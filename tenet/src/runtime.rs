@@ -485,10 +485,9 @@ pub(crate) struct RuntimeExecutionConfig {
 /// use tenet::prelude::*;
 ///
 /// let rt = Runtime::builder().build()?;
-/// let v = GradedSpace::try_new_owned(
+/// let v = GradedSpace::try_new(
 ///     Z2FusionRule,
 ///     [(Z2Irrep::EVEN, 1), (Z2Irrep::ODD, 1)],
-///     false,
 /// )?;
 /// let a: TensorMap<_, f64> = TensorMap::zeros(&rt, [&v], [&v])?;
 /// assert_eq!(a.norm()?, 0.0);
@@ -925,10 +924,9 @@ impl RuntimeBuilder {
     /// let rt = Runtime::builder()
     ///     .linalg_backend(LinalgBackend::Faer)
     ///     .build()?;
-    /// let v = GradedSpace::try_new_owned(
+    /// let v = GradedSpace::try_new(
     ///     U1FusionRule,
     ///     [(-1, 1), (0, 2), (1, 1)].map(|(q, n)| (U1Irrep::new(q), n)),
-    ///     false,
     /// )?;
     /// let t: TensorMap<_, f64> = TensorMap::rand_with_seed(&rt, [&v, &v], [&v, &v], 7)?;
     /// let (_u, _s, _vh) = t.svd_compact()?;
@@ -1225,14 +1223,13 @@ mod tests {
         let runtime_a = Runtime::builder().build().unwrap();
         let runtime_b = Runtime::builder().build().unwrap();
         let provider = Arc::new(SU2FusionRule);
-        let space = GradedSpace::try_new(
+        let space = GradedSpace::try_new_shared(
             provider,
             [
                 (SU2Irrep::from_twice_spin(0), 2),
                 (SU2Irrep::from_twice_spin(1), 2),
                 (SU2Irrep::from_twice_spin(2), 1),
             ],
-            false,
         )
         .unwrap();
         let source_a: TensorMap<SU2FusionRule, f64> =

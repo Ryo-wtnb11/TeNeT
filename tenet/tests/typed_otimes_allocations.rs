@@ -61,7 +61,7 @@ fn measured<T>(payload_bytes: usize, operation: impl FnOnce() -> T) -> (u64, usi
 }
 
 fn leg(rule: &Arc<U1FusionRule>, degeneracy: usize) -> GradedSpace<U1FusionRule> {
-    GradedSpace::try_new(Arc::clone(rule), [(U1Irrep::new(0), degeneracy)], false).unwrap()
+    GradedSpace::try_new_shared(Arc::clone(rule), [(U1Irrep::new(0), degeneracy)]).unwrap()
 }
 
 #[test]

@@ -30,7 +30,7 @@ enum Label {
 fn checked_generic_powi_zero_reuses_the_admitted_space_without_provider_work() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
     let source: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, ij| f64::from(ij == [0, 1]))
             .unwrap();
@@ -56,7 +56,7 @@ fn checked_generic_powi_zero_reuses_the_admitted_space_without_provider_work() {
 fn checked_generic_powi_matches_explicit_real_and_complex_oracles() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
     let real: TensorMap<_, f64> = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, ij| {
         [[2.0, 1.0], [3.0, 4.0]][ij[0]][ij[1]]
     })
@@ -150,8 +150,8 @@ fn checked_generic_powi_matches_explicit_real_and_complex_oracles() {
 fn checked_generic_powi_rejects_nonendomorphisms_before_provider_work() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
-    let wide = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
-    let narrow = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)], false).unwrap();
+    let wide = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
+    let narrow = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 1)]).unwrap();
     let source: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&wide], [&narrow], |_, _| 1.0).unwrap();
     let before = source
@@ -183,7 +183,7 @@ fn checked_generic_powi_rejects_nonendomorphisms_before_provider_work() {
 fn checked_generic_powi_singular_negative_powers_do_not_publish() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
     let source: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, ij| f64::from(ij == [0, 0]))
             .unwrap();
@@ -215,7 +215,7 @@ fn checked_generic_powi_singular_negative_powers_do_not_publish() {
 fn checked_generic_powi_i32_min_on_identity_is_exact() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
     let identity: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, ij| f64::from(ij[0] == ij[1]))
             .unwrap();
@@ -231,7 +231,7 @@ where
 
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(SUNFusionRule::new(n).unwrap());
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(adjoint.clone(), 2)], false).unwrap();
+    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(adjoint.clone(), 2)]).unwrap();
     let source: TensorMap<_, D> =
         TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, ij| {
             let row = ij[0] + 2 * ij[1];
@@ -312,7 +312,7 @@ fn sun_endomorphism_row_and_column_tree_stacking_is_identical() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     for (n, label) in [(3, vec![1, 1]), (4, vec![1, 0, 1])] {
         let provider = Arc::new(SUNFusionRule::new(n).unwrap());
-        let leg = GradedSpace::try_new(Arc::clone(&provider), [(label, 2)], false).unwrap();
+        let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(label, 2)]).unwrap();
         let source: TensorMap<_, f64> =
             TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |_, _| 0.0).unwrap();
         let mut stacks = BTreeMap::<Vec<i64>, (Vec<TreePlacement>, Vec<TreePlacement>)>::new();
@@ -391,7 +391,7 @@ fn assert_sun_checked_generic_eigh<D>(
 
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(SUNFusionRule::new(n).unwrap());
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(label.clone(), 2)], false).unwrap();
+    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(label.clone(), 2)]).unwrap();
     let cross_sector = label.clone();
     let source: TensorMap<_, D> =
         TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, index| {
@@ -578,7 +578,7 @@ where
 
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(SUNFusionRule::new(n).unwrap());
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(label.clone(), 2)], false).unwrap();
+    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(label.clone(), 2)]).unwrap();
     let source: TensorMap<_, D> =
         TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, index| {
             let row = index[0] + 2 * index[1];
@@ -1130,14 +1130,11 @@ impl TypedSectorAdmission for CheckedOnlyToy {
 fn checked_generic_diagonal_is_compact_canonical_and_provider_owned() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
-    let bond = GradedSpace::try_new(
-        Arc::clone(&provider),
-        [(Label::X, 2), (Label::Vacuum, 1)],
-        false,
-    )
-    .unwrap()
-    .try_dual()
-    .unwrap();
+    let bond =
+        GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 2), (Label::Vacuum, 1)])
+            .unwrap()
+            .try_dual()
+            .unwrap();
     let real = TensorMap::<_, f64>::diagonal(
         &runtime,
         &bond,
@@ -1211,12 +1208,9 @@ fn checked_generic_diagonal_is_compact_canonical_and_provider_owned() {
 fn checked_generic_diagonal_rejects_before_layout_and_preserves_error_precedence() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
-    let bond = GradedSpace::try_new(
-        Arc::clone(&provider),
-        [(Label::Vacuum, 1), (Label::X, 2)],
-        false,
-    )
-    .unwrap();
+    let bond =
+        GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::Vacuum, 1), (Label::X, 2)])
+            .unwrap();
 
     let compact = TensorMap::<_, f64>::diagonal(
         &runtime,
@@ -1384,7 +1378,7 @@ fn sun_checked_generic_diagonal_constructs_standalone_compact_blocks() {
             2
         );
         let bond =
-            GradedSpace::try_new(Arc::clone(&provider), [(adjoint.clone(), 2)], false).unwrap();
+            GradedSpace::try_new_shared(Arc::clone(&provider), [(adjoint.clone(), 2)]).unwrap();
         let diagonal = TensorMap::<_, f64>::diagonal(
             &runtime,
             &bond,
@@ -1408,8 +1402,8 @@ fn sun_checked_generic_diagonal_constructs_standalone_compact_blocks() {
 fn checked_generic_space_algebra_keeps_multiplicity_dimensions_and_failures_typed() {
     let provider = Arc::new(CheckedOnlyToy::new_space_probe(7));
     let rhs_provider = Arc::new(CheckedOnlyToy::new_space_probe(7));
-    let left = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
-    let right = GradedSpace::try_new(Arc::clone(&rhs_provider), [(Label::X, 3)], false).unwrap();
+    let left = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
+    let right = GradedSpace::try_new_shared(Arc::clone(&rhs_provider), [(Label::X, 3)]).unwrap();
 
     let dim = left.dim().unwrap();
     assert!((dim - 5.0).abs() < 1.0e-12);
@@ -1428,7 +1422,7 @@ fn checked_generic_space_algebra_keeps_multiplicity_dimensions_and_failures_type
 
     let foreign_provider = Arc::new(CheckedOnlyToy::new_space_probe(8));
     let foreign =
-        GradedSpace::try_new(Arc::clone(&foreign_provider), [(Label::X, 1)], false).unwrap();
+        GradedSpace::try_new_shared(Arc::clone(&foreign_provider), [(Label::X, 1)]).unwrap();
     let before = provider.algebra_queries.load(Ordering::Relaxed)
         + foreign_provider.algebra_queries.load(Ordering::Relaxed);
     assert!(matches!(
@@ -1465,8 +1459,8 @@ fn checked_only_provider_uses_ordinary_typed_ownership_and_vertices() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let first = Arc::new(CheckedOnlyToy::new(0));
     let second = Arc::new(CheckedOnlyToy::new(0));
-    let left = GradedSpace::try_new(Arc::clone(&first), [(Label::X, 2)], false).unwrap();
-    let right = GradedSpace::try_new(Arc::clone(&second), [(Label::X, 2)], false).unwrap();
+    let left = GradedSpace::try_new_shared(Arc::clone(&first), [(Label::X, 2)]).unwrap();
+    let right = GradedSpace::try_new_shared(Arc::clone(&second), [(Label::X, 2)]).unwrap();
 
     let tensor: TensorMap<_, f64> = TensorMap::zeros(&runtime, [&left, &right], [&right]).unwrap();
     assert!(std::ptr::eq(tensor.provider(), first.as_ref()));
@@ -1497,24 +1491,19 @@ fn checked_only_provider_uses_ordinary_typed_ownership_and_vertices() {
 fn checked_only_provider_roundtrips_through_typed_cuda_without_algebra_dispatch() {
     let runtime = Runtime::builder().cuda(0).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
-    let codomain = GradedSpace::try_new(
-        Arc::clone(&provider),
-        [(Label::Vacuum, 1), (Label::X, 2)],
-        false,
-    )
-    .unwrap();
-    let domain = GradedSpace::try_new(
-        Arc::clone(&provider),
-        [(Label::Vacuum, 1), (Label::X, 3)],
-        true,
-    )
-    .unwrap();
+    let codomain =
+        GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::Vacuum, 1), (Label::X, 2)])
+            .unwrap();
+    let domain =
+        GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::Vacuum, 1), (Label::X, 3)])
+            .and_then(|space| space.try_dual())
+            .unwrap();
     let source: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&codomain], [&domain], |_, indices| {
             indices.iter().sum::<usize>() as f64 + 1.0
         })
         .unwrap();
-    let vertex_leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let vertex_leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
     let vertex_source: TensorMap<_, f64> = TensorMap::from_block_fn(
         &runtime,
         [&vertex_leg, &vertex_leg],
@@ -1600,7 +1589,7 @@ fn checked_only_provider_roundtrips_through_typed_cuda_without_algebra_dispatch(
 fn checked_only_multiplicity_two_transforms_keep_the_source_authority() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)], false).unwrap();
+    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 1)]).unwrap();
     let source: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&leg, &leg, &leg], [], |trees, _| {
             trees.codomain_vertices()[0].get() as f64
@@ -1642,7 +1631,7 @@ fn checked_only_multiplicity_two_transforms_keep_the_source_authority() {
 fn checked_generic_reductions_cover_real_complex_dense_payloads() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
     let source: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
             (indices.iter().sum::<usize>() + 1) as f64
@@ -1663,7 +1652,7 @@ fn checked_generic_reductions_cover_real_complex_dense_payloads() {
 fn checked_generic_host_add_scale_cover_real_and_complex_payloads() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
     let source: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
             (indices.iter().sum::<usize>() + 1) as f64
@@ -1700,8 +1689,8 @@ fn checked_generic_add_rejects_runtime_before_layout_without_queries() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let foreign_runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
-    let narrow = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)], false).unwrap();
-    let wide = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let narrow = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 1)]).unwrap();
+    let wide = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
     let left: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&narrow], [&narrow], |_, _| 1.0).unwrap();
     let right: TensorMap<_, f64> =
@@ -1722,8 +1711,8 @@ fn checked_generic_add_rejects_runtime_before_layout_without_queries() {
 fn checked_generic_add_rejects_layout_mismatch_without_queries() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
-    let narrow = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)], false).unwrap();
-    let wide = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let narrow = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 1)]).unwrap();
+    let wide = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
     let left: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&narrow], [&narrow], |_, _| 1.0).unwrap();
     let right: TensorMap<_, f64> =
@@ -1745,8 +1734,8 @@ fn checked_generic_add_assign_rejects_runtime_before_layout_and_preserves_receiv
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let foreign_runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
-    let narrow = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)], false).unwrap();
-    let wide = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let narrow = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 1)]).unwrap();
+    let wide = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
     let mut left: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&narrow], [&narrow], |_, _| 1.0).unwrap();
     let right: TensorMap<_, f64> =
@@ -1776,8 +1765,8 @@ fn checked_generic_add_assign_rejects_runtime_before_layout_and_preserves_receiv
 fn checked_generic_add_assign_rejects_layout_mismatch_and_preserves_receiver() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
-    let narrow = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)], false).unwrap();
-    let wide = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let narrow = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 1)]).unwrap();
+    let wide = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
     let mut left: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&narrow], [&narrow], |_, _| 1.0).unwrap();
     let right: TensorMap<_, f64> =
@@ -1813,7 +1802,7 @@ fn sun_checked_generic_unit_insert_remove_preserves_authority_and_payload() {
     for n in [3, 4] {
         let provider = Arc::new(SUNFusionRule::new(n).unwrap());
         let label = if n == 3 { vec![1, 1] } else { vec![1, 0, 1] };
-        let leg = GradedSpace::try_new(Arc::clone(&provider), [(label, 1)], false).unwrap();
+        let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(label, 1)]).unwrap();
         let source: TensorMap<_, f64> =
             TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| 2.0).unwrap();
 
@@ -1835,7 +1824,7 @@ fn sun_checked_generic_compact_qr_preserves_provider_and_reconstructs() {
 
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(SUNFusionRule::new(3).unwrap());
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(vec![1, 1], 1)], false).unwrap();
+    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(vec![1, 1], 1)]).unwrap();
     let source: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&leg], [&leg], |trees, _| {
             trees.coupled().iter().sum::<i64>() as f64 + 1.0
@@ -1871,7 +1860,7 @@ fn sun_checked_generic_compact_svd_preserves_provider_and_reconstructs() {
 
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(SUNFusionRule::new(3).unwrap());
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(vec![1, 1], 1)], false).unwrap();
+    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(vec![1, 1], 1)]).unwrap();
     let source: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&leg], [&leg], |trees, _| {
             trees.coupled().iter().sum::<i64>() as f64 + 1.0
@@ -1915,7 +1904,7 @@ fn sun_checked_generic_dense_sqrt_preserves_svd_bond_and_principal_branch() {
     for n in [3, 4] {
         let provider = Arc::new(SUNFusionRule::new(n).unwrap());
         let label = if n == 3 { vec![1, 1] } else { vec![1, 0, 1] };
-        let leg = GradedSpace::try_new(Arc::clone(&provider), [(label, 1)], false).unwrap();
+        let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(label, 1)]).unwrap();
         let source: TensorMap<_, f64> =
             TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], |trees, _| {
                 trees.codomain_vertices()[0].get() as f64 + 1.0
@@ -1979,7 +1968,7 @@ fn sun_checked_generic_dense_sqrt_preserves_svd_bond_and_principal_branch() {
 fn checked_generic_sqrt_rejects_shape_before_queries_and_preserves_source() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)], false).unwrap();
+    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 1)]).unwrap();
     let source: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], |_, _| 2.0).unwrap();
     let before = source.data().to_vec();
@@ -2042,7 +2031,7 @@ fn checked_generic_sqrt_rejects_shape_before_queries_and_preserves_source() {
         },
         "negative"
     );
-    let bond_leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let bond_leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
     let tensor = TensorMap::from_block_fn(&runtime, [&bond_leg], [&bond_leg], |_, indices| {
         if indices[0] == indices[1] {
             4.0
@@ -2073,7 +2062,7 @@ fn sun_checked_generic_full_svd_preserves_provider_reconstructs_and_rejects_lazy
 
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(SUNFusionRule::new(3).unwrap());
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(vec![1, 1], 1)], false).unwrap();
+    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(vec![1, 1], 1)]).unwrap();
     let source: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&leg], [&leg], |trees, _| {
             trees.coupled().iter().sum::<i64>() as f64 + 1.0
@@ -2120,7 +2109,7 @@ where
 
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(SUNFusionRule::new(n).unwrap());
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(label, 2)], false).unwrap();
+    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(label, 2)]).unwrap();
     let source: TensorMap<_, D> =
         TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, indices| {
             let row = indices[0] + 2 * indices[1];
@@ -2172,7 +2161,7 @@ fn assert_sun_checked_generic_left_solve(n: usize, label: Vec<i64>) {
 
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(SUNFusionRule::new(n).unwrap());
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(label, 2)], false).unwrap();
+    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(label, 2)]).unwrap();
     let divisor: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, indices| {
             let row = indices[0] + 2 * indices[1];
@@ -2275,8 +2264,8 @@ fn sun_checked_generic_inv_preflight_counts_outer_multiplicity() {
     let provider = Arc::new(SUNFusionRule::new(3).unwrap());
     let adjoint = vec![1, 1];
     let codomain_leg =
-        GradedSpace::try_new(Arc::clone(&provider), [(adjoint.clone(), 1)], false).unwrap();
-    let isomorphic_domain = GradedSpace::try_new(
+        GradedSpace::try_new_shared(Arc::clone(&provider), [(adjoint.clone(), 1)]).unwrap();
+    let isomorphic_domain = GradedSpace::try_new_shared(
         Arc::clone(&provider),
         [
             (vec![0, 0], 1),
@@ -2285,7 +2274,6 @@ fn sun_checked_generic_inv_preflight_counts_outer_multiplicity() {
             (vec![0, 3], 1),
             (vec![2, 2], 1),
         ],
-        false,
     )
     .unwrap();
     let accepted: TensorMap<_, f64> = TensorMap::from_block_fn(
@@ -2310,7 +2298,7 @@ fn sun_checked_generic_inv_preflight_counts_outer_multiplicity() {
     assert_eq!(inverse.codomain(), accepted.domain());
     assert_eq!(inverse.domain(), accepted.codomain());
 
-    let nonisomorphic_domain = GradedSpace::try_new(
+    let nonisomorphic_domain = GradedSpace::try_new_shared(
         Arc::clone(&provider),
         [
             (vec![0, 0], 1),
@@ -2319,7 +2307,6 @@ fn sun_checked_generic_inv_preflight_counts_outer_multiplicity() {
             (vec![0, 3], 1),
             (vec![2, 2], 1),
         ],
-        false,
     )
     .unwrap();
     let rejected: TensorMap<_, f64> = TensorMap::from_block_fn(
@@ -2346,7 +2333,7 @@ fn sun_checked_generic_compact_lq_preserves_provider_and_reconstructs() {
 
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(SUNFusionRule::new(3).unwrap());
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(vec![1, 1], 1)], false).unwrap();
+    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(vec![1, 1], 1)]).unwrap();
     let source: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&leg], [&leg], |trees, _| {
             trees.coupled().iter().sum::<i64>() as f64 + 1.0
@@ -2428,7 +2415,7 @@ fn sun_checked_generic_orth_aliases_reconstruct_multiplicity_fixture() {
     for n in [3, 4] {
         let provider = Arc::new(SUNFusionRule::new(n).unwrap());
         let label = if n == 3 { vec![1, 1] } else { vec![1, 0, 1] };
-        let leg = GradedSpace::try_new(Arc::clone(&provider), [(label, 1)], false).unwrap();
+        let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(label, 1)]).unwrap();
         let source: TensorMap<_, f64> =
             TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], |trees, _| {
                 trees.codomain_vertices()[0].get() as f64
@@ -2451,7 +2438,7 @@ fn sun_checked_generic_full_qr_preserves_provider_and_reconstructs() {
 
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(SUNFusionRule::new(3).unwrap());
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(vec![1, 1], 1)], false).unwrap();
+    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(vec![1, 1], 1)]).unwrap();
     let source: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&leg], [&leg], |trees, _| {
             trees.coupled().iter().sum::<i64>() as f64 + 1.0
@@ -2487,7 +2474,7 @@ fn sun_checked_generic_svd_vals_matches_compact_spectrum() {
 
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(SUNFusionRule::new(3).unwrap());
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(vec![1, 1], 1)], false).unwrap();
+    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(vec![1, 1], 1)]).unwrap();
     let source: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&leg], [&leg], |trees, _| {
             trees.coupled().iter().sum::<i64>() as f64 + 1.0
@@ -2509,7 +2496,7 @@ fn sun_checked_generic_svd_vals_matches_compact_spectrum() {
 fn checked_generic_eigh_vals_preserves_spectrum_and_dtype() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)], false).unwrap();
+    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 1)]).unwrap();
     let source: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| 2.5).unwrap();
 
@@ -2580,7 +2567,7 @@ fn assert_checked_generic_eigh_factors<D>(
 fn checked_generic_eigh_full_and_trunc_preserve_contract_for_both_dtypes() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 3)], false).unwrap();
+    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 3)]).unwrap();
     let source: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, index| {
             [-3.0, 2.0, 1.0][index[0]] * f64::from(index[0] == index[1])
@@ -2605,7 +2592,7 @@ fn checked_generic_eigh_full_and_trunc_preserve_contract_for_both_dtypes() {
 fn checked_generic_eigh_lazy_success_and_failure_leave_the_view_lazy() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
     let hermitian: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, index| {
             [[2.0, 1.0], [1.0, -1.0]][index[0]][index[1]]
@@ -2632,8 +2619,8 @@ fn checked_generic_eigh_lazy_success_and_failure_leave_the_view_lazy() {
 fn checked_generic_eigh_rejects_invalid_inputs_before_publication() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
-    let wide = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
-    let narrow = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)], false).unwrap();
+    let wide = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
+    let narrow = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 1)]).unwrap();
     let nonendomorphism: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&wide], [&narrow], |_, _| 1.0).unwrap();
     assert!(nonendomorphism.eigh_full().is_err());
@@ -2773,12 +2760,9 @@ fn checked_generic_eigh_preflights_all_sectors_and_runs_once_per_sector() {
         .build()
         .unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
-    let leg = GradedSpace::try_new(
-        Arc::clone(&provider),
-        [(Label::Vacuum, 1), (Label::X, 2)],
-        false,
-    )
-    .unwrap();
+    let leg =
+        GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::Vacuum, 1), (Label::X, 2)])
+            .unwrap();
     let hermitian: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&leg], [&leg], |trees, index| {
             if index[0] == index[1] {
@@ -2822,7 +2806,7 @@ fn checked_generic_eigh_dense_failure_preserves_the_source() {
         .build()
         .unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
     let source: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, index| {
             [[2.0, 1.0], [1.0, -1.0]][index[0]][index[1]]
@@ -2847,7 +2831,7 @@ fn checked_generic_eig_dense_and_rank_check_failures_preserve_the_source() {
             .build()
             .unwrap();
         let provider = Arc::new(CheckedOnlyToy::new(0));
-        let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+        let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
         let source: TensorMap<_, f64> =
             TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, index| {
                 [[1.0, -3.0], [1.0, 1.0]][index[0]][index[1]]
@@ -2864,7 +2848,7 @@ fn checked_generic_eig_dense_and_rank_check_failures_preserve_the_source() {
 fn checked_generic_eigh_qdim_and_decode_failures_publish_no_pair() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
     let source: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, index| {
             [2.0, -1.0][index[0]] * f64::from(index[0] == index[1])
@@ -2899,7 +2883,7 @@ fn checked_generic_eigh_qdim_and_decode_failures_publish_no_pair() {
 fn checked_generic_eig_qdim_and_decode_failures_publish_no_pair() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
     let source: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, index| {
             [[1.0, -3.0], [1.0, 1.0]][index[0]][index[1]]
@@ -2936,7 +2920,7 @@ fn checked_generic_eigh_signed_ties_are_stable_and_degenerate_projectors_are_inv
 
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 3)], false).unwrap();
+    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 3)]).unwrap();
     let tied: TensorMap<_, f64> = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, index| {
         [-2.0, 2.0, 1.0][index[0]] * f64::from(index[0] == index[1])
     })
@@ -2982,7 +2966,7 @@ fn checked_generic_eigh_signed_ties_are_stable_and_degenerate_projectors_are_inv
 fn checked_generic_eig_vals_preserves_spectrum_and_dtype() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
     let source: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
             if indices[0] == indices[1] {
@@ -3038,7 +3022,7 @@ fn assert_checked_generic_eig_reconstruction(
 fn checked_generic_eig_full_is_complex_and_reconstructs_nonnormal_inputs() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
     let real: TensorMap<_, f64> = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, index| {
         [[1.0, -3.0], [1.0, 1.0]][index[0]][index[1]]
     })
@@ -3069,7 +3053,7 @@ fn checked_generic_eig_full_is_complex_and_reconstructs_nonnormal_inputs() {
 fn checked_generic_eig_ties_are_stable_and_degenerate_projectors_are_invariant() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 3)], false).unwrap();
+    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 3)]).unwrap();
     let tied: TensorMap<_, f64> = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, index| {
         [-2.0, 2.0, 1.0][index[0]] * f64::from(index[0] == index[1])
     })
@@ -3130,7 +3114,7 @@ fn checked_generic_eig_ties_are_stable_and_degenerate_projectors_are_invariant()
 fn checked_generic_eig_trunc_reports_discarded_spectrum_norm_only() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 3)], false).unwrap();
+    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 3)]).unwrap();
     let source: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, index| {
             [-3.0, 2.0, 1.0][index[0]] * f64::from(index[0] == index[1])
@@ -3151,7 +3135,7 @@ fn checked_generic_eig_trunc_reports_discarded_spectrum_norm_only() {
 fn checked_generic_eig_rejects_jordan_and_nonfinite_inputs() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
     let jordan: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, index| {
             [[1.0, 1.0], [0.0, 1.0]][index[0]][index[1]]
@@ -3178,7 +3162,7 @@ fn checked_generic_eig_rejects_jordan_and_nonfinite_inputs() {
 fn checked_generic_eig_lazy_calls_leave_the_source_view_lazy() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
     let source: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, index| {
             [[1.0, -3.0], [1.0, 1.0]][index[0]][index[1]]
@@ -3195,7 +3179,7 @@ fn checked_generic_eig_lazy_calls_leave_the_source_view_lazy() {
 fn checked_generic_svd_trunc_reconstructs_and_preserves_provider() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
     let source: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
             if indices[0] == indices[1] {
@@ -3225,7 +3209,7 @@ fn checked_generic_svd_trunc_reconstructs_and_preserves_provider() {
 fn checked_generic_lazy_adjoint_preserves_provider_and_reductions() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
     let source: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
             (indices.iter().sum::<usize>() + 1) as f64
@@ -3247,7 +3231,7 @@ fn checked_generic_lazy_adjoint_preserves_provider_and_reductions() {
 fn checked_generic_exp_uses_general_pade_for_nonhermitian_dense_blocks() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
     let source: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, ij| f64::from(ij == [0, 1]))
             .unwrap();
@@ -3297,8 +3281,8 @@ fn checked_generic_exp_uses_general_pade_for_nonhermitian_dense_blocks() {
 fn checked_generic_exp_rejects_nonendomorphism_before_provider_work() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
-    let wide = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
-    let narrow = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)], false).unwrap();
+    let wide = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
+    let narrow = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 1)]).unwrap();
     let source: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&wide], [&narrow], |_, _| 1.0).unwrap();
     let before = source.data().to_vec();
@@ -3317,12 +3301,9 @@ fn checked_generic_exp_rejects_nonendomorphism_before_provider_work() {
 fn checked_generic_exp_rejects_early_and_late_nonfinite_sectors_without_publication() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
-    let leg = GradedSpace::try_new(
-        Arc::clone(&provider),
-        [(Label::Vacuum, 1), (Label::X, 1)],
-        false,
-    )
-    .unwrap();
+    let leg =
+        GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::Vacuum, 1), (Label::X, 1)])
+            .unwrap();
     for target in [Label::Vacuum, Label::X] {
         let source: TensorMap<_, f64> =
             TensorMap::from_block_fn(&runtime, [&leg], [&leg], |trees, _| {
@@ -3355,7 +3336,7 @@ fn assert_sun_checked_generic_exp_outer_multiplicity(n: usize, adjoint: Vec<i64>
 
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(SUNFusionRule::new(n).unwrap());
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(adjoint.clone(), 1)], false).unwrap();
+    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(adjoint.clone(), 1)]).unwrap();
     let source: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, ij| {
             let left = trees.codomain_vertices()[0].get();
@@ -3459,7 +3440,7 @@ fn checked_generic_exp_sun_outer_multiplicity_preserves_layout() {
 fn checked_generic_reduction_dimension_failure_is_typed_and_nonpublishing() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)], false).unwrap();
+    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 1)]).unwrap();
     let source: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| 2.0).unwrap();
     let before = source.data().to_vec();
@@ -3476,7 +3457,7 @@ fn checked_generic_reduction_dimension_failure_is_typed_and_nonpublishing() {
 fn checked_generic_inv_isomorphism_preflight_failure_is_typed_and_nonpublishing() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)], false).unwrap();
+    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 1)]).unwrap();
     let source: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| 2.0).unwrap();
     let before = source.data().to_vec();
@@ -3494,7 +3475,7 @@ fn checked_generic_inv_isomorphism_preflight_failure_is_typed_and_nonpublishing(
 fn checked_generic_inv_destination_admission_failure_is_typed_and_nonpublishing() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)], false).unwrap();
+    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 1)]).unwrap();
     let source: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| 2.0).unwrap();
     let before = source.data().to_vec();
@@ -3510,8 +3491,8 @@ fn checked_generic_inv_destination_admission_failure_is_typed_and_nonpublishing(
 fn checked_generic_inv_accepts_unequal_isomorphic_spaces_and_rejects_nonisomorphic() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
-    let x = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
-    let unit = GradedSpace::try_new(Arc::clone(&provider), [(Label::Vacuum, 1)], false).unwrap();
+    let x = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
+    let unit = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::Vacuum, 1)]).unwrap();
     let source: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&x], [&x, &unit], |_, indices| {
             if indices[0] == indices[1] {
@@ -3536,7 +3517,7 @@ fn checked_generic_inv_accepts_unequal_isomorphic_spaces_and_rejects_nonisomorph
         source.scale(0.5).data()
     );
 
-    let narrow = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)], false).unwrap();
+    let narrow = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 1)]).unwrap();
     let nonisomorphic: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&narrow], [&x], |_, _| 1.0).unwrap();
     let before = nonisomorphic.data().to_vec();
@@ -3593,8 +3574,8 @@ fn checked_generic_pinv_rectangular_moore_penrose_and_validation_precedence() {
 
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
-    let codomain = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
-    let domain = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 3)], false).unwrap();
+    let codomain = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
+    let domain = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 3)]).unwrap();
     let source: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&codomain], [&domain], |_, index| {
             [[1.0, 0.0, 1.0], [0.0, 2.0, 1.0]][index[0]][index[1]]
@@ -3697,7 +3678,7 @@ fn checked_generic_polar_matches_independent_real_and_complex_qh_oracles() {
     // including conjugate-transpose arithmetic for a genuinely complex Q.
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
 
     let h = [[2.0, 0.5], [0.5, 3.0]];
     let q = [[0.0, -1.0], [1.0, 0.0]];
@@ -3757,8 +3738,8 @@ fn checked_generic_polar_direction_covers_rectangular_side_only_and_empty_inputs
     // tall/wide contract before any dense factorization.
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
-    let tall = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 3)], false).unwrap();
-    let wide = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let tall = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 3)]).unwrap();
+    let wide = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
     let source: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&tall], [&wide], |_, ij| {
             [[1.0, 0.0], [0.0, 2.0], [1.0, 1.0]][ij[0]][ij[1]]
@@ -3771,19 +3752,16 @@ fn checked_generic_polar_direction_covers_rectangular_side_only_and_empty_inputs
             tenet::typed::CheckedGenericPlanError::Operation(_)
         ))
     ));
-    let codomain_only = GradedSpace::try_new(
-        Arc::clone(&provider),
-        [(Label::Vacuum, 1), (Label::X, 1)],
-        false,
-    )
-    .unwrap();
+    let codomain_only =
+        GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::Vacuum, 1), (Label::X, 1)])
+            .unwrap();
     let domain_only =
-        GradedSpace::try_new(Arc::clone(&provider), [(Label::Vacuum, 1)], false).unwrap();
+        GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::Vacuum, 1)]).unwrap();
     let side_only: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&codomain_only], [&domain_only], |_, _| 0.0).unwrap();
     assert!(side_only.left_polar().is_ok());
     assert!(side_only.right_polar().is_err());
-    let empty = GradedSpace::try_new(Arc::clone(&provider), [], false).unwrap();
+    let empty = GradedSpace::try_new_shared(Arc::clone(&provider), []).unwrap();
     let empty_map: TensorMap<_, f64> = TensorMap::zeros(&runtime, [&empty], [&empty]).unwrap();
     assert!(empty_map.left_polar().unwrap().0.data().is_empty());
     assert!(empty_map.right_polar().unwrap().0.data().is_empty());
@@ -3795,7 +3773,7 @@ fn checked_generic_polar_lazy_redirects_to_the_opposite_parent_operation() {
     // and report the operation requested on the receiver.
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
     let source: TensorMap<_, Complex64> =
         TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, ij| {
             [
@@ -3824,8 +3802,8 @@ fn checked_generic_polar_lazy_redirects_to_the_opposite_parent_operation() {
     assert!(std::ptr::eq(actual_w.provider(), provider.as_ref()));
     assert!(actual_w.runtime().shares_state_with(source.runtime()));
 
-    let tall = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 3)], false).unwrap();
-    let narrow = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let tall = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 3)]).unwrap();
+    let narrow = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
     let tall_source: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&tall], [&narrow], |_, _| 1.0).unwrap();
     let error = tall_source.adjoint().unwrap().left_polar().unwrap_err();
@@ -3846,7 +3824,7 @@ fn checked_generic_polar_completes_rank_deficient_and_zero_sectors() {
     // P remains Hermitian PSD for rank-deficient and zero matrices.
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
     for zero in [false, true] {
         let source: TensorMap<_, Complex64> =
             TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, ij| {
@@ -3983,12 +3961,9 @@ fn checked_generic_polar_stages_svd_and_both_gemms_without_publication() {
             .build()
             .unwrap();
         let provider = Arc::new(CheckedOnlyToy::new(0));
-        let bond = GradedSpace::try_new(
-            Arc::clone(&provider),
-            [(Label::Vacuum, 1), (Label::X, 1)],
-            false,
-        )
-        .unwrap();
+        let bond =
+            GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::Vacuum, 1), (Label::X, 1)])
+                .unwrap();
         let source: TensorMap<_, f64> =
             TensorMap::from_block_fn(&runtime, [&bond], [&bond], |trees, _| {
                 if trees.coupled() == &Label::Vacuum {
@@ -4036,7 +4011,7 @@ fn checked_generic_polar_provider_error_precedes_dense_work() {
         .build()
         .unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
     let source: TensorMap<_, f64> = TensorMap::zeros(&runtime, [&leg], [&leg]).unwrap();
     let before = source.data().to_vec();
     provider.fail_algebra.store(true, Ordering::Relaxed);
@@ -4073,12 +4048,9 @@ fn checked_generic_pinv_stages_svd_and_gemm_failures_without_publication() {
             .build()
             .unwrap();
         let provider = Arc::new(CheckedOnlyToy::new(0));
-        let bond = GradedSpace::try_new(
-            Arc::clone(&provider),
-            [(Label::Vacuum, 1), (Label::X, 1)],
-            false,
-        )
-        .unwrap();
+        let bond =
+            GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::Vacuum, 1), (Label::X, 1)])
+                .unwrap();
         let source: TensorMap<_, f64> =
             TensorMap::from_block_fn(&runtime, [&bond], [&bond], |trees, _| {
                 if trees.coupled() == &Label::Vacuum {
@@ -4110,12 +4082,9 @@ fn checked_generic_pinv_stages_svd_and_gemm_failures_without_publication() {
 fn checked_generic_pinv_uses_a_strict_global_cutoff() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
-    let bond = GradedSpace::try_new(
-        Arc::clone(&provider),
-        [(Label::Vacuum, 1), (Label::X, 1)],
-        false,
-    )
-    .unwrap();
+    let bond =
+        GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::Vacuum, 1), (Label::X, 1)])
+            .unwrap();
     let source: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&bond], [&bond], |trees, _| {
             if trees.coupled() == &Label::Vacuum {
@@ -4135,7 +4104,7 @@ fn checked_generic_null_spaces_cover_rank_cutoff_zero_disjoint_and_side_only_sec
     // zero/side-only directions, drop full-rank sectors, and retain authority.
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
-    let x = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let x = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
     let tolerance = f64::EPSILON * 2.0;
     for (small, nullity) in [(0.5 * tolerance, 1), (2.0 * tolerance, 0)] {
         let source: TensorMap<_, f64> =
@@ -4159,7 +4128,7 @@ fn checked_generic_null_spaces_cover_rank_cutoff_zero_disjoint_and_side_only_sec
     assert_eq!(zero.left_null().unwrap().data().len(), 4);
     assert_eq!(zero.right_null().unwrap().data().len(), 4);
 
-    let vacuum = GradedSpace::try_new(Arc::clone(&provider), [(Label::Vacuum, 3)], false).unwrap();
+    let vacuum = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::Vacuum, 3)]).unwrap();
     let disjoint: TensorMap<_, f64> = TensorMap::zeros(&runtime, [&x], [&vacuum]).unwrap();
     let left = disjoint.left_null().unwrap();
     let right = disjoint.right_null().unwrap();
@@ -4171,13 +4140,10 @@ fn checked_generic_null_spaces_cover_rank_cutoff_zero_disjoint_and_side_only_sec
         }
     }
 
-    let shared = GradedSpace::try_new(
-        Arc::clone(&provider),
-        [(Label::Vacuum, 1), (Label::X, 2)],
-        false,
-    )
-    .unwrap();
-    let unit = GradedSpace::try_new(Arc::clone(&provider), [(Label::Vacuum, 1)], false).unwrap();
+    let shared =
+        GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::Vacuum, 1), (Label::X, 2)])
+            .unwrap();
+    let unit = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::Vacuum, 1)]).unwrap();
     let codomain_side: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&shared], [&unit], |trees, index| {
             f64::from(trees.coupled() == &Label::Vacuum && index[0] == index[1])
@@ -4204,12 +4170,9 @@ fn checked_generic_null_dense_failure_is_typed_and_nonpublishing() {
         .build()
         .unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
-    let leg = GradedSpace::try_new(
-        Arc::clone(&provider),
-        [(Label::Vacuum, 1), (Label::X, 1)],
-        false,
-    )
-    .unwrap();
+    let leg =
+        GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::Vacuum, 1), (Label::X, 1)])
+            .unwrap();
     let source: TensorMap<_, f64> = TensorMap::zeros(&runtime, [&leg], [&leg]).unwrap();
     let before = source.data().to_vec();
     assert!(matches!(
@@ -4240,7 +4203,7 @@ fn assert_sun_checked_generic_null_projectors<D>(
 
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(SUNFusionRule::new(n).unwrap());
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(label, 2)], false).unwrap();
+    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(label, 2)]).unwrap();
     let source: TensorMap<_, D> =
         TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, index| {
             let row = index[0] + 2 * index[1];
@@ -4401,7 +4364,7 @@ fn assert_sun_checked_generic_pinv<D>(
 
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(SUNFusionRule::new(n).unwrap());
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(label, 2)], false).unwrap();
+    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(label, 2)]).unwrap();
     let source: TensorMap<_, D> =
         TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, index| {
             let row = index[0] + 2 * index[1];
@@ -4537,7 +4500,7 @@ fn assert_sun_checked_generic_polar_qh<D>(
 
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(SUNFusionRule::new(n).unwrap());
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(label.clone(), 2)], false).unwrap();
+    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(label.clone(), 2)]).unwrap();
     let build = |matrix: [[D; 2]; 2], fallback: D| {
         let cross_sector = label.clone();
         TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], move |trees, index| {
@@ -4636,9 +4599,9 @@ fn assert_sun_checked_generic_solve_right<D>(
     let divisor_provider = Arc::new(SUNFusionRule::new(n).unwrap());
     let cross_sector = label.clone();
     let receiver_leg =
-        GradedSpace::try_new(Arc::clone(&receiver_provider), [(label.clone(), 2)], false).unwrap();
+        GradedSpace::try_new_shared(Arc::clone(&receiver_provider), [(label.clone(), 2)]).unwrap();
     let divisor_leg =
-        GradedSpace::try_new(Arc::clone(&divisor_provider), [(label, 2)], false).unwrap();
+        GradedSpace::try_new_shared(Arc::clone(&divisor_provider), [(label, 2)]).unwrap();
     let receiver_off_diagonal = D::from_real(0.75);
     let receiver: TensorMap<_, D> = TensorMap::from_block_fn(
         &runtime,
@@ -4816,12 +4779,9 @@ impl DenseExecutor for SolveCallSpy {
 fn checked_generic_inv_singular_early_and_late_sectors_preserve_source() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
-    let bond = GradedSpace::try_new(
-        Arc::clone(&provider),
-        [(Label::Vacuum, 1), (Label::X, 1)],
-        false,
-    )
-    .unwrap();
+    let bond =
+        GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::Vacuum, 1), (Label::X, 1)])
+            .unwrap();
     for target in [Label::Vacuum, Label::X] {
         let source: TensorMap<_, f64> =
             TensorMap::from_block_fn(&runtime, [&bond], [&bond], |trees, _| {
@@ -4853,14 +4813,14 @@ fn checked_generic_left_solve_accepts_distinct_provider_arcs_and_rectangular_rhs
     let lhs_provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
     let rhs_provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
     let lhs_codomain =
-        GradedSpace::try_new(Arc::clone(&lhs_provider), [(Label::X, 2)], false).unwrap();
+        GradedSpace::try_new_shared(Arc::clone(&lhs_provider), [(Label::X, 2)]).unwrap();
     let lhs_domain_x =
-        GradedSpace::try_new(Arc::clone(&lhs_provider), [(Label::X, 2)], false).unwrap();
+        GradedSpace::try_new_shared(Arc::clone(&lhs_provider), [(Label::X, 2)]).unwrap();
     let lhs_domain_unit =
-        GradedSpace::try_new(Arc::clone(&lhs_provider), [(Label::Vacuum, 1)], false).unwrap();
+        GradedSpace::try_new_shared(Arc::clone(&lhs_provider), [(Label::Vacuum, 1)]).unwrap();
     let rhs_codomain =
-        GradedSpace::try_new(Arc::clone(&rhs_provider), [(Label::X, 2)], false).unwrap();
-    let rhs_domain = GradedSpace::try_new(rhs_provider, [(Label::X, 3)], false).unwrap();
+        GradedSpace::try_new_shared(Arc::clone(&rhs_provider), [(Label::X, 2)]).unwrap();
+    let rhs_domain = GradedSpace::try_new_shared(rhs_provider, [(Label::X, 3)]).unwrap();
     let divisor: TensorMap<_, f64> = TensorMap::from_block_fn(
         &runtime,
         [&lhs_codomain],
@@ -4912,8 +4872,8 @@ fn checked_generic_left_solve_accepts_distinct_provider_arcs_and_rectangular_rhs
 fn checked_generic_left_solve_preflight_failures_are_nonpublishing() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
-    let x = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
-    let narrow = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)], false).unwrap();
+    let x = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
+    let narrow = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 1)]).unwrap();
     let lhs: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&x], [&narrow], |_, _| 1.0).unwrap();
     let rhs: TensorMap<_, f64> =
@@ -4941,7 +4901,7 @@ fn checked_generic_left_solve_preflight_failures_are_nonpublishing() {
 
     let foreign_provider = Arc::new(CheckedOnlyToy::new_product_probe(1));
     let foreign_x =
-        GradedSpace::try_new(Arc::clone(&foreign_provider), [(Label::X, 2)], false).unwrap();
+        GradedSpace::try_new_shared(Arc::clone(&foreign_provider), [(Label::X, 2)]).unwrap();
     let foreign_rhs: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&foreign_x], [&foreign_x], |_, _| 1.0).unwrap();
     reset_provider_queries(&provider);
@@ -4956,7 +4916,7 @@ fn checked_generic_left_solve_preflight_failures_are_nonpublishing() {
     assert_no_provider_queries(&foreign_provider);
 
     let wrong_codomain =
-        GradedSpace::try_new(Arc::clone(&provider), [(Label::Vacuum, 1)], false).unwrap();
+        GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::Vacuum, 1)]).unwrap();
     let codomain_rhs: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&wrong_codomain], [&x], |_, _| 1.0).unwrap();
     reset_provider_queries(&provider);
@@ -4973,12 +4933,9 @@ fn checked_generic_left_solve_preflight_failures_are_nonpublishing() {
 fn checked_generic_left_solve_singular_sectors_are_nonpublishing() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
-    let bond = GradedSpace::try_new(
-        Arc::clone(&provider),
-        [(Label::Vacuum, 1), (Label::X, 1)],
-        false,
-    )
-    .unwrap();
+    let bond =
+        GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::Vacuum, 1), (Label::X, 1)])
+            .unwrap();
     let rhs: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&bond], [&bond], |_, _| 1.0).unwrap();
     for target in [Label::Vacuum, Label::X] {
@@ -5002,7 +4959,7 @@ fn checked_generic_left_solve_singular_sectors_are_nonpublishing() {
 fn checked_generic_left_solve_covers_all_lazy_input_pairs() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
     let divisor: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
             if indices[0] == indices[1] {
@@ -5053,9 +5010,9 @@ fn checked_generic_solve_right_preflight_precedence_and_provider_failure_are_non
     let receiver_provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
     let divisor_provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
     let receiver_leg =
-        GradedSpace::try_new(Arc::clone(&receiver_provider), [(Label::X, 2)], false).unwrap();
+        GradedSpace::try_new_shared(Arc::clone(&receiver_provider), [(Label::X, 2)]).unwrap();
     let divisor_leg =
-        GradedSpace::try_new(Arc::clone(&divisor_provider), [(Label::X, 2)], false).unwrap();
+        GradedSpace::try_new_shared(Arc::clone(&divisor_provider), [(Label::X, 2)]).unwrap();
     let receiver: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&receiver_leg], [&receiver_leg], |_, ij| {
             f64::from(ij[0] == ij[1])
@@ -5092,7 +5049,7 @@ fn checked_generic_solve_right_preflight_precedence_and_provider_failure_are_non
 
     let foreign_provider = Arc::new(CheckedOnlyToy::new_product_probe(1));
     let foreign_leg =
-        GradedSpace::try_new(Arc::clone(&foreign_provider), [(Label::X, 2)], false).unwrap();
+        GradedSpace::try_new_shared(Arc::clone(&foreign_provider), [(Label::X, 2)]).unwrap();
     let foreign_divisor: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&foreign_leg], [&foreign_leg], |_, ij| {
             f64::from(ij[0] == ij[1])
@@ -5110,7 +5067,7 @@ fn checked_generic_solve_right_preflight_precedence_and_provider_failure_are_non
     assert_no_provider_queries(&foreign_provider);
 
     let wrong_domain =
-        GradedSpace::try_new(Arc::clone(&divisor_provider), [(Label::Vacuum, 1)], false).unwrap();
+        GradedSpace::try_new_shared(Arc::clone(&divisor_provider), [(Label::Vacuum, 1)]).unwrap();
     let domain_divisor: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&divisor_leg], [&wrong_domain], |_, _| 1.0).unwrap();
     divisor_provider.fail_algebra.store(true, Ordering::Relaxed);
@@ -5125,7 +5082,7 @@ fn checked_generic_solve_right_preflight_precedence_and_provider_failure_are_non
         .store(false, Ordering::Relaxed);
 
     let narrow =
-        GradedSpace::try_new(Arc::clone(&divisor_provider), [(Label::X, 1)], false).unwrap();
+        GradedSpace::try_new_shared(Arc::clone(&divisor_provider), [(Label::X, 1)]).unwrap();
     let rectangular_divisor: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&narrow], [&divisor_leg], |_, _| 1.0).unwrap();
     assert!(matches!(
@@ -5198,7 +5155,7 @@ fn checked_generic_solve_right_preflight_precedence_and_provider_failure_are_non
 fn checked_generic_compact_qr_failure_is_typed_and_nonpublishing() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)], false).unwrap();
+    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 1)]).unwrap();
     let source: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], |_, _| 2.0).unwrap();
     let before = source.data().to_vec();
@@ -5224,7 +5181,7 @@ fn checked_generic_compact_qr_failure_is_typed_and_nonpublishing() {
 fn checked_generic_compact_svd_failure_is_typed_and_nonpublishing() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)], false).unwrap();
+    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 1)]).unwrap();
     let source: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], |_, _| 2.0).unwrap();
     let before = source.data().to_vec();
@@ -5243,7 +5200,7 @@ fn checked_generic_compact_svd_failure_is_typed_and_nonpublishing() {
 fn checked_generic_compact_lq_failure_is_typed_and_nonpublishing() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)], false).unwrap();
+    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 1)]).unwrap();
     let source: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], |_, _| 2.0).unwrap();
     let before = source.data().to_vec();
@@ -5269,7 +5226,7 @@ fn checked_generic_compact_lq_failure_is_typed_and_nonpublishing() {
 fn checked_generic_full_qr_failure_is_typed_and_nonpublishing() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)], false).unwrap();
+    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 1)]).unwrap();
     let source: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], |_, _| 2.0).unwrap();
     let before = source.data().to_vec();
@@ -5288,7 +5245,7 @@ fn checked_generic_full_qr_failure_is_typed_and_nonpublishing() {
 fn checked_generic_full_lq_reconstructs_and_preserves_provider() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)], false).unwrap();
+    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 1)]).unwrap();
     let source: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], |_, _| 2.0).unwrap();
     let (l, q) = source.lq_full().unwrap();
@@ -5307,7 +5264,7 @@ fn checked_generic_full_lq_reconstructs_and_preserves_provider() {
 fn checked_generic_full_lq_supports_complex_scalars() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)], false).unwrap();
+    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 1)]).unwrap();
     let source: TensorMap<_, Complex64> =
         TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], |_, _| {
             Complex64::new(2.0, 1.0)
@@ -5322,7 +5279,7 @@ fn checked_generic_full_lq_supports_complex_scalars() {
 fn checked_generic_full_lq_failure_is_typed_and_nonpublishing() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)], false).unwrap();
+    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 1)]).unwrap();
     let source: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], |_, _| 2.0).unwrap();
     let before = source.data().to_vec();
@@ -5343,9 +5300,9 @@ fn checked_only_contract_and_compose_keep_left_authority() {
     let left_provider = Arc::new(CheckedOnlyToy::new(0));
     let right_provider = Arc::new(CheckedOnlyToy::new(0));
     let left_leg =
-        GradedSpace::try_new(Arc::clone(&left_provider), [(Label::X, 1)], false).unwrap();
+        GradedSpace::try_new_shared(Arc::clone(&left_provider), [(Label::X, 1)]).unwrap();
     let right_leg =
-        GradedSpace::try_new(Arc::clone(&right_provider), [(Label::X, 1)], false).unwrap();
+        GradedSpace::try_new_shared(Arc::clone(&right_provider), [(Label::X, 1)]).unwrap();
     let source: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&left_leg], [&left_leg], |_, _| 1.0).unwrap();
     let nontrivial: TensorMap<_, f64> =
@@ -5389,7 +5346,7 @@ fn checked_only_contract_and_compose_keep_left_authority() {
 
     let wrong_provider = Arc::new(CheckedOnlyToy::new(1));
     let wrong_leg =
-        GradedSpace::try_new(Arc::clone(&wrong_provider), [(Label::X, 1)], false).unwrap();
+        GradedSpace::try_new_shared(Arc::clone(&wrong_provider), [(Label::X, 1)]).unwrap();
     let wrong_identity: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&wrong_leg], [&wrong_leg], |_, _| 1.0).unwrap();
     left_provider.algebra_queries.store(0, Ordering::Relaxed);
@@ -5416,7 +5373,7 @@ fn checked_only_contract_and_compose_keep_left_authority() {
 fn checked_only_identity_transforms_make_no_provider_queries() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)], false).unwrap();
+    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 1)]).unwrap();
     let source: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], |_, indices| {
             indices.iter().sum::<usize>() as f64 + 1.0
@@ -5461,7 +5418,7 @@ fn checked_only_identity_transforms_make_no_provider_queries() {
 fn checked_only_otimes_preserves_typed_late_f_failures() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)], false).unwrap();
+    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 1)]).unwrap();
     let source: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, _| {
             trees.codomain_vertices()[0].get() as f64
@@ -5510,9 +5467,9 @@ fn checked_only_otimes_rejects_runtime_identity_and_style_before_algebra() {
     let other_runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let first = Arc::new(CheckedOnlyToy::new(0));
     let mismatched = Arc::new(CheckedOnlyToy::new(1));
-    let first_leg = GradedSpace::try_new(Arc::clone(&first), [(Label::X, 1)], false).unwrap();
+    let first_leg = GradedSpace::try_new_shared(Arc::clone(&first), [(Label::X, 1)]).unwrap();
     let mismatched_leg =
-        GradedSpace::try_new(Arc::clone(&mismatched), [(Label::X, 1)], false).unwrap();
+        GradedSpace::try_new_shared(Arc::clone(&mismatched), [(Label::X, 1)]).unwrap();
     let lhs: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&first_leg, &first_leg], [&first_leg], |_, _| 1.0)
             .unwrap();
@@ -5563,11 +5520,11 @@ fn checked_only_otimes_matches_fixed_heterogeneous_nonunit_oracle() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let first = Arc::new(CheckedOnlyToy::new_product_probe(9));
     let second = Arc::new(CheckedOnlyToy::new_product_probe(9));
-    let x2 = GradedSpace::try_new(Arc::clone(&first), [(Label::X, 2)], false).unwrap();
-    let x1 = GradedSpace::try_new(Arc::clone(&first), [(Label::X, 1)], false).unwrap();
-    let y3 = GradedSpace::try_new(Arc::clone(&second), [(Label::One, 3)], false).unwrap();
-    let y1 = GradedSpace::try_new(Arc::clone(&second), [(Label::One, 1)], false).unwrap();
-    let rhs_x1 = GradedSpace::try_new(Arc::clone(&second), [(Label::X, 1)], false).unwrap();
+    let x2 = GradedSpace::try_new_shared(Arc::clone(&first), [(Label::X, 2)]).unwrap();
+    let x1 = GradedSpace::try_new_shared(Arc::clone(&first), [(Label::X, 1)]).unwrap();
+    let y3 = GradedSpace::try_new_shared(Arc::clone(&second), [(Label::One, 3)]).unwrap();
+    let y1 = GradedSpace::try_new_shared(Arc::clone(&second), [(Label::One, 1)]).unwrap();
+    let rhs_x1 = GradedSpace::try_new_shared(Arc::clone(&second), [(Label::X, 1)]).unwrap();
     let lhs: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&x2, &x1], [&x1, &x1], |trees, index| {
             100.0 * trees.codomain_vertices()[0].get() as f64
@@ -5710,7 +5667,7 @@ fn checked_errors_stay_typed_and_callback_waits_for_all_decodes() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
     let error =
-        GradedSpace::try_new(Arc::clone(&provider), [(Label::Invalid, 1)], false).unwrap_err();
+        GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::Invalid, 1)]).unwrap_err();
     assert!(matches!(
         error,
         GenericTensorError::Structure(CheckedGenericStructureError::Provider(
@@ -5718,7 +5675,7 @@ fn checked_errors_stay_typed_and_callback_waits_for_all_decodes() {
         ))
     ));
 
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)], false).unwrap();
+    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 1)]).unwrap();
     provider.fail_decode.store(true, Ordering::Relaxed);
     let callbacks = AtomicUsize::new(0);
     let error = TensorMap::<_, f64>::from_block_fn(&runtime, [&leg, &leg], [&leg], |_, _| {
@@ -5738,8 +5695,8 @@ fn identity_mismatch_precedes_algebra_queries_and_both_dtypes_fill() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let first = Arc::new(CheckedOnlyToy::new(0));
     let other = Arc::new(CheckedOnlyToy::new(1));
-    let left = GradedSpace::try_new(Arc::clone(&first), [(Label::X, 1)], false).unwrap();
-    let right = GradedSpace::try_new(Arc::clone(&other), [(Label::X, 1)], false).unwrap();
+    let left = GradedSpace::try_new_shared(Arc::clone(&first), [(Label::X, 1)]).unwrap();
+    let right = GradedSpace::try_new_shared(Arc::clone(&other), [(Label::X, 1)]).unwrap();
     let error = TensorMap::<_, f64>::zeros(&runtime, [&left], [&right]).unwrap_err();
     assert!(matches!(error, GenericTensorError::Facade(_)));
     assert_eq!(first.algebra_queries.load(Ordering::Relaxed), 0);
@@ -5758,7 +5715,7 @@ fn failed_checked_admission_does_not_advance_the_runtime_stream() {
     let runtime_a = Runtime::builder().dense_threads(1).build().unwrap();
     let runtime_b = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(7));
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)], false).unwrap();
+    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 1)]).unwrap();
 
     provider.fail_algebra.store(true, Ordering::Relaxed);
     assert!(TensorMap::<_, f64>::rand(&runtime_a, [&leg, &leg], [&leg]).is_err());
@@ -5778,13 +5735,13 @@ fn checked_generic_cat_admits_once_and_queries_only_left_before_commit() {
     let left_provider = Arc::new(CheckedOnlyToy::new(0));
     let right_provider = Arc::new(CheckedOnlyToy::new(0));
     let left_common =
-        GradedSpace::try_new(Arc::clone(&left_provider), [(Label::X, 1)], false).unwrap();
+        GradedSpace::try_new_shared(Arc::clone(&left_provider), [(Label::X, 1)]).unwrap();
     let right_common =
-        GradedSpace::try_new(Arc::clone(&right_provider), [(Label::X, 1)], false).unwrap();
+        GradedSpace::try_new_shared(Arc::clone(&right_provider), [(Label::X, 1)]).unwrap();
     let left_changed =
-        GradedSpace::try_new(Arc::clone(&left_provider), [(Label::X, 1)], false).unwrap();
+        GradedSpace::try_new_shared(Arc::clone(&left_provider), [(Label::X, 1)]).unwrap();
     let right_changed =
-        GradedSpace::try_new(Arc::clone(&right_provider), [(Label::X, 2)], false).unwrap();
+        GradedSpace::try_new_shared(Arc::clone(&right_provider), [(Label::X, 2)]).unwrap();
     let lhs: TensorMap<_, f64> = TensorMap::from_block_fn(
         &runtime,
         [&left_common, &left_common],
@@ -5882,9 +5839,9 @@ fn checked_generic_cat_precedence_and_admission_failure_are_typed_nonpublishing(
     let provider = Arc::new(CheckedOnlyToy::new(0));
     let equal = Arc::new(CheckedOnlyToy::new(0));
     let wrong = Arc::new(CheckedOnlyToy::new(1));
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)], false).unwrap();
-    let equal_leg = GradedSpace::try_new(Arc::clone(&equal), [(Label::X, 1)], false).unwrap();
-    let wrong_leg = GradedSpace::try_new(Arc::clone(&wrong), [(Label::X, 1)], false).unwrap();
+    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 1)]).unwrap();
+    let equal_leg = GradedSpace::try_new_shared(Arc::clone(&equal), [(Label::X, 1)]).unwrap();
+    let wrong_leg = GradedSpace::try_new_shared(Arc::clone(&wrong), [(Label::X, 1)]).unwrap();
     let lhs: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], |_, indices| {
             1.0 + indices.iter().sum::<usize>() as f64
@@ -6035,13 +5992,13 @@ where
     let left_provider = Arc::new(SUNFusionRule::new(n).unwrap());
     let right_provider = Arc::new(SUNFusionRule::new(n).unwrap());
     let left_common =
-        GradedSpace::try_new(Arc::clone(&left_provider), [(label.clone(), 1)], false).unwrap();
+        GradedSpace::try_new_shared(Arc::clone(&left_provider), [(label.clone(), 1)]).unwrap();
     let right_common =
-        GradedSpace::try_new(Arc::clone(&right_provider), [(label.clone(), 1)], false).unwrap();
+        GradedSpace::try_new_shared(Arc::clone(&right_provider), [(label.clone(), 1)]).unwrap();
     let left_changed =
-        GradedSpace::try_new(Arc::clone(&left_provider), [(label.clone(), 1)], false).unwrap();
+        GradedSpace::try_new_shared(Arc::clone(&left_provider), [(label.clone(), 1)]).unwrap();
     let right_changed =
-        GradedSpace::try_new(Arc::clone(&right_provider), [(label.clone(), 2)], false).unwrap();
+        GradedSpace::try_new_shared(Arc::clone(&right_provider), [(label.clone(), 2)]).unwrap();
     let fill = |base, trees: &tenet::typed::BlockFusionTrees<Vec<i64>>, indices: &[usize]| {
         value(
             base + sun_cat_marker(trees)
@@ -6127,7 +6084,7 @@ fn sun_adjoint_multiplicity_transforms_round_trip_labels_vertices_and_payload() 
     for (n, adjoint) in [(3, vec![1, 1]), (4, vec![1, 0, 1])] {
         let provider = Arc::new(SUNFusionRule::new(n).unwrap());
         let leg =
-            GradedSpace::try_new(Arc::clone(&provider), [(adjoint.clone(), 1)], false).unwrap();
+            GradedSpace::try_new_shared(Arc::clone(&provider), [(adjoint.clone(), 1)]).unwrap();
         let tensor: TensorMap<_, f64> =
             TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], |trees, _| {
                 trees.codomain_vertices()[0].get() as f64
@@ -6280,7 +6237,7 @@ fn sun_checked_generic_adjoint_and_reductions_preserve_provider_and_errors() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     for (n, adjoint) in [(3, vec![1, 1]), (4, vec![1, 0, 1])] {
         let provider = Arc::new(SUNFusionRule::new(n).unwrap());
-        let leg = GradedSpace::try_new(Arc::clone(&provider), [(adjoint, 1)], false).unwrap();
+        let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(adjoint, 1)]).unwrap();
         let source: TensorMap<_, f64> =
             TensorMap::from_block_fn(&runtime, [&leg], [&leg], |trees, _| {
                 trees.coupled().iter().sum::<i64>() as f64 + 1.0
@@ -6316,7 +6273,7 @@ fn sun_checked_generic_transforms_reuse_the_runtime_completed_store() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     for (n, adjoint) in [(3, vec![1, 1]), (4, vec![1, 0, 1])] {
         let provider = Arc::new(SUNFusionRule::new(n).unwrap());
-        let leg = GradedSpace::try_new(Arc::clone(&provider), [(adjoint, 1)], false).unwrap();
+        let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(adjoint, 1)]).unwrap();
         let source: TensorMap<_, f64> =
             TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], |trees, _| {
                 trees.codomain_vertices()[0].get() as f64

@@ -63,7 +63,7 @@ macro_rules! factor_conformance {
         let rt = runtime();
         let provider = Arc::new($rule);
         let pairs = $pairs;
-        let endo_space = GradedSpace::try_new(Arc::clone(&provider), pairs.clone(), false).unwrap();
+        let endo_space = GradedSpace::try_new_shared(Arc::clone(&provider), pairs.clone()).unwrap();
         let tall_pairs: Vec<_> = pairs
             .iter()
             .map(|(sector, degeneracy)| (sector.clone(), degeneracy + 1))
@@ -72,8 +72,8 @@ macro_rules! factor_conformance {
             .iter()
             .map(|(sector, degeneracy)| (sector.clone(), *degeneracy))
             .collect();
-        let tall_space = GradedSpace::try_new(Arc::clone(&provider), tall_pairs, false).unwrap();
-        let wide_space = GradedSpace::try_new(Arc::clone(&provider), wide_pairs, false).unwrap();
+        let tall_space = GradedSpace::try_new_shared(Arc::clone(&provider), tall_pairs).unwrap();
+        let wide_space = GradedSpace::try_new_shared(Arc::clone(&provider), wide_pairs).unwrap();
         let tall: TensorMap<_, f64> =
             TensorMap::from_block_fn(&rt, [&tall_space], [&wide_space], |_, index| {
                 if index[0] == index[1] {

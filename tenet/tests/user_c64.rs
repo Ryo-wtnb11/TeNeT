@@ -82,25 +82,23 @@ where
 #[test]
 fn c64_contract_matches_real_imag_decomposition() {
     let runtime = Runtime::builder().build().unwrap();
-    let u1 = GradedSpace::try_new(
+    let u1 = GradedSpace::try_new_shared(
         Arc::new(U1FusionRule),
         [
             (U1Irrep::new(-1), 1),
             (U1Irrep::new(0), 2),
             (U1Irrep::new(1), 1),
         ],
-        false,
     )
     .unwrap();
     assert_complex_contract_identity(&runtime, &u1);
 
-    let su2 = GradedSpace::try_new(
+    let su2 = GradedSpace::try_new_shared(
         Arc::new(SU2FusionRule),
         [
             (SU2Irrep::from_twice_spin(0), 1),
             (SU2Irrep::from_twice_spin(1), 2),
         ],
-        false,
     )
     .unwrap();
     assert_complex_contract_identity(&runtime, &su2);
@@ -143,25 +141,23 @@ where
 #[test]
 fn tensor_macro_conj_expectation_value_is_real() {
     let runtime = Runtime::builder().build().unwrap();
-    let u1 = GradedSpace::try_new(
+    let u1 = GradedSpace::try_new_shared(
         Arc::new(U1FusionRule),
         [
             (U1Irrep::new(-1), 1),
             (U1Irrep::new(0), 2),
             (U1Irrep::new(1), 1),
         ],
-        false,
     )
     .unwrap();
     assert_typed_macro_conj(&runtime, &u1);
 
-    let su2 = GradedSpace::try_new(
+    let su2 = GradedSpace::try_new_shared(
         Arc::new(SU2FusionRule),
         [
             (SU2Irrep::from_twice_spin(0), 1),
             (SU2Irrep::from_twice_spin(1), 2),
         ],
-        false,
     )
     .unwrap();
     assert_typed_macro_conj(&runtime, &su2);

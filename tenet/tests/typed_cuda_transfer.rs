@@ -471,10 +471,9 @@ fn builtin_and_simple_product_providers_share_one_transfer_path() {
     let runtime = Runtime::builder().cuda(0).build().unwrap();
 
     let u1_rule = Arc::new(U1FusionRule);
-    let u1 = GradedSpace::try_new(
+    let u1 = GradedSpace::try_new_shared(
         Arc::clone(&u1_rule),
         [(U1Irrep::new(-1), 1), (U1Irrep::new(0), 2)],
-        false,
     )
     .unwrap();
     assert_roundtrip(
@@ -483,10 +482,9 @@ fn builtin_and_simple_product_providers_share_one_transfer_path() {
     );
 
     let fz2_rule = Arc::new(FermionParityFusionRule);
-    let fz2 = GradedSpace::try_new(
+    let fz2 = GradedSpace::try_new_shared(
         Arc::clone(&fz2_rule),
         [(Z2Irrep::EVEN, 1), (Z2Irrep::ODD, 2)],
-        false,
     )
     .unwrap();
     assert_roundtrip(
@@ -497,13 +495,12 @@ fn builtin_and_simple_product_providers_share_one_transfer_path() {
     );
 
     let su2_rule = Arc::new(SU2FusionRule);
-    let su2 = GradedSpace::try_new(
+    let su2 = GradedSpace::try_new_shared(
         Arc::clone(&su2_rule),
         [
             (SU2Irrep::from_twice_spin(0), 1),
             (SU2Irrep::from_twice_spin(1), 2),
         ],
-        false,
     )
     .unwrap();
     assert_roundtrip(
@@ -514,13 +511,12 @@ fn builtin_and_simple_product_providers_share_one_transfer_path() {
     );
 
     let product_rule = Arc::new(U1FusionRule.product(FermionParityFusionRule));
-    let product = GradedSpace::try_new(
+    let product = GradedSpace::try_new_shared(
         Arc::clone(&product_rule),
         [
             (product_sector(U1Irrep::new(0), Z2Irrep::EVEN), 1),
             (product_sector(U1Irrep::new(1), Z2Irrep::ODD), 2),
         ],
-        false,
     )
     .unwrap();
     assert_roundtrip(
@@ -537,10 +533,9 @@ fn typed_cuda_direct_execution_matches_host_providers_and_structure() {
     let runtime = Runtime::builder().cuda(0).build().unwrap();
 
     let u1_rule = Arc::new(U1FusionRule);
-    let u1 = GradedSpace::try_new(
+    let u1 = GradedSpace::try_new_shared(
         Arc::clone(&u1_rule),
         [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
-        false,
     )
     .unwrap();
     let u1_lhs = TensorMap::from_block_fn(&runtime, [&u1], [&u1], |_, indices| {
@@ -554,13 +549,12 @@ fn typed_cuda_direct_execution_matches_host_providers_and_structure() {
     assert_direct_contract_and_compose(&u1_lhs, &u1_rhs);
 
     let su2_rule = Arc::new(SU2FusionRule);
-    let su2 = GradedSpace::try_new(
+    let su2 = GradedSpace::try_new_shared(
         Arc::clone(&su2_rule),
         [
             (SU2Irrep::from_twice_spin(0), 1),
             (SU2Irrep::from_twice_spin(1), 2),
         ],
-        false,
     )
     .unwrap();
     let su2_lhs =
@@ -576,13 +570,12 @@ fn typed_cuda_direct_execution_matches_host_providers_and_structure() {
     assert_direct_contract_and_compose(&su2_lhs, &su2_rhs);
 
     let product_rule = Arc::new(U1FusionRule.product(FermionParityFusionRule));
-    let product = GradedSpace::try_new(
+    let product = GradedSpace::try_new_shared(
         Arc::clone(&product_rule),
         [
             (product_sector(U1Irrep::new(0), Z2Irrep::EVEN), 2),
             (product_sector(U1Irrep::new(1), Z2Irrep::ODD), 1),
         ],
-        false,
     )
     .unwrap();
     let product_lhs = TensorMap::from_block_fn(&runtime, [&product], [&product], |_, indices| {
@@ -595,14 +588,14 @@ fn typed_cuda_direct_execution_matches_host_providers_and_structure() {
     .unwrap();
     assert_direct_contract_and_compose(&product_lhs, &product_rhs);
 
-    let product_dual = GradedSpace::try_new(
+    let product_dual = GradedSpace::try_new_shared(
         Arc::clone(&product_rule),
         [
             (product_sector(U1Irrep::new(0), Z2Irrep::EVEN), 2),
             (product_sector(U1Irrep::new(1), Z2Irrep::ODD), 1),
         ],
-        true,
     )
+    .and_then(|space| space.try_dual())
     .unwrap();
     let product_multileg_lhs = TensorMap::from_block_fn(
         &runtime,
@@ -627,10 +620,9 @@ fn typed_cuda_reductions_cover_weights_providers_lazy_and_preflight() {
     let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
 
     let u1_provider = Arc::new(U1FusionRule);
-    let u1_leg = GradedSpace::try_new(
+    let u1_leg = GradedSpace::try_new_shared(
         Arc::clone(&u1_provider),
         [(U1Irrep::new(0), 1), (U1Irrep::new(1), 1)],
-        false,
     )
     .unwrap();
     let u1_lhs: TensorMap<_, f64> =
@@ -683,12 +675,9 @@ fn typed_cuda_reductions_cover_weights_providers_lazy_and_preflight() {
     let su2_provider = Arc::new(SU2FusionRule);
     let spin0 = SU2Irrep::from_twice_spin(0);
     let spin_half = SU2Irrep::from_twice_spin(1);
-    let su2_leg = GradedSpace::try_new(
-        Arc::clone(&su2_provider),
-        [(spin0, 1), (spin_half, 1)],
-        false,
-    )
-    .unwrap();
+    let su2_leg =
+        GradedSpace::try_new_shared(Arc::clone(&su2_provider), [(spin0, 1), (spin_half, 1)])
+            .unwrap();
     let su2_lhs: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&su2_leg], [&su2_leg], |trees, _| {
             if trees.coupled() == &spin0 {
@@ -728,10 +717,9 @@ fn typed_cuda_reductions_cover_weights_providers_lazy_and_preflight() {
     assert_reduction_parity(&su2_rank5_lhs, &su2_rank5_rhs);
 
     let fz2_provider = Arc::new(FermionParityFusionRule);
-    let fz2_leg = GradedSpace::try_new(
+    let fz2_leg = GradedSpace::try_new_shared(
         Arc::clone(&fz2_provider),
         [(Z2Irrep::EVEN, 2), (Z2Irrep::ODD, 1)],
-        false,
     )
     .unwrap();
     let fz2_lhs = TensorMap::from_block_fn(&runtime, [&fz2_leg], [&fz2_leg], |_, indices| {
@@ -745,13 +733,12 @@ fn typed_cuda_reductions_cover_weights_providers_lazy_and_preflight() {
     assert_reduction_parity(&fz2_lhs, &fz2_rhs);
 
     let product_provider = Arc::new(U1FusionRule.product(FermionParityFusionRule));
-    let product_leg = GradedSpace::try_new(
+    let product_leg = GradedSpace::try_new_shared(
         Arc::clone(&product_provider),
         [
             (product_sector(U1Irrep::new(0), Z2Irrep::EVEN), 2),
             (product_sector(U1Irrep::new(1), Z2Irrep::ODD), 1),
         ],
-        false,
     )
     .unwrap();
     let product_lhs =
@@ -772,7 +759,7 @@ fn typed_cuda_reductions_cover_weights_providers_lazy_and_preflight() {
         calls: Arc::clone(&callback_count),
     });
     let probe_leg =
-        GradedSpace::try_new(Arc::clone(&probe_provider), [(ProbeSector, 1)], false).unwrap();
+        GradedSpace::try_new_shared(Arc::clone(&probe_provider), [(ProbeSector, 1)]).unwrap();
     let probe_lhs: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&probe_leg], [&probe_leg], |_, _| 2.0).unwrap();
     let probe_rhs: TensorMap<_, f64> =
@@ -798,10 +785,9 @@ fn typed_cuda_reductions_cover_weights_providers_lazy_and_preflight() {
         tenet::typed::Error::RuntimeMismatch
     );
 
-    let wider = GradedSpace::try_new(
+    let wider = GradedSpace::try_new_shared(
         Arc::clone(&u1_provider),
         [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
-        false,
     )
     .unwrap();
     let mismatched = TensorMap::from_block_fn(&runtime, [&wider], [&wider], |_, _| 1.0)
@@ -815,8 +801,8 @@ fn typed_cuda_reductions_cover_weights_providers_lazy_and_preflight() {
     assert_eq!(u1_device.to_host().unwrap().data(), u1_lhs.data());
 
     let zn3 = Arc::new(ZNFusionRule::new(3).unwrap());
-    let charge0 = GradedSpace::try_new(Arc::clone(&zn3), [(zn3.irrep(0), 1)], false).unwrap();
-    let charge1 = GradedSpace::try_new(Arc::clone(&zn3), [(zn3.irrep(1), 1)], false).unwrap();
+    let charge0 = GradedSpace::try_new_shared(Arc::clone(&zn3), [(zn3.irrep(0), 1)]).unwrap();
+    let charge1 = GradedSpace::try_new_shared(Arc::clone(&zn3), [(zn3.irrep(1), 1)]).unwrap();
     let empty: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&charge0], [&charge1], |_, _| 1.0).unwrap();
     assert!(empty.data().is_empty());
@@ -832,16 +818,14 @@ fn typed_cuda_qr_compact_streams_multiplicity_free_f64_factors() {
     let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
 
     let u1 = Arc::new(U1FusionRule);
-    let tall = GradedSpace::try_new(
+    let tall = GradedSpace::try_new_shared(
         Arc::clone(&u1),
         [(U1Irrep::new(0), 3), (U1Irrep::new(1), 1)],
-        false,
     )
     .unwrap();
-    let wide = GradedSpace::try_new(
+    let wide = GradedSpace::try_new_shared(
         Arc::clone(&u1),
         [(U1Irrep::new(0), 2), (U1Irrep::new(1), 3)],
-        false,
     )
     .unwrap();
     let mixed = TensorMap::from_block_fn(&runtime, [&tall], [&wide], |_, indices| {
@@ -855,7 +839,7 @@ fn typed_cuda_qr_compact_streams_multiplicity_free_f64_factors() {
     assert_typed_cuda_qr_matches_host(&mixed);
 
     let charge_zero_only =
-        GradedSpace::try_new(Arc::clone(&u1), [(U1Irrep::new(0), 2)], false).unwrap();
+        GradedSpace::try_new_shared(Arc::clone(&u1), [(U1Irrep::new(0), 2)]).unwrap();
     let unmatched =
         TensorMap::from_block_fn(&runtime, [&tall], [&charge_zero_only], |_, indices| {
             if indices[0] == indices[1] {
@@ -878,13 +862,12 @@ fn typed_cuda_qr_compact_streams_multiplicity_free_f64_factors() {
     assert_typed_cuda_qr_matches_host(&square);
 
     let su2 = Arc::new(SU2FusionRule);
-    let su2_leg = GradedSpace::try_new(
+    let su2_leg = GradedSpace::try_new_shared(
         Arc::clone(&su2),
         [
             (SU2Irrep::from_twice_spin(0), 2),
             (SU2Irrep::from_twice_spin(1), 2),
         ],
-        false,
     )
     .unwrap();
     let su2_tensor = TensorMap::from_block_fn(&runtime, [&su2_leg], [&su2_leg], |_, indices| {
@@ -898,13 +881,12 @@ fn typed_cuda_qr_compact_streams_multiplicity_free_f64_factors() {
     assert_typed_cuda_qr_matches_host(&su2_tensor);
 
     let product = Arc::new(U1FusionRule.product(FermionParityFusionRule));
-    let product_leg = GradedSpace::try_new(
+    let product_leg = GradedSpace::try_new_shared(
         Arc::clone(&product),
         [
             (product_sector(U1Irrep::new(0), Z2Irrep::EVEN), 2),
             (product_sector(U1Irrep::new(1), Z2Irrep::ODD), 1),
         ],
-        false,
     )
     .unwrap();
     let product_tensor =
@@ -949,7 +931,7 @@ fn typed_cuda_qr_compact_streams_multiplicity_free_f64_factors() {
     assert_finite_r_diagonal_nonnegative(&zero_right);
 
     let rank_deficient_leg =
-        GradedSpace::try_new(Arc::clone(&u1), [(U1Irrep::new(0), 3)], false).unwrap();
+        GradedSpace::try_new_shared(Arc::clone(&u1), [(U1Irrep::new(0), 3)]).unwrap();
     let rank_deficient = TensorMap::from_block_fn(
         &runtime,
         [&rank_deficient_leg],
@@ -992,8 +974,8 @@ fn typed_cuda_qr_compact_streams_multiplicity_free_f64_factors() {
     assert_finite_r_diagonal_nonnegative(&tiny_right);
 
     let zn3 = Arc::new(ZNFusionRule::new(3).unwrap());
-    let charge0 = GradedSpace::try_new(Arc::clone(&zn3), [(zn3.irrep(0), 2)], false).unwrap();
-    let charge1 = GradedSpace::try_new(Arc::clone(&zn3), [(zn3.irrep(1), 3)], false).unwrap();
+    let charge0 = GradedSpace::try_new_shared(Arc::clone(&zn3), [(zn3.irrep(0), 2)]).unwrap();
+    let charge1 = GradedSpace::try_new_shared(Arc::clone(&zn3), [(zn3.irrep(1), 3)]).unwrap();
     let empty: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&charge0], [&charge1], |_, _| 1.0).unwrap();
     assert!(empty.data().is_empty());
@@ -1046,16 +1028,14 @@ fn typed_cuda_qr_compact_streams_multiplicity_free_f64_factors() {
 fn typed_cuda_svd_compact_streams_dense_multiplicity_free_f64_factors() {
     let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
     let u1 = Arc::new(U1FusionRule);
-    let tall = GradedSpace::try_new(
+    let tall = GradedSpace::try_new_shared(
         Arc::clone(&u1),
         [(U1Irrep::new(0), 3), (U1Irrep::new(1), 1)],
-        false,
     )
     .unwrap();
-    let wide = GradedSpace::try_new(
+    let wide = GradedSpace::try_new_shared(
         Arc::clone(&u1),
         [(U1Irrep::new(0), 2), (U1Irrep::new(1), 3)],
-        false,
     )
     .unwrap();
     let rectangular = TensorMap::from_block_fn(&runtime, [&tall], [&wide], |_, indices| {
@@ -1075,13 +1055,12 @@ fn typed_cuda_svd_compact_streams_dense_multiplicity_free_f64_factors() {
     assert_typed_cuda_svd_matches_host(&rank_deficient);
 
     let su2 = Arc::new(SU2FusionRule);
-    let su2_leg = GradedSpace::try_new(
+    let su2_leg = GradedSpace::try_new_shared(
         Arc::clone(&su2),
         [
             (SU2Irrep::from_twice_spin(0), 2),
             (SU2Irrep::from_twice_spin(1), 2),
         ],
-        false,
     )
     .unwrap();
     let multi_tree =
@@ -1107,10 +1086,9 @@ fn typed_cuda_svd_compact_streams_dense_multiplicity_free_f64_factors() {
     assert_typed_cuda_svd_matches_host(&all_zero);
 
     let fermion = Arc::new(FermionParityFusionRule);
-    let fermion_leg = GradedSpace::try_new(
+    let fermion_leg = GradedSpace::try_new_shared(
         Arc::clone(&fermion),
         [(Z2Irrep::EVEN, 2), (Z2Irrep::ODD, 1)],
-        false,
     )
     .unwrap();
     let fermion_tensor =
@@ -1121,13 +1099,12 @@ fn typed_cuda_svd_compact_streams_dense_multiplicity_free_f64_factors() {
     assert_typed_cuda_svd_matches_host(&fermion_tensor);
 
     let product = Arc::new(U1FusionRule.product(FermionParityFusionRule));
-    let product_leg = GradedSpace::try_new(
+    let product_leg = GradedSpace::try_new_shared(
         Arc::clone(&product),
         [
             (product_sector(U1Irrep::new(0), Z2Irrep::EVEN), 2),
             (product_sector(U1Irrep::new(1), Z2Irrep::ODD), 1),
         ],
-        false,
     )
     .unwrap();
     let product_tensor =
@@ -1138,8 +1115,8 @@ fn typed_cuda_svd_compact_streams_dense_multiplicity_free_f64_factors() {
     assert_typed_cuda_svd_matches_host(&product_tensor);
 
     let zn3 = Arc::new(ZNFusionRule::new(3).unwrap());
-    let charge0 = GradedSpace::try_new(Arc::clone(&zn3), [(zn3.irrep(0), 2)], false).unwrap();
-    let charge1 = GradedSpace::try_new(Arc::clone(&zn3), [(zn3.irrep(1), 3)], false).unwrap();
+    let charge0 = GradedSpace::try_new_shared(Arc::clone(&zn3), [(zn3.irrep(0), 2)]).unwrap();
+    let charge1 = GradedSpace::try_new_shared(Arc::clone(&zn3), [(zn3.irrep(1), 3)]).unwrap();
     let empty: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&charge0], [&charge1], |_, _| 1.0).unwrap();
     assert_typed_cuda_svd_matches_host(&empty);
@@ -1185,9 +1162,9 @@ fn typed_cuda_svd_compact_streams_dense_multiplicity_free_f64_factors() {
 fn typed_cuda_svd_compact_handles_large_wide_sector() {
     let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
     let provider = Arc::new(U1FusionRule);
-    let rows = GradedSpace::try_new(Arc::clone(&provider), [(U1Irrep::new(0), 8)], false).unwrap();
+    let rows = GradedSpace::try_new_shared(Arc::clone(&provider), [(U1Irrep::new(0), 8)]).unwrap();
     let cols =
-        GradedSpace::try_new(Arc::clone(&provider), [(U1Irrep::new(0), 1025)], false).unwrap();
+        GradedSpace::try_new_shared(Arc::clone(&provider), [(U1Irrep::new(0), 1025)]).unwrap();
     let source = TensorMap::from_block_fn(&runtime, [&rows], [&cols], |_, indices| {
         let row = indices[0];
         let col = indices[1];
@@ -1204,9 +1181,9 @@ fn typed_cuda_svd_trunc_handles_large_wide_sector() {
     // What: the 8 x 1025 cuSOLVER path applies a kept prefix without a Host fallback.
     let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
     let provider = Arc::new(U1FusionRule);
-    let rows = GradedSpace::try_new(Arc::clone(&provider), [(U1Irrep::new(0), 8)], false).unwrap();
+    let rows = GradedSpace::try_new_shared(Arc::clone(&provider), [(U1Irrep::new(0), 8)]).unwrap();
     let cols =
-        GradedSpace::try_new(Arc::clone(&provider), [(U1Irrep::new(0), 1025)], false).unwrap();
+        GradedSpace::try_new_shared(Arc::clone(&provider), [(U1Irrep::new(0), 1025)]).unwrap();
     let source = TensorMap::from_block_fn(&runtime, [&rows], [&cols], |_, indices| {
         let row = indices[0];
         let col = indices[1];
@@ -1224,16 +1201,14 @@ fn typed_cuda_svd_trunc_matches_host_policies_structure_and_ownership() {
     // Host semantic oracle without comparing backend-dependent U/Vh gauges.
     let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
     let provider = Arc::new(U1FusionRule);
-    let rows = GradedSpace::try_new(
+    let rows = GradedSpace::try_new_shared(
         Arc::clone(&provider),
         [(U1Irrep::new(0), 3), (U1Irrep::new(1), 2)],
-        false,
     )
     .unwrap();
-    let cols = GradedSpace::try_new(
+    let cols = GradedSpace::try_new_shared(
         Arc::clone(&provider),
         [(U1Irrep::new(0), 2), (U1Irrep::new(2), 1)],
-        false,
     )
     .unwrap();
     let mixed = TensorMap::from_block_fn(&runtime, [&rows], [&cols], |_, indices| {
@@ -1244,10 +1219,9 @@ fn typed_cuda_svd_trunc_matches_host_policies_structure_and_ownership() {
         }
     })
     .unwrap();
-    let same_identity_space = GradedSpace::try_new(
+    let same_identity_space = GradedSpace::try_new_shared(
         Arc::new(U1FusionRule),
         [(U1Irrep::new(0), 1), (U1Irrep::new(1), 1)],
-        false,
     )
     .unwrap();
     let policies = [
@@ -1271,7 +1245,7 @@ fn typed_cuda_svd_trunc_matches_host_policies_structure_and_ownership() {
         calls: Arc::clone(&dimension_calls),
     });
     let reentrant_leg =
-        GradedSpace::try_new(Arc::clone(&reentrant), [(ProbeSector, 2)], false).unwrap();
+        GradedSpace::try_new_shared(Arc::clone(&reentrant), [(ProbeSector, 2)]).unwrap();
     let reentrant_source = TensorMap::from_block_fn(
         &runtime,
         [&reentrant_leg],
@@ -1291,20 +1265,19 @@ fn typed_cuda_svd_trunc_matches_host_policies_structure_and_ownership() {
     assert_typed_cuda_svd_trunc_matches_host(&all_zero, &Truncation::relative_error(0.0).unwrap());
 
     let no_intersection_rows =
-        GradedSpace::try_new(Arc::clone(&provider), [(U1Irrep::new(4), 2)], false).unwrap();
+        GradedSpace::try_new_shared(Arc::clone(&provider), [(U1Irrep::new(4), 2)]).unwrap();
     let no_intersection: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&no_intersection_rows], [&cols], |_, _| 1.0).unwrap();
     assert!(no_intersection.data().is_empty());
     assert_typed_cuda_svd_trunc_matches_host(&no_intersection, &Truncation::Full);
 
     let su2 = Arc::new(SU2FusionRule);
-    let su2_leg = GradedSpace::try_new(
+    let su2_leg = GradedSpace::try_new_shared(
         Arc::clone(&su2),
         [
             (SU2Irrep::from_twice_spin(0), 2),
             (SU2Irrep::from_twice_spin(1), 2),
         ],
-        false,
     )
     .unwrap();
     let multi_tree =
@@ -1315,10 +1288,9 @@ fn typed_cuda_svd_trunc_matches_host_policies_structure_and_ownership() {
     assert_typed_cuda_svd_trunc_matches_host(&multi_tree, &Truncation::rank(3));
 
     let fermion = Arc::new(FermionParityFusionRule);
-    let fermion_leg = GradedSpace::try_new(
+    let fermion_leg = GradedSpace::try_new_shared(
         Arc::clone(&fermion),
         [(Z2Irrep::EVEN, 2), (Z2Irrep::ODD, 1)],
-        false,
     )
     .unwrap();
     let fermion_tensor =
@@ -1329,13 +1301,12 @@ fn typed_cuda_svd_trunc_matches_host_policies_structure_and_ownership() {
     assert_typed_cuda_svd_trunc_matches_host(&fermion_tensor, &Truncation::rank(2));
 
     let product = Arc::new(U1FusionRule.product(FermionParityFusionRule));
-    let product_leg = GradedSpace::try_new(
+    let product_leg = GradedSpace::try_new_shared(
         Arc::clone(&product),
         [
             (product_sector(U1Irrep::new(0), Z2Irrep::EVEN), 2),
             (product_sector(U1Irrep::new(1), Z2Irrep::ODD), 1),
         ],
-        false,
     )
     .unwrap();
     let product_tensor =
@@ -1369,10 +1340,9 @@ fn typed_cuda_svd_trunc_matches_host_policies_structure_and_ownership() {
 fn typed_cuda_arithmetic_matches_host_lazy_ownership_and_concurrency() {
     let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
     let provider = Arc::new(U1FusionRule);
-    let leg = GradedSpace::try_new(
+    let leg = GradedSpace::try_new_shared(
         Arc::clone(&provider),
         [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
-        false,
     )
     .unwrap();
     let lhs: TensorMap<_, f64> =
@@ -1381,10 +1351,9 @@ fn typed_cuda_arithmetic_matches_host_lazy_ownership_and_concurrency() {
         })
         .unwrap();
     let rhs_provider = Arc::new(U1FusionRule);
-    let rhs_leg = GradedSpace::try_new(
+    let rhs_leg = GradedSpace::try_new_shared(
         Arc::clone(&rhs_provider),
         [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
-        false,
     )
     .unwrap();
     let rhs: TensorMap<_, f64> =
@@ -1557,13 +1526,12 @@ fn typed_cuda_arithmetic_matches_host_lazy_ownership_and_concurrency() {
     });
 
     let su2_provider = Arc::new(SU2FusionRule);
-    let su2_leg = GradedSpace::try_new(
+    let su2_leg = GradedSpace::try_new_shared(
         Arc::clone(&su2_provider),
         [
             (SU2Irrep::from_twice_spin(0), 1),
             (SU2Irrep::from_twice_spin(1), 1),
         ],
-        false,
     )
     .unwrap();
     let su2: TensorMap<_, f64> =
@@ -1596,8 +1564,8 @@ fn typed_cuda_arithmetic_matches_host_lazy_ownership_and_concurrency() {
         .all(|value| !value.is_finite()));
 
     let zn3 = Arc::new(ZNFusionRule::new(3).unwrap());
-    let charge0 = GradedSpace::try_new(Arc::clone(&zn3), [(zn3.irrep(0), 1)], false).unwrap();
-    let charge1 = GradedSpace::try_new(Arc::clone(&zn3), [(zn3.irrep(1), 1)], false).unwrap();
+    let charge0 = GradedSpace::try_new_shared(Arc::clone(&zn3), [(zn3.irrep(0), 1)]).unwrap();
+    let charge1 = GradedSpace::try_new_shared(Arc::clone(&zn3), [(zn3.irrep(1), 1)]).unwrap();
     let empty: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&charge0], [&charge1], |_, _| f64::NAN).unwrap();
     let empty_device = empty.to_cuda().unwrap();
@@ -1632,7 +1600,7 @@ fn typed_cuda_arithmetic_matches_host_lazy_ownership_and_concurrency() {
 
     let other_runtime = Runtime::builder().cuda(0).build().unwrap();
     let other_leg =
-        GradedSpace::try_new(Arc::clone(&provider), [(U1Irrep::new(0), 1)], false).unwrap();
+        GradedSpace::try_new_shared(Arc::clone(&provider), [(U1Irrep::new(0), 1)]).unwrap();
     let foreign = TensorMap::from_block_fn(&other_runtime, [&other_leg], [&other_leg], |_, _| 1.0)
         .unwrap()
         .to_cuda()
@@ -1658,13 +1626,15 @@ fn typed_cuda_fermionic_contract_is_minus_six_and_compose_stays_plus_six() {
     let runtime = Runtime::builder().cuda(0).build().unwrap();
     let provider = Arc::new(FermionParityFusionRule);
     let lhs_codomain =
-        GradedSpace::try_new(Arc::clone(&provider), [(Z2Irrep::ODD, 1)], false).unwrap();
-    let lhs_domain =
-        GradedSpace::try_new(Arc::clone(&provider), [(Z2Irrep::ODD, 1)], true).unwrap();
-    let rhs_codomain =
-        GradedSpace::try_new(Arc::clone(&provider), [(Z2Irrep::ODD, 1)], true).unwrap();
+        GradedSpace::try_new_shared(Arc::clone(&provider), [(Z2Irrep::ODD, 1)]).unwrap();
+    let lhs_domain = GradedSpace::try_new_shared(Arc::clone(&provider), [(Z2Irrep::ODD, 1)])
+        .and_then(|space| space.try_dual())
+        .unwrap();
+    let rhs_codomain = GradedSpace::try_new_shared(Arc::clone(&provider), [(Z2Irrep::ODD, 1)])
+        .and_then(|space| space.try_dual())
+        .unwrap();
     let rhs_domain =
-        GradedSpace::try_new(Arc::clone(&provider), [(Z2Irrep::ODD, 1)], false).unwrap();
+        GradedSpace::try_new_shared(Arc::clone(&provider), [(Z2Irrep::ODD, 1)]).unwrap();
     let lhs =
         TensorMap::from_block_fn(&runtime, [&lhs_codomain], [&lhs_domain], |_, _| 2.0).unwrap();
     let rhs =
@@ -1703,7 +1673,7 @@ fn typed_cuda_direct_supports_canonical_lazy_and_rejects_other_scopes_before_mut
     let runtime = Runtime::builder().cuda(0).build().unwrap();
     let other_runtime = Runtime::builder().cuda(0).build().unwrap();
     let provider = Arc::new(U1FusionRule);
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(U1Irrep::new(0), 2)], false).unwrap();
+    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(U1Irrep::new(0), 2)]).unwrap();
     let host = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
         indices.iter().sum::<usize>() as f64 + 1.0
     })
@@ -1747,8 +1717,8 @@ fn typed_cuda_direct_supports_canonical_lazy_and_rejects_other_scopes_before_mut
 
     let zn3 = Arc::new(ZNFusionRule::new(3).unwrap());
     let zn4 = Arc::new(ZNFusionRule::new(4).unwrap());
-    let zn3_leg = GradedSpace::try_new(Arc::clone(&zn3), [(zn3.irrep(0), 1)], false).unwrap();
-    let zn4_leg = GradedSpace::try_new(Arc::clone(&zn4), [(zn4.irrep(0), 1)], false).unwrap();
+    let zn3_leg = GradedSpace::try_new_shared(Arc::clone(&zn3), [(zn3.irrep(0), 1)]).unwrap();
+    let zn4_leg = GradedSpace::try_new_shared(Arc::clone(&zn4), [(zn4.irrep(0), 1)]).unwrap();
     let zn3_tensor: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&zn3_leg], [&zn3_leg], |_, _| 1.0).unwrap();
     let zn4_tensor: TensorMap<_, f64> =
@@ -1759,9 +1729,9 @@ fn typed_cuda_direct_supports_canonical_lazy_and_rejects_other_scopes_before_mut
     assert_eq!(zn3_device.to_host().unwrap().data(), [1.0]);
     assert_eq!(zn4_device.to_host().unwrap().data(), [1.0]);
 
-    let left_open = GradedSpace::try_new(Arc::clone(&zn3), [(zn3.irrep(0), 1)], false).unwrap();
-    let seam = GradedSpace::try_new(Arc::clone(&zn3), [(zn3.irrep(1), 1)], false).unwrap();
-    let right_open = GradedSpace::try_new(Arc::clone(&zn3), [(zn3.irrep(2), 1)], false).unwrap();
+    let left_open = GradedSpace::try_new_shared(Arc::clone(&zn3), [(zn3.irrep(0), 1)]).unwrap();
+    let seam = GradedSpace::try_new_shared(Arc::clone(&zn3), [(zn3.irrep(1), 1)]).unwrap();
+    let right_open = GradedSpace::try_new_shared(Arc::clone(&zn3), [(zn3.irrep(2), 1)]).unwrap();
     let zero_lhs: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&left_open], [&seam], |_, _| 1.0).unwrap();
     let zero_rhs: TensorMap<_, f64> =

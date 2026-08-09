@@ -589,7 +589,7 @@ fn run_checked_sun(
 ) -> Result<(), Box<dyn std::error::Error>> {
     use tenet::typed::SUNFusionRule;
 
-    let space = GradedSpace::try_new(provider, [(label, degeneracy)], false)?;
+    let space = GradedSpace::try_new_shared(provider, [(label, degeneracy)])?;
     if form_enabled("destination") {
         println!("# {symmetry}: destination rows excluded: the public destination methods retain multiplicity-free dispatch bounds, so the exact SUN fixtures cannot call them");
     }
@@ -854,28 +854,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     run_provider!(
         "U1",
         U1FusionRule,
-        GradedSpace::try_new_owned(
+        GradedSpace::try_new(
             U1FusionRule,
             [
                 (U1Irrep::new(-1), degeneracy),
                 (U1Irrep::new(0), degeneracy),
                 (U1Irrep::new(1), degeneracy),
-            ],
-            false,
+            ]
         )?,
         min_time
     );
     run_provider!(
         "SU2",
         SU2FusionRule,
-        GradedSpace::try_new_owned(
+        GradedSpace::try_new(
             SU2FusionRule,
             [
                 (SU2Irrep::from_twice_spin(0), degeneracy),
                 (SU2Irrep::from_twice_spin(1), degeneracy),
                 (SU2Irrep::from_twice_spin(2), degeneracy),
-            ],
-            false,
+            ]
         )?,
         min_time
     );

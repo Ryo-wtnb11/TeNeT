@@ -10,10 +10,9 @@ fn runtime() -> Runtime {
 #[test]
 fn typed_diagonal_preserves_canonical_positions_and_dual_leg() {
     let runtime = runtime();
-    let bond = GradedSpace::try_new(
+    let bond = GradedSpace::try_new_shared(
         Arc::new(U1FusionRule),
         [(U1Irrep::new(-1), 2), (U1Irrep::new(1), 1)],
-        false,
     )
     .unwrap()
     .try_dual()
@@ -45,7 +44,7 @@ fn typed_diagonal_preserves_canonical_positions_and_dual_leg() {
 #[test]
 fn typed_real_c64_eigenvalue_readback_stays_compact() {
     let runtime = runtime();
-    let v = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)], false).unwrap();
+    let v = GradedSpace::try_new_shared(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
     let source =
         TensorMap::<U1FusionRule, Complex64>::from_block_fn(&runtime, [&v], [&v], |_, index| {
             Complex64::new(
@@ -69,13 +68,12 @@ fn typed_real_c64_eigenvalue_readback_stays_compact() {
 fn typed_diagonal_canonicalizes_labels_and_dense_predicate_handles_nonfinite_offdiag() {
     let runtime = runtime();
     let rule = Arc::new(SU2FusionRule);
-    let bond = GradedSpace::try_new(
+    let bond = GradedSpace::try_new_shared(
         Arc::clone(&rule),
         [
             (SU2Irrep::from_twice_spin(2), 1),
             (SU2Irrep::from_twice_spin(0), 2),
         ],
-        false,
     )
     .unwrap();
     let tensor = TensorMap::<SU2FusionRule, f64>::diagonal(
@@ -153,7 +151,7 @@ fn typed_diagonal_canonicalizes_labels_and_dense_predicate_handles_nonfinite_off
     )
     .is_err());
 
-    let v = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)], false).unwrap();
+    let v = GradedSpace::try_new_shared(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
     let dense = TensorMap::<U1FusionRule, f64>::from_block_fn(&runtime, [&v], [&v], |_, index| {
         if index == [0, 1] {
             f64::NAN

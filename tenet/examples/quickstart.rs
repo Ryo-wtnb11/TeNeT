@@ -3,14 +3,13 @@ use tenet_network::tensor;
 
 fn main() -> Result<(), Error> {
     let runtime = Runtime::builder().build()?;
-    let space = GradedSpace::try_new_owned(
+    let space = GradedSpace::try_new(
         U1FusionRule,
         [
             (U1Irrep::new(-1), 1),
             (U1Irrep::new(0), 2),
             (U1Irrep::new(1), 1),
         ],
-        false,
     )?;
 
     // Fill each allowed charge block. Unequal indices stay zero, so both maps

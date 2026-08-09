@@ -45,13 +45,12 @@ fn repartition_to_current_split_does_not_allocate() {
     // handles, preserves provider authority, and performs no heap allocation.
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(SU2FusionRule);
-    let space = GradedSpace::try_new(
+    let space = GradedSpace::try_new_shared(
         Arc::clone(&provider),
         [
             (SU2Irrep::from_twice_spin(0), 1),
             (SU2Irrep::from_twice_spin(1), 2),
         ],
-        false,
     )
     .unwrap();
     let source: TensorMap<SU2FusionRule, f64> =

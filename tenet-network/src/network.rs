@@ -2093,7 +2093,7 @@ mod typed_replay_tests {
     fn cuda_schedule_preflight_accepts_only_the_complete_direct_subset() {
         let runtime = Runtime::builder().build().unwrap();
         let space =
-            GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)], false).unwrap();
+            GradedSpace::try_new_shared(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
         let tensors = (0..3)
             .map(|seed| {
                 TensorMap::<U1FusionRule, f64>::rand_with_seed(
@@ -2308,7 +2308,7 @@ mod typed_replay_tests {
     fn greedy_three_tensor_chain_has_a_direct_cuda_schedule() {
         let runtime = Runtime::builder().build().unwrap();
         let space =
-            GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)], false).unwrap();
+            GradedSpace::try_new_shared(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
         let tensors = (0..3)
             .map(|seed| {
                 TensorMap::<U1FusionRule, f64>::rand_with_seed(
@@ -2346,7 +2346,7 @@ mod typed_replay_tests {
     fn reversed_final_output_is_a_valid_but_nondirect_cuda_schedule() {
         let runtime = Runtime::builder().build().unwrap();
         let space =
-            GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)], false).unwrap();
+            GradedSpace::try_new_shared(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
         let a =
             TensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&space], [&space], 750_310)
                 .unwrap();
@@ -2373,51 +2373,46 @@ mod typed_replay_tests {
         let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
         let u1_rule = Arc::new(U1FusionRule);
         let u1_x0 =
-            GradedSpace::try_new(Arc::clone(&u1_rule), [(U1Irrep::new(2), 2)], false).unwrap();
-        let u1_x1 = GradedSpace::try_new(Arc::clone(&u1_rule), [(U1Irrep::new(-1), 1)], false)
+            GradedSpace::try_new_shared(Arc::clone(&u1_rule), [(U1Irrep::new(2), 2)]).unwrap();
+        let u1_x1 = GradedSpace::try_new_shared(Arc::clone(&u1_rule), [(U1Irrep::new(-1), 1)])
             .unwrap()
             .try_dual()
             .unwrap();
         let u1_y =
-            GradedSpace::try_new(Arc::clone(&u1_rule), [(U1Irrep::new(1), 3)], false).unwrap();
+            GradedSpace::try_new_shared(Arc::clone(&u1_rule), [(U1Irrep::new(1), 3)]).unwrap();
         let u1_z0 =
-            GradedSpace::try_new(Arc::clone(&u1_rule), [(U1Irrep::new(-2), 2)], false).unwrap();
-        let u1_z1 = GradedSpace::try_new(u1_rule, [(U1Irrep::new(0), 1)], false).unwrap();
+            GradedSpace::try_new_shared(Arc::clone(&u1_rule), [(U1Irrep::new(-2), 2)]).unwrap();
+        let u1_z1 = GradedSpace::try_new_shared(u1_rule, [(U1Irrep::new(0), 1)]).unwrap();
         assert_asymmetric_cuda_plan_parity(
             &runtime, &u1_x0, &u1_x1, &u1_y, &u1_z0, &u1_z1, 748_210,
         );
 
         let product_rule = Arc::new(FermionParityFusionRule.product(U1FusionRule));
-        let product_x0 = GradedSpace::try_new(
+        let product_x0 = GradedSpace::try_new_shared(
             Arc::clone(&product_rule),
             [(product_sector(Z2Irrep::EVEN, U1Irrep::new(2)), 1)],
-            false,
         )
         .unwrap();
-        let product_x1 = GradedSpace::try_new(
+        let product_x1 = GradedSpace::try_new_shared(
             Arc::clone(&product_rule),
             [(product_sector(Z2Irrep::ODD, U1Irrep::new(-1)), 2)],
-            false,
         )
         .unwrap()
         .try_dual()
         .unwrap();
-        let product_y = GradedSpace::try_new(
+        let product_y = GradedSpace::try_new_shared(
             Arc::clone(&product_rule),
             [(product_sector(Z2Irrep::ODD, U1Irrep::new(1)), 2)],
-            false,
         )
         .unwrap();
-        let product_z0 = GradedSpace::try_new(
+        let product_z0 = GradedSpace::try_new_shared(
             Arc::clone(&product_rule),
             [(product_sector(Z2Irrep::EVEN, U1Irrep::new(-2)), 1)],
-            false,
         )
         .unwrap();
-        let product_z1 = GradedSpace::try_new(
+        let product_z1 = GradedSpace::try_new_shared(
             product_rule,
             [(product_sector(Z2Irrep::ODD, U1Irrep::new(0)), 1)],
-            false,
         )
         .unwrap();
         assert_asymmetric_cuda_plan_parity(
@@ -2432,9 +2427,9 @@ mod typed_replay_tests {
 
         let provider = Arc::new(U1FusionRule);
         let good =
-            GradedSpace::try_new(Arc::clone(&provider), [(U1Irrep::new(0), 2)], false).unwrap();
+            GradedSpace::try_new_shared(Arc::clone(&provider), [(U1Irrep::new(0), 2)]).unwrap();
         let bad =
-            GradedSpace::try_new(Arc::clone(&provider), [(U1Irrep::new(1), 2)], false).unwrap();
+            GradedSpace::try_new_shared(Arc::clone(&provider), [(U1Irrep::new(1), 2)]).unwrap();
         let host_tensors = (0..3)
             .map(|seed| {
                 TensorMap::<U1FusionRule, f64>::rand_with_seed(
@@ -2562,7 +2557,7 @@ mod typed_replay_tests {
 
         let other_runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
         let other_space =
-            GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)], false).unwrap();
+            GradedSpace::try_new_shared(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
         let foreign = TensorMap::<U1FusionRule, f64>::rand_with_seed(
             &other_runtime,
             [&other_space],
@@ -2583,7 +2578,7 @@ mod typed_replay_tests {
         let provider = Arc::new(U1FusionRule);
         let other_provider = Arc::new(U1FusionRule);
         let space = |provider: &Arc<U1FusionRule>, degeneracy| {
-            GradedSpace::try_new(Arc::clone(provider), [(U1Irrep::new(0), degeneracy)], false)
+            GradedSpace::try_new_shared(Arc::clone(provider), [(U1Irrep::new(0), degeneracy)])
                 .unwrap()
         };
         let left = space(&provider, 9);
@@ -2749,12 +2744,8 @@ mod typed_replay_tests {
         let runtime = Runtime::builder().build().unwrap();
         let provider = Arc::new(U1FusionRule);
         let space = |degeneracy| {
-            GradedSpace::try_new(
-                Arc::clone(&provider),
-                [(U1Irrep::new(0), degeneracy)],
-                false,
-            )
-            .unwrap()
+            GradedSpace::try_new_shared(Arc::clone(&provider), [(U1Irrep::new(0), degeneracy)])
+                .unwrap()
         };
         let left = space(5);
         let bond = space(4);
@@ -2806,7 +2797,7 @@ mod typed_replay_tests {
     fn typed_natural_split_change_replays_contract_then_permute() {
         let runtime = Runtime::builder().build().unwrap();
         let provider = Arc::new(U1FusionRule);
-        let space = GradedSpace::try_new(provider, [(U1Irrep::new(0), 3)], false).unwrap();
+        let space = GradedSpace::try_new_shared(provider, [(U1Irrep::new(0), 3)]).unwrap();
         let a = TensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&space], [&space], 31)
             .unwrap();
         let b = TensorMap::rand_with_seed(&runtime, [&space], [&space, &space], 32).unwrap();
@@ -2852,12 +2843,8 @@ mod typed_replay_tests {
         let runtime = Runtime::builder().build().unwrap();
         let provider = Arc::new(U1FusionRule);
         let space = |degeneracy| {
-            GradedSpace::try_new(
-                Arc::clone(&provider),
-                [(U1Irrep::new(0), degeneracy)],
-                false,
-            )
-            .unwrap()
+            GradedSpace::try_new_shared(Arc::clone(&provider), [(U1Irrep::new(0), degeneracy)])
+                .unwrap()
         };
         let left = space(5);
         let bond = space(4);

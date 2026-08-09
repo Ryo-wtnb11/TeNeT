@@ -36,7 +36,7 @@ fn main() {
     let rt = Runtime::builder().build().unwrap();
     // A few sectors with non-trivial degeneracies so the coupled blocks are big
     // enough for the conjugate-transpose copy to matter.
-    let v = GradedSpace::try_new_owned(
+    let v = GradedSpace::try_new(
         U1FusionRule,
         [
             (U1Irrep::new(-1), 6),
@@ -44,7 +44,6 @@ fn main() {
             (U1Irrep::new(1), 8),
             (U1Irrep::new(2), 4),
         ],
-        false,
     )
     .unwrap();
     let iters = 4000;

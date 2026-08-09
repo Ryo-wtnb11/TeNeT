@@ -77,12 +77,11 @@ fn tensor(
 ) -> TensorMap<U1FusionRule, num_complex::Complex64> {
     assert_eq!(rank % 2, 0);
     let provider = Arc::new(U1FusionRule);
-    let space = GradedSpace::try_new(
+    let space = GradedSpace::try_new_shared(
         provider,
         sectors
             .into_iter()
             .map(|(charge, degeneracy)| (U1Irrep::new(charge), degeneracy)),
-        false,
     )
     .unwrap();
     TensorMap::rand_with_seed(
@@ -147,7 +146,7 @@ fn typed_compact_svd_keeps_total_and_peak_below_materialized_baseline() {
     // hide a receiver-sized logical-adjoint allocation around it.
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(U1FusionRule);
-    let space = GradedSpace::try_new(provider, [(U1Irrep::new(0), 32)], false).unwrap();
+    let space = GradedSpace::try_new_shared(provider, [(U1Irrep::new(0), 32)]).unwrap();
     let parent: TensorMap<_, num_complex::Complex64> =
         TensorMap::rand_with_seed(&runtime, [&space], [&space], 693_695).unwrap();
     black_box(parent.svd_compact().unwrap());
@@ -192,7 +191,7 @@ fn typed_full_svd_keeps_total_and_peak_below_materialized_baseline() {
     let _measurement = MEASUREMENT_LOCK.lock().unwrap();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(U1FusionRule);
-    let space = GradedSpace::try_new(provider, [(U1Irrep::new(0), 32)], false).unwrap();
+    let space = GradedSpace::try_new_shared(provider, [(U1Irrep::new(0), 32)]).unwrap();
     let parent: TensorMap<_, num_complex::Complex64> =
         TensorMap::rand_with_seed(&runtime, [&space], [&space], 693_697).unwrap();
     black_box(parent.svd_full().unwrap());
@@ -240,7 +239,7 @@ fn typed_truncated_svd_keeps_total_and_peak_below_materialized_baseline() {
     // a receiver-sized logical-adjoint input.
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(U1FusionRule);
-    let space = GradedSpace::try_new(provider, [(U1Irrep::new(0), 64)], false).unwrap();
+    let space = GradedSpace::try_new_shared(provider, [(U1Irrep::new(0), 64)]).unwrap();
     let parent: TensorMap<_, num_complex::Complex64> =
         TensorMap::rand_with_seed(&runtime, [&space], [&space], 693_696).unwrap();
     let truncation = tenet::typed::Truncation::rank(16);
@@ -286,12 +285,9 @@ fn lazy_scale_and_add_allocate_only_one_input_sized_payload() {
     let _measurement = MEASUREMENT_LOCK.lock().unwrap();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(U1FusionRule);
-    let space = GradedSpace::try_new(
-        provider,
-        (-4..=4).map(|charge| (U1Irrep::new(charge), 8)),
-        false,
-    )
-    .unwrap();
+    let space =
+        GradedSpace::try_new_shared(provider, (-4..=4).map(|charge| (U1Irrep::new(charge), 8)))
+            .unwrap();
     let parent: TensorMap<_, num_complex::Complex64> =
         TensorMap::rand_with_seed(&runtime, [&space, &space], [&space], 666_401).unwrap();
     let other_parent =
@@ -345,7 +341,7 @@ fn mixed_lazy_add_has_no_rank_dependent_stride_allocation() {
     let mut reference = None;
     for rank in [8, 10, 12] {
         let provider = Arc::new(U1FusionRule);
-        let space = GradedSpace::try_new(provider, [(U1Irrep::new(0), 1)], false).unwrap();
+        let space = GradedSpace::try_new_shared(provider, [(U1Irrep::new(0), 1)]).unwrap();
         let codomain = std::iter::repeat_n(&space, rank / 2).collect::<Vec<_>>();
         let parent: TensorMap<_, num_complex::Complex64> = TensorMap::rand_with_seed(
             &runtime,
@@ -436,12 +432,11 @@ fn measure_eager_lazy_core_compose(
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(U1FusionRule);
     let make_space = |sectors: &[(i32, usize)]| {
-        GradedSpace::try_new(
+        GradedSpace::try_new_shared(
             Arc::clone(&provider),
             sectors
                 .iter()
                 .map(|&(charge, degeneracy)| (U1Irrep::new(charge), degeneracy)),
-            false,
         )
         .unwrap()
     };
