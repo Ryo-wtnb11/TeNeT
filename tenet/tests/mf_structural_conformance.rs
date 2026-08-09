@@ -6,8 +6,9 @@
 use std::sync::Arc;
 
 use tenet::prelude::{
-    product_sector, Complex64, FermionParityFusionRule, GradedSpace, ProductFusionRuleExt, Runtime,
-    SU2FusionRule, SU2Irrep, TensorMap, U1FusionRule, U1Irrep, Z2FusionRule, Z2Irrep, ZNFusionRule,
+    product_sector, CU1FusionRule, CU1Irrep, Complex64, FermionParityFusionRule, GradedSpace,
+    ProductFusionRuleExt, Runtime, SU2FusionRule, SU2Irrep, TensorMap, U1FusionRule, U1Irrep,
+    Z2FusionRule, Z2Irrep, ZNFusionRule,
 };
 
 fn runtime() -> Runtime {
@@ -172,4 +173,207 @@ fn nested_fermionic_su2_product_and_complex_adjoint_are_publicly_conformant() {
         vec![spin_half],
         "the nonzero SU(2) label survives the public product route"
     );
+}
+
+#[test]
+fn zn3_extended_structural_paths_execute_on_the_original_arc() {
+    let runtime = runtime();
+    let provider = Arc::new(ZNFusionRule::new(3).unwrap());
+    let charge = |value| provider.irrep(value);
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(charge(1), 1)], false).unwrap();
+    let source: TensorMap<_, Complex64> =
+        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| Complex64::new(1.0, 2.0))
+            .unwrap();
+    for output in [
+        source.adjoint().unwrap(),
+        source.permute(&[0], &[1]).unwrap(),
+        source.transpose().unwrap(),
+        source.repartition(0).unwrap(),
+        source.braid(&[0], &[1], &[1, 0]).unwrap(),
+        source.twist(&[0, 1]).unwrap(),
+    ] {
+        assert!(std::ptr::eq(output.provider(), provider.as_ref()));
+    }
+    let adjoint = source.adjoint().unwrap();
+    assert!(std::ptr::eq(
+        adjoint.codomain()[0].provider(),
+        provider.as_ref()
+    ));
+    assert!(std::ptr::eq(
+        adjoint.domain()[0].provider(),
+        provider.as_ref()
+    ));
+    assert_eq!(
+        source.adjoint().unwrap().data(),
+        &[Complex64::new(1.0, -2.0)]
+    );
+}
+
+#[test]
+fn cu1_charged_structural_paths_keep_the_original_arc() {
+    let runtime = runtime();
+    let provider = Arc::new(CU1FusionRule);
+    let charged = CU1Irrep::from_twice_charge(1);
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(charged, 1)], false).unwrap();
+    let source: TensorMap<_, Complex64> =
+        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| Complex64::new(2.0, 3.0))
+            .unwrap();
+    for output in [
+        source.adjoint().unwrap(),
+        source.braid(&[0], &[1], &[1, 0]).unwrap(),
+        source.twist(&[0, 1]).unwrap(),
+        source.flip(&[0]).unwrap(),
+        source.insert_right_unit(0, false).unwrap(),
+    ] {
+        assert!(std::ptr::eq(output.provider(), provider.as_ref()));
+        assert!(std::ptr::eq(
+            output.codomain()[0].provider(),
+            provider.as_ref()
+        ));
+    }
+    assert_eq!(
+        source.adjoint().unwrap().data(),
+        &[Complex64::new(2.0, -3.0)]
+    );
+    let inserted = source.insert_right_unit(0, false).unwrap();
+    assert!(inserted
+        .codomain()
+        .into_iter()
+        .chain(inserted.domain())
+        .any(|leg| leg.sectors().unwrap() == vec![CU1Irrep::VACUUM]));
+}
+
+#[test]
+fn su2_and_exact_products_keep_their_provider_through_flip_and_units() {
+    let runtime = runtime();
+    macro_rules! check {
+        ($provider:expr, $label:expr) => {{
+            let provider = Arc::new($provider);
+            let leg = GradedSpace::try_new(Arc::clone(&provider), [($label, 1)], false).unwrap();
+            let source: TensorMap<_, f64> =
+                TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| 1.0).unwrap();
+            let flipped = source.flip(&[0]).unwrap();
+            let inserted = source.insert_left_unit(1, true).unwrap();
+            for output in [&flipped, &inserted, &inserted.remove_unit(1).unwrap()] {
+                assert!(std::ptr::eq(output.provider(), provider.as_ref()));
+                assert!(std::ptr::eq(
+                    output.codomain()[0].provider(),
+                    provider.as_ref()
+                ));
+            }
+        }};
+    }
+    check!(SU2FusionRule, SU2Irrep::from_twice_spin(1));
+    check!(
+        FermionParityFusionRule.product(U1FusionRule),
+        product_sector(Z2Irrep::ODD, U1Irrep::new(1))
+    );
+    check!(
+        FermionParityFusionRule
+            .product(U1FusionRule)
+            .product(SU2FusionRule),
+        product_sector(
+            product_sector(Z2Irrep::ODD, U1Irrep::new(1)),
+            SU2Irrep::from_twice_spin(1)
+        )
+    );
+}
+
+#[test]
+fn every_builtin_multiplicity_free_provider_has_cat_and_absorb_execution() {
+    let runtime = runtime();
+    macro_rules! check {
+        ($provider:expr, $label:expr) => {{
+            let provider = Arc::new($provider);
+            let codomain =
+                GradedSpace::try_new(Arc::clone(&provider), [($label, 1)], false).unwrap();
+            let left = GradedSpace::try_new(Arc::clone(&provider), [($label, 1)], false).unwrap();
+            let right = GradedSpace::try_new(Arc::clone(&provider), [($label, 1)], false).unwrap();
+            let a: TensorMap<_, f64> =
+                TensorMap::from_block_fn(&runtime, [&codomain], [&left], |_, _| 1.0).unwrap();
+            let b: TensorMap<_, f64> =
+                TensorMap::from_block_fn(&runtime, [&codomain], [&right], |_, _| 2.0).unwrap();
+            let domain = a.catdomain(&b).unwrap();
+            let codomain_join = a
+                .adjoint()
+                .unwrap()
+                .catcodomain(&b.adjoint().unwrap())
+                .unwrap();
+            let absorbed = a.absorb(&b).unwrap();
+            for output in [&domain, &codomain_join, &absorbed] {
+                assert!(std::ptr::eq(output.provider(), provider.as_ref()));
+            }
+            // Single-sector column and row slabs, plus overwrite, are raw
+            // payload oracles independent of a round trip.
+            assert_eq!(domain.data(), &[1.0, 2.0]);
+            assert_eq!(codomain_join.data(), &[1.0, 2.0]);
+            assert_eq!(absorbed.data(), &[2.0]);
+        }};
+    }
+    check!(Z2FusionRule, Z2Irrep::EVEN);
+    check!(
+        ZNFusionRule::new(3).unwrap(),
+        ZNFusionRule::new(3).unwrap().irrep(1)
+    );
+    check!(CU1FusionRule, CU1Irrep::from_twice_charge(1));
+    check!(FermionParityFusionRule, Z2Irrep::ODD);
+    check!(
+        FermionParityFusionRule.product(U1FusionRule),
+        product_sector(Z2Irrep::ODD, U1Irrep::new(1))
+    );
+    check!(SU2FusionRule, SU2Irrep::from_twice_spin(1));
+    check!(
+        FermionParityFusionRule
+            .product(U1FusionRule)
+            .product(SU2FusionRule),
+        product_sector(
+            product_sector(Z2Irrep::ODD, U1Irrep::new(1)),
+            SU2Irrep::from_twice_spin(1)
+        )
+    );
+}
+
+#[test]
+fn zn3_and_cu1_arithmetic_contraction_and_reductions_have_scalar_oracles() {
+    let runtime = runtime();
+    macro_rules! check {
+        ($provider:expr, $label:expr) => {{
+            let provider = Arc::new($provider);
+            let leg = GradedSpace::try_new(Arc::clone(&provider), [($label, 1)], false).unwrap();
+            let a: TensorMap<_, f64> =
+                TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| 2.0).unwrap();
+            let b: TensorMap<_, f64> =
+                TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| 3.0).unwrap();
+            let ordered = a.contract_ordered(&b, &[1], &[0], &[1, 0]).unwrap();
+            let composed = a.compose(&b).unwrap();
+            let tensor_product = a.otimes(&b).unwrap();
+            let sum = a.add(&b, 1.0, -1.0).unwrap();
+            let scaled = a.scale(4.0);
+            for output in [&ordered, &composed, &tensor_product, &sum, &scaled] {
+                assert!(std::ptr::eq(output.provider(), provider.as_ref()));
+            }
+            for values in [ordered.data(), composed.data(), tensor_product.data()] {
+                assert!((values[0] - 6.0).abs() < 1e-12);
+            }
+            assert_eq!(sum.data(), &[-1.0]);
+            assert_eq!(scaled.data(), &[8.0]);
+            assert!(a.norm().unwrap() > 0.0);
+            assert!(a.inner(&b).unwrap() > 0.0);
+            assert!(a.tr().unwrap() > 0.0);
+            assert!(a.trace_pairs(&[(0, 1)]).unwrap().scalar().unwrap() > 0.0);
+        }};
+    }
+    check!(
+        ZNFusionRule::new(3).unwrap(),
+        ZNFusionRule::new(3).unwrap().irrep(1)
+    );
+    check!(CU1FusionRule, CU1Irrep::from_twice_charge(1));
+
+    let provider = Arc::new(FermionParityFusionRule);
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Z2Irrep::ODD, 1)], false).unwrap();
+    let a: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| 2.0).unwrap();
+    let b: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| 3.0).unwrap();
+    assert_eq!(a.inner(&b).unwrap(), 6.0);
 }
