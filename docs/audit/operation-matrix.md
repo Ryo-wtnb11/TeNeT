@@ -1,8 +1,8 @@
 # Operation matrix
 
-Audited at: `f58c8f4b8325ae5bebfaf9d90bca5afe8fc8c21d`
+Audited at: `7b5745541f5bbd36fb80dde40acbeda2194a1798`
 
-This is the current-main capability census for #938. The pinned source and
+This is the current-main capability inventory for #938. The pinned source and
 executable tests are authoritative; an export, a satisfiable trait bound, or an
 old benchmark is not proof.
 
@@ -231,7 +231,7 @@ provider-wide performance conclusion is inferred from SU(3)/SU(4) fixtures.
    fixtures. This does not prove arbitrary moduli or arbitrary products.
 3. B/C/D are not closure criteria for #938 and remain isolated in
    [#989](https://github.com/Ryo-wtnb11/TeNeT/issues/989).
-4. The only current measured provider-operation gap in this census is U(1)/SU(2)
+4. The only current measured provider-operation gap in this inventory is U(1)/SU(2)
    Host `inner`, [#875](https://github.com/Ryo-wtnb11/TeNeT/issues/875).
 5. Fibonacci, storage/device scope, physical dense conversion, slicing and
    release topology remain with their narrow owners listed above. The obsolete
