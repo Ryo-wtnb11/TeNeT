@@ -303,10 +303,11 @@ impl CheckedGenericFusion for SUNFusionRule {
         left: SectorId,
         right: SectorId,
     ) -> Result<SectorVec, Self::Error> {
-        let product = racah::sun::directproduct(&self.irrep(left)?, &self.irrep(right)?)
+        let product = racah::sun::shared_directproduct(&self.irrep(left)?, &self.irrep(right)?)
             .map_err(SUNFusionRuleError::Racah)?;
         let mut channels: SectorVec = product
-            .keys()
+            .iter()
+            .map(|(irrep, _)| irrep)
             .map(|irrep| self.encode_dynkin(&irrep.dynkin()))
             .collect::<Result<_, _>>()?;
         channels.sort_unstable();
@@ -327,9 +328,9 @@ impl CheckedGenericFusion for SUNFusionRule {
         right: SectorId,
         coupled: SectorId,
     ) -> Result<usize, Self::Error> {
-        let product = racah::sun::directproduct(&self.irrep(left)?, &self.irrep(right)?)
+        let product = racah::sun::shared_directproduct(&self.irrep(left)?, &self.irrep(right)?)
             .map_err(SUNFusionRuleError::Racah)?;
-        Ok(product.get(&self.irrep(coupled)?).copied().unwrap_or(0) as usize)
+        Ok(product.multiplicity(&self.irrep(coupled)?) as usize)
     }
 }
 
