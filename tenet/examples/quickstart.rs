@@ -13,6 +13,7 @@ fn main() -> Result<(), Error> {
         false,
     )?;
 
+    // Fill each allowed charge block; unequal indices stay zero, so both maps are diagonal.
     let a: TensorMap<U1FusionRule, f64> =
         TensorMap::from_block_fn(&runtime, [&space], [&space], |trees, indices| {
             if indices[0] == indices[1] {
@@ -30,8 +31,10 @@ fn main() -> Result<(), Error> {
             }
         })?;
 
+    // The repeated j is contracted, leaving codomain i and domain k.
     let c = tensor!([i; k] = a[i; j] * b[j; k])?;
     assert_eq!((c.codomain_rank(), c.domain_rank()), (1, 1));
+    // A tensor's inner product with itself is its squared norm.
     let inner = c.inner(&c)?;
     assert_eq!(inner, 50.0);
 
