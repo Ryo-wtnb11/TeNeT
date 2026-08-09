@@ -1,6 +1,6 @@
 # Operation matrix
 
-Audited at: `9a5652a3876dabd61b0dfe7110bbb91755c91cd8`
+Audited at: `548ce69b2d314e7b6ccbb45002b0df4243d8992b`
 
 This is the current-main capability census for #938. The pinned source and
 executable tests are authoritative; an export, a satisfiable trait bound, or an
@@ -52,7 +52,7 @@ or recursively nested `ProductFusionRule` values.
 | Network ordinary planning, contraction/permute replay [6] | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | UNSUPPORTED |
 | Network intra-operand trace [6] | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | [UNSUPPORTED](https://github.com/Ryo-wtnb11/TeNeT/issues/1005) | UNSUPPORTED |
 | Network payload-destination reuse [6] | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | [INTENTIONAL-DIFFERENCE](https://github.com/Ryo-wtnb11/TeNeT/issues/1005) | UNSUPPORTED |
-| Serialization | [UNSUPPORTED](https://github.com/Ryo-wtnb11/TeNeT/issues/1003) | [UNSUPPORTED](https://github.com/Ryo-wtnb11/TeNeT/issues/1003) | [UNSUPPORTED](https://github.com/Ryo-wtnb11/TeNeT/issues/1003) | [UNSUPPORTED](https://github.com/Ryo-wtnb11/TeNeT/issues/1003) | [UNSUPPORTED](https://github.com/Ryo-wtnb11/TeNeT/issues/1003) | [UNSUPPORTED](https://github.com/Ryo-wtnb11/TeNeT/issues/1003) | [UNSUPPORTED](https://github.com/Ryo-wtnb11/TeNeT/issues/1003) | [UNSUPPORTED](https://github.com/Ryo-wtnb11/TeNeT/issues/1003) | [UNSUPPORTED](https://github.com/Ryo-wtnb11/TeNeT/issues/1003) | [UNSUPPORTED](https://github.com/Ryo-wtnb11/TeNeT/issues/1003) |
+| v1 Host snapshot (`f64`/`Complex64`; admitted dense, compact, and lazy forms) [7] | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | UNSUPPORTED |
 
 Notes:
 
@@ -79,6 +79,18 @@ Notes:
    ([#1005](https://github.com/Ryo-wtnb11/TeNeT/issues/1005)).
    Lazy/conjugated checked inputs reject at the same ordinary-operation seam and
    are not silently rerouted through a weaker fallback.
+7. Persistence is provider-neutral; reconstruction dispatches through the
+   provider's admission mode. For this row, the MF cells combine the U(1)/SU(2)
+   persistence fixtures with the existing MF provider-admission proofs. They do
+   not claim that TeNeT ships or tests an application codec for every provider
+   column. The caller supplies a stable provider key, a resolver returning the
+   exact provider `Arc`, and semantic sector-label encoding through
+   `TypedPersistenceCodec`; TeNeT does not ship a fixed provider registry. Tests
+   also cover checked-Generic vertex multiplicity, both scalar types, and every
+   admitted representation kind. MF compact adjoints normalize to owned compact
+   tensors; checked Generic preserves a lazy adjoint over a compact parent.
+   Direct device snapshots and storage types other than Host `Vec<D>` are
+   unsupported; use explicit `to_host()` before encoding a device tensor.
 
 Fibonacci remains expert-layer categorical data, not a canonical typed
 provider: its coefficient scalar/codec boundary does not satisfy the ordinary
@@ -87,8 +99,7 @@ owned by [#592](https://github.com/Ryo-wtnb11/TeNeT/issues/592) and
 [#633](https://github.com/Ryo-wtnb11/TeNeT/issues/633); spinors by
 [#651](https://github.com/Ryo-wtnb11/TeNeT/issues/651). Slicing is separately
 tracked in [#6](https://github.com/Ryo-wtnb11/TeNeT/issues/6). No public
-trivial/dense provider exists; serialization remains
-[#1003](https://github.com/Ryo-wtnb11/TeNeT/issues/1003).
+trivial/dense provider exists.
 
 ## Storage and device matrix
 
@@ -105,6 +116,7 @@ trivial/dense provider exists; serialization remains
 | QR/SVD/EIGH | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | UNSUPPORTED |
 | EIG/null/polar/solve/matrix functions | PROVED | PROVED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
 | Network ordinary replay | PROVED | PROVED | INTENTIONAL-DIFFERENCE | PROVED | UNSUPPORTED | UNSUPPORTED |
+| v1 typed snapshot (`f64`/`Complex64`) [7] | PROVED | PROVED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
 
 The two storage `NEEDS-PROOF` cells describe future storage implementations,
 not provider conformance. Host/device checked-Generic parity belongs to
@@ -162,6 +174,10 @@ ownership/cache audit is #783.
 
 ## Executable evidence
 
+- `tenet/tests/typed_serialization.rs`: deterministic v1 Host snapshots,
+  exact provider restoration, semantic fusion-tree keys, scalar bit patterns,
+  dense/compact/lazy representation boundaries, decode limits, and malformed
+  input ordering for multiplicity-free and checked-Generic modes.
 - `tenet/tests/mf_structural_conformance.rs`: exact ZN(3), CU(1), SU(2),
   fermionic and exact-product structural, pivotal, contraction and reduction
   laws, including nontrivial CU(1) exchange phase and quantum-dimension oracles.
@@ -208,12 +224,10 @@ provider-wide performance conclusion is inferred from SU(3)/SU(4) fixtures.
    [#989](https://github.com/Ryo-wtnb11/TeNeT/issues/989).
 4. The only current measured provider-operation gap in this census is U(1)/SU(2)
    Host `inner`, [#875](https://github.com/Ryo-wtnb11/TeNeT/issues/875).
-5. Serialization is owned by
-   [#1003](https://github.com/Ryo-wtnb11/TeNeT/issues/1003). Fibonacci,
-   storage/device scope, physical dense conversion, slicing and release topology
-   remain with their narrow owners listed above. The obsolete CUDA doctest
-   finding is removed: current compile-fail examples use checked Generic bounds
-   rather than U(1).
+5. Fibonacci, storage/device scope, physical dense conversion, slicing and
+   release topology remain with their narrow owners listed above. The obsolete
+   CUDA doctest finding is removed: current compile-fail examples use checked
+   Generic bounds rather than U(1).
 
 After the checked Generic provider route is complete, performance should be
 reviewed as a separate measured phase. This matrix does not manufacture a

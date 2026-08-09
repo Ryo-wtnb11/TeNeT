@@ -271,6 +271,9 @@ use crate::tensor_core::{
 };
 use crate::RuntimeIdentity;
 
+mod serialization;
+pub use serialization::{DecodeError, DecodeLimits, EncodeError, TypedPersistenceCodec};
+
 /// Scalar payloads supported by [`TensorMap`].
 ///
 /// This trait is sealed; the supported scalar types are `f64` and
