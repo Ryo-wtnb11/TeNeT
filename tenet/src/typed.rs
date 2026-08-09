@@ -7305,6 +7305,9 @@ where
 /// a tensor uses only some of its fusion trees. A dual space stores dual sector
 /// labels and reports `true` from [`Self::is_dual`].
 ///
+/// When a provider query fails, a fallible operation returns the original
+/// provider error. It returns no partial value.
+///
 /// ```
 /// use std::sync::Arc;
 /// use tenet::core::{U1FusionRule, U1Irrep};
@@ -7371,8 +7374,8 @@ where
     R: TypedSectorAdmission,
     R::Mode: TypedTensorModeDispatch<R>,
 {
-    /// Creates a space from `(sector label, degeneracy)` pairs and keeps this
-    /// exact provider [`Arc`].
+    /// Creates a space from `(sector label, degeneracy)` pairs and keeps the
+    /// same provider instance.
     ///
     /// Input order does not affect the result: sectors are stored in the
     /// provider's [`tenet_core::SectorId`] order, and zero-degeneracy entries
@@ -7387,9 +7390,7 @@ where
     /// # Errors
     ///
     /// Returns an error for duplicate labels, two labels with the same encoded
-    /// id, a non-injective dual map, or a provider encode/dual failure. The
-    /// provider error remains available through the returned typed error, and
-    /// no space is returned unless every pair is valid.
+    /// id, or a non-injective dual map.
     pub fn try_new<Pairs>(
         provider: Arc<R>,
         pairs: Pairs,
@@ -7401,8 +7402,8 @@ where
         Self::try_new_shared(provider, pairs, is_dual)
     }
 
-    /// Creates the same space as [`Self::try_new`] after placing the owned
-    /// provider in a new [`Arc`].
+    /// Creates the same space as [`Self::try_new`] and stores the supplied
+    /// provider instance.
     pub fn try_new_owned<Pairs>(
         provider: R,
         pairs: Pairs,
@@ -7511,14 +7512,12 @@ where
     /// the same degeneracies, and the dual flag reversed.
     ///
     /// For a valid provider, applying this operation twice returns the original
-    /// space. It takes `O(k log k)` for `k` stored sectors and retains the exact
-    /// provider [`Arc`].
+    /// space. It takes `O(k log k)` for `k` stored sectors and retains the same
+    /// provider instance.
     ///
     /// # Errors
     ///
-    /// Returns the typed provider error when a sector cannot be dualized, or
-    /// [`Error::InvalidArgument`] when two sectors have the same dual. No space
-    /// is returned unless every sector is valid.
+    /// Returns [`Error::InvalidArgument`] when two sectors have the same dual.
     pub fn try_dual(&self) -> Result<Self, TypedFacadeError<R>> {
         let sectors = self
             .leg
@@ -7560,8 +7559,8 @@ where
     /// not orientation.
     ///
     /// The profile records this leg's provider identity, so handing it to a
-    /// factorization of a tensor built on a different rule is a typed error
-    /// rather than a silent truncation to nothing.
+    /// factorization of a tensor built on a different rule returns an error
+    /// rather than silently truncating to nothing.
     ///
     /// # Complexity
     ///
@@ -7586,9 +7585,6 @@ where
 {
     /// Returns the quantum-dimension-weighted total dimension
     /// `sum_c degeneracy(c) * quantum_dimension(c)` without integer rounding.
-    ///
-    /// A provider failure for any sector returns its typed error and no
-    /// dimension.
     pub fn dim(&self) -> Result<f64, TypedFacadeError<R>> {
         let mut total = 0.0;
         for (&sector, &degeneracy) in self.leg.sectors().iter().zip(self.leg.degeneracies()) {
@@ -7598,11 +7594,8 @@ where
         Ok(total)
     }
 
-    /// Returns the nondual unit space: the provider's vacuum sector with
-    /// degeneracy one and this space's exact provider [`Arc`].
-    ///
-    /// A provider failure while checking the vacuum label returns its typed
-    /// error and no space.
+    /// Returns the non-dual unit space: the provider's vacuum sector with
+    /// degeneracy one and the same provider instance as this space.
     pub fn unitspace(&self) -> Result<Self, TypedFacadeError<R>> {
         let vacuum = <R::Mode as TypedSpaceModeDispatch<R>>::vacuum(self.provider());
         TypedSectorAdmission::try_decode_label(self.provider(), vacuum)
@@ -7616,17 +7609,16 @@ where
         })
     }
 
-    /// Fuses the two spaces and returns a nondual space using this space's
-    /// provider [`Arc`].
+    /// Fuses the two spaces and returns a non-dual space using the same
+    /// provider instance as this space.
     ///
     /// If `d_a` and `d_b` are input degeneracies, the result has
     /// `d_c = sum_(a,b) d_a d_b N_ab^c`, including fusion multiplicities.
     /// The provider identities must match; this is checked before any fusion
     /// query.
     ///
-    /// Returns a typed provider error for a failed fusion or label query, or
-    /// [`Error::InvalidArgument`] if a degeneracy overflows. No space is
-    /// returned unless all sectors succeed.
+    /// Returns [`Error::RuleMismatch`] when the provider identities differ, or
+    /// [`Error::InvalidArgument`] if a degeneracy overflows.
     pub fn fuse(&self, other: &Self) -> Result<Self, TypedFacadeError<R>> {
         self.require_same_identity(other)?;
         let mut fused = std::collections::BTreeMap::<SectorId, usize>::new();
@@ -7677,10 +7669,11 @@ where
     }
 
     /// Returns the direct sum, adding degeneracies of matching sectors and
-    /// retaining this space's provider [`Arc`] and dual flag.
+    /// retaining the same provider instance and dual flag as this space.
     ///
-    /// Provider identities and dual flags must match. A mismatch or degeneracy
-    /// overflow returns an error and no space.
+    /// Returns [`Error::RuleMismatch`] when the provider identities differ, or
+    /// [`Error::InvalidArgument`] when the dual flags differ or a degeneracy
+    /// overflows.
     pub fn oplus(&self, other: &Self) -> Result<Self, TypedFacadeError<R>> {
         self.require_same_identity(other)?;
         let leg = oplus_sector_legs(&self.leg, &other.leg).map_err(TypedFacadeError::<R>::from)?;
@@ -8084,14 +8077,11 @@ pub struct SvdTrunc<R: SectorCodec, D, S = Vec<D>> {
 ///
 /// Factor order and spaces match [`SvdTrunc`]. All three factors use dense host
 /// storage; in particular, `s : bond <- bond` is not stored compactly. The
-/// factors retain the exact provider [`Arc`] from `t`.
+/// factors retain the same provider instance as `t`.
 ///
-/// [`Self::singular_values`] contains the kept values sorted by provider label,
-/// and [`Self::error`] is the quantum-dimension-weighted 2-norm of all
-/// discarded singular values. If a provider query, output-space check,
-/// truncation check, or numerical operation fails, [`TensorMap::svd_trunc`]
-/// returns the typed error, with the original provider error as its source, and
-/// no partial result.
+/// [`Self::singular_values`] contains the kept values by provider-labelled
+/// sector, and [`Self::error`] is the quantum-dimension-weighted 2-norm of all
+/// discarded singular values.
 pub struct CheckedGenericSvdTrunc<R: TypedSectorAdmission, D: TensorScalar> {
     /// Dense left isometry `u : codomain(t) <- bond`.
     pub u: TensorMap<R, D>,
@@ -8099,7 +8089,7 @@ pub struct CheckedGenericSvdTrunc<R: TypedSectorAdmission, D: TensorScalar> {
     pub s: TensorMap<R, D>,
     /// Dense right isometry `vh : bond <- domain(t)`.
     pub vh: TensorMap<R, D>,
-    /// Kept singular values sorted by provider label.
+    /// Kept singular values per provider-labelled sector.
     pub singular_values: Vec<SectorSpectrum<R::Sector, f64>>,
     /// Quantum-dimension-weighted 2-norm of discarded singular values.
     pub error: f64,
@@ -8444,14 +8434,9 @@ pub struct EighTrunc<R: SectorCodec, D, S = Vec<D>> {
 /// provider: `t ~= v * d * v^H`.
 ///
 /// Factor order and spaces match [`EighTrunc`]. The diagonal factor `d` uses
-/// compact host storage, `v` is dense, and both retain the exact provider
-/// [`Arc`] from `t`. [`Self::error`] is the quantum-dimension-weighted 2-norm
-/// of the discarded eigenvalues.
-///
-/// If a provider query, output-space check, truncation check, Hermiticity
-/// check, or numerical operation fails, [`TensorMap::eigh_trunc`] returns the
-/// typed error, with the original provider error as its source, and no partial
-/// result.
+/// compact host storage, `v` is dense, and both retain the same provider
+/// instance as `t`. [`Self::error`] is the quantum-dimension-weighted 2-norm of
+/// the discarded eigenvalues.
 pub struct CheckedGenericEighTrunc<R: TypedSectorAdmission, D: TensorScalar> {
     /// Compact diagonal eigenvalue factor `d : bond <- bond`.
     pub d: TensorMap<R, D>,
@@ -8468,14 +8453,9 @@ pub struct CheckedGenericEighTrunc<R: TypedSectorAdmission, D: TensorScalar> {
 ///
 /// Fields are ordered `(d, v)`: compact diagonal `d : bond <- bond` and dense
 /// right-eigenvector factor `v : codomain(t) <- bond`. Both use `Complex64`
-/// for real and complex inputs and retain the exact provider [`Arc`] from `t`.
+/// for real and complex inputs and retain the same provider instance as `t`.
 /// [`Self::error`] is the quantum-dimension-weighted 2-norm of discarded
 /// eigenvalues, not a reconstruction-error bound for a non-normal matrix.
-///
-/// If a provider query, output-space check, truncation check, eigenvector-rank
-/// check, or numerical operation fails, [`TensorMap::eig_trunc`] returns the
-/// typed error, with the original provider error as its source, and no partial
-/// result.
 pub struct CheckedGenericEigTrunc<R: TypedSectorAdmission> {
     /// Compact diagonal eigenvalue factor `d : bond <- bond`.
     pub d: TensorMap<R, num_complex::Complex64>,
@@ -15724,22 +15704,19 @@ where
 ///
 /// Insertion adds the provider's vacuum sector with degeneracy one; removal
 /// accepts only such a leg. These operations change the tensor's external
-/// spaces without changing its numerical map and retain the exact provider
-/// [`Arc`]. A dense tensor shares its payload allocation with the result. A
-/// compact diagonal tensor is first converted to a fresh dense payload because
-/// compact storage is tied to its original bond space.
+/// spaces without changing its numerical map. An owned dense tensor shares its
+/// payload allocation with the result. A lazy dense adjoint is first converted
+/// to a fresh uncached dense tensor. A compact diagonal tensor is converted to
+/// a fresh dense payload because compact storage is tied to its original bond
+/// space.
 ///
 /// Positions are zero-based in the flat external-axis order. The left and
 /// right methods differ only at the codomain/domain boundary: left assigns the
 /// boundary position to the domain, while right assigns it to the codomain.
 ///
-/// An invalid position or non-unit leg, a checked provider failure, or an
-/// output-space validation failure returns [`Self::Error`]. The original
-/// provider error remains available through [`std::error::Error::source`], and
-/// no partial tensor is returned.
+/// Failures return [`Self::Error`] and no tensor.
 pub trait GenericUnitTensorMapExt {
-    /// Error type preserving ordinary validation, provider, and output-space
-    /// failures.
+    /// Error returned when an operation fails.
     type Error;
 
     /// Inserts a canonical unit using the left boundary convention described
