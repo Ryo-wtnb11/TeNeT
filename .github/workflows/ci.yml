@@ -23,8 +23,8 @@ env:
 
 # TeNeT depends on tenferro-rs via a sibling path dependency
 # (`../../tenferro-rs`). CI checks out a known-green tenferro-rs revision next
-# to this repo. Its strided implementation is transitively pinned there, so it
-# needs no separate checkout.
+# to this repo. TeNeT and Tenferro pin the same strided-rs revision, so it needs
+# no separate checkout.
 
 jobs:
   changes:
@@ -159,8 +159,7 @@ jobs:
   # cotengra-python is build + unit tests only — its one test that shells
   # out to Python (`runs_installed_cotengra_when_requested`) early-returns
   # unless `TENET_RUN_COTENGRA_PYTHON_TEST` is set, so no Python env is
-  # needed here. The Racah rows retain their separately reviewed Tenferro
-  # revision; the other rows use the repository's known-green pin.
+  # needed here. All rows use the repository's known-green Tenferro pin.
   feature-contract:
     name: feature contract (${{ matrix.name }})
     runs-on: ubuntu-latest
@@ -170,8 +169,8 @@ jobs:
         include:
           - { name: opt-path, package: tenet-network, features: "opt-path,cpu-faer" }
           - { name: cotengra-python, package: tenet-network, features: "cotengra-python,cpu-faer" }
-          - { name: racah-generated, package: tenet-sectors, features: racah-generated, tenferro_ref: 5bbd4a0613b3c801ce924cdc4339df2c77c1ab62 }
-          - { name: racah-generated-tensors, package: tenet-tensors, features: "racah-generated,cpu-faer", tenferro_ref: 5bbd4a0613b3c801ce924cdc4339df2c77c1ab62 }
+          - { name: racah-generated, package: tenet-sectors, features: racah-generated }
+          - { name: racah-generated-tensors, package: tenet-tensors, features: "racah-generated,cpu-faer" }
     steps:
       - uses: actions/checkout@v4
         with:
@@ -179,7 +178,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: tensor4all/tenferro-rs
-          ref: ${{ matrix.tenferro_ref || env.TENFERRO_REV }}
+          ref: ${{ env.TENFERRO_REV }}
           path: tenferro-rs
       - name: Record source revisions
         run: |
