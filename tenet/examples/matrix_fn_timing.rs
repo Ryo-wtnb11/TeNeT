@@ -63,7 +63,7 @@ fn main() {
     bench!(
         "U1",
         U1FusionRule,
-        GradedSpace::try_new_owned(
+        GradedSpace::try_new(
             U1FusionRule,
             [
                 (U1Irrep::new(-2), 4),
@@ -71,8 +71,7 @@ fn main() {
                 (U1Irrep::new(0), 8),
                 (U1Irrep::new(1), 8),
                 (U1Irrep::new(2), 4),
-            ],
-            false,
+            ]
         )
         .unwrap(),
         2_000,
@@ -81,14 +80,13 @@ fn main() {
     bench!(
         "SU2",
         SU2FusionRule,
-        GradedSpace::try_new_owned(
+        GradedSpace::try_new(
             SU2FusionRule,
             [
                 (SU2Irrep::from_twice_spin(0), 6),
                 (SU2Irrep::from_twice_spin(1), 6),
                 (SU2Irrep::from_twice_spin(2), 4),
-            ],
-            false,
+            ]
         )
         .unwrap(),
         2_000

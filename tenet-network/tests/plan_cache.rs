@@ -8,7 +8,7 @@ use tenet_network::{
 };
 
 fn space(provider: Arc<U1FusionRule>, dim: usize) -> GradedSpace<U1FusionRule> {
-    GradedSpace::try_new(provider, [(U1Irrep::new(0), dim)], false).unwrap()
+    GradedSpace::try_new_with_arc(provider, [(U1Irrep::new(0), dim)]).unwrap()
 }
 
 fn pair(

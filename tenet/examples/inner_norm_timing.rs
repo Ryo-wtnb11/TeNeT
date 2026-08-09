@@ -22,7 +22,7 @@ fn main() -> Result<(), Error> {
             SU2Irrep::from_twice_spin(twice_spin),
         )
     };
-    let space = GradedSpace::try_new_owned(
+    let space = GradedSpace::try_new(
         provider,
         [
             (label(Z2Irrep::EVEN, -2, 0), 4),
@@ -30,7 +30,6 @@ fn main() -> Result<(), Error> {
             (label(Z2Irrep::ODD, -1, 1), 4),
             (label(Z2Irrep::ODD, 2, 3), 2),
         ],
-        false,
     )?;
     let lhs = TensorMap::<Rule, Complex64>::rand_with_seed(
         &runtime,

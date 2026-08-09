@@ -7,14 +7,13 @@ use std::sync::Arc;
 use tenet::prelude::{GradedSpace, LinalgBackend, Runtime, TensorMap, U1FusionRule, U1Irrep};
 
 fn u1_space() -> GradedSpace<U1FusionRule> {
-    GradedSpace::try_new(
+    GradedSpace::try_new_with_arc(
         Arc::new(U1FusionRule),
         [
             (U1Irrep::new(-1), 2),
             (U1Irrep::new(0), 3),
             (U1Irrep::new(1), 2),
         ],
-        false,
     )
     .unwrap()
 }

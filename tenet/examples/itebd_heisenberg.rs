@@ -21,7 +21,6 @@
 //! Run with:
 //! `cargo run --release -p tenet --example itebd_heisenberg --no-default-features --features cpu-faer`
 
-use std::sync::Arc;
 use std::time::Instant;
 
 use tenet::prelude::{Error, GradedSpace, Runtime, TensorMap, Truncation, U1FusionRule, U1Irrep};
@@ -35,14 +34,10 @@ const BOND_RTOL: f64 = 1e-8;
 const PINV_RCOND: f64 = 1e-12;
 type Map = TensorMap<U1FusionRule, f64>;
 
-fn space<const N: usize>(
-    rule: &Arc<U1FusionRule>,
-    sectors: [(i32, usize); N],
-) -> GradedSpace<U1FusionRule> {
+fn space<const N: usize>(sectors: [(i32, usize); N]) -> GradedSpace<U1FusionRule> {
     GradedSpace::try_new(
-        Arc::clone(rule),
+        U1FusionRule,
         sectors.map(|(charge, degeneracy)| (U1Irrep::new(charge), degeneracy)),
-        false,
     )
     .expect("valid U(1) fixture")
 }
@@ -122,13 +117,9 @@ impl State {
     /// `-1` on B — also works now that legs carry per-sector degeneracies;
     /// see the `neel_product_state_contracts_with_the_full_gate` test. The
     /// entangled start is kept because it converges faster.)
-    fn init(
-        rt: &Runtime,
-        rule: &Arc<U1FusionRule>,
-        p: &GradedSpace<U1FusionRule>,
-    ) -> Result<Self, Error> {
-        let vb = space(rule, [(0, 1)]);
-        let va = space(rule, [(1, 1), (-1, 1)]);
+    fn init(rt: &Runtime, p: &GradedSpace<U1FusionRule>) -> Result<Self, Error> {
+        let vb = space([(0, 1)]);
+        let va = space([(1, 1), (-1, 1)]);
         Ok(Self {
             ga: TensorMap::from_block_fn(rt, [&vb, p], [&va], |_, _| 1.0)?,
             la: TensorMap::from_block_fn(rt, [&va], [&va], |_, _| 1.0)?,
@@ -161,12 +152,11 @@ impl State {
 /// Runs the full schedule; returns the final energy per bond.
 pub fn run(chi: usize, schedule: &[(f64, usize)], verbose: bool) -> Result<f64, Error> {
     let rt = Runtime::builder().build()?;
-    let rule = Arc::new(U1FusionRule);
-    let p = space(&rule, [(1, 1), (-1, 1)]);
+    let p = space([(1, 1), (-1, 1)]);
     let h = heisenberg_two_site(&rt, &p)?;
     let trunc = Truncation::rank(chi).and(Truncation::relative_cutoff(BOND_RTOL)?);
 
-    let mut state = State::init(&rt, &rule, &p)?;
+    let mut state = State::init(&rt, &p)?;
     let mut energy = f64::NAN;
     for &(dt, steps) in schedule {
         let gate = h.scale(-dt).exp()?;

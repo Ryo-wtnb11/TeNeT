@@ -1658,10 +1658,9 @@ where
     /// let runtime = Runtime::builder().dense_threads(1).build()?;
     /// let provider = Arc::new(U1FusionRule);
     /// let codec = U1Codec(Arc::clone(&provider));
-    /// let space = GradedSpace::try_new(
+    /// let space = GradedSpace::try_new_with_arc(
     ///     Arc::clone(&provider),
     ///     [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
-    ///     false,
     /// )?;
     ///
     /// let space_bytes = space.to_bytes_with(&codec)?;
