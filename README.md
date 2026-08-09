@@ -6,44 +6,36 @@ enter as fusion-rule *providers* rather than as a fixed symmetry list; and
 contraction-path planning is separated from execution.
 
 Design priority, in this order: Rust-native maintainability and extensibility;
-speed that survives dynamic-rank tensor networks; TensorKit-level usability.
+speed that survives dynamic-rank tensor networks; a usable high-level API.
 
 All crates are at version `0.1.0`. The public API is not stabilized and
 expert-layer types still move between crates as the layering settles.
 
-## Two reference frames
+## Architecture
 
-TeNeT is not a port of a single library. Two references divide the design, and
-the split is visible in the crate layering.
+The ordinary API keeps the symmetry provider, payload scalar, and storage type
+concrete as `TensorMap<R, D, S>`, while tensor rank and sector content remain
+runtime values. Operations dispatch on provider capabilities—fusion
+multiplicity, braiding, rigidity, and checked symbol access—rather than on a
+central symmetry enum.
 
-**TensorKit (Julia) fixes the semantic model.** Spaces and tensor maps retain
-their sector/provider type; categorical algorithms dispatch on *fusion
-capability* — multiplicity-free versus generic symbols, braiding style,
-rigidity — instead of on a symmetry enum; tensor maps are `codomain <- domain`
-with explicit duality. Names follow the TensorKit 0.17 spelling, and
-TensorKitSectors, TensorOperations, MatrixAlgebraKit, Strided.jl and
-StridedViews.jl are the vocabulary for the layers below the user API.
-[`docs/tk_api_parity.md`](docs/tk_api_parity.md) is the per-export lookup table
-for anyone arriving from TensorKit.
+An admitted tensor owns its exact provider authority and a compiled block
+layout: fusion-tree keys, per-block shapes and strides, and offsets into one
+contiguous payload. Checked admission validates the complete structure before
+publishing a space, tensor, plan, or result. Fusion-tree layouts, recoupling
+replay, and contraction plans can then be reused without changing their
+provider or gauge snapshot.
 
-**[QSpace][qspace] (Weichselbaum) fixes the compiled execution model** — it is the base of
-the `Runtime`/backend layer. Quantum labels, block structure, coefficient
-records and runtime-rank metadata stay *tensor-near*: an admitted tensor carries
-its own block layout (fusion-tree keys plus per-block shape, strides and
-offset into one contiguous payload), so an operation resolves the layout once
-and then dispatches whole blocks into dense kernels, instead of rediscovering
-the symmetry structure per element or per call. Fusion-tree layouts, complete
-hom-space structures, recoupling replay and contraction plans are recorded and
-reused rather than recomputed. QSpace is also the second oracle for non-abelian
-conventions: SU(2) and the fZ2 ⊠ U(1) ⊠ SU(2) products are checked against its
-fusion/recoupling (CGC) handling as well as against TensorKit.
+`Runtime` owns the bounded caches, workspace pools, and selectable dense
+backends used by those operations. Contraction-path planners consume network
+metadata and produce validated plans; TeNeT executes the plans locally over its
+reduced blocks. This keeps mathematical structure, resource ownership,
+planning, and kernel selection at explicit seams.
 
-Rust's part is to hold both at once: keep the concrete provider type `R` through
-monomorphized execution — TensorKit's semantics without a vtable — over a
-QSpace-style compiled block engine, whose kernels are selectable at
-`Runtime::builder()` (see [Backend Philosophy](#backend-philosophy)).
-
-[qspace]: https://bitbucket.org/qspace4u/workspace/repositories/
+External libraries and papers are cited in function documentation,
+[`tenet/references.md`](tenet/references.md), tests, or benchmark reports when
+they support a particular convention, divergence, oracle, or comparison. They
+do not define TeNeT's public contract.
 
 ## Symmetries are providers
 
@@ -346,20 +338,14 @@ TENET_COTENGRA_UV_PROJECT=tools/cotengra-python \
 - [`docs/provider_interface.md`](docs/provider_interface.md): what a symmetry
   provider must implement, which trait owns which data, and the current
   restrictions on external providers.
-- [`docs/tk_api_parity.md`](docs/tk_api_parity.md): TensorKit 0.17 user-API
-  parity table — every user-facing export, its TeNeT name, and the rationale
-  for anything spelled or gated differently. The lookup surface for a
-  TensorKit user.
 - [`docs/sector_id_compatibility.md`](docs/sector_id_compatibility.md):
   `SectorId`, product-codec, storage-order, seeded-random, and cache
   compatibility contract.
-- [`docs/tensorkit_compatibility_table.md`](docs/tensorkit_compatibility_table.md):
-  internal naming and compatibility table.
 - [`docs/su2_authority.md`](docs/su2_authority.md): the `racah` SU(2)
   coefficient authority — pinned revision, cache ownership, and the
   compatibility protocol for bumping it.
 - [`docs/complexity_parity_policy.md`](docs/complexity_parity_policy.md): the
-  rule that TeNeT must match TensorKit's asymptotic FLOP/storage order.
+  structured-operation FLOP and storage-order contract.
 - [`docs/backend_policy.md`](docs/backend_policy.md): selectable dense
   transpose/GEMM backend design and measured thread scaling.
 - [`docs/cotengra_backend.md`](docs/cotengra_backend.md): cotengra Python
@@ -370,6 +356,5 @@ TENET_COTENGRA_UV_PROJECT=tools/cotengra-python \
 ## Development Notes
 
 Before architectural or semantic changes, read the repository review policy in
-`../AGENTS.md`. TeNeT changes that claim TensorKit compatibility should be
-checked against the reference implementation, not only against local tests.
-</content>
+`../AGENTS.md`. Claims about an external correspondence should be checked
+against the cited source as well as TeNeT's local semantic tests.
