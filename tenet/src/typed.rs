@@ -449,24 +449,64 @@ where
     R::Mode: TypedTensorSolveDispatch<R, D>,
     D: TensorScalar,
 {
-    /// TensorKit `A \\ B`: solves `A * X = B` per coupled sector without
-    /// forming an inverse. `A` and `B` must have exactly equal codomains, `A`'s
-    /// codomain and domain must be isomorphic, and the result is
-    /// `domain(A) <- domain(B)`.
+    /// Solves `self * x = rhs` independently in every coupled sector, without
+    /// forming an inverse.
     ///
-    /// Checked Generic accepts dense inputs and admits the output with `A`'s
-    /// exact provider allocation before any output allocation or dense solve.
+    /// The operands must share a runtime and fusion-rule identity, their
+    /// codomains must be exactly equal, and `self` must have isomorphic
+    /// codomain and domain. The result has space
+    /// `domain(self) <- domain(rhs)` and keeps `self`'s exact provider `Arc`.
+    /// This is TensorKit's left solve `self \\ rhs`.
+    ///
+    /// Dense input uses one linear solve per coupled sector. A
+    /// multiplicity-free compact diagonal divisor instead applies its
+    /// elementwise reciprocal and bond scaling; checked Generic materializes
+    /// compact inputs for the dense route. Lazy adjoints are materialized only
+    /// for this call and do not fill the receiver's reusable cache.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::RuntimeMismatch`] or [`Error::RuleMismatch`] for
+    /// incompatible operands, [`Error::InvalidArgument`] for unequal
+    /// codomains, and an operation error when the divisor is not isomorphic or
+    /// a sector is singular. If a checked provider rejects the output space,
+    /// its original error is available as the source. If any preflight, sector
+    /// solve, or output-space creation fails, no result tensor is returned.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use tenet::core::{U1FusionRule, U1Irrep};
+    /// use tenet::typed::{GradedSpace, Runtime, TensorMap};
+    ///
+    /// let runtime = Runtime::builder().build()?;
+    /// let rule = Arc::new(U1FusionRule);
+    /// let v = GradedSpace::try_new(Arc::clone(&rule), [(U1Irrep::new(0), 2)], false)?;
+    /// let a: TensorMap<_, f64> = TensorMap::id(&runtime, [&v])?;
+    /// let b: TensorMap<_, f64> = TensorMap::rand(&runtime, [&v], [&v])?;
+    /// assert_eq!(a.solve(&b)?.data(), b.data());
+    /// assert_eq!(b.solve_right(&a)?.data(), b.data());
+    /// # Ok::<(), tenet::typed::Error>(())
+    /// ```
     pub fn solve(&self, rhs: &Self) -> Result<Self, TypedFacadeError<R>> {
         <R::Mode as TypedTensorSolveDispatch<R, D>>::solve(self, rhs)
     }
 
-    /// TensorKit `A / B`: solves `X * B = A` per coupled sector without
-    /// forming an inverse. `A` and `B` must have exactly equal domains, `B`'s
-    /// codomain and domain must be isomorphic, and the result is
-    /// `codomain(A) <- codomain(B)`.
+    /// Solves `x * rhs = self` independently in every coupled sector, without
+    /// forming an inverse.
     ///
-    /// The result keeps `A`'s exact provider allocation, including for
-    /// checked-Generic operands backed by distinct compatible providers.
+    /// The operands must share a runtime and fusion-rule identity, their
+    /// domains must be exactly equal, and `rhs` must have isomorphic codomain
+    /// and domain. The result has space
+    /// `codomain(self) <- codomain(rhs)`. For checked Generic it keeps `self`'s
+    /// exact provider `Arc`, even when the operands use distinct compatible
+    /// provider allocations. The legacy multiplicity-free route derives the
+    /// output from `rhs`'s provider allocation after checking equal rule
+    /// identity. This is TensorKit's right solve `self / rhs`.
+    ///
+    /// It is evaluated through the adjointed left-solve equation
+    /// `rhs^H * x^H = self^H`; the returned tensor is owned. It uses the same
+    /// storage routes, cost, and error classes as [`Self::solve`]. Lazy inputs
+    /// remain uncached, and if any step fails, no result is returned.
     pub fn solve_right(&self, rhs: &Self) -> Result<Self, TypedFacadeError<R>> {
         <R::Mode as TypedTensorSolveDispatch<R, D>>::solve_right(self, rhs)
     }
@@ -535,15 +575,62 @@ where
     R::Mode: TypedTensorReductionDispatch<R, D>,
     D: TensorScalar,
 {
-    /// TensorKit positive trace/norm reductions dispatched by provider mode.
+    /// Returns the quantum-dimension-weighted Frobenius norm
+    /// `sqrt(sum_c dim(c) * sum_ij |self_c[i,j]|^2)`.
+    ///
+    /// Abelian providers have `dim(c) = 1`, giving the ordinary Frobenius
+    /// norm. Multiplicity-free compact diagonal input is reduced directly in
+    /// `O(sum_c k_c)`; dense input is one pass over the payload. Lazy adjoints
+    /// read their parent orientation without caching a materialization.
+    /// Checked-Generic reductions currently require dense payloads.
+    ///
+    /// If a checked provider cannot supply a quantum dimension, its original
+    /// error is available as the source. An invalid coupled-sector layout
+    /// returns [`Error::Core`].
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use tenet::core::{U1FusionRule, U1Irrep};
+    /// use tenet::typed::{GradedSpace, Runtime, TensorMap};
+    ///
+    /// let runtime = Runtime::builder().build()?;
+    /// let rule = Arc::new(U1FusionRule);
+    /// let v = GradedSpace::try_new(Arc::clone(&rule), [(U1Irrep::new(0), 2)], false)?;
+    /// let id: TensorMap<_, f64> = TensorMap::id(&runtime, [&v])?;
+    /// let twice = id.add(&id, 1.0, 1.0)?;
+    /// assert!((twice.norm()? - 2.0_f64.sqrt() * 2.0).abs() < 1e-12);
+    /// assert_eq!(id.inner(&id)?, 2.0);
+    /// assert_eq!(id.tr()?, 2.0);
+    /// # Ok::<(), tenet::typed::Error>(())
+    /// ```
     pub fn norm(&self) -> Result<f64, TypedFacadeError<R>> {
         <R::Mode as TypedTensorReductionDispatch<R, D>>::norm(self)
     }
-    /// Quantum-dimension-weighted Frobenius inner product.
+    /// Returns the quantum-dimension-weighted Frobenius inner product
+    /// `sum_c dim(c) * sum_ij conj(self_c[i,j]) * other_c[i,j]`.
+    ///
+    /// The product is conjugate-linear in `self`, and `self.inner(&self)` is
+    /// `self.norm()^2` up to floating-point error. Both tensors must share the
+    /// same runtime, hom space, and block layout. Two multiplicity-free compact
+    /// diagonal tensors reduce without materialization; checked-Generic
+    /// reductions currently require dense payloads. See [`Self::norm`] for the
+    /// weighting, complexity, lazy behavior, and example.
     pub fn inner(&self, other: &Self) -> Result<D, TypedFacadeError<R>> {
         <R::Mode as TypedTensorReductionDispatch<R, D>>::inner(self, other)
     }
-    /// TensorKit positive matrix trace.
+    /// Returns the quantum-dimension-weighted block trace
+    /// `sum_c dim(c) * Tr(self_c)` of an endomorphism.
+    ///
+    /// The codomain and domain legs must be exactly equal. This is TensorKit's
+    /// `tr`; it is not a positivity claim, and the result may be negative or
+    /// complex. It also is not the fermionic supertrace: no twist factor is
+    /// applied. Use [`Self::trace_pairs`] for the categorical contraction
+    /// trace, which includes the provider's pivotal/twist data.
+    ///
+    /// Multiplicity-free compact diagonal input is summed directly in
+    /// `O(sum_c k_c)`. Checked-Generic reductions require dense payloads. A
+    /// lazy adjoint returns the conjugate of its parent's trace without filling
+    /// the materialization cache. See [`Self::norm`] for a runnable example.
     pub fn tr(&self) -> Result<D, TypedFacadeError<R>> {
         <R::Mode as TypedTensorReductionDispatch<R, D>>::tr(self)
     }
@@ -555,12 +642,28 @@ where
     R::Mode: TypedTensorAddScaleDispatch<R, D>,
     D: TensorScalar,
 {
-    /// Host-side linear combination `alpha * self + beta * other`.
+    /// Returns the host-side linear combination
+    /// `alpha * self + beta * other` on the operands' common tensor space.
+    ///
+    /// Both operands must share a runtime and exactly the same tensor space and
+    /// block layout. `alpha` multiplies `self` and `beta` multiplies
+    /// `other`; this order differs from VectorInterface's Julia argument
+    /// convention. Two compact diagonal inputs stay compact. A mixed
+    /// compact/dense pair allocates only the dense result, and lazy inputs are
+    /// read in their logical orientation without filling their caches.
+    ///
+    /// Returns [`Error::RuntimeMismatch`] or [`Error::InvalidArgument`] before
+    /// producing a result. See [`Self::norm`] for a runnable example.
     pub fn add(&self, other: &Self, alpha: D, beta: D) -> Result<Self, TypedFacadeError<R>> {
         <R::Mode as TypedTensorAddScaleDispatch<R, D>>::add(self, other, alpha, beta)
     }
 
-    /// Host-side scalar multiplication.
+    /// Returns `factor * self` in host storage.
+    ///
+    /// The operation is infallible because `factor` already has the payload
+    /// type `D`. Compact diagonal storage stays compact. A dense lazy adjoint
+    /// remains lazy by scaling its parent with the conjugated factor, so no
+    /// receiver materialization is cached.
     pub fn scale(&self, factor: D) -> Self {
         <R::Mode as TypedTensorAddScaleDispatch<R, D>>::scale(self, factor)
     }
@@ -1101,7 +1204,33 @@ where
     R::Mode: TypedTensorAdjointDispatch<R, D>,
     D: TensorScalar,
 {
-    /// TensorKit adjoint dispatched by provider mode.
+    /// Returns the adjoint `self^H`, swapping codomain and domain and
+    /// conjugate-transposing every coupled-sector block.
+    ///
+    /// Dense storage becomes a lazy parent-backed view: its logical space is
+    /// available immediately, while [`Self::data`] performs and caches the
+    /// whole-payload materialization on first demand. Applying `adjoint` twice
+    /// returns the original owned parent. Multiplicity-free compact diagonal
+    /// storage instead performs an owned `O(sum_c k_c)` conjugation and stays
+    /// compact; a checked-Generic compact diagonal uses the general lazy view.
+    /// Every result keeps the source's exact provider `Arc`.
+    ///
+    /// If layout construction or checked pivotal data fails, that layout or
+    /// provider error is returned before a view is created. For real payloads
+    /// this is a transpose; complex payloads are conjugated as well.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use tenet::core::{U1FusionRule, U1Irrep};
+    /// use tenet::typed::{GradedSpace, Runtime, TensorMap};
+    ///
+    /// let runtime = Runtime::builder().build()?;
+    /// let rule = Arc::new(U1FusionRule);
+    /// let v = GradedSpace::try_new(Arc::clone(&rule), [(U1Irrep::new(0), 2)], false)?;
+    /// let t: TensorMap<_, f64> = TensorMap::rand(&runtime, [&v], [&v])?;
+    /// assert_eq!(t.adjoint()?.adjoint()?.data(), t.data());
+    /// # Ok::<(), tenet::typed::Error>(())
+    /// ```
     pub fn adjoint(&self) -> Result<Self, TypedFacadeError<R>> {
         <R::Mode as TypedTensorAdjointDispatch<R, D>>::adjoint(self)
     }
@@ -1144,20 +1273,52 @@ where
     R::Mode: TypedTensorQrDispatch<R, D>,
     D: TensorScalar,
 {
-    /// TensorKit compact QR dispatched by provider mode.
+    /// Returns the compact QR factorization `self = q * r` as `(q, r)`.
+    ///
+    /// In coupled sector `c`, with block shape `m_c x n_c`, the bond dimension
+    /// is `k_c = min(m_c, n_c)`. Thus `q : codomain(self) <- W` has
+    /// orthonormal columns and `r : W <- domain(self)`. The diagonal of `r` is
+    /// fixed to be real and non-negative, matching the default positive gauge.
+    /// [`Self::qr_full`] instead uses `dim(W_c) = m_c`, making `q` square and
+    /// `r` upper trapezoidal in every sector.
+    ///
+    /// Each sector runs one dense QR, with cost
+    /// `O(sum_c m_c * n_c * min(m_c, n_c))`. Compact diagonal input is
+    /// materialized first. Multiplicity-free lazy adjoints are materialized
+    /// only for the operation and stay uncached; checked-Generic QR requires an
+    /// owned input. Checked factors use the same provider instance as `self`.
+    /// If any sector fails or the provider rejects an output space, no factor
+    /// tuple is returned.
+    ///
+    /// # Errors
+    ///
+    /// Dense execution returns [`Error::Operation`], while factor-layout
+    /// failures return [`Error::Core`] where applicable. If a checked provider
+    /// rejects an output space, its original error is available as the source.
+    /// Passing a lazy adjoint there returns [`Error::InvalidArgument`].
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use tenet::core::{U1FusionRule, U1Irrep};
+    /// use tenet::typed::{GradedSpace, Runtime, TensorMap};
+    ///
+    /// let runtime = Runtime::builder().build()?;
+    /// let rule = Arc::new(U1FusionRule);
+    /// let v = GradedSpace::try_new(Arc::clone(&rule), [(U1Irrep::new(0), 2)], false)?;
+    /// let a: TensorMap<_, f64> = TensorMap::rand(&runtime, [&v], [&v])?;
+    /// let (q, r) = a.qr_compact()?;
+    /// let rebuilt = q.compose(&r)?;
+    /// assert!(rebuilt.add(&a, 1.0, -1.0)?.norm()? < 1e-12);
+    /// # Ok::<(), tenet::typed::Error>(())
+    /// ```
     pub fn qr_compact(&self) -> Result<(Self, Self), TypedFacadeError<R>> {
         <R::Mode as TypedTensorQrDispatch<R, D>>::qr_compact(self)
     }
 
-    /// TensorKit 0.17 `left_orth`: the left isometry factorization
-    /// `t = v * c`, `v` isometric and `c` the corestriction.
-    ///
-    /// TensorKit's default `kind` is `:qr`, so this delegates directly to
-    /// [`Self::qr_compact`].
-    ///
-    /// # Errors
-    ///
-    /// Exactly [`Self::qr_compact`]'s.
+    /// Returns the left-isometry factorization `self = v * c`, with `v`
+    /// isometric and `c` the remaining triangular factor (TensorKit
+    /// `left_orth`). TensorKit's default `kind` is `:qr`, so this calls
+    /// [`Self::qr_compact`] directly and returns the same errors.
     pub fn left_orth(&self) -> Result<(Self, Self), TypedFacadeError<R>> {
         self.qr_compact()
     }
@@ -1169,12 +1330,54 @@ where
     R::Mode: TypedTensorSvdDispatch<R, D>,
     D: TensorScalar,
 {
-    /// TensorKit compact SVD dispatched by provider mode.
+    /// Returns the compact singular-value decomposition
+    /// `self = u * s * vh` as `(u, s, vh)`.
+    ///
+    /// Sector `c` uses `k_c = min(m_c, n_c)`, with
+    /// `u : codomain(self) <- W`, `s : W <- W`, and
+    /// `vh : W <- domain(self)`. `u` has orthonormal columns, `vh` has
+    /// orthonormal rows, and each sector's singular values are non-negative and
+    /// descending. [`Self::svd_full`] instead returns square outer factors and
+    /// a rectangular dense `s`.
+    ///
+    /// For multiplicity-free providers, compact `s` stores only
+    /// `sum_c k_c` diagonal values and bond composition becomes a scaling.
+    /// Checked-Generic compact SVD currently returns a dense `s`; checked EIGH
+    /// and EIG are the Generic factorizations whose diagonal factor is compact.
+    /// All checked factors retain the source's exact provider `Arc`.
+    ///
+    /// Dense cost is `O(sum_c m_c * n_c * min(m_c, n_c))`. A
+    /// multiplicity-free lazy adjoint is handled from its parent without
+    /// filling the receiver cache; checked-Generic SVD requires owned input.
+    /// Any sector, layout, or provider failure returns no factor tuple.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use tenet::core::{U1FusionRule, U1Irrep};
+    /// use tenet::typed::{GradedSpace, Runtime, TensorMap};
+    ///
+    /// let runtime = Runtime::builder().build()?;
+    /// let rule = Arc::new(U1FusionRule);
+    /// let v = GradedSpace::try_new(Arc::clone(&rule), [(U1Irrep::new(0), 2)], false)?;
+    /// let a: TensorMap<_, f64> = TensorMap::rand(&runtime, [&v], [&v])?;
+    /// let (u, s, vh) = a.svd_compact()?;
+    /// let rebuilt = u.compose(&s)?.compose(&vh)?;
+    /// assert!(rebuilt.add(&a, 1.0, -1.0)?.norm()? < 1e-12);
+    /// # Ok::<(), tenet::typed::Error>(())
+    /// ```
     pub fn svd_compact(&self) -> Result<(Self, Self, Self), TypedFacadeError<R>> {
         <R::Mode as TypedTensorSvdDispatch<R, D>>::svd_compact(self)
     }
 
-    /// TensorKit full SVD with square outer factors.
+    /// Returns the full SVD `self = u * s * vh` with square outer factors.
+    ///
+    /// In sector `c`, `u` is `m_c x m_c`, `vh` is `n_c x n_c`, and `s` is
+    /// the dense rectangular `m_c x n_c` diagonal matrix. Factor order is
+    /// `(u, s, vh)`, and the spaces are
+    /// `u : codomain <- W_out`, `s : W_out <- W_in`, and
+    /// `vh : W_in <- domain`. It accepts the same inputs and has the same cost
+    /// and error behavior as [`Self::svd_compact`]. Checked factors use the
+    /// source provider instance, and a failure returns no factor tuple.
     pub fn svd_full(&self) -> Result<(Self, Self, Self), TypedFacadeError<R>> {
         <R::Mode as TypedTensorSvdDispatch<R, D>>::svd_full(self)
     }
@@ -1186,13 +1389,39 @@ where
     R::Mode: TypedTensorLqDispatch<R, D>,
     D: TensorScalar,
 {
-    /// TensorKit compact LQ dispatched by provider mode.
+    /// Returns the compact LQ factorization `self = l * q` as `(l, q)`.
+    ///
+    /// Sector `c` uses bond dimension `k_c = min(m_c, n_c)`, with
+    /// `l : codomain(self) <- W` and `q : W <- domain(self)`. The rows of `q`
+    /// are orthonormal and the diagonal of `l` is real and non-negative.
+    /// [`Self::lq_full`] instead uses `dim(W_c) = n_c`, so `q` is square and
+    /// `l` is lower trapezoidal.
+    ///
+    /// Its cost is the same as [`Self::qr_compact`]. Compact inputs are
+    /// materialized first, and checked Generic requires an owned input.
+    /// Checked factors use the source provider instance, and a failure returns
+    /// no factor tuple. A multiplicity-free lazy adjoint runs QR on its owned
+    /// parent and returns detached owned factors without caching the receiver.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use tenet::core::{U1FusionRule, U1Irrep};
+    /// use tenet::typed::{GradedSpace, Runtime, TensorMap};
+    ///
+    /// let runtime = Runtime::builder().build()?;
+    /// let rule = Arc::new(U1FusionRule);
+    /// let v = GradedSpace::try_new(Arc::clone(&rule), [(U1Irrep::new(0), 2)], false)?;
+    /// let a: TensorMap<_, f64> = TensorMap::rand(&runtime, [&v], [&v])?;
+    /// let (l, q) = a.lq_compact()?;
+    /// assert!(l.compose(&q)?.add(&a, 1.0, -1.0)?.norm()? < 1e-12);
+    /// # Ok::<(), tenet::typed::Error>(())
+    /// ```
     pub fn lq_compact(&self) -> Result<(Self, Self), TypedFacadeError<R>> {
         <R::Mode as TypedTensorLqDispatch<R, D>>::lq_compact(self)
     }
 
-    /// TensorKit 0.17 `right_orth`: the right isometry factorization
-    /// `t = c * vh`, `vh` carrying orthonormal rows.
+    /// Returns the right-isometry factorization `self = c * vh`, with `vh`
+    /// carrying orthonormal rows (TensorKit `right_orth`).
     ///
     /// TensorKit's default `kind` is `:lq`, so this is [`Self::lq_compact`];
     /// see [`Self::left_orth`] for why it is a delegation.
@@ -1314,7 +1543,13 @@ where
     R::Mode: TypedTensorFullQrDispatch<R, D>,
     D: TensorScalar,
 {
-    /// TensorKit full QR dispatched by provider mode.
+    /// Returns the full QR factorization `self = q * r` as `(q, r)`.
+    ///
+    /// Sector `c` has a square `m_c x m_c` unitary `q` and an
+    /// `m_c x n_c` upper-trapezoidal `r`; the intermediate bond therefore has
+    /// the codomain's coupled-sector dimensions. The diagonal of `r` is real
+    /// and non-negative. See [`Self::qr_compact`] for the compact alternative,
+    /// storage and lazy-input behavior, errors, cost, and example.
     pub fn qr_full(&self) -> Result<(Self, Self), TypedFacadeError<R>> {
         <R::Mode as TypedTensorFullQrDispatch<R, D>>::qr_full(self)
     }
@@ -1326,7 +1561,13 @@ where
     R::Mode: TypedTensorFullLqDispatch<R, D>,
     D: TensorScalar,
 {
-    /// TensorKit full LQ dispatched by provider mode.
+    /// Returns the full LQ factorization `self = l * q` as `(l, q)`.
+    ///
+    /// Sector `c` has an `m_c x n_c` lower-trapezoidal `l` and a square
+    /// `n_c x n_c` unitary `q`; the intermediate bond therefore has the
+    /// domain's coupled-sector dimensions. The diagonal of `l` is real and
+    /// non-negative. See [`Self::lq_compact`] for the compact alternative,
+    /// storage and lazy-input behavior, errors, cost, and example.
     pub fn lq_full(&self) -> Result<(Self, Self), TypedFacadeError<R>> {
         <R::Mode as TypedTensorFullLqDispatch<R, D>>::lq_full(self)
     }
@@ -1338,7 +1579,17 @@ where
     R::Mode: TypedTensorSvdValsDispatch<R, D>,
     D: TensorScalar,
 {
-    /// TensorKit singular-value spectra dispatched by provider mode.
+    /// Returns only the singular values, grouped by provider-labelled coupled
+    /// sector and descending within each sector.
+    ///
+    /// No factor tensor or intermediate bond is built. This is the least
+    /// allocating member of the SVD family when only the spectrum is needed.
+    /// Multiplicity-free lazy adjoints are read through their owned parent;
+    /// checked Generic currently requires an owned input and returns
+    /// [`Error::InvalidArgument`] for a lazy adjoint. A dense failure returns
+    /// [`Error::Operation`]; if a provider cannot decode a sector label, its
+    /// original error is available as the source. See [`Self::svd_compact`] for
+    /// the decomposition contract and representative example.
     pub fn svd_vals(
         &self,
     ) -> Result<Vec<SectorSpectrum<<R as TypedSectorAdmission>::Sector, f64>>, TypedFacadeError<R>>
@@ -1353,7 +1604,22 @@ where
     R::Mode: TypedTensorSvdTruncDispatch<R, D>,
     D: TensorScalar,
 {
-    /// TensorKit truncated SVD dispatched by provider mode.
+    /// Returns `self ~= u * s * vh` after applying `truncation` globally across
+    /// the sector spectra.
+    ///
+    /// The policy keeps a prefix of each descending spectrum, with rank and
+    /// discarded-weight decisions weighted by quantum dimension. The returned
+    /// [`SvdTrunc`] or [`CheckedGenericSvdTrunc`] contains `(u, s, vh)`, the
+    /// kept provider-labelled singular values, and the quantum-dimension-
+    /// weighted 2-norm of the discarded values. The multiplicity-free `s` is
+    /// compact; the checked-Generic `s` is currently dense.
+    ///
+    /// A malformed policy, foreign [`TruncationSpace`], dense failure, label
+    /// decoding failure, or provider rejection returns an error and no result.
+    /// The original provider error is available as the source. Checked Generic
+    /// requires owned input; multiplicity-free lazy adjoints stay uncached. See
+    /// [`Self::svd_compact`] for factor spaces, cost, and the reconstruction
+    /// convention.
     pub fn svd_trunc(
         &self,
         truncation: &Truncation,
@@ -1368,7 +1634,17 @@ where
     R::Mode: TypedTensorEighValsDispatch<R, D>,
     D: TensorScalar,
 {
-    /// TensorKit Hermitian eigenvalue spectra dispatched by provider mode.
+    /// Returns only the real Hermitian eigenvalues, grouped by
+    /// provider-labelled coupled sector and descending by absolute value.
+    ///
+    /// No eigenvector factor or bond space is built. The input must be an
+    /// endomorphism and every sector must satisfy the same Hermiticity check as
+    /// [`Self::eigh_full`]. Multiplicity-free lazy adjoints are materialized
+    /// only for this call; checked Generic currently requires owned input for
+    /// this values-only method. Dense failures return [`Error::Operation`],
+    /// layout failures return [`Error::Core`], and an original provider or
+    /// label-decoding error is available as the source. No spectrum is returned
+    /// unless every sector succeeds.
     pub fn eigh_vals(
         &self,
     ) -> Result<Vec<SectorSpectrum<<R as TypedSectorAdmission>::Sector, f64>>, TypedFacadeError<R>>
@@ -1383,14 +1659,47 @@ where
     R::Mode: TypedTensorEighDispatch<R, D>,
     D: TensorScalar,
 {
-    /// Hermitian eigendecomposition `A V = V D`, returned as `(D, V)`.
-    /// Signed eigenvalues are stable-sorted by descending magnitude within
-    /// each sector; `D` uses compact diagonal storage.
+    /// Returns the Hermitian eigendecomposition `self = v * d * v^H` as
+    /// `(d, v)`.
     ///
-    /// Checked-Generic inputs preflight identical full row/column fusion-tree
-    /// stacking and Hermiticity in every sector before one dense EIGH per
-    /// populated sector. Both factors retain the exact source provider `Arc`;
-    /// a lazy adjoint is materialized only for this call and stays uncached.
+    /// The input must be an endomorphism. In each coupled sector,
+    /// `v : codomain(self) <- W` is unitary and `d : W <- W` holds the signed
+    /// real eigenvalues. The tuple order is `(d, v)`, not the reading order of
+    /// the reconstruction equation. Eigenvalues are stable-sorted by
+    /// descending absolute value; each eigenvector's phase is fixed by making
+    /// its largest-magnitude component real and non-negative. Bases inside an
+    /// exactly degenerate eigenspace remain backend-dependent.
+    ///
+    /// Both multiplicity-free and checked-Generic `d` factors use compact
+    /// diagonal storage. Checked factors retain the exact source provider
+    /// `Arc`. A lazy adjoint is materialized only for this call and does not
+    /// fill the receiver cache.
+    ///
+    /// # Errors and cost
+    ///
+    /// A non-endomorphism, failed Hermiticity check, or dense numerical failure
+    /// returns [`Error::Operation`]. Layout failures retain [`Error::Core`],
+    /// and multiplicity-free algebra failures retain [`Error::FusionAlgebra`]
+    /// where applicable. For checked Generic, the original layout or provider
+    /// error is available as the source. It also validates identical full
+    /// row/column fusion-tree stacking. Factors are returned only after every
+    /// sector succeeds; otherwise the method returns an error and no tuple.
+    /// Cost is `O(sum_c n_c^3)`.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use tenet::core::{U1FusionRule, U1Irrep};
+    /// use tenet::typed::{GradedSpace, Runtime, TensorMap};
+    ///
+    /// let runtime = Runtime::builder().build()?;
+    /// let rule = Arc::new(U1FusionRule);
+    /// let v = GradedSpace::try_new(Arc::clone(&rule), [(U1Irrep::new(0), 2)], false)?;
+    /// let a: TensorMap<_, f64> = TensorMap::id(&runtime, [&v])?.scale(2.0);
+    /// let (d, eigenvectors) = a.eigh_full()?;
+    /// let rebuilt = eigenvectors.compose(&d)?.compose(&eigenvectors.adjoint()?)?;
+    /// assert!(rebuilt.add(&a, 1.0, -1.0)?.norm()? < 1e-12);
+    /// # Ok::<(), tenet::typed::Error>(())
+    /// ```
     pub fn eigh_full(&self) -> Result<(Self, Self), TypedFacadeError<R>> {
         <R::Mode as TypedTensorEighDispatch<R, D>>::eigh_full(self)
     }
@@ -1402,10 +1711,18 @@ where
     R::Mode: TypedTensorEighTruncDispatch<R, D>,
     D: TensorScalar,
 {
-    /// Truncated [`Self::eigh_full`] with global magnitude selection and a
-    /// quantum-dimension-weighted discarded 2-norm.
-    /// Checked-Generic results use [`CheckedGenericEighTrunc`], leaving the
-    /// legacy [`EighTrunc`] `SectorCodec` bound unchanged.
+    /// Returns selected Hermitian eigenpairs after applying `truncation`
+    /// globally to eigenvalue magnitudes.
+    ///
+    /// [`EighTrunc`] or [`CheckedGenericEighTrunc`] contains compact `d`, the
+    /// truncated eigenvector isometry `v`, provider-labelled kept eigenvalues,
+    /// and the quantum-dimension-weighted 2-norm of the discarded eigenvalues.
+    /// Hence `v * d * v^H` is the corresponding truncated spectral
+    /// reconstruction. Factor spaces, ordering, lazy-input handling, and cost
+    /// are those of [`Self::eigh_full`]. The policy is validated as described
+    /// by [`Self::svd_trunc`]. Checked results use the source provider instance.
+    /// If validation or factorization fails, or the provider rejects an output
+    /// space, no result is returned.
     pub fn eigh_trunc(
         &self,
         truncation: &Truncation,
@@ -1420,7 +1737,14 @@ where
     R::Mode: TypedTensorEigValsDispatch<R, D>,
     D: TensorScalar,
 {
-    /// TensorKit general eigenvalue spectra dispatched by provider mode.
+    /// Returns only the general eigenvalues as `Complex64`, grouped by
+    /// provider-labelled sector and descending by magnitude.
+    ///
+    /// No eigenvector factor or bond space is built. The input must be an
+    /// endomorphism. Multiplicity-free lazy adjoints are materialized only for
+    /// this call; checked Generic currently requires owned input for this
+    /// values-only method. Unlike [`Self::eig_full`], no eigenvector-rank gate
+    /// is needed because no eigenbasis is returned.
     pub fn eig_vals(
         &self,
     ) -> Result<
@@ -1437,16 +1761,43 @@ where
     R::Mode: TypedTensorEigDispatch<R, D>,
     D: TensorScalar,
 {
-    /// General eigendecomposition `A V = V D`, returned as complex `(D, V)`.
-    /// Eigenvalues are stable-sorted by descending magnitude within each
-    /// sector and `D` uses compact diagonal storage.
+    /// Returns the general eigendecomposition `self * v = v * d` as complex
+    /// `(d, v)`.
     ///
-    /// Checked-Generic inputs retain the exact source provider and require the
-    /// returned eigenvector matrix in every coupled sector to be numerically
-    /// full rank under TeNeT's n * epsilon * sigma_max threshold. This is an
-    /// operational gate on the backend result, not a universal detector for
-    /// every mathematically defective floating-point input. Lazy adjoints are
-    /// materialized only for this call and remain uncached.
+    /// For a diagonalizable input this gives
+    /// `self = v * d * v^-1`. Both factors are `Complex64` even when the input
+    /// is real. `v : codomain(self) <- W` holds right eigenvectors and compact
+    /// `d : W <- W` holds their eigenvalues. Values are stable-sorted by
+    /// descending magnitude, and the largest-magnitude component of each
+    /// eigenvector is made real and non-negative. Degenerate eigenbases remain
+    /// backend-dependent.
+    ///
+    /// Checked Generic retains the exact source provider `Arc` and rejects an
+    /// eigenvector matrix that is not numerically full rank under
+    /// `n * epsilon * sigma_max`. This is an operational gate on the computed
+    /// matrix, not a universal detector for every defective floating-point
+    /// input. The multiplicity-free path forwards the dense backend result
+    /// without this additional rank gate. Lazy adjoints are materialized only
+    /// for this call and stay uncached.
+    ///
+    /// A non-endomorphism, invalid/non-finite dense result, checked rank-gate
+    /// failure, factor-layout failure, or provider failure returns no factor
+    /// tuple. Sectorwise cost is `O(sum_c n_c^3)`.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use tenet::core::{U1FusionRule, U1Irrep};
+    /// use tenet::typed::{GradedSpace, Runtime, TensorMap};
+    ///
+    /// let runtime = Runtime::builder().build()?;
+    /// let rule = Arc::new(U1FusionRule);
+    /// let v = GradedSpace::try_new(Arc::clone(&rule), [(U1Irrep::new(0), 2)], false)?;
+    /// let a: TensorMap<_, f64> = TensorMap::id(&runtime, [&v])?.scale(2.0);
+    /// let (d, eigenvectors) = a.eig_full()?;
+    /// let rebuilt = eigenvectors.compose(&d)?.compose(&eigenvectors.inv()?)?;
+    /// assert!(rebuilt.add(&a.to_c64(), 1.0.into(), (-1.0).into())?.norm()? < 1e-12);
+    /// # Ok::<(), tenet::typed::Error>(())
+    /// ```
     pub fn eig_full(
         &self,
     ) -> Result<
@@ -1466,8 +1817,18 @@ where
     R::Mode: TypedTensorEigTruncDispatch<R, D>,
     D: TensorScalar,
 {
-    /// Truncated [`Self::eig_full`]. `error` is only the quantum-dimension-
-    /// weighted norm of discarded eigenvalues, not reconstruction error.
+    /// Returns selected general eigenpairs after applying `truncation` globally
+    /// to eigenvalue magnitudes.
+    ///
+    /// [`EigTrunc`] or [`CheckedGenericEigTrunc`] contains compact complex `d`,
+    /// the selected right-eigenvector factor `v`, provider-labelled values, and
+    /// the quantum-dimension-weighted 2-norm of discarded eigenvalues. Because
+    /// truncated `v` is generally rectangular, `error` is a spectral
+    /// discarded-value norm only, not a reconstruction-error bound. Ordering,
+    /// lazy-input handling, and cost are those of [`Self::eig_full`]. The
+    /// policy is validated as described by [`Self::svd_trunc`]. Checked results
+    /// use the source provider instance. If validation or factorization fails,
+    /// or the provider rejects an output space, no result is returned.
     pub fn eig_trunc(
         &self,
         truncation: &Truncation,
@@ -6595,7 +6956,42 @@ where
     R::Mode: TypedTensorTraceDispatch<R, D>,
     D: TensorScalar,
 {
-    /// Partial categorical trace over mutually dual axis pairs.
+    /// Traces mutually dual axis pairs and returns the tensor on the remaining
+    /// legs, preserving their order and codomain/domain side.
+    ///
+    /// Each pair uses flat zero-based axes with codomain axes first. Every axis
+    /// must be in range and appear at most once; `pairs.is_empty()` returns a
+    /// clone. This is the categorical contraction trace, so provider pivotal
+    /// coefficients and fermionic twists are included. It can therefore be a
+    /// supertrace and need not equal [`Self::tr`].
+    ///
+    /// Dense input runs the sectorwise trace engine. A multiplicity-free
+    /// compact rank-`(1, 1)` factor traced over its only pair reduces directly
+    /// in `O(sum_c k_c)`; other compact cases materialize. Checked Generic
+    /// requires [`tenet_core::CheckedGenericPivotal`] and admits the output
+    /// with the source's exact provider `Arc`. Lazy adjoints are read through
+    /// their parent without filling the receiver cache.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidArgument`] for an out-of-range or repeated axis.
+    /// Non-dual legs and trace execution failures return their corresponding
+    /// [`Error`] variant. If required pivotal data is unavailable, the original
+    /// provider error is available as the source. A failed trace returns no
+    /// output tensor.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use tenet::core::{U1FusionRule, U1Irrep};
+    /// use tenet::typed::{GradedSpace, Runtime, TensorMap};
+    ///
+    /// let runtime = Runtime::builder().build()?;
+    /// let rule = Arc::new(U1FusionRule);
+    /// let v = GradedSpace::try_new(Arc::clone(&rule), [(U1Irrep::new(0), 2)], false)?;
+    /// let id: TensorMap<_, f64> = TensorMap::id(&runtime, [&v])?;
+    /// assert_eq!(id.trace_pairs(&[(0, 1)])?.scalar()?, 2.0);
+    /// # Ok::<(), tenet::typed::Error>(())
+    /// ```
     pub fn trace_pairs(&self, pairs: &[(usize, usize)]) -> Result<Self, TypedFacadeError<R>> {
         <R::Mode as TypedTensorTraceDispatch<R, D>>::trace_pairs(self, pairs)
     }
@@ -14109,7 +14505,7 @@ where
     ///
     /// This is the **tensor-contraction** trace: it applies the categorical
     /// trace coefficients, including a fermionic rule's twists, so it is the
-    /// supertrace there. [`Self::tr`] is TensorKit's positive trace instead,
+    /// supertrace there. [`Self::tr`] is the dimension-weighted block trace,
     /// and the two genuinely disagree for a fermionic provider.
     ///
     /// TensorKit's native parallel-list `Index2Tuple` is what the seam takes
@@ -14572,7 +14968,7 @@ where
     /// TensorKit `tr`: the full trace of an endomorphism
     /// (`domain == codomain`), pairing codomain leg `i` with domain leg `i`.
     ///
-    /// This is TensorKit's **positive** trace, quantum-dimension weighted:
+    /// This is TensorKit's quantum-dimension-weighted block trace:
     /// `Σ_c dim(c) * tr(b_c)`. It is *not* the supertrace — a fermionic rule's
     /// twists belong to tensor contraction, and [`Self::trace_pairs`] is where
     /// they appear. The two therefore disagree for a fermionic provider by
@@ -14592,7 +14988,7 @@ where
             ));
         }
         if let Some(spectrum) = self.spectrum() {
-            // `Σ_c dim(c) * Σ_i d_i`: TensorKit's positive trace on a
+            // `Σ_c dim(c) * Σ_i d_i`: TensorKit's block trace on a
             // `DiagonalTensorMap`, read straight off the stored values.
             let provider = self.logical_space().provider();
             let mut total = num_complex::Complex64::new(0.0, 0.0);
@@ -14955,21 +15351,52 @@ where
     R::Mode: TypedTensorNullDispatch<R, D>,
     D: TensorScalar,
 {
-    /// Numerical left null space `N : codomain <- W`, with `N^H * self = 0`.
+    /// Returns an orthonormal basis `n : codomain(self) <- W` for the numerical
+    /// left null space, satisfying `n^H * self ~= 0`.
     ///
-    /// Each coupled sector keeps singular values strictly above
-    /// `epsilon(dtype) * max(rows, cols) * sigma_max`. This is an intentional
-    /// difference from TensorKit/MatrixAlgebraKit's QR-based default, which
-    /// keeps only structural nullity. `W` is a fresh non-dual one-leg space;
-    /// sectors with zero nullity are absent.
+    /// In sector `c`, singular values count as nonzero only when
+    /// `sigma > epsilon(dtype) * max(m_c, n_c) * sigma_max,c`. The fresh
+    /// non-dual one-leg bond `W` contains `m_c - rank_c` directions; sectors
+    /// with zero nullity are absent. This intentionally differs from
+    /// TensorKit/MatrixAlgebraKit's QR-based default, which reports structural
+    /// nullity rather than this SVD numerical rank. [`Self::right_null`]
+    /// returns the corresponding basis on the domain side.
+    ///
+    /// The compact SVD costs
+    /// `O(sum_c m_c * n_c * min(m_c, n_c))`, plus an orthonormal completion in
+    /// sectors that keep null directions. Compact diagonal input is
+    /// materialized first. Lazy adjoints use the opposite null space of their
+    /// owned parent and return a detached result without filling the receiver
+    /// cache. Checked results use the same provider instance as `self`. TeNeT
+    /// creates the output bond only after every sector succeeds; otherwise it
+    /// returns an error and no tensor.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use tenet::core::{U1FusionRule, U1Irrep};
+    /// use tenet::typed::{GradedSpace, Runtime, TensorMap};
+    ///
+    /// let runtime = Runtime::builder().build()?;
+    /// let rule = Arc::new(U1FusionRule);
+    /// let v = GradedSpace::try_new(Arc::clone(&rule), [(U1Irrep::new(0), 2)], false)?;
+    /// let zero: TensorMap<_, f64> = TensorMap::zeros(&runtime, [&v], [&v])?;
+    /// let n = zero.left_null()?;
+    /// assert!(n.adjoint()?.compose(&zero)?.norm()? < 1e-12);
+    /// # Ok::<(), tenet::typed::Error>(())
+    /// ```
     pub fn left_null(&self) -> Result<Self, TypedFacadeError<R>> {
         <R::Mode as TypedTensorNullDispatch<R, D>>::left_null(self)
     }
 
-    /// Numerical right null space `N : W <- domain`, with `self * N^H = 0`.
+    /// Returns an orthonormal-row basis `n : W <- domain(self)` for the
+    /// numerical right null space, satisfying `self * n^H ~= 0`.
     ///
-    /// The cutoff, fresh bond, and TensorKit intentional difference are the
-    /// mirror of [`Self::left_null`].
+    /// The fresh bond contains `n_c - rank_c` directions per sector. It uses
+    /// the same numerical cutoff and cost as [`Self::left_null`], with rows and
+    /// columns exchanged. Compact inputs are materialized first; a lazy
+    /// adjoint uses the left null space of its owned parent without caching the
+    /// receiver. Checked results use the source provider instance, and a
+    /// failure returns no tensor.
     pub fn right_null(&self) -> Result<Self, TypedFacadeError<R>> {
         <R::Mode as TypedTensorNullDispatch<R, D>>::right_null(self)
     }
@@ -14981,12 +15408,48 @@ where
     R::Mode: TypedTensorPolarDispatch<R, D>,
     D: TensorScalar,
 {
-    /// TensorKit / MatrixAlgebraKit left polar decomposition `self = W * P`.
+    /// Returns the left polar decomposition `self = w * p` as `(w, p)`.
+    ///
+    /// `w` lives on the input space `codomain(self) <- domain(self)` and is an
+    /// isometry (`w^H * w = id` on the domain). The positive-semidefinite
+    /// factor `p : domain(self) <- domain(self)` is `V * S * V^H` from the
+    /// compact SVD. Every coupled-sector block must be at least as tall as it
+    /// is wide. [`Self::right_polar`] handles wide blocks and returns its
+    /// factors in the opposite order.
+    ///
+    /// Cost is `O(sum_c m_c * n_c * min(m_c, n_c))` plus sectorwise
+    /// composition. Compact diagonal input is materialized first. A lazy
+    /// adjoint runs the opposite decomposition on its owned parent and returns
+    /// detached owned factors without caching the receiver. Checked factors
+    /// use the same provider instance as `self`. If that provider rejects an
+    /// output space or any sector computation fails, no factors are returned.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use tenet::core::{U1FusionRule, U1Irrep};
+    /// use tenet::typed::{GradedSpace, Runtime, TensorMap};
+    ///
+    /// let runtime = Runtime::builder().build()?;
+    /// let rule = Arc::new(U1FusionRule);
+    /// let v = GradedSpace::try_new(Arc::clone(&rule), [(U1Irrep::new(0), 2)], false)?;
+    /// let a: TensorMap<_, f64> = TensorMap::id(&runtime, [&v])?.scale(2.0);
+    /// let (w, p) = a.left_polar()?;
+    /// assert!(w.compose(&p)?.add(&a, 1.0, -1.0)?.norm()? < 1e-12);
+    /// # Ok::<(), tenet::typed::Error>(())
+    /// ```
     pub fn left_polar(&self) -> Result<(Self, Self), TypedFacadeError<R>> {
         <R::Mode as TypedTensorPolarDispatch<R, D>>::left_polar(self)
     }
 
-    /// TensorKit / MatrixAlgebraKit right polar decomposition `self = P * W`.
+    /// Returns the right polar decomposition `self = p * w` as `(p, w)`.
+    ///
+    /// `p : codomain(self) <- codomain(self)` is positive semidefinite and
+    /// `w` lives on the input space as a coisometry
+    /// (`w * w^H = id` on the codomain). Every coupled-sector block must be at
+    /// least as wide as it is tall. Factor order and spaces are stated above;
+    /// [`Self::left_polar`] describes the corresponding storage routes, lazy
+    /// input handling, and cost. Checked factors use the source provider
+    /// instance, and a failure returns no factor tuple.
     pub fn right_polar(&self) -> Result<(Self, Self), TypedFacadeError<R>> {
         <R::Mode as TypedTensorPolarDispatch<R, D>>::right_polar(self)
     }
