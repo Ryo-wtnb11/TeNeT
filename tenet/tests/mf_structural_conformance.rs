@@ -425,7 +425,7 @@ fn zn3_and_cu1_arithmetic_contraction_and_reductions_have_scalar_oracles() {
                 TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| 2.0).unwrap();
             let b: TensorMap<_, f64> =
                 TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| 3.0).unwrap();
-            let ordered = a.contract_ordered(&b, &[1], &[0], &[1, 0]).unwrap();
+            let ordered = a.contract(&b, &[1], &[0], &[1, 0]).unwrap();
             let composed = a.compose(&b).unwrap();
             let tensor_product = a.otimes(&b).unwrap();
             let sum = a.add(&b, 1.0, -1.0).unwrap();

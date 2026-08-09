@@ -171,16 +171,8 @@ where
         is_dual: leg.is_dual(),
     };
     StructuralSnapshot {
-        codomain: tensor
-            .codomain_spaces()
-            .into_iter()
-            .map(&leg_snapshot)
-            .collect(),
-        domain: tensor
-            .domain_spaces()
-            .into_iter()
-            .map(leg_snapshot)
-            .collect(),
+        codomain: tensor.codomain().into_iter().map(&leg_snapshot).collect(),
+        domain: tensor.domain().into_iter().map(leg_snapshot).collect(),
         blocks: (0..tensor.block_count())
             .map(|index| {
                 let block = tensor.block(index).unwrap();
@@ -216,6 +208,7 @@ where
     assert_eq!(structural_snapshot(&restored), structure);
 }
 
+#[allow(deprecated)]
 fn assert_direct_contract_and_compose<R>(lhs: &TensorMap<R, f64>, rhs: &TensorMap<R, f64>)
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
@@ -256,6 +249,7 @@ where
     }
 }
 
+#[allow(deprecated)]
 fn assert_reduction_parity<R>(lhs: &TensorMap<R, f64>, rhs: &TensorMap<R, f64>)
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
@@ -654,10 +648,6 @@ fn typed_cuda_reductions_cover_weights_providers_lazy_and_preflight() {
         lazy.inner(&lazy),
         Err(tenet::typed::Error::UnsupportedOnDevice(_))
     ));
-    assert!(matches!(
-        lazy.dot(&lazy),
-        Err(tenet::typed::Error::UnsupportedOnDevice(_))
-    ));
     let u1_rhs_device = u1_rhs.to_cuda().unwrap();
     let repeated = u1_device.inner(&u1_rhs_device).unwrap();
     for _ in 0..3 {
@@ -809,7 +799,6 @@ fn typed_cuda_reductions_cover_weights_providers_lazy_and_preflight() {
     let empty_device = empty.to_cuda().unwrap();
     assert_eq!(empty_device.norm().unwrap(), 0.0);
     assert_eq!(empty_device.inner(&empty_device).unwrap(), 0.0);
-    assert_eq!(empty_device.dot(&empty_device).unwrap(), 0.0);
 }
 
 #[test]

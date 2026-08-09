@@ -5314,9 +5314,6 @@ fn checked_only_contract_and_compose_keep_left_authority() {
 
     for output in [
         source.contract(&identity, &[1], &[0], &[0, 1]).unwrap(),
-        source
-            .contract_ordered(&identity, &[1], &[0], &[0, 1])
-            .unwrap(),
         source.compose(&identity).unwrap(),
     ] {
         assert!(std::ptr::eq(output.provider(), left_provider.as_ref()));
@@ -6108,9 +6105,6 @@ fn sun_adjoint_multiplicity_transforms_round_trip_labels_vertices_and_payload() 
             TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| 1.0).unwrap();
         for output in [
             tensor.contract(&identity, &[2], &[0], &[0, 1, 2]).unwrap(),
-            tensor
-                .contract_ordered(&identity, &[2], &[0], &[0, 1, 2])
-                .unwrap(),
             tensor.compose(&identity).unwrap(),
         ] {
             assert!(std::ptr::eq(output.provider(), provider.as_ref()));

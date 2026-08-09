@@ -265,14 +265,14 @@ see the tensor's shape.
 available directly when you want to spell the axes:
 
 - [`prelude::TensorMap::compose`] — categorical composition (TensorKit
-  `A * B` / `mul!`), also spelled `&a * &b`. **No** fermionic supertrace
-  twist on dual composed legs.
+  `A * B` / `mul!`), written `a.compose(&b)?` in TeNeT. TeNeT has no `Mul`
+  overload because composition is fallible and returns `Result`. **No**
+  fermionic supertrace twist on dual composed legs.
 - [`prelude::TensorMap::contract`] — contract arbitrary axis pairs with an
   explicit output order (TensorKit `tensorcontract!` and its `pAB`). Like
   `tensor!`, this **twists** dual
   contracted legs on fermionic rules — bosonic results are identical to
   `compose`, fermionic ones can differ by signs.
-- [`prelude::TensorMap::contract_ordered`] — documented alias of `contract`.
 - [`prelude::TensorMap::permute`] / [`prelude::TensorMap::braid`] /
   [`prelude::TensorMap::transpose`] — TensorKit's leg re-arrangements
   (symmetric braiding / explicit braid levels / planar transpose).
@@ -311,7 +311,7 @@ assert_eq!((h.codomain_rank(), h.domain_rank()), (2, 2));
 
 The VectorInterface / LinearAlgebra surface mirrors TensorKit:
 [`prelude::TensorMap::norm`], [`prelude::TensorMap::normalize`],
-[`prelude::TensorMap::inner`] / [`prelude::TensorMap::dot`],
+[`prelude::TensorMap::inner`],
 [`prelude::TensorMap::scale`], [`prelude::TensorMap::add`] (the `α·self + β·other`
 combination, covering TensorKit's `axpy!`/`axpby!`),
 [`prelude::TensorMap::tr`], and [`prelude::TensorMap::zeros_like`] (TensorKit

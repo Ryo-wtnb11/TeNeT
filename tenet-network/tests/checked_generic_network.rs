@@ -178,9 +178,9 @@ fn assert_sun_network<D: OracleScalar + Send + Sync + 'static>(n: usize, label: 
     assert!(!std::ptr::eq(lhs.provider(), middle.provider()));
 
     let expected = lhs
-        .contract_ordered(&middle, &[2], &[0], &[0, 1, 2])
+        .contract(&middle, &[2], &[0], &[0, 1, 2])
         .unwrap()
-        .contract_ordered(&tail, &[2], &[0], &[0, 1, 2])
+        .contract(&tail, &[2], &[0], &[0, 1, 2])
         .unwrap()
         .permute(&[1, 0], &[2])
         .unwrap();
@@ -751,7 +751,7 @@ fn checked_generic_scalar_empty_outer_product_and_single_permute_follow_ordinary
         TensorMap::from_block_fn(&runtime, [&leg], [], |_, _| 2.0).unwrap();
     let rhs: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [], [&leg], |_, _| 5.0).unwrap();
-    let scalar = lhs.contract_ordered(&rhs, &[0], &[0], &[]).unwrap();
+    let scalar = lhs.contract(&rhs, &[0], &[0], &[]).unwrap();
     let scalar_plan = Network::new(vec![vec![]], vec![false], vec![Some(0)], vec![], Some(0))
         .unwrap()
         .plan(&[&scalar], &GreedyDenseOptimizer)
@@ -772,7 +772,7 @@ fn checked_generic_scalar_empty_outer_product_and_single_permute_follow_ordinary
     .unwrap()
     .execute(&[&lhs, &rhs])
     .unwrap();
-    let expected_outer = lhs.contract_ordered(&rhs, &[], &[], &[0, 1]).unwrap();
+    let expected_outer = lhs.contract(&rhs, &[], &[], &[0, 1]).unwrap();
     assert_eq!(outer.data(), expected_outer.data());
 
     let rank_three: TensorMap<_, f64> =
@@ -839,9 +839,7 @@ fn checked_generic_cache_modes_dtype_pools_and_lazy_rejection_match_direct_autho
     assert_eq!(first.data(), second.data());
     assert_eq!(
         complex.data(),
-        ac.contract_ordered(&bc, &[1], &[0], &[0, 1])
-            .unwrap()
-            .data()
+        ac.contract(&bc, &[1], &[0], &[0, 1]).unwrap().data()
     );
     let stats = plan_cache_stats(&runtime);
     assert!(stats.hits >= 2);
@@ -868,7 +866,7 @@ fn checked_generic_cache_modes_dtype_pools_and_lazy_rejection_match_direct_autho
     )
     .unwrap();
     let planned = network.plan(&[&lazy, &b64], &GreedyDenseOptimizer).unwrap();
-    let direct = lazy.contract_ordered(&b64, &[1], &[0], &[0, 1]);
+    let direct = lazy.contract(&b64, &[1], &[0], &[0, 1]);
     let replay = planned.execute(&[&lazy, &b64]);
     assert!(matches!(
         direct,

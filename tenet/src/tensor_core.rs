@@ -1721,7 +1721,7 @@ mod tests {
 
     #[test]
     fn typed_ordered_contract_is_one_fused_seam_call_and_no_permute_transform() {
-        // What (#580 group 6, gate 1): a typed `contract_ordered` with a
+        // What (#580 group 6, gate 1): a typed `contract` with a
         // non-identity output order runs the fused contraction seam exactly
         // once and never a separate permute transform.
         let (_runtime, tensor) = typed_z2_facade_tensor();
@@ -1740,11 +1740,8 @@ mod tests {
         assert_eq!((fused, transforms), (1, 1));
 
         // The gate: the non-identity order is folded into the one fused call.
-        let (fused, transforms) = seam_calls(|| {
-            tensor
-                .contract_ordered(&tensor, &[2], &[0], &[1, 0, 3, 2])
-                .unwrap()
-        });
+        let (fused, transforms) =
+            seam_calls(|| tensor.contract(&tensor, &[2], &[0], &[1, 0, 3, 2]).unwrap());
         assert_eq!(
             (fused, transforms),
             (1, 0),
