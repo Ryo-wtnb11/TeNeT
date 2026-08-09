@@ -23,7 +23,7 @@ use tenet::typed::CudaStorage;
 use tenet::typed::{
     GradedSpace, NetworkReuseClass, RuntimeDetachedTensorMap, TensorMap, TypedSpaceModeDispatch,
     TypedTensorAdjointDispatch, TypedTensorContractDispatch, TypedTensorModeDispatch,
-    TypedTensorTransformDispatch,
+    TypedTensorTraceDispatch, TypedTensorTransformDispatch,
 };
 use tenet::RuntimeIdentity;
 #[cfg(feature = "cuda")]
@@ -140,11 +140,6 @@ where
         codomain: &[usize],
         domain: &[usize],
     ) -> Result<StepOutput<TensorMap<R, D>>, HostNetworkError<R>>;
-
-    fn trace_pairs(
-        tensor: &TensorMap<R, D>,
-        pairs: &[(usize, usize)],
-    ) -> Result<TensorMap<R, D>, HostNetworkError<R>>;
 
     fn activate_parked(
         workspace: &mut NetworkExecutionWorkspace<R, D>,
@@ -582,7 +577,12 @@ pub struct CompiledStep {
     authority_input_slot: usize,
 }
 
-/// Caller-owned typed Host replay storage for one planned network at a time.
+/// Caller-owned Host replay state for one planned network at a time.
+///
+/// The stored payload destinations are private implementation details. Host MF
+/// replay can reuse compatible intermediate buffers. Checked Generic replay
+/// reuses the plan and workspace containers but admits new intermediate
+/// tensors. The final tensor leaves the workspace in both modes.
 pub struct NetworkExecutionWorkspace<R, D> {
     slots: Vec<Option<TensorMap<R, D>>>,
     producers: Vec<Option<(usize, bool)>>,
@@ -693,13 +693,6 @@ where
         }
     }
 
-    fn trace_pairs(
-        tensor: &TensorMap<R, D>,
-        pairs: &[(usize, usize)],
-    ) -> Result<TensorMap<R, D>, Error> {
-        tensor.trace_pairs(pairs)
-    }
-
     fn activate_parked(
         workspace: &mut NetworkExecutionWorkspace<R, D>,
         runtime: &Runtime,
@@ -758,17 +751,6 @@ where
         domain: &[usize],
     ) -> Result<StepOutput<TensorMap<R, D>>, HostNetworkError<R>> {
         Ok(StepOutput::Returned(tensor.permute(codomain, domain)?))
-    }
-
-    fn trace_pairs(
-        _tensor: &TensorMap<R, D>,
-        _pairs: &[(usize, usize)],
-    ) -> Result<TensorMap<R, D>, HostNetworkError<R>> {
-        Err(Error::InvalidArgument(
-            "tensor! intra-operand trace is not supported for checked Generic providers"
-                .to_string(),
-        )
-        .into())
     }
 
     fn activate_parked(
@@ -1135,7 +1117,10 @@ impl PlannedNetwork {
         self.execute_with_workspace(tensors, &mut NetworkExecutionWorkspace::default())
     }
 
-    /// Executes this plan while reusing exact-compatible typed Host destinations.
+    /// Executes this plan with reusable private Host replay state.
+    ///
+    /// This does not accept or preserve a caller-owned output destination;
+    /// successful execution returns a new owned tensor.
     pub fn execute_with_workspace<R, D>(
         &self,
         tensors: &[&TensorMap<R, D>],
@@ -1734,14 +1719,23 @@ mod static_operand_sealed {
 /// ```
 ///
 /// Checked Generic providers use the same Host dispatch surface and preserve
-/// their typed provider errors. Intra-operand traces are rejected explicitly:
-/// ordinary checked trace requires stronger pivotal and sector-codec bounds
-/// than network admission.
+/// their typed provider errors. The macro uses [`StaticTraceNetworkOperand`]
+/// only when an operand contains a trace, so ordinary networks do not require
+/// pivotal provider data.
 #[doc(hidden)]
 pub trait StaticNetworkOperand: static_operand_sealed::Sealed + Sized {
     type Error;
 
     fn contract_static(
+        tensors: &[&Self],
+        spec: &'static StaticTopologySpec,
+    ) -> Result<Self, Self::Error>;
+}
+
+/// Static network dispatch with the ordinary typed trace operation available.
+#[doc(hidden)]
+pub trait StaticTraceNetworkOperand: StaticNetworkOperand {
+    fn contract_static_trace(
         tensors: &[&Self],
         spec: &'static StaticTopologySpec,
     ) -> Result<Self, Self::Error>;
@@ -1763,6 +1757,15 @@ pub fn contract_static_network<T: StaticNetworkOperand>(
     spec: &'static StaticTopologySpec,
 ) -> Result<T, T::Error> {
     T::contract_static(tensors, spec)
+}
+
+/// Typed Host/CUDA dispatch used by `tensor!` when an operand contains a trace.
+#[doc(hidden)]
+pub fn contract_static_trace_network<T: StaticTraceNetworkOperand>(
+    tensors: &[&T],
+    spec: &'static StaticTopologySpec,
+) -> Result<T, T::Error> {
+    T::contract_static_trace(tensors, spec)
 }
 
 fn validate_static_shape<T>(tensors: &[&T], spec: &StaticTopologySpec) -> Result<(), Error> {
@@ -1810,21 +1813,37 @@ where
             .first()
             .map(|tensor| tensor.runtime().plan_cache_config().optimizer)
             .unwrap_or_default();
-        if !spec
-            .inputs
+        crate::plancache::get_or_plan_static(
+            spec,
+            tensors,
+            &codomain_ranks,
+            &optimizer,
+            |_| Ok(()),
+            || spec.network(),
+        )?
+        .execute_host(tensors)
+    }
+}
+
+impl<R, D> StaticTraceNetworkOperand for TensorMap<R, D>
+where
+    R: TypedSectorAdmission + Send + Sync,
+    R::Mode: HostNetworkModeDispatch<R, D> + TypedTensorTraceDispatch<R, D>,
+    D: TensorScalar + Send + Sync + 'static,
+{
+    fn contract_static_trace(
+        tensors: &[&Self],
+        spec: &'static StaticTopologySpec,
+    ) -> Result<Self, Self::Error> {
+        validate_static_shape(tensors, spec)?;
+        let codomain_ranks = tensors
             .iter()
-            .any(|labels| has_intra_operand_pair_names(labels))
-        {
-            return crate::plancache::get_or_plan_static(
-                spec,
-                tensors,
-                &codomain_ranks,
-                &optimizer,
-                |_| Ok(()),
-                || spec.network(),
-            )?
-            .execute_host(tensors);
-        }
+            .map(|tensor| tensor.codomain_rank())
+            .collect::<Vec<_>>();
+        let optimizer = tensors
+            .first()
+            .map(|tensor| tensor.runtime().plan_cache_config().optimizer)
+            .unwrap_or_default();
         let mut inputs = Vec::with_capacity(tensors.len());
         let mut conj = Vec::with_capacity(tensors.len());
         let mut splits = Vec::with_capacity(tensors.len());
@@ -1864,9 +1883,7 @@ where
                 ((*tensor).clone(), written)
             };
             let (pairs, reduced) = split_trace_pairs(index, &labels)?;
-            lowered.push(Some(
-                <R::Mode as HostNetworkModeDispatch<R, D>>::trace_pairs(&value, &pairs)?,
-            ));
+            lowered.push(Some(value.trace_pairs(&pairs)?));
             inputs.push(reduced);
             conj.push(false);
             splits.push(None);
@@ -1923,15 +1940,6 @@ where
         spec: &'static StaticTopologySpec,
     ) -> Result<Self, Error> {
         validate_static_shape(tensors, spec)?;
-        if spec
-            .inputs
-            .iter()
-            .any(|labels| has_intra_operand_pair_names(labels))
-        {
-            return Err(Error::UnsupportedOnDevice(
-                "tensor! intra-operand trace is not supported on CUDA".to_string(),
-            ));
-        }
         let codomain_ranks = tensors
             .iter()
             .map(|tensor| tensor.codomain_rank())
@@ -1952,11 +1960,22 @@ where
     }
 }
 
-fn has_intra_operand_pair_names(labels: &[&str]) -> bool {
-    labels
-        .iter()
-        .enumerate()
-        .any(|(i, label)| labels[..i].contains(label))
+#[cfg(feature = "cuda")]
+impl<R> StaticTraceNetworkOperand for TensorMap<R, f64, CudaStorage>
+where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec,
+{
+    fn contract_static_trace(
+        _tensors: &[&Self],
+        _spec: &'static StaticTopologySpec,
+    ) -> Result<Self, Self::Error> {
+        Err(Error::UnsupportedOnDevice(
+            "tensor! intra-operand trace is not supported on CUDA".to_string(),
+        ))
+    }
 }
 
 fn has_intra_operand_pair(labels: &[TemporaryLabel]) -> bool {

@@ -217,6 +217,16 @@ pub fn tensor(input: TokenStream) -> TokenStream {
             .to_compile_error()
             .into();
     }
+    let contract = if inputs.iter().any(|labels| {
+        labels
+            .iter()
+            .enumerate()
+            .any(|(index, label)| labels[index + 1..].contains(label))
+    }) {
+        quote!(::tenet_network::contract_static_trace_network)
+    } else {
+        quote!(::tenet_network::contract_static_network)
+    };
 
     let tensors = parsed
         .operands
@@ -256,7 +266,7 @@ pub fn tensor(input: TokenStream) -> TokenStream {
                 let #normalized_bindings =
                     ::tenet_network::normalize_tensor_operand(#raw_bindings);
             )*
-            ::tenet_network::contract_static_network(
+            #contract(
                 &[#(#normalized_bindings),*],
                 &__TENET_TOPOLOGY,
             )
