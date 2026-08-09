@@ -1,7 +1,9 @@
 [package]
 name = "tenet-tensors"
 version = "0.1.0"
+description = "Symmetric-tensor operations for TeNeT"
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 

@@ -1,7 +1,9 @@
 [package]
 name = "tenet-sectors"
 version = "0.1.0"
+description = "Fusion-rule providers and sector types for TeNeT"
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 

@@ -4,8 +4,9 @@ resolver = "2"
 
 [workspace.package]
 edition = "2021"
+rust-version = "1.96"
 license = "MIT OR Apache-2.0"
-repository = "https://example.invalid/tensornetworks"
+repository = "https://github.com/Ryo-wtnb11/TeNeT"
 
 [patch."https://github.com/tensor4all/tenferro-rs"]
 tenferro-cpu = { path = "../tenferro-rs/crates/tenferro-cpu" }

@@ -1,7 +1,9 @@
 [package]
 name = "tenet-dense"
 version = "0.1.0"
+description = "Dense block execution for TeNeT"
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
