@@ -53,9 +53,9 @@ upstream location (the note says why).
 | `typed::TensorMap::braid` | TensorKit | 0.17.0 | `tensors/indexmanipulations.jl:331-342` | typed facade |
 | `typed::TensorMap::compose` | TensorKit | 0.17.0 | `tensors/tensoroperations.jl:388-420` | fermionic supertrace twist applied only in `blas_contract!`, never in `mul!` |
 | `typed::TensorMap::compose` | TensorKit | 0.17.0 | `tensors/linalg.jl:38-42` | categorical composition `compose` behind `A * B` |
-| `typed::TensorMap::contract` | TensorKit | 0.17.0 | `tensors/tensoroperations.jl:119-146` | `TO.tensorcontract!` with default `pAB`; see the `contract_ordered` rows for the `pAB` details |
+| `typed::TensorMap::contract` | TensorKit | 0.17.0 | `tensors/tensoroperations.jl:119-146` | `TO.tensorcontract!` and its explicit `pAB` output permutation |
 | `typed::TensorMap::data` | TensorKit | 0.17.0 | `tensors/tensor.jl:10-35` | `TensorMap`'s flat `data` vector — the coupled-sector matrix layout tenet's storage claims equivalence with |
-| `typed::TensorMap::dot` | TensorKit | 0.17.0 | `tensors/linalg.jl:255` | `LinearAlgebra.dot` alias of `inner` |
+| `typed::TensorMap::inner` | TensorKit | 0.17.0 | `tensors/linalg.jl:255` | TensorKit exposes the same inner product as `LinearAlgebra.dot` |
 | `typed::TensorMap::eig_full` | MatrixAlgebraKit | 0.6.9 | `interface/eig.jl:12-33` | typed facade |
 | `typed::TensorMap::eig_trunc` | MatrixAlgebraKit | 0.6.9 | `interface/eig.jl:35-87` | typed facade |
 | `typed::TensorMap::eig_vals` | MatrixAlgebraKit | 0.6.9 | `interface/eig.jl:140-158` | typed facade |
@@ -131,11 +131,10 @@ upstream location (the note says why).
 | `typed::TensorMap::catcodomain` | TensorKit | 0.17.0 | `tensors/linalg.jl:498-514` | domain match 499-500; codomain duality 503-504; direct sum `V = V1 ⊕ V2` 506; per-sector row slabs, `t1` first, 509-512 |
 | `typed::TensorMap::catdomain` | TensorKit | 0.17.0 | `tensors/linalg.jl:479-497` | codomain match 480-483; domain duality 486-487; direct sum `V = V1 ⊕ V2` 489; per-sector column slabs, `t1` first, 492-495 |
 | `typed::TensorMap::codomain_rank` | TensorKit | 0.17.0 | `tensors/abstracttensor.jl:239-241` | `numout` |
-| `typed::TensorMap::codomain_spaces` | TensorKit | 0.17.0 | `tensors/abstracttensor.jl:204-214` | `codomain(t)` |
-| `typed::TensorMap::contract_ordered` | TensorKit | 0.17.0 | `tensors/tensoroperations.jl:119-146` | `TO.tensorcontract!` and its `pAB` output permutation |
-| `typed::TensorMap::contract_ordered` | TensorKit | 0.17.0 | `tensors/tensoroperations.jl:159-167` | destination structure `permute(compose(sA, sB), pAB)` |
+| `typed::TensorMap::codomain` | TensorKit | 0.17.0 | `tensors/abstracttensor.jl:204-214` | `codomain(t)` |
+| `typed::TensorMap::contract` | TensorKit | 0.17.0 | `tensors/tensoroperations.jl:159-167` | destination structure `permute(compose(sA, sB), pAB)` |
 | `typed::TensorMap::domain_rank` | TensorKit | 0.17.0 | `tensors/abstracttensor.jl:253-255` | `numin` |
-| `typed::TensorMap::domain_spaces` | TensorKit | 0.17.0 | `tensors/abstracttensor.jl:217-226` | `domain(t)` |
+| `typed::TensorMap::domain` | TensorKit | 0.17.0 | `tensors/abstracttensor.jl:217-226` | `domain(t)` |
 | `typed::TensorMap::exp` | TensorKit | 0.17.0 | `tensors/linalg.jl:44` | `exp` copies, then calls `exp!` |
 | `typed::TensorMap::exp` | TensorKit | 0.17.0 | `tensors/linalg.jl:420-427` | `exp!`: `domain == codomain` check, per-block dense exponential |
 | `typed::TensorMap::flip` | TensorKit | 0.17.0 | `tensors/indexmanipulations.jl:21-29` | |
@@ -152,9 +151,6 @@ upstream location (the note says why).
 | `typed::TensorMap::leg_dims` | TensorKit | 0.17.0 | `tensors/abstracttensor.jl:196-201` | `space(t, i)` |
 | `typed::TensorMap::lq_compact` | TensorKit | 0.17.0 | `factorizations/diagonal.jl:29-41,61-66` | divergence: TK's `DiagonalAlgorithm` LQ fast path not adopted (#613 Group 4) |
 | `typed::TensorMap::norm_p` | TensorKit | 0.17.0 | `tensors/linalg.jl:257-275` | `norm(t, p)` and the `_norm` block reduction |
-| `typed::TensorMap::numin` | TensorKit | 0.17.0 | `tensors/abstracttensor.jl:253-255` | typed facade |
-| `typed::TensorMap::numind` | TensorKit | 0.17.0 | `tensors/abstracttensor.jl:267` | typed facade |
-| `typed::TensorMap::numout` | TensorKit | 0.17.0 | `tensors/abstracttensor.jl:239-241` | typed facade |
 | `typed::TensorMap::qr_compact` | TensorKit | 0.17.0 | `factorizations/diagonal.jl:16-28,61-66` | divergence: TK's `DiagonalAlgorithm` QR fast path not adopted (#613 Group 4) |
 | `typed::TensorMap::qr_full` | TensorKit | 0.17.0 | `factorizations/diagonal.jl:16-28,61-66` | same non-adoption as `qr_compact` |
 | `typed::TensorMap::rand` | TensorKit | 0.17.0 | `tensors/tensor.jl:320-408` | the generated `rand`/`randn`/`randexp`/`randisometry` family |

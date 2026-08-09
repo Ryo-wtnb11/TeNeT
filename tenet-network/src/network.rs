@@ -736,7 +736,7 @@ where
         rhs_axes: &[usize],
         output_axes: &[usize],
     ) -> Result<StepOutput<TensorMap<R, D>>, HostNetworkError<R>> {
-        Ok(StepOutput::Returned(lhs.contract_ordered(
+        Ok(StepOutput::Returned(lhs.contract(
             rhs,
             lhs_axes,
             rhs_axes,

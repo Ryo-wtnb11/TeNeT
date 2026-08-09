@@ -91,12 +91,11 @@
 //! the index-manipulation and contraction operations
 //! ([`TensorMap::permute`], [`TensorMap::braid`], [`TensorMap::transpose`],
 //! [`TensorMap::transpose_axes`], [`TensorMap::repartition`],
-//! [`TensorMap::contract`], [`TensorMap::contract_ordered`],
+//! [`TensorMap::contract`],
 //! [`TensorMap::compose`]), the scalar operations
 //! ([`TensorMap::add`], [`TensorMap::scale`], [`TensorMap::norm`],
 //! [`TensorMap::norm_inf`], [`TensorMap::norm_p`], [`TensorMap::normalize`],
-//! [`TensorMap::inner`],
-//! [`TensorMap::dot`], [`TensorMap::tr`], [`TensorMap::trace_pairs`],
+//! [`TensorMap::inner`], [`TensorMap::tr`], [`TensorMap::trace_pairs`],
 //! [`TensorMap::adjoint`]), the factorizations ([`TensorMap::svd_compact`],
 //! [`TensorMap::svd_full`], [`TensorMap::svd_trunc`], [`TensorMap::svd_vals`],
 //! [`TensorMap::qr_compact`], [`TensorMap::qr_full`],
@@ -117,9 +116,8 @@
 //! [`TensorMap::inv`], [`TensorMap::pinv`], [`TensorMap::sqrt`]) and — with
 //! issue #580 — the **typed inspection, scalar and conversion group**
 //! ([`TensorMap::rank`], [`TensorMap::codomain_rank`],
-//! [`TensorMap::domain_rank`] and their TensorKit aliases `numout` / `numin` /
-//! `numind`, [`TensorMap::leg_dims`], [`TensorMap::leg_dim`],
-//! [`TensorMap::codomain_spaces`], [`TensorMap::domain_spaces`],
+//! [`TensorMap::domain_rank`], [`TensorMap::rank`], [`TensorMap::leg_dims`],
+//! [`TensorMap::leg_dim`], [`TensorMap::codomain`], [`TensorMap::domain`],
 //! [`TensorMap::scalar`], [`TensorMap::zeros_like`], [`TensorMap::to_c64`],
 //! [`TensorMap::re`], [`TensorMap::im`]) and the **concatenation/absorb
 //! group** ([`TensorMap::catdomain`], [`TensorMap::catcodomain`],
@@ -615,6 +613,7 @@ where
     /// diagonal tensors reduce without materialization; checked-Generic
     /// reductions currently require dense payloads. See [`Self::norm`] for the
     /// weighting, complexity, lazy behavior, and example.
+    #[doc(alias = "dot")]
     pub fn inner(&self, other: &Self) -> Result<D, TypedFacadeError<R>> {
         <R::Mode as TypedTensorReductionDispatch<R, D>>::inner(self, other)
     }
@@ -8936,36 +8935,42 @@ impl<R, D, S> TensorMap<R, D, S> {
     }
 
     /// Number of codomain legs.
+    #[doc(alias = "numout")]
     #[inline]
     pub fn codomain_rank(&self) -> usize {
         self.logical_space().space().homspace().codomain().len()
     }
 
     /// Number of domain legs.
+    #[doc(alias = "numin")]
     #[inline]
     pub fn domain_rank(&self) -> usize {
         self.logical_space().space().homspace().domain().len()
     }
 
     /// Total number of legs.
+    #[doc(alias = "numind")]
     #[inline]
     pub fn rank(&self) -> usize {
         self.codomain_rank() + self.domain_rank()
     }
 
-    /// TensorKit-compatible alias for [`Self::codomain_rank`].
+    /// Deprecated alias of [`Self::codomain_rank`].
+    #[deprecated(since = "0.1.0", note = "use codomain_rank instead")]
     #[inline]
     pub fn numout(&self) -> usize {
         self.codomain_rank()
     }
 
-    /// TensorKit-compatible alias for [`Self::domain_rank`].
+    /// Deprecated alias of [`Self::domain_rank`].
+    #[deprecated(since = "0.1.0", note = "use domain_rank instead")]
     #[inline]
     pub fn numin(&self) -> usize {
         self.domain_rank()
     }
 
-    /// TensorKit-compatible alias for [`Self::rank`].
+    /// Deprecated alias of [`Self::rank`].
+    #[deprecated(since = "0.1.0", note = "use rank instead")]
     #[inline]
     pub fn numind(&self) -> usize {
         self.rank()
@@ -8993,6 +8998,7 @@ impl<R, D, S> TensorMap<R, D, S> {
     /// Allocates: each call builds a fresh `Vec` and clones every leg's
     /// sector table (the provider travels by `Arc` bump). Hold the result
     /// rather than re-calling in a loop.
+    #[doc(alias = "codomain_spaces")]
     pub fn codomain(&self) -> Vec<GradedSpace<R>> {
         self.legs(self.logical_space().space().homspace().codomain())
     }
@@ -9000,22 +9006,20 @@ impl<R, D, S> TensorMap<R, D, S> {
     /// The domain legs, in axis order.
     ///
     /// Allocates per call, exactly as [`Self::codomain`].
+    #[doc(alias = "domain_spaces")]
     pub fn domain(&self) -> Vec<GradedSpace<R>> {
         self.legs(self.logical_space().space().homspace().domain())
     }
 
-    /// The codomain legs, in axis order (TensorKit `codomain(t)`).
-    /// Documented alias of
-    /// [`Self::codomain`], using TensorKit's accessor name.
+    /// Deprecated alias of [`Self::codomain`].
+    #[deprecated(since = "0.1.0", note = "use codomain instead")]
     #[inline]
     pub fn codomain_spaces(&self) -> Vec<GradedSpace<R>> {
         self.codomain()
     }
 
-    /// The domain legs, in axis order (TensorKit `domain(t)`) — the
-    /// spaces as written, i.e.
-    /// *not* dualized. Documented alias of [`Self::domain`], using
-    /// TensorKit's accessor name.
+    /// Deprecated alias of [`Self::domain`].
+    #[deprecated(since = "0.1.0", note = "use domain instead")]
     #[inline]
     pub fn domain_spaces(&self) -> Vec<GradedSpace<R>> {
         self.domain()
@@ -9405,7 +9409,6 @@ impl<R> TensorMap<R, f64, CudaStorage> {
 /// {
 ///     let _ = lhs.norm();
 ///     let _ = lhs.inner(rhs);
-///     let _ = lhs.dot(rhs);
 ///     let _ = lhs.scale(2.0);
 ///     let _ = lhs.add(rhs, 2.0, -3.0);
 ///     let _ = lhs.zeros_like();
@@ -9429,7 +9432,6 @@ impl<R> TensorMap<R, f64, CudaStorage> {
 /// ) {
 ///     let _ = lhs.norm();
 ///     let _ = lhs.inner(rhs);
-///     let _ = lhs.dot(rhs);
 ///     let _ = lhs.scale(Complex64::new(2.0, 0.0));
 ///     let _ = lhs.add(
 ///         rhs,
@@ -10894,6 +10896,7 @@ where
 
     /// Quantum-dimension-weighted Frobenius inner product of owned f64 device
     /// tensors. Lazy adjoints remain an explicit unsupported device scope.
+    #[doc(alias = "dot")]
     pub fn inner(&self, other: &Self) -> Result<f64, Error> {
         if !self.runtime.same_runtime(&other.runtime) {
             return Err(Error::RuntimeMismatch);
@@ -10908,7 +10911,8 @@ where
         self.weighted_inner_cuda(lhs, rhs)
     }
 
-    /// Total alias of [`Self::inner`].
+    /// Deprecated alias of [`Self::inner`].
+    #[deprecated(since = "0.1.0", note = "use inner instead")]
     #[inline]
     pub fn dot(&self, other: &Self) -> Result<f64, Error> {
         self.inner(other)
@@ -10960,6 +10964,7 @@ where
     /// Contracts owned or lazy-adjoint device tensors through the canonical fully-direct
     /// coupled-block route. Other layouts are explicit unsupported errors;
     /// device data is never downloaded or materialized on host.
+    #[doc(alias = "contract_ordered")]
     pub fn contract(
         &self,
         other: &Self,
@@ -11033,8 +11038,8 @@ where
         })
     }
 
-    /// Total alias of [`Self::contract`] with the same device capability and
-    /// error behavior.
+    /// Deprecated alias of [`Self::contract`].
+    #[deprecated(since = "0.1.0", note = "use contract instead")]
     #[inline]
     pub fn contract_ordered(
         &self,
@@ -11470,7 +11475,7 @@ where
         if self.spectrum().is_some() {
             return Ok(true);
         }
-        if self.rank() != 2 || self.numout() != 1 || self.numin() != 1 {
+        if self.rank() != 2 || self.codomain_rank() != 1 || self.domain_rank() != 1 {
             return Ok(false);
         }
         let materialized = self.materialized_tensor_uncached()?;
@@ -12264,6 +12269,7 @@ where
     /// unchanged. The destination is cleared immediately before shared-engine
     /// compilation/replay, so a later engine error may leave it zeroed or
     /// partially overwritten.
+    #[doc(alias = "contract_ordered_overwrite_into")]
     #[allow(clippy::too_many_arguments)]
     pub fn contract_overwrite_into(
         &self,
@@ -12382,7 +12388,8 @@ where
         Ok(())
     }
 
-    /// Total alias of [`Self::contract_overwrite_into`].
+    /// Deprecated alias of [`Self::contract_overwrite_into`].
+    #[deprecated(since = "0.1.0", note = "use contract_overwrite_into instead")]
     #[inline]
     #[allow(clippy::too_many_arguments)]
     pub fn contract_ordered_overwrite_into(
@@ -12849,6 +12856,7 @@ where
     /// assert_eq!(out.data(), t.data());
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
+    #[doc(alias = "contract_ordered")]
     pub fn contract(
         &self,
         other: &Self,
@@ -12872,7 +12880,7 @@ where
         )
     }
 
-    /// Documented alias of [`Self::contract`]: same arguments, same
+    /// Deprecated alias of [`Self::contract`]: same arguments, same
     /// semantics, same compact fast paths and complexity, same errors — the
     /// delegation is total, so everything is stated there once.
     ///
@@ -12888,6 +12896,7 @@ where
     /// # Errors
     ///
     /// Exactly [`Self::contract`]'s.
+    #[deprecated(since = "0.1.0", note = "use contract instead")]
     #[inline]
     pub fn contract_ordered(
         &self,
@@ -15002,12 +15011,12 @@ where
         )?))
     }
 
-    /// `LinearAlgebra.dot` / TensorKit `dot(x, y)` — an alias for
-    /// [`Self::inner`].
+    /// Deprecated alias of [`Self::inner`].
     ///
     /// # Errors
     ///
     /// Exactly [`Self::inner`]'s.
+    #[deprecated(since = "0.1.0", note = "use inner instead")]
     pub fn dot(&self, other: &Self) -> Result<D, Error> {
         self.inner(other)
     }
@@ -17619,7 +17628,7 @@ mod representation_gates {
             Err(Error::UnsupportedOnDevice(_))
         ));
         assert!(matches!(
-            lazy_device.dot(&lazy_device),
+            lazy_device.inner(&lazy_device),
             Err(Error::UnsupportedOnDevice(_))
         ));
         assert_eq!(materialized_adjoint_builds(&lazy_device), 0);
@@ -17733,7 +17742,7 @@ mod representation_gates {
                 let rhs_device = device_operand(&rhs, rhs_adjoint);
                 let contracted = if upload_parent_first {
                     lhs_device
-                        .contract_ordered(&rhs_device, &[1], &[0], &[0, 1])
+                        .contract(&rhs_device, &[1], &[0], &[0, 1])
                         .unwrap()
                 } else {
                     lhs_device
@@ -18008,10 +18017,10 @@ mod representation_gates {
                 space.is_dual(),
             )
         };
-        let source_codomain = source.codomain_spaces();
-        let source_domain = source.domain_spaces();
-        let adjoint_codomain = adjoint.codomain_spaces();
-        let adjoint_domain = adjoint.domain_spaces();
+        let source_codomain = source.codomain();
+        let source_domain = source.domain();
+        let adjoint_codomain = adjoint.codomain();
+        let adjoint_domain = adjoint.domain();
         assert_eq!(
             signature(&adjoint_codomain[0]),
             signature(&source_domain[0])
@@ -21010,14 +21019,14 @@ mod representation_gates {
     #[test]
     fn adjoint_positive_trace_conjugates_the_parent_without_materializing() {
         let u1_source = u1_lazy_fixture();
-        let u1_leg = u1_source.codomain_spaces().remove(0);
+        let u1_leg = u1_source.codomain().remove(0);
         let u1 =
             TensorMap::from_block_fn(u1_source.runtime(), [&u1_leg], [&u1_leg], |_, indices| {
                 (indices[0] + 2 * indices[1]) as f64 + 1.0
             })
             .unwrap();
         let su2_source = su2_lazy_fixture();
-        let su2_leg = su2_source.codomain_spaces().remove(0);
+        let su2_leg = su2_source.codomain().remove(0);
         let su2 = TensorMap::from_block_fn(
             su2_source.runtime(),
             [&su2_leg],
@@ -21090,14 +21099,14 @@ mod representation_gates {
     #[test]
     fn adjoint_contract_and_compose_stay_parent_native() {
         let u1_source = u1_lazy_fixture();
-        let u1_leg = u1_source.codomain_spaces().remove(0);
+        let u1_leg = u1_source.codomain().remove(0);
         let u1 =
             TensorMap::from_block_fn(u1_source.runtime(), [&u1_leg], [&u1_leg], |_, indices| {
                 (indices[0] + 2 * indices[1]) as f64 + 1.0
             })
             .unwrap();
         let su2_source = su2_lazy_fixture();
-        let su2_leg = su2_source.codomain_spaces().remove(0);
+        let su2_leg = su2_source.codomain().remove(0);
         let su2 = TensorMap::from_block_fn(
             su2_source.runtime(),
             [&su2_leg],
@@ -21239,7 +21248,7 @@ mod representation_gates {
     fn lazy_contract_preserves_validation_precedence_without_materializing() {
         let source = {
             let fixture = u1_lazy_fixture();
-            let leg = fixture.codomain_spaces().remove(0);
+            let leg = fixture.codomain().remove(0);
             TensorMap::from_block_fn(fixture.runtime(), [&leg], [&leg], |_, indices| {
                 (indices[0] + 2 * indices[1] + 1) as f64
             })
@@ -21277,7 +21286,7 @@ mod representation_gates {
         assert_eq!(materialized_adjoint_builds(&lazy), 0);
 
         let other_runtime = Runtime::builder().dense_threads(1).build().unwrap();
-        let source_leg = source.codomain_spaces().remove(0);
+        let source_leg = source.codomain().remove(0);
         let other =
             TensorMap::from_block_fn(&other_runtime, [&source_leg], [&source_leg], |_, _| 1.0)
                 .unwrap();
@@ -21685,6 +21694,7 @@ mod representation_gates {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(deprecated)]
     fn assert_contract_overwrite_matches<R, D>(
         label: &str,
         lhs: &TensorMap<R, D>,
