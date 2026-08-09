@@ -338,7 +338,7 @@ fn malformed_framing_limits_and_provider_failures_are_typed_and_ordered() {
     ));
 
     let mut mismatched_key = bytes.clone();
-    mismatched_key[20..24].copy_from_slice(b"bad!");
+    mismatched_key[20..23].copy_from_slice(b"bad");
     let mismatched = Su2Codec::mismatched(Arc::clone(&provider));
     assert!(matches!(
         decode(&mismatched_key, DecodeLimits::default(), &mismatched),
