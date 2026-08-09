@@ -1,7 +1,9 @@
 [package]
 name = "tenet-network"
 version = "0.1.0"
+description = "Tensor-network contraction planning and execution for TeNeT"
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
