@@ -25,13 +25,31 @@ const REPR_DENSE: u8 = 1;
 const REPR_DIAGONAL: u8 = 2;
 const REPR_ADJOINT: u8 = 3;
 
-/// Caller-owned authority for stable provider keys and semantic sector labels.
+/// Supplies stable provider keys and semantic sector labels for typed snapshots.
 ///
-/// TeNeT never serializes a provider or owns a global provider registry.
-/// `resolve_provider` must return the provider allocation authorized by `key`;
-/// the decoder re-derives and compares the key before issuing provider queries.
-/// Sector encodings must be canonical: equal labels must produce equal bytes,
-/// and decoding followed by encoding must reproduce the original bytes.
+/// A snapshot is a versioned semantic description, not a dump of Rust memory.
+/// It contains a provider key but not the provider object. During decoding,
+/// [`Self::resolve_provider`] supplies the provider instance used to rebuild the
+/// object; the decoder recomputes its key and requires an exact match before
+/// querying it. Sector encodings must be canonical: equal labels must produce
+/// equal bytes, and decoding followed by encoding must reproduce the original
+/// bytes. A canonical codec therefore produces deterministic snapshots.
+///
+/// Version 1 keeps the same meaning across compatible TeNeT releases. A change
+/// that cannot preserve that meaning requires a new version, and readers reject
+/// unknown versions.
+///
+/// Encoding can fail if the codec cannot encode a label or the provider cannot
+/// read back a stored label. Tensor encoding can also reject an invalid live
+/// representation, and any encoding can reject a length outside the v1 wire
+/// format. No bytes are returned on failure.
+///
+/// Decoding checks framing and declared resource counts against [`DecodeLimits`]
+/// before provider resolution, payload allocation, or reconstruction. Resolved
+/// dimensions are checked again before allocating tensor data. Errors distinguish
+/// malformed input, unsupported versions, limit violations, codec failures,
+/// provider-key mismatches, and invalid sector or block data. No partially
+/// reconstructed object is returned.
 pub trait TypedPersistenceCodec<R>
 where
     R: TypedSectorAdmission,
@@ -39,10 +57,10 @@ where
     /// Error produced by provider resolution or semantic-label conversion.
     type Error: std::error::Error + Send + Sync + 'static;
 
-    /// Stable key naming the provider's full category, codec, and gauge authority.
+    /// Stable key identifying the provider's category, codec, and gauge.
     fn provider_key(&self, provider: &R) -> Result<Vec<u8>, Self::Error>;
 
-    /// Resolves a stable key to the exact provider allocation used by restoration.
+    /// Returns the provider instance to use when decoding a stable key.
     fn resolve_provider(&self, key: &[u8]) -> Result<Arc<R>, Self::Error>;
 
     /// Canonically encodes one public semantic sector label.
@@ -1588,15 +1606,8 @@ where
     /// Returns a deterministic v1 semantic snapshot of this graded space.
     ///
     /// The snapshot records duality, degeneracies, canonical sector labels, and
-    /// the codec's provider key. It is a versioned description of the space,
-    /// not a dump of its memory layout. The provider object itself is not
-    /// serialized. With a canonical [`TypedPersistenceCodec`], encoding the
-    /// same space produces the same bytes.
-    ///
-    /// Encoding can fail if the codec or provider cannot encode a label, or if
-    /// a length does not fit the v1 wire format. An error returns no snapshot.
-    /// Version 1 is the compatibility boundary: compatible releases preserve
-    /// its meaning, while an incompatible format change requires a new version.
+    /// the codec's provider key. See [`TypedPersistenceCodec`] for the shared
+    /// format, compatibility, and failure guarantees.
     ///
     /// # Example
     ///
@@ -1699,19 +1710,12 @@ where
     R: TypedSectorAdmission,
     R::Mode: TypedTensorModeDispatch<R>,
 {
-    /// Returns a fully validated graded space using the resolver's exact provider `Arc`.
+    /// Returns a fully validated graded space using the provider instance
+    /// returned by the resolver.
     ///
-    /// The provider key is read from the snapshot; the provider object is
-    /// obtained from [`TypedPersistenceCodec::resolve_provider`] and its key
-    /// must match. Framing and declared sizes are checked against `limits`
-    /// before provider resolution, allocation, or provider/layout validation.
-    /// The reconstructed space is returned only after all checks succeed.
-    ///
-    /// Errors distinguish malformed input, an unsupported version, a limit
-    /// violation, a codec failure, a provider-key mismatch, and a
-    /// provider/layout validation failure. Version 1 snapshots are accepted
-    /// across compatible releases; unknown versions are rejected rather than
-    /// interpreted with different semantics.
+    /// The method restores duality, sector labels, and degeneracies. See
+    /// [`TypedPersistenceCodec`] for provider-key checks, resource limits,
+    /// compatibility, and failure guarantees.
     pub fn from_bytes_with<C>(
         bytes: &[u8],
         limits: DecodeLimits,
@@ -1737,20 +1741,11 @@ macro_rules! tensor_persistence_impl {
         {
             /// Returns a deterministic v1 semantic snapshot of this Host `Vec` tensor.
             ///
-            /// This entrypoint is available for `f64` and [`Complex64`]. It
-            /// records spaces, canonical sector and fusion-tree labels, scalar
-            /// bits, and the codec's provider key; it does not copy the Rust
-            /// memory layout or serialize the provider object. Dense,
-            /// compact-diagonal, and lazy-adjoint representations retain their
-            /// representation on restoration. With a canonical
-            /// [`TypedPersistenceCodec`], the same tensor produces the same
-            /// bytes.
-            ///
-            /// Encoding can fail on codec or provider-label errors, an invalid
-            /// live representation, or a length outside the v1 wire format. An
-            /// error returns no snapshot. Compatible releases preserve the
-            /// meaning of version 1; incompatible format changes require a new
-            /// version.
+            /// This method is available for `f64` and [`Complex64`]. It records
+            /// spaces, canonical sector and fusion-tree labels, scalar bits,
+            /// and whether the representation is dense, compact-diagonal, or
+            /// a lazy adjoint. See [`TypedPersistenceCodec`] for the shared
+            /// format, compatibility, and failure guarantees.
             pub fn to_bytes_with<C>(
                 &self,
                 codec: &C,
@@ -1767,23 +1762,13 @@ macro_rules! tensor_persistence_impl {
             R: TypedSectorAdmission,
             R::Mode: TypedTensorRootDispatch<R> + TypedTensorAdjointDispatch<R, $scalar>,
         {
-            /// Returns a fully validated Host `Vec` tensor using the resolver's exact provider `Arc`.
+            /// Returns a fully validated Host `Vec` tensor using the provider
+            /// instance returned by the resolver.
             ///
-            /// This entrypoint restores `f64` or [`Complex64`] scalar bits and
+            /// The method restores `f64` or [`Complex64`] scalar bits and
             /// preserves whether the snapshot is dense, compact-diagonal, or a
-            /// lazy adjoint. The provider key is serialized, but the provider
-            /// object comes from [`TypedPersistenceCodec::resolve_provider`];
-            /// the returned object's key must exactly match the snapshot.
-            ///
-            /// Framing and declared resource counts are checked against
-            /// `limits` before provider resolution, payload allocation, or
-            /// provider/layout validation. Resolved dimensions are checked
-            /// again before construction. Malformed input, unsupported
-            /// versions, limit violations, codec failures, provider-key
-            /// mismatches, and provider/layout validation failures return an
-            /// error without a partial tensor. Version 1 snapshots are
-            /// accepted across compatible releases; unknown versions are
-            /// rejected rather than interpreted with different semantics.
+            /// lazy adjoint. See [`TypedPersistenceCodec`] for provider-key
+            /// checks, resource limits, compatibility, and failure guarantees.
             pub fn from_bytes_with<C>(
                 runtime: &Runtime,
                 bytes: &[u8],
