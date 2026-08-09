@@ -54,7 +54,7 @@ deterministic diagonal `TensorMap`s, and contracts them with `tensor!`. Its
 assertions check both the result rank and the analytic squared norm, `50`.
 
 After this first calculation, the guided [U(1) iTEBD Heisenberg
-application](../../docs/itebd_heisenberg.md) shows how the same tensor-map
+application](https://github.com/Ryo-wtnb11/TeNeT/blob/main/docs/itebd_heisenberg.md) shows how the same tensor-map
 conventions build a complete ground-state search.
 
 ### Scalar dtype
@@ -616,7 +616,7 @@ This doctest demonstrates the tensor algebra: apply a random Hermitian
 two-site imaginary-time gate to a random wavefunction, regroup the legs around
 the bond, and truncate with `svd_trunc`. It is not a Heisenberg Hamiltonian or
 an iTEBD loop. For the physical model and complete algorithm, follow the
-guided [U(1) iTEBD Heisenberg application](../../docs/itebd_heisenberg.md).
+guided [U(1) iTEBD Heisenberg application](https://github.com/Ryo-wtnb11/TeNeT/blob/main/docs/itebd_heisenberg.md).
 
 <div class="math" style="margin: 1.25rem 0; padding: 0.2rem 0; overflow-x: auto;">
 <math display="block" style="font-size: 1.12em; line-height: 1.8;" xmlns="http://www.w3.org/1998/Math/MathML">
