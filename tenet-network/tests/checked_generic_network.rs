@@ -116,11 +116,14 @@ fn assert_sun_network<D: OracleScalar + Send + Sync + 'static>(n: usize, label: 
     let rhs_provider = Arc::new(SUNFusionRule::new(n).unwrap());
     let tail_provider = Arc::new(SUNFusionRule::new(n).unwrap());
     let lhs_leg =
-        GradedSpace::try_new_shared(Arc::clone(&lhs_provider), [(label.clone(), 1)]).unwrap();
+        GradedSpace::try_new_with_shared_provider(Arc::clone(&lhs_provider), [(label.clone(), 1)])
+            .unwrap();
     let rhs_leg =
-        GradedSpace::try_new_shared(Arc::clone(&rhs_provider), [(label.clone(), 1)]).unwrap();
+        GradedSpace::try_new_with_shared_provider(Arc::clone(&rhs_provider), [(label.clone(), 1)])
+            .unwrap();
     let tail_leg =
-        GradedSpace::try_new_shared(Arc::clone(&tail_provider), [(label.clone(), 1)]).unwrap();
+        GradedSpace::try_new_with_shared_provider(Arc::clone(&tail_provider), [(label.clone(), 1)])
+            .unwrap();
     let lhs: TensorMap<_, D> = TensorMap::from_block_fn(
         &runtime,
         [&lhs_leg, &lhs_leg],
@@ -233,13 +236,19 @@ fn assert_sun_network<D: OracleScalar + Send + Sync + 'static>(n: usize, label: 
     let drift_lhs_provider = Arc::new(SUNFusionRule::new(n).unwrap());
     let drift_middle_provider = Arc::new(SUNFusionRule::new(n).unwrap());
     let drift_tail_provider = Arc::new(SUNFusionRule::new(n).unwrap());
-    let drift_lhs_leg =
-        GradedSpace::try_new_shared(Arc::clone(&drift_lhs_provider), [(label.clone(), 1)]).unwrap();
-    let drift_middle_leg =
-        GradedSpace::try_new_shared(Arc::clone(&drift_middle_provider), [(label.clone(), 1)])
-            .unwrap();
+    let drift_lhs_leg = GradedSpace::try_new_with_shared_provider(
+        Arc::clone(&drift_lhs_provider),
+        [(label.clone(), 1)],
+    )
+    .unwrap();
+    let drift_middle_leg = GradedSpace::try_new_with_shared_provider(
+        Arc::clone(&drift_middle_provider),
+        [(label.clone(), 1)],
+    )
+    .unwrap();
     let drift_tail_leg =
-        GradedSpace::try_new_shared(Arc::clone(&drift_tail_provider), [(label, 1)]).unwrap();
+        GradedSpace::try_new_with_shared_provider(Arc::clone(&drift_tail_provider), [(label, 1)])
+            .unwrap();
     let drift_lhs: TensorMap<_, D> = TensorMap::from_block_fn(
         &runtime,
         [&drift_lhs_leg, &drift_lhs_leg],
@@ -585,7 +594,8 @@ fn injected_chain(
     runtime: &Runtime,
     provider: &Arc<InjectedGeneric>,
 ) -> Vec<TensorMap<InjectedGeneric, f64>> {
-    let leg = GradedSpace::try_new_shared(Arc::clone(provider), [(vec![1, 1], 1)]).unwrap();
+    let leg =
+        GradedSpace::try_new_with_shared_provider(Arc::clone(provider), [(vec![1, 1], 1)]).unwrap();
     vec![
         TensorMap::from_block_fn(runtime, [&leg, &leg], [&leg], |trees, _| {
             trees.codomain_vertices()[0].get() as f64
@@ -681,7 +691,7 @@ fn checked_generic_failures_stay_typed_and_workspace_recovers_at_every_step() {
 
     provider.fail_encode.store(true, Ordering::SeqCst);
     assert!(matches!(
-        GradedSpace::try_new_shared(Arc::clone(&provider), [(vec![1, 1], 1)]),
+        GradedSpace::try_new_with_shared_provider(Arc::clone(&provider), [(vec![1, 1], 1)]),
         Err(GenericTensorError::Structure(_))
     ));
     provider.fail_encode.store(false, Ordering::SeqCst);
@@ -721,7 +731,8 @@ fn checked_generic_static_trace_failure_stays_typed_and_does_not_publish_cache_s
     // or replay workspace is published, and the same expression can recover.
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(InjectedGeneric::new());
-    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(vec![1, 1], 1)]).unwrap();
+    let leg = GradedSpace::try_new_with_shared_provider(Arc::clone(&provider), [(vec![1, 1], 1)])
+        .unwrap();
     let tensor: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| 1.0).unwrap();
     provider.arm_symbol(1);
@@ -746,7 +757,8 @@ fn checked_generic_static_trace_failure_stays_typed_and_does_not_publish_cache_s
 fn checked_generic_scalar_empty_outer_product_and_single_permute_follow_ordinary_ops() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(InjectedGeneric::new());
-    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(vec![1, 1], 1)]).unwrap();
+    let leg = GradedSpace::try_new_with_shared_provider(Arc::clone(&provider), [(vec![1, 1], 1)])
+        .unwrap();
     let lhs: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&leg], [], |_, _| 2.0).unwrap();
     let rhs: TensorMap<_, f64> =
@@ -797,7 +809,7 @@ fn checked_generic_scalar_empty_outer_product_and_single_permute_follow_ordinary
         rank_three.permute(&[1, 0], &[2]).unwrap().data()
     );
 
-    let empty = GradedSpace::try_new_shared(
+    let empty = GradedSpace::try_new_with_shared_provider(
         Arc::clone(&provider),
         std::iter::empty::<(Vec<i64>, usize)>(),
     )
@@ -822,7 +834,8 @@ fn checked_generic_scalar_empty_outer_product_and_single_permute_follow_ordinary
 fn checked_generic_cache_modes_dtype_pools_and_lazy_rejection_match_direct_authority() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(InjectedGeneric::new());
-    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(vec![1, 1], 1)]).unwrap();
+    let leg = GradedSpace::try_new_with_shared_provider(Arc::clone(&provider), [(vec![1, 1], 1)])
+        .unwrap();
     let a64: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| 2.0).unwrap();
     let b64: TensorMap<_, f64> =

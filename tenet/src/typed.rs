@@ -7366,7 +7366,7 @@ where
     where
         Pairs: IntoIterator<Item = (R::Sector, usize)>,
     {
-        Self::try_new_shared(Arc::new(provider), pairs)
+        Self::try_new_with_shared_provider(Arc::new(provider), pairs)
     }
 
     /// Creates a nondual space and reuses an existing provider allocation.
@@ -7375,7 +7375,7 @@ where
     /// several spaces should share an expensive provider or its performance
     /// cache; ordinary callers do not need to allocate an [`Arc`] themselves.
     /// Call [`Self::try_dual`] to construct the dual space.
-    pub fn try_new_shared<Pairs>(
+    pub fn try_new_with_shared_provider<Pairs>(
         provider: Arc<R>,
         pairs: Pairs,
     ) -> Result<Self, TypedFacadeError<R>>
@@ -7843,7 +7843,7 @@ where
         legs.into_iter()
             .map(|leg| {
                 let sectors = leg.sectors()?;
-                GradedSpace::try_new_shared(
+                GradedSpace::try_new_with_shared_provider(
                     Arc::clone(&provider),
                     sectors
                         .into_iter()
@@ -16348,18 +16348,18 @@ mod representation_gates {
     fn u1_lazy_fixture() -> TensorMap<U1FusionRule, f64> {
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let provider = Arc::new(U1FusionRule);
-        let left = GradedSpace::try_new_shared(
+        let left = GradedSpace::try_new_with_shared_provider(
             Arc::clone(&provider),
             [(U1Irrep::new(-1), 1), (U1Irrep::new(0), 2)],
         )
         .unwrap();
-        let right = GradedSpace::try_new_shared(
+        let right = GradedSpace::try_new_with_shared_provider(
             Arc::clone(&provider),
             [(U1Irrep::new(0), 3), (U1Irrep::new(1), 1)],
         )
         .and_then(|space| space.try_dual())
         .unwrap();
-        let domain = GradedSpace::try_new_shared(
+        let domain = GradedSpace::try_new_with_shared_provider(
             provider,
             [
                 (U1Irrep::new(-1), 2),
@@ -16492,8 +16492,11 @@ mod representation_gates {
         assert_eq!(materialized_adjoint_builds(&lazy_zero), 0);
         assert!(std::ptr::eq(lazy_zero.provider(), provider));
 
-        let empty_leg =
-            GradedSpace::try_new_shared(Arc::new(U1FusionRule), [(U1Irrep::new(0), 0)]).unwrap();
+        let empty_leg = GradedSpace::try_new_with_shared_provider(
+            Arc::new(U1FusionRule),
+            [(U1Irrep::new(0), 0)],
+        )
+        .unwrap();
         let empty =
             TensorMap::from_block_fn(source.runtime(), [&empty_leg], [&empty_leg], |_, _| {
                 f64::NAN
@@ -16619,7 +16622,7 @@ mod representation_gates {
     fn typed_cuda_eigh_full_and_trunc_match_host_without_hidden_materialization() {
         let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
         let provider = Arc::new(U1FusionRule);
-        let leg = GradedSpace::try_new_shared(
+        let leg = GradedSpace::try_new_with_shared_provider(
             Arc::clone(&provider),
             [(U1Irrep::new(-1), 2), (U1Irrep::new(0), 3)],
         )
@@ -16690,7 +16693,7 @@ mod representation_gates {
         assert_eq!(materialized_adjoint_builds(&device), 0);
 
         let su2_provider = Arc::new(SU2FusionRule);
-        let su2_leg = GradedSpace::try_new_shared(
+        let su2_leg = GradedSpace::try_new_with_shared_provider(
             Arc::clone(&su2_provider),
             [
                 (SU2Irrep::from_twice_spin(0), 2),
@@ -16760,7 +16763,7 @@ mod representation_gates {
     fn typed_cuda_qr_work_and_preflight_are_streamed_and_transactional() {
         let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
         let provider = Arc::new(SU2FusionRule);
-        let leg = GradedSpace::try_new_shared(
+        let leg = GradedSpace::try_new_with_shared_provider(
             Arc::clone(&provider),
             [
                 (SU2Irrep::from_twice_spin(0), 2),
@@ -16864,8 +16867,12 @@ mod representation_gates {
         });
 
         let zn3 = Arc::new(ZNFusionRule::new(3).unwrap());
-        let charge0 = GradedSpace::try_new_shared(Arc::clone(&zn3), [(zn3.irrep(0), 1)]).unwrap();
-        let charge1 = GradedSpace::try_new_shared(Arc::clone(&zn3), [(zn3.irrep(1), 1)]).unwrap();
+        let charge0 =
+            GradedSpace::try_new_with_shared_provider(Arc::clone(&zn3), [(zn3.irrep(0), 1)])
+                .unwrap();
+        let charge1 =
+            GradedSpace::try_new_with_shared_provider(Arc::clone(&zn3), [(zn3.irrep(1), 1)])
+                .unwrap();
         let empty: TensorMap<_, f64> =
             TensorMap::from_block_fn(&runtime, [&charge0], [&charge1], |_, _| 1.0).unwrap();
         CUDA_QR_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0, 0, 0))));
@@ -16882,7 +16889,7 @@ mod representation_gates {
     fn typed_cuda_svd_work_is_streamed_and_preflight_is_transactional() {
         let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
         let provider = Arc::new(SU2FusionRule);
-        let leg = GradedSpace::try_new_shared(
+        let leg = GradedSpace::try_new_with_shared_provider(
             Arc::clone(&provider),
             [
                 (SU2Irrep::from_twice_spin(0), 2),
@@ -16970,7 +16977,7 @@ mod representation_gates {
         // allocation, rank-zero semantics, and every late failure stay atomic.
         let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
         let provider = Arc::new(SU2FusionRule);
-        let leg = GradedSpace::try_new_shared(
+        let leg = GradedSpace::try_new_with_shared_provider(
             Arc::clone(&provider),
             [
                 (SU2Irrep::from_twice_spin(0), 2),
@@ -17195,7 +17202,8 @@ mod representation_gates {
         CUDA_SVD_TRUNC_FINAL_EXTENTS.with(|extents| *extents.borrow_mut() = Some(Vec::new()));
         let foreign_provider = Arc::new(U1FusionRule);
         let foreign_space =
-            GradedSpace::try_new_shared(foreign_provider, [(U1Irrep::new(0), 1)]).unwrap();
+            GradedSpace::try_new_with_shared_provider(foreign_provider, [(U1Irrep::new(0), 1)])
+                .unwrap();
         assert!(device
             .svd_trunc(&Truncation::space(foreign_space.truncspace()))
             .is_err());
@@ -17224,12 +17232,12 @@ mod representation_gates {
         // selectors, while mixed inputs decompose only their matched route.
         let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
         let provider = Arc::new(U1FusionRule);
-        let mixed_rows = GradedSpace::try_new_shared(
+        let mixed_rows = GradedSpace::try_new_with_shared_provider(
             Arc::clone(&provider),
             [(U1Irrep::new(0), 2), (U1Irrep::new(1), 2)],
         )
         .unwrap();
-        let mixed_cols = GradedSpace::try_new_shared(
+        let mixed_cols = GradedSpace::try_new_with_shared_provider(
             Arc::clone(&provider),
             [(U1Irrep::new(0), 3), (U1Irrep::new(2), 1)],
         )
@@ -17282,8 +17290,11 @@ mod representation_gates {
             3 + 2 * mixed_nonempty
         );
 
-        let empty_rows =
-            GradedSpace::try_new_shared(Arc::clone(&provider), [(U1Irrep::new(4), 2)]).unwrap();
+        let empty_rows = GradedSpace::try_new_with_shared_provider(
+            Arc::clone(&provider),
+            [(U1Irrep::new(4), 2)],
+        )
+        .unwrap();
         let empty: TensorMap<_, f64> =
             TensorMap::from_block_fn(&runtime, [&empty_rows], [&mixed_cols], |_, _| 1.0).unwrap();
         assert!(empty.data().is_empty());
@@ -17308,9 +17319,12 @@ mod representation_gates {
             vec![("final", 0), ("final", 0), ("final", 0)]
         );
 
-        let absent = GradedSpace::try_new_shared(Arc::new(U1FusionRule), [(U1Irrep::new(9), 1)])
-            .unwrap()
-            .truncspace();
+        let absent = GradedSpace::try_new_with_shared_provider(
+            Arc::new(U1FusionRule),
+            [(U1Irrep::new(9), 1)],
+        )
+        .unwrap()
+        .truncspace();
         for policy in [
             Truncation::space(absent.clone()),
             Truncation::rank(usize::MAX).and(Truncation::space(absent.clone())),
@@ -17392,7 +17406,7 @@ mod representation_gates {
     fn typed_cuda_compact_and_lazy_roundtrips_keep_source_caches_cold() {
         let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
         let provider = Arc::new(U1FusionRule);
-        let leg = GradedSpace::try_new_shared(
+        let leg = GradedSpace::try_new_with_shared_provider(
             Arc::clone(&provider),
             [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
         )
@@ -17619,8 +17633,11 @@ mod representation_gates {
         let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
         let provider = Arc::new(U1FusionRule);
         let leg = |degeneracy| {
-            GradedSpace::try_new_shared(Arc::clone(&provider), [(U1Irrep::new(0), degeneracy)])
-                .unwrap()
+            GradedSpace::try_new_with_shared_provider(
+                Arc::clone(&provider),
+                [(U1Irrep::new(0), degeneracy)],
+            )
+            .unwrap()
         };
         let (m, k, n) = (2, 3, 4);
         let lhs = TensorMap::from_block_fn(&runtime, [&leg(m)], [&leg(k)], |_, indices| {
@@ -17696,7 +17713,7 @@ mod representation_gates {
         let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
         let provider = Arc::new(FermionParityFusionRule);
         let odd = |is_dual| {
-            GradedSpace::try_new_shared(Arc::clone(&provider), [(Z2Irrep::ODD, 1)])
+            GradedSpace::try_new_with_shared_provider(Arc::clone(&provider), [(Z2Irrep::ODD, 1)])
                 .and_then(|space| if is_dual { space.try_dual() } else { Ok(space) })
                 .unwrap()
         };
@@ -17743,7 +17760,7 @@ mod representation_gates {
         let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
 
         let su2_provider = Arc::new(SU2FusionRule);
-        let su2 = GradedSpace::try_new_shared(
+        let su2 = GradedSpace::try_new_with_shared_provider(
             Arc::clone(&su2_provider),
             [
                 (SU2Irrep::from_twice_spin(0), 1),
@@ -17764,7 +17781,7 @@ mod representation_gates {
         assert_cuda_lazy_contract_orientations(&su2_lhs, &su2_rhs);
 
         let product_provider = Arc::new(U1FusionRule.product(FermionParityFusionRule));
-        let product = GradedSpace::try_new_shared(
+        let product = GradedSpace::try_new_with_shared_provider(
             Arc::clone(&product_provider),
             [
                 (product_sector(U1Irrep::new(0), Z2Irrep::EVEN), 2),
@@ -17816,7 +17833,7 @@ mod representation_gates {
     fn su2_lazy_fixture() -> TensorMap<SU2FusionRule, f64> {
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let provider = Arc::new(SU2FusionRule);
-        let leg = GradedSpace::try_new_shared(
+        let leg = GradedSpace::try_new_with_shared_provider(
             provider,
             [
                 (SU2Irrep::from_twice_spin(0), 2),
@@ -17836,14 +17853,14 @@ mod representation_gates {
     ) -> TensorMap<U1FusionRule, f64> {
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let provider = Arc::new(U1FusionRule);
-        let codomain = GradedSpace::try_new_shared(
+        let codomain = GradedSpace::try_new_with_shared_provider(
             Arc::clone(&provider),
             codomain
                 .into_iter()
                 .map(|(charge, degeneracy)| (U1Irrep::new(charge), degeneracy)),
         )
         .unwrap();
-        let domain = GradedSpace::try_new_shared(
+        let domain = GradedSpace::try_new_with_shared_provider(
             provider,
             domain
                 .into_iter()
@@ -17981,7 +17998,9 @@ mod representation_gates {
 
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let provider = Arc::new(SUNFusionRule::new(3).unwrap());
-        let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(vec![1, 1], 1)]).unwrap();
+        let leg =
+            GradedSpace::try_new_with_shared_provider(Arc::clone(&provider), [(vec![1, 1], 1)])
+                .unwrap();
         let source: TensorMap<_, f64> =
             TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| 2.0).unwrap();
         let lazy = source.adjoint().unwrap();
@@ -18012,7 +18031,9 @@ mod representation_gates {
 
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let provider = Arc::new(SUNFusionRule::new(3).unwrap());
-        let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(vec![1, 1], 2)]).unwrap();
+        let leg =
+            GradedSpace::try_new_with_shared_provider(Arc::clone(&provider), [(vec![1, 1], 2)])
+                .unwrap();
         let source: TensorMap<_, f64> =
             TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, indices| {
                 let row = indices[0] + 2 * indices[1];
@@ -18072,7 +18093,9 @@ mod representation_gates {
 
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let provider = Arc::new(SUNFusionRule::new(3).unwrap());
-        let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(vec![1, 1], 2)]).unwrap();
+        let leg =
+            GradedSpace::try_new_with_shared_provider(Arc::clone(&provider), [(vec![1, 1], 2)])
+                .unwrap();
         let source: TensorMap<_, f64> =
             TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, ij| {
                 [[2.0, 1.0], [3.0, 4.0]][ij[0]][ij[1]]
@@ -18100,7 +18123,9 @@ mod representation_gates {
 
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let provider = Arc::new(SUNFusionRule::new(3).unwrap());
-        let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(vec![1, 1], 1)]).unwrap();
+        let leg =
+            GradedSpace::try_new_with_shared_provider(Arc::clone(&provider), [(vec![1, 1], 1)])
+                .unwrap();
         let source: TensorMap<_, f64> =
             TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], |trees, _| {
                 trees.codomain_vertices()[0].get() as f64
@@ -18146,7 +18171,9 @@ mod representation_gates {
 
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let provider = Arc::new(SUNFusionRule::new(3).unwrap());
-        let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(vec![1, 1], 1)]).unwrap();
+        let leg =
+            GradedSpace::try_new_with_shared_provider(Arc::clone(&provider), [(vec![1, 1], 1)])
+                .unwrap();
         let source: TensorMap<_, f64> =
             TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
                 if indices[0] == indices[1] {
@@ -18203,7 +18230,9 @@ mod representation_gates {
 
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let provider = Arc::new(SUNFusionRule::new(3).unwrap());
-        let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(vec![1, 1], 1)]).unwrap();
+        let leg =
+            GradedSpace::try_new_with_shared_provider(Arc::clone(&provider), [(vec![1, 1], 1)])
+                .unwrap();
         let source: TensorMap<_, f64> =
             TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, ij| f64::from(ij == [0, 1]))
                 .unwrap();
@@ -18226,7 +18255,9 @@ mod representation_gates {
 
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let provider = Arc::new(SUNFusionRule::new(3).unwrap());
-        let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(vec![2, 2], 1)]).unwrap();
+        let leg =
+            GradedSpace::try_new_with_shared_provider(Arc::clone(&provider), [(vec![2, 2], 1)])
+                .unwrap();
         let source: TensorMap<_, f64> =
             TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], |trees, _| {
                 trees.codomain_vertices()[0].get() as f64
@@ -18495,9 +18526,11 @@ mod representation_gates {
             .build()
             .unwrap();
         let provider = Arc::new(U1FusionRule);
-        let leg =
-            GradedSpace::try_new_shared(provider, [(U1Irrep::new(0), 2), (U1Irrep::new(1), 2)])
-                .unwrap();
+        let leg = GradedSpace::try_new_with_shared_provider(
+            provider,
+            [(U1Irrep::new(0), 2), (U1Irrep::new(1), 2)],
+        )
+        .unwrap();
         let source = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
             (indices.iter().sum::<usize>() + 1) as f64
         })
@@ -18599,9 +18632,11 @@ mod representation_gates {
             .build()
             .unwrap();
         let provider = Arc::new(U1FusionRule);
-        let leg =
-            GradedSpace::try_new_shared(provider, [(U1Irrep::new(0), 2), (U1Irrep::new(1), 2)])
-                .unwrap();
+        let leg = GradedSpace::try_new_with_shared_provider(
+            provider,
+            [(U1Irrep::new(0), 2), (U1Irrep::new(1), 2)],
+        )
+        .unwrap();
         let source = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
             (indices.iter().sum::<usize>() + 1) as f64
         })
@@ -18733,7 +18768,8 @@ mod representation_gates {
     fn eigh_dense_lazy_near_hermitian_uses_logical_triangle_and_stays_cold() {
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let provider = Arc::new(U1FusionRule);
-        let leg = GradedSpace::try_new_shared(provider, [(U1Irrep::new(0), 2)]).unwrap();
+        let leg =
+            GradedSpace::try_new_with_shared_provider(provider, [(U1Irrep::new(0), 2)]).unwrap();
         let source = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
             match (indices[0], indices[1]) {
                 (0, 0) | (1, 1) => 1.0,
@@ -18762,7 +18798,8 @@ mod representation_gates {
     fn eigh_dense_lazy_complex_orientation_and_failures_match_logical_oracles() {
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let provider = Arc::new(U1FusionRule);
-        let leg = GradedSpace::try_new_shared(provider, [(U1Irrep::new(0), 2)]).unwrap();
+        let leg =
+            GradedSpace::try_new_with_shared_provider(provider, [(U1Irrep::new(0), 2)]).unwrap();
         let hermitian = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
             match (indices[0], indices[1]) {
                 (0, 0) => num_complex::Complex64::new(2.0, 0.0),
@@ -18891,7 +18928,8 @@ mod representation_gates {
     fn eig_dense_lazy_nonnormal_is_logical_owned_repeatable_and_cold() {
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let provider = Arc::new(U1FusionRule);
-        let leg = GradedSpace::try_new_shared(provider, [(U1Irrep::new(0), 2)]).unwrap();
+        let leg =
+            GradedSpace::try_new_with_shared_provider(provider, [(U1Irrep::new(0), 2)]).unwrap();
         let source = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
             match (indices[0], indices[1]) {
                 (0, 0) => 1.0,
@@ -18914,8 +18952,11 @@ mod representation_gates {
     fn eig_dense_lazy_real_order_signed_zero_and_defective_cases_match_logical_oracles() {
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let provider = Arc::new(U1FusionRule);
-        let scalar_leg =
-            GradedSpace::try_new_shared(Arc::clone(&provider), [(U1Irrep::new(0), 1)]).unwrap();
+        let scalar_leg = GradedSpace::try_new_with_shared_provider(
+            Arc::clone(&provider),
+            [(U1Irrep::new(0), 1)],
+        )
+        .unwrap();
         let negative =
             TensorMap::from_block_fn(&runtime, [&scalar_leg], [&scalar_leg], |_, _| -2.0).unwrap();
         let lazy = negative.adjoint().unwrap();
@@ -18924,7 +18965,8 @@ mod representation_gates {
         assert_eq!(value.im.to_bits(), 0.0f64.to_bits());
         assert_eq!(materialized_adjoint_builds(&lazy), 0);
 
-        let leg = GradedSpace::try_new_shared(provider, [(U1Irrep::new(0), 2)]).unwrap();
+        let leg =
+            GradedSpace::try_new_with_shared_provider(provider, [(U1Irrep::new(0), 2)]).unwrap();
         let rotation = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
             match (indices[0], indices[1]) {
                 (0, 1) => -1.0,
@@ -18972,9 +19014,13 @@ mod representation_gates {
     fn eig_dense_lazy_failures_match_logical_oracle_and_stay_cold() {
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let provider = Arc::new(U1FusionRule);
-        let left =
-            GradedSpace::try_new_shared(Arc::clone(&provider), [(U1Irrep::new(0), 2)]).unwrap();
-        let right = GradedSpace::try_new_shared(provider, [(U1Irrep::new(0), 3)]).unwrap();
+        let left = GradedSpace::try_new_with_shared_provider(
+            Arc::clone(&provider),
+            [(U1Irrep::new(0), 2)],
+        )
+        .unwrap();
+        let right =
+            GradedSpace::try_new_with_shared_provider(provider, [(U1Irrep::new(0), 3)]).unwrap();
         let source = TensorMap::from_block_fn(&runtime, [&left], [&right], |_, indices| {
             (indices[0] + indices[1]) as f64
         })
@@ -19013,7 +19059,8 @@ mod representation_gates {
         // parent-exp redirect feeds EIGH the other triangle and changes values.
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let provider = Arc::new(U1FusionRule);
-        let leg = GradedSpace::try_new_shared(provider, [(U1Irrep::new(0), 2)]).unwrap();
+        let leg =
+            GradedSpace::try_new_with_shared_provider(provider, [(U1Irrep::new(0), 2)]).unwrap();
         let delta = 4.0e-15;
         let parent = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
             match (indices[0], indices[1]) {
@@ -19102,7 +19149,7 @@ mod representation_gates {
         // remain deterministic across repeats, clones, and concurrent calls.
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let provider = Arc::new(U1FusionRule);
-        let leg = GradedSpace::try_new_shared(
+        let leg = GradedSpace::try_new_with_shared_provider(
             provider,
             [
                 (U1Irrep::new(-1), 2),
@@ -19123,8 +19170,11 @@ mod representation_gates {
         assert_exp_uses_a_cold_logical_copy(&genuinely_complex(&u1));
 
         let provider = Arc::new(SU2FusionRule);
-        let half =
-            GradedSpace::try_new_shared(provider, [(SU2Irrep::from_twice_spin(1), 1)]).unwrap();
+        let half = GradedSpace::try_new_with_shared_provider(
+            provider,
+            [(SU2Irrep::from_twice_spin(1), 1)],
+        )
+        .unwrap();
         let su2 = TensorMap::from_block_fn(
             &runtime,
             [&half, &half, &half],
@@ -19140,7 +19190,8 @@ mod representation_gates {
     fn exp_failure_leaves_the_lazy_receiver_and_parent_untouched() {
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let provider = Arc::new(U1FusionRule);
-        let leg = GradedSpace::try_new_shared(provider, [(U1Irrep::new(0), 2)]).unwrap();
+        let leg =
+            GradedSpace::try_new_with_shared_provider(provider, [(U1Irrep::new(0), 2)]).unwrap();
         let source = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
             if indices == [0, 1] {
                 num_complex::Complex64::new(f64::NAN, 0.0)
@@ -19219,9 +19270,11 @@ mod representation_gates {
     fn sqrt_dense_lazy_success_is_owned_provider_native_repeatable_and_cold() {
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let provider = Arc::new(U1FusionRule);
-        let leg =
-            GradedSpace::try_new_shared(provider, [(U1Irrep::new(-1), 2), (U1Irrep::new(2), 4)])
-                .unwrap();
+        let leg = GradedSpace::try_new_with_shared_provider(
+            provider,
+            [(U1Irrep::new(-1), 2), (U1Irrep::new(2), 4)],
+        )
+        .unwrap();
         let f64_source = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
             if indices[0] == indices[1] {
                 (indices[0] + 1) as f64
@@ -19260,7 +19313,7 @@ mod representation_gates {
         assert_sqrt_uses_a_cold_logical_copy(&c64_source);
 
         let provider = Arc::new(SU2FusionRule);
-        let leg = GradedSpace::try_new_shared(
+        let leg = GradedSpace::try_new_with_shared_provider(
             provider,
             [
                 (SU2Irrep::from_twice_spin(0), 2),
@@ -19283,7 +19336,8 @@ mod representation_gates {
     fn sqrt_dense_lazy_failures_preserve_logical_order_and_stay_cold() {
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let provider = Arc::new(U1FusionRule);
-        let leg = GradedSpace::try_new_shared(provider, [(U1Irrep::new(0), 3)]).unwrap();
+        let leg =
+            GradedSpace::try_new_with_shared_provider(provider, [(U1Irrep::new(0), 3)]).unwrap();
 
         let offdiag = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
             if indices == [0, 1] {
@@ -19496,7 +19550,7 @@ mod representation_gates {
         // cloned and concurrent calls, and return detached provider-native data.
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let provider = Arc::new(U1FusionRule);
-        let leg = GradedSpace::try_new_shared(
+        let leg = GradedSpace::try_new_with_shared_provider(
             provider,
             [
                 (U1Irrep::new(-1), 2),
@@ -19525,9 +19579,13 @@ mod representation_gates {
         assert_inverse_redirect(&u1);
 
         let provider = Arc::new(U1FusionRule);
-        let wide =
-            GradedSpace::try_new_shared(Arc::clone(&provider), [(U1Irrep::new(0), 4)]).unwrap();
-        let narrow = GradedSpace::try_new_shared(provider, [(U1Irrep::new(0), 2)]).unwrap();
+        let wide = GradedSpace::try_new_with_shared_provider(
+            Arc::clone(&provider),
+            [(U1Irrep::new(0), 4)],
+        )
+        .unwrap();
+        let narrow =
+            GradedSpace::try_new_with_shared_provider(provider, [(U1Irrep::new(0), 2)]).unwrap();
         let unequal =
             TensorMap::from_block_fn(&runtime, [&wide], [&narrow, &narrow], |_, indices| {
                 let column = 2 * indices[1] + indices[2];
@@ -19542,8 +19600,11 @@ mod representation_gates {
         assert_inverse_redirect(&unequal);
 
         let provider = Arc::new(SU2FusionRule);
-        let half =
-            GradedSpace::try_new_shared(provider, [(SU2Irrep::from_twice_spin(1), 1)]).unwrap();
+        let half = GradedSpace::try_new_with_shared_provider(
+            provider,
+            [(SU2Irrep::from_twice_spin(1), 1)],
+        )
+        .unwrap();
         let su2 = TensorMap::from_block_fn(
             &runtime,
             [&half, &half, &half],
@@ -19569,7 +19630,8 @@ mod representation_gates {
         // solve changes neither parent Arc/bytes nor the lazy receiver cache.
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let provider = Arc::new(U1FusionRule);
-        let leg = GradedSpace::try_new_shared(provider, [(U1Irrep::new(0), 3)]).unwrap();
+        let leg =
+            GradedSpace::try_new_with_shared_provider(provider, [(U1Irrep::new(0), 3)]).unwrap();
         let source = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
             if indices[0] == indices[1] {
                 4.0 + indices[0] as f64
@@ -19601,9 +19663,11 @@ mod representation_gates {
         // The first U(1) sector solves before the second singular sector
         // fails, pinning atomicity after partial backend progress.
         let provider = Arc::new(U1FusionRule);
-        let leg =
-            GradedSpace::try_new_shared(provider, [(U1Irrep::new(0), 1), (U1Irrep::new(1), 2)])
-                .unwrap();
+        let leg = GradedSpace::try_new_with_shared_provider(
+            provider,
+            [(U1Irrep::new(0), 1), (U1Irrep::new(1), 2)],
+        )
+        .unwrap();
         let late = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |trees, indices| {
             if trees.codomain_uncoupled[0] == U1Irrep::new(0) && indices[0] == indices[1] {
                 2.0
@@ -19630,19 +19694,21 @@ mod representation_gates {
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let lhs_provider = Arc::new(U1FusionRule);
         let rhs_provider = Arc::new(U1FusionRule);
-        let lhs_leg = GradedSpace::try_new_shared(
+        let lhs_leg = GradedSpace::try_new_with_shared_provider(
             Arc::clone(&lhs_provider),
             [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
         )
         .unwrap();
-        let rhs_codomain = GradedSpace::try_new_shared(
+        let rhs_codomain = GradedSpace::try_new_with_shared_provider(
             Arc::clone(&rhs_provider),
             [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
         )
         .unwrap();
-        let rhs_domain =
-            GradedSpace::try_new_shared(rhs_provider, [(U1Irrep::new(0), 3), (U1Irrep::new(1), 2)])
-                .unwrap();
+        let rhs_domain = GradedSpace::try_new_with_shared_provider(
+            rhs_provider,
+            [(U1Irrep::new(0), 3), (U1Irrep::new(1), 2)],
+        )
+        .unwrap();
         let divisor = TensorMap::from_block_fn(&runtime, [&lhs_leg], [&lhs_leg], |_, indices| {
             if indices[0] == indices[1] {
                 4.0 + indices[0] as f64
@@ -19692,8 +19758,11 @@ mod representation_gates {
         assert_typed_map_close(&divisor.solve(&lazy_rhs).unwrap(), &expected, 1e-11);
         assert_eq!(materialized_adjoint_builds(&lazy_rhs), 0);
 
-        let bad_leg =
-            GradedSpace::try_new_shared(Arc::clone(&lhs_provider), [(U1Irrep::new(7), 1)]).unwrap();
+        let bad_leg = GradedSpace::try_new_with_shared_provider(
+            Arc::clone(&lhs_provider),
+            [(U1Irrep::new(7), 1)],
+        )
+        .unwrap();
         let bad = TensorMap::from_block_fn(&runtime, [&bad_leg], [&bad_leg], |_, _| 1.0)
             .unwrap()
             .adjoint()
@@ -19805,7 +19874,9 @@ mod representation_gates {
             .build()
             .unwrap();
         let provider = Arc::new(SUNFusionRule::new(3).unwrap());
-        let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(vec![1, 1], 2)]).unwrap();
+        let leg =
+            GradedSpace::try_new_with_shared_provider(Arc::clone(&provider), [(vec![1, 1], 2)])
+                .unwrap();
         let divisor: TensorMap<_, D> =
             TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, ij| {
                 let row = ij[0] + 2 * ij[1];
@@ -19914,7 +19985,9 @@ mod representation_gates {
             .build()
             .unwrap();
         let provider = Arc::new(SUNFusionRule::new(3).unwrap());
-        let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(vec![1, 1], 1)]).unwrap();
+        let leg =
+            GradedSpace::try_new_with_shared_provider(Arc::clone(&provider), [(vec![1, 1], 1)])
+                .unwrap();
         let lhs: TensorMap<_, f64> =
             TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, ij| f64::from(ij[0] == ij[1]))
                 .unwrap();
@@ -19994,9 +20067,11 @@ mod representation_gates {
         // the parent-factor seam and return detached provider-native outputs.
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let provider = Arc::new(U1FusionRule);
-        let leg =
-            GradedSpace::try_new_shared(provider, [(U1Irrep::new(-1), 2), (U1Irrep::new(0), 3)])
-                .unwrap();
+        let leg = GradedSpace::try_new_with_shared_provider(
+            provider,
+            [(U1Irrep::new(-1), 2), (U1Irrep::new(0), 3)],
+        )
+        .unwrap();
         let full = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
             let re = if indices[0] == indices[1] {
                 30.0 + indices[0] as f64
@@ -20028,9 +20103,11 @@ mod representation_gates {
             .build()
             .unwrap();
         let provider = Arc::new(U1FusionRule);
-        let leg =
-            GradedSpace::try_new_shared(provider, [(U1Irrep::new(0), 2), (U1Irrep::new(1), 2)])
-                .unwrap();
+        let leg = GradedSpace::try_new_with_shared_provider(
+            provider,
+            [(U1Irrep::new(0), 2), (U1Irrep::new(1), 2)],
+        )
+        .unwrap();
         let source = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
             (indices.iter().sum::<usize>() + 1) as f64
         })
@@ -20063,8 +20140,11 @@ mod representation_gates {
         assert_polar_redirect(&domain_only, true);
 
         let provider = Arc::new(SU2FusionRule);
-        let half =
-            GradedSpace::try_new_shared(provider, [(SU2Irrep::from_twice_spin(1), 1)]).unwrap();
+        let half = GradedSpace::try_new_with_shared_provider(
+            provider,
+            [(SU2Irrep::from_twice_spin(1), 1)],
+        )
+        .unwrap();
         let multitree = TensorMap::from_block_fn(
             &Runtime::builder().dense_threads(1).build().unwrap(),
             [&half, &half, &half],
@@ -20081,7 +20161,8 @@ mod representation_gates {
 
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let provider = Arc::new(U1FusionRule);
-        let leg = GradedSpace::try_new_shared(provider, [(U1Irrep::new(0), 3)]).unwrap();
+        let leg =
+            GradedSpace::try_new_with_shared_provider(provider, [(U1Irrep::new(0), 3)]).unwrap();
         let rank_deficient = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
             let value = ((indices[0] + 1) * (indices[1] + 1)) as f64;
             num_complex::Complex64::new(value, value / 3.0)
@@ -20175,9 +20256,11 @@ mod representation_gates {
                 .build()
                 .unwrap();
             let provider = Arc::new(U1FusionRule);
-            let leg =
-                GradedSpace::try_new_shared(provider, [(U1Irrep::new(0), 2), (U1Irrep::new(1), 2)])
-                    .unwrap();
+            let leg = GradedSpace::try_new_with_shared_provider(
+                provider,
+                [(U1Irrep::new(0), 2), (U1Irrep::new(1), 2)],
+            )
+            .unwrap();
             let source = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
                 (indices.iter().sum::<usize>() + 1) as f64
             })
@@ -20398,9 +20481,11 @@ mod representation_gates {
             .build()
             .unwrap();
         let provider = Arc::new(U1FusionRule);
-        let leg =
-            GradedSpace::try_new_shared(provider, [(U1Irrep::new(0), 2), (U1Irrep::new(1), 2)])
-                .unwrap();
+        let leg = GradedSpace::try_new_with_shared_provider(
+            provider,
+            [(U1Irrep::new(0), 2), (U1Irrep::new(1), 2)],
+        )
+        .unwrap();
         let source = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
             (indices.iter().sum::<usize>() + 1) as f64
         })
@@ -20485,7 +20570,7 @@ mod representation_gates {
         // What: the parent-native path preserves typed truncation errors
         // without publishing the logical-adjoint payload first.
         let source = u1_lazy_fixture();
-        let foreign = GradedSpace::try_new_shared(
+        let foreign = GradedSpace::try_new_with_shared_provider(
             Arc::new(SU2FusionRule),
             [(SU2Irrep::from_twice_spin(0), 1)],
         )
@@ -20824,15 +20909,17 @@ mod representation_gates {
     fn adjoint_trace_pairs_stays_parent_native() {
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let u1_provider = Arc::new(U1FusionRule);
-        let u1_traced = GradedSpace::try_new_shared(
+        let u1_traced = GradedSpace::try_new_with_shared_provider(
             Arc::clone(&u1_provider),
             [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
         )
         .unwrap();
-        let u1_open =
-            GradedSpace::try_new_shared(u1_provider, [(U1Irrep::new(-1), 1), (U1Irrep::new(0), 1)])
-                .and_then(|space| space.try_dual())
-                .unwrap();
+        let u1_open = GradedSpace::try_new_with_shared_provider(
+            u1_provider,
+            [(U1Irrep::new(-1), 1), (U1Irrep::new(0), 1)],
+        )
+        .and_then(|space| space.try_dual())
+        .unwrap();
         let u1 = TensorMap::from_block_fn(
             &runtime,
             [&u1_traced, &u1_open],
@@ -20841,7 +20928,7 @@ mod representation_gates {
         )
         .unwrap();
         let su2_provider = Arc::new(SU2FusionRule);
-        let su2_traced = GradedSpace::try_new_shared(
+        let su2_traced = GradedSpace::try_new_with_shared_provider(
             Arc::clone(&su2_provider),
             [
                 (SU2Irrep::from_twice_spin(0), 2),
@@ -20849,7 +20936,7 @@ mod representation_gates {
             ],
         )
         .unwrap();
-        let su2_open = GradedSpace::try_new_shared(
+        let su2_open = GradedSpace::try_new_with_shared_provider(
             su2_provider,
             [
                 (SU2Irrep::from_twice_spin(0), 1),
@@ -21099,9 +21186,12 @@ mod representation_gates {
     fn fermionic_lazy_contract_keeps_the_supertrace_distinct_from_compose() {
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let provider = Arc::new(FermionParityFusionRule);
-        let leg = GradedSpace::try_new_shared(provider, [(Z2Irrep::EVEN, 2), (Z2Irrep::ODD, 2)])
-            .and_then(|space| space.try_dual())
-            .unwrap();
+        let leg = GradedSpace::try_new_with_shared_provider(
+            provider,
+            [(Z2Irrep::EVEN, 2), (Z2Irrep::ODD, 2)],
+        )
+        .and_then(|space| space.try_dual())
+        .unwrap();
         let source = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |trees, indices| {
             let sector = trees.codomain_uncoupled[0];
             let parity_weight = if sector == Z2Irrep::ODD { 3.0 } else { 1.0 };
@@ -21147,7 +21237,7 @@ mod representation_gates {
             assert_eq!(materialized_adjoint_builds(&lazy), 0);
         }
 
-        let bad_leg = GradedSpace::try_new_shared(
+        let bad_leg = GradedSpace::try_new_with_shared_provider(
             Arc::clone(source.logical_space().provider_arc()),
             [(U1Irrep::new(7), 1)],
         )
@@ -21176,8 +21266,10 @@ mod representation_gates {
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let z2 = Arc::new(ZNFusionRule::new(2).unwrap());
         let z3 = Arc::new(ZNFusionRule::new(3).unwrap());
-        let z2_leg = GradedSpace::try_new_shared(Arc::clone(&z2), [(z2.irrep(0), 2)]).unwrap();
-        let z3_leg = GradedSpace::try_new_shared(Arc::clone(&z3), [(z3.irrep(0), 2)]).unwrap();
+        let z2_leg =
+            GradedSpace::try_new_with_shared_provider(Arc::clone(&z2), [(z2.irrep(0), 2)]).unwrap();
+        let z3_leg =
+            GradedSpace::try_new_with_shared_provider(Arc::clone(&z3), [(z3.irrep(0), 2)]).unwrap();
         let z2_tensor =
             TensorMap::from_block_fn(&runtime, [&z2_leg], [&z2_leg], |_, _| 1.0).unwrap();
         let z3_tensor =
@@ -21197,12 +21289,12 @@ mod representation_gates {
         let lhs_provider = Arc::new(U1FusionRule);
         let rhs_provider = Arc::new(U1FusionRule);
         assert!(!Arc::ptr_eq(&lhs_provider, &rhs_provider));
-        let lhs_leg = GradedSpace::try_new_shared(
+        let lhs_leg = GradedSpace::try_new_with_shared_provider(
             Arc::clone(&lhs_provider),
             [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
         )
         .unwrap();
-        let rhs_leg = GradedSpace::try_new_shared(
+        let rhs_leg = GradedSpace::try_new_with_shared_provider(
             Arc::clone(&rhs_provider),
             [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
         )
@@ -21247,7 +21339,8 @@ mod representation_gates {
     fn mixed_compact_add_does_not_materialize_the_lazy_operand() {
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let provider = Arc::new(U1FusionRule);
-        let bond = GradedSpace::try_new_shared(provider, [(U1Irrep::new(0), 2)]).unwrap();
+        let bond =
+            GradedSpace::try_new_with_shared_provider(provider, [(U1Irrep::new(0), 2)]).unwrap();
         let dense = TensorMap::from_block_fn(&runtime, [&bond], [&bond], |_, indices| {
             (indices[0] + 2 * indices[1]) as f64
         })
@@ -21342,7 +21435,8 @@ mod representation_gates {
     fn compact_adjoint_never_enters_the_lazy_representation() {
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let provider = Arc::new(U1FusionRule);
-        let bond = GradedSpace::try_new_shared(provider, [(U1Irrep::new(0), 2)]).unwrap();
+        let bond =
+            GradedSpace::try_new_with_shared_provider(provider, [(U1Irrep::new(0), 2)]).unwrap();
         let real = TensorMap::diagonal(
             &runtime,
             &bond,
@@ -21404,7 +21498,8 @@ mod representation_gates {
     fn fixture() -> TensorMap<Z2FusionRule, f64> {
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let leg =
-            GradedSpace::try_new_shared(Arc::new(Z2FusionRule), [(Z2Irrep::EVEN, 8)]).unwrap();
+            GradedSpace::try_new_with_shared_provider(Arc::new(Z2FusionRule), [(Z2Irrep::EVEN, 8)])
+                .unwrap();
         let mut state = 0x5eed_0580u64;
         TensorMap::from_block_fn(&runtime, [&leg], [&leg], move |_, _| {
             state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
@@ -21436,8 +21531,9 @@ mod representation_gates {
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let provider = Arc::new(tenet_core::FermionParityFusionRule);
         let even_only =
-            GradedSpace::try_new_shared(Arc::clone(&provider), [(Z2Irrep::EVEN, 2)]).unwrap();
-        let mixed = GradedSpace::try_new_shared(
+            GradedSpace::try_new_with_shared_provider(Arc::clone(&provider), [(Z2Irrep::EVEN, 2)])
+                .unwrap();
+        let mixed = GradedSpace::try_new_with_shared_provider(
             Arc::clone(&provider),
             [(Z2Irrep::EVEN, 1), (Z2Irrep::ODD, 2)],
         )
@@ -21638,7 +21734,7 @@ mod representation_gates {
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
 
         let u1_provider = Arc::new(U1FusionRule);
-        let u1_leg = GradedSpace::try_new_shared(
+        let u1_leg = GradedSpace::try_new_with_shared_provider(
             Arc::clone(&u1_provider),
             [
                 (U1Irrep::new(-1), 1),
@@ -21660,7 +21756,7 @@ mod representation_gates {
             u1.permute_overwrite_into(destination, &[0, 1], &[2], 0.0)
         });
 
-        let independent_leg = GradedSpace::try_new_shared(
+        let independent_leg = GradedSpace::try_new_with_shared_provider(
             Arc::new(U1FusionRule),
             [
                 (U1Irrep::new(-1), 1),
@@ -21691,7 +21787,7 @@ mod representation_gates {
         );
 
         let su2_provider = Arc::new(SU2FusionRule);
-        let su2_leg = GradedSpace::try_new_shared(
+        let su2_leg = GradedSpace::try_new_with_shared_provider(
             su2_provider,
             [
                 (SU2Irrep::from_twice_spin(0), 2),
@@ -21712,7 +21808,7 @@ mod representation_gates {
         });
 
         let product_provider = Arc::new(U1FusionRule.product(FermionParityFusionRule));
-        let product_leg = GradedSpace::try_new_shared(
+        let product_leg = GradedSpace::try_new_with_shared_provider(
             product_provider,
             [
                 (product_sector(U1Irrep::new(0), Z2Irrep::EVEN), 2),
@@ -21737,7 +21833,7 @@ mod representation_gates {
     fn typed_planar_overwrite_matches_fermionic_owned_routes() {
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let provider = Arc::new(FermionParityFusionRule);
-        let odd = GradedSpace::try_new_shared(provider, [(Z2Irrep::ODD, 2)]).unwrap();
+        let odd = GradedSpace::try_new_with_shared_provider(provider, [(Z2Irrep::ODD, 2)]).unwrap();
         let source =
             TensorMap::from_block_fn(&runtime, [&odd, &odd], [&odd, &odd], |_, indices| {
                 indices.iter().sum::<usize>() as f64 + 1.0
@@ -21798,9 +21894,11 @@ mod representation_gates {
     fn typed_tree_overwrite_rejections_leave_destination_unchanged() {
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let provider = Arc::new(U1FusionRule);
-        let leg =
-            GradedSpace::try_new_shared(provider, [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)])
-                .unwrap();
+        let leg = GradedSpace::try_new_with_shared_provider(
+            provider,
+            [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
+        )
+        .unwrap();
         let source = TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], |_, indices| {
             indices.iter().sum::<usize>() as f64 + 1.0
         })
@@ -21930,8 +22028,10 @@ mod representation_gates {
 
         let z2 = Arc::new(ZNFusionRule::new(2).unwrap());
         let z3 = Arc::new(ZNFusionRule::new(3).unwrap());
-        let z2_leg = GradedSpace::try_new_shared(Arc::clone(&z2), [(z2.irrep(0), 1)]).unwrap();
-        let z3_leg = GradedSpace::try_new_shared(Arc::clone(&z3), [(z3.irrep(0), 1)]).unwrap();
+        let z2_leg =
+            GradedSpace::try_new_with_shared_provider(Arc::clone(&z2), [(z2.irrep(0), 1)]).unwrap();
+        let z3_leg =
+            GradedSpace::try_new_with_shared_provider(Arc::clone(&z3), [(z3.irrep(0), 1)]).unwrap();
         let z2_source =
             TensorMap::from_block_fn(&runtime, [&z2_leg], [&z2_leg], |_, _| 2.0).unwrap();
         let mut z3_destination =
@@ -21950,7 +22050,8 @@ mod representation_gates {
     fn typed_tree_overwrite_covers_boundary_ranks_and_runtime_cache_reuse() {
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let provider = Arc::new(U1FusionRule);
-        let leg = GradedSpace::try_new_shared(provider, [(U1Irrep::new(0), 1)]).unwrap();
+        let leg =
+            GradedSpace::try_new_with_shared_provider(provider, [(U1Irrep::new(0), 1)]).unwrap();
 
         let one_sided = TensorMap::from_block_fn(
             &runtime,
@@ -22018,7 +22119,7 @@ mod representation_gates {
         // What: exact-layout admission and completed replay share one Runtime
         // without serializing execution or changing results across callers.
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-        let leg = GradedSpace::try_new_shared(
+        let leg = GradedSpace::try_new_with_shared_provider(
             Arc::new(U1FusionRule),
             [
                 (U1Irrep::new(-1), 2),
@@ -22059,7 +22160,7 @@ mod representation_gates {
     fn typed_contract_overwrite_matches_provider_scalar_and_order_matrix() {
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
 
-        let u1_leg = GradedSpace::try_new_shared(
+        let u1_leg = GradedSpace::try_new_with_shared_provider(
             Arc::new(U1FusionRule),
             [
                 (U1Irrep::new(-1), 1),
@@ -22074,7 +22175,7 @@ mod representation_gates {
         .unwrap();
         assert_contract_overwrite_matches("u1", &u1, &u1, &[1], &[0], &[0, 1], -1.5, false);
 
-        let su2_leg = GradedSpace::try_new_shared(
+        let su2_leg = GradedSpace::try_new_with_shared_provider(
             Arc::new(SU2FusionRule),
             [
                 (SU2Irrep::from_twice_spin(0), 2),
@@ -22098,9 +22199,11 @@ mod representation_gates {
             true,
         );
 
-        let odd =
-            GradedSpace::try_new_shared(Arc::new(FermionParityFusionRule), [(Z2Irrep::ODD, 2)])
-                .unwrap();
+        let odd = GradedSpace::try_new_with_shared_provider(
+            Arc::new(FermionParityFusionRule),
+            [(Z2Irrep::ODD, 2)],
+        )
+        .unwrap();
         let fermionic = TensorMap::from_block_fn(&runtime, [&odd], [&odd], |_, indices| {
             indices.iter().sum::<usize>() as f64 + 1.0
         })
@@ -22116,7 +22219,7 @@ mod representation_gates {
             false,
         );
 
-        let product_leg = GradedSpace::try_new_shared(
+        let product_leg = GradedSpace::try_new_with_shared_provider(
             Arc::new(U1FusionRule.product(FermionParityFusionRule)),
             [
                 (product_sector(U1Irrep::new(0), Z2Irrep::EVEN), 2),
@@ -22140,7 +22243,7 @@ mod representation_gates {
             false,
         );
 
-        let q = GradedSpace::try_new_shared(
+        let q = GradedSpace::try_new_with_shared_provider(
             Arc::new(CU1FusionRule),
             [(CU1Irrep::from_twice_charge(1), 1)],
         )
@@ -22164,7 +22267,7 @@ mod representation_gates {
     fn typed_contract_overwrite_keeps_distinct_destination_provider_authority() {
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let build = |provider: Arc<U1FusionRule>, offset: f64| {
-            let leg = GradedSpace::try_new_shared(
+            let leg = GradedSpace::try_new_with_shared_provider(
                 provider,
                 [
                     (U1Irrep::new(-1), 1),
@@ -22223,7 +22326,7 @@ mod representation_gates {
     #[test]
     fn typed_contract_overwrite_accepts_lazy_and_compact_inputs_without_warming_adjoint() {
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-        let leg = GradedSpace::try_new_shared(
+        let leg = GradedSpace::try_new_with_shared_provider(
             Arc::new(U1FusionRule),
             [(U1Irrep::new(0), 3), (U1Irrep::new(1), 1)],
         )
@@ -22269,9 +22372,11 @@ mod representation_gates {
     fn typed_contract_overwrite_rejections_are_preclear_and_atomic() {
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let provider = Arc::new(U1FusionRule);
-        let leg =
-            GradedSpace::try_new_shared(provider, [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)])
-                .unwrap();
+        let leg = GradedSpace::try_new_with_shared_provider(
+            provider,
+            [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
+        )
+        .unwrap();
         let lhs = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
             (indices[0] + 2 * indices[1] + 1) as f64
         })
@@ -22324,7 +22429,7 @@ mod representation_gates {
             assert_eq!(f64_destination_state(&rejected), before);
         }
 
-        let bad_leg = GradedSpace::try_new_shared(
+        let bad_leg = GradedSpace::try_new_with_shared_provider(
             Arc::clone(lhs.logical_space().provider_arc()),
             [(U1Irrep::new(7), 1)],
         )
@@ -22428,8 +22533,10 @@ mod representation_gates {
 
         let z2 = Arc::new(ZNFusionRule::new(2).unwrap());
         let z3 = Arc::new(ZNFusionRule::new(3).unwrap());
-        let z2_leg = GradedSpace::try_new_shared(Arc::clone(&z2), [(z2.irrep(0), 1)]).unwrap();
-        let z3_leg = GradedSpace::try_new_shared(Arc::clone(&z3), [(z3.irrep(0), 1)]).unwrap();
+        let z2_leg =
+            GradedSpace::try_new_with_shared_provider(Arc::clone(&z2), [(z2.irrep(0), 1)]).unwrap();
+        let z3_leg =
+            GradedSpace::try_new_with_shared_provider(Arc::clone(&z3), [(z3.irrep(0), 1)]).unwrap();
         let z2_lhs = TensorMap::from_block_fn(&runtime, [&z2_leg], [&z2_leg], |_, _| 1.0).unwrap();
         let z2_rhs = TensorMap::from_block_fn(&runtime, [&z2_leg], [&z2_leg], |_, _| 2.0).unwrap();
         let z3_rhs = TensorMap::from_block_fn(&runtime, [&z3_leg], [&z3_leg], |_, _| 2.0).unwrap();
@@ -22467,19 +22574,23 @@ mod representation_gates {
     fn typed_contract_overwrite_handles_unmatched_sectors_and_reuses_runtime_cache() {
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let provider = Arc::new(U1FusionRule);
-        let bond =
-            GradedSpace::try_new_shared(Arc::clone(&provider), [(U1Irrep::new(0), 2)]).unwrap();
-        let left = GradedSpace::try_new_shared(
+        let bond = GradedSpace::try_new_with_shared_provider(
+            Arc::clone(&provider),
+            [(U1Irrep::new(0), 2)],
+        )
+        .unwrap();
+        let left = GradedSpace::try_new_with_shared_provider(
             Arc::clone(&provider),
             [(U1Irrep::new(0), 1), (U1Irrep::new(1), 1)],
         )
         .unwrap();
-        let partly_disjoint = GradedSpace::try_new_shared(
+        let partly_disjoint = GradedSpace::try_new_with_shared_provider(
             Arc::clone(&provider),
             [(U1Irrep::new(0), 1), (U1Irrep::new(2), 1)],
         )
         .unwrap();
-        let disjoint = GradedSpace::try_new_shared(provider, [(U1Irrep::new(3), 1)]).unwrap();
+        let disjoint =
+            GradedSpace::try_new_with_shared_provider(provider, [(U1Irrep::new(3), 1)]).unwrap();
         let lhs = TensorMap::from_block_fn(&runtime, [&left], [&bond], |_, indices| {
             indices.iter().sum::<usize>() as f64 + 1.0
         })
@@ -22502,8 +22613,11 @@ mod representation_gates {
         }
 
         let provider = Arc::new(CU1FusionRule);
-        let q =
-            GradedSpace::try_new_shared(provider, [(CU1Irrep::from_twice_charge(1), 1)]).unwrap();
+        let q = GradedSpace::try_new_with_shared_provider(
+            provider,
+            [(CU1Irrep::from_twice_charge(1), 1)],
+        )
+        .unwrap();
         let source = TensorMap::from_block_fn(&runtime, [&q, &q, &q], [&q], |_, _| 1.0).unwrap();
         let axes = [5, 1, 3, 0, 4, 2];
         let expected = source.contract(&source, &[3], &[0], &axes).unwrap();
@@ -22534,7 +22648,7 @@ mod representation_gates {
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
 
         let u1_provider = Arc::new(U1FusionRule);
-        let u1_leg = GradedSpace::try_new_shared(
+        let u1_leg = GradedSpace::try_new_with_shared_provider(
             Arc::clone(&u1_provider),
             [
                 (U1Irrep::new(-1), 1),
@@ -22551,7 +22665,7 @@ mod representation_gates {
         let u1_c64 = u1_f64.to_c64();
 
         let su2_provider = Arc::new(SU2FusionRule);
-        let su2_leg = GradedSpace::try_new_shared(
+        let su2_leg = GradedSpace::try_new_with_shared_provider(
             Arc::clone(&su2_provider),
             [
                 (SU2Irrep::from_twice_spin(0), 2),
@@ -22611,7 +22725,8 @@ mod representation_gates {
     fn high_rank_identity_has_no_inline_capacity_boundary() {
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let provider = Arc::new(U1FusionRule);
-        let leg = GradedSpace::try_new_shared(provider, [(U1Irrep::new(0), 1)]).unwrap();
+        let leg =
+            GradedSpace::try_new_with_shared_provider(provider, [(U1Irrep::new(0), 1)]).unwrap();
         let tensor: TensorMap<U1FusionRule, f64> =
             TensorMap::from_block_fn(&runtime, [&leg; 10], [&leg; 9], |_, _| 1.0).unwrap();
         let codomain_axes: Vec<_> = (0..10).collect();
@@ -22690,8 +22805,11 @@ mod representation_gates {
         let runtime = Runtime::builder().build().unwrap();
         let provider = Arc::new(U1FusionRule);
         let leg = |degeneracy| {
-            GradedSpace::try_new_shared(Arc::clone(&provider), [(U1Irrep::new(0), degeneracy)])
-                .unwrap()
+            GradedSpace::try_new_with_shared_provider(
+                Arc::clone(&provider),
+                [(U1Irrep::new(0), degeneracy)],
+            )
+            .unwrap()
         };
         let common = leg(3);
         let left = leg(2);

@@ -368,7 +368,7 @@ fn runtime() -> Runtime {
 }
 
 fn su2_leg(provider: &Arc<SU2FusionRule>, dual: bool) -> GradedSpace<SU2FusionRule> {
-    GradedSpace::try_new_shared(
+    GradedSpace::try_new_with_shared_provider(
         Arc::clone(provider),
         [
             (SU2Irrep::from_twice_spin(0), 1),
@@ -416,7 +416,9 @@ fn checked_generic_multiplicity_keys_payload_and_resolver_arc_roundtrip() {
     let codec = GenericCodec {
         provider: Arc::clone(&provider),
     };
-    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(GenericLabel::X, 1)]).unwrap();
+    let leg =
+        GradedSpace::try_new_with_shared_provider(Arc::clone(&provider), [(GenericLabel::X, 1)])
+            .unwrap();
     let source: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, indices| {
             let coupled = usize::from(*trees.coupled() == GenericLabel::X);
@@ -637,7 +639,9 @@ fn admitted_shape_limit_precedes_dense_payload_allocation() {
     let codec = GenericCodec {
         provider: Arc::clone(&provider),
     };
-    let leg = GradedSpace::try_new_shared(Arc::clone(&provider), [(GenericLabel::X, 1)]).unwrap();
+    let leg =
+        GradedSpace::try_new_with_shared_provider(Arc::clone(&provider), [(GenericLabel::X, 1)])
+            .unwrap();
     let source: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |_, _| 1.0).unwrap();
     let mut forged = source.to_bytes_with(&codec).unwrap();
@@ -690,9 +694,10 @@ fn non_self_dual_u1_space_roundtrip_does_not_dualize_twice() {
     let codec = U1Codec {
         provider: Arc::clone(&provider),
     };
-    let source = GradedSpace::try_new_shared(Arc::clone(&provider), [(U1Irrep::new(3), 7)])
-        .and_then(|space| space.try_dual())
-        .unwrap();
+    let source =
+        GradedSpace::try_new_with_shared_provider(Arc::clone(&provider), [(U1Irrep::new(3), 7)])
+            .and_then(|space| space.try_dual())
+            .unwrap();
     assert_eq!(source.sectors().unwrap(), [U1Irrep::new(-3)]);
 
     let restored = GradedSpace::<U1FusionRule>::from_bytes_with(
@@ -1043,9 +1048,11 @@ fn malformed_tensor_tags_and_duplicate_or_missing_blocks_are_rejected() {
     let runtime = runtime();
     let provider = Arc::new(SU2FusionRule);
     let codec = Su2Codec::new(Arc::clone(&provider));
-    let leg =
-        GradedSpace::try_new_shared(Arc::clone(&provider), [(SU2Irrep::from_twice_spin(0), 1)])
-            .unwrap();
+    let leg = GradedSpace::try_new_with_shared_provider(
+        Arc::clone(&provider),
+        [(SU2Irrep::from_twice_spin(0), 1)],
+    )
+    .unwrap();
     let tensor: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&leg], [], |_, _| 3.0).unwrap();
     let bytes = tensor.to_bytes_with(&codec).unwrap();

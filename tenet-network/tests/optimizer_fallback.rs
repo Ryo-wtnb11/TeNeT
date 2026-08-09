@@ -42,7 +42,7 @@ fn mf_optimizers_fall_back_on_all_dim1_gram_topology() {
             })
             .build()
             .unwrap();
-        let v = GradedSpace::try_new_shared(
+        let v = GradedSpace::try_new_with_shared_provider(
             Arc::new(SU2FusionRule),
             [(SU2Irrep::from_twice_spin(0), 1)],
         )

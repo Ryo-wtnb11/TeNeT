@@ -83,7 +83,7 @@ where
 
 #[test]
 fn provider_and_dtype_matrix_matches_direct_contract() {
-    let u1 = GradedSpace::try_new_shared(
+    let u1 = GradedSpace::try_new_with_shared_provider(
         Arc::new(U1FusionRule),
         [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
     )
@@ -91,7 +91,7 @@ fn provider_and_dtype_matrix_matches_direct_contract() {
     pair_case::<_, f64>(&u1);
     pair_case::<_, Complex64>(&u1);
 
-    let su2 = GradedSpace::try_new_shared(
+    let su2 = GradedSpace::try_new_with_shared_provider(
         Arc::new(SU2FusionRule),
         [
             (SU2Irrep::from_twice_spin(0), 2),
@@ -102,7 +102,7 @@ fn provider_and_dtype_matrix_matches_direct_contract() {
     pair_case::<_, f64>(&su2);
     pair_case::<_, Complex64>(&su2);
 
-    let fz2 = GradedSpace::try_new_shared(
+    let fz2 = GradedSpace::try_new_with_shared_provider(
         Arc::new(FermionParityFusionRule),
         [(Z2Irrep::EVEN, 2), (Z2Irrep::ODD, 1)],
     )
@@ -111,7 +111,7 @@ fn provider_and_dtype_matrix_matches_direct_contract() {
     pair_case::<_, Complex64>(&fz2);
 
     let product_rule = Arc::new(FermionParityFusionRule.product(U1FusionRule));
-    let product = GradedSpace::try_new_shared(
+    let product = GradedSpace::try_new_with_shared_provider(
         product_rule,
         [
             (product_sector(Z2Irrep::EVEN, U1Irrep::new(0)), 2),
@@ -167,38 +167,44 @@ fn planning_conjugation_uses_checked_effective_duals_without_reading_storage() {
 
     let runtime = Runtime::builder().build().unwrap();
     let rule = Arc::new(U1FusionRule);
-    let x0 = GradedSpace::try_new_shared(Arc::clone(&rule), [(U1Irrep::new(2), 2)]).unwrap();
-    let x1_base = GradedSpace::try_new_shared(Arc::clone(&rule), [(U1Irrep::new(-1), 1)]).unwrap();
+    let x0 = GradedSpace::try_new_with_shared_provider(Arc::clone(&rule), [(U1Irrep::new(2), 2)])
+        .unwrap();
+    let x1_base =
+        GradedSpace::try_new_with_shared_provider(Arc::clone(&rule), [(U1Irrep::new(-1), 1)])
+            .unwrap();
     let x1 = x1_base.try_dual().unwrap();
-    let y = GradedSpace::try_new_shared(Arc::clone(&rule), [(U1Irrep::new(1), 3)]).unwrap();
-    let z0 = GradedSpace::try_new_shared(Arc::clone(&rule), [(U1Irrep::new(-2), 2)]).unwrap();
-    let z1 = GradedSpace::try_new_shared(Arc::clone(&rule), [(U1Irrep::new(0), 1)]).unwrap();
+    let y = GradedSpace::try_new_with_shared_provider(Arc::clone(&rule), [(U1Irrep::new(1), 3)])
+        .unwrap();
+    let z0 = GradedSpace::try_new_with_shared_provider(Arc::clone(&rule), [(U1Irrep::new(-2), 2)])
+        .unwrap();
+    let z1 = GradedSpace::try_new_with_shared_provider(Arc::clone(&rule), [(U1Irrep::new(0), 1)])
+        .unwrap();
     run(&runtime, &x0, &x1, &y, &z0, &z1, 748_001);
 
     let product_rule = Arc::new(FermionParityFusionRule.product(U1FusionRule));
-    let product_x0 = GradedSpace::try_new_shared(
+    let product_x0 = GradedSpace::try_new_with_shared_provider(
         Arc::clone(&product_rule),
         [(product_sector(Z2Irrep::EVEN, U1Irrep::new(2)), 1)],
     )
     .unwrap();
-    let product_x1 = GradedSpace::try_new_shared(
+    let product_x1 = GradedSpace::try_new_with_shared_provider(
         Arc::clone(&product_rule),
         [(product_sector(Z2Irrep::ODD, U1Irrep::new(-1)), 2)],
     )
     .unwrap()
     .try_dual()
     .unwrap();
-    let product_y = GradedSpace::try_new_shared(
+    let product_y = GradedSpace::try_new_with_shared_provider(
         Arc::clone(&product_rule),
         [(product_sector(Z2Irrep::ODD, U1Irrep::new(1)), 2)],
     )
     .unwrap();
-    let product_z0 = GradedSpace::try_new_shared(
+    let product_z0 = GradedSpace::try_new_with_shared_provider(
         Arc::clone(&product_rule),
         [(product_sector(Z2Irrep::EVEN, U1Irrep::new(-2)), 1)],
     )
     .unwrap();
-    let product_z1 = GradedSpace::try_new_shared(
+    let product_z1 = GradedSpace::try_new_with_shared_provider(
         product_rule,
         [(product_sector(Z2Irrep::ODD, U1Irrep::new(0)), 1)],
     )
@@ -219,9 +225,13 @@ fn single_scalar_split_and_heterogeneous_final_permutation() {
     let runtime = Runtime::builder().build().unwrap();
     let provider = Arc::new(U1FusionRule);
     let space = |degeneracy| {
-        GradedSpace::try_new_shared(Arc::clone(&provider), [(U1Irrep::new(0), degeneracy)]).unwrap()
+        GradedSpace::try_new_with_shared_provider(
+            Arc::clone(&provider),
+            [(U1Irrep::new(0), degeneracy)],
+        )
+        .unwrap()
     };
-    let v = GradedSpace::try_new_shared(
+    let v = GradedSpace::try_new_with_shared_provider(
         Arc::clone(&provider),
         [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
     )
@@ -261,9 +271,11 @@ fn single_scalar_split_and_heterogeneous_final_permutation() {
     let norm = tensor.norm().unwrap();
     assert!((value - norm * norm).abs() <= 1e-12 * (1.0 + norm * norm));
     let other_provider = Arc::new(U1FusionRule);
-    let other_v =
-        GradedSpace::try_new_shared(other_provider, [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)])
-            .unwrap();
+    let other_v = GradedSpace::try_new_with_shared_provider(
+        other_provider,
+        [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
+    )
+    .unwrap();
     let other = TensorMap::rand_with_seed(&runtime, [&other_v], [&other_v], 13).unwrap();
     let scalar_from_lhs = scalar_plan.execute(&[&tensor, &other]).unwrap();
     assert!(std::ptr::eq(scalar_from_lhs.provider(), tensor.provider()));
@@ -307,7 +319,9 @@ fn single_scalar_split_and_heterogeneous_final_permutation() {
 #[test]
 fn compact_and_lazy_representation_replay_stays_semantic() {
     let runtime = Runtime::builder().build().unwrap();
-    let v = GradedSpace::try_new_shared(Arc::new(U1FusionRule), [(U1Irrep::new(0), 3)]).unwrap();
+    let v =
+        GradedSpace::try_new_with_shared_provider(Arc::new(U1FusionRule), [(U1Irrep::new(0), 3)])
+            .unwrap();
     let dense = TensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&v], [&v], 20).unwrap();
     let identity = Network::new(
         vec![labels(&["i", "j"])],
@@ -380,7 +394,8 @@ fn compact_and_lazy_representation_replay_stays_semantic() {
 }
 
 fn u1_space(provider: &Arc<U1FusionRule>, degeneracy: usize) -> GradedSpace<U1FusionRule> {
-    GradedSpace::try_new_shared(Arc::clone(provider), [(U1Irrep::new(0), degeneracy)]).unwrap()
+    GradedSpace::try_new_with_shared_provider(Arc::clone(provider), [(U1Irrep::new(0), degeneracy)])
+        .unwrap()
 }
 
 #[test]
@@ -474,7 +489,7 @@ fn one_plan_replays_concurrently_with_distinct_workspaces() {
 #[test]
 fn fermionic_greedy_chain_keeps_intermediate_on_the_expression_left() {
     let runtime = Runtime::builder().build().unwrap();
-    let space = GradedSpace::try_new_shared(
+    let space = GradedSpace::try_new_with_shared_provider(
         Arc::new(FermionParityFusionRule),
         [(Z2Irrep::EVEN, 1), (Z2Irrep::ODD, 2)],
     )
@@ -521,8 +536,10 @@ fn fermionic_greedy_chain_keeps_intermediate_on_the_expression_left() {
 fn fermionic_interleaved_subtrees_keep_expression_order_and_signs() {
     let runtime = Runtime::builder().build().unwrap();
     let provider = Arc::new(FermionParityFusionRule);
-    let large = GradedSpace::try_new_shared(Arc::clone(&provider), [(Z2Irrep::ODD, 3)]).unwrap();
-    let small = GradedSpace::try_new_shared(provider, [(Z2Irrep::ODD, 2)]).unwrap();
+    let large =
+        GradedSpace::try_new_with_shared_provider(Arc::clone(&provider), [(Z2Irrep::ODD, 3)])
+            .unwrap();
+    let small = GradedSpace::try_new_with_shared_provider(provider, [(Z2Irrep::ODD, 2)]).unwrap();
     let a = TensorMap::<_, f64>::rand_with_seed(&runtime, [&large], [&large], 750_400).unwrap();
     let b = TensorMap::<_, f64>::rand_with_seed(&runtime, [&small], [&small], 750_401).unwrap();
     let c = TensorMap::<_, f64>::rand_with_seed(&runtime, [&large], [&large], 750_402).unwrap();

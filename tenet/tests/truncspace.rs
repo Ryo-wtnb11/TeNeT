@@ -30,7 +30,7 @@ fn fill(state: &mut u64) -> f64 {
 }
 
 fn typed_leg(entries: &[(usize, usize)]) -> GradedSpace<SU2FusionRule> {
-    GradedSpace::try_new_shared(
+    GradedSpace::try_new_with_shared_provider(
         Arc::new(SU2FusionRule),
         entries
             .iter()
@@ -46,7 +46,7 @@ fn typed_source(seed: u64) -> TensorMap<SU2FusionRule, f64> {
 }
 
 fn typed_u1_leg(entries: &[(i32, usize)]) -> GradedSpace<U1FusionRule> {
-    GradedSpace::try_new_shared(
+    GradedSpace::try_new_with_shared_provider(
         Arc::new(U1FusionRule),
         entries
             .iter()
@@ -120,7 +120,7 @@ fn typed_truncspace_from_another_rule_is_a_typed_error() {
     // What: the typed facade reaches `select_truncation` through its own call
     // site, so the guard needs its own gate here. A U(1) leg's `SectorId`s
     // read as SU(2)'s would name unrelated spins and truncate to nothing.
-    let foreign = GradedSpace::try_new_shared(
+    let foreign = GradedSpace::try_new_with_shared_provider(
         Arc::new(U1FusionRule),
         [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
     )

@@ -11,11 +11,12 @@ use tenet::typed::{GradedSpace, Runtime, TensorMap, Truncation};
 use tenet_network::{plan_cache_stats, tensor};
 
 fn space() -> GradedSpace<U1FusionRule> {
-    GradedSpace::try_new_shared(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap()
+    GradedSpace::try_new_with_shared_provider(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)])
+        .unwrap()
 }
 
 fn u1_space() -> GradedSpace<U1FusionRule> {
-    GradedSpace::try_new_shared(
+    GradedSpace::try_new_with_shared_provider(
         Arc::new(U1FusionRule),
         [
             (U1Irrep::new(-1), 2),
@@ -27,7 +28,7 @@ fn u1_space() -> GradedSpace<U1FusionRule> {
 }
 
 fn su2_space() -> GradedSpace<SU2FusionRule> {
-    GradedSpace::try_new_shared(
+    GradedSpace::try_new_with_shared_provider(
         Arc::new(SU2FusionRule),
         [
             (SU2Irrep::from_twice_spin(0), 2),
@@ -97,7 +98,7 @@ fn typed_host_macro_provider_dtype_matrix_matches_direct_contract() {
     assert_pair_case::<_, f64>(&runtime, &su2, 750_110);
     assert_pair_case::<_, Complex64>(&runtime, &su2, 750_112);
 
-    let fz2 = GradedSpace::try_new_shared(
+    let fz2 = GradedSpace::try_new_with_shared_provider(
         Arc::new(FermionParityFusionRule),
         [(Z2Irrep::EVEN, 2), (Z2Irrep::ODD, 1)],
     )
@@ -105,7 +106,7 @@ fn typed_host_macro_provider_dtype_matrix_matches_direct_contract() {
     assert_pair_case::<_, f64>(&runtime, &fz2, 750_120);
     assert_pair_case::<_, Complex64>(&runtime, &fz2, 750_122);
 
-    let product = GradedSpace::try_new_shared(
+    let product = GradedSpace::try_new_with_shared_provider(
         Arc::new(FermionParityFusionRule.product(U1FusionRule)),
         [
             (product_sector(Z2Irrep::EVEN, U1Irrep::new(0)), 2),
@@ -370,7 +371,7 @@ fn wrong_input_codomain_split_is_rejected() {
 fn contracted_leg_degeneracy_mismatch_spells_out_both_legs() {
     let runtime = Runtime::builder().build().unwrap();
     let provider = Arc::new(U1FusionRule);
-    let lhs_space = GradedSpace::try_new_shared(
+    let lhs_space = GradedSpace::try_new_with_shared_provider(
         Arc::clone(&provider),
         [
             (U1Irrep::new(-1), 2),
@@ -379,7 +380,7 @@ fn contracted_leg_degeneracy_mismatch_spells_out_both_legs() {
         ],
     )
     .unwrap();
-    let rhs_space = GradedSpace::try_new_shared(
+    let rhs_space = GradedSpace::try_new_with_shared_provider(
         provider,
         [
             (U1Irrep::new(-1), 2),

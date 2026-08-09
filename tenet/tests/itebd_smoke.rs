@@ -17,7 +17,7 @@ fn space<const N: usize>(
     rule: &Arc<U1FusionRule>,
     sectors: [(i32, usize); N],
 ) -> GradedSpace<U1FusionRule> {
-    GradedSpace::try_new_shared(
+    GradedSpace::try_new_with_shared_provider(
         Arc::clone(rule),
         sectors.map(|(charge, degeneracy)| (U1Irrep::new(charge), degeneracy)),
     )

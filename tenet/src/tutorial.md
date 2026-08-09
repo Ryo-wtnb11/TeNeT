@@ -69,7 +69,7 @@ scalar operations are rejected at compile time; widen explicitly with
 space. Call `v.try_dual()?` when the dual space is required. Code that
 intentionally shares an existing provider allocation should replace the former
 `try_new(Arc::clone(&provider), pairs, false)` spelling with
-`try_new_shared(Arc::clone(&provider), pairs)`. Sharing can reuse an expensive
+`try_new_with_shared_provider(Arc::clone(&provider), pairs)`. Sharing can reuse an expensive
 provider or its performance cache, but does not change tensor semantics.
 
 ```rust

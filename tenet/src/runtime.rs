@@ -1223,7 +1223,7 @@ mod tests {
         let runtime_a = Runtime::builder().build().unwrap();
         let runtime_b = Runtime::builder().build().unwrap();
         let provider = Arc::new(SU2FusionRule);
-        let space = GradedSpace::try_new_shared(
+        let space = GradedSpace::try_new_with_shared_provider(
             provider,
             [
                 (SU2Irrep::from_twice_spin(0), 2),

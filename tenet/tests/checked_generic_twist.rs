@@ -374,10 +374,13 @@ fn fixture<D>(
 where
     D: TensorScalar,
 {
-    let mixed =
-        GradedSpace::try_new_shared(Arc::clone(provider), [(Label::Unit, 1), (Label::X, 2)])
-            .unwrap();
-    let x = GradedSpace::try_new_shared(Arc::clone(provider), [(Label::X, 1)]).unwrap();
+    let mixed = GradedSpace::try_new_with_shared_provider(
+        Arc::clone(provider),
+        [(Label::Unit, 1), (Label::X, 2)],
+    )
+    .unwrap();
+    let x =
+        GradedSpace::try_new_with_shared_provider(Arc::clone(provider), [(Label::X, 1)]).unwrap();
     TensorMap::from_block_fn(runtime, [&mixed, &x], [&x], |trees, indices| {
         value(
             tree_marker(trees)
@@ -556,7 +559,9 @@ fn checked_generic_twist_handles_nobraiding_bosonic_and_staged_identity_sharing(
         BraidingStyleKind::NoBraiding,
         -1.0,
     ));
-    let unit = GradedSpace::try_new_shared(Arc::clone(&no_braiding), [(Label::Unit, 1)]).unwrap();
+    let unit =
+        GradedSpace::try_new_with_shared_provider(Arc::clone(&no_braiding), [(Label::Unit, 1)])
+            .unwrap();
     let unit_tensor: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&unit], [&unit], |_, _| 3.0).unwrap();
     no_braiding.reset_ledger(0);
@@ -761,7 +766,7 @@ fn checked_generic_flip_uses_staged_nontrivial_fs_and_twist_factors() {
         -1.0,
         1.0,
     ));
-    let x_dual = GradedSpace::try_new_shared(Arc::clone(&provider), [(Label::X, 1)])
+    let x_dual = GradedSpace::try_new_with_shared_provider(Arc::clone(&provider), [(Label::X, 1)])
         .and_then(|space| space.try_dual())
         .unwrap();
     let source: TensorMap<_, f64> =
@@ -787,7 +792,11 @@ where
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(SUNFusionRule::new(n).unwrap());
     let legs = [2, 1, 2].map(|degeneracy| {
-        GradedSpace::try_new_shared(Arc::clone(&provider), [(label.clone(), degeneracy)]).unwrap()
+        GradedSpace::try_new_with_shared_provider(
+            Arc::clone(&provider),
+            [(label.clone(), degeneracy)],
+        )
+        .unwrap()
     });
     let source: TensorMap<_, D> = TensorMap::from_block_fn(
         &runtime,
@@ -840,7 +849,11 @@ where
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(SUNFusionRule::new(n).unwrap());
     let legs = [2, 1, 2].map(|degeneracy| {
-        GradedSpace::try_new_shared(Arc::clone(&provider), [(label.clone(), degeneracy)]).unwrap()
+        GradedSpace::try_new_with_shared_provider(
+            Arc::clone(&provider),
+            [(label.clone(), degeneracy)],
+        )
+        .unwrap()
     });
     let source: TensorMap<_, D> = TensorMap::from_block_fn(
         &runtime,
