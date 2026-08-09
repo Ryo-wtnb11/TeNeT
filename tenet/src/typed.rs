@@ -127,13 +127,16 @@
 //! [`TensorMap::flip`], [`TensorMap::insert_left_unit`],
 //! [`TensorMap::insert_right_unit`], [`TensorMap::remove_unit`]).
 //!
-//! Issue #570 also gave the facade **compact diagonal storage**: a spectrum
-//! factor — `svd_compact`'s and `svd_trunc`'s `s`, `eigh`/`eig`'s `d` — holds
-//! `Σ_c k_c` values rather than the `Σ_c k_c²` block-diagonal buffer they would
-//! fill, which is what TensorKit's `DiagonalTensorMap` is. It is a storage
-//! property and not a type: no signature mentions it, [`TensorMap::data`] still
-//! reports the dense buffer (materialized once, on demand, shared by every
-//! clone), and the operations that can exploit it — [`TensorMap::compose`],
+//! Issue #570 also gave the facade **compact diagonal storage**. For
+//! multiplicity-free providers, the `s` factor from `svd_compact` and
+//! `svd_trunc` is compact; for checked `Generic` providers, only the `d` factor
+//! from EIGH/EIG is compact, while checked SVD publishes its `s` factor densely.
+//! A compact factor holds `Σ_c k_c` values rather than the `Σ_c k_c²`
+//! block-diagonal buffer it would fill, which is what TensorKit's
+//! `DiagonalTensorMap` is. It is a storage property and not a type: no signature
+//! mentions it, [`TensorMap::data`] still reports the dense buffer (materialized
+//! once, on demand, shared by every clone), and the operations that can exploit
+//! it — [`TensorMap::compose`],
 //! [`TensorMap::scale`], [`TensorMap::add`], [`TensorMap::adjoint`],
 //! [`TensorMap::trace_pairs`] on its full-pair arm, and the reductions — do so
 //! silently. The ones that cannot say so in their own
@@ -177,8 +180,9 @@
 //!   change.
 //! - `conj` stays design-gated on its open correctness question for
 //!   non-self-dual sectors. [`TensorMap::adjoint`] is the TensorKit-style lazy
-//!   parent view for dense storage; compact diagonal storage keeps its direct
-//!   `O(Σ_c k_c)` conjugation path.
+//!   parent view for dense storage. A multiplicity-free compact diagonal keeps
+//!   its direct `O(Σ_c k_c)` conjugation path; a checked `Generic` compact
+//!   diagonal uses the lazy parent view instead.
 //!
 //! Adding any of them ahead of its review would bypass the gate that exists to
 //! keep this surface deliberate.
