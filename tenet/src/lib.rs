@@ -60,8 +60,8 @@ pub mod prelude {
     };
     pub use crate::typed::{
         CheckedGenericEigTrunc, CheckedGenericEighTrunc, DecodeError, DecodeLimits, EigTrunc,
-        EighTrunc, EncodeError, GenericUnitTensorMapExt, GradedSpace, SvdTrunc, TensorMap,
-        TensorScalar, TypedPersistenceCodec,
+        EighTrunc, EncodeError, GenericUnitTensorMapExt, GradedSpace, SectorSpectrum, SvdTrunc,
+        TensorMap, TensorScalar, TypedPersistenceCodec,
     };
     pub use num_complex::Complex64;
     #[allow(deprecated)]
@@ -75,7 +75,7 @@ pub mod prelude {
     pub use tenet_core::{BlockKey, FusionTreePairKey, MultiplicityIndex, SectorId};
     #[cfg(feature = "racah-generated")]
     pub use tenet_core::{SUNFusionRule, SUNFusionRuleError};
-    pub use tenet_matrixalgebra::{SectorSpectrum, Truncation, TruncationSpace};
+    pub use tenet_matrixalgebra::{Truncation, TruncationSpace};
 }
 
 /// Formula-first explanation of TeNeT's tensor-map convention, duals,
