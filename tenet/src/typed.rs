@@ -469,9 +469,9 @@ where
     /// Returns [`Error::RuntimeMismatch`] or [`Error::RuleMismatch`] for
     /// incompatible operands, [`Error::InvalidArgument`] for unequal
     /// codomains, and an operation error when the divisor is not isomorphic or
-    /// a sector is singular. Checked-Generic provider/admission failures retain
-    /// their typed source. If any preflight, sector solve, or admission fails,
-    /// no result tensor is returned.
+    /// a sector is singular. If a checked provider rejects the output space,
+    /// its original error is available as the source. If any preflight, sector
+    /// solve, or output-space creation fails, no result tensor is returned.
     ///
     /// ```
     /// use std::sync::Arc;
@@ -584,9 +584,9 @@ where
     /// read their parent orientation without caching a materialization.
     /// Checked-Generic reductions currently require dense payloads.
     ///
-    /// Returns a typed provider error when a checked quantum dimension cannot
-    /// be obtained, or a core error when the coupled-sector layout cannot be
-    /// walked.
+    /// If a checked provider cannot supply a quantum dimension, its original
+    /// error is available as the source. An invalid coupled-sector layout
+    /// returns [`Error::Core`].
     ///
     /// ```
     /// use std::sync::Arc;
@@ -645,8 +645,8 @@ where
     /// Returns the host-side linear combination
     /// `alpha * self + beta * other` on the operands' common tensor space.
     ///
-    /// Both operands must share a runtime and exactly the same admitted space
-    /// and block layout. `alpha` multiplies `self` and `beta` multiplies
+    /// Both operands must share a runtime and exactly the same tensor space and
+    /// block layout. `alpha` multiplies `self` and `beta` multiplies
     /// `other`; this order differs from VectorInterface's Julia argument
     /// convention. Two compact diagonal inputs stay compact. A mixed
     /// compact/dense pair allocates only the dense result, and lazy inputs are
@@ -1215,9 +1215,9 @@ where
     /// compact; a checked-Generic compact diagonal uses the general lazy view.
     /// Every result keeps the source's exact provider `Arc`.
     ///
-    /// Layout, pivotal, or checked-provider failures are returned as typed
-    /// errors before a view is returned. For real payloads this is a transpose;
-    /// complex payloads are conjugated as well.
+    /// If layout construction or checked pivotal data fails, that layout or
+    /// provider error is returned before a view is created. For real payloads
+    /// this is a transpose; complex payloads are conjugated as well.
     ///
     /// ```
     /// use std::sync::Arc;
@@ -1286,14 +1286,16 @@ where
     /// `O(sum_c m_c * n_c * min(m_c, n_c))`. Compact diagonal input is
     /// materialized first. Multiplicity-free lazy adjoints are materialized
     /// only for the operation and stay uncached; checked-Generic QR requires an
-    /// owned input. Checked factors keep the exact source provider `Arc`, and
-    /// a failure in any sector or output admission returns no factor tuple.
+    /// owned input. Checked factors use the same provider instance as `self`.
+    /// If any sector fails or the provider rejects an output space, no factor
+    /// tuple is returned.
     ///
     /// # Errors
     ///
-    /// Dense execution and factor-layout errors retain their operation/core
-    /// class. Checked Generic additionally preserves provider/admission errors;
-    /// passing a lazy adjoint there returns [`Error::InvalidArgument`].
+    /// Dense execution returns [`Error::Operation`], while factor-layout
+    /// failures return [`Error::Core`] where applicable. If a checked provider
+    /// rejects an output space, its original error is available as the source.
+    /// Passing a lazy adjoint there returns [`Error::InvalidArgument`].
     ///
     /// ```
     /// use std::sync::Arc;
@@ -1584,9 +1586,10 @@ where
     /// allocating member of the SVD family when only the spectrum is needed.
     /// Multiplicity-free lazy adjoints are read through their owned parent;
     /// checked Generic currently requires an owned input and returns
-    /// [`Error::InvalidArgument`] for a lazy adjoint. Sector-label decoding and
-    /// dense execution errors remain typed. See [`Self::svd_compact`] for the
-    /// decomposition contract and representative example.
+    /// [`Error::InvalidArgument`] for a lazy adjoint. A dense failure returns
+    /// [`Error::Operation`]; if a provider cannot decode a sector label, its
+    /// original error is available as the source. See [`Self::svd_compact`] for
+    /// the decomposition contract and representative example.
     pub fn svd_vals(
         &self,
     ) -> Result<Vec<SectorSpectrum<<R as TypedSectorAdmission>::Sector, f64>>, TypedFacadeError<R>>
@@ -1612,10 +1615,11 @@ where
     /// compact; the checked-Generic `s` is currently dense.
     ///
     /// A malformed policy, foreign [`TruncationSpace`], dense failure, label
-    /// decoding failure, or checked output admission returns no partial result.
-    /// Checked Generic requires owned input; multiplicity-free lazy adjoints
-    /// stay uncached. See [`Self::svd_compact`] for factor spaces, cost, and the
-    /// reconstruction convention.
+    /// decoding failure, or provider rejection returns an error and no result.
+    /// The original provider error is available as the source. Checked Generic
+    /// requires owned input; multiplicity-free lazy adjoints stay uncached. See
+    /// [`Self::svd_compact`] for factor spaces, cost, and the reconstruction
+    /// convention.
     pub fn svd_trunc(
         &self,
         truncation: &Truncation,
@@ -1637,8 +1641,10 @@ where
     /// endomorphism and every sector must satisfy the same Hermiticity check as
     /// [`Self::eigh_full`]. Multiplicity-free lazy adjoints are materialized
     /// only for this call; checked Generic currently requires owned input for
-    /// this values-only method. Dense, layout, label-decoding, and provider
-    /// failures remain typed, and no partial spectrum is returned.
+    /// this values-only method. Dense failures return [`Error::Operation`],
+    /// layout failures return [`Error::Core`], and an original provider or
+    /// label-decoding error is available as the source. No spectrum is returned
+    /// unless every sector succeeds.
     pub fn eigh_vals(
         &self,
     ) -> Result<Vec<SectorSpectrum<<R as TypedSectorAdmission>::Sector, f64>>, TypedFacadeError<R>>
@@ -1674,11 +1680,11 @@ where
     /// A non-endomorphism, failed Hermiticity check, or dense numerical failure
     /// returns [`Error::Operation`]. Layout failures retain [`Error::Core`],
     /// and multiplicity-free algebra failures retain [`Error::FusionAlgebra`]
-    /// where applicable. Checked Generic preserves the typed source of layout,
-    /// provider, and admission failures and also validates identical full
-    /// row/column fusion-tree stacking. All sectors are staged before the
-    /// method returns; a failure yields no factor tuple. Cost is
-    /// `O(sum_c n_c^3)`.
+    /// where applicable. For checked Generic, the original layout or provider
+    /// error is available as the source. It also validates identical full
+    /// row/column fusion-tree stacking. Factors are returned only after every
+    /// sector succeeds; otherwise the method returns an error and no tuple.
+    /// Cost is `O(sum_c n_c^3)`.
     ///
     /// ```
     /// use std::sync::Arc;
@@ -1714,8 +1720,9 @@ where
     /// Hence `v * d * v^H` is the corresponding truncated spectral
     /// reconstruction. Factor spaces, ordering, lazy-input handling, and cost
     /// are those of [`Self::eigh_full`]. The policy is validated as described
-    /// by [`Self::svd_trunc`]. Checked results use the source provider instance;
-    /// if validation, factorization, or admission fails, no result is returned.
+    /// by [`Self::svd_trunc`]. Checked results use the source provider instance.
+    /// If validation or factorization fails, or the provider rejects an output
+    /// space, no result is returned.
     pub fn eigh_trunc(
         &self,
         truncation: &Truncation,
@@ -1820,8 +1827,8 @@ where
     /// discarded-value norm only, not a reconstruction-error bound. Ordering,
     /// lazy-input handling, and cost are those of [`Self::eig_full`]. The
     /// policy is validated as described by [`Self::svd_trunc`]. Checked results
-    /// use the source provider instance; if validation, factorization, or
-    /// admission fails, no result is returned.
+    /// use the source provider instance. If validation or factorization fails,
+    /// or the provider rejects an output space, no result is returned.
     pub fn eig_trunc(
         &self,
         truncation: &Truncation,
@@ -6968,9 +6975,10 @@ where
     /// # Errors
     ///
     /// Returns [`Error::InvalidArgument`] for an out-of-range or repeated axis.
-    /// Non-dual legs, unsupported pivotal data, provider failures, and trace
-    /// execution failures retain their typed error class. A failed trace
-    /// returns no partial output tensor.
+    /// Non-dual legs and trace execution failures return their corresponding
+    /// [`Error`] variant. If required pivotal data is unavailable, the original
+    /// provider error is available as the source. A failed trace returns no
+    /// output tensor.
     ///
     /// ```
     /// use std::sync::Arc;
@@ -15359,9 +15367,9 @@ where
     /// sectors that keep null directions. Compact diagonal input is
     /// materialized first. Lazy adjoints use the opposite null space of their
     /// owned parent and return a detached result without filling the receiver
-    /// cache. Checked factors retain the exact source provider `Arc`; all
-    /// numerical work is staged before the data-dependent bond is admitted,
-    /// and any failure returns no tensor.
+    /// cache. Checked results use the same provider instance as `self`. TeNeT
+    /// creates the output bond only after every sector succeeds; otherwise it
+    /// returns an error and no tensor.
     ///
     /// ```
     /// use std::sync::Arc;
@@ -15413,8 +15421,8 @@ where
     /// composition. Compact diagonal input is materialized first. A lazy
     /// adjoint runs the opposite decomposition on its owned parent and returns
     /// detached owned factors without caching the receiver. Checked factors
-    /// use the exact source provider `Arc`. If provider admission or any sector
-    /// computation fails, no factors are returned.
+    /// use the same provider instance as `self`. If that provider rejects an
+    /// output space or any sector computation fails, no factors are returned.
     ///
     /// ```
     /// use std::sync::Arc;
