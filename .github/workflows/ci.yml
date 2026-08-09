@@ -14,6 +14,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  TENFERRO_REV: 0ae5e1c769f256c2180a6e0c48eafdd6d878d8f1
   # Why-not keep default DWARF: heavy Linux tests do not inspect it, while its
   # artifacts exhaust hosted-runner disk and linker memory.
   # Why-not delete more image paths: that treats the symptom and can destabilize
@@ -21,9 +22,9 @@ env:
   CI_HEAVY_TEST_DEBUG: '0'
 
 # TeNeT depends on tenferro-rs via a sibling path dependency
-# (`../../tenferro-rs`). CI checks out tenferro-rs at `main` next to this repo
-# so builds run against upstream `main`, never a developer's local branch.
-# strided-rs is pulled from crates.io by tenferro, so it needs no checkout.
+# (`../../tenferro-rs`). CI checks out a known-green tenferro-rs revision next
+# to this repo. Its strided implementation is transitively pinned there, so it
+# needs no separate checkout.
 
 jobs:
   changes:
@@ -74,8 +75,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: tensor4all/tenferro-rs
-          ref: main
+          ref: ${{ env.TENFERRO_REV }}
           path: tenferro-rs
+      - name: Record source revisions
+        run: |
+          git -C tenet log -1 --format='TeNeT %H'
+          git -C tenferro-rs log -1 --format='Tenferro %H'
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -103,8 +108,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: tensor4all/tenferro-rs
-          ref: main
+          ref: ${{ env.TENFERRO_REV }}
           path: tenferro-rs
+      - name: Record source revisions
+        run: |
+          git -C tenet log -1 --format='TeNeT %H'
+          git -C tenferro-rs log -1 --format='Tenferro %H'
       - uses: dtolnay/rust-toolchain@stable
       - name: Install Accelerate build toolchain
         if: matrix.name == 'accelerate'
@@ -126,9 +135,8 @@ jobs:
   # cotengra-python is build + unit tests only — its one test that shells
   # out to Python (`runs_installed_cotengra_when_requested`) early-returns
   # unless `TENET_RUN_COTENGRA_PYTHON_TEST` is set, so no Python env is
-  # needed here. Only racah-generated pins the reviewed Tenferro revision:
-  # Racah resolves its git dependencies through TeNeT's root patch. The
-  # existing rows continue to test Tenferro main.
+  # needed here. The Racah rows retain their separately reviewed Tenferro
+  # revision; the other rows use the repository's known-green pin.
   feature-contract:
     name: feature contract (${{ matrix.name }})
     runs-on: ubuntu-latest
@@ -136,8 +144,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: opt-path, package: tenet-network, features: "opt-path,cpu-faer", tenferro_ref: main }
-          - { name: cotengra-python, package: tenet-network, features: "cotengra-python,cpu-faer", tenferro_ref: main }
+          - { name: opt-path, package: tenet-network, features: "opt-path,cpu-faer" }
+          - { name: cotengra-python, package: tenet-network, features: "cotengra-python,cpu-faer" }
           - { name: racah-generated, package: tenet-sectors, features: racah-generated, tenferro_ref: 5bbd4a0613b3c801ce924cdc4339df2c77c1ab62 }
           - { name: racah-generated-tensors, package: tenet-tensors, features: "racah-generated,cpu-faer", tenferro_ref: 5bbd4a0613b3c801ce924cdc4339df2c77c1ab62 }
     steps:
@@ -147,8 +155,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: tensor4all/tenferro-rs
-          ref: ${{ matrix.tenferro_ref }}
+          ref: ${{ matrix.tenferro_ref || env.TENFERRO_REV }}
           path: tenferro-rs
+      - name: Record source revisions
+        run: |
+          git -C tenet log -1 --format='TeNeT %H'
+          git -C tenferro-rs log -1 --format='Tenferro %H'
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -172,8 +184,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: tensor4all/tenferro-rs
-          ref: main
+          ref: ${{ env.TENFERRO_REV }}
           path: tenferro-rs
+      - name: Record source revisions
+        run: |
+          git -C tenet log -1 --format='TeNeT %H'
+          git -C tenferro-rs log -1 --format='Tenferro %H'
       - uses: Jimver/cuda-toolkit@v0.2.28
         with:
           method: network
@@ -196,8 +212,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: tensor4all/tenferro-rs
-          ref: main
+          ref: ${{ env.TENFERRO_REV }}
           path: tenferro-rs
+      - name: Record source revisions
+        run: |
+          git -C tenet log -1 --format='TeNeT %H'
+          git -C tenferro-rs log -1 --format='Tenferro %H'
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -260,8 +280,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: tensor4all/tenferro-rs
-          ref: main
+          ref: ${{ env.TENFERRO_REV }}
           path: tenferro-rs
+      - name: Record source revisions
+        run: |
+          git -C tenet log -1 --format='TeNeT %H'
+          git -C tenferro-rs log -1 --format='Tenferro %H'
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -294,8 +318,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: tensor4all/tenferro-rs
-          ref: main
+          ref: ${{ env.TENFERRO_REV }}
           path: tenferro-rs
+      - name: Record source revisions
+        run: |
+          git -C tenet log -1 --format='TeNeT %H'
+          git -C tenferro-rs log -1 --format='Tenferro %H'
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
@@ -331,8 +359,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: tensor4all/tenferro-rs
-          ref: main
+          ref: ${{ env.TENFERRO_REV }}
           path: tenferro-rs
+      - name: Record source revisions
+        run: |
+          git -C tenet log -1 --format='TeNeT %H'
+          git -C tenferro-rs log -1 --format='Tenferro %H'
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy

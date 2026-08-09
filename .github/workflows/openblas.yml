@@ -27,6 +27,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  TENFERRO_REV: 0ae5e1c769f256c2180a6e0c48eafdd6d878d8f1
 
 jobs:
   openblas-contract:
@@ -39,8 +40,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: tensor4all/tenferro-rs
-          ref: main
+          ref: ${{ env.TENFERRO_REV }}
           path: tenferro-rs
+      - name: Record source revisions
+        run: |
+          git -C tenet log -1 --format='TeNeT %H'
+          git -C tenferro-rs log -1 --format='Tenferro %H'
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
