@@ -1,6 +1,6 @@
 # Operation matrix
 
-Audited at: `2cede6493a2b31d5c9fe2d092783e8b57c8b9357`
+Audited at: `9a5652a3876dabd61b0dfe7110bbb91755c91cd8`
 
 This is the current-main capability census for #938. The pinned source and
 executable tests are authoritative; an export, a satisfiable trait bound, or an
@@ -22,36 +22,36 @@ sector distributions, products, devices, or checked providers.
 
 ## Provider families on default Host storage
 
-All cells refer to `TensorMap<R, D, Vec<D>>`. The two product columns name the
-exact fixtures exercised by the suite; neither proves arbitrary or recursively
-nested `ProductFusionRule` values. Every linked `NEEDS-PROOF` cell is owned by
-[#1002](https://github.com/Ryo-wtnb11/TeNeT/issues/1002).
+All cells refer to `TensorMap<R, D, Vec<D>>`. The ZN column is the built-in
+`ZNFusionRule::new(3)` fixture. The two product columns name the exact fixtures
+exercised by the suite; none of these columns proves arbitrary moduli, products,
+or recursively nested `ProductFusionRule` values.
 
-| Operation family | U(1) | Z2 | ZN | CU(1) | fZ2 | SU(2) | fZ2 x U(1) | (fZ2 x U(1)) x SU(2) | checked Generic seam [1] | Fibonacci |
+| Operation family | U(1) | Z2 | ZN(3) | CU(1) | fZ2 | SU(2) | fZ2 x U(1) | (fZ2 x U(1)) x SU(2) | checked Generic seam [1] | Fibonacci |
 |---|---|---|---|---|---|---|---|---|---|---|
 | Space/tensor construction and labelled block readback | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | UNSUPPORTED |
 | Physical dense expansion and symmetric projection [2] | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
-| `adjoint` | PROVED | PROVED | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | PROVED | PROVED | PROVED | PROVED | PROVED | UNSUPPORTED |
-| `permute`, `transpose`, `repartition` | PROVED | PROVED | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | UNSUPPORTED |
-| `braid`, `twist` | PROVED | PROVED | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | PROVED | PROVED | PROVED | PROVED | PROVED | UNSUPPORTED |
-| `flip` | PROVED | PROVED | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | PROVED | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | PROVED | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | PROVED | UNSUPPORTED |
-| Unit insertion/removal | PROVED | PROVED | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | PROVED | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | PROVED | UNSUPPORTED |
-| `catdomain`, `catcodomain`, `absorb` | PROVED | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | PROVED | UNSUPPORTED |
-| `otimes`, arbitrary/ordered `contract`, `compose` | PROVED | PROVED | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | PROVED | PROVED | PROVED | PROVED | PROVED | UNSUPPORTED |
-| `add`, `scale`, `norm`, `trace_pairs`, `tr` | PROVED | PROVED | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | PROVED | PROVED | PROVED | PROVED | PROVED | UNSUPPORTED |
-| `inner` [3] | [MEASURED-GAP](https://github.com/Ryo-wtnb11/TeNeT/issues/875) | PROVED | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [MEASURED-GAP](https://github.com/Ryo-wtnb11/TeNeT/issues/875) | PROVED | PROVED | PROVED | UNSUPPORTED |
-| Compact QR; `left_orth`, `right_orth`; SVD values | PROVED | PROVED | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | PROVED | PROVED | PROVED | UNSUPPORTED |
-| Compact/full/truncated SVD; full QR; compact/full LQ | PROVED | PROVED | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | PROVED | UNSUPPORTED |
-| Left/right numerical null spaces [4] | PROVED | PROVED | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | INTENTIONAL-DIFFERENCE | UNSUPPORTED |
-| Left/right polar factors | PROVED | PROVED | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | PROVED | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | PROVED | UNSUPPORTED |
-| EIGH full/truncated/values | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | PROVED | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | PROVED | UNSUPPORTED |
-| EIG full/truncated/values | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | PROVED | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | PROVED | UNSUPPORTED |
-| `inv`, `exp`, `powi`, left/right `solve` | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | PROVED | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | PROVED | UNSUPPORTED |
-| `pinv` [5] | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | PROVED | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | INTENTIONAL-DIFFERENCE | UNSUPPORTED |
-| Dense diagonal `sqrt` | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | PROVED | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | PROVED | UNSUPPORTED |
-| Network ordinary planning, contraction/permute replay [6] | PROVED | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | PROVED | PROVED | PROVED | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | PROVED | UNSUPPORTED |
-| Network intra-operand trace [6] | PROVED | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | PROVED | PROVED | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [UNSUPPORTED](https://github.com/Ryo-wtnb11/TeNeT/issues/1005) | UNSUPPORTED |
-| Network payload-destination reuse [6] | PROVED | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | PROVED | PROVED | PROVED | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1002) | [INTENTIONAL-DIFFERENCE](https://github.com/Ryo-wtnb11/TeNeT/issues/1005) | UNSUPPORTED |
+| `adjoint` | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | UNSUPPORTED |
+| `permute`, `transpose`, `repartition` | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | UNSUPPORTED |
+| `braid`, `twist` | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | UNSUPPORTED |
+| `flip` | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | UNSUPPORTED |
+| Unit insertion/removal | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | UNSUPPORTED |
+| `catdomain`, `catcodomain`, `absorb` | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | UNSUPPORTED |
+| `otimes`, arbitrary/ordered `contract`, `compose` | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | UNSUPPORTED |
+| `add`, `scale`, `norm`, `trace_pairs`, `tr` | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | UNSUPPORTED |
+| `inner` [3] | [MEASURED-GAP](https://github.com/Ryo-wtnb11/TeNeT/issues/875) | PROVED | PROVED | PROVED | PROVED | [MEASURED-GAP](https://github.com/Ryo-wtnb11/TeNeT/issues/875) | PROVED | PROVED | PROVED | UNSUPPORTED |
+| Compact QR; `left_orth`, `right_orth`; SVD values | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | UNSUPPORTED |
+| Compact/full/truncated SVD; full QR; compact/full LQ | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | UNSUPPORTED |
+| Left/right numerical null spaces [4] | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | INTENTIONAL-DIFFERENCE | UNSUPPORTED |
+| Left/right polar factors | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | UNSUPPORTED |
+| EIGH full/truncated/values | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | UNSUPPORTED |
+| EIG full/truncated/values | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | UNSUPPORTED |
+| `inv`, `exp`, `powi`, left/right `solve` | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | UNSUPPORTED |
+| `pinv` [5] | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | INTENTIONAL-DIFFERENCE | UNSUPPORTED |
+| Dense diagonal `sqrt` | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | UNSUPPORTED |
+| Network ordinary planning, contraction/permute replay [6] | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | UNSUPPORTED |
+| Network intra-operand trace [6] | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | [UNSUPPORTED](https://github.com/Ryo-wtnb11/TeNeT/issues/1005) | UNSUPPORTED |
+| Network payload-destination reuse [6] | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | [INTENTIONAL-DIFFERENCE](https://github.com/Ryo-wtnb11/TeNeT/issues/1005) | UNSUPPORTED |
 | Serialization | [UNSUPPORTED](https://github.com/Ryo-wtnb11/TeNeT/issues/1003) | [UNSUPPORTED](https://github.com/Ryo-wtnb11/TeNeT/issues/1003) | [UNSUPPORTED](https://github.com/Ryo-wtnb11/TeNeT/issues/1003) | [UNSUPPORTED](https://github.com/Ryo-wtnb11/TeNeT/issues/1003) | [UNSUPPORTED](https://github.com/Ryo-wtnb11/TeNeT/issues/1003) | [UNSUPPORTED](https://github.com/Ryo-wtnb11/TeNeT/issues/1003) | [UNSUPPORTED](https://github.com/Ryo-wtnb11/TeNeT/issues/1003) | [UNSUPPORTED](https://github.com/Ryo-wtnb11/TeNeT/issues/1003) | [UNSUPPORTED](https://github.com/Ryo-wtnb11/TeNeT/issues/1003) | [UNSUPPORTED](https://github.com/Ryo-wtnb11/TeNeT/issues/1003) |
 
 Notes:
@@ -162,6 +162,14 @@ ownership/cache audit is #783.
 
 ## Executable evidence
 
+- `tenet/tests/mf_structural_conformance.rs`: exact ZN(3), CU(1), SU(2),
+  fermionic and exact-product structural, pivotal, contraction and reduction
+  laws, including nontrivial CU(1) exchange phase and quantum-dimension oracles.
+- `tenet/tests/mf_linalg_conformance.rs`: rectangular and square
+  factorization, spectral and matrix-function laws for the remaining provider
+  fixtures in #1002, with exact provider-`Arc` preservation.
+- `tenet-network/tests/mf_provider_conformance.rs`: explicit and macro network
+  execution, static trace and workspace reuse for the exact provider fixtures.
 - `tenet/tests/checked_generic_facade.rs`: synthetic failure staging plus
   SU(3)/SU(4) full-key `f64`/`Complex64` oracles for reductions,
   decompositions, null/polar, EIGH/EIG, solve and matrix functions.
@@ -193,10 +201,9 @@ provider-wide performance conclusion is inferred from SU(3)/SU(4) fixtures.
    construction is [#1004](https://github.com/Ryo-wtnb11/TeNeT/issues/1004).
    Lazy/conjugated contraction still rejects without fallback, and checked CUDA
    remains with [#3](https://github.com/Ryo-wtnb11/TeNeT/issues/3).
-2. Residual multiplicity-free proof is uneven across U(1), Z2, ZN, CU(1),
-   fZ2, SU(2), and the two exact product fixtures. Its finite executable-evidence
-   closure is [#1002](https://github.com/Ryo-wtnb11/TeNeT/issues/1002); no
-   arbitrary-product claim follows from it.
+2. Exact fixture tests now cover the remaining multiplicity-free evidence gaps
+   for U(1), Z2, built-in ZN(3), CU(1), fZ2, SU(2), and the two named product
+   fixtures. This does not prove arbitrary moduli or arbitrary products.
 3. B/C/D are not closure criteria for #938 and remain isolated in
    [#989](https://github.com/Ryo-wtnb11/TeNeT/issues/989).
 4. The only current measured provider-operation gap in this census is U(1)/SU(2)

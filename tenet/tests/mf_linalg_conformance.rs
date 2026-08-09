@@ -1,7 +1,7 @@
 //! Multiplicity-free public linear-algebra conformance (#1002).
 //!
-//! These are deliberately public-API tests.  They cover the provider families
-//! that users can construct today, not arbitrary `FusionRule` implementations.
+//! These are deliberately public-API tests. They cover the residual provider
+//! fixtures in #1002, not every constructible `FusionRule` implementation.
 
 use std::sync::Arc;
 
