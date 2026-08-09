@@ -1355,6 +1355,7 @@ fn build_dense<R, D, C>(
     provider: &Arc<R>,
     record: SpaceRecord<R::Sector>,
     blocks: Vec<BlockRecord<R::Sector, D>>,
+    limits: DecodeLimits,
 ) -> Result<TensorMap<R, D>, DecodeError<C, TypedFacadeError<R>>>
 where
     R: TypedSectorAdmission,
@@ -1362,6 +1363,17 @@ where
     D: WireScalar,
 {
     let space = build_space(provider, record).map_err(DecodeError::Facade)?;
+    let structure = space.space().structure();
+    check_limit(
+        "admitted dense blocks",
+        structure.block_count(),
+        limits.max_blocks,
+    )?;
+    let required = space
+        .space()
+        .required_len()
+        .map_err(|error| DecodeError::InvalidFormat(error.to_string()))?;
+    check_limit("admitted dense elements", required, limits.max_elements)?;
     let mut supplied = HashMap::with_capacity(blocks.len());
     for block in blocks {
         if supplied.insert(block.key.clone(), block).is_some() {
@@ -1370,11 +1382,6 @@ where
             ));
         }
     }
-    let structure = space.space().structure();
-    let required = space
-        .space()
-        .required_len()
-        .map_err(|error| DecodeError::InvalidFormat(error.to_string()))?;
     let mut data = vec![D::from_real(0.0); required];
     for index in 0..structure.block_count() {
         let block = structure
@@ -1408,6 +1415,7 @@ fn build_diagonal<R, D, C>(
     provider: &Arc<R>,
     record: SpaceRecord<R::Sector>,
     entries: Vec<(R::Sector, Vec<D>)>,
+    limits: DecodeLimits,
 ) -> Result<TensorMap<R, D>, DecodeError<C, TypedFacadeError<R>>>
 where
     R: TypedSectorAdmission,
@@ -1419,6 +1427,38 @@ where
         return Err(DecodeError::InvalidFormat(
             "compact payload is not on a diagonal bond space".to_string(),
         ));
+    }
+    let structure = space.space().structure();
+    check_limit(
+        "admitted diagonal blocks",
+        structure.block_count(),
+        limits.max_blocks,
+    )?;
+    check_limit(
+        "admitted diagonal sectors",
+        structure.block_count(),
+        limits.max_sectors_per_leg,
+    )?;
+    let mut admitted_elements = 0usize;
+    for index in 0..structure.block_count() {
+        let block = structure
+            .block(index)
+            .map_err(|error| DecodeError::InvalidFormat(error.to_string()))?;
+        if block.shape().len() != 2 || block.shape()[0] != block.shape()[1] {
+            return Err(DecodeError::InvalidFormat(
+                "admitted compact block is not square".to_string(),
+            ));
+        }
+        admitted_elements = admitted_elements
+            .checked_add(block.shape()[0])
+            .ok_or_else(|| {
+                DecodeError::InvalidFormat("compact element count overflow".to_string())
+            })?;
+        check_limit(
+            "admitted compact elements",
+            admitted_elements,
+            limits.max_elements,
+        )?;
     }
     let mut spectrum = Vec::with_capacity(entries.len());
     for (label, values) in entries {
@@ -1436,7 +1476,6 @@ where
             "duplicate compact spectrum sector".to_string(),
         ));
     }
-    let structure = space.space().structure();
     if structure.block_count() != spectrum.len() {
         return Err(DecodeError::InvalidFormat(
             "compact spectrum does not cover every admitted sector".to_string(),
@@ -1455,10 +1494,7 @@ where
             .ok_or_else(|| {
                 DecodeError::InvalidFormat("compact spectrum is missing a sector".to_string())
             })?;
-        if block.shape().len() != 2
-            || block.shape()[0] != block.shape()[1]
-            || entry.values.len() != block.shape()[0]
-        {
+        if entry.values.len() != block.shape()[0] {
             return Err(DecodeError::InvalidFormat(
                 "compact spectrum length differs from admitted bond dimension".to_string(),
             ));
@@ -1506,22 +1542,24 @@ where
     let record = read_tensor_record(&mut reader, limits, codec, provider.as_ref())?;
     reader.finish().map_err(DecodeError::InvalidFormat)?;
     match record {
-        TensorRecord::Dense { space, blocks } => build_dense(runtime, &provider, space, blocks),
+        TensorRecord::Dense { space, blocks } => {
+            build_dense(runtime, &provider, space, blocks, limits)
+        }
         TensorRecord::Diagonal { space, spectrum } => {
-            build_diagonal(runtime, &provider, space, spectrum)
+            build_diagonal(runtime, &provider, space, spectrum, limits)
         }
         TensorRecord::AdjointDense {
             parent_space,
             parent_blocks,
         } => {
-            let parent = build_dense(runtime, &provider, parent_space, parent_blocks)?;
+            let parent = build_dense(runtime, &provider, parent_space, parent_blocks, limits)?;
             build_adjoint(parent)
         }
         TensorRecord::AdjointDiagonal {
             parent_space,
             parent_spectrum,
         } => {
-            let parent = build_diagonal(runtime, &provider, parent_space, parent_spectrum)?;
+            let parent = build_diagonal(runtime, &provider, parent_space, parent_spectrum, limits)?;
             build_adjoint(parent)
         }
     }
