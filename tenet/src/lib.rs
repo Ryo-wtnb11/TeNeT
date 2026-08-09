@@ -101,8 +101,8 @@ pub mod dense {
 ///
 /// Most applications should use [`prelude::TensorMap`] methods. Use this module
 /// when a workflow needs explicit destination buffers, axis specifications, or
-/// operation contexts. The re-exported item docs specify buffer ownership,
-/// validation, and how each operation changes its destination.
+/// operation contexts. Documentation for each re-exported item explains buffer
+/// ownership, validation, and how the operation changes its destination.
 pub mod operations {
     pub use tenet_tensors::{
         braid_into, permute_into, tensoradd_into, tensorcontract_fusion_into, tensorcontract_into,
@@ -116,8 +116,8 @@ pub mod operations {
 ///
 /// Most applications should use the factorization methods on
 /// [`prelude::TensorMap`]. Use this module when a workflow works directly with
-/// [`core::TensorMap`] and supplies its own dense executor. The re-exported item
-/// docs specify who owns each input and returned value.
+/// [`core::TensorMap`] and supplies its own dense executor. Documentation for
+/// each re-exported item explains who owns each input and returned value.
 pub mod matrixalgebra {
     pub use tenet_matrixalgebra::{
         svd_compact, BoundTensorMap, BoundTensorMapRef, SectorSpectrum, SvdCompact,
