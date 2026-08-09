@@ -14,14 +14,13 @@ use tenet::typed::{GradedSpace, TensorMap, Truncation};
 #[test]
 fn truncated_svd_restores_dropped_sector_in_non_dual_closed_space() {
     let runtime = Runtime::builder().build().unwrap();
-    let space = GradedSpace::try_new(
+    let space = GradedSpace::try_new_with_arc(
         Arc::new(U1FusionRule),
         [
             (U1Irrep::new(0), 2),
             (U1Irrep::new(1), 1),
             (U1Irrep::new(2), 1),
         ],
-        false,
     )
     .unwrap();
 
@@ -71,10 +70,9 @@ fn truncated_svd_restores_dropped_sector_in_non_dual_closed_space() {
 #[test]
 fn solve_right_reuses_left_solve_for_real_complex_and_nonselfdual_u1() {
     let runtime = Runtime::builder().build().unwrap();
-    let space = GradedSpace::try_new(
+    let space = GradedSpace::try_new_with_arc(
         Arc::new(U1FusionRule),
         [(U1Irrep::new(0), 1), (U1Irrep::new(1), 1)],
-        false,
     )
     .unwrap();
     let lhs = TensorMap::<_, f64>::from_block_fn(&runtime, [&space], [&space], |trees, _| {

@@ -74,7 +74,7 @@ fn non_abelian_space() -> GradedSpace<Fz2U1Su2Rule> {
             SU2Irrep::from_twice_spin(twice_spin),
         )
     };
-    GradedSpace::try_new(
+    GradedSpace::try_new_with_arc(
         rule,
         [
             (label(0, -2, 0), 4),
@@ -82,7 +82,6 @@ fn non_abelian_space() -> GradedSpace<Fz2U1Su2Rule> {
             (label(1, -1, 1), 4),
             (label(1, 2, 3), 2),
         ],
-        false,
     )
     .unwrap()
 }

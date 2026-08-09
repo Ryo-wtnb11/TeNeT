@@ -5,14 +5,13 @@ mod u1 {
     use tenet_network::{configure_plan_cache, plan_cache_stats, tensor, PlanCacheConfig};
 
     fn fixture(runtime: &Runtime) -> (TensorMap<U1FusionRule, f64>, TensorMap<U1FusionRule, f64>) {
-        let space = GradedSpace::try_new(
+        let space = GradedSpace::try_new_with_arc(
             Arc::new(U1FusionRule),
             [
                 (U1Irrep::new(-1), 8),
                 (U1Irrep::new(0), 16),
                 (U1Irrep::new(1), 8),
             ],
-            false,
         )
         .unwrap();
         (
@@ -151,7 +150,7 @@ mod checked_generic {
         provider: Arc<SUNFusionRule>,
         label: Vec<i64>,
     ) -> (TensorMap<SUNFusionRule, f64>, TensorMap<SUNFusionRule, f64>) {
-        let space = GradedSpace::try_new(provider, [(label, 2)], false).expect("space");
+        let space = GradedSpace::try_new_with_arc(provider, [(label, 2)]).expect("space");
         (
             TensorMap::rand_with_seed(runtime, [&space, &space], [&space, &space], 12401)
                 .expect("lhs"),

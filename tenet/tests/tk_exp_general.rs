@@ -71,10 +71,9 @@ fn imaginary_fill(indices: &[usize], scale: f64) -> f64 {
 }
 
 fn typed_space() -> GradedSpace<U1FusionRule> {
-    GradedSpace::try_new(
+    GradedSpace::try_new_with_arc(
         Arc::new(U1FusionRule),
         [(U1Irrep::new(0), 3), (U1Irrep::new(1), 2)],
-        false,
     )
     .unwrap()
 }
@@ -167,7 +166,7 @@ fn general_exp_balances_a_badly_scaled_block_like_julia() {
     // balancing shows up in the values.
     let runtime = runtime();
     let space =
-        GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)], false).unwrap();
+        GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
     let tensor = TensorMap::from_block_fn(&runtime, [&space], [&space], |_, indices| {
         BALANCE_FIXTURE[indices[0] + 2 * indices[1]]
     })

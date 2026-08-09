@@ -98,10 +98,9 @@ const POWERS: [f64; 4] = [1.0, 2.0, 3.0, f64::INFINITY];
 fn typed_u1() -> (GradedSpace<U1FusionRule>, GradedSpace<U1FusionRule>) {
     let rule = Arc::new(U1FusionRule);
     let pairs = |entries: [(i32, usize); 3]| {
-        GradedSpace::try_new(
+        GradedSpace::try_new_with_arc(
             Arc::clone(&rule),
             entries.map(|(charge, deg)| (U1Irrep::new(charge), deg)),
-            false,
         )
         .unwrap()
     };
@@ -114,10 +113,9 @@ fn typed_u1() -> (GradedSpace<U1FusionRule>, GradedSpace<U1FusionRule>) {
 fn typed_su2() -> (GradedSpace<SU2FusionRule>, GradedSpace<SU2FusionRule>) {
     let rule = Arc::new(SU2FusionRule);
     let pairs = |entries: [(usize, usize); 3]| {
-        GradedSpace::try_new(
+        GradedSpace::try_new_with_arc(
             Arc::clone(&rule),
             entries.map(|(twice_spin, deg)| (SU2Irrep::from_twice_spin(twice_spin), deg)),
-            false,
         )
         .unwrap()
     };

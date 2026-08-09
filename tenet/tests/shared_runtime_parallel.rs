@@ -18,14 +18,13 @@ use std::thread;
 use tenet::prelude::{GradedSpace, Runtime, SU2FusionRule, SU2Irrep, TensorMap};
 
 fn space() -> GradedSpace<SU2FusionRule> {
-    GradedSpace::try_new_owned(
+    GradedSpace::try_new(
         SU2FusionRule,
         [
             (SU2Irrep::from_twice_spin(0), 3),
             (SU2Irrep::from_twice_spin(1), 2),
             (SU2Irrep::from_twice_spin(2), 1),
         ],
-        false,
     )
     .unwrap()
 }

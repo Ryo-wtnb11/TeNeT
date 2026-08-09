@@ -70,11 +70,11 @@ fn runtime() -> &'static Runtime {
 }
 
 fn leg() -> GradedSpace<Z2FusionRule> {
-    GradedSpace::try_new(Arc::new(Z2FusionRule), [(Z2Irrep::EVEN, DEGENERACY)], false).unwrap()
+    GradedSpace::try_new_with_arc(Arc::new(Z2FusionRule), [(Z2Irrep::EVEN, DEGENERACY)]).unwrap()
 }
 
 fn leg_with(degeneracy: usize) -> GradedSpace<Z2FusionRule> {
-    GradedSpace::try_new(Arc::new(Z2FusionRule), [(Z2Irrep::EVEN, degeneracy)], false).unwrap()
+    GradedSpace::try_new_with_arc(Arc::new(Z2FusionRule), [(Z2Irrep::EVEN, degeneracy)]).unwrap()
 }
 
 fn pseudo_random(state: &mut u64) -> f64 {

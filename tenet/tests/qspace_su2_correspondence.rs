@@ -14,18 +14,12 @@ use tenet::typed::{GradedSpace, Runtime, TensorMap};
 fn spin_half_vector_operator_norm_matches_qspace() {
     let runtime = Runtime::builder().build().unwrap();
     let rule = Arc::new(SU2FusionRule);
-    let half = GradedSpace::try_new(
-        Arc::clone(&rule),
-        [(SU2Irrep::from_twice_spin(1), 1)],
-        false,
-    )
-    .unwrap();
-    let vector = GradedSpace::try_new(
-        Arc::clone(&rule),
-        [(SU2Irrep::from_twice_spin(2), 1)],
-        false,
-    )
-    .unwrap();
+    let half =
+        GradedSpace::try_new_with_arc(Arc::clone(&rule), [(SU2Irrep::from_twice_spin(1), 1)])
+            .unwrap();
+    let vector =
+        GradedSpace::try_new_with_arc(Arc::clone(&rule), [(SU2Irrep::from_twice_spin(2), 1)])
+            .unwrap();
     let spin = TensorMap::from_block_fn(&runtime, [&half], [&half, &vector], |trees, _| {
         assert_eq!(trees.codomain_uncoupled(), &[SU2Irrep::from_twice_spin(1)]);
         assert_eq!(

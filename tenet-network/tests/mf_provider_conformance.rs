@@ -113,24 +113,22 @@ where
 fn multiplicity_free_public_network_path_matches_typed_oracles() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
 
-    let z2 = GradedSpace::try_new(
+    let z2 = GradedSpace::try_new_with_arc(
         Arc::new(Z2FusionRule),
         [(Z2Irrep::EVEN, 2), (Z2Irrep::ODD, 1)],
-        false,
     )
     .unwrap();
     ordinary_network_and_workspace_reuse(&runtime, &z2, 1002);
     static_trace_matches_typed_oracle(&runtime, &z2, 1003);
 
     let z3_provider = Arc::new(ZNFusionRule::new(3).unwrap());
-    let z3 = GradedSpace::try_new(
+    let z3 = GradedSpace::try_new_with_arc(
         Arc::clone(&z3_provider),
         [
             (z3_provider.irrep(0), 1),
             (z3_provider.irrep(1), 2),
             (z3_provider.irrep(2), 1),
         ],
-        false,
     )
     .unwrap();
     ordinary_network_and_workspace_reuse(&runtime, &z3, 1010);
@@ -138,27 +136,25 @@ fn multiplicity_free_public_network_path_matches_typed_oracles() {
 
     // A charged CU(1) leg exercises the nontrivial pseudo-scalar provider,
     // rather than a vacuum-only dense block.
-    let cu1 = GradedSpace::try_new(
+    let cu1 = GradedSpace::try_new_with_arc(
         Arc::new(CU1FusionRule),
         [
             (CU1Irrep::VACUUM, 1),
             (CU1Irrep::PSEUDOSCALAR, 2),
             (CU1Irrep::from_twice_charge(1), 1),
         ],
-        false,
     )
     .unwrap();
     ordinary_network_and_workspace_reuse(&runtime, &cu1, 1004);
     static_trace_matches_typed_oracle(&runtime, &cu1, 1005);
 
     let product_rule = Arc::new(FermionParityFusionRule.product(U1FusionRule));
-    let product = GradedSpace::try_new(
+    let product = GradedSpace::try_new_with_arc(
         Arc::clone(&product_rule),
         [
             (product_sector(Z2Irrep::EVEN, U1Irrep::new(0)), 2),
             (product_sector(Z2Irrep::ODD, U1Irrep::new(1)), 1),
         ],
-        false,
     )
     .unwrap();
     ordinary_network_and_workspace_reuse(&runtime, &product, 1006);
@@ -190,7 +186,7 @@ fn multiplicity_free_public_network_path_matches_typed_oracles() {
             .product(U1FusionRule)
             .product(SU2FusionRule),
     );
-    let nested = GradedSpace::try_new(
+    let nested = GradedSpace::try_new_with_arc(
         nested_rule,
         [
             (
@@ -208,7 +204,6 @@ fn multiplicity_free_public_network_path_matches_typed_oracles() {
                 1,
             ),
         ],
-        false,
     )
     .unwrap();
     ordinary_network_and_workspace_reuse(&runtime, &nested, 1008);

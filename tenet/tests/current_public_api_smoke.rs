@@ -1,7 +1,5 @@
 //! Independent Phase A smoke program for the canonical typed public API.
 
-use std::sync::Arc;
-
 use tenet::prelude::{
     product_sector, FermionParityFusionRule, GradedSpace, ProductFusionRuleExt, Runtime,
     SU2FusionRule, SU2Irrep, TensorMap, Truncation, U1FusionRule, U1Irrep, Z2Irrep,
@@ -23,12 +21,8 @@ fn labels(names: &[&str]) -> Vec<TemporaryLabel> {
 fn constructs_u1_su2_and_product_tensors_from_provider_labels() {
     let runtime = Runtime::builder().build().unwrap();
 
-    let u1 = GradedSpace::try_new(
-        Arc::new(U1FusionRule),
-        [(U1Irrep::new(-1), 1), (U1Irrep::new(0), 2)],
-        false,
-    )
-    .unwrap();
+    let u1 =
+        GradedSpace::try_new(U1FusionRule, [(U1Irrep::new(-1), 1), (U1Irrep::new(0), 2)]).unwrap();
     let u1_tensor = TensorMap::<U1FusionRule, f64>::zeros(&runtime, [&u1], [&u1]).unwrap();
     let coupled: Vec<_> = (0..u1_tensor.block_count())
         .map(|block| *u1_tensor.block_fusion_trees(block).unwrap().coupled())
@@ -37,25 +31,22 @@ fn constructs_u1_su2_and_product_tensors_from_provider_labels() {
     assert!(coupled.contains(&U1Irrep::new(0)));
 
     let su2 = GradedSpace::try_new(
-        Arc::new(SU2FusionRule),
+        SU2FusionRule,
         [
             (SU2Irrep::from_twice_spin(0), 1),
             (SU2Irrep::from_twice_spin(1), 2),
         ],
-        false,
     )
     .unwrap();
     let su2_tensor = TensorMap::<SU2FusionRule, f64>::zeros(&runtime, [&su2], [&su2]).unwrap();
     assert!(su2_tensor.block_count() >= 2);
 
-    let product_rule = Arc::new(FermionParityFusionRule.product(U1FusionRule));
     let product = GradedSpace::try_new(
-        product_rule,
+        FermionParityFusionRule.product(U1FusionRule),
         [
             (product_sector(Z2Irrep::EVEN, U1Irrep::new(0)), 1),
             (product_sector(Z2Irrep::ODD, U1Irrep::new(1)), 1),
         ],
-        false,
     )
     .unwrap();
     let product_tensor = TensorMap::<_, f64>::zeros(&runtime, [&product], [&product]).unwrap();
@@ -65,8 +56,7 @@ fn constructs_u1_su2_and_product_tensors_from_provider_labels() {
 #[test]
 fn u1_index_contraction_trace_and_decomposition_paths_are_executable() {
     let runtime = Runtime::builder().build().unwrap();
-    let space =
-        GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)], false).unwrap();
+    let space = GradedSpace::try_new(U1FusionRule, [(U1Irrep::new(0), 2)]).unwrap();
     let tensor =
         TensorMap::<U1FusionRule, f64>::from_block_fn(&runtime, [&space], [&space], |_, index| {
             match index {
@@ -113,8 +103,7 @@ fn u1_index_contraction_trace_and_decomposition_paths_are_executable() {
 #[test]
 fn planned_network_replays_through_the_current_public_api() {
     let runtime = Runtime::builder().build().unwrap();
-    let space =
-        GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)], false).unwrap();
+    let space = GradedSpace::try_new(U1FusionRule, [(U1Irrep::new(0), 2)]).unwrap();
     let lhs = TensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&space], [&space], 9_001)
         .unwrap();
     let rhs = TensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&space], [&space], 9_002)
