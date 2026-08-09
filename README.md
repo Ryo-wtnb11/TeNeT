@@ -92,31 +92,17 @@ compatibility protocol.
 
 ## Quick Start
 
-TeNeT currently uses Tenferro through a sibling path dependency. Start from an
-empty directory and keep these two checkouts next to each other:
-
-```text
-work/
-├── tenet/
-└── tenferro-rs/
-```
-
-```sh
-git clone https://github.com/tensor4all/tenferro-rs.git
-git -C tenferro-rs checkout 73926e29c2df0ae022830f9e0b736df87b699ce8
-git clone https://github.com/Ryo-wtnb11/TeNeT.git tenet
-cd tenet
-cargo run -p tenet --example quickstart
-```
-
-That Tenferro commit is the revision tested for this quickstart, not a
-repository-enforced dependency pin. The command uses TeNeT's default
-`cpu-faer` feature.
+Follow the [Quick Start tutorial source](tenet/src/tutorial.md#1-quick-start)
+for the required sibling checkout and tested Tenferro revision. That tutorial
+is rendered at the top of TeNeT's crate documentation.
 
 The runnable [U(1) example](tenet/examples/quickstart.rs) is the single source
 for the calculation. It builds two deterministic charge-preserving maps,
-contracts them with `tensor!`, and checks the result. Continue with the
-[rustdoc tutorial](tenet/src/tutorial.md).
+contracts them with `tensor!`, and checks the result:
+
+```sh
+cargo run -p tenet --example quickstart
+```
 
 For the full workspace checks and local API documentation, run:
 

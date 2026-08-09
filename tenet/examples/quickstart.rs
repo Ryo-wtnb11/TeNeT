@@ -13,7 +13,8 @@ fn main() -> Result<(), Error> {
         false,
     )?;
 
-    // Fill each allowed charge block; unequal indices stay zero, so both maps are diagonal.
+    // Fill each allowed charge block. Unequal indices stay zero, so both maps
+    // are diagonal.
     let a: TensorMap<U1FusionRule, f64> =
         TensorMap::from_block_fn(&runtime, [&space], [&space], |trees, indices| {
             if indices[0] == indices[1] {
@@ -39,7 +40,7 @@ fn main() -> Result<(), Error> {
     assert_eq!(inner, 50.0);
 
     println!(
-        "result: rank {} <- {}, squared norm = {inner}",
+        "result: codomain rank = {}, domain rank = {}, squared norm = {inner}",
         c.codomain_rank(),
         c.domain_rank()
     );
