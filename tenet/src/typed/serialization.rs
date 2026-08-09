@@ -25,13 +25,31 @@ const REPR_DENSE: u8 = 1;
 const REPR_DIAGONAL: u8 = 2;
 const REPR_ADJOINT: u8 = 3;
 
-/// Caller-owned authority for stable provider keys and semantic sector labels.
+/// Supplies stable provider keys and semantic sector labels for typed snapshots.
 ///
-/// TeNeT never serializes a provider or owns a global provider registry.
-/// `resolve_provider` must return the provider allocation authorized by `key`;
-/// the decoder re-derives and compares the key before issuing provider queries.
-/// Sector encodings must be canonical: equal labels must produce equal bytes,
-/// and decoding followed by encoding must reproduce the original bytes.
+/// A snapshot is a versioned semantic description, not a dump of Rust memory.
+/// It contains a provider key but not the provider object. During decoding,
+/// [`Self::resolve_provider`] supplies the provider instance used to rebuild the
+/// object; the decoder recomputes its key and requires an exact match before
+/// querying it. Sector encodings must be canonical: equal labels must produce
+/// equal bytes, and decoding followed by encoding must reproduce the original
+/// bytes. A canonical codec therefore produces deterministic snapshots.
+///
+/// Version 1 keeps the same meaning across compatible TeNeT releases. A change
+/// that cannot preserve that meaning requires a new version, and readers reject
+/// unknown versions.
+///
+/// Encoding can fail if the codec cannot encode a label or the provider cannot
+/// read back a stored label. Tensor encoding can also reject an invalid live
+/// representation, and any encoding can reject a length outside the v1 wire
+/// format. No bytes are returned on failure.
+///
+/// Decoding checks framing and declared resource counts against [`DecodeLimits`]
+/// before provider resolution, payload allocation, or reconstruction. Resolved
+/// dimensions are checked again before allocating tensor data. Errors distinguish
+/// malformed input, unsupported versions, limit violations, codec failures,
+/// provider-key mismatches, and invalid sector or block data. No partially
+/// reconstructed object is returned.
 pub trait TypedPersistenceCodec<R>
 where
     R: TypedSectorAdmission,
@@ -39,10 +57,10 @@ where
     /// Error produced by provider resolution or semantic-label conversion.
     type Error: std::error::Error + Send + Sync + 'static;
 
-    /// Stable key naming the provider's full category, codec, and gauge authority.
+    /// Stable key identifying the provider's category, codec, and gauge.
     fn provider_key(&self, provider: &R) -> Result<Vec<u8>, Self::Error>;
 
-    /// Resolves a stable key to the exact provider allocation used by restoration.
+    /// Returns the provider instance to use when decoding a stable key.
     fn resolve_provider(&self, key: &[u8]) -> Result<Arc<R>, Self::Error>;
 
     /// Canonically encodes one public semantic sector label.
@@ -1585,7 +1603,94 @@ impl<R> GradedSpace<R>
 where
     R: TypedSectorAdmission,
 {
-    /// Encodes this Host-independent leg as a deterministic v1 semantic snapshot.
+    /// Returns a deterministic v1 semantic snapshot of this graded space.
+    ///
+    /// The snapshot records duality, degeneracies, canonical sector labels, and
+    /// the codec's provider key. See [`TypedPersistenceCodec`] for the shared
+    /// format, compatibility, and failure guarantees.
+    ///
+    /// # Example
+    ///
+    /// The same codec can round-trip a graded space and a Host `Vec` tensor:
+    ///
+    /// ```rust
+    /// use std::{io, sync::Arc};
+    /// use tenet::prelude::*;
+    ///
+    /// struct U1Codec(Arc<U1FusionRule>);
+    ///
+    /// fn invalid_data() -> io::Error {
+    ///     io::Error::new(io::ErrorKind::InvalidData, "invalid U(1) snapshot")
+    /// }
+    ///
+    /// impl TypedPersistenceCodec<U1FusionRule> for U1Codec {
+    ///     type Error = io::Error;
+    ///
+    ///     fn provider_key(&self, _: &U1FusionRule) -> Result<Vec<u8>, Self::Error> {
+    ///         Ok(b"u1".to_vec())
+    ///     }
+    ///
+    ///     fn resolve_provider(&self, key: &[u8]) -> Result<Arc<U1FusionRule>, Self::Error> {
+    ///         (key == b"u1")
+    ///             .then(|| Arc::clone(&self.0))
+    ///             .ok_or_else(invalid_data)
+    ///     }
+    ///
+    ///     fn encode_sector(
+    ///         &self,
+    ///         _: &U1FusionRule,
+    ///         sector: &U1Irrep,
+    ///     ) -> Result<Vec<u8>, Self::Error> {
+    ///         Ok(sector.charge().to_le_bytes().to_vec())
+    ///     }
+    ///
+    ///     fn decode_sector(
+    ///         &self,
+    ///         _: &U1FusionRule,
+    ///         bytes: &[u8],
+    ///     ) -> Result<U1Irrep, Self::Error> {
+    ///         let bytes = bytes.try_into().map_err(|_| invalid_data())?;
+    ///         U1Irrep::try_new(i32::from_le_bytes(bytes)).ok_or_else(invalid_data)
+    ///     }
+    /// }
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let runtime = Runtime::builder().dense_threads(1).build()?;
+    /// let provider = Arc::new(U1FusionRule);
+    /// let codec = U1Codec(Arc::clone(&provider));
+    /// let space = GradedSpace::try_new(
+    ///     Arc::clone(&provider),
+    ///     [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
+    ///     false,
+    /// )?;
+    ///
+    /// let space_bytes = space.to_bytes_with(&codec)?;
+    /// let restored_space = GradedSpace::from_bytes_with(
+    ///     &space_bytes,
+    ///     DecodeLimits::default(),
+    ///     &codec,
+    /// )?;
+    /// assert_eq!(restored_space.sectors()?, space.sectors()?);
+    /// assert!(std::ptr::eq(restored_space.provider(), provider.as_ref()));
+    ///
+    /// let tensor = TensorMap::<U1FusionRule, f64>::from_block_fn(
+    ///     &runtime,
+    ///     [&space],
+    ///     [&space],
+    ///     |_, indices| indices.iter().sum::<usize>() as f64,
+    /// )?;
+    /// let tensor_bytes = tensor.to_bytes_with(&codec)?;
+    /// let restored_tensor = TensorMap::<U1FusionRule, f64>::from_bytes_with(
+    ///     &runtime,
+    ///     &tensor_bytes,
+    ///     DecodeLimits::default(),
+    ///     &codec,
+    /// )?;
+    /// assert_eq!(restored_tensor.to_bytes_with(&codec)?, tensor_bytes);
+    /// assert!(std::ptr::eq(restored_tensor.provider(), provider.as_ref()));
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn to_bytes_with<C>(&self, codec: &C) -> Result<Vec<u8>, EncodeError<C::Error, R::Error>>
     where
         C: TypedPersistenceCodec<R>,
@@ -1605,7 +1710,12 @@ where
     R: TypedSectorAdmission,
     R::Mode: TypedTensorModeDispatch<R>,
 {
-    /// Restores one leg with the exact provider `Arc` returned by `codec`.
+    /// Returns a fully validated graded space using the provider instance
+    /// returned by the resolver.
+    ///
+    /// The method restores duality, sector labels, and degeneracies. See
+    /// [`TypedPersistenceCodec`] for provider-key checks, resource limits,
+    /// compatibility, and failure guarantees.
     pub fn from_bytes_with<C>(
         bytes: &[u8],
         limits: DecodeLimits,
@@ -1629,7 +1739,13 @@ macro_rules! tensor_persistence_impl {
         where
             R: TypedSectorAdmission,
         {
-            /// Encodes the exact dense, compact-diagonal, or lazy-adjoint Host representation.
+            /// Returns a deterministic v1 semantic snapshot of this Host `Vec` tensor.
+            ///
+            /// This method is available for `f64` and [`Complex64`]. It records
+            /// spaces, canonical sector and fusion-tree labels, scalar bits,
+            /// and whether the representation is dense, compact-diagonal, or
+            /// a lazy adjoint. See [`TypedPersistenceCodec`] for the shared
+            /// format, compatibility, and failure guarantees.
             pub fn to_bytes_with<C>(
                 &self,
                 codec: &C,
@@ -1646,7 +1762,13 @@ macro_rules! tensor_persistence_impl {
             R: TypedSectorAdmission,
             R::Mode: TypedTensorRootDispatch<R> + TypedTensorAdjointDispatch<R, $scalar>,
         {
-            /// Restores a Host `Vec` tensor transactionally under the resolved provider authority.
+            /// Returns a fully validated Host `Vec` tensor using the provider
+            /// instance returned by the resolver.
+            ///
+            /// The method restores `f64` or [`Complex64`] scalar bits and
+            /// preserves whether the snapshot is dense, compact-diagonal, or a
+            /// lazy adjoint. See [`TypedPersistenceCodec`] for provider-key
+            /// checks, resource limits, compatibility, and failure guarantees.
             pub fn from_bytes_with<C>(
                 runtime: &Runtime,
                 bytes: &[u8],

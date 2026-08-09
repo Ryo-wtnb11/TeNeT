@@ -96,7 +96,13 @@ pub mod dense {
     pub use tenet_dense::*;
 }
 
-/// Curated expert operations and context types used by documented workflows.
+/// Low-level tensor operations for callers that manage output buffers or reuse
+/// execution contexts.
+///
+/// Most applications should use [`prelude::TensorMap`] methods. Use this module
+/// when a workflow needs explicit destination buffers, axis specifications, or
+/// operation contexts. Documentation for each re-exported item explains buffer
+/// ownership, validation, and how the operation changes its destination.
 pub mod operations {
     pub use tenet_tensors::{
         braid_into, permute_into, tensoradd_into, tensorcontract_fusion_into, tensorcontract_into,
@@ -106,7 +112,12 @@ pub mod operations {
     };
 }
 
-/// Curated factorization types and entry points.
+/// Low-level compact SVD types and entry points.
+///
+/// Most applications should use the factorization methods on
+/// [`prelude::TensorMap`]. Use this module when a workflow works directly with
+/// [`core::TensorMap`] and supplies its own dense executor. Documentation for
+/// each re-exported item explains who owns each input and returned value.
 pub mod matrixalgebra {
     pub use tenet_matrixalgebra::{
         svd_compact, BoundTensorMap, BoundTensorMapRef, SectorSpectrum, SvdCompact,
