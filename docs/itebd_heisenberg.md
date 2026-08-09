@@ -38,9 +38,9 @@ TeNeT writes every tensor as `codomain <- domain`. For example,
 `Gamma: [left, physical] <- [right]` has two codomain legs and one domain leg.
 In the contractions below, every repeated label joins a codomain leg to a
 domain leg made from the same `GradedSpace`. Those opposite orientations are
-already the required dual pairing, so no explicit `dual()` call is needed.
-An explicit dual space is needed only when contracting two legs on the same
-side, such as domain with domain.
+already the required dual pairing, so no explicit `try_dual()` call is needed.
+Call `try_dual()` when an explicit dual space is needed, such as when
+contracting two domain legs.
 
 ## 3. Two-site Hamiltonian blocks
 
@@ -91,7 +91,7 @@ two-site unit cell.
 ## 6. Contract the local wavefunction
 
 [`bond_update`](../tenet/examples/itebd_heisenberg.rs#L71-L93) absorbs the two
-outer weights, the two site tensors, the middle weight, and the gate into one
+outer weights, the two-site tensors, the middle weight, and the gate into one
 two-site tensor. This is the complete `tensor!` expression from the example:
 
 ```rust
@@ -99,16 +99,20 @@ let theta = tensor!([l, pa; pb, r] = l_out[l; x] * g1[x, qa; y] * l_mid[y; z]
     * g2[z, qb; w] * l_out[w; r] * gate[pa, pb; qa, qb])?;
 ```
 
-The output split `[l, pa; pb, r]` asks the following SVD to separate the first
-site and left bond from the second site and right bond. Labels that appear
+The output split `[l, pa; pb, r]` sets the bipartition for the following SVD:
+the first site and left bond are separated from the second site and right bond.
+Labels that appear
 twice are summed; labels that remain once become output legs.
 
 ## 7. Truncate the new bond
 
 `theta.svd_trunc(&trunc)` returns $U$, $S$, $V^\dagger$, and `svd.error`.
 [`run`](../tenet/examples/itebd_heisenberg.rs#L162-L169) combines a bond budget
-`Truncation::rank(chi)` with a relative singular-value cutoff. `chi` bounds the
-kept **quantum-dimension-weighted** bond dimension,
+`Truncation::rank(chi)` with `Truncation::relative_cutoff(rtol)`. The latter
+keeps singular values satisfying
+$\sigma_i \ge r_{\mathrm{tol}}\lVert\sigma\rVert_{2,w}$, where
+$\lVert\sigma\rVert_{2,w}^2=\sum_{q,i}d_q\sigma_{q,i}^2$. `chi` bounds the kept
+**quantum-dimension-weighted** bond dimension,
 $\sum_q d_q n_q$. For U(1), every quantum dimension is $d_q=1$, so this is the
 ordinary sum of the kept sector degeneracies.
 
@@ -131,9 +135,10 @@ $$
 where $+$ denotes the Moore-Penrose pseudo-inverse. The middle factor is
 normalized and stored as the new $\lambda_{\mathrm{mid}}$. These operations
 are the final part of [`bond_update`](../tenet/examples/itebd_heisenberg.rs#L84-L92).
-The pseudo-inverse uses a relative cutoff rather than blindly inverting every
-weight: a tiny Schmidt value would otherwise produce a very large, unstable
-factor. Directions below the cutoff are set to zero.
+The pseudo-inverse uses a different relative cutoff: it keeps values strictly
+greater than `rcond` times the largest singular value across all sectors. A
+tiny Schmidt value would otherwise produce a very large, unstable factor.
+Directions at or below the cutoff are set to zero.
 
 ## 9. Energy, schedule, and convergence
 
@@ -147,7 +152,8 @@ steps reduce imaginary-time discretization error.
 
 Three diagnostics answer different questions:
 
-- `svd.error` measures discarded weight in one local SVD.
+- `svd.error` measures the discarded quantum-dimension-weighted 2-norm in one
+  local SVD.
 - An energy plateau, or the change in energy between decreasing-$dt$ stages,
   measures whether this finite schedule has stabilized.
 - `E/bond - (1/4 - ln 2)` compares the result with the exact ground-state
