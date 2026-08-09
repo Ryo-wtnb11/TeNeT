@@ -6815,6 +6815,13 @@ where
     ///   (Higham 2005). Non-normal, defective and complex non-Hermitian blocks
     ///   are all in domain; nothing is symmetrized.
     ///
+    /// The mathematical and blockwise contract matches the referenced
+    /// implementation, but bitwise output does not. TeNeT's general dense route
+    /// always uses Padé [13/13], while the referenced implementation delegates
+    /// dense algorithm selection and may choose a lower degree for a small-norm
+    /// block. The results agree only up to their numerical approximation; pinned
+    /// source coordinates are recorded in `tenet/references.md`.
+    ///
     /// The multiplicity-free **compact** arm is TensorKit's
     /// `exp(::DiagonalTensorMap)`: unconditionally elementwise, with no
     /// hermiticity gate. Checked-Generic tensors currently use only the dense
@@ -11145,6 +11152,12 @@ where
 
     /// Random tensor map using the runtime's deterministic splitmix64 stream.
     ///
+    /// Every stored real component is uniform on `[-1, 1)`: an `f64` payload
+    /// entry uses one draw, while a `Complex64` entry uses independent draws for
+    /// its real and imaginary components. This deliberately differs from
+    /// TensorKit's default `rand`, whose components are uniform on `[0, 1)`;
+    /// pinned source coordinates are recorded in `tenet/references.md`.
+    ///
     /// The stream position is drawn only after every fallible identity,
     /// provider, shape, and layout-admission stage succeeds. A failed call
     /// therefore does not advance the runtime RNG or shift later seedless
@@ -11173,8 +11186,12 @@ where
 
     /// Random tensor map using an explicit deterministic splitmix64 seed.
     ///
+    /// The payload distribution is the same as [`Self::rand`]. This integer-seed
+    /// API differs from TensorKit's caller-supplied RNG interface.
+    ///
     /// Reproducibility is defined for the same TeNeT version and layout;
-    /// semantic cross-version fixtures should use [`Self::from_block_fn`].
+    /// it is not a cross-library byte-stream contract. Semantic cross-version
+    /// fixtures should use [`Self::from_block_fn`].
     ///
     /// # Complexity
     ///
