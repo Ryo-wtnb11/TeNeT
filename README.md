@@ -92,76 +92,23 @@ compatibility protocol.
 
 ## Quick Start
 
+Follow the [Quick Start tutorial source](tenet/src/tutorial.md#1-quick-start)
+for the required sibling checkout and tested Tenferro revision. That tutorial
+is rendered at the top of TeNeT's crate documentation.
+
+The runnable [U(1) example](tenet/examples/quickstart.rs) is the single source
+for the calculation. It builds two deterministic charge-preserving maps,
+contracts them with `tensor!`, and checks the result:
+
+```sh
+cargo run -p tenet --example quickstart
+```
+
+For the full workspace checks and local API documentation, run:
+
 ```sh
 cargo test --workspace
 cargo doc --workspace --no-deps
-```
-
-The shortest path to a working contraction:
-
-```rust
-use tenet::prelude::*;
-
-fn main() -> Result<(), Error> {
-    let rt = Runtime::builder().build()?;
-    let v = GradedSpace::try_new_owned(
-        U1FusionRule,
-        [
-            (U1Irrep::new(-1), 2),
-            (U1Irrep::new(0), 3),
-            (U1Irrep::new(1), 2),
-        ],
-        false,
-    )?;
-
-    // Tensors are maps codomain <- domain.
-    let a = TensorMap::<U1FusionRule, f64>::rand(&rt, [&v, &v], [&v, &v])?;
-    let b = TensorMap::<U1FusionRule, f64>::rand(&rt, [&v, &v], [&v, &v])?;
-
-    let c = a.compose(&b)?;
-    assert_eq!((c.codomain_rank(), c.domain_rank()), (2, 2));
-
-    Ok(())
-}
-```
-
-`tensor!` does not expose an einsum string parser. Labels are Rust identifiers
-inside the macro, `;` separates codomain and domain legs, `[]` is a scalar
-output, and `conj(x)[...]` marks an adjoint operand.
-
-The provider is an ordinary value, so a fusion rule defined outside this
-workspace substitutes for `U1FusionRule` without touching the engine — same
-operations, same semantics, and the constant-factor enumeration difference noted
-above. `try_new_owned` creates one shared provider authority internally; write `Arc`
-only when you already have an authority allocation that multiple spaces must
-share explicitly.
-
-```rust
-use tenet::prelude::*;
-use tenet_network::tensor;
-
-fn main() -> Result<(), Error> {
-    let rt = Runtime::builder().build()?;
-    let v = GradedSpace::try_new_owned(
-        U1FusionRule,
-        [(U1Irrep::new(-1), 2), (U1Irrep::new(0), 3), (U1Irrep::new(1), 2)],
-        false,
-    )?;
-
-    let t: TensorMap<U1FusionRule, f64> = TensorMap::zeros(&rt, [&v], [&v])?;
-    let u: TensorMap<U1FusionRule, f64> = TensorMap::zeros(&rt, [&v], [&v])?;
-    assert_eq!(t.block_count(), 3);
-
-    // Blocks report the provider's own labels, not SectorIds.
-    let trees = t.block_fusion_trees(0)?;
-    assert_eq!(trees.coupled(), &U1Irrep::new(0));
-
-    // @tensor-style notation: [codomain; domain].
-    let c = tensor!([i; k] = t[i; j] * u[j; k])?;
-    assert_eq!((c.codomain_rank(), c.domain_rank()), (1, 1));
-
-    Ok(())
-}
 ```
 
 ## Backend Philosophy

@@ -13,77 +13,45 @@ compile and pass against the current API.
 
 ## 1. Quick Start
 
-A [`prelude::Runtime`] is built once and then carried implicitly by every
-tensor created from it (it owns the contraction/tree-transform caches and
-the dense backend). A [`prelude::GradedSpace`] is a graded vector space for one
-tensor leg: `(sector, degeneracy)` pairs plus a dual flag. A
-[`prelude::TensorMap`] is a block-sparse symmetric tensor `codomain <- domain`
-with dynamic rank.
+A **provider** is an ordinary Rust value that defines the symmetry's sector
+labels and fusion rules. The quickstart uses the built-in U(1) provider, whose
+sectors are integer charges.
 
-```rust
-use tenet::prelude::*;
+A [`prelude::GradedSpace`] describes one tensor leg. For U(1), each
+`(charge, degeneracy)` pair says how many independent states have that charge.
+A [`prelude::TensorMap`] is a symmetry-preserving, block-sparse linear map. Its
+leg order is written `codomain <- domain`: inputs are on the right and outputs
+are on the left.
 
-let rt = Runtime::builder().build()?;
+A [`prelude::Runtime`] supplies the execution resources for tensor operations.
+The default build uses the pure-Rust `cpu-faer` backend.
 
-// U(1): (charge, degeneracy) pairs. dim = 2 + 3 + 2.
-let v = GradedSpace::try_new_owned(
-    U1FusionRule,
-    [
-        (U1Irrep::new(-1), 2),
-        (U1Irrep::new(0), 3),
-        (U1Irrep::new(1), 2),
-    ],
-    false,
-)?;
-assert_eq!(v.dim()?, 7.0);
-assert_eq!(v.try_dual()?.try_dual()?, v);
+TeNeT currently expects Tenferro in a sibling checkout:
 
-// SU(2): (twice_spin, degeneracy) pairs; dim is quantum-dimension
-// weighted: 2 * 1 (spin 0) + 2 * 2 (spin 1/2).
-let s = GradedSpace::try_new_owned(
-    SU2FusionRule,
-    [
-        (SU2Irrep::from_twice_spin(0), 2),
-        (SU2Irrep::from_twice_spin(1), 2),
-    ],
-    false,
-)?;
-assert_eq!(s.dim()?, 6.0);
-
-// Tensors on codomain <- domain leg lists.
-let a = TensorMap::<U1FusionRule, f64>::rand(&rt, [&v, &v], [&v, &v])?;
-assert_eq!((a.codomain_rank(), a.domain_rank(), a.rank()), (2, 2, 4));
-let z = TensorMap::<U1FusionRule, f64>::zeros(&rt, [&v], [&v])?;
-assert_eq!(z.norm()?, 0.0);
-# Ok::<(), Error>(())
+```text
+work/
+├── tenet/
+└── tenferro-rs/
 ```
 
-[`prelude::TensorMap::from_block_fn`] fills every symmetry-allowed block
-element from a closure over the block key and block-local degeneracy
-indices:
+From an empty `work` directory, run:
 
-```rust
-use tenet::prelude::*;
-
-let rt = Runtime::builder().build()?;
-let v = GradedSpace::try_new_owned(
-    Z2FusionRule,
-    [(Z2Irrep::EVEN, 1), (Z2Irrep::ODD, 1)],
-    false,
-)?;
-
-// A diagonal Z2 matrix: 2 on the even block, 3 on the odd block.
-let a: TensorMap<Z2FusionRule, f64> =
-    TensorMap::from_block_fn(&rt, [&v], [&v], |trees, _| {
-        if *trees.coupled() == Z2Irrep::EVEN { 2.0 } else { 3.0 }
-    })?;
-let b: TensorMap<Z2FusionRule, f64> =
-    TensorMap::from_block_fn(&rt, [&v], [&v], |trees, _| {
-        if *trees.coupled() == Z2Irrep::EVEN { 5.0 } else { 7.0 }
-    })?;
-assert_eq!(a.compose(&b)?.data(), &[10.0, 21.0]);
-# Ok::<(), Error>(())
+```sh
+git clone https://github.com/tensor4all/tenferro-rs.git
+git -C tenferro-rs checkout 73926e29c2df0ae022830f9e0b736df87b699ce8
+git clone https://github.com/Ryo-wtnb11/TeNeT.git tenet
+cd tenet
+cargo run -p tenet --example quickstart
 ```
+
+The command uses the default `cpu-faer` feature. The Tenferro commit above is
+the revision tested for this quickstart, not a project dependency pin.
+
+The complete calculation lives in the [U(1) quickstart
+example](https://github.com/Ryo-wtnb11/TeNeT/blob/main/tenet/examples/quickstart.rs).
+The example creates a space with charges `-1`, `0`, and `1`, builds two
+deterministic diagonal `TensorMap`s, and contracts them with `tensor!`. Its
+assertions check both the result rank and the analytic squared norm, `50`.
 
 ### Scalar dtype
 
