@@ -504,9 +504,9 @@ where
     /// identity. This is TensorKit's right solve `self / rhs`.
     ///
     /// It is evaluated through the adjointed left-solve equation
-    /// `rhs^H * x^H = self^H`; the returned tensor is owned. Storage, lazy
-    /// behavior, failure atomicity, cost, and error classes otherwise mirror
-    /// [`Self::solve`].
+    /// `rhs^H * x^H = self^H`; the returned tensor is owned. It uses the same
+    /// storage routes, cost, and error classes as [`Self::solve`]. Lazy inputs
+    /// remain uncached, and if any step fails, no result is returned.
     pub fn solve_right(&self, rhs: &Self) -> Result<Self, TypedFacadeError<R>> {
         <R::Mode as TypedTensorSolveDispatch<R, D>>::solve_right(self, rhs)
     }
@@ -1314,14 +1314,9 @@ where
     }
 
     /// Returns the left-isometry factorization `self = v * c`, with `v`
-    /// isometric and `c` the corestriction (TensorKit `left_orth`).
-    ///
-    /// TensorKit's default `kind` is `:qr`, so this delegates directly to
-    /// [`Self::qr_compact`].
-    ///
-    /// # Errors
-    ///
-    /// Exactly [`Self::qr_compact`]'s.
+    /// isometric and `c` the remaining triangular factor (TensorKit
+    /// `left_orth`). TensorKit's default `kind` is `:qr`, so this calls
+    /// [`Self::qr_compact`] directly and returns the same errors.
     pub fn left_orth(&self) -> Result<(Self, Self), TypedFacadeError<R>> {
         self.qr_compact()
     }
@@ -1378,8 +1373,9 @@ where
     /// the dense rectangular `m_c x n_c` diagonal matrix. Factor order is
     /// `(u, s, vh)`, and the spaces are
     /// `u : codomain <- W_out`, `s : W_out <- W_in`, and
-    /// `vh : W_in <- domain`. Storage, checked-provider authority, errors, and
-    /// lazy-input support are otherwise those of [`Self::svd_compact`].
+    /// `vh : W_in <- domain`. It accepts the same inputs and has the same cost
+    /// and error behavior as [`Self::svd_compact`]. Checked factors use the
+    /// source provider instance, and a failure returns no factor tuple.
     pub fn svd_full(&self) -> Result<(Self, Self, Self), TypedFacadeError<R>> {
         <R::Mode as TypedTensorSvdDispatch<R, D>>::svd_full(self)
     }
@@ -1399,11 +1395,11 @@ where
     /// [`Self::lq_full`] instead uses `dim(W_c) = n_c`, so `q` is square and
     /// `l` is lower trapezoidal.
     ///
-    /// Cost, compact-input materialization, provider authority, failure
-    /// atomicity, and checked-Generic owned-input requirement mirror
-    /// [`Self::qr_compact`]. A multiplicity-free lazy adjoint runs QR on its
-    /// owned parent and returns detached owned factors without caching the
-    /// receiver.
+    /// Its cost is the same as [`Self::qr_compact`]. Compact inputs are
+    /// materialized first, and checked Generic requires an owned input.
+    /// Checked factors use the source provider instance, and a failure returns
+    /// no factor tuple. A multiplicity-free lazy adjoint runs QR on its owned
+    /// parent and returns detached owned factors without caching the receiver.
     ///
     /// ```
     /// use std::sync::Arc;
@@ -1675,9 +1671,11 @@ where
     ///
     /// # Errors and cost
     ///
-    /// A non-endomorphism, non-Hermitian sector, non-finite dense result, or
-    /// factor-layout failure returns an operation error. Checked Generic also
-    /// preserves provider/admission errors and validates identical full
+    /// A non-endomorphism, failed Hermiticity check, or dense numerical failure
+    /// returns [`Error::Operation`]. Layout failures retain [`Error::Core`],
+    /// and multiplicity-free algebra failures retain [`Error::FusionAlgebra`]
+    /// where applicable. Checked Generic preserves the typed source of layout,
+    /// provider, and admission failures and also validates identical full
     /// row/column fusion-tree stacking. All sectors are staged before the
     /// method returns; a failure yields no factor tuple. Cost is
     /// `O(sum_c n_c^3)`.
@@ -1714,9 +1712,10 @@ where
     /// truncated eigenvector isometry `v`, provider-labelled kept eigenvalues,
     /// and the quantum-dimension-weighted 2-norm of the discarded eigenvalues.
     /// Hence `v * d * v^H` is the corresponding truncated spectral
-    /// reconstruction. Policy validation, factor spaces, ordering, lazy
-    /// behavior, cost, provider authority, and failure atomicity follow
-    /// [`Self::eigh_full`] and [`Self::svd_trunc`].
+    /// reconstruction. Factor spaces, ordering, lazy-input handling, and cost
+    /// are those of [`Self::eigh_full`]. The policy is validated as described
+    /// by [`Self::svd_trunc`]. Checked results use the source provider instance;
+    /// if validation, factorization, or admission fails, no result is returned.
     pub fn eigh_trunc(
         &self,
         truncation: &Truncation,
@@ -1818,9 +1817,11 @@ where
     /// the selected right-eigenvector factor `v`, provider-labelled values, and
     /// the quantum-dimension-weighted 2-norm of discarded eigenvalues. Because
     /// truncated `v` is generally rectangular, `error` is a spectral
-    /// discarded-value norm only, not a reconstruction-error bound. Policy
-    /// validation, ordering, provider authority, lazy behavior, cost, and
-    /// failure atomicity follow [`Self::eig_full`] and [`Self::svd_trunc`].
+    /// discarded-value norm only, not a reconstruction-error bound. Ordering,
+    /// lazy-input handling, and cost are those of [`Self::eig_full`]. The
+    /// policy is validated as described by [`Self::svd_trunc`]. Checked results
+    /// use the source provider instance; if validation, factorization, or
+    /// admission fails, no result is returned.
     pub fn eig_trunc(
         &self,
         truncation: &Truncation,
@@ -15350,16 +15351,17 @@ where
     /// non-dual one-leg bond `W` contains `m_c - rank_c` directions; sectors
     /// with zero nullity are absent. This intentionally differs from
     /// TensorKit/MatrixAlgebraKit's QR-based default, which reports structural
-    /// nullity rather than this SVD numerical rank. [`Self::right_null`] is the
-    /// domain-side mirror.
+    /// nullity rather than this SVD numerical rank. [`Self::right_null`]
+    /// returns the corresponding basis on the domain side.
     ///
-    /// Cost is sectorwise cubic: one compact SVD plus orthonormal completion
-    /// where needed. Compact diagonal input is materialized first. Lazy
-    /// adjoints use the opposite null space of their owned parent and return a
-    /// detached result without filling the receiver cache. Checked factors
-    /// retain the exact source provider `Arc`; all numerical work is staged
-    /// before the data-dependent bond is admitted, and any failure returns no
-    /// tensor.
+    /// The compact SVD costs
+    /// `O(sum_c m_c * n_c * min(m_c, n_c))`, plus an orthonormal completion in
+    /// sectors that keep null directions. Compact diagonal input is
+    /// materialized first. Lazy adjoints use the opposite null space of their
+    /// owned parent and return a detached result without filling the receiver
+    /// cache. Checked factors retain the exact source provider `Arc`; all
+    /// numerical work is staged before the data-dependent bond is admitted,
+    /// and any failure returns no tensor.
     ///
     /// ```
     /// use std::sync::Arc;
@@ -15381,10 +15383,12 @@ where
     /// Returns an orthonormal-row basis `n : W <- domain(self)` for the
     /// numerical right null space, satisfying `self * n^H ~= 0`.
     ///
-    /// The fresh bond contains `n_c - rank_c` directions per sector. The rank
-    /// cutoff, compact and lazy behavior, checked-provider authority, errors,
-    /// cost, and intentional difference from the QR-based default are exactly
-    /// the mirror of [`Self::left_null`].
+    /// The fresh bond contains `n_c - rank_c` directions per sector. It uses
+    /// the same numerical cutoff and cost as [`Self::left_null`], with rows and
+    /// columns exchanged. Compact inputs are materialized first; a lazy
+    /// adjoint uses the left null space of its owned parent without caching the
+    /// receiver. Checked results use the source provider instance, and a
+    /// failure returns no tensor.
     pub fn right_null(&self) -> Result<Self, TypedFacadeError<R>> {
         <R::Mode as TypedTensorNullDispatch<R, D>>::right_null(self)
     }
@@ -15402,15 +15406,15 @@ where
     /// isometry (`w^H * w = id` on the domain). The positive-semidefinite
     /// factor `p : domain(self) <- domain(self)` is `V * S * V^H` from the
     /// compact SVD. Every coupled-sector block must be at least as tall as it
-    /// is wide. [`Self::right_polar`] is the wide-block mirror and returns its
+    /// is wide. [`Self::right_polar`] handles wide blocks and returns its
     /// factors in the opposite order.
     ///
     /// Cost is `O(sum_c m_c * n_c * min(m_c, n_c))` plus sectorwise
     /// composition. Compact diagonal input is materialized first. A lazy
     /// adjoint runs the opposite decomposition on its owned parent and returns
     /// detached owned factors without caching the receiver. Checked factors
-    /// retain the exact source provider `Arc`; provider admission and all
-    /// sector computations are all-or-error, so no partial tuple is returned.
+    /// use the exact source provider `Arc`. If provider admission or any sector
+    /// computation fails, no factors are returned.
     ///
     /// ```
     /// use std::sync::Arc;
@@ -15434,9 +15438,10 @@ where
     /// `p : codomain(self) <- codomain(self)` is positive semidefinite and
     /// `w` lives on the input space as a coisometry
     /// (`w * w^H = id` on the codomain). Every coupled-sector block must be at
-    /// least as wide as it is tall. Factor order, spaces, storage, lazy
-    /// behavior, provider authority, errors, cost, and failure atomicity are
-    /// the mirror of [`Self::left_polar`].
+    /// least as wide as it is tall. Factor order and spaces are stated above;
+    /// [`Self::left_polar`] describes the corresponding storage routes, lazy
+    /// input handling, and cost. Checked factors use the source provider
+    /// instance, and a failure returns no factor tuple.
     pub fn right_polar(&self) -> Result<(Self, Self), TypedFacadeError<R>> {
         <R::Mode as TypedTensorPolarDispatch<R, D>>::right_polar(self)
     }
