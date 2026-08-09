@@ -619,7 +619,6 @@ fn pr3_inspections_allocate_no_payload() {
         ("rank", warmed_bytes(|| tensor.rank())),
         ("codomain_rank", warmed_bytes(|| tensor.codomain_rank())),
         ("domain_rank", warmed_bytes(|| tensor.domain_rank())),
-        ("numind", warmed_bytes(|| tensor.numind())),
         ("leg_dim", warmed_bytes(|| tensor.leg_dim(0).unwrap())),
         ("scalar-error", warmed_bytes(|| tensor.scalar().is_err())),
     ] {
@@ -684,6 +683,7 @@ fn the_full_bond_trace_reduces_the_spectrum_without_materializing() {
 }
 
 #[test]
+#[allow(deprecated)]
 fn contract_ordered_keeps_the_contract_compact_storage_outcomes() {
     // What (issue #580 PR 6, gate 3): the `contract_ordered` alias lands on
     // the same compact-storage outcomes `contract` is pinned to above — the

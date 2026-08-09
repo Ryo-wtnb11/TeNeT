@@ -5339,6 +5339,7 @@ fn checked_generic_full_lq_failure_is_typed_and_nonpublishing() {
 }
 
 #[test]
+#[allow(deprecated)]
 fn checked_only_contract_and_compose_keep_left_authority() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let left_provider = Arc::new(CheckedOnlyToy::new(0));
@@ -6121,6 +6122,7 @@ fn sun_checked_generic_cat_covers_both_directions_dtypes_and_mu_two_keys() {
 
 #[cfg(feature = "racah-generated")]
 #[test]
+#[allow(deprecated)]
 fn sun_adjoint_multiplicity_transforms_round_trip_labels_vertices_and_payload() {
     use tenet::typed::SUNFusionRule;
 
