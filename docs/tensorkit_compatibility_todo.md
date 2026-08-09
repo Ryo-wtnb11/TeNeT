@@ -121,13 +121,12 @@ Storage-aware workspace target:
   storage-centric path users call, matching TensorKit's TensorOperations
   lowering.
 
-Known temporary mismatch:
+Strided dependency source:
 
-- Until the raw strided-rs API is merged upstream and tenferro-rs is updated to
-  the same strided-rs source/revision, TeNeT can pull two `strided-einsum2`
-  crates: one through tenferro-rs and one through TeNeT's raw-kernel adapter.
-  This is a dependency hygiene issue, not a semantic difference; remove it by
-  converging on the upstream raw API revision.
+- TeNeT owns the exact `strided-kernel` workspace pin. The CI-pinned
+  tenferro-rs revision uses the same strided-rs revision, so Cargo resolves one
+  0.4 source for `strided-kernel`, `strided-view`, `strided-perm`, and
+  `strided-traits` in both default and `racah-generated` builds.
 
 ## AdjointTensorMap with explicit braid
 
