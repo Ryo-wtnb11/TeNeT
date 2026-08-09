@@ -1,7 +1,7 @@
 [package]
 name = "tenet-category-data"
 version = "0.1.0"
-description = "Auditable fusion-category data for TeNeT"
+description = "Fusion-category data tables for TeNeT"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
