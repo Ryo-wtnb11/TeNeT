@@ -483,6 +483,53 @@ fn checked_generic_multiplicity_keys_payload_and_resolver_arc_roundtrip() {
         assert_eq!(restored.block(index).unwrap(), source.block(index).unwrap());
     }
 
+    let complex = source.to_c64().scale(Complex64::new(1.0, -0.25));
+    let restored_complex = TensorMap::<GenericToy, Complex64>::from_bytes_with(
+        &runtime,
+        &complex.to_bytes_with(&codec).unwrap(),
+        DecodeLimits::default(),
+        &codec,
+    )
+    .unwrap();
+    assert!(std::ptr::eq(restored_complex.provider(), provider.as_ref()));
+    assert!(matches!(
+        restored_complex.network_reuse_class(false),
+        NetworkReuseClass::OwnedDense
+    ));
+    assert!(restored_complex
+        .data()
+        .iter()
+        .zip(complex.data())
+        .all(|(actual, expected)| {
+            (actual.re.to_bits(), actual.im.to_bits())
+                == (expected.re.to_bits(), expected.im.to_bits())
+        }));
+
+    let complex_lazy = complex.adjoint().unwrap();
+    let restored_complex_lazy = TensorMap::<GenericToy, Complex64>::from_bytes_with(
+        &runtime,
+        &complex_lazy.to_bytes_with(&codec).unwrap(),
+        DecodeLimits::default(),
+        &codec,
+    )
+    .unwrap();
+    assert!(std::ptr::eq(
+        restored_complex_lazy.provider(),
+        provider.as_ref()
+    ));
+    assert!(matches!(
+        restored_complex_lazy.network_reuse_class(false),
+        NetworkReuseClass::LazyAdjoint
+    ));
+    assert!(restored_complex_lazy
+        .data()
+        .iter()
+        .zip(complex_lazy.data())
+        .all(|(actual, expected)| {
+            (actual.re.to_bits(), actual.im.to_bits())
+                == (expected.re.to_bits(), expected.im.to_bits())
+        }));
+
     let hermitian = source.add(&source.adjoint().unwrap(), 1.0, 1.0).unwrap();
     let factor = hermitian.eigh_full().unwrap().0;
     assert!(matches!(
@@ -508,6 +555,74 @@ fn checked_generic_multiplicity_keys_payload_and_resolver_arc_roundtrip() {
     assert_eq!(restored_adjoint.data(), factor_adjoint.data());
     assert!(matches!(
         restored_adjoint
+            .adjoint()
+            .unwrap()
+            .network_reuse_class(false),
+        NetworkReuseClass::Compact
+    ));
+
+    let complex_hermitian = complex
+        .add(
+            &complex.adjoint().unwrap(),
+            Complex64::new(1.0, 0.0),
+            Complex64::new(1.0, 0.0),
+        )
+        .unwrap();
+    let complex_factor = complex_hermitian.eigh_full().unwrap().0;
+    assert!(matches!(
+        complex_factor.network_reuse_class(false),
+        NetworkReuseClass::Compact
+    ));
+    let restored_complex_factor = TensorMap::<GenericToy, Complex64>::from_bytes_with(
+        &runtime,
+        &complex_factor.to_bytes_with(&codec).unwrap(),
+        DecodeLimits::default(),
+        &codec,
+    )
+    .unwrap();
+    assert!(std::ptr::eq(
+        restored_complex_factor.provider(),
+        provider.as_ref()
+    ));
+    assert!(matches!(
+        restored_complex_factor.network_reuse_class(false),
+        NetworkReuseClass::Compact
+    ));
+    assert!(restored_complex_factor
+        .data()
+        .iter()
+        .zip(complex_factor.data())
+        .all(|(actual, expected)| {
+            (actual.re.to_bits(), actual.im.to_bits())
+                == (expected.re.to_bits(), expected.im.to_bits())
+        }));
+
+    let complex_factor_lazy = complex_factor.adjoint().unwrap();
+    let restored_complex_factor_lazy = TensorMap::<GenericToy, Complex64>::from_bytes_with(
+        &runtime,
+        &complex_factor_lazy.to_bytes_with(&codec).unwrap(),
+        DecodeLimits::default(),
+        &codec,
+    )
+    .unwrap();
+    assert!(std::ptr::eq(
+        restored_complex_factor_lazy.provider(),
+        provider.as_ref()
+    ));
+    assert!(matches!(
+        restored_complex_factor_lazy.network_reuse_class(false),
+        NetworkReuseClass::LazyAdjoint
+    ));
+    assert!(restored_complex_factor_lazy
+        .data()
+        .iter()
+        .zip(complex_factor_lazy.data())
+        .all(|(actual, expected)| {
+            (actual.re.to_bits(), actual.im.to_bits())
+                == (expected.re.to_bits(), expected.im.to_bits())
+        }));
+    assert!(matches!(
+        restored_complex_factor_lazy
             .adjoint()
             .unwrap()
             .network_reuse_class(false),
@@ -721,6 +836,76 @@ fn compact_and_lazy_representations_survive_roundtrip() {
     assert_eq!(actual[0].values[0].to_bits(), 0x8000_0000_0000_0000);
     assert_eq!(actual[1].values[1].to_bits(), 0x7ff8_0000_0000_0007);
 
+    let complex_spectrum = vec![
+        SectorSpectrum {
+            sector: SU2Irrep::from_twice_spin(0),
+            values: vec![Complex64::new(f64::from_bits(0x8000_0000_0000_0000), 1.0)],
+        },
+        SectorSpectrum {
+            sector: SU2Irrep::from_twice_spin(1),
+            values: vec![
+                Complex64::new(2.0, -3.0),
+                Complex64::new(4.0, f64::from_bits(0x7ff8_0000_0000_0007)),
+            ],
+        },
+    ];
+    let compact_complex =
+        TensorMap::<SU2FusionRule, Complex64>::diagonal(&runtime, &leg, complex_spectrum).unwrap();
+    let restored_compact_complex = TensorMap::<SU2FusionRule, Complex64>::from_bytes_with(
+        &runtime,
+        &compact_complex.to_bytes_with(&codec).unwrap(),
+        DecodeLimits::default(),
+        &codec,
+    )
+    .unwrap();
+    assert!(std::ptr::eq(
+        restored_compact_complex.provider(),
+        provider.as_ref()
+    ));
+    assert!(matches!(
+        restored_compact_complex.network_reuse_class(false),
+        NetworkReuseClass::Compact
+    ));
+    assert!(restored_compact_complex
+        .data()
+        .iter()
+        .zip(compact_complex.data())
+        .all(|(actual, expected)| {
+            (actual.re.to_bits(), actual.im.to_bits())
+                == (expected.re.to_bits(), expected.im.to_bits())
+        }));
+
+    // Multiplicity-free compact adjoint is an owned conjugated compact value,
+    // not a lazy parent-backed view.
+    let compact_complex_adjoint = compact_complex.adjoint().unwrap();
+    assert!(matches!(
+        compact_complex_adjoint.network_reuse_class(false),
+        NetworkReuseClass::Compact
+    ));
+    let restored_compact_adjoint = TensorMap::<SU2FusionRule, Complex64>::from_bytes_with(
+        &runtime,
+        &compact_complex_adjoint.to_bytes_with(&codec).unwrap(),
+        DecodeLimits::default(),
+        &codec,
+    )
+    .unwrap();
+    assert!(std::ptr::eq(
+        restored_compact_adjoint.provider(),
+        provider.as_ref()
+    ));
+    assert!(matches!(
+        restored_compact_adjoint.network_reuse_class(false),
+        NetworkReuseClass::Compact
+    ));
+    assert!(restored_compact_adjoint
+        .data()
+        .iter()
+        .zip(compact_complex_adjoint.data())
+        .all(|(actual, expected)| {
+            (actual.re.to_bits(), actual.im.to_bits())
+                == (expected.re.to_bits(), expected.im.to_bits())
+        }));
+
     let dense: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
             (1 + indices.iter().sum::<usize>()) as f64
@@ -746,6 +931,32 @@ fn compact_and_lazy_representations_survive_roundtrip() {
             .collect::<Vec<_>>(),
         lazy.data().iter().map(|x| x.to_bits()).collect::<Vec<_>>()
     );
+
+    let dense_complex = dense.to_c64().scale(Complex64::new(1.0, 0.5));
+    let lazy_complex = dense_complex.adjoint().unwrap();
+    let restored_lazy_complex = TensorMap::<SU2FusionRule, Complex64>::from_bytes_with(
+        &runtime,
+        &lazy_complex.to_bytes_with(&codec).unwrap(),
+        DecodeLimits::default(),
+        &codec,
+    )
+    .unwrap();
+    assert!(std::ptr::eq(
+        restored_lazy_complex.provider(),
+        provider.as_ref()
+    ));
+    assert!(matches!(
+        restored_lazy_complex.network_reuse_class(false),
+        NetworkReuseClass::LazyAdjoint
+    ));
+    assert!(restored_lazy_complex
+        .data()
+        .iter()
+        .zip(lazy_complex.data())
+        .all(|(actual, expected)| {
+            (actual.re.to_bits(), actual.im.to_bits())
+                == (expected.re.to_bits(), expected.im.to_bits())
+        }));
 }
 
 #[test]
