@@ -1,6 +1,6 @@
 # Operation matrix
 
-Audited at: `548ce69b2d314e7b6ccbb45002b0df4243d8992b`
+Audited at: `5e9cf09373d041006c715737cb9d125b205c1ae5`
 
 This is the current-main capability census for #938. The pinned source and
 executable tests are authoritative; an export, a satisfiable trait bound, or an
