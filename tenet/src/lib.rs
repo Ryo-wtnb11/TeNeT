@@ -59,8 +59,9 @@ pub mod prelude {
         LinalgBackend, Runtime, RuntimeBuilder, RuntimeTreeTransformCacheInfo,
     };
     pub use crate::typed::{
-        CheckedGenericEigTrunc, CheckedGenericEighTrunc, EigTrunc, EighTrunc,
-        GenericUnitTensorMapExt, GradedSpace, SvdTrunc, TensorMap, TensorScalar,
+        CheckedGenericEigTrunc, CheckedGenericEighTrunc, DecodeError, DecodeLimits, EigTrunc,
+        EighTrunc, EncodeError, GenericUnitTensorMapExt, GradedSpace, SvdTrunc, TensorMap,
+        TensorScalar, TypedPersistenceCodec,
     };
     pub use num_complex::Complex64;
     #[allow(deprecated)]
