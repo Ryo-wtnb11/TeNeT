@@ -8,11 +8,10 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 use tenet::core::{
-    product_sector, BraidingStyleKind, CU1FusionRule, CU1Irrep, CheckedFusionAlgebra,
-    FermionParityFusionRule, FusionAlgebraError, FusionRule, FusionStyleKind,
-    MultiplicityFreeAdmissionMode, MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols,
-    MultiplicityFreeRigidSymbols, ProductFusionRuleExt, RuleIdentity, SectorCodec, SectorId,
-    SectorVec, TypedSectorAdmission, U1FusionRule, U1Irrep, Z2FusionRule, Z2Irrep,
+    product_sector, CU1FusionRule, CU1Irrep, CheckedFusionAlgebra, FermionParityFusionRule,
+    FusionAlgebraError, MultiplicityFreeAdmissionMode, MultiplicityFreeRigidSymbols,
+    ProductFusionRuleExt, SU2FusionRule, SU2Irrep, SectorCodec, TypedSectorAdmission, U1FusionRule,
+    U1Irrep, Z2FusionRule, Z2Irrep, ZNFusionRule,
 };
 use tenet::prelude::TensorScalar;
 use tenet::typed::{GradedSpace, Runtime, TensorMap};
@@ -25,114 +24,7 @@ fn labels(names: &[&str]) -> Vec<TemporaryLabel> {
     names.iter().copied().map(TemporaryLabel::from).collect()
 }
 
-/// An external Z3 provider, deliberately not a TeNeT built-in.  Charge one
-/// and two are distinct duals, so codec and dual handling cannot collapse to
-/// the Z2/self-dual case.
-#[derive(Clone, Copy)]
-struct ExternalZ3;
-
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-struct Z3Charge(u8);
-
-impl FusionRule for ExternalZ3 {
-    fn rule_identity(&self) -> RuleIdentity {
-        RuleIdentity::from_canonical_bytes::<Self>(0x5a33_0000_0000_0000, Arc::<[u8]>::from([]))
-    }
-    fn fusion_style(&self) -> FusionStyleKind {
-        FusionStyleKind::Unique
-    }
-    fn braiding_style(&self) -> BraidingStyleKind {
-        BraidingStyleKind::Bosonic
-    }
-    fn vacuum(&self) -> SectorId {
-        SectorId::new(0)
-    }
-    fn dual(&self, sector: SectorId) -> SectorId {
-        SectorId::new((3 - sector.id() % 3) % 3)
-    }
-    fn fusion_channels(&self, lhs: SectorId, rhs: SectorId) -> SectorVec {
-        core::iter::once(SectorId::new((lhs.id() + rhs.id()) % 3)).collect()
-    }
-}
-impl MultiplicityFreeFusionRule for ExternalZ3 {}
-impl MultiplicityFreeFusionSymbols for ExternalZ3 {
-    type Scalar = f64;
-    fn f_symbol_scalar(
-        &self,
-        _: SectorId,
-        _: SectorId,
-        _: SectorId,
-        _: SectorId,
-        _: SectorId,
-        _: SectorId,
-    ) -> f64 {
-        1.0
-    }
-    fn r_symbol_scalar(&self, _: SectorId, _: SectorId, _: SectorId) -> f64 {
-        1.0
-    }
-}
-impl MultiplicityFreeRigidSymbols for ExternalZ3 {
-    fn dim_scalar(&self, _: SectorId) -> f64 {
-        1.0
-    }
-    fn inv_dim_scalar(&self, _: SectorId) -> f64 {
-        1.0
-    }
-    fn sqrt_dim_scalar(&self, _: SectorId) -> f64 {
-        1.0
-    }
-    fn inv_sqrt_dim_scalar(&self, _: SectorId) -> f64 {
-        1.0
-    }
-    fn twist_scalar(&self, _: SectorId) -> f64 {
-        1.0
-    }
-    fn frobenius_schur_phase_scalar(&self, _: SectorId) -> f64 {
-        1.0
-    }
-}
-impl CheckedFusionAlgebra for ExternalZ3 {
-    fn try_dual_sector(&self, sector: SectorId) -> Result<SectorId, FusionAlgebraError> {
-        Ok(self.dual(sector))
-    }
-    fn try_fusion_channels(
-        &self,
-        lhs: SectorId,
-        rhs: SectorId,
-    ) -> Result<SectorVec, FusionAlgebraError> {
-        Ok(self.fusion_channels(lhs, rhs))
-    }
-    fn try_nsymbol(
-        &self,
-        lhs: SectorId,
-        rhs: SectorId,
-        coupled: SectorId,
-    ) -> Result<usize, FusionAlgebraError> {
-        Ok(self.nsymbol(lhs, rhs, coupled))
-    }
-}
-impl SectorCodec for ExternalZ3 {
-    type Sector = Z3Charge;
-    fn encode_sector(&self, value: &Z3Charge) -> Result<SectorId, FusionAlgebraError> {
-        if value.0 < 3 {
-            Ok(SectorId::new(value.0.into()))
-        } else {
-            Err(FusionAlgebraError::InvalidSector {
-                sector: SectorId::new(value.0.into()),
-            })
-        }
-    }
-    fn decode_sector(&self, sector: SectorId) -> Result<Z3Charge, FusionAlgebraError> {
-        u8::try_from(sector.id())
-            .ok()
-            .filter(|charge| *charge < 3)
-            .map(Z3Charge)
-            .ok_or(FusionAlgebraError::InvalidSector { sector })
-    }
-}
-
-fn assert_same<R, D>(actual: &TensorMap<R, D>, expected: &TensorMap<R, D>)
+fn assert_same<R, D>(actual: &TensorMap<R, D>, expected: &TensorMap<R, D>, provider: &R)
 where
     R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
         + MultiplicityFreeRigidSymbols<Scalar = f64>
@@ -141,7 +33,16 @@ where
         + Send,
     D: TensorScalar + PartialEq + Debug,
 {
-    assert!(std::ptr::eq(actual.provider(), expected.provider()));
+    assert!(std::ptr::eq(actual.provider(), provider));
+    assert!(std::ptr::eq(expected.provider(), provider));
+    assert!(actual
+        .codomain()
+        .iter()
+        .all(|leg| std::ptr::eq(leg.provider(), provider)));
+    assert!(actual
+        .domain()
+        .iter()
+        .all(|leg| std::ptr::eq(leg.provider(), provider)));
     assert_eq!(actual.codomain(), expected.codomain());
     assert_eq!(actual.domain(), expected.domain());
     assert_eq!(actual.data(), expected.data());
@@ -157,12 +58,16 @@ where
 {
     let lhs = TensorMap::<R, f64>::rand_with_seed(runtime, [space], [space], seed).unwrap();
     let rhs = TensorMap::<R, f64>::rand_with_seed(runtime, [space], [space], seed + 1).unwrap();
-    let expected = lhs.contract(&rhs, &[1], &[0], &[0, 1]).unwrap();
+    let expected = lhs
+        .contract(&rhs, &[1], &[0], &[0, 1])
+        .unwrap()
+        .permute(&[1], &[0])
+        .unwrap();
     let network = Network::new(
         vec![labels(&["i", "j"]), labels(&["j", "k"])],
         vec![false, false],
         vec![Some(1), Some(1)],
-        labels(&["i", "k"]),
+        labels(&["k", "i"]),
         Some(1),
     )
     .unwrap();
@@ -175,16 +80,16 @@ where
     let second = planned
         .execute_with_workspace(&tensors, &mut workspace)
         .unwrap();
-    assert_same(&first, &expected);
-    assert_same(&second, &expected);
+    assert_same(&first, &expected, space.provider());
+    assert_same(&second, &expected, space.provider());
 
     // This is workspace reuse only.  The public contract intentionally makes
     // no promise that output payload allocations themselves are reused.
     let cold = plan_cache_stats(runtime);
-    let macro_first = tensor!([i; k] = lhs[i; j] * rhs[j; k]).unwrap();
-    let macro_second = tensor!([i; k] = lhs[i; j] * rhs[j; k]).unwrap();
-    assert_same(&macro_first, &expected);
-    assert_same(&macro_second, &expected);
+    let macro_first = tensor!([k; i] = lhs[i; j] * rhs[j; k]).unwrap();
+    let macro_second = tensor!([k; i] = lhs[i; j] * rhs[j; k]).unwrap();
+    assert_same(&macro_first, &expected, space.provider());
+    assert_same(&macro_second, &expected, space.provider());
     assert!(plan_cache_stats(runtime).workspace_reuses > cold.workspace_reuses);
 }
 
@@ -201,7 +106,7 @@ where
         TensorMap::<R, f64>::rand_with_seed(runtime, [space, &dual], [space], seed).unwrap();
     let expected = source.trace_pairs(&[(0, 1)]).unwrap();
     let actual = tensor!([; out] = source[i, i; out]).unwrap();
-    assert_same(&actual, &expected);
+    assert_same(&actual, &expected, space.provider());
 }
 
 #[test]
@@ -217,10 +122,14 @@ fn multiplicity_free_public_network_path_matches_typed_oracles() {
     ordinary_network_and_workspace_reuse(&runtime, &z2, 1002);
     static_trace_matches_typed_oracle(&runtime, &z2, 1003);
 
-    let z3_provider = Arc::new(ExternalZ3);
+    let z3_provider = Arc::new(ZNFusionRule::new(3).unwrap());
     let z3 = GradedSpace::try_new(
-        z3_provider,
-        [(Z3Charge(0), 1), (Z3Charge(1), 2), (Z3Charge(2), 1)],
+        Arc::clone(&z3_provider),
+        [
+            (z3_provider.irrep(0), 1),
+            (z3_provider.irrep(1), 2),
+            (z3_provider.irrep(2), 1),
+        ],
         false,
     )
     .unwrap();
@@ -232,8 +141,9 @@ fn multiplicity_free_public_network_path_matches_typed_oracles() {
     let cu1 = GradedSpace::try_new(
         Arc::new(CU1FusionRule),
         [
+            (CU1Irrep::VACUUM, 1),
+            (CU1Irrep::PSEUDOSCALAR, 2),
             (CU1Irrep::from_twice_charge(1), 1),
-            (CU1Irrep::from_twice_charge(3), 2),
         ],
         false,
     )
@@ -278,7 +188,7 @@ fn multiplicity_free_public_network_path_matches_typed_oracles() {
     let nested_rule = Arc::new(
         FermionParityFusionRule
             .product(U1FusionRule)
-            .product(Z2FusionRule),
+            .product(SU2FusionRule),
     );
     let nested = GradedSpace::try_new(
         nested_rule,
@@ -286,12 +196,15 @@ fn multiplicity_free_public_network_path_matches_typed_oracles() {
             (
                 product_sector(
                     product_sector(Z2Irrep::EVEN, U1Irrep::new(0)),
-                    Z2Irrep::EVEN,
+                    SU2Irrep::from_twice_spin(0),
                 ),
                 2,
             ),
             (
-                product_sector(product_sector(Z2Irrep::ODD, U1Irrep::new(1)), Z2Irrep::ODD),
+                product_sector(
+                    product_sector(Z2Irrep::ODD, U1Irrep::new(1)),
+                    SU2Irrep::from_twice_spin(1),
+                ),
                 1,
             ),
         ],
