@@ -293,7 +293,11 @@ impl Network {
         self.finish_typed_plan(tensors, ir, plan)
     }
 
-    /// Lowers planner-selected dense labels into coefficient-free symmetric slices.
+    /// Lowers planner-selected labels into a reconstructable coefficient-free plan.
+    ///
+    /// The result is unbound: it records self-consistent authority-leg snapshots
+    /// but does not prove tensor provenance. The future sliced executor must bind
+    /// it again against the actual typed tensors before execution.
     pub fn lower_symmetric_sliced_plan<R, D, S>(
         &self,
         tensors: &[&TensorMap<R, D, S>],
@@ -2185,34 +2189,37 @@ mod typed_replay_tests {
     }
 
     #[test]
-    fn symmetric_slice_binding_rejects_forged_leg_and_rule_identity() {
+    fn symmetric_slice_binding_checks_adjoint_orientation_leg_and_rule() {
         let runtime = Runtime::builder().build().unwrap();
-        let space =
-            GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
+        let provider = Arc::new(U1FusionRule);
+        let codomain =
+            GradedSpace::try_new_with_arc(Arc::clone(&provider), [(U1Irrep::new(2), 1)]).unwrap();
+        let domain = GradedSpace::try_new_with_arc(provider, [(U1Irrep::new(-1), 2)]).unwrap();
         let tensor = TensorMap::<U1FusionRule, f64>::rand_with_seed(
             &runtime,
-            [&space],
-            std::iter::empty::<&GradedSpace<U1FusionRule>>(),
+            [&codomain],
+            [&domain],
             10_280,
         )
         .unwrap();
-        let labels = vec![label("x")];
+        let written = vec![label("p"), label("x")];
+        let effective = vec![label("x"), label("p")];
         let network = Network::new(
-            vec![labels.clone()],
-            vec![false],
+            vec![written],
+            vec![true],
             vec![Some(1)],
-            labels.clone(),
+            effective.clone(),
             Some(1),
         )
         .unwrap();
-        let ir = NetworkIR::from_labels(vec![labels.clone()], labels.clone()).unwrap();
-        let order = ContractionPlan::new(1, labels.clone(), Vec::new()).unwrap();
-        let cost = DenseCostModel::from_network(&ir, &[DenseTensorInfo::new(vec![2])]).unwrap();
+        let ir = NetworkIR::from_labels(vec![effective.clone()], effective.clone()).unwrap();
+        let order = ContractionPlan::new(1, effective.clone(), Vec::new()).unwrap();
+        let cost = DenseCostModel::from_network(&ir, &[DenseTensorInfo::new(vec![2, 1])]).unwrap();
         let dense = SlicedPlan::new(
             order,
             crate::slice_plan_for(
                 &ir,
-                &ContractionPlan::new(1, labels, Vec::new()).unwrap(),
+                &ContractionPlan::new(1, effective, Vec::new()).unwrap(),
                 &cost,
                 &[label("x")],
             ),
@@ -2226,7 +2233,9 @@ mod typed_replay_tests {
         assert_eq!(bound.plan(), &valid);
 
         let index = &valid.slices().indices()[0];
-        let forged_leg = SectorLeg::new([(U1Irrep::new(0), 1)], false);
+        assert_eq!(index.authority_leg().sectors(), &[U1Irrep::new(-1).into()]);
+        assert!(!index.authority_leg().is_dual());
+        let forged_leg = SectorLeg::new(index.authority_leg().iter(), true);
         let forged = SymmetricSlicePlan::try_new(
             &ir,
             U1FusionRule.rule_identity(),
@@ -2234,10 +2243,7 @@ mod typed_replay_tests {
                 label("x"),
                 index.authority(),
                 forged_leg,
-                vec![crate::SectorSlice::new(
-                    U1Irrep::new(0).into(),
-                    crate::DegeneracyRange::new(0, 1).unwrap(),
-                )],
+                index.pieces().to_vec(),
             )],
         )
         .unwrap();

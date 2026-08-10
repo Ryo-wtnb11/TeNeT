@@ -4,8 +4,8 @@ use tenet::core::{SectorId, U1FusionRule, U1Irrep};
 use tenet::prelude::Runtime;
 use tenet::typed::{GradedSpace, TensorMap};
 use tenet_network::{
-    slice_plan_for, ContractionPlan, DenseCostModel, DenseTensorInfo, Network, NetworkIR,
-    SlicedPlan, TemporaryLabel,
+    slice_plan_for, ContractionPlan, ContractionStep, DenseCostModel, DenseTensorInfo, Network,
+    NetworkIR, SlicedPlan, TemporaryLabel, TensorId,
 };
 
 fn label(name: &str) -> TemporaryLabel {
@@ -18,7 +18,7 @@ fn common_lowering_is_atomic_and_reconstructs_after_dense_roundtrip() {
     let provider = Arc::new(U1FusionRule);
     let two = GradedSpace::try_new_with_arc(
         Arc::clone(&provider),
-        [(U1Irrep::new(0), 1), (U1Irrep::new(1), 1)],
+        [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
     )
     .unwrap();
     let vacuum = GradedSpace::try_new_with_arc(provider, [(U1Irrep::new(0), 1)]).unwrap();
@@ -32,7 +32,7 @@ fn common_lowering_is_atomic_and_reconstructs_after_dense_roundtrip() {
     let labels = vec![label("a"), label("b"), label("c")];
     let ir = NetworkIR::from_labels(vec![labels.clone()], labels.clone()).unwrap();
     let order = ContractionPlan::new(1, labels.clone(), Vec::new()).unwrap();
-    let cost = DenseCostModel::from_network(&ir, &[DenseTensorInfo::new(vec![2, 2, 1])]).unwrap();
+    let cost = DenseCostModel::from_network(&ir, &[DenseTensorInfo::new(vec![3, 3, 1])]).unwrap();
     let dense = SlicedPlan::new(
         order,
         slice_plan_for(
@@ -60,13 +60,10 @@ fn common_lowering_is_atomic_and_reconstructs_after_dense_roundtrip() {
         .unwrap();
 
     assert_eq!(lowered, reconstructed);
-    assert_eq!(lowered.slices().nslices(), 4);
-    assert!(lowered.slices().indices().iter().all(|index| {
-        index
-            .pieces()
-            .iter()
-            .all(|piece| piece.range().end() - piece.range().start() == 1)
-    }));
+    assert_eq!(lowered.slices().nslices(), 9);
+    let first = lowered.slices().indices()[0].pieces();
+    assert_eq!((first[0].range().start(), first[0].range().end()), (0, 1));
+    assert_eq!((first[1].range().start(), first[1].range().end()), (1, 2));
     let q1 = SectorId::from(U1Irrep::new(1));
     let q0 = SectorId::from(U1Irrep::new(0));
     assert!(lowered.slices().combinations().any(|combination| {
@@ -78,36 +75,76 @@ fn common_lowering_is_atomic_and_reconstructs_after_dense_roundtrip() {
 }
 
 #[test]
-fn adjoint_lowering_uses_the_actual_non_self_dual_effective_axis() {
+fn reconstruction_preserves_two_step_order_and_output_metadata() {
     let runtime = Runtime::builder().build().unwrap();
-    let provider = Arc::new(U1FusionRule);
-    let codomain =
-        GradedSpace::try_new_with_arc(Arc::clone(&provider), [(U1Irrep::new(2), 1)]).unwrap();
-    let domain = GradedSpace::try_new_with_arc(provider, [(U1Irrep::new(-1), 2)]).unwrap();
-    let tensor =
-        TensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&codomain], [&domain], 1029)
-            .unwrap();
-    let written = vec![label("p"), label("x")];
-    let effective = vec![label("x"), label("p")];
-    let ir = NetworkIR::from_labels(vec![effective.clone()], effective.clone()).unwrap();
-    let order = ContractionPlan::new(1, effective.clone(), Vec::new()).unwrap();
-    let cost = DenseCostModel::from_network(&ir, &[DenseTensorInfo::new(vec![2, 1])]).unwrap();
+    let space =
+        GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
+    let tensors = (0..3)
+        .map(|seed| {
+            TensorMap::<U1FusionRule, f64>::rand_with_seed(
+                &runtime,
+                [&space],
+                [&space],
+                20_280 + seed,
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let inputs = vec![
+        vec![label("a"), label("b")],
+        vec![label("b"), label("c")],
+        vec![label("c"), label("d")],
+    ];
+    let output = vec![label("d"), label("a")];
+    let ir = NetworkIR::from_labels(inputs.clone(), output.clone()).unwrap();
+    let order = ContractionPlan::new(
+        3,
+        output.clone(),
+        vec![
+            ContractionStep::new(
+                TensorId::new(0),
+                TensorId::new(1),
+                TensorId::new(3),
+                0,
+                vec![label("a"), label("c")],
+            ),
+            ContractionStep::new(
+                TensorId::new(3),
+                TensorId::new(2),
+                TensorId::new(4),
+                0,
+                output.clone(),
+            ),
+        ],
+    )
+    .unwrap();
+    let cost = DenseCostModel::from_network(
+        &ir,
+        &[
+            DenseTensorInfo::new(vec![2, 2]),
+            DenseTensorInfo::new(vec![2, 2]),
+            DenseTensorInfo::new(vec![2, 2]),
+        ],
+    )
+    .unwrap();
     let dense = SlicedPlan::new(
-        order,
-        slice_plan_for(
-            &ir,
-            &ContractionPlan::new(1, effective.clone(), Vec::new()).unwrap(),
-            &cost,
-            &[label("x")],
-        ),
+        order.clone(),
+        slice_plan_for(&ir, &order, &cost, &[label("b")]),
     );
-    let network =
-        Network::new(vec![written], vec![true], vec![Some(1)], effective, Some(1)).unwrap();
+    let restored = SlicedPlan::from_text(&dense.to_text()).unwrap();
+    let network = Network::new(inputs, vec![false; 3], vec![Some(1); 3], output, Some(1)).unwrap();
+    let refs = [&tensors[0], &tensors[1], &tensors[2]];
 
-    let lowered = network
-        .lower_symmetric_sliced_plan(&[&tensor], dense)
+    let original = network.lower_symmetric_sliced_plan(&refs, dense).unwrap();
+    let reconstructed = network
+        .lower_symmetric_sliced_plan(&refs, restored)
         .unwrap();
-    let authority = lowered.slices().indices()[0].authority_leg();
-    assert_eq!(authority.sectors(), &[SectorId::from(U1Irrep::new(-1))]);
-    assert!(!authority.is_dual());
+
+    assert_eq!(reconstructed, original);
+    assert_eq!(reconstructed.plan(), &order);
+    assert_eq!(reconstructed.plan().steps(), order.steps());
+    assert_eq!(
+        reconstructed.plan().output_labels(),
+        &[label("d"), label("a")]
+    );
 }

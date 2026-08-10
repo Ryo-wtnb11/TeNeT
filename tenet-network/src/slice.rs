@@ -62,8 +62,9 @@ impl SliceKind {
 }
 
 // Checked symmetric slicing schema. This is deliberately separate from the
-// dense planner's SlicePlan: it is an executable semantic partition, not a
-// cost estimate or a persistent wire format.
+// dense planner's SlicePlan: it is a self-consistent, unbound semantic
+// partition, not a tensor-proven executable plan, cost estimate, or persistent
+// wire format.
 
 /// A nonempty half-open range of degeneracy coordinates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -185,7 +186,7 @@ impl SymmetricIndexSlice {
     }
 }
 
-/// Checked, planner-neutral symmetric slicing semantics.
+/// Checked, planner-neutral, unbound and bindable symmetric slicing semantics.
 ///
 /// Pieces exactly partition every nonzero sector of each authority leg.
 /// Labels and pieces are canonicalized without merging adjacent ranges, and
@@ -201,6 +202,9 @@ impl SymmetricIndexSlice {
 /// process-local here and must not be serialized as a semantic sector label.
 /// The plan-wide [`RuleIdentity`] seals which rule gives those numeric ids
 /// meaning without retaining a fusion provider or any of its coefficients.
+/// Construction proves self-consistency against the supplied authority legs;
+/// it does not prove that those legs belong to later execution tensors. Bind
+/// this plan against the actual typed network before execution.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SymmetricSlicePlan {
     rule_identity: RuleIdentity,
@@ -208,7 +212,11 @@ pub struct SymmetricSlicePlan {
     nslices: u128,
 }
 
-/// A contraction order paired with planner-independent symmetric slicing.
+/// An unbound, bindable contraction order paired with symmetric slicing.
+///
+/// This coefficient-free value is reconstructable without its planner, but is
+/// not tensor-proven or executable. It must be bound against actual typed
+/// tensors before execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SymmetricSlicedPlan {
     plan: ContractionPlan,
@@ -230,7 +238,7 @@ impl SymmetricSlicedPlan {
 }
 
 impl SymmetricSlicePlan {
-    /// Validate all inputs before publishing a plan.
+    /// Validate self-consistency against the supplied, unbound authority legs.
     pub fn try_new(
         ir: &NetworkIR,
         rule_identity: RuleIdentity,
