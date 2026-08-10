@@ -246,9 +246,8 @@ pub use tenet_tensors::cuda::CudaStorage;
 use tenet_tensors::cuda::CudaStorageGemm;
 pub use tenet_tensors::CheckedGenericPlanError;
 
-/// Error returned by physical-basis expansion and projection for provider `R`.
-pub type PhysicalDenseError<R> =
-    tenet_tensors::PhysicalConversionError<<R as PhysicalFusionBasis>::Error>;
+/// Error returned by physical-basis expansion and projection.
+pub type PhysicalDenseError<E> = tenet_tensors::PhysicalConversionError<E>;
 
 /// Re-exported so `use tenet::typed::*` is self-sufficient apart from the
 /// provider: every fallible method here returns this error.
@@ -536,7 +535,9 @@ where
     ///     let _ = tensor.to_physical_dense();
     /// }
     /// ```
-    pub fn to_physical_dense(&self) -> Result<PhysicalDense<D>, PhysicalDenseError<R>> {
+    pub fn to_physical_dense(
+        &self,
+    ) -> Result<PhysicalDense<D>, PhysicalDenseError<<R as PhysicalFusionBasis>::Error>> {
         let source = BoundDynamicTensorRef::try_new(self.logical_space(), self.data())?;
         let (shape, data) = expand_physical_host(source)?;
         Ok(PhysicalDense { shape, data })
@@ -551,7 +552,7 @@ where
     pub fn project_physical_dense(
         &self,
         physical: &PhysicalDense<D>,
-    ) -> Result<Self, PhysicalDenseError<R>> {
+    ) -> Result<Self, PhysicalDenseError<<R as PhysicalFusionBasis>::Error>> {
         let data = project_physical_host(
             self.logical_space(),
             physical.shape.as_slice(),

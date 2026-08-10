@@ -12,9 +12,12 @@ keeps its inline coordinates (implementation-facing, reviewed with the code).
 
 ## Pinned upstream revisions
 
-All `source` coordinates below are line numbers in these exact trees
+Coordinates whose revision column names TensorKit 0.17.0, TensorKitSectors
+0.3.4, or MatrixAlgebraKit 0.6.9 are line numbers in these exact trees
 (immutable Julia package installs; the path slug is derived from the
-`git-tree-sha1`, so the on-disk tree cannot drift from the pin):
+`git-tree-sha1`, so the on-disk tree cannot drift from the pin). The physical
+conversion rows use the separate current-source audit pins recorded in their
+subsection below.
 
 | Upstream | Version | git-tree-sha1 | Local tree |
 | --- | --- | --- | --- |
@@ -33,6 +36,33 @@ path below that mentions MatrixAlgebraKit behavior
 TensorKit file wrapping it. `tensors/tensoroperations.jl` and
 `tensors/vectorinterface.jl` are likewise TensorKit's implementations of the
 TensorOperations / VectorInterface interfaces.
+
+### Physical-dense executable oracle
+
+The physical-dense SU(2) fixtures were executed with Julia 1.11.6,
+TensorKit 0.16.3 (`git-tree-sha1`
+`74461ab2eee572c2b4b2ea486a716d118825f642`, local package tree
+`TensorKit/Lo4KY`) and TensorKitSectors 0.3.6 (`git-tree-sha1`
+`334a0ed5a0a0088a2b6fe7a39f78dda928038d85`, local package tree
+`TensorKitSectors/LXgpR`). The reduced fusion-tree scalar was Julia `Float64`
+and `convert(Array, tree)` returned dense `Float64`. The executable SU(2)
+carrier order was descending `m = j, j - 1, ..., -j`.
+
+That executed environment is separate from the immutable current-source audit
+pins:
+
+- TensorKit 0.17.1, commit
+  `64430c522c7da3c13c8376fc9734a8ecc054a324`, tree
+  `913daeb8110047c283cf08423f78655df8167c96`;
+- TensorKitSectors 0.3.9, commit
+  `67d342a130bd9e31caf3eccbf9ca46ec8b088556`, tree
+  `9f536263310aae90df175337d586a1655104aae3`.
+
+The former defines expansion/projection in
+`src/tensors/abstracttensor.jl:730-790` and recursive fusion-tree arrays in
+`src/fusiontrees/fusiontrees.jl:272-339`; the latter defines the descending
+SU(2) basis in `src/irreps/su2irrep.jl:72-86`. No fixture is claimed to have
+been executed under these newer versions.
 
 ## Coordinates
 
@@ -161,6 +191,8 @@ upstream location (the note says why).
 | `typed::TensorMap::right_polar` | TensorKit | 0.17.0 | `factorizations/matrixalgebrakit.jl:210-214` | factor spaces: `p` on `codomain ← codomain`, `wh` on the input's homspace |
 | `typed::TensorMap::scalar` | TensorKit | 0.17.0 | `tensors/tensoroperations.jl:446-451` | empty payload reads as zero |
 | `typed::TensorMap::to_c64` | TensorKit | 0.17.0 | `tensors/abstracttensor.jl:696-705` | `Base.complex` |
+| `typed::TensorMap::to_physical_dense` | TensorKit | 0.17.1 | `tensors/abstracttensor.jl:730-750` | physical expansion; executable fixture provenance is recorded above |
+| `typed::TensorMap::project_physical_dense` | TensorKit | 0.17.1 | `tensors/abstracttensor.jl:752-790` | adjoint projection and coupled-sector normalization; executable fixture provenance is recorded above |
 | `typed::TensorMap::twist` | TensorKit | 0.17.0 | `tensors/indexmanipulations.jl:90-97` | `twist`; in-place `twist!` at 62-78 |
 | `typed::TensorMap::twist` | TensorKit | 0.17.0 | `tensors/indexmanipulations.jl:34-51` | `has_shared_twist` identity-twist detection |
 | `typed::TensorMap::twist` | TensorKit | 0.17.0 | `tensors/indexmanipulations.jl:91-93` | `copy = false` default shares `t` on identity twist |
