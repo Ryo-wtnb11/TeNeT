@@ -3236,6 +3236,55 @@ mod typed_replay_tests {
     }
 
     #[test]
+    fn zero_step_conjugated_output_slice_scatter_reads_lazy_adjoint() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let provider = Arc::new(U1FusionRule);
+        let plus = U1Irrep::new(1);
+        let rows = GradedSpace::try_new_with_arc(Arc::clone(&provider), [(plus, 2)]).unwrap();
+        let columns = GradedSpace::try_new_with_arc(provider, [(plus, 3)]).unwrap();
+        let tensor = TensorMap::from_block_fn(&runtime, [&rows], [&columns], |_, ij| {
+            Complex64::new((ij[0] + 2 * ij[1]) as f64, (1 + ij[0] + ij[1]) as f64)
+        })
+        .unwrap();
+        let written = vec![label("p"), label("q")];
+        let effective = vec![label("q"), label("p")];
+        let network = Network::new(
+            vec![written],
+            vec![true],
+            vec![Some(1)],
+            effective.clone(),
+            Some(1),
+        )
+        .unwrap();
+        let tensors = [&tensor];
+        let planned = network.plan(&tensors, &GreedyDenseOptimizer).unwrap();
+        assert!(planned.plan().steps().is_empty());
+        assert!(planned.schedule.final_permutation.is_none());
+
+        let ir = NetworkIR::from_labels(vec![effective.clone()], effective).unwrap();
+        let cost = DenseCostModel::from_network(&ir, &[DenseTensorInfo::new(vec![3, 2])]).unwrap();
+        let dense = SlicedPlan::new(
+            planned.plan().clone(),
+            crate::slice_plan_for(&ir, planned.plan(), &cost, &[label("q")]),
+        );
+        let sliced = network
+            .lower_symmetric_sliced_plan(&tensors, dense)
+            .unwrap();
+        assert_eq!(sliced.slices().indices()[0].output_position(), Some(0));
+        let (actual, _) = network
+            .execute_symmetric_sliced(&tensors, sliced, usize::MAX)
+            .unwrap();
+        let expected = (0..2)
+            .flat_map(|column| {
+                (0..3).map(move |row| {
+                    Complex64::new((column + 2 * row) as f64, -((1 + column + row) as f64))
+                })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(actual.data(), expected);
+    }
+
+    #[test]
     fn compact_input_preflight_applies_to_output_slices() {
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let provider = Arc::new(U1FusionRule);

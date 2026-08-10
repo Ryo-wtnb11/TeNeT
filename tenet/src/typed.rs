@@ -1558,18 +1558,20 @@ where
                 }
             }
         }
-        let TypedTensorRepr::Owned(source_body) = &source.repr else {
-            return Err(Error::InvalidArgument(
-                "network slice partial must be direct owned".to_string(),
-            ));
+        let source_is_dense = match &source.repr {
+            TypedTensorRepr::Owned(body) => matches!(body.data.as_ref(), TypedData::Dense(_)),
+            TypedTensorRepr::Adjoint(view) => {
+                matches!(view.parent.data.as_ref(), TypedData::Dense(_))
+            }
         };
-        let TypedData::Dense(source_data) = source_body.data.as_ref() else {
+        if !source_is_dense {
             return Err(Error::InvalidArgument(
                 "network slice partial must have dense payload".to_string(),
             ));
-        };
+        }
         let destination_structure = destination_space.structure().clone();
         let source_structure = source_space.structure();
+        let (source_operand, source_data) = source.fusion_operand_and_data();
         let TypedTensorRepr::Owned(destination_body) = &mut self.repr else {
             return Err(Error::InvalidArgument(
                 "network slice accumulator must be direct owned".to_string(),
@@ -1591,6 +1593,7 @@ where
             &destination_structure,
             destination_data,
             source_structure,
+            source_operand,
             source_data,
             ranges,
         )
@@ -17083,6 +17086,42 @@ mod representation_gates {
         assert!(empty_destination
             .network_scatter_add_assign(&empty_two, &[Some(0..1)])
             .is_err());
+    }
+
+    #[test]
+    fn network_scatter_reads_complex_lazy_adjoint_parent_without_materializing() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let provider = Arc::new(U1FusionRule);
+        let plus = U1Irrep::new(1);
+        let rows = GradedSpace::try_new_with_arc(Arc::clone(&provider), [(plus, 2)]).unwrap();
+        let columns = GradedSpace::try_new_with_arc(provider, [(plus, 3)]).unwrap();
+        let source = TensorMap::from_block_fn(&runtime, [&rows], [&columns], |_, ij| {
+            Complex64::new((ij[0] + 2 * ij[1]) as f64, (1 + ij[0] + ij[1]) as f64)
+        })
+        .unwrap();
+        let parent = owned(&source);
+        assert!(parent.dense_cache.get().is_none());
+        let lazy = source.adjoint().unwrap();
+        let codomain = lazy.codomain();
+        let domain = lazy.domain();
+        let mut destination = TensorMap::zeros(&runtime, codomain.iter(), domain.iter()).unwrap();
+        destination
+            .network_scatter_add_assign(&lazy, &[None, None])
+            .unwrap();
+        let expected = (0..2)
+            .flat_map(|column| {
+                (0..3).map(move |row| {
+                    Complex64::new((column + 2 * row) as f64, -((1 + column + row) as f64))
+                })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(destination.data(), expected);
+        assert!(matches!(
+            &lazy.repr,
+            TypedTensorRepr::Adjoint(view) if view.materialized.get().is_none()
+        ));
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+        assert!(parent.dense_cache.get().is_none());
     }
 
     #[test]
