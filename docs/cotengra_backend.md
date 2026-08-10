@@ -83,10 +83,10 @@ parent — so it works regardless of the caller's CWD (a downstream crate does
 `slicing` config (none / slice / reconfigure / forest-reconfigure with
 `target_size` / `step_size` / `max_repeats` / `allow_outer`).
 
-Planner startup, request transfer, and search share a five-minute deadline by
-default. On expiry TeNeT terminates the whole Python process group (including
-`uv` descendants) and reaps it. Use `.timeout(duration)` to choose another
-finite deadline. `.without_timeout()` is the explicit unbounded opt-out.
+Request transfer and planner search share a five-minute deadline by default. On
+expiry TeNeT terminates the whole Python process group (including `uv`
+descendants) and reaps it. Use `.timeout(duration)` to choose another finite
+deadline. `.without_timeout()` is the explicit unbounded opt-out.
 
 ## Latency
 

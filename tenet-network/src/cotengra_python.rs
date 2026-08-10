@@ -382,7 +382,7 @@ fn run_cotengra_python(
 fn spawn_group(command: &mut Command) -> io::Result<GroupChild> {
     #[cfg(windows)]
     {
-        return command.group().kill_on_drop(true).spawn();
+        command.group().kill_on_drop(true).spawn()
     }
     #[cfg(not(windows))]
     {
@@ -424,11 +424,14 @@ impl ChildGroup for GroupChild {
     fn cleanup_after_observed_exit(&mut self) -> io::Result<()> {
         #[cfg(windows)]
         {
-            return GroupChild::kill(self);
+            GroupChild::kill(self)
         }
-        #[cfg(not(windows))]
+        #[cfg(unix)]
         {
-            Ok(())
+            match GroupChild::kill(self) {
+                Err(err) if err.raw_os_error() == Some(libc::ESRCH) => Ok(()),
+                result => result,
+            }
         }
     }
 }
@@ -476,8 +479,12 @@ impl<C: ChildGroup> ReapingChild<C> {
 impl<C: ChildGroup> Drop for ReapingChild<C> {
     fn drop(&mut self) {
         if !self.reaped {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
+            if self.child.kill().is_ok() {
+                let _ = self.child.wait();
+            } else {
+                // Never turn cleanup failure or unwinding into an unbounded wait.
+                let _ = self.child.try_wait();
+            }
         }
     }
 }
@@ -562,13 +569,15 @@ fn supervise_child<C: ChildGroup, T: Clock>(
 }
 
 fn finish_observed_exit<C: ChildGroup>(child: &mut ReapingChild<C>) -> Supervision<C::Status> {
-    // Unix reports Some only after the process group is empty. Windows can
-    // report the leader exit while Job Object descendants still own pipes.
-    let mut errors = child
-        .cleanup_after_observed_exit()
-        .err()
-        .map(|err| vec![format!("remaining-group cleanup failed: {err}")])
-        .unwrap_or_default();
+    // A launcher leader can exit before non-child group members that still own
+    // pipes. GroupChild caches the leader status, so terminate descendants first.
+    if let Err(err) = child.cleanup_after_observed_exit() {
+        return Supervision::Failed(SupervisionFailure {
+            reason: "could not ensure the exited planner group was empty".to_string(),
+            cleanup_errors: vec![format!("remaining-group cleanup failed: {err}")],
+        });
+    }
+    let mut errors = Vec::new();
     match child.wait() {
         Ok(status) if errors.is_empty() => {
             child.mark_reaped();
@@ -610,7 +619,10 @@ fn cleanup_group<C: ChildGroup>(child: &mut ReapingChild<C>) -> Vec<String> {
 }
 
 fn kill_and_reap<C: ChildGroup>(child: &mut ReapingChild<C>) -> Vec<String> {
-    let mut errors = kill_group(child);
+    if let Err(error) = kill_group(child) {
+        return vec![error];
+    }
+    let mut errors = Vec::new();
     match child.wait() {
         Ok(_) if errors.is_empty() => child.mark_reaped(),
         Ok(_) => {}
@@ -619,18 +631,12 @@ fn kill_and_reap<C: ChildGroup>(child: &mut ReapingChild<C>) -> Vec<String> {
     errors
 }
 
-fn kill_group<C: ChildGroup>(child: &mut ReapingChild<C>) -> Vec<String> {
+fn kill_group<C: ChildGroup>(child: &mut ReapingChild<C>) -> std::result::Result<(), String> {
     match child.kill() {
-        Ok(()) => Vec::new(),
-        Err(err)
-            if matches!(
-                err.kind(),
-                io::ErrorKind::NotFound | io::ErrorKind::InvalidInput
-            ) =>
-        {
-            Vec::new()
-        }
-        Err(err) => vec![format!("group kill failed: {err}")],
+        Ok(()) => Ok(()),
+        #[cfg(unix)]
+        Err(err) if err.raw_os_error() == Some(libc::ESRCH) => Ok(()),
+        Err(err) => Err(format!("group kill failed: {err}")),
     }
 }
 
@@ -1160,6 +1166,7 @@ mod tests {
     struct FakeChild {
         state: std::rc::Rc<std::cell::RefCell<FakeState>>,
         exit_on_poll: Option<usize>,
+        kill_error: Option<io::ErrorKind>,
     }
 
     impl ChildGroup for FakeChild {
@@ -1173,7 +1180,7 @@ mod tests {
 
         fn kill(&mut self) -> io::Result<()> {
             self.state.borrow_mut().kills += 1;
-            Ok(())
+            self.kill_error.map(io::Error::from).map_or(Ok(()), Err)
         }
 
         fn wait(&mut self) -> io::Result<Self::Status> {
@@ -1215,6 +1222,7 @@ mod tests {
             ReapingChild::new(FakeChild {
                 state: state.clone(),
                 exit_on_poll,
+                kill_error: None,
             }),
             state,
         )
@@ -1280,6 +1288,29 @@ mod tests {
     }
 
     #[test]
+    fn kill_failure_never_enters_an_unbounded_wait() {
+        let (mut child, state) = fake_child(None);
+        child.child.kill_error = Some(io::ErrorKind::PermissionDenied);
+        let mut clock = FakeClock::default();
+        let (_sender, failures) = mpsc::channel();
+
+        let result = supervise_child(&mut child, Some(Duration::ZERO), &failures, &mut clock);
+        assert!(matches!(
+            result,
+            Supervision::Failed(SupervisionFailure {
+                ref cleanup_errors,
+                ..
+            }) if cleanup_errors.len() == 1
+        ));
+        assert_eq!(state.borrow().kills, 1);
+        assert_eq!(state.borrow().reaps, 0);
+
+        drop(child);
+        assert_eq!(state.borrow().kills, 2);
+        assert_eq!(state.borrow().reaps, 0);
+    }
+
+    #[test]
     fn reaping_guard_cleans_up_during_unwind() {
         let (child, state) = fake_child(None);
 
@@ -1312,12 +1343,14 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn unix_normal_exit_is_reaped_without_killing_an_empty_group() {
+    fn supervise_shell(
+        script: &str,
+        timeout: Duration,
+    ) -> (Supervision<ExitStatus>, IoOutput, Duration) {
         let mut command = Command::new("sh");
         command
             .arg("-c")
-            .arg("printf stdout; printf stderr >&2")
+            .arg(script)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -1332,13 +1365,22 @@ mod tests {
             stderr: spawn_reader(stderr, "stderr", failure_tx),
         };
 
+        let start = Instant::now();
         let result = supervise_child(
             &mut child,
-            Some(Duration::from_secs(2)),
+            Some(timeout),
             &failure_rx,
             &mut MonotonicClock::new(),
         );
         let output = workers.join();
+        (result, output, start.elapsed())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_normal_exit_tolerates_an_empty_group() {
+        let (result, output, _) =
+            supervise_shell("printf stdout; printf stderr >&2", Duration::from_secs(2));
 
         assert!(matches!(result, Supervision::Exited(status) if status.success()));
         assert!(output.errors.is_empty(), "{:?}", output.errors);
@@ -1348,36 +1390,27 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn unix_leader_exit_kills_pipe_holding_descendant() {
+        let timeout = Duration::from_secs(2);
+        let (result, output, elapsed) = supervise_shell("sleep 5 & exit 0", timeout);
+
+        assert!(matches!(result, Supervision::Exited(status) if status.success()));
+        assert!(output.errors.is_empty(), "{:?}", output.errors);
+        assert!(
+            elapsed < timeout,
+            "pipe-holding descendant survived for {elapsed:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn unix_timeout_kills_descendants_after_draining_both_pipes() {
-        let mut command = Command::new("sh");
-        command
-            .arg("-c")
-            .arg(
-                "(dd if=/dev/zero bs=131072 count=1 2>/dev/null) & \
+        let (result, output, _) = supervise_shell(
+            "(dd if=/dev/zero bs=131072 count=1 2>/dev/null) & \
                  (dd if=/dev/zero bs=131072 count=1 1>&2 2>/dev/null) & \
                  wait; sleep 30",
-            )
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let mut child = ReapingChild::new(spawn_group(&mut command).unwrap());
-        let stdin = child.inner_mut().stdin.take().unwrap();
-        let stdout = child.inner_mut().stdout.take().unwrap();
-        let stderr = child.inner_mut().stderr.take().unwrap();
-        let (failure_tx, failure_rx) = mpsc::channel();
-        let workers = IoWorkers {
-            stdin: spawn_writer(stdin, Vec::new(), failure_tx.clone()),
-            stdout: spawn_reader(stdout, "stdout", failure_tx.clone()),
-            stderr: spawn_reader(stderr, "stderr", failure_tx),
-        };
-
-        let result = supervise_child(
-            &mut child,
-            Some(Duration::from_secs(1)),
-            &failure_rx,
-            &mut MonotonicClock::new(),
+            Duration::from_secs(1),
         );
-        let output = workers.join();
 
         assert!(matches!(
             result,
