@@ -510,7 +510,12 @@ impl Network {
         let mut meter = PayloadMeter::new(measured_payload_ceiling);
         let mut workspace = NetworkExecutionWorkspace::default();
         let (codomain, domain) = bound.output_effective.split_at(bound.output_codomain_rank);
-        let mut accumulator = tensors[0]
+        let authority_input_slot = planned
+            .schedule
+            .steps
+            .last()
+            .map_or(0, |step| step.authority_input_slot);
+        let mut accumulator = tensors[authority_input_slot]
             .network_zeros_from_effective_legs(codomain, domain)
             .map_err(SymmetricSliceExecutionError::Tensor)?;
         if bound.plan.slices().nslices() == 0 {
@@ -2727,6 +2732,97 @@ mod typed_replay_tests {
             saw_late_limit,
             "fixture must reject after a completed partial"
         );
+    }
+
+    #[test]
+    fn internal_slice_accumulator_uses_final_contraction_authority() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let providers = [
+            Arc::new(U1FusionRule),
+            Arc::new(U1FusionRule),
+            Arc::new(U1FusionRule),
+        ];
+        let legs = providers
+            .iter()
+            .map(|provider| {
+                GradedSpace::try_new_with_arc(Arc::clone(provider), [(U1Irrep::new(0), 2)]).unwrap()
+            })
+            .collect::<Vec<_>>();
+        let tensors = legs
+            .iter()
+            .enumerate()
+            .map(|(operand, leg)| {
+                TensorMap::from_block_fn(&runtime, [leg], [leg], move |_, ij| {
+                    (1 + operand + ij[0] + (operand + 2) * ij[1]) as f64
+                })
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let inputs = vec![
+            vec![label("a"), label("x")],
+            vec![label("y"), label("c")],
+            vec![label("x"), label("y")],
+        ];
+        let output = vec![label("c"), label("a")];
+        let network = Network::new(
+            inputs.clone(),
+            vec![false; 3],
+            vec![Some(1); 3],
+            output.clone(),
+            Some(1),
+        )
+        .unwrap();
+        let order = ContractionPlan::new(
+            3,
+            output.clone(),
+            vec![
+                ContractionStep::new(
+                    TensorId::new(1),
+                    TensorId::new(2),
+                    TensorId::new(3),
+                    0,
+                    vec![label("c"), label("x")],
+                ),
+                ContractionStep::new(
+                    TensorId::new(3),
+                    TensorId::new(0),
+                    TensorId::new(4),
+                    0,
+                    output.clone(),
+                ),
+            ],
+        )
+        .unwrap();
+        let refs = tensors.iter().collect::<Vec<_>>();
+        let planned = network.plan_with(&refs, order).unwrap();
+        assert_eq!(
+            planned.schedule.steps.last().unwrap().authority_input_slot,
+            1
+        );
+        let expected = planned.execute(&refs).unwrap();
+        assert!(std::ptr::eq(expected.provider(), providers[1].as_ref()));
+
+        let ir = NetworkIR::from_labels(inputs, output).unwrap();
+        let cost = DenseCostModel::from_network(
+            &ir,
+            &[
+                DenseTensorInfo::new(vec![2, 2]),
+                DenseTensorInfo::new(vec![2, 2]),
+                DenseTensorInfo::new(vec![2, 2]),
+            ],
+        )
+        .unwrap();
+        let dense = SlicedPlan::new(
+            planned.plan().clone(),
+            crate::slice_plan_for(&ir, planned.plan(), &cost, &[label("x")]),
+        );
+        let sliced = network.lower_symmetric_sliced_plan(&refs, dense).unwrap();
+        let (actual, _) = network
+            .execute_symmetric_sliced(&refs, sliced, usize::MAX)
+            .unwrap();
+        assert_eq!(actual.data(), expected.data());
+        assert!(std::ptr::eq(actual.provider(), providers[1].as_ref()));
+        assert!(!std::ptr::eq(actual.provider(), providers[0].as_ref()));
     }
 
     #[test]
