@@ -1,8 +1,9 @@
 use std::fmt::{Display, Formatter};
 
-use tenet::core::SectorId;
+use tenet::core::{RuleIdentity, SectorId, SectorLeg};
 
 use crate::labels::{TemporaryLabel, TensorAxis};
+use crate::slice::SliceKind;
 
 /// Validation failures for coefficient-free symmetric slicing descriptors.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,6 +49,28 @@ pub enum SliceError {
 }
 
 pub type SliceResult<T> = std::result::Result<T, SliceError>;
+
+/// Failure while lowering or binding a symmetric sliced plan.
+#[derive(Debug)]
+pub enum SymmetricSliceLowerError<E> {
+    Tensor(E),
+    InvalidPlan(ContractError),
+    InvalidSlice(SliceError),
+    RuleMismatch {
+        expected: RuleIdentity,
+        actual: RuleIdentity,
+    },
+    AuthorityLegMismatch {
+        label: TemporaryLabel,
+        authority: TensorAxis,
+        expected: SectorLeg,
+        actual: SectorLeg,
+    },
+    MissingAuthority {
+        label: TemporaryLabel,
+        authority: TensorAxis,
+    },
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContractError {
@@ -104,6 +127,17 @@ pub enum ContractError {
     /// need a single-operand reduction/sum (e.g. `a->` or `ab->a`). Not supported.
     UnsupportedReduction {
         label: String,
+    },
+    UnsupportedPlannerProjection {
+        label: String,
+    },
+    UnknownPlannerSliceLabel {
+        label: String,
+    },
+    PlannerSliceKindMismatch {
+        label: String,
+        expected: SliceKind,
+        actual: SliceKind,
     },
 }
 
@@ -188,6 +222,21 @@ impl Display for ContractError {
                 "einsum: contracted label `{label}` occurs on a single operand \
                  (single-operand reduction) — not supported"
             ),
+            ContractError::UnsupportedPlannerProjection { label } => write!(
+                f,
+                "planner projected sliced index `{label}`; only complete index slicing is supported"
+            ),
+            ContractError::UnknownPlannerSliceLabel { label } => {
+                write!(f, "planner returned unknown sliced index `{label}`")
+            }
+            ContractError::PlannerSliceKindMismatch {
+                label,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "planner sliced index `{label}` kind mismatch: expected {expected:?}, got {actual:?}"
+            ),
         }
     }
 }
@@ -248,3 +297,46 @@ impl Display for SliceError {
 }
 
 impl std::error::Error for SliceError {}
+
+impl<E: Display> Display for SymmetricSliceLowerError<E> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Tensor(error) => write!(f, "typed network lowering failed: {error}"),
+            Self::InvalidPlan(error) => write!(f, "invalid sliced contraction plan: {error}"),
+            Self::InvalidSlice(error) => write!(f, "invalid symmetric slice: {error}"),
+            Self::RuleMismatch { expected, actual } => write!(
+                f,
+                "symmetric slice rule mismatch: expected {expected:?}, got {actual:?}"
+            ),
+            Self::AuthorityLegMismatch {
+                label,
+                authority,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "symmetric slice authority leg mismatch for `{label}` at {authority:?}: expected {expected:?}, got {actual:?}"
+            ),
+            Self::MissingAuthority { label, authority } => write!(
+                f,
+                "symmetric slice authority {authority:?} for `{label}` has no actual effective leg"
+            ),
+        }
+    }
+}
+
+impl<E> std::error::Error for SymmetricSliceLowerError<E>
+where
+    E: std::error::Error + 'static,
+{
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Tensor(error) => Some(error),
+            Self::InvalidPlan(error) => Some(error),
+            Self::InvalidSlice(error) => Some(error),
+            Self::RuleMismatch { .. }
+            | Self::AuthorityLegMismatch { .. }
+            | Self::MissingAuthority { .. } => None,
+        }
+    }
+}

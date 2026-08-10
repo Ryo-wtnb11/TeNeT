@@ -57,7 +57,7 @@ pub use cost::{
 };
 #[cfg(feature = "cotengra-python")]
 pub use cotengra_python::CotengraPythonOptimizer;
-pub use error::{ContractError, Result, SliceError, SliceResult};
+pub use error::{ContractError, Result, SliceError, SliceResult, SymmetricSliceLowerError};
 pub use ir::{HyperEdge, NetworkIR, TensorNode};
 pub use labels::{LabelOccurrence, TemporaryLabel, TensorAxis, TensorId};
 pub use network::{
@@ -87,7 +87,7 @@ pub use plancache::{
 pub use slice::{
     best_next_internal_index, best_next_slice_index, contraction_width, greedy_slice,
     greedy_slice_with_output, slice_plan_for, DegeneracyRange, SectorSlice, SliceKind, SlicePlan,
-    SlicedPlan, SymmetricIndexSlice, SymmetricSlicePlan, SymmetricSliceSpec,
+    SlicedPlan, SymmetricIndexSlice, SymmetricSlicePlan, SymmetricSliceSpec, SymmetricSlicedPlan,
 };
 #[cfg(feature = "cotengra-python")]
 pub use tenet::plancache::{
