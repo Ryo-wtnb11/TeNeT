@@ -207,7 +207,7 @@ use tenet_core::CoupledTreeExtent;
 use tenet_core::{
     validate_unit_layout_correspondence_checked,
     validate_unit_layout_correspondence_generic_checked, BlockKey, BlockRef, BlockStructure,
-    CanonicalUnitFusionRule, CategoricalScalar, CheckedCanonicalUnitFusionRule,
+    BlockView, CanonicalUnitFusionRule, CategoricalScalar, CheckedCanonicalUnitFusionRule,
     CheckedFusionAlgebra, CheckedGenericAdmissionMode, CheckedGenericStructureError,
     CoupledSectorRegion, FusionAlgebraError, FusionProductSpace, FusionTreeHomSpace,
     FusionTreePairKey, MultiplicityFreeAdmissionMode, MultiplicityFreeRigidSymbols,
@@ -11671,6 +11671,45 @@ where
         let legs: Vec<_> = codomain.iter().chain(&domain).copied().collect();
         let provider = Arc::clone(Self::authority(&legs)?);
         Self::build(runtime, provider, &codomain, &domain, Fill::Rand(seed))
+    }
+
+    /// Provider-labelled fusion trees and borrowed values for every stored block.
+    ///
+    /// All labels are decoded and all views are validated before the iterator is
+    /// returned, so iteration is infallible. In particular, a checked-provider
+    /// decode failure exposes no prefix. Blocks remain in canonical stored order.
+    ///
+    /// Dense tensors copy no numeric payload. Compact diagonals and lazy
+    /// adjoints follow [`Self::data`]: the logical dense payload is materialized
+    /// at most once and then shared by all views and clones.
+    pub fn blocks<'a>(
+        &'a self,
+    ) -> Result<
+        impl ExactSizeIterator<Item = (BlockFusionTrees<R::Sector>, BlockView<'a, D>)> + 'a,
+        TypedFacadeError<R>,
+    > {
+        let structure = self.logical_space().space().structure();
+        let mut labelled = Vec::with_capacity(structure.block_count());
+        for index in 0..structure.block_count() {
+            let block = structure
+                .block(index)
+                .map_err(Error::from)
+                .map_err(TypedFacadeError::<R>::from)?;
+            let trees = decode_block_fusion_trees(self.logical_space().provider(), block.key())?;
+            labelled.push((trees, block));
+        }
+
+        let data = self.data();
+        let blocks = labelled
+            .into_iter()
+            .map(|(trees, block)| {
+                BlockView::new(data, block.shape(), block.strides(), block.offset())
+                    .map(|values| (trees, values))
+                    .map_err(Error::from)
+                    .map_err(TypedFacadeError::<R>::from)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(blocks.into_iter())
     }
 
     /// Provider-labelled fusion trees for one stored block.

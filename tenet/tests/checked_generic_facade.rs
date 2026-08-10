@@ -709,6 +709,7 @@ struct CheckedOnlyToy {
     fail_algebra: AtomicBool,
     fail_dim: AtomicBool,
     fail_decode: AtomicBool,
+    fail_decode_on_query: AtomicUsize,
     algebra_queries: AtomicUsize,
     coefficient_queries: AtomicUsize,
     f_queries: AtomicUsize,
@@ -735,6 +736,7 @@ impl CheckedOnlyToy {
             fail_algebra: AtomicBool::new(false),
             fail_dim: AtomicBool::new(false),
             fail_decode: AtomicBool::new(false),
+            fail_decode_on_query: AtomicUsize::new(0),
             algebra_queries: AtomicUsize::new(0),
             coefficient_queries: AtomicUsize::new(0),
             f_queries: AtomicUsize::new(0),
@@ -830,7 +832,7 @@ impl CheckedOnlyToy {
             .store(query_count, Ordering::Relaxed);
     }
 
-    fn record_query(&self) {
+    fn record_query(&self) -> usize {
         let query = self.queries_since_reset.fetch_add(1, Ordering::Relaxed) + 1;
         let commit_after = self.commit_after_queries.load(Ordering::Relaxed);
         if commit_after != 0 && query == commit_after {
@@ -840,6 +842,7 @@ impl CheckedOnlyToy {
         } else if self.committed.load(Ordering::Relaxed) {
             self.postcommit_queries.fetch_add(1, Ordering::Relaxed);
         }
+        query
     }
 }
 
@@ -1104,8 +1107,10 @@ impl TypedSectorAdmission for CheckedOnlyToy {
     }
 
     fn try_decode_label(&self, sector: SectorId) -> Result<Self::Sector, Self::Error> {
-        self.record_query();
-        if self.fail_decode.load(Ordering::Relaxed) {
+        let query = self.record_query();
+        if self.fail_decode.load(Ordering::Relaxed)
+            || self.fail_decode_on_query.load(Ordering::Relaxed) == query
+        {
             return Err(ToyError::Decode);
         }
         if sector == self.vacuum() {
@@ -1483,6 +1488,68 @@ fn checked_only_provider_uses_ordinary_typed_ownership_and_vertices() {
     let clone = tensor.clone();
     assert!(std::ptr::eq(clone.provider(), first.as_ref()));
     assert_eq!(clone.data().as_ptr(), tensor.data().as_ptr());
+}
+
+#[test]
+fn checked_generic_blocks_decode_transactionally_and_keep_outer_multiplicity() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new(0));
+    let leg = GradedSpace::try_new_with_arc(Arc::clone(&provider), [(Label::X, 1)]).unwrap();
+    let tensor: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, _| {
+            100.0 * trees.codomain_vertices()[0].get() as f64
+                + 10.0 * trees.domain_vertices()[0].get() as f64
+        })
+        .unwrap();
+
+    let mut vacuum_blocks = 0;
+    let mut observed = tensor
+        .blocks()
+        .unwrap()
+        .filter_map(|(trees, values)| {
+            assert_eq!(trees.codomain_uncoupled(), &[Label::X, Label::X]);
+            assert_eq!(trees.domain_uncoupled(), &[Label::X, Label::X]);
+            assert_eq!(values.shape(), &[1, 1, 1, 1]);
+            assert_eq!(values.data().as_ptr(), tensor.data().as_ptr());
+            if trees.coupled() == &Label::Vacuum {
+                vacuum_blocks += 1;
+                assert_eq!(trees.codomain_vertices()[0].get(), 1);
+                assert_eq!(trees.domain_vertices()[0].get(), 1);
+                assert_eq!(values.get(&[0, 0, 0, 0]), Some(&110.0));
+                return None;
+            }
+            assert_eq!(trees.coupled(), &Label::X);
+            Some((
+                trees.codomain_vertices()[0].get(),
+                trees.domain_vertices()[0].get(),
+                *values.get(&[0, 0, 0, 0]).unwrap() as usize,
+            ))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(vacuum_blocks, 1);
+    observed.sort_unstable();
+    assert_eq!(
+        observed,
+        [(1, 1, 110), (1, 2, 120), (2, 1, 210), (2, 2, 220)]
+    );
+
+    reset_provider_queries(&provider);
+    // One rank-(2, 2) block decodes coupled + two codomain + two domain labels.
+    // Each decode also queries the toy vacuum, so query eleven starts the
+    // second block. The first block decoded fully, but no iterator containing
+    // that prefix escapes.
+    provider.fail_decode_on_query.store(11, Ordering::Relaxed);
+    let result = tensor.blocks();
+    let queries = provider.queries_since_reset.load(Ordering::Relaxed);
+    let error = result
+        .err()
+        .unwrap_or_else(|| panic!("late decode must fail; observed {queries} queries"));
+    assert!(matches!(
+        error,
+        GenericTensorError::Structure(CheckedGenericStructureError::Provider(ToyError::Decode))
+    ));
+    assert_eq!(provider.queries_since_reset.load(Ordering::Relaxed), 11);
+    provider.fail_decode_on_query.store(0, Ordering::Relaxed);
 }
 
 #[cfg(feature = "cuda")]

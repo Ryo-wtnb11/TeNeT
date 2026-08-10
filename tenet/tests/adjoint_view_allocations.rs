@@ -140,6 +140,43 @@ fn adjoint_involution_does_not_allocate() {
 }
 
 #[test]
+fn labelled_block_inspection_materializes_lazy_adjoint_once_and_borrows_it() {
+    let _measurement = MEASUREMENT_LOCK.lock().unwrap();
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let parent = tensor(&runtime, [(0, 64)], 2);
+    let parent_pointer = parent.data().as_ptr();
+    let parent_block = parent.block(0).unwrap();
+    let adjoint = parent.adjoint().unwrap();
+    let payload_bytes =
+        (parent.data().len() * std::mem::size_of::<num_complex::Complex64>()) as u64;
+
+    let first = measure(|| {
+        let blocks = adjoint.blocks().unwrap().collect::<Vec<_>>();
+        assert_eq!(blocks.len(), 1);
+        let (_, values) = &blocks[0];
+        assert_eq!(values.data().as_ptr(), adjoint.data().as_ptr());
+        let expected = parent.data()
+            [parent_block.offset() + 5 * parent_block.strides()[0] + 3 * parent_block.strides()[1]]
+            .conj();
+        assert_eq!(values.get(&[3, 5]).copied(), Some(expected));
+    });
+    assert!(
+        first.1 >= payload_bytes,
+        "block inspection did not materialize the lazy adjoint: {first:?}"
+    );
+
+    let second = measure(|| {
+        let blocks = adjoint.blocks().unwrap().collect::<Vec<_>>();
+        assert_eq!(blocks[0].1.data().as_ptr(), adjoint.data().as_ptr());
+    });
+    assert!(
+        second.1 < payload_bytes,
+        "block inspection rebuilt the adjoint payload: {second:?}"
+    );
+    assert_eq!(parent.data().as_ptr(), parent_pointer);
+}
+
+#[test]
 fn typed_compact_svd_keeps_total_and_peak_below_materialized_baseline() {
     let _measurement = MEASUREMENT_LOCK.lock().unwrap();
     // What: the typed wrapper reuses the same parent-factor seam and does not
