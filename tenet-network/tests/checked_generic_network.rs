@@ -310,7 +310,7 @@ fn sun_checked_generic_network_matches_manual_explicit_greedy_macro_and_replay()
 }
 
 #[test]
-fn sun_checked_generic_internal_slice_preserves_outer_multiplicity_keys() {
+fn sun_checked_generic_mixed_slice_preserves_outer_multiplicity_keys() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(SUNFusionRule::new(3).unwrap());
     let label = vec![1, 1];
@@ -356,15 +356,16 @@ fn sun_checked_generic_internal_slice_preserves_outer_multiplicity_keys() {
     .unwrap();
     let dense = SlicedPlan::new(
         planned.plan().clone(),
-        slice_plan_for(&ir, planned.plan(), &cost, &labels(&["x"])),
+        slice_plan_for(&ir, planned.plan(), &cost, &labels(&["a", "x"])),
     );
     let sliced = network
         .lower_symmetric_sliced_plan(&tensors, dense)
         .unwrap();
-    let (actual, peak) = network
+    let (actual, stats) = network
         .execute_symmetric_sliced(&tensors, sliced, usize::MAX)
         .unwrap();
-    assert!(peak > 0);
+    assert!(stats.peak_total_bytes() > 0);
+    assert_eq!(actual.provider() as *const _, provider.as_ref() as *const _);
     assert_same(&actual, &expected);
 }
 
