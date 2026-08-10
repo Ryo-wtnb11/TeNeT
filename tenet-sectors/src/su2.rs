@@ -3,7 +3,8 @@ use std::sync::{Arc, OnceLock};
 use crate::{
     BraidingStyleKind, CanonicalUnitFusionRule, CheckedFusionAlgebra, FusionAlgebraError,
     FusionRule, FusionStyleKind, MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols,
-    MultiplicityFreeRigidSymbols, RuleIdentity, SectorCodec, SectorId, SectorVec,
+    MultiplicityFreeRigidSymbols, PhysicalBasisError, PhysicalFusionBasis, RuleIdentity,
+    SectorCodec, SectorId, SectorVec,
 };
 
 /// Largest doubled spin representable by TeNeT's compact SU(2) sector encoding.
@@ -59,6 +60,13 @@ impl From<SU2Irrep> for SectorId {
     }
 }
 
+/// SU(2) fusion data in Racah's Condon--Shortley gauge.
+///
+/// The physical carrier basis follows the executable convention of
+/// TensorKitSectors 0.3.9: zero-based index `k` has doubled projection
+/// `dm = dj - 2*k`, hence `dm = dj, dj - 2, ..., -dj`. This is descending in
+/// `m`; the convention test below uses an odd-phase channel so reversal cannot
+/// hide.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
 pub struct SU2FusionRule;
 
@@ -214,6 +222,77 @@ impl SectorCodec for SU2FusionRule {
 impl MultiplicityFreeFusionRule for SU2FusionRule {}
 
 impl CanonicalUnitFusionRule for SU2FusionRule {}
+
+impl PhysicalFusionBasis for SU2FusionRule {
+    type Scalar = f64;
+    type Error = PhysicalBasisError<racah::Su2Error>;
+
+    fn try_carrier_dimension(&self, sector: SectorId) -> Result<usize, Self::Error> {
+        Ok(checked_irrep(sector)?.twice_spin() + 1)
+    }
+
+    fn try_fusion_tensor_element(
+        &self,
+        left: SectorId,
+        right: SectorId,
+        coupled: SectorId,
+        left_basis: usize,
+        right_basis: usize,
+        coupled_basis: usize,
+        multiplicity: usize,
+    ) -> Result<Self::Scalar, Self::Error> {
+        let fusion_multiplicity = self.try_nsymbol(left, right, coupled)?;
+        if multiplicity >= fusion_multiplicity {
+            return Err(PhysicalBasisError::FusionMultiplicityOutOfBounds {
+                left,
+                right,
+                coupled,
+                multiplicity,
+                dimension: fusion_multiplicity,
+            });
+        }
+
+        let mut doubled_projections = [0_i32; 3];
+        for ((sector, index), projection) in [
+            (left, left_basis),
+            (right, right_basis),
+            (coupled, coupled_basis),
+        ]
+        .into_iter()
+        .zip(&mut doubled_projections)
+        {
+            let doubled_spin = checked_irrep(sector)?.twice_spin();
+            let dimension = doubled_spin + 1;
+            if index >= dimension {
+                return Err(PhysicalBasisError::CarrierIndexOutOfBounds {
+                    sector,
+                    index,
+                    dimension,
+                });
+            }
+            // TensorKitSectors' executable SU(2) convention: index zero is
+            // highest weight, so dm = dj, dj - 2, ..., -dj.
+            *projection = doubled_spin as i32 - 2 * index as i32;
+        }
+
+        match racah::clebsch_gordan_checked(
+            left.id() as u32,
+            doubled_projections[0],
+            right.id() as u32,
+            doubled_projections[1],
+            coupled.id() as u32,
+            doubled_projections[2],
+        ) {
+            Ok(coefficient) => Ok(coefficient.to_f64()),
+            // A fusion tensor is dense over carrier indices. Magnetic-number
+            // mismatch is therefore a structural zero, not a failed query.
+            Err(racah::Su2Error::NotAdmissible(racah::AdmissibilityViolation::ProjectionSum {
+                ..
+            })) => Ok(0.0),
+            Err(error) => Err(PhysicalBasisError::Coefficient(error)),
+        }
+    }
+}
 
 impl MultiplicityFreeFusionSymbols for SU2FusionRule {
     type Scalar = f64;
@@ -421,6 +500,260 @@ mod tests {
                 sector: later_invalid,
             })
         );
+    }
+
+    #[test]
+    fn su2_physical_basis_matches_tensor_kit_descending_odd_phase_oracle() {
+        // What: index zero is highest weight. The asymmetric 1 x 1/2 -> 1/2
+        // channel is reversal-odd, so unlike 1/2 x 1/2 -> 1 this fixture fails
+        // if the ascending and descending conventions are confused.
+        let rule = SU2FusionRule;
+        let left = SectorId::new(2);
+        let right = SectorId::new(1);
+        let coupled = SectorId::new(1);
+
+        assert_eq!(rule.try_carrier_dimension(left), Ok(3));
+        assert_eq!(rule.try_carrier_dimension(right), Ok(2));
+
+        let highest = rule
+            .try_fusion_tensor_element(left, right, coupled, 0, 1, 0, 0)
+            .unwrap();
+        let reversed = rule
+            .try_fusion_tensor_element(left, right, coupled, 2, 0, 1, 0)
+            .unwrap();
+        assert!((highest - (2.0_f64 / 3.0).sqrt()).abs() < 1.0e-14);
+        assert!((reversed + (2.0_f64 / 3.0).sqrt()).abs() < 1.0e-14);
+        assert_eq!(
+            highest,
+            racah::clebsch_gordan_checked(2, 2, 1, -1, 1, 1)
+                .unwrap()
+                .to_f64()
+        );
+
+        assert_eq!(
+            rule.try_fusion_tensor_element(left, right, coupled, 3, 0, 0, 0),
+            Err(PhysicalBasisError::CarrierIndexOutOfBounds {
+                sector: left,
+                index: 3,
+                dimension: 3,
+            })
+        );
+    }
+
+    #[test]
+    fn su2_physical_basis_is_a_complete_orthonormal_local_transform() {
+        // What: all 1 x 1/2 product states and both coupled sectors form one
+        // unitary change of basis, not merely a few matching coefficients.
+        let rule = SU2FusionRule;
+        let left = SectorId::new(2);
+        let right = SectorId::new(1);
+        let coupled = [(SectorId::new(1), 2), (SectorId::new(3), 4)];
+        let coefficient = |left_basis, right_basis, coupled, coupled_basis| {
+            rule.try_fusion_tensor_element(
+                left,
+                right,
+                coupled,
+                left_basis,
+                right_basis,
+                coupled_basis,
+                0,
+            )
+            .unwrap()
+        };
+
+        for left_basis in 0..3 {
+            for right_basis in 0..2 {
+                for other_left_basis in 0..3 {
+                    for other_right_basis in 0..2 {
+                        let mut inner = 0.0;
+                        for &(sector, dimension) in &coupled {
+                            for basis in 0..dimension {
+                                inner += coefficient(left_basis, right_basis, sector, basis)
+                                    * coefficient(
+                                        other_left_basis,
+                                        other_right_basis,
+                                        sector,
+                                        basis,
+                                    );
+                            }
+                        }
+                        let expected = f64::from(
+                            left_basis == other_left_basis && right_basis == other_right_basis,
+                        );
+                        assert!((inner - expected).abs() < 1.0e-14);
+                    }
+                }
+            }
+        }
+
+        for &(sector, dimension) in &coupled {
+            for basis in 0..dimension {
+                for &(other_sector, other_dimension) in &coupled {
+                    for other_basis in 0..other_dimension {
+                        let mut inner = 0.0;
+                        for left_basis in 0..3 {
+                            for right_basis in 0..2 {
+                                inner += coefficient(left_basis, right_basis, sector, basis)
+                                    * coefficient(
+                                        left_basis,
+                                        right_basis,
+                                        other_sector,
+                                        other_basis,
+                                    );
+                            }
+                        }
+                        let expected = f64::from(sector == other_sector && basis == other_basis);
+                        assert!((inner - expected).abs() < 1.0e-14);
+                    }
+                }
+            }
+        }
+    }
+
+    fn recoupling_overlap(
+        rule: &SU2FusionRule,
+        [left, middle, right, total]: [SectorId; 4],
+        [left_coupled, right_coupled]: [SectorId; 2],
+        total_basis: usize,
+    ) -> f64 {
+        let mut overlap = 0.0;
+        for left_basis in 0..rule.try_carrier_dimension(left).unwrap() {
+            for middle_basis in 0..rule.try_carrier_dimension(middle).unwrap() {
+                for right_basis in 0..rule.try_carrier_dimension(right).unwrap() {
+                    let left_tree: f64 = (0..rule.try_carrier_dimension(left_coupled).unwrap())
+                        .map(|inner_basis| {
+                            rule.try_fusion_tensor_element(
+                                left,
+                                middle,
+                                left_coupled,
+                                left_basis,
+                                middle_basis,
+                                inner_basis,
+                                0,
+                            )
+                            .unwrap()
+                                * rule
+                                    .try_fusion_tensor_element(
+                                        left_coupled,
+                                        right,
+                                        total,
+                                        inner_basis,
+                                        right_basis,
+                                        total_basis,
+                                        0,
+                                    )
+                                    .unwrap()
+                        })
+                        .sum();
+                    let right_tree: f64 = (0..rule.try_carrier_dimension(right_coupled).unwrap())
+                        .map(|inner_basis| {
+                            rule.try_fusion_tensor_element(
+                                middle,
+                                right,
+                                right_coupled,
+                                middle_basis,
+                                right_basis,
+                                inner_basis,
+                                0,
+                            )
+                            .unwrap()
+                                * rule
+                                    .try_fusion_tensor_element(
+                                        left,
+                                        right_coupled,
+                                        total,
+                                        left_basis,
+                                        inner_basis,
+                                        total_basis,
+                                        0,
+                                    )
+                                    .unwrap()
+                        })
+                        .sum();
+                    overlap += left_tree * right_tree;
+                }
+            }
+        }
+        overlap
+    }
+
+    #[test]
+    fn su2_physical_basis_and_f_symbols_share_one_recoupling_gauge() {
+        // What: contracting the two local CGC parenthesizations reproduces
+        // the provider's F symbol for three spin-1/2 irreps.
+        let rule = SU2FusionRule;
+        let half = SectorId::new(1);
+        for left_coupled in [SectorId::new(0), SectorId::new(2)] {
+            for right_coupled in [SectorId::new(0), SectorId::new(2)] {
+                for total_basis in 0..2 {
+                    let overlap = recoupling_overlap(
+                        &rule,
+                        [half, half, half, half],
+                        [left_coupled, right_coupled],
+                        total_basis,
+                    );
+                    let expected =
+                        rule.f_symbol_scalar(half, half, half, half, left_coupled, right_coupled);
+                    assert!((overlap - expected).abs() < 1.0e-14);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn asymmetric_cgc_recoupling_fixes_f_symbol_orientation() {
+        // What: all four external spins differ and the left intermediates
+        // {1/2, 3/2} differ from the right {3/2, 5/2}. Swapping the F axes is
+        // therefore an inadmissible request, not a hidden matrix transpose.
+        let rule = SU2FusionRule;
+        let external = [
+            SectorId::new(1),
+            SectorId::new(2),
+            SectorId::new(3),
+            SectorId::new(4),
+        ];
+        let left_intermediates = [SectorId::new(1), SectorId::new(3)];
+        let right_intermediates = [SectorId::new(3), SectorId::new(5)];
+
+        for left_coupled in left_intermediates {
+            for right_coupled in right_intermediates {
+                for total_basis in 0..5 {
+                    let overlap = recoupling_overlap(
+                        &rule,
+                        external,
+                        [left_coupled, right_coupled],
+                        total_basis,
+                    );
+                    let expected = rule.f_symbol_scalar(
+                        external[0],
+                        external[1],
+                        external[2],
+                        external[3],
+                        left_coupled,
+                        right_coupled,
+                    );
+                    assert!((overlap - expected).abs() < 1.0e-14);
+                }
+            }
+        }
+
+        let oriented = rule.f_symbol_scalar(
+            external[0],
+            external[1],
+            external[2],
+            external[3],
+            left_intermediates[0],
+            right_intermediates[1],
+        );
+        let swapped = rule.f_symbol_scalar(
+            external[0],
+            external[1],
+            external[2],
+            external[3],
+            right_intermediates[1],
+            left_intermediates[0],
+        );
+        assert!((oriented - swapped).abs() > 0.5);
     }
 
     #[test]

@@ -436,6 +436,117 @@ pub trait SectorCodec: FusionRule {
     fn decode_sector(&self, id: SectorId) -> Result<Self::Sector, FusionAlgebraError>;
 }
 
+/// Error shared by checked physical carrier-basis providers.
+///
+/// `Coefficient` remains provider-defined so an implementation can preserve
+/// its coefficient authority's typed error instead of flattening it to text.
+#[non_exhaustive]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PhysicalBasisError<Coefficient> {
+    FusionAlgebra(FusionAlgebraError),
+    CarrierIndexOutOfBounds {
+        sector: SectorId,
+        index: usize,
+        dimension: usize,
+    },
+    FusionMultiplicityOutOfBounds {
+        left: SectorId,
+        right: SectorId,
+        coupled: SectorId,
+        multiplicity: usize,
+        dimension: usize,
+    },
+    Coefficient(Coefficient),
+}
+
+impl<Coefficient: fmt::Display> fmt::Display for PhysicalBasisError<Coefficient> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::FusionAlgebra(error) => error.fmt(formatter),
+            Self::CarrierIndexOutOfBounds {
+                sector,
+                index,
+                dimension,
+            } => write!(
+                formatter,
+                "carrier-basis index {index} is out of bounds for sector {sector:?} of dimension {dimension}"
+            ),
+            Self::FusionMultiplicityOutOfBounds {
+                left,
+                right,
+                coupled,
+                multiplicity,
+                dimension,
+            } => write!(
+                formatter,
+                "fusion multiplicity index {multiplicity} is out of bounds for ({left:?}, {right:?}) -> {coupled:?} of dimension {dimension}"
+            ),
+            Self::Coefficient(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl<Coefficient> std::error::Error for PhysicalBasisError<Coefficient>
+where
+    Coefficient: std::error::Error + 'static,
+{
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::FusionAlgebra(error) => Some(error),
+            Self::Coefficient(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl<Coefficient> From<FusionAlgebraError> for PhysicalBasisError<Coefficient> {
+    fn from(error: FusionAlgebraError) -> Self {
+        Self::FusionAlgebra(error)
+    }
+}
+
+/// Checked local embedding of a coupled irrep into physical carrier bases.
+///
+/// The returned element is
+/// `C[left_basis, right_basis, coupled_basis, multiplicity]` for the local
+/// fusion `left x right -> coupled`. All indices are zero-based. Their order is
+/// part of the provider's executable convention and must agree with any dense
+/// data exchanged with another library.
+///
+/// This trait describes primal carrier bases only. A tensor engine is
+/// responsible for mapping dual legs through the provider's checked duality
+/// and rigidity data; there is deliberately no independent dual-basis
+/// convention here.
+/// Implementations must use the same sector domain and fusion multiplicities
+/// as their structural fusion authority. In particular, an element exists
+/// exactly for `multiplicity < N(left, right, coupled)`, and the local tensors
+/// are orthonormal isometries whose sum over coupled sectors and
+/// multiplicities is complete on the product carrier space.
+///
+/// There is intentionally no `FusionRule` supertrait: checked Generic
+/// providers do not implement that legacy infallible interface. Tensor engines
+/// compose this capability with the provider's applicable structural trait.
+pub trait PhysicalFusionBasis {
+    type Scalar: CategoricalScalar + Send + Sync;
+    type Error: std::error::Error + Send + Sync + 'static;
+
+    /// Dimension of the physical carrier basis of `sector`.
+    fn try_carrier_dimension(&self, sector: SectorId) -> Result<usize, Self::Error>;
+
+    /// One checked local fusion-tensor element.
+    #[allow(clippy::too_many_arguments)]
+    fn try_fusion_tensor_element(
+        &self,
+        left: SectorId,
+        right: SectorId,
+        coupled: SectorId,
+        left_basis: usize,
+        right_basis: usize,
+        coupled_basis: usize,
+        multiplicity: usize,
+    ) -> Result<Self::Scalar, Self::Error>;
+}
+
 pub trait MultiplicityFreeFusionRule: FusionRule {}
 
 pub trait MultiplicityFreeFusionSymbols: MultiplicityFreeFusionRule {
