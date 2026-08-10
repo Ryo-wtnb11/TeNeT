@@ -100,6 +100,36 @@ assert!(re.to_c64().compose(&cx).is_ok());
 # Ok::<(), Error>(())
 ```
 
+### Reading stored blocks
+
+[`prelude::TensorMap::blocks`] pairs each block's provider labels with a
+read-only value view. The call finishes decoding every label before it returns,
+so a provider error cannot leave a partly visited iteration.
+
+```rust
+use tenet::prelude::*;
+
+let rt = Runtime::builder().build()?;
+let v = GradedSpace::try_new(
+    U1FusionRule,
+    [(U1Irrep::new(0), 1), (U1Irrep::new(1), 1)],
+)?;
+let tensor: TensorMap<_, f64> =
+    TensorMap::from_block_fn(&rt, [&v], [&v], |_, indices| {
+        (indices[0] + indices[1]) as f64
+    })?;
+
+let mut count = 0;
+for (trees, values) in tensor.blocks()? {
+    assert_eq!(values.shape(), &[1, 1]);
+    assert_eq!(values.get(&[0, 0]), Some(&0.0));
+    println!("charge {}: {:?}", trees.coupled().charge(), values.shape());
+    count += 1;
+}
+assert_eq!(count, tensor.block_count());
+# Ok::<(), Error>(())
+```
+
 ### Which legs may contract?
 
 Contraction compatibility uses oriented dual pairing:
