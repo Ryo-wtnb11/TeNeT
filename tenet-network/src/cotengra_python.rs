@@ -928,17 +928,15 @@ fn parse_sliced_labels(
     let mut labels = Vec::with_capacity(sliced.len());
     for index in sliced {
         if index.project.is_some() {
-            return Err(ContractError::InvalidContractionPlan(format!(
-                "cotengra returned projected index `{}`; TeNeT sliced plans only support full slices",
-                index.label
-            )));
+            return Err(ContractError::UnsupportedPlannerProjection {
+                label: index.label.clone(),
+            });
         }
         let label = TemporaryLabel::from(index.label.as_str());
         if cost_model.dim(&label).is_none() {
-            return Err(ContractError::InvalidContractionPlan(format!(
-                "cotengra returned unknown sliced index `{}`",
-                index.label
-            )));
+            return Err(ContractError::UnknownPlannerSliceLabel {
+                label: index.label.clone(),
+            });
         }
         let expected = if ir.output_labels().contains(&label) {
             SliceKind::Output
@@ -951,10 +949,11 @@ fn parse_sliced_labels(
             SliceKind::Output
         };
         if actual != expected {
-            return Err(ContractError::InvalidContractionPlan(format!(
-                "cotengra sliced index `{}` kind mismatch: cotengra={actual:?} TeNeT={expected:?}",
-                index.label
-            )));
+            return Err(ContractError::PlannerSliceKindMismatch {
+                label: index.label.clone(),
+                expected,
+                actual,
+            });
         }
         labels.push(label);
     }
@@ -1129,6 +1128,46 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn unsupported_slice_outputs_are_typed() {
+        let ir = parse_einsum("ab,bc->ac").unwrap();
+        let cost = DenseCostModel::from_network(
+            &ir,
+            &[
+                crate::DenseTensorInfo::new(vec![2, 3]),
+                crate::DenseTensorInfo::new(vec![3, 4]),
+            ],
+        )
+        .unwrap();
+        let projected = [CotengraSlicedIndex {
+            label: "b".to_string(),
+            inner: true,
+            project: Some(0),
+        }];
+        assert!(matches!(
+            parse_sliced_labels(&ir, &cost, &projected),
+            Err(ContractError::UnsupportedPlannerProjection { .. })
+        ));
+        let wrong_kind = [CotengraSlicedIndex {
+            label: "b".to_string(),
+            inner: false,
+            project: None,
+        }];
+        assert!(matches!(
+            parse_sliced_labels(&ir, &cost, &wrong_kind),
+            Err(ContractError::PlannerSliceKindMismatch { .. })
+        ));
+        let unknown = [CotengraSlicedIndex {
+            label: "missing".to_string(),
+            inner: true,
+            project: None,
+        }];
+        assert!(matches!(
+            parse_sliced_labels(&ir, &cost, &unknown),
+            Err(ContractError::UnknownPlannerSliceLabel { .. })
+        ));
     }
 
     #[test]

@@ -62,8 +62,9 @@ impl SliceKind {
 }
 
 // Checked symmetric slicing schema. This is deliberately separate from the
-// dense planner's SlicePlan: it is an executable semantic partition, not a
-// cost estimate or a persistent wire format.
+// dense planner's SlicePlan: it is a self-consistent, unbound semantic
+// partition, not a tensor-proven executable plan, cost estimate, or persistent
+// wire format.
 
 /// A nonempty half-open range of degeneracy coordinates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -185,7 +186,7 @@ impl SymmetricIndexSlice {
     }
 }
 
-/// Checked, planner-neutral symmetric slicing semantics.
+/// Checked, planner-neutral, unbound and bindable symmetric slicing semantics.
 ///
 /// Pieces exactly partition every nonzero sector of each authority leg.
 /// Labels and pieces are canonicalized without merging adjacent ranges, and
@@ -201,6 +202,9 @@ impl SymmetricIndexSlice {
 /// process-local here and must not be serialized as a semantic sector label.
 /// The plan-wide [`RuleIdentity`] seals which rule gives those numeric ids
 /// meaning without retaining a fusion provider or any of its coefficients.
+/// Construction proves self-consistency against the supplied authority legs;
+/// it does not prove that those legs belong to later execution tensors. Bind
+/// this plan against the actual typed network before execution.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SymmetricSlicePlan {
     rule_identity: RuleIdentity,
@@ -208,8 +212,33 @@ pub struct SymmetricSlicePlan {
     nslices: u128,
 }
 
+/// An unbound, bindable contraction order paired with symmetric slicing.
+///
+/// This coefficient-free value is reconstructable without its planner, but is
+/// not tensor-proven or executable. It must be bound against actual typed
+/// tensors before execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymmetricSlicedPlan {
+    plan: ContractionPlan,
+    slices: SymmetricSlicePlan,
+}
+
+impl SymmetricSlicedPlan {
+    pub fn new(plan: ContractionPlan, slices: SymmetricSlicePlan) -> Self {
+        Self { plan, slices }
+    }
+
+    pub fn plan(&self) -> &ContractionPlan {
+        &self.plan
+    }
+
+    pub fn slices(&self) -> &SymmetricSlicePlan {
+        &self.slices
+    }
+}
+
 impl SymmetricSlicePlan {
-    /// Validate all inputs before publishing a plan.
+    /// Validate self-consistency against the supplied, unbound authority legs.
     pub fn try_new(
         ir: &NetworkIR,
         rule_identity: RuleIdentity,
@@ -293,6 +322,91 @@ impl SymmetricSlicePlan {
                 .expect("ordinal is bounded by the validated slice count")
         })
     }
+}
+
+pub(crate) fn validate_contraction_plan_for_ir(
+    ir: &NetworkIR,
+    plan: &ContractionPlan,
+) -> Result<()> {
+    if plan.tensor_count() != ir.tensors().len() || plan.output_labels() != ir.output_labels() {
+        return Err(ContractError::InvalidContractionPlan(
+            "sliced plan topology does not match the typed network".to_string(),
+        ));
+    }
+    let input_labels = ir
+        .tensors()
+        .iter()
+        .map(|tensor| tensor.labels().to_vec())
+        .collect::<Vec<_>>();
+    plan.validate_step_result_labels(&input_labels)
+}
+
+pub(crate) fn lower_symmetric_sliced_plan<E>(
+    ir: &NetworkIR,
+    rule_identity: RuleIdentity,
+    effective_legs: &[Vec<SectorLeg>],
+    sliced: SlicedPlan,
+) -> std::result::Result<SymmetricSlicedPlan, crate::error::SymmetricSliceLowerError<E>> {
+    let (plan, dense_slices) = sliced.into_parts();
+    validate_contraction_plan_for_ir(ir, &plan)
+        .map_err(crate::error::SymmetricSliceLowerError::InvalidPlan)?;
+
+    let mut specs = Vec::with_capacity(dense_slices.sliced_indices().len());
+    for (label, kind) in dense_slices.sliced_with_kinds() {
+        let edge = ir.edge(label).ok_or_else(|| {
+            crate::error::SymmetricSliceLowerError::InvalidSlice(SliceError::UnknownLabel(
+                label.clone(),
+            ))
+        })?;
+        let expected_kind = if edge.output_position().is_some() {
+            SliceKind::Output
+        } else {
+            SliceKind::Internal
+        };
+        if kind != expected_kind {
+            return Err(crate::error::SymmetricSliceLowerError::InvalidPlan(
+                ContractError::PlannerSliceKindMismatch {
+                    label: label.to_string(),
+                    expected: expected_kind,
+                    actual: kind,
+                },
+            ));
+        }
+        let authority = edge.occurrences()[0];
+        let leg = effective_legs
+            .get(authority.tensor().index())
+            .and_then(|legs| legs.get(authority.axis()))
+            .ok_or_else(
+                || crate::error::SymmetricSliceLowerError::MissingAuthority {
+                    label: label.clone(),
+                    authority,
+                },
+            )?
+            .clone();
+        let pieces = leg
+            .iter()
+            .flat_map(|(sector, degeneracy)| {
+                (0..degeneracy).map(move |coordinate| {
+                    SectorSlice::new(
+                        sector,
+                        DegeneracyRange {
+                            start: coordinate,
+                            end: coordinate + 1,
+                        },
+                    )
+                })
+            })
+            .collect();
+        specs.push(SymmetricSliceSpec::new(
+            label.clone(),
+            authority,
+            leg,
+            pieces,
+        ));
+    }
+    let slices = SymmetricSlicePlan::try_new(ir, rule_identity, specs)
+        .map_err(crate::error::SymmetricSliceLowerError::InvalidSlice)?;
+    Ok(SymmetricSlicedPlan::new(plan, slices))
 }
 
 fn checked_slice_count(counts: impl IntoIterator<Item = u128>) -> SliceResult<u128> {
@@ -976,6 +1090,10 @@ impl SlicedPlan {
     /// The slicing decision.
     pub fn slice(&self) -> &SlicePlan {
         &self.slice
+    }
+
+    pub(crate) fn into_parts(self) -> (ContractionPlan, SlicePlan) {
+        (self.plan, self.slice)
     }
 
     /// Serialize the contraction order and slicing decision together.

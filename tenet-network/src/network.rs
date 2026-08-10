@@ -30,10 +30,15 @@ use tenet::RuntimeIdentity;
 use tenet::{core::Placement, operations::OperationError};
 
 use crate::cost::{DenseCostModel, DenseTensorInfo};
+use crate::error::{SliceError, SymmetricSliceLowerError};
 use crate::ir::NetworkIR;
 use crate::labels::{TemporaryLabel, TensorId};
 use crate::optimizer::{ContractionStep, DenseContractionOptimizer};
 use crate::plan::ContractionPlan;
+use crate::slice::{
+    lower_symmetric_sliced_plan, validate_contraction_plan_for_ir, SlicedPlan, SymmetricSlicePlan,
+    SymmetricSliceSpec, SymmetricSlicedPlan,
+};
 
 /// Compile-time topology emitted by [`tensor!`].
 #[doc(hidden)]
@@ -98,6 +103,26 @@ fn invalid(message: impl std::fmt::Display) -> Error {
 
 pub(crate) type HostNetworkError<R> =
     <<R as TypedSectorAdmission>::Mode as TypedTensorModeDispatch<R>>::FacadeError;
+
+struct LoweredTypedNetwork<R> {
+    ir: NetworkIR,
+    infos: Vec<DenseTensorInfo>,
+    spaces: Vec<Vec<GradedSpace<R>>>,
+    rule_identity: RuleIdentity,
+}
+
+#[allow(dead_code)]
+pub(crate) struct BoundSymmetricSlicedPlan<R> {
+    plan: SymmetricSlicedPlan,
+    authorities: Vec<GradedSpace<R>>,
+}
+
+#[allow(dead_code)]
+impl<R> BoundSymmetricSlicedPlan<R> {
+    pub(crate) fn plan(&self) -> &SymmetricSlicedPlan {
+        &self.plan
+    }
+}
 
 mod host_mode_sealed {
     pub trait Sealed {}
@@ -212,7 +237,7 @@ impl Network {
         D: TensorScalar,
         S: TensorStorage<D>,
     {
-        let (ir, infos) = self.lower_typed(tensors)?;
+        let LoweredTypedNetwork { ir, infos, .. } = self.lower_typed(tensors)?;
         let plan = if ir.tensors().len() == 1 {
             ContractionPlan::new(1, self.output.clone(), Vec::new()).map_err(invalid)?
         } else {
@@ -235,7 +260,7 @@ impl Network {
         D: TensorScalar,
         S: TensorStorage<D>,
     {
-        let (ir, infos) = self.lower_typed(tensors)?;
+        let LoweredTypedNetwork { ir, infos, .. } = self.lower_typed(tensors)?;
         let plan = if ir.tensors().len() == 1 {
             ContractionPlan::new(1, self.output.clone(), Vec::new()).map_err(invalid)?
         } else {
@@ -264,8 +289,120 @@ impl Network {
         D: TensorScalar,
         S: TensorStorage<D>,
     {
-        let (ir, _) = self.lower_typed(tensors)?;
+        let LoweredTypedNetwork { ir, .. } = self.lower_typed(tensors)?;
         self.finish_typed_plan(tensors, ir, plan)
+    }
+
+    /// Lowers planner-selected labels into a reconstructable coefficient-free plan.
+    ///
+    /// The result is unbound: it records self-consistent authority-leg snapshots
+    /// but does not prove tensor provenance. The future sliced executor must bind
+    /// it again against the actual typed tensors before execution.
+    pub fn lower_symmetric_sliced_plan<R, D, S>(
+        &self,
+        tensors: &[&TensorMap<R, D, S>],
+        sliced: SlicedPlan,
+    ) -> std::result::Result<SymmetricSlicedPlan, SymmetricSliceLowerError<HostNetworkError<R>>>
+    where
+        R: TypedSectorAdmission,
+        R::Mode: HostNetworkModeDispatch<R, D>,
+        D: TensorScalar,
+        S: TensorStorage<D>,
+    {
+        let lowered = self
+            .lower_typed(tensors)
+            .map_err(SymmetricSliceLowerError::Tensor)?;
+        let legs = lowered
+            .spaces
+            .iter()
+            .map(|spaces| {
+                spaces
+                    .iter()
+                    .map(|space| space.network_sector_leg().clone())
+                    .collect()
+            })
+            .collect::<Vec<_>>();
+        lower_symmetric_sliced_plan(&lowered.ir, lowered.rule_identity, &legs, sliced)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn bind_symmetric_sliced_plan<R, D, S>(
+        &self,
+        tensors: &[&TensorMap<R, D, S>],
+        plan: SymmetricSlicedPlan,
+    ) -> std::result::Result<
+        BoundSymmetricSlicedPlan<R>,
+        SymmetricSliceLowerError<HostNetworkError<R>>,
+    >
+    where
+        R: TypedSectorAdmission,
+        R::Mode: HostNetworkModeDispatch<R, D>,
+        D: TensorScalar,
+        S: TensorStorage<D>,
+    {
+        let lowered = self
+            .lower_typed(tensors)
+            .map_err(SymmetricSliceLowerError::Tensor)?;
+        validate_contraction_plan_for_ir(&lowered.ir, plan.plan())
+            .map_err(SymmetricSliceLowerError::InvalidPlan)?;
+        let expected = plan.slices().rule_identity().clone();
+        if expected != lowered.rule_identity {
+            return Err(SymmetricSliceLowerError::RuleMismatch {
+                expected,
+                actual: lowered.rule_identity,
+            });
+        }
+
+        let mut authorities = Vec::with_capacity(plan.slices().indices().len());
+        let mut specs = Vec::with_capacity(plan.slices().indices().len());
+        for index in plan.slices().indices() {
+            let edge = lowered.ir.edge(index.label()).ok_or_else(|| {
+                SymmetricSliceLowerError::InvalidSlice(SliceError::UnknownLabel(
+                    index.label().clone(),
+                ))
+            })?;
+            let authority = index.authority();
+            let expected_authority = edge.occurrences()[0];
+            if authority != expected_authority {
+                return Err(SymmetricSliceLowerError::InvalidSlice(
+                    SliceError::InvalidAuthority {
+                        label: index.label().clone(),
+                        expected: expected_authority,
+                        actual: authority,
+                    },
+                ));
+            }
+            let actual = lowered
+                .spaces
+                .get(authority.tensor().index())
+                .and_then(|spaces| spaces.get(authority.axis()))
+                .cloned()
+                .ok_or_else(|| SymmetricSliceLowerError::MissingAuthority {
+                    label: index.label().clone(),
+                    authority,
+                })?;
+            let actual_leg = actual.network_sector_leg().clone();
+            if index.authority_leg() != &actual_leg {
+                return Err(SymmetricSliceLowerError::AuthorityLegMismatch {
+                    label: index.label().clone(),
+                    authority,
+                    expected: actual_leg,
+                    actual: index.authority_leg().clone(),
+                });
+            }
+            authorities.push(actual);
+            specs.push(SymmetricSliceSpec::new(
+                index.label().clone(),
+                authority,
+                actual_leg,
+                index.pieces().to_vec(),
+            ));
+        }
+        let rebound = SymmetricSlicePlan::try_new(&lowered.ir, lowered.rule_identity, specs)
+            .map_err(SymmetricSliceLowerError::InvalidSlice)?;
+        debug_assert_eq!(&rebound, plan.slices());
+        let plan = SymmetricSlicedPlan::new(plan.plan().clone(), rebound);
+        Ok(BoundSymmetricSlicedPlan { plan, authorities })
     }
 
     fn finish_typed_plan<R, D, S>(
@@ -336,7 +473,7 @@ impl Network {
     fn lower_typed<R, D, S>(
         &self,
         tensors: &[&TensorMap<R, D, S>],
-    ) -> Result<(NetworkIR, Vec<DenseTensorInfo>), HostNetworkError<R>>
+    ) -> Result<LoweredTypedNetwork<R>, HostNetworkError<R>>
     where
         R: TypedSectorAdmission,
         R::Mode: HostNetworkModeDispatch<R, D>,
@@ -351,7 +488,7 @@ impl Network {
             ))
             .into());
         }
-        if let Some(first) = tensors.first() {
+        let rule_identity = if let Some(first) = tensors.first() {
             let runtime = first.runtime().identity();
             let identity = TypedSectorAdmission::typed_rule_identity(first.provider());
             for (index, tensor) in tensors.iter().enumerate().skip(1) {
@@ -362,7 +499,10 @@ impl Network {
                     return Err(Error::RuleMismatch.into());
                 }
             }
-        }
+            identity
+        } else {
+            unreachable!("a validated Network has at least one operand")
+        };
 
         let mut lowered_labels = Vec::with_capacity(tensors.len());
         let mut infos = Vec::with_capacity(tensors.len());
@@ -402,7 +542,12 @@ impl Network {
         validate_typed_contracted_leg_spaces::<R, D>(&lowered_labels, &lowered_spaces)?;
         let ir = NetworkIR::from_labels(lowered_labels, self.output.clone())
             .map_err(|error| HostNetworkError::<R>::from(invalid(error)))?;
-        Ok((ir, infos))
+        Ok(LoweredTypedNetwork {
+            ir,
+            infos,
+            spaces: lowered_spaces,
+            rule_identity,
+        })
     }
 }
 
@@ -2032,7 +2177,7 @@ mod typed_replay_tests {
 
     #[cfg(feature = "cuda")]
     use tenet::core::{product_sector, FermionParityFusionRule, ProductFusionRuleExt, Z2Irrep};
-    use tenet::core::{U1FusionRule, U1Irrep};
+    use tenet::core::{FusionRule, SectorLeg, U1FusionRule, U1Irrep, Z2FusionRule};
     use tenet::typed::{GradedSpace, TensorMap};
 
     use super::*;
@@ -2041,6 +2186,93 @@ mod typed_replay_tests {
 
     fn label(name: &str) -> TemporaryLabel {
         TemporaryLabel::from(name)
+    }
+
+    #[test]
+    fn symmetric_slice_binding_checks_adjoint_orientation_leg_and_rule() {
+        let runtime = Runtime::builder().build().unwrap();
+        let provider = Arc::new(U1FusionRule);
+        let codomain =
+            GradedSpace::try_new_with_arc(Arc::clone(&provider), [(U1Irrep::new(2), 1)]).unwrap();
+        let domain = GradedSpace::try_new_with_arc(provider, [(U1Irrep::new(-1), 2)]).unwrap();
+        let tensor = TensorMap::<U1FusionRule, f64>::rand_with_seed(
+            &runtime,
+            [&codomain],
+            [&domain],
+            10_280,
+        )
+        .unwrap();
+        let written = vec![label("p"), label("x")];
+        let effective = vec![label("x"), label("p")];
+        let network = Network::new(
+            vec![written],
+            vec![true],
+            vec![Some(1)],
+            effective.clone(),
+            Some(1),
+        )
+        .unwrap();
+        let ir = NetworkIR::from_labels(vec![effective.clone()], effective.clone()).unwrap();
+        let order = ContractionPlan::new(1, effective.clone(), Vec::new()).unwrap();
+        let cost = DenseCostModel::from_network(&ir, &[DenseTensorInfo::new(vec![2, 1])]).unwrap();
+        let dense = SlicedPlan::new(
+            order,
+            crate::slice_plan_for(
+                &ir,
+                &ContractionPlan::new(1, effective, Vec::new()).unwrap(),
+                &cost,
+                &[label("x")],
+            ),
+        );
+        let valid = network
+            .lower_symmetric_sliced_plan(&[&tensor], dense)
+            .unwrap();
+        let bound = network
+            .bind_symmetric_sliced_plan(&[&tensor], valid.clone())
+            .unwrap();
+        assert_eq!(bound.plan(), &valid);
+
+        let index = &valid.slices().indices()[0];
+        assert_eq!(index.authority_leg().sectors(), &[U1Irrep::new(-1).into()]);
+        assert!(!index.authority_leg().is_dual());
+        let forged_leg = SectorLeg::new(index.authority_leg().iter(), true);
+        let forged = SymmetricSlicePlan::try_new(
+            &ir,
+            U1FusionRule.rule_identity(),
+            vec![SymmetricSliceSpec::new(
+                label("x"),
+                index.authority(),
+                forged_leg,
+                index.pieces().to_vec(),
+            )],
+        )
+        .unwrap();
+        assert!(matches!(
+            network.bind_symmetric_sliced_plan(
+                &[&tensor],
+                SymmetricSlicedPlan::new(valid.plan().clone(), forged)
+            ),
+            Err(SymmetricSliceLowerError::AuthorityLegMismatch { .. })
+        ));
+
+        let wrong_rule = SymmetricSlicePlan::try_new(
+            &ir,
+            Z2FusionRule.rule_identity(),
+            vec![SymmetricSliceSpec::new(
+                label("x"),
+                index.authority(),
+                index.authority_leg().clone(),
+                index.pieces().to_vec(),
+            )],
+        )
+        .unwrap();
+        assert!(matches!(
+            network.bind_symmetric_sliced_plan(
+                &[&tensor],
+                SymmetricSlicedPlan::new(valid.plan().clone(), wrong_rule)
+            ),
+            Err(SymmetricSliceLowerError::RuleMismatch { .. })
+        ));
     }
 
     fn crossed_plan() -> PlannedNetwork {
