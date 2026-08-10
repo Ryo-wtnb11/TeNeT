@@ -17,6 +17,7 @@ mod contract;
 mod facade;
 mod lowering;
 mod oriented_elementwise;
+mod physical;
 mod tensortrace;
 #[cfg(test)]
 mod test_support;
@@ -89,6 +90,10 @@ pub use facade::{
     tree_transform_into_with_context, tree_transform_overwrite_execute_with,
     tree_transform_overwrite_into, tree_transform_overwrite_into_with,
     tree_transform_overwrite_into_with_context, tree_transform_structure,
+};
+#[doc(hidden)]
+pub use physical::{
+    expand_physical_host, project_physical_host, PhysicalConversionError, PhysicalHostBuffer,
 };
 /// CUDA storage and GEMM seams (flat device buffers, never host-readable).
 #[cfg(feature = "cuda")]
