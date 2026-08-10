@@ -11682,6 +11682,12 @@ where
     /// Dense tensors copy no numeric payload. Compact diagonals and lazy
     /// adjoints follow [`Self::data`]: the logical dense payload is materialized
     /// at most once and then shared by all views and clones.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the provider cannot decode a stored fusion-tree
+    /// label, or if stored block metadata does not form a valid view into the
+    /// logical tensor data.
     pub fn blocks<'a>(
         &'a self,
     ) -> Result<
