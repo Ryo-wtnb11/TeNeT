@@ -157,6 +157,36 @@ fn public_diagonal_constructor_and_readback_stay_compact_until_data() {
 }
 
 #[test]
+fn labelled_block_inspection_materializes_compact_data_once_and_borrows_it() {
+    let _measurement = MEASUREMENT_LOCK.lock().unwrap();
+    let diagonal = constructed_diagonal(DEGENERACY);
+
+    let first = measured_bytes(|| {
+        let blocks = diagonal.blocks().unwrap().collect::<Vec<_>>();
+        assert_eq!(blocks.len(), 1);
+        let (_, values) = &blocks[0];
+        assert_eq!(values.shape(), &[DEGENERACY, DEGENERACY]);
+        assert_eq!(values.get(&[0, 0]), Some(&1.0));
+        assert_eq!(values.get(&[0, 1]), Some(&0.0));
+        assert_eq!(values.data().as_ptr(), diagonal.data().as_ptr());
+    });
+    assert!(
+        first >= dense_payload_bytes(),
+        "block inspection did not materialize the compact payload: {first}"
+    );
+
+    let second = measured_bytes(|| {
+        let blocks = diagonal.blocks().unwrap().collect::<Vec<_>>();
+        assert_eq!(blocks[0].1.data().as_ptr(), diagonal.data().as_ptr());
+    });
+    assert!(
+        second < dense_payload_bytes(),
+        "block inspection rebuilt the dense payload: {second}"
+    );
+    assert!(diagonal.diagonal_spectrum().unwrap().is_some());
+}
+
+#[test]
 fn svd_compacts_s_is_built_compact_and_materializes_only_on_demand() {
     // What: `svd_compact` stores `s` as `Σ_c k_c` values. The proof is that the
     // dense buffer is still missing afterwards — the first `data()` on a fresh

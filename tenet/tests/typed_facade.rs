@@ -876,6 +876,95 @@ fn tensor_map_inspection_round_trips_the_spaces_and_blocks() {
 }
 
 #[test]
+fn labelled_blocks_borrow_u1_and_su2_values_in_canonical_order() {
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let provider = Arc::new(tenet::core::U1FusionRule);
+    let leg = GradedSpace::try_new_with_arc(
+        provider,
+        [
+            (tenet::core::U1Irrep::new(-1), 1),
+            (tenet::core::U1Irrep::new(0), 2),
+            (tenet::core::U1Irrep::new(1), 1),
+        ],
+    )
+    .unwrap();
+    let u1: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], |trees, indices| {
+            100.0 * trees.coupled().charge() as f64
+                + 10.0 * indices[0] as f64
+                + 3.0 * indices[1] as f64
+                + indices[2] as f64
+        })
+        .unwrap();
+
+    let mut u1_blocks = u1.blocks().unwrap();
+    assert_eq!(u1_blocks.len(), u1.block_count());
+    for (index, (trees, values)) in u1_blocks.by_ref().enumerate() {
+        let raw = u1.block(index).unwrap();
+        assert_eq!(values.shape(), raw.shape());
+        assert_eq!(values.strides(), raw.strides());
+        assert_eq!(values.data().as_ptr(), u1.data().as_ptr());
+        assert_eq!(trees.codomain_uncoupled().len(), 2);
+        assert_eq!(
+            trees.domain_uncoupled(),
+            std::slice::from_ref(trees.coupled())
+        );
+        assert_eq!(
+            trees.codomain_uncoupled()[0].charge() + trees.codomain_uncoupled()[1].charge(),
+            trees.coupled().charge()
+        );
+        for i in 0..values.shape()[0] {
+            for j in 0..values.shape()[1] {
+                for k in 0..values.shape()[2] {
+                    assert_eq!(
+                        values.get(&[i, j, k]),
+                        Some(
+                            &(100.0 * trees.coupled().charge() as f64
+                                + 10.0 * i as f64
+                                + 3.0 * j as f64
+                                + k as f64)
+                        )
+                    );
+                }
+            }
+        }
+    }
+    assert!(matches!(
+        u1.block(u1.block_count()),
+        Err(tenet::typed::Error::Core(error))
+            if matches!(*error, tenet::core::CoreError::BlockIndexOutOfBounds { index, count }
+                if index == count && count == u1.block_count())
+    ));
+
+    let su2 = su2_tensor_split(&runtime, 2);
+    let su2_blocks = su2.blocks().unwrap();
+    assert_eq!(su2_blocks.len(), su2.block_count());
+    for (index, (trees, values)) in su2_blocks.enumerate() {
+        let raw = su2.block(index).unwrap();
+        assert_eq!(trees.coupled(), &SU2Irrep::from_twice_spin(0));
+        assert!(trees.domain_uncoupled().is_empty());
+        assert!(SU2FusionRule
+            .fusion_channels(
+                SU2FusionRule
+                    .encode_sector(&trees.codomain_uncoupled()[0])
+                    .unwrap(),
+                SU2FusionRule
+                    .encode_sector(&trees.codomain_uncoupled()[1])
+                    .unwrap(),
+            )
+            .contains(&SU2FusionRule.encode_sector(trees.coupled()).unwrap()));
+        assert_eq!(values.shape(), raw.shape());
+        assert_eq!(values.strides(), raw.strides());
+        assert_eq!(values.data().as_ptr(), su2.data().as_ptr());
+        assert_eq!(
+            values.get(&vec![0; values.shape().len()]),
+            Some(&su2.data()[raw.offset()])
+        );
+    }
+}
+
+#[test]
 fn block_fusion_trees_reports_a_non_self_dual_domain_label() {
     // What: a dual domain leg carrying charge 2 — whose dual is charge 1, so a
     // confusion between the two would show — is decoded as charge 2, matching
