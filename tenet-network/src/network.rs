@@ -6,8 +6,8 @@
 //! typed contraction plus orientation/final permutation calls. The `tensor!`
 //! macro enters the same typed schedule directly.
 
-use std::collections::HashMap;
-#[cfg(all(test, feature = "cuda"))]
+use std::collections::{HashMap, HashSet};
+#[cfg(test)]
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -21,16 +21,17 @@ use tenet::prelude::{Error, Runtime, TensorScalar};
 #[cfg(feature = "cuda")]
 use tenet::typed::CudaStorage;
 use tenet::typed::{
-    GradedSpace, NetworkReuseClass, RuntimeDetachedTensorMap, TensorMap, TypedSpaceModeDispatch,
-    TypedTensorAdjointDispatch, TypedTensorContractDispatch, TypedTensorModeDispatch,
-    TypedTensorTraceDispatch, TypedTensorTransformDispatch,
+    GradedSpace, NetworkDegeneracyRestriction, NetworkReuseClass, RuntimeDetachedTensorMap,
+    TensorMap, TypedSpaceModeDispatch, TypedTensorAdjointDispatch, TypedTensorContractDispatch,
+    TypedTensorModeDispatch, TypedTensorRootDispatch, TypedTensorTraceDispatch,
+    TypedTensorTransformDispatch,
 };
 use tenet::RuntimeIdentity;
 #[cfg(feature = "cuda")]
 use tenet::{core::Placement, operations::OperationError};
 
 use crate::cost::{DenseCostModel, DenseTensorInfo};
-use crate::error::{SliceError, SymmetricSliceLowerError};
+use crate::error::{SliceError, SymmetricSliceExecutionError, SymmetricSliceLowerError};
 use crate::ir::NetworkIR;
 use crate::labels::{TemporaryLabel, TensorId};
 use crate::optimizer::{ContractionStep, DenseContractionOptimizer};
@@ -94,6 +95,8 @@ pub struct Network {
 }
 
 static NEXT_PLAN_OWNER_TOKEN: AtomicU64 = AtomicU64::new(1);
+#[cfg(test)]
+static SYMMETRIC_SLICE_COMPLETED_JOBS: AtomicUsize = AtomicUsize::new(0);
 #[cfg(all(test, feature = "cuda"))]
 static CUDA_NETWORK_CONTRACT_CALLS: AtomicUsize = AtomicUsize::new(0);
 
@@ -115,6 +118,16 @@ struct LoweredTypedNetwork<R> {
 pub(crate) struct BoundSymmetricSlicedPlan<R> {
     plan: SymmetricSlicedPlan,
     authorities: Vec<GradedSpace<R>>,
+    occurrences: Vec<Vec<BoundSliceOccurrence>>,
+    output_effective: Vec<GradedSpace<R>>,
+    output_codomain_rank: usize,
+}
+
+#[derive(Clone, Copy)]
+struct BoundSliceOccurrence {
+    slice_index: usize,
+    effective_axis: usize,
+    partner: bool,
 }
 
 #[allow(dead_code)]
@@ -139,6 +152,7 @@ pub trait HostNetworkModeDispatch<R, D>:
     + TypedSpaceModeDispatch<R>
     + TypedTensorAdjointDispatch<R, D>
     + TypedTensorContractDispatch<R, D>
+    + TypedTensorRootDispatch<R>
     + TypedTensorTransformDispatch<R, D>
 where
     R: TypedSectorAdmission<Mode = Self>,
@@ -401,8 +415,189 @@ impl Network {
         let rebound = SymmetricSlicePlan::try_new(&lowered.ir, lowered.rule_identity, specs)
             .map_err(SymmetricSliceLowerError::InvalidSlice)?;
         debug_assert_eq!(&rebound, plan.slices());
+        let mut occurrences = vec![Vec::new(); tensors.len()];
+        for (slice_index, index) in rebound.indices().iter().enumerate() {
+            let edge = lowered
+                .ir
+                .edge(index.label())
+                .expect("rebound label exists");
+            for (occurrence_index, occurrence) in edge.occurrences().iter().enumerate() {
+                occurrences[occurrence.tensor().index()].push(BoundSliceOccurrence {
+                    slice_index,
+                    effective_axis: occurrence.axis(),
+                    partner: occurrence_index != 0,
+                });
+            }
+        }
+        let output_effective = self
+            .output
+            .iter()
+            .map(|label| {
+                let occurrence = lowered
+                    .ir
+                    .edge(label)
+                    .expect("validated output label exists")
+                    .occurrences()[0];
+                lowered.spaces[occurrence.tensor().index()][occurrence.axis()].clone()
+            })
+            .collect();
+        let output_codomain_rank = self.output_codomain_rank.unwrap_or(self.output.len());
         let plan = SymmetricSlicedPlan::new(plan.plan().clone(), rebound);
-        Ok(BoundSymmetricSlicedPlan { plan, authorities })
+        Ok(BoundSymmetricSlicedPlan {
+            plan,
+            authorities,
+            occurrences,
+            output_effective,
+            output_codomain_rank,
+        })
+    }
+
+    /// Executes coefficient-free internal symmetric slices just in time and
+    /// returns the result with the measured peak network-owned payload bytes.
+    ///
+    /// Counted payloads are compact sliced inputs, live planned contraction
+    /// and permutation destinations, the current partial, the private
+    /// accumulator, and path-owned dense buffers. Small metadata and opaque
+    /// scratch inside an external backend are excluded because no accounting
+    /// hook exists at that boundary. The ceiling is checked against observed
+    /// payloads after each tensor kernel returns and before publication; it is
+    /// not an allocator reservation or an out-of-memory prevention guarantee.
+    /// A successful return proves that the observed peak did not exceed the
+    /// ceiling.
+    pub fn execute_symmetric_sliced<R, D>(
+        &self,
+        tensors: &[&TensorMap<R, D>],
+        plan: SymmetricSlicedPlan,
+        measured_payload_ceiling: usize,
+    ) -> std::result::Result<
+        (TensorMap<R, D>, usize),
+        SymmetricSliceExecutionError<HostNetworkError<R>>,
+    >
+    where
+        R: TypedSectorAdmission,
+        R::Mode: HostNetworkModeDispatch<R, D>,
+        D: TensorScalar,
+    {
+        // This is structural and must precede binding/provider queries.
+        if let Some(index) = plan
+            .slices()
+            .indices()
+            .iter()
+            .find(|index| index.output_position().is_some())
+        {
+            return Err(SymmetricSliceExecutionError::OutputSlice {
+                label: index.label().clone(),
+            });
+        }
+        // Compact diagonal readback may allocate a hidden full dense cache;
+        // reject it before restriction/provider work until that representation
+        // has a separately accountable copy leaf.
+        if tensors
+            .iter()
+            .any(|tensor| tensor.network_has_compact_payload())
+        {
+            return Err(SymmetricSliceExecutionError::Tensor(
+                invalid("symmetric sliced execution requires dense Host payloads").into(),
+            ));
+        }
+
+        let bound = self
+            .bind_symmetric_sliced_plan(tensors, plan)
+            .map_err(SymmetricSliceExecutionError::Bind)?;
+        let planned = self
+            .plan_with(tensors, bound.plan.plan().clone())
+            .map_err(SymmetricSliceExecutionError::Tensor)?;
+        let mut meter = PayloadMeter::new(measured_payload_ceiling);
+        let mut workspace = NetworkExecutionWorkspace::default();
+        let (codomain, domain) = bound.output_effective.split_at(bound.output_codomain_rank);
+        let authority_input_slot = planned
+            .schedule
+            .steps
+            .last()
+            .map_or(0, |step| step.authority_input_slot);
+        let mut accumulator = tensors[authority_input_slot]
+            .network_zeros_from_effective_legs(codomain, domain)
+            .map_err(SymmetricSliceExecutionError::Tensor)?;
+        if bound.plan.slices().nslices() == 0 {
+            meter.set_base([&accumulator]);
+            meter
+                .observe::<R, D>(&[], &[], &[])
+                .map_err(map_payload_error)?;
+            return Ok((accumulator, meter.peak));
+        }
+
+        for ordinal in 0..bound.plan.slices().nslices() {
+            let selected = bound
+                .plan
+                .slices()
+                .combination(ordinal)
+                .expect("ordinal is bounded by semantic nslices");
+            let mut owned = Vec::with_capacity(tensors.len());
+            let mut compact_flags = Vec::with_capacity(tensors.len());
+            for (operand, tensor) in tensors.iter().enumerate() {
+                let occurrences = &bound.occurrences[operand];
+                compact_flags.push(!occurrences.is_empty());
+                if occurrences.is_empty() {
+                    owned.push((*tensor).clone());
+                    continue;
+                }
+                let restrictions = occurrences
+                    .iter()
+                    .map(|occurrence| {
+                        let piece = selected[occurrence.slice_index];
+                        let range = piece.range();
+                        NetworkDegeneracyRestriction {
+                            effective_axis: occurrence.effective_axis,
+                            authority_sector: piece.sector(),
+                            range: range.start()..range.end(),
+                            partner: occurrence.partner,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                owned.push(
+                    tensor
+                        .network_restrict_degeneracies(self.conj[operand], &restrictions)
+                        .map_err(SymmetricSliceExecutionError::Tensor)?,
+                );
+            }
+            let compact_inputs = owned
+                .iter()
+                .zip(&compact_flags)
+                .filter_map(|(tensor, &compact)| compact.then_some(tensor));
+            meter.set_base(compact_inputs.chain(std::iter::once(&accumulator)));
+            let payloads = intermediate_payloads(&workspace.intermediates);
+            meter
+                .observe(&workspace.slots, &workspace.producers, &payloads)
+                .map_err(map_payload_error)?;
+
+            let refs = owned.iter().collect::<Vec<_>>();
+            let partial = planned
+                .execute_with_workspace_meter(&refs, &mut workspace, Some(&mut meter))
+                .map_err(map_metered_network_error)?;
+            #[cfg(test)]
+            SYMMETRIC_SLICE_COMPLETED_JOBS.fetch_add(1, Ordering::SeqCst);
+
+            let compact_inputs = owned
+                .iter()
+                .zip(&compact_flags)
+                .filter_map(|(tensor, &compact)| compact.then_some(tensor));
+            meter.set_base(
+                compact_inputs
+                    .chain(std::iter::once(&accumulator))
+                    .chain(std::iter::once(&partial)),
+            );
+            let payloads = intermediate_payloads(&workspace.intermediates);
+            meter
+                .observe(&workspace.slots, &workspace.producers, &payloads)
+                .map_err(map_payload_error)?;
+
+            accumulator
+                .network_add_subset_assign(&partial)
+                .map_err(|error| {
+                    SymmetricSliceExecutionError::Tensor(HostNetworkError::<R>::from(error))
+                })?;
+        }
+        Ok((accumulator, meter.peak))
     }
 
     fn finish_typed_plan<R, D, S>(
@@ -748,6 +943,120 @@ struct TypedIntermediateBuffers<R, D> {
     oriented: Option<TensorMap<R, D>>,
     parked_contracted: Option<RuntimeDetachedTensorMap<D>>,
     parked_oriented: Option<RuntimeDetachedTensorMap<D>>,
+}
+
+struct PayloadMeter {
+    limit: usize,
+    peak: usize,
+    base: Vec<(usize, usize)>,
+}
+
+#[derive(Debug)]
+enum PayloadMeterError {
+    Limit { limit: usize, required: usize },
+    ArithmeticOverflow,
+}
+
+impl PayloadMeter {
+    fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            peak: 0,
+            base: Vec::new(),
+        }
+    }
+
+    fn set_base<'a, R: 'a, D: TensorScalar + 'a>(
+        &mut self,
+        tensors: impl IntoIterator<Item = &'a TensorMap<R, D>>,
+    ) {
+        self.base.clear();
+        self.base.extend(
+            tensors
+                .into_iter()
+                .filter_map(TensorMap::network_owned_payload),
+        );
+    }
+
+    fn observe<R, D: TensorScalar>(
+        &mut self,
+        slots: &[Option<TensorMap<R, D>>],
+        producers: &[Option<(usize, bool)>],
+        extra: &[Option<(usize, usize)>],
+    ) -> std::result::Result<(), PayloadMeterError> {
+        let mut seen = HashSet::new();
+        let mut total = 0usize;
+        let mut charge = |payload: Option<(usize, usize)>| {
+            let Some((identity, bytes)) = payload else {
+                return Ok(());
+            };
+            if seen.insert(identity) {
+                total = total
+                    .checked_add(bytes)
+                    .ok_or(PayloadMeterError::ArithmeticOverflow)?;
+            }
+            Ok(())
+        };
+        for &(identity, bytes) in &self.base {
+            charge(Some((identity, bytes)))?;
+        }
+        for (slot, producer) in slots.iter().zip(producers) {
+            if producer.is_some() {
+                charge(slot.as_ref().and_then(TensorMap::network_owned_payload))?;
+            }
+        }
+        for &payload in extra {
+            charge(payload)?;
+        }
+        self.peak = self.peak.max(total);
+        if total > self.limit {
+            return Err(PayloadMeterError::Limit {
+                limit: self.limit,
+                required: total,
+            });
+        }
+        Ok(())
+    }
+}
+
+fn intermediate_payloads<R, D: TensorScalar>(
+    intermediates: &[TypedIntermediateBuffers<R, D>],
+) -> Vec<Option<(usize, usize)>> {
+    intermediates
+        .iter()
+        .flat_map(|buffers| [buffers.contracted.as_ref(), buffers.oriented.as_ref()])
+        .flatten()
+        .map(TensorMap::network_owned_payload)
+        .collect()
+}
+
+enum MeteredNetworkError<E> {
+    Tensor(E),
+    Payload(PayloadMeterError),
+}
+
+impl<E> From<E> for MeteredNetworkError<E> {
+    fn from(error: E) -> Self {
+        Self::Tensor(error)
+    }
+}
+
+fn map_payload_error<E>(error: PayloadMeterError) -> SymmetricSliceExecutionError<E> {
+    match error {
+        PayloadMeterError::Limit { limit, required } => {
+            SymmetricSliceExecutionError::WorkspaceLimitExceeded { limit, required }
+        }
+        PayloadMeterError::ArithmeticOverflow => {
+            SymmetricSliceExecutionError::WorkspaceArithmeticOverflow
+        }
+    }
+}
+
+fn map_metered_network_error<E>(error: MeteredNetworkError<E>) -> SymmetricSliceExecutionError<E> {
+    match error {
+        MeteredNetworkError::Tensor(error) => SymmetricSliceExecutionError::Tensor(error),
+        MeteredNetworkError::Payload(error) => map_payload_error(error),
+    }
 }
 
 #[doc(hidden)]
@@ -1276,6 +1585,26 @@ impl PlannedNetwork {
         R::Mode: HostNetworkModeDispatch<R, D>,
         D: TensorScalar,
     {
+        match self.execute_with_workspace_meter(tensors, workspace, None) {
+            Ok(result) => Ok(result),
+            Err(MeteredNetworkError::Tensor(error)) => Err(error),
+            Err(MeteredNetworkError::Payload(_)) => {
+                unreachable!("ordinary execution has no payload meter")
+            }
+        }
+    }
+
+    fn execute_with_workspace_meter<R, D>(
+        &self,
+        tensors: &[&TensorMap<R, D>],
+        workspace: &mut NetworkExecutionWorkspace<R, D>,
+        mut meter: Option<&mut PayloadMeter>,
+    ) -> std::result::Result<TensorMap<R, D>, MeteredNetworkError<HostNetworkError<R>>>
+    where
+        R: TypedSectorAdmission,
+        R::Mode: HostNetworkModeDispatch<R, D>,
+        D: TensorScalar,
+    {
         let prepared: Result<_, HostNetworkError<R>> = (|| {
             if tensors.len() != self.schedule.input_ranks.len() {
                 return Err(invalid(format!(
@@ -1433,10 +1762,17 @@ impl PlannedNetwork {
         for (index, lowered) in lowered.into_iter().enumerate() {
             workspace.slots[index] = Some(lowered);
         }
+        if let Some(meter) = meter.as_deref_mut() {
+            let payloads = intermediate_payloads(&workspace.intermediates);
+            meter
+                .observe(&workspace.slots, &workspace.producers, &payloads)
+                .map_err(MeteredNetworkError::Payload)?;
+        }
         let slots = &mut workspace.slots;
         let producers = &mut workspace.producers;
         let intermediates = &mut workspace.intermediates;
         for (step_index, step) in self.schedule.steps.iter().enumerate() {
+            let retained_payloads = intermediate_payloads(intermediates);
             let lhs = slots[step.lhs_slot].as_ref().ok_or_else(|| {
                 HostNetworkError::<R>::from(invalid("lhs operand already consumed"))
             })?;
@@ -1462,6 +1798,14 @@ impl PlannedNetwork {
                 &step.rhs_contract_axes,
                 &step.contract_output_axes,
             )?;
+            if let Some(meter) = meter.as_deref_mut() {
+                let payload = contracted.get(contract_buffer).network_owned_payload();
+                let mut payloads = retained_payloads.clone();
+                payloads.push(payload);
+                meter
+                    .observe(slots, producers, &payloads)
+                    .map_err(MeteredNetworkError::Payload)?;
+            }
             let result = if fused {
                 contracted.take(oriented_buffer)
             } else if let Some((codomain, domain)) = &step.result_permutation {
@@ -1471,6 +1815,16 @@ impl PlannedNetwork {
                     codomain,
                     domain,
                 )?;
+                if let Some(meter) = meter.as_deref_mut() {
+                    let mut payloads = retained_payloads.clone();
+                    payloads.extend([
+                        contracted.get(contracted_buffer).network_owned_payload(),
+                        oriented.get(oriented_buffer).network_owned_payload(),
+                    ]);
+                    meter
+                        .observe(slots, producers, &payloads)
+                        .map_err(MeteredNetworkError::Payload)?;
+                }
                 contracted.retain(contracted_buffer);
                 oriented.take(oriented_buffer)
             } else {
@@ -1489,12 +1843,25 @@ impl PlannedNetwork {
             slots[step.result_slot] = Some(result);
             producers[step.result_slot] =
                 Some((step_index, fused || step.result_permutation.is_some()));
+            if let Some(meter) = meter.as_deref_mut() {
+                let payloads = intermediate_payloads(intermediates);
+                meter
+                    .observe(slots, producers, &payloads)
+                    .map_err(MeteredNetworkError::Payload)?;
+            }
         }
         let result = slots[self.schedule.final_slot]
             .as_ref()
             .ok_or_else(|| HostNetworkError::<R>::from(invalid("no final tensor produced")))?;
         if let Some((codomain, domain)) = &self.schedule.final_permutation {
             let output = result.permute(codomain, domain)?;
+            if let Some(meter) = meter.as_deref_mut() {
+                let mut payloads = intermediate_payloads(intermediates);
+                payloads.push(output.network_owned_payload());
+                meter
+                    .observe(slots, producers, &payloads)
+                    .map_err(MeteredNetworkError::Payload)?;
+            }
             let input = slots[self.schedule.final_slot]
                 .take()
                 .expect("validated final tensor remains until permutation success");
@@ -2176,12 +2543,15 @@ mod typed_replay_tests {
     use std::sync::Arc;
 
     #[cfg(feature = "cuda")]
-    use tenet::core::{product_sector, FermionParityFusionRule, ProductFusionRuleExt, Z2Irrep};
-    use tenet::core::{FusionRule, SectorLeg, U1FusionRule, U1Irrep, Z2FusionRule};
-    use tenet::typed::{GradedSpace, TensorMap};
+    use tenet::core::{product_sector, ProductFusionRuleExt};
+    use tenet::core::{
+        FermionParityFusionRule, FusionRule, SectorLeg, U1FusionRule, U1Irrep, Z2FusionRule,
+        Z2Irrep,
+    };
+    use tenet::prelude::Complex64;
+    use tenet::typed::{GradedSpace, SectorSpectrum, TensorMap};
 
     use super::*;
-    #[cfg(feature = "cuda")]
     use crate::GreedyDenseOptimizer;
 
     fn label(name: &str) -> TemporaryLabel {
@@ -2273,6 +2643,473 @@ mod typed_replay_tests {
             ),
             Err(SymmetricSliceLowerError::RuleMismatch { .. })
         ));
+    }
+
+    #[test]
+    fn internal_symmetric_slices_match_unsliced_multisector_and_meter_cold_warm() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let provider = Arc::new(U1FusionRule);
+        let bond =
+            GradedSpace::try_new_with_arc(provider, [(U1Irrep::new(0), 1), (U1Irrep::new(1), 3)])
+                .unwrap();
+        let make = |shift| {
+            TensorMap::from_block_fn(&runtime, [&bond], [&bond], move |trees, indices| {
+                shift
+                    + trees.codomain_uncoupled()[0].charge() as f64
+                    + indices[0] as f64
+                    + 2.0 * indices[1] as f64
+            })
+            .unwrap()
+        };
+        let a = make(1.0);
+        let b = make(2.0);
+        let c = make(3.0);
+        let inputs = vec![
+            vec![label("a"), label("x")],
+            vec![label("x"), label("y")],
+            vec![label("y"), label("c")],
+        ];
+        let output = vec![label("a"), label("c")];
+        let network = Network::new(
+            inputs.clone(),
+            vec![false; 3],
+            vec![Some(1); 3],
+            output.clone(),
+            Some(1),
+        )
+        .unwrap();
+        let tensors = [&a, &b, &c];
+        let planned = network.plan(&tensors, &GreedyDenseOptimizer).unwrap();
+        let expected = planned.execute(&tensors).unwrap();
+        let ir = NetworkIR::from_labels(inputs, output).unwrap();
+        let cost = DenseCostModel::from_network(
+            &ir,
+            &[
+                DenseTensorInfo::new(vec![4, 4]),
+                DenseTensorInfo::new(vec![4, 4]),
+                DenseTensorInfo::new(vec![4, 4]),
+            ],
+        )
+        .unwrap();
+        let dense = SlicedPlan::new(
+            planned.plan().clone(),
+            crate::slice_plan_for(&ir, planned.plan(), &cost, &[label("x"), label("y")]),
+        );
+        let sliced = network
+            .lower_symmetric_sliced_plan(&tensors, dense)
+            .unwrap();
+        assert_eq!(sliced.slices().nslices(), 16);
+
+        let (cold, cold_peak) = network
+            .execute_symmetric_sliced(&tensors, sliced.clone(), usize::MAX)
+            .unwrap();
+        let (warm, warm_peak) = network
+            .execute_symmetric_sliced(&tensors, sliced.clone(), usize::MAX)
+            .unwrap();
+        for actual in [&cold, &warm] {
+            assert_eq!(actual.block_count(), expected.block_count());
+            for index in 0..actual.block_count() {
+                assert_eq!(actual.block(index).unwrap(), expected.block(index).unwrap());
+            }
+            assert_eq!(actual.data(), expected.data());
+        }
+        assert_eq!(cold_peak, warm_peak);
+        assert!(cold_peak > 0);
+
+        let mut saw_late_limit = false;
+        for ceiling in 0..cold_peak {
+            SYMMETRIC_SLICE_COMPLETED_JOBS.store(0, Ordering::SeqCst);
+            if matches!(
+                network.execute_symmetric_sliced(&tensors, sliced.clone(), ceiling),
+                Err(SymmetricSliceExecutionError::WorkspaceLimitExceeded { .. })
+            ) && SYMMETRIC_SLICE_COMPLETED_JOBS.load(Ordering::SeqCst) > 0
+            {
+                saw_late_limit = true;
+                break;
+            }
+        }
+        assert!(
+            saw_late_limit,
+            "fixture must reject after a completed partial"
+        );
+    }
+
+    #[test]
+    fn internal_slice_accumulator_uses_final_contraction_authority() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let providers = [
+            Arc::new(U1FusionRule),
+            Arc::new(U1FusionRule),
+            Arc::new(U1FusionRule),
+        ];
+        let legs = providers
+            .iter()
+            .map(|provider| {
+                GradedSpace::try_new_with_arc(Arc::clone(provider), [(U1Irrep::new(0), 2)]).unwrap()
+            })
+            .collect::<Vec<_>>();
+        let tensors = legs
+            .iter()
+            .enumerate()
+            .map(|(operand, leg)| {
+                TensorMap::from_block_fn(&runtime, [leg], [leg], move |_, ij| {
+                    (1 + operand + ij[0] + (operand + 2) * ij[1]) as f64
+                })
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let inputs = vec![
+            vec![label("a"), label("x")],
+            vec![label("y"), label("c")],
+            vec![label("x"), label("y")],
+        ];
+        let output = vec![label("c"), label("a")];
+        let network = Network::new(
+            inputs.clone(),
+            vec![false; 3],
+            vec![Some(1); 3],
+            output.clone(),
+            Some(1),
+        )
+        .unwrap();
+        let order = ContractionPlan::new(
+            3,
+            output.clone(),
+            vec![
+                ContractionStep::new(
+                    TensorId::new(1),
+                    TensorId::new(2),
+                    TensorId::new(3),
+                    0,
+                    vec![label("c"), label("x")],
+                ),
+                ContractionStep::new(
+                    TensorId::new(3),
+                    TensorId::new(0),
+                    TensorId::new(4),
+                    0,
+                    output.clone(),
+                ),
+            ],
+        )
+        .unwrap();
+        let refs = tensors.iter().collect::<Vec<_>>();
+        let planned = network.plan_with(&refs, order).unwrap();
+        assert_eq!(
+            planned.schedule.steps.last().unwrap().authority_input_slot,
+            1
+        );
+        let expected = planned.execute(&refs).unwrap();
+        assert!(std::ptr::eq(expected.provider(), providers[1].as_ref()));
+
+        let ir = NetworkIR::from_labels(inputs, output).unwrap();
+        let cost = DenseCostModel::from_network(
+            &ir,
+            &[
+                DenseTensorInfo::new(vec![2, 2]),
+                DenseTensorInfo::new(vec![2, 2]),
+                DenseTensorInfo::new(vec![2, 2]),
+            ],
+        )
+        .unwrap();
+        let dense = SlicedPlan::new(
+            planned.plan().clone(),
+            crate::slice_plan_for(&ir, planned.plan(), &cost, &[label("x")]),
+        );
+        let sliced = network.lower_symmetric_sliced_plan(&refs, dense).unwrap();
+        let (actual, _) = network
+            .execute_symmetric_sliced(&refs, sliced, usize::MAX)
+            .unwrap();
+        assert_eq!(actual.data(), expected.data());
+        assert!(std::ptr::eq(actual.provider(), providers[1].as_ref()));
+        assert!(!std::ptr::eq(actual.provider(), providers[0].as_ref()));
+    }
+
+    #[test]
+    fn internal_symmetric_slice_legal_empty_returns_unsliced_zero_layout() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let provider = Arc::new(U1FusionRule);
+        let open =
+            GradedSpace::try_new_with_arc(Arc::clone(&provider), [(U1Irrep::new(0), 2)]).unwrap();
+        let empty = GradedSpace::try_new_with_arc(provider, [(U1Irrep::new(0), 0)]).unwrap();
+        let a = TensorMap::<_, f64>::zeros(&runtime, [&open], [&empty]).unwrap();
+        let b = TensorMap::<_, f64>::zeros(&runtime, [&empty], [&open]).unwrap();
+        let inputs = vec![vec![label("a"), label("x")], vec![label("x"), label("c")]];
+        let output = vec![label("a"), label("c")];
+        let network = Network::new(
+            inputs.clone(),
+            vec![false; 2],
+            vec![Some(1); 2],
+            output.clone(),
+            Some(1),
+        )
+        .unwrap();
+        let tensors = [&a, &b];
+        let planned = network.plan(&tensors, &GreedyDenseOptimizer).unwrap();
+        let expected = planned.execute(&tensors).unwrap();
+        let ir = NetworkIR::from_labels(inputs, output).unwrap();
+        let authority = ir.edge(&label("x")).unwrap().occurrences()[0];
+        let leg = typed_effective_spaces(&a, false).unwrap()[authority.axis()]
+            .network_sector_leg()
+            .clone();
+        let slices = SymmetricSlicePlan::try_new(
+            &ir,
+            U1FusionRule.rule_identity(),
+            vec![SymmetricSliceSpec::new(
+                label("x"),
+                authority,
+                leg,
+                Vec::new(),
+            )],
+        )
+        .unwrap();
+        assert_eq!(slices.nslices(), 0);
+        let (actual, peak) = network
+            .execute_symmetric_sliced(
+                &tensors,
+                SymmetricSlicedPlan::new(planned.plan().clone(), slices),
+                usize::MAX,
+            )
+            .unwrap();
+        assert_eq!(actual.block_count(), expected.block_count());
+        assert_eq!(actual.data(), expected.data());
+        assert_eq!(peak, actual.network_owned_payload().unwrap().1);
+    }
+
+    #[test]
+    fn internal_slice_maps_nonselfdual_partner_from_authority_leg() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let provider = Arc::new(U1FusionRule);
+        let plus = GradedSpace::try_new_with_arc(provider, [(U1Irrep::new(1), 2)]).unwrap();
+        let a = TensorMap::from_block_fn(&runtime, [&plus], [&plus], |_, ij| {
+            (1 + ij[0] + 2 * ij[1]) as f64
+        })
+        .unwrap();
+        let b = TensorMap::from_block_fn(&runtime, [&plus], [&plus], |_, ij| {
+            (2 + 2 * ij[0] + ij[1]) as f64
+        })
+        .unwrap();
+        let inputs = vec![vec![label("a"), label("x")], vec![label("x"), label("c")]];
+        let output = vec![label("a"), label("c")];
+        let network = Network::new(
+            inputs.clone(),
+            vec![false; 2],
+            vec![Some(1); 2],
+            output.clone(),
+            Some(1),
+        )
+        .unwrap();
+        let tensors = [&a, &b];
+        let planned = network.plan(&tensors, &GreedyDenseOptimizer).unwrap();
+        let expected = planned.execute(&tensors).unwrap();
+        let ir = NetworkIR::from_labels(inputs, output).unwrap();
+        let cost = DenseCostModel::from_network(
+            &ir,
+            &[
+                DenseTensorInfo::new(vec![2, 2]),
+                DenseTensorInfo::new(vec![2, 2]),
+            ],
+        )
+        .unwrap();
+        let dense = SlicedPlan::new(
+            planned.plan().clone(),
+            crate::slice_plan_for(&ir, planned.plan(), &cost, &[label("x")]),
+        );
+        let sliced = network
+            .lower_symmetric_sliced_plan(&tensors, dense)
+            .unwrap();
+        let authority = &sliced.slices().indices()[0];
+        assert_eq!(
+            authority.authority_leg().sectors(),
+            &[U1Irrep::new(-1).into()]
+        );
+        let (actual, _) = network
+            .execute_symmetric_sliced(&tensors, sliced, usize::MAX)
+            .unwrap();
+        assert_eq!(actual.data(), expected.data());
+    }
+
+    #[test]
+    fn output_slice_rejection_precedes_compact_input_preflight() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let provider = Arc::new(U1FusionRule);
+        let leg = GradedSpace::try_new_with_arc(provider, [(U1Irrep::new(0), 2)]).unwrap();
+        let compact = TensorMap::<_, f64>::diagonal(
+            &runtime,
+            &leg,
+            [SectorSpectrum {
+                sector: U1Irrep::new(0),
+                values: vec![1.0, 1.0],
+            }],
+        )
+        .unwrap();
+        assert!(compact.network_has_compact_payload());
+        let labels = vec![label("a"), label("b")];
+        let network = Network::new(
+            vec![labels.clone()],
+            vec![false],
+            vec![Some(1)],
+            labels.clone(),
+            Some(1),
+        )
+        .unwrap();
+        let ir = NetworkIR::from_labels(vec![labels.clone()], labels.clone()).unwrap();
+        let plan = ContractionPlan::new(1, labels, Vec::new()).unwrap();
+        let authority = ir.edge(&label("a")).unwrap().occurrences()[0];
+        let effective = typed_effective_spaces(&compact, false).unwrap();
+        let authority_leg = effective[authority.axis()].network_sector_leg().clone();
+        let sector = authority_leg.sectors()[0];
+        let slices = SymmetricSlicePlan::try_new(
+            &ir,
+            U1FusionRule.rule_identity(),
+            vec![SymmetricSliceSpec::new(
+                label("a"),
+                authority,
+                authority_leg,
+                vec![crate::SectorSlice::new(
+                    sector,
+                    crate::DegeneracyRange::new(0, 2).unwrap(),
+                )],
+            )],
+        )
+        .unwrap();
+        assert!(matches!(
+            network.execute_symmetric_sliced(
+                &[&compact],
+                SymmetricSlicedPlan::new(plan, slices),
+                usize::MAX,
+            ),
+            Err(SymmetricSliceExecutionError::OutputSlice { .. })
+        ));
+        let empty =
+            SymmetricSlicePlan::try_new(&ir, U1FusionRule.rule_identity(), Vec::new()).unwrap();
+        assert!(matches!(
+            network.execute_symmetric_sliced(
+                &[&compact],
+                SymmetricSlicedPlan::new(
+                    ContractionPlan::new(1, vec![label("a"), label("b")], Vec::new()).unwrap(),
+                    empty,
+                ),
+                usize::MAX,
+            ),
+            Err(SymmetricSliceExecutionError::Tensor(_))
+        ));
+    }
+
+    fn assert_fermionic_internal_slice<D>()
+    where
+        D: TensorScalar + PartialEq + std::fmt::Debug,
+    {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let provider = Arc::new(FermionParityFusionRule);
+        let odd = GradedSpace::try_new_with_arc(provider, [(Z2Irrep::ODD, 2)]).unwrap();
+        let a = TensorMap::from_block_fn(&runtime, [&odd], [&odd], |_, ij| {
+            D::from_real((1 + ij[0] + 2 * ij[1]) as f64)
+        })
+        .unwrap();
+        let b = TensorMap::from_block_fn(&runtime, [&odd], [&odd], |_, ij| {
+            D::from_real((2 + 2 * ij[0] + ij[1]) as f64)
+        })
+        .unwrap();
+        let inputs = vec![vec![label("a"), label("x")], vec![label("x"), label("c")]];
+        let output = vec![label("a"), label("c")];
+        let network = Network::new(
+            inputs.clone(),
+            vec![false; 2],
+            vec![Some(1); 2],
+            output.clone(),
+            Some(1),
+        )
+        .unwrap();
+        let tensors = [&a, &b];
+        let planned = network.plan(&tensors, &GreedyDenseOptimizer).unwrap();
+        let expected = planned.execute(&tensors).unwrap();
+        let ir = NetworkIR::from_labels(inputs, output).unwrap();
+        let cost = DenseCostModel::from_network(
+            &ir,
+            &[
+                DenseTensorInfo::new(vec![2, 2]),
+                DenseTensorInfo::new(vec![2, 2]),
+            ],
+        )
+        .unwrap();
+        let dense = SlicedPlan::new(
+            planned.plan().clone(),
+            crate::slice_plan_for(&ir, planned.plan(), &cost, &[label("x")]),
+        );
+        let sliced = network
+            .lower_symmetric_sliced_plan(&tensors, dense)
+            .unwrap();
+        let (actual, _) = network
+            .execute_symmetric_sliced(&tensors, sliced, usize::MAX)
+            .unwrap();
+        assert_eq!(actual.data(), expected.data());
+    }
+
+    #[test]
+    fn fermionic_internal_slices_match_unsliced_real_and_complex() {
+        assert_fermionic_internal_slice::<f64>();
+        assert_fermionic_internal_slice::<Complex64>();
+    }
+
+    #[test]
+    fn fermionic_complex_conjugated_operand_internal_slice_matches_unsliced() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let provider = Arc::new(FermionParityFusionRule);
+        let odd = GradedSpace::try_new_with_arc(provider, [(Z2Irrep::ODD, 2)]).unwrap();
+        let a = TensorMap::from_block_fn(&runtime, [&odd], [&odd], |_, ij| {
+            Complex64::new(
+                (1 + ij[0] + 2 * ij[1]) as f64,
+                (2 + 3 * ij[0] + ij[1]) as f64,
+            )
+        })
+        .unwrap();
+        let b = TensorMap::from_block_fn(&runtime, [&odd], [&odd], |_, ij| {
+            Complex64::new(
+                (2 + 2 * ij[0] + ij[1]) as f64,
+                -((1 + ij[0] + 4 * ij[1]) as f64),
+            )
+        })
+        .unwrap();
+
+        // The first operand is written as [x; a]. Network lowering rotates it
+        // to the effective adjoint order [a; x], so x is the sliced contracted
+        // leg. Nonzero imaginary parts make a missed conjugation observable.
+        let written_inputs = vec![vec![label("x"), label("a")], vec![label("x"), label("c")]];
+        let effective_inputs = vec![vec![label("a"), label("x")], vec![label("x"), label("c")]];
+        let output = vec![label("a"), label("c")];
+        let network = Network::new(
+            written_inputs,
+            vec![true, false],
+            vec![Some(1); 2],
+            output.clone(),
+            Some(1),
+        )
+        .unwrap();
+        let tensors = [&a, &b];
+        let planned = network.plan(&tensors, &GreedyDenseOptimizer).unwrap();
+        let expected = planned.execute(&tensors).unwrap();
+        let ir = NetworkIR::from_labels(effective_inputs, output).unwrap();
+        let cost = DenseCostModel::from_network(
+            &ir,
+            &[
+                DenseTensorInfo::new(vec![2, 2]),
+                DenseTensorInfo::new(vec![2, 2]),
+            ],
+        )
+        .unwrap();
+        let dense = SlicedPlan::new(
+            planned.plan().clone(),
+            crate::slice_plan_for(&ir, planned.plan(), &cost, &[label("x")]),
+        );
+        let sliced = network
+            .lower_symmetric_sliced_plan(&tensors, dense)
+            .unwrap();
+        let (actual, _) = network
+            .execute_symmetric_sliced(&tensors, sliced, usize::MAX)
+            .unwrap();
+        assert_eq!(actual.data(), expected.data());
+        assert!(actual.data().iter().any(|value| value.im != 0.0));
     }
 
     fn crossed_plan() -> PlannedNetwork {

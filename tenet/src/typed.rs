@@ -289,6 +289,15 @@ pub trait TensorScalar: ScalarOps {}
 impl TensorScalar for f64 {}
 impl TensorScalar for num_complex::Complex64 {}
 
+/// One tensor-local restriction used by the internal network slice executor.
+#[doc(hidden)]
+pub struct NetworkDegeneracyRestriction {
+    pub effective_axis: usize,
+    pub authority_sector: SectorId,
+    pub range: std::ops::Range<usize>,
+    pub partner: bool,
+}
+
 /// Internal scalar operations shared by typed tensor execution.
 pub(crate) trait ScalarOps:
     FactorScalar + tenet_tensors::RecouplingCoefficientAction<f64>
@@ -1483,6 +1492,63 @@ where
     R: TypedSectorAdmission,
     D: TensorScalar,
 {
+    /// Adds every source block into the matching destination block. This is
+    /// the internal accumulation leaf for an unsliced zero destination and a
+    /// structurally smaller internal-slice partial.
+    #[doc(hidden)]
+    pub fn network_add_subset_assign(&mut self, source: &Self) -> Result<(), Error> {
+        if !self.runtime.same_runtime(&source.runtime) {
+            return Err(Error::RuntimeMismatch);
+        }
+        let destination_space = self.logical_space().space();
+        let source_space = source.logical_space().space();
+        if destination_space.nout() != source_space.nout()
+            || destination_space.nin() != source_space.nin()
+            || destination_space.admission().rule_identity()
+                != source_space.admission().rule_identity()
+        {
+            return Err(Error::InvalidArgument(
+                "network slice partial does not match accumulator rank/rule".to_string(),
+            ));
+        }
+        let TypedTensorRepr::Owned(source_body) = &source.repr else {
+            return Err(Error::InvalidArgument(
+                "network slice partial must be direct owned".to_string(),
+            ));
+        };
+        let TypedData::Dense(source_data) = source_body.data.as_ref() else {
+            return Err(Error::InvalidArgument(
+                "network slice partial must have dense payload".to_string(),
+            ));
+        };
+        let destination_structure = destination_space.structure().clone();
+        let source_structure = source_space.structure();
+        let TypedTensorRepr::Owned(destination_body) = &mut self.repr else {
+            return Err(Error::InvalidArgument(
+                "network slice accumulator must be direct owned".to_string(),
+            ));
+        };
+        let destination_body = Arc::get_mut(destination_body).ok_or_else(|| {
+            Error::InvalidArgument("network slice accumulator payload is shared".to_string())
+        })?;
+        let TypedData::Dense(destination_data) = Arc::get_mut(&mut destination_body.data)
+            .ok_or_else(|| {
+                Error::InvalidArgument("network slice accumulator data is shared".to_string())
+            })?
+        else {
+            return Err(Error::InvalidArgument(
+                "network slice accumulator must have dense payload".to_string(),
+            ));
+        };
+        tenet_tensors::fusion_subset_add_assign(
+            &destination_structure,
+            destination_data,
+            source_structure,
+            source_data,
+        )
+        .map_err(Error::from)
+    }
+
     /// TensorKit 0.17 `sqrt(::DiagonalTensorMap)`: the elementwise principal
     /// square root of a diagonal bond tensor, `√s_i` on each diagonal entry, so
     /// that `√t · √t = t`. This is the idiom that splits singular values in
@@ -11142,6 +11208,235 @@ where
         }
     }
 
+    /// Restricts tensor-local logical degeneracy coordinates for network
+    /// slicing without exposing provider allocation or storage orientation.
+    ///
+    /// `SectorId` is safe here only as an immediately validated, tensor-local
+    /// argument: the authority id is decoded by this tensor's provider, dualized
+    /// exactly once for a partner occurrence, and checked against the actual
+    /// effective leg before any destination is allocated.
+    #[doc(hidden)]
+    pub fn network_restrict_degeneracies(
+        &self,
+        adjoint: bool,
+        restrictions: &[NetworkDegeneracyRestriction],
+    ) -> Result<Self, TypedFacadeError<R>>
+    where
+        R: TypedSectorAdmission,
+        R::Mode: TypedTensorRootDispatch<R>,
+    {
+        if matches!(
+            &self.repr,
+            TypedTensorRepr::Owned(body) if matches!(body.data.as_ref(), TypedData::Diagonal(_))
+        ) || matches!(
+            &self.repr,
+            TypedTensorRepr::Adjoint(view) if matches!(view.parent.data.as_ref(), TypedData::Diagonal(_))
+        ) {
+            return Err(Error::InvalidArgument(
+                "network degeneracy restriction requires dense Host payloads".to_string(),
+            )
+            .into());
+        }
+        let rank = self.rank();
+        let codomain_rank = self.codomain_rank();
+        let domain_rank = self.domain_rank();
+        let homspace = self.logical_space().space().homspace();
+        let mut seen = vec![false; rank];
+        let mut staged = Vec::with_capacity(restrictions.len());
+
+        // Validate the complete request before deriving a layout or allocating
+        // payload. In particular, callers never reconstruct dual-sector ids.
+        for restriction in restrictions {
+            let NetworkDegeneracyRestriction {
+                effective_axis,
+                authority_sector,
+                range,
+                partner,
+            } = restriction;
+            if *effective_axis >= rank || seen[*effective_axis] {
+                return Err(Error::InvalidArgument(format!(
+                    "invalid or duplicate effective restriction axis {effective_axis} for rank {rank}"
+                ))
+                .into());
+            }
+            seen[*effective_axis] = true;
+            if range.start >= range.end {
+                return Err(Error::InvalidArgument(format!(
+                    "degeneracy restriction must be nonempty, got [{}, {})",
+                    range.start, range.end
+                ))
+                .into());
+            }
+            TypedSectorAdmission::try_decode_label(self.provider(), *authority_sector)
+                .map_err(<R::Mode as TypedTensorModeDispatch<R>>::map_provider_error)?;
+            let effective_sector = if *partner {
+                TypedSectorAdmission::try_dual_id(self.provider(), *authority_sector)
+                    .map_err(<R::Mode as TypedTensorModeDispatch<R>>::map_provider_error)?
+            } else {
+                *authority_sector
+            };
+
+            let (logical_axis, dualized) = if adjoint {
+                if *effective_axis < domain_rank {
+                    (codomain_rank + *effective_axis, false)
+                } else {
+                    (*effective_axis - domain_rank, true)
+                }
+            } else if *effective_axis < codomain_rank {
+                (*effective_axis, false)
+            } else {
+                (*effective_axis, true)
+            };
+            let logical_sector = if dualized {
+                TypedSectorAdmission::try_dual_id(self.provider(), effective_sector)
+                    .map_err(<R::Mode as TypedTensorModeDispatch<R>>::map_provider_error)?
+            } else {
+                effective_sector
+            };
+            let logical_leg = if logical_axis < codomain_rank {
+                &homspace.codomain().legs()[logical_axis]
+            } else {
+                &homspace.domain().legs()[logical_axis - codomain_rank]
+            };
+            let degeneracy = logical_leg.degeneracy(logical_sector).ok_or_else(|| {
+                TypedFacadeError::<R>::from(Error::InvalidArgument(format!(
+                    "sector {effective_sector:?} is absent from effective axis {effective_axis}"
+                )))
+            })?;
+            if range.end > degeneracy {
+                return Err(Error::InvalidArgument(format!(
+                    "degeneracy restriction [{}, {}) exceeds axis {effective_axis} sector {effective_sector:?} degeneracy {degeneracy}",
+                    range.start, range.end
+                ))
+                .into());
+            }
+            staged.push((
+                logical_axis,
+                logical_sector,
+                range.start,
+                range.end - range.start,
+            ));
+        }
+
+        let restricted_product = |product: &FusionProductSpace, axis_base: usize| {
+            product
+                .legs()
+                .iter()
+                .enumerate()
+                .map(|(axis, leg)| {
+                    let logical_axis = axis_base + axis;
+                    if let Some((_, sector, _, extent)) = staged
+                        .iter()
+                        .find(|(candidate, ..)| *candidate == logical_axis)
+                    {
+                        SectorLeg::try_new([(*sector, *extent)], leg.is_dual()).map_err(|error| {
+                            TypedFacadeError::<R>::from(Error::InvalidArgument(error.to_string()))
+                        })
+                    } else {
+                        Ok(leg.clone())
+                    }
+                })
+                .collect::<Result<Vec<_>, TypedFacadeError<R>>>()
+                .map(FusionProductSpace::new)
+        };
+        let restricted_homspace = FusionTreeHomSpace::new(
+            restricted_product(homspace.codomain(), 0)?,
+            restricted_product(homspace.domain(), codomain_rank)?,
+        );
+        let destination = <R::Mode as TypedTensorRootDispatch<R>>::build_root(
+            Arc::clone(self.logical_space().provider_arc()),
+            restricted_homspace,
+        )?;
+        let len = destination
+            .space()
+            .required_len()
+            .map_err(Error::from)
+            .map_err(TypedFacadeError::<R>::from)?;
+        let mut data = vec![D::from_real(0.0); len];
+        let mut starts = vec![0; rank];
+        for &(axis, _, start, _) in &staged {
+            starts[axis] = start;
+        }
+        let (source, source_data) = self.fusion_operand_and_data();
+        tenet_tensors::oriented_fusion_restrict_into(
+            destination.space().structure(),
+            &mut data,
+            source,
+            source_data,
+            &starts,
+        )
+        .map_err(Error::from)?;
+        Ok(Self {
+            runtime: self.runtime.clone(),
+            repr: owned_repr(TypedTensorBody::dense(destination, data)),
+        })
+    }
+
+    /// Identity and capacity of the dense payload allocation owned by this
+    /// Host tensor. Network metering uses the identity to avoid charging Arc
+    /// aliases twice.
+    #[doc(hidden)]
+    pub fn network_owned_payload(&self) -> Option<(usize, usize)> {
+        let body = self.storage_body();
+        let TypedData::Dense(data) = body.data.as_ref() else {
+            return None;
+        };
+        Some((
+            Arc::as_ptr(&body.data) as usize,
+            data.capacity().saturating_mul(std::mem::size_of::<D>()),
+        ))
+    }
+
+    #[doc(hidden)]
+    pub fn network_has_compact_payload(&self) -> bool {
+        matches!(self.storage_body().data.as_ref(), TypedData::Diagonal(_))
+    }
+
+    #[doc(hidden)]
+    pub fn network_zeros_from_effective_legs(
+        &self,
+        codomain: &[GradedSpace<R>],
+        domain: &[GradedSpace<R>],
+    ) -> Result<Self, TypedFacadeError<R>>
+    where
+        R: TypedSectorAdmission,
+        R::Mode: TypedTensorRootDispatch<R>,
+    {
+        let identity = TypedSectorAdmission::typed_rule_identity(self.provider());
+        if codomain
+            .iter()
+            .chain(domain)
+            .any(|leg| TypedSectorAdmission::typed_rule_identity(leg.provider()) != identity)
+        {
+            return Err(Error::RuleMismatch.into());
+        }
+        let raw_domain = domain
+            .iter()
+            .map(GradedSpace::try_dual)
+            .collect::<Result<Vec<_>, _>>()?;
+        let homspace = FusionTreeHomSpace::new(
+            FusionProductSpace::new(codomain.iter().map(|leg| leg.network_sector_leg().clone())),
+            FusionProductSpace::new(
+                raw_domain
+                    .iter()
+                    .map(|leg| leg.network_sector_leg().clone()),
+            ),
+        );
+        let space = <R::Mode as TypedTensorRootDispatch<R>>::build_root(
+            Arc::clone(self.logical_space().provider_arc()),
+            homspace,
+        )?;
+        let len = space
+            .space()
+            .required_len()
+            .map_err(Error::from)
+            .map_err(TypedFacadeError::<R>::from)?;
+        Ok(Self {
+            runtime: self.runtime.clone(),
+            repr: owned_repr(TypedTensorBody::dense(space, vec![D::from_real(0.0); len])),
+        })
+    }
+
     fn cat_operand(&self) -> Result<(CatOperandLayout<'_>, &[D]), Error> {
         match &self.repr {
             TypedTensorRepr::Owned(body) => Ok((
@@ -16544,6 +16839,148 @@ mod representation_gates {
             indices.iter().sum::<usize>() as f64 + 1.0
         })
         .unwrap()
+    }
+
+    #[test]
+    fn network_degeneracy_restriction_copies_nonprefix_rectangles_and_lazy_adjoint() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let provider = Arc::new(U1FusionRule);
+        let zero = U1Irrep::new(0);
+        let rows = GradedSpace::try_new_with_arc(Arc::clone(&provider), [(zero, 3)]).unwrap();
+        let columns = GradedSpace::try_new_with_arc(Arc::clone(&provider), [(zero, 4)]).unwrap();
+        let source = TensorMap::from_block_fn(&runtime, [&rows], [&columns], |_, indices| {
+            (indices[0] + 10 * indices[1]) as f64
+        })
+        .unwrap();
+        let zero_id = TypedSectorAdmission::try_encode_label(provider.as_ref(), &zero).unwrap();
+
+        let direct = source
+            .network_restrict_degeneracies(
+                false,
+                &[
+                    NetworkDegeneracyRestriction {
+                        effective_axis: 0,
+                        authority_sector: zero_id,
+                        range: 1..3,
+                        partner: false,
+                    },
+                    NetworkDegeneracyRestriction {
+                        effective_axis: 1,
+                        authority_sector: zero_id,
+                        range: 2..4,
+                        partner: false,
+                    },
+                ],
+            )
+            .unwrap();
+        assert_eq!(direct.data(), &[21.0, 22.0, 31.0, 32.0]);
+        assert!(Arc::ptr_eq(
+            direct.logical_space().provider_arc(),
+            &provider
+        ));
+
+        let lazy = source.adjoint().unwrap();
+        let restricted = lazy
+            .network_restrict_degeneracies(
+                false,
+                &[
+                    NetworkDegeneracyRestriction {
+                        effective_axis: 0,
+                        authority_sector: zero_id,
+                        range: 1..3,
+                        partner: false,
+                    },
+                    NetworkDegeneracyRestriction {
+                        effective_axis: 1,
+                        authority_sector: zero_id,
+                        range: 1..3,
+                        partner: false,
+                    },
+                ],
+            )
+            .unwrap();
+        assert_eq!(restricted.data(), &[11.0, 21.0, 12.0, 22.0]);
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+    }
+
+    #[test]
+    fn network_degeneracy_restriction_maps_effective_nonselfdual_domain_sector() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let provider = Arc::new(U1FusionRule);
+        let plus = U1Irrep::new(1);
+        let space = GradedSpace::try_new_with_arc(Arc::clone(&provider), [(plus, 3)]).unwrap();
+        let source = TensorMap::from_block_fn(&runtime, [&space], [&space], |_, indices| {
+            (indices[0] + 10 * indices[1]) as f64
+        })
+        .unwrap();
+        let plus_id = TypedSectorAdmission::try_encode_label(provider.as_ref(), &plus).unwrap();
+        let restricted = source
+            .network_restrict_degeneracies(
+                false,
+                &[
+                    NetworkDegeneracyRestriction {
+                        effective_axis: 0,
+                        authority_sector: plus_id,
+                        range: 1..3,
+                        partner: false,
+                    },
+                    NetworkDegeneracyRestriction {
+                        effective_axis: 1,
+                        authority_sector: plus_id,
+                        range: 1..3,
+                        partner: true,
+                    },
+                ],
+            )
+            .unwrap();
+        assert_eq!(restricted.data(), &[11.0, 12.0, 21.0, 22.0]);
+    }
+
+    #[test]
+    fn network_degeneracy_restriction_conjugates_complex_lazy_adjoint() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let provider = Arc::new(U1FusionRule);
+        let zero = U1Irrep::new(0);
+        let rows = GradedSpace::try_new_with_arc(Arc::clone(&provider), [(zero, 2)]).unwrap();
+        let columns = GradedSpace::try_new_with_arc(Arc::clone(&provider), [(zero, 3)]).unwrap();
+        let source = TensorMap::from_block_fn(&runtime, [&rows], [&columns], |_, indices| {
+            Complex64::new(
+                indices[0] as f64 + 10.0 * indices[1] as f64,
+                indices[1] as f64 + 1.0,
+            )
+        })
+        .unwrap();
+        let sector = TypedSectorAdmission::try_encode_label(provider.as_ref(), &zero).unwrap();
+        let lazy = source.adjoint().unwrap();
+        let restricted = lazy
+            .network_restrict_degeneracies(
+                false,
+                &[
+                    NetworkDegeneracyRestriction {
+                        effective_axis: 0,
+                        authority_sector: sector,
+                        range: 1..3,
+                        partner: false,
+                    },
+                    NetworkDegeneracyRestriction {
+                        effective_axis: 1,
+                        authority_sector: sector,
+                        range: 0..2,
+                        partner: false,
+                    },
+                ],
+            )
+            .unwrap();
+        assert_eq!(
+            restricted.data(),
+            &[
+                Complex64::new(10.0, -2.0),
+                Complex64::new(20.0, -3.0),
+                Complex64::new(11.0, -2.0),
+                Complex64::new(21.0, -3.0),
+            ]
+        );
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
     }
 
     #[test]

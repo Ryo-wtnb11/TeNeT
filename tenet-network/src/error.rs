@@ -72,6 +72,16 @@ pub enum SymmetricSliceLowerError<E> {
     },
 }
 
+/// Failure while binding or executing an internal symmetric sliced plan.
+#[derive(Debug)]
+pub enum SymmetricSliceExecutionError<E> {
+    Bind(SymmetricSliceLowerError<E>),
+    Tensor(E),
+    OutputSlice { label: TemporaryLabel },
+    WorkspaceLimitExceeded { limit: usize, required: usize },
+    WorkspaceArithmeticOverflow,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContractError {
     EmptyEquation,
@@ -340,3 +350,25 @@ where
         }
     }
 }
+
+impl<E: Display> Display for SymmetricSliceExecutionError<E> {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Bind(error) => write!(formatter, "symmetric slice binding failed: {error}"),
+            Self::Tensor(error) => write!(formatter, "symmetric slice execution failed: {error}"),
+            Self::OutputSlice { label } => write!(
+                formatter,
+                "output slice `{label}` is unsupported by the internal-slice executor"
+            ),
+            Self::WorkspaceLimitExceeded { limit, required } => write!(
+                formatter,
+                "symmetric sliced execution observed {required} network-owned payload bytes, measured ceiling is {limit}"
+            ),
+            Self::WorkspaceArithmeticOverflow => {
+                write!(formatter, "symmetric sliced workspace byte count overflowed")
+            }
+        }
+    }
+}
+
+impl<E> std::error::Error for SymmetricSliceExecutionError<E> where E: std::error::Error + 'static {}
