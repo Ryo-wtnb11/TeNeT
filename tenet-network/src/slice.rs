@@ -14,10 +14,12 @@
 
 use std::collections::{BTreeSet, HashMap};
 
+use tenet::core::{SectorId, SectorLeg};
+
 use crate::cost::DenseCostModel;
-use crate::error::{ContractError, Result};
+use crate::error::{ContractError, Result, SliceError, SliceResult};
 use crate::ir::NetworkIR;
-use crate::labels::TemporaryLabel;
+use crate::labels::{TemporaryLabel, TensorAxis};
 use crate::plan::ContractionPlan;
 
 const SLICE_PLAN_HEADER: &str = "tenet-slice-plan-v1";
@@ -30,7 +32,7 @@ const SLICE_PLAN_HEADER: &str = "tenet-slice-plan-v1";
 /// (each per-slice partial lands in a different output coordinate). A sliced
 /// executor uses this to recombine partials correctly (e.g. the new-core
 /// a sliced executor, which sums internal slices).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SliceKind {
     /// Contracted index: partials are summed.
     Internal,
@@ -57,6 +59,290 @@ impl SliceKind {
             ))),
         }
     }
+}
+
+// Checked symmetric slicing schema. This is deliberately separate from the
+// dense planner's SlicePlan: it is an executable semantic partition, not a
+// cost estimate or a persistent wire format.
+
+/// A nonempty half-open range of degeneracy coordinates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DegeneracyRange {
+    start: usize,
+    end: usize,
+}
+
+impl DegeneracyRange {
+    pub fn new(start: usize, end: usize) -> SliceResult<Self> {
+        if start == end {
+            return Err(SliceError::EmptyRange { at: start });
+        }
+        if start > end {
+            return Err(SliceError::ReversedRange { start, end });
+        }
+        Ok(Self { start, end })
+    }
+
+    pub fn start(self) -> usize {
+        self.start
+    }
+
+    pub fn end(self) -> usize {
+        self.end
+    }
+}
+
+/// One sector-local piece of a symmetric index partition.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SectorSlice {
+    sector: SectorId,
+    range: DegeneracyRange,
+}
+
+impl SectorSlice {
+    pub fn new(sector: SectorId, range: DegeneracyRange) -> Self {
+        Self { sector, range }
+    }
+
+    pub fn sector(&self) -> SectorId {
+        self.sector
+    }
+
+    pub fn range(&self) -> DegeneracyRange {
+        self.range
+    }
+}
+
+/// Unvalidated input for one expression label.
+///
+/// `authority` identifies the canonical outward leg: the first effective
+/// occurrence after typed lowering has applied adjoint rotation and represented
+/// domain legs as dual objects. The partner of an internal non-self-dual edge
+/// is interpreted through the already-validated dual space; it is not a second
+/// raw sector id in this descriptor.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SymmetricSliceSpec {
+    label: TemporaryLabel,
+    authority: TensorAxis,
+    authority_leg: SectorLeg,
+    pieces: Vec<SectorSlice>,
+}
+
+impl SymmetricSliceSpec {
+    pub fn new(
+        label: TemporaryLabel,
+        authority: TensorAxis,
+        authority_leg: SectorLeg,
+        pieces: Vec<SectorSlice>,
+    ) -> Self {
+        Self {
+            label,
+            authority,
+            authority_leg,
+            pieces,
+        }
+    }
+}
+
+/// One validated, canonically ordered symmetric index partition.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SymmetricIndexSlice {
+    label: TemporaryLabel,
+    output_position: Option<usize>,
+    authority: TensorAxis,
+    authority_leg: SectorLeg,
+    pieces: Vec<SectorSlice>,
+}
+
+impl SymmetricIndexSlice {
+    pub fn label(&self) -> &TemporaryLabel {
+        &self.label
+    }
+
+    pub fn kind(&self) -> SliceKind {
+        if self.output_position.is_some() {
+            SliceKind::Output
+        } else {
+            SliceKind::Internal
+        }
+    }
+
+    /// Requested output-axis position, or `None` for a contracted label.
+    pub fn output_position(&self) -> Option<usize> {
+        self.output_position
+    }
+
+    pub fn authority(&self) -> TensorAxis {
+        self.authority
+    }
+
+    pub fn authority_leg(&self) -> &SectorLeg {
+        &self.authority_leg
+    }
+
+    pub fn pieces(&self) -> &[SectorSlice] {
+        &self.pieces
+    }
+}
+
+/// Checked, planner-neutral symmetric slicing semantics.
+///
+/// Pieces exactly partition every nonzero sector of each authority leg.
+/// Labels and pieces are canonicalized without merging adjacent ranges, and
+/// combinations enumerate lexicographically with the last label varying
+/// fastest. An empty authority leg yields zero combinations; no sliced labels
+/// yields one.
+///
+/// This schema is coefficient-free. It only restricts degeneracy coordinates:
+/// fusion-tree order, block order, structural zeros, braiding/fermionic signs,
+/// layouts, and storage offsets remain untouched and owned by their existing
+/// lowering and execution layers. `SectorId` is process-local here and must not
+/// be serialized as a semantic sector label.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SymmetricSlicePlan {
+    indices: Vec<SymmetricIndexSlice>,
+    nslices: u128,
+}
+
+impl SymmetricSlicePlan {
+    /// Validate all inputs before publishing a plan.
+    pub fn try_new(ir: &NetworkIR, specs: Vec<SymmetricSliceSpec>) -> SliceResult<Self> {
+        let mut seen = BTreeSet::new();
+        let mut indices = Vec::with_capacity(specs.len());
+
+        for spec in specs {
+            if !seen.insert(spec.label.clone()) {
+                return Err(SliceError::DuplicateLabel(spec.label));
+            }
+            let edge = ir
+                .edge(&spec.label)
+                .ok_or_else(|| SliceError::UnknownLabel(spec.label.clone()))?;
+            let expected = edge.occurrences()[0];
+            if spec.authority != expected {
+                return Err(SliceError::InvalidAuthority {
+                    label: spec.label,
+                    expected,
+                    actual: spec.authority,
+                });
+            }
+
+            let mut pieces = spec.pieces;
+            pieces.sort();
+            validate_partition(&spec.label, &spec.authority_leg, &pieces)?;
+            indices.push(SymmetricIndexSlice {
+                label: spec.label,
+                output_position: edge.output_position(),
+                authority: spec.authority,
+                authority_leg: spec.authority_leg,
+                pieces,
+            });
+        }
+
+        indices.sort_by(|left, right| left.label.cmp(&right.label));
+        let nslices = checked_slice_count(indices.iter().map(|index| index.pieces.len() as u128))?;
+        Ok(Self { indices, nslices })
+    }
+
+    pub fn indices(&self) -> &[SymmetricIndexSlice] {
+        &self.indices
+    }
+
+    pub fn nslices(&self) -> u128 {
+        self.nslices
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.indices.is_empty()
+    }
+
+    pub fn combination(&self, ordinal: u128) -> Option<Vec<&SectorSlice>> {
+        if ordinal >= self.nslices {
+            return None;
+        }
+        let mut residual = ordinal;
+        let mut selected = Vec::with_capacity(self.indices.len());
+        for index in self.indices.iter().rev() {
+            let radix = index.pieces.len() as u128;
+            selected.push(&index.pieces[(residual % radix) as usize]);
+            residual /= radix;
+        }
+        selected.reverse();
+        Some(selected)
+    }
+
+    pub fn combinations(&self) -> impl Iterator<Item = Vec<&SectorSlice>> {
+        (0..self.nslices).map(|ordinal| {
+            self.combination(ordinal)
+                .expect("ordinal is bounded by the validated slice count")
+        })
+    }
+}
+
+fn checked_slice_count(counts: impl IntoIterator<Item = u128>) -> SliceResult<u128> {
+    let mut product = Some(1u128);
+    for count in counts {
+        if count == 0 {
+            return Ok(0);
+        }
+        product = product.and_then(|product| product.checked_mul(count));
+    }
+    product.ok_or(SliceError::SliceCountOverflow)
+}
+
+fn validate_partition(
+    label: &TemporaryLabel,
+    leg: &SectorLeg,
+    pieces: &[SectorSlice],
+) -> SliceResult<()> {
+    for piece in pieces {
+        let Some(degeneracy) = leg.degeneracy(piece.sector) else {
+            return Err(SliceError::UnknownSector {
+                label: label.clone(),
+                sector: piece.sector,
+            });
+        };
+        if piece.range.end > degeneracy {
+            return Err(SliceError::RangeOutOfBounds {
+                label: label.clone(),
+                sector: piece.sector,
+                start: piece.range.start,
+                end: piece.range.end,
+                degeneracy,
+            });
+        }
+    }
+
+    for (sector, degeneracy) in leg.iter() {
+        let mut cursor = 0;
+        for piece in pieces.iter().filter(|piece| piece.sector == sector) {
+            if piece.range.start < cursor {
+                return Err(SliceError::OverlappingRanges {
+                    label: label.clone(),
+                    sector,
+                    previous_end: cursor,
+                    next_start: piece.range.start,
+                });
+            }
+            if piece.range.start > cursor {
+                return Err(SliceError::IncompleteCoverage {
+                    label: label.clone(),
+                    sector,
+                    expected_start: cursor,
+                    actual_start: piece.range.start,
+                });
+            }
+            cursor = piece.range.end;
+        }
+        if cursor != degeneracy {
+            return Err(SliceError::IncompleteCoverage {
+                label: label.clone(),
+                sector,
+                expected_start: cursor,
+                actual_start: degeneracy,
+            });
+        }
+    }
+    Ok(())
 }
 
 /// The set of indices to slice plus summary cost metrics.
@@ -737,6 +1023,15 @@ mod tests {
     use super::*;
     use crate::parse::parse_einsum;
     use crate::{ActivePair, DenseTensorInfo};
+
+    #[test]
+    fn symmetric_slice_count_overflow_is_typed() {
+        assert_eq!(
+            checked_slice_count([u128::MAX, 2]),
+            Err(SliceError::SliceCountOverflow)
+        );
+        assert_eq!(checked_slice_count([u128::MAX, 2, 0]), Ok(0));
+    }
 
     fn chain_abc(
         a: usize,

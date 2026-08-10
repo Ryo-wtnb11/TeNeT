@@ -1,5 +1,54 @@
 use std::fmt::{Display, Formatter};
 
+use tenet::core::SectorId;
+
+use crate::labels::{TemporaryLabel, TensorAxis};
+
+/// Validation failures for coefficient-free symmetric slicing descriptors.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SliceError {
+    EmptyRange {
+        at: usize,
+    },
+    ReversedRange {
+        start: usize,
+        end: usize,
+    },
+    UnknownLabel(TemporaryLabel),
+    DuplicateLabel(TemporaryLabel),
+    InvalidAuthority {
+        label: TemporaryLabel,
+        expected: TensorAxis,
+        actual: TensorAxis,
+    },
+    UnknownSector {
+        label: TemporaryLabel,
+        sector: SectorId,
+    },
+    RangeOutOfBounds {
+        label: TemporaryLabel,
+        sector: SectorId,
+        start: usize,
+        end: usize,
+        degeneracy: usize,
+    },
+    OverlappingRanges {
+        label: TemporaryLabel,
+        sector: SectorId,
+        previous_end: usize,
+        next_start: usize,
+    },
+    IncompleteCoverage {
+        label: TemporaryLabel,
+        sector: SectorId,
+        expected_start: usize,
+        actual_start: usize,
+    },
+    SliceCountOverflow,
+}
+
+pub type SliceResult<T> = std::result::Result<T, SliceError>;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContractError {
     EmptyEquation,
@@ -144,3 +193,58 @@ impl Display for ContractError {
 }
 
 impl std::error::Error for ContractError {}
+
+impl Display for SliceError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EmptyRange { at } => write!(f, "empty degeneracy range at {at}"),
+            Self::ReversedRange { start, end } => {
+                write!(f, "reversed degeneracy range [{start}, {end})")
+            }
+            Self::UnknownLabel(label) => write!(f, "unknown sliced label `{label}`"),
+            Self::DuplicateLabel(label) => write!(f, "duplicate sliced label `{label}`"),
+            Self::InvalidAuthority {
+                label,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "invalid authority for `{label}`: expected {expected:?}, got {actual:?}"
+            ),
+            Self::UnknownSector { label, sector } => {
+                write!(f, "unknown sector {sector:?} for sliced label `{label}`")
+            }
+            Self::RangeOutOfBounds {
+                label,
+                sector,
+                start,
+                end,
+                degeneracy,
+            } => write!(
+                f,
+                "range [{start}, {end}) for `{label}` sector {sector:?} exceeds degeneracy {degeneracy}"
+            ),
+            Self::OverlappingRanges {
+                label,
+                sector,
+                previous_end,
+                next_start,
+            } => write!(
+                f,
+                "ranges for `{label}` sector {sector:?} overlap at {next_start} before {previous_end}"
+            ),
+            Self::IncompleteCoverage {
+                label,
+                sector,
+                expected_start,
+                actual_start,
+            } => write!(
+                f,
+                "incomplete coverage for `{label}` sector {sector:?}: expected next boundary {expected_start}, got {actual_start}"
+            ),
+            Self::SliceCountOverflow => write!(f, "symmetric slice count exceeds u128"),
+        }
+    }
+}
+
+impl std::error::Error for SliceError {}
