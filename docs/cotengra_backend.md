@@ -57,9 +57,11 @@ tenet-network = { path = "...", features = ["cotengra-python"] }
 
 ```rust
 use tenet::prelude::{CotengraPythonConfig, Optimizer, PlanCacheConfig};
+use std::time::Duration;
 
 let optimizer = Optimizer::CotengraPython(
-    CotengraPythonConfig::with_uv_project("tools/cotengra-python"),
+    CotengraPythonConfig::with_uv_project("tools/cotengra-python")
+        .timeout(Duration::from_secs(120)),
 );
 let rt = Runtime::builder()
     .plan_cache(PlanCacheConfig { optimizer, ..Default::default() })
@@ -80,6 +82,11 @@ parent — so it works regardless of the caller's CWD (a downstream crate does
 `Hyper`), `minimize` (flops / size / …), `max_repeats`, `seed`, and a
 `slicing` config (none / slice / reconfigure / forest-reconfigure with
 `target_size` / `step_size` / `max_repeats` / `allow_outer`).
+
+Planner startup, request transfer, and search share a five-minute deadline by
+default. On expiry TeNeT terminates the whole Python process group (including
+`uv` descendants) and reaps it. Use `.timeout(duration)` to choose another
+finite deadline. `.without_timeout()` is the explicit unbounded opt-out.
 
 ## Latency
 
