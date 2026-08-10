@@ -1,7 +1,8 @@
 use crate::{
     BraidingStyleKind, CanonicalUnitFusionRule, CheckedFusionAlgebra, FusionAlgebraError,
     FusionRule, FusionStyleKind, MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols,
-    MultiplicityFreeRigidSymbols, RuleIdentity, SectorCodec, SectorId, SectorVec,
+    MultiplicityFreeRigidSymbols, PhysicalBasisError, PhysicalFusionBasis, RuleIdentity,
+    SectorCodec, SectorId, SectorVec,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -673,6 +674,52 @@ impl MultiplicityFreeFusionRule for U1FusionRule {}
 
 impl CanonicalUnitFusionRule for U1FusionRule {}
 
+impl PhysicalFusionBasis for U1FusionRule {
+    type Scalar = f64;
+    type Error = PhysicalBasisError<std::convert::Infallible>;
+
+    fn try_carrier_dimension(&self, sector: SectorId) -> Result<usize, Self::Error> {
+        checked_u1_irrep(sector)?;
+        Ok(1)
+    }
+
+    fn try_fusion_tensor_element(
+        &self,
+        left: SectorId,
+        right: SectorId,
+        coupled: SectorId,
+        left_basis: usize,
+        right_basis: usize,
+        coupled_basis: usize,
+        multiplicity: usize,
+    ) -> Result<Self::Scalar, Self::Error> {
+        let fusion_multiplicity = self.try_nsymbol(left, right, coupled)?;
+        if multiplicity >= fusion_multiplicity {
+            return Err(PhysicalBasisError::FusionMultiplicityOutOfBounds {
+                left,
+                right,
+                coupled,
+                multiplicity,
+                dimension: fusion_multiplicity,
+            });
+        }
+        for (sector, index) in [
+            (left, left_basis),
+            (right, right_basis),
+            (coupled, coupled_basis),
+        ] {
+            if index != 0 {
+                return Err(PhysicalBasisError::CarrierIndexOutOfBounds {
+                    sector,
+                    index,
+                    dimension: 1,
+                });
+            }
+        }
+        Ok(1.0)
+    }
+}
+
 impl MultiplicityFreeFusionSymbols for U1FusionRule {
     type Scalar = f64;
 
@@ -754,7 +801,8 @@ mod tests {
     };
     use crate::{
         CanonicalUnitFusionRule, CheckedFusionAlgebra, FusionAlgebraError, FusionRule,
-        MultiplicityFreeFusionSymbols, SectorCodec, SectorId,
+        MultiplicityFreeFusionSymbols, PhysicalBasisError, PhysicalFusionBasis, SectorCodec,
+        SectorId,
     };
 
     fn assert_canonical_unit<R>(rule: &R, sector: SectorId)
@@ -882,6 +930,40 @@ mod tests {
             Err(FusionAlgebraError::U1FusionOverflow {
                 left: i32::MIN + 1,
                 right: -1,
+            })
+        );
+    }
+
+    #[test]
+    fn u1_physical_basis_is_the_checked_one_dimensional_embedding() {
+        // What: U(1) exposes exactly one carrier state and one unit CGC for an
+        // allowed charge sum, while invalid physical indices remain typed.
+        let rule = U1FusionRule;
+        let left: SectorId = U1Irrep::new(2).into();
+        let right: SectorId = U1Irrep::new(-1).into();
+        let coupled: SectorId = U1Irrep::new(1).into();
+        assert_eq!(rule.try_carrier_dimension(left), Ok(1));
+        assert_eq!(
+            rule.try_fusion_tensor_element(left, right, coupled, 0, 0, 0, 0),
+            Ok(1.0)
+        );
+        assert_eq!(
+            rule.try_fusion_tensor_element(left, right, coupled, 1, 0, 0, 0),
+            Err(PhysicalBasisError::CarrierIndexOutOfBounds {
+                sector: left,
+                index: 1,
+                dimension: 1,
+            })
+        );
+        let absent: SectorId = U1Irrep::new(0).into();
+        assert_eq!(
+            rule.try_fusion_tensor_element(left, right, absent, 0, 0, 0, 0),
+            Err(PhysicalBasisError::FusionMultiplicityOutOfBounds {
+                left,
+                right,
+                coupled: absent,
+                multiplicity: 0,
+                dimension: 0,
             })
         );
     }
