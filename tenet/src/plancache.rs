@@ -112,6 +112,9 @@ pub struct CotengraPythonConfig {
     /// Arguments inserted between the Python executable and `-c <planner>`.
     /// This supports launchers such as `uv run --project <dir> python`.
     pub python_args: Vec<String>,
+    /// Maximum wall-clock time for writing the request and waiting for the
+    /// planner process group. `None` explicitly disables the deadline.
+    pub timeout: Option<std::time::Duration>,
 }
 
 /// Optional post-processing to ask cotengra to slice a searched tree.
@@ -174,6 +177,7 @@ impl Default for CotengraPythonConfig {
             slicing: CotengraSlicingConfig::None,
             python: None,
             python_args: Vec::new(),
+            timeout: Some(std::time::Duration::from_secs(300)),
         }
     }
 }
@@ -202,6 +206,18 @@ impl CotengraPythonConfig {
     pub fn python(mut self, python: impl Into<String>) -> Self {
         self.python = Some(python.into());
         self.python_args.clear();
+        self
+    }
+
+    /// Set the planner deadline.
+    pub fn timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
+    }
+
+    /// Explicitly disable the planner deadline.
+    pub fn without_timeout(mut self) -> Self {
+        self.timeout = None;
         self
     }
 }
@@ -349,4 +365,20 @@ pub struct PlanCacheStats {
     #[doc(hidden)]
     #[deprecated(note = "dynamic Network aliases were removed; this field is always zero")]
     pub dynamic_aliases: usize,
+}
+
+#[cfg(all(test, feature = "cotengra-python"))]
+mod tests {
+    use std::time::Duration;
+
+    use super::CotengraPythonConfig;
+
+    #[test]
+    fn cotengra_timeout_defaults_to_five_minutes_and_is_cache_identity() {
+        let default = CotengraPythonConfig::default();
+        let unbounded = default.clone().without_timeout();
+
+        assert_eq!(default.timeout, Some(Duration::from_secs(300)));
+        assert_ne!(default, unbounded);
+    }
 }

@@ -1029,6 +1029,9 @@ fn topology_optimizer(optimizer: &Optimizer) -> Optimizer {
         // slicing explicitly and does not go through this cache, so slicing
         // policy must not fragment ordinary plan-cache entries.
         config.slicing = tenet::plancache::CotengraSlicingConfig::None;
+        // The timeout supervises a cold search; it cannot change the resulting
+        // plan, so it is not part of topology or persisted-plan identity.
+        config.timeout = None;
         return Optimizer::CotengraPython(config);
     }
     optimizer.clone()
@@ -1318,11 +1321,36 @@ where
 #[cfg(test)]
 mod tests {
     use super::{needs_replan, ReplanPolicy, WorkspaceBudget, WorkspacePools};
+    #[cfg(feature = "cotengra-python")]
+    use super::{topology_optimizer, Optimizer};
     use crate::network::NetworkExecutionWorkspace;
     use std::sync::atomic::Ordering;
     use std::sync::{Arc, Barrier};
+    #[cfg(feature = "cotengra-python")]
+    use std::time::Duration;
     use tenet::core::{SU2FusionRule, U1FusionRule};
     use tenet::prelude::Complex64;
+
+    #[cfg(feature = "cotengra-python")]
+    #[test]
+    fn cotengra_timeout_does_not_fragment_cache_identity_or_mutate_runtime_config() {
+        let short =
+            tenet::plancache::CotengraPythonConfig::default().timeout(Duration::from_secs(1));
+        let unbounded = tenet::plancache::CotengraPythonConfig::default().without_timeout();
+        let runtime_config = tenet::plancache::PlanCacheConfig {
+            optimizer: Optimizer::CotengraPython(short),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            topology_optimizer(&runtime_config.optimizer),
+            topology_optimizer(&Optimizer::CotengraPython(unbounded))
+        );
+        let Optimizer::CotengraPython(config) = &runtime_config.optimizer else {
+            unreachable!()
+        };
+        assert_eq!(config.timeout, Some(Duration::from_secs(1)));
+    }
 
     #[test]
     fn replan_policy_matches_dimension_drift_semantics() {

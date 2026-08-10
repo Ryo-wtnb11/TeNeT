@@ -57,9 +57,11 @@ tenet-network = { path = "...", features = ["cotengra-python"] }
 
 ```rust
 use tenet::prelude::{CotengraPythonConfig, Optimizer, PlanCacheConfig};
+use std::time::Duration;
 
 let optimizer = Optimizer::CotengraPython(
-    CotengraPythonConfig::with_uv_project("tools/cotengra-python"),
+    CotengraPythonConfig::with_uv_project("tools/cotengra-python")
+        .timeout(Duration::from_secs(120)),
 );
 let rt = Runtime::builder()
     .plan_cache(PlanCacheConfig { optimizer, ..Default::default() })
@@ -80,6 +82,11 @@ parent — so it works regardless of the caller's CWD (a downstream crate does
 `Hyper`), `minimize` (flops / size / …), `max_repeats`, `seed`, and a
 `slicing` config (none / slice / reconfigure / forest-reconfigure with
 `target_size` / `step_size` / `max_repeats` / `allow_outer`).
+
+Request transfer and planner search share a five-minute deadline by default. On
+expiry TeNeT terminates the whole Python process group (including `uv`
+descendants) and reaps it. Use `.timeout(duration)` to choose another finite
+deadline. `.without_timeout()` is the explicit unbounded opt-out.
 
 ## Latency
 
@@ -110,3 +117,9 @@ are the right choice. A persistent Python worker to remove the ~50 ms spawn is
   (`SlicedPlan`, internal=summed / output=stacked) but the ordinary tensor
   executor does not yet execute the slices — path planning only. See
   [issue #93](https://github.com/Ryo-wtnb11/TeNeT/issues/93).
+- **Windows process-group creation errors**: `command-group` 5.0.1 can fail
+  after spawning a suspended child but before returning its handle if Job
+  assignment or thread resumption fails. TeNeT's timeout and unwind guarantees
+  begin after successful group creation; the dependency does not expose the
+  child needed to clean up this rare spawn-error path. This dependency boundary
+  is tracked in [issue #1048](https://github.com/Ryo-wtnb11/TeNeT/issues/1048).

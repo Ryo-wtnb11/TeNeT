@@ -25,9 +25,10 @@ cuda = ["tenet/cuda"]
 # `DenseContractionOptimizer` backend (optimal / dp / branch / random-greedy).
 opt-path = ["dep:opt-einsum-path", "tenet/opt-path"]
 # Calls the installed Python `cotengra` package as an external path planner.
-cotengra-python = ["dep:serde_json", "tenet/cotengra-python"]
+cotengra-python = ["dep:command-group", "dep:libc", "dep:serde_json", "tenet/cotengra-python"]
 
 [dependencies]
+command-group = { version = "5.0.1", optional = true }
 tenet = { path = "../tenet", default-features = false }
 tenet-macros = { path = "../tenet-macros" }
 opt-einsum-path = { version = "0.2", optional = true }
@@ -36,3 +37,6 @@ serde_json = { version = "1", optional = true }
 # `LRUCache.jl` that TensorKit uses for its global caches. Replaces the
 # linear-scan `VecDeque` LRU whose touch was O(capacity) per plan-cache hit.
 lru = "0.12"
+
+[target.'cfg(unix)'.dependencies]
+libc = { version = "0.2", optional = true }

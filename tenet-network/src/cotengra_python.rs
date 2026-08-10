@@ -6,9 +6,13 @@
 //! executor do the rest.
 
 use std::collections::BTreeMap;
-use std::io::Write;
-use std::process::{Command, Stdio};
+use std::io::{self, Read, Write};
+use std::process::{Command, ExitStatus, Stdio};
+use std::sync::mpsc::{self, Receiver};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
+use command_group::{CommandGroup, GroupChild};
 use serde_json::{json, Value};
 use tenet::plancache::{
     CotengraMinimize, CotengraPythonConfig, CotengraPythonMethod, CotengraSlicingConfig,
@@ -143,6 +147,9 @@ except Exception as exc:
     sys.exit(1)
 "#;
 
+const SUPERVISOR_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const DIAGNOSTIC_SNIPPET_BYTES: usize = 4096;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CotengraPythonOptimizer {
     config: CotengraPythonConfig,
@@ -269,63 +276,504 @@ fn run_cotengra_python(
 ) -> Result<CotengraPythonResult> {
     let command = python_command(config);
     let command_text = command_text(&command);
-    let mut child = Command::new(&command.program)
+    let bytes = serde_json::to_vec(spec).map_err(|err| {
+        ContractError::InvalidContractionPlan(format!(
+            "failed to serialize cotengra planner input: {err}; {}",
+            diagnostic_context(config, &command_text, &[], &[])
+        ))
+    })?;
+
+    let mut process = Command::new(&command.program);
+    process
         .args(&command.args)
         .arg("-c")
         .arg(PYTHON_PLANNER)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|err| {
-            ContractError::InvalidContractionPlan(format!(
-                "failed to start cotengra Python planner `{command_text}`: {err}"
-            ))
-        })?;
+        .stderr(Stdio::piped());
+    let child = spawn_group(&mut process).map_err(|err| {
+        ContractError::InvalidContractionPlan(format!(
+            "failed to start cotengra Python planner: {err}; {}",
+            diagnostic_context(config, &command_text, &[], &[])
+        ))
+    })?;
+    let mut child = ReapingChild::new(child);
+    let stdin = child
+        .inner_mut()
+        .stdin
+        .take()
+        .ok_or_else(|| missing_pipe(config, &command_text, "stdin"))?;
+    let stdout = child
+        .inner_mut()
+        .stdout
+        .take()
+        .ok_or_else(|| missing_pipe(config, &command_text, "stdout"))?;
+    let stderr = child
+        .inner_mut()
+        .stderr
+        .take()
+        .ok_or_else(|| missing_pipe(config, &command_text, "stderr"))?;
 
-    {
-        let stdin = child.stdin.as_mut().ok_or_else(|| {
-            ContractError::InvalidContractionPlan(
-                "failed to open cotengra Python planner stdin".to_string(),
-            )
-        })?;
-        let bytes = serde_json::to_vec(spec).map_err(|err| {
-            ContractError::InvalidContractionPlan(format!(
-                "failed to serialize cotengra planner input: {err}"
-            ))
-        })?;
-        stdin.write_all(&bytes).map_err(|err| {
-            ContractError::InvalidContractionPlan(format!(
-                "failed to write cotengra planner input: {err}"
-            ))
-        })?;
+    let (failure_tx, failure_rx) = mpsc::channel();
+    let workers = IoWorkers {
+        stdin: spawn_writer(stdin, bytes, failure_tx.clone()),
+        stdout: spawn_reader(stdout, "stdout", failure_tx.clone()),
+        stderr: spawn_reader(stderr, "stderr", failure_tx),
+    };
+    let mut clock = MonotonicClock::new();
+    let supervision = supervise_child(&mut child, config.timeout, &failure_rx, &mut clock);
+    if let Supervision::Failed(failure) = &supervision {
+        if !failure.cleanup_errors.is_empty() {
+            // An unexpected group-cleanup failure means pipe EOF is not guaranteed.
+            // Retry through the guard, but detach readers instead of risking a join hang.
+            drop(child);
+            drop(workers);
+            return Err(ContractError::InvalidContractionPlan(format!(
+                "cotengra Python planner {}{}; {}",
+                failure.reason,
+                format_cleanup(&failure.cleanup_errors),
+                diagnostic_context(config, &command_text, &[], &[]),
+            )));
+        }
+    }
+    // The group has exited or has been killed and reaped before any pipe is joined.
+    let output = workers.join();
+    let context = diagnostic_context(config, &command_text, &output.stdout, &output.stderr);
+
+    if let Supervision::Failed(failure) = supervision {
+        return Err(ContractError::InvalidContractionPlan(format!(
+            "cotengra Python planner {}{}; {context}{}",
+            failure.reason,
+            format_cleanup(&failure.cleanup_errors),
+            format_io_errors(&output.errors),
+        )));
+    }
+    let Supervision::Exited(status) = supervision else {
+        unreachable!()
+    };
+    if !output.errors.is_empty() {
+        return Err(ContractError::InvalidContractionPlan(format!(
+            "cotengra Python planner I/O failed; {context}{}",
+            format_io_errors(&output.errors)
+        )));
     }
 
-    let output = child.wait_with_output().map_err(|err| {
-        ContractError::InvalidContractionPlan(format!(
-            "failed to wait for cotengra Python planner: {err}"
-        ))
-    })?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
     let value: Value = serde_json::from_slice(&output.stdout).map_err(|err| {
         ContractError::InvalidContractionPlan(format!(
-            "cotengra Python planner returned non-JSON stdout: {err}; stdout={stdout:?}; stderr={stderr:?}"
+            "cotengra Python planner returned non-JSON stdout: {err}; {context}"
         ))
     })?;
 
-    if !output.status.success() {
+    if !status.success() {
         let message = value
             .get("traceback")
             .or_else(|| value.get("error"))
             .and_then(Value::as_str)
-            .unwrap_or(stdout.as_ref());
+            .map(|message| bounded_snippet(message.as_bytes()))
+            .unwrap_or_else(|| bounded_snippet(&output.stdout));
         return Err(ContractError::InvalidContractionPlan(format!(
-            "cotengra Python planner failed: {message}; stderr={stderr:?}"
+            "cotengra Python planner failed: {message}; {context}"
         )));
     }
 
     parse_planner_output(&value)
+}
+
+fn spawn_group(command: &mut Command) -> io::Result<GroupChild> {
+    #[cfg(windows)]
+    {
+        // command-group 5.0.1 can fail after spawning CREATE_SUSPENDED but
+        // before returning GroupChild. TeNeT cannot clean up a handle it never
+        // receives; supervision guarantees begin after this returns Ok.
+        command.group().kill_on_drop(true).spawn()
+    }
+    #[cfg(not(windows))]
+    {
+        command.group_spawn()
+    }
+}
+
+fn missing_pipe(config: &CotengraPythonConfig, command_text: &str, pipe: &str) -> ContractError {
+    ContractError::InvalidContractionPlan(format!(
+        "failed to open cotengra Python planner {pipe}; {}",
+        diagnostic_context(config, command_text, &[], &[])
+    ))
+}
+
+trait ChildGroup {
+    type Status: Copy;
+
+    fn try_wait(&mut self) -> io::Result<Option<Self::Status>>;
+    fn kill(&mut self) -> io::Result<()>;
+    fn wait(&mut self) -> io::Result<Self::Status>;
+    fn cleanup_after_observed_exit(&mut self) -> io::Result<()>;
+}
+
+impl ChildGroup for GroupChild {
+    type Status = ExitStatus;
+
+    fn try_wait(&mut self) -> io::Result<Option<Self::Status>> {
+        #[cfg(windows)]
+        {
+            // Do not populate GroupChild's leader-status cache: after killing
+            // the Job, wait() must still wait for ACTIVE_PROCESS_ZERO.
+            self.inner().try_wait()
+        }
+        #[cfg(unix)]
+        {
+            GroupChild::try_wait(self)
+        }
+    }
+
+    fn kill(&mut self) -> io::Result<()> {
+        GroupChild::kill(self)
+    }
+
+    fn wait(&mut self) -> io::Result<Self::Status> {
+        GroupChild::wait(self)
+    }
+
+    fn cleanup_after_observed_exit(&mut self) -> io::Result<()> {
+        #[cfg(windows)]
+        {
+            GroupChild::kill(self)
+        }
+        #[cfg(unix)]
+        {
+            match GroupChild::kill(self) {
+                Err(err) if err.raw_os_error() == Some(libc::ESRCH) => Ok(()),
+                result => result,
+            }
+        }
+    }
+}
+
+struct ReapingChild<C: ChildGroup> {
+    child: C,
+    reaped: bool,
+}
+
+impl ReapingChild<GroupChild> {
+    fn inner_mut(&mut self) -> &mut std::process::Child {
+        self.child.inner()
+    }
+}
+
+impl<C: ChildGroup> ReapingChild<C> {
+    fn new(child: C) -> Self {
+        Self {
+            child,
+            reaped: false,
+        }
+    }
+
+    fn try_wait(&mut self) -> io::Result<Option<C::Status>> {
+        self.child.try_wait()
+    }
+
+    fn kill(&mut self) -> io::Result<()> {
+        self.child.kill()
+    }
+
+    fn wait(&mut self) -> io::Result<C::Status> {
+        self.child.wait()
+    }
+
+    fn cleanup_after_observed_exit(&mut self) -> io::Result<()> {
+        self.child.cleanup_after_observed_exit()
+    }
+
+    fn mark_reaped(&mut self) {
+        self.reaped = true;
+    }
+}
+
+impl<C: ChildGroup> Drop for ReapingChild<C> {
+    fn drop(&mut self) {
+        if !self.reaped {
+            if self.child.kill().is_ok() {
+                let _ = self.child.wait();
+            } else {
+                // Never turn cleanup failure or unwinding into an unbounded wait.
+                let _ = self.child.try_wait();
+            }
+        }
+    }
+}
+
+trait Clock {
+    fn now(&self) -> Duration;
+    fn sleep(&mut self, duration: Duration);
+}
+
+struct MonotonicClock(Instant);
+
+impl MonotonicClock {
+    fn new() -> Self {
+        Self(Instant::now())
+    }
+}
+
+impl Clock for MonotonicClock {
+    fn now(&self) -> Duration {
+        self.0.elapsed()
+    }
+
+    fn sleep(&mut self, duration: Duration) {
+        thread::sleep(duration);
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Supervision<S> {
+    Exited(S),
+    Failed(SupervisionFailure),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct SupervisionFailure {
+    reason: String,
+    cleanup_errors: Vec<String>,
+}
+
+fn supervise_child<C: ChildGroup, T: Clock>(
+    child: &mut ReapingChild<C>,
+    timeout: Option<Duration>,
+    failures: &Receiver<String>,
+    clock: &mut T,
+) -> Supervision<C::Status> {
+    let deadline = timeout.map(|timeout| clock.now().checked_add(timeout).unwrap_or(Duration::MAX));
+
+    loop {
+        if let Ok(failure) = failures.try_recv() {
+            return failed_after_cleanup(child, failure);
+        }
+
+        let now = clock.now();
+        if deadline.is_some_and(|deadline| now >= deadline) {
+            // Close the race where the group exits at the deadline.
+            return match child.try_wait() {
+                Ok(Some(_)) => finish_observed_exit(child),
+                Ok(None) => Supervision::Failed(SupervisionFailure {
+                    reason: "timed out".to_string(),
+                    cleanup_errors: kill_and_reap(child),
+                }),
+                Err(err) => {
+                    failed_after_cleanup(child, format!("status polling failed at deadline: {err}"))
+                }
+            };
+        }
+
+        match child.try_wait() {
+            Ok(Some(_)) => return finish_observed_exit(child),
+            Ok(None) => {}
+            Err(err) => {
+                return failed_after_cleanup(child, format!("status polling failed: {err}"))
+            }
+        }
+
+        let sleep = deadline
+            .map(|deadline| deadline.saturating_sub(clock.now()))
+            .unwrap_or(SUPERVISOR_POLL_INTERVAL)
+            .min(SUPERVISOR_POLL_INTERVAL);
+        clock.sleep(sleep);
+    }
+}
+
+fn finish_observed_exit<C: ChildGroup>(child: &mut ReapingChild<C>) -> Supervision<C::Status> {
+    // A launcher leader can exit before non-child group members that still own
+    // pipes. GroupChild caches the leader status, so terminate descendants first.
+    if let Err(err) = child.cleanup_after_observed_exit() {
+        return Supervision::Failed(SupervisionFailure {
+            reason: "could not ensure the exited planner group was empty".to_string(),
+            cleanup_errors: vec![format!("remaining-group cleanup failed: {err}")],
+        });
+    }
+    let mut errors = Vec::new();
+    match child.wait() {
+        Ok(status) if errors.is_empty() => {
+            child.mark_reaped();
+            Supervision::Exited(status)
+        }
+        Ok(_) => Supervision::Failed(SupervisionFailure {
+            reason: "could not ensure the exited planner group was empty".to_string(),
+            cleanup_errors: errors,
+        }),
+        Err(err) => {
+            errors.push(format!("reap failed: {err}"));
+            Supervision::Failed(SupervisionFailure {
+                reason: "could not reap exited process group".to_string(),
+                cleanup_errors: errors,
+            })
+        }
+    }
+}
+
+fn failed_after_cleanup<C: ChildGroup>(
+    child: &mut ReapingChild<C>,
+    reason: String,
+) -> Supervision<C::Status> {
+    Supervision::Failed(SupervisionFailure {
+        reason,
+        cleanup_errors: cleanup_group(child),
+    })
+}
+
+fn cleanup_group<C: ChildGroup>(child: &mut ReapingChild<C>) -> Vec<String> {
+    match child.try_wait() {
+        Ok(Some(_)) | Ok(None) => kill_and_reap(child),
+        Err(err) => {
+            let mut errors = vec![format!("final status check failed: {err}")];
+            errors.extend(kill_and_reap(child));
+            errors
+        }
+    }
+}
+
+fn kill_and_reap<C: ChildGroup>(child: &mut ReapingChild<C>) -> Vec<String> {
+    if let Err(error) = kill_group(child) {
+        return vec![error];
+    }
+    let mut errors = Vec::new();
+    match child.wait() {
+        Ok(_) if errors.is_empty() => child.mark_reaped(),
+        Ok(_) => {}
+        Err(err) => errors.push(format!("reap failed: {err}")),
+    }
+    errors
+}
+
+fn kill_group<C: ChildGroup>(child: &mut ReapingChild<C>) -> std::result::Result<(), String> {
+    match child.kill() {
+        Ok(()) => Ok(()),
+        #[cfg(unix)]
+        Err(err) if err.raw_os_error() == Some(libc::ESRCH) => Ok(()),
+        Err(err) => Err(format!("group kill failed: {err}")),
+    }
+}
+
+struct IoWorkers {
+    stdin: JoinHandle<io::Result<()>>,
+    stdout: JoinHandle<io::Result<Vec<u8>>>,
+    stderr: JoinHandle<io::Result<Vec<u8>>>,
+}
+
+struct IoOutput {
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    errors: Vec<String>,
+}
+
+impl IoWorkers {
+    fn join(self) -> IoOutput {
+        let mut errors = Vec::new();
+        match self.stdin.join() {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => errors.push(format!("stdin write failed: {err}")),
+            Err(_) => errors.push("stdin writer panicked".to_string()),
+        }
+        let stdout = join_reader(self.stdout, "stdout", &mut errors);
+        let stderr = join_reader(self.stderr, "stderr", &mut errors);
+        IoOutput {
+            stdout,
+            stderr,
+            errors,
+        }
+    }
+}
+
+fn spawn_writer(
+    mut stdin: std::process::ChildStdin,
+    bytes: Vec<u8>,
+    failures: mpsc::Sender<String>,
+) -> JoinHandle<io::Result<()>> {
+    thread::spawn(move || {
+        let result = stdin.write_all(&bytes);
+        if let Err(err) = &result {
+            let _ = failures.send(format!("stdin write failed: {err}"));
+        }
+        result
+    })
+}
+
+fn spawn_reader<R: Read + Send + 'static>(
+    mut reader: R,
+    name: &'static str,
+    failures: mpsc::Sender<String>,
+) -> JoinHandle<io::Result<Vec<u8>>> {
+    thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let result = reader.read_to_end(&mut bytes).map(|_| bytes);
+        if let Err(err) = &result {
+            let _ = failures.send(format!("{name} read failed: {err}"));
+        }
+        result
+    })
+}
+
+fn join_reader(
+    reader: JoinHandle<io::Result<Vec<u8>>>,
+    name: &str,
+    errors: &mut Vec<String>,
+) -> Vec<u8> {
+    match reader.join() {
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err(err)) => {
+            errors.push(format!("{name} read failed: {err}"));
+            Vec::new()
+        }
+        Err(_) => {
+            errors.push(format!("{name} reader panicked"));
+            Vec::new()
+        }
+    }
+}
+
+fn diagnostic_context(
+    config: &CotengraPythonConfig,
+    command_text: &str,
+    stdout: &[u8],
+    stderr: &[u8],
+) -> String {
+    format!(
+        "command={:?}, timeout={}, method={}, minimize={}, slicing={}, stdout={:?}, stderr={:?}",
+        bounded_snippet(command_text.as_bytes()),
+        config
+            .timeout
+            .map(|timeout| format!("{timeout:?}"))
+            .unwrap_or_else(|| "unbounded".to_string()),
+        method_name(&config.method),
+        minimize_name(&config.minimize),
+        slicing_name(&config.slicing),
+        bounded_snippet(stdout),
+        bounded_snippet(stderr),
+    )
+}
+
+fn bounded_snippet(bytes: &[u8]) -> String {
+    let truncated = bytes.len() > DIAGNOSTIC_SNIPPET_BYTES;
+    let mut snippet =
+        String::from_utf8_lossy(&bytes[..bytes.len().min(DIAGNOSTIC_SNIPPET_BYTES)]).into_owned();
+    if truncated {
+        snippet.push_str("...[truncated]");
+    }
+    snippet
+}
+
+fn format_cleanup(errors: &[String]) -> String {
+    if errors.is_empty() {
+        String::new()
+    } else {
+        format!(" (cleanup: {})", errors.join(", "))
+    }
+}
+
+fn format_io_errors(errors: &[String]) -> String {
+    if errors.is_empty() {
+        String::new()
+    } else {
+        format!("; I/O errors: {}", errors.join(", "))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -549,6 +997,15 @@ fn minimize_name(minimize: &CotengraMinimize) -> &str {
     }
 }
 
+fn slicing_name(slicing: &CotengraSlicingConfig) -> &'static str {
+    match slicing {
+        CotengraSlicingConfig::None => "none",
+        CotengraSlicingConfig::Slice { .. } => "slice",
+        CotengraSlicingConfig::Reconfigure { .. } => "reconfigure",
+        CotengraSlicingConfig::ForestReconfigure { .. } => "forest-reconfigure",
+    }
+}
+
 fn slicing_spec(slicing: &CotengraSlicingConfig) -> Value {
     match slicing {
         CotengraSlicingConfig::None => json!({"kind": "none"}),
@@ -613,6 +1070,7 @@ mod tests {
         assert_eq!(spec["size_dict"], json!({"a": 2, "b": 3, "c": 4}));
         assert_eq!(spec["config"]["method"], json!("auto-hq"));
         assert_eq!(spec["config"]["slicing"], json!({"kind": "none"}));
+        assert!(spec["config"].get("timeout").is_none());
     }
 
     #[test]
@@ -710,7 +1168,294 @@ mod tests {
         );
     }
 
+    #[derive(Default)]
+    struct FakeState {
+        polls: usize,
+        kills: usize,
+        leader_status_observed: bool,
+        group_waits: usize,
+    }
+
+    struct FakeChild {
+        state: std::rc::Rc<std::cell::RefCell<FakeState>>,
+        exit_on_poll: Option<usize>,
+        kill_error: Option<io::ErrorKind>,
+    }
+
+    impl ChildGroup for FakeChild {
+        type Status = u8;
+
+        fn try_wait(&mut self) -> io::Result<Option<Self::Status>> {
+            let mut state = self.state.borrow_mut();
+            state.polls += 1;
+            let status = (Some(state.polls) == self.exit_on_poll).then_some(0);
+            state.leader_status_observed |= status.is_some();
+            Ok(status)
+        }
+
+        fn kill(&mut self) -> io::Result<()> {
+            self.state.borrow_mut().kills += 1;
+            self.kill_error.map(io::Error::from).map_or(Ok(()), Err)
+        }
+
+        fn wait(&mut self) -> io::Result<Self::Status> {
+            self.state.borrow_mut().group_waits += 1;
+            Ok(0)
+        }
+
+        fn cleanup_after_observed_exit(&mut self) -> io::Result<()> {
+            // Model Windows, where a leader exit may leave Job descendants.
+            self.kill()
+        }
+    }
+
+    #[derive(Default)]
+    struct FakeClock {
+        now: Duration,
+        sleeps: Vec<Duration>,
+    }
+
+    impl Clock for FakeClock {
+        fn now(&self) -> Duration {
+            self.now
+        }
+
+        fn sleep(&mut self, duration: Duration) {
+            self.sleeps.push(duration);
+            self.now += duration;
+        }
+    }
+
+    fn fake_child(
+        exit_on_poll: Option<usize>,
+    ) -> (
+        ReapingChild<FakeChild>,
+        std::rc::Rc<std::cell::RefCell<FakeState>>,
+    ) {
+        let state = std::rc::Rc::new(std::cell::RefCell::new(FakeState::default()));
+        (
+            ReapingChild::new(FakeChild {
+                state: state.clone(),
+                exit_on_poll,
+                kill_error: None,
+            }),
+            state,
+        )
+    }
+
     #[test]
+    fn supervisor_timeout_kills_and_reaps() {
+        let (mut child, state) = fake_child(None);
+        let mut clock = FakeClock::default();
+        let (_sender, failures) = mpsc::channel();
+
+        assert_eq!(
+            supervise_child(
+                &mut child,
+                Some(Duration::from_millis(25)),
+                &failures,
+                &mut clock,
+            ),
+            Supervision::Failed(SupervisionFailure {
+                reason: "timed out".to_string(),
+                cleanup_errors: Vec::new(),
+            })
+        );
+        assert_eq!(clock.now, Duration::from_millis(25));
+        assert_eq!(state.borrow().kills, 1);
+        assert_eq!(state.borrow().group_waits, 1);
+    }
+
+    #[test]
+    fn supervisor_final_poll_closes_deadline_exit_race() {
+        let (mut child, state) = fake_child(Some(4));
+        let mut clock = FakeClock::default();
+        let (_sender, failures) = mpsc::channel();
+
+        assert_eq!(
+            supervise_child(
+                &mut child,
+                Some(Duration::from_millis(25)),
+                &failures,
+                &mut clock,
+            ),
+            Supervision::Exited(0)
+        );
+        assert_eq!(state.borrow().polls, 4);
+        assert!(state.borrow().leader_status_observed);
+        assert_eq!(state.borrow().kills, 1);
+        assert_eq!(state.borrow().group_waits, 1);
+    }
+
+    #[test]
+    fn observed_leader_status_still_kills_and_waits_for_group() {
+        let (mut child, state) = fake_child(Some(1));
+        let mut clock = FakeClock::default();
+        let (_sender, failures) = mpsc::channel();
+
+        assert_eq!(
+            supervise_child(&mut child, None, &failures, &mut clock),
+            Supervision::Exited(0)
+        );
+        let state = state.borrow();
+        assert!(state.leader_status_observed);
+        assert_eq!(state.kills, 1);
+        assert_eq!(state.group_waits, 1);
+    }
+
+    #[test]
+    fn supervisor_io_failure_kills_and_reaps() {
+        let (mut child, state) = fake_child(None);
+        let mut clock = FakeClock::default();
+        let (sender, failures) = mpsc::channel();
+        sender.send("stdin write failed".to_string()).unwrap();
+
+        assert!(matches!(
+            supervise_child(&mut child, None, &failures, &mut clock),
+            Supervision::Failed(SupervisionFailure { reason, .. })
+                if reason == "stdin write failed"
+        ));
+        assert_eq!(state.borrow().kills, 1);
+        assert_eq!(state.borrow().group_waits, 1);
+    }
+
+    #[test]
+    fn kill_failure_never_enters_an_unbounded_wait() {
+        let (mut child, state) = fake_child(None);
+        child.child.kill_error = Some(io::ErrorKind::PermissionDenied);
+        let mut clock = FakeClock::default();
+        let (_sender, failures) = mpsc::channel();
+
+        let result = supervise_child(&mut child, Some(Duration::ZERO), &failures, &mut clock);
+        assert!(matches!(
+            result,
+            Supervision::Failed(SupervisionFailure {
+                ref cleanup_errors,
+                ..
+            }) if cleanup_errors.len() == 1
+        ));
+        assert_eq!(state.borrow().kills, 1);
+        assert_eq!(state.borrow().group_waits, 0);
+
+        drop(child);
+        assert_eq!(state.borrow().kills, 2);
+        assert_eq!(state.borrow().group_waits, 0);
+    }
+
+    #[test]
+    fn reaping_guard_cleans_up_during_unwind() {
+        let (child, state) = fake_child(None);
+
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _child = child;
+            panic!("test unwind");
+        }));
+
+        assert_eq!(state.borrow().kills, 1);
+        assert_eq!(state.borrow().group_waits, 1);
+    }
+
+    #[test]
+    fn diagnostic_context_bounds_stream_snippets() {
+        let bytes = vec![b'x'; DIAGNOSTIC_SNIPPET_BYTES + 100];
+        let snippet = bounded_snippet(&bytes);
+        assert!(snippet.ends_with("...[truncated]"));
+        assert_eq!(
+            snippet.len(),
+            DIAGNOSTIC_SNIPPET_BYTES + "...[truncated]".len()
+        );
+
+        let context =
+            diagnostic_context(&CotengraPythonConfig::default(), "python3", &bytes, &bytes);
+        assert!(context.contains("timeout=300s"));
+        assert!(context.contains("method=auto-hq"));
+        assert!(context.contains("minimize=flops"));
+        assert!(context.contains("slicing=none"));
+        assert!(context.len() < 2 * (DIAGNOSTIC_SNIPPET_BYTES + 100));
+    }
+
+    #[cfg(unix)]
+    fn supervise_shell(
+        script: &str,
+        timeout: Duration,
+    ) -> (Supervision<ExitStatus>, IoOutput, Duration) {
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg(script)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = ReapingChild::new(spawn_group(&mut command).unwrap());
+        let stdin = child.inner_mut().stdin.take().unwrap();
+        let stdout = child.inner_mut().stdout.take().unwrap();
+        let stderr = child.inner_mut().stderr.take().unwrap();
+        let (failure_tx, failure_rx) = mpsc::channel();
+        let workers = IoWorkers {
+            stdin: spawn_writer(stdin, Vec::new(), failure_tx.clone()),
+            stdout: spawn_reader(stdout, "stdout", failure_tx.clone()),
+            stderr: spawn_reader(stderr, "stderr", failure_tx),
+        };
+
+        let start = Instant::now();
+        let result = supervise_child(
+            &mut child,
+            Some(timeout),
+            &failure_rx,
+            &mut MonotonicClock::new(),
+        );
+        let output = workers.join();
+        (result, output, start.elapsed())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_normal_exit_tolerates_an_empty_group() {
+        let (result, output, _) =
+            supervise_shell("printf stdout; printf stderr >&2", Duration::from_secs(2));
+
+        assert!(matches!(result, Supervision::Exited(status) if status.success()));
+        assert!(output.errors.is_empty(), "{:?}", output.errors);
+        assert_eq!(output.stdout, b"stdout");
+        assert_eq!(output.stderr, b"stderr");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_leader_exit_kills_pipe_holding_descendant() {
+        let timeout = Duration::from_secs(2);
+        let (result, output, elapsed) = supervise_shell("sleep 5 & exit 0", timeout);
+
+        assert!(matches!(result, Supervision::Exited(status) if status.success()));
+        assert!(output.errors.is_empty(), "{:?}", output.errors);
+        assert!(
+            elapsed < timeout,
+            "pipe-holding descendant survived for {elapsed:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_timeout_kills_descendants_after_draining_both_pipes() {
+        let (result, output, _) = supervise_shell(
+            "(dd if=/dev/zero bs=131072 count=1 2>/dev/null) & \
+                 (dd if=/dev/zero bs=131072 count=1 1>&2 2>/dev/null) & \
+                 wait; sleep 30",
+            Duration::from_secs(1),
+        );
+
+        assert!(matches!(
+            result,
+            Supervision::Failed(SupervisionFailure { ref reason, .. })
+                if reason == "timed out"
+        ));
+        assert!(output.errors.is_empty(), "{:?}", output.errors);
+        assert_eq!(output.stdout.len(), 131072);
+        assert_eq!(output.stderr.len(), 131072);
+    }
+
+    #[test]
+    #[ignore = "requires TENET_RUN_COTENGRA_PYTHON_TEST and an installed cotengra environment"]
     fn runs_installed_cotengra_when_requested() {
         if std::env::var_os("TENET_RUN_COTENGRA_PYTHON_TEST").is_none() {
             return;
@@ -724,7 +1469,8 @@ mod tests {
         let cost = DenseCostModel::from_network(&ir, &infos).unwrap();
         let config = std::env::var("TENET_COTENGRA_UV_PROJECT")
             .map(CotengraPythonConfig::with_uv_project)
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .timeout(Duration::from_secs(30));
 
         let steps = CotengraPythonOptimizer::new(config)
             .optimize(&ir, &cost)
