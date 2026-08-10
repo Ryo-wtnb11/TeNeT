@@ -14,7 +14,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use tenet::core::{SectorId, SectorLeg};
+use tenet::core::{RuleIdentity, SectorId, SectorLeg};
 
 use crate::cost::DenseCostModel;
 use crate::error::{ContractError, Result, SliceError, SliceResult};
@@ -196,17 +196,25 @@ impl SymmetricIndexSlice {
 /// This schema is coefficient-free. It only restricts degeneracy coordinates:
 /// fusion-tree order, block order, structural zeros, braiding/fermionic signs,
 /// layouts, and storage offsets remain untouched and owned by their existing
-/// lowering and execution layers. `SectorId` is process-local here and must not
-/// be serialized as a semantic sector label.
+/// lowering and execution layers. Inadmissible sector combinations therefore
+/// remain in Cartesian enumeration as valid zero contributions. `SectorId` is
+/// process-local here and must not be serialized as a semantic sector label.
+/// The plan-wide [`RuleIdentity`] seals which rule gives those numeric ids
+/// meaning without retaining a fusion provider or any of its coefficients.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SymmetricSlicePlan {
+    rule_identity: RuleIdentity,
     indices: Vec<SymmetricIndexSlice>,
     nslices: u128,
 }
 
 impl SymmetricSlicePlan {
     /// Validate all inputs before publishing a plan.
-    pub fn try_new(ir: &NetworkIR, specs: Vec<SymmetricSliceSpec>) -> SliceResult<Self> {
+    pub fn try_new(
+        ir: &NetworkIR,
+        rule_identity: RuleIdentity,
+        specs: Vec<SymmetricSliceSpec>,
+    ) -> SliceResult<Self> {
         let mut seen = BTreeSet::new();
         let mut indices = Vec::with_capacity(specs.len());
 
@@ -240,7 +248,16 @@ impl SymmetricSlicePlan {
 
         indices.sort_by(|left, right| left.label.cmp(&right.label));
         let nslices = checked_slice_count(indices.iter().map(|index| index.pieces.len() as u128))?;
-        Ok(Self { indices, nslices })
+        Ok(Self {
+            rule_identity,
+            indices,
+            nslices,
+        })
+    }
+
+    /// Identity of the fusion rule interpreting every process-local sector id.
+    pub fn rule_identity(&self) -> &RuleIdentity {
+        &self.rule_identity
     }
 
     pub fn indices(&self) -> &[SymmetricIndexSlice] {

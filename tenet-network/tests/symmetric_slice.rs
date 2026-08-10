@@ -1,4 +1,7 @@
-use tenet::core::{FermionParityFusionRule, SectorId, SectorLeg, U1FusionRule, U1Irrep, Z2Irrep};
+use tenet::core::{
+    FermionParityFusionRule, FusionRule, SectorId, SectorLeg, U1FusionRule, U1Irrep, Z2FusionRule,
+    Z2Irrep,
+};
 use tenet_network::{
     DegeneracyRange, NetworkIR, SectorSlice, SliceError, SliceKind, SymmetricSlicePlan,
     SymmetricSliceSpec, TemporaryLabel, TensorAxis, TensorId,
@@ -17,7 +20,11 @@ fn piece(sector: usize, start: usize, end: usize) -> SectorSlice {
 }
 
 fn axis(tensor: usize) -> TensorAxis {
-    TensorAxis::new(TensorId::new(tensor), 0)
+    axis_at(tensor, 0)
+}
+
+fn axis_at(tensor: usize, axis: usize) -> TensorAxis {
+    TensorAxis::new(TensorId::new(tensor), axis)
 }
 
 fn internal_ir() -> NetworkIR {
@@ -33,6 +40,13 @@ fn spec(
     SymmetricSliceSpec::new(label(label_name), authority, leg, pieces)
 }
 
+fn checked(
+    ir: &NetworkIR,
+    specs: Vec<SymmetricSliceSpec>,
+) -> Result<SymmetricSlicePlan, SliceError> {
+    SymmetricSlicePlan::try_new(ir, U1FusionRule.rule_identity(), specs)
+}
+
 #[test]
 fn canonicalizes_input_and_piece_order_without_merging_adjacent_ranges() {
     let ir = NetworkIR::from_labels(
@@ -45,7 +59,7 @@ fn canonicalizes_input_and_piece_order_without_merging_adjacent_ranges() {
 
     let x_forward = vec![piece(1, 0, 1), piece(1, 1, 2), piece(3, 0, 1)];
     let x_shuffled = vec![piece(3, 0, 1), piece(1, 1, 2), piece(1, 0, 1)];
-    let first = SymmetricSlicePlan::try_new(
+    let first = checked(
         &ir,
         vec![
             spec("y", axis(2), y_leg.clone(), vec![piece(2, 0, 2)]),
@@ -53,7 +67,7 @@ fn canonicalizes_input_and_piece_order_without_merging_adjacent_ranges() {
         ],
     )
     .unwrap();
-    let second = SymmetricSlicePlan::try_new(
+    let second = checked(
         &ir,
         vec![
             spec("x", axis(0), x_leg, x_forward.clone()),
@@ -71,7 +85,7 @@ fn canonicalizes_input_and_piece_order_without_merging_adjacent_ranges() {
     assert_eq!(first.indices()[0].pieces(), x_forward);
     assert_eq!(first.indices()[0].pieces().len(), 3);
 
-    let merged = SymmetricSlicePlan::try_new(
+    let merged = checked(
         &ir,
         vec![
             spec(
@@ -104,7 +118,7 @@ fn counts_and_enumerates_multi_sector_multi_index_cartesian_product() {
         vec![],
     )
     .unwrap();
-    let plan = SymmetricSlicePlan::try_new(
+    let plan = checked(
         &ir,
         vec![
             spec(
@@ -145,6 +159,38 @@ fn counts_and_enumerates_multi_sector_multi_index_cartesian_product() {
 }
 
 #[test]
+fn preserves_output_axis_order_separately_from_canonical_label_order() {
+    let ir = NetworkIR::from_labels(
+        vec![vec![label("a")], vec![label("z")]],
+        vec![label("z"), label("a")],
+    )
+    .unwrap();
+    let plan = checked(
+        &ir,
+        vec![
+            spec(
+                "z",
+                axis(1),
+                SectorLeg::new([(SectorId::new(0), 1)], false),
+                vec![piece(0, 0, 1)],
+            ),
+            spec(
+                "a",
+                axis(0),
+                SectorLeg::new([(SectorId::new(0), 1)], false),
+                vec![piece(0, 0, 1)],
+            ),
+        ],
+    )
+    .unwrap();
+
+    assert_eq!(plan.indices()[0].label(), &label("a"));
+    assert_eq!(plan.indices()[0].output_position(), Some(1));
+    assert_eq!(plan.indices()[1].label(), &label("z"));
+    assert_eq!(plan.indices()[1].output_position(), Some(0));
+}
+
+#[test]
 fn rejects_every_range_partition_and_authority_error() {
     assert_eq!(
         DegeneracyRange::new(2, 2),
@@ -159,40 +205,40 @@ fn rejects_every_range_partition_and_authority_error() {
     let leg = SectorLeg::new([(SectorId::new(1), 3)], false);
     let make = |pieces| spec("x", axis(0), leg.clone(), pieces);
     assert!(matches!(
-        SymmetricSlicePlan::try_new(
+        checked(
             &ir,
             vec![spec("missing", axis(0), leg.clone(), vec![piece(1, 0, 3)])]
         ),
         Err(SliceError::UnknownLabel(_))
     ));
     assert!(matches!(
-        SymmetricSlicePlan::try_new(
+        checked(
             &ir,
             vec![make(vec![piece(1, 0, 3)]), make(vec![piece(1, 0, 3)])]
         ),
         Err(SliceError::DuplicateLabel(_))
     ));
     assert!(matches!(
-        SymmetricSlicePlan::try_new(
+        checked(
             &ir,
             vec![spec("x", axis(1), leg.clone(), vec![piece(1, 0, 3)])]
         ),
         Err(SliceError::InvalidAuthority { .. })
     ));
     assert!(matches!(
-        SymmetricSlicePlan::try_new(&ir, vec![make(vec![piece(9, 0, 1)])]),
+        checked(&ir, vec![make(vec![piece(9, 0, 1)])]),
         Err(SliceError::UnknownSector { .. })
     ));
     assert!(matches!(
-        SymmetricSlicePlan::try_new(&ir, vec![make(vec![piece(1, 0, 4)])]),
+        checked(&ir, vec![make(vec![piece(1, 0, 4)])]),
         Err(SliceError::RangeOutOfBounds { .. })
     ));
     assert!(matches!(
-        SymmetricSlicePlan::try_new(&ir, vec![make(vec![piece(1, 0, 2), piece(1, 1, 3)])]),
+        checked(&ir, vec![make(vec![piece(1, 0, 2), piece(1, 1, 3)])]),
         Err(SliceError::OverlappingRanges { .. })
     ));
     assert!(matches!(
-        SymmetricSlicePlan::try_new(&ir, vec![make(vec![piece(1, 0, 1), piece(1, 2, 3)])]),
+        checked(&ir, vec![make(vec![piece(1, 0, 1), piece(1, 2, 3)])]),
         Err(SliceError::IncompleteCoverage { .. })
     ));
 }
@@ -200,8 +246,8 @@ fn rejects_every_range_partition_and_authority_error() {
 #[test]
 fn distinguishes_empty_leg_from_no_sliced_label() {
     let ir = internal_ir();
-    let unsliced = SymmetricSlicePlan::try_new(&ir, vec![]).unwrap();
-    let empty_leg = SymmetricSlicePlan::try_new(
+    let unsliced = checked(&ir, vec![]).unwrap();
+    let empty_leg = checked(
         &ir,
         vec![spec(
             "x",
@@ -222,65 +268,131 @@ fn distinguishes_empty_leg_from_no_sliced_label() {
 
 #[test]
 fn canonical_effective_occurrence_owns_non_self_dual_sector_identity() {
-    let ir = internal_ir();
-    let charge = U1Irrep::new(1);
-    let authority_leg = SectorLeg::new([(charge, 2)], false);
+    let written_labels = [label("p"), label("x")];
+    let effective_labels = vec![written_labels[1].clone(), written_labels[0].clone()];
+    assert_eq!(effective_labels, vec![label("x"), label("p")]);
+    let ir =
+        NetworkIR::from_labels(vec![effective_labels, vec![label("x")]], vec![label("p")]).unwrap();
+    let authority_charge = U1Irrep::new(-1);
+    let authority_leg = SectorLeg::new([(authority_charge, 2)], true);
     let partner_leg = authority_leg.dual(&U1FusionRule);
-    let plan = SymmetricSlicePlan::try_new(
+    let plan = checked(
         &ir,
         vec![spec(
             "x",
-            axis(0),
+            axis_at(0, 0),
             authority_leg.clone(),
-            vec![SectorSlice::new(charge.into(), range(0, 2))],
+            vec![SectorSlice::new(authority_charge.into(), range(0, 2))],
         )],
     )
     .unwrap();
 
-    // `axis(0)` means the first effective occurrence after adjoint rotation;
-    // the partner uses the validated dual space, not another raw schema id.
-    assert_eq!(plan.indices()[0].authority(), axis(0));
+    // This explicitly models the post-adjoint rotation [p,x] -> [x,p]: the
+    // first effective occurrence is the dual q=-1 authority at tensor0 axis0.
+    // Its partner is q=+1, but the schema stores only the authority raw id;
+    // later binding interprets the partner through the validated dual space.
+    assert_eq!(plan.indices()[0].authority(), axis_at(0, 0));
     assert_eq!(plan.indices()[0].authority_leg(), &authority_leg);
-    assert_eq!(partner_leg.sectors(), &[SectorId::from(U1Irrep::new(-1))]);
-    assert!(partner_leg.is_dual());
+    assert_eq!(
+        plan.indices()[0].pieces()[0].sector(),
+        authority_charge.into()
+    );
+    assert_eq!(partner_leg.sectors(), &[SectorId::from(U1Irrep::new(1))]);
+    assert!(!partner_leg.is_dual());
+    assert!(matches!(
+        checked(
+            &ir,
+            vec![spec(
+                "x",
+                axis_at(0, 1),
+                authority_leg,
+                vec![SectorSlice::new(authority_charge.into(), range(0, 2))],
+            )]
+        ),
+        Err(SliceError::InvalidAuthority {
+            expected,
+            actual,
+            ..
+        }) if expected == axis_at(0, 0) && actual == axis_at(0, 1)
+    ));
 }
 
 #[test]
-fn fermion_descriptor_is_coefficient_free_and_structural_zeros_are_valid() {
-    let _fermion_rule = FermionParityFusionRule;
+fn rule_identity_seals_numeric_sector_meaning_without_coefficients() {
     let odd: SectorId = Z2Irrep::ODD.into();
+    let charge_minus_one: SectorId = U1Irrep::new(-1).into();
+    assert_eq!(
+        odd, charge_minus_one,
+        "fixture requires the raw-id collision"
+    );
+    let ir = internal_ir();
+    let shared_spec = || {
+        vec![spec(
+            "x",
+            axis(0),
+            SectorLeg::new([(odd, 1)], false),
+            vec![SectorSlice::new(odd, range(0, 1))],
+        )]
+    };
+    let bosonic =
+        SymmetricSlicePlan::try_new(&ir, Z2FusionRule.rule_identity(), shared_spec()).unwrap();
+    let fermionic =
+        SymmetricSlicePlan::try_new(&ir, FermionParityFusionRule.rule_identity(), shared_spec())
+            .unwrap();
+
+    assert_ne!(bosonic, fermionic);
+    assert_eq!(bosonic.rule_identity(), &Z2FusionRule.rule_identity());
+    assert_eq!(
+        fermionic.rule_identity(),
+        &FermionParityFusionRule.rule_identity()
+    );
+    // Both plans enumerate the same coordinate piece. The identity seal is the
+    // only categorical distinction: no sign or fusion-tree field is introduced.
+    assert_eq!(bosonic.indices(), fermionic.indices());
+    assert_eq!(bosonic.combinations().count(), 1);
+    assert_eq!(fermionic.combinations().count(), 1);
+}
+
+#[test]
+fn structural_zero_sector_combinations_remain_in_enumeration() {
+    let q0: SectorId = U1Irrep::new(0).into();
+    let q1: SectorId = U1Irrep::new(1).into();
+    assert_eq!(U1FusionRule.nsymbol(q1, q1, q0), 0);
+
+    // One effective rank-three tensor carries the fusion-tree boundary
+    // (a,b;c), so the three sliced labels refer to the same N-symbol triple.
     let ir = NetworkIR::from_labels(
-        vec![
-            vec![label("f")],
-            vec![label("f")],
-            vec![label("z")],
-            vec![label("z")],
-        ],
-        vec![],
+        vec![vec![label("a"), label("b"), label("c")]],
+        vec![label("a"), label("b"), label("c")],
     )
     .unwrap();
-    let plan = SymmetricSlicePlan::try_new(
+    let two_sectors = || SectorLeg::new([(q0, 1), (q1, 1)], false);
+    let two_pieces = || {
+        vec![
+            SectorSlice::new(q0, range(0, 1)),
+            SectorSlice::new(q1, range(0, 1)),
+        ]
+    };
+    let plan = checked(
         &ir,
         vec![
+            SymmetricSliceSpec::new(label("a"), axis_at(0, 0), two_sectors(), two_pieces()),
+            SymmetricSliceSpec::new(label("b"), axis_at(0, 1), two_sectors(), two_pieces()),
             SymmetricSliceSpec::new(
-                label("f"),
-                axis(0),
-                SectorLeg::new([(odd, 1)], false),
-                vec![SectorSlice::new(odd, range(0, 1))],
-            ),
-            spec(
-                "z",
-                axis(2),
-                SectorLeg::new([(SectorId::new(8), 2)], false),
-                vec![piece(8, 0, 1), piece(8, 1, 2)],
+                label("c"),
+                axis_at(0, 2),
+                SectorLeg::new([(q0, 1)], false),
+                vec![SectorSlice::new(q0, range(0, 1))],
             ),
         ],
     )
     .unwrap();
 
-    // The schema accepts all Cartesian combinations, including combinations
-    // with no admissible tensor block. Fusion trees and fermionic signs are not
-    // represented or modified here.
-    assert_eq!(plan.nslices(), 2);
-    assert_eq!(plan.indices()[0].pieces()[0].sector(), odd);
+    assert_eq!(plan.nslices(), 4);
+    assert!(plan.combinations().any(|combination| {
+        combination
+            .iter()
+            .map(|piece| piece.sector())
+            .eq([q1, q1, q0])
+    }));
 }
