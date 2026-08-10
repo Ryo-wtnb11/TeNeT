@@ -6481,12 +6481,17 @@ mod tests {
 
     #[test]
     fn block_view_validates_column_major_layout() {
-        let data = [0.0; 6];
+        let data = [10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0];
         let shape = [2, 3];
         let strides = [1, 2];
-        let view = BlockView::new(&data, &shape, &strides, 0).unwrap();
+        let view = BlockView::new(&data, &shape, &strides, 1).unwrap();
         assert_eq!(view.shape(), &[2, 3]);
         assert_eq!(view.strides(), &[1, 2]);
+        assert_eq!(view.get(&[0, 0]), Some(&11.0));
+        assert_eq!(view.get(&[1, 2]), Some(&16.0));
+        assert_eq!(view.get(&[0]), None);
+        assert_eq!(view.get(&[2, 0]), None);
+        assert_eq!(view.get(&[0, 3]), None);
     }
 
     #[test]

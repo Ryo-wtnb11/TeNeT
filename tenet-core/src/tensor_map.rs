@@ -792,6 +792,26 @@ impl<'a, T> BlockView<'a, T> {
     pub fn offset(&self) -> usize {
         self.layout.offset()
     }
+
+    /// Returns the element at `indices`, or `None` when the rank or any index
+    /// is out of bounds.
+    pub fn get(&self, indices: &[usize]) -> Option<&'a T> {
+        if indices.len() != self.shape().len() {
+            return None;
+        }
+        let position = indices
+            .iter()
+            .zip(self.shape())
+            .zip(self.strides())
+            .try_fold(self.offset(), |position, ((&index, &extent), &stride)| {
+                if index >= extent {
+                    None
+                } else {
+                    position.checked_add(index.checked_mul(stride)?)
+                }
+            })?;
+        self.data.get(position)
+    }
 }
 
 #[derive(Debug)]
