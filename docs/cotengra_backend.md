@@ -117,3 +117,8 @@ are the right choice. A persistent Python worker to remove the ~50 ms spawn is
   (`SlicedPlan`, internal=summed / output=stacked) but the ordinary tensor
   executor does not yet execute the slices — path planning only. See
   [issue #93](https://github.com/Ryo-wtnb11/TeNeT/issues/93).
+- **Windows process-group creation errors**: `command-group` 5.0.1 can fail
+  after spawning a suspended child but before returning its handle if Job
+  assignment or thread resumption fails. TeNeT's timeout and unwind guarantees
+  begin after successful group creation; the dependency does not expose the
+  child needed to clean up this rare spawn-error path.

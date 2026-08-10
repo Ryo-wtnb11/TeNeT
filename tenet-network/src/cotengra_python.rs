@@ -382,6 +382,9 @@ fn run_cotengra_python(
 fn spawn_group(command: &mut Command) -> io::Result<GroupChild> {
     #[cfg(windows)]
     {
+        // command-group 5.0.1 can fail after spawning CREATE_SUSPENDED but
+        // before returning GroupChild. TeNeT cannot clean up a handle it never
+        // receives; supervision guarantees begin after this returns Ok.
         command.group().kill_on_drop(true).spawn()
     }
     #[cfg(not(windows))]
@@ -410,7 +413,16 @@ impl ChildGroup for GroupChild {
     type Status = ExitStatus;
 
     fn try_wait(&mut self) -> io::Result<Option<Self::Status>> {
-        GroupChild::try_wait(self)
+        #[cfg(windows)]
+        {
+            // Do not populate GroupChild's leader-status cache: after killing
+            // the Job, wait() must still wait for ACTIVE_PROCESS_ZERO.
+            self.inner().try_wait()
+        }
+        #[cfg(unix)]
+        {
+            GroupChild::try_wait(self)
+        }
     }
 
     fn kill(&mut self) -> io::Result<()> {
@@ -1160,7 +1172,8 @@ mod tests {
     struct FakeState {
         polls: usize,
         kills: usize,
-        reaps: usize,
+        leader_status_observed: bool,
+        group_waits: usize,
     }
 
     struct FakeChild {
@@ -1175,7 +1188,9 @@ mod tests {
         fn try_wait(&mut self) -> io::Result<Option<Self::Status>> {
             let mut state = self.state.borrow_mut();
             state.polls += 1;
-            Ok((Some(state.polls) == self.exit_on_poll).then_some(0))
+            let status = (Some(state.polls) == self.exit_on_poll).then_some(0);
+            state.leader_status_observed |= status.is_some();
+            Ok(status)
         }
 
         fn kill(&mut self) -> io::Result<()> {
@@ -1184,7 +1199,7 @@ mod tests {
         }
 
         fn wait(&mut self) -> io::Result<Self::Status> {
-            self.state.borrow_mut().reaps += 1;
+            self.state.borrow_mut().group_waits += 1;
             Ok(0)
         }
 
@@ -1248,7 +1263,7 @@ mod tests {
         );
         assert_eq!(clock.now, Duration::from_millis(25));
         assert_eq!(state.borrow().kills, 1);
-        assert_eq!(state.borrow().reaps, 1);
+        assert_eq!(state.borrow().group_waits, 1);
     }
 
     #[test]
@@ -1267,8 +1282,25 @@ mod tests {
             Supervision::Exited(0)
         );
         assert_eq!(state.borrow().polls, 4);
+        assert!(state.borrow().leader_status_observed);
         assert_eq!(state.borrow().kills, 1);
-        assert_eq!(state.borrow().reaps, 1);
+        assert_eq!(state.borrow().group_waits, 1);
+    }
+
+    #[test]
+    fn observed_leader_status_still_kills_and_waits_for_group() {
+        let (mut child, state) = fake_child(Some(1));
+        let mut clock = FakeClock::default();
+        let (_sender, failures) = mpsc::channel();
+
+        assert_eq!(
+            supervise_child(&mut child, None, &failures, &mut clock),
+            Supervision::Exited(0)
+        );
+        let state = state.borrow();
+        assert!(state.leader_status_observed);
+        assert_eq!(state.kills, 1);
+        assert_eq!(state.group_waits, 1);
     }
 
     #[test]
@@ -1284,7 +1316,7 @@ mod tests {
                 if reason == "stdin write failed"
         ));
         assert_eq!(state.borrow().kills, 1);
-        assert_eq!(state.borrow().reaps, 1);
+        assert_eq!(state.borrow().group_waits, 1);
     }
 
     #[test]
@@ -1303,11 +1335,11 @@ mod tests {
             }) if cleanup_errors.len() == 1
         ));
         assert_eq!(state.borrow().kills, 1);
-        assert_eq!(state.borrow().reaps, 0);
+        assert_eq!(state.borrow().group_waits, 0);
 
         drop(child);
         assert_eq!(state.borrow().kills, 2);
-        assert_eq!(state.borrow().reaps, 0);
+        assert_eq!(state.borrow().group_waits, 0);
     }
 
     #[test]
@@ -1320,7 +1352,7 @@ mod tests {
         }));
 
         assert_eq!(state.borrow().kills, 1);
-        assert_eq!(state.borrow().reaps, 1);
+        assert_eq!(state.borrow().group_waits, 1);
     }
 
     #[test]
