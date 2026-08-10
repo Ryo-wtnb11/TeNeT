@@ -121,4 +121,5 @@ are the right choice. A persistent Python worker to remove the ~50 ms spawn is
   after spawning a suspended child but before returning its handle if Job
   assignment or thread resumption fails. TeNeT's timeout and unwind guarantees
   begin after successful group creation; the dependency does not expose the
-  child needed to clean up this rare spawn-error path.
+  child needed to clean up this rare spawn-error path. This dependency boundary
+  is tracked in [issue #1048](https://github.com/Ryo-wtnb11/TeNeT/issues/1048).
