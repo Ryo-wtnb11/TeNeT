@@ -826,12 +826,13 @@ fn checked_generic_sliced_late_provider_failure_is_typed_and_recovers() {
     .unwrap();
     let dense = SlicedPlan::new(
         planned.plan().clone(),
-        slice_plan_for(&ir, planned.plan(), &cost, &labels(&["x"])),
+        slice_plan_for(&ir, planned.plan(), &cost, &labels(&["a"])),
     );
     let multi = network
         .lower_symmetric_sliced_plan(&tensors, dense)
         .unwrap();
     let index = &multi.slices().indices()[0];
+    assert_eq!(index.output_position(), Some(0));
     assert_eq!(index.pieces().len(), 2);
     let sector = index.pieces()[0].sector();
     assert!(index.pieces().iter().all(|piece| piece.sector() == sector));
@@ -851,9 +852,10 @@ fn checked_generic_sliced_late_provider_failure_is_typed_and_recovers() {
     .unwrap();
     let single = SymmetricSlicedPlan::new(multi.plan().clone(), single_slice);
 
-    // Warm provider-owned catalogs, then use the one-job execution to locate
-    // the first checked decode after a completed partial. The multi-job run has
-    // the same bind/compile/first-job sequence and strictly more decode calls.
+    // Warm provider-owned catalogs, then use the one-job output execution to
+    // locate the first checked decode after a completed output rectangle. The
+    // two-rectangle run has the same bind/compile/first-job sequence and
+    // strictly more decode calls.
     network
         .execute_symmetric_sliced(&tensors, multi.clone(), usize::MAX)
         .unwrap();
@@ -861,16 +863,16 @@ fn checked_generic_sliced_late_provider_failure_is_typed_and_recovers() {
     network
         .execute_symmetric_sliced(&tensors, single, usize::MAX)
         .unwrap();
-    let first_job_end = provider.decode_calls.load(Ordering::SeqCst);
+    let first_rectangle_end = provider.decode_calls.load(Ordering::SeqCst);
     provider.reset_decodes();
     let (expected, _) = network
         .execute_symmetric_sliced(&tensors, multi.clone(), usize::MAX)
         .unwrap();
     let all_jobs_end = provider.decode_calls.load(Ordering::SeqCst);
-    assert!(first_job_end > 0);
-    assert!(all_jobs_end > first_job_end);
+    assert!(first_rectangle_end > 0);
+    assert!(all_jobs_end > first_rectangle_end);
 
-    provider.arm_decode(first_job_end + 1);
+    provider.arm_decode(first_rectangle_end + 1);
     let error = network
         .execute_symmetric_sliced(&tensors, multi.clone(), usize::MAX)
         .unwrap_err();
@@ -882,7 +884,7 @@ fn checked_generic_sliced_late_provider_failure_is_typed_and_recovers() {
     ));
     assert_eq!(
         provider.decode_calls.load(Ordering::SeqCst),
-        first_job_end + 1
+        first_rectangle_end + 1
     );
 
     provider.reset_decodes();
