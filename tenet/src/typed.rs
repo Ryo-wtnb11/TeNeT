@@ -1492,11 +1492,13 @@ where
     R: TypedSectorAdmission,
     D: TensorScalar,
 {
-    /// Adds every source block into the matching destination block. This is
-    /// the internal accumulation leaf for an unsliced zero destination and a
-    /// structurally smaller internal-slice partial.
+    /// Adds every source block into the matching destination block rectangle.
     #[doc(hidden)]
-    pub fn network_add_subset_assign(&mut self, source: &Self) -> Result<(), Error> {
+    pub fn network_scatter_add_assign(
+        &mut self,
+        source: &Self,
+        ranges: &[Option<std::ops::Range<usize>>],
+    ) -> Result<(), Error> {
         if !self.runtime.same_runtime(&source.runtime) {
             return Err(Error::RuntimeMismatch);
         }
@@ -1504,12 +1506,57 @@ where
         let source_space = source.logical_space().space();
         if destination_space.nout() != source_space.nout()
             || destination_space.nin() != source_space.nin()
-            || destination_space.admission().rule_identity()
-                != source_space.admission().rule_identity()
+            || ranges.len() != destination_space.rank()
+            || !Arc::ptr_eq(
+                self.logical_space().provider_arc(),
+                source.logical_space().provider_arc(),
+            )
         {
             return Err(Error::InvalidArgument(
-                "network slice partial does not match accumulator rank/rule".to_string(),
+                "network slice partial does not match accumulator rank/provider".to_string(),
             ));
+        }
+        let destination_legs = destination_space
+            .homspace()
+            .codomain()
+            .legs()
+            .iter()
+            .chain(destination_space.homspace().domain().legs());
+        let source_legs = source_space
+            .homspace()
+            .codomain()
+            .legs()
+            .iter()
+            .chain(source_space.homspace().domain().legs());
+        for ((destination_leg, source_leg), range) in destination_legs.zip(source_legs).zip(ranges)
+        {
+            match range {
+                None if source_leg == destination_leg => {}
+                None => {
+                    return Err(Error::InvalidArgument(
+                        "network slice unsliced output leg differs from destination".to_string(),
+                    ));
+                }
+                Some(range) => {
+                    let Some((sector, degeneracy)) = source_leg.iter().next() else {
+                        return Err(Error::InvalidArgument(
+                            "network sliced output leg must select one sector".to_string(),
+                        ));
+                    };
+                    if source_leg.iter().nth(1).is_some()
+                        || source_leg.is_dual() != destination_leg.is_dual()
+                        || range.end.checked_sub(range.start) != Some(degeneracy)
+                        || destination_leg
+                            .degeneracy(sector)
+                            .is_none_or(|destination| range.end > destination)
+                    {
+                        return Err(Error::InvalidArgument(
+                            "network sliced output leg does not match destination range"
+                                .to_string(),
+                        ));
+                    }
+                }
+            }
         }
         let TypedTensorRepr::Owned(source_body) = &source.repr else {
             return Err(Error::InvalidArgument(
@@ -1540,11 +1587,12 @@ where
                 "network slice accumulator must have dense payload".to_string(),
             ));
         };
-        tenet_tensors::fusion_subset_add_assign(
+        tenet_tensors::fusion_scatter_add_assign(
             &destination_structure,
             destination_data,
             source_structure,
             source_data,
+            ranges,
         )
         .map_err(Error::from)
     }
@@ -16981,6 +17029,60 @@ mod representation_gates {
             ]
         );
         assert_eq!(materialized_adjoint_builds(&lazy), 0);
+    }
+
+    #[test]
+    fn network_scatter_seals_authority_split_and_zero_block_legs_before_mutation() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let provider = Arc::new(U1FusionRule);
+        let zero = U1Irrep::new(0);
+        let full = GradedSpace::try_new_with_arc(Arc::clone(&provider), [(zero, 2)]).unwrap();
+        let mut destination =
+            TensorMap::<_, f64>::from_block_fn(&runtime, [&full], [&full], |_, ij| {
+                (1 + ij[0] + 2 * ij[1]) as f64
+            })
+            .unwrap();
+        let before = destination.data().to_vec();
+
+        let other_provider = Arc::new(U1FusionRule);
+        let other = GradedSpace::try_new_with_arc(other_provider, [(zero, 2)]).unwrap();
+        let wrong_authority = TensorMap::<_, f64>::zeros(&runtime, [&other], [&other]).unwrap();
+        assert!(destination
+            .network_scatter_add_assign(&wrong_authority, &[None, None])
+            .is_err());
+        assert_eq!(destination.data(), before);
+
+        let wrong_split = TensorMap::<_, f64>::zeros(&runtime, [&full, &full], []).unwrap();
+        assert!(destination
+            .network_scatter_add_assign(&wrong_split, &[None, None])
+            .is_err());
+        assert_eq!(destination.data(), before);
+
+        // A non-vacuum rank-one map has no admissible blocks, so only logical
+        // leg validation can reject malformed scatter metadata.
+        let charged_full =
+            GradedSpace::try_new_with_arc(Arc::clone(&provider), [(U1Irrep::new(1), 2)]).unwrap();
+        let charged_piece =
+            GradedSpace::try_new_with_arc(Arc::clone(&provider), [(U1Irrep::new(1), 1)]).unwrap();
+        let mut empty_destination =
+            TensorMap::<_, f64>::zeros(&runtime, [&charged_full], []).unwrap();
+        let empty_piece = TensorMap::<_, f64>::zeros(&runtime, [&charged_piece], []).unwrap();
+        assert_eq!(empty_destination.block_count(), 0);
+        empty_destination
+            .network_scatter_add_assign(&empty_piece, &[Some(1..2)])
+            .unwrap();
+        assert!(empty_destination
+            .network_scatter_add_assign(&empty_piece, &[Some(2..3)])
+            .is_err());
+
+        let two_sectors =
+            GradedSpace::try_new_with_arc(provider, [(U1Irrep::new(1), 1), (U1Irrep::new(2), 1)])
+                .unwrap();
+        let empty_two = TensorMap::<_, f64>::zeros(&runtime, [&two_sectors], []).unwrap();
+        assert_eq!(empty_two.block_count(), 0);
+        assert!(empty_destination
+            .network_scatter_add_assign(&empty_two, &[Some(0..1)])
+            .is_err());
     }
 
     #[test]

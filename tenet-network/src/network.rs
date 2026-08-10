@@ -592,7 +592,7 @@ impl Network {
                 .map_err(map_payload_error)?;
 
             accumulator
-                .network_add_subset_assign(&partial)
+                .network_scatter_add_assign(&partial, &vec![None; partial.rank()])
                 .map_err(|error| {
                     SymmetricSliceExecutionError::Tensor(HostNetworkError::<R>::from(error))
                 })?;
