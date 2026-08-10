@@ -210,9 +210,10 @@ use tenet_core::{
     BlockView, CanonicalUnitFusionRule, CategoricalScalar, CheckedCanonicalUnitFusionRule,
     CheckedFusionAlgebra, CheckedGenericAdmissionMode, CheckedGenericStructureError,
     CoupledSectorRegion, FusionAlgebraError, FusionProductSpace, FusionTreeHomSpace,
-    FusionTreePairKey, MultiplicityFreeAdmissionMode, MultiplicityFreeRigidSymbols,
-    MultiplicityIndex, PreparedTreePairOperation, ProductFusionRule, ProductSector,
-    ProductSectorCodec, SectorId, SectorLeg, TypedSectorAdmission, UnitLegInsertion,
+    FusionTreePairKey, MultiplicityFreeAdmissionMode, MultiplicityFreeFusionSymbols,
+    MultiplicityFreeRigidSymbols, MultiplicityIndex, PhysicalFusionBasis,
+    PreparedTreePairOperation, ProductFusionRule, ProductSector, ProductSectorCodec, SectorId,
+    SectorLeg, TypedSectorAdmission, UnitLegInsertion,
 };
 use tenet_core::{
     CheckedGenericFusion, CheckedGenericPivotal, CheckedGenericRigidSymbols, HostReadableStorage,
@@ -228,10 +229,11 @@ use tenet_dense::{
 #[cfg(feature = "cuda")]
 use tenet_operations::StorageGemm;
 use tenet_tensors::{
-    tensorcontract_owned_checked_generic, tree_transform_dyn_owned_checked_generic_in_context,
-    BoundDynamicFusionMapSpace, BoundDynamicTensorRef, DynamicFusionMapSpace, OutputAxisOrder,
-    OwnedCatCopy, OwnedCatSide, TensorContractSpec, TreeTransformOperation,
-    TreeTransformOperationKind, ValidatedDynamicFusionLayout,
+    expand_physical_host, project_physical_host, tensorcontract_owned_checked_generic,
+    tree_transform_dyn_owned_checked_generic_in_context, BoundDynamicFusionMapSpace,
+    BoundDynamicTensorRef, DynamicFusionMapSpace, OutputAxisOrder, OwnedCatCopy, OwnedCatSide,
+    TensorContractSpec, TreeTransformOperation, TreeTransformOperationKind,
+    ValidatedDynamicFusionLayout,
 };
 
 pub use tenet_core::SectorCodec;
@@ -243,6 +245,9 @@ pub use tenet_tensors::cuda::CudaStorage;
 #[cfg(feature = "cuda")]
 use tenet_tensors::cuda::CudaStorageGemm;
 pub use tenet_tensors::CheckedGenericPlanError;
+
+/// Error returned by physical-basis expansion and projection.
+pub type PhysicalDenseError<E> = tenet_tensors::PhysicalConversionError<E>;
 
 /// Re-exported so `use tenet::typed::*` is self-sufficient apart from the
 /// provider: every fallible method here returns this error.
@@ -503,6 +508,60 @@ where
     /// remain uncached, and if any step fails, no result is returned.
     pub fn solve_right(&self, rhs: &Self) -> Result<Self, TypedFacadeError<R>> {
         <R::Mode as TypedTensorSolveDispatch<R, D>>::solve_right(self, rhs)
+    }
+}
+
+impl<R, D> TensorMap<R, D>
+where
+    R: MultiplicityFreeRigidSymbols
+        + PhysicalFusionBasis<Scalar = <R as MultiplicityFreeFusionSymbols>::Scalar>,
+    D: TensorScalar
+        + tenet_tensors::RecouplingCoefficientAction<<R as MultiplicityFreeFusionSymbols>::Scalar>,
+{
+    /// Expands the reduced coupled-layout payload into an owned physical-basis
+    /// tensor on the Host.
+    ///
+    /// The returned axes and entries follow [`PhysicalDense`]. The provider's
+    /// carrier basis and fusion coefficients determine the embedding; no
+    /// symmetry-specific dispatch occurs in this method.
+    ///
+    /// Providers opt in at compile time by implementing
+    /// [`PhysicalFusionBasis`]:
+    ///
+    /// ```compile_fail
+    /// use tenet::prelude::{TensorMap, Z2FusionRule};
+    ///
+    /// fn unsupported(tensor: &TensorMap<Z2FusionRule, f64>) {
+    ///     let _ = tensor.to_physical_dense();
+    /// }
+    /// ```
+    pub fn to_physical_dense(
+        &self,
+    ) -> Result<PhysicalDense<D>, PhysicalDenseError<<R as PhysicalFusionBasis>::Error>> {
+        let source = BoundDynamicTensorRef::try_new(self.logical_space(), self.data())?;
+        let (shape, data) = expand_physical_host(source)?;
+        Ok(PhysicalDense { shape, data })
+    }
+
+    /// Projects physical-basis data into this tensor's exact reduced schema.
+    ///
+    /// `self` supplies the runtime, provider allocation, fusion-tree layout,
+    /// offsets, and strides. Its numeric payload is not read or modified. All
+    /// validation and provider queries finish before the returned tensor is
+    /// constructed.
+    pub fn project_physical_dense(
+        &self,
+        physical: &PhysicalDense<D>,
+    ) -> Result<Self, PhysicalDenseError<<R as PhysicalFusionBasis>::Error>> {
+        let data = project_physical_host(
+            self.logical_space(),
+            physical.shape.as_slice(),
+            physical.data.as_slice(),
+        )?;
+        Ok(Self {
+            runtime: self.runtime.clone(),
+            repr: owned_repr(TypedTensorBody::dense(self.logical_space().clone(), data)),
+        })
     }
 }
 
@@ -8551,6 +8610,20 @@ enum TypedTensorRepr<R, D, S = Vec<D>> {
     Adjoint(Arc<TypedAdjointView<R, D, S>>),
 }
 
+/// Owned physical-basis tensor data on the Host.
+///
+/// Axes are ordered as all codomain legs followed by all domain legs. Data is
+/// column-major (axis 0 varies fastest). Within each leg, entries follow that
+/// [`SectorLeg`]'s canonical [`SectorId`] order, then degeneracy, then
+/// carrier-basis index, with the carrier index varying fastest.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PhysicalDense<D> {
+    /// Physical dimension of each axis, in codomain-then-domain order.
+    pub shape: Vec<usize>,
+    /// Column-major physical entries.
+    pub data: Vec<D>,
+}
+
 fn owned_repr<R, D, S>(body: TypedTensorBody<R, D, S>) -> TypedTensorRepr<R, D, S> {
     TypedTensorRepr::Owned(Arc::new(body))
 }
@@ -11241,7 +11314,12 @@ where
     D: TensorScalar,
     S: HostReadableStorage<D>,
 {
-    /// Whole dense payload in the tensor's logical coupled-layout order.
+    /// Whole reduced payload in the tensor's logical coupled-sector layout.
+    ///
+    /// These are fusion-tree-indexed reduced block entries, not entries in the
+    /// physical carrier basis. Use [`Self::to_physical_dense`] when the
+    /// provider implements [`PhysicalFusionBasis`] and physical entries are
+    /// required.
     ///
     /// A lazy adjoint is materialized into host storage at most once across
     /// all clones. The canonical parent payload remains in `S`.
@@ -16202,6 +16280,55 @@ mod representation_gates {
         };
         view.materialized_body_builds
             .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    #[test]
+    fn physical_projection_publishes_only_after_success_on_receiver_authority() {
+        let runtime = Runtime::builder().build().unwrap();
+        let provider = Arc::new(SU2FusionRule);
+        let half = SU2Irrep::from_twice_spin(1);
+        let leg = GradedSpace::try_new_with_arc(Arc::clone(&provider), [(half, 1)]).unwrap();
+        let source = TensorMap::from_block_fn(&runtime, [&leg, &leg, &leg], [&leg], |trees, _| {
+            if trees.codomain_innerlines()[0].twice_spin() == 0 {
+                1.25
+            } else {
+                -0.75
+            }
+        })
+        .unwrap();
+        let target =
+            TensorMap::from_block_fn(&runtime, [&leg, &leg, &leg], [&leg], |_, _| f64::NAN)
+                .unwrap();
+        let target_body = Arc::clone(owned(&target));
+        let target_data = Arc::clone(&target_body.data);
+        let physical = source.to_physical_dense().unwrap();
+        let projected = target.project_physical_dense(&physical).unwrap();
+
+        assert!(projected.runtime.same_runtime(&target.runtime));
+        assert!(Arc::ptr_eq(
+            projected.logical_space().provider_arc(),
+            target.logical_space().provider_arc()
+        ));
+        assert_eq!(
+            projected.logical_space().space(),
+            target.logical_space().space()
+        );
+        assert!(projected
+            .data()
+            .iter()
+            .zip(source.data())
+            .all(|(&actual, &expected)| (actual - expected).abs() < 2.0e-12));
+        assert!(Arc::ptr_eq(owned(&target), &target_body));
+        assert!(Arc::ptr_eq(&owned(&target).data, &target_data));
+        assert!(target.data().iter().all(|value| value.is_nan()));
+
+        let failure = target.project_physical_dense(&PhysicalDense {
+            shape: vec![2, 2],
+            data: vec![0.0; 4],
+        });
+        assert!(failure.is_err());
+        assert!(Arc::ptr_eq(owned(&target), &target_body));
+        assert!(Arc::ptr_eq(&owned(&target).data, &target_data));
     }
 
     fn scalar_structure(keys: &[FusionTreePairKey]) -> BlockStructure {

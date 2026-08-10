@@ -737,6 +737,63 @@ In a real update loop this algebra runs once per bond, with the stored bond
 weights absorbed and re-extracted around each gate. The application linked
 above shows that loop without duplicating it here.
 
+### Physical entries and changing symmetry
+
+[`prelude::TensorMap::data`] is the reduced, fusion-tree-indexed buffer. Use
+[`prelude::TensorMap::to_physical_dense`] when ordinary physical carrier-basis
+entries are needed, and [`prelude::TensorMap::project_physical_dense`] to
+project them into a receiver's exact reduced schema. The receiver supplies the
+runtime, provider, and layout; its numeric values are ignored.
+
+This also gives a clear, explicit route between symmetries. For example, a
+spin-one SU(2) singlet can be expanded and then projected into U(1) sectors
+with doubled charges `q = 2m`. The physical basis order must be aligned first:
+SU(2) uses `(2, 0, -2)`, while the U(1) leg below is stored as `(0, -2, 2)`.
+The permutation is example-local because it describes these two particular
+spaces, not a universal symmetry conversion.
+
+```rust
+use tenet::prelude::*;
+
+fn permute_square<D: Copy>(p: &PhysicalDense<D>, target_to_source: &[usize]) -> Vec<D> {
+    let n = target_to_source.len();
+    assert_eq!(p.shape, [n, n]);
+    (0..n * n)
+        .map(|k| {
+            let i = k % n;
+            let j = k / n;
+            p.data[target_to_source[i] + n * target_to_source[j]]
+        })
+        .collect()
+}
+
+let runtime = Runtime::builder().build()?;
+let spin_one = GradedSpace::try_new(
+    SU2FusionRule,
+    [(SU2Irrep::from_twice_spin(2), 1)],
+)?;
+let singlet: TensorMap<_, f64> =
+    TensorMap::from_block_fn(&runtime, [&spin_one, &spin_one], [], |_, _| 1.0)?;
+let su2 = singlet.to_physical_dense().unwrap();
+
+let charge = GradedSpace::try_new(
+    U1FusionRule,
+    [
+        (U1Irrep::new(0), 1),
+        (U1Irrep::new(-2), 1),
+        (U1Irrep::new(2), 1),
+    ],
+)?;
+let u1_schema: TensorMap<_, f64> = TensorMap::zeros(&runtime, [&charge, &charge], [])?;
+let u1 = PhysicalDense {
+    shape: vec![3, 3],
+    data: permute_square(&su2, &[1, 2, 0]),
+};
+let restricted = u1_schema.project_physical_dense(&u1).unwrap();
+assert_eq!(restricted.block_count(), 3);
+# Ok::<(), Error>(())
+```
+
 ## 6. Under the Hood: the Expert Layers
 
 The provider-typed user layer delegates storage/layout work to four expert
@@ -764,10 +821,12 @@ modules:
   optimizers, slicing types), and the pairwise executor over homogeneous
   [`prelude::TensorMap`] operands.
 
-Storage is column-major inside each dense block; symmetric tensors use the
-TeNeT's canonical **coupled-sector matrix layout** ([`prelude::TensorMap::data`]
-exposes the flat storage). Axis numbers are zero-based, codomain axes
-first.
+Storage is column-major inside each dense block; symmetric tensors use
+TeNeT's canonical **coupled-sector matrix layout**
+([`prelude::TensorMap::data`] exposes this reduced flat storage). It is distinct
+from the physical carrier-basis layout returned by
+[`prelude::TensorMap::to_physical_dense`]. Axis numbers are zero-based,
+codomain axes first.
 
 ### Two expert APIs
 
