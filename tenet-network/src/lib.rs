@@ -57,7 +57,10 @@ pub use cost::{
 };
 #[cfg(feature = "cotengra-python")]
 pub use cotengra_python::CotengraPythonOptimizer;
-pub use error::{ContractError, Result, SliceError, SliceResult, SymmetricSliceLowerError};
+pub use error::{
+    ContractError, Result, SliceError, SliceResult, SymmetricSliceExecutionError,
+    SymmetricSliceLowerError,
+};
 pub use ir::{HyperEdge, NetworkIR, TensorNode};
 pub use labels::{LabelOccurrence, TemporaryLabel, TensorAxis, TensorId};
 pub use network::{
