@@ -362,7 +362,7 @@ impl<E: Display> Display for SymmetricSliceExecutionError<E> {
             ),
             Self::WorkspaceLimitExceeded { limit, required } => write!(
                 formatter,
-                "symmetric sliced execution needs {required} network-owned payload bytes, limit is {limit}"
+                "symmetric sliced execution observed {required} network-owned payload bytes, measured ceiling is {limit}"
             ),
             Self::WorkspaceArithmeticOverflow => {
                 write!(formatter, "symmetric sliced workspace byte count overflowed")

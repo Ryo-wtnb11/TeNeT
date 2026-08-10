@@ -5,7 +5,6 @@ use std::fmt::{self, Debug};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
-#[cfg(feature = "opt-path")]
 use tenet::core::CheckedGenericStructureError;
 use tenet::core::{
     BraidingStyleKind, CheckedGenericAdmissionMode, CheckedGenericFusion, CheckedGenericPivotal,
@@ -20,9 +19,10 @@ use tenet::typed::{
 #[cfg(feature = "opt-path")]
 use tenet_network::Optimizer;
 use tenet_network::{
-    configure_plan_cache, plan_cache_stats, slice_plan_for, tensor, DenseCostModel,
-    DenseTensorInfo, GreedyDenseOptimizer, LabelOrderDenseOptimizer, Network,
-    NetworkExecutionWorkspace, NetworkIR, PlanCacheConfig, PlannedNetwork, SlicedPlan,
+    configure_plan_cache, plan_cache_stats, slice_plan_for, tensor, DegeneracyRange,
+    DenseCostModel, DenseTensorInfo, GreedyDenseOptimizer, LabelOrderDenseOptimizer, Network,
+    NetworkExecutionWorkspace, NetworkIR, PlanCacheConfig, PlannedNetwork, SectorSlice, SlicedPlan,
+    SymmetricSliceExecutionError, SymmetricSlicePlan, SymmetricSliceSpec, SymmetricSlicedPlan,
     TemporaryLabel, TensorId,
 };
 
@@ -370,6 +370,7 @@ fn sun_checked_generic_internal_slice_preserves_outer_multiplicity_keys() {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum InjectedError {
+    Decode,
     Encode,
     Dual,
     Symbol,
@@ -387,6 +388,8 @@ impl std::error::Error for InjectedError {}
 struct InjectedGeneric {
     inner: SUNFusionRule,
     fail_encode: AtomicBool,
+    fail_decode_at: AtomicUsize,
+    decode_calls: AtomicUsize,
     fail_dual: AtomicBool,
     dual_calls: AtomicUsize,
     fail_symbol_at: AtomicUsize,
@@ -398,6 +401,8 @@ impl InjectedGeneric {
         Self {
             inner: SUNFusionRule::new(3).unwrap(),
             fail_encode: AtomicBool::new(false),
+            fail_decode_at: AtomicUsize::new(0),
+            decode_calls: AtomicUsize::new(0),
             fail_dual: AtomicBool::new(false),
             dual_calls: AtomicUsize::new(0),
             fail_symbol_at: AtomicUsize::new(0),
@@ -422,6 +427,16 @@ impl InjectedGeneric {
         } else {
             Ok(())
         }
+    }
+
+    fn reset_decodes(&self) {
+        self.fail_decode_at.store(0, Ordering::SeqCst);
+        self.decode_calls.store(0, Ordering::SeqCst);
+    }
+
+    fn arm_decode(&self, ordinal: usize) {
+        self.decode_calls.store(0, Ordering::SeqCst);
+        self.fail_decode_at.store(ordinal, Ordering::SeqCst);
     }
 }
 
@@ -633,6 +648,10 @@ impl TypedSectorAdmission for InjectedGeneric {
     }
 
     fn try_decode_label(&self, sector: SectorId) -> Result<Self::Sector, Self::Error> {
+        let ordinal = self.decode_calls.fetch_add(1, Ordering::SeqCst) + 1;
+        if self.fail_decode_at.load(Ordering::SeqCst) == ordinal {
+            return Err(InjectedError::Decode);
+        }
         self.inner
             .decode_dynkin(sector)
             .map_err(|_| InjectedError::Provider)
@@ -775,6 +794,101 @@ fn checked_generic_failures_stay_typed_and_workspace_recovers_at_every_step() {
         let case_refs = case_tensors.iter().take(operands).collect::<Vec<_>>();
         assert_injected_recovery(&case_provider, &case_plan, &case_refs, ordinal);
     }
+}
+
+#[test]
+fn checked_generic_sliced_late_provider_failure_is_typed_and_recovers() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(InjectedGeneric::new());
+    let leg = GradedSpace::try_new_with_arc(Arc::clone(&provider), [(vec![1, 1], 2)]).unwrap();
+    let lhs: TensorMap<_, f64> = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, ij| {
+        (1 + ij[0] + 3 * ij[1]) as f64
+    })
+    .unwrap();
+    let rhs: TensorMap<_, f64> = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, ij| {
+        (2 + 2 * ij[0] + ij[1]) as f64
+    })
+    .unwrap();
+    let inputs = vec![labels(&["a", "x"]), labels(&["x", "c"])];
+    let output = labels(&["a", "c"]);
+    let ir = NetworkIR::from_labels(inputs.clone(), output.clone()).unwrap();
+    let network = Network::new(inputs, vec![false; 2], vec![Some(1); 2], output, Some(1)).unwrap();
+    let tensors = [&lhs, &rhs];
+    let planned = network.plan(&tensors, &GreedyDenseOptimizer).unwrap();
+    let cost = DenseCostModel::from_network(
+        &ir,
+        &[
+            DenseTensorInfo::new(vec![2, 2]),
+            DenseTensorInfo::new(vec![2, 2]),
+        ],
+    )
+    .unwrap();
+    let dense = SlicedPlan::new(
+        planned.plan().clone(),
+        slice_plan_for(&ir, planned.plan(), &cost, &labels(&["x"])),
+    );
+    let multi = network
+        .lower_symmetric_sliced_plan(&tensors, dense)
+        .unwrap();
+    let index = &multi.slices().indices()[0];
+    assert_eq!(index.pieces().len(), 2);
+    let sector = index.pieces()[0].sector();
+    assert!(index.pieces().iter().all(|piece| piece.sector() == sector));
+    let single_slice = SymmetricSlicePlan::try_new(
+        &ir,
+        multi.slices().rule_identity().clone(),
+        vec![SymmetricSliceSpec::new(
+            index.label().clone(),
+            index.authority(),
+            index.authority_leg().clone(),
+            vec![SectorSlice::new(
+                sector,
+                DegeneracyRange::new(0, 2).unwrap(),
+            )],
+        )],
+    )
+    .unwrap();
+    let single = SymmetricSlicedPlan::new(multi.plan().clone(), single_slice);
+
+    // Warm provider-owned catalogs, then use the one-job execution to locate
+    // the first checked decode after a completed partial. The multi-job run has
+    // the same bind/compile/first-job sequence and strictly more decode calls.
+    network
+        .execute_symmetric_sliced(&tensors, multi.clone(), usize::MAX)
+        .unwrap();
+    provider.reset_decodes();
+    network
+        .execute_symmetric_sliced(&tensors, single, usize::MAX)
+        .unwrap();
+    let first_job_end = provider.decode_calls.load(Ordering::SeqCst);
+    provider.reset_decodes();
+    let (expected, _) = network
+        .execute_symmetric_sliced(&tensors, multi.clone(), usize::MAX)
+        .unwrap();
+    let all_jobs_end = provider.decode_calls.load(Ordering::SeqCst);
+    assert!(first_job_end > 0);
+    assert!(all_jobs_end > first_job_end);
+
+    provider.arm_decode(first_job_end + 1);
+    let error = network
+        .execute_symmetric_sliced(&tensors, multi.clone(), usize::MAX)
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        SymmetricSliceExecutionError::Tensor(GenericTensorError::Structure(
+            CheckedGenericStructureError::Provider(InjectedError::Decode)
+        ))
+    ));
+    assert_eq!(
+        provider.decode_calls.load(Ordering::SeqCst),
+        first_job_end + 1
+    );
+
+    provider.reset_decodes();
+    let (recovered, _) = network
+        .execute_symmetric_sliced(&tensors, multi, usize::MAX)
+        .unwrap();
+    assert_eq!(recovered.data(), expected.data());
 }
 
 #[test]

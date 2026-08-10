@@ -459,7 +459,11 @@ impl Network {
     /// and permutation destinations, the current partial, the private
     /// accumulator, and path-owned dense buffers. Small metadata and opaque
     /// scratch inside an external backend are excluded because no accounting
-    /// hook exists at that boundary.
+    /// hook exists at that boundary. The ceiling is checked against observed
+    /// payloads after each tensor kernel returns and before publication; it is
+    /// not an allocator reservation or an out-of-memory prevention guarantee.
+    /// A successful return proves that the observed peak did not exceed the
+    /// ceiling.
     pub fn execute_symmetric_sliced<R, D>(
         &self,
         tensors: &[&TensorMap<R, D>],
@@ -2950,6 +2954,66 @@ mod typed_replay_tests {
     fn fermionic_internal_slices_match_unsliced_real_and_complex() {
         assert_fermionic_internal_slice::<f64>();
         assert_fermionic_internal_slice::<Complex64>();
+    }
+
+    #[test]
+    fn fermionic_complex_conjugated_operand_internal_slice_matches_unsliced() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let provider = Arc::new(FermionParityFusionRule);
+        let odd = GradedSpace::try_new_with_arc(provider, [(Z2Irrep::ODD, 2)]).unwrap();
+        let a = TensorMap::from_block_fn(&runtime, [&odd], [&odd], |_, ij| {
+            Complex64::new(
+                (1 + ij[0] + 2 * ij[1]) as f64,
+                (2 + 3 * ij[0] + ij[1]) as f64,
+            )
+        })
+        .unwrap();
+        let b = TensorMap::from_block_fn(&runtime, [&odd], [&odd], |_, ij| {
+            Complex64::new(
+                (2 + 2 * ij[0] + ij[1]) as f64,
+                -((1 + ij[0] + 4 * ij[1]) as f64),
+            )
+        })
+        .unwrap();
+
+        // The first operand is written as [x; a]. Network lowering rotates it
+        // to the effective adjoint order [a; x], so x is the sliced contracted
+        // leg. Nonzero imaginary parts make a missed conjugation observable.
+        let written_inputs = vec![vec![label("x"), label("a")], vec![label("x"), label("c")]];
+        let effective_inputs = vec![vec![label("a"), label("x")], vec![label("x"), label("c")]];
+        let output = vec![label("a"), label("c")];
+        let network = Network::new(
+            written_inputs,
+            vec![true, false],
+            vec![Some(1); 2],
+            output.clone(),
+            Some(1),
+        )
+        .unwrap();
+        let tensors = [&a, &b];
+        let planned = network.plan(&tensors, &GreedyDenseOptimizer).unwrap();
+        let expected = planned.execute(&tensors).unwrap();
+        let ir = NetworkIR::from_labels(effective_inputs, output).unwrap();
+        let cost = DenseCostModel::from_network(
+            &ir,
+            &[
+                DenseTensorInfo::new(vec![2, 2]),
+                DenseTensorInfo::new(vec![2, 2]),
+            ],
+        )
+        .unwrap();
+        let dense = SlicedPlan::new(
+            planned.plan().clone(),
+            crate::slice_plan_for(&ir, planned.plan(), &cost, &[label("x")]),
+        );
+        let sliced = network
+            .lower_symmetric_sliced_plan(&tensors, dense)
+            .unwrap();
+        let (actual, _) = network
+            .execute_symmetric_sliced(&tensors, sliced, usize::MAX)
+            .unwrap();
+        assert_eq!(actual.data(), expected.data());
+        assert!(actual.data().iter().any(|value| value.im != 0.0));
     }
 
     fn crossed_plan() -> PlannedNetwork {
