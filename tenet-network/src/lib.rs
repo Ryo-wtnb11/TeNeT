@@ -66,7 +66,7 @@ pub use labels::{LabelOccurrence, TemporaryLabel, TensorAxis, TensorId};
 pub use network::{
     contract_static_network, contract_static_trace_network, normalize_tensor_operand, Network,
     NetworkExecutionWorkspace, PlannedNetwork, StaticNetworkOperand, StaticTopologySpec,
-    StaticTraceNetworkOperand,
+    StaticTraceNetworkOperand, SymmetricSliceStats,
 };
 pub use optimizer::{
     block_sparse_order_from_labels, greedy_order, greedy_order_block_sparse,
