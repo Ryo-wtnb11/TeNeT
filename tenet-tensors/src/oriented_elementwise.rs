@@ -74,6 +74,154 @@ pub fn validate_oriented_fusion_layout(
     Ok(())
 }
 
+/// Copies one logical degeneracy rectangle from an owned or lazy-adjoint
+/// fusion tensor into a compact destination.
+#[doc(hidden)]
+pub fn oriented_fusion_restrict_into<D>(
+    destination: &BlockStructure,
+    destination_data: &mut [D],
+    source: FusionOperand<'_>,
+    source_data: &[D],
+    logical_starts: &[usize],
+) -> Result<(), OperationError>
+where
+    D: Copy
+        + Add<D, Output = D>
+        + Mul<D, Output = D>
+        + PartialEq
+        + Zero
+        + One
+        + ConjugateValue
+        + strided_kernel::MaybeSendSync,
+{
+    if destination_data.len() != destination.required_len()?
+        || source_data.len() != source.storage_space().required_len()?
+        || logical_starts.len() != destination.rank()
+    {
+        return Err(OperationError::StructureMismatch {
+            tensor: "oriented degeneracy restriction storage",
+        });
+    }
+    for destination_index in 0..destination.block_count() {
+        let destination_block = destination.block(destination_index)?;
+        let BlockKey::FusionTree(logical_key) = destination_block.key() else {
+            return Err(OperationError::StructureMismatch {
+                tensor: "oriented degeneracy restriction destination",
+            });
+        };
+        let source_block = source
+            .storage_space()
+            .structure()
+            .block(storage_block_index(source, logical_key)?)?;
+        let destination_stride = |axis| {
+            isize::try_from(destination_block.strides()[axis])
+                .map_err(|_| OperationError::ElementCountOverflow)
+        };
+        let source_stride = |axis| {
+            isize::try_from(source_block.strides()[source.storage_axis(axis)?])
+                .map_err(|_| OperationError::ElementCountOverflow)
+        };
+        let mut source_offset = source_block.offset();
+        for axis in 0..destination.rank() {
+            let storage_axis = source.storage_axis(axis)?;
+            let source_extent = source_block.shape()[storage_axis];
+            let end = logical_starts[axis]
+                .checked_add(destination_block.shape()[axis])
+                .ok_or(OperationError::ElementCountOverflow)?;
+            if end > source_extent {
+                return Err(OperationError::StructureMismatch {
+                    tensor: "oriented degeneracy restriction rectangle",
+                });
+            }
+            source_offset = source_offset
+                .checked_add(
+                    logical_starts[axis]
+                        .checked_mul(source_block.strides()[storage_axis])
+                        .ok_or(OperationError::ElementCountOverflow)?,
+                )
+                .ok_or(OperationError::ElementCountOverflow)?;
+            destination_stride(axis)?;
+            source_stride(axis)?;
+        }
+        tensoradd_raw_strided_kernel_mapped(
+            destination_data,
+            source_data,
+            destination_block.shape(),
+            destination_stride,
+            source_stride,
+            checked_offset(destination_block.offset())?,
+            checked_offset(source_offset)?,
+            source.storage_conjugate(),
+            D::one(),
+            D::zero(),
+        )?;
+    }
+    Ok(())
+}
+
+/// Adds an exact-shape subset of fusion-tree blocks into a larger key set.
+#[doc(hidden)]
+pub fn fusion_subset_add_assign<D>(
+    destination: &BlockStructure,
+    destination_data: &mut [D],
+    source: &BlockStructure,
+    source_data: &[D],
+) -> Result<(), OperationError>
+where
+    D: Copy
+        + Add<D, Output = D>
+        + Mul<D, Output = D>
+        + PartialEq
+        + Zero
+        + One
+        + ConjugateValue
+        + strided_kernel::MaybeSendSync,
+{
+    if destination_data.len() != destination.required_len()?
+        || source_data.len() != source.required_len()?
+        || destination.rank() != source.rank()
+    {
+        return Err(OperationError::StructureMismatch {
+            tensor: "fusion subset accumulation storage",
+        });
+    }
+    for source_index in 0..source.block_count() {
+        let source_block = source.block(source_index)?;
+        let destination_index = destination
+            .find_block_index_by_key(source_block.key())
+            .ok_or_else(|| OperationError::MissingBlockKey {
+                key: Box::new(source_block.key().clone()),
+            })?;
+        let destination_block = destination.block(destination_index)?;
+        if source_block.shape() != destination_block.shape() {
+            return Err(OperationError::StructureMismatch {
+                tensor: "fusion subset accumulation block",
+            });
+        }
+        let destination_stride = |axis| {
+            isize::try_from(destination_block.strides()[axis])
+                .map_err(|_| OperationError::ElementCountOverflow)
+        };
+        let source_stride = |axis| {
+            isize::try_from(source_block.strides()[axis])
+                .map_err(|_| OperationError::ElementCountOverflow)
+        };
+        tensoradd_raw_strided_kernel_mapped(
+            destination_data,
+            source_data,
+            source_block.shape(),
+            destination_stride,
+            source_stride,
+            checked_offset(destination_block.offset())?,
+            checked_offset(source_block.offset())?,
+            false,
+            D::one(),
+            D::one(),
+        )?;
+    }
+    Ok(())
+}
+
 #[doc(hidden)]
 #[allow(clippy::too_many_arguments)]
 pub fn oriented_fusion_add_into<D>(
