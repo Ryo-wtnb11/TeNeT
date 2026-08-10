@@ -20,8 +20,10 @@ use tenet::typed::{
 #[cfg(feature = "opt-path")]
 use tenet_network::Optimizer;
 use tenet_network::{
-    configure_plan_cache, plan_cache_stats, tensor, GreedyDenseOptimizer, LabelOrderDenseOptimizer,
-    Network, NetworkExecutionWorkspace, PlanCacheConfig, PlannedNetwork, TemporaryLabel, TensorId,
+    configure_plan_cache, plan_cache_stats, slice_plan_for, tensor, DenseCostModel,
+    DenseTensorInfo, GreedyDenseOptimizer, LabelOrderDenseOptimizer, Network,
+    NetworkExecutionWorkspace, NetworkIR, PlanCacheConfig, PlannedNetwork, SlicedPlan,
+    TemporaryLabel, TensorId,
 };
 
 fn labels(names: &[&str]) -> Vec<TemporaryLabel> {
@@ -305,6 +307,65 @@ fn sun_checked_generic_network_matches_manual_explicit_greedy_macro_and_replay()
         assert_sun_network::<f64>(n, label.clone());
         assert_sun_network::<Complex64>(n, label);
     }
+}
+
+#[test]
+fn sun_checked_generic_internal_slice_preserves_outer_multiplicity_keys() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(SUNFusionRule::new(3).unwrap());
+    let label = vec![1, 1];
+    let leg = GradedSpace::try_new_with_arc(Arc::clone(&provider), [(label, 2)]).unwrap();
+    let lhs: TensorMap<_, Complex64> =
+        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], |trees, indices| {
+            Complex64::value(20_000 + marker(trees, indices))
+        })
+        .unwrap();
+    assert!((0..lhs.block_count()).any(|index| {
+        lhs.block_fusion_trees(index)
+            .unwrap()
+            .codomain_vertices()
+            .iter()
+            .any(|vertex| vertex.get() == 2)
+    }));
+    let rhs: TensorMap<_, Complex64> =
+        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |trees, indices| {
+            Complex64::value(30_000 + marker(trees, indices))
+        })
+        .unwrap();
+    let inputs = vec![labels(&["a", "b", "x"]), labels(&["x", "d"])];
+    let output = labels(&["a", "b", "d"]);
+    let network = Network::new(
+        inputs.clone(),
+        vec![false; 2],
+        vec![Some(2), Some(1)],
+        output.clone(),
+        Some(2),
+    )
+    .unwrap();
+    let tensors = [&lhs, &rhs];
+    let planned = network.plan(&tensors, &GreedyDenseOptimizer).unwrap();
+    let expected = planned.execute(&tensors).unwrap();
+    let ir = NetworkIR::from_labels(inputs, output).unwrap();
+    let cost = DenseCostModel::from_network(
+        &ir,
+        &[
+            DenseTensorInfo::new(vec![2, 2, 2]),
+            DenseTensorInfo::new(vec![2, 2]),
+        ],
+    )
+    .unwrap();
+    let dense = SlicedPlan::new(
+        planned.plan().clone(),
+        slice_plan_for(&ir, planned.plan(), &cost, &labels(&["x"])),
+    );
+    let sliced = network
+        .lower_symmetric_sliced_plan(&tensors, dense)
+        .unwrap();
+    let (actual, peak) = network
+        .execute_symmetric_sliced(&tensors, sliced, usize::MAX)
+        .unwrap();
+    assert!(peak > 0);
+    assert_same(&actual, &expected);
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
