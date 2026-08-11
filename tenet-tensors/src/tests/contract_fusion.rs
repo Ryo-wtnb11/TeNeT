@@ -11,6 +11,72 @@ fn fusion_context_explicit_backend_arguments_remain_source_compatible() {
     > = Default::default();
 }
 
+#[test]
+fn fibonacci_complex_provider_replays_crossing_free_prepared_contraction() {
+    use tenet_core::{FibonacciFusionRule, FibonacciSector, SectorCodec};
+
+    // What: PR1 carries the provider's Complex64 coefficient type through the
+    // public prepare/replay contraction lane. Anyonic crossings are intentionally
+    // absent: ordinary contraction must not infer them; #633 owns explicit planar lowering.
+    let rule = FibonacciFusionRule;
+    let tau = rule.encode_sector(&FibonacciSector::Tau).unwrap();
+    let leg = || SectorLeg::new([(tau, 1)], false);
+    let hom = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg()]),
+        FusionProductSpace::new([leg()]),
+    );
+    let space = FusionTensorMapSpace::from_degeneracy_shapes(
+        TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+        hom,
+        &rule,
+        [vec![1, 1]],
+    )
+    .unwrap();
+    let lhs = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
+        vec![Complex64::new(2.0, 1.0)],
+        space.clone(),
+    )
+    .unwrap();
+    let rhs = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
+        vec![Complex64::new(3.0, -2.0)],
+        space.clone(),
+    )
+    .unwrap();
+    let mut dst = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
+        vec![Complex64::new(0.0, 0.0)],
+        space,
+    )
+    .unwrap();
+    let axes = TensorContractSpec::with_default_output_order(&[1], &[0]);
+    let mut context = TensorContractFusionExecutionContext::<
+        Complex64,
+        RuleIdentity,
+        DenseTreeTransformOperations,
+        DenseTreeTransformOperations,
+        Complex64,
+    >::default();
+    let prepared = context
+        .prepare_tensorcontract_fusion(&rule, &dst, &lhs, &rhs, axes)
+        .unwrap();
+
+    for _ in 0..2 {
+        dst.data_mut()[0] = Complex64::new(0.0, 0.0);
+        context
+            .execute_prepared_tensorcontract_fusion(
+                &prepared,
+                &rule,
+                &mut dst,
+                &lhs,
+                &rhs,
+                Complex64::new(1.0, 0.0),
+                Complex64::new(0.0, 0.0),
+            )
+            .unwrap();
+    }
+
+    assert_eq!(dst.data(), &[Complex64::new(8.0, -1.0)]);
+}
+
 // Mutation oracle for unchecked internal rigid-symbol providers, not a
 // physically coherent ribbon category.
 #[derive(Clone, Copy, Debug)]
