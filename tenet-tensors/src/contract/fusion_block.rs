@@ -222,15 +222,27 @@ pub(crate) fn core_contract_derivations() -> (usize, usize) {
 
 /// Adapts a [`TensorContractBackend`] + workspace pair onto the replay
 /// layer's [`Rank2Gemm`] seam.
-pub(crate) struct BackendRank2Gemm<'a, B, W> {
+pub(crate) struct BackendRank2Gemm<'a, B, W, C = f64> {
     pub(crate) backend: &'a mut B,
     pub(crate) workspace: &'a mut W,
+    pub(crate) coefficient: std::marker::PhantomData<C>,
 }
 
-impl<'a, B, D> Rank2Gemm<D> for BackendRank2Gemm<'a, B, B::Workspace>
+impl<'a, B, W, C> BackendRank2Gemm<'a, B, W, C> {
+    pub(crate) fn new(backend: &'a mut B, workspace: &'a mut W) -> Self {
+        Self {
+            backend,
+            workspace,
+            coefficient: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<'a, B, D, C> Rank2Gemm<D> for BackendRank2Gemm<'a, B, B::Workspace, C>
 where
-    B: TensorContractBackend<D, f64>,
-    D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
+    B: TensorContractBackend<D, C>,
+    D: DenseBlockScalar + RecouplingCoefficientAction<C>,
+    C: Copy + num_traits::One,
 {
     fn matmul_rank2(
         &mut self,
@@ -312,7 +324,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn tensorcontract_core_fusion_blocks_into_raw<A, B, R, D>(
+pub(crate) fn tensorcontract_core_fusion_blocks_into_raw<A, B, R, D, C>(
     kernels: &mut A,
     backend: &mut B,
     workspace: &mut B::Workspace,
@@ -329,9 +341,10 @@ pub(crate) fn tensorcontract_core_fusion_blocks_into_raw<A, B, R, D>(
 ) -> Result<(), OperationError>
 where
     A: HostKernelAdapter<D>,
-    B: TensorContractBackend<D, f64>,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
+    B: TensorContractBackend<D, C>,
+    R: MultiplicityFreeRigidSymbols<Scalar = C>,
+    D: DenseBlockScalar + RecouplingCoefficientAction<C>,
+    C: DenseBlockScalar,
 {
     let plan = compile_fusion_block_contract_plan(rule, dst_space, lhs_space, rhs_space, axes)?;
     tensorcontract_core_fusion_blocks_with_plan_into_raw(
@@ -341,11 +354,11 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn tensorcontract_core_fusion_blocks_with_plan_into_raw<A, B, D>(
+pub(crate) fn tensorcontract_core_fusion_blocks_with_plan_into_raw<A, B, D, C>(
     kernels: &mut A,
     backend: &mut B,
     workspace: &mut B::Workspace,
-    plan: &FusionBlockContractPlan,
+    plan: &FusionBlockContractPlan<C>,
     dst_space: &DynamicFusionMapSpace,
     dst_data: &mut [D],
     lhs_space: &DynamicFusionMapSpace,
@@ -357,13 +370,14 @@ pub(crate) fn tensorcontract_core_fusion_blocks_with_plan_into_raw<A, B, D>(
 ) -> Result<(), OperationError>
 where
     A: HostKernelAdapter<D>,
-    B: TensorContractBackend<D, f64>,
-    D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
+    B: TensorContractBackend<D, C>,
+    D: DenseBlockScalar + RecouplingCoefficientAction<C>,
+    C: DenseBlockScalar,
 {
     let mut fusion_workspace = FusionBlockContractWorkspace::<D>::default();
     plan.execute_raw(
         kernels,
-        &mut BackendRank2Gemm { backend, workspace },
+        &mut BackendRank2Gemm::new(backend, workspace),
         &mut fusion_workspace,
         dst_space.structure(),
         dst_data,
@@ -792,10 +806,7 @@ mod tests {
         let mut fusion_workspace = FusionBlockContractWorkspace::<f64>::default();
         plan.execute_raw(
             &mut crate::StridedHostKernelAdapter::default(),
-            &mut BackendRank2Gemm {
-                backend: &mut dense,
-                workspace: &mut dense_workspace,
-            },
+            &mut BackendRank2Gemm::<_, _, f64>::new(&mut dense, &mut dense_workspace),
             &mut fusion_workspace,
             dst.structure(),
             &mut output,
@@ -896,10 +907,7 @@ mod tests {
         let mut fusion_workspace = FusionBlockContractWorkspace::<f64>::default();
         plan.execute_raw(
             &mut crate::StridedHostKernelAdapter::default(),
-            &mut BackendRank2Gemm {
-                backend: &mut dense,
-                workspace: &mut dense_workspace,
-            },
+            &mut BackendRank2Gemm::<_, _, f64>::new(&mut dense, &mut dense_workspace),
             &mut fusion_workspace,
             dst.structure(),
             &mut output,
@@ -1011,7 +1019,7 @@ mod tests {
         )
         .unwrap();
         let dynamic = DynamicFusionMapSpace::from_typed(&space);
-        let layout = FusionBlockMatrixLayout::compile_generic(&dynamic).unwrap();
+        let layout = FusionBlockMatrixLayout::<f64>::compile_generic(&dynamic).unwrap();
 
         // What: first destination occurrence fixes group order, while distinct
         // row/column vertex labels retain their full Cartesian block set.
@@ -1070,7 +1078,7 @@ mod tests {
         let dst = space();
 
         reset_layout_lookups();
-        let plan = compile_fusion_block_contract_plan_generic(
+        let plan = compile_fusion_block_contract_plan_generic::<_, f64>(
             &rule,
             &dst,
             &lhs,
@@ -1086,10 +1094,7 @@ mod tests {
         let mut fusion_workspace = FusionBlockContractWorkspace::<f64>::default();
         plan.execute_raw(
             &mut crate::StridedHostKernelAdapter::default(),
-            &mut BackendRank2Gemm {
-                backend: &mut dense,
-                workspace: &mut dense_workspace,
-            },
+            &mut BackendRank2Gemm::<_, _, f64>::new(&mut dense, &mut dense_workspace),
             &mut fusion_workspace,
             dst.structure(),
             &mut output,
@@ -1190,10 +1195,7 @@ mod tests {
         let mut fusion_workspace = FusionBlockContractWorkspace::<f64>::default();
         plan.execute_raw(
             &mut crate::StridedHostKernelAdapter::default(),
-            &mut BackendRank2Gemm {
-                backend: &mut backend,
-                workspace: &mut workspace,
-            },
+            &mut BackendRank2Gemm::<_, _, f64>::new(&mut backend, &mut workspace),
             &mut fusion_workspace,
             &structure,
             &mut expected,
@@ -1468,10 +1470,7 @@ mod tests {
         let mut workspace = TensorContractWorkspace::default();
         plan.execute_raw(
             &mut crate::StridedHostKernelAdapter::default(),
-            &mut BackendRank2Gemm {
-                backend: &mut backend,
-                workspace: &mut workspace,
-            },
+            &mut BackendRank2Gemm::<_, _, f64>::new(&mut backend, &mut workspace),
             &mut FusionBlockContractWorkspace::default(),
             space.structure(),
             &mut actual,
@@ -1634,10 +1633,7 @@ mod tests {
 
         plan.execute_storage_workspace(
             &mut crate::StridedHostKernelAdapter::default(),
-            &mut BackendRank2Gemm {
-                backend: &mut backend,
-                workspace: &mut workspace,
-            },
+            &mut BackendRank2Gemm::<_, _, f64>::new(&mut backend, &mut workspace),
             &mut fusion_workspace,
             &mut dst,
             &lhs,
@@ -1654,13 +1650,16 @@ mod tests {
     }
 }
 
-fn compile_direct_coupled_region_plan(
+fn compile_direct_coupled_region_plan<C>(
     dst_space: &DynamicFusionMapSpace,
     lhs_storage: &DynamicFusionMapSpace,
     rhs_storage: &DynamicFusionMapSpace,
     lhs_op: MatrixOp,
     rhs_op: MatrixOp,
-) -> Result<Option<FusionBlockContractPlan>, OperationError> {
+) -> Result<Option<FusionBlockContractPlan<C>>, OperationError>
+where
+    C: DenseBlockScalar,
+{
     FusionBlockContractPlan::try_from_canonical_coupled_regions_with_ops(
         dst_space.structure(),
         dst_space.nout(),
@@ -1673,14 +1672,17 @@ fn compile_direct_coupled_region_plan(
     )
 }
 
-fn compile_scaled_direct_coupled_region_plan(
+fn compile_scaled_direct_coupled_region_plan<C>(
     dst_space: &DynamicFusionMapSpace,
     lhs_storage: &DynamicFusionMapSpace,
     rhs_storage: &DynamicFusionMapSpace,
     lhs_op: MatrixOp,
     rhs_op: MatrixOp,
-    alpha_by_coupled: &[(SectorId, f64)],
-) -> Result<Option<FusionBlockContractPlan>, OperationError> {
+    alpha_by_coupled: &[(SectorId, C)],
+) -> Result<Option<FusionBlockContractPlan<C>>, OperationError>
+where
+    C: DenseBlockScalar,
+{
     FusionBlockContractPlan::try_from_canonical_coupled_regions_with_ops_and_alpha(
         dst_space.structure(),
         dst_space.nout(),
@@ -1707,7 +1709,11 @@ pub(crate) fn try_compile_oriented_canonical_core_plan<R>(
     dst_space: &DynamicFusionMapSpace,
     lhs_storage: &DynamicFusionMapSpace,
     rhs_storage: &DynamicFusionMapSpace,
-) -> Result<Option<FusionBlockContractPlan>, OperationError> {
+) -> Result<Option<FusionBlockContractPlan<R::Scalar>>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
+{
     let matrix_op = |orientation| match orientation {
         FusionTreePairOrientation::Direct => MatrixOp::Identity,
         FusionTreePairOrientation::Adjoint => MatrixOp::Adjoint,
@@ -1726,8 +1732,12 @@ pub(crate) fn try_compile_scaled_canonical_core_plan<R>(
     dst_space: &DynamicFusionMapSpace,
     lhs_storage: &DynamicFusionMapSpace,
     rhs_storage: &DynamicFusionMapSpace,
-    alpha_by_coupled: &[(SectorId, f64)],
-) -> Result<Option<FusionBlockContractPlan>, OperationError> {
+    alpha_by_coupled: &[(SectorId, R::Scalar)],
+) -> Result<Option<FusionBlockContractPlan<R::Scalar>>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
+{
     let matrix_op = |orientation| match orientation {
         FusionTreePairOrientation::Direct => MatrixOp::Identity,
         FusionTreePairOrientation::Adjoint => MatrixOp::Adjoint,
@@ -1748,9 +1758,10 @@ pub(crate) fn compile_fusion_block_contract_plan<R>(
     lhs_space: &DynamicFusionMapSpace,
     rhs_space: &DynamicFusionMapSpace,
     axes: TensorContractSpec<'_>,
-) -> Result<FusionBlockContractPlan, OperationError>
+) -> Result<FusionBlockContractPlan<R::Scalar>, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
 {
     validate_fusion_contract_rule(rule, dst_space, lhs_space, rhs_space)?;
     reject_fusion_contract_conjugation(axes)?;
@@ -1770,9 +1781,10 @@ pub(crate) fn compile_fusion_block_contract_plan_validated<R>(
     dst_space: &DynamicFusionMapSpace,
     lhs_space: &DynamicFusionMapSpace,
     rhs_space: &DynamicFusionMapSpace,
-) -> Result<FusionBlockContractPlan, OperationError>
+) -> Result<FusionBlockContractPlan<R::Scalar>, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
 {
     let rule = validated.preflight.rule;
 
@@ -1826,9 +1838,10 @@ pub(crate) fn compile_fusion_block_contract_plan_prelowered_validated<R>(
     dst_space: &DynamicFusionMapSpace,
     lhs: &FusionOperandLayout<'_>,
     rhs: &FusionOperandLayout<'_>,
-) -> Result<FusionBlockContractPlan, OperationError>
+) -> Result<FusionBlockContractPlan<R::Scalar>, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
 {
     let rule = validated.preflight.rule;
     let lhs_op = match lhs.orientation() {
@@ -1904,15 +1917,16 @@ where
 /// A contraction whose source or output is NOT in core form (open contracted
 /// legs needing a source tree-pair transform) is an explicit B3c-2 error: the
 /// generic source-transform contract path is Stage B3c-2, not this stage.
-pub(crate) fn compile_fusion_block_contract_plan_generic<R>(
+pub(crate) fn compile_fusion_block_contract_plan_generic<R, C>(
     rule: &R,
     dst_space: &DynamicFusionMapSpace,
     lhs_space: &DynamicFusionMapSpace,
     rhs_space: &DynamicFusionMapSpace,
     axes: TensorContractSpec<'_>,
-) -> Result<FusionBlockContractPlan, OperationError>
+) -> Result<FusionBlockContractPlan<C>, OperationError>
 where
     R: FusionRule,
+    C: DenseBlockScalar,
 {
     validate_fusion_contract_rule(rule, dst_space, lhs_space, rhs_space)?;
     // Hardening guard (adversarial review, Stage B3c-1 refute pass): the
@@ -1949,9 +1963,9 @@ where
         return Ok(plan);
     }
 
-    let lhs_layout = FusionBlockMatrixLayout::compile_generic(lhs_space)?;
-    let rhs_layout = FusionBlockMatrixLayout::compile_generic(rhs_space)?;
-    let dst_layout = FusionBlockMatrixLayout::compile_generic(dst_space)?;
+    let lhs_layout = FusionBlockMatrixLayout::<C>::compile_generic(lhs_space)?;
+    let rhs_layout = FusionBlockMatrixLayout::<C>::compile_generic(rhs_space)?;
+    let dst_layout = FusionBlockMatrixLayout::<C>::compile_generic(dst_space)?;
 
     let mut groups = Vec::new();
     let mut active_dst_blocks = HashSet::<usize>::new();
@@ -2139,17 +2153,20 @@ where
 }
 
 #[derive(Clone, Debug)]
-struct FusionBlockMatrixLayout {
-    groups: Vec<FusionBlockMatrixGroup>,
+struct FusionBlockMatrixLayout<C = f64> {
+    groups: Vec<FusionBlockMatrixGroup<C>>,
     // Why not sort for a merge walk: expert block layouts retain first
     // destination occurrence order, while this compile-time map preserves it.
     group_indices: FxHashMap<SectorId, usize>,
 }
 
-impl FusionBlockMatrixLayout {
+impl<C> FusionBlockMatrixLayout<C>
+where
+    C: DenseBlockScalar,
+{
     fn compile<R>(rule: &R, space: &DynamicFusionMapSpace) -> Result<Self, OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+        R: MultiplicityFreeRigidSymbols<Scalar = C>,
     {
         #[cfg(test)]
         FUSION_LAYOUT_COMPILES.set(FUSION_LAYOUT_COMPILES.get() + 1);
@@ -2204,7 +2221,7 @@ impl FusionBlockMatrixLayout {
         op: MatrixOp,
     ) -> Result<Self, OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+        R: MultiplicityFreeRigidSymbols<Scalar = C>,
     {
         #[cfg(test)]
         FUSION_LAYOUT_COMPILES.set(FUSION_LAYOUT_COMPILES.get() + 1);
@@ -2318,7 +2335,7 @@ impl FusionBlockMatrixLayout {
         })
     }
 
-    fn group(&self, coupled: SectorId) -> Option<&FusionBlockMatrixGroup> {
+    fn group(&self, coupled: SectorId) -> Option<&FusionBlockMatrixGroup<C>> {
         #[cfg(test)]
         record_fusion_group_lookup();
         self.group_indices
@@ -2468,9 +2485,10 @@ impl FusionBlockMatrixGroupBuilder {
         self,
         _rule: &R,
         space: &DynamicFusionMapSpace,
-    ) -> Result<FusionBlockMatrixGroup, OperationError>
+    ) -> Result<FusionBlockMatrixGroup<R::Scalar>, OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+        R: MultiplicityFreeRigidSymbols,
+        R::Scalar: DenseBlockScalar,
     {
         let mut subblocks = Vec::with_capacity(self.blocks.len());
         let block_indices = self.blocks;
@@ -2546,9 +2564,10 @@ impl FusionBlockMatrixGroupBuilder {
         _rule: &R,
         source: &FusionOperandLayout<'_>,
         op: MatrixOp,
-    ) -> Result<FusionBlockMatrixGroup, OperationError>
+    ) -> Result<FusionBlockMatrixGroup<R::Scalar>, OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+        R: MultiplicityFreeRigidSymbols,
+        R::Scalar: DenseBlockScalar,
     {
         let storage = source.storage_space();
         let physical_rows = match op {
@@ -2636,11 +2655,14 @@ impl FusionBlockMatrixGroupBuilder {
     /// `R::Scalar::one()` returns on the mult-free path. Takes no rule (the
     /// layout math is symmetry-agnostic once blocks are grouped by coupled
     /// sector).
-    fn finish_generic(
+    fn finish_generic<C>(
         self,
         structure: &Arc<tenet_core::BlockStructure>,
         nout: usize,
-    ) -> Result<FusionBlockMatrixGroup, OperationError> {
+    ) -> Result<FusionBlockMatrixGroup<C>, OperationError>
+    where
+        C: DenseBlockScalar,
+    {
         let mut subblocks = Vec::with_capacity(self.blocks.len());
         let block_indices = self.blocks;
         for &block_index in &block_indices {
@@ -2683,7 +2705,7 @@ impl FusionBlockMatrixGroupBuilder {
             // assumes a bosonic rule; `compile_fusion_block_contract_plan_generic`
             // guards the entry against non-bosonic rules so that assumption is
             // never silently violated here.
-            let coefficient = 1.0_f64;
+            let coefficient = C::one();
             subblocks.push(FusionSubblockMatrixLayout {
                 block: FusionStridedBlockLayout {
                     shape: block.shape().to_vec(),

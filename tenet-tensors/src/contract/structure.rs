@@ -72,7 +72,7 @@ pub(crate) const PLAIN_TENSORCONTRACT_FUSION_REQUIRES_FUSION_API: &str =
 pub(crate) const PLAIN_TENSORCONTRACT_BLOCK_SPARSE_UNSUPPORTED: &str =
     "block-sparse contraction enumeration is not implemented yet";
 
-impl TensorContractStructure {
+impl TensorContractStructure<f64> {
     pub fn compile<
         TDst,
         TLhs,
@@ -130,83 +130,6 @@ impl TensorContractStructure {
         )
     }
 
-    pub fn compile_with_block_specs<
-        TDst,
-        TLhs,
-        TRhs,
-        const DST_NOUT: usize,
-        const DST_NIN: usize,
-        const LHS_NOUT: usize,
-        const LHS_NIN: usize,
-        const RHS_NOUT: usize,
-        const RHS_NIN: usize,
-        SDst,
-        SLhs,
-        SRhs,
-        DDst,
-        DLhs,
-        DRhs,
-    >(
-        dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst, DDst>,
-        lhs: &TensorMap<TLhs, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
-        rhs: &TensorMap<TRhs, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
-        axes: TensorContractSpec<'_>,
-        block_specs: &[TensorContractBlockSpec],
-    ) -> Result<Self, OperationError>
-    where
-        DDst: TensorStorage<TDst>,
-        DLhs: TensorStorage<TLhs>,
-        DRhs: TensorStorage<TRhs>,
-    {
-        Self::compile_shared_structures_with_block_specs(
-            Arc::clone(dst.structure()),
-            Arc::clone(lhs.structure()),
-            Arc::clone(rhs.structure()),
-            Arc::clone(lhs.structure()),
-            Arc::clone(rhs.structure()),
-            axes,
-            block_specs,
-        )
-    }
-
-    pub fn compile_structures_with_block_specs(
-        dst_structure: &BlockStructure,
-        lhs_structure: &BlockStructure,
-        rhs_structure: &BlockStructure,
-        axes: TensorContractSpec<'_>,
-        block_specs: &[TensorContractBlockSpec],
-    ) -> Result<Self, OperationError> {
-        Self::compile_shared_structures_with_block_specs(
-            Arc::new(dst_structure.clone()),
-            Arc::new(lhs_structure.clone()),
-            Arc::new(rhs_structure.clone()),
-            Arc::new(lhs_structure.clone()),
-            Arc::new(rhs_structure.clone()),
-            axes,
-            block_specs,
-        )
-    }
-
-    pub(crate) fn compile_shared_structures_with_block_specs_and_storage(
-        dst_structure: Arc<BlockStructure>,
-        lhs_structure: Arc<BlockStructure>,
-        rhs_structure: Arc<BlockStructure>,
-        lhs_storage_structure: Arc<BlockStructure>,
-        rhs_storage_structure: Arc<BlockStructure>,
-        axes: TensorContractSpec<'_>,
-        block_specs: &[TensorContractBlockSpec],
-    ) -> Result<Self, OperationError> {
-        Self::compile_shared_structures_with_block_specs(
-            dst_structure,
-            lhs_structure,
-            rhs_structure,
-            lhs_storage_structure,
-            rhs_storage_structure,
-            axes,
-            block_specs,
-        )
-    }
-
     fn compile_shared_structures(
         dst_structure: Arc<BlockStructure>,
         lhs_structure: Arc<BlockStructure>,
@@ -233,6 +156,88 @@ impl TensorContractStructure {
             &block_specs,
         )
     }
+}
+
+impl<C> TensorContractStructure<C>
+where
+    C: Copy + One,
+{
+    pub fn compile_with_block_specs<
+        TDst,
+        TLhs,
+        TRhs,
+        const DST_NOUT: usize,
+        const DST_NIN: usize,
+        const LHS_NOUT: usize,
+        const LHS_NIN: usize,
+        const RHS_NOUT: usize,
+        const RHS_NIN: usize,
+        SDst,
+        SLhs,
+        SRhs,
+        DDst,
+        DLhs,
+        DRhs,
+    >(
+        dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst, DDst>,
+        lhs: &TensorMap<TLhs, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
+        rhs: &TensorMap<TRhs, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
+        axes: TensorContractSpec<'_>,
+        block_specs: &[TensorContractBlockSpec<C>],
+    ) -> Result<Self, OperationError>
+    where
+        DDst: TensorStorage<TDst>,
+        DLhs: TensorStorage<TLhs>,
+        DRhs: TensorStorage<TRhs>,
+    {
+        Self::compile_shared_structures_with_block_specs(
+            Arc::clone(dst.structure()),
+            Arc::clone(lhs.structure()),
+            Arc::clone(rhs.structure()),
+            Arc::clone(lhs.structure()),
+            Arc::clone(rhs.structure()),
+            axes,
+            block_specs,
+        )
+    }
+
+    pub fn compile_structures_with_block_specs(
+        dst_structure: &BlockStructure,
+        lhs_structure: &BlockStructure,
+        rhs_structure: &BlockStructure,
+        axes: TensorContractSpec<'_>,
+        block_specs: &[TensorContractBlockSpec<C>],
+    ) -> Result<Self, OperationError> {
+        Self::compile_shared_structures_with_block_specs(
+            Arc::new(dst_structure.clone()),
+            Arc::new(lhs_structure.clone()),
+            Arc::new(rhs_structure.clone()),
+            Arc::new(lhs_structure.clone()),
+            Arc::new(rhs_structure.clone()),
+            axes,
+            block_specs,
+        )
+    }
+
+    pub(crate) fn compile_shared_structures_with_block_specs_and_storage(
+        dst_structure: Arc<BlockStructure>,
+        lhs_structure: Arc<BlockStructure>,
+        rhs_structure: Arc<BlockStructure>,
+        lhs_storage_structure: Arc<BlockStructure>,
+        rhs_storage_structure: Arc<BlockStructure>,
+        axes: TensorContractSpec<'_>,
+        block_specs: &[TensorContractBlockSpec<C>],
+    ) -> Result<Self, OperationError> {
+        Self::compile_shared_structures_with_block_specs(
+            dst_structure,
+            lhs_structure,
+            rhs_structure,
+            lhs_storage_structure,
+            rhs_storage_structure,
+            axes,
+            block_specs,
+        )
+    }
 
     fn compile_shared_structures_with_block_specs(
         dst_structure: Arc<BlockStructure>,
@@ -241,7 +246,7 @@ impl TensorContractStructure {
         lhs_storage_structure: Arc<BlockStructure>,
         rhs_storage_structure: Arc<BlockStructure>,
         axes: TensorContractSpec<'_>,
-        block_specs: &[TensorContractBlockSpec],
+        block_specs: &[TensorContractBlockSpec<C>],
     ) -> Result<Self, OperationError> {
         Self::compile_shared_structures_with_block_specs_inner(
             dst_structure,
@@ -261,7 +266,7 @@ impl TensorContractStructure {
         lhs_storage_structure: Arc<BlockStructure>,
         rhs_storage_structure: Arc<BlockStructure>,
         axes: TensorContractSpec<'_>,
-        block_specs: &[TensorContractBlockSpec],
+        block_specs: &[TensorContractBlockSpec<C>],
     ) -> Result<Self, OperationError> {
         let dst_rank = dst_structure.rank();
         let lhs_rank = lhs_structure.rank();
@@ -453,12 +458,9 @@ pub struct TensorContractBlockSpec<C = f64> {
     coefficient: C,
 }
 
-impl<C> TensorContractBlockSpec<C>
-where
-    C: One,
-{
+impl TensorContractBlockSpec<f64> {
     pub fn new(dst_block: usize, lhs_block: usize, rhs_block: usize) -> Self {
-        Self::with_coefficient(dst_block, lhs_block, rhs_block, C::one())
+        Self::with_coefficient(dst_block, lhs_block, rhs_block, 1.0)
     }
 }
 

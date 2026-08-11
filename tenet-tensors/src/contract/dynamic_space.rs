@@ -860,7 +860,7 @@ impl<'a> FusionOperandLayout<'a> {
         primer: LayoutKeyBuilder<R>,
     ) -> Result<DynamicFusionMapSpace, OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+        R: MultiplicityFreeRigidSymbols,
     {
         let (codomain_axes, domain_axes) = tree_transform_operation_axes(operation);
         let capability = LayoutBuildCapability::Legacy(primer);
@@ -1373,7 +1373,7 @@ where
         shapes: Shapes,
     ) -> Result<Self, OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+        R: MultiplicityFreeRigidSymbols,
         Shapes: IntoIterator,
         Shapes::Item: Into<Vec<usize>>,
     {
@@ -1391,7 +1391,7 @@ where
         shapes: Shapes,
     ) -> Result<Self, OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra,
+        R: MultiplicityFreeRigidSymbols + CheckedFusionAlgebra,
         Shapes: IntoIterator,
         Shapes::Item: Into<Vec<usize>>,
     {
@@ -1507,7 +1507,7 @@ where
         provider: Arc<R>,
     ) -> Result<Self, OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra,
+        R: MultiplicityFreeRigidSymbols + CheckedFusionAlgebra,
     {
         space.validate_rule(provider.as_ref())?;
         validate_bound_space_invariants(&space)?;
@@ -1544,7 +1544,7 @@ where
         rhs_axes: &[usize],
     ) -> Result<Self, OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+        R: MultiplicityFreeRigidSymbols,
     {
         if lhs.provider.rule_identity() != rhs.provider.rule_identity() {
             return Err(OperationError::from_core_preserving_context(
@@ -1582,7 +1582,7 @@ where
         output_order: OutputAxisOrder<'_>,
     ) -> Result<Self, OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+        R: MultiplicityFreeRigidSymbols,
     {
         Self::validate_shared_provider(lhs, rhs)?;
         let axes = TensorContractSpec::new(lhs_axes, rhs_axes, output_order);
@@ -1616,7 +1616,7 @@ where
         homspace: FusionTreeHomSpace,
     ) -> Result<Self, OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+        R: MultiplicityFreeRigidSymbols,
     {
         let space = DynamicFusionMapSpace::from_final_homspace(provider.as_ref(), homspace)?;
         Self::from_derived(provider, space)
@@ -1628,7 +1628,7 @@ where
         homspace: FusionTreeHomSpace,
     ) -> Result<Self, OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra,
+        R: MultiplicityFreeRigidSymbols + CheckedFusionAlgebra,
     {
         let layout_build = LayoutBuildCapability::checked();
         let prepared = layout_build.prepare(provider.as_ref(), &homspace)?;
@@ -1655,7 +1655,7 @@ where
         homspace: FusionTreeHomSpace,
     ) -> Result<Self, OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra,
+        R: MultiplicityFreeRigidSymbols + CheckedFusionAlgebra,
     {
         let layout_build = LayoutBuildCapability::checked();
         let prepared = layout_build.prepare(provider.as_ref(), &homspace)?;
@@ -1766,7 +1766,7 @@ where
         operation: &TreeTransformOperation,
     ) -> Result<Self, OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+        R: MultiplicityFreeRigidSymbols,
     {
         let space = self.space.transformed_with_primer(
             self.provider.as_ref(),
@@ -1866,7 +1866,7 @@ where
         build_shapes: BuildShapes,
     ) -> Result<Self, OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+        R: MultiplicityFreeRigidSymbols,
         BuildShapes: FnOnce(&[FusionTreePairKey]) -> Result<Shapes, OperationError>,
         Shapes: IntoIterator,
         Shapes::Item: Into<Vec<usize>>,
@@ -1893,7 +1893,7 @@ where
         shapes: Shapes,
     ) -> Result<Self, OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+        R: MultiplicityFreeRigidSymbols,
         Shapes: IntoIterator,
         Shapes::Item: Into<Vec<usize>>,
     {
@@ -1915,7 +1915,7 @@ where
         homspace: FusionTreeHomSpace,
     ) -> Result<Self, OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+        R: MultiplicityFreeRigidSymbols,
     {
         let prepared = self
             .layout_build
@@ -1971,7 +1971,7 @@ impl DynamicFusionMapSpace {
         homspace: FusionTreeHomSpace,
     ) -> Result<Self, OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+        R: MultiplicityFreeRigidSymbols,
     {
         Self::from_final_homspace_with_primer(rule, homspace, encoded_layout_primer::<R>)
     }
@@ -1982,7 +1982,7 @@ impl DynamicFusionMapSpace {
         primer: LayoutKeyBuilder<R>,
     ) -> Result<Self, OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+        R: MultiplicityFreeRigidSymbols,
     {
         let prepared = dispatch_prepare(primer, rule, &homspace)?;
         Self::from_final_homspace_with_prepared(rule, homspace, prepared)
@@ -1994,7 +1994,7 @@ impl DynamicFusionMapSpace {
         prepared: PreparedLayoutKeys,
     ) -> Result<Self, OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+        R: MultiplicityFreeRigidSymbols,
     {
         observe_final_result_layout_build();
         let staged = match prepared {
@@ -2107,7 +2107,7 @@ impl DynamicFusionMapSpace {
         shapes: Shapes,
     ) -> Result<Self, OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+        R: MultiplicityFreeRigidSymbols,
         Shapes: IntoIterator,
         Shapes::Item: Into<Vec<usize>>,
     {
@@ -2125,7 +2125,7 @@ impl DynamicFusionMapSpace {
         build_keys: BuildKeys,
     ) -> Result<Self, OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+        R: MultiplicityFreeRigidSymbols,
         Shapes: IntoIterator,
         Shapes::Item: Into<Vec<usize>>,
         BuildKeys: FnOnce(&R, &FusionTreeHomSpace) -> Result<PreparedLayoutKeys, OperationError>,
@@ -2183,7 +2183,7 @@ impl DynamicFusionMapSpace {
         operation: &TreeTransformOperation,
     ) -> Result<Self, OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+        R: MultiplicityFreeRigidSymbols,
     {
         Self::from_typed(source).transformed(rule, operation)
     }
@@ -2198,7 +2198,7 @@ impl DynamicFusionMapSpace {
         operation: &TreeTransformOperation,
     ) -> Result<Self, OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+        R: MultiplicityFreeRigidSymbols,
     {
         self.transformed_with_primer(rule, operation, encoded_layout_primer::<R>)
     }
@@ -2210,7 +2210,7 @@ impl DynamicFusionMapSpace {
         primer: LayoutKeyBuilder<R>,
     ) -> Result<Self, OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+        R: MultiplicityFreeRigidSymbols,
     {
         self.validate_rule(rule)?;
         let source = self;
@@ -2234,7 +2234,7 @@ impl DynamicFusionMapSpace {
         operation: &TreeTransformOperation,
     ) -> Result<TransformedLayoutProbe, OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+        R: MultiplicityFreeRigidSymbols,
     {
         self.validate_rule(rule)?;
         let (codomain_axes, domain_axes) = tree_transform_operation_axes(operation);
@@ -2392,7 +2392,7 @@ impl DynamicFusionMapSpace {
         rhs_axes: &[usize],
     ) -> Result<Self, OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+        R: MultiplicityFreeRigidSymbols,
     {
         let axes = TensorContractSpec::with_default_output_order(lhs_axes, rhs_axes);
         Self::contracted_with_spec(rule, lhs, rhs, axes)
@@ -2406,7 +2406,7 @@ impl DynamicFusionMapSpace {
         axes: TensorContractSpec<'_>,
     ) -> Result<Self, OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+        R: MultiplicityFreeRigidSymbols,
     {
         Self::contracted_with_spec_and_primer(rule, lhs, rhs, axes, encoded_layout_primer::<R>)
     }
@@ -2419,7 +2419,7 @@ impl DynamicFusionMapSpace {
         primer: LayoutKeyBuilder<R>,
     ) -> Result<Self, OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+        R: MultiplicityFreeRigidSymbols,
     {
         lhs.validate_rule(rule)?;
         rhs.validate_rule(rule)?;
@@ -2456,7 +2456,7 @@ impl DynamicFusionMapSpace {
         rhs_axes: &[usize],
     ) -> Result<(), OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+        R: MultiplicityFreeRigidSymbols,
     {
         Self::validate_contracted_homspace_with_primer(
             rule,
@@ -2477,7 +2477,7 @@ impl DynamicFusionMapSpace {
         primer: LayoutKeyBuilder<R>,
     ) -> Result<(), OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+        R: MultiplicityFreeRigidSymbols,
     {
         lhs.validate_rule(rule)?;
         rhs.validate_rule(rule)?;
@@ -2508,7 +2508,7 @@ impl DynamicFusionMapSpace {
         plan: &FusionContractPlan,
     ) -> Result<Self, OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+        R: MultiplicityFreeRigidSymbols,
     {
         Self::core_dst_with_primer(rule, lhs, rhs, plan, encoded_layout_primer::<R>)
     }
@@ -2521,7 +2521,7 @@ impl DynamicFusionMapSpace {
         primer: LayoutKeyBuilder<R>,
     ) -> Result<Self, OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+        R: MultiplicityFreeRigidSymbols,
     {
         let nout = plan.core_dst_open_lhs_rank();
         let nin = plan.core_dst_open_rhs_rank();
@@ -2546,7 +2546,7 @@ impl DynamicFusionMapSpace {
         primer: LayoutKeyBuilder<R>,
     ) -> Result<Self, OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+        R: MultiplicityFreeRigidSymbols,
     {
         let axis_plan = TensorContractAxisPlan::compile(lhs.rank(), rhs.rank(), nout + nin, axes)?;
         Self::contracted_space_from_plan(rule, lhs, rhs, axes, &axis_plan, nout, nin, primer)
@@ -2567,7 +2567,7 @@ impl DynamicFusionMapSpace {
         primer: LayoutKeyBuilder<R>,
     ) -> Result<Self, OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+        R: MultiplicityFreeRigidSymbols,
     {
         let (homspace, prepared) =
             Self::contracted_homspace_from_plan(rule, lhs, rhs, axes, axis_plan, nout, primer)?;
@@ -2586,7 +2586,7 @@ impl DynamicFusionMapSpace {
         primer: LayoutKeyBuilder<R>,
     ) -> Result<(FusionTreeHomSpace, PreparedLayoutKeys), OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+        R: MultiplicityFreeRigidSymbols,
     {
         LayoutBuildCapability::Legacy(primer).contract(
             rule,
@@ -3990,7 +3990,7 @@ mod checked_metadata_tests {
 
     fn assert_final_homspace_matches_shape_oracle<R>(provider: Arc<R>, homspace: FusionTreeHomSpace)
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra,
+        R: MultiplicityFreeRigidSymbols + CheckedFusionAlgebra,
     {
         let shapes = shapes_from_tree_keys(provider.as_ref(), &homspace);
         let oracle = BoundDynamicFusionMapSpace::from_degeneracy_shapes_lowered(
@@ -4430,7 +4430,7 @@ mod checked_metadata_tests {
         homspace: FusionTreeHomSpace,
         expected: FusionAlgebraError,
     ) where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra,
+        R: MultiplicityFreeRigidSymbols + CheckedFusionAlgebra,
     {
         let _guard = CACHE_TEST_LOCK
             .lock()

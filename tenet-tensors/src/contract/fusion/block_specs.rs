@@ -8,7 +8,7 @@ use tenet_core::{
 };
 
 use crate::lowering::lower_tensorcontract_adjoint_axes;
-use crate::OperationError;
+use crate::{DenseBlockScalar, OperationError};
 use tenet_operations::TensorContractSpec;
 
 use super::super::dynamic_space::{
@@ -29,7 +29,17 @@ fn dual_sector<R>(
     primer: LayoutKeyBuilder<R>,
 ) -> Result<SectorId, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
+    R::Scalar: DenseBlockScalar,
+    R::Scalar: DenseBlockScalar,
+    R::Scalar: DenseBlockScalar,
+    R::Scalar: DenseBlockScalar,
+    R::Scalar: DenseBlockScalar,
+    R::Scalar: DenseBlockScalar,
+    R::Scalar: DenseBlockScalar,
+    R::Scalar: DenseBlockScalar,
+    R::Scalar: DenseBlockScalar,
 {
     match primer(rule, MetadataRequest::DualSector { sector })? {
         MetadataOutput::Sector(dual) => Ok(dual),
@@ -43,7 +53,8 @@ fn all_sectors_self_dual<R>(
     primer: Option<LayoutKeyBuilder<R>>,
 ) -> Result<bool, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
 {
     for key in homspace.fusion_tree_keys(rule).iter() {
         for tree in [key.codomain_tree(), key.domain_tree()] {
@@ -143,9 +154,10 @@ pub fn tensorcontract_fusion_structure<
     lhs: &TensorMap<TLhs, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
     rhs: &TensorMap<TRhs, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
     axes: TensorContractSpec<'_>,
-) -> Result<TensorContractStructure, OperationError>
+) -> Result<TensorContractStructure<R::Scalar>, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
     DDst: TensorStorage<TDst>,
     DLhs: TensorStorage<TLhs>,
     DRhs: TensorStorage<TRhs>,
@@ -179,9 +191,10 @@ pub fn tensorcontract_fusion_structure_dyn<R>(
     lhs_storage_structure: Arc<tenet_core::BlockStructure>,
     rhs_storage_structure: Arc<tenet_core::BlockStructure>,
     axes: TensorContractSpec<'_>,
-) -> Result<TensorContractStructure, OperationError>
+) -> Result<TensorContractStructure<R::Scalar>, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
 {
     // Why not accept a separate rule: a caller must not be able to pair a
     // layout with a second semantic provider after the checked bind boundary.
@@ -204,9 +217,10 @@ pub(crate) fn tensorcontract_fusion_structure_dyn_raw<R>(
     lhs_storage_structure: Arc<tenet_core::BlockStructure>,
     rhs_storage_structure: Arc<tenet_core::BlockStructure>,
     axes: TensorContractSpec<'_>,
-) -> Result<TensorContractStructure, OperationError>
+) -> Result<TensorContractStructure<R::Scalar>, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
 {
     dst.validate_rule(rule)?;
     lhs.validate_rule(rule)?;
@@ -264,9 +278,10 @@ pub(crate) fn tensorcontract_fusion_structure_dyn_prelowered<R>(
     rhs: &FusionOperandLayout<'_>,
     axes: TensorContractSpec<'_>,
     primer: LayoutKeyBuilder<R>,
-) -> Result<TensorContractStructure, OperationError>
+) -> Result<TensorContractStructure<R::Scalar>, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
 {
     dst.validate_rule(rule)?;
     if (axes.lhs_conjugate() && !all_sectors_self_dual(rule, lhs.homspace(), Some(primer))?)
@@ -360,9 +375,10 @@ fn tensorcontract_fusion_structure_from_spaces<R>(
     lhs_storage_structure: std::sync::Arc<tenet_core::BlockStructure>,
     rhs_storage_structure: std::sync::Arc<tenet_core::BlockStructure>,
     axes: TensorContractSpec<'_>,
-) -> Result<TensorContractStructure, OperationError>
+) -> Result<TensorContractStructure<R::Scalar>, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
 {
     let block_specs = tensorcontract_fusion_block_specs_lowered(rule, dst, lhs, rhs, axes)?;
     TensorContractStructure::compile_shared_structures_with_block_specs_and_storage(
@@ -390,9 +406,10 @@ pub fn tensorcontract_fusion_block_specs<
     lhs: &FusionTensorMapSpace<LHS_NOUT, LHS_NIN>,
     rhs: &FusionTensorMapSpace<RHS_NOUT, RHS_NIN>,
     axes: TensorContractSpec<'_>,
-) -> Result<Vec<TensorContractBlockSpec>, OperationError>
+) -> Result<Vec<TensorContractBlockSpec<R::Scalar>>, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
 {
     let dst = DynamicFusionMapSpace::from_typed(dst);
     let lhs = DynamicFusionMapSpace::from_typed(lhs);
@@ -408,9 +425,10 @@ fn tensorcontract_fusion_block_specs_lowered<R, S>(
     lhs: &S,
     rhs: &S,
     axes: TensorContractSpec<'_>,
-) -> Result<Vec<TensorContractBlockSpec>, OperationError>
+) -> Result<Vec<TensorContractBlockSpec<R::Scalar>>, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
     S: ContractBlockSource,
 {
     let dst_nout = dst.nout();
@@ -458,9 +476,10 @@ fn tensorcontract_core_fusion_block_specs<R, S>(
     lhs: &S,
     rhs: &S,
     axis_plan: &TensorContractAxisPlan,
-) -> Result<Vec<TensorContractBlockSpec>, OperationError>
+) -> Result<Vec<TensorContractBlockSpec<R::Scalar>>, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
     S: ContractBlockSource,
 {
     let mut specs = Vec::new();
@@ -536,9 +555,10 @@ fn tensorcontract_transformed_fusion_block_specs<R, S>(
     rhs: &S,
     axis_plan: &TensorContractAxisPlan,
     dst_codomain_rank: usize,
-) -> Result<Vec<TensorContractBlockSpec>, OperationError>
+) -> Result<Vec<TensorContractBlockSpec<R::Scalar>>, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
     S: ContractBlockSource,
 {
     let output_codomain_axes = &axis_plan.output_axes[..dst_codomain_rank];
@@ -656,9 +676,10 @@ pub(crate) fn rhs_contract_twist_factor<R>(
     rhs: &FusionTreeHomSpace,
     rhs_contracting_axes: &[usize],
     rhs_core_codomain: &FusionTreeKey,
-) -> Result<f64, OperationError>
+) -> Result<R::Scalar, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
 {
     rhs_contract_twist_factor_oriented(
         rule,
@@ -673,9 +694,10 @@ pub(crate) fn rhs_contract_twist_factor_oriented<R>(
     rhs: OrientedFusionTreeHomSpace<'_>,
     rhs_contracting_axes: &[usize],
     rhs_core_codomain: &FusionTreeKey,
-) -> Result<f64, OperationError>
+) -> Result<R::Scalar, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
 {
     if rule.braiding_style() != BraidingStyleKind::Fermionic {
         return Ok(R::Scalar::one());
@@ -696,7 +718,7 @@ where
                 rank: rhs.rank(),
             })?
         {
-            factor *= rule.twist_scalar(rhs_core_codomain.uncoupled()[position]);
+            factor = factor * rule.twist_scalar(rhs_core_codomain.uncoupled()[position]);
         }
     }
     Ok(factor)

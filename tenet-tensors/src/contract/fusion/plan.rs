@@ -3,7 +3,7 @@ use tenet_core::{
 };
 
 use crate::lowering::lower_tensorcontract_adjoint_axes;
-use crate::{OperationError, TreeTransformOperation, TreeTransformOperationKind};
+use crate::{DenseBlockScalar, OperationError, TreeTransformOperation, TreeTransformOperationKind};
 use tenet_operations::{OutputAxisOrder, TensorContractSpec, TensorContractSpecOwned};
 
 use super::super::dynamic_space::{
@@ -386,7 +386,8 @@ pub fn prepare_tensorcontract_fusion_plan<
     axes: TensorContractSpec<'_>,
 ) -> Result<FusionContractPlan, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
 {
     dst.validate_rule(rule)?;
     lhs.validate_rule(rule)?;
@@ -409,7 +410,8 @@ pub fn prepare_tensorcontract_fusion_plan_dyn<R>(
     axes: TensorContractSpec<'_>,
 ) -> Result<FusionContractPlan, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
 {
     // Why not accept a separate rule: the bound spaces are the semantic
     // authority. The raw core still performs cheap identity checks without
@@ -431,7 +433,8 @@ pub(crate) fn prepare_tensorcontract_fusion_plan_dyn_raw<R>(
     axes: TensorContractSpec<'_>,
 ) -> Result<FusionContractPlan, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
 {
     prepare_tensorcontract_fusion_plan_dyn_raw_with_orientations(
         rule,
@@ -451,7 +454,8 @@ pub(crate) fn prepare_tensorcontract_fusion_plan_dyn_raw_canonical<R>(
     axes: TensorContractSpec<'_>,
 ) -> Result<FusionContractPlan, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
 {
     prepare_tensorcontract_fusion_plan_dyn_raw_with_orientations(
         rule,
@@ -472,7 +476,8 @@ fn prepare_tensorcontract_fusion_plan_dyn_raw_with_orientations<R>(
     orientations: &[FusionContractOrientation],
 ) -> Result<FusionContractPlan, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
 {
     dst.validate_rule(rule)?;
     lhs.validate_rule(rule)?;
@@ -514,7 +519,8 @@ pub(crate) fn prepare_tensorcontract_fusion_plan_dyn_prelowered_canonical<R>(
     primer: LayoutKeyBuilder<R>,
 ) -> Result<FusionContractPlan, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
 {
     prepare_tensorcontract_fusion_plan_from_operands(
         rule,
@@ -550,7 +556,8 @@ pub(crate) fn prepare_tensorcontract_fusion_plan_dyn_raw_with_axis_order<R>(
     candidate: &ContractAxisOrderCandidate,
 ) -> Result<FusionContractPlan, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
 {
     fn same_axes(a: &[usize], b: &[usize]) -> bool {
         let mut a = a.to_vec();
@@ -587,7 +594,8 @@ pub(crate) fn prepare_tensorcontract_fusion_plan_dyn_raw_with_axis_order_and_ori
     orientation: FusionContractOrientation,
 ) -> Result<FusionContractPlan, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
 {
     let plan = prepare_tensorcontract_fusion_plan_dyn_raw_with_axis_order(
         rule, dst, lhs, rhs, axes, candidate,
@@ -659,7 +667,8 @@ fn prepare_tensorcontract_fusion_plan_dyn_raw_fixed<R>(
     axes: TensorContractSpec<'_>,
 ) -> Result<FusionContractPlan, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
 {
     dst.validate_rule(rule)?;
     lhs.validate_rule(rule)?;
@@ -700,7 +709,8 @@ pub(crate) fn prepare_tensorcontract_fusion_candidate_facts_dyn_raw<R>(
     axes: TensorContractSpec<'_>,
 ) -> Result<Vec<FusionContractCandidateFacts>, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
 {
     dst.validate_rule(rule)?;
     lhs.validate_rule(rule)?;
@@ -747,7 +757,8 @@ fn select_tensorcontract_fusion_plan_from_spaces_with_orientations<R>(
     orientations: &[FusionContractOrientation],
 ) -> Result<FusionContractPlan, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
 {
     select_tensorcontract_fusion_plan_from_spaces_with_probe_and_orientations(
         rule,
@@ -778,7 +789,8 @@ fn fusion_contract_candidate_facts_from_spaces_with_probe<R>(
     orientations: &[FusionContractOrientation],
 ) -> Result<Vec<FusionContractCandidateFacts>, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
 {
     validate_tensorcontract_fusion_plan_inputs(rule, dst, lhs, rhs, axes, primer)?;
     orientations
@@ -881,7 +893,8 @@ fn encoded_layout_probe<R>(
     _primer: Option<LayoutKeyBuilder<R>>,
 ) -> Result<TransformedLayoutProbe, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
 {
     space.transformed_layout_probe(rule, operation)
 }
@@ -903,7 +916,8 @@ fn select_tensorcontract_fusion_plan_from_spaces_with_probe<R>(
     primer: Option<LayoutKeyBuilder<R>>,
 ) -> Result<FusionContractPlan, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
 {
     select_tensorcontract_fusion_plan_from_spaces_with_probe_and_orientations(
         rule,
@@ -933,7 +947,8 @@ fn select_tensorcontract_fusion_plan_from_spaces_with_probe_and_orientations<R, 
     orientations: &[FusionContractOrientation],
 ) -> Result<FusionContractPlan, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
     S: ContractPlanSource,
     P: for<'a> Fn(
             &'a R,
@@ -1000,7 +1015,8 @@ fn prepare_tensorcontract_fusion_plan_from_operands<R, P>(
     primer: LayoutKeyBuilder<R>,
 ) -> Result<FusionContractPlan, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
     P: for<'a> Fn(
             &'a R,
             &'a FusionOperandLayout<'_>,
@@ -1042,7 +1058,8 @@ fn source_contract_homspace_requires_twist<R>(
     contracting_axes: &[usize],
 ) -> Result<bool, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
 {
     // Why not permute a loser HomSpace: external-axis duality is unchanged by
     // the candidate permutation, so core-right twist can be read at its source axes.
@@ -1186,7 +1203,8 @@ fn score_complete_fusion_contract_candidate<R, S>(
     plan: &FusionContractPlan,
 ) -> Result<FusionContractCandidateFacts, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
     S: ContractPlanSource,
 {
     #[cfg(test)]
@@ -1245,7 +1263,8 @@ fn score_fusion_contract_candidate<R, S, P>(
     primer: Option<LayoutKeyBuilder<R>>,
 ) -> Result<ScoredFusionContractCandidate, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
     S: ContractPlanSource,
     P: for<'a> Fn(
             &'a R,
@@ -1309,7 +1328,8 @@ fn validate_tensorcontract_fusion_plan_inputs<R, S>(
     primer: Option<LayoutKeyBuilder<R>>,
 ) -> Result<(), OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
     S: ContractPlanSource,
 {
     #[cfg(test)]
