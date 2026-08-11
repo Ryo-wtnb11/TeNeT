@@ -3,8 +3,8 @@ mod operation;
 mod plan;
 
 pub use cache::{
-    RuntimeTreeTransformCacheInfo, RuntimeTreeTransformStore, TreePairTransformCache,
-    TreeTransformCache, TreeTransformCacheStats,
+    RuntimeTreeTransformCacheInfo, RuntimeTreeTransformCacheLedger, RuntimeTreeTransformStore,
+    TreePairTransformCache, TreeTransformCache, TreeTransformCacheStats,
 };
 pub use operation::{
     TreeTransformOperation, TreeTransformOperationKind, TreeTransformRuleCacheKey,

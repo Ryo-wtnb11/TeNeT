@@ -144,10 +144,10 @@ pub use tree_transform::{
     build_checked_generic_tree_pair_transform_group_plan,
     build_generic_tree_pair_transform_group_plan, build_tree_pair_transform_group_plan,
     build_tree_transform_group_plan, CheckedGenericPlanError, RuntimeTreeTransformCacheInfo,
-    RuntimeTreeTransformStore, TreePairTransformCache, TreeTransformBlockSpec, TreeTransformCache,
-    TreeTransformCacheStats, TreeTransformGroupBlockSpec, TreeTransformGroupPlan,
-    TreeTransformKeyBlockSpec, TreeTransformOperation, TreeTransformOperationKind,
-    TreeTransformRuleCacheKey,
+    RuntimeTreeTransformCacheLedger, RuntimeTreeTransformStore, TreePairTransformCache,
+    TreeTransformBlockSpec, TreeTransformCache, TreeTransformCacheStats,
+    TreeTransformGroupBlockSpec, TreeTransformGroupPlan, TreeTransformKeyBlockSpec,
+    TreeTransformOperation, TreeTransformOperationKind, TreeTransformRuleCacheKey,
 };
 #[cfg(test)]
 pub(crate) use tree_transform::{
