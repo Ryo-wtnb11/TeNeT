@@ -249,7 +249,10 @@ fn large_tree_pair_syntax_validation_does_not_allocate() {
     };
     run();
 
-    let (_, allocations) = measured_allocations(|| black_box(run()));
+    let (_, allocations) = measured_allocations(|| {
+        let _: () = run();
+        black_box(())
+    });
 
     // What: rank-19 syntax preflight, beyond the former per-axis `[usize; 8]`
     // scratch size, remains allocation-free on successful validation.

@@ -8722,7 +8722,7 @@ fn positive_diagonal_gauge_complex_phase_and_zero_diagonal() {
         );
         assert!(diagonal.re >= 0.0, "R[{j},{j}] = {diagonal} negative");
     }
-    assert_eq!(r_gauged[1 + 3 * 1], c(0.0, 0.0));
+    assert_eq!(r_gauged[4], c(0.0, 0.0));
     assert_eq!(q_gauged[3], q[3], "zero diagonal must not rescale Q column");
     // Q * R is unchanged.
     let after = product(&q_gauged, &r_gauged);

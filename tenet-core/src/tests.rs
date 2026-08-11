@@ -16570,7 +16570,7 @@ mod tests {
                 compose_generic_tree_pair_terms(
                     &rule,
                     vec![(source.clone(), 1.0)],
-                    |rule, key| generic_bendright_tree_pair(rule, key),
+                    generic_bendright_tree_pair,
                 )
                 .unwrap()
             })
