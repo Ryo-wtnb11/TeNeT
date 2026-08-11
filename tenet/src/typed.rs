@@ -6955,11 +6955,14 @@ where
 impl<R, D> TypedTensorProductDispatch<R, D> for MultiplicityFreeAdmissionMode
 where
     R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
-        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + MultiplicityFreeRigidSymbols
         + CheckedFusionAlgebra
         + SectorCodec
         + CanonicalUnitFusionRule,
-    D: TensorScalar,
+    <R as MultiplicityFreeFusionSymbols>::Scalar:
+        CategoricalScalar + tenet_tensors::DenseRecouplingScalar,
+    D: TensorScalar
+        + tenet_tensors::RecouplingCoefficientAction<<R as MultiplicityFreeFusionSymbols>::Scalar>,
 {
     fn tensor_product(
         lhs: &TensorMap<R, D>,
