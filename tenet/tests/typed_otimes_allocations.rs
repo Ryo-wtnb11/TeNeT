@@ -77,7 +77,7 @@ fn typed_otimes_allocates_one_output_payload_and_no_dense_kron_temporary() {
     let rhs =
         TensorMap::from_block_fn(&runtime, [&rhs_codomain], [&rhs_domain], |_, _| 3.0).unwrap();
     let warm = lhs.otimes(&rhs).unwrap();
-    let output_bytes = warm.data().len() * std::mem::size_of::<f64>();
+    let output_bytes = std::mem::size_of_val(warm.data());
     drop(warm);
 
     let (allocated, output_sized_allocations) =
