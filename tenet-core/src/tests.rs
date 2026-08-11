@@ -16586,13 +16586,14 @@ mod tests {
         assert_eq!(dst_basis, expected_order);
         assert_eq!(dst_columns.num_src, basis.len());
         assert_eq!(dst_columns.num_rows, dst_basis.len());
+        assert_eq!(oracle.len(), basis.len());
         for (destination_row, destination) in dst_basis.iter().enumerate() {
             let domain_vertices = destination.domain_tree().vertices();
             assert_eq!(
                 domain_vertices.last().map(|index| index.get()),
                 Some(destination_row + 1)
             );
-            for (source, oracle_row) in oracle.iter().enumerate().take(basis.len()) {
+            for (source, oracle_row) in oracle.iter().enumerate() {
                 let got = dst_columns.row(destination_row)[source].unwrap_or(0.0);
                 let want = oracle_row
                     .iter()
