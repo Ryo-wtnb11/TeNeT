@@ -234,24 +234,21 @@ impl RuntimeTreeTransformCacheLedger {
         state.charged_payload_bytes = state.charged_payload_bytes.saturating_sub(charged_bytes);
     }
 
-    /// Takes one coherent snapshot across two typed stores while reporting
-    /// shared resources once.
+    /// Aggregates two typed-store metric snapshots while reporting shared
+    /// resources once. Stores and the ledger are sampled separately, so the
+    /// result is intentionally not an atomic cross-store snapshot.
     #[doc(hidden)]
     pub fn store_pair_info<T, U>(
         &self,
         first: &RuntimeTreeTransformStore<T>,
         second: &RuntimeTreeTransformStore<U>,
     ) -> RuntimeTreeTransformCacheInfo {
-        // Same order as admission/clear: typed store(s), then ledger. No path
-        // takes the ledger first, so a snapshot cannot deadlock a writer.
-        let first = first
-            .state
-            .lock()
-            .expect("runtime tree-transform store poisoned");
-        let second = second
-            .state
-            .lock()
-            .expect("runtime tree-transform store poisoned");
+        let first_info = first.info();
+        let same_store = std::ptr::eq(
+            first as *const RuntimeTreeTransformStore<T> as *const (),
+            second as *const RuntimeTreeTransformStore<U> as *const (),
+        );
+        let second_info = (!same_store).then(|| second.info());
         let state = self
             .state
             .lock()
@@ -263,7 +260,7 @@ impl RuntimeTreeTransformCacheLedger {
             byte_budget: self.byte_budget,
             ..RuntimeTreeTransformCacheInfo::default()
         };
-        for store in [first.info(), second.info()] {
+        for store in [Some(first_info), second_info].into_iter().flatten() {
             combined.hits = combined.hits.saturating_add(store.hits);
             combined.misses = combined.misses.saturating_add(store.misses);
             combined.evictions = combined.evictions.saturating_add(store.evictions);
@@ -445,9 +442,16 @@ impl<T> RuntimeTreeTransformStore<T> {
             state.evictions = state.evictions.saturating_add(1);
             self.ledger.release(1, evicted.charged_bytes);
         }
-        if !self.ledger.try_reserve(charged_bytes) {
-            state.admission_bypasses = state.admission_bypasses.saturating_add(1);
-            return structure;
+        while !self.ledger.try_reserve(charged_bytes) {
+            let Some((_, evicted)) = state.entries.pop_lru() else {
+                state.admission_bypasses = state.admission_bypasses.saturating_add(1);
+                return structure;
+            };
+            state.charged_payload_bytes = state
+                .charged_payload_bytes
+                .saturating_sub(evicted.charged_bytes);
+            state.evictions = state.evictions.saturating_add(1);
+            self.ledger.release(1, evicted.charged_bytes);
         }
         state.charged_payload_bytes = state.charged_payload_bytes.saturating_add(charged_bytes);
         state.entries.put(
@@ -1259,7 +1263,8 @@ where
 )]
 mod runtime_store_tests {
     use std::convert::Infallible;
-    use std::sync::{Arc, Barrier};
+    use std::sync::{mpsc, Arc, Barrier};
+    use std::time::Duration;
 
     use num_complex::Complex64;
     use tenet_core::{BlockKey, BlockSpec, BlockStructure, FusionTreeHomSpace, RuleIdentity};
@@ -1411,6 +1416,72 @@ mod runtime_store_tests {
     }
 
     #[test]
+    fn pair_info_samples_one_store_once() {
+        // What: accidentally passing one typed store twice completes without
+        // deadlocking or double-counting its local metrics.
+        let ledger = Arc::new(RuntimeTreeTransformCacheLedger::with_limits(2, usize::MAX));
+        let store = RuntimeTreeTransformStore::with_runtime_ledger(Arc::clone(&ledger));
+        let (key, structure, _) = fixture(45);
+        store
+            .get_or_compile(key, || Ok::<_, Infallible>(structure))
+            .unwrap();
+
+        let info = ledger.store_pair_info(&store, &store);
+        assert_eq!(info.entries(), 1);
+        assert_eq!(info.misses(), 1);
+    }
+
+    #[test]
+    fn reverse_pair_info_calls_complete_concurrently() {
+        // What: opposite reporting order never holds both typed-store locks,
+        // so it cannot form an ABBA cycle.
+        let ledger = Arc::new(RuntimeTreeTransformCacheLedger::with_limits(2, usize::MAX));
+        let real = Arc::new(RuntimeTreeTransformStore::<f64>::with_runtime_ledger(
+            Arc::clone(&ledger),
+        ));
+        let complex = Arc::new(RuntimeTreeTransformStore::<Complex64>::with_runtime_ledger(
+            Arc::clone(&ledger),
+        ));
+        let start = Arc::new(Barrier::new(3));
+        let (done_tx, done_rx) = mpsc::channel();
+
+        let first = {
+            let ledger = Arc::clone(&ledger);
+            let real = Arc::clone(&real);
+            let complex = Arc::clone(&complex);
+            let start = Arc::clone(&start);
+            let done = done_tx.clone();
+            std::thread::spawn(move || {
+                start.wait();
+                for _ in 0..5_000 {
+                    let _ = ledger.store_pair_info(real.as_ref(), complex.as_ref());
+                }
+                done.send(()).unwrap();
+            })
+        };
+        let second = {
+            let ledger = Arc::clone(&ledger);
+            let real = Arc::clone(&real);
+            let complex = Arc::clone(&complex);
+            let start = Arc::clone(&start);
+            let done = done_tx;
+            std::thread::spawn(move || {
+                start.wait();
+                for _ in 0..5_000 {
+                    let _ = ledger.store_pair_info(complex.as_ref(), real.as_ref());
+                }
+                done.send(()).unwrap();
+            })
+        };
+        start.wait();
+
+        done_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        done_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        first.join().unwrap();
+        second.join().unwrap();
+    }
+
+    #[test]
     fn concurrent_cross_dtype_admission_obeys_one_total_byte_budget() {
         // What: the two typed stores race through one atomic cold-path ledger;
         // exactly one entry fits and the other admission bypasses.
@@ -1511,6 +1582,54 @@ mod runtime_store_tests {
         assert_eq!(info.entries(), 3);
         assert_eq!(info.misses(), 3);
         assert_eq!(info.hits(), 3);
+    }
+
+    #[test]
+    fn mixed_full_cache_turns_over_within_one_dtype() {
+        // What: a full shared ledger can replace the requesting dtype's LRU
+        // without evicting the other dtype's resident entry.
+        let ledger = Arc::new(RuntimeTreeTransformCacheLedger::with_limits(2, usize::MAX));
+        let real = RuntimeTreeTransformStore::with_runtime_ledger(Arc::clone(&ledger));
+        let complex = RuntimeTreeTransformStore::with_runtime_ledger(Arc::clone(&ledger));
+        let (old_key, old_structure, _) = fixture(46);
+        let (new_key, new_structure, _) = fixture(47);
+        let (complex_key, complex_structure) = complex_fixture(46);
+
+        real.get_or_compile(old_key.clone(), || {
+            Ok::<_, Infallible>(Arc::clone(&old_structure))
+        })
+        .unwrap();
+        complex
+            .get_or_compile(complex_key.clone(), || {
+                Ok::<_, Infallible>(Arc::clone(&complex_structure))
+            })
+            .unwrap();
+        real.get_or_compile(new_key.clone(), || {
+            Ok::<_, Infallible>(Arc::clone(&new_structure))
+        })
+        .unwrap();
+
+        real.get_or_compile(new_key, || -> Result<_, Infallible> {
+            unreachable!("new real entry is warm")
+        })
+        .unwrap();
+        let mut old_recompiled = false;
+        real.get_or_compile(old_key, || {
+            old_recompiled = true;
+            Ok::<_, Infallible>(old_structure)
+        })
+        .unwrap();
+        assert!(old_recompiled);
+        complex
+            .get_or_compile(complex_key, || -> Result<_, Infallible> {
+                unreachable!("complex entry survives real turnover")
+            })
+            .unwrap();
+
+        let info = ledger.store_pair_info(&real, &complex);
+        assert_eq!(info.entries(), 2);
+        assert_eq!(info.evictions(), 2);
+        assert_eq!(info.admission_bypasses(), 0);
     }
 
     #[test]
