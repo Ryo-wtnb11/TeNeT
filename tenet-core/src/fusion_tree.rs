@@ -7401,8 +7401,7 @@ where
             if vertices.len() <= index {
                 return Err(CoreError::MalformedFusionTree {
                     message: "unit braid past the first adjacent pair requires adjacent vertices",
-                }
-                .into());
+                });
             }
             vertices.swap(index - 1, index);
         }
