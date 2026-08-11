@@ -696,6 +696,120 @@ fn fibonacci_otimes_matches_the_nontrivial_tensorkit_fixture() {
     assert_eq!(seen, [[true; 2]; 2]);
 }
 
+fn fibonacci_matrix_entry(
+    seed: f64,
+    sector: &FibonacciSector,
+    row: usize,
+    column: usize,
+) -> Complex64 {
+    let channel = match sector {
+        FibonacciSector::Vacuum => 0.0,
+        FibonacciSector::Tau => 7.0,
+    };
+    Complex64::new(
+        seed + channel + 2.0 * row as f64 - column as f64,
+        0.5 * seed - channel + row as f64 + 3.0 * column as f64,
+    )
+}
+
+#[test]
+fn fibonacci_compose_is_complex_coupled_sector_matrix_multiplication() {
+    // What: fixed-boundary Fibonacci composition multiplies every coupled
+    // sector block, preserves left authority, and is identical cold and warm.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let provider = Arc::new(FibonacciFusionRule);
+    let rows = GradedSpace::try_new_with_arc(
+        Arc::clone(&provider),
+        [(FibonacciSector::Vacuum, 1), (FibonacciSector::Tau, 2)],
+    )
+    .unwrap();
+    let shared = GradedSpace::try_new_with_arc(
+        Arc::clone(&provider),
+        [(FibonacciSector::Vacuum, 2), (FibonacciSector::Tau, 3)],
+    )
+    .unwrap();
+    let columns = GradedSpace::try_new_with_arc(
+        Arc::clone(&provider),
+        [(FibonacciSector::Vacuum, 2), (FibonacciSector::Tau, 1)],
+    )
+    .unwrap();
+    let lhs: TensorMap<_, Complex64> =
+        TensorMap::from_block_fn(&runtime, [&rows], [&shared], |trees, indices| {
+            fibonacci_matrix_entry(1.0, trees.coupled(), indices[0], indices[1])
+        })
+        .unwrap();
+    let rhs: TensorMap<_, Complex64> =
+        TensorMap::from_block_fn(&runtime, [&shared], [&columns], |trees, indices| {
+            fibonacci_matrix_entry(5.0, trees.coupled(), indices[0], indices[1])
+        })
+        .unwrap();
+    runtime.clear_tree_transform_cache();
+    let before = runtime.tree_transform_cache_info();
+    let cold = lhs.compose(&rhs).unwrap();
+    let after_cold = runtime.tree_transform_cache_info();
+    let warm = lhs.compose(&rhs).unwrap();
+    let expected: TensorMap<_, Complex64> =
+        TensorMap::from_block_fn(&runtime, [&rows], [&columns], |trees, indices| {
+            let inner = match trees.coupled() {
+                FibonacciSector::Vacuum => 2,
+                FibonacciSector::Tau => 3,
+            };
+            (0..inner)
+                .map(|k| {
+                    fibonacci_matrix_entry(1.0, trees.coupled(), indices[0], k)
+                        * fibonacci_matrix_entry(5.0, trees.coupled(), k, indices[1])
+                })
+                .sum()
+        })
+        .unwrap();
+
+    assert_data_close_c64(cold.data(), expected.data());
+    assert_data_close_c64(warm.data(), expected.data());
+    assert!(std::ptr::eq(cold.provider(), lhs.provider()));
+    assert_eq!(after_cold, before);
+    assert_eq!(runtime.tree_transform_cache_info(), before);
+
+    // What: the same genuinely complex blocks are associative, while ordinary
+    // contraction refuses even this crossing-free boundary.
+    let matrix = |seed| {
+        TensorMap::from_block_fn(&runtime, [&shared], [&shared], |trees, indices| {
+            fibonacci_matrix_entry(seed, trees.coupled(), indices[0], indices[1])
+        })
+        .unwrap()
+    };
+    let (a, b, c): (_, _, TensorMap<_, Complex64>) = (matrix(1.0), matrix(3.0), matrix(8.0));
+
+    let left = a.compose(&b).unwrap().compose(&c).unwrap();
+    let right = a.compose(&b.compose(&c).unwrap()).unwrap();
+    assert_data_close_c64(left.data(), right.data());
+
+    runtime.clear_tree_transform_cache();
+    let before = runtime.tree_transform_cache_info();
+    let error = a.contract(&b, &[1], &[0], &[0, 1]).unwrap_err();
+    assert!(matches!(
+        error,
+        tenet::prelude::Error::Operation(operation)
+            if matches!(*operation, tenet::operations::OperationError::UnsupportedTensorContractScope { .. })
+    ));
+    assert_eq!(runtime.tree_transform_cache_info(), before);
+
+    let other_runtime = Runtime::builder().build().unwrap();
+    let other: TensorMap<_, Complex64> =
+        TensorMap::from_block_fn(&other_runtime, [&shared], [&shared], |trees, indices| {
+            fibonacci_matrix_entry(2.0, trees.coupled(), indices[0], indices[1])
+        })
+        .unwrap();
+    assert!(matches!(
+        a.compose(&other).unwrap_err(),
+        tenet::prelude::Error::RuntimeMismatch
+    ));
+    assert!(matches!(
+        a.contract(&other, &[1], &[0], &[0, 1]).unwrap_err(),
+        tenet::prelude::Error::RuntimeMismatch
+    ));
+}
+
 #[test]
 fn fibonacci_ordinary_permute_rejection_does_not_publish_a_cache_entry() {
     let runtime = runtime();
@@ -2426,19 +2540,8 @@ fn braid_moves_legs_of_a_multi_block_external_provider_tensor() {
     // What: an explicit braid with a full level assignment produces the same
     // reordered spaces a permute of the same axes does, and moves the payload.
     //
-    // Why not a case where braid differs from permute: the level *values* are
-    // unobservable for every provider this facade can host. The symmetric ones
-    // (both fixtures here, the built-in Z2/SU(2), and even the fermionic rule
-    // used further down) make over- and under-crossing the same morphism, and
-    // the one built-in rule that would not — `FibonacciFusionRule` — now
-    // satisfies `SectorCodec` but remains excluded by this facade's
-    // `Scalar = f64` bound.
-    //
-    // What the tests below therefore do and do not prove: they pin how the
-    // levels are *split* (by the source codomain rank, which the oracle below
-    // pins with an axis list of a different length) and that a wrong-length
-    // list is refused. Nothing here can pin the values, and no test in this
-    // crate can until an anyonic provider is reachable.
+    // This symmetric fixture pins how levels are split and validated; the
+    // Fibonacci tests above pin genuinely anyonic level values.
     let _guard = cache_lock();
     let runtime = runtime();
     let provider = Arc::new(ExternalZ3::new());
