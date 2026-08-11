@@ -25,7 +25,7 @@ mod cu1;
 pub use cu1::{CU1FusionRule, CU1Irrep, CU1_MAX_TWICE_CHARGE};
 
 mod fibonacci;
-pub use fibonacci::FibonacciFusionRule;
+pub use fibonacci::{FibonacciFusionRule, FibonacciSector};
 
 mod su2;
 pub use su2::{SU2FusionRule, SU2Irrep, SU2_MAX_DOUBLED_SPIN};

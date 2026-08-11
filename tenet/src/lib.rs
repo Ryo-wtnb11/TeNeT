@@ -85,7 +85,7 @@ pub mod prelude {
     pub use tenet_core::FusionTreeBlockKey;
     pub use tenet_core::{
         product_fusion_rule, product_fusion_rule_with_codec, product_sector, CU1FusionRule,
-        CU1Irrep, FermionParityFusionRule, FibonacciFusionRule, ProductFusionRule,
+        CU1Irrep, FermionParityFusionRule, FibonacciFusionRule, FibonacciSector, ProductFusionRule,
         ProductFusionRuleExt, ProductSector, SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep,
         Z2FusionRule, Z2Irrep, ZNFusionRule, ZNIrrep,
     };

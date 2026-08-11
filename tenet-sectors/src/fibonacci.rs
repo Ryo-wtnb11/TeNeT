@@ -4,7 +4,7 @@ use smallvec::smallvec;
 use crate::{
     BraidingStyleKind, CanonicalUnitFusionRule, CheckedFusionAlgebra, FusionAlgebraError,
     FusionRule, FusionStyleKind, MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols,
-    MultiplicityFreeRigidSymbols, RuleIdentity, SectorId, SectorVec,
+    MultiplicityFreeRigidSymbols, RuleIdentity, SectorCodec, SectorId, SectorVec,
 };
 
 // FibonacciAnyon: the simplest genuinely non-abelian anyon model (Simple
@@ -17,6 +17,15 @@ use crate::{
 // "should be").
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
 pub struct FibonacciFusionRule;
+
+/// A simple object of the Fibonacci fusion category.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub enum FibonacciSector {
+    /// The tensor unit `𝟙`.
+    Vacuum,
+    /// The nontrivial Fibonacci anyon `τ`.
+    Tau,
+}
 
 impl FibonacciFusionRule {
     /// `false` for the vacuum (`𝟙`, SectorId 0), `true` for `τ` (SectorId 1).
@@ -115,6 +124,25 @@ impl CheckedFusionAlgebra for FibonacciFusionRule {
         Ok(usize::from(
             fibonacci_channels(left, right).contains(&coupled),
         ))
+    }
+}
+
+impl SectorCodec for FibonacciFusionRule {
+    type Sector = FibonacciSector;
+
+    fn encode_sector(&self, value: &Self::Sector) -> Result<SectorId, FusionAlgebraError> {
+        Ok(match value {
+            FibonacciSector::Vacuum => SectorId::new(0),
+            FibonacciSector::Tau => SectorId::new(1),
+        })
+    }
+
+    fn decode_sector(&self, id: SectorId) -> Result<Self::Sector, FusionAlgebraError> {
+        match id.id() {
+            0 => Ok(FibonacciSector::Vacuum),
+            1 => Ok(FibonacciSector::Tau),
+            _ => Err(FusionAlgebraError::InvalidSector { sector: id }),
+        }
     }
 }
 
@@ -319,5 +347,44 @@ mod tests {
                 Complex64::new(1.0, 0.0),
             );
         }
+    }
+
+    #[test]
+    fn fibonacci_codec_round_trips_the_reachable_algebra() {
+        // What: the semantic labels are a lossless, non-aliasing boundary for
+        // the vacuum and every sector produced by duality and fusion.
+        let rule = FibonacciFusionRule;
+        let vacuum = rule.encode_sector(&FibonacciSector::Vacuum).unwrap();
+        let tau = rule.encode_sector(&FibonacciSector::Tau).unwrap();
+
+        assert_ne!(vacuum, tau);
+        assert_eq!(rule.decode_sector(vacuum), Ok(FibonacciSector::Vacuum));
+        assert_eq!(rule.decode_sector(tau), Ok(FibonacciSector::Tau));
+        assert_eq!(
+            rule.decode_sector(rule.vacuum()),
+            Ok(FibonacciSector::Vacuum)
+        );
+
+        for sector in [vacuum, tau] {
+            let label = rule.decode_sector(sector).unwrap();
+            assert_eq!(rule.encode_sector(&label), Ok(sector));
+            let dual = rule.dual(sector);
+            let dual_label = rule.decode_sector(dual).unwrap();
+            assert_eq!(rule.encode_sector(&dual_label), Ok(dual));
+        }
+        for left in [vacuum, tau] {
+            for right in [vacuum, tau] {
+                for coupled in rule.fusion_channels(left, right) {
+                    let label = rule.decode_sector(coupled).unwrap();
+                    assert_eq!(rule.encode_sector(&label), Ok(coupled));
+                }
+            }
+        }
+
+        let invalid = SectorId::new(2);
+        assert_eq!(
+            rule.decode_sector(invalid),
+            Err(FusionAlgebraError::InvalidSector { sector: invalid })
+        );
     }
 }
