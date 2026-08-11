@@ -31,15 +31,6 @@ fn dual_sector<R>(
 where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: DenseBlockScalar,
-    R::Scalar: DenseBlockScalar,
-    R::Scalar: DenseBlockScalar,
-    R::Scalar: DenseBlockScalar,
-    R::Scalar: DenseBlockScalar,
-    R::Scalar: DenseBlockScalar,
-    R::Scalar: DenseBlockScalar,
-    R::Scalar: DenseBlockScalar,
-    R::Scalar: DenseBlockScalar,
-    R::Scalar: DenseBlockScalar,
 {
     match primer(rule, MetadataRequest::DualSector { sector })? {
         MetadataOutput::Sector(dual) => Ok(dual),
