@@ -229,7 +229,7 @@ use tenet_dense::{
 #[cfg(feature = "cuda")]
 use tenet_operations::StorageGemm;
 use tenet_tensors::{
-    expand_physical_host, project_physical_host, tensorcontract_owned_checked_generic,
+    expand_physical_host, project_physical_host, tensorcontract_owned_checked_generic_in_context,
     tree_transform_dyn_owned_checked_generic_in_context, BoundDynamicFusionMapSpace,
     BoundDynamicTensorRef, DynamicFusionMapSpace, OutputAxisOrder, OwnedCatCopy, OwnedCatSide,
     TensorContractSpec, TreeTransformOperation, TreeTransformOperationKind,
@@ -7096,7 +7096,9 @@ where
             )
             .into());
         };
-        let (space, data) = tensorcontract_owned_checked_generic(
+        let mut lease = lhs.runtime.lease_context()?;
+        let (space, data) = tensorcontract_owned_checked_generic_in_context(
+            lease.context().generic_lane::<D>(),
             &lhs_body.space,
             lhs_body.materialized_dense_data(),
             &rhs_body.space,
@@ -17061,6 +17063,34 @@ mod representation_gates {
         assert!(failure.is_err());
         assert!(Arc::ptr_eq(owned(&target), &target_body));
         assert!(Arc::ptr_eq(&owned(&target).data, &target_data));
+    }
+
+    #[cfg(feature = "racah-generated")]
+    #[test]
+    fn checked_generic_contract_reuses_one_runtime_generic_lane() {
+        use tenet_core::SUNFusionRule;
+
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let provider = Arc::new(SUNFusionRule::new(3).unwrap());
+        let leg = GradedSpace::try_new_with_arc(Arc::clone(&provider), [(vec![1_i64, 1_i64], 1)])
+            .unwrap();
+        let tensor: TensorMap<_, f64> =
+            TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], |trees, _| {
+                trees.codomain_vertices()[0].get() as f64
+            })
+            .unwrap();
+        let identity: TensorMap<_, f64> =
+            TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| 1.0).unwrap();
+
+        for _ in 0..2 {
+            let output = tensor.contract(&identity, &[2], &[0], &[0, 1, 2]).unwrap();
+            assert_eq!(output.data(), tensor.data());
+            assert!(std::ptr::eq(output.provider(), provider.as_ref()));
+        }
+
+        let mut lease = runtime.lease_context().unwrap();
+        let context = lease.context();
+        assert_eq!(context.generic_lane_uses(), 2);
     }
 
     fn scalar_structure(keys: &[FusionTreePairKey]) -> BlockStructure {
