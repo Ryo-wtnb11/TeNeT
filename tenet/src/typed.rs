@@ -11821,11 +11821,10 @@ where
     }
 }
 
-#[allow(private_bounds)]
 impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
-    R::Mode: TypedTensorRootDispatch<R> + TypedTensorConstructionDispatch<R, D>,
+    R::Mode: TypedTensorRootDispatch<R>,
     D: TensorScalar,
 {
     /// Builds a compact diagonal map `bond <- bond` from labelled sector values.
@@ -11906,7 +11905,14 @@ where
             }
             spectrum.push(tenet_matrixalgebra::SectorSpectrum { sector, values });
         }
-        let space = Self::build_space(Arc::clone(bond.provider_arc()), &[bond], &[bond])?;
+        let homspace = FusionTreeHomSpace::new(
+            FusionProductSpace::new([bond.leg().clone()]),
+            FusionProductSpace::new([bond.leg().clone()]),
+        );
+        let space = <R::Mode as TypedTensorRootDispatch<R>>::build_root(
+            Arc::clone(bond.provider_arc()),
+            homspace,
+        )?;
         Ok(Self {
             runtime: runtime.clone(),
             repr: owned_repr(TypedTensorBody::diagonal(space, spectrum)),
@@ -12228,7 +12234,14 @@ where
         let provider = Arc::clone(Self::authority(&legs)?);
         Self::build(runtime, provider, &codomain, &domain, Fill::Rand(seed))
     }
+}
 
+impl<R, D> TensorMap<R, D>
+where
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorModeDispatch<R>,
+    D: TensorScalar,
+{
     /// Provider-labelled fusion trees and borrowed values for every stored block.
     ///
     /// All labels are decoded and all views are validated before the iterator is
@@ -13938,6 +13951,18 @@ where
             return Ok(None);
         }
         let ordered: Vec<usize> = output_axes.iter().map(|&axis| source[axis]).collect();
+        if codomain_rank == self.codomain_rank()
+            && ordered[..codomain_rank]
+                .iter()
+                .copied()
+                .eq(0..codomain_rank)
+            && ordered[codomain_rank..]
+                .iter()
+                .copied()
+                .eq(codomain_rank..source.len())
+        {
+            return Ok(Some(self.clone()));
+        }
         self.tree_transform_multiplicity_free_real(TreeTransformOperation::permute(
             ordered[..codomain_rank].iter().copied(),
             ordered[codomain_rank..].iter().copied(),

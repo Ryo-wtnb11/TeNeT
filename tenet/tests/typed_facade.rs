@@ -527,6 +527,22 @@ fn fibonacci_forward_braid_matches_closed_form_and_tensorkit_fixture() {
 fn fibonacci_planar_transforms_roundtrip_without_braiding() {
     let runtime = runtime();
     let source = fibonacci_tau_braid_fixture(&runtime);
+    assert_eq!(
+        source
+            .codomain()
+            .iter()
+            .map(GradedSpace::is_dual)
+            .collect::<Vec<_>>(),
+        [false, false, false]
+    );
+    assert_eq!(
+        source
+            .domain()
+            .iter()
+            .map(GradedSpace::is_dual)
+            .collect::<Vec<_>>(),
+        [false]
+    );
 
     let repartitioned = source.repartition(2).unwrap();
     let phi = (1.0 + 5.0_f64.sqrt()) / 2.0;
@@ -548,6 +564,22 @@ fn fibonacci_planar_transforms_roundtrip_without_braiding() {
         repartitioned.domain()[1].sectors().unwrap(),
         [FibonacciSector::Tau]
     );
+    assert_eq!(
+        repartitioned
+            .codomain()
+            .iter()
+            .map(GradedSpace::is_dual)
+            .collect::<Vec<_>>(),
+        [false, false]
+    );
+    assert_eq!(
+        repartitioned
+            .domain()
+            .iter()
+            .map(GradedSpace::is_dual)
+            .collect::<Vec<_>>(),
+        [false, true]
+    );
     assert_data_close_c64(repartitioned.repartition(3).unwrap().data(), source.data());
 
     let transposed = source.transpose().unwrap();
@@ -563,6 +595,22 @@ fn fibonacci_planar_transforms_roundtrip_without_braiding() {
     assert_eq!(
         (transposed.codomain_rank(), transposed.domain_rank()),
         (1, 3)
+    );
+    assert_eq!(
+        transposed
+            .codomain()
+            .iter()
+            .map(GradedSpace::is_dual)
+            .collect::<Vec<_>>(),
+        [true]
+    );
+    assert_eq!(
+        transposed
+            .domain()
+            .iter()
+            .map(GradedSpace::is_dual)
+            .collect::<Vec<_>>(),
+        [true, true, true]
     );
     assert_data_close_c64(transposed.transpose().unwrap().data(), source.data());
 
@@ -5087,6 +5135,28 @@ const DIAGONAL_CONTRACT_CASES: &[(&str, bool, &[usize], &[usize], &[usize])] = &
     // densely. The expected bytes are pinned below.
     ("s*t dense fallback", false, &[0], &[2], &[0, 1, 2]),
 ];
+
+#[test]
+fn compact_contract_identity_output_does_not_publish_a_transform_cache_entry() {
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let provider = Arc::new(tenet::core::U1FusionRule);
+    let leg = u1_leg(&provider, &[(-1, 1), (0, 2), (1, 1)]);
+    let tensor: TensorMap<_, f64> =
+        TensorMap::rand_with_seed(&runtime, [&leg, &leg], [&leg], 592_302).unwrap();
+    let spectrum = TensorMap::<_, f64>::id(&runtime, [&leg])
+        .unwrap()
+        .svd_compact()
+        .unwrap()
+        .1;
+    runtime.clear_tree_transform_cache();
+    let before = runtime.tree_transform_cache_info();
+
+    let result = tensor.contract(&spectrum, &[2], &[0], &[0, 1, 2]).unwrap();
+
+    assert_eq!(result.data().len(), tensor.data().len());
+    assert_eq!(runtime.tree_transform_cache_info(), before);
+}
 
 #[test]
 fn diagonal_contract_preserves_left_provider_authority_on_every_compact_arm() {
