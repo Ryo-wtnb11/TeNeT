@@ -7428,7 +7428,7 @@ fn tensorcontract_fusion_parallel_transform_replay_matches_serial() {
                 .unwrap();
         let mut serial_context = TensorContractFusionExecutionContext::<f64, R::Key>::default();
         serial_context
-            .tensorcontract_fusion_into(rule, &mut serial_dst, &lhs, &rhs, axes.clone(), 1.0, 0.0)
+            .tensorcontract_fusion_into(rule, &mut serial_dst, &lhs, &rhs, axes, 1.0, 0.0)
             .unwrap();
 
         let mut parallel_dst =
@@ -7441,15 +7441,7 @@ fn tensorcontract_fusion_parallel_transform_replay_matches_serial() {
         // Two runs: cold (structure compile + replay) and warm (replay only).
         for _ in 0..2 {
             parallel_context
-                .tensorcontract_fusion_into(
-                    rule,
-                    &mut parallel_dst,
-                    &lhs,
-                    &rhs,
-                    axes.clone(),
-                    1.0,
-                    0.0,
-                )
+                .tensorcontract_fusion_into(rule, &mut parallel_dst, &lhs, &rhs, axes, 1.0, 0.0)
                 .unwrap();
         }
 

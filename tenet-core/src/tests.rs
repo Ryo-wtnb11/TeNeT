@@ -4679,7 +4679,7 @@ mod tests {
 
         let block = multiplicity_free_braid_tree_pair_block(
             &IdentitySymbolPanicRule,
-            &[source.clone()],
+            std::slice::from_ref(&source),
             &[0],
             &[1],
             &[19],

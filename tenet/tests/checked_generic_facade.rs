@@ -4866,7 +4866,7 @@ fn checked_generic_inv_singular_early_and_late_sectors_preserve_source() {
             })
             .unwrap();
         let labels = (0..source.block_count())
-            .map(|index| source.block_fusion_trees(index).unwrap().coupled().clone())
+            .map(|index| *source.block_fusion_trees(index).unwrap().coupled())
             .collect::<Vec<_>>();
         assert_eq!(labels, [Label::Vacuum, Label::X]);
         let before = source.data().to_vec();
