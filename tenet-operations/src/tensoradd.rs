@@ -161,7 +161,11 @@ impl TensorAddStructure {
             .map_err(OperationError::from_core_preserving_context)?;
         let mut terms = Vec::with_capacity(dst_structure.block_count());
 
-        for dst_index in 0..dst_structure.block_count() {
+        for (dst_index, &src_index) in src_for_dst
+            .iter()
+            .take(dst_structure.block_count())
+            .enumerate()
+        {
             let dst_block = dst_structure.block(dst_index)?;
             if dst_block.shape().len() != rank {
                 return Err(OperationError::RankMismatch {
@@ -169,7 +173,6 @@ impl TensorAddStructure {
                     actual: dst_block.shape().len(),
                 });
             }
-            let src_index = src_for_dst[dst_index];
             let src_block = src_structure.block(src_index)?;
             if src_block.shape().len() != rank {
                 return Err(OperationError::RankMismatch {

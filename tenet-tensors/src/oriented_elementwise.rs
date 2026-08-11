@@ -122,10 +122,10 @@ where
                 .map_err(|_| OperationError::ElementCountOverflow)
         };
         let mut source_offset = source_block.offset();
-        for axis in 0..destination.rank() {
+        for (axis, &logical_start) in logical_starts.iter().take(destination.rank()).enumerate() {
             let storage_axis = source.storage_axis(axis)?;
             let source_extent = source_block.shape()[storage_axis];
-            let end = logical_starts[axis]
+            let end = logical_start
                 .checked_add(destination_block.shape()[axis])
                 .ok_or(OperationError::ElementCountOverflow)?;
             if end > source_extent {
@@ -135,7 +135,7 @@ where
             }
             source_offset = source_offset
                 .checked_add(
-                    logical_starts[axis]
+                    logical_start
                         .checked_mul(source_block.strides()[storage_axis])
                         .ok_or(OperationError::ElementCountOverflow)?,
                 )
