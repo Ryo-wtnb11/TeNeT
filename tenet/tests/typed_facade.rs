@@ -623,6 +623,80 @@ fn fibonacci_planar_transforms_roundtrip_without_braiding() {
 }
 
 #[test]
+fn fibonacci_otimes_matches_the_nontrivial_tensorkit_fixture() {
+    let runtime = runtime();
+    let tau = GradedSpace::try_new(FibonacciFusionRule, [(FibonacciSector::Tau, 1)]).unwrap();
+    let dual_tau = tau.try_dual().unwrap();
+    let alpha = Complex64::new(2.0, 3.0);
+    let beta = Complex64::new(-1.0, 2.0);
+    let gamma = alpha * beta;
+    assert_eq!(gamma, Complex64::new(-8.0, 1.0));
+
+    let lhs: TensorMap<_, Complex64> =
+        TensorMap::from_block_fn(&runtime, [&tau], [&tau], |_, _| alpha).unwrap();
+    let rhs: TensorMap<_, Complex64> = TensorMap::from_block_fn(
+        &runtime,
+        [&dual_tau, &tau],
+        [&dual_tau, &tau],
+        |trees, _| {
+            if trees.coupled() == &FibonacciSector::Tau {
+                beta
+            } else {
+                Complex64::new(0.0, 0.0)
+            }
+        },
+    )
+    .unwrap();
+    let product = lhs.otimes(&rhs).unwrap();
+
+    assert_eq!(
+        product
+            .codomain()
+            .iter()
+            .map(GradedSpace::is_dual)
+            .collect::<Vec<_>>(),
+        [false, true, false]
+    );
+    assert_eq!(
+        product
+            .domain()
+            .iter()
+            .map(GradedSpace::is_dual)
+            .collect::<Vec<_>>(),
+        [false, true, false]
+    );
+
+    let phi = (1.0 + 5.0_f64.sqrt()) / 2.0;
+    let tau_oracle = [
+        [1.0 / phi, -1.0 / (phi * phi.sqrt())],
+        [-1.0 / (phi * phi.sqrt()), 1.0 / phi.powi(2)],
+    ];
+    let mut seen = [[false; 2]; 2];
+    let mut vacuum = 0;
+    for (trees, block) in product.blocks().unwrap() {
+        let value = *block.get(&[0; 6]).unwrap();
+        if trees.coupled() == &FibonacciSector::Vacuum {
+            vacuum += 1;
+            assert_data_close_c64(&[value], &[gamma]);
+            continue;
+        }
+        let slot = |innerlines: &[FibonacciSector]| match innerlines {
+            [FibonacciSector::Vacuum] => 0,
+            [FibonacciSector::Tau] => 1,
+            innerlines => panic!("unexpected Fibonacci innerlines {innerlines:?}"),
+        };
+        let (row, column) = (
+            slot(trees.codomain_innerlines()),
+            slot(trees.domain_innerlines()),
+        );
+        seen[row][column] = true;
+        assert_data_close_c64(&[value], &[gamma * tau_oracle[row][column]]);
+    }
+    assert_eq!(vacuum, 1);
+    assert_eq!(seen, [[true; 2]; 2]);
+}
+
+#[test]
 fn fibonacci_ordinary_permute_rejection_does_not_publish_a_cache_entry() {
     let runtime = runtime();
     let source = fibonacci_tau_braid_fixture(&runtime);
