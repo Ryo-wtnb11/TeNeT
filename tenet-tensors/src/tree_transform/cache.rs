@@ -120,6 +120,7 @@ const RUNTIME_TREE_TRANSFORM_LRU_NODE_ALLOWANCE: usize = 8 * core::mem::size_of:
 #[doc(hidden)]
 pub struct RuntimeTreeTransformStore<T> {
     state: Mutex<RuntimeTreeTransformStoreState<T>>,
+    ledger: Arc<RuntimeTreeTransformCacheLedger>,
 }
 
 /// Snapshot of one Runtime's completed tree-transform cache.
@@ -133,6 +134,24 @@ pub struct RuntimeTreeTransformCacheInfo {
     misses: usize,
     evictions: usize,
     admission_bypasses: usize,
+}
+
+#[derive(Debug)]
+struct RuntimeTreeTransformCacheLedgerState {
+    entries: usize,
+    charged_payload_bytes: usize,
+}
+
+/// Shared cold-path accounting for Runtime-owned typed transform stores.
+///
+/// Each coefficient dtype keeps its own typed LRU. This ledger only makes the
+/// configured entry and byte limits one Runtime-wide limit; warm lookup never
+/// locks it.
+#[doc(hidden)]
+pub struct RuntimeTreeTransformCacheLedger {
+    entry_capacity: usize,
+    byte_budget: usize,
+    state: Mutex<RuntimeTreeTransformCacheLedgerState>,
 }
 
 impl RuntimeTreeTransformCacheInfo {
@@ -167,6 +186,80 @@ impl RuntimeTreeTransformCacheInfo {
 
     pub fn admission_bypasses(self) -> usize {
         self.admission_bypasses
+    }
+}
+
+impl RuntimeTreeTransformCacheLedger {
+    #[doc(hidden)]
+    pub fn new(byte_budget: usize) -> Self {
+        Self::with_limits(DEFAULT_RUNTIME_TREE_TRANSFORM_CACHE_ENTRIES, byte_budget)
+    }
+
+    fn with_limits(entry_capacity: usize, byte_budget: usize) -> Self {
+        assert!(
+            entry_capacity != 0,
+            "tree-transform cache capacity is nonzero"
+        );
+        Self {
+            entry_capacity,
+            byte_budget,
+            state: Mutex::new(RuntimeTreeTransformCacheLedgerState {
+                entries: 0,
+                charged_payload_bytes: 0,
+            }),
+        }
+    }
+
+    fn try_reserve(&self, charged_bytes: usize) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .expect("runtime tree-transform cache ledger poisoned");
+        if state.entries == self.entry_capacity
+            || state.charged_payload_bytes.saturating_add(charged_bytes) > self.byte_budget
+        {
+            return false;
+        }
+        state.entries += 1;
+        state.charged_payload_bytes = state.charged_payload_bytes.saturating_add(charged_bytes);
+        true
+    }
+
+    fn release(&self, entries: usize, charged_bytes: usize) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("runtime tree-transform cache ledger poisoned");
+        state.entries = state.entries.saturating_sub(entries);
+        state.charged_payload_bytes = state.charged_payload_bytes.saturating_sub(charged_bytes);
+    }
+
+    /// Combines per-dtype activity while reporting shared resources once.
+    #[doc(hidden)]
+    pub fn combined_info(
+        &self,
+        stores: impl IntoIterator<Item = RuntimeTreeTransformCacheInfo>,
+    ) -> RuntimeTreeTransformCacheInfo {
+        let state = self
+            .state
+            .lock()
+            .expect("runtime tree-transform cache ledger poisoned");
+        let mut combined = RuntimeTreeTransformCacheInfo {
+            entries: state.entries,
+            entry_capacity: self.entry_capacity,
+            charged_payload_bytes: state.charged_payload_bytes,
+            byte_budget: self.byte_budget,
+            ..RuntimeTreeTransformCacheInfo::default()
+        };
+        for store in stores {
+            combined.hits = combined.hits.saturating_add(store.hits);
+            combined.misses = combined.misses.saturating_add(store.misses);
+            combined.evictions = combined.evictions.saturating_add(store.evictions);
+            combined.admission_bypasses = combined
+                .admission_bypasses
+                .saturating_add(store.admission_bypasses);
+        }
+        combined
     }
 }
 
@@ -217,12 +310,30 @@ impl<T> RuntimeTreeTransformStore<T> {
     }
 
     fn with_limits(entry_capacity: usize, byte_budget: usize, max_entry_bytes: usize) -> Self {
+        let ledger = Arc::new(RuntimeTreeTransformCacheLedger::with_limits(
+            entry_capacity,
+            byte_budget,
+        ));
+        Self::with_shared_ledger(ledger, max_entry_bytes)
+    }
+
+    /// Builds one typed store charged to a Runtime-wide ledger.
+    #[doc(hidden)]
+    pub fn with_runtime_ledger(ledger: Arc<RuntimeTreeTransformCacheLedger>) -> Self {
+        Self::with_shared_ledger(ledger, DEFAULT_RUNTIME_TREE_TRANSFORM_CACHE_MAX_ENTRY_BYTES)
+    }
+
+    fn with_shared_ledger(
+        ledger: Arc<RuntimeTreeTransformCacheLedger>,
+        max_entry_bytes: usize,
+    ) -> Self {
         Self {
             state: Mutex::new(RuntimeTreeTransformStoreState::new(
-                entry_capacity,
-                byte_budget,
+                ledger.entry_capacity,
+                ledger.byte_budget,
                 max_entry_bytes,
             )),
+            ledger,
         }
     }
 
@@ -238,6 +349,8 @@ impl<T> RuntimeTreeTransformStore<T> {
             .state
             .lock()
             .expect("runtime tree-transform store poisoned");
+        let entries = state.entries.len();
+        let charged_payload_bytes = state.charged_payload_bytes;
         state.generation = state.generation.wrapping_add(1);
         state.entries.clear();
         state.charged_payload_bytes = 0;
@@ -245,6 +358,7 @@ impl<T> RuntimeTreeTransformStore<T> {
         state.misses = 0;
         state.evictions = 0;
         state.admission_bypasses = 0;
+        self.ledger.release(entries, charged_payload_bytes);
     }
 
     fn charged_entry_bytes(
@@ -317,6 +431,11 @@ impl<T> RuntimeTreeTransformStore<T> {
                 .charged_payload_bytes
                 .saturating_sub(evicted.charged_bytes);
             state.evictions = state.evictions.saturating_add(1);
+            self.ledger.release(1, evicted.charged_bytes);
+        }
+        if !self.ledger.try_reserve(charged_bytes) {
+            state.admission_bypasses = state.admission_bypasses.saturating_add(1);
+            return structure;
         }
         state.charged_payload_bytes = state.charged_payload_bytes.saturating_add(charged_bytes);
         state.entries.put(
@@ -483,6 +602,17 @@ impl<T> RuntimeTreeTransformStore<T> {
 impl<T> Default for RuntimeTreeTransformStore<T> {
     fn default() -> Self {
         Self::new(Self::DEFAULT_BYTE_BUDGET)
+    }
+}
+
+impl<T> Drop for RuntimeTreeTransformStore<T> {
+    fn drop(&mut self) {
+        let state = self
+            .state
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.ledger
+            .release(state.entries.len(), state.charged_payload_bytes);
     }
 }
 
@@ -1119,10 +1249,12 @@ mod runtime_store_tests {
     use std::convert::Infallible;
     use std::sync::{Arc, Barrier};
 
+    use num_complex::Complex64;
     use tenet_core::{BlockKey, BlockSpec, BlockStructure, FusionTreeHomSpace, RuleIdentity};
 
     use super::{
-        RuntimeTreeTransformKey, RuntimeTreeTransformOperationKey, RuntimeTreeTransformStore,
+        RuntimeTreeTransformCacheLedger, RuntimeTreeTransformKey, RuntimeTreeTransformOperationKey,
+        RuntimeTreeTransformStore,
     };
     use crate::{
         TreeTransformBlockSpec, TreeTransformOperation, TreeTransformStructure,
@@ -1133,6 +1265,17 @@ mod runtime_store_tests {
 
     fn fixture(
         tag: usize,
+    ) -> (
+        RuntimeTreeTransformKey,
+        Arc<TreeTransformStructure<f64>>,
+        BlockStructure,
+    ) {
+        fixture_with_rule(tag, RuleIdentity::of_type::<TestRuleIdentity>())
+    }
+
+    fn fixture_with_rule(
+        tag: usize,
+        rule: RuleIdentity,
     ) -> (
         RuntimeTreeTransformKey,
         Arc<TreeTransformStructure<f64>>,
@@ -1150,7 +1293,7 @@ mod runtime_store_tests {
         );
         let key = TreeTransformStructureCacheKey::from_structures(
             RuntimeTreeTransformOperationKey {
-                rule: RuleIdentity::of_type::<TestRuleIdentity>(),
+                rule,
                 operation: TreeTransformOperation::permute([tag], []),
             },
             &structure,
@@ -1158,6 +1301,38 @@ mod runtime_store_tests {
         )
         .unwrap();
         (key, compiled, structure)
+    }
+
+    fn complex_fixture(
+        tag: usize,
+    ) -> (
+        RuntimeTreeTransformKey,
+        Arc<TreeTransformStructure<Complex64>>,
+    ) {
+        let block = BlockSpec::with_key(BlockKey::ordinal(tag), vec![1], vec![1], 0).unwrap();
+        let structure = BlockStructure::from_blocks_with_rank(1, vec![block]).unwrap();
+        let compiled = Arc::new(
+            TreeTransformStructure::compile_structures(
+                &structure,
+                &structure,
+                &[TreeTransformBlockSpec::single(
+                    0,
+                    0,
+                    Complex64::new(0.0, 1.0),
+                )],
+            )
+            .unwrap(),
+        );
+        let key = TreeTransformStructureCacheKey::from_structures(
+            RuntimeTreeTransformOperationKey {
+                rule: RuleIdentity::of_type::<TestRuleIdentity>(),
+                operation: TreeTransformOperation::permute([tag], []),
+            },
+            &structure,
+            &structure,
+        )
+        .unwrap();
+        (key, compiled)
     }
 
     fn pair_fixture(
@@ -1193,6 +1368,183 @@ mod runtime_store_tests {
         )
         .unwrap();
         (key, compiled, dst, src)
+    }
+
+    #[test]
+    fn shared_ledger_preserves_full_capacity_for_one_dtype() {
+        // What: adding a second typed store does not partition the configured
+        // resources; an f64-only workload can still occupy the complete cache.
+        let (key0, structure0, _) = fixture(40);
+        let (key1, structure1, _) = fixture(41);
+        let charge0 = RuntimeTreeTransformStore::<f64>::charged_entry_bytes(&key0, &structure0);
+        let charge1 = RuntimeTreeTransformStore::<f64>::charged_entry_bytes(&key1, &structure1);
+        let ledger = Arc::new(RuntimeTreeTransformCacheLedger::with_limits(
+            2,
+            charge0.saturating_add(charge1),
+        ));
+        let real = RuntimeTreeTransformStore::with_runtime_ledger(Arc::clone(&ledger));
+        let _complex =
+            RuntimeTreeTransformStore::<Complex64>::with_runtime_ledger(Arc::clone(&ledger));
+
+        real.get_or_compile(key0, || Ok::<_, Infallible>(structure0))
+            .unwrap();
+        real.get_or_compile(key1, || Ok::<_, Infallible>(structure1))
+            .unwrap();
+
+        let info = ledger.combined_info([real.info()]);
+        assert_eq!(info.entries(), 2);
+        assert_eq!(info.entry_capacity(), 2);
+        assert_eq!(info.byte_budget(), charge0 + charge1);
+        assert_eq!(info.admission_bypasses(), 0);
+    }
+
+    #[test]
+    fn concurrent_cross_dtype_admission_obeys_one_total_byte_budget() {
+        // What: the two typed stores race through one atomic cold-path ledger;
+        // exactly one entry fits and the other admission bypasses.
+        let (real_key, real_structure, _) = fixture(42);
+        let (complex_key, complex_structure) = complex_fixture(42);
+        let real_charge =
+            RuntimeTreeTransformStore::<f64>::charged_entry_bytes(&real_key, &real_structure);
+        let complex_charge = RuntimeTreeTransformStore::<Complex64>::charged_entry_bytes(
+            &complex_key,
+            &complex_structure,
+        );
+        let budget = real_charge.max(complex_charge);
+        let ledger = Arc::new(RuntimeTreeTransformCacheLedger::with_limits(2, budget));
+        let real = Arc::new(RuntimeTreeTransformStore::with_runtime_ledger(Arc::clone(
+            &ledger,
+        )));
+        let complex = Arc::new(RuntimeTreeTransformStore::with_runtime_ledger(Arc::clone(
+            &ledger,
+        )));
+        let start = Arc::new(Barrier::new(3));
+
+        let real_worker = {
+            let store = Arc::clone(&real);
+            let start = Arc::clone(&start);
+            std::thread::spawn(move || {
+                start.wait();
+                store
+                    .get_or_compile(real_key, || Ok::<_, Infallible>(real_structure))
+                    .unwrap();
+            })
+        };
+        let complex_worker = {
+            let store = Arc::clone(&complex);
+            let start = Arc::clone(&start);
+            std::thread::spawn(move || {
+                start.wait();
+                store
+                    .get_or_compile(complex_key, || Ok::<_, Infallible>(complex_structure))
+                    .unwrap();
+            })
+        };
+        start.wait();
+        real_worker.join().unwrap();
+        complex_worker.join().unwrap();
+
+        let info = ledger.combined_info([real.info(), complex.info()]);
+        assert_eq!(info.entries(), 1);
+        assert!(info.charged_payload_bytes() <= budget);
+        assert_eq!(info.byte_budget(), budget);
+        assert_eq!(info.misses(), 2);
+        assert_eq!(info.admission_bypasses(), 1);
+    }
+
+    #[test]
+    fn coefficient_dtype_and_rule_identity_have_independent_keys() {
+        // What: equal RuleIdentity values in distinct Rust store types cannot
+        // cross-hit, while distinct identities in one dtype retain two entries.
+        struct OtherRuleIdentity;
+
+        let ledger = Arc::new(RuntimeTreeTransformCacheLedger::with_limits(4, usize::MAX));
+        let real = RuntimeTreeTransformStore::with_runtime_ledger(Arc::clone(&ledger));
+        let complex = RuntimeTreeTransformStore::with_runtime_ledger(Arc::clone(&ledger));
+        let (real_key, real_structure, _) = fixture(43);
+        let (complex_key, complex_structure) = complex_fixture(43);
+        real.get_or_compile(real_key.clone(), || {
+            Ok::<_, Infallible>(Arc::clone(&real_structure))
+        })
+        .unwrap();
+        complex
+            .get_or_compile(complex_key.clone(), || {
+                Ok::<_, Infallible>(Arc::clone(&complex_structure))
+            })
+            .unwrap();
+        assert_eq!(real.info().misses(), 1);
+        assert_eq!(complex.info().misses(), 1);
+
+        let (other_key, other_structure, _) =
+            fixture_with_rule(43, RuleIdentity::of_type::<OtherRuleIdentity>());
+        real.get_or_compile(other_key.clone(), || {
+            Ok::<_, Infallible>(Arc::clone(&other_structure))
+        })
+        .unwrap();
+        real.get_or_compile(real_key, || -> Result<_, Infallible> {
+            unreachable!("real entry is warm")
+        })
+        .unwrap();
+        real.get_or_compile(other_key, || -> Result<_, Infallible> {
+            unreachable!("other rule entry is warm")
+        })
+        .unwrap();
+        complex
+            .get_or_compile(complex_key, || -> Result<_, Infallible> {
+                unreachable!("complex entry is warm")
+            })
+            .unwrap();
+
+        let info = ledger.combined_info([real.info(), complex.info()]);
+        assert_eq!(info.entries(), 3);
+        assert_eq!(info.misses(), 3);
+        assert_eq!(info.hits(), 3);
+    }
+
+    #[test]
+    fn shared_clear_blocks_old_generation_and_releases_all_charges() {
+        // What: clear of both typed stores releases the shared ledger and a
+        // compilation begun before clear cannot republish afterward.
+        let ledger = Arc::new(RuntimeTreeTransformCacheLedger::with_limits(2, usize::MAX));
+        let real = Arc::new(RuntimeTreeTransformStore::with_runtime_ledger(Arc::clone(
+            &ledger,
+        )));
+        let complex = Arc::new(RuntimeTreeTransformStore::with_runtime_ledger(Arc::clone(
+            &ledger,
+        )));
+        let (real_key, real_structure, _) = fixture(44);
+        real.get_or_compile(real_key, || Ok::<_, Infallible>(real_structure))
+            .unwrap();
+
+        let (complex_key, complex_structure) = complex_fixture(44);
+        let started = Arc::new(Barrier::new(2));
+        let resume = Arc::new(Barrier::new(2));
+        let worker = {
+            let store = Arc::clone(&complex);
+            let started = Arc::clone(&started);
+            let resume = Arc::clone(&resume);
+            std::thread::spawn(move || {
+                store
+                    .get_or_compile(complex_key, || {
+                        started.wait();
+                        resume.wait();
+                        Ok::<_, Infallible>(complex_structure)
+                    })
+                    .unwrap()
+            })
+        };
+
+        started.wait();
+        real.clear();
+        complex.clear();
+        resume.wait();
+        assert_eq!(worker.join().unwrap().block_count(), 1);
+
+        let info = ledger.combined_info([real.info(), complex.info()]);
+        assert_eq!(info.entries(), 0);
+        assert_eq!(info.charged_payload_bytes(), 0);
+        assert_eq!(info.hits(), 0);
+        assert_eq!(info.misses(), 0);
     }
 
     #[test]
