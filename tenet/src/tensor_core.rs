@@ -16,7 +16,7 @@ use tenet_tensors::{
 };
 
 use crate::error::Error;
-use crate::runtime::Ctx;
+use crate::runtime::{CoefficientCtx, Ctx};
 use crate::typed::ScalarOps;
 
 /// Converts an internal coupled-layout invariant violation into the stable
@@ -366,14 +366,15 @@ fn observe_tree_transform_seam_call() {
 /// binding. The caller keeps user-layer dispatch and representation policy;
 /// this helper owns only typed destination derivation and the direct/fallback
 /// execution choice.
-pub(crate) fn tree_transform_owned_multiplicity_free<R, D>(
-    context: &mut Ctx<D, RuleIdentity>,
+pub(crate) fn tree_transform_owned_multiplicity_free<R, D, C>(
+    context: &mut CoefficientCtx<D, RuleIdentity, C>,
     input: BoundDynamicTensorRef<'_, R, D>,
     operation: TreeTransformOperation,
 ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), tenet_tensors::OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleIdentity>,
-    D: ScalarOps,
+    R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleIdentity>,
+    C: CategoricalScalar + tenet_tensors::DenseRecouplingScalar,
+    D: ScalarOps + RecouplingCoefficientAction<C>,
 {
     #[cfg(test)]
     observe_tree_transform_seam_call();

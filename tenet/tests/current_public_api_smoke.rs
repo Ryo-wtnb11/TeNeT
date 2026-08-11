@@ -1,8 +1,12 @@
 //! Independent Phase A smoke program for the canonical typed public API.
 
+use tenet::core::TypedSectorAdmission;
 use tenet::prelude::{
     product_sector, FermionParityFusionRule, GradedSpace, ProductFusionRuleExt, Runtime,
     SU2FusionRule, SU2Irrep, TensorMap, Truncation, U1FusionRule, U1Irrep, Z2Irrep,
+};
+use tenet::typed::{
+    TensorScalar, TypedTensorConstructionDispatch, TypedTensorModeDispatch, TypedTensorRootDispatch,
 };
 use tenet_network::{GreedyDenseOptimizer, Network, NetworkExecutionWorkspace, TemporaryLabel};
 
@@ -17,6 +21,30 @@ fn labels(names: &[&str]) -> Vec<TemporaryLabel> {
     names.iter().copied().map(TemporaryLabel::from).collect()
 }
 
+fn inspect_with_the_existing_root_bound<R, D>(tensor: &TensorMap<R, D>)
+where
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorRootDispatch<R>,
+    D: TensorScalar,
+{
+    assert_eq!(tensor.blocks().unwrap().count(), tensor.block_count());
+    if tensor.block_count() != 0 {
+        let _ = tensor.block_fusion_trees(0).unwrap();
+    }
+}
+
+fn zeros_with_the_construction_bound<'a, R, D>(
+    runtime: &Runtime,
+    space: &'a GradedSpace<R>,
+) -> Result<TensorMap<R, D>, <R::Mode as TypedTensorModeDispatch<R>>::FacadeError>
+where
+    R: TypedSectorAdmission + 'a,
+    R::Mode: TypedTensorConstructionDispatch<R, D>,
+    D: TensorScalar,
+{
+    TensorMap::zeros(runtime, [space], [space])
+}
+
 #[test]
 fn constructs_u1_su2_and_product_tensors_from_provider_labels() {
     let runtime = Runtime::builder().build().unwrap();
@@ -24,6 +52,10 @@ fn constructs_u1_su2_and_product_tensors_from_provider_labels() {
     let u1 =
         GradedSpace::try_new(U1FusionRule, [(U1Irrep::new(-1), 1), (U1Irrep::new(0), 2)]).unwrap();
     let u1_tensor = TensorMap::<U1FusionRule, f64>::zeros(&runtime, [&u1], [&u1]).unwrap();
+    inspect_with_the_existing_root_bound(&u1_tensor);
+    let generic_u1: TensorMap<U1FusionRule, f64> =
+        zeros_with_the_construction_bound(&runtime, &u1).unwrap();
+    assert_eq!(generic_u1.block_count(), u1_tensor.block_count());
     let coupled: Vec<_> = (0..u1_tensor.block_count())
         .map(|block| *u1_tensor.block_fusion_trees(block).unwrap().coupled())
         .collect();
