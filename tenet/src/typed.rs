@@ -453,6 +453,11 @@ where
     )
 }
 
+type CheckedGenericSpectrumResult<R, V> = Result<
+    Vec<SectorSpectrum<<R as TypedSectorAdmission>::Sector, V>>,
+    GenericTensorError<<R as CheckedGenericFusion>::Error>,
+>;
+
 impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
@@ -864,12 +869,7 @@ where
     D: TensorScalar,
 {
     /// Checked-Generic general eigenvalues for owned host tensors.
-    fn eig_vals_checked_generic(
-        &self,
-    ) -> Result<
-        Vec<SectorSpectrum<<R as TypedSectorAdmission>::Sector, num_complex::Complex64>>,
-        GenericTensorError<<R as CheckedGenericFusion>::Error>,
-    > {
+    fn eig_vals_checked_generic(&self) -> CheckedGenericSpectrumResult<R, num_complex::Complex64> {
         let TypedTensorRepr::Owned(body) = &self.repr else {
             return Err(GenericTensorError::Facade(Error::InvalidArgument(
                 "checked Generic eig_vals does not accept lazy adjoints".to_string(),
@@ -904,12 +904,7 @@ where
     D: TensorScalar,
 {
     /// Checked-Generic Hermitian eigenvalues for owned host tensors.
-    fn eigh_vals_checked_generic(
-        &self,
-    ) -> Result<
-        Vec<SectorSpectrum<<R as TypedSectorAdmission>::Sector, f64>>,
-        GenericTensorError<<R as CheckedGenericFusion>::Error>,
-    > {
+    fn eigh_vals_checked_generic(&self) -> CheckedGenericSpectrumResult<R, f64> {
         let TypedTensorRepr::Owned(body) = &self.repr else {
             return Err(GenericTensorError::Facade(Error::InvalidArgument(
                 "checked Generic eigh_vals does not accept lazy adjoints".to_string(),
@@ -1150,12 +1145,7 @@ where
     D: TensorScalar,
 {
     /// Checked-Generic singular values only for owned host tensors.
-    fn svd_vals_checked_generic(
-        &self,
-    ) -> Result<
-        Vec<SectorSpectrum<<R as TypedSectorAdmission>::Sector, f64>>,
-        GenericTensorError<<R as CheckedGenericFusion>::Error>,
-    > {
+    fn svd_vals_checked_generic(&self) -> CheckedGenericSpectrumResult<R, f64> {
         let TypedTensorRepr::Owned(body) = &self.repr else {
             return Err(GenericTensorError::Facade(Error::InvalidArgument(
                 "checked Generic svd_vals does not accept lazy adjoints".to_string(),

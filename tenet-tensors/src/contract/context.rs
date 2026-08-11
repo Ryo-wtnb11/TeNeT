@@ -48,6 +48,16 @@ use super::scratch::DynamicFusionScratchWorkspace;
 use super::structure::{TensorContractAxisPlan, TensorContractStructure};
 use tenet_operations::{TensorContractFusionProfile, TensorContractFusionRoute};
 
+type PreloweredPlanBuilder<R> =
+    for<'lhs, 'rhs, 'axes> fn(
+        &R,
+        &DynamicFusionMapSpace,
+        &FusionOperandLayout<'lhs>,
+        &FusionOperandLayout<'rhs>,
+        TensorContractSpec<'axes>,
+        LayoutKeyBuilder<R>,
+    ) -> Result<Arc<FusionContractPlan>, OperationError>;
+
 fn prelowered_plan_builder<R>(
     rule: &R,
     dst: &DynamicFusionMapSpace,
@@ -966,14 +976,7 @@ where
         alpha: D,
         beta: D,
         layout_primer: LayoutKeyBuilder<R>,
-        plan_builder: fn(
-            &R,
-            &DynamicFusionMapSpace,
-            &FusionOperandLayout<'_>,
-            &FusionOperandLayout<'_>,
-            TensorContractSpec<'_>,
-            LayoutKeyBuilder<R>,
-        ) -> Result<Arc<FusionContractPlan>, OperationError>,
+        plan_builder: PreloweredPlanBuilder<R>,
     ) -> Result<(), OperationError>
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,

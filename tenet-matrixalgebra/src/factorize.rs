@@ -438,6 +438,8 @@ pub struct BoundDynFactor<R, D> {
     data: Vec<D>,
 }
 
+type DynamicFactorPair<R, D> = (BoundDynFactor<R, D>, BoundDynFactor<R, D>);
+
 impl<R, D> fmt::Debug for BoundDynFactor<R, D> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BoundDynFactor")
@@ -2644,7 +2646,7 @@ fn build_left_right_bound_pair<R, D>(
     homspace: &FusionTreeHomSpace,
     matricizations: &[SectorMatricization<D>],
     pairs: &[FactorPair<D>],
-) -> Result<(BoundDynFactor<R, D>, BoundDynFactor<R, D>), OperationError>
+) -> Result<DynamicFactorPair<R, D>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
@@ -4933,7 +4935,7 @@ fn left_polar_dyn_reported<E, RuleKey, BT, BC, R, D>(
     context: &mut tenet_tensors::TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
     input: &BoundDynamicTensorRef<'_, R, D>,
     error_direction: PolarDirection,
-) -> Result<(BoundDynFactor<R, D>, BoundDynFactor<R, D>), OperationError>
+) -> Result<DynamicFactorPair<R, D>, OperationError>
 where
     E: DenseExecutor + ?Sized,
     RuleKey: Clone + Eq + std::hash::Hash + Send + Sync + 'static,
@@ -5015,7 +5017,7 @@ fn right_polar_dyn_reported<E, RuleKey, BT, BC, R, D>(
     context: &mut tenet_tensors::TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
     input: &BoundDynamicTensorRef<'_, R, D>,
     error_direction: PolarDirection,
-) -> Result<(BoundDynFactor<R, D>, BoundDynFactor<R, D>), OperationError>
+) -> Result<DynamicFactorPair<R, D>, OperationError>
 where
     E: DenseExecutor + ?Sized,
     RuleKey: Clone + Eq + std::hash::Hash + Send + Sync + 'static,
@@ -5173,7 +5175,7 @@ fn qr_compact_direct_regions<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
     plan: &CompactFactorPlan,
-) -> Result<(BoundDynFactor<R, D>, BoundDynFactor<R, D>), OperationError>
+) -> Result<DynamicFactorPair<R, D>, OperationError>
 where
     E: DenseExecutor + ?Sized,
     R: FusionRule,
@@ -5311,7 +5313,7 @@ fn lq_compact_direct_regions<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
     plan: &CompactFactorPlan,
-) -> Result<(BoundDynFactor<R, D>, BoundDynFactor<R, D>), OperationError>
+) -> Result<DynamicFactorPair<R, D>, OperationError>
 where
     E: DenseExecutor + ?Sized,
     R: FusionRule,
@@ -6860,7 +6862,7 @@ fn polar_dyn_checked_generic_reported<E, R, D>(
     input: &BoundDynamicTensorRef<'_, R, D>,
     direction: PolarDirection,
     error_direction: PolarDirection,
-) -> Result<(BoundDynFactor<R, D>, BoundDynFactor<R, D>), CheckedGenericFactorPlanError<R::Error>>
+) -> Result<DynamicFactorPair<R, D>, CheckedGenericFactorPlanError<R::Error>>
 where
     E: DenseExecutor + ?Sized,
     R: CheckedGenericFusion,
@@ -7938,7 +7940,7 @@ fn build_left_right_bound_pair_generic<R, D>(
     homspace: &FusionTreeHomSpace,
     matricizations: &[SectorMatricization<D>],
     pairs: &[FactorPair<D>],
-) -> Result<(BoundDynFactor<R, D>, BoundDynFactor<R, D>), OperationError>
+) -> Result<DynamicFactorPair<R, D>, OperationError>
 where
     R: FusionRule,
     D: FactorScalar,
@@ -7983,7 +7985,7 @@ fn build_left_right_bound_pair_generic_checked<R, D>(
     homspace: &FusionTreeHomSpace,
     matricizations: &[SectorMatricization<D>],
     pairs: &[FactorPair<D>],
-) -> Result<(BoundDynFactor<R, D>, BoundDynFactor<R, D>), CheckedGenericFactorPlanError<R::Error>>
+) -> Result<DynamicFactorPair<R, D>, CheckedGenericFactorPlanError<R::Error>>
 where
     R: CheckedGenericFusion,
     D: FactorScalar,
