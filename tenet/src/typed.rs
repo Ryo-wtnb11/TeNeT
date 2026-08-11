@@ -4447,6 +4447,20 @@ where
     ) -> Result<BoundDynamicFusionMapSpace<R>, Self::FacadeError>;
 }
 
+/// Tensor-side construction gate for payload/provider coefficient pairs.
+#[doc(hidden)]
+pub(crate) trait TypedTensorConstructionDispatch<R, D>: TypedTensorModeDispatch<R>
+where
+    R: TypedSectorAdmission,
+    D: TensorScalar,
+{
+    /// Builds one fully admitted root while retaining `provider`.
+    fn build_construction_root(
+        provider: Arc<R>,
+        homspace: FusionTreeHomSpace,
+    ) -> Result<BoundDynamicFusionMapSpace<R>, Self::FacadeError>;
+}
+
 /// Tensor-side tree-transform execution selected by a provider-owned mode.
 ///
 /// ```
@@ -6414,6 +6428,28 @@ where
     }
 }
 
+impl<R, D> TypedTensorConstructionDispatch<R, D> for MultiplicityFreeAdmissionMode
+where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols
+        + CheckedFusionAlgebra
+        + SectorCodec,
+    <R as MultiplicityFreeFusionSymbols>::Scalar:
+        CategoricalScalar + tenet_tensors::DenseRecouplingScalar,
+    D: TensorScalar
+        + tenet_tensors::RecouplingCoefficientAction<<R as MultiplicityFreeFusionSymbols>::Scalar>,
+{
+    fn build_construction_root(
+        provider: Arc<R>,
+        homspace: FusionTreeHomSpace,
+    ) -> Result<BoundDynamicFusionMapSpace<R>, Self::FacadeError> {
+        BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free_checked(
+            provider, homspace,
+        )
+        .map_err(Into::into)
+    }
+}
+
 impl<R> TypedTensorModeDispatch<R> for CheckedGenericAdmissionMode
 where
     R: TypedSectorAdmission<
@@ -6436,6 +6472,23 @@ where
         > + CheckedGenericFusion,
 {
     fn build_root(
+        provider: Arc<R>,
+        homspace: FusionTreeHomSpace,
+    ) -> Result<BoundDynamicFusionMapSpace<R>, Self::FacadeError> {
+        BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(provider, homspace)
+            .map_err(Into::into)
+    }
+}
+
+impl<R, D> TypedTensorConstructionDispatch<R, D> for CheckedGenericAdmissionMode
+where
+    R: TypedSectorAdmission<
+            Error = <R as CheckedGenericFusion>::Error,
+            Mode = CheckedGenericAdmissionMode,
+        > + CheckedGenericFusion,
+    D: TensorScalar,
+{
+    fn build_construction_root(
         provider: Arc<R>,
         homspace: FusionTreeHomSpace,
     ) -> Result<BoundDynamicFusionMapSpace<R>, Self::FacadeError> {
@@ -11756,10 +11809,11 @@ where
     }
 }
 
+#[allow(private_bounds)]
 impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
-    R::Mode: TypedTensorRootDispatch<R>,
+    R::Mode: TypedTensorRootDispatch<R> + TypedTensorConstructionDispatch<R, D>,
     D: TensorScalar,
 {
     /// Builds a compact diagonal map `bond <- bond` from labelled sector values.
@@ -11931,10 +11985,11 @@ where
     }
 }
 
+#[allow(private_bounds)]
 impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
-    R::Mode: TypedTensorRootDispatch<R>,
+    R::Mode: TypedTensorConstructionDispatch<R, D>,
     D: TensorScalar,
 {
     /// Returns the first leg's provider allocation after proving that every
@@ -11969,7 +12024,9 @@ where
             FusionProductSpace::new(codomain.iter().map(|leg| leg.leg().clone())),
             FusionProductSpace::new(domain.iter().map(|leg| leg.leg().clone())),
         );
-        <R::Mode as TypedTensorRootDispatch<R>>::build_root(provider, homspace)
+        <R::Mode as TypedTensorConstructionDispatch<R, D>>::build_construction_root(
+            provider, homspace,
+        )
     }
 
     /// Payload half of [`Self::build`]: fills only a fully admitted layout and
@@ -12011,6 +12068,19 @@ where
     ///
     /// One fusion-tree layout admission plus one `O(stored_len)` zeroed
     /// payload allocation.
+    ///
+    /// ```compile_fail
+    /// use tenet::core::{FibonacciFusionRule, FibonacciSector};
+    /// use tenet::typed::{GradedSpace, Runtime, TensorMap};
+    /// let runtime = Runtime::builder().build().unwrap();
+    /// let tau = GradedSpace::try_new(
+    ///     FibonacciFusionRule,
+    ///     [(FibonacciSector::Tau, 1)],
+    /// ).unwrap();
+    /// // A complex categorical coefficient cannot act on a real payload.
+    /// let _: TensorMap<FibonacciFusionRule, f64> =
+    ///     TensorMap::zeros(&runtime, [&tau], [&tau]).unwrap();
+    /// ```
     pub fn zeros<'a, Codomain, Domain>(
         runtime: &Runtime,
         codomain: Codomain,
