@@ -620,7 +620,7 @@ pub(crate) fn validate_raw_strided_bounds(
             actual: strides.len(),
         });
     }
-    if shape.iter().any(|&dim| dim == 0) {
+    if shape.contains(&0) {
         return Ok(());
     }
 

@@ -512,7 +512,7 @@ impl SlicePlan {
     /// recombination requires scatter/stack, not plain sum (an output-aware
     /// sliced executor is required in that case).
     pub fn has_output_slices(&self) -> bool {
-        self.kinds.iter().any(|k| *k == SliceKind::Output)
+        self.kinds.contains(&SliceKind::Output)
     }
 
     /// Number of independent sub-contractions = product of sliced index dims.
