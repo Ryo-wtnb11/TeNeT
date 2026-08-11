@@ -104,6 +104,10 @@ where
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the public in-place tensor product exposes operands, conjugation, output order, and alpha/beta explicitly"
+)]
 pub fn tensorproduct_into_with_conjugation<
     D,
     const DST_NOUT: usize,
@@ -150,6 +154,10 @@ where
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the backend-explicit contraction keeps execution resources, operands, TensorContractSpec, and alpha/beta separate"
+)]
 pub fn tensorcontract_into_with<
     B,
     D,
@@ -274,6 +282,10 @@ where
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the public fusion tensor product exposes its rule, operands, conjugation, output order, and alpha/beta explicitly"
+)]
 pub fn tensorproduct_fusion_into_with_conjugation<
     R,
     D,
@@ -342,6 +354,10 @@ where
 ///
 /// Use [`tensorcontract_fusion_prepared_into_core_dst`] when the
 /// requested output permutation needs a final tree-pair transform.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the low-level fusion operation keeps caller-owned core temporaries distinct from source and destination tensors"
+)]
 pub fn tensorcontract_fusion_via_tree_pair_transforms_into<
     R,
     D,
@@ -401,6 +417,10 @@ where
 /// Executes a caller-supplied source-transform plan. The core block plan is
 /// compiled eagerly on each call; complete compile-once replay is provided by
 /// [`crate::PreparedTensorContractFusion`].
+#[expect(
+    clippy::too_many_arguments,
+    reason = "FusionContractPlan owns geometry while this low-level API keeps caller-owned core temporaries explicit"
+)]
 pub fn tensorcontract_fusion_prepared_into<
     R,
     D,
@@ -468,6 +488,10 @@ where
 /// Executes a caller-supplied source/output-transform plan. The core block
 /// plan is compiled eagerly on each call; complete compile-once replay is
 /// provided by [`crate::PreparedTensorContractFusion`].
+#[expect(
+    clippy::too_many_arguments,
+    reason = "FusionContractPlan owns geometry while this low-level API keeps source, core, and output tensors explicit"
+)]
 pub fn tensorcontract_fusion_prepared_into_core_dst<
     R,
     D,
@@ -541,6 +565,10 @@ where
 
 /// Backend-explicit plan-only contraction. The supplied plan does not own the
 /// core block plan, which is compiled eagerly on each call.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the expert prepared boundary keeps two backend/workspace pairs and caller-owned core tensors explicit"
+)]
 pub fn tensorcontract_fusion_prepared_into_with<
     BT,
     BC,
@@ -650,6 +678,10 @@ where
 
 /// Backend-explicit plan-only contraction with output transform. The supplied
 /// plan does not own the core block plan, which is compiled eagerly per call.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the expert prepared boundary keeps execution resources and source, core, and output tensors explicit"
+)]
 pub fn tensorcontract_fusion_prepared_into_core_dst_with<
     BT,
     BC,
@@ -835,6 +867,10 @@ where
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the backend-explicit fusion contraction keeps execution resources, rule, operands, spec, and alpha/beta separate"
+)]
 pub fn tensorcontract_fusion_into_with<
     B,
     R,
@@ -1061,6 +1097,10 @@ where
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the compiled execution boundary keeps backend, workspace, structure, operands, and alpha/beta explicit"
+)]
 pub fn tensorcontract_execute_with<
     B,
     D,

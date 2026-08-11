@@ -627,6 +627,10 @@ where
     }
 
     #[allow(dead_code)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the storage-workspace replay helper keeps its extra storage resource distinct from cached transform context state"
+    )]
     pub(crate) fn tree_transform_into_storage_workspace<
         R,
         const DST_NOUT: usize,

@@ -2038,6 +2038,10 @@ where
 }
 
 /// Replays a prepared tree-transform structure on host slices.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the raw kernel boundary keeps adapter, workspace, replay structures, buffers, and alpha/beta explicit"
+)]
 pub fn tree_transform_structure_with_strided_kernel_raw<A, D, C>(
     kernels: &mut A,
     workspace: &mut TreeTransformWorkspace<D>,
@@ -2075,6 +2079,10 @@ where
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the overwrite kernel boundary keeps adapter, workspace, replay structures, buffers, and alpha explicit"
+)]
 pub fn tree_transform_structure_overwrite_with_strided_kernel_raw<A, D, C>(
     kernels: &mut A,
     workspace: &mut TreeTransformWorkspace<D>,
@@ -2111,6 +2119,10 @@ where
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the shared replay helper preserves the raw kernel inputs and destination update mode explicitly"
+)]
 fn tree_transform_structure_with_strided_kernel_raw_mode<A, D, C>(
     kernels: &mut A,
     workspace: &mut TreeTransformWorkspace<D>,
@@ -4509,6 +4521,10 @@ where
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the packing kernel keeps layout authority, source and destination slices, offset, and conjugation explicit"
+)]
 fn pack_layout_into_column<A, T>(
     kernels: &mut A,
     fused_index: Option<&mut [usize]>,

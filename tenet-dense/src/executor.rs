@@ -210,6 +210,10 @@ pub trait DenseExecutor {
     /// [`strided_batch_runs`] and issue #103): consecutive run lengths summing
     /// to `jobs.len()`. Backends that route runs differently read it to avoid
     /// recomputing the partition per replay; the serial default ignores it.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the dense backend boundary keeps three buffers, batch metadata, and BLAS alpha/beta explicit"
+    )]
     fn matmul_batch_axpby_into(
         &mut self,
         output: DenseWrite<'_>,

@@ -887,6 +887,10 @@ where
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the test seam keeps injected layout probes and each planning input independently controllable"
+)]
 fn select_tensorcontract_fusion_plan_from_spaces_with_probe<R>(
     rule: &R,
     dst: &DynamicFusionMapSpace,
@@ -1226,6 +1230,10 @@ where
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "candidate scoring keeps rule, three spaces, axis order, plan, probe, and optional primer independently meaningful"
+)]
 fn score_fusion_contract_candidate<R, S, P>(
     rule: &R,
     dst: &DynamicFusionMapSpace,

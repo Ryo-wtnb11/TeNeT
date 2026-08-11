@@ -58,6 +58,10 @@ pub trait Rank2Gemm<D> {
     ///
     /// `runs` is the batch's plan-time run partition (see issue #103); backends
     /// that route runs read it, the serial default ignores it.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the replay backend boundary keeps shared buffers, jobs, run partition, and alpha/beta explicit"
+    )]
     fn matmul_rank2_batch(
         &mut self,
         dst: &mut [D],
