@@ -898,7 +898,7 @@ mod tests {
                     BlockSpec::column_major_with_key(
                         BlockKey::from(key.clone()),
                         std::iter::once(elements)
-                            .chain(std::iter::repeat(1).take(rank - 1))
+                            .chain(std::iter::repeat_n(1, rank - 1))
                             .collect(),
                         index * elements,
                     )
