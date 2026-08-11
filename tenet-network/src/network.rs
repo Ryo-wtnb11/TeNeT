@@ -491,6 +491,10 @@ impl Network {
     /// bytes plus non-destination workspace bytes. A successful return proves
     /// that [`SymmetricSliceStats::peak_total_bytes`] did not exceed the total
     /// ceiling.
+    #[expect(
+        clippy::type_complexity,
+        reason = "the public sliced execution API returns its tensor and measured statistics together"
+    )]
     pub fn execute_symmetric_sliced<R, D>(
         &self,
         tensors: &[&TensorMap<R, D>],
@@ -2125,6 +2129,10 @@ fn label_positions(
         .collect()
 }
 
+#[expect(
+    clippy::type_complexity,
+    reason = "the planner returns the two-sided axis partition as an optional tuple"
+)]
 fn compiled_intermediate_permutation(
     labels: &[TemporaryLabel],
     current_codomain_rank: usize,
@@ -2545,6 +2553,10 @@ fn has_intra_operand_pair(labels: &[TemporaryLabel]) -> bool {
 /// written order. A label written three or more times on one operand is
 /// rejected (the macro already rejects it at compile time; this guards the
 /// direct API).
+#[expect(
+    clippy::type_complexity,
+    reason = "the trace parser returns paired axes and surviving labels together"
+)]
 fn split_trace_pairs(
     operand: usize,
     labels: &[TemporaryLabel],

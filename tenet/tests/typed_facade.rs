@@ -4866,6 +4866,10 @@ fn c64_compact_inv_and_pinv_are_elementwise_reciprocals() {
 /// `t · s` contracts `t`'s domain axis against `s`'s codomain axis (the
 /// compose-shaped pairing, which is the only one the engine admits: contracted
 /// legs must agree on their duality flag), and `s · t` the mirror.
+#[expect(
+    clippy::type_complexity,
+    reason = "the test table records each contraction geometry in one fixture row"
+)]
 const DIAGONAL_CONTRACT_CASES: &[(&str, bool, &[usize], &[usize], &[usize])] = &[
     // `t · s`, identity output order: the scaled leg stays last.
     ("t*s", true, &[2], &[0], &[0, 1, 2]),
@@ -8599,6 +8603,10 @@ fn cu1_typed_rank_three_permutation_pins_the_gauge_contract_and_recoupling_value
 // ---------------------------------------------------------------------------
 
 #[test]
+#[expect(
+    clippy::type_complexity,
+    reason = "the test table records axes and expected error class in one fixture row"
+)]
 fn contract_error_classes_and_their_both_defect_precedence() {
     // What: the typed contract reports
     // a bad output order before a simultaneous contracted-leg mismatch.
