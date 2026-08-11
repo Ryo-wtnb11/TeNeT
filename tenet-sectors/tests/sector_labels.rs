@@ -2,10 +2,11 @@ use std::collections::BTreeSet;
 
 use tenet_sectors::{
     product_sector, BraidingStyleKind, CU1FusionRule, CU1Irrep, CheckedFusionAlgebra,
-    FermionParityFusionRule, FusionAlgebraError, FusionRule, FusionStyleKind, Fz2SectorLayout,
-    PackedProductCodec, ProductFusionRule, ProductSector, ProductSectorCodecError, RuleIdentity,
-    SU2FusionRule, SU2Irrep, SectorCodec, SectorId, SectorVec, U1FusionRule, U1Irrep,
-    U1SectorLayout, Z2FusionRule, Z2Irrep, CU1_MAX_TWICE_CHARGE, SU2_MAX_DOUBLED_SPIN,
+    FermionParityFusionRule, FibonacciFusionRule, FibonacciSector, FusionAlgebraError, FusionRule,
+    FusionStyleKind, Fz2SectorLayout, PackedProductCodec, ProductFusionRule, ProductSector,
+    ProductSectorCodecError, RuleIdentity, SU2FusionRule, SU2Irrep, SectorCodec, SectorId,
+    SectorVec, U1FusionRule, U1Irrep, U1SectorLayout, Z2FusionRule, Z2Irrep, CU1_MAX_TWICE_CHARGE,
+    SU2_MAX_DOUBLED_SPIN,
 };
 
 #[test]
@@ -142,6 +143,7 @@ fn builtin_codecs_decode_every_id_their_own_algebra_reaches() {
     );
     assert_decode_total(&Z2FusionRule, [Z2Irrep::ODD], 2);
     assert_decode_total(&FermionParityFusionRule, [Z2Irrep::ODD], 2);
+    assert_decode_total(&FibonacciFusionRule, [FibonacciSector::Tau], 2);
     assert_decode_total(
         &SU2FusionRule,
         [1, 2, SU2_MAX_DOUBLED_SPIN - 1, SU2_MAX_DOUBLED_SPIN].map(SU2Irrep::from_twice_spin),
