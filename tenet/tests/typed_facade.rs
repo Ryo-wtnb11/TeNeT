@@ -13,7 +13,7 @@ use tenet::core::{
     MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols,
     ProductFusionRuleExt, RuleIdentity, SU2FusionRule, SU2Irrep, SectorCodec, SectorId, SectorVec,
 };
-use tenet::prelude::{Complex64, Runtime};
+use tenet::prelude::{Complex64, FibonacciFusionRule, FibonacciSector, Runtime};
 use tenet::typed::{GradedSpace, TensorMap, Truncation};
 
 /// The fusion-tree layout and complete-structure caches are process-global, so
@@ -383,6 +383,25 @@ fn graded_space_reports_labels_in_provider_sector_id_order() {
         vec![Z3Charge(0), Z3Charge(1), Z3Charge(2)]
     );
     assert_eq!(space.degeneracies(), &[2, 3, 1]);
+    assert!(!space.is_dual());
+}
+
+#[test]
+fn fibonacci_codec_reaches_public_graded_space_construction() {
+    // What: the closed-form provider's public labels cross the ordinary typed
+    // codec boundary and return in engine-sector order. Tensor execution has a
+    // separate complex-coefficient admission boundary and is not claimed here.
+    let space = GradedSpace::try_new(
+        FibonacciFusionRule,
+        [(FibonacciSector::Tau, 3), (FibonacciSector::Vacuum, 2)],
+    )
+    .unwrap();
+
+    assert_eq!(
+        space.sectors().unwrap(),
+        vec![FibonacciSector::Vacuum, FibonacciSector::Tau]
+    );
+    assert_eq!(space.degeneracies(), &[2, 3]);
     assert!(!space.is_dual());
 }
 
@@ -2109,8 +2128,9 @@ fn braid_moves_legs_of_a_multi_block_external_provider_tensor() {
     // unobservable for every provider this facade can host. The symmetric ones
     // (both fixtures here, the built-in Z2/SU(2), and even the fermionic rule
     // used further down) make over- and under-crossing the same morphism, and
-    // the one built-in rule that would not — `FibonacciFusionRule` — is
-    // excluded by this facade's `Scalar = f64` and `SectorCodec` bounds.
+    // the one built-in rule that would not — `FibonacciFusionRule` — now
+    // satisfies `SectorCodec` but remains excluded by this facade's
+    // `Scalar = f64` bound.
     //
     // What the tests below therefore do and do not prove: they pin how the
     // levels are *split* (by the source codomain rank, which the oracle below

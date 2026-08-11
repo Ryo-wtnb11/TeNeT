@@ -122,8 +122,9 @@ methods to the `dual_or_panic`, `fusion_channels_or_panic`, and
 `SectorCodec` in `tenet-sectors/src/algebra.rs` defines the public label type
 and its translation to `SectorId`. Without it the provider can still work at
 the expert layer but is not reachable through `GradedSpace`/`TensorMap`,
-because those return labels, never ids. (`FibonacciFusionRule` currently has no
-codec, which is exactly why it is expert-only.)
+because those return labels, never ids. `FibonacciFusionRule` implements this
+boundary with its closed `FibonacciSector` enum; its separate typed-tensor
+restriction is the complex coefficient scalar described below.
 
 Four laws:
 
@@ -214,8 +215,9 @@ are part of the Rust type and of the `ProductSector` label; `U(1) ⊠ fZ2` and
   `MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra +
   SectorCodec`. A multiplicity-free provider with complex categorical
   coefficients is currently expert-layer only.
-- `FibonacciFusionRule` has no `SectorCodec`, so it is not available through the
-  typed API.
+- `FibonacciFusionRule` implements `SectorCodec`, but its `Complex64`
+  categorical coefficients do not satisfy the typed root's current `f64`
+  restriction. A codec alone does not make its tensors executable.
 - Checked Generic typed execution is Host-only. Individual operations require
   the checked Generic capabilities they use.
 - Multiplicity-free providers still implement overlapping infallible
