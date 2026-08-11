@@ -367,7 +367,7 @@ fn storage_end_exclusive(
             strides: strides.len(),
         });
     }
-    if shape.iter().any(|&dim| dim == 0) {
+    if shape.contains(&0) {
         return Ok(offset);
     }
     let max_delta = max_offset_delta(shape, strides)?;

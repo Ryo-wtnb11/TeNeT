@@ -244,7 +244,7 @@ fn resolve_cotengra_uv_project(project: String) -> String {
 /// drifted from the snapshot it was planned under. Reusing is always
 /// *correct* (a pairwise order is dimension-independent); re-planning only
 /// restores *optimality*.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum ReplanPolicy {
     /// Always reuse the cached order, whatever the current dimensions.
     AlwaysReuse,
@@ -258,6 +258,7 @@ pub enum ReplanPolicy {
     /// default: re-searching a drifted topology (see
     /// [`DriftFactor`](Self::DriftFactor)) buys no measured speedup on
     /// TeNeT's networks while paying the (χ-dependent) search cost each time.
+    #[default]
     BakeOnce,
     /// Re-plan when any leg dimension differs from the snapshot by more
     /// than this factor (as a ratio, in either direction). Chases the
@@ -271,12 +272,6 @@ pub enum ReplanPolicy {
 /// planning-time value, on the theory that the cost balance has changed
 /// qualitatively. Not the default — see [`ReplanPolicy::BakeOnce`].
 pub const DEFAULT_REPLAN_DRIFT_FACTOR: f64 = 2.0;
-
-impl Default for ReplanPolicy {
-    fn default() -> Self {
-        Self::BakeOnce
-    }
-}
 
 /// Default maximum number of cached plans (per runtime).
 ///

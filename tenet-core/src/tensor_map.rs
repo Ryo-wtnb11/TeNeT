@@ -739,7 +739,7 @@ impl<'a> BlockLayout<'a> {
 
     #[inline]
     pub fn is_empty(self) -> bool {
-        self.shape.iter().any(|&dim| dim == 0)
+        self.shape.contains(&0)
     }
 }
 

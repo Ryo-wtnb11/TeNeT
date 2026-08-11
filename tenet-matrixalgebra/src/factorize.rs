@@ -9206,14 +9206,10 @@ where
             right_leading: stage.rank,
         });
     }
-    let (u, vh) = build_left_right_bound_pair_generic_checked(
-        &provider,
-        space.homspace(),
-        &matrices,
-        &pairs,
-    )?;
+    let (u, vh) =
+        build_left_right_bound_pair_generic_checked(provider, space.homspace(), &matrices, &pairs)?;
     let s = diagonal_bond_svd_factor_generic_checked(
-        Arc::clone(&provider),
+        Arc::clone(provider),
         &singular_values,
         &D::from_real,
     )?;
@@ -9276,7 +9272,7 @@ where
             right_leading: rank,
         });
     }
-    build_left_right_bound_pair_generic_checked(&provider, space.homspace(), &matrices, &pairs)
+    build_left_right_bound_pair_generic_checked(provider, space.homspace(), &matrices, &pairs)
 }
 
 /// Checked-Generic full QR via sectorwise augmented `[A | I]` QR.
@@ -9332,7 +9328,7 @@ where
             right_leading: rows,
         });
     }
-    build_left_right_bound_pair_generic_checked(&provider, space.homspace(), &matrices, &pairs)
+    build_left_right_bound_pair_generic_checked(provider, space.homspace(), &matrices, &pairs)
 }
 
 /// Checked-Generic full SVD. Dense work is performed before any output-space
@@ -9448,7 +9444,7 @@ where
         });
     }
     let u = build_bound_factor_generic_checked(
-        &provider,
+        provider,
         space.homspace(),
         &matrices,
         &pairs,
@@ -9456,7 +9452,7 @@ where
         FactorSide::Left,
     )?;
     let vh = build_bound_factor_generic_checked(
-        &provider,
+        provider,
         space.homspace(),
         &matrices,
         &pairs,
@@ -9464,7 +9460,7 @@ where
         FactorSide::Right,
     )?;
     let s = rectangular_diagonal_bond_tensor_generic_checked(
-        Arc::clone(&provider),
+        Arc::clone(provider),
         &singular_values,
         &row_dimensions,
         &col_dimensions,
@@ -9532,7 +9528,7 @@ where
             right_leading: cols,
         });
     }
-    build_left_right_bound_pair_generic_checked(&provider, space.homspace(), &matrices, &pairs)
+    build_left_right_bound_pair_generic_checked(provider, space.homspace(), &matrices, &pairs)
 }
 
 /// Checked-Generic singular values only. No factor-space publication occurs.

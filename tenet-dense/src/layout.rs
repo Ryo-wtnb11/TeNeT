@@ -12,7 +12,7 @@ pub(crate) fn validate_dense_layout(
             strides: strides.len(),
         });
     }
-    if shape.iter().any(|&dim| dim == 0) {
+    if shape.contains(&0) {
         return if offset <= len {
             Ok(())
         } else {
