@@ -52,13 +52,13 @@ than a provider enum or a named-group dispatch branch.
 [`docs/provider_interface.md`](docs/provider_interface.md) is the contract for
 writing one.
 
-`FibonacciFusionRule` supplies categorical data but does not implement
-`SectorCodec`, so it is not available through the ordinary typed
-`GradedSpace` / `TensorMap` API. `tenet-category-data` separately ships
-`CategoryDataFibonacci`, which implements `SectorCodec` but has `Complex64`
-categorical coefficients; the current multiplicity-free typed root requires
-`f64`. SUN is available only with `racah-generated` and uses the checked Generic
-path.
+`FibonacciFusionRule` supplies `FibonacciSector` labels through `SectorCodec`,
+but its `Complex64` categorical coefficients do not satisfy the current
+multiplicity-free typed root's `f64` requirement. It is therefore not yet
+available through the ordinary typed `TensorMap` API. `tenet-category-data`
+separately ships the table-backed `CategoryDataFibonacci`, with its own
+`CategoryObject` codec and the same coefficient-type boundary. SUN is available
+only with `racah-generated` and uses the checked Generic path.
 
 A product of providers is itself a provider, so
 
