@@ -19,21 +19,20 @@ use tenet_tensors::{
 use crate::error::Error;
 use crate::plancache::{Optimizer, PlanCacheConfig};
 use crate::typed::ScalarOps;
-pub type Ctx<D, Key, C = f64> = TensorContractFusionExecutionContext<
+type CoefficientCtx<D, Key, C> = TensorContractFusionExecutionContext<
     D,
     Key,
     DenseTreeTransformOperations,
     DenseTreeTransformOperations,
     C,
 >;
+pub type Ctx<D, Key> = CoefficientCtx<D, Key, f64>;
 /// The supported payload/coefficient execution contexts for one cache-key
 /// namespace. Existing operations dispatch on the stored dtype to the two
-/// real-coefficient lanes; the complex-coefficient lane remains private until
-/// the #592 typed-facade follow-up.
+/// real-coefficient lanes.
 pub struct Ctxs<Key: Clone + Eq + Hash + Send + Sync + 'static> {
     pub(crate) f64: Ctx<f64, Key>,
     pub(crate) c64: Ctx<Complex64, Key>,
-    pub(crate) c64_coeff_c64: Ctx<Complex64, Key, Complex64>,
 }
 
 impl<Key: Clone + Eq + Hash + Send + Sync + 'static> Default for Ctxs<Key> {
@@ -41,7 +40,6 @@ impl<Key: Clone + Eq + Hash + Send + Sync + 'static> Default for Ctxs<Key> {
         Self {
             f64: Ctx::default(),
             c64: Ctx::default(),
-            c64_coeff_c64: Ctx::default(),
         }
     }
 }
@@ -67,7 +65,6 @@ impl<Key: Clone + Eq + Hash + Send + Sync + 'static> Ctxs<Key> {
         ctx: &tenet_dense::SharedCpuContext,
         gemm_kind: Option<tenet_dense::CpuBackendKind>,
         real_tree_transform_store: Weak<RuntimeTreeTransformStore<f64>>,
-        complex_tree_transform_store: Weak<RuntimeTreeTransformStore<Complex64>>,
     ) -> Result<Self, Error> {
         let mut ctxs = Self {
             f64:
@@ -91,16 +88,6 @@ impl<Key: Clone + Eq + Hash + Send + Sync + 'static> Ctxs<Key> {
                     f64,
                 >>::Workspace::default(),
             ),
-            c64_coeff_c64: Ctx::with_parts(
-                tenet_tensors::TreeTransformExecutionContext::new(make_transform_ops(
-                    ctx, gemm_kind,
-                )?),
-                make_transform_ops(ctx, gemm_kind)?,
-                <DenseTreeTransformOperations as tenet_tensors::TensorContractBackend<
-                    Complex64,
-                    Complex64,
-                >>::Workspace::default(),
-            ),
         };
         ctxs.set_cache_policy(OperationCachePolicy::NoCache);
         ctxs.f64
@@ -111,17 +98,12 @@ impl<Key: Clone + Eq + Hash + Send + Sync + 'static> Ctxs<Key> {
             .tree_context_mut()
             .cache_mut()
             .bind_runtime_store(real_tree_transform_store);
-        ctxs.c64_coeff_c64
-            .tree_context_mut()
-            .cache_mut()
-            .bind_runtime_store(complex_tree_transform_store);
         Ok(ctxs)
     }
 
     fn set_cache_policy(&mut self, policy: OperationCachePolicy) {
         self.f64.set_cache_policy(policy);
         self.c64.set_cache_policy(policy);
-        self.c64_coeff_c64.set_cache_policy(policy);
     }
 
     pub(crate) fn set_recoupling_threads(&mut self, threads: usize) {
@@ -130,10 +112,6 @@ impl<Key: Clone + Eq + Hash + Send + Sync + 'static> Ctxs<Key> {
             .backend_mut()
             .set_recoupling_threads(threads);
         self.c64
-            .tree_context_mut()
-            .backend_mut()
-            .set_recoupling_threads(threads);
-        self.c64_coeff_c64
             .tree_context_mut()
             .backend_mut()
             .set_recoupling_threads(threads);
@@ -152,19 +130,11 @@ impl<Key: Clone + Eq + Hash + Send + Sync + 'static> Ctxs<Key> {
                 .backend_mut()
                 .recoupling_threads()
                 == expected
-            && self
-                .c64_coeff_c64
-                .tree_context_mut()
-                .backend_mut()
-                .recoupling_threads()
-                == expected
     }
 
     #[cfg(test)]
     pub(crate) fn local_cache_policy_is(&self, expected: OperationCachePolicy) -> bool {
-        self.f64.local_cache_policy_is(expected)
-            && self.c64.local_cache_policy_is(expected)
-            && self.c64_coeff_c64.local_cache_policy_is(expected)
+        self.f64.local_cache_policy_is(expected) && self.c64.local_cache_policy_is(expected)
     }
 
     #[cfg(test)]
@@ -190,18 +160,28 @@ impl<Key: Clone + Eq + Hash + Send + Sync + 'static> Ctxs<Key> {
                 .contract_backend()
                 .dense()
                 .shares_cpu_context(shared)
-            && self
-                .c64_coeff_c64
-                .tree_context_mut()
-                .backend_mut()
-                .dense()
-                .shares_cpu_context(shared)
-            && self
-                .c64_coeff_c64
-                .contract_backend()
-                .dense()
-                .shares_cpu_context(shared)
     }
+}
+
+fn make_complex_multiplicity_free_ctx(
+    ctx: &tenet_dense::SharedCpuContext,
+    gemm_kind: Option<tenet_dense::CpuBackendKind>,
+    tree_transform_store: Weak<RuntimeTreeTransformStore<Complex64>>,
+) -> Result<CoefficientCtx<Complex64, RuleIdentity, Complex64>, Error> {
+    let mut context = CoefficientCtx::with_parts(
+        tenet_tensors::TreeTransformExecutionContext::new(make_transform_ops(ctx, gemm_kind)?),
+        make_transform_ops(ctx, gemm_kind)?,
+        <DenseTreeTransformOperations as tenet_tensors::TensorContractBackend<
+            Complex64,
+            Complex64,
+        >>::Workspace::default(),
+    );
+    context.set_cache_policy(OperationCachePolicy::NoCache);
+    context
+        .tree_context_mut()
+        .cache_mut()
+        .bind_runtime_store(tree_transform_store);
+    Ok(context)
 }
 
 macro_rules! rule_lanes {
@@ -218,6 +198,7 @@ macro_rules! define_tensor_execution_context {
         /// Runtime-owned host tensor execution state.
         pub(crate) struct TensorExecutionContext {
             $(pub(crate) $field: Ctxs<$key>,)+
+            mf_c64_coeff_c64: CoefficientCtx<Complex64, RuleIdentity, Complex64>,
         }
 
         impl TensorExecutionContext {
@@ -229,8 +210,12 @@ macro_rules! define_tensor_execution_context {
                         &config.shared_ctx,
                         config.gemm_kind,
                         config.real_tree_transform_store.clone(),
-                        config.complex_tree_transform_store.clone(),
                     )?,)+
+                    mf_c64_coeff_c64: make_complex_multiplicity_free_ctx(
+                        &config.shared_ctx,
+                        config.gemm_kind,
+                        config.complex_tree_transform_store.clone(),
+                    )?,
                 };
                 if let Some(threads) = config.recoupling_threads {
                     context.set_recoupling_threads(threads);
@@ -240,6 +225,10 @@ macro_rules! define_tensor_execution_context {
 
             fn set_recoupling_threads(&mut self, threads: usize) {
                 $(self.$field.set_recoupling_threads(threads);)+
+                self.mf_c64_coeff_c64
+                    .tree_context_mut()
+                    .backend_mut()
+                    .set_recoupling_threads(threads);
             }
 
             /// Returns the multiplicity-free lane matching scalar `D`.
@@ -260,8 +249,8 @@ macro_rules! define_tensor_execution_context {
             )]
             pub(crate) fn complex_multiplicity_free_lane(
                 &mut self,
-            ) -> &mut Ctx<Complex64, tenet_core::RuleIdentity, Complex64> {
-                &mut self.mf.c64_coeff_c64
+            ) -> &mut CoefficientCtx<Complex64, RuleIdentity, Complex64> {
+                &mut self.mf_c64_coeff_c64
             }
 
             pub(crate) fn generic_lane<D: ScalarOps>(
@@ -273,6 +262,12 @@ macro_rules! define_tensor_execution_context {
             #[cfg(test)]
             pub(crate) fn recoupling_threads_are(&mut self, expected: usize) -> bool {
                 true $(&& self.$field.recoupling_threads_are(expected))+
+                    && self
+                        .mf_c64_coeff_c64
+                        .tree_context_mut()
+                        .backend_mut()
+                        .recoupling_threads()
+                        == expected
             }
 
             #[cfg(test)]
@@ -281,6 +276,17 @@ macro_rules! define_tensor_execution_context {
                 shared: &tenet_dense::SharedCpuContext,
             ) -> bool {
                 true $(&& self.$field.shares_cpu_context(shared))+
+                    && self
+                        .mf_c64_coeff_c64
+                        .tree_context_mut()
+                        .backend_mut()
+                        .dense()
+                        .shares_cpu_context(shared)
+                    && self
+                        .mf_c64_coeff_c64
+                        .contract_backend()
+                        .dense()
+                        .shares_cpu_context(shared)
             }
 
             #[cfg(test)]
@@ -289,6 +295,7 @@ macro_rules! define_tensor_execution_context {
                 expected: tenet_tensors::OperationCachePolicy,
             ) -> bool {
                 true $(&& self.$field.local_cache_policy_is(expected))+
+                    && self.mf_c64_coeff_c64.local_cache_policy_is(expected)
             }
         }
     };
@@ -302,6 +309,7 @@ macro_rules! define_runtime_state {
         /// Generic-fusion namespaces, plus the rule-independent dense executor.
         pub(crate) struct RuntimeState {
             $(pub(crate) $field: Ctxs<$key>,)+
+            mf_c64_coeff_c64: CoefficientCtx<Complex64, RuleIdentity, Complex64>,
             pub(crate) dense: Box<dyn tenet_dense::DenseExecutor + Send>,
             #[cfg(feature = "cuda")]
             pub(crate) cuda: Option<tenet_dense::CudaDenseContext>,
@@ -322,8 +330,12 @@ macro_rules! define_runtime_state {
                         ctx,
                         gemm_kind,
                         real_tree_transform_store.clone(),
-                        complex_tree_transform_store.clone(),
                     )?,)+
+                    mf_c64_coeff_c64: make_complex_multiplicity_free_ctx(
+                        ctx,
+                        gemm_kind,
+                        complex_tree_transform_store,
+                    )?,
                     dense,
                     #[cfg(feature = "cuda")]
                     cuda: None,
@@ -332,16 +344,27 @@ macro_rules! define_runtime_state {
 
             fn set_recoupling_threads(&mut self, threads: usize) {
                 $(self.$field.set_recoupling_threads(threads);)+
+                self.mf_c64_coeff_c64
+                    .tree_context_mut()
+                    .backend_mut()
+                    .set_recoupling_threads(threads);
             }
 
             #[cfg(test)]
             pub(crate) fn recoupling_threads_are(&mut self, expected: usize) -> bool {
                 true $(&& self.$field.recoupling_threads_are(expected))+
+                    && self
+                        .mf_c64_coeff_c64
+                        .tree_context_mut()
+                        .backend_mut()
+                        .recoupling_threads()
+                        == expected
             }
 
             #[cfg(test)]
             fn local_cache_policy_is(&self, expected: OperationCachePolicy) -> bool {
                 true $(&& self.$field.local_cache_policy_is(expected))+
+                    && self.mf_c64_coeff_c64.local_cache_policy_is(expected)
             }
 
             #[cfg(test)]
@@ -350,6 +373,17 @@ macro_rules! define_runtime_state {
                 shared: &tenet_dense::SharedCpuContext,
             ) -> bool {
                 true $(&& self.$field.shares_cpu_context(shared))+
+                    && self
+                        .mf_c64_coeff_c64
+                        .tree_context_mut()
+                        .backend_mut()
+                        .dense()
+                        .shares_cpu_context(shared)
+                    && self
+                        .mf_c64_coeff_c64
+                        .contract_backend()
+                        .dense()
+                        .shares_cpu_context(shared)
             }
         }
     };
@@ -556,8 +590,9 @@ pub(crate) struct RuntimeExecutionConfig {
     /// THE runtime's CPU context: one rayon pool shared by every executor this
     /// runtime mints — the state's, the executor pool's, and all
     /// transform backends of every pooled `TensorExecutionContext`
-    /// (multiplicity-free and Generic-fusion namespaces × the three supported
-    /// payload/coefficient lanes × tree/contract). Without it each
+    /// (the two real-coefficient lanes in each namespace plus the private
+    /// multiplicity-free complex-coefficient lane, each for tree/contract).
+    /// Without it each
     /// executor built its own eager env-sized pool, and the #155 context pool
     /// multiplied that into a process-thread-cap failure (macOS `WouldBlock`)
     /// under concurrent leases.
@@ -1503,6 +1538,7 @@ mod tests {
         let cold_calls = rule.structural_calls();
         assert!(cold_calls > 0);
         assert!(destination_data.iter().any(|value| value.im != 0.0));
+        let cold_destination_data = destination_data.clone();
         let cold = runtime.tree_transform_cache_info();
         assert_eq!(cold.entries(), 1);
         assert_eq!(cold.misses(), 1);
@@ -1520,6 +1556,8 @@ mod tests {
                 Complex64::new(1.0, 0.0),
             )
             .expect("warm Fibonacci braid");
+        assert_eq!(destination_data, cold_destination_data);
+        assert!(destination_data.iter().any(|value| value.im != 0.0));
         assert_eq!(rule.structural_calls(), cold_calls);
         let warm = runtime.tree_transform_cache_info();
         assert_eq!(warm.entries(), 1);
