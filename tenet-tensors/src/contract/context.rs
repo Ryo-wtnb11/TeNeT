@@ -576,6 +576,32 @@ where
         &self.contract_workspace
     }
 
+    pub(crate) fn checked_generic_resources_mut(
+        &mut self,
+    ) -> (
+        &mut BT,
+        &mut BT::Workspace,
+        &mut BC,
+        &mut BC::Workspace,
+        &mut FusionBlockContractWorkspace<D>,
+    ) {
+        let Self {
+            tree_context,
+            contract_backend,
+            contract_workspace,
+            fusion_block_workspace,
+            ..
+        } = self;
+        let (tree_backend, tree_workspace) = tree_context.backend_workspace_mut();
+        (
+            tree_backend,
+            tree_workspace,
+            contract_backend,
+            contract_workspace,
+            fusion_block_workspace,
+        )
+    }
+
     #[cfg(test)]
     pub(crate) fn last_resolution_is_core(&self) -> bool {
         self.last_top_level_resolution_was_core

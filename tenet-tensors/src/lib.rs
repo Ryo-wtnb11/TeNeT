@@ -37,8 +37,6 @@ pub use cache::{
     OperationCachePolicy, TensorContractStructureCache, TensorContractStructureCacheKey,
     TreeTransformStructureCache, TreeTransformStructureCacheKey,
 };
-#[doc(hidden)]
-pub use contract::tensorcontract_owned_checked_generic;
 #[cfg(test)]
 pub(crate) use contract::{
     contracted_fusion_tree_basis_matches, TensorContractDenseRouteKind,
@@ -60,6 +58,10 @@ pub use contract::{
     TensorContractExecutionContext, TensorContractFusionExecutionContext,
     TensorContractFusionProfile, TensorContractFusionRoute, TensorContractPlanKey,
     TensorContractStructure, TensorContractStructureTerm, TensorContractWorkspace,
+};
+#[doc(hidden)]
+pub use contract::{
+    tensorcontract_owned_checked_generic, tensorcontract_owned_checked_generic_in_context,
 };
 pub use contract::{
     BoundDynamicFusionMapSpace, DynamicFusionMapSpace, FusionOperand,

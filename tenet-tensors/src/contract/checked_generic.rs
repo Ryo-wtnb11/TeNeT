@@ -3,7 +3,7 @@ use std::sync::Arc;
 use num_traits::Zero;
 use tenet_core::{
     BraidingStyleKind, CheckedGenericRigidSymbols, CoreError, FusionStyleKind, FusionTreeHomSpace,
-    StructurallyValidatedFusionTreeSubset,
+    RuleIdentity, StructurallyValidatedFusionTreeSubset,
 };
 use tenet_operations::{DenseTreeTransformOperations, TensorContractSpec, TreeTransformBackend};
 
@@ -12,6 +12,7 @@ use crate::tree_transform::{
 };
 use crate::{ConjugateValue, DenseRecouplingScalar, OperationError, RecouplingCoefficientAction};
 
+use super::context::TensorContractFusionExecutionContext;
 use super::dynamic_space::{BoundDynamicFusionMapSpace, PreparedCheckedGenericDynamicSpace};
 use super::fusion::{
     compile_tensorcontract_fusion_plan_from_ranks, orient_fusion_contract_plan,
@@ -213,9 +214,9 @@ where
     })
 }
 
-fn execute_transform<D>(
-    backend: &mut DenseTreeTransformOperations,
-    workspace: &mut <DenseTreeTransformOperations as TreeTransformBackend<D, f64>>::Workspace,
+fn execute_transform<D, B>(
+    backend: &mut B,
+    workspace: &mut B::Workspace,
     replay: &tenet_operations::TreeTransformStructure<f64>,
     destination: &Arc<tenet_core::BlockStructure>,
     source: &Arc<tenet_core::BlockStructure>,
@@ -224,6 +225,7 @@ fn execute_transform<D>(
 ) -> Result<(), OperationError>
 where
     D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+    B: TreeTransformBackend<D, f64>,
 {
     backend.tree_transform_structure_into_raw(
         workspace,
@@ -237,15 +239,16 @@ where
     )
 }
 
-fn execute_staged_transform<D>(
-    backend: &mut DenseTreeTransformOperations,
-    workspace: &mut <DenseTreeTransformOperations as TreeTransformBackend<D, f64>>::Workspace,
+fn execute_staged_transform<D, B>(
+    backend: &mut B,
+    workspace: &mut B::Workspace,
     staged: &CheckedStagedOperand<'_>,
     source: &Arc<tenet_core::BlockStructure>,
     source_data: &[D],
 ) -> Result<Option<Vec<D>>, OperationError>
 where
     D: DenseRecouplingScalar + RecouplingCoefficientAction<f64> + Copy + Zero,
+    B: TreeTransformBackend<D, f64>,
 {
     let CheckedStagedOperand::Transformed {
         prepared,
@@ -282,6 +285,76 @@ where
     P: CheckedGenericRigidSymbols<Scalar = f64>,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<f64> + ConjugateValue + Copy + Zero,
 {
+    let mut transform_backend = DenseTreeTransformOperations::default();
+    let mut transform_workspace = Default::default();
+    let mut contract_backend = DenseTreeTransformOperations::default();
+    let mut contract_workspace = Default::default();
+    let mut fusion_workspace = FusionBlockContractWorkspace::default();
+    tensorcontract_owned_checked_generic_with_resources(
+        lhs_space,
+        lhs_data,
+        rhs_space,
+        rhs_data,
+        axes,
+        &mut transform_backend,
+        &mut transform_workspace,
+        &mut BackendRank2Gemm::<_, _, f64>::new(&mut contract_backend, &mut contract_workspace),
+        &mut fusion_workspace,
+    )
+}
+
+/// Runtime-context variant of [`tensorcontract_owned_checked_generic`].
+#[doc(hidden)]
+pub fn tensorcontract_owned_checked_generic_in_context<P, D>(
+    context: &mut TensorContractFusionExecutionContext<D, RuleIdentity>,
+    lhs_space: &BoundDynamicFusionMapSpace<P>,
+    lhs_data: &[D],
+    rhs_space: &BoundDynamicFusionMapSpace<P>,
+    rhs_data: &[D],
+    axes: TensorContractSpec<'_>,
+) -> CheckedContractResult<P, D>
+where
+    P: CheckedGenericRigidSymbols<Scalar = f64>,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64> + ConjugateValue + Copy + Zero,
+{
+    let (
+        transform_backend,
+        transform_workspace,
+        contract_backend,
+        contract_workspace,
+        fusion_workspace,
+    ) = context.checked_generic_resources_mut();
+    tensorcontract_owned_checked_generic_with_resources(
+        lhs_space,
+        lhs_data,
+        rhs_space,
+        rhs_data,
+        axes,
+        transform_backend,
+        transform_workspace,
+        &mut BackendRank2Gemm::<_, _, f64>::new(contract_backend, contract_workspace),
+        fusion_workspace,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn tensorcontract_owned_checked_generic_with_resources<P, D, G, B>(
+    lhs_space: &BoundDynamicFusionMapSpace<P>,
+    lhs_data: &[D],
+    rhs_space: &BoundDynamicFusionMapSpace<P>,
+    rhs_data: &[D],
+    axes: TensorContractSpec<'_>,
+    transform_backend: &mut B,
+    transform_workspace: &mut B::Workspace,
+    core_gemm: &mut G,
+    fusion_workspace: &mut FusionBlockContractWorkspace<D>,
+) -> CheckedContractResult<P, D>
+where
+    P: CheckedGenericRigidSymbols<Scalar = f64>,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64> + ConjugateValue + Copy + Zero,
+    G: Rank2Gemm<D>,
+    B: TreeTransformBackend<D, f64>,
+{
     let dst_nout = lhs_space
         .space()
         .rank()
@@ -315,8 +388,6 @@ where
         rhs_space.space().required_len()?,
         axes,
     )?;
-    let mut backend = DenseTreeTransformOperations::default();
-    let mut workspace = Default::default();
     execute_preselected_checked_generic_contract(
         lhs_space,
         lhs_data,
@@ -329,7 +400,10 @@ where
         provider,
         output_rank,
         destination,
-        &mut BackendRank2Gemm::<_, _, f64>::new(&mut backend, &mut workspace),
+        transform_backend,
+        transform_workspace,
+        core_gemm,
+        fusion_workspace,
     )
 }
 
@@ -355,6 +429,9 @@ where
 {
     let mut backend = DenseTreeTransformOperations::default();
     let mut workspace = Default::default();
+    let mut transform_backend = DenseTreeTransformOperations::default();
+    let mut transform_workspace = Default::default();
+    let mut fusion_workspace = FusionBlockContractWorkspace::default();
     tensorcontract_owned_checked_generic_preselected_with_core_gemm(
         lhs_space,
         lhs_data,
@@ -364,12 +441,15 @@ where
         dst_nout,
         candidate,
         orientation,
+        &mut transform_backend,
+        &mut transform_workspace,
         &mut BackendRank2Gemm::<_, _, f64>::new(&mut backend, &mut workspace),
+        &mut fusion_workspace,
     )
 }
 
 #[allow(clippy::too_many_arguments)]
-fn tensorcontract_owned_checked_generic_preselected_with_core_gemm<P, D, G>(
+fn tensorcontract_owned_checked_generic_preselected_with_core_gemm<P, D, G, B>(
     lhs_space: &BoundDynamicFusionMapSpace<P>,
     lhs_data: &[D],
     rhs_space: &BoundDynamicFusionMapSpace<P>,
@@ -378,12 +458,16 @@ fn tensorcontract_owned_checked_generic_preselected_with_core_gemm<P, D, G>(
     dst_nout: usize,
     candidate: &ContractAxisOrderCandidate,
     orientation: FusionContractOrientation,
+    transform_backend: &mut B,
+    transform_workspace: &mut B::Workspace,
     core_gemm: &mut G,
+    fusion_workspace: &mut FusionBlockContractWorkspace<D>,
 ) -> CheckedContractResult<P, D>
 where
     P: CheckedGenericRigidSymbols<Scalar = f64>,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<f64> + ConjugateValue + Copy + Zero,
     G: Rank2Gemm<D>,
+    B: TreeTransformBackend<D, f64>,
 {
     if !same_axes(axes.lhs_contracting_axes(), candidate.lhs())
         || !same_axes(axes.rhs_contracting_axes(), candidate.rhs())
@@ -430,12 +514,15 @@ where
         provider,
         output_rank,
         destination,
+        transform_backend,
+        transform_workspace,
         core_gemm,
+        fusion_workspace,
     )
 }
 
 #[allow(clippy::too_many_arguments)]
-fn execute_preselected_checked_generic_contract<P, D, G>(
+fn execute_preselected_checked_generic_contract<P, D, G, B>(
     lhs_space: &BoundDynamicFusionMapSpace<P>,
     lhs_data: &[D],
     rhs_space: &BoundDynamicFusionMapSpace<P>,
@@ -447,12 +534,16 @@ fn execute_preselected_checked_generic_contract<P, D, G>(
     provider: &P,
     output_rank: usize,
     destination: PreparedCheckedGenericDynamicSpace,
+    transform_backend: &mut B,
+    transform_workspace: &mut B::Workspace,
     core_gemm: &mut G,
+    fusion_workspace: &mut FusionBlockContractWorkspace<D>,
 ) -> CheckedContractResult<P, D>
 where
     P: CheckedGenericRigidSymbols<Scalar = f64>,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<f64> + ConjugateValue + Copy + Zero,
     G: Rank2Gemm<D>,
+    B: TreeTransformBackend<D, f64>,
 {
     let candidate_axes =
         TensorContractSpec::new(candidate.lhs(), candidate.rhs(), axes.output_permutation());
@@ -527,18 +618,16 @@ where
         Some(output_plan.compile_structures(&destination_structure, &core_structure)?)
     };
 
-    let mut transform_backend = DenseTreeTransformOperations::default();
-    let mut transform_workspace = Default::default();
     let lhs_transformed = execute_staged_transform(
-        &mut transform_backend,
-        &mut transform_workspace,
+        transform_backend,
+        transform_workspace,
         &lhs_prepared,
         lhs_space.space().structure(),
         lhs_data,
     )?;
     let rhs_transformed = execute_staged_transform(
-        &mut transform_backend,
-        &mut transform_workspace,
+        transform_backend,
+        transform_workspace,
         &rhs_prepared,
         rhs_space.space().structure(),
         rhs_data,
@@ -551,7 +640,6 @@ where
         FusionContractOrientation::LhsRhs => (lhs_core_data, rhs_core_data),
         FusionContractOrientation::RhsLhs => (rhs_core_data, lhs_core_data),
     };
-    let mut fusion_workspace = FusionBlockContractWorkspace::default();
     let mut kernels = crate::StridedHostKernelAdapter::default();
     let mut data = vec![D::zero(); destination.required_len()];
     if let Some(output_replay) = output_replay {
@@ -559,7 +647,7 @@ where
         core_plan.execute_raw(
             &mut kernels,
             core_gemm,
-            &mut fusion_workspace,
+            fusion_workspace,
             &core_structure,
             &mut core_data,
             core_left_structure,
@@ -570,8 +658,8 @@ where
             D::zero(),
         )?;
         execute_transform(
-            &mut transform_backend,
-            &mut transform_workspace,
+            transform_backend,
+            transform_workspace,
             &output_replay,
             &destination_structure,
             &core_structure,
@@ -582,7 +670,7 @@ where
         core_plan.execute_raw(
             &mut kernels,
             core_gemm,
-            &mut fusion_workspace,
+            fusion_workspace,
             &core_structure,
             &mut data,
             core_left_structure,
@@ -1074,6 +1162,9 @@ mod tests {
         let (left, lhs, right, rhs) = bound_pair(1, 1);
         tenet_core::reset_core_intern_tables();
         let candidate = contracted_axis_order_candidates(&[1], &[0]).remove(0);
+        let mut transform_backend = DenseTreeTransformOperations::default();
+        let mut transform_workspace = Default::default();
+        let mut fusion_workspace = FusionBlockContractWorkspace::default();
         let error = tensorcontract_owned_checked_generic_preselected_with_core_gemm(
             &lhs,
             &vec![1.0; lhs.space().required_len().unwrap()],
@@ -1083,7 +1174,10 @@ mod tests {
             1,
             &candidate,
             FusionContractOrientation::LhsRhs,
+            &mut transform_backend,
+            &mut transform_workspace,
             &mut FailingGemm,
+            &mut fusion_workspace,
         )
         .unwrap_err();
 

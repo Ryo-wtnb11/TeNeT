@@ -4,7 +4,9 @@ mod backend;
 #[allow(dead_code)]
 mod checked_generic;
 #[doc(hidden)]
-pub use checked_generic::tensorcontract_owned_checked_generic;
+pub use checked_generic::{
+    tensorcontract_owned_checked_generic, tensorcontract_owned_checked_generic_in_context,
+};
 mod context;
 mod dynamic;
 #[cfg(test)]

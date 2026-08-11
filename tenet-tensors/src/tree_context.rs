@@ -258,6 +258,11 @@ where
     }
 
     #[inline]
+    pub(crate) fn backend_workspace_mut(&mut self) -> (&mut B, &mut B::Workspace) {
+        (&mut self.backend, &mut self.workspace)
+    }
+
+    #[inline]
     pub fn cache(&self) -> &TreeTransformCache<C, RuleKey> {
         &self.cache
     }
