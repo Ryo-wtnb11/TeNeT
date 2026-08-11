@@ -132,7 +132,7 @@ impl FusionGroupExecutionClass {
     const PACK_RHS: u8 = 2;
     const SCATTER_DST: u8 = 4;
 
-    fn compile(group: &FusionBlockContractGroupPlan) -> Self {
+    fn compile<C>(group: &FusionBlockContractGroupPlan<C>) -> Self {
         let mut bits = 0;
         if group.lhs.direct_offset.is_none() {
             bits |= Self::PACK_LHS;
@@ -213,14 +213,14 @@ impl<T> ReportsPlacement for HostFusionBlockContractWorkspace<T> {
 }
 
 #[derive(Clone, Debug)]
-pub struct FusionBlockContractPlan {
+pub struct FusionBlockContractPlan<C = f64> {
     dst_structure: Arc<BlockStructure>,
     lhs_structure: Arc<BlockStructure>,
     rhs_structure: Arc<BlockStructure>,
     inactive_dst_scale_blocks: Vec<FusionScaleBlockLayout>,
-    groups: Vec<FusionBlockContractGroupPlan>,
+    groups: Vec<FusionBlockContractGroupPlan<C>>,
     direct_batch: Vec<Rank2GemmBatchJob>,
-    direct_batch_alpha: Vec<f64>,
+    direct_batch_alpha: Vec<C>,
     // Plan-time run partition of `direct_batch` (see issue #103): the backend
     // reads it to route each run without recomputing the partition per replay.
     // A backend-agnostic shape fact, so it lives in this operations-layer plan
@@ -233,7 +233,10 @@ pub struct FusionBlockContractPlan {
     rhs_op: MatrixOp,
 }
 
-impl FusionBlockContractPlan {
+impl<C> FusionBlockContractPlan<C>
+where
+    C: Copy + PartialEq + One,
+{
     /// True when every group reads and writes coupled-sector matrices directly
     /// in storage.
     pub fn is_fully_direct(&self) -> bool {
@@ -250,7 +253,7 @@ impl FusionBlockContractPlan {
         lhs_structure: Arc<BlockStructure>,
         rhs_structure: Arc<BlockStructure>,
         inactive_dst_scale_blocks: Vec<FusionScaleBlockLayout>,
-        groups: Vec<FusionBlockContractGroupPlan>,
+        groups: Vec<FusionBlockContractGroupPlan<C>>,
     ) -> Result<Self, OperationError> {
         Self::from_parts_with_ops(
             dst_structure,
@@ -269,7 +272,7 @@ impl FusionBlockContractPlan {
         lhs_structure: Arc<BlockStructure>,
         rhs_structure: Arc<BlockStructure>,
         inactive_dst_scale_blocks: Vec<FusionScaleBlockLayout>,
-        groups: Vec<FusionBlockContractGroupPlan>,
+        groups: Vec<FusionBlockContractGroupPlan<C>>,
         lhs_op: MatrixOp,
         rhs_op: MatrixOp,
     ) -> Result<Self, OperationError> {
@@ -284,7 +287,7 @@ impl FusionBlockContractPlan {
         )?;
         let (direct_batch, irregular, max_irregular_scratch_len) =
             compile_group_execution(&groups)?;
-        let direct_batch_alpha = vec![1.0; direct_batch.len()];
+        let direct_batch_alpha = vec![C::one(); direct_batch.len()];
         let direct_batch_runs = strided_batch_runs(&direct_batch);
         Ok(Self {
             dst_structure,
@@ -329,7 +332,7 @@ impl FusionBlockContractPlan {
             rhs_storage_nout,
             lhs_op,
             rhs_op,
-            |_| Ok(1.0),
+            |_| Ok(C::one()),
         )
     }
 
@@ -346,7 +349,7 @@ impl FusionBlockContractPlan {
         rhs_storage_nout: usize,
         lhs_op: MatrixOp,
         rhs_op: MatrixOp,
-        alpha_for_coupled: impl FnMut(SectorId) -> Result<f64, OperationError>,
+        alpha_for_coupled: impl FnMut(SectorId) -> Result<C, OperationError>,
     ) -> Result<Option<Self>, OperationError> {
         Self::try_from_canonical_coupled_regions_impl(
             dst_structure,
@@ -371,7 +374,7 @@ impl FusionBlockContractPlan {
         rhs_storage_nout: usize,
         lhs_op: MatrixOp,
         rhs_op: MatrixOp,
-        mut alpha_for_coupled: impl FnMut(SectorId) -> Result<f64, OperationError>,
+        mut alpha_for_coupled: impl FnMut(SectorId) -> Result<C, OperationError>,
     ) -> Result<Option<Self>, OperationError> {
         let Some(dst_regions) = sorted_coupled_regions(dst_structure, dst_nout)? else {
             return Ok(None);
@@ -478,7 +481,7 @@ impl FusionBlockContractPlan {
     where
         A: HostKernelAdapter<D>,
         G: Rank2Gemm<D>,
-        D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
+        D: DenseBlockScalar + RecouplingCoefficientAction<C>,
     {
         self.execute_host::<_, _, _, false>(
             kernels,
@@ -515,7 +518,7 @@ impl FusionBlockContractPlan {
     where
         A: HostKernelAdapter<D>,
         G: Rank2Gemm<D>,
-        D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
+        D: DenseBlockScalar + RecouplingCoefficientAction<C>,
     {
         self.execute_host::<_, _, _, true>(
             kernels,
@@ -552,7 +555,7 @@ impl FusionBlockContractPlan {
     where
         A: HostKernelAdapter<D>,
         G: Rank2Gemm<D>,
-        D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
+        D: DenseBlockScalar + RecouplingCoefficientAction<C>,
     {
         self.require_unit_direct_batch_alpha()?;
         let total_start = PROFILED.then(std::time::Instant::now);
@@ -657,7 +660,7 @@ impl FusionBlockContractPlan {
     where
         A: HostKernelAdapter<D>,
         G: Rank2Gemm<D>,
-        D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
+        D: DenseBlockScalar + RecouplingCoefficientAction<C>,
     {
         let group = &self.groups[execution.group_index];
         let scratch = &mut fusion_workspace.scratch.as_mut_slice()[..execution.scratch.total_len];
@@ -830,7 +833,7 @@ impl FusionBlockContractPlan {
     where
         A: HostKernelAdapter<D>,
         G: Rank2Gemm<D>,
-        D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
+        D: DenseBlockScalar + RecouplingCoefficientAction<C>,
         DDst: HostWritableStorage<D> + SimilarStorage<D>,
         DDst::Similar: HostWritableStorage<D> + ScratchStorage<D>,
         DLhs: HostReadableStorage<D> + SimilarStorage<D>,
@@ -899,7 +902,11 @@ impl FusionBlockContractPlan {
     }
 
     fn require_unit_direct_batch_alpha(&self) -> Result<(), OperationError> {
-        if self.direct_batch_alpha.iter().all(|&alpha| alpha == 1.0) {
+        if self
+            .direct_batch_alpha
+            .iter()
+            .all(|&alpha| alpha == C::one())
+        {
             return Ok(());
         }
         Err(OperationError::UnsupportedTensorContractScope {
@@ -945,7 +952,7 @@ impl FusionBlockContractPlan {
     where
         A: HostKernelAdapter<D>,
         G: Rank2Gemm<D>,
-        D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
+        D: DenseBlockScalar + RecouplingCoefficientAction<C>,
         SLhs: SimilarStorage<D>,
         SLhs::Similar: HostWritableStorage<D> + ScratchStorage<D>,
         SRhs: SimilarStorage<D>,
@@ -1020,7 +1027,7 @@ impl FusionBlockContractPlan {
     where
         A: HostKernelAdapter<D>,
         G: Rank2Gemm<D>,
-        D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
+        D: DenseBlockScalar + RecouplingCoefficientAction<C>,
         SLhs: SimilarStorage<D>,
         SLhs::Similar: HostWritableStorage<D> + ScratchStorage<D>,
         SRhs: SimilarStorage<D>,
@@ -1078,7 +1085,7 @@ impl FusionBlockContractPlan {
     ) -> Result<(), OperationError>
     where
         G: StorageGemm<D, DDst, DLhs, DRhs>,
-        D: RecouplingCoefficientAction<f64>,
+        D: RecouplingCoefficientAction<C>,
         DDst: TensorStorage<D>,
         DLhs: TensorStorage<D>,
         DRhs: TensorStorage<D>,
@@ -1105,7 +1112,7 @@ impl FusionBlockContractPlan {
     ) -> Result<(), OperationError>
     where
         G: StorageGemm<D, DDst, DLhs, DRhs>,
-        D: RecouplingCoefficientAction<f64>,
+        D: RecouplingCoefficientAction<C>,
         DDst: TensorStorage<D>,
         DLhs: TensorStorage<D>,
         DRhs: TensorStorage<D>,
@@ -1118,7 +1125,10 @@ impl FusionBlockContractPlan {
         }
         let needs_general_gemm = self.lhs_op != MatrixOp::Identity
             || self.rhs_op != MatrixOp::Identity
-            || self.direct_batch_alpha.iter().any(|&alpha| alpha != 1.0);
+            || self
+                .direct_batch_alpha
+                .iter()
+                .any(|&alpha| alpha != C::one());
         if needs_general_gemm && !gemm.supports_matmul_with_ops_scaled(self.lhs_op, self.rhs_op) {
             return Err(OperationError::UnsupportedTensorContractScope {
                 message: "storage GEMM backend does not implement scaled replay",
@@ -1130,7 +1140,7 @@ impl FusionBlockContractPlan {
             validate_storage_range(dst.len(), job.dst_offset, job.rows, job.cols)?;
         }
         for (job, &alpha) in self.direct_batch.iter().zip(&self.direct_batch_alpha) {
-            if alpha == 1.0
+            if alpha == C::one()
                 && self.lhs_op == MatrixOp::Identity
                 && self.rhs_op == MatrixOp::Identity
             {
@@ -1283,18 +1293,18 @@ fn validate_storage_len(
 }
 
 #[derive(Clone, Debug)]
-pub struct FusionBlockContractGroupPlan {
-    pub lhs: FusionBlockMatrixGroup,
-    pub rhs: FusionBlockMatrixGroup,
-    pub dst: FusionBlockMatrixGroup,
+pub struct FusionBlockContractGroupPlan<C = f64> {
+    pub lhs: FusionBlockMatrixGroup<C>,
+    pub rhs: FusionBlockMatrixGroup<C>,
+    pub dst: FusionBlockMatrixGroup<C>,
 }
 
-impl FusionBlockContractGroupPlan {
+impl<C> FusionBlockContractGroupPlan<C> {
     /// Validates and packages a group triple; called by the compile layer.
     pub fn new(
-        lhs: FusionBlockMatrixGroup,
-        rhs: FusionBlockMatrixGroup,
-        dst: FusionBlockMatrixGroup,
+        lhs: FusionBlockMatrixGroup<C>,
+        rhs: FusionBlockMatrixGroup<C>,
+        dst: FusionBlockMatrixGroup<C>,
     ) -> Result<Self, OperationError> {
         if lhs.cols != rhs.rows {
             return Err(OperationError::ShapeMismatch {
@@ -1314,7 +1324,7 @@ impl FusionBlockContractGroupPlan {
 }
 
 #[derive(Clone, Debug)]
-pub struct FusionBlockMatrixGroup {
+pub struct FusionBlockMatrixGroup<C = f64> {
     pub coupled: SectorId,
     pub rows: usize,
     pub cols: usize,
@@ -1327,19 +1337,22 @@ pub struct FusionBlockMatrixGroup {
     // directly.
     pub direct_offset: Option<usize>,
     pub block_indices: Vec<usize>,
-    pub subblocks: Vec<FusionSubblockMatrixLayout>,
+    pub subblocks: Vec<FusionSubblockMatrixLayout<C>>,
 }
 
-pub fn direct_group_matrix_offset(
-    subblocks: &[FusionSubblockMatrixLayout],
+pub fn direct_group_matrix_offset<C>(
+    subblocks: &[FusionSubblockMatrixLayout<C>],
     covers_matrix: bool,
-) -> Option<usize> {
+) -> Option<usize>
+where
+    C: Copy + PartialEq + One,
+{
     if !covers_matrix {
         return None;
     }
     let mut base: Option<isize> = None;
     for subblock in subblocks {
-        if subblock.coefficient != 1.0 {
+        if subblock.coefficient != C::one() {
             return None;
         }
         let strides_match = subblock
@@ -1365,11 +1378,11 @@ pub fn direct_group_matrix_offset(
 }
 
 #[derive(Clone, Debug)]
-pub struct FusionSubblockMatrixLayout {
+pub struct FusionSubblockMatrixLayout<C = f64> {
     pub block: FusionStridedBlockLayout,
     pub matrix_offset: isize,
     pub matrix_strides: Vec<isize>,
-    pub coefficient: f64,
+    pub coefficient: C,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1410,9 +1423,9 @@ fn direct_matrix_len(rows: usize, cols: usize) -> Result<usize, OperationError> 
         .ok_or(OperationError::ElementCountOverflow)
 }
 
-fn group_scratch_layout(
+fn group_scratch_layout<C>(
     class: FusionGroupExecutionClass,
-    group: &FusionBlockContractGroupPlan,
+    group: &FusionBlockContractGroupPlan<C>,
 ) -> Result<FusionGroupScratchLayout, OperationError> {
     let lhs_len = if class.packs_lhs() {
         direct_matrix_len(group.lhs.rows, group.lhs.cols)?
@@ -1446,8 +1459,8 @@ fn group_scratch_layout(
     })
 }
 
-fn validate_group_replay_bounds(
-    group: &FusionBlockMatrixGroup,
+fn validate_group_replay_bounds<C>(
+    group: &FusionBlockMatrixGroup<C>,
     storage_len: usize,
     matrix_rows: usize,
     matrix_cols: usize,
@@ -1478,15 +1491,18 @@ fn validate_group_replay_bounds(
     Ok(())
 }
 
-fn validate_compiled_plan_layouts(
+fn validate_compiled_plan_layouts<C>(
     dst_structure: &BlockStructure,
     lhs_structure: &BlockStructure,
     rhs_structure: &BlockStructure,
     inactive_dst_scale_blocks: &[FusionScaleBlockLayout],
-    groups: &[FusionBlockContractGroupPlan],
+    groups: &[FusionBlockContractGroupPlan<C>],
     lhs_op: MatrixOp,
     rhs_op: MatrixOp,
-) -> Result<(), OperationError> {
+) -> Result<(), OperationError>
+where
+    C: Copy + PartialEq + One,
+{
     validate_destination_layouts_injective(
         dst_structure,
         "fusion block contraction destination layouts overlap",
@@ -1554,12 +1570,12 @@ fn validate_compiled_plan_layouts(
     Ok(())
 }
 
-fn validate_direct_plan_layouts(
+fn validate_direct_plan_layouts<C>(
     dst_structure: &BlockStructure,
     lhs_structure: &BlockStructure,
     rhs_structure: &BlockStructure,
     inactive_dst_scale_blocks: &[FusionScaleBlockLayout],
-    jobs: &[(Rank2GemmBatchJob, f64)],
+    jobs: &[(Rank2GemmBatchJob, C)],
 ) -> Result<(), OperationError> {
     let dst_len = dst_structure
         .required_len()
@@ -1754,7 +1770,7 @@ fn canonical_inactive_range(
     Ok((start, end))
 }
 
-fn validate_group_shape(group: &FusionBlockContractGroupPlan) -> Result<(), OperationError> {
+fn validate_group_shape<C>(group: &FusionBlockContractGroupPlan<C>) -> Result<(), OperationError> {
     if group.lhs.cols != group.rhs.rows {
         return Err(OperationError::ShapeMismatch {
             dst: vec![group.lhs.cols],
@@ -1770,13 +1786,16 @@ fn validate_group_shape(group: &FusionBlockContractGroupPlan) -> Result<(), Oper
     Ok(())
 }
 
-fn validate_group_against_structure(
+fn validate_group_against_structure<C>(
     tensor: &'static str,
-    group: &FusionBlockMatrixGroup,
+    group: &FusionBlockMatrixGroup<C>,
     structure: &BlockStructure,
     storage_len: usize,
     op: MatrixOp,
-) -> Result<(), OperationError> {
+) -> Result<(), OperationError>
+where
+    C: Copy + PartialEq + One,
+{
     let (matrix_rows, matrix_cols) = match op {
         MatrixOp::Identity => (group.rows, group.cols),
         MatrixOp::Transpose | MatrixOp::Adjoint => (group.cols, group.rows),
@@ -1814,8 +1833,8 @@ fn validate_group_against_structure(
     Ok(())
 }
 
-fn matrix_layouts_cover_exactly(
-    group: &FusionBlockMatrixGroup,
+fn matrix_layouts_cover_exactly<C>(
+    group: &FusionBlockMatrixGroup<C>,
     matrix_rows: usize,
     matrix_cols: usize,
 ) -> Result<bool, OperationError> {
@@ -1864,10 +1883,10 @@ fn matrix_layouts_cover_exactly(
     Ok(occupied == matrix_len)
 }
 
-fn canonical_matrix_rectangle(
+fn canonical_matrix_rectangle<C>(
     matrix_rows: usize,
     matrix_cols: usize,
-    layout: &FusionSubblockMatrixLayout,
+    layout: &FusionSubblockMatrixLayout<C>,
 ) -> Result<[(usize, usize); 2], OperationError> {
     let offset = usize::try_from(layout.matrix_offset)
         .map_err(|_| OperationError::OffsetOverflow { value: usize::MAX })?;
@@ -1930,15 +1949,16 @@ fn canonical_matrix_rectangle(
     })
 }
 
-fn pack_group<A, T>(
+fn pack_group<A, T, C>(
     kernels: &mut A,
-    group: &FusionBlockMatrixGroup,
+    group: &FusionBlockMatrixGroup<C>,
     data: &[T],
     packed: &mut [T],
 ) -> Result<(), OperationError>
 where
     A: HostKernelAdapter<T>,
-    T: Copy + RecouplingCoefficientAction<f64>,
+    T: Copy + RecouplingCoefficientAction<C>,
+    C: Copy,
 {
     for layout in &group.subblocks {
         kernels.copy_scale_strided(
@@ -1956,16 +1976,17 @@ where
     Ok(())
 }
 
-fn scatter_group<A, T>(
+fn scatter_group<A, T, C>(
     kernels: &mut A,
-    group: &FusionBlockMatrixGroup,
+    group: &FusionBlockMatrixGroup<C>,
     data: &mut [T],
     packed: &[T],
     beta: T,
 ) -> Result<(), OperationError>
 where
     A: HostKernelAdapter<T>,
-    T: Copy + RecouplingCoefficientAction<f64>,
+    T: Copy + RecouplingCoefficientAction<C>,
+    C: Copy,
 {
     for layout in &group.subblocks {
         kernels.axpby_strided(
@@ -2028,8 +2049,8 @@ where
     Ok(())
 }
 
-fn compile_group_execution(
-    groups: &[FusionBlockContractGroupPlan],
+fn compile_group_execution<C>(
+    groups: &[FusionBlockContractGroupPlan<C>],
 ) -> Result<CompiledGroupExecution, OperationError> {
     let mut direct_batch = Vec::new();
     let mut direct_destinations = Vec::new();
@@ -2149,7 +2170,8 @@ mod tests {
     use num_complex::Complex64;
     use num_traits::Zero;
     use tenet_core::{
-        FusionProductSpace, FusionTensorMapSpace, FusionTreeHomSpace, SectorLeg, TensorMapSpace,
+        FibonacciFusionRule, FibonacciSector, FusionProductSpace, FusionTensorMapSpace,
+        FusionTreeHomSpace, MultiplicityFreeFusionSymbols, SectorCodec, SectorLeg, TensorMapSpace,
         Z2FusionRule, Z2Irrep,
     };
 
@@ -2251,6 +2273,76 @@ mod tests {
             }
             Ok(())
         }
+    }
+
+    #[test]
+    fn fibonacci_complex_r_symbol_survives_fusion_block_contraction() {
+        let provider = FibonacciFusionRule;
+        let tau = provider.encode_sector(&FibonacciSector::Tau).unwrap();
+        let vacuum = provider.encode_sector(&FibonacciSector::Vacuum).unwrap();
+        let r_tau_tau_vacuum = provider.r_symbol_scalar(tau, tau, vacuum);
+        assert!(
+            r_tau_tau_vacuum.im.abs() > 0.5,
+            "the oracle must exercise a genuinely non-real R-symbol"
+        );
+
+        let structure = Arc::new(BlockStructure::packed_column_major(1, [vec![1]]).unwrap());
+        let group = |direct: bool, coefficient: Complex64| FusionBlockMatrixGroup {
+            coupled: vacuum,
+            rows: 1,
+            cols: 1,
+            needs_clear: false,
+            direct_offset: direct.then_some(0),
+            block_indices: vec![0],
+            subblocks: vec![FusionSubblockMatrixLayout {
+                block: FusionStridedBlockLayout {
+                    shape: vec![1],
+                    strides: vec![1],
+                    offset: 0,
+                },
+                matrix_offset: 0,
+                matrix_strides: vec![1],
+                coefficient,
+            }],
+        };
+        let contract_group = FusionBlockContractGroupPlan::new(
+            group(false, r_tau_tau_vacuum),
+            group(true, Complex64::new(1.0, 0.0)),
+            group(true, Complex64::new(1.0, 0.0)),
+        )
+        .unwrap();
+        let plan = FusionBlockContractPlan::from_parts(
+            Arc::clone(&structure),
+            Arc::clone(&structure),
+            Arc::clone(&structure),
+            Vec::new(),
+            vec![contract_group],
+        )
+        .unwrap();
+
+        let lhs = [Complex64::new(2.0, 0.0)];
+        let rhs = [Complex64::new(3.0, 0.0)];
+        let mut dst = [Complex64::new(0.0, 0.0)];
+        let mut kernels = crate::StridedHostKernelAdapter::default();
+        let mut gemm = NaiveGemm;
+        let mut workspace = FusionBlockContractWorkspace::<Complex64>::default();
+        plan.execute_raw(
+            &mut kernels,
+            &mut gemm,
+            &mut workspace,
+            &structure,
+            &mut dst,
+            &structure,
+            &lhs,
+            &structure,
+            &rhs,
+            Complex64::new(1.0, 0.0),
+            Complex64::new(0.0, 0.0),
+        )
+        .unwrap();
+
+        assert_eq!(dst[0], r_tau_tau_vacuum * Complex64::new(6.0, 0.0));
+        assert_ne!(dst[0].im, 0.0, "discarding the R-symbol phase must fail");
     }
 
     fn all_classes_apply_alpha_beta_and_coefficients<T>()
@@ -2600,7 +2692,7 @@ mod tests {
         let structure = Arc::new(BlockStructure::trivial(&[1]).unwrap());
         let mut lhs = scalar_group(0, false, 1.0);
         lhs.subblocks[0].matrix_offset = 1;
-        let error = FusionBlockContractPlan::from_parts(
+        let error = FusionBlockContractPlan::<f64>::from_parts(
             Arc::clone(&structure),
             Arc::clone(&structure),
             Arc::clone(&structure),
@@ -2741,7 +2833,7 @@ mod tests {
             |sector| BlockSpec::with_key(BlockKey::ordinal(sector), vec![1], vec![1], 0).unwrap();
         let aliased =
             Arc::new(BlockStructure::from_blocks_with_rank(1, vec![block(0), block(1)]).unwrap());
-        let error = FusionBlockContractPlan::from_parts(
+        let error = FusionBlockContractPlan::<f64>::from_parts(
             Arc::clone(&aliased),
             Arc::clone(&aliased),
             Arc::clone(&aliased),
@@ -3009,7 +3101,7 @@ mod tests {
             BlockStructure::coupled_sector_matrix_with_keys(&rule, 2, 4, reordered).unwrap(),
         );
 
-        let plan = FusionBlockContractPlan::try_from_canonical_coupled_regions_with_ops(
+        let plan = FusionBlockContractPlan::<f64>::try_from_canonical_coupled_regions_with_ops(
             &canonical,
             2,
             &canonical,
@@ -3025,17 +3117,18 @@ mod tests {
         // contracted and output fusion-tree bases at the safe plan boundary.
         assert!(plan.is_none());
 
-        let oriented_plan = FusionBlockContractPlan::try_from_canonical_coupled_regions_with_ops(
-            &canonical,
-            2,
-            &reordered,
-            2,
-            &canonical,
-            2,
-            MatrixOp::Adjoint,
-            MatrixOp::Identity,
-        )
-        .unwrap();
+        let oriented_plan =
+            FusionBlockContractPlan::<f64>::try_from_canonical_coupled_regions_with_ops(
+                &canonical,
+                2,
+                &reordered,
+                2,
+                &canonical,
+                2,
+                MatrixOp::Adjoint,
+                MatrixOp::Identity,
+            )
+            .unwrap();
 
         // What: swapping the physical row/column view for an adjoint cannot
         // turn a reordered physical fusion-tree basis into a canonical match.
@@ -3162,7 +3255,7 @@ mod tests {
         )
         .unwrap();
         let structure = Arc::clone(space.subblock_structure());
-        let plan = FusionBlockContractPlan::try_from_canonical_coupled_regions_with_ops(
+        let plan = FusionBlockContractPlan::<f64>::try_from_canonical_coupled_regions_with_ops(
             &structure,
             1,
             &structure,
