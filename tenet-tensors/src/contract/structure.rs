@@ -894,6 +894,10 @@ where
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[expect(
+    clippy::enum_variant_names,
+    reason = "the ContractingAxes suffix distinguishes route kinds from output-axis ordering"
+)]
 pub(crate) enum TensorContractDenseRouteKind {
     ForwardSortLhsContractingAxes,
     ForwardSortRhsContractingAxes,
