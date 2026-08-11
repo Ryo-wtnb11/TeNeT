@@ -920,6 +920,27 @@ struct TensorContractDenseRoute {
     output_axes: Vec<usize>,
 }
 
+#[derive(Clone, Copy)]
+struct TensorContractDenseRouteCandidate<'a> {
+    kind: TensorContractDenseRouteKind,
+    order: TensorContractDenseRouteOrder,
+    lhs_contracting_axes: &'a [usize],
+    rhs_contracting_axes: &'a [usize],
+    output_axes: &'a [usize],
+}
+
+impl TensorContractDenseRouteCandidate<'_> {
+    fn into_owned(self) -> TensorContractDenseRoute {
+        TensorContractDenseRoute {
+            kind: self.kind,
+            order: self.order,
+            lhs_contracting_axes: self.lhs_contracting_axes.to_vec(),
+            rhs_contracting_axes: self.rhs_contracting_axes.to_vec(),
+            output_axes: self.output_axes.to_vec(),
+        }
+    }
+}
+
 impl TensorContractDenseRoute {
     fn select<C>(
         axis_plan: &TensorContractAxisPlan,
@@ -939,16 +960,27 @@ impl TensorContractDenseRoute {
         let forward_output_axes = forward_output_axes(axis_plan);
         let reverse_output_axes = reverse_output_axes(axis_plan);
 
+        let forward_lhs = TensorContractDenseRouteCandidate {
+            kind: TensorContractDenseRouteKind::ForwardSortLhsContractingAxes,
+            order: TensorContractDenseRouteOrder::LhsRhs,
+            lhs_contracting_axes: &lhs_sorted_by_lhs,
+            rhs_contracting_axes: &rhs_sorted_by_lhs,
+            output_axes: &forward_output_axes,
+        };
+        let forward_rhs = TensorContractDenseRouteCandidate {
+            kind: TensorContractDenseRouteKind::ForwardSortRhsContractingAxes,
+            order: TensorContractDenseRouteOrder::LhsRhs,
+            lhs_contracting_axes: &lhs_sorted_by_rhs,
+            rhs_contracting_axes: &rhs_sorted_by_rhs,
+            output_axes: &forward_output_axes,
+        };
         let lhs_cost = dense_route_memcost(
             axis_plan,
             terms,
             dst_structure,
             lhs_structure,
             rhs_structure,
-            &lhs_sorted_by_lhs,
-            &rhs_sorted_by_lhs,
-            &forward_output_axes,
-            TensorContractDenseRouteOrder::LhsRhs,
+            forward_lhs,
         )?;
         let rhs_cost = dense_route_memcost(
             axis_plan,
@@ -956,44 +988,40 @@ impl TensorContractDenseRoute {
             dst_structure,
             lhs_structure,
             rhs_structure,
-            &lhs_sorted_by_rhs,
-            &rhs_sorted_by_rhs,
-            &forward_output_axes,
-            TensorContractDenseRouteOrder::LhsRhs,
+            forward_rhs,
         )?;
 
-        let forward = if lhs_cost <= rhs_cost {
-            Self {
-                kind: TensorContractDenseRouteKind::ForwardSortLhsContractingAxes,
-                order: TensorContractDenseRouteOrder::LhsRhs,
-                lhs_contracting_axes: lhs_sorted_by_lhs.clone(),
-                rhs_contracting_axes: rhs_sorted_by_lhs.clone(),
-                output_axes: forward_output_axes.clone(),
-            }
+        let (forward, forward_cost) = if lhs_cost <= rhs_cost {
+            (forward_lhs, lhs_cost)
         } else {
-            Self {
-                kind: TensorContractDenseRouteKind::ForwardSortRhsContractingAxes,
-                order: TensorContractDenseRouteOrder::LhsRhs,
-                lhs_contracting_axes: lhs_sorted_by_rhs.clone(),
-                rhs_contracting_axes: rhs_sorted_by_rhs.clone(),
-                output_axes: forward_output_axes.clone(),
-            }
+            (forward_rhs, rhs_cost)
         };
 
         if axis_plan.lhs_conjugate || axis_plan.rhs_conjugate {
-            return Ok(forward);
+            return Ok(forward.into_owned());
         }
 
+        let reverse_lhs = TensorContractDenseRouteCandidate {
+            kind: TensorContractDenseRouteKind::ReverseSortLhsContractingAxes,
+            order: TensorContractDenseRouteOrder::RhsLhs,
+            lhs_contracting_axes: &lhs_sorted_by_lhs,
+            rhs_contracting_axes: &rhs_sorted_by_lhs,
+            output_axes: &reverse_output_axes,
+        };
+        let reverse_rhs = TensorContractDenseRouteCandidate {
+            kind: TensorContractDenseRouteKind::ReverseSortRhsContractingAxes,
+            order: TensorContractDenseRouteOrder::RhsLhs,
+            lhs_contracting_axes: &lhs_sorted_by_rhs,
+            rhs_contracting_axes: &rhs_sorted_by_rhs,
+            output_axes: &reverse_output_axes,
+        };
         let reverse_lhs_cost = dense_route_memcost(
             axis_plan,
             terms,
             dst_structure,
             lhs_structure,
             rhs_structure,
-            &lhs_sorted_by_lhs,
-            &rhs_sorted_by_lhs,
-            &reverse_output_axes,
-            TensorContractDenseRouteOrder::RhsLhs,
+            reverse_lhs,
         )?;
         let reverse_rhs_cost = dense_route_memcost(
             axis_plan,
@@ -1001,36 +1029,19 @@ impl TensorContractDenseRoute {
             dst_structure,
             lhs_structure,
             rhs_structure,
-            &lhs_sorted_by_rhs,
-            &rhs_sorted_by_rhs,
-            &reverse_output_axes,
-            TensorContractDenseRouteOrder::RhsLhs,
+            reverse_rhs,
         )?;
 
-        let reverse = if reverse_lhs_cost <= reverse_rhs_cost {
-            Self {
-                kind: TensorContractDenseRouteKind::ReverseSortLhsContractingAxes,
-                order: TensorContractDenseRouteOrder::RhsLhs,
-                lhs_contracting_axes: lhs_sorted_by_lhs,
-                rhs_contracting_axes: rhs_sorted_by_lhs,
-                output_axes: reverse_output_axes.clone(),
-            }
+        let (reverse, reverse_cost) = if reverse_lhs_cost <= reverse_rhs_cost {
+            (reverse_lhs, reverse_lhs_cost)
         } else {
-            Self {
-                kind: TensorContractDenseRouteKind::ReverseSortRhsContractingAxes,
-                order: TensorContractDenseRouteOrder::RhsLhs,
-                lhs_contracting_axes: lhs_sorted_by_rhs,
-                rhs_contracting_axes: rhs_sorted_by_rhs,
-                output_axes: reverse_output_axes,
-            }
+            (reverse_rhs, reverse_rhs_cost)
         };
 
-        let forward_cost = lhs_cost.min(rhs_cost);
-        let reverse_cost = reverse_lhs_cost.min(reverse_rhs_cost);
         if forward_cost <= reverse_cost {
-            Ok(forward)
+            Ok(forward.into_owned())
         } else {
-            Ok(reverse)
+            Ok(reverse.into_owned())
         }
     }
 
@@ -1063,14 +1074,11 @@ fn dense_route_memcost<C>(
     dst_structure: &BlockStructure,
     lhs_structure: &BlockStructure,
     rhs_structure: &BlockStructure,
-    lhs_contracting_axes: &[usize],
-    rhs_contracting_axes: &[usize],
-    output_axes: &[usize],
-    order: TensorContractDenseRouteOrder,
+    candidate: TensorContractDenseRouteCandidate<'_>,
 ) -> Result<usize, OperationError> {
     let mut cost = 0usize;
-    let output_dst_axes = dst_axes_for_route_output(axis_plan, output_axes)?;
-    let first_output_len = match order {
+    let output_dst_axes = dst_axes_for_route_output(axis_plan, candidate.output_axes)?;
+    let first_output_len = match candidate.order {
         TensorContractDenseRouteOrder::LhsRhs => axis_plan.lhs_open_axes.len(),
         TensorContractDenseRouteOrder::RhsLhs => axis_plan.rhs_open_axes.len(),
     };
@@ -1078,16 +1086,16 @@ fn dense_route_memcost<C>(
         let dst_block = dst_structure.block(term.dst_block())?;
         let lhs_block = lhs_structure.block(term.lhs_block())?;
         let rhs_block = rhs_structure.block(term.rhs_block())?;
-        let lhs_needs_copy = match order {
+        let lhs_needs_copy = match candidate.order {
             TensorContractDenseRouteOrder::LhsRhs => !is_dense_contractable_layout(
                 lhs_block.shape(),
                 lhs_block.strides(),
                 &axis_plan.lhs_open_axes,
-                lhs_contracting_axes,
+                candidate.lhs_contracting_axes,
                 axis_plan.lhs_conjugate,
             )?,
             TensorContractDenseRouteOrder::RhsLhs => {
-                let mut reversed_lhs_contracting_axes = lhs_contracting_axes.to_vec();
+                let mut reversed_lhs_contracting_axes = candidate.lhs_contracting_axes.to_vec();
                 reversed_lhs_contracting_axes.reverse();
                 !is_dense_contractable_layout(
                     lhs_block.shape(),
@@ -1103,16 +1111,16 @@ fn dense_route_memcost<C>(
                 .checked_add(element_count(lhs_block.shape())?)
                 .ok_or(OperationError::ElementCountOverflow)?;
         }
-        let rhs_needs_copy = match order {
+        let rhs_needs_copy = match candidate.order {
             TensorContractDenseRouteOrder::LhsRhs => !is_dense_contractable_layout(
                 rhs_block.shape(),
                 rhs_block.strides(),
-                rhs_contracting_axes,
+                candidate.rhs_contracting_axes,
                 &axis_plan.rhs_open_axes,
                 axis_plan.rhs_conjugate,
             )?,
             TensorContractDenseRouteOrder::RhsLhs => {
-                let mut reversed_rhs_contracting_axes = rhs_contracting_axes.to_vec();
+                let mut reversed_rhs_contracting_axes = candidate.rhs_contracting_axes.to_vec();
                 reversed_rhs_contracting_axes.reverse();
                 !is_dense_contractable_layout(
                     rhs_block.shape(),
