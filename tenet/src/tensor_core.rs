@@ -601,16 +601,17 @@ where
 
 /// TensorKit tensor product: merge codomain trees with codomain trees and
 /// domain trees with domain trees, without crossing either pair of legs.
-pub(crate) fn tensorproduct_owned_multiplicity_free<R, D>(
+pub(crate) fn tensorproduct_owned_multiplicity_free<R, D, C>(
     lhs: BoundDynamicTensorRef<'_, R, D>,
     rhs: BoundDynamicTensorRef<'_, R, D>,
 ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), tenet_tensors::OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>
+    R: MultiplicityFreeRigidSymbols<Scalar = C>
         + CheckedFusionAlgebra
         + CanonicalUnitFusionRule
         + TreeTransformRuleCacheKey<Key = RuleIdentity>,
-    D: ScalarOps,
+    C: CategoricalScalar,
+    D: ScalarOps + RecouplingCoefficientAction<C>,
 {
     let rule = lhs.space().provider();
     if rule.rule_identity() != rhs.space().provider().rule_identity() {
@@ -652,11 +653,11 @@ where
         .map(|(index, key)| (key, index))
         .collect::<HashMap<_, _>>();
 
-    struct Contribution {
+    struct Contribution<C> {
         lhs: usize,
         rhs: usize,
         destination: usize,
-        coefficient: f64,
+        coefficient: C,
     }
     let lhs_structure = lhs.space().space().structure();
     let rhs_structure = rhs.space().space().structure();
@@ -709,7 +710,7 @@ where
                             lhs: lhs_index,
                             rhs: rhs_index,
                             destination: destination_index,
-                            coefficient: *codomain_coefficient * (*domain_coefficient).conj(),
+                            coefficient: codomain_coefficient.clone() * domain_coefficient.conj(),
                         });
                     }
                 }
@@ -1041,7 +1042,7 @@ fn tensor_product_checked_error(error: CheckedFusionSpaceError) -> tenet_tensors
 }
 
 #[allow(clippy::too_many_arguments)]
-fn scatter_tensor_product_block<D: ScalarOps>(
+fn scatter_tensor_product_block<D, C>(
     lhs_data: &[D],
     lhs: tenet_core::BlockRef<'_>,
     lhs_nout: usize,
@@ -1050,8 +1051,12 @@ fn scatter_tensor_product_block<D: ScalarOps>(
     rhs_nout: usize,
     destination_data: &mut [D],
     destination: tenet_core::BlockRef<'_>,
-    coefficient: f64,
-) -> Result<(), tenet_tensors::OperationError> {
+    coefficient: C,
+) -> Result<(), tenet_tensors::OperationError>
+where
+    D: ScalarOps + RecouplingCoefficientAction<C>,
+    C: Clone,
+{
     if !destination
         .shape()
         .iter()
@@ -1104,8 +1109,8 @@ fn scatter_tensor_product_block<D: ScalarOps>(
                     )
                     .map(|(&index, &stride)| index * stride)
                     .sum::<usize>();
-            let value =
-                (lhs_data[lhs_position] * rhs_data[rhs_position]).scale_by_coefficient(coefficient);
+            let value = (lhs_data[lhs_position] * rhs_data[rhs_position])
+                .scale_by_coefficient(coefficient.clone());
             destination_data[destination_position] = destination_data[destination_position] + value;
             increment_coordinates(&mut rhs_coordinates, rhs.shape());
         }

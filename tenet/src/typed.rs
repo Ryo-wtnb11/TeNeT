@@ -6955,11 +6955,14 @@ where
 impl<R, D> TypedTensorProductDispatch<R, D> for MultiplicityFreeAdmissionMode
 where
     R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
-        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + MultiplicityFreeRigidSymbols
         + CheckedFusionAlgebra
         + SectorCodec
         + CanonicalUnitFusionRule,
-    D: TensorScalar,
+    <R as MultiplicityFreeFusionSymbols>::Scalar:
+        CategoricalScalar + tenet_tensors::DenseRecouplingScalar,
+    D: TensorScalar
+        + tenet_tensors::RecouplingCoefficientAction<<R as MultiplicityFreeFusionSymbols>::Scalar>,
 {
     fn tensor_product(
         lhs: &TensorMap<R, D>,
@@ -13241,6 +13244,55 @@ where
     /// [`Error::RuntimeMismatch`] is reported before provider work. Checked
     /// Generic providers preserve algebra and malformed-F failures in
     /// [`GenericTensorError::TensorProduct`].
+    ///
+    /// ```compile_fail
+    /// use tenet::core::FibonacciFusionRule;
+    /// use tenet::typed::TensorMap;
+    /// fn unavailable(tensor: &TensorMap<FibonacciFusionRule, f64>) {
+    ///     let _ = tensor.otimes(tensor);
+    /// }
+    /// ```
+    ///
+    /// ```compile_fail
+    /// use tenet::prelude::{Complex64, FibonacciFusionRule};
+    /// use tenet::typed::TensorMap;
+    /// fn unavailable(tensor: &TensorMap<FibonacciFusionRule, Complex64>) {
+    ///     let _ = tensor.compose(tensor);
+    /// }
+    /// ```
+    ///
+    /// ```compile_fail
+    /// use tenet::prelude::{Complex64, FibonacciFusionRule};
+    /// use tenet::typed::TensorMap;
+    /// fn unavailable(tensor: &TensorMap<FibonacciFusionRule, Complex64>) {
+    ///     let _ = tensor.contract(tensor, &[], &[], &[]);
+    /// }
+    /// ```
+    ///
+    /// ```compile_fail
+    /// use tenet::prelude::{Complex64, FibonacciFusionRule};
+    /// use tenet::typed::TensorMap;
+    /// fn unavailable(tensor: &TensorMap<FibonacciFusionRule, Complex64>) {
+    ///     let _ = tensor.tr();
+    /// }
+    /// ```
+    ///
+    /// ```compile_fail
+    /// use tenet::prelude::{Complex64, FibonacciFusionRule};
+    /// use tenet::typed::TensorMap;
+    /// fn unavailable(tensor: &TensorMap<FibonacciFusionRule, Complex64>) {
+    ///     let _ = tensor.svd_full();
+    /// }
+    /// ```
+    ///
+    /// ```compile_fail
+    /// use tenet::prelude::{Complex64, FibonacciFusionRule};
+    /// use tenet::typed::TensorMap;
+    /// use tenet_network::{GreedyDenseOptimizer, Network};
+    /// fn unavailable(network: &Network, tensor: &TensorMap<FibonacciFusionRule, Complex64>) {
+    ///     let _ = network.plan(&[tensor], &GreedyDenseOptimizer);
+    /// }
+    /// ```
     pub fn otimes(&self, other: &Self) -> Result<Self, TypedFacadeError<R>> {
         if !self.runtime.same_runtime(&other.runtime) {
             return Err(Error::RuntimeMismatch.into());
