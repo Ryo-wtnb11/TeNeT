@@ -1522,7 +1522,7 @@ where
         rhs_space: Option<&DynamicFusionMapSpace>,
         rhs_structure: &Arc<BlockStructure>,
         layout_primer: LayoutKeyBuilder<R>,
-        mut profile: Option<&mut TensorContractFusionProfile>,
+        profile: Option<&mut TensorContractFusionProfile>,
     ) -> Result<Option<Arc<super::dynamic::DynamicTreeExecutionArtifact>>, OperationError>
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
@@ -1552,7 +1552,7 @@ where
             lhs_structure,
             rhs_space,
             rhs_structure,
-            profile.as_deref_mut(),
+            profile,
         )?);
         Ok(Some(artifact))
     }

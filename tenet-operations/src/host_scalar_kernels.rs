@@ -620,7 +620,7 @@ pub(crate) fn validate_raw_strided_bounds(
             actual: strides.len(),
         });
     }
-    if shape.iter().any(|&dim| dim == 0) {
+    if shape.contains(&0) {
         return Ok(());
     }
 
@@ -969,8 +969,8 @@ fn strided_linear_offset(
     let mut offset = base;
     for (&dim, &stride) in shape.iter().zip(strides.iter()) {
         let coord = if dim == 0 { 0 } else { linear % dim };
-        if dim != 0 {
-            linear /= dim;
+        if let Some(quotient) = linear.checked_div(dim) {
+            linear = quotient;
         }
         let coord = isize::try_from(coord).map_err(|_| OperationError::ElementCountOverflow)?;
         offset = offset

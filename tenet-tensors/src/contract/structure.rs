@@ -1172,7 +1172,7 @@ fn inverse_permutation(values: &[usize], len: usize) -> Result<Vec<usize>, Opera
         }
         inverse[value] = index;
     }
-    if inverse.iter().any(|&index| index == usize::MAX) {
+    if inverse.contains(&usize::MAX) {
         return Err(OperationError::InvalidAxisSet {
             tensor: "permutation",
             axes: values.to_vec(),

@@ -1134,7 +1134,6 @@ where
     )?;
     if let Some(start) = block_plan_start {
         profile
-            .as_deref_mut()
             .expect("profiled compilation carries a profile")
             .core_block_plan_build += start.elapsed();
         #[cfg(test)]
@@ -1511,9 +1510,7 @@ where
         )
     };
     if let Some(start) = transform_start {
-        let profile = profile
-            .as_deref_mut()
-            .expect("profiled replay carries a profile");
+        let profile = profile.expect("profiled replay carries a profile");
         profile.output_transform += start.elapsed();
         profile.output_transform_calls += 1;
     }

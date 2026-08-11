@@ -2834,8 +2834,8 @@ fn layout_linear_offset(
     let mut offset = base;
     for (&dim, &stride) in shape.iter().zip(strides) {
         let coordinate = if dim == 0 { 0 } else { linear % dim };
-        if dim != 0 {
-            linear /= dim;
+        if let Some(quotient) = linear.checked_div(dim) {
+            linear = quotient;
         }
         let coordinate =
             isize::try_from(coordinate).map_err(|_| OperationError::ElementCountOverflow)?;
