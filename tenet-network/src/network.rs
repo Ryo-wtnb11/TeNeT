@@ -1898,7 +1898,7 @@ impl PlannedNetwork {
             .ok_or_else(|| HostNetworkError::<R>::from(invalid("no final tensor produced")))?;
         if let Some((codomain, domain)) = &self.schedule.final_permutation {
             let output = result.permute(codomain, domain)?;
-            if let Some(meter) = meter.as_deref_mut() {
+            if let Some(meter) = meter {
                 let mut payloads = intermediate_payloads(intermediates);
                 payloads.push(output.network_owned_payload());
                 meter
