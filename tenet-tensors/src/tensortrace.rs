@@ -1489,8 +1489,7 @@ where
         src_space,
         axes,
         dst_space.space().nout(),
-    )
-    .map_err(|error| error)?;
+    )?;
     if selected != *dst_space.space().homspace() {
         return Err(CheckedGenericPlanError::Operation(
             OperationError::StructureMismatch { tensor: "dst" },
