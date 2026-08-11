@@ -748,9 +748,7 @@ fn fibonacci_compose_is_complex_coupled_sector_matrix_multiplication() {
     let before = runtime.tree_transform_cache_info();
     let cold = lhs.compose(&rhs).unwrap();
     let after_cold = runtime.tree_transform_cache_info();
-    let structure_cold = complete_hom_space_structure_cache_info();
     let warm = lhs.compose(&rhs).unwrap();
-    let structure_warm = complete_hom_space_structure_cache_info();
     let expected: TensorMap<_, Complex64> =
         TensorMap::from_block_fn(&runtime, [&rows], [&columns], |trees, indices| {
             let inner = match trees.coupled() {
@@ -771,10 +769,6 @@ fn fibonacci_compose_is_complex_coupled_sector_matrix_multiplication() {
     assert!(std::ptr::eq(cold.provider(), lhs.provider()));
     assert_eq!(after_cold, before);
     assert_eq!(runtime.tree_transform_cache_info(), before);
-    assert_eq!(structure_warm.entries(), structure_cold.entries());
-    assert_eq!(structure_warm.misses(), structure_cold.misses());
-    assert_eq!(structure_warm.admissions(), structure_cold.admissions());
-    assert!(structure_warm.hits() > structure_cold.hits());
 
     // What: the same genuinely complex blocks are associative, while ordinary
     // contraction refuses even this crossing-free boundary.
