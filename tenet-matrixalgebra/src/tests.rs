@@ -3983,12 +3983,12 @@ fn eigh_full_does_not_relabel_the_lowest_u1_sector() {
     assert_eq!(result.v.tensor().space().dims(), &[2, 2]);
     assert_eq!(result.d.tensor().space().dims(), &[2, 2]);
     let values = &result.eigenvalues[0].values;
-    for col in 0..2 {
+    for (col, &value) in values.iter().take(2).enumerate() {
         for row in 0..2 {
             let lhs = (0..2)
                 .map(|index| tensor.data()[row + 2 * index] * result.v.data()[index + 2 * col])
                 .sum::<f64>();
-            let rhs = result.v.data()[row + 2 * col] * values[col];
+            let rhs = result.v.data()[row + 2 * col] * value;
             assert!((lhs - rhs).abs() < 1e-10);
         }
     }
@@ -4051,12 +4051,12 @@ fn compact_factorizations_do_not_relabel_product_lowest_u1_sectors() {
     assert_eq!(result.v.tensor().space().dims(), &[2, 2]);
     assert_eq!(result.d.tensor().space().dims(), &[2, 2]);
     let values = &result.eigenvalues[0].values;
-    for col in 0..2 {
+    for (col, &value) in values.iter().take(2).enumerate() {
         for row in 0..2 {
             let lhs = (0..2)
                 .map(|index| hermitian.data()[row + 2 * index] * result.v.data()[index + 2 * col])
                 .sum::<f64>();
-            let rhs = result.v.data()[row + 2 * col] * values[col];
+            let rhs = result.v.data()[row + 2 * col] * value;
             assert!((lhs - rhs).abs() < 1e-10);
         }
     }

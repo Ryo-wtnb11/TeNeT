@@ -15363,13 +15363,13 @@ mod tests {
         let want = tp_expected_b();
         // Sanity: the oracle itself must be non-symmetric, else no discrimination.
         assert!((want[0][1] - want[1][0]).abs() > 0.1, "oracle B must be non-symmetric");
-        for mu in 0..2 {
-            for nu in 0..2 {
+        for (mu, row) in want.iter().enumerate() {
+            for (nu, &want_value) in row.iter().enumerate() {
                 assert!(
-                    (b.get(mu, nu) - want[mu][nu]).abs() < 1e-12,
+                    (b.get(mu, nu) - want_value).abs() < 1e-12,
                     "B[{mu},{nu}]={} want {} (μ↔ν transpose?)",
                     b.get(mu, nu),
-                    want[mu][nu]
+                    want_value
                 );
             }
         }
@@ -15385,13 +15385,13 @@ mod tests {
         assert_eq!(a.shape(), (2, 2));
         let want = tp_expected_a();
         assert!((want[0][1] - want[1][0]).abs() > 0.1, "oracle A must be non-symmetric");
-        for k in 0..2 {
-            for l in 0..2 {
+        for (k, row) in want.iter().enumerate() {
+            for (l, &want_value) in row.iter().enumerate() {
                 assert!(
-                    (a.get(k, l) - want[k][l]).abs() < 1e-12,
+                    (a.get(k, l) - want_value).abs() < 1e-12,
                     "A[{k},{l}]={} want {} (κ↔λ transpose?)",
                     a.get(k, l),
-                    want[k][l]
+                    want_value
                 );
             }
         }
@@ -16586,17 +16586,17 @@ mod tests {
         assert_eq!(dst_basis, expected_order);
         assert_eq!(dst_columns.num_src, basis.len());
         assert_eq!(dst_columns.num_rows, dst_basis.len());
-        for destination_row in 0..dst_basis.len() {
-            let domain_vertices = dst_basis[destination_row].domain_tree().vertices();
+        for (destination_row, destination) in dst_basis.iter().enumerate() {
+            let domain_vertices = destination.domain_tree().vertices();
             assert_eq!(
                 domain_vertices.last().map(|index| index.get()),
                 Some(destination_row + 1)
             );
-            for source in 0..basis.len() {
+            for (source, oracle_row) in oracle.iter().enumerate().take(basis.len()) {
                 let got = dst_columns.row(destination_row)[source].unwrap_or(0.0);
-                let want = oracle[source]
+                let want = oracle_row
                     .iter()
-                    .find_map(|(key, coeff)| (key == &dst_basis[destination_row]).then_some(*coeff))
+                    .find_map(|(key, coeff)| (key == destination).then_some(*coeff))
                     .unwrap_or(0.0);
                 assert!((got - want).abs() < 1e-12);
             }
