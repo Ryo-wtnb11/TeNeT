@@ -8323,7 +8323,7 @@ fn generic_artin_braid_at_with_inverse_checked<C>(
     tree: &FusionTreeKey,
     index: usize,
     inverse: bool,
-) -> Result<Vec<(FusionTreeKey, C::Scalar)>, CheckedGenericSymbolError<C::Error>>
+) -> Result<GenericTreeTerms<C::Scalar>, CheckedGenericSymbolError<C::Error>>
 where
     C: GenericFRAccess,
 {
@@ -8691,7 +8691,7 @@ fn generic_braid_tree_result<C>(
     permutation: &[usize],
     levels: &[usize],
     swaps: &[usize],
-) -> Result<Vec<(FusionTreeKey, C::Scalar)>, CheckedGenericSymbolError<C::Error>>
+) -> Result<GenericTreeTerms<C::Scalar>, CheckedGenericSymbolError<C::Error>>
 where
     C: GenericFRAccess,
 {
@@ -9047,7 +9047,7 @@ where
 fn generic_bendright_tree_pair_checked<C>(
     rule: &C,
     tree_pair: &FusionTreePairKey,
-) -> Result<Vec<(FusionTreePairKey, C::Scalar)>, CheckedGenericSymbolError<C::Error>>
+) -> Result<GenericTreePairTerms<C::Scalar>, CheckedGenericSymbolError<C::Error>>
 where
     C: CheckedGenericRigidSymbols,
 {
@@ -9059,7 +9059,7 @@ where
 fn generic_bendright_tree_pair_result<C>(
     rule: &C,
     tree_pair: &FusionTreePairKey,
-) -> Result<Vec<(FusionTreePairKey, C::Scalar)>, CheckedGenericSymbolError<C::Error>>
+) -> Result<GenericTreePairTerms<C::Scalar>, CheckedGenericSymbolError<C::Error>>
 where
     C: GenericRigidAccess,
 {
@@ -9258,7 +9258,7 @@ where
 fn generic_bendleft_tree_pair_checked<C>(
     rule: &C,
     tree_pair: &FusionTreePairKey,
-) -> Result<Vec<(FusionTreePairKey, C::Scalar)>, CheckedGenericSymbolError<C::Error>>
+) -> Result<GenericTreePairTerms<C::Scalar>, CheckedGenericSymbolError<C::Error>>
 where
     C: CheckedGenericRigidSymbols,
 {
@@ -9270,7 +9270,7 @@ where
 fn generic_bendleft_tree_pair_result<C>(
     rule: &C,
     tree_pair: &FusionTreePairKey,
-) -> Result<Vec<(FusionTreePairKey, C::Scalar)>, CheckedGenericSymbolError<C::Error>>
+) -> Result<GenericTreePairTerms<C::Scalar>, CheckedGenericSymbolError<C::Error>>
 where
     C: GenericRigidAccess,
 {
@@ -9428,7 +9428,7 @@ fn generic_repartition_tree_pair_result<C>(
     rule: &C,
     tree_pair: &FusionTreePairKey,
     target_codomain_rank: usize,
-) -> Result<Vec<(FusionTreePairKey, C::Scalar)>, CheckedGenericSymbolError<C::Error>>
+) -> Result<GenericTreePairTerms<C::Scalar>, CheckedGenericSymbolError<C::Error>>
 where
     C: GenericRigidAccess,
 {
@@ -10603,7 +10603,7 @@ fn generic_braid_tree_pair_result<C>(
     levels: &[usize],
     swaps: &[usize],
     identity: bool,
-) -> Result<Vec<(FusionTreePairKey, C::Scalar)>, CheckedGenericSymbolError<C::Error>>
+) -> Result<GenericTreePairTerms<C::Scalar>, CheckedGenericSymbolError<C::Error>>
 where
     C: GenericRigidAccess,
 {
