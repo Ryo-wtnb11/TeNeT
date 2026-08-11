@@ -5,9 +5,9 @@ use std::hash::Hash;
 use std::sync::Arc;
 
 use tenet_core::{
-    BlockStructure, CoreError, FusionTreeHomSpace, FusionTreePairOrientation, HostReadableStorage,
-    HostWritableStorage, MultiplicityFreeRigidSymbols, ScratchStorage, SimilarStorage, TensorMap,
-    TensorStorage,
+    BlockStructure, CategoricalScalar, CoreError, FusionTreeHomSpace, FusionTreePairOrientation,
+    HostReadableStorage, HostWritableStorage, MultiplicityFreeRigidSymbols, ScratchStorage,
+    SimilarStorage, TensorMap, TensorStorage,
 };
 
 use crate::cache::{
@@ -19,9 +19,9 @@ use crate::tree_transform::build_tree_pair_transform_group_plan;
 #[cfg(test)]
 use crate::DenseTreeTransformOperations;
 use crate::{
-    DenseRecouplingScalar, OperationError, RecouplingCoefficientAction, TreeTransformBackend,
-    TreeTransformOperation, TreeTransformOperationKind, TreeTransformRuleCacheKey,
-    TreeTransformStructure,
+    DenseBlockScalar, DenseRecouplingScalar, OperationError, RecouplingCoefficientAction,
+    TreeTransformBackend, TreeTransformOperation, TreeTransformOperationKind,
+    TreeTransformRuleCacheKey, TreeTransformStructure,
 };
 use tenet_operations::fusion_replay::FusionBlockContractPlan;
 use tenet_operations::{TensorContractSpec, TensorContractSpecOwned};
@@ -217,7 +217,7 @@ fn rhs_source_is_borrowable<R>(
     core_axes: TensorContractSpec<'_>,
 ) -> Result<bool, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
 {
     if !source_is_borrowable_core_layout(
         source_space,
@@ -263,10 +263,11 @@ pub(crate) fn tensorcontract_fusion_dynamic_plan_into_with<
     beta: D,
 ) -> Result<(), OperationError>
 where
-    BT: TreeTransformBackend<D, f64>,
-    BC: TensorContractBackend<D, f64>,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+    BT: TreeTransformBackend<D, R::Scalar>,
+    BC: TensorContractBackend<D, R::Scalar>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<R::Scalar>,
     DDst: HostWritableStorage<D>,
     DLhs: HostReadableStorage<D>,
     DRhs: HostReadableStorage<D>,
@@ -633,7 +634,7 @@ where
         rhs.fusion_space()
             .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
     );
-    let artifact = compile_dynamic_tree_execution_artifact::<_, _, _, _, false>(
+    let artifact = compile_dynamic_tree_execution_artifact::<_, _, _, _, _, false>(
         &mut tree_context,
         &mut dynamic_space_cache,
         rule,
@@ -712,7 +713,7 @@ where
     let layout_primer = encoded_layout_primer::<R>;
     let lhs_layout = lhs.prepare(rule, layout_primer)?;
     let rhs_layout = rhs.prepare(rule, layout_primer)?;
-    let artifact = compile_prelowered_dynamic_tree_execution_artifact::<_, _, _, _, false>(
+    let artifact = compile_prelowered_dynamic_tree_execution_artifact::<_, _, _, _, _, false>(
         &mut tree_context,
         &mut dynamic_space_cache,
         rule,
@@ -773,7 +774,7 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
 {
-    let artifact = compile_dynamic_tree_execution_artifact::<_, _, _, _, false>(
+    let artifact = compile_dynamic_tree_execution_artifact::<_, _, _, _, _, false>(
         tree_context,
         dynamic_space_cache,
         rule,
@@ -803,21 +804,21 @@ where
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct DynamicTreeExecutionArtifact {
+pub(crate) struct DynamicTreeExecutionArtifact<C = f64> {
     orientation: FusionContractOrientation,
-    lhs_transform: DynamicFusionTransformedSourceEntry,
-    rhs_transform: DynamicFusionTransformedSourceEntry,
+    lhs_transform: DynamicFusionTransformedSourceEntry<C>,
+    rhs_transform: DynamicFusionTransformedSourceEntry<C>,
     lhs_borrowed: bool,
     rhs_borrowed: bool,
-    core_right_twist: Arc<[RhsTwistAction]>,
-    core_dst: Option<DynamicFusionCoreDstEntry>,
-    block_plan: Arc<FusionBlockContractPlan>,
+    core_right_twist: Arc<[RhsTwistAction<C>]>,
+    core_dst: Option<DynamicFusionCoreDstEntry<C>>,
+    block_plan: Arc<FusionBlockContractPlan<C>>,
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn compile_dynamic_tree_execution_artifact<RuleKey, BT, R, D, const PROFILED: bool>(
-    tree_context: &mut TreeTransformExecutionContext<D, RuleKey, f64, BT>,
-    dynamic_space_cache: &mut DynamicFusionSpaceCache<RuleKey>,
+pub(crate) fn compile_dynamic_tree_execution_artifact<RuleKey, BT, R, D, C, const PROFILED: bool>(
+    tree_context: &mut TreeTransformExecutionContext<D, RuleKey, C, BT>,
+    dynamic_space_cache: &mut DynamicFusionSpaceCache<RuleKey, C>,
     rule: &R,
     layout_primer: LayoutKeyBuilder<R>,
     plan: &FusionContractPlan,
@@ -827,12 +828,13 @@ pub(crate) fn compile_dynamic_tree_execution_artifact<RuleKey, BT, R, D, const P
     rhs_space: &DynamicFusionMapSpace,
     rhs_structure: &Arc<BlockStructure>,
     profile: Option<&mut TensorContractFusionProfile>,
-) -> Result<DynamicTreeExecutionArtifact, OperationError>
+) -> Result<DynamicTreeExecutionArtifact<C>, OperationError>
 where
     RuleKey: 'static + Clone + Eq + std::hash::Hash + Send + Sync,
-    BT: TreeTransformBackend<D, f64>,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
-    D: DenseRecouplingScalar,
+    BT: TreeTransformBackend<D, C>,
+    R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
+    C: DenseBlockScalar,
 {
     let source_start = PROFILED.then(std::time::Instant::now);
     let reverse = plan.orientation() == FusionContractOrientation::RhsLhs;
@@ -892,7 +894,7 @@ where
             plan.core_axes().as_spec(),
         )?
     };
-    finish_dynamic_tree_execution_artifact::<_, _, _, _, PROFILED>(
+    finish_dynamic_tree_execution_artifact::<_, _, _, _, _, PROFILED>(
         tree_context,
         dynamic_space_cache,
         rule,
@@ -914,10 +916,11 @@ pub(crate) fn compile_prelowered_dynamic_tree_execution_artifact<
     BT,
     R,
     D,
+    C,
     const PROFILED: bool,
 >(
-    tree_context: &mut TreeTransformExecutionContext<D, RuleKey, f64, BT>,
-    dynamic_space_cache: &mut DynamicFusionSpaceCache<RuleKey>,
+    tree_context: &mut TreeTransformExecutionContext<D, RuleKey, C, BT>,
+    dynamic_space_cache: &mut DynamicFusionSpaceCache<RuleKey, C>,
     rule: &R,
     layout_primer: LayoutKeyBuilder<R>,
     plan: &FusionContractPlan,
@@ -925,12 +928,13 @@ pub(crate) fn compile_prelowered_dynamic_tree_execution_artifact<
     lhs: &FusionOperandLayout<'_>,
     rhs: &FusionOperandLayout<'_>,
     profile: Option<&mut TensorContractFusionProfile>,
-) -> Result<DynamicTreeExecutionArtifact, OperationError>
+) -> Result<DynamicTreeExecutionArtifact<C>, OperationError>
 where
     RuleKey: 'static + Clone + Eq + std::hash::Hash + Send + Sync,
-    BT: TreeTransformBackend<D, f64>,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
-    D: DenseRecouplingScalar,
+    BT: TreeTransformBackend<D, C>,
+    R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
+    C: DenseBlockScalar,
 {
     let source_start = PROFILED.then(std::time::Instant::now);
     let reverse = plan.orientation() == FusionContractOrientation::RhsLhs;
@@ -1000,7 +1004,7 @@ where
                 plan.core_axes().as_spec(),
             )?
         };
-    let artifact = finish_dynamic_tree_execution_artifact::<_, _, _, _, PROFILED>(
+    let artifact = finish_dynamic_tree_execution_artifact::<_, _, _, _, _, PROFILED>(
         tree_context,
         dynamic_space_cache,
         rule,
@@ -1017,19 +1021,20 @@ where
     Ok(artifact)
 }
 
-fn compile_prelowered_source_transform<RuleKey, BT, R, D>(
-    tree_context: &mut TreeTransformExecutionContext<D, RuleKey, f64, BT>,
-    dynamic_space_cache: &mut DynamicFusionSpaceCache<RuleKey>,
+fn compile_prelowered_source_transform<RuleKey, BT, R, D, C>(
+    tree_context: &mut TreeTransformExecutionContext<D, RuleKey, C, BT>,
+    dynamic_space_cache: &mut DynamicFusionSpaceCache<RuleKey, C>,
     rule: &R,
     source: &FusionOperandLayout<'_>,
     operation: &TreeTransformOperation,
     layout_primer: LayoutKeyBuilder<R>,
-) -> Result<DynamicFusionTransformedSourceEntry, OperationError>
+) -> Result<DynamicFusionTransformedSourceEntry<C>, OperationError>
 where
     RuleKey: 'static + Clone + Eq + std::hash::Hash + Send + Sync,
-    BT: TreeTransformBackend<D, f64>,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
-    D: DenseRecouplingScalar,
+    BT: TreeTransformBackend<D, C>,
+    R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
+    C: DenseBlockScalar,
 {
     if source.is_direct() {
         dynamic_space_cache.get_or_compile_transformed_source(
@@ -1053,25 +1058,26 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn finish_dynamic_tree_execution_artifact<RuleKey, BT, R, D, const PROFILED: bool>(
-    tree_context: &mut TreeTransformExecutionContext<D, RuleKey, f64, BT>,
-    dynamic_space_cache: &mut DynamicFusionSpaceCache<RuleKey>,
+fn finish_dynamic_tree_execution_artifact<RuleKey, BT, R, D, C, const PROFILED: bool>(
+    tree_context: &mut TreeTransformExecutionContext<D, RuleKey, C, BT>,
+    dynamic_space_cache: &mut DynamicFusionSpaceCache<RuleKey, C>,
     rule: &R,
     layout_primer: LayoutKeyBuilder<R>,
     plan: &FusionContractPlan,
     dst_space: &DynamicFusionMapSpace,
-    lhs_transform: DynamicFusionTransformedSourceEntry,
-    rhs_transform: DynamicFusionTransformedSourceEntry,
+    lhs_transform: DynamicFusionTransformedSourceEntry<C>,
+    rhs_transform: DynamicFusionTransformedSourceEntry<C>,
     lhs_borrowed: bool,
     rhs_borrowed: bool,
     source_start: Option<std::time::Instant>,
     mut profile: Option<&mut TensorContractFusionProfile>,
-) -> Result<DynamicTreeExecutionArtifact, OperationError>
+) -> Result<DynamicTreeExecutionArtifact<C>, OperationError>
 where
     RuleKey: 'static + Clone + Eq + std::hash::Hash + Send + Sync,
-    BT: TreeTransformBackend<D, f64>,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
-    D: DenseRecouplingScalar,
+    BT: TreeTransformBackend<D, C>,
+    R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
+    C: DenseBlockScalar,
 {
     let physical_lhs_core_space = lhs_transform.space.clone();
     let physical_rhs_core_space = rhs_transform.space.clone();
@@ -1153,13 +1159,13 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn execute_dynamic_tree_execution_artifact<RuleKey, BT, BC, D>(
-    tree_context: &mut TreeTransformExecutionContext<D, RuleKey, f64, BT>,
+pub(crate) fn execute_dynamic_tree_execution_artifact<RuleKey, BT, BC, D, C>(
+    tree_context: &mut TreeTransformExecutionContext<D, RuleKey, C, BT>,
     contract_backend: &mut BC,
     contract_workspace: &mut BC::Workspace,
     fusion_block_workspace: &mut FusionBlockContractWorkspace<D>,
     scratch: &mut DynamicFusionScratchWorkspace<D>,
-    artifact: &DynamicTreeExecutionArtifact,
+    artifact: &DynamicTreeExecutionArtifact<C>,
     dst_structure: &Arc<BlockStructure>,
     dst_data: &mut [D],
     lhs_data: &[D],
@@ -1169,11 +1175,12 @@ pub(crate) fn execute_dynamic_tree_execution_artifact<RuleKey, BT, BC, D>(
 ) -> Result<(), OperationError>
 where
     RuleKey: 'static + Clone + Eq + std::hash::Hash + Send + Sync,
-    BT: TreeTransformBackend<D, f64>,
-    BC: TensorContractBackend<D, f64>,
-    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+    BT: TreeTransformBackend<D, C>,
+    BC: TensorContractBackend<D, C>,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
+    C: DenseBlockScalar,
 {
-    execute_dynamic_tree_execution_artifact_impl::<_, _, _, _, false>(
+    execute_dynamic_tree_execution_artifact_impl::<_, _, _, _, _, false>(
         tree_context,
         contract_backend,
         contract_workspace,
@@ -1191,13 +1198,13 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn execute_dynamic_tree_execution_artifact_profiled<RuleKey, BT, BC, D>(
-    tree_context: &mut TreeTransformExecutionContext<D, RuleKey, f64, BT>,
+pub(crate) fn execute_dynamic_tree_execution_artifact_profiled<RuleKey, BT, BC, D, C>(
+    tree_context: &mut TreeTransformExecutionContext<D, RuleKey, C, BT>,
     contract_backend: &mut BC,
     contract_workspace: &mut BC::Workspace,
     fusion_block_workspace: &mut FusionBlockContractWorkspace<D>,
     scratch: &mut DynamicFusionScratchWorkspace<D>,
-    artifact: &DynamicTreeExecutionArtifact,
+    artifact: &DynamicTreeExecutionArtifact<C>,
     dst_structure: &Arc<BlockStructure>,
     dst_data: &mut [D],
     lhs_data: &[D],
@@ -1208,11 +1215,12 @@ pub(crate) fn execute_dynamic_tree_execution_artifact_profiled<RuleKey, BT, BC, 
 ) -> Result<(), OperationError>
 where
     RuleKey: 'static + Clone + Eq + std::hash::Hash + Send + Sync,
-    BT: TreeTransformBackend<D, f64>,
-    BC: TensorContractBackend<D, f64>,
-    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+    BT: TreeTransformBackend<D, C>,
+    BC: TensorContractBackend<D, C>,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
+    C: DenseBlockScalar,
 {
-    execute_dynamic_tree_execution_artifact_impl::<_, _, _, _, true>(
+    execute_dynamic_tree_execution_artifact_impl::<_, _, _, _, _, true>(
         tree_context,
         contract_backend,
         contract_workspace,
@@ -1230,13 +1238,13 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn execute_dynamic_tree_execution_artifact_impl<RuleKey, BT, BC, D, const PROFILED: bool>(
-    tree_context: &mut TreeTransformExecutionContext<D, RuleKey, f64, BT>,
+fn execute_dynamic_tree_execution_artifact_impl<RuleKey, BT, BC, D, C, const PROFILED: bool>(
+    tree_context: &mut TreeTransformExecutionContext<D, RuleKey, C, BT>,
     contract_backend: &mut BC,
     contract_workspace: &mut BC::Workspace,
     fusion_block_workspace: &mut FusionBlockContractWorkspace<D>,
     scratch: &mut DynamicFusionScratchWorkspace<D>,
-    artifact: &DynamicTreeExecutionArtifact,
+    artifact: &DynamicTreeExecutionArtifact<C>,
     dst_structure: &Arc<BlockStructure>,
     dst_data: &mut [D],
     lhs_data: &[D],
@@ -1247,9 +1255,10 @@ fn execute_dynamic_tree_execution_artifact_impl<RuleKey, BT, BC, D, const PROFIL
 ) -> Result<(), OperationError>
 where
     RuleKey: 'static + Clone + Eq + std::hash::Hash + Send + Sync,
-    BT: TreeTransformBackend<D, f64>,
-    BC: TensorContractBackend<D, f64>,
-    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+    BT: TreeTransformBackend<D, C>,
+    BC: TensorContractBackend<D, C>,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
+    C: DenseBlockScalar,
 {
     let reverse = artifact.orientation == FusionContractOrientation::RhsLhs;
     let lhs_transform = &artifact.lhs_transform;
@@ -1371,10 +1380,8 @@ where
             (physical_lhs_core, physical_rhs_core)
         };
         let mut kernels = crate::StridedHostKernelAdapter::default();
-        let mut gemm = super::fusion_block::BackendRank2Gemm {
-            backend: contract_backend,
-            workspace: contract_workspace,
-        };
+        let mut gemm =
+            super::fusion_block::BackendRank2Gemm::new(contract_backend, contract_workspace);
         return if PROFILED {
             artifact.block_plan.execute_raw_profiled(
                 &mut kernels,
@@ -1428,10 +1435,8 @@ where
                            rhs_core: CoreSource<'_, D>,
                            core_dst: &mut DynamicFusionScratch<D>| {
             let mut kernels = crate::StridedHostKernelAdapter::default();
-            let mut gemm = super::fusion_block::BackendRank2Gemm {
-                backend: contract_backend,
-                workspace: contract_workspace,
-            };
+            let mut gemm =
+                super::fusion_block::BackendRank2Gemm::new(contract_backend, contract_workspace);
             if PROFILED {
                 artifact.block_plan.execute_raw_profiled(
                     &mut kernels,
@@ -1533,6 +1538,7 @@ pub(crate) fn tensorcontract_fusion_dynamic_plan_into_storage_context<
     BC,
     R,
     D,
+    C,
     const DST_NOUT: usize,
     const DST_NIN: usize,
     const LHS_NOUT: usize,
@@ -1546,10 +1552,10 @@ pub(crate) fn tensorcontract_fusion_dynamic_plan_into_storage_context<
     DLhs,
     DRhs,
 >(
-    tree_context: &mut TreeTransformExecutionContext<D, RuleKey, f64, BT>,
+    tree_context: &mut TreeTransformExecutionContext<D, RuleKey, C, BT>,
     contract_backend: &mut BC,
     contract_workspace: &mut BC::Workspace,
-    dynamic_space_cache: &mut DynamicFusionSpaceCache<RuleKey>,
+    dynamic_space_cache: &mut DynamicFusionSpaceCache<RuleKey, C>,
     fusion_block_workspace: &mut StorageFusionBlockContractWorkspace<
         DLhs::Similar,
         DRhs::Similar,
@@ -1566,10 +1572,11 @@ pub(crate) fn tensorcontract_fusion_dynamic_plan_into_storage_context<
 ) -> Result<(), OperationError>
 where
     RuleKey: 'static + Clone + Eq + std::hash::Hash + Send + Sync,
-    BT: TreeTransformBackend<D, f64>,
-    BC: TensorContractBackend<D, f64>,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
-    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+    BT: TreeTransformBackend<D, C>,
+    BC: TensorContractBackend<D, C>,
+    R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
+    C: DenseBlockScalar,
     DDst: HostWritableStorage<D> + SimilarStorage<D>,
     DDst::Similar: HostWritableStorage<D> + ScratchStorage<D>,
     DLhs: HostReadableStorage<D> + SimilarStorage<D>,
@@ -1679,10 +1686,10 @@ where
         });
         return block_plan.execute_storage_raw_sources(
             &mut crate::StridedHostKernelAdapter::default(),
-            &mut super::fusion_block::BackendRank2Gemm {
-                backend: contract_backend,
-                workspace: contract_workspace,
-            },
+            &mut super::fusion_block::BackendRank2Gemm::<_, _, C>::new(
+                contract_backend,
+                contract_workspace,
+            ),
             fusion_block_workspace,
             lhs.storage(),
             rhs.storage(),
@@ -1726,10 +1733,10 @@ where
              core_dst: &mut StorageDynamicFusionScratch<DDst::Similar>| {
                 block_plan.execute_storage_raw(
                     &mut crate::StridedHostKernelAdapter::default(),
-                    &mut super::fusion_block::BackendRank2Gemm {
-                        backend: contract_backend,
-                        workspace: contract_workspace,
-                    },
+                    &mut super::fusion_block::BackendRank2Gemm::<_, _, C>::new(
+                        contract_backend,
+                        contract_workspace,
+                    ),
                     fusion_block_workspace,
                     lhs.storage(),
                     rhs.storage(),
@@ -1794,38 +1801,38 @@ impl DynamicFusionSpaceCacheStats {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct DynamicFusionSpaceCache<RuleKey> {
-    last_transformed_sources: Vec<DynamicFusionTransformedSourceLastEntry<RuleKey>>,
+pub(crate) struct DynamicFusionSpaceCache<RuleKey, C = f64> {
+    last_transformed_sources: Vec<DynamicFusionTransformedSourceLastEntry<RuleKey, C>>,
     fast_transformed_sources: FxHashMap<
         DynamicFusionTransformedSourceFastKey<RuleKey>,
-        DynamicFusionTransformedSourceEntry,
+        DynamicFusionTransformedSourceEntry<C>,
     >,
     transformed_sources: FxHashMap<
         DynamicFusionTransformedSourceSpaceKey<RuleKey>,
-        DynamicFusionTransformedSourceEntry,
+        DynamicFusionTransformedSourceEntry<C>,
     >,
     lru_order: VecDeque<DynamicFusionSpaceCacheEntryKey<RuleKey>>,
-    last_core_dst: Option<DynamicFusionCoreDstLastEntry<RuleKey>>,
-    fast_core_dsts: FxHashMap<DynamicFusionCoreDstFastKey<RuleKey>, DynamicFusionCoreDstEntry>,
-    core_dsts: FxHashMap<DynamicFusionCoreDstSpaceKey<RuleKey>, DynamicFusionCoreDstEntry>,
+    last_core_dst: Option<DynamicFusionCoreDstLastEntry<RuleKey, C>>,
+    fast_core_dsts: FxHashMap<DynamicFusionCoreDstFastKey<RuleKey>, DynamicFusionCoreDstEntry<C>>,
+    core_dsts: FxHashMap<DynamicFusionCoreDstSpaceKey<RuleKey>, DynamicFusionCoreDstEntry<C>>,
     policy: OperationCachePolicy,
     stats: DynamicFusionSpaceCacheStats,
 }
 
 #[derive(Clone, Debug)]
-struct DynamicFusionTransformedSourceEntry {
+struct DynamicFusionTransformedSourceEntry<C = f64> {
     space: Arc<DynamicFusionMapSpace>,
     replay_structure: Arc<BlockStructure>,
-    transform_structure: Arc<TreeTransformStructure<f64>>,
+    transform_structure: Arc<TreeTransformStructure<C>>,
 }
 
 #[derive(Clone, Debug)]
-struct DynamicFusionCoreDstEntry {
+struct DynamicFusionCoreDstEntry<C = f64> {
     space: Arc<DynamicFusionMapSpace>,
-    output_transform_structure: Arc<TreeTransformStructure<f64>>,
+    output_transform_structure: Arc<TreeTransformStructure<C>>,
 }
 
-impl<RuleKey> Default for DynamicFusionSpaceCache<RuleKey> {
+impl<RuleKey, C> Default for DynamicFusionSpaceCache<RuleKey, C> {
     fn default() -> Self {
         Self {
             last_transformed_sources: Vec::new(),
@@ -1842,7 +1849,7 @@ impl<RuleKey> Default for DynamicFusionSpaceCache<RuleKey> {
 }
 
 #[derive(Clone, Debug)]
-struct DynamicFusionTransformedSourceLastEntry<RuleKey> {
+struct DynamicFusionTransformedSourceLastEntry<RuleKey, C = f64> {
     key: Option<DynamicFusionTransformedSourceSpaceKey<RuleKey>>,
     rule: RuleKey,
     nout: usize,
@@ -1850,12 +1857,13 @@ struct DynamicFusionTransformedSourceLastEntry<RuleKey> {
     replay_structure: Arc<BlockStructure>,
     operation: TreeTransformOperation,
     source_conjugate: bool,
-    entry: DynamicFusionTransformedSourceEntry,
+    entry: DynamicFusionTransformedSourceEntry<C>,
 }
 
-impl<RuleKey> DynamicFusionTransformedSourceLastEntry<RuleKey>
+impl<RuleKey, C> DynamicFusionTransformedSourceLastEntry<RuleKey, C>
 where
     RuleKey: Eq,
+    C: Clone,
 {
     fn matches(
         &self,
@@ -1876,7 +1884,7 @@ where
 }
 
 #[derive(Clone, Debug)]
-struct DynamicFusionCoreDstLastEntry<RuleKey> {
+struct DynamicFusionCoreDstLastEntry<RuleKey, C = f64> {
     key: Option<DynamicFusionCoreDstSpaceKey<RuleKey>>,
     rule: RuleKey,
     lhs: DynamicFusionLastSpaceKey,
@@ -1886,10 +1894,10 @@ struct DynamicFusionCoreDstLastEntry<RuleKey> {
     core_dst_open_rhs_rank: usize,
     output_transform: TreeTransformOperation,
     output_dst: DynamicFusionLastSpaceKey,
-    entry: DynamicFusionCoreDstEntry,
+    entry: DynamicFusionCoreDstEntry<C>,
 }
 
-impl<RuleKey> DynamicFusionCoreDstLastEntry<RuleKey>
+impl<RuleKey, C> DynamicFusionCoreDstLastEntry<RuleKey, C>
 where
     RuleKey: Eq,
 {
@@ -1935,9 +1943,10 @@ impl DynamicFusionLastSpaceKey {
     }
 }
 
-impl<RuleKey> DynamicFusionSpaceCache<RuleKey>
+impl<RuleKey, C> DynamicFusionSpaceCache<RuleKey, C>
 where
     RuleKey: 'static + Clone + Eq + Hash + Send + Sync,
+    C: DenseBlockScalar,
 {
     #[inline]
     pub(crate) fn len(&self) -> usize {
@@ -1992,7 +2001,7 @@ where
 
     fn remember_transformed_source(
         &mut self,
-        entry: DynamicFusionTransformedSourceLastEntry<RuleKey>,
+        entry: DynamicFusionTransformedSourceLastEntry<RuleKey, C>,
     ) {
         if !self.policy.stores_entries() {
             return;
@@ -2017,7 +2026,7 @@ where
         &mut self,
         key: DynamicFusionTransformedSourceSpaceKey<RuleKey>,
         fast_key: DynamicFusionTransformedSourceFastKey<RuleKey>,
-        entry: DynamicFusionTransformedSourceEntry,
+        entry: DynamicFusionTransformedSourceEntry<C>,
     ) {
         if !self.policy.stores_entries() {
             return;
@@ -2045,7 +2054,7 @@ where
         &mut self,
         key: DynamicFusionCoreDstSpaceKey<RuleKey>,
         fast_key: DynamicFusionCoreDstFastKey<RuleKey>,
-        entry: DynamicFusionCoreDstEntry,
+        entry: DynamicFusionCoreDstEntry<C>,
     ) {
         if !self.policy.stores_entries() {
             return;
@@ -2092,18 +2101,18 @@ where
     )]
     fn get_or_compile_transformed_source<R, D, BT>(
         &mut self,
-        tree_context: &mut TreeTransformExecutionContext<D, RuleKey, f64, BT>,
+        tree_context: &mut TreeTransformExecutionContext<D, RuleKey, C, BT>,
         rule: &R,
         src_space: &DynamicFusionMapSpace,
         src_storage_structure: &Arc<BlockStructure>,
         operation: &TreeTransformOperation,
         source_conjugate: bool,
         layout_primer: LayoutKeyBuilder<R>,
-    ) -> Result<DynamicFusionTransformedSourceEntry, OperationError>
+    ) -> Result<DynamicFusionTransformedSourceEntry<C>, OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
-        D: DenseRecouplingScalar,
-        BT: TreeTransformBackend<D, f64>,
+        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
+        BT: TreeTransformBackend<D, C>,
     {
         let rule_key = rule.tree_transform_rule_cache_key();
         let nout = if source_conjugate {
@@ -2315,16 +2324,16 @@ where
 
     fn get_or_compile_transformed_source_oriented<R, D, BT>(
         &mut self,
-        tree_context: &mut TreeTransformExecutionContext<D, RuleKey, f64, BT>,
+        tree_context: &mut TreeTransformExecutionContext<D, RuleKey, C, BT>,
         rule: &R,
         source: &FusionOperandLayout<'_>,
         operation: &TreeTransformOperation,
         layout_primer: LayoutKeyBuilder<R>,
-    ) -> Result<DynamicFusionTransformedSourceEntry, OperationError>
+    ) -> Result<DynamicFusionTransformedSourceEntry<C>, OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
-        D: DenseRecouplingScalar,
-        BT: TreeTransformBackend<D, f64>,
+        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
+        BT: TreeTransformBackend<D, C>,
     {
         let rule_key = rule.tree_transform_rule_cache_key();
         let nout = source.nout();
@@ -2397,18 +2406,18 @@ where
     )]
     fn get_or_compile_core_dst<R, D, BT>(
         &mut self,
-        tree_context: &mut TreeTransformExecutionContext<D, RuleKey, f64, BT>,
+        tree_context: &mut TreeTransformExecutionContext<D, RuleKey, C, BT>,
         rule: &R,
         lhs: &DynamicFusionMapSpace,
         rhs: &DynamicFusionMapSpace,
         plan: &FusionContractPlan,
         output_dst: &DynamicFusionMapSpace,
         layout_primer: LayoutKeyBuilder<R>,
-    ) -> Result<DynamicFusionCoreDstEntry, OperationError>
+    ) -> Result<DynamicFusionCoreDstEntry<C>, OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
-        D: DenseRecouplingScalar,
-        BT: TreeTransformBackend<D, f64>,
+        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
+        BT: TreeTransformBackend<D, C>,
     {
         let rule_key = rule.tree_transform_rule_cache_key();
         if !self.policy.stores_entries() {
@@ -2659,7 +2668,7 @@ fn transformed_source_space_and_structure<
     source_conjugate: bool,
 ) -> Result<(DynamicFusionMapSpace, std::sync::Arc<BlockStructure>), OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
     DSrc: TensorStorage<D>,
 {
     let src_fusion = src
@@ -2678,20 +2687,21 @@ where
 }
 
 #[derive(Clone, Debug)]
-struct RhsTwistAction {
+struct RhsTwistAction<C = f64> {
     shape: Vec<usize>,
     strides: Vec<isize>,
     offset: isize,
-    factor: f64,
+    factor: C,
 }
 
 fn compile_rhs_contract_twist<R>(
     rule: &R,
     space: &DynamicFusionMapSpace,
     rhs_contracting_axes: &[usize],
-) -> Result<Arc<[RhsTwistAction]>, OperationError>
+) -> Result<Arc<[RhsTwistAction<R::Scalar>]>, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
 {
     if rule.braiding_style() != tenet_core::BraidingStyleKind::Fermionic {
         return Ok(Arc::from([]));
@@ -2711,7 +2721,7 @@ where
             rhs_contracting_axes,
             key.codomain_tree(),
         )?;
-        if factor != 1.0 {
+        if factor != R::Scalar::one() {
             actions.push(RhsTwistAction {
                 shape: block.shape().to_vec(),
                 strides: tenet_operations::strided::strides_to_isize(block.strides())?,
@@ -2732,8 +2742,9 @@ fn apply_rhs_contract_twist<A, R, D>(
 ) -> Result<(), OperationError>
 where
     A: crate::HostKernelAdapter<D>,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<R::Scalar>,
 {
     let actions = compile_rhs_contract_twist(rule, space, rhs_contracting_axes)?;
     execute_rhs_contract_twist(kernels, data, &actions)
@@ -2742,14 +2753,15 @@ where
 /// Applies the fermionic supertrace actions compiled with the tree artifact.
 /// Why not retain the rule here: numerical replay must not re-enter categorical
 /// coefficient evaluation or rebuild strided descriptors.
-fn execute_rhs_contract_twist<A, D>(
+fn execute_rhs_contract_twist<A, D, C>(
     kernels: &mut A,
     data: &mut [D],
-    actions: &[RhsTwistAction],
+    actions: &[RhsTwistAction<C>],
 ) -> Result<(), OperationError>
 where
     A: crate::HostKernelAdapter<D>,
-    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
+    C: Copy,
 {
     for action in actions {
         kernels.scale_strided(
@@ -2787,9 +2799,10 @@ fn tree_pair_transform_typed_to_dynamic<
     alpha: D,
 ) -> Result<(), OperationError>
 where
-    BT: TreeTransformBackend<D, f64>,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+    BT: TreeTransformBackend<D, R::Scalar>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<R::Scalar>,
     DSrc: HostReadableStorage<D>,
 {
     let plan = build_tree_pair_transform_group_plan(rule, operation, src_replay_structure)?;
@@ -2833,9 +2846,10 @@ fn tree_pair_transform_dynamic_to_typed<
     beta: D,
 ) -> Result<(), OperationError>
 where
-    BT: TreeTransformBackend<D, f64>,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+    BT: TreeTransformBackend<D, R::Scalar>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<R::Scalar>,
     DDst: HostWritableStorage<D>,
 {
     let plan = build_tree_pair_transform_group_plan(rule, operation, src.space().structure())?;
@@ -2869,9 +2883,10 @@ fn tensorcontract_dynamic_core_into_raw<B, R, D>(
     beta: D,
 ) -> Result<(), OperationError>
 where
-    B: TensorContractBackend<D, f64>,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+    B: TensorContractBackend<D, R::Scalar>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<R::Scalar>,
 {
     let _ = dst_structure;
     tensorcontract_core_fusion_blocks_into_raw(

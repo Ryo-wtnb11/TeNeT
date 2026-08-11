@@ -1,6 +1,16 @@
 use super::*;
 use std::sync::Arc;
 
+#[test]
+fn fusion_context_explicit_backend_arguments_remain_source_compatible() {
+    let _: TensorContractFusionExecutionContext<
+        f64,
+        RuleIdentity,
+        DenseTreeTransformOperations,
+        DenseTreeTransformOperations,
+    > = Default::default();
+}
+
 // Mutation oracle for unchecked internal rigid-symbol providers, not a
 // physically coherent ribbon category.
 #[derive(Clone, Copy, Debug)]

@@ -67,7 +67,8 @@ fn prelowered_plan_builder<R>(
     primer: LayoutKeyBuilder<R>,
 ) -> Result<Arc<FusionContractPlan>, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
 {
     prepare_tensorcontract_fusion_plan_dyn_prelowered_canonical(rule, dst, lhs, rhs, axes, primer)
         .map(Arc::new)
@@ -476,14 +477,16 @@ pub struct TensorContractFusionExecutionContext<
     RuleKey,
     BT = DenseTreeTransformOperations,
     BC = DenseTreeTransformOperations,
+    C = f64,
 > where
-    D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
+    D: DenseBlockScalar + RecouplingCoefficientAction<C>,
+    C: DenseBlockScalar,
     RuleKey: 'static + Clone + Eq + Hash + Send + Sync,
-    BT: TreeTransformBackend<D, f64>,
-    BC: TensorContractBackend<D, f64>,
+    BT: TreeTransformBackend<D, C>,
+    BC: TensorContractBackend<D, C>,
 {
-    tree_context: TreeTransformExecutionContext<D, RuleKey, f64, BT>,
-    dynamic_space_cache: DynamicFusionSpaceCache<RuleKey>,
+    tree_context: TreeTransformExecutionContext<D, RuleKey, C, BT>,
+    dynamic_space_cache: DynamicFusionSpaceCache<RuleKey, C>,
     contract_backend: BC,
     contract_workspace: BC::Workspace,
     fusion_block_workspace: FusionBlockContractWorkspace<D>,
@@ -501,15 +504,16 @@ pub type HostTreeFusionExecutionContext<D, RuleKey> = TensorContractFusionExecut
     DenseTreeTransformOperations,
 >;
 
-impl<D, RuleKey, BT, BC> TensorContractFusionExecutionContext<D, RuleKey, BT, BC>
+impl<D, RuleKey, BT, BC, C> TensorContractFusionExecutionContext<D, RuleKey, BT, BC, C>
 where
-    D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
+    D: DenseBlockScalar + RecouplingCoefficientAction<C>,
+    C: DenseBlockScalar,
     RuleKey: 'static + Clone + Eq + Hash + Send + Sync,
-    BT: TreeTransformBackend<D, f64>,
-    BC: TensorContractBackend<D, f64>,
+    BT: TreeTransformBackend<D, C>,
+    BC: TensorContractBackend<D, C>,
 {
     pub fn with_parts(
-        tree_context: TreeTransformExecutionContext<D, RuleKey, f64, BT>,
+        tree_context: TreeTransformExecutionContext<D, RuleKey, C, BT>,
         contract_backend: BC,
         contract_workspace: BC::Workspace,
     ) -> Self {
@@ -528,12 +532,12 @@ where
     }
 
     #[inline]
-    pub fn tree_context(&self) -> &TreeTransformExecutionContext<D, RuleKey, f64, BT> {
+    pub fn tree_context(&self) -> &TreeTransformExecutionContext<D, RuleKey, C, BT> {
         &self.tree_context
     }
 
     #[inline]
-    pub fn tree_context_mut(&mut self) -> &mut TreeTransformExecutionContext<D, RuleKey, f64, BT> {
+    pub fn tree_context_mut(&mut self) -> &mut TreeTransformExecutionContext<D, RuleKey, C, BT> {
         &mut self.tree_context
     }
 
@@ -583,7 +587,7 @@ where
     }
 
     #[cfg(test)]
-    fn record_top_level_resolution(&mut self, resolution: &Resolution) {
+    fn record_top_level_resolution(&mut self, resolution: &Resolution<C>) {
         self.last_top_level_resolution_was_core = matches!(resolution, Resolution::Core(_));
         self.last_top_level_resolution_orientation = match resolution {
             Resolution::DynamicTree(plan) => Some(plan.orientation()),
@@ -605,7 +609,7 @@ where
     pub fn into_parts(
         self,
     ) -> (
-        TreeTransformExecutionContext<D, RuleKey, f64, BT>,
+        TreeTransformExecutionContext<D, RuleKey, C, BT>,
         BC,
         BC::Workspace,
     ) {
@@ -617,13 +621,14 @@ where
     }
 }
 
-impl<D, RuleKey, BT, BC> TensorContractFusionExecutionContext<D, RuleKey, BT, BC>
+impl<D, RuleKey, BT, BC, C> TensorContractFusionExecutionContext<D, RuleKey, BT, BC, C>
 where
-    D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
+    D: DenseBlockScalar + RecouplingCoefficientAction<C>,
+    C: DenseBlockScalar,
     RuleKey: 'static + Clone + Eq + Hash + Send + Sync,
-    BT: TreeTransformBackend<D, f64> + ReportsPlacement,
+    BT: TreeTransformBackend<D, C> + ReportsPlacement,
     BT::Workspace: ReportsPlacement,
-    BC: TensorContractBackend<D, f64> + ReportsPlacement,
+    BC: TensorContractBackend<D, C> + ReportsPlacement,
     BC::Workspace: ReportsPlacement,
 {
     #[inline]
@@ -666,12 +671,13 @@ where
     }
 }
 
-impl<D, RuleKey, BT, BC> TensorContractFusionExecutionContext<D, RuleKey, BT, BC>
+impl<D, RuleKey, BT, BC, C> TensorContractFusionExecutionContext<D, RuleKey, BT, BC, C>
 where
-    D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
+    D: DenseBlockScalar + RecouplingCoefficientAction<C>,
+    C: DenseBlockScalar,
     RuleKey: 'static + Clone + Eq + Hash + Send + Sync,
-    BT: TreeTransformBackend<D, f64>,
-    BC: TensorContractBackend<D, f64>,
+    BT: TreeTransformBackend<D, C>,
+    BC: TensorContractBackend<D, C>,
     BT::Workspace: Default,
     BC::Workspace: Default,
 {
@@ -684,12 +690,13 @@ where
     }
 }
 
-impl<D, RuleKey, BT, BC> Default for TensorContractFusionExecutionContext<D, RuleKey, BT, BC>
+impl<D, RuleKey, BT, BC, C> Default for TensorContractFusionExecutionContext<D, RuleKey, BT, BC, C>
 where
-    D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
+    D: DenseBlockScalar + RecouplingCoefficientAction<C>,
+    C: DenseBlockScalar,
     RuleKey: 'static + Clone + Eq + Hash + Send + Sync,
-    BT: TreeTransformBackend<D, f64> + Default,
-    BC: TensorContractBackend<D, f64> + Default,
+    BT: TreeTransformBackend<D, C> + Default,
+    BC: TensorContractBackend<D, C> + Default,
     BT::Workspace: Default,
     BC::Workspace: Default,
 {
@@ -698,12 +705,13 @@ where
     }
 }
 
-impl<D, RuleKey, BT, BC> TensorContractFusionExecutionContext<D, RuleKey, BT, BC>
+impl<D, RuleKey, BT, BC, C> TensorContractFusionExecutionContext<D, RuleKey, BT, BC, C>
 where
-    D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
+    D: DenseBlockScalar + RecouplingCoefficientAction<C>,
+    C: DenseBlockScalar,
     RuleKey: 'static + Clone + Eq + Hash + Send + Sync,
-    BT: TreeTransformBackend<D, f64>,
-    BC: TensorContractBackend<D, f64>,
+    BT: TreeTransformBackend<D, C>,
+    BC: TensorContractBackend<D, C>,
 {
     #[expect(
         clippy::too_many_arguments,
@@ -734,8 +742,8 @@ where
         beta: D,
     ) -> Result<(), OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
-        D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
         DDst: HostWritableStorage<D>,
         DLhs: HostReadableStorage<D>,
         DRhs: HostReadableStorage<D>,
@@ -801,8 +809,8 @@ where
         beta: D,
     ) -> Result<(), OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
-        D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
     {
         // Why not accept a separate rule: the lhs bound space is the authority
         // used for planning and execution; the raw core only checks identities.
@@ -837,8 +845,8 @@ where
         beta: D,
     ) -> Result<(), OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
-        D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
     {
         self.tensorcontract_fusion_dyn_into_raw_with_primer(
             rule,
@@ -871,8 +879,8 @@ where
         layout_primer: LayoutKeyBuilder<R>,
     ) -> Result<(), OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
-        D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
     {
         let resolution = compile_resolution(
             rule,
@@ -949,8 +957,8 @@ where
         beta: D,
     ) -> Result<(), OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
-        D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
     {
         self.tensorcontract_fusion_dyn_prelowered_into_core(
             dst_space,
@@ -983,8 +991,8 @@ where
         plan_builder: PreloweredPlanBuilder<R>,
     ) -> Result<(), OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
-        D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
     {
         let rule = dst_space.provider();
         validate_fusion_contract_rule(
@@ -1060,6 +1068,7 @@ where
                     _,
                     _,
                     _,
+                    _,
                     false,
                 >(
                     &mut self.tree_context,
@@ -1116,8 +1125,8 @@ where
         beta: D,
     ) -> Result<(), OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
-        D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
     {
         let rule = dst_space.provider();
         let axes = TensorContractSpec::new_with_conjugation(
@@ -1237,10 +1246,10 @@ where
             ..
         } = self;
         let mut kernels = crate::StridedHostKernelAdapter::default();
-        let mut gemm = super::fusion_block::BackendRank2Gemm {
-            backend: contract_backend,
-            workspace: contract_workspace,
-        };
+        let mut gemm = super::fusion_block::BackendRank2Gemm::<_, _, C>::new(
+            contract_backend,
+            contract_workspace,
+        );
         plan.execute_raw(
             &mut kernels,
             &mut gemm,
@@ -1281,7 +1290,7 @@ where
         axes: TensorContractSpec<'_>,
     ) -> Result<(), OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
         G: tenet_operations::fusion_replay::StorageGemm<D, DDst, DLhs, DRhs>,
         DDst: TensorStorage<D>,
         DLhs: TensorStorage<D>,
@@ -1321,7 +1330,7 @@ where
         rhs_axes: &[usize],
     ) -> Result<(), OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
         G: tenet_operations::fusion_replay::StorageGemm<D, DDst, DLhs, DRhs>,
         DDst: TensorStorage<D>,
         DLhs: TensorStorage<D>,
@@ -1364,7 +1373,7 @@ where
         axes: TensorContractSpec<'_>,
     ) -> Result<(), OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
         G: tenet_operations::fusion_replay::StorageGemm<D, DDst, DLhs, DRhs>,
         DDst: TensorStorage<D>,
         DLhs: TensorStorage<D>,
@@ -1417,7 +1426,7 @@ where
         rhs_axes: &[usize],
     ) -> Result<(), OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
         G: tenet_operations::fusion_replay::StorageGemm<D, DDst, DLhs, DRhs>,
         DDst: TensorStorage<D>,
         DLhs: TensorStorage<D>,
@@ -1468,7 +1477,7 @@ where
         axes: TensorContractSpec<'_>,
     ) -> Result<(), OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
         G: tenet_operations::fusion_replay::StorageGemm<D, DDst, DLhs, DRhs>,
         DDst: TensorStorage<D>,
         DLhs: TensorStorage<D>,
@@ -1521,7 +1530,7 @@ where
     #[allow(clippy::too_many_arguments)]
     fn compile_dynamic_execution_artifact<R, const PROFILED: bool>(
         &mut self,
-        resolution: &Resolution,
+        resolution: &Resolution<C>,
         rule: &R,
         dst_space: Option<&DynamicFusionMapSpace>,
         lhs_space: Option<&DynamicFusionMapSpace>,
@@ -1530,9 +1539,9 @@ where
         rhs_structure: &Arc<BlockStructure>,
         layout_primer: LayoutKeyBuilder<R>,
         profile: Option<&mut TensorContractFusionProfile>,
-    ) -> Result<Option<Arc<super::dynamic::DynamicTreeExecutionArtifact>>, OperationError>
+    ) -> Result<Option<Arc<super::dynamic::DynamicTreeExecutionArtifact<C>>>, OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
         D: DenseRecouplingScalar,
     {
         let Resolution::DynamicTree(plan) = resolution else {
@@ -1543,6 +1552,7 @@ where
         let lhs_space = lhs_space.ok_or_else(missing)?;
         let rhs_space = rhs_space.ok_or_else(missing)?;
         let artifact = Arc::new(super::dynamic::compile_dynamic_tree_execution_artifact::<
+            _,
             _,
             _,
             _,
@@ -1578,8 +1588,8 @@ where
     #[allow(clippy::too_many_arguments)]
     fn execute_resolution_dyn(
         &mut self,
-        resolution: &Resolution,
-        dynamic_artifact: Option<&Arc<super::dynamic::DynamicTreeExecutionArtifact>>,
+        resolution: &Resolution<C>,
+        dynamic_artifact: Option<&Arc<super::dynamic::DynamicTreeExecutionArtifact<C>>>,
         dst_structure: &Arc<BlockStructure>,
         dst_data: &mut [D],
         lhs_structure: &Arc<BlockStructure>,
@@ -1590,7 +1600,7 @@ where
         beta: D,
     ) -> Result<(), OperationError>
     where
-        D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+        D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
     {
         match resolution {
             Resolution::Core(block_plan) => {
@@ -1601,10 +1611,10 @@ where
                     ..
                 } = self;
                 let mut kernels = crate::StridedHostKernelAdapter::default();
-                let mut gemm = super::fusion_block::BackendRank2Gemm {
-                    backend: contract_backend,
-                    workspace: contract_workspace,
-                };
+                let mut gemm = super::fusion_block::BackendRank2Gemm::new(
+                    contract_backend,
+                    contract_workspace,
+                );
                 block_plan.execute_raw(
                     &mut kernels,
                     &mut gemm,
@@ -1683,7 +1693,7 @@ where
         DRhs,
     >(
         &mut self,
-        resolution: &Resolution,
+        resolution: &Resolution<C>,
         rule: &R,
         dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
         lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
@@ -1692,8 +1702,8 @@ where
         beta: D,
     ) -> Result<(), OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
-        D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
         DDst: HostWritableStorage<D>,
         DLhs: HostReadableStorage<D>,
         DRhs: HostReadableStorage<D>,
@@ -1760,10 +1770,10 @@ where
         lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
         rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
         axes: TensorContractSpec<'_>,
-    ) -> Result<PreparedTensorContractFusion<RuleKey>, OperationError>
+    ) -> Result<PreparedTensorContractFusion<RuleKey, C>, OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
-        D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
         DDst: HostWritableStorage<D>,
         DLhs: HostReadableStorage<D>,
         DRhs: HostReadableStorage<D>,
@@ -1848,7 +1858,7 @@ where
         DRhs,
     >(
         &mut self,
-        prepared: &PreparedTensorContractFusion<RuleKey>,
+        prepared: &PreparedTensorContractFusion<RuleKey, C>,
         rule: &R,
         dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
         lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
@@ -1857,8 +1867,8 @@ where
         beta: D,
     ) -> Result<(), OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
-        D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
         DDst: HostWritableStorage<D>,
         DLhs: HostReadableStorage<D>,
         DRhs: HostReadableStorage<D>,
@@ -1937,8 +1947,8 @@ where
         profile: &mut TensorContractFusionProfile,
     ) -> Result<(), OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
-        D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
         DDst: HostWritableStorage<D>,
         DLhs: HostReadableStorage<D>,
         DRhs: HostReadableStorage<D>,
@@ -2000,10 +2010,10 @@ where
                 let lhs_structure = std::sync::Arc::clone(lhs.structure());
                 let rhs_structure = std::sync::Arc::clone(rhs.structure());
                 let mut kernels = crate::StridedHostKernelAdapter::default();
-                let mut gemm = super::fusion_block::BackendRank2Gemm {
-                    backend: contract_backend,
-                    workspace: contract_workspace,
-                };
+                let mut gemm = super::fusion_block::BackendRank2Gemm::new(
+                    contract_backend,
+                    contract_workspace,
+                );
                 profile.route = TensorContractFusionRoute::CoreFusionBlocks;
                 let result = block_plan.execute_raw_profiled(
                     &mut kernels,
@@ -2133,8 +2143,8 @@ where
         beta: D,
     ) -> Result<(), OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
-        D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
     {
         plan.require_forward_scratch()?;
         if !plan.output_transform_is_identity()
@@ -2191,8 +2201,8 @@ where
         beta: D,
     ) -> Result<(), OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
-        D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
     {
         plan.require_forward_scratch()?;
         if DST_CAN_NOUT != plan.core_dst_open_lhs_rank()
@@ -2259,8 +2269,8 @@ where
         beta: D,
     ) -> Result<(), OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
-        D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
     {
         if LHS_CAN_NOUT != plan.lhs_open_rank() || LHS_CAN_NIN != plan.lhs_contract_rank() {
             return Err(OperationError::StructureRankMismatch {
@@ -2316,10 +2326,10 @@ where
         let rhs_structure = std::sync::Arc::clone(rhs_core.structure());
         block_plan.execute_raw(
             &mut crate::StridedHostKernelAdapter::default(),
-            &mut super::fusion_block::BackendRank2Gemm {
-                backend: &mut self.contract_backend,
-                workspace: &mut self.contract_workspace,
-            },
+            &mut super::fusion_block::BackendRank2Gemm::new(
+                &mut self.contract_backend,
+                &mut self.contract_workspace,
+            ),
             &mut self.fusion_block_workspace,
             &dst_structure,
             dst.data_mut(),
@@ -2349,8 +2359,8 @@ where
         src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc>,
     ) -> Result<(), OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
-        D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
     {
         let src_fusion = src
             .fusion_space()
@@ -2427,11 +2437,11 @@ impl std::fmt::Debug for PreparedFusionSpaceWitness {
 /// cache lookups. Created by
 /// [`TensorContractFusionExecutionContext::prepare_tensorcontract_fusion`].
 #[derive(Clone, Debug)]
-pub struct PreparedTensorContractFusion<RuleKey> {
+pub struct PreparedTensorContractFusion<RuleKey, C = f64> {
     rule: RuleKey,
     dst_fusion_space: PreparedFusionSpaceWitness,
     lhs_fusion_space: PreparedFusionSpaceWitness,
     rhs_fusion_space: PreparedFusionSpaceWitness,
-    resolution: Resolution,
-    dynamic_artifact: Option<Arc<super::dynamic::DynamicTreeExecutionArtifact>>,
+    resolution: Resolution<C>,
+    dynamic_artifact: Option<Arc<super::dynamic::DynamicTreeExecutionArtifact<C>>>,
 }

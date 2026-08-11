@@ -329,10 +329,7 @@ where
         provider,
         output_rank,
         destination,
-        &mut BackendRank2Gemm {
-            backend: &mut backend,
-            workspace: &mut workspace,
-        },
+        &mut BackendRank2Gemm::<_, _, f64>::new(&mut backend, &mut workspace),
     )
 }
 
@@ -367,10 +364,7 @@ where
         dst_nout,
         candidate,
         orientation,
-        &mut BackendRank2Gemm {
-            backend: &mut backend,
-            workspace: &mut workspace,
-        },
+        &mut BackendRank2Gemm::<_, _, f64>::new(&mut backend, &mut workspace),
     )
 }
 
