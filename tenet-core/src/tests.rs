@@ -13588,44 +13588,44 @@ mod tests {
 
     #[test]
     fn checked_generic_artin_matches_legacy_outer_and_inner_rows() {
-        let mut rule = UnitaryToyOmRule;
+        let rule = UnitaryToyOmRule;
         for (tree, index) in [(unitary_rank2_tree(1), 0), (unitary_rank3_tree(1), 1)] {
             let legacy = generic_artin_braid_at_with_inverse(&rule, &tree, index, false).unwrap();
-            let checked = generic_artin_braid_at_with_inverse_checked(&mut rule, &tree, index, false).unwrap();
+            let checked = generic_artin_braid_at_with_inverse_checked(&rule, &tree, index, false).unwrap();
             assert_eq!(checked, legacy);
         }
     }
 
     #[test]
     fn checked_generic_artin_calls_only_required_symbols_and_preserves_failures() {
-        let mut outer = ArtinSpy::new();
-        generic_artin_braid_at_with_inverse_checked(&mut outer, &unitary_rank2_tree(1), 0, false).unwrap();
+        let outer = ArtinSpy::new();
+        generic_artin_braid_at_with_inverse_checked(&outer, &unitary_rank2_tree(1), 0, false).unwrap();
         assert_eq!((outer.f_calls.get(), outer.r_calls.get()), (0, 1));
         assert_eq!(outer.rigid_calls.get(), 0);
-        let mut inner = ArtinSpy::new();
-        generic_artin_braid_at_with_inverse_checked(&mut inner, &unitary_rank3_tree(1), 1, false).unwrap();
+        let inner = ArtinSpy::new();
+        generic_artin_braid_at_with_inverse_checked(&inner, &unitary_rank3_tree(1), 1, false).unwrap();
         assert!(inner.f_calls.get() > 0 && inner.r_calls.get() > 0);
-        let mut fail_r = ArtinSpy { fail_r: Some(1), ..ArtinSpy::new() };
-        assert!(matches!(generic_artin_braid_at_with_inverse_checked(&mut fail_r, &unitary_rank2_tree(1), 0, false), Err(CheckedGenericSymbolError::Provider(ArtinSpyError::R))));
-        let mut fail_f = ArtinSpy { fail_f: Some(1), ..ArtinSpy::new() };
-        assert!(matches!(generic_artin_braid_at_with_inverse_checked(&mut fail_f, &unitary_rank3_tree(1), 1, false), Err(CheckedGenericSymbolError::Provider(ArtinSpyError::F))));
+        let fail_r = ArtinSpy { fail_r: Some(1), ..ArtinSpy::new() };
+        assert!(matches!(generic_artin_braid_at_with_inverse_checked(&fail_r, &unitary_rank2_tree(1), 0, false), Err(CheckedGenericSymbolError::Provider(ArtinSpyError::R))));
+        let fail_f = ArtinSpy { fail_f: Some(1), ..ArtinSpy::new() };
+        assert!(matches!(generic_artin_braid_at_with_inverse_checked(&fail_f, &unitary_rank3_tree(1), 1, false), Err(CheckedGenericSymbolError::Provider(ArtinSpyError::F))));
     }
 
     #[test]
     fn checked_generic_artin_rejects_categorical_symbol_shapes_before_indexing() {
-        let mut bad_r = ArtinSpy { bad_r: true, ..ArtinSpy::new() };
-        assert!(matches!(generic_artin_braid_at_with_inverse_checked(&mut bad_r, &unitary_rank2_tree(1), 0, false), Err(CheckedGenericSymbolError::Shape { symbol: "R", .. })));
-        let mut bad_f = ArtinSpy { bad_f: true, ..ArtinSpy::new() };
-        assert!(matches!(generic_artin_braid_at_with_inverse_checked(&mut bad_f, &unitary_rank3_tree(1), 1, false), Err(CheckedGenericSymbolError::Shape { symbol: "F", .. })));
+        let bad_r = ArtinSpy { bad_r: true, ..ArtinSpy::new() };
+        assert!(matches!(generic_artin_braid_at_with_inverse_checked(&bad_r, &unitary_rank2_tree(1), 0, false), Err(CheckedGenericSymbolError::Shape { symbol: "R", .. })));
+        let bad_f = ArtinSpy { bad_f: true, ..ArtinSpy::new() };
+        assert!(matches!(generic_artin_braid_at_with_inverse_checked(&bad_f, &unitary_rank3_tree(1), 1, false), Err(CheckedGenericSymbolError::Shape { symbol: "F", .. })));
     }
 
     #[test]
     fn checked_generic_merge_rejects_a_malformed_f_before_emitting_terms() {
-        let mut rule = ArtinSpy { bad_f: true, ..ArtinSpy::new() };
+        let rule = ArtinSpy { bad_f: true, ..ArtinSpy::new() };
         let lhs = unitary_rank3_tree(1);
         let rhs = unitary_rank2_tree(1);
         let result = merge_fusion_trees_generic_checked(
-                &mut rule,
+                &rule,
                 &lhs,
                 &rhs,
                 SectorId::new(UnitaryToyOmRule::A),
@@ -14843,21 +14843,21 @@ mod tests {
     fn checked_generic_bend_and_repartition_match_legacy_rows_and_order() {
         let pair = a4_dual_pair_rank2(2);
         let legacy_bend = generic_bendright_tree_pair(&A4BendRule, &pair).unwrap();
-        let mut checked = A4BendRule;
+        let checked = A4BendRule;
         let checked_bend =
-            generic_bendright_tree_pair_checked(&mut checked, &pair).unwrap();
+            generic_bendright_tree_pair_checked(&checked, &pair).unwrap();
         assert_eq!(checked_bend, legacy_bend);
 
         let legacy_repartition =
             generic_repartition_tree_pair(&A4BendRule, &pair, 0).unwrap();
-        let mut checked = A4BendRule;
+        let checked = A4BendRule;
         let checked_repartition =
-            generic_repartition_tree_pair_checked(&mut checked, &pair, 0).unwrap();
+            generic_repartition_tree_pair_checked(&checked, &pair, 0).unwrap();
         assert_eq!(checked_repartition, legacy_repartition);
 
-        let mut checked = A4BendRule;
+        let checked = A4BendRule;
         assert_eq!(
-            generic_bendleft_tree_pair_checked(&mut checked, &legacy_bend[0].0).unwrap(),
+            generic_bendleft_tree_pair_checked(&checked, &legacy_bend[0].0).unwrap(),
             generic_bendleft_tree_pair(&A4BendRule, &legacy_bend[0].0).unwrap()
         );
     }
@@ -14865,8 +14865,8 @@ mod tests {
     #[test]
     fn checked_generic_bend_queries_only_the_rigid_data_it_uses() {
         let pair = a4_dual_pair_rank2(1);
-        let mut rule = CheckedA4Spy::new();
-        generic_bendright_tree_pair_checked(&mut rule, &pair).unwrap();
+        let rule = CheckedA4Spy::new();
+        generic_bendright_tree_pair_checked(&rule, &pair).unwrap();
         assert_eq!(rule.dual_calls.get(), 3);
         assert_eq!(rule.n_calls.get(), 7);
         assert_eq!(rule.f_calls.get(), 1);
@@ -14877,12 +14877,12 @@ mod tests {
 
     #[test]
     fn checked_generic_bend_stores_the_b_column_as_the_output_vertex() {
-        let mut rule = CheckedA4Spy {
+        let rule = CheckedA4Spy {
             non_diagonal_b: true,
             ..CheckedA4Spy::new()
         };
         let out =
-            generic_bendright_tree_pair_checked(&mut rule, &a4_pair_rank2(1)).unwrap();
+            generic_bendright_tree_pair_checked(&rule, &a4_pair_rank2(1)).unwrap();
         assert_eq!(out.len(), 2);
         assert_eq!(
             out.iter()
@@ -14896,79 +14896,79 @@ mod tests {
     fn checked_generic_bend_preserves_each_provider_failure_source() {
         let pair = a4_dual_pair_rank2(1);
 
-        let mut rule = CheckedA4Spy {
+        let rule = CheckedA4Spy {
             fail_n: Some(2),
             ..CheckedA4Spy::new()
         };
         assert_rigid_provider_error(
-            generic_bendright_tree_pair_checked(&mut rule, &pair).unwrap_err(),
+            generic_bendright_tree_pair_checked(&rule, &pair).unwrap_err(),
             RigidSpyError::N,
         );
 
-        let mut rule = CheckedA4Spy {
+        let rule = CheckedA4Spy {
             fail_dual: Some(2),
             ..CheckedA4Spy::new()
         };
         assert_rigid_provider_error(
-            generic_bendright_tree_pair_checked(&mut rule, &pair).unwrap_err(),
+            generic_bendright_tree_pair_checked(&rule, &pair).unwrap_err(),
             RigidSpyError::Dual,
         );
 
-        let mut rule = CheckedA4Spy {
+        let rule = CheckedA4Spy {
             fail_sqrt: Some(1),
             ..CheckedA4Spy::new()
         };
         assert_rigid_provider_error(
-            generic_bendright_tree_pair_checked(&mut rule, &pair).unwrap_err(),
+            generic_bendright_tree_pair_checked(&rule, &pair).unwrap_err(),
             RigidSpyError::Sqrt,
         );
 
-        let mut rule = CheckedA4Spy {
+        let rule = CheckedA4Spy {
             fail_inv_sqrt: Some(1),
             ..CheckedA4Spy::new()
         };
         assert_rigid_provider_error(
-            generic_bendright_tree_pair_checked(&mut rule, &pair).unwrap_err(),
+            generic_bendright_tree_pair_checked(&rule, &pair).unwrap_err(),
             RigidSpyError::InvSqrt,
         );
 
-        let mut rule = CheckedA4Spy {
+        let rule = CheckedA4Spy {
             fail_fs: Some(1),
             ..CheckedA4Spy::new()
         };
         assert_rigid_provider_error(
-            generic_bendright_tree_pair_checked(&mut rule, &pair).unwrap_err(),
+            generic_bendright_tree_pair_checked(&rule, &pair).unwrap_err(),
             RigidSpyError::Fs,
         );
 
-        let mut rule = CheckedA4Spy {
+        let rule = CheckedA4Spy {
             fail_f: Some(1),
             ..CheckedA4Spy::new()
         };
         assert_rigid_provider_error(
-            generic_bendright_tree_pair_checked(&mut rule, &pair).unwrap_err(),
+            generic_bendright_tree_pair_checked(&rule, &pair).unwrap_err(),
             RigidSpyError::F,
         );
     }
 
     #[test]
     fn checked_generic_b_and_a_reject_malformed_categorical_f_shapes() {
-        let mut bad_b = CheckedA4Spy {
+        let bad_b = CheckedA4Spy {
             bad_b_f: true,
             ..CheckedA4Spy::new()
         };
         assert!(matches!(
-            generic_bendright_tree_pair_checked(&mut bad_b, &a4_pair_rank2(1)),
+            generic_bendright_tree_pair_checked(&bad_b, &a4_pair_rank2(1)),
             Err(CheckedGenericSymbolError::Shape { symbol: "F", .. })
         ));
 
-        let mut bad_a = CheckedA4Spy {
+        let bad_a = CheckedA4Spy {
             bad_a_f: true,
             ..CheckedA4Spy::new()
         };
         let t = a4_three();
         assert!(matches!(
-            GenericRigidAccess::try_a_symbol_generic(&mut bad_a, t, t, t),
+            GenericRigidAccess::try_a_symbol_generic(&bad_a, t, t, t),
             Err(CheckedGenericSymbolError::Shape { symbol: "F", .. })
         ));
     }

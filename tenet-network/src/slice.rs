@@ -1255,6 +1255,7 @@ mod tests {
     /// candidates. Their two metrics disagree:
     ///   - per-slice FLOPs only:  e = 48  <  b = 72        → would pick `e`
     ///   - total time complexity: b = 72*3 = 216  <  e = 48*6 = 288  → picks `b`
+    ///
     /// The old code compared per-slice FLOPs and would have returned `e`; with
     /// the total-cost metric it must now return `b`. (The `dc,cd` factor is an
     /// independent scalar block; it shapes the step order but not the decision.)
