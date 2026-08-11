@@ -120,7 +120,7 @@ fn typed_cat_uses_one_output_allocation_without_scratch() {
         })
         .unwrap();
     let warm: TensorMap<U1FusionRule, f64> = lhs.catdomain(&rhs).unwrap();
-    let output_payload = warm.data().len() * std::mem::size_of::<f64>();
+    let output_payload = std::mem::size_of_val(warm.data());
 
     let (allocated, payload_allocations) =
         measured_allocations(output_payload, || lhs.catdomain(&rhs).unwrap());
@@ -155,7 +155,7 @@ fn typed_absorb_clones_the_destination_once() {
     )
     .unwrap();
     black_box(destination.absorb(&source).unwrap());
-    let output_payload = destination.data().len() * std::mem::size_of::<f64>();
+    let output_payload = std::mem::size_of_val(destination.data());
 
     let (allocated, payload_allocations) =
         measured_allocations(output_payload, || destination.absorb(&source).unwrap());
@@ -224,7 +224,7 @@ fn typed_lazy_adjoint_cat_allocates_only_the_output_payload() {
     let warm_lhs = lhs_parent.adjoint().unwrap();
     let warm_rhs = rhs_parent.adjoint().unwrap();
     let warm_output = warm_lhs.catdomain(&warm_rhs).unwrap();
-    let output_payload = warm_output.data().len() * std::mem::size_of::<Complex64>();
+    let output_payload = std::mem::size_of_val(warm_output.data());
     let input_payload = (lhs_parent.data().len() + rhs_parent.data().len()) as u64
         * std::mem::size_of::<Complex64>() as u64;
 

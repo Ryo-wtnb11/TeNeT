@@ -147,8 +147,7 @@ fn labelled_block_inspection_materializes_lazy_adjoint_once_and_borrows_it() {
     let parent_pointer = parent.data().as_ptr();
     let parent_block = parent.block(0).unwrap();
     let adjoint = parent.adjoint().unwrap();
-    let payload_bytes =
-        (parent.data().len() * std::mem::size_of::<num_complex::Complex64>()) as u64;
+    let payload_bytes = std::mem::size_of_val(parent.data()) as u64;
 
     let first = measure(|| {
         let blocks = adjoint.blocks().unwrap().collect::<Vec<_>>();
@@ -188,7 +187,7 @@ fn typed_compact_svd_keeps_total_and_peak_below_materialized_baseline() {
         TensorMap::rand_with_seed(&runtime, [&space], [&space], 693_695).unwrap();
     black_box(parent.svd_compact().unwrap());
 
-    let input_bytes = (parent.data().len() * std::mem::size_of::<num_complex::Complex64>()) as u64;
+    let input_bytes = std::mem::size_of_val(parent.data()) as u64;
     let optimized = parent.adjoint().unwrap();
     let baseline = parent.adjoint().unwrap();
     let optimized_cost = measure_peak(|| {
@@ -233,7 +232,7 @@ fn typed_full_svd_keeps_total_and_peak_below_materialized_baseline() {
         TensorMap::rand_with_seed(&runtime, [&space], [&space], 693_697).unwrap();
     black_box(parent.svd_full().unwrap());
 
-    let input_bytes = (parent.data().len() * std::mem::size_of::<num_complex::Complex64>()) as u64;
+    let input_bytes = std::mem::size_of_val(parent.data()) as u64;
     let optimized = parent.adjoint().unwrap();
     let baseline = parent.adjoint().unwrap();
     let optimized_cost = measure_peak(|| {
@@ -282,7 +281,7 @@ fn typed_truncated_svd_keeps_total_and_peak_below_materialized_baseline() {
     let truncation = tenet::typed::Truncation::rank(16);
     black_box(parent.svd_trunc(&truncation).unwrap());
 
-    let input_bytes = (parent.data().len() * std::mem::size_of::<num_complex::Complex64>()) as u64;
+    let input_bytes = std::mem::size_of_val(parent.data()) as u64;
     let optimized = parent.adjoint().unwrap();
     let baseline = parent.adjoint().unwrap();
     let optimized_cost = measure_peak(|| {

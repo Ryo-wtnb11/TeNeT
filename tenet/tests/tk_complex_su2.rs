@@ -61,16 +61,16 @@ fn complex_su2_structural_invariants_match_tensorkit() {
     let gram = source.adjoint().unwrap().compose(&source).unwrap();
 
     for (tensor, expected_norm, expected_trace) in [
-        (&source, 40.741733994626308, Complex64::new(-81.0, -9.0)),
+        (&source, 40.741_733_994_626_31, Complex64::new(-81.0, -9.0)),
         (
             &permuted,
-            40.741733994626323,
-            Complex64::new(-81.000000000000043, -9.0000000000000036),
+            40.741_733_994_626_32,
+            Complex64::new(-81.000_000_000_000_04, -9.000_000_000_000_004),
         ),
         (
             &gram,
-            853.85823699774005,
-            Complex64::new(1659.8888888888889, 0.0),
+            853.858_236_997_74,
+            Complex64::new(1_659.888_888_888_889, 0.0),
         ),
     ] {
         close(tensor.norm().unwrap(), expected_norm);
@@ -90,8 +90,8 @@ fn complex_su2_structural_invariants_match_tensorkit() {
         23.892354784323476,
         21.02264361151887,
         8.027729719194868,
-        3.2214290434895219,
-        0.84564901095677913,
+        3.221_429_043_489_522,
+        0.845_649_010_956_779_1,
     ];
     assert_eq!(singular_values.len(), expected.len());
     for (got, expected) in singular_values.into_iter().zip(expected) {

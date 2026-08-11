@@ -4813,7 +4813,7 @@ fn c64_compact_inv_and_pinv_are_elementwise_reciprocals() {
         ],
     )
     .unwrap();
-    let mut state = 0x5eed_c64u64;
+    let mut state = 0x05ee_dc64_u64;
     let mut next = || {
         state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
         complex(((state >> 33) as f64) / (u32::MAX as f64) + 0.5)

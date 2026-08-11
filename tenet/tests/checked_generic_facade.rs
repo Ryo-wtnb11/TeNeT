@@ -4866,7 +4866,7 @@ fn checked_generic_inv_singular_early_and_late_sectors_preserve_source() {
             })
             .unwrap();
         let labels = (0..source.block_count())
-            .map(|index| source.block_fusion_trees(index).unwrap().coupled().clone())
+            .map(|index| *source.block_fusion_trees(index).unwrap().coupled())
             .collect::<Vec<_>>();
         assert_eq!(labels, [Label::Vacuum, Label::X]);
         let before = source.data().to_vec();
@@ -5053,12 +5053,16 @@ fn checked_generic_left_solve_covers_all_lazy_input_pairs() {
         .unwrap();
     let expected = divisor.solve(&rhs).unwrap();
     for (lazy_lhs, lazy_rhs) in [(false, false), (true, false), (false, true), (true, true)] {
-        let lhs = lazy_lhs
-            .then(|| divisor.adjoint().unwrap())
-            .unwrap_or_else(|| divisor.clone());
-        let right = lazy_rhs
-            .then(|| rhs.adjoint().unwrap())
-            .unwrap_or_else(|| rhs.clone());
+        let lhs = if lazy_lhs {
+            divisor.adjoint().unwrap()
+        } else {
+            divisor.clone()
+        };
+        let right = if lazy_rhs {
+            rhs.adjoint().unwrap()
+        } else {
+            rhs.clone()
+        };
         reset_provider_queries(&provider);
         let solution = lhs.solve(&right).unwrap();
         assert!(std::ptr::eq(solution.provider(), provider.as_ref()));

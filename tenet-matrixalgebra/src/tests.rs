@@ -3983,12 +3983,13 @@ fn eigh_full_does_not_relabel_the_lowest_u1_sector() {
     assert_eq!(result.v.tensor().space().dims(), &[2, 2]);
     assert_eq!(result.d.tensor().space().dims(), &[2, 2]);
     let values = &result.eigenvalues[0].values;
-    for col in 0..2 {
+    assert_eq!(values.len(), 2);
+    for (col, &value) in values.iter().enumerate() {
         for row in 0..2 {
             let lhs = (0..2)
                 .map(|index| tensor.data()[row + 2 * index] * result.v.data()[index + 2 * col])
                 .sum::<f64>();
-            let rhs = result.v.data()[row + 2 * col] * values[col];
+            let rhs = result.v.data()[row + 2 * col] * value;
             assert!((lhs - rhs).abs() < 1e-10);
         }
     }
@@ -4051,12 +4052,13 @@ fn compact_factorizations_do_not_relabel_product_lowest_u1_sectors() {
     assert_eq!(result.v.tensor().space().dims(), &[2, 2]);
     assert_eq!(result.d.tensor().space().dims(), &[2, 2]);
     let values = &result.eigenvalues[0].values;
-    for col in 0..2 {
+    assert_eq!(values.len(), 2);
+    for (col, &value) in values.iter().enumerate() {
         for row in 0..2 {
             let lhs = (0..2)
                 .map(|index| hermitian.data()[row + 2 * index] * result.v.data()[index + 2 * col])
                 .sum::<f64>();
-            let rhs = result.v.data()[row + 2 * col] * values[col];
+            let rhs = result.v.data()[row + 2 * col] * value;
             assert!((lhs - rhs).abs() < 1e-10);
         }
     }
@@ -8722,7 +8724,10 @@ fn positive_diagonal_gauge_complex_phase_and_zero_diagonal() {
         );
         assert!(diagonal.re >= 0.0, "R[{j},{j}] = {diagonal} negative");
     }
-    assert_eq!(r_gauged[1 + 3 * 1], c(0.0, 0.0));
+    let zero_diagonal_row = 1;
+    let leading_dimension = 3;
+    let zero_diagonal_index = zero_diagonal_row + leading_dimension * zero_diagonal_row;
+    assert_eq!(r_gauged[zero_diagonal_index], c(0.0, 0.0));
     assert_eq!(q_gauged[3], q[3], "zero diagonal must not rescale Q column");
     // Q * R is unchanged.
     let after = product(&q_gauged, &r_gauged);

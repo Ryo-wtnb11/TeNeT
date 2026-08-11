@@ -4759,10 +4759,9 @@ fn tree_pair_transform_public_helper_executes_product_with_complex_data() {
         let dst_key = &spec.dst_keys()[0];
         let src_offset = block_offset_for_tree_pair(src.structure(), src_key);
         let dst_offset = block_offset_for_tree_pair(dst.structure(), dst_key);
-        expected[dst_offset] = expected[dst_offset]
-            + src.data()[src_offset]
-                .scale_by_coefficient(spec.recoupling_coefficients_dst_src()[0])
-                * alpha;
+        expected[dst_offset] += src.data()[src_offset]
+            .scale_by_coefficient(spec.recoupling_coefficients_dst_src()[0])
+            * alpha;
     }
 
     tree_transform_into(&rule, operation, &mut dst, &src, alpha, beta).unwrap();
