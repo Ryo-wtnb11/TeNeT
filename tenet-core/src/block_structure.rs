@@ -31,6 +31,10 @@ impl FusionTreePairKey {
     /// [`Self::validate_for_rule`] before categorical use. Providers with a
     /// finite table may otherwise panic through their infallible
     /// [`FusionRule`] methods.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the raw constructor mirrors two FusionTreeKey descriptions without duplicating that domain model"
+    )]
     pub fn try_pair_from_sector_ids<
         Codomain,
         Domain,

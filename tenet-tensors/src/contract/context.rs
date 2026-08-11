@@ -705,6 +705,10 @@ where
     BT: TreeTransformBackend<D, f64>,
     BC: TensorContractBackend<D, f64>,
 {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the context already owns execution resources, leaving the public contraction operands, spec, and alpha/beta explicit"
+    )]
     pub fn tensorcontract_fusion_into<
         R,
         const DST_NOUT: usize,
@@ -2095,6 +2099,10 @@ where
     /// block plan eagerly. Use [`Self::prepare_tensorcontract_fusion`] and
     /// [`PreparedTensorContractFusion`] when the complete contraction should
     /// be compiled once and replayed without lookups.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the context owns execution resources while FusionContractPlan and caller-owned core tensors retain separate authority"
+    )]
     pub fn tensorcontract_fusion_prepared_into<
         R,
         const DST_NOUT: usize,
@@ -2145,6 +2153,10 @@ where
     /// Executes a caller-supplied source/output-transform plan and compiles its
     /// core block plan eagerly. Use [`Self::prepare_tensorcontract_fusion`] and
     /// [`PreparedTensorContractFusion`] for complete compile-once replay.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the context owns execution resources while the prepared plan's source, core, and output tensors remain explicit"
+    )]
     pub fn tensorcontract_fusion_prepared_into_core_dst<
         R,
         const DST_NOUT: usize,

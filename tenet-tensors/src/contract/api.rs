@@ -104,6 +104,10 @@ where
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the public in-place tensor product exposes operands, conjugation, output order, and alpha/beta explicitly"
+)]
 pub fn tensorproduct_into_with_conjugation<
     D,
     const DST_NOUT: usize,
@@ -274,6 +278,10 @@ where
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the public fusion tensor product exposes its rule, operands, conjugation, output order, and alpha/beta explicitly"
+)]
 pub fn tensorproduct_fusion_into_with_conjugation<
     R,
     D,
@@ -342,6 +350,10 @@ where
 ///
 /// Use [`tensorcontract_fusion_prepared_into_core_dst`] when the
 /// requested output permutation needs a final tree-pair transform.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the low-level fusion operation keeps caller-owned core temporaries distinct from source and destination tensors"
+)]
 pub fn tensorcontract_fusion_via_tree_pair_transforms_into<
     R,
     D,
@@ -401,6 +413,10 @@ where
 /// Executes a caller-supplied source-transform plan. The core block plan is
 /// compiled eagerly on each call; complete compile-once replay is provided by
 /// [`crate::PreparedTensorContractFusion`].
+#[expect(
+    clippy::too_many_arguments,
+    reason = "FusionContractPlan owns geometry while this low-level API keeps caller-owned core temporaries explicit"
+)]
 pub fn tensorcontract_fusion_prepared_into<
     R,
     D,
@@ -468,6 +484,10 @@ where
 /// Executes a caller-supplied source/output-transform plan. The core block
 /// plan is compiled eagerly on each call; complete compile-once replay is
 /// provided by [`crate::PreparedTensorContractFusion`].
+#[expect(
+    clippy::too_many_arguments,
+    reason = "FusionContractPlan owns geometry while this low-level API keeps source, core, and output tensors explicit"
+)]
 pub fn tensorcontract_fusion_prepared_into_core_dst<
     R,
     D,
