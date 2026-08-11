@@ -373,7 +373,6 @@ jobs:
 
   clippy:
     name: clippy
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -395,22 +394,6 @@ jobs:
         with:
           workspaces: tenet
           key: clippy
-      # Non-gating for now (#153). `clippy::result_large_err` no longer needs
-      # an `-A` here: #231 boxed the large payloads on `CoreError` and
-      # `OperationError` (536 -> 96 B, under the lint's default threshold),
-      # so the whole category self-clears. `cargo clippy --workspace
-      # --all-targets` still turns up ~130 pre-existing warnings spread
-      # across ~25 other lint categories (clippy::too_many_arguments,
-      # clippy::type_complexity,
-      # clippy::manual_contains, clippy::doc_lazy_continuation,
-      # clippy::needless_range_loop, clippy::useless_vec,
-      # clippy::large_enum_variant, clippy::wrong_self_convention, ...) —
-      # too broad and too shallow a spread per category to allowlist away
-      # without also hiding genuinely new signal. Ratchet plan: burn these
-      # down category by category in follow-up PRs (tackle the largest
-      # counts first), then flip this job to `-D warnings` once clippy is
-      # clean. `continue-on-error: true` keeps the job's output visible in
-      # the Actions UI without blocking merges in the meantime.
-      - run: cargo clippy --workspace --all-targets
+      # The workspace is Clippy-clean; deny warnings so new findings cannot silently accumulate.
+      - run: cargo clippy --workspace --all-targets -- -D warnings
         working-directory: tenet
-        continue-on-error: true
