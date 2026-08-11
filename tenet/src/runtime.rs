@@ -1302,15 +1302,17 @@ mod tests {
     use super::*;
     use crate::typed::{GradedSpace, TensorMap};
     use tenet_core::{
-        BraidingStyleKind, FibonacciFusionRule, FusionProductSpace, FusionRule, FusionStyleKind,
-        FusionTreeHomSpace, MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols,
-        MultiplicityFreeRigidSymbols, SU2FusionRule, SU2Irrep, SectorId, SectorLeg, SectorVec,
+        BraidingStyleKind, CheckedFusionAlgebra, FibonacciFusionRule, FibonacciSector,
+        FusionAlgebraError, FusionProductSpace, FusionRule, FusionStyleKind, FusionTreeHomSpace,
+        MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols,
+        SU2FusionRule, SU2Irrep, SectorCodec, SectorId, SectorLeg, SectorVec,
     };
 
     #[derive(Clone)]
     struct CountingFibonacci {
         structural_calls: Arc<AtomicUsize>,
         layout_calls: Arc<AtomicUsize>,
+        malformed_channels: bool,
     }
 
     impl CountingFibonacci {
@@ -1318,11 +1320,57 @@ mod tests {
             Self {
                 structural_calls: Arc::new(AtomicUsize::new(0)),
                 layout_calls: Arc::new(AtomicUsize::new(0)),
+                malformed_channels: false,
             }
         }
 
         fn structural_calls(&self) -> usize {
             self.structural_calls.load(Ordering::Relaxed)
+        }
+
+        fn layout_calls(&self) -> usize {
+            self.layout_calls.load(Ordering::Relaxed)
+        }
+    }
+
+    impl CheckedFusionAlgebra for CountingFibonacci {
+        fn try_dual_sector(&self, sector: SectorId) -> Result<SectorId, FusionAlgebraError> {
+            self.layout_calls.fetch_add(1, Ordering::Relaxed);
+            FibonacciFusionRule.try_dual_sector(sector)
+        }
+
+        fn try_fusion_channels(
+            &self,
+            left: SectorId,
+            right: SectorId,
+        ) -> Result<SectorVec, FusionAlgebraError> {
+            self.layout_calls.fetch_add(1, Ordering::Relaxed);
+            if self.malformed_channels && left == SectorId::new(1) && right == SectorId::new(1) {
+                return Ok([SectorId::new(0), SectorId::new(2)].into_iter().collect());
+            }
+            FibonacciFusionRule.try_fusion_channels(left, right)
+        }
+
+        fn try_nsymbol(
+            &self,
+            left: SectorId,
+            right: SectorId,
+            coupled: SectorId,
+        ) -> Result<usize, FusionAlgebraError> {
+            self.layout_calls.fetch_add(1, Ordering::Relaxed);
+            FibonacciFusionRule.try_nsymbol(left, right, coupled)
+        }
+    }
+
+    impl SectorCodec for CountingFibonacci {
+        type Sector = FibonacciSector;
+
+        fn encode_sector(&self, value: &Self::Sector) -> Result<SectorId, FusionAlgebraError> {
+            FibonacciFusionRule.encode_sector(value)
+        }
+
+        fn decode_sector(&self, id: SectorId) -> Result<Self::Sector, FusionAlgebraError> {
+            FibonacciFusionRule.decode_sector(id)
         }
     }
 
@@ -1567,7 +1615,9 @@ mod tests {
             )
             .expect("cold Fibonacci braid");
         let cold_calls = rule.structural_calls();
+        let cold_layout_calls = rule.layout_calls();
         assert!(cold_calls > 0);
+        assert!(cold_layout_calls > 0);
         assert!(destination_data.iter().any(|value| value.im != 0.0));
         let cold_destination_data = destination_data.clone();
         let cold = runtime.tree_transform_cache_info();
@@ -1590,10 +1640,73 @@ mod tests {
         assert_eq!(destination_data, cold_destination_data);
         assert!(destination_data.iter().any(|value| value.im != 0.0));
         assert_eq!(rule.structural_calls(), cold_calls);
+        // Layout/admission queries are observed separately; only structural
+        // F/R replay is promised to disappear on a warm cache hit.
+        assert!(rule.layout_calls() >= cold_layout_calls);
         let warm = runtime.tree_transform_cache_info();
         assert_eq!(warm.entries(), 1);
         assert_eq!(warm.misses(), 1);
         assert_eq!(warm.hits(), 1);
+    }
+
+    #[test]
+    fn fibonacci_checked_construction_failures_publish_nothing() {
+        let runtime = Runtime::builder().build().expect("runtime");
+        let control = Runtime::builder().build().expect("control runtime");
+        let rule = Arc::new(CountingFibonacci {
+            malformed_channels: true,
+            ..CountingFibonacci::new()
+        });
+        let tau = GradedSpace::try_new_with_arc(Arc::clone(&rule), [(FibonacciSector::Tau, 1)])
+            .expect("label admission");
+        runtime.clear_tree_transform_cache();
+        let cache_before = runtime.tree_transform_cache_info();
+        let callbacks = AtomicUsize::new(0);
+
+        let late = TensorMap::<CountingFibonacci, Complex64>::from_block_fn(
+            &runtime,
+            [&tau, &tau, &tau],
+            [&tau],
+            |_, _| {
+                callbacks.fetch_add(1, Ordering::Relaxed);
+                Complex64::new(1.0, 0.0)
+            },
+        );
+        let late = late.unwrap_err();
+        assert!(format!("{late:?}").contains("InvalidSector"));
+        assert_eq!(callbacks.load(Ordering::Relaxed), 0);
+        assert_eq!(runtime.tree_transform_cache_info(), cache_before);
+
+        let early = TensorMap::<CountingFibonacci, Complex64>::from_block_fn(
+            &runtime,
+            std::iter::empty(),
+            std::iter::empty(),
+            |_, _| {
+                callbacks.fetch_add(1, Ordering::Relaxed);
+                Complex64::new(1.0, 0.0)
+            },
+        );
+        assert!(matches!(
+            early,
+            Err(Error::InvalidArgument(message))
+                if message == "at least one leg is required to infer the fusion provider"
+        ));
+        assert_eq!(callbacks.load(Ordering::Relaxed), 0);
+        assert_eq!(runtime.tree_transform_cache_info(), cache_before);
+
+        assert!(TensorMap::<CountingFibonacci, Complex64>::rand(
+            &runtime,
+            [&tau, &tau, &tau],
+            [&tau]
+        )
+        .is_err());
+        let valid_tau =
+            GradedSpace::try_new(FibonacciFusionRule, [(FibonacciSector::Tau, 1)]).unwrap();
+        let after: TensorMap<_, Complex64> =
+            TensorMap::rand(&runtime, [&valid_tau], [&valid_tau]).unwrap();
+        let expected: TensorMap<_, Complex64> =
+            TensorMap::rand(&control, [&valid_tau], [&valid_tau]).unwrap();
+        assert_eq!(after.data(), expected.data());
     }
 
     #[test]

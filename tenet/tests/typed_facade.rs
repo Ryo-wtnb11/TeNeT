@@ -406,6 +406,186 @@ fn fibonacci_codec_reaches_public_graded_space_construction() {
 }
 
 #[test]
+fn fibonacci_complex_tensor_reaches_all_checked_constructors() {
+    let runtime = runtime();
+    let space = GradedSpace::try_new(
+        FibonacciFusionRule,
+        [(FibonacciSector::Vacuum, 1), (FibonacciSector::Tau, 1)],
+    )
+    .unwrap();
+
+    let zeros: TensorMap<_, Complex64> = TensorMap::zeros(&runtime, [&space], [&space]).unwrap();
+    assert!(zeros
+        .data()
+        .iter()
+        .all(|&value| value == Complex64::new(0.0, 0.0)));
+
+    let filled: TensorMap<_, Complex64> =
+        TensorMap::from_block_fn(&runtime, [&space], [&space], |trees, indices| {
+            Complex64::new(
+                (indices.iter().sum::<usize>() + 1) as f64,
+                if trees.coupled() == &FibonacciSector::Tau {
+                    1.0
+                } else {
+                    -1.0
+                },
+            )
+        })
+        .unwrap();
+    assert!(filled.data().iter().any(|value| value.im != 0.0));
+
+    let random: TensorMap<_, Complex64> = TensorMap::rand(&runtime, [&space], [&space]).unwrap();
+    let seeded: TensorMap<_, Complex64> =
+        TensorMap::rand_with_seed(&runtime, [&space], [&space], 592_301).unwrap();
+    assert_eq!(random.data().len(), zeros.data().len());
+    assert_eq!(seeded.data().len(), zeros.data().len());
+    assert!(seeded.data().iter().any(|value| value.im != 0.0));
+}
+
+fn fibonacci_tau_braid_fixture(runtime: &Runtime) -> TensorMap<FibonacciFusionRule, Complex64> {
+    let tau = GradedSpace::try_new(FibonacciFusionRule, [(FibonacciSector::Tau, 1)]).unwrap();
+    TensorMap::from_block_fn(runtime, [&tau, &tau, &tau], [&tau], |trees, _| match trees
+        .codomain_innerlines()
+    {
+        [FibonacciSector::Vacuum] => Complex64::new(1.0, 0.0),
+        [FibonacciSector::Tau] => Complex64::new(0.0, 0.0),
+        inner => panic!("unexpected Fibonacci fusion path {inner:?}"),
+    })
+    .unwrap()
+}
+
+fn fibonacci_tau_channel(tensor: &TensorMap<FibonacciFusionRule, Complex64>) -> [Complex64; 2] {
+    let mut values = [Complex64::new(0.0, 0.0); 2];
+    for (trees, block) in tensor.blocks().unwrap() {
+        if trees.coupled() != &FibonacciSector::Tau {
+            continue;
+        }
+        let slot = match trees.codomain_innerlines() {
+            [FibonacciSector::Vacuum] => 0,
+            [FibonacciSector::Tau] => 1,
+            inner => panic!("unexpected Fibonacci fusion path {inner:?}"),
+        };
+        values[slot] = *block.get(&[0, 0, 0, 0]).unwrap();
+    }
+    values
+}
+
+#[test]
+fn fibonacci_forward_braid_matches_closed_form_and_tensorkit_fixture() {
+    let runtime = runtime();
+    let source = fibonacci_tau_braid_fixture(&runtime);
+    runtime.clear_tree_transform_cache();
+    let braided = source.braid(&[0, 2, 1], &[3], &[0, 1, 2, 3]).unwrap();
+    let cold = runtime.tree_transform_cache_info();
+    assert_eq!((cold.entries(), cold.misses(), cold.hits()), (1, 1, 0));
+    let warm = source.braid(&[0, 2, 1], &[3], &[0, 1, 2, 3]).unwrap();
+    assert_eq!(warm.data(), braided.data());
+    let warm_info = runtime.tree_transform_cache_info();
+    assert_eq!(
+        (warm_info.entries(), warm_info.misses(), warm_info.hits()),
+        (1, 1, 1)
+    );
+    let actual = fibonacci_tau_channel(&braided);
+
+    let phi = (1.0 + 5.0_f64.sqrt()) / 2.0;
+    let f = [
+        [1.0 / phi, 1.0 / phi.sqrt()],
+        [1.0 / phi.sqrt(), -1.0 / phi],
+    ];
+    let r = [
+        Complex64::from_polar(1.0, 4.0 * std::f64::consts::PI / 5.0),
+        Complex64::from_polar(1.0, -3.0 * std::f64::consts::PI / 5.0),
+    ];
+    let expected = [
+        f[0][0] * r[0] * f[0][0] + f[0][1] * r[1] * f[1][0],
+        f[1][0] * r[0] * f[0][0] + f[1][1] * r[1] * f[1][0],
+    ];
+    for (value, oracle) in actual.into_iter().zip(expected) {
+        assert!((value - oracle).norm() < 1e-12, "{value:?} != {oracle:?}");
+    }
+
+    // TensorKit 0.17 / TensorKitSectors Fibonacci, pinned independently from
+    // `treebraider` on the same all-tau, total-tau basis and braid convention.
+    let tensorkit = [
+        Complex64::new(-0.5, -0.3632712640026805),
+        Complex64::new(-0.2429341358783228, 0.7476743906106103),
+    ];
+    for (value, oracle) in fibonacci_tau_channel(&braided).into_iter().zip(tensorkit) {
+        assert!((value - oracle).norm() < 1e-12, "{value:?} != {oracle:?}");
+    }
+
+    let back = braided.braid(&[0, 2, 1], &[3], &[0, 2, 1, 3]).unwrap();
+    for (value, oracle) in fibonacci_tau_channel(&back)
+        .into_iter()
+        .zip(fibonacci_tau_channel(&source))
+    {
+        assert!((value - oracle).norm() < 1e-12);
+    }
+}
+
+#[test]
+fn fibonacci_planar_transforms_roundtrip_without_braiding() {
+    let runtime = runtime();
+    let source = fibonacci_tau_braid_fixture(&runtime);
+
+    let repartitioned = source.repartition(2).unwrap();
+    let phi = (1.0 + 5.0_f64.sqrt()) / 2.0;
+    // Pinned TensorKit `repartition` fixture; the same value is the
+    // independent rigidity oracle sqrt(d_tau).
+    assert_data_close_c64(
+        repartitioned.data(),
+        &[Complex64::new(phi.sqrt(), 0.0), Complex64::new(0.0, 0.0)],
+    );
+    assert_eq!(
+        (repartitioned.codomain_rank(), repartitioned.domain_rank()),
+        (2, 2)
+    );
+    assert_eq!(
+        repartitioned.codomain()[0].sectors().unwrap(),
+        [FibonacciSector::Tau]
+    );
+    assert_eq!(
+        repartitioned.domain()[1].sectors().unwrap(),
+        [FibonacciSector::Tau]
+    );
+    assert_data_close_c64(repartitioned.repartition(3).unwrap().data(), source.data());
+
+    let transposed = source.transpose().unwrap();
+    // Pinned TensorKit planar-transpose fixture and the closed-form first row
+    // of the Fibonacci F matrix.
+    assert_data_close_c64(
+        transposed.data(),
+        &[
+            Complex64::new(1.0 / phi, 0.0),
+            Complex64::new(1.0 / phi.sqrt(), 0.0),
+        ],
+    );
+    assert_eq!(
+        (transposed.codomain_rank(), transposed.domain_rank()),
+        (1, 3)
+    );
+    assert_data_close_c64(transposed.transpose().unwrap().data(), source.data());
+
+    let explicit = source.transpose_axes(&[3], &[2, 1, 0]).unwrap();
+    assert_data_close_c64(explicit.data(), transposed.data());
+    for (trees, _) in explicit.blocks().unwrap() {
+        assert_eq!(trees.codomain_uncoupled(), &[FibonacciSector::Tau]);
+        assert_eq!(trees.domain_uncoupled(), &[FibonacciSector::Tau; 3]);
+    }
+}
+
+#[test]
+fn fibonacci_ordinary_permute_rejection_does_not_publish_a_cache_entry() {
+    let runtime = runtime();
+    let source = fibonacci_tau_braid_fixture(&runtime);
+    runtime.clear_tree_transform_cache();
+    let before = runtime.tree_transform_cache_info();
+    let error = source.permute(&[0, 2, 1], &[3]).unwrap_err();
+    assert!(format!("{error:?}").contains("UnsupportedBraidingStyle"));
+    assert_eq!(runtime.tree_transform_cache_info(), before);
+}
+
+#[test]
 fn graded_space_drops_zero_degeneracy_sectors() {
     // What: the leg invariant (a zero-degeneracy sector is absent) reaches the
     // typed surface unchanged.
