@@ -2128,8 +2128,9 @@ fn braid_moves_legs_of_a_multi_block_external_provider_tensor() {
     // unobservable for every provider this facade can host. The symmetric ones
     // (both fixtures here, the built-in Z2/SU(2), and even the fermionic rule
     // used further down) make over- and under-crossing the same morphism, and
-    // the one built-in rule that would not — `FibonacciFusionRule` — is
-    // excluded by this facade's `Scalar = f64` and `SectorCodec` bounds.
+    // the one built-in rule that would not — `FibonacciFusionRule` — now
+    // satisfies `SectorCodec` but remains excluded by this facade's
+    // `Scalar = f64` bound.
     //
     // What the tests below therefore do and do not prove: they pin how the
     // levels are *split* (by the source codomain rank, which the oracle below
