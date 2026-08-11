@@ -17,9 +17,9 @@ use crate::{DenseBlockScalar, HostKernelAdapter, OperationError, RecouplingCoeff
 use tenet_operations::TensorContractSpec;
 
 use tenet_operations::fusion_replay::{
-    direct_group_matrix_offset, fusion_scale_block_layouts_excluding, FusionBlockContractGroupPlan,
-    FusionBlockMatrixGroup, FusionStridedBlockLayout, FusionSubblockMatrixLayout, MatrixOp,
-    Rank2GemmBatchJob,
+    direct_group_matrix_offset_generic, fusion_scale_block_layouts_excluding,
+    FusionBlockContractGroupPlan, FusionBlockMatrixGroup, FusionStridedBlockLayout,
+    FusionSubblockMatrixLayout, MatrixOp, Rank2GemmBatchJob,
 };
 pub(crate) use tenet_operations::fusion_replay::{
     FusionBlockContractPlan, FusionBlockContractWorkspace, Rank2Gemm, StorageGemm,
@@ -1660,7 +1660,7 @@ fn compile_direct_coupled_region_plan<C>(
 where
     C: DenseBlockScalar,
 {
-    FusionBlockContractPlan::try_from_canonical_coupled_regions_with_ops(
+    FusionBlockContractPlan::try_from_canonical_coupled_regions_with_ops_generic(
         dst_space.structure(),
         dst_space.nout(),
         lhs_storage.structure(),
@@ -1683,7 +1683,7 @@ fn compile_scaled_direct_coupled_region_plan<C>(
 where
     C: DenseBlockScalar,
 {
-    FusionBlockContractPlan::try_from_canonical_coupled_regions_with_ops_and_alpha(
+    FusionBlockContractPlan::try_from_canonical_coupled_regions_with_ops_and_alpha_generic(
         dst_space.structure(),
         dst_space.nout(),
         lhs_storage.structure(),
@@ -1824,7 +1824,7 @@ where
             dst_group,
         )?);
     }
-    FusionBlockContractPlan::from_parts(
+    FusionBlockContractPlan::from_parts_generic(
         Arc::clone(dst_space.structure()),
         Arc::clone(lhs_space.structure()),
         Arc::clone(rhs_space.structure()),
@@ -1894,7 +1894,7 @@ where
             dst_group,
         )?);
     }
-    FusionBlockContractPlan::from_parts_with_ops(
+    FusionBlockContractPlan::from_parts_with_ops_generic(
         Arc::clone(dst_space.structure()),
         Arc::clone(lhs.storage_space().structure()),
         Arc::clone(rhs.storage_space().structure()),
@@ -1989,7 +1989,7 @@ where
             dst_group,
         )?);
     }
-    FusionBlockContractPlan::from_parts(
+    FusionBlockContractPlan::from_parts_generic(
         Arc::clone(dst_space.structure()),
         Arc::clone(lhs_space.structure()),
         Arc::clone(rhs_space.structure()),
@@ -2547,7 +2547,7 @@ impl FusionBlockMatrixGroupBuilder {
             .checked_mul(self.cols)
             .ok_or(OperationError::ElementCountOverflow)?;
         let covers_matrix = self.occupied_elements == matrix_elements;
-        let direct_offset = direct_group_matrix_offset(&subblocks, covers_matrix);
+        let direct_offset = direct_group_matrix_offset_generic(&subblocks, covers_matrix);
         Ok(FusionBlockMatrixGroup {
             coupled: self.coupled,
             rows: self.rows,
@@ -2637,7 +2637,7 @@ impl FusionBlockMatrixGroupBuilder {
             .checked_mul(self.cols)
             .ok_or(OperationError::ElementCountOverflow)?;
         let covers_matrix = self.occupied_elements == matrix_elements;
-        let direct_offset = direct_group_matrix_offset(&subblocks, covers_matrix);
+        let direct_offset = direct_group_matrix_offset_generic(&subblocks, covers_matrix);
         Ok(FusionBlockMatrixGroup {
             coupled: self.coupled,
             rows: self.rows,
@@ -2722,7 +2722,7 @@ impl FusionBlockMatrixGroupBuilder {
             .checked_mul(self.cols)
             .ok_or(OperationError::ElementCountOverflow)?;
         let covers_matrix = self.occupied_elements == matrix_elements;
-        let direct_offset = direct_group_matrix_offset(&subblocks, covers_matrix);
+        let direct_offset = direct_group_matrix_offset_generic(&subblocks, covers_matrix);
         Ok(FusionBlockMatrixGroup {
             coupled: self.coupled,
             rows: self.rows,

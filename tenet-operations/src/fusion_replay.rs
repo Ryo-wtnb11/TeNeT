@@ -233,6 +233,95 @@ pub struct FusionBlockContractPlan<C = f64> {
     rhs_op: MatrixOp,
 }
 
+impl FusionBlockContractPlan<f64> {
+    pub fn from_parts(
+        dst_structure: Arc<BlockStructure>,
+        lhs_structure: Arc<BlockStructure>,
+        rhs_structure: Arc<BlockStructure>,
+        inactive_dst_scale_blocks: Vec<FusionScaleBlockLayout>,
+        groups: Vec<FusionBlockContractGroupPlan<f64>>,
+    ) -> Result<Self, OperationError> {
+        Self::from_parts_generic(
+            dst_structure,
+            lhs_structure,
+            rhs_structure,
+            inactive_dst_scale_blocks,
+            groups,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_parts_with_ops(
+        dst_structure: Arc<BlockStructure>,
+        lhs_structure: Arc<BlockStructure>,
+        rhs_structure: Arc<BlockStructure>,
+        inactive_dst_scale_blocks: Vec<FusionScaleBlockLayout>,
+        groups: Vec<FusionBlockContractGroupPlan<f64>>,
+        lhs_op: MatrixOp,
+        rhs_op: MatrixOp,
+    ) -> Result<Self, OperationError> {
+        Self::from_parts_with_ops_generic(
+            dst_structure,
+            lhs_structure,
+            rhs_structure,
+            inactive_dst_scale_blocks,
+            groups,
+            lhs_op,
+            rhs_op,
+        )
+    }
+
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_from_canonical_coupled_regions_with_ops(
+        dst_structure: &Arc<BlockStructure>,
+        dst_nout: usize,
+        lhs_storage_structure: &Arc<BlockStructure>,
+        lhs_storage_nout: usize,
+        rhs_storage_structure: &Arc<BlockStructure>,
+        rhs_storage_nout: usize,
+        lhs_op: MatrixOp,
+        rhs_op: MatrixOp,
+    ) -> Result<Option<Self>, OperationError> {
+        Self::try_from_canonical_coupled_regions_with_ops_generic(
+            dst_structure,
+            dst_nout,
+            lhs_storage_structure,
+            lhs_storage_nout,
+            rhs_storage_structure,
+            rhs_storage_nout,
+            lhs_op,
+            rhs_op,
+        )
+    }
+
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_from_canonical_coupled_regions_with_ops_and_alpha(
+        dst_structure: &Arc<BlockStructure>,
+        dst_nout: usize,
+        lhs_storage_structure: &Arc<BlockStructure>,
+        lhs_storage_nout: usize,
+        rhs_storage_structure: &Arc<BlockStructure>,
+        rhs_storage_nout: usize,
+        lhs_op: MatrixOp,
+        rhs_op: MatrixOp,
+        alpha_for_coupled: impl FnMut(SectorId) -> Result<f64, OperationError>,
+    ) -> Result<Option<Self>, OperationError> {
+        Self::try_from_canonical_coupled_regions_with_ops_and_alpha_generic(
+            dst_structure,
+            dst_nout,
+            lhs_storage_structure,
+            lhs_storage_nout,
+            rhs_storage_structure,
+            rhs_storage_nout,
+            lhs_op,
+            rhs_op,
+            alpha_for_coupled,
+        )
+    }
+}
+
 impl<C> FusionBlockContractPlan<C>
 where
     C: Copy + PartialEq + One,
@@ -248,14 +337,14 @@ where
     /// fixed group-local pack/scatter descriptor in coupled-sector order.
     /// Overlapping direct destination ranges are rejected because backends may
     /// run the direct batch concurrently.
-    pub fn from_parts(
+    pub fn from_parts_generic(
         dst_structure: Arc<BlockStructure>,
         lhs_structure: Arc<BlockStructure>,
         rhs_structure: Arc<BlockStructure>,
         inactive_dst_scale_blocks: Vec<FusionScaleBlockLayout>,
         groups: Vec<FusionBlockContractGroupPlan<C>>,
     ) -> Result<Self, OperationError> {
-        Self::from_parts_with_ops(
+        Self::from_parts_with_ops_generic(
             dst_structure,
             lhs_structure,
             rhs_structure,
@@ -267,7 +356,7 @@ where
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn from_parts_with_ops(
+    pub fn from_parts_with_ops_generic(
         dst_structure: Arc<BlockStructure>,
         lhs_structure: Arc<BlockStructure>,
         rhs_structure: Arc<BlockStructure>,
@@ -313,7 +402,7 @@ where
     /// requests the general symmetry-aware compiler.
     #[doc(hidden)]
     #[allow(clippy::too_many_arguments)]
-    pub fn try_from_canonical_coupled_regions_with_ops(
+    pub fn try_from_canonical_coupled_regions_with_ops_generic(
         dst_structure: &Arc<BlockStructure>,
         dst_nout: usize,
         lhs_storage_structure: &Arc<BlockStructure>,
@@ -340,7 +429,7 @@ where
     /// coupled-sector GEMM job.
     #[doc(hidden)]
     #[allow(clippy::too_many_arguments)]
-    pub fn try_from_canonical_coupled_regions_with_ops_and_alpha(
+    pub fn try_from_canonical_coupled_regions_with_ops_and_alpha_generic(
         dst_structure: &Arc<BlockStructure>,
         dst_nout: usize,
         lhs_storage_structure: &Arc<BlockStructure>,
@@ -1340,7 +1429,14 @@ pub struct FusionBlockMatrixGroup<C = f64> {
     pub subblocks: Vec<FusionSubblockMatrixLayout<C>>,
 }
 
-pub fn direct_group_matrix_offset<C>(
+pub fn direct_group_matrix_offset(
+    subblocks: &[FusionSubblockMatrixLayout<f64>],
+    covers_matrix: bool,
+) -> Option<usize> {
+    direct_group_matrix_offset_generic(subblocks, covers_matrix)
+}
+
+pub fn direct_group_matrix_offset_generic<C>(
     subblocks: &[FusionSubblockMatrixLayout<C>],
     covers_matrix: bool,
 ) -> Option<usize>
@@ -1826,7 +1922,7 @@ where
         return Err(OperationError::StructureMismatch { tensor });
     }
     if let Some(offset) = group.direct_offset {
-        if direct_group_matrix_offset(&group.subblocks, covers_matrix) != Some(offset) {
+        if direct_group_matrix_offset_generic(&group.subblocks, covers_matrix) != Some(offset) {
             return Err(OperationError::StructureMismatch { tensor });
         }
     }
@@ -2276,6 +2372,40 @@ mod tests {
     }
 
     #[test]
+    fn legacy_coefficient_free_calls_infer_f64() {
+        let structure = Arc::new(BlockStructure::packed_column_major(1, [vec![1]]).unwrap());
+        let _ = direct_group_matrix_offset(&[], true);
+        let _ = FusionBlockContractPlan::from_parts(
+            Arc::clone(&structure),
+            Arc::clone(&structure),
+            Arc::clone(&structure),
+            Vec::new(),
+            Vec::new(),
+        );
+        let _ = FusionBlockContractPlan::try_from_canonical_coupled_regions_with_ops(
+            &structure,
+            1,
+            &structure,
+            1,
+            &structure,
+            1,
+            MatrixOp::Identity,
+            MatrixOp::Identity,
+        );
+        let _ = FusionBlockContractPlan::try_from_canonical_coupled_regions_with_ops_and_alpha(
+            &structure,
+            1,
+            &structure,
+            1,
+            &structure,
+            1,
+            MatrixOp::Identity,
+            MatrixOp::Identity,
+            |_| Ok(Default::default()),
+        );
+    }
+
+    #[test]
     fn fibonacci_complex_r_symbol_survives_fusion_block_contraction() {
         let provider = FibonacciFusionRule;
         let tau = provider.encode_sector(&FibonacciSector::Tau).unwrap();
@@ -2311,7 +2441,7 @@ mod tests {
             group(true, Complex64::new(1.0, 0.0)),
         )
         .unwrap();
-        let plan = FusionBlockContractPlan::from_parts(
+        let plan = FusionBlockContractPlan::from_parts_generic(
             Arc::clone(&structure),
             Arc::clone(&structure),
             Arc::clone(&structure),
