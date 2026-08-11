@@ -234,12 +234,24 @@ impl RuntimeTreeTransformCacheLedger {
         state.charged_payload_bytes = state.charged_payload_bytes.saturating_sub(charged_bytes);
     }
 
-    /// Combines per-dtype activity while reporting shared resources once.
+    /// Takes one coherent snapshot across two typed stores while reporting
+    /// shared resources once.
     #[doc(hidden)]
-    pub fn combined_info(
+    pub fn store_pair_info<T, U>(
         &self,
-        stores: impl IntoIterator<Item = RuntimeTreeTransformCacheInfo>,
+        first: &RuntimeTreeTransformStore<T>,
+        second: &RuntimeTreeTransformStore<U>,
     ) -> RuntimeTreeTransformCacheInfo {
+        // Same order as admission/clear: typed store(s), then ledger. No path
+        // takes the ledger first, so a snapshot cannot deadlock a writer.
+        let first = first
+            .state
+            .lock()
+            .expect("runtime tree-transform store poisoned");
+        let second = second
+            .state
+            .lock()
+            .expect("runtime tree-transform store poisoned");
         let state = self
             .state
             .lock()
@@ -251,7 +263,7 @@ impl RuntimeTreeTransformCacheLedger {
             byte_budget: self.byte_budget,
             ..RuntimeTreeTransformCacheInfo::default()
         };
-        for store in stores {
+        for store in [first.info(), second.info()] {
             combined.hits = combined.hits.saturating_add(store.hits);
             combined.misses = combined.misses.saturating_add(store.misses);
             combined.evictions = combined.evictions.saturating_add(store.evictions);
@@ -1383,7 +1395,7 @@ mod runtime_store_tests {
             charge0.saturating_add(charge1),
         ));
         let real = RuntimeTreeTransformStore::with_runtime_ledger(Arc::clone(&ledger));
-        let _complex =
+        let complex =
             RuntimeTreeTransformStore::<Complex64>::with_runtime_ledger(Arc::clone(&ledger));
 
         real.get_or_compile(key0, || Ok::<_, Infallible>(structure0))
@@ -1391,7 +1403,7 @@ mod runtime_store_tests {
         real.get_or_compile(key1, || Ok::<_, Infallible>(structure1))
             .unwrap();
 
-        let info = ledger.combined_info([real.info()]);
+        let info = ledger.store_pair_info(&real, &complex);
         assert_eq!(info.entries(), 2);
         assert_eq!(info.entry_capacity(), 2);
         assert_eq!(info.byte_budget(), charge0 + charge1);
@@ -1444,7 +1456,7 @@ mod runtime_store_tests {
         real_worker.join().unwrap();
         complex_worker.join().unwrap();
 
-        let info = ledger.combined_info([real.info(), complex.info()]);
+        let info = ledger.store_pair_info(real.as_ref(), complex.as_ref());
         assert_eq!(info.entries(), 1);
         assert!(info.charged_payload_bytes() <= budget);
         assert_eq!(info.byte_budget(), budget);
@@ -1495,7 +1507,7 @@ mod runtime_store_tests {
             })
             .unwrap();
 
-        let info = ledger.combined_info([real.info(), complex.info()]);
+        let info = ledger.store_pair_info(&real, &complex);
         assert_eq!(info.entries(), 3);
         assert_eq!(info.misses(), 3);
         assert_eq!(info.hits(), 3);
@@ -1540,7 +1552,7 @@ mod runtime_store_tests {
         resume.wait();
         assert_eq!(worker.join().unwrap().block_count(), 1);
 
-        let info = ledger.combined_info([real.info(), complex.info()]);
+        let info = ledger.store_pair_info(real.as_ref(), complex.as_ref());
         assert_eq!(info.entries(), 0);
         assert_eq!(info.charged_payload_bytes(), 0);
         assert_eq!(info.hits(), 0);

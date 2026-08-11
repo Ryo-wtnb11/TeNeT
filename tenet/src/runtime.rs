@@ -12,19 +12,28 @@ use tenet_core::{HomSpaceId, RuleIdentity};
 pub use tenet_tensors::RuntimeTreeTransformCacheInfo;
 use tenet_tensors::{
     BoundDynamicFusionMapSpace, DenseTreeTransformOperations, OperationCachePolicy,
-    RuntimeTreeTransformStore, TensorContractFusionExecutionContext, TreeTransformOperation,
+    RuntimeTreeTransformCacheLedger, RuntimeTreeTransformStore,
+    TensorContractFusionExecutionContext, TreeTransformOperation,
 };
 
 use crate::error::Error;
 use crate::plancache::{Optimizer, PlanCacheConfig};
 use crate::typed::ScalarOps;
-pub type Ctx<D, Key> = TensorContractFusionExecutionContext<D, Key>;
-/// The pair of per-scalar execution contexts for one cache-key namespace.
-/// Tensor operations dispatch on the stored dtype once per call and pick one
-/// side.
+pub type Ctx<D, Key, C = f64> = TensorContractFusionExecutionContext<
+    D,
+    Key,
+    DenseTreeTransformOperations,
+    DenseTreeTransformOperations,
+    C,
+>;
+/// The supported payload/coefficient execution contexts for one cache-key
+/// namespace. Existing operations dispatch on the stored dtype to the two
+/// real-coefficient lanes; the complex-coefficient lane remains private until
+/// the #592 typed-facade follow-up.
 pub struct Ctxs<Key: Clone + Eq + Hash + Send + Sync + 'static> {
     pub(crate) f64: Ctx<f64, Key>,
     pub(crate) c64: Ctx<Complex64, Key>,
+    pub(crate) c64_coeff_c64: Ctx<Complex64, Key, Complex64>,
 }
 
 impl<Key: Clone + Eq + Hash + Send + Sync + 'static> Default for Ctxs<Key> {
@@ -32,6 +41,7 @@ impl<Key: Clone + Eq + Hash + Send + Sync + 'static> Default for Ctxs<Key> {
         Self {
             f64: Ctx::default(),
             c64: Ctx::default(),
+            c64_coeff_c64: Ctx::default(),
         }
     }
 }
@@ -56,7 +66,8 @@ impl<Key: Clone + Eq + Hash + Send + Sync + 'static> Ctxs<Key> {
     pub(crate) fn with_config(
         ctx: &tenet_dense::SharedCpuContext,
         gemm_kind: Option<tenet_dense::CpuBackendKind>,
-        tree_transform_store: Weak<RuntimeTreeTransformStore<f64>>,
+        real_tree_transform_store: Weak<RuntimeTreeTransformStore<f64>>,
+        complex_tree_transform_store: Weak<RuntimeTreeTransformStore<Complex64>>,
     ) -> Result<Self, Error> {
         let mut ctxs = Self {
             f64:
@@ -80,22 +91,37 @@ impl<Key: Clone + Eq + Hash + Send + Sync + 'static> Ctxs<Key> {
                     f64,
                 >>::Workspace::default(),
             ),
+            c64_coeff_c64: Ctx::with_parts(
+                tenet_tensors::TreeTransformExecutionContext::new(make_transform_ops(
+                    ctx, gemm_kind,
+                )?),
+                make_transform_ops(ctx, gemm_kind)?,
+                <DenseTreeTransformOperations as tenet_tensors::TensorContractBackend<
+                    Complex64,
+                    Complex64,
+                >>::Workspace::default(),
+            ),
         };
         ctxs.set_cache_policy(OperationCachePolicy::NoCache);
         ctxs.f64
             .tree_context_mut()
             .cache_mut()
-            .bind_runtime_store(tree_transform_store.clone());
+            .bind_runtime_store(real_tree_transform_store.clone());
         ctxs.c64
             .tree_context_mut()
             .cache_mut()
-            .bind_runtime_store(tree_transform_store);
+            .bind_runtime_store(real_tree_transform_store);
+        ctxs.c64_coeff_c64
+            .tree_context_mut()
+            .cache_mut()
+            .bind_runtime_store(complex_tree_transform_store);
         Ok(ctxs)
     }
 
     fn set_cache_policy(&mut self, policy: OperationCachePolicy) {
         self.f64.set_cache_policy(policy);
         self.c64.set_cache_policy(policy);
+        self.c64_coeff_c64.set_cache_policy(policy);
     }
 
     pub(crate) fn set_recoupling_threads(&mut self, threads: usize) {
@@ -104,6 +130,10 @@ impl<Key: Clone + Eq + Hash + Send + Sync + 'static> Ctxs<Key> {
             .backend_mut()
             .set_recoupling_threads(threads);
         self.c64
+            .tree_context_mut()
+            .backend_mut()
+            .set_recoupling_threads(threads);
+        self.c64_coeff_c64
             .tree_context_mut()
             .backend_mut()
             .set_recoupling_threads(threads);
@@ -122,11 +152,19 @@ impl<Key: Clone + Eq + Hash + Send + Sync + 'static> Ctxs<Key> {
                 .backend_mut()
                 .recoupling_threads()
                 == expected
+            && self
+                .c64_coeff_c64
+                .tree_context_mut()
+                .backend_mut()
+                .recoupling_threads()
+                == expected
     }
 
     #[cfg(test)]
     pub(crate) fn local_cache_policy_is(&self, expected: OperationCachePolicy) -> bool {
-        self.f64.local_cache_policy_is(expected) && self.c64.local_cache_policy_is(expected)
+        self.f64.local_cache_policy_is(expected)
+            && self.c64.local_cache_policy_is(expected)
+            && self.c64_coeff_c64.local_cache_policy_is(expected)
     }
 
     #[cfg(test)]
@@ -149,6 +187,17 @@ impl<Key: Clone + Eq + Hash + Send + Sync + 'static> Ctxs<Key> {
                 .shares_cpu_context(shared)
             && self
                 .c64
+                .contract_backend()
+                .dense()
+                .shares_cpu_context(shared)
+            && self
+                .c64_coeff_c64
+                .tree_context_mut()
+                .backend_mut()
+                .dense()
+                .shares_cpu_context(shared)
+            && self
+                .c64_coeff_c64
                 .contract_backend()
                 .dense()
                 .shares_cpu_context(shared)
@@ -179,7 +228,8 @@ macro_rules! define_tensor_execution_context {
                     $($field: Ctxs::with_config(
                         &config.shared_ctx,
                         config.gemm_kind,
-                        config.tree_transform_store.clone(),
+                        config.real_tree_transform_store.clone(),
+                        config.complex_tree_transform_store.clone(),
                     )?,)+
                 };
                 if let Some(threads) = config.recoupling_threads {
@@ -200,6 +250,18 @@ macro_rules! define_tensor_execution_context {
                 &mut self,
             ) -> &mut Ctx<D, tenet_core::RuleIdentity> {
                 D::ctx_of(&mut self.mf)
+            }
+
+            /// Returns the statically compatible complex-payload,
+            /// complex-coefficient multiplicity-free lane.
+            #[allow(
+                dead_code,
+                reason = "runtime foundation for the #592 typed-facade follow-up"
+            )]
+            pub(crate) fn complex_multiplicity_free_lane(
+                &mut self,
+            ) -> &mut Ctx<Complex64, tenet_core::RuleIdentity, Complex64> {
+                &mut self.mf.c64_coeff_c64
             }
 
             pub(crate) fn generic_lane<D: ScalarOps>(
@@ -252,10 +314,16 @@ macro_rules! define_runtime_state {
                 dense: Box<dyn tenet_dense::DenseExecutor + Send>,
                 ctx: &tenet_dense::SharedCpuContext,
                 gemm_kind: Option<tenet_dense::CpuBackendKind>,
-                tree_transform_store: Weak<RuntimeTreeTransformStore<f64>>,
+                real_tree_transform_store: Weak<RuntimeTreeTransformStore<f64>>,
+                complex_tree_transform_store: Weak<RuntimeTreeTransformStore<Complex64>>,
             ) -> Result<Self, Error> {
                 Ok(Self {
-                    $($field: Ctxs::with_config(ctx, gemm_kind, tree_transform_store.clone())?,)+
+                    $($field: Ctxs::with_config(
+                        ctx,
+                        gemm_kind,
+                        real_tree_transform_store.clone(),
+                        complex_tree_transform_store.clone(),
+                    )?,)+
                     dense,
                     #[cfg(feature = "cuda")]
                     cuda: None,
@@ -305,6 +373,36 @@ struct PlanCacheHome {
     slot: Option<Box<dyn Any + Send>>,
 }
 
+struct RuntimeTreeTransformStores {
+    ledger: Arc<RuntimeTreeTransformCacheLedger>,
+    real: Arc<RuntimeTreeTransformStore<f64>>,
+    complex: Arc<RuntimeTreeTransformStore<Complex64>>,
+}
+
+impl RuntimeTreeTransformStores {
+    fn new(byte_budget: usize) -> Self {
+        let ledger = Arc::new(RuntimeTreeTransformCacheLedger::new(byte_budget));
+        Self {
+            real: Arc::new(RuntimeTreeTransformStore::with_runtime_ledger(Arc::clone(
+                &ledger,
+            ))),
+            complex: Arc::new(RuntimeTreeTransformStore::with_runtime_ledger(Arc::clone(
+                &ledger,
+            ))),
+            ledger,
+        }
+    }
+
+    fn info(&self) -> RuntimeTreeTransformCacheInfo {
+        self.ledger.store_pair_info(&self.real, &self.complex)
+    }
+
+    fn clear(&self) {
+        self.real.clear();
+        self.complex.clear();
+    }
+}
+
 struct RuntimeInner {
     // The coarse state mutex is now cold on the CPU hot paths: standalone ops
     // lease from `context_pool`/`executor_pool` (below) and the network path
@@ -313,7 +411,7 @@ struct RuntimeInner {
     state: Mutex<RuntimeState>,
     rand_counter: AtomicU64,
     execution_config: RuntimeExecutionConfig,
-    tree_transform_store: Arc<RuntimeTreeTransformStore<f64>>,
+    tree_transform_stores: RuntimeTreeTransformStores,
     /// Standalone-op parallelism (#155): rather than hold the coarse `state`
     /// mutex for a whole `contract`/`permute`/factorization, each op leases a
     /// execution context (and, for factorizations, a dense executor)
@@ -453,12 +551,13 @@ pub(crate) struct RuntimeExecutionConfig {
     /// standalone-op executor pool can re-mint an executor identical to the one
     /// `RuntimeBuilder::build` created (issue #155). `None` uses faer.
     pub(crate) linalg_kind: Option<tenet_dense::CpuBackendKind>,
-    pub(crate) tree_transform_store: Weak<RuntimeTreeTransformStore<f64>>,
+    pub(crate) real_tree_transform_store: Weak<RuntimeTreeTransformStore<f64>>,
+    pub(crate) complex_tree_transform_store: Weak<RuntimeTreeTransformStore<Complex64>>,
     /// THE runtime's CPU context: one rayon pool shared by every executor this
-    /// runtime mints — the state's, the executor pool's, and the eight
+    /// runtime mints — the state's, the executor pool's, and all
     /// transform backends of every pooled `TensorExecutionContext`
-    /// (multiplicity-free and Generic-fusion lanes × `f64`/`c64` ×
-    /// tree/contract). Without it each
+    /// (multiplicity-free and Generic-fusion namespaces × the three supported
+    /// payload/coefficient lanes × tree/contract). Without it each
     /// executor built its own eager env-sized pool, and the #155 context pool
     /// multiplied that into a process-thread-cap failure (macOS `WouldBlock`)
     /// under concurrent leases.
@@ -559,12 +658,12 @@ impl Runtime {
 
     /// Returns this Runtime's completed tree-transform cache activity.
     pub fn tree_transform_cache_info(&self) -> RuntimeTreeTransformCacheInfo {
-        self.inner.tree_transform_store.info()
+        self.inner.tree_transform_stores.info()
     }
 
     /// Clears this Runtime's completed tree-transform cache.
     pub fn clear_tree_transform_cache(&self) {
-        self.inner.tree_transform_store.clear();
+        self.inner.tree_transform_stores.clear();
     }
 
     pub(crate) fn admitted_tree_pair_operation<R>(
@@ -577,7 +676,8 @@ impl Runtime {
         let (source_homspace, source_layout) = bound_layout_identity(source);
         let (destination_homspace, destination_layout) = bound_layout_identity(destination);
         self.inner
-            .tree_transform_store
+            .tree_transform_stores
+            .real
             .admitted_tree_pair_operation(
                 rule,
                 &source_homspace,
@@ -600,7 +700,8 @@ impl Runtime {
         // Cache retention must not change an already-successful operation.
         let _ = self
             .inner
-            .tree_transform_store
+            .tree_transform_stores
+            .real
             .admit_exact_tree_pair_layout(
                 rule,
                 operation,
@@ -1026,15 +1127,16 @@ impl RuntimeBuilder {
             ),
         };
         let gemm_kind = self.gemm_backend.map(LinalgBackend::to_kind);
-        let tree_transform_store = Arc::new(RuntimeTreeTransformStore::new(
-            self.tree_transform_cache_byte_budget,
-        ));
-        let tree_transform_store_weak = Arc::downgrade(&tree_transform_store);
+        let tree_transform_stores =
+            RuntimeTreeTransformStores::new(self.tree_transform_cache_byte_budget);
+        let real_tree_transform_store = Arc::downgrade(&tree_transform_stores.real);
+        let complex_tree_transform_store = Arc::downgrade(&tree_transform_stores.complex);
         let mut state = RuntimeState::with_config(
             dense,
             &shared_ctx,
             gemm_kind,
-            tree_transform_store_weak.clone(),
+            real_tree_transform_store.clone(),
+            complex_tree_transform_store.clone(),
         )?;
         let plan_cache = PlanCacheHome {
             config: self.plan_cache,
@@ -1064,10 +1166,11 @@ impl RuntimeBuilder {
                     gemm_kind,
                     recoupling_threads: self.recoupling_threads,
                     linalg_kind,
-                    tree_transform_store: tree_transform_store_weak,
+                    real_tree_transform_store,
+                    complex_tree_transform_store,
                     shared_ctx,
                 },
-                tree_transform_store,
+                tree_transform_stores,
                 context_pool: Mutex::new(Vec::new()),
                 executor_pool: Mutex::new(Vec::new()),
                 executor_mintable,
@@ -1128,12 +1231,142 @@ macro_rules! default {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
     use crate::typed::{GradedSpace, TensorMap};
-    use tenet_core::{SU2FusionRule, SU2Irrep};
+    use tenet_core::{
+        BraidingStyleKind, FibonacciFusionRule, FusionProductSpace, FusionRule, FusionStyleKind,
+        FusionTreeHomSpace, MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols,
+        MultiplicityFreeRigidSymbols, SU2FusionRule, SU2Irrep, SectorId, SectorLeg, SectorVec,
+    };
+
+    #[derive(Clone)]
+    struct CountingFibonacci {
+        structural_calls: Arc<AtomicUsize>,
+        layout_calls: Arc<AtomicUsize>,
+    }
+
+    impl CountingFibonacci {
+        fn new() -> Self {
+            Self {
+                structural_calls: Arc::new(AtomicUsize::new(0)),
+                layout_calls: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        fn structural_calls(&self) -> usize {
+            self.structural_calls.load(Ordering::Relaxed)
+        }
+    }
+
+    impl FusionRule for CountingFibonacci {
+        fn rule_identity(&self) -> RuleIdentity {
+            FibonacciFusionRule.rule_identity()
+        }
+
+        fn fusion_style(&self) -> FusionStyleKind {
+            FibonacciFusionRule.fusion_style()
+        }
+
+        fn braiding_style(&self) -> BraidingStyleKind {
+            FibonacciFusionRule.braiding_style()
+        }
+
+        fn vacuum(&self) -> SectorId {
+            FibonacciFusionRule.vacuum()
+        }
+
+        fn supports_unitary_braid_dagger(&self) -> bool {
+            FibonacciFusionRule.supports_unitary_braid_dagger()
+        }
+
+        fn dual(&self, sector: SectorId) -> SectorId {
+            self.layout_calls.fetch_add(1, Ordering::Relaxed);
+            FibonacciFusionRule.dual(sector)
+        }
+
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+            self.layout_calls.fetch_add(1, Ordering::Relaxed);
+            FibonacciFusionRule.fusion_channels(left, right)
+        }
+
+        fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+            self.layout_calls.fetch_add(1, Ordering::Relaxed);
+            FibonacciFusionRule.nsymbol(left, right, coupled)
+        }
+    }
+
+    impl MultiplicityFreeFusionRule for CountingFibonacci {}
+
+    impl MultiplicityFreeFusionSymbols for CountingFibonacci {
+        type Scalar = Complex64;
+
+        fn f_symbol_scalar(
+            &self,
+            left: SectorId,
+            middle: SectorId,
+            right: SectorId,
+            coupled: SectorId,
+            left_coupled: SectorId,
+            right_coupled: SectorId,
+        ) -> Self::Scalar {
+            self.structural_calls.fetch_add(1, Ordering::Relaxed);
+            FibonacciFusionRule.f_symbol_scalar(
+                left,
+                middle,
+                right,
+                coupled,
+                left_coupled,
+                right_coupled,
+            )
+        }
+
+        fn r_symbol_scalar(
+            &self,
+            left: SectorId,
+            right: SectorId,
+            coupled: SectorId,
+        ) -> Self::Scalar {
+            self.structural_calls.fetch_add(1, Ordering::Relaxed);
+            FibonacciFusionRule.r_symbol_scalar(left, right, coupled)
+        }
+    }
+
+    impl MultiplicityFreeRigidSymbols for CountingFibonacci {
+        fn dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+            self.structural_calls.fetch_add(1, Ordering::Relaxed);
+            FibonacciFusionRule.dim_scalar(sector)
+        }
+
+        fn inv_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+            self.structural_calls.fetch_add(1, Ordering::Relaxed);
+            FibonacciFusionRule.inv_dim_scalar(sector)
+        }
+
+        fn sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+            self.structural_calls.fetch_add(1, Ordering::Relaxed);
+            FibonacciFusionRule.sqrt_dim_scalar(sector)
+        }
+
+        fn inv_sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+            self.structural_calls.fetch_add(1, Ordering::Relaxed);
+            FibonacciFusionRule.inv_sqrt_dim_scalar(sector)
+        }
+
+        fn twist_scalar(&self, sector: SectorId) -> Self::Scalar {
+            self.structural_calls.fetch_add(1, Ordering::Relaxed);
+            FibonacciFusionRule.twist_scalar(sector)
+        }
+
+        fn frobenius_schur_phase_scalar(&self, sector: SectorId) -> Self::Scalar {
+            self.structural_calls.fetch_add(1, Ordering::Relaxed);
+            FibonacciFusionRule.frobenius_schur_phase_scalar(sector)
+        }
+    }
 
     // What: the context pool must hold pointer-sized entries. Pooling the
-    // complete two-lane execution state by value made Vec pop/push memmoves
+    // complete multi-lane execution state by value made Vec pop/push memmoves
     // ~70% of a small standalone op's cost (issue #228). Reverting
     // `PooledContext` to a by-value alias fails here instead of silently
     // reintroducing that tax.
@@ -1219,6 +1452,82 @@ mod tests {
     }
 
     #[test]
+    fn fibonacci_complex_lane_reuses_nonreal_structural_plan() {
+        // What: the private Complex64<-Complex64 Runtime lane compiles one
+        // Fibonacci braid, then warm replay avoids every structural-symbol
+        // query. Layout queries are counted separately and are not claimed to
+        // disappear.
+        let runtime = Runtime::builder().build().expect("runtime");
+        let rule = Arc::new(CountingFibonacci::new());
+        let tau = SectorId::new(1);
+        let leg = || SectorLeg::new([(tau, 1)], false);
+        let homspace = FusionTreeHomSpace::new(
+            FusionProductSpace::new([leg(), leg()]),
+            FusionProductSpace::new([]),
+        );
+        let source = BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free(
+            Arc::clone(&rule),
+            homspace,
+        )
+        .expect("Fibonacci source");
+        let operation = TreeTransformOperation::braid([1, 0], [], [0, 1], []);
+        let destination = source
+            .transformed_multiplicity_free(&operation)
+            .expect("Fibonacci braid destination");
+        rule.structural_calls.store(0, Ordering::Relaxed);
+        rule.layout_calls.store(0, Ordering::Relaxed);
+        runtime.clear_tree_transform_cache();
+
+        let source_structure = Arc::clone(source.space().structure());
+        let destination_structure = Arc::clone(destination.space().structure());
+        let source_data = vec![Complex64::new(1.0, 0.0); source.space().required_len().unwrap()];
+        let mut destination_data =
+            vec![Complex64::new(0.0, 0.0); destination.space().required_len().unwrap()];
+        let mut lease = runtime.lease_context().expect("context");
+        let context = lease
+            .context()
+            .complex_multiplicity_free_lane()
+            .tree_context_mut();
+
+        context
+            .tree_transform_dyn_overwrite_into_ref(
+                rule.as_ref(),
+                &operation,
+                &destination_structure,
+                &source_structure,
+                &mut destination_data,
+                &source_data,
+                Complex64::new(1.0, 0.0),
+            )
+            .expect("cold Fibonacci braid");
+        let cold_calls = rule.structural_calls();
+        assert!(cold_calls > 0);
+        assert!(destination_data.iter().any(|value| value.im != 0.0));
+        let cold = runtime.tree_transform_cache_info();
+        assert_eq!(cold.entries(), 1);
+        assert_eq!(cold.misses(), 1);
+        assert_eq!(cold.hits(), 0);
+
+        destination_data.fill(Complex64::new(0.0, 0.0));
+        context
+            .tree_transform_dyn_overwrite_into_ref(
+                rule.as_ref(),
+                &operation,
+                &destination_structure,
+                &source_structure,
+                &mut destination_data,
+                &source_data,
+                Complex64::new(1.0, 0.0),
+            )
+            .expect("warm Fibonacci braid");
+        assert_eq!(rule.structural_calls(), cold_calls);
+        let warm = runtime.tree_transform_cache_info();
+        assert_eq!(warm.entries(), 1);
+        assert_eq!(warm.misses(), 1);
+        assert_eq!(warm.hits(), 1);
+    }
+
+    #[test]
     fn runtime_transform_stores_are_isolated_and_expired_weak_handles_run_eagerly() {
         let runtime_a = Runtime::builder().build().unwrap();
         let runtime_b = Runtime::builder().build().unwrap();
@@ -1248,7 +1557,10 @@ mod tests {
         assert_eq!(runtime_b.tree_transform_cache_info().misses(), 1);
 
         let mut context = TensorExecutionContext::for_config(runtime_b.execution_config()).unwrap();
-        let store = runtime_b.execution_config().tree_transform_store.clone();
+        let store = runtime_b
+            .execution_config()
+            .real_tree_transform_store
+            .clone();
         let source_space = source_b.test_bound_space();
         let destination_space = expected_b.test_bound_space();
         let rule = Arc::clone(source_space.provider_arc());
