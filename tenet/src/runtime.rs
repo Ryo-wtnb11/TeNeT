@@ -19,7 +19,7 @@ use tenet_tensors::{
 use crate::error::Error;
 use crate::plancache::{Optimizer, PlanCacheConfig};
 use crate::typed::ScalarOps;
-type CoefficientCtx<D, Key, C> = TensorContractFusionExecutionContext<
+pub(crate) type CoefficientCtx<D, Key, C> = TensorContractFusionExecutionContext<
     D,
     Key,
     DenseTreeTransformOperations,
@@ -27,6 +27,23 @@ type CoefficientCtx<D, Key, C> = TensorContractFusionExecutionContext<
     C,
 >;
 pub type Ctx<D, Key> = CoefficientCtx<D, Key, f64>;
+
+mod coefficient_lane_private {
+    pub trait Sealed<C> {}
+
+    impl<T: crate::typed::ScalarOps> Sealed<f64> for T {}
+    impl Sealed<num_complex::Complex64> for num_complex::Complex64 {}
+}
+
+/// Selects one of the three payload/coefficient pairs owned by a runtime.
+///
+/// This stays private to the crate: provider scalar compatibility is a static
+/// execution detail, not another public context type.
+pub(crate) trait MultiplicityFreeCoefficientLane<C: tenet_tensors::DenseBlockScalar>:
+    ScalarOps + tenet_tensors::RecouplingCoefficientAction<C> + coefficient_lane_private::Sealed<C>
+{
+    fn lane(context: &mut TensorExecutionContext) -> &mut CoefficientCtx<Self, RuleIdentity, C>;
+}
 /// The supported payload/coefficient execution contexts for one cache-key
 /// namespace. Existing operations dispatch on the stored dtype to the two
 /// real-coefficient lanes.
@@ -299,6 +316,20 @@ macro_rules! define_tensor_execution_context {
             }
         }
     };
+}
+
+impl<D: ScalarOps> MultiplicityFreeCoefficientLane<f64> for D {
+    fn lane(context: &mut TensorExecutionContext) -> &mut CoefficientCtx<Self, RuleIdentity, f64> {
+        Self::ctx_of(&mut context.mf)
+    }
+}
+
+impl MultiplicityFreeCoefficientLane<Complex64> for Complex64 {
+    fn lane(
+        context: &mut TensorExecutionContext,
+    ) -> &mut CoefficientCtx<Self, RuleIdentity, Complex64> {
+        &mut context.mf_c64_coeff_c64
+    }
 }
 
 rule_lanes!(define_tensor_execution_context);

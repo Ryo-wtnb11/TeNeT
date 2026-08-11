@@ -4492,6 +4492,15 @@ where
     ) -> Result<TensorMap<R, D>, Self::FacadeError>;
 }
 
+trait MultiplicityFreeTransformExecution<R, C>: TensorScalar {
+    fn execute(
+        tensor: &TensorMap<R, Self>,
+        operation: TreeTransformOperation,
+    ) -> Result<TensorMap<R, Self>, Error>
+    where
+        R: TypedSectorAdmission;
+}
+
 /// Ribbon-twist execution selected by the admitted provider mode.
 #[doc(hidden)]
 pub trait TypedTensorTwistDispatch<R, D>: TypedTensorModeDispatch<R>
@@ -6500,16 +6509,19 @@ where
 impl<R, D> TypedTensorTransformDispatch<R, D> for MultiplicityFreeAdmissionMode
 where
     R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
-        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + MultiplicityFreeRigidSymbols
         + CheckedFusionAlgebra
         + SectorCodec,
-    D: TensorScalar,
+    <R as MultiplicityFreeFusionSymbols>::Scalar:
+        CategoricalScalar + tenet_tensors::DenseRecouplingScalar,
+    D: TensorScalar
+        + MultiplicityFreeTransformExecution<R, <R as MultiplicityFreeFusionSymbols>::Scalar>,
 {
     fn tree_transform(
         tensor: &TensorMap<R, D>,
         operation: TreeTransformOperation,
     ) -> Result<TensorMap<R, D>, Self::FacadeError> {
-        tensor.tree_transform_multiplicity_free(operation)
+        D::execute(tensor, operation)
     }
 }
 
@@ -13225,23 +13237,48 @@ where
     }
 }
 
+#[allow(private_bounds)]
+impl<R, D> TensorMap<R, D>
+where
+    R: MultiplicityFreeRigidSymbols + CheckedFusionAlgebra + SectorCodec,
+    <R as MultiplicityFreeFusionSymbols>::Scalar:
+        CategoricalScalar + tenet_tensors::DenseRecouplingScalar,
+    D: TensorScalar
+        + crate::runtime::MultiplicityFreeCoefficientLane<
+            <R as MultiplicityFreeFusionSymbols>::Scalar,
+        >,
+{
+    fn tree_transform_multiplicity_free_owned(
+        &self,
+        operation: TreeTransformOperation,
+    ) -> Result<Self, Error> {
+        // Leasing rather than locking: independent operations on one runtime
+        // must not serialize behind each other.
+        let mut lease = self.runtime.lease_context()?;
+        let body = self.owned_body().expect("owned tree transform input");
+        let (space, data) = tree_transform_owned_multiplicity_free(
+            D::lane(lease.context()),
+            BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())?,
+            operation,
+        )?;
+        Ok(Self {
+            runtime: self.runtime.clone(),
+            repr: owned_repr(TypedTensorBody::dense(space, data)),
+        })
+    }
+}
+
 impl<R, D> TensorMap<R, D>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
     D: TensorScalar,
 {
-    /// Runs one prepared tree transform on this tensor's own runtime.
-    fn tree_transform_multiplicity_free(
+    /// Runs one prepared real-coefficient tree transform, retaining the
+    /// established compact and lazy-adjoint fast paths.
+    fn tree_transform_multiplicity_free_real(
         &self,
         operation: TreeTransformOperation,
     ) -> Result<Self, Error> {
-        // Compact arm: a rank-(1,1) leg swap of a spectrum factor is a
-        // per-sector rescaling of the stored diagonal, so it never touches the
-        // `Σ_c k_c²` materialization. Every other geometry — an explicit braid,
-        // any higher rank, the identity partitions `repartition` produces —
-        // falls through to the dense route below; the shared guard documents
-        // why. TensorKit 0.17 `src/tensors/diagonal.jl:215-242` makes the same
-        // split.
         if let Some(spectrum) = self.spectrum() {
             if crate::tensor_core::is_rank_one_diagonal_swap(
                 self.codomain_rank(),
@@ -13272,10 +13309,10 @@ where
                 runtime: self.runtime.clone(),
                 repr: TypedTensorRepr::Owned(Arc::clone(&view.parent)),
             };
-            return parent.tree_transform_multiplicity_free(lowered)?.adjoint();
+            return parent
+                .tree_transform_multiplicity_free_real(lowered)?
+                .adjoint();
         }
-        // Leasing rather than locking: independent operations on one runtime
-        // must not serialize behind each other.
         let mut lease = self.runtime.lease_context()?;
         let body = self.owned_body().expect("owned tree transform input");
         let (space, data) = tree_transform_owned_multiplicity_free(
@@ -13287,6 +13324,52 @@ where
             runtime: self.runtime.clone(),
             repr: owned_repr(TypedTensorBody::dense(space, data)),
         })
+    }
+}
+
+impl<R> TensorMap<R, num_complex::Complex64>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = num_complex::Complex64>
+        + CheckedFusionAlgebra
+        + SectorCodec,
+{
+    fn tree_transform_multiplicity_free_complex(
+        &self,
+        operation: TreeTransformOperation,
+    ) -> Result<Self, Error> {
+        self.materialized_tensor_uncached()?
+            .tree_transform_multiplicity_free_owned(operation)
+    }
+}
+
+impl<R, D> MultiplicityFreeTransformExecution<R, f64> for D
+where
+    R: TypedSectorAdmission
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec,
+    D: TensorScalar,
+{
+    fn execute(
+        tensor: &TensorMap<R, Self>,
+        operation: TreeTransformOperation,
+    ) -> Result<TensorMap<R, Self>, Error> {
+        tensor.tree_transform_multiplicity_free_real(operation)
+    }
+}
+
+impl<R> MultiplicityFreeTransformExecution<R, num_complex::Complex64> for num_complex::Complex64
+where
+    R: TypedSectorAdmission
+        + MultiplicityFreeRigidSymbols<Scalar = num_complex::Complex64>
+        + CheckedFusionAlgebra
+        + SectorCodec,
+{
+    fn execute(
+        tensor: &TensorMap<R, Self>,
+        operation: TreeTransformOperation,
+    ) -> Result<TensorMap<R, Self>, Error> {
+        tensor.tree_transform_multiplicity_free_complex(operation)
     }
 }
 
@@ -13855,8 +13938,11 @@ where
             return Ok(None);
         }
         let ordered: Vec<usize> = output_axes.iter().map(|&axis| source[axis]).collect();
-        self.permute(&ordered[..codomain_rank], &ordered[codomain_rank..])
-            .map(Some)
+        self.tree_transform_multiplicity_free_real(TreeTransformOperation::permute(
+            ordered[..codomain_rank].iter().copied(),
+            ordered[codomain_rank..].iter().copied(),
+        ))
+        .map(Some)
     }
 
     /// This tensor with one bond axis of every block scaled by `spectrum`,
