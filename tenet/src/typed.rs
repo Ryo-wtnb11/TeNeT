@@ -4501,6 +4501,21 @@ trait MultiplicityFreeTransformExecution<R, C>: TensorScalar {
         R: TypedSectorAdmission;
 }
 
+trait MultiplicityFreeContractExecution<R: TypedSectorAdmission, C>: TensorScalar {
+    fn contract(
+        lhs: &TensorMap<R, Self>,
+        rhs: &TensorMap<R, Self>,
+        lhs_axes: &[usize],
+        rhs_axes: &[usize],
+        output_axes: &[usize],
+    ) -> Result<TensorMap<R, Self>, Error>;
+
+    fn compose(
+        lhs: &TensorMap<R, Self>,
+        rhs: &TensorMap<R, Self>,
+    ) -> Result<TensorMap<R, Self>, Error>;
+}
+
 /// Ribbon-twist execution selected by the admitted provider mode.
 #[doc(hidden)]
 pub trait TypedTensorTwistDispatch<R, D>: TypedTensorModeDispatch<R>
@@ -7023,10 +7038,13 @@ where
 impl<R, D> TypedTensorContractDispatch<R, D> for MultiplicityFreeAdmissionMode
 where
     R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
-        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + MultiplicityFreeRigidSymbols
         + CheckedFusionAlgebra
         + SectorCodec,
-    D: TensorScalar,
+    <R as MultiplicityFreeFusionSymbols>::Scalar:
+        CategoricalScalar + tenet_tensors::DenseRecouplingScalar,
+    D: TensorScalar
+        + MultiplicityFreeContractExecution<R, <R as MultiplicityFreeFusionSymbols>::Scalar>,
 {
     fn contract(
         lhs: &TensorMap<R, D>,
@@ -7035,14 +7053,23 @@ where
         rhs_axes: &[usize],
         output_axes: &[usize],
     ) -> Result<TensorMap<R, D>, Self::FacadeError> {
-        contract_multiplicity_free(lhs, rhs, lhs_axes, rhs_axes, output_axes)
+        if lhs.logical_space().provider().braiding_style() == tenet_core::BraidingStyleKind::Anyonic
+        {
+            // Why not infer a braid from these axes: ordinary contraction has
+            // no planar embedding or over/under-crossing data; #633 owns that API.
+            return Err(tenet_tensors::OperationError::UnsupportedTensorContractScope {
+                message: "ordinary contraction is undefined for anyonic braiding; use an explicit planar operation",
+            }
+            .into());
+        }
+        D::contract(lhs, rhs, lhs_axes, rhs_axes, output_axes)
     }
 
     fn compose(
         lhs: &TensorMap<R, D>,
         rhs: &TensorMap<R, D>,
     ) -> Result<TensorMap<R, D>, Self::FacadeError> {
-        compose_multiplicity_free(lhs, rhs)
+        D::compose(lhs, rhs)
     }
 }
 
@@ -7330,6 +7357,19 @@ where
     if let Some(compact) = lhs.compose_compact(rhs)? {
         return Ok(compact);
     }
+    compose_multiplicity_free_with_lane(lhs, rhs)
+}
+
+#[allow(private_bounds)]
+fn compose_multiplicity_free_with_lane<R, D>(
+    lhs: &TensorMap<R, D>,
+    rhs: &TensorMap<R, D>,
+) -> Result<TensorMap<R, D>, Error>
+where
+    R: MultiplicityFreeRigidSymbols + CheckedFusionAlgebra + SectorCodec,
+    R::Scalar: CategoricalScalar + tenet_tensors::DenseRecouplingScalar,
+    D: TensorScalar + crate::runtime::MultiplicityFreeCoefficientLane<R::Scalar>,
+{
     let lhs_axes = (lhs.codomain_rank()..lhs.rank()).collect::<Vec<_>>();
     let rhs_axes = (0..rhs.codomain_rank()).collect::<Vec<_>>();
     let mut lease = lhs.runtime.lease_context()?;
@@ -7338,7 +7378,7 @@ where
             (&lhs.repr, &rhs.repr)
         {
             tensorcompose_owned_multiplicity_free(
-                lease.context().multiplicity_free_lane::<D>(),
+                D::lane(lease.context()),
                 BoundDynamicTensorRef::try_new(
                     &lhs_body.space,
                     lhs_body.materialized_dense_data(),
@@ -7354,7 +7394,7 @@ where
             let (lhs_operand, lhs_data) = lhs.fusion_operand_and_data();
             let (rhs_operand, rhs_data) = rhs.fusion_operand_and_data();
             tensorcontract_oriented_multiplicity_free(
-                lease.context().multiplicity_free_lane::<D>(),
+                D::lane(lease.context()),
                 lhs.logical_space(),
                 lhs_operand,
                 lhs_data,
@@ -7371,6 +7411,62 @@ where
         runtime: lhs.runtime.clone(),
         repr: owned_repr(TypedTensorBody::dense(space, data)),
     })
+}
+
+impl<R, D> MultiplicityFreeContractExecution<R, f64> for D
+where
+    R: TypedSectorAdmission
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec,
+    D: TensorScalar,
+{
+    fn contract(
+        lhs: &TensorMap<R, Self>,
+        rhs: &TensorMap<R, Self>,
+        lhs_axes: &[usize],
+        rhs_axes: &[usize],
+        output_axes: &[usize],
+    ) -> Result<TensorMap<R, Self>, Error> {
+        contract_multiplicity_free(lhs, rhs, lhs_axes, rhs_axes, output_axes)
+    }
+
+    fn compose(
+        lhs: &TensorMap<R, Self>,
+        rhs: &TensorMap<R, Self>,
+    ) -> Result<TensorMap<R, Self>, Error> {
+        compose_multiplicity_free(lhs, rhs)
+    }
+}
+
+impl<R> MultiplicityFreeContractExecution<R, Complex64> for Complex64
+where
+    R: TypedSectorAdmission
+        + MultiplicityFreeRigidSymbols<Scalar = Complex64>
+        + CheckedFusionAlgebra
+        + SectorCodec,
+{
+    fn contract(
+        _lhs: &TensorMap<R, Self>,
+        _rhs: &TensorMap<R, Self>,
+        _lhs_axes: &[usize],
+        _rhs_axes: &[usize],
+        _output_axes: &[usize],
+    ) -> Result<TensorMap<R, Self>, Error> {
+        Err(
+            tenet_tensors::OperationError::UnsupportedTensorContractScope {
+                message: "ordinary complex-coefficient contraction is outside the admitted scope",
+            }
+            .into(),
+        )
+    }
+
+    fn compose(
+        lhs: &TensorMap<R, Self>,
+        rhs: &TensorMap<R, Self>,
+    ) -> Result<TensorMap<R, Self>, Error> {
+        compose_multiplicity_free_with_lane(lhs, rhs)
+    }
 }
 
 type TypedFacadeError<R> =
@@ -13257,22 +13353,6 @@ where
     /// use tenet::prelude::{Complex64, FibonacciFusionRule};
     /// use tenet::typed::TensorMap;
     /// fn unavailable(tensor: &TensorMap<FibonacciFusionRule, Complex64>) {
-    ///     let _ = tensor.compose(tensor);
-    /// }
-    /// ```
-    ///
-    /// ```compile_fail
-    /// use tenet::prelude::{Complex64, FibonacciFusionRule};
-    /// use tenet::typed::TensorMap;
-    /// fn unavailable(tensor: &TensorMap<FibonacciFusionRule, Complex64>) {
-    ///     let _ = tensor.contract(tensor, &[], &[], &[]);
-    /// }
-    /// ```
-    ///
-    /// ```compile_fail
-    /// use tenet::prelude::{Complex64, FibonacciFusionRule};
-    /// use tenet::typed::TensorMap;
-    /// fn unavailable(tensor: &TensorMap<FibonacciFusionRule, Complex64>) {
     ///     let _ = tensor.tr();
     /// }
     /// ```
@@ -13456,8 +13536,13 @@ where
     /// becomes its domain (`other.rank() - rhs_axes.len()` axes), regardless
     /// of which side of either operand those axes came from.
     ///
-    /// **Fermionic semantics**: like TensorKit `tensorcontract!` / `@tensor`,
-    /// this **twists**
+    /// **Braiding scope**: ordinary contraction is available only for
+    /// symmetric braiding. An anyonic provider is rejected even when these
+    /// axes look crossing-free: the call carries no planar embedding or braid
+    /// direction, so inferring either would choose an unspecified morphism.
+    /// General planar contraction remains outside this API (#633).
+    ///
+    /// For fermionic symmetric braiding this **twists**
     /// dual contracted legs with the fermionic supertrace twist — unlike
     /// composition (TensorKit `A * B` / `mul!`), which never does. Bosonic
     /// rules are unaffected; fermionic rules can differ by signs.
@@ -13511,6 +13596,9 @@ where
     ///
     /// - [`Error::RuntimeMismatch`] when the operands belong to different
     ///   runtimes.
+    /// - [`Error::Operation`] with
+    ///   [`tenet_tensors::OperationError::UnsupportedTensorContractScope`] for
+    ///   anyonic providers.
     /// - [`Error::Operation`] / [`Error::Core`] / [`Error::FusionAlgebra`] for
     ///   malformed axis lists, an output order that is not a permutation of
     ///   the open axes, mismatched contracted legs, or operands whose
@@ -13681,6 +13769,10 @@ where
     /// multiplication of tensor maps, and for `contract` when you mean
     /// index-notation contraction.
     ///
+    /// **Anyonic semantics**: composition remains coupled-sector block
+    /// multiplication. The fixed domain/codomain boundary supplies the whole
+    /// geometry, so no legs are exchanged and no R symbol is used.
+    ///
     /// The axes are not arguments, deliberately: composition is defined by the
     /// codomain/domain split itself, and TensorKit's `*` takes none.
     ///
@@ -13716,6 +13808,14 @@ where
     ///   mutually dual, or providers reporting different rule identities.
     ///   Those come back from the expert layer, which owns the rules.
     ///   Checked Generic failures use [`GenericTensorError::Plan`].
+    ///
+    /// ```compile_fail
+    /// use tenet::core::FibonacciFusionRule;
+    /// use tenet::typed::TensorMap;
+    /// fn unavailable(tensor: &TensorMap<FibonacciFusionRule, f64>) {
+    ///     let _ = tensor.compose(tensor);
+    /// }
+    /// ```
     #[doc(alias = "mul")]
     pub fn compose(&self, other: &Self) -> Result<Self, TypedFacadeError<R>> {
         // Runtime first, exactly as `contract`: crossing runtimes is a

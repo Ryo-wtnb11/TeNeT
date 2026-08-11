@@ -452,7 +452,7 @@ pub(crate) enum OrientedContractionKind {
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn tensorcontract_oriented_multiplicity_free<R, D>(
-    context: &mut Ctx<D, RuleIdentity>,
+    context: &mut CoefficientCtx<D, RuleIdentity, R::Scalar>,
     lhs_authority: &BoundDynamicFusionMapSpace<R>,
     lhs: FusionOperand<'_>,
     lhs_data: &[D],
@@ -465,10 +465,11 @@ pub(crate) fn tensorcontract_oriented_multiplicity_free<R, D>(
     kind: OrientedContractionKind,
 ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), tenet_tensors::OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>
+    R: MultiplicityFreeRigidSymbols
         + CheckedFusionAlgebra
         + TreeTransformRuleCacheKey<Key = RuleIdentity>,
-    D: ScalarOps,
+    R::Scalar: CategoricalScalar + tenet_tensors::DenseRecouplingScalar,
+    D: ScalarOps + RecouplingCoefficientAction<R::Scalar>,
 {
     if lhs_authority.provider().rule_identity() != rhs_authority.provider().rule_identity() {
         return Err(tenet_tensors::OperationError::from_core_preserving_context(
@@ -1150,15 +1151,16 @@ fn increment_coordinates(coordinates: &mut [usize], shape: &[usize]) {
 /// there is no conjugated storage for [`tenet_tensors::FusionOperand`] to
 /// separate from its logical geometry.
 pub(crate) fn tensorcompose_owned_multiplicity_free<R, D>(
-    context: &mut Ctx<D, RuleIdentity>,
+    context: &mut CoefficientCtx<D, RuleIdentity, R::Scalar>,
     lhs: BoundDynamicTensorRef<'_, R, D>,
     rhs: BoundDynamicTensorRef<'_, R, D>,
     lhs_axes: &[usize],
     rhs_axes: &[usize],
 ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), tenet_tensors::OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleIdentity>,
-    D: ScalarOps,
+    R: MultiplicityFreeRigidSymbols + TreeTransformRuleCacheKey<Key = RuleIdentity>,
+    R::Scalar: CategoricalScalar + tenet_tensors::DenseRecouplingScalar,
+    D: ScalarOps + RecouplingCoefficientAction<R::Scalar>,
 {
     let destination = BoundDynamicFusionMapSpace::contracted_multiplicity_free_ordered(
         lhs.space(),
