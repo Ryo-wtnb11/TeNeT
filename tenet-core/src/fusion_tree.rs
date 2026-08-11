@@ -2142,8 +2142,8 @@ where
     R: GenericRigidSymbols,
     R::Scalar: CategoricalScalar + Send + Sync,
 {
-    let mut checked = InfallibleGeneric::new(rule);
-    match merge_fusion_trees_generic_checked(&mut checked, lhs, rhs, coupled, root_vertex) {
+    let checked = InfallibleGeneric::new(rule);
+    match merge_fusion_trees_generic_checked(&checked, lhs, rhs, coupled, root_vertex) {
         Ok(terms) => Ok(terms),
         Err(CheckedGenericSymbolError::Provider(never)) => match never {},
         Err(CheckedGenericSymbolError::Shape { symbol, expected, actual }) => {
@@ -8675,8 +8675,8 @@ where
     R: GenericFusionSymbols,
     R::Scalar: CategoricalScalar,
 {
-    let mut checked = InfallibleGenericFR(rule);
-    match generic_braid_tree_result(&mut checked, tree, permutation, levels, swaps) {
+    let checked = InfallibleGenericFR(rule);
+    match generic_braid_tree_result(&checked, tree, permutation, levels, swaps) {
         Ok(rows) => Ok(rows),
         Err(CheckedGenericSymbolError::Provider(never)) => match never {},
         Err(CheckedGenericSymbolError::Core(error)) => Err(error),
@@ -9033,8 +9033,8 @@ where
     R: GenericRigidSymbols,
     R::Scalar: CategoricalScalar,
 {
-    let mut checked = InfallibleGenericRigid(rule);
-    match generic_bendright_tree_pair_result(&mut checked, tree_pair) {
+    let checked = InfallibleGenericRigid(rule);
+    match generic_bendright_tree_pair_result(&checked, tree_pair) {
         Ok(rows) => Ok(rows),
         Err(CheckedGenericSymbolError::Provider(never)) => match never {},
         Err(CheckedGenericSymbolError::Core(error)) => Err(error),
@@ -9244,8 +9244,8 @@ where
     R: GenericRigidSymbols,
     R::Scalar: CategoricalScalar,
 {
-    let mut checked = InfallibleGenericRigid(rule);
-    match generic_bendleft_tree_pair_result(&mut checked, tree_pair) {
+    let checked = InfallibleGenericRigid(rule);
+    match generic_bendleft_tree_pair_result(&checked, tree_pair) {
         Ok(rows) => Ok(rows),
         Err(CheckedGenericSymbolError::Provider(never)) => match never {},
         Err(CheckedGenericSymbolError::Core(error)) => Err(error),
@@ -9368,8 +9368,8 @@ where
     R::Scalar: CategoricalScalar,
 {
     let rule = tree_pair.rule;
-    let mut checked = InfallibleGenericRigid(rule);
-    match generic_repartition_tree_pair_result(&mut checked, tree_pair.key, target_codomain_rank) {
+    let checked = InfallibleGenericRigid(rule);
+    match generic_repartition_tree_pair_result(&checked, tree_pair.key, target_codomain_rank) {
         Ok(rows) => Ok(rows),
         Err(CheckedGenericSymbolError::Provider(never)) => match never {},
         Err(CheckedGenericSymbolError::Core(error)) => Err(error),
@@ -9388,8 +9388,8 @@ where
     R: GenericRigidSymbols,
     R::Scalar: CategoricalScalar,
 {
-    let mut checked = InfallibleGenericRigid(rule);
-    match generic_repartition_tree_pair_result(&mut checked, tree_pair, target_codomain_rank) {
+    let checked = InfallibleGenericRigid(rule);
+    match generic_repartition_tree_pair_result(&checked, tree_pair, target_codomain_rank) {
         Ok(rows) => Ok(rows),
         Err(CheckedGenericSymbolError::Provider(never)) => match never {},
         Err(CheckedGenericSymbolError::Core(error)) => Err(error),
@@ -10577,9 +10577,9 @@ where
     R: GenericRigidSymbols,
     R::Scalar: CategoricalScalar,
 {
-    let mut checked = InfallibleGenericRigid(tree_pair.rule);
+    let checked = InfallibleGenericRigid(tree_pair.rule);
     match generic_braid_tree_pair_result(
-        &mut checked,
+        &checked,
         tree_pair.key,
         target_codomain_rank,
         permutation,
