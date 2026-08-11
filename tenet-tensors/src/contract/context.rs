@@ -2225,6 +2225,10 @@ where
         )
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the private prepared replay keeps each source beside its caller-owned transformed scratch tensor"
+    )]
     fn transform_sources_and_contract<
         R,
         const DST_NOUT: usize,

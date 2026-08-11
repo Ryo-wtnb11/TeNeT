@@ -2086,6 +2086,10 @@ where
         }
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the cache lookup keeps source geometry, storage identity, transform, conjugation, and layout primer independently keyed"
+    )]
     fn get_or_compile_transformed_source<R, D, BT>(
         &mut self,
         tree_context: &mut TreeTransformExecutionContext<D, RuleKey, f64, BT>,
@@ -2387,6 +2391,10 @@ where
         Ok(entry)
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the cache lookup keeps both source spaces, plan, output authority, and layout primer independently keyed"
+    )]
     fn get_or_compile_core_dst<R, D, BT>(
         &mut self,
         tree_context: &mut TreeTransformExecutionContext<D, RuleKey, f64, BT>,
@@ -2755,6 +2763,10 @@ where
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the typed-to-dynamic replay boundary keeps backend resources, transform, structures, buffers, conjugation, and alpha explicit"
+)]
 fn tree_pair_transform_typed_to_dynamic<
     BT,
     R,
@@ -2798,6 +2810,10 @@ where
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the dynamic-to-typed replay boundary keeps backend resources, transform, operands, and alpha/beta explicit"
+)]
 fn tree_pair_transform_dynamic_to_typed<
     BT,
     R,

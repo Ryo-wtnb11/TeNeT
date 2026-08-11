@@ -607,6 +607,10 @@ where
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the backend-explicit trace keeps execution resources, rule, operands, axis spec, and alpha/beta separate"
+)]
 pub fn tensortrace_fusion_into_with<
     B,
     R,
@@ -924,6 +928,10 @@ where
 ///
 /// The raw block keys follow [`tree_transform_structure`]'s provider-domain
 /// precondition.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the backend-explicit transform keeps resources, grouped operation, operands, and alpha/beta separate"
+)]
 pub fn tree_transform_into_with<
     B,
     R,
@@ -1130,6 +1138,10 @@ where
 ///
 /// The raw block keys follow [`tree_transform_structure`]'s provider-domain
 /// precondition.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the backend-explicit convenience API mirrors permute while TreeTransformOperation is the grouped alternative"
+)]
 pub fn permute_into_with<
     B,
     R,
@@ -1297,6 +1309,10 @@ where
 ///
 /// The raw block keys follow [`tree_transform_structure`]'s provider-domain
 /// precondition.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the backend-explicit convenience API mirrors braid while TreeTransformOperation is the grouped alternative"
+)]
 pub fn braid_into_with<
     B,
     R,
@@ -1467,6 +1483,10 @@ where
 ///
 /// The raw block keys follow [`tree_transform_structure`]'s provider-domain
 /// precondition.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the backend-explicit convenience API mirrors transpose while TreeTransformOperation is the grouped alternative"
+)]
 pub fn transpose_into_with<
     B,
     R,

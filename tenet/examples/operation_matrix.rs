@@ -93,6 +93,10 @@ fn delta(after: usize, before: usize) -> isize {
     after as isize - before as isize
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the example printer exposes one local benchmark row without introducing a reporting abstraction"
+)]
 fn print_sample(
     symmetry: &str,
     operation: &str,
@@ -155,6 +159,10 @@ fn print_sample(
     );
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the example harness keeps local labels, phases, timing policy, and measured closure explicit"
+)]
 fn bench<T, E>(
     runtime: &Runtime,
     symmetry: &str,

@@ -62,6 +62,10 @@ where
         DDst: HostWritableStorage<D>,
         DSrc: HostReadableStorage<D>;
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the raw backend contract keeps workspace, replay structures, buffers, and alpha/beta explicit"
+    )]
     fn tree_transform_structure_into_raw(
         &mut self,
         workspace: &mut Self::Workspace,
@@ -74,6 +78,10 @@ where
         beta: D,
     ) -> Result<(), OperationError>;
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the overwrite backend contract keeps workspace, replay structures, buffers, and alpha explicit"
+    )]
     fn tree_transform_structure_overwrite_into_raw(
         &mut self,
         workspace: &mut Self::Workspace,

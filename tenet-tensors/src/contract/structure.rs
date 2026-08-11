@@ -405,6 +405,10 @@ where
         validate_structure_identity("rhs", &self.rhs_storage_structure, rhs_structure)
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the compiled structure execution boundary keeps backend resources, three operands, and alpha/beta explicit"
+    )]
     pub fn execute_with<
         B,
         D,

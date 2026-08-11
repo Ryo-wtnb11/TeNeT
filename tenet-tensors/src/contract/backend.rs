@@ -36,6 +36,10 @@ where
 {
     type Workspace;
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the backend trait keeps workspace, compiled structure, three operands, and alpha/beta explicit"
+    )]
     fn tensorcontract_structure_into<
         const DST_NOUT: usize,
         const DST_NIN: usize,
@@ -64,6 +68,10 @@ where
         DLhs: HostReadableStorage<D>,
         DRhs: HostReadableStorage<D>;
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the raw backend trait keeps three structure/data pairs, workspace, and alpha/beta explicit"
+    )]
     fn tensorcontract_structure_into_raw(
         &mut self,
         workspace: &mut Self::Workspace,
@@ -521,6 +529,10 @@ where
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the dense adapter preserves the backend trait's workspace, structure, operands, and alpha/beta boundary"
+)]
 fn tensorcontract_structure_with_dense_executor<
     E,
     D,

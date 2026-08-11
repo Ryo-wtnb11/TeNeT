@@ -2756,6 +2756,10 @@ impl<'operation> PreparedTreePairOperation<'operation> {
         )
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the private lowering step keeps the two tree sides, levels, and optional raw-axis projection explicit"
+    )]
     fn prepare_braid_lowered(
         unique: bool,
         raw_axis_positions: Option<&'operation [usize]>,

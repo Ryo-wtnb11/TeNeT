@@ -2552,6 +2552,10 @@ impl DynamicFusionMapSpace {
         Self::contracted_space_from_plan(rule, lhs, rhs, axes, &axis_plan, nout, nin, primer)
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the private builder keeps source spaces, compiled axis plan, output split, and layout primer explicit"
+    )]
     fn contracted_space_from_plan<R>(
         rule: &R,
         lhs: &Self,

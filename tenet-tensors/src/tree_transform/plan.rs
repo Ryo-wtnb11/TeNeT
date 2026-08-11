@@ -1597,6 +1597,10 @@ where
     Ok(TreeTransformGroupPlan::new(specs))
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the oriented planner keeps logical keys, storage authority, projection, orientation, rank, and thread policy explicit"
+)]
 pub(crate) fn build_oriented_tree_pair_transform_group_plan_with_threads<R>(
     rule: &R,
     operation: TreeTransformOperation,

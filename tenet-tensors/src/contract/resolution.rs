@@ -66,6 +66,10 @@ where
 
 /// Compiles and attributes the ordinary eager route without introducing a
 /// reusable execution artifact.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "profiled resolution keeps three spaces, TensorContractSpec, two lazy compilers, and profile sink explicit"
+)]
 pub(crate) fn compile_resolution_profiled<R>(
     rule: &R,
     dst: &DynamicFusionMapSpace,
