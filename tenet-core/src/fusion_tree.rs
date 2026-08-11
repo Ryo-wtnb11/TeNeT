@@ -6155,6 +6155,10 @@ where
 ///
 /// Every source follows
 /// [`FusionTreePairKey::validate_for_rule`]'s provider-domain precondition.
+#[expect(
+    clippy::type_complexity,
+    reason = "the public block transform API exposes source-major coefficient rows directly"
+)]
 pub fn multiplicity_free_braid_tree_pair_block<R>(
     rule: &R,
     src_keys: &[FusionTreePairKey],
@@ -6341,6 +6345,10 @@ where
 ///
 /// Every source follows
 /// [`FusionTreePairKey::validate_for_rule`]'s provider-domain precondition.
+#[expect(
+    clippy::type_complexity,
+    reason = "the public block transform API exposes source-major coefficient rows directly"
+)]
 pub fn multiplicity_free_permute_tree_pair_block<R>(
     rule: &R,
     src_keys: &[FusionTreePairKey],
@@ -6498,6 +6506,10 @@ where
 ///
 /// Every source follows
 /// [`FusionTreePairKey::validate_for_rule`]'s provider-domain precondition.
+#[expect(
+    clippy::type_complexity,
+    reason = "the public block transform API exposes source-major coefficient rows directly"
+)]
 pub fn multiplicity_free_transpose_tree_pair_block<R>(
     rule: &R,
     src_keys: &[FusionTreePairKey],
@@ -8253,6 +8265,10 @@ impl PreparedMultiplicityFreeArtin {
     }
 }
 
+#[expect(
+    clippy::type_complexity,
+    reason = "the SmallVec inline capacity is part of this local braid allocation contract"
+)]
 fn multiplicity_free_artin_braid_at_with_inverse<R>(
     rule: &R,
     tree: &FusionTreeKey,
@@ -8969,6 +8985,10 @@ where
     })
 }
 
+#[expect(
+    clippy::type_complexity,
+    reason = "the SmallVec inline capacity is part of this local bend allocation contract"
+)]
 fn multiplicity_free_bendright_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreePairKey,
@@ -8989,6 +9009,10 @@ where
     Ok(terms)
 }
 
+#[expect(
+    clippy::type_complexity,
+    reason = "the SmallVec inline capacity is part of this local bend allocation contract"
+)]
 fn multiplicity_free_bendleft_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreePairKey,
@@ -9402,6 +9426,10 @@ where
 ///
 /// Structural validation completes before the first F, dimension, or pivotal
 /// query, and provider failures retain their typed source.
+#[expect(
+    clippy::type_complexity,
+    reason = "the public checked API exposes destination tree-pair coefficient rows directly"
+)]
 pub fn generic_repartition_tree_pair_checked<C>(
     rule: &C,
     tree_pair: &FusionTreePairKey,
@@ -10638,6 +10666,10 @@ where
 }
 
 /// Checked Generic-fusion braid on a full tree pair.
+#[expect(
+    clippy::type_complexity,
+    reason = "the public checked API exposes destination tree-pair coefficient rows directly"
+)]
 pub fn generic_braid_tree_pair_checked<C>(
     rule: &C,
     tree_pair: &FusionTreePairKey,
@@ -10733,6 +10765,10 @@ where
 }
 
 /// Checked Generic-fusion permutation on a full tree pair.
+#[expect(
+    clippy::type_complexity,
+    reason = "the public checked API exposes destination tree-pair coefficient rows directly"
+)]
 pub fn generic_permute_tree_pair_checked<C>(
     rule: &C,
     tree_pair: &FusionTreePairKey,
