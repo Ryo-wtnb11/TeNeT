@@ -1935,6 +1935,10 @@ where
         })
     }
 
+    #[expect(
+        clippy::type_complexity,
+        reason = "the public block API returns source-major transform rows as nested vectors"
+    )]
     pub fn execute_multiplicity_free_braid_for_block_indices<I>(
         &self,
         indices: I,
@@ -1995,6 +1999,10 @@ where
         multiplicity_free_braid_tree_pair_block_ordered_proven(batch, operation)
     }
 
+    #[expect(
+        clippy::type_complexity,
+        reason = "the public block API returns source-major transform rows as nested vectors"
+    )]
     pub fn execute_multiplicity_free_transpose_for_block_indices<I>(
         &self,
         indices: I,
@@ -2122,6 +2130,10 @@ where
         )
     }
 
+    #[expect(
+        clippy::type_complexity,
+        reason = "the public block API returns source-major transform rows as nested vectors"
+    )]
     pub fn braid_codomain_rows_for_block_indices<I>(
         &self,
         indices: I,
@@ -2137,6 +2149,10 @@ where
         multiplicity_free_braid_tree_block_proven(batch, permutation, levels)
     }
 
+    #[expect(
+        clippy::type_complexity,
+        reason = "the public block API returns source-major transform rows as nested vectors"
+    )]
     pub fn permute_codomain_rows_for_block_indices<I>(
         &self,
         indices: I,

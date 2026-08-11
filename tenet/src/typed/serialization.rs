@@ -1173,6 +1173,10 @@ where
         .collect()
 }
 
+#[expect(
+    clippy::type_complexity,
+    reason = "the wire decoder returns space metadata and dense block records together"
+)]
 fn read_dense<R, D, C, F>(
     reader: &mut Reader<'_>,
     limits: DecodeLimits,
@@ -1226,6 +1230,10 @@ where
     Ok((space, blocks))
 }
 
+#[expect(
+    clippy::type_complexity,
+    reason = "the wire decoder returns space metadata and compact sector spectra together"
+)]
 fn read_diagonal<R, D, C, F>(
     reader: &mut Reader<'_>,
     limits: DecodeLimits,

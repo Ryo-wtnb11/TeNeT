@@ -438,6 +438,8 @@ pub struct BoundDynFactor<R, D> {
     data: Vec<D>,
 }
 
+type DynamicFactorPair<R, D> = (BoundDynFactor<R, D>, BoundDynFactor<R, D>);
+
 impl<R, D> fmt::Debug for BoundDynFactor<R, D> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BoundDynFactor")
@@ -643,6 +645,10 @@ impl<R, D> SvdTruncDyn<R, D> {
         self.error
     }
 
+    #[expect(
+        clippy::type_complexity,
+        reason = "the public decomposition accessor returns its named components in documented order"
+    )]
     pub fn into_parts(
         self,
     ) -> (
@@ -707,6 +713,10 @@ impl<R, D> SvdCompactDyn<R, D> {
         &self.singular_values
     }
 
+    #[expect(
+        clippy::type_complexity,
+        reason = "the public decomposition accessor returns its named components in documented order"
+    )]
     pub fn into_parts(
         self,
     ) -> (
@@ -2098,6 +2108,10 @@ where
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::type_complexity,
+    reason = "the test seam returns source, left, and right region tables in documented order"
+)]
 pub(crate) fn compact_factor_plan_regions_for_test(
     plan: &CompactFactorPlan,
 ) -> (
@@ -2644,7 +2658,7 @@ fn build_left_right_bound_pair<R, D>(
     homspace: &FusionTreeHomSpace,
     matricizations: &[SectorMatricization<D>],
     pairs: &[FactorPair<D>],
-) -> Result<(BoundDynFactor<R, D>, BoundDynFactor<R, D>), OperationError>
+) -> Result<DynamicFactorPair<R, D>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
@@ -3358,6 +3372,10 @@ impl<R, D> SvdFullDyn<R, D> {
     pub fn singular_values(&self) -> &[SectorSpectrum] {
         &self.singular_values
     }
+    #[expect(
+        clippy::type_complexity,
+        reason = "the public decomposition accessor returns its named components in documented order"
+    )]
     pub fn into_parts(
         self,
     ) -> (
@@ -3988,6 +4006,10 @@ fn scale_row<D: FactorScalar>(data: &mut [D], cols: usize, leading: usize, row: 
 /// square `m x m` unitary and `R` the upper-trapezoidal `m x n`, obtained
 /// from one economy QR of the augmented `[A | I]` on the dense boundary.
 /// The positive-diagonal gauge is applied (MAK / TensorKit 0.17 default).
+#[expect(
+    clippy::type_complexity,
+    reason = "the public factorization API exposes its ordered factor tuple directly"
+)]
 pub fn qr_full<E, R, D, const NOUT: usize, const NIN: usize>(
     dense: &mut E,
     input: &BoundTensorMapRef<'_, R, D, NOUT, NIN>,
@@ -4002,6 +4024,10 @@ where
 }
 
 /// Provider-bound dynamic-rank [`qr_full`].
+#[expect(
+    clippy::type_complexity,
+    reason = "the public factorization API exposes its ordered factor tuple directly"
+)]
 pub fn qr_full_dyn<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
@@ -4078,6 +4104,10 @@ where
 /// lower-trapezoidal `m x n` and `Q` the square `n x n` unitary, via the full
 /// QR of the transposed sector matrices.
 /// The positive-diagonal gauge is applied (MAK / TensorKit 0.17 default).
+#[expect(
+    clippy::type_complexity,
+    reason = "the public factorization API exposes its ordered factor tuple directly"
+)]
 pub fn lq_full<E, R, D, const NOUT: usize, const NIN: usize>(
     dense: &mut E,
     input: &BoundTensorMapRef<'_, R, D, NOUT, NIN>,
@@ -4092,6 +4122,10 @@ where
 }
 
 /// Provider-bound dynamic-rank [`lq_full`].
+#[expect(
+    clippy::type_complexity,
+    reason = "the public factorization API exposes its ordered factor tuple directly"
+)]
 pub fn lq_full_dyn<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
@@ -4886,6 +4920,10 @@ where
 /// the domain. Every coupled-sector matrix must have at least as many rows as
 /// columns; otherwise this returns [`OperationError::InvalidArgument`] before
 /// entering the dense SVD.
+#[expect(
+    clippy::type_complexity,
+    reason = "the public factorization API exposes its ordered factor tuple directly"
+)]
 pub fn left_polar<E, RuleKey, BT, BC, R, D, const NOUT: usize, const NIN: usize>(
     dense: &mut E,
     context: &mut tenet_tensors::TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
@@ -4911,6 +4949,10 @@ where
 }
 
 /// Dynamic-rank [`left_polar`].
+#[expect(
+    clippy::type_complexity,
+    reason = "the public factorization API exposes its ordered factor tuple directly"
+)]
 pub fn left_polar_dyn<E, RuleKey, BT, BC, R, D>(
     dense: &mut E,
     context: &mut tenet_tensors::TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
@@ -4933,7 +4975,7 @@ fn left_polar_dyn_reported<E, RuleKey, BT, BC, R, D>(
     context: &mut tenet_tensors::TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
     input: &BoundDynamicTensorRef<'_, R, D>,
     error_direction: PolarDirection,
-) -> Result<(BoundDynFactor<R, D>, BoundDynFactor<R, D>), OperationError>
+) -> Result<DynamicFactorPair<R, D>, OperationError>
 where
     E: DenseExecutor + ?Sized,
     RuleKey: Clone + Eq + std::hash::Hash + Send + Sync + 'static,
@@ -4968,6 +5010,10 @@ where
 /// Every coupled-sector matrix must have at least as many columns as rows;
 /// otherwise this returns [`OperationError::InvalidArgument`] before entering
 /// the dense SVD.
+#[expect(
+    clippy::type_complexity,
+    reason = "the public factorization API exposes its ordered factor tuple directly"
+)]
 pub fn right_polar<E, RuleKey, BT, BC, R, D, const NOUT: usize, const NIN: usize>(
     dense: &mut E,
     context: &mut tenet_tensors::TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
@@ -4993,6 +5039,10 @@ where
 }
 
 /// Dynamic-rank [`right_polar`].
+#[expect(
+    clippy::type_complexity,
+    reason = "the public factorization API exposes its ordered factor tuple directly"
+)]
 pub fn right_polar_dyn<E, RuleKey, BT, BC, R, D>(
     dense: &mut E,
     context: &mut tenet_tensors::TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
@@ -5015,7 +5065,7 @@ fn right_polar_dyn_reported<E, RuleKey, BT, BC, R, D>(
     context: &mut tenet_tensors::TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
     input: &BoundDynamicTensorRef<'_, R, D>,
     error_direction: PolarDirection,
-) -> Result<(BoundDynFactor<R, D>, BoundDynFactor<R, D>), OperationError>
+) -> Result<DynamicFactorPair<R, D>, OperationError>
 where
     E: DenseExecutor + ?Sized,
     RuleKey: Clone + Eq + std::hash::Hash + Send + Sync + 'static,
@@ -5048,6 +5098,10 @@ where
 
 /// Left polar factors of an adjoint view, executed on its owned parent.
 #[doc(hidden)]
+#[expect(
+    clippy::type_complexity,
+    reason = "the public factorization API exposes its ordered factor tuple directly"
+)]
 pub fn left_polar_adjoint_parent_dyn<E, RuleKey, BT, BC, R, D>(
     dense: &mut E,
     context: &mut tenet_tensors::TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
@@ -5069,6 +5123,10 @@ where
 
 /// Right polar factors of an adjoint view, executed on its owned parent.
 #[doc(hidden)]
+#[expect(
+    clippy::type_complexity,
+    reason = "the public factorization API exposes its ordered factor tuple directly"
+)]
 pub fn right_polar_adjoint_parent_dyn<E, RuleKey, BT, BC, R, D>(
     dense: &mut E,
     context: &mut tenet_tensors::TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
@@ -5093,6 +5151,10 @@ where
 /// `R : W <- domain` with per-sector bond `min(rows, cols)`. The
 /// positive-diagonal gauge is applied (MAK / TensorKit 0.17 default
 /// `positive = true`): `R`'s diagonal is real non-negative per sector.
+#[expect(
+    clippy::type_complexity,
+    reason = "the public factorization API exposes its ordered factor tuple directly"
+)]
 pub fn qr_compact<E, R, D, const NOUT: usize, const NIN: usize>(
     dense: &mut E,
     input: &BoundTensorMapRef<'_, R, D, NOUT, NIN>,
@@ -5107,6 +5169,10 @@ where
 }
 
 /// Provider-bound compact QR used by authority-preserving callers.
+#[expect(
+    clippy::type_complexity,
+    reason = "the public factorization API exposes its ordered factor tuple directly"
+)]
 pub fn qr_compact_dyn<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
@@ -5173,7 +5239,7 @@ fn qr_compact_direct_regions<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
     plan: &CompactFactorPlan,
-) -> Result<(BoundDynFactor<R, D>, BoundDynFactor<R, D>), OperationError>
+) -> Result<DynamicFactorPair<R, D>, OperationError>
 where
     E: DenseExecutor + ?Sized,
     R: FusionRule,
@@ -5230,6 +5296,10 @@ where
 /// coupled sector and `L : codomain <- W`. The positive-diagonal gauge is
 /// applied (MAK / TensorKit 0.17 default `positive = true`): `L`'s diagonal
 /// is real non-negative per sector.
+#[expect(
+    clippy::type_complexity,
+    reason = "the public factorization API exposes its ordered factor tuple directly"
+)]
 pub fn lq_compact<E, R, D, const NOUT: usize, const NIN: usize>(
     dense: &mut E,
     input: &BoundTensorMapRef<'_, R, D, NOUT, NIN>,
@@ -5244,6 +5314,10 @@ where
 }
 
 /// Provider-bound compact LQ used by authority-preserving callers.
+#[expect(
+    clippy::type_complexity,
+    reason = "the public factorization API exposes its ordered factor tuple directly"
+)]
 pub fn lq_compact_dyn<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
@@ -5311,7 +5385,7 @@ fn lq_compact_direct_regions<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
     plan: &CompactFactorPlan,
-) -> Result<(BoundDynFactor<R, D>, BoundDynFactor<R, D>), OperationError>
+) -> Result<DynamicFactorPair<R, D>, OperationError>
 where
     E: DenseExecutor + ?Sized,
     R: FusionRule,
@@ -5426,6 +5500,10 @@ where
 ///
 /// TensorKit's default `kind = :qr` maps to [`qr_compact`], which applies the
 /// positive-diagonal QR gauge (`positive = true`, the MAK default).
+#[expect(
+    clippy::type_complexity,
+    reason = "the public factorization API exposes its ordered factor tuple directly"
+)]
 pub fn left_orth<E, R, D, const NOUT: usize, const NIN: usize>(
     dense: &mut E,
     input: &BoundTensorMapRef<'_, R, D, NOUT, NIN>,
@@ -5444,6 +5522,10 @@ where
 ///
 /// TensorKit's default `kind = :lq` maps to [`lq_compact`], which applies the
 /// positive-diagonal LQ gauge (`positive = true`, the MAK default).
+#[expect(
+    clippy::type_complexity,
+    reason = "the public factorization API exposes its ordered factor tuple directly"
+)]
 pub fn right_orth<E, R, D, const NOUT: usize, const NIN: usize>(
     dense: &mut E,
     input: &BoundTensorMapRef<'_, R, D, NOUT, NIN>,
@@ -6860,7 +6942,7 @@ fn polar_dyn_checked_generic_reported<E, R, D>(
     input: &BoundDynamicTensorRef<'_, R, D>,
     direction: PolarDirection,
     error_direction: PolarDirection,
-) -> Result<(BoundDynFactor<R, D>, BoundDynFactor<R, D>), CheckedGenericFactorPlanError<R::Error>>
+) -> Result<DynamicFactorPair<R, D>, CheckedGenericFactorPlanError<R::Error>>
 where
     E: DenseExecutor + ?Sized,
     R: CheckedGenericFusion,
@@ -6952,6 +7034,10 @@ where
 }
 
 #[doc(hidden)]
+#[expect(
+    clippy::type_complexity,
+    reason = "the public checked factorization API exposes its ordered factor tuple directly"
+)]
 pub fn left_polar_dyn_checked_generic<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
@@ -6965,6 +7051,10 @@ where
 }
 
 #[doc(hidden)]
+#[expect(
+    clippy::type_complexity,
+    reason = "the public checked factorization API exposes its ordered factor tuple directly"
+)]
 pub fn right_polar_dyn_checked_generic<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
@@ -6984,6 +7074,10 @@ where
 }
 
 #[doc(hidden)]
+#[expect(
+    clippy::type_complexity,
+    reason = "the public checked factorization API exposes its ordered factor tuple directly"
+)]
 pub fn left_polar_adjoint_parent_dyn_checked_generic<E, R, D>(
     dense: &mut E,
     parent: &BoundDynamicTensorRef<'_, R, D>,
@@ -7003,6 +7097,10 @@ where
 }
 
 #[doc(hidden)]
+#[expect(
+    clippy::type_complexity,
+    reason = "the public checked factorization API exposes its ordered factor tuple directly"
+)]
 pub fn right_polar_adjoint_parent_dyn_checked_generic<E, R, D>(
     dense: &mut E,
     parent: &BoundDynamicTensorRef<'_, R, D>,
@@ -7938,7 +8036,7 @@ fn build_left_right_bound_pair_generic<R, D>(
     homspace: &FusionTreeHomSpace,
     matricizations: &[SectorMatricization<D>],
     pairs: &[FactorPair<D>],
-) -> Result<(BoundDynFactor<R, D>, BoundDynFactor<R, D>), OperationError>
+) -> Result<DynamicFactorPair<R, D>, OperationError>
 where
     R: FusionRule,
     D: FactorScalar,
@@ -7983,7 +8081,7 @@ fn build_left_right_bound_pair_generic_checked<R, D>(
     homspace: &FusionTreeHomSpace,
     matricizations: &[SectorMatricization<D>],
     pairs: &[FactorPair<D>],
-) -> Result<(BoundDynFactor<R, D>, BoundDynFactor<R, D>), CheckedGenericFactorPlanError<R::Error>>
+) -> Result<DynamicFactorPair<R, D>, CheckedGenericFactorPlanError<R::Error>>
 where
     R: CheckedGenericFusion,
     D: FactorScalar,
@@ -9043,6 +9141,10 @@ where
 }
 
 /// Provider-bound compact QR for a generic rule.
+#[expect(
+    clippy::type_complexity,
+    reason = "the public factorization API exposes its ordered factor tuple directly"
+)]
 pub fn qr_compact_dyn_generic<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
@@ -9110,6 +9212,10 @@ where
 /// through the checked staging boundary; dense QR itself performs no provider
 /// queries and therefore needs no Tenferro-specific capability.
 #[doc(hidden)]
+#[expect(
+    clippy::type_complexity,
+    reason = "the public checked factorization API exposes its ordered factor tuple directly"
+)]
 pub fn qr_compact_dyn_checked_generic<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
@@ -9168,6 +9274,10 @@ where
 /// Checked-Generic compact SVD. Dense SVD is unchanged; all provider-bound
 /// output spaces are admitted through the checked staging boundary.
 #[doc(hidden)]
+#[expect(
+    clippy::type_complexity,
+    reason = "the public checked SVD API exposes its ordered U, S, and Vh tuple directly"
+)]
 pub fn svd_compact_dyn_checked_generic<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
@@ -9219,6 +9329,10 @@ where
 /// Checked-Generic compact LQ, implemented through the existing host
 /// adjoint-plus-QR boundary; no borrowed conjugated-dot capability is needed.
 #[doc(hidden)]
+#[expect(
+    clippy::type_complexity,
+    reason = "the public checked factorization API exposes its ordered factor tuple directly"
+)]
 pub fn lq_compact_dyn_checked_generic<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
@@ -9277,6 +9391,10 @@ where
 
 /// Checked-Generic full QR via sectorwise augmented `[A | I]` QR.
 #[doc(hidden)]
+#[expect(
+    clippy::type_complexity,
+    reason = "the public checked factorization API exposes its ordered factor tuple directly"
+)]
 pub fn qr_full_dyn_checked_generic<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
@@ -9476,6 +9594,10 @@ where
 
 /// Checked-Generic full LQ via the full QR of each sector's adjoint matrix.
 #[doc(hidden)]
+#[expect(
+    clippy::type_complexity,
+    reason = "the public checked factorization API exposes its ordered factor tuple directly"
+)]
 pub fn lq_full_dyn_checked_generic<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
@@ -10088,6 +10210,10 @@ where
 }
 
 /// Provider-bound compact LQ for a generic rule.
+#[expect(
+    clippy::type_complexity,
+    reason = "the public factorization API exposes its ordered factor tuple directly"
+)]
 pub fn lq_compact_dyn_generic<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,

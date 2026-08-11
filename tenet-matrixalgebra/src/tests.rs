@@ -7433,6 +7433,10 @@ fn null_space_second_sector_failure_builds_no_factor() {
 }
 
 #[test]
+#[expect(
+    clippy::type_complexity,
+    reason = "the test table pairs codomain and domain sector fixtures directly"
+)]
 fn inv_rejects_nonisomorphic_spaces_before_dense_execution() {
     // What: neither a square stored-sector intersection nor equal total
     // dimension substitutes for complete coupled-sector isomorphism.

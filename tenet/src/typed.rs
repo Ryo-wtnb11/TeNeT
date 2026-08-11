@@ -453,6 +453,11 @@ where
     )
 }
 
+type CheckedGenericSpectrumResult<R, V> = Result<
+    Vec<SectorSpectrum<<R as TypedSectorAdmission>::Sector, V>>,
+    GenericTensorError<<R as CheckedGenericFusion>::Error>,
+>;
+
 impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
@@ -864,12 +869,7 @@ where
     D: TensorScalar,
 {
     /// Checked-Generic general eigenvalues for owned host tensors.
-    fn eig_vals_checked_generic(
-        &self,
-    ) -> Result<
-        Vec<SectorSpectrum<<R as TypedSectorAdmission>::Sector, num_complex::Complex64>>,
-        GenericTensorError<<R as CheckedGenericFusion>::Error>,
-    > {
+    fn eig_vals_checked_generic(&self) -> CheckedGenericSpectrumResult<R, num_complex::Complex64> {
         let TypedTensorRepr::Owned(body) = &self.repr else {
             return Err(GenericTensorError::Facade(Error::InvalidArgument(
                 "checked Generic eig_vals does not accept lazy adjoints".to_string(),
@@ -904,12 +904,7 @@ where
     D: TensorScalar,
 {
     /// Checked-Generic Hermitian eigenvalues for owned host tensors.
-    fn eigh_vals_checked_generic(
-        &self,
-    ) -> Result<
-        Vec<SectorSpectrum<<R as TypedSectorAdmission>::Sector, f64>>,
-        GenericTensorError<<R as CheckedGenericFusion>::Error>,
-    > {
+    fn eigh_vals_checked_generic(&self) -> CheckedGenericSpectrumResult<R, f64> {
         let TypedTensorRepr::Owned(body) = &self.repr else {
             return Err(GenericTensorError::Facade(Error::InvalidArgument(
                 "checked Generic eigh_vals does not accept lazy adjoints".to_string(),
@@ -1029,6 +1024,10 @@ where
         > + CheckedGenericFusion,
     D: TensorScalar + FactorScalar<Eig = num_complex::Complex64>,
 {
+    #[expect(
+        clippy::type_complexity,
+        reason = "the checked eigensolver returns its diagonal and eigenvector factors together"
+    )]
     fn eig_full_checked_generic(
         &self,
     ) -> Result<
@@ -1150,12 +1149,7 @@ where
     D: TensorScalar,
 {
     /// Checked-Generic singular values only for owned host tensors.
-    fn svd_vals_checked_generic(
-        &self,
-    ) -> Result<
-        Vec<SectorSpectrum<<R as TypedSectorAdmission>::Sector, f64>>,
-        GenericTensorError<<R as CheckedGenericFusion>::Error>,
-    > {
+    fn svd_vals_checked_generic(&self) -> CheckedGenericSpectrumResult<R, f64> {
         let TypedTensorRepr::Owned(body) = &self.repr else {
             return Err(GenericTensorError::Facade(Error::InvalidArgument(
                 "checked Generic svd_vals does not accept lazy adjoints".to_string(),
@@ -1955,6 +1949,10 @@ where
     /// assert!(rebuilt.add(&a.to_c64(), 1.0.into(), (-1.0).into())?.norm()? < 1e-12);
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
+    #[expect(
+        clippy::type_complexity,
+        reason = "the public eigensolver API exposes its ordered factor tuple directly"
+    )]
     pub fn eig_full(
         &self,
     ) -> Result<
@@ -4757,9 +4755,17 @@ where
     R: TypedSectorAdmission,
     D: TensorScalar,
 {
+    #[expect(
+        clippy::type_complexity,
+        reason = "the dispatch contract preserves the public ordered factor tuple"
+    )]
     fn left_polar(
         tensor: &TensorMap<R, D>,
     ) -> Result<(TensorMap<R, D>, TensorMap<R, D>), Self::FacadeError>;
+    #[expect(
+        clippy::type_complexity,
+        reason = "the dispatch contract preserves the public ordered factor tuple"
+    )]
     fn right_polar(
         tensor: &TensorMap<R, D>,
     ) -> Result<(TensorMap<R, D>, TensorMap<R, D>), Self::FacadeError>;
@@ -4789,6 +4795,10 @@ where
     R: TypedSectorAdmission,
     D: TensorScalar,
 {
+    #[expect(
+        clippy::type_complexity,
+        reason = "the dispatch contract preserves the public ordered factor tuple"
+    )]
     fn qr_compact(
         tensor: &TensorMap<R, D>,
     ) -> Result<(TensorMap<R, D>, TensorMap<R, D>), Self::FacadeError>;
@@ -4800,9 +4810,17 @@ where
     R: TypedSectorAdmission,
     D: TensorScalar,
 {
+    #[expect(
+        clippy::type_complexity,
+        reason = "the dispatch contract preserves the public ordered factor tuple"
+    )]
     fn svd_compact(
         tensor: &TensorMap<R, D>,
     ) -> Result<(TensorMap<R, D>, TensorMap<R, D>, TensorMap<R, D>), Self::FacadeError>;
+    #[expect(
+        clippy::type_complexity,
+        reason = "the dispatch contract preserves the public ordered factor tuple"
+    )]
     fn svd_full(
         tensor: &TensorMap<R, D>,
     ) -> Result<(TensorMap<R, D>, TensorMap<R, D>, TensorMap<R, D>), Self::FacadeError>;
@@ -4814,6 +4832,10 @@ where
     R: TypedSectorAdmission,
     D: TensorScalar,
 {
+    #[expect(
+        clippy::type_complexity,
+        reason = "the dispatch contract preserves the public ordered factor tuple"
+    )]
     fn lq_compact(
         tensor: &TensorMap<R, D>,
     ) -> Result<(TensorMap<R, D>, TensorMap<R, D>), Self::FacadeError>;
@@ -4825,6 +4847,10 @@ where
     R: TypedSectorAdmission,
     D: TensorScalar,
 {
+    #[expect(
+        clippy::type_complexity,
+        reason = "the dispatch contract preserves the public ordered factor tuple"
+    )]
     fn qr_full(
         tensor: &TensorMap<R, D>,
     ) -> Result<(TensorMap<R, D>, TensorMap<R, D>), Self::FacadeError>;
@@ -4836,6 +4862,10 @@ where
     R: TypedSectorAdmission,
     D: TensorScalar,
 {
+    #[expect(
+        clippy::type_complexity,
+        reason = "the dispatch contract preserves the public ordered factor tuple"
+    )]
     fn lq_full(
         tensor: &TensorMap<R, D>,
     ) -> Result<(TensorMap<R, D>, TensorMap<R, D>), Self::FacadeError>;
@@ -4882,6 +4912,10 @@ where
     R: TypedSectorAdmission,
     D: TensorScalar,
 {
+    #[expect(
+        clippy::type_complexity,
+        reason = "the dispatch contract preserves the public ordered factor tuple"
+    )]
     fn eigh_full(
         tensor: &TensorMap<R, D>,
     ) -> Result<(TensorMap<R, D>, TensorMap<R, D>), Self::FacadeError>;
@@ -4920,6 +4954,10 @@ where
     R: TypedSectorAdmission,
     D: TensorScalar,
 {
+    #[expect(
+        clippy::type_complexity,
+        reason = "the dispatch contract preserves the public ordered factor tuple"
+    )]
     fn eig_full(
         tensor: &TensorMap<R, D>,
     ) -> Result<
@@ -6671,6 +6709,10 @@ where
     })
 }
 
+#[expect(
+    clippy::type_complexity,
+    reason = "the flip staging contract returns the admitted space with occurrence metadata"
+)]
 fn checked_generic_flip_destination<R, D>(
     tensor: &TensorMap<R, D>,
     legs: &[usize],
@@ -7995,6 +8037,10 @@ where
     source: &'a TensorMap<S, D>,
     codomain: Vec<GradedSpace<P>>,
     domain: Vec<GradedSpace<P>>,
+    #[expect(
+        clippy::type_complexity,
+        reason = "each prepared block stores its source index and two axis maps together"
+    )]
     blocks: HashMap<BlockFusionTrees<P::Sector>, (usize, Vec<usize>, Vec<usize>)>,
 }
 
@@ -11807,6 +11853,10 @@ where
     /// directly stored compact spectrum (it is dense or a lazy adjoint);
     /// otherwise it clones only the `O(Σ_c k_c)` compact values in canonical
     /// bond-sector order.
+    #[expect(
+        clippy::type_complexity,
+        reason = "the public compact readback API exposes provider-labelled sector spectra"
+    )]
     pub fn diagonal_spectrum(
         &self,
     ) -> Result<Option<Vec<SectorSpectrum<R::Sector, D>>>, TypedFacadeError<R>> {
@@ -12112,6 +12162,10 @@ where
     /// Returns an error if the provider cannot decode a stored fusion-tree
     /// label, or if stored block metadata does not form a valid view into the
     /// logical tensor data.
+    #[expect(
+        clippy::type_complexity,
+        reason = "the public block iterator yields labelled trees with borrowed block views"
+    )]
     pub fn blocks<'a>(
         &'a self,
     ) -> Result<

@@ -6155,6 +6155,10 @@ where
 ///
 /// Every source follows
 /// [`FusionTreePairKey::validate_for_rule`]'s provider-domain precondition.
+#[expect(
+    clippy::type_complexity,
+    reason = "the public block transform API exposes source-major coefficient rows directly"
+)]
 pub fn multiplicity_free_braid_tree_pair_block<R>(
     rule: &R,
     src_keys: &[FusionTreePairKey],
@@ -6341,6 +6345,10 @@ where
 ///
 /// Every source follows
 /// [`FusionTreePairKey::validate_for_rule`]'s provider-domain precondition.
+#[expect(
+    clippy::type_complexity,
+    reason = "the public block transform API exposes source-major coefficient rows directly"
+)]
 pub fn multiplicity_free_permute_tree_pair_block<R>(
     rule: &R,
     src_keys: &[FusionTreePairKey],
@@ -6498,6 +6506,10 @@ where
 ///
 /// Every source follows
 /// [`FusionTreePairKey::validate_for_rule`]'s provider-domain precondition.
+#[expect(
+    clippy::type_complexity,
+    reason = "the public block transform API exposes source-major coefficient rows directly"
+)]
 pub fn multiplicity_free_transpose_tree_pair_block<R>(
     rule: &R,
     src_keys: &[FusionTreePairKey],
@@ -8253,6 +8265,10 @@ impl PreparedMultiplicityFreeArtin {
     }
 }
 
+#[expect(
+    clippy::type_complexity,
+    reason = "the SmallVec inline capacity is part of this local braid allocation contract"
+)]
 fn multiplicity_free_artin_braid_at_with_inverse<R>(
     rule: &R,
     tree: &FusionTreeKey,
@@ -8323,7 +8339,7 @@ fn generic_artin_braid_at_with_inverse_checked<C>(
     tree: &FusionTreeKey,
     index: usize,
     inverse: bool,
-) -> Result<Vec<(FusionTreeKey, C::Scalar)>, CheckedGenericSymbolError<C::Error>>
+) -> Result<GenericTreeTerms<C::Scalar>, CheckedGenericSymbolError<C::Error>>
 where
     C: GenericFRAccess,
 {
@@ -8691,7 +8707,7 @@ fn generic_braid_tree_result<C>(
     permutation: &[usize],
     levels: &[usize],
     swaps: &[usize],
-) -> Result<Vec<(FusionTreeKey, C::Scalar)>, CheckedGenericSymbolError<C::Error>>
+) -> Result<GenericTreeTerms<C::Scalar>, CheckedGenericSymbolError<C::Error>>
 where
     C: GenericFRAccess,
 {
@@ -8969,6 +8985,10 @@ where
     })
 }
 
+#[expect(
+    clippy::type_complexity,
+    reason = "the SmallVec inline capacity is part of this local bend allocation contract"
+)]
 fn multiplicity_free_bendright_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreePairKey,
@@ -8989,6 +9009,10 @@ where
     Ok(terms)
 }
 
+#[expect(
+    clippy::type_complexity,
+    reason = "the SmallVec inline capacity is part of this local bend allocation contract"
+)]
 fn multiplicity_free_bendleft_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreePairKey,
@@ -9047,7 +9071,7 @@ where
 fn generic_bendright_tree_pair_checked<C>(
     rule: &C,
     tree_pair: &FusionTreePairKey,
-) -> Result<Vec<(FusionTreePairKey, C::Scalar)>, CheckedGenericSymbolError<C::Error>>
+) -> Result<GenericTreePairTerms<C::Scalar>, CheckedGenericSymbolError<C::Error>>
 where
     C: CheckedGenericRigidSymbols,
 {
@@ -9059,7 +9083,7 @@ where
 fn generic_bendright_tree_pair_result<C>(
     rule: &C,
     tree_pair: &FusionTreePairKey,
-) -> Result<Vec<(FusionTreePairKey, C::Scalar)>, CheckedGenericSymbolError<C::Error>>
+) -> Result<GenericTreePairTerms<C::Scalar>, CheckedGenericSymbolError<C::Error>>
 where
     C: GenericRigidAccess,
 {
@@ -9258,7 +9282,7 @@ where
 fn generic_bendleft_tree_pair_checked<C>(
     rule: &C,
     tree_pair: &FusionTreePairKey,
-) -> Result<Vec<(FusionTreePairKey, C::Scalar)>, CheckedGenericSymbolError<C::Error>>
+) -> Result<GenericTreePairTerms<C::Scalar>, CheckedGenericSymbolError<C::Error>>
 where
     C: CheckedGenericRigidSymbols,
 {
@@ -9270,7 +9294,7 @@ where
 fn generic_bendleft_tree_pair_result<C>(
     rule: &C,
     tree_pair: &FusionTreePairKey,
-) -> Result<Vec<(FusionTreePairKey, C::Scalar)>, CheckedGenericSymbolError<C::Error>>
+) -> Result<GenericTreePairTerms<C::Scalar>, CheckedGenericSymbolError<C::Error>>
 where
     C: GenericRigidAccess,
 {
@@ -9402,6 +9426,10 @@ where
 ///
 /// Structural validation completes before the first F, dimension, or pivotal
 /// query, and provider failures retain their typed source.
+#[expect(
+    clippy::type_complexity,
+    reason = "the public checked API exposes destination tree-pair coefficient rows directly"
+)]
 pub fn generic_repartition_tree_pair_checked<C>(
     rule: &C,
     tree_pair: &FusionTreePairKey,
@@ -9428,7 +9456,7 @@ fn generic_repartition_tree_pair_result<C>(
     rule: &C,
     tree_pair: &FusionTreePairKey,
     target_codomain_rank: usize,
-) -> Result<Vec<(FusionTreePairKey, C::Scalar)>, CheckedGenericSymbolError<C::Error>>
+) -> Result<GenericTreePairTerms<C::Scalar>, CheckedGenericSymbolError<C::Error>>
 where
     C: GenericRigidAccess,
 {
@@ -10603,7 +10631,7 @@ fn generic_braid_tree_pair_result<C>(
     levels: &[usize],
     swaps: &[usize],
     identity: bool,
-) -> Result<Vec<(FusionTreePairKey, C::Scalar)>, CheckedGenericSymbolError<C::Error>>
+) -> Result<GenericTreePairTerms<C::Scalar>, CheckedGenericSymbolError<C::Error>>
 where
     C: GenericRigidAccess,
 {
@@ -10638,6 +10666,10 @@ where
 }
 
 /// Checked Generic-fusion braid on a full tree pair.
+#[expect(
+    clippy::type_complexity,
+    reason = "the public checked API exposes destination tree-pair coefficient rows directly"
+)]
 pub fn generic_braid_tree_pair_checked<C>(
     rule: &C,
     tree_pair: &FusionTreePairKey,
@@ -10733,6 +10765,10 @@ where
 }
 
 /// Checked Generic-fusion permutation on a full tree pair.
+#[expect(
+    clippy::type_complexity,
+    reason = "the public checked API exposes destination tree-pair coefficient rows directly"
+)]
 pub fn generic_permute_tree_pair_checked<C>(
     rule: &C,
     tree_pair: &FusionTreePairKey,
