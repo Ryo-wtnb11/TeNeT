@@ -177,8 +177,7 @@ where
         rule: &R,
         lhs: &FusionTreeHomSpace,
         rhs: &FusionTreeHomSpace,
-        lhs_axes: &[usize],
-        rhs_axes: &[usize],
+        axes: TensorContractSpec<'_>,
         output_axes: &[usize],
         dst_codomain_rank: usize,
     ) -> Result<(FusionTreeHomSpace, PreparedLayoutKeys), OperationError> {
@@ -187,8 +186,8 @@ where
             MetadataRequest::Contract {
                 lhs,
                 rhs,
-                lhs_axes,
-                rhs_axes,
+                lhs_axes: axes.lhs_contracting_axes(),
+                rhs_axes: axes.rhs_contracting_axes(),
                 output_axes,
                 dst_codomain_rank,
             },
@@ -2589,8 +2588,7 @@ impl DynamicFusionMapSpace {
             rule,
             lhs.homspace(),
             rhs.homspace(),
-            axes.lhs_contracting_axes(),
-            axes.rhs_contracting_axes(),
+            axes,
             &axis_plan.output_axes,
             nout,
         )
