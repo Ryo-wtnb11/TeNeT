@@ -9,7 +9,7 @@ use std::sync::Arc;
 use tenet_core::{FusionTreeHomSpace, FusionTreePairOrientation, MultiplicityFreeRigidSymbols};
 
 use super::structure::TensorContractStructure;
-use crate::OperationError;
+use crate::{DenseBlockScalar, OperationError};
 use tenet_operations::axis::TensorContractSpec;
 use tenet_operations::fusion_replay::FusionBlockContractPlan;
 use tenet_operations::TensorContractFusionProfile;
@@ -27,15 +27,15 @@ use super::fusion_block::{
 /// Resolved execution artifact for one contraction key: the route decision
 /// and its compiled plan are one value, never cached separately.
 #[derive(Clone, Debug)]
-pub(crate) enum Resolution {
+pub(crate) enum Resolution<C = f64> {
     /// Coupled-sector direct GEMM (TensorKit `mul!` shape).
-    Core(Arc<FusionBlockContractPlan>),
+    Core(Arc<FusionBlockContractPlan<C>>),
     /// Source/output tree transforms around a core contraction
     /// (TensorKit `@tensor` shape).
     DynamicTree(Arc<FusionContractPlan>),
     /// Dense one-shot structure for conjugated operands (TeNeT optimization
     /// over the faithful transform-then-contract path).
-    Structure(Arc<TensorContractStructure<f64>>),
+    Structure(Arc<TensorContractStructure<C>>),
 }
 
 /// Compiles the route and plan for one ordinary contraction.
@@ -45,12 +45,15 @@ pub(crate) fn compile_resolution<R>(
     lhs: &DynamicFusionMapSpace,
     rhs: &DynamicFusionMapSpace,
     axes: TensorContractSpec<'_>,
-    compile_structure: impl FnOnce()
-        -> Result<Option<Arc<TensorContractStructure<f64>>>, OperationError>,
+    compile_structure: impl FnOnce() -> Result<
+        Option<Arc<TensorContractStructure<R::Scalar>>>,
+        OperationError,
+    >,
     compile_dynamic: impl FnOnce() -> Result<Arc<FusionContractPlan>, OperationError>,
-) -> Result<Resolution, OperationError>
+) -> Result<Resolution<R::Scalar>, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
 {
     compile_resolution_with_profile::<R, false>(
         rule,
@@ -76,13 +79,16 @@ pub(crate) fn compile_resolution_profiled<R>(
     lhs: &DynamicFusionMapSpace,
     rhs: &DynamicFusionMapSpace,
     axes: TensorContractSpec<'_>,
-    compile_structure: impl FnOnce()
-        -> Result<Option<Arc<TensorContractStructure<f64>>>, OperationError>,
+    compile_structure: impl FnOnce() -> Result<
+        Option<Arc<TensorContractStructure<R::Scalar>>>,
+        OperationError,
+    >,
     compile_dynamic: impl FnOnce() -> Result<Arc<FusionContractPlan>, OperationError>,
     profile: &mut TensorContractFusionProfile,
-) -> Result<Resolution, OperationError>
+) -> Result<Resolution<R::Scalar>, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
 {
     compile_resolution_with_profile::<R, true>(
         rule,
@@ -103,13 +109,16 @@ fn compile_resolution_with_profile<R, const PROFILED: bool>(
     lhs: &DynamicFusionMapSpace,
     rhs: &DynamicFusionMapSpace,
     axes: TensorContractSpec<'_>,
-    compile_structure: impl FnOnce()
-        -> Result<Option<Arc<TensorContractStructure<f64>>>, OperationError>,
+    compile_structure: impl FnOnce() -> Result<
+        Option<Arc<TensorContractStructure<R::Scalar>>>,
+        OperationError,
+    >,
     compile_dynamic: impl FnOnce() -> Result<Arc<FusionContractPlan>, OperationError>,
     mut profile: Option<&mut TensorContractFusionProfile>,
-) -> Result<Resolution, OperationError>
+) -> Result<Resolution<R::Scalar>, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
 {
     let preflight_start = PROFILED.then(std::time::Instant::now);
     let preflight = CoreContractPreflight::compile(rule, dst, lhs, rhs, axes)?;
@@ -129,14 +138,14 @@ where
             }
         }
         record_resolution_preflight(&mut profile, preflight_start);
-        return compile_dynamic_tree_plan::<PROFILED>(compile_dynamic, &mut profile);
+        return compile_dynamic_tree_plan::<R::Scalar, PROFILED>(compile_dynamic, &mut profile);
     }
     if let Some(structure) = compile_structure()? {
         record_resolution_preflight(&mut profile, preflight_start);
         return Ok(Resolution::Structure(structure));
     }
     record_resolution_preflight(&mut profile, preflight_start);
-    compile_dynamic_tree_plan::<PROFILED>(compile_dynamic, &mut profile)
+    compile_dynamic_tree_plan::<R::Scalar, PROFILED>(compile_dynamic, &mut profile)
 }
 
 fn record_resolution_preflight(
@@ -151,10 +160,10 @@ fn record_resolution_preflight(
     }
 }
 
-fn compile_dynamic_tree_plan<const PROFILED: bool>(
+fn compile_dynamic_tree_plan<C, const PROFILED: bool>(
     compile_dynamic: impl FnOnce() -> Result<Arc<FusionContractPlan>, OperationError>,
     profile: &mut Option<&mut TensorContractFusionProfile>,
-) -> Result<Resolution, OperationError> {
+) -> Result<Resolution<C>, OperationError> {
     let start = PROFILED.then(std::time::Instant::now);
     let plan = compile_dynamic()?;
     if let Some(start) = start {
@@ -175,12 +184,15 @@ pub(crate) fn compile_prelowered_resolution<R>(
     lhs: &FusionOperandLayout<'_>,
     rhs: &FusionOperandLayout<'_>,
     axes: TensorContractSpec<'_>,
-    compile_structure: impl FnOnce()
-        -> Result<Option<Arc<TensorContractStructure<f64>>>, OperationError>,
+    compile_structure: impl FnOnce() -> Result<
+        Option<Arc<TensorContractStructure<R::Scalar>>>,
+        OperationError,
+    >,
     compile_dynamic: impl FnOnce() -> Result<Arc<FusionContractPlan>, OperationError>,
-) -> Result<Resolution, OperationError>
+) -> Result<Resolution<R::Scalar>, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
 {
     let preflight = CoreContractPreflight::compile_oriented(
         rule,
@@ -211,9 +223,10 @@ pub(crate) fn try_compile_oriented_canonical_core_resolution<R>(
     lhs: FusionOperand<'_>,
     rhs: FusionOperand<'_>,
     axes: TensorContractSpec<'_>,
-) -> Result<Option<Resolution>, OperationError>
+) -> Result<Option<Resolution<R::Scalar>>, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
 {
     let preflight = CoreContractPreflight::compile_oriented(
         rule,
@@ -245,12 +258,15 @@ pub(crate) fn compile_storage_resolution<R>(
     lhs: &DynamicFusionMapSpace,
     rhs: &DynamicFusionMapSpace,
     axes: TensorContractSpec<'_>,
-    compile_structure: impl FnOnce()
-        -> Result<Option<Arc<TensorContractStructure<f64>>>, OperationError>,
+    compile_structure: impl FnOnce() -> Result<
+        Option<Arc<TensorContractStructure<R::Scalar>>>,
+        OperationError,
+    >,
     compile_dynamic: impl FnOnce() -> Result<Arc<FusionContractPlan>, OperationError>,
-) -> Result<Resolution, OperationError>
+) -> Result<Resolution<R::Scalar>, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
 {
     let preflight = CoreContractPreflight::compile(rule, dst, lhs, rhs, axes)?;
     if !preflight.has_conjugation() {
@@ -287,9 +303,10 @@ fn try_compile_scaled_storage_contract_plan<R>(
     lhs: &DynamicFusionMapSpace,
     rhs: &DynamicFusionMapSpace,
     rhs_orientation: FusionTreePairOrientation,
-) -> Result<Option<FusionBlockContractPlan>, OperationError>
+) -> Result<Option<FusionBlockContractPlan<R::Scalar>>, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
 {
     let Some(regions) = rhs
         .structure()
@@ -342,9 +359,10 @@ pub(crate) fn try_compile_oriented_storage_contract_plan<R>(
     lhs: FusionOperand<'_>,
     rhs: FusionOperand<'_>,
     axes: TensorContractSpec<'_>,
-) -> Result<Option<Arc<FusionBlockContractPlan>>, OperationError>
+) -> Result<Option<Arc<FusionBlockContractPlan<R::Scalar>>>, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
 {
     let preflight = CoreContractPreflight::compile_oriented(
         rule,
@@ -383,9 +401,10 @@ pub(crate) fn try_compile_oriented_storage_composition_plan<R>(
     lhs: FusionOperand<'_>,
     rhs: FusionOperand<'_>,
     axes: TensorContractSpec<'_>,
-) -> Result<Option<Arc<FusionBlockContractPlan>>, OperationError>
+) -> Result<Option<Arc<FusionBlockContractPlan<R::Scalar>>>, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
 {
     let preflight = CoreContractPreflight::compile_oriented(
         rule,
@@ -413,9 +432,10 @@ pub(crate) fn compile_core_plan<R>(
     lhs: &DynamicFusionMapSpace,
     rhs: &DynamicFusionMapSpace,
     axes: TensorContractSpec<'_>,
-) -> Result<Arc<FusionBlockContractPlan>, OperationError>
+) -> Result<Arc<FusionBlockContractPlan<R::Scalar>>, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
 {
     let preflight = CoreContractPreflight::compile(rule, dst, lhs, rhs, axes)?;
     super::fusion::reject_fusion_contract_conjugation(axes)?;
@@ -432,9 +452,10 @@ pub(crate) fn compile_composition_plan<R>(
     lhs: &FusionOperandLayout<'_>,
     rhs: &FusionOperandLayout<'_>,
     axes: TensorContractSpec<'_>,
-) -> Result<Arc<FusionBlockContractPlan>, OperationError>
+) -> Result<Arc<FusionBlockContractPlan<R::Scalar>>, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
 {
     let validated = CoreContractPreflight::compile_oriented(
         rule,
@@ -457,7 +478,7 @@ pub(crate) fn rhs_contract_requires_twist<R>(
     axes: TensorContractSpec<'_>,
 ) -> Result<bool, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
 {
     rhs_contract_homspace_requires_twist(rule, rhs.homspace(), axes)
 }
@@ -466,7 +487,7 @@ fn validated_rhs_contract_requires_twist<R>(
     validated: &ValidatedCoreContract<'_, R>,
 ) -> Result<bool, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
 {
     if validated.rule().braiding_style() != tenet_core::BraidingStyleKind::Fermionic {
         return Ok(false);
@@ -489,7 +510,7 @@ pub(crate) fn rhs_contract_homspace_requires_twist<R>(
     axes: TensorContractSpec<'_>,
 ) -> Result<bool, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
 {
     rhs_contract_axes_require_twist(rule, rhs, axes.rhs_contracting_axes())
 }
@@ -500,7 +521,7 @@ fn rhs_contract_axes_require_twist<R>(
     rhs_contracting_axes: &[usize],
 ) -> Result<bool, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols,
 {
     if rule.braiding_style() != tenet_core::BraidingStyleKind::Fermionic {
         return Ok(false);

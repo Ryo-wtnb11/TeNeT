@@ -219,8 +219,9 @@ pub fn tensorcontract_fusion_into<
     beta: D,
 ) -> Result<(), OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<R::Scalar>,
     DDst: HostWritableStorage<D>,
     DLhs: HostReadableStorage<D>,
     DRhs: HostReadableStorage<D>,
@@ -265,8 +266,9 @@ pub fn tensorproduct_fusion_into<
     beta: D,
 ) -> Result<(), OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<R::Scalar>,
     DDst: HostWritableStorage<D>,
     DLhs: HostReadableStorage<D>,
     DRhs: HostReadableStorage<D>,
@@ -313,8 +315,9 @@ pub fn tensorproduct_fusion_into_with_conjugation<
     beta: D,
 ) -> Result<(), OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<R::Scalar>,
     DDst: HostWritableStorage<D>,
     DLhs: HostReadableStorage<D>,
     DRhs: HostReadableStorage<D>,
@@ -393,8 +396,9 @@ pub fn tensorcontract_fusion_via_tree_pair_transforms_into<
     beta: D,
 ) -> Result<(), OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<R::Scalar>,
     DDst: HostWritableStorage<D>,
     DLhs: HostReadableStorage<D>,
     DRhs: HostReadableStorage<D>,
@@ -456,8 +460,9 @@ pub fn tensorcontract_fusion_prepared_into<
     beta: D,
 ) -> Result<(), OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<R::Scalar>,
     DDst: HostWritableStorage<D>,
     DLhs: HostReadableStorage<D>,
     DRhs: HostReadableStorage<D>,
@@ -532,8 +537,9 @@ pub fn tensorcontract_fusion_prepared_into_core_dst<
     beta: D,
 ) -> Result<(), OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<R::Scalar>,
     DDst: HostWritableStorage<D>,
     DDstCan: HostWritableStorage<D> + HostReadableStorage<D>,
     DLhs: HostReadableStorage<D>,
@@ -610,10 +616,11 @@ pub fn tensorcontract_fusion_prepared_into_with<
     beta: D,
 ) -> Result<(), OperationError>
 where
-    BT: TreeTransformBackend<D, f64>,
-    BC: TensorContractBackend<D, f64>,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+    BT: TreeTransformBackend<D, R::Scalar>,
+    BC: TensorContractBackend<D, R::Scalar>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<R::Scalar>,
     DDst: HostWritableStorage<D>,
     DLhs: HostReadableStorage<D>,
     DRhs: HostReadableStorage<D>,
@@ -728,10 +735,11 @@ pub fn tensorcontract_fusion_prepared_into_core_dst_with<
     beta: D,
 ) -> Result<(), OperationError>
 where
-    BT: TreeTransformBackend<D, f64>,
-    BC: TensorContractBackend<D, f64>,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+    BT: TreeTransformBackend<D, R::Scalar>,
+    BC: TensorContractBackend<D, R::Scalar>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<R::Scalar>,
     DDst: HostWritableStorage<D>,
     DDstCan: HostWritableStorage<D> + HostReadableStorage<D>,
     DLhs: HostReadableStorage<D>,
@@ -830,9 +838,10 @@ fn tree_transform_overwrite_with_optional_storage_conjugation<
     alpha: D,
 ) -> Result<(), OperationError>
 where
-    B: TreeTransformBackend<D, f64>,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+    B: TreeTransformBackend<D, R::Scalar>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<R::Scalar>,
     DDst: HostWritableStorage<D>,
     DSrc: HostReadableStorage<D>,
 {
@@ -899,9 +908,10 @@ pub fn tensorcontract_fusion_into_with<
     beta: D,
 ) -> Result<(), OperationError>
 where
-    B: TensorContractBackend<D, f64>,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+    B: TensorContractBackend<D, R::Scalar>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<R::Scalar>,
     DDst: HostWritableStorage<D>,
     DLhs: HostReadableStorage<D>,
     DRhs: HostReadableStorage<D>,
@@ -1012,10 +1022,11 @@ pub fn tensorcontract_fusion_into_with_backends<
     beta: D,
 ) -> Result<(), OperationError>
 where
-    BT: TreeTransformBackend<D, f64>,
-    BC: TensorContractBackend<D, f64>,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+    BT: TreeTransformBackend<D, R::Scalar>,
+    BC: TensorContractBackend<D, R::Scalar>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<R::Scalar>,
     DDst: HostWritableStorage<D>,
     DLhs: HostReadableStorage<D>,
     DRhs: HostReadableStorage<D>,

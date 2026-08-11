@@ -1,4 +1,10 @@
 use super::*;
+
+#[test]
+fn tensorcontract_block_spec_new_supports_complex_coefficients() {
+    let spec = TensorContractBlockSpec::<num_complex::Complex64>::new(2, 3, 5);
+    assert_eq!(spec.coefficient(), num_complex::Complex64::new(1.0, 0.0));
+}
 use std::sync::Arc;
 
 #[test]
