@@ -1525,6 +1525,10 @@ impl CheckedGenericFusion for LateGenericSpy {
 }
 
 #[test]
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
 fn checked_generic_polar_covers_scalar_maps() {
     // What: a rank-zero tensor map is a one-by-one vacuum-sector matrix for
     // both left and right polar decomposition.
@@ -1594,6 +1598,10 @@ fn checked_generic_factor_plan_late_failure_precedes_commit() {
 }
 
 #[test]
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
 fn checked_generic_full_svd_preserves_provider_and_completes_unmatched_rows() {
     let rule = FactorGenericRule;
     let x = SectorId::new(1);
@@ -1640,6 +1648,10 @@ fn checked_generic_full_svd_preserves_provider_and_completes_unmatched_rows() {
 }
 
 #[test]
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
 fn checked_generic_full_svd_failure_publishes_no_factors() {
     let (source, data) = generic_factorization_input();
     let failing = Arc::new(LateGenericSpy {
@@ -1659,6 +1671,10 @@ fn checked_generic_full_svd_failure_publishes_no_factors() {
 }
 
 #[test]
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
 fn checked_generic_eigh_stages_dense_work_before_checked_factor_admission() {
     let x = SectorId::new(1);
     let leg = SectorLeg::new([(x, 1)], false);
@@ -1718,6 +1734,10 @@ fn checked_generic_eig_uses_the_existing_numerical_rank_boundary() {
 }
 
 #[test]
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
 fn checked_generic_eig_stages_dense_work_before_checked_factor_admission() {
     let x = SectorId::new(1);
     let leg = SectorLeg::new([(x, 1)], false);
@@ -1750,6 +1770,10 @@ fn checked_generic_eig_stages_dense_work_before_checked_factor_admission() {
 }
 
 #[test]
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
 fn checked_generic_full_svd_completes_unmatched_columns_and_disjoint_space() {
     let rule = FactorGenericRule;
     let x = SectorId::new(1);
@@ -1802,6 +1826,10 @@ fn checked_generic_full_svd_completes_unmatched_columns_and_disjoint_space() {
     assert!(full.singular_values().is_empty());
 }
 
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
 fn assert_checked_full_svd_builder_failure(fail_at: usize) {
     let (source, data) = generic_factorization_input();
     let provider = Arc::new(LateGenericSpy {
@@ -1849,6 +1877,10 @@ fn checked_generic_full_svd_s_builder_failure_preserves_provider_context() {
 }
 
 #[test]
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
 fn checked_generic_full_svd_local_shape_error_precedes_provider_query() {
     // What: checked tensor admission reports the local storage mismatch before
     // any provider-backed factorization work can run.
@@ -1885,6 +1917,10 @@ fn checked_spy_null(
 }
 
 #[test]
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
 fn checked_generic_null_admits_only_after_all_dense_work_and_keeps_exact_authority() {
     // What: both null sides finish every local SVD/completion before their
     // data-dependent output admission, whose late error publishes no factor.
@@ -1941,6 +1977,10 @@ fn checked_generic_null_admits_only_after_all_dense_work_and_keeps_exact_authori
 }
 
 #[test]
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
 fn checked_generic_null_dense_failure_never_reaches_output_admission() {
     // What: a later sector SVD failure stops after structural preflight and
     // before the checked output builder or any scatter can run.
@@ -1983,6 +2023,10 @@ fn checked_generic_null_dense_failure_never_reaches_output_admission() {
 }
 
 #[test]
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
 fn checked_generic_disjoint_null_is_identity_without_dense_calls() {
     // What: disjoint support returns complete identity bases for both sides
     // and never enters SVD or completion.
@@ -7153,6 +7197,10 @@ fn solve_left_direct_into_rejects_foreign_authority_and_wrong_output_before_exec
 }
 
 #[test]
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
 fn pinv_direct_into_rejects_foreign_authority_and_wrong_output_before_execution() {
     // What: the checked-Generic pinv seam treats its admitted destination as
     // a sealed input, before it allocates staging or invokes SVD/GEMM.

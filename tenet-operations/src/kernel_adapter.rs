@@ -66,14 +66,22 @@ struct StridedKernelScratch {
 ///     src_strides: &[1],
 /// };
 /// ```
+///
+/// Exhaustive destructuring is sealed as well:
+///
+/// ```compile_fail
+/// use tenet_operations::BakedFusedLayout;
+///
+/// fn inspect(layout: BakedFusedLayout<'_>) {
+///     let BakedFusedLayout { dims, dst_strides, src_strides } = layout;
+/// }
+/// ```
 #[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
 pub struct BakedFusedLayout<'a> {
     pub dims: &'a [usize],
     pub dst_strides: &'a [isize],
     pub src_strides: &'a [isize],
-    // Why not expose the seal: readable fields preserve custom-adapter
-    // compatibility, while construction must remain tied to normalized data.
-    _sealed: (),
 }
 
 impl<'a> BakedFusedLayout<'a> {
@@ -105,7 +113,6 @@ impl<'a> BakedFusedLayout<'a> {
                 dims,
                 dst_strides,
                 src_strides,
-                _sealed: (),
             });
         }
         if dims == [1] && dst_strides == [0] && src_strides == [0] {
@@ -113,7 +120,6 @@ impl<'a> BakedFusedLayout<'a> {
                 dims,
                 dst_strides,
                 src_strides,
-                _sealed: (),
             });
         }
         if dims.iter().any(|&dim| dim <= 1) {
@@ -130,7 +136,6 @@ impl<'a> BakedFusedLayout<'a> {
             dims,
             dst_strides,
             src_strides,
-            _sealed: (),
         })
     }
 
@@ -146,7 +151,6 @@ impl<'a> BakedFusedLayout<'a> {
             dims,
             dst_strides,
             src_strides,
-            _sealed: (),
         }
     }
 

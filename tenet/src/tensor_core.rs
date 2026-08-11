@@ -831,13 +831,13 @@ fn validate_tensor_product_source_structures<E>(
     validate_tensor_product_source_structure("lhs", lhs)?;
     #[cfg(test)]
     {
-        return CHECKED_TENSOR_PRODUCT_RHS_STRUCTURE_OVERRIDE.with(|override_structure| {
+        CHECKED_TENSOR_PRODUCT_RHS_STRUCTURE_OVERRIDE.with(|override_structure| {
             let override_structure = override_structure.borrow();
             validate_tensor_product_source_structure(
                 "rhs",
                 override_structure.as_ref().unwrap_or(rhs),
             )
-        });
+        })
     }
     #[cfg(not(test))]
     validate_tensor_product_source_structure("rhs", rhs)

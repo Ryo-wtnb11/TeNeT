@@ -281,6 +281,10 @@ where
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::items_after_test_module,
+    reason = "co-location keeps the large private-helper tests out of the public surface"
+)]
 mod generic_context_tests {
     use super::*;
     use crate::tests::GenericMultiplicityRule;

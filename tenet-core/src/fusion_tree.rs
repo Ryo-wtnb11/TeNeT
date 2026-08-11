@@ -8309,8 +8309,8 @@ where
     R: GenericFusionSymbols,
     R::Scalar: CategoricalScalar,
 {
-    let mut checked = InfallibleGenericFR(rule);
-    match generic_artin_braid_at_with_inverse_checked(&mut checked, tree, index, inverse) {
+    let checked = InfallibleGenericFR(rule);
+    match generic_artin_braid_at_with_inverse_checked(&checked, tree, index, inverse) {
         Ok(rows) => Ok(rows),
         Err(CheckedGenericSymbolError::Provider(never)) => match never {},
         Err(CheckedGenericSymbolError::Core(error)) => Err(error),

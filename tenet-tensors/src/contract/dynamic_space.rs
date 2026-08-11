@@ -4760,7 +4760,7 @@ mod checked_metadata_tests {
             &rule,
             homspace,
             shapes,
-            |rule, homspace| checked_layout_primer(rule, homspace),
+            checked_layout_primer,
         )
         .unwrap();
 
