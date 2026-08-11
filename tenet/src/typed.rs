@@ -4449,7 +4449,7 @@ where
 
 /// Tensor-side construction gate for payload/provider coefficient pairs.
 #[doc(hidden)]
-pub(crate) trait TypedTensorConstructionDispatch<R, D>: TypedTensorModeDispatch<R>
+pub trait TypedTensorConstructionDispatch<R, D>: TypedTensorModeDispatch<R>
 where
     R: TypedSectorAdmission,
     D: TensorScalar,
@@ -12003,7 +12003,6 @@ where
     }
 }
 
-#[allow(private_bounds)]
 impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
