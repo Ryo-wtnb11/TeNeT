@@ -5,6 +5,7 @@ Review date: 2026-08-12
 Reviewed revisions:
 
 - TeNeT: [`5390f64a`](https://github.com/Ryo-wtnb11/TeNeT/tree/5390f64a4e58b76f011f58e1576f632bfd569cf0)
+- tenferro-rs: [`ec9b0602`](https://github.com/tensor4all/tenferro-rs/tree/ec9b06025774574a5df47e11ccdd730fb0c01c80)
 - TensorKit.jl: [`64430c5`](https://github.com/QuantumKitHub/TensorKit.jl/tree/64430c522c7da3c13c8376fc9734a8ecc054a324)
 - QSpace v4 public source: [`684bdb8`](https://bitbucket.org/qspace4u/qspace-v4-pub/commits/684bdb817ee6bc14154e12445252a390ff252e70)
 - QSpace paper: [SciPost Phys. Codebases 40 (2024)](https://doi.org/10.21468/SciPostPhysCodeb.40)
@@ -16,7 +17,7 @@ The work was split into three independent source audits: (1) TensorKit mathemati
 ## 1. Executive summary
 
 1. The design thesis—**TensorKit-like categorical semantics plus Rust-native ahead-of-execution lowering**—is sound. More importantly, current TeNeT already implements most of it. Runtime-rank operations are compiled into immutable categorical group plans, layout-resolved replay descriptors, strided copy/accumulate work, and pack/GEMM/scatter work. Fusion-tree traversal and F/R evaluation are not present in the warm numerical replay loop.
-2. There is no P0 architectural blocker in the inspected CPU path. One independent P1 CPU defect remains: direct checked-Generic contraction bypasses the Runtime Generic lane and repeatedly constructs execution resources and contraction artifacts. This should first be remeasured and then fixed by reusing existing Runtime resources, not by adding a global operation cache.
+2. There is no P0 architectural blocker in the inspected CPU path. At the reviewed TeNeT revision, one independent P1 CPU defect remained: direct checked-Generic contraction bypassed the Runtime Generic lane and repeatedly constructed execution resources and contraction artifacts. This was resolved after remeasurement by #1079, which reused existing Runtime resources without adding a global operation cache.
 3. `TreeTransformGroupPlan<T>` is a genuinely layout-independent categorical plan. `TreeTransformStructure<T>` is the layout-bound, replay-ready descriptor. Its name understates its role, but its contents are coherent: block layouts, offsets, categorical coefficient payload, GEMM jobs, pack/scatter descriptors, overwrite proof, and a host parallel schedule.
 4. The material pre-CUDA gap is the execution interface, not categorical semantics. `TreeTransformBackend` is explicitly host-slice based. CUDA network execution accepts only direct contraction schedules and rejects required result/final permutations. A placement-aware replay/lowering boundary should consume the existing layout-bound descriptor without re-running symmetry reasoning.
 5. TeNeT's dynamic rank is not dynamic kernel generation. A rank-17 permutation can use a baked generic N-D strided descriptor. Rank-specialized kernels should be optional backend choices supported by measurements, not public tensor types.
@@ -242,7 +243,7 @@ The inspected warm loop does not allocate FusionTrees, evaluate F/R, search sect
 
 ## 11. Problems and design smells
 
-### [P1] Checked-Generic contraction bypasses Runtime execution-resource reuse
+### [P1 at reviewed revision; resolved by #1079] Checked-Generic contraction bypasses Runtime execution-resource reuse
 
 **Location:** `tenet/src/typed.rs:7076-7110`; `tenet-tensors/src/contract/checked_generic.rs:318-333,457-556`.
 
@@ -520,6 +521,8 @@ An “X-like” TeNeT object, if ever useful, should be a deterministic small tr
 
 The diagram is intentionally not seven mandatory cached Rust structs. The existing completed structure can serve both layout-bound plan and backend-neutral execution description until a second backend demonstrates a useful split.
 
+For the backend half of this boundary, [tenferro-rs at the reviewed revision](https://github.com/tensor4all/tenferro-rs/tree/ec9b06025774574a5df47e11ccdd730fb0c01c80) is the primary implementation reference. Tenferro already owns private finite execution staging, placement-bound scheduling, explicit transfer and event domains, and bounded runtime/backend caches. TeNeT should therefore stop at symmetry-aware structural/layout lowering where possible and evaluate a supported Tenferro backend or extension boundary first. If that boundary cannot express efficient copy/pack/GEMM/scatter replay, the result should motivate a narrow upstream seam or retain a TeNeT-local compact view. TeNeT should not copy Tenferro's crate-private `ExecProgram` or `ScheduledGraph`, nor grow a second generic device runtime.
+
 ## 19. Migration roadmap
 
 ### Phase 1 — establish measurement and invariants
@@ -626,23 +629,28 @@ Use medians plus tail latency and memory high-water mark. Reject a new cache if 
 
 Items are ordered. Existing issues should be extended rather than duplicated where scopes match.
 
-1. **Host checked-Generic contraction: reuse Runtime execution resources.** Route the checked path through the Generic lane, reproduce the #1009 baseline, and avoid an implicit ordinary-operation cache.
+1. **Host checked-Generic contraction: reuse Runtime execution resources — completed by [#1079](https://github.com/Ryo-wtnb11/TeNeT/pull/1079).** The checked path now uses the Generic lane; remeasurement did not justify an implicit ordinary-operation cache.
 2. **Benchmark: cold/warm symmetric lowering matrix and phase counters.** Extend the existing operation-matrix harness with ranks, symmetry regimes, block distributions, F/R/hash/allocation counters and CUDA task metrics.
-3. **CUDA: placement-aware tree-transform replay contract.** Add the narrow successor anticipated by `replay_backend.rs`, consuming existing completed structures without host slices.
+3. **CUDA: placement-aware tree-transform replay contract ([#1080](https://github.com/Ryo-wtnb11/TeNeT/issues/1080)).** Add the narrow successor anticipated by `replay_backend.rs`, consuming existing completed structures without host slices. Evaluate a supported Tenferro boundary first; otherwise motivate a narrow upstream seam or retain a TeNeT-local compact view.
 4. **CUDA: device strided copy/axpby, pack and scatter tasks.** Preserve scalar fast paths and generic runtime rank.
-5. **CUDA: backend-local completed-plan lowering sidecar.** Begin operation/context-local; retain device grouping/task/workspace metadata only if repeated lowering is measured, with complete keys and byte bounds.
+5. **CUDA: decide backend-lowering retention ownership ([#1082](https://github.com/Ryo-wtnb11/TeNeT/issues/1082)).** Begin operation/context-local; first determine whether retention belongs to Tenferro's prepared/backend cache owners. Add a TeNeT sidecar only for metadata proven to remain TeNeT-specific and reusable.
 6. **CUDA network: lower non-direct/result/final permutations.** Replace direct-only admission incrementally while keeping preflight atomicity.
 7. **Runtime: measure and narrow CUDA lease/lock scope.** Introduce device-local execution leases only after the measurement demonstrates serialization.
-8. **CUDA scheduler: streams/events/workspace ownership.** Keep scheduling state out of structural plans.
+8. **CUDA scheduler: streams/events/workspace ownership ([#1083](https://github.com/Ryo-wtnb11/TeNeT/issues/1083)).** Keep scheduling state out of structural plans and avoid duplicating Tenferro's execution-endpoint, transfer and event-domain runtime.
 9. **CPU: benchmark-gated many-small grouping and documentation.** Evaluate grouped GEMM/fused replay and document the cold/warm/hot ownership boundary.
 10. **Conditional only: cross-layout categorical transform cache.** Open implementation work only if Phase 1 proves repeated categorical compilation dominates and a complete deterministic gauge/provider key is available.
 
 ### Final judgment
 
-TeNeT **does maintain a runtime-rank symmetric tensor API while lowering FusionTree/F/R semantics into reusable finite numerical work on CPU**. The arbitrary-rank frontend does not remain as arbitrary-rank categorical interpretation in the inspected hot replay path. After the CPU-first #1077 remeasurement/fix and the benchmark gate, the next CUDA-enabling step is to expose the already-lowered work through a placement-aware execution boundary. That is preferable to a categorical redesign or a new hierarchy of global caches.
+TeNeT **does maintain a runtime-rank symmetric tensor API while lowering FusionTree/F/R semantics into reusable finite numerical work on CPU**. The arbitrary-rank frontend does not remain as arbitrary-rank categorical interpretation in the inspected hot replay path. With the CPU-first #1077 remeasurement/fix completed by #1079, the next CUDA-enabling step is to expose the already-lowered work through a placement-aware execution boundary. That is preferable to a categorical redesign or a new hierarchy of global caches.
 
 Issue disposition from this audit:
 
-- New evidence-backed Host leaf: [#1077](https://github.com/Ryo-wtnb11/TeNeT/issues/1077), checked-Generic Runtime resource reuse.
-- Existing CUDA umbrella updated: [#3 audit comment](https://github.com/Ryo-wtnb11/TeNeT/issues/3#issuecomment-5255889347), containing the incremental placement-aware execution order.
-- No new issue was opened for transform-cache sharding, a separate categorical cache, a universal mega-IR, rank-specialized kernels, or multi-GPU scheduling. Each currently lacks a prerequisite implementation or measurement, and several would duplicate the boundaries fixed by #451 and #783.
+- Completed Host leaf: [#1077](https://github.com/Ryo-wtnb11/TeNeT/issues/1077), checked-Generic Runtime resource reuse, implemented by [#1079](https://github.com/Ryo-wtnb11/TeNeT/pull/1079). Source inspection proves resource reuse; measurement did not show an allocation reduction, so no broader operation cache was added.
+- CUDA umbrella and first implementation gate: [#3](https://github.com/Ryo-wtnb11/TeNeT/issues/3) and [#1080](https://github.com/Ryo-wtnb11/TeNeT/issues/1080), placement-aware tree-transform replay with Tenferro integration, a narrow upstream seam, and a TeNeT-local compact view retained as alternatives pending #1084.
+- Investigation gates, not implementation commitments:
+  - [#1081](https://github.com/Ryo-wtnb11/TeNeT/issues/1081), rank-specialized kernels versus generic N-D replay; generic dense execution should use Tenferro's backend contract, while reusable low-level kernel work belongs upstream in Tenferro or its kernel provider rather than TeNeT.
+  - [#1082](https://github.com/Ryo-wtnb11/TeNeT/issues/1082), retained backend-lowering metadata and cache ownership; duplicate TeNeT retention is the default rejection.
+  - [#1083](https://github.com/Ryo-wtnb11/TeNeT/issues/1083), TeNeT/Tenferro multi-stream and multi-device boundary.
+  - [#1084](https://github.com/Ryo-wtnb11/TeNeT/issues/1084), whether any common TeNeT execution IR is needed now that Tenferro already owns private finite execution staging and scheduling.
+- No issue was opened for transform-cache sharding or a separate categorical cache; both still lack evidence that an additional cache would beat current completed-structure reuse.
