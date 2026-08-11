@@ -747,7 +747,6 @@ where
     LocallyValidatedFusionTreeBlockStructure::try_new(source_proof.rule(), &dst_structure)
         .map_err(OperationError::from_core_preserving_context)?;
     let plan = build_plan(&source_proof, operation)?;
-    drop(source_proof);
     plan.compile_shared_structures_with_storage_conjugation(
         dst_structure,
         src_structure,

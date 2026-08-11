@@ -51,6 +51,11 @@ impl<T> HostScratchBuffer<T> {
         self.data.len()
     }
 
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+
     #[cfg(test)]
     #[inline]
     pub(crate) fn capacity(&self) -> usize {
