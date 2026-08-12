@@ -64,11 +64,21 @@ pub struct PhysicalCooView<C> {
 }
 
 impl<C> PhysicalCooView<C> {
-    pub fn dense_indices(&self) -> &[usize] { &self.dense_indices }
-    pub fn reduced_indices(&self) -> &[usize] { &self.reduced_indices }
-    pub fn coefficients(&self) -> &[C] { &self.coefficients }
-    pub fn len(&self) -> usize { self.coefficients.len() }
-    pub fn is_empty(&self) -> bool { self.coefficients.is_empty() }
+    pub fn dense_indices(&self) -> &[usize] {
+        &self.dense_indices
+    }
+    pub fn reduced_indices(&self) -> &[usize] {
+        &self.reduced_indices
+    }
+    pub fn coefficients(&self) -> &[C] {
+        &self.coefficients
+    }
+    pub fn len(&self) -> usize {
+        self.coefficients.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.coefficients.is_empty()
+    }
 }
 
 /// Immutable provider-bound plan for repeated physical-basis expansion.
