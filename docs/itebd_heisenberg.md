@@ -197,7 +197,7 @@ cargo test -p tenet-rs --release -- --ignored itebd
 
 # Compiling tutorial examples and warning-free crate documentation.
 cargo test -p tenet-rs --doc
-RUSTDOCFLAGS="-D warnings" cargo doc -p tenet --no-deps
+RUSTDOCFLAGS="-D warnings" cargo doc -p tenet-rs --no-deps
 ```
 
 The smoke test checks the same physics with a small bond dimension and short

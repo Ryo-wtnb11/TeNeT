@@ -37,8 +37,9 @@ planning, and kernel selection separate.
 
 External libraries and papers are cited in function documentation,
 [`tenet/references.md`](tenet/references.md), tests, or benchmark reports when
-they support a particular convention, divergence, oracle, or comparison. They
-do not define TeNeT's public contract.
+they support a particular convention, divergence, oracle, or comparison.
+TensorKit and QSpace are comparison and oracle sources, not API dependencies
+or definitions of TeNeT's public contract.
 
 ## Symmetries are providers
 
@@ -106,12 +107,12 @@ Follow the [Quick Start tutorial source](tenet/src/tutorial.md#1-quick-start)
 for the required sibling checkout and tested Tenferro revision. That tutorial
 is rendered at the top of TeNeT's crate documentation.
 
-The runnable [U(1) example](tenet/examples/quickstart.rs) is the single source
+The runnable [U(1) example](tenet-network/examples/quickstart.rs) is the single source
 for the calculation. It builds two deterministic charge-preserving maps,
 contracts them with `tensor!`, and checks the result:
 
 ```sh
-cargo run -p tenet --example quickstart
+cargo run -p tenet-network --example quickstart
 ```
 
 For the full workspace checks and local API documentation, run:
@@ -173,7 +174,7 @@ choice.
 
 | crate | role |
 | --- | --- |
-| `tenet` | Public provider-typed `Runtime`, `GradedSpace<R>`, `TensorMap<R,D,S>`, tensor operations and decomposition results. |
+| `tenet-rs` (library target `tenet`) | Public provider-typed `Runtime`, `GradedSpace<R>`, `TensorMap<R,D,S>`, tensor operations and decomposition results. |
 | `tenet-category-data` | Pinned category tables and provenance, currently exposed through `CategoryDataFibonacci`. |
 | `tenet-network` | `tensor!` frontend, `NetworkIR`, contraction-order optimizers, reusable `ContractionPlan`, plan cache, slicing metadata. |
 | `tenet-macros` | Procedural macro implementation for `tensor!`. |
