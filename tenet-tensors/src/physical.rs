@@ -3,7 +3,7 @@ use std::collections::HashMap;
 
 use tenet_core::{
     BlockKey, CategoricalScalar, CoreError, FusionTreeKey, MultiplicityFreeRigidSymbols,
-    PhysicalFusionBasis, SectorId, SectorLeg,
+    PhysicalFusionBasis, RuleIdentity, SectorId, SectorLeg,
 };
 
 use crate::{
@@ -83,6 +83,11 @@ where
     #[inline]
     pub fn shape(&self) -> &[usize] {
         &self.stage.shape
+    }
+
+    /// Stable semantic identity of the provider used to compile this plan.
+    pub fn provider_identity(&self) -> RuleIdentity {
+        self.space.provider().rule_identity()
     }
 
     /// Expands a tensor bound to the same space/provider allocation.
@@ -1154,6 +1159,7 @@ mod tests {
         let space = su2_multitree_space();
         let plan = PhysicalExpansionPlan::<SU2FusionRule, f64>::compile(&space).unwrap();
         assert_eq!(plan.shape(), &[2, 2, 2, 2]);
+        assert_eq!(plan.provider_identity(), space.provider().rule_identity());
         let first = plan
             .expand_host(BoundDynamicTensorRef::try_new(&space, &[1.25, -0.75]).unwrap())
             .unwrap();
