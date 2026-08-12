@@ -16,9 +16,9 @@ package is packaged and inspected before it is published.
 5. `tenet-tensors`
 6. `tenet-matrixalgebra`
 7. `tenet-macros`
-8. `tenet-category-data`
+8. `tenet-rs`
 9. `tenet-network`
-10. `tenet-rs`
+10. `tenet-category-data`
 
 `tenet-krylov` is not part of the initial public closure and remains private
 until the facade uses it.

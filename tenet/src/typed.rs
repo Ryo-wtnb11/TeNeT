@@ -13367,14 +13367,6 @@ where
     /// }
     /// ```
     ///
-    /// ```compile_fail
-    /// use tenet::prelude::{Complex64, FibonacciFusionRule};
-    /// use tenet::typed::TensorMap;
-    /// use tenet_network::{GreedyDenseOptimizer, Network};
-    /// fn unavailable(network: &Network, tensor: &TensorMap<FibonacciFusionRule, Complex64>) {
-    ///     let _ = network.plan(&[tensor], &GreedyDenseOptimizer);
-    /// }
-    /// ```
     pub fn otimes(&self, other: &Self) -> Result<Self, TypedFacadeError<R>> {
         if !self.runtime.same_runtime(&other.runtime) {
             return Err(Error::RuntimeMismatch.into());
