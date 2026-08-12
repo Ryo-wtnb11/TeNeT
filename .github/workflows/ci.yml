@@ -277,7 +277,7 @@ jobs:
       # workspace test step above.
       - name: Build tenet docs with warnings denied
         if: needs.changes.outputs.light_rust != 'true'
-        run: cargo doc -p tenet --no-deps
+        run: cargo doc -p tenet-rs --no-deps
         working-directory: tenet
         env:
           RUSTDOCFLAGS: -D warnings
