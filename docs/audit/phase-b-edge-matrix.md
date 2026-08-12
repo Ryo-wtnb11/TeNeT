@@ -21,10 +21,10 @@ storage forms that are not exercised.
 Commands used from the TeNeT workspace:
 
 ```text
-cargo test -p tenet --test semantic_suite --test tk_disjoint_null \
+cargo test -p tenet-rs --test semantic_suite --test tk_disjoint_null \
   --test tk_complex_su2 --test tk_fermionic_correspondence \
   --test qspace_su2_correspondence --test checked_generic_facade
-cargo test -p tenet --release --test semantic_suite -- --ignored
+cargo test -p tenet-rs --release --test semantic_suite -- --ignored
 ```
 
 The first command ran 31 tests with no failures (three invariant streams are

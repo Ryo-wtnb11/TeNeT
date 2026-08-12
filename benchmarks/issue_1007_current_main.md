@@ -26,7 +26,7 @@ Representative commands:
 ```sh
 cargo test -p tenet-tensors --features racah-generated \
   measure_checked_generic_transform_phases -- --ignored --nocapture --test-threads=1
-cargo test -p tenet --features racah-generated \
+cargo test -p tenet-rs --features racah-generated \
   --test permute_overwrite_allocations \
   checked_generic_public_transform_measurement -- --ignored --nocapture --test-threads=1
 OP_MATRIX_MIN_MS=0 OP_MATRIX_OPERATION=permute OP_MATRIX_FORM=owned \
