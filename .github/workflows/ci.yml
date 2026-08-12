@@ -268,7 +268,7 @@ jobs:
           CARGO_PROFILE_TEST_DEBUG: ${{ env.CI_HEAVY_TEST_DEBUG }}
       - name: Run quickstart example
         if: needs.changes.outputs.light_rust != 'true'
-        run: cargo run -p tenet-rs --example quickstart
+        run: cargo run -p tenet-network --example quickstart
         working-directory: tenet
       # Rustdoc gate (#579): the tenet facade's docs are a maintained public
       # surface with per-item provenance (tenet/references.md), so broken

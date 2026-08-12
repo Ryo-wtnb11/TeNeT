@@ -41,14 +41,14 @@ git clone https://github.com/tensor4all/tenferro-rs.git
 git -C tenferro-rs checkout 73926e29c2df0ae022830f9e0b736df87b699ce8
 git clone https://github.com/Ryo-wtnb11/TeNeT.git tenet
 cd tenet
-cargo run -p tenet --example quickstart
+cargo run -p tenet-network --example quickstart
 ```
 
 The command uses the default `cpu-faer` feature. The Tenferro commit above is
 the revision tested for this quickstart, not a project dependency pin.
 
 The complete calculation lives in the [U(1) quickstart
-example](https://github.com/Ryo-wtnb11/TeNeT/blob/main/tenet/examples/quickstart.rs).
+example](https://github.com/Ryo-wtnb11/TeNeT/blob/main/tenet-network/examples/quickstart.rs).
 The example creates a space with charges `-1`, `0`, and `1`, builds two
 deterministic diagonal `TensorMap`s, and contracts them with `tensor!`. Its
 assertions check both the result rank and the analytic squared norm, `50`.
