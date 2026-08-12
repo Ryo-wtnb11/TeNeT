@@ -56,6 +56,55 @@ impl<E> From<OperationError> for PhysicalConversionError<E> {
 #[doc(hidden)]
 pub type PhysicalHostBuffer<D> = (Vec<usize>, Vec<D>);
 
+/// Immutable provider-bound plan for repeated physical-basis expansion.
+///
+/// Provider answers and layout arithmetic are staged once at construction;
+/// replay only reads the staged embeddings and the input data.
+pub struct PhysicalExpansionPlan<R, C> {
+    space: BoundDynamicFusionMapSpace<R>,
+    stage: PhysicalStage<C>,
+}
+
+impl<R, C> PhysicalExpansionPlan<R, C>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = C> + PhysicalFusionBasis<Scalar = C>,
+    C: CategoricalScalar,
+{
+    /// Builds a plan from a validated provider-bound dynamic space.
+    pub fn compile(
+        space: &BoundDynamicFusionMapSpace<R>,
+    ) -> Result<Self, PhysicalConversionError<R::Error>> {
+        Ok(Self {
+            space: space.clone(),
+            stage: stage_physical(space)?,
+        })
+    }
+
+    #[inline]
+    pub fn shape(&self) -> &[usize] {
+        &self.stage.shape
+    }
+
+    /// Expands a tensor bound to the same space/provider allocation.
+    pub fn expand_host<D>(
+        &self,
+        source: BoundDynamicTensorRef<'_, R, D>,
+    ) -> Result<PhysicalHostBuffer<D>, PhysicalConversionError<R::Error>>
+    where
+        D: TreeTransformScalar + RecouplingCoefficientAction<C>,
+    {
+        if source.space().space() != self.space.space()
+            || !std::sync::Arc::ptr_eq(source.space().provider_arc(), self.space.provider_arc())
+        {
+            return Err(OperationError::StructureMismatch {
+                tensor: "physical expansion plan",
+            }
+            .into());
+        }
+        expand_physical_stage(&self.stage, source)
+    }
+}
+
 #[derive(Clone)]
 struct LocalTensor<C> {
     left_dim: usize,
@@ -814,8 +863,19 @@ where
     C: CategoricalScalar,
     D: TreeTransformScalar + RecouplingCoefficientAction<C>,
 {
-    // Provider queries and all layout arithmetic finish before the destination exists.
-    let stage = stage_physical(source.space())?;
+    let plan = PhysicalExpansionPlan::<R, C>::compile(source.space())?;
+    plan.expand_host(source)
+}
+
+fn expand_physical_stage<R, D, C>(
+    stage: &PhysicalStage<C>,
+    source: BoundDynamicTensorRef<'_, R, D>,
+) -> Result<PhysicalHostBuffer<D>, PhysicalConversionError<R::Error>>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = C> + PhysicalFusionBasis<Scalar = C>,
+    C: CategoricalScalar,
+    D: TreeTransformScalar + RecouplingCoefficientAction<C>,
+{
     if source.data().len() != stage.required_len {
         return Err(OperationError::ElementCountMismatch {
             expected: stage.required_len,
@@ -837,13 +897,13 @@ where
             for_each_index(&carrier_shape, |carrier| {
                 let coefficient =
                     pair_coefficient(codomain, domain, carrier, source.space().space().nout());
-                let position = dense_position(&stage, block, degeneracy, carrier);
+                let position = dense_position(stage, block, degeneracy, carrier);
                 output[position] =
                     output[position] + source_value.scale_by_coefficient(coefficient);
             });
         });
     }
-    Ok((stage.shape, output))
+    Ok((stage.shape.clone(), output))
 }
 
 /// Projects owned/borrowed column-major Host data into one exact dynamic layout.
@@ -901,7 +961,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
 
     use num_complex::Complex64;
     use tenet_core::{
@@ -926,7 +989,10 @@ mod tests {
 
     impl std::error::Error for ProbePhysicalError {}
 
-    struct FailingPhysicalU1;
+    struct FailingPhysicalU1 {
+        calls: Arc<AtomicUsize>,
+        fail: bool,
+    }
 
     impl FusionRule for FailingPhysicalU1 {
         fn rule_identity(&self) -> RuleIdentity {
@@ -1015,6 +1081,7 @@ mod tests {
         type Error = ProbePhysicalError;
 
         fn try_carrier_dimension(&self, _sector: SectorId) -> Result<usize, Self::Error> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
             Ok(1)
         }
 
@@ -1028,7 +1095,12 @@ mod tests {
             _coupled_basis: usize,
             _multiplicity: usize,
         ) -> Result<f64, Self::Error> {
-            Err(ProbePhysicalError)
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            if self.fail {
+                Err(ProbePhysicalError)
+            } else {
+                Ok(1.0)
+            }
         }
     }
 
@@ -1075,6 +1147,95 @@ mod tests {
         for (&actual, &expected) in projected.iter().zip(&reduced) {
             assert!((actual - expected).norm() < 2.0e-12);
         }
+    }
+
+    #[test]
+    fn physical_expansion_plan_reuses_staged_provider_data() {
+        let space = su2_multitree_space();
+        let plan = PhysicalExpansionPlan::<SU2FusionRule, f64>::compile(&space).unwrap();
+        assert_eq!(plan.shape(), &[2, 2, 2, 2]);
+        let first = plan
+            .expand_host(BoundDynamicTensorRef::try_new(&space, &[1.25, -0.75]).unwrap())
+            .unwrap();
+        let second = plan
+            .expand_host(BoundDynamicTensorRef::try_new(&space, &[0.5, 0.25]).unwrap())
+            .unwrap();
+        assert_eq!(first.0, second.0);
+        assert_ne!(first.1, second.1);
+    }
+
+    fn counting_u1_space(
+        provider: Arc<FailingPhysicalU1>,
+    ) -> BoundDynamicFusionMapSpace<FailingPhysicalU1> {
+        let leg = SectorLeg::new([(U1Irrep::new(0), 1)], false);
+        BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free(
+            provider,
+            FusionTreeHomSpace::new(
+                FusionProductSpace::new([leg.clone()]),
+                FusionProductSpace::new([leg]),
+            ),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn physical_expansion_plan_is_provider_staged_and_reusable_for_complex_data() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let space = counting_u1_space(Arc::new(FailingPhysicalU1 {
+            calls: Arc::clone(&calls),
+            fail: false,
+        }));
+        let plan = PhysicalExpansionPlan::<FailingPhysicalU1, f64>::compile(&space).unwrap();
+        let staged_calls = calls.load(Ordering::Relaxed);
+        assert!(
+            staged_calls > 0,
+            "plan compilation must stage provider answers"
+        );
+        plan.expand_host(BoundDynamicTensorRef::try_new(&space, &[1.0]).unwrap())
+            .unwrap();
+        plan.expand_host(
+            BoundDynamicTensorRef::try_new(&space, &[Complex64::new(2.0, -0.5)]).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), staged_calls);
+    }
+
+    #[test]
+    fn physical_expansion_plan_rejects_equivalent_but_distinct_provider_arc() {
+        let first = counting_u1_space(Arc::new(FailingPhysicalU1 {
+            calls: Arc::new(AtomicUsize::new(0)),
+            fail: false,
+        }));
+        let second = counting_u1_space(Arc::new(FailingPhysicalU1 {
+            calls: Arc::new(AtomicUsize::new(0)),
+            fail: false,
+        }));
+        let plan = PhysicalExpansionPlan::<FailingPhysicalU1, f64>::compile(&first).unwrap();
+        assert!(matches!(
+            plan.expand_host(BoundDynamicTensorRef::try_new(&second, &[1.0]).unwrap()),
+            Err(PhysicalConversionError::Operation(
+                OperationError::StructureMismatch { .. }
+            ))
+        ));
+    }
+
+    #[test]
+    fn physical_expansion_plan_survives_provenance_failure() {
+        let first = counting_u1_space(Arc::new(FailingPhysicalU1 {
+            calls: Arc::new(AtomicUsize::new(0)),
+            fail: false,
+        }));
+        let second = counting_u1_space(Arc::new(FailingPhysicalU1 {
+            calls: Arc::new(AtomicUsize::new(0)),
+            fail: false,
+        }));
+        let plan = PhysicalExpansionPlan::<FailingPhysicalU1, f64>::compile(&first).unwrap();
+        assert!(plan
+            .expand_host(BoundDynamicTensorRef::try_new(&second, &[1.0]).unwrap())
+            .is_err());
+        assert!(plan
+            .expand_host(BoundDynamicTensorRef::try_new(&first, &[1.0]).unwrap())
+            .is_ok());
     }
 
     #[test]
@@ -1290,7 +1451,10 @@ mod tests {
     #[test]
     fn provider_failure_remains_typed_during_transactional_staging() {
         let space = BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free(
-            Arc::new(FailingPhysicalU1),
+            Arc::new(FailingPhysicalU1 {
+                calls: Arc::new(AtomicUsize::new(0)),
+                fail: true,
+            }),
             FusionTreeHomSpace::new(FusionProductSpace::new([]), FusionProductSpace::new([])),
         )
         .unwrap();
