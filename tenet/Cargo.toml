@@ -37,8 +37,3 @@ tenet-dense = { version = "0.1.0", path = "../tenet-dense", default-features = f
 tenet-matrixalgebra = { version = "0.1.0", path = "../tenet-matrixalgebra", default-features = false }
 tenet-operations = { version = "0.1.0", path = "../tenet-operations", default-features = false }
 tenet-tensors = { version = "0.1.0", path = "../tenet-tensors", default-features = false }
-
-[dev-dependencies]
-# Dev-only cycle (tenet-network depends on tenet): lets the tutorial's
-# `tensor!` examples run as doctests of this crate.
-tenet-network = { version = "0.1.0", path = "../tenet-network", default-features = false }
