@@ -525,6 +525,33 @@ where
     }
 }
 
+/// Closed Rust-only adapter for the built-in SU(2) physical basis.
+impl<D> TensorMap<tenet_core::SU2FusionRule, D>
+where
+    D: TensorScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
+{
+    /// Expands this SU(2) tensor into its owned physical-basis representation.
+    pub fn to_physical_dense_su2(
+        &self,
+    ) -> Result<
+        PhysicalDense<D>,
+        PhysicalDenseError<<tenet_core::SU2FusionRule as tenet_core::PhysicalFusionBasis>::Error>,
+    > {
+        self.to_physical_dense()
+    }
+
+    /// Projects SU(2) physical-basis data into this tensor's reduced schema.
+    pub fn project_physical_dense_su2(
+        &self,
+        physical: &PhysicalDense<D>,
+    ) -> Result<
+        Self,
+        PhysicalDenseError<<tenet_core::SU2FusionRule as tenet_core::PhysicalFusionBasis>::Error>,
+    > {
+        self.project_physical_dense(physical)
+    }
+}
+
 impl<R, D> TensorMap<R, D>
 where
     R: MultiplicityFreeRigidSymbols
