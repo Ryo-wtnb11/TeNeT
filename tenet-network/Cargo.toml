@@ -29,8 +29,8 @@ cotengra-python = ["dep:command-group", "dep:libc", "dep:serde_json", "tenet/cot
 
 [dependencies]
 command-group = { version = "5.0.1", optional = true }
-tenet = { package = "tenet-rs", path = "../tenet", default-features = false }
-tenet-macros = { path = "../tenet-macros" }
+tenet = { package = "tenet-rs", version = "0.1.0", path = "../tenet", default-features = false }
+tenet-macros = { version = "0.1.0", path = "../tenet-macros" }
 opt-einsum-path = { version = "0.2", optional = true }
 serde_json = { version = "1", optional = true }
 # O(1) LRU (HashMap + intrusive linked list), the Rust analog of the

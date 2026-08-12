@@ -23,9 +23,9 @@ cuda = ["tenet-dense/cuda", "tenet-operations/cuda"]
 racah-generated = ["tenet-core/racah-generated"]
 
 [dependencies]
-tenet-core = { path = "../tenet-core" }
-tenet-operations = { path = "../tenet-operations", default-features = false }
-tenet-dense = { path = "../tenet-dense", default-features = false }
+tenet-core = { version = "0.1.0", path = "../tenet-core" }
+tenet-operations = { version = "0.1.0", path = "../tenet-operations", default-features = false }
+tenet-dense = { version = "0.1.0", path = "../tenet-dense", default-features = false }
 strided-kernel.workspace = true
 # Fast non-cryptographic hasher for internal plan/structure/recoupling caches
 # keyed on fusion-tree structure (no untrusted input); std SipHash is slow here.
@@ -40,4 +40,4 @@ num-complex = "0.4"
 smallvec = { version = "1", features = ["const_generics", "union"] }
 
 [dev-dependencies]
-tenet-sectors = { path = "../tenet-sectors" }
+tenet-sectors = { version = "0.1.0", path = "../tenet-sectors" }
