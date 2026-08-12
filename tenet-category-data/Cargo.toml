@@ -17,4 +17,4 @@ smallvec = { version = "1", features = ["const_generics", "union"] }
 tenet-sectors = { path = "../tenet-sectors" }
 
 [dev-dependencies]
-tenet = { path = "../tenet" }
+tenet = { package = "tenet-rs", path = "../tenet" }

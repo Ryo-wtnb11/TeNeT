@@ -1,5 +1,5 @@
 [package]
-name = "tenet"
+name = "tenet-rs"
 version = "0.1.0"
 description = "Symmetric tensors and tensor-network operations"
 edition.workspace = true

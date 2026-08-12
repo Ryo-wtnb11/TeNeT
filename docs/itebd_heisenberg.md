@@ -190,13 +190,13 @@ Use the focused checks when changing the example or this guide:
 
 ```sh
 # Fast smoke tests used by normal test runs.
-cargo test -p tenet --test itebd_smoke
+cargo test -p tenet-rs --test itebd_smoke
 
 # Shorter release-mode convergence test; ignored by default.
-cargo test -p tenet --release -- --ignored itebd
+cargo test -p tenet-rs --release -- --ignored itebd
 
 # Compiling tutorial examples and warning-free crate documentation.
-cargo test -p tenet --doc
+cargo test -p tenet-rs --doc
 RUSTDOCFLAGS="-D warnings" cargo doc -p tenet --no-deps
 ```
 
