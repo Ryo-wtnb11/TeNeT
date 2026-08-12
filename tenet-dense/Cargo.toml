@@ -60,7 +60,7 @@ provider-inject = [
 
 [dependencies]
 num-complex = "0.4"
-tenferro-cpu = { path = "../../tenferro-rs/crates/tenferro-cpu", default-features = false, optional = true }
-tenferro-linalg = { path = "../../tenferro-rs/crates/tenferro-linalg", default-features = false, optional = true }
-tenferro-tensor = { path = "../../tenferro-rs/crates/tenferro-tensor", default-features = false, optional = true }
-tenferro-gpu = { path = "../../tenferro-rs/crates/tenferro-gpu", default-features = false, optional = true }
+tenferro-cpu = { version = "0.3.0", default-features = false, optional = true }
+tenferro-linalg = { version = "0.3.0", default-features = false, optional = true }
+tenferro-tensor = { version = "0.3.0", default-features = false, optional = true }
+tenferro-gpu = { version = "0.3.0", default-features = false, optional = true }
