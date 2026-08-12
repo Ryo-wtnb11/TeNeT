@@ -14,7 +14,7 @@ path = "src/lib.rs"
 [dependencies]
 num-complex = "0.4"
 smallvec = { version = "1", features = ["const_generics", "union"] }
-tenet-sectors = { path = "../tenet-sectors" }
+tenet-sectors = { version = "0.1.0", path = "../tenet-sectors" }
 
 [dev-dependencies]
-tenet = { package = "tenet-rs", path = "../tenet" }
+tenet = { package = "tenet-rs", version = "0.1.0", path = "../tenet" }
