@@ -9,7 +9,7 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/Ryo-wtnb11/TeNeT"
 
 [workspace.dependencies]
-strided-kernel = { git = "https://github.com/tensor4all/strided-rs.git", rev = "b29e7601ba090aa5eafc65b9bde5d9450282e0d8", version = "0.4.0", features = ["parallel"] }
+strided-kernel = { version = "0.4.0", features = ["parallel"] }
 
 [patch."https://github.com/tensor4all/tenferro-rs"]
 tenferro-cpu = { path = "../tenferro-rs/crates/tenferro-cpu" }
