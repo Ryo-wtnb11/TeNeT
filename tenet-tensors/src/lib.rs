@@ -96,8 +96,8 @@ pub use facade::{
 };
 #[doc(hidden)]
 pub use physical::{
-    expand_physical_host, project_physical_host, PhysicalConversionError, PhysicalExpansionPlan,
-    PhysicalCooView, PhysicalHostBuffer,
+    expand_physical_host, project_physical_host, PhysicalConversionError, PhysicalCooView,
+    PhysicalExpansionPlan, PhysicalHostBuffer,
 };
 /// CUDA storage and GEMM seams (flat device buffers, never host-readable).
 #[cfg(feature = "cuda")]
