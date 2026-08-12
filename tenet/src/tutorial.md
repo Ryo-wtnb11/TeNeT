@@ -26,7 +26,8 @@ are on the left.
 A [`prelude::Runtime`] supplies the execution resources for tensor operations.
 The default build uses the pure-Rust `cpu-faer` backend.
 
-TeNeT currently expects Tenferro in a sibling checkout:
+The current source checkout uses a sibling Tenferro checkout through its
+development patch:
 
 ```text
 work/
@@ -45,7 +46,10 @@ cargo run -p tenet-network --example quickstart
 ```
 
 The command uses the default `cpu-faer` feature. The Tenferro commit above is
-the revision tested for this quickstart, not a project dependency pin.
+the revision tested for this source checkout, not a downstream dependency
+requirement. The registry release procedure instead uses published Tenferro
+and publishes the facade package as `tenet-rs` (whose Rust library target is
+still named `tenet`); see [`docs/releasing.md`](../../docs/releasing.md).
 
 The complete calculation lives in the [U(1) quickstart
 example](https://github.com/Ryo-wtnb11/TeNeT/blob/main/tenet-network/examples/quickstart.rs).
@@ -866,6 +870,10 @@ value with no ceiling. The curated matrix-algebra facade exposes typed
 for broader unstable dynamic workflows.
 
 ### If you are coming from TensorKit
+
+This table is a translation aid only. TensorKit names and QSpace comparisons
+help state conventions and test selected numerical oracles; the TeNeT API and
+its supported scope are defined by this crate's types and tests.
 
 | TensorKit idea | TeNeT user layer | expert-layer internals |
 | --- | --- | --- |
