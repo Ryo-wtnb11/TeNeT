@@ -56,6 +56,21 @@ impl<E> From<OperationError> for PhysicalConversionError<E> {
 #[doc(hidden)]
 pub type PhysicalHostBuffer<D> = (Vec<usize>, Vec<D>);
 
+/// Read-only sparse COO entries for a physical expansion.
+pub struct PhysicalCooView<C> {
+    dense_indices: Vec<usize>,
+    reduced_indices: Vec<usize>,
+    coefficients: Vec<C>,
+}
+
+impl<C> PhysicalCooView<C> {
+    pub fn dense_indices(&self) -> &[usize] { &self.dense_indices }
+    pub fn reduced_indices(&self) -> &[usize] { &self.reduced_indices }
+    pub fn coefficients(&self) -> &[C] { &self.coefficients }
+    pub fn len(&self) -> usize { self.coefficients.len() }
+    pub fn is_empty(&self) -> bool { self.coefficients.is_empty() }
+}
+
 /// Immutable provider-bound plan for repeated physical-basis expansion.
 ///
 /// Provider answers and layout arithmetic are staged once at construction;
@@ -83,6 +98,40 @@ where
     #[inline]
     pub fn shape(&self) -> &[usize] {
         &self.stage.shape
+    }
+
+    /// Returns the staged expansion as read-only COO entries.
+    pub fn coo_view(&self) -> PhysicalCooView<C>
+    where
+        C: Clone,
+    {
+        let mut dense_indices = Vec::new();
+        let mut reduced_indices = Vec::new();
+        let mut coefficients = Vec::new();
+        for block in &self.stage.blocks {
+            let codomain = &self.stage.embeddings[block.codomain_embedding];
+            let domain = &self.stage.embeddings[block.domain_embedding];
+            let carrier_shape = block
+                .slices
+                .iter()
+                .map(|slice| slice.carrier_dim)
+                .collect::<Vec<_>>();
+            for_each_index(&block.shape, |degeneracy| {
+                for_each_index(&carrier_shape, |carrier| {
+                    dense_indices.push(dense_position(&self.stage, block, degeneracy, carrier));
+                    reduced_indices.push(reduced_position(block, degeneracy));
+                    coefficients.push(
+                        pair_coefficient(codomain, domain, carrier, self.space.space().nout())
+                            .clone(),
+                    );
+                });
+            });
+        }
+        PhysicalCooView {
+            dense_indices,
+            reduced_indices,
+            coefficients,
+        }
     }
 
     /// Stable semantic identity of the provider used to compile this plan.
