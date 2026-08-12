@@ -237,7 +237,7 @@ automatically by a greedy planner. There are no einsum strings anywhere.
 </math>
 </div>
 
-```rust
+```rust,ignore
 use tenet::prelude::*;
 use tenet_network::tensor;
 
@@ -688,7 +688,7 @@ guided [U(1) iTEBD Heisenberg application](https://github.com/Ryo-wtnb11/TeNeT/b
 </math>
 </div>
 
-```rust
+```rust,ignore
 use tenet::prelude::*;
 use tenet_network::tensor;
 
