@@ -19,4 +19,4 @@ racah-generated = ["racah/cgc-gen"]
 smallvec = { version = "1", features = ["const_generics", "union"] }
 num-complex = "0.4"
 num-traits = "0.2"
-racah = { git = "https://github.com/Ryo-wtnb11/racah", rev = "a5f91940ab1ea9998f2b58bf7525e7fa2bc24224" }
+racah = { version = "0.1.1" }
