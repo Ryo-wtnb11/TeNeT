@@ -16,10 +16,11 @@ use crate::kernel_adapter::for_each_fused_span;
 use crate::owned_overwrite_buffer::initialize_owned;
 use crate::storage_scratch::{StorageTreeTransformWorkspace, TreeTransformScratchBuffers};
 use crate::strided::offset_to_isize;
+use crate::task_view::TreeTransformTaskView;
 use crate::tensoradd::{TensorAddDescriptor, TensorAddDescriptorTerm};
 use crate::transform_structure::{
-    TreeTransformPackReplay, TreeTransformScatterGroupReplay, TreeTransformScatterReplay,
-    TreeTransformSingleReplay,
+    TreeTransformPackReplay, TreeTransformParallelSchedule, TreeTransformScatterGroupReplay,
+    TreeTransformScatterReplay, TreeTransformSingleReplay,
 };
 use crate::{
     tensoradd_raw_strided_kernel, tensoradd_raw_strided_kernel_trusted, BakedFusedLayout,
@@ -192,22 +193,20 @@ impl<T> ReportsPlacement for HostTreeTransformWorkspace<T> {
 
 fn ensure_recoupling_coefficients<D, C>(
     workspace: &mut TreeTransformWorkspace<D>,
-    structure: &TreeTransformStructure<C>,
+    task: TreeTransformTaskView<'_, C>,
 ) -> Result<bool, OperationError>
 where
     D: RecouplingCoefficientAction<C>,
     C: Copy,
 {
-    let plan = structure.recoupling_plan();
+    let plan = task.recoupling_plan();
     // Why not key by the shared categorical payload alone: different layout
     // bindings can reorder Multi jobs by element count and therefore require
     // different packed RHS orders for the same categorical matrices.
-    let same_structure = workspace
-        .coefficient_structure_identity
-        .as_ref()
-        .and_then(Weak::upgrade)
-        .is_some_and(|identity| Arc::ptr_eq(&identity, structure.identity_marker()));
-    if same_structure && workspace.coefficient_scratch.len() == plan.coefficient_len() {
+    if task.coefficient_cache_is_current(
+        workspace.coefficient_structure_identity.as_ref(),
+        workspace.coefficient_scratch.len(),
+    ) {
         return Ok(false);
     }
 
@@ -217,7 +216,7 @@ where
         .reserve(plan.coefficient_len());
     // Preserve entry order: each job's rhs_offset addresses this exact pack.
     for (block_index, _) in plan.entries() {
-        let block = recoupling_multi_block(structure, block_index)?;
+        let block = recoupling_multi_block(task, block_index)?;
         let TreeTransformBlock::Multi {
             dst_count,
             src_count,
@@ -233,12 +232,12 @@ where
         let coefficient_end = coefficient_start
             .checked_add(coefficient_len)
             .ok_or(OperationError::ElementCountOverflow)?;
-        let coefficients = structure
-            .recoupling_coefficients_dst_src()
+        let coefficients = task
+            .coefficients()
             .get(coefficient_start..coefficient_end)
             .ok_or(OperationError::CoefficientCountMismatch {
                 expected: coefficient_end,
-                actual: structure.recoupling_coefficients_dst_src().len(),
+                actual: task.coefficients().len(),
             })?;
         workspace.coefficient_scratch.extend(
             coefficients
@@ -252,12 +251,12 @@ where
             actual: workspace.coefficient_scratch.len(),
         });
     }
-    workspace.coefficient_structure_identity = Some(Arc::downgrade(structure.identity_marker()));
+    task.remember_coefficient_cache_identity(&mut workspace.coefficient_structure_identity);
     Ok(true)
 }
 
 fn recoupling_multi_block<C: Copy>(
-    structure: &TreeTransformStructure<C>,
+    task: TreeTransformTaskView<'_, C>,
     block_index: usize,
 ) -> Result<&TreeTransformBlock, OperationError> {
     // Lazy error construction: recoupling_multi_block is called per block on the
@@ -265,19 +264,20 @@ fn recoupling_multi_block<C: Copy>(
     // BlockIndexOutOfBounds struct on every success too, which the d=4 bisect
     // (see issue #103) attributed to the compose regression. .ok_or_else only
     // builds it on the never-taken out-of-bounds path.
-    let block = structure.blocks().get(block_index).ok_or_else(|| {
-        OperationError::BlockIndexOutOfBounds {
-            tensor: "recoupling block",
-            index: block_index,
-            count: structure.blocks().len(),
-        }
-    })?;
+    let block =
+        task.blocks()
+            .get(block_index)
+            .ok_or_else(|| OperationError::BlockIndexOutOfBounds {
+                tensor: "recoupling block",
+                index: block_index,
+                count: task.blocks().len(),
+            })?;
     match block {
         TreeTransformBlock::Multi { .. } => Ok(block),
         TreeTransformBlock::Single { .. } => Err(OperationError::BlockIndexOutOfBounds {
             tensor: "recoupling block",
             index: block_index,
-            count: structure.blocks().len(),
+            count: task.blocks().len(),
         }),
     }
 }
@@ -285,7 +285,7 @@ fn recoupling_multi_block<C: Copy>(
 fn scale_inactive_destinations<A, D, C>(
     kernels: &mut A,
     zero_strides: &mut Vec<isize>,
-    structure: &TreeTransformStructure<C>,
+    task: TreeTransformTaskView<'_, C>,
     dst_data: &mut [D],
     mode: DestinationMode<D>,
 ) -> Result<(), OperationError>
@@ -301,12 +301,12 @@ where
             }
             // Scaling the complete storage would also mutate padding not owned by any
             // block, so compile only the destination layouts with no active replay.
-            for &layout_index in structure.inactive_destination_layouts() {
-                let layout = structure.layouts().entry(layout_index);
+            for &layout_index in task.inactive_destination_layouts() {
+                let layout = task.layouts().entry(layout_index);
                 kernels.scale_strided(
                     dst_data,
-                    structure.layouts().shape(layout),
-                    structure.layouts().strides(layout),
+                    task.layouts().shape(layout),
+                    task.layouts().strides(layout),
                     layout.offset,
                     beta,
                 )?;
@@ -314,15 +314,15 @@ where
         }
         DestinationMode::Overwrite => {
             let zero = [D::zero()];
-            for &layout_index in structure.inactive_destination_layouts() {
-                let layout = structure.layouts().entry(layout_index);
+            for &layout_index in task.inactive_destination_layouts() {
+                let layout = task.layouts().entry(layout_index);
                 zero_strides.clear();
-                zero_strides.resize(structure.layouts().shape(layout).len(), 0);
+                zero_strides.resize(task.layouts().shape(layout).len(), 0);
                 kernels.copy_scale_strided(
                     dst_data,
                     &zero,
-                    structure.layouts().shape(layout),
-                    structure.layouts().strides(layout),
+                    task.layouts().shape(layout),
+                    task.layouts().strides(layout),
                     zero_strides,
                     layout.offset,
                     0,
@@ -397,17 +397,30 @@ mod coefficient_cache_tests {
         let structure = multi_recoupling_structure([1.0, 2.0, 3.0, 4.0]);
         let mut workspace = TreeTransformWorkspace::<f64>::default();
 
-        assert!(ensure_recoupling_coefficients(&mut workspace, &structure).unwrap());
+        assert!(
+            ensure_recoupling_coefficients(&mut workspace, structure.task_view().unwrap()).unwrap()
+        );
         assert_eq!(workspace.coefficient_scratch, vec![1.0, 2.0, 3.0, 4.0]);
-        assert!(!ensure_recoupling_coefficients(&mut workspace, &structure).unwrap());
+        assert!(
+            !ensure_recoupling_coefficients(&mut workspace, structure.task_view().unwrap())
+                .unwrap()
+        );
 
         let structure_clone = structure.clone();
-        assert!(!ensure_recoupling_coefficients(&mut workspace, &structure_clone).unwrap());
+        assert!(!ensure_recoupling_coefficients(
+            &mut workspace,
+            structure_clone.task_view().unwrap()
+        )
+        .unwrap());
 
         let equal_but_distinct = multi_recoupling_structure([1.0, 2.0, 3.0, 4.0]);
         assert_eq!(structure, equal_but_distinct);
         workspace.coefficient_scratch.fill(-1.0);
-        assert!(ensure_recoupling_coefficients(&mut workspace, &equal_but_distinct).unwrap());
+        assert!(ensure_recoupling_coefficients(
+            &mut workspace,
+            equal_but_distinct.task_view().unwrap()
+        )
+        .unwrap());
         assert_eq!(workspace.coefficient_scratch, vec![1.0, 2.0, 3.0, 4.0]);
     }
 
@@ -442,12 +455,16 @@ mod coefficient_cache_tests {
         assert!(first.shares_coefficient_payload_with(&second));
         let mut workspace = TreeTransformWorkspace::<f64>::default();
 
-        assert!(ensure_recoupling_coefficients(&mut workspace, &first).unwrap());
+        assert!(
+            ensure_recoupling_coefficients(&mut workspace, first.task_view().unwrap()).unwrap()
+        );
         assert_eq!(
             workspace.coefficient_scratch,
             vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
         );
-        assert!(ensure_recoupling_coefficients(&mut workspace, &second).unwrap());
+        assert!(
+            ensure_recoupling_coefficients(&mut workspace, second.task_view().unwrap()).unwrap()
+        );
         assert_eq!(
             workspace.coefficient_scratch,
             vec![5.0, 6.0, 7.0, 8.0, 1.0, 2.0, 3.0, 4.0]
@@ -494,6 +511,80 @@ mod inactive_destination_tests {
 
     fn expected(beta: f64) -> [f64; 2] {
         [6.0 + beta * 10.0, beta * 20.0]
+    }
+
+    #[test]
+    fn finite_task_view_serial_matches_per_block_replay() -> Result<(), OperationError> {
+        let block_structure =
+            Arc::new(BlockStructure::packed_column_major(2, vec![vec![2, 2]; 4]).unwrap());
+        let transform = TreeTransformStructure::compile_structures(
+            &block_structure,
+            &block_structure,
+            &[
+                TreeTransformBlockSpec::single(0, 0, -2.0).with_source_axes([1, 0]),
+                TreeTransformBlockSpec::multi(vec![1, 2], vec![1, 2], vec![1.0, 2.0, 3.0, 4.0])
+                    .with_source_axes([1, 0]),
+            ],
+        )
+        .unwrap();
+        let source = (1..=16).map(f64::from).collect::<Vec<_>>();
+
+        for overwrite in [false, true] {
+            let mut expected = (17..=32).map(f64::from).collect::<Vec<_>>();
+            let mut actual = expected.clone();
+            let mut kernels = StridedHostKernelAdapter::default();
+            if overwrite {
+                tree_transform_structure_overwrite_with_strided_kernel_raw(
+                    &mut kernels,
+                    &mut TreeTransformWorkspace::default(),
+                    &transform,
+                    &block_structure,
+                    &block_structure,
+                    &mut expected,
+                    &source,
+                    0.5,
+                )?;
+                tree_transform_structure_overwrite_with_structural_recoupling_raw(
+                    &mut kernels,
+                    &mut DefaultDenseExecutor::new(),
+                    &mut TreeTransformWorkspace::default(),
+                    &transform,
+                    &block_structure,
+                    &block_structure,
+                    &mut actual,
+                    &source,
+                    0.5,
+                    1,
+                )?;
+            } else {
+                tree_transform_structure_with_strided_kernel_raw(
+                    &mut kernels,
+                    &mut TreeTransformWorkspace::default(),
+                    &transform,
+                    &block_structure,
+                    &block_structure,
+                    &mut expected,
+                    &source,
+                    0.5,
+                    -0.25,
+                )?;
+                tree_transform_structure_with_structural_recoupling_raw(
+                    &mut kernels,
+                    &mut DefaultDenseExecutor::new(),
+                    &mut TreeTransformWorkspace::default(),
+                    &transform,
+                    &block_structure,
+                    &block_structure,
+                    &mut actual,
+                    &source,
+                    0.5,
+                    -0.25,
+                    1,
+                )?;
+            }
+            assert_eq!(actual, expected);
+        }
+        Ok(())
     }
 
     fn custom_structure(blocks: Vec<BlockSpec>) -> BlockStructure {
@@ -1979,12 +2070,13 @@ where
     structure.validate_replay_structures(&dst_structure, &src_structure)?;
     validate_replay_storage_len(&dst_structure, dst.storage().len())?;
     validate_replay_storage_len(&src_structure, src.storage().len())?;
+    let task = structure.task_view()?;
     workspace.prepare_fused_index(structure.layouts().max_fused_rank())?;
 
     scale_inactive_destinations(
         kernels,
         workspace.zero_strides_mut(),
-        structure,
+        task,
         dst.data_mut(),
         mode,
     )?;
@@ -2174,14 +2266,9 @@ where
     structure.validate_replay_structures(dst_structure, src_structure)?;
     validate_replay_storage_len(dst_structure, dst_data.len())?;
     validate_replay_storage_len(src_structure, src_data.len())?;
+    let task = structure.task_view()?;
     workspace.prepare_fused_indices(1, structure.layouts().max_fused_rank())?;
-    scale_inactive_destinations(
-        kernels,
-        &mut workspace.zero_strides,
-        structure,
-        dst_data,
-        mode,
-    )?;
+    scale_inactive_destinations(kernels, &mut workspace.zero_strides, task, dst_data, mode)?;
     for block in structure.blocks() {
         match *block {
             TreeTransformBlock::Single {
@@ -2443,6 +2530,7 @@ where
     debug_assert_eq!(proof.nout, nout);
     debug_assert!(Arc::ptr_eq(proof.dst_structure, dst_structure));
     debug_assert!(core::ptr::eq(proof.structure, structure));
+    let task = structure.task_view()?;
     workspace.prepare_fused_indices(1, structure.layouts().max_fused_rank())?;
 
     initialize_owned(proof.required_len, |dst_data| {
@@ -2477,7 +2565,7 @@ where
         if recoupling_plan.is_empty() {
             return Ok(());
         }
-        ensure_recoupling_coefficients(workspace, structure)?;
+        ensure_recoupling_coefficients(workspace, task)?;
         for (block_index, job) in recoupling_plan.entries() {
             let TreeTransformBlock::Multi {
                 dst_layout_start,
@@ -2486,7 +2574,7 @@ where
                 src_count,
                 element_count,
                 ..
-            } = *recoupling_multi_block(structure, block_index)?
+            } = *recoupling_multi_block(task, block_index)?
             else {
                 unreachable!("recoupling_multi_block only returns Multi blocks");
             };
@@ -3043,11 +3131,10 @@ where
     Ok(())
 }
 
-fn effective_tree_transform_threads<C: Copy>(
-    structure: &TreeTransformStructure<C>,
+fn effective_tree_transform_threads(
+    schedule: &TreeTransformParallelSchedule,
     requested: usize,
 ) -> usize {
-    let schedule = structure.parallel_schedule();
     let singles = if schedule.singles_slice_disjoint {
         schedule.singles.len()
     } else {
@@ -3098,7 +3185,8 @@ where
         dst_data.len(),
         src_data.len(),
     )?;
-    let threads = effective_tree_transform_threads(structure, threads);
+    let schedule = structure.parallel_schedule();
+    let threads = effective_tree_transform_threads(schedule, threads);
     let requirements = task.workspace_requirements();
     task.validate_workspace_requirements::<D>()?;
     checked_fused_index_len(threads, requirements.fused_index_len_per_worker)?;
@@ -3106,22 +3194,17 @@ where
         // Admission converts coefficients before the first destination write.
         // The shared serial/parallel helpers call this again, but the
         // structure-identity check makes that call a no-work cache hit.
-        ensure_recoupling_coefficients(workspace, structure)?;
+        ensure_recoupling_coefficients(workspace, task)?;
     }
-    scale_inactive_destinations(
-        kernels,
-        &mut workspace.zero_strides,
-        structure,
-        dst_data,
-        mode,
-    )?;
+    scale_inactive_destinations(kernels, &mut workspace.zero_strides, task, dst_data, mode)?;
     if threads > 1 {
         return tree_transform_blocks_with_batched_recoupling_parallel(
-            kernels, dense, workspace, structure, dst_data, src_data, alpha, mode, threads, None,
+            kernels, dense, workspace, task, schedule, dst_data, src_data, alpha, mode, threads,
+            None,
         );
     }
     tree_transform_blocks_with_batched_recoupling(
-        kernels, dense, workspace, structure, dst_data, src_data, alpha, mode, None,
+        kernels, dense, workspace, task, dst_data, src_data, alpha, mode, None,
     )
 }
 
@@ -3231,7 +3314,8 @@ where
     )?;
     profile.validate += start.elapsed();
 
-    let threads = effective_tree_transform_threads(structure, threads);
+    let schedule = structure.parallel_schedule();
+    let threads = effective_tree_transform_threads(schedule, threads);
     let requirements = task.workspace_requirements();
     task.validate_workspace_requirements::<D>()?;
     checked_fused_index_len(threads, requirements.fused_index_len_per_worker)?;
@@ -3240,19 +3324,13 @@ where
         let start = std::time::Instant::now();
         // Attribute the admission conversion here; the replay helper's second
         // call is the same no-work identity check as in the unprofiled path.
-        if ensure_recoupling_coefficients(workspace, structure)? {
+        if ensure_recoupling_coefficients(workspace, task)? {
             profile.multi_coefficient_prepare += start.elapsed();
         }
     }
 
     let start = std::time::Instant::now();
-    scale_inactive_destinations(
-        kernels,
-        &mut workspace.zero_strides,
-        structure,
-        dst_data,
-        mode,
-    )?;
+    scale_inactive_destinations(kernels, &mut workspace.zero_strides, task, dst_data, mode)?;
     profile.strided_kernel += start.elapsed();
 
     if threads > 1 {
@@ -3260,7 +3338,8 @@ where
             kernels,
             dense,
             workspace,
-            structure,
+            task,
+            schedule,
             dst_data,
             src_data,
             alpha,
@@ -3273,7 +3352,7 @@ where
             kernels,
             dense,
             workspace,
-            structure,
+            task,
             dst_data,
             src_data,
             alpha,
@@ -3298,7 +3377,7 @@ fn tree_transform_blocks_with_batched_recoupling<A, E, D, C>(
     kernels: &mut A,
     dense: &mut E,
     workspace: &mut TreeTransformWorkspace<D>,
-    structure: &TreeTransformStructure<C>,
+    task: TreeTransformTaskView<'_, C>,
     dst_data: &mut [D],
     src_data: &[D],
     alpha: D,
@@ -3311,14 +3390,14 @@ where
     D: DenseRecouplingScalar + RecouplingCoefficientAction<C> + ConjugateValue,
     C: Copy,
 {
-    let layouts = structure.layouts();
-    let recoupling_plan = structure.recoupling_plan();
+    let layouts = task.layouts();
+    let recoupling_plan = task.recoupling_plan();
     workspace.prepare_fused_indices(1, layouts.max_fused_rank())?;
 
     // All-Single structures (abelian recoupling is diagonal) skip the batch
     // machinery entirely: no pack scratch, no job list, no scatter pass.
     if recoupling_plan.is_empty() {
-        for block in structure.blocks() {
+        for block in task.blocks() {
             let TreeTransformBlock::Single {
                 dst_layout,
                 src_layout,
@@ -3335,8 +3414,8 @@ where
                 layouts,
                 dst_layout,
                 src_layout,
-                structure.coefficient(coefficient),
-                structure.storage_conjugate(),
+                task.coefficients()[coefficient],
+                task.storage_conjugate(),
                 dst_data,
                 src_data,
                 alpha,
@@ -3353,7 +3432,7 @@ where
     }
 
     let start = profile.as_ref().map(|_| std::time::Instant::now());
-    let converted = ensure_recoupling_coefficients(workspace, structure)?;
+    let converted = ensure_recoupling_coefficients(workspace, task)?;
     if converted {
         if let (Some(profile), Some(start)) = (profile.as_deref_mut(), start) {
             profile.multi_coefficient_prepare += start.elapsed();
@@ -3363,7 +3442,7 @@ where
     // Singles apply directly in replay order. Multi blocks are packed through
     // the compile-time recoupling entries, whose order is chosen to form
     // same-shape strided GEMM runs.
-    for block in structure.blocks() {
+    for block in task.blocks() {
         let TreeTransformBlock::Single {
             dst_layout,
             src_layout,
@@ -3382,8 +3461,8 @@ where
             layouts,
             dst_layout,
             src_layout,
-            structure.coefficient(coefficient),
-            structure.storage_conjugate(),
+            task.coefficients()[coefficient],
+            task.storage_conjugate(),
             dst_data,
             src_data,
             alpha,
@@ -3405,7 +3484,7 @@ where
             src_count,
             element_count,
             ..
-        } = *recoupling_multi_block(structure, block_index)?
+        } = *recoupling_multi_block(task, block_index)?
         else {
             unreachable!("recoupling_multi_block only returns Multi blocks");
         };
@@ -3433,7 +3512,7 @@ where
                 src_data,
                 workspace.packed.source_mut().as_mut_slice(),
                 src_index * element_count,
-                structure.storage_conjugate(),
+                task.storage_conjugate(),
             )?;
         }
         if let (Some(profile), Some(start)) = (profile.as_deref_mut(), start) {
@@ -3929,7 +4008,8 @@ fn tree_transform_blocks_with_batched_recoupling_parallel<A, E, D, C>(
     kernels: &mut A,
     dense: &mut E,
     workspace: &mut TreeTransformWorkspace<D>,
-    structure: &TreeTransformStructure<C>,
+    task: TreeTransformTaskView<'_, C>,
+    schedule: &TreeTransformParallelSchedule,
     dst_data: &mut [D],
     src_data: &[D],
     alpha: D,
@@ -3943,9 +4023,8 @@ where
     D: DenseRecouplingScalar + RecouplingCoefficientAction<C> + ConjugateValue,
     C: Copy + Sync,
 {
-    let layouts = structure.layouts();
-    let recoupling_plan = structure.recoupling_plan();
-    let schedule = structure.parallel_schedule();
+    let layouts = task.layouts();
+    let recoupling_plan = task.recoupling_plan();
     let max_fused_rank = layouts.max_fused_rank();
     workspace.prepare_fused_indices(threads, max_fused_rank)?;
     let fused_index_len = checked_fused_index_len(threads, max_fused_rank)?;
@@ -3953,7 +4032,7 @@ where
     let single_count = schedule.single_block_count;
     let multi_count = recoupling_plan.jobs().len();
     let start = profile.as_ref().map(|_| std::time::Instant::now());
-    let converted = ensure_recoupling_coefficients(workspace, structure)?;
+    let converted = ensure_recoupling_coefficients(workspace, task)?;
     if converted {
         if let (Some(profile), Some(start)) = (profile.as_deref_mut(), start) {
             profile.multi_coefficient_prepare += start.elapsed();
@@ -3964,7 +4043,7 @@ where
         profile.multi_blocks += multi_count;
     }
 
-    let storage_conjugate = structure.storage_conjugate();
+    let storage_conjugate = task.storage_conjugate();
 
     // Single destinations are independent of every Multi destination.
     {
@@ -3975,7 +4054,7 @@ where
                 &mut workspace.fused_indices[..fused_index_len],
                 max_fused_rank,
                 layouts,
-                structure.recoupling_coefficients_dst_src(),
+                task.coefficients(),
                 storage_conjugate,
                 &schedule.singles,
                 dst_data,
@@ -3995,7 +4074,7 @@ where
                     layouts,
                     item.dst_layout,
                     item.src_layout,
-                    structure.coefficient(item.coefficient),
+                    task.coefficients()[item.coefficient],
                     storage_conjugate,
                     dst_data,
                     src_data,
