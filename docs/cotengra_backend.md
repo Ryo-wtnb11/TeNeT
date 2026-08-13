@@ -3,8 +3,8 @@
 An **optional**, feature-gated path planner that shells out to the installed
 Python [`cotengra`](https://github.com/jcmgray/cotengra) package for
 contraction-order search (greedy / optimal / auto-hq / **hyper**) and slicing
-decisions (slice / reconfigure / forest-reconfigure). The pure-Rust
-`opt-einsum-path` optimizers remain the default; cotengra adds the
+decisions (slice / reconfigure / forest-reconfigure). Built-in greedy is the
+default; the pure-Rust `opt-einsum-path` optimizers are optional. Cotengra adds the
 hyper-optimization tier (KaHyPar hypergraph partitioning + Bayesian
 hyper-parameter search) that has no pure-Rust equivalent yet.
 
@@ -110,13 +110,10 @@ are the right choice. A persistent Python worker to remove the ~50 ms spawn is
 ## Limitations
 
 - **Deployment**: opting in requires a Python environment (uv + cotengra)
-  alongside the Rust binary. The pure-Rust `opt-einsum-path` default has no such
-  requirement; a fully self-contained Rust `hyper` would need the AGPL-avoiding
-  `tenet-cotengrust` port (roadmap TODO).
-- **Sliced execution is not connected**: the backend *decides* a slicing
-  (`SlicedPlan`, internal=summed / output=stacked) but the ordinary tensor
-  executor does not yet execute the slices — path planning only. See
-  [issue #93](https://github.com/Ryo-wtnb11/TeNeT/issues/93).
+  alongside the Rust binary. Built-in greedy has no such requirement.
+- **Sliced execution is explicit**: a cotengra sliced plan is lowered and
+  executed through the Host dense `Network` APIs. `tensor!` does not
+  automatically lower or execute slices.
 - **Windows process-group creation errors**: `command-group` 5.0.1 can fail
   after spawning a suspended child but before returning its handle if Job
   assignment or thread resumption fails. TeNeT's timeout and unwind guarantees

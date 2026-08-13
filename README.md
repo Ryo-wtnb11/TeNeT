@@ -10,8 +10,8 @@ remains separate from execution.
 Design priority, in this order: Rust-native maintainability and extensibility;
 speed that survives dynamic-rank tensor networks; a usable high-level API.
 
-All crates are at version `0.1.0`. The public API is not stabilized and
-expert-layer types still move between crates as the layering settles.
+The public API is not stabilized and expert-layer types still move between
+crates as the layering settles.
 
 ## Architecture
 
@@ -53,10 +53,11 @@ than a provider enum or a named-group dispatch branch.
 [`docs/provider_interface.md`](docs/provider_interface.md) is the contract for
 writing one.
 
-`FibonacciFusionRule` supplies `FibonacciSector` labels and complex categorical
-coefficients. Host typed construction, transforms, tensor products, and
-composition are admitted where the operation's categorical-scalar bounds are
-satisfied; decompositions, network coverage, and CUDA remain narrower.
+`FibonacciFusionRule` supplies `FibonacciSector` labels and `Complex64`
+categorical coefficients. Its tested typed scope is construction,
+transformations including explicit planar braids, tensor products, and
+composition. Ordinary arbitrary-axis contraction, factorization, and general
+network execution are not supported or claimed.
 `tenet-category-data` separately ships the table-backed `CategoryDataFibonacci`.
 SUN is available only with `racah-generated` and uses the checked Generic path.
 
@@ -81,10 +82,12 @@ The ordinary user API is `GradedSpace<R>` / `TensorMap<R, D, S>`. It keeps `R`
 concrete, returns the provider's own labels (`SectorCodec::Sector`), and keeps
 payload scalar `D` and storage `S` separate from the categorical coefficient
 scalar. Host typed operations use operation-specific categorical-scalar and
-capability bounds. Checked Generic providers have a separate Host-only
-admission and execution path. Supported typed CUDA paths are currently
-multiplicity-free `f64`. A failed checked operation returns no output tensor or
-partial factor tuple.
+capability bounds. Checked Generic providers have a separate Host-only path for
+construction, transforms, tensor products, owned composition and trace, static
+N-ary networks, and explicit sliced execution, subject to each operation's
+bounds. Supported typed CUDA paths are an explicit-transfer,
+multiplicity-free `f64` subset. A failed checked operation returns no output
+tensor or partial factor tuple.
 
 SU(2) representation algebra itself is not reimplemented here: `tenet-sectors`
 delegates 3j/6j, F/R and Frobenius-Schur coefficients plus their caches to the
@@ -102,9 +105,8 @@ below.
 
 ## Quick Start
 
-Follow the [Quick Start tutorial source](tenet/src/tutorial.md#1-quick-start)
-for the required sibling checkout and tested Tenferro revision. That tutorial
-is rendered at the top of TeNeT's crate documentation.
+Follow the [Quick Start tutorial source](tenet/src/tutorial.md#1-quick-start).
+That tutorial is rendered at the top of TeNeT's crate documentation.
 
 The runnable [U(1) example](tenet-network/examples/quickstart.rs) is the single source
 for the calculation. It builds two deterministic charge-preserving maps,
@@ -145,7 +147,7 @@ dense-backend settings, both defaulting to the pure-Rust faer path:
 | `.linalg_backend(LinalgBackend::Faer \| Blas)` | factorizations — SVD / QR / eigh / eig / inv / exp (LAPACK-style work). |
 | `.gemm_backend(LinalgBackend::Faer \| Blas)` | the coupled-block contraction GEMM used by `compose`, `contract`, and recoupling execution (BLAS-style work). |
 | `.with_dense_executor(Box<dyn DenseExecutor + Send>)` | a fully custom factorization backend; takes precedence over `linalg_backend`. |
-| `.cuda(device)` (feature `cuda`) | device placement. |
+| `.cuda(device)` (feature `cuda`) | attaches CUDA capability and context; tensors remain on Host until `to_cuda()`. |
 | `.optimizer(Optimizer::…)` | the contraction-path planner (see below). |
 
 Because OpenBLAS, MKL, and Accelerate cannot be linked simultaneously, *which*
@@ -267,10 +269,10 @@ TENET_COTENGRA_UV_PROJECT=tools/cotengra-python \
 
 ## Current Limitations
 
-- Checked Generic providers use the same `TensorMap<R,D,S>` ownership model on
-  Host storage, including ordinary network execution and static intra-operand
-  trace. Checked Generic CUDA remains unsupported. Supported typed CUDA paths
-  are currently multiplicity-free `f64`.
+- Checked Generic providers are Host-only. Representative tested typed scope
+  includes construction, transforms, tensor products, owned composition and
+  trace, static N-ary networks, and explicit sliced execution. CUDA supports a
+  multiplicity-free `f64` subset after explicit transfer.
 - Execution crates reject a no-default-features build because their convenience
   APIs require a concrete executor. Use `tenet-sectors` / `tenet-core` for
   backend-free types, or enable a CPU feature or `provider-inject` for the full
@@ -279,8 +281,6 @@ TENET_COTENGRA_UV_PROJECT=tools/cotengra-python \
 - CUDA is compile-checked in CI, but requires a CUDA runner for runtime smoke
   tests; Host-only tree-transform execution is not used silently on a device.
 - `cotengra-python` is a planner backend, not an executor backend.
-- Cotengra slicing decisions can be represented as `SlicedPlan`, but ordinary
-  sliced execution over `TensorMap` is not wired yet.
 - External planners use dense effective dimensions. Symmetric block execution,
   fusion-tree bookkeeping, fermionic signs, and storage layout remain TeNeT
   execution responsibilities.

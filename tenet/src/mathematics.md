@@ -644,9 +644,12 @@ endomorphism `H`, an imaginary-time gate uses
 ## Current Scope
 
 This page describes the model implemented by TeNeT today, not the full
-generality of category-theoretic tensor calculus. The user layer is currently
-`f64`/`c64` on the host, multiplicity-free, and phase-1 CUDA for explicit
-`f64` direct contractions behind the `cuda` feature. Device tensors do not
-silently fall back to host execution; unsupported device operations return an
-explicit error. The expert crates already carry more of the structure needed
-for broader scalar and backend support.
+generality of category-theoretic tensor calculus. Host ordinary operations are
+multiplicity-free plus the checked Generic operations that state their own
+bounds. `FibonacciFusionRule` has `Complex64` categorical coefficients and is
+tested for construction, transformations including explicit planar braids,
+tensor products, and composition. Ordinary arbitrary-axis contraction,
+factorization, and general network execution are not supported or claimed.
+Checked Generic support is Host-only. CUDA requires explicit transfer and
+currently supports a multiplicity-free `f64` subset; unsupported device
+operations return an explicit error.

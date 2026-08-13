@@ -9,8 +9,8 @@ runtime values. The `tensor!` contraction frontend is provided by the
 `tenet-network` crate. Expert layers ([`core`], [`operations`], [`dense`],
 [`matrixalgebra`]) stay available underneath — see the appendix at the end.
 
-Every code block in this tutorial runs as a doctest, so it is guaranteed to
-compile and pass against the current API.
+Most Rust blocks in this tutorial are doctests. The two `ignore` blocks show
+larger network forms and are not compiled by rustdoc.
 
 ## 1. Quick Start
 
@@ -27,30 +27,17 @@ are on the left.
 A [`prelude::Runtime`] supplies the execution resources for tensor operations.
 The default build uses the pure-Rust `cpu-faer` backend.
 
-The current source checkout uses a sibling Tenferro checkout through its
-development patch:
-
-```text
-work/
-├── tenet/
-└── tenferro-rs/
-```
-
-From an empty `work` directory, run:
+Clone TeNeT and run:
 
 ```sh
-git clone https://github.com/tensor4all/tenferro-rs.git
-git -C tenferro-rs checkout 73926e29c2df0ae022830f9e0b736df87b699ce8
-git clone https://github.com/Ryo-wtnb11/TeNeT.git tenet
-cd tenet
+git clone https://github.com/Ryo-wtnb11/TeNeT.git
+cd TeNeT
 cargo run -p tenet-network --example quickstart
 ```
 
-The command uses the default `cpu-faer` feature. The Tenferro commit above is
-the revision tested for this source checkout, not a downstream dependency
-requirement. The registry release procedure instead uses published Tenferro
-and publishes the facade package as `tenet-rs` (whose Rust library target is
-still named `tenet`); see [`docs/releasing.md`](../../docs/releasing.md).
+The command uses the default `cpu-faer` feature and the published Tenferro
+0.3 dependency line. The facade package is `tenet-rs`, whose Rust library
+target remains `tenet`; see [`docs/releasing.md`](../../docs/releasing.md).
 
 The complete calculation lives in the [U(1) quickstart
 example](https://github.com/Ryo-wtnb11/TeNeT/blob/main/tenet-network/examples/quickstart.rs).
@@ -141,7 +128,7 @@ Contraction compatibility uses oriented dual pairing:
 the two selected legs must represent dual vector spaces in the current
 codomain/domain orientation. A codomain leg built from `v` contracts a
 domain leg built from the same `v`. To contract two same-side legs
-(e.g. domain against domain), build exactly one of them from `v.dual()`.
+(e.g. domain against domain), build exactly one of them from `v.try_dual()?`.
 
 <div class="math" style="margin: 1.25rem 0; padding: 0.2rem 0; overflow-x: auto;">
 <math display="block" style="font-size: 1.12em; line-height: 1.8;" xmlns="http://www.w3.org/1998/Math/MathML">
@@ -201,7 +188,8 @@ output, read out with [`prelude::TensorMap::scalar`]. `conj(x)` marks an
 adjoint operand. A label appearing on two operands is contracted; a label
 appearing once must be listed in the output — violations are compile
 errors. With three or more operands the pairwise order is chosen
-automatically by a greedy planner. There are no einsum strings anywhere.
+automatically by the configured optimizer (built-in greedy by default). There
+are no einsum strings anywhere.
 
 <div class="math" style="margin: 1.25rem 0; padding: 0.2rem 0; overflow-x: auto;">
 <math display="block" style="font-size: 1.12em; line-height: 1.8;" xmlns="http://www.w3.org/1998/Math/MathML">
@@ -904,8 +892,9 @@ A [`prelude::Runtime`] is built once with [`prelude::RuntimeBuilder`] and then
 carried implicitly by every tensor made from it. The builder is where you pick
 execution policy — none of it appears in everyday op code:
 
-- **Device.** `Runtime::builder().cuda(device)` selects CUDA storage (phase 1;
-  see the limitations below). The default is the host CPU backend.
+- **Device.** `Runtime::builder().cuda(device)` attaches CUDA capability and a
+  context. Tensors start on Host storage; call `to_cuda()` for an explicit
+  transfer. The default is the host CPU backend.
 - **Dense backends.** [`prelude::RuntimeBuilder::linalg_backend`] /
   `gemm_backend` ([`prelude::LinalgBackend`]) choose the dense factorization /
   GEMM providers. Backends are first-class and selectable — see
@@ -951,17 +940,15 @@ dimension — size budgets against `GradedSpace::dim`, not raw sector counts.
 Honest list, as of this writing:
 
 - **CUDA support remains deliberately narrow.**
-  `Runtime::builder().cuda(device)` + `to_cuda()`/`to_host()` support direct
-  dense-`f64` contractions, selected arithmetic and reductions (including
-  norms), and the typed compact QR, compact SVD, and truncated-SVD paths.
-  Unsupported storage/scalar/provider combinations and unwired operations
-  still return an explicit `UnsupportedOnDevice`-style error; nothing falls
-  back to the CPU silently.
+  `Runtime::builder().cuda(device)` attaches a context; `to_cuda()` and
+  `to_host()` transfer explicitly. CUDA supports a multiplicity-free `f64`
+  subset. Unsupported storage, scalar, provider, and operation combinations
+  return an explicit error; nothing falls back to the CPU silently.
 - **No hyperedge/batch labels in `tensor!`** (a label appearing three or
   more times is a compile error). Partial traces (`a[i, i; j]`) and full
   traces are supported.
 - **No automatic dtype promotion**: mixing `f64` and `c64` operands in
   `tensor!` is rejected at compile time; widen explicitly with `to_c64()`.
-- **Memory-bounded slicing is planned but not executable yet**: the
-  slicing planner IR is ported, the sliced executor over symmetric legs
-  is future work (sector-granular slicing).
+- **Sliced execution is explicit.** Use the Host dense `Network` lowering and
+  `execute_symmetric_sliced` APIs; `tensor!` does not select or execute slices
+  automatically.

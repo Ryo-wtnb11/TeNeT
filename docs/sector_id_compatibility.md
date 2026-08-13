@@ -73,9 +73,9 @@ for representing the complete encoded `i32` U(1) label set. On a narrower
 target the checked codec and space constructors return a width error rather
 than truncating, wrapping, or overlapping component bits.
 
-Representation does not imply that the finite `i32` charge window is closed
-under U(1) algebra. In particular, `i32::MIN` has no representable negation,
-and charge addition can overflow near either endpoint. Checked typed handling
-for those algebra boundaries is tracked separately in
-[issue #274](https://github.com/Ryo-wtnb11/TeNeT/issues/274); this packed-codec
-migration does not wrap, saturate, or reinterpret overflowing charges.
+The representable U(1) charge range is `i32::MIN + 1 ..= i32::MAX`.
+`U1Irrep::try_new(i32::MIN)` returns `None`, and `U1Irrep::new(i32::MIN)`
+panics because that charge has no representable dual. Addition outside that
+range, including a valid sum equal to `i32::MIN`, returns
+`FusionAlgebraError::U1FusionOverflow`. TeNeT does not wrap, saturate, or
+reinterpret these charges.
