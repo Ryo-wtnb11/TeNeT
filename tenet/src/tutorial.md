@@ -3,7 +3,8 @@
 Everyday TeNeT code uses the **user layer**: one `use tenet::prelude::*;`
 import gives [`prelude::Runtime`], [`prelude::GradedSpace`],
 [`prelude::TensorMap`], built-in providers and [`prelude::Truncation`]. The
-provider, scalar and storage are type parameters; rank and sector content remain
+provider `R`, payload scalar `D`, and storage `S` are type parameters; the
+provider's categorical coefficient scalar is separate. Rank and sector content remain
 runtime values. The `tensor!` contraction frontend is provided by the
 `tenet-network` crate. Expert layers ([`core`], [`operations`], [`dense`],
 [`matrixalgebra`]) stay available underneath — see the appendix at the end.
@@ -508,8 +509,9 @@ consequences worth knowing before you pick an order:
   at the top of your model.
 - **The coefficient scalar is promoted, not fixed.** A product of two
   real-coefficient providers stays real; a component with complex F/R data,
-  such as `FibonacciFusionRule`, widens the product to `Complex64`. Tensors
-  over such a product need a complex payload.
+  such as `FibonacciFusionRule`, widens the product's categorical scalar to
+  `Complex64`. Host operations that admit that scalar may use such products;
+  the payload type `D` remains separate and operation-specific bounds apply.
 
 To use a symmetry that is not built in, implement the provider traits in your
 own crate — nothing in the engine enumerates symmetries, so an external

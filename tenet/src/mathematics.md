@@ -79,7 +79,8 @@ So an SU(2) `GradedSpace` with degeneracy two in twice-spin sectors 0 and 1 has 
 </div>
 
 The user layer currently exposes U(1), bosonic Z2, fermion parity fZ2,
-SU(2), and selected product spaces. Product-space dimensions multiply sector
+SU(2), and selected product symmetries through `GradedSpace` values over
+admitted providers. Product-sector dimensions multiply sector
 quantum dimensions componentwise.
 
 ## Duals

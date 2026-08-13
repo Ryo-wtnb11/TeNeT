@@ -12,7 +12,8 @@
 //! [`prelude::GradedSpace`]s. The provider, scalar and storage are concrete type
 //! parameters, while tensor rank and sector content remain runtime values. A
 //! fusion rule defined outside this workspace therefore uses the same ordinary
-//! tensor API as the built-in U(1), Z2, fZ2, SU(2), and product providers.
+//! tensor API as the built-in U(1), Z2, fZ2, SU(2), and product providers when
+//! they satisfy the required admission and operation capability bounds.
 //!
 //! A [`prelude::Runtime`] owns the shared execution state: the per-rule
 //! contraction/tree-transform contexts, the dense backend (selectable per
