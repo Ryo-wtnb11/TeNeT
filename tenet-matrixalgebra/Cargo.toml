@@ -1,6 +1,6 @@
 [package]
 name = "tenet-matrixalgebra"
-version = "0.1.0"
+version = "0.1.1"
 description = "Blockwise matrix factorizations for TeNeT"
 edition.workspace = true
 rust-version.workspace = true
@@ -8,9 +8,9 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-tenet-core = { version = "0.1.0", path = "../tenet-core" }
-tenet-dense = { version = "0.1.0", path = "../tenet-dense", default-features = false }
-tenet-tensors = { version = "0.1.0", path = "../tenet-tensors", default-features = false }
+tenet-core = { version = "0.1.1", path = "../tenet-core" }
+tenet-dense = { version = "0.1.1", path = "../tenet-dense", default-features = false }
+tenet-tensors = { version = "0.1.1", path = "../tenet-tensors", default-features = false }
 num-complex = "0.4"
 num-traits = "0.2"
 
