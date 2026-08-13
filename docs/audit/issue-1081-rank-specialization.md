@@ -57,31 +57,35 @@ cargo bench -p tenet-operations --bench tree_transform_lowering -- \
 | rank 4 reverse, 8 x 4096 | 13.597–14.009 / 12.988–13.049 / 13.254–13.902 | 13.328–13.376 / 13.558–14.022 / 13.328–13.865 |
 | rank 4 reverse, 2 x 65536 | 94.244–95.118 / 91.517–92.261 / 94.438–95.563 | 94.763–95.962 / 95.110–97.218 / 94.192–101.77 |
 
-The rank-2 many-small prototype is consistently faster, but by roughly
-11–18%, below the 20% strided gate.  The rank-4 reverse prototype has a
-roughly 6–9% many-small difference and no consistent sign in the other two
-regimes.  These prototype timings omit replay admission and therefore cannot
-establish the required 10% end-to-end warm-total result.  They provide no
-evidence to adopt a TeNeT rank-specialized path.  Every measured warm replay
-allocation result was `calls=0 bytes=0`; rank 8/16 are constructed and
+The rank-2 many-small prototype is consistently faster by roughly 11–18%.
+That is a useful, reproducible candidate for an existing upstream rank
+dispatch, even though it is below the conservative 20% gate for duplicating a
+kernel inside TeNeT.  The rank-4 reverse prototype has a roughly 6–9%
+many-small difference and no consistent sign in the other two regimes.  These
+prototype timings omit replay admission and therefore cannot establish the
+required 10% TeNeT-local end-to-end warm-total result.  Every measured warm
+replay allocation result was `calls=0 bytes=0`; rank 8/16 are constructed and
 bitwise-checked but not timed as specialization candidates.
 
 ## Decision
 
-Do not adopt TeNeT logical-rank or fixed effective-rank specialization from
-this evidence.  It does not meet the stated strided or end-to-end gates, and
-the generic fused carry loop already has no warm allocation.  This is not a
-blanket rejection of a future, measured specialization.
+Do not duplicate a TeNeT-local logical-rank or fixed effective-rank kernel.
+The generic fused carry loop already has no warm allocation, and a locally
+duplicated path would need a conservative 20% strided or 10% end-to-end
+warm-total improvement to pay for its maintenance and binary-size cost.  That
+gate is a TeNeT-local duplication gate, not an absolute rejection threshold.
 
-The Multi pack/GEMM/scatter path has no isolated fixed-rank prototype through
-the current public/internal benchmark boundary.  It is therefore unmeasured
-here.  #1081 must remain open unless its acceptance criteria are explicitly
-narrowed to Single-block strided replay; this document alone cannot close it.
+Use the rank-2 many-small result as a follow-on candidate for an upstream
+`strided-kernel` or Tenferro prepared/raw path to apply its existing rank
+dispatch.  TeNeT should consume that result through `StridedHostKernelAdapter`
+rather than own a second rank-specialized kernel family.
 
-This does not reject an upstream strided-kernel optimization: if an upstream
-kernel provides a measured fast path that meets the same gates, TeNeT should
-call it through `StridedHostKernelAdapter`, rather than duplicate it or own a
-separate rank-specialized kernel family.
+The Multi pack/GEMM/scatter path is not an omitted rank-specialization result:
+its measured runtime mixes strided pack/scatter with GEMM, and the current
+interfaces cannot attribute a fixed-rank strided optimization in isolation.
+It remains a separate performance question and does not block closing this
+Single-block rank-dispatch investigation once the upstream ownership issue is
+linked.
 
 No production executable changed, so a release binary-size or compile-time
 regression gate is not applicable to this measurement-only change.  The
