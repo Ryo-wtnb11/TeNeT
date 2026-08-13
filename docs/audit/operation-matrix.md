@@ -1,6 +1,6 @@
 # Operation matrix
 
-Audited at: `7b5745541f5bbd36fb80dde40acbeda2194a1798`
+Audited at: `eb99cc405bc57c24c9755d4a9c30b2fcc5aeec2b`
 
 This is the current-main capability inventory for #938. The pinned source and
 executable tests are authoritative; an export, a satisfiable trait bound, or an
@@ -30,7 +30,7 @@ or recursively nested `ProductFusionRule` values.
 | Operation family | U(1) | Z2 | ZN(3) | CU(1) | fZ2 | SU(2) | fZ2 x U(1) | (fZ2 x U(1)) x SU(2) | checked Generic seam [1] | Fibonacci |
 |---|---|---|---|---|---|---|---|---|---|---|
 | Space/tensor construction and labelled block readback | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED |
-| Physical dense expansion and symmetric projection [2] | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
+| Physical dense expansion and symmetric projection [2] | PROVED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | PROVED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
 | `adjoint` | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | UNSUPPORTED |
 | `permute`, `transpose`, `repartition` | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED |
 | `braid`, `twist` | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | UNSUPPORTED |
@@ -61,7 +61,7 @@ Notes:
    fixtures, for `f64` and `Complex64` where applicable. SU(N) is evidence, not
    a named-group implementation branch. B/C/D provider work is excluded and
    remains in [#989](https://github.com/Ryo-wtnb11/TeNeT/issues/989).
-2. Physical expansion/projection is a separate API project, [#861](https://github.com/Ryo-wtnb11/TeNeT/issues/861).
+2. Host physical expansion/projection is proved for built-in U(1) and SU(2) multiplicity-free providers by `tenet/tests/physical_dense.rs`, including real/complex SU(2) round trips, an independent TensorKit SU(2) oracle, and U(1) basis-order projection. Checked Generic, products, devices, and Python export remain unsupported; the Python/JAX surface is deferred in [#1086](https://github.com/Ryo-wtnb11/TeNeT/issues/1086).
 3. Only the U(1)/SU(2) Host `inner` production gap has a current measurement;
    [#875](https://github.com/Ryo-wtnb11/TeNeT/issues/875) owns it. The
    values-only risk in [#880](https://github.com/Ryo-wtnb11/TeNeT/issues/880)
@@ -113,7 +113,7 @@ trivial/dense provider exists.
 |---|---|---|---|---|---|---|
 | Metadata, provider ownership, handle clone | PROVED | PROVED | PROVED | PROVED | PROVED | UNSUPPORTED |
 | Stable `data() -> &[D]` | PROVED | PROVED | INTENTIONAL-DIFFERENCE | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
-| Physical expansion/projection [2] | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
+| Physical expansion/projection [2] | PROVED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
 | Explicit Host/device transfer | PROVED | PROVED | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/3) | PROVED | PROVED | UNSUPPORTED |
 | Lazy adjoint | PROVED | PROVED | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/3) | PROVED | UNSUPPORTED | UNSUPPORTED |
 | Permute/braid/recoupling | PROVED | PROVED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
@@ -209,6 +209,9 @@ ownership/cache audit is #783.
 - `tenet/tests/typed_cuda_transfer.rs` and
   `tenet-network/tests/typed_cuda_network.rs`: real-device MF transfer,
   operation and canonical-network gates.
+- `tenet/tests/physical_dense.rs`: U(1)/SU(2) Host physical expansion and
+  projection, real and complex SU(2) round trips, and an independent
+  TensorKit SU(2) coefficient oracle.
 
 TensorKit's `matrixalgebrakit.jl` wrappers and MatrixAlgebraKit's factorization
 interfaces are the API/law comparison, not proof of TeNeT execution. QSpace is
