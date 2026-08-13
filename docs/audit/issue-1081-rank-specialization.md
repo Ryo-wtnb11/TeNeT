@@ -5,6 +5,9 @@ Date: 2026-08-13.  Benchmark commits under test:
 `fe5dae8785461ba543b066abc4298f4abc82061c`.  Host: Apple arm64, macOS 15.5,
 Rust 1.96.0, `cpu-faer` default feature.
 
+> Historical measurement only; not current performance authority. Later
+> outcomes are listed in the [audit index](README.md).
+
 ## Question
 
 The relevant rank is not a tensor's logical rank.  `TreeTransformStructure`

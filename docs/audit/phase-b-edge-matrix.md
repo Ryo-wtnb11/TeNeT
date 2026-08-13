@@ -2,6 +2,9 @@
 
 Audited at: `e9c5d35c45b022f93999bf8be63c27cd08fda1a3`
 
+> Historical evidence only; not current capability authority. Later outcomes
+> are listed in the [audit index](README.md).
+
 This is a historical compact evidence index for issue #9 at the revision
 above. It must not be read as current-main evidence without being rerun. It
 records existing executable tests; it does not upgrade an operation to

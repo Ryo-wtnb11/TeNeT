@@ -2,6 +2,9 @@
 
 Audited at: `eb99cc405bc57c24c9755d4a9c30b2fcc5aeec2b`
 
+> Historical evidence only; not current capability authority. Later outcomes
+> are listed in the [audit index](README.md).
+
 This is a historical capability inventory for #938 at the revision above. It
 must not be read as current-main evidence without being rerun. The pinned
 source and executable tests are authoritative for that revision; an export, a
