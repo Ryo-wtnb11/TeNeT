@@ -6,6 +6,9 @@ This review measures the completed Host GenericSymmetry provider path at main
 `5f9e3b45b55220a2560698e262551cf3c3b1e3aa`. It does not change production
 algorithms, add caches or prepared APIs, or extend the B/C/D providers.
 
+> Historical measurement only; not current performance authority. See the
+> [benchmark index](README.md).
+
 - Host: Apple M4 Max, arm64, Darwin 24.5.0
 - Toolchain: rustc/cargo 1.96.0
 - Dense backend: faer

@@ -1,5 +1,8 @@
 # Issue #245 fusion-layout cache benchmark
 
+> Historical measurement only; not current performance authority. The exact
+> compared revisions are recorded below; see the [benchmark index](README.md).
+
 This report records an exploratory non-regression check for commit
 `e42a34138b2a06482cf18213f9a2042eb59eff17` against `origin/main` at
 `7825e085de7ed3d2c3f5921721f7701e4d637a86`.

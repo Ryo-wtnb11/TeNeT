@@ -1,5 +1,10 @@
 # Issue 118 warm-cache audit
 
+> Historical measurement only; not current performance authority. Compared
+> TeNeT `55b82747d5ab9309190cd89febfe5aedd00d3d6a` with
+> `d99e9b2c96f7ee5d59f53d4d8fbade789ac36ebd`. See the
+> [benchmark index](README.md).
+
 ## Identity and complexity
 
 `HomSpaceId` is a collision-safe semantic identity, not a counter token. It

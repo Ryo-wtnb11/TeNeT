@@ -1,5 +1,9 @@
 # Issue 124 allocation evidence
 
+> Historical measurement only; not current performance authority. Evidence
+> finalized at TeNeT `b5f3efa63df8b0371e7df927a5bd9010aa3d52f2`. See the
+> [benchmark index](README.md).
+
 ## Measurement boundary
 
 `tenet-network/tests/intermediate_allocations.rs` runs every `(workload, chi,
