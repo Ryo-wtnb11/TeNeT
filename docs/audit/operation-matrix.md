@@ -29,15 +29,15 @@ or recursively nested `ProductFusionRule` values.
 
 | Operation family | U(1) | Z2 | ZN(3) | CU(1) | fZ2 | SU(2) | fZ2 x U(1) | (fZ2 x U(1)) x SU(2) | checked Generic seam [1] | Fibonacci |
 |---|---|---|---|---|---|---|---|---|---|---|
-| Space/tensor construction and labelled block readback | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | UNSUPPORTED |
+| Space/tensor construction and labelled block readback | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED |
 | Physical dense expansion and symmetric projection [2] | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
 | `adjoint` | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | UNSUPPORTED |
-| `permute`, `transpose`, `repartition` | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | UNSUPPORTED |
+| `permute`, `transpose`, `repartition` | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED |
 | `braid`, `twist` | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | UNSUPPORTED |
 | `flip` | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | UNSUPPORTED |
 | Unit insertion/removal | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | UNSUPPORTED |
 | `catdomain`, `catcodomain`, `absorb` | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | UNSUPPORTED |
-| `otimes`, arbitrary/ordered `contract`, `compose` | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | UNSUPPORTED |
+| `otimes`, arbitrary/ordered `contract`, `compose` | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED |
 | `add`, `scale`, `norm`, `trace_pairs`, `tr` | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | UNSUPPORTED |
 | `inner` [3] | [MEASURED-GAP](https://github.com/Ryo-wtnb11/TeNeT/issues/875) | PROVED | PROVED | PROVED | PROVED | [MEASURED-GAP](https://github.com/Ryo-wtnb11/TeNeT/issues/875) | PROVED | PROVED | PROVED | UNSUPPORTED |
 | Compact QR; `left_orth`, `right_orth`; SVD values | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | UNSUPPORTED |
@@ -100,12 +100,10 @@ Notes:
    Direct device snapshots and storage types other than Host `Vec<D>` are
    unsupported; use explicit `to_host()` before encoding a device tensor.
 
-Fibonacci remains expert-layer categorical data, not a canonical typed
-provider: its coefficient scalar/codec boundary does not satisfy the ordinary
-typed admission contract. Complex categorical composition and Fibonacci are
-owned by [#592](https://github.com/Ryo-wtnb11/TeNeT/issues/592) and
-[#633](https://github.com/Ryo-wtnb11/TeNeT/issues/633); spinors by
-[#651](https://github.com/Ryo-wtnb11/TeNeT/issues/651). Slicing is separately
+Fibonacci has partial canonical typed Host coverage: construction/readback,
+the tested complex transforms, tensor products, and composition are admitted.
+Full snapshot, decomposition, network, planar, and device coverage remains
+unsupported unless a row above has an executable fixture. Slicing is separately
 tracked in [#6](https://github.com/Ryo-wtnb11/TeNeT/issues/6). No public
 trivial/dense provider exists.
 

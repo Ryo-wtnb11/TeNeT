@@ -53,13 +53,12 @@ than a provider enum or a named-group dispatch branch.
 [`docs/provider_interface.md`](docs/provider_interface.md) is the contract for
 writing one.
 
-`FibonacciFusionRule` supplies `FibonacciSector` labels through `SectorCodec`,
-but its `Complex64` categorical coefficients do not satisfy the current
-multiplicity-free typed root's `f64` requirement. It is therefore not yet
-available through the ordinary typed `TensorMap` API. `tenet-category-data`
-separately ships the table-backed `CategoryDataFibonacci`, with its own
-`CategoryObject` codec and the same coefficient-type boundary. SUN is available
-only with `racah-generated` and uses the checked Generic path.
+`FibonacciFusionRule` supplies `FibonacciSector` labels and complex categorical
+coefficients. Host typed construction, transforms, tensor products, and
+composition are admitted where the operation's categorical-scalar bounds are
+satisfied; decompositions, network coverage, and CUDA remain narrower.
+`tenet-category-data` separately ships the table-backed `CategoryDataFibonacci`.
+SUN is available only with `racah-generated` and uses the checked Generic path.
 
 A product of providers is itself a provider, so
 
@@ -81,8 +80,8 @@ coefficients while `fZ2 ⊠ U(1)` stays real.
 The ordinary user API is `GradedSpace<R>` / `TensorMap<R, D, S>`. It keeps `R`
 concrete, returns the provider's own labels (`SectorCodec::Sector`), and keeps
 payload scalar `D` and storage `S` separate from the categorical coefficient
-scalar. The multiplicity-free typed path currently requires categorical
-coefficients of type `f64`. Checked Generic providers have a separate Host-only
+scalar. Host typed operations use operation-specific categorical-scalar and
+capability bounds. Checked Generic providers have a separate Host-only
 admission and execution path. Supported typed CUDA paths are currently
 multiplicity-free `f64`. A failed checked operation returns no output tensor or
 partial factor tuple.

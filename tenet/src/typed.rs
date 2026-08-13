@@ -3,7 +3,8 @@
 //!
 //! This is the canonical user facade re-exported by [`crate::prelude`]. `R`
 //! stays concrete through monomorphized construction, so any provider —
-//! including one defined downstream — can drive it, and the categorical
+//! including one defined downstream that implements the required admission and
+//! operation capability traits — can drive it, and the categorical
 //! identity of a tensor comes back as [`TypedSectorAdmission::Sector`] labels
 //! instead of opaque [`tenet_core::SectorId`] keys. The engine itself never
 //! sees a label; the codec is the single boundary where one enters or leaves.
@@ -63,10 +64,10 @@
 //! TeNeT keeps the nesting in the Rust type — see
 //! [`tenet_core::ProductFusionRule`] for the full statement.
 //!
-//! The scope of that product-provider claim is:
-//! `MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra +
-//! SectorCodec`. Complex categorical scalars and anyonic product operations
-//! are issue #539.
+//! The product-provider claim is subject to the capability bounds of the
+//! operation being called. Host paths admit complex categorical scalars where
+//! the corresponding categorical-scalar and recoupling bounds are present;
+//! some decompositions, network paths, and CUDA remain narrower.
 //!
 //! **`ProductSector` is not `ProductSpace`.** [`tenet_core::ProductSector`] is
 //! a *sector label*: one irrep of a Deligne product category, TensorKit's
