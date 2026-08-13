@@ -194,6 +194,7 @@ impl<T> ReportsPlacement for HostTreeTransformWorkspace<T> {
 fn ensure_recoupling_coefficients<D, C>(
     workspace: &mut TreeTransformWorkspace<D>,
     task: TreeTransformTaskView<'_, C>,
+    structure_identity: &Arc<()>,
 ) -> Result<bool, OperationError>
 where
     D: RecouplingCoefficientAction<C>,
@@ -203,10 +204,12 @@ where
     // Why not key by the shared categorical payload alone: different layout
     // bindings can reorder Multi jobs by element count and therefore require
     // different packed RHS orders for the same categorical matrices.
-    if task.coefficient_cache_is_current(
-        workspace.coefficient_structure_identity.as_ref(),
-        workspace.coefficient_scratch.len(),
-    ) {
+    let same_structure = workspace
+        .coefficient_structure_identity
+        .as_ref()
+        .and_then(Weak::upgrade)
+        .is_some_and(|identity| Arc::ptr_eq(&identity, structure_identity));
+    if same_structure && workspace.coefficient_scratch.len() == plan.coefficient_len() {
         return Ok(false);
     }
 
@@ -251,7 +254,7 @@ where
             actual: workspace.coefficient_scratch.len(),
         });
     }
-    task.remember_coefficient_cache_identity(&mut workspace.coefficient_structure_identity);
+    workspace.coefficient_structure_identity = Some(Arc::downgrade(structure_identity));
     Ok(true)
 }
 
@@ -397,19 +400,25 @@ mod coefficient_cache_tests {
         let structure = multi_recoupling_structure([1.0, 2.0, 3.0, 4.0]);
         let mut workspace = TreeTransformWorkspace::<f64>::default();
 
-        assert!(
-            ensure_recoupling_coefficients(&mut workspace, structure.task_view().unwrap()).unwrap()
-        );
+        assert!(ensure_recoupling_coefficients(
+            &mut workspace,
+            structure.task_view().unwrap(),
+            structure.identity_marker(),
+        )
+        .unwrap());
         assert_eq!(workspace.coefficient_scratch, vec![1.0, 2.0, 3.0, 4.0]);
-        assert!(
-            !ensure_recoupling_coefficients(&mut workspace, structure.task_view().unwrap())
-                .unwrap()
-        );
+        assert!(!ensure_recoupling_coefficients(
+            &mut workspace,
+            structure.task_view().unwrap(),
+            structure.identity_marker(),
+        )
+        .unwrap());
 
         let structure_clone = structure.clone();
         assert!(!ensure_recoupling_coefficients(
             &mut workspace,
-            structure_clone.task_view().unwrap()
+            structure_clone.task_view().unwrap(),
+            structure_clone.identity_marker(),
         )
         .unwrap());
 
@@ -418,7 +427,8 @@ mod coefficient_cache_tests {
         workspace.coefficient_scratch.fill(-1.0);
         assert!(ensure_recoupling_coefficients(
             &mut workspace,
-            equal_but_distinct.task_view().unwrap()
+            equal_but_distinct.task_view().unwrap(),
+            equal_but_distinct.identity_marker(),
         )
         .unwrap());
         assert_eq!(workspace.coefficient_scratch, vec![1.0, 2.0, 3.0, 4.0]);
@@ -455,16 +465,22 @@ mod coefficient_cache_tests {
         assert!(first.shares_coefficient_payload_with(&second));
         let mut workspace = TreeTransformWorkspace::<f64>::default();
 
-        assert!(
-            ensure_recoupling_coefficients(&mut workspace, first.task_view().unwrap()).unwrap()
-        );
+        assert!(ensure_recoupling_coefficients(
+            &mut workspace,
+            first.task_view().unwrap(),
+            first.identity_marker(),
+        )
+        .unwrap());
         assert_eq!(
             workspace.coefficient_scratch,
             vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
         );
-        assert!(
-            ensure_recoupling_coefficients(&mut workspace, second.task_view().unwrap()).unwrap()
-        );
+        assert!(ensure_recoupling_coefficients(
+            &mut workspace,
+            second.task_view().unwrap(),
+            second.identity_marker(),
+        )
+        .unwrap());
         assert_eq!(
             workspace.coefficient_scratch,
             vec![5.0, 6.0, 7.0, 8.0, 1.0, 2.0, 3.0, 4.0]
@@ -2565,7 +2581,7 @@ where
         if recoupling_plan.is_empty() {
             return Ok(());
         }
-        ensure_recoupling_coefficients(workspace, task)?;
+        ensure_recoupling_coefficients(workspace, task, structure.identity_marker())?;
         for (block_index, job) in recoupling_plan.entries() {
             let TreeTransformBlock::Multi {
                 dst_layout_start,
@@ -3194,17 +3210,36 @@ where
         // Admission converts coefficients before the first destination write.
         // The shared serial/parallel helpers call this again, but the
         // structure-identity check makes that call a no-work cache hit.
-        ensure_recoupling_coefficients(workspace, task)?;
+        ensure_recoupling_coefficients(workspace, task, structure.identity_marker())?;
     }
     scale_inactive_destinations(kernels, &mut workspace.zero_strides, task, dst_data, mode)?;
     if threads > 1 {
         return tree_transform_blocks_with_batched_recoupling_parallel(
-            kernels, dense, workspace, task, schedule, dst_data, src_data, alpha, mode, threads,
+            kernels,
+            dense,
+            workspace,
+            task,
+            schedule,
+            structure.identity_marker(),
+            dst_data,
+            src_data,
+            alpha,
+            mode,
+            threads,
             None,
         );
     }
     tree_transform_blocks_with_batched_recoupling(
-        kernels, dense, workspace, task, dst_data, src_data, alpha, mode, None,
+        kernels,
+        dense,
+        workspace,
+        task,
+        structure.identity_marker(),
+        dst_data,
+        src_data,
+        alpha,
+        mode,
+        None,
     )
 }
 
@@ -3324,7 +3359,7 @@ where
         let start = std::time::Instant::now();
         // Attribute the admission conversion here; the replay helper's second
         // call is the same no-work identity check as in the unprofiled path.
-        if ensure_recoupling_coefficients(workspace, task)? {
+        if ensure_recoupling_coefficients(workspace, task, structure.identity_marker())? {
             profile.multi_coefficient_prepare += start.elapsed();
         }
     }
@@ -3340,6 +3375,7 @@ where
             workspace,
             task,
             schedule,
+            structure.identity_marker(),
             dst_data,
             src_data,
             alpha,
@@ -3353,6 +3389,7 @@ where
             dense,
             workspace,
             task,
+            structure.identity_marker(),
             dst_data,
             src_data,
             alpha,
@@ -3378,6 +3415,7 @@ fn tree_transform_blocks_with_batched_recoupling<A, E, D, C>(
     dense: &mut E,
     workspace: &mut TreeTransformWorkspace<D>,
     task: TreeTransformTaskView<'_, C>,
+    structure_identity: &Arc<()>,
     dst_data: &mut [D],
     src_data: &[D],
     alpha: D,
@@ -3432,7 +3470,7 @@ where
     }
 
     let start = profile.as_ref().map(|_| std::time::Instant::now());
-    let converted = ensure_recoupling_coefficients(workspace, task)?;
+    let converted = ensure_recoupling_coefficients(workspace, task, structure_identity)?;
     if converted {
         if let (Some(profile), Some(start)) = (profile.as_deref_mut(), start) {
             profile.multi_coefficient_prepare += start.elapsed();
@@ -4010,6 +4048,7 @@ fn tree_transform_blocks_with_batched_recoupling_parallel<A, E, D, C>(
     workspace: &mut TreeTransformWorkspace<D>,
     task: TreeTransformTaskView<'_, C>,
     schedule: &TreeTransformParallelSchedule,
+    structure_identity: &Arc<()>,
     dst_data: &mut [D],
     src_data: &[D],
     alpha: D,
@@ -4032,7 +4071,7 @@ where
     let single_count = schedule.single_block_count;
     let multi_count = recoupling_plan.jobs().len();
     let start = profile.as_ref().map(|_| std::time::Instant::now());
-    let converted = ensure_recoupling_coefficients(workspace, task)?;
+    let converted = ensure_recoupling_coefficients(workspace, task, structure_identity)?;
     if converted {
         if let (Some(profile), Some(start)) = (profile.as_deref_mut(), start) {
             profile.multi_coefficient_prepare += start.elapsed();

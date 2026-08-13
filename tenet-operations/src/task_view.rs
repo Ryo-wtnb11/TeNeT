@@ -1,4 +1,4 @@
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 
 use tenet_core::BlockStructure;
 
@@ -71,23 +71,6 @@ impl<'a, C: Copy> TreeTransformTaskView<'a, C> {
     #[inline]
     pub(crate) fn storage_conjugate(self) -> bool {
         self.structure.storage_conjugate()
-    }
-
-    /// Whether Host coefficient-conversion scratch belongs to this structure.
-    pub(crate) fn coefficient_cache_is_current(
-        self,
-        identity: Option<&Weak<()>>,
-        coefficient_len: usize,
-    ) -> bool {
-        identity
-            .and_then(Weak::upgrade)
-            .is_some_and(|identity| Arc::ptr_eq(&identity, self.structure.identity_marker()))
-            && coefficient_len == self.recoupling_plan().coefficient_len()
-    }
-
-    /// Records the structure identity for Host coefficient-conversion scratch.
-    pub(crate) fn remember_coefficient_cache_identity(self, identity: &mut Option<Weak<()>>) {
-        *identity = Some(Arc::downgrade(self.structure.identity_marker()));
     }
 
     pub(crate) fn workspace_requirements(self) -> TreeTransformWorkspaceRequirements {
