@@ -482,11 +482,16 @@ struct RankFixture {
 }
 
 fn rank_fixture(logical_rank: usize, permutation: Permutation, blocks: usize) -> RankFixture {
-    // Equal dimensions keep every requested permutation shape-preserving. The
-    // total stays close to 2 Mi elements where integral power-of-two sides
-    // permit it; rank 16 bottoms out at side 2 by construction.
-    const TARGET_TOTAL_ELEMENTS: usize = 1 << 21;
-    let target_per_block = TARGET_TOTAL_ELEMENTS / blocks;
+    // Equal dimensions keep every requested permutation shape-preserving.
+    // These regimes intentionally change the *block* size: 32 x 256 elements
+    // is metadata/scheduling dominated, 8 x 4096 is mixed, and 2 x 65536 is
+    // dense-kernel dominated for ranks where the dimensions can realize it.
+    let target_per_block = match blocks {
+        32 => 1 << 8,
+        8 => 1 << 12,
+        2 => 1 << 16,
+        _ => unreachable!("the benchmark defines exactly three block regimes"),
+    };
     let mut side = 2usize;
     while side
         .checked_mul(2)
@@ -654,6 +659,8 @@ fn bench_rank_fixture(c: &mut Criterion, mut fixture: RankFixture) {
         let block_len = src.len() / fixture.structure.block_count();
         group.bench_function("prototype_fixed_effective_rank", |bencher| {
             bencher.iter(|| {
+                let src = black_box(&src);
+                let dst = black_box(&mut dst);
                 for block in 0..fixture.structure.block_count() {
                     let start = block * block_len;
                     let end = start + block_len;
