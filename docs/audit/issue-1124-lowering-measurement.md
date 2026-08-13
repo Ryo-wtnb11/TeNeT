@@ -55,7 +55,9 @@ opaque Stage A/C admission.
 Keep the current operation-local borrowed task view and existing workspace-local
 one-slot coefficient reuse. Do not add retained lowering metadata or a new cache:
 admission is already allocation-free and negligible beside replay. The measured
-A/B penalty is coefficient conversion covered by the existing one-slot; it
-does not justify new ownership, keying, invalidation, and byte-budget machinery.
+A/B path forces a one-slot coefficient-conversion miss, but the separately
+profiled conversion cost is sub-microsecond. The remaining timing difference is
+unattributed and does not justify new ownership, keying, invalidation, or
+byte-budget machinery.
 Reused executors matter in these fixtures, but Tenferro owns that analysis and
 its policy.
