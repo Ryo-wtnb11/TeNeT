@@ -193,9 +193,11 @@ an error. F and R become dense blocks (`GenericFArray`,
 provider to the checked interface; see `tenet-sectors/src/sun.rs` for a
 catalog-bounded provider.
 
-Current checked Generic coverage is listed in the
-[operation matrix](audit/operation-matrix.md). It is a Host path; CUDA typed
-execution is currently limited to supported multiplicity-free `f64` paths.
+Current checked Generic coverage is defined by the public bounds and executable
+tests at this revision. It is a Host path; CUDA typed execution is currently
+limited to supported multiplicity-free `f64` paths. The
+[operation matrix](audit/operation-matrix.md) is retained only as
+revision-pinned historical evidence.
 
 ## Products
 

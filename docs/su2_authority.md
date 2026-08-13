@@ -4,7 +4,8 @@
 > sweep below describe the recorded migration pair, not current-main behavior.
 > Snapshot authority: TeNeT
 > `c612b4ff5c0b9285fa6ef8617b5c5472cba3287e`. The current dependency authority
-> is `Cargo.lock`; see the [historical-record index](history.md).
+> is the versioned `racah` requirement in `tenet-sectors/Cargo.toml`; see the
+> [historical-record index](history.md).
 
 At the recorded migration revision, `tenet-sectors` delegated base/default-feature
 SU(2) representation algebra, F/R/Frobenius--Schur coefficients, and coefficient
