@@ -25,6 +25,14 @@ pub(crate) enum StorageRegion {
     },
 }
 
+/// Immutable post-preparation storage facts for one synchronous operation.
+///
+/// A nonempty handle must report a checked byte region covering every byte
+/// reachable through its usable capacity. All wrappers of one root allocation
+/// must share `(domain, allocation)`, whose identity cannot be reused while a
+/// snapshot is live. Region, placement, and context must remain stable through
+/// the executor's final completion fence. Adapters unable to prove this
+/// provenance are unsupported and must fail before submission.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct StorageSnapshot {
     pub(crate) active_len: usize,
@@ -60,7 +68,7 @@ pub(crate) struct WorkspaceSnapshot {
     pub(crate) coefficient_readiness: Option<CoefficientReadiness>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum TreeTransformAdmissionError {
     Structure(&'static str),
     Length { expected: usize, actual: usize },
@@ -72,6 +80,7 @@ pub(crate) enum TreeTransformAdmissionError {
     Aliasing,
     WorkspaceCapacity(&'static str),
     CoefficientReadiness,
+    Task(OperationError),
 }
 
 impl From<TreeTransformAdmissionError> for OperationError {
@@ -103,6 +112,7 @@ impl From<TreeTransformAdmissionError> for OperationError {
             TreeTransformAdmissionError::CoefficientReadiness => {
                 "tree transform coefficient readiness admission failed"
             }
+            TreeTransformAdmissionError::Task(_) => "tree transform task admission failed",
         };
         OperationError::InvalidArgument { message }
     }
@@ -236,6 +246,9 @@ fn validate_region<D>(
     name: &'static str,
     storage: StorageSnapshot,
 ) -> Result<(), TreeTransformAdmissionError> {
+    if storage.active_len > storage.usable_capacity {
+        return Err(TreeTransformAdmissionError::InvalidRegion(name));
+    }
     let bytes = Layout::array::<D>(storage.usable_capacity)
         .map_err(|_| TreeTransformAdmissionError::ArithmeticOverflow)?
         .size();
@@ -293,7 +306,8 @@ fn map_task_error(error: OperationError) -> TreeTransformAdmissionError {
         OperationError::ElementCountMismatch { expected, actual } => {
             TreeTransformAdmissionError::Length { expected, actual }
         }
-        _ => TreeTransformAdmissionError::ArithmeticOverflow,
+        OperationError::ElementCountOverflow => TreeTransformAdmissionError::ArithmeticOverflow,
+        error => TreeTransformAdmissionError::Task(error),
     }
 }
 
@@ -334,6 +348,17 @@ mod tests {
         };
         assert_eq!(
             validate_region::<u64>("source", snapshot),
+            Err(TreeTransformAdmissionError::InvalidRegion("source"))
+        );
+        assert_eq!(
+            validate_region::<u64>(
+                "source",
+                StorageSnapshot {
+                    active_len: 3,
+                    region: region(1, 1, 0, 16),
+                    ..snapshot
+                }
+            ),
             Err(TreeTransformAdmissionError::InvalidRegion("source"))
         );
         assert_eq!(
