@@ -46,3 +46,7 @@ harness = false
 [[bench]]
 name = "permute_u1_many"
 harness = false
+
+[[bench]]
+name = "tree_transform_lowering"
+harness = false
