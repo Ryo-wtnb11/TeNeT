@@ -51,6 +51,18 @@ pub(crate) struct ExecutorSnapshot {
     pub(crate) scalar: TypeId,
 }
 
+/// Stage-A-issued checked arithmetic result. Private fields prevent later
+/// operation adapters from weakening Stage C with a forged scratch length.
+pub(crate) struct AdmissionRequirements {
+    fused_index_len: usize,
+}
+
+impl AdmissionRequirements {
+    pub(crate) fn fused_index_len(&self) -> usize {
+        self.fused_index_len
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct CoefficientReadiness {
     pub(crate) structure_and_layout: Weak<()>,
@@ -126,14 +138,27 @@ pub(crate) fn validate_stage_a<D: 'static, C: Copy>(
     src: StorageSnapshot,
     executor: ExecutorSnapshot,
     workers: usize,
-) -> Result<usize, TreeTransformAdmissionError> {
-    task.validate_structures_and_lengths(
-        dst_structure,
-        src_structure,
-        dst.active_len,
-        src.active_len,
-    )
-    .map_err(map_task_error)?;
+) -> Result<AdmissionRequirements, TreeTransformAdmissionError> {
+    // Stage A order: completed structure and checked arithmetic, exact lengths,
+    // then executor-local placement, context, and finite capabilities.
+    task.validate_structures(dst_structure, src_structure)
+        .map_err(map_task_error)?;
+    let requirements = task.workspace_requirements();
+    for len in [
+        requirements.packed_source_len,
+        requirements.packed_destination_len,
+        requirements.converted_coefficient_len,
+    ] {
+        Layout::array::<D>(len).map_err(|_| TreeTransformAdmissionError::ArithmeticOverflow)?;
+    }
+    let fused_index_len = workers
+        .max(1)
+        .checked_mul(requirements.fused_index_len_per_worker)
+        .ok_or(TreeTransformAdmissionError::ArithmeticOverflow)?;
+    Layout::array::<usize>(fused_index_len)
+        .map_err(|_| TreeTransformAdmissionError::ArithmeticOverflow)?;
+    task.validate_lengths(dst.active_len, src.active_len)
+        .map_err(map_task_error)?;
     for (name, storage) in [("destination", dst), ("source", src)] {
         if storage.placement != executor.placement {
             return Err(TreeTransformAdmissionError::Placement(name));
@@ -151,20 +176,7 @@ pub(crate) fn validate_stage_a<D: 'static, C: Copy>(
     if executor.scalar != TypeId::of::<D>() {
         return Err(TreeTransformAdmissionError::Capability("scalar"));
     }
-    let requirements = task.workspace_requirements();
-    for len in [
-        requirements.packed_source_len,
-        requirements.packed_destination_len,
-        requirements.converted_coefficient_len,
-    ] {
-        Layout::array::<D>(len).map_err(|_| TreeTransformAdmissionError::ArithmeticOverflow)?;
-    }
-    let fused = workers
-        .max(1)
-        .checked_mul(requirements.fused_index_len_per_worker)
-        .ok_or(TreeTransformAdmissionError::ArithmeticOverflow)?;
-    Layout::array::<usize>(fused).map_err(|_| TreeTransformAdmissionError::ArithmeticOverflow)?;
-    Ok(fused)
+    Ok(AdmissionRequirements { fused_index_len })
 }
 
 pub(crate) fn validate_stage_c<D: 'static, C: Copy>(
@@ -173,12 +185,14 @@ pub(crate) fn validate_stage_c<D: 'static, C: Copy>(
     src: StorageSnapshot,
     workspace: &WorkspaceSnapshot,
     executor: ExecutorSnapshot,
-    fused_index_len: usize,
+    admission: &AdmissionRequirements,
 ) -> Result<(), TreeTransformAdmissionError> {
     let requirements = task.workspace_requirements();
+    // Stage C order: immutable provenance, aliasing, workspace facts, then the
+    // exact coefficient-readiness witness.
     validate_region::<D>("destination", dst)?;
     validate_region::<D>("source", src)?;
-    for (name, storage, required) in [
+    let workspace_slots = [
         (
             "packed source",
             workspace.packed_source,
@@ -194,25 +208,9 @@ pub(crate) fn validate_stage_c<D: 'static, C: Copy>(
             workspace.converted_coefficients,
             requirements.converted_coefficient_len,
         ),
-    ] {
-        if storage.usable_capacity < required {
-            return Err(TreeTransformAdmissionError::WorkspaceCapacity(name));
-        }
-        if storage.placement != executor.placement {
-            return Err(TreeTransformAdmissionError::Placement(name));
-        }
-        if storage.context != executor.context {
-            return Err(TreeTransformAdmissionError::Context(name));
-        }
+    ];
+    for (name, storage, _) in workspace_slots {
         validate_region::<D>(name, storage)?;
-    }
-    if workspace.fused_index_capacity < fused_index_len {
-        return Err(TreeTransformAdmissionError::WorkspaceCapacity(
-            "fused indices",
-        ));
-    }
-    if workspace.fused_index_placement != Placement::Host {
-        return Err(TreeTransformAdmissionError::Placement("fused indices"));
     }
     let regions = [
         (dst.region, true),
@@ -228,6 +226,25 @@ pub(crate) fn validate_stage_c<D: 'static, C: Copy>(
                 return Err(TreeTransformAdmissionError::Aliasing);
             }
         }
+    }
+    for (name, storage, required) in workspace_slots {
+        if storage.placement != executor.placement {
+            return Err(TreeTransformAdmissionError::Placement(name));
+        }
+        if storage.context != executor.context {
+            return Err(TreeTransformAdmissionError::Context(name));
+        }
+        if storage.usable_capacity < required {
+            return Err(TreeTransformAdmissionError::WorkspaceCapacity(name));
+        }
+    }
+    if workspace.fused_index_placement != Placement::Host {
+        return Err(TreeTransformAdmissionError::Placement("fused indices"));
+    }
+    if workspace.fused_index_capacity < admission.fused_index_len {
+        return Err(TreeTransformAdmissionError::WorkspaceCapacity(
+            "fused indices",
+        ));
     }
     if requirements.converted_coefficient_len != 0 {
         let ready = workspace.coefficient_readiness.as_ref();
@@ -420,14 +437,15 @@ mod tests {
                 AdmissionFault::WrongScalar => executor.scalar = TypeId::of::<f32>(),
                 _ => {}
             }
-            let fused =
+            let admission =
                 validate_stage_a::<f64, _>(task, structure, structure, dst, src, executor, workers)
                     .map_err(MockError::Admission)?;
 
             // Stage B invalidates readiness before any allocation/conversion.
-            let mut workspace = self.prepare_workspace(task, executor, fused)?;
+            let mut workspace =
+                self.prepare_workspace(task, executor, admission.fused_index_len())?;
             self.inject_stage_c_fault(&mut workspace, &mut dst, src);
-            validate_stage_c::<f64, _>(task, dst, src, &workspace, executor, fused)
+            validate_stage_c::<f64, _>(task, dst, src, &workspace, executor, &admission)
                 .map_err(MockError::Admission)?;
 
             for block in task.blocks() {
@@ -502,19 +520,24 @@ mod tests {
                 AdmissionFault::Overlap => dst.region = src.region,
                 AdmissionFault::PackedSourceCapacity => {
                     workspace.packed_source.usable_capacity =
-                        workspace.packed_source.usable_capacity.saturating_sub(1)
+                        workspace.packed_source.usable_capacity.saturating_sub(1);
+                    workspace.packed_source.active_len = workspace.packed_source.usable_capacity;
                 }
                 AdmissionFault::PackedDestinationCapacity => {
                     workspace.packed_destination.usable_capacity = workspace
                         .packed_destination
                         .usable_capacity
-                        .saturating_sub(1)
+                        .saturating_sub(1);
+                    workspace.packed_destination.active_len =
+                        workspace.packed_destination.usable_capacity;
                 }
                 AdmissionFault::CoefficientCapacity => {
                     workspace.converted_coefficients.usable_capacity = workspace
                         .converted_coefficients
                         .usable_capacity
-                        .saturating_sub(1)
+                        .saturating_sub(1);
+                    workspace.converted_coefficients.active_len =
+                        workspace.converted_coefficients.usable_capacity;
                 }
                 AdmissionFault::FusedCapacity => {
                     workspace.fused_index_capacity =
@@ -733,15 +756,16 @@ mod tests {
         };
         let dst = storage(1, 4);
         let src = storage(2, 4);
-        let fused = validate_stage_a::<f64, _>(task, &structure, &structure, dst, src, executor, 3)
-            .unwrap();
-        assert_eq!(fused, 3);
+        let admission =
+            validate_stage_a::<f64, _>(task, &structure, &structure, dst, src, executor, 3)
+                .unwrap();
+        assert_eq!(admission.fused_index_len(), 3);
         let structure_and_layout = task.admission_identity();
         let workspace = WorkspaceSnapshot {
             packed_source: storage(3, 4),
             packed_destination: storage(4, 4),
             converted_coefficients: storage(5, 4),
-            fused_index_capacity: fused,
+            fused_index_capacity: admission.fused_index_len(),
             fused_index_placement: Placement::Host,
             coefficient_readiness: Some(CoefficientReadiness {
                 structure_and_layout,
@@ -749,7 +773,15 @@ mod tests {
                 context,
             }),
         };
-        validate_stage_c::<f64, _>(task, dst, src, &workspace, executor, fused).unwrap();
+        validate_stage_c::<f64, _>(task, dst, src, &workspace, executor, &admission).unwrap();
+        let mut too_small = workspace.clone();
+        too_small.fused_index_capacity = admission.fused_index_len() - 1;
+        assert_eq!(
+            validate_stage_c::<f64, _>(task, dst, src, &too_small, executor, &admission),
+            Err(TreeTransformAdmissionError::WorkspaceCapacity(
+                "fused indices"
+            ))
+        );
         assert_eq!(
             validate_stage_c::<f64, _>(
                 task,
@@ -763,7 +795,7 @@ mod tests {
                     ..workspace
                 },
                 executor,
-                fused,
+                &admission,
             ),
             Err(TreeTransformAdmissionError::Aliasing)
         );

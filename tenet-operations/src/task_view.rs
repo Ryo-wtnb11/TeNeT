@@ -112,8 +112,24 @@ impl<'a, C: Copy> TreeTransformTaskView<'a, C> {
         dst_len: usize,
         src_len: usize,
     ) -> Result<(), OperationError> {
+        self.validate_structures(dst_structure, src_structure)?;
+        self.validate_lengths(dst_len, src_len)
+    }
+
+    pub(crate) fn validate_structures(
+        self,
+        dst_structure: &Arc<BlockStructure>,
+        src_structure: &Arc<BlockStructure>,
+    ) -> Result<(), OperationError> {
         self.structure
-            .validate_replay_structures(dst_structure, src_structure)?;
+            .validate_replay_structures(dst_structure, src_structure)
+    }
+
+    pub(crate) fn validate_lengths(
+        self,
+        dst_len: usize,
+        src_len: usize,
+    ) -> Result<(), OperationError> {
         validate_exact_len(self.destination_len, dst_len)?;
         validate_exact_len(self.source_len, src_len)
     }
