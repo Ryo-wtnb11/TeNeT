@@ -72,7 +72,9 @@ fn warmed_public_host_admission_without_tasks_is_allocation_free() {
     ALLOCATIONS.set(0);
     COUNTING.set(true);
     let mut profile = TreeTransformReplayProfile::default();
-    replay(&mut profile);
+    for _ in 0..100 {
+        replay(&mut profile);
+    }
     COUNTING.set(false);
 
     assert_eq!(ALLOCATIONS.get(), 0);
