@@ -100,7 +100,8 @@ impl Fixture {
     fn describe(&self) {
         let plan = self.a.recoupling_plan();
         let workspace_payload_lower_bound_bytes =
-            (plan.source_len() + plan.destination_len() + plan.coefficient_len()) * size_of::<f64>();
+            (plan.source_len() + plan.destination_len() + plan.coefficient_len())
+                * size_of::<f64>();
         println!(
             "fixture={} tasks={} jobs={} runs={} structure_charged_bytes={} workspace_payload_lower_bound_bytes={}",
             self.name,
