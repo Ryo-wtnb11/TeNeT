@@ -1,9 +1,10 @@
 # Audit artifacts
 
-Each file here is a census of the workspace at one commit. They are cited as
-the current capability authority — by `AUDIT_REPORT.md` and by the roadmap
-issues — so a reader must be able to find the current one and see how old it
-is.
+Each file here is a census of the workspace at one commit. These files are
+historical evidence, not an automatically current capability authority. A
+reader must be able to find the audited revision and see how old it is; use an
+artifact as current evidence only after it has been refreshed at the target
+revision.
 
 Two rules, both of which the earlier commit-suffixed filenames broke:
 

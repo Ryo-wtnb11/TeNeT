@@ -3,6 +3,10 @@
 作成日: 2026-07-04。`tensorkit_semantic_naming_audit.md` の実施決定版。
 「現行名 → 改定名」はこの表が正本。改名は tier ごとに 1 コミット、372 テスト緑維持。
 
+> **Historical naming snapshot.** This table records the 2026-07-04 naming
+> decision; it is not a current API inventory. Confirm the exported API and
+> deprecation status in the current source before removing or migrating names.
+
 ## 層の定義(監査メモどおり)
 
 - **ユーザー層**(将来の高レベル API): TensorKit 語彙(`permute`, `tsvd`, …)。本表の後に別途設計。
