@@ -5,15 +5,31 @@ use tenet_core::{BlockStructure, Placement};
 
 use crate::{task_view::TreeTransformTaskView, OperationError};
 
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "production opaque adapter is deferred")
+)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ContextIdentity(pub(crate) u64);
 
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "production opaque adapter is deferred")
+)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct StorageDomain(pub(crate) u64);
 
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "production opaque adapter is deferred")
+)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct AllocationIdentity(pub(crate) u64);
 
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "production opaque adapter is deferred")
+)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum StorageRegion {
     Empty,
@@ -33,6 +49,10 @@ pub(crate) enum StorageRegion {
 /// snapshot is live. Region, placement, and context must remain stable through
 /// the executor's final completion fence. Adapters unable to prove this
 /// provenance are unsupported and must fail before submission.
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "production opaque adapter is deferred")
+)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct StorageSnapshot {
     pub(crate) active_len: usize,
@@ -42,6 +62,10 @@ pub(crate) struct StorageSnapshot {
     pub(crate) region: StorageRegion,
 }
 
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "production opaque adapter is deferred")
+)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ExecutorSnapshot {
     pub(crate) placement: Placement,
@@ -53,16 +77,28 @@ pub(crate) struct ExecutorSnapshot {
 
 /// Stage-A-issued checked arithmetic result. Private fields prevent later
 /// operation adapters from weakening Stage C with a forged scratch length.
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "production opaque adapter is deferred")
+)]
 pub(crate) struct AdmissionRequirements {
     fused_index_len: usize,
 }
 
 impl AdmissionRequirements {
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "production opaque adapter is deferred")
+    )]
     pub(crate) fn fused_index_len(&self) -> usize {
         self.fused_index_len
     }
 }
 
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "production opaque adapter is deferred")
+)]
 #[derive(Clone, Debug)]
 pub(crate) struct CoefficientReadiness {
     pub(crate) structure_and_layout: Weak<()>,
@@ -70,6 +106,10 @@ pub(crate) struct CoefficientReadiness {
     pub(crate) context: ContextIdentity,
 }
 
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "production opaque adapter is deferred")
+)]
 #[derive(Clone, Debug)]
 pub(crate) struct WorkspaceSnapshot {
     pub(crate) packed_source: StorageSnapshot,
@@ -80,6 +120,10 @@ pub(crate) struct WorkspaceSnapshot {
     pub(crate) coefficient_readiness: Option<CoefficientReadiness>,
 }
 
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "production opaque adapter is deferred")
+)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum TreeTransformAdmissionError {
     Structure(&'static str),
@@ -130,6 +174,10 @@ impl From<TreeTransformAdmissionError> for OperationError {
     }
 }
 
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "production opaque adapter is deferred")
+)]
 pub(crate) fn validate_stage_a<D: 'static, C: Copy>(
     task: TreeTransformTaskView<'_, C>,
     dst_structure: &Arc<BlockStructure>,
@@ -179,6 +227,10 @@ pub(crate) fn validate_stage_a<D: 'static, C: Copy>(
     Ok(AdmissionRequirements { fused_index_len })
 }
 
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "production opaque adapter is deferred")
+)]
 pub(crate) fn validate_stage_c<D: 'static, C: Copy>(
     task: TreeTransformTaskView<'_, C>,
     dst: StorageSnapshot,
@@ -259,6 +311,10 @@ pub(crate) fn validate_stage_c<D: 'static, C: Copy>(
     Ok(())
 }
 
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "production opaque adapter is deferred")
+)]
 fn validate_region<D>(
     name: &'static str,
     storage: StorageSnapshot,
@@ -285,6 +341,10 @@ fn validate_region<D>(
     }
 }
 
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "production opaque adapter is deferred")
+)]
 fn overlaps(
     left: StorageRegion,
     right: StorageRegion,
@@ -315,6 +375,10 @@ fn overlaps(
     Ok(ld == rd && la == ra && ls < re && rs < le)
 }
 
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "production opaque adapter is deferred")
+)]
 fn map_task_error(error: OperationError) -> TreeTransformAdmissionError {
     match error {
         OperationError::StructureMismatch { tensor } => {
@@ -375,10 +439,13 @@ mod tests {
         destination: Vec<f64>,
         source_region: StorageRegion,
         destination_region: StorageRegion,
+        placement: Placement,
         context: ContextIdentity,
         fault: AdmissionFault,
         fail_preparation: bool,
         fail_after_submission: Option<usize>,
+        converted_coefficients: Vec<f64>,
+        coefficient_readiness: Option<CoefficientReadiness>,
         submissions: usize,
         writes: usize,
     }
@@ -390,10 +457,13 @@ mod tests {
                 destination_region: region(1, 1, 0, destination.capacity() * size_of::<f64>()),
                 source,
                 destination,
+                placement: Placement::Cuda(3),
                 context: ContextIdentity(7),
                 fault: AdmissionFault::None,
                 fail_preparation: false,
                 fail_after_submission: None,
+                converted_coefficients: Vec::new(),
+                coefficient_readiness: None,
                 submissions: 0,
                 writes: 0,
             }
@@ -411,7 +481,7 @@ mod tests {
                 .task_view()
                 .map_err(|error| MockError::Admission(TreeTransformAdmissionError::Task(error)))?;
             let mut executor = ExecutorSnapshot {
-                placement: Placement::Host,
+                placement: self.placement,
                 context: self.context,
                 supports_strided: true,
                 supports_matrix: true,
@@ -428,7 +498,7 @@ mod tests {
                 self.source_region,
             );
             match self.fault {
-                AdmissionFault::DestinationPlacement => dst.placement = Placement::Cuda(0),
+                AdmissionFault::DestinationPlacement => dst.placement = Placement::Host,
                 AdmissionFault::DestinationContext => dst.context = ContextIdentity(99),
                 AdmissionFault::DestinationLength => dst.active_len -= 1,
                 AdmissionFault::ActiveBeyondCapacity => dst.usable_capacity -= 1,
@@ -448,9 +518,9 @@ mod tests {
             validate_stage_c::<f64, _>(task, dst, src, &workspace, executor, &admission)
                 .map_err(MockError::Admission)?;
 
-            for block in task.blocks() {
+            for (block_index, block) in task.blocks().iter().enumerate() {
                 self.submissions += 1;
-                self.execute_block(task, block, alpha, mode);
+                self.execute_block(task, block_index, block, alpha, mode);
                 if self.fail_after_submission == Some(self.submissions) {
                     return Err(MockError::Backend);
                 }
@@ -467,22 +537,51 @@ mod tests {
             StorageSnapshot {
                 active_len,
                 usable_capacity,
-                placement: Placement::Host,
+                placement: self.placement,
                 context: self.context,
                 region,
             }
         }
 
-        fn prepare_workspace<C: Copy>(
-            &self,
+        fn prepare_workspace<C: Copy + Into<f64>>(
+            &mut self,
             task: TreeTransformTaskView<'_, C>,
             executor: ExecutorSnapshot,
             fused: usize,
         ) -> Result<WorkspaceSnapshot, MockError> {
+            self.coefficient_readiness = None;
             if self.fail_preparation {
                 return Err(MockError::Preparation);
             }
             let required = task.workspace_requirements();
+            self.converted_coefficients.clear();
+            self.converted_coefficients
+                .reserve(required.converted_coefficient_len);
+            for (block_index, _) in task.recoupling_plan().entries() {
+                let TreeTransformBlock::Multi {
+                    dst_count,
+                    src_count,
+                    coefficient_start,
+                    ..
+                } = task.blocks()[block_index]
+                else {
+                    unreachable!("completed recoupling plan references Multi blocks")
+                };
+                let coefficient_end = coefficient_start + dst_count * src_count;
+                self.converted_coefficients.extend(
+                    task.coefficients()[coefficient_start..coefficient_end]
+                        .iter()
+                        .copied()
+                        .map(Into::into),
+                );
+            }
+            if required.converted_coefficient_len != 0 {
+                self.coefficient_readiness = Some(CoefficientReadiness {
+                    structure_and_layout: task.admission_identity(),
+                    scalar: TypeId::of::<f64>(),
+                    context: executor.context,
+                });
+            }
             let storage = |allocation, capacity| StorageSnapshot {
                 active_len: capacity,
                 usable_capacity: capacity,
@@ -491,7 +590,7 @@ mod tests {
                 region: if capacity == 0 {
                     StorageRegion::Empty
                 } else {
-                    region(1, allocation, 0, capacity * size_of::<f64>())
+                    region(42, allocation, 0, capacity * size_of::<f64>())
                 },
             };
             Ok(WorkspaceSnapshot {
@@ -500,13 +599,7 @@ mod tests {
                 converted_coefficients: storage(5, required.converted_coefficient_len),
                 fused_index_capacity: fused,
                 fused_index_placement: Placement::Host,
-                coefficient_readiness: (required.converted_coefficient_len != 0).then(|| {
-                    CoefficientReadiness {
-                        structure_and_layout: task.admission_identity(),
-                        scalar: TypeId::of::<f64>(),
-                        context: executor.context,
-                    }
-                }),
+                coefficient_readiness: self.coefficient_readiness.clone(),
             })
         }
 
@@ -544,7 +637,7 @@ mod tests {
                         workspace.fused_index_capacity.saturating_sub(1)
                 }
                 AdmissionFault::WorkspacePlacement => {
-                    workspace.packed_source.placement = Placement::Cuda(0)
+                    workspace.packed_source.placement = Placement::Host
                 }
                 AdmissionFault::WorkspaceContext => {
                     workspace.packed_source.context = ContextIdentity(99)
@@ -572,6 +665,7 @@ mod tests {
         fn execute_block<C: Copy + Into<f64>>(
             &mut self,
             task: TreeTransformTaskView<'_, C>,
+            block_index: usize,
             block: &TreeTransformBlock,
             alpha: f64,
             mode: DestinationMode,
@@ -598,9 +692,24 @@ mod tests {
                     dst_count,
                     src_layout_start,
                     src_count,
-                    coefficient_start,
+                    coefficient_start: _,
                     element_count,
                 } => {
+                    let mut prepared_start = 0;
+                    for (prepared_block, _) in task.recoupling_plan().entries() {
+                        let TreeTransformBlock::Multi {
+                            dst_count,
+                            src_count,
+                            ..
+                        } = task.blocks()[prepared_block]
+                        else {
+                            unreachable!("completed recoupling plan references Multi blocks")
+                        };
+                        if prepared_block == block_index {
+                            break;
+                        }
+                        prepared_start += dst_count * src_count;
+                    }
                     for destination in 0..dst_count {
                         let dst = task.layouts().entry(dst_layout_start + destination);
                         for element in 0..element_count {
@@ -608,9 +717,8 @@ mod tests {
                             for source in 0..src_count {
                                 let src = task.layouts().entry(src_layout_start + source);
                                 value += self.source[src.offset as usize + element]
-                                    * task.coefficients()
-                                        [coefficient_start + destination * src_count + source]
-                                        .into();
+                                    * self.converted_coefficients
+                                        [prepared_start + destination * src_count + source];
                             }
                             self.write(dst.offset as usize + element, alpha * value, mode);
                         }
@@ -819,9 +927,12 @@ mod tests {
 
         let (structure, matrix) = multi_fixture();
         let mut executor = MockOpaqueExecutor::new(vec![1.0, 2.0, 3.0, 4.0], vec![10.0; 4]);
+        assert_eq!(executor.placement, Placement::Cuda(3));
         executor
             .execute(&matrix, &structure, 2.0, DestinationMode::Axpby(0.5), 2)
             .unwrap();
+        assert_eq!(executor.converted_coefficients, [0.0, 1.0, 1.0, 0.0]);
+        assert!(executor.coefficient_readiness.is_some());
         assert_eq!(executor.destination, [11.0, 13.0, 7.0, 9.0]);
         assert_eq!((executor.submissions, executor.writes), (1, 4));
     }
@@ -859,6 +970,11 @@ mod tests {
         }
 
         let mut executor = MockOpaqueExecutor::new(vec![1.0, 2.0, 3.0, 4.0], vec![10.0; 4]);
+        executor.coefficient_readiness = Some(CoefficientReadiness {
+            structure_and_layout: transform.task_view().unwrap().admission_identity(),
+            scalar: TypeId::of::<f64>(),
+            context: executor.context,
+        });
         executor.fail_preparation = true;
         assert_eq!(
             executor.execute(&transform, &structure, 1.0, DestinationMode::Overwrite, 1),
@@ -866,6 +982,7 @@ mod tests {
         );
         assert_eq!((executor.submissions, executor.writes), (0, 0));
         assert_eq!(executor.destination, [10.0; 4]);
+        assert!(executor.coefficient_readiness.is_none());
     }
 
     #[test]

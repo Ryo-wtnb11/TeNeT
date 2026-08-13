@@ -47,6 +47,10 @@ impl<'a, C: Copy> TreeTransformTaskView<'a, C> {
     /// layouts cannot change after compilation, this also identifies the exact
     /// layout ordering used by converted coefficients.
     #[inline]
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "first production opaque adapter is a later leaf")
+    )]
     pub(crate) fn admission_identity(self) -> Weak<()> {
         Arc::downgrade(self.structure.identity_marker())
     }

@@ -82,9 +82,6 @@ pub use tree_profile::TreeTransformReplayProfile;
 // Why not retain crate-level `forbid`: Rust does not permit a narrower module
 // to override it. `deny` keeps every other module unsafe-free while this one
 // owns the audited Vec length transition.
-// The pure seam is intentionally crate-private until a production opaque
-// executor (for example CUDA) consumes it; #1123 exercises it with a mock.
-#[allow(dead_code)]
 mod opaque_admission;
 mod owned_cat;
 #[allow(unsafe_code)]
