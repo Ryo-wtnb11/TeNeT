@@ -41,11 +41,10 @@ impl<C: Copy> TreeTransformStructure<C> {
 
 impl<'a, C: Copy> TreeTransformTaskView<'a, C> {
     pub(crate) fn workspace_requirements(self) -> TreeTransformWorkspaceRequirements {
-        let (serial_source, serial_destination) = self.structure.workspace_lens();
         let plan = self.structure.recoupling_plan();
         TreeTransformWorkspaceRequirements {
-            packed_source_len: serial_source.max(plan.source_len()),
-            packed_destination_len: serial_destination.max(plan.destination_len()),
+            packed_source_len: plan.source_len(),
+            packed_destination_len: plan.destination_len(),
             converted_coefficient_len: plan.coefficient_len(),
             fused_index_len_per_worker: self.structure.layouts().max_fused_rank(),
         }
@@ -95,27 +94,30 @@ mod tests {
 
     #[test]
     fn completed_view_exposes_lengths_and_workspace_requirements() {
-        let structure =
-            Arc::new(BlockStructure::packed_column_major(1, [vec![2], vec![2], vec![1]]).unwrap());
+        let structure = Arc::new(
+            BlockStructure::packed_column_major(1, [vec![2], vec![2], vec![1], vec![1], vec![1]])
+                .unwrap(),
+        );
         let transform = TreeTransformStructure::compile_structures(
             &structure,
             &structure,
             &[
                 TreeTransformBlockSpec::single(2, 2, -1.0_f64),
                 TreeTransformBlockSpec::multi(vec![0, 1], vec![0, 1], vec![1.0, 2.0, 3.0, 4.0]),
+                TreeTransformBlockSpec::multi(vec![3, 4], vec![3, 4], vec![5.0, 6.0, 7.0, 8.0]),
             ],
         )
         .unwrap();
 
         let view = transform.task_view().unwrap();
-        view.validate_structures_and_lengths(&structure, &structure, 5, 5)
+        view.validate_structures_and_lengths(&structure, &structure, 7, 7)
             .unwrap();
         assert_eq!(
             view.workspace_requirements(),
             TreeTransformWorkspaceRequirements {
-                packed_source_len: 4,
-                packed_destination_len: 4,
-                converted_coefficient_len: 4,
+                packed_source_len: 6,
+                packed_destination_len: 6,
+                converted_coefficient_len: 8,
                 fused_index_len_per_worker: 1,
             }
         );
