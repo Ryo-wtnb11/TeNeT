@@ -269,9 +269,9 @@ TENET_COTENGRA_UV_PROJECT=tools/cotengra-python \
 
 ## Current Limitations
 
-- Checked Generic providers are Host-only. Their tested typed scope is
-  construction, transforms, tensor products, owned composition and trace,
-  static N-ary networks, and explicit sliced execution. CUDA supports a
+- Checked Generic providers are Host-only. Representative tested typed scope
+  includes construction, transforms, tensor products, owned composition and
+  trace, static N-ary networks, and explicit sliced execution. CUDA supports a
   multiplicity-free `f64` subset after explicit transfer.
 - Execution crates reject a no-default-features build because their convenience
   APIs require a concrete executor. Use `tenet-sectors` / `tenet-core` for
@@ -281,8 +281,6 @@ TENET_COTENGRA_UV_PROJECT=tools/cotengra-python \
 - CUDA is compile-checked in CI, but requires a CUDA runner for runtime smoke
   tests; Host-only tree-transform execution is not used silently on a device.
 - `cotengra-python` is a planner backend, not an executor backend.
-- Cotengra slicing decisions can be represented as `SlicedPlan`, but ordinary
-  sliced execution over `TensorMap` is not wired yet.
 - External planners use dense effective dimensions. Symmetric block execution,
   fusion-tree bookkeeping, fermionic signs, and storage layout remain TeNeT
   execution responsibilities.
