@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use tenet_core::BlockStructure;
 
@@ -43,6 +43,13 @@ impl<C: Copy> TreeTransformStructure<C> {
 }
 
 impl<'a, C: Copy> TreeTransformTaskView<'a, C> {
+    /// Process-local identity for this immutable completed structure. Because
+    /// layouts cannot change after compilation, this also identifies the exact
+    /// layout ordering used by converted coefficients.
+    #[inline]
+    pub(crate) fn admission_identity(self) -> Weak<()> {
+        Arc::downgrade(self.structure.identity_marker())
+    }
     #[inline]
     pub(crate) fn blocks(self) -> &'a [TreeTransformBlock] {
         self.structure.blocks()
