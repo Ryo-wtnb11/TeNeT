@@ -902,6 +902,13 @@ impl<T: Copy> TreeTransformStructure<T> {
         validate_structure_identity("src", &self.src_structure, src_structure)
     }
 
+    pub(crate) fn replay_storage_lens(&self) -> Result<(usize, usize), OperationError> {
+        Ok((
+            self.src_structure.required_len()?,
+            self.dst_structure.required_len()?,
+        ))
+    }
+
     /// Rebinds an already compiled descriptor to content-equal canonical
     /// structures without rebuilding its replay payload.
     #[doc(hidden)]
