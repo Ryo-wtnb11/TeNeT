@@ -2,8 +2,10 @@
 
 > **Historical implementation notes, not a current support matrix.** Several
 > host-only and pre-CUDA statements below have since been superseded. Issue #9
-> owns the current operation/provider/storage/device audit; retain this file only
-> as design history until its durable decisions are extracted into an ADR.
+> does not make this a current operation/provider/storage/device audit.
+> Snapshot authority: TeNeT
+> `e8db35ad98bf99cd1af90e853ff177b0b3400f2b`. See the
+> [historical-record index](history.md).
 
 This file records TensorKit ecosystem behavior that TeNeT intentionally mirrors
 or leaves unsupported until the categorical semantics are fixed. These items are

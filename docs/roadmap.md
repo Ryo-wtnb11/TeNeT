@@ -2,7 +2,9 @@
 
 > **Historical status only.** This checklist predates the current typed API and
 > CUDA work. Its completion marks and performance claims are not current support
-> evidence. Issue #9 and its operation matrix are the current audit authority.
+> evidence. Snapshot authority: TeNeT
+> `c612b4ff5c0b9285fa6ef8617b5c5472cba3287e`. See the
+> [historical-record index](history.md) for current navigation.
 
 完成像: fZ2⊠U(1)⊠SU(2) の TN 計算、縮約パス最適化、CPU/GPU 両対応、
 TensorKit 並みの使い勝手。最重要軸 = Rust 準拠の保守性・拡張性 × 動的 rank でも速い。

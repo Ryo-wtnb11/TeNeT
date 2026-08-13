@@ -1,5 +1,9 @@
 # Expert facade migration (pre-release)
 
+> **Historical migration manifest.** Snapshot authority: TeNeT
+> `aa7afbc70ced74c17cdb5d42533c4ceda1c913f0`. This is not a current export
+> inventory; see the [historical-record index](history.md).
+
 TeNeT is pre-release (`0.1.0`, with no published TeNeT release), so the
 facade cleanup may remove paths. Runtime behavior is unchanged.
 
