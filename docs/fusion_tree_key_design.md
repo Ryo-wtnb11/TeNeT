@@ -1,4 +1,8 @@
-> **Current implementation boundary (issues #249, #322, and #472):** completed
+> **Historical design exploration.** Snapshot authority: TeNeT
+> `af713cec92137a20c81efe2bddf809b2bf670a16`. This is not current cache or
+> persistence authority; see the [historical-record index](history.md).
+>
+> **Recorded implementation boundary (issues #249, #322, and #472):** completed
 > tree-transform structures are reused only in the owning execution context.
 > Semantic group plans and source-column recoupling rows are compile-local: an
 > exact structure hit already owns the whole transform, and measured partial

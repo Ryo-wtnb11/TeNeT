@@ -2,6 +2,9 @@
 
 Audited at: `8999ec3678b7f894a3547b1a930802a1adfe90a0`
 
+> Historical evidence only; not current capability authority. Later outcomes
+> are listed in the [audit index](README.md).
+
 This inventory is the Phase A artifact census required by #9. The production
 source authority is that commit; the audit base
 is `b73fd39f3eb271d9d287f5927df41d99bd017a63`, which adds only the public-API

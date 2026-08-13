@@ -2,6 +2,10 @@
 
 作成日: 2026-07-03
 
+> **Historical naming analysis.** Snapshot authority: TeNeT
+> `d096e8becb33e9d797a0a37165b83d04b6f626f1`. This is not a current API
+> inventory; see the [historical-record index](history.md).
+>
 > **実施済み (2026-07-04)**: P0 / P1 の改名は完了。現行名との対応は
 > [`tensorkit_compatibility_table.md`](tensorkit_compatibility_table.md) が正本。
 > 本メモ中の「現在の名前」は改名前のものを指す。

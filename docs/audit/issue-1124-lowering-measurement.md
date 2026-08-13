@@ -7,6 +7,9 @@ Measured implementation commit: `b0984695cfa218cef71ba42ca6c672a6c234e6d2` (base
 15.5, Rust 1.96.0, default `cpu-faer` feature, Criterion 0.5.1. Results are
 local and indicative, not performance guarantees.
 
+> Historical measurement only; not current performance authority. Later
+> outcomes are listed in the [audit index](README.md).
+
 `TreeTransformTaskView` is a borrowed `Copy` view. `TreeTransformStructure`
 owns blocks, layouts, coefficients, GEMM jobs/runs, and workspace requirements.
 The benchmark does not rebuild it inside replay timing. At this Host replay

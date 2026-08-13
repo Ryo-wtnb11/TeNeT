@@ -6,6 +6,9 @@
 > **Historical naming snapshot.** This table records the 2026-07-04 naming
 > decision; it is not a current API inventory. Confirm the exported API and
 > deprecation status in the current source before removing or migrating names.
+> Snapshot authority: TeNeT
+> `ef915980c969ea04f93a0eedf845c057b937ad52`. See the
+> [historical-record index](history.md).
 
 ## 層の定義(監査メモどおり)
 

@@ -1,27 +1,20 @@
 # Audit artifacts
 
-Each file here is a census of the workspace at one commit. These files are
-historical evidence, not an automatically current capability authority. A
-reader must be able to find the audited revision and see how old it is; use an
-artifact as current evidence only after it has been refreshed at the target
-revision.
+These files are revision-pinned evidence, not current capability authority.
+Each Markdown artifact names the revision it inspected or measured. Refresh an
+artifact at the same stable path; use its Git history to retain earlier
+snapshots. `public-api.jsonl` is generated evidence tied to the revision named
+by `artifact-classification.md` and must not be hand-edited.
 
-Two rules, both of which the earlier commit-suffixed filenames broke:
+| Artifact | Authority | Later outcome |
+| --- | --- | --- |
+| [Artifact classification](artifact-classification.md) | `8999ec3678b7f894a3547b1a930802a1adfe90a0` | Documentation reconciliation: [history index](../history.md). |
+| [Operation matrix](operation-matrix.md) | `eb99cc405bc57c24c9755d4a9c30b2fcc5aeec2b` | No automatic current-main claim; rerun the matrix for a new authority. |
+| [Edge-case matrix](phase-b-edge-matrix.md) | `e9c5d35c45b022f93999bf8be63c27cd08fda1a3` | No automatic current-main claim; use current tests for current support. |
+| [Runtime architecture review](symmetric-runtime-architecture-review.md) | TeNeT `5390f64a4e58b76f011f58e1576f632bfd569cf0` and the reference revisions listed in the report | Checked-Generic resource reuse: [#1079](https://github.com/Ryo-wtnb11/TeNeT/pull/1079); replay boundary: [#1080](https://github.com/Ryo-wtnb11/TeNeT/issues/1080); subsequent investigations: [#1081](https://github.com/Ryo-wtnb11/TeNeT/issues/1081), [#1082](https://github.com/Ryo-wtnb11/TeNeT/issues/1082), [#1083](https://github.com/Ryo-wtnb11/TeNeT/issues/1083), and [#1084](https://github.com/Ryo-wtnb11/TeNeT/issues/1084). |
+| [Rank-specialization measurement](issue-1081-rank-specialization.md) | `40f5570518176f3a0860abdc43d12253789ad394` and `fe5dae8785461ba543b066abc4298f4abc82061c` | Generic replay retained; no production specialization was added ([#1129](https://github.com/Ryo-wtnb11/TeNeT/pull/1129)). |
+| [Lowering-retention measurement](issue-1124-lowering-measurement.md) | `b0984695cfa218cef71ba42ca6c672a6c234e6d2` | No retained TeNeT backend sidecar was justified ([#1128](https://github.com/Ryo-wtnb11/TeNeT/pull/1128)). |
 
-1. **The filename is stable; the commit lives in the file.** Every artifact
-   carries an `Audited at: <full sha>` line directly under its title. Refreshing
-   an audit is an edit to the same path, so citations do not rot and the
-   history of the census is the file's git history.
-
-2. **The `Audited at` line is the only authority statement.** Do not repeat the
-   commit in the title. `operation-matrix-c612b4f.md` was previously titled for
-   `c612b4f` while its body claimed `d612869`; that ambiguity is what this
-   convention removes.
-
-Refreshing an artifact means: rerun the census against the new commit, update
-the `Audited at` line, and state in the commit message what changed
-classification. A stale artifact is not deleted — it is refreshed or explicitly
-demoted in `AUDIT_REPORT.md`.
-
-`public-api.jsonl` is generated from rustdoc JSON. It is reproducible from the
-commit in the accompanying `artifact-classification.md`, not hand-edited.
+Later outcomes are indexed here rather than inserted into the original audit
+narrative. Current source, tests, crate documentation, and normative policy
+documents remain the authority for current behavior.

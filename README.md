@@ -95,17 +95,14 @@ tensor or partial factor tuple.
 
 SU(2) representation algebra itself is not reimplemented here: `tenet-sectors`
 delegates 3j/6j, F/R and Frobenius-Schur coefficients plus their caches to the
-pinned [`racah`](https://github.com/Ryo-wtnb11/racah) crate. See
-[`docs/su2_authority.md`](docs/su2_authority.md) for the pinned revision and the
-compatibility protocol.
+versioned [`racah`](https://github.com/Ryo-wtnb11/racah) dependency. The
+`tenet-sectors` manifest is the authority for the supported dependency line.
 
 ## Current typed capabilities
 
-The [operation matrix](docs/audit/operation-matrix.md) lists the Host operations
-covered by current tests. This includes tensor transformations and
-contractions, matrix factorizations, static network traces, and versioned
-`f64`/`Complex64` Host snapshots. Storage and device limits are summarized
-below.
+Current capability claims are backed by the public trait bounds and executable
+tests at this revision. Storage and device limits are summarized below;
+revision-pinned audits are retained only as historical evidence.
 
 ## Quick Start
 
@@ -309,17 +306,16 @@ TENET_COTENGRA_UV_PROJECT=tools/cotengra-python \
 - [`docs/sector_id_compatibility.md`](docs/sector_id_compatibility.md):
   `SectorId`, product-codec, storage-order, seeded-random, and cache
   compatibility contract.
-- [`docs/su2_authority.md`](docs/su2_authority.md): the `racah` SU(2)
-  coefficient authority — pinned revision, cache ownership, and the
-  compatibility protocol for bumping it.
 - [`docs/complexity_parity_policy.md`](docs/complexity_parity_policy.md): the
   structured-operation FLOP and storage-order contract.
 - [`docs/backend_policy.md`](docs/backend_policy.md): backend selection and the
   policy for performance evidence.
 - [`docs/cotengra_backend.md`](docs/cotengra_backend.md): cotengra setup,
   planner protocol, and current limitations.
-- [`benchmarks/README.md`](benchmarks/README.md): benchmark harnesses, recorded
-  results, and notes.
+- [`benchmarks/README.md`](benchmarks/README.md): current harnesses and
+  revision-specific result records.
+- [`docs/history.md`](docs/history.md): historical design, audit, migration,
+  and measurement records. These are not current capability authority.
 
 ## Development Notes
 
