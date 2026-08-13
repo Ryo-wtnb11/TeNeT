@@ -35,6 +35,7 @@ mod scalar;
 pub mod storage_scratch;
 pub mod strided;
 pub mod structure_identity;
+mod task_view;
 pub mod tensoradd;
 pub mod transform_helpers;
 mod transform_key;

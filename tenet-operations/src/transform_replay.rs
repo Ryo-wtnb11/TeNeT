@@ -1398,6 +1398,30 @@ mod inactive_destination_tests {
                 .collect::<Vec<_>>()
         );
 
+        let result = tree_transform_structure_overwrite_with_structural_recoupling_raw(
+            &mut StridedHostKernelAdapter::default(),
+            &mut DefaultDenseExecutor::new(),
+            &mut TreeTransformWorkspace::default(),
+            &structure,
+            &Arc::clone(dst.structure()),
+            &Arc::clone(src.structure()),
+            dst.data_mut(),
+            &[],
+            1.0,
+            1,
+        );
+        assert!(result.is_err());
+        assert_eq!(
+            dst.data()
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            before
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        );
+
         let scalar_structure =
             Arc::new(BlockStructure::packed_column_major(0, [Vec::<usize>::new()]).unwrap());
         let scalar_replay = TreeTransformStructure::compile_structures(
@@ -3067,11 +3091,23 @@ where
     D: DenseRecouplingScalar + RecouplingCoefficientAction<C> + ConjugateValue,
     C: Copy + Sync,
 {
-    structure.validate_replay_structures(dst_structure, src_structure)?;
-    validate_replay_storage_len(dst_structure, dst_data.len())?;
-    validate_replay_storage_len(src_structure, src_data.len())?;
+    let task = structure.task_view()?;
+    task.validate_structures_and_lengths(
+        dst_structure,
+        src_structure,
+        dst_data.len(),
+        src_data.len(),
+    )?;
     let threads = effective_tree_transform_threads(structure, threads);
-    checked_fused_index_len(threads, structure.layouts().max_fused_rank())?;
+    let requirements = task.workspace_requirements();
+    task.validate_workspace_requirements::<D>()?;
+    checked_fused_index_len(threads, requirements.fused_index_len_per_worker)?;
+    if requirements.converted_coefficient_len != 0 {
+        // Admission converts coefficients before the first destination write.
+        // The shared serial/parallel helpers call this again, but the
+        // structure-identity check makes that call a no-work cache hit.
+        ensure_recoupling_coefficients(workspace, structure)?;
+    }
     scale_inactive_destinations(
         kernels,
         &mut workspace.zero_strides,
@@ -3186,13 +3222,28 @@ where
     let total_start = std::time::Instant::now();
 
     let start = std::time::Instant::now();
-    structure.validate_replay_structures(dst_structure, src_structure)?;
-    validate_replay_storage_len(dst_structure, dst_data.len())?;
-    validate_replay_storage_len(src_structure, src_data.len())?;
+    let task = structure.task_view()?;
+    task.validate_structures_and_lengths(
+        dst_structure,
+        src_structure,
+        dst_data.len(),
+        src_data.len(),
+    )?;
     profile.validate += start.elapsed();
 
     let threads = effective_tree_transform_threads(structure, threads);
-    checked_fused_index_len(threads, structure.layouts().max_fused_rank())?;
+    let requirements = task.workspace_requirements();
+    task.validate_workspace_requirements::<D>()?;
+    checked_fused_index_len(threads, requirements.fused_index_len_per_worker)?;
+
+    if requirements.converted_coefficient_len != 0 {
+        let start = std::time::Instant::now();
+        // Attribute the admission conversion here; the replay helper's second
+        // call is the same no-work identity check as in the unprofiled path.
+        if ensure_recoupling_coefficients(workspace, structure)? {
+            profile.multi_coefficient_prepare += start.elapsed();
+        }
+    }
 
     let start = std::time::Instant::now();
     scale_inactive_destinations(
