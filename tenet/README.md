@@ -9,7 +9,7 @@ notation and network planning, add `tenet-network` and run its
 [quickstart](https://github.com/Ryo-wtnb11/TeNeT/blob/main/tenet-network/examples/quickstart.rs).
 
 The default host backend is `cpu-faer`; see the root
-[feature table](https://github.com/Ryo-wtnb11/TeNeT#feature-flags) and
+[feature table](https://github.com/Ryo-wtnb11/TeNeT#features) and
 [`Cargo.toml`](Cargo.toml) for alternatives. `cuda` and `racah-generated` add
 the typed CUDA surface and SUN providers. The `opt-path` and `cotengra-python`
 facade markers expose optimizer configuration; the planners themselves are
