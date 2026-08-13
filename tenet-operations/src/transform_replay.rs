@@ -3347,13 +3347,13 @@ where
         dst_data.len(),
         src_data.len(),
     )?;
-    profile.validate += start.elapsed();
 
     let schedule = structure.parallel_schedule();
     let threads = effective_tree_transform_threads(schedule, threads);
     let requirements = task.workspace_requirements();
     task.validate_workspace_requirements::<D>()?;
     checked_fused_index_len(threads, requirements.fused_index_len_per_worker)?;
+    profile.validate += start.elapsed();
 
     if requirements.converted_coefficient_len != 0 {
         let start = std::time::Instant::now();
