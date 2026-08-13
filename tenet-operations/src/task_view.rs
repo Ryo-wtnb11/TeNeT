@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use tenet_core::BlockStructure;
 
@@ -43,6 +43,17 @@ impl<C: Copy> TreeTransformStructure<C> {
 }
 
 impl<'a, C: Copy> TreeTransformTaskView<'a, C> {
+    /// Process-local identity for this immutable completed structure. Because
+    /// layouts cannot change after compilation, this also identifies the exact
+    /// layout ordering used by converted coefficients.
+    #[inline]
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "first production opaque adapter is a later leaf")
+    )]
+    pub(crate) fn admission_identity(self) -> Weak<()> {
+        Arc::downgrade(self.structure.identity_marker())
+    }
     #[inline]
     pub(crate) fn blocks(self) -> &'a [TreeTransformBlock] {
         self.structure.blocks()
@@ -105,8 +116,24 @@ impl<'a, C: Copy> TreeTransformTaskView<'a, C> {
         dst_len: usize,
         src_len: usize,
     ) -> Result<(), OperationError> {
+        self.validate_structures(dst_structure, src_structure)?;
+        self.validate_lengths(dst_len, src_len)
+    }
+
+    pub(crate) fn validate_structures(
+        self,
+        dst_structure: &Arc<BlockStructure>,
+        src_structure: &Arc<BlockStructure>,
+    ) -> Result<(), OperationError> {
         self.structure
-            .validate_replay_structures(dst_structure, src_structure)?;
+            .validate_replay_structures(dst_structure, src_structure)
+    }
+
+    pub(crate) fn validate_lengths(
+        self,
+        dst_len: usize,
+        src_len: usize,
+    ) -> Result<(), OperationError> {
         validate_exact_len(self.destination_len, dst_len)?;
         validate_exact_len(self.source_len, src_len)
     }
