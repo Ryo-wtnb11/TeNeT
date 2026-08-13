@@ -1,14 +1,10 @@
 # tenet-sectors
 
-Fusion-rule providers and sector types: U(1), Z/N, fermion parity, SU(2),
-Fibonacci, products, and feature-gated SUN providers. Providers own sector
-labels and categorical coefficients; tensor algorithms consume their traits.
+Provider vocabulary for TeNeT's symmetry and category layers. Expert users
+implement or select `FusionRule`, `SectorCodec`, `CheckedFusionAlgebra`, and
+the capability traits; built-in providers include U(1), Z/N, fZ2, SU(2), and
+Fibonacci. `ProductFusionRuleExt` builds ordered, nested products: factor
+order and association remain part of the provider and sector type.
 
-`ProductFusionRule<L, R>` is itself a provider: `left.product(right)` creates
-an ordered, recursively nestable product, and `ProductSector` is its typed
-sector label. Products do not flatten or reorder factors automatically.
-
-Provider capability traits determine which typed operations are available.
-In particular, complex categorical coefficients (for example Fibonacci) are
-distinct from a tensor payload's scalar type and are supported only on the
-Host paths whose bounds admit them.
+The `racah-generated` feature enables the generated SUN provider. It does not
+turn arbitrary product labels or raw `SectorId` values into stable wire data.

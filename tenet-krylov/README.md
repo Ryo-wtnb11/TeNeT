@@ -1,9 +1,6 @@
 # tenet-krylov
 
-Matrix-free Krylov algorithm building blocks. The crate currently exposes a
-small real-`f64` Conjugate Gradient API over `KrylovVector` and
-`LinearOperator`.
-
-Status: private algorithm-layer support; it is not part of TeNeT's initial
-public API closure and is not used by the tensor layer yet.
-
+Private algorithm-layer support, outside TeNeT's initial public API closure.
+It provides real-`f64` Conjugate Gradient through `cg`, `CgOptions`, and
+`CgResult`, over the `KrylovVector` and `LinearOperator` traits. It has no
+crate-specific features and is not used by the tensor layer.

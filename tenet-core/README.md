@@ -1,10 +1,9 @@
 # tenet-core
 
-Core tensor maps, fusion-tree keys, block layouts, sector vocabulary, and
-storage traits. This crate contains data and validation, not high-level
-execution. Its fusion-tree model is informed by TensorKit and QSpace, while
-TeNeT's Rust types and validation rules are authoritative.
+Expert structural layer for the static, low-level `TensorMap<T, NOUT, NIN>`;
+it is distinct from the dynamic user facade in `tenet`. Entry points are
+`TensorMapSpace`, `FusionTensorMapSpace`, `SectorLeg`, fusion-tree and block
+keys, and storage traits. It validates spaces and layouts but does not provide
+high-level execution.
 
-`ProductSector` is a sector label for a product fusion provider. It is not the
-leg-level `ProductSpace` concept from TensorKit; TeNeT represents tensor legs
-as `SectorLeg` values collected in `FusionProductSpace`.
+Enable `racah-generated` to pass generated SUN support through to sectors.

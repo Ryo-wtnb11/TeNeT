@@ -1,17 +1,16 @@
 # tenet
 
-The public TeNeT facade: provider-typed `Runtime`, `GradedSpace`, `TensorMap`,
-tensor operations, and factorization results.
+`tenet-rs` is TeNeT's public package; its library is imported as `tenet`.
+Ordinary applications use `tenet::prelude::*` for `Runtime`, `RuntimeBuilder`,
+`GradedSpace`, `TensorMap`, `LinalgBackend`, and `Truncation`.
 
-`GradedSpace<R>` and `TensorMap<R, D, S>` keep the fusion-rule provider `R`
-concrete. `R` owns sector labels and categorical coefficients; payload scalar
-`D` and storage `S` are independent. Host operations are admitted by the
-provider and operation-specific capability bounds. Product providers are
-built with `left.product(right)` and use nested `ProductSector` labels; factor
-order and association are part of the provider type.
+Start with the [crate tutorial](src/tutorial.md#1-quick-start). For index
+notation and network planning, add `tenet-network` and run its
+[quickstart](https://github.com/Ryo-wtnb11/TeNeT/blob/main/tenet-network/examples/quickstart.rs).
 
-Fibonacci and other complex-coefficient providers have partial Host typed
-coverage where the operation bounds support them. Typed CUDA is currently a
-narrower multiplicity-free `f64` surface.
-
-Start with the crate tutorial in [`src/tutorial.md`](src/tutorial.md).
+The default host backend is `cpu-faer`; see the root
+[feature table](https://github.com/Ryo-wtnb11/TeNeT#features) and
+[`Cargo.toml`](Cargo.toml) for alternatives. `cuda` and `racah-generated` add
+the typed CUDA surface and SUN providers. The `opt-path` and `cotengra-python`
+facade markers expose optimizer configuration; the planners themselves are
+enabled in `tenet-network`.

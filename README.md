@@ -13,6 +13,10 @@ speed that survives dynamic-rank tensor networks; a usable high-level API.
 The public API is not stabilized and expert-layer types still move between
 crates as the layering settles.
 
+Ordinary applications depend on the `tenet-rs` package and import the `tenet`
+library. Add `tenet-network` when using the `tensor!` frontend or explicit
+network planning.
+
 ## Architecture
 
 The ordinary API keeps the symmetry provider, payload scalar, and storage type
