@@ -55,9 +55,9 @@ writing one.
 
 `FibonacciFusionRule` supplies `FibonacciSector` labels and `Complex64`
 categorical coefficients. Its tested typed scope is construction,
-transformations including explicit planar braids, tensor products, composition,
-and trace. It is not an ordinary anyonic contract for factorizations or general
-network execution.
+transformations including explicit planar braids, tensor products, and
+composition. Ordinary arbitrary-axis contraction, factorization, and general
+network execution are not supported or claimed.
 `tenet-category-data` separately ships the table-backed `CategoryDataFibonacci`.
 SUN is available only with `racah-generated` and uses the checked Generic path.
 
@@ -147,7 +147,7 @@ dense-backend settings, both defaulting to the pure-Rust faer path:
 | `.linalg_backend(LinalgBackend::Faer \| Blas)` | factorizations — SVD / QR / eigh / eig / inv / exp (LAPACK-style work). |
 | `.gemm_backend(LinalgBackend::Faer \| Blas)` | the coupled-block contraction GEMM used by `compose`, `contract`, and recoupling execution (BLAS-style work). |
 | `.with_dense_executor(Box<dyn DenseExecutor + Send>)` | a fully custom factorization backend; takes precedence over `linalg_backend`. |
-| `.cuda(device)` (feature `cuda`) | attaches CUDA capability and context; tensors remain on Host until `to_cuda`. |
+| `.cuda(device)` (feature `cuda`) | attaches CUDA capability and context; tensors remain on Host until `to_cuda()`. |
 | `.optimizer(Optimizer::…)` | the contraction-path planner (see below). |
 
 Because OpenBLAS, MKL, and Accelerate cannot be linked simultaneously, *which*

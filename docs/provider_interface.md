@@ -215,8 +215,9 @@ are part of the Rust type and of the `ProductSector` label; `U(1) ⊠ fZ2` and
   bounds; there is no blanket `Scalar = f64` requirement.
 - `FibonacciFusionRule` has `Complex64` categorical coefficients. Its tested
   typed scope is construction, transformations including explicit planar
-  braids, tensor products, composition, and trace. It is not an ordinary
-  anyonic contract for factorizations or general networks.
+  braids, tensor products, and composition. Ordinary arbitrary-axis
+  contraction, factorization, and general network execution are not supported
+  or claimed.
 - Checked Generic typed execution is Host-only. The tested scope is
   construction, transforms, tensor products, owned composition and trace,
   static N-ary networks, and explicit sliced execution. Operations require the

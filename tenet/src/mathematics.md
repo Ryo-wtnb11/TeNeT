@@ -648,8 +648,8 @@ generality of category-theoretic tensor calculus. Host ordinary operations are
 multiplicity-free plus the checked Generic operations that state their own
 bounds. `FibonacciFusionRule` has `Complex64` categorical coefficients and is
 tested for construction, transformations including explicit planar braids,
-tensor products, composition, and trace; this is not an ordinary anyonic
-contract for factorizations or general networks. Checked Generic support is
-Host-only. CUDA requires explicit transfer and currently supports a
-multiplicity-free `f64` subset; unsupported device operations return an
-explicit error.
+tensor products, and composition. Ordinary arbitrary-axis contraction,
+factorization, and general network execution are not supported or claimed.
+Checked Generic support is Host-only. CUDA requires explicit transfer and
+currently supports a multiplicity-free `f64` subset; unsupported device
+operations return an explicit error.
