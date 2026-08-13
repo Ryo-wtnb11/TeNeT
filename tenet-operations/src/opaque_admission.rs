@@ -314,7 +314,296 @@ fn map_task_error(error: OperationError) -> TreeTransformAdmissionError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::TreeTransformBlockSpec;
+    use crate::{TreeTransformBlock, TreeTransformBlockSpec, TreeTransformStructure};
+    use tenet_core::BlockSpec;
+
+    #[derive(Clone, Copy)]
+    enum DestinationMode {
+        Overwrite,
+        Axpby(f64),
+    }
+
+    #[derive(Debug, PartialEq)]
+    enum MockError {
+        Admission(TreeTransformAdmissionError),
+        Preparation,
+        Backend,
+    }
+
+    #[derive(Clone, Copy)]
+    enum AdmissionFault {
+        None,
+        DestinationPlacement,
+        DestinationContext,
+        DestinationLength,
+        ActiveBeyondCapacity,
+        MissingStrided,
+        MissingMatrix,
+        WrongScalar,
+        Overlap,
+        PackedSourceCapacity,
+        PackedDestinationCapacity,
+        CoefficientCapacity,
+        FusedCapacity,
+        WorkspacePlacement,
+        WorkspaceContext,
+        StaleReadiness,
+        WrongReadinessScalar,
+        WrongReadinessContext,
+        ReadReadOverlap,
+    }
+
+    struct MockOpaqueExecutor {
+        source: Vec<f64>,
+        destination: Vec<f64>,
+        source_region: StorageRegion,
+        destination_region: StorageRegion,
+        context: ContextIdentity,
+        fault: AdmissionFault,
+        fail_preparation: bool,
+        fail_after_submission: Option<usize>,
+        submissions: usize,
+        writes: usize,
+    }
+
+    impl MockOpaqueExecutor {
+        fn new(source: Vec<f64>, destination: Vec<f64>) -> Self {
+            Self {
+                source_region: region(1, 2, 0, source.capacity() * size_of::<f64>()),
+                destination_region: region(1, 1, 0, destination.capacity() * size_of::<f64>()),
+                source,
+                destination,
+                context: ContextIdentity(7),
+                fault: AdmissionFault::None,
+                fail_preparation: false,
+                fail_after_submission: None,
+                submissions: 0,
+                writes: 0,
+            }
+        }
+
+        fn execute(
+            &mut self,
+            transform: &TreeTransformStructure<f64>,
+            structure: &Arc<BlockStructure>,
+            alpha: f64,
+            mode: DestinationMode,
+            workers: usize,
+        ) -> Result<(), MockError> {
+            let task = transform
+                .task_view()
+                .map_err(|error| MockError::Admission(TreeTransformAdmissionError::Task(error)))?;
+            let mut executor = ExecutorSnapshot {
+                placement: Placement::Host,
+                context: self.context,
+                supports_strided: true,
+                supports_matrix: true,
+                scalar: TypeId::of::<f64>(),
+            };
+            let mut dst = self.storage_snapshot(
+                self.destination.len(),
+                self.destination.capacity(),
+                self.destination_region,
+            );
+            let src = self.storage_snapshot(
+                self.source.len(),
+                self.source.capacity(),
+                self.source_region,
+            );
+            match self.fault {
+                AdmissionFault::DestinationPlacement => dst.placement = Placement::Cuda(0),
+                AdmissionFault::DestinationContext => dst.context = ContextIdentity(99),
+                AdmissionFault::DestinationLength => dst.active_len -= 1,
+                AdmissionFault::ActiveBeyondCapacity => dst.usable_capacity -= 1,
+                AdmissionFault::MissingStrided => executor.supports_strided = false,
+                AdmissionFault::MissingMatrix => executor.supports_matrix = false,
+                AdmissionFault::WrongScalar => executor.scalar = TypeId::of::<f32>(),
+                _ => {}
+            }
+            let fused =
+                validate_stage_a::<f64, _>(task, structure, structure, dst, src, executor, workers)
+                    .map_err(MockError::Admission)?;
+
+            // Stage B invalidates readiness before any allocation/conversion.
+            let mut workspace = self.prepare_workspace(task, executor, fused)?;
+            self.inject_stage_c_fault(&mut workspace, &mut dst, src);
+            validate_stage_c::<f64, _>(task, dst, src, &workspace, executor, fused)
+                .map_err(MockError::Admission)?;
+
+            for block in task.blocks() {
+                self.submissions += 1;
+                self.execute_block(task, block, alpha, mode);
+                if self.fail_after_submission == Some(self.submissions) {
+                    return Err(MockError::Backend);
+                }
+            }
+            Ok(())
+        }
+
+        fn storage_snapshot(
+            &self,
+            active_len: usize,
+            usable_capacity: usize,
+            region: StorageRegion,
+        ) -> StorageSnapshot {
+            StorageSnapshot {
+                active_len,
+                usable_capacity,
+                placement: Placement::Host,
+                context: self.context,
+                region,
+            }
+        }
+
+        fn prepare_workspace<C: Copy>(
+            &self,
+            task: TreeTransformTaskView<'_, C>,
+            executor: ExecutorSnapshot,
+            fused: usize,
+        ) -> Result<WorkspaceSnapshot, MockError> {
+            if self.fail_preparation {
+                return Err(MockError::Preparation);
+            }
+            let required = task.workspace_requirements();
+            let storage = |allocation, capacity| StorageSnapshot {
+                active_len: capacity,
+                usable_capacity: capacity,
+                placement: executor.placement,
+                context: executor.context,
+                region: if capacity == 0 {
+                    StorageRegion::Empty
+                } else {
+                    region(1, allocation, 0, capacity * size_of::<f64>())
+                },
+            };
+            Ok(WorkspaceSnapshot {
+                packed_source: storage(3, required.packed_source_len),
+                packed_destination: storage(4, required.packed_destination_len),
+                converted_coefficients: storage(5, required.converted_coefficient_len),
+                fused_index_capacity: fused,
+                fused_index_placement: Placement::Host,
+                coefficient_readiness: (required.converted_coefficient_len != 0).then(|| {
+                    CoefficientReadiness {
+                        structure_and_layout: task.admission_identity(),
+                        scalar: TypeId::of::<f64>(),
+                        context: executor.context,
+                    }
+                }),
+            })
+        }
+
+        fn inject_stage_c_fault(
+            &self,
+            workspace: &mut WorkspaceSnapshot,
+            dst: &mut StorageSnapshot,
+            src: StorageSnapshot,
+        ) {
+            match self.fault {
+                AdmissionFault::Overlap => dst.region = src.region,
+                AdmissionFault::PackedSourceCapacity => {
+                    workspace.packed_source.usable_capacity =
+                        workspace.packed_source.usable_capacity.saturating_sub(1)
+                }
+                AdmissionFault::PackedDestinationCapacity => {
+                    workspace.packed_destination.usable_capacity = workspace
+                        .packed_destination
+                        .usable_capacity
+                        .saturating_sub(1)
+                }
+                AdmissionFault::CoefficientCapacity => {
+                    workspace.converted_coefficients.usable_capacity = workspace
+                        .converted_coefficients
+                        .usable_capacity
+                        .saturating_sub(1)
+                }
+                AdmissionFault::FusedCapacity => {
+                    workspace.fused_index_capacity =
+                        workspace.fused_index_capacity.saturating_sub(1)
+                }
+                AdmissionFault::WorkspacePlacement => {
+                    workspace.packed_source.placement = Placement::Cuda(0)
+                }
+                AdmissionFault::WorkspaceContext => {
+                    workspace.packed_source.context = ContextIdentity(99)
+                }
+                AdmissionFault::StaleReadiness => {
+                    workspace.coefficient_readiness = Some(CoefficientReadiness {
+                        structure_and_layout: Weak::new(),
+                        scalar: TypeId::of::<f64>(),
+                        context: self.context,
+                    })
+                }
+                AdmissionFault::WrongReadinessScalar => {
+                    workspace.coefficient_readiness.as_mut().unwrap().scalar = TypeId::of::<f32>()
+                }
+                AdmissionFault::WrongReadinessContext => {
+                    workspace.coefficient_readiness.as_mut().unwrap().context = ContextIdentity(99)
+                }
+                AdmissionFault::ReadReadOverlap => {
+                    workspace.converted_coefficients.region = src.region
+                }
+                _ => {}
+            }
+        }
+
+        fn execute_block<C: Copy + Into<f64>>(
+            &mut self,
+            task: TreeTransformTaskView<'_, C>,
+            block: &TreeTransformBlock,
+            alpha: f64,
+            mode: DestinationMode,
+        ) {
+            match *block {
+                TreeTransformBlock::Single {
+                    dst_layout,
+                    src_layout,
+                    coefficient,
+                } => {
+                    let dst = task.layouts().entry(dst_layout);
+                    let src = task.layouts().entry(src_layout);
+                    let coefficient = task.coefficients()[coefficient].into();
+                    for element in 0..dst.element_count {
+                        self.write(
+                            dst.offset as usize + element,
+                            alpha * coefficient * self.source[src.offset as usize + element],
+                            mode,
+                        );
+                    }
+                }
+                TreeTransformBlock::Multi {
+                    dst_layout_start,
+                    dst_count,
+                    src_layout_start,
+                    src_count,
+                    coefficient_start,
+                    element_count,
+                } => {
+                    for destination in 0..dst_count {
+                        let dst = task.layouts().entry(dst_layout_start + destination);
+                        for element in 0..element_count {
+                            let mut value = 0.0;
+                            for source in 0..src_count {
+                                let src = task.layouts().entry(src_layout_start + source);
+                                value += self.source[src.offset as usize + element]
+                                    * task.coefficients()
+                                        [coefficient_start + destination * src_count + source]
+                                        .into();
+                            }
+                            self.write(dst.offset as usize + element, alpha * value, mode);
+                        }
+                    }
+                }
+            }
+        }
+
+        fn write(&mut self, index: usize, value: f64, mode: DestinationMode) {
+            self.destination[index] = match mode {
+                DestinationMode::Overwrite => value,
+                DestinationMode::Axpby(beta) => value + beta * self.destination[index],
+            };
+            self.writes += 1;
+        }
+    }
 
     fn region(domain: u64, allocation: u64, start: usize, len: usize) -> StorageRegion {
         StorageRegion::Bytes {
@@ -323,6 +612,37 @@ mod tests {
             start,
             len,
         }
+    }
+
+    fn scalar_fixture() -> (Arc<BlockStructure>, TreeTransformStructure<f64>) {
+        let structure =
+            Arc::new(BlockStructure::packed_column_major(1, [vec![2], vec![2]]).unwrap());
+        let transform = TreeTransformStructure::compile_structures(
+            &structure,
+            &structure,
+            &[
+                TreeTransformBlockSpec::single(0, 0, 2.0),
+                TreeTransformBlockSpec::single(1, 1, 3.0),
+            ],
+        )
+        .unwrap();
+        (structure, transform)
+    }
+
+    fn multi_fixture() -> (Arc<BlockStructure>, TreeTransformStructure<f64>) {
+        let structure =
+            Arc::new(BlockStructure::packed_column_major(1, [vec![2], vec![2]]).unwrap());
+        let transform = TreeTransformStructure::compile_structures(
+            &structure,
+            &structure,
+            &[TreeTransformBlockSpec::multi(
+                vec![0, 1],
+                vec![0, 1],
+                vec![0.0, 1.0, 1.0, 0.0],
+            )],
+        )
+        .unwrap();
+        (structure, transform)
     }
 
     #[test]
@@ -453,5 +773,149 @@ mod tests {
                 message: "tree transform capability admission failed"
             }
         );
+    }
+
+    #[test]
+    fn mock_executes_scalar_and_matrix_overwrite_and_axpby_deterministically() {
+        let (structure, scalar) = scalar_fixture();
+        let mut executor = MockOpaqueExecutor::new(vec![1.0, 2.0, 3.0, 4.0], vec![f64::NAN; 4]);
+        executor
+            .execute(&scalar, &structure, 1.0, DestinationMode::Overwrite, 1)
+            .unwrap();
+        assert_eq!(executor.destination, [2.0, 4.0, 9.0, 12.0]);
+        assert_eq!((executor.submissions, executor.writes), (2, 4));
+
+        let (structure, matrix) = multi_fixture();
+        let mut executor = MockOpaqueExecutor::new(vec![1.0, 2.0, 3.0, 4.0], vec![10.0; 4]);
+        executor
+            .execute(&matrix, &structure, 2.0, DestinationMode::Axpby(0.5), 2)
+            .unwrap();
+        assert_eq!(executor.destination, [11.0, 13.0, 7.0, 9.0]);
+        assert_eq!((executor.submissions, executor.writes), (1, 4));
+    }
+
+    #[test]
+    fn every_mock_admission_and_preparation_failure_is_pre_submit_atomic() {
+        let (structure, transform) = multi_fixture();
+        for fault in [
+            AdmissionFault::DestinationPlacement,
+            AdmissionFault::DestinationContext,
+            AdmissionFault::DestinationLength,
+            AdmissionFault::ActiveBeyondCapacity,
+            AdmissionFault::MissingStrided,
+            AdmissionFault::MissingMatrix,
+            AdmissionFault::WrongScalar,
+            AdmissionFault::Overlap,
+            AdmissionFault::PackedSourceCapacity,
+            AdmissionFault::PackedDestinationCapacity,
+            AdmissionFault::CoefficientCapacity,
+            AdmissionFault::FusedCapacity,
+            AdmissionFault::WorkspacePlacement,
+            AdmissionFault::WorkspaceContext,
+            AdmissionFault::StaleReadiness,
+            AdmissionFault::WrongReadinessScalar,
+            AdmissionFault::WrongReadinessContext,
+        ] {
+            let mut executor = MockOpaqueExecutor::new(vec![1.0, 2.0, 3.0, 4.0], vec![10.0; 4]);
+            executor.fault = fault;
+            assert!(matches!(
+                executor.execute(&transform, &structure, 1.0, DestinationMode::Overwrite, 2),
+                Err(MockError::Admission(_))
+            ));
+            assert_eq!((executor.submissions, executor.writes), (0, 0));
+            assert_eq!(executor.destination, [10.0; 4]);
+        }
+
+        let mut executor = MockOpaqueExecutor::new(vec![1.0, 2.0, 3.0, 4.0], vec![10.0; 4]);
+        executor.fail_preparation = true;
+        assert_eq!(
+            executor.execute(&transform, &structure, 1.0, DestinationMode::Overwrite, 1),
+            Err(MockError::Preparation)
+        );
+        assert_eq!((executor.submissions, executor.writes), (0, 0));
+        assert_eq!(executor.destination, [10.0; 4]);
+    }
+
+    #[test]
+    fn mock_accepts_disjoint_shared_regions_domains_and_read_read_overlap() {
+        let (structure, transform) = multi_fixture();
+        let mut disjoint = MockOpaqueExecutor::new(vec![1.0, 2.0, 3.0, 4.0], vec![0.0; 4]);
+        disjoint.destination_region = region(1, 1, 0, 32);
+        disjoint.source_region = region(1, 1, 32, 32);
+        disjoint
+            .execute(&transform, &structure, 1.0, DestinationMode::Overwrite, 1)
+            .unwrap();
+
+        let mut domains = MockOpaqueExecutor::new(vec![1.0, 2.0, 3.0, 4.0], vec![0.0; 4]);
+        domains.destination_region = region(1, 1, 0, 32);
+        domains.source_region = region(2, 1, 0, 32);
+        domains
+            .execute(&transform, &structure, 1.0, DestinationMode::Overwrite, 1)
+            .unwrap();
+
+        let mut read_overlap = MockOpaqueExecutor::new(vec![1.0, 2.0, 3.0, 4.0], vec![0.0; 4]);
+        read_overlap.fault = AdmissionFault::ReadReadOverlap;
+        read_overlap
+            .execute(&transform, &structure, 1.0, DestinationMode::Overwrite, 1)
+            .unwrap();
+    }
+
+    #[test]
+    fn mock_accepts_empty_storage() {
+        let structure = Arc::new(BlockStructure::packed_column_major(1, [vec![0]]).unwrap());
+        let transform = TreeTransformStructure::compile_structures(
+            &structure,
+            &structure,
+            &[TreeTransformBlockSpec::single(0, 0, 1.0)],
+        )
+        .unwrap();
+        let mut executor = MockOpaqueExecutor::new(Vec::new(), Vec::new());
+        executor.source_region = StorageRegion::Empty;
+        executor.destination_region = StorageRegion::Empty;
+        executor
+            .execute(&transform, &structure, 1.0, DestinationMode::Overwrite, 1)
+            .unwrap();
+        assert_eq!((executor.submissions, executor.writes), (1, 0));
+    }
+
+    #[test]
+    fn worker_overflow_is_pre_submit_and_post_submit_failure_does_not_roll_back() {
+        let strided = Arc::new(
+            BlockStructure::from_blocks_with_rank(
+                2,
+                vec![BlockSpec::new(vec![2, 2], vec![1, 3], 0).unwrap()],
+            )
+            .unwrap(),
+        );
+        let transform = TreeTransformStructure::compile_structures(
+            &strided,
+            &strided,
+            &[TreeTransformBlockSpec::single(0, 0, 1.0)],
+        )
+        .unwrap();
+        let mut overflow = MockOpaqueExecutor::new(vec![1.0; 5], vec![0.0; 5]);
+        assert_eq!(
+            overflow.execute(
+                &transform,
+                &strided,
+                1.0,
+                DestinationMode::Overwrite,
+                usize::MAX,
+            ),
+            Err(MockError::Admission(
+                TreeTransformAdmissionError::ArithmeticOverflow
+            ))
+        );
+        assert_eq!((overflow.submissions, overflow.writes), (0, 0));
+
+        let (structure, transform) = scalar_fixture();
+        let mut partial = MockOpaqueExecutor::new(vec![1.0, 2.0, 3.0, 4.0], vec![10.0; 4]);
+        partial.fail_after_submission = Some(1);
+        assert_eq!(
+            partial.execute(&transform, &structure, 1.0, DestinationMode::Overwrite, 1,),
+            Err(MockError::Backend)
+        );
+        assert_eq!(partial.destination, [2.0, 4.0, 10.0, 10.0]);
+        assert_eq!((partial.submissions, partial.writes), (1, 2));
     }
 }
