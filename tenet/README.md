@@ -6,8 +6,11 @@ Ordinary applications use `tenet::prelude::*` for `Runtime`, `RuntimeBuilder`,
 
 Start with the [crate tutorial](src/tutorial.md#1-quick-start). For index
 notation and network planning, add `tenet-network` and run its
-[quickstart](../tenet-network/examples/quickstart.rs).
+[quickstart](https://github.com/Ryo-wtnb11/TeNeT/blob/main/tenet-network/examples/quickstart.rs).
 
-Crate-specific features are `cuda` for the typed CUDA surface,
-`racah-generated` for SUN providers, and `cotengra-python` for Python
-cotengra path search.
+The default host backend is `cpu-faer`; see the root
+[feature table](https://github.com/Ryo-wtnb11/TeNeT#feature-flags) and
+[`Cargo.toml`](Cargo.toml) for alternatives. `cuda` and `racah-generated` add
+the typed CUDA surface and SUN providers. The `opt-path` and `cotengra-python`
+facade markers expose optimizer configuration; the planners themselves are
+enabled in `tenet-network`.
