@@ -58,9 +58,9 @@ cargo bench -p tenet-operations --bench tree_transform_lowering -- \
 | rank 4 reverse, 2 x 65536 | 94.244–95.118 / 91.517–92.261 / 94.438–95.563 | 94.763–95.962 / 95.110–97.218 / 94.192–101.77 |
 
 The rank-2 many-small prototype is consistently faster by roughly 11–18%.
-That is a useful, reproducible candidate for an existing upstream rank
-dispatch, even though it is below the conservative 20% gate for duplicating a
-kernel inside TeNeT.  The rank-4 reverse prototype has a roughly 6–9%
+That is a useful, reproducible candidate to expose upstream, even though it
+is below the conservative 20% gate for duplicating a kernel inside TeNeT.  The
+rank-4 reverse prototype has a roughly 6–9%
 many-small difference and no consistent sign in the other two regimes.  These
 prototype timings omit replay admission and therefore cannot establish the
 required 10% TeNeT-local end-to-end warm-total result.  Every measured warm
@@ -75,10 +75,18 @@ duplicated path would need a conservative 20% strided or 10% end-to-end
 warm-total improvement to pay for its maintenance and binary-size cost.  That
 gate is a TeNeT-local duplication gate, not an absolute rejection threshold.
 
-Use the rank-2 many-small result as a follow-on candidate for an upstream
-`strided-kernel` or Tenferro prepared/raw path to apply its existing rank
-dispatch.  TeNeT should consume that result through `StridedHostKernelAdapter`
-rather than own a second rank-specialized kernel family.
+Use the rank-2 many-small result as a follow-on upstream ownership question.
+`strided-kernel` 0.4 has private rank-1 through rank-8 dispatch in its view
+kernel, but the public view path allocates `Arc`/`Vec` metadata; its raw path
+and `CopyPlan` remain generic.  `CopyPlan` also lacks scaled-conjugate,
+`axpy`, and conjugated-`axpy` operations required by TeNeT replay.
+
+The candidate is therefore to extend `CopyPlan`, or add a small prepared pair
+plan, with `execute_scale_conj`, `execute_axpy`, and `execute_axpy_conj` so
+those operations can reuse that private rank dispatch; arbitrary-beta
+operations remain on the generic fallback.  Only then should TeNeT benchmark
+the resulting prepared/raw path end-to-end through `StridedHostKernelAdapter`.
+TeNeT must not own a second rank-specialized kernel family.
 
 The Multi pack/GEMM/scatter path is not an omitted rank-specialization result:
 its measured runtime mixes strided pack/scatter with GEMM, and the current
