@@ -16,7 +16,6 @@ use crate::kernel_adapter::for_each_fused_span;
 use crate::owned_overwrite_buffer::initialize_owned;
 use crate::storage_scratch::{StorageTreeTransformWorkspace, TreeTransformScratchBuffers};
 use crate::strided::offset_to_isize;
-use crate::task_view::TreeTransformTaskMode;
 use crate::tensoradd::{TensorAddDescriptor, TensorAddDescriptorTerm};
 use crate::transform_structure::{
     TreeTransformPackReplay, TreeTransformScatterGroupReplay, TreeTransformScatterReplay,
@@ -36,15 +35,6 @@ enum DestinationMode<D> {
     // Why not use Axpby(D::zero()): IEEE arithmetic still reads NaN destination
     // values, whereas assignment APIs promise destination-independent output.
     Overwrite,
-}
-
-impl<D> DestinationMode<D> {
-    fn task_mode(&self) -> TreeTransformTaskMode {
-        match self {
-            Self::Axpby(_) => TreeTransformTaskMode::Axpby,
-            Self::Overwrite => TreeTransformTaskMode::Overwrite,
-        }
-    }
 }
 
 struct PhysicalOverwriteProof<'a, C> {
@@ -3101,14 +3091,13 @@ where
     D: DenseRecouplingScalar + RecouplingCoefficientAction<C> + ConjugateValue,
     C: Copy + Sync,
 {
-    let task = structure.task_view(mode.task_mode())?;
+    let task = structure.task_view()?;
     task.validate_structures_and_lengths(
         dst_structure,
         src_structure,
         dst_data.len(),
         src_data.len(),
     )?;
-    debug_assert_eq!(task.mode(), mode.task_mode());
     let threads = effective_tree_transform_threads(structure, threads);
     let requirements = task.workspace_requirements();
     task.validate_workspace_requirements::<D>()?;
@@ -3233,14 +3222,13 @@ where
     let total_start = std::time::Instant::now();
 
     let start = std::time::Instant::now();
-    let task = structure.task_view(mode.task_mode())?;
+    let task = structure.task_view()?;
     task.validate_structures_and_lengths(
         dst_structure,
         src_structure,
         dst_data.len(),
         src_data.len(),
     )?;
-    debug_assert_eq!(task.mode(), mode.task_mode());
     profile.validate += start.elapsed();
 
     let threads = effective_tree_transform_threads(structure, threads);

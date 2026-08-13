@@ -4,13 +4,6 @@ use tenet_core::BlockStructure;
 
 use crate::{OperationError, TreeTransformStructure};
 
-/// Destination update requested for one synchronous tree-transform replay.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum TreeTransformTaskMode {
-    Overwrite,
-    Axpby,
-}
-
 /// Backend-neutral scratch sizes required by a completed tree transform.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct TreeTransformWorkspaceRequirements {
@@ -31,20 +24,15 @@ pub(crate) struct TreeTransformWorkspaceRequirements {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct TreeTransformTaskView<'a, C> {
     structure: &'a TreeTransformStructure<C>,
-    mode: TreeTransformTaskMode,
     source_len: usize,
     destination_len: usize,
 }
 
 impl<C: Copy> TreeTransformStructure<C> {
-    pub(crate) fn task_view(
-        &self,
-        mode: TreeTransformTaskMode,
-    ) -> Result<TreeTransformTaskView<'_, C>, OperationError> {
+    pub(crate) fn task_view(&self) -> Result<TreeTransformTaskView<'_, C>, OperationError> {
         let (source_len, destination_len) = self.replay_storage_lens()?;
         Ok(TreeTransformTaskView {
             structure: self,
-            mode,
             source_len,
             destination_len,
         })
@@ -52,11 +40,6 @@ impl<C: Copy> TreeTransformStructure<C> {
 }
 
 impl<'a, C: Copy> TreeTransformTaskView<'a, C> {
-    #[inline]
-    pub(crate) fn mode(self) -> TreeTransformTaskMode {
-        self.mode
-    }
-
     pub(crate) fn workspace_requirements(self) -> TreeTransformWorkspaceRequirements {
         let (serial_source, serial_destination) = self.structure.workspace_lens();
         let plan = self.structure.recoupling_plan();
@@ -111,7 +94,7 @@ mod tests {
     use crate::TreeTransformBlockSpec;
 
     #[test]
-    fn completed_view_exposes_mode_lengths_and_workspace_requirements() {
+    fn completed_view_exposes_lengths_and_workspace_requirements() {
         let structure =
             Arc::new(BlockStructure::packed_column_major(1, [vec![2], vec![2], vec![1]]).unwrap());
         let transform = TreeTransformStructure::compile_structures(
@@ -124,10 +107,7 @@ mod tests {
         )
         .unwrap();
 
-        let view = transform
-            .task_view(TreeTransformTaskMode::Overwrite)
-            .unwrap();
-        assert_eq!(view.mode(), TreeTransformTaskMode::Overwrite);
+        let view = transform.task_view().unwrap();
         view.validate_structures_and_lengths(&structure, &structure, 5, 5)
             .unwrap();
         assert_eq!(
@@ -151,7 +131,7 @@ mod tests {
             &[TreeTransformBlockSpec::single(0, 0, 1.0_f64)],
         )
         .unwrap();
-        let view = transform.task_view(TreeTransformTaskMode::Axpby).unwrap();
+        let view = transform.task_view().unwrap();
 
         assert_eq!(
             view.validate_structures_and_lengths(&structure, &structure, 3, 2),
