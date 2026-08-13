@@ -6,13 +6,13 @@ use crate::{DenseBackend, DenseDType, DenseError};
 #[cfg(feature = "tenferro")]
 use crate::tenferro_adapter::tenferro_error;
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct DenseTensor {
     backend: DenseBackend,
     inner: DenseTensorInner,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 enum DenseTensorInner {
     #[cfg(feature = "tenferro")]
     #[allow(dead_code)]
