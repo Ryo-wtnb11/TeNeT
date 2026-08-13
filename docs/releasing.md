@@ -1,6 +1,8 @@
 # Releasing TeNeT
 
-TeNeT's first registry release uses the published Tenferro 0.3.0 line. The
+This is the planned procedure for TeNeT's first registry release; it is not
+evidence that the release has been published. The procedure uses the published
+Tenferro 0.3.0 line. The
 facade is published as `tenet-rs`; its Rust library target remains `tenet`, so
 downstream code continues to write `use tenet::prelude::*`.
 
