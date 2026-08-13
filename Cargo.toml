@@ -10,8 +10,3 @@ repository = "https://github.com/Ryo-wtnb11/TeNeT"
 
 [workspace.dependencies]
 strided-kernel = { version = "0.4.0", features = ["parallel"] }
-
-[patch."https://github.com/tensor4all/tenferro-rs"]
-tenferro-cpu = { path = "../tenferro-rs/crates/tenferro-cpu" }
-tenferro-linalg = { path = "../tenferro-rs/crates/tenferro-linalg" }
-tenferro-runtime = { path = "../tenferro-rs/crates/tenferro-runtime" }
