@@ -22,7 +22,7 @@ The typed API selects one of two admission modes through
 
 | mode | required provider capabilities | scope |
 | --- | --- | --- |
-| multiplicity-free | `MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec` | ordinary typed construction and multiplicity-free operations |
+| multiplicity-free | `MultiplicityFreeRigidSymbols + CheckedFusionAlgebra + SectorCodec`, plus the coefficient and payload bounds of the operation | ordinary typed construction and multiplicity-free operations |
 | checked Generic | `TypedSectorAdmission<Mode = CheckedGenericAdmissionMode>` plus the checked Generic fusion, rigidity, pivotal, and symbol traits required by each operation | outer multiplicity with fallible provider queries; currently Host-only |
 
 For the multiplicity-free mode, `FusionRule` supplies the infallible algebra,
@@ -211,15 +211,18 @@ are part of the Rust type and of the `ProductSector` label; `U(1) ⊠ fZ2` and
 
 ## Current typed API boundaries
 
-- The multiplicity-free typed root requires
-  `MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra +
-  SectorCodec`. A multiplicity-free provider with complex categorical
-  coefficients is currently expert-layer only.
-- `FibonacciFusionRule` implements `SectorCodec`, but its `Complex64`
-  categorical coefficients do not satisfy the typed root's current `f64`
-  restriction. A codec alone does not make its tensors executable.
-- Checked Generic typed execution is Host-only. Individual operations require
-  the checked Generic capabilities they use.
+- The multiplicity-free root uses operation-specific coefficient and payload
+  bounds; there is no blanket `Scalar = f64` requirement.
+- `FibonacciFusionRule` has `Complex64` categorical coefficients. Its tested
+  typed scope is construction, transformations including explicit planar
+  braids, tensor products, composition, and trace. It is not an ordinary
+  anyonic contract for factorizations or general networks.
+- Checked Generic typed execution is Host-only. The tested scope is
+  construction, transforms, tensor products, owned composition and trace,
+  static N-ary networks, and explicit sliced execution. Operations require the
+  exact checked fusion, rigidity, pivotal, and symbol traits they use; borrowed
+  or compact routes are only admitted where their direct owned contract says
+  so. CUDA does not support Checked Generic providers.
 - Multiplicity-free providers still implement overlapping infallible
   `FusionRule` and fallible `CheckedFusionAlgebra` methods.
 

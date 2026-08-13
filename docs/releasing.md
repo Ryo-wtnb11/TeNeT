@@ -1,9 +1,8 @@
 # Releasing TeNeT
 
-This is the planned procedure for TeNeT's first registry release; it is not
-evidence that the release has been published. The procedure uses the published
-Tenferro 0.3.0 line. The
-facade is published as `tenet-rs`; its Rust library target remains `tenet`, so
+This is the checklist for a future registry release. The published facade is
+`tenet-rs` 0.1.1 and uses the published Tenferro 0.3.0 line. Its Rust library
+target remains `tenet`, so
 downstream code continues to write `use tenet::prelude::*`.
 
 ## Publication order
@@ -22,7 +21,7 @@ package is packaged and inspected before it is published.
 9. `tenet-network`
 10. `tenet-category-data`
 
-`tenet-krylov` is not part of the initial public closure and remains private
+`tenet-krylov` is outside this publication closure and remains unpublished
 until the facade uses it.
 
 ## Checks for each package
@@ -43,7 +42,7 @@ After the complete closure is published, build a clean downstream fixture:
 
 ```toml
 [dependencies]
-tenet = { package = "tenet-rs", version = "0.1.0" }
+tenet = { package = "tenet-rs", version = "0.1.1" }
 ```
 
 The fixture must compile `use tenet::prelude::*` without a sibling checkout,
@@ -51,7 +50,6 @@ Tenferro source override, or Racah git override.
 
 ## External prerequisites
 
-Tenferro 0.3.0 is the selected initial release line and is already published.
-Racah must provide a compatible registry release before `tenet-sectors` can
-pass the registry-only gate. Tenferro 0.4 is a future upgrade, not a blocker
-for this release procedure.
+Tenferro 0.3.0 and Racah 0.1.1 are the current published dependency lines.
+The registry-only gate must still verify compatible resolved versions before a
+future release.
