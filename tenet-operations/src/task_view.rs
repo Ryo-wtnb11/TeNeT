@@ -2,7 +2,10 @@ use std::sync::Arc;
 
 use tenet_core::BlockStructure;
 
-use crate::{OperationError, TreeTransformStructure};
+use crate::{
+    OperationError, TreeTransformBlock, TreeTransformLayoutTable, TreeTransformRecouplingPlan,
+    TreeTransformStructure,
+};
 
 /// Backend-neutral scratch sizes required by a completed tree transform.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -19,8 +22,8 @@ pub(crate) struct TreeTransformWorkspaceRequirements {
 /// pointer, or mutable workspace state. Concrete executors remain responsible
 /// for placement/capability checks, allocation-range disjointness, and ensuring
 /// their workspace satisfies [`Self::workspace_requirements`] before dispatch.
-/// Descriptor replay through this admission prototype remains the follow-up
-/// Host-bridge work.
+/// Host replay consumes the borrowed descriptors directly; backend-specific
+/// scheduling remains outside this view.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct TreeTransformTaskView<'a, C> {
     structure: &'a TreeTransformStructure<C>,
@@ -40,6 +43,36 @@ impl<C: Copy> TreeTransformStructure<C> {
 }
 
 impl<'a, C: Copy> TreeTransformTaskView<'a, C> {
+    #[inline]
+    pub(crate) fn blocks(self) -> &'a [TreeTransformBlock] {
+        self.structure.blocks()
+    }
+
+    #[inline]
+    pub(crate) fn layouts(self) -> &'a TreeTransformLayoutTable {
+        self.structure.layouts()
+    }
+
+    #[inline]
+    pub(crate) fn coefficients(self) -> &'a [C] {
+        self.structure.recoupling_coefficients_dst_src()
+    }
+
+    #[inline]
+    pub(crate) fn recoupling_plan(self) -> &'a TreeTransformRecouplingPlan {
+        self.structure.recoupling_plan()
+    }
+
+    #[inline]
+    pub(crate) fn inactive_destination_layouts(self) -> &'a [usize] {
+        self.structure.inactive_destination_layouts()
+    }
+
+    #[inline]
+    pub(crate) fn storage_conjugate(self) -> bool {
+        self.structure.storage_conjugate()
+    }
+
     pub(crate) fn workspace_requirements(self) -> TreeTransformWorkspaceRequirements {
         let plan = self.structure.recoupling_plan();
         TreeTransformWorkspaceRequirements {
