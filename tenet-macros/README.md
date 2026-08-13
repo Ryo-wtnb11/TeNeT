@@ -1,5 +1,6 @@
 # tenet-macros
 
-Procedural macros for TeNeT, currently the `tensor!` index-notation frontend.
-Most users should depend on `tenet`, which re-exports the supported macro API.
-
+Implementation crate for TeNeT procedural macros. The supported `tensor!`
+frontend is re-exported by `tenet-network`, so applications write
+`use tenet_network::tensor;`. See the
+[network quickstart](../tenet-network/examples/quickstart.rs).
