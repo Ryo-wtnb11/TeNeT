@@ -1,6 +1,6 @@
 [package]
 name = "tenet-rs"
-version = "0.1.0"
+version = "0.1.1"
 description = "Symmetric tensors and tensor-network operations"
 edition.workspace = true
 rust-version.workspace = true
@@ -32,8 +32,8 @@ cotengra-python = []
 num-complex = "0.4"
 rayon = "1.10"
 smallvec = { version = "1", features = ["const_generics", "union"] }
-tenet-core = { version = "0.1.0", path = "../tenet-core" }
-tenet-dense = { version = "0.1.0", path = "../tenet-dense", default-features = false }
-tenet-matrixalgebra = { version = "0.1.0", path = "../tenet-matrixalgebra", default-features = false }
-tenet-operations = { version = "0.1.0", path = "../tenet-operations", default-features = false }
-tenet-tensors = { version = "0.1.0", path = "../tenet-tensors", default-features = false }
+tenet-core = { version = "0.1.1", path = "../tenet-core" }
+tenet-dense = { version = "0.1.1", path = "../tenet-dense", default-features = false }
+tenet-matrixalgebra = { version = "0.1.1", path = "../tenet-matrixalgebra", default-features = false }
+tenet-operations = { version = "0.1.1", path = "../tenet-operations", default-features = false }
+tenet-tensors = { version = "0.1.1", path = "../tenet-tensors", default-features = false }

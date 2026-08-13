@@ -1,6 +1,6 @@
 [package]
 name = "tenet-category-data"
-version = "0.1.0"
+version = "0.1.1"
 description = "Fusion-category data tables for TeNeT"
 edition.workspace = true
 rust-version.workspace = true
@@ -14,7 +14,7 @@ path = "src/lib.rs"
 [dependencies]
 num-complex = "0.4"
 smallvec = { version = "1", features = ["const_generics", "union"] }
-tenet-sectors = { version = "0.1.0", path = "../tenet-sectors" }
+tenet-sectors = { version = "0.1.1", path = "../tenet-sectors" }
 
 [dev-dependencies]
-tenet = { package = "tenet-rs", version = "0.1.0", path = "../tenet" }
+tenet = { package = "tenet-rs", version = "0.1.1", path = "../tenet" }
