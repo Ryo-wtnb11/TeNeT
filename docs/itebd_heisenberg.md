@@ -1,7 +1,7 @@
 # U(1) iTEBD for the Heisenberg Chain
 
 This guide follows the runnable
-[`itebd_heisenberg.rs`](../tenet/examples/itebd_heisenberg.rs) example. It shows
+[`itebd_heisenberg.rs`](../tenet-network/examples/itebd_heisenberg.rs) example. It shows
 how TeNeT represents the physics and how one infinite time-evolving block
 decimation (iTEBD) update is assembled. The algorithm lives in the example;
 the small fragments below only connect its code to the equations.
@@ -18,7 +18,7 @@ $$
 
 Its exact ground-state energy per bond is
 $e_0=1/4-\ln 2\simeq-0.44314718$. The example stores this comparison value in
-[`E_EXACT`](../tenet/examples/itebd_heisenberg.rs#L30). iTEBD tries to reach the
+[`E_EXACT`](../tenet-network/examples/itebd_heisenberg.rs). iTEBD tries to reach the
 ground state by repeatedly applying imaginary-time evolution and truncating
 the resulting bond.
 
@@ -32,7 +32,7 @@ $$
 
 Therefore spin up has $q=+1$ and spin down has $q=-1$. This is only a
 rescaling of the charge label; it does not change the spin operators. The
-physical space is constructed in [`run`](../tenet/examples/itebd_heisenberg.rs#L162-L167).
+physical space is constructed in [`run`](../tenet-network/examples/itebd_heisenberg.rs).
 
 TeNeT writes every tensor as `codomain <- domain`. For example,
 `Gamma: [left, physical] <- [right]` has two codomain legs and one domain leg.
@@ -56,7 +56,7 @@ h_{q=0}=\begin{pmatrix}-1/4&1/2\\1/2&-1/4\end{pmatrix}.
 $$
 
 The diagonal terms come from $S_i^zS_{i+1}^z$ and the off-diagonal $1/2$
-terms flip the two spins. [`heisenberg_two_site`](../tenet/examples/itebd_heisenberg.rs#L50-L69)
+terms flip the two spins. [`heisenberg_two_site`](../tenet-network/examples/itebd_heisenberg.rs)
 builds exactly these allowed blocks with `TensorMap::from_block_fn`.
 
 ## 4. The two-site Vidal state
@@ -70,7 +70,7 @@ $$
 Here each $\Gamma$ has shape `[left, physical] <- [right]`, while each
 $\lambda$ is a diagonal map `bond <- bond` containing Schmidt weights. The two
 different bond tensors are needed because an A-B bond and a B-A bond need not
-be identical during the update. [`State`](../tenet/examples/itebd_heisenberg.rs#L110-L138)
+be identical during the update. [`State`](../tenet-network/examples/itebd_heisenberg.rs)
 stores these four tensors and constructs a charge-balanced entangled initial
 state. The plus-sign state used there is not the two-spin singlet.
 
@@ -82,15 +82,15 @@ $$
 G(dt)=\exp(-dt\,h).
 $$
 
-[`run`](../tenet/examples/itebd_heisenberg.rs#L161-L190) constructs this gate
-with `h.scale(-dt).exp()`. [`State::step`](../tenet/examples/itebd_heisenberg.rs#L140-L150)
+[`run`](../tenet-network/examples/itebd_heisenberg.rs) constructs this gate
+with `h.scale(-dt).exp()`. [`State::step`](../tenet-network/examples/itebd_heisenberg.rs)
 first updates the A-B bond and then the B-A bond. Repeating these two updates
 projects the initial state toward low-energy states while preserving the
 two-site unit cell.
 
 ## 6. Contract the local wavefunction
 
-[`bond_update`](../tenet/examples/itebd_heisenberg.rs#L71-L93) absorbs the two
+[`bond_update`](../tenet-network/examples/itebd_heisenberg.rs) absorbs the two
 outer weights, the two-site tensors, the middle weight, and the gate into one
 two-site tensor. This is the complete `tensor!` expression from the example:
 
@@ -107,7 +107,7 @@ twice are summed; labels that remain once become output legs.
 ## 7. Truncate the new bond
 
 `theta.svd_trunc(&trunc)` returns $U$, $S$, $V^\dagger$, and `svd.error`.
-[`run`](../tenet/examples/itebd_heisenberg.rs#L162-L169) combines a bond budget
+[`run`](../tenet-network/examples/itebd_heisenberg.rs) combines a bond budget
 `Truncation::rank(chi)` with `Truncation::relative_cutoff(rtol)`. The latter
 keeps singular values satisfying
 $\sigma_i \ge r_{\mathrm{tol}}\lVert\sigma\rVert_{2,w}$, where
@@ -134,7 +134,7 @@ $$
 
 where $+$ denotes the Moore-Penrose pseudo-inverse. The middle factor is
 normalized and stored as the new $\lambda_{\mathrm{mid}}$. These operations
-are the final part of [`bond_update`](../tenet/examples/itebd_heisenberg.rs#L84-L92).
+are the final part of [`bond_update`](../tenet-network/examples/itebd_heisenberg.rs).
 The pseudo-inverse uses a different relative cutoff: it keeps values strictly
 greater than `rcond` times the largest singular value across all sectors. A
 tiny Schmidt value would otherwise produce a very large, unstable factor.
@@ -142,11 +142,11 @@ Directions at or below the cutoff are set to zero.
 
 ## 9. Energy, schedule, and convergence
 
-[`bond_energy`](../tenet/examples/itebd_heisenberg.rs#L95-L103) evaluates the
+[`bond_energy`](../tenet-network/examples/itebd_heisenberg.rs) evaluates the
 normalized local expectation value
 $\langle\theta\rvert h\lvert\theta\rangle/\langle\theta\vert\theta\rangle$.
-[`State::energy`](../tenet/examples/itebd_heisenberg.rs#L153-L158) averages the
-A-B and B-A bond energies. The schedule in [`main`](../tenet/examples/itebd_heisenberg.rs#L194-L215)
+[`State::energy`](../tenet-network/examples/itebd_heisenberg.rs) averages the
+A-B and B-A bond energies. The schedule in [`main`](../tenet-network/examples/itebd_heisenberg.rs)
 uses progressively smaller $dt$: large steps project quickly, while small
 steps reduce imaginary-time discretization error.
 
@@ -170,7 +170,7 @@ Run the full application with the same pure-Rust CPU backend used by the
 documented example:
 
 ```sh
-cargo run --release -p tenet --example itebd_heisenberg --no-default-features --features cpu-faer
+cargo run --release -p tenet-network --example itebd_heisenberg --no-default-features --features cpu-faer
 ```
 
 A stage line has this form (rates and times depend on the machine):
@@ -190,10 +190,10 @@ Use the focused checks when changing the example or this guide:
 
 ```sh
 # Fast smoke tests used by normal test runs.
-cargo test -p tenet-rs --test itebd_smoke
+cargo test -p tenet-network --test itebd_smoke
 
 # Shorter release-mode convergence test; ignored by default.
-cargo test -p tenet-rs --release -- --ignored itebd
+cargo test -p tenet-network --release --test itebd_smoke -- --ignored itebd
 
 # Compiling tutorial examples and warning-free crate documentation.
 cargo test -p tenet-rs --doc

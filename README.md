@@ -109,7 +109,7 @@ below.
 
 ## Quick Start
 
-Follow the [Quick Start tutorial source](tenet/src/tutorial.md#1-quick-start).
+Follow the [Quick Start tutorial source](tenet/src/tutorial.md#quick-start).
 That tutorial is rendered at the top of TeNeT's crate documentation.
 
 The runnable [U(1) example](tenet-network/examples/quickstart.rs) is the single source
