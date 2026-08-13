@@ -19,7 +19,7 @@
 //! Reference: ground-state energy per bond `e = 1/4 - ln 2 ≈ -0.4431471`.
 //!
 //! Run with:
-//! `cargo run --release -p tenet --example itebd_heisenberg --no-default-features --features cpu-faer`
+//! `cargo run --release -p tenet-network --example itebd_heisenberg --no-default-features --features cpu-faer`
 
 use std::time::Instant;
 

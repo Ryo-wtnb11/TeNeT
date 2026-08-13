@@ -137,8 +137,10 @@ assert_eq!(count, a.block_count());
 # Ok::<(), Error>(())
 ```
 
-Provider and scalar mismatches are type errors. Space or runtime mismatches
-return [`prelude::Error`].
+Different Rust provider types and scalar types are compile-time mismatches.
+Two spaces with the same provider type but different rule identities return
+[`prelude::Error::RuleMismatch`]. Incompatible spaces and runtimes also return
+[`prelude::Error`].
 
 The block buffer is reduced data, so it is not a carrier-basis matrix. In
 particular, its length depends on fusion sectors and degeneracies, not just the
@@ -250,9 +252,9 @@ assert!(id.is_hermitian(1e-12)? && id.is_unitary(1e-12)?);
 
 `add(&other, alpha, beta)` computes `alpha * self + beta * other`; both maps
 must have compatible runtime, space, scalar, and storage. `inner` and `norm`
-use TeNeT's weighted block inner product. `normalize` returns an error for a
-zero tensor, so retain the original tensor if a zero norm is a valid state in
-your algorithm.
+use TeNeT's weighted block inner product. Check `norm()` before `normalize()`
+when zero tensors are possible: normalization divides by that norm, so a zero
+input produces non-finite values rather than an error.
 
 `GradedSpace` exposes its sectors, per-sector degeneracies, total dimension,
 direct sum (`oplus`), and fusion (`fuse`). The total dimension includes each

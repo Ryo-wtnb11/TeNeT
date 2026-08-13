@@ -160,7 +160,7 @@ fn itebd_heisenberg_reaches_the_ground_state_energy_coarsely() {
 }
 
 /// Short but tighter run for release-mode machines:
-/// `cargo test -p tenet --release -- --ignored itebd`.
+/// `cargo test -p tenet-network --release --test itebd_smoke -- --ignored itebd`.
 #[test]
 #[ignore = "several hundred iTEBD steps; run in release mode"]
 fn itebd_heisenberg_short_run_release() {

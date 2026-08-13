@@ -4,7 +4,7 @@
 Ordinary applications use `tenet::prelude::*` for `Runtime`, `RuntimeBuilder`,
 `GradedSpace`, `TensorMap`, `LinalgBackend`, and `Truncation`.
 
-Start with the [crate tutorial](src/tutorial.md#1-quick-start). For index
+Start with the [crate tutorial](src/tutorial.md#quick-start). For index
 notation and network planning, add `tenet-network` and run its
 [quickstart](https://github.com/Ryo-wtnb11/TeNeT/blob/main/tenet-network/examples/quickstart.rs).
 
