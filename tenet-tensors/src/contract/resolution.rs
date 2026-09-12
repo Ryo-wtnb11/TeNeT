@@ -33,8 +33,8 @@ pub(crate) enum Resolution<C = f64> {
     /// Source/output tree transforms around a core contraction
     /// (TensorKit `@tensor` shape).
     DynamicTree(Arc<FusionContractPlan>),
-    /// Dense one-shot structure for conjugated operands (TeNeT optimization
-    /// over the faithful transform-then-contract path).
+    /// Dense one-shot structure for source/output transforms (TeNeT
+    /// optimization over the faithful transform-then-contract path).
     Structure(Arc<TensorContractStructure<C>>),
 }
 
