@@ -11,7 +11,7 @@ use tenet::prelude::{Complex64, TensorScalar};
 use tenet::typed::{GradedSpace, Runtime, TensorMap};
 use tenet_network::{
     GreedyDenseOptimizer, LabelOrderDenseOptimizer, Network, NetworkExecutionWorkspace,
-    TemporaryLabel, TensorId,
+    PlannedNetwork, TemporaryLabel, TensorId,
 };
 
 fn labels(names: &[&str]) -> Vec<TemporaryLabel> {
@@ -79,6 +79,341 @@ where
     assert_eq!(actual.data(), expected.data());
     assert_eq!(actual.codomain(), expected.codomain());
     assert_eq!(actual.domain(), expected.domain());
+}
+
+trait OracleScalar: TensorScalar + Copy + Debug + Default + PartialEq {
+    fn sample(value: f64) -> Self;
+    fn error(self, expected: Self) -> f64;
+    fn magnitude(self) -> f64;
+}
+
+impl OracleScalar for f64 {
+    fn sample(value: f64) -> Self {
+        value
+    }
+
+    fn error(self, expected: Self) -> f64 {
+        (self - expected).abs()
+    }
+
+    fn magnitude(self) -> f64 {
+        self.abs()
+    }
+}
+
+impl OracleScalar for Complex64 {
+    fn sample(value: f64) -> Self {
+        Complex64::new(value, 0.3 * value - 0.2)
+    }
+
+    fn error(self, expected: Self) -> f64 {
+        (self - expected).norm()
+    }
+
+    fn magnitude(self) -> f64 {
+        self.norm()
+    }
+}
+
+fn matrix<R, D>(
+    runtime: &Runtime,
+    codomain: &GradedSpace<R>,
+    domain: &GradedSpace<R>,
+    salt: f64,
+    sector_tag: &impl Fn(&<R as TypedSectorAdmission>::Sector) -> f64,
+) -> TensorMap<R, D>
+where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec,
+    D: OracleScalar,
+{
+    TensorMap::from_block_fn(runtime, [codomain], [domain], |trees, ij| {
+        D::sample(salt + sector_tag(trees.coupled()) + 0.1 * ij[0] as f64 + 0.01 * ij[1] as f64)
+    })
+    .unwrap()
+}
+
+fn assert_chain_oracle<R, D>(
+    actual: &TensorMap<R, D>,
+    a: &TensorMap<R, D>,
+    b: &TensorMap<R, D>,
+    c: &TensorMap<R, D>,
+) where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec,
+    D: OracleScalar,
+{
+    assert_eq!(actual.codomain(), a.codomain());
+    assert_eq!(actual.domain(), c.domain());
+    let codomain = a.codomain();
+    let domain = c.domain();
+    let expected_sectors = codomain[0]
+        .sectors()
+        .unwrap()
+        .into_iter()
+        .filter(|sector| domain[0].has_sector(sector).unwrap())
+        .collect::<Vec<_>>();
+    let actual_sectors = actual
+        .blocks()
+        .unwrap()
+        .map(|(trees, _)| trees.coupled().clone())
+        .collect::<Vec<_>>();
+    assert_eq!(actual_sectors, expected_sectors);
+    let a_blocks = a.blocks().unwrap().collect::<Vec<_>>();
+    let b_blocks = b.blocks().unwrap().collect::<Vec<_>>();
+    let c_blocks = c.blocks().unwrap().collect::<Vec<_>>();
+    for (trees, output) in actual.blocks().unwrap() {
+        let left = a_blocks
+            .iter()
+            .find(|(candidate, _)| candidate.coupled() == trees.coupled())
+            .map(|(_, block)| *block);
+        let middle = b_blocks
+            .iter()
+            .find(|(candidate, _)| candidate.coupled() == trees.coupled())
+            .map(|(_, block)| *block);
+        let right = c_blocks
+            .iter()
+            .find(|(candidate, _)| candidate.coupled() == trees.coupled())
+            .map(|(_, block)| *block);
+        for row in 0..output.shape()[0] {
+            for column in 0..output.shape()[1] {
+                let mut expected = D::default();
+                if let (Some(left), Some(middle), Some(right)) = (left, middle, right) {
+                    for first in 0..left.shape()[1] {
+                        for second in 0..middle.shape()[1] {
+                            expected = expected
+                                + *left.get(&[row, first]).unwrap()
+                                    * *middle.get(&[first, second]).unwrap()
+                                    * *right.get(&[second, column]).unwrap();
+                        }
+                    }
+                }
+                let got = *output.get(&[row, column]).unwrap();
+                assert!(
+                    got.error(expected) <= 1.0e-11 * (1.0 + expected.magnitude()),
+                    "sector {:?}, ({row}, {column}): expected {expected:?}, got {got:?}",
+                    trees.coupled()
+                );
+            }
+        }
+    }
+}
+
+fn assert_chain_case<R, D>(
+    plan: &PlannedNetwork,
+    workspace: &mut NetworkExecutionWorkspace<R, D>,
+    tensors: [&TensorMap<R, D>; 3],
+) -> TensorMap<R, D>
+where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec,
+    D: OracleScalar,
+{
+    let reused = plan.execute_with_workspace(&tensors, workspace).unwrap();
+    let fresh = plan.execute(&tensors).unwrap();
+    assert_same(&reused, &fresh);
+    assert_chain_oracle(&reused, tensors[0], tensors[1], tensors[2]);
+    reused
+}
+
+fn run_shape_reuse_sequence<R, D>(
+    provider: Arc<R>,
+    make_space: impl Fn(&Arc<R>, &[(i32, usize)]) -> GradedSpace<R>,
+    sector_tag: impl Fn(&<R as TypedSectorAdmission>::Sector) -> f64,
+) where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec,
+    D: OracleScalar,
+{
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let initial = make_space(&provider, &[(0, 2), (1, 1)]);
+    let initial_tensors = [
+        matrix(&runtime, &initial, &initial, 1.0, &sector_tag),
+        matrix(&runtime, &initial, &initial, 2.0, &sector_tag),
+        matrix(&runtime, &initial, &initial, 3.0, &sector_tag),
+    ];
+    let network = Network::new(
+        vec![
+            labels(&["a", "b"]),
+            labels(&["b", "c"]),
+            labels(&["c", "d"]),
+        ],
+        vec![false; 3],
+        vec![Some(1); 3],
+        labels(&["a", "d"]),
+        Some(1),
+    )
+    .unwrap();
+    let initial_refs = [
+        &initial_tensors[0],
+        &initial_tensors[1],
+        &initial_tensors[2],
+    ];
+    let plan = network
+        .plan(
+            &initial_refs,
+            &LabelOrderDenseOptimizer::new(labels(&["b", "c"])),
+        )
+        .unwrap();
+    assert_eq!(
+        plan.plan()
+            .steps()
+            .iter()
+            .map(|step| (step.lhs(), step.rhs()))
+            .collect::<Vec<_>>(),
+        [
+            (TensorId::new(0), TensorId::new(1)),
+            (TensorId::new(2), TensorId::new(3)),
+        ]
+    );
+
+    let mut workspace = NetworkExecutionWorkspace::default();
+    assert_chain_case(&plan, &mut workspace, initial_refs);
+    for (spec, salt) in [
+        (vec![(0, 1), (1, 2)], 11.0),
+        (vec![(0, 3), (1, 2)], 21.0),
+        (vec![(0, 1)], 31.0),
+        (vec![(-1, 2), (2, 1)], 51.0),
+        (vec![(0, 0), (1, 2)], 61.0),
+        (vec![(0, 2), (1, 1)], 41.0),
+    ] {
+        let space = make_space(&provider, &spec);
+        for value_shift in [0.0, 100.0] {
+            let tensors = [
+                matrix(&runtime, &space, &space, salt + value_shift, &sector_tag),
+                matrix(
+                    &runtime,
+                    &space,
+                    &space,
+                    salt + value_shift + 1.0,
+                    &sector_tag,
+                ),
+                matrix(
+                    &runtime,
+                    &space,
+                    &space,
+                    salt + value_shift + 2.0,
+                    &sector_tag,
+                ),
+            ];
+            assert_chain_case(
+                &plan,
+                &mut workspace,
+                [&tensors[0], &tensors[1], &tensors[2]],
+            );
+        }
+    }
+
+    let x = make_space(&provider, &[(0, 1)]);
+    let k = make_space(&provider, &[(0, 1), (1, 1)]);
+    let l = make_space(&provider, &[(1, 1), (2, 1)]);
+    let y = make_space(&provider, &[(2, 1)]);
+    let empty_chain = [
+        matrix(&runtime, &x, &k, 71.0, &sector_tag),
+        matrix(&runtime, &k, &l, 72.0, &sector_tag),
+        matrix(&runtime, &l, &y, 73.0, &sector_tag),
+    ];
+    let empty = assert_chain_case(
+        &plan,
+        &mut workspace,
+        [&empty_chain[0], &empty_chain[1], &empty_chain[2]],
+    );
+    assert_eq!(empty.block_count(), 0);
+    assert!(empty.data().is_empty());
+
+    let valid = initial_refs;
+    let wrong_bond = make_space(&provider, &[(9, 1)]);
+    let invalid_b = matrix(&runtime, &wrong_bond, &initial, 81.0, &sector_tag);
+    assert!(plan
+        .execute_with_workspace(&[valid[0], &invalid_b, valid[2]], &mut workspace)
+        .is_err());
+    assert_chain_case(&plan, &mut workspace, valid);
+
+    let wrong_split = TensorMap::from_block_fn(&runtime, [&initial, &initial], [], |trees, ij| {
+        D::sample(91.0 + sector_tag(trees.coupled()) + 0.1 * ij[0] as f64 + 0.01 * ij[1] as f64)
+    })
+    .unwrap();
+    assert!(plan
+        .execute_with_workspace(&[valid[0], &wrong_split, valid[2]], &mut workspace)
+        .is_err());
+    assert_chain_case(&plan, &mut workspace, valid);
+
+    let wrong_rank =
+        TensorMap::from_block_fn(&runtime, [&initial, &initial], [&initial], |trees, ij| {
+            D::sample(
+                101.0
+                    + sector_tag(trees.coupled())
+                    + 0.1 * ij[0] as f64
+                    + 0.01 * ij[1] as f64
+                    + 0.001 * ij[2] as f64,
+            )
+        })
+        .unwrap();
+    assert!(plan
+        .execute_with_workspace(&[valid[0], &wrong_rank, valid[2]], &mut workspace)
+        .is_err());
+    assert_chain_case(&plan, &mut workspace, valid);
+}
+
+#[test]
+fn u1_workspace_reuse_tracks_chain_values_and_sector_shapes() {
+    let provider = Arc::new(U1FusionRule);
+    let make_space = |provider: &Arc<_>, spec: &[(i32, usize)]| {
+        GradedSpace::try_new_with_arc(
+            Arc::clone(provider),
+            spec.iter()
+                .map(|&(charge, degeneracy)| (U1Irrep::new(charge), degeneracy)),
+        )
+        .unwrap()
+    };
+    run_shape_reuse_sequence::<_, f64>(Arc::clone(&provider), make_space, |sector| {
+        f64::from(sector.charge())
+    });
+    run_shape_reuse_sequence::<_, Complex64>(provider, make_space, |sector| {
+        f64::from(sector.charge())
+    });
+}
+
+#[test]
+fn fermion_u1_workspace_reuse_tracks_chain_values_and_sector_shapes() {
+    let provider = Arc::new(FermionParityFusionRule.product(U1FusionRule));
+    let make_space = |provider: &Arc<_>, spec: &[(i32, usize)]| {
+        GradedSpace::try_new_with_arc(
+            Arc::clone(provider),
+            spec.iter().map(|&(charge, degeneracy)| {
+                (
+                    product_sector(
+                        if charge.rem_euclid(2) == 0 {
+                            Z2Irrep::EVEN
+                        } else {
+                            Z2Irrep::ODD
+                        },
+                        U1Irrep::new(charge),
+                    ),
+                    degeneracy,
+                )
+            }),
+        )
+        .unwrap()
+    };
+    let sector_tag = |sector: &tenet::core::ProductSector<Z2Irrep, U1Irrep>| {
+        f64::from(sector.right().charge())
+            + if *sector.left() == Z2Irrep::ODD {
+                0.5
+            } else {
+                0.0
+            }
+    };
+    run_shape_reuse_sequence::<_, f64>(Arc::clone(&provider), make_space, sector_tag);
+    run_shape_reuse_sequence::<_, Complex64>(provider, make_space, sector_tag);
 }
 
 #[test]
