@@ -59,7 +59,7 @@ TensorMap space and block identity
 | Storage | Placement, readable/writable storage, and reusable scratch are separate traits. Host ordinary payload and scratch are `Vec<T>`. | `tenet-core/src/storage.rs:8-72,74-109` |
 | Typed tensor | `typed::TensorMap` shares its `Runtime` and representation. `TypedTensorBody` pairs a bound space with a separately shared payload. Clone shares; a write route must publish or obtain a unique payload. | `tenet/src/typed.rs:8890-8941,9042-9085` |
 | Lazy/compact representations | A lazy adjoint owns its parent and logical space and may materialize once. Compact spectrum storage is distinct from the ordinary dense payload. | `tenet/src/typed.rs:8944-8968` |
-| Borrowed dense boundary | `DenseView` and `DenseViewMut` borrow a slice plus shape, positive strides, and offset; constructors validate layout bounds. | `tenet-dense/src/view.rs:6-35,84-105` |
+| Borrowed dense boundary | `DenseView` and `DenseViewMut` borrow a slice plus shape, nonnegative strides, and offset; constructors validate layout bounds. | `tenet-dense/src/view.rs:6-35,84-105` |
 | Backend result | `DenseTensor` owns a Tenferro `Tensor` behind an `Arc` and exposes read-only shape/dtype/slices. It is not `Clone`, and TeNeT has no use that clones the inner Arc. | `tenet-dense/src/tensor.rs:9-19,25-100` |
 
 The final `Arc<Tensor>` adds a local control-block allocation without enabling
@@ -115,11 +115,46 @@ checks degeneracy/provider/runtime drift and recovery with two operands
 intermediate through a three-or-more-operand chain. That is the concrete #1141
 evidence gap.
 
-A focused #1141 reproducer now confirms a production wrong answer on a warm
-three-or-more-operand workspace after same-total sector redistribution from
-`[(0,2),(1,1)]` to `[(0,1),(1,2)]`: the reused second sector is zero although a
-fresh U(1) or fZ2 x U(1) execution is nonzero. The narrow fix and permanent
-regression evidence remain pending; this does not change the Tenferro API map.
+The confirmed defect is in TeNeT's fusion `Structure` producer, before any
+Tenferro call. The workspace correctly notices changed sector metadata, clears
+replay state, and rebuilds the structure. The rebuilt structure can still omit
+a valid non-self-dual sector or match unequal coupled sectors because its two
+contraction predicates apply duality at the wrong layers. Workspace reuse made
+the wrong answer visible, but neither retained workspace state nor a plan cache
+is its root cause.
+
+### Contraction equivalence and consumer map
+
+The repair is confined to the two private predicates used by
+`tensorcontract_fusion_block_specs_lowered` in
+`tenet-tensors/src/contract/fusion/block_specs.rs:413-461,487-500,591-606,731-768`:
+
+| invariant | reference correspondence | TeNeT boundary |
+| --- | --- | --- |
+| Contracted all-outgoing labels are dual across the two operands. | TensorKit `cfaa073e4d1e3eb2167edcbdc3be9872f41e7d91`, `src/tensors/tensoroperations.jl:TO.checkcontractible` (180-188), requires the dual external space of A to equal B. | `FusionTreePairKey::external_sectors` already dualizes stored domain sectors (`tenet-core/src/block_structure.rs:151-165`). `contracted_external_sectors_match` must therefore compare dual labels. |
+| After permutation into matrix form, the stored contracted fusion-tree bases are identical. | TensorKit's sector matrix product joins equal coupled sectors (`src/tensors/linalg.jl:LinearAlgebra.mul!`, 330-372). QSpace `dd2cc7e10dc7d3917b23309a44d1fe67adb4dc43`, `Source/QSpace.cc:QSpace::contract_matchAB_groupC` (4267-4484), validates index metadata separately and then exact-matches stored contracted QIDX slices. | `contracted_fusion_tree_basis_matches` must compare the complete `FusionTreeKey`: uncoupled and coupled sectors, inner lines, vertices, and dual flags (`tenet-core/src/fusion_tree.rs:1224-1231`). The direct coupled-region path already requires equal stored column/row trees (`tenet-operations/src/fusion_replay.rs:509-515`). |
+
+The single producer feeds core and transformed block-spec loops and is shared
+by raw/legacy and prelowered structure constructors. Ordinary host,
+dynamic/raw, prelowered overwrite, profiled, standalone backend, and explicit
+`PreparedTensorContractFusion` execution consume structures produced there
+(`tenet-tensors/src/contract/context.rs:1774-1945`). The plain dense
+`TensorContractCache::get_or_compile` (`context.rs:188-259`) is a different
+producer, and ordinary fusion resolution does not use that cache. Direct
+canonical and DynamicTree lowering remain separate oracles. Checked Generic
+network execution also remains separate; multiplicity-free network execution
+selects retained overwrite or an owned result, while Checked Generic always
+uses the returned route (`tenet-network/src/network.rs:1141-1245`). Raw storage
+may compile `Structure` but rejects that execution route, and the public
+prelowered device path accepts Core only, so no successful CUDA numerical path
+consumes this repair.
+
+The repair preserves the existing block-pair enumeration and O(r) contracted
+rank matching and introduces no new allocation, cache, workspace, or copy/pack
+mechanism. Correct execution must process every valid block, so allocation,
+copy/pack, backend-call, and other resource totals can increase relative to the
+incorrect baseline. Timings from an incorrect result are not performance
+evidence.
 
 For SVD, `svd_compact_factors_dyn_with_direction` either uses direct coupled
 regions or constructs sector matricizations. The fallback builds factor spaces
@@ -202,13 +237,16 @@ decomposition destinations, public borrowed values-only SVD in installed
 0.3.0, and context-plus-kind construction are narrow API gaps. An upstream
 dependency update is a separate design decision.
 
-## Pending evidence and residual ownership
+## Measurement evidence and residual ownership
 
-No performance result is claimed here. #1141 must add and execute its
-multi-step oracle and cold/warm/changing-structure benchmark before reporting
-allocation, packing, retained-memory, peak-memory, or timing behavior. The
-evidence must distinguish many-small from few-large blocks and report
-unobservable counters as unmeasured.
+No timing or speedup result is claimed in this contract. #1141's benchmark
+protocol covers independent multi-step correctness, cold and warm execution,
+changing structure, many-small and few-large blocks, allocation calls and
+requested bytes, and process-wide live-memory peaks. Actual results and raw
+sample spreads will be recorded in the pull request and issue only after runs
+at the exact immutable integrated commit. Copy/pack counts and private
+workspace retention remain unmeasured where the public interfaces expose no
+direct counter; allocation or byte totals are not proxies for either quantity.
 
 [#880] retains values-only factorization work. [#1083] retains stream,
 multi-device, event, and scheduling scope. [#1084] retains the optional common
