@@ -17,8 +17,9 @@ complex `Complex64` values. Dynamic rows cycle continuously through growing
 and shrinking degeneracies or equal-total-dimension sector redistribution,
 disappearance and appearance. `cold_structure_input_plan_first_execute`
 includes graded-space construction, inputs, label-order planning and first
-execution. Warm rows exclude fixture and plan construction and change input
-values on every call.
+execution. Runtime and provider construction occur immediately before that
+scope and are excluded. Warm rows exclude fixture and plan construction and
+change input values on every call.
 
 There is no no-symmetry provider in the public typed `TensorMap` API in this
 checkout. The one-charge U(1) case is dense-equivalent (one allowed reduced
@@ -34,6 +35,11 @@ baseline-subtracted: freeing allocations created before the scope therefore
 cannot underflow or hide the reported active peak. The allocator adds atomic
 instrumentation overhead, so elapsed time characterizes this harness rather
 than an instrumentation-free latency floor.
+
+Within a batched row, assignment retains the preceding returned output until
+the next output has been constructed. The reported live-byte peak can therefore
+include two returned outputs; it remains identical between the fresh and reuse
+protocols and is not interpreted as private workspace capacity.
 
 The explicit workspace's private retained capacity is not publicly observable.
 `live_idle_bytes` is process-wide and may include runtime or provider caches;

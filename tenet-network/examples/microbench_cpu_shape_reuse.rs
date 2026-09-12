@@ -504,6 +504,7 @@ fn run_case<R, D>(
     );
     println!("{}", warm.child_csv());
     drop(warm);
+    drop(steady_workspace);
 
     if let Some(phase) = dynamic_phase {
         let changing = patterns
