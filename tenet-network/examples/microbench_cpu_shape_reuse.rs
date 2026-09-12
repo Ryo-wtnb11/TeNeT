@@ -29,9 +29,9 @@ static REQUESTED_BYTES: AtomicU64 = AtomicU64::new(0);
 static LIVE_BYTES: AtomicU64 = AtomicU64::new(0);
 static PEAK_LIVE_BYTES: AtomicU64 = AtomicU64::new(0);
 
-fn add_live(bytes: u64) {
+fn add_live(bytes: u64, measuring: bool) {
     let live = LIVE_BYTES.fetch_add(bytes, Ordering::Relaxed) + bytes;
-    if MEASURING.load(Ordering::Relaxed) {
+    if measuring {
         PEAK_LIVE_BYTES.fetch_max(live, Ordering::Relaxed);
     }
 }
@@ -40,8 +40,9 @@ unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let pointer = unsafe { System.alloc(layout) };
         if !pointer.is_null() && layout.size() != 0 {
-            add_live(layout.size() as u64);
-            if MEASURING.load(Ordering::Relaxed) {
+            let measuring = MEASURING.load(Ordering::Acquire);
+            add_live(layout.size() as u64, measuring);
+            if measuring {
                 ALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
                 REQUESTED_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
             }
@@ -59,12 +60,13 @@ unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         let new_pointer = unsafe { System.realloc(pointer, layout, new_size) };
         if !new_pointer.is_null() {
+            let measuring = MEASURING.load(Ordering::Acquire);
             if new_size >= layout.size() {
-                add_live((new_size - layout.size()) as u64);
+                add_live((new_size - layout.size()) as u64, measuring);
             } else {
                 LIVE_BYTES.fetch_sub((layout.size() - new_size) as u64, Ordering::Relaxed);
             }
-            if MEASURING.load(Ordering::Relaxed) {
+            if measuring {
                 REALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
                 REQUESTED_BYTES.fetch_add(new_size as u64, Ordering::Relaxed);
             }

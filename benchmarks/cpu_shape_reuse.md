@@ -5,11 +5,12 @@ Issue: #1141 (parent #1140). Baseline authority: TeNeT
 
 `microbench_cpu_shape_reuse` measures one deterministic two-step, three-operand
 matrix chain. The first contraction destination remains eligible for reuse by
-`NetworkExecutionWorkspace`. Each timed execution is compared with the same
-plan and inputs under either `PlannedNetwork::execute` (fresh workspace) or
-`execute_with_workspace` (one caller-owned workspace). Correctness is checked
-outside timing by direct column-major indexing of every reduced block and two
-nested summations.
+`NetworkExecutionWorkspace`. The same plan and fixtures run under either
+`PlannedNetwork::execute` (fresh workspace) or `execute_with_workspace` (one
+caller-owned workspace). Before warmup and timing, every fixture is executed
+once in the selected mode and checked by direct column-major indexing of every
+reduced block and two nested summations. Timed repetitions are not checked
+individually; production regressions own the full replay-history contract.
 
 The fixtures cover a dense-equivalent one-charge U(1) layout, U(1) few-large
 and many-small block layouts, and fZ2 x U(1), each with `f64` and genuinely
@@ -33,7 +34,9 @@ requested live bytes at scope entry, peak, output publication and after the
 returned output is dropped. These absolute samples are intentionally not
 baseline-subtracted: freeing allocations created before the scope therefore
 cannot underflow or hide the reported active peak. The allocator adds atomic
-instrumentation overhead, so elapsed time characterizes this harness rather
+instrumentation overhead. Each successful allocation or reallocation samples
+the measurement gate once and uses that decision consistently for its peak and
+request counters. Elapsed time therefore characterizes this harness rather
 than an instrumentation-free latency floor.
 
 Within a batched row, assignment retains the preceding returned output until
