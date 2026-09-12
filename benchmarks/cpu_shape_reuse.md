@@ -67,6 +67,8 @@ CARGO_TARGET_DIR=../tenet/target cargo run --locked --release \
 `TENET_CPU_SHAPE_SAMPLES` controls the number of isolated child processes per
 case/workspace pair (default 5). The `median` row is the complete raw row whose
 `ns_per_iter` is the sample median; raw rows remain in the same CSV.
+`TENET_CPU_SHAPE_WORKSPACE_FILTER=fresh` or `reuse` runs only that workspace
+mode, which permits valid baseline fresh evidence when reuse correctness fails.
 
 Record the exact TeNeT SHA, lock SHA-256, command, `rustc -Vv`, CPU/OS details,
 and raw CSV under `libraries/reviews/cpu-data-20260912/`. Run the committed
