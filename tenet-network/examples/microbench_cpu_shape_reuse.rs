@@ -691,11 +691,18 @@ fn main() {
         .map(|value| value.parse::<usize>().expect("positive sample count"))
         .unwrap_or(5);
     assert!(samples > 0);
+    let workspace_filter = std::env::var("TENET_CPU_SHAPE_WORKSPACE_FILTER").ok();
     let mut grouped = BTreeMap::<(String, String, String, String), Vec<Row>>::new();
     let executable = std::env::current_exe().unwrap();
     println!("stat,sample,case,dtype,phase,workspace,iterations,ns_per_iter,alloc_calls,realloc_calls,requested_bytes,live_start_bytes,live_peak_bytes,live_with_output_bytes,live_idle_bytes");
     for case in CASES {
         for workspace in ["fresh", "reuse"] {
+            if workspace_filter
+                .as_deref()
+                .is_some_and(|selected| selected != workspace)
+            {
+                continue;
+            }
             for sample in 0..samples {
                 let output = Command::new(&executable)
                     .env("TENET_CPU_SHAPE_CHILD", case)
