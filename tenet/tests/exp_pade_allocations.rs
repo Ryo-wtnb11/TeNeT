@@ -257,7 +257,7 @@ fn typed_u1_general_exp_matches_the_upper_triangular_oracle() {
         3.0_f64.exp() - 1.0_f64.exp(),
         3.0_f64.exp(),
     ];
-    for block in image.data().chunks_exact(4) {
+    for block in image.data().as_chunks::<4>().0 {
         for (&actual, &expected) in block.iter().zip(&expected) {
             assert!((actual - expected).abs() <= 1.0e-12 * expected.abs().max(1.0));
         }
