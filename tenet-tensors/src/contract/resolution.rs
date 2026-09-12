@@ -201,12 +201,16 @@ where
         rhs.oriented_homspace(),
         axes,
     )?;
+    let has_conjugation = preflight.has_conjugation();
     if let Some(validated) = preflight.validate_core_geometry()? {
         if !validated_rhs_contract_requires_twist(&validated)? {
             let plan =
                 compile_fusion_block_contract_plan_prelowered_validated(validated, dst, lhs, rhs)?;
             return Ok(Resolution::Core(Arc::new(plan)));
         }
+    }
+    if !has_conjugation {
+        return Ok(Resolution::DynamicTree(compile_dynamic()?));
     }
     if let Some(structure) = compile_structure()? {
         return Ok(Resolution::Structure(structure));
