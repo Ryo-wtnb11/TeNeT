@@ -270,6 +270,8 @@ jobs:
         if: needs.changes.outputs.light_rust != 'true'
         run: cargo run -p tenet-network --example quickstart
         working-directory: tenet
+        env:
+          CARGO_PROFILE_DEV_DEBUG: ${{ env.CI_HEAVY_TEST_DEBUG }}
       # Rustdoc gate (#579): the tenet facade's docs are a maintained public
       # surface with per-item provenance (tenet/references.md), so broken
       # intra-doc links or malformed doc markup fail the build here rather
@@ -280,6 +282,7 @@ jobs:
         run: cargo doc -p tenet-rs --no-deps
         working-directory: tenet
         env:
+          CARGO_PROFILE_DEV_DEBUG: ${{ env.CI_HEAVY_TEST_DEBUG }}
           RUSTDOCFLAGS: -D warnings
       - name: Check the backend-selection diagnostic
         run: |
@@ -290,6 +293,8 @@ jobs:
           fi
           grep -F "tenet-operations requires a host execution backend" no-backend.log
         working-directory: tenet
+        env:
+          CARGO_PROFILE_DEV_DEBUG: ${{ env.CI_HEAVY_TEST_DEBUG }}
 
   test-macos:
     name: cargo test (macos-latest)
