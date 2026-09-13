@@ -2819,6 +2819,11 @@ fn compile_coupled_sector_regions(
 
             let mut row_trees = Vec::<CoupledTreeExtent>::new();
             let mut col_trees = Vec::<CoupledTreeExtent>::new();
+            let mut row_indexes = FxHashMap::<&FusionTreeKey, usize>::default();
+            let mut col_indexes = FxHashMap::<&FusionTreeKey, usize>::default();
+            let mut tree_pairs = Vec::<(usize, usize)>::new();
+            let mut rows = 0usize;
+            let mut cols = 0usize;
             let mut end = block_index;
             while end < structure.block_count() {
                 let block = structure.block(end)?;
@@ -2833,22 +2838,28 @@ fn compile_coupled_sector_regions(
                 }
                 let row_shape: DimVec = block.shape()[..nout].iter().copied().collect();
                 let col_shape: DimVec = block.shape()[nout..].iter().copied().collect();
-                if !insert_coupled_tree_extent(
+                let Some(row_index) = insert_coupled_tree_extent(
                     &mut row_trees,
+                    &mut row_indexes,
                     key.codomain_tree(),
                     row_shape,
-                )? || !insert_coupled_tree_extent(
+                    &mut rows,
+                )? else {
+                    return Ok(None);
+                };
+                let Some(col_index) = insert_coupled_tree_extent(
                     &mut col_trees,
+                    &mut col_indexes,
                     key.domain_tree(),
                     col_shape,
-                )? {
+                    &mut cols,
+                )? else {
                     return Ok(None);
-                }
+                };
+                tree_pairs.push((row_index, col_index));
                 end += 1;
             }
 
-            let rows = coupled_tree_total(&row_trees)?;
-            let cols = coupled_tree_total(&col_trees)?;
             let expected_blocks = row_trees
                 .len()
                 .checked_mul(col_trees.len())
@@ -2856,31 +2867,15 @@ fn compile_coupled_sector_regions(
             if end - block_index != expected_blocks {
                 return Ok(None);
             }
-            let mut seen_pairs = FxHashMap::<(FusionTreeKey, FusionTreeKey), ()>::default();
-            for index in block_index..end {
+            let mut seen_pairs = vec![false; expected_blocks];
+            for (index, (row_index, col_index)) in (block_index..end).zip(tree_pairs) {
                 let block = structure.block(index)?;
-                let BlockKey::FusionTree(key) = block.key() else {
-                    unreachable!("fusion-tree keys checked above")
-                };
-                if seen_pairs
-                    .insert(
-                        (key.codomain_tree().clone(), key.domain_tree().clone()),
-                        (),
-                    )
-                    .is_some()
-                {
+                let pair_index = col_index * row_trees.len() + row_index;
+                if std::mem::replace(&mut seen_pairs[pair_index], true) {
                     return Ok(None);
                 }
-                let row_offset = row_trees
-                    .iter()
-                    .find(|extent| extent.tree() == key.codomain_tree())
-                    .expect("row tree recorded above")
-                    .offset();
-                let col_offset = col_trees
-                    .iter()
-                    .find(|extent| extent.tree() == key.domain_tree())
-                    .expect("column tree recorded above")
-                    .offset();
+                let row_offset = row_trees[row_index].offset();
+                let col_offset = col_trees[col_index].offset();
                 let expected_offset = next_offset
                     .checked_add(row_offset)
                     .and_then(|offset| {
@@ -2921,32 +2916,28 @@ fn compile_coupled_sector_regions(
         Ok(Some(regions))
 }
 
-fn insert_coupled_tree_extent(
+fn insert_coupled_tree_extent<'a>(
     trees: &mut Vec<CoupledTreeExtent>,
-    tree: &FusionTreeKey,
+    indexes: &mut FxHashMap<&'a FusionTreeKey, usize>,
+    tree: &'a FusionTreeKey,
     shape: DimVec,
-) -> Result<bool, CoreError> {
-    if let Some(known) = trees.iter().find(|known| known.tree() == tree) {
-        return Ok(known.shape() == shape.as_slice());
+    total: &mut usize,
+) -> Result<Option<usize>, CoreError> {
+    if let Some(&index) = indexes.get(tree) {
+        return Ok((trees[index].shape() == shape.as_slice()).then_some(index));
     }
-    let offset = coupled_tree_total(trees)?;
-    offset
+    let index = trees.len();
+    let offset = *total;
+    *total = offset
         .checked_add(checked_element_count(&shape)?)
         .ok_or(CoreError::ElementCountOverflow)?;
+    indexes.insert(tree, index);
     trees.push(CoupledTreeExtent {
         tree: tree.clone(),
         offset,
         shape,
     });
-    Ok(true)
-}
-
-fn coupled_tree_total(trees: &[CoupledTreeExtent]) -> Result<usize, CoreError> {
-    trees.iter().try_fold(0usize, |total, tree| {
-        total
-            .checked_add(tree.extent()?)
-            .ok_or(CoreError::ElementCountOverflow)
-    })
+    Ok(Some(index))
 }
 
 fn checked_element_count(shape: &[usize]) -> Result<usize, CoreError> {
