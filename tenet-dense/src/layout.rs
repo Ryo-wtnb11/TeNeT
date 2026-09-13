@@ -48,11 +48,41 @@ fn max_offset_delta(shape: &[usize], strides: &[usize]) -> Result<usize, DenseEr
 }
 
 #[cfg(feature = "tenferro")]
-pub(crate) fn strides_to_isize(strides: &[usize]) -> Result<Vec<isize>, DenseError> {
+pub(crate) fn strides_to_isize(
+    strides: &[usize],
+) -> Result<tenferro_tensor::StrideVec, DenseError> {
     strides
         .iter()
         .map(|&stride| {
             isize::try_from(stride).map_err(|_| DenseError::StrideOverflow { value: stride })
         })
         .collect()
+}
+
+#[cfg(all(test, feature = "tenferro"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stride_conversion_uses_backend_carrier_for_arbitrary_rank() {
+        let empty = strides_to_isize(&[]).unwrap();
+        assert!(empty.is_empty());
+        assert!(!empty.spilled());
+
+        let short = strides_to_isize(&[1, 2, 4]).unwrap();
+        assert_eq!(short.as_slice(), &[1, 2, 4]);
+        assert!(!short.spilled());
+
+        let long = strides_to_isize(&[1, 2, 4, 8, 16, 32, 64, 128, 256]).unwrap();
+        assert_eq!(long.as_slice(), &[1, 2, 4, 8, 16, 32, 64, 128, 256]);
+        assert!(long.spilled());
+    }
+
+    #[test]
+    fn stride_conversion_preserves_overflow_error() {
+        assert_eq!(
+            strides_to_isize(&[usize::MAX]).unwrap_err(),
+            DenseError::StrideOverflow { value: usize::MAX }
+        );
+    }
 }
