@@ -7980,6 +7980,47 @@ fn prelowered_storage_layouts_and_execution_paths_match_oracle() {
             crate::OutputAxisOrder::from_axes(&[1, 0]),
         )
         .unwrap();
+    let swapped_axes =
+        || TensorContractSpec::new(&[1], &[0], crate::OutputAxisOrder::from_axes(&[1, 0]));
+    reset_global_operation_caches();
+    let mut route_context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
+    let mut ordinary_swapped = vec![0.0; swapped_dst_bound.space().required_len().unwrap()];
+    route_context
+        .tensorcontract_fusion_dyn_into(
+            &swapped_dst_bound,
+            &mut ordinary_swapped,
+            &logical_lhs_bound,
+            &eager_lhs_data,
+            &rhs_bound,
+            &rhs_data,
+            swapped_axes(),
+            1.0,
+            0.0,
+        )
+        .unwrap();
+    assert_eq!(ordinary_swapped, [0.0, 6.5, 2.0, 13.5]);
+    let ordinary_orientation = route_context.last_resolution_orientation();
+    assert!(ordinary_orientation.is_some());
+    let mut prelowered_swapped = vec![0.0; swapped_dst_bound.space().required_len().unwrap()];
+    route_context
+        .tensorcontract_fusion_dyn_prelowered_into(
+            &swapped_dst_bound,
+            &mut prelowered_swapped,
+            crate::FusionOperand::direct(&logical_lhs),
+            &eager_lhs_data,
+            rhs_operand,
+            &rhs_data,
+            swapped_axes(),
+            1.0,
+            0.0,
+        )
+        .unwrap();
+    assert_eq!(prelowered_swapped, ordinary_swapped);
+    assert_eq!(
+        route_context.last_resolution_orientation(),
+        ordinary_orientation,
+        "direct prelowered contraction must select the ordinary eager orientation"
+    );
     let candidate = crate::contract::contracted_axis_order_candidates(&[0], &[0]).remove(0);
     let reverse_plan = crate::contract::prepare_tensorcontract_fusion_plan_dyn_raw_with_axis_order_and_orientation(
         provider.as_ref(),
