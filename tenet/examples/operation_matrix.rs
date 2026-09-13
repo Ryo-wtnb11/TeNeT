@@ -20,7 +20,7 @@ use tenet::core::{
 use tenet::dense::DefaultDenseExecutor;
 use tenet_matrixalgebra::{
     lq_compact_dyn_checked_generic, qr_compact_dyn_checked_generic, qr_compact_dyn_generic,
-    svd_compact_dyn_checked_generic, BoundDynFactor, FactorScalar,
+    svd_compact_dyn_checked_generic, BoundDynFactor, CheckedGenericFactorPlanError, FactorScalar,
 };
 use tenet_tensors::{BoundDynamicFusionMapSpace, BoundDynamicTensorRef, DynamicFusionMapSpace};
 
@@ -885,13 +885,74 @@ fn assert_rows_orthonormal<D: HarnessScalar>(
     }
 }
 
+fn checked_compact_example_error(error: CheckedGenericFactorPlanError<Infallible>) -> Error {
+    Error::InvalidArgument(format!("checked compact input fixture failed: {error:?}"))
+}
+
+fn preflight_checked_compact_input<D: HarnessScalar>(
+    input: &BoundDynamicTensorRef<'_, LayoutGenericRule, D>,
+    sector_count: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut dense = DefaultDenseExecutor::new();
+    let qr =
+        qr_compact_dyn_checked_generic(&mut dense, input).map_err(checked_compact_example_error)?;
+    assert_checked_pair_reconstructs(&qr.0, &qr.1, sector_count);
+    assert_columns_orthonormal(&qr.0, sector_count);
+    drop(qr);
+    let svd = svd_compact_dyn_checked_generic(&mut dense, input)
+        .map_err(checked_compact_example_error)?;
+    assert_checked_svd_reconstructs(&svd.0, &svd.1, &svd.2, sector_count);
+    assert_columns_orthonormal(&svd.0, sector_count);
+    assert_rows_orthonormal(&svd.2, sector_count);
+    drop(svd);
+    let lq =
+        lq_compact_dyn_checked_generic(&mut dense, input).map_err(checked_compact_example_error)?;
+    assert_checked_pair_reconstructs(&lq.0, &lq.1, sector_count);
+    assert_rows_orthonormal(&lq.1, sector_count);
+    Ok(())
+}
+
+fn run_checked_compact_operation<D: HarnessScalar>(
+    operation: &str,
+    dense: &mut DefaultDenseExecutor,
+    input: &BoundDynamicTensorRef<'_, LayoutGenericRule, D>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match operation {
+        "qr" => drop(
+            qr_compact_dyn_checked_generic(dense, input).map_err(checked_compact_example_error)?,
+        ),
+        "svd" => drop(
+            svd_compact_dyn_checked_generic(dense, input).map_err(checked_compact_example_error)?,
+        ),
+        "lq" => drop(
+            lq_compact_dyn_checked_generic(dense, input).map_err(checked_compact_example_error)?,
+        ),
+        _ => unreachable!("fixed checked compact operation table"),
+    }
+    Ok(())
+}
+
 fn run_checked_compact_input_fixture<D: HarnessScalar>(
     workload: &str,
     degeneracy: usize,
     sector_count: usize,
     min_time: Duration,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let setup_runtime = benchmark_runtime()?;
+    let setup_symmetry = format!("GenericCheckedInput-{workload}-{}", D::NAME);
+    drop(bench(
+        &setup_runtime,
+        &setup_symmetry,
+        "checked_compact_input_fixture",
+        "setup",
+        "fixture_first",
+        "fixture_repeat",
+        min_time,
+        || checked_layout_fixture::<D>(degeneracy, sector_count),
+    )?);
     let (canonical, fallback) = checked_layout_fixture::<D>(degeneracy, sector_count)?;
+    let (canonical_changed, fallback_changed) =
+        checked_layout_fixture::<D>(degeneracy + 1, sector_count)?;
     let canonical_structure = canonical.space.space().structure();
     assert_eq!(canonical_structure.block_count(), sector_count);
     assert_eq!(
@@ -918,26 +979,24 @@ fn run_checked_compact_input_fixture<D: HarnessScalar>(
         canonical_structure.block_count(),
         matrix_shapes.join(";")
     );
-    for (layout, fixture) in [("canonical", canonical), ("fallback", fallback)] {
+    println!(
+        "# GenericCheckedInput: shape_change=alternating_preconstructed_d{}_d{} fixture_construction=excluded region_tables=preinitialized_by_literal_preflight executor=reused_per_operation returned_factors=dropped_inside_timed_closure",
+        degeneracy,
+        degeneracy + 1
+    );
+    for (layout, fixture, changed_fixture) in [
+        ("canonical", canonical, canonical_changed),
+        ("fallback", fallback, fallback_changed),
+    ] {
         let input = BoundDynamicTensorRef::try_new(&fixture.space, &fixture.data)?;
+        let changed_input =
+            BoundDynamicTensorRef::try_new(&changed_fixture.space, &changed_fixture.data)?;
         let original = fixture.data.clone();
-        {
-            let mut preflight_dense = DefaultDenseExecutor::new();
-            let qr = qr_compact_dyn_checked_generic(&mut preflight_dense, &input)?;
-            assert_checked_pair_reconstructs(&qr.0, &qr.1, sector_count);
-            assert_columns_orthonormal(&qr.0, sector_count);
-            drop(qr);
-            let svd = svd_compact_dyn_checked_generic(&mut preflight_dense, &input)?;
-            assert_checked_svd_reconstructs(&svd.0, &svd.1, &svd.2, sector_count);
-            assert_columns_orthonormal(&svd.0, sector_count);
-            assert_rows_orthonormal(&svd.2, sector_count);
-            drop(svd);
-            let lq = lq_compact_dyn_checked_generic(&mut preflight_dense, &input)?;
-            assert_checked_pair_reconstructs(&lq.0, &lq.1, sector_count);
-            assert_rows_orthonormal(&lq.1, sector_count);
-            drop(lq);
-            assert_checked_source_unchanged(&fixture.data, &original);
-        }
+        let changed_original = changed_fixture.data.clone();
+        preflight_checked_compact_input(&input, sector_count)?;
+        preflight_checked_compact_input(&changed_input, sector_count)?;
+        assert_checked_source_unchanged(&fixture.data, &original);
+        assert_checked_source_unchanged(&changed_fixture.data, &changed_original);
 
         let symmetry = format!("GenericCheckedInput-{workload}-{layout}-{}", D::NAME);
         let runtime = benchmark_runtime()?;
@@ -950,7 +1009,10 @@ fn run_checked_compact_input_fixture<D: HarnessScalar>(
             "first_after_setup",
             "warm_after_setup",
             min_time,
-            || qr_compact_dyn_checked_generic(&mut dense, &input),
+            || {
+                qr_compact_dyn_checked_generic(&mut dense, &input)
+                    .map_err(checked_compact_example_error)
+            },
         )?;
         assert_checked_pair_reconstructs(&qr.0, &qr.1, sector_count);
         drop(qr);
@@ -962,7 +1024,10 @@ fn run_checked_compact_input_fixture<D: HarnessScalar>(
             "first_after_setup",
             "warm_after_setup",
             min_time,
-            || svd_compact_dyn_checked_generic(&mut dense, &input),
+            || {
+                svd_compact_dyn_checked_generic(&mut dense, &input)
+                    .map_err(checked_compact_example_error)
+            },
         )?;
         assert_checked_svd_reconstructs(&svd.0, &svd.1, &svd.2, sector_count);
         drop(svd);
@@ -974,11 +1039,36 @@ fn run_checked_compact_input_fixture<D: HarnessScalar>(
             "first_after_setup",
             "warm_after_setup",
             min_time,
-            || lq_compact_dyn_checked_generic(&mut dense, &input),
+            || {
+                lq_compact_dyn_checked_generic(&mut dense, &input)
+                    .map_err(checked_compact_example_error)
+            },
         )?;
         assert_checked_pair_reconstructs(&lq.0, &lq.1, sector_count);
         drop(lq);
         assert_checked_source_unchanged(&fixture.data, &original);
+
+        for operation in ["qr", "svd", "lq"] {
+            let runtime = benchmark_runtime()?;
+            let mut dense = DefaultDenseExecutor::new();
+            let mut changed = false;
+            bench(
+                &runtime,
+                &symmetry,
+                &format!("checked_compact_input_{operation}_shape_alternating"),
+                "owned",
+                "first_after_inputs_and_regions_setup",
+                "warm_shape_alternating",
+                min_time,
+                || {
+                    let selected = if changed { &changed_input } else { &input };
+                    changed = !changed;
+                    run_checked_compact_operation(operation, &mut dense, selected)
+                },
+            )?;
+        }
+        assert_checked_source_unchanged(&fixture.data, &original);
+        assert_checked_source_unchanged(&changed_fixture.data, &changed_original);
     }
     Ok(())
 }

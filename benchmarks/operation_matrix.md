@@ -137,6 +137,16 @@ OP_MATRIX_MIN_MS=100 \
 benchmarks/operation_matrix.sh
 ```
 
+The grouped output separates three scopes. `checked_compact_input_fixture`
+times construction and payload initialization of both canonical and fallback
+fixtures (`fixture_first`/`fixture_repeat`). The ordinary QR/SVD/LQ rows keep one
+fixed preconstructed input. Their `_shape_alternating` controls alternate
+preconstructed `d` and `d+1` inputs with one dense executor per numerical
+family; fixture construction is excluded, and literal preflight has already
+initialized both inputs' region metadata. Fresh factor results are dropped
+inside every alternating timed closure. These labels describe setup and shape
+reuse only; none claims an isolated process-cold cache.
+
 The benchmark-local XOR provider has a fixed 16-label domain; labels 0 and 1
 retain the previous fixture behavior. The many-small geometry is `G=16`, with
 16 row trees and 16 column trees (`T=32` total side trees under the issue's
