@@ -5,6 +5,7 @@
 //! performance. Fixture construction and admission stay outside measurement. Each timed call
 //! includes `BoundDynamicTensorRef` construction, checked routing and matrix assembly, error
 //! propagation from the rejecting dense executor, and destruction of the returned error.
+//! Set `TENET_GENERIC_VALUES_BORROW_CASES=1` to compare matched canonical and padded layouts.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::convert::Infallible;
@@ -214,7 +215,7 @@ struct Fixture {
     data: Vec<f64>,
 }
 
-fn fixture(labels: &[usize], degeneracy: usize, interleave: bool) -> Fixture {
+fn canonical_fixture(labels: &[usize], degeneracy: usize) -> Fixture {
     let provider = Arc::new(MeasurementRule);
     let leg = SectorLeg::new(
         labels
@@ -227,12 +228,21 @@ fn fixture(labels: &[usize], degeneracy: usize, interleave: bool) -> Fixture {
         FusionProductSpace::new([leg.clone(), leg.clone()]),
         FusionProductSpace::new([leg.clone(), leg]),
     );
-    let canonical = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
-        Arc::clone(&provider),
-        homspace.clone(),
-    )
-    .unwrap();
-    let source = canonical.space().structure();
+    let canonical =
+        BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(provider, homspace)
+            .unwrap();
+    let data = vec![1.0; canonical.space().required_len().unwrap()];
+    Fixture {
+        space: canonical,
+        data,
+    }
+}
+
+fn fixture(labels: &[usize], degeneracy: usize, interleave: bool) -> Fixture {
+    let canonical = canonical_fixture(labels, degeneracy);
+    let provider = Arc::clone(canonical.space.provider_arc());
+    let homspace = canonical.space.space().homspace().clone();
+    let source = canonical.space.space().structure();
     let mut indices = (0..source.block_count()).collect::<Vec<_>>();
     if interleave {
         indices.sort_by_key(|&index| {
@@ -346,6 +356,23 @@ fn main() {
     assert!(iterations > 0, "iterations must be nonzero");
     assert!(samples > 0, "samples must be nonzero");
     println!("case,sample,iterations,ns_per_iter,alloc_calls_per_iter,alloc_bytes_per_iter");
+    if std::env::var("TENET_GENERIC_VALUES_BORROW_CASES").as_deref() == Ok("1") {
+        for (trees, degeneracy) in [(2, 3), (8, 1)] {
+            measure(
+                &format!("canonical_one_sector_t{trees}_deg{degeneracy}"),
+                &canonical_fixture(&[trees], degeneracy),
+                iterations,
+                samples,
+            );
+            measure(
+                &format!("padded_one_sector_t{trees}_deg{degeneracy}"),
+                &fixture(&[trees], degeneracy, false),
+                iterations,
+                samples,
+            );
+        }
+        return;
+    }
     for trees in [1, 2, 4, 8, 16] {
         measure(
             &format!("one_sector_t{trees}_deg1"),
