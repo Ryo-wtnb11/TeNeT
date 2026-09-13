@@ -3125,30 +3125,106 @@ pub(crate) fn scale_blocks_impl<D: ScalarOps>(
         if factor == 1.0 {
             continue;
         }
-        let factor = D::from_real(factor);
-        let shape = block.shape();
-        let strides = block.strides();
-        let offset = block.offset();
-        let count: usize = shape.iter().product();
-        let mut indices = vec![0usize; shape.len()];
-        for _ in 0..count {
-            let position = offset
-                + indices
-                    .iter()
-                    .zip(strides)
-                    .map(|(&i, &s)| i * s)
-                    .sum::<usize>();
-            data[position] = data[position] * factor;
-            for axis in 0..shape.len() {
-                indices[axis] += 1;
-                if indices[axis] < shape[axis] {
-                    break;
-                }
-                indices[axis] = 0;
-            }
-        }
+        scale_strided_block(
+            data,
+            block.shape(),
+            block.strides(),
+            block.offset(),
+            D::from_real(factor),
+        )?;
     }
     Ok(())
+}
+
+fn scale_strided_block<D: ScalarOps>(
+    data: &mut [D],
+    shape: &[usize],
+    strides: &[usize],
+    offset: usize,
+    factor: D,
+) -> Result<(), Error> {
+    if shape.contains(&0) {
+        return Ok(());
+    }
+    let strides = shape
+        .iter()
+        .zip(strides)
+        .map(|(&extent, &stride)| {
+            if extent <= 1 {
+                Ok(0)
+            } else {
+                isize::try_from(stride)
+                    .map_err(|_| tenet_operations::OperationError::StrideOverflow { value: stride })
+            }
+        })
+        .collect::<Result<SmallVec<[isize; 8]>, _>>()?;
+    let offset = tenet_operations::strided::offset_to_isize(offset)?;
+    tenet_operations::scale_raw_strided_kernel_trusted(data, shape, &strides, offset, factor)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod scale_strided_block_tests {
+    use super::*;
+
+    const VISITED: [usize; 8] = [2, 3, 6, 7, 12, 13, 16, 17];
+
+    #[test]
+    fn rank_three_scale_touches_only_literal_strided_addresses() {
+        let mut real = vec![-99.0; 20];
+        for (value, index) in VISITED.into_iter().enumerate() {
+            real[index] = f64::from(value as u32 + 1);
+        }
+        let mut expected_real = vec![-99.0; 20];
+        for (value, index) in VISITED.into_iter().enumerate() {
+            expected_real[index] = -2.0 * f64::from(value as u32 + 1);
+        }
+        scale_strided_block(&mut real, &[2, 2, 2], &[1, 4, 10], 2, -2.0).unwrap();
+        assert_eq!(real, expected_real);
+
+        let sentinel = Complex64::new(-99.0, 99.0);
+        let mut complex = vec![sentinel; 20];
+        for (value, index) in VISITED.into_iter().enumerate() {
+            let value = f64::from(value as u32 + 1);
+            complex[index] = Complex64::new(value, -value);
+        }
+        let mut expected_complex = vec![sentinel; 20];
+        for (value, index) in VISITED.into_iter().enumerate() {
+            let value = 3.0 * f64::from(value as u32 + 1);
+            expected_complex[index] = Complex64::new(value, -value);
+        }
+        scale_strided_block(
+            &mut complex,
+            &[2, 2, 2],
+            &[1, 4, 10],
+            2,
+            Complex64::new(3.0, 0.0),
+        )
+        .unwrap();
+        assert_eq!(complex, expected_complex);
+    }
+
+    #[test]
+    fn scalar_empty_and_singleton_layouts_keep_their_existing_meaning() {
+        let mut scalar = vec![11.0, 13.0, 17.0];
+        scale_strided_block(&mut scalar, &[], &[], 1, -1.0).unwrap();
+        assert_eq!(scalar, [11.0, -13.0, 17.0]);
+
+        let mut empty = Vec::<f64>::new();
+        scale_strided_block(
+            &mut empty,
+            &[0, 2],
+            &[usize::MAX, usize::MAX],
+            usize::MAX,
+            2.0,
+        )
+        .unwrap();
+        assert!(empty.is_empty());
+
+        let mut singleton = vec![2.0, 3.0, 5.0, 7.0];
+        scale_strided_block(&mut singleton, &[1, 2], &[usize::MAX, 2], 1, 10.0).unwrap();
+        assert_eq!(singleton, [2.0, 30.0, 5.0, 70.0]);
+    }
 }
 
 fn uncoupled_sector_of_leg(key: &FusionTreePairKey, nout: usize, leg: usize) -> SectorId {
