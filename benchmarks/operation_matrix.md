@@ -138,11 +138,13 @@ benchmarks/operation_matrix.sh
 ```
 
 The benchmark-local XOR provider has a fixed 16-label domain; labels 0 and 1
-retain the previous fixture behavior. The `many-small` case has `G=T=16` and 16
-source blocks, but it is only a finite cardinality/dataflow control and makes no
-physical non-Abelian claim. Existing generated SUN QR rows supply a physical
-many-tree supplement. Rank-4, multiplicity, and broader G/T correctness sweeps,
-plus direct borrow/pack probes, belong to tests because the public benchmark API
+retain the previous fixture behavior. The many-small geometry is `G=16`, with
+16 row trees and 16 column trees (`T=32` total side trees under the issue's
+convention), and 16 source blocks. It is only a finite cardinality/dataflow
+control and makes no physical non-Abelian claim. Existing generated SUN QR rows
+supply a physical many-tree supplement. Rank-4, multiplicity, and broader G/T
+correctness sweeps, plus
+direct borrow/pack probes, belong to tests because the public benchmark API
 exposes no input-copy counter. Reported allocation totals remain caller-thread
 requested calls/bytes; peak, live, native, and worker-thread memory are
 unavailable.

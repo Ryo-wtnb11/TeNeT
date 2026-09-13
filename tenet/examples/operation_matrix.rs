@@ -926,13 +926,16 @@ fn run_checked_compact_input_fixture<D: HarnessScalar>(
             let qr = qr_compact_dyn_checked_generic(&mut preflight_dense, &input)?;
             assert_checked_pair_reconstructs(&qr.0, &qr.1, sector_count);
             assert_columns_orthonormal(&qr.0, sector_count);
+            drop(qr);
             let svd = svd_compact_dyn_checked_generic(&mut preflight_dense, &input)?;
             assert_checked_svd_reconstructs(&svd.0, &svd.1, &svd.2, sector_count);
             assert_columns_orthonormal(&svd.0, sector_count);
             assert_rows_orthonormal(&svd.2, sector_count);
+            drop(svd);
             let lq = lq_compact_dyn_checked_generic(&mut preflight_dense, &input)?;
             assert_checked_pair_reconstructs(&lq.0, &lq.1, sector_count);
             assert_rows_orthonormal(&lq.1, sector_count);
+            drop(lq);
             assert_checked_source_unchanged(&fixture.data, &original);
         }
 
@@ -950,6 +953,7 @@ fn run_checked_compact_input_fixture<D: HarnessScalar>(
             || qr_compact_dyn_checked_generic(&mut dense, &input),
         )?;
         assert_checked_pair_reconstructs(&qr.0, &qr.1, sector_count);
+        drop(qr);
         let svd = bench(
             &runtime,
             &symmetry,
@@ -961,6 +965,7 @@ fn run_checked_compact_input_fixture<D: HarnessScalar>(
             || svd_compact_dyn_checked_generic(&mut dense, &input),
         )?;
         assert_checked_svd_reconstructs(&svd.0, &svd.1, &svd.2, sector_count);
+        drop(svd);
         let lq = bench(
             &runtime,
             &symmetry,
@@ -972,6 +977,7 @@ fn run_checked_compact_input_fixture<D: HarnessScalar>(
             || lq_compact_dyn_checked_generic(&mut dense, &input),
         )?;
         assert_checked_pair_reconstructs(&lq.0, &lq.1, sector_count);
+        drop(lq);
         assert_checked_source_unchanged(&fixture.data, &original);
     }
     Ok(())
