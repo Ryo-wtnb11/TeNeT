@@ -1,8 +1,9 @@
 use tenet_core::{
     product_fusion_rule, BlockKey, BlockSpec, BlockStructure, BraidingStyleKind,
-    CheckedGenericFusion, CoreError, FermionParityFusionRule, FusionProductSpace, FusionRule,
-    FusionStyleKind, FusionTensorMapSpace, FusionTreeHomSpace, FusionTreeKey, GenericFArray,
-    GenericFusionSymbols, GenericRMatrix, GenericRigidSymbols, MultiplicityFreeFusionRule,
+    CheckedGenericFusion, CheckedGenericRigidSymbols, CoreError, CoupledSectorFold,
+    FermionParityFusionRule, FusionProductSpace, FusionRule, FusionStyleKind, FusionTensorMapSpace,
+    FusionTreeHomSpace, FusionTreeKey, GenericFArray, GenericFusionSymbols, GenericRMatrix,
+    GenericRigidSymbols, InfallibleGeneric, MultiplicityFreeFusionRule,
     MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols, RuleIdentity, SU2FusionRule,
     SU2Irrep, SectorId, SectorLeg, SectorVec, TensorMap, TensorMapSpace, U1FusionRule, U1Irrep,
     Z2FusionRule,
@@ -1374,6 +1375,7 @@ struct LateGenericSpy {
 struct CountingDense {
     inner: tenet_dense::DefaultDenseExecutor,
     svd_calls: usize,
+    svd_into_calls: usize,
     svd_vals_calls: usize,
     qr_calls: usize,
     eig_calls: usize,
@@ -1385,6 +1387,7 @@ impl Default for CountingDense {
         Self {
             inner: tenet_dense::DefaultDenseExecutor::new(),
             svd_calls: 0,
+            svd_into_calls: 0,
             svd_vals_calls: 0,
             qr_calls: 0,
             eig_calls: 0,
@@ -1402,6 +1405,18 @@ impl DenseExecutor for CountingDense {
     fn svd_vals(&mut self, input: DenseRead<'_>) -> Result<DenseTensor, DenseError> {
         self.svd_vals_calls += 1;
         self.inner.svd_vals(input)
+    }
+
+    fn svd_into(
+        &mut self,
+        input: DenseRead<'_>,
+        u: DenseWrite<'_>,
+        s: DenseWrite<'_>,
+        vt: DenseWrite<'_>,
+    ) -> Result<(), DenseError> {
+        self.svd_into_calls += 1;
+        self.svd_calls += 1;
+        self.inner.svd_into(input, u, s, vt)
     }
 
     fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
@@ -1522,6 +1537,468 @@ impl CheckedGenericFusion for LateGenericSpy {
     ) -> Result<usize, Self::Error> {
         self.call(|| self.rule.nsymbol(left, right, coupled))
     }
+}
+
+impl CheckedGenericRigidSymbols for LateGenericSpy {
+    type Scalar = f64;
+
+    fn try_sqrt_dim_scalar(&self, sector: SectorId) -> Result<Self::Scalar, Self::Error> {
+        self.call(|| self.rule.sqrt_dim_scalar(sector))
+    }
+
+    fn try_inv_sqrt_dim_scalar(&self, sector: SectorId) -> Result<Self::Scalar, Self::Error> {
+        self.call(|| self.rule.inv_sqrt_dim_scalar(sector))
+    }
+
+    fn try_frobenius_schur_phase_scalar(
+        &self,
+        sector: SectorId,
+    ) -> Result<Self::Scalar, Self::Error> {
+        self.call(|| self.rule.frobenius_schur_phase_scalar(sector))
+    }
+
+    fn try_f_symbol_generic(
+        &self,
+        a: SectorId,
+        b: SectorId,
+        c: SectorId,
+        d: SectorId,
+        e: SectorId,
+        f: SectorId,
+    ) -> Result<GenericFArray<Self::Scalar>, Self::Error> {
+        self.call(|| self.rule.f_symbol_generic(a, b, c, d, e, f))
+    }
+
+    fn try_r_symbol_generic(
+        &self,
+        a: SectorId,
+        b: SectorId,
+        coupled: SectorId,
+    ) -> Result<GenericRMatrix<Self::Scalar>, Self::Error> {
+        self.call(|| self.rule.r_symbol_generic(a, b, coupled))
+    }
+}
+
+struct FailSingleLegFold {
+    rule: FactorGenericRule,
+    fail_at: usize,
+    single_leg_folds: Cell<usize>,
+}
+
+impl FusionRule for FailSingleLegFold {
+    fn rule_identity(&self) -> RuleIdentity {
+        self.rule.rule_identity()
+    }
+    fn fusion_style(&self) -> FusionStyleKind {
+        self.rule.fusion_style()
+    }
+    fn braiding_style(&self) -> BraidingStyleKind {
+        self.rule.braiding_style()
+    }
+    fn vacuum(&self) -> SectorId {
+        self.rule.vacuum()
+    }
+    fn dual(&self, sector: SectorId) -> SectorId {
+        self.rule.dual(sector)
+    }
+    fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+        self.rule.fusion_channels(left, right)
+    }
+    fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+        self.rule.nsymbol(left, right, coupled)
+    }
+}
+
+impl CheckedGenericFusion for FailSingleLegFold {
+    type Error = LateGenericError;
+
+    fn rule_identity(&self) -> RuleIdentity {
+        self.rule.rule_identity()
+    }
+    fn fusion_style(&self) -> FusionStyleKind {
+        self.rule.fusion_style()
+    }
+    fn braiding_style(&self) -> BraidingStyleKind {
+        self.rule.braiding_style()
+    }
+    fn vacuum(&self) -> SectorId {
+        self.rule.vacuum()
+    }
+    fn try_dual(&self, sector: SectorId) -> Result<SectorId, Self::Error> {
+        Ok(self.rule.dual(sector))
+    }
+    fn try_fusion_channels(
+        &self,
+        left: SectorId,
+        right: SectorId,
+    ) -> Result<SectorVec, Self::Error> {
+        Ok(self.rule.fusion_channels(left, right))
+    }
+    fn try_fusion_channels_in_table(
+        &self,
+        left: SectorId,
+        right: SectorId,
+    ) -> Result<SectorVec, Self::Error> {
+        self.try_fusion_channels(left, right)
+    }
+    fn try_coupled_sector_fold(
+        &self,
+        effective: &[SectorId],
+    ) -> Result<CoupledSectorFold, Self::Error> {
+        if effective.len() == 1 {
+            let call = self.single_leg_folds.get() + 1;
+            self.single_leg_folds.set(call);
+            if call == self.fail_at {
+                return Err(LateGenericError(call));
+            }
+        }
+        Ok(InfallibleGeneric::new(&self.rule)
+            .try_coupled_sector_fold(effective)
+            .unwrap())
+    }
+    fn try_nsymbol(
+        &self,
+        left: SectorId,
+        right: SectorId,
+        coupled: SectorId,
+    ) -> Result<usize, Self::Error> {
+        Ok(self.rule.nsymbol(left, right, coupled))
+    }
+}
+
+impl CheckedGenericRigidSymbols for FailSingleLegFold {
+    type Scalar = f64;
+
+    fn try_sqrt_dim_scalar(&self, sector: SectorId) -> Result<Self::Scalar, Self::Error> {
+        Ok(self.rule.sqrt_dim_scalar(sector))
+    }
+    fn try_inv_sqrt_dim_scalar(&self, sector: SectorId) -> Result<Self::Scalar, Self::Error> {
+        Ok(self.rule.inv_sqrt_dim_scalar(sector))
+    }
+    fn try_frobenius_schur_phase_scalar(
+        &self,
+        sector: SectorId,
+    ) -> Result<Self::Scalar, Self::Error> {
+        Ok(self.rule.frobenius_schur_phase_scalar(sector))
+    }
+    fn try_f_symbol_generic(
+        &self,
+        a: SectorId,
+        b: SectorId,
+        c: SectorId,
+        d: SectorId,
+        e: SectorId,
+        f: SectorId,
+    ) -> Result<GenericFArray<Self::Scalar>, Self::Error> {
+        Ok(self.rule.f_symbol_generic(a, b, c, d, e, f))
+    }
+    fn try_r_symbol_generic(
+        &self,
+        a: SectorId,
+        b: SectorId,
+        coupled: SectorId,
+    ) -> Result<GenericRMatrix<Self::Scalar>, Self::Error> {
+        Ok(self.rule.r_symbol_generic(a, b, coupled))
+    }
+}
+
+fn checked_svd_matrix(sector: SectorId, complex: bool) -> (usize, usize, Vec<Complex64>) {
+    match sector.id() {
+        0 => (
+            2,
+            2,
+            vec![
+                Complex64::new(0.0, 0.0),
+                Complex64::new(1.0, 0.0),
+                if complex {
+                    Complex64::new(0.0, 4.0)
+                } else {
+                    Complex64::new(4.0, 0.0)
+                },
+                Complex64::new(0.0, 0.0),
+            ],
+        ),
+        1 => {
+            let a = 3.0 / 2.0_f64.sqrt();
+            (
+                3,
+                2,
+                vec![
+                    Complex64::new(a, 0.0),
+                    if complex {
+                        Complex64::new(0.0, a)
+                    } else {
+                        Complex64::new(a, 0.0)
+                    },
+                    Complex64::new(0.0, 0.0),
+                    Complex64::new(0.0, 0.0),
+                    Complex64::new(0.0, 0.0),
+                    if complex {
+                        Complex64::new(0.0, -2.0)
+                    } else {
+                        Complex64::new(2.0, 0.0)
+                    },
+                ],
+            )
+        }
+        id => panic!("unexpected checked-SVD fixture sector {id}"),
+    }
+}
+
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
+fn checked_svd_truncation_input<D>(
+    complex: bool,
+) -> (
+    Arc<LateGenericSpy>,
+    BoundDynamicFusionMapSpace<LateGenericSpy>,
+    Vec<D>,
+)
+where
+    D: FactorScalar,
+{
+    let vacuum = SectorId::new(0);
+    let x = SectorId::new(1);
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([SectorLeg::new([(vacuum, 2), (x, 3)], false)]),
+        FusionProductSpace::new([SectorLeg::new([(vacuum, 2), (x, 2)], false)]),
+    );
+    let source = BoundDynamicFusionMapSpace::from_final_homspace_generic(
+        Arc::new(FactorGenericRule),
+        homspace,
+    )
+    .unwrap();
+    let provider = Arc::new(LateGenericSpy {
+        rule: FactorGenericRule,
+        fail_at: usize::MAX,
+        calls: Cell::new(0),
+    });
+    let checked =
+        BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
+            .unwrap();
+    let mut data = vec![D::zero(); checked.space().required_len().unwrap()];
+    let structure = checked.space().structure();
+    for index in 0..structure.block_count() {
+        let block = structure.block(index).unwrap();
+        let BlockKey::FusionTree(key) = block.key() else {
+            panic!("checked Generic fixture must use fusion-tree blocks")
+        };
+        let sector = key.codomain_tree().coupled();
+        let (rows, cols, matrix) = checked_svd_matrix(sector, complex);
+        assert_eq!(block.shape(), [rows, cols]);
+        for col in 0..cols {
+            for row in 0..rows {
+                let source_index = row + rows * col;
+                let destination =
+                    block.offset() + row * block.strides()[0] + col * block.strides()[1];
+                data[destination] = D::from_complex64(matrix[source_index]);
+            }
+        }
+    }
+    (provider, checked, data)
+}
+
+fn assert_checked_svd_truncation<D>(complex: bool, truncation: &Truncation, kept: usize)
+where
+    D: FactorScalar,
+{
+    let (provider, space, data) = checked_svd_truncation_input::<D>(complex);
+    let input = BoundDynamicTensorRef::try_new(&space, &data).unwrap();
+    let mut dense = CountingDense::default();
+    let (u, vh, spectra, error) =
+        svd_trunc_factors_dyn_checked_generic(&mut dense, &input, truncation).unwrap();
+
+    assert_eq!(dense.svd_into_calls, 2);
+    assert_eq!(dense.svd_vals_calls, 0);
+    assert!(Arc::ptr_eq(u.space().provider_arc(), &provider));
+    assert!(Arc::ptr_eq(vh.space().provider_arc(), &provider));
+
+    let expected_spectra = [
+        (SectorId::new(0), [4.0, 1.0]),
+        (SectorId::new(1), [3.0, 2.0]),
+    ];
+    let mut residual_squared = 0.0;
+    for (sector, expected) in expected_spectra {
+        let spectrum = spectra.iter().find(|entry| entry.sector == sector).unwrap();
+        assert_eq!(spectrum.values.len(), kept);
+        for (&actual, &expected) in spectrum.values.iter().zip(&expected[..kept]) {
+            assert!((actual - expected).abs() < 1.0e-10);
+        }
+
+        let u_block = (0..u.space().space().structure().block_count())
+            .map(|index| u.space().space().structure().block(index).unwrap())
+            .find(|block| {
+                matches!(
+                    block.key(),
+                    BlockKey::FusionTree(key) if key.codomain_tree().coupled() == sector
+                )
+            })
+            .unwrap();
+        let vh_block = (0..vh.space().space().structure().block_count())
+            .map(|index| vh.space().space().structure().block(index).unwrap())
+            .find(|block| {
+                matches!(
+                    block.key(),
+                    BlockKey::FusionTree(key) if key.domain_tree().coupled() == sector
+                )
+            })
+            .unwrap();
+        let (rows, cols, matrix) = checked_svd_matrix(sector, complex);
+        assert_eq!(u_block.shape(), [rows, kept]);
+        assert_eq!(vh_block.shape(), [kept, cols]);
+
+        let u_value = |row: usize, col: usize| {
+            u.data()[u_block.offset() + row * u_block.strides()[0] + col * u_block.strides()[1]]
+                .widen_complex()
+        };
+        let vh_value = |row: usize, col: usize| {
+            vh.data()[vh_block.offset() + row * vh_block.strides()[0] + col * vh_block.strides()[1]]
+                .widen_complex()
+        };
+        for left in 0..kept {
+            for right in 0..kept {
+                let u_inner = (0..rows)
+                    .map(|row| u_value(row, left).conj() * u_value(row, right))
+                    .sum::<Complex64>();
+                let vh_inner = (0..cols)
+                    .map(|col| vh_value(left, col) * vh_value(right, col).conj())
+                    .sum::<Complex64>();
+                let expected = if left == right { 1.0 } else { 0.0 };
+                assert!((u_inner - expected).norm() < 1.0e-10);
+                assert!((vh_inner - expected).norm() < 1.0e-10);
+            }
+        }
+        for col in 0..cols {
+            for row in 0..rows {
+                let reconstructed = (0..kept)
+                    .map(|bond| u_value(row, bond) * spectrum.values[bond] * vh_value(bond, col))
+                    .sum::<Complex64>();
+                residual_squared += if sector == SectorId::new(1) {
+                    (1.0 + 2.0_f64.sqrt()) * (reconstructed - matrix[row + rows * col]).norm_sqr()
+                } else {
+                    (reconstructed - matrix[row + rows * col]).norm_sqr()
+                };
+            }
+        }
+    }
+    let expected_error = if kept == 2 {
+        0.0
+    } else {
+        (1.0 + 4.0 * (1.0 + 2.0_f64.sqrt())).sqrt()
+    };
+    assert!((error - expected_error).abs() < 1.0e-10);
+    assert!((residual_squared.sqrt() - error).abs() < 1.0e-10);
+}
+
+#[test]
+fn checked_generic_svd_trunc_uses_each_real_compact_decomposition_once() {
+    assert_checked_svd_truncation::<f64>(false, &Truncation::Full, 2);
+    assert_checked_svd_truncation::<f64>(false, &Truncation::absolute_cutoff(2.5).unwrap(), 1);
+}
+
+#[test]
+fn checked_generic_svd_trunc_uses_each_complex_compact_decomposition_once() {
+    assert_checked_svd_truncation::<Complex64>(true, &Truncation::Full, 2);
+    assert_checked_svd_truncation::<Complex64>(true, &Truncation::absolute_cutoff(2.5).unwrap(), 1);
+}
+
+#[test]
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
+fn checked_generic_svd_trunc_empty_input_skips_dense_execution() {
+    let vacuum = SectorId::new(0);
+    let x = SectorId::new(1);
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([SectorLeg::new([(vacuum, 1)], false)]),
+        FusionProductSpace::new([SectorLeg::new([(x, 1)], false)]),
+    );
+    let source = BoundDynamicFusionMapSpace::from_final_homspace_generic(
+        Arc::new(FactorGenericRule),
+        homspace,
+    )
+    .unwrap();
+    let provider = Arc::new(LateGenericSpy {
+        rule: FactorGenericRule,
+        fail_at: usize::MAX,
+        calls: Cell::new(0),
+    });
+    let checked =
+        BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
+            .unwrap();
+    let data = Vec::<f64>::new();
+    let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
+    let mut dense = CountingDense::default();
+    let (u, vh, spectra, error) =
+        svd_trunc_factors_dyn_checked_generic(&mut dense, &input, &Truncation::Full).unwrap();
+
+    assert_eq!(dense.svd_into_calls, 0);
+    assert_eq!(dense.svd_vals_calls, 0);
+    assert!(spectra.is_empty());
+    assert_eq!(error, 0.0);
+    assert!(u.data().is_empty());
+    assert!(vh.data().is_empty());
+    assert!(Arc::ptr_eq(u.space().provider_arc(), &provider));
+    assert!(Arc::ptr_eq(vh.space().provider_arc(), &provider));
+}
+
+#[test]
+fn checked_generic_svd_trunc_dense_failure_precedes_output_provider_admission() {
+    let (provider, space, data) = checked_svd_truncation_input::<f64>(false);
+    let input = BoundDynamicTensorRef::try_new(&space, &data).unwrap();
+    let before = input.data().to_vec();
+    let mut dense = FailAfterObservingSvdInput::default();
+    let result = svd_trunc_factors_dyn_checked_generic(&mut dense, &input, &Truncation::Full);
+
+    assert!(matches!(
+        result,
+        Err(CheckedGenericFactorPlanError::Operation(
+            OperationError::Dense(DenseError::Backend { op: "svd_into", .. })
+        ))
+    ));
+    assert_eq!(provider.calls.get(), 0);
+    assert_eq!(dense.observed.len(), 1);
+    assert_eq!(input.data(), before);
+}
+
+#[test]
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
+fn checked_generic_svd_trunc_preserves_full_s_fold_failure() {
+    let (source, data) = generic_factorization_input();
+    // U and Vh preflight/construction each fold both one-leg bond sectors,
+    // making the first fold for the full diagonal S the ninth one.
+    const FIRST_FULL_S_FOLD: usize = 9;
+    let failing_provider = Arc::new(FailSingleLegFold {
+        rule: FactorGenericRule,
+        fail_at: FIRST_FULL_S_FOLD,
+        single_leg_folds: Cell::new(0),
+    });
+    let failing_space = BoundDynamicFusionMapSpace::bind_generic(
+        source.space().clone(),
+        Arc::clone(&failing_provider),
+    )
+    .unwrap();
+    let input = BoundDynamicTensorRef::try_new(&failing_space, &data).unwrap();
+    let before = input.data().to_vec();
+    let mut dense = CountingDense::default();
+    let cutoff = Truncation::absolute_cutoff(1.0e100).unwrap();
+    let result = svd_trunc_factors_dyn_checked_generic(&mut dense, &input, &cutoff);
+
+    assert!(matches!(
+        result,
+        Err(CheckedGenericFactorPlanError::Provider(LateGenericError(call)))
+            if call == FIRST_FULL_S_FOLD
+    ));
+    assert_eq!(failing_provider.single_leg_folds.get(), FIRST_FULL_S_FOLD);
+    assert_eq!(dense.svd_into_calls, 2);
+    assert_eq!(dense.svd_vals_calls, 0);
+    assert_eq!(input.data(), before);
 }
 
 #[test]
