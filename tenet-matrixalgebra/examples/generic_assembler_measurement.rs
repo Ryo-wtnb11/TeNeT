@@ -5,14 +5,15 @@
 //! performance. Fixture construction and admission stay outside measurement. Each timed call
 //! includes `BoundDynamicTensorRef` construction, checked routing and matrix assembly, error
 //! propagation from the rejecting dense executor, and destruction of the returned error.
-//! Set `TENET_GENERIC_VALUES_BORROW_CASES=1` to compare matched canonical and padded layouts.
+//! Set `TENET_GENERIC_VALUES_BORROW_CASES=1` to compare matched canonical and padded layouts
+//! after a 100 ms untimed warmup per case.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::convert::Infallible;
 use std::hint::black_box;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tenet_core::{
     BlockKey, BlockSpec, BlockStructure, BraidingStyleKind, CheckedGenericFusion,
@@ -314,8 +315,15 @@ fn validate_run(fixture: &Fixture) {
 
 fn measure(name: &str, fixture: &Fixture, iterations: usize, samples: usize) {
     validate_run(fixture);
-    for _ in 0..16 {
-        drop(black_box(run_once(fixture)));
+    if std::env::var("TENET_GENERIC_VALUES_BORROW_CASES").as_deref() == Ok("1") {
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_millis(100) {
+            drop(black_box(run_once(fixture)));
+        }
+    } else {
+        for _ in 0..16 {
+            drop(black_box(run_once(fixture)));
+        }
     }
     for sample in 0..samples {
         validate_run(fixture);
