@@ -3,6 +3,7 @@
 use std::{
     alloc::{GlobalAlloc, Layout, System},
     cell::Cell,
+    convert::Infallible,
     hint::black_box,
     sync::Arc,
     time::{Duration, Instant},
@@ -12,12 +13,15 @@ use tenet::prelude::*;
 
 use tenet::core::{
     complete_hom_space_structure_cache_info, fusion_tree_layout_cache_info, BlockRef, BlockSpec,
-    BlockStructure, BraidingStyleKind, CompleteHomSpaceStructureCacheInfo, FusionProductSpace,
-    FusionRule, FusionStyleKind, FusionTensorMapSpace, FusionTreeHomSpace,
+    BlockStructure, BraidingStyleKind, CheckedGenericFusion, CompleteHomSpaceStructureCacheInfo,
+    FusionProductSpace, FusionRule, FusionStyleKind, FusionTensorMapSpace, FusionTreeHomSpace,
     FusionTreeLayoutCacheInfo, RuleIdentity, SectorId, SectorLeg, SectorVec, TensorMapSpace,
 };
 use tenet::dense::DefaultDenseExecutor;
-use tenet_matrixalgebra::{qr_compact_dyn_generic, BoundDynFactor};
+use tenet_matrixalgebra::{
+    lq_compact_dyn_checked_generic, qr_compact_dyn_checked_generic, qr_compact_dyn_generic,
+    svd_compact_dyn_checked_generic, BoundDynFactor, FactorScalar,
+};
 use tenet_tensors::{BoundDynamicFusionMapSpace, BoundDynamicTensorRef, DynamicFusionMapSpace};
 
 struct CountingAllocator;
@@ -318,13 +322,93 @@ impl FusionRule for LayoutGenericRule {
     }
 
     fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
-        if left.id() < 2 && right.id() < 2 {
+        if left.id() < 16 && right.id() < 16 {
             [SectorId::new(left.id() ^ right.id())]
                 .into_iter()
                 .collect()
         } else {
             SectorVec::new()
         }
+    }
+}
+
+impl CheckedGenericFusion for LayoutGenericRule {
+    type Error = Infallible;
+
+    fn rule_identity(&self) -> RuleIdentity {
+        FusionRule::rule_identity(self)
+    }
+
+    fn fusion_style(&self) -> FusionStyleKind {
+        FusionRule::fusion_style(self)
+    }
+
+    fn braiding_style(&self) -> BraidingStyleKind {
+        FusionRule::braiding_style(self)
+    }
+
+    fn vacuum(&self) -> SectorId {
+        FusionRule::vacuum(self)
+    }
+
+    fn try_dual(&self, sector: SectorId) -> Result<SectorId, Self::Error> {
+        Ok(FusionRule::dual(self, sector))
+    }
+
+    fn try_fusion_channels(
+        &self,
+        left: SectorId,
+        right: SectorId,
+    ) -> Result<SectorVec, Self::Error> {
+        Ok(FusionRule::fusion_channels(self, left, right))
+    }
+
+    fn try_fusion_channels_in_table(
+        &self,
+        left: SectorId,
+        right: SectorId,
+    ) -> Result<SectorVec, Self::Error> {
+        Ok(FusionRule::fusion_channels(self, left, right))
+    }
+
+    fn try_nsymbol(
+        &self,
+        left: SectorId,
+        right: SectorId,
+        coupled: SectorId,
+    ) -> Result<usize, Self::Error> {
+        Ok(FusionRule::nsymbol(self, left, right, coupled))
+    }
+}
+
+trait HarnessScalar: FactorScalar + Copy {
+    const NAME: &'static str;
+
+    fn from_parts(real: f64, imaginary: f64) -> Self;
+    fn as_complex(self) -> Complex64;
+}
+
+impl HarnessScalar for f64 {
+    const NAME: &'static str = "f64";
+
+    fn from_parts(real: f64, _imaginary: f64) -> Self {
+        real
+    }
+
+    fn as_complex(self) -> Complex64 {
+        Complex64::new(self, 0.0)
+    }
+}
+
+impl HarnessScalar for Complex64 {
+    const NAME: &'static str = "c64";
+
+    fn from_parts(real: f64, imaginary: f64) -> Self {
+        Complex64::new(real, imaginary)
+    }
+
+    fn as_complex(self) -> Complex64 {
+        self
     }
 }
 
@@ -553,6 +637,363 @@ fn run_layout_generic_qr(
         assert_layout_generic_qr_reconstructs(&left, &right);
     }
     Ok(())
+}
+
+struct CheckedLayoutInput<D> {
+    space: BoundDynamicFusionMapSpace<LayoutGenericRule>,
+    data: Vec<D>,
+}
+
+fn checked_layout_value<D: HarnessScalar>(sector: SectorId, row: usize, column: usize) -> D {
+    let real = layout_generic_value(sector, row, column);
+    let imaginary = if D::NAME == "c64" {
+        ((row + 2) * 7 + (column + 1) * 11 + sector.id() * 3) as f64 / 37.0
+    } else {
+        0.0
+    };
+    D::from_parts(real, imaginary)
+}
+
+fn fill_checked_layout_data<D: HarnessScalar>(
+    space: &BoundDynamicFusionMapSpace<LayoutGenericRule>,
+) -> Vec<D> {
+    let structure = space.space().structure();
+    let mut data = vec![D::zero(); space.space().required_len().unwrap()];
+    for index in 0..structure.block_count() {
+        let block = structure.block(index).unwrap();
+        let sector = block.key().as_fusion_tree_pair().unwrap().coupled();
+        for column in 0..block.shape()[1] {
+            for row in 0..block.shape()[0] {
+                let offset =
+                    block.offset() + row * block.strides()[0] + column * block.strides()[1];
+                data[offset] = checked_layout_value(sector, row, column);
+            }
+        }
+    }
+    data
+}
+
+fn checked_layout_fixture<D: HarnessScalar>(
+    degeneracy: usize,
+    sector_count: usize,
+) -> Result<(CheckedLayoutInput<D>, CheckedLayoutInput<D>), Box<dyn std::error::Error>> {
+    let provider = Arc::new(LayoutGenericRule);
+    let codomain = (0..sector_count)
+        .map(|sector| {
+            (
+                SectorId::new(sector),
+                if sector % 2 == 0 {
+                    degeneracy
+                } else {
+                    2 * degeneracy
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    let domain = (0..sector_count)
+        .map(|sector| {
+            (
+                SectorId::new(sector),
+                if sector % 2 == 0 {
+                    2 * degeneracy
+                } else {
+                    degeneracy
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([SectorLeg::new(codomain, false)]),
+        FusionProductSpace::new([SectorLeg::new(domain, false)]),
+    );
+    let canonical = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+        Arc::clone(&provider),
+        homspace.clone(),
+    )?;
+    let canonical_data = fill_checked_layout_data(&canonical);
+
+    let canonical_structure = canonical.space().structure();
+    let mut offset = 1;
+    let mut blocks = Vec::with_capacity(canonical_structure.block_count());
+    for index in (0..canonical_structure.block_count()).rev() {
+        let block = canonical_structure.block(index)?;
+        blocks.push(BlockSpec::column_major_with_key(
+            block.key().clone(),
+            block.shape().to_vec(),
+            offset,
+        )?);
+        offset += block.element_count()? + 1;
+    }
+    let structure = BlockStructure::from_blocks_with_rank(2, blocks)?;
+    let dense_dim = 3 * degeneracy * (sector_count / 2);
+    let typed = FusionTensorMapSpace::new_unbound(
+        TensorMapSpace::<1, 1>::from_dims([dense_dim], [dense_dim])?,
+        homspace,
+        structure,
+    )?
+    .try_bind_rule(provider.as_ref())?;
+    let fallback = BoundDynamicFusionMapSpace::bind_generic(
+        DynamicFusionMapSpace::from_typed(&typed),
+        provider,
+    )?;
+    let fallback_data = fill_checked_layout_data(&fallback);
+    Ok((
+        CheckedLayoutInput {
+            space: canonical,
+            data: canonical_data,
+        },
+        CheckedLayoutInput {
+            space: fallback,
+            data: fallback_data,
+        },
+    ))
+}
+
+fn factor_block<'a, D>(
+    factor: &'a BoundDynFactor<LayoutGenericRule, D>,
+    sector: SectorId,
+) -> BlockRef<'a> {
+    let structure = factor.space().space().structure();
+    (0..structure.block_count())
+        .map(|index| structure.block(index).unwrap())
+        .find(|block| block.key().as_fusion_tree_pair().unwrap().coupled() == sector)
+        .expect("checked compact factor retains every source sector")
+}
+
+fn checked_block_value<D: HarnessScalar>(
+    data: &[D],
+    block: BlockRef<'_>,
+    row: usize,
+    column: usize,
+) -> Complex64 {
+    data[block.offset() + row * block.strides()[0] + column * block.strides()[1]].as_complex()
+}
+
+fn assert_checked_source_unchanged<D: HarnessScalar>(actual: &[D], expected: &[D]) {
+    assert_eq!(actual.len(), expected.len());
+    for (&actual, &expected) in actual.iter().zip(expected) {
+        assert_eq!(actual.as_complex(), expected.as_complex());
+    }
+}
+
+fn assert_checked_pair_reconstructs<D: HarnessScalar>(
+    left: &BoundDynFactor<LayoutGenericRule, D>,
+    right: &BoundDynFactor<LayoutGenericRule, D>,
+    sector_count: usize,
+) {
+    assert_eq!(left.space().space().structure().block_count(), sector_count);
+    assert_eq!(
+        right.space().space().structure().block_count(),
+        sector_count
+    );
+    for sector in (0..sector_count).map(SectorId::new) {
+        let left_block = factor_block(left, sector);
+        let right_block = factor_block(right, sector);
+        let rows = left_block.shape()[0];
+        let kept = left_block.shape()[1];
+        let columns = right_block.shape()[1];
+        assert_eq!(right_block.shape()[0], kept);
+        for column in 0..columns {
+            for row in 0..rows {
+                let actual = (0..kept).fold(Complex64::new(0.0, 0.0), |sum, inner| {
+                    sum + checked_block_value(left.data(), left_block, row, inner)
+                        * checked_block_value(right.data(), right_block, inner, column)
+                });
+                let expected = checked_layout_value::<D>(sector, row, column).as_complex();
+                assert!((actual - expected).norm() <= 2.0e-10 * expected.norm().max(1.0));
+            }
+        }
+    }
+}
+
+fn assert_checked_svd_reconstructs<D: HarnessScalar>(
+    u: &BoundDynFactor<LayoutGenericRule, D>,
+    s: &BoundDynFactor<LayoutGenericRule, D>,
+    vh: &BoundDynFactor<LayoutGenericRule, D>,
+    sector_count: usize,
+) {
+    assert_eq!(u.space().space().structure().block_count(), sector_count);
+    assert_eq!(s.space().space().structure().block_count(), sector_count);
+    assert_eq!(vh.space().space().structure().block_count(), sector_count);
+    for sector in (0..sector_count).map(SectorId::new) {
+        let u_block = factor_block(u, sector);
+        let s_block = factor_block(s, sector);
+        let vh_block = factor_block(vh, sector);
+        let rows = u_block.shape()[0];
+        let kept = u_block.shape()[1];
+        let columns = vh_block.shape()[1];
+        assert_eq!(s_block.shape(), [kept, kept]);
+        assert_eq!(vh_block.shape()[0], kept);
+        let singular_values = (0..kept)
+            .map(|index| checked_block_value(s.data(), s_block, index, index))
+            .collect::<Vec<_>>();
+        for value in &singular_values {
+            assert!(value.im.abs() <= 2.0e-12 && value.re >= 0.0);
+        }
+        for adjacent in singular_values.windows(2) {
+            assert!(adjacent[0].re >= adjacent[1].re);
+        }
+        for column in 0..columns {
+            for row in 0..rows {
+                let actual = (0..kept).fold(Complex64::new(0.0, 0.0), |sum, inner| {
+                    sum + checked_block_value(u.data(), u_block, row, inner)
+                        * checked_block_value(s.data(), s_block, inner, inner)
+                        * checked_block_value(vh.data(), vh_block, inner, column)
+                });
+                let expected = checked_layout_value::<D>(sector, row, column).as_complex();
+                assert!((actual - expected).norm() <= 4.0e-10 * expected.norm().max(1.0));
+            }
+        }
+    }
+}
+
+fn assert_columns_orthonormal<D: HarnessScalar>(
+    factor: &BoundDynFactor<LayoutGenericRule, D>,
+    sector_count: usize,
+) {
+    for sector in (0..sector_count).map(SectorId::new) {
+        let block = factor_block(factor, sector);
+        for right in 0..block.shape()[1] {
+            for left in 0..block.shape()[1] {
+                let actual = (0..block.shape()[0]).fold(Complex64::new(0.0, 0.0), |sum, row| {
+                    sum + checked_block_value(factor.data(), block, row, left).conj()
+                        * checked_block_value(factor.data(), block, row, right)
+                });
+                let expected = Complex64::new(f64::from(left == right), 0.0);
+                assert!((actual - expected).norm() <= 2.0e-10);
+            }
+        }
+    }
+}
+
+fn assert_rows_orthonormal<D: HarnessScalar>(
+    factor: &BoundDynFactor<LayoutGenericRule, D>,
+    sector_count: usize,
+) {
+    for sector in (0..sector_count).map(SectorId::new) {
+        let block = factor_block(factor, sector);
+        for lower in 0..block.shape()[0] {
+            for upper in 0..block.shape()[0] {
+                let actual = (0..block.shape()[1]).fold(Complex64::new(0.0, 0.0), |sum, column| {
+                    sum + checked_block_value(factor.data(), block, upper, column)
+                        * checked_block_value(factor.data(), block, lower, column).conj()
+                });
+                let expected = Complex64::new(f64::from(upper == lower), 0.0);
+                assert!((actual - expected).norm() <= 2.0e-10);
+            }
+        }
+    }
+}
+
+fn run_checked_compact_input_fixture<D: HarnessScalar>(
+    workload: &str,
+    degeneracy: usize,
+    sector_count: usize,
+    min_time: Duration,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (canonical, fallback) = checked_layout_fixture::<D>(degeneracy, sector_count)?;
+    let canonical_structure = canonical.space.space().structure();
+    assert_eq!(canonical_structure.block_count(), sector_count);
+    assert_eq!(
+        fallback.space.space().structure().block_count(),
+        sector_count
+    );
+    let mut matrix_shapes = Vec::with_capacity(sector_count);
+    for sector in 0..sector_count {
+        let block = canonical_structure.block(sector)?;
+        assert_eq!(
+            block.key().as_fusion_tree_pair().unwrap().coupled(),
+            SectorId::new(sector)
+        );
+        matrix_shapes.push(format!("{}x{}", block.shape()[0], block.shape()[1]));
+    }
+    println!(
+        "# GenericCheckedInput: workload={} dtype={} labels=0..{} G={} row_trees={} col_trees={} source_blocks={} matrix_shapes={} layouts=canonical,padded_reordered setup=fixture+binding+literal_preflight_outside_timer measured=public_owned_factorization+fresh_return+drop caller_allocations=requested_only peak_native_worker=NA",
+        workload,
+        D::NAME,
+        sector_count - 1,
+        canonical_structure.block_count(),
+        canonical_structure.block_count(),
+        canonical_structure.block_count(),
+        canonical_structure.block_count(),
+        matrix_shapes.join(";")
+    );
+    for (layout, fixture) in [("canonical", canonical), ("fallback", fallback)] {
+        let input = BoundDynamicTensorRef::try_new(&fixture.space, &fixture.data)?;
+        let original = fixture.data.clone();
+        {
+            let mut preflight_dense = DefaultDenseExecutor::new();
+            let qr = qr_compact_dyn_checked_generic(&mut preflight_dense, &input)?;
+            assert_checked_pair_reconstructs(&qr.0, &qr.1, sector_count);
+            assert_columns_orthonormal(&qr.0, sector_count);
+            let svd = svd_compact_dyn_checked_generic(&mut preflight_dense, &input)?;
+            assert_checked_svd_reconstructs(&svd.0, &svd.1, &svd.2, sector_count);
+            assert_columns_orthonormal(&svd.0, sector_count);
+            assert_rows_orthonormal(&svd.2, sector_count);
+            let lq = lq_compact_dyn_checked_generic(&mut preflight_dense, &input)?;
+            assert_checked_pair_reconstructs(&lq.0, &lq.1, sector_count);
+            assert_rows_orthonormal(&lq.1, sector_count);
+            assert_checked_source_unchanged(&fixture.data, &original);
+        }
+
+        let symmetry = format!("GenericCheckedInput-{workload}-{layout}-{}", D::NAME);
+        let runtime = benchmark_runtime()?;
+        let mut dense = DefaultDenseExecutor::new();
+        let qr = bench(
+            &runtime,
+            &symmetry,
+            "checked_compact_input_qr",
+            "owned",
+            "first_after_setup",
+            "warm_after_setup",
+            min_time,
+            || qr_compact_dyn_checked_generic(&mut dense, &input),
+        )?;
+        assert_checked_pair_reconstructs(&qr.0, &qr.1, sector_count);
+        let svd = bench(
+            &runtime,
+            &symmetry,
+            "checked_compact_input_svd",
+            "owned",
+            "first_after_setup",
+            "warm_after_setup",
+            min_time,
+            || svd_compact_dyn_checked_generic(&mut dense, &input),
+        )?;
+        assert_checked_svd_reconstructs(&svd.0, &svd.1, &svd.2, sector_count);
+        let lq = bench(
+            &runtime,
+            &symmetry,
+            "checked_compact_input_lq",
+            "owned",
+            "first_after_setup",
+            "warm_after_setup",
+            min_time,
+            || lq_compact_dyn_checked_generic(&mut dense, &input),
+        )?;
+        assert_checked_pair_reconstructs(&lq.0, &lq.1, sector_count);
+        assert_checked_source_unchanged(&fixture.data, &original);
+    }
+    Ok(())
+}
+
+fn run_checked_compact_input_for<D: HarnessScalar>(
+    degeneracy: usize,
+    min_time: Duration,
+) -> Result<(), Box<dyn std::error::Error>> {
+    run_checked_compact_input_fixture::<D>("few-large", degeneracy, 2, min_time)?;
+    run_checked_compact_input_fixture::<D>("many-small", (degeneracy / 16).max(1), 16, min_time)
+}
+
+fn run_checked_compact_input(
+    degeneracy: usize,
+    min_time: Duration,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !operation_enabled("checked_compact_input") || !form_enabled("owned") {
+        return Ok(());
+    }
+    run_checked_compact_input_for::<f64>(degeneracy, min_time)?;
+    run_checked_compact_input_for::<Complex64>(degeneracy, min_time)
 }
 
 macro_rules! run_provider {
@@ -1123,6 +1564,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 | "contract_input_output_swap"
                 | "qr_compact"
                 | "qr_compact_generic_layout"
+                | "checked_compact_input"
         ) {
             return Err(Box::new(Error::InvalidArgument(format!(
                 "unknown OP_MATRIX_OPERATION `{operation}`"
@@ -1187,6 +1629,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let min_time = Duration::from_millis(min_ms);
     run_layout_generic_qr(degeneracy, min_time)?;
+    run_checked_compact_input(degeneracy, min_time)?;
     run_provider!(
         "U1",
         U1FusionRule,
