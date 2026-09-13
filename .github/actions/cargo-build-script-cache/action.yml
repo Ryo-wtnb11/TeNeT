@@ -27,6 +27,6 @@ runs:
           tenet/target/*/build
           tenet/target/llvm-cov-target/*/.fingerprint
           tenet/target/llvm-cov-target/*/build
-        key: cargo-fp-v2-${{ inputs.key }}-${{ runner.os }}-${{ hashFiles('tenet/**/Cargo.toml', 'tenferro-rs/**/Cargo.toml') }}
+        key: cargo-fp-v2-${{ inputs.key }}-${{ runner.os }}-${{ hashFiles('tenet/**/Cargo.toml') }}
         restore-keys: |
           cargo-fp-v2-${{ inputs.key }}-${{ runner.os }}-
