@@ -7841,9 +7841,9 @@ where
     Ok(dimensions)
 }
 
-/// Generic sibling of [`sector_matricizations`]: identical two-pass stacking
-/// (vertex-labelled trees are distinct keys, so OM trees get distinct rows /
-/// columns of the coupled block, exactly TensorKit's `block(t, c)` layout).
+/// Generic sibling of [`sector_matricizations`]. The shared assembler indexes
+/// the full [`FusionTreeKey`], including vertex labels, so distinct OM trees
+/// retain distinct rows and columns.
 fn sector_matricizations_generic<D>(
     structure: &BlockStructure,
     data: &[D],
@@ -7852,109 +7852,7 @@ fn sector_matricizations_generic<D>(
 where
     D: FactorScalar,
 {
-    let mut matricizations: Vec<SectorMatricization<D>> = Vec::new();
-
-    for index in 0..structure.block_count() {
-        let block = structure
-            .block(index)
-            .map_err(OperationError::from_core_preserving_context)?;
-        let BlockKey::FusionTree(key) = block.key() else {
-            return Err(OperationError::ExpectedFusionTreeBlock {
-                tensor: "tsvd",
-                index,
-            });
-        };
-        let sector = coupled_of_generic(key.codomain_tree());
-        let row_dim: usize = block.shape()[..nout].iter().product();
-        let col_dim: usize = block.shape()[nout..].iter().product();
-        let matrix = match matricizations
-            .iter_mut()
-            .find(|matrix| matrix.sector == sector)
-        {
-            Some(matrix) => matrix,
-            None => {
-                matricizations.push(SectorMatricization::<D> {
-                    sector,
-                    rows: 0,
-                    cols: 0,
-                    row_trees: Vec::new(),
-                    col_trees: Vec::new(),
-                    data: Vec::new(),
-                });
-                matricizations.last_mut().expect("just pushed")
-            }
-        };
-        if !matrix
-            .row_trees
-            .iter()
-            .any(|(tree, _, _)| tree == key.codomain_tree())
-        {
-            matrix.row_trees.push((
-                key.codomain_tree().clone(),
-                matrix.rows,
-                block.shape()[..nout].to_vec(),
-            ));
-            matrix.rows += row_dim;
-        }
-        if !matrix
-            .col_trees
-            .iter()
-            .any(|(tree, _, _)| tree == key.domain_tree())
-        {
-            matrix.col_trees.push((
-                key.domain_tree().clone(),
-                matrix.cols,
-                block.shape()[nout..].to_vec(),
-            ));
-            matrix.cols += col_dim;
-        }
-    }
-    for matrix in &mut matricizations {
-        matrix.data = vec![D::zero(); matrix.rows * matrix.cols];
-    }
-
-    for index in 0..structure.block_count() {
-        let block = structure
-            .block(index)
-            .map_err(OperationError::from_core_preserving_context)?;
-        let BlockKey::FusionTree(key) = block.key() else {
-            continue;
-        };
-        let sector = coupled_of_generic(key.codomain_tree());
-        let matrix = matricizations
-            .iter_mut()
-            .find(|matrix| matrix.sector == sector)
-            .expect("matricization registered in first pass");
-        let row_offset = matrix
-            .row_trees
-            .iter()
-            .find(|(tree, _, _)| tree == key.codomain_tree())
-            .map(|(_, offset, _)| *offset)
-            .expect("row tree registered in first pass");
-        let col_offset = matrix
-            .col_trees
-            .iter()
-            .find(|(tree, _, _)| tree == key.domain_tree())
-            .map(|(_, offset, _)| *offset)
-            .expect("column tree registered in first pass");
-
-        let shape = block.shape();
-        let strides = block.strides();
-        let offset = block.offset();
-        let rows = matrix.rows;
-        copy_tensor_block_to_matrix(
-            data,
-            shape,
-            strides,
-            offset,
-            nout,
-            &mut matrix.data,
-            rows,
-            row_offset,
-            col_offset,
-        );
-    }
-    Ok(matricizations)
+    sector_matricizations(structure, data, nout)
 }
 
 fn validate_endomorphism_tree_stacking<D>(
