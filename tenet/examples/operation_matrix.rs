@@ -594,6 +594,7 @@ fn run_checked_sun(
     label: Vec<i64>,
     degeneracy: usize,
     min_time: Duration,
+    qr_only: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use tenet::typed::SUNFusionRule;
 
@@ -602,7 +603,7 @@ fn run_checked_sun(
         println!("# {symmetry}: destination rows excluded: the public destination methods retain multiplicity-free dispatch bounds, so the exact SUN fixtures cannot call them");
     }
     for operation in ["permute", "transpose", "repartition"] {
-        if !operation_enabled(operation) || !form_enabled("owned") {
+        if qr_only || !operation_enabled(operation) || !form_enabled("owned") {
             continue;
         }
         let runtime = benchmark_runtime()?;
@@ -636,7 +637,7 @@ fn run_checked_sun(
         assert_same_tensor!(cold, expected, source);
     }
 
-    if operation_enabled("trace") || operation_enabled("trace_adjoint") {
+    if !qr_only && (operation_enabled("trace") || operation_enabled("trace_adjoint")) {
         println!("# {symmetry}: trace rows excluded: checked-Generic trace dispatch exists, but SUNFusionRule lacks the required SectorCodec");
     }
 
@@ -653,6 +654,42 @@ fn run_checked_sun(
         [&space, &space],
         726,
     )?;
+    if operation_enabled("qr_compact") && form_enabled("owned") {
+        let mut sectors = Vec::new();
+        let mut row_trees = Vec::new();
+        let mut col_trees = Vec::new();
+        for index in 0..lhs.block_count() {
+            let trees = lhs.block_fusion_trees(index)?;
+            if !sectors.contains(trees.coupled()) {
+                sectors.push(trees.coupled().clone());
+            }
+            let row = (
+                trees.coupled().clone(),
+                trees.codomain_uncoupled().to_vec(),
+                trees.codomain_innerlines().to_vec(),
+                trees.codomain_vertices().to_vec(),
+            );
+            if !row_trees.contains(&row) {
+                row_trees.push(row);
+            }
+            let column = (
+                trees.coupled().clone(),
+                trees.domain_uncoupled().to_vec(),
+                trees.domain_innerlines().to_vec(),
+                trees.domain_vertices().to_vec(),
+            );
+            if !col_trees.contains(&column) {
+                col_trees.push(column);
+            }
+        }
+        println!(
+            "# {symmetry}: qr_fixture_matrices={} row_trees={} col_trees={} source_blocks={}",
+            sectors.len(),
+            row_trees.len(),
+            col_trees.len(),
+            lhs.block_count()
+        );
+    }
     for (operation, action) in [
         ("scale", 0),
         ("add", 1),
@@ -664,7 +701,7 @@ fn run_checked_sun(
         ("contract_input_output_swap", 7),
         ("qr_compact", 8),
     ] {
-        if !operation_enabled(operation) || !form_enabled("owned") {
+        if (qr_only && action != 8) || !operation_enabled(operation) || !form_enabled("owned") {
             continue;
         }
         match action {
@@ -830,6 +867,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ))));
         }
     }
+    #[cfg(not(feature = "racah-generated"))]
+    if std::env::var("OP_MATRIX_OPERATION").as_deref() == Ok("qr_compact") {
+        return Err(Box::new(Error::InvalidArgument(
+            "operation-matrix qr_compact requires the racah-generated feature".into(),
+        )));
+    }
     let min_ms = std::env::var("OP_MATRIX_MIN_MS")
         .ok()
         .map(|value| value.parse().expect("OP_MATRIX_MIN_MS must be an integer"))
@@ -906,11 +949,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         use tenet::typed::SUNFusionRule;
 
         run_checked_sun(
+            "SU3[0;0]",
+            Arc::new(SUNFusionRule::new(3)?),
+            vec![0, 0],
+            degeneracy,
+            min_time,
+            true,
+        )?;
+        run_checked_sun(
             "SU3[1;1]",
             Arc::new(SUNFusionRule::new(3)?),
             vec![1, 1],
             degeneracy,
             min_time,
+            false,
         )?;
         run_checked_sun(
             "SU4[1;0;1]",
@@ -918,6 +970,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             vec![1, 0, 1],
             degeneracy,
             min_time,
+            false,
         )?;
     }
     Ok(())

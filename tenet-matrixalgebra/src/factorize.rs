@@ -8334,7 +8334,7 @@ fn append_owned_factor<D>(
         data.extend(factor);
     } else {
         let mut factor = factor;
-        factor.reserve(required_len - factor.len());
+        factor.reserve_exact(required_len - factor.len());
         *output = Some(factor);
     }
 }
@@ -11466,6 +11466,154 @@ mod sector_matricization_tests {
             (probe.left_scatter_calls, probe.right_scatter_calls),
             (2, 2)
         );
+    }
+
+    #[test]
+    fn generic_pair_canonical_validation_scales_linearly_in_sectors_and_trees() {
+        for (sector_count, trees_per_sector) in [(1, 1), (1, 4), (4, 1), (4, 3)] {
+            let mut matrices = Vec::with_capacity(sector_count);
+            let mut pairs = Vec::with_capacity(sector_count);
+            let mut left_keys = Vec::with_capacity(sector_count * trees_per_sector);
+            let mut right_keys = Vec::with_capacity(sector_count * trees_per_sector);
+            let mut left_blocks = Vec::with_capacity(sector_count * trees_per_sector);
+            let mut right_blocks = Vec::with_capacity(sector_count * trees_per_sector);
+            let mut output_offset = 0usize;
+            for sector in 0..sector_count {
+                let bond = FusionTreePairKey::try_pair_from_sector_ids(
+                    [sector],
+                    [sector],
+                    sector,
+                    [false],
+                    [false],
+                    [],
+                    [],
+                    [],
+                    [],
+                )
+                .unwrap()
+                .codomain_tree()
+                .clone();
+                let mut row_trees = Vec::with_capacity(trees_per_sector);
+                let mut col_trees = Vec::with_capacity(trees_per_sector);
+                for tree_index in 0..trees_per_sector {
+                    let source = generic_pair(sector, tree_index + 1, tree_index + 1);
+                    let row_tree = source.codomain_tree().clone();
+                    let col_tree = source.domain_tree().clone();
+                    let left_key = FusionTreePairKey::pair(row_tree.clone(), bond.clone());
+                    let right_key = FusionTreePairKey::pair(bond.clone(), col_tree.clone());
+                    left_blocks.push(
+                        BlockSpec::with_key(
+                            left_key.clone().into(),
+                            vec![1, 1, 1],
+                            vec![1, 1, trees_per_sector],
+                            output_offset + tree_index,
+                        )
+                        .unwrap(),
+                    );
+                    right_blocks.push(
+                        BlockSpec::with_key(
+                            right_key.clone().into(),
+                            vec![1, 1, 1],
+                            vec![1, 1, 1],
+                            output_offset + tree_index,
+                        )
+                        .unwrap(),
+                    );
+                    left_keys.push(left_key);
+                    right_keys.push(right_key);
+                    row_trees.push((row_tree, tree_index, vec![1, 1]));
+                    col_trees.push((col_tree, tree_index, vec![1, 1]));
+                }
+                let sector = SectorId::new(sector);
+                matrices.push(SectorMatricization {
+                    sector,
+                    rows: trees_per_sector,
+                    cols: trees_per_sector,
+                    row_trees,
+                    col_trees,
+                    data: vec![0.0; trees_per_sector * trees_per_sector],
+                });
+                pairs.push(FactorPair {
+                    sector,
+                    kept: 1,
+                    left: (0..trees_per_sector)
+                        .map(|index| 100.0 * sector.id() as f64 + index as f64)
+                        .collect(),
+                    left_rows: trees_per_sector,
+                    right: (0..trees_per_sector)
+                        .map(|index| -100.0 * sector.id() as f64 - index as f64)
+                        .collect(),
+                    right_leading: 1,
+                });
+                output_offset += trees_per_sector;
+            }
+            let ranks = pairs
+                .iter()
+                .map(|pair| SectorRank {
+                    sector: pair.sector,
+                    kept: pair.kept,
+                })
+                .collect::<Vec<_>>();
+            let left_structure = BlockStructure::from_blocks_with_rank(3, left_blocks).unwrap();
+            let right_structure = BlockStructure::from_blocks_with_rank(3, right_blocks).unwrap();
+            let expected_left = pairs
+                .iter()
+                .flat_map(|pair| pair.left.iter().copied())
+                .collect::<Vec<_>>();
+            let expected_right = pairs
+                .iter()
+                .flat_map(|pair| pair.right.iter().copied())
+                .collect::<Vec<_>>();
+
+            reset_generic_pair_publication_probe();
+            let mut matrix_by_sector = None;
+            let mut left_cursor = FactorTreeCursor::new(&matrices, &ranks);
+            assert!(validate_generic_factor_keys(
+                &left_keys,
+                FactorSide::Left,
+                Some(&mut left_cursor),
+                &matrices,
+                &mut matrix_by_sector,
+            )
+            .unwrap());
+            let mut right_cursor = FactorTreeCursor::new(&matrices, &ranks);
+            assert!(validate_generic_factor_keys(
+                &right_keys,
+                FactorSide::Right,
+                Some(&mut right_cursor),
+                &matrices,
+                &mut matrix_by_sector,
+            )
+            .unwrap());
+            assert!(factor_output_is_canonical(
+                &left_structure,
+                &left_keys,
+                &matrices,
+                &pairs,
+                expected_left.len(),
+                FactorSide::Left,
+            ));
+            assert!(factor_output_is_canonical(
+                &right_structure,
+                &right_keys,
+                &matrices,
+                &pairs,
+                expected_right.len(),
+                FactorSide::Right,
+            ));
+            let output_blocks = left_keys.len() + right_keys.len();
+            let probe = generic_pair_publication_probe();
+            assert_eq!(probe.output_blocks_visited, output_blocks);
+            assert_eq!(probe.ordered_key_validation_events, 2 * output_blocks);
+            assert_eq!(
+                (probe.fallback_row_lookups, probe.fallback_col_lookups),
+                (0, 0)
+            );
+            let (left, right) =
+                publish_generic_factor_pairs(pairs, expected_left.len(), expected_right.len());
+            assert_eq!(left, expected_left);
+            assert_eq!(right, expected_right);
+        }
     }
 
     #[test]
