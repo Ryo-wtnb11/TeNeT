@@ -4,8 +4,11 @@
 uses a fresh `Runtime` and constructs its fixture before timing. Owned rows run
 one cold call followed by warm-up and repeated calls in that same process.
 The wrapper records the OS, architecture, CPU name, Rust compiler, Cargo,
-TeNeT, and Tenferro authorities before the CSV. TensorKit records the Julia
-kernel/machine/CPU report alongside its pinned package and BLAS authorities.
+full TeNeT SHA and dirty state, lock SHA-256, selected package/features/backend,
+and the built Tenferro and Racah package versions, Cargo sources, active
+features, and available registry VCS revisions before the CSV. TensorKit
+records the Julia kernel/machine/CPU report alongside its pinned package and
+BLAS authorities.
 Here `cold` means that the fresh `Runtime` tree-transform store is empty;
 process-global interned structure may already exist.
 Destination rows require an exact output from the owned operation; they report
@@ -52,6 +55,20 @@ transfers remain `NA` rather than being inferred from elapsed time.
 ```sh
 OP_MATRIX_MIN_MS=20 benchmarks/operation_matrix.sh
 ```
+
+Install the reviewed benchmark lock explicitly in a fresh checkout, then run
+the wrapper:
+
+```sh
+cp benchmarks/cpu_shape_reuse.Cargo.lock Cargo.lock
+OP_MATRIX_MIN_MS=20 benchmarks/operation_matrix.sh
+```
+
+The runner requires that root lock. Before timing, it builds the exact selected
+release example and takes Tenferro features from Cargo's compiler-artifact
+records. Metadata supplies package source and manifest provenance. The build
+and all three samples use `--locked --offline`; fetch the locked dependencies
+before disconnecting if they are not already in the local Cargo cache.
 
 `OP_MATRIX_DEGENERACY` selects the common per-sector degeneracy (default 8).
 `OP_MATRIX_GEMM_BACKEND` is `faer` by default. A macOS BLAS control uses the
