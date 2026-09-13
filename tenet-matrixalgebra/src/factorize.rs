@@ -11,8 +11,8 @@ use tenet_core::{
     BlockKey, BlockStructure, CheckedGenericFusion, CheckedGenericRigidSymbols,
     CheckedGenericStructureError, CoreError, CoupledSectorRegion, CoupledTreeExtent,
     FusionProductSpace, FusionRule, FusionTensorMapSpace, FusionTreeHomSpace, FusionTreeKey,
-    GenericRigidSymbols, InfallibleGeneric, MultiplicityFreeRigidSymbols, SectorId, SectorLeg,
-    TensorMap, TensorMapSpace,
+    FusionTreePairKey, GenericRigidSymbols, InfallibleGeneric, MultiplicityFreeRigidSymbols,
+    SectorId, SectorLeg, TensorMap, TensorMapSpace,
 };
 use tenet_dense::{
     DenseDotConfig, DenseError, DenseExecutor, DenseTensor, DenseView, DenseViewMut,
@@ -2583,6 +2583,44 @@ struct FactorPair<D> {
 struct SectorRank {
     sector: SectorId,
     kept: usize,
+}
+
+struct GenericFactorPairSpaces<R> {
+    left: BoundDynamicFusionMapSpace<R>,
+    right: BoundDynamicFusionMapSpace<R>,
+    left_keys: Vec<FusionTreePairKey>,
+    right_keys: Vec<FusionTreePairKey>,
+    ordered: bool,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct GenericPairPublicationProbe {
+    pub ordered_key_comparisons: usize,
+    pub output_blocks_visited: usize,
+    pub left_owner_reused: usize,
+    pub right_owner_reused: usize,
+    pub left_appended_elements: usize,
+    pub right_appended_elements: usize,
+    pub left_scattered_elements: usize,
+    pub right_scattered_elements: usize,
+    pub canonical_publications: usize,
+    pub fallback_publications: usize,
+}
+
+#[cfg(test)]
+thread_local! {
+    static GENERIC_PAIR_PUBLICATION_PROBE: Cell<GenericPairPublicationProbe> = Cell::default();
+}
+
+#[cfg(test)]
+pub(crate) fn reset_generic_pair_publication_probe() {
+    GENERIC_PAIR_PUBLICATION_PROBE.set(GenericPairPublicationProbe::default());
+}
+
+#[cfg(test)]
+pub(crate) fn generic_pair_publication_probe() -> GenericPairPublicationProbe {
+    GENERIC_PAIR_PUBLICATION_PROBE.get()
 }
 
 #[cfg(test)]
@@ -7996,6 +8034,326 @@ fn validate_endomorphism_tree_stacking<D>(
     Ok(())
 }
 
+#[cfg(test)]
+fn record_generic_pair_ordered_key_comparison() {
+    GENERIC_PAIR_PUBLICATION_PROBE.with(|probe| {
+        let mut value = probe.get();
+        value.ordered_key_comparisons += 1;
+        probe.set(value);
+    });
+}
+
+#[cfg(not(test))]
+fn record_generic_pair_ordered_key_comparison() {}
+
+struct FactorTreeCursor<'a, D> {
+    matricizations: &'a [SectorMatricization<D>],
+    ranks: &'a [SectorRank],
+    matrix: usize,
+    tree: usize,
+    valid: bool,
+}
+
+impl<'a, D> FactorTreeCursor<'a, D> {
+    fn new(matricizations: &'a [SectorMatricization<D>], ranks: &'a [SectorRank]) -> Self {
+        Self {
+            matricizations,
+            ranks,
+            matrix: 0,
+            tree: 0,
+            valid: matricizations.len() == ranks.len(),
+        }
+    }
+
+    fn next(&mut self, side: FactorSide) -> Option<(SectorId, &'a FusionTreeKey)> {
+        while let (Some(matrix), Some(rank)) = (
+            self.matricizations.get(self.matrix),
+            self.ranks.get(self.matrix),
+        ) {
+            self.valid &= matrix.sector == rank.sector;
+            let trees = match side {
+                FactorSide::Left => &matrix.row_trees,
+                FactorSide::Right => &matrix.col_trees,
+            };
+            if rank.kept != 0 {
+                if let Some((tree, _, _)) = trees.get(self.tree) {
+                    self.tree += 1;
+                    return Some((matrix.sector, tree));
+                }
+            }
+            self.matrix += 1;
+            self.tree = 0;
+        }
+        None
+    }
+
+    fn matches(&mut self, side: FactorSide, key: &FusionTreeKey) -> bool {
+        record_generic_pair_ordered_key_comparison();
+        self.next(side)
+            .is_some_and(|(sector, tree)| coupled_of_generic(key) == sector && key == tree)
+    }
+
+    fn is_exhausted(&mut self, side: FactorSide) -> bool {
+        self.next(side).is_none() && self.valid
+    }
+}
+
+fn checked_extent(shape: &[usize]) -> Option<usize> {
+    shape
+        .iter()
+        .try_fold(1usize, |extent, &dim| extent.checked_mul(dim))
+}
+
+fn left_factor_output_is_canonical<D>(
+    structure: &BlockStructure,
+    keys: &[FusionTreePairKey],
+    matricizations: &[SectorMatricization<D>],
+    pairs: &[FactorPair<D>],
+    required_len: usize,
+) -> bool {
+    if matricizations.len() != pairs.len() || keys.len() != structure.block_count() {
+        return false;
+    }
+    let mut block_index = 0usize;
+    let mut output_offset = 0usize;
+    for (matrix, pair) in matricizations.iter().zip(pairs) {
+        if pair.sector != matrix.sector || pair.left_rows != matrix.rows {
+            return false;
+        }
+        let Some(expected_len) = matrix.rows.checked_mul(pair.kept) else {
+            return false;
+        };
+        if pair.left.len() != expected_len {
+            return false;
+        }
+        let mut row_prefix = 0usize;
+        for (tree, row_offset, shape) in &matrix.row_trees {
+            let Some(extent) = checked_extent(shape) else {
+                return false;
+            };
+            if *row_offset != row_prefix {
+                return false;
+            }
+            row_prefix = match row_prefix.checked_add(extent) {
+                Some(value) => value,
+                None => return false,
+            };
+            if pair.kept == 0 {
+                continue;
+            }
+            let Ok(block) = structure.block(block_index) else {
+                return false;
+            };
+            #[cfg(test)]
+            GENERIC_PAIR_PUBLICATION_PROBE.with(|probe| {
+                let mut value = probe.get();
+                value.output_blocks_visited += 1;
+                probe.set(value);
+            });
+            let Some(expected_key) = keys.get(block_index) else {
+                return false;
+            };
+            let BlockKey::FusionTree(actual_key) = block.key() else {
+                return false;
+            };
+            record_generic_pair_ordered_key_comparison();
+            let Some(block_offset) = output_offset.checked_add(*row_offset) else {
+                return false;
+            };
+            if actual_key != expected_key
+                || expected_key.codomain_tree() != tree
+                || block.shape().len() != shape.len() + 1
+                || &block.shape()[..shape.len()] != shape
+                || block.shape()[shape.len()] != pair.kept
+                || block.offset() != block_offset
+            {
+                return false;
+            }
+            let mut stride = 1usize;
+            for (axis, &dim) in shape.iter().enumerate() {
+                if block.strides()[axis] != stride {
+                    return false;
+                }
+                stride = match stride.checked_mul(dim) {
+                    Some(value) => value,
+                    None => return false,
+                };
+            }
+            if block.strides()[shape.len()] != matrix.rows {
+                return false;
+            }
+            block_index += 1;
+        }
+        if row_prefix != matrix.rows {
+            return false;
+        }
+        output_offset = match output_offset.checked_add(pair.left.len()) {
+            Some(value) => value,
+            None => return false,
+        };
+    }
+    block_index == structure.block_count() && output_offset == required_len
+}
+
+fn right_factor_output_is_canonical<D>(
+    structure: &BlockStructure,
+    keys: &[FusionTreePairKey],
+    matricizations: &[SectorMatricization<D>],
+    pairs: &[FactorPair<D>],
+    required_len: usize,
+) -> bool {
+    if matricizations.len() != pairs.len() || keys.len() != structure.block_count() {
+        return false;
+    }
+    let mut block_index = 0usize;
+    let mut output_offset = 0usize;
+    for (matrix, pair) in matricizations.iter().zip(pairs) {
+        if pair.sector != matrix.sector || pair.right_leading != pair.kept {
+            return false;
+        }
+        let Some(expected_len) = pair.kept.checked_mul(matrix.cols) else {
+            return false;
+        };
+        if pair.right.len() != expected_len {
+            return false;
+        }
+        let mut col_prefix = 0usize;
+        for (tree, col_offset, shape) in &matrix.col_trees {
+            let Some(extent) = checked_extent(shape) else {
+                return false;
+            };
+            if *col_offset != col_prefix {
+                return false;
+            }
+            col_prefix = match col_prefix.checked_add(extent) {
+                Some(value) => value,
+                None => return false,
+            };
+            if pair.kept == 0 {
+                continue;
+            }
+            let Ok(block) = structure.block(block_index) else {
+                return false;
+            };
+            #[cfg(test)]
+            GENERIC_PAIR_PUBLICATION_PROBE.with(|probe| {
+                let mut value = probe.get();
+                value.output_blocks_visited += 1;
+                probe.set(value);
+            });
+            let Some(expected_key) = keys.get(block_index) else {
+                return false;
+            };
+            let BlockKey::FusionTree(actual_key) = block.key() else {
+                return false;
+            };
+            record_generic_pair_ordered_key_comparison();
+            if actual_key != expected_key
+                || expected_key.domain_tree() != tree
+                || block.shape().len() != shape.len() + 1
+                || block.shape()[0] != pair.kept
+                || &block.shape()[1..] != shape
+            {
+                return false;
+            }
+            let Some(block_offset) = pair
+                .kept
+                .checked_mul(*col_offset)
+                .and_then(|offset| output_offset.checked_add(offset))
+            else {
+                return false;
+            };
+            if block.offset() != block_offset || block.strides()[0] != 1 {
+                return false;
+            }
+            let mut stride = pair.kept;
+            for (axis, &dim) in shape.iter().enumerate() {
+                if block.strides()[axis + 1] != stride {
+                    return false;
+                }
+                stride = match stride.checked_mul(dim) {
+                    Some(value) => value,
+                    None => return false,
+                };
+            }
+            block_index += 1;
+        }
+        if col_prefix != matrix.cols {
+            return false;
+        }
+        output_offset = match output_offset.checked_add(pair.right.len()) {
+            Some(value) => value,
+            None => return false,
+        };
+    }
+    block_index == structure.block_count() && output_offset == required_len
+}
+
+fn publish_generic_factor_pairs<D>(
+    pairs: Vec<FactorPair<D>>,
+    left_len: usize,
+    right_len: usize,
+) -> (Vec<D>, Vec<D>) {
+    #[cfg(test)]
+    let first_left = pairs
+        .iter()
+        .find(|pair| !pair.left.is_empty())
+        .map(|pair| pair.left.as_ptr());
+    #[cfg(test)]
+    let first_right = pairs
+        .iter()
+        .find(|pair| !pair.right.is_empty())
+        .map(|pair| pair.right.as_ptr());
+    let mut left_data: Option<Vec<D>> = None;
+    let mut right_data: Option<Vec<D>> = None;
+    for pair in pairs {
+        if !pair.left.is_empty() {
+            if let Some(data) = &mut left_data {
+                #[cfg(test)]
+                GENERIC_PAIR_PUBLICATION_PROBE.with(|probe| {
+                    let mut value = probe.get();
+                    value.left_appended_elements += pair.left.len();
+                    probe.set(value);
+                });
+                data.extend(pair.left);
+            } else {
+                let mut data = pair.left;
+                data.reserve(left_len - data.len());
+                left_data = Some(data);
+            }
+        }
+        if !pair.right.is_empty() {
+            if let Some(data) = &mut right_data {
+                #[cfg(test)]
+                GENERIC_PAIR_PUBLICATION_PROBE.with(|probe| {
+                    let mut value = probe.get();
+                    value.right_appended_elements += pair.right.len();
+                    probe.set(value);
+                });
+                data.extend(pair.right);
+            } else {
+                let mut data = pair.right;
+                data.reserve(right_len - data.len());
+                right_data = Some(data);
+            }
+        }
+    }
+    let left_data = left_data.unwrap_or_default();
+    let right_data = right_data.unwrap_or_default();
+    #[cfg(test)]
+    GENERIC_PAIR_PUBLICATION_PROBE.with(|probe| {
+        let mut value = probe.get();
+        value.left_owner_reused += usize::from(
+            first_left.is_some_and(|pointer| std::ptr::eq(pointer, left_data.as_ptr())),
+        );
+        value.right_owner_reused += usize::from(
+            first_right.is_some_and(|pointer| std::ptr::eq(pointer, right_data.as_ptr())),
+        );
+        probe.set(value);
+    });
+    (left_data, right_data)
+}
+
 /// Builds provider-bound left and right factor spaces for a generic rule.
 fn build_left_right_bound_spaces_generic<R, D>(
     provider: &Arc<R>,
@@ -8007,54 +8365,166 @@ where
     R: FusionRule,
     D: FactorScalar,
 {
-    let rule = provider.as_ref();
-    let matrix_by_sector = matricization_map(matricizations);
     let new_leg = SectorLeg::new(ranks.iter().map(|rank| (rank.sector, rank.kept)), false);
+    let mut matrix_by_sector = None;
+    let (left, _, _) = build_left_bound_space_generic(
+        provider,
+        homspace,
+        matricizations,
+        new_leg.clone(),
+        None,
+        &mut matrix_by_sector,
+    )?;
+    let (right, _, _) = build_right_bound_space_generic(
+        provider,
+        homspace,
+        matricizations,
+        new_leg,
+        None,
+        &mut matrix_by_sector,
+    )?;
+    Ok((left, right))
+}
+
+fn build_left_right_bound_spaces_and_keys_generic<R, D>(
+    provider: &Arc<R>,
+    homspace: &FusionTreeHomSpace,
+    matricizations: &[SectorMatricization<D>],
+    ranks: &[SectorRank],
+) -> Result<GenericFactorPairSpaces<R>, OperationError>
+where
+    R: FusionRule,
+    D: FactorScalar,
+{
+    let new_leg = SectorLeg::new(ranks.iter().map(|rank| (rank.sector, rank.kept)), false);
+    let mut matrix_by_sector = None;
+    let mut left_cursor = FactorTreeCursor::new(matricizations, ranks);
+    let (left, left_keys, left_ordered) = build_left_bound_space_generic(
+        provider,
+        homspace,
+        matricizations,
+        new_leg.clone(),
+        Some(&mut left_cursor),
+        &mut matrix_by_sector,
+    )?;
+    let mut right_cursor = FactorTreeCursor::new(matricizations, ranks);
+    let (right, right_keys, right_ordered) = build_right_bound_space_generic(
+        provider,
+        homspace,
+        matricizations,
+        new_leg,
+        Some(&mut right_cursor),
+        &mut matrix_by_sector,
+    )?;
+    Ok(GenericFactorPairSpaces {
+        left,
+        right,
+        left_keys,
+        right_keys,
+        ordered: left_ordered && right_ordered,
+    })
+}
+
+fn build_left_bound_space_generic<'a, R, D>(
+    provider: &Arc<R>,
+    homspace: &FusionTreeHomSpace,
+    matricizations: &'a [SectorMatricization<D>],
+    new_leg: SectorLeg,
+    mut cursor: Option<&mut FactorTreeCursor<'_, D>>,
+    matrix_by_sector: &mut Option<HashMap<SectorId, &'a SectorMatricization<D>>>,
+) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<FusionTreePairKey>, bool), OperationError>
+where
+    R: FusionRule,
+    D: FactorScalar,
+{
     let left_hom = FusionTreeHomSpace::new(
         homspace.codomain().clone(),
-        FusionProductSpace::new([new_leg.clone()]),
+        FusionProductSpace::new([new_leg]),
     );
     let left_keys = left_hom
-        .fusion_tree_keys_generic(rule)
+        .fusion_tree_keys_generic(provider.as_ref())
         .map_err(OperationError::from_core_preserving_context)?;
+    let mut ordered = true;
     for key in left_keys.iter() {
         // Why not build the final layout first: missing source placements must
         // fail before output construction; sharing this Generic enumeration is
         // the prepared-enumeration boundary tracked by #257.
         let sector = coupled_of_generic(key.codomain_tree());
-        row_placement(
-            matricization_of(&matrix_by_sector, sector)?,
-            key.codomain_tree(),
-        )?;
+        let aligned = cursor
+            .as_deref_mut()
+            .map(|cursor| cursor.matches(FactorSide::Left, key.codomain_tree()));
+        if aligned != Some(true) {
+            let matrix_by_sector =
+                matrix_by_sector.get_or_insert_with(|| matricization_map(matricizations));
+            row_placement(
+                matricization_of(matrix_by_sector, sector)?,
+                key.codomain_tree(),
+            )?;
+        }
+        if let Some(aligned) = aligned {
+            ordered &= aligned;
+        }
+    }
+    if let Some(cursor) = cursor {
+        ordered &= cursor.is_exhausted(FactorSide::Left);
     }
     let left =
         BoundDynamicFusionMapSpace::from_final_homspace_generic(Arc::clone(provider), left_hom)?;
+    Ok((left, left_keys, ordered))
+}
+
+fn build_right_bound_space_generic<'a, R, D>(
+    provider: &Arc<R>,
+    homspace: &FusionTreeHomSpace,
+    matricizations: &'a [SectorMatricization<D>],
+    new_leg: SectorLeg,
+    mut cursor: Option<&mut FactorTreeCursor<'_, D>>,
+    matrix_by_sector: &mut Option<HashMap<SectorId, &'a SectorMatricization<D>>>,
+) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<FusionTreePairKey>, bool), OperationError>
+where
+    R: FusionRule,
+    D: FactorScalar,
+{
     let right_hom = FusionTreeHomSpace::new(
         FusionProductSpace::new([new_leg]),
         homspace.domain().clone(),
     );
     let right_keys = right_hom
-        .fusion_tree_keys_generic(rule)
+        .fusion_tree_keys_generic(provider.as_ref())
         .map_err(OperationError::from_core_preserving_context)?;
+    let mut ordered = true;
     for key in right_keys.iter() {
         // Why not build the final layout first: preserve the left-to-right
         // missing-placement error boundary without adding a second plan API.
         let sector = coupled_of_generic(key.domain_tree());
-        col_placement(
-            matricization_of(&matrix_by_sector, sector)?,
-            key.domain_tree(),
-        )?;
+        let aligned = cursor
+            .as_deref_mut()
+            .map(|cursor| cursor.matches(FactorSide::Right, key.domain_tree()));
+        if aligned != Some(true) {
+            let matrix_by_sector =
+                matrix_by_sector.get_or_insert_with(|| matricization_map(matricizations));
+            col_placement(
+                matricization_of(matrix_by_sector, sector)?,
+                key.domain_tree(),
+            )?;
+        }
+        if let Some(aligned) = aligned {
+            ordered &= aligned;
+        }
+    }
+    if let Some(cursor) = cursor {
+        ordered &= cursor.is_exhausted(FactorSide::Right);
     }
     let right =
         BoundDynamicFusionMapSpace::from_final_homspace_generic(Arc::clone(provider), right_hom)?;
-    Ok((left, right))
+    Ok((right, right_keys, ordered))
 }
 
 fn build_left_right_bound_pair_generic<R, D>(
     provider: &Arc<R>,
     homspace: &FusionTreeHomSpace,
     matricizations: &[SectorMatricization<D>],
-    pairs: &[FactorPair<D>],
+    pairs: Vec<FactorPair<D>>,
 ) -> Result<DynamicFactorPair<R, D>, OperationError>
 where
     R: FusionRule,
@@ -8067,31 +8537,65 @@ where
             kept: pair.kept,
         })
         .collect::<Vec<_>>();
-    let (left_space, right_space) =
-        build_left_right_bound_spaces_generic(provider, homspace, matricizations, &ranks)?;
-    let mut left_data = vec![D::zero(); left_space.space().required_len()?];
-    let mut right_data = vec![D::zero(); right_space.space().required_len()?];
-    for (matrix, pair) in matricizations.iter().zip(pairs) {
-        scatter_left_sector_blocks_generic(
-            left_space.space(),
-            &mut left_data,
-            matrix,
-            &pair.left,
-            pair.left_rows,
-        )?;
-        scatter_right_sector_blocks_generic(
-            right_space.space(),
-            &mut right_data,
-            matrix,
-            &pair.right,
-            pair.right_leading,
-        )?;
-    }
-    let left_nout = left_space.space().nout();
-    let right_nin = right_space.space().nin();
+    let spaces =
+        build_left_right_bound_spaces_and_keys_generic(provider, homspace, matricizations, &ranks)?;
+    let left_len = spaces.left.space().required_len()?;
+    let right_len = spaces.right.space().required_len()?;
+    let canonical = spaces.ordered
+        && left_factor_output_is_canonical(
+            spaces.left.space().structure(),
+            &spaces.left_keys,
+            matricizations,
+            &pairs,
+            left_len,
+        )
+        && right_factor_output_is_canonical(
+            spaces.right.space().structure(),
+            &spaces.right_keys,
+            matricizations,
+            &pairs,
+            right_len,
+        );
+    let (left_data, right_data) = if canonical {
+        #[cfg(test)]
+        GENERIC_PAIR_PUBLICATION_PROBE.with(|probe| {
+            let mut value = probe.get();
+            value.canonical_publications += 1;
+            probe.set(value);
+        });
+        publish_generic_factor_pairs(pairs, left_len, right_len)
+    } else {
+        #[cfg(test)]
+        GENERIC_PAIR_PUBLICATION_PROBE.with(|probe| {
+            let mut value = probe.get();
+            value.fallback_publications += 1;
+            probe.set(value);
+        });
+        let mut left_data = vec![D::zero(); left_len];
+        let mut right_data = vec![D::zero(); right_len];
+        for (matrix, pair) in matricizations.iter().zip(&pairs) {
+            scatter_left_sector_blocks_generic(
+                spaces.left.space(),
+                &mut left_data,
+                matrix,
+                &pair.left,
+                pair.left_rows,
+            )?;
+            scatter_right_sector_blocks_generic(
+                spaces.right.space(),
+                &mut right_data,
+                matrix,
+                &pair.right,
+                pair.right_leading,
+            )?;
+        }
+        (left_data, right_data)
+    };
+    let left_nout = spaces.left.space().nout();
+    let right_nin = spaces.right.space().nin();
     Ok((
-        BoundDynFactor::from_bound(left_space, left_data, left_nout, 1)?,
-        BoundDynFactor::from_bound(right_space, right_data, 1, right_nin)?,
+        BoundDynFactor::from_bound(spaces.left, left_data, left_nout, 1)?,
+        BoundDynFactor::from_bound(spaces.right, right_data, 1, right_nin)?,
     ))
 }
 
@@ -8099,7 +8603,7 @@ fn build_left_right_bound_pair_generic_checked<R, D>(
     provider: &Arc<R>,
     homspace: &FusionTreeHomSpace,
     matricizations: &[SectorMatricization<D>],
-    pairs: &[FactorPair<D>],
+    pairs: Vec<FactorPair<D>>,
 ) -> Result<DynamicFactorPair<R, D>, CheckedGenericFactorPlanError<R::Error>>
 where
     R: CheckedGenericFusion,
@@ -8112,7 +8616,7 @@ where
             kept: pair.kept,
         })
         .collect::<Vec<_>>();
-    let matrix_by_sector = matricization_map(matricizations);
+    let mut matrix_by_sector = None;
     let new_leg = SectorLeg::new(ranks.iter().map(|rank| (rank.sector, rank.kept)), false);
     let left_hom = FusionTreeHomSpace::new(
         homspace.codomain().clone(),
@@ -8121,15 +8625,24 @@ where
     let left_keys = left_hom
         .fusion_tree_keys_generic_checked(provider.as_ref())
         .map_err(CheckedGenericFactorPlanError::from)?;
+    let mut left_cursor = FactorTreeCursor::new(matricizations, &ranks);
+    let mut left_ordered = true;
     for key in left_keys.iter() {
         let sector = coupled_of_generic(key.codomain_tree());
-        row_placement(
-            matricization_of(&matrix_by_sector, sector)
-                .map_err(CheckedGenericFactorPlanError::from)?,
-            key.codomain_tree(),
-        )
-        .map_err(CheckedGenericFactorPlanError::from)?;
+        let aligned = left_cursor.matches(FactorSide::Left, key.codomain_tree());
+        if !aligned {
+            let matrix_by_sector =
+                matrix_by_sector.get_or_insert_with(|| matricization_map(matricizations));
+            row_placement(
+                matricization_of(matrix_by_sector, sector)
+                    .map_err(CheckedGenericFactorPlanError::from)?,
+                key.codomain_tree(),
+            )
+            .map_err(CheckedGenericFactorPlanError::from)?;
+        }
+        left_ordered &= aligned;
     }
+    left_ordered &= left_cursor.is_exhausted(FactorSide::Left);
     let left = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
         Arc::clone(provider),
         left_hom,
@@ -8142,54 +8655,88 @@ where
     let right_keys = right_hom
         .fusion_tree_keys_generic_checked(provider.as_ref())
         .map_err(CheckedGenericFactorPlanError::from)?;
+    let mut right_cursor = FactorTreeCursor::new(matricizations, &ranks);
+    let mut right_ordered = true;
     for key in right_keys.iter() {
         let sector = coupled_of_generic(key.domain_tree());
-        col_placement(
-            matricization_of(&matrix_by_sector, sector)
-                .map_err(CheckedGenericFactorPlanError::from)?,
-            key.domain_tree(),
-        )
-        .map_err(CheckedGenericFactorPlanError::from)?;
+        let aligned = right_cursor.matches(FactorSide::Right, key.domain_tree());
+        if !aligned {
+            let matrix_by_sector =
+                matrix_by_sector.get_or_insert_with(|| matricization_map(matricizations));
+            col_placement(
+                matricization_of(matrix_by_sector, sector)
+                    .map_err(CheckedGenericFactorPlanError::from)?,
+                key.domain_tree(),
+            )
+            .map_err(CheckedGenericFactorPlanError::from)?;
+        }
+        right_ordered &= aligned;
     }
+    right_ordered &= right_cursor.is_exhausted(FactorSide::Right);
     let right = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
         Arc::clone(provider),
         right_hom,
     )
     .map_err(CheckedGenericFactorPlanError::from)?;
-    let mut left_data = vec![
-        D::zero();
-        left.space().required_len().map_err(|e| {
-            CheckedGenericFactorPlanError::Operation(OperationError::from_core_preserving_context(
-                e,
-            ))
-        })?
-    ];
-    let mut right_data = vec![
-        D::zero();
-        right.space().required_len().map_err(|e| {
-            CheckedGenericFactorPlanError::Operation(OperationError::from_core_preserving_context(
-                e,
-            ))
-        })?
-    ];
-    for (matrix, pair) in matricizations.iter().zip(pairs) {
-        scatter_left_sector_blocks_generic(
-            left.space(),
-            &mut left_data,
-            matrix,
-            &pair.left,
-            pair.left_rows,
+    let left_len = left.space().required_len().map_err(|e| {
+        CheckedGenericFactorPlanError::Operation(OperationError::from_core_preserving_context(e))
+    })?;
+    let right_len = right.space().required_len().map_err(|e| {
+        CheckedGenericFactorPlanError::Operation(OperationError::from_core_preserving_context(e))
+    })?;
+    let canonical = left_ordered
+        && right_ordered
+        && left_factor_output_is_canonical(
+            left.space().structure(),
+            &left_keys,
+            matricizations,
+            &pairs,
+            left_len,
         )
-        .map_err(CheckedGenericFactorPlanError::from)?;
-        scatter_right_sector_blocks_generic(
-            right.space(),
-            &mut right_data,
-            matrix,
-            &pair.right,
-            pair.right_leading,
-        )
-        .map_err(CheckedGenericFactorPlanError::from)?;
-    }
+        && right_factor_output_is_canonical(
+            right.space().structure(),
+            &right_keys,
+            matricizations,
+            &pairs,
+            right_len,
+        );
+    let (left_data, right_data) = if canonical {
+        #[cfg(test)]
+        GENERIC_PAIR_PUBLICATION_PROBE.with(|probe| {
+            let mut value = probe.get();
+            value.canonical_publications += 1;
+            probe.set(value);
+        });
+        publish_generic_factor_pairs(pairs, left_len, right_len)
+    } else {
+        #[cfg(test)]
+        GENERIC_PAIR_PUBLICATION_PROBE.with(|probe| {
+            let mut value = probe.get();
+            value.fallback_publications += 1;
+            probe.set(value);
+        });
+        let mut left_data = vec![D::zero(); left_len];
+        let mut right_data = vec![D::zero(); right_len];
+        for (matrix, pair) in matricizations.iter().zip(&pairs) {
+            scatter_left_sector_blocks_generic(
+                left.space(),
+                &mut left_data,
+                matrix,
+                &pair.left,
+                pair.left_rows,
+            )
+            .map_err(CheckedGenericFactorPlanError::from)?;
+            scatter_right_sector_blocks_generic(
+                right.space(),
+                &mut right_data,
+                matrix,
+                &pair.right,
+                pair.right_leading,
+            )
+            .map_err(CheckedGenericFactorPlanError::from)?;
+        }
+        (left_data, right_data)
+    };
     let left_nout = left.space().nout();
     let right_nin = right.space().nin();
     Ok((
@@ -8418,6 +8965,13 @@ where
             continue;
         }
         let (row_offset, _) = row_placement(matrix, key.codomain_tree())?;
+        #[cfg(test)]
+        GENERIC_PAIR_PUBLICATION_PROBE.with(|probe| {
+            let mut value = probe.get();
+            value.left_scattered_elements +=
+                checked_extent(block.shape()).expect("admitted block extent is finite");
+            probe.set(value);
+        });
         scatter_matrix_block(
             left_data,
             block.shape(),
@@ -8455,6 +9009,13 @@ where
             continue;
         }
         let (col_offset, _) = col_placement(matrix, key.domain_tree())?;
+        #[cfg(test)]
+        GENERIC_PAIR_PUBLICATION_PROBE.with(|probe| {
+            let mut value = probe.get();
+            value.right_scattered_elements +=
+                checked_extent(block.shape()).expect("admitted block extent is finite");
+            probe.set(value);
+        });
         scatter_matrix_block(
             right_data,
             block.shape(),
@@ -9195,11 +9756,6 @@ where
             rank,
             matrix.cols,
         );
-        #[cfg(test)]
-        {
-            record_compact_qr_output_scatter::<D>(q.len());
-            record_compact_qr_output_scatter::<D>(r.len());
-        }
         pairs.push(FactorPair {
             sector: matrix.sector,
             kept: rank,
@@ -9209,7 +9765,21 @@ where
             right_leading: rank,
         });
     }
-    build_left_right_bound_pair_generic(provider, space.homspace(), &matrices, &pairs)
+    #[cfg(test)]
+    let scatter_before = generic_pair_publication_probe();
+    let result = build_left_right_bound_pair_generic(provider, space.homspace(), &matrices, pairs);
+    #[cfg(test)]
+    {
+        let scatter_after = generic_pair_publication_probe();
+        let elements = scatter_after.left_scattered_elements
+            - scatter_before.left_scattered_elements
+            + scatter_after.right_scattered_elements
+            - scatter_before.right_scattered_elements;
+        if elements != 0 {
+            record_compact_qr_output_scatter::<D>(elements);
+        }
+    }
+    result
 }
 
 /// Checked-Generic compact QR. Provider-bound output spaces are admitted
@@ -9272,7 +9842,7 @@ where
             right_leading: rank,
         });
     }
-    build_left_right_bound_pair_generic_checked(provider, space.homspace(), &matrices, &pairs)
+    build_left_right_bound_pair_generic_checked(provider, space.homspace(), &matrices, pairs)
 }
 
 /// Checked-Generic compact SVD. Dense SVD is unchanged; all provider-bound
@@ -9341,7 +9911,7 @@ where
         });
     }
     let (u, vh) =
-        build_left_right_bound_pair_generic_checked(provider, space.homspace(), &matrices, &pairs)?;
+        build_left_right_bound_pair_generic_checked(provider, space.homspace(), &matrices, pairs)?;
     let s = diagonal_bond_svd_factor_generic_checked(
         Arc::clone(provider),
         &singular_values,
@@ -9410,7 +9980,7 @@ where
             right_leading: rank,
         });
     }
-    build_left_right_bound_pair_generic_checked(provider, space.homspace(), &matrices, &pairs)
+    build_left_right_bound_pair_generic_checked(provider, space.homspace(), &matrices, pairs)
 }
 
 /// Checked-Generic full QR via sectorwise augmented `[A | I]` QR.
@@ -9470,7 +10040,7 @@ where
             right_leading: rows,
         });
     }
-    build_left_right_bound_pair_generic_checked(provider, space.homspace(), &matrices, &pairs)
+    build_left_right_bound_pair_generic_checked(provider, space.homspace(), &matrices, pairs)
 }
 
 /// Checked-Generic full SVD. Dense work is performed before any output-space
@@ -9674,7 +10244,7 @@ where
             right_leading: cols,
         });
     }
-    build_left_right_bound_pair_generic_checked(provider, space.homspace(), &matrices, &pairs)
+    build_left_right_bound_pair_generic_checked(provider, space.homspace(), &matrices, pairs)
 }
 
 /// Checked-Generic singular values only. No factor-space publication occurs.
@@ -10296,11 +10866,6 @@ where
             rank,
             matrix.rows,
         );
-        #[cfg(test)]
-        {
-            record_compact_lq_output_scatter::<D>(r_prime.len());
-            record_compact_lq_output_scatter::<D>(q_prime.len());
-        }
         pairs.push(FactorPair {
             sector: matrix.sector,
             kept: rank,
@@ -10310,13 +10875,60 @@ where
             right_leading: rank,
         });
     }
-    build_left_right_bound_pair_generic(provider, space.homspace(), &matrices, &pairs)
+    #[cfg(test)]
+    let scatter_before = generic_pair_publication_probe();
+    let result = build_left_right_bound_pair_generic(provider, space.homspace(), &matrices, pairs);
+    #[cfg(test)]
+    {
+        let scatter_after = generic_pair_publication_probe();
+        let elements = scatter_after.left_scattered_elements
+            - scatter_before.left_scattered_elements
+            + scatter_after.right_scattered_elements
+            - scatter_before.right_scattered_elements;
+        if elements != 0 {
+            record_compact_lq_output_scatter::<D>(elements);
+        }
+    }
+    result
 }
 
 #[cfg(test)]
 mod sector_matricization_tests {
     use super::*;
     use tenet_core::{BlockSpec, FusionTreePairKey, Z2FusionRule};
+
+    #[derive(Clone, Copy)]
+    struct TestGenericRule;
+
+    impl FusionRule for TestGenericRule {
+        fn rule_identity(&self) -> tenet_core::RuleIdentity {
+            tenet_core::RuleIdentity::of_type::<Self>()
+        }
+
+        fn fusion_style(&self) -> tenet_core::FusionStyleKind {
+            tenet_core::FusionStyleKind::Generic
+        }
+
+        fn braiding_style(&self) -> tenet_core::BraidingStyleKind {
+            tenet_core::BraidingStyleKind::Bosonic
+        }
+
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(0)
+        }
+
+        fn dual(&self, sector: SectorId) -> SectorId {
+            sector
+        }
+
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> tenet_core::SectorVec {
+            Z2FusionRule.fusion_channels(left, right)
+        }
+
+        fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+            Z2FusionRule.nsymbol(left, right, coupled)
+        }
+    }
 
     fn z2_pair(codomain: [usize; 2], domain: [usize; 2], coupled: usize) -> FusionTreePairKey {
         let pair = FusionTreePairKey::try_pair_from_sector_ids(
@@ -10631,5 +11243,203 @@ mod sector_matricization_tests {
                 index: 0
             })
         ));
+    }
+
+    fn z2_single_sector_matrix(
+        rows: usize,
+        cols: usize,
+    ) -> (FusionTreeHomSpace, SectorMatricization<f64>) {
+        let even = SectorId::new(0);
+        let homspace = FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new([(even, rows)], false)]),
+            FusionProductSpace::new([SectorLeg::new([(even, cols)], false)]),
+        );
+        let key = homspace.fusion_tree_keys_generic(&TestGenericRule).unwrap()[0].clone();
+        (
+            homspace,
+            SectorMatricization {
+                sector: even,
+                rows,
+                cols,
+                row_trees: vec![(key.codomain_tree().clone(), 0, vec![rows])],
+                col_trees: vec![(key.domain_tree().clone(), 0, vec![cols])],
+                data: vec![0.0; rows * cols],
+            },
+        )
+    }
+
+    #[test]
+    fn generic_pair_publication_falls_back_for_padded_staged_geometry() {
+        let (homspace, matrix) = z2_single_sector_matrix(2, 1);
+        let provider = Arc::new(TestGenericRule);
+        reset_generic_pair_publication_probe();
+
+        let (left, right) = build_left_right_bound_pair_generic(
+            &provider,
+            &homspace,
+            &[matrix],
+            vec![FactorPair {
+                sector: SectorId::new(0),
+                kept: 1,
+                left: vec![2.0, 3.0],
+                left_rows: 2,
+                right: vec![5.0, 99.0],
+                right_leading: 2,
+            }],
+        )
+        .unwrap();
+
+        assert_eq!(left.data(), [2.0, 3.0]);
+        assert_eq!(right.data(), [5.0]);
+        let probe = generic_pair_publication_probe();
+        assert_eq!(
+            (probe.canonical_publications, probe.fallback_publications),
+            (0, 1)
+        );
+        assert_eq!(
+            (
+                probe.left_scattered_elements,
+                probe.right_scattered_elements
+            ),
+            (2, 1)
+        );
+    }
+
+    #[test]
+    fn generic_pair_validation_preserves_missing_sector_and_tree_errors() {
+        let (homspace, matrix) = z2_single_sector_matrix(1, 1);
+        let provider = Arc::new(TestGenericRule);
+        let pair = || FactorPair {
+            sector: SectorId::new(0),
+            kept: 1,
+            left: vec![1.0],
+            left_rows: 1,
+            right: vec![1.0],
+            right_leading: 1,
+        };
+
+        let missing_sector =
+            build_left_right_bound_pair_generic(&provider, &homspace, &[], vec![pair()])
+                .unwrap_err();
+        assert!(matches!(
+            missing_sector,
+            OperationError::UnsupportedTensorContractScope {
+                message: "factor tree references a coupled sector absent from the source tensor"
+            }
+        ));
+
+        let wrong = FusionTreePairKey::try_pair_from_sector_ids(
+            [1],
+            [0],
+            0,
+            [false],
+            [false],
+            [],
+            [],
+            [],
+            [],
+        )
+        .unwrap()
+        .codomain_tree()
+        .clone();
+        let mut wrong_row = matrix;
+        wrong_row.row_trees[0].0 = wrong.clone();
+        wrong_row.col_trees[0].0 = wrong.clone();
+        let missing_row =
+            build_left_right_bound_pair_generic(&provider, &homspace, &[wrong_row], vec![pair()])
+                .unwrap_err();
+        assert!(matches!(
+            missing_row,
+            OperationError::UnsupportedTensorContractScope {
+                message: "factor codomain tree absent from the source matricization"
+            }
+        ));
+
+        let (_, mut wrong_col) = z2_single_sector_matrix(1, 1);
+        wrong_col.col_trees[0].0 = wrong;
+        let missing_col =
+            build_left_right_bound_pair_generic(&provider, &homspace, &[wrong_col], vec![pair()])
+                .unwrap_err();
+        assert!(matches!(
+            missing_col,
+            OperationError::UnsupportedTensorContractScope {
+                message: "factor domain tree absent from the source matricization"
+            }
+        ));
+    }
+
+    #[test]
+    fn generic_pair_publication_handles_zero_kept_sector() {
+        let (homspace, matrix) = z2_single_sector_matrix(2, 1);
+        reset_generic_pair_publication_probe();
+        let (left, right) = build_left_right_bound_pair_generic(
+            &Arc::new(TestGenericRule),
+            &homspace,
+            &[matrix],
+            vec![FactorPair {
+                sector: SectorId::new(0),
+                kept: 0,
+                left: Vec::<f64>::new(),
+                left_rows: 2,
+                right: Vec::new(),
+                right_leading: 0,
+            }],
+        )
+        .unwrap();
+        assert!(left.data().is_empty());
+        assert!(right.data().is_empty());
+        assert_eq!(
+            generic_pair_publication_probe(),
+            GenericPairPublicationProbe {
+                canonical_publications: 1,
+                ..GenericPairPublicationProbe::default()
+            }
+        );
+
+        let empty = FusionProductSpace::new(std::iter::empty::<SectorLeg>());
+        let empty_hom = FusionTreeHomSpace::new(empty.clone(), empty);
+        let (left, right) = build_left_right_bound_pair_generic::<_, f64>(
+            &Arc::new(TestGenericRule),
+            &empty_hom,
+            &[],
+            Vec::new(),
+        )
+        .unwrap();
+        assert!(left.data().is_empty());
+        assert!(right.data().is_empty());
+    }
+
+    #[test]
+    fn generic_pair_publication_handles_scalar_matrix() {
+        let empty = FusionProductSpace::new(std::iter::empty::<SectorLeg>());
+        let homspace = FusionTreeHomSpace::new(empty.clone(), empty);
+        let key = homspace.fusion_tree_keys_generic(&TestGenericRule).unwrap()[0].clone();
+        reset_generic_pair_publication_probe();
+        let (left, right) = build_left_right_bound_pair_generic(
+            &Arc::new(TestGenericRule),
+            &homspace,
+            &[SectorMatricization {
+                sector: SectorId::new(0),
+                rows: 1,
+                cols: 1,
+                row_trees: vec![(key.codomain_tree().clone(), 0, Vec::new())],
+                col_trees: vec![(key.domain_tree().clone(), 0, Vec::new())],
+                data: vec![7.0],
+            }],
+            vec![FactorPair {
+                sector: SectorId::new(0),
+                kept: 1,
+                left: vec![2.0],
+                left_rows: 1,
+                right: vec![3.5],
+                right_leading: 1,
+            }],
+        )
+        .unwrap();
+        assert_eq!(left.data(), [2.0]);
+        assert_eq!(right.data(), [3.5]);
+        let probe = generic_pair_publication_probe();
+        assert_eq!(probe.canonical_publications, 1);
+        assert_eq!((probe.left_owner_reused, probe.right_owner_reused), (1, 1));
     }
 }

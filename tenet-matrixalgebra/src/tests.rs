@@ -1192,14 +1192,49 @@ fn generic_factorization_input() -> (BoundDynamicFusionMapSpace<FactorGenericRul
     (space, data)
 }
 
+fn one_sector_generic_factorization_input(
+) -> (BoundDynamicFusionMapSpace<FactorGenericRule>, Vec<f64>) {
+    let provider = Arc::new(FactorGenericRule);
+    let vacuum = SectorId::new(0);
+    let x = SectorId::new(1);
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([
+            SectorLeg::new([(x, 2)], false),
+            SectorLeg::new([(x, 1)], false),
+        ]),
+        FusionProductSpace::new([
+            SectorLeg::new([(x, 3)], false),
+            SectorLeg::new([(vacuum, 1)], false),
+        ]),
+    );
+    let space =
+        BoundDynamicFusionMapSpace::from_final_homspace_generic(provider, homspace).unwrap();
+    let data = (0..space.space().required_len().unwrap())
+        .map(|index| 1.0 + index as f64 / 8.0)
+        .collect();
+    (space, data)
+}
+
 fn padded_generic_factorization_input(
     source: &BoundDynamicFusionMapSpace<FactorGenericRule>,
     source_data: &[f64],
 ) -> (BoundDynamicFusionMapSpace<FactorGenericRule>, Vec<f64>) {
+    expert_generic_factorization_input(source, source_data, false)
+}
+
+fn expert_generic_factorization_input(
+    source: &BoundDynamicFusionMapSpace<FactorGenericRule>,
+    source_data: &[f64],
+    reverse_blocks: bool,
+) -> (BoundDynamicFusionMapSpace<FactorGenericRule>, Vec<f64>) {
     let source_structure = source.space().structure();
     let mut offset = 1usize;
     let mut blocks = Vec::with_capacity(source_structure.block_count());
-    for index in 0..source_structure.block_count() {
+    let mut indices = (0..source_structure.block_count()).collect::<Vec<_>>();
+    if reverse_blocks {
+        indices.reverse();
+    }
+    for index in indices {
         let block = source_structure.block(index).unwrap();
         blocks.push(
             BlockSpec::column_major_with_key(block.key().clone(), block.shape().to_vec(), offset)
@@ -1300,6 +1335,224 @@ fn provider_neutral_generic_factorizations_keep_the_strided_fallback() {
     let padded_lq = lq_compact_dyn_generic(&mut dense, &padded).unwrap();
     assert_generic_factor_close(&padded_lq.0, &canonical_lq.0);
     assert_generic_factor_close(&padded_lq.1, &canonical_lq.1);
+}
+
+#[test]
+fn generic_pair_publication_keeps_reordered_tree_scatter_fallback() {
+    let (canonical_space, canonical_data) = generic_factorization_input();
+    let (reordered_space, reordered_data) =
+        expert_generic_factorization_input(&canonical_space, &canonical_data, true);
+    let reordered = BoundDynamicTensorRef::try_new(&reordered_space, &reordered_data).unwrap();
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+
+    crate::factorize::reset_generic_pair_publication_probe();
+    crate::factorize::reset_compact_qr_copy_probe();
+    let actual_qr = qr_compact_dyn_generic(&mut dense, &reordered).unwrap();
+    assert!(!actual_qr.0.data().is_empty());
+    assert!(!actual_qr.1.data().is_empty());
+    let probe = crate::factorize::generic_pair_publication_probe();
+    assert_eq!(
+        (probe.canonical_publications, probe.fallback_publications),
+        (0, 1)
+    );
+    assert!(probe.left_scattered_elements > 0);
+    assert!(probe.right_scattered_elements > 0);
+    let qr_copy = crate::factorize::compact_qr_copy_probe();
+    assert_eq!(qr_copy.output_scatter_calls, 1);
+    assert_eq!(
+        qr_copy.output_scatter_bytes,
+        (actual_qr.0.data().len() + actual_qr.1.data().len()) * std::mem::size_of::<f64>()
+    );
+
+    crate::factorize::reset_generic_pair_publication_probe();
+    crate::factorize::reset_compact_lq_copy_probe();
+    let actual_lq = lq_compact_dyn_generic(&mut dense, &reordered).unwrap();
+    assert!(!actual_lq.0.data().is_empty());
+    assert!(!actual_lq.1.data().is_empty());
+    let probe = crate::factorize::generic_pair_publication_probe();
+    assert_eq!(
+        (probe.canonical_publications, probe.fallback_publications),
+        (0, 1)
+    );
+    assert!(probe.left_scattered_elements > 0);
+    assert!(probe.right_scattered_elements > 0);
+    let lq_copy = crate::factorize::compact_lq_copy_probe();
+    assert_eq!(lq_copy.output_scatter_calls, 1);
+    assert_eq!(
+        lq_copy.output_scatter_bytes,
+        (actual_lq.0.data().len() + actual_lq.1.data().len()) * std::mem::size_of::<f64>()
+    );
+}
+
+#[test]
+fn checked_generic_pair_publication_reuses_one_sector_owners() {
+    let (source, data) = one_sector_generic_factorization_input();
+    let (provider, checked) = bind_checked_only(&source);
+    let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    crate::factorize::reset_generic_pair_publication_probe();
+
+    let (left, right) = qr_compact_dyn_checked_generic(&mut dense, &input).unwrap();
+
+    let probe = crate::factorize::generic_pair_publication_probe();
+    let blocks = left.space().space().structure().block_count()
+        + right.space().space().structure().block_count();
+    assert_eq!(probe.canonical_publications, 1);
+    assert_eq!(probe.fallback_publications, 0);
+    assert_eq!((probe.left_owner_reused, probe.right_owner_reused), (1, 1));
+    assert_eq!(
+        (probe.left_appended_elements, probe.right_appended_elements),
+        (0, 0)
+    );
+    assert_eq!(
+        (
+            probe.left_scattered_elements,
+            probe.right_scattered_elements
+        ),
+        (0, 0)
+    );
+    assert_eq!(probe.output_blocks_visited, blocks);
+    assert_eq!(probe.ordered_key_comparisons, 2 * blocks);
+    assert!(Arc::ptr_eq(left.space().provider_arc(), &provider));
+    assert!(Arc::ptr_eq(right.space().provider_arc(), &provider));
+}
+
+fn assert_pair_reconstructs_checked_literal<R, D>(
+    left: &BoundDynFactor<R, D>,
+    right: &BoundDynFactor<R, D>,
+    complex: bool,
+) where
+    D: FactorScalar,
+{
+    let left_regions = left
+        .space()
+        .space()
+        .structure()
+        .coupled_sector_regions(left.space().space().nout())
+        .unwrap()
+        .unwrap();
+    let right_regions = right
+        .space()
+        .space()
+        .structure()
+        .coupled_sector_regions(right.space().space().nout())
+        .unwrap()
+        .unwrap();
+    for sector in [SectorId::new(0), SectorId::new(1)] {
+        let left_region = left_regions
+            .iter()
+            .find(|region| region.coupled() == sector)
+            .unwrap();
+        let right_region = right_regions
+            .iter()
+            .find(|region| region.coupled() == sector)
+            .unwrap();
+        let (rows, cols, expected) = checked_svd_matrix(sector, complex);
+        assert_eq!((left_region.rows(), right_region.cols()), (rows, cols));
+        assert_eq!(left_region.cols(), right_region.rows());
+        let kept = left_region.cols();
+        for col in 0..cols {
+            for row in 0..rows {
+                let actual = (0..kept).fold(D::zero(), |sum, bond| {
+                    sum + left.data()[left_region.range().start + row + rows * bond]
+                        * right.data()[right_region.range().start + bond + kept * col]
+                });
+                assert!((actual.widen_complex() - expected[row + rows * col]).norm() < 1.0e-10);
+            }
+        }
+    }
+}
+
+#[test]
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
+fn staged_generic_pair_callers_publish_canonical_owned_payloads() {
+    let (source, data) = one_sector_generic_factorization_input();
+    let (padded_space, padded_data) = padded_generic_factorization_input(&source, &data);
+    let padded = BoundDynamicTensorRef::try_new(&padded_space, &padded_data).unwrap();
+    let provider = Arc::new(LateGenericSpy {
+        rule: FactorGenericRule,
+        fail_at: usize::MAX,
+        calls: Cell::new(0),
+    });
+    let checked =
+        BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
+            .unwrap();
+    let checked_input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    crate::factorize::reset_generic_pair_publication_probe();
+
+    qr_compact_dyn_generic(&mut dense, &padded).unwrap();
+    lq_compact_dyn_generic(&mut dense, &padded).unwrap();
+    qr_compact_dyn_checked_generic(&mut dense, &checked_input).unwrap();
+    svd_compact_dyn_checked_generic(&mut dense, &checked_input).unwrap();
+    lq_compact_dyn_checked_generic(&mut dense, &checked_input).unwrap();
+    qr_full_dyn_checked_generic(&mut dense, &checked_input).unwrap();
+    lq_full_dyn_checked_generic(&mut dense, &checked_input).unwrap();
+
+    let probe = crate::factorize::generic_pair_publication_probe();
+    assert_eq!(probe.canonical_publications, 7);
+    assert_eq!(probe.fallback_publications, 0);
+    assert_eq!((probe.left_owner_reused, probe.right_owner_reused), (7, 7));
+    assert_eq!(
+        (probe.left_appended_elements, probe.right_appended_elements),
+        (0, 0)
+    );
+    assert_eq!(
+        (
+            probe.left_scattered_elements,
+            probe.right_scattered_elements
+        ),
+        (0, 0)
+    );
+}
+
+fn assert_checked_generic_pair_publication_appends_multiple_literal_sectors<D>(complex: bool)
+where
+    D: FactorScalar,
+{
+    let (provider, space, data) = checked_svd_truncation_input::<D>(complex);
+    let input = BoundDynamicTensorRef::try_new(&space, &data).unwrap();
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    crate::factorize::reset_generic_pair_publication_probe();
+
+    let qr = qr_compact_dyn_checked_generic(&mut dense, &input).unwrap();
+    assert_pair_reconstructs_checked_literal(&qr.0, &qr.1, complex);
+    let qr_probe = crate::factorize::generic_pair_publication_probe();
+    let qr_blocks = qr.0.space().space().structure().block_count()
+        + qr.1.space().space().structure().block_count();
+    assert_eq!(qr_probe.output_blocks_visited, qr_blocks);
+    assert_eq!(qr_probe.ordered_key_comparisons, 2 * qr_blocks);
+    svd_compact_dyn_checked_generic(&mut dense, &input).unwrap();
+    let lq = lq_compact_dyn_checked_generic(&mut dense, &input).unwrap();
+    assert_pair_reconstructs_checked_literal(&lq.0, &lq.1, complex);
+    let full_qr = qr_full_dyn_checked_generic(&mut dense, &input).unwrap();
+    assert_pair_reconstructs_checked_literal(&full_qr.0, &full_qr.1, complex);
+    let full_lq = lq_full_dyn_checked_generic(&mut dense, &input).unwrap();
+    assert_pair_reconstructs_checked_literal(&full_lq.0, &full_lq.1, complex);
+
+    let probe = crate::factorize::generic_pair_publication_probe();
+    assert_eq!(probe.canonical_publications, 5);
+    assert_eq!(probe.fallback_publications, 0);
+    assert!(probe.left_appended_elements > 0);
+    assert!(probe.right_appended_elements > 0);
+    assert_eq!(
+        (
+            probe.left_scattered_elements,
+            probe.right_scattered_elements
+        ),
+        (0, 0)
+    );
+    assert!(Arc::ptr_eq(qr.0.space().provider_arc(), &provider));
+    assert!(Arc::ptr_eq(qr.1.space().provider_arc(), &provider));
+}
+
+#[test]
+fn checked_generic_pair_publication_appends_multiple_literal_sectors() {
+    assert_checked_generic_pair_publication_appends_multiple_literal_sectors::<f64>(false);
+    assert_checked_generic_pair_publication_appends_multiple_literal_sectors::<Complex64>(true);
 }
 
 #[test]
