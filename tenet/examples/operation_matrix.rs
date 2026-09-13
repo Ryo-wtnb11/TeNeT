@@ -4,15 +4,21 @@ use std::{
     alloc::{GlobalAlloc, Layout, System},
     cell::Cell,
     hint::black_box,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
 use tenet::prelude::*;
 
 use tenet::core::{
-    complete_hom_space_structure_cache_info, fusion_tree_layout_cache_info,
-    CompleteHomSpaceStructureCacheInfo, FusionTreeLayoutCacheInfo,
+    complete_hom_space_structure_cache_info, fusion_tree_layout_cache_info, BlockRef, BlockSpec,
+    BlockStructure, BraidingStyleKind, CompleteHomSpaceStructureCacheInfo, FusionProductSpace,
+    FusionRule, FusionStyleKind, FusionTensorMapSpace, FusionTreeHomSpace,
+    FusionTreeLayoutCacheInfo, RuleIdentity, SectorId, SectorLeg, SectorVec, TensorMapSpace,
 };
+use tenet::dense::DefaultDenseExecutor;
+use tenet_matrixalgebra::{qr_compact_dyn_generic, BoundDynFactor};
+use tenet_tensors::{BoundDynamicFusionMapSpace, BoundDynamicTensorRef, DynamicFusionMapSpace};
 
 struct CountingAllocator;
 
@@ -285,6 +291,268 @@ macro_rules! assert_same_tensor {
         }
         assert_f64_payload_close($actual.data(), $expected.data());
     }};
+}
+
+#[derive(Clone, Copy)]
+struct LayoutGenericRule;
+
+impl FusionRule for LayoutGenericRule {
+    fn rule_identity(&self) -> RuleIdentity {
+        RuleIdentity::of_type::<Self>()
+    }
+
+    fn fusion_style(&self) -> FusionStyleKind {
+        FusionStyleKind::Generic
+    }
+
+    fn braiding_style(&self) -> BraidingStyleKind {
+        BraidingStyleKind::Bosonic
+    }
+
+    fn vacuum(&self) -> SectorId {
+        SectorId::new(0)
+    }
+
+    fn dual(&self, sector: SectorId) -> SectorId {
+        sector
+    }
+
+    fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+        if left.id() < 2 && right.id() < 2 {
+            [SectorId::new(left.id() ^ right.id())]
+                .into_iter()
+                .collect()
+        } else {
+            SectorVec::new()
+        }
+    }
+}
+
+fn layout_generic_value(sector: SectorId, row: usize, column: usize) -> f64 {
+    let diagonal = f64::from(row == column) * (2.0 + sector.id() as f64);
+    diagonal + ((row + 1) * 3 + (column + 1) * 5 + sector.id()) as f64 / 32.0
+}
+
+fn block_value(data: &[f64], block: BlockRef<'_>, row: usize, column: usize) -> f64 {
+    data[block.offset() + row * block.strides()[0] + column * block.strides()[1]]
+}
+
+fn fill_layout_generic_data(space: &BoundDynamicFusionMapSpace<LayoutGenericRule>) -> Vec<f64> {
+    let structure = space.space().structure();
+    let mut data = vec![0.0; space.space().required_len().unwrap()];
+    for index in 0..structure.block_count() {
+        let block = structure.block(index).unwrap();
+        let sector = block.key().as_fusion_tree_pair().unwrap().coupled();
+        for column in 0..block.shape()[1] {
+            for row in 0..block.shape()[0] {
+                let offset =
+                    block.offset() + row * block.strides()[0] + column * block.strides()[1];
+                data[offset] = layout_generic_value(sector, row, column);
+            }
+        }
+    }
+    data
+}
+
+struct LayoutGenericInput {
+    space: BoundDynamicFusionMapSpace<LayoutGenericRule>,
+    data: Vec<f64>,
+}
+
+fn layout_generic_qr_fixture(
+    degeneracy: usize,
+) -> Result<(LayoutGenericInput, LayoutGenericInput), Box<dyn std::error::Error>> {
+    let provider = Arc::new(LayoutGenericRule);
+    let vacuum = SectorId::new(0);
+    let charge = SectorId::new(1);
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([SectorLeg::new(
+            [(vacuum, degeneracy), (charge, 2 * degeneracy)],
+            false,
+        )]),
+        FusionProductSpace::new([SectorLeg::new(
+            [(vacuum, 2 * degeneracy), (charge, degeneracy)],
+            false,
+        )]),
+    );
+    let ordinary = BoundDynamicFusionMapSpace::from_final_homspace_generic(
+        Arc::clone(&provider),
+        homspace.clone(),
+    )?;
+    let expert = |reverse: bool| {
+        let ordinary_structure = ordinary.space().structure();
+        let mut offset = 1;
+        let mut blocks = Vec::with_capacity(ordinary_structure.block_count());
+        let mut indices = (0..ordinary_structure.block_count()).collect::<Vec<_>>();
+        if reverse {
+            indices.reverse();
+        }
+        for index in indices {
+            let block = ordinary_structure.block(index)?;
+            blocks.push(BlockSpec::column_major_with_key(
+                block.key().clone(),
+                block.shape().to_vec(),
+                offset,
+            )?);
+            offset += block.element_count()? + 1;
+        }
+        let structure = BlockStructure::from_blocks_with_rank(2, blocks)?;
+        let dense_dim = 3 * degeneracy;
+        let typed = FusionTensorMapSpace::new_unbound(
+            TensorMapSpace::<1, 1>::from_dims([dense_dim], [dense_dim])?,
+            homspace.clone(),
+            structure,
+        )?
+        .try_bind_rule(provider.as_ref())?;
+        let dynamic = DynamicFusionMapSpace::from_typed(&typed);
+        let bound = BoundDynamicFusionMapSpace::bind_generic(dynamic, Arc::clone(&provider))?;
+        let data = fill_layout_generic_data(&bound);
+        Ok::<_, Box<dyn std::error::Error>>(LayoutGenericInput { space: bound, data })
+    };
+    Ok((expert(false)?, expert(true)?))
+}
+
+fn assert_layout_generic_source(
+    space: &BoundDynamicFusionMapSpace<LayoutGenericRule>,
+    data: &[f64],
+) {
+    let structure = space.space().structure();
+    assert_eq!(structure.block_count(), 2);
+    for index in 0..structure.block_count() {
+        let block = structure.block(index).unwrap();
+        let sector = block.key().as_fusion_tree_pair().unwrap().coupled();
+        for column in 0..block.shape()[1] {
+            for row in 0..block.shape()[0] {
+                assert_eq!(
+                    block_value(data, block, row, column),
+                    layout_generic_value(sector, row, column)
+                );
+            }
+        }
+    }
+}
+
+fn factor_block_for_sector<'a>(
+    factor: &'a BoundDynFactor<LayoutGenericRule, f64>,
+    sector: SectorId,
+) -> BlockRef<'a> {
+    let structure = factor.space().space().structure();
+    (0..structure.block_count())
+        .map(|index| structure.block(index).unwrap())
+        .find(|block| block.key().as_fusion_tree_pair().unwrap().coupled() == sector)
+        .expect("the compact factor retains every source sector")
+}
+
+fn assert_layout_generic_factors_equal(
+    actual: &BoundDynFactor<LayoutGenericRule, f64>,
+    expected: &BoundDynFactor<LayoutGenericRule, f64>,
+) {
+    assert_eq!(
+        actual.space().space().homspace(),
+        expected.space().space().homspace()
+    );
+    let actual_structure = actual.space().space().structure();
+    let expected_structure = expected.space().space().structure();
+    assert_eq!(
+        actual_structure.block_count(),
+        expected_structure.block_count()
+    );
+    for index in 0..expected_structure.block_count() {
+        let expected_block = expected_structure.block(index).unwrap();
+        let actual_block = actual_structure.block_by_key(expected_block.key()).unwrap();
+        assert_eq!(actual_block.shape(), expected_block.shape());
+        for column in 0..expected_block.shape()[1] {
+            for row in 0..expected_block.shape()[0] {
+                let actual_value = block_value(actual.data(), actual_block, row, column);
+                let expected_value = block_value(expected.data(), expected_block, row, column);
+                let tolerance = 512.0 * f64::EPSILON * expected_value.abs().max(1.0);
+                assert!((actual_value - expected_value).abs() <= tolerance);
+            }
+        }
+    }
+}
+
+fn assert_layout_generic_qr_reconstructs(
+    left: &BoundDynFactor<LayoutGenericRule, f64>,
+    right: &BoundDynFactor<LayoutGenericRule, f64>,
+) {
+    for sector in [SectorId::new(0), SectorId::new(1)] {
+        let left_block = factor_block_for_sector(left, sector);
+        let right_block = factor_block_for_sector(right, sector);
+        assert_eq!(left_block.shape()[1], right_block.shape()[0]);
+        for column in 0..right_block.shape()[1] {
+            for row in 0..left_block.shape()[0] {
+                let actual = (0..left_block.shape()[1])
+                    .map(|inner| {
+                        block_value(left.data(), left_block, row, inner)
+                            * block_value(right.data(), right_block, inner, column)
+                    })
+                    .sum::<f64>();
+                let expected = layout_generic_value(sector, row, column);
+                let tolerance = 2048.0 * f64::EPSILON * expected.abs().max(1.0);
+                assert!((actual - expected).abs() <= tolerance);
+            }
+        }
+    }
+}
+
+fn run_layout_generic_qr(
+    degeneracy: usize,
+    min_time: Duration,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !operation_enabled("qr_compact_generic_layout") || !form_enabled("owned") {
+        return Ok(());
+    }
+    let (ordered, reordered) = layout_generic_qr_fixture(degeneracy)?;
+    assert_layout_generic_source(&ordered.space, &ordered.data);
+    assert_layout_generic_source(&reordered.space, &reordered.data);
+    let ordered_structure = ordered.space.space().structure();
+    let reordered_structure = reordered.space.space().structure();
+    assert_eq!(
+        ordered_structure.block(0)?.key(),
+        reordered_structure.block(1)?.key()
+    );
+    assert_eq!(
+        ordered_structure.block(1)?.key(),
+        reordered_structure.block(0)?.key()
+    );
+
+    let ordered_input = BoundDynamicTensorRef::try_new(&ordered.space, &ordered.data)?;
+    let reordered_input = BoundDynamicTensorRef::try_new(&reordered.space, &reordered.data)?;
+    let mut preflight_dense = DefaultDenseExecutor::new();
+    let ordered_expected = qr_compact_dyn_generic(&mut preflight_dense, &ordered_input)?;
+    let reordered_expected = qr_compact_dyn_generic(&mut preflight_dense, &reordered_input)?;
+    assert_layout_generic_factors_equal(&reordered_expected.0, &ordered_expected.0);
+    assert_layout_generic_factors_equal(&reordered_expected.1, &ordered_expected.1);
+    assert_layout_generic_qr_reconstructs(&ordered_expected.0, &ordered_expected.1);
+    assert_layout_generic_qr_reconstructs(&reordered_expected.0, &reordered_expected.1);
+
+    println!(
+        "# GenericLayout: qr_fixture_matrices=2 row_trees=2 col_trees=2 source_blocks=2 matrix_shapes={}x{},{}x{}",
+        degeneracy,
+        2 * degeneracy,
+        2 * degeneracy,
+        degeneracy
+    );
+    for (symmetry, input) in [
+        ("GenericLayout-ordered", &ordered_input),
+        ("GenericLayout-reordered", &reordered_input),
+    ] {
+        let runtime = benchmark_runtime()?;
+        let mut dense = DefaultDenseExecutor::new();
+        let (left, right) = bench(
+            &runtime,
+            symmetry,
+            "qr_compact_generic_layout",
+            "owned",
+            "first_after_setup",
+            "warm_after_setup",
+            min_time,
+            || qr_compact_dyn_generic(&mut dense, input),
+        )?;
+        assert_layout_generic_qr_reconstructs(&left, &right);
+    }
+    Ok(())
 }
 
 macro_rules! run_provider {
@@ -854,6 +1122,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 | "contract_input_swap"
                 | "contract_input_output_swap"
                 | "qr_compact"
+                | "qr_compact_generic_layout"
         ) {
             return Err(Box::new(Error::InvalidArgument(format!(
                 "unknown OP_MATRIX_OPERATION `{operation}`"
@@ -917,6 +1186,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("symmetry,operation,form,phase,iterations,us_per_iter,tree_hits,tree_misses,tree_evictions,tree_bypasses,tree_entries_delta,tree_charged_payload_bytes_before,tree_charged_payload_bytes_after,tree_charged_payload_bytes_delta,fusion_layout_misses,fusion_layout_evictions,fusion_layout_bypasses,fusion_layout_entries_delta,fusion_layout_charged_payload_bytes_before,fusion_layout_charged_payload_bytes_after,fusion_layout_charged_payload_bytes_delta,complete_hom_hits,complete_hom_misses,complete_hom_admissions,complete_hom_evictions,complete_hom_bypasses,complete_hom_entries_delta,complete_hom_charged_bytes_before,complete_hom_charged_bytes_after,complete_hom_charged_bytes_delta,exact_layout_admission,caller_allocation_calls,caller_requested_allocation_bytes,operation_local_scratch_bytes,provider_queries,transform_passes,gemm_calls,host_device_transfers");
 
     let min_time = Duration::from_millis(min_ms);
+    run_layout_generic_qr(degeneracy, min_time)?;
     run_provider!(
         "U1",
         U1FusionRule,
