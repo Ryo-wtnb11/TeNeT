@@ -184,7 +184,8 @@ fn rejected() -> DenseError {
 }
 
 impl DenseExecutor for RejectDense {
-    fn svd(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+    fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        black_box(input);
         self.calls += 1;
         Err(rejected())
     }
@@ -342,6 +343,8 @@ fn env_usize(name: &str, default: usize) -> usize {
 fn main() {
     let iterations = env_usize("TENET_GENERIC_ASSEMBLER_ITERS", 2_000);
     let samples = env_usize("TENET_GENERIC_ASSEMBLER_SAMPLES", 7);
+    assert!(iterations > 0, "iterations must be nonzero");
+    assert!(samples > 0, "samples must be nonzero");
     println!("case,sample,iterations,ns_per_iter,alloc_calls_per_iter,alloc_bytes_per_iter");
     for trees in [1, 2, 4, 8, 16] {
         measure(
