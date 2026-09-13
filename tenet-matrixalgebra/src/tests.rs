@@ -2241,7 +2241,7 @@ fn checked_only_generic_values_borrow_canonical_input_regions() {
 }
 
 #[test]
-fn checked_only_generic_values_keep_padded_reordered_fallback() {
+fn checked_generic_values_keep_padded_reordered_fallback() {
     let (canonical_space, hermitian, general) = generic_values_endomorphism_input();
     let (padded_space, padded_hermitian) =
         padded_reordered_generic_endomorphism_input(&canonical_space, &hermitian);
