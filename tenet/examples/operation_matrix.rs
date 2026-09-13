@@ -662,6 +662,7 @@ fn run_checked_sun(
         ("contract_identity", 5),
         ("contract_input_swap", 6),
         ("contract_input_output_swap", 7),
+        ("qr_compact", 8),
     ] {
         if !operation_enabled(operation) || !form_enabled("owned") {
             continue;
@@ -753,6 +754,19 @@ fn run_checked_sun(
                     lhs
                 );
             }
+            8 => {
+                let (q, r) = bench(
+                    &runtime,
+                    symmetry,
+                    operation,
+                    "owned",
+                    "cold",
+                    "warm",
+                    min_time,
+                    || lhs.qr_compact(),
+                )?;
+                assert_same_tensor!(q.compose(&r)?, lhs, lhs);
+            }
             _ => {
                 let (lhs_axes, output_axes) = match action {
                     5 => (&[2, 3][..], &[0, 1, 2, 3][..]),
@@ -802,6 +816,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 | "contract_identity"
                 | "contract_input_swap"
                 | "contract_input_output_swap"
+                | "qr_compact"
         ) {
             return Err(Box::new(Error::InvalidArgument(format!(
                 "unknown OP_MATRIX_OPERATION `{operation}`"

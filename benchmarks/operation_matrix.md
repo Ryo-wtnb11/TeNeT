@@ -25,10 +25,11 @@ swap, and contracted-input plus output swap. An owned `compose` row checks
 that its result equals the canonical contraction before reporting it.
 With the default `racah-generated` feature it also runs exact checked-Generic
 SU3 `[1,1]` and SU4 `[1,0,1]` fixtures for public owned transforms, reductions,
-compose, and contract. Transform/compose/contract checks are public-call
+compose, contract, and compact QR. Transform/compose/contract checks are public-call
 self-consistency checks comparing provider authority, spaces, block layout,
 full fusion-tree keys, and payload; scale/add also check elementary payload
-laws, while norm/inner check scalar identities. On this base those fixtures
+laws, norm/inner check scalar identities, and compact QR reconstructs the input
+outside timing. On this base those fixtures
 print an explicit trace exclusion because this exact `SUNFusionRule` lacks the
 `SectorCodec` bound required by checked trace dispatch, and a destination
 exclusion because it lacks the required multiplicity-free dispatch bounds.
@@ -118,7 +119,7 @@ process-global TensorKit caches warmed by earlier rows; it is not directly
 comparable to TeNeT's fresh-`Runtime` cold row. Only matching warm rows under
 the recorded one-thread BLAS configuration are timing controls.
 
-The remaining #9 rows (ordered contract, compact SVD/QR, compact diagonal,
+The remaining #9 rows (ordered contract, compact SVD, compact diagonal,
 and other lazy-adjoint consumers) are
 not substituted with other operations. Add each only with its real public form
 and available counters. This diagnostic harness remains outside required CI;
