@@ -10319,6 +10319,21 @@ mod sector_matricization_tests {
         pair
     }
 
+    fn generic_pair(coupled: usize, row_vertex: usize, col_vertex: usize) -> FusionTreePairKey {
+        FusionTreePairKey::try_pair_from_sector_ids(
+            [1, 1],
+            [1, 1],
+            coupled,
+            [false; 2],
+            [false; 2],
+            std::iter::empty::<usize>(),
+            std::iter::empty::<usize>(),
+            [row_vertex],
+            [col_vertex],
+        )
+        .unwrap()
+    }
+
     #[test]
     fn sector_matricizations_preserve_encounter_order_and_padded_block_values() {
         // What: noncanonical storage packs repeated row/column trees into
@@ -10460,5 +10475,145 @@ mod sector_matricization_tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn generic_sector_matricizations_preserve_full_tree_identity_and_exact_layout() {
+        let structure = BlockStructure::from_blocks_with_rank(
+            4,
+            vec![
+                BlockSpec::with_key(
+                    generic_pair(1, 2, 1).into(),
+                    vec![1, 2, 2, 1],
+                    vec![1, 17, 3, 40],
+                    5,
+                )
+                .unwrap(),
+                BlockSpec::with_key(
+                    generic_pair(0, 1, 1).into(),
+                    vec![1, 1, 1, 1],
+                    vec![1, 7, 5, 3],
+                    80,
+                )
+                .unwrap(),
+                BlockSpec::with_key(
+                    generic_pair(1, 1, 2).into(),
+                    vec![1, 1, 1, 3],
+                    vec![1, 8, 2, 4],
+                    60,
+                )
+                .unwrap(),
+                BlockSpec::with_key(
+                    generic_pair(1, 1, 1).into(),
+                    vec![1, 1, 2, 1],
+                    vec![1, 9, 5, 30],
+                    40,
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+        let mut real = vec![0.0; structure.required_len().unwrap()];
+        for (index, value) in [
+            (5, 11.0),
+            (22, 12.0),
+            (8, 13.0),
+            (25, 14.0),
+            (80, 90.0),
+            (60, 31.0),
+            (64, 32.0),
+            (68, 33.0),
+            (40, 21.0),
+            (45, 22.0),
+        ] {
+            real[index] = value;
+        }
+        let expected = [
+            11.0, 12.0, 21.0, 13.0, 14.0, 22.0, 0.0, 0.0, 31.0, 0.0, 0.0, 32.0, 0.0, 0.0, 33.0,
+        ];
+
+        let matrices = sector_matricizations_generic(&structure, &real, 2).unwrap();
+        assert_eq!(
+            matrices
+                .iter()
+                .map(|matrix| matrix.sector)
+                .collect::<Vec<_>>(),
+            [SectorId::new(1), SectorId::new(0)]
+        );
+        assert_eq!((matrices[0].rows, matrices[0].cols), (3, 5));
+        assert_eq!(matrices[0].data, expected);
+        assert_eq!(matrices[1].data, [90.0]);
+        assert_eq!(
+            matrices[0]
+                .row_trees
+                .iter()
+                .map(|(tree, offset, shape)| (tree.vertices()[0].get(), *offset, shape.clone()))
+                .collect::<Vec<_>>(),
+            [(2, 0, vec![1, 2]), (1, 2, vec![1, 1])]
+        );
+        assert_eq!(
+            matrices[0]
+                .col_trees
+                .iter()
+                .map(|(tree, offset, shape)| (tree.vertices()[0].get(), *offset, shape.clone()))
+                .collect::<Vec<_>>(),
+            [(1, 0, vec![2, 1]), (2, 2, vec![1, 3])]
+        );
+
+        let complex = real
+            .iter()
+            .map(|&value| Complex64::new(value, -value / 10.0))
+            .collect::<Vec<_>>();
+        let complex_matrices = sector_matricizations_generic(&structure, &complex, 2).unwrap();
+        assert_eq!(
+            complex_matrices[0].data,
+            expected.map(|value| Complex64::new(value, -value / 10.0))
+        );
+        assert_eq!(complex_matrices[1].data, [Complex64::new(90.0, -9.0)]);
+
+        let empty = BlockStructure::from_blocks_with_rank(4, Vec::new()).unwrap();
+        assert!(sector_matricizations_generic::<f64>(&empty, &[], 2)
+            .unwrap()
+            .is_empty());
+
+        let scalar_key =
+            FusionTreePairKey::try_pair_from_sector_ids([], [], 0, [], [], [], [], [], []).unwrap();
+        let scalar = BlockStructure::from_blocks_with_rank(
+            0,
+            vec![BlockSpec::with_key(scalar_key.into(), vec![], vec![], 1).unwrap()],
+        )
+        .unwrap();
+        assert_eq!(
+            sector_matricizations_generic(&scalar, &[0.0, 7.0], 0).unwrap()[0].data,
+            [7.0]
+        );
+
+        let zero_extent = BlockStructure::from_blocks_with_rank(
+            4,
+            vec![BlockSpec::with_key(
+                generic_pair(1, 1, 1).into(),
+                vec![0, 1, 1, 1],
+                vec![1, 1, 1, 1],
+                0,
+            )
+            .unwrap()],
+        )
+        .unwrap();
+        let zero_matrix = sector_matricizations_generic::<f64>(&zero_extent, &[], 2).unwrap();
+        assert_eq!((zero_matrix[0].rows, zero_matrix[0].cols), (0, 1));
+        assert!(zero_matrix[0].data.is_empty());
+
+        let non_fusion = BlockStructure::from_blocks_with_rank(
+            1,
+            vec![BlockSpec::with_key(BlockKey::opaque([7]), vec![1], vec![1], 0).unwrap()],
+        )
+        .unwrap();
+        assert!(matches!(
+            sector_matricizations_generic::<f64>(&non_fusion, &[1.0], 1),
+            Err(OperationError::ExpectedFusionTreeBlock {
+                tensor: "tsvd",
+                index: 0
+            })
+        ));
     }
 }
