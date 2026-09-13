@@ -918,15 +918,15 @@ fn run_checked_compact_operation<D: HarnessScalar>(
     input: &BoundDynamicTensorRef<'_, LayoutGenericRule, D>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match operation {
-        "qr" => drop(
+        "qr" => drop(black_box(
             qr_compact_dyn_checked_generic(dense, input).map_err(checked_compact_example_error)?,
-        ),
-        "svd" => drop(
+        )),
+        "svd" => drop(black_box(
             svd_compact_dyn_checked_generic(dense, input).map_err(checked_compact_example_error)?,
-        ),
-        "lq" => drop(
+        )),
+        "lq" => drop(black_box(
             lq_compact_dyn_checked_generic(dense, input).map_err(checked_compact_example_error)?,
-        ),
+        )),
         _ => unreachable!("fixed checked compact operation table"),
     }
     Ok(())
