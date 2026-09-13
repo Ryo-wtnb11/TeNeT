@@ -6210,6 +6210,25 @@ fn canonical_generic_sector_regions(
     Ok((sectors_are_ordered && trees_are_ordered).then_some(regions))
 }
 
+fn generic_value_matricizations<'a, D>(
+    structure: &BlockStructure,
+    data: &'a [D],
+    nout: usize,
+) -> Result<ValueMatricizations<'a, D>, OperationError>
+where
+    D: FactorScalar,
+{
+    let regions = canonical_generic_sector_regions(structure, nout)?;
+    Ok(match regions {
+        Some(regions) => ValueMatricizations::Regions { data, regions },
+        None => {
+            #[cfg(test)]
+            record_values_matricization_fallback();
+            ValueMatricizations::Packed(sector_matricizations_generic(structure, data, nout)?)
+        }
+    })
+}
+
 fn value_matricizations<'a, D>(
     structure: &BlockStructure,
     data: &'a [D],
@@ -8626,22 +8645,8 @@ where
     D: FactorScalar,
 {
     let space = input.space().space();
-    let regions = canonical_generic_sector_regions(space.structure(), space.nout())?;
-    let matricizations = match regions {
-        Some(regions) => ValueMatricizations::Regions {
-            data: input.data(),
-            regions,
-        },
-        None => {
-            #[cfg(test)]
-            record_values_matricization_fallback();
-            ValueMatricizations::Packed(sector_matricizations_generic(
-                space.structure(),
-                input.data(),
-                space.nout(),
-            )?)
-        }
-    };
+    let matricizations =
+        generic_value_matricizations(space.structure(), input.data(), space.nout())?;
     let mut singular_values = Vec::with_capacity(matricizations.len());
     for index in 0..matricizations.len() {
         let matrix = matricizations.get(index)?;
@@ -9684,14 +9689,18 @@ where
     D: FactorScalar,
 {
     let space = input.space().space();
-    let matrices = sector_matricizations_generic(space.structure(), input.data(), space.nout())
-        .map_err(CheckedGenericFactorPlanError::from)?;
-    let mut singular_values = Vec::with_capacity(matrices.len());
-    for matrix in &matrices {
+    let matricizations =
+        generic_value_matricizations(space.structure(), input.data(), space.nout())
+            .map_err(CheckedGenericFactorPlanError::from)?;
+    let mut singular_values = Vec::with_capacity(matricizations.len());
+    for index in 0..matricizations.len() {
+        let matrix = matricizations
+            .get(index)
+            .map_err(CheckedGenericFactorPlanError::from)?;
         let input_shape = [matrix.rows, matrix.cols];
         let input_strides = [1usize, matrix.rows];
         let input_view =
-            DenseView::new(&matrix.data, &input_shape, &input_strides, 0).map_err(|error| {
+            DenseView::new(matrix.data, &input_shape, &input_strides, 0).map_err(|error| {
                 CheckedGenericFactorPlanError::Operation(OperationError::Dense(error))
             })?;
         let values = dense.svd_vals(D::dense_read(input_view)).map_err(|error| {
@@ -10146,16 +10155,20 @@ where
         ));
     }
     let matricizations =
-        sector_matricizations_generic(space.structure(), input.data(), space.nout())
+        generic_value_matricizations(space.structure(), input.data(), space.nout())
             .map_err(CheckedGenericFactorPlanError::from)?;
-    validate_hermitian_matricizations(&matricizations)
+    matricizations
+        .validate_hermitian()
         .map_err(CheckedGenericFactorPlanError::from)?;
     let mut eigenvalues = Vec::with_capacity(matricizations.len());
-    for matrix in &matricizations {
+    for index in 0..matricizations.len() {
+        let matrix = matricizations
+            .get(index)
+            .map_err(CheckedGenericFactorPlanError::from)?;
         let n = matrix.rows;
         let shape = [matrix.rows, matrix.cols];
         let strides = [1usize, matrix.rows];
-        let view = DenseView::new(&matrix.data, &shape, &strides, 0).map_err(|error| {
+        let view = DenseView::new(matrix.data, &shape, &strides, 0).map_err(|error| {
             CheckedGenericFactorPlanError::Operation(OperationError::Dense(error))
         })?;
         let values_tensor = dense.eigh_vals(D::dense_read(view)).map_err(|error| {
@@ -10196,14 +10209,17 @@ where
         ));
     }
     let matricizations =
-        sector_matricizations_generic(space.structure(), input.data(), space.nout())
+        generic_value_matricizations(space.structure(), input.data(), space.nout())
             .map_err(CheckedGenericFactorPlanError::from)?;
     let mut eigenvalues = Vec::with_capacity(matricizations.len());
-    for matrix in &matricizations {
+    for index in 0..matricizations.len() {
+        let matrix = matricizations
+            .get(index)
+            .map_err(CheckedGenericFactorPlanError::from)?;
         let n = matrix.rows;
         let shape = [matrix.rows, matrix.cols];
         let strides = [1usize, matrix.rows];
-        let view = DenseView::new(&matrix.data, &shape, &strides, 0).map_err(|error| {
+        let view = DenseView::new(matrix.data, &shape, &strides, 0).map_err(|error| {
             CheckedGenericFactorPlanError::Operation(OperationError::Dense(error))
         })?;
         let values_tensor = dense.eig_vals(D::dense_read(view)).map_err(|error| {

@@ -22,7 +22,7 @@ use crate::factorize::{
 use crate::*;
 use num_complex::{Complex32, Complex64};
 use num_traits::Zero;
-use std::{cell::Cell, fmt, sync::Arc};
+use std::{cell::Cell, convert::Infallible, fmt, sync::Arc};
 use tenet_dense::{
     DenseBackend, DenseDotConfig, DenseError, DenseExecutor, DenseRead, DenseTensor, DenseWrite,
 };
@@ -1382,6 +1382,100 @@ struct CountingDense {
     eigh_calls: usize,
 }
 
+#[derive(Debug)]
+struct ValuesInputObservation {
+    operation: ValuesOperation,
+    pointer: usize,
+    shape: Vec<usize>,
+    strides: Vec<usize>,
+    offset: usize,
+    values: Vec<Complex64>,
+}
+
+struct ValuesInputSpy {
+    inner: tenet_dense::DefaultDenseExecutor,
+    observations: Vec<ValuesInputObservation>,
+}
+
+impl Default for ValuesInputSpy {
+    fn default() -> Self {
+        Self {
+            inner: tenet_dense::DefaultDenseExecutor::new(),
+            observations: Vec::new(),
+        }
+    }
+}
+
+impl ValuesInputSpy {
+    fn observe(&mut self, operation: ValuesOperation, input: DenseRead<'_>) {
+        let (pointer, strides, offset, values) = match input {
+            DenseRead::F64(view) => (
+                view.data().as_ptr() as usize,
+                view.strides().to_vec(),
+                view.offset(),
+                view.data()
+                    .iter()
+                    .map(|&value| Complex64::new(value, 0.0))
+                    .collect(),
+            ),
+            DenseRead::C64(view) => (
+                view.data().as_ptr() as usize,
+                view.strides().to_vec(),
+                view.offset(),
+                view.data().to_vec(),
+            ),
+            _ => panic!("checked Generic values fixture must be f64 or c64"),
+        };
+        self.observations.push(ValuesInputObservation {
+            operation,
+            pointer,
+            shape: input.shape().to_vec(),
+            strides,
+            offset,
+            values,
+        });
+    }
+}
+
+impl DenseExecutor for ValuesInputSpy {
+    fn svd(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        panic!("test only exercises values-only operations")
+    }
+
+    fn qr(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        panic!("test only exercises values-only operations")
+    }
+
+    fn eigh(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        panic!("test only exercises values-only operations")
+    }
+
+    fn svd_vals(&mut self, input: DenseRead<'_>) -> Result<DenseTensor, DenseError> {
+        self.observe(ValuesOperation::Svd, input);
+        self.inner.svd_vals(input)
+    }
+
+    fn eigh_vals(&mut self, input: DenseRead<'_>) -> Result<DenseTensor, DenseError> {
+        self.observe(ValuesOperation::Eigh, input);
+        self.inner.eigh_vals(input)
+    }
+
+    fn eig_vals(&mut self, input: DenseRead<'_>) -> Result<DenseTensor, DenseError> {
+        self.observe(ValuesOperation::Eig, input);
+        self.inner.eig_vals(input)
+    }
+
+    fn dot_general_into(
+        &mut self,
+        _: DenseWrite<'_>,
+        _: DenseRead<'_>,
+        _: DenseRead<'_>,
+        _: &DenseDotConfig,
+    ) -> Result<(), DenseError> {
+        panic!("test only exercises values-only operations")
+    }
+}
+
 impl Default for CountingDense {
     fn default() -> Self {
         Self {
@@ -1475,6 +1569,66 @@ impl FusionRule for LateGenericSpy {
     }
     fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
         self.rule.nsymbol(left, right, coupled)
+    }
+}
+
+struct CheckedOnlyFactorRule {
+    calls: Cell<usize>,
+}
+
+impl CheckedOnlyFactorRule {
+    fn call<T>(&self, value: impl FnOnce(&FactorGenericRule) -> T) -> Result<T, Infallible> {
+        self.calls.set(self.calls.get() + 1);
+        Ok(value(&FactorGenericRule))
+    }
+}
+
+impl CheckedGenericFusion for CheckedOnlyFactorRule {
+    type Error = Infallible;
+
+    fn rule_identity(&self) -> RuleIdentity {
+        FactorGenericRule.rule_identity()
+    }
+
+    fn fusion_style(&self) -> FusionStyleKind {
+        FactorGenericRule.fusion_style()
+    }
+
+    fn braiding_style(&self) -> BraidingStyleKind {
+        FactorGenericRule.braiding_style()
+    }
+
+    fn vacuum(&self) -> SectorId {
+        FactorGenericRule.vacuum()
+    }
+
+    fn try_dual(&self, sector: SectorId) -> Result<SectorId, Self::Error> {
+        self.call(|rule| rule.dual(sector))
+    }
+
+    fn try_fusion_channels(
+        &self,
+        left: SectorId,
+        right: SectorId,
+    ) -> Result<SectorVec, Self::Error> {
+        self.call(|rule| rule.fusion_channels(left, right))
+    }
+
+    fn try_fusion_channels_in_table(
+        &self,
+        left: SectorId,
+        right: SectorId,
+    ) -> Result<SectorVec, Self::Error> {
+        self.call(|rule| rule.fusion_channels(left, right))
+    }
+
+    fn try_nsymbol(
+        &self,
+        left: SectorId,
+        right: SectorId,
+        coupled: SectorId,
+    ) -> Result<usize, Self::Error> {
+        self.call(|rule| rule.nsymbol(left, right, coupled))
     }
 }
 
@@ -1798,6 +1952,480 @@ where
         }
     }
     (provider, checked, data)
+}
+
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
+fn bind_checked_only(
+    space: &BoundDynamicFusionMapSpace<impl FusionRule>,
+) -> (
+    Arc<CheckedOnlyFactorRule>,
+    BoundDynamicFusionMapSpace<CheckedOnlyFactorRule>,
+) {
+    let provider = Arc::new(CheckedOnlyFactorRule {
+        calls: Cell::new(0),
+    });
+    let checked = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+        Arc::clone(&provider),
+        space.space().homspace().clone(),
+    )
+    .unwrap();
+    (provider, checked)
+}
+
+fn generic_values_endomorphism_input() -> (
+    BoundDynamicFusionMapSpace<FactorGenericRule>,
+    Vec<Complex64>,
+    Vec<Complex64>,
+) {
+    let x = SectorId::new(1);
+    let leg = SectorLeg::new([(x, 1)], false);
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg.clone(), leg.clone()]),
+        FusionProductSpace::new([leg.clone(), leg]),
+    );
+    let space = BoundDynamicFusionMapSpace::from_final_homspace_generic(
+        Arc::new(FactorGenericRule),
+        homspace,
+    )
+    .unwrap();
+    let regions = space
+        .space()
+        .structure()
+        .coupled_sector_regions(2)
+        .unwrap()
+        .unwrap();
+    let mut hermitian = vec![Complex64::zero(); space.space().required_len().unwrap()];
+    let mut general = hermitian.clone();
+    for region in regions.iter() {
+        let (hermitian_matrix, general_matrix): (&[Complex64], &[Complex64]) =
+            match region.coupled().id() {
+                0 => (&[Complex64::new(-4.0, 0.0)], &[Complex64::new(2.0, -1.0)]),
+                1 => (
+                    &[
+                        Complex64::new(2.0, 0.0),
+                        Complex64::new(0.0, -1.0),
+                        Complex64::new(0.0, 1.0),
+                        Complex64::new(2.0, 0.0),
+                    ],
+                    &[
+                        Complex64::new(1.0, 1.0),
+                        Complex64::new(0.0, 0.0),
+                        Complex64::new(2.0, 0.0),
+                        Complex64::new(3.0, -1.0),
+                    ],
+                ),
+                sector => panic!("unexpected Generic values sector {sector}"),
+            };
+        assert_eq!(region.range().len(), hermitian_matrix.len());
+        hermitian[region.range()].copy_from_slice(hermitian_matrix);
+        general[region.range()].copy_from_slice(general_matrix);
+    }
+    (space, hermitian, general)
+}
+
+fn padded_reordered_generic_endomorphism_input(
+    source: &BoundDynamicFusionMapSpace<FactorGenericRule>,
+    source_data: &[Complex64],
+) -> (
+    BoundDynamicFusionMapSpace<FactorGenericRule>,
+    Vec<Complex64>,
+) {
+    let source_structure = source.space().structure();
+    let mut offset = 1usize;
+    let mut blocks = Vec::with_capacity(source_structure.block_count());
+    for index in (0..source_structure.block_count()).rev() {
+        let block = source_structure.block(index).unwrap();
+        blocks.push(
+            BlockSpec::column_major_with_key(block.key().clone(), block.shape().to_vec(), offset)
+                .unwrap(),
+        );
+        offset += block.shape().iter().product::<usize>() + 1;
+    }
+    let structure = BlockStructure::from_blocks_with_rank(4, blocks).unwrap();
+    let typed_space = FusionTensorMapSpace::new_unbound(
+        TensorMapSpace::<2, 2>::from_dims([1, 1], [1, 1]).unwrap(),
+        source.space().homspace().clone(),
+        structure,
+    )
+    .unwrap()
+    .try_bind_rule(source.provider())
+    .unwrap();
+    let tensor = TensorMap::<Complex64, 2, 2>::from_block_fn_with_fusion_space(
+        typed_space,
+        Complex64::zero(),
+        |key, indices| {
+            let block = source_structure
+                .block(source_structure.find_block_index_by_key(key).unwrap())
+                .unwrap();
+            source_data[block.offset()
+                + indices
+                    .iter()
+                    .zip(block.strides())
+                    .map(|(&index, &stride)| index * stride)
+                    .sum::<usize>()]
+        },
+    )
+    .unwrap();
+    let dynamic = DynamicFusionMapSpace::from_typed(tensor.fusion_space().unwrap());
+    let bound =
+        BoundDynamicFusionMapSpace::bind_generic(dynamic, Arc::clone(source.provider_arc()))
+            .unwrap();
+    (bound, tensor.data().to_vec())
+}
+
+fn assert_borrowed_values_inputs<D: FactorScalar>(
+    observations: &[ValuesInputObservation],
+    operation: ValuesOperation,
+    data: &[D],
+    regions: &[tenet_core::CoupledSectorRegion],
+) {
+    assert_eq!(observations.len(), regions.len());
+    for (observation, region) in observations.iter().zip(regions) {
+        assert_eq!(observation.operation, operation);
+        assert_eq!(observation.shape, [region.rows(), region.cols()]);
+        assert_eq!(observation.strides, [1, region.rows()]);
+        assert_eq!(observation.offset, 0);
+        assert_eq!(
+            observation.pointer,
+            data.as_ptr() as usize + region.range().start * std::mem::size_of::<D>()
+        );
+        let expected = data[region.range()]
+            .iter()
+            .map(|&value| value.widen_complex())
+            .collect::<Vec<_>>();
+        assert_eq!(observation.values, expected);
+    }
+}
+
+fn assert_real_spectra_by_sector_close(actual: &[SectorSpectrum], expected: &[SectorSpectrum]) {
+    assert_eq!(actual.len(), expected.len());
+    for expected in expected {
+        let actual = actual
+            .iter()
+            .find(|actual| actual.sector == expected.sector)
+            .unwrap();
+        assert_eq!(actual.values.len(), expected.values.len());
+        for (&actual, &expected) in actual.values.iter().zip(&expected.values) {
+            assert!((actual - expected).abs() < 1.0e-10);
+        }
+    }
+}
+
+fn assert_complex_spectra_by_sector_close(
+    actual: &[SectorSpectrum<Complex64>],
+    expected: &[SectorSpectrum<Complex64>],
+) {
+    assert_eq!(actual.len(), expected.len());
+    for expected in expected {
+        let actual = actual
+            .iter()
+            .find(|actual| actual.sector == expected.sector)
+            .unwrap();
+        assert_eq!(actual.values.len(), expected.values.len());
+        for (&actual, &expected) in actual.values.iter().zip(&expected.values) {
+            assert!((actual - expected).norm() < 1.0e-10);
+        }
+    }
+}
+
+#[test]
+fn checked_only_generic_values_borrow_canonical_input_regions() {
+    let (_, rectangular_space, rectangular_data) = checked_svd_truncation_input::<f64>(false);
+    let (rectangular_provider, rectangular_space) = bind_checked_only(&rectangular_space);
+    let rectangular_calls = rectangular_provider.calls.get();
+    let rectangular_before = rectangular_data.clone();
+    let rectangular_regions = rectangular_space
+        .space()
+        .structure()
+        .coupled_sector_regions(1)
+        .unwrap()
+        .unwrap();
+    let mut spy = ValuesInputSpy::default();
+    crate::factorize::reset_values_matricization_fallbacks();
+    let spectra = svd_vals_dyn_checked_generic(
+        &mut spy,
+        &BoundDynamicTensorRef::try_new(&rectangular_space, &rectangular_data).unwrap(),
+    )
+    .unwrap();
+    assert_borrowed_values_inputs(
+        &spy.observations,
+        ValuesOperation::Svd,
+        &rectangular_data,
+        &rectangular_regions,
+    );
+    assert_real_spectra_by_sector_close(
+        &spectra,
+        &[
+            SectorSpectrum {
+                sector: SectorId::new(0),
+                values: vec![4.0, 1.0],
+            },
+            SectorSpectrum {
+                sector: SectorId::new(1),
+                values: vec![3.0, 2.0],
+            },
+        ],
+    );
+    assert_eq!(rectangular_provider.calls.get(), rectangular_calls);
+    assert_eq!(rectangular_data, rectangular_before);
+
+    let (endomorphism_space, hermitian, general) = generic_values_endomorphism_input();
+    let (endomorphism_provider, endomorphism_space) = bind_checked_only(&endomorphism_space);
+    let provider_calls = endomorphism_provider.calls.get();
+    let regions = endomorphism_space
+        .space()
+        .structure()
+        .coupled_sector_regions(2)
+        .unwrap()
+        .unwrap();
+    let multiplicity_region = regions
+        .iter()
+        .find(|region| region.coupled() == SectorId::new(1))
+        .unwrap();
+    assert_eq!(multiplicity_region.row_trees().len(), 2);
+    assert_eq!(multiplicity_region.col_trees().len(), 2);
+    let hermitian_before = hermitian.clone();
+    let general_before = general.clone();
+    spy.observations.clear();
+    let eigh = eigh_vals_dyn_checked_generic(
+        &mut spy,
+        &BoundDynamicTensorRef::try_new(&endomorphism_space, &hermitian).unwrap(),
+    )
+    .unwrap();
+    assert_borrowed_values_inputs(
+        &spy.observations,
+        ValuesOperation::Eigh,
+        &hermitian,
+        &regions,
+    );
+    assert_real_spectra_by_sector_close(
+        &eigh,
+        &[
+            SectorSpectrum {
+                sector: SectorId::new(0),
+                values: vec![-4.0],
+            },
+            SectorSpectrum {
+                sector: SectorId::new(1),
+                values: vec![3.0, 1.0],
+            },
+        ],
+    );
+    spy.observations.clear();
+    let eig = eig_vals_dyn_checked_generic(
+        &mut spy,
+        &BoundDynamicTensorRef::try_new(&endomorphism_space, &general).unwrap(),
+    )
+    .unwrap();
+    assert_borrowed_values_inputs(&spy.observations, ValuesOperation::Eig, &general, &regions);
+    assert_complex_spectra_by_sector_close(
+        &eig,
+        &[
+            SectorSpectrum {
+                sector: SectorId::new(0),
+                values: vec![Complex64::new(2.0, -1.0)],
+            },
+            SectorSpectrum {
+                sector: SectorId::new(1),
+                values: vec![Complex64::new(3.0, -1.0), Complex64::new(1.0, 1.0)],
+            },
+        ],
+    );
+    assert_eq!(crate::factorize::values_matricization_fallbacks(), 0);
+    assert_eq!(endomorphism_provider.calls.get(), provider_calls);
+    assert_eq!(hermitian, hermitian_before);
+    assert_eq!(general, general_before);
+}
+
+#[test]
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
+fn checked_generic_values_keep_padded_reordered_fallback() {
+    let (canonical_space, hermitian, general) = generic_values_endomorphism_input();
+    let (padded_space, padded_hermitian) =
+        padded_reordered_generic_endomorphism_input(&canonical_space, &hermitian);
+    let (_, padded_general) =
+        padded_reordered_generic_endomorphism_input(&canonical_space, &general);
+    let provider = Arc::new(LateGenericSpy {
+        rule: FactorGenericRule,
+        fail_at: usize::MAX,
+        calls: Cell::new(0),
+    });
+    let canonical_space = BoundDynamicFusionMapSpace::bind_generic(
+        canonical_space.space().clone(),
+        Arc::clone(&provider),
+    )
+    .unwrap();
+    let padded_space = BoundDynamicFusionMapSpace::bind_generic(
+        padded_space.space().clone(),
+        Arc::clone(&provider),
+    )
+    .unwrap();
+    assert!(padded_space
+        .space()
+        .structure()
+        .coupled_sector_regions(2)
+        .unwrap()
+        .is_none());
+    let provider_calls = provider.calls.get();
+    let canonical_general = BoundDynamicTensorRef::try_new(&canonical_space, &general).unwrap();
+    let canonical_hermitian = BoundDynamicTensorRef::try_new(&canonical_space, &hermitian).unwrap();
+    let padded_general_input =
+        BoundDynamicTensorRef::try_new(&padded_space, &padded_general).unwrap();
+    let padded_hermitian_input =
+        BoundDynamicTensorRef::try_new(&padded_space, &padded_hermitian).unwrap();
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    let expected_svd = svd_vals_dyn_checked_generic(&mut dense, &canonical_general).unwrap();
+    let expected_eigh = eigh_vals_dyn_checked_generic(&mut dense, &canonical_hermitian).unwrap();
+    let expected_eig = eig_vals_dyn_checked_generic(&mut dense, &canonical_general).unwrap();
+
+    let general_before = padded_general.clone();
+    let hermitian_before = padded_hermitian.clone();
+    let mut spy = ValuesInputSpy::default();
+    crate::factorize::reset_values_matricization_fallbacks();
+    let actual_svd = svd_vals_dyn_checked_generic(&mut spy, &padded_general_input).unwrap();
+    let actual_eigh = eigh_vals_dyn_checked_generic(&mut spy, &padded_hermitian_input).unwrap();
+    let actual_eig = eig_vals_dyn_checked_generic(&mut spy, &padded_general_input).unwrap();
+    assert_eq!(crate::factorize::values_matricization_fallbacks(), 3);
+    assert_real_spectra_by_sector_close(&actual_svd, &expected_svd);
+    assert_real_spectra_by_sector_close(&actual_eigh, &expected_eigh);
+    assert_complex_spectra_by_sector_close(&actual_eig, &expected_eig);
+    assert_eq!(provider.calls.get(), provider_calls);
+    assert_eq!(padded_general, general_before);
+    assert_eq!(padded_hermitian, hermitian_before);
+
+    let general_start = padded_general.as_ptr() as usize;
+    let general_end = general_start + std::mem::size_of_val(padded_general.as_slice());
+    let hermitian_start = padded_hermitian.as_ptr() as usize;
+    let hermitian_end = hermitian_start + std::mem::size_of_val(padded_hermitian.as_slice());
+    for observation in &spy.observations {
+        let (start, end) = if observation.operation == ValuesOperation::Eigh {
+            (hermitian_start, hermitian_end)
+        } else {
+            (general_start, general_end)
+        };
+        assert!(observation.pointer < start || observation.pointer >= end);
+    }
+}
+
+#[test]
+fn checked_only_generic_eigh_validates_every_region_before_dense_work() {
+    let (space, mut hermitian, _) = generic_values_endomorphism_input();
+    let (provider, space) = bind_checked_only(&space);
+    let regions = space
+        .space()
+        .structure()
+        .coupled_sector_regions(2)
+        .unwrap()
+        .unwrap();
+    let later = regions.last().unwrap();
+    hermitian[later.range().start + 1] += Complex64::new(1.0, 0.0);
+    let before = hermitian.clone();
+    let provider_calls = provider.calls.get();
+    let mut dense = EighCallSpy::default();
+    crate::factorize::reset_values_matricization_fallbacks();
+
+    let error = eigh_vals_dyn_checked_generic(
+        &mut dense,
+        &BoundDynamicTensorRef::try_new(&space, &hermitian).unwrap(),
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        CheckedGenericFactorPlanError::Operation(OperationError::InvalidArgument {
+            message: "eigh requires Hermitian coupled-sector blocks",
+        })
+    ));
+    assert_eq!(dense.calls, 0);
+    assert_eq!(crate::factorize::values_matricization_fallbacks(), 0);
+    assert_eq!(provider.calls.get(), provider_calls);
+    assert_eq!(hermitian, before);
+}
+
+#[test]
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
+fn checked_only_generic_values_preserve_empty_scalar_and_shape_boundaries() {
+    let x = SectorId::new(1);
+    let empty_leg = SectorLeg::new([(x, 0)], false);
+    let empty_homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([empty_leg.clone()]),
+        FusionProductSpace::new([empty_leg]),
+    );
+    let empty_provider = Arc::new(CheckedOnlyFactorRule {
+        calls: Cell::new(0),
+    });
+    let empty_space = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+        Arc::clone(&empty_provider),
+        empty_homspace,
+    )
+    .unwrap();
+    let empty_calls = empty_provider.calls.get();
+    let empty_data: [f64; 0] = [];
+    let empty = BoundDynamicTensorRef::try_new(&empty_space, &empty_data).unwrap();
+    let mut reject = RejectExecutorCalls;
+    assert!(svd_vals_dyn_checked_generic(&mut reject, &empty)
+        .unwrap()
+        .is_empty());
+    assert!(eigh_vals_dyn_checked_generic(&mut reject, &empty)
+        .unwrap()
+        .is_empty());
+    assert!(eig_vals_dyn_checked_generic(&mut reject, &empty)
+        .unwrap()
+        .is_empty());
+    assert_eq!(empty_provider.calls.get(), empty_calls);
+
+    let scalar_provider = Arc::new(CheckedOnlyFactorRule {
+        calls: Cell::new(0),
+    });
+    let scalar_space = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+        Arc::clone(&scalar_provider),
+        FusionTreeHomSpace::new(FusionProductSpace::new([]), FusionProductSpace::new([])),
+    )
+    .unwrap();
+    let scalar_calls = scalar_provider.calls.get();
+    let scalar_data = [-3.0];
+    let scalar = BoundDynamicTensorRef::try_new(&scalar_space, &scalar_data).unwrap();
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    assert_eq!(
+        svd_vals_dyn_checked_generic(&mut dense, &scalar).unwrap()[0].values,
+        [3.0]
+    );
+    assert_eq!(
+        eigh_vals_dyn_checked_generic(&mut dense, &scalar).unwrap()[0].values,
+        [-3.0]
+    );
+    assert_eq!(
+        eig_vals_dyn_checked_generic(&mut dense, &scalar).unwrap()[0].values,
+        [Complex64::new(-3.0, 0.0)]
+    );
+    assert_eq!(scalar_provider.calls.get(), scalar_calls);
+
+    let (_, rectangular, data) = checked_svd_truncation_input::<f64>(false);
+    let (rectangular_provider, rectangular) = bind_checked_only(&rectangular);
+    let rectangular_calls = rectangular_provider.calls.get();
+    let rectangular = BoundDynamicTensorRef::try_new(&rectangular, &data).unwrap();
+    assert!(matches!(
+        eigh_vals_dyn_checked_generic(&mut reject, &rectangular),
+        Err(CheckedGenericFactorPlanError::Operation(
+            OperationError::UnsupportedTensorContractScope { .. }
+        ))
+    ));
+    assert!(matches!(
+        eig_vals_dyn_checked_generic(&mut reject, &rectangular),
+        Err(CheckedGenericFactorPlanError::Operation(
+            OperationError::UnsupportedTensorContractScope { .. }
+        ))
+    ));
+    assert_eq!(rectangular_provider.calls.get(), rectangular_calls);
 }
 
 fn assert_checked_svd_truncation<D>(complex: bool, truncation: &Truncation, kept: usize)
