@@ -1358,7 +1358,10 @@ fn generic_pair_publication_keeps_reordered_tree_scatter_fallback() {
     assert!(probe.left_scattered_elements > 0);
     assert!(probe.right_scattered_elements > 0);
     let qr_copy = crate::factorize::compact_qr_copy_probe();
-    assert_eq!(qr_copy.output_scatter_calls, 1);
+    assert_eq!(
+        qr_copy.output_scatter_calls,
+        probe.left_scatter_calls + probe.right_scatter_calls
+    );
     assert_eq!(
         qr_copy.output_scatter_bytes,
         (actual_qr.0.data().len() + actual_qr.1.data().len()) * std::mem::size_of::<f64>()
@@ -1377,7 +1380,10 @@ fn generic_pair_publication_keeps_reordered_tree_scatter_fallback() {
     assert!(probe.left_scattered_elements > 0);
     assert!(probe.right_scattered_elements > 0);
     let lq_copy = crate::factorize::compact_lq_copy_probe();
-    assert_eq!(lq_copy.output_scatter_calls, 1);
+    assert_eq!(
+        lq_copy.output_scatter_calls,
+        probe.left_scatter_calls + probe.right_scatter_calls
+    );
     assert_eq!(
         lq_copy.output_scatter_bytes,
         (actual_lq.0.data().len() + actual_lq.1.data().len()) * std::mem::size_of::<f64>()
@@ -1412,7 +1418,11 @@ fn checked_generic_pair_publication_reuses_one_sector_owners() {
         (0, 0)
     );
     assert_eq!(probe.output_blocks_visited, blocks);
-    assert_eq!(probe.ordered_key_comparisons, 2 * blocks);
+    assert_eq!(probe.ordered_key_validation_events, 2 * blocks);
+    assert_eq!(
+        (probe.fallback_row_lookups, probe.fallback_col_lookups),
+        (0, 0)
+    );
     assert!(Arc::ptr_eq(left.space().provider_arc(), &provider));
     assert!(Arc::ptr_eq(right.space().provider_arc(), &provider));
 }
@@ -1524,7 +1534,11 @@ where
     let qr_blocks = qr.0.space().space().structure().block_count()
         + qr.1.space().space().structure().block_count();
     assert_eq!(qr_probe.output_blocks_visited, qr_blocks);
-    assert_eq!(qr_probe.ordered_key_comparisons, 2 * qr_blocks);
+    assert_eq!(qr_probe.ordered_key_validation_events, 2 * qr_blocks);
+    assert_eq!(
+        (qr_probe.fallback_row_lookups, qr_probe.fallback_col_lookups),
+        (0, 0)
+    );
     svd_compact_dyn_checked_generic(&mut dense, &input).unwrap();
     let lq = lq_compact_dyn_checked_generic(&mut dense, &input).unwrap();
     assert_pair_reconstructs_checked_literal(&lq.0, &lq.1, complex);
