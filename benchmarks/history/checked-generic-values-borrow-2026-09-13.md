@@ -39,7 +39,9 @@ Fixture construction and checked admission are outside measurement. The timed
 prefix includes `BoundDynamicTensorRef` construction, checked routing, matrix
 selection or packing, the rejecting first dense call, error propagation, and
 destruction. `black_box` consumes the dense input view at that boundary. It
-does not run a dense numerical kernel or measure full factorization. Allocation
+specifically exercises checked SVD values with an already constructed region
+descriptor; EIGH and EIG correctness are covered by tests but are not timed.
+It does not run a dense numerical kernel or measure full factorization. Allocation
 figures count requests and requested bytes, not successful or live bytes. The
 rank-four provider is synthetic and structurally admitted; it is not a physical
 category and uses no Racah coefficients.
@@ -53,12 +55,14 @@ category and uses no Racah coefficients.
 | canonical, `T=8`, degeneracy 1 | 7,392.895 | 77.334 | 87 -> 1 | 5,728 -> 32 |
 | padded, `T=8`, degeneracy 1 | 7,578.875 | 7,221.729 | 87 -> 87 | 5,728 -> 5,728 |
 
-The canonical cases remove the TeNeT-owned matrix payload pack in this measured
-prefix. The padded controls keep identical allocation counts and requested
-bytes; their timing difference is not attributed to an algorithm change. The
-remaining one allocation and 32 requested bytes belong to the returned dense
-error path. These results do not claim that Tenferro performs no internal copy
-or that complete SVD/eigenvalue execution improves by the same ratio.
+Direct DenseExecutor-boundary tests prove that canonical matrix views borrow
+the original payload. Consistently, the canonical measurements contain no
+matrix payload pack. The padded controls keep identical allocation counts and
+requested bytes; their timing difference is not attributed to an algorithm
+change. The remaining one allocation and 32 requested bytes reserve the
+one-sector result vector and are freed on the injected dense error. These
+results do not claim that Tenferro performs no internal copy or that complete
+SVD/eigenvalue execution improves by the same ratio.
 
 Raw samples are in
 `checked-generic-values-borrow-baseline-2026-09-13.csv` and
