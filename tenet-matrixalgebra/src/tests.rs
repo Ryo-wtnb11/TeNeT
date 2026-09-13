@@ -1292,6 +1292,114 @@ fn assert_generic_factor_close(
     }
 }
 
+fn flattened_block_value<D: FactorScalar>(
+    data: &[D],
+    block: tenet_core::BlockRef<'_>,
+    axes: std::ops::Range<usize>,
+    mut flat_index: usize,
+) -> (usize, D) {
+    let mut offset = block.offset();
+    for axis in axes {
+        let coordinate = flat_index % block.shape()[axis];
+        flat_index /= block.shape()[axis];
+        offset += coordinate * block.strides()[axis];
+    }
+    (offset, data[offset])
+}
+
+fn assert_compact_factors_reconstruct_input<R, D>(
+    input: &BoundDynamicTensorRef<'_, R, D>,
+    left: &BoundDynFactor<R, D>,
+    diagonal: Option<&BoundDynFactor<R, D>>,
+    right: &BoundDynFactor<R, D>,
+) where
+    D: FactorScalar,
+{
+    let source_structure = input.space().space().structure();
+    let left_structure = left.space().space().structure();
+    let right_structure = right.space().space().structure();
+    for source_index in 0..source_structure.block_count() {
+        let source = source_structure.block(source_index).unwrap();
+        let BlockKey::FusionTree(source_key) = source.key() else {
+            panic!("factorization fixture must use fusion-tree blocks")
+        };
+        let left_block = (0..left_structure.block_count())
+            .map(|index| left_structure.block(index).unwrap())
+            .find(|block| {
+                block
+                    .key()
+                    .as_fusion_tree_pair()
+                    .is_some_and(|key| key.codomain_tree() == source_key.codomain_tree())
+            })
+            .unwrap();
+        let right_block = (0..right_structure.block_count())
+            .map(|index| right_structure.block(index).unwrap())
+            .find(|block| {
+                block
+                    .key()
+                    .as_fusion_tree_pair()
+                    .is_some_and(|key| key.domain_tree() == source_key.domain_tree())
+            })
+            .unwrap();
+        let rows = source.shape()[..input.space().space().nout()]
+            .iter()
+            .product::<usize>();
+        let cols = source.shape()[input.space().space().nout()..]
+            .iter()
+            .product::<usize>();
+        let rank = left_block.shape()[left_block.shape().len() - 1];
+        assert_eq!(right_block.shape()[0], rank);
+        let diagonal_block = diagonal.map(|factor| {
+            let structure = factor.space().space().structure();
+            (0..structure.block_count())
+                .map(|index| structure.block(index).unwrap())
+                .find(|block| {
+                    block
+                        .key()
+                        .as_fusion_tree_pair()
+                        .is_some_and(|key| key.coupled() == source_key.coupled())
+                })
+                .unwrap()
+        });
+        for column in 0..cols {
+            for row in 0..rows {
+                let mut reconstructed = D::zero();
+                for bond in 0..rank {
+                    let (left_offset, _) = flattened_block_value(
+                        left.data(),
+                        left_block,
+                        0..left_block.shape().len() - 1,
+                        row,
+                    );
+                    let left_value = left.data()
+                        [left_offset + bond * left_block.strides()[left_block.shape().len() - 1]];
+                    let (right_offset, _) = flattened_block_value(
+                        right.data(),
+                        right_block,
+                        1..right_block.shape().len(),
+                        column,
+                    );
+                    let right_value = right.data()[right_offset + bond * right_block.strides()[0]];
+                    let scale = diagonal_block.map_or_else(D::one, |block| {
+                        diagonal.unwrap().data()
+                            [block.offset() + bond * block.strides()[0] + bond * block.strides()[1]]
+                    });
+                    reconstructed = reconstructed + left_value * scale * right_value;
+                }
+                let (_, expected) = flattened_block_value(
+                    input.data(),
+                    source,
+                    0..source.shape().len(),
+                    row + rows * column,
+                );
+                assert!(
+                    (reconstructed.widen_complex() - expected.widen_complex()).norm() < 1.0e-10
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn provider_neutral_generic_compact_factorizations_remain_covered() {
     let (space, data) = generic_factorization_input();
@@ -1662,6 +1770,113 @@ struct ValuesInputObservation {
 struct ValuesInputSpy {
     inner: tenet_dense::DefaultDenseExecutor,
     observations: Vec<ValuesInputObservation>,
+}
+
+#[derive(Debug)]
+struct CompactInputObservation {
+    pointer: usize,
+    shape: Vec<usize>,
+    strides: Vec<usize>,
+    offset: usize,
+    values: Vec<Complex64>,
+}
+
+struct CompactInputSpy {
+    inner: tenet_dense::DefaultDenseExecutor,
+    operation: crate::factorize::CheckedCompactOperation,
+    observations: Vec<CompactInputObservation>,
+}
+
+impl CompactInputSpy {
+    fn new(operation: crate::factorize::CheckedCompactOperation) -> Self {
+        Self {
+            inner: tenet_dense::DefaultDenseExecutor::new(),
+            operation,
+            observations: Vec::new(),
+        }
+    }
+
+    fn observe(&mut self, input: DenseRead<'_>) {
+        let (pointer, strides, offset, values) = match input {
+            DenseRead::F64(view) => (
+                view.data().as_ptr() as usize,
+                view.strides().to_vec(),
+                view.offset(),
+                view.data()
+                    .iter()
+                    .map(|&value| Complex64::new(value, 0.0))
+                    .collect(),
+            ),
+            DenseRead::C64(view) => (
+                view.data().as_ptr() as usize,
+                view.strides().to_vec(),
+                view.offset(),
+                view.data().to_vec(),
+            ),
+            _ => panic!("checked Generic compact fixture must be f64 or c64"),
+        };
+        self.observations.push(CompactInputObservation {
+            pointer,
+            shape: input.shape().to_vec(),
+            strides,
+            offset,
+            values,
+        });
+    }
+}
+
+impl DenseExecutor for CompactInputSpy {
+    fn svd(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        panic!("compact SVD must use the destination API")
+    }
+
+    fn svd_into(
+        &mut self,
+        input: DenseRead<'_>,
+        u: DenseWrite<'_>,
+        s: DenseWrite<'_>,
+        vt: DenseWrite<'_>,
+    ) -> Result<(), DenseError> {
+        assert_eq!(
+            self.operation,
+            crate::factorize::CheckedCompactOperation::Svd
+        );
+        self.observe(input);
+        self.inner.svd_into(input, u, s, vt)
+    }
+
+    fn qr(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        panic!("compact QR/LQ must use the destination API")
+    }
+
+    fn qr_into(
+        &mut self,
+        input: DenseRead<'_>,
+        q: DenseWrite<'_>,
+        r: DenseWrite<'_>,
+    ) -> Result<(), DenseError> {
+        assert!(matches!(
+            self.operation,
+            crate::factorize::CheckedCompactOperation::Qr
+                | crate::factorize::CheckedCompactOperation::Lq
+        ));
+        self.observe(input);
+        self.inner.qr_into(input, q, r)
+    }
+
+    fn eigh(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        panic!("test only exercises compact QR/SVD/LQ")
+    }
+
+    fn dot_general_into(
+        &mut self,
+        _: DenseWrite<'_>,
+        _: DenseRead<'_>,
+        _: DenseRead<'_>,
+        _: &DenseDotConfig,
+    ) -> Result<(), DenseError> {
+        panic!("test only exercises compact QR/SVD/LQ")
+    }
 }
 
 impl Default for ValuesInputSpy {
@@ -2225,6 +2440,58 @@ where
     clippy::arc_with_non_send_sync,
     reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
 )]
+fn checked_svd_wide_input<D>() -> (
+    Arc<LateGenericSpy>,
+    BoundDynamicFusionMapSpace<LateGenericSpy>,
+    Vec<D>,
+)
+where
+    D: FactorScalar,
+{
+    let vacuum = SectorId::new(0);
+    let x = SectorId::new(1);
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([SectorLeg::new([(vacuum, 2), (x, 2)], false)]),
+        FusionProductSpace::new([SectorLeg::new([(vacuum, 2), (x, 3)], false)]),
+    );
+    let source = BoundDynamicFusionMapSpace::from_final_homspace_generic(
+        Arc::new(FactorGenericRule),
+        homspace,
+    )
+    .unwrap();
+    let provider = Arc::new(LateGenericSpy {
+        rule: FactorGenericRule,
+        fail_at: usize::MAX,
+        calls: Cell::new(0),
+    });
+    let checked =
+        BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
+            .unwrap();
+    let mut data = vec![D::zero(); checked.space().required_len().unwrap()];
+    let structure = checked.space().structure();
+    for index in 0..structure.block_count() {
+        let block = structure.block(index).unwrap();
+        let BlockKey::FusionTree(key) = block.key() else {
+            panic!("checked Generic fixture must use fusion-tree blocks")
+        };
+        let (rows, cols, matrix) = checked_svd_matrix(key.coupled(), true);
+        assert_eq!(block.shape(), [cols, rows]);
+        for column in 0..rows {
+            for row in 0..cols {
+                let source = matrix[column + rows * row].conj();
+                let destination =
+                    block.offset() + row * block.strides()[0] + column * block.strides()[1];
+                data[destination] = D::from_complex64(source);
+            }
+        }
+    }
+    (provider, checked, data)
+}
+
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
 fn bind_checked_only(
     space: &BoundDynamicFusionMapSpace<impl FusionRule>,
 ) -> (
@@ -2300,10 +2567,25 @@ fn padded_reordered_generic_endomorphism_input(
     BoundDynamicFusionMapSpace<FactorGenericRule>,
     Vec<Complex64>,
 ) {
+    expert_generic_endomorphism_input(
+        source,
+        source_data,
+        (0..source.space().structure().block_count()).rev(),
+    )
+}
+
+fn expert_generic_endomorphism_input(
+    source: &BoundDynamicFusionMapSpace<FactorGenericRule>,
+    source_data: &[Complex64],
+    indices: impl IntoIterator<Item = usize>,
+) -> (
+    BoundDynamicFusionMapSpace<FactorGenericRule>,
+    Vec<Complex64>,
+) {
     let source_structure = source.space().structure();
     let mut offset = 1usize;
     let mut blocks = Vec::with_capacity(source_structure.block_count());
-    for index in (0..source_structure.block_count()).rev() {
+    for index in indices {
         let block = source_structure.block(index).unwrap();
         blocks.push(
             BlockSpec::column_major_with_key(block.key().clone(), block.shape().to_vec(), offset)
@@ -2343,6 +2625,56 @@ fn padded_reordered_generic_endomorphism_input(
     (bound, tensor.data().to_vec())
 }
 
+fn interleaved_generic_endomorphism_input(
+    source: &BoundDynamicFusionMapSpace<FactorGenericRule>,
+    source_data: &[Complex64],
+) -> (
+    BoundDynamicFusionMapSpace<FactorGenericRule>,
+    Vec<Complex64>,
+) {
+    let structure = source.space().structure();
+    let regions = structure.coupled_sector_regions(2).unwrap().unwrap();
+    let scalar = regions
+        .iter()
+        .find(|region| region.coupled() == SectorId::new(0))
+        .unwrap();
+    let matrix = regions
+        .iter()
+        .find(|region| region.coupled() == SectorId::new(1))
+        .unwrap();
+    assert_eq!((matrix.row_trees().len(), matrix.col_trees().len()), (2, 2));
+    let find = |row: usize, col: usize| {
+        (0..structure.block_count())
+            .find(|&index| {
+                structure
+                    .block(index)
+                    .unwrap()
+                    .key()
+                    .as_fusion_tree_pair()
+                    .is_some_and(|key| {
+                        key.codomain_tree() == matrix.row_trees()[row].tree()
+                            && key.domain_tree() == matrix.col_trees()[col].tree()
+                    })
+            })
+            .unwrap()
+    };
+    let scalar_index = (0..structure.block_count())
+        .find(|&index| {
+            structure
+                .block(index)
+                .unwrap()
+                .key()
+                .as_fusion_tree_pair()
+                .is_some_and(|key| key.coupled() == scalar.coupled())
+        })
+        .unwrap();
+    expert_generic_endomorphism_input(
+        source,
+        source_data,
+        [find(1, 1), scalar_index, find(0, 1), find(1, 0), find(0, 0)],
+    )
+}
+
 fn assert_borrowed_values_inputs<D: FactorScalar>(
     observations: &[ValuesInputObservation],
     operation: ValuesOperation,
@@ -2365,6 +2697,340 @@ fn assert_borrowed_values_inputs<D: FactorScalar>(
             .collect::<Vec<_>>();
         assert_eq!(observation.values, expected);
     }
+}
+
+fn assert_compact_input_observations<D: FactorScalar>(
+    operation: crate::factorize::CheckedCompactOperation,
+    dense: &[CompactInputObservation],
+    data: &[D],
+    regions: &[tenet_core::CoupledSectorRegion],
+) {
+    let lowering = crate::factorize::checked_compact_input_observations();
+    assert_eq!(lowering.len(), regions.len());
+    assert_eq!(dense.len(), regions.len());
+    for ((lowering, dense), region) in lowering.iter().zip(dense).zip(regions) {
+        let source_pointer =
+            data.as_ptr() as usize + region.range().start * std::mem::size_of::<D>();
+        assert_eq!(lowering.operation, operation);
+        assert_eq!(lowering.input_pointer, data.as_ptr() as usize);
+        assert_eq!(lowering.matrix_pointer, source_pointer);
+        assert_eq!(lowering.elements, region.range().len());
+        assert_eq!(dense.offset, 0);
+        match operation {
+            crate::factorize::CheckedCompactOperation::Qr
+            | crate::factorize::CheckedCompactOperation::Svd => {
+                assert_eq!(lowering.adjoint_pointer, None);
+                assert_eq!(dense.pointer, source_pointer);
+                assert_eq!(dense.shape, [region.rows(), region.cols()]);
+                assert_eq!(dense.strides, [1, region.rows()]);
+                assert_eq!(
+                    dense.values,
+                    data[region.range()]
+                        .iter()
+                        .map(|&value| value.widen_complex())
+                        .collect::<Vec<_>>()
+                );
+            }
+            crate::factorize::CheckedCompactOperation::Lq => {
+                assert_eq!(lowering.adjoint_pointer, Some(dense.pointer));
+                assert_ne!(dense.pointer, source_pointer);
+                assert_eq!(dense.shape, [region.cols(), region.rows()]);
+                assert_eq!(dense.strides, [1, region.cols()]);
+                let source = &data[region.range()];
+                let expected = (0..region.rows())
+                    .flat_map(|column| {
+                        (0..region.cols()).map(move |row| {
+                            source[column + region.rows() * row].widen_complex().conj()
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(dense.values, expected);
+            }
+        }
+    }
+}
+
+fn assert_checked_compact_input_borrowing<D: FactorScalar>(
+    space: BoundDynamicFusionMapSpace<LateGenericSpy>,
+    data: Vec<D>,
+) {
+    let regions = space
+        .space()
+        .structure()
+        .coupled_sector_regions(space.space().nout())
+        .unwrap()
+        .unwrap();
+    let input = BoundDynamicTensorRef::try_new(&space, &data).unwrap();
+    let before = data.clone();
+
+    crate::factorize::reset_compact_qr_copy_probe();
+    crate::factorize::reset_checked_compact_input_observations();
+    let mut qr = CompactInputSpy::new(crate::factorize::CheckedCompactOperation::Qr);
+    let factors = qr_compact_dyn_checked_generic(&mut qr, &input).unwrap();
+    assert_compact_factors_reconstruct_input(&input, &factors.0, None, &factors.1);
+    assert_compact_input_observations(
+        crate::factorize::CheckedCompactOperation::Qr,
+        &qr.observations,
+        &data,
+        &regions,
+    );
+    assert_eq!(
+        crate::factorize::compact_qr_copy_probe().input_pack_calls,
+        0
+    );
+
+    crate::factorize::reset_compact_svd_copy_probe();
+    crate::factorize::reset_checked_compact_input_observations();
+    let mut svd = CompactInputSpy::new(crate::factorize::CheckedCompactOperation::Svd);
+    let factors = svd_compact_dyn_checked_generic(&mut svd, &input).unwrap();
+    assert_compact_factors_reconstruct_input(&input, &factors.0, Some(&factors.1), &factors.2);
+    assert_compact_input_observations(
+        crate::factorize::CheckedCompactOperation::Svd,
+        &svd.observations,
+        &data,
+        &regions,
+    );
+    assert_eq!(
+        crate::factorize::compact_svd_copy_probe().input_pack_calls,
+        0
+    );
+
+    crate::factorize::reset_compact_lq_copy_probe();
+    crate::factorize::reset_checked_compact_input_observations();
+    let mut lq = CompactInputSpy::new(crate::factorize::CheckedCompactOperation::Lq);
+    let factors = lq_compact_dyn_checked_generic(&mut lq, &input).unwrap();
+    assert_compact_factors_reconstruct_input(&input, &factors.0, None, &factors.1);
+    assert_compact_input_observations(
+        crate::factorize::CheckedCompactOperation::Lq,
+        &lq.observations,
+        &data,
+        &regions,
+    );
+    let probe = crate::factorize::compact_lq_copy_probe();
+    assert_eq!(probe.input_pack_calls, 0);
+    assert_eq!(probe.adjoint_scratch_fill_calls, regions.len());
+    assert_eq!(
+        probe.adjoint_scratch_fill_bytes,
+        data.len() * std::mem::size_of::<D>()
+    );
+    assert!(data == before);
+}
+
+#[test]
+fn checked_generic_compact_factors_borrow_real_and_complex_canonical_inputs() {
+    let (_, real_space, real_data) = checked_svd_truncation_input::<f64>(false);
+    assert_checked_compact_input_borrowing(real_space, real_data);
+    let (_, complex_space, complex_data) = checked_svd_truncation_input::<Complex64>(true);
+    assert_checked_compact_input_borrowing(complex_space, complex_data);
+    let (_, wide_space, wide_data) = checked_svd_wide_input::<Complex64>();
+    assert_checked_compact_input_borrowing(wide_space, wide_data);
+}
+
+#[test]
+fn checked_generic_compact_geometry_preserves_complete_multi_tree_identity() {
+    let (source, _, data) = generic_values_endomorphism_input();
+    let (_, space) = bind_checked_only(&source);
+    let input = BoundDynamicTensorRef::try_new(&space, &data).unwrap();
+    let regions = space
+        .space()
+        .structure()
+        .coupled_sector_regions(space.space().nout())
+        .unwrap()
+        .unwrap();
+    let multiplicity_region = regions
+        .iter()
+        .find(|region| region.coupled() == SectorId::new(1))
+        .unwrap();
+    assert_eq!(multiplicity_region.row_trees().len(), 2);
+    let first = multiplicity_region.row_trees()[0].tree();
+    let second = multiplicity_region.row_trees()[1].tree();
+    assert_eq!(first.uncoupled(), second.uncoupled());
+    assert_eq!(first.is_dual(), second.is_dual());
+    assert_eq!(first.innerlines(), second.innerlines());
+    assert_ne!(first.vertices(), second.vertices());
+
+    crate::factorize::reset_checked_compact_input_observations();
+    let mut qr = CompactInputSpy::new(crate::factorize::CheckedCompactOperation::Qr);
+    let qr_factors = qr_compact_dyn_checked_generic(&mut qr, &input).unwrap();
+    assert_compact_input_observations(
+        crate::factorize::CheckedCompactOperation::Qr,
+        &qr.observations,
+        &data,
+        &regions,
+    );
+    assert_compact_factors_reconstruct_input(&input, &qr_factors.0, None, &qr_factors.1);
+
+    crate::factorize::reset_checked_compact_input_observations();
+    let mut svd = CompactInputSpy::new(crate::factorize::CheckedCompactOperation::Svd);
+    let svd_factors = svd_compact_dyn_checked_generic(&mut svd, &input).unwrap();
+    assert_compact_input_observations(
+        crate::factorize::CheckedCompactOperation::Svd,
+        &svd.observations,
+        &data,
+        &regions,
+    );
+    assert_compact_factors_reconstruct_input(
+        &input,
+        &svd_factors.0,
+        Some(&svd_factors.1),
+        &svd_factors.2,
+    );
+
+    crate::factorize::reset_checked_compact_input_observations();
+    let mut lq = CompactInputSpy::new(crate::factorize::CheckedCompactOperation::Lq);
+    let lq_factors = lq_compact_dyn_checked_generic(&mut lq, &input).unwrap();
+    assert_compact_input_observations(
+        crate::factorize::CheckedCompactOperation::Lq,
+        &lq.observations,
+        &data,
+        &regions,
+    );
+    assert_compact_factors_reconstruct_input(&input, &lq_factors.0, None, &lq_factors.1);
+}
+
+#[test]
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
+fn checked_generic_compact_factors_keep_padded_reordered_input_pack() {
+    let (canonical_space, canonical_data) = generic_factorization_input();
+    let (expert_space, expert_data) =
+        expert_generic_factorization_input(&canonical_space, &canonical_data, true);
+    let provider = Arc::new(LateGenericSpy {
+        rule: FactorGenericRule,
+        fail_at: usize::MAX,
+        calls: Cell::new(0),
+    });
+    let expert_space = BoundDynamicFusionMapSpace::bind_generic(
+        expert_space.space().clone(),
+        Arc::clone(&provider),
+    )
+    .unwrap();
+    let expert = BoundDynamicTensorRef::try_new(&expert_space, &expert_data).unwrap();
+    let canonical_before = canonical_data.clone();
+    let expert_before = expert_data.clone();
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+
+    crate::factorize::reset_compact_qr_copy_probe();
+    crate::factorize::reset_checked_compact_input_observations();
+    let actual_qr = qr_compact_dyn_checked_generic(&mut dense, &expert).unwrap();
+    assert_compact_factors_reconstruct_input(&expert, &actual_qr.0, None, &actual_qr.1);
+    assert!(crate::factorize::compact_qr_copy_probe().input_pack_calls > 0);
+
+    crate::factorize::reset_compact_svd_copy_probe();
+    crate::factorize::reset_checked_compact_input_observations();
+    let actual_svd = svd_compact_dyn_checked_generic(&mut dense, &expert).unwrap();
+    assert_compact_factors_reconstruct_input(
+        &expert,
+        &actual_svd.0,
+        Some(&actual_svd.1),
+        &actual_svd.2,
+    );
+    assert!(crate::factorize::compact_svd_copy_probe().input_pack_calls > 0);
+
+    crate::factorize::reset_compact_lq_copy_probe();
+    crate::factorize::reset_checked_compact_input_observations();
+    let actual_lq = lq_compact_dyn_checked_generic(&mut dense, &expert).unwrap();
+    assert_compact_factors_reconstruct_input(&expert, &actual_lq.0, None, &actual_lq.1);
+    let lq_probe = crate::factorize::compact_lq_copy_probe();
+    assert!(lq_probe.input_pack_calls > 0);
+    assert!(lq_probe.adjoint_scratch_fill_calls > 0);
+
+    let start = expert_data.as_ptr() as usize;
+    let end = start + expert_data.len() * std::mem::size_of::<f64>();
+    for observation in crate::factorize::checked_compact_input_observations() {
+        assert_eq!(observation.input_pointer, start);
+        assert!(observation.matrix_pointer < start || observation.matrix_pointer >= end);
+    }
+    assert!(canonical_data == canonical_before);
+    assert!(expert_data == expert_before);
+    assert!(Arc::ptr_eq(actual_qr.0.space().provider_arc(), &provider));
+    assert!(Arc::ptr_eq(actual_svd.1.space().provider_arc(), &provider));
+    assert!(Arc::ptr_eq(actual_lq.1.space().provider_arc(), &provider));
+}
+
+#[test]
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
+fn checked_generic_compact_interleaved_fallback_keeps_literal_matrix_order() {
+    let (canonical, _, canonical_data) = generic_values_endomorphism_input();
+    let (expert_space, expert_data) =
+        interleaved_generic_endomorphism_input(&canonical, &canonical_data);
+    let provider = Arc::new(LateGenericSpy {
+        rule: FactorGenericRule,
+        fail_at: usize::MAX,
+        calls: Cell::new(0),
+    });
+    let expert_space = BoundDynamicFusionMapSpace::bind_generic(
+        expert_space.space().clone(),
+        Arc::clone(&provider),
+    )
+    .unwrap();
+    let expert = BoundDynamicTensorRef::try_new(&expert_space, &expert_data).unwrap();
+    let before = expert_data.clone();
+    let direct = [
+        vec![
+            Complex64::new(3.0, -1.0),
+            Complex64::new(2.0, 0.0),
+            Complex64::new(0.0, 0.0),
+            Complex64::new(1.0, 1.0),
+        ],
+        vec![Complex64::new(2.0, -1.0)],
+    ];
+    let adjoint = [
+        vec![
+            Complex64::new(3.0, 1.0),
+            Complex64::new(0.0, 0.0),
+            Complex64::new(2.0, 0.0),
+            Complex64::new(1.0, -1.0),
+        ],
+        vec![Complex64::new(2.0, 1.0)],
+    ];
+
+    crate::factorize::reset_compact_qr_copy_probe();
+    let mut qr = CompactInputSpy::new(crate::factorize::CheckedCompactOperation::Qr);
+    let factors = qr_compact_dyn_checked_generic(&mut qr, &expert).unwrap();
+    assert_eq!(
+        qr.observations
+            .iter()
+            .map(|observation| observation.values.clone())
+            .collect::<Vec<_>>(),
+        direct
+    );
+    assert_compact_factors_reconstruct_input(&expert, &factors.0, None, &factors.1);
+    assert!(crate::factorize::compact_qr_copy_probe().input_pack_calls > 0);
+
+    crate::factorize::reset_compact_svd_copy_probe();
+    let mut svd = CompactInputSpy::new(crate::factorize::CheckedCompactOperation::Svd);
+    let factors = svd_compact_dyn_checked_generic(&mut svd, &expert).unwrap();
+    assert_eq!(
+        svd.observations
+            .iter()
+            .map(|observation| observation.values.clone())
+            .collect::<Vec<_>>(),
+        direct
+    );
+    assert_compact_factors_reconstruct_input(&expert, &factors.0, Some(&factors.1), &factors.2);
+    assert!(crate::factorize::compact_svd_copy_probe().input_pack_calls > 0);
+
+    crate::factorize::reset_compact_lq_copy_probe();
+    let mut lq = CompactInputSpy::new(crate::factorize::CheckedCompactOperation::Lq);
+    let factors = lq_compact_dyn_checked_generic(&mut lq, &expert).unwrap();
+    assert_eq!(
+        lq.observations
+            .iter()
+            .map(|observation| observation.values.clone())
+            .collect::<Vec<_>>(),
+        adjoint
+    );
+    assert_compact_factors_reconstruct_input(&expert, &factors.0, None, &factors.1);
+    let probe = crate::factorize::compact_lq_copy_probe();
+    assert!(probe.input_pack_calls > 0);
+    assert!(probe.adjoint_scratch_fill_calls > 0);
+    assert_eq!(expert_data, before);
 }
 
 fn assert_real_spectra_by_sector_close(actual: &[SectorSpectrum], expected: &[SectorSpectrum]) {

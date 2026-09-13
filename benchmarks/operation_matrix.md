@@ -115,6 +115,50 @@ OP_MATRIX_MIN_MS=100 \
 benchmarks/operation_matrix.sh
 ```
 
+The checked-Generic compact input-lowering group runs public compact QR, SVD,
+and LQ on the same source geometry. It covers `f64` and genuinely complex
+`Complex64` payloads, and compares a canonical contiguous layout with a padded,
+reversed-block fallback. `few-large` uses two sectors with alternating matrix
+shapes `d x 2d` and `2d x d`; `many-small` uses labels 0 through 15 with the
+same alternating geometry and `max(1,d/16)` in place of `d`. Fixture
+construction, provider binding, literal
+reconstruction (`Q*R`, `U*S*Vh`, `L*Q`), QR/LQ/SVD orthogonality, singular-value
+ordering, and source-immutability checks are outside timing. Every invocation
+owns fresh returned factors; warm-loop temporaries are dropped per iteration,
+while the first returned value is retained until its sample has been printed.
+That ownership and teardown scope is identical in baseline and candidate. The
+first phase is therefore `first_after_setup`, not a process-cold claim.
+
+```sh
+OP_MATRIX_OPERATION=checked_compact_input \
+OP_MATRIX_FORM=owned \
+OP_MATRIX_DEGENERACY=32 \
+OP_MATRIX_MIN_MS=100 \
+benchmarks/operation_matrix.sh
+```
+
+The grouped output separates three scopes. `checked_compact_input_fixture`
+times construction and payload initialization of both canonical and fallback
+fixtures (`fixture_first`/`fixture_repeat`). The ordinary QR/SVD/LQ rows keep one
+fixed preconstructed input. Their `_shape_alternating` controls alternate
+preconstructed `d` and `d+1` inputs with one dense executor per numerical
+family; fixture construction is excluded, and literal preflight has already
+initialized both inputs' region metadata. Fresh factor results are dropped
+inside every alternating timed closure. These labels describe setup and shape
+reuse only; none claims an isolated process-cold cache.
+
+The benchmark-local XOR provider has a fixed 16-label domain; labels 0 and 1
+retain the previous fixture behavior. The many-small geometry is `G=16`, with
+16 row trees and 16 column trees (`T=32` total side trees under the issue's
+convention), and 16 source blocks. It is only a finite cardinality/dataflow
+control and makes no physical non-Abelian claim. Existing generated SUN QR rows
+supply a physical many-tree supplement. Rank-4, multiplicity, and broader G/T
+correctness sweeps, plus
+direct borrow/pack probes, belong to tests because the public benchmark API
+exposes no input-copy counter. Reported allocation totals remain caller-thread
+requested calls/bytes; peak, live, native, and worker-thread memory are
+unavailable.
+
 The Apple Accelerate control is:
 
 ```sh
