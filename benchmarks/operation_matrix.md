@@ -25,15 +25,29 @@ swap, and contracted-input plus output swap. An owned `compose` row checks
 that its result equals the canonical contraction before reporting it.
 With the default `racah-generated` feature it also runs exact checked-Generic
 SU3 `[1,1]` and SU4 `[1,0,1]` fixtures for public owned transforms, reductions,
-compose, and contract. Transform/compose/contract checks are public-call
-self-consistency checks comparing provider authority, spaces, block layout,
+compose, and contract, plus compact QR for those fixtures and a one-sector SU3
+vacuum control. Compact QR coverage is limited to these checked-SUN owned rows;
+no trivial or multiplicity-free row is implied. Transform/compose/contract
+checks are public-call self-consistency checks comparing provider authority, spaces, block layout,
 full fusion-tree keys, and payload; scale/add also check elementary payload
-laws, while norm/inner check scalar identities. On this base those fixtures
+laws, norm/inner check scalar identities, and compact QR reconstructs the input
+outside timing. On this base those fixtures
 print an explicit trace exclusion because this exact `SUNFusionRule` lacks the
 `SectorCodec` bound required by checked trace dispatch, and a destination
 exclusion because it lacks the required multiplicity-free dispatch bounds.
 The checked-Generic API exists; these operations are neither emulated nor
 replaced for the exact SUN fixtures.
+The `qr_compact_generic_layout` selector adds one lower-level public owned-QR
+control for an infallible Generic provider. It compares the same two-sector
+rank-(1,1) tensor in two padded expert layouts: canonical key order and the
+same blocks in reverse order. Both inputs therefore use staged matrix assembly;
+only the reversed order requires output scatter. Its two sector matrices have
+shapes `d x 2d` and `2d x d`, where `d` is `OP_MATRIX_DEGENERACY`. Fixture
+construction, keyed source-coordinate checks, factor-coordinate comparison,
+and direct `Q * R` reconstruction are outside the timers. Because that
+preflight calls QR, its first timed phase is labeled `first_after_setup`; the
+measurement is a matched production-build layout control, not a cold-start
+claim.
 Runtime tree-transform counters are reported as cold and warm deltas. The same
 snapshots report process-global fusion-layout and complete-HomSpace cache
 deltas, with charged bytes before and after each phase. The fusion-layout cache
@@ -92,6 +106,15 @@ OP_MATRIX_PROFILE_PAUSE_MS=30000 \
 OP_MATRIX_MIN_MS=0 benchmarks/operation_matrix.sh
 ```
 
+The matched Generic compact-QR layout control is:
+
+```sh
+OP_MATRIX_OPERATION=qr_compact_generic_layout \
+OP_MATRIX_FORM=owned \
+OP_MATRIX_MIN_MS=100 \
+benchmarks/operation_matrix.sh
+```
+
 The Apple Accelerate control is:
 
 ```sh
@@ -118,8 +141,8 @@ process-global TensorKit caches warmed by earlier rows; it is not directly
 comparable to TeNeT's fresh-`Runtime` cold row. Only matching warm rows under
 the recorded one-thread BLAS configuration are timing controls.
 
-The remaining #9 rows (ordered contract, compact SVD/QR, compact diagonal,
-and other lazy-adjoint consumers) are
+The remaining #9 rows (ordered contract, compact SVD, compact diagonal,
+the multiplicity-free and other compact QR forms, and other lazy-adjoint consumers) are
 not substituted with other operations. Add each only with its real public form
 and available counters. This diagnostic harness remains outside required CI;
 semantic coverage belongs in the existing user API tests.
