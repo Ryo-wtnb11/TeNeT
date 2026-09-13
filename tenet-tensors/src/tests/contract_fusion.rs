@@ -5183,7 +5183,7 @@ fn tensorcontract_fusion_su2_keeps_contracted_tree_basis_with_degeneracy() {
 }
 
 #[test]
-fn contracted_fusion_tree_basis_matches_dual_u1_labels_and_flags() {
+fn contracted_fusion_tree_basis_requires_exact_stored_tree() {
     let rule = U1FusionRule;
     let plus_two = U1Irrep::new(2).sector_id();
     let minus_two = U1Irrep::new(-2).sector_id();
@@ -5196,7 +5196,7 @@ fn contracted_fusion_tree_basis_matches_dual_u1_labels_and_flags() {
         Vec::<MultiplicityIndex>::new(),
     )
     .unwrap();
-    let rhs_codomain = FusionTreeKey::try_new_for_rule(
+    let dual_label = FusionTreeKey::try_new_for_rule(
         &rule,
         [minus_two],
         minus_two,
@@ -5205,13 +5205,12 @@ fn contracted_fusion_tree_basis_matches_dual_u1_labels_and_flags() {
         Vec::<MultiplicityIndex>::new(),
     )
     .unwrap();
-    assert!(contracted_fusion_tree_basis_matches(
-        &rule,
+    assert!(!contracted_fusion_tree_basis_matches(
         &lhs_domain,
-        &rhs_codomain
+        &dual_label
     ));
 
-    let raw_rhs_codomain = FusionTreeKey::try_new_for_rule(
+    let exact = FusionTreeKey::try_new_for_rule(
         &rule,
         [plus_two],
         plus_two,
@@ -5220,23 +5219,18 @@ fn contracted_fusion_tree_basis_matches_dual_u1_labels_and_flags() {
         Vec::<MultiplicityIndex>::new(),
     )
     .unwrap();
-    assert!(!contracted_fusion_tree_basis_matches(
-        &rule,
-        &lhs_domain,
-        &raw_rhs_codomain
-    ));
+    assert!(contracted_fusion_tree_basis_matches(&lhs_domain, &exact));
 
     let dual_flag_rhs_codomain = FusionTreeKey::try_new_for_rule(
         &rule,
-        [minus_two],
-        minus_two,
+        [plus_two],
+        plus_two,
         [true],
         Vec::<SectorId>::new(),
         Vec::<MultiplicityIndex>::new(),
     )
     .unwrap();
     assert!(!contracted_fusion_tree_basis_matches(
-        &rule,
         &lhs_domain,
         &dual_flag_rhs_codomain
     ));

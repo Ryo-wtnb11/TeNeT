@@ -28,61 +28,71 @@ fn assert_c64_close(actual: Complex64, expected: Complex64, tol: f64) {
 }
 
 #[test]
-fn op_bearing_batch_applies_rectangular_adjoint_and_alpha_beta() {
-    // What: a batch-level Adjoint transposes rectangular parent matrices,
-    // conjugates C64 values, and preserves caller alpha/beta accumulation.
-    let rows = 2;
-    let contracted = 3;
-    let cols = 4;
-    let lhs = (0..contracted * rows)
-        .map(|i| Complex64::new(i as f64 + 1.0, 0.25 * i as f64 - 0.5))
-        .collect::<Vec<_>>();
-    let rhs = (0..cols * contracted)
-        .map(|i| Complex64::new(0.5 * i as f64 - 2.0, 0.75 - 0.1 * i as f64))
-        .collect::<Vec<_>>();
-    let mut output = vec![Complex64::new(0.5, -0.25); rows * cols];
-    let initial = output.clone();
+fn op_bearing_batch_reuses_executor_across_shapes_offsets_and_alpha_beta() {
+    // Adjoint gives both rectangular operands noncontiguous matrix strides.
     let alpha = Complex64::new(0.75, -0.5);
     let beta = Complex64::new(-0.25, 0.125);
-    let jobs = [DenseGemmBatchJob {
-        dst_offset: 0,
-        lhs_offset: 0,
-        rhs_offset: 0,
-        rows,
-        contracted,
-        cols,
-    }];
-    let flat_strides = [1];
-    let lhs_shape = [lhs.len()];
-    let rhs_shape = [rhs.len()];
-    let output_shape = [output.len()];
     let mut executor = DefaultDenseExecutor::with_threads(1).unwrap();
-    executor
-        .matmul_batch_axpby_with_ops_into(
-            DenseWrite::C64(
-                DenseViewMut::new(&mut output, &output_shape, &flat_strides, 0).unwrap(),
-            ),
-            DenseRead::C64(DenseView::new(&lhs, &lhs_shape, &flat_strides, 0).unwrap()),
-            DenseRead::C64(DenseView::new(&rhs, &rhs_shape, &flat_strides, 0).unwrap()),
-            &jobs,
-            &[1],
-            MatrixOp::Adjoint,
-            MatrixOp::Adjoint,
-            DenseScalar::C64(alpha),
-            DenseScalar::C64(beta),
-        )
-        .unwrap();
+    for (rows, contracted, cols, seed) in [(2, 3, 4, 1.0), (3, 2, 1, 9.0)] {
+        let (view_offset, job_offset) = (1, 2);
+        let lhs_values = (0..contracted * rows)
+            .map(|i| Complex64::new(seed + i as f64, 0.25 * i as f64 - 0.5))
+            .collect::<Vec<_>>();
+        let rhs_values = (0..cols * contracted)
+            .map(|i| Complex64::new(seed - 0.5 * i as f64, 0.75 - 0.1 * i as f64))
+            .collect::<Vec<_>>();
+        let mut lhs = vec![Complex64::new(-99.0, 1.0); view_offset + job_offset];
+        lhs.extend_from_slice(&lhs_values);
+        let mut rhs = vec![Complex64::new(-98.0, 2.0); view_offset + job_offset];
+        rhs.extend_from_slice(&rhs_values);
+        let initial = Complex64::new(0.5, -0.25);
+        let mut output = vec![initial; view_offset + job_offset + rows * cols + 1];
+        let jobs = [DenseGemmBatchJob {
+            dst_offset: job_offset,
+            lhs_offset: job_offset,
+            rhs_offset: job_offset,
+            rows,
+            contracted,
+            cols,
+        }];
+        let flat_strides = [1];
+        let (lhs_shape, rhs_shape, output_shape) = (
+            [lhs.len() - view_offset],
+            [rhs.len() - view_offset],
+            [output.len() - view_offset],
+        );
+        executor
+            .matmul_batch_axpby_with_ops_into(
+                DenseWrite::C64(
+                    DenseViewMut::new(&mut output, &output_shape, &flat_strides, view_offset)
+                        .unwrap(),
+                ),
+                DenseRead::C64(
+                    DenseView::new(&lhs, &lhs_shape, &flat_strides, view_offset).unwrap(),
+                ),
+                DenseRead::C64(
+                    DenseView::new(&rhs, &rhs_shape, &flat_strides, view_offset).unwrap(),
+                ),
+                &jobs,
+                &[1],
+                MatrixOp::Adjoint,
+                MatrixOp::Adjoint,
+                DenseScalar::C64(alpha),
+                DenseScalar::C64(beta),
+            )
+            .unwrap();
 
-    for col in 0..cols {
-        for row in 0..rows {
-            let mut sum = Complex64::new(0.0, 0.0);
-            for inner in 0..contracted {
-                let left = lhs[inner + contracted * row].conj();
-                let right = rhs[col + cols * inner].conj();
-                sum += left * right;
+        for col in 0..cols {
+            for row in 0..rows {
+                let mut sum = Complex64::new(0.0, 0.0);
+                for inner in 0..contracted {
+                    let left = lhs_values[inner + contracted * row].conj();
+                    let right = rhs_values[col + cols * inner].conj();
+                    sum += left * right;
+                }
+                let index = view_offset + job_offset + row + rows * col;
+                assert_c64_close(output[index], alpha * sum + beta * initial, 1.0e-12);
             }
-            let index = row + rows * col;
-            assert_c64_close(output[index], alpha * sum + beta * initial[index], 1.0e-12);
         }
     }
 }

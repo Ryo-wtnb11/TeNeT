@@ -485,6 +485,7 @@ where
             };
             let rhs_external = rhs_key.external_sectors(rule);
             if !contracted_external_sectors_match(
+                rule,
                 &lhs_external,
                 &rhs_external,
                 axis_plan.lhs_contracting_axes.as_slice(),
@@ -492,11 +493,8 @@ where
             ) {
                 continue;
             }
-            if !contracted_fusion_tree_basis_matches(
-                rule,
-                lhs_key.domain_tree(),
-                rhs_key.codomain_tree(),
-            ) {
+            if !contracted_fusion_tree_basis_matches(lhs_key.domain_tree(), rhs_key.codomain_tree())
+            {
                 continue;
             }
             let dst_key = FusionTreePairKey::pair(
@@ -589,6 +587,7 @@ where
         let lhs_external = lhs_key.external_sectors(rule);
         for (rhs_index, rhs_external, rhs_terms) in &rhs_prepared {
             if !contracted_external_sectors_match(
+                rule,
                 &lhs_external,
                 rhs_external,
                 axis_plan.lhs_contracting_axes.as_slice(),
@@ -600,7 +599,6 @@ where
             for (lhs_core, lhs_coeff) in &lhs_terms {
                 for (rhs_core, rhs_coeff) in rhs_terms {
                     if !contracted_fusion_tree_basis_matches(
-                        rule,
                         lhs_core.domain_tree(),
                         rhs_core.codomain_tree(),
                     ) {
@@ -728,43 +726,27 @@ pub(crate) fn external_axis_is_dual(
         })
 }
 
-fn contracted_external_sectors_match(
+fn contracted_external_sectors_match<R>(
+    rule: &R,
     lhs_external: &[SectorId],
     rhs_external: &[SectorId],
     lhs_axes: &[usize],
     rhs_axes: &[usize],
-) -> bool {
-    lhs_axes
-        .iter()
-        .zip(rhs_axes)
-        .all(|(&lhs_axis, &rhs_axis)| lhs_external[lhs_axis] == rhs_external[rhs_axis])
-}
-
-pub(crate) fn contracted_fusion_tree_basis_matches<R>(
-    rule: &R,
-    lhs_domain: &FusionTreeKey,
-    rhs_codomain: &FusionTreeKey,
 ) -> bool
 where
     R: FusionRule,
 {
-    lhs_domain.uncoupled().len() == rhs_codomain.uncoupled().len()
-        && lhs_domain.innerlines().len() == rhs_codomain.innerlines().len()
-        && lhs_domain.vertices() == rhs_codomain.vertices()
-        && lhs_domain.is_dual() == rhs_codomain.is_dual()
-        && lhs_domain
-            .uncoupled()
-            .iter()
-            .copied()
-            .map(|sector| rule.dual(sector))
-            .eq(rhs_codomain.uncoupled().iter().copied())
-        && lhs_domain
-            .innerlines()
-            .iter()
-            .copied()
-            .map(|sector| rule.dual(sector))
-            .eq(rhs_codomain.innerlines().iter().copied())
-        && rule.dual(lhs_domain.coupled()) == rhs_codomain.coupled()
+    lhs_axes
+        .iter()
+        .zip(rhs_axes)
+        .all(|(&lhs_axis, &rhs_axis)| rule.dual(lhs_external[lhs_axis]) == rhs_external[rhs_axis])
+}
+
+pub(crate) fn contracted_fusion_tree_basis_matches(
+    lhs_domain: &FusionTreeKey,
+    rhs_codomain: &FusionTreeKey,
+) -> bool {
+    lhs_domain == rhs_codomain
 }
 
 fn contracted_output_external_sectors(
