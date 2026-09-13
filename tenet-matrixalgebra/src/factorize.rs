@@ -9096,9 +9096,8 @@ where
     R: CheckedGenericRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    let singular_values = svd_vals_dyn_checked_generic(dense, input)?;
-    let (u, _s, vh) = svd_compact_dyn_checked_generic(dense, input)?;
-    let mut singular_values = singular_values;
+    let (u, _s, vh, mut singular_values) =
+        svd_compact_with_spectrum_dyn_checked_generic(dense, input)?;
     let rule = u.space().provider();
     let decision = decide_bond_truncation_generic_checked(rule, &singular_values, truncation)?;
     if singular_values
@@ -9294,6 +9293,26 @@ where
     R: CheckedGenericFusion,
     D: FactorScalar,
 {
+    let (u, s, vh, _) = svd_compact_with_spectrum_dyn_checked_generic(dense, input)?;
+    Ok((u, s, vh))
+}
+
+type CheckedCompactSvdWithSpectrum<R, D> = (
+    BoundDynFactor<R, D>,
+    BoundDynFactor<R, D>,
+    BoundDynFactor<R, D>,
+    Vec<SectorSpectrum>,
+);
+
+fn svd_compact_with_spectrum_dyn_checked_generic<E, R, D>(
+    dense: &mut E,
+    input: &BoundDynamicTensorRef<'_, R, D>,
+) -> Result<CheckedCompactSvdWithSpectrum<R, D>, CheckedGenericFactorPlanError<R::Error>>
+where
+    E: DenseExecutor + ?Sized,
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
     let provider = input.space().provider_arc();
     let space = input.space().space();
     let matrices = sector_matricizations_generic(space.structure(), input.data(), space.nout())
@@ -9323,7 +9342,7 @@ where
         &singular_values,
         &D::from_real,
     )?;
-    Ok((u, s, vh))
+    Ok((u, s, vh, singular_values))
 }
 
 /// Checked-Generic compact LQ, implemented through the existing host
