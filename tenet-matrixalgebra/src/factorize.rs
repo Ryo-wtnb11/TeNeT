@@ -11164,6 +11164,124 @@ mod sector_matricization_tests {
         .unwrap()
     }
 
+    fn full_identity_pair(
+        row_inner: usize,
+        row_dual: bool,
+        col_inner: usize,
+        col_dual: bool,
+    ) -> FusionTreePairKey {
+        FusionTreePairKey::try_pair_from_sector_ids(
+            [1, 2, 3],
+            [4, 5, 6],
+            9,
+            [false, row_dual, false],
+            [true, false, col_dual],
+            [row_inner],
+            [col_inner],
+            [1, 2],
+            [2, 1],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn packed_and_region_geometry_preserve_dual_and_innerline_tree_identity() {
+        let mut row_trees = vec![
+            full_identity_pair(7, false, 11, false)
+                .codomain_tree()
+                .clone(),
+            full_identity_pair(8, true, 11, false)
+                .codomain_tree()
+                .clone(),
+        ];
+        let mut col_trees = vec![
+            full_identity_pair(7, false, 10, false)
+                .domain_tree()
+                .clone(),
+            full_identity_pair(7, false, 11, true).domain_tree().clone(),
+        ];
+        row_trees.sort();
+        col_trees.sort();
+        assert_ne!(row_trees[0].innerlines(), row_trees[1].innerlines());
+        assert_ne!(row_trees[0].is_dual(), row_trees[1].is_dual());
+        assert_ne!(col_trees[0].innerlines(), col_trees[1].innerlines());
+        assert_ne!(col_trees[0].is_dual(), col_trees[1].is_dual());
+
+        let row_shapes = [vec![1, 2, 1], vec![2, 1, 1]];
+        let col_shapes = [vec![1, 3, 1], vec![1, 1, 1]];
+        let row_extents = row_shapes
+            .iter()
+            .map(|shape| shape.iter().product::<usize>())
+            .collect::<Vec<_>>();
+        let col_extents = col_shapes
+            .iter()
+            .map(|shape| shape.iter().product::<usize>())
+            .collect::<Vec<_>>();
+        let rows = row_extents.iter().sum::<usize>();
+        let cols = col_extents.iter().sum::<usize>();
+        let mut blocks = Vec::new();
+        let mut col_offset = 0;
+        for (col, (col_tree, col_shape)) in col_trees.iter().zip(&col_shapes).enumerate() {
+            let mut row_offset = 0;
+            for (row, (row_tree, row_shape)) in row_trees.iter().zip(&row_shapes).enumerate() {
+                let mut shape = row_shape.clone();
+                shape.extend_from_slice(col_shape);
+                let mut strides = Vec::with_capacity(shape.len());
+                let mut stride = 1;
+                for &dimension in row_shape {
+                    strides.push(stride);
+                    stride *= dimension;
+                }
+                stride = rows;
+                for &dimension in col_shape {
+                    strides.push(stride);
+                    stride *= dimension;
+                }
+                blocks.push(
+                    BlockSpec::with_key(
+                        FusionTreePairKey::pair(row_tree.clone(), col_tree.clone()).into(),
+                        shape,
+                        strides,
+                        row_offset + rows * col_offset,
+                    )
+                    .unwrap(),
+                );
+                row_offset += row_extents[row];
+            }
+            col_offset += col_extents[col];
+        }
+        let structure = BlockStructure::from_blocks_with_rank(6, blocks).unwrap();
+        let data = (0..rows * cols)
+            .map(|value| value as f64)
+            .collect::<Vec<_>>();
+        let regions = structure.coupled_sector_regions(3).unwrap().unwrap();
+        let packed = sector_matricizations_generic(&structure, &data, 3).unwrap();
+        assert_eq!(regions.len(), 1);
+        assert_eq!(packed.len(), 1);
+        assert!(matches!(
+            generic_input_matricizations(&structure, &data, 3).unwrap(),
+            InputMatricizations::Regions { .. }
+        ));
+        let region = &regions[0];
+        let matrix = &packed[0];
+        assert_eq!(matrix.data, data);
+        assert_eq!(region.sector(), matrix.sector());
+        assert_eq!(
+            (region.rows(), region.cols()),
+            (matrix.rows(), matrix.cols())
+        );
+        for side in [FactorSide::Left, FactorSide::Right] {
+            assert_eq!(region.tree_count(side), matrix.tree_count(side));
+            for index in 0..region.tree_count(side) {
+                let borrowed = region.tree(side, index).unwrap();
+                let owned = matrix.tree(side, index).unwrap();
+                assert_eq!(borrowed.tree, owned.tree);
+                assert_eq!(borrowed.offset, owned.offset);
+                assert_eq!(borrowed.shape, owned.shape);
+            }
+        }
+    }
+
     #[test]
     fn sector_matricizations_preserve_encounter_order_and_padded_block_values() {
         // What: noncanonical storage packs repeated row/column trees into

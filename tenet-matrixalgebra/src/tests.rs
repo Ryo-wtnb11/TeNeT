@@ -2440,6 +2440,58 @@ where
     clippy::arc_with_non_send_sync,
     reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
 )]
+fn checked_svd_wide_input<D>() -> (
+    Arc<LateGenericSpy>,
+    BoundDynamicFusionMapSpace<LateGenericSpy>,
+    Vec<D>,
+)
+where
+    D: FactorScalar,
+{
+    let vacuum = SectorId::new(0);
+    let x = SectorId::new(1);
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([SectorLeg::new([(vacuum, 2), (x, 2)], false)]),
+        FusionProductSpace::new([SectorLeg::new([(vacuum, 2), (x, 3)], false)]),
+    );
+    let source = BoundDynamicFusionMapSpace::from_final_homspace_generic(
+        Arc::new(FactorGenericRule),
+        homspace,
+    )
+    .unwrap();
+    let provider = Arc::new(LateGenericSpy {
+        rule: FactorGenericRule,
+        fail_at: usize::MAX,
+        calls: Cell::new(0),
+    });
+    let checked =
+        BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
+            .unwrap();
+    let mut data = vec![D::zero(); checked.space().required_len().unwrap()];
+    let structure = checked.space().structure();
+    for index in 0..structure.block_count() {
+        let block = structure.block(index).unwrap();
+        let BlockKey::FusionTree(key) = block.key() else {
+            panic!("checked Generic fixture must use fusion-tree blocks")
+        };
+        let (rows, cols, matrix) = checked_svd_matrix(key.coupled(), true);
+        assert_eq!(block.shape(), [cols, rows]);
+        for column in 0..rows {
+            for row in 0..cols {
+                let source = matrix[column + rows * row].conj();
+                let destination =
+                    block.offset() + row * block.strides()[0] + column * block.strides()[1];
+                data[destination] = D::from_complex64(source);
+            }
+        }
+    }
+    (provider, checked, data)
+}
+
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
 fn bind_checked_only(
     space: &BoundDynamicFusionMapSpace<impl FusionRule>,
 ) -> (
@@ -2515,10 +2567,25 @@ fn padded_reordered_generic_endomorphism_input(
     BoundDynamicFusionMapSpace<FactorGenericRule>,
     Vec<Complex64>,
 ) {
+    expert_generic_endomorphism_input(
+        source,
+        source_data,
+        (0..source.space().structure().block_count()).rev(),
+    )
+}
+
+fn expert_generic_endomorphism_input(
+    source: &BoundDynamicFusionMapSpace<FactorGenericRule>,
+    source_data: &[Complex64],
+    indices: impl IntoIterator<Item = usize>,
+) -> (
+    BoundDynamicFusionMapSpace<FactorGenericRule>,
+    Vec<Complex64>,
+) {
     let source_structure = source.space().structure();
     let mut offset = 1usize;
     let mut blocks = Vec::with_capacity(source_structure.block_count());
-    for index in (0..source_structure.block_count()).rev() {
+    for index in indices {
         let block = source_structure.block(index).unwrap();
         blocks.push(
             BlockSpec::column_major_with_key(block.key().clone(), block.shape().to_vec(), offset)
@@ -2556,6 +2623,56 @@ fn padded_reordered_generic_endomorphism_input(
         BoundDynamicFusionMapSpace::bind_generic(dynamic, Arc::clone(source.provider_arc()))
             .unwrap();
     (bound, tensor.data().to_vec())
+}
+
+fn interleaved_generic_endomorphism_input(
+    source: &BoundDynamicFusionMapSpace<FactorGenericRule>,
+    source_data: &[Complex64],
+) -> (
+    BoundDynamicFusionMapSpace<FactorGenericRule>,
+    Vec<Complex64>,
+) {
+    let structure = source.space().structure();
+    let regions = structure.coupled_sector_regions(2).unwrap().unwrap();
+    let scalar = regions
+        .iter()
+        .find(|region| region.coupled() == SectorId::new(0))
+        .unwrap();
+    let matrix = regions
+        .iter()
+        .find(|region| region.coupled() == SectorId::new(1))
+        .unwrap();
+    assert_eq!((matrix.row_trees().len(), matrix.col_trees().len()), (2, 2));
+    let find = |row: usize, col: usize| {
+        (0..structure.block_count())
+            .find(|&index| {
+                structure
+                    .block(index)
+                    .unwrap()
+                    .key()
+                    .as_fusion_tree_pair()
+                    .is_some_and(|key| {
+                        key.codomain_tree() == matrix.row_trees()[row].tree()
+                            && key.domain_tree() == matrix.col_trees()[col].tree()
+                    })
+            })
+            .unwrap()
+    };
+    let scalar_index = (0..structure.block_count())
+        .find(|&index| {
+            structure
+                .block(index)
+                .unwrap()
+                .key()
+                .as_fusion_tree_pair()
+                .is_some_and(|key| key.coupled() == scalar.coupled())
+        })
+        .unwrap();
+    expert_generic_endomorphism_input(
+        source,
+        source_data,
+        [find(1, 1), scalar_index, find(0, 1), find(1, 0), find(0, 0)],
+    )
 }
 
 fn assert_borrowed_values_inputs<D: FactorScalar>(
@@ -2633,8 +2750,10 @@ fn assert_compact_input_observations<D: FactorScalar>(
     }
 }
 
-fn assert_checked_compact_input_borrowing<D: FactorScalar>(complex: bool) {
-    let (_, space, data) = checked_svd_truncation_input::<D>(complex);
+fn assert_checked_compact_input_borrowing<D: FactorScalar>(
+    space: BoundDynamicFusionMapSpace<LateGenericSpy>,
+    data: Vec<D>,
+) {
     let regions = space
         .space()
         .structure()
@@ -2648,7 +2767,7 @@ fn assert_checked_compact_input_borrowing<D: FactorScalar>(complex: bool) {
     crate::factorize::reset_checked_compact_input_observations();
     let mut qr = CompactInputSpy::new(crate::factorize::CheckedCompactOperation::Qr);
     let factors = qr_compact_dyn_checked_generic(&mut qr, &input).unwrap();
-    assert_pair_reconstructs_checked_literal(&factors.0, &factors.1, complex);
+    assert_compact_factors_reconstruct_input(&input, &factors.0, None, &factors.1);
     assert_compact_input_observations(
         crate::factorize::CheckedCompactOperation::Qr,
         &qr.observations,
@@ -2663,7 +2782,8 @@ fn assert_checked_compact_input_borrowing<D: FactorScalar>(complex: bool) {
     crate::factorize::reset_compact_svd_copy_probe();
     crate::factorize::reset_checked_compact_input_observations();
     let mut svd = CompactInputSpy::new(crate::factorize::CheckedCompactOperation::Svd);
-    svd_compact_dyn_checked_generic(&mut svd, &input).unwrap();
+    let factors = svd_compact_dyn_checked_generic(&mut svd, &input).unwrap();
+    assert_compact_factors_reconstruct_input(&input, &factors.0, Some(&factors.1), &factors.2);
     assert_compact_input_observations(
         crate::factorize::CheckedCompactOperation::Svd,
         &svd.observations,
@@ -2679,7 +2799,7 @@ fn assert_checked_compact_input_borrowing<D: FactorScalar>(complex: bool) {
     crate::factorize::reset_checked_compact_input_observations();
     let mut lq = CompactInputSpy::new(crate::factorize::CheckedCompactOperation::Lq);
     let factors = lq_compact_dyn_checked_generic(&mut lq, &input).unwrap();
-    assert_pair_reconstructs_checked_literal(&factors.0, &factors.1, complex);
+    assert_compact_factors_reconstruct_input(&input, &factors.0, None, &factors.1);
     assert_compact_input_observations(
         crate::factorize::CheckedCompactOperation::Lq,
         &lq.observations,
@@ -2698,8 +2818,12 @@ fn assert_checked_compact_input_borrowing<D: FactorScalar>(complex: bool) {
 
 #[test]
 fn checked_generic_compact_factors_borrow_real_and_complex_canonical_inputs() {
-    assert_checked_compact_input_borrowing::<f64>(false);
-    assert_checked_compact_input_borrowing::<Complex64>(true);
+    let (_, real_space, real_data) = checked_svd_truncation_input::<f64>(false);
+    assert_checked_compact_input_borrowing(real_space, real_data);
+    let (_, complex_space, complex_data) = checked_svd_truncation_input::<Complex64>(true);
+    assert_checked_compact_input_borrowing(complex_space, complex_data);
+    let (_, wide_space, wide_data) = checked_svd_wide_input::<Complex64>();
+    assert_checked_compact_input_borrowing(wide_space, wide_data);
 }
 
 #[test]
@@ -2824,6 +2948,89 @@ fn checked_generic_compact_factors_keep_padded_reordered_input_pack() {
     assert!(Arc::ptr_eq(actual_qr.0.space().provider_arc(), &provider));
     assert!(Arc::ptr_eq(actual_svd.1.space().provider_arc(), &provider));
     assert!(Arc::ptr_eq(actual_lq.1.space().provider_arc(), &provider));
+}
+
+#[test]
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
+fn checked_generic_compact_interleaved_fallback_keeps_literal_matrix_order() {
+    let (canonical, _, canonical_data) = generic_values_endomorphism_input();
+    let (expert_space, expert_data) =
+        interleaved_generic_endomorphism_input(&canonical, &canonical_data);
+    let provider = Arc::new(LateGenericSpy {
+        rule: FactorGenericRule,
+        fail_at: usize::MAX,
+        calls: Cell::new(0),
+    });
+    let expert_space = BoundDynamicFusionMapSpace::bind_generic(
+        expert_space.space().clone(),
+        Arc::clone(&provider),
+    )
+    .unwrap();
+    let expert = BoundDynamicTensorRef::try_new(&expert_space, &expert_data).unwrap();
+    let before = expert_data.clone();
+    let direct = [
+        vec![
+            Complex64::new(3.0, -1.0),
+            Complex64::new(2.0, 0.0),
+            Complex64::new(0.0, 0.0),
+            Complex64::new(1.0, 1.0),
+        ],
+        vec![Complex64::new(2.0, -1.0)],
+    ];
+    let adjoint = [
+        vec![
+            Complex64::new(3.0, 1.0),
+            Complex64::new(0.0, 0.0),
+            Complex64::new(2.0, 0.0),
+            Complex64::new(1.0, -1.0),
+        ],
+        vec![Complex64::new(2.0, 1.0)],
+    ];
+
+    crate::factorize::reset_compact_qr_copy_probe();
+    let mut qr = CompactInputSpy::new(crate::factorize::CheckedCompactOperation::Qr);
+    let factors = qr_compact_dyn_checked_generic(&mut qr, &expert).unwrap();
+    assert_eq!(
+        qr.observations
+            .iter()
+            .map(|observation| observation.values.clone())
+            .collect::<Vec<_>>(),
+        direct
+    );
+    assert_compact_factors_reconstruct_input(&expert, &factors.0, None, &factors.1);
+    assert!(crate::factorize::compact_qr_copy_probe().input_pack_calls > 0);
+
+    crate::factorize::reset_compact_svd_copy_probe();
+    let mut svd = CompactInputSpy::new(crate::factorize::CheckedCompactOperation::Svd);
+    let factors = svd_compact_dyn_checked_generic(&mut svd, &expert).unwrap();
+    assert_eq!(
+        svd.observations
+            .iter()
+            .map(|observation| observation.values.clone())
+            .collect::<Vec<_>>(),
+        direct
+    );
+    assert_compact_factors_reconstruct_input(&expert, &factors.0, Some(&factors.1), &factors.2);
+    assert!(crate::factorize::compact_svd_copy_probe().input_pack_calls > 0);
+
+    crate::factorize::reset_compact_lq_copy_probe();
+    let mut lq = CompactInputSpy::new(crate::factorize::CheckedCompactOperation::Lq);
+    let factors = lq_compact_dyn_checked_generic(&mut lq, &expert).unwrap();
+    assert_eq!(
+        lq.observations
+            .iter()
+            .map(|observation| observation.values.clone())
+            .collect::<Vec<_>>(),
+        adjoint
+    );
+    assert_compact_factors_reconstruct_input(&expert, &factors.0, None, &factors.1);
+    let probe = crate::factorize::compact_lq_copy_probe();
+    assert!(probe.input_pack_calls > 0);
+    assert!(probe.adjoint_scratch_fill_calls > 0);
+    assert_eq!(expert_data, before);
 }
 
 fn assert_real_spectra_by_sector_close(actual: &[SectorSpectrum], expected: &[SectorSpectrum]) {
