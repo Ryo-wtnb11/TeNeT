@@ -2241,6 +2241,10 @@ fn checked_only_generic_values_borrow_canonical_input_regions() {
 }
 
 #[test]
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
 fn checked_generic_values_keep_padded_reordered_fallback() {
     let (canonical_space, hermitian, general) = generic_values_endomorphism_input();
     let (padded_space, padded_hermitian) =
@@ -2345,6 +2349,10 @@ fn checked_only_generic_eigh_validates_every_region_before_dense_work() {
 }
 
 #[test]
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
 fn checked_only_generic_values_preserve_empty_scalar_and_shape_boundaries() {
     let x = SectorId::new(1);
     let empty_leg = SectorLeg::new([(x, 0)], false);
