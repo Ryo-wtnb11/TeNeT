@@ -11265,16 +11265,28 @@ mod sector_matricization_tests {
         let region = &regions[0];
         let matrix = &packed[0];
         assert_eq!(matrix.data, data);
+        assert_eq!(region.sector(), SectorId::new(9));
+        assert_eq!((region.rows(), region.cols()), (4, 4));
         assert_eq!(region.sector(), matrix.sector());
         assert_eq!(
             (region.rows(), region.cols()),
             (matrix.rows(), matrix.cols())
         );
         for side in [FactorSide::Left, FactorSide::Right] {
+            let (expected_trees, expected_offsets, expected_shapes) = match side {
+                FactorSide::Left => (&row_trees, [0, 2], &row_shapes),
+                FactorSide::Right => (&col_trees, [0, 3], &col_shapes),
+            };
             assert_eq!(region.tree_count(side), matrix.tree_count(side));
             for index in 0..region.tree_count(side) {
                 let borrowed = region.tree(side, index).unwrap();
                 let owned = matrix.tree(side, index).unwrap();
+                assert_eq!(borrowed.tree, &expected_trees[index]);
+                assert_eq!(borrowed.offset, expected_offsets[index]);
+                assert_eq!(borrowed.shape, expected_shapes[index]);
+                assert_eq!(owned.tree, &expected_trees[index]);
+                assert_eq!(owned.offset, expected_offsets[index]);
+                assert_eq!(owned.shape, expected_shapes[index]);
                 assert_eq!(borrowed.tree, owned.tree);
                 assert_eq!(borrowed.offset, owned.offset);
                 assert_eq!(borrowed.shape, owned.shape);
