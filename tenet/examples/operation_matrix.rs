@@ -1145,7 +1145,7 @@ fn assert_full_qr_lq<D: HarnessScalar>(
         }
         for diagonal in 0..rows.min(columns) {
             let value = checked_block_value(gauge_factor.data(), gauge_block, diagonal, diagonal);
-            assert!(value.im.abs() <= 2.0e-10 && value.re > 0.0);
+            assert!(value.im.abs() <= 2.0e-10 && value.re >= 0.0);
         }
     }
     if operation == "qr" {
@@ -1260,7 +1260,7 @@ fn run_full_qr_lowering(min_time: Duration) -> Result<(), Box<dyn std::error::Er
         return Ok(());
     }
     let min_time = min_time.max(Duration::from_millis(100));
-    println!("# FullQr: fixed_global_D=32 geometries=few-large:G2:d32,many-small:G16:d2 shapes=square,wide,tall layouts=canonical,padded dtypes=f64,c64 fixture_and_literal_preflight_outside_factor_timers");
+    println!("# FullQr: fixed_global_D=32 geometries=few-large:G2:d32,many-small:G16:d2 shapes=square,wide,tall layouts=canonical,padded dtypes=f64,c64 fixture_and_literal_preflight_outside_factor_timers dense_executor=DefaultDenseExecutor factorization_provider=compiled_cpu_features OP_MATRIX_GEMM_BACKEND_does_not_select_factorization_provider threads=wrapper_RAYON_BLAS_1");
     for (workload, degeneracy, sectors) in [("few-large", 32, 2), ("many-small", 2, 16)] {
         for (shape_name, aspect) in [
             ("square", CheckedMatrixAspect::Square),

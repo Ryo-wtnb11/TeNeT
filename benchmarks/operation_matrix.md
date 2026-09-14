@@ -155,11 +155,17 @@ inside every timed call. The fixed D32 sweep is a bounded comparison; it does
 not establish general rank or symmetry speed. Pure solver time, peak memory,
 and retained idle storage remain unavailable in this runner.
 
+These checked rows construct `DefaultDenseExecutor` directly. The prescribed
+comparison builds only `cpu-faer,racah-generated` and uses the wrapper's
+`RAYON_NUM_THREADS=1` and BLAS thread limits. `OP_MATRIX_GEMM_BACKEND` configures
+tensor-operation GEMM and does not select the factorization provider.
+
 ```sh
 OP_MATRIX_OPERATION=full_qr_lowering \
 OP_MATRIX_FORM=owned \
 OP_MATRIX_DEGENERACY=32 \
 OP_MATRIX_MIN_MS=100 \
+OP_MATRIX_CARGO_FEATURES=cpu-faer,racah-generated \
 benchmarks/operation_matrix.sh
 ```
 
