@@ -8079,6 +8079,7 @@ where
     let mut matricizations: Vec<SectorMatricization<D>> = Vec::new();
     let mut matrix_indices = HashMap::new();
     let mut tree_placements = HashMap::new();
+    let mut routes = Vec::with_capacity(structure.block_count());
 
     for index in 0..structure.block_count() {
         let block = structure
@@ -8123,6 +8124,7 @@ where
             matrix.rows += row_dim;
             row_placement.row_offset = Some(offset);
         }
+        let row_offset = row_placement.row_offset.expect("row tree registered above");
         let col_placement = tree_placements
             .entry((matrix_index, key.domain_tree()))
             .or_insert_with(TreePlacement::default);
@@ -8136,30 +8138,21 @@ where
             matrix.cols += col_dim;
             col_placement.col_offset = Some(offset);
         }
+        let col_offset = col_placement
+            .col_offset
+            .expect("column tree registered above");
+        routes.push((matrix_index, row_offset, col_offset));
     }
+    drop(matrix_indices);
+    drop(tree_placements);
     for matrix in &mut matricizations {
         matrix.data = vec![D::zero(); matrix.rows * matrix.cols];
     }
 
-    for index in 0..structure.block_count() {
+    for (index, (matrix_index, row_offset, col_offset)) in routes.into_iter().enumerate() {
         let block = structure
             .block(index)
             .map_err(OperationError::from_core_preserving_context)?;
-        let BlockKey::FusionTree(key) = block.key() else {
-            continue;
-        };
-        let sector = coupled_of_generic(key.codomain_tree());
-        let matrix_index = *matrix_indices
-            .get(&sector)
-            .expect("matricization registered in first pass");
-        let row_offset = tree_placements
-            .get(&(matrix_index, key.codomain_tree()))
-            .and_then(|placement| placement.row_offset)
-            .expect("row tree registered in first pass");
-        let col_offset = tree_placements
-            .get(&(matrix_index, key.domain_tree()))
-            .and_then(|placement| placement.col_offset)
-            .expect("column tree registered in first pass");
         let matrix = &mut matricizations[matrix_index];
 
         let shape = block.shape();
