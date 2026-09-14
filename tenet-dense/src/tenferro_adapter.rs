@@ -373,6 +373,13 @@ impl DefaultDenseExecutor {
         W: for<'x> Fn(DenseViewMut<'x, T>) -> DenseWrite<'x> + Copy,
         R: for<'x> Fn(DenseView<'x, T>) -> DenseRead<'x> + Copy,
     {
+        // A valid covering partition with one entry per job contains only
+        // singletons; malformed equal-count partitions need the same fallback.
+        if runs.len() == jobs.len() {
+            return self.matmul_batch_axpby_ops_serial_typed(
+                output, lhs, rhs, jobs, 0, lhs_op, rhs_op, alpha, beta, wrap_write, wrap_read,
+            );
+        }
         if !run_partition_covers(jobs, runs) {
             return self.matmul_batch_axpby_ops_serial_typed(
                 output, lhs, rhs, jobs, 0, lhs_op, rhs_op, alpha, beta, wrap_write, wrap_read,

@@ -482,6 +482,27 @@ fn op_bearing_mixed_runs_and_safe_subpartitions_use_absolute_jobs() {
     }
     assert_eq!(&output[6..], &[1.0, 1.0]);
 
+    let mut singleton_output = [1.0; 8];
+    executor.reset_seam_dispatches();
+    executor
+        .matmul_batch_axpby_with_ops_into(
+            DenseWrite::F64(DenseViewMut::new(&mut singleton_output, &shape, &strides, 0).unwrap()),
+            DenseRead::F64(DenseView::new(&lhs, &[lhs.len()], &strides, 0).unwrap()),
+            DenseRead::F64(DenseView::new(&rhs, &[rhs.len()], &strides, 0).unwrap()),
+            &jobs,
+            &[1; 6],
+            MatrixOp::Transpose,
+            MatrixOp::Identity,
+            DenseScalar::F64(2.0),
+            DenseScalar::F64(-0.5),
+        )
+        .unwrap();
+    assert_eq!(executor.seam_dispatches(), jobs.len());
+    for (actual, sum) in singleton_output[..6].iter().zip(sums) {
+        assert_eq!(*actual, 2.0 * sum - 0.5);
+    }
+    assert_eq!(&singleton_output[6..], &[1.0, 1.0]);
+
     let affine = (0..4)
         .map(|offset| batch_job((1, 1, 1), (offset, offset, offset)))
         .collect::<Vec<_>>();
@@ -555,24 +576,26 @@ fn op_bearing_malformed_runs_fall_back_without_skipping_late_errors() {
 
     let lhs = [2.0, 3.0, 5.0];
     let rhs = [7.0, 11.0, 13.0, 17.0];
-    let mut output = [-1.0; 4];
-    executor.reset_seam_dispatches();
-    let error = executor
-        .matmul_batch_axpby_with_ops_into(
-            DenseWrite::F64(DenseViewMut::new(&mut output, &[4], &strides, 0).unwrap()),
-            DenseRead::F64(DenseView::new(&lhs, &[3], &strides, 0).unwrap()),
-            DenseRead::F64(DenseView::new(&rhs, &[4], &strides, 0).unwrap()),
-            &affine,
-            &[4],
-            MatrixOp::Transpose,
-            MatrixOp::Identity,
-            DenseScalar::F64(1.0),
-            DenseScalar::F64(0.0),
-        )
-        .unwrap_err();
-    assert_eq!(error, DenseError::OutOfBounds);
-    assert_eq!(executor.seam_dispatches(), 3);
-    assert_eq!(output, [14.0, 33.0, 65.0, -1.0]);
+    for runs in [&[4][..], &[1, 1, 0, 2][..]] {
+        let mut output = [-1.0; 4];
+        executor.reset_seam_dispatches();
+        let error = executor
+            .matmul_batch_axpby_with_ops_into(
+                DenseWrite::F64(DenseViewMut::new(&mut output, &[4], &strides, 0).unwrap()),
+                DenseRead::F64(DenseView::new(&lhs, &[3], &strides, 0).unwrap()),
+                DenseRead::F64(DenseView::new(&rhs, &[4], &strides, 0).unwrap()),
+                &affine,
+                runs,
+                MatrixOp::Transpose,
+                MatrixOp::Identity,
+                DenseScalar::F64(1.0),
+                DenseScalar::F64(0.0),
+            )
+            .unwrap_err();
+        assert_eq!(error, DenseError::OutOfBounds);
+        assert_eq!(executor.seam_dispatches(), 3);
+        assert_eq!(output, [14.0, 33.0, 65.0, -1.0]);
+    }
 }
 
 #[test]
