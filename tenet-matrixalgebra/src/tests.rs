@@ -1315,6 +1315,21 @@ fn assert_compact_factors_reconstruct_input<R, D>(
 ) where
     D: FactorScalar,
 {
+    assert_eq!(
+        left.space().space().homspace().domain(),
+        right.space().space().homspace().codomain()
+    );
+    assert_factors_reconstruct_input(input, left, diagonal, right);
+}
+
+fn assert_factors_reconstruct_input<R, D>(
+    input: &BoundDynamicTensorRef<'_, R, D>,
+    left: &BoundDynFactor<R, D>,
+    diagonal: Option<&BoundDynFactor<R, D>>,
+    right: &BoundDynFactor<R, D>,
+) where
+    D: FactorScalar,
+{
     let source_structure = input.space().space().structure();
     let left_structure = left.space().space().structure();
     let right_structure = right.space().space().structure();
@@ -3730,7 +3745,7 @@ fn checked_generic_full_svd_publishes_aligned_vertex_factors_without_scatter() {
         ),
         (0, 0)
     );
-    assert_compact_factors_reconstruct_input(&input, full.u(), Some(full.s()), full.vh());
+    assert_factors_reconstruct_input(&input, full.u(), Some(full.s()), full.vh());
     for factor in [full.u(), full.s(), full.vh()] {
         assert!(Arc::ptr_eq(factor.space().provider_arc(), &provider));
     }
