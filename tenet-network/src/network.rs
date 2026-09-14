@@ -2684,7 +2684,8 @@ mod typed_replay_tests {
 
         assert_eq!(cold_calls, 0);
         assert_eq!(warm_calls, 0);
-        assert_eq!(cold.data(), warm.data());
+        assert_eq!(cold.data(), &[109.0, 160.0, 169.0, 248.0]);
+        assert_eq!(warm.data(), &[109.0, 160.0, 169.0, 248.0]);
     }
 
     #[test]
