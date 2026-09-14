@@ -18,6 +18,10 @@ use tenet::core::{
     FusionTreeLayoutCacheInfo, RuleIdentity, SectorId, SectorLeg, SectorVec, TensorMapSpace,
 };
 use tenet::dense::DefaultDenseExecutor;
+use tenet::dense::{
+    strided_batch_runs, CpuBackendKind, DenseExecutor, DenseGemmBatchJob, DenseRead, DenseScalar,
+    DenseView, DenseViewMut, DenseWrite, MatrixOp,
+};
 use tenet_matrixalgebra::{
     lq_compact_dyn_checked_generic, lq_full_dyn_checked_generic, qr_compact_dyn_checked_generic,
     qr_compact_dyn_generic, qr_full_dyn_checked_generic, svd_compact_dyn_checked_generic,
@@ -254,6 +258,20 @@ fn benchmark_runtime() -> Result<Runtime, Error> {
     builder.build()
 }
 
+fn benchmark_dense_executor() -> Result<DefaultDenseExecutor, tenet::dense::DenseError> {
+    let kind = match std::env::var("OP_MATRIX_GEMM_BACKEND").as_deref() {
+        Ok("blas") => CpuBackendKind::Blas,
+        Ok("faer") | Err(_) => CpuBackendKind::Faer,
+        Ok(other) => {
+            return Err(tenet::dense::DenseError::Unsupported {
+                op: "oriented_uniform_run",
+                message: format!("OP_MATRIX_GEMM_BACKEND must be `faer` or `blas`, got `{other}`"),
+            })
+        }
+    };
+    DefaultDenseExecutor::with_threads_and_kind(1, kind)
+}
+
 fn operation_enabled(operation: &str) -> bool {
     std::env::var("OP_MATRIX_OPERATION").map_or(true, |selected| selected == operation)
 }
@@ -279,6 +297,545 @@ fn assert_f64_payload_close(actual: &[f64], expected: &[f64]) {
             "payload mismatch at index {index}: actual={actual}, expected={expected}, error={error}, tolerance={tolerance}"
         );
     }
+}
+
+trait OrientedScalar:
+    TensorScalar + Copy + std::fmt::Debug + std::ops::Add<Output = Self> + std::ops::Mul<Output = Self>
+{
+    const TAG: &'static str;
+    fn zero() -> Self;
+    fn sentinel() -> Self;
+    fn sample(index: usize) -> Self;
+    fn alpha() -> Self;
+    fn conjugate(self) -> Self;
+    fn read<'a>(view: DenseView<'a, Self>) -> DenseRead<'a>;
+    fn write<'a>(view: DenseViewMut<'a, Self>) -> DenseWrite<'a>;
+    fn scalar(value: Self) -> DenseScalar;
+    fn error(self, other: Self) -> f64;
+    fn magnitude(self) -> f64;
+}
+
+impl OrientedScalar for f64 {
+    const TAG: &'static str = "f64";
+
+    fn zero() -> Self {
+        0.0
+    }
+
+    fn sentinel() -> Self {
+        -0.375
+    }
+
+    fn sample(index: usize) -> Self {
+        0.125 + ((index * 17 + 3) % 97) as f64 / 29.0
+    }
+
+    fn alpha() -> Self {
+        0.75
+    }
+
+    fn conjugate(self) -> Self {
+        self
+    }
+
+    fn read<'a>(view: DenseView<'a, Self>) -> DenseRead<'a> {
+        DenseRead::F64(view)
+    }
+
+    fn write<'a>(view: DenseViewMut<'a, Self>) -> DenseWrite<'a> {
+        DenseWrite::F64(view)
+    }
+
+    fn scalar(value: Self) -> DenseScalar {
+        DenseScalar::F64(value)
+    }
+
+    fn error(self, other: Self) -> f64 {
+        (self - other).abs()
+    }
+
+    fn magnitude(self) -> f64 {
+        self.abs()
+    }
+}
+
+impl OrientedScalar for Complex64 {
+    const TAG: &'static str = "c64";
+
+    fn zero() -> Self {
+        Self::new(0.0, 0.0)
+    }
+
+    fn sentinel() -> Self {
+        Self::new(-0.375, 0.625)
+    }
+
+    fn sample(index: usize) -> Self {
+        Self::new(
+            0.125 + ((index * 17 + 3) % 97) as f64 / 29.0,
+            -0.25 + ((index * 11 + 7) % 89) as f64 / 31.0,
+        )
+    }
+
+    fn alpha() -> Self {
+        Self::new(0.75, -0.375)
+    }
+
+    fn conjugate(self) -> Self {
+        self.conj()
+    }
+
+    fn read<'a>(view: DenseView<'a, Self>) -> DenseRead<'a> {
+        DenseRead::C64(view)
+    }
+
+    fn write<'a>(view: DenseViewMut<'a, Self>) -> DenseWrite<'a> {
+        DenseWrite::C64(view)
+    }
+
+    fn scalar(value: Self) -> DenseScalar {
+        DenseScalar::C64(value)
+    }
+
+    fn error(self, other: Self) -> f64 {
+        (self - other).norm()
+    }
+
+    fn magnitude(self) -> f64 {
+        self.norm()
+    }
+}
+
+fn assert_oriented_close<T: OrientedScalar>(actual: &[T], expected: &[T]) {
+    assert_eq!(actual.len(), expected.len());
+    for (index, (&actual, &expected)) in actual.iter().zip(expected).enumerate() {
+        let tolerance = 2.0e-11 * (1.0 + actual.magnitude().max(expected.magnitude()));
+        assert!(
+            actual.error(expected) <= tolerance,
+            "payload mismatch at {index}: actual={actual:?}, expected={expected:?}"
+        );
+    }
+}
+
+#[derive(Clone)]
+struct AdapterFixture<T> {
+    lhs: Vec<T>,
+    rhs: Vec<T>,
+    output: Vec<T>,
+    jobs: Vec<DenseGemmBatchJob>,
+    runs: Vec<usize>,
+    lhs_base: usize,
+    rhs_base: usize,
+    dst_base: usize,
+}
+
+fn adapter_fixture<T: OrientedScalar>(shapes: &[(usize, usize, usize)]) -> AdapterFixture<T> {
+    let uniform = shapes.windows(2).all(|pair| pair[0] == pair[1]);
+    let (lhs_base, rhs_base, dst_base) = (3, 5, 7);
+    let mut lhs_offset = 0usize;
+    let mut rhs_offset = 0usize;
+    let mut dst_offset = 0usize;
+    let mut jobs = Vec::with_capacity(shapes.len());
+    for (index, &(rows, contracted, cols)) in shapes.iter().enumerate() {
+        jobs.push(DenseGemmBatchJob {
+            dst_offset,
+            lhs_offset,
+            rhs_offset,
+            rows,
+            contracted,
+            cols,
+        });
+        if index + 1 != shapes.len() {
+            if uniform {
+                let lhs_stride = if (rows, contracted, cols) == (64, 48, 56) {
+                    3080
+                } else if rows >= 32 {
+                    rows * contracted + 8
+                } else {
+                    rows * contracted + 4
+                };
+                let rhs_stride = if (rows, contracted, cols) == (4, 3, 5) {
+                    18
+                } else if (rows, contracted, cols) == (64, 48, 56) {
+                    2696
+                } else if rows >= 32 {
+                    contracted * cols + 8
+                } else {
+                    contracted * cols + 6
+                };
+                let dst_stride = if (rows, contracted, cols) == (64, 48, 56) {
+                    3592
+                } else if rows >= 32 {
+                    rows * cols + 8
+                } else {
+                    rows * cols + 4
+                };
+                lhs_offset += lhs_stride;
+                rhs_offset += rhs_stride;
+                dst_offset += dst_stride;
+            } else {
+                lhs_offset += rows * contracted + 3;
+                rhs_offset += contracted * cols + 5;
+                dst_offset += rows * cols + 7;
+            }
+        }
+    }
+    let &(last_rows, last_contracted, last_cols) = shapes.last().expect("nonempty fixture");
+    let lhs_len = lhs_base + lhs_offset + last_rows * last_contracted;
+    let rhs_len = rhs_base + rhs_offset + last_contracted * last_cols;
+    let dst_len = dst_base + dst_offset + last_rows * last_cols;
+    let lhs = (0..lhs_len).map(T::sample).collect();
+    let rhs = (0..rhs_len).map(|index| T::sample(index + 101)).collect();
+    let output = vec![T::sentinel(); dst_len];
+    let runs = strided_batch_runs(&jobs);
+    AdapterFixture {
+        lhs,
+        rhs,
+        output,
+        jobs,
+        runs,
+        lhs_base,
+        rhs_base,
+        dst_base,
+    }
+}
+
+fn expected_adapter<T: OrientedScalar>(
+    fixture: &AdapterFixture<T>,
+    lhs_op: MatrixOp,
+    rhs_op: MatrixOp,
+    alpha: T,
+    beta: T,
+) -> Vec<T> {
+    let mut expected = fixture.output.clone();
+    for job in &fixture.jobs {
+        for col in 0..job.cols {
+            for row in 0..job.rows {
+                let mut sum = T::zero();
+                for inner in 0..job.contracted {
+                    let lhs_index = match lhs_op {
+                        MatrixOp::Identity => row + job.rows * inner,
+                        MatrixOp::Transpose | MatrixOp::Adjoint => inner + job.contracted * row,
+                    };
+                    let rhs_index = match rhs_op {
+                        MatrixOp::Identity => inner + job.contracted * col,
+                        MatrixOp::Transpose | MatrixOp::Adjoint => col + job.cols * inner,
+                    };
+                    let mut lhs = fixture.lhs[fixture.lhs_base + job.lhs_offset + lhs_index];
+                    let mut rhs = fixture.rhs[fixture.rhs_base + job.rhs_offset + rhs_index];
+                    if lhs_op == MatrixOp::Adjoint {
+                        lhs = lhs.conjugate();
+                    }
+                    if rhs_op == MatrixOp::Adjoint {
+                        rhs = rhs.conjugate();
+                    }
+                    sum = sum + lhs * rhs;
+                }
+                let index = fixture.dst_base + job.dst_offset + row + job.rows * col;
+                expected[index] = alpha * sum + beta * expected[index];
+            }
+        }
+    }
+    expected
+}
+
+fn execute_adapter<T: OrientedScalar>(
+    executor: &mut DefaultDenseExecutor,
+    fixture: &mut AdapterFixture<T>,
+    lhs_op: MatrixOp,
+    rhs_op: MatrixOp,
+    alpha: T,
+    beta: T,
+) -> Result<(T, usize), tenet::dense::DenseError> {
+    let lhs_shape = [fixture.lhs.len() - fixture.lhs_base];
+    let rhs_shape = [fixture.rhs.len() - fixture.rhs_base];
+    let dst_shape = [fixture.output.len() - fixture.dst_base];
+    let strides = [1];
+    let lhs = DenseView::new(&fixture.lhs, &lhs_shape, &strides, fixture.lhs_base)?;
+    let rhs = DenseView::new(&fixture.rhs, &rhs_shape, &strides, fixture.rhs_base)?;
+    let output = DenseViewMut::new(&mut fixture.output, &dst_shape, &strides, fixture.dst_base)?;
+    executor.matmul_batch_axpby_with_ops_into(
+        T::write(output),
+        T::read(lhs),
+        T::read(rhs),
+        &fixture.jobs,
+        &fixture.runs,
+        lhs_op,
+        rhs_op,
+        T::scalar(alpha),
+        T::scalar(beta),
+    )?;
+    let marker = (fixture.output[fixture.dst_base], fixture.output.len());
+    black_box(marker);
+    Ok(marker)
+}
+
+fn print_adapter_sample(
+    form: &str,
+    phase: &str,
+    iterations: u64,
+    elapsed: Duration,
+    allocations: Allocations,
+) {
+    let mut fields = vec![
+        "DenseAdapter".to_string(),
+        "oriented_uniform_run".to_string(),
+        form.to_string(),
+        phase.to_string(),
+        iterations.to_string(),
+        format!("{:.3}", elapsed.as_secs_f64() * 1e6 / iterations as f64),
+    ];
+    fields.extend(std::iter::repeat("NA".to_string()).take(25));
+    fields.push(allocations.calls.to_string());
+    fields.push(allocations.requested_bytes.to_string());
+    fields.extend(std::iter::repeat("NA".to_string()).take(5));
+    println!("{}", fields.join(","));
+}
+
+fn bench_adapter<T: OrientedScalar>(
+    form: &str,
+    min_time: Duration,
+    expected_marker: (T, usize),
+    mut operation: impl FnMut() -> Result<(T, usize), tenet::dense::DenseError>,
+) -> Result<(), tenet::dense::DenseError> {
+    let started = Instant::now();
+    let (marker, allocations) = measure_allocations(&mut operation)?;
+    let elapsed = started.elapsed();
+    print_adapter_sample(
+        form,
+        "first_fresh_executor_after_preflight",
+        1,
+        elapsed,
+        allocations,
+    );
+    assert_oriented_close(&[marker.0], &[expected_marker.0]);
+    assert_eq!(marker.1, expected_marker.1);
+
+    for _ in 0..2 {
+        let marker = operation()?;
+        assert_oriented_close(&[marker.0], &[expected_marker.0]);
+        assert_eq!(marker.1, expected_marker.1);
+    }
+    let started = Instant::now();
+    let mut iterations = 0;
+    let (marker, allocations) = measure_allocations(|| {
+        let mut marker = expected_marker;
+        while iterations < 2 || started.elapsed() < min_time {
+            marker = operation()?;
+            iterations += 1;
+        }
+        Ok(marker)
+    })?;
+    let elapsed = started.elapsed();
+    print_adapter_sample(form, "warm_fixed", iterations, elapsed, allocations);
+    assert_oriented_close(&[marker.0], &[expected_marker.0]);
+    assert_eq!(marker.1, expected_marker.1);
+    Ok(())
+}
+
+fn bench_public<T: OrientedScalar>(
+    runtime: &Runtime,
+    form: &str,
+    min_time: Duration,
+    mut validate: impl FnMut((usize, T, usize)),
+    mut operation: impl FnMut() -> Result<(usize, T, usize), Error>,
+) -> Result<(), Error> {
+    let before = counters(runtime);
+    let started = Instant::now();
+    let (marker, allocations) = measure_allocations(&mut operation)?;
+    let elapsed = started.elapsed();
+    let after = counters(runtime);
+    print_sample(
+        "U1Public",
+        "oriented_uniform_run",
+        form,
+        "first_fresh_runtime_after_preflight",
+        1,
+        elapsed,
+        allocations,
+        before,
+        after,
+    );
+    validate(marker);
+
+    for _ in 0..2 {
+        validate(operation()?);
+    }
+    let before = counters(runtime);
+    let started = Instant::now();
+    let mut iterations = 0;
+    let (marker, allocations) = measure_allocations(|| {
+        let mut marker = operation()?;
+        iterations += 1;
+        while iterations < 2 || started.elapsed() < min_time {
+            marker = operation()?;
+            iterations += 1;
+        }
+        Ok(marker)
+    })?;
+    let elapsed = started.elapsed();
+    let after = counters(runtime);
+    print_sample(
+        "U1Public",
+        "oriented_uniform_run",
+        form,
+        "warm_fixed",
+        iterations,
+        elapsed,
+        allocations,
+        before,
+        after,
+    );
+    validate(marker);
+    Ok(())
+}
+
+fn bench_adapter_shape<T: OrientedScalar>(
+    form: &str,
+    min_time: Duration,
+    expected: &[(T, usize)],
+    mut operation: impl FnMut() -> Result<(usize, T, usize), tenet::dense::DenseError>,
+) -> Result<(), tenet::dense::DenseError> {
+    for _ in 0..2 {
+        let (case, first, len) = operation()?;
+        assert_oriented_close(&[first], &[expected[case].0]);
+        assert_eq!(len, expected[case].1);
+    }
+    let started = Instant::now();
+    let mut iterations = 0;
+    let (marker, allocations) = measure_allocations(|| {
+        let mut marker = operation()?;
+        iterations += 1;
+        while iterations < 2 || started.elapsed() < min_time {
+            marker = operation()?;
+            iterations += 1;
+        }
+        Ok(marker)
+    })?;
+    let elapsed = started.elapsed();
+    print_adapter_sample(form, "warm_shape_cycle", iterations, elapsed, allocations);
+    assert_oriented_close(&[marker.1], &[expected[marker.0].0]);
+    assert_eq!(marker.2, expected[marker.0].1);
+    Ok(())
+}
+
+fn bench_public_shape<T: OrientedScalar>(
+    runtime: &Runtime,
+    form: &str,
+    min_time: Duration,
+    expected: &[(T, usize)],
+    mut operation: impl FnMut() -> Result<(usize, T, usize), Error>,
+) -> Result<(), Error> {
+    for _ in 0..2 {
+        let (case, first, len) = operation()?;
+        assert_oriented_close(&[first], &[expected[case].0]);
+        assert_eq!(len, expected[case].1);
+    }
+    let before = counters(runtime);
+    let started = Instant::now();
+    let mut iterations = 0;
+    let (marker, allocations) = measure_allocations(|| {
+        let mut marker = operation()?;
+        iterations += 1;
+        while iterations < 2 || started.elapsed() < min_time {
+            marker = operation()?;
+            iterations += 1;
+        }
+        Ok(marker)
+    })?;
+    let elapsed = started.elapsed();
+    let after = counters(runtime);
+    print_sample(
+        "U1Public",
+        "oriented_uniform_run",
+        form,
+        "warm_shape_cycle",
+        iterations,
+        elapsed,
+        allocations,
+        before,
+        after,
+    );
+    assert_oriented_close(&[marker.1], &[expected[marker.0].0]);
+    assert_eq!(marker.2, expected[marker.0].1);
+    Ok(())
+}
+
+struct PublicFixture<T: TensorScalar> {
+    lhs: TensorMap<U1FusionRule, T>,
+    lhs_adjoint: TensorMap<U1FusionRule, T>,
+    rhs: TensorMap<U1FusionRule, T>,
+    expected_direct: TensorMap<U1FusionRule, T>,
+    expected_adjoint: TensorMap<U1FusionRule, T>,
+}
+
+fn public_fixture<T: OrientedScalar>(
+    runtime: &Runtime,
+    sectors: usize,
+    degeneracy: usize,
+) -> Result<PublicFixture<T>, Error> {
+    let provider = Arc::new(U1FusionRule);
+    let leg = GradedSpace::try_new_with_arc(
+        provider,
+        (0..sectors).map(|charge| (U1Irrep::new(charge as i32), degeneracy)),
+    )?;
+    let lhs_value = |charge: i32, indices: &[usize]| {
+        T::sample(charge as usize * 1009 + indices[0] + 3 * indices[1] + 211)
+    };
+    let rhs_value = |charge: i32, indices: &[usize]| {
+        T::sample(charge as usize * 1013 + 2 * indices[0] + 5 * indices[1] + 401)
+    };
+    let lhs = TensorMap::from_block_fn(runtime, [&leg], [&leg], |trees, indices| {
+        lhs_value(trees.coupled().charge(), indices)
+    })?;
+    let lhs_adjoint = lhs.adjoint()?;
+    let rhs = TensorMap::from_block_fn(runtime, [&leg], [&leg], |trees, indices| {
+        rhs_value(trees.coupled().charge(), indices)
+    })?;
+    let expected_direct = TensorMap::from_block_fn(runtime, [&leg], [&leg], |trees, indices| {
+        let charge = trees.coupled().charge();
+        let mut sum = T::zero();
+        for inner in 0..degeneracy {
+            sum = sum
+                + lhs_value(charge, &[indices[0], inner]) * rhs_value(charge, &[inner, indices[1]]);
+        }
+        sum
+    })?;
+    let expected_adjoint = TensorMap::from_block_fn(runtime, [&leg], [&leg], |trees, indices| {
+        let charge = trees.coupled().charge();
+        let mut sum = T::zero();
+        for inner in 0..degeneracy {
+            sum = sum
+                + lhs_value(charge, &[inner, indices[0]]).conjugate()
+                    * rhs_value(charge, &[inner, indices[1]]);
+        }
+        sum
+    })?;
+    Ok(PublicFixture {
+        lhs,
+        lhs_adjoint,
+        rhs,
+        expected_direct,
+        expected_adjoint,
+    })
+}
+
+fn assert_public_fixture<T: OrientedScalar>(
+    actual: &TensorMap<U1FusionRule, T>,
+    expected: &TensorMap<U1FusionRule, T>,
+) -> Result<(), Error> {
+    assert_eq!(actual.codomain(), expected.codomain());
+    assert_eq!(actual.domain(), expected.domain());
+    assert_eq!(actual.block_count(), expected.block_count());
+    for index in 0..actual.block_count() {
+        assert_eq!(actual.block(index)?, expected.block(index)?);
+        assert_eq!(
+            actual.block_fusion_trees(index)?,
+            expected.block_fusion_trees(index)?
+        );
+    }
+    assert_oriented_close(actual.data(), expected.data());
+    Ok(())
 }
 
 macro_rules! assert_same_tensor {
@@ -1823,6 +2380,319 @@ fn run_checked_sun(
     Ok(())
 }
 
+fn matrix_op_tag(op: MatrixOp) -> &'static str {
+    match op {
+        MatrixOp::Identity => "I",
+        MatrixOp::Transpose => "T",
+        MatrixOp::Adjoint => "A",
+    }
+}
+
+fn run_adapter_case<T: OrientedScalar>(
+    class: &str,
+    shapes: &[(usize, usize, usize)],
+    expected_runs: &[usize],
+    lhs_op: MatrixOp,
+    rhs_op: MatrixOp,
+    min_time: Duration,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let form = format!(
+        "{class}_{}_{}{}",
+        T::TAG,
+        matrix_op_tag(lhs_op),
+        matrix_op_tag(rhs_op)
+    );
+    let mut preflight = adapter_fixture::<T>(shapes);
+    assert_eq!(preflight.runs, expected_runs);
+    let alpha = T::alpha();
+    let beta = T::sample(997);
+    let expected = expected_adapter(&preflight, lhs_op, rhs_op, alpha, beta);
+    let mut preflight_executor = benchmark_dense_executor()?;
+    execute_adapter(
+        &mut preflight_executor,
+        &mut preflight,
+        lhs_op,
+        rhs_op,
+        alpha,
+        beta,
+    )?;
+    assert_oriented_close(&preflight.output, &expected);
+    drop(preflight_executor);
+    drop(preflight);
+    drop(expected);
+
+    let mut fixture = adapter_fixture::<T>(shapes);
+    let expected = expected_adapter(&fixture, lhs_op, rhs_op, alpha, T::zero());
+    let expected_marker = (expected[fixture.dst_base], expected.len());
+    let mut executor = benchmark_dense_executor()?;
+    bench_adapter(&form, min_time, expected_marker, || {
+        execute_adapter(
+            &mut executor,
+            &mut fixture,
+            lhs_op,
+            rhs_op,
+            alpha,
+            T::zero(),
+        )
+    })?;
+    Ok(())
+}
+
+fn run_adapter_shape_cycle<T: OrientedScalar>(
+    class: &str,
+    geometries: &[(usize, usize, usize)],
+    jobs: usize,
+    lhs_op: MatrixOp,
+    min_time: Duration,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let form = format!("{class}_{}_{}I_shape_cycle", T::TAG, matrix_op_tag(lhs_op));
+    for &geometry in geometries {
+        let shapes = vec![geometry; jobs];
+        let mut fixture = adapter_fixture::<T>(&shapes);
+        assert_eq!(fixture.runs, [jobs]);
+        let expected = expected_adapter(
+            &fixture,
+            lhs_op,
+            MatrixOp::Identity,
+            T::alpha(),
+            T::sample(997),
+        );
+        let mut executor = benchmark_dense_executor()?;
+        execute_adapter(
+            &mut executor,
+            &mut fixture,
+            lhs_op,
+            MatrixOp::Identity,
+            T::alpha(),
+            T::sample(997),
+        )?;
+        assert_oriented_close(&fixture.output, &expected);
+    }
+
+    let mut fixtures: Vec<_> = geometries
+        .iter()
+        .map(|&geometry| adapter_fixture::<T>(&vec![geometry; jobs]))
+        .collect();
+    let expected: Vec<_> = fixtures
+        .iter()
+        .map(|fixture| {
+            let data = expected_adapter(fixture, lhs_op, MatrixOp::Identity, T::alpha(), T::zero());
+            (data[fixture.dst_base], data.len())
+        })
+        .collect();
+    let mut executor = benchmark_dense_executor()?;
+    let mut next = 0usize;
+    bench_adapter_shape(&form, min_time, &expected, || {
+        let case = next;
+        next = (next + 1) % fixtures.len();
+        let (first, len) = execute_adapter(
+            &mut executor,
+            &mut fixtures[case],
+            lhs_op,
+            MatrixOp::Identity,
+            T::alpha(),
+            T::zero(),
+        )?;
+        Ok((case, first, len))
+    })?;
+    Ok(())
+}
+
+fn observe_owned<T: OrientedScalar>(output: TensorMap<U1FusionRule, T>) -> (usize, T, usize) {
+    let marker = (0, output.data()[0], output.data().len());
+    black_box(marker);
+    drop(output);
+    marker
+}
+
+macro_rules! preflight_public {
+    ($fixture:expr) => {{
+        let direct = $fixture.lhs.compose(&$fixture.rhs)?;
+        assert_public_fixture(&direct, &$fixture.expected_direct)?;
+        let composed = $fixture.lhs_adjoint.compose(&$fixture.rhs)?;
+        assert_public_fixture(&composed, &$fixture.expected_adjoint)?;
+        let contracted = $fixture
+            .lhs_adjoint
+            .contract(&$fixture.rhs, &[1], &[0], &[0, 1])?;
+        assert_public_fixture(&contracted, &$fixture.expected_adjoint)?;
+    }};
+}
+
+macro_rules! run_public_dtype {
+    ($ty:ty, $class:expr, $sectors:expr, $degeneracy:expr, $min_time:expr) => {{
+        for operation in ["direct_compose", "lazy_lhs_compose", "lazy_lhs_contract"] {
+            let preflight_runtime = benchmark_runtime()?;
+            let preflight = public_fixture::<$ty>(&preflight_runtime, $sectors, $degeneracy)?;
+            preflight_public!(preflight);
+            drop(preflight);
+            drop(preflight_runtime);
+
+            let runtime = benchmark_runtime()?;
+            let fixture = public_fixture::<$ty>(&runtime, $sectors, $degeneracy)?;
+            let expected = if operation == "direct_compose" {
+                &fixture.expected_direct
+            } else {
+                &fixture.expected_adjoint
+            };
+            let expected_marker = (expected.data()[0], expected.data().len());
+            let form = format!("{}_{}_{}", $class, <$ty as OrientedScalar>::TAG, operation);
+            let validate = |(_, first, len)| {
+                assert_oriented_close(&[first], &[expected_marker.0]);
+                assert_eq!(len, expected_marker.1);
+            };
+            match operation {
+                "direct_compose" => bench_public(&runtime, &form, $min_time, validate, || {
+                    Ok(observe_owned(fixture.lhs.compose(&fixture.rhs)?))
+                })?,
+                "lazy_lhs_compose" => bench_public(&runtime, &form, $min_time, validate, || {
+                    Ok(observe_owned(fixture.lhs_adjoint.compose(&fixture.rhs)?))
+                })?,
+                "lazy_lhs_contract" => bench_public(&runtime, &form, $min_time, validate, || {
+                    Ok(observe_owned(fixture.lhs_adjoint.contract(
+                        &fixture.rhs,
+                        &[1],
+                        &[0],
+                        &[0, 1],
+                    )?))
+                })?,
+                _ => unreachable!(),
+            }
+        }
+    }};
+}
+
+macro_rules! run_public_shape_dtype {
+    ($ty:ty, $class:expr, $sectors:expr, $degeneracies:expr, $min_time:expr) => {{
+        let preflight_runtime = benchmark_runtime()?;
+        for &degeneracy in $degeneracies {
+            let fixture = public_fixture::<$ty>(&preflight_runtime, $sectors, degeneracy)?;
+            preflight_public!(fixture);
+        }
+        drop(preflight_runtime);
+
+        let runtime = benchmark_runtime()?;
+        let fixtures: Vec<_> = $degeneracies
+            .iter()
+            .map(|&degeneracy| public_fixture::<$ty>(&runtime, $sectors, degeneracy))
+            .collect::<Result<_, _>>()?;
+        let expected: Vec<_> = fixtures
+            .iter()
+            .map(|fixture| {
+                (
+                    fixture.expected_adjoint.data()[0],
+                    fixture.expected_adjoint.data().len(),
+                )
+            })
+            .collect();
+        let form = format!(
+            "{}_{}_lazy_lhs_compose_shape_cycle",
+            $class,
+            <$ty as OrientedScalar>::TAG
+        );
+        let mut next = 0usize;
+        bench_public_shape(&runtime, &form, $min_time, &expected, || {
+            let case = next;
+            next = (next + 1) % fixtures.len();
+            let output = fixtures[case].lhs_adjoint.compose(&fixtures[case].rhs)?;
+            let (_, first, len) = observe_owned(output);
+            Ok((case, first, len))
+        })?;
+    }};
+}
+
+fn run_oriented_uniform_run(min_time: Duration) -> Result<(), Box<dyn std::error::Error>> {
+    let many_small = vec![(4, 3, 5); 32];
+    let few_large = vec![(64, 48, 56); 4];
+    let minimum_run = vec![(4, 3, 5); 2];
+    let singleton = vec![(64, 48, 56)];
+    let heterogeneous: Vec<_> = (0..8)
+        .map(|index| if index % 2 == 0 { (4, 3, 5) } else { (5, 4, 3) })
+        .collect();
+
+    for (lhs_op, rhs_op) in [
+        (MatrixOp::Identity, MatrixOp::Identity),
+        (MatrixOp::Transpose, MatrixOp::Identity),
+    ] {
+        run_adapter_case::<f64>("many_small", &many_small, &[32], lhs_op, rhs_op, min_time)?;
+        run_adapter_case::<f64>("few_large", &few_large, &[4], lhs_op, rhs_op, min_time)?;
+    }
+    for (lhs_op, rhs_op) in [
+        (MatrixOp::Identity, MatrixOp::Identity),
+        (MatrixOp::Adjoint, MatrixOp::Identity),
+        (MatrixOp::Adjoint, MatrixOp::Adjoint),
+    ] {
+        run_adapter_case::<Complex64>("many_small", &many_small, &[32], lhs_op, rhs_op, min_time)?;
+        run_adapter_case::<Complex64>("few_large", &few_large, &[4], lhs_op, rhs_op, min_time)?;
+    }
+    run_adapter_case::<f64>(
+        "minimum_run",
+        &minimum_run,
+        &[2],
+        MatrixOp::Transpose,
+        MatrixOp::Identity,
+        min_time,
+    )?;
+    run_adapter_case::<Complex64>(
+        "minimum_run",
+        &minimum_run,
+        &[2],
+        MatrixOp::Adjoint,
+        MatrixOp::Identity,
+        min_time,
+    )?;
+    run_adapter_case::<Complex64>(
+        "singleton",
+        &singleton,
+        &[1],
+        MatrixOp::Adjoint,
+        MatrixOp::Identity,
+        min_time,
+    )?;
+    run_adapter_case::<Complex64>(
+        "heterogeneous",
+        &heterogeneous,
+        &[1; 8],
+        MatrixOp::Adjoint,
+        MatrixOp::Identity,
+        min_time,
+    )?;
+
+    let small_shapes = [(4, 3, 5), (5, 4, 6), (3, 6, 4)];
+    let large_shapes = [(64, 48, 56), (56, 40, 64), (72, 56, 48)];
+    run_adapter_shape_cycle::<f64>(
+        "many_small",
+        &small_shapes,
+        32,
+        MatrixOp::Transpose,
+        min_time,
+    )?;
+    run_adapter_shape_cycle::<Complex64>(
+        "many_small",
+        &small_shapes,
+        32,
+        MatrixOp::Adjoint,
+        min_time,
+    )?;
+    run_adapter_shape_cycle::<f64>("few_large", &large_shapes, 4, MatrixOp::Transpose, min_time)?;
+    run_adapter_shape_cycle::<Complex64>(
+        "few_large",
+        &large_shapes,
+        4,
+        MatrixOp::Adjoint,
+        min_time,
+    )?;
+
+    run_public_dtype!(f64, "many_small", 32, 4, min_time);
+    run_public_dtype!(Complex64, "many_small", 32, 4, min_time);
+    run_public_dtype!(f64, "few_large", 4, 32, min_time);
+    run_public_dtype!(Complex64, "few_large", 4, 32, min_time);
+    run_public_shape_dtype!(f64, "many_small", 32, &[4, 5, 3], min_time);
+    run_public_shape_dtype!(Complex64, "many_small", 32, &[4, 5, 3], min_time);
+    run_public_shape_dtype!(f64, "few_large", 4, &[32, 33, 31], min_time);
+    run_public_shape_dtype!(Complex64, "few_large", 4, &[32, 33, 31], min_time);
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Ok(operation) = std::env::var("OP_MATRIX_OPERATION") {
         if !matches!(
@@ -1848,6 +2718,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 | "qr_compact_generic_layout"
                 | "checked_compact_input"
                 | "full_qr_lowering"
+                | "oriented_uniform_run"
         ) {
             return Err(Box::new(Error::InvalidArgument(format!(
                 "unknown OP_MATRIX_OPERATION `{operation}`"
@@ -1908,9 +2779,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!("# allocation_scope=caller-thread Rust allocation calls and requested bytes during the measured phase; excludes worker threads, native BLAS allocation, frees, and peak/live bytes");
     println!("# unavailable_counters=exact_layout_admission,operation_local_scratch_bytes,provider_queries,transform_passes,gemm_calls,host_device_transfers");
+    if std::env::var("OP_MATRIX_OPERATION").as_deref() == Ok("oriented_uniform_run") {
+        println!("# oriented_uniform_run_scope=DenseAdapter caller-owned destination retained; U1Public owned result first-value/length observation and drop inside every measured call");
+        println!("# oriented_uniform_run_fixtures=many_small:L32:4x3x5;few_large:L4:64x48x56;minimum_run:L2:4x3x5;singleton:L1:64x48x56;heterogeneous:L8:alternating");
+        println!("# oriented_uniform_run_shape_cycles=many_small:L32:[4x3x5,5x4x6,3x6x4];few_large:L4:[64x48x56,56x40x64,72x56x48]");
+        println!("# oriented_uniform_run_public=many_small:32_sectors:d4;few_large:4_sectors:d32;shape_degeneracies:[d,d+1,d-1]");
+        println!("# oriented_uniform_run_first_scope=fresh executor or Runtime after separate full oracle preflight; process-global metadata may already be warm");
+        println!("# adapter_runtime_cache_provider_counters=NA");
+        println!("# comparison_protocol=unconditional A-baseline,B-candidate,B-candidate,A-baseline; three fresh child processes per position");
+    }
     println!("symmetry,operation,form,phase,iterations,us_per_iter,tree_hits,tree_misses,tree_evictions,tree_bypasses,tree_entries_delta,tree_charged_payload_bytes_before,tree_charged_payload_bytes_after,tree_charged_payload_bytes_delta,fusion_layout_misses,fusion_layout_evictions,fusion_layout_bypasses,fusion_layout_entries_delta,fusion_layout_charged_payload_bytes_before,fusion_layout_charged_payload_bytes_after,fusion_layout_charged_payload_bytes_delta,complete_hom_hits,complete_hom_misses,complete_hom_admissions,complete_hom_evictions,complete_hom_bypasses,complete_hom_entries_delta,complete_hom_charged_bytes_before,complete_hom_charged_bytes_after,complete_hom_charged_bytes_delta,exact_layout_admission,caller_allocation_calls,caller_requested_allocation_bytes,operation_local_scratch_bytes,provider_queries,transform_passes,gemm_calls,host_device_transfers");
 
     let min_time = Duration::from_millis(min_ms);
+    if std::env::var("OP_MATRIX_OPERATION").as_deref() == Ok("oriented_uniform_run") {
+        return run_oriented_uniform_run(min_time);
+    }
     run_layout_generic_qr(degeneracy, min_time)?;
     run_checked_compact_input(degeneracy, min_time)?;
     run_full_qr_lowering(min_time)?;

@@ -115,6 +115,78 @@ OP_MATRIX_MIN_MS=100 \
 benchmarks/operation_matrix.sh
 ```
 
+## Oriented uniform-run diagnostic
+
+`OP_MATRIX_OPERATION=oriented_uniform_run` is an explicit-only #1179
+benchmark. It has two scopes. `DenseAdapter` calls the public
+`DenseExecutor::matmul_batch_axpby_with_ops_into` seam into caller-owned
+destination storage; the destination remains allocated across calls. `U1Public`
+calls public owned `compose` and `contract`; every first, warm, and shape-cycle
+call copies the first payload value and length, observes them through
+`black_box`, and drops the complete owned output before its measured span ends.
+The copied marker is compared with the precomputed oracle after timing.
+
+All jobs, buffers, run partitions, tensors, expected payloads, and changing-shape
+fixtures are constructed before timing. A separate executor or `Runtime` runs a
+full literal nested-sum preflight first and is dropped before the measured
+fixture is built. Adapter preflight uses nonzero complex alpha and beta and
+checks gaps as well as active destinations. Timed calls use beta zero. Public
+U1 expected tensors are built directly from parent coordinates and distinct
+coupled-sector labels; they do not use the measured compose, contract, or
+lazy-adjoint materialization as their oracle.
+
+The adapter sweep contains:
+
+- `many_small`: `L=32`, `(m,k,n)=(4,3,5)`, with affine gaps;
+- `few_large`: `L=4`, `(64,48,56)`, with bases `(3,5,7)` and strides
+  `(3080,2696,3592)`;
+- `minimum_run`: `L=2`, `(4,3,5)`, for the structural oriented-run minimum;
+- `singleton`: `L=1`, `(64,48,56)`;
+- `heterogeneous`: eight alternating `(4,3,5)` and `(5,4,3)` jobs whose
+  maximal runs all have length one.
+
+The two uniform workloads measure f64 `II`/`TI` and complex64 `II`/`AI`/`AA`.
+The minimum-run control measures f64 `TI` and complex64 `AI`; singleton and
+heterogeneous controls measure complex64 `AI`. Shape-cycle rows retain one
+executor while cycling the fully preconstructed geometries
+`[(4,3,5),(5,4,6),(3,6,4)]` at `L=32` or
+`[(64,48,56),(56,40,64),(72,56,48)]` at `L=4`.
+
+The public U1 layer uses 32 sectors of degeneracy 4 (`many_small`) or four
+sectors of degeneracy 32 (`few_large`). For f64 and genuinely complex
+complex64 it measures direct compose, lazy-lhs-adjoint compose, and the same
+lazy lhs through `contract(..., &[1], &[0], &[0,1])`. Shape-cycle compose rows
+use degeneracies `4,5,3` or `32,33,31` on one `Runtime`. These public rows make
+no backend submission-count claim; correctness seam counts belong to #1179's
+tests.
+
+Adapter rows preserve the 38-column CSV schema but print `NA` for Runtime,
+tree/cache, provider, exact-admission, scratch, GEMM-call, and transfer fields,
+because that public adapter has no such counters. Caller-thread Rust allocation
+calls/bytes and elapsed time are measured. Native/provider allocation, frees,
+live or peak bytes, copy/pack traffic, and isolated kernel time remain
+unavailable. Reduced backend submissions therefore do not establish an elapsed
+improvement.
+
+Use the reviewed lock and run three fresh child processes at each position in
+the unconditional `A -> B -> B -> A` order. Keep all raw samples; do not choose
+favorable repeats:
+
+```sh
+cp benchmarks/cpu_shape_reuse.Cargo.lock Cargo.lock
+RAYON_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 \
+MKL_NUM_THREADS=1 BLIS_NUM_THREADS=1 \
+OP_MATRIX_OPERATION=oriented_uniform_run \
+OP_MATRIX_MIN_MS=200 \
+OP_MATRIX_GEMM_BACKEND=faer \
+OP_MATRIX_CARGO_FEATURES=cpu-faer,racah-generated \
+CARGO_TARGET_DIR=/Users/ryowatanabe/Research/codes/MyTensorNetworks/libraries/tenet/target \
+benchmarks/operation_matrix.sh
+```
+
+Execute that command once in baseline A, twice in candidate B, then once again
+in baseline A, with separate output files for all four wrapper invocations.
+
 The checked-Generic compact input-lowering group runs public compact QR, SVD,
 and LQ on the same source geometry. It covers `f64` and genuinely complex
 `Complex64` payloads, and compares a canonical contiguous layout with a padded,
