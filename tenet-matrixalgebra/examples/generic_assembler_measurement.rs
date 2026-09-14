@@ -7,6 +7,8 @@
 //! `BoundDynamicTensorRef` construction, checked routing and matrix assembly, error propagation
 //! from the rejecting dense executor, and destruction of the returned error.
 //! Set `TENET_GENERIC_VALUES_BORROW_CASES=1` to retain the narrower canonical/padded case set.
+//! Each fresh process reports one calibrated repeated batch; the historical
+//! `TENET_GENERIC_ASSEMBLER_SAMPLES` setting is intentionally ignored.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::convert::Infallible;
@@ -336,25 +338,19 @@ fn measure(name: &str, fixture: &Fixture, minimum_iterations: usize, min_time: D
     assert_eq!(first_calls, 1);
 
     let mut iterations = minimum_iterations;
-    loop {
+    let repeated_elapsed = loop {
         let start = Instant::now();
         for _ in 0..iterations {
             drop(black_box(run_once(black_box(fixture))));
         }
-        if start.elapsed() >= min_time {
-            break;
+        let elapsed = start.elapsed();
+        if elapsed >= min_time {
+            break elapsed;
         }
         iterations = iterations
             .checked_mul(2)
             .expect("iteration calibration overflowed");
-    }
-
-    let start = Instant::now();
-    for _ in 0..iterations {
-        drop(black_box(run_once(black_box(fixture))));
-    }
-    let repeated_elapsed = start.elapsed();
-    assert!(repeated_elapsed >= min_time);
+    };
     validate_run(fixture);
 
     ALLOCATION_CALLS.store(0, Ordering::Relaxed);
@@ -396,7 +392,7 @@ fn main() {
         "# scope_first=checked_prefix_through_return_error_retained_for_outside_validation scope_repeated=checked_prefix_through_error_drop setup=fixture+admission_excluded"
     );
     println!(
-        "# allocations=global_process_Rust_requests first_timer_includes_allocation_probe=true repeated_timer_excludes_allocation_probe=true synchronous_rejecting_executor=true native_worker_peak=NA min_repeated_ms={}",
+        "# sampling=one_calibrated_repeated_batch_per_fresh_process historical_samples_env_ignored=true allocations=global_process_Rust_requests first_timer_includes_allocation_probe=true repeated_timer_excludes_allocation_probe=true synchronous_rejecting_executor=true native_worker_peak=NA min_repeated_ms={}",
         min_time.as_millis()
     );
     println!("case,phase,iterations,elapsed_ns,ns_per_iter,alloc_calls_per_iter,alloc_bytes_per_iter,peak_bytes");
