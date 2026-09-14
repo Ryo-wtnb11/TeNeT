@@ -7532,7 +7532,12 @@ fn full_qr_and_lq_use_original_input_only_when_economy_q_is_full() {
     }
     assert_orthonormal_columns(&dense_sector_matrices(1, &q));
     assert_nonnegative_diagonal(&dense_sector_matrices(1, &r));
-    assert_svd_blocks_match(&tensor, &contract_pair(&rule, &tensor, &q, &r));
+    assert_compact_factors_reconstruct_input(
+        &input.as_ref().dynamic(),
+        &q.as_ref().dynamic(),
+        None,
+        &r.as_ref().dynamic(),
+    );
 
     let mut lq_dense = FullQrInputSpy::default();
     let (l, q) = lq_full(&mut lq_dense, &input.as_ref()).unwrap();
@@ -7547,7 +7552,12 @@ fn full_qr_and_lq_use_original_input_only_when_economy_q_is_full() {
         assert_full_qr_observation(observation, &adjoint, *cols, *rows);
     }
     assert_nonnegative_diagonal(&dense_sector_matrices(1, &l));
-    assert_svd_blocks_match(&tensor, &contract_pair(&rule, &tensor, &l, &q));
+    assert_compact_factors_reconstruct_input(
+        &input.as_ref().dynamic(),
+        &l.as_ref().dynamic(),
+        None,
+        &q.as_ref().dynamic(),
+    );
 }
 
 fn checked_fixture_matrices(
@@ -7633,7 +7643,12 @@ fn full_and_compact_qr_lq_match_for_rank_deficient_no_completion_shapes() {
     assert_eq!(full.1.data(), compact.1.data());
     assert_orthonormal_columns(&dense_sector_matrices(1, &full.0));
     assert_nonnegative_diagonal(&dense_sector_matrices(1, &full.1));
-    assert_svd_blocks_match(&wide, &contract_pair(&rule, &wide, &full.0, &full.1));
+    assert_compact_factors_reconstruct_input(
+        &wide_input.as_ref().dynamic(),
+        &full.0.as_ref().dynamic(),
+        None,
+        &full.1.as_ref().dynamic(),
+    );
 
     let tall = transposed_rectangular_tensor(&wide, 2, 3);
     let tall_input = bound_tensor(Arc::new(rule), &tall);
@@ -7644,7 +7659,12 @@ fn full_and_compact_qr_lq_match_for_rank_deficient_no_completion_shapes() {
     assert_eq!(full.0.data(), compact.0.data());
     assert_eq!(full.1.data(), compact.1.data());
     assert_nonnegative_diagonal(&dense_sector_matrices(1, &full.0));
-    assert_svd_blocks_match(&tall, &contract_pair(&rule, &tall, &full.0, &full.1));
+    assert_compact_factors_reconstruct_input(
+        &tall_input.as_ref().dynamic(),
+        &full.0.as_ref().dynamic(),
+        None,
+        &full.1.as_ref().dynamic(),
+    );
 }
 
 #[test]
