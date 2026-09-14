@@ -89,12 +89,14 @@ impl ContractionTree {
         }
     }
 
+    /// Saturating sum of the optimizer cost estimates in this tree.
     pub fn total_cost(&self) -> usize {
         match self {
             ContractionTree::Leaf { .. } => 0,
-            ContractionTree::Pair { lhs, rhs, cost, .. } => {
-                lhs.total_cost() + rhs.total_cost() + cost
-            }
+            ContractionTree::Pair { lhs, rhs, cost, .. } => lhs
+                .total_cost()
+                .saturating_add(rhs.total_cost())
+                .saturating_add(*cost),
         }
     }
 

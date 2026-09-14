@@ -287,16 +287,20 @@ impl DensePlanCostReport {
     }
 }
 
+/// Compare a supplied dense plan with the greedy baseline using saturating totals.
 pub fn dense_plan_cost_report(
     steps: &[ContractionStep],
     ir: &NetworkIR,
     cost_model: &DenseCostModel,
 ) -> Result<DensePlanCostReport> {
-    let plan_cost = steps.iter().map(ContractionStep::cost).sum();
+    let plan_cost = steps
+        .iter()
+        .map(ContractionStep::cost)
+        .fold(0, usize::saturating_add);
     let greedy_cost = greedy_order(ir, cost_model)?
         .iter()
         .map(ContractionStep::cost)
-        .sum();
+        .fold(0, usize::saturating_add);
     Ok(DensePlanCostReport::new(plan_cost, greedy_cost))
 }
 
