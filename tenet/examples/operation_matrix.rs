@@ -578,6 +578,7 @@ fn bench_adapter_shape<T: OrientedScalar>(
         Ok(marker.expect("shape cycle is nonempty"))
     })?;
     let elapsed = started.elapsed();
+    assert_eq!(iterations % expected.len(), 0);
     print_adapter_sample(form, "warm_shape_cycle", iterations, elapsed, allocations);
     assert_oriented_close(&[marker.1], &[expected[marker.0].0]);
     assert_eq!(marker.2, expected[marker.0].1);
@@ -610,6 +611,7 @@ fn bench_public_shape<T: OrientedScalar>(
         Ok(marker.expect("shape cycle is nonempty"))
     })?;
     let elapsed = started.elapsed();
+    assert_eq!(iterations % expected.len(), 0);
     let after = counters(runtime);
     print_sample(
         "U1Public",
