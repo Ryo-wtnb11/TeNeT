@@ -615,11 +615,12 @@ impl DenseExecutor for DefaultDenseExecutor {
         }
     }
 
-    // The current tenferro public extension API exposes values-only results
-    // through the ordinary decomposition extensions, so these adapters keep
-    // the dense API working by computing the decomposition and discarding the
-    // factors. The borrowed view is materialized once because the owned
-    // extension methods require a contiguous Tensor.
+    // SVD and EIGH values-only calls currently materialize the borrowed input,
+    // compute full factors through supported owned extensions, and discard the
+    // vectors; general EIG below already uses native owned `eigvals`.
+    // TODO(#880): adopt a supported concrete values-only API once its stability
+    // and ownership are confirmed. The installed hidden backend hook is
+    // callable, but carries no supported downstream guarantee.
     fn svd_vals(&mut self, input: DenseRead<'_>) -> Result<DenseTensor, DenseError> {
         #[cfg(feature = "provider-inject")]
         {
