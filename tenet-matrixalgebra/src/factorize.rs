@@ -3006,14 +3006,14 @@ where
         .iter()
         .map(|matrix| (matrix.sector(), (matrix, None)))
         .collect::<HashMap<_, _>>();
-    for (index, pair) in pairs.iter().enumerate() {
+    for pair in pairs.iter() {
         let route =
             routes
                 .get_mut(&pair.sector)
                 .ok_or(OperationError::UnsupportedTensorContractScope {
                     message: "factor sector absent from the source tensor",
                 })?;
-        route.1 = Some(index);
+        route.1 = Some(pair);
     }
     let mut data = vec![D::zero(); required_len];
     let mut missing_offsets = HashMap::<SectorId, usize>::new();
@@ -3026,8 +3026,7 @@ where
             FactorSide::Left => (coupled_of(key.codomain_tree()), block.shape().len() - 1),
             FactorSide::Right => (coupled_of(key.domain_tree()), 0),
         };
-        if let Some(&(matrix, Some(pair_index))) = routes.get(&sector) {
-            let pair = &pairs[pair_index];
+        if let Some(&(matrix, Some(pair))) = routes.get(&sector) {
             let side_offset = match (side, placement) {
                 (FactorSide::Left, FactorPlacement::Direct) => {
                     row_placement(matrix, key.codomain_tree())?.0
