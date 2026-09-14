@@ -7484,6 +7484,57 @@ fn assert_orthonormal_columns(matrices: &[(SectorId, usize, usize, Vec<f64>)]) {
     }
 }
 
+fn bound_factor_matrices<R>(
+    factor: &BoundDynFactor<R, f64>,
+) -> Vec<(SectorId, usize, usize, Vec<f64>)> {
+    factor
+        .space()
+        .space()
+        .structure()
+        .coupled_sector_regions(factor.space().space().nout())
+        .unwrap()
+        .unwrap()
+        .iter()
+        .map(|region| {
+            assert_eq!(region.range().len(), region.rows() * region.cols());
+            (
+                region.coupled(),
+                region.rows(),
+                region.cols(),
+                factor.data()[region.range()].to_vec(),
+            )
+        })
+        .collect()
+}
+
+fn assert_orthonormal_rows(matrices: &[(SectorId, usize, usize, Vec<f64>)]) {
+    for (sector, rows, cols, matrix) in matrices {
+        for upper in 0..*rows {
+            for lower in 0..*rows {
+                let dot = (0..*cols)
+                    .map(|col| matrix[upper + rows * col] * matrix[lower + rows * col])
+                    .sum::<f64>();
+                let expected = if upper == lower { 1.0 } else { 0.0 };
+                assert!(
+                    (dot - expected).abs() < 1.0e-9,
+                    "sector {sector:?}: row dot ({upper},{lower}) = {dot}"
+                );
+            }
+        }
+    }
+}
+
+fn assert_nonnegative_diagonal(matrices: &[(SectorId, usize, usize, Vec<f64>)]) {
+    for (sector, rows, cols, matrix) in matrices {
+        for index in 0..(*rows).min(*cols) {
+            assert!(
+                matrix[index + rows * index] >= 0.0,
+                "sector {sector:?}: diagonal {index} is negative"
+            );
+        }
+    }
+}
+
 fn assert_full_qr_observation(
     observation: &FullQrObservation,
     input: &[Complex64],
@@ -7534,6 +7585,8 @@ fn full_qr_and_lq_use_original_input_only_when_economy_q_is_full() {
             .collect::<Vec<_>>();
         assert_full_qr_observation(observation, &matrix, *rows, *cols);
     }
+    assert_orthonormal_columns(&bound_factor_matrices(&q));
+    assert_nonnegative_diagonal(&bound_factor_matrices(&r));
     assert_compact_factors_reconstruct_input(&input, &q, None, &r);
 
     let mut lq_dense = FullQrInputSpy::default();
@@ -7548,6 +7601,8 @@ fn full_qr_and_lq_use_original_input_only_when_economy_q_is_full() {
         let adjoint = adjoint_complex(&matrix, *rows, *cols);
         assert_full_qr_observation(observation, &adjoint, *cols, *rows);
     }
+    assert_nonnegative_diagonal(&bound_factor_matrices(&l));
+    assert_orthonormal_rows(&bound_factor_matrices(&q));
     assert_compact_factors_reconstruct_input(&input, &l, None, &q);
 }
 
@@ -7634,6 +7689,8 @@ fn full_and_compact_qr_lq_match_for_rank_deficient_no_completion_shapes() {
     assert_eq!(full.1.space().space(), compact.1.space().space());
     assert_eq!(full.0.data(), compact.0.data());
     assert_eq!(full.1.data(), compact.1.data());
+    assert_orthonormal_columns(&bound_factor_matrices(&full.0));
+    assert_nonnegative_diagonal(&bound_factor_matrices(&full.1));
     assert_compact_factors_reconstruct_input(&wide_input, &full.0, None, &full.1);
 
     let tall = transposed_rectangular_tensor(&wide, 2, 3);
@@ -7646,6 +7703,8 @@ fn full_and_compact_qr_lq_match_for_rank_deficient_no_completion_shapes() {
     assert_eq!(full.1.space().space(), compact.1.space().space());
     assert_eq!(full.0.data(), compact.0.data());
     assert_eq!(full.1.data(), compact.1.data());
+    assert_nonnegative_diagonal(&bound_factor_matrices(&full.0));
+    assert_orthonormal_rows(&bound_factor_matrices(&full.1));
     assert_compact_factors_reconstruct_input(&tall_input, &full.0, None, &full.1);
 }
 
