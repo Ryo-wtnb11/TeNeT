@@ -1891,7 +1891,10 @@ fn lazy_transform_source<D: HarnessScalar + TensorScalar>(
 fn apply_lazy_transform<D: HarnessScalar + TensorScalar>(
     source: &TensorMap<tenet::typed::SUNFusionRule, D>,
     operation: &str,
-) -> Result<TensorMap<tenet::typed::SUNFusionRule, D>, Error> {
+) -> Result<
+    TensorMap<tenet::typed::SUNFusionRule, D>,
+    tenet::typed::TypedFacadeError<tenet::typed::SUNFusionRule>,
+> {
     let rank = source.rank();
     let nout = source.codomain().len();
     match (operation, rank) {
@@ -1922,7 +1925,7 @@ fn apply_lazy_transform<D: HarnessScalar + TensorScalar>(
 fn assert_lazy_transform_same<D: HarnessScalar + TensorScalar>(
     actual: &TensorMap<tenet::typed::SUNFusionRule, D>,
     expected: &TensorMap<tenet::typed::SUNFusionRule, D>,
-) -> Result<(), Error> {
+) -> Result<(), tenet::typed::TypedFacadeError<tenet::typed::SUNFusionRule>> {
     assert_eq!(actual.codomain(), expected.codomain());
     assert_eq!(actual.domain(), expected.domain());
     assert_eq!(actual.block_count(), expected.block_count());
@@ -2011,6 +2014,10 @@ fn preflight_lazy_transform<D: HarnessScalar + TensorScalar>(
 }
 
 #[cfg(feature = "racah-generated")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one benchmark row carries its explicit matrix dimensions"
+)]
 fn run_lazy_transform_row<D: HarnessScalar + TensorScalar>(
     symmetry: &str,
     n: usize,
@@ -2068,7 +2075,7 @@ fn run_lazy_transform_row<D: HarnessScalar + TensorScalar>(
             let output = apply_lazy_transform(input, operation)?;
             black_box(output.data().first());
             drop(black_box(output));
-            Ok::<(), Error>(())
+            Ok::<(), tenet::typed::TypedFacadeError<tenet::typed::SUNFusionRule>>(())
         },
     )?;
     Ok(())
