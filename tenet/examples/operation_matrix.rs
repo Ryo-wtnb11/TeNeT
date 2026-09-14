@@ -19,8 +19,9 @@ use tenet::core::{
 };
 use tenet::dense::DefaultDenseExecutor;
 use tenet_matrixalgebra::{
-    lq_compact_dyn_checked_generic, qr_compact_dyn_checked_generic, qr_compact_dyn_generic,
-    svd_compact_dyn_checked_generic, BoundDynFactor, CheckedGenericFactorPlanError, FactorScalar,
+    lq_compact_dyn_checked_generic, lq_full_dyn_checked_generic, qr_compact_dyn_checked_generic,
+    qr_compact_dyn_generic, qr_full_dyn_checked_generic, svd_compact_dyn_checked_generic,
+    BoundDynFactor, CheckedGenericFactorPlanError, FactorScalar,
 };
 use tenet_tensors::{BoundDynamicFusionMapSpace, BoundDynamicTensorRef, DynamicFusionMapSpace};
 
@@ -644,6 +645,14 @@ struct CheckedLayoutInput<D> {
     data: Vec<D>,
 }
 
+#[derive(Clone, Copy)]
+enum CheckedMatrixAspect {
+    Alternating,
+    Square,
+    Wide,
+    Tall,
+}
+
 fn checked_layout_value<D: HarnessScalar>(sector: SectorId, row: usize, column: usize) -> D {
     let real = layout_generic_value(sector, row, column);
     let imaginary = if D::NAME == "c64" {
@@ -677,15 +686,23 @@ fn checked_layout_fixture<D: HarnessScalar>(
     degeneracy: usize,
     sector_count: usize,
 ) -> Result<(CheckedLayoutInput<D>, CheckedLayoutInput<D>), Box<dyn std::error::Error>> {
+    checked_layout_fixture_with_aspect(degeneracy, sector_count, CheckedMatrixAspect::Alternating)
+}
+
+fn checked_layout_fixture_with_aspect<D: HarnessScalar>(
+    degeneracy: usize,
+    sector_count: usize,
+    aspect: CheckedMatrixAspect,
+) -> Result<(CheckedLayoutInput<D>, CheckedLayoutInput<D>), Box<dyn std::error::Error>> {
     let provider = Arc::new(LayoutGenericRule);
     let codomain = (0..sector_count)
         .map(|sector| {
             (
                 SectorId::new(sector),
-                if sector % 2 == 0 {
-                    degeneracy
-                } else {
-                    2 * degeneracy
+                match aspect {
+                    CheckedMatrixAspect::Alternating if sector % 2 != 0 => 2 * degeneracy,
+                    CheckedMatrixAspect::Tall => 2 * degeneracy,
+                    _ => degeneracy,
                 },
             )
         })
@@ -694,14 +711,16 @@ fn checked_layout_fixture<D: HarnessScalar>(
         .map(|sector| {
             (
                 SectorId::new(sector),
-                if sector % 2 == 0 {
-                    2 * degeneracy
-                } else {
-                    degeneracy
+                match aspect {
+                    CheckedMatrixAspect::Alternating if sector % 2 == 0 => 2 * degeneracy,
+                    CheckedMatrixAspect::Wide => 2 * degeneracy,
+                    _ => degeneracy,
                 },
             )
         })
         .collect::<Vec<_>>();
+    let codomain_dim = codomain.iter().map(|(_, dim)| dim).sum();
+    let domain_dim = domain.iter().map(|(_, dim)| dim).sum();
     let homspace = FusionTreeHomSpace::new(
         FusionProductSpace::new([SectorLeg::new(codomain, false)]),
         FusionProductSpace::new([SectorLeg::new(domain, false)]),
@@ -725,9 +744,8 @@ fn checked_layout_fixture<D: HarnessScalar>(
         offset += block.element_count()? + 1;
     }
     let structure = BlockStructure::from_blocks_with_rank(2, blocks)?;
-    let dense_dim = 3 * degeneracy * (sector_count / 2);
     let typed = FusionTensorMapSpace::new_unbound(
-        TensorMapSpace::<1, 1>::from_dims([dense_dim], [dense_dim])?,
+        TensorMapSpace::<1, 1>::from_dims([codomain_dim], [domain_dim])?,
         homspace,
         structure,
     )?
@@ -1090,6 +1108,174 @@ fn run_checked_compact_input(
     }
     run_checked_compact_input_for::<f64>(degeneracy, min_time)?;
     run_checked_compact_input_for::<Complex64>(degeneracy, min_time)
+}
+
+fn assert_full_qr_lq<D: HarnessScalar>(
+    input: &BoundDynamicTensorRef<'_, LayoutGenericRule, D>,
+    left: &BoundDynFactor<LayoutGenericRule, D>,
+    right: &BoundDynFactor<LayoutGenericRule, D>,
+    operation: &str,
+    sector_count: usize,
+) {
+    assert!(Arc::ptr_eq(
+        input.space().provider_arc(),
+        left.space().provider_arc()
+    ));
+    assert!(Arc::ptr_eq(
+        input.space().provider_arc(),
+        right.space().provider_arc()
+    ));
+    assert_checked_pair_reconstructs(left, right, sector_count);
+    for sector in (0..sector_count).map(SectorId::new) {
+        let source = (0..input.space().space().structure().block_count())
+            .map(|index| input.space().space().structure().block(index).unwrap())
+            .find(|block| block.key().as_fusion_tree_pair().unwrap().coupled() == sector)
+            .unwrap();
+        let left_block = factor_block(left, sector);
+        let right_block = factor_block(right, sector);
+        let (rows, columns) = (source.shape()[0], source.shape()[1]);
+        let gauge_factor = if operation == "qr" { right } else { left };
+        let gauge_block = factor_block(gauge_factor, sector);
+        if operation == "qr" {
+            assert_eq!(left_block.shape(), [rows, rows]);
+            assert_eq!(right_block.shape(), [rows, columns]);
+        } else {
+            assert_eq!(left_block.shape(), [rows, columns]);
+            assert_eq!(right_block.shape(), [columns, columns]);
+        }
+        for diagonal in 0..rows.min(columns) {
+            let value = checked_block_value(gauge_factor.data(), gauge_block, diagonal, diagonal);
+            assert!(value.im.abs() <= 2.0e-10 && value.re > 0.0);
+        }
+    }
+    if operation == "qr" {
+        assert_columns_orthonormal(left, sector_count);
+    } else {
+        assert_rows_orthonormal(right, sector_count);
+    }
+}
+
+fn run_checked_full_qr_lq<D: HarnessScalar>(
+    operation: &str,
+    dense: &mut DefaultDenseExecutor,
+    input: &BoundDynamicTensorRef<'_, LayoutGenericRule, D>,
+) -> Result<(), Error> {
+    if operation == "qr" {
+        drop(black_box(
+            qr_full_dyn_checked_generic(dense, input).map_err(checked_compact_example_error)?,
+        ));
+    } else {
+        drop(black_box(
+            lq_full_dyn_checked_generic(dense, input).map_err(checked_compact_example_error)?,
+        ));
+    }
+    Ok(())
+}
+
+fn run_full_qr_fixture<D: HarnessScalar>(
+    workload: &str,
+    degeneracy: usize,
+    sector_count: usize,
+    shape_name: &str,
+    aspect: CheckedMatrixAspect,
+    min_time: Duration,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let setup_runtime = benchmark_runtime()?;
+    let setup_symmetry = format!("FullQr-{workload}-{shape_name}-{}", D::NAME);
+    drop(bench(
+        &setup_runtime,
+        &setup_symmetry,
+        "full_qr_fixture",
+        "setup",
+        "fixture_first",
+        "fixture_repeat",
+        min_time,
+        || checked_layout_fixture_with_aspect::<D>(degeneracy, sector_count, aspect),
+    )?);
+    let (canonical, padded) =
+        checked_layout_fixture_with_aspect::<D>(degeneracy, sector_count, aspect)?;
+    let (canonical_changed, padded_changed) =
+        checked_layout_fixture_with_aspect::<D>(degeneracy + 1, sector_count, aspect)?;
+    for (layout, fixture, changed_fixture) in [
+        ("canonical", canonical, canonical_changed),
+        ("padded", padded, padded_changed),
+    ] {
+        let input = BoundDynamicTensorRef::try_new(&fixture.space, &fixture.data)?;
+        let changed =
+            BoundDynamicTensorRef::try_new(&changed_fixture.space, &changed_fixture.data)?;
+        let original = fixture.data.clone();
+        let changed_original = changed_fixture.data.clone();
+        let mut preflight_dense = DefaultDenseExecutor::new();
+        for selected in [&input, &changed] {
+            let qr = qr_full_dyn_checked_generic(&mut preflight_dense, selected)
+                .map_err(checked_compact_example_error)?;
+            assert_full_qr_lq(selected, &qr.0, &qr.1, "qr", sector_count);
+            drop(qr);
+            let lq = lq_full_dyn_checked_generic(&mut preflight_dense, selected)
+                .map_err(checked_compact_example_error)?;
+            assert_full_qr_lq(selected, &lq.0, &lq.1, "lq", sector_count);
+            drop(lq);
+        }
+        drop(preflight_dense);
+        let symmetry = format!("FullQr-{workload}-{shape_name}-{layout}-{}", D::NAME);
+        for operation in ["qr", "lq"] {
+            let runtime = benchmark_runtime()?;
+            let mut dense = DefaultDenseExecutor::new();
+            bench(
+                &runtime,
+                &symmetry,
+                &format!("checked_full_{operation}"),
+                "owned",
+                "first_after_setup",
+                "warm_after_setup",
+                min_time,
+                || run_checked_full_qr_lq(operation, &mut dense, &input),
+            )?;
+            let mut alternate = false;
+            bench(
+                &runtime,
+                &symmetry,
+                &format!("checked_full_{operation}_shape_alternating"),
+                "owned",
+                "first_after_inputs_setup",
+                "warm_shape_alternating",
+                min_time,
+                || {
+                    let selected = if alternate { &changed } else { &input };
+                    alternate = !alternate;
+                    run_checked_full_qr_lq(operation, &mut dense, selected)
+                },
+            )?;
+        }
+        assert_checked_source_unchanged(&fixture.data, &original);
+        assert_checked_source_unchanged(&changed_fixture.data, &changed_original);
+    }
+    Ok(())
+}
+
+fn run_full_qr_lowering(min_time: Duration) -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::var("OP_MATRIX_OPERATION").as_deref() != Ok("full_qr_lowering")
+        || !form_enabled("owned")
+    {
+        return Ok(());
+    }
+    let min_time = min_time.max(Duration::from_millis(100));
+    println!("# FullQr: fixed_global_D=32 geometries=few-large:G2:d32,many-small:G16:d2 shapes=square,wide,tall layouts=canonical,padded dtypes=f64,c64 fixture_and_literal_preflight_outside_factor_timers");
+    for (workload, degeneracy, sectors) in [("few-large", 32, 2), ("many-small", 2, 16)] {
+        for (shape_name, aspect) in [
+            ("square", CheckedMatrixAspect::Square),
+            ("wide", CheckedMatrixAspect::Wide),
+            ("tall", CheckedMatrixAspect::Tall),
+        ] {
+            run_full_qr_fixture::<f64>(
+                workload, degeneracy, sectors, shape_name, aspect, min_time,
+            )?;
+            run_full_qr_fixture::<Complex64>(
+                workload, degeneracy, sectors, shape_name, aspect, min_time,
+            )?;
+        }
+    }
+    Ok(())
 }
 
 macro_rules! run_provider {
@@ -1661,6 +1847,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 | "qr_compact"
                 | "qr_compact_generic_layout"
                 | "checked_compact_input"
+                | "full_qr_lowering"
         ) {
             return Err(Box::new(Error::InvalidArgument(format!(
                 "unknown OP_MATRIX_OPERATION `{operation}`"
@@ -1726,6 +1913,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let min_time = Duration::from_millis(min_ms);
     run_layout_generic_qr(degeneracy, min_time)?;
     run_checked_compact_input(degeneracy, min_time)?;
+    run_full_qr_lowering(min_time)?;
     run_provider!(
         "U1",
         U1FusionRule,

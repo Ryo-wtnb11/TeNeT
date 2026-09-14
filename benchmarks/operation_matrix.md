@@ -137,6 +137,32 @@ OP_MATRIX_MIN_MS=100 \
 benchmarks/operation_matrix.sh
 ```
 
+`full_qr_lowering` is an explicit-only diagnostic for the original-input full
+QR/LQ lowering. It fixes global `D=32`: few-large uses `G=2,d=32`, and
+many-small uses `G=16,d=2`. The sweep covers homogeneous square `d x d`, wide
+`d x 2d`, and tall `2d x d` sectors, `f64` and genuinely complex
+`Complex64`, and canonical and padded reversed layouts. QR's direct-input
+cases are square/wide and its unchanged completion control is tall; LQ's
+direct-input cases are square/tall and its completion control is wide.
+
+Fixture construction has separate `fixture_first` and `fixture_repeat` rows.
+Factor rows measure fixed preconstructed inputs and alternating preconstructed
+`d`/`d+1` inputs, with at least 100 ms per repeated phase. Independent
+preflight checks exact factor shapes, literal reconstruction, square-Q
+unitarity, nonnegative real diagonal gauge, provider identity, and source
+immutability. Returned owned factors are passed through `black_box` and dropped
+inside every timed call. The fixed D32 sweep is a bounded comparison; it does
+not establish general rank or symmetry speed. Pure solver time, peak memory,
+and retained idle storage remain unavailable in this runner.
+
+```sh
+OP_MATRIX_OPERATION=full_qr_lowering \
+OP_MATRIX_FORM=owned \
+OP_MATRIX_DEGENERACY=32 \
+OP_MATRIX_MIN_MS=100 \
+benchmarks/operation_matrix.sh
+```
+
 The grouped output separates three scopes. `checked_compact_input_fixture`
 times construction and payload initialization of both canonical and fallback
 fixtures (`fixture_first`/`fixture_repeat`). The ordinary QR/SVD/LQ rows keep one
