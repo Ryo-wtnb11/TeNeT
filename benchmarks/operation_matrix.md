@@ -105,6 +105,10 @@ the returned transform, observes its first data element, and drops the result
 inside the measured closure. `first_after_setup` therefore means the first
 transform on that unwarmed runtime after fixture construction; it is not a
 process-cold claim. The three-process wrapper remains the repetition authority.
+The selector accepts the runner's `owned` form; selecting `destination` emits
+an explicit exclusion because this checked-Generic path has no matching public
+destination method. Phase names include the fixed extent or alternating extent
+pair, so every raw sample has an unambiguous grouping key.
 
 Before measurement, a separate runtime materializes the logical adjoint and
 applies the same public operation as an oracle. It compares complete typed

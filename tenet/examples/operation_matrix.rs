@@ -2008,18 +2008,24 @@ fn run_lazy_transform_row<D: HarnessScalar + TensorScalar>(
     } else {
         changed
     };
+    let first_phase = if alternating {
+        format!("first_after_setup_extent{extent}_alternating")
+    } else {
+        format!("first_after_setup_extent{extent}_fixed")
+    };
+    let repeated_phase = if alternating {
+        format!("warm_extent{extent}_{changed_extent}_alternating")
+    } else {
+        format!("warm_extent{extent}_fixed")
+    };
     let mut alternate = false;
     bench(
         &runtime,
         symmetry,
         &format!("lazy_tree_transform_{operation}_{}", D::NAME),
         form,
-        "first_after_setup",
-        if alternating {
-            "warm_extent_alternating"
-        } else {
-            "warm_fixed"
-        },
+        &first_phase,
+        &repeated_phase,
         min_time,
         || {
             let input = if alternating && alternate {
@@ -2040,6 +2046,10 @@ fn run_lazy_transform_row<D: HarnessScalar + TensorScalar>(
 #[cfg(feature = "racah-generated")]
 fn run_lazy_tree_transform(min_time: Duration) -> Result<(), Box<dyn std::error::Error>> {
     if std::env::var("OP_MATRIX_OPERATION").as_deref() != Ok("lazy_tree_transform") {
+        return Ok(());
+    }
+    if !form_enabled("owned") {
+        println!("# LazyTreeTransform: destination rows excluded: checked-Generic lazy transforms expose the public owned-result form only");
         return Ok(());
     }
     println!("# LazyTreeTransform: public_owned_output transform_and_first_data_observation_and_drop_inside_timer oracle=separate_runtime_materialize_first_then_same_public_operation extents=1,3 direct_control=true");
