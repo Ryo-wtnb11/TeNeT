@@ -88,6 +88,29 @@ before disconnecting if they are not already in the local Cargo cache.
 `OP_MATRIX_GEMM_BACKEND` is `faer` by default. A macOS BLAS control uses the
 same Apple Accelerate provider as the pinned TensorKit environment.
 `OP_MATRIX_OPERATION` can select one exact operation name for focused profiling.
+
+`OP_MATRIX_OPERATION=lazy_tree_transform` is an explicit checked-Generic
+diagnostic and does not change the default matrix. It requires the existing
+`racah-generated` feature and uses typed SU(3) and SU(4) fixtures at asymmetric
+ranks 3 and 4. Each fixture reports its actual reduced-block count and stored
+payload length; the harness does not assign a synthetic few-large or many-small
+label. The bounded extent sweep is 1 and 3, with genuinely complex as well as
+real payloads.
+
+The diagnostic measures five nonidentity public operations (`permute`,
+`braid`, `transpose`, `transpose_axes`, and `repartition`) on pre-built lazy
+adjoints, alongside direct-input controls. Fixed-shape and alternating
+preconstructed-extent rows use separate fresh runtimes. Every timed call owns
+the returned transform, observes its first data element, and drops the result
+inside the measured closure. `first_after_setup` therefore means the first
+transform on that unwarmed runtime after fixture construction; it is not a
+process-cold claim. The three-process wrapper remains the repetition authority.
+
+Before measurement, a separate runtime materializes the logical adjoint and
+applies the same public operation as an oracle. It compares complete typed
+spaces, block metadata, fusion-tree keys, provider ownership, and values. This
+harness oracle guards measurement setup; the independent production tests own
+the semantic correctness contract.
 `OP_MATRIX_FORM` similarly selects `owned` or `destination`.
 `OP_MATRIX_PROFILE_PAUSE_MS` pauses after that row's warm phase so an external
 profiler can inspect the live process; it is outside every reported timer.

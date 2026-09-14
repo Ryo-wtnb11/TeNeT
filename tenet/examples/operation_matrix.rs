@@ -1823,6 +1823,297 @@ fn run_checked_sun(
     Ok(())
 }
 
+#[cfg(feature = "racah-generated")]
+fn lazy_transform_source<D: HarnessScalar + TensorScalar>(
+    runtime: &Runtime,
+    provider: Arc<tenet::typed::SUNFusionRule>,
+    label: Vec<i64>,
+    rank: usize,
+    extent: usize,
+) -> Result<TensorMap<tenet::typed::SUNFusionRule, D>, Box<dyn std::error::Error>> {
+    let legs = (0..rank)
+        .map(|axis| {
+            GradedSpace::try_new_with_arc(
+                Arc::clone(&provider),
+                [(label.clone(), extent + axis % 2)],
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let nout = rank - 1;
+    Ok(TensorMap::from_block_fn(
+        runtime,
+        legs[..nout].iter(),
+        legs[nout..].iter(),
+        |trees, indices| {
+            let label_marker = trees
+                .codomain_uncoupled()
+                .iter()
+                .chain(trees.domain_uncoupled())
+                .chain(trees.codomain_innerlines())
+                .chain(trees.domain_innerlines())
+                .flat_map(|label| label.iter())
+                .map(|value| value.unsigned_abs() as usize)
+                .sum::<usize>();
+            let vertex_marker = trees
+                .codomain_vertices()
+                .iter()
+                .chain(trees.domain_vertices())
+                .map(|vertex| vertex.get())
+                .sum::<usize>();
+            let marker = 11 * label_marker + 7 * vertex_marker + indices.iter().sum::<usize>();
+            D::from_parts(1.0 + marker as f64 / 17.0, 0.25 + marker as f64 / 29.0)
+        },
+    )?)
+}
+
+#[cfg(feature = "racah-generated")]
+fn apply_lazy_transform<D: HarnessScalar + TensorScalar>(
+    source: &TensorMap<tenet::typed::SUNFusionRule, D>,
+    operation: &str,
+    rank: usize,
+) -> Result<TensorMap<tenet::typed::SUNFusionRule, D>, Error> {
+    match (operation, rank) {
+        ("permute", 3) => source.permute(&[1], &[2, 0]),
+        ("braid", 3) => source.braid(&[1], &[2, 0], &[5, 2, 7]),
+        ("transpose", _) => source.transpose(),
+        ("transpose_axes", _) => {
+            let nout = rank - 1;
+            let mut planar = (0..nout).chain((nout..rank).rev()).collect::<Vec<_>>();
+            planar.rotate_left(1);
+            let target_nout = if rank == 4 { 2 } else { nout };
+            let codomain = planar[..target_nout].to_vec();
+            let domain = planar[target_nout..]
+                .iter()
+                .rev()
+                .copied()
+                .collect::<Vec<_>>();
+            source.transpose_axes(&codomain, &domain)
+        }
+        ("repartition", 3) => source.repartition(1),
+        ("permute", 4) => source.permute(&[2, 0], &[3, 1]),
+        ("braid", 4) => source.braid(&[2, 0], &[3, 1], &[7, 1, 6, 3]),
+        ("repartition", 4) => source.repartition(2),
+        _ => unreachable!("fixed lazy transform table"),
+    }
+}
+
+#[cfg(feature = "racah-generated")]
+fn assert_lazy_transform_same<D: HarnessScalar + TensorScalar>(
+    actual: &TensorMap<tenet::typed::SUNFusionRule, D>,
+    expected: &TensorMap<tenet::typed::SUNFusionRule, D>,
+) -> Result<(), Error> {
+    assert_eq!(actual.codomain(), expected.codomain());
+    assert_eq!(actual.domain(), expected.domain());
+    assert_eq!(actual.block_count(), expected.block_count());
+    for index in 0..actual.block_count() {
+        let actual_block = actual.block(index)?;
+        let expected_block = expected.block(index)?;
+        assert_eq!(actual_block.shape(), expected_block.shape());
+        assert_eq!(actual_block.strides(), expected_block.strides());
+        assert_eq!(actual_block.offset(), expected_block.offset());
+        assert_eq!(
+            actual.block_fusion_trees(index)?,
+            expected.block_fusion_trees(index)?
+        );
+    }
+    assert_eq!(actual.data().len(), expected.data().len());
+    assert!(actual
+        .data()
+        .iter()
+        .zip(expected.data())
+        .all(|(&a, &b)| (a.as_complex() - b.as_complex()).norm()
+            <= 1.0e-11 * (1.0 + b.as_complex().norm())));
+    Ok(())
+}
+
+#[cfg(feature = "racah-generated")]
+fn preflight_lazy_transform<D: HarnessScalar + TensorScalar>(
+    n: usize,
+    label: Vec<i64>,
+    rank: usize,
+    extent: usize,
+) -> Result<(usize, usize, usize), Box<dyn std::error::Error>> {
+    use tenet::typed::SUNFusionRule;
+    let runtime = benchmark_runtime()?;
+    let provider = Arc::new(SUNFusionRule::new(n)?);
+    let source = lazy_transform_source::<D>(&runtime, provider, label, rank, extent)?;
+    let lazy = source.adjoint()?;
+    black_box(lazy.data());
+    let materialized = TensorMap::from_block_fn(
+        &runtime,
+        lazy.codomain().iter(),
+        lazy.domain().iter(),
+        |trees, indices| {
+            let index = (0..lazy.block_count())
+                .find(|&index| lazy.block_fusion_trees(index).unwrap() == trees.clone())
+                .expect("materialized logical block exists");
+            let block = lazy.block(index).unwrap();
+            lazy.data()[block.offset()
+                + indices
+                    .iter()
+                    .zip(block.strides())
+                    .map(|(&coordinate, &stride)| coordinate * stride)
+                    .sum::<usize>()]
+        },
+    )?;
+    assert!(std::ptr::eq(materialized.provider(), lazy.provider()));
+    for operation in [
+        "permute",
+        "braid",
+        "transpose",
+        "transpose_axes",
+        "repartition",
+    ] {
+        let actual = apply_lazy_transform(&lazy, operation, rank)?;
+        let expected = apply_lazy_transform(&materialized, operation, rank)?;
+        assert!(std::ptr::eq(actual.provider(), source.provider()));
+        assert_lazy_transform_same(&actual, &expected)?;
+    }
+    let mut coupled = Vec::new();
+    for index in 0..source.block_count() {
+        let sector = source.block_fusion_trees(index)?.coupled().clone();
+        if !coupled.contains(&sector) {
+            coupled.push(sector);
+        }
+    }
+    Ok((source.block_count(), coupled.len(), source.data().len()))
+}
+
+#[cfg(feature = "racah-generated")]
+fn run_lazy_transform_row<D: HarnessScalar + TensorScalar>(
+    symmetry: &str,
+    n: usize,
+    label: Vec<i64>,
+    rank: usize,
+    operation: &str,
+    form: &str,
+    extent: usize,
+    alternating: bool,
+    min_time: Duration,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use tenet::typed::SUNFusionRule;
+    let runtime = benchmark_runtime()?;
+    let provider = Arc::new(SUNFusionRule::new(n)?);
+    let source =
+        lazy_transform_source::<D>(&runtime, Arc::clone(&provider), label.clone(), rank, extent)?;
+    let changed_extent = if extent == 1 { 3 } else { 1 };
+    let changed = lazy_transform_source::<D>(&runtime, provider, label, rank, changed_extent)?;
+    let source = if form == "lazy" {
+        source.adjoint()?
+    } else {
+        source
+    };
+    let changed = if form == "lazy" {
+        changed.adjoint()?
+    } else {
+        changed
+    };
+    let mut alternate = false;
+    bench(
+        &runtime,
+        symmetry,
+        &format!("lazy_tree_transform_{operation}_{}", D::NAME),
+        form,
+        "first_after_setup",
+        if alternating {
+            "warm_extent_alternating"
+        } else {
+            "warm_fixed"
+        },
+        min_time,
+        || {
+            let input = if alternating && alternate {
+                &changed
+            } else {
+                &source
+            };
+            alternate = !alternate;
+            let output = apply_lazy_transform(input, operation, rank)?;
+            black_box(output.data().first());
+            drop(black_box(output));
+            Ok::<(), Error>(())
+        },
+    )?;
+    Ok(())
+}
+
+#[cfg(feature = "racah-generated")]
+fn run_lazy_tree_transform(min_time: Duration) -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::var("OP_MATRIX_OPERATION").as_deref() != Ok("lazy_tree_transform") {
+        return Ok(());
+    }
+    println!("# LazyTreeTransform: public_owned_output transform_and_first_data_observation_and_drop_inside_timer oracle=separate_runtime_materialize_first_then_same_public_operation extents=1,3 direct_control=true");
+    for (symmetry, n, label, rank) in [
+        ("SU3[1;1]-rank3", 3, vec![1, 1], 3),
+        ("SU4[1;0;1]-rank4", 4, vec![1, 0, 1], 4),
+    ] {
+        for extent in [1, 3] {
+            let (blocks_f64, sectors_f64, stored_f64) =
+                preflight_lazy_transform::<f64>(n, label.clone(), rank, extent)?;
+            let (blocks_c64, sectors_c64, stored_c64) =
+                preflight_lazy_transform::<Complex64>(n, label.clone(), rank, extent)?;
+            println!("# LazyTreeTransformFixture symmetry={symmetry} rank={rank} extent={extent} coupled_sectors_f64={sectors_f64} blocks_f64={blocks_f64} stored_f64={stored_f64} coupled_sectors_c64={sectors_c64} blocks_c64={blocks_c64} stored_c64={stored_c64}");
+        }
+        for operation in [
+            "permute",
+            "braid",
+            "transpose",
+            "transpose_axes",
+            "repartition",
+        ] {
+            for form in ["direct", "lazy"] {
+                for extent in [1, 3] {
+                    run_lazy_transform_row::<f64>(
+                        symmetry,
+                        n,
+                        label.clone(),
+                        rank,
+                        operation,
+                        form,
+                        extent,
+                        false,
+                        min_time,
+                    )?;
+                    run_lazy_transform_row::<Complex64>(
+                        symmetry,
+                        n,
+                        label.clone(),
+                        rank,
+                        operation,
+                        form,
+                        extent,
+                        false,
+                        min_time,
+                    )?;
+                }
+                run_lazy_transform_row::<f64>(
+                    symmetry,
+                    n,
+                    label.clone(),
+                    rank,
+                    operation,
+                    form,
+                    1,
+                    true,
+                    min_time,
+                )?;
+                run_lazy_transform_row::<Complex64>(
+                    symmetry,
+                    n,
+                    label.clone(),
+                    rank,
+                    operation,
+                    form,
+                    1,
+                    true,
+                    min_time,
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Ok(operation) = std::env::var("OP_MATRIX_OPERATION") {
         if !matches!(
@@ -1848,6 +2139,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 | "qr_compact_generic_layout"
                 | "checked_compact_input"
                 | "full_qr_lowering"
+                | "lazy_tree_transform"
         ) {
             return Err(Box::new(Error::InvalidArgument(format!(
                 "unknown OP_MATRIX_OPERATION `{operation}`"
@@ -1862,9 +2154,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     #[cfg(not(feature = "racah-generated"))]
-    if std::env::var("OP_MATRIX_OPERATION").as_deref() == Ok("qr_compact") {
+    if matches!(
+        std::env::var("OP_MATRIX_OPERATION").as_deref(),
+        Ok("qr_compact" | "lazy_tree_transform")
+    ) {
         return Err(Box::new(Error::InvalidArgument(
-            "operation-matrix qr_compact requires the racah-generated feature".into(),
+            "the selected operation-matrix row requires the racah-generated feature".into(),
         )));
     }
     let min_ms = std::env::var("OP_MATRIX_MIN_MS")
@@ -1914,6 +2209,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     run_layout_generic_qr(degeneracy, min_time)?;
     run_checked_compact_input(degeneracy, min_time)?;
     run_full_qr_lowering(min_time)?;
+    #[cfg(feature = "racah-generated")]
+    run_lazy_tree_transform(min_time)?;
     run_provider!(
         "U1",
         U1FusionRule,
