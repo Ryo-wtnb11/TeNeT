@@ -4,10 +4,10 @@ use std::sync::Arc;
 
 use num_traits::Zero;
 use tenet_core::{
-    BlockStructure, CategoricalScalar, CheckedGenericRigidSymbols, GenericRigidSymbols,
-    HostReadableStorage, HostWritableStorage, MultiplicityFreeFusionSymbols,
-    MultiplicityFreeRigidSymbols, Placement, RuleIdentity, ScratchStorage, SimilarStorage,
-    TensorMap,
+    BlockKey, BlockStructure, CategoricalScalar, CheckedGenericRigidSymbols,
+    FusionTreePairOrientation, GenericRigidSymbols, HostReadableStorage, HostWritableStorage,
+    MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols, Placement, RuleIdentity,
+    ScratchStorage, SimilarStorage, TensorMap,
 };
 
 use crate::cache::OperationCachePolicy;
@@ -86,13 +86,196 @@ where
         + crate::ConjugateValue,
     B: TreeTransformBackend<D, P::Scalar>,
 {
-    let source = src_space.space();
-    let provider = src_space.provider();
-    let expected = source.required_len()?;
-    if src_data.len() != expected {
+    tree_transform_dyn_owned_checked_generic_from_storage_in_context(
+        context,
+        operation,
+        src_space,
+        src_space,
+        src_data,
+        FusionTreePairOrientation::Direct,
+        alpha,
+    )
+}
+
+/// Checked Generic owned transform reading a logical adjoint from its parent storage.
+///
+/// The logical source remains the categorical authority. The parent supplies
+/// only physical block addresses and conjugated scalar reads; the returned
+/// destination is the same fresh owned tensor as the direct entrypoint.
+#[doc(hidden)]
+#[allow(clippy::type_complexity)]
+pub fn tree_transform_dyn_owned_checked_generic_adjoint_in_context<P, D, B>(
+    context: &mut TreeTransformExecutionContext<D, RuleIdentity, P::Scalar, B>,
+    operation: TreeTransformOperation,
+    logical_src_space: &BoundDynamicFusionMapSpace<P>,
+    parent_src_space: &BoundDynamicFusionMapSpace<P>,
+    parent_src_data: &[D],
+    alpha: D,
+) -> Result<(BoundDynamicFusionMapSpace<P>, Vec<D>), CheckedGenericPlanError<P::Error>>
+where
+    P: CheckedGenericRigidSymbols,
+    P::Scalar: CategoricalScalar
+        + Copy
+        + Clone
+        + Add<Output = P::Scalar>
+        + Mul<Output = P::Scalar>
+        + Zero
+        + Send
+        + Sync
+        + 'static,
+    D: crate::DenseRecouplingScalar
+        + RecouplingCoefficientAction<P::Scalar>
+        + crate::ConjugateValue,
+    B: TreeTransformBackend<D, P::Scalar>,
+{
+    tree_transform_dyn_owned_checked_generic_from_storage_in_context(
+        context,
+        operation,
+        logical_src_space,
+        parent_src_space,
+        parent_src_data,
+        FusionTreePairOrientation::Adjoint,
+        alpha,
+    )
+}
+
+fn checked_generic_adjoint_storage_index<P>(
+    logical_src_space: &BoundDynamicFusionMapSpace<P>,
+    parent_src_space: &BoundDynamicFusionMapSpace<P>,
+    logical_index: usize,
+) -> Result<usize, OperationError>
+where
+    P: CheckedGenericRigidSymbols,
+{
+    let logical_block = logical_src_space
+        .space()
+        .structure()
+        .block(logical_index)
+        .map_err(OperationError::from_core_preserving_context)?;
+    let BlockKey::FusionTree(logical_key) = logical_block.key() else {
+        return Err(OperationError::ExpectedFusionTreeBlock {
+            tensor: "logical src",
+            index: logical_index,
+        });
+    };
+    parent_src_space
+        .space()
+        .structure()
+        .find_block_index_by_adjoint_fusion_tree_pair(logical_key)
+        .ok_or_else(|| OperationError::MissingBlockKey {
+            key: Box::new(BlockKey::FusionTree(logical_key.clone())),
+        })
+}
+
+fn validate_checked_generic_adjoint_storage<P>(
+    logical_src_space: &BoundDynamicFusionMapSpace<P>,
+    parent_src_space: &BoundDynamicFusionMapSpace<P>,
+) -> Result<(), OperationError>
+where
+    P: CheckedGenericRigidSymbols,
+{
+    let logical = logical_src_space.space();
+    let parent = parent_src_space.space();
+    if !Arc::ptr_eq(
+        logical_src_space.provider_arc(),
+        parent_src_space.provider_arc(),
+    ) {
+        return Err(OperationError::StructureMismatch {
+            tensor: "checked Generic oriented provider allocation",
+        });
+    }
+    if logical.homspace().codomain() != parent.homspace().domain()
+        || logical.homspace().domain() != parent.homspace().codomain()
+        || logical.admission().rule_identity() != parent.admission().rule_identity()
+        || logical.nout() != parent.nin()
+        || logical.nin() != parent.nout()
+        || logical.structure().rank() != parent.structure().rank()
+        || logical.structure().block_count() != parent.structure().block_count()
+    {
+        return Err(OperationError::StructureMismatch {
+            tensor: "checked Generic adjoint source relation",
+        });
+    }
+
+    for logical_index in 0..logical.structure().block_count() {
+        let logical_block = logical
+            .structure()
+            .block(logical_index)
+            .map_err(OperationError::from_core_preserving_context)?;
+        let storage_index = checked_generic_adjoint_storage_index(
+            logical_src_space,
+            parent_src_space,
+            logical_index,
+        )?;
+        let storage_block = parent
+            .structure()
+            .block(storage_index)
+            .map_err(OperationError::from_core_preserving_context)?;
+        for logical_axis in 0..logical.structure().rank() {
+            let storage_axis = if logical_axis < parent.nin() {
+                parent.nout() + logical_axis
+            } else {
+                logical_axis - parent.nin()
+            };
+            if logical_block.shape()[logical_axis] != storage_block.shape()[storage_axis] {
+                return Err(OperationError::StructureMismatch {
+                    tensor: "checked Generic adjoint block shape",
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn tree_transform_dyn_owned_checked_generic_from_storage_in_context<P, D, B>(
+    context: &mut TreeTransformExecutionContext<D, RuleIdentity, P::Scalar, B>,
+    operation: TreeTransformOperation,
+    logical_src_space: &BoundDynamicFusionMapSpace<P>,
+    storage_src_space: &BoundDynamicFusionMapSpace<P>,
+    storage_src_data: &[D],
+    orientation: FusionTreePairOrientation,
+    alpha: D,
+) -> Result<(BoundDynamicFusionMapSpace<P>, Vec<D>), CheckedGenericPlanError<P::Error>>
+where
+    P: CheckedGenericRigidSymbols,
+    P::Scalar: CategoricalScalar
+        + Copy
+        + Clone
+        + Add<Output = P::Scalar>
+        + Mul<Output = P::Scalar>
+        + Zero
+        + Send
+        + Sync
+        + 'static,
+    D: crate::DenseRecouplingScalar
+        + RecouplingCoefficientAction<P::Scalar>
+        + crate::ConjugateValue,
+    B: TreeTransformBackend<D, P::Scalar>,
+{
+    let source = logical_src_space.space();
+    let storage_source = storage_src_space.space();
+    let storage_conjugate = orientation == FusionTreePairOrientation::Adjoint;
+    if storage_conjugate {
+        validate_checked_generic_adjoint_storage(logical_src_space, storage_src_space)?;
+    } else {
+        if !Arc::ptr_eq(
+            logical_src_space.provider_arc(),
+            storage_src_space.provider_arc(),
+        ) || source != storage_source
+        {
+            return Err(OperationError::StructureMismatch {
+                tensor: "checked Generic direct source relation",
+            }
+            .into());
+        }
+    }
+    let provider = logical_src_space.provider();
+    let expected = storage_source.required_len()?;
+    if storage_src_data.len() != expected {
         return Err(OperationError::ElementCountMismatch {
             expected,
-            actual: src_data.len(),
+            actual: storage_src_data.len(),
         }
         .into());
     }
@@ -118,6 +301,8 @@ where
             &operation,
             prepared.structure(),
             source.structure(),
+            storage_source.structure(),
+            storage_conjugate,
         )?,
         None => (None, 0),
     };
@@ -130,7 +315,38 @@ where
                 operation.clone(),
                 &source_proof,
             )?;
-            Arc::new(plan.compile_structures(prepared.structure(), source.structure())?)
+            if storage_conjugate {
+                let dst_structure = Arc::new(prepared.structure().clone());
+                Arc::new(plan.compile_shared_structures_with_storage_mapping(
+                    dst_structure,
+                    source.structure(),
+                    Arc::clone(storage_source.structure()),
+                    |logical_index| {
+                        checked_generic_adjoint_storage_index(
+                            logical_src_space,
+                            storage_src_space,
+                            logical_index,
+                        )
+                    },
+                    |logical_axis| {
+                        if logical_axis >= source.rank() {
+                            return Err(OperationError::InvalidAxisSet {
+                                tensor: "logical src",
+                                axes: vec![logical_axis],
+                                rank: source.rank(),
+                            });
+                        }
+                        Ok(if logical_axis < storage_source.nin() {
+                            storage_source.nout() + logical_axis
+                        } else {
+                            logical_axis - storage_source.nin()
+                        })
+                    },
+                    true,
+                )?)
+            } else {
+                Arc::new(plan.compile_structures(prepared.structure(), source.structure())?)
+            }
         }
     };
     let mut dst_data = vec![D::zero(); prepared.required_len()];
@@ -140,19 +356,19 @@ where
         &mut context.workspace,
         &replay,
         &dst_preview,
-        source.structure(),
+        storage_source.structure(),
         &mut dst_data,
-        src_data,
+        storage_src_data,
         alpha,
         D::zero(),
     )?;
-    let dst_space = src_space.commit_final_homspace_generic_bound_checked(prepared)?;
+    let dst_space = logical_src_space.commit_final_homspace_generic_bound_checked(prepared)?;
     if compiled {
         if let Some(store) = runtime_store {
             if let Ok(replay) = Arc::try_unwrap(replay) {
                 if let Ok(replay) = replay.with_canonical_structures(
                     Arc::clone(dst_space.space().structure()),
-                    Arc::clone(source.structure()),
+                    Arc::clone(storage_source.structure()),
                 ) {
                     // Retention is an optimization and cannot turn a successful
                     // transform into an error.
@@ -161,6 +377,8 @@ where
                         &operation,
                         dst_space.space().structure(),
                         source.structure(),
+                        storage_source.structure(),
+                        storage_conjugate,
                         Arc::new(replay),
                         generation,
                     );

@@ -139,8 +139,9 @@ pub use tensortrace::{
     TensorTraceStructure, TensorTraceStructureTerm,
 };
 pub use tree_context::{
-    tree_transform_dyn_owned_checked_generic, tree_transform_dyn_owned_checked_generic_in_context,
-    TreeTransformExecutionContext,
+    tree_transform_dyn_owned_checked_generic,
+    tree_transform_dyn_owned_checked_generic_adjoint_in_context,
+    tree_transform_dyn_owned_checked_generic_in_context, TreeTransformExecutionContext,
 };
 pub use tree_transform::{
     build_all_codomain_tree_transform_group_plan,
