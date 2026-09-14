@@ -159,6 +159,50 @@ exposes no input-copy counter. Reported allocation totals remain caller-thread
 requested calls/bytes; peak, live, native, and worker-thread memory are
 unavailable.
 
+The one-sided factor-publication group measures the public results affected by
+the canonical owned-payload leaf. Checked full SVD uses the existing
+few-large (`G=2`) and many-small (`G=16`) unequal rectangular matrices for
+`f64` and genuinely complex `Complex64`, in canonical and padded reversed
+layouts. Literal checks require `U(rows,rows)`, `S(rows,cols)`, and
+`Vh(cols,cols)`, reconstruction, orthogonality, provider authority, and an
+unchanged source. Checked and multiplicity-free U(1) EIG rows use distinct
+upper-triangular eigenvalues and verify `A V = V D`, unit-normalized nonzero
+columns, and the exact eigenvalue set without comparing gauge-dependent vector
+entries. The `d=1` many-small baseline necessarily has zero off-diagonal data;
+its alternating `d=2` input is non-diagonal and genuinely complex for c64.
+Few-large c64 is non-diagonal in both shapes.
+
+The `one_sided_checked_fixture` and `one_sided_mf_fixture` setup rows measure
+fixture construction separately. Ordinary factor rows use one fixed
+preconstructed input. `_shape_alternating` rows alternate preconstructed `d`
+and `d+1` inputs with one dense executor. Literal preflight is outside timing.
+Timed closures pass each complete result through `black_box` and drop it
+immediately; `bench` retains only their unit return while measuring the warm
+phase. Identity and omitted sectors remain correctness-test coverage because
+they deliberately take the unchanged fallback. `qr_compact_generic_layout`
+remains the paired-publication negative control.
+
+Each group header prints its actual local `d` and `d+1`, `G`, full-SVD and EIG
+matrix shapes, and the compiled feature record identifies the provider. These
+factor rows instantiate `DefaultDenseExecutor` directly;
+`OP_MATRIX_GEMM_BACKEND` configures tensor-operation GEMM and does not select a
+factorization provider. Running global degeneracies 16 and 32 gives the G=16
+controls local baseline dimensions 1 and 2, respectively.
+
+```sh
+OP_MATRIX_OPERATION=one_sided_factor_publication \
+OP_MATRIX_FORM=owned \
+OP_MATRIX_DEGENERACY=16 \
+OP_MATRIX_MIN_MS=100 \
+benchmarks/operation_matrix.sh
+
+OP_MATRIX_OPERATION=one_sided_factor_publication \
+OP_MATRIX_FORM=owned \
+OP_MATRIX_DEGENERACY=32 \
+OP_MATRIX_MIN_MS=100 \
+benchmarks/operation_matrix.sh
+```
+
 The Apple Accelerate control is:
 
 ```sh
