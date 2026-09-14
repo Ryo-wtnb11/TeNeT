@@ -259,9 +259,12 @@ impl ContractionPlan {
         active_pair_path_from_steps(self.tensor_count, &self.steps)
     }
 
-    /// Sum of the optimizer cost estimates stored on all steps.
+    /// Saturating sum of the optimizer cost estimates stored on all steps.
     pub fn total_cost(&self) -> usize {
-        self.steps.iter().map(ContractionStep::cost).sum()
+        self.steps
+            .iter()
+            .map(ContractionStep::cost)
+            .fold(0, usize::saturating_add)
     }
 
     /// Compare this dense plan against TeNeT's greedy dense baseline.
@@ -763,6 +766,86 @@ mod tests {
         // the requested output is c,a; charge one final 2*5 element permute.
         assert_eq!(plan.steps()[0].cost(), 40);
         assert_eq!(plan.total_cost(), 40);
+    }
+
+    fn chain_steps(first_cost: usize, second_cost: usize) -> Vec<ContractionStep> {
+        vec![
+            ContractionStep::new(
+                TensorId::new(0),
+                TensorId::new(1),
+                TensorId::new(3),
+                first_cost,
+                vec![label("a"), label("c")],
+            ),
+            ContractionStep::new(
+                TensorId::new(3),
+                TensorId::new(2),
+                TensorId::new(4),
+                second_cost,
+                vec![label("a"), label("d")],
+            ),
+        ]
+    }
+
+    #[test]
+    fn aggregate_costs_saturate_and_preserve_exact_totals() {
+        let saturated =
+            ContractionPlan::new(3, vec![label("a"), label("d")], chain_steps(usize::MAX, 1))
+                .unwrap();
+        assert_eq!(saturated.total_cost(), usize::MAX);
+        assert_eq!(saturated.tree().unwrap().total_cost(), usize::MAX);
+
+        let boundary = ContractionPlan::new(
+            3,
+            vec![label("a"), label("d")],
+            chain_steps(usize::MAX - 1, 1),
+        )
+        .unwrap();
+        assert_eq!(boundary.total_cost(), usize::MAX);
+        assert_eq!(boundary.tree().unwrap().total_cost(), usize::MAX);
+
+        let ordinary =
+            ContractionPlan::new(3, vec![label("a"), label("d")], chain_steps(20, 22)).unwrap();
+        assert_eq!(ordinary.total_cost(), 42);
+        assert_eq!(ordinary.tree().unwrap().total_cost(), 42);
+
+        let leaf = ContractionPlan::new(1, Vec::new(), Vec::new()).unwrap();
+        assert_eq!(leaf.total_cost(), 0);
+        assert_eq!(leaf.tree().unwrap().total_cost(), 0);
+    }
+
+    #[test]
+    fn dense_cost_report_saturates_supplied_and_greedy_totals() {
+        let ir = parse_einsum("ab,bc,cd->ad").unwrap();
+        let small = DenseCostModel::from_network(
+            &ir,
+            &[
+                DenseTensorInfo::new(vec![2, 2]),
+                DenseTensorInfo::new(vec![2, 2]),
+                DenseTensorInfo::new(vec![2, 2]),
+            ],
+        )
+        .unwrap();
+        let supplied = ContractionPlan::from_steps(&ir, chain_steps(usize::MAX, 1)).unwrap();
+        let report = supplied.dense_cost_report(&ir, &small).unwrap();
+        assert_eq!(report.plan_cost(), usize::MAX);
+        assert!(report.greedy_cost() < usize::MAX);
+        assert!(report.is_suboptimal());
+
+        let overflow = DenseCostModel::from_network(
+            &ir,
+            &[
+                DenseTensorInfo::new(vec![usize::MAX, 2]),
+                DenseTensorInfo::new(vec![2, 2]),
+                DenseTensorInfo::new(vec![2, usize::MAX]),
+            ],
+        )
+        .unwrap();
+        let cheap = ContractionPlan::from_steps(&ir, chain_steps(1, 2)).unwrap();
+        let report = cheap.dense_cost_report(&ir, &overflow).unwrap();
+        assert_eq!(report.plan_cost(), 3);
+        assert_eq!(report.greedy_cost(), usize::MAX);
+        assert!(!report.is_suboptimal());
     }
 
     /// A correctly hand-built plan (right `result_labels`) must pass.
