@@ -4189,14 +4189,15 @@ where
     D: FactorScalar,
 {
     let mut q = vec![D::zero(); rows * rows];
-    let mut r = vec![D::zero(); rows * cols];
-    if rows <= cols {
+    let mut r = if rows <= cols {
+        let mut r = vec![D::zero(); rows * cols];
         qr_into_workspace(
             dense, input, rows, cols, rows, &mut q, rows, rows, rows, &mut r, rows, cols, rows,
         )?;
+        r
     } else {
-        // Full-Q completion still requires augmentation; #1140 A3 owns a
-        // future supported dense-backend completion path.
+        // The current full-Q completion retains augmentation until #1140 A3
+        // supplies a supported efficient dense-backend path.
         let mut augmented = vec![D::zero(); rows * (cols + rows)];
         augmented[..rows * cols].copy_from_slice(input);
         for row in 0..rows {
@@ -4218,8 +4219,8 @@ where
             cols + rows,
             rows,
         )?;
-        r.copy_from_slice(&work_r[..rows * cols]);
-    }
+        work_r[..rows * cols].to_vec()
+    };
     positive_diagonal_gauge(&mut q, rows, &mut r, rows, cols);
     Ok((q, r))
 }
@@ -4315,7 +4316,7 @@ where
 
 /// Full LQ `t = L * Q` (MatrixAlgebraKit `lq_full`): per sector `L` is the
 /// lower-trapezoidal `m x n` and `Q` the square `n x n` unitary, via the full
-/// QR of the transposed sector matrices.
+/// QR of the adjoint sector matrices.
 /// The positive-diagonal gauge is applied (MAK / TensorKit 0.17 default).
 #[expect(
     clippy::type_complexity,

@@ -7584,6 +7584,7 @@ fn assert_checked_full_qr_lq_inputs(
 
     let mut qr_dense = FullQrInputSpy::default();
     let (q, r) = qr_full_dyn_checked_generic(&mut qr_dense, &input).unwrap();
+    assert_eq!(qr_dense.observations.len(), matrices.len());
     for (observation, (rows, cols, matrix)) in qr_dense.observations.iter().zip(matrices.iter()) {
         assert_full_qr_observation(observation, matrix, *rows, *cols);
     }
@@ -7593,6 +7594,7 @@ fn assert_checked_full_qr_lq_inputs(
 
     let mut lq_dense = FullQrInputSpy::default();
     let (l, q) = lq_full_dyn_checked_generic(&mut lq_dense, &input).unwrap();
+    assert_eq!(lq_dense.observations.len(), matrices.len());
     for (observation, (rows, cols, matrix)) in lq_dense.observations.iter().zip(matrices.iter()) {
         let adjoint = adjoint_complex(matrix, *rows, *cols);
         assert_full_qr_observation(observation, &adjoint, *cols, *rows);
