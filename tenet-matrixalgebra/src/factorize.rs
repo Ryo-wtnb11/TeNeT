@@ -4178,6 +4178,53 @@ fn unit_phase<D: FactorScalar>(value: Complex64, norm_sqr: f64) -> (D, bool) {
     }
 }
 
+fn full_qr_numerical_stage<E, D>(
+    dense: &mut E,
+    input: &[D],
+    rows: usize,
+    cols: usize,
+) -> Result<(Vec<D>, Vec<D>), OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    D: FactorScalar,
+{
+    let mut q = vec![D::zero(); rows * rows];
+    let mut r = vec![D::zero(); rows * cols];
+    if rows <= cols {
+        qr_into_workspace(
+            dense, input, rows, cols, rows, &mut q, rows, rows, rows, &mut r, rows, cols,
+            rows,
+        )?;
+    } else {
+        // Full-Q completion still requires augmentation; #1140 A3 owns a
+        // future supported dense-backend completion path.
+        let mut augmented = vec![D::zero(); rows * (cols + rows)];
+        augmented[..rows * cols].copy_from_slice(input);
+        for row in 0..rows {
+            augmented[rows * cols + row * rows + row] = D::one();
+        }
+        let mut work_r = vec![D::zero(); rows * (cols + rows)];
+        qr_into_workspace(
+            dense,
+            &augmented,
+            rows,
+            cols + rows,
+            rows,
+            &mut q,
+            rows,
+            rows,
+            rows,
+            &mut work_r,
+            rows,
+            cols + rows,
+            rows,
+        )?;
+        r.copy_from_slice(&work_r[..rows * cols]);
+    }
+    positive_diagonal_gauge(&mut q, rows, &mut r, rows, cols);
+    Ok((q, r))
+}
+
 fn scale_col<D: FactorScalar>(data: &mut [D], rows: usize, leading: usize, col: usize, phase: D) {
     for row in 0..rows {
         let index = row + leading * col;
@@ -4194,7 +4241,7 @@ fn scale_row<D: FactorScalar>(data: &mut [D], cols: usize, leading: usize, row: 
 
 /// Full QR `t = Q * R` (MatrixAlgebraKit `qr_full`): per sector `Q` is the
 /// square `m x m` unitary and `R` the upper-trapezoidal `m x n`, obtained
-/// from one economy QR of the augmented `[A | I]` on the dense boundary.
+/// from one economy QR, augmenting with identity columns only when `m > n`.
 /// The positive-diagonal gauge is applied (MAK / TensorKit 0.17 default).
 #[expect(
     clippy::type_complexity,
@@ -4233,30 +4280,7 @@ where
     for matrix in &matrices {
         let rows = matrix.rows;
         let cols = matrix.cols;
-        let mut augmented = vec![D::zero(); rows * (cols + rows)];
-        augmented[..rows * cols].copy_from_slice(&matrix.data);
-        for row in 0..rows {
-            augmented[rows * cols + row * rows + row] = D::one();
-        }
-        let mut q = vec![D::zero(); rows * rows];
-        let mut work_r = vec![D::zero(); rows * (cols + rows)];
-        qr_into_workspace(
-            dense,
-            &augmented,
-            rows,
-            cols + rows,
-            rows,
-            &mut q,
-            rows,
-            rows,
-            rows,
-            &mut work_r,
-            rows,
-            cols + rows,
-            rows,
-        )?;
-        let mut r = work_r[..rows * cols].to_vec();
-        positive_diagonal_gauge(&mut q, rows, &mut r, rows, cols);
+        let (q, r) = full_qr_numerical_stage(dense, &matrix.data, rows, cols)?;
         pairs.push(FactorPair {
             sector: matrix.sector,
             kept: rows,
@@ -4332,30 +4356,7 @@ where
         let rows = matrix.rows;
         let cols = matrix.cols;
         let transposed = adjoint_col_major(&matrix.data, rows, cols);
-        let mut augmented = vec![D::zero(); cols * (rows + cols)];
-        augmented[..cols * rows].copy_from_slice(&transposed);
-        for row in 0..cols {
-            augmented[cols * rows + row * cols + row] = D::one();
-        }
-        let mut q_prime = vec![D::zero(); cols * cols];
-        let mut work_r = vec![D::zero(); cols * (rows + cols)];
-        qr_into_workspace(
-            dense,
-            &augmented,
-            cols,
-            rows + cols,
-            cols,
-            &mut q_prime,
-            cols,
-            cols,
-            cols,
-            &mut work_r,
-            cols,
-            rows + cols,
-            cols,
-        )?;
-        let mut r_prime = work_r[..cols * rows].to_vec();
-        positive_diagonal_gauge(&mut q_prime, cols, &mut r_prime, cols, rows);
+        let (q_prime, r_prime) = full_qr_numerical_stage(dense, &transposed, cols, rows)?;
         pairs.push(FactorPair {
             sector: matrix.sector,
             kept: cols,
@@ -10174,7 +10175,7 @@ where
     build_checked_pair_from_input(provider, space.homspace(), &matrices, pairs)
 }
 
-/// Checked-Generic full QR via sectorwise augmented `[A | I]` QR.
+/// Checked-Generic full QR, augmenting only sectors that require completion.
 #[doc(hidden)]
 #[expect(
     clippy::type_complexity,
@@ -10197,31 +10198,8 @@ where
     for matrix in &matrices {
         let rows = matrix.rows;
         let cols = matrix.cols;
-        let mut augmented = vec![D::zero(); rows * (cols + rows)];
-        augmented[..rows * cols].copy_from_slice(&matrix.data);
-        for row in 0..rows {
-            augmented[rows * cols + row * rows + row] = D::one();
-        }
-        let mut q = vec![D::zero(); rows * rows];
-        let mut work_r = vec![D::zero(); rows * (cols + rows)];
-        qr_into_workspace(
-            dense,
-            &augmented,
-            rows,
-            cols + rows,
-            rows,
-            &mut q,
-            rows,
-            rows,
-            rows,
-            &mut work_r,
-            rows,
-            cols + rows,
-            rows,
-        )
-        .map_err(CheckedGenericFactorPlanError::from)?;
-        let mut r = work_r[..rows * cols].to_vec();
-        positive_diagonal_gauge(&mut q, rows, &mut r, rows, cols);
+        let (q, r) = full_qr_numerical_stage(dense, &matrix.data, rows, cols)
+            .map_err(CheckedGenericFactorPlanError::from)?;
         pairs.push(FactorPair {
             sector: matrix.sector,
             kept: rows,
@@ -10401,31 +10379,8 @@ where
         let rows = matrix.rows;
         let cols = matrix.cols;
         let transposed = adjoint_col_major(&matrix.data, rows, cols);
-        let mut augmented = vec![D::zero(); cols * (rows + cols)];
-        augmented[..cols * rows].copy_from_slice(&transposed);
-        for row in 0..cols {
-            augmented[cols * rows + row * cols + row] = D::one();
-        }
-        let mut q_prime = vec![D::zero(); cols * cols];
-        let mut work_r = vec![D::zero(); cols * (rows + cols)];
-        qr_into_workspace(
-            dense,
-            &augmented,
-            cols,
-            rows + cols,
-            cols,
-            &mut q_prime,
-            cols,
-            cols,
-            cols,
-            &mut work_r,
-            cols,
-            rows + cols,
-            cols,
-        )
-        .map_err(CheckedGenericFactorPlanError::from)?;
-        let mut r_prime = work_r[..cols * rows].to_vec();
-        positive_diagonal_gauge(&mut q_prime, cols, &mut r_prime, cols, rows);
+        let (q_prime, r_prime) = full_qr_numerical_stage(dense, &transposed, cols, rows)
+            .map_err(CheckedGenericFactorPlanError::from)?;
         pairs.push(FactorPair {
             sector: matrix.sector,
             kept: cols,
