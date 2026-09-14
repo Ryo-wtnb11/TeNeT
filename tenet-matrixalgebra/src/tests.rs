@@ -1347,8 +1347,9 @@ fn assert_compact_factors_reconstruct_input<R, D>(
         let cols = source.shape()[input.space().space().nout()..]
             .iter()
             .product::<usize>();
-        let rank = left_block.shape()[left_block.shape().len() - 1];
-        assert_eq!(right_block.shape()[0], rank);
+        let left_rank = left_block.shape()[left_block.shape().len() - 1];
+        let right_rank = right_block.shape()[0];
+        let rank = left_rank.min(right_rank);
         let diagonal_block = diagonal.map(|factor| {
             let structure = factor.space().space().structure();
             (0..structure.block_count())
@@ -1361,6 +1362,11 @@ fn assert_compact_factors_reconstruct_input<R, D>(
                 })
                 .unwrap()
         });
+        if let Some(block) = diagonal_block {
+            assert_eq!(block.shape(), [left_rank, right_rank]);
+        } else {
+            assert_eq!(left_rank, right_rank);
+        }
         for column in 0..cols {
             for row in 0..rows {
                 let mut reconstructed = D::zero();
@@ -3687,6 +3693,8 @@ fn checked_generic_full_svd_preserves_provider_and_completes_unmatched_rows() {
     let probe = crate::factorize::generic_pair_publication_probe();
     assert_eq!(probe.one_sided_canonical_publications, 1);
     assert_eq!(probe.one_sided_fallback_publications, 1);
+    assert!(probe.one_sided_left_fallback_scatter_calls > 0);
+    assert_eq!(probe.one_sided_right_fallback_scatter_calls, 0);
 }
 
 #[test]
@@ -3716,9 +3724,13 @@ fn checked_generic_full_svd_publishes_aligned_vertex_factors_without_scatter() {
     assert!(probe.left_appended_elements > 0);
     assert!(probe.right_appended_elements > 0);
     assert_eq!(
-        (probe.left_scatter_calls, probe.right_scatter_calls),
+        (
+            probe.one_sided_left_fallback_scatter_calls,
+            probe.one_sided_right_fallback_scatter_calls
+        ),
         (0, 0)
     );
+    assert_compact_factors_reconstruct_input(&input, full.u(), Some(full.s()), full.vh());
     for factor in [full.u(), full.s(), full.vh()] {
         assert!(Arc::ptr_eq(factor.space().provider_arc(), &provider));
     }

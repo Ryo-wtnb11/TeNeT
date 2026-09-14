@@ -2760,6 +2760,8 @@ pub(crate) struct GenericPairPublicationProbe {
     pub fallback_publications: usize,
     pub one_sided_canonical_publications: usize,
     pub one_sided_fallback_publications: usize,
+    pub one_sided_left_fallback_scatter_calls: usize,
+    pub one_sided_right_fallback_scatter_calls: usize,
 }
 
 #[cfg(test)]
@@ -2792,6 +2794,21 @@ fn record_one_sided_publication(canonical: bool) {
 
 #[cfg(not(test))]
 fn record_one_sided_publication(_canonical: bool) {}
+
+#[cfg(test)]
+fn record_one_sided_fallback_scatter(side: FactorSide) {
+    GENERIC_PAIR_PUBLICATION_PROBE.with(|probe| {
+        let mut value = probe.get();
+        match side {
+            FactorSide::Left => value.one_sided_left_fallback_scatter_calls += 1,
+            FactorSide::Right => value.one_sided_right_fallback_scatter_calls += 1,
+        }
+        probe.set(value);
+    });
+}
+
+#[cfg(not(test))]
+fn record_one_sided_fallback_scatter(_side: FactorSide) {}
 
 #[cfg(test)]
 thread_local! {
@@ -3045,6 +3062,7 @@ where
                 FactorSide::Left => (pair.left.as_slice(), pair.left_rows),
                 FactorSide::Right => (pair.right.as_slice(), pair.right_leading),
             };
+            record_one_sided_fallback_scatter(side);
             scatter_matrix_block(
                 &mut data,
                 block.shape(),
@@ -9162,6 +9180,7 @@ where
                 FactorSide::Left => (&pair.left, pair.left_rows),
                 FactorSide::Right => (&pair.right, pair.right_leading),
             };
+            record_one_sided_fallback_scatter(side);
             scatter_matrix_block(
                 &mut data,
                 block.shape(),
@@ -11254,7 +11273,7 @@ where
 #[cfg(test)]
 mod sector_matricization_tests {
     use super::*;
-    use tenet_core::{BlockSpec, FusionTreePairKey, Z2FusionRule};
+    use tenet_core::{BlockSpec, FusionTreePairKey, U1FusionRule, U1Irrep, Z2FusionRule};
 
     #[derive(Clone, Copy)]
     struct TestGenericRule;
@@ -12064,6 +12083,338 @@ mod sector_matricization_tests {
             (probe.left_scatter_calls, probe.right_scatter_calls),
             (2, 2)
         );
+    }
+
+    #[test]
+    fn checked_one_sided_publication_preserves_vertex_payload_and_fallback_ownership() {
+        let generic_rule = TestGenericRule;
+        let provider = Arc::new(InfallibleGeneric::new(&generic_rule));
+        let x = SectorId::new(1);
+        let left_dimensions = BTreeMap::from([(x, 2)]);
+        let right_dimensions = BTreeMap::from([(x, 3)]);
+
+        let (homspace, matrix, mut pair) = vertex_tree_factor_fixture(false);
+        pair.right = (0..18)
+            .map(|index| Complex64::new(30.0 + index as f64, 2.0 + index as f64 / 3.0))
+            .collect();
+        pair.right_leading = 3;
+        let expected_left = pair.left.clone();
+        let expected_right = pair.right.clone();
+        let left_pointer = pair.left.as_ptr();
+        let right_pointer = pair.right.as_ptr();
+        let mut pairs = [pair];
+        reset_generic_pair_publication_probe();
+
+        let left = build_bound_factor_generic_checked(
+            &provider,
+            &homspace,
+            std::slice::from_ref(&matrix),
+            &mut pairs,
+            &left_dimensions,
+            FactorSide::Left,
+        )
+        .unwrap();
+        assert_eq!(left.data(), expected_left);
+        assert!(std::ptr::eq(left.data().as_ptr(), left_pointer));
+        assert!(pairs[0].left.is_empty());
+        assert_eq!(pairs[0].right, expected_right);
+        assert!(std::ptr::eq(pairs[0].right.as_ptr(), right_pointer));
+
+        let right = build_bound_factor_generic_checked(
+            &provider,
+            &homspace,
+            std::slice::from_ref(&matrix),
+            &mut pairs,
+            &right_dimensions,
+            FactorSide::Right,
+        )
+        .unwrap();
+        assert_eq!(right.data(), expected_right);
+        assert!(std::ptr::eq(right.data().as_ptr(), right_pointer));
+        assert!(pairs[0].right.is_empty());
+        let probe = generic_pair_publication_probe();
+        assert_eq!(probe.one_sided_canonical_publications, 2);
+        assert_eq!(probe.one_sided_fallback_publications, 0);
+        assert_eq!(
+            (
+                probe.one_sided_left_fallback_scatter_calls,
+                probe.one_sided_right_fallback_scatter_calls,
+            ),
+            (0, 0)
+        );
+
+        let (homspace, matrix, mut pair) = vertex_tree_factor_fixture(true);
+        pair.right = (0..18)
+            .map(|index| Complex64::new(30.0 + index as f64, 2.0 + index as f64 / 3.0))
+            .collect();
+        pair.right_leading = 3;
+        let left_source = pair.left.clone();
+        let right_source = pair.right.clone();
+        let mut pairs = [pair];
+        reset_generic_pair_publication_probe();
+
+        let left = build_bound_factor_generic_checked(
+            &provider,
+            &homspace,
+            std::slice::from_ref(&matrix),
+            &mut pairs,
+            &left_dimensions,
+            FactorSide::Left,
+        )
+        .unwrap();
+        assert_eq!(
+            left.data(),
+            [
+                left_source[2],
+                left_source[3],
+                left_source[0],
+                left_source[1],
+                left_source[6],
+                left_source[7],
+                left_source[4],
+                left_source[5],
+            ]
+        );
+        assert_eq!(pairs[0].left, left_source);
+        assert_eq!(pairs[0].right, right_source);
+
+        let right = build_bound_factor_generic_checked(
+            &provider,
+            &homspace,
+            std::slice::from_ref(&matrix),
+            &mut pairs,
+            &right_dimensions,
+            FactorSide::Right,
+        )
+        .unwrap();
+        assert_eq!(
+            right.data(),
+            [
+                right_source[9],
+                right_source[10],
+                right_source[11],
+                right_source[12],
+                right_source[13],
+                right_source[14],
+                right_source[15],
+                right_source[16],
+                right_source[17],
+                right_source[0],
+                right_source[1],
+                right_source[2],
+                right_source[3],
+                right_source[4],
+                right_source[5],
+                right_source[6],
+                right_source[7],
+                right_source[8],
+            ]
+        );
+        assert_eq!(pairs[0].left, left_source);
+        assert_eq!(pairs[0].right, right_source);
+        let probe = generic_pair_publication_probe();
+        assert_eq!(probe.one_sided_canonical_publications, 0);
+        assert_eq!(probe.one_sided_fallback_publications, 2);
+        assert_eq!(
+            (
+                probe.one_sided_left_fallback_scatter_calls,
+                probe.one_sided_right_fallback_scatter_calls,
+            ),
+            (2, 2)
+        );
+    }
+
+    #[test]
+    fn one_sided_fallback_preserves_pair_admission_contracts() {
+        let (homspace, matrix) = z2_single_sector_matrix(1, 1);
+        let mf_authority =
+            BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free_lowered(
+                Arc::new(Z2FusionRule),
+                homspace.clone(),
+            )
+            .unwrap();
+        let generic_rule = TestGenericRule;
+        let generic_provider = Arc::new(InfallibleGeneric::new(&generic_rule));
+        let dimensions = BTreeMap::from([(SectorId::new(0), 1)]);
+        let pair = |sector, value| FactorPair {
+            sector,
+            kept: 1,
+            left: vec![value],
+            left_rows: 1,
+            right: vec![value + 10.0],
+            right_leading: 1,
+        };
+
+        let mut duplicate = [pair(SectorId::new(0), 1.0), pair(SectorId::new(0), 2.0)];
+        let output = build_bound_factor(
+            &mf_authority,
+            &homspace,
+            std::slice::from_ref(&matrix),
+            &mut duplicate,
+            &dimensions,
+            FactorSide::Left,
+        )
+        .unwrap();
+        assert_eq!(output.data(), [2.0]);
+        assert_eq!(duplicate[0].left, [1.0]);
+        assert_eq!(duplicate[1].left, [2.0]);
+
+        let mut duplicate = [pair(SectorId::new(0), 3.0), pair(SectorId::new(0), 4.0)];
+        let output = build_bound_factor_generic_checked(
+            &generic_provider,
+            &homspace,
+            std::slice::from_ref(&matrix),
+            &mut duplicate,
+            &dimensions,
+            FactorSide::Left,
+        )
+        .unwrap();
+        assert_eq!(output.data(), [4.0]);
+        assert_eq!(duplicate[0].left, [3.0]);
+        assert_eq!(duplicate[1].left, [4.0]);
+
+        let mut with_foreign = [pair(SectorId::new(0), 5.0), pair(SectorId::new(1), 6.0)];
+        let error = build_bound_factor(
+            &mf_authority,
+            &homspace,
+            std::slice::from_ref(&matrix),
+            &mut with_foreign,
+            &dimensions,
+            FactorSide::Left,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            OperationError::UnsupportedTensorContractScope {
+                message: "factor sector absent from the source tensor"
+            }
+        ));
+
+        let mut with_foreign = [pair(SectorId::new(0), 7.0), pair(SectorId::new(1), 8.0)];
+        let output = build_bound_factor_generic_checked(
+            &generic_provider,
+            &homspace,
+            std::slice::from_ref(&matrix),
+            &mut with_foreign,
+            &dimensions,
+            FactorSide::Left,
+        )
+        .unwrap();
+        assert_eq!(output.data(), [7.0]);
+        assert_eq!(with_foreign[1].left, [8.0]);
+
+        let mut missing = Vec::<FactorPair<f64>>::new();
+        let error = build_bound_factor(
+            &mf_authority,
+            &homspace,
+            std::slice::from_ref(&matrix),
+            &mut missing,
+            &dimensions,
+            FactorSide::Left,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            OperationError::UnsupportedTensorContractScope {
+                message: "factor rank absent for a populated source sector"
+            }
+        ));
+
+        let error = build_bound_factor_generic_checked(
+            &generic_provider,
+            &homspace,
+            std::slice::from_ref(&matrix),
+            &mut missing,
+            &dimensions,
+            FactorSide::Left,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            CheckedGenericFactorPlanError::Operation(
+                OperationError::UnsupportedTensorContractScope {
+                    message: "factor rank absent for a populated source sector"
+                }
+            )
+        ));
+    }
+
+    #[test]
+    fn one_sided_fallback_places_identity_sectors_before_between_and_after_payloads() {
+        let sectors = [0, -1, 1, -2, 2].map(|charge| U1Irrep::new(charge).sector_id());
+        let homspace = FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new(sectors.map(|sector| (sector, 2)), false)]),
+            FusionProductSpace::new([SectorLeg::new([(sectors[1], 2), (sectors[3], 2)], false)]),
+        );
+        let authority = BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free_lowered(
+            Arc::new(U1FusionRule),
+            homspace.clone(),
+        )
+        .unwrap();
+        let input_data = vec![0.0; authority.space().required_len().unwrap()];
+        let matrices = sector_matricizations(
+            authority.space().structure(),
+            &input_data,
+            authority.space().nout(),
+        )
+        .unwrap();
+        assert_eq!(
+            matrices
+                .iter()
+                .map(|matrix| matrix.sector)
+                .collect::<Vec<_>>(),
+            [sectors[1], sectors[3]]
+        );
+        let populated = BTreeMap::from([
+            (sectors[1], vec![2.0, 3.0, 4.0, 5.0]),
+            (sectors[3], vec![6.0, 7.0, 8.0, 9.0]),
+        ]);
+        let mut pairs = matrices
+            .iter()
+            .map(|matrix| FactorPair {
+                sector: matrix.sector,
+                kept: 2,
+                left: populated[&matrix.sector].clone(),
+                left_rows: 2,
+                right: Vec::new(),
+                right_leading: 0,
+            })
+            .collect::<Vec<_>>();
+        let dimensions = sectors
+            .into_iter()
+            .map(|sector| (sector, 2))
+            .collect::<BTreeMap<_, _>>();
+        reset_generic_pair_publication_probe();
+
+        let output = build_bound_factor(
+            &authority,
+            &homspace,
+            &matrices,
+            &mut pairs,
+            &dimensions,
+            FactorSide::Left,
+        )
+        .unwrap();
+
+        let mut output_sectors = Vec::new();
+        for index in 0..output.space().space().structure().block_count() {
+            let block = output.space().space().structure().block(index).unwrap();
+            let key = block.key().as_fusion_tree_pair().unwrap();
+            let sector = coupled_of(key.codomain_tree());
+            output_sectors.push(sector);
+            assert_eq!(block.shape(), [2, 2]);
+            assert_eq!(block.strides(), [1, 2]);
+            let actual = &output.data()[block.offset()..block.offset() + 4];
+            match populated.get(&sector) {
+                Some(expected) => assert_eq!(actual, expected),
+                None => assert_eq!(actual, [1.0, 0.0, 0.0, 1.0]),
+            }
+        }
+        assert_eq!(output_sectors, sectors);
+        let probe = generic_pair_publication_probe();
+        assert_eq!(probe.one_sided_canonical_publications, 0);
+        assert_eq!(probe.one_sided_fallback_publications, 1);
+        assert_eq!(probe.one_sided_left_fallback_scatter_calls, 2);
     }
 
     #[test]
