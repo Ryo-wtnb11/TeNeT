@@ -27,10 +27,7 @@ use tenet_matrixalgebra::{
     qr_compact_dyn_generic, qr_full_dyn_checked_generic, svd_compact_dyn_checked_generic,
     BoundDynFactor, CheckedGenericFactorPlanError, FactorScalar,
 };
-use tenet_tensors::{
-    BoundDynamicFusionMapSpace, BoundDynamicTensorRef, ConjugateValue, DenseBlockScalar,
-    DynamicFusionMapSpace,
-};
+use tenet_tensors::{BoundDynamicFusionMapSpace, BoundDynamicTensorRef, DynamicFusionMapSpace};
 
 struct CountingAllocator;
 
@@ -575,7 +572,7 @@ fn bench_adapter_shape<T: OrientedScalar>(
                 iterations += 1;
             }
         }
-        Ok(marker.expect("shape cycle is nonempty"))
+        Ok::<_, tenet::dense::DenseError>(marker.expect("shape cycle is nonempty"))
     })?;
     let elapsed = started.elapsed();
     assert_eq!(iterations % expected.len() as u64, 0);
@@ -608,7 +605,7 @@ fn bench_public_shape<T: OrientedScalar>(
                 iterations += 1;
             }
         }
-        Ok(marker.expect("shape cycle is nonempty"))
+        Ok::<_, Error>(marker.expect("shape cycle is nonempty"))
     })?;
     let elapsed = started.elapsed();
     assert_eq!(iterations % expected.len() as u64, 0);
