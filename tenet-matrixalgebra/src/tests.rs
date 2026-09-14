@@ -7531,7 +7531,8 @@ fn full_qr_and_lq_use_original_input_only_when_economy_q_is_full() {
     let tensor = mixed_rectangular_tensor((2, 4), (3, 1));
     let matrices = dense_sector_matrices(1, &tensor);
     let input = bound_tensor(Arc::new(rule), &tensor);
-    let input = input.as_ref().dynamic();
+    let input_ref = input.as_ref();
+    let input = input_ref.dynamic();
 
     let mut qr_dense = FullQrInputSpy::default();
     let (q, r) = qr_full_dyn(&mut qr_dense, &input).unwrap();
@@ -7635,7 +7636,8 @@ fn full_and_compact_qr_lq_match_for_rank_deficient_no_completion_shapes() {
         TensorMap::from_vec_with_fusion_space(vec![1.0, 2.0, 2.0, 4.0, 3.0, 6.0], wide_space)
             .unwrap();
     let wide_input = bound_tensor(Arc::new(rule), &wide);
-    let wide_input = wide_input.as_ref().dynamic();
+    let wide_input_ref = wide_input.as_ref();
+    let wide_input = wide_input_ref.dynamic();
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
     let compact = qr_compact_dyn(&mut dense, &wide_input).unwrap();
     let full = qr_full_dyn(&mut dense, &wide_input).unwrap();
@@ -7647,7 +7649,8 @@ fn full_and_compact_qr_lq_match_for_rank_deficient_no_completion_shapes() {
 
     let tall = transposed_rectangular_tensor(&wide, 2, 3);
     let tall_input = bound_tensor(Arc::new(rule), &tall);
-    let tall_input = tall_input.as_ref().dynamic();
+    let tall_input_ref = tall_input.as_ref();
+    let tall_input = tall_input_ref.dynamic();
     let compact = lq_compact_dyn(&mut dense, &tall_input).unwrap();
     let full = lq_full_dyn(&mut dense, &tall_input).unwrap();
     assert_eq!(full.0.space().space(), compact.0.space().space());
