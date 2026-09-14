@@ -1787,6 +1787,89 @@ struct CompactInputSpy {
     observations: Vec<CompactInputObservation>,
 }
 
+#[derive(Debug)]
+struct FullQrObservation {
+    input_shape: Vec<usize>,
+    q_shape: Vec<usize>,
+    r_shape: Vec<usize>,
+    values: Vec<Complex64>,
+}
+
+struct FullQrInputSpy {
+    inner: tenet_dense::DefaultDenseExecutor,
+    observations: Vec<FullQrObservation>,
+}
+
+impl Default for FullQrInputSpy {
+    fn default() -> Self {
+        Self {
+            inner: tenet_dense::DefaultDenseExecutor::new(),
+            observations: Vec::new(),
+        }
+    }
+}
+
+impl DenseExecutor for FullQrInputSpy {
+    fn svd(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        panic!("test only exercises full QR/LQ")
+    }
+
+    fn qr(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        panic!("full QR/LQ must use the destination API")
+    }
+
+    fn qr_into(
+        &mut self,
+        input: DenseRead<'_>,
+        q: DenseWrite<'_>,
+        r: DenseWrite<'_>,
+    ) -> Result<(), DenseError> {
+        let input_shape = input.shape().to_vec();
+        let (strides, offset, data_len, values) = match input {
+            DenseRead::F64(view) => (
+                view.strides().to_vec(),
+                view.offset(),
+                view.data().len(),
+                view.data()
+                    .iter()
+                    .map(|&value| Complex64::new(value, 0.0))
+                    .collect(),
+            ),
+            DenseRead::C64(view) => (
+                view.strides().to_vec(),
+                view.offset(),
+                view.data().len(),
+                view.data().to_vec(),
+            ),
+            _ => panic!("full QR/LQ fixture must be f64 or c64"),
+        };
+        assert_eq!(offset, 0);
+        assert_eq!(strides, [1, input_shape[0]]);
+        assert_eq!(data_len, input_shape.iter().product::<usize>());
+        self.observations.push(FullQrObservation {
+            input_shape,
+            q_shape: q.shape().to_vec(),
+            r_shape: r.shape().to_vec(),
+            values,
+        });
+        self.inner.qr_into(input, q, r)
+    }
+
+    fn eigh(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        panic!("test only exercises full QR/LQ")
+    }
+
+    fn dot_general_into(
+        &mut self,
+        _: DenseWrite<'_>,
+        _: DenseRead<'_>,
+        _: DenseRead<'_>,
+        _: &DenseDotConfig,
+    ) -> Result<(), DenseError> {
+        panic!("test only exercises full QR/LQ")
+    }
+}
+
 impl CompactInputSpy {
     fn new(operation: crate::factorize::CheckedCompactOperation) -> Self {
         Self {
@@ -7399,6 +7482,226 @@ fn assert_orthonormal_columns(matrices: &[(SectorId, usize, usize, Vec<f64>)]) {
             }
         }
     }
+}
+
+fn bound_factor_matrices<R>(
+    factor: &BoundDynFactor<R, f64>,
+) -> Vec<(SectorId, usize, usize, Vec<f64>)> {
+    factor
+        .space()
+        .space()
+        .structure()
+        .coupled_sector_regions(factor.space().space().nout())
+        .unwrap()
+        .unwrap()
+        .iter()
+        .map(|region| {
+            assert_eq!(region.range().len(), region.rows() * region.cols());
+            (
+                region.coupled(),
+                region.rows(),
+                region.cols(),
+                factor.data()[region.range()].to_vec(),
+            )
+        })
+        .collect()
+}
+
+fn assert_orthonormal_rows(matrices: &[(SectorId, usize, usize, Vec<f64>)]) {
+    for (sector, rows, cols, matrix) in matrices {
+        for upper in 0..*rows {
+            for lower in 0..*rows {
+                let dot = (0..*cols)
+                    .map(|col| matrix[upper + rows * col] * matrix[lower + rows * col])
+                    .sum::<f64>();
+                let expected = if upper == lower { 1.0 } else { 0.0 };
+                assert!(
+                    (dot - expected).abs() < 1.0e-9,
+                    "sector {sector:?}: row dot ({upper},{lower}) = {dot}"
+                );
+            }
+        }
+    }
+}
+
+fn assert_nonnegative_diagonal(matrices: &[(SectorId, usize, usize, Vec<f64>)]) {
+    for (sector, rows, cols, matrix) in matrices {
+        for index in 0..(*rows).min(*cols) {
+            assert!(
+                matrix[index + rows * index] >= 0.0,
+                "sector {sector:?}: diagonal {index} is negative"
+            );
+        }
+    }
+}
+
+fn assert_full_qr_observation(
+    observation: &FullQrObservation,
+    input: &[Complex64],
+    rows: usize,
+    cols: usize,
+) {
+    let dense_cols = if rows <= cols { cols } else { cols + rows };
+    assert_eq!(observation.input_shape, [rows, dense_cols]);
+    assert_eq!(observation.q_shape, [rows, rows]);
+    assert_eq!(observation.r_shape, [rows, dense_cols]);
+    let mut expected = vec![Complex64::new(0.0, 0.0); rows * dense_cols];
+    expected[..rows * cols].copy_from_slice(input);
+    if rows > cols {
+        for row in 0..rows {
+            expected[rows * cols + row * rows + row] = Complex64::new(1.0, 0.0);
+        }
+    }
+    assert_eq!(observation.values, expected);
+}
+
+fn adjoint_complex(input: &[Complex64], rows: usize, cols: usize) -> Vec<Complex64> {
+    let mut output = vec![Complex64::new(0.0, 0.0); input.len()];
+    for col in 0..cols {
+        for row in 0..rows {
+            output[col + cols * row] = input[row + rows * col].conj();
+        }
+    }
+    output
+}
+
+#[test]
+fn full_qr_and_lq_use_original_input_only_when_economy_q_is_full() {
+    let rule = Z2FusionRule;
+    let tensor = mixed_rectangular_tensor((2, 4), (3, 1));
+    let matrices = dense_sector_matrices(1, &tensor);
+    let input = bound_tensor(Arc::new(rule), &tensor);
+    let input_ref = input.as_ref();
+    let input = input_ref.dynamic();
+
+    let mut qr_dense = FullQrInputSpy::default();
+    let (q, r) = qr_full_dyn(&mut qr_dense, &input).unwrap();
+    assert_eq!(qr_dense.observations.len(), matrices.len());
+    for (observation, (_, rows, cols, matrix)) in qr_dense.observations.iter().zip(matrices.iter())
+    {
+        let matrix = matrix
+            .iter()
+            .map(|&value| Complex64::new(value, 0.0))
+            .collect::<Vec<_>>();
+        assert_full_qr_observation(observation, &matrix, *rows, *cols);
+    }
+    assert_orthonormal_columns(&bound_factor_matrices(&q));
+    assert_nonnegative_diagonal(&bound_factor_matrices(&r));
+    assert_compact_factors_reconstruct_input(&input, &q, None, &r);
+
+    let mut lq_dense = FullQrInputSpy::default();
+    let (l, q) = lq_full_dyn(&mut lq_dense, &input).unwrap();
+    assert_eq!(lq_dense.observations.len(), matrices.len());
+    for (observation, (_, rows, cols, matrix)) in lq_dense.observations.iter().zip(matrices.iter())
+    {
+        let matrix = matrix
+            .iter()
+            .map(|&value| Complex64::new(value, 0.0))
+            .collect::<Vec<_>>();
+        let adjoint = adjoint_complex(&matrix, *rows, *cols);
+        assert_full_qr_observation(observation, &adjoint, *cols, *rows);
+    }
+    assert_nonnegative_diagonal(&bound_factor_matrices(&l));
+    assert_orthonormal_rows(&bound_factor_matrices(&q));
+    assert_compact_factors_reconstruct_input(&input, &l, None, &q);
+}
+
+fn checked_fixture_matrices(
+    space: &BoundDynamicFusionMapSpace<LateGenericSpy>,
+    data: &[Complex64],
+) -> Vec<(usize, usize, Vec<Complex64>)> {
+    (0..space.space().structure().block_count())
+        .map(|index| {
+            let block = space.space().structure().block(index).unwrap();
+            let (rows, cols) = (block.shape()[0], block.shape()[1]);
+            let mut matrix = vec![Complex64::new(0.0, 0.0); rows * cols];
+            for col in 0..cols {
+                for row in 0..rows {
+                    matrix[row + rows * col] =
+                        data[block.offset() + row * block.strides()[0] + col * block.strides()[1]];
+                }
+            }
+            (rows, cols, matrix)
+        })
+        .collect()
+}
+
+fn assert_checked_full_qr_lq_inputs(
+    provider: Arc<LateGenericSpy>,
+    space: BoundDynamicFusionMapSpace<LateGenericSpy>,
+    data: Vec<Complex64>,
+) {
+    let matrices = checked_fixture_matrices(&space, &data);
+    let input = BoundDynamicTensorRef::try_new(&space, &data).unwrap();
+
+    let mut qr_dense = FullQrInputSpy::default();
+    let (q, r) = qr_full_dyn_checked_generic(&mut qr_dense, &input).unwrap();
+    assert_eq!(qr_dense.observations.len(), matrices.len());
+    for (observation, (rows, cols, matrix)) in qr_dense.observations.iter().zip(matrices.iter()) {
+        assert_full_qr_observation(observation, matrix, *rows, *cols);
+    }
+    assert_compact_factors_reconstruct_input(&input, &q, None, &r);
+    assert!(Arc::ptr_eq(q.space().provider_arc(), &provider));
+    assert!(Arc::ptr_eq(r.space().provider_arc(), &provider));
+
+    let mut lq_dense = FullQrInputSpy::default();
+    let (l, q) = lq_full_dyn_checked_generic(&mut lq_dense, &input).unwrap();
+    assert_eq!(lq_dense.observations.len(), matrices.len());
+    for (observation, (rows, cols, matrix)) in lq_dense.observations.iter().zip(matrices.iter()) {
+        let adjoint = adjoint_complex(matrix, *rows, *cols);
+        assert_full_qr_observation(observation, &adjoint, *cols, *rows);
+    }
+    assert_compact_factors_reconstruct_input(&input, &l, None, &q);
+    assert!(Arc::ptr_eq(l.space().provider_arc(), &provider));
+    assert!(Arc::ptr_eq(q.space().provider_arc(), &provider));
+}
+
+#[test]
+fn checked_full_qr_and_lq_preserve_complex_inputs_and_provider_identity() {
+    let (provider, space, data) = checked_svd_truncation_input::<Complex64>(true);
+    assert_checked_full_qr_lq_inputs(provider, space, data);
+    let (provider, space, data) = checked_svd_wide_input::<Complex64>();
+    assert_checked_full_qr_lq_inputs(provider, space, data);
+}
+
+#[test]
+fn full_and_compact_qr_lq_match_for_rank_deficient_no_completion_shapes() {
+    let rule = Z2FusionRule;
+    let wide_space = rectangular_svd_tensor(2, 3)
+        .fusion_space()
+        .unwrap()
+        .as_ref()
+        .clone();
+    let wide =
+        TensorMap::from_vec_with_fusion_space(vec![1.0, 2.0, 2.0, 4.0, 3.0, 6.0], wide_space)
+            .unwrap();
+    let wide_input = bound_tensor(Arc::new(rule), &wide);
+    let wide_input_ref = wide_input.as_ref();
+    let wide_input = wide_input_ref.dynamic();
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    let compact = qr_compact_dyn(&mut dense, &wide_input).unwrap();
+    let full = qr_full_dyn(&mut dense, &wide_input).unwrap();
+    assert_eq!(full.0.space().space(), compact.0.space().space());
+    assert_eq!(full.1.space().space(), compact.1.space().space());
+    assert_eq!(full.0.data(), compact.0.data());
+    assert_eq!(full.1.data(), compact.1.data());
+    assert_orthonormal_columns(&bound_factor_matrices(&full.0));
+    assert_nonnegative_diagonal(&bound_factor_matrices(&full.1));
+    assert_compact_factors_reconstruct_input(&wide_input, &full.0, None, &full.1);
+
+    let tall = transposed_rectangular_tensor(&wide, 2, 3);
+    let tall_input = bound_tensor(Arc::new(rule), &tall);
+    let tall_input_ref = tall_input.as_ref();
+    let tall_input = tall_input_ref.dynamic();
+    let compact = lq_compact_dyn(&mut dense, &tall_input).unwrap();
+    let full = lq_full_dyn(&mut dense, &tall_input).unwrap();
+    assert_eq!(full.0.space().space(), compact.0.space().space());
+    assert_eq!(full.1.space().space(), compact.1.space().space());
+    assert_eq!(full.0.data(), compact.0.data());
+    assert_eq!(full.1.data(), compact.1.data());
+    assert_nonnegative_diagonal(&bound_factor_matrices(&full.0));
+    assert_orthonormal_rows(&bound_factor_matrices(&full.1));
+    assert_compact_factors_reconstruct_input(&tall_input, &full.0, None, &full.1);
 }
 
 #[test]

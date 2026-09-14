@@ -1731,8 +1731,11 @@ where
     /// Sector `c` has a square `m_c x m_c` unitary `q` and an
     /// `m_c x n_c` upper-trapezoidal `r`; the intermediate bond therefore has
     /// the codomain's coupled-sector dimensions. The diagonal of `r` is real
-    /// and non-negative. See [`Self::qr_compact`] for the compact alternative,
-    /// storage and lazy-input behavior, errors, cost, and example.
+    /// and non-negative. For sector shape `m_c x n_c`, dense work is
+    /// `O(m_c² n_c)` when `m_c <= n_c`; when `m_c > n_c`, completing the
+    /// square `q` costs `O(m_c²(n_c + m_c))`. Source packing and owned factor
+    /// publication are additional costs. See [`Self::qr_compact`] for the
+    /// compact alternative, storage and lazy-input behavior, errors, and example.
     pub fn qr_full(&self) -> Result<(Self, Self), TypedFacadeError<R>> {
         <R::Mode as TypedTensorFullQrDispatch<R, D>>::qr_full(self)
     }
@@ -1749,8 +1752,12 @@ where
     /// Sector `c` has an `m_c x n_c` lower-trapezoidal `l` and a square
     /// `n_c x n_c` unitary `q`; the intermediate bond therefore has the
     /// domain's coupled-sector dimensions. The diagonal of `l` is real and
-    /// non-negative. See [`Self::lq_compact`] for the compact alternative,
-    /// storage and lazy-input behavior, errors, cost, and example.
+    /// non-negative. For sector shape `m_c x n_c`, dense work is
+    /// `O(n_c² m_c)` when `n_c <= m_c`; when `n_c > m_c`, completing the
+    /// square `q` costs `O(n_c²(m_c + n_c))`. Source packing, the sectorwise
+    /// adjoint, and owned factor publication are additional costs. See
+    /// [`Self::lq_compact`] for the compact alternative, storage and
+    /// lazy-input behavior, errors, and example.
     pub fn lq_full(&self) -> Result<(Self, Self), TypedFacadeError<R>> {
         <R::Mode as TypedTensorFullLqDispatch<R, D>>::lq_full(self)
     }
@@ -14539,10 +14546,13 @@ where
     ///
     /// # Complexity
     ///
-    /// As [`Self::qr_compact`]: sectorwise cubic. This includes the uncached
-    /// whole-logical-payload allocation for a lazy adjoint. A compact-diagonal
-    /// payload is materialized dense first (TensorKit's `DiagonalAlgorithm`
-    /// covers `qr_full!` too — same non-adoption, same #613 Group 4 deferral).
+    /// For sector shape `m_c x n_c`, dense work is `O(m_c² n_c)` when
+    /// `m_c <= n_c`, and `O(m_c²(n_c + m_c))` when completion is required.
+    /// Source packing and owned factor publication are additional costs. A
+    /// lazy adjoint also allocates its whole logical payload without publishing
+    /// it in the receiver cache. A compact-diagonal payload is materialized
+    /// dense first (TensorKit's `DiagonalAlgorithm` covers `qr_full!` too —
+    /// same non-adoption, same #613 Group 4 deferral).
     fn qr_full_multiplicity_free(&self) -> Result<(Self, Self), Error> {
         if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
             return self.materialized_tensor_uncached()?.qr_full();
@@ -14589,9 +14599,12 @@ where
     ///
     /// # Complexity
     ///
-    /// As [`Self::lq_compact`]: sectorwise cubic, including the lazy-adjoint
-    /// parent-QR route and two detached owned output payloads. A compact-diagonal
-    /// payload is materialized dense first.
+    /// For sector shape `m_c x n_c`, dense work is `O(n_c² m_c)` when
+    /// `n_c <= m_c`, and `O(n_c²(m_c + n_c))` when completion is required.
+    /// Source packing, the sectorwise adjoint, and owned factor publication are
+    /// additional costs. A lazy adjoint uses the parent full-QR route and two
+    /// detached owned output payloads. A compact-diagonal payload is
+    /// materialized dense first.
     fn lq_full_multiplicity_free(&self) -> Result<(Self, Self), Error> {
         if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
             let (q, r) = self.adjoint()?.qr_full()?;
