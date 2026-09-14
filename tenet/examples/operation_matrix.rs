@@ -1845,22 +1845,43 @@ fn lazy_transform_source<D: HarnessScalar + TensorScalar>(
         legs[..nout].iter(),
         legs[nout..].iter(),
         |trees, indices| {
+            let weighted_labels = |labels: &[Vec<i64>], factor| {
+                labels
+                    .iter()
+                    .flatten()
+                    .enumerate()
+                    .map(|(axis, value)| (axis + 1) * factor * value.unsigned_abs() as usize)
+                    .sum::<usize>()
+            };
             let label_marker = trees
-                .codomain_uncoupled()
+                .coupled()
                 .iter()
-                .chain(trees.domain_uncoupled())
-                .chain(trees.codomain_innerlines())
-                .chain(trees.domain_innerlines())
-                .flat_map(|label| label.iter())
-                .map(|value| value.unsigned_abs() as usize)
-                .sum::<usize>();
+                .enumerate()
+                .map(|(axis, value)| (axis + 1) * 97 * value.unsigned_abs() as usize)
+                .sum::<usize>()
+                + weighted_labels(trees.codomain_uncoupled(), 13)
+                + weighted_labels(trees.domain_uncoupled(), 37)
+                + weighted_labels(trees.codomain_innerlines(), 53)
+                + weighted_labels(trees.domain_innerlines(), 71);
             let vertex_marker = trees
                 .codomain_vertices()
                 .iter()
-                .chain(trees.domain_vertices())
-                .map(|vertex| vertex.get())
+                .enumerate()
+                .map(|(axis, vertex)| (axis + 1) * 19 * vertex.get())
+                .chain(
+                    trees
+                        .domain_vertices()
+                        .iter()
+                        .enumerate()
+                        .map(|(axis, vertex)| (axis + 1) * 43 * vertex.get()),
+                )
                 .sum::<usize>();
-            let marker = 11 * label_marker + 7 * vertex_marker + indices.iter().sum::<usize>();
+            let index_marker = indices
+                .iter()
+                .enumerate()
+                .map(|(axis, &index)| (axis + 2) * (axis + 5) * index)
+                .sum::<usize>();
+            let marker = label_marker + vertex_marker + index_marker;
             D::from_parts(1.0 + marker as f64 / 17.0, 0.25 + marker as f64 / 29.0)
         },
     )?)
@@ -1870,17 +1891,17 @@ fn lazy_transform_source<D: HarnessScalar + TensorScalar>(
 fn apply_lazy_transform<D: HarnessScalar + TensorScalar>(
     source: &TensorMap<tenet::typed::SUNFusionRule, D>,
     operation: &str,
-    rank: usize,
 ) -> Result<TensorMap<tenet::typed::SUNFusionRule, D>, Error> {
+    let rank = source.rank();
+    let nout = source.codomain().len();
     match (operation, rank) {
         ("permute", 3) => source.permute(&[1], &[2, 0]),
         ("braid", 3) => source.braid(&[1], &[2, 0], &[5, 2, 7]),
         ("transpose", _) => source.transpose(),
         ("transpose_axes", _) => {
-            let nout = rank - 1;
             let mut planar = (0..nout).chain((nout..rank).rev()).collect::<Vec<_>>();
             planar.rotate_left(1);
-            let target_nout = if rank == 4 { 2 } else { nout };
+            let target_nout = rank - nout;
             let codomain = planar[..target_nout].to_vec();
             let domain = planar[target_nout..]
                 .iter()
@@ -1889,10 +1910,10 @@ fn apply_lazy_transform<D: HarnessScalar + TensorScalar>(
                 .collect::<Vec<_>>();
             source.transpose_axes(&codomain, &domain)
         }
-        ("repartition", 3) => source.repartition(1),
+        ("repartition", 3) => source.repartition(rank - nout),
         ("permute", 4) => source.permute(&[2, 0], &[3, 1]),
         ("braid", 4) => source.braid(&[2, 0], &[3, 1], &[7, 1, 6, 3]),
-        ("repartition", 4) => source.repartition(2),
+        ("repartition", 4) => source.repartition(rank - nout),
         _ => unreachable!("fixed lazy transform table"),
     }
 }
@@ -1934,21 +1955,27 @@ fn preflight_lazy_transform<D: HarnessScalar + TensorScalar>(
     extent: usize,
 ) -> Result<(usize, usize, usize), Box<dyn std::error::Error>> {
     use tenet::typed::SUNFusionRule;
-    let runtime = benchmark_runtime()?;
-    let provider = Arc::new(SUNFusionRule::new(n)?);
-    let source = lazy_transform_source::<D>(&runtime, provider, label, rank, extent)?;
-    let lazy = source.adjoint()?;
-    black_box(lazy.data());
-    let materialized = TensorMap::from_block_fn(
-        &runtime,
-        lazy.codomain().iter(),
-        lazy.domain().iter(),
+    let oracle_runtime = benchmark_runtime()?;
+    let oracle_provider = Arc::new(SUNFusionRule::new(n)?);
+    let oracle_parent = lazy_transform_source::<D>(
+        &oracle_runtime,
+        oracle_provider,
+        label.clone(),
+        rank,
+        extent,
+    )?;
+    let oracle_lazy = oracle_parent.adjoint()?;
+    let oracle_data = oracle_lazy.data();
+    let expected_source = TensorMap::from_block_fn(
+        &oracle_runtime,
+        oracle_lazy.codomain().iter(),
+        oracle_lazy.domain().iter(),
         |trees, indices| {
-            let index = (0..lazy.block_count())
-                .find(|&index| lazy.block_fusion_trees(index).unwrap() == trees.clone())
-                .expect("materialized logical block exists");
-            let block = lazy.block(index).unwrap();
-            lazy.data()[block.offset()
+            let index = (0..oracle_lazy.block_count())
+                .find(|&index| oracle_lazy.block_fusion_trees(index).unwrap() == trees.clone())
+                .expect("oracle logical block exists");
+            let block = oracle_lazy.block(index).unwrap();
+            oracle_data[block.offset()
                 + indices
                     .iter()
                     .zip(block.strides())
@@ -1956,7 +1983,11 @@ fn preflight_lazy_transform<D: HarnessScalar + TensorScalar>(
                     .sum::<usize>()]
         },
     )?;
-    assert!(std::ptr::eq(materialized.provider(), lazy.provider()));
+
+    let runtime = benchmark_runtime()?;
+    let provider = Arc::new(SUNFusionRule::new(n)?);
+    let source = lazy_transform_source::<D>(&runtime, provider, label, rank, extent)?;
+    let lazy = source.adjoint()?;
     for operation in [
         "permute",
         "braid",
@@ -1964,8 +1995,8 @@ fn preflight_lazy_transform<D: HarnessScalar + TensorScalar>(
         "transpose_axes",
         "repartition",
     ] {
-        let actual = apply_lazy_transform(&lazy, operation, rank)?;
-        let expected = apply_lazy_transform(&materialized, operation, rank)?;
+        let actual = apply_lazy_transform(&lazy, operation)?;
+        let expected = apply_lazy_transform(&expected_source, operation)?;
         assert!(std::ptr::eq(actual.provider(), source.provider()));
         assert_lazy_transform_same(&actual, &expected)?;
     }
@@ -2034,7 +2065,7 @@ fn run_lazy_transform_row<D: HarnessScalar + TensorScalar>(
                 &source
             };
             alternate = !alternate;
-            let output = apply_lazy_transform(input, operation, rank)?;
+            let output = apply_lazy_transform(input, operation)?;
             black_box(output.data().first());
             drop(black_box(output));
             Ok::<(), Error>(())
@@ -2052,7 +2083,7 @@ fn run_lazy_tree_transform(min_time: Duration) -> Result<(), Box<dyn std::error:
         println!("# LazyTreeTransform: destination rows excluded: checked-Generic lazy transforms expose the public owned-result form only");
         return Ok(());
     }
-    println!("# LazyTreeTransform: public_owned_output transform_and_first_data_observation_and_drop_inside_timer oracle=separate_runtime_materialize_first_then_same_public_operation extents=1,3 direct_control=true");
+    println!("# LazyTreeTransform: public_owned_output full_output_and_first_data_observation_and_drop_inside_timer oracle=separate_runtime_owned_logical_fixture extents=1,3 direct_source_split=rank-1 lazy_source_split=1 planar_target_split=opposite direct_control=true peak_and_copy_counters=NA");
     for (symmetry, n, label, rank) in [
         ("SU3[1;1]-rank3", 3, vec![1, 1], 3),
         ("SU4[1;0;1]-rank4", 4, vec![1, 0, 1], 4),

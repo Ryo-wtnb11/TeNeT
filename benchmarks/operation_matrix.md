@@ -99,22 +99,29 @@ real payloads.
 
 The diagnostic measures five nonidentity public operations (`permute`,
 `braid`, `transpose`, `transpose_axes`, and `repartition`) on pre-built lazy
-adjoints, alongside direct-input controls. Fixed-shape and alternating
-preconstructed-extent rows use separate fresh runtimes. Every timed call owns
-the returned transform, observes its first data element, and drops the result
-inside the measured closure. `first_after_setup` therefore means the first
-transform on that unwarmed runtime after fixture construction; it is not a
-process-cold claim. The three-process wrapper remains the repetition authority.
+adjoints, alongside direct-input controls. The direct source split is rank
+minus one and the lazy-adjoint source split is one; `transpose_axes` and
+`repartition` target the opposite split, respectively one and rank minus one.
+Fixed-shape and alternating preconstructed-extent rows use separate fresh
+runtimes. Every timed call owns the complete returned transform, observes its
+first data element, and drops it inside the measured closure.
+`first_after_setup` therefore means the first transform on that runtime's fresh
+tree-transform store after fixture construction; process-global structural
+metadata may already be warm. The three-process wrapper remains the repetition
+authority.
 The selector accepts the runner's `owned` form; selecting `destination` emits
 an explicit exclusion because this checked-Generic path has no matching public
 destination method. Phase names include the fixed extent or alternating extent
 pair, so every raw sample has an unambiguous grouping key.
 
-Before measurement, a separate runtime materializes the logical adjoint and
-applies the same public operation as an oracle. It compares complete typed
-spaces, block metadata, fusion-tree keys, provider ownership, and values. This
-harness oracle guards measurement setup; the independent production tests own
-the semantic correctness contract.
+Before measurement, a separate oracle runtime materializes the logical adjoint
+and copies it through `from_block_fn` into a true owned logical fixture. The
+timed source uses another runtime and remains cold. Applying the same public
+operation to both compares complete typed spaces, block metadata, fusion-tree
+keys, provider ownership, and values. This harness oracle guards measurement
+setup; the independent production tests own the semantic correctness contract.
+Peak memory and copy-pass counters unavailable to this harness are reported as
+`NA`.
 `OP_MATRIX_FORM` similarly selects `owned` or `destination`.
 `OP_MATRIX_PROFILE_PAUSE_MS` pauses after that row's warm phase so an external
 profiler can inspect the live process; it is outside every reported timer.
