@@ -8070,7 +8070,15 @@ fn sector_matricizations_generic<D>(
 where
     D: FactorScalar,
 {
+    #[derive(Clone, Copy, Default)]
+    struct TreePlacement {
+        row_offset: Option<usize>,
+        col_offset: Option<usize>,
+    }
+
     let mut matricizations: Vec<SectorMatricization<D>> = Vec::new();
+    let mut matrix_indices = HashMap::new();
+    let mut tree_placements = HashMap::new();
 
     for index in 0..structure.block_count() {
         let block = structure
@@ -8085,12 +8093,10 @@ where
         let sector = coupled_of_generic(key.codomain_tree());
         let row_dim: usize = block.shape()[..nout].iter().product();
         let col_dim: usize = block.shape()[nout..].iter().product();
-        let matrix = match matricizations
-            .iter_mut()
-            .find(|matrix| matrix.sector == sector)
-        {
-            Some(matrix) => matrix,
+        let matrix_index = match matrix_indices.get(&sector).copied() {
+            Some(matrix_index) => matrix_index,
             None => {
+                let matrix_index = matricizations.len();
                 matricizations.push(SectorMatricization::<D> {
                     sector,
                     rows: 0,
@@ -8099,32 +8105,36 @@ where
                     col_trees: Vec::new(),
                     data: Vec::new(),
                 });
-                matricizations.last_mut().expect("just pushed")
+                matrix_indices.insert(sector, matrix_index);
+                matrix_index
             }
         };
-        if !matrix
-            .row_trees
-            .iter()
-            .any(|(tree, _, _)| tree == key.codomain_tree())
-        {
+        let matrix = &mut matricizations[matrix_index];
+        let row_placement = tree_placements
+            .entry((matrix_index, key.codomain_tree()))
+            .or_insert_with(TreePlacement::default);
+        if row_placement.row_offset.is_none() {
+            let offset = matrix.rows;
             matrix.row_trees.push((
                 key.codomain_tree().clone(),
-                matrix.rows,
+                offset,
                 block.shape()[..nout].to_vec(),
             ));
             matrix.rows += row_dim;
+            row_placement.row_offset = Some(offset);
         }
-        if !matrix
-            .col_trees
-            .iter()
-            .any(|(tree, _, _)| tree == key.domain_tree())
-        {
+        let col_placement = tree_placements
+            .entry((matrix_index, key.domain_tree()))
+            .or_insert_with(TreePlacement::default);
+        if col_placement.col_offset.is_none() {
+            let offset = matrix.cols;
             matrix.col_trees.push((
                 key.domain_tree().clone(),
-                matrix.cols,
+                offset,
                 block.shape()[nout..].to_vec(),
             ));
             matrix.cols += col_dim;
+            col_placement.col_offset = Some(offset);
         }
     }
     for matrix in &mut matricizations {
@@ -8139,22 +8149,18 @@ where
             continue;
         };
         let sector = coupled_of_generic(key.codomain_tree());
-        let matrix = matricizations
-            .iter_mut()
-            .find(|matrix| matrix.sector == sector)
+        let matrix_index = *matrix_indices
+            .get(&sector)
             .expect("matricization registered in first pass");
-        let row_offset = matrix
-            .row_trees
-            .iter()
-            .find(|(tree, _, _)| tree == key.codomain_tree())
-            .map(|(_, offset, _)| *offset)
+        let row_offset = tree_placements
+            .get(&(matrix_index, key.codomain_tree()))
+            .and_then(|placement| placement.row_offset)
             .expect("row tree registered in first pass");
-        let col_offset = matrix
-            .col_trees
-            .iter()
-            .find(|(tree, _, _)| tree == key.domain_tree())
-            .map(|(_, offset, _)| *offset)
+        let col_offset = tree_placements
+            .get(&(matrix_index, key.domain_tree()))
+            .and_then(|placement| placement.col_offset)
             .expect("column tree registered in first pass");
+        let matrix = &mut matricizations[matrix_index];
 
         let shape = block.shape();
         let strides = block.strides();
@@ -11530,6 +11536,105 @@ mod sector_matricization_tests {
                 index: 0
             })
         ));
+    }
+
+    #[test]
+    fn generic_sector_matricizations_keep_tree_offsets_matrix_local() {
+        // Raw block structures can pair trees whose coupled sectors differ. A
+        // domain tree shared by two codomain-selected matrices therefore has
+        // an independent column offset in each matrix.
+        let sector_one = generic_pair(1, 1, 1);
+        let sector_zero = generic_pair(0, 1, 1);
+        let row_one = sector_one.codomain_tree().clone();
+        let row_zero = sector_zero.codomain_tree().clone();
+        let shared_domain = sector_one.domain_tree().clone();
+        let other_domain = sector_zero.domain_tree().clone();
+        let structure = BlockStructure::from_blocks_with_rank(
+            4,
+            vec![
+                BlockSpec::with_key(
+                    FusionTreePairKey::pair(row_one.clone(), other_domain.clone()).into(),
+                    vec![1, 1, 1, 1],
+                    vec![1, 1, 1, 1],
+                    1,
+                )
+                .unwrap(),
+                BlockSpec::with_key(
+                    FusionTreePairKey::pair(row_zero.clone(), shared_domain.clone()).into(),
+                    vec![1, 1, 1, 2],
+                    vec![1, 1, 1, 1],
+                    4,
+                )
+                .unwrap(),
+                BlockSpec::with_key(
+                    FusionTreePairKey::pair(row_one.clone(), shared_domain.clone()).into(),
+                    vec![1, 1, 1, 2],
+                    vec![1, 1, 1, 1],
+                    8,
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+        let mut data = vec![0.0; structure.required_len().unwrap()];
+        data[1] = 11.0;
+        data[4..6].copy_from_slice(&[21.0, 22.0]);
+        data[8..10].copy_from_slice(&[31.0, 32.0]);
+
+        let matrices = sector_matricizations_generic(&structure, &data, 2).unwrap();
+
+        assert_eq!(matrices.len(), 2);
+        assert_eq!(matrices[0].sector, SectorId::new(1));
+        assert_eq!((matrices[0].rows, matrices[0].cols), (1, 3));
+        assert_eq!(matrices[0].data, [11.0, 31.0, 32.0]);
+        assert_eq!(
+            matrices[0]
+                .col_trees
+                .iter()
+                .map(|(tree, offset, _)| (tree, *offset))
+                .collect::<Vec<_>>(),
+            [(&other_domain, 0), (&shared_domain, 1)]
+        );
+        assert_eq!(matrices[1].sector, SectorId::new(0));
+        assert_eq!((matrices[1].rows, matrices[1].cols), (1, 2));
+        assert_eq!(matrices[1].data, [21.0, 22.0]);
+        assert_eq!(matrices[1].col_trees[0].0, shared_domain);
+        assert_eq!(matrices[1].col_trees[0].1, 0);
+    }
+
+    #[test]
+    fn generic_sector_matricizations_report_late_opaque_key_without_mutating_source() {
+        let structure = BlockStructure::from_blocks_with_rank(
+            4,
+            vec![
+                BlockSpec::with_key(
+                    generic_pair(1, 1, 1).into(),
+                    vec![1, 1, 1, 1],
+                    vec![1, 1, 1, 1],
+                    1,
+                )
+                .unwrap(),
+                BlockSpec::with_key(
+                    BlockKey::opaque([7, 8, 9, 10]),
+                    vec![1, 1, 1, 1],
+                    vec![1, 1, 1, 1],
+                    3,
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+        let data = vec![0.0, 5.0, 0.0, 9.0];
+        let snapshot = data.clone();
+
+        assert!(matches!(
+            sector_matricizations_generic::<f64>(&structure, &data, 2),
+            Err(OperationError::ExpectedFusionTreeBlock {
+                tensor: "tsvd",
+                index: 1
+            })
+        ));
+        assert_eq!(data, snapshot);
     }
 
     fn z2_single_sector_matrix(
