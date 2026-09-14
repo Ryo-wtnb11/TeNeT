@@ -13,7 +13,7 @@ use tenet_core::{
     TensorStorage, WeakHomSpaceId,
 };
 
-use crate::cache::{OperationCachePolicy, TreeTransformStructureCacheKey};
+use crate::cache::{BlockStructureCacheKey, OperationCachePolicy, TreeTransformStructureCacheKey};
 use crate::{OperationError, TreeTransformStructure, TreeTransformStructureCache};
 
 use super::operation::{TreeTransformOperation, TreeTransformRuleCacheKey};
@@ -51,6 +51,22 @@ struct TreeTransformStructureOperationKey<RuleKey> {
 struct RuntimeTreeTransformOperationKey {
     rule: RuleIdentity,
     operation: TreeTransformOperation,
+    /// Logical source authority when replay reads a distinct physical layout.
+    /// Direct entries keep this empty because the outer source key already
+    /// retains the same structure.
+    logical_src: Option<BlockStructureCacheKey>,
+}
+
+impl RuntimeTreeTransformOperationKey {
+    fn same_content(&self, other: &Self) -> bool {
+        self.rule == other.rule
+            && self.operation == other.operation
+            && match (&self.logical_src, &other.logical_src) {
+                (Some(left), Some(right)) => left.same_content(right),
+                (None, None) => true,
+                _ => false,
+            }
+    }
 }
 
 type RuntimeTreeTransformKey = TreeTransformStructureCacheKey<RuntimeTreeTransformOperationKey>;
@@ -388,6 +404,15 @@ impl<T> RuntimeTreeTransformStore<T> {
             .saturating_add(key.plan().operation.charged_retained_bytes())
             .saturating_add(structure.charged_payload_bytes())
             .saturating_add(dependent_structure_bytes)
+            .saturating_add(
+                key.plan()
+                    .logical_src
+                    .as_ref()
+                    .filter(|logical| {
+                        logical.id() != key.src().id() && logical.id() != key.dst().id()
+                    })
+                    .map_or(0, BlockStructureCacheKey::charged_retained_bytes),
+            )
             .saturating_add(ARC_CONTROL_BYTES)
             .saturating_add(RUNTIME_TREE_TRANSFORM_LRU_NODE_ALLOWANCE)
     }
@@ -483,15 +508,21 @@ impl<T> RuntimeTreeTransformStore<T> {
         rule: RuleIdentity,
         operation: &TreeTransformOperation,
         dst_structure: &BlockStructure,
-        src_structure: &BlockStructure,
+        logical_src_structure: &BlockStructure,
+        physical_src_structure: &BlockStructure,
+        storage_conjugate: bool,
     ) -> Result<RuntimeTreeTransformLookup<T>, OperationError> {
-        let key = TreeTransformStructureCacheKey::from_structures(
+        let key = TreeTransformStructureCacheKey::from_structures_with_storage_conjugation(
             RuntimeTreeTransformOperationKey {
                 rule,
                 operation: operation.clone(),
+                logical_src: storage_conjugate
+                    .then(|| BlockStructureCacheKey::from_structure(logical_src_structure))
+                    .transpose()?,
             },
             dst_structure,
-            src_structure,
+            physical_src_structure,
+            storage_conjugate,
         )?;
         let mut state = self
             .state
@@ -504,7 +535,7 @@ impl<T> RuntimeTreeTransformStore<T> {
             // previews deliberately have no intern identity before commit, so
             // a bounded semantic scan avoids a second key/index hierarchy.
             state.entries.iter().find_map(|(candidate, _)| {
-                (candidate.plan() == key.plan()
+                (candidate.plan().same_content(key.plan())
                     && candidate.storage_conjugate() == key.storage_conjugate()
                     && candidate.src().same_content(key.src())
                     && candidate.dst().same_content(key.dst()))
@@ -531,17 +562,23 @@ impl<T> RuntimeTreeTransformStore<T> {
         rule: RuleIdentity,
         operation: &TreeTransformOperation,
         dst_structure: &BlockStructure,
-        src_structure: &BlockStructure,
+        logical_src_structure: &BlockStructure,
+        physical_src_structure: &BlockStructure,
+        storage_conjugate: bool,
         structure: Arc<TreeTransformStructure<T>>,
         generation: u64,
     ) -> Result<(), OperationError> {
-        let key = TreeTransformStructureCacheKey::from_structures(
+        let key = TreeTransformStructureCacheKey::from_structures_with_storage_conjugation(
             RuntimeTreeTransformOperationKey {
                 rule,
                 operation: operation.clone(),
+                logical_src: storage_conjugate
+                    .then(|| BlockStructureCacheKey::from_structure(logical_src_structure))
+                    .transpose()?,
             },
             dst_structure,
-            src_structure,
+            physical_src_structure,
+            storage_conjugate,
         )?;
         self.admit(key, structure, generation);
         Ok(())
@@ -595,6 +632,7 @@ impl<T> RuntimeTreeTransformStore<T> {
             RuntimeTreeTransformOperationKey {
                 rule,
                 operation: operation.clone(),
+                logical_src: None,
             },
             dst_structure,
             src_structure,
@@ -918,6 +956,7 @@ where
                 RuntimeTreeTransformOperationKey {
                     rule: rule.rule_identity(),
                     operation: operation.clone(),
+                    logical_src: None,
                 },
                 dst_structure,
                 src_structure,
@@ -1312,6 +1351,7 @@ mod runtime_store_tests {
             RuntimeTreeTransformOperationKey {
                 rule,
                 operation: TreeTransformOperation::permute([tag], []),
+                logical_src: None,
             },
             &structure,
             &structure,
@@ -1344,6 +1384,7 @@ mod runtime_store_tests {
             RuntimeTreeTransformOperationKey {
                 rule: RuleIdentity::of_type::<TestRuleIdentity>(),
                 operation: TreeTransformOperation::permute([tag], []),
+                logical_src: None,
             },
             &structure,
             &structure,
@@ -1379,12 +1420,57 @@ mod runtime_store_tests {
             RuntimeTreeTransformOperationKey {
                 rule: RuleIdentity::of_type::<TestRuleIdentity>(),
                 operation: TreeTransformOperation::permute([0], []),
+                logical_src: None,
             },
             &dst,
             &src,
         )
         .unwrap();
         (key, compiled, dst, src)
+    }
+
+    fn oriented_pair_fixture(
+        logical_tag: usize,
+        dst_tag: usize,
+        physical_tag: usize,
+    ) -> (
+        RuntimeTreeTransformKey,
+        Arc<TreeTransformStructure<f64>>,
+        BlockStructure,
+        BlockStructure,
+        BlockStructure,
+    ) {
+        let structure = |tag| {
+            BlockStructure::from_blocks_with_rank(
+                1,
+                vec![BlockSpec::with_key(BlockKey::ordinal(tag), vec![1], vec![1], 0).unwrap()],
+            )
+            .unwrap()
+        };
+        let logical = structure(logical_tag);
+        let dst = structure(dst_tag);
+        let physical = structure(physical_tag);
+        let compiled = Arc::new(
+            TreeTransformStructure::compile_structures_with_storage_conjugation(
+                &dst,
+                &physical,
+                &[TreeTransformBlockSpec::single(0, 0, 1.0)],
+                true,
+            )
+            .unwrap(),
+        );
+        let key = TreeTransformStructureCacheKey::from_structures_with_storage_conjugation(
+            RuntimeTreeTransformOperationKey {
+                rule: RuleIdentity::of_type::<TestRuleIdentity>(),
+                operation: TreeTransformOperation::permute([0], []),
+                logical_src: Some(super::BlockStructureCacheKey::from_structure(&logical).unwrap()),
+            },
+            &dst,
+            &physical,
+            true,
+        )
+        .unwrap();
+        (key, compiled, logical, dst, physical)
     }
 
     #[test]
@@ -1695,6 +1781,57 @@ mod runtime_store_tests {
             same_charge.saturating_add(distinct_key.src().charged_retained_bytes())
         );
 
+        let (shared_logical_key, shared_logical_compiled, _, _, _) =
+            oriented_pair_fixture(14, 14, 14);
+        let (distinct_logical_key, distinct_logical_compiled, logical, _, _) =
+            oriented_pair_fixture(13, 14, 14);
+        let distinct_logical_charge = RuntimeTreeTransformStore::<f64>::charged_entry_bytes(
+            &distinct_logical_key,
+            &distinct_logical_compiled,
+        );
+        assert_eq!(
+            distinct_logical_charge,
+            RuntimeTreeTransformStore::<f64>::charged_entry_bytes(
+                &shared_logical_key,
+                &shared_logical_compiled,
+            )
+            .saturating_add(
+                super::BlockStructureCacheKey::from_structure(&logical)
+                    .unwrap()
+                    .charged_retained_bytes(),
+            )
+        );
+        let logical_content = logical.content_key();
+        let logical_weak = Arc::downgrade(&logical_content);
+        drop(logical_content);
+        drop(logical);
+        let logical_store =
+            RuntimeTreeTransformStore::with_limits(1, distinct_logical_charge, usize::MAX);
+        logical_store
+            .get_or_compile(distinct_logical_key, || {
+                Ok::<_, Infallible>(distinct_logical_compiled)
+            })
+            .unwrap();
+        assert!(logical_weak.upgrade().is_some());
+        logical_store.clear();
+        assert!(logical_weak.upgrade().is_none());
+
+        let (oversized_key, oversized_compiled, _, _, _) = oriented_pair_fixture(15, 16, 16);
+        let oversized = RuntimeTreeTransformStore::with_limits(
+            1,
+            RuntimeTreeTransformStore::<f64>::charged_entry_bytes(
+                &oversized_key,
+                &oversized_compiled,
+            )
+            .saturating_sub(1),
+            usize::MAX,
+        );
+        oversized
+            .get_or_compile(oversized_key, || Ok::<_, Infallible>(oversized_compiled))
+            .unwrap();
+        assert_eq!(oversized.info().entries(), 0);
+        assert_eq!(oversized.info().admission_bypasses(), 1);
+
         let budgeted = RuntimeTreeTransformStore::with_limits(
             2,
             distinct_charge.saturating_sub(1),
@@ -1972,11 +2109,104 @@ mod runtime_store_tests {
                 &TreeTransformOperation::permute([31], []),
                 &rebuilt,
                 &rebuilt,
+                &rebuilt,
+                false,
             )
             .unwrap();
         assert!(cached.is_some());
         assert_eq!(store.info().hits(), 1);
         assert_eq!(store.info().misses(), 1);
+    }
+
+    #[test]
+    fn checked_generic_oriented_key_tracks_logical_content_and_orientation() {
+        let store = RuntimeTreeTransformStore::default();
+        let (key, structure, logical, dst, physical) = oriented_pair_fixture(32, 33, 34);
+        store
+            .get_or_compile(key, || Ok::<_, Infallible>(structure))
+            .unwrap();
+
+        let lookup = |logical: &BlockStructure, conjugate| {
+            store
+                .lookup_checked_generic(
+                    RuleIdentity::of_type::<TestRuleIdentity>(),
+                    &TreeTransformOperation::permute([0], []),
+                    &dst,
+                    logical,
+                    &physical,
+                    conjugate,
+                )
+                .unwrap()
+                .0
+                .is_some()
+        };
+        assert!(lookup(&logical, true));
+        assert!(!lookup(&logical, false));
+
+        let changed = BlockStructure::from_blocks_with_rank(
+            1,
+            vec![BlockSpec::with_key(BlockKey::ordinal(35), vec![1], vec![1], 0).unwrap()],
+        )
+        .unwrap();
+        assert!(!lookup(&changed, true));
+        assert!(lookup(&logical, true));
+    }
+
+    #[test]
+    fn checked_generic_oriented_lookup_survives_all_structure_interner_resets() {
+        let _guard = crate::test_support::CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let store = RuntimeTreeTransformStore::default();
+        let (key, structure, logical, dst, physical) = oriented_pair_fixture(36, 37, 38);
+        let original_ids = [
+            logical.content_id(),
+            dst.content_id(),
+            physical.content_id(),
+        ];
+        store
+            .get_or_compile(key, || Ok::<_, Infallible>(structure))
+            .unwrap();
+
+        tenet_core::reset_core_intern_tables();
+        let rebuild = |tag| {
+            BlockStructure::from_blocks_with_rank(
+                1,
+                vec![BlockSpec::with_key(BlockKey::ordinal(tag), vec![1], vec![1], 0).unwrap()],
+            )
+            .unwrap()
+        };
+        let rebuilt_logical = rebuild(36);
+        let rebuilt_dst = rebuild(37);
+        let rebuilt_physical = rebuild(38);
+        assert_ne!(rebuilt_logical.content_id(), original_ids[0]);
+        assert_ne!(rebuilt_dst.content_id(), original_ids[1]);
+        assert_ne!(rebuilt_physical.content_id(), original_ids[2]);
+
+        let (cached, _) = store
+            .lookup_checked_generic(
+                RuleIdentity::of_type::<TestRuleIdentity>(),
+                &TreeTransformOperation::permute([0], []),
+                &rebuilt_dst,
+                &rebuilt_logical,
+                &rebuilt_physical,
+                true,
+            )
+            .unwrap();
+        assert!(cached.is_some());
+
+        let changed_logical = rebuild(39);
+        let (cached, _) = store
+            .lookup_checked_generic(
+                RuleIdentity::of_type::<TestRuleIdentity>(),
+                &TreeTransformOperation::permute([0], []),
+                &rebuilt_dst,
+                &changed_logical,
+                &rebuilt_physical,
+                true,
+            )
+            .unwrap();
+        assert!(cached.is_none());
     }
 }
 
