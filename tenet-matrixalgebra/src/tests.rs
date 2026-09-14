@@ -7522,8 +7522,7 @@ fn full_qr_and_lq_use_original_input_only_when_economy_q_is_full() {
     let mut qr_dense = FullQrInputSpy::default();
     let (q, r) = qr_full(&mut qr_dense, &input.as_ref()).unwrap();
     assert_eq!(qr_dense.observations.len(), matrices.len());
-    for (observation, (_, rows, cols, matrix)) in
-        qr_dense.observations.iter().zip(matrices.iter())
+    for (observation, (_, rows, cols, matrix)) in qr_dense.observations.iter().zip(matrices.iter())
     {
         let matrix = matrix
             .iter()
@@ -7538,8 +7537,7 @@ fn full_qr_and_lq_use_original_input_only_when_economy_q_is_full() {
     let mut lq_dense = FullQrInputSpy::default();
     let (l, q) = lq_full(&mut lq_dense, &input.as_ref()).unwrap();
     assert_eq!(lq_dense.observations.len(), matrices.len());
-    for (observation, (_, rows, cols, matrix)) in
-        lq_dense.observations.iter().zip(matrices.iter())
+    for (observation, (_, rows, cols, matrix)) in lq_dense.observations.iter().zip(matrices.iter())
     {
         let matrix = matrix
             .iter()
@@ -7563,9 +7561,8 @@ fn checked_fixture_matrices(
             let mut matrix = vec![Complex64::new(0.0, 0.0); rows * cols];
             for col in 0..cols {
                 for row in 0..rows {
-                    matrix[row + rows * col] = data[block.offset()
-                        + row * block.strides()[0]
-                        + col * block.strides()[1]];
+                    matrix[row + rows * col] =
+                        data[block.offset() + row * block.strides()[0] + col * block.strides()[1]];
                 }
             }
             (rows, cols, matrix)
@@ -7587,9 +7584,7 @@ fn assert_checked_full_qr_lq_inputs(
 
     let mut qr_dense = FullQrInputSpy::default();
     let (q, r) = qr_full_dyn_checked_generic(&mut qr_dense, &input).unwrap();
-    for (observation, (rows, cols, matrix)) in
-        qr_dense.observations.iter().zip(matrices.iter())
-    {
+    for (observation, (rows, cols, matrix)) in qr_dense.observations.iter().zip(matrices.iter()) {
         assert_full_qr_observation(observation, matrix, *rows, *cols);
     }
     assert_compact_factors_reconstruct_input(&input, &q, None, &r);
@@ -7598,9 +7593,7 @@ fn assert_checked_full_qr_lq_inputs(
 
     let mut lq_dense = FullQrInputSpy::default();
     let (l, q) = lq_full_dyn_checked_generic(&mut lq_dense, &input).unwrap();
-    for (observation, (rows, cols, matrix)) in
-        lq_dense.observations.iter().zip(matrices.iter())
-    {
+    for (observation, (rows, cols, matrix)) in lq_dense.observations.iter().zip(matrices.iter()) {
         let adjoint = adjoint_complex(matrix, *rows, *cols);
         assert_full_qr_observation(observation, &adjoint, *cols, *rows);
     }
@@ -7625,11 +7618,9 @@ fn full_and_compact_qr_lq_match_for_rank_deficient_no_completion_shapes() {
         .unwrap()
         .as_ref()
         .clone();
-    let wide = TensorMap::from_vec_with_fusion_space(
-        vec![1.0, 2.0, 2.0, 4.0, 3.0, 6.0],
-        wide_space,
-    )
-    .unwrap();
+    let wide =
+        TensorMap::from_vec_with_fusion_space(vec![1.0, 2.0, 2.0, 4.0, 3.0, 6.0], wide_space)
+            .unwrap();
     let wide_input = bound_tensor(Arc::new(rule), &wide);
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
     let compact = qr_compact(&mut dense, &wide_input.as_ref()).unwrap();
@@ -7640,10 +7631,7 @@ fn full_and_compact_qr_lq_match_for_rank_deficient_no_completion_shapes() {
     assert_eq!(full.1.data(), compact.1.data());
     assert_orthonormal_columns(&dense_sector_matrices(1, &full.0));
     assert_nonnegative_diagonal(&dense_sector_matrices(1, &full.1));
-    assert_svd_blocks_match(
-        &wide,
-        &contract_pair(&rule, &wide, &full.0, &full.1),
-    );
+    assert_svd_blocks_match(&wide, &contract_pair(&rule, &wide, &full.0, &full.1));
 
     let tall = transposed_rectangular_tensor(&wide, 2, 3);
     let tall_input = bound_tensor(Arc::new(rule), &tall);
@@ -7654,10 +7642,7 @@ fn full_and_compact_qr_lq_match_for_rank_deficient_no_completion_shapes() {
     assert_eq!(full.0.data(), compact.0.data());
     assert_eq!(full.1.data(), compact.1.data());
     assert_nonnegative_diagonal(&dense_sector_matrices(1, &full.0));
-    assert_svd_blocks_match(
-        &tall,
-        &contract_pair(&rule, &tall, &full.0, &full.1),
-    );
+    assert_svd_blocks_match(&tall, &contract_pair(&rule, &tall, &full.0, &full.1));
 }
 
 #[test]

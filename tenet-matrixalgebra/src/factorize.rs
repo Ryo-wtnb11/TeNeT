@@ -4192,8 +4192,7 @@ where
     let mut r = vec![D::zero(); rows * cols];
     if rows <= cols {
         qr_into_workspace(
-            dense, input, rows, cols, rows, &mut q, rows, rows, rows, &mut r, rows, cols,
-            rows,
+            dense, input, rows, cols, rows, &mut q, rows, rows, rows, &mut r, rows, cols, rows,
         )?;
     } else {
         // Full-Q completion still requires augmentation; #1140 A3 owns a
