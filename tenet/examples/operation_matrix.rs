@@ -1302,7 +1302,8 @@ where
     assert_eq!(v.block_count(), sector_count);
     for block_index in 0..v.block_count() {
         let v_block = v.block(block_index)?;
-        let sector = v.block_fusion_trees(block_index)?.coupled();
+        let v_trees = v.block_fusion_trees(block_index)?;
+        let sector = v_trees.coupled();
         let source_block = (0..source.block_count())
             .find(|&index| source.block_fusion_trees(index).unwrap().coupled() == sector)
             .map(|index| source.block(index).unwrap())
@@ -1576,8 +1577,8 @@ where
             Ok::<_, tenet::typed::Error>(())
         },
     )?;
-    assert_eq!(source.data(), original);
-    assert_eq!(changed_source.data(), changed_original);
+    assert_checked_source_unchanged(source.data(), &original);
+    assert_checked_source_unchanged(changed_source.data(), &changed_original);
     Ok(())
 }
 
