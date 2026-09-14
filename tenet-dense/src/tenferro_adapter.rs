@@ -1,6 +1,6 @@
 use num_complex::{Complex32, Complex64};
 
-use crate::executor::batch_offset;
+use crate::executor::{batch_offset, strided_batch_run_len};
 use crate::layout::strides_to_isize;
 use crate::{
     DenseBackend, DenseDotConfig, DenseError, DenseExecutor, DenseGemmBatchJob, DenseRead,
@@ -37,6 +37,36 @@ use tenferro_tensor::{
 /// plan-time cost-model constant (peer of the contraction-order cost model),
 /// not a runtime kernel knob.
 const STRIDED_RUN_MIN: usize = 4;
+
+#[derive(Clone, Copy)]
+struct StridedBatchRunLayout {
+    lhs_shape: [usize; 3],
+    lhs_strides: [usize; 3],
+    lhs_job_offset: usize,
+    rhs_shape: [usize; 3],
+    rhs_strides: [usize; 3],
+    rhs_job_offset: usize,
+    dst_shape: [usize; 3],
+    dst_strides: [usize; 3],
+    dst_job_offset: usize,
+}
+
+fn run_partition_covers(jobs: &[DenseGemmBatchJob], runs: &[usize]) -> bool {
+    let mut start = 0usize;
+    for &run_len in runs {
+        if run_len == 0 {
+            return false;
+        }
+        let Some(end) = start.checked_add(run_len) else {
+            return false;
+        };
+        if end > jobs.len() {
+            return false;
+        }
+        start = end;
+    }
+    start == jobs.len()
+}
 
 /// One CPU execution context — parallelism hint plus the rayon pool behind
 /// multi-threaded CPU work — meant to be shared by EVERY executor a runtime
@@ -96,9 +126,8 @@ pub struct DefaultDenseExecutor {
     // tenferro's `CpuBackend::linalg_context` accessor is `cpu-faer`-gated, so
     // a hook based on it does not compile on BLAS-provider builds.
     shared_ctx: Option<SharedCpuContext>,
-    // Test-only count of low-level seam dispatches (one per grouped-gemm call,
-    // one per strided-batch call). A structural proxy that stays flat as a
-    // batch fragments into more runs — see the dispatch-count test for #103.
+    // Test-only count of low-level batch seam submissions: one per grouped or
+    // strided call and one per job in the op-bearing serial fallback.
     #[cfg(test)]
     seam_dispatches: usize,
 }
@@ -239,7 +268,18 @@ impl DefaultDenseExecutor {
             let run = &jobs[start..start + run_len];
             if run_len >= STRIDED_RUN_MIN {
                 self.matmul_strided_batch_run_typed(
-                    output, lhs, rhs, run, start, alpha, beta, wrap_write, wrap_read,
+                    output,
+                    lhs,
+                    rhs,
+                    run,
+                    start,
+                    MatrixOp::Identity,
+                    MatrixOp::Identity,
+                    alpha,
+                    beta,
+                    "strided_batch_gemm",
+                    wrap_write,
+                    wrap_read,
                 )?;
             } else {
                 // Bundle short-run/singleton jobs, in order, for one grouped call.
@@ -320,6 +360,72 @@ impl DefaultDenseExecutor {
         lhs: DenseView<'_, T>,
         rhs: DenseView<'_, T>,
         jobs: &[DenseGemmBatchJob],
+        runs: &[usize],
+        lhs_op: MatrixOp,
+        rhs_op: MatrixOp,
+        alpha: DenseScalar,
+        beta: DenseScalar,
+        wrap_write: W,
+        wrap_read: R,
+    ) -> Result<(), DenseError>
+    where
+        T: 'static,
+        W: for<'x> Fn(DenseViewMut<'x, T>) -> DenseWrite<'x> + Copy,
+        R: for<'x> Fn(DenseView<'x, T>) -> DenseRead<'x> + Copy,
+    {
+        if !run_partition_covers(jobs, runs) {
+            return self.matmul_batch_axpby_ops_serial_typed(
+                output, lhs, rhs, jobs, 0, lhs_op, rhs_op, alpha, beta, wrap_write, wrap_read,
+            );
+        }
+
+        let mut start = 0usize;
+        for &run_len in runs {
+            let end = start + run_len;
+            let run = &jobs[start..end];
+            let can_batch = run_len >= 2
+                && run[0].rows != 0
+                && run[0].contracted != 0
+                && run[0].cols != 0
+                && strided_batch_run_len(run, 0) == run_len;
+            let layout = can_batch
+                .then(|| self.strided_batch_run_layout(run, lhs_op, rhs_op))
+                .and_then(Result::ok)
+                .filter(|layout| self.strided_batch_run_layout_admitted(output, lhs, rhs, layout));
+            if let Some(layout) = layout {
+                self.matmul_strided_batch_run_layout_typed(
+                    output,
+                    lhs,
+                    rhs,
+                    layout,
+                    start,
+                    lhs_op,
+                    rhs_op,
+                    alpha,
+                    beta,
+                    "matmul_batch_axpby_with_ops_into",
+                    wrap_write,
+                    wrap_read,
+                )?;
+            } else {
+                self.matmul_batch_axpby_ops_serial_typed(
+                    output, lhs, rhs, run, start, lhs_op, rhs_op, alpha, beta, wrap_write,
+                    wrap_read,
+                )?;
+            }
+            start = end;
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn matmul_batch_axpby_ops_serial_typed<T, W, R>(
+        &mut self,
+        output: &mut DenseViewMut<'_, T>,
+        lhs: DenseView<'_, T>,
+        rhs: DenseView<'_, T>,
+        jobs: &[DenseGemmBatchJob],
+        cache_start: usize,
         lhs_op: MatrixOp,
         rhs_op: MatrixOp,
         alpha: DenseScalar,
@@ -333,7 +439,7 @@ impl DefaultDenseExecutor {
         R: for<'x> Fn(DenseView<'x, T>) -> DenseRead<'x>,
     {
         let output_base = output.offset();
-        for (cache_slot, job) in jobs.iter().enumerate() {
+        for (relative_slot, job) in jobs.iter().enumerate() {
             let lhs_shape = [job.rows, job.contracted];
             let lhs_strides = match lhs_op {
                 MatrixOp::Identity => [1, job.rows],
@@ -373,10 +479,14 @@ impl DefaultDenseExecutor {
                 alpha: tenferro_scalar(alpha),
                 beta: tenferro_scalar(beta),
             };
+            #[cfg(test)]
+            {
+                self.seam_dispatches += 1;
+            }
             BackendCachedDot::dot_general_read_into_accum_cached(
                 &mut self.backend,
                 &mut self.grouped_cache,
-                Some(cache_slot),
+                Some(cache_start + relative_slot),
                 lhs,
                 rhs,
                 &self.matmul_config,
@@ -396,8 +506,11 @@ impl DefaultDenseExecutor {
         rhs: DenseView<'_, T>,
         run: &[DenseGemmBatchJob],
         cache_slot: usize,
+        lhs_op: MatrixOp,
+        rhs_op: MatrixOp,
         alpha: DenseScalar,
         beta: DenseScalar,
+        error_op: &'static str,
         wrap_write: W,
         wrap_read: R,
     ) -> Result<(), DenseError>
@@ -406,14 +519,22 @@ impl DefaultDenseExecutor {
         W: for<'x> Fn(DenseViewMut<'x, T>) -> DenseWrite<'x>,
         R: for<'x> Fn(DenseView<'x, T>) -> DenseRead<'x>,
     {
-        #[cfg(test)]
-        {
-            self.seam_dispatches += 1;
-        }
-        // Only reached from the router with a run of length >= STRIDED_RUN_MIN
-        // (>= 2), so the batch strides come from the first two jobs' constant
-        // step (guaranteed constant by the plan-time run partition). The old
-        // singleton fallback is gone: singletons now route to the grouped seam.
+        let layout = self.strided_batch_run_layout(run, lhs_op, rhs_op)?;
+        self.matmul_strided_batch_run_layout_typed(
+            output, lhs, rhs, layout, cache_slot, lhs_op, rhs_op, alpha, beta, error_op,
+            wrap_write, wrap_read,
+        )
+    }
+
+    fn strided_batch_run_layout(
+        &self,
+        run: &[DenseGemmBatchJob],
+        lhs_op: MatrixOp,
+        rhs_op: MatrixOp,
+    ) -> Result<StridedBatchRunLayout, DenseError> {
+        // Identity runs reach this helper at the existing empirical threshold;
+        // oriented runs need only two jobs to define the structural batch
+        // stride. Singletons retain their existing fallback.
         debug_assert!(run.len() >= 2, "strided run must hold at least two jobs");
         let first = &run[0];
         let next = &run[1];
@@ -437,34 +558,135 @@ impl DefaultDenseExecutor {
                     value: first.dst_offset,
                 })?;
         let lhs_shape = [first.rows, first.contracted, run_len];
-        let lhs_strides = [1, first.rows, lhs_batch_stride];
+        let lhs_strides = match lhs_op {
+            MatrixOp::Identity => [1, first.rows, lhs_batch_stride],
+            MatrixOp::Transpose | MatrixOp::Adjoint => [first.contracted, 1, lhs_batch_stride],
+        };
         let rhs_shape = [first.contracted, first.cols, run_len];
-        let rhs_strides = [1, first.contracted, rhs_batch_stride];
+        let rhs_strides = match rhs_op {
+            MatrixOp::Identity => [1, first.contracted, rhs_batch_stride],
+            MatrixOp::Transpose | MatrixOp::Adjoint => [first.cols, 1, rhs_batch_stride],
+        };
         let dst_shape = [first.rows, first.cols, run_len];
         let dst_strides = [1, first.rows, dst_batch_stride];
+        Ok(StridedBatchRunLayout {
+            lhs_shape,
+            lhs_strides,
+            lhs_job_offset: first.lhs_offset,
+            rhs_shape,
+            rhs_strides,
+            rhs_job_offset: first.rhs_offset,
+            dst_shape,
+            dst_strides,
+            dst_job_offset: first.dst_offset,
+        })
+    }
+
+    fn strided_batch_run_layout_admitted<T>(
+        &self,
+        output: &DenseViewMut<'_, T>,
+        lhs: DenseView<'_, T>,
+        rhs: DenseView<'_, T>,
+        layout: &StridedBatchRunLayout,
+    ) -> bool {
+        let Some(lhs_offset) = lhs.offset().checked_add(layout.lhs_job_offset) else {
+            return false;
+        };
+        let Some(rhs_offset) = rhs.offset().checked_add(layout.rhs_job_offset) else {
+            return false;
+        };
+        let Some(dst_offset) = output.offset().checked_add(layout.dst_job_offset) else {
+            return false;
+        };
+        let offsets_fit = [lhs_offset, rhs_offset, dst_offset]
+            .into_iter()
+            .all(|offset| isize::try_from(offset).is_ok());
+        let strides_fit = layout
+            .lhs_strides
+            .into_iter()
+            .chain(layout.rhs_strides)
+            .chain(layout.dst_strides)
+            .all(|stride| isize::try_from(stride).is_ok());
+        offsets_fit
+            && strides_fit
+            && DenseView::new(
+                lhs.data(),
+                &layout.lhs_shape,
+                &layout.lhs_strides,
+                lhs_offset,
+            )
+            .is_ok()
+            && DenseView::new(
+                rhs.data(),
+                &layout.rhs_shape,
+                &layout.rhs_strides,
+                rhs_offset,
+            )
+            .is_ok()
+            && DenseView::new(
+                output.data(),
+                &layout.dst_shape,
+                &layout.dst_strides,
+                dst_offset,
+            )
+            .is_ok()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn matmul_strided_batch_run_layout_typed<T, W, R>(
+        &mut self,
+        output: &mut DenseViewMut<'_, T>,
+        lhs: DenseView<'_, T>,
+        rhs: DenseView<'_, T>,
+        layout: StridedBatchRunLayout,
+        cache_slot: usize,
+        lhs_op: MatrixOp,
+        rhs_op: MatrixOp,
+        alpha: DenseScalar,
+        beta: DenseScalar,
+        error_op: &'static str,
+        wrap_write: W,
+        wrap_read: R,
+    ) -> Result<(), DenseError>
+    where
+        T: 'static,
+        W: for<'x> Fn(DenseViewMut<'x, T>) -> DenseWrite<'x>,
+        R: for<'x> Fn(DenseView<'x, T>) -> DenseRead<'x>,
+    {
+        let lhs_offset = batch_offset(lhs.offset(), layout.lhs_job_offset)?;
         let lhs_view = DenseView::new(
             lhs.data(),
-            &lhs_shape,
-            &lhs_strides,
-            batch_offset(lhs.offset(), first.lhs_offset)?,
+            &layout.lhs_shape,
+            &layout.lhs_strides,
+            lhs_offset,
         )?;
+        let rhs_offset = batch_offset(rhs.offset(), layout.rhs_job_offset)?;
         let rhs_view = DenseView::new(
             rhs.data(),
-            &rhs_shape,
-            &rhs_strides,
-            batch_offset(rhs.offset(), first.rhs_offset)?,
+            &layout.rhs_shape,
+            &layout.rhs_strides,
+            rhs_offset,
         )?;
-        let dst_offset = batch_offset(output.offset(), first.dst_offset)?;
-        let dst_view = DenseViewMut::new(output.data_mut(), &dst_shape, &dst_strides, dst_offset)?;
+        let dst_offset = batch_offset(output.offset(), layout.dst_job_offset)?;
+        let dst_view = DenseViewMut::new(
+            output.data_mut(),
+            &layout.dst_shape,
+            &layout.dst_strides,
+            dst_offset,
+        )?;
         let lhs = TensorRead::from_view(tenferro_view(wrap_read(lhs_view))?);
         let rhs = TensorRead::from_view(tenferro_view(wrap_read(rhs_view))?);
         let output = TensorWrite::from_view(tenferro_view_mut(wrap_write(dst_view))?);
         let accumulation = tenferro_tensor::DotGeneralAccumulation {
-            lhs_conj: false,
-            rhs_conj: false,
+            lhs_conj: lhs_op == MatrixOp::Adjoint,
+            rhs_conj: rhs_op == MatrixOp::Adjoint,
             alpha: tenferro_scalar(alpha),
             beta: tenferro_scalar(beta),
         };
+        #[cfg(test)]
+        {
+            self.seam_dispatches += 1;
+        }
         BackendCachedDot::dot_general_read_into_accum_cached(
             &mut self.backend,
             &mut self.grouped_cache,
@@ -475,7 +697,7 @@ impl DefaultDenseExecutor {
             accumulation,
             output,
         )
-        .map_err(|err| tenferro_error("strided_batch_gemm", err))
+        .map_err(|err| tenferro_error(error_op, err))
     }
 }
 
@@ -842,6 +1064,7 @@ impl DenseExecutor for DefaultDenseExecutor {
                     lhs,
                     rhs,
                     jobs,
+                    runs,
                     lhs_op,
                     rhs_op,
                     alpha,
@@ -857,6 +1080,7 @@ impl DenseExecutor for DefaultDenseExecutor {
                     lhs,
                     rhs,
                     jobs,
+                    runs,
                     lhs_op,
                     rhs_op,
                     alpha,
@@ -870,6 +1094,7 @@ impl DenseExecutor for DefaultDenseExecutor {
                     lhs,
                     rhs,
                     jobs,
+                    runs,
                     lhs_op,
                     rhs_op,
                     alpha,
@@ -883,6 +1108,7 @@ impl DenseExecutor for DefaultDenseExecutor {
                     lhs,
                     rhs,
                     jobs,
+                    runs,
                     lhs_op,
                     rhs_op,
                     alpha,
