@@ -503,10 +503,10 @@ fn print_adapter_sample(
         iterations.to_string(),
         format!("{:.3}", elapsed.as_secs_f64() * 1e6 / iterations as f64),
     ];
-    fields.extend(std::iter::repeat("NA".to_string()).take(25));
+    fields.extend(std::iter::repeat_n("NA".to_string(), 25));
     fields.push(allocations.calls.to_string());
     fields.push(allocations.requested_bytes.to_string());
-    fields.extend(std::iter::repeat("NA".to_string()).take(5));
+    fields.extend(std::iter::repeat_n("NA".to_string(), 5));
     println!("{}", fields.join(","));
 }
 
