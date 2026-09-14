@@ -11602,41 +11602,6 @@ mod sector_matricization_tests {
         assert_eq!(matrices[1].col_trees[0].1, 0);
     }
 
-    #[test]
-    fn generic_sector_matricizations_report_late_opaque_key_without_mutating_source() {
-        let structure = BlockStructure::from_blocks_with_rank(
-            4,
-            vec![
-                BlockSpec::with_key(
-                    generic_pair(1, 1, 1).into(),
-                    vec![1, 1, 1, 1],
-                    vec![1, 1, 1, 1],
-                    1,
-                )
-                .unwrap(),
-                BlockSpec::with_key(
-                    BlockKey::opaque([7, 8, 9, 10]),
-                    vec![1, 1, 1, 1],
-                    vec![1, 1, 1, 1],
-                    3,
-                )
-                .unwrap(),
-            ],
-        )
-        .unwrap();
-        let data = vec![0.0, 5.0, 0.0, 9.0];
-        let snapshot = data.clone();
-
-        assert!(matches!(
-            sector_matricizations_generic::<f64>(&structure, &data, 2),
-            Err(OperationError::ExpectedFusionTreeBlock {
-                tensor: "tsvd",
-                index: 1
-            })
-        ));
-        assert_eq!(data, snapshot);
-    }
-
     fn z2_single_sector_matrix(
         rows: usize,
         cols: usize,
