@@ -166,9 +166,10 @@ few-large (`G=2`) and many-small (`G=16`) unequal rectangular matrices for
 layouts. Literal checks require `U(rows,rows)`, `S(rows,cols)`, and
 `Vh(cols,cols)`, reconstruction, orthogonality, provider authority, and an
 unchanged source. Checked and multiplicity-free U(1) EIG rows use distinct
-upper-triangular eigenvalues and verify `A V = V D`, unit-normalized nonzero
-columns, and the exact eigenvalue set without comparing gauge-dependent vector
-entries. The `d=1` many-small baseline necessarily has zero off-diagonal data;
+upper-triangular eigenvalues and verify `A V = V D` with a scale-independent
+column-normalized residual, finite nonzero columns, and the exact eigenvalue set
+without comparing gauge-dependent vector entries. The `d=1` many-small baseline
+necessarily has zero off-diagonal data;
 its alternating `d=2` input is non-diagonal and genuinely complex for c64.
 Few-large c64 is non-diagonal in both shapes.
 

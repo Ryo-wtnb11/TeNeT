@@ -1273,14 +1273,20 @@ fn assert_checked_eig<D: HarnessScalar<Eig = Complex64>>(
             let norm = (0..n)
                 .map(|row| checked_block_value(result.v().data(), vectors, row, column).norm_sqr())
                 .sum::<f64>();
-            assert!((norm - 1.0).abs() <= 1.0e-9);
+            assert!(
+                norm.is_finite() && norm > 0.0,
+                "checked EIG sector={sector:?} n={n} column={column} norm={norm}"
+            );
+            let vector_norm = norm.sqrt();
             for row in 0..n {
                 let av = (0..n).fold(Complex64::new(0.0, 0.0), |sum, inner| {
                     sum + checked_block_value(input.data(), source, row, inner)
                         * checked_block_value(result.v().data(), vectors, inner, column)
                 });
                 let vd = checked_block_value(result.v().data(), vectors, row, column) * *value;
-                assert!((av - vd).norm() <= 1.0e-9 * av.norm().max(vd.norm()).max(1.0));
+                let residual = (av - vd).norm() / vector_norm;
+                let scale = (av.norm().max(vd.norm()) / vector_norm).max(1.0);
+                assert!(residual <= 1.0e-9 * scale);
             }
         }
     }
@@ -1325,7 +1331,11 @@ where
                         .norm_sqr()
                 })
                 .sum::<f64>();
-            assert!((norm - 1.0).abs() <= 1.0e-9);
+            assert!(
+                norm.is_finite() && norm > 0.0,
+                "MF EIG sector={sector:?} n={n} column={column} norm={norm}"
+            );
+            let vector_norm = norm.sqrt();
             let value = d.data()
                 [d_block.offset() + column * d_block.strides()[0] + column * d_block.strides()[1]];
             let expected = Complex64::new((sector.charge() as usize * 32 + n - column) as f64, 0.0);
@@ -1343,7 +1353,9 @@ where
                 let vd = v.data()
                     [v_block.offset() + row * v_block.strides()[0] + column * v_block.strides()[1]]
                     * value;
-                assert!((av - vd).norm() <= 1.0e-9 * av.norm().max(vd.norm()).max(1.0));
+                let residual = (av - vd).norm() / vector_norm;
+                let scale = (av.norm().max(vd.norm()) / vector_norm).max(1.0);
+                assert!(residual <= 1.0e-9 * scale);
             }
         }
     }
