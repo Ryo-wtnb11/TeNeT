@@ -1315,6 +1315,21 @@ fn assert_compact_factors_reconstruct_input<R, D>(
 ) where
     D: FactorScalar,
 {
+    assert_eq!(
+        left.space().space().homspace().domain(),
+        right.space().space().homspace().codomain()
+    );
+    assert_factors_reconstruct_input(input, left, diagonal, right);
+}
+
+fn assert_factors_reconstruct_input<R, D>(
+    input: &BoundDynamicTensorRef<'_, R, D>,
+    left: &BoundDynFactor<R, D>,
+    diagonal: Option<&BoundDynFactor<R, D>>,
+    right: &BoundDynFactor<R, D>,
+) where
+    D: FactorScalar,
+{
     let source_structure = input.space().space().structure();
     let left_structure = left.space().space().structure();
     let right_structure = right.space().space().structure();
@@ -1347,8 +1362,9 @@ fn assert_compact_factors_reconstruct_input<R, D>(
         let cols = source.shape()[input.space().space().nout()..]
             .iter()
             .product::<usize>();
-        let rank = left_block.shape()[left_block.shape().len() - 1];
-        assert_eq!(right_block.shape()[0], rank);
+        let left_rank = left_block.shape()[left_block.shape().len() - 1];
+        let right_rank = right_block.shape()[0];
+        let rank = left_rank.min(right_rank);
         let diagonal_block = diagonal.map(|factor| {
             let structure = factor.space().space().structure();
             (0..structure.block_count())
@@ -1361,6 +1377,11 @@ fn assert_compact_factors_reconstruct_input<R, D>(
                 })
                 .unwrap()
         });
+        if let Some(block) = diagonal_block {
+            assert_eq!(block.shape(), [left_rank, right_rank]);
+        } else {
+            assert_eq!(left_rank, right_rank);
+        }
         for column in 0..cols {
             for row in 0..rows {
                 let mut reconstructed = D::zero();
@@ -3663,6 +3684,7 @@ fn checked_generic_full_svd_preserves_provider_and_completes_unmatched_rows() {
     .unwrap();
     let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    crate::factorize::reset_generic_pair_publication_probe();
     let full = svd_full_dyn_checked_generic(&mut dense, &input).unwrap();
     assert!(Arc::ptr_eq(
         full.u().space().provider_arc(),
@@ -3683,6 +3705,50 @@ fn checked_generic_full_svd_preserves_provider_and_completes_unmatched_rows() {
             BlockKey::FusionTree(key) if key.codomain_tree().coupled() == vacuum
         )
     }));
+    let probe = crate::factorize::generic_pair_publication_probe();
+    assert_eq!(probe.one_sided_canonical_publications, 1);
+    assert_eq!(probe.one_sided_fallback_publications, 1);
+    assert!(probe.one_sided_left_fallback_scatter_calls > 0);
+    assert_eq!(probe.one_sided_right_fallback_scatter_calls, 0);
+}
+
+#[test]
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
+fn checked_generic_full_svd_publishes_aligned_vertex_factors_without_scatter() {
+    let (source, data) = generic_factorization_input();
+    let provider = Arc::new(LateGenericSpy {
+        rule: FactorGenericRule,
+        fail_at: usize::MAX,
+        calls: Cell::new(0),
+    });
+    let checked =
+        BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
+            .unwrap();
+    let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    crate::factorize::reset_generic_pair_publication_probe();
+
+    let full = svd_full_dyn_checked_generic(&mut dense, &input).unwrap();
+
+    let probe = crate::factorize::generic_pair_publication_probe();
+    assert_eq!(probe.one_sided_canonical_publications, 2);
+    assert_eq!(probe.one_sided_fallback_publications, 0);
+    assert!(probe.left_appended_elements > 0);
+    assert!(probe.right_appended_elements > 0);
+    assert_eq!(
+        (
+            probe.one_sided_left_fallback_scatter_calls,
+            probe.one_sided_right_fallback_scatter_calls
+        ),
+        (0, 0)
+    );
+    assert_factors_reconstruct_input(&input, full.u(), Some(full.s()), full.vh());
+    for factor in [full.u(), full.s(), full.vh()] {
+        assert!(Arc::ptr_eq(factor.space().provider_arc(), &provider));
+    }
 }
 
 #[test]
@@ -4568,6 +4634,7 @@ fn full_svd_adjoint_builds_only_the_final_factor_buffers() {
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
 
     crate::factorize::reset_factor_buffer_build_counts_for_test();
+    crate::factorize::reset_generic_pair_publication_probe();
     let output = svd_full_adjoint_dyn(&mut dense, &bound.as_ref().dynamic()).unwrap();
 
     assert_eq!(
@@ -4577,6 +4644,10 @@ fn full_svd_adjoint_builds_only_the_final_factor_buffers() {
     assert_eq!(output.u().space().space().required_len().unwrap(), 9);
     assert_eq!(output.s().space().space().required_len().unwrap(), 6);
     assert_eq!(output.vh().space().space().required_len().unwrap(), 4);
+    let probe = crate::factorize::generic_pair_publication_probe();
+    assert_eq!(probe.one_sided_canonical_publications, 2);
+    assert_eq!(probe.one_sided_fallback_publications, 0);
+    assert_eq!((probe.left_owner_reused, probe.right_owner_reused), (1, 1));
 }
 
 #[test]
@@ -7976,6 +8047,7 @@ fn rectangular_full_svd_has_square_outer_factors_and_reconstructs() {
             cols,
         );
         let input = bound_tensor(Arc::new(rule), &matrix);
+        crate::factorize::reset_generic_pair_publication_probe();
         let full = svd_full(&mut dense, &input.as_ref()).unwrap();
         assert_factor_layout_matches_legacy_shapes(full.u.space());
         assert_factor_layout_matches_legacy_shapes(full.s.space());
@@ -8005,6 +8077,10 @@ fn rectangular_full_svd_has_square_outer_factors_and_reconstructs() {
         for (actual, expected) in reconstructed.iter().zip(matrix.data()) {
             assert!((actual - expected).abs() < 1.0e-9);
         }
+        let probe = crate::factorize::generic_pair_publication_probe();
+        assert_eq!(probe.one_sided_canonical_publications, 2);
+        assert_eq!(probe.one_sided_fallback_publications, 0);
+        assert_eq!((probe.left_owner_reused, probe.right_owner_reused), (1, 1));
     }
 }
 
