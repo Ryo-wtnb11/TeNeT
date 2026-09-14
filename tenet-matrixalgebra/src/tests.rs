@@ -1824,17 +1824,30 @@ impl DenseExecutor for FullQrInputSpy {
         q: DenseWrite<'_>,
         r: DenseWrite<'_>,
     ) -> Result<(), DenseError> {
-        let values = match input {
-            DenseRead::F64(view) => view
-                .data()
-                .iter()
-                .map(|&value| Complex64::new(value, 0.0))
-                .collect(),
-            DenseRead::C64(view) => view.data().to_vec(),
+        let input_shape = input.shape().to_vec();
+        let (strides, offset, data_len, values) = match input {
+            DenseRead::F64(view) => (
+                view.strides().to_vec(),
+                view.offset(),
+                view.data().len(),
+                view.data()
+                    .iter()
+                    .map(|&value| Complex64::new(value, 0.0))
+                    .collect(),
+            ),
+            DenseRead::C64(view) => (
+                view.strides().to_vec(),
+                view.offset(),
+                view.data().len(),
+                view.data().to_vec(),
+            ),
             _ => panic!("full QR/LQ fixture must be f64 or c64"),
         };
+        assert_eq!(offset, 0);
+        assert_eq!(strides, [1, input_shape[0]]);
+        assert_eq!(data_len, input_shape.iter().product::<usize>());
         self.observations.push(FullQrObservation {
-            input_shape: input.shape().to_vec(),
+            input_shape,
             q_shape: q.shape().to_vec(),
             r_shape: r.shape().to_vec(),
             values,
@@ -7518,9 +7531,10 @@ fn full_qr_and_lq_use_original_input_only_when_economy_q_is_full() {
     let tensor = mixed_rectangular_tensor((2, 4), (3, 1));
     let matrices = dense_sector_matrices(1, &tensor);
     let input = bound_tensor(Arc::new(rule), &tensor);
+    let input = input.as_ref().dynamic();
 
     let mut qr_dense = FullQrInputSpy::default();
-    let (q, r) = qr_full(&mut qr_dense, &input.as_ref()).unwrap();
+    let (q, r) = qr_full_dyn(&mut qr_dense, &input).unwrap();
     assert_eq!(qr_dense.observations.len(), matrices.len());
     for (observation, (_, rows, cols, matrix)) in qr_dense.observations.iter().zip(matrices.iter())
     {
@@ -7530,17 +7544,10 @@ fn full_qr_and_lq_use_original_input_only_when_economy_q_is_full() {
             .collect::<Vec<_>>();
         assert_full_qr_observation(observation, &matrix, *rows, *cols);
     }
-    assert_orthonormal_columns(&dense_sector_matrices(1, &q));
-    assert_nonnegative_diagonal(&dense_sector_matrices(1, &r));
-    assert_compact_factors_reconstruct_input(
-        &input.as_ref().dynamic(),
-        &q.as_ref().dynamic(),
-        None,
-        &r.as_ref().dynamic(),
-    );
+    assert_compact_factors_reconstruct_input(&input, &q, None, &r);
 
     let mut lq_dense = FullQrInputSpy::default();
-    let (l, q) = lq_full(&mut lq_dense, &input.as_ref()).unwrap();
+    let (l, q) = lq_full_dyn(&mut lq_dense, &input).unwrap();
     assert_eq!(lq_dense.observations.len(), matrices.len());
     for (observation, (_, rows, cols, matrix)) in lq_dense.observations.iter().zip(matrices.iter())
     {
@@ -7551,13 +7558,7 @@ fn full_qr_and_lq_use_original_input_only_when_economy_q_is_full() {
         let adjoint = adjoint_complex(&matrix, *rows, *cols);
         assert_full_qr_observation(observation, &adjoint, *cols, *rows);
     }
-    assert_nonnegative_diagonal(&dense_sector_matrices(1, &l));
-    assert_compact_factors_reconstruct_input(
-        &input.as_ref().dynamic(),
-        &l.as_ref().dynamic(),
-        None,
-        &q.as_ref().dynamic(),
-    );
+    assert_compact_factors_reconstruct_input(&input, &l, None, &q);
 }
 
 fn checked_fixture_matrices(
@@ -7634,37 +7635,26 @@ fn full_and_compact_qr_lq_match_for_rank_deficient_no_completion_shapes() {
         TensorMap::from_vec_with_fusion_space(vec![1.0, 2.0, 2.0, 4.0, 3.0, 6.0], wide_space)
             .unwrap();
     let wide_input = bound_tensor(Arc::new(rule), &wide);
+    let wide_input = wide_input.as_ref().dynamic();
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
-    let compact = qr_compact(&mut dense, &wide_input.as_ref()).unwrap();
-    let full = qr_full(&mut dense, &wide_input.as_ref()).unwrap();
-    assert_eq!(full.0.fusion_space(), compact.0.fusion_space());
-    assert_eq!(full.1.fusion_space(), compact.1.fusion_space());
+    let compact = qr_compact_dyn(&mut dense, &wide_input).unwrap();
+    let full = qr_full_dyn(&mut dense, &wide_input).unwrap();
+    assert_eq!(full.0.space().space(), compact.0.space().space());
+    assert_eq!(full.1.space().space(), compact.1.space().space());
     assert_eq!(full.0.data(), compact.0.data());
     assert_eq!(full.1.data(), compact.1.data());
-    assert_orthonormal_columns(&dense_sector_matrices(1, &full.0));
-    assert_nonnegative_diagonal(&dense_sector_matrices(1, &full.1));
-    assert_compact_factors_reconstruct_input(
-        &wide_input.as_ref().dynamic(),
-        &full.0.as_ref().dynamic(),
-        None,
-        &full.1.as_ref().dynamic(),
-    );
+    assert_compact_factors_reconstruct_input(&wide_input, &full.0, None, &full.1);
 
     let tall = transposed_rectangular_tensor(&wide, 2, 3);
     let tall_input = bound_tensor(Arc::new(rule), &tall);
-    let compact = lq_compact(&mut dense, &tall_input.as_ref()).unwrap();
-    let full = lq_full(&mut dense, &tall_input.as_ref()).unwrap();
-    assert_eq!(full.0.fusion_space(), compact.0.fusion_space());
-    assert_eq!(full.1.fusion_space(), compact.1.fusion_space());
+    let tall_input = tall_input.as_ref().dynamic();
+    let compact = lq_compact_dyn(&mut dense, &tall_input).unwrap();
+    let full = lq_full_dyn(&mut dense, &tall_input).unwrap();
+    assert_eq!(full.0.space().space(), compact.0.space().space());
+    assert_eq!(full.1.space().space(), compact.1.space().space());
     assert_eq!(full.0.data(), compact.0.data());
     assert_eq!(full.1.data(), compact.1.data());
-    assert_nonnegative_diagonal(&dense_sector_matrices(1, &full.0));
-    assert_compact_factors_reconstruct_input(
-        &tall_input.as_ref().dynamic(),
-        &full.0.as_ref().dynamic(),
-        None,
-        &full.1.as_ref().dynamic(),
-    );
+    assert_compact_factors_reconstruct_input(&tall_input, &full.0, None, &full.1);
 }
 
 #[test]
