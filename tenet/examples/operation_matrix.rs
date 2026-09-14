@@ -19,15 +19,18 @@ use tenet::core::{
 };
 use tenet::dense::DefaultDenseExecutor;
 use tenet::dense::{
-    strided_batch_runs, CpuBackendKind, DenseExecutor, DenseGemmBatchJob, DenseRead, DenseScalar,
-    DenseView, DenseViewMut, DenseWrite, MatrixOp,
+    strided_batch_runs, CpuBackendKind, DenseExecutor, DenseGemmBatchJob, DenseView, DenseViewMut,
+    MatrixOp,
 };
 use tenet_matrixalgebra::{
     lq_compact_dyn_checked_generic, lq_full_dyn_checked_generic, qr_compact_dyn_checked_generic,
     qr_compact_dyn_generic, qr_full_dyn_checked_generic, svd_compact_dyn_checked_generic,
     BoundDynFactor, CheckedGenericFactorPlanError, FactorScalar,
 };
-use tenet_tensors::{BoundDynamicFusionMapSpace, BoundDynamicTensorRef, DynamicFusionMapSpace};
+use tenet_tensors::{
+    BoundDynamicFusionMapSpace, BoundDynamicTensorRef, ConjugateValue, DenseBlockScalar,
+    DynamicFusionMapSpace,
+};
 
 struct CountingAllocator;
 
@@ -299,112 +302,30 @@ fn assert_f64_payload_close(actual: &[f64], expected: &[f64]) {
     }
 }
 
-trait OrientedScalar:
-    TensorScalar + Copy + std::fmt::Debug + std::ops::Add<Output = Self> + std::ops::Mul<Output = Self>
-{
-    const TAG: &'static str;
-    fn zero() -> Self;
-    fn sentinel() -> Self;
-    fn sample(index: usize) -> Self;
-    fn alpha() -> Self;
-    fn conjugate(self) -> Self;
-    fn read<'a>(view: DenseView<'a, Self>) -> DenseRead<'a>;
-    fn write<'a>(view: DenseViewMut<'a, Self>) -> DenseWrite<'a>;
-    fn scalar(value: Self) -> DenseScalar;
-    fn error(self, other: Self) -> f64;
-    fn magnitude(self) -> f64;
-}
-
-impl OrientedScalar for f64 {
-    const TAG: &'static str = "f64";
-
-    fn zero() -> Self {
-        0.0
-    }
-
+trait OrientedScalar: HarnessScalar + TensorScalar + std::fmt::Debug {
     fn sentinel() -> Self {
-        -0.375
+        Self::from_parts(-0.375, 0.625)
     }
-
     fn sample(index: usize) -> Self {
-        0.125 + ((index * 17 + 3) % 97) as f64 / 29.0
-    }
-
-    fn alpha() -> Self {
-        0.75
-    }
-
-    fn conjugate(self) -> Self {
-        self
-    }
-
-    fn read<'a>(view: DenseView<'a, Self>) -> DenseRead<'a> {
-        DenseRead::F64(view)
-    }
-
-    fn write<'a>(view: DenseViewMut<'a, Self>) -> DenseWrite<'a> {
-        DenseWrite::F64(view)
-    }
-
-    fn scalar(value: Self) -> DenseScalar {
-        DenseScalar::F64(value)
-    }
-
-    fn error(self, other: Self) -> f64 {
-        (self - other).abs()
-    }
-
-    fn magnitude(self) -> f64 {
-        self.abs()
-    }
-}
-
-impl OrientedScalar for Complex64 {
-    const TAG: &'static str = "c64";
-
-    fn zero() -> Self {
-        Self::new(0.0, 0.0)
-    }
-
-    fn sentinel() -> Self {
-        Self::new(-0.375, 0.625)
-    }
-
-    fn sample(index: usize) -> Self {
-        Self::new(
+        Self::from_parts(
             0.125 + ((index * 17 + 3) % 97) as f64 / 29.0,
             -0.25 + ((index * 11 + 7) % 89) as f64 / 31.0,
         )
     }
-
     fn alpha() -> Self {
-        Self::new(0.75, -0.375)
+        Self::from_parts(0.75, -0.375)
     }
-
-    fn conjugate(self) -> Self {
-        self.conj()
-    }
-
-    fn read<'a>(view: DenseView<'a, Self>) -> DenseRead<'a> {
-        DenseRead::C64(view)
-    }
-
-    fn write<'a>(view: DenseViewMut<'a, Self>) -> DenseWrite<'a> {
-        DenseWrite::C64(view)
-    }
-
-    fn scalar(value: Self) -> DenseScalar {
-        DenseScalar::C64(value)
-    }
-
     fn error(self, other: Self) -> f64 {
-        (self - other).norm()
+        (self.as_complex() - other.as_complex()).norm()
     }
-
     fn magnitude(self) -> f64 {
-        self.norm()
+        self.as_complex().norm()
     }
 }
+
+impl OrientedScalar for f64 {}
+
+impl OrientedScalar for Complex64 {}
 
 fn assert_oriented_close<T: OrientedScalar>(actual: &[T], expected: &[T]) {
     assert_eq!(actual.len(), expected.len());
@@ -524,10 +445,10 @@ fn expected_adapter<T: OrientedScalar>(
                     let mut lhs = fixture.lhs[fixture.lhs_base + job.lhs_offset + lhs_index];
                     let mut rhs = fixture.rhs[fixture.rhs_base + job.rhs_offset + rhs_index];
                     if lhs_op == MatrixOp::Adjoint {
-                        lhs = lhs.conjugate();
+                        lhs = lhs.maybe_conj(true);
                     }
                     if rhs_op == MatrixOp::Adjoint {
-                        rhs = rhs.conjugate();
+                        rhs = rhs.maybe_conj(true);
                     }
                     sum = sum + lhs * rhs;
                 }
@@ -555,15 +476,15 @@ fn execute_adapter<T: OrientedScalar>(
     let rhs = DenseView::new(&fixture.rhs, &rhs_shape, &strides, fixture.rhs_base)?;
     let output = DenseViewMut::new(&mut fixture.output, &dst_shape, &strides, fixture.dst_base)?;
     executor.matmul_batch_axpby_with_ops_into(
-        T::write(output),
-        T::read(lhs),
-        T::read(rhs),
+        T::dense_write(output),
+        T::dense_read(lhs),
+        T::dense_read(rhs),
         &fixture.jobs,
         &fixture.runs,
         lhs_op,
         rhs_op,
-        T::scalar(alpha),
-        T::scalar(beta),
+        alpha.dense_scalar(),
+        beta.dense_scalar(),
     )?;
     let marker = (fixture.output[fixture.dst_base], fixture.output.len());
     black_box(marker);
@@ -633,70 +554,13 @@ fn bench_adapter<T: OrientedScalar>(
     Ok(())
 }
 
-fn bench_public<T: OrientedScalar>(
-    runtime: &Runtime,
-    form: &str,
-    min_time: Duration,
-    mut validate: impl FnMut((usize, T, usize)),
-    mut operation: impl FnMut() -> Result<(usize, T, usize), Error>,
-) -> Result<(), Error> {
-    let before = counters(runtime);
-    let started = Instant::now();
-    let (marker, allocations) = measure_allocations(&mut operation)?;
-    let elapsed = started.elapsed();
-    let after = counters(runtime);
-    print_sample(
-        "U1Public",
-        "oriented_uniform_run",
-        form,
-        "first_fresh_runtime_after_preflight",
-        1,
-        elapsed,
-        allocations,
-        before,
-        after,
-    );
-    validate(marker);
-
-    for _ in 0..2 {
-        validate(operation()?);
-    }
-    let before = counters(runtime);
-    let started = Instant::now();
-    let mut iterations = 0;
-    let (marker, allocations) = measure_allocations(|| {
-        let mut marker = operation()?;
-        iterations += 1;
-        while iterations < 2 || started.elapsed() < min_time {
-            marker = operation()?;
-            iterations += 1;
-        }
-        Ok(marker)
-    })?;
-    let elapsed = started.elapsed();
-    let after = counters(runtime);
-    print_sample(
-        "U1Public",
-        "oriented_uniform_run",
-        form,
-        "warm_fixed",
-        iterations,
-        elapsed,
-        allocations,
-        before,
-        after,
-    );
-    validate(marker);
-    Ok(())
-}
-
 fn bench_adapter_shape<T: OrientedScalar>(
     form: &str,
     min_time: Duration,
     expected: &[(T, usize)],
     mut operation: impl FnMut() -> Result<(usize, T, usize), tenet::dense::DenseError>,
 ) -> Result<(), tenet::dense::DenseError> {
-    for _ in 0..2 {
+    for _ in 0..expected.len() {
         let (case, first, len) = operation()?;
         assert_oriented_close(&[first], &[expected[case].0]);
         assert_eq!(len, expected[case].1);
@@ -704,13 +568,14 @@ fn bench_adapter_shape<T: OrientedScalar>(
     let started = Instant::now();
     let mut iterations = 0;
     let (marker, allocations) = measure_allocations(|| {
-        let mut marker = operation()?;
-        iterations += 1;
-        while iterations < 2 || started.elapsed() < min_time {
-            marker = operation()?;
-            iterations += 1;
+        let mut marker = None;
+        while iterations == 0 || started.elapsed() < min_time {
+            for _ in 0..expected.len() {
+                marker = Some(operation()?);
+                iterations += 1;
+            }
         }
-        Ok(marker)
+        Ok(marker.expect("shape cycle is nonempty"))
     })?;
     let elapsed = started.elapsed();
     print_adapter_sample(form, "warm_shape_cycle", iterations, elapsed, allocations);
@@ -726,7 +591,7 @@ fn bench_public_shape<T: OrientedScalar>(
     expected: &[(T, usize)],
     mut operation: impl FnMut() -> Result<(usize, T, usize), Error>,
 ) -> Result<(), Error> {
-    for _ in 0..2 {
+    for _ in 0..expected.len() {
         let (case, first, len) = operation()?;
         assert_oriented_close(&[first], &[expected[case].0]);
         assert_eq!(len, expected[case].1);
@@ -735,13 +600,14 @@ fn bench_public_shape<T: OrientedScalar>(
     let started = Instant::now();
     let mut iterations = 0;
     let (marker, allocations) = measure_allocations(|| {
-        let mut marker = operation()?;
-        iterations += 1;
-        while iterations < 2 || started.elapsed() < min_time {
-            marker = operation()?;
-            iterations += 1;
+        let mut marker = None;
+        while iterations == 0 || started.elapsed() < min_time {
+            for _ in 0..expected.len() {
+                marker = Some(operation()?);
+                iterations += 1;
+            }
         }
-        Ok(marker)
+        Ok(marker.expect("shape cycle is nonempty"))
     })?;
     let elapsed = started.elapsed();
     let after = counters(runtime);
@@ -767,6 +633,37 @@ struct PublicFixture<T: TensorScalar> {
     rhs: TensorMap<U1FusionRule, T>,
     expected_direct: TensorMap<U1FusionRule, T>,
     expected_adjoint: TensorMap<U1FusionRule, T>,
+}
+
+struct PublicInputs<T: TensorScalar> {
+    lhs: TensorMap<U1FusionRule, T>,
+    lhs_adjoint: TensorMap<U1FusionRule, T>,
+    rhs: TensorMap<U1FusionRule, T>,
+}
+
+fn discard_public_oracles<T: OrientedScalar>(
+    fixture: PublicFixture<T>,
+) -> (PublicInputs<T>, (T, usize), (T, usize)) {
+    let PublicFixture {
+        lhs,
+        lhs_adjoint,
+        rhs,
+        expected_direct,
+        expected_adjoint,
+    } = fixture;
+    let direct_marker = (expected_direct.data()[0], expected_direct.data().len());
+    let adjoint_marker = (expected_adjoint.data()[0], expected_adjoint.data().len());
+    drop(expected_direct);
+    drop(expected_adjoint);
+    (
+        PublicInputs {
+            lhs,
+            lhs_adjoint,
+            rhs,
+        },
+        direct_marker,
+        adjoint_marker,
+    )
 }
 
 fn public_fixture<T: OrientedScalar>(
@@ -806,7 +703,7 @@ fn public_fixture<T: OrientedScalar>(
         let mut sum = T::zero();
         for inner in 0..degeneracy {
             sum = sum
-                + lhs_value(charge, &[inner, indices[0]]).conjugate()
+                + lhs_value(charge, &[inner, indices[0]]).maybe_conj(true)
                     * rhs_value(charge, &[inner, indices[1]]);
         }
         sum
@@ -2398,7 +2295,7 @@ fn run_adapter_case<T: OrientedScalar>(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let form = format!(
         "{class}_{}_{}{}",
-        T::TAG,
+        T::NAME,
         matrix_op_tag(lhs_op),
         matrix_op_tag(rhs_op)
     );
@@ -2424,6 +2321,7 @@ fn run_adapter_case<T: OrientedScalar>(
     let mut fixture = adapter_fixture::<T>(shapes);
     let expected = expected_adapter(&fixture, lhs_op, rhs_op, alpha, T::zero());
     let expected_marker = (expected[fixture.dst_base], expected.len());
+    drop(expected);
     let mut executor = benchmark_dense_executor()?;
     bench_adapter(&form, min_time, expected_marker, || {
         execute_adapter(
@@ -2445,7 +2343,7 @@ fn run_adapter_shape_cycle<T: OrientedScalar>(
     lhs_op: MatrixOp,
     min_time: Duration,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let form = format!("{class}_{}_{}I_shape_cycle", T::TAG, matrix_op_tag(lhs_op));
+    let form = format!("{class}_{}_{}I_shape_cycle", T::NAME, matrix_op_tag(lhs_op));
     for &geometry in geometries {
         let shapes = vec![geometry; jobs];
         let mut fixture = adapter_fixture::<T>(&shapes);
@@ -2528,35 +2426,56 @@ macro_rules! run_public_dtype {
             drop(preflight_runtime);
 
             let runtime = benchmark_runtime()?;
-            let fixture = public_fixture::<$ty>(&runtime, $sectors, $degeneracy)?;
-            let expected = if operation == "direct_compose" {
-                &fixture.expected_direct
+            let (fixture, direct_marker, adjoint_marker) =
+                discard_public_oracles(public_fixture::<$ty>(&runtime, $sectors, $degeneracy)?);
+            let expected_marker = if operation == "direct_compose" {
+                direct_marker
             } else {
-                &fixture.expected_adjoint
+                adjoint_marker
             };
-            let expected_marker = (expected.data()[0], expected.data().len());
-            let form = format!("{}_{}_{}", $class, <$ty as OrientedScalar>::TAG, operation);
-            let validate = |(_, first, len)| {
-                assert_oriented_close(&[first], &[expected_marker.0]);
-                assert_eq!(len, expected_marker.1);
-            };
-            match operation {
-                "direct_compose" => bench_public(&runtime, &form, $min_time, validate, || {
-                    Ok(observe_owned(fixture.lhs.compose(&fixture.rhs)?))
-                })?,
-                "lazy_lhs_compose" => bench_public(&runtime, &form, $min_time, validate, || {
-                    Ok(observe_owned(fixture.lhs_adjoint.compose(&fixture.rhs)?))
-                })?,
-                "lazy_lhs_contract" => bench_public(&runtime, &form, $min_time, validate, || {
-                    Ok(observe_owned(fixture.lhs_adjoint.contract(
-                        &fixture.rhs,
-                        &[1],
-                        &[0],
-                        &[0, 1],
-                    )?))
-                })?,
+            let form = format!("{}_{}_{}", $class, <$ty as HarnessScalar>::NAME, operation);
+            let marker = match operation {
+                "direct_compose" => bench(
+                    &runtime,
+                    "U1Public",
+                    "oriented_uniform_run",
+                    &form,
+                    "first_fresh_runtime_after_preflight",
+                    "warm_fixed",
+                    $min_time,
+                    || Ok(observe_owned(fixture.lhs.compose(&fixture.rhs)?)),
+                )?,
+                "lazy_lhs_compose" => bench(
+                    &runtime,
+                    "U1Public",
+                    "oriented_uniform_run",
+                    &form,
+                    "first_fresh_runtime_after_preflight",
+                    "warm_fixed",
+                    $min_time,
+                    || Ok(observe_owned(fixture.lhs_adjoint.compose(&fixture.rhs)?)),
+                )?,
+                "lazy_lhs_contract" => bench(
+                    &runtime,
+                    "U1Public",
+                    "oriented_uniform_run",
+                    &form,
+                    "first_fresh_runtime_after_preflight",
+                    "warm_fixed",
+                    $min_time,
+                    || {
+                        Ok(observe_owned(fixture.lhs_adjoint.contract(
+                            &fixture.rhs,
+                            &[1],
+                            &[0],
+                            &[0, 1],
+                        )?))
+                    },
+                )?,
                 _ => unreachable!(),
-            }
+            };
+            assert_oriented_close(&[marker.1], &[expected_marker.0]);
+            assert_eq!(marker.2, expected_marker.1);
         }
     }};
 }
@@ -2571,23 +2490,18 @@ macro_rules! run_public_shape_dtype {
         drop(preflight_runtime);
 
         let runtime = benchmark_runtime()?;
-        let fixtures: Vec<_> = $degeneracies
-            .iter()
-            .map(|&degeneracy| public_fixture::<$ty>(&runtime, $sectors, degeneracy))
-            .collect::<Result<_, _>>()?;
-        let expected: Vec<_> = fixtures
-            .iter()
-            .map(|fixture| {
-                (
-                    fixture.expected_adjoint.data()[0],
-                    fixture.expected_adjoint.data().len(),
-                )
-            })
-            .collect();
+        let mut fixtures = Vec::with_capacity($degeneracies.len());
+        let mut expected = Vec::with_capacity($degeneracies.len());
+        for &degeneracy in $degeneracies {
+            let (fixture, _, adjoint_marker) =
+                discard_public_oracles(public_fixture::<$ty>(&runtime, $sectors, degeneracy)?);
+            fixtures.push(fixture);
+            expected.push(adjoint_marker);
+        }
         let form = format!(
             "{}_{}_lazy_lhs_compose_shape_cycle",
             $class,
-            <$ty as OrientedScalar>::TAG
+            <$ty as HarnessScalar>::NAME
         );
         let mut next = 0usize;
         bench_public_shape(&runtime, &form, $min_time, &expected, || {

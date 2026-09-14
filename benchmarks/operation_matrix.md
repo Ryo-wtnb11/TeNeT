@@ -129,7 +129,9 @@ The copied marker is compared with the precomputed oracle after timing.
 All jobs, buffers, run partitions, tensors, expected payloads, and changing-shape
 fixtures are constructed before timing. A separate executor or `Runtime` runs a
 full literal nested-sum preflight first and is dropped before the measured
-fixture is built. Adapter preflight uses nonzero complex alpha and beta and
+fixture is built. Measured fixtures retain only copied expected first-value and
+length markers; their full expected payloads are dropped before timing.
+Adapter preflight uses nonzero complex alpha and beta and
 checks gaps as well as active destinations. Timed calls use beta zero. Public
 U1 expected tensors are built directly from parent coordinates and distinct
 coupled-sector labels; they do not use the measured compose, contract, or
@@ -150,7 +152,9 @@ The minimum-run control measures f64 `TI` and complex64 `AI`; singleton and
 heterogeneous controls measure complex64 `AI`. Shape-cycle rows retain one
 executor while cycling the fully preconstructed geometries
 `[(4,3,5),(5,4,6),(3,6,4)]` at `L=32` or
-`[(64,48,56),(56,40,64),(72,56,48)]` at `L=4`.
+`[(64,48,56),(56,40,64),(72,56,48)]` at `L=4`. All three geometries are
+warmed once before timing, and each timing check completes a whole three-case
+cycle. This does not claim that the backend retains three compiled plans.
 
 The public U1 layer uses 32 sectors of degeneracy 4 (`many_small`) or four
 sectors of degeneracy 32 (`few_large`). For f64 and genuinely complex
