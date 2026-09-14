@@ -7514,17 +7514,6 @@ fn adjoint_complex(input: &[Complex64], rows: usize, cols: usize) -> Vec<Complex
     output
 }
 
-fn assert_nonnegative_diagonal(matrices: &[(SectorId, usize, usize, Vec<f64>)]) {
-    for (sector, rows, cols, matrix) in matrices {
-        for index in 0..(*rows).min(*cols) {
-            assert!(
-                matrix[index + rows * index] >= 0.0,
-                "sector {sector:?}: diagonal {index} is negative"
-            );
-        }
-    }
-}
-
 #[test]
 fn full_qr_and_lq_use_original_input_only_when_economy_q_is_full() {
     let rule = Z2FusionRule;
