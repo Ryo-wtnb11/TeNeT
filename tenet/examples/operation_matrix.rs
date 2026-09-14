@@ -1290,10 +1290,16 @@ fn assert_mf_eig<D>(
     source: &TensorMap<U1FusionRule, D>,
     d: &TensorMap<U1FusionRule, Complex64>,
     v: &TensorMap<U1FusionRule, Complex64>,
+    sector_count: usize,
 ) -> Result<(), Error>
 where
     D: HarnessScalar<Eig = Complex64> + tenet::typed::TensorScalar,
 {
+    assert!(std::ptr::eq(source.provider(), d.provider()));
+    assert!(std::ptr::eq(source.provider(), v.provider()));
+    assert_eq!(source.block_count(), sector_count);
+    assert_eq!(d.block_count(), sector_count);
+    assert_eq!(v.block_count(), sector_count);
     for block_index in 0..v.block_count() {
         let v_block = v.block(block_index)?;
         let sector = v.block_fusion_trees(block_index)?.coupled();
@@ -1306,6 +1312,9 @@ where
             .map(|index| d.block(index).unwrap())
             .unwrap();
         let n = v_block.shape()[0];
+        assert_eq!(source_block.shape(), [n, n]);
+        assert_eq!(v_block.shape(), [n, n]);
+        assert_eq!(d_block.shape(), [n, n]);
         for column in 0..n {
             let norm = (0..n)
                 .map(|row| {
@@ -1348,7 +1357,7 @@ fn run_checked_one_sided_for<D: HarnessScalar<Eig = Complex64>>(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let setup_runtime = benchmark_runtime()?;
     let setup_symmetry = format!("OneSided-{workload}-{}", D::NAME);
-    drop(bench(
+    bench(
         &setup_runtime,
         &setup_symmetry,
         "one_sided_checked_fixture",
@@ -1367,7 +1376,7 @@ fn run_checked_one_sided_for<D: HarnessScalar<Eig = Complex64>>(
             )?));
             Ok::<_, Box<dyn std::error::Error>>(())
         },
-    )?);
+    )?;
     let (svd_canonical, svd_fallback) = checked_layout_fixture::<D>(degeneracy, sector_count)?;
     let (svd_canonical_changed, svd_fallback_changed) =
         checked_layout_fixture::<D>(degeneracy + 1, sector_count)?;
@@ -1420,6 +1429,7 @@ fn run_checked_one_sided_for<D: HarnessScalar<Eig = Complex64>>(
             .map_err(checked_compact_example_error)?;
         assert_checked_eig(&eig_changed_input, &changed_eig, sector_count);
         drop(changed_eig);
+        drop(preflight_dense);
         let symmetry = format!("OneSided-{workload}-{layout}-{}", D::NAME);
         for (operation, input, changed_input) in [
             ("checked_full_svd", &svd_input, &svd_changed_input),
@@ -1427,7 +1437,7 @@ fn run_checked_one_sided_for<D: HarnessScalar<Eig = Complex64>>(
         ] {
             let runtime = benchmark_runtime()?;
             let mut dense = DefaultDenseExecutor::new();
-            drop(bench(
+            bench(
                 &runtime,
                 &symmetry,
                 operation,
@@ -1449,9 +1459,9 @@ fn run_checked_one_sided_for<D: HarnessScalar<Eig = Complex64>>(
                     }
                     Ok::<_, Error>(())
                 },
-            )?);
+            )?;
             let mut changed = false;
-            drop(bench(
+            bench(
                 &runtime,
                 &symmetry,
                 &format!("{operation}_shape_alternating"),
@@ -1475,7 +1485,7 @@ fn run_checked_one_sided_for<D: HarnessScalar<Eig = Complex64>>(
                     }
                     Ok::<_, Error>(())
                 },
-            )?);
+            )?;
         }
         assert_checked_source_unchanged(&svd_fixture.data, &originals[0]);
         assert_checked_source_unchanged(&svd_changed.data, &originals[1]);
@@ -1514,7 +1524,7 @@ where
         )?;
         Ok(source)
     };
-    drop(bench(
+    bench(
         &runtime,
         &format!("OneSided-MF-{workload}-{}", D::NAME),
         "one_sided_mf_fixture",
@@ -1526,18 +1536,18 @@ where
             drop(black_box(make(degeneracy)?));
             Ok::<_, Box<dyn std::error::Error>>(())
         },
-    )?);
+    )?;
     let source = make(degeneracy)?;
     let changed_source = make(degeneracy + 1)?;
     let original = source.data().to_vec();
     let changed_original = changed_source.data().to_vec();
     for selected in [&source, &changed_source] {
         let (d, v) = selected.eig_full()?;
-        assert_mf_eig(selected, &d, &v)?;
+        assert_mf_eig(selected, &d, &v, sector_count)?;
         drop((d, v));
     }
     let symmetry = format!("OneSided-MF-{workload}-{}", D::NAME);
-    drop(bench(
+    bench(
         &runtime,
         &symmetry,
         "mf_eig_vectors",
@@ -1549,9 +1559,9 @@ where
             drop(black_box(source.eig_full()?));
             Ok::<_, tenet::typed::Error>(())
         },
-    )?);
+    )?;
     let mut changed = false;
-    drop(bench(
+    bench(
         &runtime,
         &symmetry,
         "mf_eig_vectors_shape_alternating",
@@ -1565,7 +1575,7 @@ where
             drop(black_box(selected.eig_full()?));
             Ok::<_, tenet::typed::Error>(())
         },
-    )?);
+    )?;
     assert_eq!(source.data(), original);
     assert_eq!(changed_source.data(), changed_original);
     Ok(())

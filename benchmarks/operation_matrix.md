@@ -183,11 +183,12 @@ they deliberately take the unchanged fallback. `qr_compact_generic_layout`
 remains the paired-publication negative control.
 
 Each group header prints its actual local `d` and `d+1`, `G`, full-SVD and EIG
-matrix shapes, and the compiled feature record identifies the provider. These
-factor rows instantiate `DefaultDenseExecutor` directly;
-`OP_MATRIX_GEMM_BACKEND` configures tensor-operation GEMM and does not select a
-factorization provider. Running global degeneracies 16 and 32 gives the G=16
-controls local baseline dimensions 1 and 2, respectively.
+matrix shapes, and the compiled feature record identifies the provider. The
+checked rows instantiate `DefaultDenseExecutor` directly; the MF rows use the
+executor leased by their `Runtime`. `OP_MATRIX_GEMM_BACKEND` configures
+tensor-operation GEMM and does not select either factorization provider.
+Running global degeneracies 16 and 32 gives the G=16 controls local baseline
+dimensions 1 and 2, respectively.
 
 ```sh
 OP_MATRIX_OPERATION=one_sided_factor_publication \
