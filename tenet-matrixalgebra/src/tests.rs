@@ -7626,10 +7626,6 @@ fn checked_fixture_matrices(
         .collect()
 }
 
-#[expect(
-    clippy::arc_with_non_send_sync,
-    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
-)]
 fn assert_checked_full_qr_lq_inputs(
     provider: Arc<LateGenericSpy>,
     space: BoundDynamicFusionMapSpace<LateGenericSpy>,
