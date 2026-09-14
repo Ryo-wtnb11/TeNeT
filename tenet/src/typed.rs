@@ -22669,6 +22669,10 @@ mod representation_gates {
         .unwrap();
         let source_body = Arc::clone(owned(&source));
         let source_payload = Arc::clone(&source_body.data);
+        let TypedData::Dense(source_values) = source_payload.as_ref() else {
+            unreachable!()
+        };
+        let source_values = source_values.clone();
         let lazy = source.adjoint().unwrap();
         let eager = lazy.materialized_tensor_uncached().unwrap();
         UNCACHED_ADJOINT_MATERIALIZATIONS.set(0);
@@ -22695,6 +22699,7 @@ mod representation_gates {
                 actual.logical_space().space(),
                 expected.logical_space().space()
             );
+            assert_eq!(actual.data().len(), expected.data().len());
             assert!(actual
                 .data()
                 .iter()
@@ -22707,6 +22712,10 @@ mod representation_gates {
         assert_eq!(UNCACHED_ADJOINT_MATERIALIZATIONS.get(), 0);
         assert!(Arc::ptr_eq(owned(&source), &source_body));
         assert!(Arc::ptr_eq(&owned(&source).data, &source_payload));
+        let TypedData::Dense(unchanged_source_values) = owned(&source).data.as_ref() else {
+            unreachable!()
+        };
+        assert_eq!(unchanged_source_values, &source_values);
         assert_eq!(materialized_adjoint_builds(&lazy), 0);
         let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
             unreachable!()

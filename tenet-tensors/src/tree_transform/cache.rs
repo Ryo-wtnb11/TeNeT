@@ -557,6 +557,7 @@ impl<T> RuntimeTreeTransformStore<T> {
         Ok((None, state.generation))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn admit_checked_generic(
         &self,
         rule: RuleIdentity,

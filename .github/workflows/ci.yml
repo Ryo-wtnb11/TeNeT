@@ -166,6 +166,12 @@ jobs:
         working-directory: tenet
         env:
           CARGO_PROFILE_TEST_DEBUG: ${{ env.CI_HEAVY_TEST_DEBUG }}
+      - name: Run checked Generic facade regression
+        if: matrix.name == 'racah-generated-tensors'
+        run: cargo test -p tenet-rs --no-default-features --features racah-generated,cpu-faer --lib checked_generic_lazy_nonidentity_transforms_are_owned_and_keep_source_cold
+        working-directory: tenet
+        env:
+          CARGO_PROFILE_TEST_DEBUG: ${{ env.CI_HEAVY_TEST_DEBUG }}
 
   cuda-check:
     name: CUDA compile contract
