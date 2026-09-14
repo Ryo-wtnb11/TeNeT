@@ -97,6 +97,11 @@ pub struct Network {
 static NEXT_PLAN_OWNER_TOKEN: AtomicU64 = AtomicU64::new(1);
 #[cfg(test)]
 static SYMMETRIC_SLICE_COMPLETED_JOBS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+thread_local! {
+    static INTERMEDIATE_PAYLOAD_SNAPSHOT_CALLS: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
 #[cfg(all(test, feature = "cuda"))]
 static CUDA_NETWORK_CONTRACT_CALLS: AtomicUsize = AtomicUsize::new(0);
 
@@ -1069,6 +1074,12 @@ impl PayloadMeter {
 fn intermediate_payloads<R, D: TensorScalar>(
     intermediates: &[TypedIntermediateBuffers<R, D>],
 ) -> Vec<Option<(usize, usize)>> {
+    #[cfg(test)]
+    INTERMEDIATE_PAYLOAD_SNAPSHOT_CALLS.with(|calls| {
+        if let Some(count) = calls.get() {
+            calls.set(Some(count + 1));
+        }
+    });
     intermediates
         .iter()
         .flat_map(|buffers| [buffers.contracted.as_ref(), buffers.oriented.as_ref()])
@@ -1819,7 +1830,7 @@ impl PlannedNetwork {
         let producers = &mut workspace.producers;
         let intermediates = &mut workspace.intermediates;
         for (step_index, step) in self.schedule.steps.iter().enumerate() {
-            let retained_payloads = intermediate_payloads(intermediates);
+            let retained_payloads = meter.as_ref().map(|_| intermediate_payloads(intermediates));
             let lhs = slots[step.lhs_slot].as_ref().ok_or_else(|| {
                 HostNetworkError::<R>::from(invalid("lhs operand already consumed"))
             })?;
@@ -1847,7 +1858,10 @@ impl PlannedNetwork {
             )?;
             if let Some(meter) = meter.as_deref_mut() {
                 let payload = contracted.get(contract_buffer).network_owned_payload();
-                let mut payloads = retained_payloads.clone();
+                let mut payloads = retained_payloads
+                    .as_ref()
+                    .expect("meter requires retained payload snapshot")
+                    .clone();
                 payloads.push(payload);
                 meter
                     .observe(slots, producers, &payloads)
@@ -1863,7 +1877,10 @@ impl PlannedNetwork {
                     domain,
                 )?;
                 if let Some(meter) = meter.as_deref_mut() {
-                    let mut payloads = retained_payloads.clone();
+                    let mut payloads = retained_payloads
+                        .as_ref()
+                        .expect("meter requires retained payload snapshot")
+                        .clone();
                     payloads.extend([
                         contracted.get(contracted_buffer).network_owned_payload(),
                         oriented.get(oriented_buffer).network_owned_payload(),
@@ -2613,6 +2630,64 @@ mod typed_replay_tests {
         TemporaryLabel::from(name)
     }
 
+    fn intermediate_payload_snapshot_calls<T>(operation: impl FnOnce() -> T) -> (T, usize) {
+        INTERMEDIATE_PAYLOAD_SNAPSHOT_CALLS.with(|calls| {
+            assert!(calls.replace(Some(0)).is_none());
+        });
+        let result = operation();
+        let calls = INTERMEDIATE_PAYLOAD_SNAPSHOT_CALLS.with(|calls| {
+            calls
+                .replace(None)
+                .expect("snapshot observation must remain armed")
+        });
+        (result, calls)
+    }
+
+    #[test]
+    fn ordinary_workspace_replay_skips_payload_meter_snapshots() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let bond = GradedSpace::try_new(U1FusionRule, [(U1Irrep::new(0), 2)]).unwrap();
+        let make = |shift| {
+            TensorMap::from_block_fn(&runtime, [&bond], [&bond], move |_, indices| {
+                shift + indices[0] as f64 + 2.0 * indices[1] as f64
+            })
+            .unwrap()
+        };
+        let tensors = [make(1.0), make(2.0), make(3.0)];
+        let network = Network::new(
+            vec![
+                vec![label("a"), label("x")],
+                vec![label("x"), label("y")],
+                vec![label("y"), label("c")],
+            ],
+            vec![false; 3],
+            vec![Some(1); 3],
+            vec![label("a"), label("c")],
+            Some(1),
+        )
+        .unwrap();
+        let refs = tensors.iter().collect::<Vec<_>>();
+        let planned = network.plan(&refs, &GreedyDenseOptimizer).unwrap();
+        assert!(planned.schedule.steps.len() > 1);
+        let mut workspace = NetworkExecutionWorkspace::default();
+
+        let (cold, cold_calls) = intermediate_payload_snapshot_calls(|| {
+            planned
+                .execute_with_workspace(&refs, &mut workspace)
+                .unwrap()
+        });
+        let (warm, warm_calls) = intermediate_payload_snapshot_calls(|| {
+            planned
+                .execute_with_workspace(&refs, &mut workspace)
+                .unwrap()
+        });
+
+        assert_eq!(cold_calls, 0);
+        assert_eq!(warm_calls, 0);
+        assert_eq!(cold.data(), &[109.0, 160.0, 169.0, 248.0]);
+        assert_eq!(warm.data(), &[109.0, 160.0, 169.0, 248.0]);
+    }
+
     #[test]
     fn symmetric_slice_binding_checks_adjoint_orientation_leg_and_rule() {
         let runtime = Runtime::builder().build().unwrap();
@@ -2755,9 +2830,12 @@ mod typed_replay_tests {
             .unwrap();
         assert_eq!(sliced.slices().nslices(), 16);
 
-        let (cold, cold_stats) = network
-            .execute_symmetric_sliced(&tensors, sliced.clone(), usize::MAX)
-            .unwrap();
+        let ((cold, cold_stats), snapshot_calls) = intermediate_payload_snapshot_calls(|| {
+            network
+                .execute_symmetric_sliced(&tensors, sliced.clone(), usize::MAX)
+                .unwrap()
+        });
+        assert!(snapshot_calls > 0);
         let (warm, warm_stats) = network
             .execute_symmetric_sliced(&tensors, sliced.clone(), usize::MAX)
             .unwrap();
