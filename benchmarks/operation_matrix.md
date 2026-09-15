@@ -213,6 +213,32 @@ OP_MATRIX_MIN_MS=100 \
 benchmarks/operation_matrix.sh
 ```
 
+`eig_source_geometry` is an explicit-only rank-2 measurement group for MF U(1)
+and checked-Generic full EIG. It covers `f64` and genuinely complex
+`Complex64`, few-large `G=2,d=D`, and many-small
+`G=16,d=max(1,D/16)`. Checked inputs use canonical and padded reversed layouts;
+both layouts exercise the EIG geometry path. Compact QR over separate inputs
+with identical geometry and scalar types is the unchanged control.
+
+Fixed and alternating `d`/`d+1` inputs are preconstructed. Full preflight
+checks the known distinct spectrum, finite nonzero eigenvector columns,
+scale-invariant `A V = V Lambda`, provider/block identity, QR reconstruction,
+and source preservation outside timing. Every timed operation drops its owned
+result inside the closure, including the first row. Because preflight may warm
+Runtime and process-global metadata, rows say `first_after_preflight`; they do
+not claim cold cache admission. Caller-thread Rust allocation calls and
+requested bytes are available. Native and worker allocations, frees, live or
+peak bytes, exact source-copy bytes, and backend materialization are not.
+
+```sh
+OP_MATRIX_OPERATION=eig_source_geometry \
+OP_MATRIX_FORM=owned \
+OP_MATRIX_DEGENERACY=32 \
+OP_MATRIX_MIN_MS=100 \
+OP_MATRIX_CARGO_FEATURES=cpu-faer,racah-generated \
+benchmarks/operation_matrix.sh
+```
+
 `full_qr_lowering` is an explicit-only diagnostic for the original-input full
 QR/LQ lowering. It fixes global `D=32`: few-large uses `G=2,d=32`, and
 many-small uses `G=16,d=2`. The sweep covers homogeneous square `d x d`, wide
