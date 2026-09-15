@@ -11833,12 +11833,14 @@ mod sector_matricization_tests {
 
     #[test]
     fn mf_one_sided_pair_errors_precede_tree_traversal() {
-        let (homspace, matrix) = z2_single_sector_matrix(1, 1);
+        let (homspace, mut matrix) = z2_single_sector_matrix(1, 1);
         let authority = BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free(
             Arc::new(Z2FusionRule),
             homspace.clone(),
         )
         .unwrap();
+        matrix.row_trees.clear();
+        matrix.col_trees.clear();
         let dimensions = BTreeMap::from([(SectorId::new(0), 1)]);
         let pair = |sector| FactorPair {
             sector,
@@ -12097,7 +12099,7 @@ mod sector_matricization_tests {
     }
 
     #[test]
-    fn checked_one_sided_missing_pair_precedes_publication_placement() {
+    fn checked_one_sided_reports_missing_pairs_and_full_trees() {
         let rule = TestGenericRule;
         let provider = Arc::new(InfallibleGeneric::new(&rule));
         let (homspace, matrix, _) = vertex_tree_factor_fixture(false);
