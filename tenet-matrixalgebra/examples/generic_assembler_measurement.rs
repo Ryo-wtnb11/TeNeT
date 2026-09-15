@@ -2,11 +2,13 @@
 //!
 //! The provider is synthetic but structurally admitted through the checked public API. It is not
 //! a physical category, uses no Racah coefficients, and says nothing about dense numerical
-//! performance. Fixture construction and admission stay outside measurement. Each timed call
-//! includes `BoundDynamicTensorRef` construction, checked routing and matrix assembly, error
-//! propagation from the rejecting dense executor, and destruction of the returned error.
-//! Set `TENET_GENERIC_VALUES_BORROW_CASES=1` to compare matched canonical and padded layouts
-//! after a 100 ms untimed warmup per case.
+//! performance. Fixture construction and admission stay outside measurement. The first timed call
+//! retains its returned error for validation after the clock stops. Repeated calls include
+//! `BoundDynamicTensorRef` construction, checked routing and matrix assembly, error propagation
+//! from the rejecting dense executor, and destruction of the returned error.
+//! Set `TENET_GENERIC_VALUES_BORROW_CASES=1` to retain the narrower canonical/padded case set.
+//! Each fresh process reports one calibrated repeated batch; the historical
+//! `TENET_GENERIC_ASSEMBLER_SAMPLES` setting is intentionally ignored.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::convert::Infallible;
@@ -313,42 +315,65 @@ fn validate_run(fixture: &Fixture) {
     assert_eq!(calls, 1);
 }
 
-fn measure(name: &str, fixture: &Fixture, iterations: usize, samples: usize) {
-    validate_run(fixture);
-    if std::env::var("TENET_GENERIC_VALUES_BORROW_CASES").as_deref() == Ok("1") {
-        let start = Instant::now();
-        while start.elapsed() < Duration::from_millis(100) {
-            drop(black_box(run_once(fixture)));
-        }
-    } else {
-        for _ in 0..16 {
-            drop(black_box(run_once(fixture)));
-        }
-    }
-    for sample in 0..samples {
-        validate_run(fixture);
+fn measure(name: &str, fixture: &Fixture, minimum_iterations: usize, min_time: Duration) {
+    ALLOCATION_CALLS.store(0, Ordering::Relaxed);
+    ALLOCATION_BYTES.store(0, Ordering::Relaxed);
+    MEASURE_ALLOCATIONS.store(true, Ordering::Relaxed);
+    let start = Instant::now();
+    let first = black_box(run_once(black_box(fixture)));
+    let first_elapsed = start.elapsed();
+    MEASURE_ALLOCATIONS.store(false, Ordering::Relaxed);
+    let first_allocation_calls = ALLOCATION_CALLS.load(Ordering::Relaxed);
+    let first_allocation_bytes = ALLOCATION_BYTES.load(Ordering::Relaxed);
+    let (first_error, first_calls) = first;
+    assert!(matches!(
+        first_error,
+        CheckedGenericFactorPlanError::Operation(tenet_tensors::OperationError::Dense(
+            DenseError::RankMismatch {
+                shape: 0,
+                strides: 0
+            }
+        ))
+    ));
+    assert_eq!(first_calls, 1);
+
+    let mut iterations = minimum_iterations;
+    let repeated_elapsed = loop {
         let start = Instant::now();
         for _ in 0..iterations {
-            drop(black_box(run_once(fixture)));
+            drop(black_box(run_once(black_box(fixture))));
         }
         let elapsed = start.elapsed();
-        validate_run(fixture);
-
-        ALLOCATION_CALLS.store(0, Ordering::Relaxed);
-        ALLOCATION_BYTES.store(0, Ordering::Relaxed);
-        MEASURE_ALLOCATIONS.store(true, Ordering::Relaxed);
-        for _ in 0..iterations {
-            drop(black_box(run_once(fixture)));
+        if elapsed >= min_time {
+            break elapsed;
         }
-        MEASURE_ALLOCATIONS.store(false, Ordering::Relaxed);
-        validate_run(fixture);
-        println!(
-            "{name},{sample},{iterations},{:.3},{:.3},{:.3}",
-            elapsed.as_nanos() as f64 / iterations as f64,
-            ALLOCATION_CALLS.load(Ordering::Relaxed) as f64 / iterations as f64,
-            ALLOCATION_BYTES.load(Ordering::Relaxed) as f64 / iterations as f64,
-        );
+        iterations = iterations
+            .checked_mul(2)
+            .expect("iteration calibration overflowed");
+    };
+    validate_run(fixture);
+
+    ALLOCATION_CALLS.store(0, Ordering::Relaxed);
+    ALLOCATION_BYTES.store(0, Ordering::Relaxed);
+    MEASURE_ALLOCATIONS.store(true, Ordering::Relaxed);
+    for _ in 0..iterations {
+        drop(black_box(run_once(black_box(fixture))));
     }
+    MEASURE_ALLOCATIONS.store(false, Ordering::Relaxed);
+    validate_run(fixture);
+
+    println!(
+        "{name},first_after_setup,1,{},{:.3},{first_allocation_calls},{first_allocation_bytes},NA",
+        first_elapsed.as_nanos(),
+        first_elapsed.as_nanos() as f64,
+    );
+    println!(
+        "{name},repeated,{iterations},{},{:.3},{:.3},{:.3},NA",
+        repeated_elapsed.as_nanos(),
+        repeated_elapsed.as_nanos() as f64 / iterations as f64,
+        ALLOCATION_CALLS.load(Ordering::Relaxed) as f64 / iterations as f64,
+        ALLOCATION_BYTES.load(Ordering::Relaxed) as f64 / iterations as f64,
+    );
 }
 
 fn env_usize(name: &str, default: usize) -> usize {
@@ -359,24 +384,31 @@ fn env_usize(name: &str, default: usize) -> usize {
 }
 
 fn main() {
-    let iterations = env_usize("TENET_GENERIC_ASSEMBLER_ITERS", 2_000);
-    let samples = env_usize("TENET_GENERIC_ASSEMBLER_SAMPLES", 7);
-    assert!(iterations > 0, "iterations must be nonzero");
-    assert!(samples > 0, "samples must be nonzero");
-    println!("case,sample,iterations,ns_per_iter,alloc_calls_per_iter,alloc_bytes_per_iter");
+    let minimum_iterations = env_usize("TENET_GENERIC_ASSEMBLER_ITERS", 1);
+    let min_time = Duration::from_millis(env_usize("TENET_GENERIC_ASSEMBLER_MIN_MS", 100) as u64);
+    assert!(minimum_iterations > 0, "iterations must be nonzero");
+    assert!(!min_time.is_zero(), "minimum time must be nonzero");
+    println!(
+        "# scope_first=checked_prefix_through_return_error_retained_for_outside_validation scope_repeated=checked_prefix_through_error_drop setup=fixture+admission_excluded"
+    );
+    println!(
+        "# sampling=one_calibrated_repeated_batch_per_fresh_process historical_samples_env_ignored=true allocations=global_process_Rust_requests first_timer_includes_allocation_probe=true repeated_timer_excludes_allocation_probe=true synchronous_rejecting_executor=true native_worker_peak=NA min_repeated_ms={}",
+        min_time.as_millis()
+    );
+    println!("case,phase,iterations,elapsed_ns,ns_per_iter,alloc_calls_per_iter,alloc_bytes_per_iter,peak_bytes");
     if std::env::var("TENET_GENERIC_VALUES_BORROW_CASES").as_deref() == Ok("1") {
         for (trees, degeneracy) in [(2, 3), (8, 1)] {
             measure(
                 &format!("canonical_one_sector_t{trees}_deg{degeneracy}"),
                 &canonical_fixture(&[trees], degeneracy),
-                iterations,
-                samples,
+                minimum_iterations,
+                min_time,
             );
             measure(
                 &format!("padded_one_sector_t{trees}_deg{degeneracy}"),
                 &fixture(&[trees], degeneracy, false),
-                iterations,
-                samples,
+                minimum_iterations,
+                min_time,
             );
         }
         return;
@@ -385,26 +417,26 @@ fn main() {
         measure(
             &format!("one_sector_t{trees}_deg1"),
             &fixture(&[trees], 1, false),
-            iterations,
-            samples,
+            minimum_iterations,
+            min_time,
         );
     }
     measure(
         "one_sector_t2_deg3",
         &fixture(&[2], 3, false),
-        iterations,
-        samples,
+        minimum_iterations,
+        min_time,
     );
     measure(
         "interleaved_two_sector_t8_deg1",
         &fixture(&[8, 9], 1, true),
-        iterations,
-        samples,
+        minimum_iterations,
+        min_time,
     );
     measure(
         "few_large_t1_deg4",
         &fixture(&[1], 4, false),
-        iterations,
-        samples,
+        minimum_iterations,
+        min_time,
     );
 }
