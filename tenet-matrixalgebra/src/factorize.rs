@@ -8925,12 +8925,11 @@ where
             };
         }
     }
-    let space = build_bound_factor_space_generic_checked(
+    let space = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
         Arc::clone(provider),
-        homspace,
-        dimensions.iter().map(|(&sector, &dim)| (sector, dim)),
-        matches!(side, FactorSide::Left),
-    )?;
+        output_hom,
+    )
+    .map_err(CheckedGenericFactorPlanError::from)?;
     let len = space.space().required_len().map_err(|e| {
         CheckedGenericFactorPlanError::Operation(OperationError::from_core_preserving_context(e))
     })?;
