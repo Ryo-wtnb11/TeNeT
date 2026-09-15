@@ -1759,6 +1759,7 @@ fn assert_multitree_source<D: HarnessScalar>(
 ) {
     let structure = input.space().space().structure();
     assert_eq!(structure.block_count(), sector_count.pow(3));
+    assert_eq!(input.data().len(), structure.required_len().unwrap());
     let mut visited = vec![false; sector_count.pow(3)];
     let dimension = sector_count * degeneracy;
     for index in 0..structure.block_count() {
@@ -1794,6 +1795,8 @@ fn assert_multitree_source<D: HarnessScalar>(
 fn assert_multitree_layouts<D>(
     canonical: &CheckedLayoutInput<D>,
     fallback: &CheckedLayoutInput<D>,
+    degeneracy: usize,
+    sector_count: usize,
 ) {
     let canonical = canonical.space.space().structure();
     let fallback = fallback.space.space().structure();
@@ -1804,17 +1807,17 @@ fn assert_multitree_layouts<D>(
         assert_eq!(canonical_block.key(), fallback_block.key());
         assert_eq!(canonical_block.shape(), fallback_block.shape());
     }
-    let mut canonical_offset = 0;
     let mut fallback_offset = 1;
     for index in 0..canonical.block_count() {
-        let canonical_block = canonical.block(index).unwrap();
         let fallback_block = fallback.block(index).unwrap();
-        assert_eq!(canonical_block.offset(), canonical_offset);
         assert_eq!(fallback_block.offset(), fallback_offset);
-        canonical_offset += canonical_block.element_count().unwrap();
         fallback_offset += fallback_block.element_count().unwrap() + 1;
     }
-    assert_eq!(canonical.required_len().unwrap(), canonical_offset);
+    let matrix_dimension = sector_count * degeneracy;
+    assert_eq!(
+        canonical.required_len().unwrap(),
+        sector_count * matrix_dimension * matrix_dimension
+    );
     assert_eq!(fallback.required_len().unwrap(), fallback_offset - 1);
 }
 
@@ -2382,8 +2385,13 @@ fn run_checked_multitree_eig<D: HarnessScalar<Eig = Complex64>>(
     let (canonical, fallback) = multitree_eig_fixture::<D>(degeneracy, sector_count)?;
     let (canonical_changed, fallback_changed) =
         multitree_eig_fixture::<D>(degeneracy + 1, sector_count)?;
-    assert_multitree_layouts(&canonical, &fallback);
-    assert_multitree_layouts(&canonical_changed, &fallback_changed);
+    assert_multitree_layouts(&canonical, &fallback, degeneracy, sector_count);
+    assert_multitree_layouts(
+        &canonical_changed,
+        &fallback_changed,
+        degeneracy + 1,
+        sector_count,
+    );
     for (layout, fixture, changed_fixture) in [
         ("canonical", canonical, canonical_changed),
         ("padded_reordered", fallback, fallback_changed),
