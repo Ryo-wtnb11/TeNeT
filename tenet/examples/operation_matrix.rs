@@ -23,9 +23,9 @@ use tenet::dense::{
     MatrixOp,
 };
 use tenet_matrixalgebra::{
-    lq_compact_dyn_checked_generic, lq_full_dyn_checked_generic, qr_compact_dyn_checked_generic,
-    qr_compact_dyn_generic, qr_full_dyn_checked_generic, svd_compact_dyn_checked_generic,
-    BoundDynFactor, CheckedGenericFactorPlanError, FactorScalar,
+    eig_full_dyn_checked_generic, lq_compact_dyn_checked_generic, lq_full_dyn_checked_generic,
+    qr_compact_dyn_checked_generic, qr_compact_dyn_generic, qr_full_dyn_checked_generic,
+    svd_compact_dyn_checked_generic, BoundDynFactor, CheckedGenericFactorPlanError, FactorScalar,
 };
 use tenet_tensors::{BoundDynamicFusionMapSpace, BoundDynamicTensorRef, DynamicFusionMapSpace};
 
@@ -1563,6 +1563,453 @@ fn run_checked_compact_input(
     run_checked_compact_input_for::<Complex64>(degeneracy, min_time)
 }
 
+fn eig_value<D: HarnessScalar>(sector: usize, row: usize, column: usize) -> D {
+    let diagonal = (sector * 32 + row + 1) as f64;
+    let adjacent = row + 1 == column && diagonal > 1.0;
+    D::from_parts(
+        if row == column {
+            diagonal
+        } else if adjacent {
+            if D::NAME == "c64" {
+                0.25
+            } else {
+                0.5
+            }
+        } else {
+            0.0
+        },
+        if D::NAME == "c64" && adjacent {
+            -0.375
+        } else {
+            0.0
+        },
+    )
+}
+
+fn eig_fixture<D: HarnessScalar>(
+    degeneracy: usize,
+    sector_count: usize,
+) -> Result<(CheckedLayoutInput<D>, CheckedLayoutInput<D>), Box<dyn std::error::Error>> {
+    let (mut canonical, mut fallback) =
+        checked_layout_fixture_with_aspect(degeneracy, sector_count, CheckedMatrixAspect::Square)?;
+    for fixture in [&mut canonical, &mut fallback] {
+        let structure = fixture.space.space().structure();
+        for block_index in 0..structure.block_count() {
+            let block = structure.block(block_index)?;
+            let sector = block.key().as_fusion_tree_pair().unwrap().coupled().id();
+            for column in 0..block.shape()[1] {
+                for row in 0..block.shape()[0] {
+                    fixture.data
+                        [block.offset() + row * block.strides()[0] + column * block.strides()[1]] =
+                        eig_value(sector, row, column);
+                }
+            }
+        }
+    }
+    Ok((canonical, fallback))
+}
+
+fn checked_source_block<'a, D>(
+    input: &'a BoundDynamicTensorRef<'_, LayoutGenericRule, D>,
+    sector: SectorId,
+) -> BlockRef<'a> {
+    let structure = input.space().space().structure();
+    (0..structure.block_count())
+        .map(|index| structure.block(index).unwrap())
+        .find(|block| block.key().as_fusion_tree_pair().unwrap().coupled() == sector)
+        .expect("EIG fixture contains every requested sector")
+}
+
+fn assert_checked_eig_source<D: HarnessScalar>(
+    input: &BoundDynamicTensorRef<'_, LayoutGenericRule, D>,
+) {
+    let structure = input.space().space().structure();
+    for block_index in 0..structure.block_count() {
+        let block = structure.block(block_index).unwrap();
+        let sector = block.key().as_fusion_tree_pair().unwrap().coupled().id();
+        for column in 0..block.shape()[1] {
+            for row in 0..block.shape()[0] {
+                assert_eq!(
+                    checked_block_value(input.data(), block, row, column),
+                    eig_value::<D>(sector, row, column).as_complex()
+                );
+            }
+        }
+    }
+}
+
+fn assert_eig_block(
+    sector: usize,
+    n: usize,
+    value: impl Fn(usize) -> Complex64,
+    source: impl Fn(usize, usize) -> Complex64,
+    vector: impl Fn(usize, usize) -> Complex64,
+) {
+    for column in 0..n {
+        let eigenvalue = value(column);
+        let expected = Complex64::new((sector * 32 + n - column) as f64, 0.0);
+        assert!((eigenvalue - expected).norm() <= 1.0e-10 * expected.norm().max(1.0));
+        let column_norm = (0..n)
+            .map(|row| vector(row, column).norm_sqr())
+            .sum::<f64>()
+            .sqrt();
+        assert!(column_norm.is_finite() && column_norm > 0.0);
+        for row in 0..n {
+            let av = (0..n).fold(Complex64::new(0.0, 0.0), |sum, inner| {
+                sum + source(row, inner) * vector(inner, column)
+            }) / column_norm;
+            let vd = vector(row, column) * eigenvalue / column_norm;
+            assert!((av - vd).norm() <= 1.0e-9 * av.norm().max(vd.norm()).max(1.0));
+        }
+    }
+}
+
+fn assert_checked_eig<D: HarnessScalar<Eig = Complex64>>(
+    input: &BoundDynamicTensorRef<'_, LayoutGenericRule, D>,
+    result: &tenet_matrixalgebra::EigFullDyn<LayoutGenericRule, D>,
+    sector_count: usize,
+) {
+    assert!(Arc::ptr_eq(
+        result.v().space().provider_arc(),
+        input.space().provider_arc()
+    ));
+    assert_eq!(
+        input.space().space().structure().block_count(),
+        sector_count
+    );
+    assert_eq!(
+        result.v().space().space().structure().block_count(),
+        sector_count
+    );
+    assert_eq!(result.eigenvalues().len(), sector_count);
+    for sector in (0..sector_count).map(SectorId::new) {
+        let source = checked_source_block(input, sector);
+        let vectors = factor_block(result.v(), sector);
+        let values = &result
+            .eigenvalues()
+            .iter()
+            .find(|entry| entry.sector == sector)
+            .expect("EIG result contains every requested sector")
+            .values;
+        let n = source.shape()[0];
+        assert_eq!(source.shape(), [n, n]);
+        assert_eq!(vectors.shape(), [n, n]);
+        assert_eq!(values.len(), n);
+        assert_eig_block(
+            sector.id(),
+            n,
+            |column| values[column],
+            |row, column| checked_block_value(input.data(), source, row, column),
+            |row, column| checked_block_value(result.v().data(), vectors, row, column),
+        );
+    }
+}
+
+fn assert_mf_eig<D>(
+    source: &TensorMap<U1FusionRule, D>,
+    d: &TensorMap<U1FusionRule, Complex64>,
+    v: &TensorMap<U1FusionRule, Complex64>,
+    sector_count: usize,
+) -> Result<(), Error>
+where
+    D: HarnessScalar<Eig = Complex64> + tenet::typed::TensorScalar,
+{
+    assert!(std::ptr::eq(source.provider(), d.provider()));
+    assert!(std::ptr::eq(source.provider(), v.provider()));
+    assert_eq!(
+        (source.block_count(), d.block_count(), v.block_count()),
+        (sector_count, sector_count, sector_count)
+    );
+    for block_index in 0..v.block_count() {
+        let vectors = v.block(block_index)?;
+        let trees = v.block_fusion_trees(block_index)?;
+        let sector = trees.coupled();
+        let source_index = (0..source.block_count())
+            .find(|&index| source.block_fusion_trees(index).unwrap().coupled() == sector)
+            .unwrap();
+        let value_index = (0..d.block_count())
+            .find(|&index| d.block_fusion_trees(index).unwrap().coupled() == sector)
+            .unwrap();
+        let source_block = source.block(source_index)?;
+        let values = d.block(value_index)?;
+        let n = vectors.shape()[0];
+        assert_eq!(source_block.shape(), [n, n]);
+        assert_eq!(vectors.shape(), [n, n]);
+        assert_eq!(values.shape(), [n, n]);
+        for column in 0..n {
+            for row in 0..n {
+                if row != column {
+                    let value = d.data()[values.offset()
+                        + row * values.strides()[0]
+                        + column * values.strides()[1]];
+                    assert!(value.norm() <= 1.0e-12);
+                }
+            }
+        }
+        assert_eig_block(
+            sector.charge() as usize,
+            n,
+            |column| {
+                d.data()
+                    [values.offset() + column * values.strides()[0] + column * values.strides()[1]]
+            },
+            |row, column| {
+                source.data()[source_block.offset()
+                    + row * source_block.strides()[0]
+                    + column * source_block.strides()[1]]
+                    .as_complex()
+            },
+            |row, column| {
+                v.data()
+                    [vectors.offset() + row * vectors.strides()[0] + column * vectors.strides()[1]]
+            },
+        );
+    }
+    Ok(())
+}
+
+fn run_checked_eig<D: HarnessScalar<Eig = Complex64>>(
+    workload: &str,
+    degeneracy: usize,
+    sector_count: usize,
+    min_time: Duration,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let setup_runtime = benchmark_runtime()?;
+    bench(
+        &setup_runtime,
+        &format!("EigGeometry-{workload}-{}", D::NAME),
+        "checked_eig_fixture",
+        "setup",
+        "fixture_first",
+        "fixture_repeat",
+        min_time,
+        || {
+            drop(black_box(eig_fixture::<D>(degeneracy, sector_count)?));
+            Ok::<_, Box<dyn std::error::Error>>(())
+        },
+    )?;
+    let (canonical, fallback) = eig_fixture::<D>(degeneracy, sector_count)?;
+    let (canonical_changed, fallback_changed) = eig_fixture::<D>(degeneracy + 1, sector_count)?;
+    let (control_canonical, control_fallback) =
+        checked_layout_fixture_with_aspect(degeneracy, sector_count, CheckedMatrixAspect::Square)?;
+    let (control_canonical_changed, control_fallback_changed) = checked_layout_fixture_with_aspect(
+        degeneracy + 1,
+        sector_count,
+        CheckedMatrixAspect::Square,
+    )?;
+    for (layout, fixture, changed_fixture, control, changed_control) in [
+        (
+            "canonical",
+            canonical,
+            canonical_changed,
+            control_canonical,
+            control_canonical_changed,
+        ),
+        (
+            "padded_reordered",
+            fallback,
+            fallback_changed,
+            control_fallback,
+            control_fallback_changed,
+        ),
+    ] {
+        let input = BoundDynamicTensorRef::try_new(&fixture.space, &fixture.data)?;
+        let changed_input =
+            BoundDynamicTensorRef::try_new(&changed_fixture.space, &changed_fixture.data)?;
+        let control_input = BoundDynamicTensorRef::try_new(&control.space, &control.data)?;
+        let changed_control_input =
+            BoundDynamicTensorRef::try_new(&changed_control.space, &changed_control.data)?;
+        let mut preflight = DefaultDenseExecutor::new();
+        for selected in [&input, &changed_input] {
+            let eig = eig_full_dyn_checked_generic(&mut preflight, selected)
+                .map_err(checked_compact_example_error)?;
+            assert_checked_eig(selected, &eig, sector_count);
+            drop(eig);
+        }
+        for selected in [&control_input, &changed_control_input] {
+            let qr = qr_compact_dyn_checked_generic(&mut preflight, selected)
+                .map_err(checked_compact_example_error)?;
+            assert_checked_pair_reconstructs(&qr.0, &qr.1, sector_count);
+            drop(qr);
+        }
+        drop(preflight);
+        let symmetry = format!("EigGeometry-{workload}-{layout}-{}", D::NAME);
+        for (operation, is_eig) in [("checked_eig", true), ("compact_qr_control", false)] {
+            let runtime = benchmark_runtime()?;
+            let mut dense = DefaultDenseExecutor::new();
+            let fixed = if is_eig { &input } else { &control_input };
+            let shape_changed = if is_eig {
+                &changed_input
+            } else {
+                &changed_control_input
+            };
+            bench(
+                &runtime,
+                &symmetry,
+                operation,
+                "owned",
+                "first_after_preflight",
+                "warm_after_preflight",
+                min_time,
+                || {
+                    if is_eig {
+                        drop(black_box(
+                            eig_full_dyn_checked_generic(&mut dense, &input)
+                                .map_err(checked_compact_example_error)?,
+                        ));
+                    } else {
+                        drop(black_box(
+                            qr_compact_dyn_checked_generic(&mut dense, fixed)
+                                .map_err(checked_compact_example_error)?,
+                        ));
+                    }
+                    Ok::<_, Error>(())
+                },
+            )?;
+            let mut changed = false;
+            bench(
+                &runtime,
+                &symmetry,
+                &format!("{operation}_shape_alternating"),
+                "owned",
+                "first_after_preflight",
+                "warm_shape_alternating",
+                min_time,
+                || {
+                    let selected = if changed { shape_changed } else { fixed };
+                    changed = !changed;
+                    if is_eig {
+                        drop(black_box(
+                            eig_full_dyn_checked_generic(&mut dense, selected)
+                                .map_err(checked_compact_example_error)?,
+                        ));
+                    } else {
+                        drop(black_box(
+                            qr_compact_dyn_checked_generic(&mut dense, selected)
+                                .map_err(checked_compact_example_error)?,
+                        ));
+                    }
+                    Ok::<_, Error>(())
+                },
+            )?;
+        }
+        assert_checked_eig_source(&input);
+        assert_checked_eig_source(&changed_input);
+    }
+    Ok(())
+}
+
+fn run_mf_eig<D>(
+    workload: &str,
+    degeneracy: usize,
+    sector_count: usize,
+    min_time: Duration,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    D: HarnessScalar<Eig = Complex64> + tenet::typed::TensorScalar,
+{
+    let runtime = benchmark_runtime()?;
+    let make = |d| -> Result<_, Box<dyn std::error::Error>> {
+        let space = GradedSpace::try_new(
+            U1FusionRule,
+            (0..sector_count).map(|sector| (U1Irrep::new(sector as i32), d)),
+        )?;
+        Ok(TensorMap::<U1FusionRule, D>::from_block_fn(
+            &runtime,
+            [&space],
+            [&space],
+            |trees, index| eig_value(trees.coupled().charge() as usize, index[0], index[1]),
+        )?)
+    };
+    bench(
+        &runtime,
+        &format!("EigGeometry-MF-{workload}-{}", D::NAME),
+        "mf_eig_fixture",
+        "setup",
+        "fixture_first",
+        "fixture_repeat",
+        min_time,
+        || {
+            drop(black_box(make(degeneracy)?));
+            Ok::<_, Box<dyn std::error::Error>>(())
+        },
+    )?;
+    let source = make(degeneracy)?;
+    let changed_source = make(degeneracy + 1)?;
+    for selected in [&source, &changed_source] {
+        let (d, v) = selected.eig_full()?;
+        assert_mf_eig(selected, &d, &v, sector_count)?;
+        drop((d, v));
+    }
+    let symmetry = format!("EigGeometry-MF-{workload}-{}", D::NAME);
+    bench(
+        &runtime,
+        &symmetry,
+        "mf_eig",
+        "owned",
+        "first_after_preflight",
+        "warm_after_preflight",
+        min_time,
+        || {
+            drop(black_box(source.eig_full()?));
+            Ok::<_, Error>(())
+        },
+    )?;
+    let mut changed = false;
+    bench(
+        &runtime,
+        &symmetry,
+        "mf_eig_shape_alternating",
+        "owned",
+        "first_after_preflight",
+        "warm_shape_alternating",
+        min_time,
+        || {
+            let selected = if changed { &changed_source } else { &source };
+            changed = !changed;
+            drop(black_box(selected.eig_full()?));
+            Ok::<_, Error>(())
+        },
+    )?;
+    for selected in [&source, &changed_source] {
+        for block_index in 0..selected.block_count() {
+            let block = selected.block(block_index)?;
+            let sector = selected.block_fusion_trees(block_index)?.coupled().charge() as usize;
+            for column in 0..block.shape()[1] {
+                for row in 0..block.shape()[0] {
+                    assert_eq!(
+                        selected.data()[block.offset()
+                            + row * block.strides()[0]
+                            + column * block.strides()[1]]
+                            .as_complex(),
+                        eig_value::<D>(sector, row, column).as_complex()
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn run_eig_source_geometry(
+    degeneracy: usize,
+    min_time: Duration,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !operation_enabled("eig_source_geometry") || !form_enabled("owned") {
+        return Ok(());
+    }
+    for (workload, d, sectors) in [
+        ("few-large", degeneracy, 2),
+        ("many-small", (degeneracy / 16).max(1), 16),
+    ] {
+        run_checked_eig::<f64>(workload, d, sectors, min_time)?;
+        run_checked_eig::<Complex64>(workload, d, sectors, min_time)?;
+        run_mf_eig::<f64>(workload, d, sectors, min_time)?;
+        run_mf_eig::<Complex64>(workload, d, sectors, min_time)?;
+    }
+    Ok(())
+}
+
 fn assert_full_qr_lq<D: HarnessScalar>(
     input: &BoundDynamicTensorRef<'_, LayoutGenericRule, D>,
     left: &BoundDynFactor<LayoutGenericRule, D>,
@@ -2630,6 +3077,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 | "qr_compact"
                 | "qr_compact_generic_layout"
                 | "checked_compact_input"
+                | "eig_source_geometry"
                 | "full_qr_lowering"
                 | "oriented_uniform_run"
         ) {
@@ -2701,11 +3149,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("# adapter_runtime_cache_provider_counters=NA");
         println!("# comparison_protocol=unconditional A-baseline,B-candidate,B-candidate,A-baseline; three fresh child processes per position");
     }
+    if std::env::var("OP_MATRIX_OPERATION").as_deref() == Ok("eig_source_geometry") {
+        println!("# eig_source_geometry_scope=rank2 MF and checked Generic EIG complete owned result dropped inside every measured call; checked canonical and padded/reordered layouts are both affected");
+        println!("# eig_source_geometry_fixtures=few-large:G2:d{degeneracy};many-small:G16:d{};changed_shape=d+1;dtypes=f64,c64;complex_input_has_nonzero_imaginary_part", (degeneracy / 16).max(1));
+        println!("# eig_source_geometry_oracle=known spectrum,finite nonzero eigenvectors,scale-invariant AV=VL,provider identity,block geometry,source preservation; full preflight outside timers");
+        println!("# eig_source_geometry_control=checked compact QR over identical input geometry and scalar types");
+        println!("# eig_source_geometry_first_scope=first_after_preflight; Runtime and process-global metadata may already be warm");
+        println!("# eig_source_geometry_cache_counters=MF rows observe their execution Runtime; checked EIG and QR use DefaultDenseExecutor directly, so printed Runtime cache counters are not execution-owned and are NA for interpretation");
+        println!("# eig_source_geometry_unavailable=native_worker_allocations,frees,live_peak_bytes,exact_source_copy_bytes,backend_materialization_bytes");
+        println!("# comparison_protocol=unconditional A-baseline,B-candidate,B-candidate,A-baseline; three fresh child processes per position");
+    }
     println!("symmetry,operation,form,phase,iterations,us_per_iter,tree_hits,tree_misses,tree_evictions,tree_bypasses,tree_entries_delta,tree_charged_payload_bytes_before,tree_charged_payload_bytes_after,tree_charged_payload_bytes_delta,fusion_layout_misses,fusion_layout_evictions,fusion_layout_bypasses,fusion_layout_entries_delta,fusion_layout_charged_payload_bytes_before,fusion_layout_charged_payload_bytes_after,fusion_layout_charged_payload_bytes_delta,complete_hom_hits,complete_hom_misses,complete_hom_admissions,complete_hom_evictions,complete_hom_bypasses,complete_hom_entries_delta,complete_hom_charged_bytes_before,complete_hom_charged_bytes_after,complete_hom_charged_bytes_delta,exact_layout_admission,caller_allocation_calls,caller_requested_allocation_bytes,operation_local_scratch_bytes,provider_queries,transform_passes,gemm_calls,host_device_transfers");
 
     let min_time = Duration::from_millis(min_ms);
     if std::env::var("OP_MATRIX_OPERATION").as_deref() == Ok("oriented_uniform_run") {
         return run_oriented_uniform_run(min_time);
+    }
+    if std::env::var("OP_MATRIX_OPERATION").as_deref() == Ok("eig_source_geometry") {
+        return run_eig_source_geometry(degeneracy, min_time);
     }
     run_layout_generic_qr(degeneracy, min_time)?;
     run_checked_compact_input(degeneracy, min_time)?;
