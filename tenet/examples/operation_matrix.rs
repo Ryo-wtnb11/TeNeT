@@ -1736,6 +1736,16 @@ where
         assert_eq!(source_block.shape(), [n, n]);
         assert_eq!(vectors.shape(), [n, n]);
         assert_eq!(values.shape(), [n, n]);
+        for column in 0..n {
+            for row in 0..n {
+                if row != column {
+                    let value = d.data()[values.offset()
+                        + row * values.strides()[0]
+                        + column * values.strides()[1]];
+                    assert!(value.norm() <= 1.0e-12);
+                }
+            }
+        }
         assert_eig_block(
             sector.charge() as usize,
             n,
@@ -3145,6 +3155,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("# eig_source_geometry_oracle=known spectrum,finite nonzero eigenvectors,scale-invariant AV=VL,provider identity,block geometry,source preservation; full preflight outside timers");
         println!("# eig_source_geometry_control=checked compact QR over identical input geometry and scalar types");
         println!("# eig_source_geometry_first_scope=first_after_preflight; Runtime and process-global metadata may already be warm");
+        println!("# eig_source_geometry_cache_counters=MF rows observe their execution Runtime; checked EIG and QR use DefaultDenseExecutor directly, so printed Runtime cache counters are not execution-owned and are NA for interpretation");
         println!("# eig_source_geometry_unavailable=native_worker_allocations,frees,live_peak_bytes,exact_source_copy_bytes,backend_materialization_bytes");
         println!("# comparison_protocol=unconditional A-baseline,B-candidate,B-candidate,A-baseline; three fresh child processes per position");
     }

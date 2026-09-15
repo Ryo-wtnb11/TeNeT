@@ -229,6 +229,9 @@ Runtime and process-global metadata, rows say `first_after_preflight`; they do
 not claim cold cache admission. Caller-thread Rust allocation calls and
 requested bytes are available. Native and worker allocations, frees, live or
 peak bytes, exact source-copy bytes, and backend materialization are not.
+MF rows observe the Runtime that executes EIG. Checked EIG and QR call
+`DefaultDenseExecutor` directly, so their printed Runtime cache counters belong
+to a separate reporting Runtime and are `NA` for execution interpretation.
 
 ```sh
 OP_MATRIX_OPERATION=eig_source_geometry \
