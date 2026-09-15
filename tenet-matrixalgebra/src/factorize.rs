@@ -11722,6 +11722,171 @@ mod sector_matricization_tests {
     }
 
     #[test]
+    fn mf_one_sided_placement_uses_direct_and_adjoint_source_sides() {
+        let (homspace, mut matrix) = z2_single_sector_matrix(2, 3);
+        matrix.rows = 3;
+        matrix.row_trees[0].1 = 1;
+        matrix.cols = 5;
+        matrix.col_trees[0].1 = 2;
+        matrix.data = Vec::new();
+        let authority = BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free(
+            Arc::new(Z2FusionRule),
+            homspace.clone(),
+        )
+        .unwrap();
+        let adjoint = tenet_tensors::adjoint_bound_space_dyn(&authority).unwrap();
+        let values = |len: usize, base: f64| {
+            (0..len)
+                .map(|index| Complex64::new(base + index as f64, -base - index as f64 / 10.0))
+                .collect::<Vec<_>>()
+        };
+
+        let cases = [
+            (
+                &authority,
+                authority.space().homspace(),
+                FactorSide::Left,
+                FactorPlacement::Direct,
+                2,
+                FactorPair {
+                    sector: SectorId::new(0),
+                    kept: 99,
+                    left: values(6, 10.0),
+                    left_rows: 3,
+                    right: Vec::new(),
+                    right_leading: 0,
+                },
+                vec![1, 2, 4, 5],
+            ),
+            (
+                &authority,
+                authority.space().homspace(),
+                FactorSide::Right,
+                FactorPlacement::Direct,
+                3,
+                FactorPair {
+                    sector: SectorId::new(0),
+                    kept: 99,
+                    left: Vec::new(),
+                    left_rows: 0,
+                    right: values(15, 20.0),
+                    right_leading: 3,
+                },
+                (6..15).collect(),
+            ),
+            (
+                &adjoint,
+                adjoint.space().homspace(),
+                FactorSide::Left,
+                FactorPlacement::Adjoint,
+                4,
+                FactorPair {
+                    sector: SectorId::new(0),
+                    kept: 99,
+                    left: values(20, 30.0),
+                    left_rows: 5,
+                    right: Vec::new(),
+                    right_leading: 0,
+                },
+                vec![2, 3, 4, 7, 8, 9, 12, 13, 14, 17, 18, 19],
+            ),
+            (
+                &adjoint,
+                adjoint.space().homspace(),
+                FactorSide::Right,
+                FactorPlacement::Adjoint,
+                2,
+                FactorPair {
+                    sector: SectorId::new(0),
+                    kept: 99,
+                    left: Vec::new(),
+                    left_rows: 0,
+                    right: values(6, 40.0),
+                    right_leading: 2,
+                },
+                (2..6).collect(),
+            ),
+        ];
+
+        for (authority, output_hom, side, placement, bond, pair, selected) in cases {
+            let source = match side {
+                FactorSide::Left => &pair.left,
+                FactorSide::Right => &pair.right,
+            };
+            let expected = selected
+                .into_iter()
+                .map(|index| source[index])
+                .collect::<Vec<_>>();
+            let factor = build_bound_factor_with_placement(
+                authority,
+                output_hom,
+                std::slice::from_ref(&matrix),
+                std::slice::from_ref(&pair),
+                &BTreeMap::from([(SectorId::new(0), bond)]),
+                side,
+                placement,
+            )
+            .unwrap();
+            assert_eq!(factor.data(), expected);
+        }
+    }
+
+    #[test]
+    fn mf_one_sided_pair_errors_precede_tree_traversal() {
+        let (homspace, mut matrix) = z2_single_sector_matrix(1, 1);
+        let authority = BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free(
+            Arc::new(Z2FusionRule),
+            homspace.clone(),
+        )
+        .unwrap();
+        matrix.row_trees.clear();
+        matrix.col_trees.clear();
+        let dimensions = BTreeMap::from([(SectorId::new(0), 1)]);
+        let pair = |sector| FactorPair {
+            sector,
+            kept: 1,
+            left: vec![1.0],
+            left_rows: 1,
+            right: vec![2.0],
+            right_leading: 1,
+        };
+
+        let error = build_bound_factor_with_placement(
+            &authority,
+            &homspace,
+            std::slice::from_ref(&matrix),
+            &[pair(SectorId::new(0)), pair(SectorId::new(1))],
+            &dimensions,
+            FactorSide::Left,
+            FactorPlacement::Direct,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            OperationError::UnsupportedTensorContractScope {
+                message: "factor sector absent from the source tensor"
+            }
+        ));
+
+        let error = build_bound_factor_with_placement::<_, f64, _>(
+            &authority,
+            &homspace,
+            std::slice::from_ref(&matrix),
+            &[],
+            &dimensions,
+            FactorSide::Right,
+            FactorPlacement::Direct,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            OperationError::UnsupportedTensorContractScope {
+                message: "factor rank absent for a populated source sector"
+            }
+        ));
+    }
+
+    #[test]
     fn generic_pair_publication_falls_back_for_padded_staged_geometry() {
         let (homspace, matrix) = z2_single_sector_matrix(2, 1);
         let provider = Arc::new(TestGenericRule);
@@ -11845,6 +12010,146 @@ mod sector_matricization_tests {
                 right_leading: 2,
             },
         )
+    }
+
+    #[test]
+    fn one_sided_row_placement_uses_the_first_matching_duplicate() {
+        let a = generic_pair(1, 1, 1).codomain_tree().clone();
+        let b = generic_pair(1, 2, 1).codomain_tree().clone();
+        let c = generic_pair(0, 1, 1).codomain_tree().clone();
+        let matrix = SectorMatricization {
+            sector: SectorId::new(1),
+            rows: 7,
+            cols: 0,
+            row_trees: vec![
+                (a.clone(), 0, vec![2]),
+                (b.clone(), 2, vec![2]),
+                (a.clone(), 4, vec![2]),
+                (c.clone(), 6, vec![1]),
+            ],
+            col_trees: Vec::new(),
+            data: Vec::<f64>::new(),
+        };
+        let offsets = [&b, &c, &a].map(|tree| row_placement(&matrix, tree).unwrap().0);
+
+        assert_eq!(offsets, [2, 6, 0]);
+    }
+
+    #[test]
+    fn checked_one_sided_placement_preserves_both_sides_and_tree_orders() {
+        let rule = TestGenericRule;
+        let provider = Arc::new(InfallibleGeneric::new(&rule));
+        let dimensions = BTreeMap::from([(SectorId::new(1), 2)]);
+
+        for reverse in [false, true] {
+            let (homspace, matrix, pair) = vertex_tree_factor_fixture(reverse);
+            for side in [FactorSide::Left, FactorSide::Right] {
+                let factor = build_bound_factor_generic_checked(
+                    &provider,
+                    &homspace,
+                    std::slice::from_ref(&matrix),
+                    std::slice::from_ref(&pair),
+                    &dimensions,
+                    side,
+                )
+                .unwrap();
+                let expected = match (side, reverse) {
+                    (FactorSide::Left, false) => pair.left.clone(),
+                    (FactorSide::Right, false) => pair.right.clone(),
+                    (FactorSide::Left, true) => vec![
+                        pair.left[2],
+                        pair.left[3],
+                        pair.left[0],
+                        pair.left[1],
+                        pair.left[6],
+                        pair.left[7],
+                        pair.left[4],
+                        pair.left[5],
+                    ],
+                    (FactorSide::Right, true) => vec![
+                        pair.right[6],
+                        pair.right[7],
+                        pair.right[8],
+                        pair.right[9],
+                        pair.right[10],
+                        pair.right[11],
+                        pair.right[0],
+                        pair.right[1],
+                        pair.right[2],
+                        pair.right[3],
+                        pair.right[4],
+                        pair.right[5],
+                    ],
+                };
+                assert_eq!(factor.data(), expected);
+                assert!(Arc::ptr_eq(factor.space().provider_arc(), &provider));
+                let selected_vertices = (0..factor.space().space().structure().block_count())
+                    .map(|index| factor.space().space().structure().block(index).unwrap())
+                    .map(|block| match block.key() {
+                        BlockKey::FusionTree(key) => match side {
+                            FactorSide::Left => key.codomain_tree().vertices()[0].get(),
+                            FactorSide::Right => key.domain_tree().vertices()[0].get(),
+                        },
+                        _ => unreachable!("checked factor has fusion-tree keys"),
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(selected_vertices, [1, 2]);
+            }
+        }
+    }
+
+    #[test]
+    fn checked_one_sided_reports_missing_pairs_and_full_trees() {
+        let rule = TestGenericRule;
+        let provider = Arc::new(InfallibleGeneric::new(&rule));
+        let (homspace, matrix, _) = vertex_tree_factor_fixture(false);
+        let dimensions = BTreeMap::from([(SectorId::new(1), 2)]);
+        for side in [FactorSide::Left, FactorSide::Right] {
+            let error = build_bound_factor_generic_checked::<_, Complex64, _>(
+                &provider,
+                &homspace,
+                std::slice::from_ref(&matrix),
+                &[],
+                &dimensions,
+                side,
+            )
+            .unwrap_err();
+            assert!(matches!(
+                error,
+                CheckedGenericFactorPlanError::Operation(
+                    OperationError::UnsupportedTensorContractScope {
+                        message: "factor rank absent for a populated source sector"
+                    }
+                )
+            ));
+        }
+
+        for side in [FactorSide::Left, FactorSide::Right] {
+            let (_, mut wrong, pair) = vertex_tree_factor_fixture(false);
+            match side {
+                FactorSide::Left => wrong.row_trees[0].0 = wrong.row_trees[1].0.clone(),
+                FactorSide::Right => wrong.col_trees[0].0 = wrong.col_trees[1].0.clone(),
+            }
+            let error = build_bound_factor_generic_checked(
+                &provider,
+                &homspace,
+                std::slice::from_ref(&wrong),
+                std::slice::from_ref(&pair),
+                &dimensions,
+                side,
+            )
+            .unwrap_err();
+            let expected = match side {
+                FactorSide::Left => "factor codomain tree absent from the source matricization",
+                FactorSide::Right => "factor domain tree absent from the source matricization",
+            };
+            assert!(matches!(
+                error,
+                CheckedGenericFactorPlanError::Operation(
+                    OperationError::UnsupportedTensorContractScope { message }
+                ) if message == expected
+            ));
+        }
     }
 
     #[test]
