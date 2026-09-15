@@ -1886,7 +1886,7 @@ fn assert_multitree_eig<D: HarnessScalar<Eig = Complex64>>(
     assert_eq!(result.eigenvalues().len(), sector_count);
     let dimension = sector_count * degeneracy;
     let vectors = multitree_factor_matrices(result.v(), degeneracy, sector_count, true);
-    for sector in 0..sector_count {
+    for (sector, sector_vectors) in vectors.iter().enumerate() {
         let values = &result
             .eigenvalues()
             .iter()
@@ -1899,16 +1899,16 @@ fn assert_multitree_eig<D: HarnessScalar<Eig = Complex64>>(
             let expected = Complex64::new((sector * dimension + dimension - column) as f64, 0.0);
             assert!((eigenvalue - expected).norm() <= 1.0e-10 * expected.norm().max(1.0));
             let norm = (0..dimension)
-                .map(|row| vectors[sector][row + dimension * column].norm_sqr())
+                .map(|row| sector_vectors[row + dimension * column].norm_sqr())
                 .sum::<f64>()
                 .sqrt();
             assert!(norm.is_finite() && norm > 0.0);
             for row in 0..dimension {
                 let av = (0..dimension).fold(Complex64::new(0.0, 0.0), |sum, inner| {
                     sum + multitree_eig_value::<D>(sector, dimension, row, inner).as_complex()
-                        * vectors[sector][inner + dimension * column]
+                        * sector_vectors[inner + dimension * column]
                 }) / norm;
-                let vd = vectors[sector][row + dimension * column] * eigenvalue / norm;
+                let vd = sector_vectors[row + dimension * column] * eigenvalue / norm;
                 assert!((av - vd).norm() <= 1.0e-9 * av.norm().max(vd.norm()).max(1.0));
             }
         }
