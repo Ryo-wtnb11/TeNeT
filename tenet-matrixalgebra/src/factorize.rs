@@ -2877,15 +2877,16 @@ where
     ))
 }
 
-fn build_left_bound_factor<R, D>(
+fn build_left_bound_factor<R, D, M>(
     authority: &BoundDynamicFusionMapSpace<R>,
     homspace: &FusionTreeHomSpace,
-    matricizations: &[SectorMatricization<D>],
+    matricizations: &[M],
     pairs: &[FactorPair<D>],
 ) -> Result<BoundDynFactor<R, D>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
+    M: SectorGeometry,
 {
     let dimensions = pairs
         .iter()
@@ -2901,10 +2902,10 @@ where
     )
 }
 
-fn build_bound_factor<R, D>(
+fn build_bound_factor<R, D, M>(
     authority: &BoundDynamicFusionMapSpace<R>,
     homspace: &FusionTreeHomSpace,
-    matricizations: &[SectorMatricization<D>],
+    matricizations: &[M],
     pairs: &[FactorPair<D>],
     dimensions: &BTreeMap<SectorId, usize>,
     side: FactorSide,
@@ -2912,6 +2913,7 @@ fn build_bound_factor<R, D>(
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
+    M: SectorGeometry,
 {
     build_bound_factor_with_placement(
         authority,
@@ -2925,10 +2927,10 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn build_bound_factor_with_placement<R, D>(
+fn build_bound_factor_with_placement<R, D, M>(
     authority: &BoundDynamicFusionMapSpace<R>,
     homspace: &FusionTreeHomSpace,
-    matricizations: &[SectorMatricization<D>],
+    matricizations: &[M],
     pairs: &[FactorPair<D>],
     dimensions: &BTreeMap<SectorId, usize>,
     side: FactorSide,
@@ -2937,6 +2939,7 @@ fn build_bound_factor_with_placement<R, D>(
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
+    M: SectorGeometry,
 {
     let space = build_bound_factor_space(
         authority,
@@ -2957,7 +2960,7 @@ where
     });
     let mut routes = matricizations
         .iter()
-        .map(|matrix| (matrix.sector, (matrix, None)))
+        .map(|matrix| (matrix.sector(), (matrix, None)))
         .collect::<HashMap<_, _>>();
     for pair in pairs {
         let route =
@@ -4557,32 +4560,15 @@ where
         pairs.push(FactorPair {
             sector: matrix.sector,
             kept: n,
-            right: vec![<D::Eig as num_traits::Zero>::zero(); n * n],
             left: sorted_vectors,
             left_rows: n,
+            right: Vec::new(),
             right_leading: n,
         });
     }
 
-    // Rebuild the matricization skeleton at the complex scalar so the pair
-    // builder can place blocks (only shapes and offsets are read).
-    let complex_matricizations: Vec<SectorMatricization<D::Eig>> = matricizations
-        .iter()
-        .map(|matrix| SectorMatricization {
-            sector: matrix.sector,
-            rows: matrix.rows,
-            cols: matrix.cols,
-            row_trees: matrix.row_trees.clone(),
-            col_trees: matrix.col_trees.clone(),
-            data: Vec::new(),
-        })
-        .collect();
-    let v_factor = build_left_bound_factor(
-        input.space(),
-        space.homspace(),
-        &complex_matricizations,
-        &pairs,
-    )?;
+    let v_factor =
+        build_left_bound_factor(input.space(), space.homspace(), &matricizations, &pairs)?;
     Ok(EigFullDyn {
         v: v_factor,
         eigenvalues,
@@ -8895,10 +8881,10 @@ where
 
 /// Checked generic factor materialization with identity completion for sectors
 /// absent from the source matricization (the full-factor contract).
-fn build_bound_factor_generic_checked<R, D>(
+fn build_bound_factor_generic_checked<R, D, M>(
     provider: &Arc<R>,
     homspace: &FusionTreeHomSpace,
-    matricizations: &[SectorMatricization<D>],
+    matricizations: &[M],
     pairs: &[FactorPair<D>],
     dimensions: &BTreeMap<SectorId, usize>,
     side: FactorSide,
@@ -8906,6 +8892,7 @@ fn build_bound_factor_generic_checked<R, D>(
 where
     R: CheckedGenericFusion,
     D: FactorScalar,
+    M: SectorGeometry,
 {
     let bond = SectorLeg::new(
         dimensions.iter().map(|(&sector, &dim)| (sector, dim)),
@@ -8921,7 +8908,7 @@ where
     };
     let matrices = matricizations
         .iter()
-        .map(|matrix| (matrix.sector, matrix))
+        .map(|matrix| (matrix.sector(), matrix))
         .collect::<HashMap<_, _>>();
     let keys = output_hom
         .fusion_tree_keys_generic_checked(provider.as_ref())
@@ -10758,17 +10745,6 @@ where
         });
     }
 
-    let complex_matrices = matrices
-        .iter()
-        .map(|matrix| SectorMatricization {
-            sector: matrix.sector,
-            rows: matrix.rows,
-            cols: matrix.cols,
-            row_trees: matrix.row_trees.clone(),
-            col_trees: matrix.col_trees.clone(),
-            data: Vec::<D::Eig>::new(),
-        })
-        .collect::<Vec<_>>();
     let dimensions = matrices
         .iter()
         .map(|matrix| (matrix.sector, matrix.rows))
@@ -10776,7 +10752,7 @@ where
     let v = build_bound_factor_generic_checked(
         provider,
         space.homspace(),
-        &complex_matrices,
+        &matrices,
         &pairs,
         &dimensions,
         FactorSide::Left,
@@ -11045,6 +11021,49 @@ mod sector_matricization_tests {
     use super::*;
     use tenet_core::{BlockSpec, FusionTreePairKey, Z2FusionRule};
 
+    struct PayloadFreeGeometry {
+        sector: SectorId,
+        rows: usize,
+        cols: usize,
+        row_tree: FusionTreeKey,
+        row_shape: Vec<usize>,
+        col_tree: FusionTreeKey,
+        col_shape: Vec<usize>,
+    }
+
+    impl SectorGeometry for PayloadFreeGeometry {
+        fn sector(&self) -> SectorId {
+            self.sector
+        }
+
+        fn rows(&self) -> usize {
+            self.rows
+        }
+
+        fn cols(&self) -> usize {
+            self.cols
+        }
+
+        fn tree_count(&self, _side: FactorSide) -> usize {
+            1
+        }
+
+        fn tree(&self, side: FactorSide, index: usize) -> Option<TreeExtentRef<'_>> {
+            if index != 0 {
+                return None;
+            }
+            let (tree, shape) = match side {
+                FactorSide::Left => (&self.row_tree, self.row_shape.as_slice()),
+                FactorSide::Right => (&self.col_tree, self.col_shape.as_slice()),
+            };
+            Some(TreeExtentRef {
+                tree,
+                offset: 0,
+                shape,
+            })
+        }
+    }
+
     #[derive(Clone, Copy)]
     struct TestGenericRule;
 
@@ -11101,6 +11120,91 @@ mod sector_matricization_tests {
         .unwrap();
         pair.validate_for_rule(&Z2FusionRule).unwrap();
         pair
+    }
+
+    #[test]
+    fn left_factor_publication_borrows_real_geometry_for_complex_output() {
+        let x = SectorId::new(1);
+        let vacuum = SectorId::new(0);
+        let source_key = FusionTreePairKey::try_pair_from_sector_ids(
+            [1, 1, 1],
+            [1],
+            1,
+            [false; 3],
+            [false],
+            [0],
+            std::iter::empty::<usize>(),
+            [1, 1],
+            std::iter::empty::<usize>(),
+        )
+        .unwrap();
+        source_key.validate_for_rule(&Z2FusionRule).unwrap();
+        let homspace = FusionTreeHomSpace::new(
+            FusionProductSpace::new([
+                SectorLeg::new([(x, 2)], false),
+                SectorLeg::new([(x, 1)], false),
+                SectorLeg::new([(x, 3)], false),
+            ]),
+            FusionProductSpace::new([SectorLeg::new([(x, 1)], false)]),
+        );
+        let authority = BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free(
+            Arc::new(Z2FusionRule),
+            homspace.clone(),
+        )
+        .unwrap();
+        let geometry = [PayloadFreeGeometry {
+            sector: x,
+            rows: 6,
+            cols: 1,
+            row_tree: source_key.codomain_tree().clone(),
+            row_shape: vec![2, 1, 3],
+            col_tree: source_key.domain_tree().clone(),
+            col_shape: vec![1],
+        }];
+        let row_tree_before = geometry[0].row_tree.clone();
+        let col_tree_before = geometry[0].col_tree.clone();
+        let expected = (0..12)
+            .map(|index| Complex64::new(index as f64 + 0.5, 10.0 - index as f64))
+            .collect::<Vec<_>>();
+        let pairs = [FactorPair {
+            sector: x,
+            kept: 2,
+            left: expected.clone(),
+            left_rows: 6,
+            right: Vec::new(),
+            right_leading: 0,
+        }];
+
+        let factor = build_left_bound_factor(&authority, &homspace, &geometry, &pairs).unwrap();
+
+        assert_eq!(geometry[0].row_tree, row_tree_before);
+        assert_eq!(geometry[0].col_tree, col_tree_before);
+        assert_eq!(geometry[0].row_shape, [2, 1, 3]);
+        assert_eq!(geometry[0].col_shape, [1]);
+        let block = factor.space().space().structure().block(0).unwrap();
+        assert_eq!(block.shape(), [2, 1, 3, 2]);
+        let BlockKey::FusionTree(key) = block.key() else {
+            panic!("left factor must retain the complete fusion-tree key")
+        };
+        assert_eq!(key.codomain_tree(), &row_tree_before);
+        assert_eq!(key.domain_tree().uncoupled(), &[x]);
+        assert_eq!(key.domain_tree().coupled(), x);
+        assert_eq!(key.domain_tree().vertices(), &[]);
+        assert_eq!(key.domain_tree().innerlines(), &[]);
+        assert_eq!(factor.data().len(), expected.len());
+        for bond in 0..2 {
+            for third in 0..3 {
+                for first in 0..2 {
+                    let output = block.offset()
+                        + first * block.strides()[0]
+                        + third * block.strides()[2]
+                        + bond * block.strides()[3];
+                    let matrix_row = first + 2 * third;
+                    assert_eq!(factor.data()[output], expected[matrix_row + 6 * bond]);
+                }
+            }
+        }
+        assert_eq!(vacuum, row_tree_before.innerlines()[0]);
     }
 
     fn generic_pair(coupled: usize, row_vertex: usize, col_vertex: usize) -> FusionTreePairKey {
