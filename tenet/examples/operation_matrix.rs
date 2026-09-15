@@ -1722,7 +1722,8 @@ where
     );
     for block_index in 0..v.block_count() {
         let vectors = v.block(block_index)?;
-        let sector = v.block_fusion_trees(block_index)?.coupled();
+        let trees = v.block_fusion_trees(block_index)?;
+        let sector = trees.coupled();
         let source_index = (0..source.block_count())
             .find(|&index| source.block_fusion_trees(index).unwrap().coupled() == sector)
             .unwrap();
