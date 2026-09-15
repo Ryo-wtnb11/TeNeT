@@ -242,6 +242,41 @@ OP_MATRIX_CARGO_FEATURES=cpu-faer,racah-generated \
 benchmarks/operation_matrix.sh
 ```
 
+`eig_output_placement` is an explicit-only multi-tree measurement group for
+one-sided factor publication. Checked-Generic full EIG is the affected rank-4
+route. Each side has two sector legs under the XOR fixture rule: few-large uses
+`G=2,T=2,d=D`, while many-small uses
+`G=16,T=16,d=max(1,D/16)`. The corresponding canonical inputs have 8 and 4,096
+source blocks. Reversed blocks with one-element gaps exercise the existing
+fallback. Checked compact QR over the same geometry is the unchanged paired
+publication control. Existing rank-2 MF EIG rows are included as affected
+`T=1` evidence.
+
+Fixed and alternating `d`/`d+1` inputs are preconstructed. Outside timing,
+preflight verifies every literal full key and source value, the known distinct
+spectrum, finite nonzero eigenvector columns, scale-invariant
+`A V = V Lambda`, QR reconstruction and orthogonality, provider identity and
+source preservation. Setup rows separately include construction, checked
+binding and literal fill. Every operation row black-boxes and drops its
+complete owned result inside the timed closure. The first row is
+`first_after_preflight`, not cold admission.
+
+Caller-thread Rust allocation calls and requested bytes are available. Native
+and worker allocations, frees, live or peak bytes, exact placement comparisons,
+exact copied bytes and isolated solver time are not. Checked EIG and QR use
+`DefaultDenseExecutor` directly, so printed Runtime cache counters are not
+execution-owned and are `NA` for interpretation. The group supplies no timing
+evidence for full SVD, EIGH or null operations and no universal speed claim.
+
+```sh
+OP_MATRIX_OPERATION=eig_output_placement \
+OP_MATRIX_FORM=owned \
+OP_MATRIX_DEGENERACY=32 \
+OP_MATRIX_MIN_MS=100 \
+OP_MATRIX_CARGO_FEATURES=cpu-faer,racah-generated \
+benchmarks/operation_matrix.sh
+```
+
 `full_qr_lowering` is an explicit-only diagnostic for the original-input full
 QR/LQ lowering. It fixes global `D=32`: few-large uses `G=2,d=32`, and
 many-small uses `G=16,d=2`. The sweep covers homogeneous square `d x d`, wide

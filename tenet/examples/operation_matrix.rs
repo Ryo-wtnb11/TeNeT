@@ -15,7 +15,8 @@ use tenet::core::{
     complete_hom_space_structure_cache_info, fusion_tree_layout_cache_info, BlockRef, BlockSpec,
     BlockStructure, BraidingStyleKind, CheckedGenericFusion, CompleteHomSpaceStructureCacheInfo,
     FusionProductSpace, FusionRule, FusionStyleKind, FusionTensorMapSpace, FusionTreeHomSpace,
-    FusionTreeLayoutCacheInfo, RuleIdentity, SectorId, SectorLeg, SectorVec, TensorMapSpace,
+    FusionTreeKey, FusionTreeLayoutCacheInfo, RuleIdentity, SectorId, SectorLeg, SectorVec,
+    TensorMapSpace,
 };
 use tenet::dense::DefaultDenseExecutor;
 use tenet::dense::{
@@ -1609,6 +1610,351 @@ fn eig_fixture<D: HarnessScalar>(
     Ok((canonical, fallback))
 }
 
+fn multitree_eig_value<D: HarnessScalar>(
+    sector: usize,
+    dimension: usize,
+    row: usize,
+    column: usize,
+) -> D {
+    let adjacent = row + 1 == column;
+    D::from_parts(
+        if row == column {
+            (sector * dimension + row + 1) as f64
+        } else if adjacent {
+            if D::NAME == "c64" {
+                0.25
+            } else {
+                0.5
+            }
+        } else {
+            0.0
+        },
+        if D::NAME == "c64" && adjacent {
+            -0.375
+        } else {
+            0.0
+        },
+    )
+}
+
+fn multitree_label(tree: &FusionTreeKey, sector_count: usize) -> (usize, usize) {
+    assert_eq!(tree.uncoupled().len(), 2);
+    assert_eq!(tree.is_dual(), [false, false]);
+    assert!(tree.innerlines().is_empty());
+    assert_eq!(tree.vertices().len(), 1);
+    assert_eq!(tree.vertices()[0].get(), 1);
+    let sector = tree.coupled().id();
+    let first = tree.uncoupled()[0].id();
+    let second = tree.uncoupled()[1].id();
+    assert!(sector < sector_count && first < sector_count && second < sector_count);
+    assert_eq!(first ^ second, sector);
+    (sector, first)
+}
+
+fn assert_bond_tree(tree: &FusionTreeKey, sector: usize) {
+    assert_eq!(tree.uncoupled(), [SectorId::new(sector)]);
+    assert_eq!(tree.coupled(), SectorId::new(sector));
+    assert_eq!(tree.is_dual(), [false]);
+    assert!(tree.innerlines().is_empty());
+    assert!(tree.vertices().is_empty());
+}
+
+fn fill_multitree_eig_data<D: HarnessScalar>(
+    space: &BoundDynamicFusionMapSpace<LayoutGenericRule>,
+    degeneracy: usize,
+    sector_count: usize,
+) -> Vec<D> {
+    let structure = space.space().structure();
+    assert_eq!(structure.block_count(), sector_count.pow(3));
+    let dimension = sector_count * degeneracy;
+    let mut data = vec![D::zero(); space.space().required_len().unwrap()];
+    for index in 0..structure.block_count() {
+        let block = structure.block(index).unwrap();
+        let key = block.key().as_fusion_tree_pair().unwrap();
+        let (sector, row_tree) = multitree_label(key.codomain_tree(), sector_count);
+        let (domain_sector, column_tree) = multitree_label(key.domain_tree(), sector_count);
+        assert_eq!(domain_sector, sector);
+        assert_eq!(block.shape(), [degeneracy, 1, degeneracy, 1]);
+        for column in 0..degeneracy {
+            for row in 0..degeneracy {
+                let offset =
+                    block.offset() + row * block.strides()[0] + column * block.strides()[2];
+                data[offset] = multitree_eig_value(
+                    sector,
+                    dimension,
+                    row_tree * degeneracy + row,
+                    column_tree * degeneracy + column,
+                );
+            }
+        }
+    }
+    data
+}
+
+fn multitree_eig_fixture<D: HarnessScalar>(
+    degeneracy: usize,
+    sector_count: usize,
+) -> Result<(CheckedLayoutInput<D>, CheckedLayoutInput<D>), Box<dyn std::error::Error>> {
+    let provider = Arc::new(LayoutGenericRule);
+    let first = SectorLeg::new(
+        (0..sector_count).map(|sector| (SectorId::new(sector), degeneracy)),
+        false,
+    );
+    let second = SectorLeg::new(
+        (0..sector_count).map(|sector| (SectorId::new(sector), 1)),
+        false,
+    );
+    let product = FusionProductSpace::new([first, second]);
+    let homspace = FusionTreeHomSpace::new(product.clone(), product);
+    let canonical = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+        Arc::clone(&provider),
+        homspace.clone(),
+    )?;
+    let canonical_data = fill_multitree_eig_data(&canonical, degeneracy, sector_count);
+
+    let canonical_structure = canonical.space().structure();
+    let mut offset = 1;
+    let mut blocks = Vec::with_capacity(canonical_structure.block_count());
+    for index in (0..canonical_structure.block_count()).rev() {
+        let block = canonical_structure.block(index)?;
+        blocks.push(BlockSpec::column_major_with_key(
+            block.key().clone(),
+            block.shape().to_vec(),
+            offset,
+        )?);
+        offset += block.element_count()? + 1;
+    }
+    let structure = BlockStructure::from_blocks_with_rank(4, blocks)?;
+    let dense_first = sector_count * degeneracy;
+    let typed = FusionTensorMapSpace::new_unbound(
+        TensorMapSpace::<2, 2>::from_dims(
+            [dense_first, sector_count],
+            [dense_first, sector_count],
+        )?,
+        homspace,
+        structure,
+    )?
+    .try_bind_rule(provider.as_ref())?;
+    let fallback = BoundDynamicFusionMapSpace::bind_generic(
+        DynamicFusionMapSpace::from_typed(&typed),
+        provider,
+    )?;
+    let fallback_data = fill_multitree_eig_data(&fallback, degeneracy, sector_count);
+    Ok((
+        CheckedLayoutInput {
+            space: canonical,
+            data: canonical_data,
+        },
+        CheckedLayoutInput {
+            space: fallback,
+            data: fallback_data,
+        },
+    ))
+}
+
+fn assert_multitree_source<D: HarnessScalar>(
+    input: &BoundDynamicTensorRef<'_, LayoutGenericRule, D>,
+    degeneracy: usize,
+    sector_count: usize,
+) {
+    let structure = input.space().space().structure();
+    assert_eq!(structure.block_count(), sector_count.pow(3));
+    let mut visited = vec![false; sector_count.pow(3)];
+    let dimension = sector_count * degeneracy;
+    for index in 0..structure.block_count() {
+        let block = structure.block(index).unwrap();
+        let key = block.key().as_fusion_tree_pair().unwrap();
+        let (sector, row_tree) = multitree_label(key.codomain_tree(), sector_count);
+        let (domain_sector, column_tree) = multitree_label(key.domain_tree(), sector_count);
+        assert_eq!(domain_sector, sector);
+        assert_eq!(block.shape(), [degeneracy, 1, degeneracy, 1]);
+        let visit = (sector * sector_count + row_tree) * sector_count + column_tree;
+        assert!(!visited[visit]);
+        visited[visit] = true;
+        for column in 0..degeneracy {
+            for row in 0..degeneracy {
+                assert_eq!(
+                    input.data()
+                        [block.offset() + row * block.strides()[0] + column * block.strides()[2]]
+                        .as_complex(),
+                    multitree_eig_value::<D>(
+                        sector,
+                        dimension,
+                        row_tree * degeneracy + row,
+                        column_tree * degeneracy + column,
+                    )
+                    .as_complex()
+                );
+            }
+        }
+    }
+    assert!(visited.into_iter().all(|value| value));
+}
+
+fn assert_multitree_layouts<D>(
+    canonical: &CheckedLayoutInput<D>,
+    fallback: &CheckedLayoutInput<D>,
+) {
+    let canonical = canonical.space.space().structure();
+    let fallback = fallback.space.space().structure();
+    assert_eq!(canonical.block_count(), fallback.block_count());
+    for index in 0..canonical.block_count() {
+        let canonical_block = canonical.block(index).unwrap();
+        let fallback_block = fallback.block(canonical.block_count() - index - 1).unwrap();
+        assert_eq!(canonical_block.key(), fallback_block.key());
+        assert_eq!(canonical_block.shape(), fallback_block.shape());
+    }
+    let mut canonical_offset = 0;
+    let mut fallback_offset = 1;
+    for index in 0..canonical.block_count() {
+        let canonical_block = canonical.block(index).unwrap();
+        let fallback_block = fallback.block(index).unwrap();
+        assert_eq!(canonical_block.offset(), canonical_offset);
+        assert_eq!(fallback_block.offset(), fallback_offset);
+        canonical_offset += canonical_block.element_count().unwrap();
+        fallback_offset += fallback_block.element_count().unwrap() + 1;
+    }
+    assert_eq!(canonical.required_len().unwrap(), canonical_offset);
+    assert_eq!(fallback.required_len().unwrap(), fallback_offset - 1);
+}
+
+fn multitree_factor_matrices<D: HarnessScalar>(
+    factor: &BoundDynFactor<LayoutGenericRule, D>,
+    degeneracy: usize,
+    sector_count: usize,
+    left: bool,
+) -> Vec<Vec<Complex64>> {
+    let structure = factor.space().space().structure();
+    assert_eq!(structure.block_count(), sector_count * sector_count);
+    let dimension = sector_count * degeneracy;
+    let mut matrices = vec![vec![Complex64::new(0.0, 0.0); dimension * dimension]; sector_count];
+    let mut visited = vec![false; sector_count * sector_count];
+    for index in 0..structure.block_count() {
+        let block = structure.block(index).unwrap();
+        let key = block.key().as_fusion_tree_pair().unwrap();
+        let (sector, tree) = if left {
+            let value = multitree_label(key.codomain_tree(), sector_count);
+            assert_bond_tree(key.domain_tree(), value.0);
+            assert_eq!(block.shape(), [degeneracy, 1, dimension]);
+            value
+        } else {
+            let value = multitree_label(key.domain_tree(), sector_count);
+            assert_bond_tree(key.codomain_tree(), value.0);
+            assert_eq!(block.shape(), [dimension, degeneracy, 1]);
+            value
+        };
+        let visit = sector * sector_count + tree;
+        assert!(!visited[visit]);
+        visited[visit] = true;
+        for column in 0..dimension {
+            for row in 0..degeneracy {
+                let (matrix_row, matrix_column, offset) = if left {
+                    (
+                        tree * degeneracy + row,
+                        column,
+                        block.offset() + row * block.strides()[0] + column * block.strides()[2],
+                    )
+                } else {
+                    (
+                        column,
+                        tree * degeneracy + row,
+                        block.offset() + column * block.strides()[0] + row * block.strides()[1],
+                    )
+                };
+                matrices[sector][matrix_row + dimension * matrix_column] =
+                    factor.data()[offset].as_complex();
+            }
+        }
+    }
+    assert!(visited.into_iter().all(|value| value));
+    matrices
+}
+
+fn assert_multitree_eig<D: HarnessScalar<Eig = Complex64>>(
+    input: &BoundDynamicTensorRef<'_, LayoutGenericRule, D>,
+    result: &tenet_matrixalgebra::EigFullDyn<LayoutGenericRule, D>,
+    degeneracy: usize,
+    sector_count: usize,
+) {
+    assert!(Arc::ptr_eq(
+        result.v().space().provider_arc(),
+        input.space().provider_arc()
+    ));
+    assert_eq!(result.eigenvalues().len(), sector_count);
+    let dimension = sector_count * degeneracy;
+    let vectors = multitree_factor_matrices(result.v(), degeneracy, sector_count, true);
+    for sector in 0..sector_count {
+        let values = &result
+            .eigenvalues()
+            .iter()
+            .find(|entry| entry.sector == SectorId::new(sector))
+            .expect("EIG result contains every sector")
+            .values;
+        assert_eq!(values.len(), dimension);
+        for column in 0..dimension {
+            let eigenvalue = values[column];
+            let expected = Complex64::new((sector * dimension + dimension - column) as f64, 0.0);
+            assert!((eigenvalue - expected).norm() <= 1.0e-10 * expected.norm().max(1.0));
+            let norm = (0..dimension)
+                .map(|row| vectors[sector][row + dimension * column].norm_sqr())
+                .sum::<f64>()
+                .sqrt();
+            assert!(norm.is_finite() && norm > 0.0);
+            for row in 0..dimension {
+                let av = (0..dimension).fold(Complex64::new(0.0, 0.0), |sum, inner| {
+                    sum + multitree_eig_value::<D>(sector, dimension, row, inner).as_complex()
+                        * vectors[sector][inner + dimension * column]
+                }) / norm;
+                let vd = vectors[sector][row + dimension * column] * eigenvalue / norm;
+                assert!((av - vd).norm() <= 1.0e-9 * av.norm().max(vd.norm()).max(1.0));
+            }
+        }
+    }
+}
+
+fn assert_multitree_qr<D: HarnessScalar>(
+    input: &BoundDynamicTensorRef<'_, LayoutGenericRule, D>,
+    left: &BoundDynFactor<LayoutGenericRule, D>,
+    right: &BoundDynFactor<LayoutGenericRule, D>,
+    degeneracy: usize,
+    sector_count: usize,
+) {
+    assert!(Arc::ptr_eq(
+        left.space().provider_arc(),
+        input.space().provider_arc()
+    ));
+    assert!(Arc::ptr_eq(
+        right.space().provider_arc(),
+        input.space().provider_arc()
+    ));
+    let dimension = sector_count * degeneracy;
+    let left = multitree_factor_matrices(left, degeneracy, sector_count, true);
+    let right = multitree_factor_matrices(right, degeneracy, sector_count, false);
+    for sector in 0..sector_count {
+        for column in 0..dimension {
+            for row in 0..dimension {
+                let actual = (0..dimension).fold(Complex64::new(0.0, 0.0), |sum, inner| {
+                    sum + left[sector][row + dimension * inner]
+                        * right[sector][inner + dimension * column]
+                });
+                let expected =
+                    multitree_eig_value::<D>(sector, dimension, row, column).as_complex();
+                assert!((actual - expected).norm() <= 2.0e-9 * expected.norm().max(1.0));
+            }
+        }
+        for right_column in 0..dimension {
+            for left_column in 0..dimension {
+                let actual = (0..dimension).fold(Complex64::new(0.0, 0.0), |sum, row| {
+                    sum + left[sector][row + dimension * left_column].conj()
+                        * left[sector][row + dimension * right_column]
+                });
+                let expected = Complex64::new(f64::from(left_column == right_column), 0.0);
+                assert!((actual - expected).norm() <= 2.0e-9);
+            }
+        }
+    }
+}
+
 fn checked_source_block<'a, D>(
     input: &'a BoundDynamicTensorRef<'_, LayoutGenericRule, D>,
     sector: SectorId,
@@ -2004,6 +2350,140 @@ fn run_eig_source_geometry(
     ] {
         run_checked_eig::<f64>(workload, d, sectors, min_time)?;
         run_checked_eig::<Complex64>(workload, d, sectors, min_time)?;
+        run_mf_eig::<f64>(workload, d, sectors, min_time)?;
+        run_mf_eig::<Complex64>(workload, d, sectors, min_time)?;
+    }
+    Ok(())
+}
+
+fn run_checked_multitree_eig<D: HarnessScalar<Eig = Complex64>>(
+    workload: &str,
+    degeneracy: usize,
+    sector_count: usize,
+    min_time: Duration,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let setup_runtime = benchmark_runtime()?;
+    bench(
+        &setup_runtime,
+        &format!("EigPlacement-{workload}-{}", D::NAME),
+        "checked_multitree_fixture",
+        "setup",
+        "fixture_first",
+        "fixture_repeat",
+        min_time,
+        || {
+            drop(black_box(multitree_eig_fixture::<D>(
+                degeneracy,
+                sector_count,
+            )?));
+            Ok::<_, Box<dyn std::error::Error>>(())
+        },
+    )?;
+    let (canonical, fallback) = multitree_eig_fixture::<D>(degeneracy, sector_count)?;
+    let (canonical_changed, fallback_changed) =
+        multitree_eig_fixture::<D>(degeneracy + 1, sector_count)?;
+    assert_multitree_layouts(&canonical, &fallback);
+    assert_multitree_layouts(&canonical_changed, &fallback_changed);
+    for (layout, fixture, changed_fixture) in [
+        ("canonical", canonical, canonical_changed),
+        ("padded_reordered", fallback, fallback_changed),
+    ] {
+        let input = BoundDynamicTensorRef::try_new(&fixture.space, &fixture.data)?;
+        let changed_input =
+            BoundDynamicTensorRef::try_new(&changed_fixture.space, &changed_fixture.data)?;
+        assert_multitree_source(&input, degeneracy, sector_count);
+        assert_multitree_source(&changed_input, degeneracy + 1, sector_count);
+        let mut preflight = DefaultDenseExecutor::new();
+        for (selected, selected_degeneracy) in
+            [(&input, degeneracy), (&changed_input, degeneracy + 1)]
+        {
+            let eig = eig_full_dyn_checked_generic(&mut preflight, selected)
+                .map_err(checked_compact_example_error)?;
+            assert_multitree_eig(selected, &eig, selected_degeneracy, sector_count);
+            drop(eig);
+            let qr = qr_compact_dyn_checked_generic(&mut preflight, selected)
+                .map_err(checked_compact_example_error)?;
+            assert_multitree_qr(selected, &qr.0, &qr.1, selected_degeneracy, sector_count);
+            drop(qr);
+        }
+        drop(preflight);
+
+        let symmetry = format!("EigPlacement-{workload}-{layout}-{}", D::NAME);
+        for (operation, is_eig) in [
+            ("checked_multitree_eig", true),
+            ("compact_qr_multitree_control", false),
+        ] {
+            let runtime = benchmark_runtime()?;
+            let mut dense = DefaultDenseExecutor::new();
+            bench(
+                &runtime,
+                &symmetry,
+                operation,
+                "owned",
+                "first_after_preflight",
+                "warm_after_preflight",
+                min_time,
+                || {
+                    if is_eig {
+                        drop(black_box(
+                            eig_full_dyn_checked_generic(&mut dense, &input)
+                                .map_err(checked_compact_example_error)?,
+                        ));
+                    } else {
+                        drop(black_box(
+                            qr_compact_dyn_checked_generic(&mut dense, &input)
+                                .map_err(checked_compact_example_error)?,
+                        ));
+                    }
+                    Ok::<_, Error>(())
+                },
+            )?;
+            let mut changed = false;
+            bench(
+                &runtime,
+                &symmetry,
+                &format!("{operation}_shape_alternating"),
+                "owned",
+                "first_after_preflight",
+                "warm_shape_alternating",
+                min_time,
+                || {
+                    let selected = if changed { &changed_input } else { &input };
+                    changed = !changed;
+                    if is_eig {
+                        drop(black_box(
+                            eig_full_dyn_checked_generic(&mut dense, selected)
+                                .map_err(checked_compact_example_error)?,
+                        ));
+                    } else {
+                        drop(black_box(
+                            qr_compact_dyn_checked_generic(&mut dense, selected)
+                                .map_err(checked_compact_example_error)?,
+                        ));
+                    }
+                    Ok::<_, Error>(())
+                },
+            )?;
+        }
+        assert_multitree_source(&input, degeneracy, sector_count);
+        assert_multitree_source(&changed_input, degeneracy + 1, sector_count);
+    }
+    Ok(())
+}
+
+fn run_eig_output_placement(
+    degeneracy: usize,
+    min_time: Duration,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !operation_enabled("eig_output_placement") || !form_enabled("owned") {
+        return Ok(());
+    }
+    for (workload, d, sectors) in [
+        ("few-large", degeneracy, 2),
+        ("many-small", (degeneracy / 16).max(1), 16),
+    ] {
+        run_checked_multitree_eig::<f64>(workload, d, sectors, min_time)?;
+        run_checked_multitree_eig::<Complex64>(workload, d, sectors, min_time)?;
         run_mf_eig::<f64>(workload, d, sectors, min_time)?;
         run_mf_eig::<Complex64>(workload, d, sectors, min_time)?;
     }
@@ -3078,6 +3558,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 | "qr_compact_generic_layout"
                 | "checked_compact_input"
                 | "eig_source_geometry"
+                | "eig_output_placement"
                 | "full_qr_lowering"
                 | "oriented_uniform_run"
         ) {
@@ -3159,6 +3640,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("# eig_source_geometry_unavailable=native_worker_allocations,frees,live_peak_bytes,exact_source_copy_bytes,backend_materialization_bytes");
         println!("# comparison_protocol=unconditional A-baseline,B-candidate,B-candidate,A-baseline; three fresh child processes per position");
     }
+    if std::env::var("OP_MATRIX_OPERATION").as_deref() == Ok("eig_output_placement") {
+        println!("# eig_output_placement_scope=rank4 checked Generic full EIG affected; rank4 checked compact QR paired-publication control; rank2 MF full EIG affected");
+        println!("# eig_output_placement_fixtures=few-large:G2:T2:d{degeneracy}:source_blocks8;many-small:G16:T16:d{}:source_blocks4096;changed_shape=d+1;layouts=canonical,padded_reordered;dtypes=f64,c64", (degeneracy / 16).max(1));
+        println!("# eig_output_placement_oracle=literal_full_keys,known_distinct_spectrum,finite_nonzero_eigenvectors,scale_invariant_AV_equals_VLambda,QR_reconstruction_and_orthogonality,provider_identity,source_preservation;full_preflight_outside_timers");
+        println!("# eig_output_placement_first_scope=first_after_preflight; Runtime and process-global metadata may already be warm; complete owned result dropped inside every measured call");
+        println!("# eig_output_placement_cache_counters=MF rows observe their execution Runtime; checked EIG and QR use DefaultDenseExecutor directly, so printed Runtime cache counters are not execution-owned and are NA for interpretation");
+        println!("# eig_output_placement_unavailable=native_worker_allocations,frees,live_peak_bytes,placement_comparisons,exact_copied_bytes,isolated_solver_time");
+        println!("# comparison_protocol=unconditional A-baseline,B-candidate,B-candidate,A-baseline; three fresh child processes per position");
+    }
     println!("symmetry,operation,form,phase,iterations,us_per_iter,tree_hits,tree_misses,tree_evictions,tree_bypasses,tree_entries_delta,tree_charged_payload_bytes_before,tree_charged_payload_bytes_after,tree_charged_payload_bytes_delta,fusion_layout_misses,fusion_layout_evictions,fusion_layout_bypasses,fusion_layout_entries_delta,fusion_layout_charged_payload_bytes_before,fusion_layout_charged_payload_bytes_after,fusion_layout_charged_payload_bytes_delta,complete_hom_hits,complete_hom_misses,complete_hom_admissions,complete_hom_evictions,complete_hom_bypasses,complete_hom_entries_delta,complete_hom_charged_bytes_before,complete_hom_charged_bytes_after,complete_hom_charged_bytes_delta,exact_layout_admission,caller_allocation_calls,caller_requested_allocation_bytes,operation_local_scratch_bytes,provider_queries,transform_passes,gemm_calls,host_device_transfers");
 
     let min_time = Duration::from_millis(min_ms);
@@ -3167,6 +3657,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if std::env::var("OP_MATRIX_OPERATION").as_deref() == Ok("eig_source_geometry") {
         return run_eig_source_geometry(degeneracy, min_time);
+    }
+    if std::env::var("OP_MATRIX_OPERATION").as_deref() == Ok("eig_output_placement") {
+        return run_eig_output_placement(degeneracy, min_time);
     }
     run_layout_generic_qr(degeneracy, min_time)?;
     run_checked_compact_input(degeneracy, min_time)?;
