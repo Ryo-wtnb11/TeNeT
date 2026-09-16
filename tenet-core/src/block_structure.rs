@@ -1804,6 +1804,13 @@ impl PreparedBlockStructure {
         self.required_len
     }
 
+    /// Borrow the staged block keys alone. Why not `structure()`: key-only
+    /// prevalidation must not pay for cloning both structures into the preview.
+    #[doc(hidden)]
+    pub fn sector_structure(&self) -> &SectorStructure {
+        &self.sector
+    }
+
     /// Publish the validated structure through the existing interner.
     #[doc(hidden)]
     pub fn commit(self) -> BlockStructure {

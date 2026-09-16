@@ -1226,14 +1226,45 @@ where
         homspace: FusionTreeHomSpace,
     ) -> Result<Self, CheckedGenericStructureError<R::Error>> {
         Self::validate_checked_generic_style(provider.as_ref())?;
-        let identity = provider.rule_identity();
-        let nout = homspace.codomain().len();
-        let nin = homspace.domain().len();
         let structure = homspace
             .prepare_coupled_subblock_structure_from_leg_degeneracies_generic_checked(
                 provider.as_ref(),
             )?;
-        Ok(Self {
+        Ok(Self::commit_prepared_generic_checked(
+            provider, homspace, structure,
+        ))
+    }
+
+    /// Commits a structure that `homspace` already enumerated under `provider`
+    /// as a complete checked Generic root, without enumerating it again. The
+    /// style check runs here because the checked enumeration does not perform
+    /// it; the root constructor above checks before enumerating instead.
+    ///
+    /// Why not the existing prepare/commit pairs: they either require a
+    /// `CheckedGeneric`-bound input space or hand the result the input's
+    /// capability, so a caller that only holds the provider could not obtain
+    /// the `CheckedGeneric` binding `from_final_homspace_generic_checked` gives.
+    #[doc(hidden)]
+    pub fn from_prepared_final_homspace_generic_checked(
+        provider: Arc<R>,
+        homspace: FusionTreeHomSpace,
+        structure: PreparedBlockStructure,
+    ) -> Result<Self, CheckedGenericStructureError<R::Error>> {
+        Self::validate_checked_generic_style(provider.as_ref())?;
+        Ok(Self::commit_prepared_generic_checked(
+            provider, homspace, structure,
+        ))
+    }
+
+    fn commit_prepared_generic_checked(
+        provider: Arc<R>,
+        homspace: FusionTreeHomSpace,
+        structure: PreparedBlockStructure,
+    ) -> Self {
+        let identity = provider.rule_identity();
+        let nout = homspace.codomain().len();
+        let nin = homspace.domain().len();
+        Self {
             space: PreparedCheckedGenericDynamicSpace {
                 nout,
                 nin,
@@ -1244,7 +1275,7 @@ where
             .commit(),
             provider,
             layout_build: LayoutBuildCapability::CheckedGeneric,
-        })
+        }
     }
 
     /// Stages one checked Generic final HomSpace without publishing its layout.
@@ -3115,6 +3146,87 @@ mod bound_invariant_tests {
             CheckedGenericStructureError::Core(CoreError::MalformedFusionTree { .. })
         ));
         assert_eq!(checker.calls.get(), 0);
+    }
+
+    #[test]
+    #[allow(clippy::arc_with_non_send_sync)] // The bound API requires Arc; the spy and rule are single-threaded test values.
+    fn checked_generic_prepared_structure_constructor_matches_root_constructor() {
+        // What: committing a structure the caller already enumerated yields
+        // the same checked Generic root as enumerating inside the constructor
+        // (blocks, required length, HomSpace, provider Arc, checked binding),
+        // and the commit itself issues no provider query.
+        let rule = GenericMultiplicityRule;
+        let charge = SectorId::new(1);
+        let homspace = FusionTreeHomSpace::new(
+            FusionProductSpace::new([
+                SectorLeg::new([(charge, 2)], false),
+                SectorLeg::new([(charge, 1)], false),
+            ]),
+            FusionProductSpace::new([
+                SectorLeg::new([(charge, 1)], false),
+                SectorLeg::new([(charge, 3)], false),
+            ]),
+        );
+        let provider = Arc::new(InfallibleGeneric::new(&rule));
+        let root = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+            Arc::clone(&provider),
+            homspace.clone(),
+        )
+        .unwrap();
+        let prepared = homspace
+            .prepare_coupled_subblock_structure_from_leg_degeneracies_generic_checked(
+                provider.as_ref(),
+            )
+            .unwrap();
+        let committed = BoundDynamicFusionMapSpace::from_prepared_final_homspace_generic_checked(
+            Arc::clone(&provider),
+            homspace.clone(),
+            prepared,
+        )
+        .unwrap();
+        let rows = |space: &DynamicFusionMapSpace| {
+            let structure = space.structure();
+            (0..structure.block_count())
+                .map(|index| {
+                    let block = structure.block(index).unwrap();
+                    (
+                        block.key().clone(),
+                        block.shape().to_vec(),
+                        block.strides().to_vec(),
+                        block.offset(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(root.space().structure().block_count(), 5);
+        assert_eq!(rows(root.space()), rows(committed.space()));
+        assert_eq!(
+            root.space().required_len().unwrap(),
+            committed.space().required_len().unwrap()
+        );
+        assert_eq!(root.space().homspace(), committed.space().homspace());
+        assert_eq!(root.space().nout(), committed.space().nout());
+        assert_eq!(root.space().nin(), committed.space().nin());
+        assert!(Arc::ptr_eq(committed.provider_arc(), &provider));
+        // Only a `CheckedGeneric` binding stages a checked final HomSpace.
+        committed
+            .prepare_final_homspace_generic_with_checked(provider.as_ref(), homspace)
+            .unwrap();
+
+        let spy = Arc::new(CheckedGenericSpy::new());
+        let vacuum_hom = FusionTreeHomSpace::from_sector_ids([(0, 2)], [(0, 3)]);
+        let prepared = vacuum_hom
+            .prepare_coupled_subblock_structure_from_leg_degeneracies_generic_checked(spy.as_ref())
+            .unwrap();
+        let enumerated = spy.calls.get();
+        assert!(enumerated > 0);
+        BoundDynamicFusionMapSpace::from_prepared_final_homspace_generic_checked(
+            Arc::clone(&spy),
+            vacuum_hom,
+            prepared,
+        )
+        .unwrap();
+        assert_eq!(spy.calls.get(), enumerated);
     }
 
     #[test]

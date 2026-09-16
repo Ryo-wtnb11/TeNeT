@@ -3977,24 +3977,91 @@ fn assert_checked_full_svd_builder_failure(fail_at: usize) {
     assert_eq!(dense.qr_calls, 2);
 }
 
+// Checked full-SVD provider sequence for `generic_factorization_input`: ten
+// calls of the two multiplicity-aware dimension preflights, then the single
+// U output-layout enumeration (calls 11-13), then the single Vh enumeration
+// (calls 14-16); the diagonal S space issues no provider query. Before the
+// one-sided owner enumerated its layout once, each output enumerated twice
+// (U 11-16, Vh 17-22) and these tests pinned calls 15, 19 and 22.
+const FULL_SVD_DIMENSION_PREFLIGHT_CALLS: usize = 10;
+const FULL_SVD_U_FIRST_CALL: usize = FULL_SVD_DIMENSION_PREFLIGHT_CALLS + 1;
+const FULL_SVD_U_LAST_CALL: usize = FULL_SVD_DIMENSION_PREFLIGHT_CALLS + 3;
+const FULL_SVD_VH_FIRST_CALL: usize = FULL_SVD_U_LAST_CALL + 1;
+const FULL_SVD_VH_LAST_CALL: usize = FULL_SVD_U_LAST_CALL + 3;
+
 #[test]
 fn checked_generic_full_svd_u_builder_failure_preserves_provider_context() {
-    // What: after the two multiplicity-aware dimension DPs (ten checked calls),
-    // the first post-dense checked-provider call belongs to U-space construction.
-    assert_checked_full_svd_builder_failure(15);
+    // What: the first and last post-dense checked-provider calls of U-space
+    // construction propagate their exact provider error.
+    assert_checked_full_svd_builder_failure(FULL_SVD_U_FIRST_CALL);
+    assert_checked_full_svd_builder_failure(FULL_SVD_U_LAST_CALL);
 }
 
 #[test]
 fn checked_generic_full_svd_vh_builder_failure_preserves_provider_context() {
-    // What: Vh-space construction propagates its exact provider error without publishing U.
-    assert_checked_full_svd_builder_failure(19);
+    // What: Vh-space construction propagates its exact provider error without
+    // publishing U, from its first call to its last.
+    assert_checked_full_svd_builder_failure(FULL_SVD_VH_FIRST_CALL);
+    assert_checked_full_svd_builder_failure(FULL_SVD_VH_LAST_CALL);
 }
 
 #[test]
-fn checked_generic_full_svd_s_builder_failure_preserves_provider_context() {
-    // What: S-space construction propagates its exact provider error after U/Vh staging;
-    // its final checked admission call follows the ten-call dimension preflight at 22.
-    assert_checked_full_svd_builder_failure(22);
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
+fn checked_generic_full_svd_enumerates_each_output_layout_once() {
+    // What: the provider sees the dimension preflights plus exactly one
+    // layout enumeration per one-sided output; the diagonal S publication
+    // adds none. Formerly 22 calls (each output enumerated twice), now 16.
+    let (source, data) = generic_factorization_input();
+    let provider = Arc::new(LateGenericSpy {
+        rule: FactorGenericRule,
+        fail_at: usize::MAX,
+        calls: Cell::new(0),
+    });
+    let checked =
+        BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
+            .unwrap();
+    let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
+    let mut dense = CountingDense::default();
+    let output = svd_full_dyn_checked_generic(&mut dense, &input).unwrap();
+    assert_eq!(provider.calls.get(), FULL_SVD_VH_LAST_CALL);
+
+    let probe_calls = |run: &dyn Fn(&LateGenericSpy)| {
+        let probe = LateGenericSpy {
+            rule: FactorGenericRule,
+            fail_at: usize::MAX,
+            calls: Cell::new(0),
+        };
+        run(&probe);
+        probe.calls.get()
+    };
+    let homspace = source.space().homspace();
+    let preflight = probe_calls(&|probe| {
+        coupled_sector_block_dimensions_generic_checked(homspace.codomain(), probe).unwrap();
+        coupled_sector_block_dimensions_generic_checked(homspace.domain(), probe).unwrap();
+    });
+    assert_eq!(preflight, FULL_SVD_DIMENSION_PREFLIGHT_CALLS);
+    let enumeration = |factor: &BoundDynFactor<LateGenericSpy, f64>| {
+        let homspace = factor.space().space().homspace().clone();
+        probe_calls(&|probe| {
+            homspace
+                .prepare_coupled_subblock_structure_from_leg_degeneracies_generic_checked(probe)
+                .unwrap();
+        })
+    };
+    assert_eq!(
+        enumeration(output.u()),
+        FULL_SVD_U_LAST_CALL - FULL_SVD_U_FIRST_CALL + 1
+    );
+    assert_eq!(
+        enumeration(output.vh()),
+        FULL_SVD_VH_LAST_CALL - FULL_SVD_VH_FIRST_CALL + 1
+    );
+    assert_eq!(enumeration(output.s()), 0);
+    assert!(Arc::ptr_eq(output.u().space().provider_arc(), &provider));
+    assert!(Arc::ptr_eq(output.vh().space().provider_arc(), &provider));
 }
 
 #[test]
