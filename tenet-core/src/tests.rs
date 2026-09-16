@@ -10786,7 +10786,7 @@ mod tests {
             [(u1(0), 1)],
             Vec::<(SectorId, usize)>::new(),
         );
-        let content = BlockStructure::trivial(&[1]).unwrap().content_key();
+        let structure = BlockStructure::trivial(&[1]).unwrap().into_shared();
         let key = || {
             Arc::new(CompleteHomSpaceStructureCacheKey {
                 rule: RuleIdentity::new_unique::<usize>(),
@@ -10798,10 +10798,23 @@ mod tests {
         let key2 = key();
         let mut cache = CompleteHomSpaceStructureCache::new(2, 20, 10);
 
-        cache.admit(Arc::clone(&key0), Arc::clone(&content), 10);
-        cache.admit(Arc::clone(&key1), Arc::clone(&content), 10);
+        // Charged bytes include the entry's `Weak<BlockStructure>` word
+        // (`size_of::<CompleteHomSpaceStructureCacheEntry>()` grew from 2 to
+        // 3 words, 16 -> 24 bytes on 64-bit) and the wrapper `ArcInner` the
+        // Weak keeps allocated after the last strong owner dies.
+        let charged = charged_complete_hom_space_structure_bytes(&key0, &structure.content_key());
+        assert!(
+            charged
+                >= std::mem::size_of::<CompleteHomSpaceStructureCacheKey>()
+                    + 3 * std::mem::size_of::<usize>()
+                    + 12 * std::mem::size_of::<usize>()
+                    + std::mem::size_of::<BlockStructure>()
+        );
+
+        cache.admit(Arc::clone(&key0), Arc::clone(&structure), 10);
+        cache.admit(Arc::clone(&key1), Arc::clone(&structure), 10);
         assert!(cache.lookup(&key0).is_some());
-        cache.admit(Arc::clone(&key2), Arc::clone(&content), 10);
+        cache.admit(Arc::clone(&key2), Arc::clone(&structure), 10);
         assert!(cache.lookup(&key0).is_none());
         assert!(cache.lookup(&key1).is_some());
         assert!(cache.lookup(&key2).is_some());
@@ -10810,8 +10823,8 @@ mod tests {
         assert_eq!(cache.info().evictions(), 1);
 
         let oversize = key();
-        let returned = cache.admit(Arc::clone(&oversize), Arc::clone(&content), 11);
-        assert!(Arc::ptr_eq(&returned, &content));
+        let returned = cache.admit(Arc::clone(&oversize), Arc::clone(&structure), 11);
+        assert!(Arc::ptr_eq(&returned, &structure));
         assert!(cache.lookup(&oversize).is_none());
         assert_eq!(cache.info().entries(), 2);
         assert_eq!(cache.info().bypasses(), 1);
@@ -10847,15 +10860,45 @@ mod tests {
             let first = first_hom
                 .coupled_subblock_structure_from_leg_degeneracies(rule)
                 .unwrap();
-            block_structure_arc_table().write().unwrap().clear();
+            let info = complete_hom_space_structure_cache_info();
+            let interned = block_structure_intern_calls();
+            // Live wrapper: the hit returns the canonical Arc itself, without
+            // re-interning content.
             let second = second_hom
                 .coupled_subblock_structure_from_leg_degeneracies(rule)
                 .unwrap();
-            assert!(Arc::ptr_eq(&first.content_key(), &second.content_key()));
-            assert!(!Arc::ptr_eq(&first.regions, &second.regions));
-            let region = Arc::downgrade(&second.regions);
+            assert!(Arc::ptr_eq(&first, &second));
+            let after = complete_hom_space_structure_cache_info();
+            assert_eq!(after.hits(), info.hits() + 1);
+            assert_eq!(after.misses(), info.misses());
+            assert_eq!(after.admissions(), info.admissions());
+            assert_eq!(block_structure_intern_calls(), interned);
+
+            // Dead wrapper: content stays cached (a hit, not a miss), only the
+            // wrapper is rebuilt; region state died with the old wrapper.
+            let content = first.content_key();
+            let region = first.weak_region_state();
             drop(first);
             drop(second);
+            assert!(region.upgrade().is_none());
+            let third = second_hom
+                .coupled_subblock_structure_from_leg_degeneracies(rule)
+                .unwrap();
+            assert!(Arc::ptr_eq(&third.content_key(), &content));
+            assert!(third.weak_region_state().upgrade().is_some());
+            let after = complete_hom_space_structure_cache_info();
+            assert_eq!(after.hits(), info.hits() + 2);
+            assert_eq!(after.misses(), info.misses());
+            assert_eq!(after.admissions(), info.admissions());
+            assert_eq!(block_structure_intern_calls(), interned);
+            // The entry's Weak was refreshed: the next hit is the rebuilt Arc.
+            let fourth = first_hom
+                .coupled_subblock_structure_from_leg_degeneracies(rule)
+                .unwrap();
+            assert!(Arc::ptr_eq(&third, &fourth));
+            let region = third.weak_region_state();
+            drop(third);
+            drop(fourth);
             assert!(region.upgrade().is_none());
         }
 
@@ -10881,6 +10924,60 @@ mod tests {
         assert_eq!(info.entries(), 3);
         assert_eq!(info.admissions(), 3);
         assert!(info.hits() >= 3);
+    }
+
+    #[test]
+    fn complete_homspace_layout_cache_concurrent_hits_share_one_canonical_arc() {
+        // What: threads looking up one key concurrently, with and without a
+        // live wrapper between rounds, all receive the same canonical Arc from
+        // a single admission.
+        let _guard = test_support::CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reset_core_intern_tables();
+        let hom = || FusionTreeHomSpace::from_sectors([(su2(1), 2), (su2(3), 1)], [(su2(1), 3)]);
+        let held = hom()
+            .coupled_subblock_structure_from_leg_degeneracies(&SU2FusionRule)
+            .unwrap();
+
+        let round = || {
+            let barrier = std::sync::Barrier::new(4);
+            let results = std::thread::scope(|scope| {
+                let handles = (0..4)
+                    .map(|_| {
+                        scope.spawn(|| {
+                            barrier.wait();
+                            hom()
+                                .coupled_subblock_structure_from_leg_degeneracies(&SU2FusionRule)
+                                .unwrap()
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                handles
+                    .into_iter()
+                    .map(|handle| handle.join().unwrap())
+                    .collect::<Vec<_>>()
+            });
+            assert!(results.iter().all(|r| Arc::ptr_eq(r, &results[0])));
+            results
+        };
+
+        let live = round();
+        assert!(Arc::ptr_eq(&live[0], &held));
+        drop(live);
+        drop(held);
+        let rebuilt = round();
+        // The refreshed entry pairs the rebuilt wrapper with its own content.
+        let key = CompleteHomSpaceStructureCacheKey::new(&SU2FusionRule, &hom());
+        let cache = complete_hom_space_structure_cache().read().unwrap();
+        let entry = cache.entries.peek(&key).unwrap();
+        assert!(Arc::ptr_eq(&entry.content, &rebuilt[0].content_key()));
+        assert!(Arc::ptr_eq(&entry.wrapper.upgrade().unwrap(), &rebuilt[0]));
+        drop(cache);
+        assert_eq!(complete_hom_space_structure_cache_info().admissions(), 1);
+        assert_eq!(complete_hom_space_structure_cache_info().misses(), 1);
+        assert_eq!(complete_hom_space_structure_cache_info().hits(), 8);
+        drop(rebuilt);
     }
 
     #[test]
