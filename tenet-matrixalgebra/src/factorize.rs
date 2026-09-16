@@ -3055,6 +3055,7 @@ where
                 block.strides(),
                 block.offset(),
                 matrix_axis,
+                side,
                 factor,
                 factor_rows,
                 side_offset,
@@ -3133,6 +3134,7 @@ where
             block.strides(),
             block.offset(),
             block.shape().len() - 1,
+            FactorSide::Left,
             factor,
             factor_rows,
             row_offset,
@@ -3171,6 +3173,7 @@ where
             block.strides(),
             block.offset(),
             0,
+            FactorSide::Right,
             factor,
             factor_rows,
             col_offset,
@@ -5974,6 +5977,8 @@ fn copy_mapped_to_strided_diagonal<D, V, F>(
 /// For `U` the matrix axis is the trailing (new leg) axis and the codomain
 /// axes select rows at `side_offset`; for `Vt` the matrix axis is the leading
 /// (new leg) axis and the domain axes select columns at `side_offset`.
+/// `factor_side` names the factor layout (`Left`: `a x b`, element `(o, j)` at
+/// `F[o + a*j]`; `Right`: `b x cols`, element `(j, o)` at `F[j + b*o]`).
 #[allow(clippy::too_many_arguments)]
 fn scatter_matrix_block<D: Copy>(
     data: &mut [D],
@@ -5981,6 +5986,7 @@ fn scatter_matrix_block<D: Copy>(
     strides: &[usize],
     offset: usize,
     matrix_axis: usize,
+    factor_side: FactorSide,
     matrix: &[D],
     matrix_rows: usize,
     side_offset: usize,
@@ -6008,8 +6014,11 @@ fn scatter_matrix_block<D: Copy>(
                 side_stride *= shape[axis];
             }
         }
+        // A rank-1 block (zero-leg tree) has `matrix_axis == 0 == rank - 1` on
+        // both sides, so `matrix_axis` alone cannot encode the source layout;
+        // only a Left factor walks the bond with stride `matrix_rows`.
         let (src_start, src_lane_stride) = if matrix_axis == 0 {
-            if matrix_axis == rank - 1 {
+            if matrix_axis == rank - 1 && factor_side == FactorSide::Left {
                 (side_offset + side, matrix_rows)
             } else {
                 (matrix_rows * (side_offset + side), 1)
@@ -9294,6 +9303,7 @@ where
                 block.strides(),
                 block.offset(),
                 axis,
+                side,
                 factor,
                 factor_rows,
                 offset,
@@ -9426,6 +9436,7 @@ where
             block.strides(),
             block.offset(),
             block.shape().len() - 1,
+            FactorSide::Left,
             factor,
             factor_rows,
             row_offset,
@@ -9474,6 +9485,7 @@ where
             block.strides(),
             block.offset(),
             0,
+            FactorSide::Right,
             factor,
             factor_rows,
             col_offset,
@@ -13973,6 +13985,198 @@ mod sector_matricization_tests {
             assert!(pair.right.is_empty());
             assert_eq!(pair.left, opposite[index]);
         }
+    }
+
+    /// One even sector whose selected tree has zero legs: the factor block on
+    /// that side is rank-1 (`shape == [b]`). `padding` extra source rows or
+    /// columns precede the tree so the canonical proof declines and the
+    /// scatter fallback publishes the block.
+    fn zero_leg_side_matrix<D: FactorScalar>(
+        zero_leg_side: FactorSide,
+        extent: usize,
+        padding: usize,
+    ) -> (FusionTreeHomSpace, SectorMatricization<D>) {
+        let even = SectorId::new(0);
+        let leg = FusionProductSpace::new([SectorLeg::new([(even, extent)], false)]);
+        let homspace = match zero_leg_side {
+            FactorSide::Left => FusionTreeHomSpace::new(FusionProductSpace::new([]), leg),
+            FactorSide::Right => FusionTreeHomSpace::new(leg, FusionProductSpace::new([])),
+        };
+        let key = homspace.fusion_tree_keys_generic(&TestGenericRule).unwrap()[0].clone();
+        let (rows, cols, row_trees, col_trees) = match zero_leg_side {
+            FactorSide::Left => (
+                1 + padding,
+                extent,
+                vec![(key.codomain_tree().clone(), padding, vec![])],
+                vec![(key.domain_tree().clone(), 0, vec![extent])],
+            ),
+            FactorSide::Right => (
+                extent,
+                1 + padding,
+                vec![(key.codomain_tree().clone(), 0, vec![extent])],
+                vec![(key.domain_tree().clone(), padding, vec![])],
+            ),
+        };
+        (
+            homspace,
+            SectorMatricization {
+                sector: even,
+                rows,
+                cols,
+                row_trees,
+                col_trees,
+                data: vec![D::zero(); rows * cols],
+            },
+        )
+    }
+
+    /// Rank-1 blocks on both sides through the MF and the checked one-sided
+    /// owners (#1197). Right: `b x cols` column-major, the block at column
+    /// `o` is `F[j + b*o]`; Left: `a x b`, the block at row `o` is
+    /// `F[o + a*j]`. Before the fix the Right block was read with the Left
+    /// stride (`F[o + b*j]`), which for `b = 3, cols = 2, o = 1` reaches
+    /// `F[7]` past the six-element factor and panicked on the slice bound.
+    fn one_sided_rank1_fallback_case<D>(values: &dyn Fn(usize) -> D)
+    where
+        D: FactorScalar + PartialEq + fmt::Debug,
+    {
+        let even = SectorId::new(0);
+        let b = 3usize;
+        let padding = 1usize;
+        let factor = (0..2 * b).map(values).collect::<Vec<_>>();
+        let pair = |side| match side {
+            FactorSide::Right => FactorPair {
+                sector: even,
+                kept: 99,
+                left: vec![values(500)],
+                left_rows: 1,
+                right: factor.clone(),
+                right_leading: b,
+            },
+            FactorSide::Left => FactorPair {
+                sector: even,
+                kept: 99,
+                left: factor.clone(),
+                left_rows: 1 + padding,
+                right: vec![values(500)],
+                right_leading: 1,
+            },
+        };
+        let cases = [
+            (
+                FactorSide::Right,
+                (0..b).map(|j| factor[j + b * padding]).collect::<Vec<_>>(),
+            ),
+            (
+                FactorSide::Left,
+                (0..b)
+                    .map(|j| factor[padding + (1 + padding) * j])
+                    .collect::<Vec<_>>(),
+            ),
+        ];
+        for (side, expected) in cases {
+            let (homspace, matrix) = zero_leg_side_matrix::<D>(side, 2, padding);
+            let dimensions = BTreeMap::from([(even, b)]);
+            let selected = factor.clone();
+
+            let authority = BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free(
+                Arc::new(Z2FusionRule),
+                homspace.clone(),
+            )
+            .unwrap();
+            let mut pairs = [pair(side)];
+            reset_one_sided_publication_probe();
+            let mf = build_bound_factor_with_placement(
+                &authority,
+                &homspace,
+                std::slice::from_ref(&matrix),
+                &mut pairs,
+                &dimensions,
+                side,
+                FactorPlacement::Direct,
+            )
+            .unwrap();
+            let probe = one_sided_publication_probe();
+            assert_eq!(
+                (probe.canonical_publications, probe.fallback_publications),
+                (0, 1)
+            );
+            let block = mf.space().space().structure().block(0).unwrap();
+            assert_eq!(block.shape(), [b]);
+            assert_eq!(mf.data(), expected);
+            assert_eq!(selected_of(&pairs[0], side), &selected);
+
+            let provider = Arc::new(InfallibleGeneric::new(&TestGenericRule));
+            let mut pairs = [pair(side)];
+            reset_one_sided_publication_probe();
+            let checked = build_bound_factor_generic_checked(
+                &provider,
+                &homspace,
+                std::slice::from_ref(&matrix),
+                &mut pairs,
+                &dimensions,
+                side,
+            )
+            .unwrap();
+            let probe = one_sided_publication_probe();
+            assert_eq!(
+                (probe.canonical_publications, probe.fallback_publications),
+                (0, 1)
+            );
+            assert_eq!(checked.data(), expected);
+            assert_eq!(selected_of(&pairs[0], side), &selected);
+        }
+    }
+
+    #[test]
+    fn one_sided_rank1_fallback_scatters_right_and_left_layouts_real() {
+        one_sided_rank1_fallback_case(&|k| k as f64 + 0.5);
+    }
+
+    #[test]
+    fn one_sided_rank1_fallback_scatters_right_and_left_layouts_complex() {
+        one_sided_rank1_fallback_case(&|k| Complex64::new(k as f64, -(k as f64) - 0.25));
+    }
+
+    #[test]
+    fn generic_pair_fallback_scatters_rank1_right_block_with_right_layout() {
+        let b = 3usize;
+        let padding = 1usize;
+        let (homspace, matrix) = zero_leg_side_matrix::<f64>(FactorSide::Right, 2, padding);
+        let provider = Arc::new(TestGenericRule);
+        let left = (0..2 * b).map(|k| 10.0 + k as f64).collect::<Vec<_>>();
+        let right = (0..b * (1 + padding))
+            .map(|k| 20.0 + k as f64)
+            .collect::<Vec<_>>();
+        reset_generic_pair_publication_probe();
+
+        let (left_factor, right_factor) = build_left_right_bound_pair_generic(
+            &provider,
+            &homspace,
+            std::slice::from_ref(&matrix),
+            vec![FactorPair {
+                sector: SectorId::new(0),
+                kept: b,
+                left: left.clone(),
+                left_rows: 2,
+                right: right.clone(),
+                right_leading: b,
+            }],
+        )
+        .unwrap();
+
+        let probe = generic_pair_publication_probe();
+        assert_eq!(
+            (probe.canonical_publications, probe.fallback_publications),
+            (0, 1)
+        );
+        assert_eq!(left_factor.data(), left);
+        let block = right_factor.space().space().structure().block(0).unwrap();
+        assert_eq!(block.shape(), [b]);
+        assert_eq!(
+            right_factor.data(),
+            (0..b).map(|j| right[j + b * padding]).collect::<Vec<_>>()
+        );
     }
 
     #[test]
