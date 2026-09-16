@@ -1809,18 +1809,15 @@ where
             kept: matrix.rows.min(matrix.cols),
         })
         .collect::<Vec<_>>();
+    let bond = SectorLeg::new(ranks.iter().map(|rank| (rank.sector, rank.kept)), false);
     let u_space = build_bound_factor_space(
         input.space(),
         space.homspace(),
-        ranks.iter().map(|rank| (rank.sector, rank.kept)),
+        bond.clone(),
         FactorSide::Left,
     )?;
-    let vt_space = build_bound_factor_space(
-        input.space(),
-        space.homspace(),
-        ranks.iter().map(|rank| (rank.sector, rank.kept)),
-        FactorSide::Right,
-    )?;
+    let vt_space =
+        build_bound_factor_space(input.space(), space.homspace(), bond, FactorSide::Right)?;
     let u_len = u_space
         .space()
         .required_len()
@@ -1935,14 +1932,8 @@ where
     Ok((u, vh, singular_values))
 }
 
-#[derive(Debug)]
-struct MatricizationPlan {
-    layout: ValidatedDynamicFusionLayout,
-    regions: Arc<[CoupledSectorRegion]>,
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct CompactFactorRoute {
+pub(crate) struct CompactFactorRoute {
     source_region: usize,
     left_region: Option<usize>,
     right_region: Option<usize>,
@@ -1950,14 +1941,21 @@ struct CompactFactorRoute {
     rank: usize,
 }
 
+/// Per-call routing from the source coupled-sector regions to the two factor
+/// regions. Owned by the calling factorization and dropped with it.
+///
+/// Why not `Arc` the plan or its source half: nothing shares it beyond the
+/// one call that builds it, so the wrappers were two heap allocations per
+/// call with no owner to serve.
 #[derive(Debug)]
 pub(crate) struct CompactFactorPlan {
-    source: Arc<MatricizationPlan>,
+    source_layout: ValidatedDynamicFusionLayout,
+    source_regions: Arc<[CoupledSectorRegion]>,
     left_layout: ValidatedDynamicFusionLayout,
     right_layout: ValidatedDynamicFusionLayout,
     left_regions: Arc<[CoupledSectorRegion]>,
     right_regions: Arc<[CoupledSectorRegion]>,
-    routes: Arc<[CompactFactorRoute]>,
+    routes: Vec<CompactFactorRoute>,
 }
 
 #[doc(hidden)]
@@ -1985,17 +1983,18 @@ impl<E> From<OperationError> for CheckedGenericFactorPlanError<E> {
 }
 
 pub(crate) struct PreparedGenericCompactFactorPlan {
-    source: Arc<MatricizationPlan>,
+    source_layout: ValidatedDynamicFusionLayout,
+    source_regions: Arc<[CoupledSectorRegion]>,
     left: PreparedCheckedGenericDynamicSpace,
     right: PreparedCheckedGenericDynamicSpace,
     left_regions: Arc<[CoupledSectorRegion]>,
     right_regions: Arc<[CoupledSectorRegion]>,
-    routes: Arc<[CompactFactorRoute]>,
+    routes: Vec<CompactFactorRoute>,
 }
 
 fn compact_factor_plan<R>(
     input: &BoundDynamicFusionMapSpace<R>,
-) -> Result<Option<Arc<CompactFactorPlan>>, OperationError>
+) -> Result<Option<CompactFactorPlan>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
@@ -2004,7 +2003,7 @@ where
 
 fn compact_factor_plan_generic<R>(
     input: &BoundDynamicFusionMapSpace<R>,
-) -> Result<Option<Arc<CompactFactorPlan>>, OperationError>
+) -> Result<Option<CompactFactorPlan>, OperationError>
 where
     R: FusionRule,
 {
@@ -2029,19 +2028,7 @@ where
     let Some(regions) = checked_sector_regions(space.structure(), space.nout())? else {
         return Ok(None);
     };
-    let source = Arc::new(MatricizationPlan {
-        layout: input.validated_layout(),
-        regions,
-    });
-    let ranks = source
-        .regions
-        .iter()
-        .map(|region| SectorRank {
-            sector: region_sector(region),
-            kept: region.rows().min(region.cols()),
-        })
-        .collect::<Vec<_>>();
-    let new_leg = SectorLeg::new(ranks.iter().map(|rank| (rank.sector, rank.kept)), false);
+    let new_leg = compact_bond_leg(&regions);
     let left_hom = FusionTreeHomSpace::new(
         space.homspace().codomain().clone(),
         FusionProductSpace::new([new_leg.clone()]),
@@ -2062,12 +2049,13 @@ where
             message: "compact right factor is not a coupled-sector matrix layout",
         },
     )?;
-    if !source_factor_tree_extents_match(&source.regions, &left_regions, &right_regions) {
+    if !source_factor_tree_extents_match(&regions, &left_regions, &right_regions) {
         return Ok(None);
     }
-    let routes = compile_compact_factor_routes(&source.regions, &left_regions, &right_regions)?;
+    let routes = compile_compact_factor_routes(&regions, &left_regions, &right_regions)?;
     Ok(Some(PreparedGenericCompactFactorPlan {
-        source,
+        source_layout: input.validated_layout(),
+        source_regions: regions,
         left,
         right,
         left_regions,
@@ -2103,14 +2091,15 @@ fn source_factor_tree_extents_match(
 fn finish_compact_factor_plan_generic<R>(
     input: &BoundDynamicFusionMapSpace<R>,
     prepared: PreparedGenericCompactFactorPlan,
-) -> Result<Option<Arc<CompactFactorPlan>>, OperationError>
+) -> Result<Option<CompactFactorPlan>, OperationError>
 where
     R: FusionRule,
 {
     #[cfg(test)]
     GENERIC_FACTOR_PLAN_FINISH_CALLS.with(|calls| calls.set(calls.get() + 1));
     let PreparedGenericCompactFactorPlan {
-        source,
+        source_layout,
+        source_regions,
         left,
         right,
         left_regions,
@@ -2119,14 +2108,15 @@ where
     } = prepared;
     let left = input.commit_final_homspace_generic_checked(left)?;
     let right = input.commit_final_homspace_generic_checked(right)?;
-    Ok(Some(Arc::new(CompactFactorPlan {
-        source,
+    Ok(Some(CompactFactorPlan {
+        source_layout,
+        source_regions,
         left_layout: left.validated_layout(),
         right_layout: right.validated_layout(),
         left_regions,
         right_regions,
         routes,
-    })))
+    }))
 }
 
 #[cfg(test)]
@@ -2170,7 +2160,7 @@ where
 fn build_compact_factor_plan<R>(
     input: &BoundDynamicFusionMapSpace<R>,
     source_layout: ValidatedDynamicFusionLayout,
-) -> Result<Option<Arc<CompactFactorPlan>>, OperationError>
+) -> Result<Option<CompactFactorPlan>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
@@ -2178,30 +2168,10 @@ where
     let Some(regions) = checked_sector_regions(space.structure(), space.nout())? else {
         return Ok(None);
     };
-    let source = Arc::new(MatricizationPlan {
-        layout: source_layout,
-        regions,
-    });
-    let ranks = source
-        .regions
-        .iter()
-        .map(|region| SectorRank {
-            sector: region_sector(region),
-            kept: region.rows().min(region.cols()),
-        })
-        .collect::<Vec<_>>();
-    let u_space = build_bound_factor_space(
-        input,
-        space.homspace(),
-        ranks.iter().map(|rank| (rank.sector, rank.kept)),
-        FactorSide::Left,
-    )?;
-    let vh_space = build_bound_factor_space(
-        input,
-        space.homspace(),
-        ranks.iter().map(|rank| (rank.sector, rank.kept)),
-        FactorSide::Right,
-    )?;
+    let bond = compact_bond_leg(&regions);
+    let u_space =
+        build_bound_factor_space(input, space.homspace(), bond.clone(), FactorSide::Left)?;
+    let vh_space = build_bound_factor_space(input, space.homspace(), bond, FactorSide::Right)?;
     let left_regions = checked_sector_regions(u_space.space().structure(), u_space.space().nout())?
         .ok_or(OperationError::UnsupportedTensorContractScope {
             message: "compact left factor is not a coupled-sector matrix layout",
@@ -2212,27 +2182,42 @@ where
                 message: "compact right factor is not a coupled-sector matrix layout",
             },
         )?;
-    let routes = compile_compact_factor_routes(&source.regions, &left_regions, &right_regions)?;
-    Ok(Some(Arc::new(CompactFactorPlan {
-        source,
+    let routes = compile_compact_factor_routes(&regions, &left_regions, &right_regions)?;
+    Ok(Some(CompactFactorPlan {
+        source_layout,
+        source_regions: regions,
         left_layout: u_space.validated_layout(),
         right_layout: vh_space.validated_layout(),
         left_regions,
         right_regions,
         routes,
-    })))
+    }))
+}
+
+/// The bond leg `W` shared by both compact factors: one sector per source
+/// region with degeneracy `min(rows, cols)`.
+fn compact_bond_leg(regions: &[CoupledSectorRegion]) -> SectorLeg {
+    SectorLeg::new(
+        regions
+            .iter()
+            .map(|region| (region_sector(region), region.rows().min(region.cols()))),
+        false,
+    )
 }
 
 fn compile_compact_factor_routes(
     source_regions: &[CoupledSectorRegion],
     left_regions: &[CoupledSectorRegion],
     right_regions: &[CoupledSectorRegion],
-) -> Result<Arc<[CompactFactorRoute]>, OperationError> {
-    let left_by_sector = sector_region_index_map(left_regions)?;
-    let right_by_sector = sector_region_index_map(right_regions)?;
+) -> Result<Vec<CompactFactorRoute>, OperationError> {
+    let left_by_sector = SectorRegionIndex::new(left_regions)?;
+    let right_by_sector = SectorRegionIndex::new(right_regions)?;
     let mut routes = Vec::with_capacity(source_regions.len());
-    let mut used_left = vec![false; left_regions.len()];
-    let mut used_right = vec![false; right_regions.len()];
+    // Why not per-region `used` tables: the sector -> region index is
+    // injective and each nonzero route consumes a distinct index per side, so
+    // "an unused nonzero region exists" is exactly "used < nonzero regions".
+    let mut used_left = 0usize;
+    let mut used_right = 0usize;
     for (source_region, region) in source_regions.iter().enumerate() {
         let sector = region_sector(region);
         let rank = region.rows().min(region.cols());
@@ -2243,8 +2228,8 @@ fn compile_compact_factor_routes(
             let right_region = sector_region_index_of(&right_by_sector, sector, "right")?;
             validate_factor_region(&left_regions[left_region], region.rows(), rank, "left")?;
             validate_factor_region(&right_regions[right_region], rank, region.cols(), "right")?;
-            used_left[left_region] = true;
-            used_right[right_region] = true;
+            used_left += 1;
+            used_right += 1;
             (Some(left_region), Some(right_region))
         };
         routes.push(CompactFactorRoute {
@@ -2255,15 +2240,15 @@ fn compile_compact_factor_routes(
             rank,
         });
     }
-    validate_no_unused_factor_regions(left_regions, &used_left, "left")?;
-    validate_no_unused_factor_regions(right_regions, &used_right, "right")?;
-    Ok(routes.into())
+    validate_no_unused_factor_regions(left_regions, used_left, "left")?;
+    validate_no_unused_factor_regions(right_regions, used_right, "right")?;
+    Ok(routes)
 }
 
 #[cfg(test)]
 pub(crate) fn compact_factor_plan_for_test<R>(
     input: &BoundDynamicFusionMapSpace<R>,
-) -> Result<Option<Arc<CompactFactorPlan>>, OperationError>
+) -> Result<Option<CompactFactorPlan>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
@@ -2283,7 +2268,7 @@ pub(crate) fn compact_factor_plan_regions_for_test(
     Arc<[CoupledSectorRegion]>,
 ) {
     (
-        Arc::clone(&plan.source.regions),
+        Arc::clone(&plan.source_regions),
         Arc::clone(&plan.left_regions),
         Arc::clone(&plan.right_regions),
     )
@@ -2294,8 +2279,22 @@ pub(crate) fn validate_compact_factor_routes_for_test(
     source: &[CoupledSectorRegion],
     u: &[CoupledSectorRegion],
     vh: &[CoupledSectorRegion],
-) -> Result<(), OperationError> {
-    compile_compact_factor_routes(source, u, vh).map(|_| ())
+) -> Result<Vec<CompactFactorRoute>, OperationError> {
+    compile_compact_factor_routes(source, u, vh)
+}
+
+#[cfg(test)]
+pub(crate) fn compact_factor_plan_routes_for_test(
+    plan: &CompactFactorPlan,
+) -> &[CompactFactorRoute] {
+    &plan.routes
+}
+
+#[cfg(test)]
+impl CompactFactorRoute {
+    pub(crate) fn factor_regions_for_test(&self) -> (usize, Option<usize>, Option<usize>) {
+        (self.source_region, self.left_region, self.right_region)
+    }
 }
 
 fn svd_compact_direct_regions<E, R, D>(
@@ -2310,7 +2309,7 @@ where
     D: FactorScalar,
 {
     let space = input.space().space();
-    debug_assert_eq!(plan.source.layout, input.space().validated_layout());
+    debug_assert_eq!(plan.source_layout, input.space().validated_layout());
     let u_space = input.space().rebind_validated(&plan.left_layout)?;
     let vh_space = input.space().rebind_validated(&plan.right_layout)?;
     let mut u_data = vec![D::zero(); plan.left_layout.required_len()?];
@@ -2319,7 +2318,7 @@ where
     let mut spectrum_scratch = Vec::<D::Real>::new();
 
     for route in plan.routes.iter().copied() {
-        let region = &plan.source.regions[route.source_region];
+        let region = &plan.source_regions[route.source_region];
         let rank = route.rank;
         if rank == 0 {
             singular_values.push(SectorSpectrum {
@@ -2414,14 +2413,45 @@ fn sector_region_index_map(
     Ok(by_sector)
 }
 
+/// Sector -> region index lookup over one factor's region table.
+///
+/// Canonical factor layouts list their regions strictly sorted by coupled
+/// sector (a structural invariant of the derived layout, checked here in
+/// O(G)), so a binary search serves without building a map. Expert region
+/// tables that are not sorted keep the hash-map path, which also reports the
+/// duplicate-sector error.
+enum SectorRegionIndex<'a> {
+    Sorted(&'a [CoupledSectorRegion]),
+    Map(FxHashMap<SectorId, usize>),
+}
+
+impl<'a> SectorRegionIndex<'a> {
+    fn new(regions: &'a [CoupledSectorRegion]) -> Result<Self, OperationError> {
+        if regions
+            .windows(2)
+            .all(|pair| region_sector(&pair[0]) < region_sector(&pair[1]))
+        {
+            Ok(Self::Sorted(regions))
+        } else {
+            sector_region_index_map(regions).map(Self::Map)
+        }
+    }
+
+    fn get(&self, sector: SectorId) -> Option<usize> {
+        match self {
+            Self::Sorted(regions) => regions.binary_search_by_key(&sector, region_sector).ok(),
+            Self::Map(map) => map.get(&sector).copied(),
+        }
+    }
+}
+
 fn sector_region_index_of(
-    regions: &FxHashMap<SectorId, usize>,
+    regions: &SectorRegionIndex<'_>,
     sector: SectorId,
     side: &'static str,
 ) -> Result<usize, OperationError> {
     regions
-        .get(&sector)
-        .copied()
+        .get(sector)
         .ok_or(OperationError::UnsupportedTensorContractScope {
             message: match side {
                 "left" => "compact left factor is missing a nonzero-rank sector",
@@ -2449,14 +2479,14 @@ fn validate_factor_region(
 
 fn validate_no_unused_factor_regions(
     regions: &[CoupledSectorRegion],
-    used: &[bool],
+    used: usize,
     side: &'static str,
 ) -> Result<(), OperationError> {
-    if regions
+    let nonzero = regions
         .iter()
-        .zip(used)
-        .any(|(region, used)| !used && region.rows() != 0 && region.cols() != 0)
-    {
+        .filter(|region| region.rows() != 0 && region.cols() != 0)
+        .count();
+    if used < nonzero {
         return Err(OperationError::UnsupportedTensorContractScope {
             message: match side {
                 "left" => "compact left factor contains an unused nonzero sector",
@@ -2844,13 +2874,12 @@ enum FactorPlacement {
 fn build_bound_factor_space<R>(
     authority: &BoundDynamicFusionMapSpace<R>,
     homspace: &FusionTreeHomSpace,
-    dimensions: impl IntoIterator<Item = (SectorId, usize)>,
+    new_leg: SectorLeg,
     side: FactorSide,
 ) -> Result<BoundDynamicFusionMapSpace<R>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
-    let new_leg = SectorLeg::new(dimensions, false);
     let bond = FusionProductSpace::new([new_leg]);
     let hom = match side {
         FactorSide::Left => FusionTreeHomSpace::new(homspace.codomain().clone(), bond),
@@ -2983,9 +3012,12 @@ where
     let space = build_bound_factor_space(
         authority,
         homspace,
-        dimensions
-            .iter()
-            .map(|(&sector, &dimension)| (sector, dimension)),
+        SectorLeg::new(
+            dimensions
+                .iter()
+                .map(|(&sector, &dimension)| (sector, dimension)),
+            false,
+        ),
         side,
     )?;
     let required_len = space.space().required_len()?;
@@ -3328,7 +3360,7 @@ where
     let v_space = build_bound_factor_space(
         input.space(),
         space.homspace(),
-        ranks.iter().map(|rank| (rank.sector, rank.kept)),
+        SectorLeg::new(ranks.iter().map(|rank| (rank.sector, rank.kept)), false),
         FactorSide::Left,
     )?;
     let v_len = v_space
@@ -3426,14 +3458,13 @@ where
     D: FactorScalar,
 {
     let space = input.space().space();
-    debug_assert_eq!(plan.source.layout, input.space().validated_layout());
-    validate_hermitian_regions(input.data(), &plan.source.regions)?;
+    debug_assert_eq!(plan.source_layout, input.space().validated_layout());
+    validate_hermitian_regions(input.data(), &plan.source_regions)?;
 
     let v_space = input.space().rebind_validated(&plan.left_layout)?;
     let mut v_data = vec![D::zero(); plan.left_layout.required_len()?];
     let max_n = plan
-        .source
-        .regions
+        .source_regions
         .iter()
         .map(CoupledSectorRegion::rows)
         .max()
@@ -3445,7 +3476,7 @@ where
     let mut eigenvalues = Vec::with_capacity(plan.routes.len());
 
     for route in plan.routes.iter().copied() {
-        let source = &plan.source.regions[route.source_region];
+        let source = &plan.source_regions[route.source_region];
         let n = source.rows();
         if n == 0 {
             eigenvalues.push(SectorSpectrum {
@@ -5497,7 +5528,7 @@ where
     D: FactorScalar,
 {
     let space = input.space().space();
-    debug_assert_eq!(plan.source.layout, input.space().validated_layout());
+    debug_assert_eq!(plan.source_layout, input.space().validated_layout());
     let left_space = input.space().rebind_validated(&plan.left_layout)?;
     let right_space = input.space().rebind_validated(&plan.right_layout)?;
     let mut left_data = vec![D::zero(); plan.left_layout.required_len()?];
@@ -5507,7 +5538,7 @@ where
         if route.rank == 0 {
             continue;
         }
-        let source = &plan.source.regions[route.source_region];
+        let source = &plan.source_regions[route.source_region];
         let left = &plan.left_regions[route.left_region.expect("nonzero route has left region")];
         let right =
             &plan.right_regions[route.right_region.expect("nonzero route has right region")];
@@ -5643,7 +5674,7 @@ where
     D: FactorScalar,
 {
     let space = input.space().space();
-    debug_assert_eq!(plan.source.layout, input.space().validated_layout());
+    debug_assert_eq!(plan.source_layout, input.space().validated_layout());
     let left_space = input.space().rebind_validated(&plan.left_layout)?;
     let right_space = input.space().rebind_validated(&plan.right_layout)?;
     let mut left_data = vec![D::zero(); plan.left_layout.required_len()?];
@@ -5652,7 +5683,7 @@ where
     let max_adjoint_len = plan
         .routes
         .iter()
-        .map(|route| plan.source.regions[route.source_region].range().len())
+        .map(|route| plan.source_regions[route.source_region].range().len())
         .max()
         .unwrap_or(0);
     let max_q_prime_len = plan
@@ -5685,7 +5716,7 @@ where
         if route.rank == 0 {
             continue;
         }
-        let source = &plan.source.regions[route.source_region];
+        let source = &plan.source_regions[route.source_region];
         let left = &plan.left_regions[route.left_region.expect("nonzero route has left region")];
         let right =
             &plan.right_regions[route.right_region.expect("nonzero route has right region")];
@@ -7212,8 +7243,8 @@ fn compile_polar_region_routes(
     p_len: usize,
     direction: PolarDirection,
 ) -> Result<Vec<PolarRegionRoute>, OperationError> {
-    let w_by_sector = sector_region_index_map(w)?;
-    let p_by_sector = sector_region_index_map(p)?;
+    let w_by_sector = SectorRegionIndex::new(w)?;
+    let p_by_sector = SectorRegionIndex::new(p)?;
     let mut used_w = vec![false; w.len()];
     let mut used_p = vec![false; p.len()];
     let mut routes = Vec::with_capacity(source.len());

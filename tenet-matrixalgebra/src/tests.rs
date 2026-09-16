@@ -5111,7 +5111,93 @@ fn compact_factor_plan_does_not_retain_provider() {
     drop(provider);
 
     assert!(weak.upgrade().is_none());
-    assert!(Arc::strong_count(&plan) >= 1);
+    drop(plan);
+}
+
+#[test]
+fn compact_factor_plan_is_identical_across_calls_on_one_space() {
+    // What: rebuilding the per-call plan on the same bound space yields the
+    // same routes and the same region tables (shared `Arc`s), with the first
+    // plan still alive.
+    let charges =
+        [U1Irrep::new(-1), U1Irrep::new(0), U1Irrep::new(1)].map(|charge| charge.sector_id());
+    let tensor = tsvd_test_tensor(&U1FusionRule, &charges);
+    let bound = bound_tensor(Arc::new(U1FusionRule), &tensor);
+    let first = crate::factorize::compact_factor_plan_for_test(bound.space())
+        .unwrap()
+        .unwrap();
+    let second = crate::factorize::compact_factor_plan_for_test(bound.space())
+        .unwrap()
+        .unwrap();
+
+    let (first_source, first_u, first_vh) =
+        crate::factorize::compact_factor_plan_regions_for_test(&first);
+    let (second_source, second_u, second_vh) =
+        crate::factorize::compact_factor_plan_regions_for_test(&second);
+    assert!(first_source.len() >= 3);
+    assert!(Arc::ptr_eq(&first_source, &second_source));
+    assert!(Arc::ptr_eq(&first_u, &second_u));
+    assert!(Arc::ptr_eq(&first_vh, &second_vh));
+    assert_eq!(
+        crate::factorize::compact_factor_plan_routes_for_test(&first),
+        crate::factorize::compact_factor_plan_routes_for_test(&second)
+    );
+}
+
+#[test]
+fn compact_factor_routes_agree_between_sorted_and_unsorted_region_tables() {
+    // What: canonical factor regions are strictly sorted by coupled sector and
+    // route without a map; an expert (unsorted) region table routes through
+    // the map path to the same regions in the same source order.
+    let charges =
+        [U1Irrep::new(-1), U1Irrep::new(0), U1Irrep::new(1)].map(|charge| charge.sector_id());
+    let tensor = tsvd_test_tensor(&U1FusionRule, &charges);
+    let bound = bound_tensor(Arc::new(U1FusionRule), &tensor);
+    let plan = crate::factorize::compact_factor_plan_for_test(bound.space())
+        .unwrap()
+        .unwrap();
+    let (source, u, vh) = crate::factorize::compact_factor_plan_regions_for_test(&plan);
+    assert!(u
+        .windows(2)
+        .all(|pair| pair[0].coupled() < pair[1].coupled()));
+    assert!(vh
+        .windows(2)
+        .all(|pair| pair[0].coupled() < pair[1].coupled()));
+
+    let mut shuffled_u = u.to_vec();
+    let mut shuffled_vh = vh.to_vec();
+    shuffled_u.rotate_left(2);
+    shuffled_vh.reverse();
+    assert!(!shuffled_u
+        .windows(2)
+        .all(|pair| pair[0].coupled() < pair[1].coupled()));
+    let sorted =
+        crate::factorize::validate_compact_factor_routes_for_test(&source, &u, &vh).unwrap();
+    let unsorted = crate::factorize::validate_compact_factor_routes_for_test(
+        &source,
+        &shuffled_u,
+        &shuffled_vh,
+    )
+    .unwrap();
+    assert_eq!(
+        sorted,
+        crate::factorize::compact_factor_plan_routes_for_test(&plan)
+    );
+    assert_eq!(sorted.len(), unsorted.len());
+    for (sorted_route, unsorted_route) in sorted.iter().zip(&unsorted) {
+        let (sorted_source, sorted_left, sorted_right) = sorted_route.factor_regions_for_test();
+        let (unsorted_source, unsorted_left, unsorted_right) =
+            unsorted_route.factor_regions_for_test();
+        assert_eq!(sorted_source, unsorted_source);
+        assert_eq!(
+            sorted_left.map(|index| &u[index]),
+            unsorted_left.map(|index| &shuffled_u[index])
+        );
+        assert_eq!(
+            sorted_right.map(|index| &vh[index]),
+            unsorted_right.map(|index| &shuffled_vh[index])
+        );
+    }
 }
 
 #[test]
