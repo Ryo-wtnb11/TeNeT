@@ -1393,7 +1393,7 @@ mod tests {
         // surviving multiplicity-free braid decomposes each Artin swap into.
         let err = apply_unique_artin_braid_at_with_inverse(
             &FermionParityFusionRule,
-            &mut tree.clone(),
+            &mut UnhashedFusionTree::from(tree.clone()),
             1,
             false,
         )
@@ -1516,7 +1516,7 @@ mod tests {
             assert_eq!(direct_terms.len(), 1);
             let direct = direct_terms.into_iter().next().unwrap();
 
-            let mut replay_tree = tree.clone();
+            let mut replay_tree = UnhashedFusionTree::from(tree.clone());
             let mut replay_coefficient = 1.0;
             let mut replay_levels = levels;
             for swap in permutation_to_adjacent_swaps(&permutation, 4).unwrap() {
@@ -1531,7 +1531,7 @@ mod tests {
                 replay_coefficient *= coefficient;
                 replay_levels.swap(swap, swap + 1);
             }
-            assert_eq!(direct, (replay_tree, replay_coefficient));
+            assert_eq!(direct, (replay_tree.freeze(), replay_coefficient));
 
             let Some(pivot) =
                 (0..permutation.len() - 1).rfind(|&index| permutation[index] < permutation[index + 1])
@@ -3661,11 +3661,14 @@ mod tests {
         assert_eq!(terms.len(), 1);
         let (destination, coefficient) = terms.into_iter().next().unwrap();
 
-        let mut expected_tree = tree.clone();
+        let mut expected_tree = UnhashedFusionTree::from(tree.clone());
         let expected_coefficient =
             apply_unique_artin_braid_at_with_inverse(&rule, &mut expected_tree, 1, false).unwrap();
 
-        assert_eq!((destination, coefficient), (expected_tree, expected_coefficient));
+        assert_eq!(
+            (destination, coefficient),
+            (expected_tree.freeze(), expected_coefficient)
+        );
         assert_eq!(coefficient, 30.0);
     }
 
@@ -17077,6 +17080,166 @@ mod tests {
         assert!(ids
             .windows(2)
             .all(|pair| Arc::ptr_eq(&pair[0].key, &pair[1].key)));
+    }
+
+    // Fixture for the cached-hash contracts (#1207): keys that differ from a
+    // base tree in exactly one identity field each (uncoupled, coupled, dual
+    // flag, inner line, vertex), plus equal copies built with shared and with
+    // fresh backings.
+    fn key_hash_fixture() -> (Vec<FusionTreeKey>, FusionTreeKey, FusionTreeKey) {
+        let base =
+            FusionTreeKey::try_from_sector_ids([3, 3, 3], 3, [false, true, false], [1], [1, 2]).unwrap();
+        let distinct = vec![
+            base.clone(),
+            FusionTreeKey::try_from_sector_ids([3, 3, 4], 3, [false, true, false], [1], [1, 2]).unwrap(),
+            FusionTreeKey::try_from_sector_ids([3, 3, 3], 4, [false, true, false], [1], [1, 2]).unwrap(),
+            FusionTreeKey::try_from_sector_ids([3, 3, 3], 3, [false, true, true], [1], [1, 2]).unwrap(),
+            FusionTreeKey::try_from_sector_ids([3, 3, 3], 3, [false, true, false], [2], [1, 2]).unwrap(),
+            FusionTreeKey::try_from_sector_ids([3, 3, 3], 3, [false, true, false], [1], [2, 2]).unwrap(),
+        ];
+        let shared = FusionTreeKey::from_frozen(
+            Arc::from(base.uncoupled()),
+            base.coupled(),
+            Arc::from(base.is_dual()),
+            Arc::from(base.innerlines()),
+            Arc::from(base.vertices()),
+        );
+        let fresh = FusionTreeKey::new(
+            base.uncoupled().iter().copied(),
+            base.coupled(),
+            base.is_dual().iter().copied(),
+            base.innerlines().iter().copied(),
+            base.vertices().iter().copied(),
+        );
+        (distinct, shared, fresh)
+    }
+
+    fn fx_hash_of<T: Hash>(value: &T) -> u64 {
+        let mut hasher = rustc_hash::FxHasher::default();
+        value.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    #[test]
+    fn fusion_tree_key_hash_is_consistent_with_eq() {
+        let (distinct, shared, fresh) = key_hash_fixture();
+        let base = &distinct[0];
+        for copy in [&shared, &fresh] {
+            assert_eq!(base, copy);
+            assert_eq!(base.cached_hash_for_test(), copy.cached_hash_for_test());
+            assert_eq!(fx_hash_of(base), fx_hash_of(copy));
+        }
+        for key in &distinct {
+            let recomputed = fusion_tree_key_hash(
+                key.uncoupled(),
+                key.coupled(),
+                key.is_dual(),
+                key.innerlines(),
+                key.vertices(),
+            );
+            assert_eq!(key.cached_hash_for_test(), recomputed);
+            // `Hash` writes exactly the cached value.
+            let mut hasher = rustc_hash::FxHasher::default();
+            hasher.write_u64(key.cached_hash_for_test());
+            assert_eq!(fx_hash_of(key), hasher.finish());
+        }
+        // Pairwise set includes the shared-backing and fresh-backing
+        // duplicates of the base key so the equal-key branch covers real
+        // distinct objects, not only a key against itself.
+        let mut pairwise = distinct.clone();
+        pairwise.push(shared);
+        pairwise.push(fresh);
+        let mut equal_pairs_between_distinct_objects = 0;
+        for (i, a) in pairwise.iter().enumerate() {
+            for (j, b) in pairwise.iter().enumerate() {
+                if a == b {
+                    assert_eq!(a.cached_hash_for_test(), b.cached_hash_for_test());
+                    if i != j {
+                        equal_pairs_between_distinct_objects += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(equal_pairs_between_distinct_objects, 6);
+        assert_eq!(pairwise.iter().collect::<rustc_hash::FxHashSet<_>>().len(), distinct.len());
+    }
+
+    #[test]
+    fn fusion_tree_key_collision_falls_back_to_field_comparison() {
+        // Why the hook exists: a genuine Fx collision on this fixture is not
+        // constructible on demand, so the cache is forced equal to prove that
+        // `Eq` and map insertion still distinguish keys by their fields.
+        let (distinct, _, _) = key_hash_fixture();
+        let forced = 0x5eed_u64;
+        let left = distinct[0].clone().with_cached_hash_for_test(forced);
+        for other in &distinct[1..] {
+            let right = other.clone().with_cached_hash_for_test(forced);
+            assert_eq!(fx_hash_of(&left), fx_hash_of(&right));
+            assert_ne!(left, right);
+            let mut map: rustc_hash::FxHashMap<FusionTreeKey, usize> = rustc_hash::FxHashMap::default();
+            map.insert(left.clone(), 0);
+            map.insert(right.clone(), 1);
+            assert_eq!(map.len(), 2);
+            assert_eq!(map[&left], 0);
+            assert_eq!(map[&right], 1);
+        }
+    }
+
+    #[test]
+    fn fusion_tree_key_ordering_matches_field_wise_comparison() {
+        let (mut keys, shared, fresh) = key_hash_fixture();
+        keys.push(shared);
+        keys.push(fresh);
+        let fields = |k: &FusionTreeKey| {
+            (
+                k.uncoupled().to_vec(),
+                k.coupled(),
+                k.is_dual().to_vec(),
+                k.innerlines().to_vec(),
+                k.vertices().to_vec(),
+            )
+        };
+        for a in &keys {
+            for b in &keys {
+                assert_eq!(a.cmp(b), fields(a).cmp(&fields(b)));
+                assert_eq!(a.partial_cmp(b), Some(a.cmp(b)));
+                assert_eq!(a.cmp(b) == std::cmp::Ordering::Equal, a == b);
+            }
+        }
+    }
+
+    #[test]
+    fn braided_fusion_tree_key_carries_a_fresh_hash() {
+        let tree = FusionTreeKey::try_from_sector_ids([1, 1, 0], 0, [false, true, false], [0], [1, 1]).unwrap();
+        let steps = [
+            PreparedArtinStep { index: 1, inverse: false },
+            PreparedArtinStep { index: 0, inverse: true },
+        ];
+        let (braided, _) = execute_unique_tree_braid_steps(&FermionParityFusionRule, &tree, steps).unwrap();
+        assert_ne!(braided, tree);
+        let recomputed = fusion_tree_key_hash(
+            braided.uncoupled(),
+            braided.coupled(),
+            braided.is_dual(),
+            braided.innerlines(),
+            braided.vertices(),
+        );
+        assert_eq!(braided.cached_hash_for_test(), recomputed);
+        // Hand oracle: (1⊗1→0)(0⊗0→0) with the vacuum leg braided to the
+        // front becomes (0⊗1→1)(1⊗1→0); the dual flag travels with its leg.
+        let expected = FusionTreeKey::try_from_sector_ids([0, 1, 1], 0, [false, false, true], [1], [1, 1]).unwrap();
+        assert_eq!(braided, expected);
+        assert_eq!(fx_hash_of(&braided), fx_hash_of(&expected));
+    }
+
+    #[test]
+    fn fusion_tree_key_debug_excludes_cache() {
+        let key = FusionTreeKey::try_from_sector_ids([3, 4], 5, [false, true], [], [1]).unwrap();
+        assert_eq!(
+            format!("{key:?}"),
+            "FusionTreeKey { uncoupled: [SectorId(3), SectorId(4)], coupled: SectorId(5), \
+             is_dual: [false, true], innerlines: [], vertices: [MultiplicityIndex(1)] }"
+        );
     }
 
     // Canary (#153) against silent growth of the hottest recoupling-plan key.

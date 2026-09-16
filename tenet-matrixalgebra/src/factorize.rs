@@ -1,4 +1,6 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
+
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::fmt;
 use std::sync::Arc;
 
@@ -814,7 +816,7 @@ where
     D: FactorScalar,
     V: Copy,
 {
-    let spectrum_by_sector: HashMap<SectorId, &SectorSpectrum<V>> =
+    let spectrum_by_sector: FxHashMap<SectorId, &SectorSpectrum<V>> =
         spectrum.iter().map(|entry| (entry.sector, entry)).collect();
     let len = space
         .required_len()
@@ -881,7 +883,7 @@ where
     D: FactorScalar,
     V: Copy,
 {
-    let spectrum_by_sector: HashMap<SectorId, &SectorSpectrum<V>> =
+    let spectrum_by_sector: FxHashMap<SectorId, &SectorSpectrum<V>> =
         spectrum.iter().map(|entry| (entry.sector, entry)).collect();
     let nout = space.nout();
     let structure = Arc::clone(space.structure());
@@ -2400,8 +2402,8 @@ fn region_sector(region: &CoupledSectorRegion) -> SectorId {
 
 fn sector_region_index_map(
     regions: &[CoupledSectorRegion],
-) -> Result<HashMap<SectorId, usize>, OperationError> {
-    let mut by_sector = HashMap::with_capacity(regions.len());
+) -> Result<FxHashMap<SectorId, usize>, OperationError> {
+    let mut by_sector = FxHashMap::with_capacity_and_hasher(regions.len(), Default::default());
     for (index, region) in regions.iter().enumerate() {
         if by_sector.insert(region_sector(region), index).is_some() {
             return Err(OperationError::UnsupportedTensorContractScope {
@@ -2413,7 +2415,7 @@ fn sector_region_index_map(
 }
 
 fn sector_region_index_of(
-    regions: &HashMap<SectorId, usize>,
+    regions: &FxHashMap<SectorId, usize>,
     sector: SectorId,
     side: &'static str,
 ) -> Result<usize, OperationError> {
@@ -2641,7 +2643,7 @@ where
         entry.values.truncate(count);
     }
     singular_values.retain(|entry| !entry.values.is_empty());
-    let kept_by_sector: HashMap<SectorId, usize> = singular_values
+    let kept_by_sector: FxHashMap<SectorId, usize> = singular_values
         .iter()
         .map(|entry| (entry.sector, entry.values.len()))
         .collect();
@@ -2998,7 +3000,7 @@ where
     let mut routes = matricizations
         .iter()
         .map(|matrix| (matrix.sector(), (matrix, None)))
-        .collect::<HashMap<_, _>>();
+        .collect::<FxHashMap<_, _>>();
     for pair in pairs.iter() {
         let route =
             routes
@@ -3032,7 +3034,7 @@ where
     }
     record_one_sided_fallback_publication();
     let mut data = vec![D::zero(); required_len];
-    let mut missing_offsets = HashMap::<SectorId, usize>::new();
+    let mut missing_offsets = FxHashMap::<SectorId, usize>::default();
     let placements = PlacementIndex::new(matricizations, &[source_trees]);
     for index in 0..space.space().structure().block_count() {
         let block = space.space().structure().block(index)?;
@@ -3583,7 +3585,7 @@ where
         entry.values.truncate(count);
     }
     eigenvalues.retain(|entry| !entry.values.is_empty());
-    let kept_by_sector: HashMap<SectorId, usize> = eigenvalues
+    let kept_by_sector: FxHashMap<SectorId, usize> = eigenvalues
         .iter()
         .map(|entry| (entry.sector, entry.values.len()))
         .collect();
@@ -3961,7 +3963,7 @@ where
         .map_err(OperationError::from_core_preserving_context)?;
     let mut data = vec![D::zero(); len];
     let structure = Arc::clone(space.space().structure());
-    let spectrum_by_sector: HashMap<SectorId, &SectorSpectrum> =
+    let spectrum_by_sector: FxHashMap<SectorId, &SectorSpectrum> =
         spectra.iter().map(|entry| (entry.sector, entry)).collect();
     for index in 0..structure.block_count() {
         let block = structure
@@ -4023,7 +4025,7 @@ where
         ))
     })?;
     let mut data = vec![D::zero(); len];
-    let spectrum_by_sector: HashMap<SectorId, &SectorSpectrum> =
+    let spectrum_by_sector: FxHashMap<SectorId, &SectorSpectrum> =
         spectra.iter().map(|entry| (entry.sector, entry)).collect();
     let structure = Arc::clone(space.space().structure());
     for index in 0..structure.block_count() {
@@ -4712,7 +4714,7 @@ where
         entry.values.truncate(count);
     }
     eigenvalues.retain(|entry| !entry.values.is_empty());
-    let kept_by_sector: HashMap<SectorId, usize> = eigenvalues
+    let kept_by_sector: FxHashMap<SectorId, usize> = eigenvalues
         .iter()
         .map(|entry| (entry.sector, entry.values.len()))
         .collect();
@@ -6091,7 +6093,7 @@ fn coupled_of(tree: &FusionTreeKey) -> SectorId {
     tree.coupled()
 }
 
-fn matricization_map<M: SectorGeometry>(matricizations: &[M]) -> HashMap<SectorId, &M> {
+fn matricization_map<M: SectorGeometry>(matricizations: &[M]) -> FxHashMap<SectorId, &M> {
     matricizations
         .iter()
         .map(|matrix| (matrix.sector(), matrix))
@@ -6099,7 +6101,7 @@ fn matricization_map<M: SectorGeometry>(matricizations: &[M]) -> HashMap<SectorI
 }
 
 fn matricization_of<'a, M>(
-    matricizations: &HashMap<SectorId, &'a M>,
+    matricizations: &FxHashMap<SectorId, &'a M>,
     sector: SectorId,
 ) -> Result<&'a M, OperationError> {
     matricizations
@@ -6151,7 +6153,7 @@ pub(crate) fn placement_index_probe() -> PlacementIndexProbe {
 /// matricization per coupled sector and region admission rejects duplicate
 /// sectors, so the sector already identifies the matricization.
 struct PlacementIndex<'a> {
-    by_tree: HashMap<(SectorId, FactorSide, &'a FusionTreeKey), (usize, &'a [usize])>,
+    by_tree: FxHashMap<(SectorId, FactorSide, &'a FusionTreeKey), (usize, &'a [usize])>,
 }
 
 impl<'a> PlacementIndex<'a> {
@@ -6160,7 +6162,7 @@ impl<'a> PlacementIndex<'a> {
             matricizations
                 .iter()
                 .map(SectorGeometry::sector)
-                .collect::<std::collections::HashSet<_>>()
+                .collect::<FxHashSet<_>>()
                 .len(),
             matricizations.len(),
             "placement index requires one matricization per coupled sector"
@@ -6174,7 +6176,7 @@ impl<'a> PlacementIndex<'a> {
                     .sum::<usize>()
             })
             .sum();
-        let mut by_tree = HashMap::with_capacity(capacity);
+        let mut by_tree = FxHashMap::with_capacity_and_hasher(capacity, Default::default());
         for matrix in matricizations {
             let sector = matrix.sector();
             for &side in sides {
@@ -6720,9 +6722,9 @@ where
     D: FactorScalar,
 {
     let mut matricizations: Vec<SectorMatricization<D>> = Vec::new();
-    let mut matrix_indices = HashMap::new();
-    let mut row_offsets: Vec<HashMap<&FusionTreeKey, usize>> = Vec::new();
-    let mut col_offsets: Vec<HashMap<&FusionTreeKey, usize>> = Vec::new();
+    let mut matrix_indices = FxHashMap::default();
+    let mut row_offsets: Vec<FxHashMap<&FusionTreeKey, usize>> = Vec::new();
+    let mut col_offsets: Vec<FxHashMap<&FusionTreeKey, usize>> = Vec::new();
     let mut routes = Vec::with_capacity(structure.block_count());
 
     for index in 0..structure.block_count() {
@@ -6751,8 +6753,8 @@ where
                     data: Vec::new(),
                 });
                 matrix_indices.insert(sector, matrix_index);
-                row_offsets.push(HashMap::new());
-                col_offsets.push(HashMap::new());
+                row_offsets.push(FxHashMap::default());
+                col_offsets.push(FxHashMap::default());
                 matrix_index
             }
         };
@@ -8149,7 +8151,7 @@ fn compile_inverse_basis_extents(
         .iter()
         .enumerate()
         .map(|(index, extent)| (extent.tree(), index))
-        .collect::<HashMap<_, _>>();
+        .collect::<FxHashMap<_, _>>();
     if output_by_tree.len() != output.len() {
         return Err(OperationError::UnsupportedTensorContractScope {
             message: "inverse output contains a duplicate tree basis",
@@ -8339,8 +8341,8 @@ where
     }
 
     let mut matricizations: Vec<SectorMatricization<D>> = Vec::new();
-    let mut matrix_indices = HashMap::new();
-    let mut tree_placements = HashMap::new();
+    let mut matrix_indices = FxHashMap::default();
+    let mut tree_placements = FxHashMap::default();
     let mut routes = Vec::with_capacity(structure.block_count());
 
     for index in 0..structure.block_count() {
@@ -8542,7 +8544,7 @@ fn validate_generic_factor_keys<'a, M: SectorGeometry>(
     side: FactorSide,
     mut cursor: Option<&mut FactorTreeCursor<'_, M>>,
     matricizations: &'a [M],
-    matrix_by_sector: &mut Option<HashMap<SectorId, &'a M>>,
+    matrix_by_sector: &mut Option<FxHashMap<SectorId, &'a M>>,
 ) -> Result<bool, OperationError> {
     let mut ordered = true;
     let mut index: Option<PlacementIndex<'a>> = None;
@@ -8993,7 +8995,7 @@ fn build_left_bound_space_generic<'a, R, M>(
     matricizations: &'a [M],
     new_leg: SectorLeg,
     cursor: Option<&mut FactorTreeCursor<'_, M>>,
-    matrix_by_sector: &mut Option<HashMap<SectorId, &'a M>>,
+    matrix_by_sector: &mut Option<FxHashMap<SectorId, &'a M>>,
 ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<FusionTreePairKey>, bool), OperationError>
 where
     R: FusionRule,
@@ -9024,7 +9026,7 @@ fn build_right_bound_space_generic<'a, R, M>(
     matricizations: &'a [M],
     new_leg: SectorLeg,
     cursor: Option<&mut FactorTreeCursor<'_, M>>,
-    matrix_by_sector: &mut Option<HashMap<SectorId, &'a M>>,
+    matrix_by_sector: &mut Option<FxHashMap<SectorId, &'a M>>,
 ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<FusionTreePairKey>, bool), OperationError>
 where
     R: FusionRule,
@@ -9332,7 +9334,7 @@ where
     let matrices = matricizations
         .iter()
         .map(|matrix| (matrix.sector(), matrix))
-        .collect::<HashMap<_, _>>();
+        .collect::<FxHashMap<_, _>>();
     // One provider-backed enumeration serves both the populated-key
     // prevalidation and the committed space; the prepared structure lists its
     // blocks in the enumeration's key order, so the first-match placement
@@ -9388,8 +9390,8 @@ where
     let pairs = pairs
         .iter()
         .map(|pair| (pair.sector, pair))
-        .collect::<HashMap<_, _>>();
-    let mut missing_offsets = HashMap::<SectorId, usize>::new();
+        .collect::<FxHashMap<_, _>>();
+    let mut missing_offsets = FxHashMap::<SectorId, usize>::default();
     let structure = Arc::clone(space.space().structure());
     for index in 0..structure.block_count() {
         let block = structure.block(index).map_err(|e| {
@@ -10179,7 +10181,7 @@ where
         entry.values.truncate(count);
     }
     singular_values.retain(|entry| !entry.values.is_empty());
-    let kept_by_sector: HashMap<SectorId, usize> = singular_values
+    let kept_by_sector: FxHashMap<SectorId, usize> = singular_values
         .iter()
         .map(|entry| (entry.sector, entry.values.len()))
         .collect();
@@ -10277,7 +10279,7 @@ where
         entry.values.truncate(count);
     }
     singular_values.retain(|entry| !entry.values.is_empty());
-    let kept: HashMap<SectorId, usize> = singular_values
+    let kept: FxHashMap<SectorId, usize> = singular_values
         .iter()
         .map(|entry| (entry.sector, entry.values.len()))
         .collect();
@@ -11032,7 +11034,7 @@ where
     let kept = eigenvalues
         .iter()
         .map(|entry| (entry.sector, entry.values.len()))
-        .collect::<HashMap<_, _>>();
+        .collect::<FxHashMap<_, _>>();
     let kept_of = |sector| kept.get(&sector).copied().unwrap_or(0);
     let bond_axis = full.v.space().space().nout();
     let provider = Arc::clone(full.v.space().provider_arc());
@@ -11268,7 +11270,7 @@ where
     let kept = eigenvalues
         .iter()
         .map(|entry| (entry.sector, entry.values.len()))
-        .collect::<HashMap<_, _>>();
+        .collect::<FxHashMap<_, _>>();
     let kept_of = |sector| kept.get(&sector).copied().unwrap_or(0);
     let bond_axis = full.v.space().space().nout();
     let provider = Arc::clone(full.v.space().provider_arc());
