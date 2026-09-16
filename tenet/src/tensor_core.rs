@@ -10,9 +10,10 @@ use tenet_core::{
 };
 use tenet_matrixalgebra::SectorSpectrum;
 use tenet_tensors::{
-    BoundDynamicFusionMapSpace, BoundDynamicTensorRef, DynamicFusionMapSpace, FusionOperand,
-    OutputAxisOrder, RecouplingCoefficientAction, TensorContractSpec, TreeTransformOperation,
-    TreeTransformOperationKind, TreeTransformRuleCacheKey,
+    zeroed_payload, BoundDynamicFusionMapSpace, BoundDynamicTensorRef, ContractDestinationInit,
+    DynamicFusionMapSpace, FusionOperand, OutputAxisOrder, RecouplingCoefficientAction,
+    TensorContractSpec, TreeTransformOperation, TreeTransformOperationKind,
+    TreeTransformRuleCacheKey,
 };
 
 use crate::error::Error;
@@ -430,8 +431,8 @@ where
         rhs_axes,
         output_order,
     )?;
-    let mut data = vec![D::from_real(0.0); destination.space().required_len()?];
-    context.tensorcontract_fusion_dyn_into(
+    let mut data = zeroed_payload(destination.space().required_len()?);
+    context.tensorcontract_fusion_dyn_into_with_init(
         &destination,
         &mut data,
         lhs.space(),
@@ -440,7 +441,7 @@ where
         rhs.data(),
         TensorContractSpec::new(lhs_axes, rhs_axes, output_order),
         D::from_real(1.0),
-        D::from_real(0.0),
+        ContractDestinationInit::Zeroed,
     )?;
     Ok((destination, data))
 }
@@ -565,9 +566,9 @@ where
         },
     })?;
     let destination = lhs_authority.derive_from_final_homspace(homspace)?;
-    let mut data = vec![D::from_real(0.0); destination.space().required_len()?];
+    let mut data = zeroed_payload(destination.space().required_len()?);
     match kind {
-        OrientedContractionKind::Compose => context.tensorcompose_fusion_dyn_into(
+        OrientedContractionKind::Compose => context.tensorcompose_fusion_dyn_into_with_init(
             &destination,
             &mut data,
             lhs,
@@ -577,25 +578,26 @@ where
             lhs_axes,
             rhs_axes,
             D::from_real(1.0),
-            D::from_real(0.0),
+            ContractDestinationInit::Zeroed,
         )?,
-        OrientedContractionKind::Contract => context.tensorcontract_fusion_dyn_prelowered_into(
-            &destination,
-            &mut data,
-            lhs,
-            lhs_data,
-            rhs,
-            rhs_data,
-            TensorContractSpec::new_with_conjugation(
-                lhs_axes,
-                rhs_axes,
-                output_order,
-                lhs.storage_conjugate(),
-                rhs.storage_conjugate(),
-            ),
-            D::from_real(1.0),
-            D::from_real(0.0),
-        )?,
+        OrientedContractionKind::Contract => context
+            .tensorcontract_fusion_dyn_prelowered_into_with_init(
+                &destination,
+                &mut data,
+                lhs,
+                lhs_data,
+                rhs,
+                rhs_data,
+                TensorContractSpec::new_with_conjugation(
+                    lhs_axes,
+                    rhs_axes,
+                    output_order,
+                    lhs.storage_conjugate(),
+                    rhs.storage_conjugate(),
+                ),
+                D::from_real(1.0),
+                ContractDestinationInit::Zeroed,
+            )?,
     }
     Ok((destination, data))
 }
@@ -1169,8 +1171,8 @@ where
         rhs_axes,
         OutputAxisOrder::identity(),
     )?;
-    let mut data = vec![D::from_real(0.0); destination.space().required_len()?];
-    context.tensorcompose_fusion_dyn_into(
+    let mut data = zeroed_payload(destination.space().required_len()?);
+    context.tensorcompose_fusion_dyn_into_with_init(
         &destination,
         &mut data,
         FusionOperand::direct(lhs.space().space()),
@@ -1180,7 +1182,7 @@ where
         lhs_axes,
         rhs_axes,
         D::from_real(1.0),
-        D::from_real(0.0),
+        ContractDestinationInit::Zeroed,
     )?;
     Ok((destination, data))
 }

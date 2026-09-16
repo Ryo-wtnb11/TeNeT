@@ -6,7 +6,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use num_traits::One;
+use num_traits::{One, Zero};
 use tenet_core::{
     BlockStructure, CoupledSectorRegion, HostReadableStorage, HostWritableStorage, Placement,
     ScratchStorage, SectorId, SimilarStorage, TensorStorage,
@@ -193,6 +193,9 @@ type CompiledGroupExecution = (
 
 pub struct HostFusionBlockContractWorkspace<T> {
     scratch: HostScratchBuffer<T>,
+    // Zero-stride source layout of the `Axpby(0)` inactive-block assignment,
+    // kept here so a warmed replay allocates nothing.
+    zero_strides: Vec<isize>,
 }
 
 pub type FusionBlockContractWorkspace<T> = HostFusionBlockContractWorkspace<T>;
@@ -201,6 +204,7 @@ impl<T> Default for HostFusionBlockContractWorkspace<T> {
     fn default() -> Self {
         Self {
             scratch: HostScratchBuffer::default(),
+            zero_strides: Vec::new(),
         }
     }
 }
@@ -209,6 +213,35 @@ impl<T> ReportsPlacement for HostFusionBlockContractWorkspace<T> {
     #[inline]
     fn placement(&self) -> Placement {
         Placement::Host
+    }
+}
+
+/// How a replay initialises the destination blocks that no GEMM or scatter
+/// job writes (the inactive blocks); the active blocks always receive the
+/// corresponding `beta`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ContractDestinationInit<D> {
+    /// `dst = alpha * lhs * rhs + beta * dst`. `Axpby(0)` is a strong zero:
+    /// inactive blocks are assigned `0` without reading them (TensorKit
+    /// `β = false`, BLAS `beta == 0`), so NaN or Inf destination values do
+    /// not leak into the output.
+    Axpby(D),
+    /// The caller proves every destination element is already `D::zero()`
+    /// (an owned output born from `alloc_zeroed`). Inactive blocks are not
+    /// touched at all: plan validation proves each destination block is
+    /// owned by exactly one GEMM job, one scatter group, or the inactive
+    /// list, so `Axpby(0)` would only rewrite zeros that are already there.
+    Zeroed,
+}
+
+impl<D: Zero> ContractDestinationInit<D> {
+    /// The `beta` handed to the GEMM and scatter jobs of the active blocks.
+    #[inline]
+    pub fn active_beta(self) -> D {
+        match self {
+            Self::Axpby(beta) => beta,
+            Self::Zeroed => D::zero(),
+        }
     }
 }
 
@@ -583,7 +616,46 @@ where
             rhs_structure,
             rhs_data,
             alpha,
-            beta,
+            ContractDestinationInit::Axpby(beta),
+            None,
+        )
+    }
+
+    /// [`Self::execute_raw`] with `beta = 0` for a destination the caller
+    /// proves is all-zero ([`ContractDestinationInit::Zeroed`]): the active
+    /// blocks are overwritten by their GEMM/scatter job and the inactive
+    /// blocks are left untouched.
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_raw_zeroed<A, G, D>(
+        &self,
+        kernels: &mut A,
+        gemm: &mut G,
+        fusion_workspace: &mut FusionBlockContractWorkspace<D>,
+        dst_structure: &Arc<BlockStructure>,
+        dst_data: &mut [D],
+        lhs_structure: &Arc<BlockStructure>,
+        lhs_data: &[D],
+        rhs_structure: &Arc<BlockStructure>,
+        rhs_data: &[D],
+        alpha: D,
+    ) -> Result<(), OperationError>
+    where
+        A: HostKernelAdapter<D>,
+        G: Rank2Gemm<D>,
+        D: DenseBlockScalar + RecouplingCoefficientAction<C>,
+    {
+        self.execute_host::<_, _, _, false>(
+            kernels,
+            gemm,
+            fusion_workspace,
+            dst_structure,
+            dst_data,
+            lhs_structure,
+            lhs_data,
+            rhs_structure,
+            rhs_data,
+            alpha,
+            ContractDestinationInit::Zeroed,
             None,
         )
     }
@@ -620,7 +692,7 @@ where
             rhs_structure,
             rhs_data,
             alpha,
-            beta,
+            ContractDestinationInit::Axpby(beta),
             Some(profile),
         )
     }
@@ -638,7 +710,7 @@ where
         rhs_structure: &Arc<BlockStructure>,
         rhs_data: &[D],
         alpha: D,
-        beta: D,
+        init: ContractDestinationInit<D>,
         mut profile: Option<&mut TensorContractFusionProfile>,
     ) -> Result<(), OperationError>
     where
@@ -646,6 +718,7 @@ where
         G: Rank2Gemm<D>,
         D: DenseBlockScalar + RecouplingCoefficientAction<C>,
     {
+        let beta = init.active_beta();
         self.require_unit_direct_batch_alpha()?;
         let total_start = PROFILED.then(std::time::Instant::now);
         let start = PROFILED.then(std::time::Instant::now);
@@ -674,7 +747,7 @@ where
         }
 
         let start = PROFILED.then(std::time::Instant::now);
-        scale_all_blocks(kernels, &self.inactive_dst_scale_blocks, dst_data, beta)?;
+        self.init_inactive_blocks(kernels, &mut fusion_workspace.zero_strides, dst_data, init)?;
         if let (Some(start), Some(profile)) = (start, profile.as_deref_mut()) {
             profile.core_scale += start.elapsed();
         }
@@ -944,11 +1017,11 @@ where
         self.require_fully_direct_storage()?;
         self.require_identity_storage_ops()?;
         self.require_unit_direct_batch_alpha()?;
-        scale_all_blocks(
+        self.init_inactive_blocks(
             kernels,
-            &self.inactive_dst_scale_blocks,
+            &mut Vec::new(),
             dst.data_mut(),
-            beta,
+            ContractDestinationInit::Axpby(beta),
         )?;
 
         let lhs_data = lhs.data();
@@ -1060,7 +1133,12 @@ where
         self.require_fully_direct_storage()?;
         self.require_identity_storage_ops()?;
         self.require_unit_direct_batch_alpha()?;
-        scale_all_blocks(kernels, &self.inactive_dst_scale_blocks, dst_data, beta)?;
+        self.init_inactive_blocks(
+            kernels,
+            &mut Vec::new(),
+            dst_data,
+            ContractDestinationInit::Axpby(beta),
+        )?;
 
         let _ = fusion_workspace;
         gemm.matmul_rank2_batch(
@@ -1136,11 +1214,11 @@ where
         self.require_fully_direct_storage()?;
         self.require_identity_storage_ops()?;
         self.require_unit_direct_batch_alpha()?;
-        scale_all_blocks(
+        self.init_inactive_blocks(
             kernels,
-            &self.inactive_dst_scale_blocks,
+            &mut Vec::new(),
             dst.data_mut(),
-            beta,
+            ContractDestinationInit::Axpby(beta),
         )?;
 
         let _ = fusion_workspace;
@@ -2120,29 +2198,56 @@ pub fn direct_slice_mut<T>(
         })
 }
 
-fn scale_all_blocks<A, T>(
-    kernels: &mut A,
-    blocks: &[FusionScaleBlockLayout],
-    data: &mut [T],
-    beta: T,
-) -> Result<(), OperationError>
-where
-    A: HostKernelAdapter<T>,
-    T: Copy + One + PartialEq,
-{
-    if beta.is_one() {
-        return Ok(());
+impl<C> FusionBlockContractPlan<C> {
+    /// Initialises the destination blocks no job writes (see
+    /// [`ContractDestinationInit`]). `zero_strides` is the caller's reusable
+    /// stride scratch for the zero-source assignment.
+    fn init_inactive_blocks<A, T>(
+        &self,
+        kernels: &mut A,
+        zero_strides: &mut Vec<isize>,
+        data: &mut [T],
+        init: ContractDestinationInit<T>,
+    ) -> Result<(), OperationError>
+    where
+        A: HostKernelAdapter<T>,
+        T: Copy + Zero + One + PartialEq,
+    {
+        let beta = match init {
+            ContractDestinationInit::Zeroed => return Ok(()),
+            ContractDestinationInit::Axpby(beta) if beta.is_one() => return Ok(()),
+            ContractDestinationInit::Axpby(beta) => beta,
+        };
+        if beta.is_zero() {
+            let zero = [T::zero()];
+            for layout in &self.inactive_dst_scale_blocks {
+                zero_strides.clear();
+                zero_strides.resize(layout.block.shape.len(), 0);
+                kernels.copy_scale_strided(
+                    data,
+                    &zero,
+                    &layout.block.shape,
+                    &layout.block.strides,
+                    zero_strides,
+                    layout.block.offset,
+                    0,
+                    false,
+                    T::one(),
+                )?;
+            }
+            return Ok(());
+        }
+        for layout in &self.inactive_dst_scale_blocks {
+            kernels.scale_strided(
+                data,
+                &layout.block.shape,
+                &layout.block.strides,
+                layout.block.offset,
+                beta,
+            )?;
+        }
+        Ok(())
     }
-    for layout in blocks {
-        kernels.scale_strided(
-            data,
-            &layout.block.shape,
-            &layout.block.strides,
-            layout.block.offset,
-            beta,
-        )?;
-    }
-    Ok(())
 }
 
 fn compile_group_execution<C>(
@@ -2364,7 +2469,12 @@ mod tests {
                         value = value + lhs[row + inner * rows] * rhs[inner + col * contracted];
                     }
                     let index = row + col * rows;
-                    dst[index] = alpha * value + beta * dst[index];
+                    // BLAS semantics: `beta == 0` never reads the destination.
+                    dst[index] = if beta.is_zero() {
+                        alpha * value
+                    } else {
+                        alpha * value + beta * dst[index]
+                    };
                 }
             }
             Ok(())
@@ -3639,5 +3749,454 @@ mod tests {
         ));
         assert_eq!(unit_only.unit_calls, 0);
         assert_eq!(rejected, vec![Complex64::ZERO; 2]);
+    }
+
+    /// Records the destination offset of every scale/copy kernel call so a
+    /// test can prove which blocks the inactive-block pass touched.
+    struct CountingKernels {
+        inner: crate::StridedHostKernelAdapter,
+        scale_offsets: Vec<isize>,
+        copy_offsets: Vec<isize>,
+    }
+
+    impl CountingKernels {
+        fn new() -> Self {
+            Self {
+                inner: crate::StridedHostKernelAdapter::default(),
+                scale_offsets: Vec::new(),
+                copy_offsets: Vec::new(),
+            }
+        }
+    }
+
+    impl HostKernelAdapter<f64> for CountingKernels {
+        fn add_strided(
+            &mut self,
+            zero_strides: &mut Vec<isize>,
+            dst_data: &mut [f64],
+            src_data: &[f64],
+            shape: &[usize],
+            dst_strides: &[isize],
+            src_strides: &[isize],
+            dst_offset: isize,
+            src_offset: isize,
+            source_conjugate: bool,
+            alpha: f64,
+            beta: f64,
+        ) -> Result<(), OperationError> {
+            self.inner.add_strided(
+                zero_strides,
+                dst_data,
+                src_data,
+                shape,
+                dst_strides,
+                src_strides,
+                dst_offset,
+                src_offset,
+                source_conjugate,
+                alpha,
+                beta,
+            )
+        }
+
+        fn axpby_strided(
+            &mut self,
+            dst_data: &mut [f64],
+            src_data: &[f64],
+            shape: &[usize],
+            dst_strides: &[isize],
+            src_strides: &[isize],
+            dst_offset: isize,
+            src_offset: isize,
+            alpha: f64,
+            beta: f64,
+        ) -> Result<(), OperationError> {
+            self.inner.axpby_strided(
+                dst_data,
+                src_data,
+                shape,
+                dst_strides,
+                src_strides,
+                dst_offset,
+                src_offset,
+                alpha,
+                beta,
+            )
+        }
+
+        fn copy_scale_strided(
+            &mut self,
+            dst_data: &mut [f64],
+            src_data: &[f64],
+            shape: &[usize],
+            dst_strides: &[isize],
+            src_strides: &[isize],
+            dst_offset: isize,
+            src_offset: isize,
+            source_conjugate: bool,
+            alpha: f64,
+        ) -> Result<(), OperationError> {
+            self.copy_offsets.push(dst_offset);
+            self.inner.copy_scale_strided(
+                dst_data,
+                src_data,
+                shape,
+                dst_strides,
+                src_strides,
+                dst_offset,
+                src_offset,
+                source_conjugate,
+                alpha,
+            )
+        }
+
+        fn scale_strided(
+            &mut self,
+            dst_data: &mut [f64],
+            shape: &[usize],
+            dst_strides: &[isize],
+            dst_offset: isize,
+            beta: f64,
+        ) -> Result<(), OperationError> {
+            self.scale_offsets.push(dst_offset);
+            self.inner
+                .scale_strided(dst_data, shape, dst_strides, dst_offset, beta)
+        }
+
+        fn recoupling_src_times_u_transpose<C>(
+            &mut self,
+            destination: &mut [f64],
+            source: &[f64],
+            recoupling_coefficients_dst_src: &[C],
+            coefficient_start: usize,
+            element_count: usize,
+            src_count: usize,
+            dst_count: usize,
+        ) -> Result<(), OperationError>
+        where
+            C: Copy,
+            f64: RecouplingCoefficientAction<C>,
+        {
+            self.inner.recoupling_src_times_u_transpose(
+                destination,
+                source,
+                recoupling_coefficients_dst_src,
+                coefficient_start,
+                element_count,
+                src_count,
+                dst_count,
+            )
+        }
+    }
+
+    /// Fails on the `fail_at`-th (zero-based) GEMM job, after the earlier
+    /// jobs have written their destination blocks.
+    struct FailingAtJob {
+        calls: usize,
+        fail_at: usize,
+    }
+
+    impl Rank2Gemm<f64> for FailingAtJob {
+        fn matmul_rank2(
+            &mut self,
+            dst: &mut [f64],
+            lhs: &[f64],
+            rhs: &[f64],
+            rows: usize,
+            contracted: usize,
+            cols: usize,
+            alpha: f64,
+            beta: f64,
+        ) -> Result<(), OperationError> {
+            let call = self.calls;
+            self.calls += 1;
+            if call == self.fail_at {
+                return Err(OperationError::StridedKernel {
+                    message: "injected GEMM failure".into(),
+                });
+            }
+            NaiveGemm.matmul_rank2(dst, lhs, rhs, rows, contracted, cols, alpha, beta)
+        }
+    }
+
+    /// Four scalar blocks: blocks 0 and 1 are active (block 0 irregular when
+    /// `irregular_first`, both direct otherwise) and blocks 2 and 3 are the
+    /// inactive complement.
+    fn four_block_plan(irregular_first: bool) -> (Arc<BlockStructure>, FusionBlockContractPlan) {
+        let structure = Arc::new(
+            BlockStructure::packed_column_major(1, [vec![1], vec![1], vec![1], vec![1]]).unwrap(),
+        );
+        let inactive = [2usize, 3]
+            .into_iter()
+            .map(|block| FusionScaleBlockLayout {
+                block: FusionStridedBlockLayout {
+                    shape: vec![1],
+                    strides: vec![1],
+                    offset: block as isize,
+                },
+            })
+            .collect();
+        let plan = FusionBlockContractPlan::from_parts(
+            Arc::clone(&structure),
+            Arc::clone(&structure),
+            Arc::clone(&structure),
+            inactive,
+            vec![
+                FusionBlockContractGroupPlan::new(
+                    scalar_group(0, !irregular_first, 1.0),
+                    scalar_group(0, true, 1.0),
+                    scalar_group(0, true, 1.0),
+                )
+                .unwrap(),
+                FusionBlockContractGroupPlan::new(
+                    scalar_group(1, true, 1.0),
+                    scalar_group(1, true, 1.0),
+                    scalar_group(1, true, 1.0),
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+        (structure, plan)
+    }
+
+    const FOUR_BLOCK_LHS: [f64; 4] = [3.0, 5.0, 0.0, 0.0];
+    const FOUR_BLOCK_RHS: [f64; 4] = [7.0, 11.0, 0.0, 0.0];
+
+    fn touched_inactive(offsets: &[isize]) -> Vec<isize> {
+        offsets.iter().copied().filter(|&o| o >= 2).collect()
+    }
+
+    #[test]
+    fn zeroed_replay_never_touches_inactive_blocks() {
+        // What: on an all-zero destination `Zeroed` runs no scale/copy kernel
+        // over the inactive blocks; the active blocks are written by their
+        // job with `beta = 0` and the inactive ones keep their zeros.
+        for irregular_first in [false, true] {
+            let (structure, plan) = four_block_plan(irregular_first);
+            let mut kernels = CountingKernels::new();
+            let mut dst = vec![0.0; 4];
+            plan.execute_raw_zeroed(
+                &mut kernels,
+                &mut NaiveGemm,
+                &mut FusionBlockContractWorkspace::default(),
+                &structure,
+                &mut dst,
+                &structure,
+                &FOUR_BLOCK_LHS,
+                &structure,
+                &FOUR_BLOCK_RHS,
+                2.0,
+            )
+            .unwrap();
+            assert_eq!(dst, [42.0, 110.0, 0.0, 0.0]);
+            assert!(kernels.scale_offsets.is_empty(), "{irregular_first}");
+            assert!(
+                touched_inactive(&kernels.copy_offsets).is_empty(),
+                "irregular_first={irregular_first}: {:?}",
+                kernels.copy_offsets
+            );
+            assert!(dst[2..].iter().all(|v| v.to_bits() == 0));
+        }
+    }
+
+    #[test]
+    fn axpby_zero_assigns_inactive_blocks_without_reading_them() {
+        // What: `Axpby(0)` is a strong zero: NaN, Inf and -0.0 in the inactive
+        // blocks become exactly +0.0 through one copy per block, never a
+        // multiply that would keep NaN.
+        for irregular_first in [false, true] {
+            let (structure, plan) = four_block_plan(irregular_first);
+            let mut kernels = CountingKernels::new();
+            let mut dst = vec![f64::NAN, f64::INFINITY, f64::NAN, -0.0];
+            plan.execute_raw(
+                &mut kernels,
+                &mut NaiveGemm,
+                &mut FusionBlockContractWorkspace::default(),
+                &structure,
+                &mut dst,
+                &structure,
+                &FOUR_BLOCK_LHS,
+                &structure,
+                &FOUR_BLOCK_RHS,
+                1.0,
+                0.0,
+            )
+            .unwrap();
+            assert_eq!(dst[..2], [21.0, 55.0]);
+            assert_eq!(dst[2].to_bits(), 0);
+            assert_eq!(dst[3].to_bits(), 0);
+            assert!(kernels.scale_offsets.is_empty());
+            assert_eq!(touched_inactive(&kernels.copy_offsets), [2, 3]);
+        }
+    }
+
+    #[test]
+    fn axpby_one_leaves_inactive_blocks_untouched() {
+        let (structure, plan) = four_block_plan(false);
+        let mut kernels = CountingKernels::new();
+        let mut dst = vec![1.0, 2.0, 3.0, f64::NAN];
+        plan.execute_raw(
+            &mut kernels,
+            &mut NaiveGemm,
+            &mut FusionBlockContractWorkspace::default(),
+            &structure,
+            &mut dst,
+            &structure,
+            &FOUR_BLOCK_LHS,
+            &structure,
+            &FOUR_BLOCK_RHS,
+            1.0,
+            1.0,
+        )
+        .unwrap();
+        assert_eq!(dst[..3], [22.0, 57.0, 3.0]);
+        assert!(dst[3].is_nan());
+        assert!(kernels.scale_offsets.is_empty());
+        assert!(kernels.copy_offsets.is_empty());
+    }
+
+    #[test]
+    fn axpby_general_beta_scales_inactive_blocks_exactly_once() {
+        let (structure, plan) = four_block_plan(false);
+        let mut kernels = CountingKernels::new();
+        let mut dst = vec![1.0, 2.0, 3.0, 4.0];
+        plan.execute_raw(
+            &mut kernels,
+            &mut NaiveGemm,
+            &mut FusionBlockContractWorkspace::default(),
+            &structure,
+            &mut dst,
+            &structure,
+            &FOUR_BLOCK_LHS,
+            &structure,
+            &FOUR_BLOCK_RHS,
+            1.0,
+            0.5,
+        )
+        .unwrap();
+        assert_eq!(dst, [21.5, 56.0, 1.5, 2.0]);
+        assert_eq!(kernels.scale_offsets, [2, 3]);
+        assert!(kernels.copy_offsets.is_empty());
+    }
+
+    #[test]
+    fn gemm_failure_after_the_first_job_surfaces_without_panicking() {
+        // What: an error on a later job returns `Err`; the destination is a
+        // valid buffer throughout (born zero, first job written), so nothing
+        // uninitialised can be observed and the owner drops it.
+        let (structure, plan) = four_block_plan(false);
+        let mut kernels = CountingKernels::new();
+        let mut gemm = FailingAtJob {
+            calls: 0,
+            fail_at: 1,
+        };
+        let mut dst = vec![0.0; 4];
+        let error = plan
+            .execute_raw_zeroed(
+                &mut kernels,
+                &mut gemm,
+                &mut FusionBlockContractWorkspace::default(),
+                &structure,
+                &mut dst,
+                &structure,
+                &FOUR_BLOCK_LHS,
+                &structure,
+                &FOUR_BLOCK_RHS,
+                1.0,
+            )
+            .unwrap_err();
+        assert!(matches!(error, OperationError::StridedKernel { .. }));
+        assert_eq!(gemm.calls, 2);
+        assert_eq!(dst, [21.0, 0.0, 0.0, 0.0]);
+        assert!(kernels.scale_offsets.is_empty());
+        assert!(kernels.copy_offsets.is_empty());
+    }
+
+    #[test]
+    fn canonical_plan_zeroed_replay_skips_the_inactive_coupled_range() {
+        // What: a canonical coupled-layout plan whose contracted leg carries
+        // only the even sector leaves the odd destination range untouched
+        // under `Zeroed` and assigns it under `Axpby(0)`.
+        let both = || SectorLeg::new([(Z2Irrep::EVEN, 2), (Z2Irrep::ODD, 3)], false);
+        let even = || SectorLeg::new([(Z2Irrep::EVEN, 2)], false);
+        // `shapes` holds one `[rows, cols]` per coupled tree pair.
+        let space =
+            |codomain: SectorLeg, domain: SectorLeg, dims: [usize; 2], shapes: Vec<Vec<usize>>| {
+                FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+                    TensorMapSpace::<1, 1>::from_dims([dims[0]], [dims[1]]).unwrap(),
+                    FusionTreeHomSpace::new(
+                        FusionProductSpace::new([codomain]),
+                        FusionProductSpace::new([domain]),
+                    ),
+                    &Z2FusionRule,
+                    shapes,
+                )
+                .unwrap()
+            };
+        let dst = space(both(), both(), [5, 5], vec![vec![2, 2], vec![3, 3]]);
+        let lhs = space(both(), even(), [5, 2], vec![vec![2, 2]]);
+        let rhs = space(even(), both(), [2, 5], vec![vec![2, 2]]);
+        let dst_structure = Arc::clone(dst.subblock_structure());
+        let lhs_structure = Arc::clone(lhs.subblock_structure());
+        let rhs_structure = Arc::clone(rhs.subblock_structure());
+        let plan = FusionBlockContractPlan::<f64>::try_from_canonical_coupled_regions_with_ops(
+            &dst_structure,
+            1,
+            &lhs_structure,
+            1,
+            &rhs_structure,
+            1,
+            MatrixOp::Identity,
+            MatrixOp::Identity,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(plan.inactive_dst_scale_blocks.len(), 1);
+        assert_eq!(plan.direct_batch().len(), 1);
+        let required = dst_structure.required_len().unwrap();
+        assert_eq!(required, 2 * 2 + 3 * 3);
+        let lhs_data = vec![1.0; lhs_structure.required_len().unwrap()];
+        let rhs_data = vec![2.0; rhs_structure.required_len().unwrap()];
+
+        let mut kernels = CountingKernels::new();
+        let mut zeroed = vec![0.0; required];
+        plan.execute_raw_zeroed(
+            &mut kernels,
+            &mut NaiveGemm,
+            &mut FusionBlockContractWorkspace::default(),
+            &dst_structure,
+            &mut zeroed,
+            &lhs_structure,
+            &lhs_data,
+            &rhs_structure,
+            &rhs_data,
+            1.0,
+        )
+        .unwrap();
+        assert!(kernels.scale_offsets.is_empty());
+        assert!(kernels.copy_offsets.is_empty());
+
+        let mut kernels = CountingKernels::new();
+        let mut assigned = vec![f64::NAN; required];
+        plan.execute_raw(
+            &mut kernels,
+            &mut NaiveGemm,
+            &mut FusionBlockContractWorkspace::default(),
+            &dst_structure,
+            &mut assigned,
+            &lhs_structure,
+            &lhs_data,
+            &rhs_structure,
+            &rhs_data,
+            1.0,
+            0.0,
+        )
+        .unwrap();
+        assert_eq!(kernels.copy_offsets.len(), 1);
+        assert!(kernels.scale_offsets.is_empty());
+        assert_eq!(zeroed, assigned);
+        assert!(zeroed.iter().all(|v| v.to_bits() == 0 || *v == 4.0));
+        assert_eq!(zeroed.iter().filter(|v| **v == 4.0).count(), 4);
     }
 }
