@@ -387,6 +387,48 @@ impl<E> DenseTreeTransformOperations<E> {
     }
 }
 
+impl<E: DenseExecutor> DenseTreeTransformOperations<E> {
+    /// Owned-output transform under this backend's replay worker count and
+    /// size gate, exactly as `tree_transform_structure_overwrite_into_raw`
+    /// would replay into a caller buffer of the same length.
+    ///
+    /// Internal and unstable; see
+    /// [`crate::try_tree_transform_structure_overwrite_owned_raw`].
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_tree_transform_structure_overwrite_owned_raw<D, C>(
+        &mut self,
+        workspace: &mut TreeTransformWorkspace<D>,
+        structure: &TreeTransformStructure<C>,
+        dst_structure: &Arc<BlockStructure>,
+        src_structure: &Arc<BlockStructure>,
+        nout: usize,
+        src_data: &[D],
+        alpha: D,
+    ) -> Result<Option<Vec<D>>, OperationError>
+    where
+        D: DenseRecouplingScalar + RecouplingCoefficientAction<C> + ConjugateValue,
+        C: Copy + Sync,
+    {
+        // A malformed destination reports its error from the overwrite proof
+        // in the same order as before; the serial count only sizes scratch.
+        let threads = dst_structure
+            .required_len()
+            .map_or(1, |len| self.effective_recoupling_threads(len));
+        crate::try_tree_transform_structure_overwrite_owned_raw(
+            &mut self.dense,
+            workspace,
+            structure,
+            dst_structure,
+            src_structure,
+            nout,
+            src_data,
+            alpha,
+            threads,
+        )
+    }
+}
+
 impl<E> ReportsPlacement for DenseTreeTransformOperations<E> {
     #[inline]
     fn placement(&self) -> Placement {
