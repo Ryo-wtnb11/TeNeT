@@ -22,22 +22,6 @@ use tenferro_tensor::{
     TensorViewMut, TensorWrite, TypedTensorView, TypedTensorViewMut,
 };
 
-/// Minimum plan-time run length routed to the strided-batch seam; shorter runs
-/// and singletons are bundled into one grouped-gemm call. The strided seam's
-/// per-call setup (`analyse_gemm_cached`, stride normalization, layout checks)
-/// only amortizes over a long run — and tenferro loops internally either way
-/// (no true batched BLAS), so short runs pay that setup for no fusion win.
-///
-/// Derivation (issue #103 A/B measurements, Apple M4 Max, Accelerate, 1 thread):
-/// forcing the small d=4 5-group batch through grouped restored U1 compose from
-/// 6.3 to ~4.2 us and swap+out to ~12.6 us, while d=8/d=16 showed no strided
-/// advantage for short runs; the only case where strided wins is a long run
-/// (the SU2 recoupling run=7). 4 is the empirically-validated old
-/// `STRIDED_BATCH_MIN_JOBS` threshold (pre-b8bb92e), re-derived here as a
-/// plan-time cost-model constant (peer of the contraction-order cost model),
-/// not a runtime kernel knob.
-const STRIDED_RUN_MIN: usize = 4;
-
 #[derive(Clone, Copy)]
 struct StridedBatchRunLayout {
     lhs_shape: [usize; 3],
@@ -231,14 +215,24 @@ impl DefaultDenseExecutor {
         self.seam_dispatches
     }
 
-    /// Routes one typed batch by its plan-time run partition (see issue #103).
-    /// Runs of length >= [`STRIDED_RUN_MIN`] go to the strided-batch seam; every
-    /// shorter run and singleton is bundled — preserving original job order —
-    /// into ONE grouped-gemm call. Because a batch's destination ranges are
-    /// pairwise disjoint (a [`DenseGemmBatchJob`] invariant), job order never
-    /// affects results, so this bundling is byte-identical to the per-run
-    /// dispatch it replaces while never fragmenting a small batch into one seam
-    /// call per run — which was the d=4 regression this fixes.
+    /// Routes one typed identity batch by what the two tenferro entries can
+    /// represent, not by a run-length cutoff. The strided entry is one rank-3
+    /// contraction, so it can carry a batch iff the batch is ONE affine run:
+    /// `runs == [jobs.len()]`, at least two jobs (a step needs two offsets), and
+    /// a destination step of at least `rows * cols`, which is the O(1) proof
+    /// that the rank-3 destination view is self-disjoint (tenferro's dot path
+    /// does not check destination overlap; its grouped validator does). The
+    /// grouped entry — TensorKit `mul!` per matched sector, QSpace
+    /// `contract_matchAB_groupC` -> `contractDATA_group`, a destination-grouped
+    /// GEMM list with no cutoff — represents every batch, so everything else
+    /// goes there as ONE submission built from `jobs` (never from `runs`, so a
+    /// malformed partition cannot skip or over-index a job).
+    ///
+    /// Why not keep a per-run cutoff: it was an empirical constant in tensor
+    /// semantics (user decision 2026-09-14). The disadvantage accepted here: a
+    /// long run plus residual jobs now goes grouped, paying tenferro's
+    /// O(J log J) grouped validation per call instead of the cached O(1)
+    /// strided analysis plus O(S log S) for the residual.
     #[allow(clippy::too_many_arguments)]
     fn matmul_batch_axpby_route_typed<T, W, R>(
         &mut self,
@@ -257,54 +251,48 @@ impl DefaultDenseExecutor {
         W: for<'x> Fn(DenseViewMut<'x, T>) -> DenseWrite<'x> + Copy,
         R: for<'x> Fn(DenseView<'x, T>) -> DenseRead<'x> + Copy,
     {
-        debug_assert_eq!(
-            runs.iter().sum::<usize>(),
-            jobs.len(),
-            "run partition must cover every job"
-        );
+        if jobs.is_empty() {
+            return Ok(());
+        }
+        let single_self_disjoint_run = runs == [jobs.len()]
+            && jobs.len() >= 2
+            && jobs[1]
+                .dst_offset
+                .checked_sub(jobs[0].dst_offset)
+                .zip(jobs[0].rows.checked_mul(jobs[0].cols))
+                .is_some_and(|(dst_step, block)| dst_step >= block);
+        if single_self_disjoint_run {
+            return self.matmul_strided_batch_run_typed(
+                output,
+                lhs,
+                rhs,
+                jobs,
+                0,
+                MatrixOp::Identity,
+                MatrixOp::Identity,
+                alpha,
+                beta,
+                "strided_batch_gemm",
+                wrap_write,
+                wrap_read,
+            );
+        }
         self.grouped_jobs.clear();
-        let mut start = 0usize;
-        for &run_len in runs {
-            let run = &jobs[start..start + run_len];
-            if run_len >= STRIDED_RUN_MIN {
-                self.matmul_strided_batch_run_typed(
-                    output,
-                    lhs,
-                    rhs,
-                    run,
-                    start,
-                    MatrixOp::Identity,
-                    MatrixOp::Identity,
-                    alpha,
-                    beta,
-                    "strided_batch_gemm",
-                    wrap_write,
-                    wrap_read,
-                )?;
-            } else {
-                // Bundle short-run/singleton jobs, in order, for one grouped call.
-                self.grouped_jobs.extend(run.iter().map(|job| {
-                    GroupedGemmJob::new(
-                        job.dst_offset,
-                        job.lhs_offset,
-                        job.rhs_offset,
-                        job.rows,
-                        job.contracted,
-                        job.cols,
-                    )
-                }));
-            }
-            start += run_len;
-        }
-        if !self.grouped_jobs.is_empty() {
-            self.matmul_grouped_bundle_typed(output, lhs, rhs, alpha, beta, wrap_write, wrap_read)?;
-        }
-        Ok(())
+        self.grouped_jobs.extend(jobs.iter().map(|job| {
+            GroupedGemmJob::new(
+                job.dst_offset,
+                job.lhs_offset,
+                job.rhs_offset,
+                job.rows,
+                job.contracted,
+                job.cols,
+            )
+        }));
+        self.matmul_grouped_bundle_typed(output, lhs, rhs, alpha, beta, wrap_write, wrap_read)
     }
 
-    /// Single grouped-gemm call over the jobs already staged in
-    /// `self.grouped_jobs` (the bundled short runs and singletons). One seam
-    /// dispatch regardless of how many runs fed it.
+    /// Single grouped-gemm call over the jobs staged in `self.grouped_jobs`.
+    /// One seam dispatch regardless of how many runs fed it.
     #[allow(clippy::too_many_arguments)]
     fn matmul_grouped_bundle_typed<T, W, R>(
         &mut self,
@@ -539,9 +527,7 @@ impl DefaultDenseExecutor {
         lhs_op: MatrixOp,
         rhs_op: MatrixOp,
     ) -> Result<StridedBatchRunLayout, DenseError> {
-        // Identity runs reach this helper at the existing empirical threshold;
-        // oriented runs need only two jobs to define the structural batch
-        // stride. Singletons retain their existing fallback.
+        // Two jobs define the structural batch stride; singletons cannot.
         debug_assert!(run.len() >= 2, "strided run must hold at least two jobs");
         let first = &run[0];
         let next = &run[1];

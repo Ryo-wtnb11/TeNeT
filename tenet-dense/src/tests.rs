@@ -1036,9 +1036,9 @@ fn default_executor_matmul_into_matches_tensorkit_recoupling_view_for_all_gemm_d
 #[cfg(feature = "tenferro")]
 #[test]
 fn default_executor_fuses_same_shape_strided_batch_jobs_for_all_gemm_dtypes() {
-    // Four same-shape constant-stride jobs form one length-4 run (>=
-    // STRIDED_RUN_MIN), so the batch routes through the strided-batch seam as a
-    // single dispatch rather than one call per job.
+    // Four same-shape constant-stride jobs form one affine run, so the batch
+    // routes through the strided-batch seam as a single dispatch rather than
+    // one call per job.
     let mut lhs = Vec::new();
     let mut rhs = Vec::new();
     for block in 0..4 {
@@ -1209,7 +1209,7 @@ fn default_executor_fuses_same_shape_strided_batch_jobs_for_all_gemm_dtypes() {
 #[test]
 fn default_executor_bundles_short_runs_into_one_seam_dispatch() {
     // Structural guard for issue #103: a fragmented batch (three runs — two
-    // length-2 same-shape runs plus a singleton, all below STRIDED_RUN_MIN)
+    // length-2 same-shape runs plus a singleton) is not one affine run, so it
     // must dispatch ONE grouped seam call, not one per run. Seam-call count
     // stays flat as a batch fragments into more runs.
     //
@@ -1259,11 +1259,7 @@ fn default_executor_bundles_short_runs_into_one_seam_dispatch() {
         },
     ];
     let runs = strided_batch_runs(&jobs);
-    assert_eq!(
-        runs,
-        vec![2, 2, 1],
-        "batch must present three runs, none >= cutoff"
-    );
+    assert_eq!(runs, vec![2, 2, 1], "batch must present three runs");
 
     // Storage large enough for every lhs/rhs/dst range referenced above.
     let buf_len = 16usize;
@@ -2020,4 +2016,776 @@ fn strided_batch_runs_breaks_on_shape_and_stride_changes() {
         batch_job((2, 2, 2), (100, 4, 4)),
     ];
     assert_eq!(strided_batch_runs(&jobs), vec![2, 1]);
+}
+
+// ---------------------------------------------------------------------------
+// Identity batch dispatch (#1182): one strided rank-3 dot iff the batch is one
+// affine run of >= 2 jobs with destination step >= rows * cols; otherwise one
+// grouped submission over every job. Oracles below are scalar loops over the
+// job list, independent of the adapter's routing.
+// ---------------------------------------------------------------------------
+
+trait IdentityBatchScalar:
+    Copy + Default + std::ops::Add<Output = Self> + std::ops::Mul<Output = Self> + PartialEq
+{
+    fn read(view: DenseView<'_, Self>) -> DenseRead<'_>;
+    fn write(view: DenseViewMut<'_, Self>) -> DenseWrite<'_>;
+    fn scalar(value: Self) -> DenseScalar;
+    fn sample(index: usize, salt: f64) -> Self;
+    fn assert_close(actual: Self, expected: Self);
+}
+
+impl IdentityBatchScalar for f64 {
+    fn read(view: DenseView<'_, Self>) -> DenseRead<'_> {
+        DenseRead::F64(view)
+    }
+    fn write(view: DenseViewMut<'_, Self>) -> DenseWrite<'_> {
+        DenseWrite::F64(view)
+    }
+    fn scalar(value: Self) -> DenseScalar {
+        DenseScalar::F64(value)
+    }
+    fn sample(index: usize, salt: f64) -> Self {
+        0.5 + salt + 0.25 * index as f64 - 0.01 * (index * index % 7) as f64
+    }
+    fn assert_close(actual: Self, expected: Self) {
+        assert_f64_close(actual, expected, 1.0e-10);
+    }
+}
+
+impl IdentityBatchScalar for f32 {
+    fn read(view: DenseView<'_, Self>) -> DenseRead<'_> {
+        DenseRead::F32(view)
+    }
+    fn write(view: DenseViewMut<'_, Self>) -> DenseWrite<'_> {
+        DenseWrite::F32(view)
+    }
+    fn scalar(value: Self) -> DenseScalar {
+        DenseScalar::F32(value)
+    }
+    fn sample(index: usize, salt: f64) -> Self {
+        <f64 as IdentityBatchScalar>::sample(index, salt) as f32
+    }
+    fn assert_close(actual: Self, expected: Self) {
+        assert_f32_close(actual, expected, 1.0e-3);
+    }
+}
+
+impl IdentityBatchScalar for Complex64 {
+    fn read(view: DenseView<'_, Self>) -> DenseRead<'_> {
+        DenseRead::C64(view)
+    }
+    fn write(view: DenseViewMut<'_, Self>) -> DenseWrite<'_> {
+        DenseWrite::C64(view)
+    }
+    fn scalar(value: Self) -> DenseScalar {
+        DenseScalar::C64(value)
+    }
+    fn sample(index: usize, salt: f64) -> Self {
+        Complex64::new(
+            <f64 as IdentityBatchScalar>::sample(index, salt),
+            -0.75 + 0.125 * index as f64 + salt,
+        )
+    }
+    fn assert_close(actual: Self, expected: Self) {
+        assert_c64_close(actual, expected, 1.0e-10);
+    }
+}
+
+impl IdentityBatchScalar for Complex32 {
+    fn read(view: DenseView<'_, Self>) -> DenseRead<'_> {
+        DenseRead::C32(view)
+    }
+    fn write(view: DenseViewMut<'_, Self>) -> DenseWrite<'_> {
+        DenseWrite::C32(view)
+    }
+    fn scalar(value: Self) -> DenseScalar {
+        DenseScalar::C32(value)
+    }
+    fn sample(index: usize, salt: f64) -> Self {
+        let value = <Complex64 as IdentityBatchScalar>::sample(index, salt);
+        Complex32::new(value.re as f32, value.im as f32)
+    }
+    fn assert_close(actual: Self, expected: Self) {
+        assert_c32_close(actual, expected, 1.0e-3);
+    }
+}
+
+/// Column-major scalar oracle: `alpha * lhs * rhs + beta * dst` per job over
+/// flat buffers with view base offsets; elements no job owns are unchanged.
+fn identity_batch_oracle<T: IdentityBatchScalar>(
+    jobs: &[DenseGemmBatchJob],
+    lhs: &[T],
+    rhs: &[T],
+    output_before: &[T],
+    base: (usize, usize, usize),
+    alpha: T,
+    beta: T,
+) -> Vec<T> {
+    let mut expected = output_before.to_vec();
+    for job in jobs {
+        let lhs_base = base.0 + job.lhs_offset;
+        let rhs_base = base.1 + job.rhs_offset;
+        let dst_base = base.2 + job.dst_offset;
+        for col in 0..job.cols {
+            for row in 0..job.rows {
+                let mut sum = T::default();
+                for inner in 0..job.contracted {
+                    sum = sum
+                        + lhs[lhs_base + row + job.rows * inner]
+                            * rhs[rhs_base + inner + job.contracted * col];
+                }
+                let index = dst_base + row + job.rows * col;
+                expected[index] = alpha * sum + beta * output_before[index];
+            }
+        }
+    }
+    expected
+}
+
+struct IdentityBatchFixture<T> {
+    jobs: Vec<DenseGemmBatchJob>,
+    lhs: Vec<T>,
+    rhs: Vec<T>,
+    output: Vec<T>,
+    base: (usize, usize, usize),
+}
+
+/// Lays `shapes` out sequentially in flat lhs/rhs/dst buffers, leaving `gap`
+/// unused elements between consecutive blocks of every operand and `base`
+/// elements before the view offset. `gap == 0` yields a batch whose same-shape
+/// neighbours are one affine run.
+fn identity_fixture<T: IdentityBatchScalar>(
+    shapes: &[(usize, usize, usize)],
+    gap: usize,
+    base: (usize, usize, usize),
+    sentinel: T,
+) -> IdentityBatchFixture<T> {
+    let (mut lhs_off, mut rhs_off, mut dst_off) = (0usize, 0usize, 0usize);
+    let jobs = shapes
+        .iter()
+        .map(|&(rows, contracted, cols)| {
+            let job = DenseGemmBatchJob {
+                dst_offset: dst_off,
+                lhs_offset: lhs_off,
+                rhs_offset: rhs_off,
+                rows,
+                contracted,
+                cols,
+            };
+            lhs_off += rows * contracted + gap;
+            rhs_off += contracted * cols + gap;
+            dst_off += rows * cols + gap;
+            job
+        })
+        .collect::<Vec<_>>();
+    let lhs = (0..base.0 + lhs_off + 1)
+        .map(|i| T::sample(i, 0.0))
+        .collect();
+    let rhs = (0..base.1 + rhs_off + 1)
+        .map(|i| T::sample(i, 1.5))
+        .collect();
+    let output = vec![sentinel; base.2 + dst_off + 1];
+    IdentityBatchFixture {
+        jobs,
+        lhs,
+        rhs,
+        output,
+        base,
+    }
+}
+
+fn run_identity_batch<T: IdentityBatchScalar>(
+    executor: &mut DefaultDenseExecutor,
+    fixture: &mut IdentityBatchFixture<T>,
+    runs: &[usize],
+    alpha: T,
+    beta: T,
+) -> Result<(), DenseError> {
+    let strides = [1usize];
+    let (lhs_base, rhs_base, dst_base) = fixture.base;
+    let lhs_shape = [fixture.lhs.len() - lhs_base];
+    let rhs_shape = [fixture.rhs.len() - rhs_base];
+    let out_shape = [fixture.output.len() - dst_base];
+    executor.reset_seam_dispatches();
+    executor.matmul_batch_axpby_into(
+        T::write(DenseViewMut::new(&mut fixture.output, &out_shape, &strides, dst_base).unwrap()),
+        T::read(DenseView::new(&fixture.lhs, &lhs_shape, &strides, lhs_base).unwrap()),
+        T::read(DenseView::new(&fixture.rhs, &rhs_shape, &strides, rhs_base).unwrap()),
+        &fixture.jobs,
+        runs,
+        T::scalar(alpha),
+        T::scalar(beta),
+    )
+}
+
+/// Executes the batch with the plan-time partition (unless `runs` overrides
+/// it), asserts exactly `dispatches` seam submissions and oracle-exact values.
+#[allow(clippy::too_many_arguments)]
+fn check_identity_batch<T: IdentityBatchScalar>(
+    executor: &mut DefaultDenseExecutor,
+    shapes: &[(usize, usize, usize)],
+    gap: usize,
+    base: (usize, usize, usize),
+    runs: Option<&[usize]>,
+    alpha: T,
+    beta: T,
+    dispatches: usize,
+) {
+    let mut fixture = identity_fixture::<T>(shapes, gap, base, T::sample(3, -4.0));
+    let plan_runs = strided_batch_runs(&fixture.jobs);
+    let runs = runs.unwrap_or(&plan_runs);
+    let expected = identity_batch_oracle(
+        &fixture.jobs,
+        &fixture.lhs,
+        &fixture.rhs,
+        &fixture.output,
+        base,
+        alpha,
+        beta,
+    );
+    run_identity_batch(executor, &mut fixture, runs, alpha, beta).unwrap();
+    assert_eq!(
+        executor.seam_dispatches(),
+        dispatches,
+        "shapes {shapes:?} gap {gap} runs {runs:?}"
+    );
+    for (actual, expected) in fixture.output.iter().zip(&expected) {
+        T::assert_close(*actual, *expected);
+    }
+}
+
+fn c64(re: f64, im: f64) -> Complex64 {
+    Complex64::new(re, im)
+}
+
+#[cfg(feature = "tenferro")]
+#[test]
+fn identity_single_affine_run_is_one_strided_dispatch_for_two_and_four_jobs() {
+    let mut executor = DefaultDenseExecutor::with_threads(1).unwrap();
+    for len in [2usize, 4] {
+        let shapes = vec![(2, 3, 2); len];
+        check_identity_batch::<f64>(&mut executor, &shapes, 0, (0, 0, 0), None, 1.25, -0.5, 1);
+        check_identity_batch::<f32>(&mut executor, &shapes, 0, (1, 2, 3), None, 1.0, 0.0, 1);
+        check_identity_batch::<Complex64>(
+            &mut executor,
+            &shapes,
+            1,
+            (2, 1, 3),
+            None,
+            c64(0.75, -0.5),
+            c64(-0.25, 0.125),
+            1,
+        );
+        check_identity_batch::<Complex32>(
+            &mut executor,
+            &shapes,
+            0,
+            (0, 0, 0),
+            None,
+            Complex32::new(0.5, 0.5),
+            Complex32::new(0.0, 0.0),
+            1,
+        );
+    }
+}
+
+#[cfg(feature = "tenferro")]
+#[test]
+fn identity_long_run_with_residual_jobs_is_one_grouped_dispatch() {
+    let mut executor = DefaultDenseExecutor::with_threads(1).unwrap();
+    // 7 + singleton.
+    let mut shapes = vec![(2, 2, 3); 7];
+    shapes.push((3, 1, 1));
+    assert_eq!(
+        strided_batch_runs(&identity_fixture::<f64>(&shapes, 0, (0, 0, 0), 0.0).jobs),
+        [7, 1]
+    );
+    check_identity_batch::<f64>(&mut executor, &shapes, 0, (0, 0, 0), None, 1.0, 0.0, 1);
+    check_identity_batch::<Complex64>(
+        &mut executor,
+        &shapes,
+        0,
+        (1, 1, 1),
+        None,
+        c64(0.5, 1.5),
+        c64(-1.0, 0.25),
+        1,
+    );
+    // 7 + short run of 2.
+    shapes.push((3, 1, 1));
+    assert_eq!(
+        strided_batch_runs(&identity_fixture::<f64>(&shapes, 0, (0, 0, 0), 0.0).jobs),
+        [7, 2]
+    );
+    check_identity_batch::<f64>(&mut executor, &shapes, 0, (0, 0, 0), None, -2.0, 0.5, 1);
+    check_identity_batch::<Complex64>(
+        &mut executor,
+        &shapes,
+        0,
+        (0, 0, 0),
+        None,
+        c64(0.0, 1.0),
+        c64(0.0, 0.0),
+        1,
+    );
+}
+
+#[cfg(feature = "tenferro")]
+#[test]
+fn identity_heterogeneous_batch_with_gaps_and_base_offsets_is_one_dispatch() {
+    let mut executor = DefaultDenseExecutor::with_threads(1).unwrap();
+    let shapes = [(2, 3, 1), (1, 1, 4), (3, 2, 2), (2, 2, 2), (1, 5, 1)];
+    let jobs = identity_fixture::<f64>(&shapes, 2, (0, 0, 0), 0.0).jobs;
+    assert_eq!(strided_batch_runs(&jobs), [1; 5]);
+    check_identity_batch::<f64>(&mut executor, &shapes, 2, (3, 5, 7), None, 1.5, -1.0, 1);
+    check_identity_batch::<Complex64>(
+        &mut executor,
+        &shapes,
+        3,
+        (4, 0, 2),
+        None,
+        c64(-0.5, 0.75),
+        c64(0.25, -0.5),
+        1,
+    );
+    check_identity_batch::<f32>(&mut executor, &shapes, 1, (0, 1, 0), None, 2.0, 0.0, 1);
+}
+
+#[cfg(feature = "tenferro")]
+#[test]
+fn identity_beta_zero_overwrites_sentinel_on_both_paths() {
+    let mut executor = DefaultDenseExecutor::with_threads(1).unwrap();
+    let sentinel = c64(-99.0, 99.0);
+    let alpha = c64(0.5, -1.25);
+    for (shapes, gap) in [
+        (vec![(2, 2, 2); 3], 0usize),
+        (vec![(2, 2, 2), (1, 3, 2)], 0),
+    ] {
+        let mut fixture = identity_fixture::<Complex64>(&shapes, gap, (1, 0, 2), sentinel);
+        let runs = strided_batch_runs(&fixture.jobs);
+        let expected = identity_batch_oracle(
+            &fixture.jobs,
+            &fixture.lhs,
+            &fixture.rhs,
+            &fixture.output,
+            fixture.base,
+            alpha,
+            c64(0.0, 0.0),
+        );
+        run_identity_batch(&mut executor, &mut fixture, &runs, alpha, c64(0.0, 0.0)).unwrap();
+        assert_eq!(executor.seam_dispatches(), 1);
+        for job in &fixture.jobs {
+            let start = fixture.base.2 + job.dst_offset;
+            for index in start..start + job.rows * job.cols {
+                assert_ne!(fixture.output[index], sentinel);
+            }
+        }
+        for (actual, expected) in fixture.output.iter().zip(&expected) {
+            assert_c64_close(*actual, *expected, 1.0e-10);
+        }
+    }
+}
+
+#[cfg(feature = "tenferro")]
+#[test]
+fn identity_overlapping_destinations_are_rejected_by_the_grouped_validator_without_writes() {
+    let mut executor = DefaultDenseExecutor::with_threads(1).unwrap();
+    // One affine run whose destination step (2) is below rows * cols (4): the
+    // strided view would alias itself, so admission fails and the grouped
+    // validator reports the overlap before writing anything.
+    let jobs = (0..3)
+        .map(|batch| batch_job((2, 1, 2), (2 * batch, 2 * batch, 2 * batch)))
+        .collect::<Vec<_>>();
+    assert_eq!(strided_batch_runs(&jobs), [3]);
+    let lhs = (0..8).map(|i| 1.0 + i as f64).collect::<Vec<_>>();
+    let rhs = lhs.clone();
+    let mut output = vec![-7.0; 10];
+    let strides = [1];
+    executor.reset_seam_dispatches();
+    let error = executor
+        .matmul_batch_axpby_into(
+            DenseWrite::F64(DenseViewMut::new(&mut output, &[10], &strides, 0).unwrap()),
+            DenseRead::F64(DenseView::new(&lhs, &[8], &strides, 0).unwrap()),
+            DenseRead::F64(DenseView::new(&rhs, &[8], &strides, 0).unwrap()),
+            &jobs,
+            &[3],
+            DenseScalar::F64(1.0),
+            DenseScalar::F64(0.0),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&error, DenseError::Backend { op: "grouped_gemm", message, .. } if message.contains("overlaps")),
+        "{error:?}"
+    );
+    assert_eq!(executor.seam_dispatches(), 1);
+    assert_eq!(output, vec![-7.0; 10]);
+
+    // Two heterogeneous jobs whose destination ranges 0..4 and 2..5 overlap.
+    let jobs = [
+        batch_job((2, 1, 2), (0, 0, 0)),
+        batch_job((1, 1, 3), (2, 2, 2)),
+    ];
+    assert_eq!(strided_batch_runs(&jobs), [1, 1]);
+    let lhs = (0..6).map(|i| c64(i as f64, 1.0)).collect::<Vec<_>>();
+    let mut output = vec![c64(3.0, -3.0); 6];
+    executor.reset_seam_dispatches();
+    let error = executor
+        .matmul_batch_axpby_into(
+            DenseWrite::C64(DenseViewMut::new(&mut output, &[6], &strides, 0).unwrap()),
+            DenseRead::C64(DenseView::new(&lhs, &[6], &strides, 0).unwrap()),
+            DenseRead::C64(DenseView::new(&lhs, &[6], &strides, 0).unwrap()),
+            &jobs,
+            &[1, 1],
+            DenseScalar::C64(c64(1.0, 0.0)),
+            DenseScalar::C64(c64(0.0, 0.0)),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&error, DenseError::Backend { op: "grouped_gemm", message, .. } if message.contains("overlaps")),
+        "{error:?}"
+    );
+    assert_eq!(executor.seam_dispatches(), 1);
+    assert_eq!(output, vec![c64(3.0, -3.0); 6]);
+}
+
+#[cfg(feature = "tenferro")]
+#[test]
+fn identity_empty_and_zero_dimension_batches_on_both_paths() {
+    let mut executor = DefaultDenseExecutor::with_threads(1).unwrap();
+    let strides = [1];
+    let mut output = [3.0, 4.0];
+    executor.reset_seam_dispatches();
+    executor
+        .matmul_batch_axpby_into(
+            DenseWrite::F64(DenseViewMut::new(&mut output, &[2], &strides, 0).unwrap()),
+            DenseRead::F64(DenseView::new(&[1.0], &[1], &strides, 0).unwrap()),
+            DenseRead::F64(DenseView::new(&[2.0], &[1], &strides, 0).unwrap()),
+            &[],
+            &[],
+            DenseScalar::F64(1.0),
+            DenseScalar::F64(0.0),
+        )
+        .unwrap();
+    assert_eq!(executor.seam_dispatches(), 0);
+    assert_eq!(output, [3.0, 4.0]);
+
+    // rows = 0 and cols = 0 own no destination elements; contracted = 0 scales
+    // the destination by beta. Gap 1 keeps the zero-size blocks at distinct
+    // offsets so the dispatch decision is exercised, not degenerate.
+    let alpha = c64(2.0, -1.0);
+    let beta = c64(-0.5, 0.25);
+    for shapes in [
+        vec![(0, 2, 3); 2],
+        vec![(2, 3, 0); 3],
+        vec![(2, 0, 2); 2],
+        vec![(2, 0, 2), (1, 0, 3)],
+        vec![(0, 1, 1), (2, 2, 2)],
+    ] {
+        check_identity_batch::<Complex64>(
+            &mut executor,
+            &shapes,
+            1,
+            (1, 1, 1),
+            None,
+            alpha,
+            beta,
+            1,
+        );
+        check_identity_batch::<f64>(&mut executor, &shapes, 1, (0, 0, 0), None, 1.5, 0.5, 1);
+    }
+}
+
+#[cfg(feature = "tenferro")]
+#[test]
+fn identity_executor_replays_strided_grouped_strided_across_shapes() {
+    let mut executor = DefaultDenseExecutor::with_threads(1).unwrap();
+    let alpha = c64(1.0, 0.5);
+    let beta = c64(0.25, 0.0);
+    // strided (one affine run) -> grouped (heterogeneous) -> strided with a
+    // different shape and step, all through cache slot 0 of one executor.
+    check_identity_batch::<Complex64>(
+        &mut executor,
+        &[(2, 2, 2); 3],
+        0,
+        (0, 0, 0),
+        None,
+        alpha,
+        beta,
+        1,
+    );
+    check_identity_batch::<Complex64>(
+        &mut executor,
+        &[(2, 2, 2), (3, 1, 2)],
+        0,
+        (0, 0, 0),
+        None,
+        alpha,
+        beta,
+        1,
+    );
+    check_identity_batch::<Complex64>(
+        &mut executor,
+        &[(3, 1, 4); 2],
+        2,
+        (1, 0, 0),
+        None,
+        alpha,
+        beta,
+        1,
+    );
+    check_identity_batch::<f64>(
+        &mut executor,
+        &[(1, 3, 1); 5],
+        0,
+        (0, 0, 0),
+        None,
+        1.0,
+        0.0,
+        1,
+    );
+    check_identity_batch::<f64>(
+        &mut executor,
+        &[(1, 3, 1), (2, 1, 1)],
+        0,
+        (0, 0, 0),
+        None,
+        1.0,
+        0.0,
+        1,
+    );
+    check_identity_batch::<f64>(
+        &mut executor,
+        &[(2, 2, 1); 4],
+        0,
+        (0, 0, 0),
+        None,
+        1.0,
+        0.0,
+        1,
+    );
+}
+
+#[cfg(feature = "tenferro")]
+#[test]
+fn identity_malformed_runs_route_grouped_over_all_jobs() {
+    // Pins the post-#1182 behaviour: `runs` is consulted only for the O(1)
+    // single-run test, so a short, long, or zero-entry partition can neither
+    // skip trailing jobs (the old release-mode result of a short sum) nor
+    // over-index the job slice (the old panic on a long sum). Every job runs,
+    // grouped, in one submission.
+    let mut executor = DefaultDenseExecutor::with_threads(1).unwrap();
+    let shapes = [(2, 2, 2); 3];
+    for runs in [&[2usize][..], &[5], &[0, 3], &[1, 1, 1], &[]] {
+        check_identity_batch::<f64>(
+            &mut executor,
+            &shapes,
+            0,
+            (0, 0, 0),
+            Some(runs),
+            1.0,
+            0.0,
+            1,
+        );
+        check_identity_batch::<Complex64>(
+            &mut executor,
+            &shapes,
+            0,
+            (2, 0, 1),
+            Some(runs),
+            c64(0.5, 0.5),
+            c64(1.0, -1.0),
+            1,
+        );
+    }
+}
+
+#[cfg(feature = "tenferro")]
+#[test]
+fn identity_grouped_out_of_range_span_fails_before_any_write() {
+    let mut executor = DefaultDenseExecutor::with_threads(1).unwrap();
+    let strides = [1];
+    let values = (0..8).map(|i| 1.0 + i as f64).collect::<Vec<_>>();
+    // Heterogeneous batch: the second job's lhs span 6..10 exceeds the 8-element
+    // buffer; tenferro's grouped validator rejects the whole submission before
+    // the first (valid) job writes.
+    let jobs = [
+        batch_job((2, 1, 2), (0, 0, 0)),
+        batch_job((2, 2, 1), (4, 6, 4)),
+    ];
+    assert_eq!(strided_batch_runs(&jobs), [1, 1]);
+    let mut output = vec![-1.0; 8];
+    executor.reset_seam_dispatches();
+    let error = executor
+        .matmul_batch_axpby_into(
+            DenseWrite::F64(DenseViewMut::new(&mut output, &[8], &strides, 0).unwrap()),
+            DenseRead::F64(DenseView::new(&values, &[8], &strides, 0).unwrap()),
+            DenseRead::F64(DenseView::new(&values, &[8], &strides, 0).unwrap()),
+            &jobs,
+            &[1, 1],
+            DenseScalar::F64(1.0),
+            DenseScalar::F64(0.0),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            DenseError::Backend {
+                op: "grouped_gemm",
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    assert_eq!(executor.seam_dispatches(), 1);
+    assert_eq!(output, vec![-1.0; 8]);
+
+    // Same for an rhs span past the end of a base-offset view.
+    let jobs = [
+        batch_job((1, 2, 1), (0, 0, 0)),
+        batch_job((1, 1, 2), (1, 2, 7)),
+    ];
+    let mut output = vec![c64(-1.0, 1.0); 4];
+    let complex = values.iter().map(|&v| c64(v, -v)).collect::<Vec<_>>();
+    executor.reset_seam_dispatches();
+    let error = executor
+        .matmul_batch_axpby_into(
+            DenseWrite::C64(DenseViewMut::new(&mut output, &[3], &strides, 1).unwrap()),
+            DenseRead::C64(DenseView::new(&complex, &[7], &strides, 1).unwrap()),
+            DenseRead::C64(DenseView::new(&complex, &[7], &strides, 1).unwrap()),
+            &jobs,
+            &[1, 1],
+            DenseScalar::C64(c64(1.0, 0.0)),
+            DenseScalar::C64(c64(0.0, 0.0)),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            DenseError::Backend {
+                op: "grouped_gemm",
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    assert_eq!(executor.seam_dispatches(), 1);
+    assert_eq!(output, vec![c64(-1.0, 1.0); 4]);
+}
+
+#[cfg(feature = "tenferro")]
+#[test]
+fn identity_two_job_affine_run_is_admitted_to_the_strided_view() {
+    // `seam_dispatches()` is 1 on both routes for a two-job run, and the old
+    // cutoff also produced one (grouped) dispatch there, so the route is pinned
+    // through the bounds-check contract instead: an lhs span past the buffer
+    // fails TeNeT-side as `OutOfBounds` with 0 dispatches only on the strided
+    // route; the grouped route reaches tenferro (`Backend{op:"grouped_gemm"}`,
+    // 1 dispatch). The mirror with dst step 2 < rows * cols = 4 must therefore
+    // take the grouped route (the three-job variant is in
+    // `identity_overlapping_destinations_are_rejected_by_the_grouped_validator_without_writes`).
+    fn jobs(dst_step: usize) -> [DenseGemmBatchJob; 2] {
+        [
+            batch_job((2, 1, 2), (0, 0, 0)),
+            batch_job((2, 1, 2), (dst_step, 2, 2)),
+        ]
+    }
+    let strides = [1];
+    let mut executor = DefaultDenseExecutor::with_threads(1).unwrap();
+
+    // lhs holds 3 elements; the run's rank-3 lhs view needs index 3.
+    let lhs_f64 = [1.0, 2.0, 3.0];
+    let rhs_f64 = [4.0, 5.0, 6.0, 7.0];
+    let strided = jobs(4);
+    assert_eq!(strided_batch_runs(&strided), [2]);
+    let mut output = [-3.0; 8];
+    executor.reset_seam_dispatches();
+    let error = executor
+        .matmul_batch_axpby_into(
+            DenseWrite::F64(DenseViewMut::new(&mut output, &[8], &strides, 0).unwrap()),
+            DenseRead::F64(DenseView::new(&lhs_f64, &[3], &strides, 0).unwrap()),
+            DenseRead::F64(DenseView::new(&rhs_f64, &[4], &strides, 0).unwrap()),
+            &strided,
+            &[2],
+            DenseScalar::F64(1.0),
+            DenseScalar::F64(0.0),
+        )
+        .unwrap_err();
+    assert_eq!(error, DenseError::OutOfBounds);
+    assert_eq!(executor.seam_dispatches(), 0);
+    assert_eq!(output, [-3.0; 8]);
+
+    let grouped = jobs(2);
+    assert_eq!(strided_batch_runs(&grouped), [2]);
+    let mut output = [-3.0; 8];
+    executor.reset_seam_dispatches();
+    let error = executor
+        .matmul_batch_axpby_into(
+            DenseWrite::F64(DenseViewMut::new(&mut output, &[8], &strides, 0).unwrap()),
+            DenseRead::F64(DenseView::new(&lhs_f64, &[3], &strides, 0).unwrap()),
+            DenseRead::F64(DenseView::new(&rhs_f64, &[4], &strides, 0).unwrap()),
+            &grouped,
+            &[2],
+            DenseScalar::F64(1.0),
+            DenseScalar::F64(0.0),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            DenseError::Backend {
+                op: "grouped_gemm",
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    assert_eq!(executor.seam_dispatches(), 1);
+    assert_eq!(output, [-3.0; 8]);
+
+    let lhs_c64 = lhs_f64.map(|v| c64(v, -v));
+    let rhs_c64 = rhs_f64.map(|v| c64(-v, 0.5 * v));
+    let sentinel = c64(-3.0, 3.0);
+    let mut output = [sentinel; 8];
+    executor.reset_seam_dispatches();
+    let error = executor
+        .matmul_batch_axpby_into(
+            DenseWrite::C64(DenseViewMut::new(&mut output, &[8], &strides, 0).unwrap()),
+            DenseRead::C64(DenseView::new(&lhs_c64, &[3], &strides, 0).unwrap()),
+            DenseRead::C64(DenseView::new(&rhs_c64, &[4], &strides, 0).unwrap()),
+            &strided,
+            &[2],
+            DenseScalar::C64(c64(0.5, -0.5)),
+            DenseScalar::C64(c64(1.0, 1.0)),
+        )
+        .unwrap_err();
+    assert_eq!(error, DenseError::OutOfBounds);
+    assert_eq!(executor.seam_dispatches(), 0);
+    assert_eq!(output, [sentinel; 8]);
+
+    let mut output = [sentinel; 8];
+    executor.reset_seam_dispatches();
+    let error = executor
+        .matmul_batch_axpby_into(
+            DenseWrite::C64(DenseViewMut::new(&mut output, &[8], &strides, 0).unwrap()),
+            DenseRead::C64(DenseView::new(&lhs_c64, &[3], &strides, 0).unwrap()),
+            DenseRead::C64(DenseView::new(&rhs_c64, &[4], &strides, 0).unwrap()),
+            &grouped,
+            &[2],
+            DenseScalar::C64(c64(0.5, -0.5)),
+            DenseScalar::C64(c64(1.0, 1.0)),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            DenseError::Backend {
+                op: "grouped_gemm",
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    assert_eq!(executor.seam_dispatches(), 1);
+    assert_eq!(output, [sentinel; 8]);
 }
