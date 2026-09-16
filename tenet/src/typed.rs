@@ -6449,7 +6449,7 @@ where
         {
             let (lhs_operand, lhs_data) = tensor.fusion_operand_and_data();
             let (rhs_operand, rhs_data) = other.fusion_operand_and_data();
-            return tenet_tensors::oriented_fusion_inner(
+            return tenet_tensors::oriented_fusion_inner_with(
                 tensor.logical_space().space().structure(),
                 lhs_operand,
                 lhs_data,
@@ -15867,7 +15867,7 @@ where
                         rhs.parent.materialized_dense_data(),
                         tenet_tensors::FusionOperand::direct(lhs.parent.space.space()),
                         lhs.parent.materialized_dense_data(),
-                        |sector| Ok::<_, Error>(D::from_real(provider.dim_scalar(sector))),
+                        |sector| D::from_real(provider.dim_scalar(sector)),
                     )?
                 }
                 _ => tenet_tensors::oriented_fusion_inner(
@@ -15876,7 +15876,7 @@ where
                     lhs_data,
                     rhs_operand,
                     rhs_data,
-                    |sector| Ok::<_, Error>(D::from_real(provider.dim_scalar(sector))),
+                    |sector| D::from_real(provider.dim_scalar(sector)),
                 )?,
             };
             return Ok(value);

@@ -74,7 +74,7 @@ pub use facade::{
 #[doc(hidden)]
 pub use oriented_elementwise::{
     fusion_scatter_add_assign, oriented_fusion_add_into, oriented_fusion_inner,
-    oriented_fusion_restrict_into, validate_oriented_fusion_layout,
+    oriented_fusion_inner_with, oriented_fusion_restrict_into, validate_oriented_fusion_layout,
 };
 // Stage B3a: Generic-fusion (outer-multiplicity) facade siblings.
 pub use adjoint::adjoint_bound_space_dyn_generic_checked;

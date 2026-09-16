@@ -448,11 +448,29 @@ where
     Ok(())
 }
 
-/// `sector_weight` supplies `dim(c)` per logical block and is fallible so a
-/// checked provider can be queried in place; the caller's error type absorbs
-/// the layout errors raised here through `From<OperationError>`.
+/// Quantum-dimension-weighted oriented inner product.
+///
+/// `sector_weight` supplies `dim(c)` per logical block.
 #[doc(hidden)]
-pub fn oriented_fusion_inner<D, E>(
+pub fn oriented_fusion_inner<D>(
+    logical: &BlockStructure,
+    lhs: FusionOperand<'_>,
+    lhs_data: &[D],
+    rhs: FusionOperand<'_>,
+    rhs_data: &[D],
+    mut sector_weight: impl FnMut(SectorId) -> D,
+) -> Result<D, OperationError>
+where
+    D: Copy + Add<D, Output = D> + Mul<D, Output = D> + Zero + ConjugateValue,
+{
+    oriented_fusion_inner_with(logical, lhs, lhs_data, rhs, rhs_data, |sector| {
+        Ok::<_, OperationError>(sector_weight(sector))
+    })
+}
+
+/// Fallible variant of [`oriented_fusion_inner`] for checked providers.
+#[doc(hidden)]
+pub fn oriented_fusion_inner_with<D, E>(
     logical: &BlockStructure,
     lhs: FusionOperand<'_>,
     lhs_data: &[D],
@@ -794,6 +812,18 @@ mod tests {
                 &direct,
                 adjoint_operand,
                 &parent,
+                |_| Complex64::one(),
+            )
+            .unwrap(),
+            expected_inner
+        );
+        assert_eq!(
+            oriented_fusion_inner_with(
+                logical.structure(),
+                direct_operand,
+                &direct,
+                adjoint_operand,
+                &parent,
                 |_| Ok::<_, OperationError>(Complex64::one()),
             )
             .unwrap(),
@@ -806,7 +836,7 @@ mod tests {
                 &parent,
                 direct_operand,
                 &direct,
-                |_| Ok::<_, OperationError>(Complex64::one()),
+                |_| Complex64::one(),
             )
             .unwrap(),
             expected_inner.conj()
