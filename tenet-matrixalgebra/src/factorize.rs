@@ -1846,6 +1846,7 @@ where
     let mut vt_workspace = vec![D::zero(); max_rank * max_cols];
     let mut singular_values = Vec::with_capacity(matricizations.len());
 
+    let index = PlacementIndex::new(&matricizations, &[FactorSide::Left, FactorSide::Right]);
     for matrix in &matricizations {
         let rank = matrix.rows.min(matrix.cols);
         let input_shape = [matrix.rows, matrix.cols];
@@ -1901,13 +1902,21 @@ where
                 .map(Into::into)
                 .collect(),
         });
-        scatter_left_sector_blocks(u_space.space(), &mut u_data, matrix, &u_workspace, max_rows)?;
+        scatter_left_sector_blocks(
+            u_space.space(),
+            &mut u_data,
+            matrix,
+            &index,
+            &u_workspace,
+            max_rows,
+        )?;
         #[cfg(test)]
         record_compact_svd_output_scatter::<D>(matrix.rows * rank);
         scatter_right_sector_blocks(
             vt_space.space(),
             &mut vt_data,
             matrix,
+            &index,
             &vt_workspace,
             max_rank,
         )?;
@@ -2814,7 +2823,7 @@ pub(crate) fn factor_buffer_build_counts_for_test() -> (usize, usize) {
     FACTOR_BUFFER_BUILD_COUNTS.get()
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum FactorSide {
     Left,
     Right,
@@ -3020,7 +3029,7 @@ where
     record_one_sided_fallback_publication();
     let mut data = vec![D::zero(); required_len];
     let mut missing_offsets = HashMap::<SectorId, usize>::new();
-    let mut indexes = HashMap::<SectorId, SidePlacementIndex<'_>>::new();
+    let placements = PlacementIndex::new(matricizations, &[source_trees]);
     for index in 0..space.space().structure().block_count() {
         let block = space.space().structure().block(index)?;
         let BlockKey::FusionTree(key) = block.key() else {
@@ -3030,16 +3039,12 @@ where
             FactorSide::Left => (coupled_of(key.codomain_tree()), block.shape().len() - 1),
             FactorSide::Right => (coupled_of(key.domain_tree()), 0),
         };
-        if let Some(&(matrix, Some(pair))) = routes.get(&sector) {
+        if let Some(&(_, Some(pair))) = routes.get(&sector) {
             let tree = match side {
                 FactorSide::Left => key.codomain_tree(),
                 FactorSide::Right => key.domain_tree(),
             };
-            let side_offset = indexes
-                .entry(sector)
-                .or_insert_with(|| SidePlacementIndex::new(matrix, source_trees))
-                .placement(tree)?
-                .0;
+            let side_offset = placements.placement(sector, source_trees, tree)?.0;
             let (factor, factor_rows) = match side {
                 FactorSide::Left => (pair.left.as_slice(), pair.left_rows),
                 FactorSide::Right => (pair.right.as_slice(), pair.right_leading),
@@ -3102,6 +3107,7 @@ fn scatter_left_sector_blocks<D>(
     left_space: &DynamicFusionMapSpace,
     left_data: &mut [D],
     matrix: &SectorMatricization<D>,
+    index: &PlacementIndex<'_>,
     factor: &[D],
     factor_rows: usize,
 ) -> Result<(), OperationError>
@@ -3109,7 +3115,6 @@ where
     D: FactorScalar,
 {
     let left_structure = Arc::clone(left_space.structure());
-    let index = SidePlacementIndex::new(matrix, FactorSide::Left);
     for block_index in 0..left_structure.block_count() {
         let block = left_structure
             .block(block_index)
@@ -3120,7 +3125,8 @@ where
         if coupled_of(key.codomain_tree()) != matrix.sector {
             continue;
         }
-        let (row_offset, _) = index.placement(key.codomain_tree())?;
+        let (row_offset, _) =
+            index.placement(matrix.sector, FactorSide::Left, key.codomain_tree())?;
         scatter_matrix_block(
             left_data,
             block.shape(),
@@ -3139,6 +3145,7 @@ fn scatter_right_sector_blocks<D>(
     right_space: &DynamicFusionMapSpace,
     right_data: &mut [D],
     matrix: &SectorMatricization<D>,
+    index: &PlacementIndex<'_>,
     factor: &[D],
     factor_rows: usize,
 ) -> Result<(), OperationError>
@@ -3146,7 +3153,6 @@ where
     D: FactorScalar,
 {
     let right_structure = Arc::clone(right_space.structure());
-    let index = SidePlacementIndex::new(matrix, FactorSide::Right);
     for block_index in 0..right_structure.block_count() {
         let block = right_structure
             .block(block_index)
@@ -3157,7 +3163,8 @@ where
         if coupled_of(key.domain_tree()) != matrix.sector {
             continue;
         }
-        let (col_offset, _) = index.placement(key.domain_tree())?;
+        let (col_offset, _) =
+            index.placement(matrix.sector, FactorSide::Right, key.domain_tree())?;
         scatter_matrix_block(
             right_data,
             block.shape(),
@@ -3327,6 +3334,7 @@ where
     let mut vectors_workspace = vec![D::zero(); max_n * max_n];
     let mut sorted_vectors = vec![D::zero(); max_n * max_n];
     let mut eigenvalues = Vec::with_capacity(matricizations.len());
+    let index = PlacementIndex::new(&matricizations, &[FactorSide::Left]);
     for matrix in &matricizations {
         let shape = [matrix.rows, matrix.cols];
         let strides = [1usize, matrix.rows];
@@ -3376,7 +3384,14 @@ where
             sector: matrix.sector,
             values: sorted_values,
         });
-        scatter_left_sector_blocks(v_space.space(), &mut v_data, matrix, &sorted_vectors, n)?;
+        scatter_left_sector_blocks(
+            v_space.space(),
+            &mut v_data,
+            matrix,
+            &index,
+            &sorted_vectors,
+            n,
+        )?;
         #[cfg(test)]
         record_eigh_output_scatter::<D>(n * n);
     }
@@ -6081,7 +6096,10 @@ fn matricization_of<'a, M>(
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct PlacementIndexProbe {
+    /// Index tables allocated (one per owner call).
     pub index_builds: usize,
+    /// `(matricization, side)` pairs inserted into a table.
+    pub indexed_sides: usize,
     pub indexed_trees: usize,
     pub lookups: usize,
 }
@@ -6101,55 +6119,82 @@ pub(crate) fn placement_index_probe() -> PlacementIndexProbe {
     PLACEMENT_INDEX_PROBE.get()
 }
 
-/// Call-local first-match index of one matricization side by full tree key.
+/// Call-local first-match index of source trees by `(sector, side, key)`,
+/// built once per publication call over every matricization.
 ///
 /// Why not scan `tree(side, i)` per output block: the references reach a
 /// block in O(1) (TensorKit's hashed sector dictionary, QSpace's cumulative
-/// offsets), while the scan cost O(T_c·K) per block. For a handful of trees
-/// the scan's early exit can beat SipHash plus one table allocation; that
-/// constant is disclosed, not dispatched on.
-struct SidePlacementIndex<'a> {
-    side: FactorSide,
-    by_tree: HashMap<&'a FusionTreeKey, (usize, &'a [usize])>,
+/// offsets), while the scan cost O(T_c·K) per block. Why one table for the
+/// whole call rather than one per matricization and side: at G=16 with one
+/// or two trees per sector the per-table allocation dominated the lookup
+/// saving (+72 allocation calls per paired publication). For a handful of
+/// trees the scan's early exit can still beat SipHash plus this single
+/// allocation; that constant is disclosed, not dispatched on.
+struct PlacementIndex<'a> {
+    by_tree: HashMap<(SectorId, FactorSide, &'a FusionTreeKey), (usize, &'a [usize])>,
 }
 
-impl<'a> SidePlacementIndex<'a> {
-    fn new<M: SectorGeometry>(matrix: &'a M, side: FactorSide) -> Self {
-        let count = matrix.tree_count(side);
-        let mut by_tree = HashMap::with_capacity(count);
-        for index in 0..count {
-            if let Some(extent) = matrix.tree(side, index) {
-                by_tree
-                    .entry(extent.tree)
-                    .or_insert((extent.offset, extent.shape));
+impl<'a> PlacementIndex<'a> {
+    fn new<M: SectorGeometry>(matricizations: &'a [M], sides: &[FactorSide]) -> Self {
+        let capacity = matricizations
+            .iter()
+            .map(|matrix| {
+                sides
+                    .iter()
+                    .map(|&side| matrix.tree_count(side))
+                    .sum::<usize>()
+            })
+            .sum();
+        let mut by_tree = HashMap::with_capacity(capacity);
+        for matrix in matricizations {
+            let sector = matrix.sector();
+            for &side in sides {
+                let count = matrix.tree_count(side);
+                for index in 0..count {
+                    if let Some(extent) = matrix.tree(side, index) {
+                        by_tree
+                            .entry((sector, side, extent.tree))
+                            .or_insert((extent.offset, extent.shape));
+                    }
+                }
+                #[cfg(test)]
+                PLACEMENT_INDEX_PROBE.with(|probe| {
+                    let mut value = probe.get();
+                    value.indexed_sides += 1;
+                    value.indexed_trees += count;
+                    probe.set(value);
+                });
             }
         }
         #[cfg(test)]
         PLACEMENT_INDEX_PROBE.with(|probe| {
             let mut value = probe.get();
             value.index_builds += 1;
-            value.indexed_trees += count;
             probe.set(value);
         });
-        Self { side, by_tree }
+        Self { by_tree }
     }
 
-    fn placement(&self, tree: &FusionTreeKey) -> Result<(usize, &'a [usize]), OperationError> {
+    fn placement(
+        &self,
+        sector: SectorId,
+        side: FactorSide,
+        tree: &FusionTreeKey,
+    ) -> Result<(usize, &'a [usize]), OperationError> {
         #[cfg(test)]
         PLACEMENT_INDEX_PROBE.with(|probe| {
             let mut value = probe.get();
             value.lookups += 1;
             probe.set(value);
         });
-        self.by_tree
-            .get(tree)
-            .copied()
-            .ok_or(OperationError::UnsupportedTensorContractScope {
-                message: match self.side {
+        self.by_tree.get(&(sector, side, tree)).copied().ok_or(
+            OperationError::UnsupportedTensorContractScope {
+                message: match side {
                     FactorSide::Left => "factor codomain tree absent from the source matricization",
                     FactorSide::Right => "factor domain tree absent from the source matricization",
                 },
-            })
+            },
+        )
     }
 }
 
@@ -8364,7 +8409,7 @@ fn validate_generic_factor_keys<'a, M: SectorGeometry>(
     matrix_by_sector: &mut Option<HashMap<SectorId, &'a M>>,
 ) -> Result<bool, OperationError> {
     let mut ordered = true;
-    let mut indexes = HashMap::<SectorId, SidePlacementIndex<'a>>::new();
+    let mut index: Option<PlacementIndex<'a>> = None;
     for key in keys {
         // Why not build the final layout first: missing source placements must
         // fail before output construction. The cursor only skips the old
@@ -8382,11 +8427,10 @@ fn validate_generic_factor_keys<'a, M: SectorGeometry>(
             let matrix_by_sector =
                 matrix_by_sector.get_or_insert_with(|| matricization_map(matricizations));
             let sector = coupled_of_generic(tree);
-            let matrix = matricization_of(matrix_by_sector, sector)?;
-            indexes
-                .entry(sector)
-                .or_insert_with(|| SidePlacementIndex::new(matrix, side))
-                .placement(tree)?;
+            matricization_of(matrix_by_sector, sector)?;
+            index
+                .get_or_insert_with(|| PlacementIndex::new(matricizations, &[side]))
+                .placement(sector, side, tree)?;
         }
         if let Some(aligned) = aligned {
             ordered &= aligned;
@@ -8925,11 +8969,13 @@ where
         });
         let mut left_data = vec![D::zero(); left_len];
         let mut right_data = vec![D::zero(); right_len];
+        let index = PlacementIndex::new(matricizations, &[FactorSide::Left, FactorSide::Right]);
         for (matrix, pair) in matricizations.iter().zip(&pairs) {
             scatter_left_sector_blocks_generic(
                 spaces.left.space(),
                 &mut left_data,
                 matrix,
+                &index,
                 &pair.left,
                 pair.left_rows,
             )?;
@@ -8937,6 +8983,7 @@ where
                 spaces.right.space(),
                 &mut right_data,
                 matrix,
+                &index,
                 &pair.right,
                 pair.right_leading,
             )?;
@@ -9054,11 +9101,13 @@ where
         });
         let mut left_data = vec![D::zero(); left_len];
         let mut right_data = vec![D::zero(); right_len];
+        let index = PlacementIndex::new(matricizations, &[FactorSide::Left, FactorSide::Right]);
         for (matrix, pair) in matricizations.iter().zip(&pairs) {
             scatter_left_sector_blocks_generic(
                 left.space(),
                 &mut left_data,
                 matrix,
+                &index,
                 &pair.left,
                 pair.left_rows,
             )
@@ -9067,6 +9116,7 @@ where
                 right.space(),
                 &mut right_data,
                 matrix,
+                &index,
                 &pair.right,
                 pair.right_leading,
             )
@@ -9142,7 +9192,7 @@ where
     let prepared = output_hom
         .prepare_coupled_subblock_structure_from_leg_degeneracies_generic_checked(provider.as_ref())
         .map_err(CheckedGenericFactorPlanError::from)?;
-    let mut indexes = HashMap::<SectorId, SidePlacementIndex<'_>>::new();
+    let placements = PlacementIndex::new(matricizations, &[side]);
     for block in prepared.sector_structure().blocks() {
         let BlockKey::FusionTree(key) = block.key() else {
             continue;
@@ -9151,15 +9201,12 @@ where
             FactorSide::Left => coupled_of_generic(key.codomain_tree()),
             FactorSide::Right => coupled_of_generic(key.domain_tree()),
         };
-        if let Some(&matrix) = matrices.get(&sector) {
+        if matrices.contains_key(&sector) {
             let tree = match side {
                 FactorSide::Left => key.codomain_tree(),
                 FactorSide::Right => key.domain_tree(),
             };
-            indexes
-                .entry(sector)
-                .or_insert_with(|| SidePlacementIndex::new(matrix, side))
-                .placement(tree)?;
+            placements.placement(sector, side, tree)?;
         }
     }
     let space = BoundDynamicFusionMapSpace::from_prepared_final_homspace_generic_checked(
@@ -9212,7 +9259,7 @@ where
             ),
             FactorSide::Right => (coupled_of_generic(key.domain_tree()), 0),
         };
-        if let Some(matrix) = matrices.get(&sector) {
+        if matrices.contains_key(&sector) {
             let pair = pairs
                 .get(&sector)
                 .ok_or(CheckedGenericFactorPlanError::Operation(
@@ -9224,11 +9271,7 @@ where
                 FactorSide::Left => key.codomain_tree(),
                 FactorSide::Right => key.domain_tree(),
             };
-            let offset = indexes
-                .entry(sector)
-                .or_insert_with(|| SidePlacementIndex::new(*matrix, side))
-                .placement(tree)?
-                .0;
+            let offset = placements.placement(sector, side, tree)?.0;
             let (factor, factor_rows) = match side {
                 FactorSide::Left => (&pair.left, pair.left_rows),
                 FactorSide::Right => (&pair.right, pair.right_leading),
@@ -9336,6 +9379,7 @@ fn scatter_left_sector_blocks_generic<D, M>(
     left_space: &DynamicFusionMapSpace,
     left_data: &mut [D],
     matrix: &M,
+    index: &PlacementIndex<'_>,
     factor: &[D],
     factor_rows: usize,
 ) -> Result<(), OperationError>
@@ -9344,7 +9388,6 @@ where
     M: SectorGeometry,
 {
     let left_structure = Arc::clone(left_space.structure());
-    let index = SidePlacementIndex::new(matrix, FactorSide::Left);
     for block_index in 0..left_structure.block_count() {
         let block = left_structure
             .block(block_index)
@@ -9355,7 +9398,8 @@ where
         if coupled_of_generic(key.codomain_tree()) != matrix.sector() {
             continue;
         }
-        let (row_offset, _) = index.placement(key.codomain_tree())?;
+        let (row_offset, _) =
+            index.placement(matrix.sector(), FactorSide::Left, key.codomain_tree())?;
         #[cfg(test)]
         GENERIC_PAIR_PUBLICATION_PROBE.with(|probe| {
             let mut value = probe.get();
@@ -9383,6 +9427,7 @@ fn scatter_right_sector_blocks_generic<D, M>(
     right_space: &DynamicFusionMapSpace,
     right_data: &mut [D],
     matrix: &M,
+    index: &PlacementIndex<'_>,
     factor: &[D],
     factor_rows: usize,
 ) -> Result<(), OperationError>
@@ -9391,7 +9436,6 @@ where
     M: SectorGeometry,
 {
     let right_structure = Arc::clone(right_space.structure());
-    let index = SidePlacementIndex::new(matrix, FactorSide::Right);
     for block_index in 0..right_structure.block_count() {
         let block = right_structure
             .block(block_index)
@@ -9402,7 +9446,8 @@ where
         if coupled_of_generic(key.domain_tree()) != matrix.sector() {
             continue;
         }
-        let (col_offset, _) = index.placement(key.domain_tree())?;
+        let (col_offset, _) =
+            index.placement(matrix.sector(), FactorSide::Right, key.domain_tree())?;
         #[cfg(test)]
         GENERIC_PAIR_PUBLICATION_PROBE.with(|probe| {
             let mut value = probe.get();
@@ -9482,6 +9527,7 @@ where
     let mut vt_workspace = vec![D::zero(); max_rank * max_cols];
     let mut singular_values = Vec::with_capacity(matricizations.len());
 
+    let index = PlacementIndex::new(&matricizations, &[FactorSide::Left, FactorSide::Right]);
     for matrix in &matricizations {
         let rank = matrix.rows.min(matrix.cols);
         let input_shape = [matrix.rows, matrix.cols];
@@ -9530,6 +9576,7 @@ where
             u_space.space(),
             &mut u_data,
             matrix,
+            &index,
             &u_workspace,
             max_rows,
         )?;
@@ -9537,6 +9584,7 @@ where
             vt_space.space(),
             &mut vt_data,
             matrix,
+            &index,
             &vt_workspace,
             max_rank,
         )?;
@@ -12305,8 +12353,13 @@ mod sector_matricization_tests {
             col_trees: Vec::new(),
             data: Vec::<f64>::new(),
         };
-        let index = SidePlacementIndex::new(&matrix, FactorSide::Left);
-        let offsets = [&b, &c, &a].map(|tree| index.placement(tree).unwrap().0);
+        let index = PlacementIndex::new(std::slice::from_ref(&matrix), &[FactorSide::Left]);
+        let offsets = [&b, &c, &a].map(|tree| {
+            index
+                .placement(SectorId::new(1), FactorSide::Left, tree)
+                .unwrap()
+                .0
+        });
 
         assert_eq!(offsets, [2, 6, 0]);
     }
@@ -12349,8 +12402,11 @@ mod sector_matricization_tests {
             ],
             data: Vec::<f64>::new(),
         };
-        let rows = SidePlacementIndex::new(&matrix, FactorSide::Left);
-        let cols = SidePlacementIndex::new(&matrix, FactorSide::Right);
+        let index = PlacementIndex::new(
+            std::slice::from_ref(&matrix),
+            &[FactorSide::Left, FactorSide::Right],
+        );
+        let sector = SectorId::new(9);
         assert_eq!(
             [
                 base.codomain_tree(),
@@ -12358,7 +12414,7 @@ mod sector_matricization_tests {
                 inner.codomain_tree(),
                 &row_vertex
             ]
-            .map(|tree| rows.placement(tree).unwrap().0),
+            .map(|tree| index.placement(sector, FactorSide::Left, tree).unwrap().0),
             [0, 1, 2, 3]
         );
         assert_eq!(
@@ -12368,18 +12424,18 @@ mod sector_matricization_tests {
                 inner.domain_tree(),
                 &col_vertex
             ]
-            .map(|tree| cols.placement(tree).unwrap().0),
+            .map(|tree| index.placement(sector, FactorSide::Right, tree).unwrap().0),
             [0, 1, 2, 3]
         );
         // A domain tree is never a codomain tree of this matrix and vice versa.
         assert!(matches!(
-            rows.placement(base.domain_tree()),
+            index.placement(sector, FactorSide::Left, base.domain_tree()),
             Err(OperationError::UnsupportedTensorContractScope {
                 message: "factor codomain tree absent from the source matricization"
             })
         ));
         assert!(matches!(
-            cols.placement(base.codomain_tree()),
+            index.placement(sector, FactorSide::Right, base.codomain_tree()),
             Err(OperationError::UnsupportedTensorContractScope {
                 message: "factor domain tree absent from the source matricization"
             })
@@ -12456,6 +12512,7 @@ mod sector_matricization_tests {
                     placement_index_probe(),
                     PlacementIndexProbe {
                         index_builds: 1,
+                        indexed_sides: 1,
                         indexed_trees: 2,
                         lookups: 1,
                     }
@@ -12530,8 +12587,8 @@ mod sector_matricization_tests {
                 assert_eq!(index, PlacementIndexProbe::default());
 
                 // All eight sectors populated, reversed: F = T = 64 over
-                // G_s = 8, so 128 hashes replace the former 8 * 8 * 8 = 512
-                // key comparisons.
+                // G_s = 8 in one table (formerly one per sector), so 128
+                // hashes replace the former 8 * 8 * 8 = 512 key comparisons.
                 let (_, mut reversed) = fresh();
                 reversed.reverse();
                 let mut pairs = staged(&reversed);
@@ -12541,7 +12598,8 @@ mod sector_matricization_tests {
                 assert_eq!(
                     index,
                     PlacementIndexProbe {
-                        index_builds: 8,
+                        index_builds: 1,
+                        indexed_sides: 8,
                         indexed_trees: 64,
                         lookups: 64,
                     }
@@ -12549,7 +12607,7 @@ mod sector_matricization_tests {
                 assert!(index.indexed_trees + index.lookups < 8 * 8 * 8);
 
                 // Identity-only sectors 0 (before), 3 (between) and 7 (after)
-                // build no index.
+                // have no matricization and index nothing.
                 let (_, kept) = fresh();
                 let kept = kept
                     .into_iter()
@@ -12561,7 +12619,8 @@ mod sector_matricization_tests {
                 assert_eq!(
                     index,
                     PlacementIndexProbe {
-                        index_builds: 5,
+                        index_builds: 1,
+                        indexed_sides: 5,
                         indexed_trees: 40,
                         lookups: 40,
                     }
@@ -12646,14 +12705,16 @@ mod sector_matricization_tests {
                 assert_eq!(
                     index,
                     PlacementIndexProbe {
-                        index_builds: 2,
+                        index_builds: 1,
+                        indexed_sides: 2,
                         indexed_trees: 20,
                         lookups: 20,
                     }
                 );
 
-                // Fallback: the prevalidation index is reused, so builds stay
-                // at G_s while lookups double; 60 hashes replace the former
+                // Fallback: the single prevalidation table is reused (formerly
+                // one table per sector, G_s = 2), so lookups double without a
+                // rebuild; 60 hashes replace the former
                 // 2 * (6 * 6 + 14 * 14) = 464 key comparisons.
                 let mut reversed = fresh();
                 reversed.reverse();
@@ -12664,7 +12725,8 @@ mod sector_matricization_tests {
                 assert_eq!(
                     index,
                     PlacementIndexProbe {
-                        index_builds: 2,
+                        index_builds: 1,
+                        indexed_sides: 2,
                         indexed_trees: 20,
                         lookups: 40,
                     }
@@ -12689,6 +12751,7 @@ mod sector_matricization_tests {
                         index,
                         PlacementIndexProbe {
                             index_builds: 1,
+                            indexed_sides: 1,
                             indexed_trees: kept[0].row_trees.len(),
                             lookups: 2 * kept[0].row_trees.len(),
                         }
@@ -12772,7 +12835,8 @@ mod sector_matricization_tests {
             assert_eq!(
                 index,
                 PlacementIndexProbe {
-                    index_builds: sector_count,
+                    index_builds: 1,
+                    indexed_sides: sector_count,
                     indexed_trees: total,
                     lookups: total,
                 }
@@ -12878,6 +12942,7 @@ mod sector_matricization_tests {
                 placement_index_probe(),
                 PlacementIndexProbe {
                     index_builds: 1,
+                    indexed_sides: 1,
                     indexed_trees: 2,
                     lookups: 2,
                 }
@@ -12994,12 +13059,13 @@ mod sector_matricization_tests {
             (probe.left_scatter_calls, probe.right_scatter_calls),
             (2, 2)
         );
-        // Key validation (row + col) and the two scatter helpers each index
-        // the single matricization once.
+        // Row and column key validation each build a one-sided table; the
+        // scatter loop shares one two-sided table (formerly four tables).
         assert_eq!(
             placement_index_probe(),
             PlacementIndexProbe {
-                index_builds: 4,
+                index_builds: 3,
+                indexed_sides: 4,
                 indexed_trees: 8,
                 lookups: 8,
             }
@@ -14311,7 +14377,10 @@ mod sector_matricization_tests {
                 (0, 0)
             );
             let index = placement_index_probe();
-            assert_eq!((index.index_builds, index.indexed_trees), (1, 1));
+            assert_eq!(
+                (index.index_builds, index.indexed_sides, index.indexed_trees),
+                (1, 1, 1)
+            );
             assert_eq!(index.lookups, 2);
             assert_eq!(pair.left, reference.left);
             assert_eq!(pair.right, reference.right);
