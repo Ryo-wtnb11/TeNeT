@@ -14312,7 +14312,7 @@ mod sector_matricization_tests {
             );
             let index = placement_index_probe();
             assert_eq!((index.index_builds, index.indexed_trees), (1, 1));
-            assert!(index.lookups <= 2);
+            assert_eq!(index.lookups, 2);
             assert_eq!(pair.left, reference.left);
             assert_eq!(pair.right, reference.right);
         }
