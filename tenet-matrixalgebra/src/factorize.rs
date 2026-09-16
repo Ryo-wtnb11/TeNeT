@@ -6129,13 +6129,25 @@ pub(crate) fn placement_index_probe() -> PlacementIndexProbe {
 /// or two trees per sector the per-table allocation dominated the lookup
 /// saving (+72 allocation calls per paired publication). For a handful of
 /// trees the scan's early exit can still beat SipHash plus this single
-/// allocation; that constant is disclosed, not dispatched on.
+/// allocation; that constant is disclosed, not dispatched on. Why not key
+/// by matricization instead of sector: `sector_matricizations*` produce one
+/// matricization per coupled sector and region admission rejects duplicate
+/// sectors, so the sector already identifies the matricization.
 struct PlacementIndex<'a> {
     by_tree: HashMap<(SectorId, FactorSide, &'a FusionTreeKey), (usize, &'a [usize])>,
 }
 
 impl<'a> PlacementIndex<'a> {
     fn new<M: SectorGeometry>(matricizations: &'a [M], sides: &[FactorSide]) -> Self {
+        debug_assert_eq!(
+            matricizations
+                .iter()
+                .map(SectorGeometry::sector)
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            matricizations.len(),
+            "placement index requires one matricization per coupled sector"
+        );
         let capacity = matricizations
             .iter()
             .map(|matrix| {
