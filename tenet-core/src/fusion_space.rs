@@ -828,29 +828,16 @@ impl PreparedFusionTreeLayout {
     ) -> Result<Arc<BlockStructure>, CoreError> {
         self.validate_homspace_signature(homspace)?;
         visit_coupled_leg_blocks(homspace, self.layout_data(), |_| Ok(()))?;
-        let key = Arc::new(CompleteHomSpaceStructureCacheKey {
+        let key = CompleteHomSpaceStructureCacheKey {
             rule: self.cache_key().rule.clone(),
             homspace: Arc::clone(&homspace.content),
-        });
-        let cache = complete_hom_space_structure_cache();
-        let read = cache
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(content) = read.lookup(&key) {
-            return Ok(BlockStructure::from_content(content).into_shared());
+        };
+        if let Some(structure) = complete_hom_space_structure_cached(&key) {
+            return Ok(structure);
         }
-        drop(read);
 
         let built = self.build_from_leg_degeneracies(homspace)?;
-        let content = built.content_key();
-        let charged_bytes = charged_complete_hom_space_structure_bytes(&key, &content);
-        drop(built);
-
-        let mut write = cache
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let content = write.admit(key, content, charged_bytes);
-        Ok(BlockStructure::from_content(content).into_shared())
+        Ok(admit_complete_hom_space_structure(key, built))
     }
 
     /// Publishes the prepared layout and returns its shared key storage.
@@ -1240,7 +1227,15 @@ fn charged_fusion_tree_layout_bytes(
 
 struct CompleteHomSpaceStructureCacheEntry {
     content: Arc<BlockStructureContent>,
+    /// Canonical wrapper accelerator. Weak, not strong: the strong owner
+    /// retains frozen content only, never wrapper-local region state.
+    wrapper: Weak<BlockStructure>,
     charged_bytes: usize,
+}
+
+enum CompleteHomSpaceStructureLookup {
+    Wrapper(Arc<BlockStructure>),
+    Content(Arc<BlockStructureContent>),
 }
 
 /// Bounded FIFO owner for complete immutable multiplicity-free layouts.
@@ -1292,32 +1287,51 @@ impl CompleteHomSpaceStructureCache {
     fn lookup(
         &self,
         key: &CompleteHomSpaceStructureCacheKey,
-    ) -> Option<Arc<BlockStructureContent>> {
-        let content = self.peek(key);
-        let counter = if content.is_some() { &self.hits } else { &self.misses };
+    ) -> Option<CompleteHomSpaceStructureLookup> {
+        let found = self.peek(key);
+        let counter = if found.is_some() { &self.hits } else { &self.misses };
         counter.fetch_add(1, Ordering::Relaxed);
-        content
+        found
     }
 
-    fn peek(&self, key: &CompleteHomSpaceStructureCacheKey) -> Option<Arc<BlockStructureContent>> {
-        self.entries.peek(key).map(|entry| Arc::clone(&entry.content))
+    fn peek(
+        &self,
+        key: &CompleteHomSpaceStructureCacheKey,
+    ) -> Option<CompleteHomSpaceStructureLookup> {
+        self.entries.peek(key).map(|entry| match entry.wrapper.upgrade() {
+            Some(wrapper) => CompleteHomSpaceStructureLookup::Wrapper(wrapper),
+            None => CompleteHomSpaceStructureLookup::Content(Arc::clone(&entry.content)),
+        })
+    }
+
+    /// Repoints a retained entry at the canonical wrapper after its previous
+    /// wrapper died; a no-op when the key was evicted meanwhile.
+    fn refresh(&mut self, key: &CompleteHomSpaceStructureCacheKey, structure: &Arc<BlockStructure>) {
+        if let Some(entry) = self.entries.peek_mut(key) {
+            entry.wrapper = Arc::downgrade(structure);
+        }
     }
 
     fn admit(
         &mut self,
         key: Arc<CompleteHomSpaceStructureCacheKey>,
-        content: Arc<BlockStructureContent>,
+        structure: Arc<BlockStructure>,
         charged_bytes: usize,
-    ) -> Arc<BlockStructureContent> {
-        if let Some(existing) = self.peek(&key) {
-            return existing;
+    ) -> Arc<BlockStructure> {
+        match self.peek(&key) {
+            Some(CompleteHomSpaceStructureLookup::Wrapper(existing)) => return existing,
+            Some(CompleteHomSpaceStructureLookup::Content(_)) => {
+                self.refresh(&key, &structure);
+                return structure;
+            }
+            None => {}
         }
         if charged_bytes == usize::MAX
             || charged_bytes > self.max_entry_bytes
             || charged_bytes > self.byte_budget
         {
             self.bypasses.fetch_add(1, Ordering::Relaxed);
-            return content;
+            return structure;
         }
 
         while self.entries.len() >= self.entry_capacity
@@ -1334,12 +1348,13 @@ impl CompleteHomSpaceStructureCache {
         self.entries.put(
             key,
             CompleteHomSpaceStructureCacheEntry {
-                content: Arc::clone(&content),
+                content: structure.content_key(),
+                wrapper: Arc::downgrade(&structure),
                 charged_bytes,
             },
         );
         self.admissions.fetch_add(1, Ordering::Relaxed);
-        content
+        structure
     }
 
     fn clear(&mut self) {
@@ -1422,6 +1437,41 @@ fn reset_complete_hom_space_structure_cache() {
         .clear();
 }
 
+/// Hit path: one cache read, a stack key (`Arc<K>: Borrow<K>`), and the
+/// canonical wrapper returned as-is. A dead wrapper keeps the content hit and
+/// rebuilds only the wrapper, repointing the entry under the write lock.
+fn complete_hom_space_structure_cached(
+    key: &CompleteHomSpaceStructureCacheKey,
+) -> Option<Arc<BlockStructure>> {
+    let cache = complete_hom_space_structure_cache();
+    let found = cache
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .lookup(key);
+    match found? {
+        CompleteHomSpaceStructureLookup::Wrapper(structure) => Some(structure),
+        CompleteHomSpaceStructureLookup::Content(content) => {
+            let structure = BlockStructure::from_content(content).into_shared();
+            cache
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .refresh(key, &structure);
+            Some(structure)
+        }
+    }
+}
+
+fn admit_complete_hom_space_structure(
+    key: CompleteHomSpaceStructureCacheKey,
+    structure: Arc<BlockStructure>,
+) -> Arc<BlockStructure> {
+    let charged_bytes = charged_complete_hom_space_structure_bytes(&key, &structure.content_key());
+    complete_hom_space_structure_cache()
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .admit(Arc::new(key), structure, charged_bytes)
+}
+
 fn charged_complete_hom_space_structure_bytes(
     key: &CompleteHomSpaceStructureCacheKey,
     content: &BlockStructureContent,
@@ -1431,7 +1481,9 @@ fn charged_complete_hom_space_structure_bytes(
         .saturating_add(key.rule.charged_retained_bytes())
         .saturating_add(key.homspace.charged_retained_bytes())
         .saturating_add(content.charged_retained_bytes())
-        // Hash/FIFO nodes and both retained Arc control allocations.
+        // Hash/FIFO nodes and both retained Arc control allocations; the
+        // entry's Weak shares the wrapper's control block, so its one word
+        // is already counted in `size_of::<CompleteHomSpaceStructureCacheEntry>`.
         .saturating_add(10 * std::mem::size_of::<usize>())
 }
 
@@ -2941,29 +2993,16 @@ impl FusionTreeHomSpace {
     where
         R: MultiplicityFreeFusionRule,
     {
-        let key = Arc::new(CompleteHomSpaceStructureCacheKey::new(rule, self));
-        let cache = complete_hom_space_structure_cache();
-        let read = cache
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(content) = read.lookup(&key) {
-            return Ok(BlockStructure::from_content(content).into_shared());
+        let key = CompleteHomSpaceStructureCacheKey::new(rule, self);
+        if let Some(structure) = complete_hom_space_structure_cached(&key) {
+            return Ok(structure);
         }
-        drop(read);
 
         let layout = self.cached_fusion_tree_layout(rule);
         let (sector, degeneracy) =
             coupled_subblock_parts_from_leg_degeneracies(self, &layout)?;
-        let built = BlockStructure::from_parts(sector, degeneracy)?;
-        let content = built.content_key();
-        let charged_bytes = charged_complete_hom_space_structure_bytes(&key, &content);
-        drop(built);
-
-        let mut write = cache
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let content = write.admit(key, content, charged_bytes);
-        Ok(BlockStructure::from_content(content).into_shared())
+        let built = BlockStructure::from_parts(sector, degeneracy)?.into_shared();
+        Ok(admit_complete_hom_space_structure(key, built))
     }
 
     #[doc(hidden)]
