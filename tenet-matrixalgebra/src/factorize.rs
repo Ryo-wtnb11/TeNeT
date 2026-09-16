@@ -14,7 +14,7 @@ use tenet_core::{
     CheckedGenericStructureError, CoreError, CoupledSectorRegion, CoupledTreeExtent,
     FusionProductSpace, FusionRule, FusionTensorMapSpace, FusionTreeHomSpace, FusionTreeKey,
     FusionTreePairKey, GenericRigidSymbols, InfallibleGeneric, MultiplicityFreeRigidSymbols,
-    SectorId, SectorLeg, TensorMap, TensorMapSpace,
+    SectorId, SectorLeg, SectorStructure, TensorMap, TensorMapSpace,
 };
 use tenet_dense::{
     DenseDotConfig, DenseError, DenseExecutor, DenseTensor, DenseView, DenseViewMut,
@@ -8539,8 +8539,23 @@ fn record_generic_pair_fallback_lookup(side: FactorSide) {
 #[cfg(not(test))]
 fn record_generic_pair_fallback_lookup(_side: FactorSide) {}
 
-fn validate_generic_factor_keys<'a, M: SectorGeometry>(
-    keys: &[FusionTreePairKey],
+/// Staged keys of a prepared checked layout in enumeration order. The
+/// prepared structure lists its blocks exactly as the enumeration produced
+/// its keys and `commit` interns them without reordering, so this sequence
+/// is the key order of the committed space; the checked builders validate
+/// and commit from one enumeration instead of enumerating keys separately.
+fn staged_fusion_tree_keys(sector: &SectorStructure) -> impl Iterator<Item = &FusionTreePairKey> {
+    sector
+        .blocks()
+        .iter()
+        .filter_map(|block| match block.key() {
+            BlockKey::FusionTree(key) => Some(key),
+            _ => None,
+        })
+}
+
+fn validate_generic_factor_keys<'a, 'k, M: SectorGeometry>(
+    keys: impl IntoIterator<Item = &'k FusionTreePairKey>,
     side: FactorSide,
     mut cursor: Option<&mut FactorTreeCursor<'_, M>>,
     matricizations: &'a [M],
@@ -8586,15 +8601,20 @@ fn checked_extent(shape: &[usize]) -> Option<usize> {
         .try_fold(1usize, |extent, &dim| extent.checked_mul(dim))
 }
 
+/// `keys` carries the separately enumerated key list of the unchecked paired
+/// route for the admitted-key equality against `structure`; the checked route
+/// commits the very structure it validated and passes `None`.
 fn factor_output_is_canonical<D, M: SectorGeometry>(
     structure: &BlockStructure,
-    keys: &[FusionTreePairKey],
+    keys: Option<&[FusionTreePairKey]>,
     matricizations: &[M],
     pairs: &[FactorPair<D>],
     required_len: usize,
     side: FactorSide,
 ) -> bool {
-    if matricizations.len() != pairs.len() || keys.len() != structure.block_count() {
+    if matricizations.len() != pairs.len()
+        || keys.is_some_and(|keys| keys.len() != structure.block_count())
+    {
         return false;
     }
     let mut block_index = 0usize;
@@ -8617,7 +8637,7 @@ fn factor_output_is_canonical<D, M: SectorGeometry>(
             factor_leading,
             pair.kept,
             side,
-            Some(keys),
+            keys,
         ) else {
             return false;
         };
@@ -9076,7 +9096,7 @@ where
     let canonical = spaces.ordered
         && factor_output_is_canonical(
             spaces.left.space().structure(),
-            &spaces.left_keys,
+            Some(&spaces.left_keys),
             matricizations,
             &pairs,
             left_len,
@@ -9084,7 +9104,7 @@ where
         )
         && factor_output_is_canonical(
             spaces.right.space().structure(),
-            &spaces.right_keys,
+            Some(&spaces.right_keys),
             matricizations,
             &pairs,
             right_len,
@@ -9162,46 +9182,51 @@ where
         .collect::<Vec<_>>();
     let mut matrix_by_sector = None;
     let new_leg = SectorLeg::new(ranks.iter().map(|rank| (rank.sector, rank.kept)), false);
+    // One provider-backed enumeration per side serves both the ordered key
+    // validation and the committed space; the left side completes before the
+    // right side starts so validation precedence is unchanged.
     let left_hom = FusionTreeHomSpace::new(
         homspace.codomain().clone(),
         FusionProductSpace::new([new_leg.clone()]),
     );
-    let left_keys = left_hom
-        .fusion_tree_keys_generic_checked(provider.as_ref())
+    let left_prepared = left_hom
+        .prepare_coupled_subblock_structure_from_leg_degeneracies_generic_checked(provider.as_ref())
         .map_err(CheckedGenericFactorPlanError::from)?;
     let mut left_cursor = FactorTreeCursor::new(matricizations, &ranks);
     let left_ordered = validate_generic_factor_keys(
-        &left_keys,
+        staged_fusion_tree_keys(left_prepared.sector_structure()),
         FactorSide::Left,
         Some(&mut left_cursor),
         matricizations,
         &mut matrix_by_sector,
     )
     .map_err(CheckedGenericFactorPlanError::from)?;
-    let left = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+    let left = BoundDynamicFusionMapSpace::from_prepared_final_homspace_generic_checked(
         Arc::clone(provider),
         left_hom,
+        left_prepared,
     )
     .map_err(CheckedGenericFactorPlanError::from)?;
     let right_hom = FusionTreeHomSpace::new(
         FusionProductSpace::new([new_leg]),
         homspace.domain().clone(),
     );
-    let right_keys = right_hom
-        .fusion_tree_keys_generic_checked(provider.as_ref())
+    let right_prepared = right_hom
+        .prepare_coupled_subblock_structure_from_leg_degeneracies_generic_checked(provider.as_ref())
         .map_err(CheckedGenericFactorPlanError::from)?;
     let mut right_cursor = FactorTreeCursor::new(matricizations, &ranks);
     let right_ordered = validate_generic_factor_keys(
-        &right_keys,
+        staged_fusion_tree_keys(right_prepared.sector_structure()),
         FactorSide::Right,
         Some(&mut right_cursor),
         matricizations,
         &mut matrix_by_sector,
     )
     .map_err(CheckedGenericFactorPlanError::from)?;
-    let right = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+    let right = BoundDynamicFusionMapSpace::from_prepared_final_homspace_generic_checked(
         Arc::clone(provider),
         right_hom,
+        right_prepared,
     )
     .map_err(CheckedGenericFactorPlanError::from)?;
     let left_len = left.space().required_len().map_err(|e| {
@@ -9214,7 +9239,7 @@ where
         && right_ordered
         && factor_output_is_canonical(
             left.space().structure(),
-            &left_keys,
+            None,
             matricizations,
             &pairs,
             left_len,
@@ -9222,7 +9247,7 @@ where
         )
         && factor_output_is_canonical(
             right.space().structure(),
-            &right_keys,
+            None,
             matricizations,
             &pairs,
             right_len,
@@ -10099,10 +10124,10 @@ where
         legs[axis - nout] = bond_leg;
         FusionTreeHomSpace::new(homspace.codomain().clone(), FusionProductSpace::new(legs))
     };
-    let keys = new_hom
-        .fusion_tree_keys_generic_checked(provider.as_ref())
+    let prepared = new_hom
+        .prepare_coupled_subblock_structure_from_leg_degeneracies_generic_checked(provider.as_ref())
         .map_err(CheckedGenericFactorPlanError::from)?;
-    for key in &keys {
+    for key in staged_fusion_tree_keys(prepared.sector_structure()) {
         let old = source_structure
             .find_block_index_by_key(&BlockKey::FusionTree(key.clone()))
             .ok_or(CheckedGenericFactorPlanError::Operation(
@@ -10116,8 +10141,10 @@ where
             ))
         })?;
     }
-    let space = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(provider, new_hom)
-        .map_err(CheckedGenericFactorPlanError::from)?;
+    let space = BoundDynamicFusionMapSpace::from_prepared_final_homspace_generic_checked(
+        provider, new_hom, prepared,
+    )
+    .map_err(CheckedGenericFactorPlanError::from)?;
     let len = space.space().required_len().map_err(|error| {
         CheckedGenericFactorPlanError::Operation(OperationError::from_core_preserving_context(
             error,
@@ -13364,7 +13391,7 @@ mod sector_matricization_tests {
             .unwrap());
             assert!(factor_output_is_canonical(
                 &left_structure,
-                &left_keys,
+                Some(&left_keys),
                 &matrices,
                 &pairs,
                 expected_left.len(),
@@ -13372,7 +13399,7 @@ mod sector_matricization_tests {
             ));
             assert!(factor_output_is_canonical(
                 &right_structure,
-                &right_keys,
+                Some(&right_keys),
                 &matrices,
                 &pairs,
                 expected_right.len(),
@@ -15083,6 +15110,302 @@ mod sector_matricization_tests {
                     OperationError::UnsupportedTensorContractScope { message }
                 ) if message == expected
             ));
+        }
+    }
+
+    /// The paired output HomSpaces exactly as
+    /// `build_left_right_bound_pair_generic_checked` derives them, built
+    /// independently of the returned factors.
+    fn paired_output_homs<D>(
+        homspace: &FusionTreeHomSpace,
+        pairs: &[FactorPair<D>],
+    ) -> (FusionTreeHomSpace, FusionTreeHomSpace) {
+        let bond = SectorLeg::new(pairs.iter().map(|pair| (pair.sector, pair.kept)), false);
+        (
+            FusionTreeHomSpace::new(
+                homspace.codomain().clone(),
+                FusionProductSpace::new([bond.clone()]),
+            ),
+            FusionTreeHomSpace::new(FusionProductSpace::new([bond]), homspace.domain().clone()),
+        )
+    }
+
+    /// One checked factor space built the former way: keys enumerated, then
+    /// the bound space enumerated again.
+    fn two_enumeration_space<R: CheckedGenericFusion>(
+        provider: &Arc<R>,
+        hom: FusionTreeHomSpace,
+    ) -> (Vec<FusionTreePairKey>, BoundDynamicFusionMapSpace<R>) {
+        let keys = hom
+            .fusion_tree_keys_generic_checked(provider.as_ref())
+            .unwrap();
+        let space = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+            Arc::clone(provider),
+            hom,
+        )
+        .unwrap();
+        (keys, space)
+    }
+
+    fn assert_factor_matches_space<R: CheckedGenericFusion, D: FactorScalar + fmt::Debug>(
+        factor: &BoundDynFactor<R, D>,
+        keys: &[FusionTreePairKey],
+        expected: &BoundDynamicFusionMapSpace<R>,
+        provider: &Arc<R>,
+    ) {
+        let rows = block_rows(factor.space().space().structure());
+        assert_eq!(rows, block_rows(expected.space().structure()));
+        assert_eq!(
+            rows.into_iter().map(|(key, ..)| key).collect::<Vec<_>>(),
+            keys.iter().cloned().map(BlockKey::from).collect::<Vec<_>>()
+        );
+        let expected_len = expected.space().required_len().unwrap();
+        assert_eq!(factor.space().space().required_len().unwrap(), expected_len);
+        assert_eq!(factor.data().len(), expected_len);
+        assert_eq!(
+            factor.space().space().homspace(),
+            expected.space().homspace()
+        );
+        assert!(Arc::ptr_eq(factor.space().provider_arc(), provider));
+    }
+
+    /// Checked paired publication equals the two-enumeration construction in
+    /// structure, key order, length, homspace and provider binding, and the
+    /// unchecked paired builder in data.
+    fn assert_checked_pair_matches_two_enumeration_construction<
+        P: FusionRule,
+        R: CheckedGenericFusion,
+        D: FactorScalar + fmt::Debug,
+        M: SectorGeometry,
+    >(
+        plain: &Arc<P>,
+        checked: &Arc<R>,
+        homspace: &FusionTreeHomSpace,
+        matrices: &[M],
+        pairs: &dyn Fn() -> Vec<FactorPair<D>>,
+        expected_publications: (usize, usize),
+    ) {
+        let (left_hom, right_hom) = paired_output_homs(homspace, &pairs());
+        let (left_keys, left_expected) = two_enumeration_space(checked, left_hom);
+        let (right_keys, right_expected) = two_enumeration_space(checked, right_hom);
+        let (plain_left, plain_right) =
+            build_left_right_bound_pair_generic(plain, homspace, matrices, pairs()).unwrap();
+        reset_generic_pair_publication_probe();
+        let (left, right) =
+            build_left_right_bound_pair_generic_checked(checked, homspace, matrices, pairs())
+                .unwrap();
+        let probe = generic_pair_publication_probe();
+        assert_eq!(
+            (probe.canonical_publications, probe.fallback_publications),
+            expected_publications
+        );
+        assert_eq!(probe.output_blocks_visited, 0);
+        assert_eq!(
+            probe.ordered_key_validation_events,
+            left_keys.len() + right_keys.len()
+        );
+        assert_factor_matches_space(&left, &left_keys, &left_expected, checked);
+        assert_factor_matches_space(&right, &right_keys, &right_expected, checked);
+        assert_eq!(left.data(), plain_left.data());
+        assert_eq!(right.data(), plain_right.data());
+    }
+
+    #[test]
+    #[allow(clippy::arc_with_non_send_sync)] // The checked API needs Arc identity; the recorder is a single-threaded RefCell log.
+    fn checked_paired_enumerates_each_factor_layout_once() {
+        // What: one paired publication issues exactly the provider queries of
+        // one left enumeration followed by one right enumeration; the former
+        // route (keys, then a bound space, per side) issued each of those
+        // sequences twice. Canonical (`reverse = false`) and fallback
+        // (`reverse = true`) geometries publish the same structure and data
+        // as the two-enumeration construction.
+        for reverse in [false, true] {
+            let (homspace, matrix, pair) = vertex_tree_factor_fixture(reverse);
+            let pairs = || vec![vertex_tree_factor_fixture(reverse).2];
+            let recorder = Arc::new(RecordingGeneric::new());
+            build_left_right_bound_pair_generic_checked(
+                &recorder,
+                &homspace,
+                std::slice::from_ref(&matrix),
+                vec![pair],
+            )
+            .unwrap();
+            let once = recorder.log();
+
+            let (left_hom, right_hom) = paired_output_homs(&homspace, &pairs());
+            let side_log = |hom: &FusionTreeHomSpace| {
+                let probe = RecordingGeneric::new();
+                hom.prepare_coupled_subblock_structure_from_leg_degeneracies_generic_checked(
+                    &probe,
+                )
+                .unwrap();
+                probe.log()
+            };
+            let (once_left, once_right) = (side_log(&left_hom), side_log(&right_hom));
+            // Vertex fixture: each side folds its one-leg bond once and
+            // queries channels plus the multiplicity of its single vertex.
+            assert_eq!((once_left.len(), once_right.len()), (3, 3));
+            assert_eq!(once, [once_left.clone(), once_right.clone()].concat());
+
+            let former = Arc::new(RecordingGeneric::new());
+            two_enumeration_space(&former, left_hom);
+            two_enumeration_space(&former, right_hom);
+            assert_eq!(
+                former.log(),
+                [once_left.clone(), once_left, once_right.clone(), once_right].concat()
+            );
+
+            assert_checked_pair_matches_two_enumeration_construction(
+                &Arc::new(TestGenericRule),
+                &recorder,
+                &homspace,
+                std::slice::from_ref(&matrix),
+                &pairs,
+                if reverse { (0, 1) } else { (1, 0) },
+            );
+        }
+    }
+
+    #[test]
+    fn checked_paired_structure_matches_two_enumeration_construction() {
+        // What: over G_s = 4 Z_4 matricizations with F = 16 blocks per side,
+        // canonical and reversed (fallback) geometries, `f64` and
+        // `Complex64`, the checked pair equals the two-enumeration
+        // construction and the unchecked builder's data.
+        fn run<D: FactorScalar + fmt::Debug>(values: impl Fn(usize) -> D) {
+            let fresh = || z4_generic_geometry::<D>(z4_all_charge_legs());
+            let (homspace, matrices) = fresh();
+            let (_, mut reversed) = fresh();
+            reversed.reverse();
+            let plain = Arc::new(Z4GenericRule);
+            let checked = Arc::new(InfallibleGeneric::new(&Z4_GENERIC));
+            for (matrices, publications) in [(&matrices, (1, 0)), (&reversed, (0, 1))] {
+                assert_checked_pair_matches_two_enumeration_construction(
+                    &plain,
+                    &checked,
+                    &homspace,
+                    matrices,
+                    &|| staged_pairs(matrices, &values),
+                    publications,
+                );
+            }
+        }
+        run(|k| k as f64 + 0.125);
+        run(|k| Complex64::new(k as f64 + 0.125, 0.75 - k as f64));
+    }
+
+    #[test]
+    #[allow(clippy::arc_with_non_send_sync)] // The checked API needs Arc identity; the recorder is a single-threaded RefCell log.
+    fn checked_paired_placement_error_precedes_bound_space() {
+        // What: a factor key whose tree the matricization lacks fails after
+        // that side's single enumeration and before any publication; the
+        // left side is validated completely before the right side is
+        // enumerated. Formerly the left error surfaced after 3 queries and
+        // the right error after 9 (left keys, left space, right keys); now
+        // after 3 and 6.
+        for side in [FactorSide::Left, FactorSide::Right] {
+            let (homspace, mut matrix, pair) = vertex_tree_factor_fixture(false);
+            match side {
+                FactorSide::Left => matrix.row_trees.truncate(1),
+                FactorSide::Right => matrix.col_trees.truncate(1),
+            }
+            let recorder = Arc::new(RecordingGeneric::new());
+            reset_generic_pair_publication_probe();
+            let error = build_left_right_bound_pair_generic_checked(
+                &recorder,
+                &homspace,
+                std::slice::from_ref(&matrix),
+                vec![pair],
+            )
+            .unwrap_err();
+            let (expected_message, expected_calls) = match side {
+                FactorSide::Left => (
+                    "factor codomain tree absent from the source matricization",
+                    3,
+                ),
+                FactorSide::Right => ("factor domain tree absent from the source matricization", 6),
+            };
+            assert!(matches!(
+                error,
+                CheckedGenericFactorPlanError::Operation(
+                    OperationError::UnsupportedTensorContractScope { message }
+                ) if message == expected_message
+            ));
+            assert_eq!(recorder.log().len(), expected_calls);
+            let probe = generic_pair_publication_probe();
+            assert_eq!(
+                (probe.canonical_publications, probe.fallback_publications),
+                (0, 0)
+            );
+        }
+    }
+
+    #[test]
+    #[allow(clippy::arc_with_non_send_sync)] // The checked API needs Arc identity; the recorder is a single-threaded RefCell log.
+    fn checked_sliced_enumerates_the_bond_layout_once() {
+        // What: one sliced-bond build issues exactly the provider queries of
+        // one enumeration of the sliced HomSpace (formerly twice: keys, then
+        // the bound space), on a codomain and a domain axis, and equals the
+        // two-enumeration construction in structure and the unchecked sliced
+        // builder in data.
+        let x = SectorId::new(1);
+        let (homspace, ..) = vertex_tree_factor_fixture(false);
+        let source = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+            Arc::new(InfallibleGeneric::new(&TestGenericRule)),
+            homspace.clone(),
+        )
+        .unwrap();
+        let data = (0..source.space().required_len().unwrap())
+            .map(|k| Complex64::new(k as f64, -0.5 * k as f64))
+            .collect::<Vec<_>>();
+        let nout = source.space().nout();
+        for (axis, kept) in [(0usize, 1usize), (3, 2)] {
+            let kept_of = move |sector: SectorId| usize::from(sector == x) * kept;
+            let recorder = Arc::new(RecordingGeneric::new());
+            let factor = sliced_bond_tensor_generic_checked(
+                Arc::clone(&recorder),
+                source.space(),
+                &data,
+                axis,
+                &kept_of,
+                nout,
+                2,
+            )
+            .unwrap();
+            let once = recorder.log();
+
+            let mut legs = if axis < nout {
+                homspace.codomain().legs().to_vec()
+            } else {
+                homspace.domain().legs().to_vec()
+            };
+            legs[axis % nout] = SectorLeg::new([(x, kept)], false);
+            let sliced_hom = if axis < nout {
+                FusionTreeHomSpace::new(FusionProductSpace::new(legs), homspace.domain().clone())
+            } else {
+                FusionTreeHomSpace::new(homspace.codomain().clone(), FusionProductSpace::new(legs))
+            };
+            let former = Arc::new(RecordingGeneric::new());
+            let (keys, expected) = two_enumeration_space(&former, sliced_hom);
+            let twice = former.log();
+            // Both sides of the sliced HomSpace keep two legs: channels plus
+            // the vertex multiplicity per side, and one fold per side.
+            assert_eq!(once.len(), 6, "{once:?}");
+            assert_eq!(twice, [once.clone(), once].concat());
+            assert_factor_matches_space(&factor, &keys, &expected, &recorder);
+
+            let plain = sliced_bond_tensor_generic(
+                Arc::new(TestGenericRule),
+                source.space(),
+                &data,
+                axis,
+                &kept_of,
+                nout,
+                2,
+            )
+            .unwrap();
+            assert_eq!(factor.data(), plain.data());
+            assert!(factor.data().len() < data.len());
         }
     }
 }
