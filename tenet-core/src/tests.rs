@@ -17143,14 +17143,25 @@ mod tests {
             hasher.write_u64(key.cached_hash_for_test());
             assert_eq!(fx_hash_of(key), hasher.finish());
         }
-        for a in &distinct {
-            for b in &distinct {
+        // Pairwise set includes the shared-backing and fresh-backing
+        // duplicates of the base key so the equal-key branch covers real
+        // distinct objects, not only a key against itself.
+        let mut pairwise = distinct.clone();
+        pairwise.push(shared);
+        pairwise.push(fresh);
+        let mut equal_pairs_between_distinct_objects = 0;
+        for (i, a) in pairwise.iter().enumerate() {
+            for (j, b) in pairwise.iter().enumerate() {
                 if a == b {
                     assert_eq!(a.cached_hash_for_test(), b.cached_hash_for_test());
+                    if i != j {
+                        equal_pairs_between_distinct_objects += 1;
+                    }
                 }
             }
         }
-        assert_eq!(distinct.iter().collect::<std::collections::HashSet<_>>().len(), distinct.len());
+        assert_eq!(equal_pairs_between_distinct_objects, 6);
+        assert_eq!(pairwise.iter().collect::<rustc_hash::FxHashSet<_>>().len(), distinct.len());
     }
 
     #[test]
@@ -17165,7 +17176,7 @@ mod tests {
             let right = other.clone().with_cached_hash_for_test(forced);
             assert_eq!(fx_hash_of(&left), fx_hash_of(&right));
             assert_ne!(left, right);
-            let mut map: std::collections::HashMap<FusionTreeKey, usize> = std::collections::HashMap::new();
+            let mut map: rustc_hash::FxHashMap<FusionTreeKey, usize> = rustc_hash::FxHashMap::default();
             map.insert(left.clone(), 0);
             map.insert(right.clone(), 1);
             assert_eq!(map.len(), 2);
