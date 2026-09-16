@@ -406,6 +406,17 @@ fn kept_counts(spectra: &[WeightedSpectrum<'_>], truncation: &Truncation) -> Vec
                 })
                 .collect()
         }
+        // TensorKit `findtruncated(::SectorVector, ::TruncationByError)`
+        // (truncation.jl:227-256): ascending raw magnitude, weight only in the
+        // squared error, stop at the first candidate that overflows. The
+        // budget is `(rtol * norm)^2` as in MatrixAlgebraKit `_truncerr_impl`,
+        // not TensorKit's `rtol^p * norm(values, p)` (truncation.jl:230), so
+        // that `relative_error(rtol)` means `error <= rtol * norm` literally.
+        //
+        // One tail per non-empty sector lives in a call-local min-heap on
+        // (value asc, sector asc): O(G + D log G) selection with O(G)
+        // workspace instead of rescanning G sectors per discard (O(D * G)).
+        // The heap build is paid even for D = 0; no cutoff to the scan.
         Truncation::DiscardWeight { rtol } => {
             let norm = full_norm(spectra);
             let budget = (rtol * norm) * (rtol * norm);
@@ -413,16 +424,28 @@ fn kept_counts(spectra: &[WeightedSpectrum<'_>], truncation: &Truncation) -> Vec
                 .iter()
                 .map(|spectrum| spectrum.values.len())
                 .collect();
+            let mut tails = Vec::with_capacity(spectra.len());
+            tails.extend(spectra.iter().enumerate().filter_map(|(sector, spectrum)| {
+                spectrum
+                    .values
+                    .last()
+                    .map(|&value| TailCandidate { value, sector })
+            }));
+            let mut tails = BinaryHeap::from(tails);
             let mut discarded = 0.0;
-            while let Some(sector) = smallest_tail_candidate(spectra, &kept) {
-                let index = kept[sector] - 1;
-                let value = spectra[sector].values[index];
+            while let Some(TailCandidate { value, sector }) = tails.pop() {
                 let next = discarded + spectra[sector].weight * value * value;
                 if next > budget + 1e-15 {
                     break;
                 }
                 discarded = next;
                 kept[sector] -= 1;
+                if kept[sector] > 0 {
+                    tails.push(TailCandidate {
+                        value: spectra[sector].values[kept[sector] - 1],
+                        sector,
+                    });
+                }
             }
             kept
         }
@@ -452,24 +475,39 @@ fn kept_counts(spectra: &[WeightedSpectrum<'_>], truncation: &Truncation) -> Vec
     }
 }
 
-fn smallest_tail_candidate(spectra: &[WeightedSpectrum<'_>], kept: &[usize]) -> Option<usize> {
-    let mut best: Option<(usize, f64)> = None;
-    for (sector, (spectrum, &count)) in spectra.iter().zip(kept).enumerate() {
-        if count == 0 {
-            continue;
-        }
-        let value = spectrum.values[count - 1];
-        match best {
-            None => best = Some((sector, value)),
-            Some((best_sector, best_value))
-                if value < best_value || (value == best_value && sector < best_sector) =>
-            {
-                best = Some((sector, value));
-            }
-            _ => {}
-        }
+/// A sector's current tail for `DiscardWeight`. `Ord` is inverted so the
+/// max-heap pops the smallest value, lowest sector first. Not
+/// `Reverse<DescendingCandidate>`: that would break cross-sector ties toward
+/// the highest sector. `partial_cmp` rather than `total_cmp` keeps
+/// `-0.0 == 0.0`; NaN never reaches here (`validate_spectra`).
+#[derive(Clone, Copy, Debug)]
+struct TailCandidate {
+    value: f64,
+    sector: usize,
+}
+
+impl PartialEq for TailCandidate {
+    fn eq(&self, other: &Self) -> bool {
+        self.value == other.value && self.sector == other.sector
     }
-    best.map(|(sector, _)| sector)
+}
+
+impl Eq for TailCandidate {}
+
+impl PartialOrd for TailCandidate {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for TailCandidate {
+    fn cmp(&self, other: &Self) -> Ordering {
+        other
+            .value
+            .partial_cmp(&self.value)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| other.sector.cmp(&self.sector))
+    }
 }
 
 /// Candidates as `(sector, index)` sorted by descending value; ties keep the
@@ -819,5 +857,233 @@ mod tests {
             select(&spectra, &Truncation::rank(2)),
             Err(TruncationError::InvalidSpectrum { .. })
         ));
+    }
+
+    /// Independent `DiscardWeight` oracle: flatten every value, stable-sort by
+    /// (value asc, sector asc, index desc) and accumulate the weighted squared
+    /// error with the same first-failure stop. Shares no code with the heap
+    /// selector and never touches `kept` while selecting. Within-sector ties
+    /// are ordered tail-first: that is TeNeT's prefix convention, which differs
+    /// from TensorKit's boolean mask order only by a permutation among equal
+    /// values, so kept counts and error agree.
+    fn discard_weight_oracle(spectra: &[WeightedSpectrum<'_>], rtol: f64) -> (Vec<usize>, f64) {
+        let norm = full_norm(spectra);
+        let budget = (rtol * norm) * (rtol * norm);
+        let mut flat: Vec<(f64, usize, usize)> = spectra
+            .iter()
+            .enumerate()
+            .flat_map(|(sector, spectrum)| {
+                spectrum
+                    .values
+                    .iter()
+                    .enumerate()
+                    .map(move |(index, &value)| (value, sector, index))
+            })
+            .collect();
+        flat.sort_by(|a, b| {
+            a.0.partial_cmp(&b.0)
+                .unwrap()
+                .then_with(|| a.1.cmp(&b.1))
+                .then_with(|| b.2.cmp(&a.2))
+        });
+        let mut discards: Vec<Vec<usize>> = vec![Vec::new(); spectra.len()];
+        let mut total = 0.0;
+        for (value, sector, index) in flat {
+            total += spectra[sector].weight * value * value;
+            if total > budget + 1e-15 {
+                break;
+            }
+            discards[sector].push(index);
+        }
+        let kept: Vec<usize> = spectra
+            .iter()
+            .zip(&discards)
+            .map(|(spectrum, discarded)| {
+                let len = spectrum.values.len();
+                let mut expected: Vec<usize> = (len - discarded.len()..len).rev().collect();
+                expected.sort_unstable();
+                let mut got = discarded.clone();
+                got.sort_unstable();
+                assert_eq!(got, expected, "discards must form a suffix");
+                len - discarded.len()
+            })
+            .collect();
+        let error = discarded_norm(spectra, &kept);
+        (kept, error)
+    }
+
+    #[test]
+    fn discard_weight_matches_flatten_and_sort_oracle() {
+        const WEIGHTS: [f64; 6] = [1.0, 2.0, 3.0, 0.5, 2.5, 4.0];
+        const VALUES: [f64; 7] = [3.0, 2.0, 1.0, 1.0, 0.5, 0.25, 0.0];
+        const RTOLS: [f64; 6] = [0.0, 0.05, 0.3, 0.7, 1.0, 1.5];
+        // Tiny deterministic LCG; the grid is fixed, not random.
+        let mut state: u64 = 0x2545_F491_4F6C_DD1D;
+        let mut next = |bound: usize| -> usize {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((state >> 33) as usize) % bound
+        };
+        let mut cases = 0;
+        for sectors in [1usize, 2, 3, 5, 8] {
+            for _ in 0..40 {
+                let entries: Vec<(f64, Vec<f64>)> = (0..sectors)
+                    .map(|_| {
+                        let len = next(7);
+                        let mut values: Vec<f64> = (0..len).map(|_| VALUES[next(7)]).collect();
+                        values.sort_by(|a, b| b.partial_cmp(a).unwrap());
+                        (WEIGHTS[next(6)], values)
+                    })
+                    .collect();
+                let weighted = spectra(&entries);
+                for rtol in RTOLS {
+                    let (kept, error) = discard_weight_oracle(&weighted, rtol);
+                    let decision =
+                        select(&weighted, &Truncation::relative_error(rtol).unwrap()).unwrap();
+                    assert_eq!(decision.kept, kept, "entries {entries:?} rtol {rtol}");
+                    assert!((decision.error - error).abs() <= 1e-12);
+                    cases += 1;
+                }
+            }
+        }
+        assert_eq!(cases, 5 * 40 * RTOLS.len());
+    }
+
+    #[test]
+    fn tail_candidate_orders_signed_zeros_equal_then_lower_sector_first() {
+        // `partial_cmp` treats -0.0 == 0.0, so the tie falls to the sector;
+        // the heap is a max-heap, so Greater means "pops first".
+        let lower = TailCandidate {
+            value: -0.0,
+            sector: 0,
+        };
+        let higher = TailCandidate {
+            value: 0.0,
+            sector: 1,
+        };
+        assert_eq!(lower.cmp(&higher), Ordering::Greater);
+        let lower = TailCandidate {
+            value: -0.0,
+            sector: 1,
+        };
+        let higher = TailCandidate {
+            value: 0.0,
+            sector: 0,
+        };
+        assert_eq!(lower.cmp(&higher), Ordering::Less);
+    }
+
+    #[test]
+    fn discard_weight_cross_sector_ties_go_to_the_lower_sector() {
+        // norm^2 = 21; rtol 0.31 -> budget 2.018 admits exactly two 1.0^2.
+        // Sectors 0 and 1 lose their tails; sector 2 keeps its 1.0. The
+        // inverted tie rule (highest sector first) would give [2, 1, 0].
+        let entries = [
+            (1.0, vec![3.0, 1.0]),
+            (1.0, vec![3.0, 1.0]),
+            (1.0, vec![1.0]),
+        ];
+        let spectra = spectra(&entries);
+        let decision = select(&spectra, &Truncation::relative_error(0.31).unwrap()).unwrap();
+        assert_eq!(decision.kept, vec![1, 1, 1]);
+        assert!((decision.error - 2f64.sqrt()).abs() < 1e-12);
+    }
+
+    #[test]
+    fn discard_weight_repeated_values_stay_a_prefix() {
+        // norm^2 = 14; rtol 0.6 -> budget 5.04 admits two of the three 2*1^2.
+        let entries = [(2.0, vec![2.0, 1.0, 1.0, 1.0])];
+        let spectra = spectra(&entries);
+        let decision = select(&spectra, &Truncation::relative_error(0.6).unwrap()).unwrap();
+        assert_eq!(decision.kept, vec![2]);
+        assert!((decision.error - 2.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn discard_weight_stops_at_the_first_failure() {
+        // Tails ascending: 1.0 (w=4, cost 4) then 1.5 (w=1, cost 2.25).
+        // norm^2 = 131.25; rtol 0.16 -> budget 3.36. The first candidate
+        // fails, so nothing is discarded even though 2.25 alone would fit.
+        let entries = [(4.0, vec![5.0, 1.0]), (1.0, vec![5.0, 1.5])];
+        let spectra = spectra(&entries);
+        let decision = select(&spectra, &Truncation::relative_error(0.16).unwrap()).unwrap();
+        assert_eq!(decision.kept, vec![2, 2]);
+        assert_eq!(decision.error, 0.0);
+    }
+
+    #[test]
+    fn discard_weight_zero_values_cost_nothing() {
+        let entries = [(1.0, vec![1.0, 0.0, -0.0]), (3.0, vec![0.0])];
+        let mixed = spectra(&entries);
+        let decision = select(&mixed, &Truncation::relative_error(0.0).unwrap()).unwrap();
+        assert_eq!(decision.kept, vec![1, 0]);
+        assert_eq!(decision.error, 0.0);
+
+        let entries = [(1.0, vec![0.0, 0.0]), (2.0, vec![-0.0])];
+        let all_zero = spectra(&entries);
+        let decision = select(&all_zero, &Truncation::relative_error(0.0).unwrap()).unwrap();
+        assert_eq!(decision.kept, vec![0, 0]);
+        assert_eq!(decision.error, 0.0);
+    }
+
+    #[test]
+    fn discard_weight_skips_empty_sectors() {
+        // norm^2 = 8.75; rtol 0.4 -> budget 1.4 admits both 0.5 tails
+        // (costs 0.5 and 0.25) but not 2.0 (cost 8).
+        let entries = [
+            (1.0, vec![]),
+            (2.0, vec![2.0, 0.5]),
+            (1.0, vec![]),
+            (1.0, vec![0.5]),
+        ];
+        let spectra = spectra(&entries);
+        let decision = select(&spectra, &Truncation::relative_error(0.4).unwrap()).unwrap();
+        assert_eq!(decision.kept, vec![0, 1, 0, 0]);
+        assert!((decision.error - 0.75f64.sqrt()).abs() < 1e-12);
+
+        let decision = select(&[], &Truncation::relative_error(0.5).unwrap()).unwrap();
+        assert!(decision.kept.is_empty());
+        assert_eq!(decision.error, 0.0);
+    }
+
+    #[test]
+    fn discard_weight_no_all_and_partial_discard() {
+        // norm^2 = 9 + 4 + 1 + 2 * 6.25 = 26.5.
+        let entries = [(1.0, vec![3.0, 2.0, 1.0]), (2.0, vec![2.5])];
+        let spectra = spectra(&entries);
+        let decision = select(&spectra, &Truncation::relative_error(0.0).unwrap()).unwrap();
+        assert_eq!(decision.kept, vec![3, 1]);
+        let decision = select(&spectra, &Truncation::relative_error(1.0).unwrap()).unwrap();
+        assert_eq!(decision.kept, vec![0, 0]);
+        // budget 2.385: 1.0 fits, then 2.0 (cost 4) fails.
+        let decision = select(&spectra, &Truncation::relative_error(0.3).unwrap()).unwrap();
+        assert_eq!(decision.kept, vec![2, 1]);
+        assert!((decision.error - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn discard_weight_composes_as_per_sector_minimum() {
+        let entries = [(1.0, vec![4.0, 3.0, 2.0, 1.0]), (2.0, vec![3.5, 0.5])];
+        let spectra = spectra(&entries);
+        let rank = Truncation::rank(3);
+        let error = Truncation::relative_error(0.3).unwrap();
+        let by_rank = select(&spectra, &rank).unwrap().kept;
+        let by_error = select(&spectra, &error).unwrap().kept;
+        assert_ne!(by_rank, by_error, "fixture must make both components bind");
+        let expected: Vec<usize> = by_rank
+            .iter()
+            .zip(&by_error)
+            .map(|(a, b)| *a.min(b))
+            .collect();
+
+        for combined in [
+            rank.clone().and(error.clone()),
+            error.clone().and(rank.clone()),
+        ] {
+            let decision = select(&spectra, &combined).unwrap();
+            assert_eq!(decision.kept, expected);
+            assert_eq!(decision.error, discarded_norm(&spectra, &decision.kept));
+        }
     }
 }
