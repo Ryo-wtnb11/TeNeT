@@ -63,7 +63,9 @@ struct FailAfterObservingSvdInput {
 
 #[derive(Default)]
 struct FailAfterObservingQrInput {
+    inner: tenet_dense::DefaultDenseExecutor,
     observed: Vec<Vec<f64>>,
+    qr_succeeds: bool,
 }
 
 #[derive(Default)]
@@ -470,8 +472,20 @@ impl DenseExecutor for FailAfterObservingQrInput {
         panic!("test only exercises QR")
     }
 
-    fn qr(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("compact QR must use the destination API")
+    fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        let DenseRead::F64(input) = input else {
+            panic!("test input must be f64")
+        };
+        self.observed.push(input.data().to_vec());
+        if self.qr_succeeds {
+            self.inner.qr(DenseRead::F64(input))
+        } else {
+            Err(DenseError::Backend {
+                backend: DenseBackend::Tenferro,
+                op: "qr",
+                message: "injected failure".to_string(),
+            })
+        }
     }
 
     fn qr_into(
@@ -480,18 +494,7 @@ impl DenseExecutor for FailAfterObservingQrInput {
         q: DenseWrite<'_>,
         r: DenseWrite<'_>,
     ) -> Result<(), DenseError> {
-        let DenseRead::F64(input) = input else {
-            panic!("test input must be f64")
-        };
-        self.observed.push(input.data().to_vec());
-        let DenseWrite::F64(q) = q else {
-            panic!("test Q must be f64")
-        };
-        let DenseWrite::F64(r) = r else {
-            panic!("test R must be f64")
-        };
-        assert!(q.data().iter().all(|&value| value == 0.0));
-        assert!(r.data().iter().all(|&value| value == 0.0));
+        let _ = (input, q, r);
         Err(DenseError::Backend {
             backend: DenseBackend::Tenferro,
             op: "qr_into",
@@ -1934,8 +1937,14 @@ impl DenseExecutor for CompactInputSpy {
         self.inner.svd_into(input, u, s, vt)
     }
 
-    fn qr(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("compact QR/LQ must use the destination API")
+    fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        assert!(matches!(
+            self.operation,
+            crate::factorize::CheckedCompactOperation::Qr
+                | crate::factorize::CheckedCompactOperation::Lq
+        ));
+        self.observe(input);
+        self.inner.qr(input)
     }
 
     fn qr_into(
@@ -1944,13 +1953,8 @@ impl DenseExecutor for CompactInputSpy {
         q: DenseWrite<'_>,
         r: DenseWrite<'_>,
     ) -> Result<(), DenseError> {
-        assert!(matches!(
-            self.operation,
-            crate::factorize::CheckedCompactOperation::Qr
-                | crate::factorize::CheckedCompactOperation::Lq
-        ));
-        self.observe(input);
-        self.inner.qr_into(input, q, r)
+        let _ = (input, q, r);
+        panic!("compact QR/LQ must not use qr_into")
     }
 
     fn eigh(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
@@ -5018,6 +5022,23 @@ fn compact_qr_error_preserves_borrowed_input_and_publishes_no_factors() {
         .observed
         .iter()
         .all(|sector| before.windows(sector.len()).any(|window| window == sector)));
+}
+
+#[test]
+fn compact_qr_uses_owned_executor_outputs_not_qr_into() {
+    let rule = Z2FusionRule;
+    let tensor = tsvd_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
+    let mut dense = FailAfterObservingQrInput {
+        qr_succeeds: true,
+        ..Default::default()
+    };
+    let input = bound_tensor(Arc::new(rule), &tensor);
+
+    let (q, r) = qr_compact(&mut dense, &input.as_ref()).unwrap();
+
+    assert!(!dense.observed.is_empty());
+    assert!(!q.data().is_empty());
+    assert!(!r.data().is_empty());
 }
 
 #[test]

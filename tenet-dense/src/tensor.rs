@@ -89,6 +89,50 @@ impl DenseTensor {
         }
     }
 
+    /// Consume a host-backed tensor and transfer its `f64` buffer.
+    #[cfg(feature = "tenferro")]
+    #[cfg(not(feature = "provider-inject"))]
+    pub fn into_f64_vec(self) -> Result<Vec<f64>, DenseError> {
+        let DenseTensorInner::Tenferro(tensor) = self.inner;
+        tensor
+            .into_vec_col_major::<f64>()
+            .map(|(_, data)| data)
+            .map_err(|err| tenferro_error("DenseTensor::into_f64_vec", err))
+    }
+
+    /// Consume a host-backed tensor and transfer its `f32` buffer.
+    #[cfg(feature = "tenferro")]
+    #[cfg(not(feature = "provider-inject"))]
+    pub fn into_f32_vec(self) -> Result<Vec<f32>, DenseError> {
+        let DenseTensorInner::Tenferro(tensor) = self.inner;
+        tensor
+            .into_vec_col_major::<f32>()
+            .map(|(_, data)| data)
+            .map_err(|err| tenferro_error("DenseTensor::into_f32_vec", err))
+    }
+
+    /// Consume a host-backed tensor and transfer its `Complex32` buffer.
+    #[cfg(feature = "tenferro")]
+    #[cfg(not(feature = "provider-inject"))]
+    pub fn into_c32_vec(self) -> Result<Vec<Complex32>, DenseError> {
+        let DenseTensorInner::Tenferro(tensor) = self.inner;
+        tensor
+            .into_vec_col_major::<Complex32>()
+            .map(|(_, data)| data)
+            .map_err(|err| tenferro_error("DenseTensor::into_c32_vec", err))
+    }
+
+    /// Consume a host-backed tensor and transfer its `Complex64` buffer.
+    #[cfg(feature = "tenferro")]
+    #[cfg(not(feature = "provider-inject"))]
+    pub fn into_c64_vec(self) -> Result<Vec<Complex64>, DenseError> {
+        let DenseTensorInner::Tenferro(tensor) = self.inner;
+        tensor
+            .into_vec_col_major::<Complex64>()
+            .map(|(_, data)| data)
+            .map_err(|err| tenferro_error("DenseTensor::into_c64_vec", err))
+    }
+
     #[cfg(feature = "tenferro")]
     #[cfg(not(feature = "provider-inject"))]
     pub(crate) fn from_tenferro(tensor: tenferro_tensor::Tensor) -> Self {

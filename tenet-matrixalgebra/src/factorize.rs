@@ -17,7 +17,7 @@ use tenet_core::{
     SectorId, SectorLeg, SectorStructure, TensorMap, TensorMapSpace,
 };
 use tenet_dense::{
-    DenseDotConfig, DenseError, DenseExecutor, DenseTensor, DenseView, DenseViewMut,
+    DenseBackend, DenseDotConfig, DenseError, DenseExecutor, DenseTensor, DenseView, DenseViewMut,
 };
 
 pub use tenet_tensors::BoundDynamicTensorRef;
@@ -39,6 +39,7 @@ pub trait FactorScalar: DenseRecouplingScalar {
     type Real: DenseRecouplingScalar + Into<f64>;
 
     fn dense_slice(tensor: &DenseTensor) -> Result<&[Self], DenseError>;
+    fn dense_into_vec(tensor: DenseTensor) -> Result<Vec<Self>, DenseError>;
     /// Real spectrum output (singular values, Hermitian eigenvalues) widened
     /// to `f64` for the host-side truncation policies.
     fn real_spectrum(tensor: &DenseTensor) -> Result<Vec<f64>, DenseError>;
@@ -108,6 +109,10 @@ impl FactorScalar for f32 {
         tensor.as_f32_slice()
     }
 
+    fn dense_into_vec(tensor: DenseTensor) -> Result<Vec<Self>, DenseError> {
+        tensor.into_f32_vec()
+    }
+
     fn real_spectrum(tensor: &DenseTensor) -> Result<Vec<f64>, DenseError> {
         Ok(tensor
             .as_f32_slice()?
@@ -147,6 +152,10 @@ impl FactorScalar for f64 {
 
     fn dense_slice(tensor: &DenseTensor) -> Result<&[Self], DenseError> {
         tensor.as_f64_slice()
+    }
+
+    fn dense_into_vec(tensor: DenseTensor) -> Result<Vec<Self>, DenseError> {
+        tensor.into_f64_vec()
     }
 
     fn real_spectrum(tensor: &DenseTensor) -> Result<Vec<f64>, DenseError> {
@@ -199,6 +208,10 @@ impl FactorScalar for num_complex::Complex32 {
         tensor.as_c32_slice()
     }
 
+    fn dense_into_vec(tensor: DenseTensor) -> Result<Vec<Self>, DenseError> {
+        tensor.into_c32_vec()
+    }
+
     fn real_spectrum(tensor: &DenseTensor) -> Result<Vec<f64>, DenseError> {
         Ok(tensor
             .as_f32_slice()?
@@ -238,6 +251,10 @@ impl FactorScalar for Complex64 {
 
     fn dense_slice(tensor: &DenseTensor) -> Result<&[Self], DenseError> {
         tensor.as_c64_slice()
+    }
+
+    fn dense_into_vec(tensor: DenseTensor) -> Result<Vec<Self>, DenseError> {
+        tensor.into_c64_vec()
     }
 
     fn real_spectrum(tensor: &DenseTensor) -> Result<Vec<f64>, DenseError> {
@@ -5474,23 +5491,7 @@ where
     let mut pairs = Vec::with_capacity(matricizations.len());
     for matrix in &matricizations {
         let rank = matrix.rows.min(matrix.cols);
-        let mut q = vec![D::zero(); matrix.rows * rank];
-        let mut r = vec![D::zero(); rank * matrix.cols];
-        qr_into_workspace(
-            dense,
-            &matrix.data,
-            matrix.rows,
-            matrix.cols,
-            matrix.rows,
-            &mut q,
-            matrix.rows,
-            rank,
-            matrix.rows,
-            &mut r,
-            rank,
-            matrix.cols,
-            rank,
-        )?;
+        let (mut q, mut r) = compact_qr_owned(dense, &matrix.data, matrix.rows, matrix.cols)?;
         positive_diagonal_gauge_strided(
             &mut q,
             matrix.rows,
@@ -5531,42 +5532,41 @@ where
     debug_assert_eq!(plan.source_layout, input.space().validated_layout());
     let left_space = input.space().rebind_validated(&plan.left_layout)?;
     let right_space = input.space().rebind_validated(&plan.right_layout)?;
-    let mut left_data = vec![D::zero(); plan.left_layout.required_len()?];
-    let mut right_data = vec![D::zero(); plan.right_layout.required_len()?];
+    let mut left_regions = (0..plan.left_regions.len())
+        .map(|_| None)
+        .collect::<Vec<_>>();
+    let mut right_regions = (0..plan.right_regions.len())
+        .map(|_| None)
+        .collect::<Vec<_>>();
 
     for route in plan.routes.iter().copied() {
         if route.rank == 0 {
             continue;
         }
         let source = &plan.source_regions[route.source_region];
-        let left = &plan.left_regions[route.left_region.expect("nonzero route has left region")];
-        let right =
-            &plan.right_regions[route.right_region.expect("nonzero route has right region")];
-        qr_into_workspace(
+        let (mut left_data, mut right_data) = compact_qr_owned(
             dense,
             &input.data()[source.range()],
             source.rows(),
             source.cols(),
-            source.rows(),
-            &mut left_data[left.range()],
-            source.rows(),
-            route.rank,
-            source.rows(),
-            &mut right_data[right.range()],
-            route.rank,
-            source.cols(),
-            route.rank,
         )?;
         positive_diagonal_gauge_strided(
-            &mut left_data[left.range()],
+            &mut left_data,
             source.rows(),
             source.rows(),
-            &mut right_data[right.range()],
+            &mut right_data,
             route.rank,
             route.rank,
             source.cols(),
         );
+        left_regions[route.left_region.expect("nonzero route has left region")] = Some(left_data);
+        right_regions[route.right_region.expect("nonzero route has right region")] =
+            Some(right_data);
     }
+
+    let left_data = concat_compact_factor_regions(left_regions, plan.left_layout.required_len()?);
+    let right_data =
+        concat_compact_factor_regions(right_regions, plan.right_layout.required_len()?);
 
     let left = BoundDynFactor::from_bound(left_space, left_data, space.nout(), 1)?;
     let right = BoundDynFactor::from_bound(right_space, right_data, 1, space.nin())?;
@@ -5620,23 +5620,8 @@ where
     for matrix in &matricizations {
         let rank = matrix.rows.min(matrix.cols);
         let adjoint = adjoint_col_major(&matrix.data, matrix.rows, matrix.cols);
-        let mut q_prime = vec![D::zero(); matrix.cols * rank];
-        let mut r_prime = vec![D::zero(); rank * matrix.rows];
-        qr_into_workspace(
-            dense,
-            &adjoint,
-            matrix.cols,
-            matrix.rows,
-            matrix.cols,
-            &mut q_prime,
-            matrix.cols,
-            rank,
-            matrix.cols,
-            &mut r_prime,
-            rank,
-            matrix.rows,
-            rank,
-        )?;
+        let (mut q_prime, mut r_prime) =
+            compact_qr_owned(dense, &adjoint, matrix.cols, matrix.rows)?;
         positive_diagonal_gauge_strided(
             &mut q_prime,
             matrix.cols,
@@ -5677,8 +5662,12 @@ where
     debug_assert_eq!(plan.source_layout, input.space().validated_layout());
     let left_space = input.space().rebind_validated(&plan.left_layout)?;
     let right_space = input.space().rebind_validated(&plan.right_layout)?;
-    let mut left_data = vec![D::zero(); plan.left_layout.required_len()?];
-    let mut right_data = vec![D::zero(); plan.right_layout.required_len()?];
+    let mut left_regions = (0..plan.left_regions.len())
+        .map(|_| None)
+        .collect::<Vec<_>>();
+    let mut right_regions = (0..plan.right_regions.len())
+        .map(|_| None)
+        .collect::<Vec<_>>();
 
     let max_adjoint_len = plan
         .routes
@@ -5686,91 +5675,48 @@ where
         .map(|route| plan.source_regions[route.source_region].range().len())
         .max()
         .unwrap_or(0);
-    let max_q_prime_len = plan
-        .routes
-        .iter()
-        .filter_map(|route| {
-            route
-                .right_region
-                .map(|index| plan.right_regions[index].range().len())
-        })
-        .max()
-        .unwrap_or(0);
-    let max_r_prime_len = plan
-        .routes
-        .iter()
-        .filter_map(|route| {
-            route
-                .left_region
-                .map(|index| plan.left_regions[index].range().len())
-        })
-        .max()
-        .unwrap_or(0);
     let mut adjoint_scratch = vec![D::zero(); max_adjoint_len];
-    let mut q_prime_scratch = vec![D::zero(); max_q_prime_len];
-    let mut r_prime_scratch = vec![D::zero(); max_r_prime_len];
     #[cfg(test)]
-    record_compact_lq_scratch::<D>(max_adjoint_len + max_q_prime_len + max_r_prime_len);
+    record_compact_lq_scratch::<D>(max_adjoint_len);
 
     for route in plan.routes.iter().copied() {
         if route.rank == 0 {
             continue;
         }
         let source = &plan.source_regions[route.source_region];
-        let left = &plan.left_regions[route.left_region.expect("nonzero route has left region")];
-        let right =
-            &plan.right_regions[route.right_region.expect("nonzero route has right region")];
         let source_data = &input.data()[source.range()];
         let adjoint = &mut adjoint_scratch[..source_data.len()];
         adjoint_col_major_into(source_data, source.rows(), source.cols(), adjoint);
         #[cfg(test)]
         record_compact_lq_adjoint_fill::<D>(source_data.len());
 
-        let q_prime_len = source.cols() * route.rank;
-        let r_prime_len = route.rank * source.rows();
-        let q_prime = &mut q_prime_scratch[..q_prime_len];
-        let r_prime = &mut r_prime_scratch[..r_prime_len];
-        qr_into_workspace(
-            dense,
-            adjoint,
-            source.cols(),
-            source.rows(),
-            source.cols(),
-            q_prime,
-            source.cols(),
-            route.rank,
-            source.cols(),
-            r_prime,
-            route.rank,
-            source.rows(),
-            route.rank,
-        )?;
+        let (mut q_prime, mut r_prime) =
+            compact_qr_owned(dense, adjoint, source.cols(), source.rows())?;
         positive_diagonal_gauge_strided(
-            q_prime,
+            &mut q_prime,
             source.cols(),
             source.cols(),
-            r_prime,
+            &mut r_prime,
             route.rank,
             route.rank,
             source.rows(),
         );
-        adjoint_col_major_into(
-            r_prime,
-            route.rank,
-            source.rows(),
-            &mut left_data[left.range()],
-        );
+        let mut left_data = vec![D::zero(); r_prime.len()];
+        adjoint_col_major_into(&r_prime, route.rank, source.rows(), &mut left_data);
         #[cfg(test)]
         record_compact_lq_final_adjoint_copy::<D>(r_prime.len());
-        adjoint_col_major_into(
-            q_prime,
-            source.cols(),
-            route.rank,
-            &mut right_data[right.range()],
-        );
+        let mut right_data = vec![D::zero(); q_prime.len()];
+        adjoint_col_major_into(&q_prime, source.cols(), route.rank, &mut right_data);
         #[cfg(test)]
         record_compact_lq_final_adjoint_copy::<D>(q_prime.len());
+        left_regions[route.left_region.expect("nonzero route has left region")] = Some(left_data);
+        right_regions[route.right_region.expect("nonzero route has right region")] =
+            Some(right_data);
     }
+
+    let left_data = concat_compact_factor_regions(left_regions, plan.left_layout.required_len()?);
+    let right_data =
+        concat_compact_factor_regions(right_regions, plan.right_layout.required_len()?);
 
     let left = BoundDynFactor::from_bound(left_space, left_data, space.nout(), 1)?;
     let right = BoundDynFactor::from_bound(right_space, right_data, 1, space.nin())?;
@@ -5881,6 +5827,63 @@ where
             D::dense_write(r_view),
         )
         .map_err(OperationError::Dense)
+}
+
+/// Compact QR owns both dense outputs, so it can transfer the executor's host
+/// buffers directly. Full QR keeps its caller-owned workspace contract above.
+fn compact_qr_owned<E, D>(
+    dense: &mut E,
+    input: &[D],
+    rows: usize,
+    cols: usize,
+) -> Result<(Vec<D>, Vec<D>), OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    D: FactorScalar,
+{
+    let rank = rows.min(cols);
+    let input_shape = [rows, cols];
+    let input_strides = [1usize, rows];
+    let input_view =
+        DenseView::new(input, &input_shape, &input_strides, 0).map_err(OperationError::Dense)?;
+    let mut outputs = dense
+        .qr(D::dense_read(input_view))
+        .map_err(OperationError::Dense)?;
+    if outputs.len() != 2 {
+        return Err(OperationError::Dense(DenseError::Backend {
+            backend: DenseBackend::Tenferro,
+            op: "qr_into",
+            message: "dense QR must return exactly (Q, R)".to_string(),
+        }));
+    }
+    let q = compact_qr_output_owned::<D>(outputs.remove(0), &[rows, rank])?;
+    let r = compact_qr_output_owned::<D>(outputs.remove(0), &[rank, cols])?;
+    Ok((q, r))
+}
+
+fn compact_qr_output_owned<D: FactorScalar>(
+    tensor: DenseTensor,
+    expected_shape: &[usize],
+) -> Result<Vec<D>, OperationError> {
+    let shape = tensor.shape().to_vec();
+    let data = D::dense_into_vec(tensor).map_err(OperationError::Dense)?;
+    validate_dense_shape(&shape, expected_shape)?;
+    let expected_len = expected_shape.iter().product::<usize>();
+    if data.len() != expected_len {
+        return Err(OperationError::ElementCountMismatch {
+            expected: expected_len,
+            actual: data.len(),
+        });
+    }
+    Ok(data)
+}
+
+fn concat_compact_factor_regions<D>(regions: Vec<Option<Vec<D>>>, required_len: usize) -> Vec<D> {
+    let mut output = None;
+    for region in regions.into_iter().flatten() {
+        append_owned_factor(&mut output, region, required_len);
+    }
+    output.unwrap_or_default()
 }
 
 fn copy_col_major_strided<D: Copy>(
@@ -10390,23 +10393,7 @@ where
     let mut pairs = Vec::with_capacity(matrices.len());
     for matrix in &matrices {
         let rank = matrix.rows.min(matrix.cols);
-        let mut q = vec![D::zero(); matrix.rows * rank];
-        let mut r = vec![D::zero(); rank * matrix.cols];
-        qr_into_workspace(
-            dense,
-            &matrix.data,
-            matrix.rows,
-            matrix.cols,
-            matrix.rows,
-            &mut q,
-            matrix.rows,
-            rank,
-            matrix.rows,
-            &mut r,
-            rank,
-            matrix.cols,
-            rank,
-        )?;
+        let (mut q, mut r) = compact_qr_owned(dense, &matrix.data, matrix.rows, matrix.cols)?;
         positive_diagonal_gauge_strided(
             &mut q,
             matrix.rows,
@@ -10478,24 +10465,8 @@ where
         #[cfg(test)]
         record_checked_compact_input(CheckedCompactOperation::Qr, input.data(), matrix.data, None);
         let rank = matrix.rows.min(matrix.cols);
-        let mut q = vec![D::zero(); matrix.rows * rank];
-        let mut r = vec![D::zero(); rank * matrix.cols];
-        qr_into_workspace(
-            dense,
-            matrix.data,
-            matrix.rows,
-            matrix.cols,
-            matrix.rows,
-            &mut q,
-            matrix.rows,
-            rank,
-            matrix.rows,
-            &mut r,
-            rank,
-            matrix.cols,
-            rank,
-        )
-        .map_err(CheckedGenericFactorPlanError::from)?;
+        let (mut q, mut r) = compact_qr_owned(dense, matrix.data, matrix.rows, matrix.cols)
+            .map_err(CheckedGenericFactorPlanError::from)?;
         positive_diagonal_gauge_strided(
             &mut q,
             matrix.rows,
@@ -10645,24 +10616,9 @@ where
             matrix.data,
             Some(&adjoint),
         );
-        let mut q_prime = vec![D::zero(); matrix.cols * rank];
-        let mut r_prime = vec![D::zero(); rank * matrix.rows];
-        qr_into_workspace(
-            dense,
-            &adjoint,
-            matrix.cols,
-            matrix.rows,
-            matrix.cols,
-            &mut q_prime,
-            matrix.cols,
-            rank,
-            matrix.cols,
-            &mut r_prime,
-            rank,
-            matrix.rows,
-            rank,
-        )
-        .map_err(CheckedGenericFactorPlanError::from)?;
+        let (mut q_prime, mut r_prime) =
+            compact_qr_owned(dense, &adjoint, matrix.cols, matrix.rows)
+                .map_err(CheckedGenericFactorPlanError::from)?;
         positive_diagonal_gauge_strided(
             &mut q_prime,
             matrix.cols,
@@ -11484,23 +11440,8 @@ where
     for matrix in &matrices {
         let rank = matrix.rows.min(matrix.cols);
         let adjoint = adjoint_col_major(&matrix.data, matrix.rows, matrix.cols);
-        let mut q_prime = vec![D::zero(); matrix.cols * rank];
-        let mut r_prime = vec![D::zero(); rank * matrix.rows];
-        qr_into_workspace(
-            dense,
-            &adjoint,
-            matrix.cols,
-            matrix.rows,
-            matrix.cols,
-            &mut q_prime,
-            matrix.cols,
-            rank,
-            matrix.cols,
-            &mut r_prime,
-            rank,
-            matrix.rows,
-            rank,
-        )?;
+        let (mut q_prime, mut r_prime) =
+            compact_qr_owned(dense, &adjoint, matrix.cols, matrix.rows)?;
         positive_diagonal_gauge_strided(
             &mut q_prime,
             matrix.cols,
