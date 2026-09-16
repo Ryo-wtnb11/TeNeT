@@ -1847,6 +1847,8 @@ where
     let mut singular_values = Vec::with_capacity(matricizations.len());
 
     let index = PlacementIndex::new(&matricizations, &[FactorSide::Left, FactorSide::Right]);
+    let u_groups = SectorBlockGroups::new(u_space.space().structure(), FactorSide::Left)?;
+    let vt_groups = SectorBlockGroups::new(vt_space.space().structure(), FactorSide::Right)?;
     for matrix in &matricizations {
         let rank = matrix.rows.min(matrix.cols);
         let input_shape = [matrix.rows, matrix.cols];
@@ -1907,6 +1909,7 @@ where
             &mut u_data,
             matrix,
             &index,
+            &u_groups,
             &u_workspace,
             max_rows,
         )?;
@@ -1917,6 +1920,7 @@ where
             &mut vt_data,
             matrix,
             &index,
+            &vt_groups,
             &vt_workspace,
             max_rank,
         )?;
@@ -3109,6 +3113,7 @@ fn scatter_left_sector_blocks<D>(
     left_data: &mut [D],
     matrix: &SectorMatricization<D>,
     index: &PlacementIndex<'_>,
+    groups: &SectorBlockGroups,
     factor: &[D],
     factor_rows: usize,
 ) -> Result<(), OperationError>
@@ -3116,16 +3121,16 @@ where
     D: FactorScalar,
 {
     let left_structure = Arc::clone(left_space.structure());
-    for block_index in 0..left_structure.block_count() {
+    for block_index in groups.blocks(matrix.sector) {
+        #[cfg(test)]
+        record_scatter_visit(FactorSide::Left);
         let block = left_structure
             .block(block_index)
             .map_err(OperationError::from_core_preserving_context)?;
         let BlockKey::FusionTree(key) = block.key() else {
             continue;
         };
-        if coupled_of(key.codomain_tree()) != matrix.sector {
-            continue;
-        }
+        debug_assert_eq!(coupled_of(key.codomain_tree()), matrix.sector);
         let (row_offset, _) =
             index.placement(matrix.sector, FactorSide::Left, key.codomain_tree())?;
         scatter_matrix_block(
@@ -3148,6 +3153,7 @@ fn scatter_right_sector_blocks<D>(
     right_data: &mut [D],
     matrix: &SectorMatricization<D>,
     index: &PlacementIndex<'_>,
+    groups: &SectorBlockGroups,
     factor: &[D],
     factor_rows: usize,
 ) -> Result<(), OperationError>
@@ -3155,16 +3161,16 @@ where
     D: FactorScalar,
 {
     let right_structure = Arc::clone(right_space.structure());
-    for block_index in 0..right_structure.block_count() {
+    for block_index in groups.blocks(matrix.sector) {
+        #[cfg(test)]
+        record_scatter_visit(FactorSide::Right);
         let block = right_structure
             .block(block_index)
             .map_err(OperationError::from_core_preserving_context)?;
         let BlockKey::FusionTree(key) = block.key() else {
             continue;
         };
-        if coupled_of(key.domain_tree()) != matrix.sector {
-            continue;
-        }
+        debug_assert_eq!(coupled_of(key.domain_tree()), matrix.sector);
         let (col_offset, _) =
             index.placement(matrix.sector, FactorSide::Right, key.domain_tree())?;
         scatter_matrix_block(
@@ -3338,6 +3344,7 @@ where
     let mut sorted_vectors = vec![D::zero(); max_n * max_n];
     let mut eigenvalues = Vec::with_capacity(matricizations.len());
     let index = PlacementIndex::new(&matricizations, &[FactorSide::Left]);
+    let v_groups = SectorBlockGroups::new(v_space.space().structure(), FactorSide::Left)?;
     for matrix in &matricizations {
         let shape = [matrix.rows, matrix.cols];
         let strides = [1usize, matrix.rows];
@@ -3392,6 +3399,7 @@ where
             &mut v_data,
             matrix,
             &index,
+            &v_groups,
             &sorted_vectors,
             n,
         )?;
@@ -6219,6 +6227,113 @@ impl<'a> PlacementIndex<'a> {
     }
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ScatterVisitProbe {
+    /// Output blocks scanned by the grouping pass, per side (`B`).
+    pub left_grouped: usize,
+    pub right_grouped: usize,
+    /// Groupings built, per side (one per publication call).
+    pub left_groups_built: usize,
+    pub right_groups_built: usize,
+    /// Output blocks iterated by the paired scatter helpers, per side (`F`).
+    pub left_visits: usize,
+    pub right_visits: usize,
+}
+
+#[cfg(test)]
+thread_local! {
+    static SCATTER_VISIT_PROBE: Cell<ScatterVisitProbe> = Cell::default();
+}
+
+#[cfg(test)]
+pub(crate) fn reset_scatter_visit_probe() {
+    SCATTER_VISIT_PROBE.set(ScatterVisitProbe::default());
+}
+
+#[cfg(test)]
+pub(crate) fn scatter_visit_probe() -> ScatterVisitProbe {
+    SCATTER_VISIT_PROBE.get()
+}
+
+#[cfg(test)]
+fn record_scatter_visit(side: FactorSide) {
+    SCATTER_VISIT_PROBE.with(|probe| {
+        let mut value = probe.get();
+        match side {
+            FactorSide::Left => value.left_visits += 1,
+            FactorSide::Right => value.right_visits += 1,
+        }
+        probe.set(value);
+    });
+}
+
+/// Output block indices of one factor side grouped by the coupled sector of
+/// that side's tree, in structure order within a sector. Built once per
+/// publication call next to [`PlacementIndex`] and dropped at return, so a
+/// paired publication over `G_s` matricizations visits `B + F` output blocks
+/// per side (one grouping pass plus the scattered blocks) instead of
+/// `G_s * B`; the cost is one `16 * B`-byte allocation per side per call,
+/// paid also for `G_s = 1`.
+///
+/// Why not one structure-major pass routing each output block to its
+/// matricization: the compact SVD and EIGH consumers keep each sector's dense
+/// factor in a workspace reused across sectors, so scattering has to happen
+/// per matricization, and a structure-major pass would also change which
+/// missing-tree error fires first when two sectors are defective. Why not a
+/// tenet-core accessor: nothing exposes the coupled grouping
+/// (`sorted_indices` is uncoupled-major and the coupled ranges known at
+/// layout time are dropped at `BlockStructure`).
+struct SectorBlockGroups {
+    /// `(coupled sector, block index)` sorted by sector; the stable sort keeps
+    /// ascending structure order within a sector.
+    entries: Vec<(SectorId, usize)>,
+}
+
+impl SectorBlockGroups {
+    fn new(structure: &BlockStructure, side: FactorSide) -> Result<Self, OperationError> {
+        let mut entries = Vec::with_capacity(structure.block_count());
+        for index in 0..structure.block_count() {
+            let block = structure
+                .block(index)
+                .map_err(OperationError::from_core_preserving_context)?;
+            let BlockKey::FusionTree(key) = block.key() else {
+                continue;
+            };
+            let tree = match side {
+                FactorSide::Left => key.codomain_tree(),
+                FactorSide::Right => key.domain_tree(),
+            };
+            entries.push((coupled_of(tree), index));
+        }
+        entries.sort_by_key(|&(sector, _)| sector);
+        #[cfg(test)]
+        SCATTER_VISIT_PROBE.with(|probe| {
+            let mut value = probe.get();
+            match side {
+                FactorSide::Left => {
+                    value.left_grouped += structure.block_count();
+                    value.left_groups_built += 1;
+                }
+                FactorSide::Right => {
+                    value.right_grouped += structure.block_count();
+                    value.right_groups_built += 1;
+                }
+            }
+            probe.set(value);
+        });
+        Ok(Self { entries })
+    }
+
+    fn blocks(&self, sector: SectorId) -> impl Iterator<Item = usize> + '_ {
+        let start = self.entries.partition_point(|&(s, _)| s < sector);
+        self.entries[start..]
+            .iter()
+            .take_while(move |&&(s, _)| s == sector)
+            .map(|&(_, index)| index)
+    }
+}
+
 fn validate_dense_shape(actual: &[usize], expected: &[usize]) -> Result<(), OperationError> {
     if actual != expected {
         return Err(OperationError::ShapeMismatch {
@@ -8991,12 +9106,17 @@ where
         let mut left_data = vec![D::zero(); left_len];
         let mut right_data = vec![D::zero(); right_len];
         let index = PlacementIndex::new(matricizations, &[FactorSide::Left, FactorSide::Right]);
+        let left_groups =
+            SectorBlockGroups::new(spaces.left.space().structure(), FactorSide::Left)?;
+        let right_groups =
+            SectorBlockGroups::new(spaces.right.space().structure(), FactorSide::Right)?;
         for (matrix, pair) in matricizations.iter().zip(&pairs) {
             scatter_left_sector_blocks_generic(
                 spaces.left.space(),
                 &mut left_data,
                 matrix,
                 &index,
+                &left_groups,
                 &pair.left,
                 pair.left_rows,
             )?;
@@ -9005,6 +9125,7 @@ where
                 &mut right_data,
                 matrix,
                 &index,
+                &right_groups,
                 &pair.right,
                 pair.right_leading,
             )?;
@@ -9123,12 +9244,17 @@ where
         let mut left_data = vec![D::zero(); left_len];
         let mut right_data = vec![D::zero(); right_len];
         let index = PlacementIndex::new(matricizations, &[FactorSide::Left, FactorSide::Right]);
+        let left_groups = SectorBlockGroups::new(left.space().structure(), FactorSide::Left)
+            .map_err(CheckedGenericFactorPlanError::from)?;
+        let right_groups = SectorBlockGroups::new(right.space().structure(), FactorSide::Right)
+            .map_err(CheckedGenericFactorPlanError::from)?;
         for (matrix, pair) in matricizations.iter().zip(&pairs) {
             scatter_left_sector_blocks_generic(
                 left.space(),
                 &mut left_data,
                 matrix,
                 &index,
+                &left_groups,
                 &pair.left,
                 pair.left_rows,
             )
@@ -9138,6 +9264,7 @@ where
                 &mut right_data,
                 matrix,
                 &index,
+                &right_groups,
                 &pair.right,
                 pair.right_leading,
             )
@@ -9402,6 +9529,7 @@ fn scatter_left_sector_blocks_generic<D, M>(
     left_data: &mut [D],
     matrix: &M,
     index: &PlacementIndex<'_>,
+    groups: &SectorBlockGroups,
     factor: &[D],
     factor_rows: usize,
 ) -> Result<(), OperationError>
@@ -9410,16 +9538,16 @@ where
     M: SectorGeometry,
 {
     let left_structure = Arc::clone(left_space.structure());
-    for block_index in 0..left_structure.block_count() {
+    for block_index in groups.blocks(matrix.sector()) {
+        #[cfg(test)]
+        record_scatter_visit(FactorSide::Left);
         let block = left_structure
             .block(block_index)
             .map_err(OperationError::from_core_preserving_context)?;
         let BlockKey::FusionTree(key) = block.key() else {
             continue;
         };
-        if coupled_of_generic(key.codomain_tree()) != matrix.sector() {
-            continue;
-        }
+        debug_assert_eq!(coupled_of_generic(key.codomain_tree()), matrix.sector());
         let (row_offset, _) =
             index.placement(matrix.sector(), FactorSide::Left, key.codomain_tree())?;
         #[cfg(test)]
@@ -9451,6 +9579,7 @@ fn scatter_right_sector_blocks_generic<D, M>(
     right_data: &mut [D],
     matrix: &M,
     index: &PlacementIndex<'_>,
+    groups: &SectorBlockGroups,
     factor: &[D],
     factor_rows: usize,
 ) -> Result<(), OperationError>
@@ -9459,16 +9588,16 @@ where
     M: SectorGeometry,
 {
     let right_structure = Arc::clone(right_space.structure());
-    for block_index in 0..right_structure.block_count() {
+    for block_index in groups.blocks(matrix.sector()) {
+        #[cfg(test)]
+        record_scatter_visit(FactorSide::Right);
         let block = right_structure
             .block(block_index)
             .map_err(OperationError::from_core_preserving_context)?;
         let BlockKey::FusionTree(key) = block.key() else {
             continue;
         };
-        if coupled_of_generic(key.domain_tree()) != matrix.sector() {
-            continue;
-        }
+        debug_assert_eq!(coupled_of_generic(key.domain_tree()), matrix.sector());
         let (col_offset, _) =
             index.placement(matrix.sector(), FactorSide::Right, key.domain_tree())?;
         #[cfg(test)]
@@ -9552,6 +9681,8 @@ where
     let mut singular_values = Vec::with_capacity(matricizations.len());
 
     let index = PlacementIndex::new(&matricizations, &[FactorSide::Left, FactorSide::Right]);
+    let u_groups = SectorBlockGroups::new(u_space.space().structure(), FactorSide::Left)?;
+    let vt_groups = SectorBlockGroups::new(vt_space.space().structure(), FactorSide::Right)?;
     for matrix in &matricizations {
         let rank = matrix.rows.min(matrix.cols);
         let input_shape = [matrix.rows, matrix.cols];
@@ -9601,6 +9732,7 @@ where
             &mut u_data,
             matrix,
             &index,
+            &u_groups,
             &u_workspace,
             max_rows,
         )?;
@@ -9609,6 +9741,7 @@ where
             &mut vt_data,
             matrix,
             &index,
+            &vt_groups,
             &vt_workspace,
             max_rank,
         )?;
@@ -12238,6 +12371,7 @@ mod sector_matricization_tests {
         let (homspace, matrix) = z2_single_sector_matrix(2, 1);
         let provider = Arc::new(TestGenericRule);
         reset_generic_pair_publication_probe();
+        reset_scatter_visit_probe();
 
         let (left, right) = build_left_right_bound_pair_generic(
             &provider,
@@ -12256,6 +12390,19 @@ mod sector_matricization_tests {
 
         assert_eq!(left.data(), [2.0, 3.0]);
         assert_eq!(right.data(), [5.0]);
+        // G_s = 1 still pays the grouping pass (B = 1 per side) on top of the
+        // F = 1 scattered block; disclosed, not dispatched on.
+        assert_eq!(
+            scatter_visit_probe(),
+            ScatterVisitProbe {
+                left_grouped: 1,
+                right_grouped: 1,
+                left_groups_built: 1,
+                right_groups_built: 1,
+                left_visits: 1,
+                right_visits: 1,
+            }
+        );
         let probe = generic_pair_publication_probe();
         assert_eq!(
             (probe.canonical_publications, probe.fallback_publications),
@@ -14677,6 +14824,263 @@ mod sector_matricization_tests {
                 );
                 assert_eq!(factor.data().len(), expected_len);
             }
+        }
+    }
+
+    /// Z_4 fusion declared under Generic style so the generic paired builders
+    /// accept it; multiplicity-free, so trees and blocks match the abelian
+    /// geometry.
+    struct Z4GenericRule;
+
+    static Z4_GENERIC: Z4GenericRule = Z4GenericRule;
+
+    impl FusionRule for Z4GenericRule {
+        fn rule_identity(&self) -> tenet_core::RuleIdentity {
+            tenet_core::RuleIdentity::of_type::<Self>()
+        }
+
+        fn fusion_style(&self) -> tenet_core::FusionStyleKind {
+            tenet_core::FusionStyleKind::Generic
+        }
+
+        fn braiding_style(&self) -> tenet_core::BraidingStyleKind {
+            tenet_core::BraidingStyleKind::Bosonic
+        }
+
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(0)
+        }
+
+        fn dual(&self, sector: SectorId) -> SectorId {
+            SectorId::new((4 - sector.id() % 4) % 4)
+        }
+
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> tenet_core::SectorVec {
+            [SectorId::new((left.id() + right.id()) % 4)]
+                .into_iter()
+                .collect()
+        }
+
+        fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+            usize::from((left.id() + right.id()) % 4 == coupled.id())
+        }
+    }
+
+    /// Two-leg codomain/domain hom space under [`Z4GenericRule`], matricized
+    /// exactly as the generic production path does.
+    fn z4_generic_geometry<D: FactorScalar>(
+        legs: [Vec<(SectorId, usize)>; 4],
+    ) -> (FusionTreeHomSpace, Vec<SectorMatricization<D>>) {
+        let [a, b, c, d] = legs;
+        let homspace = FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new(a, false), SectorLeg::new(b, false)]),
+            FusionProductSpace::new([SectorLeg::new(c, false), SectorLeg::new(d, false)]),
+        );
+        let space = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+            Arc::new(InfallibleGeneric::new(&Z4_GENERIC)),
+            homspace.clone(),
+        )
+        .unwrap();
+        let zeros = vec![D::zero(); space.space().required_len().unwrap()];
+        let matrices = sector_matricizations_generic(space.space().structure(), &zeros, 2).unwrap();
+        (homspace, matrices)
+    }
+
+    /// Every leg carries all four charges: G_s = 4 coupled sectors with four
+    /// row and four column trees each, so each factor side has B = F = 16
+    /// output blocks.
+    fn z4_all_charge_legs() -> [Vec<(SectorId, usize)>; 4] {
+        let all = (0..4).map(|s| (SectorId::new(s), 1)).collect::<Vec<_>>();
+        [all.clone(), all.clone(), all.clone(), all]
+    }
+
+    /// Stages `rows x kept` left and `kept x cols` right factors per sector
+    /// with `kept = min(rows, cols)` and sector-tagged values.
+    fn staged_pairs<D: FactorScalar>(
+        matrices: &[SectorMatricization<D>],
+        values: &dyn Fn(usize) -> D,
+    ) -> Vec<FactorPair<D>> {
+        matrices
+            .iter()
+            .map(|matrix| {
+                let kept = matrix.rows.min(matrix.cols);
+                let tag = matrix.sector.id() + 1;
+                FactorPair {
+                    sector: matrix.sector,
+                    kept,
+                    left: (0..matrix.rows * kept)
+                        .map(|k| values(1000 * tag + k))
+                        .collect(),
+                    left_rows: matrix.rows,
+                    right: (0..kept * matrix.cols)
+                        .map(|k| values(5000 * tag + k))
+                        .collect(),
+                    right_leading: kept,
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn generic_pair_fallback_scatters_each_output_block_once() {
+        // What: a paired fallback publication over G_s = 4 matricizations
+        // groups each factor side once and iterates only the F blocks of the
+        // matricization being scattered, publishing the same data as the
+        // canonical path, for both paired builders and both scalar types.
+        fn run<D: FactorScalar + fmt::Debug>(values: impl Fn(usize) -> D) {
+            let fresh = || z4_generic_geometry::<D>(z4_all_charge_legs());
+            let (homspace, matrices) = fresh();
+            assert_eq!(matrices.len(), 4);
+            assert!(matrices
+                .iter()
+                .all(|m| m.row_trees.len() == 4 && m.col_trees.len() == 4));
+            let plain_provider = Arc::new(Z4GenericRule);
+            let checked_provider = Arc::new(InfallibleGeneric::new(&Z4_GENERIC));
+
+            let build = |matrices: &[SectorMatricization<D>]| {
+                reset_generic_pair_publication_probe();
+                reset_scatter_visit_probe();
+                let (left, right) = build_left_right_bound_pair_generic(
+                    &plain_provider,
+                    &homspace,
+                    matrices,
+                    staged_pairs(matrices, &values),
+                )
+                .unwrap();
+                let plain = (
+                    left.data().to_vec(),
+                    right.data().to_vec(),
+                    generic_pair_publication_probe(),
+                    scatter_visit_probe(),
+                );
+                reset_generic_pair_publication_probe();
+                reset_scatter_visit_probe();
+                let (left, right) = build_left_right_bound_pair_generic_checked(
+                    &checked_provider,
+                    &homspace,
+                    matrices,
+                    staged_pairs(matrices, &values),
+                )
+                .unwrap();
+                assert_eq!(
+                    (
+                        left.space().space().structure().block_count(),
+                        right.space().space().structure().block_count()
+                    ),
+                    (16, 16)
+                );
+                let checked = (
+                    left.data().to_vec(),
+                    right.data().to_vec(),
+                    generic_pair_publication_probe(),
+                    scatter_visit_probe(),
+                );
+                (plain, checked)
+            };
+
+            let (reference, checked_reference) = build(&matrices);
+            for (_, _, probe, visits) in [&reference, &checked_reference] {
+                assert_eq!(probe.canonical_publications, 1);
+                assert_eq!(*visits, ScatterVisitProbe::default());
+            }
+
+            let (_, mut reversed) = fresh();
+            reversed.reverse();
+            let (plain, checked) = build(&reversed);
+            for ((left, right, probe, visits), (left_ref, right_ref, ..)) in
+                [(&plain, &reference), (&checked, &checked_reference)]
+            {
+                assert_eq!(probe.fallback_publications, 1);
+                assert_eq!((left, right), (left_ref, right_ref));
+                assert_eq!(
+                    (probe.left_scatter_calls, probe.right_scatter_calls),
+                    (16, 16)
+                );
+                // Formerly G_s * B = 4 * 16 = 64 block visits per side; now
+                // one grouping pass over B = 16 plus the F = 16 scattered
+                // blocks.
+                assert_eq!(
+                    *visits,
+                    ScatterVisitProbe {
+                        left_grouped: 16,
+                        right_grouped: 16,
+                        left_groups_built: 1,
+                        right_groups_built: 1,
+                        left_visits: 16,
+                        right_visits: 16,
+                    }
+                );
+                assert!(visits.left_grouped + visits.left_visits < 4 * 16);
+                assert!(visits.right_grouped + visits.right_visits < 4 * 16);
+            }
+        }
+        run(|k| k as f64 + 0.125);
+        run(|k| Complex64::new(k as f64 + 0.125, 0.75 - k as f64));
+    }
+
+    #[test]
+    fn generic_pair_validation_reports_left_defect_before_right_across_sectors() {
+        // What: validation precedence, not scatter order. With a defective
+        // domain tree in the first sector and a defective codomain tree in a
+        // later sector, the codomain error fires for both paired builders
+        // because `validate_generic_factor_keys` checks every left key before
+        // any right key. Scatter-time placement errors are unreachable in the
+        // paired builders: validation has already checked every key.
+        let two = || {
+            let leg = || vec![(SectorId::new(0), 1), (SectorId::new(1), 1)];
+            z4_generic_geometry::<f64>([leg(), leg(), leg(), leg()])
+        };
+        let (homspace, matrices) = two();
+        assert_eq!(
+            matrices.iter().map(|m| m.sector.id()).collect::<Vec<_>>(),
+            [0, 1, 2]
+        );
+        let plain_provider = Arc::new(Z4GenericRule);
+        let checked_provider = Arc::new(InfallibleGeneric::new(&Z4_GENERIC));
+        let foreign_row = matrices[0].row_trees[0].0.clone();
+        let foreign_col = matrices[1].col_trees[0].0.clone();
+        let corrupt = |bad_first_col: bool, bad_later_row: bool| {
+            let (_, mut matrices) = two();
+            if bad_first_col {
+                matrices[0].col_trees[0].0 = foreign_col.clone();
+            }
+            if bad_later_row {
+                matrices[1].row_trees[0].0 = foreign_row.clone();
+            }
+            matrices
+        };
+        let codomain = "factor codomain tree absent from the source matricization";
+        let domain = "factor domain tree absent from the source matricization";
+        for (bad_first_col, bad_later_row, expected) in [
+            (true, true, codomain),
+            (true, false, domain),
+            (false, true, codomain),
+        ] {
+            let matrices = corrupt(bad_first_col, bad_later_row);
+            let error = build_left_right_bound_pair_generic(
+                &plain_provider,
+                &homspace,
+                &matrices,
+                staged_pairs(&matrices, &|k| k as f64),
+            )
+            .unwrap_err();
+            assert!(matches!(
+                error,
+                OperationError::UnsupportedTensorContractScope { message } if message == expected
+            ));
+            let error = build_left_right_bound_pair_generic_checked(
+                &checked_provider,
+                &homspace,
+                &matrices,
+                staged_pairs(&matrices, &|k| k as f64),
+            )
+            .unwrap_err();
+            assert!(matches!(
+                error,
+                CheckedGenericFactorPlanError::Operation(
+                    OperationError::UnsupportedTensorContractScope { message }
+                ) if message == expected
+            ));
         }
     }
 }
