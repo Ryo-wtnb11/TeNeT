@@ -86,6 +86,7 @@ mod opaque_admission;
 mod owned_cat;
 #[allow(unsafe_code)]
 mod owned_overwrite_buffer;
+#[doc(hidden)]
 pub use owned_overwrite_buffer::{zeroed_payload, ZeroBytes};
 mod owned_trace;
 #[doc(hidden)]

@@ -8,7 +8,9 @@ use std::alloc::{alloc_zeroed, handle_alloc_error};
 ///
 /// Implementors promise that `len * size_of::<Self>()` zeroed bytes with
 /// `Self`'s alignment are `len` valid, initialised values, each equal to the
-/// additive zero. IEEE floats and `#[repr(C)]` pairs of them satisfy this.
+/// additive zero, and that `Self` is not zero-sized (`alloc_zeroed` with a
+/// zero-size layout is undefined behaviour). IEEE floats and `#[repr(C)]`
+/// pairs of them satisfy this.
 pub unsafe trait ZeroBytes: Copy {}
 
 unsafe impl ZeroBytes for f64 {}
@@ -20,6 +22,14 @@ unsafe impl ZeroBytes for num_complex::Complex64 {}
 /// types with its private `IsZero` specialisation, which `num_complex`
 /// scalars lack, so `Complex64` would be filled by an element loop over `len`.
 pub fn zeroed_payload<D: ZeroBytes>(len: usize) -> Vec<D> {
+    // Checked here as well so the allocation does not rest on the trait
+    // contract alone.
+    const {
+        assert!(
+            size_of::<D>() != 0,
+            "ZeroBytes types must not be zero-sized"
+        )
+    };
     if len == 0 {
         return Vec::new();
     }

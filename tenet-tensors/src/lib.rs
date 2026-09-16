@@ -102,6 +102,7 @@ pub use physical::{
 /// CUDA storage and GEMM seams (flat device buffers, never host-readable).
 #[cfg(feature = "cuda")]
 pub use tenet_operations::cuda;
+pub use tenet_operations::ContractDestinationInit;
 pub use tenet_operations::OperationError;
 pub use tenet_operations::ReportsPlacement;
 pub use tenet_operations::TreeTransformReplayProfile;
@@ -118,7 +119,8 @@ pub(crate) use tenet_operations::{
 pub use tenet_operations::{
     try_cat_owned_c64_raw, try_cat_owned_raw, OwnedCatC64Source, OwnedCatCopy, OwnedCatSide,
 };
-pub use tenet_operations::{zeroed_payload, ContractDestinationInit, ZeroBytes};
+#[doc(hidden)]
+pub use tenet_operations::{zeroed_payload, ZeroBytes};
 pub use tenet_operations::{
     ConjugateValue, DenseBlockScalar, DenseRecouplingScalar, RealStructuralCoefficient,
     RecouplingCoefficientAction, TreeTransformScalar,
