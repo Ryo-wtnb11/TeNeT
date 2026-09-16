@@ -1,3 +1,5 @@
+mod common;
+
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -6380,4 +6382,366 @@ fn sun_checked_generic_transforms_reuse_the_runtime_completed_store() {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// #1201: lazy-adjoint reads through FusionOperand + the shared strided owner,
+// and checked `tr` collapsed onto `weighted_trace`.
+// ---------------------------------------------------------------------------
+
+fn lazy_oracle_value(
+    trees: &tenet::typed::BlockFusionTrees<Label>,
+    indices: &[usize],
+) -> Complex64 {
+    let tree = (format!("{trees:?}").bytes().fold(0u32, |acc, byte| {
+        acc.wrapping_mul(31).wrapping_add(byte as u32)
+    }) % 97) as f64;
+    let mut re = tree;
+    let mut im = -0.5 * tree + 0.25;
+    for (axis, &index) in indices.iter().enumerate() {
+        re += (index as f64 + 1.0) * (axis as f64 + 1.0);
+        im += (index as f64 + 1.0) * (axis as f64 + 1.0) * (axis as f64 + 1.0) * 0.5;
+    }
+    Complex64::new(re, im)
+}
+
+fn lazy_close_c64(a: Complex64, b: Complex64) -> bool {
+    (a - b).norm() <= 1e-12 * (1.0 + b.norm())
+}
+
+fn lazy_close_f64(a: f64, b: f64) -> bool {
+    (a - b).abs() <= 1e-12 * (1.0 + b.abs())
+}
+
+/// Rank 2+2 checked fixture: `X (x) X -> X` carries outer multiplicity two,
+/// the coupled sector ranges over `{Vacuum, X}`, degeneracies two and three.
+fn checked_multiplicity_lazy_fixture(
+    runtime: &Runtime,
+    provider: &Arc<CheckedOnlyToy>,
+) -> TensorMap<CheckedOnlyToy, Complex64> {
+    let x = GradedSpace::try_new_with_arc(Arc::clone(provider), [(Label::X, 2)]).unwrap();
+    let mixed =
+        GradedSpace::try_new_with_arc(Arc::clone(provider), [(Label::Vacuum, 1), (Label::X, 3)])
+            .unwrap();
+    let tensor =
+        TensorMap::from_block_fn(runtime, [&x, &x], [&x, &mixed], lazy_oracle_value).unwrap();
+    let coupled: std::collections::BTreeSet<_> = (0..tensor.block_count())
+        .map(|index| *tensor.block_fusion_trees(index).unwrap().coupled())
+        .collect();
+    assert_eq!(coupled.len(), 2);
+    assert!((0..tensor.block_count()).any(|index| {
+        tensor
+            .block_fusion_trees(index)
+            .unwrap()
+            .codomain_vertices()[0]
+            .get()
+            == 2
+    }));
+    tensor
+}
+
+/// Asserts `lazy.data()` against the literal pre-#1201 formula, builds an
+/// Owned twin from that literal payload, and checks that every listed
+/// transform gives the same blocks (or the same error) on both. `$ops` is a
+/// closure `(lazy, owned) -> [(name, Result, Result); N]`.
+macro_rules! assert_checked_lazy_adjoint_matches_literal {
+    ($parent:expr, $conj:expr, $close:expr, $ops:expr) => {{
+        let parent = $parent;
+        let lazy = parent.adjoint().unwrap();
+        let parent_snapshot = snapshot!(parent);
+        let lazy_snapshot = snapshot!(lazy);
+        let literal = common::literal_adjoint_payload(&parent_snapshot, &lazy_snapshot, $conj);
+        assert_eq!(literal.len(), lazy.data().len());
+        for (actual, expected) in lazy.data().iter().zip(&literal) {
+            assert!($close(*actual, *expected), "{actual:?} != {expected:?}");
+        }
+        let codomain = lazy.codomain();
+        let domain = lazy.domain();
+        let owned =
+            TensorMap::from_block_fn(parent.runtime(), &codomain, &domain, |trees, indices| {
+                let (_, geometry) = lazy_snapshot
+                    .blocks
+                    .iter()
+                    .find(|(candidate, _)| candidate == trees)
+                    .unwrap();
+                literal[common::linear(geometry, indices)]
+            })
+            .unwrap();
+        common::assert_same_tensor(&snapshot!(owned), &lazy_snapshot, $close);
+
+        let mut succeeded = 0usize;
+        for (name, actual, expected) in $ops(&lazy, &owned) {
+            match (actual, expected) {
+                (Ok(actual), Ok(expected)) => {
+                    succeeded += 1;
+                    assert!(std::ptr::eq(actual.provider(), parent.provider()));
+                    common::assert_same_tensor(&snapshot!(actual), &snapshot!(expected), $close);
+                }
+                (Err(actual), Err(expected)) => {
+                    assert_eq!(format!("{actual:?}"), format!("{expected:?}"), "{name}")
+                }
+                (actual, expected) => panic!("{name}: lazy {actual:?} vs owned {expected:?}"),
+            }
+        }
+        succeeded
+    }};
+}
+
+#[test]
+fn checked_multiplicity_lazy_adjoint_matches_the_literal_kernel_for_real_and_complex() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new(0));
+    // The toy's F-symbols are the identity on `e == f` and zero otherwise, so
+    // most recouplings are unrepresentable and fail identically for the lazy
+    // and the Owned input (error parity is asserted); the real SU(3) sibling
+    // below covers every transform. Bends on a one-sided tree do succeed and
+    // exercise the checked lane's lazy-input materialization.
+    type ToyStep<D> = (
+        &'static str,
+        Result<TensorMap<CheckedOnlyToy, D>, GenericTensorError<ToyError>>,
+        Result<TensorMap<CheckedOnlyToy, D>, GenericTensorError<ToyError>>,
+    );
+    fn two_sided_ops<D: tenet::typed::TensorScalar>(
+        lazy: &TensorMap<CheckedOnlyToy, D>,
+        owned: &TensorMap<CheckedOnlyToy, D>,
+    ) -> [ToyStep<D>; 5] {
+        [
+            (
+                "permute",
+                lazy.permute(&[1, 0], &[2, 3]),
+                owned.permute(&[1, 0], &[2, 3]),
+            ),
+            (
+                "braid",
+                lazy.braid(&[1, 0], &[2, 3], &[1, 0, 2, 3]),
+                owned.braid(&[1, 0], &[2, 3], &[1, 0, 2, 3]),
+            ),
+            ("repartition", lazy.repartition(1), owned.repartition(1)),
+            ("transpose", lazy.transpose(), owned.transpose()),
+            (
+                "transpose_axes",
+                lazy.transpose_axes(&[1, 3], &[0, 2]),
+                owned.transpose_axes(&[1, 3], &[0, 2]),
+            ),
+        ]
+    }
+    // Lazy space `[] <- X, X, X`.
+    fn one_sided_ops<D: tenet::typed::TensorScalar>(
+        lazy: &TensorMap<CheckedOnlyToy, D>,
+        owned: &TensorMap<CheckedOnlyToy, D>,
+    ) -> [ToyStep<D>; 5] {
+        [
+            (
+                "permute",
+                lazy.permute(&[], &[1, 0, 2]),
+                owned.permute(&[], &[1, 0, 2]),
+            ),
+            (
+                "braid",
+                lazy.braid(&[], &[1, 0, 2], &[0, 1, 2]),
+                owned.braid(&[], &[1, 0, 2], &[0, 1, 2]),
+            ),
+            ("repartition", lazy.repartition(1), owned.repartition(1)),
+            ("transpose", lazy.transpose(), owned.transpose()),
+            (
+                "transpose_axes",
+                lazy.transpose_axes(&[2], &[0, 1]),
+                owned.transpose_axes(&[2], &[0, 1]),
+            ),
+        ]
+    }
+
+    let two_sided = checked_multiplicity_lazy_fixture(&runtime, &provider);
+    assert!(two_sided.data().iter().any(|value| value.im != 0.0));
+    assert_checked_lazy_adjoint_matches_literal!(
+        two_sided.clone(),
+        |z: Complex64| z.conj(),
+        lazy_close_c64,
+        two_sided_ops
+    );
+    assert_checked_lazy_adjoint_matches_literal!(
+        two_sided.re(),
+        |x: f64| x,
+        lazy_close_f64,
+        two_sided_ops
+    );
+
+    let x = GradedSpace::try_new_with_arc(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
+    let one_sided =
+        TensorMap::from_block_fn(&runtime, [&x, &x, &x], [], lazy_oracle_value).unwrap();
+    assert!((0..one_sided.block_count()).any(|index| {
+        one_sided
+            .block_fusion_trees(index)
+            .unwrap()
+            .codomain_vertices()[0]
+            .get()
+            == 2
+    }));
+    let complex_succeeded = assert_checked_lazy_adjoint_matches_literal!(
+        one_sided.clone(),
+        |z: Complex64| z.conj(),
+        lazy_close_c64,
+        one_sided_ops
+    );
+    let real_succeeded = assert_checked_lazy_adjoint_matches_literal!(
+        one_sided.re(),
+        |x: f64| x,
+        lazy_close_f64,
+        one_sided_ops
+    );
+    assert!(complex_succeeded >= 2 && real_succeeded >= 2);
+}
+
+/// Real SU(3) multiplicity: all five transforms on a lazy adjoint against the
+/// literal-payload Owned twin.
+#[cfg(feature = "racah-generated")]
+#[test]
+fn sun_lazy_adjoint_matches_the_literal_kernel_under_all_transforms() {
+    use tenet::typed::SUNFusionRule;
+
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(SUNFusionRule::new(3).unwrap());
+    let adjoint = vec![1, 1];
+    let leg = GradedSpace::try_new_with_arc(Arc::clone(&provider), [(adjoint.clone(), 2)]).unwrap();
+    let other =
+        GradedSpace::try_new_with_arc(Arc::clone(&provider), [(vec![0, 0], 1), (adjoint, 1)])
+            .unwrap();
+    let complex =
+        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&other, &leg], |trees, indices| {
+            let tree = (format!("{trees:?}").bytes().fold(0u32, |acc, byte| {
+                acc.wrapping_mul(31).wrapping_add(byte as u32)
+            }) % 97) as f64;
+            let mut re = tree;
+            let mut im = -0.5 * tree + 0.25;
+            for (axis, &index) in indices.iter().enumerate() {
+                re += (index as f64 + 1.0) * (axis as f64 + 1.0);
+                im += (index as f64 + 1.0) * (axis as f64 + 1.0) * (axis as f64 + 1.0) * 0.5;
+            }
+            Complex64::new(re, im)
+        })
+        .unwrap();
+    assert!((0..complex.block_count()).any(|index| {
+        complex
+            .block_fusion_trees(index)
+            .unwrap()
+            .codomain_vertices()[0]
+            .get()
+            == 2
+    }));
+    type SunStep<D> = (
+        &'static str,
+        Result<TensorMap<SUNFusionRule, D>, GenericTensorError<tenet::prelude::SUNFusionRuleError>>,
+        Result<TensorMap<SUNFusionRule, D>, GenericTensorError<tenet::prelude::SUNFusionRuleError>>,
+    );
+    fn ops<D: tenet::typed::TensorScalar>(
+        lazy: &TensorMap<SUNFusionRule, D>,
+        owned: &TensorMap<SUNFusionRule, D>,
+    ) -> [SunStep<D>; 5] {
+        [
+            (
+                "permute",
+                lazy.permute(&[1, 3], &[0, 2]),
+                owned.permute(&[1, 3], &[0, 2]),
+            ),
+            (
+                "braid",
+                lazy.braid(&[1, 3], &[0, 2], &[3, 1, 2, 0]),
+                owned.braid(&[1, 3], &[0, 2], &[3, 1, 2, 0]),
+            ),
+            ("repartition", lazy.repartition(1), owned.repartition(1)),
+            ("transpose", lazy.transpose(), owned.transpose()),
+            (
+                "transpose_axes",
+                lazy.transpose_axes(&[1, 3], &[0, 2]),
+                owned.transpose_axes(&[1, 3], &[0, 2]),
+            ),
+        ]
+    }
+    let succeeded = assert_checked_lazy_adjoint_matches_literal!(
+        complex.clone(),
+        |z: Complex64| z.conj(),
+        lazy_close_c64,
+        ops
+    );
+    assert_eq!(succeeded, 5);
+    let succeeded =
+        assert_checked_lazy_adjoint_matches_literal!(complex.re(), |x: f64| x, lazy_close_f64, ops);
+    assert_eq!(succeeded, 5);
+}
+
+#[test]
+fn checked_tr_matches_the_literal_weighted_sum_and_keeps_error_precedence() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new(0));
+    let leg =
+        GradedSpace::try_new_with_arc(Arc::clone(&provider), [(Label::Vacuum, 1), (Label::X, 2)])
+            .unwrap();
+    // 2+2 endomorphism: diagonal blocks exist per (coupled, vertices) pair and
+    // off-diagonal multiplicity blocks must not contribute.
+    let complex =
+        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], lazy_oracle_value).unwrap();
+    assert!((0..complex.block_count()).any(|index| {
+        let trees = complex.block_fusion_trees(index).unwrap();
+        trees.codomain_vertices() != trees.domain_vertices()
+    }));
+    let dim = |label: &Label| match label {
+        Label::Vacuum => 1.0,
+        Label::X => 1.0 + 2.0_f64.sqrt(),
+        _ => unreachable!(),
+    };
+
+    let mut expected = Complex64::new(0.0, 0.0);
+    common::literal_weighted_trace(&snapshot!(complex), dim, |value, weight| {
+        expected += value * weight
+    });
+    assert!(expected.im.abs() > 1e-6);
+    assert!(lazy_close_c64(complex.tr().unwrap(), expected));
+    let lazy = complex.adjoint().unwrap();
+    assert!(lazy_close_c64(lazy.tr().unwrap(), expected.conj()));
+
+    let real = complex.re();
+    let mut expected_real = 0.0;
+    common::literal_weighted_trace(&snapshot!(real), dim, |value, weight| {
+        expected_real += value * weight
+    });
+    assert!(lazy_close_f64(real.tr().unwrap(), expected_real));
+    assert!(lazy_close_f64(
+        real.adjoint().unwrap().tr().unwrap(),
+        expected_real
+    ));
+    let mut unweighted = 0.0;
+    common::literal_weighted_trace(
+        &snapshot!(real),
+        |_| 1.0,
+        |value, weight| unweighted += value * weight,
+    );
+    assert!((unweighted - expected_real).abs() > 1e-6);
+
+    // Error precedence: endomorphism check before any provider query, then the
+    // provider's dim failure, for owned and lazy inputs alike.
+    let non_endomorphism =
+        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], lazy_oracle_value).unwrap();
+    provider.fail_dim.store(true, Ordering::Relaxed);
+    provider.coefficient_queries.store(0, Ordering::Relaxed);
+    for tensor in [
+        non_endomorphism.clone(),
+        non_endomorphism.adjoint().unwrap(),
+    ] {
+        assert!(matches!(
+            tensor.tr().unwrap_err(),
+            GenericTensorError::Facade(tenet::prelude::Error::InvalidArgument(message))
+                if message == "tr() requires an endomorphism (domain == codomain)"
+        ));
+    }
+    assert_eq!(provider.coefficient_queries.load(Ordering::Relaxed), 0);
+    for tensor in [complex.clone(), lazy.clone()] {
+        assert!(matches!(
+            tensor.tr().unwrap_err(),
+            GenericTensorError::Structure(CheckedGenericStructureError::Provider(
+                ToyError::Algebra
+            ))
+        ));
+    }
+    provider.fail_dim.store(false, Ordering::Relaxed);
+    assert!(lazy_close_c64(complex.tr().unwrap(), expected));
 }

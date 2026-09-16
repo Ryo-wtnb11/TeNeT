@@ -2219,25 +2219,30 @@ where
 /// `nout + i` (equal degeneracies, since the spaces match). Real tensors give
 /// an exactly-real result. Fermionic twists belong to `trace_pairs` / tensor
 /// contractions and are not part of this matrix trace.
-pub(crate) fn weighted_trace<R, D>(
-    rule: &R,
+///
+/// `weight_of` supplies `dim(c)`; it is fallible so the checked Generic mode can
+/// query its provider directly (TensorKit `linalg.jl::tr` is one definition
+/// for every sector type, and so is this).
+pub(crate) fn weighted_trace<D, W, E>(
     structure: &BlockStructure,
     nout: usize,
     data: &[D],
-) -> Result<Complex64, Error>
+    mut weight_of: W,
+) -> Result<Complex64, E>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: ScalarOps,
+    W: FnMut(SectorId) -> Result<f64, E>,
+    E: From<Error>,
 {
     let mut total = Complex64::new(0.0, 0.0);
     for index in 0..structure.block_count() {
-        let block = structure.block(index)?;
+        let block = structure.block(index).map_err(Error::from)?;
         let key = match block.key() {
             BlockKey::FusionTree(key) => key,
             _ => {
-                return Err(Error::InvalidArgument(
-                    "tr() requires fusion-tree blocks".to_string(),
-                ))
+                return Err(
+                    Error::InvalidArgument("tr() requires fusion-tree blocks".to_string()).into(),
+                )
             }
         };
         // Off the coupled-block diagonal (codomain tree != domain tree): not on
@@ -2245,8 +2250,7 @@ where
         if key.codomain_tree() != key.domain_tree() {
             continue;
         }
-        let coupled = key.codomain_tree().coupled();
-        let weight = rule.dim_scalar(coupled);
+        let weight = weight_of(key.codomain_tree().coupled())?;
         let shape = block.shape();
         let strides = block.strides();
         let offset = block.offset();
@@ -6493,44 +6497,16 @@ where
             };
             return Ok(FactorScalar::adjoint(Self::tr(&parent)?));
         }
-        let weights = checked_generic_weight_map_for(tensor)?;
-        let structure = tensor.logical_space().space().structure();
-        let nout = tensor.logical_space().space().nout();
-        let data = tensor
-            .owned_body()
-            .expect("owned trace input")
-            .materialized_dense_data();
-        let mut total = num_complex::Complex64::new(0.0, 0.0);
-        for index in 0..structure.block_count() {
-            let block = structure.block(index).map_err(Error::from)?;
-            let BlockKey::FusionTree(key) = block.key() else {
-                return Err(
-                    Error::InvalidArgument("tr() requires fusion-tree blocks".to_string()).into(),
-                );
-            };
-            if key.codomain_tree() != key.domain_tree() {
-                continue;
-            }
-            let shape = block.shape();
-            let strides = block.strides();
-            let mut partial = D::from_real(0.0);
-            for linear in 0..shape[..nout].iter().product() {
-                let mut remainder = linear;
-                let mut position = block.offset();
-                for axis in 0..nout {
-                    let coordinate = remainder % shape[axis];
-                    remainder /= shape[axis];
-                    position += coordinate * (strides[axis] + strides[nout + axis]);
-                }
-                partial = partial + data[position];
-            }
-            total += partial.widen_complex()
-                * weights
-                    .get(&key.codomain_tree().coupled())
-                    .copied()
-                    .unwrap_or(0.0);
-        }
-        Ok(D::from_complex64(total))
+        let provider = tensor.logical_space().provider();
+        Ok(D::from_complex64(weighted_trace(
+            tensor.logical_space().space().structure(),
+            tensor.logical_space().space().nout(),
+            tensor
+                .owned_body()
+                .expect("owned trace input")
+                .materialized_dense_data(),
+            |sector| <R::Mode as TypedSpaceModeDispatch<R>>::dim(provider, sector),
+        )?))
     }
 }
 
@@ -15967,13 +15943,14 @@ where
             };
             return Ok(FactorScalar::adjoint(parent.tr()?));
         }
+        let provider = self.logical_space().provider();
         Ok(D::from_complex64(weighted_trace(
-            self.logical_space().provider(),
             self.logical_space().space().structure(),
             self.logical_space().space().nout(),
             self.owned_body()
                 .expect("owned trace input")
                 .materialized_dense_data(),
+            |sector| Ok::<_, Error>(provider.dim_scalar(sector)),
         )?))
     }
 

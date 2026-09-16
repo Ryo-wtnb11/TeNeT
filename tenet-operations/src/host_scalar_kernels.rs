@@ -383,9 +383,21 @@ where
 
 #[derive(Clone, Copy, Debug)]
 enum RawStridedAction<T> {
-    CopyScale { alpha: T },
-    Axpy { alpha: T },
-    Axpby { alpha: T, beta: T },
+    /// `alpha == 1, beta == 0`: bit-exact copy (or conjugate). Why not
+    /// `CopyScale { alpha: 1 }`: `1 * (inf + 0i)` is `inf + NaN i` for complex
+    /// scalars, so a plain copy must not multiply (TensorKit skips the scale
+    /// for `One()` as well).
+    Copy,
+    CopyScale {
+        alpha: T,
+    },
+    Axpy {
+        alpha: T,
+    },
+    Axpby {
+        alpha: T,
+        beta: T,
+    },
 }
 
 fn raw_strided_action<T>(alpha: T, beta: T) -> RawStridedAction<T>
@@ -393,7 +405,11 @@ where
     T: Copy + PartialEq + Zero + One,
 {
     if beta.is_zero() {
-        RawStridedAction::CopyScale { alpha }
+        if alpha.is_one() {
+            RawStridedAction::Copy
+        } else {
+            RawStridedAction::CopyScale { alpha }
+        }
     } else if beta.is_one() {
         RawStridedAction::Axpy { alpha }
     } else {
@@ -900,6 +916,7 @@ where
     T: Copy + Add<T, Output = T> + Mul<T, Output = T>,
 {
     *dst = match action {
+        RawStridedAction::Copy => src,
         RawStridedAction::CopyScale { alpha } => alpha * src,
         RawStridedAction::Axpy { alpha } => *dst + alpha * src,
         RawStridedAction::Axpby { alpha, beta } => beta * *dst + alpha * src,

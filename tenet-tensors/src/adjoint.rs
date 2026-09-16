@@ -5,6 +5,7 @@
 //! transposes of `t`'s blocks (`block(t^H, c) = block(t, c)^H`). Codomain and
 //! domain swap as spaces; leg duality flags are unchanged.
 
+use core::ops::{Add, Mul};
 use std::sync::Arc;
 
 use tenet_core::{
@@ -21,7 +22,32 @@ use crate::contract::{
 use crate::contract::{
     dispatch_prepare, BoundDynamicFusionMapSpace, DynamicFusionMapSpace, LayoutKeyBuilder,
 };
-use crate::{CheckedGenericPlanError, ConjugateValue, OperationError};
+use crate::{CheckedGenericPlanError, ConjugateValue, FusionOperand, OperationError};
+use tenet_operations::tensoradd_raw_strided_kernel_mapped;
+
+/// Scalar contract of the adjoint materialization: exactly what the shared
+/// strided owner `tensoradd_raw_strided_kernel_mapped` requires, in one place.
+pub trait AdjointScalar:
+    Copy
+    + Add<Self, Output = Self>
+    + Mul<Self, Output = Self>
+    + PartialEq
+    + num_traits::Zero
+    + num_traits::One
+    + ConjugateValue
+{
+}
+
+impl<T> AdjointScalar for T where
+    T: Copy
+        + Add<T, Output = T>
+        + Mul<T, Output = T>
+        + PartialEq
+        + num_traits::Zero
+        + num_traits::One
+        + ConjugateValue
+{
+}
 
 /// Dynamic-rank adjoint space (dagger of the homspace): codomain and domain
 /// swapped, per-block shapes transposed. Pure metadata — touches no data — so a
@@ -242,7 +268,7 @@ pub(crate) fn adjoint_dyn<R, D>(
 ) -> Result<(DynamicFusionMapSpace, Vec<D>), OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: Copy + num_traits::Zero + Clone + ConjugateValue,
+    D: AdjointScalar,
 {
     adjoint_dyn_with_primer(rule, space, data, encoded_layout_primer::<R>)
 }
@@ -255,7 +281,7 @@ fn adjoint_dyn_with_primer<R, D>(
 ) -> Result<(DynamicFusionMapSpace, Vec<D>), OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: Copy + num_traits::Zero + Clone + ConjugateValue,
+    D: AdjointScalar,
 {
     space.validate_rule(rule)?;
     validate_adjoint_data_extent(space.required_len(), data.len())?;
@@ -271,6 +297,13 @@ where
 /// Materialize adjoint payload bytes between an already-admitted source and
 /// destination layout.
 ///
+/// Per logical block this is one strided copy with conjugation from the
+/// parent block, read through [`FusionOperand::adjoint`] and the same owner
+/// (`tensoradd_raw_strided_kernel_mapped`) that `oriented_fusion_restrict_into`
+/// and the oriented add path use, so the adjoint axis/key map lives in one
+/// place. The receiver-sized output copy itself is the retained limitation
+/// recorded on #1177.
+///
 /// This contains no provider work: callers must derive and admit
 /// `adjoint_space` transactionally before publishing a lazy view.
 #[doc(hidden)]
@@ -280,18 +313,16 @@ pub fn materialize_adjoint_data_dyn<D>(
     data: &[D],
 ) -> Result<Vec<D>, OperationError>
 where
-    D: Copy + num_traits::Zero + Clone + ConjugateValue,
+    D: AdjointScalar,
 {
     validate_adjoint_data_extent(space.required_len(), data.len())?;
-    let nout = space.nout();
-    let nin = space.nin();
-    let structure = Arc::clone(space.structure());
     let len = adjoint_space
         .required_len()
         .map_err(OperationError::from_core_preserving_context)?;
     let mut result = vec![D::zero(); len];
-
-    let result_structure = Arc::clone(adjoint_space.structure());
+    let source = FusionOperand::adjoint(space);
+    let structure = space.structure();
+    let result_structure = adjoint_space.structure();
     for index in 0..result_structure.block_count() {
         let block = result_structure
             .block(index)
@@ -299,57 +330,42 @@ where
         let BlockKey::FusionTree(key) = block.key() else {
             continue;
         };
-        let source_key = BlockKey::FusionTree(FusionTreePairKey::pair(
-            key.domain_tree().clone(),
-            key.codomain_tree().clone(),
-        ));
         let source_index = structure
-            .find_block_index_by_key(&source_key)
+            .find_block_index_by_adjoint_fusion_tree_pair(key)
             .ok_or_else(|| OperationError::MissingBlockKey {
-                key: Box::new(source_key),
+                key: Box::new(BlockKey::FusionTree(FusionTreePairKey::pair(
+                    key.domain_tree().clone(),
+                    key.codomain_tree().clone(),
+                ))),
             })?;
         let source_block = structure
             .block(source_index)
             .map_err(OperationError::from_core_preserving_context)?;
-
-        let shape = block.shape().to_vec();
-        let strides = block.strides().to_vec();
-        let offset = block.offset();
-        let source_strides = source_block.strides().to_vec();
-        let source_offset = source_block.offset();
-        // Adjoint index map: result (j[..nin], i[..nout]) reads
-        // conj(source(i, j)).
-        let count: usize = shape.iter().product();
-        let mut indices = vec![0usize; shape.len()];
-        for _ in 0..count {
-            let position = offset
-                + indices
-                    .iter()
-                    .zip(&strides)
-                    .map(|(&i, &s)| i * s)
-                    .sum::<usize>();
-            let source_position = source_offset
-                + indices[nin..]
-                    .iter()
-                    .zip(&source_strides[..nout])
-                    .map(|(&i, &s)| i * s)
-                    .sum::<usize>()
-                + indices[..nin]
-                    .iter()
-                    .zip(&source_strides[nout..])
-                    .map(|(&i, &s)| i * s)
-                    .sum::<usize>();
-            result[position] = data[source_position].maybe_conj(true);
-            for axis in 0..shape.len() {
-                indices[axis] += 1;
-                if indices[axis] < shape[axis] {
-                    break;
-                }
-                indices[axis] = 0;
-            }
-        }
+        let result_stride = |axis: usize| {
+            isize::try_from(block.strides()[axis]).map_err(|_| OperationError::ElementCountOverflow)
+        };
+        let source_stride = |axis: usize| {
+            isize::try_from(source_block.strides()[source.storage_axis(axis)?])
+                .map_err(|_| OperationError::ElementCountOverflow)
+        };
+        tensoradd_raw_strided_kernel_mapped(
+            &mut result,
+            data,
+            block.shape(),
+            result_stride,
+            source_stride,
+            checked_offset(block.offset())?,
+            checked_offset(source_block.offset())?,
+            source.storage_conjugate(),
+            D::one(),
+            D::zero(),
+        )?;
     }
     Ok(result)
+}
+
+fn checked_offset(offset: usize) -> Result<isize, OperationError> {
+    isize::try_from(offset).map_err(|_| OperationError::OffsetOverflow { value: offset })
 }
 
 /// Dynamic-rank adjoint that retains the exact provider allocation of its
@@ -360,7 +376,7 @@ pub fn adjoint_bound_dyn<R, D>(
 ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: Copy + num_traits::Zero + Clone + ConjugateValue,
+    D: AdjointScalar,
 {
     let (output, data) =
         adjoint_dyn_with_primer(space.provider(), space.space(), data, space.layout_primer())?;
@@ -376,7 +392,7 @@ pub fn adjoint_bound_dyn_generic<R, D>(
 ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), OperationError>
 where
     R: FusionRule,
-    D: Copy + num_traits::Zero + Clone + ConjugateValue,
+    D: AdjointScalar,
 {
     let (output, data) = adjoint_dyn_generic(space.provider(), space.space(), data)?;
     let output =
@@ -498,77 +514,12 @@ pub(crate) fn adjoint_dyn_generic<R, D>(
 ) -> Result<(DynamicFusionMapSpace, Vec<D>), OperationError>
 where
     R: FusionRule,
-    D: Copy + num_traits::Zero + Clone + ConjugateValue,
+    D: AdjointScalar,
 {
     space.validate_rule(rule)?;
     validate_adjoint_data_extent(space.required_len(), data.len())?;
-    let nout = space.nout();
-    let nin = space.nin();
-    let structure = Arc::clone(space.structure());
     let adjoint_space = adjoint_space_dyn_generic(rule, space)?;
-    let len = adjoint_space
-        .required_len()
-        .map_err(OperationError::from_core_preserving_context)?;
-    let mut result = vec![D::zero(); len];
-
-    let result_structure = Arc::clone(adjoint_space.structure());
-    for index in 0..result_structure.block_count() {
-        let block = result_structure
-            .block(index)
-            .map_err(OperationError::from_core_preserving_context)?;
-        let BlockKey::FusionTree(key) = block.key() else {
-            continue;
-        };
-        let source_key = BlockKey::FusionTree(FusionTreePairKey::pair(
-            key.domain_tree().clone(),
-            key.codomain_tree().clone(),
-        ));
-        let source_index = structure
-            .find_block_index_by_key(&source_key)
-            .ok_or_else(|| OperationError::MissingBlockKey {
-                key: Box::new(source_key),
-            })?;
-        let source_block = structure
-            .block(source_index)
-            .map_err(OperationError::from_core_preserving_context)?;
-
-        let shape = block.shape().to_vec();
-        let strides = block.strides().to_vec();
-        let offset = block.offset();
-        let source_strides = source_block.strides().to_vec();
-        let source_offset = source_block.offset();
-        // Adjoint index map: result (j[..nin], i[..nout]) reads
-        // conj(source(i, j)).
-        let count: usize = shape.iter().product();
-        let mut indices = vec![0usize; shape.len()];
-        for _ in 0..count {
-            let position = offset
-                + indices
-                    .iter()
-                    .zip(&strides)
-                    .map(|(&i, &s)| i * s)
-                    .sum::<usize>();
-            let source_position = source_offset
-                + indices[nin..]
-                    .iter()
-                    .zip(&source_strides[..nout])
-                    .map(|(&i, &s)| i * s)
-                    .sum::<usize>()
-                + indices[..nin]
-                    .iter()
-                    .zip(&source_strides[nout..])
-                    .map(|(&i, &s)| i * s)
-                    .sum::<usize>();
-            result[position] = data[source_position].maybe_conj(true);
-            for axis in 0..shape.len() {
-                indices[axis] += 1;
-                if indices[axis] < shape[axis] {
-                    break;
-                }
-                indices[axis] = 0;
-            }
-        }
-    }
+    let result = materialize_adjoint_data_dyn(space, &adjoint_space, data)?;
     Ok((adjoint_space, result))
 }
 
@@ -579,7 +530,7 @@ pub fn adjoint<R, D, const NOUT: usize, const NIN: usize>(
 ) -> Result<TensorMap<D, NIN, NOUT>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: Copy + num_traits::Zero + Clone + ConjugateValue,
+    D: AdjointScalar,
 {
     let fusion_space = tensor
         .fusion_space()
@@ -593,7 +544,6 @@ where
     let adjoint_hom =
         FusionTreeHomSpace::new(homspace.domain().clone(), homspace.codomain().clone());
 
-    let structure = Arc::clone(tensor.structure());
     let dims = tensor.space().dims();
     let mut domain_dims = [0usize; NIN];
     domain_dims.copy_from_slice(&dims[NOUT..]);
@@ -612,73 +562,13 @@ where
     .map_err(OperationError::from_core_preserving_context)?
     .try_bind_rule(rule)
     .map_err(OperationError::from_core_preserving_context)?;
-    let len = space
-        .required_len()
+    let data = materialize_adjoint_data_dyn(
+        &DynamicFusionMapSpace::from_typed(fusion_space),
+        &DynamicFusionMapSpace::from_typed(&space),
+        tensor.data(),
+    )?;
+    let result = TensorMap::<D, NIN, NOUT>::from_vec_with_fusion_space(data, space)
         .map_err(OperationError::from_core_preserving_context)?;
-    let mut result =
-        TensorMap::<D, NIN, NOUT>::from_vec_with_fusion_space(vec![D::zero(); len], space)
-            .map_err(OperationError::from_core_preserving_context)?;
-
-    let result_structure = Arc::clone(result.structure());
-    let source_data = tensor.data();
-    for index in 0..result_structure.block_count() {
-        let block = result_structure
-            .block(index)
-            .map_err(OperationError::from_core_preserving_context)?;
-        let BlockKey::FusionTree(key) = block.key() else {
-            continue;
-        };
-        let source_key = BlockKey::FusionTree(FusionTreePairKey::pair(
-            key.domain_tree().clone(),
-            key.codomain_tree().clone(),
-        ));
-        let source_index = structure
-            .find_block_index_by_key(&source_key)
-            .ok_or_else(|| OperationError::MissingBlockKey {
-                key: Box::new(source_key),
-            })?;
-        let source_block = structure
-            .block(source_index)
-            .map_err(OperationError::from_core_preserving_context)?;
-
-        let shape = block.shape().to_vec();
-        let strides = block.strides().to_vec();
-        let offset = block.offset();
-        let source_strides = source_block.strides().to_vec();
-        let source_offset = source_block.offset();
-        // Adjoint index map: result (j[..NIN], i[..NOUT]) reads
-        // conj(source(i, j)).
-        let count: usize = shape.iter().product();
-        let mut indices = vec![0usize; shape.len()];
-        let data = result.data_mut();
-        for _ in 0..count {
-            let position = offset
-                + indices
-                    .iter()
-                    .zip(&strides)
-                    .map(|(&i, &s)| i * s)
-                    .sum::<usize>();
-            let source_position = source_offset
-                + indices[NIN..]
-                    .iter()
-                    .zip(&source_strides[..NOUT])
-                    .map(|(&i, &s)| i * s)
-                    .sum::<usize>()
-                + indices[..NIN]
-                    .iter()
-                    .zip(&source_strides[NOUT..])
-                    .map(|(&i, &s)| i * s)
-                    .sum::<usize>();
-            data[position] = source_data[source_position].maybe_conj(true);
-            for axis in 0..shape.len() {
-                indices[axis] += 1;
-                if indices[axis] < shape[axis] {
-                    break;
-                }
-                indices[axis] = 0;
-            }
-        }
-    }
     Ok(result)
 }
 
@@ -687,7 +577,7 @@ mod cache_tests {
     use super::*;
     use num_complex::Complex64;
     use std::cell::Cell;
-    use std::ops::Add;
+    use std::ops::{Add, Mul};
     use tenet_core::{
         BlockSpec, BraidingStyleKind, FermionParityFusionRule, FusionProductSpace, FusionStyleKind,
         FusionTreeKey, Fz2SectorLayout, PackedProductCodec, ProductFusionRule, ProductSectorCodec,
@@ -725,6 +615,20 @@ mod cache_tests {
 
         fn is_zero(&self) -> bool {
             self.0 == 0.0
+        }
+    }
+
+    impl Mul for OutputObservedValue {
+        type Output = Self;
+
+        fn mul(self, rhs: Self) -> Self::Output {
+            Self(self.0 * rhs.0)
+        }
+    }
+
+    impl num_traits::One for OutputObservedValue {
+        fn one() -> Self {
+            Self(1.0)
         }
     }
 
