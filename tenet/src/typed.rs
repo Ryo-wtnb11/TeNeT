@@ -2113,23 +2113,31 @@ pub(crate) fn sector_regions(
         .ok_or_else(|| internal_layout_error("non-packed coupled-sector layout"))
 }
 
-pub(crate) fn coupled_region_inner<D, W>(
+/// Quantum-dimension-weighted region inner product `sum_c dim(c) * <a_c, b_c>`
+/// over the packed coupled-sector regions, first argument conjugated.
+///
+/// `weight_of` supplies `dim(c)` and is fallible for the same reason as
+/// [`weighted_trace`]'s: the checked Generic mode queries its provider in
+/// place, once per region, instead of materializing a per-call weight map.
+pub(crate) fn coupled_region_inner<D, W, E>(
     structure: &BlockStructure,
     nout: usize,
     a: &[D],
     b: &[D],
     mut weight_of: W,
-) -> Result<Complex64, Error>
+) -> Result<Complex64, E>
 where
     D: ScalarOps,
-    W: FnMut(SectorId) -> f64,
+    W: FnMut(SectorId) -> Result<f64, E>,
+    E: From<Error>,
 {
     let regions = sector_regions(structure, nout)?;
-    let required_len = structure.required_len()?;
+    let required_len = structure.required_len().map_err(Error::from)?;
     if a.len() != required_len || b.len() != required_len {
         return Err(internal_layout_error(
             "coupled-sector regions do not cover the scalar buffers",
-        ));
+        )
+        .into());
     }
 
     let mut total = Complex64::new(0.0, 0.0);
@@ -2145,37 +2153,9 @@ where
         for (&ai, &bi) in lhs.iter().zip(rhs) {
             partial = partial + FactorScalar::adjoint(ai) * bi;
         }
-        total += partial.widen_complex() * weight_of(region.coupled());
+        total += partial.widen_complex() * weight_of(region.coupled())?;
     }
     Ok(total)
-}
-
-fn checked_generic_weight_map_for<R, D>(
-    tensor: &TensorMap<R, D>,
-) -> Result<HashMap<SectorId, f64>, GenericTensorError<<R as CheckedGenericFusion>::Error>>
-where
-    R: TypedSectorAdmission<
-            Error = <R as CheckedGenericFusion>::Error,
-            Mode = CheckedGenericAdmissionMode,
-        > + CheckedGenericFusion
-        + CheckedGenericRigidSymbols<Scalar = f64>,
-    D: TensorScalar,
-{
-    let regions = sector_regions(
-        tensor.logical_space().space().structure(),
-        tensor.logical_space().space().nout(),
-    )?;
-    let mut weights = HashMap::with_capacity(regions.len());
-    for region in regions.iter() {
-        let sector = region.coupled();
-        if weights.contains_key(&sector) {
-            continue;
-        }
-        let weight =
-            <R::Mode as TypedSpaceModeDispatch<R>>::dim(tensor.logical_space().provider(), sector)?;
-        weights.insert(sector, weight);
-    }
-    Ok(weights)
 }
 
 /// Quantum-dimension-weighted Frobenius inner product over the stored
@@ -2207,7 +2187,13 @@ where
         }
         return Ok(total.widen_complex());
     }
-    coupled_region_inner(structure, nout, a, b, |coupled| rule.dim_scalar(coupled))
+    coupled_region_inner(
+        structure,
+        nout,
+        a,
+        b,
+        |coupled| Ok(rule.dim_scalar(coupled)),
+    )
 }
 
 /// Quantum-dimension-weighted block trace of an endomorphism:
@@ -4505,6 +4491,12 @@ impl<E> From<Error> for GenericTensorError<E> {
     }
 }
 
+impl<E> From<tenet_tensors::OperationError> for GenericTensorError<E> {
+    fn from(error: tenet_tensors::OperationError) -> Self {
+        Self::Facade(error.into())
+    }
+}
+
 impl<E> From<CheckedGenericStructureError<E>> for GenericTensorError<E> {
     fn from(error: CheckedGenericStructureError<E>) -> Self {
         Self::Structure(error)
@@ -6434,22 +6426,37 @@ where
             )
             .into());
         }
-        let weights = checked_generic_weight_map_for(tensor)?;
+        // One `dim(c)` query per coupled sector, evaluated in place. The
+        // dense owner asks once per region; the oriented owner asks once per
+        // logical block, and a canonical structure lists each coupled sector
+        // as one contiguous run of blocks, so a one-entry run cache keeps
+        // both at G queries with no allocation and no hashing. Why not a
+        // `Vec<f64>` indexed by region: the oriented owner asks by `SectorId`,
+        // so that would still need a sector-to-index map or a tenet-core
+        // accessor, while the run cache needs neither.
+        let provider = tensor.logical_space().provider();
+        let mut last: Option<(SectorId, f64)> = None;
+        let mut weight_of = move |sector: SectorId| match last {
+            Some((cached, weight)) if cached == sector => Ok(weight),
+            _ => {
+                let weight = <R::Mode as TypedSpaceModeDispatch<R>>::dim(provider, sector)?;
+                last = Some((sector, weight));
+                Ok(weight)
+            }
+        };
         if matches!(&tensor.repr, TypedTensorRepr::Adjoint(_))
             || matches!(&other.repr, TypedTensorRepr::Adjoint(_))
         {
             let (lhs_operand, lhs_data) = tensor.fusion_operand_and_data();
             let (rhs_operand, rhs_data) = other.fusion_operand_and_data();
-            let value = tenet_tensors::oriented_fusion_inner(
+            return tenet_tensors::oriented_fusion_inner_with(
                 tensor.logical_space().space().structure(),
                 lhs_operand,
                 lhs_data,
                 rhs_operand,
                 rhs_data,
-                |sector| D::from_real(*weights.get(&sector).unwrap_or(&0.0)),
-            )
-            .map_err(|error| GenericTensorError::Facade(error.into()))?;
-            return Ok(value);
+                |sector| weight_of(sector).map(D::from_real),
+            );
         }
         let value = coupled_region_inner(
             tensor.logical_space().space().structure(),
@@ -6462,7 +6469,7 @@ where
                 .owned_body()
                 .expect("owned inner input")
                 .materialized_dense_data(),
-            |sector| *weights.get(&sector).unwrap_or(&0.0),
+            weight_of,
         )?;
         Ok(D::from_complex64(value))
     }
@@ -17268,7 +17275,7 @@ mod representation_gates {
             owned(&tensor).space.space().nout(),
             &data[..data.len() - 1],
             data,
-            |_| 1.0,
+            |_| Ok::<_, Error>(1.0),
         )
         .unwrap_err();
         assert!(matches!(error, Error::InvalidArgument(message) if
@@ -17279,12 +17286,14 @@ mod representation_gates {
     fn coupled_region_inner_keeps_empty_and_non_fusion_boundaries() {
         let empty = BlockStructure::empty(3);
         assert_eq!(
-            coupled_region_inner::<f64, _>(&empty, 1, &[], &[], |_| 7.0).unwrap(),
+            coupled_region_inner::<f64, _, Error>(&empty, 1, &[], &[], |_| Ok(7.0)).unwrap(),
             Complex64::new(0.0, 0.0)
         );
 
         let trivial = BlockStructure::trivial(&[2, 2]).unwrap();
-        let error = coupled_region_inner(&trivial, 1, &[1.0; 4], &[1.0; 4], |_| 1.0).unwrap_err();
+        let error =
+            coupled_region_inner(&trivial, 1, &[1.0; 4], &[1.0; 4], |_| Ok::<_, Error>(1.0))
+                .unwrap_err();
         assert!(matches!(error, Error::InvalidArgument(message) if
             message.contains("non-packed coupled-sector layout")));
     }

@@ -6745,3 +6745,229 @@ fn checked_tr_matches_the_literal_weighted_sum_and_keeps_error_precedence() {
     provider.fail_dim.store(false, Ordering::Relaxed);
     assert!(lazy_close_c64(complex.tr().unwrap(), expected));
 }
+
+/// TensorKit `inner` (`vectorinterface.jl`): `sum_c dim(c) * <a_c, b_c>` over
+/// every stored block with the first argument conjugated, walked with an
+/// explicit odometer over public block geometry so the expected value never
+/// passes through the coupled-region or oriented owners under test.
+fn literal_weighted_inner<D: Copy>(
+    lhs: &common::Snapshot<Label, D>,
+    rhs: &common::Snapshot<Label, D>,
+    dim: impl Fn(&Label) -> f64,
+    mut accumulate: impl FnMut(D, D, f64),
+) {
+    assert_eq!(lhs.blocks.len(), rhs.blocks.len());
+    for ((trees, geometry), (other_trees, other_geometry)) in lhs.blocks.iter().zip(&rhs.blocks) {
+        assert_eq!(trees, other_trees);
+        assert_eq!(geometry.shape, other_geometry.shape);
+        let weight = dim(trees.coupled());
+        common::for_each_index(&geometry.shape, |index| {
+            accumulate(
+                lhs.data[common::linear(geometry, index)],
+                rhs.data[common::linear(other_geometry, index)],
+                weight,
+            );
+        });
+    }
+}
+
+#[test]
+fn checked_inner_and_norm_take_one_weight_per_sector_and_keep_error_precedence() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new(0));
+    let leg =
+        GradedSpace::try_new_with_arc(Arc::clone(&provider), [(Label::Vacuum, 1), (Label::X, 2)])
+            .unwrap();
+    // 2+2 with outer multiplicity: every coupled sector owns several blocks
+    // (B > G), so a per-block weight lookup would be observable as extra
+    // provider queries below.
+    let lhs =
+        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], lazy_oracle_value).unwrap();
+    let rhs = TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, indices| {
+        lazy_oracle_value(trees, indices) * Complex64::new(0.5, -1.5) + Complex64::new(1.0, 2.0)
+    })
+    .unwrap();
+    let sectors = (0..lhs.block_count())
+        .map(|index| *lhs.block_fusion_trees(index).unwrap().coupled())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    assert_eq!(sectors, 2);
+    assert!(lhs.block_count() > sectors);
+    let dim = |label: &Label| match label {
+        Label::Vacuum => 1.0,
+        Label::X => 1.0 + 2.0_f64.sqrt(),
+        _ => unreachable!(),
+    };
+    let literal_c64 = |a: &TensorMap<CheckedOnlyToy, Complex64>,
+                       b: &TensorMap<CheckedOnlyToy, Complex64>| {
+        let mut expected = Complex64::new(0.0, 0.0);
+        literal_weighted_inner(&snapshot!(a), &snapshot!(b), dim, |x, y, weight| {
+            expected += x.conj() * y * weight
+        });
+        expected
+    };
+    let literal_f64 = |a: &TensorMap<CheckedOnlyToy, f64>, b: &TensorMap<CheckedOnlyToy, f64>| {
+        let mut expected = 0.0;
+        literal_weighted_inner(&snapshot!(a), &snapshot!(b), dim, |x, y, weight| {
+            expected += x * y * weight
+        });
+        expected
+    };
+
+    // Owned, complex and real.
+    let expected = literal_c64(&lhs, &rhs);
+    assert!(expected.im.abs() > 1e-6);
+    assert!(lazy_close_c64(lhs.inner(&rhs).unwrap(), expected));
+    assert!(lazy_close_c64(rhs.inner(&lhs).unwrap(), expected.conj()));
+    assert!(lazy_close_f64(
+        lhs.norm().unwrap(),
+        literal_c64(&lhs, &lhs).re.sqrt()
+    ));
+    let real_lhs = lhs.re();
+    let real_rhs = rhs.re();
+    assert!(lazy_close_f64(
+        real_lhs.inner(&real_rhs).unwrap(),
+        literal_f64(&real_lhs, &real_rhs)
+    ));
+    assert!(lazy_close_f64(
+        real_lhs.norm().unwrap(),
+        literal_f64(&real_lhs, &real_lhs).sqrt()
+    ));
+    let mut unweighted = Complex64::new(0.0, 0.0);
+    literal_weighted_inner(
+        &snapshot!(lhs),
+        &snapshot!(rhs),
+        |_| 1.0,
+        |x, y, w| unweighted += x.conj() * y * w,
+    );
+    assert!((unweighted - expected).norm() > 1e-6);
+
+    // Lazy adjoints in every orientation: the literal oracle on the
+    // materialized lazy payload, and <a†, b†> = conj(<a, b>) against owned.
+    let lazy_lhs = lhs.adjoint().unwrap();
+    let lazy_rhs = rhs.adjoint().unwrap();
+    let expected_lazy = literal_c64(&lazy_lhs, &lazy_rhs);
+    assert!(lazy_close_c64(expected_lazy, expected.conj()));
+    assert!(lazy_close_c64(
+        lazy_lhs.inner(&lazy_rhs).unwrap(),
+        expected_lazy
+    ));
+    let expected_mixed = literal_c64(&lazy_lhs, &rhs);
+    assert!(lazy_close_c64(
+        lazy_lhs.inner(&rhs).unwrap(),
+        expected_mixed
+    ));
+    assert!(lazy_close_c64(
+        rhs.inner(&lazy_lhs).unwrap(),
+        expected_mixed.conj()
+    ));
+    assert!(lazy_close_f64(
+        lazy_lhs.norm().unwrap(),
+        lhs.norm().unwrap()
+    ));
+    let real_lazy = real_lhs.adjoint().unwrap();
+    assert!(lazy_close_f64(
+        real_lazy.inner(&real_rhs).unwrap(),
+        literal_f64(&real_lazy, &real_rhs)
+    ));
+
+    // Exactly G `dim` queries per call on the dense and the oriented owners.
+    // The former per-call map hashed 3G (dense) or 2G + B (lazy) times; hashes
+    // are not provider queries, so only the query count is pinned here.
+    for (row, call) in [
+        (
+            "owned inner",
+            Box::new(|| lhs.inner(&rhs).map(|_| ())) as Box<dyn Fn() -> _>,
+        ),
+        ("owned norm", Box::new(|| lhs.norm().map(|_| ()))),
+        (
+            "lazy-lazy inner",
+            Box::new(|| lazy_lhs.inner(&lazy_rhs).map(|_| ())),
+        ),
+        (
+            "lazy-owned inner",
+            Box::new(|| lazy_lhs.inner(&rhs).map(|_| ())),
+        ),
+        (
+            "owned-lazy inner",
+            Box::new(|| rhs.inner(&lazy_lhs).map(|_| ())),
+        ),
+        ("lazy norm", Box::new(|| lazy_lhs.norm().map(|_| ()))),
+    ] {
+        provider.coefficient_queries.store(0, Ordering::Relaxed);
+        call().unwrap();
+        assert_eq!(
+            provider.coefficient_queries.load(Ordering::Relaxed),
+            sectors,
+            "{row}"
+        );
+    }
+
+    // Error precedence: space mismatch and diagonal-payload rejection come
+    // before any weight query even while `dim` is failing; then the provider
+    // failure surfaces for owned and lazy inputs on both reductions.
+    let wide = GradedSpace::try_new_with_arc(Arc::clone(&provider), [(Label::X, 3)]).unwrap();
+    let mismatched =
+        TensorMap::from_block_fn(&runtime, [&wide, &wide], [&wide, &wide], lazy_oracle_value)
+            .unwrap();
+    let diagonal = TensorMap::<_, Complex64>::diagonal(
+        &runtime,
+        &leg,
+        [
+            SectorSpectrum {
+                sector: Label::Vacuum,
+                values: vec![Complex64::new(3.0, 0.0)],
+            },
+            SectorSpectrum {
+                sector: Label::X,
+                values: vec![Complex64::new(1.0, 0.0), Complex64::new(2.0, 0.0)],
+            },
+        ],
+    )
+    .unwrap();
+    provider.fail_dim.store(true, Ordering::Relaxed);
+    provider.coefficient_queries.store(0, Ordering::Relaxed);
+    for (a, b) in [
+        (&lhs, &mismatched),
+        (&mismatched, &lhs),
+        (&lazy_lhs, &mismatched),
+        (&mismatched, &lazy_lhs),
+    ] {
+        assert!(matches!(
+            a.inner(b).unwrap_err(),
+            GenericTensorError::Facade(tenet::prelude::Error::InvalidArgument(message))
+                if message == "tensors live on different spaces or block layouts"
+        ));
+    }
+    assert!(matches!(
+        diagonal.inner(&diagonal).unwrap_err(),
+        GenericTensorError::Facade(tenet::prelude::Error::InvalidArgument(message))
+            if message == "checked Generic reductions require dense payloads"
+    ));
+    assert!(matches!(
+        diagonal.norm().unwrap_err(),
+        GenericTensorError::Facade(tenet::prelude::Error::InvalidArgument(message))
+            if message == "checked Generic reductions require dense payloads"
+    ));
+    assert_eq!(provider.coefficient_queries.load(Ordering::Relaxed), 0);
+    for tensor in [&lhs, &lazy_lhs] {
+        assert!(matches!(
+            tensor.inner(&rhs).unwrap_err(),
+            GenericTensorError::Structure(CheckedGenericStructureError::Provider(
+                ToyError::Algebra
+            ))
+        ));
+        assert!(matches!(
+            tensor.norm().unwrap_err(),
+            GenericTensorError::Structure(CheckedGenericStructureError::Provider(
+                ToyError::Algebra
+            ))
+        ));
+    }
+    provider.fail_dim.store(false, Ordering::Relaxed);
+    assert!(lazy_close_c64(lhs.inner(&rhs).unwrap(), expected));
+    assert!(lazy_close_c64(
+        lazy_lhs.inner(&lazy_rhs).unwrap(),
+        expected_lazy
+    ));
+}

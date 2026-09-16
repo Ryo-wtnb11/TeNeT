@@ -448,6 +448,9 @@ where
     Ok(())
 }
 
+/// Quantum-dimension-weighted oriented inner product.
+///
+/// `sector_weight` supplies `dim(c)` per logical block.
 #[doc(hidden)]
 pub fn oriented_fusion_inner<D>(
     logical: &BlockStructure,
@@ -460,31 +463,62 @@ pub fn oriented_fusion_inner<D>(
 where
     D: Copy + Add<D, Output = D> + Mul<D, Output = D> + Zero + ConjugateValue,
 {
-    if lhs_data.len() != lhs.storage_space().required_len()?
-        || rhs_data.len() != rhs.storage_space().required_len()?
+    oriented_fusion_inner_with(logical, lhs, lhs_data, rhs, rhs_data, |sector| {
+        Ok::<_, OperationError>(sector_weight(sector))
+    })
+}
+
+/// Fallible variant of [`oriented_fusion_inner`] for checked providers.
+#[doc(hidden)]
+pub fn oriented_fusion_inner_with<D, E>(
+    logical: &BlockStructure,
+    lhs: FusionOperand<'_>,
+    lhs_data: &[D],
+    rhs: FusionOperand<'_>,
+    rhs_data: &[D],
+    mut sector_weight: impl FnMut(SectorId) -> Result<D, E>,
+) -> Result<D, E>
+where
+    D: Copy + Add<D, Output = D> + Mul<D, Output = D> + Zero + ConjugateValue,
+    E: From<OperationError>,
+{
+    if lhs_data.len()
+        != lhs
+            .storage_space()
+            .required_len()
+            .map_err(OperationError::from)?
+        || rhs_data.len()
+            != rhs
+                .storage_space()
+                .required_len()
+                .map_err(OperationError::from)?
     {
         return Err(OperationError::StructureMismatch {
             tensor: "oriented inner storage",
-        });
+        }
+        .into());
     }
     validate_oriented_fusion_layout(logical, lhs)?;
     validate_oriented_fusion_layout(logical, rhs)?;
     let mut total = D::zero();
     for logical_index in 0..logical.block_count() {
-        let logical_block = logical.block(logical_index)?;
+        let logical_block = logical.block(logical_index).map_err(OperationError::from)?;
         let BlockKey::FusionTree(logical_key) = logical_block.key() else {
             return Err(OperationError::StructureMismatch {
                 tensor: "oriented inner logical layout",
-            });
+            }
+            .into());
         };
         let lhs_block = lhs
             .storage_space()
             .structure()
-            .block(storage_block_index(lhs, logical_key)?)?;
+            .block(storage_block_index(lhs, logical_key)?)
+            .map_err(OperationError::from)?;
         let rhs_block = rhs
             .storage_space()
             .structure()
-            .block(storage_block_index(rhs, logical_key)?)?;
+            .block(storage_block_index(rhs, logical_key)?)
+            .map_err(OperationError::from)?;
         let lhs_stride = |axis| {
             let storage_axis = lhs.storage_axis(axis)?;
             isize::try_from(lhs_block.strides()[storage_axis])
@@ -506,7 +540,7 @@ where
             !lhs.storage_conjugate(),
             rhs.storage_conjugate(),
         )?;
-        total = total + partial * sector_weight(logical_key.codomain_tree().coupled());
+        total = total + partial * sector_weight(logical_key.codomain_tree().coupled())?;
     }
     Ok(total)
 }
@@ -779,6 +813,18 @@ mod tests {
                 adjoint_operand,
                 &parent,
                 |_| Complex64::one(),
+            )
+            .unwrap(),
+            expected_inner
+        );
+        assert_eq!(
+            oriented_fusion_inner_with(
+                logical.structure(),
+                direct_operand,
+                &direct,
+                adjoint_operand,
+                &parent,
+                |_| Ok::<_, OperationError>(Complex64::one()),
             )
             .unwrap(),
             expected_inner
