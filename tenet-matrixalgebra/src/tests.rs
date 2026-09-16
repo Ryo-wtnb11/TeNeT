@@ -12931,3 +12931,58 @@ fn exp_publishes_nothing_when_a_later_sector_fails() {
     );
     assert_eq!(tensor.data(), &before[..], "input storage was mutated");
 }
+
+#[test]
+fn noncanonical_mf_svd_and_eigh_scatter_each_output_block_once() {
+    // What: on a four-sector noncanonical MF input, the compact SVD and EIGH
+    // fallbacks group each factor side once and iterate only the scattered
+    // blocks (F = B = 16 per side), instead of G_s * B = 64 visits per side.
+    use crate::factorize::{reset_scatter_visit_probe, scatter_visit_probe, ScatterVisitProbe};
+    let sectors = (0..4).map(SectorId::new).collect::<Vec<_>>();
+    let rule = || tenet_core::ZNFusionRule::new(4).unwrap();
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+
+    let tensor = tsvd_test_tensor(&rule(), &sectors);
+    let bound = bound_tensor(Arc::new(rule()), &tensor);
+    let adjoint_space = bound.space().adjoint_view().unwrap();
+    let input = BoundDynamicTensorRef::try_new(&adjoint_space, bound.data()).unwrap();
+    reset_scatter_visit_probe();
+    let (u, vh, _) = svd_compact_factors_dyn(&mut dense, &input).unwrap();
+    let b_u = u.space().space().structure().block_count();
+    let b_vh = vh.space().space().structure().block_count();
+    assert_eq!((b_u, b_vh), (16, 16));
+    let probe = scatter_visit_probe();
+    assert_eq!(
+        probe,
+        ScatterVisitProbe {
+            left_grouped: b_u,
+            right_grouped: b_vh,
+            left_groups_built: 1,
+            right_groups_built: 1,
+            left_visits: b_u,
+            right_visits: b_vh,
+        }
+    );
+    assert!(probe.left_grouped + probe.left_visits < 4 * b_u);
+    assert!(probe.right_grouped + probe.right_visits < 4 * b_vh);
+
+    let tensor = hermitian_test_tensor(&rule(), &sectors);
+    let bound = bound_tensor(Arc::new(rule()), &tensor);
+    let adjoint_space = bound.space().adjoint_view().unwrap();
+    let input = BoundDynamicTensorRef::try_new(&adjoint_space, bound.data()).unwrap();
+    reset_scatter_visit_probe();
+    let full = eigh_full_dyn(&mut dense, &input).unwrap();
+    let b_v = full.v().space().space().structure().block_count();
+    assert_eq!(b_v, 16);
+    let probe = scatter_visit_probe();
+    assert_eq!(
+        probe,
+        ScatterVisitProbe {
+            left_grouped: b_v,
+            left_groups_built: 1,
+            left_visits: b_v,
+            ..ScatterVisitProbe::default()
+        }
+    );
+    assert!(probe.left_grouped + probe.left_visits < 4 * b_v);
+}
