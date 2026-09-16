@@ -2776,6 +2776,30 @@ pub(crate) fn generic_pair_publication_probe() -> GenericPairPublicationProbe {
 }
 
 #[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct OneSidedPublicationProbe {
+    pub canonical_publications: usize,
+    pub fallback_publications: usize,
+    pub owner_reused: usize,
+    pub appended_elements: usize,
+}
+
+#[cfg(test)]
+thread_local! {
+    static ONE_SIDED_PUBLICATION_PROBE: Cell<OneSidedPublicationProbe> = Cell::default();
+}
+
+#[cfg(test)]
+pub(crate) fn reset_one_sided_publication_probe() {
+    ONE_SIDED_PUBLICATION_PROBE.set(OneSidedPublicationProbe::default());
+}
+
+#[cfg(test)]
+pub(crate) fn one_sided_publication_probe() -> OneSidedPublicationProbe {
+    ONE_SIDED_PUBLICATION_PROBE.get()
+}
+
+#[cfg(test)]
 thread_local! {
     static FACTOR_BUFFER_BUILD_COUNTS: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
 }
@@ -2847,7 +2871,7 @@ fn build_left_right_bound_pair<R, D>(
     authority: &BoundDynamicFusionMapSpace<R>,
     homspace: &FusionTreeHomSpace,
     matricizations: &[SectorMatricization<D>],
-    pairs: &[FactorPair<D>],
+    pairs: &mut [FactorPair<D>],
 ) -> Result<DynamicFactorPair<R, D>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
@@ -2881,7 +2905,7 @@ fn build_left_bound_factor<R, D, M>(
     authority: &BoundDynamicFusionMapSpace<R>,
     homspace: &FusionTreeHomSpace,
     matricizations: &[M],
-    pairs: &[FactorPair<D>],
+    pairs: &mut [FactorPair<D>],
 ) -> Result<BoundDynFactor<R, D>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
@@ -2906,7 +2930,7 @@ fn build_bound_factor<R, D, M>(
     authority: &BoundDynamicFusionMapSpace<R>,
     homspace: &FusionTreeHomSpace,
     matricizations: &[M],
-    pairs: &[FactorPair<D>],
+    pairs: &mut [FactorPair<D>],
     dimensions: &BTreeMap<SectorId, usize>,
     side: FactorSide,
 ) -> Result<BoundDynFactor<R, D>, OperationError>
@@ -2931,7 +2955,7 @@ fn build_bound_factor_with_placement<R, D, M>(
     authority: &BoundDynamicFusionMapSpace<R>,
     homspace: &FusionTreeHomSpace,
     matricizations: &[M],
-    pairs: &[FactorPair<D>],
+    pairs: &mut [FactorPair<D>],
     dimensions: &BTreeMap<SectorId, usize>,
     side: FactorSide,
     placement: FactorPlacement,
@@ -2949,7 +2973,7 @@ where
             .map(|(&sector, &dimension)| (sector, dimension)),
         side,
     )?;
-    let mut data = vec![D::zero(); space.space().required_len()?];
+    let required_len = space.space().required_len()?;
     #[cfg(test)]
     FACTOR_BUFFER_BUILD_COUNTS.set({
         let (left, right) = FACTOR_BUFFER_BUILD_COUNTS.get();
@@ -2962,7 +2986,7 @@ where
         .iter()
         .map(|matrix| (matrix.sector(), (matrix, None)))
         .collect::<HashMap<_, _>>();
-    for pair in pairs {
+    for pair in pairs.iter() {
         let route =
             routes
                 .get_mut(&pair.sector)
@@ -2971,6 +2995,30 @@ where
                 })?;
         route.1 = Some(pair);
     }
+    let source_trees = match (side, placement) {
+        (FactorSide::Left, FactorPlacement::Direct)
+        | (FactorSide::Right, FactorPlacement::Adjoint) => FactorSide::Left,
+        (FactorSide::Right, FactorPlacement::Direct)
+        | (FactorSide::Left, FactorPlacement::Adjoint) => FactorSide::Right,
+    };
+    if one_sided_factor_output_is_canonical(
+        space.space().structure(),
+        matricizations,
+        pairs,
+        dimensions,
+        required_len,
+        side,
+        source_trees,
+    ) {
+        let data = take_one_sided_factors(pairs, required_len, side);
+        let (nout, nin) = match side {
+            FactorSide::Left => (space.space().nout(), 1),
+            FactorSide::Right => (1, space.space().nin()),
+        };
+        return BoundDynFactor::from_bound(space, data, nout, nin);
+    }
+    record_one_sided_fallback_publication();
+    let mut data = vec![D::zero(); required_len];
     let mut missing_offsets = HashMap::<SectorId, usize>::new();
     for index in 0..space.space().structure().block_count() {
         let block = space.space().structure().block(index)?;
@@ -3782,7 +3830,7 @@ where
         authority,
         homspace,
         &matricizations,
-        &pairs,
+        &mut pairs,
         output_row_dimensions,
         FactorSide::Left,
         placement,
@@ -3791,7 +3839,7 @@ where
         authority,
         homspace,
         &matricizations,
-        &pairs,
+        &mut pairs,
         output_col_dimensions,
         FactorSide::Right,
         placement,
@@ -4302,7 +4350,7 @@ where
             input.space(),
             space.homspace(),
             &matrices,
-            &pairs,
+            &mut pairs,
             &dimensions,
             FactorSide::Left,
         )?,
@@ -4310,7 +4358,7 @@ where
             input.space(),
             space.homspace(),
             &matrices,
-            &pairs,
+            &mut pairs,
             &dimensions,
             FactorSide::Right,
         )?,
@@ -4378,7 +4426,7 @@ where
             input.space(),
             space.homspace(),
             &matrices,
-            &pairs,
+            &mut pairs,
             &dimensions,
             FactorSide::Left,
         )?,
@@ -4386,7 +4434,7 @@ where
             input.space(),
             space.homspace(),
             &matrices,
-            &pairs,
+            &mut pairs,
             &dimensions,
             FactorSide::Right,
         )?,
@@ -4568,7 +4616,7 @@ where
     }
 
     let v_factor =
-        build_left_bound_factor(input.space(), space.homspace(), &matricizations, &pairs)?;
+        build_left_bound_factor(input.space(), space.homspace(), &matricizations, &mut pairs)?;
     Ok(EigFullDyn {
         v: v_factor,
         eigenvalues,
@@ -4850,7 +4898,7 @@ where
         input.space(),
         space.homspace(),
         &matrices,
-        &pairs,
+        &mut pairs,
         &null_dimensions,
         FactorSide::Left,
     )
@@ -4919,7 +4967,7 @@ where
         input.space(),
         space.homspace(),
         &matrices,
-        &pairs,
+        &mut pairs,
         &null_dimensions,
         FactorSide::Right,
     )
@@ -4975,7 +5023,7 @@ where
         provider,
         space.homspace(),
         &matrices,
-        &pairs,
+        &mut pairs,
         &null_dimensions,
         FactorSide::Left,
     )
@@ -5028,7 +5076,7 @@ where
         provider,
         space.homspace(),
         &matrices,
-        &pairs,
+        &mut pairs,
         &null_dimensions,
         FactorSide::Right,
     )
@@ -5409,7 +5457,7 @@ where
             right_leading: rank,
         });
     }
-    build_left_right_bound_pair(input.space(), space.homspace(), &matricizations, &pairs)
+    build_left_right_bound_pair(input.space(), space.homspace(), &matricizations, &mut pairs)
 }
 
 fn qr_compact_direct_regions<E, R, D>(
@@ -5555,7 +5603,7 @@ where
             right_leading: rank,
         });
     }
-    build_left_right_bound_pair(input.space(), space.homspace(), &matricizations, &pairs)
+    build_left_right_bound_pair(input.space(), space.homspace(), &matricizations, &mut pairs)
 }
 
 fn lq_compact_direct_regions<E, R, D>(
@@ -8324,153 +8372,280 @@ fn factor_output_is_canonical<D, M: SectorGeometry>(
         if pair.sector != matrix.sector() {
             return false;
         }
-        let (factor, trees, matrix_extent) = match side {
-            FactorSide::Left => {
-                if pair.left_rows != matrix.rows() {
-                    return false;
-                }
-                (&pair.left, FactorSide::Left, matrix.rows())
-            }
-            FactorSide::Right => {
-                if pair.right_leading != pair.kept {
-                    return false;
-                }
-                (&pair.right, FactorSide::Right, matrix.cols())
-            }
+        let (factor_len, factor_leading) = match side {
+            FactorSide::Left => (pair.left.len(), pair.left_rows),
+            FactorSide::Right => (pair.right.len(), pair.right_leading),
         };
-        let Some(expected_len) = matrix_extent.checked_mul(pair.kept) else {
+        let Some(next_offset) = sector_factor_output_is_canonical(
+            structure,
+            &mut block_index,
+            output_offset,
+            matrix,
+            side,
+            factor_len,
+            factor_leading,
+            pair.kept,
+            side,
+            Some(keys),
+        ) else {
             return false;
         };
-        if factor.len() != expected_len {
-            return false;
-        }
-        let mut tree_prefix = 0usize;
-        for tree_index in 0..matrix.tree_count(trees) {
-            let Some(tree) = matrix.tree(trees, tree_index) else {
-                return false;
-            };
-            let Some(extent) = checked_extent(tree.shape) else {
-                return false;
-            };
-            if tree.offset != tree_prefix {
-                return false;
-            }
-            tree_prefix = match tree_prefix.checked_add(extent) {
-                Some(value) => value,
-                None => return false,
-            };
-            if pair.kept == 0 {
-                continue;
-            }
-            let Ok(block) = structure.block(block_index) else {
-                return false;
-            };
-            #[cfg(test)]
-            GENERIC_PAIR_PUBLICATION_PROBE.with(|probe| {
-                let mut value = probe.get();
-                value.output_blocks_visited += 1;
-                probe.set(value);
-            });
-            let Some(expected_key) = keys.get(block_index) else {
-                return false;
-            };
-            let BlockKey::FusionTree(actual_key) = block.key() else {
-                return false;
-            };
-            record_generic_pair_ordered_key_validation();
-            let expected_tree = match side {
-                FactorSide::Left => expected_key.codomain_tree(),
-                FactorSide::Right => expected_key.domain_tree(),
-            };
-            if actual_key != expected_key || expected_tree != tree.tree {
-                return false;
-            }
-            let Some(block_offset) = (match side {
-                FactorSide::Left => output_offset.checked_add(tree.offset),
-                FactorSide::Right => pair
-                    .kept
-                    .checked_mul(tree.offset)
-                    .and_then(|offset| output_offset.checked_add(offset)),
-            }) else {
-                return false;
-            };
-            if block.offset() != block_offset
-                || block.shape().len() != tree.shape.len() + 1
-                || block.strides().len() != block.shape().len()
-            {
-                return false;
-            }
-            let shape_matches = match side {
-                FactorSide::Left => {
-                    &block.shape()[..tree.shape.len()] == tree.shape
-                        && block.shape()[tree.shape.len()] == pair.kept
-                }
-                FactorSide::Right => {
-                    block.shape()[0] == pair.kept && &block.shape()[1..] == tree.shape
-                }
-            };
-            if !shape_matches {
-                return false;
-            }
-            let mut stride = match side {
-                FactorSide::Left => 1,
-                FactorSide::Right => pair.kept,
-            };
-            let stride_offset = usize::from(matches!(side, FactorSide::Right));
-            if matches!(side, FactorSide::Right) && block.strides()[0] != 1 {
-                return false;
-            }
-            for (axis, &dim) in tree.shape.iter().enumerate() {
-                if block.strides()[axis + stride_offset] != stride {
-                    return false;
-                }
-                stride = match stride.checked_mul(dim) {
-                    Some(value) => value,
-                    None => return false,
-                };
-            }
-            if matches!(side, FactorSide::Left)
-                && block.strides()[tree.shape.len()] != matrix.rows()
-            {
-                return false;
-            }
-            block_index += 1;
-        }
-        if tree_prefix != matrix_extent {
-            return false;
-        }
-        output_offset = match output_offset.checked_add(factor.len()) {
-            Some(value) => value,
-            None => return false,
-        };
+        output_offset = next_offset;
     }
     block_index == structure.block_count() && output_offset == required_len
 }
 
+/// Proves that one sector's selected factor (`factor_len` elements, column
+/// major with leading dimension `factor_leading`, bond extent `bond`) already
+/// occupies the blocks of `structure` starting at `block_index`/`output_offset`
+/// in the exact layout `from_bound` expects, and returns the next output
+/// offset. Left output reads the source as `F[o + q + a*j]`, right output as
+/// `F[j + b*(o + q)]`; `a` is the source-side extent on `source_trees`.
+/// `expected_keys` keeps the paired callers' additional admitted-key equality
+/// and their probe events; one-sided callers pass `None`.
+#[allow(clippy::too_many_arguments)]
+fn sector_factor_output_is_canonical<M: SectorGeometry>(
+    structure: &BlockStructure,
+    block_index: &mut usize,
+    output_offset: usize,
+    matrix: &M,
+    source_trees: FactorSide,
+    factor_len: usize,
+    factor_leading: usize,
+    bond: usize,
+    side: FactorSide,
+    expected_keys: Option<&[FusionTreePairKey]>,
+) -> Option<usize> {
+    let source_extent = match source_trees {
+        FactorSide::Left => matrix.rows(),
+        FactorSide::Right => matrix.cols(),
+    };
+    let required_leading = match side {
+        FactorSide::Left => source_extent,
+        FactorSide::Right => bond,
+    };
+    if factor_leading != required_leading || factor_len != source_extent.checked_mul(bond)? {
+        return None;
+    }
+    let mut tree_prefix = 0usize;
+    for tree_index in 0..matrix.tree_count(source_trees) {
+        let tree = matrix.tree(source_trees, tree_index)?;
+        let extent = checked_extent(tree.shape)?;
+        if tree.offset != tree_prefix {
+            return None;
+        }
+        tree_prefix = tree_prefix.checked_add(extent)?;
+        if bond == 0 {
+            continue;
+        }
+        let block = structure.block(*block_index).ok()?;
+        let BlockKey::FusionTree(actual_key) = block.key() else {
+            return None;
+        };
+        if let Some(keys) = expected_keys {
+            record_generic_pair_output_block_visit();
+            record_generic_pair_ordered_key_validation();
+            if actual_key != keys.get(*block_index)? {
+                return None;
+            }
+        }
+        let actual_tree = match side {
+            FactorSide::Left => actual_key.codomain_tree(),
+            FactorSide::Right => actual_key.domain_tree(),
+        };
+        if actual_tree != tree.tree || coupled_of(actual_tree) != matrix.sector() {
+            return None;
+        }
+        let block_offset = match side {
+            FactorSide::Left => output_offset.checked_add(tree.offset)?,
+            FactorSide::Right => output_offset.checked_add(bond.checked_mul(tree.offset)?)?,
+        };
+        if block.offset() != block_offset
+            || block.shape().len() != tree.shape.len() + 1
+            || block.strides().len() != block.shape().len()
+        {
+            return None;
+        }
+        let shape_matches = match side {
+            FactorSide::Left => {
+                &block.shape()[..tree.shape.len()] == tree.shape
+                    && block.shape()[tree.shape.len()] == bond
+            }
+            FactorSide::Right => block.shape()[0] == bond && &block.shape()[1..] == tree.shape,
+        };
+        if !shape_matches {
+            return None;
+        }
+        let mut stride = match side {
+            FactorSide::Left => 1,
+            FactorSide::Right => bond,
+        };
+        let stride_offset = usize::from(matches!(side, FactorSide::Right));
+        if matches!(side, FactorSide::Right) && block.strides()[0] != 1 {
+            return None;
+        }
+        for (axis, &dim) in tree.shape.iter().enumerate() {
+            if block.strides()[axis + stride_offset] != stride {
+                return None;
+            }
+            stride = stride.checked_mul(dim)?;
+        }
+        if matches!(side, FactorSide::Left) && block.strides()[tree.shape.len()] != source_extent {
+            return None;
+        }
+        *block_index += 1;
+    }
+    if tree_prefix != source_extent {
+        return None;
+    }
+    output_offset.checked_add(factor_len)
+}
+
+/// One-sided sibling of [`factor_output_is_canonical`]: the source
+/// matricizations, factor pairs and admitted bond dimensions must be one
+/// aligned ascending sector stream (which excludes duplicate, omitted, and
+/// identity-only sectors), and the whole admitted output must be exhausted by
+/// the selected factors. `source_trees` selects the matricization side whose
+/// trees index the selected factor (columns for adjoint placement).
+fn one_sided_factor_output_is_canonical<D, M: SectorGeometry>(
+    structure: &BlockStructure,
+    matricizations: &[M],
+    pairs: &[FactorPair<D>],
+    dimensions: &BTreeMap<SectorId, usize>,
+    required_len: usize,
+    side: FactorSide,
+    source_trees: FactorSide,
+) -> bool {
+    if matricizations.len() != pairs.len() || matricizations.len() != dimensions.len() {
+        return false;
+    }
+    let mut block_index = 0usize;
+    let mut output_offset = 0usize;
+    for ((matrix, pair), (&sector, &bond)) in matricizations.iter().zip(pairs).zip(dimensions) {
+        if matrix.sector() != sector || pair.sector != sector {
+            return false;
+        }
+        let (factor_len, factor_leading) = match side {
+            FactorSide::Left => (pair.left.len(), pair.left_rows),
+            FactorSide::Right => (pair.right.len(), pair.right_leading),
+        };
+        let Some(next_offset) = sector_factor_output_is_canonical(
+            structure,
+            &mut block_index,
+            output_offset,
+            matrix,
+            source_trees,
+            factor_len,
+            factor_leading,
+            bond,
+            side,
+            None,
+        ) else {
+            return false;
+        };
+        output_offset = next_offset;
+    }
+    block_index == structure.block_count() && output_offset == required_len
+}
+
+/// Moves the selected side of every pair into one output buffer after
+/// [`one_sided_factor_output_is_canonical`] proved the layout; the opposite
+/// side stays in place for its own publication.
+fn take_one_sided_factors<D>(
+    pairs: &mut [FactorPair<D>],
+    required_len: usize,
+    side: FactorSide,
+) -> Vec<D> {
+    #[cfg(test)]
+    let first = pairs
+        .iter()
+        .map(|pair| match side {
+            FactorSide::Left => &pair.left,
+            FactorSide::Right => &pair.right,
+        })
+        .find(|factor| !factor.is_empty())
+        .map(Vec::as_ptr);
+    let mut output: Option<Vec<D>> = None;
+    let _appended = pairs
+        .iter_mut()
+        .map(|pair| {
+            let factor = match side {
+                FactorSide::Left => std::mem::take(&mut pair.left),
+                FactorSide::Right => std::mem::take(&mut pair.right),
+            };
+            append_owned_factor(&mut output, factor, required_len)
+        })
+        .sum::<usize>();
+    let data = output.unwrap_or_default();
+    #[cfg(test)]
+    ONE_SIDED_PUBLICATION_PROBE.with(|probe| {
+        let mut value = probe.get();
+        value.canonical_publications += 1;
+        value.owner_reused +=
+            usize::from(first.is_some_and(|pointer| std::ptr::eq(pointer, data.as_ptr())));
+        value.appended_elements += _appended;
+        probe.set(value);
+    });
+    data
+}
+
+#[cfg(test)]
+fn record_one_sided_fallback_publication() {
+    ONE_SIDED_PUBLICATION_PROBE.with(|probe| {
+        let mut value = probe.get();
+        value.fallback_publications += 1;
+        probe.set(value);
+    });
+}
+
+#[cfg(not(test))]
+fn record_one_sided_fallback_publication() {}
+
+#[cfg(test)]
+fn record_generic_pair_output_block_visit() {
+    GENERIC_PAIR_PUBLICATION_PROBE.with(|probe| {
+        let mut value = probe.get();
+        value.output_blocks_visited += 1;
+        probe.set(value);
+    });
+}
+
+#[cfg(not(test))]
+fn record_generic_pair_output_block_visit() {}
+
+#[cfg(test)]
+fn record_generic_pair_appended(left: usize, right: usize) {
+    GENERIC_PAIR_PUBLICATION_PROBE.with(|probe| {
+        let mut value = probe.get();
+        value.left_appended_elements += left;
+        value.right_appended_elements += right;
+        probe.set(value);
+    });
+}
+
+#[cfg(not(test))]
+fn record_generic_pair_appended(_left: usize, _right: usize) {}
+
+/// Appends `factor` to `output`, letting the first nonempty factor keep its
+/// allocation (grown once to `required_len`). Returns the element count that
+/// was appended to an existing owner, zero otherwise.
 fn append_owned_factor<D>(
     output: &mut Option<Vec<D>>,
     factor: Vec<D>,
     required_len: usize,
-    _side: FactorSide,
-) {
+) -> usize {
     if factor.is_empty() {
-        return;
+        return 0;
     }
     if let Some(data) = output {
-        #[cfg(test)]
-        GENERIC_PAIR_PUBLICATION_PROBE.with(|probe| {
-            let mut value = probe.get();
-            match _side {
-                FactorSide::Left => value.left_appended_elements += factor.len(),
-                FactorSide::Right => value.right_appended_elements += factor.len(),
-            }
-            probe.set(value);
-        });
+        let appended = factor.len();
         data.extend(factor);
+        appended
     } else {
         let mut factor = factor;
         factor.reserve_exact(required_len - factor.len());
         *output = Some(factor);
+        0
     }
 }
 
@@ -8492,8 +8667,9 @@ fn publish_generic_factor_pairs<D>(
     let mut left_data: Option<Vec<D>> = None;
     let mut right_data: Option<Vec<D>> = None;
     for pair in pairs {
-        append_owned_factor(&mut left_data, pair.left, left_len, FactorSide::Left);
-        append_owned_factor(&mut right_data, pair.right, right_len, FactorSide::Right);
+        let left_appended = append_owned_factor(&mut left_data, pair.left, left_len);
+        let right_appended = append_owned_factor(&mut right_data, pair.right, right_len);
+        record_generic_pair_appended(left_appended, right_appended);
     }
     let left_data = left_data.unwrap_or_default();
     let right_data = right_data.unwrap_or_default();
@@ -8885,7 +9061,7 @@ fn build_bound_factor_generic_checked<R, D, M>(
     provider: &Arc<R>,
     homspace: &FusionTreeHomSpace,
     matricizations: &[M],
-    pairs: &[FactorPair<D>],
+    pairs: &mut [FactorPair<D>],
     dimensions: &BTreeMap<SectorId, usize>,
     side: FactorSide,
 ) -> Result<BoundDynFactor<R, D>, CheckedGenericFactorPlanError<R::Error>>
@@ -8933,6 +9109,24 @@ where
     let len = space.space().required_len().map_err(|e| {
         CheckedGenericFactorPlanError::Operation(OperationError::from_core_preserving_context(e))
     })?;
+    let (nout, nin) = match side {
+        FactorSide::Left => (space.space().nout(), 1),
+        FactorSide::Right => (1, space.space().nin()),
+    };
+    if one_sided_factor_output_is_canonical(
+        space.space().structure(),
+        matricizations,
+        pairs,
+        dimensions,
+        len,
+        side,
+        side,
+    ) {
+        let data = take_one_sided_factors(pairs, len, side);
+        return BoundDynFactor::from_bound(space, data, nout, nin)
+            .map_err(CheckedGenericFactorPlanError::from);
+    }
+    record_one_sided_fallback_publication();
     let mut data = vec![D::zero(); len];
     let pairs = pairs
         .iter()
@@ -9028,10 +9222,6 @@ where
         )?;
         *side_offset = end;
     }
-    let (nout, nin) = match side {
-        FactorSide::Left => (space.space().nout(), 1),
-        FactorSide::Right => (1, space.space().nin()),
-    };
     BoundDynFactor::from_bound(space, data, nout, nin).map_err(CheckedGenericFactorPlanError::from)
 }
 
@@ -10313,7 +10503,7 @@ where
         provider,
         space.homspace(),
         &matrices,
-        &pairs,
+        &mut pairs,
         &row_dimensions,
         FactorSide::Left,
     )?;
@@ -10321,7 +10511,7 @@ where
         provider,
         space.homspace(),
         &matrices,
-        &pairs,
+        &mut pairs,
         &col_dimensions,
         FactorSide::Right,
     )?;
@@ -10516,7 +10706,7 @@ where
         provider,
         space.homspace(),
         &matrices,
-        &pairs,
+        &mut pairs,
         &dimensions,
         FactorSide::Left,
     )?;
@@ -10752,7 +10942,7 @@ where
         provider,
         space.homspace(),
         &matrices,
-        &pairs,
+        &mut pairs,
         &dimensions,
         FactorSide::Left,
     )?;
@@ -11165,7 +11355,7 @@ mod sector_matricization_tests {
         let expected = (0..12)
             .map(|index| Complex64::new(index as f64 + 0.5, 10.0 - index as f64))
             .collect::<Vec<_>>();
-        let pairs = [FactorPair {
+        let mut pairs = [FactorPair {
             sector: x,
             kept: 2,
             left: expected.clone(),
@@ -11174,8 +11364,22 @@ mod sector_matricization_tests {
             right_leading: 0,
         }];
 
-        let factor = build_left_bound_factor(&authority, &homspace, &geometry, &pairs).unwrap();
+        let selected_ptr = pairs[0].left.as_ptr();
+        reset_one_sided_publication_probe();
+        let factor = build_left_bound_factor(&authority, &homspace, &geometry, &mut pairs).unwrap();
 
+        let probe = one_sided_publication_probe();
+        assert_eq!(
+            (
+                probe.canonical_publications,
+                probe.fallback_publications,
+                probe.owner_reused,
+                probe.appended_elements,
+            ),
+            (1, 0, 1, 0)
+        );
+        assert!(std::ptr::eq(selected_ptr, factor.data().as_ptr()));
+        assert!(pairs[0].left.is_empty());
         assert_eq!(geometry[0].row_tree, row_tree_before);
         assert_eq!(geometry[0].col_tree, col_tree_before);
         assert_eq!(geometry[0].row_shape, [2, 1, 3]);
@@ -11808,7 +12012,7 @@ mod sector_matricization_tests {
             ),
         ];
 
-        for (authority, output_hom, side, placement, bond, pair, selected) in cases {
+        for (authority, output_hom, side, placement, bond, mut pair, selected) in cases {
             let source = match side {
                 FactorSide::Left => &pair.left,
                 FactorSide::Right => &pair.right,
@@ -11821,7 +12025,7 @@ mod sector_matricization_tests {
                 authority,
                 output_hom,
                 std::slice::from_ref(&matrix),
-                std::slice::from_ref(&pair),
+                std::slice::from_mut(&mut pair),
                 &BTreeMap::from([(SectorId::new(0), bond)]),
                 side,
                 placement,
@@ -11855,7 +12059,7 @@ mod sector_matricization_tests {
             &authority,
             &homspace,
             std::slice::from_ref(&matrix),
-            &[pair(SectorId::new(0)), pair(SectorId::new(1))],
+            &mut [pair(SectorId::new(0)), pair(SectorId::new(1))],
             &dimensions,
             FactorSide::Left,
             FactorPlacement::Direct,
@@ -11872,7 +12076,7 @@ mod sector_matricization_tests {
             &authority,
             &homspace,
             std::slice::from_ref(&matrix),
-            &[],
+            &mut [],
             &dimensions,
             FactorSide::Right,
             FactorPlacement::Direct,
@@ -12044,11 +12248,12 @@ mod sector_matricization_tests {
         for reverse in [false, true] {
             let (homspace, matrix, pair) = vertex_tree_factor_fixture(reverse);
             for side in [FactorSide::Left, FactorSide::Right] {
+                let (_, _, mut staged) = vertex_tree_factor_fixture(reverse);
                 let factor = build_bound_factor_generic_checked(
                     &provider,
                     &homspace,
                     std::slice::from_ref(&matrix),
-                    std::slice::from_ref(&pair),
+                    std::slice::from_mut(&mut staged),
                     &dimensions,
                     side,
                 )
@@ -12109,7 +12314,7 @@ mod sector_matricization_tests {
                 &provider,
                 &homspace,
                 std::slice::from_ref(&matrix),
-                &[],
+                &mut [],
                 &dimensions,
                 side,
             )
@@ -12125,7 +12330,7 @@ mod sector_matricization_tests {
         }
 
         for side in [FactorSide::Left, FactorSide::Right] {
-            let (_, mut wrong, pair) = vertex_tree_factor_fixture(false);
+            let (_, mut wrong, mut pair) = vertex_tree_factor_fixture(false);
             match side {
                 FactorSide::Left => wrong.row_trees[0].0 = wrong.row_trees[1].0.clone(),
                 FactorSide::Right => wrong.col_trees[0].0 = wrong.col_trees[1].0.clone(),
@@ -12134,7 +12339,7 @@ mod sector_matricization_tests {
                 &provider,
                 &homspace,
                 std::slice::from_ref(&wrong),
-                std::slice::from_ref(&pair),
+                std::slice::from_mut(&mut pair),
                 &dimensions,
                 side,
             )
@@ -12524,5 +12729,753 @@ mod sector_matricization_tests {
         let probe = generic_pair_publication_probe();
         assert_eq!(probe.canonical_publications, 1);
         assert_eq!((probe.left_owner_reused, probe.right_owner_reused), (1, 1));
+    }
+
+    /// Two-leg codomain/domain hom space matricized exactly as production
+    /// does, so tree orders and offsets are the real ones.
+    fn two_leg_geometry<R, D>(
+        rule: Arc<R>,
+        legs: [Vec<(SectorId, usize)>; 4],
+    ) -> (BoundDynamicFusionMapSpace<R>, Vec<SectorMatricization<D>>)
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+        D: FactorScalar,
+    {
+        let [a, b, c, d] = legs;
+        let homspace = FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new(a, false), SectorLeg::new(b, false)]),
+            FusionProductSpace::new([SectorLeg::new(c, false), SectorLeg::new(d, false)]),
+        );
+        let authority =
+            BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free(rule, homspace)
+                .unwrap();
+        let data = vec![D::zero(); authority.space().required_len().unwrap()];
+        let matrices = sector_matricizations(authority.space().structure(), &data, 2).unwrap();
+        (authority, matrices)
+    }
+
+    fn z2_two_sector_geometry<D: FactorScalar>() -> (
+        BoundDynamicFusionMapSpace<Z2FusionRule>,
+        Vec<SectorMatricization<D>>,
+    ) {
+        let even = SectorId::new(0);
+        let odd = SectorId::new(1);
+        two_leg_geometry(
+            Arc::new(Z2FusionRule),
+            [
+                vec![(even, 2), (odd, 1)],
+                vec![(even, 1), (odd, 3)],
+                vec![(even, 1), (odd, 2)],
+                vec![(even, 2), (odd, 1)],
+            ],
+        )
+    }
+
+    fn source_trees_for(side: FactorSide, placement: FactorPlacement) -> FactorSide {
+        match (side, placement) {
+            (FactorSide::Left, FactorPlacement::Direct)
+            | (FactorSide::Right, FactorPlacement::Adjoint) => FactorSide::Left,
+            (FactorSide::Right, FactorPlacement::Direct)
+            | (FactorSide::Left, FactorPlacement::Adjoint) => FactorSide::Right,
+        }
+    }
+
+    fn source_extent<D>(matrix: &SectorMatricization<D>, source_trees: FactorSide) -> usize {
+        match source_trees {
+            FactorSide::Left => matrix.rows,
+            FactorSide::Right => matrix.cols,
+        }
+    }
+
+    /// Stages `a x b` (left) or `b x a` (right) selected factors per sector
+    /// with `kept` deliberately unrelated to the admitted bond; the opposite
+    /// side carries a sentinel payload that must survive publication.
+    fn staged_one_sided_pairs<D: FactorScalar>(
+        matrices: &[SectorMatricization<D>],
+        dimensions: &BTreeMap<SectorId, usize>,
+        side: FactorSide,
+        source_trees: FactorSide,
+        values: &dyn Fn(usize) -> D,
+    ) -> Vec<FactorPair<D>> {
+        matrices
+            .iter()
+            .map(|matrix| {
+                let a = source_extent(matrix, source_trees);
+                let b = dimensions[&matrix.sector];
+                let tag = matrix.sector.id() + 1;
+                let selected = (0..a * b)
+                    .map(|k| values(1000 * tag + k))
+                    .collect::<Vec<_>>();
+                let opposite = (0..3).map(|k| values(7 * tag + k)).collect();
+                match side {
+                    FactorSide::Left => FactorPair {
+                        sector: matrix.sector,
+                        kept: 99,
+                        left: selected,
+                        left_rows: a,
+                        right: opposite,
+                        right_leading: 5,
+                    },
+                    FactorSide::Right => FactorPair {
+                        sector: matrix.sector,
+                        kept: 99,
+                        left: opposite,
+                        left_rows: 5,
+                        right: selected,
+                        right_leading: b,
+                    },
+                }
+            })
+            .collect()
+    }
+
+    fn selected_of<D>(pair: &FactorPair<D>, side: FactorSide) -> &Vec<D> {
+        match side {
+            FactorSide::Left => &pair.left,
+            FactorSide::Right => &pair.right,
+        }
+    }
+
+    fn opposite_of<D>(pair: &FactorPair<D>, side: FactorSide) -> &Vec<D> {
+        match side {
+            FactorSide::Left => &pair.right,
+            FactorSide::Right => &pair.left,
+        }
+    }
+
+    /// Checks every output element against the literal coordinates
+    /// `F[o + q + a*j]` (left) / `F[j + b*(o + q)]` (right), independent of
+    /// the production layout proof.
+    fn assert_literal_one_sided_layout<D>(
+        structure: &BlockStructure,
+        data: &[D],
+        matrices: &[SectorMatricization<D>],
+        selected: &[Vec<D>],
+        dimensions: &BTreeMap<SectorId, usize>,
+        side: FactorSide,
+        source_trees: FactorSide,
+    ) where
+        D: FactorScalar + PartialEq + fmt::Debug,
+    {
+        let mut verified = 0usize;
+        for index in 0..structure.block_count() {
+            let block = structure.block(index).unwrap();
+            let BlockKey::FusionTree(key) = block.key() else {
+                panic!("factor blocks carry fusion-tree keys")
+            };
+            let tree = match side {
+                FactorSide::Left => key.codomain_tree(),
+                FactorSide::Right => key.domain_tree(),
+            };
+            let (matrix_index, matrix) = matrices
+                .iter()
+                .enumerate()
+                .find(|(_, matrix)| matrix.sector == tree.coupled())
+                .unwrap();
+            let trees = match source_trees {
+                FactorSide::Left => &matrix.row_trees,
+                FactorSide::Right => &matrix.col_trees,
+            };
+            let (_, o, tree_shape) = trees
+                .iter()
+                .find(|(candidate, _, _)| candidate == tree)
+                .unwrap();
+            let a = source_extent(matrix, source_trees);
+            let b = dimensions[&matrix.sector];
+            let factor = &selected[matrix_index];
+            let shape = block.shape();
+            let strides = block.strides();
+            let total = shape.iter().product::<usize>();
+            assert_eq!(total, tree_shape.iter().product::<usize>() * b);
+            for flat in 0..total {
+                let mut remaining = flat;
+                let mut destination = block.offset();
+                let mut coordinates = vec![0usize; shape.len()];
+                for axis in 0..shape.len() {
+                    coordinates[axis] = remaining % shape[axis];
+                    remaining /= shape[axis];
+                    destination += coordinates[axis] * strides[axis];
+                }
+                let tree_axes = match side {
+                    FactorSide::Left => 0..shape.len() - 1,
+                    FactorSide::Right => 1..shape.len(),
+                };
+                let mut q = 0usize;
+                let mut span = 1usize;
+                for axis in tree_axes {
+                    q += coordinates[axis] * span;
+                    span *= shape[axis];
+                }
+                let j = match side {
+                    FactorSide::Left => coordinates[shape.len() - 1],
+                    FactorSide::Right => coordinates[0],
+                };
+                let expected = match side {
+                    FactorSide::Left => factor[o + q + a * j],
+                    FactorSide::Right => factor[j + b * (o + q)],
+                };
+                assert_eq!(data[destination], expected);
+                verified += 1;
+            }
+        }
+        assert_eq!(verified, data.len());
+    }
+
+    fn mf_one_sided_canonical_transfer_case<D>(values: &dyn Fn(usize) -> D)
+    where
+        D: FactorScalar + PartialEq + fmt::Debug,
+    {
+        let (authority, matrices) = z2_two_sector_geometry::<D>();
+        let adjoint = tenet_tensors::adjoint_bound_space_dyn(&authority).unwrap();
+        let row_dimensions = matrices
+            .iter()
+            .map(|matrix| (matrix.sector, matrix.rows))
+            .collect::<BTreeMap<_, _>>();
+        let col_dimensions = matrices
+            .iter()
+            .map(|matrix| (matrix.sector, matrix.cols))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(matrices.len(), 2);
+        assert!(matrices.iter().all(|matrix| matrix.rows != matrix.cols
+            && matrix.row_trees.len() == 2
+            && matrix.col_trees.len() == 2));
+        assert_ne!(matrices[0].rows, matrices[1].rows);
+
+        let cases = [
+            (&authority, FactorSide::Left, FactorPlacement::Direct),
+            (&authority, FactorSide::Right, FactorPlacement::Direct),
+            (&adjoint, FactorSide::Left, FactorPlacement::Adjoint),
+            (&adjoint, FactorSide::Right, FactorPlacement::Adjoint),
+        ];
+        for (space, side, placement) in cases {
+            let source_trees = source_trees_for(side, placement);
+            let dimensions = match source_trees {
+                FactorSide::Left => &row_dimensions,
+                FactorSide::Right => &col_dimensions,
+            };
+            let mut pairs =
+                staged_one_sided_pairs(&matrices, dimensions, side, source_trees, values);
+            let selected = pairs
+                .iter()
+                .map(|pair| selected_of(pair, side).clone())
+                .collect::<Vec<_>>();
+            let opposite = pairs
+                .iter()
+                .map(|pair| opposite_of(pair, side).clone())
+                .collect::<Vec<_>>();
+
+            reset_one_sided_publication_probe();
+            let factor = build_bound_factor_with_placement(
+                space,
+                space.space().homspace(),
+                &matrices,
+                &mut pairs,
+                dimensions,
+                side,
+                placement,
+            )
+            .unwrap();
+
+            let probe = one_sided_publication_probe();
+            assert_eq!(
+                (probe.canonical_publications, probe.fallback_publications),
+                (1, 0)
+            );
+            assert_eq!(probe.appended_elements, selected[1].len());
+            assert_literal_one_sided_layout(
+                factor.space().space().structure(),
+                factor.data(),
+                &matrices,
+                &selected,
+                dimensions,
+                side,
+                source_trees,
+            );
+            for (index, pair) in pairs.iter().enumerate() {
+                assert!(selected_of(pair, side).is_empty());
+                assert_eq!(opposite_of(pair, side), &opposite[index]);
+                assert_eq!((pair.kept, pair.left_rows, pair.right_leading).0, 99);
+            }
+        }
+    }
+
+    #[test]
+    fn mf_one_sided_canonical_transfer_real_full_svd_bonds() {
+        mf_one_sided_canonical_transfer_case(&|k| k as f64 * 0.5 - 7.0);
+    }
+
+    #[test]
+    fn mf_one_sided_canonical_transfer_complex_full_svd_bonds() {
+        mf_one_sided_canonical_transfer_case(&|k| Complex64::new(k as f64, -(k as f64) / 3.0));
+    }
+
+    fn assert_buffers_intact<D>(pairs: &[FactorPair<D>], side: FactorSide) {
+        assert!(pairs.iter().all(|pair| !selected_of(pair, side).is_empty()));
+    }
+
+    #[test]
+    fn mf_one_sided_fallbacks_match_canonical_output_and_keep_buffers() {
+        let (authority, matrices) = z2_two_sector_geometry::<f64>();
+        let homspace = authority.space().homspace();
+        let side = FactorSide::Left;
+        let placement = FactorPlacement::Direct;
+        let row_dimensions = matrices
+            .iter()
+            .map(|matrix| (matrix.sector, matrix.rows))
+            .collect::<BTreeMap<_, _>>();
+        let staged = |scale: f64| {
+            staged_one_sided_pairs(&matrices, &row_dimensions, side, side, &|k| {
+                scale * (k as f64 + 1.0)
+            })
+        };
+        let build = |matrices: &[SectorMatricization<f64>],
+                     pairs: &mut [FactorPair<f64>],
+                     dimensions: &BTreeMap<SectorId, usize>| {
+            reset_one_sided_publication_probe();
+            let result = build_bound_factor_with_placement(
+                &authority, homspace, matrices, pairs, dimensions, side, placement,
+            );
+            (result, one_sided_publication_probe())
+        };
+        let canonical = |scale: f64| {
+            let mut pairs = staged(scale);
+            let (factor, probe) = build(&matrices, &mut pairs, &row_dimensions);
+            assert_eq!(
+                (probe.canonical_publications, probe.fallback_publications),
+                (1, 0)
+            );
+            factor.unwrap().data().to_vec()
+        };
+        let reference = canonical(1.0);
+        let sector_len = matrices[0].rows * matrices[0].rows;
+
+        // Reordered matricizations: same admitted output, scatter path.
+        let (_, mut reversed) = z2_two_sector_geometry::<f64>();
+        reversed.reverse();
+        let mut pairs = staged(1.0);
+        pairs.reverse();
+        let (factor, probe) = build(&reversed, &mut pairs, &row_dimensions);
+        assert_eq!(
+            (probe.canonical_publications, probe.fallback_publications),
+            (0, 1)
+        );
+        assert_eq!(factor.unwrap().data(), reference);
+        assert_buffers_intact(&pairs, side);
+
+        // Reordered pairs alone.
+        let mut pairs = staged(1.0);
+        pairs.reverse();
+        let (factor, probe) = build(&matrices, &mut pairs, &row_dimensions);
+        assert_eq!(probe.fallback_publications, 1);
+        assert_eq!(factor.unwrap().data(), reference);
+        assert_buffers_intact(&pairs, side);
+
+        // Padded source geometry: the even factor carries one extra leading
+        // row that no tree covers, so tree offsets no longer start at zero.
+        let (_, mut padded) = z2_two_sector_geometry::<f64>();
+        padded[0].rows += 1;
+        for tree in &mut padded[0].row_trees {
+            tree.1 += 1;
+        }
+        let mut pairs =
+            staged_one_sided_pairs(&padded, &row_dimensions, side, side, &|k| k as f64 + 1.0);
+        let selected = pairs
+            .iter()
+            .map(|pair| pair.left.clone())
+            .collect::<Vec<_>>();
+        let (factor, probe) = build(&padded, &mut pairs, &row_dimensions);
+        assert_eq!(probe.fallback_publications, 1);
+        let factor = factor.unwrap();
+        assert_eq!(factor.data().len(), reference.len());
+        assert_literal_one_sided_layout(
+            factor.space().space().structure(),
+            factor.data(),
+            &padded,
+            &selected,
+            &row_dimensions,
+            side,
+            side,
+        );
+        assert_buffers_intact(&pairs, side);
+
+        // Identity-only sector after (drop odd) and before (drop even) the
+        // populated sector; the populated region equals the canonical one.
+        let mut pairs = staged(1.0);
+        let (factor, probe) = build(&matrices[..1], &mut pairs[..1], &row_dimensions);
+        assert_eq!(probe.fallback_publications, 1);
+        let factor = factor.unwrap();
+        assert_eq!(&factor.data()[..sector_len], &reference[..sector_len]);
+        let identity = &factor.data()[sector_len..];
+        assert_eq!(
+            identity.iter().filter(|&&value| value == 1.0).count(),
+            matrices[1].rows
+        );
+        assert!(identity.iter().all(|&value| value == 0.0 || value == 1.0));
+        assert_buffers_intact(&pairs, side);
+        let mut pairs = staged(1.0);
+        let (factor, probe) = build(&matrices[1..], &mut pairs[1..], &row_dimensions);
+        assert_eq!(probe.fallback_publications, 1);
+        let factor = factor.unwrap();
+        assert_eq!(&factor.data()[sector_len..], &reference[sector_len..]);
+        assert_eq!(
+            factor.data()[..sector_len]
+                .iter()
+                .filter(|&&value| value == 1.0)
+                .count(),
+            matrices[0].rows
+        );
+        assert_buffers_intact(&pairs, side);
+
+        // Missing pair for a populated sector: unchanged error.
+        let mut pairs = staged(1.0);
+        let (result, probe) = build(&matrices, &mut pairs[..1], &row_dimensions);
+        assert!(matches!(
+            result.unwrap_err(),
+            OperationError::UnsupportedTensorContractScope {
+                message: "factor rank absent for a populated source sector"
+            }
+        ));
+        assert_eq!(probe.fallback_publications, 1);
+        assert_buffers_intact(&pairs, side);
+
+        // Extraneous pair: unchanged error before any publication decision.
+        let mut pairs = staged(1.0);
+        pairs.push(FactorPair {
+            sector: SectorId::new(5),
+            kept: 1,
+            left: vec![1.0],
+            left_rows: 1,
+            right: Vec::new(),
+            right_leading: 0,
+        });
+        let (result, probe) = build(&matrices, &mut pairs, &row_dimensions);
+        assert!(matches!(
+            result.unwrap_err(),
+            OperationError::UnsupportedTensorContractScope {
+                message: "factor sector absent from the source tensor"
+            }
+        ));
+        assert_eq!(
+            (probe.canonical_publications, probe.fallback_publications),
+            (0, 0)
+        );
+        assert_buffers_intact(&pairs, side);
+
+        // Duplicate pair records for the even sector with different payloads:
+        // the last record wins, on the scatter path.
+        let alternate = canonical(2.0);
+        let mut pairs = staged(1.0);
+        let mut duplicate = staged(2.0);
+        pairs.push(duplicate.swap_remove(0));
+        let (factor, probe) = build(&matrices, &mut pairs, &row_dimensions);
+        assert_eq!(probe.fallback_publications, 1);
+        let factor = factor.unwrap();
+        assert_eq!(&factor.data()[..sector_len], &alternate[..sector_len]);
+        assert_eq!(&factor.data()[sector_len..], &reference[sector_len..]);
+        assert_ne!(&alternate[..sector_len], &reference[..sector_len]);
+        assert_buffers_intact(&pairs, side);
+    }
+
+    #[test]
+    fn mf_one_sided_identity_sector_between_populated_sectors_falls_back() {
+        let rule = Arc::new(tenet_core::ZNFusionRule::new(3).unwrap());
+        let sectors = [SectorId::new(0), SectorId::new(1), SectorId::new(2)];
+        let [s0, s1, s2] = sectors;
+        let (authority, matrices) = two_leg_geometry::<_, f64>(
+            rule,
+            [
+                vec![(s0, 1), (s1, 2), (s2, 1)],
+                vec![(s0, 2), (s1, 1), (s2, 1)],
+                vec![(s0, 1), (s1, 1), (s2, 2)],
+                vec![(s0, 2), (s1, 1), (s2, 1)],
+            ],
+        );
+        assert_eq!(
+            matrices
+                .iter()
+                .map(|matrix| matrix.sector)
+                .collect::<Vec<_>>(),
+            sectors
+        );
+        let side = FactorSide::Right;
+        let col_dimensions = matrices
+            .iter()
+            .map(|matrix| (matrix.sector, matrix.cols))
+            .collect::<BTreeMap<_, _>>();
+        let build = |matrices: &[SectorMatricization<f64>], pairs: &mut [FactorPair<f64>]| {
+            reset_one_sided_publication_probe();
+            let factor = build_bound_factor_with_placement(
+                &authority,
+                authority.space().homspace(),
+                matrices,
+                pairs,
+                &col_dimensions,
+                side,
+                FactorPlacement::Direct,
+            )
+            .unwrap();
+            (factor.data().to_vec(), one_sided_publication_probe())
+        };
+        let mut pairs =
+            staged_one_sided_pairs(&matrices, &col_dimensions, side, side, &|k| k as f64 + 0.25);
+        let (reference, probe) = build(&matrices, &mut pairs);
+        assert_eq!(
+            (probe.canonical_publications, probe.fallback_publications),
+            (1, 0)
+        );
+
+        let (_, mut without_middle) = two_leg_geometry::<_, f64>(
+            Arc::new(tenet_core::ZNFusionRule::new(3).unwrap()),
+            [
+                vec![(s0, 1), (s1, 2), (s2, 1)],
+                vec![(s0, 2), (s1, 1), (s2, 1)],
+                vec![(s0, 1), (s1, 1), (s2, 2)],
+                vec![(s0, 2), (s1, 1), (s2, 1)],
+            ],
+        );
+        without_middle.remove(1);
+        let mut pairs =
+            staged_one_sided_pairs(&without_middle, &col_dimensions, side, side, &|k| {
+                k as f64 + 0.25
+            });
+        let (data, probe) = build(&without_middle, &mut pairs);
+        assert_eq!(
+            (probe.canonical_publications, probe.fallback_publications),
+            (0, 1)
+        );
+        assert_buffers_intact(&pairs, side);
+        let first = matrices[0].cols * matrices[0].cols;
+        let middle = matrices[1].cols * matrices[1].cols;
+        assert_eq!(&data[..first], &reference[..first]);
+        assert_eq!(&data[first + middle..], &reference[first + middle..]);
+        assert_eq!(
+            data[first..first + middle]
+                .iter()
+                .filter(|&&value| value == 1.0)
+                .count(),
+            matrices[1].cols
+        );
+    }
+
+    #[test]
+    fn mf_one_sided_zero_bond_sector_between_populated_sectors() {
+        // Pinned outcome (a): the admitted structure omits zero-extent blocks,
+        // so a zero-bond sector contributes no blocks and an empty factor; the
+        // populated neighbours still transfer canonically.
+        let legs = |s0, s1, s2| {
+            [
+                vec![(s0, 1), (s1, 2), (s2, 1)],
+                vec![(s0, 2), (s1, 1), (s2, 1)],
+                vec![(s0, 1), (s1, 1), (s2, 2)],
+                vec![(s0, 2), (s1, 1), (s2, 1)],
+            ]
+        };
+        let [s0, s1, s2] = [SectorId::new(0), SectorId::new(1), SectorId::new(2)];
+        let (authority, matrices) = two_leg_geometry::<_, f64>(
+            Arc::new(tenet_core::ZNFusionRule::new(3).unwrap()),
+            legs(s0, s1, s2),
+        );
+        assert_eq!(
+            matrices
+                .iter()
+                .map(|matrix| matrix.sector)
+                .collect::<Vec<_>>(),
+            [s0, s1, s2]
+        );
+        let side = FactorSide::Right;
+        let dimensions = BTreeMap::from([(s0, matrices[0].cols), (s1, 0), (s2, matrices[2].cols)]);
+        let mut pairs =
+            staged_one_sided_pairs(&matrices, &dimensions, side, side, &|k| k as f64 - 0.5);
+        pairs[1].kept = 0;
+        assert!(pairs[1].right.is_empty());
+        let selected = pairs
+            .iter()
+            .map(|pair| pair.right.clone())
+            .collect::<Vec<_>>();
+        let opposite = pairs
+            .iter()
+            .map(|pair| pair.left.clone())
+            .collect::<Vec<_>>();
+
+        reset_one_sided_publication_probe();
+        let factor = build_bound_factor_with_placement(
+            &authority,
+            authority.space().homspace(),
+            &matrices,
+            &mut pairs,
+            &dimensions,
+            side,
+            FactorPlacement::Direct,
+        )
+        .unwrap();
+
+        let probe = one_sided_publication_probe();
+        assert_eq!(
+            (probe.canonical_publications, probe.fallback_publications),
+            (1, 0)
+        );
+        assert_eq!(probe.appended_elements, selected[2].len());
+        assert_eq!(factor.data().len(), selected[0].len() + selected[2].len());
+        assert_literal_one_sided_layout(
+            factor.space().space().structure(),
+            factor.data(),
+            &matrices,
+            &selected,
+            &dimensions,
+            side,
+            side,
+        );
+        for (index, pair) in pairs.iter().enumerate() {
+            assert!(pair.right.is_empty());
+            assert_eq!(pair.left, opposite[index]);
+        }
+    }
+
+    #[test]
+    fn checked_one_sided_canonical_transfer_across_sectors_and_extra_pairs() {
+        let rule = TestGenericRule;
+        let provider = Arc::new(InfallibleGeneric::new(&rule));
+        let even = SectorId::new(0);
+        let odd = SectorId::new(1);
+        let homspace = FusionTreeHomSpace::new(
+            FusionProductSpace::new([
+                SectorLeg::new([(even, 2), (odd, 1)], false),
+                SectorLeg::new([(even, 1), (odd, 3)], false),
+            ]),
+            FusionProductSpace::new([
+                SectorLeg::new([(even, 1), (odd, 2)], false),
+                SectorLeg::new([(even, 2), (odd, 1)], false),
+            ]),
+        );
+        let space = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+            Arc::clone(&provider),
+            homspace.clone(),
+        )
+        .unwrap();
+        let zeros = vec![Complex64::new(0.0, 0.0); space.space().required_len().unwrap()];
+        let matrices = sector_matricizations(space.space().structure(), &zeros, 2).unwrap();
+        assert_eq!(matrices.len(), 2);
+        let values = |k: usize| Complex64::new(0.5 * k as f64, 2.0 - k as f64);
+
+        for side in [FactorSide::Left, FactorSide::Right] {
+            let dimensions = matrices
+                .iter()
+                .map(|matrix| (matrix.sector, source_extent(matrix, side)))
+                .collect::<BTreeMap<_, _>>();
+            let mut pairs = staged_one_sided_pairs(&matrices, &dimensions, side, side, &values);
+            let selected = pairs
+                .iter()
+                .map(|pair| selected_of(pair, side).clone())
+                .collect::<Vec<_>>();
+            let opposite = pairs
+                .iter()
+                .map(|pair| opposite_of(pair, side).clone())
+                .collect::<Vec<_>>();
+            reset_one_sided_publication_probe();
+            let factor = build_bound_factor_generic_checked(
+                &provider,
+                &homspace,
+                &matrices,
+                &mut pairs,
+                &dimensions,
+                side,
+            )
+            .unwrap();
+            let probe = one_sided_publication_probe();
+            assert_eq!(
+                (probe.canonical_publications, probe.fallback_publications),
+                (1, 0)
+            );
+            assert_eq!(probe.appended_elements, selected[1].len());
+            assert!(Arc::ptr_eq(factor.space().provider_arc(), &provider));
+            assert_literal_one_sided_layout(
+                factor.space().space().structure(),
+                factor.data(),
+                &matrices,
+                &selected,
+                &dimensions,
+                side,
+                side,
+            );
+            for (index, pair) in pairs.iter().enumerate() {
+                assert!(selected_of(pair, side).is_empty());
+                assert_eq!(opposite_of(pair, side), &opposite[index]);
+            }
+
+            // An extra unused pair is ignored on the scatter path, never an
+            // error, and the output is identical.
+            let mut pairs = staged_one_sided_pairs(&matrices, &dimensions, side, side, &values);
+            pairs.push(FactorPair {
+                sector: SectorId::new(7),
+                kept: 1,
+                left: vec![Complex64::new(1.0, 1.0)],
+                left_rows: 1,
+                right: vec![Complex64::new(1.0, 1.0)],
+                right_leading: 1,
+            });
+            reset_one_sided_publication_probe();
+            let fallback = build_bound_factor_generic_checked(
+                &provider,
+                &homspace,
+                &matrices,
+                &mut pairs,
+                &dimensions,
+                side,
+            )
+            .unwrap();
+            let probe = one_sided_publication_probe();
+            assert_eq!(
+                (probe.canonical_publications, probe.fallback_publications),
+                (0, 1)
+            );
+            assert_eq!(fallback.data(), factor.data());
+            assert_buffers_intact(&pairs, side);
+        }
+    }
+
+    #[test]
+    fn checked_one_sided_vertex_trees_transfer_sole_owner_or_fall_back() {
+        let rule = TestGenericRule;
+        let provider = Arc::new(InfallibleGeneric::new(&rule));
+        let dimensions = BTreeMap::from([(SectorId::new(1), 2)]);
+        for reverse in [false, true] {
+            for side in [FactorSide::Left, FactorSide::Right] {
+                let (homspace, matrix, mut pair) = vertex_tree_factor_fixture(reverse);
+                let (_, _, reference) = vertex_tree_factor_fixture(reverse);
+                let selected_ptr = selected_of(&pair, side).as_ptr();
+                reset_one_sided_publication_probe();
+                let factor = build_bound_factor_generic_checked(
+                    &provider,
+                    &homspace,
+                    std::slice::from_ref(&matrix),
+                    std::slice::from_mut(&mut pair),
+                    &dimensions,
+                    side,
+                )
+                .unwrap();
+                let probe = one_sided_publication_probe();
+                assert_eq!(opposite_of(&pair, side), opposite_of(&reference, side));
+                if reverse {
+                    assert_eq!(
+                        (probe.canonical_publications, probe.fallback_publications),
+                        (0, 1)
+                    );
+                    assert_eq!(selected_of(&pair, side), selected_of(&reference, side));
+                } else {
+                    assert_eq!(
+                        (
+                            probe.canonical_publications,
+                            probe.fallback_publications,
+                            probe.owner_reused,
+                            probe.appended_elements,
+                        ),
+                        (1, 0, 1, 0)
+                    );
+                    assert!(std::ptr::eq(selected_ptr, factor.data().as_ptr()));
+                    assert!(selected_of(&pair, side).is_empty());
+                    assert_eq!(factor.data(), selected_of(&reference, side));
+                }
+            }
+        }
     }
 }

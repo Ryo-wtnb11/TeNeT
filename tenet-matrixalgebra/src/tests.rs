@@ -4645,6 +4645,38 @@ fn full_svd_late_error_preserves_input_and_publishes_no_factors() {
 }
 
 #[test]
+fn full_svd_publishes_owned_factors_without_scatter_in_both_orientations() {
+    // What: the production full SVD (direct and adjoint engines) admits U and
+    // Vh layouts that the staged per-sector factors already occupy, so both
+    // factors are transferred instead of zero-filled and scattered.
+    let rule = Z2FusionRule;
+    let tensor = tsvd_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
+    let bound = bound_tensor(Arc::new(rule), &tensor);
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+
+    crate::factorize::reset_one_sided_publication_probe();
+    let direct = svd_full_dyn(&mut dense, &bound.as_ref().dynamic()).unwrap();
+    let probe = crate::factorize::one_sided_publication_probe();
+    assert_eq!(
+        (probe.canonical_publications, probe.fallback_publications),
+        (2, 0)
+    );
+    assert!(probe.appended_elements > 0);
+
+    crate::factorize::reset_one_sided_publication_probe();
+    let adjoint = svd_full_adjoint_dyn(&mut dense, &bound.as_ref().dynamic()).unwrap();
+    let probe = crate::factorize::one_sided_publication_probe();
+    assert_eq!(
+        (probe.canonical_publications, probe.fallback_publications),
+        (2, 0)
+    );
+    assert_eq!(
+        direct.u().space().space().required_len().unwrap(),
+        adjoint.u().space().space().required_len().unwrap()
+    );
+}
+
+#[test]
 fn full_svd_adjoint_builds_only_the_final_factor_buffers() {
     let tensor = one_sector_rectangular_matrix(vec![1.0, 2.0, 3.0, 4.0, 5.0, 7.0], 2, 3);
     let bound = bound_tensor(Arc::new(Z2FusionRule), &tensor);
