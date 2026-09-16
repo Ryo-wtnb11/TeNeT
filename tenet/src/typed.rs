@@ -301,7 +301,7 @@ pub struct NetworkDegeneracyRestriction {
 
 /// Internal scalar operations shared by typed tensor execution.
 pub(crate) trait ScalarOps:
-    FactorScalar + tenet_tensors::RecouplingCoefficientAction<f64>
+    FactorScalar + tenet_tensors::RecouplingCoefficientAction<f64> + tenet_tensors::ZeroBytes
 {
     fn ctx_of<Key: Clone + Eq + Hash + Send + Sync + 'static>(
         ctxs: &mut Ctxs<Key>,

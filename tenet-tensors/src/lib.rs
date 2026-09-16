@@ -118,6 +118,7 @@ pub(crate) use tenet_operations::{
 pub use tenet_operations::{
     try_cat_owned_c64_raw, try_cat_owned_raw, OwnedCatC64Source, OwnedCatCopy, OwnedCatSide,
 };
+pub use tenet_operations::{zeroed_payload, ContractDestinationInit, ZeroBytes};
 pub use tenet_operations::{
     ConjugateValue, DenseBlockScalar, DenseRecouplingScalar, RealStructuralCoefficient,
     RecouplingCoefficientAction, TreeTransformScalar,

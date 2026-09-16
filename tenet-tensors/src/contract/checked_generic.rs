@@ -10,7 +10,10 @@ use tenet_operations::{DenseTreeTransformOperations, TensorContractSpec, TreeTra
 use crate::tree_transform::{
     build_checked_generic_tree_pair_transform_group_plan, CheckedGenericPlanError,
 };
-use crate::{ConjugateValue, DenseRecouplingScalar, OperationError, RecouplingCoefficientAction};
+use crate::{
+    zeroed_payload, ConjugateValue, DenseRecouplingScalar, OperationError,
+    RecouplingCoefficientAction, ZeroBytes,
+};
 
 use super::context::TensorContractFusionExecutionContext;
 use super::dynamic_space::{BoundDynamicFusionMapSpace, PreparedCheckedGenericDynamicSpace};
@@ -247,7 +250,7 @@ fn execute_staged_transform<D, B>(
     source_data: &[D],
 ) -> Result<Option<Vec<D>>, OperationError>
 where
-    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64> + Copy + Zero,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64> + Copy + Zero + ZeroBytes,
     B: TreeTransformBackend<D, f64>,
 {
     let CheckedStagedOperand::Transformed {
@@ -258,7 +261,7 @@ where
     else {
         return Ok(None);
     };
-    let mut data = vec![D::zero(); prepared.required_len()];
+    let mut data = zeroed_payload(prepared.required_len());
     execute_transform(
         backend,
         workspace,
@@ -283,7 +286,12 @@ pub fn tensorcontract_owned_checked_generic<P, D>(
 ) -> CheckedContractResult<P, D>
 where
     P: CheckedGenericRigidSymbols<Scalar = f64>,
-    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64> + ConjugateValue + Copy + Zero,
+    D: DenseRecouplingScalar
+        + RecouplingCoefficientAction<f64>
+        + ConjugateValue
+        + Copy
+        + Zero
+        + ZeroBytes,
 {
     let mut transform_backend = DenseTreeTransformOperations::default();
     let mut transform_workspace = Default::default();
@@ -315,7 +323,12 @@ pub fn tensorcontract_owned_checked_generic_in_context<P, D>(
 ) -> CheckedContractResult<P, D>
 where
     P: CheckedGenericRigidSymbols<Scalar = f64>,
-    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64> + ConjugateValue + Copy + Zero,
+    D: DenseRecouplingScalar
+        + RecouplingCoefficientAction<f64>
+        + ConjugateValue
+        + Copy
+        + Zero
+        + ZeroBytes,
 {
     let (
         transform_backend,
@@ -351,7 +364,12 @@ fn tensorcontract_owned_checked_generic_with_resources<P, D, G, B>(
 ) -> CheckedContractResult<P, D>
 where
     P: CheckedGenericRigidSymbols<Scalar = f64>,
-    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64> + ConjugateValue + Copy + Zero,
+    D: DenseRecouplingScalar
+        + RecouplingCoefficientAction<f64>
+        + ConjugateValue
+        + Copy
+        + Zero
+        + ZeroBytes,
     G: Rank2Gemm<D>,
     B: TreeTransformBackend<D, f64>,
 {
@@ -425,7 +443,12 @@ pub(crate) fn tensorcontract_owned_checked_generic_preselected<P, D>(
 ) -> CheckedContractResult<P, D>
 where
     P: CheckedGenericRigidSymbols<Scalar = f64>,
-    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64> + ConjugateValue + Copy + Zero,
+    D: DenseRecouplingScalar
+        + RecouplingCoefficientAction<f64>
+        + ConjugateValue
+        + Copy
+        + Zero
+        + ZeroBytes,
 {
     let mut backend = DenseTreeTransformOperations::default();
     let mut workspace = Default::default();
@@ -465,7 +488,12 @@ fn tensorcontract_owned_checked_generic_preselected_with_core_gemm<P, D, G, B>(
 ) -> CheckedContractResult<P, D>
 where
     P: CheckedGenericRigidSymbols<Scalar = f64>,
-    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64> + ConjugateValue + Copy + Zero,
+    D: DenseRecouplingScalar
+        + RecouplingCoefficientAction<f64>
+        + ConjugateValue
+        + Copy
+        + Zero
+        + ZeroBytes,
     G: Rank2Gemm<D>,
     B: TreeTransformBackend<D, f64>,
 {
@@ -541,7 +569,12 @@ fn execute_preselected_checked_generic_contract<P, D, G, B>(
 ) -> CheckedContractResult<P, D>
 where
     P: CheckedGenericRigidSymbols<Scalar = f64>,
-    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64> + ConjugateValue + Copy + Zero,
+    D: DenseRecouplingScalar
+        + RecouplingCoefficientAction<f64>
+        + ConjugateValue
+        + Copy
+        + Zero
+        + ZeroBytes,
     G: Rank2Gemm<D>,
     B: TreeTransformBackend<D, f64>,
 {
@@ -641,10 +674,10 @@ where
         FusionContractOrientation::RhsLhs => (rhs_core_data, lhs_core_data),
     };
     let mut kernels = crate::StridedHostKernelAdapter::default();
-    let mut data = vec![D::zero(); destination.required_len()];
+    let mut data = zeroed_payload(destination.required_len());
     if let Some(output_replay) = output_replay {
-        let mut core_data = vec![D::zero(); core_destination.required_len()];
-        core_plan.execute_raw(
+        let mut core_data = zeroed_payload(core_destination.required_len());
+        core_plan.execute_raw_zeroed(
             &mut kernels,
             core_gemm,
             fusion_workspace,
@@ -655,7 +688,6 @@ where
             core_right_structure,
             core_rhs_data,
             D::one(),
-            D::zero(),
         )?;
         execute_transform(
             transform_backend,
@@ -667,7 +699,7 @@ where
             &core_data,
         )?;
     } else {
-        core_plan.execute_raw(
+        core_plan.execute_raw_zeroed(
             &mut kernels,
             core_gemm,
             fusion_workspace,
@@ -678,7 +710,6 @@ where
             core_right_structure,
             core_rhs_data,
             D::one(),
-            D::zero(),
         )?;
     }
     let destination = lhs_space.commit_final_homspace_generic_bound_checked(destination)?;
@@ -1238,5 +1269,153 @@ mod tests {
             .events
             .borrow()
             .ends_with(&[Event::Identity, Event::Style]));
+    }
+
+    /// Rank-1 legs with the listed `(sector, degeneracy)` pairs on each side.
+    fn homspace_with(codomain: &[(usize, usize)], domain: &[(usize, usize)]) -> FusionTreeHomSpace {
+        let leg = |sectors: &[(usize, usize)]| {
+            SectorLeg::new(
+                sectors
+                    .iter()
+                    .map(|&(sector, degeneracy)| (SectorId::new(sector), degeneracy)),
+                false,
+            )
+        };
+        FusionTreeHomSpace::new(
+            FusionProductSpace::new([leg(codomain)]),
+            FusionProductSpace::new([leg(domain)]),
+        )
+    }
+
+    #[allow(clippy::arc_with_non_send_sync)]
+    fn bound_space(homspace: FusionTreeHomSpace) -> BoundDynamicFusionMapSpace<CheckedGenericSpy> {
+        BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+            Arc::new(CheckedGenericSpy::new()),
+            homspace,
+        )
+        .unwrap()
+    }
+
+    fn assert_inactive_sector_zero_and_active_product<D>(
+        one: D,
+        two: D,
+        six: D,
+        is_positive_zero: fn(D) -> bool,
+    ) where
+        D: DenseRecouplingScalar
+            + RecouplingCoefficientAction<f64>
+            + ConjugateValue
+            + Copy
+            + Zero
+            + ZeroBytes
+            + std::fmt::Debug,
+    {
+        // lhs `[0:1, 1:2] <- [1:3]` and rhs `[1:3] <- [0:1, 1:2]` couple only
+        // to sector 1; the destination `[0:1, 1:2] <- [0:1, 1:2]` also has the
+        // sector-0 block, which no GEMM writes.
+        let lhs = bound_space(homspace_with(&[(0, 1), (1, 2)], &[(1, 3)]));
+        let rhs = bound_space(homspace_with(&[(1, 3)], &[(0, 1), (1, 2)]));
+        let lhs_data = vec![one; lhs.space().required_len().unwrap()];
+        let rhs_data = vec![two; rhs.space().required_len().unwrap()];
+        let (output, data) = tensorcontract_owned_checked_generic(
+            &lhs,
+            &lhs_data,
+            &rhs,
+            &rhs_data,
+            TensorContractSpec::with_default_output_order(&[1], &[0]),
+        )
+        .unwrap();
+        let structure = output.space().structure();
+        assert_eq!(structure.block_count(), 2);
+        assert_eq!(data.len(), 1 + 4);
+        for index in 0..structure.block_count() {
+            // The sector-0 block is the 1x1 one, the sector-1 block the 2x2 one.
+            let block = structure.block(index).unwrap();
+            let range = block.offset()..block.offset() + block.element_count().unwrap();
+            match range.len() {
+                1 => assert!(data[range].iter().all(|&v| is_positive_zero(v))),
+                4 => assert!(data[range].iter().all(|&v| v == six)),
+                other => panic!("unexpected block length {other}"),
+            }
+        }
+    }
+
+    #[test]
+    fn owned_checked_generic_contract_leaves_inactive_sectors_exactly_zero() {
+        assert_inactive_sector_zero_and_active_product::<f64>(1.0, 2.0, 6.0, |v| v.to_bits() == 0);
+        assert_inactive_sector_zero_and_active_product::<num_complex::Complex64>(
+            num_complex::Complex64::new(1.0, 0.0),
+            num_complex::Complex64::new(2.0, 0.0),
+            num_complex::Complex64::new(6.0, 0.0),
+            |v| v.re.to_bits() == 0 && v.im.to_bits() == 0,
+        );
+    }
+
+    struct FailingAtJob {
+        calls: usize,
+        fail_at: usize,
+    }
+
+    impl Rank2Gemm<f64> for FailingAtJob {
+        #[allow(clippy::too_many_arguments)]
+        fn matmul_rank2(
+            &mut self,
+            dst: &mut [f64],
+            _lhs: &[f64],
+            _rhs: &[f64],
+            _rows: usize,
+            _contracted: usize,
+            _cols: usize,
+            _alpha: f64,
+            _beta: f64,
+        ) -> Result<(), OperationError> {
+            let call = self.calls;
+            self.calls += 1;
+            if call == self.fail_at {
+                return Err(OperationError::StridedKernel {
+                    message: "injected failure on a later GEMM job".into(),
+                });
+            }
+            dst.fill(1.0);
+            Ok(())
+        }
+    }
+
+    #[test]
+    #[allow(clippy::arc_with_non_send_sync)]
+    fn checked_generic_gemm_failure_on_a_later_job_returns_the_error_without_publishing() {
+        // What: with two coupled sectors the second GEMM job fails after the
+        // first wrote its block; the owner returns `Err` (no panic) and no
+        // output space or payload is returned.
+        let lhs = bound_space(homspace_with(&[(0, 2), (1, 2)], &[(0, 2), (1, 2)]));
+        let rhs = bound_space(homspace_with(&[(0, 2), (1, 2)], &[(0, 2), (1, 2)]));
+        let candidate = contracted_axis_order_candidates(&[1], &[0]).remove(0);
+        let mut transform_backend = DenseTreeTransformOperations::default();
+        let mut transform_workspace = Default::default();
+        let mut fusion_workspace = FusionBlockContractWorkspace::default();
+        let mut gemm = FailingAtJob {
+            calls: 0,
+            fail_at: 1,
+        };
+        let error = tensorcontract_owned_checked_generic_preselected_with_core_gemm(
+            &lhs,
+            &vec![1.0; lhs.space().required_len().unwrap()],
+            &rhs,
+            &vec![2.0; rhs.space().required_len().unwrap()],
+            TensorContractSpec::with_default_output_order(&[1], &[0]),
+            1,
+            &candidate,
+            FusionContractOrientation::LhsRhs,
+            &mut transform_backend,
+            &mut transform_workspace,
+            &mut gemm,
+            &mut fusion_workspace,
+        )
+        .unwrap_err();
+        assert_eq!(gemm.calls, 2);
+        assert!(matches!(
+            error,
+            CheckedGenericPlanError::Operation(OperationError::StridedKernel { .. })
+        ));
     }
 }

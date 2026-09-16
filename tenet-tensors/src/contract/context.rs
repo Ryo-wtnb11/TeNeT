@@ -19,7 +19,7 @@ use crate::{
     DenseBlockScalar, DenseRecouplingScalar, DenseTreeTransformOperations, HostTensorOperations,
     OperationError, RecouplingCoefficientAction, ReportsPlacement, TreeTransformBackend,
 };
-use tenet_operations::{TensorContractSpec, TensorContractSpecOwned};
+use tenet_operations::{ContractDestinationInit, TensorContractSpec, TensorContractSpecOwned};
 
 use super::backend::{
     tensorcontract_structure_with_storage_workspace_dense_executor, TensorContractBackend,
@@ -838,6 +838,40 @@ where
         R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
         D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
     {
+        self.tensorcontract_fusion_dyn_into_with_init(
+            dst_space,
+            dst_data,
+            lhs_space,
+            lhs_data,
+            rhs_space,
+            rhs_data,
+            axes,
+            alpha,
+            ContractDestinationInit::Axpby(beta),
+        )
+    }
+
+    /// [`Self::tensorcontract_fusion_dyn_into`] with the destination
+    /// initialisation made explicit: an owned output born all-zero passes
+    /// [`ContractDestinationInit::Zeroed`] so its inactive blocks are never
+    /// touched.
+    #[allow(clippy::too_many_arguments)]
+    pub fn tensorcontract_fusion_dyn_into_with_init<R>(
+        &mut self,
+        dst_space: &BoundDynamicFusionMapSpace<R>,
+        dst_data: &mut [D],
+        lhs_space: &BoundDynamicFusionMapSpace<R>,
+        lhs_data: &[D],
+        rhs_space: &BoundDynamicFusionMapSpace<R>,
+        rhs_data: &[D],
+        axes: TensorContractSpec<'_>,
+        alpha: D,
+        init: ContractDestinationInit<D>,
+    ) -> Result<(), OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
+    {
         // Why not accept a separate rule: the lhs bound space is the authority
         // used for planning and execution; the raw core only checks identities.
         self.tensorcontract_fusion_dyn_into_raw_with_primer(
@@ -850,7 +884,7 @@ where
             rhs_data,
             axes,
             alpha,
-            beta,
+            init,
             lhs_space.layout_primer(),
         )
     }
@@ -884,7 +918,7 @@ where
             rhs_data,
             axes,
             alpha,
-            beta,
+            ContractDestinationInit::Axpby(beta),
             encoded_layout_primer::<R>,
         )
     }
@@ -901,7 +935,7 @@ where
         rhs_data: &[D],
         axes: TensorContractSpec<'_>,
         alpha: D,
-        beta: D,
+        init: ContractDestinationInit<D>,
         layout_primer: LayoutKeyBuilder<R>,
     ) -> Result<(), OperationError>
     where
@@ -959,7 +993,7 @@ where
             rhs_space.structure(),
             rhs_data,
             alpha,
-            beta,
+            init,
         )
     }
 
@@ -986,6 +1020,39 @@ where
         R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
         D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
     {
+        self.tensorcontract_fusion_dyn_prelowered_into_with_init(
+            dst_space,
+            dst_data,
+            lhs,
+            lhs_data,
+            rhs,
+            rhs_data,
+            axes,
+            alpha,
+            ContractDestinationInit::Axpby(beta),
+        )
+    }
+
+    /// [`Self::tensorcontract_fusion_dyn_prelowered_into`] with the
+    /// destination initialisation made explicit.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn tensorcontract_fusion_dyn_prelowered_into_with_init<R>(
+        &mut self,
+        dst_space: &BoundDynamicFusionMapSpace<R>,
+        dst_data: &mut [D],
+        lhs: FusionOperand<'_>,
+        lhs_data: &[D],
+        rhs: FusionOperand<'_>,
+        rhs_data: &[D],
+        axes: TensorContractSpec<'_>,
+        alpha: D,
+        init: ContractDestinationInit<D>,
+    ) -> Result<(), OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
+    {
         self.tensorcontract_fusion_dyn_prelowered_into_core(
             dst_space,
             dst_data,
@@ -995,7 +1062,7 @@ where
             rhs_data,
             axes,
             alpha,
-            beta,
+            init,
             dst_space.layout_primer(),
             prelowered_plan_builder::<R>,
         )
@@ -1012,7 +1079,7 @@ where
         rhs_data: &[D],
         axes: TensorContractSpec<'_>,
         alpha: D,
-        beta: D,
+        init: ContractDestinationInit<D>,
         layout_primer: LayoutKeyBuilder<R>,
         plan_builder: PreloweredPlanBuilder<R>,
     ) -> Result<(), OperationError>
@@ -1049,7 +1116,7 @@ where
                 rhs.storage_space().structure(),
                 rhs_data,
                 alpha,
-                beta,
+                init,
             );
         }
         let lhs_layout = lhs.prepare(rule, layout_primer)?;
@@ -1120,7 +1187,7 @@ where
             rhs.storage_space().structure(),
             rhs_data,
             alpha,
-            beta,
+            init,
         )
     }
 
@@ -1154,6 +1221,41 @@ where
         R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
         D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
     {
+        self.tensorcompose_fusion_dyn_into_with_init(
+            dst_space,
+            dst_data,
+            lhs,
+            lhs_data,
+            rhs,
+            rhs_data,
+            lhs_axes,
+            rhs_axes,
+            alpha,
+            ContractDestinationInit::Axpby(beta),
+        )
+    }
+
+    /// [`Self::tensorcompose_fusion_dyn_into`] with the destination
+    /// initialisation made explicit.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn tensorcompose_fusion_dyn_into_with_init<R>(
+        &mut self,
+        dst_space: &BoundDynamicFusionMapSpace<R>,
+        dst_data: &mut [D],
+        lhs: FusionOperand<'_>,
+        lhs_data: &[D],
+        rhs: FusionOperand<'_>,
+        rhs_data: &[D],
+        lhs_axes: &[usize],
+        rhs_axes: &[usize],
+        alpha: D,
+        init: ContractDestinationInit<D>,
+    ) -> Result<(), OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
+    {
         let rule = dst_space.provider();
         let axes = TensorContractSpec::new_with_conjugation(
             lhs_axes,
@@ -1176,12 +1278,12 @@ where
                     rhs_data,
                     axes,
                     alpha,
-                    beta,
+                    init,
                     dst_space.layout_primer(),
                 );
             }
-            return self.tensorcontract_fusion_dyn_prelowered_into(
-                dst_space, dst_data, lhs, lhs_data, rhs, rhs_data, axes, alpha, beta,
+            return self.tensorcontract_fusion_dyn_prelowered_into_with_init(
+                dst_space, dst_data, lhs, lhs_data, rhs, rhs_data, axes, alpha, init,
             );
         }
         let lhs_layout = lhs.prepare(rule, dst_space.layout_primer())?;
@@ -1203,7 +1305,7 @@ where
             rhs.storage_space().structure(),
             rhs_data,
             alpha,
-            beta,
+            init,
         )
     }
 
@@ -1623,11 +1725,14 @@ where
         rhs_structure: &Arc<BlockStructure>,
         rhs_data: &[D],
         alpha: D,
-        beta: D,
+        init: ContractDestinationInit<D>,
     ) -> Result<(), OperationError>
     where
         D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
     {
+        // The dynamic-tree and structure routes still run their own inactive
+        // pass with `beta = 0`; only the core replay honours `Zeroed`.
+        let beta = init.active_beta();
         match resolution {
             Resolution::Core(block_plan) => {
                 let Self {
@@ -1641,19 +1746,33 @@ where
                     contract_backend,
                     contract_workspace,
                 );
-                block_plan.execute_raw(
-                    &mut kernels,
-                    &mut gemm,
-                    fusion_block_workspace,
-                    dst_structure,
-                    dst_data,
-                    lhs_structure,
-                    lhs_data,
-                    rhs_structure,
-                    rhs_data,
-                    alpha,
-                    beta,
-                )
+                match init {
+                    ContractDestinationInit::Zeroed => block_plan.execute_raw_zeroed(
+                        &mut kernels,
+                        &mut gemm,
+                        fusion_block_workspace,
+                        dst_structure,
+                        dst_data,
+                        lhs_structure,
+                        lhs_data,
+                        rhs_structure,
+                        rhs_data,
+                        alpha,
+                    ),
+                    ContractDestinationInit::Axpby(beta) => block_plan.execute_raw(
+                        &mut kernels,
+                        &mut gemm,
+                        fusion_block_workspace,
+                        dst_structure,
+                        dst_data,
+                        lhs_structure,
+                        lhs_data,
+                        rhs_structure,
+                        rhs_data,
+                        alpha,
+                        beta,
+                    ),
+                }
             }
             Resolution::DynamicTree(_) => {
                 let Self {
@@ -1767,7 +1886,7 @@ where
             &rhs_structure,
             rhs.data(),
             alpha,
-            beta,
+            ContractDestinationInit::Axpby(beta),
         )
     }
 
@@ -1942,7 +2061,7 @@ where
             &rhs_structure,
             rhs.data(),
             alpha,
-            beta,
+            ContractDestinationInit::Axpby(beta),
         )
     }
 

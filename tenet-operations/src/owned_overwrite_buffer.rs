@@ -1,4 +1,52 @@
+use core::alloc::Layout;
 use core::mem::MaybeUninit;
+use std::alloc::{alloc_zeroed, handle_alloc_error};
+
+/// Scalars whose all-zero byte pattern is a valid value equal to `Self::zero()`.
+///
+/// # Safety
+///
+/// Implementors promise that `len * size_of::<Self>()` zeroed bytes with
+/// `Self`'s alignment are `len` valid, initialised values, each equal to the
+/// additive zero. IEEE floats and `#[repr(C)]` pairs of them satisfy this.
+pub unsafe trait ZeroBytes: Copy {}
+
+unsafe impl ZeroBytes for f64 {}
+unsafe impl ZeroBytes for num_complex::Complex64 {}
+
+/// `len` zero scalars zeroed by the allocator (calloc), not by a scalar loop.
+///
+/// Why not `vec![D::zero(); len]`: std lowers that to `alloc_zeroed` only for
+/// types with its private `IsZero` specialisation, which `num_complex`
+/// scalars lack, so `Complex64` would be filled by an element loop over `len`.
+pub fn zeroed_payload<D: ZeroBytes>(len: usize) -> Vec<D> {
+    if len == 0 {
+        return Vec::new();
+    }
+    let Ok(layout) = Layout::array::<D>(len) else {
+        capacity_overflow()
+    };
+    // SAFETY: `ZeroBytes` is implemented only for types whose all-zero byte
+    // pattern is a valid `D::zero()`; `alloc_zeroed` returns
+    // `len * size_of::<D>()` zeroed bytes with `D`'s alignment (a null result
+    // is routed to `handle_alloc_error` exactly as `Vec` does), so all `len`
+    // elements are initialised before `Vec::from_raw_parts` receives the same
+    // pointer with the matching `Layout` (`capacity == len`, same alignment).
+    // `len == 0` returned above, so the zero-size allocation path is never
+    // taken, and `layout.size() != 0` holds as `alloc_zeroed` requires.
+    unsafe {
+        let pointer = alloc_zeroed(layout);
+        if pointer.is_null() {
+            handle_alloc_error(layout);
+        }
+        Vec::from_raw_parts(pointer.cast::<D>(), len, len)
+    }
+}
+
+#[cold]
+fn capacity_overflow() -> ! {
+    panic!("capacity overflow")
+}
 
 struct OwnedOverwriteBuffer<D: Copy> {
     data: Vec<D>,
@@ -43,6 +91,34 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zeroed_payload_holds_len_zero_values_for_both_scalar_types() {
+        // What: `zeroed_payload` returns `len` values bit-equal to the
+        // positive zero of each supported scalar; Miri checks that every
+        // element is initialised and the allocation layout round-trips.
+        for len in [0usize, 1, 7, 64] {
+            let real = zeroed_payload::<f64>(len);
+            assert_eq!(real.len(), len);
+            assert_eq!(real.capacity(), len);
+            assert!(real.iter().all(|value| value.to_bits() == 0));
+
+            let complex = zeroed_payload::<num_complex::Complex64>(len);
+            assert_eq!(complex.len(), len);
+            assert_eq!(complex.capacity(), len);
+            assert!(complex
+                .iter()
+                .all(|value| value.re.to_bits() == 0 && value.im.to_bits() == 0));
+        }
+    }
+
+    #[test]
+    fn zeroed_payload_vec_can_grow_and_drop() {
+        let mut values = zeroed_payload::<num_complex::Complex64>(3);
+        values.push(num_complex::Complex64::new(1.0, 2.0));
+        assert_eq!(values.len(), 4);
+        assert_eq!(values[3].re, 1.0);
+    }
 
     #[test]
     fn completed_transaction_returns_initialized_values() {
