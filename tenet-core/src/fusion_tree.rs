@@ -1221,16 +1221,104 @@ impl FusionTreeGroupKey {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+// Why the hash is stored: keys are built once per structure and looked up
+// many times per publication, so an `O(K)` hash per lookup (TensorKit's
+// `hash(::FusionTree)` per `Dict` access) is avoidable constant work. The
+// cache is a pure function of the five identity fields, is excluded from
+// `Ord` and `Debug`, and is never persisted.
+#[derive(Clone)]
 pub struct FusionTreeKey {
     uncoupled: Arc<[SectorId]>,
     coupled: SectorId,
     is_dual: Arc<[bool]>,
     innerlines: Arc<[SectorId]>,
     vertices: Arc<[MultiplicityIndex]>,
+    hash: u64,
+}
+
+#[inline]
+fn fusion_tree_key_hash(
+    uncoupled: &[SectorId],
+    coupled: SectorId,
+    is_dual: &[bool],
+    innerlines: &[SectorId],
+    vertices: &[MultiplicityIndex],
+) -> u64 {
+    use std::hash::Hasher;
+    let mut hasher = rustc_hash::FxHasher::default();
+    uncoupled.hash(&mut hasher);
+    coupled.hash(&mut hasher);
+    is_dual.hash(&mut hasher);
+    innerlines.hash(&mut hasher);
+    vertices.hash(&mut hasher);
+    hasher.finish()
+}
+
+impl Hash for FusionTreeKey {
+    #[inline]
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        state.write_u64(self.hash);
+    }
+}
+
+impl PartialEq for FusionTreeKey {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        self.hash == other.hash
+            && self.coupled == other.coupled
+            && self.uncoupled == other.uncoupled
+            && self.is_dual == other.is_dual
+            && self.innerlines == other.innerlines
+            && self.vertices == other.vertices
+    }
+}
+
+impl Eq for FusionTreeKey {}
+
+impl Ord for FusionTreeKey {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        self.uncoupled
+            .cmp(&other.uncoupled)
+            .then_with(|| self.coupled.cmp(&other.coupled))
+            .then_with(|| self.is_dual.cmp(&other.is_dual))
+            .then_with(|| self.innerlines.cmp(&other.innerlines))
+            .then_with(|| self.vertices.cmp(&other.vertices))
+    }
+}
+
+impl PartialOrd for FusionTreeKey {
+    #[inline]
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl fmt::Debug for FusionTreeKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FusionTreeKey")
+            .field("uncoupled", &self.uncoupled)
+            .field("coupled", &self.coupled)
+            .field("is_dual", &self.is_dual)
+            .field("innerlines", &self.innerlines)
+            .field("vertices", &self.vertices)
+            .finish()
+    }
 }
 
 impl FusionTreeKey {
+    #[cfg(test)]
+    pub(crate) fn cached_hash_for_test(&self) -> u64 {
+        self.hash
+    }
+
+    /// Test-only hook that overrides the cached hash so collision handling can
+    /// be exercised deterministically; it never changes the identity fields.
+    #[cfg(test)]
+    pub(crate) fn with_cached_hash_for_test(mut self, hash: u64) -> Self {
+        self.hash = hash;
+        self
+    }
+
     /// Construct and validate a categorical fusion tree for `rule`.
     ///
     /// # Provider-domain precondition
@@ -1295,13 +1383,13 @@ impl FusionTreeKey {
         Innerlines: IntoIterator<Item = SectorId>,
         Vertices: IntoIterator<Item = MultiplicityIndex>,
     {
-        Self {
-            uncoupled: uncoupled.into_iter().collect::<Vec<_>>().into(),
+        Self::from_frozen(
+            uncoupled.into_iter().collect::<Vec<_>>().into(),
             coupled,
-            is_dual: is_dual.into_iter().collect::<Vec<_>>().into(),
-            innerlines: innerlines.into_iter().collect::<Vec<_>>().into(),
-            vertices: vertices.into_iter().collect::<Vec<_>>().into(),
-        }
+            is_dual.into_iter().collect::<Vec<_>>().into(),
+            innerlines.into_iter().collect::<Vec<_>>().into(),
+            vertices.into_iter().collect::<Vec<_>>().into(),
+        )
     }
 
     fn from_frozen(
@@ -1311,12 +1399,14 @@ impl FusionTreeKey {
         innerlines: Arc<[SectorId]>,
         vertices: Arc<[MultiplicityIndex]>,
     ) -> Self {
+        let hash = fusion_tree_key_hash(&uncoupled, coupled, &is_dual, &innerlines, &vertices);
         Self {
             uncoupled,
             coupled,
             is_dual,
             innerlines,
             vertices,
+            hash,
         }
     }
 
@@ -7282,14 +7372,14 @@ where
 {
     // Why not freeze a key after every step: this state is private to one
     // execution, while only the final categorical identity can escape.
-    let mut current = tree.clone();
+    let mut current = UnhashedFusionTree::from(tree.clone());
     let mut coefficient = R::Scalar::one();
     for step in steps {
         let step_coefficient =
             apply_unique_artin_braid_at_with_inverse(rule, &mut current, step.index, step.inverse)?;
         coefficient = coefficient * step_coefficient;
     }
-    Ok((current, coefficient))
+    Ok((current.freeze(), coefficient))
 }
 
 fn is_unique_direct_braid_source<R>(rule: &R, tree: &FusionTreeKey) -> bool
@@ -7484,9 +7574,74 @@ where
     Ok((braided, coefficient))
 }
 
+/// Braid state that is mutated step by step without a cached hash.
+///
+/// `FusionTreeKey` caches its hash, so in-place `Arc::make_mut` swaps on a key
+/// would leave that cache stale between steps; keeping the working state in a
+/// hash-free struct makes the stale state unrepresentable and costs one hash
+/// at `freeze` instead of one per Artin step.
+struct UnhashedFusionTree {
+    uncoupled: Arc<[SectorId]>,
+    coupled: SectorId,
+    is_dual: Arc<[bool]>,
+    innerlines: Arc<[SectorId]>,
+    vertices: Arc<[MultiplicityIndex]>,
+}
+
+impl From<FusionTreeKey> for UnhashedFusionTree {
+    fn from(key: FusionTreeKey) -> Self {
+        let FusionTreeKey {
+            uncoupled,
+            coupled,
+            is_dual,
+            innerlines,
+            vertices,
+            hash: _,
+        } = key;
+        Self {
+            uncoupled,
+            coupled,
+            is_dual,
+            innerlines,
+            vertices,
+        }
+    }
+}
+
+impl UnhashedFusionTree {
+    fn freeze(self) -> FusionTreeKey {
+        FusionTreeKey::from_frozen(
+            self.uncoupled,
+            self.coupled,
+            self.is_dual,
+            self.innerlines,
+            self.vertices,
+        )
+    }
+}
+
+impl MultiplicityFreeTreeLocalData for UnhashedFusionTree {
+    #[inline]
+    fn coupled(&self) -> SectorId {
+        self.coupled
+    }
+
+    #[inline]
+    fn innerlines(&self) -> &[SectorId] {
+        &self.innerlines
+    }
+}
+
+impl MultiplicityFreeTreeData for UnhashedFusionTree {
+    #[inline]
+    fn uncoupled(&self) -> &[SectorId] {
+        &self.uncoupled
+    }
+}
+
 fn apply_unique_artin_braid_at_with_inverse<R>(
     rule: &R,
-    tree: &mut FusionTreeKey,
+    tree: &mut UnhashedFusionTree,
     index: usize,
     inverse: bool,
 ) -> Result<R::Scalar, CoreError>

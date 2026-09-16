@@ -13,6 +13,7 @@ tenet-dense = { version = "0.1.1", path = "../tenet-dense", default-features = f
 tenet-tensors = { version = "0.1.1", path = "../tenet-tensors", default-features = false }
 num-complex = "0.4"
 num-traits = "0.2"
+rustc-hash = "2"
 
 [features]
 default = ["cpu-faer"]
