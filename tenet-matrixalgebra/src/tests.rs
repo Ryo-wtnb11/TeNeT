@@ -1525,8 +1525,12 @@ fn checked_generic_pair_publication_reuses_one_sector_owners() {
         ),
         (0, 0)
     );
-    assert_eq!(probe.output_blocks_visited, blocks);
-    assert_eq!(probe.ordered_key_validation_events, 2 * blocks);
+    // The checked route validates each staged key once (one cursor event per
+    // block) and commits the structure it validated, so the admitted-key
+    // equality of a two-source construction (formerly one visit and one more
+    // event per block: `blocks` visits, `2 * blocks` events) no longer runs.
+    assert_eq!(probe.output_blocks_visited, 0);
+    assert_eq!(probe.ordered_key_validation_events, blocks);
     assert_eq!(
         (probe.fallback_row_lookups, probe.fallback_col_lookups),
         (0, 0)
@@ -1641,8 +1645,10 @@ where
     let qr_probe = crate::factorize::generic_pair_publication_probe();
     let qr_blocks = qr.0.space().space().structure().block_count()
         + qr.1.space().space().structure().block_count();
-    assert_eq!(qr_probe.output_blocks_visited, qr_blocks);
-    assert_eq!(qr_probe.ordered_key_validation_events, 2 * qr_blocks);
+    // Formerly `qr_blocks` visits and `2 * qr_blocks` events: the checked
+    // route no longer cross-checks a separate key list against its structure.
+    assert_eq!(qr_probe.output_blocks_visited, 0);
+    assert_eq!(qr_probe.ordered_key_validation_events, qr_blocks);
     assert_eq!(
         (qr_probe.fallback_row_lookups, qr_probe.fallback_col_lookups),
         (0, 0)
@@ -3615,9 +3621,11 @@ fn checked_generic_svd_trunc_dense_failure_precedes_output_provider_admission() 
 )]
 fn checked_generic_svd_trunc_preserves_full_s_fold_failure() {
     let (source, data) = generic_factorization_input();
-    // U and Vh preflight/construction each fold both one-leg bond sectors,
-    // making the first fold for the full diagonal S the ninth one.
-    const FIRST_FULL_S_FOLD: usize = 9;
+    // U and Vh construction each enumerate their layout once and fold both
+    // one-leg bond sectors (U 1-2, Vh 3-4), making the first fold for the
+    // full diagonal S the fifth one. Formerly each side enumerated twice
+    // (keys, then space: U 1-4, Vh 5-8) and S's first fold was the ninth.
+    const FIRST_FULL_S_FOLD: usize = 5;
     let failing_provider = Arc::new(FailSingleLegFold {
         rule: FactorGenericRule,
         fail_at: FIRST_FULL_S_FOLD,
@@ -4062,6 +4070,150 @@ fn checked_generic_full_svd_enumerates_each_output_layout_once() {
     assert_eq!(enumeration(output.s()), 0);
     assert!(Arc::ptr_eq(output.u().space().provider_arc(), &provider));
     assert!(Arc::ptr_eq(output.vh().space().provider_arc(), &provider));
+}
+
+fn late_spy_calls(run: &dyn Fn(&LateGenericSpy)) -> usize {
+    let probe = LateGenericSpy {
+        rule: FactorGenericRule,
+        fail_at: usize::MAX,
+        calls: Cell::new(0),
+    };
+    run(&probe);
+    probe.calls.get()
+}
+
+fn checked_enumeration_calls<D: FactorScalar>(factor: &BoundDynFactor<LateGenericSpy, D>) -> usize {
+    let homspace = factor.space().space().homspace().clone();
+    late_spy_calls(&|probe| {
+        homspace
+            .prepare_coupled_subblock_structure_from_leg_degeneracies_generic_checked(probe)
+            .unwrap();
+    })
+}
+
+// Checked compact-QR provider sequence for `generic_factorization_input`: the
+// compact plan issues no preflight query, the left (Q) space enumerates once
+// (calls 1-3), then the right (R) space enumerates once (calls 4-6). Before
+// the paired builder enumerated each side once, each side enumerated twice
+// (left keys 1-3, left space 4-6, right keys 7-9, right space 10-12) and the
+// first right-side call was the seventh.
+const COMPACT_PAIR_LEFT_LAST_CALL: usize = 3;
+const COMPACT_PAIR_RIGHT_FIRST_CALL: usize = 4;
+const COMPACT_PAIR_RIGHT_LAST_CALL: usize = 6;
+
+#[test]
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
+fn checked_generic_compact_pair_builder_failure_preserves_provider_context() {
+    // What: the last call of the left enumeration and the first call of the
+    // right enumeration propagate their exact provider error without
+    // publishing either factor or touching the input.
+    let (source, data) = generic_factorization_input();
+    for fail_at in [COMPACT_PAIR_LEFT_LAST_CALL, COMPACT_PAIR_RIGHT_FIRST_CALL] {
+        let provider = Arc::new(LateGenericSpy {
+            rule: FactorGenericRule,
+            fail_at,
+            calls: Cell::new(0),
+        });
+        let checked =
+            BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
+                .unwrap();
+        let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
+        let mut dense = CountingDense::default();
+        let result = qr_compact_dyn_checked_generic(&mut dense, &input);
+        assert!(matches!(
+            result,
+            Err(CheckedGenericFactorPlanError::Provider(LateGenericError(call))) if call == fail_at
+        ));
+        assert_eq!(provider.calls.get(), fail_at);
+        assert_eq!(dense.qr_calls, 2);
+        assert_eq!(input.data(), data);
+    }
+
+    let provider = Arc::new(LateGenericSpy {
+        rule: FactorGenericRule,
+        fail_at: usize::MAX,
+        calls: Cell::new(0),
+    });
+    let checked =
+        BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
+            .unwrap();
+    let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
+    let (q, r) = qr_compact_dyn_checked_generic(&mut CountingDense::default(), &input).unwrap();
+    assert_eq!(provider.calls.get(), COMPACT_PAIR_RIGHT_LAST_CALL);
+    assert_eq!(checked_enumeration_calls(&q), COMPACT_PAIR_LEFT_LAST_CALL);
+    assert_eq!(
+        checked_enumeration_calls(&r),
+        COMPACT_PAIR_RIGHT_LAST_CALL - COMPACT_PAIR_LEFT_LAST_CALL
+    );
+}
+
+#[test]
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
+fn checked_generic_svd_trunc_enumerates_each_factor_layout_once() {
+    // What: a truncating checked SVD queries the provider for exactly one
+    // enumeration of each of the compact U and Vh spaces, the diagonal S
+    // space, and the sliced U and Vh spaces, plus one dimension weight per
+    // bond sector for the truncation decision. On
+    // `generic_factorization_input`: compact U 3 + Vh 3, S 0, weights 2,
+    // sliced U 3 + Vh 3 = 14 calls. Formerly the compact pair and both
+    // sliced spaces enumerated twice: 2 * (3 + 3) + 0 + 2 + 2 * (3 + 3) = 26.
+    const TRUNC_SVD_CALLS: usize = 14;
+    let (source, data) = generic_factorization_input();
+    let provider = Arc::new(LateGenericSpy {
+        rule: FactorGenericRule,
+        fail_at: usize::MAX,
+        calls: Cell::new(0),
+    });
+    let checked =
+        BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
+            .unwrap();
+    let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
+    let mut dense = CountingDense::default();
+    let (u_compact, s, vh_compact) = svd_compact_dyn_checked_generic(&mut dense, &input).unwrap();
+    let compact_calls = provider.calls.get();
+    assert!(s.data().len() > 1);
+
+    let (u, vh, truncated, _) =
+        svd_trunc_factors_dyn_checked_generic(&mut dense, &input, &Truncation::rank(4)).unwrap();
+    let trunc_calls = provider.calls.get() - compact_calls;
+    // Weighted rank 4 keeps one value in each of the two bond sectors and
+    // drops the second value of sector 1, so both sliced spaces are strict
+    // sub-spaces that still carry every sector.
+    assert_eq!(
+        truncated
+            .iter()
+            .map(|entry| entry.values.len())
+            .collect::<Vec<_>>(),
+        [1, 1]
+    );
+    assert_eq!(
+        compact_calls,
+        checked_enumeration_calls(&u_compact)
+            + checked_enumeration_calls(&s)
+            + checked_enumeration_calls(&vh_compact)
+    );
+    let weight_calls = late_spy_calls(&|probe| {
+        for entry in &truncated {
+            probe.try_sqrt_dim_scalar(entry.sector).unwrap();
+        }
+    });
+    assert_eq!(weight_calls, 2);
+    assert_eq!(
+        trunc_calls,
+        compact_calls
+            + weight_calls
+            + checked_enumeration_calls(&u)
+            + checked_enumeration_calls(&vh)
+    );
+    assert_eq!(trunc_calls, TRUNC_SVD_CALLS);
+    assert!(Arc::ptr_eq(u.space().provider_arc(), &provider));
+    assert!(Arc::ptr_eq(vh.space().provider_arc(), &provider));
 }
 
 #[test]
