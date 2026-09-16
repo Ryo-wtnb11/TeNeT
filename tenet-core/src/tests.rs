@@ -10798,15 +10798,17 @@ mod tests {
         let key2 = key();
         let mut cache = CompleteHomSpaceStructureCache::new(2, 20, 10);
 
-        // Charged bytes include the entry's `Weak<BlockStructure>` word:
-        // `size_of::<CompleteHomSpaceStructureCacheEntry>()` grew from 2 to
-        // 3 words (16 -> 24 bytes on 64-bit); no separate control block.
+        // Charged bytes include the entry's `Weak<BlockStructure>` word
+        // (`size_of::<CompleteHomSpaceStructureCacheEntry>()` grew from 2 to
+        // 3 words, 16 -> 24 bytes on 64-bit) and the wrapper `ArcInner` the
+        // Weak keeps allocated after the last strong owner dies.
         let charged = charged_complete_hom_space_structure_bytes(&key0, &structure.content_key());
         assert!(
             charged
                 >= std::mem::size_of::<CompleteHomSpaceStructureCacheKey>()
                     + 3 * std::mem::size_of::<usize>()
-                    + 10 * std::mem::size_of::<usize>()
+                    + 12 * std::mem::size_of::<usize>()
+                    + std::mem::size_of::<BlockStructure>()
         );
 
         cache.admit(Arc::clone(&key0), Arc::clone(&structure), 10);
@@ -10965,6 +10967,13 @@ mod tests {
         drop(live);
         drop(held);
         let rebuilt = round();
+        // The refreshed entry pairs the rebuilt wrapper with its own content.
+        let key = CompleteHomSpaceStructureCacheKey::new(&SU2FusionRule, &hom());
+        let cache = complete_hom_space_structure_cache().read().unwrap();
+        let entry = cache.entries.peek(&key).unwrap();
+        assert!(Arc::ptr_eq(&entry.content, &rebuilt[0].content_key()));
+        assert!(Arc::ptr_eq(&entry.wrapper.upgrade().unwrap(), &rebuilt[0]));
+        drop(cache);
         assert_eq!(complete_hom_space_structure_cache_info().admissions(), 1);
         assert_eq!(complete_hom_space_structure_cache_info().misses(), 1);
         assert_eq!(complete_hom_space_structure_cache_info().hits(), 8);

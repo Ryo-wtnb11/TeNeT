@@ -1308,6 +1308,10 @@ impl CompleteHomSpaceStructureCache {
     /// wrapper died; a no-op when the key was evicted meanwhile.
     fn refresh(&mut self, key: &CompleteHomSpaceStructureCacheKey, structure: &Arc<BlockStructure>) {
         if let Some(entry) = self.entries.peek_mut(key) {
+            // Content and wrapper must come from one interning generation:
+            // a racing admit after intern-table eviction could otherwise pair
+            // an old content id with a wrapper minted under a new one.
+            entry.content = structure.content_key();
             entry.wrapper = Arc::downgrade(structure);
         }
     }
@@ -1481,10 +1485,13 @@ fn charged_complete_hom_space_structure_bytes(
         .saturating_add(key.rule.charged_retained_bytes())
         .saturating_add(key.homspace.charged_retained_bytes())
         .saturating_add(content.charged_retained_bytes())
-        // Hash/FIFO nodes and both retained Arc control allocations; the
-        // entry's Weak shares the wrapper's control block, so its one word
-        // is already counted in `size_of::<CompleteHomSpaceStructureCacheEntry>`.
+        // Hash/FIFO nodes and both retained Arc control allocations.
         .saturating_add(10 * std::mem::size_of::<usize>())
+        // The entry's Weak keeps the wrapper's `ArcInner` (two counters plus
+        // the dropped `BlockStructure` payload) allocated after the last strong
+        // owner dies, until the entry is evicted or refreshed.
+        .saturating_add(2 * std::mem::size_of::<usize>())
+        .saturating_add(std::mem::size_of::<BlockStructure>())
 }
 
 type CoupledBlockStructureCache =
