@@ -15020,11 +15020,12 @@ mod sector_matricization_tests {
 
     #[test]
     fn generic_pair_validation_reports_left_defect_before_right_across_sectors() {
-        // What: with a defective domain tree in the first sector and a
-        // defective codomain tree in a later sector, the codomain error fires
-        // for both paired builders: every left key is validated before any
-        // right key, and the grouped scatter keeps the per-matricization,
-        // left-then-right sequence rather than moving to structure order.
+        // What: validation precedence, not scatter order. With a defective
+        // domain tree in the first sector and a defective codomain tree in a
+        // later sector, the codomain error fires for both paired builders
+        // because `validate_generic_factor_keys` checks every left key before
+        // any right key. Scatter-time placement errors are unreachable in the
+        // paired builders: validation has already checked every key.
         let two = || {
             let leg = || vec![(SectorId::new(0), 1), (SectorId::new(1), 1)];
             z4_generic_geometry::<f64>([leg(), leg(), leg(), leg()])
