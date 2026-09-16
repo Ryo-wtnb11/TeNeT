@@ -7,9 +7,9 @@ use tenet_core::{
     BlockStructure, BlockView, BlockViewMut, HostReadableStorage, HostWritableStorage, Placement,
     ScratchStorage, SimilarStorage, TensorMap,
 };
-use tenet_dense::{
-    strided_batch_runs_into, DefaultDenseExecutor, DenseExecutor, DenseGemmBatchJob,
-};
+#[cfg(test)]
+use tenet_dense::DefaultDenseExecutor;
+use tenet_dense::{strided_batch_runs_into, DenseExecutor, DenseGemmBatchJob};
 
 use crate::host_scratch::HostScratchBuffer;
 use crate::kernel_adapter::for_each_fused_span;
@@ -2509,17 +2509,22 @@ where
     )
 }
 
-/// Internal, unstable owned-output path for the serial built-in host executor.
+/// Internal, unstable owned-output path for the built-in host executor:
+/// allocates the destination uninitialised and writes every element exactly
+/// once. Returns `Ok(None)` without allocating output when the destination
+/// does not have a proof of exact physical overwrite coverage.
 ///
-/// Returns `Ok(None)` without allocating output when the destination does not
-/// have a proof of exact physical overwrite coverage.
+/// `threads` is the requested replay worker count; the effective count follows
+/// the same schedule rule as the initialised replay
+/// (`effective_tree_transform_threads`), so the writer runs under the parallel
+/// schedule whenever the initialised path would, and serially otherwise.
 ///
-/// Why public: `tenet-tensors` is a separate crate. This concrete-executor seam
-/// is not a general backend API; downstream callers must not rely on it.
+/// Why public: `tenet-tensors` is a separate crate. This executor seam is not
+/// a general backend API; downstream callers must not rely on it.
 #[doc(hidden)]
 #[allow(clippy::too_many_arguments)]
-pub fn try_tree_transform_structure_overwrite_owned_raw<D, C>(
-    dense: &mut DefaultDenseExecutor,
+pub fn try_tree_transform_structure_overwrite_owned_raw<E, D, C>(
+    dense: &mut E,
     workspace: &mut TreeTransformWorkspace<D>,
     structure: &TreeTransformStructure<C>,
     dst_structure: &Arc<BlockStructure>,
@@ -2527,8 +2532,10 @@ pub fn try_tree_transform_structure_overwrite_owned_raw<D, C>(
     nout: usize,
     src_data: &[D],
     alpha: D,
+    threads: usize,
 ) -> Result<Option<Vec<D>>, OperationError>
 where
+    E: DenseExecutor,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<C> + ConjugateValue,
     C: Copy + Sync,
 {
@@ -2547,103 +2554,189 @@ where
     debug_assert!(Arc::ptr_eq(proof.dst_structure, dst_structure));
     debug_assert!(core::ptr::eq(proof.structure, structure));
     let task = structure.task_view()?;
-    workspace.prepare_fused_indices(1, structure.layouts().max_fused_rank())?;
+    let schedule = structure.parallel_schedule();
+    let threads = effective_tree_transform_threads(schedule, threads);
+    let layouts = structure.layouts();
+    let max_fused_rank = layouts.max_fused_rank();
+    workspace.prepare_fused_indices(threads, max_fused_rank)?;
+    let fused_index_len = checked_fused_index_len(threads, max_fused_rank)?;
 
     initialize_owned(proof.required_len, |dst_data| {
-        let layouts = structure.layouts();
         let recoupling_plan = structure.recoupling_plan();
+        let storage_conjugate = structure.storage_conjugate();
+        let coefficients = task.coefficients();
         let mut kernels = crate::StridedHostKernelAdapter::default();
 
         for &layout_index in structure.inactive_destination_layouts() {
             write_uninit_layout_zero(layouts, layouts.entry(layout_index), dst_data)?;
         }
-        for block in structure.blocks() {
-            let TreeTransformBlock::Single {
-                dst_layout,
-                src_layout,
-                coefficient,
-            } = *block
-            else {
-                continue;
-            };
-            write_uninit_layout_from_source(
-                layouts,
-                dst_layout,
-                src_layout,
-                dst_data,
-                src_data,
-                structure.storage_conjugate(),
-                alpha.scale_by_coefficient(structure.coefficient(coefficient)),
-                &mut workspace.fused_indices,
-            )?;
-        }
+        // Singles split on the schedule's slice-disjoint boundaries exactly as
+        // `replay_single_blocks` does; a non-disjoint schedule stays serial.
+        split_join_uninit(
+            &schedule.singles,
+            dst_data,
+            0,
+            &mut workspace.fused_indices[..fused_index_len],
+            max_fused_rank,
+            if schedule.singles_slice_disjoint {
+                threads
+            } else {
+                1
+            },
+            &|item| item.dst_lo,
+            &|items, dst, dst_start, fused_index| {
+                for item in items {
+                    write_uninit_layout_from_source(
+                        layouts,
+                        item.dst_layout,
+                        item.src_layout,
+                        dst,
+                        dst_start,
+                        src_data,
+                        storage_conjugate,
+                        alpha.scale_by_coefficient(coefficients[item.coefficient]),
+                        fused_index,
+                    )?;
+                }
+                Ok(())
+            },
+        )?;
 
         if recoupling_plan.is_empty() {
             return Ok(());
         }
         ensure_recoupling_coefficients(workspace, task, structure.identity_marker())?;
-        for (block_index, job) in recoupling_plan.entries() {
-            let TreeTransformBlock::Multi {
-                dst_layout_start,
-                dst_count,
-                src_layout_start,
-                src_count,
-                element_count,
-                ..
-            } = *recoupling_multi_block(task, block_index)?
-            else {
-                unreachable!("recoupling_multi_block only returns Multi blocks");
-            };
-            let source_len = element_count
-                .checked_mul(src_count)
-                .ok_or(OperationError::ElementCountOverflow)?;
-            let destination_len = element_count
-                .checked_mul(dst_count)
-                .ok_or(OperationError::ElementCountOverflow)?;
-            workspace.prepare_packed_buffers(source_len, destination_len, D::zero());
-            for src_index in 0..src_count {
-                pack_layout_into_column(
-                    &mut kernels,
-                    Some(workspace.fused_indices.as_mut_slice()),
-                    layouts,
-                    src_layout_start + src_index,
-                    src_data,
-                    workspace.packed.source_mut().as_mut_slice(),
-                    src_index * element_count,
-                    structure.storage_conjugate(),
-                )?;
-            }
-            {
-                let local_job = DenseGemmBatchJob {
-                    dst_offset: 0,
-                    lhs_offset: 0,
-                    ..*job
-                };
-                let (source, destination) = workspace.packed.source_and_destination_mut();
-                recoupling_gemm_batch(
-                    dense,
-                    destination.as_mut_slice(),
-                    source.as_slice(),
-                    &workspace.coefficient_scratch,
-                    core::slice::from_ref(&local_job),
-                    &[1],
-                )?;
-            }
-            for dst_index in 0..dst_count {
-                write_uninit_layout_from_packed(
-                    layouts,
-                    dst_layout_start + dst_index,
-                    dst_data,
-                    workspace.packed.destination().as_slice(),
-                    dst_index * element_count,
-                    alpha,
-                    &mut workspace.fused_indices,
-                )?;
-            }
+        let chunk_size = threads.max(1);
+        let mut pack_cursor = 0;
+        for (chunk_index, chunk) in recoupling_plan.jobs().chunks(chunk_size).enumerate() {
+            let (destination_start, scatter_slice_disjoint) = replay_multi_chunk(
+                &mut kernels,
+                dense,
+                workspace,
+                task,
+                schedule,
+                chunk_index * chunk_size,
+                chunk,
+                &mut pack_cursor,
+                src_data,
+                threads,
+                None,
+            )?;
+            let packed = workspace.packed.destination().as_slice();
+            let scatter_columns = &schedule.scatter_columns;
+            let scatter_groups = &schedule.scatter_groups;
+            // Groups split on their ordered destination ranges exactly as
+            // `replay_scatter_groups` does; columns inside a group stay serial.
+            split_join_uninit(
+                &workspace.chunk_scatter_groups,
+                dst_data,
+                0,
+                &mut workspace.fused_indices[..fused_index_len],
+                max_fused_rank,
+                if scatter_slice_disjoint { threads } else { 1 },
+                &|&group| scatter_columns[scatter_groups[group].columns.start].dst_lo,
+                &|groups, dst, dst_start, fused_index| {
+                    for &group in groups {
+                        for item in &scatter_columns[scatter_groups[group].columns.clone()] {
+                            write_uninit_layout_from_packed(
+                                layouts,
+                                item.dst_layout,
+                                dst,
+                                dst_start,
+                                packed,
+                                item.packed_offset - destination_start,
+                                alpha,
+                                fused_index,
+                            )?;
+                        }
+                    }
+                    Ok(())
+                },
+            )?;
         }
+        debug_assert_eq!(pack_cursor, schedule.pack_columns.len());
         Ok(())
     })
     .map(Some)
+}
+
+/// Recursive `rayon::join` over an uninitialised destination, mirroring the
+/// split tree of `replay_single_blocks` / `replay_scatter_groups`: `items`
+/// are sorted by destination offset and `dst_lo(item)` is the absolute start
+/// of each item's destination range; `leaf` writes `items` into `dst`, whose
+/// first element is absolute offset `dst_start`, using one worker's traversal
+/// scratch.
+///
+/// No `unsafe` is needed here: `split_at_mut` at `dst_lo(items[middle])`
+/// yields two non-overlapping `&mut [MaybeUninit<D>]`, which the compiler
+/// proves independent. The callers pass `threads > 1` only when the compiled
+/// schedule proved the items' destination ranges pairwise slice-disjoint
+/// (`singles_slice_disjoint` / `scatter_groups[i].slice_disjoint` plus the
+/// per-chunk group ordering check), so the boundary lies inside `dst` and no
+/// item of one half touches the other half. Each leaf writes only its own
+/// half; full coverage of the buffer is the caller's `PhysicalOverwriteProof`,
+/// and `initialize_owned` exposes the initialised length only after every
+/// join has returned `Ok`.
+#[allow(clippy::too_many_arguments)]
+fn split_join_uninit<I, D>(
+    items: &[I],
+    dst: &mut [MaybeUninit<D>],
+    dst_start: isize,
+    fused_indices: &mut [usize],
+    max_fused_rank: usize,
+    threads: usize,
+    dst_lo: &(impl Fn(&I) -> isize + Sync),
+    leaf: &(impl Fn(&[I], &mut [MaybeUninit<D>], isize, &mut [usize]) -> Result<(), OperationError>
+          + Sync),
+) -> Result<(), OperationError>
+where
+    I: Sync,
+    D: Send,
+{
+    if items.is_empty() {
+        return Ok(());
+    }
+    if threads <= 1 || items.len() == 1 {
+        return leaf(items, dst, dst_start, &mut fused_indices[..max_fused_rank]);
+    }
+
+    let middle = parallel_split(items.len(), threads);
+    let boundary = dst_lo(&items[middle]);
+    let split =
+        usize::try_from(boundary - dst_start).map_err(|_| OperationError::ElementCountOverflow)?;
+    let (left_data, right_data) = dst.split_at_mut(split);
+    let (left_items, right_items) = items.split_at(middle);
+    let left_threads = threads / 2;
+    let right_threads = threads - left_threads;
+    let (left_indices, right_indices) = fused_indices.split_at_mut(left_threads * max_fused_rank);
+    let (left, right) = rayon::join(
+        || {
+            split_join_uninit(
+                left_items,
+                left_data,
+                dst_start,
+                left_indices,
+                max_fused_rank,
+                left_threads,
+                dst_lo,
+                leaf,
+            )
+        },
+        || {
+            split_join_uninit(
+                right_items,
+                right_data,
+                boundary,
+                right_indices,
+                max_fused_rank,
+                right_threads,
+                dst_lo,
+                leaf,
+            )
+        },
+    );
+    left?;
+    right
 }
 
 #[cfg(test)]
@@ -2777,6 +2870,9 @@ mod owned_overwrite_tests {
         BlockKey, BlockSpec, FusionProductSpace, FusionTensorMapSpace, FusionTreeHomSpace,
         FusionTreePairKey, SectorLeg, TensorMapSpace, Z2FusionRule, Z2Irrep,
     };
+    use tenet_dense::{
+        DenseBackend, DenseDotConfig, DenseError, DenseRead, DenseScalar, DenseTensor, DenseWrite,
+    };
 
     fn canonical_structure(offset: usize) -> Arc<BlockStructure> {
         let key = BlockKey::from(
@@ -2837,6 +2933,7 @@ mod owned_overwrite_tests {
             1,
             &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
             3.0,
+            1,
         )
         .unwrap()
         .unwrap();
@@ -2854,6 +2951,7 @@ mod owned_overwrite_tests {
             1,
             &complex_src,
             Complex64::new(3.0, 1.0),
+            1,
         )
         .unwrap()
         .unwrap();
@@ -2905,6 +3003,7 @@ mod owned_overwrite_tests {
             1,
             &[11.0, 13.0],
             2.0,
+            1,
         )
         .unwrap()
         .unwrap();
@@ -2915,6 +3014,273 @@ mod owned_overwrite_tests {
                 2.0 * (5.0 * 11.0 + 7.0 * 13.0)
             ]
         );
+    }
+
+    fn pool(threads: usize) -> rayon::ThreadPool {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap()
+    }
+
+    fn z2_leg(even: usize, odd: usize) -> SectorLeg {
+        SectorLeg::new([(Z2Irrep::EVEN, even), (Z2Irrep::ODD, odd)], false)
+    }
+
+    /// Z2 rank (1, 3): one codomain tree per coupled sector, so the eight
+    /// 24-element blocks are contiguous column slices (slice-disjoint).
+    /// Singles and Multi groups interleave in destination order: three
+    /// runnable singles and five pack columns.
+    fn mixed_fixture() -> (Arc<BlockStructure>, TreeTransformStructure<f64>, Vec<f64>) {
+        let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+            TensorMapSpace::<1, 3>::from_dims([6], [4, 4, 4]).unwrap(),
+            FusionTreeHomSpace::new(
+                FusionProductSpace::new([z2_leg(3, 3)]),
+                FusionProductSpace::new([z2_leg(2, 2), z2_leg(2, 2), z2_leg(2, 2)]),
+            ),
+            &Z2FusionRule,
+            vec![vec![3, 2, 2, 2]; 8],
+        )
+        .unwrap();
+        let structure = Arc::clone(space.subblock_structure());
+        assert_eq!(structure.block_count(), 8);
+        let specs = vec![
+            TreeTransformBlockSpec::single(0, 0, -2.0),
+            TreeTransformBlockSpec::multi(
+                vec![1, 2, 3],
+                vec![1, 2, 3],
+                vec![1.0, -1.0, 2.0, 0.5, 4.0, -3.0, 1.5, 2.5, -0.5],
+            ),
+            TreeTransformBlockSpec::single(4, 4, 0.5),
+            TreeTransformBlockSpec::multi(vec![5, 6], vec![5, 6], vec![2.0, 3.0, 5.0, 7.0]),
+            TreeTransformBlockSpec::single(7, 7, 3.0),
+        ];
+        let transform =
+            TreeTransformStructure::compile_structures(&structure, &structure, &specs).unwrap();
+        let source = (1..=structure.required_len().unwrap())
+            .map(|value| value as f64)
+            .collect::<Vec<_>>();
+        (structure, transform, source)
+    }
+
+    #[test]
+    fn owned_writer_under_the_parallel_schedule_is_bit_identical_to_serial() {
+        // What: with a multi-worker budget the owned writer splits the
+        // uninitialised destination on the compiled slice-disjoint boundaries
+        // and produces exactly the serial owned bytes for real and complex
+        // data, which in turn equal the initialised overwrite oracle.
+        let (structure, transform, source) = mixed_fixture();
+        let schedule = transform.parallel_schedule();
+        assert!(schedule.singles_slice_disjoint);
+        assert!(schedule
+            .scatter_groups
+            .iter()
+            .all(|group| group.slice_disjoint));
+        assert_eq!(schedule.singles.len(), 3);
+        assert_eq!(schedule.pack_columns.len(), 5);
+
+        let pool = pool(3);
+        assert_eq!(
+            pool.install(|| effective_tree_transform_threads(schedule, 3)),
+            3
+        );
+
+        let mut oracle = vec![f64::NAN; source.len()];
+        tree_transform_structure_overwrite_with_structural_recoupling_raw(
+            &mut StridedHostKernelAdapter::default(),
+            &mut DefaultDenseExecutor::new(),
+            &mut TreeTransformWorkspace::default(),
+            &transform,
+            &structure,
+            &structure,
+            &mut oracle,
+            &source,
+            1.5,
+            1,
+        )
+        .unwrap();
+        let serial = try_tree_transform_structure_overwrite_owned_raw(
+            &mut DefaultDenseExecutor::new(),
+            &mut TreeTransformWorkspace::default(),
+            &transform,
+            &structure,
+            &structure,
+            1,
+            &source,
+            1.5,
+            1,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(serial, oracle);
+        let mut workspace = TreeTransformWorkspace::default();
+        let parallel = pool
+            .install(|| {
+                try_tree_transform_structure_overwrite_owned_raw(
+                    &mut DefaultDenseExecutor::new(),
+                    &mut workspace,
+                    &transform,
+                    &structure,
+                    &structure,
+                    1,
+                    &source,
+                    1.5,
+                    3,
+                )
+            })
+            .unwrap()
+            .unwrap();
+        assert!(serial
+            .iter()
+            .zip(&parallel)
+            .all(|(serial, parallel)| serial.to_bits() == parallel.to_bits()));
+
+        let complex_source = source
+            .iter()
+            .map(|&value| Complex64::new(value, -0.5 * value))
+            .collect::<Vec<_>>();
+        let alpha = Complex64::new(1.5, -1.0);
+        let serial = try_tree_transform_structure_overwrite_owned_raw(
+            &mut DefaultDenseExecutor::new(),
+            &mut TreeTransformWorkspace::default(),
+            &transform,
+            &structure,
+            &structure,
+            1,
+            &complex_source,
+            alpha,
+            1,
+        )
+        .unwrap()
+        .unwrap();
+        let parallel = pool
+            .install(|| {
+                try_tree_transform_structure_overwrite_owned_raw(
+                    &mut DefaultDenseExecutor::new(),
+                    &mut TreeTransformWorkspace::default(),
+                    &transform,
+                    &structure,
+                    &structure,
+                    1,
+                    &complex_source,
+                    alpha,
+                    3,
+                )
+            })
+            .unwrap()
+            .unwrap();
+        assert!(serial.iter().zip(&parallel).all(|(serial, parallel)| {
+            serial.re.to_bits() == parallel.re.to_bits()
+                && serial.im.to_bits() == parallel.im.to_bits()
+        }));
+    }
+
+    #[test]
+    fn owned_writer_without_a_disjoint_split_uses_the_serial_writer() {
+        // What: a schedule with one runnable item has no disjoint split, so a
+        // multi-worker budget collapses to the serial writer, which still
+        // returns the owned result. Interleaved (non-slice-disjoint) layouts
+        // cannot reach this writer at all: the physical overwrite proof
+        // requires every destination layout to be contiguous.
+        let structure = canonical_structure(0);
+        let transform = TreeTransformStructure::compile_structures(
+            &structure,
+            &structure,
+            &[TreeTransformBlockSpec::single(0, 0, -2.0)],
+        )
+        .unwrap();
+        let schedule = transform.parallel_schedule();
+        let pool = pool(3);
+        assert_eq!(
+            pool.install(|| effective_tree_transform_threads(schedule, 3)),
+            1
+        );
+        let source = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let actual = pool
+            .install(|| {
+                try_tree_transform_structure_overwrite_owned_raw(
+                    &mut DefaultDenseExecutor::new(),
+                    &mut TreeTransformWorkspace::default(),
+                    &transform,
+                    &structure,
+                    &structure,
+                    1,
+                    &source,
+                    1.5,
+                    3,
+                )
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(actual, source.map(|value| -3.0 * value));
+    }
+
+    struct FailingGemm;
+
+    impl DenseExecutor for FailingGemm {
+        fn svd(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+            unreachable!("owned transform replay never factorizes")
+        }
+
+        fn qr(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+            unreachable!("owned transform replay never factorizes")
+        }
+
+        fn eigh(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+            unreachable!("owned transform replay never factorizes")
+        }
+
+        fn dot_general_into(
+            &mut self,
+            _: DenseWrite<'_>,
+            _: DenseRead<'_>,
+            _: DenseRead<'_>,
+            _: &DenseDotConfig,
+        ) -> Result<(), DenseError> {
+            unreachable!("owned transform replay uses the grouped GEMM")
+        }
+
+        fn matmul_batch_axpby_into(
+            &mut self,
+            _: DenseWrite<'_>,
+            _: DenseRead<'_>,
+            _: DenseRead<'_>,
+            _: &[DenseGemmBatchJob],
+            _: &[usize],
+            _: DenseScalar,
+            _: DenseScalar,
+        ) -> Result<(), DenseError> {
+            Err(DenseError::Backend {
+                backend: DenseBackend::Tenferro,
+                op: "matmul_batch_axpby_into",
+                message: "injected recoupling failure".to_string(),
+            })
+        }
+    }
+
+    #[test]
+    fn owned_writer_error_after_parallel_singles_returns_err_without_publishing() {
+        // What: a GEMM failure after the parallel singles phase has written
+        // part of the uninitialised buffer surfaces as `Err`; no owned payload
+        // escapes and nothing panics on the joined workers.
+        let (structure, transform, source) = mixed_fixture();
+        let result = pool(3).install(|| {
+            try_tree_transform_structure_overwrite_owned_raw(
+                &mut FailingGemm,
+                &mut TreeTransformWorkspace::default(),
+                &transform,
+                &structure,
+                &structure,
+                1,
+                &source,
+                1.0,
+                3,
+            )
+        });
+        assert!(matches!(
+            result,
+            Err(OperationError::Dense(DenseError::Backend { .. }))
+        ));
     }
 
     #[test]
@@ -2940,6 +3306,7 @@ mod owned_overwrite_tests {
             1,
             &[1.0; 6],
             1.0,
+            1,
         )
         .unwrap()
         .is_none());
@@ -2959,6 +3326,7 @@ mod owned_overwrite_tests {
             3,
             &[1.0; 6],
             1.0,
+            1,
         )
         .unwrap()
         .is_none());
@@ -3061,12 +3429,16 @@ fn write_uninit_layout_zero<D: Zero + Copy>(
     Ok(())
 }
 
+/// `dst` may be a split of the owned destination starting at absolute offset
+/// `dst_start`; layout offsets are rebased exactly as the initialised parallel
+/// replay rebases them.
 #[allow(clippy::too_many_arguments)]
 fn write_uninit_layout_from_source<D>(
     layouts: &TreeTransformLayoutTable,
     dst_index: usize,
     src_index: usize,
     dst: &mut [MaybeUninit<D>],
+    dst_start: isize,
     src: &[D],
     conjugate: bool,
     scale: D,
@@ -3082,7 +3454,7 @@ where
             baked,
             dst,
             src,
-            dst_layout.offset,
+            dst_layout.offset - dst_start,
             src_layout.offset,
             fused_index,
             move |value| scale * value.maybe_conj(conjugate),
@@ -3094,7 +3466,7 @@ where
             linear,
             layouts.shape(dst_layout),
             layouts.strides(dst_layout),
-            dst_layout.offset,
+            dst_layout.offset - dst_start,
         )?;
         let src_index = layout_linear_offset(
             linear,
@@ -3107,10 +3479,12 @@ where
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_uninit_layout_from_packed<D>(
     layouts: &TreeTransformLayoutTable,
     dst_index: usize,
     dst: &mut [MaybeUninit<D>],
+    dst_start: isize,
     packed: &[D],
     packed_offset: usize,
     alpha: D,
@@ -3128,7 +3502,7 @@ where
             baked,
             dst,
             packed,
-            layout.offset,
+            layout.offset - dst_start,
             offset_to_isize(packed_offset)?,
             fused_index,
             move |value| alpha * value,
@@ -3140,7 +3514,7 @@ where
             linear,
             layouts.shape(layout),
             layouts.strides(layout),
-            layout.offset,
+            layout.offset - dst_start,
         )?;
         dst[dst_index].write(alpha * packed[packed_offset + linear]);
     }
@@ -4012,6 +4386,144 @@ where
     right
 }
 
+/// One concurrency-bounded chunk of Multi jobs up to and including its grouped
+/// GEMM: rebases the jobs onto chunk scratch, packs the chunk's source columns
+/// (in parallel when `threads > 1`), runs the GEMM into
+/// `workspace.packed.destination()`, and orders the chunk's non-empty scatter
+/// groups by destination offset in `workspace.chunk_scatter_groups`.
+///
+/// Shared by the initialised parallel replay and the owned uninitialised
+/// writer, which differ only in how they scatter the packed destination.
+/// Returns the chunk's packed destination base offset and whether the ordered
+/// scatter groups may be split by destination slice.
+#[allow(clippy::too_many_arguments)]
+fn replay_multi_chunk<A, E, D, C>(
+    kernels: &mut A,
+    dense: &mut E,
+    workspace: &mut TreeTransformWorkspace<D>,
+    task: TreeTransformTaskView<'_, C>,
+    schedule: &TreeTransformParallelSchedule,
+    first_group: usize,
+    chunk: &[DenseGemmBatchJob],
+    pack_cursor: &mut usize,
+    src_data: &[D],
+    threads: usize,
+    mut profile: Option<&mut TreeTransformReplayProfile>,
+) -> Result<(usize, bool), OperationError>
+where
+    A: HostKernelAdapter<D> + Clone + Send + Sync,
+    E: DenseExecutor,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<C> + ConjugateValue,
+    C: Copy + Sync,
+{
+    let layouts = task.layouts();
+    let max_fused_rank = layouts.max_fused_rank();
+    let fused_index_len = checked_fused_index_len(threads, max_fused_rank)?;
+    let storage_conjugate = task.storage_conjugate();
+    let source_start = chunk[0].lhs_offset;
+    let destination_start = chunk[0].dst_offset;
+    let source_end = chunk
+        .last()
+        .and_then(|job| {
+            job.rows
+                .checked_mul(job.contracted)
+                .and_then(|len| job.lhs_offset.checked_add(len))
+        })
+        .ok_or(OperationError::ElementCountOverflow)?;
+    let destination_end = chunk
+        .last()
+        .and_then(|job| {
+            job.rows
+                .checked_mul(job.cols)
+                .and_then(|len| job.dst_offset.checked_add(len))
+        })
+        .ok_or(OperationError::ElementCountOverflow)?;
+
+    workspace.chunk_jobs.clear();
+    workspace
+        .chunk_jobs
+        .extend(chunk.iter().map(|job| DenseGemmBatchJob {
+            dst_offset: job.dst_offset - destination_start,
+            lhs_offset: job.lhs_offset - source_start,
+            ..*job
+        }));
+    strided_batch_runs_into(&workspace.chunk_jobs, &mut workspace.chunk_runs);
+
+    let start = profile.as_ref().map(|_| std::time::Instant::now());
+    workspace.prepare_packed_buffers(
+        source_end - source_start,
+        destination_end - destination_start,
+        D::zero(),
+    );
+    if let (Some(profile), Some(start)) = (profile.as_deref_mut(), start) {
+        profile.multi_workspace_prepare += start.elapsed();
+    }
+
+    let pack_start = *pack_cursor;
+    while *pack_cursor < schedule.pack_columns.len()
+        && schedule.pack_columns[*pack_cursor].packed_offset < source_end
+    {
+        *pack_cursor += 1;
+    }
+    let start = profile.as_ref().map(|_| std::time::Instant::now());
+    replay_pack_columns(
+        kernels.clone(),
+        &mut workspace.fused_indices[..fused_index_len],
+        max_fused_rank,
+        layouts,
+        &schedule.pack_columns[pack_start..*pack_cursor],
+        workspace.packed.source_mut().as_mut_slice(),
+        source_start,
+        src_data,
+        storage_conjugate,
+        threads,
+    )?;
+    if let (Some(profile), Some(start)) = (profile.as_deref_mut(), start) {
+        profile.packed_columns += chunk.iter().map(|job| job.contracted).sum::<usize>();
+        profile.multi_pack += start.elapsed();
+    }
+
+    let start = profile.as_ref().map(|_| std::time::Instant::now());
+    let (source, destination) = workspace.packed.source_and_destination_mut();
+    recoupling_gemm_batch(
+        dense,
+        destination.as_mut_slice(),
+        source.as_slice(),
+        &workspace.coefficient_scratch,
+        &workspace.chunk_jobs,
+        &workspace.chunk_runs,
+    )?;
+    if let (Some(profile), Some(start)) = (profile, start) {
+        let elapsed = start.elapsed();
+        profile.multi_dense_matmul_call += elapsed;
+        profile.multi_matmul_total += elapsed;
+    }
+
+    workspace.chunk_scatter_groups.clear();
+    workspace.chunk_scatter_groups.extend(
+        (first_group..first_group + chunk.len())
+            .filter(|&group| !schedule.scatter_groups[group].columns.is_empty()),
+    );
+    // Why not sort/copy every scatter descriptor: only the at-most-T group
+    // indices need destination order for one safe Rayon split tree.
+    workspace
+        .chunk_scatter_groups
+        .sort_unstable_by_key(|&group| {
+            schedule.scatter_columns[schedule.scatter_groups[group].columns.start].dst_lo
+        });
+    let scatter_slice_disjoint = workspace
+        .chunk_scatter_groups
+        .iter()
+        .all(|&group| schedule.scatter_groups[group].slice_disjoint)
+        && workspace.chunk_scatter_groups.windows(2).all(|groups| {
+            let left_end = schedule.scatter_groups[groups[0]].columns.end;
+            let right_start = schedule.scatter_groups[groups[1]].columns.start;
+            schedule.scatter_columns[left_end - 1].dst_hi
+                < schedule.scatter_columns[right_start].dst_lo
+        });
+    Ok((destination_start, scatter_slice_disjoint))
+}
+
 /// Threaded variant of [`tree_transform_blocks_with_batched_recoupling`]
 /// (TensorKit `_add_abelian_kernel_threaded!` / `_add_general_kernel_threaded!`
 /// precedent, indexmanipulations.jl:520-738):
@@ -4136,112 +4648,23 @@ where
     let chunk_size = threads.max(1);
     let mut pack_cursor = 0;
     for (chunk_index, chunk) in recoupling_plan.jobs().chunks(chunk_size).enumerate() {
-        let packed_column_count = chunk.iter().map(|job| job.contracted).sum::<usize>();
         let scattered_column_count = chunk.iter().map(|job| job.cols).sum::<usize>();
-        let source_start = chunk[0].lhs_offset;
-        let destination_start = chunk[0].dst_offset;
-        let source_end = chunk
-            .last()
-            .and_then(|job| {
-                job.rows
-                    .checked_mul(job.contracted)
-                    .and_then(|len| job.lhs_offset.checked_add(len))
-            })
-            .ok_or(OperationError::ElementCountOverflow)?;
-        let destination_end = chunk
-            .last()
-            .and_then(|job| {
-                job.rows
-                    .checked_mul(job.cols)
-                    .and_then(|len| job.dst_offset.checked_add(len))
-            })
-            .ok_or(OperationError::ElementCountOverflow)?;
-
-        workspace.chunk_jobs.clear();
-        workspace
-            .chunk_jobs
-            .extend(chunk.iter().map(|job| DenseGemmBatchJob {
-                dst_offset: job.dst_offset - destination_start,
-                lhs_offset: job.lhs_offset - source_start,
-                ..*job
-            }));
-        strided_batch_runs_into(&workspace.chunk_jobs, &mut workspace.chunk_runs);
-
-        let start = profile.as_ref().map(|_| std::time::Instant::now());
-        workspace.prepare_packed_buffers(
-            source_end - source_start,
-            destination_end - destination_start,
-            D::zero(),
-        );
-        if let (Some(profile), Some(start)) = (profile.as_deref_mut(), start) {
-            profile.multi_workspace_prepare += start.elapsed();
-        }
-
-        let pack_start = pack_cursor;
-        while pack_cursor < schedule.pack_columns.len()
-            && schedule.pack_columns[pack_cursor].packed_offset < source_end
-        {
-            pack_cursor += 1;
-        }
-        let start = profile.as_ref().map(|_| std::time::Instant::now());
-        replay_pack_columns(
-            kernels.clone(),
-            &mut workspace.fused_indices[..fused_index_len],
-            max_fused_rank,
-            layouts,
-            &schedule.pack_columns[pack_start..pack_cursor],
-            workspace.packed.source_mut().as_mut_slice(),
-            source_start,
-            src_data,
-            storage_conjugate,
-            threads,
-        )?;
-        if let (Some(profile), Some(start)) = (profile.as_deref_mut(), start) {
-            profile.packed_columns += packed_column_count;
-            profile.multi_pack += start.elapsed();
-        }
-
-        let start = profile.as_ref().map(|_| std::time::Instant::now());
-        let (source, destination) = workspace.packed.source_and_destination_mut();
-        recoupling_gemm_batch(
+        let (destination_start, scatter_slice_disjoint) = replay_multi_chunk(
+            kernels,
             dense,
-            destination.as_mut_slice(),
-            source.as_slice(),
-            &workspace.coefficient_scratch,
-            &workspace.chunk_jobs,
-            &workspace.chunk_runs,
+            workspace,
+            task,
+            schedule,
+            chunk_index * chunk_size,
+            chunk,
+            &mut pack_cursor,
+            src_data,
+            threads,
+            profile.as_deref_mut(),
         )?;
-        if let (Some(profile), Some(start)) = (profile.as_deref_mut(), start) {
-            let elapsed = start.elapsed();
-            profile.multi_dense_matmul_call += elapsed;
-            profile.multi_matmul_total += elapsed;
-        }
+        let packed_destination = workspace.packed.destination().as_slice();
 
         let start = profile.as_ref().map(|_| std::time::Instant::now());
-        let packed_destination = workspace.packed.destination().as_slice();
-        let first_group = chunk_index * chunk_size;
-        workspace.chunk_scatter_groups.clear();
-        workspace.chunk_scatter_groups.extend(
-            (first_group..first_group + chunk.len())
-                .filter(|&group| !schedule.scatter_groups[group].columns.is_empty()),
-        );
-        // Why not sort/copy every scatter descriptor: only the at-most-T group
-        // indices need destination order for one safe Rayon split tree.
-        workspace
-            .chunk_scatter_groups
-            .sort_unstable_by_key(|&group| {
-                schedule.scatter_columns[schedule.scatter_groups[group].columns.start].dst_lo
-            });
-        let scatter_slice_disjoint = workspace
-            .chunk_scatter_groups
-            .iter()
-            .all(|&group| schedule.scatter_groups[group].slice_disjoint)
-            && workspace.chunk_scatter_groups.windows(2).all(|groups| {
-                let left_end = schedule.scatter_groups[groups[0]].columns.end;
-                let right_start = schedule.scatter_groups[groups[1]].columns.start;
-                schedule.scatter_columns[left_end - 1].dst_hi
-                    < schedule.scatter_columns[right_start].dst_lo
-            });
         if scatter_slice_disjoint {
             replay_scatter_groups(
                 kernels.clone(),

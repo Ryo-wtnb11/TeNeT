@@ -351,8 +351,12 @@ where
     C: 'static + Copy + Clone + Add<Output = C> + Mul<Output = C> + Zero + Send + Sync,
     RuleKey: 'static + Clone + Eq + Hash + Send + Sync,
 {
-    /// Attempts the serial built-in writer used by owned tensor transforms.
-    /// `Ok(None)` means the proof was unavailable and no output was allocated.
+    /// Attempts the built-in uninitialised writer used by owned tensor
+    /// transforms. `Ok(None)` means the proof was unavailable and no output
+    /// was allocated. The writer runs under the backend's replay worker
+    /// count: the parallel schedule splits the destination on its compiled
+    /// slice-disjoint boundaries, so thread count never forces the
+    /// zero-then-replay fallback.
     ///
     /// This concrete cross-crate entrypoint is internal and unstable despite
     /// being public for `tenet`; downstream callers must not rely on it.
@@ -371,10 +375,9 @@ where
     where
         R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
     {
-        if self.backend.recoupling_threads() != 1 {
-            return Ok(None);
-        }
-        self.cache.set_recoupling_threads(1);
+        // One knob: compile parallelism follows the backend's replay setting.
+        self.cache
+            .set_recoupling_threads(self.backend.recoupling_threads());
         let structure = self
             .cache
             .get_or_compile_tree_pair_structures_with_storage_conjugation_ref(
@@ -384,16 +387,16 @@ where
                 src_structure,
                 false,
             )?;
-        tenet_operations::try_tree_transform_structure_overwrite_owned_raw(
-            self.backend.dense_mut(),
-            &mut self.workspace,
-            &structure,
-            dst_structure,
-            src_structure,
-            nout,
-            src_data,
-            alpha,
-        )
+        self.backend
+            .try_tree_transform_structure_overwrite_owned_raw(
+                &mut self.workspace,
+                &structure,
+                dst_structure,
+                src_structure,
+                nout,
+                src_data,
+                alpha,
+            )
     }
 }
 
