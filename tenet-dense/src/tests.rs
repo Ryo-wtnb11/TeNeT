@@ -2672,3 +2672,120 @@ fn identity_grouped_out_of_range_span_fails_before_any_write() {
     assert_eq!(executor.seam_dispatches(), 1);
     assert_eq!(output, vec![c64(-1.0, 1.0); 4]);
 }
+
+#[cfg(feature = "tenferro")]
+#[test]
+fn identity_two_job_affine_run_is_admitted_to_the_strided_view() {
+    // `seam_dispatches()` is 1 on both routes for a two-job run, and the old
+    // cutoff also produced one (grouped) dispatch there, so the route is pinned
+    // through the bounds-check contract instead: an lhs span past the buffer
+    // fails TeNeT-side as `OutOfBounds` with 0 dispatches only on the strided
+    // route; the grouped route reaches tenferro (`Backend{op:"grouped_gemm"}`,
+    // 1 dispatch). The mirror with dst step 2 < rows * cols = 4 must therefore
+    // take the grouped route (the three-job variant is in
+    // `identity_overlapping_destinations_are_rejected_by_the_grouped_validator_without_writes`).
+    fn jobs(dst_step: usize) -> [DenseGemmBatchJob; 2] {
+        [
+            batch_job((2, 1, 2), (0, 0, 0)),
+            batch_job((2, 1, 2), (dst_step, 2, 2)),
+        ]
+    }
+    let strides = [1];
+    let mut executor = DefaultDenseExecutor::with_threads(1).unwrap();
+
+    // lhs holds 3 elements; the run's rank-3 lhs view needs index 3.
+    let lhs_f64 = [1.0, 2.0, 3.0];
+    let rhs_f64 = [4.0, 5.0, 6.0, 7.0];
+    let strided = jobs(4);
+    assert_eq!(strided_batch_runs(&strided), [2]);
+    let mut output = [-3.0; 8];
+    executor.reset_seam_dispatches();
+    let error = executor
+        .matmul_batch_axpby_into(
+            DenseWrite::F64(DenseViewMut::new(&mut output, &[8], &strides, 0).unwrap()),
+            DenseRead::F64(DenseView::new(&lhs_f64, &[3], &strides, 0).unwrap()),
+            DenseRead::F64(DenseView::new(&rhs_f64, &[4], &strides, 0).unwrap()),
+            &strided,
+            &[2],
+            DenseScalar::F64(1.0),
+            DenseScalar::F64(0.0),
+        )
+        .unwrap_err();
+    assert_eq!(error, DenseError::OutOfBounds);
+    assert_eq!(executor.seam_dispatches(), 0);
+    assert_eq!(output, [-3.0; 8]);
+
+    let grouped = jobs(2);
+    assert_eq!(strided_batch_runs(&grouped), [2]);
+    let mut output = [-3.0; 8];
+    executor.reset_seam_dispatches();
+    let error = executor
+        .matmul_batch_axpby_into(
+            DenseWrite::F64(DenseViewMut::new(&mut output, &[8], &strides, 0).unwrap()),
+            DenseRead::F64(DenseView::new(&lhs_f64, &[3], &strides, 0).unwrap()),
+            DenseRead::F64(DenseView::new(&rhs_f64, &[4], &strides, 0).unwrap()),
+            &grouped,
+            &[2],
+            DenseScalar::F64(1.0),
+            DenseScalar::F64(0.0),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            DenseError::Backend {
+                op: "grouped_gemm",
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    assert_eq!(executor.seam_dispatches(), 1);
+    assert_eq!(output, [-3.0; 8]);
+
+    let lhs_c64 = lhs_f64.map(|v| c64(v, -v));
+    let rhs_c64 = rhs_f64.map(|v| c64(-v, 0.5 * v));
+    let sentinel = c64(-3.0, 3.0);
+    let mut output = [sentinel; 8];
+    executor.reset_seam_dispatches();
+    let error = executor
+        .matmul_batch_axpby_into(
+            DenseWrite::C64(DenseViewMut::new(&mut output, &[8], &strides, 0).unwrap()),
+            DenseRead::C64(DenseView::new(&lhs_c64, &[3], &strides, 0).unwrap()),
+            DenseRead::C64(DenseView::new(&rhs_c64, &[4], &strides, 0).unwrap()),
+            &strided,
+            &[2],
+            DenseScalar::C64(c64(0.5, -0.5)),
+            DenseScalar::C64(c64(1.0, 1.0)),
+        )
+        .unwrap_err();
+    assert_eq!(error, DenseError::OutOfBounds);
+    assert_eq!(executor.seam_dispatches(), 0);
+    assert_eq!(output, [sentinel; 8]);
+
+    let mut output = [sentinel; 8];
+    executor.reset_seam_dispatches();
+    let error = executor
+        .matmul_batch_axpby_into(
+            DenseWrite::C64(DenseViewMut::new(&mut output, &[8], &strides, 0).unwrap()),
+            DenseRead::C64(DenseView::new(&lhs_c64, &[3], &strides, 0).unwrap()),
+            DenseRead::C64(DenseView::new(&rhs_c64, &[4], &strides, 0).unwrap()),
+            &grouped,
+            &[2],
+            DenseScalar::C64(c64(0.5, -0.5)),
+            DenseScalar::C64(c64(1.0, 1.0)),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            DenseError::Backend {
+                op: "grouped_gemm",
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    assert_eq!(executor.seam_dispatches(), 1);
+    assert_eq!(output, [sentinel; 8]);
+}
