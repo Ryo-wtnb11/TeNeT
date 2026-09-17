@@ -1563,6 +1563,13 @@ fn direct_compact_svd_uses_owned_executor_outputs_only() {
     assert!(generic.svd_calls > 0);
     assert_eq!(generic.svd_into_calls, 0);
 
+    let (_, checked_space) = bind_checked_only(&space);
+    let checked_input = BoundDynamicTensorRef::try_new(&checked_space, &data).unwrap();
+    let mut checked = RejectSvdInto::default();
+    svd_compact_dyn_checked_generic(&mut checked, &checked_input).unwrap();
+    assert!(checked.svd_calls > 0);
+    assert_eq!(checked.svd_into_calls, 0);
+
     let bound = bound_tensor(Arc::new(Z2FusionRule), &tensor);
     let mut polar = RejectSvdInto::default();
     let mut context = default_context();
