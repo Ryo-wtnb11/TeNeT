@@ -4991,18 +4991,27 @@ fn compact_lq_noncanonical_layout_uses_copy_fallback() {
 fn eigh_error_preserves_borrowed_input_and_publishes_no_output() {
     // What: an EIGH backend failure leaves borrowed storage unchanged and returns no vectors.
     let rule = Arc::new(Z2FusionRule);
-    let (source, _) = unequal_fallback_eigh_fixtures();
-    let tensor = padded_copy(rule.as_ref(), &source);
-    let before = tensor.data().to_vec();
-    let mut dense = FailAfterObservingEighInput::default();
+    let canonical = hermitian_test_tensor(rule.as_ref(), &[SectorId::new(0), SectorId::new(1)]);
+    let padded = padded_copy(rule.as_ref(), &canonical);
+    for (tensor, is_fallback) in [(&canonical, false), (&padded, true)] {
+        let before = tensor.data().to_vec();
+        let mut dense = FailAfterObservingEighInput::default();
 
-    crate::factorize::reset_eigh_copy_probe();
-    let result = eigh_full(&mut dense, &bound_tensor_ref!(Arc::clone(&rule), &tensor));
+        crate::factorize::reset_eigh_copy_probe();
+        let result = eigh_full(&mut dense, &bound_tensor_ref!(Arc::clone(&rule), tensor));
 
-    assert!(matches!(result, Err(OperationError::Dense(_))));
-    assert_eq!(tensor.data(), before);
-    assert!(!dense.observed.is_empty());
-    assert!(crate::factorize::eigh_copy_probe().input_pack_bytes > 0);
+        assert!(matches!(result, Err(OperationError::Dense(_))));
+        assert_eq!(tensor.data(), before);
+        assert!(!dense.observed.is_empty());
+        if is_fallback {
+            assert!(crate::factorize::eigh_copy_probe().input_pack_bytes > 0);
+        } else {
+            assert!(dense
+                .observed
+                .iter()
+                .all(|sector| before.windows(sector.len()).any(|window| window == sector)));
+        }
+    }
 }
 
 #[test]
