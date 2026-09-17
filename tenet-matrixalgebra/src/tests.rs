@@ -1563,6 +1563,13 @@ fn direct_compact_svd_uses_owned_executor_outputs_only() {
     assert!(generic.svd_calls > 0);
     assert_eq!(generic.svd_into_calls, 0);
 
+    let (_, checked_space) = bind_checked_only(&space);
+    let checked_input = BoundDynamicTensorRef::try_new(&checked_space, &data).unwrap();
+    let mut checked = RejectSvdInto::default();
+    svd_compact_dyn_checked_generic(&mut checked, &checked_input).unwrap();
+    assert!(checked.svd_calls > 0);
+    assert_eq!(checked.svd_into_calls, 0);
+
     let bound = bound_tensor(Arc::new(Z2FusionRule), &tensor);
     let mut polar = RejectSvdInto::default();
     let mut context = default_context();
@@ -2109,8 +2116,13 @@ impl CompactInputSpy {
 }
 
 impl DenseExecutor for CompactInputSpy {
-    fn svd(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("compact SVD must use the destination API")
+    fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        assert_eq!(
+            self.operation,
+            crate::factorize::CheckedCompactOperation::Svd
+        );
+        self.observe(input);
+        self.inner.svd(input)
     }
 
     fn svd_into(
@@ -2120,12 +2132,8 @@ impl DenseExecutor for CompactInputSpy {
         s: DenseWrite<'_>,
         vt: DenseWrite<'_>,
     ) -> Result<(), DenseError> {
-        assert_eq!(
-            self.operation,
-            crate::factorize::CheckedCompactOperation::Svd
-        );
-        self.observe(input);
-        self.inner.svd_into(input, u, s, vt)
+        let _ = (input, u, s, vt);
+        panic!("checked compact SVD must use the owned API")
     }
 
     fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
@@ -3659,7 +3667,8 @@ where
     let (u, vh, spectra, error) =
         svd_trunc_factors_dyn_checked_generic(&mut dense, &input, truncation).unwrap();
 
-    assert_eq!(dense.svd_into_calls, 2);
+    assert_eq!(dense.svd_calls, 2);
+    assert_eq!(dense.svd_into_calls, 0);
     assert_eq!(dense.svd_vals_calls, 0);
     assert!(Arc::ptr_eq(u.space().provider_arc(), &provider));
     assert!(Arc::ptr_eq(vh.space().provider_arc(), &provider));
@@ -3784,6 +3793,7 @@ fn checked_generic_svd_trunc_empty_input_skips_dense_execution() {
     let (u, vh, spectra, error) =
         svd_trunc_factors_dyn_checked_generic(&mut dense, &input, &Truncation::Full).unwrap();
 
+    assert_eq!(dense.svd_calls, 0);
     assert_eq!(dense.svd_into_calls, 0);
     assert_eq!(dense.svd_vals_calls, 0);
     assert!(spectra.is_empty());
@@ -3847,7 +3857,8 @@ fn checked_generic_svd_trunc_preserves_full_s_fold_failure() {
             if call == FIRST_FULL_S_FOLD
     ));
     assert_eq!(failing_provider.single_leg_folds.get(), FIRST_FULL_S_FOLD);
-    assert_eq!(dense.svd_into_calls, 2);
+    assert_eq!(dense.svd_calls, 2);
+    assert_eq!(dense.svd_into_calls, 0);
     assert_eq!(dense.svd_vals_calls, 0);
     assert_eq!(input.data(), before);
 }
@@ -4226,6 +4237,52 @@ fn checked_generic_eigh_keeps_live_pair_owners_for_every_dtype() {
     assert_checked_generic_eigh_live_pair_owners::<f32>();
     assert_checked_generic_eigh_live_pair_owners::<Complex32>();
     assert_checked_generic_eigh_live_pair_owners::<Complex64>();
+}
+
+fn assert_checked_compact_svd_live_stage_owners<D: crate::factorize::FactorScalar>() {
+    let (_, space, data) = checked_svd_truncation_input::<D>(true);
+    let input = BoundDynamicTensorRef::try_new(&space, &data).unwrap();
+    let mut dense = RejectSvdInto::default();
+    crate::factorize::reset_checked_compact_svd_stage_pointers();
+
+    svd_compact_dyn_checked_generic(&mut dense, &input).unwrap();
+    let stage = crate::factorize::checked_compact_svd_stage_pointers();
+
+    assert_eq!(dense.svd_into_calls, 0);
+    assert_eq!(dense.svd_calls, 2);
+    assert_eq!(stage.len(), 2);
+    assert_eq!(dense.output_ptrs, stage);
+    assert!(stage.iter().all(|&(u, vt)| u != 0 && vt != 0 && u != vt));
+}
+
+#[test]
+fn checked_generic_compact_svd_keeps_live_stage_owners_for_every_dtype() {
+    assert_checked_compact_svd_live_stage_owners::<f64>();
+    assert_checked_compact_svd_live_stage_owners::<f32>();
+    assert_checked_compact_svd_live_stage_owners::<Complex32>();
+    assert_checked_compact_svd_live_stage_owners::<Complex64>();
+}
+
+#[test]
+fn checked_compact_svd_zero_rank_skips_backend_and_post_gauge_stage() {
+    let mut dense = RejectSvdInto::default();
+    crate::factorize::reset_checked_compact_svd_stage_pointers();
+
+    for (rows, cols) in [(0, 3), (3, 0)] {
+        assert_eq!(
+            crate::factorize::compact_svd_numerical_stage_lengths_for_test(
+                &mut dense,
+                &[] as &[f64],
+                rows,
+                cols,
+            )
+            .unwrap(),
+            (0, 0, 0)
+        );
+    }
+    assert_eq!(dense.svd_calls, 0);
+    assert_eq!(dense.svd_into_calls, 0);
+    assert!(crate::factorize::checked_compact_svd_stage_pointers().is_empty());
 }
 
 fn assert_complex_checked_eigh_reconstruction<R>(

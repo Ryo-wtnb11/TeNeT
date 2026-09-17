@@ -1151,11 +1151,32 @@ thread_local! {
     static EIGH_COPY_PROBE: Cell<EighCopyProbe> = Cell::default();
     static EIGH_OWNED_VECTOR_POINTERS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
     static CHECKED_EIGH_PAIR_POINTERS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+    static CHECKED_COMPACT_SVD_STAGE_POINTERS: RefCell<Vec<(usize, usize)>> =
+        const { RefCell::new(Vec::new()) };
     static COMPACT_LQ_COPY_PROBE: Cell<CompactLqCopyProbe> = Cell::default();
     static DIAGONAL_BOND_BUILD_PROBE: Cell<DiagonalBondBuildProbe> = Cell::default();
     static VALUES_MATRICIZATION_FALLBACKS: Cell<usize> = const { Cell::new(0) };
     static CHECKED_COMPACT_INPUT_OBSERVATIONS: RefCell<Vec<CheckedCompactInputObservation>> =
         const { RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_checked_compact_svd_stage_pointers() {
+    CHECKED_COMPACT_SVD_STAGE_POINTERS.with(|pointers| pointers.borrow_mut().clear());
+}
+
+#[cfg(test)]
+pub(crate) fn checked_compact_svd_stage_pointers() -> Vec<(usize, usize)> {
+    CHECKED_COMPACT_SVD_STAGE_POINTERS.with(|pointers| pointers.borrow().clone())
+}
+
+#[cfg(test)]
+fn record_checked_compact_svd_stage_gauge<D>(u: &[D], vt: &[D]) {
+    CHECKED_COMPACT_SVD_STAGE_POINTERS.with(|pointers| {
+        pointers
+            .borrow_mut()
+            .push((u.as_ptr() as usize, vt.as_ptr() as usize));
+    });
 }
 
 #[cfg(test)]
@@ -1747,44 +1768,43 @@ where
     D: FactorScalar,
 {
     let rank = rows.min(cols);
-    let mut u = vec![D::zero(); rows * rank];
-    let mut singular_values = vec![D::Real::zero(); rank];
-    let mut vt = vec![D::zero(); rank * cols];
-    if rank != 0 {
-        let input_shape = [rows, cols];
-        let input_strides = [1, rows];
-        let u_shape = [rows, rank];
-        let u_strides = [1, rows];
-        let s_shape = [rank];
-        let s_strides = [1];
-        let vt_shape = [rank, cols];
-        let vt_strides = [1, rank];
-        let input = DenseView::new(matrix, &input_shape, &input_strides, 0)
-            .map_err(OperationError::Dense)?;
-        let u_view =
-            DenseViewMut::new(&mut u, &u_shape, &u_strides, 0).map_err(OperationError::Dense)?;
-        let s_view = DenseViewMut::new(&mut singular_values, &s_shape, &s_strides, 0)
-            .map_err(OperationError::Dense)?;
-        let vt_view =
-            DenseViewMut::new(&mut vt, &vt_shape, &vt_strides, 0).map_err(OperationError::Dense)?;
-        dense
-            .svd_into(
-                D::dense_read(input),
-                D::dense_write(u_view),
-                D::Real::dense_write(s_view),
-                D::dense_write(vt_view),
-            )
-            .map_err(OperationError::Dense)?;
-        svd_compact_gauge(&mut u, rows, rows, &mut vt, rank, cols, rank);
+    if rank == 0 {
+        return Ok(CompactSvdNumericalStage {
+            rows,
+            cols,
+            rank,
+            u: Vec::new(),
+            singular_values: Vec::new(),
+            vt: Vec::new(),
+        });
     }
+    let (mut u, singular_values, mut vt) = compact_svd_owned(dense, matrix, rows, cols)?;
+    svd_compact_gauge(&mut u, rows, rows, &mut vt, rank, cols, rank);
+    #[cfg(test)]
+    record_checked_compact_svd_stage_gauge(&u, &vt);
     Ok(CompactSvdNumericalStage {
         rows,
         cols,
         rank,
         u,
-        singular_values: singular_values.into_iter().map(Into::into).collect(),
+        singular_values,
         vt,
     })
+}
+
+#[cfg(test)]
+pub(crate) fn compact_svd_numerical_stage_lengths_for_test<E, D>(
+    dense: &mut E,
+    matrix: &[D],
+    rows: usize,
+    cols: usize,
+) -> Result<(usize, usize, usize), OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    D: FactorScalar,
+{
+    let stage = compact_svd_numerical_stage(dense, matrix, rows, cols)?;
+    Ok((stage.u.len(), stage.singular_values.len(), stage.vt.len()))
 }
 
 #[derive(Clone, Copy)]

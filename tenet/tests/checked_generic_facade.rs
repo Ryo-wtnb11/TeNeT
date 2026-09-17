@@ -3958,8 +3958,23 @@ struct PinvFaultExecutor {
     fail_gemm: Option<usize>,
 }
 
+impl PinvFaultExecutor {
+    fn observe_svd(&self, op: &'static str) -> Result<(), DenseError> {
+        let call = self.svd_calls.fetch_add(1, Ordering::Relaxed) + 1;
+        if self.fail_svd == Some(call) {
+            return Err(DenseError::Backend {
+                backend: DenseBackend::Tenferro,
+                op,
+                message: "injected pinv SVD failure".to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
 impl DenseExecutor for PinvFaultExecutor {
     fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        self.observe_svd("svd")?;
         self.inner.svd(input)
     }
 
@@ -3970,14 +3985,7 @@ impl DenseExecutor for PinvFaultExecutor {
         s: DenseWrite<'_>,
         vt: DenseWrite<'_>,
     ) -> Result<(), DenseError> {
-        let call = self.svd_calls.fetch_add(1, Ordering::Relaxed) + 1;
-        if self.fail_svd == Some(call) {
-            return Err(DenseError::Backend {
-                backend: DenseBackend::Tenferro,
-                op: "svd_into",
-                message: "injected pinv SVD failure".to_string(),
-            });
-        }
+        self.observe_svd("svd_into")?;
         self.inner.svd_into(input, u, s, vt)
     }
 
@@ -4064,6 +4072,57 @@ fn checked_generic_polar_stages_svd_and_both_gemms_without_publication() {
         }
         assert_eq!(svd_calls.load(Ordering::Relaxed), expected_svd);
         assert_eq!(gemm_calls.load(Ordering::Relaxed), expected_gemm);
+        assert_eq!(source.data(), before.as_slice());
+    }
+}
+
+#[test]
+fn checked_generic_lazy_polar_second_svd_failure_keeps_parent_unchanged() {
+    for left in [true, false] {
+        let svd_calls = Arc::new(AtomicUsize::new(0));
+        let gemm_calls = Arc::new(AtomicUsize::new(0));
+        let runtime = Runtime::builder()
+            .dense_threads(1)
+            .with_dense_executor(Box::new(PinvFaultExecutor {
+                inner: DefaultDenseExecutor::new(),
+                svd_calls: Arc::clone(&svd_calls),
+                gemm_calls: Arc::clone(&gemm_calls),
+                fail_svd: Some(2),
+                fail_gemm: None,
+            }))
+            .build()
+            .unwrap();
+        let provider = Arc::new(CheckedOnlyToy::new(0));
+        let bond = GradedSpace::try_new_with_arc(
+            Arc::clone(&provider),
+            [(Label::Vacuum, 1), (Label::X, 1)],
+        )
+        .unwrap();
+        let source: TensorMap<_, f64> =
+            TensorMap::from_block_fn(&runtime, [&bond], [&bond], |trees, _| {
+                if trees.coupled() == &Label::Vacuum {
+                    2.0
+                } else {
+                    3.0
+                }
+            })
+            .unwrap();
+        let before = source.data().to_vec();
+        let lazy = source.adjoint().unwrap();
+        let result = if left {
+            lazy.left_polar()
+        } else {
+            lazy.right_polar()
+        };
+
+        assert!(matches!(
+            result,
+            Err(GenericTensorError::Plan(
+                tenet::typed::CheckedGenericPlanError::Operation(_)
+            ))
+        ));
+        assert_eq!(svd_calls.load(Ordering::Relaxed), 2);
+        assert_eq!(gemm_calls.load(Ordering::Relaxed), 0);
         assert_eq!(source.data(), before.as_slice());
     }
 }
