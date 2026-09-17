@@ -4175,6 +4175,7 @@ fn checked_generic_eigh_keeps_owned_vectors_in_live_pairs_before_publication() {
 
     assert_eq!(dense.eigh_into_calls, 0);
     assert_eq!(dense.vector_ptrs, before_publication);
+    assert_eq!(dense.vector_ptrs.len(), 2);
     assert_eq!(dense.vector_ptrs.len(), full.eigenvalues().len());
 }
 
@@ -4210,6 +4211,7 @@ fn assert_checked_generic_eigh_live_pair_owners<D: crate::factorize::FactorScala
         dense.vector_ptrs,
         crate::factorize::checked_eigh_pair_pointers()
     );
+    assert_eq!(dense.vector_ptrs.len(), 2);
     assert_eq!(dense.vector_ptrs.len(), full.eigenvalues().len());
     assert!(Arc::ptr_eq(full.v().space().provider_arc(), &provider));
 }
