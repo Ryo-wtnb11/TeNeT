@@ -38,6 +38,30 @@ struct SvdCallSpy {
 }
 
 #[derive(Default)]
+struct RejectSvdInto {
+    inner: tenet_dense::DefaultDenseExecutor,
+    svd_calls: usize,
+    svd_into_calls: usize,
+    output_ptrs: Vec<(usize, usize)>,
+}
+
+fn dense_tensor_pointer(tensor: &DenseTensor) -> usize {
+    if let Ok(data) = tensor.as_f32_slice() {
+        return data.as_ptr() as usize;
+    }
+    if let Ok(data) = tensor.as_f64_slice() {
+        return data.as_ptr() as usize;
+    }
+    if let Ok(data) = tensor.as_c32_slice() {
+        return data.as_ptr() as usize;
+    }
+    if let Ok(data) = tensor.as_c64_slice() {
+        return data.as_ptr() as usize;
+    }
+    panic!("compact SVD fixture must return a supported host dtype")
+}
+
+#[derive(Default)]
 struct SolveCallSpy {
     inner: tenet_dense::DefaultDenseExecutor,
     solve_calls: usize,
@@ -59,6 +83,7 @@ struct FailSecondSvd {
 #[derive(Default)]
 struct FailAfterObservingSvdInput {
     observed: Vec<Vec<f64>>,
+    outputs: Option<Vec<DenseTensor>>,
 }
 
 #[derive(Default)]
@@ -288,6 +313,51 @@ impl DenseExecutor for SvdCallSpy {
     }
 }
 
+impl DenseExecutor for RejectSvdInto {
+    fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        self.svd_calls += 1;
+        let outputs = self.inner.svd(input)?;
+        self.output_ptrs.push((
+            dense_tensor_pointer(&outputs[0]),
+            dense_tensor_pointer(&outputs[2]),
+        ));
+        Ok(outputs)
+    }
+
+    fn svd_into(
+        &mut self,
+        _: DenseRead<'_>,
+        _: DenseWrite<'_>,
+        _: DenseWrite<'_>,
+        _: DenseWrite<'_>,
+    ) -> Result<(), DenseError> {
+        self.svd_into_calls += 1;
+        Err(DenseError::Backend {
+            backend: DenseBackend::Tenferro,
+            op: "svd_into",
+            message: "direct compact SVD must not use svd_into".to_string(),
+        })
+    }
+
+    fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        self.inner.qr(input)
+    }
+
+    fn eigh(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        self.inner.eigh(input)
+    }
+
+    fn dot_general_into(
+        &mut self,
+        output: DenseWrite<'_>,
+        lhs: DenseRead<'_>,
+        rhs: DenseRead<'_>,
+        config: &DenseDotConfig,
+    ) -> Result<(), DenseError> {
+        self.inner.dot_general_into(output, lhs, rhs, config)
+    }
+}
+
 impl DenseExecutor for SolveCallSpy {
     fn svd(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
         panic!("inverse must not execute an SVD")
@@ -373,8 +443,19 @@ impl DenseExecutor for FailSecondSolve {
 }
 
 impl DenseExecutor for FailAfterObservingSvdInput {
-    fn svd(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("compact SVD must use the destination API")
+    fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        if let Some(outputs) = self.outputs.take() {
+            return Ok(outputs);
+        }
+        let DenseRead::F64(input) = input else {
+            panic!("test input must be f64")
+        };
+        self.observed.push(input.data().to_vec());
+        Err(DenseError::Backend {
+            backend: DenseBackend::Tenferro,
+            op: "svd_into",
+            message: "injected failure".to_string(),
+        })
     }
 
     fn svd_into(
@@ -427,8 +508,16 @@ impl DenseExecutor for FailAfterObservingSvdInput {
 }
 
 impl DenseExecutor for FailSecondSvd {
-    fn svd(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("compact SVD must use the destination API")
+    fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        self.calls += 1;
+        if self.calls == 2 {
+            return Err(DenseError::Backend {
+                backend: DenseBackend::Tenferro,
+                op: "svd_into",
+                message: "injected second-sector failure".to_string(),
+            });
+        }
+        self.inner.svd(input)
     }
 
     fn svd_into(
@@ -965,6 +1054,14 @@ fn tsvd_fusion_reconstructs_z2_tensor_coupled_layout() {
     run_tsvd_reconstruction_case(&Z2FusionRule, &[SectorId::new(0), SectorId::new(1)], true);
 }
 
+fn assert_compact_svd_direct_copy_probe() {
+    let probe = crate::factorize::compact_svd_copy_probe();
+    assert_eq!(probe.input_pack_calls, 0);
+    assert_eq!(probe.input_pack_bytes, 0);
+    assert_eq!(probe.output_scatter_calls, 0);
+    assert_eq!(probe.output_scatter_bytes, 0);
+}
+
 #[test]
 fn compact_svd_canonical_layout_skips_input_pack_and_factor_scatter() {
     // What: canonical coupled storage reaches final factor destinations without numerical copies.
@@ -975,10 +1072,7 @@ fn compact_svd_canonical_layout_skips_input_pack_and_factor_scatter() {
     crate::factorize::reset_compact_svd_copy_probe();
     svd_compact(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor)).unwrap();
 
-    assert_eq!(
-        crate::factorize::compact_svd_copy_probe(),
-        crate::factorize::CompactSvdCopyProbe::default()
-    );
+    assert_compact_svd_direct_copy_probe();
 }
 
 #[test]
@@ -1438,6 +1532,46 @@ fn provider_neutral_generic_compact_factorizations_remain_covered() {
     assert!(Arc::ptr_eq(vh.space().provider_arc(), space.provider_arc()));
     qr_compact_dyn_generic(&mut dense, &input).unwrap();
     lq_compact_dyn_generic(&mut dense, &input).unwrap();
+}
+
+#[test]
+fn direct_compact_svd_uses_owned_executor_outputs_only() {
+    let tensor = rectangular_svd_tensor(3, 2);
+    let mut direct = RejectSvdInto::default();
+    svd_compact(
+        &mut direct,
+        &bound_tensor_ref!(Arc::new(Z2FusionRule), &tensor),
+    )
+    .unwrap();
+    assert_eq!(direct.svd_calls, 1);
+    assert_eq!(direct.svd_into_calls, 0);
+
+    let (space, data) = generic_factorization_input();
+    let input = BoundDynamicTensorRef::try_new(&space, &data).unwrap();
+    let mut generic = RejectSvdInto::default();
+    svd_compact_factors_dyn_generic(&mut generic, &input).unwrap();
+    assert!(generic.svd_calls > 0);
+    assert_eq!(generic.svd_into_calls, 0);
+
+    let bound = bound_tensor(Arc::new(Z2FusionRule), &tensor);
+    let mut polar = RejectSvdInto::default();
+    let mut context = default_context();
+    left_polar(&mut polar, &mut context, &bound.as_ref()).unwrap();
+    assert_eq!(polar.svd_calls, 1);
+    assert_eq!(polar.svd_into_calls, 0);
+
+    let fallback_space = bound.space().adjoint_view().unwrap();
+    let fallback = BoundDynamicTensorRef::try_new(&fallback_space, bound.data()).unwrap();
+    let mut legacy = RejectSvdInto::default();
+    assert!(matches!(
+        svd_compact_dyn(&mut legacy, &fallback),
+        Err(OperationError::Dense(DenseError::Backend {
+            op: "svd_into",
+            ..
+        }))
+    ));
+    assert_eq!(legacy.svd_calls, 0);
+    assert_eq!(legacy.svd_into_calls, 1);
 }
 
 #[test]
@@ -5088,6 +5222,26 @@ fn compact_qr_uses_owned_executor_outputs_not_qr_into() {
     assert!(!r.data().is_empty());
 }
 
+fn f64_svd_outputs(rows: usize, cols: usize) -> Vec<DenseTensor> {
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    let data = vec![1.0; rows * cols];
+    dense
+        .svd(DenseRead::F64(
+            tenet_dense::DenseView::new(&data, &[rows, cols], &[1, rows], 0).unwrap(),
+        ))
+        .unwrap()
+}
+
+fn c64_svd_outputs(rows: usize, cols: usize) -> Vec<DenseTensor> {
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    let data = vec![Complex64::new(1.0, 1.0); rows * cols];
+    dense
+        .svd(DenseRead::C64(
+            tenet_dense::DenseView::new(&data, &[rows, cols], &[1, rows], 0).unwrap(),
+        ))
+        .unwrap()
+}
+
 fn f64_qr_outputs(rows: usize, cols: usize) -> Vec<DenseTensor> {
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
     let data = vec![1.0; rows * cols];
@@ -5106,6 +5260,67 @@ fn c64_qr_outputs(rows: usize, cols: usize) -> Vec<DenseTensor> {
             tenet_dense::DenseView::new(&data, &[rows, cols], &[1, rows], 0).unwrap(),
         ))
         .unwrap()
+}
+
+#[test]
+fn compact_owned_svd_preserves_svd_into_output_precedence() {
+    let tensor = rectangular_svd_tensor(2, 2);
+    let bound = bound_tensor(Arc::new(Z2FusionRule), &tensor);
+    let input = bound.as_ref();
+    let check = |outputs: Vec<DenseTensor>, expected: &str| {
+        let mut dense = FailAfterObservingSvdInput {
+            outputs: Some(outputs),
+            ..Default::default()
+        };
+        let error = svd_compact(&mut dense, &input).unwrap_err();
+        assert!(format!("{error}").contains(expected), "{error:?}");
+    };
+
+    check(vec![f64_svd_outputs(2, 2).remove(0)], "exactly (U, S, Vt)");
+    check(
+        f64_svd_outputs(1, 1),
+        "output shape mismatch: source [1, 1], destination [2, 2]",
+    );
+    let mut outputs = f64_svd_outputs(2, 2);
+    outputs[1] = f64_svd_outputs(1, 1).remove(1);
+    check(
+        outputs,
+        "output shape mismatch: source [1], destination [2]",
+    );
+    let mut outputs = f64_svd_outputs(2, 2);
+    outputs[2] = f64_svd_outputs(1, 1).remove(2);
+    check(
+        outputs,
+        "output shape mismatch: source [1, 1], destination [2, 2]",
+    );
+    let outputs = c64_svd_outputs(2, 2);
+    let expected = outputs[0].as_f64_slice().unwrap_err();
+    let mut dense = FailAfterObservingSvdInput {
+        outputs: Some(outputs),
+        ..Default::default()
+    };
+    let error = svd_compact(&mut dense, &input).unwrap_err();
+    assert!(matches!(error, OperationError::Dense(actual) if actual == expected));
+
+    let mut outputs = f64_svd_outputs(2, 2);
+    outputs[1] = c64_svd_outputs(2, 2).remove(0);
+    let expected = outputs[1].as_f64_slice().unwrap_err();
+    let mut dense = FailAfterObservingSvdInput {
+        outputs: Some(outputs),
+        ..Default::default()
+    };
+    let error = svd_compact(&mut dense, &input).unwrap_err();
+    assert!(matches!(error, OperationError::Dense(actual) if actual == expected));
+
+    let mut outputs = f64_svd_outputs(2, 2);
+    outputs[2] = c64_svd_outputs(2, 2).remove(0);
+    let expected = outputs[2].as_f64_slice().unwrap_err();
+    let mut dense = FailAfterObservingSvdInput {
+        outputs: Some(outputs),
+        ..Default::default()
+    };
+    let error = svd_compact(&mut dense, &input).unwrap_err();
+    assert!(matches!(error, OperationError::Dense(actual) if actual == expected));
 }
 
 #[test]
@@ -5324,7 +5539,7 @@ fn compact_factor_routes_agree_between_sorted_and_unsorted_region_tables() {
 }
 
 #[test]
-fn compact_qr_lq_direct_regions_follow_factor_order_for_reversed_sector_spans() {
+fn compact_svd_qr_lq_direct_regions_follow_factor_order_for_reversed_sector_spans() {
     let rule = Z2FusionRule;
     let source = mixed_rectangular_tensor((3, 2), (2, 4));
     let tensor = reversed_complete_grid_copy(&rule, &source);
@@ -5349,10 +5564,55 @@ fn compact_qr_lq_direct_regions_follow_factor_order_for_reversed_sector_spans() 
     let input = bound.as_ref();
     let input = input.dynamic();
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    let svd = svd_compact_dyn(&mut dense, &input).unwrap();
+    assert_compact_factors_reconstruct_input(&input, svd.u(), Some(svd.s()), svd.vh());
+    assert_eq!(
+        svd.singular_values()
+            .iter()
+            .map(|entry| entry.sector)
+            .collect::<Vec<_>>(),
+        tensor
+            .structure()
+            .coupled_sector_regions(1)
+            .unwrap()
+            .unwrap()
+            .iter()
+            .map(|region| region.coupled())
+            .collect::<Vec<_>>()
+    );
     let (q, r) = qr_compact_dyn(&mut dense, &input).unwrap();
     assert_compact_factors_reconstruct_input(&input, &q, None, &r);
     let (l, q) = lq_compact_dyn(&mut dense, &input).unwrap();
     assert_compact_factors_reconstruct_input(&input, &l, None, &q);
+
+    let complex = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
+        tensor
+            .data()
+            .iter()
+            .map(|&value| Complex64::new(value, value * 0.25))
+            .collect(),
+        tensor.fusion_space().unwrap().as_ref().clone(),
+    )
+    .unwrap();
+    let complex_bound = bound_tensor(Arc::new(Z2FusionRule), &complex);
+    let complex_ref = complex_bound.as_ref();
+    let complex_input = complex_ref.dynamic();
+    let svd = svd_compact_dyn(&mut dense, &complex_input).unwrap();
+    assert_compact_factors_reconstruct_input(&complex_input, svd.u(), Some(svd.s()), svd.vh());
+    assert_eq!(
+        svd.singular_values()
+            .iter()
+            .map(|entry| entry.sector)
+            .collect::<Vec<_>>(),
+        complex
+            .structure()
+            .coupled_sector_regions(1)
+            .unwrap()
+            .unwrap()
+            .iter()
+            .map(|region| region.coupled())
+            .collect::<Vec<_>>()
+    );
 }
 
 #[test]
@@ -5557,10 +5817,7 @@ fn assert_rectangular_direct_svd(rows: usize, cols: usize) {
     assert_factor_layout_matches_legacy_shapes(svd.u.space());
     assert_factor_layout_matches_legacy_shapes(svd.s.space());
     assert_factor_layout_matches_legacy_shapes(svd.vh.space());
-    assert_eq!(
-        crate::factorize::compact_svd_copy_probe(),
-        crate::factorize::CompactSvdCopyProbe::default()
-    );
+    assert_compact_svd_direct_copy_probe();
     let rank = rows.min(cols);
     if rank == 0 {
         assert!(svd.u.space().space().homspace().domain().legs()[0]
@@ -5615,6 +5872,57 @@ fn compact_svd_direct_spans_reconstruct_tall_and_wide_matrices() {
     // What: exact final-factor spans work for both compact rectangular shapes.
     assert_rectangular_direct_svd(5, 3);
     assert_rectangular_direct_svd(3, 5);
+}
+
+#[test]
+fn compact_svd_direct_outputs_keep_executor_factor_owners() {
+    fn check<D: crate::factorize::FactorScalar>(tensor: &TensorMap<D, 1, 1>) {
+        let mut dense = RejectSvdInto::default();
+        let bound = bound_tensor(Arc::new(Z2FusionRule), tensor);
+        crate::factorize::reset_compact_svd_copy_probe();
+        let svd = svd_compact(&mut dense, &bound.as_ref()).unwrap();
+        assert_eq!(dense.output_ptrs.len(), 1);
+        let (u, vh) = dense.output_ptrs[0];
+        assert_eq!(u, svd.u.data().as_ptr() as usize);
+        assert_eq!(vh, svd.vh.data().as_ptr() as usize);
+        let probe = crate::factorize::compact_svd_copy_probe();
+        assert_compact_svd_direct_copy_probe();
+        assert_eq!(probe.owned_output_publications, 2);
+        assert_eq!(probe.owned_output_owner_reused, 2);
+    }
+
+    let tensor = rectangular_svd_tensor(3, 2);
+    check(&tensor);
+    let space = tensor.fusion_space().unwrap().as_ref().clone();
+    check(
+        &TensorMap::<f32, 1, 1>::from_vec_with_fusion_space(
+            tensor.data().iter().map(|&value| value as f32).collect(),
+            space.clone(),
+        )
+        .unwrap(),
+    );
+    check(
+        &TensorMap::<Complex32, 1, 1>::from_vec_with_fusion_space(
+            tensor
+                .data()
+                .iter()
+                .map(|&value| Complex32::new(value as f32, value as f32 * 0.25))
+                .collect(),
+            space.clone(),
+        )
+        .unwrap(),
+    );
+    check(
+        &TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
+            tensor
+                .data()
+                .iter()
+                .map(|&value| Complex64::new(value, value * 0.25))
+                .collect(),
+            space,
+        )
+        .unwrap(),
+    );
 }
 
 #[test]
@@ -5848,10 +6156,7 @@ fn compact_svd_c64_reconstructs_mixed_tall_and_wide_sectors_without_copies() {
 
     let svd = svd_compact(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor)).unwrap();
 
-    assert_eq!(
-        crate::factorize::compact_svd_copy_probe(),
-        crate::factorize::CompactSvdCopyProbe::default()
-    );
+    assert_compact_svd_direct_copy_probe();
     let input_regions = tensor
         .structure()
         .coupled_sector_regions(1)
@@ -6080,10 +6385,7 @@ fn compact_svd_c32_reconstructs_mixed_tall_and_wide_sectors_without_copies() {
 
     let svd = svd_compact(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor)).unwrap();
 
-    assert_eq!(
-        crate::factorize::compact_svd_copy_probe(),
-        crate::factorize::CompactSvdCopyProbe::default()
-    );
+    assert_compact_svd_direct_copy_probe();
     let input_regions = tensor
         .structure()
         .coupled_sector_regions(1)
@@ -6166,10 +6468,7 @@ fn compact_svd_c32_direct_and_fallback_apply_the_same_gauge() {
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
     crate::factorize::reset_compact_svd_copy_probe();
     let direct = svd_compact(&mut dense, &bound_tensor_ref!(Arc::new(rule), &transposed)).unwrap();
-    assert_eq!(
-        crate::factorize::compact_svd_copy_probe(),
-        crate::factorize::CompactSvdCopyProbe::default()
-    );
+    assert_compact_svd_direct_copy_probe();
     let bound = bound_tensor(Arc::new(rule), &tensor);
     let adjoint_space = bound.space().adjoint_view().unwrap();
     let fallback_input = BoundDynamicTensorRef::try_new(&adjoint_space, bound.data()).unwrap();
@@ -6226,10 +6525,7 @@ fn svd_trunc_c32_reports_the_discarded_reconstruction_error() {
     )
     .unwrap();
 
-    assert_eq!(
-        crate::factorize::compact_svd_copy_probe(),
-        crate::factorize::CompactSvdCopyProbe::default()
-    );
+    assert_compact_svd_direct_copy_probe();
     assert_eq!(
         svd.singular_values
             .iter()
@@ -8453,10 +8749,7 @@ fn svd_trunc_c64_reconstruction_distance_matches_error() {
         &Truncation::rank(8),
     )
     .unwrap();
-    assert_eq!(
-        crate::factorize::compact_svd_copy_probe(),
-        crate::factorize::CompactSvdCopyProbe::default()
-    );
+    assert_compact_svd_direct_copy_probe();
     assert!(svd.error > 0.0);
     for entry in &svd.singular_values {
         for pair in entry.values.windows(2) {

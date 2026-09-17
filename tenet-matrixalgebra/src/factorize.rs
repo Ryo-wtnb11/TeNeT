@@ -1140,6 +1140,8 @@ pub(crate) struct CompactSvdCopyProbe {
     pub input_pack_bytes: usize,
     pub output_scatter_calls: usize,
     pub output_scatter_bytes: usize,
+    pub owned_output_publications: usize,
+    pub owned_output_owner_reused: usize,
 }
 
 #[cfg(test)]
@@ -2335,10 +2337,9 @@ where
     debug_assert_eq!(plan.source_layout, input.space().validated_layout());
     let u_space = input.space().rebind_validated(&plan.left_layout)?;
     let vh_space = input.space().rebind_validated(&plan.right_layout)?;
-    let mut u_data = vec![D::zero(); plan.left_layout.required_len()?];
-    let mut vh_data = vec![D::zero(); plan.right_layout.required_len()?];
+    let mut u_regions = vec![None; plan.left_regions.len()];
+    let mut vh_regions = vec![None; plan.right_regions.len()];
     let mut singular_values = Vec::with_capacity(plan.routes.len());
-    let mut spectrum_scratch = Vec::<D::Real>::new();
 
     for route in plan.routes.iter().copied() {
         let region = &plan.source_regions[route.source_region];
@@ -2350,69 +2351,44 @@ where
             });
             continue;
         }
-        let u_region =
-            &plan.left_regions[route.left_region.expect("nonzero route has left region")];
-        let vh_region =
-            &plan.right_regions[route.right_region.expect("nonzero route has right region")];
-
-        let input_shape = [region.rows(), region.cols()];
-        let input_strides = [1usize, region.rows()];
-        let u_shape = [region.rows(), rank];
-        let u_strides = [1usize, region.rows()];
-        let s_shape = [rank];
-        let s_strides = [1usize];
-        let vh_shape = [rank, region.cols()];
-        let vh_strides = [1usize, rank];
-        let input_view = DenseView::new(
+        let left_region = route.left_region.expect("nonzero route has left region");
+        let right_region = route.right_region.expect("nonzero route has right region");
+        let (mut u, spectrum, mut vh) = compact_svd_owned(
+            dense,
             &input.data()[region.range()],
-            &input_shape,
-            &input_strides,
-            0,
-        )
-        .map_err(OperationError::Dense)?;
-        let u_view = DenseViewMut::new(&mut u_data[u_region.range()], &u_shape, &u_strides, 0)
-            .map_err(OperationError::Dense)?;
-        let spectrum = D::compute_f64_spectrum(rank, &mut spectrum_scratch, |spectrum| {
-            let s_view = DenseViewMut::new(spectrum, &s_shape, &s_strides, 0)
-                .map_err(OperationError::Dense)?;
-            let vh_view =
-                DenseViewMut::new(&mut vh_data[vh_region.range()], &vh_shape, &vh_strides, 0)
-                    .map_err(OperationError::Dense)?;
-            dense
-                .svd_into(
-                    D::dense_read(input_view),
-                    D::dense_write(u_view),
-                    D::Real::dense_write(s_view),
-                    D::dense_write(vh_view),
-                )
-                .map_err(OperationError::Dense)
-        })?;
+            region.rows(),
+            region.cols(),
+        )?;
         match gauge {
             CompactSvdGauge::Left => svd_compact_gauge(
-                &mut u_data[u_region.range()],
+                &mut u,
                 region.rows(),
                 region.rows(),
-                &mut vh_data[vh_region.range()],
+                &mut vh,
                 rank,
                 region.cols(),
                 rank,
             ),
             CompactSvdGauge::AdjointLeft => svd_compact_adjoint_gauge(
-                &mut u_data[u_region.range()],
+                &mut u,
                 region.rows(),
                 region.rows(),
-                &mut vh_data[vh_region.range()],
+                &mut vh,
                 rank,
                 region.cols(),
                 rank,
             ),
         }
+        u_regions[left_region] = Some(u);
+        vh_regions[right_region] = Some(vh);
         singular_values.push(SectorSpectrum {
             sector: route.sector,
             values: spectrum,
         });
     }
 
+    let u_data = concat_compact_svd_factor_regions(u_regions, plan.left_layout.required_len()?);
+    let vh_data = concat_compact_svd_factor_regions(vh_regions, plan.right_layout.required_len()?);
     let u = BoundDynFactor::from_bound(u_space, u_data, space.nout(), 1)?;
     let vh = BoundDynFactor::from_bound(vh_space, vh_data, 1, space.nin())?;
     Ok((u, vh, singular_values))
@@ -5862,24 +5838,61 @@ where
             message: "dense QR must return exactly (Q, R)".to_string(),
         }));
     }
-    let q = compact_qr_output_owned::<D>(outputs.remove(0), &[rows, rank])?;
-    let r = compact_qr_output_owned::<D>(outputs.remove(0), &[rank, cols])?;
+    let q = compact_factor_output_owned::<D>(outputs.remove(0), &[rows, rank], "qr_into")?;
+    let r = compact_factor_output_owned::<D>(outputs.remove(0), &[rank, cols], "qr_into")?;
     Ok((q, r))
 }
 
-fn compact_qr_output_owned<D: FactorScalar>(
+/// Compact SVD owns U and Vt, while S remains the host-side spectrum used by
+/// the existing truncation and diagonal construction paths.
+#[expect(
+    clippy::type_complexity,
+    reason = "the dense SVD ownership boundary returns its documented U, S, Vt tuple"
+)]
+fn compact_svd_owned<E, D>(
+    dense: &mut E,
+    input: &[D],
+    rows: usize,
+    cols: usize,
+) -> Result<(Vec<D>, Vec<f64>, Vec<D>), OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    D: FactorScalar,
+{
+    let rank = rows.min(cols);
+    let input_shape = [rows, cols];
+    let input_strides = [1usize, rows];
+    let input_view =
+        DenseView::new(input, &input_shape, &input_strides, 0).map_err(OperationError::Dense)?;
+    let mut outputs = dense
+        .svd(D::dense_read(input_view))
+        .map_err(OperationError::Dense)?;
+    if outputs.len() != 3 {
+        return Err(OperationError::Dense(DenseError::Backend {
+            backend: DenseBackend::Tenferro,
+            op: "svd_into",
+            message: "dense SVD must return exactly (U, S, Vt)".to_string(),
+        }));
+    }
+    let u = compact_factor_output_owned::<D>(outputs.remove(0), &[rows, rank], "svd_into")?;
+    let singular_values = compact_svd_spectrum_owned::<D>(outputs.remove(0), &[rank])?;
+    let vt = compact_factor_output_owned::<D>(outputs.remove(0), &[rank, cols], "svd_into")?;
+    Ok((u, singular_values, vt))
+}
+
+fn compact_factor_output_owned<D: FactorScalar>(
     tensor: DenseTensor,
     expected_shape: &[usize],
+    op: &'static str,
 ) -> Result<Vec<D>, OperationError> {
     let source = D::dense_slice(&tensor).map_err(OperationError::Dense)?;
     let shape = tensor.shape();
     if shape != expected_shape {
         return Err(OperationError::Dense(DenseError::Backend {
             backend: DenseBackend::Tenferro,
-            op: "qr_into",
+            op,
             message: format!(
-                "qr_into output shape mismatch: source {:?}, destination {:?}",
-                shape, expected_shape
+                "{op} output shape mismatch: source {shape:?}, destination {expected_shape:?}",
             ),
         }));
     }
@@ -5892,9 +5905,9 @@ fn compact_qr_output_owned<D: FactorScalar>(
     if source.len() != expected_len {
         return Err(OperationError::Dense(DenseError::Backend {
             backend: DenseBackend::Tenferro,
-            op: "qr_into",
+            op,
             message: format!(
-                "qr_into output storage length mismatch: source {}, expected {}",
+                "{op} output storage length mismatch: source {}, expected {}",
                 source.len(),
                 expected_len
             ),
@@ -5903,18 +5916,77 @@ fn compact_qr_output_owned<D: FactorScalar>(
     D::dense_into_vec(tensor).map_err(OperationError::Dense)
 }
 
+fn compact_svd_spectrum_owned<D: FactorScalar>(
+    tensor: DenseTensor,
+    expected_shape: &[usize],
+) -> Result<Vec<f64>, OperationError> {
+    let spectrum = D::real_spectrum(&tensor).map_err(OperationError::Dense)?;
+    let shape = tensor.shape();
+    if shape != expected_shape {
+        return Err(OperationError::Dense(DenseError::Backend {
+            backend: DenseBackend::Tenferro,
+            op: "svd_into",
+            message: format!(
+                "svd_into output shape mismatch: source {shape:?}, destination {expected_shape:?}",
+            ),
+        }));
+    }
+    let expected_len = shape
+        .iter()
+        .try_fold(1usize, |acc, &dim| {
+            acc.checked_mul(dim).ok_or(DenseError::ElementCountOverflow)
+        })
+        .map_err(OperationError::Dense)?;
+    if spectrum.len() != expected_len {
+        return Err(OperationError::Dense(DenseError::Backend {
+            backend: DenseBackend::Tenferro,
+            op: "svd_into",
+            message: format!(
+                "svd_into output storage length mismatch: source {}, expected {}",
+                spectrum.len(),
+                expected_len
+            ),
+        }));
+    }
+    Ok(spectrum)
+}
+
 fn concat_compact_factor_regions<D>(regions: Vec<Option<Vec<D>>>, required_len: usize) -> Vec<D> {
     #[cfg(test)]
     let first = regions
         .iter()
         .find_map(|region| region.as_ref().map(Vec::as_ptr));
+    let output = concat_owned_factor_regions(regions, required_len);
+    #[cfg(test)]
+    COMPACT_QR_COPY_PROBE.with(|probe| {
+        let mut current = probe.get();
+        current.owned_output_publications += 1;
+        current.owned_output_owner_reused +=
+            usize::from(first.is_some_and(|pointer| std::ptr::eq(pointer, output.as_ptr())));
+        probe.set(current);
+    });
+    output
+}
+
+fn concat_owned_factor_regions<D>(regions: Vec<Option<Vec<D>>>, required_len: usize) -> Vec<D> {
     let mut output = None;
     for region in regions.into_iter().flatten() {
         append_owned_factor(&mut output, region, required_len);
     }
-    let output = output.unwrap_or_default();
+    output.unwrap_or_default()
+}
+
+fn concat_compact_svd_factor_regions<D>(
+    regions: Vec<Option<Vec<D>>>,
+    required_len: usize,
+) -> Vec<D> {
     #[cfg(test)]
-    COMPACT_QR_COPY_PROBE.with(|probe| {
+    let first = regions
+        .iter()
+        .find_map(|region| region.as_ref().map(Vec::as_ptr));
+    let output = concat_owned_factor_regions(regions, required_len);
+    #[cfg(test)]
+    COMPACT_SVD_COPY_PROBE.with(|probe| {
         let mut current = probe.get();
         current.owned_output_publications += 1;
         current.owned_output_owner_reused +=

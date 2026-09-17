@@ -17044,8 +17044,16 @@ mod representation_gates {
     }
 
     impl DenseExecutor for FailSecondSvd {
-        fn svd(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-            panic!("full SVD must use the destination API")
+        fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+            self.calls += 1;
+            if self.calls == 2 {
+                return Err(DenseError::Backend {
+                    backend: DenseBackend::Tenferro,
+                    op: "svd_into",
+                    message: "injected second-sector failure".to_string(),
+                });
+            }
+            self.inner.svd(input)
         }
 
         fn svd_into(
