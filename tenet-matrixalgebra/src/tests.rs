@@ -4272,10 +4272,6 @@ fn assert_complex_checked_eigh_reconstruction<R>(
 }
 
 #[test]
-#[expect(
-    clippy::arc_with_non_send_sync,
-    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
-)]
 fn checked_generic_eigh_reconstructs_complex_unequal_multi_tree_sectors() {
     let (source, hermitian, _) = generic_values_endomorphism_input();
     let source_regions = source
@@ -4347,10 +4343,6 @@ fn checked_generic_eigh_reconstructs_padded_reordered_complex_input() {
 }
 
 #[test]
-#[expect(
-    clippy::arc_with_non_send_sync,
-    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
-)]
 fn checked_generic_eigh_stably_keeps_raw_exact_signed_ties() {
     let (source, mut hermitian, _) = generic_values_endomorphism_input();
     let regions = source
