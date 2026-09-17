@@ -2785,24 +2785,28 @@ impl DenseExecutor for EighFaultExecutor {
     }
 
     fn eigh(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        let call = self.calls.fetch_add(1, Ordering::Relaxed) + 1;
+        if self.fail_at == Some(call) {
+            return Err(DenseError::Backend {
+                backend: DenseBackend::Tenferro,
+                op: "eigh",
+                message: "injected checked Generic EIGH failure".to_string(),
+            });
+        }
         self.inner.eigh(input)
     }
 
     fn eigh_into(
         &mut self,
-        input: DenseRead<'_>,
-        values: DenseWrite<'_>,
-        vectors: DenseWrite<'_>,
+        _: DenseRead<'_>,
+        _: DenseWrite<'_>,
+        _: DenseWrite<'_>,
     ) -> Result<(), DenseError> {
-        let call = self.calls.fetch_add(1, Ordering::Relaxed) + 1;
-        if self.fail_at == Some(call) {
-            return Err(DenseError::Backend {
-                backend: DenseBackend::Tenferro,
-                op: "eigh_into",
-                message: "injected checked Generic EIGH failure".to_string(),
-            });
-        }
-        self.inner.eigh_into(input, values, vectors)
+        Err(DenseError::Backend {
+            backend: DenseBackend::Tenferro,
+            op: "eigh_into",
+            message: "checked Generic EIGH must use owned output".to_string(),
+        })
     }
 
     fn dot_general_into(
