@@ -3958,8 +3958,23 @@ struct PinvFaultExecutor {
     fail_gemm: Option<usize>,
 }
 
+impl PinvFaultExecutor {
+    fn observe_svd(&self, op: &'static str) -> Result<(), DenseError> {
+        let call = self.svd_calls.fetch_add(1, Ordering::Relaxed) + 1;
+        if self.fail_svd == Some(call) {
+            return Err(DenseError::Backend {
+                backend: DenseBackend::Tenferro,
+                op,
+                message: "injected pinv SVD failure".to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
 impl DenseExecutor for PinvFaultExecutor {
     fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        self.observe_svd("svd")?;
         self.inner.svd(input)
     }
 
@@ -3970,14 +3985,7 @@ impl DenseExecutor for PinvFaultExecutor {
         s: DenseWrite<'_>,
         vt: DenseWrite<'_>,
     ) -> Result<(), DenseError> {
-        let call = self.svd_calls.fetch_add(1, Ordering::Relaxed) + 1;
-        if self.fail_svd == Some(call) {
-            return Err(DenseError::Backend {
-                backend: DenseBackend::Tenferro,
-                op: "svd_into",
-                message: "injected pinv SVD failure".to_string(),
-            });
-        }
+        self.observe_svd("svd_into")?;
         self.inner.svd_into(input, u, s, vt)
     }
 
