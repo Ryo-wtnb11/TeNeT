@@ -5054,6 +5054,16 @@ fn f64_qr_outputs(rows: usize, cols: usize) -> Vec<DenseTensor> {
         .unwrap()
 }
 
+fn c64_qr_outputs(rows: usize, cols: usize) -> Vec<DenseTensor> {
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    let data = vec![Complex64::new(1.0, 1.0); rows * cols];
+    dense
+        .qr(DenseRead::C64(
+            tenet_dense::DenseView::new(&data, &[rows, cols], &[1, rows], 0).unwrap(),
+        ))
+        .unwrap()
+}
+
 #[test]
 fn compact_owned_qr_preserves_qr_into_output_precedence() {
     let tensor = rectangular_svd_tensor(2, 2);
@@ -5079,6 +5089,14 @@ fn compact_owned_qr_preserves_qr_into_output_precedence() {
         outputs,
         "output shape mismatch: source [1, 1], destination [2, 2]",
     );
+    let outputs = c64_qr_outputs(2, 2);
+    let expected = outputs[0].as_f64_slice().unwrap_err();
+    let mut dense = FailAfterObservingQrInput {
+        outputs: Some(outputs),
+        ..Default::default()
+    };
+    let error = qr_compact(&mut dense, &input).unwrap_err();
+    assert!(matches!(error, OperationError::Dense(actual) if actual == expected));
 }
 
 #[test]
