@@ -11075,8 +11075,8 @@ where
     let mut pairs = Vec::with_capacity(matrices.len());
     for matrix in &matrices {
         let n = matrix.rows;
-        let (real_values, mut vectors) =
-            compact_eigh_owned(dense, &matrix.data, n).map_err(CheckedGenericFactorPlanError::from)?;
+        let (real_values, mut vectors) = compact_eigh_owned(dense, &matrix.data, n)
+            .map_err(CheckedGenericFactorPlanError::from)?;
         validate_real_eigenvalues(&real_values).map_err(CheckedGenericFactorPlanError::from)?;
         order.clear();
         order.extend(0..n);
