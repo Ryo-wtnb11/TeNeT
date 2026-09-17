@@ -1789,6 +1789,31 @@ fn generic_compact_svd_second_dense_failure_preserves_source() {
 }
 
 #[test]
+fn generic_compact_svd_empty_input_skips_dense_execution() {
+    let x = SectorId::new(1);
+    let empty_leg = SectorLeg::new([(x, 0)], false);
+    let space = BoundDynamicFusionMapSpace::from_final_homspace_generic(
+        Arc::new(FactorGenericRule),
+        FusionTreeHomSpace::new(
+            FusionProductSpace::new([empty_leg.clone()]),
+            FusionProductSpace::new([empty_leg]),
+        ),
+    )
+    .unwrap();
+    let data: [f64; 0] = [];
+    let input = BoundDynamicTensorRef::try_new(&space, &data).unwrap();
+    let mut reject = RejectExecutorCalls;
+
+    let result = svd_trunc_dyn_generic(&mut reject, &input, &Truncation::Full).unwrap();
+
+    assert!(result.u().data().is_empty());
+    assert!(result.s().data().is_empty());
+    assert!(result.vh().data().is_empty());
+    assert!(result.singular_values().is_empty());
+    assert_eq!(result.error(), 0.0);
+}
+
+#[test]
 fn generic_pair_publication_keeps_reordered_tree_scatter_fallback() {
     let (canonical_space, canonical_data) = generic_factorization_input();
     let (reordered_space, reordered_data) =
