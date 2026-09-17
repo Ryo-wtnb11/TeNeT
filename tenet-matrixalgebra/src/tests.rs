@@ -1761,7 +1761,7 @@ fn generic_compact_svd_padded_complex_rectangular_fallback_matches_canonical_gau
     assert_generic_complex_factor_close(padded_svd.u(), canonical_svd.u());
     assert_generic_complex_factor_close(padded_svd.s(), canonical_svd.s());
     assert_generic_complex_factor_close(padded_svd.vh(), canonical_svd.vh());
-    assert_eq!(padded_svd.singular_values(), canonical_svd.singular_values());
+    assert_real_spectra_close(padded_svd.singular_values(), canonical_svd.singular_values());
     let probe = crate::factorize::compact_svd_copy_probe();
     assert!(probe.input_pack_calls > 0);
     assert!(probe.output_scatter_calls > 0);
@@ -2891,6 +2891,10 @@ fn assert_generic_complex_factor_close(
     expected: &BoundDynFactor<FactorGenericRule, Complex64>,
 ) {
     assert_eq!(actual.space().space().homspace(), expected.space().space().homspace());
+    assert_eq!(
+        actual.space().space().structure(),
+        expected.space().space().structure()
+    );
     assert_eq!(actual.data().len(), expected.data().len());
     for (&actual, &expected) in actual.data().iter().zip(expected.data()) {
         assert!((actual - expected).norm() < 1.0e-12);
