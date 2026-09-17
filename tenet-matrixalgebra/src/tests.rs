@@ -4172,6 +4172,77 @@ fn checked_generic_eigh_keeps_live_pair_owners_for_every_dtype() {
 }
 
 #[test]
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
+fn checked_generic_eigh_reconstructs_complex_unequal_multi_tree_sectors() {
+    let (source, hermitian, _) = generic_values_endomorphism_input();
+    let source_regions = source
+        .space()
+        .structure()
+        .coupled_sector_regions(2)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        source_regions.iter().map(|region| region.rows()).collect::<Vec<_>>(),
+        [1, 2]
+    );
+    let multi_tree = source_regions
+        .iter()
+        .find(|region| region.rows() == 2)
+        .unwrap();
+    assert_eq!(
+        (multi_tree.row_trees().len(), multi_tree.col_trees().len()),
+        (2, 2)
+    );
+    assert!(hermitian.iter().any(|value| value.im != 0.0));
+
+    let (provider, checked) = bind_checked_only(&source);
+    let input = BoundDynamicTensorRef::try_new(&checked, &hermitian).unwrap();
+    let full =
+        eigh_full_dyn_checked_generic(&mut tenet_dense::DefaultDenseExecutor::new(), &input)
+            .unwrap();
+    let vector_regions = full
+        .v()
+        .space()
+        .space()
+        .structure()
+        .coupled_sector_regions(2)
+        .unwrap()
+        .unwrap();
+
+    for source_region in source_regions.iter() {
+        let vectors = vector_regions
+            .iter()
+            .find(|region| region.coupled() == source_region.coupled())
+            .unwrap();
+        let values = &full
+            .eigenvalues()
+            .iter()
+            .find(|spectrum| spectrum.sector == source_region.coupled())
+            .unwrap()
+            .values;
+        let n = source_region.rows();
+        assert_eq!((vectors.rows(), vectors.cols(), values.len()), (n, n, n));
+        for column in 0..n {
+            for row in 0..n {
+                let reconstructed = (0..n)
+                    .map(|bond| {
+                        full.v().data()[vectors.range().start + row + n * bond]
+                            * values[bond]
+                            * full.v().data()[vectors.range().start + column + n * bond].conj()
+                    })
+                    .sum::<Complex64>();
+                let expected = hermitian[source_region.range().start + row + n * column];
+                assert!((reconstructed - expected).norm() < 1.0e-10);
+            }
+        }
+    }
+    assert!(Arc::ptr_eq(full.v().space().provider_arc(), &provider));
+}
+
+#[test]
 fn checked_generic_eig_uses_the_existing_numerical_rank_boundary() {
     let epsilon = f64::EPSILON;
     assert!(validate_eigenvector_singular_values(&[1.0, 2.0 * epsilon], 2, epsilon).is_err());
