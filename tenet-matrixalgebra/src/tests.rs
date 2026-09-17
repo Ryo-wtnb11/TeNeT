@@ -11370,7 +11370,8 @@ fn pinv_satisfies_the_moore_penrose_identity() {
     .unwrap();
     let tp = crate::compose::compose(&mut context, &rule, &tensor, &plus).unwrap();
     let tpt = crate::compose::compose(&mut context, &rule, &tp, &tensor).unwrap();
-    for (index, (lhs, rhs)) in tpt.data().iter().zip(tensor.data()).enumerate() {
+    assert_eq!(tpt.data().len(), canonical.data().len());
+    for (index, (lhs, rhs)) in tpt.data().iter().zip(canonical.data()).enumerate() {
         assert!(
             (lhs - rhs).abs() < 1e-8,
             "Moore-Penrose violated at raw position {index}: {lhs} != {rhs}"
