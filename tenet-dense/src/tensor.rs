@@ -90,47 +90,59 @@ impl DenseTensor {
     }
 
     /// Consume a host-backed tensor and transfer its `f64` buffer.
-    #[cfg(feature = "tenferro")]
-    #[cfg(not(feature = "provider-inject"))]
     pub fn into_f64_vec(self) -> Result<Vec<f64>, DenseError> {
-        let DenseTensorInner::Tenferro(tensor) = self.inner;
-        tensor
-            .into_vec_col_major::<f64>()
-            .map(|(_, data)| data)
-            .map_err(|err| tenferro_error("DenseTensor::into_f64_vec", err))
+        match self.inner {
+            #[cfg(feature = "tenferro")]
+            DenseTensorInner::Tenferro(tensor) => {
+                <f64 as tenferro_tensor::TensorScalar>::into_typed(tensor)
+                    .and_then(tenferro_tensor::TypedTensor::into_host_vec)
+                    .map_err(|err| tenferro_error("DenseTensor::into_f64_vec", err))
+            }
+            #[cfg(not(feature = "tenferro"))]
+            DenseTensorInner::Empty(inner) => match inner {},
+        }
     }
 
     /// Consume a host-backed tensor and transfer its `f32` buffer.
-    #[cfg(feature = "tenferro")]
-    #[cfg(not(feature = "provider-inject"))]
     pub fn into_f32_vec(self) -> Result<Vec<f32>, DenseError> {
-        let DenseTensorInner::Tenferro(tensor) = self.inner;
-        tensor
-            .into_vec_col_major::<f32>()
-            .map(|(_, data)| data)
-            .map_err(|err| tenferro_error("DenseTensor::into_f32_vec", err))
+        match self.inner {
+            #[cfg(feature = "tenferro")]
+            DenseTensorInner::Tenferro(tensor) => {
+                <f32 as tenferro_tensor::TensorScalar>::into_typed(tensor)
+                    .and_then(tenferro_tensor::TypedTensor::into_host_vec)
+                    .map_err(|err| tenferro_error("DenseTensor::into_f32_vec", err))
+            }
+            #[cfg(not(feature = "tenferro"))]
+            DenseTensorInner::Empty(inner) => match inner {},
+        }
     }
 
     /// Consume a host-backed tensor and transfer its `Complex32` buffer.
-    #[cfg(feature = "tenferro")]
-    #[cfg(not(feature = "provider-inject"))]
     pub fn into_c32_vec(self) -> Result<Vec<Complex32>, DenseError> {
-        let DenseTensorInner::Tenferro(tensor) = self.inner;
-        tensor
-            .into_vec_col_major::<Complex32>()
-            .map(|(_, data)| data)
-            .map_err(|err| tenferro_error("DenseTensor::into_c32_vec", err))
+        match self.inner {
+            #[cfg(feature = "tenferro")]
+            DenseTensorInner::Tenferro(tensor) => {
+                <Complex32 as tenferro_tensor::TensorScalar>::into_typed(tensor)
+                    .and_then(tenferro_tensor::TypedTensor::into_host_vec)
+                    .map_err(|err| tenferro_error("DenseTensor::into_c32_vec", err))
+            }
+            #[cfg(not(feature = "tenferro"))]
+            DenseTensorInner::Empty(inner) => match inner {},
+        }
     }
 
     /// Consume a host-backed tensor and transfer its `Complex64` buffer.
-    #[cfg(feature = "tenferro")]
-    #[cfg(not(feature = "provider-inject"))]
     pub fn into_c64_vec(self) -> Result<Vec<Complex64>, DenseError> {
-        let DenseTensorInner::Tenferro(tensor) = self.inner;
-        tensor
-            .into_vec_col_major::<Complex64>()
-            .map(|(_, data)| data)
-            .map_err(|err| tenferro_error("DenseTensor::into_c64_vec", err))
+        match self.inner {
+            #[cfg(feature = "tenferro")]
+            DenseTensorInner::Tenferro(tensor) => {
+                <Complex64 as tenferro_tensor::TensorScalar>::into_typed(tensor)
+                    .and_then(tenferro_tensor::TypedTensor::into_host_vec)
+                    .map_err(|err| tenferro_error("DenseTensor::into_c64_vec", err))
+            }
+            #[cfg(not(feature = "tenferro"))]
+            DenseTensorInner::Empty(inner) => match inner {},
+        }
     }
 
     #[cfg(feature = "tenferro")]

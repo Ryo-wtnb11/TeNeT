@@ -5222,6 +5222,38 @@ fn compact_factor_routes_agree_between_sorted_and_unsorted_region_tables() {
 }
 
 #[test]
+fn compact_qr_lq_direct_regions_follow_factor_order_for_reversed_sector_spans() {
+    let rule = Z2FusionRule;
+    let source = mixed_rectangular_tensor((3, 2), (2, 4));
+    let tensor = reversed_complete_grid_copy(&rule, &source);
+    let bound = bound_tensor(Arc::new(rule), &tensor);
+    assert!(bound
+        .space()
+        .space()
+        .structure()
+        .coupled_sector_regions(1)
+        .unwrap()
+        .is_some());
+    let plan = crate::factorize::compact_factor_plan_for_test(bound.space())
+        .unwrap()
+        .unwrap();
+    assert!(crate::factorize::compact_factor_plan_routes_for_test(&plan)
+        .iter()
+        .any(|route| {
+            let (source, left, right) = route.factor_regions_for_test();
+            left.is_some_and(|left| left != source) || right.is_some_and(|right| right != source)
+        }));
+
+    let input = bound.as_ref();
+    let input = input.dynamic();
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    let (q, r) = qr_compact_dyn(&mut dense, &input).unwrap();
+    assert_compact_factors_reconstruct_input(&input, &q, None, &r);
+    let (l, q) = lq_compact_dyn(&mut dense, &input).unwrap();
+    assert_compact_factors_reconstruct_input(&input, &l, None, &q);
+}
+
+#[test]
 fn compact_factor_plan_rejects_duplicate_missing_mismatched_and_extra_routes() {
     // What: every nonzero source sector has one shape-correct left/right route and no extras.
     let rule = Z2FusionRule;

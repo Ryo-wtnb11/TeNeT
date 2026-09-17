@@ -39,7 +39,11 @@ pub trait FactorScalar: DenseRecouplingScalar {
     type Real: DenseRecouplingScalar + Into<f64>;
 
     fn dense_slice(tensor: &DenseTensor) -> Result<&[Self], DenseError>;
-    fn dense_into_vec(tensor: DenseTensor) -> Result<Vec<Self>, DenseError>;
+    /// Consuming implementations may transfer backend-owned host storage.
+    /// Custom scalar implementations retain the former borrowed-copy behavior.
+    fn dense_into_vec(tensor: DenseTensor) -> Result<Vec<Self>, DenseError> {
+        Self::dense_slice(&tensor).map(ToOwned::to_owned)
+    }
     /// Real spectrum output (singular values, Hermitian eigenvalues) widened
     /// to `f64` for the host-side truncation policies.
     fn real_spectrum(tensor: &DenseTensor) -> Result<Vec<f64>, DenseError>;
@@ -5662,12 +5666,8 @@ where
     debug_assert_eq!(plan.source_layout, input.space().validated_layout());
     let left_space = input.space().rebind_validated(&plan.left_layout)?;
     let right_space = input.space().rebind_validated(&plan.right_layout)?;
-    let mut left_regions = (0..plan.left_regions.len())
-        .map(|_| None)
-        .collect::<Vec<_>>();
-    let mut right_regions = (0..plan.right_regions.len())
-        .map(|_| None)
-        .collect::<Vec<_>>();
+    let mut left_data = vec![D::zero(); plan.left_layout.required_len()?];
+    let mut right_data = vec![D::zero(); plan.right_layout.required_len()?];
 
     let max_adjoint_len = plan
         .routes
@@ -5684,6 +5684,9 @@ where
             continue;
         }
         let source = &plan.source_regions[route.source_region];
+        let left = &plan.left_regions[route.left_region.expect("nonzero route has left region")];
+        let right =
+            &plan.right_regions[route.right_region.expect("nonzero route has right region")];
         let source_data = &input.data()[source.range()];
         let adjoint = &mut adjoint_scratch[..source_data.len()];
         adjoint_col_major_into(source_data, source.rows(), source.cols(), adjoint);
@@ -5701,22 +5704,23 @@ where
             route.rank,
             source.rows(),
         );
-        let mut left_data = vec![D::zero(); r_prime.len()];
-        adjoint_col_major_into(&r_prime, route.rank, source.rows(), &mut left_data);
+        adjoint_col_major_into(
+            &r_prime,
+            route.rank,
+            source.rows(),
+            &mut left_data[left.range()],
+        );
         #[cfg(test)]
         record_compact_lq_final_adjoint_copy::<D>(r_prime.len());
-        let mut right_data = vec![D::zero(); q_prime.len()];
-        adjoint_col_major_into(&q_prime, source.cols(), route.rank, &mut right_data);
+        adjoint_col_major_into(
+            &q_prime,
+            source.cols(),
+            route.rank,
+            &mut right_data[right.range()],
+        );
         #[cfg(test)]
         record_compact_lq_final_adjoint_copy::<D>(q_prime.len());
-        left_regions[route.left_region.expect("nonzero route has left region")] = Some(left_data);
-        right_regions[route.right_region.expect("nonzero route has right region")] =
-            Some(right_data);
     }
-
-    let left_data = concat_compact_factor_regions(left_regions, plan.left_layout.required_len()?);
-    let right_data =
-        concat_compact_factor_regions(right_regions, plan.right_layout.required_len()?);
 
     let left = BoundDynFactor::from_bound(left_space, left_data, space.nout(), 1)?;
     let right = BoundDynFactor::from_bound(right_space, right_data, 1, space.nin())?;
@@ -5867,13 +5871,32 @@ fn compact_qr_output_owned<D: FactorScalar>(
 ) -> Result<Vec<D>, OperationError> {
     let shape = tensor.shape().to_vec();
     let data = D::dense_into_vec(tensor).map_err(OperationError::Dense)?;
-    validate_dense_shape(&shape, expected_shape)?;
-    let expected_len = expected_shape.iter().product::<usize>();
+    if shape != expected_shape {
+        return Err(OperationError::Dense(DenseError::Backend {
+            backend: DenseBackend::Tenferro,
+            op: "qr_into",
+            message: format!(
+                "qr_into output shape mismatch: source {:?}, destination {:?}",
+                shape, expected_shape
+            ),
+        }));
+    }
+    let expected_len = shape
+        .iter()
+        .try_fold(1usize, |acc, &dim| {
+            acc.checked_mul(dim).ok_or(DenseError::ElementCountOverflow)
+        })
+        .map_err(OperationError::Dense)?;
     if data.len() != expected_len {
-        return Err(OperationError::ElementCountMismatch {
-            expected: expected_len,
-            actual: data.len(),
-        });
+        return Err(OperationError::Dense(DenseError::Backend {
+            backend: DenseBackend::Tenferro,
+            op: "qr_into",
+            message: format!(
+                "qr_into output storage length mismatch: source {}, expected {}",
+                data.len(),
+                expected_len
+            ),
+        }));
     }
     Ok(data)
 }
