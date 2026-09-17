@@ -12982,6 +12982,7 @@ fn polar_valid_direct_and_fallback_layouts_agree() {
         let mut direct_context = default_context();
         let mut fallback_dense = tenet_dense::DefaultDenseExecutor::new();
         let mut fallback_context = default_context();
+        crate::factorize::reset_compact_svd_copy_probe();
 
         let (direct_first, direct_second, fallback_first, fallback_second) =
             if operation == "left_polar" {
@@ -13026,6 +13027,9 @@ fn polar_valid_direct_and_fallback_layouts_agree() {
         for (direct, fallback) in direct_second.iter().zip(&fallback_second) {
             assert!((direct - fallback).abs() < 1e-10);
         }
+        let probe = crate::factorize::compact_svd_copy_probe();
+        assert!(probe.input_pack_calls > 0);
+        assert!(probe.output_scatter_calls > 0);
     }
 }
 
