@@ -1150,6 +1150,7 @@ thread_local! {
     static COMPACT_QR_COPY_PROBE: Cell<CompactQrCopyProbe> = Cell::default();
     static EIGH_COPY_PROBE: Cell<EighCopyProbe> = Cell::default();
     static EIGH_OWNED_VECTOR_POINTERS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+    static CHECKED_EIGH_PAIR_POINTERS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
     static COMPACT_LQ_COPY_PROBE: Cell<CompactLqCopyProbe> = Cell::default();
     static DIAGONAL_BOND_BUILD_PROBE: Cell<DiagonalBondBuildProbe> = Cell::default();
     static VALUES_MATRICIZATION_FALLBACKS: Cell<usize> = const { Cell::new(0) };
@@ -1377,6 +1378,26 @@ pub(crate) fn eigh_owned_vector_pointers() -> Vec<usize> {
 fn record_eigh_owned_vector_before_scatter<D>(vectors: &[D]) {
     EIGH_OWNED_VECTOR_POINTERS.with(|pointers| {
         pointers.borrow_mut().push(vectors.as_ptr() as usize);
+    });
+}
+
+#[cfg(test)]
+pub(crate) fn reset_checked_eigh_pair_pointers() {
+    CHECKED_EIGH_PAIR_POINTERS.with(|pointers| pointers.borrow_mut().clear());
+}
+
+#[cfg(test)]
+pub(crate) fn checked_eigh_pair_pointers() -> Vec<usize> {
+    CHECKED_EIGH_PAIR_POINTERS.with(|pointers| pointers.borrow().clone())
+}
+
+#[cfg(test)]
+fn record_checked_eigh_pair_pointers<D>(pairs: &[FactorPair<D>]) {
+    CHECKED_EIGH_PAIR_POINTERS.with(|pointers| {
+        *pointers.borrow_mut() = pairs
+            .iter()
+            .map(|pair| pair.left.as_ptr() as usize)
+            .collect();
     });
 }
 
@@ -11047,51 +11068,26 @@ where
     validate_hermitian_matricizations(&matrices).map_err(CheckedGenericFactorPlanError::from)?;
 
     let max_n = matrices.iter().map(|matrix| matrix.rows).max().unwrap_or(0);
-    let mut values_workspace = vec![D::Real::zero(); max_n];
-    let mut vectors_workspace = vec![D::zero(); max_n * max_n];
-    let mut sorted_vectors = vec![D::zero(); max_n * max_n];
+    let mut order = Vec::with_capacity(max_n);
+    let mut visited = vec![false; max_n];
+    let mut column_scratch = vec![D::zero(); max_n];
     let mut eigenvalues = Vec::with_capacity(matrices.len());
     let mut pairs = Vec::with_capacity(matrices.len());
     for matrix in &matrices {
         let n = matrix.rows;
-        let shape = [n, n];
-        let strides = [1usize, n];
-        let input_view = DenseView::new(&matrix.data, &shape, &strides, 0).map_err(|error| {
-            CheckedGenericFactorPlanError::Operation(OperationError::Dense(error))
-        })?;
-        let values_shape = [n];
-        let values_strides = [1usize];
-        let vectors_strides = [1usize, max_n];
-        let values_view =
-            DenseViewMut::new(&mut values_workspace, &values_shape, &values_strides, 0).map_err(
-                |error| CheckedGenericFactorPlanError::Operation(OperationError::Dense(error)),
-            )?;
-        let vectors_view = DenseViewMut::new(&mut vectors_workspace, &shape, &vectors_strides, 0)
-            .map_err(|error| {
-            CheckedGenericFactorPlanError::Operation(OperationError::Dense(error))
-        })?;
-        dense
-            .eigh_into(
-                D::dense_read(input_view),
-                D::Real::dense_write(values_view),
-                D::dense_write(vectors_view),
-            )
-            .map_err(|error| {
-                CheckedGenericFactorPlanError::Operation(OperationError::Dense(error))
-            })?;
-        let values = values_workspace[..n]
-            .iter()
-            .map(|value| (*value).into())
-            .collect::<Vec<f64>>();
-        validate_real_eigenvalues(&values).map_err(CheckedGenericFactorPlanError::from)?;
-        let mut order = (0..n).collect::<Vec<_>>();
-        order.sort_by(|&a, &b| values[b].abs().total_cmp(&values[a].abs()).then(a.cmp(&b)));
-        let sorted_values = order.iter().map(|&index| values[index]).collect();
-        for (position, &index) in order.iter().enumerate() {
-            sorted_vectors[position * n..(position + 1) * n]
-                .copy_from_slice(&vectors_workspace[index * max_n..index * max_n + n]);
-        }
-        let mut vectors = sorted_vectors[..n * n].to_vec();
+        let (real_values, mut vectors) = compact_eigh_owned(dense, &matrix.data, n)
+            .map_err(CheckedGenericFactorPlanError::from)?;
+        validate_real_eigenvalues(&real_values).map_err(CheckedGenericFactorPlanError::from)?;
+        order.clear();
+        order.extend(0..n);
+        order.sort_by(|&a, &b| {
+            real_values[b]
+                .abs()
+                .total_cmp(&real_values[a].abs())
+                .then(a.cmp(&b))
+        });
+        let sorted_values = order.iter().map(|&index| real_values[index]).collect();
+        reorder_columns_in_place(&mut vectors, n, &order, &mut visited, &mut column_scratch);
         eigenvector_gauge(&mut vectors, n, n, n);
         eigenvalues.push(SectorSpectrum {
             sector: matrix.sector,
@@ -11110,6 +11106,8 @@ where
         .iter()
         .map(|matrix| (matrix.sector, matrix.rows))
         .collect::<BTreeMap<_, _>>();
+    #[cfg(test)]
+    record_checked_eigh_pair_pointers(&pairs);
     let v = build_bound_factor_generic_checked(
         provider,
         space.homspace(),

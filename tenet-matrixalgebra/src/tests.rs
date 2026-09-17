@@ -2285,6 +2285,7 @@ impl DenseExecutor for CountingDense {
     }
 
     fn eigh(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        self.eigh_calls += 1;
         self.inner.eigh(input)
     }
 
@@ -3595,6 +3596,9 @@ fn checked_only_generic_values_preserve_empty_scalar_and_shape_boundaries() {
     assert!(eigh_vals_dyn_checked_generic(&mut reject, &empty)
         .unwrap()
         .is_empty());
+    let empty_eigh = eigh_full_dyn_checked_generic(&mut reject, &empty).unwrap();
+    assert!(empty_eigh.v().data().is_empty());
+    assert!(empty_eigh.eigenvalues().is_empty());
     assert!(eig_vals_dyn_checked_generic(&mut reject, &empty)
         .unwrap()
         .is_empty());
@@ -4047,6 +4051,349 @@ fn checked_generic_eigh_stages_dense_work_before_checked_factor_admission() {
         .iter()
         .flat_map(|entry| &entry.values)
         .all(|value| *value == 0.0));
+}
+
+#[test]
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
+fn checked_generic_eigh_late_dense_failure_publishes_no_factors() {
+    let x = SectorId::new(1);
+    let leg = SectorLeg::new([(x, 1)], false);
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg.clone(), leg.clone()]),
+        FusionProductSpace::new([leg.clone(), leg]),
+    );
+    let source = BoundDynamicFusionMapSpace::from_final_homspace_generic(
+        Arc::new(FactorGenericRule),
+        homspace,
+    )
+    .unwrap();
+    let data = vec![0.0; source.space().required_len().unwrap()];
+    let provider = Arc::new(LateGenericSpy {
+        rule: FactorGenericRule,
+        fail_at: usize::MAX,
+        calls: Cell::new(0),
+    });
+    let checked =
+        BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
+            .unwrap();
+    let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
+    provider.calls.set(0);
+    let mut dense = FailAfterObservingEighInput {
+        outputs: Some(f64_eigh_outputs(1)),
+        ..Default::default()
+    };
+    crate::factorize::reset_one_sided_publication_probe();
+
+    let result = eigh_full_dyn_checked_generic(&mut dense, &input);
+
+    assert!(matches!(
+        result,
+        Err(CheckedGenericFactorPlanError::Operation(
+            OperationError::Dense(_)
+        ))
+    ));
+    assert_eq!(dense.observed.len(), 2);
+    assert_eq!(provider.calls.get(), 0);
+    assert_eq!(input.data(), data);
+    assert_eq!(
+        crate::factorize::one_sided_publication_probe(),
+        crate::factorize::OneSidedPublicationProbe::default()
+    );
+}
+
+#[test]
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
+fn checked_generic_eigh_uses_owned_dense_output() {
+    let x = SectorId::new(1);
+    let leg = SectorLeg::new([(x, 1)], false);
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg.clone(), leg.clone()]),
+        FusionProductSpace::new([leg.clone(), leg]),
+    );
+    let source = BoundDynamicFusionMapSpace::from_final_homspace_generic(
+        Arc::new(FactorGenericRule),
+        homspace,
+    )
+    .unwrap();
+    let data = vec![0.0; source.space().required_len().unwrap()];
+    let provider = Arc::new(LateGenericSpy {
+        rule: FactorGenericRule,
+        fail_at: usize::MAX,
+        calls: Cell::new(0),
+    });
+    let checked =
+        BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
+            .unwrap();
+    let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
+    let mut dense = RejectEighInto::default();
+
+    let full = eigh_full_dyn_checked_generic(&mut dense, &input).unwrap();
+
+    assert_eq!(dense.eigh_calls, 2);
+    assert_eq!(dense.eigh_into_calls, 0);
+    assert!(Arc::ptr_eq(full.v().space().provider_arc(), &provider));
+}
+
+#[test]
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
+fn checked_generic_eigh_keeps_owned_vectors_in_live_pairs_before_publication() {
+    let x = SectorId::new(1);
+    let leg = SectorLeg::new([(x, 1)], false);
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg.clone(), leg.clone()]),
+        FusionProductSpace::new([leg.clone(), leg]),
+    );
+    let source = BoundDynamicFusionMapSpace::from_final_homspace_generic(
+        Arc::new(FactorGenericRule),
+        homspace,
+    )
+    .unwrap();
+    let data = vec![0.0; source.space().required_len().unwrap()];
+    let provider = Arc::new(LateGenericSpy {
+        rule: FactorGenericRule,
+        fail_at: usize::MAX,
+        calls: Cell::new(0),
+    });
+    let checked =
+        BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
+            .unwrap();
+    let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
+    let mut dense = RejectEighInto::default();
+    crate::factorize::reset_checked_eigh_pair_pointers();
+
+    let full = eigh_full_dyn_checked_generic(&mut dense, &input).unwrap();
+    let before_publication = crate::factorize::checked_eigh_pair_pointers();
+
+    assert_eq!(dense.eigh_into_calls, 0);
+    assert_eq!(dense.vector_ptrs, before_publication);
+    assert_eq!(dense.vector_ptrs.len(), 2);
+    assert_eq!(dense.vector_ptrs.len(), full.eigenvalues().len());
+}
+
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
+fn assert_checked_generic_eigh_live_pair_owners<D: crate::factorize::FactorScalar>() {
+    let x = SectorId::new(1);
+    let leg = SectorLeg::new([(x, 1)], false);
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg.clone(), leg.clone()]),
+        FusionProductSpace::new([leg.clone(), leg]),
+    );
+    let source = BoundDynamicFusionMapSpace::from_final_homspace_generic(
+        Arc::new(FactorGenericRule),
+        homspace,
+    )
+    .unwrap();
+    let data = vec![D::zero(); source.space().required_len().unwrap()];
+    let provider = Arc::new(LateGenericSpy {
+        rule: FactorGenericRule,
+        fail_at: usize::MAX,
+        calls: Cell::new(0),
+    });
+    let checked =
+        BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
+            .unwrap();
+    let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
+    let mut dense = RejectEighInto::default();
+    crate::factorize::reset_checked_eigh_pair_pointers();
+
+    let full = eigh_full_dyn_checked_generic(&mut dense, &input).unwrap();
+
+    assert_eq!(dense.eigh_into_calls, 0);
+    assert_eq!(
+        dense.vector_ptrs,
+        crate::factorize::checked_eigh_pair_pointers()
+    );
+    assert_eq!(dense.vector_ptrs.len(), 2);
+    assert_eq!(dense.vector_ptrs.len(), full.eigenvalues().len());
+    assert!(Arc::ptr_eq(full.v().space().provider_arc(), &provider));
+}
+
+#[test]
+fn checked_generic_eigh_keeps_live_pair_owners_for_every_dtype() {
+    assert_checked_generic_eigh_live_pair_owners::<f64>();
+    assert_checked_generic_eigh_live_pair_owners::<f32>();
+    assert_checked_generic_eigh_live_pair_owners::<Complex32>();
+    assert_checked_generic_eigh_live_pair_owners::<Complex64>();
+}
+
+fn assert_complex_checked_eigh_reconstruction<R>(
+    source_regions: &[tenet_core::CoupledSectorRegion],
+    hermitian: &[Complex64],
+    full: &EighFullDyn<R, Complex64>,
+) {
+    let vector_regions = full
+        .v()
+        .space()
+        .space()
+        .structure()
+        .coupled_sector_regions(2)
+        .unwrap()
+        .unwrap();
+
+    for source_region in source_regions {
+        let vectors = vector_regions
+            .iter()
+            .find(|region| region.coupled() == source_region.coupled())
+            .unwrap();
+        let values = &full
+            .eigenvalues()
+            .iter()
+            .find(|spectrum| spectrum.sector == source_region.coupled())
+            .unwrap()
+            .values;
+        let n = source_region.rows();
+        assert_eq!((vectors.rows(), vectors.cols(), values.len()), (n, n, n));
+        for column in 0..n {
+            for row in 0..n {
+                let reconstructed = (0..n)
+                    .map(|bond| {
+                        full.v().data()[vectors.range().start + row + n * bond]
+                            * values[bond]
+                            * full.v().data()[vectors.range().start + column + n * bond].conj()
+                    })
+                    .sum::<Complex64>();
+                let expected = hermitian[source_region.range().start + row + n * column];
+                assert!((reconstructed - expected).norm() < 1.0e-10);
+            }
+        }
+    }
+}
+
+#[test]
+fn checked_generic_eigh_reconstructs_complex_unequal_multi_tree_sectors() {
+    let (source, hermitian, _) = generic_values_endomorphism_input();
+    let source_regions = source
+        .space()
+        .structure()
+        .coupled_sector_regions(2)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        source_regions
+            .iter()
+            .map(|region| region.rows())
+            .collect::<Vec<_>>(),
+        [1, 2]
+    );
+    let multi_tree = source_regions
+        .iter()
+        .find(|region| region.rows() == 2)
+        .unwrap();
+    assert_eq!(
+        (multi_tree.row_trees().len(), multi_tree.col_trees().len()),
+        (2, 2)
+    );
+    assert!(hermitian.iter().any(|value| value.im != 0.0));
+
+    let (provider, checked) = bind_checked_only(&source);
+    let input = BoundDynamicTensorRef::try_new(&checked, &hermitian).unwrap();
+    let full = eigh_full_dyn_checked_generic(&mut tenet_dense::DefaultDenseExecutor::new(), &input)
+        .unwrap();
+    assert_complex_checked_eigh_reconstruction(&source_regions, &hermitian, &full);
+    assert!(Arc::ptr_eq(full.v().space().provider_arc(), &provider));
+}
+
+#[test]
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
+fn checked_generic_eigh_reconstructs_padded_reordered_complex_input() {
+    let (source, hermitian, _) = generic_values_endomorphism_input();
+    let source_regions = source
+        .space()
+        .structure()
+        .coupled_sector_regions(2)
+        .unwrap()
+        .unwrap();
+    let (expert, data) = padded_reordered_generic_endomorphism_input(&source, &hermitian);
+    assert!(expert
+        .space()
+        .structure()
+        .coupled_sector_regions(2)
+        .unwrap()
+        .is_none());
+    let provider = Arc::new(LateGenericSpy {
+        rule: FactorGenericRule,
+        fail_at: usize::MAX,
+        calls: Cell::new(0),
+    });
+    let checked =
+        BoundDynamicFusionMapSpace::bind_generic(expert.space().clone(), Arc::clone(&provider))
+            .unwrap();
+    let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
+    let before = input.data().to_vec();
+    let full = eigh_full_dyn_checked_generic(&mut tenet_dense::DefaultDenseExecutor::new(), &input)
+        .unwrap();
+    assert_complex_checked_eigh_reconstruction(&source_regions, &hermitian, &full);
+    assert_eq!(input.data(), before);
+    assert!(Arc::ptr_eq(full.v().space().provider_arc(), &provider));
+}
+
+#[test]
+fn checked_generic_eigh_stably_keeps_raw_exact_signed_ties() {
+    let (source, mut hermitian, _) = generic_values_endomorphism_input();
+    let regions = source
+        .space()
+        .structure()
+        .coupled_sector_regions(2)
+        .unwrap()
+        .unwrap();
+    for region in regions.iter() {
+        let values = match region.rows() {
+            1 => &[Complex64::new(1.0, 0.0)][..],
+            2 => &[
+                Complex64::new(-2.0, 0.0),
+                Complex64::zero(),
+                Complex64::zero(),
+                Complex64::new(2.0, 0.0),
+            ],
+            rows => panic!("unexpected checked EIGH tie fixture size {rows}"),
+        };
+        hermitian[region.range()].copy_from_slice(values);
+    }
+    let (_, checked) = bind_checked_only(&source);
+    let input = BoundDynamicTensorRef::try_new(&checked, &hermitian).unwrap();
+    let mut dense = RecordingEigh::default();
+
+    let full = eigh_full_dyn_checked_generic(&mut dense, &input).unwrap();
+
+    let tied_sector = full
+        .eigenvalues()
+        .iter()
+        .find(|spectrum| spectrum.values.len() == 2)
+        .unwrap();
+    let raw_tied = dense
+        .raw_values
+        .iter()
+        .find(|values| values.len() == 2)
+        .unwrap()
+        .iter()
+        .copied()
+        .filter(|value| value.abs() == 2.0)
+        .collect::<Vec<_>>();
+    let published_tied = tied_sector
+        .values
+        .iter()
+        .copied()
+        .filter(|value| value.abs() == 2.0)
+        .collect::<Vec<_>>();
+    assert_eq!(raw_tied.len(), 2);
+    assert!(raw_tied.iter().any(|value| *value < 0.0));
+    assert!(raw_tied.iter().any(|value| *value > 0.0));
+    assert_eq!(published_tied, raw_tied);
 }
 
 #[test]
