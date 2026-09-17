@@ -1588,19 +1588,6 @@ fn direct_compact_svd_uses_owned_executor_outputs_only() {
     assert!(probe.input_pack_calls > 0);
     assert!(probe.output_scatter_calls > 0);
 
-    let mut adjoint_dense = RejectSvdInto::default();
-    crate::factorize::reset_compact_svd_copy_probe();
-    crate::factorize::reset_mf_compact_svd_fallback_pointers();
-    svd_compact_adjoint_factors_dyn(&mut adjoint_dense, &fallback).unwrap();
-    let adjoint_stage = crate::factorize::mf_compact_svd_fallback_pointers();
-    assert_eq!(adjoint_dense.svd_into_calls, 0);
-    assert_eq!(adjoint_dense.svd_calls, 2);
-    assert_eq!(adjoint_dense.output_ptrs, adjoint_stage);
-    assert_eq!(adjoint_stage.len(), 2);
-    assert!(adjoint_stage.iter().all(|&(u, vt)| u != 0 && vt != 0 && u != vt));
-    let adjoint_probe = crate::factorize::compact_svd_copy_probe();
-    assert!(adjoint_probe.input_pack_calls > 0);
-    assert!(adjoint_probe.output_scatter_calls > 0);
 }
 
 fn assert_mf_compact_svd_fallback_live_owners<D: crate::factorize::FactorScalar>() {
@@ -1632,6 +1619,20 @@ fn assert_mf_compact_svd_fallback_live_owners<D: crate::factorize::FactorScalar>
     let probe = crate::factorize::compact_svd_copy_probe();
     assert!(probe.input_pack_calls > 0);
     assert!(probe.output_scatter_calls > 0);
+
+    let mut adjoint_dense = RejectSvdInto::default();
+    crate::factorize::reset_compact_svd_copy_probe();
+    crate::factorize::reset_mf_compact_svd_fallback_pointers();
+    svd_compact_adjoint_factors_dyn(&mut adjoint_dense, &fallback).unwrap();
+    let adjoint_stage = crate::factorize::mf_compact_svd_fallback_pointers();
+    assert_eq!(adjoint_dense.svd_into_calls, 0);
+    assert_eq!(adjoint_dense.svd_calls, 2);
+    assert_eq!(adjoint_dense.output_ptrs, adjoint_stage);
+    assert_eq!(adjoint_stage.len(), 2);
+    assert!(adjoint_stage.iter().all(|&(u, vt)| u != 0 && vt != 0 && u != vt));
+    let adjoint_probe = crate::factorize::compact_svd_copy_probe();
+    assert!(adjoint_probe.input_pack_calls > 0);
+    assert!(adjoint_probe.output_scatter_calls > 0);
 }
 
 #[test]
