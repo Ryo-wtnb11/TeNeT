@@ -1609,6 +1609,36 @@ fn generic_compact_svd_padded_fallback_uses_owned_outputs_and_scatter() {
     assert!(probe.output_scatter_calls > 0);
 }
 
+fn assert_generic_compact_svd_fallback_live_owners<D: crate::factorize::FactorScalar>() {
+    let (canonical_space, canonical_data) = generic_factorization_input();
+    let (padded_space, padded_data) =
+        padded_generic_factorization_input(&canonical_space, &canonical_data);
+    let data = padded_data.into_iter().map(D::from_real).collect::<Vec<_>>();
+    let padded = BoundDynamicTensorRef::try_new(&padded_space, &data).unwrap();
+    let mut dense = RejectSvdInto::default();
+
+    crate::factorize::reset_compact_svd_copy_probe();
+    crate::factorize::reset_generic_compact_svd_fallback_pointers();
+    svd_compact_factors_dyn_generic(&mut dense, &padded).unwrap();
+    let stage = crate::factorize::generic_compact_svd_fallback_pointers();
+
+    assert_eq!(dense.svd_into_calls, 0);
+    assert_eq!(dense.output_ptrs, stage);
+    assert_eq!(stage.len(), 2);
+    assert!(stage.iter().all(|&(u, vt)| u != 0 && vt != 0 && u != vt));
+    let probe = crate::factorize::compact_svd_copy_probe();
+    assert!(probe.input_pack_calls > 0);
+    assert!(probe.output_scatter_calls > 0);
+}
+
+#[test]
+fn generic_compact_svd_fallback_keeps_live_owners_for_every_dtype() {
+    assert_generic_compact_svd_fallback_live_owners::<f64>();
+    assert_generic_compact_svd_fallback_live_owners::<f32>();
+    assert_generic_compact_svd_fallback_live_owners::<Complex32>();
+    assert_generic_compact_svd_fallback_live_owners::<Complex64>();
+}
+
 #[test]
 fn generic_compact_qr_lq_paths_do_not_call_qr_into() {
     let (canonical_space, canonical_data) = generic_factorization_input();

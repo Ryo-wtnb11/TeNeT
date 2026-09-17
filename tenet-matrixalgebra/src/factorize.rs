@@ -1153,6 +1153,8 @@ thread_local! {
     static CHECKED_EIGH_PAIR_POINTERS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
     static CHECKED_COMPACT_SVD_STAGE_POINTERS: RefCell<Vec<(usize, usize)>> =
         const { RefCell::new(Vec::new()) };
+    static GENERIC_COMPACT_SVD_FALLBACK_POINTERS: RefCell<Vec<(usize, usize)>> =
+        const { RefCell::new(Vec::new()) };
     static COMPACT_LQ_COPY_PROBE: Cell<CompactLqCopyProbe> = Cell::default();
     static DIAGONAL_BOND_BUILD_PROBE: Cell<DiagonalBondBuildProbe> = Cell::default();
     static VALUES_MATRICIZATION_FALLBACKS: Cell<usize> = const { Cell::new(0) };
@@ -1173,6 +1175,25 @@ pub(crate) fn checked_compact_svd_stage_pointers() -> Vec<(usize, usize)> {
 #[cfg(test)]
 fn record_checked_compact_svd_stage_gauge<D>(u: &[D], vt: &[D]) {
     CHECKED_COMPACT_SVD_STAGE_POINTERS.with(|pointers| {
+        pointers
+            .borrow_mut()
+            .push((u.as_ptr() as usize, vt.as_ptr() as usize));
+    });
+}
+
+#[cfg(test)]
+pub(crate) fn reset_generic_compact_svd_fallback_pointers() {
+    GENERIC_COMPACT_SVD_FALLBACK_POINTERS.with(|pointers| pointers.borrow_mut().clear());
+}
+
+#[cfg(test)]
+pub(crate) fn generic_compact_svd_fallback_pointers() -> Vec<(usize, usize)> {
+    GENERIC_COMPACT_SVD_FALLBACK_POINTERS.with(|pointers| pointers.borrow().clone())
+}
+
+#[cfg(test)]
+fn record_generic_compact_svd_fallback_gauge<D>(u: &[D], vt: &[D]) {
+    GENERIC_COMPACT_SVD_FALLBACK_POINTERS.with(|pointers| {
         pointers
             .borrow_mut()
             .push((u.as_ptr() as usize, vt.as_ptr() as usize));
@@ -9897,6 +9918,8 @@ where
             matrix.cols,
             rank,
         );
+        #[cfg(test)]
+        record_generic_compact_svd_fallback_gauge(&u, &vt);
 
         singular_values.push(SectorSpectrum {
             sector: matrix.sector,
