@@ -1592,6 +1592,57 @@ fn direct_compact_svd_uses_owned_executor_outputs_only() {
 }
 
 #[test]
+fn generic_compact_svd_padded_fallback_uses_owned_outputs_and_scatter() {
+    let (canonical_space, canonical_data) = generic_factorization_input();
+    let (padded_space, padded_data) =
+        padded_generic_factorization_input(&canonical_space, &canonical_data);
+    let padded = BoundDynamicTensorRef::try_new(&padded_space, &padded_data).unwrap();
+    let mut dense = RejectSvdInto::default();
+
+    crate::factorize::reset_compact_svd_copy_probe();
+    svd_compact_factors_dyn_generic(&mut dense, &padded).unwrap();
+
+    assert!(dense.svd_calls > 0);
+    assert_eq!(dense.svd_into_calls, 0);
+    let probe = crate::factorize::compact_svd_copy_probe();
+    assert!(probe.input_pack_calls > 0);
+    assert!(probe.output_scatter_calls > 0);
+}
+
+fn assert_generic_compact_svd_fallback_live_owners<D: crate::factorize::FactorScalar>() {
+    let (canonical_space, canonical_data) = generic_factorization_input();
+    let (padded_space, padded_data) =
+        padded_generic_factorization_input(&canonical_space, &canonical_data);
+    let data = padded_data
+        .into_iter()
+        .map(D::from_real)
+        .collect::<Vec<_>>();
+    let padded = BoundDynamicTensorRef::try_new(&padded_space, &data).unwrap();
+    let mut dense = RejectSvdInto::default();
+
+    crate::factorize::reset_compact_svd_copy_probe();
+    crate::factorize::reset_generic_compact_svd_fallback_pointers();
+    svd_compact_factors_dyn_generic(&mut dense, &padded).unwrap();
+    let stage = crate::factorize::generic_compact_svd_fallback_pointers();
+
+    assert_eq!(dense.svd_into_calls, 0);
+    assert_eq!(dense.output_ptrs, stage);
+    assert_eq!(stage.len(), 2);
+    assert!(stage.iter().all(|&(u, vt)| u != 0 && vt != 0 && u != vt));
+    let probe = crate::factorize::compact_svd_copy_probe();
+    assert!(probe.input_pack_calls > 0);
+    assert!(probe.output_scatter_calls > 0);
+}
+
+#[test]
+fn generic_compact_svd_fallback_keeps_live_owners_for_every_dtype() {
+    assert_generic_compact_svd_fallback_live_owners::<f64>();
+    assert_generic_compact_svd_fallback_live_owners::<f32>();
+    assert_generic_compact_svd_fallback_live_owners::<Complex32>();
+    assert_generic_compact_svd_fallback_live_owners::<Complex64>();
+}
+
+#[test]
 fn generic_compact_qr_lq_paths_do_not_call_qr_into() {
     let (canonical_space, canonical_data) = generic_factorization_input();
     let canonical = BoundDynamicTensorRef::try_new(&canonical_space, &canonical_data).unwrap();
@@ -1644,6 +1695,248 @@ fn provider_neutral_generic_factorizations_keep_the_strided_fallback() {
     let padded_lq = lq_compact_dyn_generic(&mut dense, &padded).unwrap();
     assert_generic_factor_close(&padded_lq.0, &canonical_lq.0);
     assert_generic_factor_close(&padded_lq.1, &canonical_lq.1);
+}
+
+#[test]
+fn generic_compact_svd_interleaved_complex_fallback_preserves_source_order() {
+    let (canonical_space, canonical_data, _) = generic_values_endomorphism_input();
+    let (interleaved_space, interleaved_data) =
+        interleaved_generic_endomorphism_input(&canonical_space, &canonical_data);
+    let canonical = BoundDynamicTensorRef::try_new(&canonical_space, &canonical_data).unwrap();
+    let interleaved =
+        BoundDynamicTensorRef::try_new(&interleaved_space, &interleaved_data).unwrap();
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+
+    let canonical_svd = svd_trunc_dyn_generic(&mut dense, &canonical, &Truncation::Full).unwrap();
+    crate::factorize::reset_compact_svd_copy_probe();
+    let fallback_svd = svd_trunc_dyn_generic(&mut dense, &interleaved, &Truncation::Full).unwrap();
+
+    assert_compact_factors_reconstruct_input(
+        &interleaved,
+        fallback_svd.u(),
+        Some(fallback_svd.s()),
+        fallback_svd.vh(),
+    );
+    assert_eq!(
+        fallback_svd
+            .singular_values()
+            .iter()
+            .map(|entry| entry.sector)
+            .collect::<Vec<_>>(),
+        [SectorId::new(1), SectorId::new(0)]
+    );
+    for actual in fallback_svd.singular_values() {
+        let expected = canonical_svd
+            .singular_values()
+            .iter()
+            .find(|entry| entry.sector == actual.sector)
+            .unwrap();
+        assert_eq!(actual.values.len(), expected.values.len());
+        for (&actual, &expected) in actual.values.iter().zip(&expected.values) {
+            assert!((actual - expected).abs() < 1.0e-10);
+        }
+    }
+    let probe = crate::factorize::compact_svd_copy_probe();
+    assert!(probe.input_pack_calls > 0);
+    assert!(probe.output_scatter_calls > 0);
+}
+
+#[test]
+fn generic_compact_svd_padded_complex_rectangular_fallback_matches_canonical_gauge() {
+    let (canonical_space, canonical_data) = generic_svd_truncation_input::<Complex64>(true);
+    let (padded_space, padded_data) =
+        padded_generic_svd_truncation_input(&canonical_space, &canonical_data);
+    let canonical = BoundDynamicTensorRef::try_new(&canonical_space, &canonical_data).unwrap();
+    let padded = BoundDynamicTensorRef::try_new(&padded_space, &padded_data).unwrap();
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+
+    let canonical_svd = svd_trunc_dyn_generic(&mut dense, &canonical, &Truncation::Full).unwrap();
+    crate::factorize::reset_compact_svd_copy_probe();
+    let mut reject = RejectSvdInto::default();
+    let padded_svd = svd_trunc_dyn_generic(&mut reject, &padded, &Truncation::Full).unwrap();
+
+    assert_eq!(reject.svd_into_calls, 0);
+    assert_compact_factors_reconstruct_input(
+        &padded,
+        padded_svd.u(),
+        Some(padded_svd.s()),
+        padded_svd.vh(),
+    );
+    assert_generic_complex_factor_close(padded_svd.u(), canonical_svd.u());
+    assert_generic_complex_factor_close(padded_svd.s(), canonical_svd.s());
+    assert_generic_complex_factor_close(padded_svd.vh(), canonical_svd.vh());
+    assert_real_spectra_close(
+        padded_svd.singular_values(),
+        canonical_svd.singular_values(),
+    );
+    let probe = crate::factorize::compact_svd_copy_probe();
+    assert!(probe.input_pack_calls > 0);
+    assert!(probe.output_scatter_calls > 0);
+}
+
+#[test]
+fn generic_compact_svd_second_dense_failure_preserves_source() {
+    let (source_space, source_data) = generic_svd_truncation_input::<f64>(false);
+    let (space, data) = padded_generic_svd_truncation_input(&source_space, &source_data);
+    let input = BoundDynamicTensorRef::try_new(&space, &data).unwrap();
+    let before = input.data().to_vec();
+    let mut dense = FailSecondSvd::default();
+
+    crate::factorize::reset_compact_svd_copy_probe();
+    match svd_trunc_dyn_generic(&mut dense, &input, &Truncation::Full) {
+        Err(OperationError::Dense(DenseError::Backend { op: "svd_into", .. })) => {}
+        Err(error) => panic!("unexpected Generic SVD failure: {error}"),
+        Ok(_) => panic!("second compact SVD must fail"),
+    }
+    assert_eq!(dense.calls, 2);
+    assert_eq!(input.data(), before);
+    let probe = crate::factorize::compact_svd_copy_probe();
+    assert!(probe.input_pack_calls > 0);
+    assert!(probe.output_scatter_calls > 0);
+}
+
+#[test]
+fn generic_compact_svd_empty_input_skips_dense_execution() {
+    let x = SectorId::new(1);
+    let empty_leg = SectorLeg::new([(x, 0)], false);
+    let space = BoundDynamicFusionMapSpace::from_final_homspace_generic(
+        Arc::new(FactorGenericRule),
+        FusionTreeHomSpace::new(
+            FusionProductSpace::new([empty_leg.clone()]),
+            FusionProductSpace::new([empty_leg]),
+        ),
+    )
+    .unwrap();
+    let data: [f64; 0] = [];
+    let input = BoundDynamicTensorRef::try_new(&space, &data).unwrap();
+    let mut reject = RejectExecutorCalls;
+
+    let result = svd_trunc_dyn_generic(&mut reject, &input, &Truncation::Full).unwrap();
+
+    assert!(result.u().data().is_empty());
+    assert!(result.s().data().is_empty());
+    assert!(result.vh().data().is_empty());
+    assert!(result.singular_values().is_empty());
+    assert_eq!(result.error(), 0.0);
+}
+
+#[test]
+fn generic_svd_truncation_keeps_cutoff_spectrum_and_diagonal_s() {
+    let (source_space, source_data) = generic_svd_truncation_input::<Complex64>(true);
+    let (space, data) = padded_generic_svd_truncation_input(&source_space, &source_data);
+    let input = BoundDynamicTensorRef::try_new(&space, &data).unwrap();
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+
+    let full = svd_trunc_dyn_generic(&mut dense, &input, &Truncation::Full).unwrap();
+    assert_compact_factors_reconstruct_input(&input, full.u(), Some(full.s()), full.vh());
+
+    crate::factorize::reset_compact_svd_copy_probe();
+    let cutoff = svd_trunc_dyn_generic(
+        &mut dense,
+        &input,
+        &Truncation::absolute_cutoff(2.5).unwrap(),
+    )
+    .unwrap();
+    let expected = [
+        SectorSpectrum {
+            sector: SectorId::new(0),
+            values: vec![4.0],
+        },
+        SectorSpectrum {
+            sector: SectorId::new(1),
+            values: vec![3.0],
+        },
+    ];
+    assert_real_spectra_close(cutoff.singular_values(), &expected);
+    assert!((cutoff.error() - (1.0 + 4.0 * (1.0 + 2.0_f64.sqrt())).sqrt()).abs() < 1.0e-10);
+
+    let mut s_blocks = 0;
+    for block_index in 0..cutoff.s().space().space().structure().block_count() {
+        let block = cutoff
+            .s()
+            .space()
+            .space()
+            .structure()
+            .block(block_index)
+            .unwrap();
+        let BlockKey::FusionTree(key) = block.key() else {
+            panic!("truncated diagonal S must use fusion-tree blocks")
+        };
+        let sector = key.codomain_tree().coupled();
+        let spectrum = cutoff
+            .singular_values()
+            .iter()
+            .find(|entry| entry.sector == sector)
+            .unwrap();
+        assert_eq!(block.shape(), [1, 1]);
+        assert!(
+            (cutoff.s().data()[block.offset()].widen_complex().re - spectrum.values[0]).abs()
+                < 1.0e-10
+        );
+        assert!(cutoff.s().data()[block.offset()].widen_complex().im.abs() < 1.0e-10);
+        s_blocks += 1;
+    }
+    assert_eq!(s_blocks, 2);
+
+    let mut residual_squared = 0.0;
+    for spectrum in cutoff.singular_values() {
+        let sector = spectrum.sector;
+        let u_block = (0..cutoff.u().space().space().structure().block_count())
+            .map(|index| cutoff.u().space().space().structure().block(index).unwrap())
+            .find(|block| {
+                matches!(
+                    block.key(),
+                    BlockKey::FusionTree(key) if key.codomain_tree().coupled() == sector
+                )
+            })
+            .unwrap();
+        let vh_block = (0..cutoff.vh().space().space().structure().block_count())
+            .map(|index| {
+                cutoff
+                    .vh()
+                    .space()
+                    .space()
+                    .structure()
+                    .block(index)
+                    .unwrap()
+            })
+            .find(|block| {
+                matches!(
+                    block.key(),
+                    BlockKey::FusionTree(key) if key.domain_tree().coupled() == sector
+                )
+            })
+            .unwrap();
+        let (rows, cols, matrix) = checked_svd_matrix(sector, true);
+        for col in 0..cols {
+            for row in 0..rows {
+                let u = cutoff.u().data()[u_block.offset() + row * u_block.strides()[0]];
+                let vh = cutoff.vh().data()[vh_block.offset() + col * vh_block.strides()[1]];
+                let reconstructed = u
+                    * cutoff.s().data()[(0..cutoff.s().space().space().structure().block_count())
+                        .map(|index| cutoff.s().space().space().structure().block(index).unwrap())
+                        .find(|block| {
+                            matches!(
+                                block.key(),
+                                BlockKey::FusionTree(key) if key.codomain_tree().coupled() == sector
+                            )
+                        })
+                        .unwrap()
+                        .offset()]
+                    * vh;
+                let weight = if sector == SectorId::new(1) {
+                    1.0 + 2.0_f64.sqrt()
+                } else {
+                    1.0
+                };
+                residual_squared += weight * (reconstructed - matrix[row + rows * col]).norm_sqr();
+            }
+        }
+    }
+    assert!((residual_squared.sqrt() - cutoff.error()).abs() < 1.0e-10);
+    let probe = crate::factorize::compact_svd_copy_probe();
+    assert!(probe.input_pack_calls > 0);
+    assert!(probe.output_scatter_calls > 0);
 }
 
 #[test]
@@ -2671,6 +2964,115 @@ fn checked_svd_matrix(sector: SectorId, complex: bool) -> (usize, usize, Vec<Com
             )
         }
         id => panic!("unexpected checked-SVD fixture sector {id}"),
+    }
+}
+
+fn generic_svd_truncation_input<D>(
+    complex: bool,
+) -> (BoundDynamicFusionMapSpace<FactorGenericRule>, Vec<D>)
+where
+    D: FactorScalar,
+{
+    let vacuum = SectorId::new(0);
+    let x = SectorId::new(1);
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([SectorLeg::new([(vacuum, 2), (x, 3)], false)]),
+        FusionProductSpace::new([SectorLeg::new([(vacuum, 2), (x, 2)], false)]),
+    );
+    let space = BoundDynamicFusionMapSpace::from_final_homspace_generic(
+        Arc::new(FactorGenericRule),
+        homspace,
+    )
+    .unwrap();
+    let mut data = vec![D::zero(); space.space().required_len().unwrap()];
+    for index in 0..space.space().structure().block_count() {
+        let block = space.space().structure().block(index).unwrap();
+        let BlockKey::FusionTree(key) = block.key() else {
+            panic!("Generic SVD fixture must use fusion-tree blocks")
+        };
+        let (rows, cols, matrix) = checked_svd_matrix(key.codomain_tree().coupled(), complex);
+        assert_eq!(block.shape(), [rows, cols]);
+        for col in 0..cols {
+            for row in 0..rows {
+                let source_index = row + rows * col;
+                let destination =
+                    block.offset() + row * block.strides()[0] + col * block.strides()[1];
+                data[destination] = D::from_complex64(matrix[source_index]);
+            }
+        }
+    }
+    (space, data)
+}
+
+fn padded_generic_svd_truncation_input<D>(
+    source: &BoundDynamicFusionMapSpace<FactorGenericRule>,
+    source_data: &[D],
+) -> (BoundDynamicFusionMapSpace<FactorGenericRule>, Vec<D>)
+where
+    D: FactorScalar,
+{
+    let source_structure = source.space().structure();
+    let mut offset = 1usize;
+    let mut blocks = Vec::with_capacity(source_structure.block_count());
+    for index in 0..source_structure.block_count() {
+        let block = source_structure.block(index).unwrap();
+        blocks.push(
+            BlockSpec::column_major_with_key(block.key().clone(), block.shape().to_vec(), offset)
+                .unwrap(),
+        );
+        offset += block.shape().iter().product::<usize>() + 1;
+    }
+    let structure = BlockStructure::from_blocks_with_rank(source.space().rank(), blocks).unwrap();
+    let typed_space = FusionTensorMapSpace::new_unbound(
+        TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+        source.space().homspace().clone(),
+        structure,
+    )
+    .unwrap()
+    .try_bind_rule(source.provider())
+    .unwrap();
+    let tensor = TensorMap::<D, 1, 1>::from_block_fn_with_fusion_space(
+        typed_space,
+        D::zero(),
+        |key, indices| {
+            let block = source_structure
+                .block(
+                    source_structure
+                        .find_block_index_by_key(key)
+                        .expect("copy preserves every key"),
+                )
+                .unwrap();
+            source_data[block.offset()
+                + indices
+                    .iter()
+                    .zip(block.strides())
+                    .map(|(&index, &stride)| index * stride)
+                    .sum::<usize>()]
+        },
+    )
+    .unwrap();
+    let dynamic = DynamicFusionMapSpace::from_typed(tensor.fusion_space().unwrap());
+    let bound =
+        BoundDynamicFusionMapSpace::bind_generic(dynamic, Arc::clone(source.provider_arc()))
+            .unwrap();
+    (bound, tensor.data().to_vec())
+}
+
+fn assert_generic_complex_factor_close(
+    actual: &BoundDynFactor<FactorGenericRule, Complex64>,
+    expected: &BoundDynFactor<FactorGenericRule, Complex64>,
+) {
+    assert_eq!(
+        actual.space().space().homspace(),
+        expected.space().space().homspace()
+    );
+    assert_eq!(
+        actual.space().space().structure(),
+        expected.space().space().structure()
+    );
+    assert_eq!(actual.data().len(), expected.data().len());
+    for (&actual, &expected) in actual.data().iter().zip(expected.data()) {
+        assert!((actual - expected).norm() < 1.0e-12);
     }
 }
 
