@@ -4243,6 +4243,64 @@ fn checked_generic_eigh_reconstructs_complex_unequal_multi_tree_sectors() {
 }
 
 #[test]
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
+fn checked_generic_eigh_stably_keeps_raw_exact_signed_ties() {
+    let (source, mut hermitian, _) = generic_values_endomorphism_input();
+    let regions = source
+        .space()
+        .structure()
+        .coupled_sector_regions(2)
+        .unwrap()
+        .unwrap();
+    for region in regions.iter() {
+        let values = match region.rows() {
+            1 => &[Complex64::new(1.0, 0.0)][..],
+            2 => &[
+                Complex64::new(-2.0, 0.0),
+                Complex64::zero(),
+                Complex64::zero(),
+                Complex64::new(2.0, 0.0),
+            ],
+            rows => panic!("unexpected checked EIGH tie fixture size {rows}"),
+        };
+        hermitian[region.range()].copy_from_slice(values);
+    }
+    let (_, checked) = bind_checked_only(&source);
+    let input = BoundDynamicTensorRef::try_new(&checked, &hermitian).unwrap();
+    let mut dense = RecordingEigh::default();
+
+    let full = eigh_full_dyn_checked_generic(&mut dense, &input).unwrap();
+
+    let tied_sector = full
+        .eigenvalues()
+        .iter()
+        .find(|spectrum| spectrum.values.len() == 2)
+        .unwrap();
+    let raw_tied = dense
+        .raw_values
+        .iter()
+        .find(|values| values.len() == 2)
+        .unwrap()
+        .iter()
+        .copied()
+        .filter(|value| value.abs() == 2.0)
+        .collect::<Vec<_>>();
+    let published_tied = tied_sector
+        .values
+        .iter()
+        .copied()
+        .filter(|value| value.abs() == 2.0)
+        .collect::<Vec<_>>();
+    assert_eq!(raw_tied.len(), 2);
+    assert!(raw_tied.iter().any(|value| *value < 0.0));
+    assert!(raw_tied.iter().any(|value| *value > 0.0));
+    assert_eq!(published_tied, raw_tied);
+}
+
+#[test]
 fn checked_generic_eig_uses_the_existing_numerical_rank_boundary() {
     let epsilon = f64::EPSILON;
     assert!(validate_eigenvector_singular_values(&[1.0, 2.0 * epsilon], 2, epsilon).is_err());
