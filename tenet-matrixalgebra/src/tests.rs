@@ -4055,6 +4055,52 @@ fn checked_generic_eigh_stages_dense_work_before_checked_factor_admission() {
     clippy::arc_with_non_send_sync,
     reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
 )]
+fn checked_generic_eigh_late_dense_failure_publishes_no_factors() {
+    let x = SectorId::new(1);
+    let leg = SectorLeg::new([(x, 1)], false);
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg.clone(), leg.clone()]),
+        FusionProductSpace::new([leg.clone(), leg]),
+    );
+    let source = BoundDynamicFusionMapSpace::from_final_homspace_generic(
+        Arc::new(FactorGenericRule),
+        homspace,
+    )
+    .unwrap();
+    let data = vec![0.0; source.space().required_len().unwrap()];
+    let provider = Arc::new(LateGenericSpy {
+        rule: FactorGenericRule,
+        fail_at: usize::MAX,
+        calls: Cell::new(0),
+    });
+    let checked =
+        BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), provider).unwrap();
+    let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
+    let mut dense = FailAfterObservingEighInput {
+        outputs: Some(f64_eigh_outputs(1)),
+        ..Default::default()
+    };
+    crate::factorize::reset_one_sided_publication_probe();
+
+    let result = eigh_full_dyn_checked_generic(&mut dense, &input);
+
+    assert!(matches!(
+        result,
+        Err(CheckedGenericFactorPlanError::Operation(OperationError::Dense(_)))
+    ));
+    assert_eq!(dense.observed.len(), 2);
+    assert_eq!(input.data(), data);
+    assert_eq!(
+        crate::factorize::one_sided_publication_probe(),
+        crate::factorize::OneSidedPublicationProbe::default()
+    );
+}
+
+#[test]
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
 fn checked_generic_eigh_uses_owned_dense_output() {
     let x = SectorId::new(1);
     let leg = SectorLeg::new([(x, 1)], false);
