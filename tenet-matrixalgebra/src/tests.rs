@@ -4050,6 +4050,42 @@ fn checked_generic_eigh_stages_dense_work_before_checked_factor_admission() {
 }
 
 #[test]
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
+fn checked_generic_eigh_uses_owned_dense_output() {
+    let x = SectorId::new(1);
+    let leg = SectorLeg::new([(x, 1)], false);
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg.clone(), leg.clone()]),
+        FusionProductSpace::new([leg.clone(), leg]),
+    );
+    let source = BoundDynamicFusionMapSpace::from_final_homspace_generic(
+        Arc::new(FactorGenericRule),
+        homspace,
+    )
+    .unwrap();
+    let data = vec![0.0; source.space().required_len().unwrap()];
+    let provider = Arc::new(LateGenericSpy {
+        rule: FactorGenericRule,
+        fail_at: usize::MAX,
+        calls: Cell::new(0),
+    });
+    let checked =
+        BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
+            .unwrap();
+    let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
+    let mut dense = RejectEighInto::default();
+
+    let full = eigh_full_dyn_checked_generic(&mut dense, &input).unwrap();
+
+    assert_eq!(dense.eigh_calls, 2);
+    assert_eq!(dense.eigh_into_calls, 0);
+    assert!(Arc::ptr_eq(full.v().space().provider_arc(), &provider));
+}
+
+#[test]
 fn checked_generic_eig_uses_the_existing_numerical_rank_boundary() {
     let epsilon = f64::EPSILON;
     assert!(validate_eigenvector_singular_values(&[1.0, 2.0 * epsilon], 2, epsilon).is_err());
