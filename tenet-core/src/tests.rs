@@ -17402,6 +17402,7 @@ mod tests {
         assert!(regions.iter().all(|region| {
             !region.row_trees().is_empty()
                 && !region.col_trees().is_empty()
+                && region.has_aligned_diagonal()
                 && region
                     .row_trees()
                     .iter()
@@ -17479,6 +17480,7 @@ mod tests {
         assert_eq!(regions[0].rows(), 9);
         assert_eq!(regions[0].cols(), 5);
         assert_eq!(regions[0].range(), 0..45);
+        assert!(!regions[0].has_aligned_diagonal());
         assert_eq!(
             regions[0]
                 .row_trees()
@@ -17502,6 +17504,46 @@ mod tests {
                 (&col_x, 2, [1, 3].as_slice()),
             ]
         );
+    }
+
+    #[test]
+    fn coupled_sector_regions_require_source_ordered_tree_diagonals() {
+        // What: matching row/column extents alone do not prove that walking
+        // them preserves the source diagonal-block encounter order.
+        let tree = |label| {
+            FusionTreeKey::try_from_sector_ids([label], 7, [false], [], []).unwrap()
+        };
+        let trees = [tree(0), tree(1), tree(2)];
+        let block = |row: usize, col: usize| {
+            BlockSpec::with_key(
+                BlockKey::FusionTree(FusionTreePairKey::pair(
+                    trees[row].clone(),
+                    trees[col].clone(),
+                )),
+                vec![1, 1],
+                vec![1, 3],
+                row + 3 * col,
+            )
+            .unwrap()
+        };
+        let ordered = BlockStructure::from_blocks(
+            [(0, 0), (1, 0), (0, 1), (1, 1), (2, 0), (0, 2), (2, 1), (1, 2), (2, 2)]
+                .into_iter()
+                .map(|(row, col)| block(row, col))
+                .collect(),
+        )
+        .unwrap();
+        assert!(ordered.coupled_sector_regions(1).unwrap().unwrap()[0].has_aligned_diagonal());
+
+        let reordered = BlockStructure::from_blocks(
+            [(0, 0), (1, 0), (0, 1), (2, 0), (0, 2), (2, 2), (1, 1), (1, 2), (2, 1)]
+                .into_iter()
+                .map(|(row, col)| block(row, col))
+                .collect(),
+        )
+        .unwrap();
+        let regions = reordered.coupled_sector_regions(1).unwrap().unwrap();
+        assert!(!regions[0].has_aligned_diagonal());
     }
 
     #[test]
