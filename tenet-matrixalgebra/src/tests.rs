@@ -1035,6 +1035,25 @@ fn compact_qr_noncanonical_layout_uses_copy_fallback() {
 }
 
 #[test]
+fn compact_qr_lq_noncanonical_layout_does_not_call_qr_into() {
+    // The fallback still consumes `qr` outputs; its scatter is TeNeT-owned.
+    let rule = Z2FusionRule;
+    let tensor = tsvd_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
+    let bound = bound_tensor(Arc::new(rule), &tensor);
+    let adjoint_space = bound.space().adjoint_view().unwrap();
+    let input = BoundDynamicTensorRef::try_new(&adjoint_space, bound.data()).unwrap();
+    let mut dense = FailAfterObservingQrInput {
+        qr_succeeds: true,
+        ..Default::default()
+    };
+
+    qr_compact_dyn(&mut dense, &input).unwrap();
+    lq_compact_dyn(&mut dense, &input).unwrap();
+
+    assert!(!dense.observed.is_empty());
+}
+
+#[test]
 fn eigh_canonical_layout_skips_input_pack_and_vector_scatter() {
     // What: canonical EIGH reads source regions and writes final eigenvector regions directly.
     let rule = Z2FusionRule;
@@ -1419,6 +1438,31 @@ fn provider_neutral_generic_compact_factorizations_remain_covered() {
     assert!(Arc::ptr_eq(vh.space().provider_arc(), space.provider_arc()));
     qr_compact_dyn_generic(&mut dense, &input).unwrap();
     lq_compact_dyn_generic(&mut dense, &input).unwrap();
+}
+
+#[test]
+fn generic_compact_qr_lq_paths_do_not_call_qr_into() {
+    let (canonical_space, canonical_data) = generic_factorization_input();
+    let canonical = BoundDynamicTensorRef::try_new(&canonical_space, &canonical_data).unwrap();
+    let (fallback_space, fallback_data) =
+        expert_generic_factorization_input(&canonical_space, &canonical_data, true);
+    let fallback = BoundDynamicTensorRef::try_new(&fallback_space, &fallback_data).unwrap();
+
+    let mut direct_dense = FailAfterObservingQrInput {
+        qr_succeeds: true,
+        ..Default::default()
+    };
+    qr_compact_dyn_generic(&mut direct_dense, &canonical).unwrap();
+    lq_compact_dyn_generic(&mut direct_dense, &canonical).unwrap();
+    assert!(!direct_dense.observed.is_empty());
+
+    let mut fallback_dense = FailAfterObservingQrInput {
+        qr_succeeds: true,
+        ..Default::default()
+    };
+    qr_compact_dyn_generic(&mut fallback_dense, &fallback).unwrap();
+    lq_compact_dyn_generic(&mut fallback_dense, &fallback).unwrap();
+    assert!(!fallback_dense.observed.is_empty());
 }
 
 #[test]
