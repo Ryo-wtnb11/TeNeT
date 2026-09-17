@@ -203,18 +203,16 @@ use std::sync::{Arc, OnceLock};
 
 use num_complex::Complex64;
 use smallvec::SmallVec;
-#[cfg(feature = "cuda")]
-use tenet_core::CoupledTreeExtent;
 use tenet_core::{
     validate_unit_layout_correspondence_checked,
     validate_unit_layout_correspondence_generic_checked, BlockKey, BlockRef, BlockStructure,
     BlockView, CanonicalUnitFusionRule, CategoricalScalar, CheckedCanonicalUnitFusionRule,
     CheckedFusionAlgebra, CheckedGenericAdmissionMode, CheckedGenericStructureError,
-    CoupledSectorRegion, FusionAlgebraError, FusionProductSpace, FusionTreeHomSpace,
-    FusionTreePairKey, MultiplicityFreeAdmissionMode, MultiplicityFreeFusionSymbols,
-    MultiplicityFreeRigidSymbols, MultiplicityIndex, PhysicalFusionBasis,
-    PreparedTreePairOperation, ProductFusionRule, ProductSector, ProductSectorCodec, SectorId,
-    SectorLeg, TypedSectorAdmission, UnitLegInsertion,
+    CoupledSectorRegion, CoupledTreeExtent, FusionAlgebraError, FusionProductSpace,
+    FusionTreeHomSpace, FusionTreePairKey, MultiplicityFreeAdmissionMode,
+    MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols, MultiplicityIndex,
+    PhysicalFusionBasis, PreparedTreePairOperation, ProductFusionRule, ProductSector,
+    ProductSectorCodec, SectorId, SectorLeg, TypedSectorAdmission, UnitLegInsertion,
 };
 use tenet_core::{
     CheckedGenericFusion, CheckedGenericPivotal, CheckedGenericRigidSymbols, HostReadableStorage,
@@ -2220,6 +2218,36 @@ where
     W: FnMut(SectorId) -> Result<f64, E>,
     E: From<Error>,
 {
+    if let Ok(Some(regions)) = structure.coupled_sector_regions(nout) {
+        if regions
+            .iter()
+            .all(CoupledSectorRegion::has_aligned_diagonal)
+        {
+            let mut total = Complex64::new(0.0, 0.0);
+            for region in regions.iter() {
+                let weight = weight_of(region.coupled())?;
+                let step = region.rows() + 1;
+                for (tree_index, (row, col)) in region
+                    .row_trees()
+                    .iter()
+                    .zip(region.col_trees())
+                    .enumerate()
+                {
+                    let mut partial = D::from_real(0.0);
+                    let start = region.range().start + row.offset() + region.rows() * col.offset();
+                    let row_end = region
+                        .row_trees()
+                        .get(tree_index + 1)
+                        .map_or(region.rows(), CoupledTreeExtent::offset);
+                    for diagonal in 0..row_end - row.offset() {
+                        partial = partial + data[start + diagonal * step];
+                    }
+                    total += partial.widen_complex() * weight;
+                }
+            }
+            return Ok(total);
+        }
+    }
     let mut total = Complex64::new(0.0, 0.0);
     for index in 0..structure.block_count() {
         let block = structure.block(index).map_err(Error::from)?;
@@ -16926,8 +16954,9 @@ mod representation_gates {
     use super::*;
     use tenet_core::{product_sector, ProductFusionRuleExt};
     use tenet_core::{
-        BlockSpec, CU1FusionRule, CU1Irrep, FermionParityFusionRule, FusionTreeKey, SU2FusionRule,
-        SU2Irrep, U1FusionRule, U1Irrep, Z2FusionRule, Z2Irrep, ZNFusionRule,
+        BlockKey, BlockSpec, BlockStructure, CU1FusionRule, CU1Irrep, FermionParityFusionRule,
+        FusionTreeKey, FusionTreePairKey, SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep,
+        Z2FusionRule, Z2Irrep, ZNFusionRule,
     };
     use tenet_dense::{
         DefaultDenseExecutor, DenseBackend, DenseDotConfig, DenseError, DenseExecutor, DenseRead,
@@ -24011,6 +24040,57 @@ mod representation_gates {
         assert_eq!(twin.data(), before.as_slice());
         assert_ne!(scaled.data().as_ptr(), tensor.data().as_ptr());
         assert!(!Arc::ptr_eq(&owned(&scaled).data, &owned(&tensor).data));
+    }
+
+    #[test]
+    fn weighted_trace_keeps_misaligned_and_nonpacked_layouts_on_the_literal_walk() {
+        let tree = |dual| {
+            FusionTreeKey::try_from_sector_ids_for_rule(&Z2FusionRule, [0], 0, [dual], [], [])
+                .unwrap()
+        };
+        let (a, b) = (tree(false), tree(true));
+        let block = |row: &FusionTreeKey, col: &FusionTreeKey, offset| {
+            BlockSpec::with_key(
+                BlockKey::FusionTree(FusionTreePairKey::pair(row.clone(), col.clone())),
+                vec![1, 1],
+                vec![1, 2],
+                offset,
+            )
+            .unwrap()
+        };
+        // The packed matrix's logical row order is [a, b] while its columns
+        // are [b, a]; its two literal diagonal blocks occur b then a.
+        let misaligned = BlockStructure::from_blocks(vec![
+            block(&a, &b, 0),
+            block(&b, &b, 1),
+            block(&a, &a, 2),
+            block(&b, &a, 3),
+        ])
+        .unwrap();
+        assert!(!misaligned.coupled_sector_regions(1).unwrap().unwrap()[0].has_aligned_diagonal());
+        let mut weights = Vec::new();
+        let value = weighted_trace(&misaligned, 1, &[10.0, 20.0, 30.0, 40.0], |sector| {
+            weights.push(sector);
+            Ok::<_, Error>(2.0)
+        })
+        .unwrap();
+        assert_eq!(value, Complex64::new(100.0, 0.0));
+        assert_eq!(weights, vec![SectorId::new(0), SectorId::new(0)]);
+
+        let nonpacked = BlockStructure::from_blocks(vec![BlockSpec::with_key(
+            BlockKey::FusionTree(FusionTreePairKey::pair(a.clone(), a)),
+            vec![2, 2],
+            vec![2, 4],
+            0,
+        )
+        .unwrap()])
+        .unwrap();
+        assert_eq!(nonpacked.coupled_sector_regions(1).unwrap(), None);
+        let value = weighted_trace(&nonpacked, 1, &[3.0, 0.0, 0.0, 0.0, 0.0, 0.0, 5.0], |_| {
+            Ok::<_, Error>(2.0)
+        })
+        .unwrap();
+        assert_eq!(value, Complex64::new(16.0, 0.0));
     }
 
     #[test]

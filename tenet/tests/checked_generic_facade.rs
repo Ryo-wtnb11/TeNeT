@@ -6695,20 +6695,40 @@ fn checked_tr_matches_the_literal_weighted_sum_and_keeps_error_precedence() {
         expected += value * weight
     });
     assert!(expected.im.abs() > 1e-6);
-    assert!(lazy_close_c64(complex.tr().unwrap(), expected));
     let lazy = complex.adjoint().unwrap();
+    let sectors = (0..complex.block_count())
+        .map(|index| *complex.block_fusion_trees(index).unwrap().coupled())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    provider.coefficient_queries.store(0, Ordering::Relaxed);
+    assert!(lazy_close_c64(complex.tr().unwrap(), expected));
+    assert_eq!(
+        provider.coefficient_queries.swap(0, Ordering::Relaxed),
+        sectors
+    );
     assert!(lazy_close_c64(lazy.tr().unwrap(), expected.conj()));
+    assert_eq!(
+        provider.coefficient_queries.swap(0, Ordering::Relaxed),
+        sectors
+    );
 
     let real = complex.re();
     let mut expected_real = 0.0;
     common::literal_weighted_trace(&snapshot!(real), dim, |value, weight| {
         expected_real += value * weight
     });
+    let real_lazy = real.adjoint().unwrap();
+    provider.coefficient_queries.store(0, Ordering::Relaxed);
     assert!(lazy_close_f64(real.tr().unwrap(), expected_real));
-    assert!(lazy_close_f64(
-        real.adjoint().unwrap().tr().unwrap(),
-        expected_real
-    ));
+    assert_eq!(
+        provider.coefficient_queries.swap(0, Ordering::Relaxed),
+        sectors
+    );
+    assert!(lazy_close_f64(real_lazy.tr().unwrap(), expected_real));
+    assert_eq!(
+        provider.coefficient_queries.swap(0, Ordering::Relaxed),
+        sectors
+    );
     let mut unweighted = 0.0;
     common::literal_weighted_trace(
         &snapshot!(real),

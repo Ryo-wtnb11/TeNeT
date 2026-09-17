@@ -1086,6 +1086,7 @@ pub struct CoupledSectorRegion {
     range: core::ops::Range<usize>,
     row_trees: Vec<CoupledTreeExtent>,
     col_trees: Vec<CoupledTreeExtent>,
+    aligned_diagonal: bool,
 }
 
 impl CoupledSectorRegion {
@@ -1117,6 +1118,11 @@ impl CoupledSectorRegion {
     /// Domain trees with their column offsets and degeneracy shapes.
     pub fn col_trees(&self) -> &[CoupledTreeExtent] {
         &self.col_trees
+    }
+
+    #[doc(hidden)]
+    pub fn has_aligned_diagonal(&self) -> bool {
+        self.aligned_diagonal
     }
 }
 
@@ -2875,7 +2881,9 @@ fn compile_coupled_sector_regions(
                 return Ok(None);
             }
             let mut seen_pairs = vec![false; expected_blocks];
-            for (index, (row_index, col_index)) in (block_index..end).zip(tree_pairs) {
+            for (index, (row_index, col_index)) in
+                (block_index..end).zip(tree_pairs.iter().copied())
+            {
                 let block = structure.block(index)?;
                 let pair_index = col_index * row_trees.len() + row_index;
                 if std::mem::replace(&mut seen_pairs[pair_index], true) {
@@ -2906,6 +2914,11 @@ fn compile_coupled_sector_regions(
             if end_offset > structure.content.required_len {
                 return Ok(None);
             }
+            let aligned_diagonal = row_trees == col_trees
+                && tree_pairs
+                    .iter()
+                    .filter_map(|&(row, col)| (row == col).then_some(row))
+                    .eq(0..row_trees.len());
             regions.push(CoupledSectorRegion {
                 coupled,
                 rows,
@@ -2913,6 +2926,7 @@ fn compile_coupled_sector_regions(
                 range: next_offset..end_offset,
                 row_trees,
                 col_trees,
+                aligned_diagonal,
             });
             next_offset = end_offset;
             block_index = end;

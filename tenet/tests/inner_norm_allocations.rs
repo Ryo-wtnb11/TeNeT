@@ -116,6 +116,25 @@ fn warmed_non_abelian_inner_and_norm_do_not_allocate() {
 }
 
 #[test]
+fn warmed_non_abelian_trace_does_not_allocate() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let space = non_abelian_space();
+    let owned: TensorMap<Fz2U1Su2Rule, Complex64> =
+        TensorMap::rand_with_seed(&runtime, [&space, &space], [&space, &space], 282_403).unwrap();
+    let lazy = owned.adjoint().unwrap();
+
+    black_box(owned.tr().unwrap());
+    black_box(lazy.tr().unwrap());
+    for (row, (value, allocations)) in [
+        ("owned trace", measured(|| owned.tr().unwrap())),
+        ("lazy trace", measured(|| lazy.tr().unwrap())),
+    ] {
+        black_box(value);
+        assert_eq!(allocations, 0, "{row}");
+    }
+}
+
+#[test]
 fn warmed_lazy_adjoint_inner_does_not_allocate_in_mixed_or_double_orientation() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let space = non_abelian_space();
@@ -373,8 +392,8 @@ macro_rules! coupled_sector_count {
 }
 
 #[test]
-fn warmed_checked_generic_inner_and_norm_do_not_allocate() {
-    // What: checked Generic `inner` and `norm` take their `dim(c)` weights
+fn warmed_checked_generic_reductions_do_not_allocate() {
+    // What: checked Generic reductions take their `dim(c)` weights
     // through one fallible closure and never build a per-call weight map.
     // Before #1219 every warm call allocated once (a std `HashMap`) for owned
     // and lazy-adjoint inputs alike.
@@ -403,6 +422,8 @@ fn warmed_checked_generic_inner_and_norm_do_not_allocate() {
     black_box(lazy_lhs.inner(&lazy_rhs).unwrap());
     black_box(lazy_lhs.inner(&rhs).unwrap());
     black_box(lazy_lhs.norm().unwrap());
+    black_box(lhs.tr().unwrap());
+    black_box(lazy_lhs.tr().unwrap());
 
     for (row, (value, allocations)) in [
         ("owned inner", measured(|| lhs.inner(&rhs).unwrap())),
@@ -426,6 +447,8 @@ fn warmed_checked_generic_inner_and_norm_do_not_allocate() {
             "lazy norm",
             measured(|| Complex64::from(lazy_lhs.norm().unwrap())),
         ),
+        ("owned trace", measured(|| lhs.tr().unwrap())),
+        ("lazy trace", measured(|| lazy_lhs.tr().unwrap())),
     ] {
         black_box(value);
         assert_eq!(allocations, 0, "{row}");
