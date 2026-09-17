@@ -827,8 +827,7 @@ impl DenseExecutor for RecordingEigh {
 
     fn eigh(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
         let outputs = self.inner.eigh(input)?;
-        self.raw_values
-            .push(outputs[0].as_f64_slice()?.to_vec());
+        self.raw_values.push(outputs[0].as_f64_slice()?.to_vec());
         Ok(outputs)
     }
 
