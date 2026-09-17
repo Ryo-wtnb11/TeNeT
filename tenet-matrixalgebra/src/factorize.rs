@@ -1150,6 +1150,7 @@ thread_local! {
     static COMPACT_QR_COPY_PROBE: Cell<CompactQrCopyProbe> = Cell::default();
     static EIGH_COPY_PROBE: Cell<EighCopyProbe> = Cell::default();
     static EIGH_OWNED_VECTOR_POINTERS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+    static CHECKED_EIGH_PAIR_POINTERS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
     static COMPACT_LQ_COPY_PROBE: Cell<CompactLqCopyProbe> = Cell::default();
     static DIAGONAL_BOND_BUILD_PROBE: Cell<DiagonalBondBuildProbe> = Cell::default();
     static VALUES_MATRICIZATION_FALLBACKS: Cell<usize> = const { Cell::new(0) };
@@ -1377,6 +1378,26 @@ pub(crate) fn eigh_owned_vector_pointers() -> Vec<usize> {
 fn record_eigh_owned_vector_before_scatter<D>(vectors: &[D]) {
     EIGH_OWNED_VECTOR_POINTERS.with(|pointers| {
         pointers.borrow_mut().push(vectors.as_ptr() as usize);
+    });
+}
+
+#[cfg(test)]
+pub(crate) fn reset_checked_eigh_pair_pointers() {
+    CHECKED_EIGH_PAIR_POINTERS.with(|pointers| pointers.borrow_mut().clear());
+}
+
+#[cfg(test)]
+pub(crate) fn checked_eigh_pair_pointers() -> Vec<usize> {
+    CHECKED_EIGH_PAIR_POINTERS.with(|pointers| pointers.borrow().clone())
+}
+
+#[cfg(test)]
+fn record_checked_eigh_pair_pointers<D>(pairs: &[FactorPair<D>]) {
+    CHECKED_EIGH_PAIR_POINTERS.with(|pointers| {
+        *pointers.borrow_mut() = pairs
+            .iter()
+            .map(|pair| pair.left.as_ptr() as usize)
+            .collect();
     });
 }
 
@@ -11085,6 +11106,8 @@ where
         .iter()
         .map(|matrix| (matrix.sector, matrix.rows))
         .collect::<BTreeMap<_, _>>();
+    #[cfg(test)]
+    record_checked_eigh_pair_pointers(&pairs);
     let v = build_bound_factor_generic_checked(
         provider,
         space.homspace(),
