@@ -45,6 +45,14 @@ struct RejectSvdInto {
     output_ptrs: Vec<(usize, usize)>,
 }
 
+#[derive(Default)]
+struct RejectEighInto {
+    inner: tenet_dense::DefaultDenseExecutor,
+    eigh_calls: usize,
+    eigh_into_calls: usize,
+    vector_ptrs: Vec<usize>,
+}
+
 fn dense_tensor_pointer(tensor: &DenseTensor) -> usize {
     if let Ok(data) = tensor.as_f32_slice() {
         return data.as_ptr() as usize;
@@ -97,6 +105,7 @@ struct FailAfterObservingQrInput {
 #[derive(Default)]
 struct FailAfterObservingEighInput {
     observed: Vec<Vec<f64>>,
+    outputs: Option<Vec<DenseTensor>>,
 }
 
 #[derive(Default)]
@@ -358,6 +367,47 @@ impl DenseExecutor for RejectSvdInto {
     }
 }
 
+impl DenseExecutor for RejectEighInto {
+    fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        self.inner.svd(input)
+    }
+
+    fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        self.inner.qr(input)
+    }
+
+    fn eigh(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        self.eigh_calls += 1;
+        let outputs = self.inner.eigh(input)?;
+        self.vector_ptrs.push(dense_tensor_pointer(&outputs[1]));
+        Ok(outputs)
+    }
+
+    fn eigh_into(
+        &mut self,
+        _: DenseRead<'_>,
+        _: DenseWrite<'_>,
+        _: DenseWrite<'_>,
+    ) -> Result<(), DenseError> {
+        self.eigh_into_calls += 1;
+        Err(DenseError::Backend {
+            backend: DenseBackend::Tenferro,
+            op: "eigh_into",
+            message: "direct compact EIGH must not use eigh_into".to_string(),
+        })
+    }
+
+    fn dot_general_into(
+        &mut self,
+        output: DenseWrite<'_>,
+        lhs: DenseRead<'_>,
+        rhs: DenseRead<'_>,
+        config: &DenseDotConfig,
+    ) -> Result<(), DenseError> {
+        self.inner.dot_general_into(output, lhs, rhs, config)
+    }
+}
+
 impl DenseExecutor for SolveCallSpy {
     fn svd(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
         panic!("inverse must not execute an SVD")
@@ -451,6 +501,9 @@ impl DenseExecutor for FailAfterObservingSvdInput {
             panic!("test input must be f64")
         };
         self.observed.push(input.data().to_vec());
+        if let Some(outputs) = self.outputs.take() {
+            return Ok(outputs);
+        }
         Err(DenseError::Backend {
             backend: DenseBackend::Tenferro,
             op: "svd_into",
@@ -619,8 +672,19 @@ impl DenseExecutor for FailAfterObservingEighInput {
         panic!("test only exercises EIGH")
     }
 
-    fn eigh(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("canonical EIGH must use the destination API")
+    fn eigh(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        let DenseRead::F64(input) = input else {
+            panic!("test input must be f64")
+        };
+        self.observed.push(input.data().to_vec());
+        if let Some(outputs) = self.outputs.take() {
+            return Ok(outputs);
+        }
+        Err(DenseError::Backend {
+            backend: DenseBackend::Tenferro,
+            op: "eigh_into",
+            message: "injected failure".to_string(),
+        })
     }
 
     fn eigh_into(
@@ -669,7 +733,12 @@ impl DenseExecutor for EighCallSpy {
     }
 
     fn eigh(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("canonical EIGH must use the destination API")
+        self.calls += 1;
+        Err(DenseError::Backend {
+            backend: DenseBackend::Tenferro,
+            op: "eigh_into",
+            message: "injected failure".to_string(),
+        })
     }
 
     fn eigh_into(
@@ -755,7 +824,7 @@ impl DenseExecutor for EqualMagnitudeEigh {
     }
 
     fn eigh(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("canonical EIGH must use the destination API")
+        panic!("fallback EIGH must use the destination API")
     }
 
     fn eigh_into(
@@ -801,7 +870,7 @@ impl DenseExecutor for NanEigh {
     }
 
     fn eigh(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("canonical EIGH must use the destination API")
+        panic!("fallback EIGH must use the destination API")
     }
 
     fn eigh_into(
@@ -5099,22 +5168,44 @@ fn full_svd_adjoint_builds_only_the_final_factor_buffers() {
 }
 
 #[test]
-fn eigh_stably_orders_equal_magnitudes_and_reorders_vectors_in_place() {
-    // What: equal magnitudes retain backend order while larger-magnitude columns move together.
+fn eigh_fallback_stably_orders_equal_magnitudes() {
+    // What: the legacy fallback retains backend tie order while larger-magnitude columns move together.
     let tensor =
         one_sector_rectangular_matrix(vec![1.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 3.0], 3, 3);
+    let bound = bound_tensor(Arc::new(Z2FusionRule), &tensor);
+    let adjoint_space = bound.space().adjoint_view().unwrap();
+    let input = BoundDynamicTensorRef::try_new(&adjoint_space, bound.data()).unwrap();
     let mut dense = EqualMagnitudeEigh;
 
-    let eigh = eigh_full(
-        &mut dense,
-        &bound_tensor_ref!(Arc::new(Z2FusionRule), &tensor),
-    )
-    .unwrap();
+    let eigh = eigh_full_dyn(&mut dense, &input).unwrap();
 
-    assert_eq!(eigh.eigenvalues[0].values, vec![-2.0, 2.0, 1.0]);
+    assert_eq!(eigh.eigenvalues()[0].values, vec![-2.0, 2.0, 1.0]);
     assert_eq!(
-        eigh.v.data(),
+        eigh.v().data(),
         &[0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0]
+    );
+}
+
+#[test]
+fn eigh_direct_column_reorder_preserves_the_literal_three_cycle() {
+    // What: direct owned vectors reorder in place by destination columns [1, 2, 0].
+    let mut vectors = vec![
+        10.0, 11.0, 12.0, // column 0
+        20.0, 21.0, 22.0, // column 1
+        30.0, 31.0, 32.0, // column 2
+    ];
+    let mut visited = vec![false; 3];
+    let mut scratch = vec![0.0; 3];
+    crate::factorize::reorder_columns_in_place_for_test(
+        &mut vectors,
+        3,
+        &[1, 2, 0],
+        &mut visited,
+        &mut scratch,
+    );
+    assert_eq!(
+        vectors,
+        vec![20.0, 21.0, 22.0, 30.0, 31.0, 32.0, 10.0, 11.0, 12.0]
     );
 }
 
@@ -5123,13 +5214,12 @@ fn eigh_rejects_non_finite_backend_eigenvalues_before_sorting() {
     // What: backend non-finite spectra become a typed operation error, not a comparator panic.
     let tensor =
         one_sector_rectangular_matrix(vec![1.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 3.0], 3, 3);
+    let bound = bound_tensor(Arc::new(Z2FusionRule), &tensor);
+    let adjoint_space = bound.space().adjoint_view().unwrap();
+    let input = BoundDynamicTensorRef::try_new(&adjoint_space, bound.data()).unwrap();
     let mut dense = NanEigh;
 
-    let error = eigh_full(
-        &mut dense,
-        &bound_tensor_ref!(Arc::new(Z2FusionRule), &tensor),
-    )
-    .unwrap_err();
+    let error = eigh_full_dyn(&mut dense, &input).unwrap_err();
 
     assert_eq!(
         error,
@@ -5160,6 +5250,55 @@ fn eigh_vectors_retain_each_callers_exact_provider_arc() {
         second_eigh.v.space().provider_arc(),
         &second_provider
     ));
+}
+
+#[test]
+fn eigh_direct_outputs_keep_executor_vector_owner() {
+    // What: a one-region direct EIGH publishes the executor-returned V buffer.
+    fn check<D: crate::factorize::FactorScalar>(tensor: &TensorMap<D, 1, 1>) {
+        let mut dense = RejectEighInto::default();
+        let eigh = eigh_full(
+            &mut dense,
+            &bound_tensor_ref!(Arc::new(Z2FusionRule), tensor),
+        )
+        .unwrap();
+        assert_eq!(dense.eigh_calls, 1);
+        assert_eq!(dense.eigh_into_calls, 0);
+        assert_eq!(dense.vector_ptrs, vec![eigh.v.data().as_ptr() as usize]);
+    }
+
+    let tensor = one_sector_matrix(vec![2.0_f64, 0.0, 0.0, 3.0]);
+    let space = tensor.fusion_space().unwrap().as_ref().clone();
+    check(&tensor);
+    check(
+        &TensorMap::<f32, 1, 1>::from_vec_with_fusion_space(
+            tensor.data().iter().map(|&value| value as f32).collect(),
+            space.clone(),
+        )
+        .unwrap(),
+    );
+    check(
+        &TensorMap::<Complex32, 1, 1>::from_vec_with_fusion_space(
+            tensor
+                .data()
+                .iter()
+                .map(|&value| Complex32::new(value as f32, 0.0))
+                .collect(),
+            space.clone(),
+        )
+        .unwrap(),
+    );
+    check(
+        &TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
+            tensor
+                .data()
+                .iter()
+                .map(|&value| Complex64::new(value, 0.0))
+                .collect(),
+            space,
+        )
+        .unwrap(),
+    );
 }
 
 #[test]
@@ -5262,6 +5401,30 @@ fn c64_qr_outputs(rows: usize, cols: usize) -> Vec<DenseTensor> {
         .unwrap()
 }
 
+fn f64_eigh_outputs(order: usize) -> Vec<DenseTensor> {
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    let data = vec![1.0; order * order];
+    let shape = [order, order];
+    let strides = [1, order];
+    dense
+        .eigh(DenseRead::F64(
+            tenet_dense::DenseView::new(&data, &shape, &strides, 0).unwrap(),
+        ))
+        .unwrap()
+}
+
+fn c64_eigh_outputs(order: usize) -> Vec<DenseTensor> {
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    let data = vec![Complex64::new(1.0, 1.0); order * order];
+    let shape = [order, order];
+    let strides = [1, order];
+    dense
+        .eigh(DenseRead::C64(
+            tenet_dense::DenseView::new(&data, &shape, &strides, 0).unwrap(),
+        ))
+        .unwrap()
+}
+
 #[test]
 fn compact_owned_svd_preserves_svd_into_output_precedence() {
     let tensor = rectangular_svd_tensor(2, 2);
@@ -5355,6 +5518,55 @@ fn compact_owned_qr_preserves_qr_into_output_precedence() {
         ..Default::default()
     };
     let error = qr_compact(&mut dense, &input).unwrap_err();
+    assert!(matches!(error, OperationError::Dense(actual) if actual == expected));
+}
+
+#[test]
+fn compact_owned_eigh_preserves_eigh_into_output_precedence() {
+    let tensor = one_sector_matrix(vec![2.0, 0.0, 0.0, 3.0]);
+    let bound = bound_tensor(Arc::new(Z2FusionRule), &tensor);
+    let input = bound.as_ref();
+    let check = |outputs: Vec<DenseTensor>, expected: &str| {
+        let mut dense = FailAfterObservingEighInput {
+            outputs: Some(outputs),
+            ..Default::default()
+        };
+        let error = eigh_full(&mut dense, &input).unwrap_err();
+        assert!(format!("{error}").contains(expected), "{error:?}");
+    };
+
+    check(
+        vec![f64_eigh_outputs(2).remove(0)],
+        "dense EIGH must return exactly (values, vectors)",
+    );
+    check(
+        f64_eigh_outputs(1),
+        "output shape mismatch: source [1], destination [2]",
+    );
+    let mut outputs = f64_eigh_outputs(2);
+    outputs[1] = f64_eigh_outputs(1).remove(1);
+    check(
+        outputs,
+        "output shape mismatch: source [1, 1], destination [2, 2]",
+    );
+    let mut outputs = f64_eigh_outputs(2);
+    outputs[0] = c64_eigh_outputs(2).remove(1);
+    let expected = outputs[0].as_f64_slice().unwrap_err();
+    let mut dense = FailAfterObservingEighInput {
+        outputs: Some(outputs),
+        ..Default::default()
+    };
+    let error = eigh_full(&mut dense, &input).unwrap_err();
+    assert!(matches!(error, OperationError::Dense(actual) if actual == expected));
+
+    let mut outputs = f64_eigh_outputs(2);
+    outputs[1] = c64_eigh_outputs(2).remove(1);
+    let expected = outputs[1].as_f64_slice().unwrap_err();
+    let mut dense = FailAfterObservingEighInput {
+        outputs: Some(outputs),
+        ..Default::default()
+    };
+    let error = eigh_full(&mut dense, &input).unwrap_err();
     assert!(matches!(error, OperationError::Dense(actual) if actual == expected));
 }
 
@@ -8120,6 +8332,123 @@ fn eigh_c64_reconstructs_multi_sector_hermitian_input_and_fixes_gauge() {
             }
         }
     }
+}
+
+#[test]
+fn eigh_direct_regions_publish_vectors_by_factor_order_and_spectra_by_source_order() {
+    // What: reversed source spans leave spectra in source traversal while V is
+    // interpreted through the published factor's sector regions.
+    fn check<D: crate::factorize::FactorScalar>(tensor: &TensorMap<D, 1, 1>) {
+        let rule = Arc::new(Z2FusionRule);
+        let bound = bound_tensor(Arc::clone(&rule), tensor);
+        let plan = crate::factorize::compact_factor_plan_for_test(bound.space())
+            .unwrap()
+            .unwrap();
+        assert!(crate::factorize::compact_factor_plan_routes_for_test(&plan)
+            .iter()
+            .any(|route| {
+                let (source, left, _) = route.factor_regions_for_test();
+                left.is_some_and(|left| left != source)
+            }));
+
+        let mut dense = tenet_dense::DefaultDenseExecutor::new();
+        let eigh = eigh_full(&mut dense, &bound.as_ref()).unwrap();
+        let source_regions = tensor
+            .structure()
+            .coupled_sector_regions(1)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            eigh.eigenvalues
+                .iter()
+                .map(|entry| entry.sector)
+                .collect::<Vec<_>>(),
+            source_regions
+                .iter()
+                .map(|region| region.coupled())
+                .collect::<Vec<_>>()
+        );
+        let vector_regions = eigh
+            .v
+            .structure()
+            .coupled_sector_regions(1)
+            .unwrap()
+            .unwrap();
+        for source in source_regions.iter() {
+            let sector = source.coupled();
+            let vector = vector_regions
+                .iter()
+                .find(|region| region.coupled() == sector)
+                .unwrap();
+            let values = &eigh
+                .eigenvalues
+                .iter()
+                .find(|entry| entry.sector == sector)
+                .unwrap()
+                .values;
+            let n = source.rows();
+            for col in 0..n {
+                for row in 0..n {
+                    let reconstructed = (0..n)
+                        .map(|bond| {
+                            eigh.v.data()[vector.range().start + row + n * bond].widen_complex()
+                                * values[bond]
+                                * eigh.v.data()[vector.range().start + col + n * bond]
+                                    .widen_complex()
+                                    .conj()
+                        })
+                        .sum::<Complex64>();
+                    let expected =
+                        tensor.data()[source.range().start + row + n * col].widen_complex();
+                    assert!(
+                        (reconstructed - expected).norm() < 2e-5,
+                        "sector {sector:?}, entry ({row}, {col})"
+                    );
+                }
+            }
+        }
+    }
+
+    let rule = Z2FusionRule;
+    let source = mixed_rectangular_tensor((3, 3), (2, 2));
+    let mut data = source.data().to_vec();
+    for region in source
+        .structure()
+        .coupled_sector_regions(1)
+        .unwrap()
+        .unwrap()
+        .iter()
+    {
+        let n = region.rows();
+        for col in 0..n {
+            for row in 0..n {
+                data[region.range().start + row + n * col] = if row == col {
+                    (row + 2) as f64
+                } else {
+                    (row + col + 1) as f64 * 0.25
+                };
+            }
+        }
+    }
+    let real = reversed_complete_grid_copy(
+        &rule,
+        &TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
+            data,
+            source.fusion_space().unwrap().as_ref().clone(),
+        )
+        .unwrap(),
+    );
+    check(&real);
+    check(
+        &TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
+            real.data()
+                .iter()
+                .map(|&value| Complex64::new(value, 0.0))
+                .collect(),
+            real.fusion_space().unwrap().as_ref().clone(),
+        )
+        .unwrap(),
+    );
 }
 
 #[test]
@@ -12301,6 +12630,7 @@ impl DenseExecutor for MatrixFunctionCallSpy {
     }
 
     fn eigh(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        self.eigh_calls += 1;
         self.inner.eigh(input)
     }
 
