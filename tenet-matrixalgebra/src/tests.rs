@@ -63,7 +63,10 @@ struct FailAfterObservingSvdInput {
 
 #[derive(Default)]
 struct FailAfterObservingQrInput {
+    inner: tenet_dense::DefaultDenseExecutor,
     observed: Vec<Vec<f64>>,
+    qr_succeeds: bool,
+    outputs: Option<Vec<DenseTensor>>,
 }
 
 #[derive(Default)]
@@ -470,8 +473,23 @@ impl DenseExecutor for FailAfterObservingQrInput {
         panic!("test only exercises QR")
     }
 
-    fn qr(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("compact QR must use the destination API")
+    fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        if let Some(outputs) = self.outputs.take() {
+            return Ok(outputs);
+        }
+        let DenseRead::F64(input) = input else {
+            panic!("test input must be f64")
+        };
+        self.observed.push(input.data().to_vec());
+        if self.qr_succeeds {
+            self.inner.qr(DenseRead::F64(input))
+        } else {
+            Err(DenseError::Backend {
+                backend: DenseBackend::Tenferro,
+                op: "qr",
+                message: "injected failure".to_string(),
+            })
+        }
     }
 
     fn qr_into(
@@ -480,18 +498,7 @@ impl DenseExecutor for FailAfterObservingQrInput {
         q: DenseWrite<'_>,
         r: DenseWrite<'_>,
     ) -> Result<(), DenseError> {
-        let DenseRead::F64(input) = input else {
-            panic!("test input must be f64")
-        };
-        self.observed.push(input.data().to_vec());
-        let DenseWrite::F64(q) = q else {
-            panic!("test Q must be f64")
-        };
-        let DenseWrite::F64(r) = r else {
-            panic!("test R must be f64")
-        };
-        assert!(q.data().iter().all(|&value| value == 0.0));
-        assert!(r.data().iter().all(|&value| value == 0.0));
+        let _ = (input, q, r);
         Err(DenseError::Backend {
             backend: DenseBackend::Tenferro,
             op: "qr_into",
@@ -1004,10 +1011,9 @@ fn compact_qr_canonical_layout_skips_input_pack_and_factor_scatter() {
     crate::factorize::reset_compact_qr_copy_probe();
     qr_compact(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor)).unwrap();
 
-    assert_eq!(
-        crate::factorize::compact_qr_copy_probe(),
-        crate::factorize::CompactQrCopyProbe::default()
-    );
+    let probe = crate::factorize::compact_qr_copy_probe();
+    assert_eq!(probe.input_pack_bytes, 0);
+    assert_eq!(probe.output_scatter_bytes, 0);
 }
 
 #[test]
@@ -1026,6 +1032,25 @@ fn compact_qr_noncanonical_layout_uses_copy_fallback() {
 
     assert!(probe.input_pack_bytes > 0);
     assert!(probe.output_scatter_bytes > 0);
+}
+
+#[test]
+fn compact_qr_lq_noncanonical_layout_does_not_call_qr_into() {
+    // The fallback still consumes `qr` outputs; its scatter is TeNeT-owned.
+    let rule = Z2FusionRule;
+    let tensor = tsvd_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
+    let bound = bound_tensor(Arc::new(rule), &tensor);
+    let adjoint_space = bound.space().adjoint_view().unwrap();
+    let input = BoundDynamicTensorRef::try_new(&adjoint_space, bound.data()).unwrap();
+    let mut dense = FailAfterObservingQrInput {
+        qr_succeeds: true,
+        ..Default::default()
+    };
+
+    qr_compact_dyn(&mut dense, &input).unwrap();
+    lq_compact_dyn(&mut dense, &input).unwrap();
+
+    assert!(!dense.observed.is_empty());
 }
 
 #[test]
@@ -1060,7 +1085,7 @@ fn compact_lq_canonical_layout_uses_only_bounded_adjoint_copies() {
     assert_eq!(probe.input_pack_bytes, 0);
     assert_eq!(probe.output_scatter_calls, 0);
     assert_eq!(probe.output_scatter_bytes, 0);
-    assert_eq!(probe.scratch_buffer_count, 3);
+    assert_eq!(probe.scratch_buffer_count, 1);
     assert!(probe.scratch_capacity_bytes > 0);
     assert!(probe.adjoint_scratch_fill_calls > 0);
     assert_eq!(
@@ -1413,6 +1438,31 @@ fn provider_neutral_generic_compact_factorizations_remain_covered() {
     assert!(Arc::ptr_eq(vh.space().provider_arc(), space.provider_arc()));
     qr_compact_dyn_generic(&mut dense, &input).unwrap();
     lq_compact_dyn_generic(&mut dense, &input).unwrap();
+}
+
+#[test]
+fn generic_compact_qr_lq_paths_do_not_call_qr_into() {
+    let (canonical_space, canonical_data) = generic_factorization_input();
+    let canonical = BoundDynamicTensorRef::try_new(&canonical_space, &canonical_data).unwrap();
+    let (fallback_space, fallback_data) =
+        expert_generic_factorization_input(&canonical_space, &canonical_data, true);
+    let fallback = BoundDynamicTensorRef::try_new(&fallback_space, &fallback_data).unwrap();
+
+    let mut direct_dense = FailAfterObservingQrInput {
+        qr_succeeds: true,
+        ..Default::default()
+    };
+    qr_compact_dyn_generic(&mut direct_dense, &canonical).unwrap();
+    lq_compact_dyn_generic(&mut direct_dense, &canonical).unwrap();
+    assert!(!direct_dense.observed.is_empty());
+
+    let mut fallback_dense = FailAfterObservingQrInput {
+        qr_succeeds: true,
+        ..Default::default()
+    };
+    qr_compact_dyn_generic(&mut fallback_dense, &fallback).unwrap();
+    lq_compact_dyn_generic(&mut fallback_dense, &fallback).unwrap();
+    assert!(!fallback_dense.observed.is_empty());
 }
 
 #[test]
@@ -1934,8 +1984,14 @@ impl DenseExecutor for CompactInputSpy {
         self.inner.svd_into(input, u, s, vt)
     }
 
-    fn qr(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("compact QR/LQ must use the destination API")
+    fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        assert!(matches!(
+            self.operation,
+            crate::factorize::CheckedCompactOperation::Qr
+                | crate::factorize::CheckedCompactOperation::Lq
+        ));
+        self.observe(input);
+        self.inner.qr(input)
     }
 
     fn qr_into(
@@ -1944,13 +2000,8 @@ impl DenseExecutor for CompactInputSpy {
         q: DenseWrite<'_>,
         r: DenseWrite<'_>,
     ) -> Result<(), DenseError> {
-        assert!(matches!(
-            self.operation,
-            crate::factorize::CheckedCompactOperation::Qr
-                | crate::factorize::CheckedCompactOperation::Lq
-        ));
-        self.observe(input);
-        self.inner.qr_into(input, q, r)
+        let _ = (input, q, r);
+        panic!("compact QR/LQ must not use qr_into")
     }
 
     fn eigh(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
@@ -5021,6 +5072,78 @@ fn compact_qr_error_preserves_borrowed_input_and_publishes_no_factors() {
 }
 
 #[test]
+fn compact_qr_uses_owned_executor_outputs_not_qr_into() {
+    let rule = Z2FusionRule;
+    let tensor = tsvd_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
+    let mut dense = FailAfterObservingQrInput {
+        qr_succeeds: true,
+        ..Default::default()
+    };
+    let input = bound_tensor(Arc::new(rule), &tensor);
+
+    let (q, r) = qr_compact(&mut dense, &input.as_ref()).unwrap();
+
+    assert!(!dense.observed.is_empty());
+    assert!(!q.data().is_empty());
+    assert!(!r.data().is_empty());
+}
+
+fn f64_qr_outputs(rows: usize, cols: usize) -> Vec<DenseTensor> {
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    let data = vec![1.0; rows * cols];
+    dense
+        .qr(DenseRead::F64(
+            tenet_dense::DenseView::new(&data, &[rows, cols], &[1, rows], 0).unwrap(),
+        ))
+        .unwrap()
+}
+
+fn c64_qr_outputs(rows: usize, cols: usize) -> Vec<DenseTensor> {
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    let data = vec![Complex64::new(1.0, 1.0); rows * cols];
+    dense
+        .qr(DenseRead::C64(
+            tenet_dense::DenseView::new(&data, &[rows, cols], &[1, rows], 0).unwrap(),
+        ))
+        .unwrap()
+}
+
+#[test]
+fn compact_owned_qr_preserves_qr_into_output_precedence() {
+    let tensor = rectangular_svd_tensor(2, 2);
+    let bound = bound_tensor(Arc::new(Z2FusionRule), &tensor);
+    let input = bound.as_ref();
+    let check = |outputs: Vec<DenseTensor>, expected: &str| {
+        let mut dense = FailAfterObservingQrInput {
+            outputs: Some(outputs),
+            ..Default::default()
+        };
+        let error = qr_compact(&mut dense, &input).unwrap_err();
+        assert!(format!("{error}").contains(expected), "{error:?}");
+    };
+
+    check(vec![f64_qr_outputs(2, 2).remove(0)], "exactly (Q, R)");
+    check(
+        f64_qr_outputs(1, 1),
+        "output shape mismatch: source [1, 1], destination [2, 2]",
+    );
+    let mut outputs = f64_qr_outputs(2, 2);
+    outputs[1] = f64_qr_outputs(1, 1).remove(1);
+    check(
+        outputs,
+        "output shape mismatch: source [1, 1], destination [2, 2]",
+    );
+    let outputs = c64_qr_outputs(2, 2);
+    let expected = outputs[0].as_f64_slice().unwrap_err();
+    let mut dense = FailAfterObservingQrInput {
+        outputs: Some(outputs),
+        ..Default::default()
+    };
+    let error = qr_compact(&mut dense, &input).unwrap_err();
+    assert!(matches!(error, OperationError::Dense(actual) if actual == expected));
+}
+
+#[test]
 fn compact_qr_factors_retain_each_callers_exact_provider_arc() {
     // What: per-call QR factor construction preserves each caller's provider allocation.
     let tensor = rectangular_svd_tensor(7, 5);
@@ -5198,6 +5321,38 @@ fn compact_factor_routes_agree_between_sorted_and_unsorted_region_tables() {
             unsorted_right.map(|index| &shuffled_vh[index])
         );
     }
+}
+
+#[test]
+fn compact_qr_lq_direct_regions_follow_factor_order_for_reversed_sector_spans() {
+    let rule = Z2FusionRule;
+    let source = mixed_rectangular_tensor((3, 2), (2, 4));
+    let tensor = reversed_complete_grid_copy(&rule, &source);
+    let bound = bound_tensor(Arc::new(rule), &tensor);
+    assert!(bound
+        .space()
+        .space()
+        .structure()
+        .coupled_sector_regions(1)
+        .unwrap()
+        .is_some());
+    let plan = crate::factorize::compact_factor_plan_for_test(bound.space())
+        .unwrap()
+        .unwrap();
+    assert!(crate::factorize::compact_factor_plan_routes_for_test(&plan)
+        .iter()
+        .any(|route| {
+            let (source, left, right) = route.factor_regions_for_test();
+            left.is_some_and(|left| left != source) || right.is_some_and(|right| right != source)
+        }));
+
+    let input = bound.as_ref();
+    let input = input.dynamic();
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    let (q, r) = qr_compact_dyn(&mut dense, &input).unwrap();
+    assert_compact_factors_reconstruct_input(&input, &q, None, &r);
+    let (l, q) = lq_compact_dyn(&mut dense, &input).unwrap();
+    assert_compact_factors_reconstruct_input(&input, &l, None, &q);
 }
 
 #[test]
@@ -5478,10 +5633,9 @@ fn assert_rectangular_direct_qr(rows: usize, cols: usize) {
     let (q, r) = qr_compact(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor)).unwrap();
     assert_factor_layout_matches_legacy_shapes(q.space());
     assert_factor_layout_matches_legacy_shapes(r.space());
-    assert_eq!(
-        crate::factorize::compact_qr_copy_probe(),
-        crate::factorize::CompactQrCopyProbe::default()
-    );
+    let probe = crate::factorize::compact_qr_copy_probe();
+    assert_eq!(probe.input_pack_bytes, 0);
+    assert_eq!(probe.output_scatter_bytes, 0);
     let rank = rows.min(cols);
     if rank == 0 {
         assert!(q.space().space().homspace().domain().legs()[0]
@@ -5509,6 +5663,23 @@ fn compact_qr_direct_spans_reconstruct_tall_and_wide_matrices() {
 }
 
 #[test]
+fn compact_qr_direct_single_sector_keeps_executor_factor_owners() {
+    let tensor = rectangular_svd_tensor(3, 2);
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    crate::factorize::reset_compact_qr_copy_probe();
+    qr_compact(
+        &mut dense,
+        &bound_tensor_ref!(Arc::new(Z2FusionRule), &tensor),
+    )
+    .unwrap();
+    let probe = crate::factorize::compact_qr_copy_probe();
+    assert_eq!(probe.input_pack_bytes, 0);
+    assert_eq!(probe.output_scatter_bytes, 0);
+    assert_eq!(probe.owned_output_publications, 2);
+    assert_eq!(probe.owned_output_owner_reused, 2);
+}
+
+#[test]
 fn compact_qr_zero_only_input_normalizes_to_an_empty_factorization_result() {
     // What: a zero-only row or column produces empty Q/R spaces without
     // calling an invalid factor route.
@@ -5528,7 +5699,7 @@ fn assert_rectangular_direct_lq(rows: usize, cols: usize) {
     let probe = crate::factorize::compact_lq_copy_probe();
     assert_eq!(probe.input_pack_bytes, 0);
     assert_eq!(probe.output_scatter_bytes, 0);
-    assert_eq!(probe.scratch_buffer_count, 3);
+    assert_eq!(probe.scratch_buffer_count, 1);
     let rank = rows.min(cols);
     if rank == 0 {
         assert!(left.space().space().homspace().domain().legs()[0]
@@ -5794,10 +5965,9 @@ fn compact_qr_c64_reconstructs_mixed_tall_and_wide_sectors_without_copies() {
 
     let (q, r) = qr_compact(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor)).unwrap();
 
-    assert_eq!(
-        crate::factorize::compact_qr_copy_probe(),
-        crate::factorize::CompactQrCopyProbe::default()
-    );
+    let probe = crate::factorize::compact_qr_copy_probe();
+    assert_eq!(probe.input_pack_bytes, 0);
+    assert_eq!(probe.output_scatter_bytes, 0);
     let input_regions = tensor
         .structure()
         .coupled_sector_regions(1)
@@ -5858,7 +6028,7 @@ fn compact_lq_c64_reconstructs_mixed_tall_and_wide_sectors_with_bounded_scratch(
     let probe = crate::factorize::compact_lq_copy_probe();
     assert_eq!(probe.input_pack_bytes, 0);
     assert_eq!(probe.output_scatter_bytes, 0);
-    assert_eq!(probe.scratch_buffer_count, 3);
+    assert_eq!(probe.scratch_buffer_count, 1);
     assert!(probe.adjoint_scratch_fill_bytes > 0);
     assert!(probe.final_adjoint_copy_bytes > 0);
     let input_regions = tensor
@@ -6954,10 +7124,9 @@ fn compact_qr_reconstructs_u1_fermion_parity_and_product_rules() {
     ];
     crate::factorize::reset_compact_qr_copy_probe();
     assert_compact_qr_reconstructs_rule(&nested, &nested_sectors);
-    assert_eq!(
-        crate::factorize::compact_qr_copy_probe(),
-        crate::factorize::CompactQrCopyProbe::default()
-    );
+    let probe = crate::factorize::compact_qr_copy_probe();
+    assert_eq!(probe.input_pack_bytes, 0);
+    assert_eq!(probe.output_scatter_bytes, 0);
 }
 
 fn assert_compact_lq_reconstructs_rule<R>(rule: &R, sectors: &[SectorId])
@@ -7016,7 +7185,7 @@ fn compact_lq_reconstructs_u1_fermion_parity_and_product_rules() {
     let probe = crate::factorize::compact_lq_copy_probe();
     assert_eq!(probe.input_pack_bytes, 0);
     assert_eq!(probe.output_scatter_bytes, 0);
-    assert_eq!(probe.scratch_buffer_count, 3);
+    assert_eq!(probe.scratch_buffer_count, 1);
 }
 
 #[test]
