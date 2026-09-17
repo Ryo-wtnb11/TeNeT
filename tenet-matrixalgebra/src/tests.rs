@@ -11351,13 +11351,15 @@ fn pinv_satisfies_the_moore_penrose_identity() {
     )
     .unwrap();
     let len = space.required_len().unwrap();
-    let tensor = TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(
+    let canonical = TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(
         (0..len).map(|i| ((i * 3 + 2) % 11) as f64 - 5.0).collect(),
         space,
     )
     .unwrap();
+    let tensor = padded_copy(&rule, &canonical);
     let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
     let mut context = default_context();
+    crate::factorize::reset_compact_svd_copy_probe();
 
     let plus = pinv(
         &mut dense_executor,
@@ -11374,6 +11376,9 @@ fn pinv_satisfies_the_moore_penrose_identity() {
             "Moore-Penrose violated at raw position {index}: {lhs} != {rhs}"
         );
     }
+    let probe = crate::factorize::compact_svd_copy_probe();
+    assert!(probe.input_pack_calls > 0);
+    assert!(probe.output_scatter_calls > 0);
 }
 
 #[test]
