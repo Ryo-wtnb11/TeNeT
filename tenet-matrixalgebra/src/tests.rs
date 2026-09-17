@@ -7318,6 +7318,52 @@ fn compact_svd_adjoint_accepts_padded_parent_layout() {
 }
 
 #[test]
+fn compact_svd_adjoint_c64_padded_parent_reconstructs_literal_adjoint() {
+    let rule = Z2FusionRule;
+    let source = rectangular_svd_tensor(5, 3);
+    let complex = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
+        source
+            .data()
+            .iter()
+            .enumerate()
+            .map(|(index, &value)| Complex64::new(value, index as f64 * 0.125 - 0.5))
+            .collect(),
+        source.fusion_space().unwrap().as_ref().clone(),
+    )
+    .unwrap();
+    let parent = padded_copy(&rule, &complex);
+    let bound = bound_tensor(Arc::new(rule), &parent);
+    assert!(
+        crate::factorize::compact_factor_plan_for_test(bound.space())
+            .unwrap()
+            .is_none()
+    );
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    crate::factorize::reset_compact_svd_copy_probe();
+    let actual = svd_compact_adjoint_factors_dyn(&mut dense, &bound.as_ref().dynamic()).unwrap();
+    let singular = &actual.2[0].values;
+    let source = parent.structure().block(0).unwrap();
+    for col in 0..5 {
+        for row in 0..3 {
+            let reconstructed = (0..3)
+                .map(|bond| {
+                    actual.0.data()[row + 3 * bond]
+                        * singular[bond]
+                        * actual.1.data()[bond + 3 * col]
+                })
+                .sum::<Complex64>();
+            let expected = parent.data()
+                [source.offset() + col * source.strides()[0] + row * source.strides()[1]]
+                .conj();
+            assert!((reconstructed - expected).norm() < 1e-10);
+        }
+    }
+    let probe = crate::factorize::compact_svd_copy_probe();
+    assert!(probe.input_pack_calls > 0);
+    assert!(probe.output_scatter_calls > 0);
+}
+
+#[test]
 fn compact_svd_c64_reconstructs_mixed_tall_and_wide_sectors_without_copies() {
     use num_complex::Complex64;
 
