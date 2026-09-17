@@ -8458,8 +8458,10 @@ fn tsvd_truncdim_bounds_weighted_dimension_and_reports_error_su2() {
         SU2Irrep::from_twice_spin(0).sector_id(),
         SU2Irrep::from_twice_spin(1).sector_id(),
     ];
-    let tensor = tsvd_test_tensor(&rule, &sectors);
+    let canonical = tsvd_test_tensor(&rule, &sectors);
+    let tensor = padded_copy(&rule, &canonical);
     let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
+    crate::factorize::reset_compact_svd_copy_probe();
 
     let max_dim = 10usize;
     let svd = svd_trunc(
@@ -8481,12 +8483,15 @@ fn tsvd_truncdim_bounds_weighted_dimension_and_reports_error_su2() {
     );
     assert!(error > 0.0, "this cut must discard weight");
 
-    let reconstructed = reconstruct_from_svd(&rule, &tensor, &svd);
-    let distance = weighted_norm_squared_of_difference(&rule, &tensor, &reconstructed).sqrt();
+    let reconstructed = reconstruct_from_svd(&rule, &canonical, &svd);
+    let distance = weighted_norm_squared_of_difference(&rule, &canonical, &reconstructed).sqrt();
     assert!(
         (distance - error).abs() < 1e-8,
         "reconstruction distance {distance} != reported truncation error {error}"
     );
+    let probe = crate::factorize::compact_svd_copy_probe();
+    assert!(probe.input_pack_calls > 0);
+    assert!(probe.output_scatter_calls > 0);
 }
 
 #[test]
