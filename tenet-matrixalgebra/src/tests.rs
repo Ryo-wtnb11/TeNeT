@@ -4248,6 +4248,77 @@ fn checked_generic_eigh_reconstructs_complex_unequal_multi_tree_sectors() {
     clippy::arc_with_non_send_sync,
     reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
 )]
+fn checked_generic_eigh_reconstructs_padded_reordered_complex_input() {
+    let (source, hermitian, _) = generic_values_endomorphism_input();
+    let source_regions = source
+        .space()
+        .structure()
+        .coupled_sector_regions(2)
+        .unwrap()
+        .unwrap();
+    let (expert, data) = padded_reordered_generic_endomorphism_input(&source, &hermitian);
+    assert!(expert
+        .space()
+        .structure()
+        .coupled_sector_regions(2)
+        .unwrap()
+        .is_none());
+    let provider = Arc::new(LateGenericSpy {
+        rule: FactorGenericRule,
+        fail_at: usize::MAX,
+        calls: Cell::new(0),
+    });
+    let checked = BoundDynamicFusionMapSpace::bind_generic(expert.space().clone(), Arc::clone(&provider))
+        .unwrap();
+    let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
+    let before = input.data().to_vec();
+    let full =
+        eigh_full_dyn_checked_generic(&mut tenet_dense::DefaultDenseExecutor::new(), &input)
+            .unwrap();
+    let vector_regions = full
+        .v()
+        .space()
+        .space()
+        .structure()
+        .coupled_sector_regions(2)
+        .unwrap()
+        .unwrap();
+
+    for source_region in source_regions.iter() {
+        let vectors = vector_regions
+            .iter()
+            .find(|region| region.coupled() == source_region.coupled())
+            .unwrap();
+        let values = &full
+            .eigenvalues()
+            .iter()
+            .find(|spectrum| spectrum.sector == source_region.coupled())
+            .unwrap()
+            .values;
+        let n = source_region.rows();
+        for column in 0..n {
+            for row in 0..n {
+                let reconstructed = (0..n)
+                    .map(|bond| {
+                        full.v().data()[vectors.range().start + row + n * bond]
+                            * values[bond]
+                            * full.v().data()[vectors.range().start + column + n * bond].conj()
+                    })
+                    .sum::<Complex64>();
+                let expected = hermitian[source_region.range().start + row + n * column];
+                assert!((reconstructed - expected).norm() < 1.0e-10);
+            }
+        }
+    }
+    assert_eq!(input.data(), before);
+    assert!(Arc::ptr_eq(full.v().space().provider_arc(), &provider));
+}
+
+#[test]
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
 fn checked_generic_eigh_stably_keeps_raw_exact_signed_ties() {
     let (source, mut hermitian, _) = generic_values_endomorphism_input();
     let regions = source
