@@ -1149,6 +1149,7 @@ thread_local! {
     static COMPACT_SVD_COPY_PROBE: Cell<CompactSvdCopyProbe> = Cell::default();
     static COMPACT_QR_COPY_PROBE: Cell<CompactQrCopyProbe> = Cell::default();
     static EIGH_COPY_PROBE: Cell<EighCopyProbe> = Cell::default();
+    static EIGH_OWNED_VECTOR_POINTERS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
     static COMPACT_LQ_COPY_PROBE: Cell<CompactLqCopyProbe> = Cell::default();
     static DIAGONAL_BOND_BUILD_PROBE: Cell<DiagonalBondBuildProbe> = Cell::default();
     static VALUES_MATRICIZATION_FALLBACKS: Cell<usize> = const { Cell::new(0) };
@@ -1360,6 +1361,23 @@ pub(crate) fn reset_eigh_copy_probe() {
 #[cfg(test)]
 pub(crate) fn eigh_copy_probe() -> EighCopyProbe {
     EIGH_COPY_PROBE.with(Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_eigh_owned_vector_pointers() {
+    EIGH_OWNED_VECTOR_POINTERS.with(|pointers| pointers.borrow_mut().clear());
+}
+
+#[cfg(test)]
+pub(crate) fn eigh_owned_vector_pointers() -> Vec<usize> {
+    EIGH_OWNED_VECTOR_POINTERS.with(|pointers| pointers.borrow().clone())
+}
+
+#[cfg(test)]
+fn record_eigh_owned_vector_before_scatter<D>(vectors: &[D]) {
+    EIGH_OWNED_VECTOR_POINTERS.with(|pointers| {
+        pointers.borrow_mut().push(vectors.as_ptr() as usize);
+    });
 }
 
 #[cfg(test)]
@@ -3372,42 +3390,19 @@ where
         .map(|matrix| matrix.rows)
         .max()
         .unwrap_or(0);
-    let mut values_workspace = vec![D::Real::zero(); max_n];
-    let mut vectors_workspace = vec![D::zero(); max_n * max_n];
-    let mut sorted_vectors = vec![D::zero(); max_n * max_n];
+    let mut order = Vec::with_capacity(max_n);
+    let mut visited = vec![false; max_n];
+    let mut column_scratch = vec![D::zero(); max_n];
     let mut eigenvalues = Vec::with_capacity(matricizations.len());
     let index = PlacementIndex::new(&matricizations, &[FactorSide::Left]);
     let v_groups = SectorBlockGroups::new(v_space.space().structure(), FactorSide::Left)?;
     for matrix in &matricizations {
-        let shape = [matrix.rows, matrix.cols];
-        let strides = [1usize, matrix.rows];
-        let view =
-            DenseView::new(&matrix.data, &shape, &strides, 0).map_err(OperationError::Dense)?;
         let n = matrix.rows;
-        let values_shape = [n];
-        let values_strides = [1usize];
-        let vectors_shape = [n, n];
-        let vectors_strides = [1usize, max_n];
-        let values_view =
-            DenseViewMut::new(&mut values_workspace, &values_shape, &values_strides, 0)
-                .map_err(OperationError::Dense)?;
-        let vectors_view =
-            DenseViewMut::new(&mut vectors_workspace, &vectors_shape, &vectors_strides, 0)
-                .map_err(OperationError::Dense)?;
-        dense
-            .eigh_into(
-                D::dense_read(view),
-                D::Real::dense_write(values_view),
-                D::dense_write(vectors_view),
-            )
-            .map_err(OperationError::Dense)?;
-        let real_values: Vec<f64> = values_workspace[..n]
-            .iter()
-            .map(|value| (*value).into())
-            .collect();
+        let (real_values, mut vectors) = compact_eigh_owned(dense, &matrix.data, n)?;
         validate_real_eigenvalues(&real_values)?;
 
-        let mut order: Vec<usize> = (0..n).collect();
+        order.clear();
+        order.extend(0..n);
         // Reorder bond states descending by |eigenvalue| (stable on ties).
         order.sort_by(|&a, &b| {
             real_values[b]
@@ -3416,24 +3411,21 @@ where
                 .then(a.cmp(&b))
         });
         let sorted_values: Vec<f64> = order.iter().map(|&index| real_values[index]).collect();
-        for (position, &index) in order.iter().enumerate() {
-            let dst_start = position * n;
-            let src_start = index * max_n;
-            sorted_vectors[dst_start..dst_start + n]
-                .copy_from_slice(&vectors_workspace[src_start..src_start + n]);
-        }
-        eigenvector_gauge(&mut sorted_vectors, n, n, n);
+        reorder_columns_in_place(&mut vectors, n, &order, &mut visited, &mut column_scratch);
+        eigenvector_gauge(&mut vectors, n, n, n);
         eigenvalues.push(SectorSpectrum {
             sector: matrix.sector,
             values: sorted_values,
         });
+        #[cfg(test)]
+        record_eigh_owned_vector_before_scatter(&vectors);
         scatter_left_sector_blocks(
             v_space.space(),
             &mut v_data,
             matrix,
             &index,
             &v_groups,
-            &sorted_vectors,
+            &vectors,
             n,
         )?;
         #[cfg(test)]
@@ -10030,6 +10022,11 @@ fn validate_real_eigenvalues(values: &[f64]) -> Result<(), OperationError> {
     } else {
         Err(invalid_eigenvalues())
     }
+}
+
+#[cfg(test)]
+pub(crate) fn validate_real_eigenvalues_for_test(values: &[f64]) -> Result<(), OperationError> {
+    validate_real_eigenvalues(values)
 }
 
 fn validate_complex_eigenvalues(values: &[Complex64]) -> Result<(), OperationError> {
