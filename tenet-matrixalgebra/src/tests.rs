@@ -4239,6 +4239,57 @@ fn checked_generic_eigh_keeps_live_pair_owners_for_every_dtype() {
     assert_checked_generic_eigh_live_pair_owners::<Complex64>();
 }
 
+fn assert_checked_compact_svd_live_stage_owners<D: crate::factorize::FactorScalar>() {
+    let (_, space, data) = checked_svd_truncation_input::<D>(true);
+    let input = BoundDynamicTensorRef::try_new(&space, &data).unwrap();
+    let mut dense = RejectSvdInto::default();
+    crate::factorize::reset_checked_compact_svd_stage_probe();
+
+    svd_compact_dyn_checked_generic(&mut dense, &input).unwrap();
+    let stage = crate::factorize::checked_compact_svd_stage_probe();
+
+    assert_eq!(dense.svd_into_calls, 0);
+    assert_eq!(stage.view_calls, dense.svd_calls);
+    assert_eq!(stage.gauge_calls, dense.svd_calls);
+    assert!(!stage.factor_pointers.is_empty());
+    assert_eq!(dense.output_ptrs, stage.factor_pointers);
+    assert!(stage
+        .factor_pointers
+        .iter()
+        .all(|&(u, vt)| u != 0 && vt != 0 && u != vt));
+}
+
+#[test]
+fn checked_generic_compact_svd_keeps_live_stage_owners_for_every_dtype() {
+    assert_checked_compact_svd_live_stage_owners::<f64>();
+    assert_checked_compact_svd_live_stage_owners::<f32>();
+    assert_checked_compact_svd_live_stage_owners::<Complex32>();
+    assert_checked_compact_svd_live_stage_owners::<Complex64>();
+}
+
+#[test]
+fn checked_compact_svd_zero_rank_skips_view_backend_and_gauge() {
+    let mut dense = RejectSvdInto::default();
+    crate::factorize::reset_checked_compact_svd_stage_probe();
+
+    assert_eq!(
+        crate::factorize::compact_svd_numerical_stage_lengths_for_test(
+            &mut dense,
+            &[] as &[f64],
+            0,
+            3,
+        )
+        .unwrap(),
+        (0, 0, 0)
+    );
+    assert_eq!(dense.svd_calls, 0);
+    assert_eq!(dense.svd_into_calls, 0);
+    assert_eq!(
+        crate::factorize::checked_compact_svd_stage_probe(),
+        crate::factorize::CheckedCompactSvdStageProbe::default()
+    );
+}
+
 fn assert_complex_checked_eigh_reconstruction<R>(
     source_regions: &[tenet_core::CoupledSectorRegion],
     hermitian: &[Complex64],
