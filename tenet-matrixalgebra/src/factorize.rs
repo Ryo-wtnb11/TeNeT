@@ -1934,20 +1934,6 @@ where
         .map_err(OperationError::from_core_preserving_context)?;
     let mut vt_data = vec![D::zero(); vt_len];
 
-    let max_rows = matricizations
-        .iter()
-        .map(|matrix| matrix.rows)
-        .max()
-        .unwrap_or(0);
-    let max_cols = matricizations
-        .iter()
-        .map(|matrix| matrix.cols)
-        .max()
-        .unwrap_or(0);
-    let max_rank = ranks.iter().map(|rank| rank.kept).max().unwrap_or(0);
-    let mut u_workspace = vec![D::zero(); max_rows * max_rank];
-    let mut s_workspace = vec![D::Real::zero(); max_rank];
-    let mut vt_workspace = vec![D::zero(); max_rank * max_cols];
     let mut singular_values = Vec::with_capacity(matricizations.len());
 
     let index = PlacementIndex::new(&matricizations, &[FactorSide::Left, FactorSide::Right]);
@@ -1955,58 +1941,32 @@ where
     let vt_groups = SectorBlockGroups::new(vt_space.space().structure(), FactorSide::Right)?;
     for matrix in &matricizations {
         let rank = matrix.rows.min(matrix.cols);
-        let input_shape = [matrix.rows, matrix.cols];
-        let input_strides = [1usize, matrix.rows];
-        let input = DenseView::new(&matrix.data, &input_shape, &input_strides, 0)
-            .map_err(OperationError::Dense)?;
-        let u_shape = [matrix.rows, rank];
-        let u_strides = [1usize, max_rows];
-        let s_shape = [rank];
-        let s_strides = [1usize];
-        let vt_shape = [rank, matrix.cols];
-        let vt_strides = [1usize, max_rank];
-        let u_view = DenseViewMut::new(&mut u_workspace, &u_shape, &u_strides, 0)
-            .map_err(OperationError::Dense)?;
-        let s_view = DenseViewMut::new(&mut s_workspace, &s_shape, &s_strides, 0)
-            .map_err(OperationError::Dense)?;
-        let vt_view = DenseViewMut::new(&mut vt_workspace, &vt_shape, &vt_strides, 0)
-            .map_err(OperationError::Dense)?;
-        dense
-            .svd_into(
-                D::dense_read(input),
-                D::dense_write(u_view),
-                D::Real::dense_write(s_view),
-                D::dense_write(vt_view),
-            )
-            .map_err(OperationError::Dense)?;
+        let (mut u, values, mut vt) =
+            compact_svd_owned(dense, &matrix.data, matrix.rows, matrix.cols)?;
         match gauge {
             CompactSvdGauge::Left => svd_compact_gauge(
-                &mut u_workspace,
+                &mut u,
                 matrix.rows,
-                max_rows,
-                &mut vt_workspace,
+                matrix.rows,
+                &mut vt,
                 rank,
                 matrix.cols,
-                max_rank,
+                rank,
             ),
             CompactSvdGauge::AdjointLeft => svd_compact_adjoint_gauge(
-                &mut u_workspace,
+                &mut u,
                 matrix.rows,
-                max_rows,
-                &mut vt_workspace,
+                matrix.rows,
+                &mut vt,
                 rank,
                 matrix.cols,
-                max_rank,
+                rank,
             ),
         }
 
         singular_values.push(SectorSpectrum {
             sector: matrix.sector,
-            values: s_workspace[..rank]
-                .iter()
-                .copied()
-                .map(Into::into)
-                .collect(),
+            values,
         });
         scatter_left_sector_blocks(
             u_space.space(),
@@ -2014,8 +1974,8 @@ where
             matrix,
             &index,
             &u_groups,
-            &u_workspace,
-            max_rows,
+            &u,
+            matrix.rows,
         )?;
         #[cfg(test)]
         record_compact_svd_output_scatter::<D>(matrix.rows * rank);
@@ -2025,8 +1985,8 @@ where
             matrix,
             &index,
             &vt_groups,
-            &vt_workspace,
-            max_rank,
+            &vt,
+            rank,
         )?;
         #[cfg(test)]
         record_compact_svd_output_scatter::<D>(rank * matrix.cols);
