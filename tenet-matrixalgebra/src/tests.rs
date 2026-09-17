@@ -7417,6 +7417,48 @@ fn compact_svd_c64_reconstructs_mixed_tall_and_wide_sectors_without_copies() {
     }
 }
 
+#[test]
+fn compact_svd_adjoint_c64_padded_fallback_matches_canonical_gauge() {
+    let rule = Z2FusionRule;
+    let source = mixed_rectangular_c32_tensor();
+    let canonical = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
+        source
+            .data()
+            .iter()
+            .map(|value| Complex64::new(value.re as f64, value.im as f64))
+            .collect(),
+        source.fusion_space().unwrap().as_ref().clone(),
+    )
+    .unwrap();
+    let padded = padded_copy(&rule, &canonical);
+    let canonical_bound = bound_tensor(Arc::new(rule), &canonical);
+    let padded_bound = bound_tensor(Arc::new(rule), &padded);
+    assert!(
+        crate::factorize::compact_factor_plan_for_test(padded_bound.space())
+            .unwrap()
+            .is_none()
+    );
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    let expected = svd_compact_adjoint_factors_dyn(&mut dense, &canonical_bound.as_ref().dynamic())
+        .unwrap();
+    crate::factorize::reset_compact_svd_copy_probe();
+    let actual = svd_compact_adjoint_factors_dyn(&mut dense, &padded_bound.as_ref().dynamic())
+        .unwrap();
+
+    assert_eq!(actual.0.space().space().structure(), expected.0.space().space().structure());
+    assert_eq!(actual.1.space().space().structure(), expected.1.space().space().structure());
+    for (&actual, &expected) in actual.0.data().iter().zip(expected.0.data()) {
+        assert!((actual - expected).norm() < 1.0e-10);
+    }
+    for (&actual, &expected) in actual.1.data().iter().zip(expected.1.data()) {
+        assert!((actual - expected).norm() < 1.0e-10);
+    }
+    assert_real_spectra_close(&actual.2, &expected.2);
+    let probe = crate::factorize::compact_svd_copy_probe();
+    assert!(probe.input_pack_calls > 0);
+    assert!(probe.output_scatter_calls > 0);
+}
+
 fn mixed_rectangular_c32_tensor() -> TensorMap<Complex32, 1, 1> {
     let rule = Z2FusionRule;
     let even = SectorId::new(0);
