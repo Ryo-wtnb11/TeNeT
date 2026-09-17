@@ -1580,15 +1580,13 @@ fn direct_compact_svd_uses_owned_executor_outputs_only() {
     let fallback_space = bound.space().adjoint_view().unwrap();
     let fallback = BoundDynamicTensorRef::try_new(&fallback_space, bound.data()).unwrap();
     let mut legacy = RejectSvdInto::default();
-    assert!(matches!(
-        svd_compact_dyn(&mut legacy, &fallback),
-        Err(OperationError::Dense(DenseError::Backend {
-            op: "svd_into",
-            ..
-        }))
-    ));
-    assert_eq!(legacy.svd_calls, 0);
-    assert_eq!(legacy.svd_into_calls, 1);
+    crate::factorize::reset_compact_svd_copy_probe();
+    svd_compact_dyn(&mut legacy, &fallback).unwrap();
+    assert!(legacy.svd_calls > 0);
+    assert_eq!(legacy.svd_into_calls, 0);
+    let probe = crate::factorize::compact_svd_copy_probe();
+    assert!(probe.input_pack_calls > 0);
+    assert!(probe.output_scatter_calls > 0);
 }
 
 #[test]
