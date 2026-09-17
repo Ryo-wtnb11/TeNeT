@@ -1768,6 +1768,22 @@ fn generic_compact_svd_padded_complex_rectangular_fallback_matches_canonical_gau
 }
 
 #[test]
+fn generic_compact_svd_second_dense_failure_preserves_source() {
+    let (space, data) = generic_svd_truncation_input::<f64>(false);
+    let input = BoundDynamicTensorRef::try_new(&space, &data).unwrap();
+    let before = input.data().to_vec();
+    let mut dense = FailSecondSvd::default();
+
+    match svd_trunc_dyn_generic(&mut dense, &input, &Truncation::Full) {
+        Err(OperationError::Dense(DenseError::Backend { op: "svd_into", .. })) => {}
+        Err(error) => panic!("unexpected Generic SVD failure: {error}"),
+        Ok(_) => panic!("second compact SVD must fail"),
+    }
+    assert_eq!(dense.calls, 2);
+    assert_eq!(input.data(), before);
+}
+
+#[test]
 fn generic_pair_publication_keeps_reordered_tree_scatter_fallback() {
     let (canonical_space, canonical_data) = generic_factorization_input();
     let (reordered_space, reordered_data) =
