@@ -1613,7 +1613,10 @@ fn assert_generic_compact_svd_fallback_live_owners<D: crate::factorize::FactorSc
     let (canonical_space, canonical_data) = generic_factorization_input();
     let (padded_space, padded_data) =
         padded_generic_factorization_input(&canonical_space, &canonical_data);
-    let data = padded_data.into_iter().map(D::from_real).collect::<Vec<_>>();
+    let data = padded_data
+        .into_iter()
+        .map(D::from_real)
+        .collect::<Vec<_>>();
     let padded = BoundDynamicTensorRef::try_new(&padded_space, &data).unwrap();
     let mut dense = RejectSvdInto::default();
 
@@ -1700,7 +1703,8 @@ fn generic_compact_svd_interleaved_complex_fallback_preserves_source_order() {
     let (interleaved_space, interleaved_data) =
         interleaved_generic_endomorphism_input(&canonical_space, &canonical_data);
     let canonical = BoundDynamicTensorRef::try_new(&canonical_space, &canonical_data).unwrap();
-    let interleaved = BoundDynamicTensorRef::try_new(&interleaved_space, &interleaved_data).unwrap();
+    let interleaved =
+        BoundDynamicTensorRef::try_new(&interleaved_space, &interleaved_data).unwrap();
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
 
     let canonical_svd = svd_trunc_dyn_generic(&mut dense, &canonical, &Truncation::Full).unwrap();
@@ -1761,7 +1765,10 @@ fn generic_compact_svd_padded_complex_rectangular_fallback_matches_canonical_gau
     assert_generic_complex_factor_close(padded_svd.u(), canonical_svd.u());
     assert_generic_complex_factor_close(padded_svd.s(), canonical_svd.s());
     assert_generic_complex_factor_close(padded_svd.vh(), canonical_svd.vh());
-    assert_real_spectra_close(padded_svd.singular_values(), canonical_svd.singular_values());
+    assert_real_spectra_close(
+        padded_svd.singular_values(),
+        canonical_svd.singular_values(),
+    );
     let probe = crate::factorize::compact_svd_copy_probe();
     assert!(probe.input_pack_calls > 0);
     assert!(probe.output_scatter_calls > 0);
@@ -1845,7 +1852,13 @@ fn generic_svd_truncation_keeps_cutoff_spectrum_and_diagonal_s() {
 
     let mut s_blocks = 0;
     for block_index in 0..cutoff.s().space().space().structure().block_count() {
-        let block = cutoff.s().space().space().structure().block(block_index).unwrap();
+        let block = cutoff
+            .s()
+            .space()
+            .space()
+            .structure()
+            .block(block_index)
+            .unwrap();
         let BlockKey::FusionTree(key) = block.key() else {
             panic!("truncated diagonal S must use fusion-tree blocks")
         };
@@ -1856,7 +1869,10 @@ fn generic_svd_truncation_keeps_cutoff_spectrum_and_diagonal_s() {
             .find(|entry| entry.sector == sector)
             .unwrap();
         assert_eq!(block.shape(), [1, 1]);
-        assert!((cutoff.s().data()[block.offset()].widen_complex().re - spectrum.values[0]).abs() < 1.0e-10);
+        assert!(
+            (cutoff.s().data()[block.offset()].widen_complex().re - spectrum.values[0]).abs()
+                < 1.0e-10
+        );
         assert!(cutoff.s().data()[block.offset()].widen_complex().im.abs() < 1.0e-10);
         s_blocks += 1;
     }
@@ -1875,7 +1891,15 @@ fn generic_svd_truncation_keeps_cutoff_spectrum_and_diagonal_s() {
             })
             .unwrap();
         let vh_block = (0..cutoff.vh().space().space().structure().block_count())
-            .map(|index| cutoff.vh().space().space().structure().block(index).unwrap())
+            .map(|index| {
+                cutoff
+                    .vh()
+                    .space()
+                    .space()
+                    .structure()
+                    .block(index)
+                    .unwrap()
+            })
             .find(|block| {
                 matches!(
                     block.key(),
@@ -1886,12 +1910,10 @@ fn generic_svd_truncation_keeps_cutoff_spectrum_and_diagonal_s() {
         let (rows, cols, matrix) = checked_svd_matrix(sector, true);
         for col in 0..cols {
             for row in 0..rows {
-                let u = cutoff.u().data()
-                    [u_block.offset() + row * u_block.strides()[0]];
-                let vh = cutoff.vh().data()
-                    [vh_block.offset() + col * vh_block.strides()[1]];
-                let reconstructed = u * cutoff.s().data()
-                    [(0..cutoff.s().space().space().structure().block_count())
+                let u = cutoff.u().data()[u_block.offset() + row * u_block.strides()[0]];
+                let vh = cutoff.vh().data()[vh_block.offset() + col * vh_block.strides()[1]];
+                let reconstructed = u
+                    * cutoff.s().data()[(0..cutoff.s().space().space().structure().block_count())
                         .map(|index| cutoff.s().space().space().structure().block(index).unwrap())
                         .find(|block| {
                             matches!(
@@ -3040,7 +3062,10 @@ fn assert_generic_complex_factor_close(
     actual: &BoundDynFactor<FactorGenericRule, Complex64>,
     expected: &BoundDynFactor<FactorGenericRule, Complex64>,
 ) {
-    assert_eq!(actual.space().space().homspace(), expected.space().space().homspace());
+    assert_eq!(
+        actual.space().space().homspace(),
+        expected.space().space().homspace()
+    );
     assert_eq!(
         actual.space().space().structure(),
         expected.space().space().structure()
