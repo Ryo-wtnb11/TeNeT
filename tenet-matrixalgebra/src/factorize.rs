@@ -1747,42 +1747,24 @@ where
     D: FactorScalar,
 {
     let rank = rows.min(cols);
-    let mut u = vec![D::zero(); rows * rank];
-    let mut singular_values = vec![D::Real::zero(); rank];
-    let mut vt = vec![D::zero(); rank * cols];
-    if rank != 0 {
-        let input_shape = [rows, cols];
-        let input_strides = [1, rows];
-        let u_shape = [rows, rank];
-        let u_strides = [1, rows];
-        let s_shape = [rank];
-        let s_strides = [1];
-        let vt_shape = [rank, cols];
-        let vt_strides = [1, rank];
-        let input = DenseView::new(matrix, &input_shape, &input_strides, 0)
-            .map_err(OperationError::Dense)?;
-        let u_view =
-            DenseViewMut::new(&mut u, &u_shape, &u_strides, 0).map_err(OperationError::Dense)?;
-        let s_view = DenseViewMut::new(&mut singular_values, &s_shape, &s_strides, 0)
-            .map_err(OperationError::Dense)?;
-        let vt_view =
-            DenseViewMut::new(&mut vt, &vt_shape, &vt_strides, 0).map_err(OperationError::Dense)?;
-        dense
-            .svd_into(
-                D::dense_read(input),
-                D::dense_write(u_view),
-                D::Real::dense_write(s_view),
-                D::dense_write(vt_view),
-            )
-            .map_err(OperationError::Dense)?;
-        svd_compact_gauge(&mut u, rows, rows, &mut vt, rank, cols, rank);
+    if rank == 0 {
+        return Ok(CompactSvdNumericalStage {
+            rows,
+            cols,
+            rank,
+            u: Vec::new(),
+            singular_values: Vec::new(),
+            vt: Vec::new(),
+        });
     }
+    let (mut u, singular_values, mut vt) = compact_svd_owned(dense, matrix, rows, cols)?;
+    svd_compact_gauge(&mut u, rows, rows, &mut vt, rank, cols, rank);
     Ok(CompactSvdNumericalStage {
         rows,
         cols,
         rank,
         u,
-        singular_values: singular_values.into_iter().map(Into::into).collect(),
+        singular_values,
         vt,
     })
 }
