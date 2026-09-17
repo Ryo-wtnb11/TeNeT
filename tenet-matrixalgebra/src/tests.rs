@@ -4076,9 +4076,13 @@ fn checked_generic_eigh_late_dense_failure_publishes_no_factors() {
         fail_at: usize::MAX,
         calls: Cell::new(0),
     });
-    let checked =
-        BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), provider).unwrap();
+    let checked = BoundDynamicFusionMapSpace::bind_generic(
+        source.space().clone(),
+        Arc::clone(&provider),
+    )
+    .unwrap();
     let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
+    provider.calls.set(0);
     let mut dense = FailAfterObservingEighInput {
         outputs: Some(f64_eigh_outputs(1)),
         ..Default::default()
@@ -4092,6 +4096,7 @@ fn checked_generic_eigh_late_dense_failure_publishes_no_factors() {
         Err(CheckedGenericFactorPlanError::Operation(OperationError::Dense(_)))
     ));
     assert_eq!(dense.observed.len(), 2);
+    assert_eq!(provider.calls.get(), 0);
     assert_eq!(input.data(), data);
     assert_eq!(
         crate::factorize::one_sided_publication_probe(),
