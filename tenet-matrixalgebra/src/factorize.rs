@@ -3461,18 +3461,20 @@ where
     validate_hermitian_regions(input.data(), &plan.source_regions)?;
 
     let v_space = input.space().rebind_validated(&plan.left_layout)?;
-    let mut v_data = vec![D::zero(); plan.left_layout.required_len()?];
+    let v_len = plan.left_layout.required_len()?;
     let max_n = plan
         .source_regions
         .iter()
         .map(CoupledSectorRegion::rows)
         .max()
         .unwrap_or(0);
-    let mut values_workspace = vec![D::Real::zero(); max_n];
     let mut order = Vec::with_capacity(max_n);
     let mut visited = vec![false; max_n];
     let mut column_scratch = vec![D::zero(); max_n];
     let mut eigenvalues = Vec::with_capacity(plan.routes.len());
+    let mut regions = vec![None; plan.left_regions.len()];
+    let mut next_left_region = 0;
+    let mut output = None;
 
     for route in plan.routes.iter().copied() {
         let source = &plan.source_regions[route.source_region];
@@ -3484,45 +3486,8 @@ where
             });
             continue;
         }
-        let left = &plan.left_regions[route.left_region.expect("nonzero route has left region")];
-        let input_shape = [n, n];
-        let input_strides = [1usize, n];
-        let values_shape = [n];
-        let values_strides = [1usize];
-        let vectors_shape = [n, n];
-        let vectors_strides = [1usize, n];
-        let input_view = DenseView::new(
-            &input.data()[source.range()],
-            &input_shape,
-            &input_strides,
-            0,
-        )
-        .map_err(OperationError::Dense)?;
-        let values_view = DenseViewMut::new(
-            &mut values_workspace[..n],
-            &values_shape,
-            &values_strides,
-            0,
-        )
-        .map_err(OperationError::Dense)?;
-        let vectors_view = DenseViewMut::new(
-            &mut v_data[left.range()],
-            &vectors_shape,
-            &vectors_strides,
-            0,
-        )
-        .map_err(OperationError::Dense)?;
-        dense
-            .eigh_into(
-                D::dense_read(input_view),
-                D::Real::dense_write(values_view),
-                D::dense_write(vectors_view),
-            )
-            .map_err(OperationError::Dense)?;
-        let real_values: Vec<f64> = values_workspace[..n]
-            .iter()
-            .map(|value| (*value).into())
-            .collect();
+        let (real_values, mut vectors) =
+            compact_eigh_owned(dense, &input.data()[source.range()], n)?;
         validate_real_eigenvalues(&real_values)?;
 
         order.clear();
@@ -3534,14 +3499,20 @@ where
                 .then(a.cmp(&b))
         });
         let sorted_values = order.iter().map(|&index| real_values[index]).collect();
-        reorder_columns_in_place(
-            &mut v_data[left.range()],
-            n,
-            &order,
-            &mut visited,
-            &mut column_scratch,
-        );
-        eigenvector_gauge(&mut v_data[left.range()], n, n, n);
+        reorder_columns_in_place(&mut vectors, n, &order, &mut visited, &mut column_scratch);
+        eigenvector_gauge(&mut vectors, n, n, n);
+        regions[route.left_region.expect("nonzero route has left region")] = Some(vectors);
+        while next_left_region < plan.left_regions.len() {
+            if plan.left_regions[next_left_region].range().is_empty() {
+                next_left_region += 1;
+                continue;
+            }
+            let Some(region) = regions[next_left_region].take() else {
+                break;
+            };
+            append_owned_factor(&mut output, region, v_len);
+            next_left_region += 1;
+        }
         eigenvalues.push(SectorSpectrum {
             sector: route.sector,
             values: sorted_values,
@@ -3549,7 +3520,7 @@ where
     }
 
     Ok(EighFullDyn {
-        v: BoundDynFactor::from_bound(v_space, v_data, space.nout(), 1)?,
+        v: BoundDynFactor::from_bound(v_space, output.unwrap_or_default(), space.nout(), 1)?,
         eigenvalues,
     })
 }
@@ -4237,6 +4208,17 @@ fn reorder_columns_in_place<D: Copy>(
             destination = source;
         }
     }
+}
+
+#[cfg(test)]
+pub(crate) fn reorder_columns_in_place_for_test<D: Copy>(
+    vectors: &mut [D],
+    n: usize,
+    order: &[usize],
+    visited: &mut [bool],
+    column_scratch: &mut [D],
+) {
+    reorder_columns_in_place(vectors, n, order, visited, column_scratch);
 }
 
 fn phase_of_largest_abs_col<D: FactorScalar>(
@@ -5875,9 +5857,37 @@ where
         }));
     }
     let u = compact_factor_output_owned::<D>(outputs.remove(0), &[rows, rank], "svd_into")?;
-    let singular_values = compact_svd_spectrum_owned::<D>(outputs.remove(0), &[rank])?;
+    let singular_values = compact_real_spectrum_owned::<D>(outputs.remove(0), &[rank], "svd_into")?;
     let vt = compact_factor_output_owned::<D>(outputs.remove(0), &[rank, cols], "svd_into")?;
     Ok((u, singular_values, vt))
+}
+
+fn compact_eigh_owned<E, D>(
+    dense: &mut E,
+    input: &[D],
+    order: usize,
+) -> Result<(Vec<f64>, Vec<D>), OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    D: FactorScalar,
+{
+    let shape = [order, order];
+    let strides = [1usize, order];
+    let input = DenseView::new(input, &shape, &strides, 0).map_err(OperationError::Dense)?;
+    let mut outputs = dense
+        .eigh(D::dense_read(input))
+        .map_err(OperationError::Dense)?;
+    if outputs.len() != 2 {
+        return Err(OperationError::Dense(DenseError::Backend {
+            backend: DenseBackend::Tenferro,
+            op: "eigh_into",
+            message: "dense EIGH must return exactly (values, vectors)".to_string(),
+        }));
+    }
+    let values = compact_real_spectrum_owned::<D>(outputs.remove(0), &[order], "eigh_into")?;
+    let vectors =
+        compact_factor_output_owned::<D>(outputs.remove(0), &[order, order], "eigh_into")?;
+    Ok((values, vectors))
 }
 
 fn compact_factor_output_owned<D: FactorScalar>(
@@ -5916,18 +5926,19 @@ fn compact_factor_output_owned<D: FactorScalar>(
     D::dense_into_vec(tensor).map_err(OperationError::Dense)
 }
 
-fn compact_svd_spectrum_owned<D: FactorScalar>(
+fn compact_real_spectrum_owned<D: FactorScalar>(
     tensor: DenseTensor,
     expected_shape: &[usize],
+    op: &'static str,
 ) -> Result<Vec<f64>, OperationError> {
     let spectrum = D::real_spectrum(&tensor).map_err(OperationError::Dense)?;
     let shape = tensor.shape();
     if shape != expected_shape {
         return Err(OperationError::Dense(DenseError::Backend {
             backend: DenseBackend::Tenferro,
-            op: "svd_into",
+            op,
             message: format!(
-                "svd_into output shape mismatch: source {shape:?}, destination {expected_shape:?}",
+                "{op} output shape mismatch: source {shape:?}, destination {expected_shape:?}",
             ),
         }));
     }
@@ -5940,9 +5951,9 @@ fn compact_svd_spectrum_owned<D: FactorScalar>(
     if spectrum.len() != expected_len {
         return Err(OperationError::Dense(DenseError::Backend {
             backend: DenseBackend::Tenferro,
-            op: "svd_into",
+            op,
             message: format!(
-                "svd_into output storage length mismatch: source {}, expected {}",
+                "{op} output storage length mismatch: source {}, expected {}",
                 spectrum.len(),
                 expected_len
             ),
