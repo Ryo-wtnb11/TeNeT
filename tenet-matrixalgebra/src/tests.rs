@@ -1695,6 +1695,49 @@ fn provider_neutral_generic_factorizations_keep_the_strided_fallback() {
 }
 
 #[test]
+fn generic_compact_svd_interleaved_complex_fallback_preserves_source_order() {
+    let (canonical_space, canonical_data, _) = generic_values_endomorphism_input();
+    let (interleaved_space, interleaved_data) =
+        interleaved_generic_endomorphism_input(&canonical_space, &canonical_data);
+    let canonical = BoundDynamicTensorRef::try_new(&canonical_space, &canonical_data).unwrap();
+    let interleaved = BoundDynamicTensorRef::try_new(&interleaved_space, &interleaved_data).unwrap();
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+
+    let canonical_svd = svd_trunc_dyn_generic(&mut dense, &canonical, &Truncation::Full).unwrap();
+    crate::factorize::reset_compact_svd_copy_probe();
+    let fallback_svd = svd_trunc_dyn_generic(&mut dense, &interleaved, &Truncation::Full).unwrap();
+
+    assert_compact_factors_reconstruct_input(
+        &interleaved,
+        fallback_svd.u(),
+        Some(fallback_svd.s()),
+        fallback_svd.vh(),
+    );
+    assert_eq!(
+        fallback_svd
+            .singular_values()
+            .iter()
+            .map(|entry| entry.sector)
+            .collect::<Vec<_>>(),
+        [SectorId::new(1), SectorId::new(0)]
+    );
+    for actual in fallback_svd.singular_values() {
+        let expected = canonical_svd
+            .singular_values()
+            .iter()
+            .find(|entry| entry.sector == actual.sector)
+            .unwrap();
+        assert_eq!(actual.values.len(), expected.values.len());
+        for (&actual, &expected) in actual.values.iter().zip(&expected.values) {
+            assert!((actual - expected).abs() < 1.0e-10);
+        }
+    }
+    let probe = crate::factorize::compact_svd_copy_probe();
+    assert!(probe.input_pack_calls > 0);
+    assert!(probe.output_scatter_calls > 0);
+}
+
+#[test]
 fn generic_pair_publication_keeps_reordered_tree_scatter_fallback() {
     let (canonical_space, canonical_data) = generic_factorization_input();
     let (reordered_space, reordered_data) =
