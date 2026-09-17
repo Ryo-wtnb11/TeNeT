@@ -5126,13 +5126,10 @@ fn unequal_fallback_eigh_fixtures() -> (TensorMap<f64, 1, 1>, TensorMap<Complex6
     for region in source_regions.iter() {
         for diagonal in 0..region.rows() {
             data[region.range().start + diagonal + region.rows() * diagonal] = match diagonal {
-                0 | 1 => 0.0,
+                0 => -2.0,
+                1 => 2.0,
                 _ => 1.0,
             };
-        }
-        if region.rows() > 1 {
-            data[region.range().start + 1] = 1.2;
-            data[region.range().start + region.rows()] = 1.2;
         }
     }
     let real = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
@@ -5163,10 +5160,9 @@ fn unequal_fallback_eigh_fixtures() -> (TensorMap<f64, 1, 1>, TensorMap<Complex6
 
 #[test]
 fn eigh_fallback_stably_orders_equal_magnitudes() {
-    // What: the noncanonical fallback keeps a real executor's raw tie order
-    // while publicly reconstructing each unequal complex Hermitian sector.
+    // What: the noncanonical fallback preserves an exact real backend tie.
     let rule = Arc::new(Z2FusionRule);
-    let (_, source) = unequal_fallback_eigh_fixtures();
+    let (source, _) = unequal_fallback_eigh_fixtures();
     let source_regions = source
         .structure()
         .coupled_sector_regions(1)
@@ -5201,19 +5197,40 @@ fn eigh_fallback_stably_orders_equal_magnitudes() {
         let raw_tied = raw
             .iter()
             .copied()
-            .filter(|value| (value.abs() - 2.0).abs() < 1.0e-12)
+            .filter(|value| value.abs() == 2.0)
             .collect::<Vec<_>>();
         let published_tied = spectrum
             .values
             .iter()
             .copied()
-            .filter(|value| (value.abs() - 2.0).abs() < 1.0e-12)
+            .filter(|value| value.abs() == 2.0)
             .collect::<Vec<_>>();
         assert_eq!(raw_tied.len(), 2);
         assert!(raw_tied.iter().any(|value| *value < 0.0));
         assert!(raw_tied.iter().any(|value| *value > 0.0));
         assert_eq!(published_tied, raw_tied);
     }
+}
+
+#[test]
+fn eigh_fallback_reconstructs_complex_unequal_sectors() {
+    // What: the padded fallback scatters each complex owned V into the public
+    // factor structure without changing any sector's V D V^H reconstruction.
+    let rule = Arc::new(Z2FusionRule);
+    let (_, source) = unequal_fallback_eigh_fixtures();
+    let source_regions = source
+        .structure()
+        .coupled_sector_regions(1)
+        .unwrap()
+        .unwrap();
+    let padded = padded_copy(rule.as_ref(), &source);
+    assert!(padded
+        .structure()
+        .coupled_sector_regions(1)
+        .unwrap()
+        .is_none());
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    let eigh = eigh_full(&mut dense, &bound_tensor_ref!(Arc::clone(&rule), &padded)).unwrap();
     let vector_regions = eigh
         .v
         .structure()
