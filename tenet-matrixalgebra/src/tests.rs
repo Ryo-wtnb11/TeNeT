@@ -1815,13 +1815,15 @@ fn generic_compact_svd_empty_input_skips_dense_execution() {
 
 #[test]
 fn generic_svd_truncation_keeps_cutoff_spectrum_and_diagonal_s() {
-    let (space, data) = generic_svd_truncation_input::<Complex64>(true);
+    let (source_space, source_data) = generic_svd_truncation_input::<Complex64>(true);
+    let (space, data) = padded_generic_svd_truncation_input(&source_space, &source_data);
     let input = BoundDynamicTensorRef::try_new(&space, &data).unwrap();
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
 
     let full = svd_trunc_dyn_generic(&mut dense, &input, &Truncation::Full).unwrap();
     assert_compact_factors_reconstruct_input(&input, full.u(), Some(full.s()), full.vh());
 
+    crate::factorize::reset_compact_svd_copy_probe();
     let cutoff = svd_trunc_dyn_generic(
         &mut dense,
         &input,
@@ -1841,6 +1843,7 @@ fn generic_svd_truncation_keeps_cutoff_spectrum_and_diagonal_s() {
     assert_real_spectra_close(cutoff.singular_values(), &expected);
     assert!((cutoff.error() - (1.0 + 4.0 * (1.0 + 2.0_f64.sqrt())).sqrt()).abs() < 1.0e-10);
 
+    let mut s_blocks = 0;
     for block_index in 0..cutoff.s().space().space().structure().block_count() {
         let block = cutoff.s().space().space().structure().block(block_index).unwrap();
         let BlockKey::FusionTree(key) = block.key() else {
@@ -1855,7 +1858,63 @@ fn generic_svd_truncation_keeps_cutoff_spectrum_and_diagonal_s() {
         assert_eq!(block.shape(), [1, 1]);
         assert!((cutoff.s().data()[block.offset()].widen_complex().re - spectrum.values[0]).abs() < 1.0e-10);
         assert!(cutoff.s().data()[block.offset()].widen_complex().im.abs() < 1.0e-10);
+        s_blocks += 1;
     }
+    assert_eq!(s_blocks, 2);
+
+    let mut residual_squared = 0.0;
+    for spectrum in cutoff.singular_values() {
+        let sector = spectrum.sector;
+        let u_block = (0..cutoff.u().space().space().structure().block_count())
+            .map(|index| cutoff.u().space().space().structure().block(index).unwrap())
+            .find(|block| {
+                matches!(
+                    block.key(),
+                    BlockKey::FusionTree(key) if key.codomain_tree().coupled() == sector
+                )
+            })
+            .unwrap();
+        let vh_block = (0..cutoff.vh().space().space().structure().block_count())
+            .map(|index| cutoff.vh().space().space().structure().block(index).unwrap())
+            .find(|block| {
+                matches!(
+                    block.key(),
+                    BlockKey::FusionTree(key) if key.domain_tree().coupled() == sector
+                )
+            })
+            .unwrap();
+        let (rows, cols, matrix) = checked_svd_matrix(sector, true);
+        for col in 0..cols {
+            for row in 0..rows {
+                let u = cutoff.u().data()
+                    [u_block.offset() + row * u_block.strides()[0]];
+                let vh = cutoff.vh().data()
+                    [vh_block.offset() + col * vh_block.strides()[1]];
+                let reconstructed = u * cutoff.s().data()
+                    [(0..cutoff.s().space().space().structure().block_count())
+                        .map(|index| cutoff.s().space().space().structure().block(index).unwrap())
+                        .find(|block| {
+                            matches!(
+                                block.key(),
+                                BlockKey::FusionTree(key) if key.codomain_tree().coupled() == sector
+                            )
+                        })
+                        .unwrap()
+                        .offset()]
+                    * vh;
+                let weight = if sector == SectorId::new(1) {
+                    1.0 + 2.0_f64.sqrt()
+                } else {
+                    1.0
+                };
+                residual_squared += weight * (reconstructed - matrix[row + rows * col]).norm_sqr();
+            }
+        }
+    }
+    assert!((residual_squared.sqrt() - cutoff.error()).abs() < 1.0e-10);
+    let probe = crate::factorize::compact_svd_copy_probe();
+    assert!(probe.input_pack_calls > 0);
+    assert!(probe.output_scatter_calls > 0);
 }
 
 #[test]
