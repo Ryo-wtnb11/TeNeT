@@ -12597,9 +12597,11 @@ fn inv_solves_the_rank_zero_scalar_sector() {
 #[test]
 fn pinv_keeps_its_global_rcond_cutoff() {
     // What: public pinv still drops singular values relative to the global maximum.
-    let tensor = u1_block_endomorphism(&[(0, 1, vec![1.0_f64]), (1, 1, vec![1e-14])]);
+    let canonical = u1_block_endomorphism(&[(0, 1, vec![1.0_f64]), (1, 1, vec![1e-14])]);
+    let tensor = padded_copy(&U1FusionRule, &canonical);
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
     let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
+    crate::factorize::reset_compact_svd_copy_probe();
 
     let inverse = pinv(
         &mut dense,
@@ -12611,6 +12613,9 @@ fn pinv_keeps_its_global_rcond_cutoff() {
 
     assert!((scalar_u1_block(inverse.tensor(), 0) - 1.0).abs() < 1e-12);
     assert_eq!(scalar_u1_block(inverse.tensor(), 1), 0.0);
+    let probe = crate::factorize::compact_svd_copy_probe();
+    assert!(probe.input_pack_calls > 0);
+    assert!(probe.output_scatter_calls > 0);
 }
 
 #[test]
