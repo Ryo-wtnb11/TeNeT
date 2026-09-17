@@ -1592,6 +1592,24 @@ fn direct_compact_svd_uses_owned_executor_outputs_only() {
 }
 
 #[test]
+fn generic_compact_svd_padded_fallback_uses_owned_outputs_and_scatter() {
+    let (canonical_space, canonical_data) = generic_factorization_input();
+    let (padded_space, padded_data) =
+        padded_generic_factorization_input(&canonical_space, &canonical_data);
+    let padded = BoundDynamicTensorRef::try_new(&padded_space, &padded_data).unwrap();
+    let mut dense = RejectSvdInto::default();
+
+    crate::factorize::reset_compact_svd_copy_probe();
+    svd_compact_factors_dyn_generic(&mut dense, &padded).unwrap();
+
+    assert!(dense.svd_calls > 0);
+    assert_eq!(dense.svd_into_calls, 0);
+    let probe = crate::factorize::compact_svd_copy_probe();
+    assert!(probe.input_pack_calls > 0);
+    assert!(probe.output_scatter_calls > 0);
+}
+
+#[test]
 fn generic_compact_qr_lq_paths_do_not_call_qr_into() {
     let (canonical_space, canonical_data) = generic_factorization_input();
     let canonical = BoundDynamicTensorRef::try_new(&canonical_space, &canonical_data).unwrap();
