@@ -1814,6 +1814,51 @@ fn generic_compact_svd_empty_input_skips_dense_execution() {
 }
 
 #[test]
+fn generic_svd_truncation_keeps_cutoff_spectrum_and_diagonal_s() {
+    let (space, data) = generic_svd_truncation_input::<Complex64>(true);
+    let input = BoundDynamicTensorRef::try_new(&space, &data).unwrap();
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+
+    let full = svd_trunc_dyn_generic(&mut dense, &input, &Truncation::Full).unwrap();
+    assert_compact_factors_reconstruct_input(&input, full.u(), Some(full.s()), full.vh());
+
+    let cutoff = svd_trunc_dyn_generic(
+        &mut dense,
+        &input,
+        &Truncation::absolute_cutoff(2.5).unwrap(),
+    )
+    .unwrap();
+    let expected = [
+        SectorSpectrum {
+            sector: SectorId::new(0),
+            values: vec![4.0],
+        },
+        SectorSpectrum {
+            sector: SectorId::new(1),
+            values: vec![3.0],
+        },
+    ];
+    assert_real_spectra_close(cutoff.singular_values(), &expected);
+    assert!((cutoff.error() - (1.0 + 4.0 * (1.0 + 2.0_f64.sqrt())).sqrt()).abs() < 1.0e-10);
+
+    for block_index in 0..cutoff.s().space().space().structure().block_count() {
+        let block = cutoff.s().space().space().structure().block(block_index).unwrap();
+        let BlockKey::FusionTree(key) = block.key() else {
+            panic!("truncated diagonal S must use fusion-tree blocks")
+        };
+        let sector = key.codomain_tree().coupled();
+        let spectrum = cutoff
+            .singular_values()
+            .iter()
+            .find(|entry| entry.sector == sector)
+            .unwrap();
+        assert_eq!(block.shape(), [1, 1]);
+        assert!((cutoff.s().data()[block.offset()].widen_complex().re - spectrum.values[0]).abs() < 1.0e-10);
+        assert!(cutoff.s().data()[block.offset()].widen_complex().im.abs() < 1.0e-10);
+    }
+}
+
+#[test]
 fn generic_pair_publication_keeps_reordered_tree_scatter_fallback() {
     let (canonical_space, canonical_data) = generic_factorization_input();
     let (reordered_space, reordered_data) =
