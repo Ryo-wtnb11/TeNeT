@@ -3596,6 +3596,9 @@ fn checked_only_generic_values_preserve_empty_scalar_and_shape_boundaries() {
     assert!(eigh_vals_dyn_checked_generic(&mut reject, &empty)
         .unwrap()
         .is_empty());
+    let empty_eigh = eigh_full_dyn_checked_generic(&mut reject, &empty).unwrap();
+    assert!(empty_eigh.v().data().is_empty());
+    assert!(empty_eigh.eigenvalues().is_empty());
     assert!(eig_vals_dyn_checked_generic(&mut reject, &empty)
         .unwrap()
         .is_empty());
