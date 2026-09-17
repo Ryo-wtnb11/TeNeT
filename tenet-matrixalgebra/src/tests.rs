@@ -1589,6 +1589,45 @@ fn direct_compact_svd_uses_owned_executor_outputs_only() {
     assert!(probe.output_scatter_calls > 0);
 }
 
+fn assert_mf_compact_svd_fallback_live_owners<D: crate::factorize::FactorScalar>() {
+    let source = mixed_rectangular_c32_tensor();
+    let tensor = TensorMap::<D, 1, 1>::from_vec_with_fusion_space(
+        source
+            .data()
+            .iter()
+            .map(|value| D::from_complex64(Complex64::new(value.re as f64, value.im as f64)))
+            .collect(),
+        source.fusion_space().unwrap().as_ref().clone(),
+    )
+    .unwrap();
+    let bound = bound_tensor(Arc::new(Z2FusionRule), &tensor);
+    let fallback_space = bound.space().adjoint_view().unwrap();
+    let fallback = BoundDynamicTensorRef::try_new(&fallback_space, bound.data()).unwrap();
+    let mut dense = RejectSvdInto::default();
+
+    crate::factorize::reset_compact_svd_copy_probe();
+    crate::factorize::reset_mf_compact_svd_fallback_pointers();
+    svd_compact_dyn(&mut dense, &fallback).unwrap();
+    let stage = crate::factorize::mf_compact_svd_fallback_pointers();
+
+    assert_eq!(dense.svd_into_calls, 0);
+    assert_eq!(dense.svd_calls, 2);
+    assert_eq!(dense.output_ptrs, stage);
+    assert_eq!(stage.len(), 2);
+    assert!(stage.iter().all(|&(u, vt)| u != 0 && vt != 0 && u != vt));
+    let probe = crate::factorize::compact_svd_copy_probe();
+    assert!(probe.input_pack_calls > 0);
+    assert!(probe.output_scatter_calls > 0);
+}
+
+#[test]
+fn mf_compact_svd_fallback_keeps_live_owners_for_every_dtype() {
+    assert_mf_compact_svd_fallback_live_owners::<f64>();
+    assert_mf_compact_svd_fallback_live_owners::<f32>();
+    assert_mf_compact_svd_fallback_live_owners::<Complex32>();
+    assert_mf_compact_svd_fallback_live_owners::<Complex64>();
+}
+
 #[test]
 fn generic_compact_svd_padded_fallback_uses_owned_outputs_and_scatter() {
     let (canonical_space, canonical_data) = generic_factorization_input();
