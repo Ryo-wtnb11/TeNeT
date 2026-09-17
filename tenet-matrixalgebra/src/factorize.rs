@@ -1274,6 +1274,8 @@ pub(crate) struct CompactQrCopyProbe {
     pub input_pack_bytes: usize,
     pub output_scatter_calls: usize,
     pub output_scatter_bytes: usize,
+    pub owned_output_publications: usize,
+    pub owned_output_owner_reused: usize,
 }
 
 #[cfg(test)]
@@ -1413,7 +1415,7 @@ fn record_compact_lq_output_scatter_work<D>(calls: usize, elements: usize) {
 fn record_compact_lq_scratch<D>(elements: usize) {
     COMPACT_LQ_COPY_PROBE.with(|probe| {
         let mut current = probe.get();
-        current.scratch_buffer_count += 3;
+        current.scratch_buffer_count += 1;
         current.scratch_capacity_bytes += elements * std::mem::size_of::<D>();
         probe.set(current);
     });
@@ -5869,8 +5871,8 @@ fn compact_qr_output_owned<D: FactorScalar>(
     tensor: DenseTensor,
     expected_shape: &[usize],
 ) -> Result<Vec<D>, OperationError> {
-    let shape = tensor.shape().to_vec();
-    let data = D::dense_into_vec(tensor).map_err(OperationError::Dense)?;
+    let source = D::dense_slice(&tensor).map_err(OperationError::Dense)?;
+    let shape = tensor.shape();
     if shape != expected_shape {
         return Err(OperationError::Dense(DenseError::Backend {
             backend: DenseBackend::Tenferro,
@@ -5887,26 +5889,39 @@ fn compact_qr_output_owned<D: FactorScalar>(
             acc.checked_mul(dim).ok_or(DenseError::ElementCountOverflow)
         })
         .map_err(OperationError::Dense)?;
-    if data.len() != expected_len {
+    if source.len() != expected_len {
         return Err(OperationError::Dense(DenseError::Backend {
             backend: DenseBackend::Tenferro,
             op: "qr_into",
             message: format!(
                 "qr_into output storage length mismatch: source {}, expected {}",
-                data.len(),
+                source.len(),
                 expected_len
             ),
         }));
     }
-    Ok(data)
+    D::dense_into_vec(tensor).map_err(OperationError::Dense)
 }
 
 fn concat_compact_factor_regions<D>(regions: Vec<Option<Vec<D>>>, required_len: usize) -> Vec<D> {
+    #[cfg(test)]
+    let first = regions
+        .iter()
+        .find_map(|region| region.as_ref().map(Vec::as_ptr));
     let mut output = None;
     for region in regions.into_iter().flatten() {
         append_owned_factor(&mut output, region, required_len);
     }
-    output.unwrap_or_default()
+    let output = output.unwrap_or_default();
+    #[cfg(test)]
+    COMPACT_QR_COPY_PROBE.with(|probe| {
+        let mut current = probe.get();
+        current.owned_output_publications += 1;
+        current.owned_output_owner_reused +=
+            usize::from(first.is_some_and(|pointer| std::ptr::eq(pointer, output.as_ptr())));
+        probe.set(current);
+    });
+    output
 }
 
 fn copy_col_major_strided<D: Copy>(
