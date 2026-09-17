@@ -37,7 +37,7 @@ struct StridedKernelScratch {
 
 /// Borrowed view of a prebaked fused loop layout (issue #232).
 ///
-/// Holds the exact `(dims, dst_strides, src_strides)` that [`normalize_fused_layout`]
+/// Holds the exact `(dims, dst_strides, src_strides)` that `normalize_fused_layout`
 /// would return for one (block, role) stride pair, computed once at compile
 /// time in the immutable `TreeTransformLayoutTable` and reused across every
 /// replay call instead of recomputed. The slices live in that table's arena;
