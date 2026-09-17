@@ -2285,6 +2285,7 @@ impl DenseExecutor for CountingDense {
     }
 
     fn eigh(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        self.eigh_calls += 1;
         self.inner.eigh(input)
     }
 
