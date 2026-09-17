@@ -2116,8 +2116,13 @@ impl CompactInputSpy {
 }
 
 impl DenseExecutor for CompactInputSpy {
-    fn svd(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("compact SVD must use the destination API")
+    fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        assert_eq!(
+            self.operation,
+            crate::factorize::CheckedCompactOperation::Svd
+        );
+        self.observe(input);
+        self.inner.svd(input)
     }
 
     fn svd_into(
@@ -2127,12 +2132,8 @@ impl DenseExecutor for CompactInputSpy {
         s: DenseWrite<'_>,
         vt: DenseWrite<'_>,
     ) -> Result<(), DenseError> {
-        assert_eq!(
-            self.operation,
-            crate::factorize::CheckedCompactOperation::Svd
-        );
-        self.observe(input);
-        self.inner.svd_into(input, u, s, vt)
+        let _ = (input, u, s, vt);
+        panic!("checked compact SVD must use the owned API")
     }
 
     fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
@@ -3666,7 +3667,8 @@ where
     let (u, vh, spectra, error) =
         svd_trunc_factors_dyn_checked_generic(&mut dense, &input, truncation).unwrap();
 
-    assert_eq!(dense.svd_into_calls, 2);
+    assert_eq!(dense.svd_calls, 2);
+    assert_eq!(dense.svd_into_calls, 0);
     assert_eq!(dense.svd_vals_calls, 0);
     assert!(Arc::ptr_eq(u.space().provider_arc(), &provider));
     assert!(Arc::ptr_eq(vh.space().provider_arc(), &provider));
@@ -3791,6 +3793,7 @@ fn checked_generic_svd_trunc_empty_input_skips_dense_execution() {
     let (u, vh, spectra, error) =
         svd_trunc_factors_dyn_checked_generic(&mut dense, &input, &Truncation::Full).unwrap();
 
+    assert_eq!(dense.svd_calls, 0);
     assert_eq!(dense.svd_into_calls, 0);
     assert_eq!(dense.svd_vals_calls, 0);
     assert!(spectra.is_empty());
@@ -3854,7 +3857,8 @@ fn checked_generic_svd_trunc_preserves_full_s_fold_failure() {
             if call == FIRST_FULL_S_FOLD
     ));
     assert_eq!(failing_provider.single_leg_folds.get(), FIRST_FULL_S_FOLD);
-    assert_eq!(dense.svd_into_calls, 2);
+    assert_eq!(dense.svd_calls, 2);
+    assert_eq!(dense.svd_into_calls, 0);
     assert_eq!(dense.svd_vals_calls, 0);
     assert_eq!(input.data(), before);
 }
