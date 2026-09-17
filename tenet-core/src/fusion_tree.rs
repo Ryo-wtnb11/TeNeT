@@ -1544,7 +1544,7 @@ impl FusionTreeKey {
     /// Ruleless construction remains available for exact categorical
     /// reconstruction, deserialization, and expert import. Call this boundary
     /// before categorical execution; application routing labels are represented
-    /// by [`OpaqueBlockKey`](crate::OpaqueBlockKey), not raw fusion trees.
+    /// by [`OpaqueBlockKey`], not raw fusion trees.
     ///
     /// # Provider-domain precondition
     ///
@@ -8786,12 +8786,12 @@ fn mu_index(tree: &FusionTreeKey, vertex_index: usize) -> Result<usize, CoreErro
 /// [`multiplicity_free_braid_tree`] and of TensorKit's `braid(f, p, levels)`
 /// swap-decomposition loop (`braiding_manipulations.jl:235-248`,
 /// non-`SymmetricBraiding` branch). The permutation is decomposed into
-/// neighbouring swaps; each swap is an [`generic_artin_braid_at_with_inverse`]
+/// neighbouring swaps; each swap is an `generic_artin_braid_at_with_inverse`
 /// with `inverse = levels[s] > levels[s+1]` (:239), and the running level
 /// tuple is swapped after each step (:243-244).
 ///
 /// Because one input tree can fan out to several vertex-labelled outputs, the
-/// coefficients are threaded through a [`FusionTermAccumulator`] (summing paths
+/// coefficients are threaded through a `FusionTermAccumulator` (summing paths
 /// that reconverge on the same output tree), exactly as the multiplicity-free
 /// braid does.
 // `pub` to mirror the mult-free split (`multiplicity_free_braid_tree` is `pub`,
@@ -10223,7 +10223,7 @@ where
 /// GenericFusion branch (`duality_manipulations.jl:238-289`), especially the
 /// coefficient-vector × A × coefficient-vector contraction at `:277-284`:
 ///   `coeff₀ · (coeff₂' · (transpose(A) · coeff₁))`.
-/// Structural twin of [`multiplicity_free_foldright_tree_pair`], with the scalar
+/// Structural twin of `multiplicity_free_foldright_tree_pair`, with the scalar
 /// `coeff₁ · A · conj(coeff₂)` promoted to the vector–matrix–vector contraction
 /// through the A-move matrix (which connects the two topmost `λ` vertices).
 /// `tree_pair` follows [`FusionTreePairKey::validate_for_rule`]'s
@@ -10287,7 +10287,7 @@ where
 
 /// Generic-fusion `foldleft` = swap + conjugate of `foldright`, verbatim mirror
 /// of TensorKit `foldleft((f₁,f₂))` (`duality_manipulations.jl:315-319`).
-/// Structural twin of [`multiplicity_free_foldleft_tree_pair`].
+/// Structural twin of `multiplicity_free_foldleft_tree_pair`.
 /// `tree_pair` follows [`FusionTreePairKey::validate_for_rule`]'s
 /// provider-domain precondition.
 pub fn generic_foldleft_tree_pair<R>(
@@ -10340,7 +10340,7 @@ where
 /// Generic-fusion `cycleclockwise` = foldright ∘ bendleft (or the reverse order
 /// when the codomain is empty), composing coefficient matrices. Verbatim mirror
 /// of TensorKit `cycleclockwise` (`duality_manipulations.jl:401-410`) and
-/// structural twin of [`multiplicity_free_cycle_clockwise_tree_pair`].
+/// structural twin of `multiplicity_free_cycle_clockwise_tree_pair`.
 /// `tree_pair` follows [`FusionTreePairKey::validate_for_rule`]'s
 /// provider-domain precondition.
 pub fn generic_cycle_clockwise_tree_pair<R>(
@@ -10390,7 +10390,7 @@ where
 /// Generic-fusion `cycleanticlockwise` = foldleft ∘ bendright (or the reverse
 /// order when the domain is empty). Verbatim mirror of TensorKit
 /// `cycleanticlockwise` (`duality_manipulations.jl:431-440`) and structural
-/// twin of [`multiplicity_free_cycle_anticlockwise_tree_pair`].
+/// twin of `multiplicity_free_cycle_anticlockwise_tree_pair`.
 /// `tree_pair` follows [`FusionTreePairKey::validate_for_rule`]'s
 /// provider-domain precondition.
 pub fn generic_cycle_anticlockwise_tree_pair<R>(
