@@ -963,12 +963,8 @@ impl DenseExecutor for DefaultDenseExecutor {
         }
     }
 
-    // SVD and EIGH values-only calls currently materialize the borrowed input,
-    // compute full factors through supported owned extensions, and discard the
-    // vectors; general EIG below already uses native owned `eigvals`.
-    // TODO(#880): adopt a supported concrete values-only API once its stability
-    // and ownership are confirmed. The installed hidden backend hook is
-    // callable, but carries no supported downstream guarantee.
+    // SVD and EIGH values-only calls use Tenferro's documented borrowed
+    // no-vector extensions. General EIG below uses native owned `eigvals`.
     fn svd_vals(&mut self, input: DenseRead<'_>) -> Result<DenseTensor, DenseError> {
         #[cfg(feature = "provider-inject")]
         {
@@ -978,13 +974,11 @@ impl DenseExecutor for DefaultDenseExecutor {
         #[cfg(not(feature = "provider-inject"))]
         {
             let input = tenferro_view(input)?;
-            let owned = self
-                .backend
-                .with_backend_session(|exec| exec.to_contiguous_read(TensorRead::from_view(input)))
-                .map_err(|err| tenferro_error("svd_values", err))?;
-            let (_, values, _) = with_cpu_linalg(&mut self.backend, |exec| owned.svd(exec))
-                .map_err(|err| tenferro_error("svd_values", err))?;
-            Ok(DenseTensor::from_tenferro(values))
+            with_cpu_linalg(&mut self.backend, |exec| {
+                TensorRead::from_view(input).svdvals_read(exec)
+            })
+            .map(DenseTensor::from_tenferro)
+            .map_err(|err| tenferro_error("svd_values", err))
         }
     }
 
@@ -997,13 +991,11 @@ impl DenseExecutor for DefaultDenseExecutor {
         #[cfg(not(feature = "provider-inject"))]
         {
             let input = tenferro_view(input)?;
-            let owned = self
-                .backend
-                .with_backend_session(|exec| exec.to_contiguous_read(TensorRead::from_view(input)))
-                .map_err(|err| tenferro_error("eigh_values", err))?;
-            let (values, _) = with_cpu_linalg(&mut self.backend, |exec| owned.eigh(exec))
-                .map_err(|err| tenferro_error("eigh_values", err))?;
-            Ok(DenseTensor::from_tenferro(values))
+            with_cpu_linalg(&mut self.backend, |exec| {
+                TensorRead::from_view(input).eigvalsh_read(exec)
+            })
+            .map(DenseTensor::from_tenferro)
+            .map_err(|err| tenferro_error("eigh_values", err))
         }
     }
 

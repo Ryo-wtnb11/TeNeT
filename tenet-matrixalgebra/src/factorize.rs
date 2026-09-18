@@ -1632,8 +1632,8 @@ where
     // never builds the U/Vt spaces, allocates the factor buffers, gauge-fixes,
     // or scatters blocks into the fusion-tree layout — all of which the old
     // `svd_compact_dyn(..).map(|svd| svd.singular_values)` computed then threw
-    // away. LAPACK computes the singular values identically with or without
-    // vectors, so the spectrum is bit-for-bit the full-SVD spectrum.
+    // away. Valid no-vector and full-factor drivers can differ in the last
+    // bits, so comparisons use dtype-appropriate tolerances.
     let matricizations = value_matricizations(space.structure(), input.data(), space.nout())?;
     let mut singular_values = Vec::with_capacity(matricizations.len());
     for index in 0..matricizations.len() {
