@@ -44,6 +44,7 @@ mod allocation_oracle {
 
     thread_local! {
         static MEASURED: Cell<bool> = const { Cell::new(false) };
+        static SESSION_ACTIVE: Cell<bool> = const { Cell::new(false) };
     }
 
     static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
@@ -87,9 +88,17 @@ mod allocation_oracle {
 
     struct RestoreMeasurement(bool);
 
+    struct RestoreSession(bool);
+
     impl Drop for RestoreMeasurement {
         fn drop(&mut self) {
             MEASURED.with(|measured| measured.set(self.0));
+        }
+    }
+
+    impl Drop for RestoreSession {
+        fn drop(&mut self) {
+            SESSION_ACTIVE.with(|active| active.set(self.0));
         }
     }
 
@@ -100,11 +109,14 @@ mod allocation_oracle {
     pub(super) fn with_session<R>(action: impl FnOnce() -> R) -> (R, usize) {
         assert!(rayon::current_thread_index().is_none());
         assert!(!is_measured());
+        assert!(!SESSION_ACTIVE.with(Cell::get));
+        let restore = RestoreSession(SESSION_ACTIVE.with(|active| active.replace(true)));
         let session = SESSION.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         ALLOCATIONS.store(0, Ordering::Relaxed);
         let result = action();
         let allocations = ALLOCATIONS.load(Ordering::Relaxed);
         drop(session);
+        drop(restore);
         (result, allocations)
     }
 
@@ -5511,6 +5523,7 @@ mod allocation_replay_tests {
         let pool = rayon::ThreadPoolBuilder::new().num_threads(3).build().unwrap();
 
         let mut replay = || {
+            dst.fill(f64::NAN);
             tree_transform_structure_overwrite_with_structural_recoupling_raw(
                 &mut kernels,
                 &mut dense,
@@ -5533,11 +5546,121 @@ mod allocation_replay_tests {
         assert_eq!(allocations, 0);
         assert_eq!(dst, expected);
     }
+
+    #[test]
+    fn rank_ten_multi_replay_matches_literal_oracle_without_owned_allocations() {
+        const RANK: usize = 10;
+        const GROUPS: usize = 4;
+        const BLOCKS: usize = 2 * GROUPS;
+        let shape = [2, 2, 2, 2, 2, 2, 2, 2, 2, 1];
+        let axes = [8, 7, 6, 5, 4, 3, 2, 1, 0, 9];
+        let block_structure = Arc::new(
+            BlockStructure::packed_column_major(RANK, vec![shape.to_vec(); BLOCKS]).unwrap(),
+        );
+        let specs = (0..GROUPS)
+            .map(|group| {
+                let first = 2 * group;
+                TreeTransformBlockSpec::multi(
+                    vec![first, first + 1],
+                    vec![first, first + 1],
+                    vec![1.0, 0.0, 0.0, 1.0],
+                )
+                .with_source_axes(axes)
+            })
+            .collect::<Vec<_>>();
+        let structure =
+            TreeTransformStructure::compile_structures(&block_structure, &block_structure, &specs)
+                .unwrap();
+        assert!(structure.has_pack_gemm_scatter_blocks());
+        assert_eq!(structure.recoupling_plan().jobs().len(), GROUPS);
+
+        let elements = shape.iter().product::<usize>();
+        let src = (0..BLOCKS * elements)
+            .map(|value| value as f64 + 0.25)
+            .collect::<Vec<_>>();
+        let strides = block_structure.block(0).unwrap().strides();
+        let mut expected = vec![0.0; src.len()];
+        for block in 0..BLOCKS {
+            let base = block * elements;
+            for dst_linear in 0..elements {
+                let src_linear = (0..RANK).fold(0usize, |offset, axis| {
+                    let coordinate = (dst_linear / strides[axis]) % shape[axis];
+                    offset + coordinate * strides[axes[axis]]
+                });
+                expected[base + dst_linear] = src[base + src_linear];
+            }
+        }
+
+        let mut serial = vec![0.0; src.len()];
+        tree_transform_structure_with_structural_recoupling_raw(
+            &mut StridedHostKernelAdapter::default(),
+            &mut NoAllocDenseExecutor,
+            &mut TreeTransformWorkspace::default(),
+            &structure,
+            &block_structure,
+            &block_structure,
+            &mut serial,
+            &src,
+            1.0,
+            0.0,
+            1,
+        )
+        .unwrap();
+        assert_eq!(serial, expected);
+
+        let mut threaded = vec![0.0; src.len()];
+        let mut kernels = StridedHostKernelAdapter::default();
+        let mut dense = NoAllocDenseExecutor;
+        let mut workspace = TreeTransformWorkspace::default();
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(3).build().unwrap();
+        pool.install(|| {
+            tree_transform_structure_with_structural_recoupling_raw(
+                &mut kernels,
+                &mut dense,
+                &mut workspace,
+                &structure,
+                &block_structure,
+                &block_structure,
+                &mut threaded,
+                &src,
+                1.0,
+                0.0,
+                3,
+            )
+            .unwrap();
+        });
+
+        assert_eq!(threaded, expected);
+        threaded.fill(0.0);
+        let (_, allocations) = allocation_oracle::with_session(|| {
+            pool.install(|| {
+                allocation_oracle::with_measurement(|| {
+                    tree_transform_structure_with_structural_recoupling_raw(
+                        &mut kernels,
+                        &mut dense,
+                        &mut workspace,
+                        &structure,
+                        &block_structure,
+                        &block_structure,
+                        &mut threaded,
+                        &src,
+                        1.0,
+                        0.0,
+                        3,
+                    )
+                    .unwrap();
+                })
+            })
+        });
+        assert_eq!(allocations, 0);
+        assert_eq!(threaded, expected);
+    }
 }
 
 #[cfg(test)]
 mod allocation_oracle_tests {
     use super::allocation_oracle;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
 
     #[test]
     fn allocation_oracle_inherits_and_restores_join_scopes() {
@@ -5581,6 +5704,23 @@ mod allocation_oracle_tests {
                 );
                 assert!(allocation_oracle::is_measured());
             })
+        });
+        assert_eq!(allocations, 0);
+        assert!(!allocation_oracle::is_measured());
+    }
+
+    #[test]
+    fn allocation_oracle_recovers_after_a_panicking_session() {
+        let panic = catch_unwind(AssertUnwindSafe(|| {
+            allocation_oracle::with_session(|| {
+                allocation_oracle::with_measurement(|| panic!("expected oracle panic"))
+            });
+        }));
+        assert!(panic.is_err());
+        assert!(!allocation_oracle::is_measured());
+
+        let (_, allocations) = allocation_oracle::with_session(|| {
+            allocation_oracle::with_measurement(|| assert!(allocation_oracle::is_measured()))
         });
         assert_eq!(allocations, 0);
         assert!(!allocation_oracle::is_measured());
