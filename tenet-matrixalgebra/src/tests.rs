@@ -5889,10 +5889,12 @@ fn compact_svd_adjoint_error_preserves_borrowed_input_and_publishes_no_factors()
 #[test]
 fn truncated_svd_adjoint_error_preserves_borrowed_input_and_publishes_no_factors() {
     let rule = Z2FusionRule;
-    let tensor = hermitian_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
+    let canonical = hermitian_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
+    let tensor = padded_copy(&rule, &canonical);
     let before = tensor.data().to_vec();
     let bound = bound_tensor(Arc::new(rule), &tensor);
     let mut dense = FailSecondSvd::default();
+    crate::factorize::reset_compact_svd_copy_probe();
 
     let result =
         svd_trunc_adjoint_factors_dyn(&mut dense, &bound.as_ref().dynamic(), &Truncation::rank(1));
@@ -5900,6 +5902,9 @@ fn truncated_svd_adjoint_error_preserves_borrowed_input_and_publishes_no_factors
     assert!(matches!(result, Err(OperationError::Dense(_))));
     assert_eq!(tensor.data(), before);
     assert_eq!(dense.calls, 2);
+    let probe = crate::factorize::compact_svd_copy_probe();
+    assert!(probe.input_pack_calls > 0);
+    assert!(probe.output_scatter_calls > 0);
 }
 
 #[test]
