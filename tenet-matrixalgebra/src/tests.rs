@@ -12295,10 +12295,6 @@ fn pinv_direct_into_rejects_foreign_authority_and_wrong_output_before_execution(
     assert!(matches!(error, OperationError::StructureMismatch { .. }));
 }
 
-#[expect(
-    clippy::arc_with_non_send_sync,
-    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
-)]
 fn assert_checked_pinv_uses_owned_svd_outputs_at_final_gemm<D: crate::factorize::FactorScalar>() {
     let (base, data) = generic_factorization_input();
     let data = data.into_iter().map(D::from_real).collect::<Vec<_>>();
