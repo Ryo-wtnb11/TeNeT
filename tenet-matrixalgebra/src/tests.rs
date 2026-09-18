@@ -24,7 +24,8 @@ use num_complex::{Complex32, Complex64};
 use num_traits::Zero;
 use std::{cell::Cell, convert::Infallible, fmt, sync::Arc};
 use tenet_dense::{
-    DenseBackend, DenseDotConfig, DenseError, DenseExecutor, DenseRead, DenseTensor, DenseWrite,
+    DenseBackend, DenseDotConfig, DenseError, DenseExecutor, DenseOwned, DenseRead, DenseTensor,
+    DenseWrite,
 };
 
 struct RejectExecutorCalls;
@@ -111,6 +112,12 @@ struct FailAfterObservingEighInput {
 #[derive(Default)]
 struct EighCallSpy {
     calls: usize,
+}
+
+#[derive(Default)]
+struct NativeFullSvdSpy {
+    inner: tenet_dense::DefaultDenseExecutor,
+    full_calls: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -321,6 +328,44 @@ impl DenseExecutor for SvdCallSpy {
         config: &DenseDotConfig,
     ) -> Result<(), DenseError> {
         self.inner.dot_general_into(output, lhs, rhs, config)
+    }
+}
+
+impl DenseExecutor for NativeFullSvdSpy {
+    fn svd(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        panic!("native full SVD must not use the legacy SVD route")
+    }
+
+    fn qr(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        panic!("native full SVD must not use orthonormal completion")
+    }
+
+    fn eigh(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        panic!("test only exercises full SVD")
+    }
+
+    fn supports_svd_full(&self) -> bool {
+        true
+    }
+
+    fn svd_full_owned(
+        &mut self,
+        input: DenseOwned,
+        rows: usize,
+        cols: usize,
+    ) -> Result<Vec<DenseTensor>, DenseError> {
+        self.full_calls += 1;
+        self.inner.svd_full_owned(input, rows, cols)
+    }
+
+    fn dot_general_into(
+        &mut self,
+        _: DenseWrite<'_>,
+        _: DenseRead<'_>,
+        _: DenseRead<'_>,
+        _: &DenseDotConfig,
+    ) -> Result<(), DenseError> {
+        panic!("test only exercises full SVD")
     }
 }
 
@@ -10072,6 +10117,18 @@ fn svd_full_gives_square_unitaries_and_reconstructs() {
         .unwrap();
     let reconstructed = contract_pair(&rule, &tensor, &us, &full.vh);
     assert_svd_blocks_match(&tensor, &reconstructed);
+}
+
+#[test]
+fn svd_full_uses_native_owned_full_svd_without_legacy_completion() {
+    let tensor = rectangular_svd_tensor(2, 3);
+    let input = bound_tensor(Arc::new(Z2FusionRule), &tensor);
+    let mut dense = NativeFullSvdSpy::default();
+
+    let full = svd_full_dyn(&mut dense, &input.as_ref().dynamic()).unwrap();
+
+    assert_eq!(dense.full_calls, 1);
+    assert!(!full.singular_values().is_empty());
 }
 
 #[test]
