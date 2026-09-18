@@ -142,6 +142,13 @@ struct FailAfterObservingQrInput {
 }
 
 #[derive(Default)]
+struct FailAfterSvdQr {
+    inner: tenet_dense::DefaultDenseExecutor,
+    svd_calls: usize,
+    qr_calls: usize,
+}
+
+#[derive(Default)]
 struct FailAfterObservingEighInput {
     observed: Vec<Vec<f64>>,
     outputs: Option<Vec<DenseTensor>>,
@@ -839,6 +846,46 @@ impl DenseExecutor for FailAfterObservingQrInput {
         _: &DenseDotConfig,
     ) -> Result<(), DenseError> {
         panic!("test only exercises QR")
+    }
+}
+
+impl DenseExecutor for FailAfterSvdQr {
+    fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        self.svd_calls += 1;
+        self.inner.svd(input)
+    }
+
+    fn svd_into(
+        &mut self,
+        _: DenseRead<'_>,
+        _: DenseWrite<'_>,
+        _: DenseWrite<'_>,
+        _: DenseWrite<'_>,
+    ) -> Result<(), DenseError> {
+        panic!("numerical null completion must use owned SVD outputs")
+    }
+
+    fn qr(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        self.qr_calls += 1;
+        Err(DenseError::Backend {
+            backend: DenseBackend::Tenferro,
+            op: "qr",
+            message: "injected completion failure".to_string(),
+        })
+    }
+
+    fn eigh(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        panic!("test only exercises numerical null completion")
+    }
+
+    fn dot_general_into(
+        &mut self,
+        _: DenseWrite<'_>,
+        _: DenseRead<'_>,
+        _: DenseRead<'_>,
+        _: &DenseDotConfig,
+    ) -> Result<(), DenseError> {
+        panic!("test only exercises numerical null completion")
     }
 }
 
@@ -12604,6 +12651,35 @@ fn null_space_second_sector_failure_builds_no_factor() {
         (0, 0)
     );
     assert_eq!(tensor.data(), before);
+}
+
+#[test]
+fn null_completion_qr_failure_preserves_input_and_builds_no_factor() {
+    for (left, rows, cols) in [(true, 3, 2), (false, 2, 3)] {
+        let tensor = one_sector_rectangular_matrix(
+            vec![1.0_f64, 0.0, 0.0, 0.0, 0.0, 0.0],
+            rows,
+            cols,
+        );
+        let before = tensor.data().to_vec();
+        let input = bound_tensor(Arc::new(Z2FusionRule), &tensor);
+        let mut dense = FailAfterSvdQr::default();
+
+        crate::factorize::reset_factor_buffer_build_counts_for_test();
+        let result = if left {
+            left_null(&mut dense, &input.as_ref())
+        } else {
+            right_null(&mut dense, &input.as_ref())
+        };
+
+        assert!(matches!(result, Err(OperationError::Dense(_))));
+        assert_eq!((dense.svd_calls, dense.qr_calls), (1, 1));
+        assert_eq!(
+            crate::factorize::factor_buffer_build_counts_for_test(),
+            (0, 0)
+        );
+        assert_eq!(tensor.data(), before);
+    }
 }
 
 #[test]
