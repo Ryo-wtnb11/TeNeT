@@ -2,6 +2,11 @@ use core::mem::MaybeUninit;
 use core::ops::{Add, Mul};
 use std::sync::{Arc, Weak};
 
+#[cfg(test)]
+use allocation_oracle::join as replay_join;
+#[cfg(not(test))]
+use rayon::join as replay_join;
+
 use num_traits::{One, Zero};
 use tenet_core::{
     BlockStructure, BlockView, BlockViewMut, HostReadableStorage, HostWritableStorage, Placement,
@@ -29,6 +34,137 @@ use crate::{
     TreeTransformLayout, TreeTransformLayoutTable, TreeTransformReplayProfile,
     TreeTransformStructure,
 };
+
+#[cfg(test)]
+mod allocation_oracle {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
+    thread_local! {
+        static MEASURED: Cell<bool> = const { Cell::new(false) };
+        static SESSION_ACTIVE: Cell<bool> = const { Cell::new(false) };
+    }
+
+    static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
+    static JOINS: AtomicUsize = AtomicUsize::new(0);
+    static SESSION: Mutex<()> = Mutex::new(());
+
+    struct CountingAllocator;
+
+    #[allow(unsafe_code)]
+    unsafe impl GlobalAlloc for CountingAllocator {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            let pointer = unsafe { System.alloc(layout) };
+            record(pointer);
+            pointer
+        }
+
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            let pointer = unsafe { System.alloc_zeroed(layout) };
+            record(pointer);
+            pointer
+        }
+
+        unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+            unsafe { System.dealloc(pointer, layout) }
+        }
+
+        unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            let pointer = unsafe { System.realloc(pointer, layout, new_size) };
+            record(pointer);
+            pointer
+        }
+    }
+
+    #[global_allocator]
+    static ALLOCATOR: CountingAllocator = CountingAllocator;
+
+    fn record(pointer: *mut u8) {
+        if !pointer.is_null() && is_measured() {
+            ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    struct RestoreMeasurement(bool);
+
+    struct RestoreSession(bool);
+
+    impl Drop for RestoreMeasurement {
+        fn drop(&mut self) {
+            MEASURED.with(|measured| measured.set(self.0));
+        }
+    }
+
+    impl Drop for RestoreSession {
+        fn drop(&mut self) {
+            SESSION_ACTIVE.with(|active| active.set(self.0));
+        }
+    }
+
+    pub(super) fn is_measured() -> bool {
+        MEASURED.with(Cell::get)
+    }
+
+    pub(super) fn with_session<R>(action: impl FnOnce() -> R) -> (R, usize) {
+        assert!(rayon::current_thread_index().is_none());
+        assert!(!is_measured());
+        assert!(!SESSION_ACTIVE.with(Cell::get));
+        let restore = RestoreSession(SESSION_ACTIVE.with(|active| active.replace(true)));
+        let session = SESSION
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        ALLOCATIONS.store(0, Ordering::Relaxed);
+        JOINS.store(0, Ordering::Relaxed);
+        let result = action();
+        let allocations = ALLOCATIONS.load(Ordering::Relaxed);
+        drop(session);
+        drop(restore);
+        (result, allocations)
+    }
+
+    pub(super) fn with_measurement<R>(action: impl FnOnce() -> R) -> R {
+        let restore = RestoreMeasurement(MEASURED.with(|measured| measured.replace(true)));
+        let result = action();
+        drop(restore);
+        result
+    }
+
+    pub(super) fn join_entries() -> usize {
+        JOINS.load(Ordering::Relaxed)
+    }
+
+    pub(super) fn join<A, B, RA, RB>(left: A, right: B) -> (RA, RB)
+    where
+        A: FnOnce() -> RA + Send,
+        B: FnOnce() -> RB + Send,
+        RA: Send,
+        RB: Send,
+    {
+        let measured = is_measured();
+        if measured {
+            JOINS.fetch_add(1, Ordering::Relaxed);
+        }
+        let restore = RestoreMeasurement(MEASURED.with(|state| state.replace(false)));
+        let result = rayon::join(
+            || {
+                let restore = RestoreMeasurement(MEASURED.with(|state| state.replace(measured)));
+                let result = left();
+                drop(restore);
+                result
+            },
+            || {
+                let restore = RestoreMeasurement(MEASURED.with(|state| state.replace(measured)));
+                let result = right();
+                drop(restore);
+                result
+            },
+        );
+        drop(restore);
+        result
+    }
+}
 
 #[derive(Clone, Copy)]
 enum DestinationMode<D> {
@@ -2709,7 +2845,7 @@ where
     let left_threads = threads / 2;
     let right_threads = threads - left_threads;
     let (left_indices, right_indices) = fused_indices.split_at_mut(left_threads * max_fused_rank);
-    let (left, right) = rayon::join(
+    let (left, right) = replay_join(
         || {
             split_join_uninit(
                 left_items,
@@ -4032,7 +4168,7 @@ where
     let right_threads = threads - left_threads;
     let (left_indices, right_indices) = fused_indices.split_at_mut(left_threads * max_fused_rank);
     let right_kernels = kernels.clone();
-    let (left, right) = rayon::join(
+    let (left, right) = replay_join(
         || {
             replay_pack_columns(
                 kernels,
@@ -4142,7 +4278,7 @@ where
     let right_threads = threads - left_threads;
     let (left_indices, right_indices) = fused_indices.split_at_mut(left_threads * max_fused_rank);
     let right_kernels = kernels.clone();
-    let (left, right) = rayon::join(
+    let (left, right) = replay_join(
         || {
             replay_single_blocks(
                 kernels,
@@ -4251,7 +4387,7 @@ where
     let right_threads = threads - left_threads;
     let (left_indices, right_indices) = fused_indices.split_at_mut(left_threads * max_fused_rank);
     let right_kernels = kernels.clone();
-    let (left, right) = rayon::join(
+    let (left, right) = replay_join(
         || {
             replay_scatter_columns(
                 kernels,
@@ -4344,7 +4480,7 @@ where
     let right_threads = threads - left_threads;
     let (left_indices, right_indices) = fused_indices.split_at_mut(left_threads * max_fused_rank);
     let right_kernels = kernels.clone();
-    let (left, right) = rayon::join(
+    let (left, right) = replay_join(
         || {
             replay_scatter_groups(
                 kernels,
@@ -5241,5 +5377,432 @@ where
             alpha,
             baked,
         ),
+    }
+}
+
+#[cfg(test)]
+mod allocation_replay_tests {
+    use super::*;
+    use crate::{StridedHostKernelAdapter, TreeTransformBlockSpec};
+    use tenet_dense::{
+        DenseDotConfig, DenseError, DenseRead, DenseScalar, DenseTensor, DenseWrite,
+    };
+
+    #[derive(Default)]
+    struct NoAllocDenseExecutor;
+
+    impl DenseExecutor for NoAllocDenseExecutor {
+        fn svd(&mut self, _input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+            unreachable!("tree replay does not call SVD")
+        }
+
+        fn qr(&mut self, _input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+            unreachable!("tree replay does not call QR")
+        }
+
+        fn eigh(&mut self, _input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+            unreachable!("tree replay does not call EIGH")
+        }
+
+        fn dot_general_into(
+            &mut self,
+            _output: DenseWrite<'_>,
+            _lhs: DenseRead<'_>,
+            _rhs: DenseRead<'_>,
+            _config: &DenseDotConfig,
+        ) -> Result<(), DenseError> {
+            unreachable!("tree replay uses the batched matmul entry point")
+        }
+
+        fn matmul_batch_axpby_into(
+            &mut self,
+            output: DenseWrite<'_>,
+            lhs: DenseRead<'_>,
+            rhs: DenseRead<'_>,
+            jobs: &[DenseGemmBatchJob],
+            _runs: &[usize],
+            _alpha: DenseScalar,
+            _beta: DenseScalar,
+        ) -> Result<(), DenseError> {
+            let (mut output, lhs, rhs) = match (output, lhs, rhs) {
+                (DenseWrite::F64(output), DenseRead::F64(lhs), DenseRead::F64(rhs)) => {
+                    (output, lhs, rhs)
+                }
+                _ => unreachable!("allocation oracle uses f64"),
+            };
+            let output_offset = output.offset();
+            let lhs_offset = lhs.offset();
+            let rhs_offset = rhs.offset();
+            let output_data = output.data_mut();
+            for job in jobs {
+                for col in 0..job.cols {
+                    for row in 0..job.rows {
+                        let mut value = 0.0;
+                        for contracted in 0..job.contracted {
+                            value += lhs.data()
+                                [lhs_offset + job.lhs_offset + row + contracted * job.rows]
+                                * rhs.data()[rhs_offset
+                                    + job.rhs_offset
+                                    + contracted
+                                    + col * job.contracted];
+                        }
+                        output_data[output_offset + job.dst_offset + row + col * job.rows] = value;
+                    }
+                }
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn warm_threaded_replay_has_no_owned_allocations() {
+        let block_structure = Arc::new(
+            BlockStructure::packed_column_major(1, [vec![4], vec![4], vec![4], vec![4]]).unwrap(),
+        );
+        let structure = TreeTransformStructure::compile_structures(
+            &block_structure,
+            &block_structure,
+            &[
+                TreeTransformBlockSpec::multi(vec![0, 1], vec![0, 1], vec![1.0, 0.0, 0.0, 1.0]),
+                TreeTransformBlockSpec::single(2, 2, 1.0),
+                TreeTransformBlockSpec::single(3, 3, -1.0),
+            ],
+        )
+        .unwrap();
+        let src = (1..=16).map(f64::from).collect::<Vec<_>>();
+        let expected = (1..=16)
+            .map(|value| {
+                if value <= 12 {
+                    f64::from(value)
+                } else {
+                    -f64::from(value)
+                }
+            })
+            .collect::<Vec<_>>();
+        let mut dst = vec![0.0; 16];
+        let mut kernels = StridedHostKernelAdapter::default();
+        let mut dense = NoAllocDenseExecutor;
+        let mut workspace = TreeTransformWorkspace::default();
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(3)
+            .build()
+            .unwrap();
+
+        let mut replay = || {
+            tree_transform_structure_with_structural_recoupling_raw(
+                &mut kernels,
+                &mut dense,
+                &mut workspace,
+                &structure,
+                &block_structure,
+                &block_structure,
+                &mut dst,
+                &src,
+                1.0,
+                0.0,
+                3,
+            )
+            .unwrap();
+        };
+
+        pool.install(&mut replay);
+        let (joins, allocations) = allocation_oracle::with_session(|| {
+            pool.install(|| {
+                allocation_oracle::with_measurement(|| {
+                    replay();
+                    allocation_oracle::join_entries()
+                })
+            })
+        });
+        assert_eq!(allocations, 0);
+        assert!(joins > 0);
+        assert_eq!(dst, expected);
+    }
+
+    #[test]
+    fn warm_threaded_overwrite_replay_has_no_owned_allocations() {
+        let block_structure = Arc::new(
+            BlockStructure::packed_column_major(1, [vec![4], vec![4], vec![4], vec![4]]).unwrap(),
+        );
+        let structure = TreeTransformStructure::compile_structures(
+            &block_structure,
+            &block_structure,
+            &[
+                TreeTransformBlockSpec::multi(vec![0, 1], vec![0, 1], vec![1.0, 0.0, 0.0, 1.0]),
+                TreeTransformBlockSpec::single(2, 2, 1.0),
+                TreeTransformBlockSpec::single(3, 3, -1.0),
+            ],
+        )
+        .unwrap();
+        let src = (1..=16).map(f64::from).collect::<Vec<_>>();
+        let expected = (1..=16)
+            .map(|value| {
+                if value <= 12 {
+                    f64::from(value)
+                } else {
+                    -f64::from(value)
+                }
+            })
+            .collect::<Vec<_>>();
+        let mut dst = vec![f64::NAN; 16];
+        let mut kernels = StridedHostKernelAdapter::default();
+        let mut dense = NoAllocDenseExecutor;
+        let mut workspace = TreeTransformWorkspace::default();
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(3)
+            .build()
+            .unwrap();
+
+        let mut replay = || {
+            dst.fill(f64::NAN);
+            tree_transform_structure_overwrite_with_structural_recoupling_raw(
+                &mut kernels,
+                &mut dense,
+                &mut workspace,
+                &structure,
+                &block_structure,
+                &block_structure,
+                &mut dst,
+                &src,
+                1.0,
+                3,
+            )
+            .unwrap();
+        };
+
+        pool.install(&mut replay);
+        let (_, allocations) = allocation_oracle::with_session(|| {
+            pool.install(|| allocation_oracle::with_measurement(&mut replay))
+        });
+        assert_eq!(allocations, 0);
+        assert_eq!(dst, expected);
+    }
+
+    #[test]
+    fn rank_ten_multi_replay_matches_literal_oracle_without_owned_allocations() {
+        const RANK: usize = 10;
+        const GROUPS: usize = 4;
+        const BLOCKS: usize = 2 * GROUPS;
+        let shape = [2, 2, 2, 2, 2, 2, 2, 2, 2, 1];
+        let axes = [8, 7, 6, 5, 4, 3, 2, 1, 0, 9];
+        let block_structure = Arc::new(
+            BlockStructure::packed_column_major(RANK, vec![shape.to_vec(); BLOCKS]).unwrap(),
+        );
+        let specs = (0..GROUPS)
+            .map(|group| {
+                let first = 2 * group;
+                TreeTransformBlockSpec::multi(
+                    vec![first, first + 1],
+                    vec![first, first + 1],
+                    vec![1.0, 0.0, 0.0, 1.0],
+                )
+                .with_source_axes(axes)
+            })
+            .collect::<Vec<_>>();
+        let structure =
+            TreeTransformStructure::compile_structures(&block_structure, &block_structure, &specs)
+                .unwrap();
+        assert!(structure.has_pack_gemm_scatter_blocks());
+        assert_eq!(structure.recoupling_plan().jobs().len(), GROUPS);
+
+        let elements = shape.iter().product::<usize>();
+        let src = (0..BLOCKS * elements)
+            .map(|value| value as f64 + 0.25)
+            .collect::<Vec<_>>();
+        let strides = block_structure.block(0).unwrap().strides();
+        let mut expected = vec![0.0; src.len()];
+        for block in 0..BLOCKS {
+            let base = block * elements;
+            for dst_linear in 0..elements {
+                let src_linear = (0..RANK).fold(0usize, |offset, axis| {
+                    let coordinate = (dst_linear / strides[axis]) % shape[axis];
+                    offset + coordinate * strides[axes[axis]]
+                });
+                expected[base + dst_linear] = src[base + src_linear];
+            }
+        }
+
+        let mut serial = vec![0.0; src.len()];
+        tree_transform_structure_with_structural_recoupling_raw(
+            &mut StridedHostKernelAdapter::default(),
+            &mut NoAllocDenseExecutor,
+            &mut TreeTransformWorkspace::default(),
+            &structure,
+            &block_structure,
+            &block_structure,
+            &mut serial,
+            &src,
+            1.0,
+            0.0,
+            1,
+        )
+        .unwrap();
+        assert_eq!(serial, expected);
+
+        let mut threaded = vec![0.0; src.len()];
+        let mut kernels = StridedHostKernelAdapter::default();
+        let mut dense = NoAllocDenseExecutor;
+        let mut workspace = TreeTransformWorkspace::default();
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(3)
+            .build()
+            .unwrap();
+        pool.install(|| {
+            tree_transform_structure_with_structural_recoupling_raw(
+                &mut kernels,
+                &mut dense,
+                &mut workspace,
+                &structure,
+                &block_structure,
+                &block_structure,
+                &mut threaded,
+                &src,
+                1.0,
+                0.0,
+                3,
+            )
+            .unwrap();
+        });
+
+        assert_eq!(threaded, expected);
+        threaded.fill(0.0);
+        let (_, allocations) = allocation_oracle::with_session(|| {
+            pool.install(|| {
+                allocation_oracle::with_measurement(|| {
+                    tree_transform_structure_with_structural_recoupling_raw(
+                        &mut kernels,
+                        &mut dense,
+                        &mut workspace,
+                        &structure,
+                        &block_structure,
+                        &block_structure,
+                        &mut threaded,
+                        &src,
+                        1.0,
+                        0.0,
+                        3,
+                    )
+                    .unwrap();
+                })
+            })
+        });
+        assert_eq!(allocations, 0);
+        assert_eq!(threaded, expected);
+    }
+}
+
+#[cfg(test)]
+mod allocation_oracle_tests {
+    use super::{allocation_oracle, replay_join};
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    #[test]
+    fn allocation_oracle_inherits_and_restores_join_scopes() {
+        assert!(!allocation_oracle::is_measured());
+        let (_, allocations) = allocation_oracle::with_session(|| {
+            allocation_oracle::with_measurement(|| {
+                assert!(allocation_oracle::is_measured());
+                allocation_oracle::join(
+                    || assert!(allocation_oracle::is_measured()),
+                    || assert!(allocation_oracle::is_measured()),
+                );
+                assert!(allocation_oracle::is_measured());
+            })
+        });
+        assert_eq!(allocations, 0);
+        assert!(!allocation_oracle::is_measured());
+    }
+
+    #[test]
+    fn allocation_oracle_leaves_inactive_joins_unmeasured() {
+        allocation_oracle::join(
+            || assert!(!allocation_oracle::is_measured()),
+            || assert!(!allocation_oracle::is_measured()),
+        );
+        assert!(!allocation_oracle::is_measured());
+    }
+
+    #[test]
+    fn allocation_oracle_restores_nested_worker_scopes() {
+        let (_, allocations) = allocation_oracle::with_session(|| {
+            allocation_oracle::with_measurement(|| {
+                allocation_oracle::join(
+                    || {
+                        allocation_oracle::join(
+                            || assert!(allocation_oracle::is_measured()),
+                            || assert!(allocation_oracle::is_measured()),
+                        );
+                        assert!(allocation_oracle::is_measured());
+                    },
+                    || assert!(allocation_oracle::is_measured()),
+                );
+                assert!(allocation_oracle::is_measured());
+            })
+        });
+        assert_eq!(allocations, 0);
+        assert!(!allocation_oracle::is_measured());
+    }
+
+    #[test]
+    fn allocation_oracle_recovers_after_a_panicking_session() {
+        let panic = catch_unwind(AssertUnwindSafe(|| {
+            allocation_oracle::with_session(|| {
+                allocation_oracle::with_measurement(|| panic!("expected oracle panic"))
+            });
+        }));
+        assert!(panic.is_err());
+        assert!(!allocation_oracle::is_measured());
+
+        let (_, allocations) = allocation_oracle::with_session(|| {
+            allocation_oracle::with_measurement(|| assert!(allocation_oracle::is_measured()))
+        });
+        assert_eq!(allocations, 0);
+        assert!(!allocation_oracle::is_measured());
+    }
+
+    #[test]
+    fn allocation_oracle_rejects_nested_sessions() {
+        let nested = catch_unwind(AssertUnwindSafe(|| {
+            allocation_oracle::with_session(|| allocation_oracle::with_session(|| ()))
+        }));
+        assert!(nested.is_err());
+
+        let (_, allocations) = allocation_oracle::with_session(|| ());
+        assert_eq!(allocations, 0);
+    }
+
+    #[test]
+    fn allocation_oracle_rejects_worker_sessions() {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap();
+        let worker_session = pool
+            .install(|| catch_unwind(AssertUnwindSafe(|| allocation_oracle::with_session(|| ()))));
+        assert!(worker_session.is_err());
+
+        let (_, allocations) = allocation_oracle::with_session(|| ());
+        assert_eq!(allocations, 0);
+    }
+
+    #[test]
+    fn allocation_oracle_restores_after_a_panicking_replay_join() {
+        let panic = catch_unwind(AssertUnwindSafe(|| {
+            allocation_oracle::with_session(|| {
+                allocation_oracle::with_measurement(|| {
+                    replay_join(
+                        || panic!("expected replay join panic"),
+                        || assert!(allocation_oracle::is_measured()),
+                    );
+                })
+            });
+        }));
+        assert!(panic.is_err());
+        assert!(!allocation_oracle::is_measured());
+
+        let (_, allocations) = allocation_oracle::with_session(|| {
+            allocation_oracle::with_measurement(|| assert!(allocation_oracle::is_measured()))
+        });
+        assert_eq!(allocations, 0);
     }
 }
