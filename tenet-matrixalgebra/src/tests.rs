@@ -24,8 +24,8 @@ use num_complex::{Complex32, Complex64};
 use num_traits::Zero;
 use std::{cell::Cell, convert::Infallible, fmt, sync::Arc};
 use tenet_dense::{
-    DenseBackend, DenseDotConfig, DenseError, DenseExecutor, DenseOwned, DenseRead, DenseTensor,
-    DenseWrite,
+    CpuBackendKind, DenseBackend, DenseDotConfig, DenseError, DenseExecutor, DenseOwned, DenseRead,
+    DenseTensor, DenseWrite,
 };
 
 struct RejectExecutorCalls;
@@ -114,18 +114,56 @@ struct EighCallSpy {
     calls: usize,
 }
 
-#[cfg(feature = "cpu-faer")]
-#[derive(Default)]
 struct NativeFullSvdSpy {
     inner: tenet_dense::DefaultDenseExecutor,
     full_calls: usize,
 }
 
-#[cfg(feature = "cpu-faer")]
-#[derive(Default)]
 struct FailSecondOwnedFullSvd {
     inner: tenet_dense::DefaultDenseExecutor,
     calls: usize,
+}
+
+fn native_full_svd_executor() -> Option<tenet_dense::DefaultDenseExecutor> {
+    match tenet_dense::DefaultDenseExecutor::with_kind(CpuBackendKind::Faer) {
+        Ok(executor) if executor.supports_svd_full() => Some(executor),
+        Ok(mut executor) => {
+            assert!(matches!(
+                executor.svd_full_owned(DenseOwned::F64(vec![1.0]), 1, 1),
+                Err(DenseError::Unsupported {
+                    op: "svd_full_owned",
+                    ..
+                })
+            ));
+            None
+        }
+        Err(_) => {
+            let mut executor = tenet_dense::DefaultDenseExecutor::new();
+            assert!(matches!(
+                executor.svd_full_owned(DenseOwned::F64(vec![1.0]), 1, 1),
+                Err(DenseError::Unsupported {
+                    op: "svd_full_owned",
+                    ..
+                })
+            ));
+            None
+        }
+    }
+}
+
+impl NativeFullSvdSpy {
+    fn new() -> Option<Self> {
+        native_full_svd_executor().map(|inner| Self {
+            inner,
+            full_calls: 0,
+        })
+    }
+}
+
+impl FailSecondOwnedFullSvd {
+    fn new() -> Option<Self> {
+        native_full_svd_executor().map(|inner| Self { inner, calls: 0 })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -339,7 +377,6 @@ impl DenseExecutor for SvdCallSpy {
     }
 }
 
-#[cfg(feature = "cpu-faer")]
 impl DenseExecutor for NativeFullSvdSpy {
     fn svd(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
         panic!("native full SVD must not use the legacy SVD route")
@@ -378,7 +415,6 @@ impl DenseExecutor for NativeFullSvdSpy {
     }
 }
 
-#[cfg(feature = "cpu-faer")]
 impl DenseExecutor for FailSecondOwnedFullSvd {
     fn svd(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
         panic!("claimed native full SVD must not retry the legacy route")
@@ -5226,7 +5262,6 @@ fn checked_generic_full_svd_enumerates_each_output_layout_once() {
     clippy::arc_with_non_send_sync,
     reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
 )]
-#[cfg(feature = "cpu-faer")]
 fn checked_native_full_svd_stages_before_unchanged_provider_admission() {
     let (source, data) = generic_factorization_input();
     let provider = Arc::new(LateGenericSpy {
@@ -5238,7 +5273,9 @@ fn checked_native_full_svd_stages_before_unchanged_provider_admission() {
         BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
             .unwrap();
     let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
-    let mut dense = NativeFullSvdSpy::default();
+    let Some(mut dense) = NativeFullSvdSpy::new() else {
+        return;
+    };
 
     let full = svd_full_dyn_checked_generic(&mut dense, &input).unwrap();
 
@@ -10197,12 +10234,13 @@ fn svd_full_gives_square_unitaries_and_reconstructs() {
     assert_svd_blocks_match(&tensor, &reconstructed);
 }
 
-#[cfg(feature = "cpu-faer")]
 #[test]
 fn svd_full_uses_native_owned_full_svd_without_legacy_completion() {
     let tensor = rectangular_svd_tensor(2, 3);
     let input = bound_tensor(Arc::new(Z2FusionRule), &tensor);
-    let mut dense = NativeFullSvdSpy::default();
+    let Some(mut dense) = NativeFullSvdSpy::new() else {
+        return;
+    };
 
     let full = svd_full_dyn(&mut dense, &input.as_ref().dynamic()).unwrap();
 
@@ -10210,7 +10248,6 @@ fn svd_full_uses_native_owned_full_svd_without_legacy_completion() {
     assert!(!full.singular_values().is_empty());
 }
 
-#[cfg(feature = "cpu-faer")]
 fn assert_native_full_svd_uses_builtin_owned_dtype<D: FactorScalar>() {
     let source = mixed_rectangular_c32_tensor();
     let tensor = TensorMap::<D, 1, 1>::from_vec_with_fusion_space(
@@ -10223,7 +10260,9 @@ fn assert_native_full_svd_uses_builtin_owned_dtype<D: FactorScalar>() {
     )
     .unwrap();
     let input = bound_tensor(Arc::new(Z2FusionRule), &tensor);
-    let mut dense = NativeFullSvdSpy::default();
+    let Some(mut dense) = NativeFullSvdSpy::new() else {
+        return;
+    };
 
     let full = svd_full_dyn(&mut dense, &input.as_ref().dynamic()).unwrap();
 
@@ -10235,7 +10274,6 @@ fn assert_native_full_svd_uses_builtin_owned_dtype<D: FactorScalar>() {
         .all(|entry| !entry.values.is_empty()));
 }
 
-#[cfg(feature = "cpu-faer")]
 #[test]
 fn native_full_svd_uses_owned_inputs_for_every_builtin_dtype() {
     assert_native_full_svd_uses_builtin_owned_dtype::<f32>();
@@ -10244,7 +10282,6 @@ fn native_full_svd_uses_owned_inputs_for_every_builtin_dtype() {
     assert_native_full_svd_uses_builtin_owned_dtype::<Complex64>();
 }
 
-#[cfg(feature = "cpu-faer")]
 #[test]
 fn native_full_svd_reconstructs_complex_mixed_rectangular_sectors() {
     let source = mixed_rectangular_c32_tensor();
@@ -10258,7 +10295,9 @@ fn native_full_svd_reconstructs_complex_mixed_rectangular_sectors() {
     )
     .unwrap();
     let input = bound_tensor(Arc::new(Z2FusionRule), &tensor);
-    let mut dense = NativeFullSvdSpy::default();
+    let Some(mut dense) = NativeFullSvdSpy::new() else {
+        return;
+    };
 
     let full = svd_full_dyn(&mut dense, &input.as_ref().dynamic()).unwrap();
     assert_eq!(dense.full_calls, 2);
@@ -10374,13 +10413,14 @@ fn native_full_svd_reconstructs_complex_mixed_rectangular_sectors() {
     }
 }
 
-#[cfg(feature = "cpu-faer")]
 #[test]
 fn native_full_svd_late_failure_does_not_publish_or_retry_compatibility() {
     let tensor = mixed_rectangular_c32_tensor();
     let before = tensor.data().to_vec();
     let input = bound_tensor(Arc::new(Z2FusionRule), &tensor);
-    let mut dense = FailSecondOwnedFullSvd::default();
+    let Some(mut dense) = FailSecondOwnedFullSvd::new() else {
+        return;
+    };
 
     crate::factorize::reset_factor_buffer_build_counts_for_test();
     let result = svd_full_dyn(&mut dense, &input.as_ref().dynamic());
@@ -10392,6 +10432,69 @@ fn native_full_svd_late_failure_does_not_publish_or_retry_compatibility() {
         crate::factorize::factor_buffer_build_counts_for_test(),
         (0, 0)
     );
+}
+
+#[test]
+fn native_full_svd_reconstructs_complex_square_and_padded_inputs() {
+    let square = one_sector_rectangular_matrix(
+        vec![
+            Complex64::new(1.0, 2.0),
+            Complex64::new(-3.0, 1.0),
+            Complex64::new(0.5, -1.5),
+            Complex64::new(2.0, 0.25),
+        ],
+        2,
+        2,
+    );
+    for tensor in [&square, &padded_copy(&Z2FusionRule, &square)] {
+        let input = bound_tensor(Arc::new(Z2FusionRule), tensor);
+        let Some(mut dense) = NativeFullSvdSpy::new() else {
+            return;
+        };
+
+        let full = svd_full_dyn(&mut dense, &input.as_ref().dynamic()).unwrap();
+
+        assert_eq!(dense.full_calls, 1);
+        assert_compact_factors_reconstruct_input(
+            &input.as_ref().dynamic(),
+            full.u(),
+            Some(full.s()),
+            full.vh(),
+        );
+    }
+}
+
+#[test]
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
+fn checked_native_full_svd_reconstructs_complex_interleaved_square_trees() {
+    let (canonical, _, data) = generic_values_endomorphism_input();
+    let (interleaved_space, interleaved_data) =
+        interleaved_generic_endomorphism_input(&canonical, &data);
+    let provider = Arc::new(LateGenericSpy {
+        rule: FactorGenericRule,
+        fail_at: usize::MAX,
+        calls: Cell::new(0),
+    });
+    let space = BoundDynamicFusionMapSpace::bind_generic(
+        interleaved_space.space().clone(),
+        Arc::clone(&provider),
+    )
+    .unwrap();
+    let input = BoundDynamicTensorRef::try_new(&space, &interleaved_data).unwrap();
+    let Some(mut dense) = NativeFullSvdSpy::new() else {
+        return;
+    };
+
+    let full = svd_full_dyn_checked_generic(&mut dense, &input).unwrap();
+
+    assert_eq!(dense.full_calls, 2);
+    assert_compact_factors_reconstruct_input(&input, full.u(), Some(full.s()), full.vh());
+    assert!(Arc::ptr_eq(full.u().space().provider_arc(), &provider));
+    assert!(Arc::ptr_eq(full.s().space().provider_arc(), &provider));
+    assert!(Arc::ptr_eq(full.vh().space().provider_arc(), &provider));
 }
 
 #[test]
