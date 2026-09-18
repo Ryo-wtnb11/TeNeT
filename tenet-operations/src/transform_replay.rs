@@ -5243,3 +5243,22 @@ where
         ),
     }
 }
+
+#[cfg(test)]
+mod allocation_oracle_tests {
+    use super::allocation_oracle;
+
+    #[test]
+    fn allocation_oracle_inherits_and_restores_join_scopes() {
+        assert!(!allocation_oracle::is_measured());
+        allocation_oracle::with_measurement(|| {
+            assert!(allocation_oracle::is_measured());
+            allocation_oracle::join(
+                || assert!(allocation_oracle::is_measured()),
+                || assert!(allocation_oracle::is_measured()),
+            );
+            assert!(allocation_oracle::is_measured());
+        });
+        assert!(!allocation_oracle::is_measured());
+    }
+}
