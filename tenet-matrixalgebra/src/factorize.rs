@@ -3798,11 +3798,8 @@ where
         }));
     }
     let u = compact_factor_output_owned(outputs.remove(0), &[rows, rows], "svd_full_owned")?;
-    let singular_values = compact_real_spectrum_owned::<D>(
-        outputs.remove(0),
-        &[rows.min(cols)],
-        "svd_full_owned",
-    )?;
+    let singular_values =
+        compact_real_spectrum_owned::<D>(outputs.remove(0), &[rows.min(cols)], "svd_full_owned")?;
     let vh = compact_factor_output_owned(outputs.remove(0), &[cols, cols], "svd_full_owned")?;
     Ok(Some((u, singular_values, vh)))
 }
@@ -3850,96 +3847,94 @@ where
     let mut vt_workspace = Vec::new();
     for matrix in &mut matricizations {
         let rank = matrix.rows.min(matrix.cols);
-        let (mut left, left_rows, mut right, right_leading, s_values) = match owned_full_svd_stage(
-            dense,
-            &mut matrix.data,
-            matrix.rows,
-            matrix.cols,
-        )? {
-            Some((u_full, s_values, vh_full)) => match placement {
-                FactorPlacement::Direct => (u_full, matrix.rows, vh_full, matrix.cols, s_values),
-                FactorPlacement::Adjoint => (
-                    adjoint_col_major(&vh_full, matrix.cols, matrix.cols),
-                    matrix.cols,
-                    adjoint_col_major(&u_full, matrix.rows, matrix.rows),
-                    matrix.rows,
-                    s_values,
-                ),
-            },
-            None => {
-                if u_workspace.is_empty() && max_rows != 0 && max_rank != 0 {
-                    u_workspace = vec![D::zero(); max_rows * max_rank];
-                    s_workspace = vec![D::Real::zero(); max_rank];
-                    vt_workspace = vec![D::zero(); max_rank * max_cols];
-                }
-                let shape = [matrix.rows, matrix.cols];
-                let strides = [1usize, matrix.rows];
-                let view = DenseView::new(&matrix.data, &shape, &strides, 0)
-                    .map_err(OperationError::Dense)?;
-                let u_shape = [matrix.rows, rank];
-                let u_strides = [1usize, max_rows];
-                let s_shape = [rank];
-                let s_strides = [1usize];
-                let vt_shape = [rank, matrix.cols];
-                let vt_strides = [1usize, max_rank];
-                let u_view = DenseViewMut::new(&mut u_workspace, &u_shape, &u_strides, 0)
-                    .map_err(OperationError::Dense)?;
-                let s_view = DenseViewMut::new(&mut s_workspace, &s_shape, &s_strides, 0)
-                    .map_err(OperationError::Dense)?;
-                let vt_view = DenseViewMut::new(&mut vt_workspace, &vt_shape, &vt_strides, 0)
-                    .map_err(OperationError::Dense)?;
-                dense
-                    .svd_into(
-                        D::dense_read(view),
-                        D::dense_write(u_view),
-                        D::Real::dense_write(s_view),
-                        D::dense_write(vt_view),
-                    )
-                    .map_err(OperationError::Dense)?;
-                let s_values = s_workspace[..rank]
-                    .iter()
-                    .copied()
-                    .map(Into::into)
-                    .collect::<Vec<_>>();
-                let mut u_thin = vec![D::zero(); matrix.rows * rank];
-                let mut vt_thin = vec![D::zero(); rank * matrix.cols];
-                copy_col_major_strided(
-                    &u_workspace,
-                    matrix.rows,
-                    rank,
-                    max_rows,
-                    &mut u_thin,
-                    matrix.rows,
-                );
-                copy_col_major_strided(
-                    &vt_workspace,
-                    rank,
-                    matrix.cols,
-                    max_rank,
-                    &mut vt_thin,
-                    rank,
-                );
-                let u_full = orthonormal_completion(dense, &u_thin, matrix.rows, rank)?;
-                let v_thin = adjoint_col_major(&vt_thin, rank, matrix.cols);
-                let v_full = orthonormal_completion(dense, &v_thin, matrix.cols, rank)?;
-                match placement {
-                    FactorPlacement::Direct => (
-                        u_full,
-                        matrix.rows,
-                        adjoint_col_major(&v_full, matrix.cols, matrix.cols),
-                        matrix.cols,
-                        s_values,
-                    ),
+        let (mut left, left_rows, mut right, right_leading, s_values) =
+            match owned_full_svd_stage(dense, &mut matrix.data, matrix.rows, matrix.cols)? {
+                Some((u_full, s_values, vh_full)) => match placement {
+                    FactorPlacement::Direct => {
+                        (u_full, matrix.rows, vh_full, matrix.cols, s_values)
+                    }
                     FactorPlacement::Adjoint => (
-                        v_full,
+                        adjoint_col_major(&vh_full, matrix.cols, matrix.cols),
                         matrix.cols,
                         adjoint_col_major(&u_full, matrix.rows, matrix.rows),
                         matrix.rows,
                         s_values,
                     ),
+                },
+                None => {
+                    if u_workspace.is_empty() && max_rows != 0 && max_rank != 0 {
+                        u_workspace = vec![D::zero(); max_rows * max_rank];
+                        s_workspace = vec![D::Real::zero(); max_rank];
+                        vt_workspace = vec![D::zero(); max_rank * max_cols];
+                    }
+                    let shape = [matrix.rows, matrix.cols];
+                    let strides = [1usize, matrix.rows];
+                    let view = DenseView::new(&matrix.data, &shape, &strides, 0)
+                        .map_err(OperationError::Dense)?;
+                    let u_shape = [matrix.rows, rank];
+                    let u_strides = [1usize, max_rows];
+                    let s_shape = [rank];
+                    let s_strides = [1usize];
+                    let vt_shape = [rank, matrix.cols];
+                    let vt_strides = [1usize, max_rank];
+                    let u_view = DenseViewMut::new(&mut u_workspace, &u_shape, &u_strides, 0)
+                        .map_err(OperationError::Dense)?;
+                    let s_view = DenseViewMut::new(&mut s_workspace, &s_shape, &s_strides, 0)
+                        .map_err(OperationError::Dense)?;
+                    let vt_view = DenseViewMut::new(&mut vt_workspace, &vt_shape, &vt_strides, 0)
+                        .map_err(OperationError::Dense)?;
+                    dense
+                        .svd_into(
+                            D::dense_read(view),
+                            D::dense_write(u_view),
+                            D::Real::dense_write(s_view),
+                            D::dense_write(vt_view),
+                        )
+                        .map_err(OperationError::Dense)?;
+                    let s_values = s_workspace[..rank]
+                        .iter()
+                        .copied()
+                        .map(Into::into)
+                        .collect::<Vec<_>>();
+                    let mut u_thin = vec![D::zero(); matrix.rows * rank];
+                    let mut vt_thin = vec![D::zero(); rank * matrix.cols];
+                    copy_col_major_strided(
+                        &u_workspace,
+                        matrix.rows,
+                        rank,
+                        max_rows,
+                        &mut u_thin,
+                        matrix.rows,
+                    );
+                    copy_col_major_strided(
+                        &vt_workspace,
+                        rank,
+                        matrix.cols,
+                        max_rank,
+                        &mut vt_thin,
+                        rank,
+                    );
+                    let u_full = orthonormal_completion(dense, &u_thin, matrix.rows, rank)?;
+                    let v_thin = adjoint_col_major(&vt_thin, rank, matrix.cols);
+                    let v_full = orthonormal_completion(dense, &v_thin, matrix.cols, rank)?;
+                    match placement {
+                        FactorPlacement::Direct => (
+                            u_full,
+                            matrix.rows,
+                            adjoint_col_major(&v_full, matrix.cols, matrix.cols),
+                            matrix.cols,
+                            s_values,
+                        ),
+                        FactorPlacement::Adjoint => (
+                            v_full,
+                            matrix.cols,
+                            adjoint_col_major(&u_full, matrix.rows, matrix.rows),
+                            matrix.rows,
+                            s_values,
+                        ),
+                    }
                 }
-            }
-        };
+            };
         svd_full_gauge(
             &mut left,
             left_rows,
@@ -10927,88 +10922,85 @@ where
     let mut singular_values = Vec::with_capacity(matrices.len());
     for matrix in &mut matrices {
         let rank = matrix.rows.min(matrix.cols);
-        let (mut left, s_values, mut right) = match owned_full_svd_stage(
-            dense,
-            &mut matrix.data,
-            matrix.rows,
-            matrix.cols,
-        )
-        .map_err(CheckedGenericFactorPlanError::from)?
-        {
-            Some(outputs) => outputs,
-            None => {
-                if u_workspace.is_empty() && max_rows != 0 && max_rank != 0 {
-                    u_workspace = vec![D::zero(); max_rows * max_rank];
-                    s_workspace = vec![D::Real::zero(); max_rank];
-                    vt_workspace = vec![D::zero(); max_rank * max_cols];
-                }
-                let shape = [matrix.rows, matrix.cols];
-                let strides = [1usize, matrix.rows];
-                let u_shape = [matrix.rows, rank];
-                let u_strides = [1usize, max_rows];
-                let s_shape = [rank];
-                let s_strides = [1usize];
-                let vt_shape = [rank, matrix.cols];
-                let vt_strides = [1usize, max_rank];
-                let input_view = DenseView::new(&matrix.data, &shape, &strides, 0).map_err(|e| {
-                    CheckedGenericFactorPlanError::Operation(OperationError::Dense(e))
-                })?;
-                let u_view = DenseViewMut::new(&mut u_workspace, &u_shape, &u_strides, 0)
-                    .map_err(|e| {
+        let (mut left, s_values, mut right) =
+            match owned_full_svd_stage(dense, &mut matrix.data, matrix.rows, matrix.cols)
+                .map_err(CheckedGenericFactorPlanError::from)?
+            {
+                Some(outputs) => outputs,
+                None => {
+                    if u_workspace.is_empty() && max_rows != 0 && max_rank != 0 {
+                        u_workspace = vec![D::zero(); max_rows * max_rank];
+                        s_workspace = vec![D::Real::zero(); max_rank];
+                        vt_workspace = vec![D::zero(); max_rank * max_cols];
+                    }
+                    let shape = [matrix.rows, matrix.cols];
+                    let strides = [1usize, matrix.rows];
+                    let u_shape = [matrix.rows, rank];
+                    let u_strides = [1usize, max_rows];
+                    let s_shape = [rank];
+                    let s_strides = [1usize];
+                    let vt_shape = [rank, matrix.cols];
+                    let vt_strides = [1usize, max_rank];
+                    let input_view =
+                        DenseView::new(&matrix.data, &shape, &strides, 0).map_err(|e| {
+                            CheckedGenericFactorPlanError::Operation(OperationError::Dense(e))
+                        })?;
+                    let u_view = DenseViewMut::new(&mut u_workspace, &u_shape, &u_strides, 0)
+                        .map_err(|e| {
+                            CheckedGenericFactorPlanError::Operation(OperationError::Dense(e))
+                        })?;
+                    let s_view = DenseViewMut::new(&mut s_workspace, &s_shape, &s_strides, 0)
+                        .map_err(|e| {
+                            CheckedGenericFactorPlanError::Operation(OperationError::Dense(e))
+                        })?;
+                    let vt_view = DenseViewMut::new(&mut vt_workspace, &vt_shape, &vt_strides, 0)
+                        .map_err(|e| {
                         CheckedGenericFactorPlanError::Operation(OperationError::Dense(e))
                     })?;
-                let s_view = DenseViewMut::new(&mut s_workspace, &s_shape, &s_strides, 0)
-                    .map_err(|e| {
-                        CheckedGenericFactorPlanError::Operation(OperationError::Dense(e))
-                    })?;
-                let vt_view = DenseViewMut::new(&mut vt_workspace, &vt_shape, &vt_strides, 0)
-                    .map_err(|e| {
-                        CheckedGenericFactorPlanError::Operation(OperationError::Dense(e))
-                    })?;
-                dense
-                    .svd_into(
-                        D::dense_read(input_view),
-                        D::dense_write(u_view),
-                        D::Real::dense_write(s_view),
-                        D::dense_write(vt_view),
+                    dense
+                        .svd_into(
+                            D::dense_read(input_view),
+                            D::dense_write(u_view),
+                            D::Real::dense_write(s_view),
+                            D::dense_write(vt_view),
+                        )
+                        .map_err(|e| {
+                            CheckedGenericFactorPlanError::Operation(OperationError::Dense(e))
+                        })?;
+                    let mut u_thin = vec![D::zero(); matrix.rows * rank];
+                    let mut vt_thin = vec![D::zero(); rank * matrix.cols];
+                    copy_col_major_strided(
+                        &u_workspace,
+                        matrix.rows,
+                        rank,
+                        max_rows,
+                        &mut u_thin,
+                        matrix.rows,
+                    );
+                    copy_col_major_strided(
+                        &vt_workspace,
+                        rank,
+                        matrix.cols,
+                        max_rank,
+                        &mut vt_thin,
+                        rank,
+                    );
+                    let left = orthonormal_completion(dense, &u_thin, matrix.rows, rank)
+                        .map_err(CheckedGenericFactorPlanError::from)?;
+                    let v_thin = adjoint_col_major(&vt_thin, rank, matrix.cols);
+                    let v_full = orthonormal_completion(dense, &v_thin, matrix.cols, rank)
+                        .map_err(CheckedGenericFactorPlanError::from)?;
+                    (
+                        left,
+                        s_workspace[..rank]
+                            .iter()
+                            .copied()
+                            .map(Into::into)
+                            .collect(),
+                        adjoint_col_major(&v_full, matrix.cols, matrix.cols),
                     )
-                    .map_err(|e| {
-                        CheckedGenericFactorPlanError::Operation(OperationError::Dense(e))
-                    })?;
-                let mut u_thin = vec![D::zero(); matrix.rows * rank];
-                let mut vt_thin = vec![D::zero(); rank * matrix.cols];
-                copy_col_major_strided(
-                    &u_workspace,
-                    matrix.rows,
-                    rank,
-                    max_rows,
-                    &mut u_thin,
-                    matrix.rows,
-                );
-                copy_col_major_strided(
-                    &vt_workspace,
-                    rank,
-                    matrix.cols,
-                    max_rank,
-                    &mut vt_thin,
-                    rank,
-                );
-                let left = orthonormal_completion(dense, &u_thin, matrix.rows, rank)
-                    .map_err(CheckedGenericFactorPlanError::from)?;
-                let v_thin = adjoint_col_major(&vt_thin, rank, matrix.cols);
-                let v_full = orthonormal_completion(dense, &v_thin, matrix.cols, rank)
-                    .map_err(CheckedGenericFactorPlanError::from)?;
-                (
-                    left,
-                    s_workspace[..rank]
-                        .iter()
-                        .copied()
-                        .map(Into::into)
-                        .collect(),
-                    adjoint_col_major(&v_full, matrix.cols, matrix.cols),
-                )
-            }
-        };
+                }
+            };
         svd_full_gauge(
             &mut left,
             matrix.rows,

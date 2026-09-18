@@ -3,8 +3,8 @@ use num_complex::{Complex32, Complex64};
 use crate::executor::{batch_offset, strided_batch_run_len};
 use crate::layout::strides_to_isize;
 use crate::{
-    DenseBackend, DenseDotConfig, DenseError, DenseExecutor, DenseGemmBatchJob, DenseRead,
-    DenseOwned, DenseScalar, DenseTensor, DenseView, DenseViewMut, DenseWrite, MatrixOp,
+    DenseBackend, DenseDotConfig, DenseError, DenseExecutor, DenseGemmBatchJob, DenseOwned,
+    DenseRead, DenseScalar, DenseTensor, DenseView, DenseViewMut, DenseWrite, MatrixOp,
 };
 
 use std::sync::Arc;
@@ -793,10 +793,18 @@ impl DenseExecutor for DefaultDenseExecutor {
             #[cfg(test)]
             OWNED_FULL_SVD_INPUT_POINTERS.with(|pointers| {
                 let pointer = match &input {
-                    tenferro_tensor::Tensor::F32(tensor) => tensor.as_slice().unwrap().as_ptr() as usize,
-                    tenferro_tensor::Tensor::F64(tensor) => tensor.as_slice().unwrap().as_ptr() as usize,
-                    tenferro_tensor::Tensor::C32(tensor) => tensor.as_slice().unwrap().as_ptr() as usize,
-                    tenferro_tensor::Tensor::C64(tensor) => tensor.as_slice().unwrap().as_ptr() as usize,
+                    tenferro_tensor::Tensor::F32(tensor) => {
+                        tensor.as_slice().unwrap().as_ptr() as usize
+                    }
+                    tenferro_tensor::Tensor::F64(tensor) => {
+                        tensor.as_slice().unwrap().as_ptr() as usize
+                    }
+                    tenferro_tensor::Tensor::C32(tensor) => {
+                        tensor.as_slice().unwrap().as_ptr() as usize
+                    }
+                    tenferro_tensor::Tensor::C64(tensor) => {
+                        tensor.as_slice().unwrap().as_ptr() as usize
+                    }
                     _ => unreachable!("DenseOwned only contains supported full-SVD dtypes"),
                 };
                 pointers.borrow_mut().push(pointer);

@@ -34,12 +34,12 @@ pub use scalar::DenseScalar;
 pub use tensor::DenseTensor;
 pub use view::{DenseRead, DenseView, DenseViewMut, DenseWrite};
 
-#[cfg(feature = "tenferro")]
-pub use tenferro_adapter::{DefaultDenseExecutor, SharedCpuContext};
 #[cfg(all(test, feature = "tenferro"))]
 pub(crate) use tenferro_adapter::{
     owned_full_svd_input_pointers, reset_owned_full_svd_input_pointers,
 };
+#[cfg(feature = "tenferro")]
+pub use tenferro_adapter::{DefaultDenseExecutor, SharedCpuContext};
 
 /// CPU linear-algebra provider selector (faer vs system BLAS/LAPACK), re-exported
 /// from tenferro so runtimes can pick a backend via

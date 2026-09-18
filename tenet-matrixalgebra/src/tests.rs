@@ -114,12 +114,14 @@ struct EighCallSpy {
     calls: usize,
 }
 
+#[cfg(feature = "cpu-faer")]
 #[derive(Default)]
 struct NativeFullSvdSpy {
     inner: tenet_dense::DefaultDenseExecutor,
     full_calls: usize,
 }
 
+#[cfg(feature = "cpu-faer")]
 #[derive(Default)]
 struct FailSecondOwnedFullSvd {
     inner: tenet_dense::DefaultDenseExecutor,
@@ -337,6 +339,7 @@ impl DenseExecutor for SvdCallSpy {
     }
 }
 
+#[cfg(feature = "cpu-faer")]
 impl DenseExecutor for NativeFullSvdSpy {
     fn svd(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
         panic!("native full SVD must not use the legacy SVD route")
@@ -375,6 +378,7 @@ impl DenseExecutor for NativeFullSvdSpy {
     }
 }
 
+#[cfg(feature = "cpu-faer")]
 impl DenseExecutor for FailSecondOwnedFullSvd {
     fn svd(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
         panic!("claimed native full SVD must not retry the legacy route")
@@ -385,15 +389,32 @@ impl DenseExecutor for FailSecondOwnedFullSvd {
     fn eigh(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
         panic!("test only exercises full SVD")
     }
-    fn supports_svd_full(&self) -> bool { true }
-    fn svd_full_owned(&mut self, input: DenseOwned, rows: usize, cols: usize) -> Result<Vec<DenseTensor>, DenseError> {
+    fn supports_svd_full(&self) -> bool {
+        true
+    }
+    fn svd_full_owned(
+        &mut self,
+        input: DenseOwned,
+        rows: usize,
+        cols: usize,
+    ) -> Result<Vec<DenseTensor>, DenseError> {
         self.calls += 1;
         if self.calls == 2 {
-            return Err(DenseError::Backend { backend: DenseBackend::Tenferro, op: "svd_full_owned", message: "injected second-sector failure".to_string() });
+            return Err(DenseError::Backend {
+                backend: DenseBackend::Tenferro,
+                op: "svd_full_owned",
+                message: "injected second-sector failure".to_string(),
+            });
         }
         self.inner.svd_full_owned(input, rows, cols)
     }
-    fn dot_general_into(&mut self, _: DenseWrite<'_>, _: DenseRead<'_>, _: DenseRead<'_>, _: &DenseDotConfig) -> Result<(), DenseError> {
+    fn dot_general_into(
+        &mut self,
+        _: DenseWrite<'_>,
+        _: DenseRead<'_>,
+        _: DenseRead<'_>,
+        _: &DenseDotConfig,
+    ) -> Result<(), DenseError> {
         panic!("test only exercises full SVD")
     }
 }
@@ -5205,6 +5226,7 @@ fn checked_generic_full_svd_enumerates_each_output_layout_once() {
     clippy::arc_with_non_send_sync,
     reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
 )]
+#[cfg(feature = "cpu-faer")]
 fn checked_native_full_svd_stages_before_unchanged_provider_admission() {
     let (source, data) = generic_factorization_input();
     let provider = Arc::new(LateGenericSpy {
@@ -10175,6 +10197,7 @@ fn svd_full_gives_square_unitaries_and_reconstructs() {
     assert_svd_blocks_match(&tensor, &reconstructed);
 }
 
+#[cfg(feature = "cpu-faer")]
 #[test]
 fn svd_full_uses_native_owned_full_svd_without_legacy_completion() {
     let tensor = rectangular_svd_tensor(2, 3);
@@ -10187,6 +10210,7 @@ fn svd_full_uses_native_owned_full_svd_without_legacy_completion() {
     assert!(!full.singular_values().is_empty());
 }
 
+#[cfg(feature = "cpu-faer")]
 fn assert_native_full_svd_uses_builtin_owned_dtype<D: FactorScalar>() {
     let source = mixed_rectangular_c32_tensor();
     let tensor = TensorMap::<D, 1, 1>::from_vec_with_fusion_space(
@@ -10205,9 +10229,13 @@ fn assert_native_full_svd_uses_builtin_owned_dtype<D: FactorScalar>() {
 
     assert_eq!(dense.full_calls, 2);
     assert_eq!(full.singular_values().len(), 2);
-    assert!(full.singular_values().iter().all(|entry| !entry.values.is_empty()));
+    assert!(full
+        .singular_values()
+        .iter()
+        .all(|entry| !entry.values.is_empty()));
 }
 
+#[cfg(feature = "cpu-faer")]
 #[test]
 fn native_full_svd_uses_owned_inputs_for_every_builtin_dtype() {
     assert_native_full_svd_uses_builtin_owned_dtype::<f32>();
@@ -10216,6 +10244,7 @@ fn native_full_svd_uses_owned_inputs_for_every_builtin_dtype() {
     assert_native_full_svd_uses_builtin_owned_dtype::<Complex64>();
 }
 
+#[cfg(feature = "cpu-faer")]
 #[test]
 fn native_full_svd_reconstructs_complex_mixed_rectangular_sectors() {
     let source = mixed_rectangular_c32_tensor();
@@ -10291,8 +10320,7 @@ fn native_full_svd_reconstructs_complex_mixed_rectangular_sectors() {
                 let gram = (0..rows)
                     .map(|inner| {
                         full.u().data()[u_region.range().start + inner + rows * row].conj()
-                            * full.u().data()
-                                [u_region.range().start + inner + rows * column]
+                            * full.u().data()[u_region.range().start + inner + rows * column]
                     })
                     .sum::<Complex64>();
                 let expected = if row == column {
@@ -10308,8 +10336,7 @@ fn native_full_svd_reconstructs_complex_mixed_rectangular_sectors() {
                 let gram = (0..cols)
                     .map(|inner| {
                         full.vh().data()[vh_region.range().start + row + cols * inner]
-                            * full.vh().data()
-                                [vh_region.range().start + column + cols * inner]
+                            * full.vh().data()[vh_region.range().start + column + cols * inner]
                                 .conj()
                     })
                     .sum::<Complex64>();
@@ -10337,8 +10364,7 @@ fn native_full_svd_reconstructs_complex_mixed_rectangular_sectors() {
                 let actual = (0..cols)
                     .map(|inner| {
                         us[row + rows * inner]
-                            * full.vh().data()
-                                [vh_region.range().start + inner + cols * col]
+                            * full.vh().data()[vh_region.range().start + inner + cols * col]
                     })
                     .sum::<Complex64>();
                 let expected = tensor.data()[input_region.range().start + row + rows * col];
@@ -10348,6 +10374,7 @@ fn native_full_svd_reconstructs_complex_mixed_rectangular_sectors() {
     }
 }
 
+#[cfg(feature = "cpu-faer")]
 #[test]
 fn native_full_svd_late_failure_does_not_publish_or_retry_compatibility() {
     let tensor = mixed_rectangular_c32_tensor();
@@ -10361,7 +10388,10 @@ fn native_full_svd_late_failure_does_not_publish_or_retry_compatibility() {
     assert!(matches!(result, Err(OperationError::Dense(_))));
     assert_eq!(dense.calls, 2);
     assert_eq!(input.data(), before);
-    assert_eq!(crate::factorize::factor_buffer_build_counts_for_test(), (0, 0));
+    assert_eq!(
+        crate::factorize::factor_buffer_build_counts_for_test(),
+        (0, 0)
+    );
 }
 
 #[test]
