@@ -10286,6 +10286,42 @@ fn native_full_svd_reconstructs_complex_mixed_rectangular_sectors() {
         assert_eq!(vh_region.rows(), cols);
         assert_eq!(vh_region.cols(), cols);
 
+        for column in 0..rows {
+            for row in 0..rows {
+                let gram = (0..rows)
+                    .map(|inner| {
+                        full.u().data()[u_region.range().start + inner + rows * row].conj()
+                            * full.u().data()
+                                [u_region.range().start + inner + rows * column]
+                    })
+                    .sum::<Complex64>();
+                let expected = if row == column {
+                    Complex64::new(1.0, 0.0)
+                } else {
+                    Complex64::zero()
+                };
+                assert!((gram - expected).norm() < 1.0e-10);
+            }
+        }
+        for column in 0..cols {
+            for row in 0..cols {
+                let gram = (0..cols)
+                    .map(|inner| {
+                        full.vh().data()[vh_region.range().start + row + cols * inner]
+                            * full.vh().data()
+                                [vh_region.range().start + column + cols * inner]
+                                .conj()
+                    })
+                    .sum::<Complex64>();
+                let expected = if row == column {
+                    Complex64::new(1.0, 0.0)
+                } else {
+                    Complex64::zero()
+                };
+                assert!((gram - expected).norm() < 1.0e-10);
+            }
+        }
+
         let mut us = vec![Complex64::zero(); rows * cols];
         for col in 0..cols {
             for inner in 0..rows {
