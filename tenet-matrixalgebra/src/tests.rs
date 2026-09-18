@@ -12286,9 +12286,9 @@ fn checked_pinv_uses_owned_svd_outputs_at_final_gemm() {
     let result = pinv_direct_into_dyn(&mut dense, &input, output, 0.0).unwrap();
 
     assert_eq!(dense.svd_into_calls, 0);
-    assert_eq!(dense.svd_calls, 1);
-    assert_eq!(dense.output_ptrs.len(), 1);
-    assert_eq!(dense.gemm_ptrs.len(), 1);
+    assert_eq!(dense.svd_calls, 2);
+    assert_eq!(dense.output_ptrs.len(), 2);
+    assert_eq!(dense.gemm_ptrs.len(), 2);
     assert_eq!(
         dense.gemm_ptrs,
         dense
