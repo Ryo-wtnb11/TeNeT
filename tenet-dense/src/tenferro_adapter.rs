@@ -9,7 +9,26 @@ use crate::{
 
 use std::sync::Arc;
 
-use tenferro_cpu::{CpuBackend, CpuBackendKind, CpuContext};
+#[cfg(test)]
+use std::cell::RefCell;
+
+#[cfg(test)]
+thread_local! {
+    static OWNED_FULL_SVD_INPUT_POINTERS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_owned_full_svd_input_pointers() {
+    OWNED_FULL_SVD_INPUT_POINTERS.with(|pointers| pointers.borrow_mut().clear());
+}
+
+#[cfg(test)]
+pub(crate) fn owned_full_svd_input_pointers() -> Vec<usize> {
+    OWNED_FULL_SVD_INPUT_POINTERS.with(|pointers| pointers.borrow().clone())
+}
+
+#[cfg(not(feature = "provider-inject"))]
+use tenferro_cpu::{with_cpu_exec_session, CpuBackend, CpuBackendKind, CpuContext};
 #[cfg(not(feature = "provider-inject"))]
 use tenferro_linalg::{LinalgBackend, TensorLinalgExt, TensorReadLinalgExt};
 #[cfg(not(feature = "provider-inject"))]
@@ -771,10 +790,27 @@ impl DenseExecutor for DefaultDenseExecutor {
                 }
             }
             .map_err(|err| tenferro_error("svd_full_owned", err))?;
-            let outputs = with_cpu_linalg(&mut self.backend, "svd_full_owned", |exec| {
-                exec.svd_full(&input)
-            })
-            .map_err(|err| tenferro_error("svd_full_owned", err))?;
+            #[cfg(test)]
+            OWNED_FULL_SVD_INPUT_POINTERS.with(|pointers| {
+                let pointer = match &input {
+                    tenferro_tensor::Tensor::F32(tensor) => tensor.as_slice().unwrap().as_ptr() as usize,
+                    tenferro_tensor::Tensor::F64(tensor) => tensor.as_slice().unwrap().as_ptr() as usize,
+                    tenferro_tensor::Tensor::C32(tensor) => tensor.as_slice().unwrap().as_ptr() as usize,
+                    tenferro_tensor::Tensor::C64(tensor) => tensor.as_slice().unwrap().as_ptr() as usize,
+                    _ => unreachable!("DenseOwned only contains supported full-SVD dtypes"),
+                };
+                pointers.borrow_mut().push(pointer);
+            });
+            let outputs = self
+                .backend
+                .with_backend_session(|session| {
+                    with_cpu_exec_session(session, |exec| exec.svd_full(&input))
+                })
+                .ok_or_else(|| DenseError::Unsupported {
+                    op: "svd_full_owned",
+                    message: "CPU backend session unavailable".to_string(),
+                })?
+                .map_err(|err| tenferro_error("svd_full_owned", err))?;
             if outputs.len() != 3 {
                 return Err(DenseError::Backend {
                     backend: DenseBackend::Tenferro,
