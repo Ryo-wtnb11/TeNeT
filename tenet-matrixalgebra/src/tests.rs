@@ -11124,6 +11124,31 @@ fn numerical_null_rank_uses_the_documented_c32_threshold() {
 }
 
 #[test]
+fn numerical_null_rank_uses_the_documented_c64_threshold() {
+    let rule = Z2FusionRule;
+    let tolerance = f64::EPSILON * 2.0;
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    for (small, expected_nullity) in [(0.5 * tolerance, 1), (2.0 * tolerance, 0)] {
+        let matrix = one_sector_matrix(vec![
+            Complex64::new(1.0, 0.0),
+            Complex64::new(0.0, 0.0),
+            Complex64::new(0.0, 0.0),
+            Complex64::new(small, 0.0),
+        ]);
+        let input = bound_tensor(Arc::new(rule), &matrix);
+        let left = left_null(&mut dense, &input.as_ref()).unwrap();
+        let right = right_null(&mut dense, &input.as_ref()).unwrap();
+        if expected_nullity == 0 {
+            assert!(left.data().is_empty());
+            assert!(right.data().is_empty());
+        } else {
+            assert_eq!(left.structure().block(0).unwrap().shape(), &[2, 1]);
+            assert_eq!(right.structure().block(0).unwrap().shape(), &[1, 2]);
+        }
+    }
+}
+
+#[test]
 fn rectangular_rank_deficient_null_spaces_include_shape_and_rank_deficits() {
     // What: tall and wide sectors include both the rectangular shape deficit
     // and additional null directions caused by numerical rank deficiency.
