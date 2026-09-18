@@ -1873,6 +1873,16 @@ fn owned_full_svd_default_is_explicitly_unsupported() {
     ));
 }
 
+#[cfg(all(feature = "cpu-faer", not(feature = "provider-inject")))]
+#[test]
+fn default_executor_advertises_faer_owned_full_svd() {
+    assert!(
+        DefaultDenseExecutor::with_kind(CpuBackendKind::Faer)
+            .unwrap()
+            .supports_svd_full()
+    );
+}
+
 #[test]
 fn solve_default_is_explicitly_unsupported_without_writing() {
     // What: executors without solve capability reject the operation before
