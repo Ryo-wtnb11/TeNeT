@@ -65,9 +65,6 @@ mod allocation_oracle {
         RB: Send,
     {
         let measured = is_measured();
-        if !measured {
-            return rayon::join(left, right);
-        }
         let restore = RestoreMeasurement(MEASURED.with(|state| state.replace(false)));
         let result = rayon::join(
             || {
@@ -5315,6 +5312,33 @@ mod allocation_oracle_tests {
             assert!(allocation_oracle::is_measured());
             allocation_oracle::join(
                 || assert!(allocation_oracle::is_measured()),
+                || assert!(allocation_oracle::is_measured()),
+            );
+            assert!(allocation_oracle::is_measured());
+        });
+        assert!(!allocation_oracle::is_measured());
+    }
+
+    #[test]
+    fn allocation_oracle_leaves_inactive_joins_unmeasured() {
+        allocation_oracle::join(
+            || assert!(!allocation_oracle::is_measured()),
+            || assert!(!allocation_oracle::is_measured()),
+        );
+        assert!(!allocation_oracle::is_measured());
+    }
+
+    #[test]
+    fn allocation_oracle_restores_nested_worker_scopes() {
+        allocation_oracle::with_measurement(|| {
+            allocation_oracle::join(
+                || {
+                    allocation_oracle::join(
+                        || assert!(allocation_oracle::is_measured()),
+                        || assert!(allocation_oracle::is_measured()),
+                    );
+                    assert!(allocation_oracle::is_measured());
+                },
                 || assert!(allocation_oracle::is_measured()),
             );
             assert!(allocation_oracle::is_measured());
