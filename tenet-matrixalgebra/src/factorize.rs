@@ -3767,6 +3767,10 @@ where
     svd_full_oriented_dyn(dense, input, FactorPlacement::Adjoint)
 }
 
+#[expect(
+    clippy::type_complexity,
+    reason = "the private stage returns the fixed dense full-SVD tuple without another wrapper"
+)]
 fn owned_full_svd_stage<E, D>(
     dense: &mut E,
     data: &mut Vec<D>,
