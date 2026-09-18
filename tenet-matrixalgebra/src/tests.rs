@@ -12806,10 +12806,13 @@ fn pinv_adjoint_parent_rejects_invalid_rcond_before_svd() {
 fn pinv_adjoint_parent_discards_unpublished_factors_on_late_svd_failure() {
     // What: a successful first sector cannot publish factors or an output when
     // the second sector's SVD fails.
-    let tensor = u1_block_endomorphism(&[(0, 1, vec![2.0_f64]), (1, 1, vec![3.0])]);
+    let canonical = u1_block_endomorphism(&[(0, 1, vec![2.0_f64]), (1, 1, vec![3.0])]);
+    let tensor = padded_copy(&U1FusionRule, &canonical);
+    let before = tensor.data().to_vec();
     let bound = bound_tensor(Arc::new(U1FusionRule), &tensor);
     let mut dense = FailSecondSvd::default();
     let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
+    crate::factorize::reset_compact_svd_copy_probe();
 
     assert!(matches!(
         pinv_adjoint_parent_dyn(&mut dense, &mut context, &bound.as_ref().dynamic(), 0.0,),
@@ -12819,6 +12822,10 @@ fn pinv_adjoint_parent_discards_unpublished_factors_on_late_svd_failure() {
         }))
     ));
     assert_eq!(dense.calls, 2);
+    assert_eq!(tensor.data(), before);
+    let probe = crate::factorize::compact_svd_copy_probe();
+    assert!(probe.input_pack_calls > 0);
+    assert!(probe.output_scatter_calls > 0);
 }
 
 #[test]
