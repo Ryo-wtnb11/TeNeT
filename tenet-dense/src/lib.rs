@@ -34,7 +34,7 @@ pub use scalar::DenseScalar;
 pub use tensor::DenseTensor;
 pub use view::{DenseRead, DenseView, DenseViewMut, DenseWrite};
 
-#[cfg(all(test, feature = "tenferro"))]
+#[cfg(all(test, feature = "cpu-faer", not(feature = "provider-inject")))]
 pub(crate) use tenferro_adapter::{
     owned_full_svd_input_pointers, reset_owned_full_svd_input_pointers,
 };

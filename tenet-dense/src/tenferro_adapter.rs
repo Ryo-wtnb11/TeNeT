@@ -9,20 +9,20 @@ use crate::{
 
 use std::sync::Arc;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "cpu-faer", not(feature = "provider-inject")))]
 use std::cell::RefCell;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "cpu-faer", not(feature = "provider-inject")))]
 thread_local! {
     static OWNED_FULL_SVD_INPUT_POINTERS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "cpu-faer", not(feature = "provider-inject")))]
 pub(crate) fn reset_owned_full_svd_input_pointers() {
     OWNED_FULL_SVD_INPUT_POINTERS.with(|pointers| pointers.borrow_mut().clear());
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "cpu-faer", not(feature = "provider-inject")))]
 pub(crate) fn owned_full_svd_input_pointers() -> Vec<usize> {
     OWNED_FULL_SVD_INPUT_POINTERS.with(|pointers| pointers.borrow().clone())
 }
@@ -791,7 +791,7 @@ impl DenseExecutor for DefaultDenseExecutor {
                 }
             }
             .map_err(|err| tenferro_error("svd_full_owned", err))?;
-            #[cfg(test)]
+            #[cfg(all(test, feature = "cpu-faer", not(feature = "provider-inject")))]
             OWNED_FULL_SVD_INPUT_POINTERS.with(|pointers| {
                 let pointer = match &input {
                     tenferro_tensor::Tensor::F32(tensor) => {
