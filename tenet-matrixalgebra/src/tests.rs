@@ -12295,13 +12295,13 @@ fn pinv_direct_into_rejects_foreign_authority_and_wrong_output_before_execution(
     assert!(matches!(error, OperationError::StructureMismatch { .. }));
 }
 
-#[test]
 #[expect(
     clippy::arc_with_non_send_sync,
     reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
 )]
-fn checked_pinv_uses_owned_svd_outputs_at_final_gemm() {
+fn assert_checked_pinv_uses_owned_svd_outputs_at_final_gemm<D: crate::factorize::FactorScalar>() {
     let (base, data) = generic_factorization_input();
+    let data = data.into_iter().map(D::from_real).collect::<Vec<_>>();
     let (provider, source) = bind_checked_only(&base);
     let input = BoundDynamicTensorRef::try_new(&source, &data).unwrap();
     let output = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
@@ -12346,6 +12346,14 @@ fn checked_pinv_uses_owned_svd_outputs_at_final_gemm() {
         assert!(*lhs_conj && *rhs_conj);
     }
     assert!(std::ptr::eq(result.space().provider_arc().as_ref(), provider.as_ref()));
+}
+
+#[test]
+fn checked_pinv_uses_owned_svd_outputs_at_final_gemm() {
+    assert_checked_pinv_uses_owned_svd_outputs_at_final_gemm::<f32>();
+    assert_checked_pinv_uses_owned_svd_outputs_at_final_gemm::<f64>();
+    assert_checked_pinv_uses_owned_svd_outputs_at_final_gemm::<Complex32>();
+    assert_checked_pinv_uses_owned_svd_outputs_at_final_gemm::<Complex64>();
 }
 
 #[test]
