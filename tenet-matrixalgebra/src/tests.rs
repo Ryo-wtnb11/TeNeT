@@ -44,6 +44,7 @@ struct RejectSvdInto {
     svd_calls: usize,
     svd_into_calls: usize,
     output_ptrs: Vec<(usize, usize)>,
+    gemm_ptrs: Vec<(usize, usize)>,
 }
 
 #[derive(Default)]
@@ -68,6 +69,18 @@ fn dense_tensor_pointer(tensor: &DenseTensor) -> usize {
         return data.as_ptr() as usize;
     }
     panic!("compact SVD fixture must return a supported host dtype")
+}
+
+fn dense_read_pointer(read: &DenseRead<'_>) -> usize {
+    match read {
+        DenseRead::F32(view) => view.data().as_ptr() as usize,
+        DenseRead::F64(view) => view.data().as_ptr() as usize,
+        DenseRead::I32(view) => view.data().as_ptr() as usize,
+        DenseRead::I64(view) => view.data().as_ptr() as usize,
+        DenseRead::Bool(view) => view.data().as_ptr() as usize,
+        DenseRead::C32(view) => view.data().as_ptr() as usize,
+        DenseRead::C64(view) => view.data().as_ptr() as usize,
+    }
 }
 
 #[derive(Default)]
@@ -496,6 +509,8 @@ impl DenseExecutor for RejectSvdInto {
         rhs: DenseRead<'_>,
         config: &DenseDotConfig,
     ) -> Result<(), DenseError> {
+        self.gemm_ptrs
+            .push((dense_read_pointer(&lhs), dense_read_pointer(&rhs)));
         self.inner.dot_general_into(output, lhs, rhs, config)
     }
 }
@@ -12247,6 +12262,42 @@ fn pinv_direct_into_rejects_foreign_authority_and_wrong_output_before_execution(
     .unwrap();
     let error = pinv_direct_into_dyn(&mut RejectExecutorCalls, &input, wrong, 0.0).unwrap_err();
     assert!(matches!(error, OperationError::StructureMismatch { .. }));
+}
+
+#[test]
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
+fn checked_pinv_uses_owned_svd_outputs_at_final_gemm() {
+    let (base, data) = generic_factorization_input();
+    let (provider, source) = bind_checked_only(&base);
+    let input = BoundDynamicTensorRef::try_new(&source, &data).unwrap();
+    let output = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+        Arc::clone(&provider),
+        FusionTreeHomSpace::new(
+            source.space().homspace().domain().clone(),
+            source.space().homspace().codomain().clone(),
+        ),
+    )
+    .unwrap();
+    let mut dense = RejectSvdInto::default();
+
+    let result = pinv_direct_into_dyn(&mut dense, &input, output, 0.0).unwrap();
+
+    assert_eq!(dense.svd_into_calls, 0);
+    assert_eq!(dense.svd_calls, 1);
+    assert_eq!(dense.output_ptrs.len(), 1);
+    assert_eq!(dense.gemm_ptrs.len(), 1);
+    assert_eq!(
+        dense.gemm_ptrs,
+        dense
+            .output_ptrs
+            .iter()
+            .map(|&(u, vt)| (vt, u))
+            .collect::<Vec<_>>(),
+    );
+    assert!(std::ptr::eq(result.space().provider_arc().as_ref(), provider.as_ref()));
 }
 
 #[test]
