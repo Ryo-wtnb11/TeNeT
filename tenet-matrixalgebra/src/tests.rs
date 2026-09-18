@@ -10131,6 +10131,35 @@ fn svd_full_uses_native_owned_full_svd_without_legacy_completion() {
     assert!(!full.singular_values().is_empty());
 }
 
+fn assert_native_full_svd_uses_builtin_owned_dtype<D: FactorScalar>() {
+    let source = mixed_rectangular_c32_tensor();
+    let tensor = TensorMap::<D, 1, 1>::from_vec_with_fusion_space(
+        source
+            .data()
+            .iter()
+            .map(|value| D::from_complex64(Complex64::new(value.re as f64, value.im as f64)))
+            .collect(),
+        source.fusion_space().unwrap().as_ref().clone(),
+    )
+    .unwrap();
+    let input = bound_tensor(Arc::new(Z2FusionRule), &tensor);
+    let mut dense = NativeFullSvdSpy::default();
+
+    let full = svd_full_dyn(&mut dense, &input.as_ref().dynamic()).unwrap();
+
+    assert_eq!(dense.full_calls, 2);
+    assert_eq!(full.singular_values().len(), 2);
+    assert!(full.singular_values().iter().all(|entry| !entry.values.is_empty()));
+}
+
+#[test]
+fn native_full_svd_uses_owned_inputs_for_every_builtin_dtype() {
+    assert_native_full_svd_uses_builtin_owned_dtype::<f32>();
+    assert_native_full_svd_uses_builtin_owned_dtype::<f64>();
+    assert_native_full_svd_uses_builtin_owned_dtype::<Complex32>();
+    assert_native_full_svd_uses_builtin_owned_dtype::<Complex64>();
+}
+
 #[test]
 fn full_factorizations_preserve_compact_bytes_on_matching_square_support() {
     let rule = U1FusionRule;
