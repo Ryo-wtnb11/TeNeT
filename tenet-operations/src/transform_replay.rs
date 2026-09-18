@@ -2,10 +2,10 @@ use core::mem::MaybeUninit;
 use core::ops::{Add, Mul};
 use std::sync::{Arc, Weak};
 
-#[cfg(not(test))]
-use rayon::join as replay_join;
 #[cfg(test)]
 use allocation_oracle::join as replay_join;
+#[cfg(not(test))]
+use rayon::join as replay_join;
 
 use num_traits::{One, Zero};
 use tenet_core::{
@@ -112,7 +112,9 @@ mod allocation_oracle {
         assert!(!is_measured());
         assert!(!SESSION_ACTIVE.with(Cell::get));
         let restore = RestoreSession(SESSION_ACTIVE.with(|active| active.replace(true)));
-        let session = SESSION.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let session = SESSION
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         ALLOCATIONS.store(0, Ordering::Relaxed);
         JOINS.store(0, Ordering::Relaxed);
         let result = action();
@@ -147,15 +149,13 @@ mod allocation_oracle {
         let restore = RestoreMeasurement(MEASURED.with(|state| state.replace(false)));
         let result = rayon::join(
             || {
-                let restore =
-                    RestoreMeasurement(MEASURED.with(|state| state.replace(measured)));
+                let restore = RestoreMeasurement(MEASURED.with(|state| state.replace(measured)));
                 let result = left();
                 drop(restore);
                 result
             },
             || {
-                let restore =
-                    RestoreMeasurement(MEASURED.with(|state| state.replace(measured)));
+                let restore = RestoreMeasurement(MEASURED.with(|state| state.replace(measured)));
                 let result = right();
                 drop(restore);
                 result
@@ -5457,8 +5457,7 @@ mod allocation_replay_tests {
     #[test]
     fn warm_threaded_replay_has_no_owned_allocations() {
         let block_structure = Arc::new(
-            BlockStructure::packed_column_major(1, [vec![4], vec![4], vec![4], vec![4]])
-                .unwrap(),
+            BlockStructure::packed_column_major(1, [vec![4], vec![4], vec![4], vec![4]]).unwrap(),
         );
         let structure = TreeTransformStructure::compile_structures(
             &block_structure,
@@ -5472,13 +5471,22 @@ mod allocation_replay_tests {
         .unwrap();
         let src = (1..=16).map(f64::from).collect::<Vec<_>>();
         let expected = (1..=16)
-            .map(|value| if value <= 12 { f64::from(value) } else { -f64::from(value) })
+            .map(|value| {
+                if value <= 12 {
+                    f64::from(value)
+                } else {
+                    -f64::from(value)
+                }
+            })
             .collect::<Vec<_>>();
         let mut dst = vec![0.0; 16];
         let mut kernels = StridedHostKernelAdapter::default();
         let mut dense = NoAllocDenseExecutor;
         let mut workspace = TreeTransformWorkspace::default();
-        let pool = rayon::ThreadPoolBuilder::new().num_threads(3).build().unwrap();
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(3)
+            .build()
+            .unwrap();
 
         let mut replay = || {
             tree_transform_structure_with_structural_recoupling_raw(
@@ -5514,8 +5522,7 @@ mod allocation_replay_tests {
     #[test]
     fn warm_threaded_overwrite_replay_has_no_owned_allocations() {
         let block_structure = Arc::new(
-            BlockStructure::packed_column_major(1, [vec![4], vec![4], vec![4], vec![4]])
-                .unwrap(),
+            BlockStructure::packed_column_major(1, [vec![4], vec![4], vec![4], vec![4]]).unwrap(),
         );
         let structure = TreeTransformStructure::compile_structures(
             &block_structure,
@@ -5529,13 +5536,22 @@ mod allocation_replay_tests {
         .unwrap();
         let src = (1..=16).map(f64::from).collect::<Vec<_>>();
         let expected = (1..=16)
-            .map(|value| if value <= 12 { f64::from(value) } else { -f64::from(value) })
+            .map(|value| {
+                if value <= 12 {
+                    f64::from(value)
+                } else {
+                    -f64::from(value)
+                }
+            })
             .collect::<Vec<_>>();
         let mut dst = vec![f64::NAN; 16];
         let mut kernels = StridedHostKernelAdapter::default();
         let mut dense = NoAllocDenseExecutor;
         let mut workspace = TreeTransformWorkspace::default();
-        let pool = rayon::ThreadPoolBuilder::new().num_threads(3).build().unwrap();
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(3)
+            .build()
+            .unwrap();
 
         let mut replay = || {
             dst.fill(f64::NAN);
@@ -5627,7 +5643,10 @@ mod allocation_replay_tests {
         let mut kernels = StridedHostKernelAdapter::default();
         let mut dense = NoAllocDenseExecutor;
         let mut workspace = TreeTransformWorkspace::default();
-        let pool = rayon::ThreadPoolBuilder::new().num_threads(3).build().unwrap();
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(3)
+            .build()
+            .unwrap();
         pool.install(|| {
             tree_transform_structure_with_structural_recoupling_raw(
                 &mut kernels,
@@ -5754,10 +5773,12 @@ mod allocation_oracle_tests {
 
     #[test]
     fn allocation_oracle_rejects_worker_sessions() {
-        let pool = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap();
-        let worker_session = pool.install(|| {
-            catch_unwind(AssertUnwindSafe(|| allocation_oracle::with_session(|| ())))
-        });
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap();
+        let worker_session = pool
+            .install(|| catch_unwind(AssertUnwindSafe(|| allocation_oracle::with_session(|| ()))));
         assert!(worker_session.is_err());
 
         let (_, allocations) = allocation_oracle::with_session(|| ());
