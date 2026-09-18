@@ -3,12 +3,9 @@
 //! tenet workspace that touches tenferro GPU types; upper layers see opaque
 //! storage handles and `DenseError`.
 
-use tenferro_gpu::cuda::{
-    download_tensor, upload_tensor, with_cuda_exec_session, CudaBackend, CudaDeviceId,
-    CudaExecSession,
-};
+use tenferro_gpu::cuda::{download_tensor, upload_tensor, CudaBackend, CudaDeviceId};
 use tenferro_linalg::TensorReadLinalgExt;
-use tenferro_tensor::backend::BackendSessionHost;
+use tenferro_tensor::backend::{BackendSession, BackendSessionHost};
 use tenferro_tensor::{
     ContractionScalar, DotGeneralAccumulation, DotGeneralConfig, Tensor, TensorDot,
     TensorElementwise, TensorRead, TensorReduction, TensorStructural, TensorView,
@@ -35,14 +32,9 @@ fn cuda_error(op: &'static str, err: impl std::fmt::Display) -> DenseError {
 
 fn with_cuda_linalg<R: Send>(
     backend: &mut CudaBackend,
-    op: &'static str,
-    f: impl for<'a> FnOnce(&'a mut CudaExecSession<'a>) -> tenferro_tensor::Result<R> + Send,
+    f: impl FnOnce(&mut dyn BackendSession) -> tenferro_tensor::Result<R> + Send,
 ) -> tenferro_tensor::Result<R> {
-    backend
-        .with_backend_session(|session| with_cuda_exec_session(session, f))
-        .ok_or_else(|| {
-            tenferro_tensor::Error::unsupported(op, "CUDA backend session unavailable")
-        })?
+    backend.with_backend_session(f)
 }
 
 fn cuda_operand_view(op: MatrixOp, rows: usize, cols: usize) -> ([usize; 2], bool) {
@@ -569,7 +561,7 @@ pub fn cuda_svd_region(
 ) -> Result<(CudaDenseStorage, Vec<f64>, CudaDenseStorage), DenseError> {
     ensure_cuda_device(ctx.device, "cuda_svd", &[("src", src.device)])?;
     let view = src.region_view(rows, cols, rows, offset)?;
-    let (u, s, vt) = with_cuda_linalg(&mut ctx.backend, "cuda_svd", |exec| {
+    let (u, s, vt) = with_cuda_linalg(&mut ctx.backend, |exec| {
         TensorRead::from_view(view).svd_read(exec)
     })
     .map_err(|err| cuda_error("cuda_svd", err))?;
@@ -613,7 +605,7 @@ pub fn cuda_qr_region(
 ) -> Result<(CudaDenseStorage, CudaDenseStorage, Vec<f64>), DenseError> {
     ensure_cuda_device(ctx.device, "cuda_qr", &[("src", src.device)])?;
     let view = src.region_view(rows, cols, rows, offset)?;
-    let (q, r) = with_cuda_linalg(&mut ctx.backend, "cuda_qr", |exec| {
+    let (q, r) = with_cuda_linalg(&mut ctx.backend, |exec| {
         TensorRead::from_view(view).qr_read(exec)
     })
     .map_err(|err| cuda_error("cuda_qr", err))?;
@@ -678,7 +670,7 @@ pub fn cuda_eigh_region(
 ) -> Result<(Vec<f64>, CudaDenseStorage), DenseError> {
     ensure_cuda_device(ctx.device, "cuda_eigh", &[("src", src.device)])?;
     let view = src.region_view(n, n, n, offset)?;
-    let (values, vectors) = with_cuda_linalg(&mut ctx.backend, "cuda_eigh", |exec| {
+    let (values, vectors) = with_cuda_linalg(&mut ctx.backend, |exec| {
         TensorRead::from_view(view).eigh_read(exec)
     })
     .map_err(|err| cuda_error("cuda_eigh", err))?;
