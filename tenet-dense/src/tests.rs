@@ -2196,6 +2196,80 @@ fn values_only_defaults_fall_back_to_the_full_decomposition_spectrum() {
     }
 }
 
+#[test]
+fn default_executor_svd_vals_returns_literal_spectra_for_every_dense_dtype() {
+    // What: all four supported input dtypes yield their real-partner singular
+    // spectrum, including tall, wide, rank-deficient, repeated, and genuinely
+    // complex matrices.
+    let mut executor = DefaultDenseExecutor::new();
+    let c32 = |re, im| Complex32::new(re, im);
+    let c64 = |re, im| Complex64::new(re, im);
+
+    let f32_shape = [2, 3];
+    let f32_data = [0.0_f32, 0.0, 3.0, 0.0, 4.0, 0.0];
+    let f32_before = f32_data;
+    let values = executor
+        .svd_vals(DenseRead::F32(
+            DenseView::new(&f32_data, &f32_shape, &[1, 2], 0).unwrap(),
+        ))
+        .unwrap();
+    assert_eq!(values.dtype(), DenseDType::F32);
+    let values = values.as_f32_slice().unwrap();
+    assert_eq!(values.len(), 2);
+    for (actual, expected) in values.iter().zip([5.0, 0.0]) {
+        assert_f32_close(*actual, expected, 1.0e-5);
+    }
+    assert_eq!(f32_data, f32_before);
+
+    let f64_shape = [3, 2];
+    let f64_data = [3.0_f64, 4.0, 0.0, 0.0, 0.0, 0.0];
+    let f64_before = f64_data;
+    let values = executor
+        .svd_vals(DenseRead::F64(
+            DenseView::new(&f64_data, &f64_shape, &[1, 3], 0).unwrap(),
+        ))
+        .unwrap();
+    assert_eq!(values.dtype(), DenseDType::F64);
+    let values = values.as_f64_slice().unwrap();
+    assert_eq!(values.len(), 2);
+    for (actual, expected) in values.iter().zip([5.0, 0.0]) {
+        assert_f64_close(*actual, expected, 1.0e-12);
+    }
+    assert_eq!(f64_data, f64_before);
+
+    let c32_shape = [2, 2];
+    let c32_data = [c32(3.0, 0.0), c32(0.0, 0.0), c32(0.0, 0.0), c32(0.0, 0.0)];
+    let c32_before = c32_data;
+    let values = executor
+        .svd_vals(DenseRead::C32(
+            DenseView::new(&c32_data, &c32_shape, &[1, 2], 0).unwrap(),
+        ))
+        .unwrap();
+    assert_eq!(values.dtype(), DenseDType::F32);
+    let values = values.as_f32_slice().unwrap();
+    assert_eq!(values.len(), 2);
+    for (actual, expected) in values.iter().zip([3.0, 0.0]) {
+        assert_f32_close(*actual, expected, 1.0e-5);
+    }
+    assert_eq!(c32_data, c32_before);
+
+    let c64_shape = [2, 2];
+    let c64_data = [c64(1.0, 0.0), c64(0.0, 1.0), c64(0.0, 1.0), c64(1.0, 0.0)];
+    let c64_before = c64_data;
+    let values = executor
+        .svd_vals(DenseRead::C64(
+            DenseView::new(&c64_data, &c64_shape, &[1, 2], 0).unwrap(),
+        ))
+        .unwrap();
+    assert_eq!(values.dtype(), DenseDType::F64);
+    let values = values.as_f64_slice().unwrap();
+    assert_eq!(values.len(), 2);
+    for (actual, expected) in values.iter().zip([2.0_f64.sqrt(), 2.0_f64.sqrt()]) {
+        assert_f64_close(*actual, expected, 1.0e-12);
+    }
+    assert_eq!(c64_data, c64_before);
+}
+
 fn batch_job(shape: (usize, usize, usize), offsets: (usize, usize, usize)) -> DenseGemmBatchJob {
     DenseGemmBatchJob {
         rows: shape.0,
