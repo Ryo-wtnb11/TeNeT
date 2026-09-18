@@ -1856,6 +1856,141 @@ impl DenseExecutor for FullOnly {
 }
 
 #[test]
+fn owned_full_svd_default_is_explicitly_unsupported() {
+    let mut executor = FullOnly(DefaultDenseExecutor::new());
+
+    assert!(!executor.supports_svd_full());
+    let error = executor
+        .svd_full_owned(DenseOwned::F64(vec![1.0]), 1, 1)
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        DenseError::Unsupported {
+            op: "svd_full_owned",
+            ..
+        }
+    ));
+}
+
+#[cfg(all(feature = "cpu-faer", not(feature = "provider-inject")))]
+#[test]
+fn default_executor_advertises_faer_owned_full_svd() {
+    assert!(DefaultDenseExecutor::with_kind(CpuBackendKind::Faer)
+        .unwrap()
+        .supports_svd_full());
+}
+
+#[cfg(all(feature = "cpu-faer", not(feature = "provider-inject")))]
+#[test]
+fn default_executor_runs_faer_owned_full_svd() {
+    let mut executor = DefaultDenseExecutor::with_kind(CpuBackendKind::Faer).unwrap();
+    let outputs = executor
+        .svd_full_owned(DenseOwned::F64(vec![1.0, 3.0, 2.0, 4.0, 5.0, 6.0]), 2, 3)
+        .unwrap();
+
+    assert_eq!(outputs.len(), 3);
+    assert_eq!(outputs[0].shape(), [2, 2]);
+    assert_eq!(outputs[1].shape(), [2]);
+    assert_eq!(outputs[2].shape(), [3, 3]);
+}
+
+#[cfg(all(feature = "cpu-faer", not(feature = "provider-inject")))]
+#[test]
+fn faer_owned_full_svd_validates_overflow_length_then_zero_extent() {
+    let mut executor = DefaultDenseExecutor::with_kind(CpuBackendKind::Faer).unwrap();
+    reset_owned_full_svd_input_pointers();
+
+    assert!(matches!(
+        executor.svd_full_owned(DenseOwned::F64(Vec::new()), usize::MAX, 2),
+        Err(DenseError::ElementCountOverflow)
+    ));
+    assert!(matches!(
+        executor.svd_full_owned(DenseOwned::F64(vec![1.0]), 2, 2),
+        Err(DenseError::Backend {
+            op: "svd_full_owned",
+            ..
+        })
+    ));
+    assert!(matches!(
+        executor.svd_full_owned(DenseOwned::F64(Vec::new()), 0, 2),
+        Err(DenseError::Unsupported {
+            op: "svd_full_owned",
+            ..
+        })
+    ));
+    assert!(matches!(
+        executor.svd_full_owned(DenseOwned::F64(Vec::new()), 2, 0),
+        Err(DenseError::Unsupported {
+            op: "svd_full_owned",
+            ..
+        })
+    ));
+    assert!(matches!(
+        executor.svd_full_owned(DenseOwned::F64(Vec::new()), 0, 0),
+        Err(DenseError::Unsupported {
+            op: "svd_full_owned",
+            ..
+        })
+    ));
+    assert!(matches!(
+        executor.svd_full_owned(DenseOwned::F64(vec![1.0]), 0, 2),
+        Err(DenseError::Backend {
+            op: "svd_full_owned",
+            ..
+        })
+    ));
+    assert!(owned_full_svd_input_pointers().is_empty());
+}
+
+#[cfg(all(feature = "cpu-faer", not(feature = "provider-inject")))]
+#[test]
+fn faer_owned_full_svd_moves_each_dtype_input_buffer() {
+    let mut executor = DefaultDenseExecutor::with_kind(CpuBackendKind::Faer).unwrap();
+    reset_owned_full_svd_input_pointers();
+    let mut expected = Vec::new();
+
+    let f32 = vec![1.0_f32, 3.0, 2.0, 4.0];
+    expected.push(f32.as_ptr() as usize);
+    assert_eq!(
+        executor
+            .svd_full_owned(DenseOwned::F32(f32), 2, 2)
+            .unwrap()
+            .len(),
+        3
+    );
+    let f64 = vec![1.0_f64, 3.0, 2.0, 4.0];
+    expected.push(f64.as_ptr() as usize);
+    assert_eq!(
+        executor
+            .svd_full_owned(DenseOwned::F64(f64), 2, 2)
+            .unwrap()
+            .len(),
+        3
+    );
+    let c32 = vec![Complex32::new(1.0, 1.0); 4];
+    expected.push(c32.as_ptr() as usize);
+    assert_eq!(
+        executor
+            .svd_full_owned(DenseOwned::C32(c32), 2, 2)
+            .unwrap()
+            .len(),
+        3
+    );
+    let c64 = vec![Complex64::new(1.0, 1.0); 4];
+    expected.push(c64.as_ptr() as usize);
+    assert_eq!(
+        executor
+            .svd_full_owned(DenseOwned::C64(c64), 2, 2)
+            .unwrap()
+            .len(),
+        3
+    );
+
+    assert_eq!(owned_full_svd_input_pointers(), expected);
+}
+
+#[test]
 fn solve_default_is_explicitly_unsupported_without_writing() {
     // What: executors without solve capability reject the operation before
     // publishing anything into the caller's destination.

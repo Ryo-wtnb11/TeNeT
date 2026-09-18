@@ -24,7 +24,8 @@ use num_complex::{Complex32, Complex64};
 use num_traits::Zero;
 use std::{cell::Cell, convert::Infallible, fmt, sync::Arc};
 use tenet_dense::{
-    DenseBackend, DenseDotConfig, DenseError, DenseExecutor, DenseRead, DenseTensor, DenseWrite,
+    CpuBackendKind, DenseBackend, DenseDotConfig, DenseError, DenseExecutor, DenseOwned, DenseRead,
+    DenseTensor, DenseWrite,
 };
 
 struct RejectExecutorCalls;
@@ -111,6 +112,58 @@ struct FailAfterObservingEighInput {
 #[derive(Default)]
 struct EighCallSpy {
     calls: usize,
+}
+
+struct NativeFullSvdSpy {
+    inner: tenet_dense::DefaultDenseExecutor,
+    full_calls: usize,
+}
+
+struct FailSecondOwnedFullSvd {
+    inner: tenet_dense::DefaultDenseExecutor,
+    calls: usize,
+}
+
+fn native_full_svd_executor() -> Option<tenet_dense::DefaultDenseExecutor> {
+    match tenet_dense::DefaultDenseExecutor::with_kind(CpuBackendKind::Faer) {
+        Ok(executor) if executor.supports_svd_full() => Some(executor),
+        Ok(mut executor) => {
+            assert!(matches!(
+                executor.svd_full_owned(DenseOwned::F64(vec![1.0]), 1, 1),
+                Err(DenseError::Unsupported {
+                    op: "svd_full_owned",
+                    ..
+                })
+            ));
+            None
+        }
+        Err(_) => {
+            let mut executor = tenet_dense::DefaultDenseExecutor::new();
+            assert!(matches!(
+                executor.svd_full_owned(DenseOwned::F64(vec![1.0]), 1, 1),
+                Err(DenseError::Unsupported {
+                    op: "svd_full_owned",
+                    ..
+                })
+            ));
+            None
+        }
+    }
+}
+
+impl NativeFullSvdSpy {
+    fn new() -> Option<Self> {
+        native_full_svd_executor().map(|inner| Self {
+            inner,
+            full_calls: 0,
+        })
+    }
+}
+
+impl FailSecondOwnedFullSvd {
+    fn new() -> Option<Self> {
+        native_full_svd_executor().map(|inner| Self { inner, calls: 0 })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -321,6 +374,84 @@ impl DenseExecutor for SvdCallSpy {
         config: &DenseDotConfig,
     ) -> Result<(), DenseError> {
         self.inner.dot_general_into(output, lhs, rhs, config)
+    }
+}
+
+impl DenseExecutor for NativeFullSvdSpy {
+    fn svd(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        panic!("native full SVD must not use the legacy SVD route")
+    }
+
+    fn qr(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        panic!("native full SVD must not use orthonormal completion")
+    }
+
+    fn eigh(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        panic!("test only exercises full SVD")
+    }
+
+    fn supports_svd_full(&self) -> bool {
+        true
+    }
+
+    fn svd_full_owned(
+        &mut self,
+        input: DenseOwned,
+        rows: usize,
+        cols: usize,
+    ) -> Result<Vec<DenseTensor>, DenseError> {
+        self.full_calls += 1;
+        self.inner.svd_full_owned(input, rows, cols)
+    }
+
+    fn dot_general_into(
+        &mut self,
+        _: DenseWrite<'_>,
+        _: DenseRead<'_>,
+        _: DenseRead<'_>,
+        _: &DenseDotConfig,
+    ) -> Result<(), DenseError> {
+        panic!("test only exercises full SVD")
+    }
+}
+
+impl DenseExecutor for FailSecondOwnedFullSvd {
+    fn svd(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        panic!("claimed native full SVD must not retry the legacy route")
+    }
+    fn qr(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        panic!("claimed native full SVD must not use completion")
+    }
+    fn eigh(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        panic!("test only exercises full SVD")
+    }
+    fn supports_svd_full(&self) -> bool {
+        true
+    }
+    fn svd_full_owned(
+        &mut self,
+        input: DenseOwned,
+        rows: usize,
+        cols: usize,
+    ) -> Result<Vec<DenseTensor>, DenseError> {
+        self.calls += 1;
+        if self.calls == 2 {
+            return Err(DenseError::Backend {
+                backend: DenseBackend::Tenferro,
+                op: "svd_full_owned",
+                message: "injected second-sector failure".to_string(),
+            });
+        }
+        self.inner.svd_full_owned(input, rows, cols)
+    }
+    fn dot_general_into(
+        &mut self,
+        _: DenseWrite<'_>,
+        _: DenseRead<'_>,
+        _: DenseRead<'_>,
+        _: &DenseDotConfig,
+    ) -> Result<(), DenseError> {
+        panic!("test only exercises full SVD")
     }
 }
 
@@ -5124,6 +5255,35 @@ fn checked_generic_full_svd_enumerates_each_output_layout_once() {
     assert_eq!(enumeration(output.s()), 0);
     assert!(Arc::ptr_eq(output.u().space().provider_arc(), &provider));
     assert!(Arc::ptr_eq(output.vh().space().provider_arc(), &provider));
+}
+
+#[test]
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
+fn checked_native_full_svd_stages_before_unchanged_provider_admission() {
+    let (source, data) = generic_factorization_input();
+    let provider = Arc::new(LateGenericSpy {
+        rule: FactorGenericRule,
+        fail_at: usize::MAX,
+        calls: Cell::new(0),
+    });
+    let checked =
+        BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
+            .unwrap();
+    let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
+    let Some(mut dense) = NativeFullSvdSpy::new() else {
+        return;
+    };
+
+    let full = svd_full_dyn_checked_generic(&mut dense, &input).unwrap();
+
+    assert_eq!(dense.full_calls, 2);
+    assert_eq!(provider.calls.get(), FULL_SVD_VH_LAST_CALL);
+    assert!(Arc::ptr_eq(full.u().space().provider_arc(), &provider));
+    assert!(Arc::ptr_eq(full.s().space().provider_arc(), &provider));
+    assert!(Arc::ptr_eq(full.vh().space().provider_arc(), &provider));
 }
 
 fn late_spy_calls(run: &dyn Fn(&LateGenericSpy)) -> usize {
@@ -10072,6 +10232,269 @@ fn svd_full_gives_square_unitaries_and_reconstructs() {
         .unwrap();
     let reconstructed = contract_pair(&rule, &tensor, &us, &full.vh);
     assert_svd_blocks_match(&tensor, &reconstructed);
+}
+
+#[test]
+fn svd_full_uses_native_owned_full_svd_without_legacy_completion() {
+    let tensor = rectangular_svd_tensor(2, 3);
+    let input = bound_tensor(Arc::new(Z2FusionRule), &tensor);
+    let Some(mut dense) = NativeFullSvdSpy::new() else {
+        return;
+    };
+
+    let full = svd_full_dyn(&mut dense, &input.as_ref().dynamic()).unwrap();
+
+    assert_eq!(dense.full_calls, 1);
+    assert!(!full.singular_values().is_empty());
+}
+
+fn assert_native_full_svd_uses_builtin_owned_dtype<D: FactorScalar>() {
+    let source = mixed_rectangular_c32_tensor();
+    let tensor = TensorMap::<D, 1, 1>::from_vec_with_fusion_space(
+        source
+            .data()
+            .iter()
+            .map(|value| D::from_complex64(Complex64::new(value.re as f64, value.im as f64)))
+            .collect(),
+        source.fusion_space().unwrap().as_ref().clone(),
+    )
+    .unwrap();
+    let input = bound_tensor(Arc::new(Z2FusionRule), &tensor);
+    let Some(mut dense) = NativeFullSvdSpy::new() else {
+        return;
+    };
+
+    let full = svd_full_dyn(&mut dense, &input.as_ref().dynamic()).unwrap();
+
+    assert_eq!(dense.full_calls, 2);
+    assert_eq!(full.singular_values().len(), 2);
+    assert!(full
+        .singular_values()
+        .iter()
+        .all(|entry| !entry.values.is_empty()));
+}
+
+#[test]
+fn native_full_svd_uses_owned_inputs_for_every_builtin_dtype() {
+    assert_native_full_svd_uses_builtin_owned_dtype::<f32>();
+    assert_native_full_svd_uses_builtin_owned_dtype::<f64>();
+    assert_native_full_svd_uses_builtin_owned_dtype::<Complex32>();
+    assert_native_full_svd_uses_builtin_owned_dtype::<Complex64>();
+}
+
+#[test]
+fn native_full_svd_reconstructs_complex_mixed_rectangular_sectors() {
+    let source = mixed_rectangular_c32_tensor();
+    let tensor = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
+        source
+            .data()
+            .iter()
+            .map(|value| Complex64::new(value.re as f64, value.im as f64))
+            .collect(),
+        source.fusion_space().unwrap().as_ref().clone(),
+    )
+    .unwrap();
+    let input = bound_tensor(Arc::new(Z2FusionRule), &tensor);
+    let Some(mut dense) = NativeFullSvdSpy::new() else {
+        return;
+    };
+
+    let full = svd_full_dyn(&mut dense, &input.as_ref().dynamic()).unwrap();
+    assert_eq!(dense.full_calls, 2);
+
+    let input_regions = tensor
+        .structure()
+        .coupled_sector_regions(1)
+        .unwrap()
+        .unwrap();
+    let u_regions = full
+        .u()
+        .space()
+        .space()
+        .structure()
+        .coupled_sector_regions(1)
+        .unwrap()
+        .unwrap();
+    let s_regions = full
+        .s()
+        .space()
+        .space()
+        .structure()
+        .coupled_sector_regions(1)
+        .unwrap()
+        .unwrap();
+    let vh_regions = full
+        .vh()
+        .space()
+        .space()
+        .structure()
+        .coupled_sector_regions(1)
+        .unwrap()
+        .unwrap();
+    for input_region in input_regions.iter() {
+        let sector = input_region.coupled();
+        let u_region = u_regions
+            .iter()
+            .find(|region| region.coupled() == sector)
+            .unwrap();
+        let s_region = s_regions
+            .iter()
+            .find(|region| region.coupled() == sector)
+            .unwrap();
+        let vh_region = vh_regions
+            .iter()
+            .find(|region| region.coupled() == sector)
+            .unwrap();
+        let rows = input_region.rows();
+        let cols = input_region.cols();
+        assert_eq!(u_region.rows(), rows);
+        assert_eq!(u_region.cols(), rows);
+        assert_eq!(s_region.rows(), rows);
+        assert_eq!(s_region.cols(), cols);
+        assert_eq!(vh_region.rows(), cols);
+        assert_eq!(vh_region.cols(), cols);
+
+        for column in 0..rows {
+            for row in 0..rows {
+                let gram = (0..rows)
+                    .map(|inner| {
+                        full.u().data()[u_region.range().start + inner + rows * row].conj()
+                            * full.u().data()[u_region.range().start + inner + rows * column]
+                    })
+                    .sum::<Complex64>();
+                let expected = if row == column {
+                    Complex64::new(1.0, 0.0)
+                } else {
+                    Complex64::zero()
+                };
+                assert!((gram - expected).norm() < 1.0e-10);
+            }
+        }
+        for column in 0..cols {
+            for row in 0..cols {
+                let gram = (0..cols)
+                    .map(|inner| {
+                        full.vh().data()[vh_region.range().start + row + cols * inner]
+                            * full.vh().data()[vh_region.range().start + column + cols * inner]
+                                .conj()
+                    })
+                    .sum::<Complex64>();
+                let expected = if row == column {
+                    Complex64::new(1.0, 0.0)
+                } else {
+                    Complex64::zero()
+                };
+                assert!((gram - expected).norm() < 1.0e-10);
+            }
+        }
+
+        let mut us = vec![Complex64::zero(); rows * cols];
+        for col in 0..cols {
+            for inner in 0..rows {
+                for row in 0..rows {
+                    us[row + rows * col] += full.u().data()
+                        [u_region.range().start + row + rows * inner]
+                        * full.s().data()[s_region.range().start + inner + rows * col];
+                }
+            }
+        }
+        for col in 0..cols {
+            for row in 0..rows {
+                let actual = (0..cols)
+                    .map(|inner| {
+                        us[row + rows * inner]
+                            * full.vh().data()[vh_region.range().start + inner + cols * col]
+                    })
+                    .sum::<Complex64>();
+                let expected = tensor.data()[input_region.range().start + row + rows * col];
+                assert!((actual - expected).norm() < 1.0e-10);
+            }
+        }
+    }
+}
+
+#[test]
+fn native_full_svd_late_failure_does_not_publish_or_retry_compatibility() {
+    let tensor = mixed_rectangular_c32_tensor();
+    let before = tensor.data().to_vec();
+    let input = bound_tensor(Arc::new(Z2FusionRule), &tensor);
+    let Some(mut dense) = FailSecondOwnedFullSvd::new() else {
+        return;
+    };
+
+    crate::factorize::reset_factor_buffer_build_counts_for_test();
+    let result = svd_full_dyn(&mut dense, &input.as_ref().dynamic());
+
+    assert!(matches!(result, Err(OperationError::Dense(_))));
+    assert_eq!(dense.calls, 2);
+    assert_eq!(input.data(), before);
+    assert_eq!(
+        crate::factorize::factor_buffer_build_counts_for_test(),
+        (0, 0)
+    );
+}
+
+#[test]
+fn native_full_svd_reconstructs_complex_square_and_padded_inputs() {
+    let square = one_sector_rectangular_matrix(
+        vec![
+            Complex64::new(1.0, 2.0),
+            Complex64::new(-3.0, 1.0),
+            Complex64::new(0.5, -1.5),
+            Complex64::new(2.0, 0.25),
+        ],
+        2,
+        2,
+    );
+    for tensor in [&square, &padded_copy(&Z2FusionRule, &square)] {
+        let input = bound_tensor(Arc::new(Z2FusionRule), tensor);
+        let Some(mut dense) = NativeFullSvdSpy::new() else {
+            return;
+        };
+
+        let full = svd_full_dyn(&mut dense, &input.as_ref().dynamic()).unwrap();
+
+        assert_eq!(dense.full_calls, 1);
+        assert_compact_factors_reconstruct_input(
+            &input.as_ref().dynamic(),
+            full.u(),
+            Some(full.s()),
+            full.vh(),
+        );
+    }
+}
+
+#[test]
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
+fn checked_native_full_svd_reconstructs_complex_interleaved_square_trees() {
+    let (canonical, _, data) = generic_values_endomorphism_input();
+    let (interleaved_space, interleaved_data) =
+        interleaved_generic_endomorphism_input(&canonical, &data);
+    let provider = Arc::new(LateGenericSpy {
+        rule: FactorGenericRule,
+        fail_at: usize::MAX,
+        calls: Cell::new(0),
+    });
+    let space = BoundDynamicFusionMapSpace::bind_generic(
+        interleaved_space.space().clone(),
+        Arc::clone(&provider),
+    )
+    .unwrap();
+    let input = BoundDynamicTensorRef::try_new(&space, &interleaved_data).unwrap();
+    let Some(mut dense) = NativeFullSvdSpy::new() else {
+        return;
+    };
+
+    let full = svd_full_dyn_checked_generic(&mut dense, &input).unwrap();
+
+    assert_eq!(dense.full_calls, 2);
+    assert_compact_factors_reconstruct_input(&input, full.u(), Some(full.s()), full.vh());
+    assert!(Arc::ptr_eq(full.u().space().provider_arc(), &provider));
+    assert!(Arc::ptr_eq(full.s().space().provider_arc(), &provider));
+    assert!(Arc::ptr_eq(full.vh().space().provider_arc(), &provider));
 }
 
 #[test]

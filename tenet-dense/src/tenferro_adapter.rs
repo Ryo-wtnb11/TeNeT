@@ -3,15 +3,35 @@ use num_complex::{Complex32, Complex64};
 use crate::executor::{batch_offset, strided_batch_run_len};
 use crate::layout::strides_to_isize;
 use crate::{
-    DenseBackend, DenseDotConfig, DenseError, DenseExecutor, DenseGemmBatchJob, DenseRead,
-    DenseScalar, DenseTensor, DenseView, DenseViewMut, DenseWrite, MatrixOp,
+    DenseBackend, DenseDotConfig, DenseError, DenseExecutor, DenseGemmBatchJob, DenseOwned,
+    DenseRead, DenseScalar, DenseTensor, DenseView, DenseViewMut, DenseWrite, MatrixOp,
 };
 
 use std::sync::Arc;
 
+#[cfg(all(test, feature = "cpu-faer", not(feature = "provider-inject")))]
+use std::cell::RefCell;
+
+#[cfg(all(test, feature = "cpu-faer", not(feature = "provider-inject")))]
+thread_local! {
+    static OWNED_FULL_SVD_INPUT_POINTERS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+}
+
+#[cfg(all(test, feature = "cpu-faer", not(feature = "provider-inject")))]
+pub(crate) fn reset_owned_full_svd_input_pointers() {
+    OWNED_FULL_SVD_INPUT_POINTERS.with(|pointers| pointers.borrow_mut().clear());
+}
+
+#[cfg(all(test, feature = "cpu-faer", not(feature = "provider-inject")))]
+pub(crate) fn owned_full_svd_input_pointers() -> Vec<usize> {
+    OWNED_FULL_SVD_INPUT_POINTERS.with(|pointers| pointers.borrow().clone())
+}
+
+#[cfg(not(feature = "provider-inject"))]
+use tenferro_cpu::with_cpu_exec_session;
 use tenferro_cpu::{CpuBackend, CpuBackendKind, CpuContext};
 #[cfg(not(feature = "provider-inject"))]
-use tenferro_linalg::{TensorLinalgExt, TensorReadLinalgExt};
+use tenferro_linalg::{LinalgBackend, TensorLinalgExt, TensorReadLinalgExt};
 #[cfg(not(feature = "provider-inject"))]
 use tenferro_tensor::backend::{BackendSession, BackendSessionHost};
 use tenferro_tensor::backend::{GroupedGemmConfig, GroupedGemmJob};
@@ -699,11 +719,126 @@ impl Default for DefaultDenseExecutor {
 }
 
 impl DenseExecutor for DefaultDenseExecutor {
+    fn supports_svd_full(&self) -> bool {
+        #[cfg(all(feature = "cpu-faer", not(feature = "provider-inject")))]
+        {
+            self.backend.kind() == CpuBackendKind::Faer
+        }
+        #[cfg(any(not(feature = "cpu-faer"), feature = "provider-inject"))]
+        {
+            false
+        }
+    }
+
+    fn svd_full_owned(
+        &mut self,
+        input: DenseOwned,
+        rows: usize,
+        cols: usize,
+    ) -> Result<Vec<DenseTensor>, DenseError> {
+        #[cfg(feature = "provider-inject")]
+        {
+            let _ = (input, rows, cols);
+            Err(DenseError::Unsupported {
+                op: "svd_full_owned",
+                message: "executor does not implement owned full-matrices SVD".to_string(),
+            })
+        }
+        #[cfg(not(feature = "provider-inject"))]
+        {
+            if !self.supports_svd_full() {
+                return Err(DenseError::Unsupported {
+                    op: "svd_full_owned",
+                    message: "executor does not implement owned full-matrices SVD".to_string(),
+                });
+            }
+            let expected = rows
+                .checked_mul(cols)
+                .ok_or(DenseError::ElementCountOverflow)?;
+            let actual = match &input {
+                DenseOwned::F32(data) => data.len(),
+                DenseOwned::F64(data) => data.len(),
+                DenseOwned::C32(data) => data.len(),
+                DenseOwned::C64(data) => data.len(),
+            };
+            if actual != expected {
+                return Err(DenseError::Backend {
+                    backend: DenseBackend::Tenferro,
+                    op: "svd_full_owned",
+                    message: format!(
+                        "owned full SVD input storage length mismatch: source {actual}, expected {expected}",
+                    ),
+                });
+            }
+            if rows == 0 || cols == 0 {
+                return Err(DenseError::Unsupported {
+                    op: "svd_full_owned",
+                    message: "zero-extent full-matrices SVD is unsupported".to_string(),
+                });
+            }
+            let input = match input {
+                DenseOwned::F32(data) => {
+                    tenferro_tensor::Tensor::from_vec_col_major(vec![rows, cols], data)
+                }
+                DenseOwned::F64(data) => {
+                    tenferro_tensor::Tensor::from_vec_col_major(vec![rows, cols], data)
+                }
+                DenseOwned::C32(data) => {
+                    tenferro_tensor::Tensor::from_vec_col_major(vec![rows, cols], data)
+                }
+                DenseOwned::C64(data) => {
+                    tenferro_tensor::Tensor::from_vec_col_major(vec![rows, cols], data)
+                }
+            }
+            .map_err(|err| tenferro_error("svd_full_owned", err))?;
+            #[cfg(all(test, feature = "cpu-faer", not(feature = "provider-inject")))]
+            OWNED_FULL_SVD_INPUT_POINTERS.with(|pointers| {
+                let pointer = match &input {
+                    tenferro_tensor::Tensor::F32(tensor) => {
+                        tensor.as_slice().unwrap().as_ptr() as usize
+                    }
+                    tenferro_tensor::Tensor::F64(tensor) => {
+                        tensor.as_slice().unwrap().as_ptr() as usize
+                    }
+                    tenferro_tensor::Tensor::C32(tensor) => {
+                        tensor.as_slice().unwrap().as_ptr() as usize
+                    }
+                    tenferro_tensor::Tensor::C64(tensor) => {
+                        tensor.as_slice().unwrap().as_ptr() as usize
+                    }
+                    _ => unreachable!("DenseOwned only contains supported full-SVD dtypes"),
+                };
+                pointers.borrow_mut().push(pointer);
+            });
+            let outputs = self
+                .backend
+                .with_backend_session(|session| {
+                    with_cpu_exec_session(session, |exec| exec.svd_full(&input))
+                })
+                .ok_or_else(|| DenseError::Unsupported {
+                    op: "svd_full_owned",
+                    message: "CPU backend session unavailable".to_string(),
+                })?
+                .map_err(|err| tenferro_error("svd_full_owned", err))?;
+            if outputs.len() != 3 {
+                return Err(DenseError::Backend {
+                    backend: DenseBackend::Tenferro,
+                    op: "svd_full_owned",
+                    message: "dense full SVD must return exactly (U, S, Vh)".to_string(),
+                });
+            }
+            Ok(outputs
+                .into_iter()
+                .map(DenseTensor::from_tenferro)
+                .collect())
+        }
+    }
+
     fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
         #[cfg(feature = "provider-inject")]
         {
             let _ = input;
-            return Err(linalg_unavailable("svd"));
+            Err(linalg_unavailable("svd"))
         }
         #[cfg(not(feature = "provider-inject"))]
         {
@@ -725,7 +860,7 @@ impl DenseExecutor for DefaultDenseExecutor {
         #[cfg(feature = "provider-inject")]
         {
             let _ = input;
-            return Err(linalg_unavailable("qr"));
+            Err(linalg_unavailable("qr"))
         }
         #[cfg(not(feature = "provider-inject"))]
         {
@@ -747,7 +882,7 @@ impl DenseExecutor for DefaultDenseExecutor {
         #[cfg(feature = "provider-inject")]
         {
             let _ = input;
-            return Err(linalg_unavailable("eig"));
+            Err(linalg_unavailable("eig"))
         }
         #[cfg(not(feature = "provider-inject"))]
         {
@@ -769,7 +904,7 @@ impl DenseExecutor for DefaultDenseExecutor {
         #[cfg(feature = "provider-inject")]
         {
             let _ = input;
-            return Err(linalg_unavailable("eigh"));
+            Err(linalg_unavailable("eigh"))
         }
         #[cfg(not(feature = "provider-inject"))]
         {
@@ -796,7 +931,7 @@ impl DenseExecutor for DefaultDenseExecutor {
         #[cfg(feature = "provider-inject")]
         {
             let _ = (a, b, x);
-            return Err(linalg_unavailable("solve_into"));
+            Err(linalg_unavailable("solve_into"))
         }
         #[cfg(not(feature = "provider-inject"))]
         {
@@ -838,7 +973,7 @@ impl DenseExecutor for DefaultDenseExecutor {
         #[cfg(feature = "provider-inject")]
         {
             let _ = input;
-            return Err(linalg_unavailable("svd_vals"));
+            Err(linalg_unavailable("svd_vals"))
         }
         #[cfg(not(feature = "provider-inject"))]
         {
@@ -857,7 +992,7 @@ impl DenseExecutor for DefaultDenseExecutor {
         #[cfg(feature = "provider-inject")]
         {
             let _ = input;
-            return Err(linalg_unavailable("eigh_vals"));
+            Err(linalg_unavailable("eigh_vals"))
         }
         #[cfg(not(feature = "provider-inject"))]
         {
@@ -876,7 +1011,7 @@ impl DenseExecutor for DefaultDenseExecutor {
         #[cfg(feature = "provider-inject")]
         {
             let _ = input;
-            return Err(linalg_unavailable("eig_vals"));
+            Err(linalg_unavailable("eig_vals"))
         }
         #[cfg(not(feature = "provider-inject"))]
         {

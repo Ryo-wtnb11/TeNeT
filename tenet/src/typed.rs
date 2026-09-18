@@ -1450,9 +1450,10 @@ where
     /// the dense rectangular `m_c x n_c` diagonal matrix. Factor order is
     /// `(u, s, vh)`, and the spaces are
     /// `u : codomain <- W_out`, `s : W_out <- W_in`, and
-    /// `vh : W_in <- domain`. It accepts the same inputs and has the same cost
-    /// and error behavior as [`Self::svd_compact`]. Checked factors use the
-    /// source provider instance, and a failure returns no factor tuple.
+    /// `vh : W_in <- domain`. It accepts the same inputs as
+    /// [`Self::svd_compact`], but its square outer factors can require more
+    /// dense storage. Checked factors use the source provider instance, and a
+    /// failure returns no factor tuple.
     pub fn svd_full(&self) -> Result<(Self, Self, Self), TypedFacadeError<R>> {
         <R::Mode as TypedTensorSvdDispatch<R, D>>::svd_full(self)
     }
