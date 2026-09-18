@@ -2735,9 +2735,9 @@ dependencies = [
  "num-bigint",
  "num-rational",
  "num-traits",
- "tenferro-cpu",
- "tenferro-linalg",
- "tenferro-runtime",
+ "tenferro-cpu 0.3.0",
+ "tenferro-linalg 0.3.0",
+ "tenferro-runtime 0.3.0",
 ]
 
 [[package]]
@@ -3689,10 +3689,10 @@ name = "tenet-dense"
 version = "0.1.1"
 dependencies = [
  "num-complex",
- "tenferro-cpu",
+ "tenferro-cpu 0.5.0",
  "tenferro-gpu",
- "tenferro-linalg",
- "tenferro-tensor",
+ "tenferro-linalg 0.5.0",
+ "tenferro-tensor 0.5.0",
 ]
 
 [[package]]
@@ -3799,11 +3799,28 @@ dependencies = [
  "lru",
  "num-complex",
  "num-traits",
- "tenferro-cpu",
+ "tenferro-cpu 0.3.0",
+ "tenferro-internal-ops 0.3.0",
+ "tenferro-runtime 0.3.0",
+ "tenferro-tensor 0.3.0",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "tenferro-ad"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75c87949a1181d3c59f73a4d6c7eeeef8c119256f0135d59d4d11a44e953ebce"
+dependencies = [
+ "computegraph",
+ "lru",
+ "num-complex",
+ "num-traits",
+ "tenferro-cpu 0.5.0",
  "tenferro-gpu",
- "tenferro-internal-ops",
- "tenferro-runtime",
- "tenferro-tensor",
+ "tenferro-internal-ops 0.5.0",
+ "tenferro-runtime 0.5.0",
+ "tenferro-tensor 0.5.0",
  "thiserror 2.0.20",
 ]
 
@@ -3814,10 +3831,36 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3beaee695115687ac766de083ad71eea39c01407f73c5b46a1a7b3694a0fb5e4"
 
 [[package]]
+name = "tenferro-core-ops"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "53e9e147feb4ffaa50a07a8330d9827dc3aa3bc763314165ef6309fcaee5830f"
+
+[[package]]
 name = "tenferro-cpu"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "63b0826d707d6a5347e2d5712fc5421f8388bf4c9183f221de8257f048057c7c"
+dependencies = [
+ "faer",
+ "lru",
+ "num-complex",
+ "num-traits",
+ "rayon",
+ "smallvec",
+ "strided-kernel",
+ "tenferro-core-ops 0.3.0",
+ "tenferro-internal-cpu-kernels 0.3.0",
+ "tenferro-runtime 0.3.0",
+ "tenferro-tensor 0.3.0",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "tenferro-cpu"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ef5c7e9a3aa4954b687c19249ea821866dbd60181827e5b8d985e5174034f5ed"
 dependencies = [
  "blas-src",
  "cblas-inject",
@@ -3833,21 +3876,22 @@ dependencies = [
  "rayon",
  "smallvec",
  "strided-kernel",
- "tenferro-core-ops",
- "tenferro-internal-cpu-kernels",
- "tenferro-runtime",
- "tenferro-tensor",
+ "tenferro-core-ops 0.5.0",
+ "tenferro-internal-cpu-kernels 0.5.0",
+ "tenferro-runtime 0.5.0",
+ "tenferro-tensor 0.5.0",
  "thiserror 2.0.20",
 ]
 
 [[package]]
 name = "tenferro-gpu"
-version = "0.3.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b446e43b9126b1488656effc394febe114c577c0a0d4a74e8be9f791e43dc9de"
+checksum = "c87dd7e4bca837bd78775bf17f51a2e764c51a31ff0f468a1125037fc2d89870"
 dependencies = [
  "cudarc",
  "libloading 0.8.9",
+ "lru",
  "num-complex",
  "num-traits",
  "smallvec",
@@ -3855,10 +3899,10 @@ dependencies = [
  "t4a-cubecl",
  "t4a-cubecl-cuda",
  "t4a-cubecl-runtime",
- "tenferro-core-ops",
- "tenferro-cpu",
- "tenferro-runtime",
- "tenferro-tensor",
+ "tenferro-core-ops 0.5.0",
+ "tenferro-cpu 0.5.0",
+ "tenferro-runtime 0.5.0",
+ "tenferro-tensor 0.5.0",
  "thiserror 2.0.20",
 ]
 
@@ -3871,7 +3915,20 @@ dependencies = [
  "num-complex",
  "num-traits",
  "strided-kernel",
- "tenferro-tensor",
+ "tenferro-tensor 0.3.0",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "tenferro-internal-cpu-kernels"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6ad87f090ce86b118ec810566b5b14d06375b356981cd116d953b49e28f68c07"
+dependencies = [
+ "num-complex",
+ "num-traits",
+ "strided-kernel",
+ "tenferro-tensor 0.5.0",
  "thiserror 2.0.20",
 ]
 
@@ -3887,6 +3944,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tenferro-internal-extension-macros"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c78b7716b8878cc04ad8dc59209f930e86529eff5de0ac3408fbde6c3e183a02"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "tenferro-internal-ops"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3894,9 +3962,23 @@ checksum = "dd4f490227012a980b549f66c9e3b796f0ac0abb6966f7fac3485399a64f65f3"
 dependencies = [
  "computegraph",
  "num-complex",
- "tenferro-core-ops",
- "tenferro-internal-extension-macros",
- "tenferro-tensor",
+ "tenferro-core-ops 0.3.0",
+ "tenferro-internal-extension-macros 0.3.0",
+ "tenferro-tensor 0.3.0",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "tenferro-internal-ops"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e14a34be5d43984b7607a7ba96fb753dd3dae3a57d8458a57a072e7cd8f2da28"
+dependencies = [
+ "computegraph",
+ "num-complex",
+ "tenferro-core-ops 0.5.0",
+ "tenferro-internal-extension-macros 0.5.0",
+ "tenferro-tensor 0.5.0",
  "thiserror 2.0.20",
 ]
 
@@ -3905,6 +3987,24 @@ name = "tenferro-linalg"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2b441a4dbe6ea1a2c9867fe6721f4f235fe327c6fdab0c61d3bb74f1fbd5dcee"
+dependencies = [
+ "faer",
+ "num-complex",
+ "num-traits",
+ "tenferro-ad 0.3.0",
+ "tenferro-cpu 0.3.0",
+ "tenferro-internal-extension-macros 0.3.0",
+ "tenferro-internal-ops 0.3.0",
+ "tenferro-runtime 0.3.0",
+ "tenferro-tensor 0.3.0",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "tenferro-linalg"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c62ee55bb010b64f9407aae83f66443e90f12eb9302bd2149eda8e0f73aaac60"
 dependencies = [
  "cblas-inject",
  "cblas-sys",
@@ -3918,13 +4018,13 @@ dependencies = [
  "t4a-cubecl",
  "t4a-cubecl-cuda",
  "t4a-cubecl-runtime",
- "tenferro-ad",
- "tenferro-cpu",
+ "tenferro-ad 0.5.0",
+ "tenferro-cpu 0.5.0",
  "tenferro-gpu",
- "tenferro-internal-extension-macros",
- "tenferro-internal-ops",
- "tenferro-runtime",
- "tenferro-tensor",
+ "tenferro-internal-extension-macros 0.5.0",
+ "tenferro-internal-ops 0.5.0",
+ "tenferro-runtime 0.5.0",
+ "tenferro-tensor 0.5.0",
  "thiserror 2.0.20",
 ]
 
@@ -3939,9 +4039,27 @@ dependencies = [
  "num-complex",
  "num-traits",
  "smallvec",
- "tenferro-core-ops",
- "tenferro-internal-ops",
- "tenferro-tensor",
+ "tenferro-core-ops 0.3.0",
+ "tenferro-internal-ops 0.3.0",
+ "tenferro-tensor 0.3.0",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "tenferro-runtime"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "22a6518488c1033fa3b596f85129c6a1e03d78d26a0e143288f0b2d02d05e469"
+dependencies = [
+ "computegraph",
+ "lru",
+ "num-complex",
+ "num-traits",
+ "smallvec",
+ "tenferro-core-ops 0.5.0",
+ "tenferro-internal-extension-macros 0.5.0",
+ "tenferro-internal-ops 0.5.0",
+ "tenferro-tensor 0.5.0",
  "thiserror 2.0.20",
 ]
 
@@ -3955,8 +4073,23 @@ dependencies = [
  "num-traits",
  "smallvec",
  "strided-kernel",
- "tenferro-core-ops",
- "tenferro-tensor-core",
+ "tenferro-core-ops 0.3.0",
+ "tenferro-tensor-core 0.3.0",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "tenferro-tensor"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "40eab4bf1e0db49db694cf8036878defd5eb973eaeb5a599ade7941e0b8921dd"
+dependencies = [
+ "num-complex",
+ "num-traits",
+ "smallvec",
+ "strided-kernel",
+ "tenferro-core-ops 0.5.0",
+ "tenferro-tensor-core 0.5.0",
  "thiserror 2.0.20",
 ]
 
@@ -3965,6 +4098,17 @@ name = "tenferro-tensor-core"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b267afc0afac5aff5bacaa0167cfd415ab465c27244bc0c990e146d3f49ba82d"
+dependencies = [
+ "num-complex",
+ "smallvec",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "tenferro-tensor-core"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77a4ea439dd33422fdf42365edcf426dbe5990f17ad2c7824a00e89e35b6c820"
 dependencies = [
  "num-complex",
  "smallvec",
