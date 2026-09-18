@@ -34,6 +34,9 @@
 //!   [`greedy_slice`]) are ported; a memory-bounded sliced executor over
 //!   `Tensor` needs `select_index` on the user layer first.
 
+#[cfg(test)]
+extern crate self as tenet_network;
+
 mod cost;
 #[cfg(feature = "cotengra-python")]
 mod cotengra_python;
