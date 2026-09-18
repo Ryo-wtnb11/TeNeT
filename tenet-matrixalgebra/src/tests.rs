@@ -12541,6 +12541,21 @@ fn disjoint_null_spaces_keep_all_structural_directions_without_dense_work() {
 }
 
 #[test]
+fn null_zero_only_input_normalizes_to_empty_without_dense_work() {
+    let tensor = rectangular_svd_tensor(0, 0);
+    let input = bound_tensor(Arc::new(Z2FusionRule), &tensor);
+    let mut dense = RejectExecutorCalls;
+
+    let left = left_null(&mut dense, &input.as_ref()).unwrap();
+    let right = right_null(&mut dense, &input.as_ref()).unwrap();
+
+    assert_eq!(left.structure().block_count(), 0);
+    assert!(left.data().is_empty());
+    assert_eq!(right.structure().block_count(), 0);
+    assert!(right.data().is_empty());
+}
+
+#[test]
 fn unmatched_null_sectors_coexist_with_a_full_rank_matched_sector() {
     // What: matched full-rank directions disappear while side-only sectors
     // survive as identity bases.
