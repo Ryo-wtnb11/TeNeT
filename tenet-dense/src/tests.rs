@@ -1897,6 +1897,28 @@ fn default_executor_runs_faer_owned_full_svd() {
     assert_eq!(outputs[2].shape(), [3, 3]);
 }
 
+#[cfg(all(feature = "cpu-faer", not(feature = "provider-inject")))]
+#[test]
+fn faer_owned_full_svd_validates_overflow_length_then_zero_extent() {
+    let mut executor = DefaultDenseExecutor::with_kind(CpuBackendKind::Faer).unwrap();
+
+    assert!(matches!(
+        executor.svd_full_owned(DenseOwned::F64(Vec::new()), usize::MAX, 2),
+        Err(DenseError::ElementCountOverflow)
+    ));
+    assert!(matches!(
+        executor.svd_full_owned(DenseOwned::F64(vec![1.0]), 2, 2),
+        Err(DenseError::Backend { op: "svd_full_owned", .. })
+    ));
+    assert!(matches!(
+        executor.svd_full_owned(DenseOwned::F64(Vec::new()), 0, 2),
+        Err(DenseError::Unsupported {
+            op: "svd_full_owned",
+            ..
+        })
+    ));
+}
+
 #[test]
 fn solve_default_is_explicitly_unsupported_without_writing() {
     // What: executors without solve capability reject the operation before
