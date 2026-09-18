@@ -17,7 +17,10 @@ fn provider_inject_rejects_linalg_before_backend_work() {
         panic!("provider-inject SVD must be unsupported")
     };
     assert_eq!(op, "svd");
-    assert_eq!(message, "provider-inject requires a registered BLAS/LAPACK provider");
+    assert_eq!(
+        message,
+        "provider-inject requires a registered BLAS/LAPACK provider"
+    );
 }
 
 fn assert_f64_close(actual: f64, expected: f64, tol: f64) {
