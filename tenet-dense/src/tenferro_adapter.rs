@@ -4,14 +4,14 @@ use crate::executor::{batch_offset, strided_batch_run_len};
 use crate::layout::strides_to_isize;
 use crate::{
     DenseBackend, DenseDotConfig, DenseError, DenseExecutor, DenseGemmBatchJob, DenseRead,
-    DenseScalar, DenseTensor, DenseView, DenseViewMut, DenseWrite, MatrixOp,
+    DenseOwned, DenseScalar, DenseTensor, DenseView, DenseViewMut, DenseWrite, MatrixOp,
 };
 
 use std::sync::Arc;
 
 use tenferro_cpu::{CpuBackend, CpuBackendKind, CpuContext};
 #[cfg(not(feature = "provider-inject"))]
-use tenferro_linalg::{TensorLinalgExt, TensorReadLinalgExt};
+use tenferro_linalg::{LinalgBackend, TensorLinalgExt, TensorReadLinalgExt};
 #[cfg(not(feature = "provider-inject"))]
 use tenferro_tensor::backend::{BackendSession, BackendSessionHost};
 use tenferro_tensor::backend::{GroupedGemmConfig, GroupedGemmJob};
@@ -707,6 +707,85 @@ impl DenseExecutor for DefaultDenseExecutor {
         #[cfg(any(not(feature = "cpu-faer"), feature = "provider-inject"))]
         {
             false
+        }
+    }
+
+    fn svd_full_owned(
+        &mut self,
+        input: DenseOwned,
+        rows: usize,
+        cols: usize,
+    ) -> Result<Vec<DenseTensor>, DenseError> {
+        #[cfg(feature = "provider-inject")]
+        {
+            let _ = (input, rows, cols);
+            return Err(DenseError::Unsupported {
+                op: "svd_full_owned",
+                message: "executor does not implement owned full-matrices SVD".to_string(),
+            });
+        }
+        #[cfg(not(feature = "provider-inject"))]
+        {
+            if !self.supports_svd_full() {
+                return Err(DenseError::Unsupported {
+                    op: "svd_full_owned",
+                    message: "executor does not implement owned full-matrices SVD".to_string(),
+                });
+            }
+            let expected = rows
+                .checked_mul(cols)
+                .ok_or(DenseError::ElementCountOverflow)?;
+            let actual = match &input {
+                DenseOwned::F32(data) => data.len(),
+                DenseOwned::F64(data) => data.len(),
+                DenseOwned::C32(data) => data.len(),
+                DenseOwned::C64(data) => data.len(),
+            };
+            if actual != expected {
+                return Err(DenseError::Backend {
+                    backend: DenseBackend::Tenferro,
+                    op: "svd_full_owned",
+                    message: format!(
+                        "owned full SVD input storage length mismatch: source {actual}, expected {expected}",
+                    ),
+                });
+            }
+            if rows == 0 || cols == 0 {
+                return Err(DenseError::Unsupported {
+                    op: "svd_full_owned",
+                    message: "zero-extent full-matrices SVD is unsupported".to_string(),
+                });
+            }
+            let input = match input {
+                DenseOwned::F32(data) => {
+                    tenferro_tensor::Tensor::from_vec_col_major(vec![rows, cols], data)
+                }
+                DenseOwned::F64(data) => {
+                    tenferro_tensor::Tensor::from_vec_col_major(vec![rows, cols], data)
+                }
+                DenseOwned::C32(data) => {
+                    tenferro_tensor::Tensor::from_vec_col_major(vec![rows, cols], data)
+                }
+                DenseOwned::C64(data) => {
+                    tenferro_tensor::Tensor::from_vec_col_major(vec![rows, cols], data)
+                }
+            }
+            .map_err(|err| tenferro_error("svd_full_owned", err))?;
+            let outputs = with_cpu_linalg(&mut self.backend, "svd_full_owned", |exec| {
+                exec.svd_full(&input)
+            })
+            .map_err(|err| tenferro_error("svd_full_owned", err))?;
+            if outputs.len() != 3 {
+                return Err(DenseError::Backend {
+                    backend: DenseBackend::Tenferro,
+                    op: "svd_full_owned",
+                    message: "dense full SVD must return exactly (U, S, Vh)".to_string(),
+                });
+            }
+            Ok(outputs
+                .into_iter()
+                .map(DenseTensor::from_tenferro)
+                .collect())
         }
     }
 
