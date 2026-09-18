@@ -1041,9 +1041,10 @@ impl RuntimeBuilder {
     /// process, so a later call cannot resize an already initialized global
     /// pool.
     ///
-    /// If unset, [`Self::build`] also checks `TENET_DENSE_THREADS`. A value
-    /// of 1 keeps tiny-block workloads serial while still allowing outer
-    /// application-level parallelism.
+    /// If unset, [`Self::build`] also checks `TENET_DENSE_THREADS`. A value of
+    /// 1 creates no worker pool for this CPU context; it does not resize an
+    /// existing global Rayon pool or configure provider-internal/custom-executor
+    /// threads.
     pub fn dense_threads(mut self, threads: usize) -> Self {
         self.dense_threads = Some(threads.max(1));
         self
