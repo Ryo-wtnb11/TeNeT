@@ -12724,11 +12724,13 @@ fn pinv_adjoint_parent_uses_one_parent_svd_and_the_shared_global_cutoff() {
     // sector sits exactly on the strict global cutoff. The parent-native seam
     // runs one SVD per stored sector, preserves provider identity, and emits
     // the final logical-adjoint orientation directly.
-    let tensor = u1_block_endomorphism(&[(0, 1, vec![0.5_f64]), (1, 1, vec![1.0])]);
+    let canonical = u1_block_endomorphism(&[(0, 1, vec![0.5_f64]), (1, 1, vec![1.0])]);
+    let tensor = padded_copy(&U1FusionRule, &canonical);
     let provider = Arc::new(U1FusionRule);
     let bound = bound_tensor(Arc::clone(&provider), &tensor);
     let mut dense = SvdCallSpy::default();
     let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
+    crate::factorize::reset_compact_svd_copy_probe();
 
     let output =
         pinv_adjoint_parent_dyn(&mut dense, &mut context, &bound.as_ref().dynamic(), 0.5).unwrap();
@@ -12737,6 +12739,9 @@ fn pinv_adjoint_parent_uses_one_parent_svd_and_the_shared_global_cutoff() {
     let output: BoundTensorMap<_, _, 1, 1> = typed_from_bound_factor(output).unwrap();
     assert_eq!(scalar_u1_block(output.tensor(), 0), 0.0);
     assert!((scalar_u1_block(output.tensor(), 1) - 1.0).abs() < 1e-12);
+    let probe = crate::factorize::compact_svd_copy_probe();
+    assert!(probe.input_pack_calls > 0);
+    assert!(probe.output_scatter_calls > 0);
 }
 
 #[test]
