@@ -5171,6 +5171,33 @@ fn checked_generic_full_svd_enumerates_each_output_layout_once() {
     assert!(Arc::ptr_eq(output.vh().space().provider_arc(), &provider));
 }
 
+#[test]
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
+fn checked_native_full_svd_stages_before_unchanged_provider_admission() {
+    let (source, data) = generic_factorization_input();
+    let provider = Arc::new(LateGenericSpy {
+        rule: FactorGenericRule,
+        fail_at: usize::MAX,
+        calls: Cell::new(0),
+    });
+    let checked =
+        BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
+            .unwrap();
+    let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
+    let mut dense = NativeFullSvdSpy::default();
+
+    let full = svd_full_dyn_checked_generic(&mut dense, &input).unwrap();
+
+    assert_eq!(dense.full_calls, 2);
+    assert_eq!(provider.calls.get(), FULL_SVD_VH_LAST_CALL);
+    assert!(Arc::ptr_eq(full.u().space().provider_arc(), &provider));
+    assert!(Arc::ptr_eq(full.s().space().provider_arc(), &provider));
+    assert!(Arc::ptr_eq(full.vh().space().provider_arc(), &provider));
+}
+
 fn late_spy_calls(run: &dyn Fn(&LateGenericSpy)) -> usize {
     let probe = LateGenericSpy {
         rule: FactorGenericRule,
