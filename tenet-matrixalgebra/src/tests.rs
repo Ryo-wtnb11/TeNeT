@@ -1587,7 +1587,6 @@ fn direct_compact_svd_uses_owned_executor_outputs_only() {
     let probe = crate::factorize::compact_svd_copy_probe();
     assert!(probe.input_pack_calls > 0);
     assert!(probe.output_scatter_calls > 0);
-
 }
 
 fn assert_mf_compact_svd_fallback_live_owners<D: crate::factorize::FactorScalar>() {
@@ -1629,7 +1628,9 @@ fn assert_mf_compact_svd_fallback_live_owners<D: crate::factorize::FactorScalar>
     assert_eq!(adjoint_dense.svd_calls, 2);
     assert_eq!(adjoint_dense.output_ptrs, adjoint_stage);
     assert_eq!(adjoint_stage.len(), 2);
-    assert!(adjoint_stage.iter().all(|&(u, vt)| u != 0 && vt != 0 && u != vt));
+    assert!(adjoint_stage
+        .iter()
+        .all(|&(u, vt)| u != 0 && vt != 0 && u != vt));
     let adjoint_probe = crate::factorize::compact_svd_copy_probe();
     assert!(adjoint_probe.input_pack_calls > 0);
     assert!(adjoint_probe.output_scatter_calls > 0);
@@ -7485,19 +7486,30 @@ fn compact_svd_adjoint_c64_padded_fallback_matches_canonical_gauge() {
     let canonical_bound = bound_tensor(Arc::new(rule), &canonical);
     let padded_bound = bound_tensor(Arc::new(rule), &padded);
     assert!(
+        crate::factorize::compact_factor_plan_for_test(canonical_bound.space())
+            .unwrap()
+            .is_some()
+    );
+    assert!(
         crate::factorize::compact_factor_plan_for_test(padded_bound.space())
             .unwrap()
             .is_none()
     );
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
-    let expected = svd_compact_adjoint_factors_dyn(&mut dense, &canonical_bound.as_ref().dynamic())
-        .unwrap();
+    let expected =
+        svd_compact_adjoint_factors_dyn(&mut dense, &canonical_bound.as_ref().dynamic()).unwrap();
     crate::factorize::reset_compact_svd_copy_probe();
-    let actual = svd_compact_adjoint_factors_dyn(&mut dense, &padded_bound.as_ref().dynamic())
-        .unwrap();
+    let actual =
+        svd_compact_adjoint_factors_dyn(&mut dense, &padded_bound.as_ref().dynamic()).unwrap();
 
-    assert_eq!(actual.0.space().space().structure(), expected.0.space().space().structure());
-    assert_eq!(actual.1.space().space().structure(), expected.1.space().space().structure());
+    assert_eq!(
+        actual.0.space().space().structure(),
+        expected.0.space().space().structure()
+    );
+    assert_eq!(
+        actual.1.space().space().structure(),
+        expected.1.space().space().structure()
+    );
     for (&actual, &expected) in actual.0.data().iter().zip(expected.0.data()) {
         assert!((actual - expected).norm() < 1.0e-10);
     }
@@ -12773,14 +12785,14 @@ fn pinv_adjoint_parent_reconstructs_complex_padded_rectangular_sectors() {
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
     let mut context = TensorContractFusionExecutionContext::<Complex64, RuleIdentity>::default();
     crate::factorize::reset_compact_svd_copy_probe();
-    let output = pinv_adjoint_parent_dyn(&mut dense, &mut context, &bound.as_ref().dynamic(), 0.0)
-        .unwrap();
+    let output =
+        pinv_adjoint_parent_dyn(&mut dense, &mut context, &bound.as_ref().dynamic(), 0.0).unwrap();
     let output: BoundTensorMap<_, _, 1, 1> = typed_from_bound_factor(output).unwrap();
     let adjoint = tenet_tensors::adjoint(provider.as_ref(), &canonical).unwrap();
     let first = crate::compose::compose(&mut context, provider.as_ref(), &adjoint, output.tensor())
         .unwrap();
-    let reconstructed = crate::compose::compose(&mut context, provider.as_ref(), &first, &adjoint)
-        .unwrap();
+    let reconstructed =
+        crate::compose::compose(&mut context, provider.as_ref(), &first, &adjoint).unwrap();
 
     assert_eq!(reconstructed.structure(), adjoint.structure());
     for (&actual, &expected) in reconstructed.data().iter().zip(adjoint.data()) {
