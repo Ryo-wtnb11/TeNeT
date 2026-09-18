@@ -10161,6 +10161,102 @@ fn native_full_svd_uses_owned_inputs_for_every_builtin_dtype() {
 }
 
 #[test]
+fn native_full_svd_reconstructs_complex_mixed_rectangular_sectors() {
+    let source = mixed_rectangular_c32_tensor();
+    let tensor = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
+        source
+            .data()
+            .iter()
+            .map(|value| Complex64::new(value.re as f64, value.im as f64))
+            .collect(),
+        source.fusion_space().unwrap().as_ref().clone(),
+    )
+    .unwrap();
+    let input = bound_tensor(Arc::new(Z2FusionRule), &tensor);
+    let mut dense = NativeFullSvdSpy::default();
+
+    let full = svd_full_dyn(&mut dense, &input.as_ref().dynamic()).unwrap();
+    assert_eq!(dense.full_calls, 2);
+
+    let input_regions = tensor
+        .structure()
+        .coupled_sector_regions(1)
+        .unwrap()
+        .unwrap();
+    let u_regions = full
+        .u()
+        .space()
+        .space()
+        .structure()
+        .coupled_sector_regions(1)
+        .unwrap()
+        .unwrap();
+    let s_regions = full
+        .s()
+        .space()
+        .space()
+        .structure()
+        .coupled_sector_regions(1)
+        .unwrap()
+        .unwrap();
+    let vh_regions = full
+        .vh()
+        .space()
+        .space()
+        .structure()
+        .coupled_sector_regions(1)
+        .unwrap()
+        .unwrap();
+    for input_region in input_regions.iter() {
+        let sector = input_region.coupled();
+        let u_region = u_regions
+            .iter()
+            .find(|region| region.coupled() == sector)
+            .unwrap();
+        let s_region = s_regions
+            .iter()
+            .find(|region| region.coupled() == sector)
+            .unwrap();
+        let vh_region = vh_regions
+            .iter()
+            .find(|region| region.coupled() == sector)
+            .unwrap();
+        let rows = input_region.rows();
+        let cols = input_region.cols();
+        assert_eq!(u_region.rows(), rows);
+        assert_eq!(u_region.cols(), rows);
+        assert_eq!(s_region.rows(), rows);
+        assert_eq!(s_region.cols(), cols);
+        assert_eq!(vh_region.rows(), cols);
+        assert_eq!(vh_region.cols(), cols);
+
+        let mut us = vec![Complex64::zero(); rows * cols];
+        for col in 0..cols {
+            for inner in 0..rows {
+                for row in 0..rows {
+                    us[row + rows * col] += full.u().data()
+                        [u_region.range().start + row + rows * inner]
+                        * full.s().data()[s_region.range().start + inner + rows * col];
+                }
+            }
+        }
+        for col in 0..cols {
+            for row in 0..rows {
+                let actual = (0..cols)
+                    .map(|inner| {
+                        us[row + rows * inner]
+                            * full.vh().data()
+                                [vh_region.range().start + inner + cols * col]
+                    })
+                    .sum::<Complex64>();
+                let expected = tensor.data()[input_region.range().start + row + rows * col];
+                assert!((actual - expected).norm() < 1.0e-10);
+            }
+        }
+    }
+}
+
+#[test]
 fn full_factorizations_preserve_compact_bytes_on_matching_square_support() {
     let rule = U1FusionRule;
     let neutral = U1Irrep::new(0).sector_id();
