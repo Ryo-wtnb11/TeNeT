@@ -2387,6 +2387,60 @@ fn default_executor_values_only_reads_offset_padded_transposed_views() {
     assert_eq!(eigh_data, eigh_before);
 }
 
+#[test]
+fn default_executor_values_only_admits_batches_and_zero_extents() {
+    // What: direct values-only operations preserve their reduced spectrum and
+    // batch shapes at the dense zero-extent boundary.
+    let mut executor = DefaultDenseExecutor::new();
+
+    let batch_shape = [2, 2, 2];
+    let batch_data = [3.0_f64, 0.0, 0.0, 1.0, 4.0, 0.0, 0.0, 2.0];
+    let batch_before = batch_data;
+    let values = executor
+        .svd_vals(DenseRead::F64(
+            DenseView::new(&batch_data, &batch_shape, &[1, 2, 4], 0).unwrap(),
+        ))
+        .unwrap();
+    assert_eq!(values.shape(), &[2, 2]);
+    assert_eq!(values.as_f64_slice().unwrap(), &[3.0, 1.0, 4.0, 2.0]);
+    assert_eq!(batch_data, batch_before);
+
+    let values = executor
+        .eigh_vals(DenseRead::F64(
+            DenseView::new(&batch_data, &batch_shape, &[1, 2, 4], 0).unwrap(),
+        ))
+        .unwrap();
+    assert_eq!(values.shape(), &[2, 2]);
+    assert_eq!(values.as_f64_slice().unwrap(), &[1.0, 3.0, 2.0, 4.0]);
+    assert_eq!(batch_data, batch_before);
+
+    for (shape, strides) in [([0, 3], [1, 0]), ([3, 0], [1, 3]), ([0, 0], [1, 0])] {
+        let values = executor
+            .svd_vals(DenseRead::F64(
+                DenseView::new(&[] as &[f64], &shape, &strides, 0).unwrap(),
+            ))
+            .unwrap();
+        assert_eq!(values.shape(), &[0]);
+        assert!(values.as_f64_slice().unwrap().is_empty());
+    }
+
+    let values = executor
+        .eigh_vals(DenseRead::F64(
+            DenseView::new(&[] as &[f64], &[0, 0], &[1, 0], 0).unwrap(),
+        ))
+        .unwrap();
+    assert_eq!(values.shape(), &[0]);
+    assert!(values.as_f64_slice().unwrap().is_empty());
+
+    let values = executor
+        .svd_vals(DenseRead::F64(
+            DenseView::new(&[] as &[f64], &[2, 2, 0], &[1, 2, 4], 0).unwrap(),
+        ))
+        .unwrap();
+    assert_eq!(values.shape(), &[2, 0]);
+    assert!(values.as_f64_slice().unwrap().is_empty());
+}
+
 fn batch_job(shape: (usize, usize, usize), offsets: (usize, usize, usize)) -> DenseGemmBatchJob {
     DenseGemmBatchJob {
         rows: shape.0,
