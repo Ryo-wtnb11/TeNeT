@@ -30,10 +30,45 @@ pub enum MatrixOp {
     Adjoint,
 }
 
+/// A host-owned column-major payload accepted by an executor's full-SVD entry
+/// point.
+pub enum DenseOwned {
+    F32(Vec<f32>),
+    F64(Vec<f64>),
+    C32(Vec<Complex32>),
+    C64(Vec<Complex64>),
+}
+
 pub trait DenseExecutor {
     fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError>;
     fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError>;
     fn eigh(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError>;
+
+    /// Whether this executor supports native full SVD for every [`DenseOwned`]
+    /// dtype. The default is false.
+    fn supports_svd_full(&self) -> bool {
+        false
+    }
+
+    /// Full-matrices SVD of a column-major owned `rows x cols` payload.
+    ///
+    /// On success, returns `(U, S, Vh)` with shapes `rows x rows`,
+    /// `min(rows, cols)`, and `cols x cols`. `input` is consumed even when the
+    /// operation returns an error. The default reports [`DenseError::Unsupported`]
+    /// without validating the shape or payload. A capable implementation must
+    /// check element-count overflow, exact payload length, then zero extents
+    /// before constructing or calling its backend.
+    fn svd_full_owned(
+        &mut self,
+        _input: DenseOwned,
+        _rows: usize,
+        _cols: usize,
+    ) -> Result<Vec<DenseTensor>, DenseError> {
+        Err(DenseError::Unsupported {
+            op: "svd_full_owned",
+            message: "executor does not implement owned full-matrices SVD".to_string(),
+        })
+    }
 
     /// Solve `a * x = b` into caller-owned storage.
     fn solve_into(
