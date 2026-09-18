@@ -2231,11 +2231,9 @@ fn values_only_defaults_fall_back_to_the_full_decomposition_spectrum() {
     }
 }
 
+#[cfg(not(feature = "provider-inject"))]
 #[test]
 fn default_executor_svd_vals_returns_literal_spectra_for_every_dense_dtype() {
-    // What: all four supported input dtypes yield their real-partner singular
-    // spectrum, including tall, wide, rank-deficient, repeated, and genuinely
-    // complex matrices.
     let mut executor = DefaultDenseExecutor::new();
     let c32 = |re, im| Complex32::new(re, im);
     let c64 = |re, im| Complex64::new(re, im);
@@ -2273,7 +2271,7 @@ fn default_executor_svd_vals_returns_literal_spectra_for_every_dense_dtype() {
     assert_eq!(f64_data, f64_before);
 
     let c32_shape = [2, 2];
-    let c32_data = [c32(3.0, 0.0), c32(0.0, 0.0), c32(0.0, 0.0), c32(0.0, 0.0)];
+    let c32_data = [c32(1.0, 0.0), c32(0.0, 1.0), c32(0.0, 1.0), c32(1.0, 0.0)];
     let c32_before = c32_data;
     let values = executor
         .svd_vals(DenseRead::C32(
@@ -2283,7 +2281,7 @@ fn default_executor_svd_vals_returns_literal_spectra_for_every_dense_dtype() {
     assert_eq!(values.dtype(), DenseDType::F32);
     let values = values.as_f32_slice().unwrap();
     assert_eq!(values.len(), 2);
-    for (actual, expected) in values.iter().zip([3.0, 0.0]) {
+    for (actual, expected) in values.iter().zip([2.0_f32.sqrt(), 2.0_f32.sqrt()]) {
         assert_f32_close(*actual, expected, 1.0e-5);
     }
     assert_eq!(c32_data, c32_before);
@@ -2305,10 +2303,9 @@ fn default_executor_svd_vals_returns_literal_spectra_for_every_dense_dtype() {
     assert_eq!(c64_data, c64_before);
 }
 
+#[cfg(not(feature = "provider-inject"))]
 #[test]
 fn default_executor_eigh_vals_returns_literal_spectra_for_every_dense_dtype() {
-    // What: all four supported input dtypes yield their real-partner Hermitian
-    // spectrum, including negative, repeated, and genuinely complex inputs.
     let mut executor = DefaultDenseExecutor::new();
     let c32 = |re, im| Complex32::new(re, im);
     let c64 = |re, im| Complex64::new(re, im);
@@ -2345,7 +2342,7 @@ fn default_executor_eigh_vals_returns_literal_spectra_for_every_dense_dtype() {
     }
     assert_eq!(f64_data, f64_before);
 
-    let c32_data = [c32(1.0, 0.0), c32(0.0, 0.0), c32(0.0, 0.0), c32(1.0, 0.0)];
+    let c32_data = [c32(2.0, 0.0), c32(0.0, -1.0), c32(0.0, 1.0), c32(2.0, 0.0)];
     let c32_before = c32_data;
     let values = executor
         .eigh_vals(DenseRead::C32(
@@ -2355,7 +2352,7 @@ fn default_executor_eigh_vals_returns_literal_spectra_for_every_dense_dtype() {
     assert_eq!(values.dtype(), DenseDType::F32);
     let values = values.as_f32_slice().unwrap();
     assert_eq!(values.len(), 2);
-    for (actual, expected) in values.iter().zip([1.0, 1.0]) {
+    for (actual, expected) in values.iter().zip([1.0, 3.0]) {
         assert_f32_close(*actual, expected, 1.0e-5);
     }
     assert_eq!(c32_data, c32_before);
@@ -2376,10 +2373,9 @@ fn default_executor_eigh_vals_returns_literal_spectra_for_every_dense_dtype() {
     assert_eq!(c64_data, c64_before);
 }
 
+#[cfg(not(feature = "provider-inject"))]
 #[test]
 fn default_executor_values_only_reads_offset_padded_transposed_views() {
-    // What: values-only calls respect the borrowed view's logical layout and
-    // leave padding and source elements untouched.
     let shape = [2, 2];
     let strides = [7, 3];
     let mut executor = DefaultDenseExecutor::new();
@@ -2420,12 +2416,36 @@ fn default_executor_values_only_reads_offset_padded_transposed_views() {
         assert_f64_close(*actual, expected, 1.0e-12);
     }
     assert_eq!(eigh_data, eigh_before);
+
+    let overlap_data = [2.0_f64];
+    let values = executor
+        .svd_vals(DenseRead::F64(
+            DenseView::new(&overlap_data, &shape, &[0, 0], 0).unwrap(),
+        ))
+        .unwrap();
+    let values = values.as_f64_slice().unwrap();
+    assert_eq!(values.len(), 2);
+    for (actual, expected) in values.iter().zip([4.0, 0.0]) {
+        assert_f64_close(*actual, expected, 1.0e-12);
+    }
+    assert_eq!(overlap_data, [2.0]);
+
+    let values = executor
+        .eigh_vals(DenseRead::F64(
+            DenseView::new(&overlap_data, &shape, &[0, 0], 0).unwrap(),
+        ))
+        .unwrap();
+    let values = values.as_f64_slice().unwrap();
+    assert_eq!(values.len(), 2);
+    for (actual, expected) in values.iter().zip([0.0, 4.0]) {
+        assert_f64_close(*actual, expected, 1.0e-12);
+    }
+    assert_eq!(overlap_data, [2.0]);
 }
 
+#[cfg(not(feature = "provider-inject"))]
 #[test]
 fn default_executor_values_only_admits_batches_and_zero_extents() {
-    // What: direct values-only operations preserve their reduced spectrum and
-    // batch shapes at the dense zero-extent boundary.
     let mut executor = DefaultDenseExecutor::new();
 
     let batch_shape = [2, 2, 2];
@@ -2437,7 +2457,14 @@ fn default_executor_values_only_admits_batches_and_zero_extents() {
         ))
         .unwrap();
     assert_eq!(values.shape(), &[2, 2]);
-    assert_eq!(values.as_f64_slice().unwrap(), &[3.0, 1.0, 4.0, 2.0]);
+    for (actual, expected) in values
+        .as_f64_slice()
+        .unwrap()
+        .iter()
+        .zip([3.0, 1.0, 4.0, 2.0])
+    {
+        assert_f64_close(*actual, expected, 1.0e-12);
+    }
     assert_eq!(batch_data, batch_before);
 
     let values = executor
@@ -2446,7 +2473,14 @@ fn default_executor_values_only_admits_batches_and_zero_extents() {
         ))
         .unwrap();
     assert_eq!(values.shape(), &[2, 2]);
-    assert_eq!(values.as_f64_slice().unwrap(), &[1.0, 3.0, 2.0, 4.0]);
+    for (actual, expected) in values
+        .as_f64_slice()
+        .unwrap()
+        .iter()
+        .zip([1.0, 3.0, 2.0, 4.0])
+    {
+        assert_f64_close(*actual, expected, 1.0e-12);
+    }
     assert_eq!(batch_data, batch_before);
 
     for (shape, strides) in [([0, 3], [1, 0]), ([3, 0], [1, 3]), ([0, 0], [1, 0])] {
@@ -2476,10 +2510,9 @@ fn default_executor_values_only_admits_batches_and_zero_extents() {
     assert!(values.as_f64_slice().unwrap().is_empty());
 }
 
+#[cfg(not(feature = "provider-inject"))]
 #[test]
 fn default_executor_values_only_preserves_rank_and_dtype_rejections() {
-    // What: invalid ranks, nonsquare EIGH, and unsupported scalar inputs still
-    // surface as the established Tenferro-backed values-operation errors.
     let mut executor = DefaultDenseExecutor::new();
 
     let svd_rank_one = [1.0_f64, 2.0];
@@ -2493,6 +2526,21 @@ fn default_executor_values_only_preserves_rank_and_dtype_rejections() {
         DenseError::Backend {
             backend: DenseBackend::Tenferro,
             op: "svd_values",
+            ..
+        }
+    ));
+
+    let rank_zero = [1.0_f64];
+    let error = executor
+        .eigh_vals(DenseRead::F64(
+            DenseView::new(&rank_zero, &[], &[], 0).unwrap(),
+        ))
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        DenseError::Backend {
+            backend: DenseBackend::Tenferro,
+            op: "eigh_values",
             ..
         }
     ));
@@ -2526,6 +2574,78 @@ fn default_executor_values_only_preserves_rank_and_dtype_rejections() {
             ref message,
         } if message.contains("does not support dtype I32")
     ));
+
+    let booleans = [true, false, false, true];
+    let error = executor
+        .eigh_vals(DenseRead::Bool(
+            DenseView::new(&booleans, &[2, 2], &[1, 2], 0).unwrap(),
+        ))
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        DenseError::Backend {
+            backend: DenseBackend::Tenferro,
+            op: "eigh_values",
+            ref message,
+        } if message.contains("does not support dtype Bool")
+    ));
+}
+
+#[cfg(all(
+    not(feature = "provider-inject"),
+    any(
+        feature = "cpu-faer",
+        feature = "blas-accelerate",
+        feature = "blas-openblas",
+        feature = "blas-mkl"
+    )
+))]
+fn assert_values_only_for_explicit_cpu_provider(kind: CpuBackendKind) {
+    let mut executor = DefaultDenseExecutor::with_kind(kind).unwrap();
+    let data = [2.0_f64, 0.0, 0.0, -1.0];
+    let shape = [2, 2];
+    let strides = [1, 2];
+
+    let values = executor
+        .svd_vals(DenseRead::F64(
+            DenseView::new(&data, &shape, &strides, 0).unwrap(),
+        ))
+        .unwrap();
+    let values = values.as_f64_slice().unwrap();
+    assert_eq!(values.len(), 2);
+    for (actual, expected) in values.iter().zip([2.0, 1.0]) {
+        assert_f64_close(*actual, expected, 1.0e-12);
+    }
+
+    let values = executor
+        .eigh_vals(DenseRead::F64(
+            DenseView::new(&data, &shape, &strides, 0).unwrap(),
+        ))
+        .unwrap();
+    let values = values.as_f64_slice().unwrap();
+    assert_eq!(values.len(), 2);
+    for (actual, expected) in values.iter().zip([-1.0, 2.0]) {
+        assert_f64_close(*actual, expected, 1.0e-12);
+    }
+}
+
+#[cfg(all(feature = "cpu-faer", not(feature = "provider-inject")))]
+#[test]
+fn default_executor_values_only_runs_explicit_faer_provider() {
+    assert_values_only_for_explicit_cpu_provider(CpuBackendKind::Faer);
+}
+
+#[cfg(all(
+    not(feature = "provider-inject"),
+    any(
+        feature = "blas-accelerate",
+        feature = "blas-openblas",
+        feature = "blas-mkl"
+    )
+))]
+#[test]
+fn default_executor_values_only_runs_explicit_blas_provider() {
+    assert_values_only_for_explicit_cpu_provider(CpuBackendKind::Blas);
 }
 
 fn batch_job(shape: (usize, usize, usize), offsets: (usize, usize, usize)) -> DenseGemmBatchJob {
