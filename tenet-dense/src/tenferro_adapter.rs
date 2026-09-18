@@ -28,7 +28,8 @@ pub(crate) fn owned_full_svd_input_pointers() -> Vec<usize> {
 }
 
 #[cfg(not(feature = "provider-inject"))]
-use tenferro_cpu::{with_cpu_exec_session, CpuBackend, CpuBackendKind, CpuContext};
+use tenferro_cpu::with_cpu_exec_session;
+use tenferro_cpu::{CpuBackend, CpuBackendKind, CpuContext};
 #[cfg(not(feature = "provider-inject"))]
 use tenferro_linalg::{LinalgBackend, TensorLinalgExt, TensorReadLinalgExt};
 #[cfg(not(feature = "provider-inject"))]
