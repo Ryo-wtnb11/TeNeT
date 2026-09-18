@@ -13047,12 +13047,14 @@ fn polar_complete_dimension_preflight_handles_empty_sides_and_empty_products() {
 fn polar_second_sector_failure_leaves_the_source_unchanged() {
     // What: a later dense failure publishes no factors and cannot mutate the
     // borrowed source, in either direction.
-    let tensor = u1_cross_space_map::<f64>(&[(0, 2), (1, 2)], &[(0, 2), (1, 2)]);
+    let canonical = u1_cross_space_map::<f64>(&[(0, 2), (1, 2)], &[(0, 2), (1, 2)]);
+    let tensor = padded_copy(&U1FusionRule, &canonical);
     let before = tensor.data().to_vec();
     let input = bound_tensor(Arc::new(U1FusionRule), &tensor);
     for left in [true, false] {
         let mut dense = FailSecondSvd::default();
         let mut context = default_context();
+        crate::factorize::reset_compact_svd_copy_probe();
         let result = if left {
             left_polar(&mut dense, &mut context, &input.as_ref())
         } else {
@@ -13061,6 +13063,9 @@ fn polar_second_sector_failure_leaves_the_source_unchanged() {
         assert!(matches!(result, Err(OperationError::Dense(_))));
         assert_eq!(dense.calls, 2);
         assert_eq!(tensor.data(), before);
+        let probe = crate::factorize::compact_svd_copy_probe();
+        assert!(probe.input_pack_calls > 0);
+        assert!(probe.output_scatter_calls > 0);
     }
 }
 
