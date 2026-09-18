@@ -1856,6 +1856,24 @@ impl DenseExecutor for FullOnly {
 }
 
 #[test]
+fn owned_full_svd_default_is_explicitly_unsupported() {
+    let mut executor = FullOnly(DefaultDenseExecutor::new());
+
+    assert!(!executor.supports_svd_full());
+    let error = executor
+        .svd_full_owned(DenseOwned::F64(vec![1.0]), 1, 1)
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        DenseError::Unsupported {
+            op: "svd_full_owned",
+            ..
+        }
+    ));
+}
+
+#[test]
 fn solve_default_is_explicitly_unsupported_without_writing() {
     // What: executors without solve capability reject the operation before
     // publishing anything into the caller's destination.
