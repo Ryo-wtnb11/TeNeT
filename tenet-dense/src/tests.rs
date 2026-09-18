@@ -1901,6 +1901,7 @@ fn default_executor_runs_faer_owned_full_svd() {
 #[test]
 fn faer_owned_full_svd_validates_overflow_length_then_zero_extent() {
     let mut executor = DefaultDenseExecutor::with_kind(CpuBackendKind::Faer).unwrap();
+    reset_owned_full_svd_input_pointers();
 
     assert!(matches!(
         executor.svd_full_owned(DenseOwned::F64(Vec::new()), usize::MAX, 2),
@@ -1917,6 +1918,25 @@ fn faer_owned_full_svd_validates_overflow_length_then_zero_extent() {
             ..
         })
     ));
+    assert!(matches!(
+        executor.svd_full_owned(DenseOwned::F64(Vec::new()), 2, 0),
+        Err(DenseError::Unsupported {
+            op: "svd_full_owned",
+            ..
+        })
+    ));
+    assert!(matches!(
+        executor.svd_full_owned(DenseOwned::F64(Vec::new()), 0, 0),
+        Err(DenseError::Unsupported {
+            op: "svd_full_owned",
+            ..
+        })
+    ));
+    assert!(matches!(
+        executor.svd_full_owned(DenseOwned::F64(vec![1.0]), 0, 2),
+        Err(DenseError::Backend { op: "svd_full_owned", .. })
+    ));
+    assert!(owned_full_svd_input_pointers().is_empty());
 }
 
 #[cfg(all(feature = "cpu-faer", not(feature = "provider-inject")))]
