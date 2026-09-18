@@ -1883,6 +1883,20 @@ fn default_executor_advertises_faer_owned_full_svd() {
     );
 }
 
+#[cfg(all(feature = "cpu-faer", not(feature = "provider-inject")))]
+#[test]
+fn default_executor_runs_faer_owned_full_svd() {
+    let mut executor = DefaultDenseExecutor::with_kind(CpuBackendKind::Faer).unwrap();
+    let outputs = executor
+        .svd_full_owned(DenseOwned::F64(vec![1.0, 3.0, 2.0, 4.0, 5.0, 6.0]), 2, 3)
+        .unwrap();
+
+    assert_eq!(outputs.len(), 3);
+    assert_eq!(outputs[0].shape(), [2, 2]);
+    assert_eq!(outputs[1].shape(), [2]);
+    assert_eq!(outputs[2].shape(), [3, 3]);
+}
+
 #[test]
 fn solve_default_is_explicitly_unsupported_without_writing() {
     // What: executors without solve capability reject the operation before
