@@ -699,6 +699,17 @@ impl Default for DefaultDenseExecutor {
 }
 
 impl DenseExecutor for DefaultDenseExecutor {
+    fn supports_svd_full(&self) -> bool {
+        #[cfg(all(feature = "cpu-faer", not(feature = "provider-inject")))]
+        {
+            self.backend.kind() == CpuBackendKind::Faer
+        }
+        #[cfg(any(not(feature = "cpu-faer"), feature = "provider-inject"))]
+        {
+            false
+        }
+    }
+
     fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
         #[cfg(feature = "provider-inject")]
         {
