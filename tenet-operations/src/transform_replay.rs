@@ -5725,4 +5725,15 @@ mod allocation_oracle_tests {
         assert_eq!(allocations, 0);
         assert!(!allocation_oracle::is_measured());
     }
+
+    #[test]
+    fn allocation_oracle_rejects_nested_sessions() {
+        let nested = catch_unwind(AssertUnwindSafe(|| {
+            allocation_oracle::with_session(|| allocation_oracle::with_session(|| ()))
+        }));
+        assert!(nested.is_err());
+
+        let (_, allocations) = allocation_oracle::with_session(|| ());
+        assert_eq!(allocations, 0);
+    }
 }
