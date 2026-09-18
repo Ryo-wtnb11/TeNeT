@@ -5344,10 +5344,7 @@ where
     let compact_rank = rows.min(cols);
     let (u, singular_values, vh) = compact_svd_owned(dense, matrix, rows, cols)?;
 
-    let sigma_max = singular_values
-        .first()
-        .copied()
-        .unwrap_or(0.0);
+    let sigma_max = singular_values.first().copied().unwrap_or(0.0);
     // Why not exact-zero rank: backward-stable SVD represents dependent
     // directions at working precision, not necessarily as bitwise zero.
     let tolerance = D::epsilon() * rows.max(cols) as f64 * sigma_max;

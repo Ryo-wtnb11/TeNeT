@@ -12656,11 +12656,8 @@ fn null_space_second_sector_failure_builds_no_factor() {
 #[test]
 fn null_completion_qr_failure_preserves_input_and_builds_no_factor() {
     for (left, rows, cols) in [(true, 3, 2), (false, 2, 3)] {
-        let tensor = one_sector_rectangular_matrix(
-            vec![1.0_f64, 0.0, 0.0, 0.0, 0.0, 0.0],
-            rows,
-            cols,
-        );
+        let tensor =
+            one_sector_rectangular_matrix(vec![1.0_f64, 0.0, 0.0, 0.0, 0.0, 0.0], rows, cols);
         let before = tensor.data().to_vec();
         let input = bound_tensor(Arc::new(Z2FusionRule), &tensor);
         let mut dense = FailAfterSvdQr::default();
