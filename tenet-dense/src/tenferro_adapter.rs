@@ -9,13 +9,11 @@ use crate::{
 
 use std::sync::Arc;
 
-#[cfg(not(feature = "provider-inject"))]
-use tenferro_cpu::{with_cpu_exec_session, CpuExecSession};
 use tenferro_cpu::{CpuBackend, CpuBackendKind, CpuContext};
 #[cfg(not(feature = "provider-inject"))]
 use tenferro_linalg::{TensorLinalgExt, TensorReadLinalgExt};
 #[cfg(not(feature = "provider-inject"))]
-use tenferro_tensor::backend::BackendSessionHost;
+use tenferro_tensor::backend::{BackendSession, BackendSessionHost};
 use tenferro_tensor::backend::{GroupedGemmConfig, GroupedGemmJob};
 use tenferro_tensor::{
     BackendCachedDot, BackendRuntimeCache, DotGeneralConfig, TensorDot, TensorRead, TensorView,
@@ -710,7 +708,7 @@ impl DenseExecutor for DefaultDenseExecutor {
         #[cfg(not(feature = "provider-inject"))]
         {
             let input = tenferro_view(input)?;
-            with_cpu_linalg(&mut self.backend, "svd_read", |exec| {
+            with_cpu_linalg(&mut self.backend, |exec| {
                 TensorRead::from_view(input).svd_read(exec)
             })
             .map(|(u, s, vt)| {
@@ -732,7 +730,7 @@ impl DenseExecutor for DefaultDenseExecutor {
         #[cfg(not(feature = "provider-inject"))]
         {
             let input = tenferro_view(input)?;
-            with_cpu_linalg(&mut self.backend, "qr_read", |exec| {
+            with_cpu_linalg(&mut self.backend, |exec| {
                 TensorRead::from_view(input).qr_read(exec)
             })
             .map(|(q, r)| {
@@ -754,7 +752,7 @@ impl DenseExecutor for DefaultDenseExecutor {
         #[cfg(not(feature = "provider-inject"))]
         {
             let input = tenferro_view(input)?;
-            with_cpu_linalg(&mut self.backend, "eig_read", |exec| {
+            with_cpu_linalg(&mut self.backend, |exec| {
                 TensorRead::from_view(input).eig_read(exec)
             })
             .map(|(values, vectors)| {
@@ -776,7 +774,7 @@ impl DenseExecutor for DefaultDenseExecutor {
         #[cfg(not(feature = "provider-inject"))]
         {
             let input = tenferro_view(input)?;
-            with_cpu_linalg(&mut self.backend, "eigh_read", |exec| {
+            with_cpu_linalg(&mut self.backend, |exec| {
                 TensorRead::from_view(input).eigh_read(exec)
             })
             .map(|(values, vectors)| {
@@ -819,7 +817,7 @@ impl DenseExecutor for DefaultDenseExecutor {
             let a = tenferro_view(a)?;
             let b = tenferro_view(b)?;
             let x = tenferro_view_mut(x)?;
-            with_cpu_linalg(&mut self.backend, "solve_into", |exec| {
+            with_cpu_linalg(&mut self.backend, |exec| {
                 TensorRead::from_view(a).solve_read_into(
                     TensorRead::from_view(b),
                     TensorWrite::from_view(x),
@@ -849,9 +847,8 @@ impl DenseExecutor for DefaultDenseExecutor {
                 .backend
                 .with_backend_session(|exec| exec.to_contiguous_read(TensorRead::from_view(input)))
                 .map_err(|err| tenferro_error("svd_values", err))?;
-            let (_, values, _) =
-                with_cpu_linalg(&mut self.backend, "svd_values", |exec| owned.svd(exec))
-                    .map_err(|err| tenferro_error("svd_values", err))?;
+            let (_, values, _) = with_cpu_linalg(&mut self.backend, |exec| owned.svd(exec))
+                .map_err(|err| tenferro_error("svd_values", err))?;
             Ok(DenseTensor::from_tenferro(values))
         }
     }
@@ -869,9 +866,8 @@ impl DenseExecutor for DefaultDenseExecutor {
                 .backend
                 .with_backend_session(|exec| exec.to_contiguous_read(TensorRead::from_view(input)))
                 .map_err(|err| tenferro_error("eigh_values", err))?;
-            let (values, _) =
-                with_cpu_linalg(&mut self.backend, "eigh_values", |exec| owned.eigh(exec))
-                    .map_err(|err| tenferro_error("eigh_values", err))?;
+            let (values, _) = with_cpu_linalg(&mut self.backend, |exec| owned.eigh(exec))
+                .map_err(|err| tenferro_error("eigh_values", err))?;
             Ok(DenseTensor::from_tenferro(values))
         }
     }
@@ -889,7 +885,7 @@ impl DenseExecutor for DefaultDenseExecutor {
                 .backend
                 .with_backend_session(|exec| exec.to_contiguous_read(TensorRead::from_view(input)))
                 .map_err(|err| tenferro_error("eig_values", err))?;
-            with_cpu_linalg(&mut self.backend, "eig_values", |exec| owned.eigvals(exec))
+            with_cpu_linalg(&mut self.backend, |exec| owned.eigvals(exec))
                 .map(DenseTensor::from_tenferro)
                 .map_err(|err| tenferro_error("eig_values", err))
         }
@@ -1219,12 +1215,9 @@ fn tenferro_solve_error(err: tenferro_tensor::Error) -> DenseError {
 #[cfg(not(feature = "provider-inject"))]
 fn with_cpu_linalg<R: Send>(
     backend: &mut CpuBackend,
-    op: &'static str,
-    f: impl for<'a> FnOnce(&'a mut CpuExecSession<'a>) -> tenferro_tensor::Result<R> + Send,
+    f: impl FnOnce(&mut dyn BackendSession) -> tenferro_tensor::Result<R> + Send,
 ) -> tenferro_tensor::Result<R> {
-    backend
-        .with_backend_session(|session| with_cpu_exec_session(session, f))
-        .ok_or_else(|| tenferro_tensor::Error::unsupported(op, "CPU backend session unavailable"))?
+    backend.with_backend_session(f)
 }
 
 #[cfg(feature = "provider-inject")]
