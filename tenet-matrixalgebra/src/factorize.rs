@@ -3850,13 +3850,22 @@ where
     let mut vt_workspace = Vec::new();
     for matrix in &mut matricizations {
         let rank = matrix.rows.min(matrix.cols);
-        let (u_full, s_values, vh_full) = match owned_full_svd_stage(
+        let (mut left, left_rows, mut right, right_leading, s_values) = match owned_full_svd_stage(
             dense,
             &mut matrix.data,
             matrix.rows,
             matrix.cols,
         )? {
-            Some(outputs) => outputs,
+            Some((u_full, s_values, vh_full)) => match placement {
+                FactorPlacement::Direct => (u_full, matrix.rows, vh_full, matrix.cols, s_values),
+                FactorPlacement::Adjoint => (
+                    adjoint_col_major(&vh_full, matrix.cols, matrix.cols),
+                    matrix.cols,
+                    adjoint_col_major(&u_full, matrix.rows, matrix.rows),
+                    matrix.rows,
+                    s_values,
+                ),
+            },
             None => {
                 if u_workspace.is_empty() && max_rows != 0 && max_rank != 0 {
                     u_workspace = vec![D::zero(); max_rows * max_rank];
@@ -3913,21 +3922,23 @@ where
                 let u_full = orthonormal_completion(dense, &u_thin, matrix.rows, rank)?;
                 let v_thin = adjoint_col_major(&vt_thin, rank, matrix.cols);
                 let v_full = orthonormal_completion(dense, &v_thin, matrix.cols, rank)?;
-                (
-                    u_full,
-                    s_values,
-                    adjoint_col_major(&v_full, matrix.cols, matrix.cols),
-                )
+                match placement {
+                    FactorPlacement::Direct => (
+                        u_full,
+                        matrix.rows,
+                        adjoint_col_major(&v_full, matrix.cols, matrix.cols),
+                        matrix.cols,
+                        s_values,
+                    ),
+                    FactorPlacement::Adjoint => (
+                        v_full,
+                        matrix.cols,
+                        adjoint_col_major(&u_full, matrix.rows, matrix.rows),
+                        matrix.rows,
+                        s_values,
+                    ),
+                }
             }
-        };
-        let (mut left, left_rows, mut right, right_leading) = match placement {
-            FactorPlacement::Direct => (u_full, matrix.rows, vh_full, matrix.cols),
-            FactorPlacement::Adjoint => (
-                adjoint_col_major(&vh_full, matrix.cols, matrix.cols),
-                matrix.cols,
-                adjoint_col_major(&u_full, matrix.rows, matrix.rows),
-                matrix.rows,
-            ),
         };
         svd_full_gauge(
             &mut left,
