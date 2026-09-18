@@ -739,10 +739,10 @@ impl DenseExecutor for DefaultDenseExecutor {
         #[cfg(feature = "provider-inject")]
         {
             let _ = (input, rows, cols);
-            return Err(DenseError::Unsupported {
+            Err(DenseError::Unsupported {
                 op: "svd_full_owned",
                 message: "executor does not implement owned full-matrices SVD".to_string(),
-            });
+            })
         }
         #[cfg(not(feature = "provider-inject"))]
         {
@@ -838,7 +838,7 @@ impl DenseExecutor for DefaultDenseExecutor {
         #[cfg(feature = "provider-inject")]
         {
             let _ = input;
-            return Err(linalg_unavailable("svd"));
+            Err(linalg_unavailable("svd"))
         }
         #[cfg(not(feature = "provider-inject"))]
         {
@@ -860,7 +860,7 @@ impl DenseExecutor for DefaultDenseExecutor {
         #[cfg(feature = "provider-inject")]
         {
             let _ = input;
-            return Err(linalg_unavailable("qr"));
+            Err(linalg_unavailable("qr"))
         }
         #[cfg(not(feature = "provider-inject"))]
         {
@@ -882,7 +882,7 @@ impl DenseExecutor for DefaultDenseExecutor {
         #[cfg(feature = "provider-inject")]
         {
             let _ = input;
-            return Err(linalg_unavailable("eig"));
+            Err(linalg_unavailable("eig"))
         }
         #[cfg(not(feature = "provider-inject"))]
         {
@@ -904,7 +904,7 @@ impl DenseExecutor for DefaultDenseExecutor {
         #[cfg(feature = "provider-inject")]
         {
             let _ = input;
-            return Err(linalg_unavailable("eigh"));
+            Err(linalg_unavailable("eigh"))
         }
         #[cfg(not(feature = "provider-inject"))]
         {
@@ -931,7 +931,7 @@ impl DenseExecutor for DefaultDenseExecutor {
         #[cfg(feature = "provider-inject")]
         {
             let _ = (a, b, x);
-            return Err(linalg_unavailable("solve_into"));
+            Err(linalg_unavailable("solve_into"))
         }
         #[cfg(not(feature = "provider-inject"))]
         {
@@ -973,7 +973,7 @@ impl DenseExecutor for DefaultDenseExecutor {
         #[cfg(feature = "provider-inject")]
         {
             let _ = input;
-            return Err(linalg_unavailable("svd_vals"));
+            Err(linalg_unavailable("svd_vals"))
         }
         #[cfg(not(feature = "provider-inject"))]
         {
@@ -992,7 +992,7 @@ impl DenseExecutor for DefaultDenseExecutor {
         #[cfg(feature = "provider-inject")]
         {
             let _ = input;
-            return Err(linalg_unavailable("eigh_vals"));
+            Err(linalg_unavailable("eigh_vals"))
         }
         #[cfg(not(feature = "provider-inject"))]
         {
@@ -1011,7 +1011,7 @@ impl DenseExecutor for DefaultDenseExecutor {
         #[cfg(feature = "provider-inject")]
         {
             let _ = input;
-            return Err(linalg_unavailable("eig_vals"));
+            Err(linalg_unavailable("eig_vals"))
         }
         #[cfg(not(feature = "provider-inject"))]
         {
