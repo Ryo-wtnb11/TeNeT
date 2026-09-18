@@ -5347,7 +5347,6 @@ where
     let sigma_max = singular_values
         .first()
         .copied()
-        .map(Into::into)
         .unwrap_or(0.0);
     // Why not exact-zero rank: backward-stable SVD represents dependent
     // directions at working precision, not necessarily as bitwise zero.
@@ -5357,9 +5356,13 @@ where
         .copied()
         .filter(|&sigma| sigma > tolerance)
         .count();
+    drop(singular_values);
     let basis = match side {
         FactorSide::Left => u,
-        FactorSide::Right => adjoint_col_major(&vh, compact_rank, cols),
+        FactorSide::Right => {
+            drop(u);
+            adjoint_col_major(&vh, compact_rank, cols)
+        }
     };
     Ok((rank, basis))
 }
