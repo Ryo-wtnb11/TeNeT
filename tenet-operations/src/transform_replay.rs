@@ -5483,6 +5483,56 @@ mod allocation_replay_tests {
         assert_eq!(allocations, 0);
         assert_eq!(dst, expected);
     }
+
+    #[test]
+    fn warm_threaded_overwrite_replay_has_no_owned_allocations() {
+        let block_structure = Arc::new(
+            BlockStructure::packed_column_major(1, [vec![4], vec![4], vec![4], vec![4]])
+                .unwrap(),
+        );
+        let structure = TreeTransformStructure::compile_structures(
+            &block_structure,
+            &block_structure,
+            &[
+                TreeTransformBlockSpec::multi(vec![0, 1], vec![0, 1], vec![1.0, 0.0, 0.0, 1.0]),
+                TreeTransformBlockSpec::single(2, 2, 1.0),
+                TreeTransformBlockSpec::single(3, 3, -1.0),
+            ],
+        )
+        .unwrap();
+        let src = (1..=16).map(f64::from).collect::<Vec<_>>();
+        let expected = (1..=16)
+            .map(|value| if value <= 12 { f64::from(value) } else { -f64::from(value) })
+            .collect::<Vec<_>>();
+        let mut dst = vec![f64::NAN; 16];
+        let mut kernels = StridedHostKernelAdapter::default();
+        let mut dense = NoAllocDenseExecutor;
+        let mut workspace = TreeTransformWorkspace::default();
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(3).build().unwrap();
+
+        let mut replay = || {
+            tree_transform_structure_overwrite_with_structural_recoupling_raw(
+                &mut kernels,
+                &mut dense,
+                &mut workspace,
+                &structure,
+                &block_structure,
+                &block_structure,
+                &mut dst,
+                &src,
+                1.0,
+                3,
+            )
+            .unwrap();
+        };
+
+        pool.install(&mut replay);
+        let (_, allocations) = allocation_oracle::with_session(|| {
+            pool.install(|| allocation_oracle::with_measurement(&mut replay))
+        });
+        assert_eq!(allocations, 0);
+        assert_eq!(dst, expected);
+    }
 }
 
 #[cfg(test)]
