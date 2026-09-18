@@ -12745,6 +12745,48 @@ fn pinv_adjoint_parent_uses_one_parent_svd_and_the_shared_global_cutoff() {
 }
 
 #[test]
+fn pinv_adjoint_parent_reconstructs_complex_padded_rectangular_sectors() {
+    let rule = Z2FusionRule;
+    let source = mixed_rectangular_c32_tensor();
+    let canonical = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
+        source
+            .data()
+            .iter()
+            .map(|value| Complex64::new(value.re as f64, value.im as f64))
+            .collect(),
+        source.fusion_space().unwrap().as_ref().clone(),
+    )
+    .unwrap();
+    let parent = padded_copy(&rule, &canonical);
+    let provider = Arc::new(rule);
+    let bound = bound_tensor(Arc::clone(&provider), &parent);
+    assert!(
+        crate::factorize::compact_factor_plan_for_test(bound.space())
+            .unwrap()
+            .is_none()
+    );
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    let mut context = TensorContractFusionExecutionContext::<Complex64, RuleIdentity>::default();
+    crate::factorize::reset_compact_svd_copy_probe();
+    let output = pinv_adjoint_parent_dyn(&mut dense, &mut context, &bound.as_ref().dynamic(), 0.0)
+        .unwrap();
+    let output: BoundTensorMap<_, _, 1, 1> = typed_from_bound_factor(output).unwrap();
+    let adjoint = tenet_tensors::adjoint(provider.as_ref(), &canonical).unwrap();
+    let first = crate::compose::compose(&mut context, provider.as_ref(), &adjoint, output.tensor())
+        .unwrap();
+    let reconstructed = crate::compose::compose(&mut context, provider.as_ref(), &first, &adjoint)
+        .unwrap();
+
+    assert_eq!(reconstructed.structure(), adjoint.structure());
+    for (&actual, &expected) in reconstructed.data().iter().zip(adjoint.data()) {
+        assert!((actual - expected).norm() < 1.0e-10);
+    }
+    let probe = crate::factorize::compact_svd_copy_probe();
+    assert!(probe.input_pack_calls > 0);
+    assert!(probe.output_scatter_calls > 0);
+}
+
+#[test]
 fn pinv_adjoint_parent_rejects_invalid_rcond_before_svd() {
     // What: the hidden seam owns the same validation precedence as ordinary
     // pinv, independently of either facade.
