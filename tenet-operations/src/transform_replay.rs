@@ -30,6 +30,66 @@ use crate::{
     TreeTransformStructure,
 };
 
+#[cfg(test)]
+mod allocation_oracle {
+    use std::cell::Cell;
+
+    thread_local! {
+        static MEASURED: Cell<bool> = const { Cell::new(false) };
+    }
+
+    struct RestoreMeasurement(bool);
+
+    impl Drop for RestoreMeasurement {
+        fn drop(&mut self) {
+            MEASURED.with(|measured| measured.set(self.0));
+        }
+    }
+
+    pub(super) fn is_measured() -> bool {
+        MEASURED.with(Cell::get)
+    }
+
+    pub(super) fn with_measurement<R>(action: impl FnOnce() -> R) -> R {
+        let restore = RestoreMeasurement(MEASURED.with(|measured| measured.replace(true)));
+        let result = action();
+        drop(restore);
+        result
+    }
+
+    pub(super) fn join<A, B, RA, RB>(left: A, right: B) -> (RA, RB)
+    where
+        A: FnOnce() -> RA + Send,
+        B: FnOnce() -> RB + Send,
+        RA: Send,
+        RB: Send,
+    {
+        let measured = is_measured();
+        if !measured {
+            return rayon::join(left, right);
+        }
+        let restore = RestoreMeasurement(MEASURED.with(|state| state.replace(false)));
+        let result = rayon::join(
+            || {
+                let restore =
+                    RestoreMeasurement(MEASURED.with(|state| state.replace(measured)));
+                let result = left();
+                drop(restore);
+                result
+            },
+            || {
+                let restore =
+                    RestoreMeasurement(MEASURED.with(|state| state.replace(measured)));
+                let result = right();
+                drop(restore);
+                result
+            },
+        );
+        drop(restore);
+        result
+    }
+}
+
 #[derive(Clone, Copy)]
 enum DestinationMode<D> {
     Axpby(D),
