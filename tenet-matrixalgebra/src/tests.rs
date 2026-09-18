@@ -120,6 +120,12 @@ struct NativeFullSvdSpy {
     full_calls: usize,
 }
 
+#[derive(Default)]
+struct FailSecondOwnedFullSvd {
+    inner: tenet_dense::DefaultDenseExecutor,
+    calls: usize,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ValuesOperation {
     Svd,
@@ -365,6 +371,29 @@ impl DenseExecutor for NativeFullSvdSpy {
         _: DenseRead<'_>,
         _: &DenseDotConfig,
     ) -> Result<(), DenseError> {
+        panic!("test only exercises full SVD")
+    }
+}
+
+impl DenseExecutor for FailSecondOwnedFullSvd {
+    fn svd(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        panic!("claimed native full SVD must not retry the legacy route")
+    }
+    fn qr(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        panic!("claimed native full SVD must not use completion")
+    }
+    fn eigh(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        panic!("test only exercises full SVD")
+    }
+    fn supports_svd_full(&self) -> bool { true }
+    fn svd_full_owned(&mut self, input: DenseOwned, rows: usize, cols: usize) -> Result<Vec<DenseTensor>, DenseError> {
+        self.calls += 1;
+        if self.calls == 2 {
+            return Err(DenseError::Backend { backend: DenseBackend::Tenferro, op: "svd_full_owned", message: "injected second-sector failure".to_string() });
+        }
+        self.inner.svd_full_owned(input, rows, cols)
+    }
+    fn dot_general_into(&mut self, _: DenseWrite<'_>, _: DenseRead<'_>, _: DenseRead<'_>, _: &DenseDotConfig) -> Result<(), DenseError> {
         panic!("test only exercises full SVD")
     }
 }
@@ -10281,6 +10310,22 @@ fn native_full_svd_reconstructs_complex_mixed_rectangular_sectors() {
             }
         }
     }
+}
+
+#[test]
+fn native_full_svd_late_failure_does_not_publish_or_retry_compatibility() {
+    let tensor = mixed_rectangular_c32_tensor();
+    let before = tensor.data().to_vec();
+    let input = bound_tensor(Arc::new(Z2FusionRule), &tensor);
+    let mut dense = FailSecondOwnedFullSvd::default();
+
+    crate::factorize::reset_factor_buffer_build_counts_for_test();
+    let result = svd_full_dyn(&mut dense, &input.as_ref().dynamic());
+
+    assert!(matches!(result, Err(OperationError::Dense(_))));
+    assert_eq!(dense.calls, 2);
+    assert_eq!(input.data(), before);
+    assert_eq!(crate::factorize::factor_buffer_build_counts_for_test(), (0, 0));
 }
 
 #[test]
