@@ -4235,6 +4235,35 @@ fn checked_generic_pinv_uses_a_strict_global_cutoff() {
 }
 
 #[test]
+fn checked_generic_pinv_normalized_empty_skips_dense_execution() {
+    let svd_calls = Arc::new(AtomicUsize::new(0));
+    let gemm_calls = Arc::new(AtomicUsize::new(0));
+    let runtime = Runtime::builder()
+        .dense_threads(1)
+        .with_dense_executor(Box::new(PinvFaultExecutor {
+            inner: DefaultDenseExecutor::new(),
+            svd_calls: Arc::clone(&svd_calls),
+            gemm_calls: Arc::clone(&gemm_calls),
+            fail_svd: None,
+            fail_gemm: None,
+        }))
+        .build()
+        .unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new(0));
+    let empty = GradedSpace::try_new_with_arc(Arc::clone(&provider), [(Label::X, 0)]).unwrap();
+    let source: TensorMap<_, f64> = TensorMap::zeros(&runtime, [&empty], [&empty]).unwrap();
+
+    assert!(source.data().is_empty());
+    let pseudo = source.pinv(0.0).unwrap();
+    assert!(pseudo.data().is_empty());
+    assert_eq!(pseudo.codomain(), source.domain());
+    assert_eq!(pseudo.domain(), source.codomain());
+    assert!(std::ptr::eq(pseudo.provider(), provider.as_ref()));
+    assert_eq!(svd_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(gemm_calls.load(Ordering::Relaxed), 0);
+}
+
+#[test]
 fn checked_generic_null_spaces_cover_rank_cutoff_zero_disjoint_and_side_only_sectors() {
     // What: Generic null spaces use the documented numerical rank, keep full
     // zero/side-only directions, drop full-rank sectors, and retain authority.
