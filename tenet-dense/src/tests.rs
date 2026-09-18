@@ -2341,6 +2341,52 @@ fn default_executor_eigh_vals_returns_literal_spectra_for_every_dense_dtype() {
     assert_eq!(c64_data, c64_before);
 }
 
+#[test]
+fn default_executor_values_only_reads_offset_padded_transposed_views() {
+    // What: values-only calls respect the borrowed view's logical layout and
+    // leave padding and source elements untouched.
+    let shape = [2, 2];
+    let strides = [7, 3];
+    let mut executor = DefaultDenseExecutor::new();
+
+    let mut svd_data = vec![-17.0_f64; 12];
+    svd_data[1] = 0.0;
+    svd_data[4] = 3.0;
+    svd_data[8] = 4.0;
+    svd_data[11] = 0.0;
+    let svd_before = svd_data.clone();
+    let values = executor
+        .svd_vals(DenseRead::F64(
+            DenseView::new(&svd_data, &shape, &strides, 1).unwrap(),
+        ))
+        .unwrap();
+    let values = values.as_f64_slice().unwrap();
+    assert_eq!(values.len(), 2);
+    for (actual, expected) in values.iter().zip([4.0, 3.0]) {
+        assert_f64_close(*actual, expected, 1.0e-12);
+    }
+    assert_eq!(svd_data, svd_before);
+
+    let c = |re, im| Complex64::new(re, im);
+    let mut eigh_data = vec![c(-17.0, 9.0); 12];
+    eigh_data[1] = c(2.0, 0.0);
+    eigh_data[4] = c(0.0, 1.0);
+    eigh_data[8] = c(0.0, -1.0);
+    eigh_data[11] = c(2.0, 0.0);
+    let eigh_before = eigh_data.clone();
+    let values = executor
+        .eigh_vals(DenseRead::C64(
+            DenseView::new(&eigh_data, &shape, &strides, 1).unwrap(),
+        ))
+        .unwrap();
+    let values = values.as_f64_slice().unwrap();
+    assert_eq!(values.len(), 2);
+    for (actual, expected) in values.iter().zip([1.0, 3.0]) {
+        assert_f64_close(*actual, expected, 1.0e-12);
+    }
+    assert_eq!(eigh_data, eigh_before);
+}
+
 fn batch_job(shape: (usize, usize, usize), offsets: (usize, usize, usize)) -> DenseGemmBatchJob {
     DenseGemmBatchJob {
         rows: shape.0,
