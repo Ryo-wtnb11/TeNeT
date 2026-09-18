@@ -12345,7 +12345,10 @@ fn assert_checked_pinv_uses_owned_svd_outputs_at_final_gemm<D: crate::factorize:
         assert_eq!(rhs.offset, 0);
         assert!(*lhs_conj && *rhs_conj);
     }
-    assert!(std::ptr::eq(result.space().provider_arc().as_ref(), provider.as_ref()));
+    assert!(std::ptr::eq(
+        result.space().provider_arc().as_ref(),
+        provider.as_ref()
+    ));
 }
 
 #[test]
