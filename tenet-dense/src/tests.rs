@@ -3,6 +3,23 @@
 use super::*;
 use num_complex::{Complex32, Complex64};
 
+#[cfg(feature = "provider-inject")]
+#[test]
+fn provider_inject_rejects_linalg_before_backend_work() {
+    let mut executor = DefaultDenseExecutor::new();
+    let data = [1.0, 0.0, 0.0, 1.0];
+    let error = executor
+        .svd(DenseRead::F64(
+            DenseView::new(&data, &[2, 2], &[1, 2], 0).unwrap(),
+        ))
+        .unwrap_err();
+    let DenseError::Unsupported { op, message } = error else {
+        panic!("provider-inject SVD must be unsupported")
+    };
+    assert_eq!(op, "svd");
+    assert_eq!(message, "provider-inject requires a registered BLAS/LAPACK provider");
+}
+
 fn assert_f64_close(actual: f64, expected: f64, tol: f64) {
     assert!(
         (actual - expected).abs() <= tol,
