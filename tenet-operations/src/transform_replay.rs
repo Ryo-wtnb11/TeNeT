@@ -48,6 +48,7 @@ mod allocation_oracle {
     }
 
     static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
+    static JOINS: AtomicUsize = AtomicUsize::new(0);
     static SESSION: Mutex<()> = Mutex::new(());
 
     struct CountingAllocator;
@@ -113,6 +114,7 @@ mod allocation_oracle {
         let restore = RestoreSession(SESSION_ACTIVE.with(|active| active.replace(true)));
         let session = SESSION.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         ALLOCATIONS.store(0, Ordering::Relaxed);
+        JOINS.store(0, Ordering::Relaxed);
         let result = action();
         let allocations = ALLOCATIONS.load(Ordering::Relaxed);
         drop(session);
@@ -127,6 +129,10 @@ mod allocation_oracle {
         result
     }
 
+    pub(super) fn join_entries() -> usize {
+        JOINS.load(Ordering::Relaxed)
+    }
+
     pub(super) fn join<A, B, RA, RB>(left: A, right: B) -> (RA, RB)
     where
         A: FnOnce() -> RA + Send,
@@ -135,6 +141,9 @@ mod allocation_oracle {
         RB: Send,
     {
         let measured = is_measured();
+        if measured {
+            JOINS.fetch_add(1, Ordering::Relaxed);
+        }
         let restore = RestoreMeasurement(MEASURED.with(|state| state.replace(false)));
         let result = rayon::join(
             || {
@@ -5489,10 +5498,16 @@ mod allocation_replay_tests {
         };
 
         pool.install(&mut replay);
-        let (_, allocations) = allocation_oracle::with_session(|| {
-            pool.install(|| allocation_oracle::with_measurement(&mut replay))
+        let (joins, allocations) = allocation_oracle::with_session(|| {
+            pool.install(|| {
+                allocation_oracle::with_measurement(|| {
+                    replay();
+                    allocation_oracle::join_entries()
+                })
+            })
         });
         assert_eq!(allocations, 0);
+        assert!(joins > 0);
         assert_eq!(dst, expected);
     }
 
@@ -5659,7 +5674,7 @@ mod allocation_replay_tests {
 
 #[cfg(test)]
 mod allocation_oracle_tests {
-    use super::allocation_oracle;
+    use super::{allocation_oracle, replay_join};
     use std::panic::{catch_unwind, AssertUnwindSafe};
 
     #[test]
@@ -5734,6 +5749,39 @@ mod allocation_oracle_tests {
         assert!(nested.is_err());
 
         let (_, allocations) = allocation_oracle::with_session(|| ());
+        assert_eq!(allocations, 0);
+    }
+
+    #[test]
+    fn allocation_oracle_rejects_worker_sessions() {
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+        let worker_session = pool.install(|| {
+            catch_unwind(AssertUnwindSafe(|| allocation_oracle::with_session(|| ())))
+        });
+        assert!(worker_session.is_err());
+
+        let (_, allocations) = allocation_oracle::with_session(|| ());
+        assert_eq!(allocations, 0);
+    }
+
+    #[test]
+    fn allocation_oracle_restores_after_a_panicking_replay_join() {
+        let panic = catch_unwind(AssertUnwindSafe(|| {
+            allocation_oracle::with_session(|| {
+                allocation_oracle::with_measurement(|| {
+                    replay_join(
+                        || panic!("expected replay join panic"),
+                        || assert!(allocation_oracle::is_measured()),
+                    );
+                })
+            });
+        }));
+        assert!(panic.is_err());
+        assert!(!allocation_oracle::is_measured());
+
+        let (_, allocations) = allocation_oracle::with_session(|| {
+            allocation_oracle::with_measurement(|| assert!(allocation_oracle::is_measured()))
+        });
         assert_eq!(allocations, 0);
     }
 }
