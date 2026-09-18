@@ -70,18 +70,14 @@ fn run_partition_covers(jobs: &[DenseGemmBatchJob], runs: &[usize]) -> bool {
     start == jobs.len()
 }
 
-/// One CPU execution context — parallelism hint plus the rayon pool behind
-/// multi-threaded CPU work — meant to be shared by EVERY executor a runtime
-/// mints (its dense factorization executor, executor-pool mints, and all
-/// per-rule transform backends). Sharing is the point: each
-/// `CpuBackend::new()`/`with_threads(n>1)` otherwise builds its own eager
-/// rayon pool, and a runtime minting dozens of executors multiplies that into
-/// hundreds of idle threads (the macOS `WouldBlock` thread-cap failure on
-/// TeNeT#155's context pool). Opaque so callers never name tenferro types.
+/// One CPU execution context — a parallelism hint plus resources for
+/// multi-threaded CPU work — shared by runtime-built executors using the
+/// compiled default provider kind. An explicitly requested nondefault kind
+/// uses a private provider context, while a custom executor owns its own
+/// configuration. The wrapper keeps callers independent of Tenferro types.
 ///
-/// Buffer pools are deliberately NOT shared: each executor keeps its own
-/// `CpuBackend`/`BufferPool` (scratch reuse is per-executor state; sharing it
-/// would put a lock on the GEMM scratch path).
+/// Each executor keeps its own `CpuBackend` and `BufferPool`; scratch reuse,
+/// synchronization, and thread behavior remain provider concerns.
 #[derive(Clone, Debug)]
 pub struct SharedCpuContext {
     ctx: Arc<CpuContext>,
@@ -166,10 +162,11 @@ impl DefaultDenseExecutor {
             .map_err(|err| tenferro_error("CpuBackend::with_threads_and_kind", err.into()))
     }
 
-    /// Builds an executor on a runtime's shared [`SharedCpuContext`] (own
-    /// backend + buffer pool, shared rayon pool) with an optional explicit
-    /// provider. This is the constructor every runtime-minted executor must
-    /// use — see [`SharedCpuContext`] for why.
+    /// Builds an executor with an optional provider kind. The compiled default
+    /// kind uses the runtime's shared [`SharedCpuContext`]; an explicit
+    /// nondefault kind uses a private provider context. Each executor retains
+    /// its own backend and buffer pool; this does not promise lock-free scratch
+    /// access or a provider thread policy.
     pub fn with_shared_context(
         ctx: &SharedCpuContext,
         kind: Option<CpuBackendKind>,
