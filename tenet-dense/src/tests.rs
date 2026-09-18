@@ -2441,6 +2441,58 @@ fn default_executor_values_only_admits_batches_and_zero_extents() {
     assert!(values.as_f64_slice().unwrap().is_empty());
 }
 
+#[test]
+fn default_executor_values_only_preserves_rank_and_dtype_rejections() {
+    // What: invalid ranks, nonsquare EIGH, and unsupported scalar inputs still
+    // surface as the established Tenferro-backed values-operation errors.
+    let mut executor = DefaultDenseExecutor::new();
+
+    let svd_rank_one = [1.0_f64, 2.0];
+    let error = executor
+        .svd_vals(DenseRead::F64(
+            DenseView::new(&svd_rank_one, &[2], &[1], 0).unwrap(),
+        ))
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        DenseError::Backend {
+            backend: DenseBackend::Tenferro,
+            op: "svd_values",
+            ..
+        }
+    ));
+
+    let nonsquare = [1.0_f64; 6];
+    let error = executor
+        .eigh_vals(DenseRead::F64(
+            DenseView::new(&nonsquare, &[2, 3], &[1, 2], 0).unwrap(),
+        ))
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        DenseError::Backend {
+            backend: DenseBackend::Tenferro,
+            op: "eigh_values",
+            ..
+        }
+    ));
+
+    let integers = [1_i32, 0, 0, 1];
+    let error = executor
+        .svd_vals(DenseRead::I32(
+            DenseView::new(&integers, &[2, 2], &[1, 2], 0).unwrap(),
+        ))
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        DenseError::Backend {
+            backend: DenseBackend::Tenferro,
+            op: "svd_values",
+            ref message,
+        } if message.contains("does not support dtype I32")
+    ));
+}
+
 fn batch_job(shape: (usize, usize, usize), offsets: (usize, usize, usize)) -> DenseGemmBatchJob {
     DenseGemmBatchJob {
         rows: shape.0,
