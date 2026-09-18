@@ -61,10 +61,9 @@ impl<Key: Clone + Eq + Hash + Send + Sync + 'static> Default for Ctxs<Key> {
     }
 }
 
-/// Builds one contraction/recoupling backend on the runtime's shared CPU
-/// context (one rayon pool per runtime — see `RuntimeExecutionConfig::
-/// shared_ctx`); a `gemm_kind` of `Blas` fails if no `cpu-blas`/`blas-*`
-/// provider was compiled in.
+/// Builds one contraction/recoupling backend. A compiled-default `gemm_kind`
+/// uses the runtime's shared CPU context; an explicit nondefault kind uses a
+/// private provider context. Both remain subject to provider synchronization.
 fn make_transform_ops(
     ctx: &tenet_dense::SharedCpuContext,
     gemm_kind: Option<tenet_dense::CpuBackendKind>,
@@ -482,39 +481,31 @@ impl RuntimeTreeTransformStores {
 }
 
 struct RuntimeInner {
-    // The coarse state mutex is now cold on the CPU hot paths: standalone ops
-    // lease from `context_pool`/`executor_pool` (below) and the network path
-    // uses per-plan workspace pools, so this is held only for CUDA device state,
-    // plan-cache config, and the non-mintable injected-executor fallback (#155).
+    // Standalone CPU ops normally lease from `context_pool`/`executor_pool`,
+    // while network execution uses per-plan workspace pools. Pool checkout,
+    // cache access, provider resources, CUDA state, and a non-mintable injected
+    // executor can still synchronize.
     state: Mutex<RuntimeState>,
     rand_counter: AtomicU64,
     execution_config: RuntimeExecutionConfig,
     tree_transform_stores: RuntimeTreeTransformStores,
-    /// Standalone-op parallelism (#155): rather than hold the coarse `state`
-    /// mutex for a whole `contract`/`permute`/factorization, each op leases a
-    /// execution context (and, for factorizations, a dense executor)
-    /// for its duration and returns it, so ops on a shared `Runtime` run
-    /// concurrently. Both pools mirror the network `WorkspacePool`: mint on
-    /// empty, bounded idle count, quarantine-on-panic.
+    /// Standalone operations lease an execution context and, for factorization,
+    /// a dense executor. Both pools mint on empty, bound their idle count, and
+    /// quarantine a resource that unwinds while leased.
     ///
-    /// Why not one shared `Sync` executor instead of a pool: `DenseExecutor`
-    /// takes `&mut self` (per-call scratch), and a future CUDA per-stream
-    /// executor would carry non-`Sync` device state — a pool of owned
-    /// executors is the share strategy that survives that, a `&`-shared one is
-    /// not.
+    /// `DenseExecutor` takes `&mut self` for per-call scratch, so leases own
+    /// mutable executor state rather than sharing one executor by `&`.
     context_pool: Mutex<Vec<PooledContext>>,
     executor_pool: Mutex<Vec<Box<dyn tenet_dense::DenseExecutor + Send>>>,
     /// `false` when a caller injected a custom (non-mintable) executor via
     /// `with_dense_executor`: the pool cannot reproduce it, so factorizations
     /// fall back to the `state` lock and its single executor.
     executor_mintable: bool,
-    /// Idle-pool cap: keep up to one warm context/executor per core so a
-    /// data-parallel driver (one thread per core) reuses them instead of
-    /// re-minting each call. ponytail: cores, not a tunable; raise only if a
-    /// workload oversubscribes cores and re-mint churn shows up in a profile.
+    /// Idle-pool cap derived from available parallelism, with a minimum of two
+    /// and a fallback of four when the system does not report a value.
     max_idle: usize,
-    /// Contraction-plan cache, behind its own mutex so the network hot path
-    /// never contends with standalone ops on the `state` mutex (#155).
+    /// Contraction-plan cache behind its own mutex, separate from `state` but
+    /// still synchronized while cache work is in progress.
     plan_cache: Mutex<PlanCacheHome>,
 }
 
@@ -631,15 +622,10 @@ pub(crate) struct RuntimeExecutionConfig {
     pub(crate) linalg_kind: Option<tenet_dense::CpuBackendKind>,
     pub(crate) real_tree_transform_store: Weak<RuntimeTreeTransformStore<f64>>,
     pub(crate) complex_tree_transform_store: Weak<RuntimeTreeTransformStore<Complex64>>,
-    /// THE runtime's CPU context: one rayon pool shared by every executor this
-    /// runtime mints — the state's, the executor pool's, and all
-    /// transform backends of every pooled `TensorExecutionContext`
-    /// (the two real-coefficient lanes in each namespace plus the private
-    /// multiplicity-free complex-coefficient lane, each for tree/contract).
-    /// Without it each
-    /// executor built its own eager env-sized pool, and the #155 context pool
-    /// multiplied that into a process-thread-cap failure (macOS `WouldBlock`)
-    /// under concurrent leases.
+    /// Runtime CPU context shared by built-in executors that use the compiled
+    /// default kind: the state, mintable executor pool, and transform backends.
+    /// An explicitly requested nondefault kind uses its own provider context;
+    /// an injected executor owns its own configuration.
     pub(crate) shared_ctx: tenet_dense::SharedCpuContext,
 }
 
@@ -651,11 +637,10 @@ pub(crate) struct RuntimeExecutionConfig {
 /// arguments. Context-local operation caches stay disabled; cloning a
 /// `Runtime` clones a shared handle, not the state.
 ///
-/// Concurrency: standalone tensor operations lease independent execution
-/// contexts, so they do not hold the coarse state mutex for their full
-/// duration. The shared completed-transform store and the network plan cache
-/// each use their own synchronization; dense backend parallelism remains below
-/// this user-layer boundary.
+/// Concurrency: standalone tensor operations can lease independent execution
+/// contexts instead of holding the coarse state mutex for their full duration.
+/// Pool checkout, shared stores, the plan cache, and dense providers retain
+/// their own synchronization and capability limits.
 ///
 /// # Examples
 ///
@@ -791,14 +776,11 @@ impl Runtime {
             );
     }
 
-    /// Leases an execution context for one standalone op (#155): pop an idle
-    /// one or mint a fresh config-bound one. Each context owns one
+    /// Leases an execution context for one standalone op: pop an idle one or
+    /// mint a fresh config-bound one. Each context owns one
     /// `RuleIdentity`-keyed multiplicity-free lane and a separate Generic-fusion
-    /// lane. The op runs on the leased context, not under the coarse `state`
-    /// lock, so ops on a shared runtime run concurrently. Byte-identical to the
-    /// old locked path: the machinery is the same `Ctxs`. Completed tree
-    /// transforms are shared by the Runtime store regardless of which context
-    /// is leased; unrelated context-local caches remain disabled.
+    /// lane. The coarse `state` lock is not held during that lease, but pool
+    /// checkout and other shared resources remain synchronized.
     pub(crate) fn lease_context(&self) -> Result<ContextLease<'_>, Error> {
         let pooled = self
             .inner
@@ -1054,13 +1036,15 @@ impl RuntimeBuilder {
         self
     }
 
-    /// Sets the global CPU worker count used by dense/strided kernels that
-    /// run on rayon's global pool. This must be configured before any rayon
-    /// work has initialized the pool; later calls are best-effort no-ops.
+    /// Sets the runtime CPU-context worker count and best-effort initializes
+    /// Rayon’s process-global pool. Rayon can be initialized only once per
+    /// process, so a later call cannot resize an already initialized global
+    /// pool.
     ///
-    /// If unset, [`Self::build`] also checks `TENET_DENSE_THREADS`. A value
-    /// of 1 keeps tiny-block workloads serial while still allowing outer
-    /// application-level parallelism.
+    /// If unset, [`Self::build`] also checks `TENET_DENSE_THREADS`. A value of
+    /// 1 creates no worker pool for this CPU context; it does not resize an
+    /// existing global Rayon pool or configure provider-internal/custom-executor
+    /// threads.
     pub fn dense_threads(mut self, threads: usize) -> Self {
         self.dense_threads = Some(threads.max(1));
         self
@@ -1072,9 +1056,9 @@ impl RuntimeBuilder {
     /// BLAS/LAPACK or MKL backend: implement `DenseExecutor` and pass it here —
     /// no operator or decomposition code changes.
     ///
-    /// The injected executor carries its own thread configuration;
-    /// [`Self::dense_threads`] then only sizes the shared rayon pool and the
-    /// recoupling contexts, not the injected backend.
+    /// The injected executor owns its thread configuration. [`Self::dense_threads`]
+    /// configures the runtime CPU context and only attempts global Rayon setup;
+    /// it does not reconfigure the injected backend.
     pub fn with_dense_executor(
         mut self,
         executor: Box<dyn tenet_dense::DenseExecutor + Send>,
@@ -1163,8 +1147,9 @@ impl RuntimeBuilder {
     /// Sets the CPU worker count for symmetry recoupling replays
     /// (permute/braid/transpose tree transforms — the cold-path cost of
     /// SU(2) workloads; **not** BLAS threads). Default is 1 (serial); values
-    /// above 1 parallelize replays past the backend's size gate on the
-    /// shared rayon pool.
+    /// above 1 request replay parallelism past the backend's size gate on the
+    /// current Rayon pool (normally the process-global pool outside `install`),
+    /// not on the runtime CPU context.
     pub fn recoupling_threads(mut self, threads: usize) -> Self {
         self.recoupling_threads = Some(threads);
         self
@@ -1186,11 +1171,9 @@ impl RuntimeBuilder {
         // runtimes fall back to the state lock for factorizations (#155).
         let executor_mintable = self.dense_executor.is_none();
         let linalg_kind = self.linalg_backend.map(LinalgBackend::to_kind);
-        // THE runtime's one CPU context (rayon pool): every executor below —
-        // factorization, executor-pool mints, both transform lanes, and every
-        // pooled TensorExecutionContext — shares it. dense_threads
-        // pins the count; otherwise the environment decides once, here, instead
-        // of once per executor.
+        // Built-in executors using the compiled default kind share this runtime
+        // CPU context. Explicit nondefault providers receive a private context
+        // in `with_shared_context`; injected executors own their configuration.
         let shared_ctx = match dense_threads {
             Some(threads) => tenet_dense::SharedCpuContext::with_threads(threads)
                 .map_err(tenet_tensors::OperationError::Dense)?,

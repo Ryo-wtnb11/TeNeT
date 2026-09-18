@@ -13,18 +13,15 @@ how backends are structured and selected.
 
 ## Guiding principle
 
-**If a seam is a plausible backend choice, abstract it as a backend from the
-start** — put it behind a trait and make it selectable at `Runtime::builder()`
-from day one. Do not hardcode one implementation and retrofit selection later.
-Linear algebra is the canonical example: on CPU there are several viable
-providers (faer, system BLAS/LAPACK, Intel MKL, OpenBLAS), so it must be a
-selectable backend, not a fixed dependency — the same way device placement
-(CPU vs CUDA) already is.
+**Start at the supported Tenferro/Strided boundary.** Add a trait, builder
+knob, or retained execution state only when a concrete supported requirement
+cannot be expressed through that boundary. TeNeT owns categorical semantics
+and layout decisions; Tenferro owns dense-provider resources and Strided owns
+applicable strided movement. Do not pre-abstract every plausible seam.
 
 ## What "backend" means here
 
-A backend is a swappable implementation of a compute primitive, living behind a
-trait:
+Existing execution seams include:
 
 - `DenseExecutor` — the dense linear algebra (per-coupled-sector GEMM, SVD, eig,
   QR, inv, exp). `tenet-matrixalgebra` is already generic over it
@@ -35,10 +32,10 @@ trait:
 - `TensorTraceOperationsBackend` — traces.
 - Device placement — CPU vs CUDA, selected on the runtime.
 
-State today, and the gap this policy targets:
+State today:
 
-- The **traits exist**, and the CPU dense provider is **selectable at the
-  builder** with two independent knobs, both defaulting to faer (#64):
+- The CPU dense provider is selectable at the builder with two independent
+  knobs:
   - `Runtime::builder().linalg_backend(LinalgBackend::Faer | LinalgBackend::Blas)`
     picks the provider for the **factorizations** (SVD / QR / eigh / eig / inv /
     exp — LAPACK-style work).
@@ -47,112 +44,82 @@ State today, and the gap this policy targets:
     recoupling replays — BLAS-style work). Independent of `linalg_backend`.
   - `Runtime::builder().with_dense_executor(Box<dyn DenseExecutor + Send>)`
     injects a custom factorization backend (takes precedence over
-    `linalg_backend`). Unset defaults use the faer-backed
-    `DefaultDenseExecutor` (`tenet-dense` → `tenferro` → faer).
+    `linalg_backend`). An unset built-in kind follows the compiled provider
+    default. Earlier documentation calling that default universally faer is a
+    separate pending default-provider decision; this policy does not choose it.
   - `Blas` uses the system BLAS/LAPACK linked via a `blas-*` cargo feature and
     fails at `build()` if none was compiled in. Runtime vs compile-time:
     OpenBLAS / MKL / Accelerate can't be linked simultaneously, so *which* BLAS
     is a compile-time `blas-*` feature; at runtime you choose faer vs the one
     linked BLAS. (MKL, being both BLAS and LAPACK, backs both knobs at once.)
-- Still hardcoded: the transpose-free contraction path inside
-  `DenseTreeTransformOperations` — TBLIS-style kernels are not yet a builder
-  choice.
 - Device selection is exposed the same way (`Runtime::builder().cuda`).
-
-Remaining work: TBLIS (transpose-free contraction) for the contract kernels —
-see #7, #41.
 
 ## Rules
 
-1. **Everything behind a trait.** No compute primitive is inlined into operator
-   or user-layer code. Adding a backend is a new trait `impl` plus registration
-   — it must require *zero* changes to operators (`contract`, `adjoint`, `svd`,
-   …).
+1. **Keep operator code independent of dense providers.** Reuse an existing
+   Tenferro/Strided boundary where it expresses the requirement. Introduce a
+   new trait only for a concrete supported capability that cannot be represented
+   there; operators (`contract`, `adjoint`, `svd`, …) do not select providers.
 
-2. **Selection is explicit and runtime, at `Runtime::builder()`.** Device
-   selection already works this way (`Runtime::builder().cuda(device)`). CPU
-   compute backends must be selectable the same way — the dense factorization
-   provider (`.linalg_backend(...)`) and the contraction GEMM provider
-   (`.gemm_backend(...)`), both done in #64, and, still to come, the
-   transpose-free-contraction kernels (TBLIS) — not chosen at call sites and
-   not hardcoded at compile time.
-   There is one documented default (faer / CPU dense); everything else is
-   opt-in. (Where several implementations of one provider can't co-link —
-   OpenBLAS vs MKL — which one is a compile-time feature; the *family* stays a
-   runtime choice.)
+2. **Selection follows the supported boundary.** Device selection is explicit
+   at `Runtime::builder().cuda(device)`. Built-in dense factorization and GEMM
+   providers are selected with `.linalg_backend(...)` and `.gemm_backend(...)`;
+   custom factorization executors can be injected. A new runtime knob requires
+   a concrete capability, not merely a possible future implementation. Where
+   OpenBLAS and MKL cannot co-link, the linked implementation remains a
+   compile-time feature.
 
 3. **Separate WHAT from WHICH.** Operator and user-layer code express *what* to
    compute — spaces, axes, conjugate flags, output order — and never *which*
    kernel runs it. Kernel/route choice belongs to the backend/selection layer.
    Example: the adjoint contraction fold hands the seam semantic flags
-   (`conjugate=true`, remapped axes); whether that becomes a BLAS `op='C'` or a
-   TBLIS call is the backend's business.
+   (`conjugate=true`, remapped axes); the provider chooses its dense operation.
 
-4. **No ad-hoc kernels in operator code.** No raw BLAS calls and no
-   threshold-gated hand-written kernels sitting in operators. Only structural
-   improvements (dispatch hoisting, batched-GEMM seams) or a new backend behind
-   the trait.
+4. **No ad-hoc kernels in operator code.** No raw BLAS calls or
+   threshold-gated hand-written numerical kernels in operators. Structural
+   improvements route through the existing Tenferro/Strided boundary; a new
+   backend needs a concrete unsupported requirement.
 
-5. **Backend choice is a performance knob, never a semantics knob.** Switching
-   backends must not change numerical results — TeNeT stays TensorKit-equivalent
-   regardless of backend. Every backend is verified against the same oracle /
-   test suite, and a backend is adopted on measured wins (metric-gated), not on
-   expectation.
+5. **Backend choice is a performance knob, never a semantics knob.** Supported
+   mathematical semantics and dtype-appropriate numerical tolerances remain
+   the same, while provider capabilities can differ explicitly. Correctness and
+   capability gates are distinct from separately recorded performance evidence;
+   wall-clock timing is not a CI pass/fail gate.
 
-6. **Routing in `tenet`, heavy kernels in `tenferro` + adapters.** 2D
-   normalization and the direct/SVD-invariant routing decisions live in
-   `tenet`; heavy contract kernels such as TBLIS sit behind adapters in
-   `tenferro`. `tenet` routes; it does not embed kernels.
+6. **Routing in `tenet`, dense kernels in `tenferro` + adapters.** 2D
+   normalization and direct/SVD-invariant routing decisions live in `tenet`;
+   dense kernels remain behind Tenferro adapters. `tenet` routes; it does not
+   embed kernels.
 
 ## Parallel execution (current state)
 
-Ops on a shared `Runtime` scale with outer threads (#155, #176). Nothing holds
-the coarse state mutex for a whole computation any more; each op leases its
-execution machinery for its own duration and runs lock-free.
+Standalone operations lease contexts and mintable dense executors from runtime
+pools. Checkout and return synchronize on those pools; the plan cache and
+shared structural stores also synchronize independently. The pool cap is
+`max(available_parallelism, 2)`, falling back to 4 when the system does not
+report a value. A leased resource that unwinds is not returned to its pool.
 
-- **Standalone ops** (`contract`, `permute`, factorizations) lease from two
-  pools on `RuntimeInner`:
-  - `ContextPool` — per-rule `TensorExecutionContext`s (the `Ctxs` the locked
-    state used to carry) for contract/permute/transpose and the polar/exp/inv/
-    pinv factorizations.
-  - `ExecutorPool` — `Box<dyn DenseExecutor + Send>` for SVD/QR/eigh/eig/null.
-  Both mirror the network `WorkspacePool`: mint-on-empty, idle cap = one warm
-  resource per core (`available_parallelism`), quarantine-on-panic (a resource
-  live during a panic is dropped, not returned). Single-threaded use reuses one
-  pooled resource and warms its caches exactly as the state did, so it stays
-  byte-identical to the pre-#176 locked path.
-- **Plan cache** lives behind its own mutex (`PlanCacheHome`), separate from the
-  state mutex, so the `tensor!` network path never contends with standalone ops.
-  A warm hit costs **one** plan-cache acquisition (config read + slot access
-  folded into `with_plan_cache`) and **one** topology hash (residency check +
-  LRU touch folded into a single `LruCache::get`).
-- Each `Runtime` owns **one** `SharedCpuContext` (a single rayon pool); every
-  minted context/executor and all transform backends bind to it, so `dense_
-  threads`/rayon width is one process-level knob, not per-lease.
-- **Escape hatch:** a custom executor injected via `with_dense_executor` is not
-  mintable, so those runtimes fall back to the `state` lock for factorizations
-  (context leasing still applies). This is the one path that still serializes.
+Built-in executors using the compiled default CPU kind share one
+`SharedCpuContext` per runtime. An explicitly requested nondefault kind uses a
+private provider context, and an injected executor owns its configuration and
+falls back to the runtime state lock for factorization. `CpuContext` worker
+resources are distinct from the process-global Rayon configuration and from
+provider-internal synchronization. Consequently this design makes no general
+lock-free, byte-identical warm-path, or outer-thread scaling guarantee.
 
-Measured scaling (`examples/thread_scaling.rs`, warm rank-4 SU(2) `contract`,
-`dense_threads(1)` + `RAYON_NUM_THREADS=1` so outer threads are the only
-parallelism; speedup vs N=1):
+## Historical context
 
-| Arm | N=4 | N=8 |
-|---|---|---|
-| standalone shared `Runtime` | 3.84× | 7.58× |
-| network cached-plan path | 3.77× | — |
-| per-thread `Runtime` (ceiling) | ~3.9× | ~7.7× |
-
-Standalone now tracks the per-thread ceiling. The residual gap at d=16, N=8 is
-memory bandwidth (larger blocks), not lock contention. Data-parallel callers no
-longer need a `Runtime` per thread — a shared handle scales — though one per
-thread remains valid and contention-free.
+Issues #155 and #176 record earlier implementation work; they are not current
+Tenferro 0.5 scaling evidence. Any scaling claim needs fresh, pinned provider,
+revision, configuration, and raw measurement evidence.
 
 ## Adding a backend (checklist)
 
-- Implement the relevant backend trait; keep it `tenferro`-side if it is a heavy
-  kernel, exposed to `tenet` via an adapter.
-- Wire a selection knob on `RuntimeBuilder`; keep the default unchanged.
-- Prove numerical equivalence against the existing suite (no result changes).
-- Gate adoption on a benchmark that shows the win in the intended regime, and
-  keep that metric as a merge gate.
+- Start with an existing Tenferro/Strided boundary; add a trait or selection
+  knob only for a concrete supported requirement it cannot express.
+- Keep a dense kernel `tenferro`-side and expose it to `tenet` through an
+  adapter when a new backend is warranted.
+- Prove supported mathematical semantics with dtype-appropriate tolerances and
+  test unsupported provider capabilities explicitly.
+- Record separately scoped performance evidence when relevant; do not use a
+  wall-clock benchmark as a CI merge gate.
