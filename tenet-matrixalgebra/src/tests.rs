@@ -142,6 +142,13 @@ struct FailAfterObservingQrInput {
 }
 
 #[derive(Default)]
+struct FailAfterSvdQr {
+    inner: tenet_dense::DefaultDenseExecutor,
+    svd_calls: usize,
+    qr_calls: usize,
+}
+
+#[derive(Default)]
 struct FailAfterObservingEighInput {
     observed: Vec<Vec<f64>>,
     outputs: Option<Vec<DenseTensor>>,
@@ -839,6 +846,46 @@ impl DenseExecutor for FailAfterObservingQrInput {
         _: &DenseDotConfig,
     ) -> Result<(), DenseError> {
         panic!("test only exercises QR")
+    }
+}
+
+impl DenseExecutor for FailAfterSvdQr {
+    fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        self.svd_calls += 1;
+        self.inner.svd(input)
+    }
+
+    fn svd_into(
+        &mut self,
+        _: DenseRead<'_>,
+        _: DenseWrite<'_>,
+        _: DenseWrite<'_>,
+        _: DenseWrite<'_>,
+    ) -> Result<(), DenseError> {
+        panic!("numerical null completion must use owned SVD outputs")
+    }
+
+    fn qr(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        self.qr_calls += 1;
+        Err(DenseError::Backend {
+            backend: DenseBackend::Tenferro,
+            op: "qr",
+            message: "injected completion failure".to_string(),
+        })
+    }
+
+    fn eigh(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        panic!("test only exercises numerical null completion")
+    }
+
+    fn dot_general_into(
+        &mut self,
+        _: DenseWrite<'_>,
+        _: DenseRead<'_>,
+        _: DenseRead<'_>,
+        _: &DenseDotConfig,
+    ) -> Result<(), DenseError> {
+        panic!("test only exercises numerical null completion")
     }
 }
 
@@ -11099,6 +11146,56 @@ fn numerical_null_rank_uses_the_documented_f32_threshold() {
 }
 
 #[test]
+fn numerical_null_rank_uses_the_documented_c32_threshold() {
+    let rule = Z2FusionRule;
+    let tolerance = f32::EPSILON * 2.0;
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    for (small, expected_nullity) in [(0.5 * tolerance, 1), (2.0 * tolerance, 0)] {
+        let matrix = one_sector_matrix(vec![
+            Complex32::new(1.0, 0.0),
+            Complex32::new(0.0, 0.0),
+            Complex32::new(0.0, 0.0),
+            Complex32::new(small, 0.0),
+        ]);
+        let input = bound_tensor(Arc::new(rule), &matrix);
+        let left = left_null(&mut dense, &input.as_ref()).unwrap();
+        let right = right_null(&mut dense, &input.as_ref()).unwrap();
+        if expected_nullity == 0 {
+            assert!(left.data().is_empty());
+            assert!(right.data().is_empty());
+        } else {
+            assert_eq!(left.structure().block(0).unwrap().shape(), &[2, 1]);
+            assert_eq!(right.structure().block(0).unwrap().shape(), &[1, 2]);
+        }
+    }
+}
+
+#[test]
+fn numerical_null_rank_uses_the_documented_c64_threshold() {
+    let rule = Z2FusionRule;
+    let tolerance = f64::EPSILON * 2.0;
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    for (small, expected_nullity) in [(0.5 * tolerance, 1), (2.0 * tolerance, 0)] {
+        let matrix = one_sector_matrix(vec![
+            Complex64::new(1.0, 0.0),
+            Complex64::new(0.0, 0.0),
+            Complex64::new(0.0, 0.0),
+            Complex64::new(small, 0.0),
+        ]);
+        let input = bound_tensor(Arc::new(rule), &matrix);
+        let left = left_null(&mut dense, &input.as_ref()).unwrap();
+        let right = right_null(&mut dense, &input.as_ref()).unwrap();
+        if expected_nullity == 0 {
+            assert!(left.data().is_empty());
+            assert!(right.data().is_empty());
+        } else {
+            assert_eq!(left.structure().block(0).unwrap().shape(), &[2, 1]);
+            assert_eq!(right.structure().block(0).unwrap().shape(), &[1, 2]);
+        }
+    }
+}
+
+#[test]
 fn rectangular_rank_deficient_null_spaces_include_shape_and_rank_deficits() {
     // What: tall and wide sectors include both the rectangular shape deficit
     // and additional null directions caused by numerical rank deficiency.
@@ -12491,6 +12588,21 @@ fn disjoint_null_spaces_keep_all_structural_directions_without_dense_work() {
 }
 
 #[test]
+fn null_zero_only_input_normalizes_to_empty_without_dense_work() {
+    let tensor = rectangular_svd_tensor(0, 0);
+    let input = bound_tensor(Arc::new(Z2FusionRule), &tensor);
+    let mut dense = RejectExecutorCalls;
+
+    let left = left_null(&mut dense, &input.as_ref()).unwrap();
+    let right = right_null(&mut dense, &input.as_ref()).unwrap();
+
+    assert_eq!(left.structure().block_count(), 0);
+    assert!(left.data().is_empty());
+    assert_eq!(right.structure().block_count(), 0);
+    assert!(right.data().is_empty());
+}
+
+#[test]
 fn unmatched_null_sectors_coexist_with_a_full_rank_matched_sector() {
     // What: matched full-rank directions disappear while side-only sectors
     // survive as identity bases.
@@ -12539,6 +12651,32 @@ fn null_space_second_sector_failure_builds_no_factor() {
         (0, 0)
     );
     assert_eq!(tensor.data(), before);
+}
+
+#[test]
+fn null_completion_qr_failure_preserves_input_and_builds_no_factor() {
+    for (left, rows, cols) in [(true, 3, 2), (false, 2, 3)] {
+        let tensor =
+            one_sector_rectangular_matrix(vec![1.0_f64, 0.0, 0.0, 0.0, 0.0, 0.0], rows, cols);
+        let before = tensor.data().to_vec();
+        let input = bound_tensor(Arc::new(Z2FusionRule), &tensor);
+        let mut dense = FailAfterSvdQr::default();
+
+        crate::factorize::reset_factor_buffer_build_counts_for_test();
+        let result = if left {
+            left_null(&mut dense, &input.as_ref())
+        } else {
+            right_null(&mut dense, &input.as_ref())
+        };
+
+        assert!(matches!(result, Err(OperationError::Dense(_))));
+        assert_eq!((dense.svd_calls, dense.qr_calls), (1, 1));
+        assert_eq!(
+            crate::factorize::factor_buffer_build_counts_for_test(),
+            (0, 0)
+        );
+        assert_eq!(tensor.data(), before);
+    }
 }
 
 #[test]

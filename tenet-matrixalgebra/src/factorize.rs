@@ -87,6 +87,83 @@ pub trait FactorScalar: DenseRecouplingScalar {
     }
 }
 
+#[cfg(test)]
+mod numerical_null_tests {
+    use super::*;
+    use tenet_dense::{DefaultDenseExecutor, DenseRead, DenseWrite};
+
+    #[derive(Default)]
+    struct OwnedSvdSpy {
+        inner: DefaultDenseExecutor,
+        u_pointer: Option<usize>,
+        svd_into_calls: usize,
+    }
+
+    impl DenseExecutor for OwnedSvdSpy {
+        fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+            let outputs = self.inner.svd(input)?;
+            self.u_pointer = Some(
+                outputs[0]
+                    .as_f64_slice()
+                    .expect("f64 null fixture must return f64 U")
+                    .as_ptr() as usize,
+            );
+            Ok(outputs)
+        }
+
+        fn svd_into(
+            &mut self,
+            _: DenseRead<'_>,
+            _: DenseWrite<'_>,
+            _: DenseWrite<'_>,
+            _: DenseWrite<'_>,
+        ) -> Result<(), DenseError> {
+            self.svd_into_calls += 1;
+            Err(DenseError::Backend {
+                backend: DenseBackend::Tenferro,
+                op: "svd_into",
+                message: "numerical null must consume owned SVD factors".to_string(),
+            })
+        }
+
+        fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+            self.inner.qr(input)
+        }
+
+        fn eigh(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+            self.inner.eigh(input)
+        }
+
+        fn dot_general_into(
+            &mut self,
+            output: DenseWrite<'_>,
+            lhs: DenseRead<'_>,
+            rhs: DenseRead<'_>,
+            config: &DenseDotConfig,
+        ) -> Result<(), DenseError> {
+            self.inner.dot_general_into(output, lhs, rhs, config)
+        }
+    }
+
+    #[test]
+    fn numerical_null_left_basis_keeps_owned_svd_u() {
+        let mut dense = OwnedSvdSpy::default();
+        let (rank, u) = numerical_rank_and_compact_basis(
+            &mut dense,
+            &[1.0_f64, 0.0, 0.0, 0.0, 2.0, 0.0],
+            3,
+            2,
+            FactorSide::Left,
+        )
+        .unwrap();
+
+        assert_eq!(rank, 2);
+        assert_eq!(u.len(), 6);
+        assert_eq!(dense.svd_into_calls, 0);
+        assert_eq!(u.as_ptr() as usize, dense.u_pointer.unwrap());
+    }
+}
+
 trait HermitianReal: Float {
     fn from_f64(value: f64) -> Self;
     fn relative_tolerance() -> Self;
@@ -5034,8 +5111,8 @@ where
     let mut pairs = Vec::new();
     for matrix in &matrices {
         let (rows, cols) = (matrix.rows, matrix.cols);
-        let (rank, u_compact, _) =
-            numerical_rank_and_compact_bases(dense, &matrix.data, rows, cols)?;
+        let (rank, u_compact) =
+            numerical_rank_and_compact_basis(dense, &matrix.data, rows, cols, FactorSide::Left)?;
         if rank == rows {
             null_dimensions.remove(&matrix.sector);
             continue;
@@ -5103,8 +5180,8 @@ where
     let mut pairs = Vec::new();
     for matrix in &matrices {
         let (rows, cols) = (matrix.rows, matrix.cols);
-        let (rank, _, v_compact) =
-            numerical_rank_and_compact_bases(dense, &matrix.data, rows, cols)?;
+        let (rank, v_compact) =
+            numerical_rank_and_compact_basis(dense, &matrix.data, rows, cols, FactorSide::Right)?;
         if rank == cols {
             null_dimensions.remove(&matrix.sector);
             continue;
@@ -5158,9 +5235,14 @@ where
     )?;
     let mut pairs = Vec::new();
     for matrix in &matrices {
-        let (rank, u_compact, _) =
-            numerical_rank_and_compact_bases(dense, &matrix.data, matrix.rows, matrix.cols)
-                .map_err(CheckedGenericFactorPlanError::from)?;
+        let (rank, u_compact) = numerical_rank_and_compact_basis(
+            dense,
+            &matrix.data,
+            matrix.rows,
+            matrix.cols,
+            FactorSide::Left,
+        )
+        .map_err(CheckedGenericFactorPlanError::from)?;
         if rank == matrix.rows {
             null_dimensions.remove(&matrix.sector);
             continue;
@@ -5211,9 +5293,14 @@ where
     )?;
     let mut pairs = Vec::new();
     for matrix in &matrices {
-        let (rank, _, v_compact) =
-            numerical_rank_and_compact_bases(dense, &matrix.data, matrix.rows, matrix.cols)
-                .map_err(CheckedGenericFactorPlanError::from)?;
+        let (rank, v_compact) = numerical_rank_and_compact_basis(
+            dense,
+            &matrix.data,
+            matrix.rows,
+            matrix.cols,
+            FactorSide::Right,
+        )
+        .map_err(CheckedGenericFactorPlanError::from)?;
         if rank == matrix.cols {
             null_dimensions.remove(&matrix.sector);
             continue;
@@ -5242,62 +5329,39 @@ where
     )
 }
 
-/// Computes compact singular-vector bases and the documented numerical rank.
-fn numerical_rank_and_compact_bases<E, D>(
+/// Computes the requested compact singular-vector basis and the documented numerical rank.
+fn numerical_rank_and_compact_basis<E, D>(
     dense: &mut E,
     matrix: &[D],
     rows: usize,
     cols: usize,
-) -> Result<(usize, Vec<D>, Vec<D>), OperationError>
+    side: FactorSide,
+) -> Result<(usize, Vec<D>), OperationError>
 where
     E: DenseExecutor + ?Sized,
     D: FactorScalar,
 {
     let compact_rank = rows.min(cols);
-    let mut u = vec![D::zero(); rows * compact_rank];
-    let mut singular_values = vec![D::Real::zero(); compact_rank];
-    let mut vh = vec![D::zero(); compact_rank * cols];
-    let input_shape = [rows, cols];
-    let input_strides = [1usize, rows];
-    let u_shape = [rows, compact_rank];
-    let u_strides = [1usize, rows];
-    let s_shape = [compact_rank];
-    let s_strides = [1usize];
-    let vh_shape = [compact_rank, cols];
-    let vh_strides = [1usize, compact_rank];
-    let input =
-        DenseView::new(matrix, &input_shape, &input_strides, 0).map_err(OperationError::Dense)?;
-    let u_view =
-        DenseViewMut::new(&mut u, &u_shape, &u_strides, 0).map_err(OperationError::Dense)?;
-    let s_view = DenseViewMut::new(&mut singular_values, &s_shape, &s_strides, 0)
-        .map_err(OperationError::Dense)?;
-    let vh_view =
-        DenseViewMut::new(&mut vh, &vh_shape, &vh_strides, 0).map_err(OperationError::Dense)?;
-    dense
-        .svd_into(
-            D::dense_read(input),
-            D::dense_write(u_view),
-            D::Real::dense_write(s_view),
-            D::dense_write(vh_view),
-        )
-        .map_err(OperationError::Dense)?;
+    let (u, singular_values, vh) = compact_svd_owned(dense, matrix, rows, cols)?;
 
-    let sigma_max = singular_values
-        .first()
-        .copied()
-        .map(Into::into)
-        .unwrap_or(0.0);
+    let sigma_max = singular_values.first().copied().unwrap_or(0.0);
     // Why not exact-zero rank: backward-stable SVD represents dependent
     // directions at working precision, not necessarily as bitwise zero.
     let tolerance = D::epsilon() * rows.max(cols) as f64 * sigma_max;
     let rank = singular_values
         .iter()
         .copied()
-        .map(Into::into)
         .filter(|&sigma| sigma > tolerance)
         .count();
-    let v_compact = adjoint_col_major(&vh, compact_rank, cols);
-    Ok((rank, u, v_compact))
+    drop(singular_values);
+    let basis = match side {
+        FactorSide::Left => u,
+        FactorSide::Right => {
+            drop(u);
+            adjoint_col_major(&vh, compact_rank, cols)
+        }
+    };
+    Ok((rank, basis))
 }
 
 /// Left polar decomposition `t = W * P` (MatrixAlgebraKit `left_polar`):
