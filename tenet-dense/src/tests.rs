@@ -23,6 +23,41 @@ fn provider_inject_rejects_linalg_before_backend_work() {
     );
 }
 
+#[cfg(feature = "provider-inject")]
+#[test]
+fn provider_inject_rejects_values_only_before_backend_work() {
+    let mut executor = DefaultDenseExecutor::new();
+    let data = [1.0, 0.0, 0.0, 1.0];
+
+    let error = executor
+        .svd_vals(DenseRead::F64(
+            DenseView::new(&data, &[2, 2], &[1, 2], 0).unwrap(),
+        ))
+        .unwrap_err();
+    let DenseError::Unsupported { op, message } = error else {
+        panic!("provider-inject SVD values must be unsupported")
+    };
+    assert_eq!(op, "svd_vals");
+    assert_eq!(
+        message,
+        "provider-inject requires a registered BLAS/LAPACK provider"
+    );
+
+    let error = executor
+        .eigh_vals(DenseRead::F64(
+            DenseView::new(&data, &[2, 2], &[1, 2], 0).unwrap(),
+        ))
+        .unwrap_err();
+    let DenseError::Unsupported { op, message } = error else {
+        panic!("provider-inject EIGH values must be unsupported")
+    };
+    assert_eq!(op, "eigh_vals");
+    assert_eq!(
+        message,
+        "provider-inject requires a registered BLAS/LAPACK provider"
+    );
+}
+
 fn assert_f64_close(actual: f64, expected: f64, tol: f64) {
     assert!(
         (actual - expected).abs() <= tol,
