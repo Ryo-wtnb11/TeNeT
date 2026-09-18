@@ -2624,7 +2624,7 @@ mod typed_replay_tests {
     use tenet::typed::{GradedSpace, SectorSpectrum, TensorMap};
 
     use super::*;
-    use crate::GreedyDenseOptimizer;
+    use crate::{plan_cache_config, plan_cache_stats, GreedyDenseOptimizer, Optimizer};
 
     fn label(name: &str) -> TemporaryLabel {
         TemporaryLabel::from(name)
@@ -4351,6 +4351,116 @@ mod typed_replay_tests {
         }
         assert!(workspace.intermediates[0].contracted.is_some());
         assert!(workspace.intermediates[0].oriented.is_some());
+    }
+
+    #[test]
+    fn default_cached_macro_replays_rank_four_orientation_after_shape_drift_f64() {
+        let runtime = Runtime::builder().build().unwrap();
+        assert_eq!(plan_cache_config(&runtime).optimizer, Optimizer::Greedy);
+        let provider = Arc::new(U1FusionRule);
+        let make_space = |degeneracy| {
+            GradedSpace::try_new_with_arc(
+                Arc::clone(&provider),
+                [(U1Irrep::new(0), degeneracy)],
+            )
+            .unwrap()
+        };
+        let make_inputs = |a_dim, f_dim, c_dim, b_dim, d_dim, e_dim| {
+            let a = make_space(a_dim);
+            let f = make_space(f_dim);
+            let c = make_space(c_dim);
+            let b = make_space(b_dim);
+            let d = make_space(d_dim);
+            let e = make_space(e_dim);
+            let a_dual = a.try_dual().unwrap();
+            let f_dual = f.try_dual().unwrap();
+            let e_dual = e.try_dual().unwrap();
+            let x = TensorMap::from_block_fn(&runtime, [&a, &f], [&c], |_, ijk| {
+                1.0 + ijk[0] as f64 + 2.0 * ijk[1] as f64 + 3.0 * ijk[2] as f64
+            })
+            .unwrap();
+            let y = TensorMap::from_block_fn(&runtime, [&c], [&b, &d], |_, ijk| {
+                2.0 + 2.0 * ijk[0] as f64 + 3.0 * ijk[1] as f64 + 5.0 * ijk[2] as f64
+            })
+            .unwrap();
+            let z = TensorMap::from_block_fn(&runtime, [&a_dual, &f_dual, &d], [&e], |_, ijkl| {
+                3.0 + 2.0 * ijkl[0] as f64
+                    + 3.0 * ijkl[1] as f64
+                    + 5.0 * ijkl[2] as f64
+                    + 7.0 * ijkl[3] as f64
+            })
+            .unwrap();
+            let expected = TensorMap::from_block_fn(&runtime, [&e_dual], [&b], |_, eb| {
+                (0..a_dim)
+                    .flat_map(|ai| {
+                        (0..f_dim).flat_map(move |fi| {
+                            (0..c_dim).flat_map(move |ci| {
+                                (0..d_dim).map(move |di| {
+                                    let x = 1.0 + ai as f64 + 2.0 * fi as f64 + 3.0 * ci as f64;
+                                    let y = 2.0
+                                        + 2.0 * ci as f64
+                                        + 3.0 * eb[1] as f64
+                                        + 5.0 * di as f64;
+                                    let z = 3.0
+                                        + 2.0 * ai as f64
+                                        + 3.0 * fi as f64
+                                        + 5.0 * di as f64
+                                        + 7.0 * eb[0] as f64;
+                                    x * y * z
+                                })
+                            })
+                        })
+                    })
+                    .sum::<f64>()
+            })
+            .unwrap();
+            (x, y, z, expected)
+        };
+        let first = make_inputs(2, 2, 3, 2, 3, 5);
+        let network = Network::new(
+            vec![
+                vec![label("a"), label("f"), label("c")],
+                vec![label("c"), label("b"), label("d")],
+                vec![label("a"), label("f"), label("d"), label("e")],
+            ],
+            vec![false; 3],
+            vec![Some(2), Some(1), Some(3)],
+            vec![label("e"), label("b")],
+            Some(1),
+        )
+        .unwrap();
+        let first_refs = [&first.0, &first.1, &first.2];
+        let planned = network.plan(&first_refs, &GreedyDenseOptimizer).unwrap();
+        assert_eq!(
+            (planned.plan().steps()[0].lhs(), planned.plan().steps()[0].rhs()),
+            (TensorId::new(0), TensorId::new(1))
+        );
+        assert!(planned.schedule.steps[0].result_output_axes.is_none());
+        assert_eq!(
+            planned.schedule.steps[0].result_permutation,
+            Some((vec![2], vec![0, 1, 3]))
+        );
+
+        let execute = |x, y, z| {
+            crate::tensor!([e; b] = x[a, f; c] * y[c; b, d] * z[a, f, d; e]).unwrap()
+        };
+        let macro_result = execute(&first.0, &first.1, &first.2);
+        assert_eq!(macro_result.codomain(), first.3.codomain());
+        assert_eq!(macro_result.domain(), first.3.domain());
+        assert_eq!(macro_result.data(), first.3.data());
+        assert_eq!(plan_cache_stats(&runtime).workspaces_created, 1);
+
+        let second = make_inputs(3, 3, 4, 3, 4, 7);
+        let macro_result = execute(&second.0, &second.1, &second.2);
+        assert_eq!(macro_result.codomain(), second.3.codomain());
+        assert_eq!(macro_result.domain(), second.3.domain());
+        assert_eq!(macro_result.data(), second.3.data());
+
+        let macro_result = execute(&first.0, &first.1, &first.2);
+        assert_eq!(macro_result.data(), first.3.data());
+        let stats = plan_cache_stats(&runtime);
+        assert_eq!((stats.misses, stats.hits, stats.replans, stats.entries), (1, 2, 0, 1));
+        assert_eq!((stats.workspaces_created, stats.workspace_reuses), (1, 2));
     }
 
     #[test]
