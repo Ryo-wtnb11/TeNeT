@@ -141,7 +141,8 @@ by the selected backend. The full policy is
 Three consequences worth knowing before you build a `Runtime`:
 
 **Selection is runtime, at `Runtime::builder()`.** There are two independent
-dense-backend settings, both defaulting to the pure-Rust faer path:
+dense-backend settings. When unset, each uses Tenferro's resolved compiled
+provider default: BLAS when its CPU build enables `cpu-blas`, otherwise faer:
 
 | builder call | picks the backend for |
 | --- | --- |
@@ -248,7 +249,7 @@ The Python side calls `cotengra.array_contract_tree(...)` and returns
 | feature | effect |
 | --- | --- |
 | no default features | `tenet-sectors` and `tenet-core` build without a dense backend. Execution crates require a CPU backend or `provider-inject`; otherwise they fail with a backend-selection diagnostic. |
-| `cpu-faer` | Default CPU dense backend. |
+| `cpu-faer` | Enable the pure-Rust faer CPU dense provider; it is the compiled default when the resolved Tenferro CPU build does not enable `cpu-blas`. |
 | `cpu-blas` | Enable the BLAS/LAPACK provider path selected through downstream backend features. |
 | `blas-accelerate` | Accelerate-backed BLAS/LAPACK feature wiring. |
 | `blas-openblas` | OpenBLAS-backed BLAS/LAPACK feature wiring. |

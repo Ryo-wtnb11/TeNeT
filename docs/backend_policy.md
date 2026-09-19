@@ -44,9 +44,9 @@ State today:
     recoupling replays — BLAS-style work). Independent of `linalg_backend`.
   - `Runtime::builder().with_dense_executor(Box<dyn DenseExecutor + Send>)`
     injects a custom factorization backend (takes precedence over
-    `linalg_backend`). An unset built-in kind follows the compiled provider
-    default. Earlier documentation calling that default universally faer is a
-    separate pending default-provider decision; this policy does not choose it.
+    `linalg_backend`). An unset built-in kind follows Tenferro's resolved
+    compiled provider default: BLAS when its CPU build enables `cpu-blas`,
+    otherwise faer.
   - `Blas` uses the system BLAS/LAPACK linked via a `blas-*` cargo feature and
     fails at `build()` if none was compiled in. Runtime vs compile-time:
     OpenBLAS / MKL / Accelerate can't be linked simultaneously, so *which* BLAS
