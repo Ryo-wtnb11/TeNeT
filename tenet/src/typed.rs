@@ -17203,12 +17203,18 @@ mod representation_gates {
                 eager.transpose_axes(&[0, 2], &[1]).unwrap(),
             ),
         ];
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+        let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+            unreachable!()
+        };
+        assert!(view.materialized.get().is_none());
         for (actual, expected) in outputs {
             assert!(matches!(&actual.repr, TypedTensorRepr::Owned(_)));
             assert_eq!(
                 actual.logical_space().space(),
                 expected.logical_space().space()
             );
+            assert_eq!(actual.data().len(), expected.data().len());
             assert!(actual
                 .data()
                 .iter()
@@ -17216,6 +17222,8 @@ mod representation_gates {
                 .all(|(&actual, &expected)| (actual - expected).norm() < 1.0e-10));
         }
         assert_eq!(UNCACHED_ADJOINT_MATERIALIZATIONS.get(), 0);
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+        assert!(view.materialized.get().is_none());
     }
 
     #[test]
