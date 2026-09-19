@@ -2010,6 +2010,64 @@ mod runtime_store_tests {
         assert_eq!(store.info().hits(), 1);
         assert_eq!(store.info().misses(), 1);
     }
+
+    #[test]
+    fn checked_generic_lookup_matches_fresh_logical_content_after_interner_reset() {
+        let _guard = crate::test_support::CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let make_structure = |tag| {
+            BlockStructure::from_blocks_with_rank(
+                1,
+                vec![BlockSpec::with_key(BlockKey::ordinal(tag), vec![1], vec![1], 0).unwrap()],
+            )
+            .unwrap()
+        };
+        let physical = make_structure(41);
+        let logical = make_structure(42);
+        let operation = TreeTransformOperation::permute([0], []);
+        let replay = Arc::new(
+            TreeTransformStructure::compile_structures(
+                &physical,
+                &physical,
+                &[TreeTransformBlockSpec::single(0, 0, 1.0)],
+            )
+            .unwrap(),
+        );
+        let store = RuntimeTreeTransformStore::default();
+        store
+            .admit_checked_generic(
+                RuleIdentity::of_type::<TestRuleIdentity>(),
+                &operation,
+                &physical,
+                &physical,
+                Some(&logical),
+                true,
+                replay,
+                0,
+            )
+            .unwrap();
+        let old_logical_id = logical.content_id();
+
+        tenet_core::reset_core_intern_tables();
+        let rebuilt_physical = make_structure(41);
+        let rebuilt_logical = make_structure(42);
+        assert_ne!(rebuilt_logical.content_id(), old_logical_id);
+
+        let (cached, _) = store
+            .lookup_checked_generic(
+                RuleIdentity::of_type::<TestRuleIdentity>(),
+                &operation,
+                &rebuilt_physical,
+                &rebuilt_physical,
+                Some(&rebuilt_logical),
+                true,
+            )
+            .unwrap();
+        assert!(cached.is_some());
+        assert_eq!(store.info().hits(), 1);
+        assert_eq!(store.info().misses(), 0);
+    }
 }
 
 impl<T, RuleKey> TreeTransformCache<T, RuleKey>
