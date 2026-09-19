@@ -42,7 +42,7 @@ fn contraction_norm(rt: &Runtime) -> f64 {
 
 #[test]
 fn faer_backend_builds_and_computes() {
-    // The default provider, requested explicitly, must build and produce a
+    // The explicit Faer provider must build and produce a
     // sane spectrum (descending, all non-negative singular values).
     let rt = Runtime::builder()
         .linalg_backend(LinalgBackend::Faer)
@@ -71,7 +71,7 @@ fn linalg_backend_composes_with_dense_threads() {
 #[test]
 fn gemm_backend_builds_and_contracts() {
     // The contraction-GEMM provider is selected independently of the
-    // factorization provider; faer (the default) requested explicitly.
+    // factorization provider; Faer requested explicitly.
     let rt = Runtime::builder()
         .gemm_backend(LinalgBackend::Faer)
         .build()

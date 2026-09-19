@@ -162,11 +162,12 @@ impl DefaultDenseExecutor {
             .map_err(|err| tenferro_error("CpuBackend::with_threads_and_kind", err.into()))
     }
 
-    /// Builds an executor with an optional provider kind. The compiled default
-    /// kind uses the runtime's shared [`SharedCpuContext`]; an explicit
-    /// nondefault kind uses a private provider context. Each executor retains
-    /// its own backend and buffer pool; this does not promise lock-free scratch
-    /// access or a provider thread policy.
+    /// Builds an executor with an optional provider kind. `None` uses Tenferro's
+    /// resolved compiled default — BLAS when its CPU build enables `cpu-blas`,
+    /// otherwise faer — on the runtime's shared [`SharedCpuContext`]; an
+    /// explicit nondefault kind uses a private provider context. Each executor
+    /// retains its own backend and buffer pool; this does not promise lock-free
+    /// scratch access or a provider thread policy.
     pub fn with_shared_context(
         ctx: &SharedCpuContext,
         kind: Option<CpuBackendKind>,
@@ -1349,5 +1350,19 @@ fn linalg_unavailable(op: &'static str) -> DenseError {
     DenseError::Unsupported {
         op,
         message: "provider-inject requires a registered BLAS/LAPACK provider".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shared_context_without_kind_uses_the_compiled_provider_default() {
+        let context = SharedCpuContext::with_threads(1).expect("serial context");
+        let executor =
+            DefaultDenseExecutor::with_shared_context(&context, None).expect("default provider");
+
+        assert_eq!(executor.backend.kind(), CpuBackendKind::default_compiled());
     }
 }

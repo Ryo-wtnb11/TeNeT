@@ -1,7 +1,7 @@
 //! `RuntimeBuilder::with_dense_executor` lets a caller select the CPU
 //! linear-algebra backend by injecting a `DenseExecutor` (issue #64). This
 //! checks the runtime actually drives the injected executor and that doing so
-//! is numerically identical to the faer default.
+//! is numerically identical to the unset built-in provider.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -44,8 +44,8 @@ impl SpyCounts {
     }
 }
 
-/// Delegates every dense op to the faer default, counting the calls so the
-/// tests can see which kernels a public operation drives.
+/// Delegates every dense op to the built-in compiled default, counting the
+/// calls so the tests can see which kernels a public operation drives.
 struct SpyExecutor {
     inner: DefaultDenseExecutor,
     counts: Arc<SpyCounts>,
@@ -172,7 +172,7 @@ fn injected_dense_executor_is_used_and_preserves_results() {
          driving the injected backend"
     );
 
-    // No behavior change: the same seeded tensor on the faer default runtime
+    // No behavior change: the same seeded tensor on an unset built-in runtime
     // yields identical singular values.
     let rt_default = Runtime::builder().build().unwrap();
     let t_default =

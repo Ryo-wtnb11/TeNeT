@@ -618,7 +618,8 @@ pub(crate) struct RuntimeExecutionConfig {
     pub(crate) recoupling_threads: Option<usize>,
     /// CPU provider for dense factorizations (SVD/QR/eigh). Kept here so the
     /// standalone-op executor pool can re-mint an executor identical to the one
-    /// `RuntimeBuilder::build` created (issue #155). `None` uses faer.
+    /// `RuntimeBuilder::build` created (issue #155). `None` uses Tenferro's
+    /// resolved compiled provider default.
     pub(crate) linalg_kind: Option<tenet_dense::CpuBackendKind>,
     pub(crate) real_tree_transform_store: Weak<RuntimeTreeTransformStore<f64>>,
     pub(crate) complex_tree_transform_store: Weak<RuntimeTreeTransformStore<Complex64>>,
@@ -937,7 +938,7 @@ impl std::fmt::Debug for Runtime {
 /// at [`RuntimeBuilder::build`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LinalgBackend {
-    /// Pure-Rust faer provider (the default; always available).
+    /// Pure-Rust faer provider, available with the `cpu-faer` feature.
     Faer,
     /// System BLAS/LAPACK linked through a `blas-*` cargo feature.
     Blas,
@@ -964,13 +965,17 @@ pub struct RuntimeBuilder {
     plan_cache: PlanCacheConfig,
     dense_threads: Option<usize>,
     recoupling_threads: Option<usize>,
-    /// User-injected CPU linear-algebra backend; `None` uses the faer default.
+    /// User-injected CPU linear-algebra backend. When absent, the selected
+    /// built-in `linalg_backend` is used; when that is absent too, its compiled
+    /// provider default is used.
     dense_executor: Option<Box<dyn tenet_dense::DenseExecutor + Send>>,
     /// Selected built-in CPU provider for dense factorizations (SVD/QR/eigh);
-    /// `None` uses faer. Ignored when [`Self::dense_executor`] is set.
+    /// `None` uses the compiled provider default. Ignored when
+    /// [`Self::dense_executor`] is set.
     linalg_backend: Option<LinalgBackend>,
     /// Selected built-in CPU provider for the contraction/recoupling GEMM;
-    /// `None` uses faer. Independent of [`Self::linalg_backend`].
+    /// `None` uses the compiled provider default. Independent of
+    /// [`Self::linalg_backend`].
     gemm_backend: Option<LinalgBackend>,
     tree_transform_cache_byte_budget: usize,
 }
@@ -1052,9 +1057,11 @@ impl RuntimeBuilder {
 
     /// Selects the CPU linear-algebra backend (SVD / QR / eigh / GEMM on the
     /// coupled-sector matrices) by injecting a [`tenet_dense::DenseExecutor`].
-    /// Unset uses the faer-backed default. This is the seam for a system
-    /// BLAS/LAPACK or MKL backend: implement `DenseExecutor` and pass it here —
-    /// no operator or decomposition code changes.
+    /// When no executor is injected, the selected built-in `linalg_backend` is
+    /// used; when it is unset, the provider follows Tenferro's resolved compiled
+    /// default: BLAS when its CPU build enables `cpu-blas`, otherwise faer. This
+    /// is the seam for a system BLAS/LAPACK or MKL backend: implement
+    /// `DenseExecutor` and pass it here — no operator or decomposition code changes.
     ///
     /// The injected executor owns its thread configuration. [`Self::dense_threads`]
     /// configures the runtime CPU context and only attempts global Rayon setup;
@@ -1069,9 +1076,10 @@ impl RuntimeBuilder {
 
     /// Selects a built-in CPU provider ([`LinalgBackend::Faer`] or
     /// [`LinalgBackend::Blas`]) for the dense **factorizations** — SVD / QR /
-    /// eigh / eig / inv / exp (the LAPACK-style work). Unset uses faer. The
-    /// contraction GEMM (BLAS-style work) is chosen separately with
-    /// [`Self::gemm_backend`].
+    /// eigh / eig / inv / exp (the LAPACK-style work). Unset uses Tenferro's
+    /// resolved compiled provider default: BLAS when its CPU build enables
+    /// `cpu-blas`, otherwise faer. The contraction GEMM (BLAS-style work) is
+    /// chosen separately with [`Self::gemm_backend`].
     ///
     /// This is the ergonomic counterpart to [`Self::with_dense_executor`] for
     /// the shipped providers; an explicitly injected executor takes precedence.
@@ -1083,8 +1091,8 @@ impl RuntimeBuilder {
     /// ```
     /// use tenet::prelude::*;
     ///
-    /// // Explicit faer provider (also the default). Every tensor created from
-    /// // this runtime factorizes on the chosen backend — no per-call argument.
+    /// // Explicit faer provider. Every tensor created from this runtime
+    /// // factorizes on the chosen backend — no per-call argument.
     /// let rt = Runtime::builder()
     ///     .linalg_backend(LinalgBackend::Faer)
     ///     .build()?;
@@ -1098,7 +1106,7 @@ impl RuntimeBuilder {
     /// // Switch to the system BLAS/LAPACK linked via a `blas-*` cargo feature
     /// // (OpenBLAS / MKL / Accelerate). Results are identical to faer up to
     /// // floating-point rounding; only performance differs. Without a linked
-    /// // provider this returns an error, so fall back to faer:
+    /// // provider this returns an error, so return to the compiled default:
     /// let rt = Runtime::builder()
     ///     .linalg_backend(LinalgBackend::Blas)
     ///     .build()
@@ -1114,7 +1122,9 @@ impl RuntimeBuilder {
     /// Selects a built-in CPU provider ([`LinalgBackend::Faer`] or
     /// [`LinalgBackend::Blas`]) for the coupled-block **contraction GEMM**
     /// (`compose` / `contract` and the recoupling replays — the BLAS-style
-    /// work). Unset uses faer. Independent of [`Self::linalg_backend`]: the
+    /// work). Unset uses Tenferro's resolved compiled provider default: BLAS
+    /// when its CPU build enables `cpu-blas`, otherwise faer. Independent of
+    /// [`Self::linalg_backend`]: the
     /// factorizations and the contraction GEMM can run on different providers
     /// (e.g. faer GEMM with BLAS/LAPACK factorizations, or the reverse).
     /// Choosing [`LinalgBackend::Blas`] without a compiled `cpu-blas`/`blas-*`
@@ -1125,7 +1135,7 @@ impl RuntimeBuilder {
     /// ```
     /// use tenet::prelude::*;
     ///
-    /// // faer everywhere is the default; this is explicit and equivalent.
+    /// // This explicitly selects faer, regardless of the compiled default.
     /// let rt = Runtime::builder()
     ///     .gemm_backend(LinalgBackend::Faer)
     ///     .build()?;
@@ -1488,9 +1498,9 @@ mod tests {
         );
     }
 
-    // All context/provider combinations of the contraction-backend builder
-    // must construct on faer (always compiled), and each must land on the
-    // context it was given (the one-pool-per-Runtime invariant, #155).
+    // The default-feature graph includes faer. This control verifies that its
+    // explicit provider path constructs; the adapter's private route test pins
+    // the unset compiled-default selection separately.
     #[test]
     fn transform_ops_builds_for_every_faer_config() {
         let faer = tenet_dense::CpuBackendKind::Faer;

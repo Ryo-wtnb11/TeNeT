@@ -379,11 +379,12 @@ assert!(a.runtime().shares_state_with(&rt));
 # Ok::<(), Error>(())
 ```
 
-The default build uses the Host `cpu-faer` backend. Select a different enabled
-dense backend with the builder when a measured workload requires it. CUDA
-operations reject unsupported combinations rather than silently moving work
-back to the CPU. Build the runtime once at program setup; `clone` shares its
-execution configuration for work submitted from another thread.
+An unset builder uses Tenferro's resolved compiled Host provider default: BLAS
+when its CPU build enables `cpu-blas`, otherwise `cpu-faer`. Select a different
+enabled dense backend with the builder when a measured workload requires it.
+CUDA operations reject unsupported combinations rather than silently moving
+work back to the CPU. Build the runtime once at program setup; `clone` shares
+its execution configuration for work submitted from another thread.
 
 `tensor!` does not accept hyperedges: a label may appear at most twice.
 It does not promote scalar types automatically. Slicing is explicit rather

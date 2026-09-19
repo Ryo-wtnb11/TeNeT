@@ -8,7 +8,8 @@ Start with the [crate tutorial](src/tutorial.md#quick-start). For index
 notation and network planning, add `tenet-network` and run its
 [quickstart](https://github.com/Ryo-wtnb11/TeNeT/blob/main/tenet-network/examples/quickstart.rs).
 
-The default host backend is `cpu-faer`; see the root
+The default host provider is Tenferro's resolved compiled default: BLAS when
+its CPU build enables `cpu-blas`, otherwise `cpu-faer`; see the root
 [feature table](https://github.com/Ryo-wtnb11/TeNeT#features) and
 [`Cargo.toml`](Cargo.toml) for alternatives. `cuda` and `racah-generated` add
 the typed CUDA surface and SUN providers. The `opt-path` and `cotengra-python`
