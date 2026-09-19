@@ -229,10 +229,10 @@ use tenet_dense::{
 use tenet_operations::StorageGemm;
 use tenet_tensors::{
     expand_physical_host, project_physical_host, tensorcontract_owned_checked_generic_in_context,
-    tree_transform_dyn_owned_checked_generic_in_context, BoundDynamicFusionMapSpace,
-    BoundDynamicTensorRef, DynamicFusionMapSpace, OutputAxisOrder, OwnedCatCopy, OwnedCatSide,
-    TensorContractSpec, TreeTransformOperation, TreeTransformOperationKind,
-    ValidatedDynamicFusionLayout,
+    tree_transform_dyn_owned_checked_generic_input_in_context, BoundDynamicFusionMapSpace,
+    BoundDynamicTensorRef, CheckedTreeTransformInput, DynamicFusionMapSpace, OutputAxisOrder,
+    OwnedCatCopy, OwnedCatSide, TensorContractSpec, TreeTransformOperation,
+    TreeTransformOperationKind, ValidatedDynamicFusionLayout,
 };
 
 pub use tenet_core::SectorCodec;
@@ -6675,16 +6675,21 @@ where
         tensor: &TensorMap<R, D>,
         operation: TreeTransformOperation,
     ) -> Result<TensorMap<R, D>, Self::FacadeError> {
-        let materialized = tensor.materialized_tensor_uncached()?;
-        let body = materialized
-            .owned_body()
-            .expect("uncached materialization is owned");
+        let input = match &tensor.repr {
+            TypedTensorRepr::Owned(body) => {
+                CheckedTreeTransformInput::direct(&body.space, body.materialized_dense_data())
+            }
+            TypedTensorRepr::Adjoint(view) => CheckedTreeTransformInput::adjoint(
+                &view.logical_space,
+                &view.parent.space,
+                view.parent.materialized_dense_data(),
+            ),
+        };
         let mut lease = tensor.runtime.lease_context()?;
-        let (space, data) = tree_transform_dyn_owned_checked_generic_in_context(
+        let (space, data) = tree_transform_dyn_owned_checked_generic_input_in_context(
             lease.context().generic_lane::<D>().tree_context_mut(),
             operation,
-            &body.space,
-            body.materialized_dense_data(),
+            input,
             D::from_real(1.0),
         )?;
         Ok(TensorMap {
@@ -9055,6 +9060,11 @@ struct TypedAdjointView<R, D, S = Vec<D>> {
     materialized: OnceLock<Arc<TypedTensorBody<R, D>>>,
     #[cfg(test)]
     materialized_body_builds: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(test)]
+thread_local! {
+    static UNCACHED_ADJOINT_MATERIALIZATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 enum TypedTensorRepr<R, D, S = Vec<D>> {
@@ -11851,6 +11861,9 @@ where
         let TypedTensorRepr::Adjoint(view) = &self.repr else {
             return Ok(self.clone());
         };
+        #[cfg(test)]
+        UNCACHED_ADJOINT_MATERIALIZATIONS
+            .set(UNCACHED_ADJOINT_MATERIALIZATIONS.get().saturating_add(1));
         let data = tenet_tensors::materialize_adjoint_data_dyn(
             view.parent.space.space(),
             view.logical_space.space(),
@@ -17145,6 +17158,74 @@ mod representation_gates {
         };
         view.materialized_body_builds
             .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    #[cfg(feature = "racah-generated")]
+    #[test]
+    fn checked_generic_lazy_transforms_do_not_materialize_uncached_input() {
+        use tenet_core::SUNFusionRule;
+
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let provider = Arc::new(SUNFusionRule::new(3).unwrap());
+        let fundamental =
+            GradedSpace::try_new_with_arc(Arc::clone(&provider), [(vec![1, 0], 2)]).unwrap();
+        let antifundamental =
+            GradedSpace::try_new_with_arc(Arc::clone(&provider), [(vec![0, 1], 3)]).unwrap();
+        let source: TensorMap<_, Complex64> = TensorMap::from_block_fn(
+            &runtime,
+            [&fundamental, &fundamental],
+            [&antifundamental],
+            |trees, indices| {
+                Complex64::new(
+                    indices.iter().sum::<usize>() as f64,
+                    trees.coupled().iter().sum::<i64>() as f64 + 0.5,
+                )
+            },
+        )
+        .unwrap();
+        let lazy = source.adjoint().unwrap();
+        let eager = lazy.materialized_tensor_uncached().unwrap();
+        UNCACHED_ADJOINT_MATERIALIZATIONS.set(0);
+
+        let outputs = [
+            (
+                lazy.permute(&[0, 2], &[1]).unwrap(),
+                eager.permute(&[0, 2], &[1]).unwrap(),
+            ),
+            (
+                lazy.braid(&[0, 2], &[1], &[0, 1, 2]).unwrap(),
+                eager.braid(&[0, 2], &[1], &[0, 1, 2]).unwrap(),
+            ),
+            (lazy.repartition(2).unwrap(), eager.repartition(2).unwrap()),
+            (lazy.transpose().unwrap(), eager.transpose().unwrap()),
+            (
+                lazy.transpose_axes(&[0, 2], &[1]).unwrap(),
+                eager.transpose_axes(&[0, 2], &[1]).unwrap(),
+            ),
+        ];
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+        let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+            unreachable!()
+        };
+        assert!(view.materialized.get().is_none());
+        for (actual, expected) in outputs {
+            assert!(matches!(&actual.repr, TypedTensorRepr::Owned(_)));
+            assert_eq!(
+                actual.logical_space().space(),
+                expected.logical_space().space()
+            );
+            assert_eq!(actual.data().len(), expected.data().len());
+            assert!(actual
+                .data()
+                .iter()
+                .zip(expected.data())
+                .all(|(&actual, &expected)| (actual - expected).norm() < 1.0e-10));
+            assert!(actual.norm().unwrap().is_finite());
+            assert!(actual.qr_compact().is_ok());
+        }
+        assert_eq!(UNCACHED_ADJOINT_MATERIALIZATIONS.get(), 0);
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+        assert!(view.materialized.get().is_none());
     }
 
     #[test]

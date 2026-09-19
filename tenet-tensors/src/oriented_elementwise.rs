@@ -1,28 +1,13 @@
 use core::ops::{Add, Mul, Range};
 
 use num_traits::{One, Zero};
-use tenet_core::{BlockKey, BlockStructure, FusionTreePairKey, SectorId};
+use tenet_core::{BlockKey, BlockStructure, SectorId};
 use tenet_operations::{
     bilinear_raw_strided_kernel_mapped, tensoradd_raw_strided_kernel_mapped, ConjugateValue,
     OperationError,
 };
 
 use crate::FusionOperand;
-
-fn storage_block_index(
-    operand: FusionOperand<'_>,
-    logical_key: &FusionTreePairKey,
-) -> Result<usize, OperationError> {
-    let structure = operand.storage_space().structure();
-    let index = if operand.storage_conjugate() {
-        structure.find_block_index_by_adjoint_fusion_tree_pair(logical_key)
-    } else {
-        structure.find_block_index_by_fusion_tree_pair(logical_key)
-    };
-    index.ok_or_else(|| OperationError::MissingBlockKey {
-        key: Box::new(BlockKey::from(logical_key.clone())),
-    })
-}
 
 fn checked_offset(offset: usize) -> Result<isize, OperationError> {
     isize::try_from(offset).map_err(|_| OperationError::OffsetOverflow { value: offset })
@@ -68,7 +53,7 @@ pub fn validate_oriented_fusion_layout(
         let storage_block = operand
             .storage_space()
             .structure()
-            .block(storage_block_index(operand, logical_key)?)?;
+            .block(operand.storage_block_index(logical_key)?)?;
         validate_logical_block_shape(operand, logical_block.shape(), storage_block.shape())?;
     }
     Ok(())
@@ -112,7 +97,7 @@ where
         let source_block = source
             .storage_space()
             .structure()
-            .block(storage_block_index(source, logical_key)?)?;
+            .block(source.storage_block_index(logical_key)?)?;
         let destination_stride = |axis| {
             isize::try_from(destination_block.strides()[axis])
                 .map_err(|_| OperationError::ElementCountOverflow)
@@ -252,7 +237,7 @@ where
         let storage_block = source
             .storage_space()
             .structure()
-            .block(storage_block_index(source, logical_key)?)?;
+            .block(source.storage_block_index(logical_key)?)?;
         validate_logical_block_shape(source, logical_block.shape(), storage_block.shape())?;
         if logical_block.shape().len() != destination.rank()
             || destination_block.shape().len() != destination.rank()
@@ -388,11 +373,11 @@ where
         let lhs_block = lhs
             .storage_space()
             .structure()
-            .block(storage_block_index(lhs, logical_key)?)?;
+            .block(lhs.storage_block_index(logical_key)?)?;
         let rhs_block = rhs
             .storage_space()
             .structure()
-            .block(storage_block_index(rhs, logical_key)?)?;
+            .block(rhs.storage_block_index(logical_key)?)?;
         let destination_stride = |axis| {
             isize::try_from(destination_block.strides()[axis])
                 .map_err(|_| OperationError::ElementCountOverflow)
@@ -512,12 +497,12 @@ where
         let lhs_block = lhs
             .storage_space()
             .structure()
-            .block(storage_block_index(lhs, logical_key)?)
+            .block(lhs.storage_block_index(logical_key)?)
             .map_err(OperationError::from)?;
         let rhs_block = rhs
             .storage_space()
             .structure()
-            .block(storage_block_index(rhs, logical_key)?)
+            .block(rhs.storage_block_index(logical_key)?)
             .map_err(OperationError::from)?;
         let lhs_stride = |axis| {
             let storage_axis = lhs.storage_axis(axis)?;
