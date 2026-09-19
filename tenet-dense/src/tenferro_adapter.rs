@@ -716,20 +716,6 @@ impl Default for DefaultDenseExecutor {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn shared_context_without_kind_uses_the_compiled_provider_default() {
-        let context = SharedCpuContext::with_threads(1).expect("serial context");
-        let executor =
-            DefaultDenseExecutor::with_shared_context(&context, None).expect("default provider");
-
-        assert_eq!(executor.backend.kind(), CpuBackendKind::default_compiled());
-    }
-}
-
 impl DenseExecutor for DefaultDenseExecutor {
     fn supports_svd_full(&self) -> bool {
         #[cfg(all(feature = "cpu-faer", not(feature = "provider-inject")))]
@@ -1364,5 +1350,19 @@ fn linalg_unavailable(op: &'static str) -> DenseError {
     DenseError::Unsupported {
         op,
         message: "provider-inject requires a registered BLAS/LAPACK provider".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shared_context_without_kind_uses_the_compiled_provider_default() {
+        let context = SharedCpuContext::with_threads(1).expect("serial context");
+        let executor =
+            DefaultDenseExecutor::with_shared_context(&context, None).expect("default provider");
+
+        assert_eq!(executor.backend.kind(), CpuBackendKind::default_compiled());
     }
 }
