@@ -9308,6 +9308,31 @@ fn checked_generic_adjoint_failures_do_not_consume_or_publish_cache_entries() {
 }
 
 #[test]
+#[allow(clippy::arc_with_non_send_sync)]
+fn checked_generic_direct_transform_does_not_prepare_fusion_operand_projection() {
+    let rule = DenseGenericRule;
+    let provider = Arc::new(CheckedPlanSpy::new(&rule));
+    let source = crate::BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+        provider,
+        dense_generic_dynamic_space().homspace().clone(),
+    )
+    .unwrap();
+    let data = vec![1.0; source.space().required_len().unwrap()];
+    crate::contract::reset_fusion_operand_projection_prepares();
+
+    crate::tree_transform_dyn_owned_checked_generic_in_context(
+        &mut crate::TreeTransformExecutionContext::<f64, RuleIdentity, f64>::default(),
+        TreeTransformOperation::braid([1, 0], [2], [0, 1], [2]),
+        &source,
+        &data,
+        1.0,
+    )
+    .unwrap();
+
+    assert_eq!(crate::contract::fusion_operand_projection_prepares(), 0);
+}
+
+#[test]
 #[allow(clippy::arc_with_non_send_sync)] // The API requires Arc; this single-threaded spy uses Cells for deterministic failures.
 fn checked_generic_owned_failure_does_not_publish_destination_state() {
     use tenet_core::{
