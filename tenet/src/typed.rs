@@ -9057,6 +9057,11 @@ struct TypedAdjointView<R, D, S = Vec<D>> {
     materialized_body_builds: std::sync::atomic::AtomicUsize,
 }
 
+#[cfg(test)]
+thread_local! {
+    static UNCACHED_ADJOINT_MATERIALIZATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 enum TypedTensorRepr<R, D, S = Vec<D>> {
     Owned(Arc<TypedTensorBody<R, D, S>>),
     Adjoint(Arc<TypedAdjointView<R, D, S>>),
@@ -11851,6 +11856,9 @@ where
         let TypedTensorRepr::Adjoint(view) = &self.repr else {
             return Ok(self.clone());
         };
+        #[cfg(test)]
+        UNCACHED_ADJOINT_MATERIALIZATIONS
+            .set(UNCACHED_ADJOINT_MATERIALIZATIONS.get().saturating_add(1));
         let data = tenet_tensors::materialize_adjoint_data_dyn(
             view.parent.space.space(),
             view.logical_space.space(),
@@ -17145,6 +17153,40 @@ mod representation_gates {
         };
         view.materialized_body_builds
             .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    #[cfg(feature = "racah-generated")]
+    #[test]
+    fn checked_generic_lazy_permute_does_not_materialize_uncached_input() {
+        use tenet_core::SUNFusionRule;
+
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let provider = Arc::new(SUNFusionRule::new(3).unwrap());
+        let fundamental =
+            GradedSpace::try_new_with_arc(Arc::clone(&provider), [(vec![1, 0], 2)]).unwrap();
+        let antifundamental =
+            GradedSpace::try_new_with_arc(Arc::clone(&provider), [(vec![0, 1], 3)]).unwrap();
+        let source: TensorMap<_, Complex64> = TensorMap::from_block_fn(
+            &runtime,
+            [&fundamental, &fundamental],
+            [&antifundamental],
+            |trees, indices| {
+                Complex64::new(
+                    indices.iter().sum::<usize>() as f64,
+                    trees.coupled().iter().sum::<i64>() as f64 + 0.5,
+                )
+            },
+        )
+        .unwrap();
+        let lazy = source.adjoint().unwrap();
+        let eager = lazy.materialized_tensor_uncached().unwrap();
+        UNCACHED_ADJOINT_MATERIALIZATIONS.set(0);
+
+        let actual = lazy.permute(&[0, 2], &[1]).unwrap();
+        let expected = eager.permute(&[0, 2], &[1]).unwrap();
+
+        assert_eq!(actual.data(), expected.data());
+        assert_eq!(UNCACHED_ADJOINT_MATERIALIZATIONS.get(), 0);
     }
 
     #[test]
