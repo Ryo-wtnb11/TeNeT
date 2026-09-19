@@ -8053,6 +8053,30 @@ impl SynchronizedCheckedGeneric {
     }
 }
 
+impl FusionRule for SynchronizedCheckedGeneric {
+    fn rule_identity(&self) -> RuleIdentity {
+        self.rule.rule_identity()
+    }
+    fn fusion_style(&self) -> FusionStyleKind {
+        self.rule.fusion_style()
+    }
+    fn braiding_style(&self) -> BraidingStyleKind {
+        self.rule.braiding_style()
+    }
+    fn vacuum(&self) -> SectorId {
+        self.rule.vacuum()
+    }
+    fn dual(&self, sector: SectorId) -> SectorId {
+        self.rule.dual(sector)
+    }
+    fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+        self.rule.fusion_channels(left, right)
+    }
+    fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+        self.rule.nsymbol(left, right, coupled)
+    }
+}
+
 impl CheckedGenericFusion for SynchronizedCheckedGeneric {
     type Error = std::convert::Infallible;
 
@@ -9061,6 +9085,85 @@ fn checked_generic_adjoint_storage_matches_literal_dense_braid() {
         assert_eq!(block.strides(), &[1, 3, 12]);
         assert_eq!(block.offset(), offset);
     }
+}
+
+#[test]
+fn checked_generic_adjoint_storage_keeps_distinct_logical_layout_cache_identity() {
+    let provider = Arc::new(SynchronizedCheckedGeneric::new());
+    let canonical = crate::BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+        Arc::clone(&provider),
+        dense_generic_dynamic_space().homspace().clone(),
+    )
+    .unwrap();
+    let parent = crate::adjoint_bound_space_dyn_generic_checked(&canonical).unwrap();
+    let canonical_logical = crate::adjoint_bound_space_dyn_generic_checked(&parent).unwrap();
+    let canonical_structure = canonical_logical.space().structure();
+    let reordered_structure = BlockStructure::from_blocks_with_rank(
+        3,
+        [1, 0]
+            .into_iter()
+            .enumerate()
+            .map(|(position, index)| {
+                let block = canonical_structure.block(index).unwrap();
+                BlockSpec::with_key(
+                    block.key().clone(),
+                    block.shape().to_vec(),
+                    vec![1, 2, 6],
+                    position * 30,
+                )
+                .unwrap()
+            })
+            .collect(),
+    )
+    .unwrap();
+    let reordered_typed = FusionTensorMapSpace::<2, 1>::new_unbound(
+        TensorMapSpace::from_dims([2, 3], [5]).unwrap(),
+        canonical_logical.space().homspace().clone(),
+        reordered_structure,
+    )
+    .unwrap()
+    .try_bind_rule(provider.as_ref())
+    .unwrap();
+    let custom_bound = crate::BoundDynamicFusionMapSpace::bind_generic(
+        crate::DynamicFusionMapSpace::from_typed(&reordered_typed),
+        Arc::clone(&provider),
+    )
+    .unwrap();
+    let reordered_logical = canonical_logical
+        .rebind_validated(&custom_bound.validated_layout())
+        .unwrap();
+    assert_ne!(
+        canonical_structure.content_id(),
+        reordered_logical.space().structure().content_id()
+    );
+
+    let parent_data = (0..parent.space().required_len().unwrap())
+        .map(|index| Complex64::new(index as f64 + 1.0, 0.25 - index as f64))
+        .collect::<Vec<_>>();
+    let operation = TreeTransformOperation::braid([1, 0], [2], [0, 1], [2]);
+    let alpha = Complex64::new(0.5, -1.25);
+    let expected = literal_dense_generic_adjoint_braid(&parent_data, alpha);
+    let store = Arc::new(RuntimeTreeTransformStore::<f64>::default());
+    let mut context =
+        crate::TreeTransformExecutionContext::<Complex64, RuleIdentity, f64>::default();
+    context
+        .cache_mut()
+        .bind_runtime_store(Arc::downgrade(&store));
+    let mut execute = |logical| {
+        crate::tree_transform_dyn_owned_checked_generic_input_in_context(
+            &mut context,
+            operation.clone(),
+            crate::CheckedTreeTransformInput::adjoint(logical, &parent, &parent_data),
+            alpha,
+        )
+        .unwrap()
+    };
+
+    assert_eq!(execute(&canonical_logical).1, expected);
+    assert_eq!(execute(&reordered_logical).1, expected);
+    assert_eq!(execute(&reordered_logical).1, expected);
+    assert_eq!(store.info().misses(), 2);
+    assert_eq!(store.info().hits(), 1);
 }
 
 #[test]
