@@ -9309,6 +9309,67 @@ fn checked_generic_adjoint_failures_do_not_consume_or_publish_cache_entries() {
 
 #[test]
 #[allow(clippy::arc_with_non_send_sync)]
+fn checked_generic_adjoint_rejects_equal_length_wrong_parent_relation_without_cache_change() {
+    let rule = DenseGenericRule;
+    let provider = Arc::new(CheckedPlanSpy::new(&rule));
+    let canonical = crate::BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+        Arc::clone(&provider),
+        dense_generic_dynamic_space().homspace().clone(),
+    )
+    .unwrap();
+    let parent = crate::adjoint_bound_space_dyn_generic_checked(&canonical).unwrap();
+    let logical = crate::adjoint_bound_space_dyn_generic_checked(&parent).unwrap();
+    let data = vec![1.0; parent.space().required_len().unwrap()];
+    let operation = TreeTransformOperation::braid([1, 0], [2], [0, 1], [2]);
+    let store = Arc::new(RuntimeTreeTransformStore::<f64>::default());
+    let mut context = crate::TreeTransformExecutionContext::<f64, RuleIdentity, f64>::default();
+    context
+        .cache_mut()
+        .bind_runtime_store(Arc::downgrade(&store));
+    crate::tree_transform_dyn_owned_checked_generic_input_in_context(
+        &mut context,
+        operation.clone(),
+        crate::CheckedTreeTransformInput::adjoint(&logical, &parent, &data),
+        1.0,
+    )
+    .unwrap();
+    let warm = store.info();
+    assert_eq!(warm.entries(), 1);
+
+    let sector = SectorId::new(1);
+    let wrong_logical = crate::BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+        Arc::clone(&provider),
+        FusionTreeHomSpace::new(
+            FusionProductSpace::new(
+                [3usize, 2].map(|degeneracy| SectorLeg::new([(sector, degeneracy)], false)),
+            ),
+            FusionProductSpace::new([SectorLeg::new([(sector, 5)], false)]),
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        wrong_logical.space().required_len().unwrap(),
+        logical.space().required_len().unwrap()
+    );
+
+    let error = crate::tree_transform_dyn_owned_checked_generic_input_in_context(
+        &mut context,
+        operation,
+        crate::CheckedTreeTransformInput::adjoint(&wrong_logical, &parent, &data),
+        1.0,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        CheckedGenericPlanError::Operation(OperationError::StructureMismatch {
+            tensor: "checked adjoint relation"
+        })
+    ));
+    assert_eq!(store.info(), warm);
+}
+
+#[test]
+#[allow(clippy::arc_with_non_send_sync)]
 fn checked_generic_direct_transform_does_not_prepare_fusion_operand_projection() {
     let rule = DenseGenericRule;
     let provider = Arc::new(CheckedPlanSpy::new(&rule));
