@@ -229,10 +229,10 @@ use tenet_dense::{
 use tenet_operations::StorageGemm;
 use tenet_tensors::{
     expand_physical_host, project_physical_host, tensorcontract_owned_checked_generic_in_context,
-    tree_transform_dyn_owned_checked_generic_in_context, BoundDynamicFusionMapSpace,
-    BoundDynamicTensorRef, DynamicFusionMapSpace, OutputAxisOrder, OwnedCatCopy, OwnedCatSide,
-    TensorContractSpec, TreeTransformOperation, TreeTransformOperationKind,
-    ValidatedDynamicFusionLayout,
+    tree_transform_dyn_owned_checked_generic_input_in_context, BoundDynamicFusionMapSpace,
+    BoundDynamicTensorRef, CheckedTreeTransformInput, DynamicFusionMapSpace, OutputAxisOrder,
+    OwnedCatCopy, OwnedCatSide, TensorContractSpec, TreeTransformOperation,
+    TreeTransformOperationKind, ValidatedDynamicFusionLayout,
 };
 
 pub use tenet_core::SectorCodec;
@@ -6675,16 +6675,21 @@ where
         tensor: &TensorMap<R, D>,
         operation: TreeTransformOperation,
     ) -> Result<TensorMap<R, D>, Self::FacadeError> {
-        let materialized = tensor.materialized_tensor_uncached()?;
-        let body = materialized
-            .owned_body()
-            .expect("uncached materialization is owned");
+        let input = match &tensor.repr {
+            TypedTensorRepr::Owned(body) => {
+                CheckedTreeTransformInput::direct(&body.space, body.materialized_dense_data())
+            }
+            TypedTensorRepr::Adjoint(view) => CheckedTreeTransformInput::adjoint(
+                &view.logical_space,
+                &view.parent.space,
+                view.parent.materialized_dense_data(),
+            ),
+        };
         let mut lease = tensor.runtime.lease_context()?;
-        let (space, data) = tree_transform_dyn_owned_checked_generic_in_context(
+        let (space, data) = tree_transform_dyn_owned_checked_generic_input_in_context(
             lease.context().generic_lane::<D>().tree_context_mut(),
             operation,
-            &body.space,
-            body.materialized_dense_data(),
+            input,
             D::from_real(1.0),
         )?;
         Ok(TensorMap {

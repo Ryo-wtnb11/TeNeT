@@ -13,7 +13,7 @@ use tenet_core::{
     TensorStorage, WeakHomSpaceId,
 };
 
-use crate::cache::{OperationCachePolicy, TreeTransformStructureCacheKey};
+use crate::cache::{BlockStructureCacheKey, OperationCachePolicy, TreeTransformStructureCacheKey};
 use crate::{OperationError, TreeTransformStructure, TreeTransformStructureCache};
 
 use super::operation::{TreeTransformOperation, TreeTransformRuleCacheKey};
@@ -51,6 +51,7 @@ struct TreeTransformStructureOperationKey<RuleKey> {
 struct RuntimeTreeTransformOperationKey {
     rule: RuleIdentity,
     operation: TreeTransformOperation,
+    logical_source: Option<BlockStructureCacheKey>,
 }
 
 type RuntimeTreeTransformKey = TreeTransformStructureCacheKey<RuntimeTreeTransformOperationKey>;
@@ -381,6 +382,12 @@ impl<T> RuntimeTreeTransformStore<T> {
             dependent_structure_bytes =
                 dependent_structure_bytes.saturating_add(key.src().charged_retained_bytes());
         }
+        if let Some(logical) = &key.plan().logical_source {
+            if logical.id() != key.src().id() && logical.id() != key.dst().id() {
+                dependent_structure_bytes =
+                    dependent_structure_bytes.saturating_add(logical.charged_retained_bytes());
+            }
+        }
 
         core::mem::size_of::<RuntimeTreeTransformKey>()
             .saturating_add(core::mem::size_of::<RuntimeTreeTransformStoreEntry<T>>())
@@ -484,14 +491,20 @@ impl<T> RuntimeTreeTransformStore<T> {
         operation: &TreeTransformOperation,
         dst_structure: &BlockStructure,
         src_structure: &BlockStructure,
+        logical_src_structure: Option<&BlockStructure>,
+        storage_conjugate: bool,
     ) -> Result<RuntimeTreeTransformLookup<T>, OperationError> {
-        let key = TreeTransformStructureCacheKey::from_structures(
+        let key = TreeTransformStructureCacheKey::from_structures_with_storage_conjugation(
             RuntimeTreeTransformOperationKey {
                 rule,
                 operation: operation.clone(),
+                logical_source: logical_src_structure
+                    .map(BlockStructureCacheKey::from_structure)
+                    .transpose()?,
             },
             dst_structure,
             src_structure,
+            storage_conjugate,
         )?;
         let mut state = self
             .state
@@ -504,7 +517,13 @@ impl<T> RuntimeTreeTransformStore<T> {
             // previews deliberately have no intern identity before commit, so
             // a bounded semantic scan avoids a second key/index hierarchy.
             state.entries.iter().find_map(|(candidate, _)| {
-                (candidate.plan() == key.plan()
+                (candidate.plan().rule == key.plan().rule
+                    && candidate.plan().operation == key.plan().operation
+                    && match (&candidate.plan().logical_source, &key.plan().logical_source) {
+                        (Some(candidate), Some(key)) => candidate.same_content(key),
+                        (None, None) => true,
+                        _ => false,
+                    }
                     && candidate.storage_conjugate() == key.storage_conjugate()
                     && candidate.src().same_content(key.src())
                     && candidate.dst().same_content(key.dst()))
@@ -532,16 +551,22 @@ impl<T> RuntimeTreeTransformStore<T> {
         operation: &TreeTransformOperation,
         dst_structure: &BlockStructure,
         src_structure: &BlockStructure,
+        logical_src_structure: Option<&BlockStructure>,
+        storage_conjugate: bool,
         structure: Arc<TreeTransformStructure<T>>,
         generation: u64,
     ) -> Result<(), OperationError> {
-        let key = TreeTransformStructureCacheKey::from_structures(
+        let key = TreeTransformStructureCacheKey::from_structures_with_storage_conjugation(
             RuntimeTreeTransformOperationKey {
                 rule,
                 operation: operation.clone(),
+                logical_source: logical_src_structure
+                    .map(BlockStructureCacheKey::from_structure)
+                    .transpose()?,
             },
             dst_structure,
             src_structure,
+            storage_conjugate,
         )?;
         self.admit(key, structure, generation);
         Ok(())
@@ -595,6 +620,7 @@ impl<T> RuntimeTreeTransformStore<T> {
             RuntimeTreeTransformOperationKey {
                 rule,
                 operation: operation.clone(),
+                logical_source: None,
             },
             dst_structure,
             src_structure,
@@ -918,6 +944,7 @@ where
                 RuntimeTreeTransformOperationKey {
                     rule: rule.rule_identity(),
                     operation: operation.clone(),
+                    logical_source: None,
                 },
                 dst_structure,
                 src_structure,
@@ -1312,6 +1339,7 @@ mod runtime_store_tests {
             RuntimeTreeTransformOperationKey {
                 rule,
                 operation: TreeTransformOperation::permute([tag], []),
+                logical_source: None,
             },
             &structure,
             &structure,
@@ -1344,6 +1372,7 @@ mod runtime_store_tests {
             RuntimeTreeTransformOperationKey {
                 rule: RuleIdentity::of_type::<TestRuleIdentity>(),
                 operation: TreeTransformOperation::permute([tag], []),
+                logical_source: None,
             },
             &structure,
             &structure,
@@ -1379,6 +1408,7 @@ mod runtime_store_tests {
             RuntimeTreeTransformOperationKey {
                 rule: RuleIdentity::of_type::<TestRuleIdentity>(),
                 operation: TreeTransformOperation::permute([0], []),
+                logical_source: None,
             },
             &dst,
             &src,
@@ -1972,6 +2002,8 @@ mod runtime_store_tests {
                 &TreeTransformOperation::permute([31], []),
                 &rebuilt,
                 &rebuilt,
+                None,
+                false,
             )
             .unwrap();
         assert!(cached.is_some());

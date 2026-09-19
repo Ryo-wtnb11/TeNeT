@@ -143,6 +143,7 @@ pub use tensortrace::{
 };
 pub use tree_context::{
     tree_transform_dyn_owned_checked_generic, tree_transform_dyn_owned_checked_generic_in_context,
+    tree_transform_dyn_owned_checked_generic_input_in_context, CheckedTreeTransformInput,
     TreeTransformExecutionContext,
 };
 pub use tree_transform::{
