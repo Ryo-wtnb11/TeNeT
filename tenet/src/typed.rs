@@ -17220,6 +17220,8 @@ mod representation_gates {
                 .iter()
                 .zip(expected.data())
                 .all(|(&actual, &expected)| (actual - expected).norm() < 1.0e-10));
+            assert!(actual.norm().unwrap().is_finite());
+            assert!(actual.qr_compact().is_ok());
         }
         assert_eq!(UNCACHED_ADJOINT_MATERIALIZATIONS.get(), 0);
         assert_eq!(materialized_adjoint_builds(&lazy), 0);
