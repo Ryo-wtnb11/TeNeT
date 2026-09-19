@@ -1375,8 +1375,8 @@ mod tests {
 
     #[test]
     fn tensortrace_raw_exports_reject_all_stride_rank_mismatches() {
-        let cases: [(&[isize], &[isize], &[isize], usize, usize); 6] = [
-            (&[], &[1], &[1], 1, 0),
+        let cases = [
+            (&[][..], &[1isize][..], &[1isize][..], 1, 0),
             (&[1, 1], &[1], &[1], 1, 2),
             (&[1], &[], &[1], 1, 0),
             (&[1], &[1, 1], &[1], 1, 2),
