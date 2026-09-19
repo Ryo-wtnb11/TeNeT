@@ -17162,7 +17162,7 @@ mod representation_gates {
 
     #[cfg(feature = "racah-generated")]
     #[test]
-    fn checked_generic_lazy_permute_does_not_materialize_uncached_input() {
+    fn checked_generic_lazy_transforms_do_not_materialize_uncached_input() {
         use tenet_core::SUNFusionRule;
 
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
@@ -17187,10 +17187,34 @@ mod representation_gates {
         let eager = lazy.materialized_tensor_uncached().unwrap();
         UNCACHED_ADJOINT_MATERIALIZATIONS.set(0);
 
-        let actual = lazy.permute(&[0, 2], &[1]).unwrap();
-        let expected = eager.permute(&[0, 2], &[1]).unwrap();
-
-        assert_eq!(actual.data(), expected.data());
+        let outputs = [
+            (
+                lazy.permute(&[0, 2], &[1]).unwrap(),
+                eager.permute(&[0, 2], &[1]).unwrap(),
+            ),
+            (
+                lazy.braid(&[0, 2], &[1], &[0, 1, 2]).unwrap(),
+                eager.braid(&[0, 2], &[1], &[0, 1, 2]).unwrap(),
+            ),
+            (lazy.repartition(2).unwrap(), eager.repartition(2).unwrap()),
+            (lazy.transpose().unwrap(), eager.transpose().unwrap()),
+            (
+                lazy.transpose_axes(&[0, 2], &[1]).unwrap(),
+                eager.transpose_axes(&[0, 2], &[1]).unwrap(),
+            ),
+        ];
+        for (actual, expected) in outputs {
+            assert!(matches!(&actual.repr, TypedTensorRepr::Owned(_)));
+            assert_eq!(
+                actual.logical_space().space(),
+                expected.logical_space().space()
+            );
+            assert!(actual
+                .data()
+                .iter()
+                .zip(expected.data())
+                .all(|(&actual, &expected)| (actual - expected).norm() < 1.0e-10));
+        }
         assert_eq!(UNCACHED_ADJOINT_MATERIALIZATIONS.get(), 0);
     }
 
