@@ -950,44 +950,12 @@ pub(crate) fn validate_raw_strided_bounds(
     strides: &[isize],
     offset: isize,
 ) -> Result<(), OperationError> {
-    if shape.len() != strides.len() {
-        return Err(OperationError::RankMismatch {
-            expected: shape.len(),
-            actual: strides.len(),
-        });
-    }
+    validate_rank(shape, strides)?;
     if shape.contains(&0) {
         return Ok(());
     }
-
-    let mut min_offset = offset;
-    let mut max_offset = offset;
-    for (&dim, &stride) in shape.iter().zip(strides.iter()) {
-        if dim <= 1 {
-            continue;
-        }
-        let dim = isize::try_from(dim - 1).map_err(|_| OperationError::ElementCountOverflow)?;
-        let end = stride
-            .checked_mul(dim)
-            .ok_or(OperationError::ElementCountOverflow)?;
-        if end >= 0 {
-            max_offset = max_offset
-                .checked_add(end)
-                .ok_or(OperationError::ElementCountOverflow)?;
-        } else {
-            min_offset = min_offset
-                .checked_add(end)
-                .ok_or(OperationError::ElementCountOverflow)?;
-        }
-    }
-    if min_offset < 0 {
-        return Err(OperationError::OffsetOverflow { value: usize::MAX });
-    }
-    let max_offset = checked_offset_to_index(max_offset)?;
-    if max_offset >= len {
-        return Err(OperationError::OffsetOverflow { value: max_offset });
-    }
-    Ok(())
+    let (min_offset, max_offset) = checked_strided_extrema(offset, shape, strides)?;
+    validate_reachable_bounds(len, min_offset, max_offset)
 }
 
 fn raw_strided_scale_loop<T>(
