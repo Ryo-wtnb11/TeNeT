@@ -112,9 +112,6 @@ pub use tenet_operations::{
     tensoradd_structure, tensoradd_structure_with_conjugation, TensorAddStructure,
     TensorAddStructureTerm,
 };
-pub(crate) use tenet_operations::{
-    tensortrace_raw_strided_kernel, tensortrace_raw_strided_kernel_add_with_coefficient,
-};
 #[doc(hidden)]
 pub use tenet_operations::{
     try_cat_owned_c64_raw, try_cat_owned_raw, OwnedCatC64Source, OwnedCatCopy, OwnedCatSide,

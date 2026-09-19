@@ -19,11 +19,14 @@ use crate::lowering::{
 };
 use crate::strided::offset_to_isize;
 use crate::tree_transform::CheckedGenericPlanError;
-use crate::{tensortrace_raw_strided_kernel, tensortrace_raw_strided_kernel_add_with_coefficient};
 use tenet_operations::structure_identity::validate_structure_identity;
 use tenet_operations::transform_structure::validate_destination_layouts_injective;
 use tenet_operations::TensorTraceAxisSpec;
 use tenet_operations::{axpby_raw_strided_kernel_trusted, scale_raw_strided_kernel_trusted};
+use tenet_operations::{
+    tensortrace_raw_strided_kernel_add_with_coefficient_trusted,
+    tensortrace_raw_strided_kernel_trusted,
+};
 use tenet_operations::{try_tensortrace_owned_raw, OperationError, OwnedTraceTerm};
 use tenet_operations::{ConjugateValue, RealStructuralCoefficient, RecouplingCoefficientAction};
 
@@ -1871,7 +1874,7 @@ where
     validate_trace_data_extents(&dst_structure, dst_len, &src_structure, src.data().len())?;
     let descriptor = structure.descriptor();
     for term in descriptor.terms() {
-        tensortrace_raw_strided_kernel(
+        tensortrace_raw_strided_kernel_trusted(
             dst.data_mut(),
             src.data(),
             descriptor.output_shape(term),
@@ -1930,7 +1933,7 @@ where
     let descriptor = structure.descriptor();
     scale_trace_destination_layouts(descriptor, dst.data_mut(), beta)?;
     for (term, fusion_term) in descriptor.terms().iter().zip(structure.terms()) {
-        tensortrace_raw_strided_kernel_add_with_coefficient(
+        tensortrace_raw_strided_kernel_add_with_coefficient_trusted(
             dst.data_mut(),
             src.data(),
             descriptor.output_shape(term),
@@ -2251,7 +2254,7 @@ where
     let descriptor = structure.descriptor();
     scale_trace_destination_layouts(descriptor, dst_data, beta)?;
     for (term, fusion_term) in descriptor.terms().iter().zip(structure.terms()) {
-        tensortrace_raw_strided_kernel_add_with_coefficient(
+        tensortrace_raw_strided_kernel_add_with_coefficient_trusted(
             dst_data,
             src_data,
             descriptor.output_shape(term),

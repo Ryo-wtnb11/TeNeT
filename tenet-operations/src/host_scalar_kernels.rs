@@ -521,6 +521,8 @@ where
     raw_strided_scale_loop(dst_data, shape, dst_strides, dst_offset, beta)
 }
 
+/// Traces a raw strided source after validating all ranks and reachable ranges.
+/// Invalid layout metadata is returned before destination storage is changed.
 #[allow(clippy::too_many_arguments)]
 pub fn tensortrace_raw_strided_kernel<T>(
     dst_data: &mut [T],
@@ -539,8 +541,115 @@ pub fn tensortrace_raw_strided_kernel<T>(
 where
     T: Copy + Add<T, Output = T> + Mul<T, Output = T> + PartialEq + Zero + One + ConjugateValue,
 {
-    let output_len = crate::strided::element_count(output_shape)?;
-    let trace_len = crate::strided::element_count(trace_shape)?;
+    let (output_len, trace_len) = validate_tensortrace_raw_layout(
+        dst_data.len(),
+        src_data.len(),
+        output_shape,
+        trace_shape,
+        dst_strides,
+        src_output_strides,
+        src_trace_strides,
+        dst_offset,
+        src_offset,
+    )?;
+    tensortrace_raw_strided_kernel_loop(
+        dst_data,
+        src_data,
+        output_shape,
+        trace_shape,
+        dst_strides,
+        src_output_strides,
+        src_trace_strides,
+        dst_offset,
+        src_offset,
+        source_conjugate,
+        alpha,
+        beta,
+        output_len,
+        trace_len,
+    )
+}
+
+/// Executes a raw trace layout already admitted by a tensor trace descriptor.
+///
+/// The caller must provide matching shape/stride ranks and ranges reachable
+/// within `dst_data` and `src_data`. Empty traces require representable,
+/// nonnegative source output bases but do not require those bases to index
+/// `src_data`.
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn tensortrace_raw_strided_kernel_trusted<T>(
+    dst_data: &mut [T],
+    src_data: &[T],
+    output_shape: &[usize],
+    trace_shape: &[usize],
+    dst_strides: &[isize],
+    src_output_strides: &[isize],
+    src_trace_strides: &[isize],
+    dst_offset: isize,
+    src_offset: isize,
+    source_conjugate: bool,
+    alpha: T,
+    beta: T,
+) -> Result<(), OperationError>
+where
+    T: Copy + Add<T, Output = T> + Mul<T, Output = T> + PartialEq + Zero + One + ConjugateValue,
+{
+    #[cfg(debug_assertions)]
+    let (output_len, trace_len) = validate_tensortrace_raw_layout(
+        dst_data.len(),
+        src_data.len(),
+        output_shape,
+        trace_shape,
+        dst_strides,
+        src_output_strides,
+        src_trace_strides,
+        dst_offset,
+        src_offset,
+    )?;
+    #[cfg(not(debug_assertions))]
+    let (output_len, trace_len) = (
+        crate::strided::element_count(output_shape)?,
+        crate::strided::element_count(trace_shape)?,
+    );
+    tensortrace_raw_strided_kernel_loop(
+        dst_data,
+        src_data,
+        output_shape,
+        trace_shape,
+        dst_strides,
+        src_output_strides,
+        src_trace_strides,
+        dst_offset,
+        src_offset,
+        source_conjugate,
+        alpha,
+        beta,
+        output_len,
+        trace_len,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn tensortrace_raw_strided_kernel_loop<T>(
+    dst_data: &mut [T],
+    src_data: &[T],
+    output_shape: &[usize],
+    trace_shape: &[usize],
+    dst_strides: &[isize],
+    src_output_strides: &[isize],
+    src_trace_strides: &[isize],
+    dst_offset: isize,
+    src_offset: isize,
+    source_conjugate: bool,
+    alpha: T,
+    beta: T,
+    output_len: usize,
+    trace_len: usize,
+) -> Result<(), OperationError>
+where
+    T: Copy + Add<T, Output = T> + Mul<T, Output = T> + PartialEq + Zero + One + ConjugateValue,
+{
     for output_linear in 0..output_len {
         let dst_index =
             strided_linear_offset(output_linear, output_shape, dst_strides, dst_offset)?;
@@ -564,6 +673,9 @@ where
     Ok(())
 }
 
+/// Adds a coefficient-weighted raw trace after validating all ranks and
+/// reachable ranges. Invalid layout metadata is returned before destination
+/// storage is changed.
 #[allow(clippy::too_many_arguments)]
 pub fn tensortrace_raw_strided_kernel_add_with_coefficient<T, C>(
     dst_data: &mut [T],
@@ -588,8 +700,126 @@ where
         + crate::RecouplingCoefficientAction<C>,
     C: Copy,
 {
-    let output_len = crate::strided::element_count(output_shape)?;
-    let trace_len = crate::strided::element_count(trace_shape)?;
+    let (output_len, trace_len) = validate_tensortrace_raw_layout(
+        dst_data.len(),
+        src_data.len(),
+        output_shape,
+        trace_shape,
+        dst_strides,
+        src_output_strides,
+        src_trace_strides,
+        dst_offset,
+        src_offset,
+    )?;
+    tensortrace_raw_strided_kernel_add_with_coefficient_loop(
+        dst_data,
+        src_data,
+        output_shape,
+        trace_shape,
+        dst_strides,
+        src_output_strides,
+        src_trace_strides,
+        dst_offset,
+        src_offset,
+        source_conjugate,
+        alpha,
+        coefficient,
+        output_len,
+        trace_len,
+    )
+}
+
+/// Executes a coefficient-weighted raw trace layout already admitted by a
+/// tensor trace descriptor.
+///
+/// The caller must uphold the same layout preconditions as
+/// [`tensortrace_raw_strided_kernel_trusted`].
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn tensortrace_raw_strided_kernel_add_with_coefficient_trusted<T, C>(
+    dst_data: &mut [T],
+    src_data: &[T],
+    output_shape: &[usize],
+    trace_shape: &[usize],
+    dst_strides: &[isize],
+    src_output_strides: &[isize],
+    src_trace_strides: &[isize],
+    dst_offset: isize,
+    src_offset: isize,
+    source_conjugate: bool,
+    alpha: T,
+    coefficient: C,
+) -> Result<(), OperationError>
+where
+    T: Copy
+        + Add<T, Output = T>
+        + Mul<T, Output = T>
+        + Zero
+        + ConjugateValue
+        + crate::RecouplingCoefficientAction<C>,
+    C: Copy,
+{
+    #[cfg(debug_assertions)]
+    let (output_len, trace_len) = validate_tensortrace_raw_layout(
+        dst_data.len(),
+        src_data.len(),
+        output_shape,
+        trace_shape,
+        dst_strides,
+        src_output_strides,
+        src_trace_strides,
+        dst_offset,
+        src_offset,
+    )?;
+    #[cfg(not(debug_assertions))]
+    let (output_len, trace_len) = (
+        crate::strided::element_count(output_shape)?,
+        crate::strided::element_count(trace_shape)?,
+    );
+    tensortrace_raw_strided_kernel_add_with_coefficient_loop(
+        dst_data,
+        src_data,
+        output_shape,
+        trace_shape,
+        dst_strides,
+        src_output_strides,
+        src_trace_strides,
+        dst_offset,
+        src_offset,
+        source_conjugate,
+        alpha,
+        coefficient,
+        output_len,
+        trace_len,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn tensortrace_raw_strided_kernel_add_with_coefficient_loop<T, C>(
+    dst_data: &mut [T],
+    src_data: &[T],
+    output_shape: &[usize],
+    trace_shape: &[usize],
+    dst_strides: &[isize],
+    src_output_strides: &[isize],
+    src_trace_strides: &[isize],
+    dst_offset: isize,
+    src_offset: isize,
+    source_conjugate: bool,
+    alpha: T,
+    coefficient: C,
+    output_len: usize,
+    trace_len: usize,
+) -> Result<(), OperationError>
+where
+    T: Copy
+        + Add<T, Output = T>
+        + Mul<T, Output = T>
+        + Zero
+        + ConjugateValue
+        + crate::RecouplingCoefficientAction<C>,
+    C: Copy,
+{
     for output_linear in 0..output_len {
         let dst_index =
             strided_linear_offset(output_linear, output_shape, dst_strides, dst_offset)?;
@@ -605,6 +835,101 @@ where
         }
         let value = (alpha * sum).scale_by_coefficient(coefficient);
         dst_data[dst_index] = dst_data[dst_index] + value;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_tensortrace_raw_layout(
+    dst_len: usize,
+    src_len: usize,
+    output_shape: &[usize],
+    trace_shape: &[usize],
+    dst_strides: &[isize],
+    src_output_strides: &[isize],
+    src_trace_strides: &[isize],
+    dst_offset: isize,
+    src_offset: isize,
+) -> Result<(usize, usize), OperationError> {
+    validate_rank(output_shape, dst_strides)?;
+    validate_rank(output_shape, src_output_strides)?;
+    validate_rank(trace_shape, src_trace_strides)?;
+
+    let output_len = crate::strided::element_count(output_shape)?;
+    let trace_len = crate::strided::element_count(trace_shape)?;
+    if output_len == 0 {
+        return Ok((output_len, trace_len));
+    }
+
+    let (dst_min, dst_max) = checked_strided_extrema(dst_offset, output_shape, dst_strides)?;
+    validate_reachable_bounds(dst_len, dst_min, dst_max)?;
+
+    let (src_min, src_max) = checked_strided_extrema(src_offset, output_shape, src_output_strides)?;
+    if src_min < 0 {
+        return Err(OperationError::OffsetOverflow { value: usize::MAX });
+    }
+    if trace_len != 0 {
+        let (src_min, src_max) =
+            checked_strided_extrema_from(src_min, src_max, trace_shape, src_trace_strides)?;
+        validate_reachable_bounds(src_len, src_min, src_max)?;
+    }
+    Ok((output_len, trace_len))
+}
+
+fn validate_rank(shape: &[usize], strides: &[isize]) -> Result<(), OperationError> {
+    if shape.len() != strides.len() {
+        return Err(OperationError::RankMismatch {
+            expected: shape.len(),
+            actual: strides.len(),
+        });
+    }
+    Ok(())
+}
+
+fn checked_strided_extrema(
+    offset: isize,
+    shape: &[usize],
+    strides: &[isize],
+) -> Result<(isize, isize), OperationError> {
+    checked_strided_extrema_from(offset, offset, shape, strides)
+}
+
+fn checked_strided_extrema_from(
+    mut min_offset: isize,
+    mut max_offset: isize,
+    shape: &[usize],
+    strides: &[isize],
+) -> Result<(isize, isize), OperationError> {
+    for (&dim, &stride) in shape.iter().zip(strides.iter()) {
+        let coordinate =
+            isize::try_from(dim - 1).map_err(|_| OperationError::ElementCountOverflow)?;
+        let end = coordinate
+            .checked_mul(stride)
+            .ok_or(OperationError::ElementCountOverflow)?;
+        if end >= 0 {
+            max_offset = max_offset
+                .checked_add(end)
+                .ok_or(OperationError::ElementCountOverflow)?;
+        } else {
+            min_offset = min_offset
+                .checked_add(end)
+                .ok_or(OperationError::ElementCountOverflow)?;
+        }
+    }
+    Ok((min_offset, max_offset))
+}
+
+fn validate_reachable_bounds(
+    len: usize,
+    min_offset: isize,
+    max_offset: isize,
+) -> Result<(), OperationError> {
+    if min_offset < 0 {
+        return Err(OperationError::OffsetOverflow { value: usize::MAX });
+    }
+    let max_offset = checked_offset_to_index(max_offset)?;
+    if max_offset >= len {
+        return Err(OperationError::OffsetOverflow { value: max_offset });
     }
     Ok(())
 }
@@ -630,44 +955,12 @@ pub(crate) fn validate_raw_strided_bounds(
     strides: &[isize],
     offset: isize,
 ) -> Result<(), OperationError> {
-    if shape.len() != strides.len() {
-        return Err(OperationError::RankMismatch {
-            expected: shape.len(),
-            actual: strides.len(),
-        });
-    }
+    validate_rank(shape, strides)?;
     if shape.contains(&0) {
         return Ok(());
     }
-
-    let mut min_offset = offset;
-    let mut max_offset = offset;
-    for (&dim, &stride) in shape.iter().zip(strides.iter()) {
-        if dim <= 1 {
-            continue;
-        }
-        let dim = isize::try_from(dim - 1).map_err(|_| OperationError::ElementCountOverflow)?;
-        let end = stride
-            .checked_mul(dim)
-            .ok_or(OperationError::ElementCountOverflow)?;
-        if end >= 0 {
-            max_offset = max_offset
-                .checked_add(end)
-                .ok_or(OperationError::ElementCountOverflow)?;
-        } else {
-            min_offset = min_offset
-                .checked_add(end)
-                .ok_or(OperationError::ElementCountOverflow)?;
-        }
-    }
-    if min_offset < 0 {
-        return Err(OperationError::OffsetOverflow { value: usize::MAX });
-    }
-    let max_offset = checked_offset_to_index(max_offset)?;
-    if max_offset >= len {
-        return Err(OperationError::OffsetOverflow { value: max_offset });
-    }
-    Ok(())
+    let (min_offset, max_offset) = checked_strided_extrema(offset, shape, strides)?;
+    validate_reachable_bounds(len, min_offset, max_offset)
 }
 
 fn raw_strided_scale_loop<T>(
@@ -1026,6 +1319,347 @@ mod tests {
         // A negative offset cannot be a usize index -> OffsetOverflow{usize::MAX}.
         let err: OperationError = checked_offset_to_index(-1).unwrap_err().into();
         assert_eq!(err, OperationError::OffsetOverflow { value: usize::MAX });
+    }
+
+    #[test]
+    fn tensortrace_raw_rejects_short_destination_stride_rank() {
+        let mut dst = [0.0; 4];
+        let error = tensortrace_raw_strided_kernel(
+            &mut dst,
+            &[1.0, 2.0, 3.0, 4.0],
+            &[2, 2],
+            &[],
+            &[1],
+            &[1, 2],
+            &[],
+            0,
+            0,
+            false,
+            1.0,
+            0.0,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            OperationError::RankMismatch {
+                expected: 2,
+                actual: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn tensortrace_raw_rejects_combined_source_range_before_writing() {
+        let mut dst = [7.0, 8.0];
+        let original = dst;
+        let error = tensortrace_raw_strided_kernel(
+            &mut dst,
+            &[1.0, 2.0, 3.0, 4.0],
+            &[2],
+            &[2],
+            &[1],
+            &[2],
+            &[2],
+            0,
+            0,
+            false,
+            1.0,
+            0.0,
+        )
+        .unwrap_err();
+
+        assert_eq!(error, OperationError::OffsetOverflow { value: 4 });
+        assert_eq!(dst, original);
+    }
+
+    #[test]
+    fn tensortrace_raw_exports_reject_all_stride_rank_mismatches() {
+        let cases = [
+            (&[][..], &[1isize][..], &[1isize][..], 1, 0),
+            (&[1, 1], &[1], &[1], 1, 2),
+            (&[1], &[], &[1], 1, 0),
+            (&[1], &[1, 1], &[1], 1, 2),
+            (&[1], &[1], &[], 1, 0),
+            (&[1], &[1], &[1, 1], 1, 2),
+        ];
+        for (dst_strides, src_output_strides, src_trace_strides, expected, actual) in cases {
+            let mut dst = [7.0, 8.0];
+            let original = dst;
+            let error = tensortrace_raw_strided_kernel(
+                &mut dst,
+                &[1.0, 2.0, 3.0],
+                &[2],
+                &[2],
+                dst_strides,
+                src_output_strides,
+                src_trace_strides,
+                0,
+                0,
+                false,
+                1.0,
+                0.0,
+            )
+            .unwrap_err();
+            assert_eq!(error, OperationError::RankMismatch { expected, actual });
+            assert_eq!(dst, original);
+
+            let error = tensortrace_raw_strided_kernel_add_with_coefficient(
+                &mut dst,
+                &[1.0, 2.0, 3.0],
+                &[2],
+                &[2],
+                dst_strides,
+                src_output_strides,
+                src_trace_strides,
+                0,
+                0,
+                false,
+                1.0,
+                1.0,
+            )
+            .unwrap_err();
+            assert_eq!(error, OperationError::RankMismatch { expected, actual });
+            assert_eq!(dst, original);
+        }
+    }
+
+    #[test]
+    fn coefficient_tensortrace_raw_rejects_bounds_before_writing() {
+        for (dst_len, src_len, src_output_stride, src_trace_stride, expected) in
+            [(1, 4, 1, 1, 1), (2, 2, 1, 1, 2), (2, 4, 2, 2, 4)]
+        {
+            let mut dst = vec![7.0; dst_len];
+            let original = dst.clone();
+            let error = tensortrace_raw_strided_kernel_add_with_coefficient(
+                &mut dst,
+                &vec![1.0; src_len],
+                &[2],
+                &[2],
+                &[1],
+                &[src_output_stride],
+                &[src_trace_stride],
+                0,
+                0,
+                false,
+                1.0,
+                1.0,
+            )
+            .unwrap_err();
+            assert_eq!(error, OperationError::OffsetOverflow { value: expected });
+            assert_eq!(dst, original);
+        }
+    }
+
+    #[test]
+    fn tensortrace_raw_accepts_reversed_and_broadcast_strides() {
+        let mut dst = [10.0, 20.0, 30.0];
+        tensortrace_raw_strided_kernel(
+            &mut dst,
+            &[1.0, 3.0],
+            &[2],
+            &[2],
+            &[-1],
+            &[0],
+            &[-1],
+            1,
+            1,
+            false,
+            2.0,
+            3.0,
+        )
+        .unwrap();
+
+        assert_eq!(dst, [38.0, 68.0, 30.0]);
+    }
+
+    #[test]
+    fn tensortrace_raw_preserves_scalar_and_zero_extent_semantics() {
+        let mut scalar = [2.0];
+        tensortrace_raw_strided_kernel(
+            &mut scalar,
+            &[3.0],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            0,
+            0,
+            false,
+            2.0,
+            5.0,
+        )
+        .unwrap();
+        assert_eq!(scalar, [16.0]);
+
+        tensortrace_raw_strided_kernel(
+            &mut [],
+            &[],
+            &[0],
+            &[usize::MAX],
+            &[isize::MAX],
+            &[isize::MIN],
+            &[0],
+            isize::MIN,
+            isize::MAX,
+            false,
+            2.0,
+            3.0,
+        )
+        .unwrap();
+
+        let mut empty_trace = [1.0, 2.0];
+        tensortrace_raw_strided_kernel(
+            &mut empty_trace,
+            &[],
+            &[2],
+            &[0],
+            &[1],
+            &[1],
+            &[isize::MAX],
+            0,
+            100,
+            false,
+            2.0,
+            3.0,
+        )
+        .unwrap();
+        assert_eq!(empty_trace, [3.0, 6.0]);
+    }
+
+    #[test]
+    fn tensortrace_raw_rejects_coordinate_and_intermediate_overflow() {
+        for (output_shape, dst_strides, src_output_strides, src_offset) in [
+            (&[usize::MAX][..], &[0][..], &[0][..], 0),
+            (&[2, 2][..], &[0, 0][..], &[isize::MAX, -isize::MAX][..], 1),
+        ] {
+            let mut dst = [9.0];
+            let original = dst;
+            let error = tensortrace_raw_strided_kernel(
+                &mut dst,
+                &[1.0],
+                output_shape,
+                &[],
+                dst_strides,
+                src_output_strides,
+                &[],
+                0,
+                src_offset,
+                false,
+                1.0,
+                0.0,
+            )
+            .unwrap_err();
+            assert_eq!(error, OperationError::ElementCountOverflow);
+            assert_eq!(dst, original);
+        }
+    }
+
+    #[test]
+    fn tensortrace_raw_rejects_output_and_trace_element_count_overflow() {
+        for (output_shape, trace_shape, dst_strides, src_output_strides, src_trace_strides) in [
+            (
+                &[usize::MAX, 2][..],
+                &[][..],
+                &[0, 0][..],
+                &[0, 0][..],
+                &[][..],
+            ),
+            (&[][..], &[usize::MAX, 2][..], &[][..], &[][..], &[0, 0][..]),
+        ] {
+            let mut dst = [9.0];
+            let original = dst;
+            let error = tensortrace_raw_strided_kernel(
+                &mut dst,
+                &[1.0],
+                output_shape,
+                trace_shape,
+                dst_strides,
+                src_output_strides,
+                src_trace_strides,
+                0,
+                0,
+                false,
+                1.0,
+                0.0,
+            )
+            .unwrap_err();
+            assert_eq!(error, OperationError::ElementCountOverflow);
+            assert_eq!(dst, original);
+        }
+    }
+
+    #[test]
+    fn tensortrace_raw_rejects_negative_reachable_offsets_before_writing() {
+        for (trace_shape, dst_offset, src_output_stride, src_offset) in
+            [(&[1][..], -1, 1, 0), (&[0][..], 0, -2, 1)]
+        {
+            let mut dst = [7.0, 8.0];
+            let original = dst;
+            let error = tensortrace_raw_strided_kernel(
+                &mut dst,
+                &[1.0, 2.0],
+                &[2],
+                trace_shape,
+                &[1],
+                &[src_output_stride],
+                &[1],
+                dst_offset,
+                src_offset,
+                false,
+                1.0,
+                0.0,
+            )
+            .unwrap_err();
+            assert_eq!(error, OperationError::OffsetOverflow { value: usize::MAX });
+            assert_eq!(dst, original);
+        }
+    }
+
+    #[test]
+    fn coefficient_tensortrace_raw_empty_trace_keeps_unread_base_and_scalar_action() {
+        let mut dst = [1.0, 2.0];
+        tensortrace_raw_strided_kernel_add_with_coefficient(
+            &mut dst,
+            &[],
+            &[2],
+            &[0],
+            &[1],
+            &[1],
+            &[isize::MAX],
+            0,
+            100,
+            false,
+            f64::INFINITY,
+            1.0,
+        )
+        .unwrap();
+
+        assert!(dst[0].is_nan());
+        assert!(dst[1].is_nan());
+    }
+
+    #[test]
+    fn coefficient_tensortrace_raw_applies_conjugation_and_complex_coefficient() {
+        let mut dst = [Complex64::new(1.0, 1.0)];
+        tensortrace_raw_strided_kernel_add_with_coefficient(
+            &mut dst,
+            &[Complex64::new(1.0, 2.0), Complex64::new(3.0, -4.0)],
+            &[],
+            &[2],
+            &[],
+            &[],
+            &[1],
+            0,
+            0,
+            true,
+            Complex64::new(2.0, -1.0),
+            Complex64::new(0.0, 1.0),
+        )
+        .unwrap();
+
+        assert_eq!(dst, [Complex64::new(1.0, 11.0)]);
     }
 
     #[test]
