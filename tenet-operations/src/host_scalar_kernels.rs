@@ -1029,6 +1029,34 @@ mod tests {
     }
 
     #[test]
+    fn tensortrace_raw_rejects_short_destination_stride_rank() {
+        let mut dst = [0.0; 4];
+        let error = tensortrace_raw_strided_kernel(
+            &mut dst,
+            &[1.0, 2.0, 3.0, 4.0],
+            &[2, 2],
+            &[],
+            &[1],
+            &[1, 2],
+            &[],
+            0,
+            0,
+            false,
+            1.0,
+            0.0,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            OperationError::RankMismatch {
+                expected: 2,
+                actual: 1,
+            }
+        );
+    }
+
+    #[test]
     fn bilinear_kernel_handles_independent_conjugation_and_padding() {
         let lhs = [
             Complex64::new(99.0, 0.0),
