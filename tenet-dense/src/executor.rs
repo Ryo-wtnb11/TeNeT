@@ -140,11 +140,11 @@ pub trait DenseExecutor {
     }
 
     /// General (non-Hermitian) eigendecomposition `(values, vectors)`; both
-    /// outputs are complex regardless of the input scalar.
+    /// outputs are complex regardless of the input scalar. The default reports
+    /// [`DenseError::Unsupported`] without inspecting the input.
     fn eig(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
         let _ = input;
-        Err(DenseError::Backend {
-            backend: DenseBackend::Tenferro,
+        Err(DenseError::Unsupported {
             op: "eig",
             message: "executor does not implement the general eigendecomposition".to_string(),
         })
@@ -216,7 +216,9 @@ pub trait DenseExecutor {
 
     /// Accumulate-form matmul: `output = alpha * lhs * rhs + beta * output`
     /// (BLAS gemm semantics). The default supports only the overwrite case
-    /// `alpha = 1, beta = 0`; accumulate-capable backends override it.
+    /// `alpha = 1, beta = 0`, which it delegates to [`Self::matmul_into`]; any
+    /// other `alpha`/`beta` reports [`DenseError::Unsupported`].
+    /// Accumulate-capable backends override it.
     fn matmul_axpby_into(
         &mut self,
         output: DenseWrite<'_>,
@@ -228,8 +230,7 @@ pub trait DenseExecutor {
         if alpha.is_one() && beta.is_zero() {
             return self.matmul_into(output, lhs, rhs);
         }
-        Err(DenseError::Backend {
-            backend: DenseBackend::Tenferro,
+        Err(DenseError::Unsupported {
             op: "matmul_axpby_into",
             message: "executor does not implement the accumulate-form matmul".to_string(),
         })

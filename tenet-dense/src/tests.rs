@@ -1908,6 +1908,86 @@ fn owned_full_svd_default_is_explicitly_unsupported() {
     ));
 }
 
+/// Implements only the required trait methods, so the accumulate-form matmul
+/// falls through to the [`DenseExecutor`] default.
+#[derive(Default)]
+struct NoAxpby {
+    dot_calls: usize,
+}
+
+impl DenseExecutor for NoAxpby {
+    fn svd(&mut self, _input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        unreachable!("the accumulate-form matmul default never factorizes")
+    }
+
+    fn qr(&mut self, _input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        unreachable!("the accumulate-form matmul default never factorizes")
+    }
+
+    fn eigh(&mut self, _input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        unreachable!("the accumulate-form matmul default never factorizes")
+    }
+
+    fn dot_general_into(
+        &mut self,
+        _output: DenseWrite<'_>,
+        _lhs: DenseRead<'_>,
+        _rhs: DenseRead<'_>,
+        _config: &DenseDotConfig,
+    ) -> Result<(), DenseError> {
+        self.dot_calls += 1;
+        Ok(())
+    }
+}
+
+#[test]
+fn accumulate_form_matmul_default_overwrites_then_reports_unsupported() {
+    let mut executor = NoAxpby::default();
+    let lhs = [1.0_f64];
+    let rhs = [1.0_f64];
+    let mut output = [0.0_f64];
+    let shape = [1, 1];
+    let strides = [1, 1];
+
+    executor
+        .matmul_axpby_into(
+            DenseWrite::F64(DenseViewMut::new(&mut output, &shape, &strides, 0).unwrap()),
+            DenseRead::F64(DenseView::new(&lhs, &shape, &strides, 0).unwrap()),
+            DenseRead::F64(DenseView::new(&rhs, &shape, &strides, 0).unwrap()),
+            DenseScalar::F64(1.0),
+            DenseScalar::F64(0.0),
+        )
+        .unwrap();
+    assert_eq!(
+        executor.dot_calls, 1,
+        "alpha = 1, beta = 0 must delegate to matmul_into"
+    );
+
+    let error = executor
+        .matmul_axpby_into(
+            DenseWrite::F64(DenseViewMut::new(&mut output, &shape, &strides, 0).unwrap()),
+            DenseRead::F64(DenseView::new(&lhs, &shape, &strides, 0).unwrap()),
+            DenseRead::F64(DenseView::new(&rhs, &shape, &strides, 0).unwrap()),
+            DenseScalar::F64(1.0),
+            DenseScalar::F64(1.0),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            DenseError::Unsupported {
+                op: "matmul_axpby_into",
+                ..
+            }
+        ),
+        "a missing accumulate-form capability must be Unsupported, got {error:?}"
+    );
+    assert_eq!(
+        executor.dot_calls, 1,
+        "the unsupported arm must not drive a kernel"
+    );
+}
+
 #[cfg(all(feature = "cpu-faer", not(feature = "provider-inject")))]
 #[test]
 fn default_executor_advertises_faer_owned_full_svd() {
