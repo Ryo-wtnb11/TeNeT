@@ -2068,6 +2068,51 @@ mod runtime_store_tests {
         assert_eq!(store.info().hits(), 1);
         assert_eq!(store.info().misses(), 0);
     }
+
+    #[test]
+    fn checked_generic_cache_charges_distinct_logical_content_once() {
+        let structure = |tag| {
+            BlockStructure::from_blocks_with_rank(
+                1,
+                vec![BlockSpec::with_key(BlockKey::ordinal(tag), vec![1], vec![1], 0).unwrap()],
+            )
+            .unwrap()
+        };
+        let physical = structure(51);
+        let logical = structure(52);
+        let operation = TreeTransformOperation::permute([0], []);
+        let replay = Arc::new(
+            TreeTransformStructure::compile_structures(
+                &physical,
+                &physical,
+                &[TreeTransformBlockSpec::single(0, 0, 1.0)],
+            )
+            .unwrap(),
+        );
+        let admit = |logical_source| {
+            let store = RuntimeTreeTransformStore::default();
+            store
+                .admit_checked_generic(
+                    RuleIdentity::of_type::<TestRuleIdentity>(),
+                    &operation,
+                    &physical,
+                    &physical,
+                    logical_source,
+                    logical_source.is_some(),
+                    Arc::clone(&replay),
+                    0,
+                )
+                .unwrap();
+            store.info().charged_payload_bytes()
+        };
+        let direct_bytes = admit(None);
+        let adjoint_bytes = admit(Some(&logical));
+        let logical_bytes = crate::cache::BlockStructureCacheKey::from_structure(&logical)
+            .unwrap()
+            .charged_retained_bytes();
+
+        assert_eq!(adjoint_bytes - direct_bytes, logical_bytes);
+    }
 }
 
 impl<T, RuleKey> TreeTransformCache<T, RuleKey>
