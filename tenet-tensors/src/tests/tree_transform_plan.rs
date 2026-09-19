@@ -9368,6 +9368,42 @@ fn checked_generic_adjoint_storage_handles_empty_layouts() {
 }
 
 #[test]
+#[allow(clippy::arc_with_non_send_sync)]
+fn checked_generic_adjoint_storage_rejects_distinct_provider_allocation() {
+    let rule = DenseGenericRule;
+    let logical_provider = Arc::new(CheckedPlanSpy::new(&rule));
+    let canonical = crate::BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+        Arc::clone(&logical_provider),
+        dense_generic_dynamic_space().homspace().clone(),
+    )
+    .unwrap();
+    let parent = crate::adjoint_bound_space_dyn_generic_checked(&canonical).unwrap();
+    let logical = crate::adjoint_bound_space_dyn_generic_checked(&parent).unwrap();
+    let storage_provider = Arc::new(CheckedPlanSpy::new(&rule));
+    let distinct_parent = crate::BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+        storage_provider,
+        parent.space().homspace().clone(),
+    )
+    .unwrap();
+    let data = vec![1.0; distinct_parent.space().required_len().unwrap()];
+
+    let error = crate::tree_transform_dyn_owned_checked_generic_input_in_context(
+        &mut crate::TreeTransformExecutionContext::<f64, RuleIdentity, f64>::default(),
+        TreeTransformOperation::braid([1, 0], [2], [0, 1], [2]),
+        crate::CheckedTreeTransformInput::adjoint(&logical, &distinct_parent, &data),
+        1.0,
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        CheckedGenericPlanError::Operation(OperationError::StructureMismatch {
+            tensor: "checked adjoint provider"
+        })
+    ));
+}
+
+#[test]
 #[allow(clippy::arc_with_non_send_sync)] // The API requires Arc; this single-threaded spy uses Cells for deterministic failures.
 fn checked_generic_owned_failure_does_not_publish_destination_state() {
     use tenet_core::{
