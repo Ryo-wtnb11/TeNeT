@@ -9167,6 +9167,89 @@ fn checked_generic_adjoint_storage_keeps_distinct_logical_layout_cache_identity(
 }
 
 #[test]
+fn checked_generic_adjoint_storage_reads_reordered_padded_parent() {
+    let provider = Arc::new(SynchronizedCheckedGeneric::new());
+    let canonical = crate::BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+        Arc::clone(&provider),
+        dense_generic_dynamic_space().homspace().clone(),
+    )
+    .unwrap();
+    let canonical_parent = crate::adjoint_bound_space_dyn_generic_checked(&canonical).unwrap();
+    let parent_structure = canonical_parent.space().structure();
+    let padded_structure = BlockStructure::from_blocks_with_rank(
+        3,
+        [1, 0]
+            .into_iter()
+            .enumerate()
+            .map(|(position, index)| {
+                let block = parent_structure.block(index).unwrap();
+                BlockSpec::with_key(
+                    block.key().clone(),
+                    block.shape().to_vec(),
+                    vec![1, 7, 19],
+                    3 + position * 60,
+                )
+                .unwrap()
+            })
+            .collect(),
+    )
+    .unwrap();
+    let padded_typed = FusionTensorMapSpace::<1, 2>::new_unbound(
+        TensorMapSpace::from_dims([5], [2, 3]).unwrap(),
+        canonical_parent.space().homspace().clone(),
+        padded_structure,
+    )
+    .unwrap()
+    .try_bind_rule(provider.as_ref())
+    .unwrap();
+    let custom_bound = crate::BoundDynamicFusionMapSpace::bind_generic(
+        crate::DynamicFusionMapSpace::from_typed(&padded_typed),
+        Arc::clone(&provider),
+    )
+    .unwrap();
+    let parent = canonical_parent
+        .rebind_validated(&custom_bound.validated_layout())
+        .unwrap();
+    let logical = crate::adjoint_bound_space_dyn_generic_checked(&parent).unwrap();
+
+    let canonical_data = (0..60)
+        .map(|index| Complex64::new(index as f64 + 1.0, 0.25 - index as f64))
+        .collect::<Vec<_>>();
+    let mut padded_data = vec![Complex64::new(-99.0, 77.0); parent.space().required_len().unwrap()];
+    for source_vertex in 0..2 {
+        let padded_block = parent.space().structure().block(1 - source_vertex).unwrap();
+        for source_axis_0 in 0..2 {
+            for source_axis_1 in 0..3 {
+                for source_axis_2 in 0..5 {
+                    let canonical_position =
+                        source_vertex * 30 + source_axis_2 + 5 * source_axis_0 + 10 * source_axis_1;
+                    let padded_position = padded_block.offset()
+                        + source_axis_2
+                        + 7 * source_axis_0
+                        + 19 * source_axis_1;
+                    padded_data[padded_position] = canonical_data[canonical_position];
+                }
+            }
+        }
+    }
+    let alpha = Complex64::new(0.5, -1.25);
+    let mut context =
+        crate::TreeTransformExecutionContext::<Complex64, RuleIdentity, f64>::default();
+    let actual = crate::tree_transform_dyn_owned_checked_generic_input_in_context(
+        &mut context,
+        TreeTransformOperation::braid([1, 0], [2], [0, 1], [2]),
+        crate::CheckedTreeTransformInput::adjoint(&logical, &parent, &padded_data),
+        alpha,
+    )
+    .unwrap();
+
+    assert_eq!(
+        actual.1,
+        literal_dense_generic_adjoint_braid(&canonical_data, alpha)
+    );
+}
+
+#[test]
 #[allow(clippy::arc_with_non_send_sync)] // The API requires Arc; this single-threaded spy uses Cells for deterministic failures.
 fn checked_generic_owned_failure_does_not_publish_destination_state() {
     use tenet_core::{
