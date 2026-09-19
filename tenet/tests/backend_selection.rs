@@ -10,7 +10,9 @@ use tenet::dense::{
     DefaultDenseExecutor, DenseDotConfig, DenseError, DenseExecutor, DenseGemmBatchJob, DenseRead,
     DenseScalar, DenseTensor, DenseWrite, MatrixOp,
 };
+use tenet::operations::OperationError;
 use tenet::prelude::{GradedSpace, Runtime, TensorMap, U1FusionRule, U1Irrep};
+use tenet::typed::Error;
 
 fn u1_space(entries: [(i32, usize); 3]) -> GradedSpace<U1FusionRule> {
     GradedSpace::try_new_with_arc(
@@ -236,4 +238,33 @@ fn compact_diagonal_exp_drives_no_dense_kernel() {
             );
         }
     }
+}
+
+#[test]
+fn injected_executor_without_eig_reports_unsupported() {
+    // `SpyExecutor` implements the required methods but leaves `eig` at the
+    // trait default, which is exactly the missing-capability case: the error
+    // must name the injected executor's gap, not a Tenferro backend failure.
+    let rt = Runtime::builder()
+        .with_dense_executor(Box::new(SpyExecutor {
+            inner: DefaultDenseExecutor::default(),
+            counts: Arc::new(SpyCounts::default()),
+        }))
+        .build()
+        .unwrap();
+
+    let v = u1_space([(-1, 1), (0, 2), (1, 1)]);
+    let t = TensorMap::<U1FusionRule, f64>::rand_with_seed(&rt, [&v], [&v], 1266).unwrap();
+
+    let error = t.eig_full().unwrap_err();
+    let Error::Operation(operation) = error else {
+        panic!("a missing executor capability must surface as an operation error, got {error:?}")
+    };
+    assert!(
+        matches!(
+            *operation,
+            OperationError::Dense(DenseError::Unsupported { op: "eig", .. })
+        ),
+        "a missing executor capability must be Unsupported, got {operation:?}"
+    );
 }
