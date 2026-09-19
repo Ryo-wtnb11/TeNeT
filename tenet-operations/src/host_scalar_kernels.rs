@@ -521,6 +521,8 @@ where
     raw_strided_scale_loop(dst_data, shape, dst_strides, dst_offset, beta)
 }
 
+/// Traces a raw strided source after validating all ranks and reachable ranges.
+/// Invalid layout metadata is returned before destination storage is changed.
 #[allow(clippy::too_many_arguments)]
 pub fn tensortrace_raw_strided_kernel<T>(
     dst_data: &mut [T],
@@ -671,6 +673,9 @@ where
     Ok(())
 }
 
+/// Adds a coefficient-weighted raw trace after validating all ranks and
+/// reachable ranges. Invalid layout metadata is returned before destination
+/// storage is changed.
 #[allow(clippy::too_many_arguments)]
 pub fn tensortrace_raw_strided_kernel_add_with_coefficient<T, C>(
     dst_data: &mut [T],
@@ -1549,6 +1554,90 @@ mod tests {
             assert_eq!(error, OperationError::ElementCountOverflow);
             assert_eq!(dst, original);
         }
+    }
+
+    #[test]
+    fn tensortrace_raw_rejects_output_and_trace_element_count_overflow() {
+        for (output_shape, trace_shape, dst_strides, src_output_strides, src_trace_strides) in [
+            (
+                &[usize::MAX, 2][..],
+                &[][..],
+                &[0, 0][..],
+                &[0, 0][..],
+                &[][..],
+            ),
+            (&[][..], &[usize::MAX, 2][..], &[][..], &[][..], &[0, 0][..]),
+        ] {
+            let mut dst = [9.0];
+            let original = dst;
+            let error = tensortrace_raw_strided_kernel(
+                &mut dst,
+                &[1.0],
+                output_shape,
+                trace_shape,
+                dst_strides,
+                src_output_strides,
+                src_trace_strides,
+                0,
+                0,
+                false,
+                1.0,
+                0.0,
+            )
+            .unwrap_err();
+            assert_eq!(error, OperationError::ElementCountOverflow);
+            assert_eq!(dst, original);
+        }
+    }
+
+    #[test]
+    fn tensortrace_raw_rejects_negative_reachable_offsets_before_writing() {
+        for (trace_shape, dst_offset, src_output_stride, src_offset) in
+            [(&[1][..], -1, 1, 0), (&[0][..], 0, -2, 1)]
+        {
+            let mut dst = [7.0, 8.0];
+            let original = dst;
+            let error = tensortrace_raw_strided_kernel(
+                &mut dst,
+                &[1.0, 2.0],
+                &[2],
+                trace_shape,
+                &[1],
+                &[src_output_stride],
+                &[1],
+                dst_offset,
+                src_offset,
+                false,
+                1.0,
+                0.0,
+            )
+            .unwrap_err();
+            assert_eq!(error, OperationError::OffsetOverflow { value: usize::MAX });
+            assert_eq!(dst, original);
+        }
+    }
+
+    #[test]
+    fn coefficient_tensortrace_raw_empty_trace_keeps_unread_base_and_scalar_action() {
+        let mut dst = [1.0, 2.0];
+        tensortrace_raw_strided_kernel_add_with_coefficient(
+            &mut dst,
+            &[],
+            &[2],
+            &[0],
+            &[1],
+            &[1],
+            &[isize::MAX],
+            0,
+            100,
+            false,
+            f64::INFINITY,
+            1.0,
+        )
+        .unwrap();
+
+        assert!(dst[0].is_nan());
+        assert!(dst[1].is_nan());
     }
 
     #[test]
