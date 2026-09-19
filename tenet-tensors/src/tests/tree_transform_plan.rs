@@ -9333,6 +9333,41 @@ fn checked_generic_direct_transform_does_not_prepare_fusion_operand_projection()
 }
 
 #[test]
+#[allow(clippy::arc_with_non_send_sync)]
+fn checked_generic_adjoint_storage_handles_empty_layouts() {
+    let rule = DenseGenericRule;
+    let provider = Arc::new(CheckedPlanSpy::new(&rule));
+    let empty_leg = || SectorLeg::new(std::iter::empty::<(SectorId, usize)>(), false);
+    let canonical = crate::BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+        Arc::clone(&provider),
+        FusionTreeHomSpace::new(
+            FusionProductSpace::new([empty_leg(), empty_leg()]),
+            FusionProductSpace::new([empty_leg()]),
+        ),
+    )
+    .unwrap();
+    let parent = crate::adjoint_bound_space_dyn_generic_checked(&canonical).unwrap();
+    let logical = crate::adjoint_bound_space_dyn_generic_checked(&parent).unwrap();
+    assert_eq!(parent.space().required_len().unwrap(), 0);
+    let mut context =
+        crate::TreeTransformExecutionContext::<Complex64, RuleIdentity, f64>::default();
+
+    for operation in [
+        TreeTransformOperation::braid([1, 0], [2], [0, 1], [2]),
+        TreeTransformOperation::transpose([2], [1, 0]),
+    ] {
+        let output = crate::tree_transform_dyn_owned_checked_generic_input_in_context(
+            &mut context,
+            operation,
+            crate::CheckedTreeTransformInput::adjoint(&logical, &parent, &[]),
+            Complex64::new(0.5, -1.25),
+        )
+        .unwrap();
+        assert!(output.1.is_empty());
+    }
+}
+
+#[test]
 #[allow(clippy::arc_with_non_send_sync)] // The API requires Arc; this single-threaded spy uses Cells for deterministic failures.
 fn checked_generic_owned_failure_does_not_publish_destination_state() {
     use tenet_core::{
