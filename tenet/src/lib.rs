@@ -20,14 +20,15 @@
 //! [`prelude::LinalgBackend`]), and the
 //! contraction-plan cache the `tensor!` frontend keys by network topology.
 //!
-//! **Parallelism.** Ops on a shared `Runtime` scale with outer threads: each
-//! standalone op leases a per-rule context (and, for factorizations, a dense
-//! executor) from a pool for its own duration and runs lock-free, and the
-//! `tensor!` cached-plan path holds only its own plan-cache mutex. A `Runtime`
-//! is therefore cheap to `clone` across threads; the one path that still
-//! serializes is a custom executor injected via
-//! [`prelude::RuntimeBuilder::with_dense_executor`]. See `docs/backend_policy.md`
-//! for the pool design and measured scaling.
+//! **Parallelism.** A `Runtime` is cheap to clone across threads. Standalone
+//! operations normally lease independent per-rule contexts and, for
+//! factorizations, dense executors instead of holding the Runtime's coarse state
+//! mutex for the full operation. The `tensor!` path uses plan-local workspace
+//! pools. Pool checkout and return, plan-cache and structural-store access, and
+//! dense providers may still synchronize; an injected non-mintable executor
+//! serializes factorization through the Runtime state lock. Consequently no
+//! general lock-free or outer-thread scaling guarantee is made. See
+//! `docs/backend_policy.md` for the ownership and synchronization model.
 //!
 #![doc = include_str!("tutorial.md")]
 
