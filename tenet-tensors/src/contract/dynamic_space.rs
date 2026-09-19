@@ -994,6 +994,21 @@ impl<'a> FusionOperand<'a> {
             }
         })
     }
+
+    pub(crate) fn storage_block_index(
+        self,
+        logical_key: &FusionTreePairKey,
+    ) -> Result<usize, OperationError> {
+        let structure = self.storage_space().structure();
+        let index = if self.storage_conjugate() {
+            structure.find_block_index_by_adjoint_fusion_tree_pair(logical_key)
+        } else {
+            structure.find_block_index_by_fusion_tree_pair(logical_key)
+        };
+        index.ok_or_else(|| OperationError::MissingBlockKey {
+            key: Box::new(BlockKey::from(logical_key.clone())),
+        })
+    }
 }
 
 fn validate_bound_space_invariants(space: &DynamicFusionMapSpace) -> Result<(), OperationError> {

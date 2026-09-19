@@ -8053,6 +8053,30 @@ impl SynchronizedCheckedGeneric {
     }
 }
 
+impl FusionRule for SynchronizedCheckedGeneric {
+    fn rule_identity(&self) -> RuleIdentity {
+        self.rule.rule_identity()
+    }
+    fn fusion_style(&self) -> FusionStyleKind {
+        self.rule.fusion_style()
+    }
+    fn braiding_style(&self) -> BraidingStyleKind {
+        self.rule.braiding_style()
+    }
+    fn vacuum(&self) -> SectorId {
+        self.rule.vacuum()
+    }
+    fn dual(&self, sector: SectorId) -> SectorId {
+        self.rule.dual(sector)
+    }
+    fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+        self.rule.fusion_channels(left, right)
+    }
+    fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+        self.rule.nsymbol(left, right, coupled)
+    }
+}
+
 impl CheckedGenericFusion for SynchronizedCheckedGeneric {
     type Error = std::convert::Infallible;
 
@@ -8297,6 +8321,38 @@ fn dense_generic_dynamic_space() -> crate::contract::DynamicFusionMapSpace {
     );
     crate::contract::DynamicFusionMapSpace::from_final_homspace_generic(&DenseGenericRule, homspace)
         .unwrap()
+}
+
+fn literal_dense_generic_adjoint_braid(
+    parent_data: &[Complex64],
+    alpha: Complex64,
+) -> Vec<Complex64> {
+    assert_eq!(parent_data.len(), 60);
+    let coefficients = [[2.0, 5.0], [7.0, 11.0]];
+    let mut expected = vec![Complex64::new(0.0, 0.0); 60];
+    for destination_vertex in 0..2 {
+        for source_axis_0 in 0..2 {
+            for source_axis_1 in 0..3 {
+                for source_axis_2 in 0..5 {
+                    let mut value = Complex64::new(0.0, 0.0);
+                    for (source_vertex, source_coefficients) in coefficients.iter().enumerate() {
+                        let parent_position = source_vertex * 30
+                            + source_axis_2
+                            + 5 * source_axis_0
+                            + 10 * source_axis_1;
+                        value += parent_data[parent_position].conj()
+                            * source_coefficients[destination_vertex];
+                    }
+                    let destination_position = destination_vertex * 6
+                        + source_axis_1
+                        + 3 * source_axis_0
+                        + 12 * source_axis_2;
+                    expected[destination_position] = alpha * value;
+                }
+            }
+        }
+    }
+    expected
 }
 
 // The generic plan compile reproduces the core `generic_permute_tree_pair`
@@ -8988,6 +9044,461 @@ fn checked_generic_runtime_reuses_completed_structure_after_checked_admission() 
         CheckedGenericPlanError::Provider(CheckedPlanSpyError(CheckedPlanCall::F))
     ));
     assert_eq!(store.info().entries(), 1);
+}
+
+#[test]
+#[allow(clippy::arc_with_non_send_sync)]
+fn checked_generic_adjoint_storage_matches_literal_dense_braid() {
+    let rule = DenseGenericRule;
+    let provider = Arc::new(CheckedPlanSpy::new(&rule));
+    let canonical = crate::BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+        Arc::clone(&provider),
+        dense_generic_dynamic_space().homspace().clone(),
+    )
+    .unwrap();
+    let parent = crate::adjoint_bound_space_dyn_generic_checked(&canonical).unwrap();
+    let logical = crate::adjoint_bound_space_dyn_generic_checked(&parent).unwrap();
+    let parent_data = (0..parent.space().required_len().unwrap())
+        .map(|index| Complex64::new(index as f64 + 1.0, 0.25 - index as f64))
+        .collect::<Vec<_>>();
+    let operation = TreeTransformOperation::braid([1, 0], [2], [0, 1], [2]);
+    let alpha = Complex64::new(0.5, -1.25);
+    let mut context =
+        crate::TreeTransformExecutionContext::<Complex64, RuleIdentity, f64>::default();
+
+    let actual = crate::tree_transform_dyn_owned_checked_generic_input_in_context(
+        &mut context,
+        operation,
+        crate::CheckedTreeTransformInput::adjoint(&logical, &parent, &parent_data),
+        alpha,
+    )
+    .unwrap();
+
+    assert_eq!(
+        actual.1,
+        literal_dense_generic_adjoint_braid(&parent_data, alpha)
+    );
+    assert_eq!(actual.0.space().structure().block_count(), 2);
+    for (index, offset) in [0, 6].into_iter().enumerate() {
+        let block = actual.0.space().structure().block(index).unwrap();
+        assert_eq!(block.shape(), &[3, 2, 5]);
+        assert_eq!(block.strides(), &[1, 3, 12]);
+        assert_eq!(block.offset(), offset);
+    }
+}
+
+#[test]
+fn checked_generic_adjoint_storage_keeps_distinct_logical_layout_cache_identity() {
+    let provider = Arc::new(SynchronizedCheckedGeneric::new());
+    let canonical = crate::BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+        Arc::clone(&provider),
+        dense_generic_dynamic_space().homspace().clone(),
+    )
+    .unwrap();
+    let parent = crate::adjoint_bound_space_dyn_generic_checked(&canonical).unwrap();
+    let canonical_logical = crate::adjoint_bound_space_dyn_generic_checked(&parent).unwrap();
+    let canonical_structure = canonical_logical.space().structure();
+    let reordered_structure = BlockStructure::from_blocks_with_rank(
+        3,
+        [1, 0]
+            .into_iter()
+            .enumerate()
+            .map(|(position, index)| {
+                let block = canonical_structure.block(index).unwrap();
+                BlockSpec::with_key(
+                    block.key().clone(),
+                    block.shape().to_vec(),
+                    vec![1, 2, 6],
+                    position * 30,
+                )
+                .unwrap()
+            })
+            .collect(),
+    )
+    .unwrap();
+    let reordered_typed = FusionTensorMapSpace::<2, 1>::new_unbound(
+        TensorMapSpace::from_dims([2, 3], [5]).unwrap(),
+        canonical_logical.space().homspace().clone(),
+        reordered_structure,
+    )
+    .unwrap()
+    .try_bind_rule(provider.as_ref())
+    .unwrap();
+    let custom_bound = crate::BoundDynamicFusionMapSpace::bind_generic(
+        crate::DynamicFusionMapSpace::from_typed(&reordered_typed),
+        Arc::clone(&provider),
+    )
+    .unwrap();
+    let reordered_logical = canonical_logical
+        .rebind_validated(&custom_bound.validated_layout())
+        .unwrap();
+    assert_ne!(
+        canonical_structure.content_id(),
+        reordered_logical.space().structure().content_id()
+    );
+
+    let parent_data = (0..parent.space().required_len().unwrap())
+        .map(|index| Complex64::new(index as f64 + 1.0, 0.25 - index as f64))
+        .collect::<Vec<_>>();
+    let operation = TreeTransformOperation::braid([1, 0], [2], [0, 1], [2]);
+    let alpha = Complex64::new(0.5, -1.25);
+    let expected = literal_dense_generic_adjoint_braid(&parent_data, alpha);
+    let store = Arc::new(RuntimeTreeTransformStore::<f64>::default());
+    let mut context =
+        crate::TreeTransformExecutionContext::<Complex64, RuleIdentity, f64>::default();
+    context
+        .cache_mut()
+        .bind_runtime_store(Arc::downgrade(&store));
+    let mut execute = |logical| {
+        crate::tree_transform_dyn_owned_checked_generic_input_in_context(
+            &mut context,
+            operation.clone(),
+            crate::CheckedTreeTransformInput::adjoint(logical, &parent, &parent_data),
+            alpha,
+        )
+        .unwrap()
+    };
+
+    assert_eq!(execute(&canonical_logical).1, expected);
+    assert_eq!(execute(&reordered_logical).1, expected);
+    assert_eq!(execute(&reordered_logical).1, expected);
+    assert_eq!(store.info().misses(), 2);
+    assert_eq!(store.info().hits(), 1);
+}
+
+#[test]
+fn checked_generic_adjoint_storage_reads_reordered_padded_parent() {
+    let provider = Arc::new(SynchronizedCheckedGeneric::new());
+    let canonical = crate::BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+        Arc::clone(&provider),
+        dense_generic_dynamic_space().homspace().clone(),
+    )
+    .unwrap();
+    let canonical_parent = crate::adjoint_bound_space_dyn_generic_checked(&canonical).unwrap();
+    let parent_structure = canonical_parent.space().structure();
+    let padded_structure = BlockStructure::from_blocks_with_rank(
+        3,
+        [1, 0]
+            .into_iter()
+            .enumerate()
+            .map(|(position, index)| {
+                let block = parent_structure.block(index).unwrap();
+                BlockSpec::with_key(
+                    block.key().clone(),
+                    block.shape().to_vec(),
+                    vec![1, 7, 19],
+                    3 + position * 60,
+                )
+                .unwrap()
+            })
+            .collect(),
+    )
+    .unwrap();
+    let padded_typed = FusionTensorMapSpace::<1, 2>::new_unbound(
+        TensorMapSpace::from_dims([5], [2, 3]).unwrap(),
+        canonical_parent.space().homspace().clone(),
+        padded_structure,
+    )
+    .unwrap()
+    .try_bind_rule(provider.as_ref())
+    .unwrap();
+    let custom_bound = crate::BoundDynamicFusionMapSpace::bind_generic(
+        crate::DynamicFusionMapSpace::from_typed(&padded_typed),
+        Arc::clone(&provider),
+    )
+    .unwrap();
+    let parent = canonical_parent
+        .rebind_validated(&custom_bound.validated_layout())
+        .unwrap();
+    let logical = crate::adjoint_bound_space_dyn_generic_checked(&parent).unwrap();
+
+    let canonical_data = (0..60)
+        .map(|index| Complex64::new(index as f64 + 1.0, 0.25 - index as f64))
+        .collect::<Vec<_>>();
+    let mut padded_data = vec![Complex64::new(-99.0, 77.0); parent.space().required_len().unwrap()];
+    for source_vertex in 0..2 {
+        let padded_block = parent.space().structure().block(1 - source_vertex).unwrap();
+        for source_axis_0 in 0..2 {
+            for source_axis_1 in 0..3 {
+                for source_axis_2 in 0..5 {
+                    let canonical_position =
+                        source_vertex * 30 + source_axis_2 + 5 * source_axis_0 + 10 * source_axis_1;
+                    let padded_position = padded_block.offset()
+                        + source_axis_2
+                        + 7 * source_axis_0
+                        + 19 * source_axis_1;
+                    padded_data[padded_position] = canonical_data[canonical_position];
+                }
+            }
+        }
+    }
+    let alpha = Complex64::new(0.5, -1.25);
+    let mut context =
+        crate::TreeTransformExecutionContext::<Complex64, RuleIdentity, f64>::default();
+    let actual = crate::tree_transform_dyn_owned_checked_generic_input_in_context(
+        &mut context,
+        TreeTransformOperation::braid([1, 0], [2], [0, 1], [2]),
+        crate::CheckedTreeTransformInput::adjoint(&logical, &parent, &padded_data),
+        alpha,
+    )
+    .unwrap();
+
+    assert_eq!(
+        actual.1,
+        literal_dense_generic_adjoint_braid(&canonical_data, alpha)
+    );
+}
+
+#[test]
+#[allow(clippy::arc_with_non_send_sync)]
+fn checked_generic_adjoint_failures_do_not_consume_or_publish_cache_entries() {
+    let rule = DenseGenericRule;
+    let provider = Arc::new(CheckedPlanSpy::new(&rule));
+    let canonical = crate::BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+        Arc::clone(&provider),
+        dense_generic_dynamic_space().homspace().clone(),
+    )
+    .unwrap();
+    let parent = crate::adjoint_bound_space_dyn_generic_checked(&canonical).unwrap();
+    let logical = crate::adjoint_bound_space_dyn_generic_checked(&parent).unwrap();
+    let data = vec![1.0; parent.space().required_len().unwrap()];
+    let operation = TreeTransformOperation::braid([1, 0], [2], [0, 1], [2]);
+    let store = Arc::new(RuntimeTreeTransformStore::<f64>::default());
+    let mut context = crate::TreeTransformExecutionContext::<f64, RuleIdentity, f64>::default();
+    context
+        .cache_mut()
+        .bind_runtime_store(Arc::downgrade(&store));
+    crate::tree_transform_dyn_owned_checked_generic_input_in_context(
+        &mut context,
+        operation.clone(),
+        crate::CheckedTreeTransformInput::adjoint(&logical, &parent, &data),
+        1.0,
+    )
+    .unwrap();
+    let warm = store.info();
+    assert_eq!(warm.entries(), 1);
+
+    *provider.identity.borrow_mut() = Some(RuleIdentity::of_type::<ToyGenericRule>());
+    let error = crate::tree_transform_dyn_owned_checked_generic_input_in_context(
+        &mut context,
+        operation.clone(),
+        crate::CheckedTreeTransformInput::adjoint(&logical, &parent, &data),
+        1.0,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        CheckedGenericPlanError::Core(CoreError::FusionRuleMismatch { .. })
+    ));
+    assert_eq!(store.info(), warm);
+
+    *provider.identity.borrow_mut() = None;
+    let error = crate::tree_transform_dyn_owned_checked_generic_input_in_context(
+        &mut context,
+        operation,
+        crate::CheckedTreeTransformInput::adjoint(&logical, &parent, &data[..data.len() - 1]),
+        1.0,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        CheckedGenericPlanError::Operation(OperationError::ElementCountMismatch { .. })
+    ));
+    assert_eq!(store.info(), warm);
+}
+
+#[test]
+#[allow(clippy::arc_with_non_send_sync)]
+fn checked_generic_adjoint_rejects_equal_length_wrong_parent_relation_without_cache_change() {
+    let rule = DenseGenericRule;
+    let provider = Arc::new(CheckedPlanSpy::new(&rule));
+    let canonical = crate::BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+        Arc::clone(&provider),
+        dense_generic_dynamic_space().homspace().clone(),
+    )
+    .unwrap();
+    let parent = crate::adjoint_bound_space_dyn_generic_checked(&canonical).unwrap();
+    let logical = crate::adjoint_bound_space_dyn_generic_checked(&parent).unwrap();
+    let data = vec![1.0; parent.space().required_len().unwrap()];
+    let operation = TreeTransformOperation::braid([1, 0], [2], [0, 1], [2]);
+    let store = Arc::new(RuntimeTreeTransformStore::<f64>::default());
+    let mut context = crate::TreeTransformExecutionContext::<f64, RuleIdentity, f64>::default();
+    context
+        .cache_mut()
+        .bind_runtime_store(Arc::downgrade(&store));
+    crate::tree_transform_dyn_owned_checked_generic_input_in_context(
+        &mut context,
+        operation.clone(),
+        crate::CheckedTreeTransformInput::adjoint(&logical, &parent, &data),
+        1.0,
+    )
+    .unwrap();
+    let warm = store.info();
+    assert_eq!(warm.entries(), 1);
+
+    let sector = SectorId::new(1);
+    let wrong_logical = crate::BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+        Arc::clone(&provider),
+        FusionTreeHomSpace::new(
+            FusionProductSpace::new(
+                [3usize, 2].map(|degeneracy| SectorLeg::new([(sector, degeneracy)], false)),
+            ),
+            FusionProductSpace::new([SectorLeg::new([(sector, 5)], false)]),
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        wrong_logical.space().required_len().unwrap(),
+        logical.space().required_len().unwrap()
+    );
+
+    let error = crate::tree_transform_dyn_owned_checked_generic_input_in_context(
+        &mut context,
+        operation,
+        crate::CheckedTreeTransformInput::adjoint(&wrong_logical, &parent, &data),
+        1.0,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        CheckedGenericPlanError::Operation(OperationError::StructureMismatch {
+            tensor: "checked adjoint relation"
+        })
+    ));
+    assert_eq!(store.info(), warm);
+}
+
+#[test]
+#[allow(clippy::arc_with_non_send_sync)]
+fn checked_generic_direct_transform_does_not_prepare_fusion_operand_projection() {
+    let rule = DenseGenericRule;
+    let provider = Arc::new(CheckedPlanSpy::new(&rule));
+    let source = crate::BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+        provider,
+        dense_generic_dynamic_space().homspace().clone(),
+    )
+    .unwrap();
+    let data = vec![1.0; source.space().required_len().unwrap()];
+    crate::contract::reset_fusion_operand_projection_prepares();
+
+    crate::tree_transform_dyn_owned_checked_generic_in_context(
+        &mut crate::TreeTransformExecutionContext::<f64, RuleIdentity, f64>::default(),
+        TreeTransformOperation::braid([1, 0], [2], [0, 1], [2]),
+        &source,
+        &data,
+        1.0,
+    )
+    .unwrap();
+
+    assert_eq!(crate::contract::fusion_operand_projection_prepares(), 0);
+}
+
+#[test]
+#[allow(clippy::arc_with_non_send_sync)]
+fn checked_generic_adjoint_storage_handles_empty_layouts() {
+    let rule = DenseGenericRule;
+    let provider = Arc::new(CheckedPlanSpy::new(&rule));
+    let empty_leg = || SectorLeg::new(std::iter::empty::<(SectorId, usize)>(), false);
+    let canonical = crate::BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+        Arc::clone(&provider),
+        FusionTreeHomSpace::new(
+            FusionProductSpace::new([empty_leg(), empty_leg()]),
+            FusionProductSpace::new([empty_leg()]),
+        ),
+    )
+    .unwrap();
+    let parent = crate::adjoint_bound_space_dyn_generic_checked(&canonical).unwrap();
+    let logical = crate::adjoint_bound_space_dyn_generic_checked(&parent).unwrap();
+    assert_eq!(parent.space().required_len().unwrap(), 0);
+    let mut context =
+        crate::TreeTransformExecutionContext::<Complex64, RuleIdentity, f64>::default();
+
+    for operation in [
+        TreeTransformOperation::braid([1, 0], [2], [0, 1], [2]),
+        TreeTransformOperation::transpose([2], [1, 0]),
+    ] {
+        let output = crate::tree_transform_dyn_owned_checked_generic_input_in_context(
+            &mut context,
+            operation,
+            crate::CheckedTreeTransformInput::adjoint(&logical, &parent, &[]),
+            Complex64::new(0.5, -1.25),
+        )
+        .unwrap();
+        assert!(output.1.is_empty());
+    }
+}
+
+#[test]
+#[allow(clippy::arc_with_non_send_sync)]
+fn checked_generic_adjoint_storage_rejects_distinct_provider_allocation() {
+    let rule = DenseGenericRule;
+    let logical_provider = Arc::new(CheckedPlanSpy::new(&rule));
+    let canonical = crate::BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+        Arc::clone(&logical_provider),
+        dense_generic_dynamic_space().homspace().clone(),
+    )
+    .unwrap();
+    let parent = crate::adjoint_bound_space_dyn_generic_checked(&canonical).unwrap();
+    let logical = crate::adjoint_bound_space_dyn_generic_checked(&parent).unwrap();
+    let storage_provider = Arc::new(CheckedPlanSpy::new(&rule));
+    let distinct_parent = crate::BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+        storage_provider,
+        parent.space().homspace().clone(),
+    )
+    .unwrap();
+    let data = vec![1.0; distinct_parent.space().required_len().unwrap()];
+
+    let error = crate::tree_transform_dyn_owned_checked_generic_input_in_context(
+        &mut crate::TreeTransformExecutionContext::<f64, RuleIdentity, f64>::default(),
+        TreeTransformOperation::braid([1, 0], [2], [0, 1], [2]),
+        crate::CheckedTreeTransformInput::adjoint(&logical, &distinct_parent, &data),
+        1.0,
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        CheckedGenericPlanError::Operation(OperationError::StructureMismatch {
+            tensor: "checked adjoint provider"
+        })
+    ));
+}
+
+#[test]
+#[allow(clippy::arc_with_non_send_sync)]
+fn checked_generic_adjoint_late_provider_failure_does_not_publish_cache() {
+    let rule = DenseGenericRule;
+    let provider = Arc::new(CheckedPlanSpy::new(&rule));
+    let canonical = crate::BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+        Arc::clone(&provider),
+        dense_generic_dynamic_space().homspace().clone(),
+    )
+    .unwrap();
+    let parent = crate::adjoint_bound_space_dyn_generic_checked(&canonical).unwrap();
+    let logical = crate::adjoint_bound_space_dyn_generic_checked(&parent).unwrap();
+    let data = vec![1.0; parent.space().required_len().unwrap()];
+    let store = Arc::new(RuntimeTreeTransformStore::<f64>::default());
+    let mut context = crate::TreeTransformExecutionContext::<f64, RuleIdentity, f64>::default();
+    context
+        .cache_mut()
+        .bind_runtime_store(Arc::downgrade(&store));
+    provider.calls.set([0; CheckedPlanCall::COUNT]);
+    provider.fail.set(Some((CheckedPlanCall::F, 1)));
+
+    let error = crate::tree_transform_dyn_owned_checked_generic_input_in_context(
+        &mut context,
+        TreeTransformOperation::transpose([0], [2, 1]),
+        crate::CheckedTreeTransformInput::adjoint(&logical, &parent, &data),
+        1.0,
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        CheckedGenericPlanError::Provider(CheckedPlanSpyError(CheckedPlanCall::F))
+    ));
+    assert!(provider.call_count(CheckedPlanCall::F) > 0);
+    assert_eq!(store.info().entries(), 0);
 }
 
 #[test]
