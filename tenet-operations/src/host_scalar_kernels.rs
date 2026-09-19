@@ -1377,6 +1377,235 @@ mod tests {
     }
 
     #[test]
+    fn tensortrace_raw_rejects_combined_source_range_before_writing() {
+        let mut dst = [7.0, 8.0];
+        let original = dst;
+        let error = tensortrace_raw_strided_kernel(
+            &mut dst,
+            &[1.0, 2.0, 3.0, 4.0],
+            &[2],
+            &[2],
+            &[1],
+            &[2],
+            &[2],
+            0,
+            0,
+            false,
+            1.0,
+            0.0,
+        )
+        .unwrap_err();
+
+        assert_eq!(error, OperationError::OffsetOverflow { value: 4 });
+        assert_eq!(dst, original);
+    }
+
+    #[test]
+    fn tensortrace_raw_exports_reject_all_stride_rank_mismatches() {
+        let cases: [(&[isize], &[isize], &[isize], usize, usize); 6] = [
+            (&[], &[1], &[1], 1, 0),
+            (&[1, 1], &[1], &[1], 1, 2),
+            (&[1], &[], &[1], 1, 0),
+            (&[1], &[1, 1], &[1], 1, 2),
+            (&[1], &[1], &[], 1, 0),
+            (&[1], &[1], &[1, 1], 1, 2),
+        ];
+        for (dst_strides, src_output_strides, src_trace_strides, expected, actual) in cases {
+            let mut dst = [7.0, 8.0];
+            let original = dst;
+            let error = tensortrace_raw_strided_kernel(
+                &mut dst,
+                &[1.0, 2.0, 3.0],
+                &[2],
+                &[2],
+                dst_strides,
+                src_output_strides,
+                src_trace_strides,
+                0,
+                0,
+                false,
+                1.0,
+                0.0,
+            )
+            .unwrap_err();
+            assert_eq!(error, OperationError::RankMismatch { expected, actual });
+            assert_eq!(dst, original);
+
+            let error = tensortrace_raw_strided_kernel_add_with_coefficient(
+                &mut dst,
+                &[1.0, 2.0, 3.0],
+                &[2],
+                &[2],
+                dst_strides,
+                src_output_strides,
+                src_trace_strides,
+                0,
+                0,
+                false,
+                1.0,
+                1.0,
+            )
+            .unwrap_err();
+            assert_eq!(error, OperationError::RankMismatch { expected, actual });
+            assert_eq!(dst, original);
+        }
+    }
+
+    #[test]
+    fn coefficient_tensortrace_raw_rejects_bounds_before_writing() {
+        for (dst_len, src_len, src_output_stride, src_trace_stride, expected) in
+            [(1, 4, 1, 1, 1), (2, 2, 1, 1, 2), (2, 4, 2, 2, 4)]
+        {
+            let mut dst = vec![7.0; dst_len];
+            let original = dst.clone();
+            let error = tensortrace_raw_strided_kernel_add_with_coefficient(
+                &mut dst,
+                &vec![1.0; src_len],
+                &[2],
+                &[2],
+                &[1],
+                &[src_output_stride],
+                &[src_trace_stride],
+                0,
+                0,
+                false,
+                1.0,
+                1.0,
+            )
+            .unwrap_err();
+            assert_eq!(error, OperationError::OffsetOverflow { value: expected });
+            assert_eq!(dst, original);
+        }
+    }
+
+    #[test]
+    fn tensortrace_raw_accepts_reversed_and_broadcast_strides() {
+        let mut dst = [10.0, 20.0, 30.0];
+        tensortrace_raw_strided_kernel(
+            &mut dst,
+            &[1.0, 3.0],
+            &[2],
+            &[2],
+            &[-1],
+            &[0],
+            &[-1],
+            1,
+            1,
+            false,
+            2.0,
+            3.0,
+        )
+        .unwrap();
+
+        assert_eq!(dst, [38.0, 68.0, 30.0]);
+    }
+
+    #[test]
+    fn tensortrace_raw_preserves_scalar_and_zero_extent_semantics() {
+        let mut scalar = [2.0];
+        tensortrace_raw_strided_kernel(
+            &mut scalar,
+            &[3.0],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            0,
+            0,
+            false,
+            2.0,
+            5.0,
+        )
+        .unwrap();
+        assert_eq!(scalar, [16.0]);
+
+        tensortrace_raw_strided_kernel(
+            &mut [],
+            &[],
+            &[0],
+            &[usize::MAX],
+            &[isize::MAX],
+            &[isize::MIN],
+            &[0],
+            isize::MIN,
+            isize::MAX,
+            false,
+            2.0,
+            3.0,
+        )
+        .unwrap();
+
+        let mut empty_trace = [1.0, 2.0];
+        tensortrace_raw_strided_kernel(
+            &mut empty_trace,
+            &[],
+            &[2],
+            &[0],
+            &[1],
+            &[1],
+            &[isize::MAX],
+            0,
+            100,
+            false,
+            2.0,
+            3.0,
+        )
+        .unwrap();
+        assert_eq!(empty_trace, [3.0, 6.0]);
+    }
+
+    #[test]
+    fn tensortrace_raw_rejects_coordinate_and_intermediate_overflow() {
+        for (output_shape, dst_strides, src_output_strides, src_offset) in [
+            (&[usize::MAX][..], &[0][..], &[0][..], 0),
+            (&[2, 2][..], &[0, 0][..], &[isize::MAX, -isize::MAX][..], 1),
+        ] {
+            let mut dst = [9.0];
+            let original = dst;
+            let error = tensortrace_raw_strided_kernel(
+                &mut dst,
+                &[1.0],
+                output_shape,
+                &[],
+                dst_strides,
+                src_output_strides,
+                &[],
+                0,
+                src_offset,
+                false,
+                1.0,
+                0.0,
+            )
+            .unwrap_err();
+            assert_eq!(error, OperationError::ElementCountOverflow);
+            assert_eq!(dst, original);
+        }
+    }
+
+    #[test]
+    fn coefficient_tensortrace_raw_applies_conjugation_and_complex_coefficient() {
+        let mut dst = [Complex64::new(1.0, 1.0)];
+        tensortrace_raw_strided_kernel_add_with_coefficient(
+            &mut dst,
+            &[Complex64::new(1.0, 2.0), Complex64::new(3.0, -4.0)],
+            &[],
+            &[2],
+            &[],
+            &[],
+            &[1],
+            0,
+            0,
+            true,
+            Complex64::new(2.0, -1.0),
+            Complex64::new(0.0, 1.0),
+        )
+        .unwrap();
+
+        assert_eq!(dst, [Complex64::new(1.0, 11.0)]);
+    }
+
+    #[test]
     fn bilinear_kernel_handles_independent_conjugation_and_padding() {
         let lhs = [
             Complex64::new(99.0, 0.0),
