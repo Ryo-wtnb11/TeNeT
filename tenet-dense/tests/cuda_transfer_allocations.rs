@@ -21,10 +21,15 @@ use tenet_dense::{cuda_transfer_stats, CudaDenseContext, CudaDenseStorage, CudaS
 /// Measured on an A100 with Tenferro 0.5.0: 2 before this change (TeNeT copied
 /// that vector once more), 1 after, for both f64 and `Complex64`.
 ///
-/// The upload side is asserted as a difference instead of an absolute count:
-/// how many payload-sized buffers CubeCL stages through is its own affair (2
-/// for f64, 3 for `Complex64` on the same host), while the copy TeNeT adds for
-/// a borrowed slice is exactly one, on every dtype and every backend version.
+/// Payload-sized host allocations an owned upload makes, measured on the same
+/// host: CubeCL's own staging, which TeNeT does not control but must not add
+/// to. `Complex64` needs one more than f64 because CubeCL stages complex data
+/// through an extra buffer. Pinning them absolutely is what catches a copy
+/// reintroduced inside `upload_owned`; the borrowed entry point is then
+/// asserted at exactly one more, which is the copy Tenferro's owned-host-tensor
+/// contract requires.
+const OWNED_UPLOAD_PAYLOAD_ALLOCATIONS_F64: usize = 2;
+const OWNED_UPLOAD_PAYLOAD_ALLOCATIONS_C64: usize = 3;
 const DOWNLOAD_PAYLOAD_ALLOCATIONS: usize = 1;
 
 struct PayloadProbe;
@@ -83,7 +88,7 @@ fn measure<T>(payload_bytes: usize, f: impl FnOnce() -> T) -> (T, usize) {
 /// allocation happens to share the payload size.
 const ELEMENTS: usize = 4099;
 
-fn assert_transfer_copies<D>(ctx: &CudaDenseContext, data: Vec<D>)
+fn assert_transfer_copies<D>(ctx: &CudaDenseContext, data: Vec<D>, owned_upload_allocations: usize)
 where
     D: CudaScalar + PartialEq + std::fmt::Debug,
 {
@@ -103,8 +108,13 @@ where
     let owned_upload = stats_delta(owned_before, cuda_transfer_stats());
 
     assert_eq!(
+        owned_hits, owned_upload_allocations,
+        "an owned upload of {payload_bytes} bytes must stage exactly what CubeCL \
+         stages and copy the payload no further"
+    );
+    assert_eq!(
         borrowed_hits,
-        owned_hits + 1,
+        owned_upload_allocations + 1,
         "a borrowed upload of {payload_bytes} bytes costs exactly one host copy \
          more than an owned one"
     );
@@ -151,7 +161,7 @@ fn owned_f64_transfers_cost_no_redundant_host_copy() {
     let _serialized = DEVICE.lock().unwrap_or_else(|err| err.into_inner());
     let ctx = CudaDenseContext::new(0).unwrap();
     let data: Vec<f64> = (0..ELEMENTS).map(|index| index as f64).collect();
-    assert_transfer_copies(&ctx, data);
+    assert_transfer_copies(&ctx, data, OWNED_UPLOAD_PAYLOAD_ALLOCATIONS_F64);
 }
 
 #[test]
@@ -162,5 +172,5 @@ fn owned_complex64_transfers_cost_no_redundant_host_copy() {
     let data: Vec<Complex64> = (0..ELEMENTS)
         .map(|index| Complex64::new(index as f64, -(index as f64) - 0.5))
         .collect();
-    assert_transfer_copies(&ctx, data);
+    assert_transfer_copies(&ctx, data, OWNED_UPLOAD_PAYLOAD_ALLOCATIONS_C64);
 }

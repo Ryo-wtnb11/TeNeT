@@ -4008,12 +4008,12 @@ pub(crate) fn upload_selector<D: CudaPayload>(
         data[row + rows * col] = value;
     }
     #[cfg(test)]
-    let entries = data.len();
+    let extent = data.len();
     let selector = CudaStorage::upload_owned(cuda, data).map_err(Error::from)?;
     #[cfg(test)]
     {
         observe_cuda_qr_selector_upload();
-        observe_cuda_svd_trunc_allocation("selector", entries);
+        observe_cuda_svd_trunc_allocation("selector", extent);
     }
     Ok(selector)
 }

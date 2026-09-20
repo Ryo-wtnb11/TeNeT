@@ -8,8 +8,11 @@ a measurement record, not a CI gate and not a threshold any code dispatches on.
 
 ## Comparison baseline
 
-`cuda-baseline-2026-09-20-gl3.csv`, the record of the current merge base
-`077b5b58` on the same host, driver, toolchain, cuTENSOR 2.5.0, `Cargo.lock`
+`cuda-baseline-2026-09-20-gl3.csv`, the record of the merge base this branch
+was cut from. Its header reads `tenet_sha=ea4f3f5c+gl3-device-local-lock`, which
+is the pre-squash branch of PR #1282; that PR squash-merged as `077b5b58`, so
+the two are the same tree and `077b5b58` is the base compared here. Same host,
+driver, toolchain, cuTENSOR 2.5.0, `Cargo.lock`
 (`lock_sha256=cad23363…`), features `cuda,cpu-faer`, release,
 `CUDA_VISIBLE_DEVICES=0` and single-threaded BLAS/rayon. The two runs used
 separate `CARGO_TARGET_DIR`s, so neither reused the other's example binary.
