@@ -17,7 +17,8 @@ use std::sync::Arc;
 
 use num_complex::Complex64;
 use tenet::core::{
-    FermionParityFusionRule, SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep, Z2Irrep,
+    product_sector, FermionParityFusionRule, ProductFusionRuleExt, SU2FusionRule, SU2Irrep,
+    U1FusionRule, U1Irrep, Z2Irrep, ZNFusionRule,
 };
 use tenet::prelude::{GradedSpace, LegSelection, Runtime, TensorMap};
 
@@ -97,6 +98,35 @@ fn masked(shape: &[usize], data: &[f64], maps: &[Vec<usize>]) -> Vec<f64> {
             .map(|(axis, &offset)| maps[axis][offset] * strides[axis])
             .sum();
         out[position] = data[position];
+        for axis in 0..index.len() {
+            index[axis] += 1;
+            if index[axis] < out_shape[axis] {
+                break;
+            }
+            index[axis] = 0;
+        }
+    }
+    out
+}
+
+/// `source` placed into a zero buffer of `shape` at the gathered indices: the
+/// dense form of an embedding.
+fn scattered<D: Copy>(shape: &[usize], source: &[D], maps: &[Vec<usize>], zero: D) -> Vec<D> {
+    let mut strides = vec![1usize; shape.len()];
+    for axis in 1..shape.len() {
+        strides[axis] = strides[axis - 1] * shape[axis - 1];
+    }
+    let out_shape: Vec<usize> = maps.iter().map(Vec::len).collect();
+    let mut out = vec![zero; shape.iter().product()];
+    let total: usize = out_shape.iter().product();
+    let mut index = vec![0usize; shape.len()];
+    for &value in source.iter().take(total) {
+        let destination: usize = index
+            .iter()
+            .enumerate()
+            .map(|(axis, &offset)| maps[axis][offset] * strides[axis])
+            .sum();
+        out[destination] = value;
         for axis in 0..index.len() {
             index[axis] += 1;
             if index[axis] < out_shape[axis] {
@@ -190,10 +220,12 @@ fn dense_plan<S: PartialEq>(
 fn restrict_matches_the_dense_gather_on_a_dual_u1_codomain_leg() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(U1FusionRule);
-    let leg = u1(&provider, &[(-1, 2), (0, 3), (1, 2)])
+    // Degeneracies asymmetric under c -> -c, so a label/dual mix-up cannot
+    // survive by coincidence.
+    let leg = u1(&provider, &[(-1, 2), (0, 3), (1, 4)])
         .try_dual()
         .unwrap();
-    let other = u1(&provider, &[(-1, 1), (0, 2), (1, 1)]);
+    let other = u1(&provider, &[(-1, 1), (0, 2), (1, 3)]);
     let source: TensorMap<_, f64> =
         TensorMap::rand_with_seed(&runtime, [&leg, &other], [&other], 7).unwrap();
 
@@ -585,4 +617,259 @@ fn restricting_a_compact_diagonal_payload_is_rejected() {
     let selection = LegSelection::try_new(&bond, [(U1Irrep::new(0), 0..1)]).unwrap();
     assert!(diagonal.restrict_leg(1, &selection).is_err());
     assert!(diagonal.embed_leg(1, &selection).is_err());
+}
+
+#[test]
+fn embed_scatters_a_complex_lazy_adjoint_dual_domain_leg_per_sector() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(U1FusionRule);
+    let leg = u1(&provider, &[(-1, 2), (0, 3), (1, 4)])
+        .try_dual()
+        .unwrap();
+    let selected = [(U1Irrep::new(1), 0..1), (U1Irrep::new(-1), 2..4)];
+    let selection = LegSelection::try_new(&leg, selected.iter().cloned()).unwrap();
+    let spectator = u1(&provider, &[(0, 2), (1, 1)]);
+    let columns = u1(&provider, &[(-1, 1), (0, 2)]);
+
+    // The parent already lives on the subspace, so the lazy adjoint itself is
+    // the embed source: a dual leg, in the domain, complex, read through the
+    // adjoint axis map, with a multi-sector table.
+    let parent: TensorMap<_, Complex64> =
+        TensorMap::rand_with_seed(&runtime, [selection.subspace(), &spectator], [&columns], 53)
+            .unwrap();
+    let lazy = parent.adjoint().unwrap();
+    assert_eq!(lazy.domain()[0], *selection.subspace());
+
+    let embedded = lazy.embed_leg(1, &selection).unwrap();
+    assert_eq!(embedded.domain()[0], leg);
+    assert_eq!(embedded.domain()[1], spectator);
+    assert_eq!(embedded.codomain()[0], columns);
+
+    let (layout, ranges) = dense_plan(
+        &leg.sectors().unwrap(),
+        leg.degeneracies(),
+        |_| 1,
+        &selected,
+    );
+    let (column_layout, _) = dense_plan::<U1Irrep>(
+        &columns.sectors().unwrap(),
+        columns.degeneracies(),
+        |_| 1,
+        &[],
+    );
+    let (spectator_layout, _) = dense_plan::<U1Irrep>(
+        &spectator.sectors().unwrap(),
+        spectator.degeneracies(),
+        |_| 1,
+        &[],
+    );
+    let maps = vec![
+        identity_gather(&column_layout),
+        axis_gather(&layout, &ranges),
+        identity_gather(&spectator_layout),
+    ];
+    let source = lazy.to_physical_dense().unwrap();
+    let actual = embedded.to_physical_dense().unwrap();
+    let expected = scattered(&actual.shape, &source.data, &maps, Complex64::new(0.0, 0.0));
+    assert_close_complex(&actual.data, &expected);
+
+    // And the restriction of that embedding is the original, bitwise.
+    assert_eq!(
+        embedded.restrict_leg(1, &selection).unwrap().data(),
+        lazy.data()
+    );
+}
+
+#[test]
+fn restrict_and_embed_on_a_product_fz2_u1_leg_match_the_isometry_composition() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(FermionParityFusionRule.product(U1FusionRule));
+    let label = |odd: bool, charge: i32| {
+        product_sector(
+            if odd { Z2Irrep::ODD } else { Z2Irrep::EVEN },
+            U1Irrep::new(charge),
+        )
+    };
+    let leg = GradedSpace::try_new_with_arc(
+        Arc::clone(&provider),
+        [
+            (label(false, 0), 2),
+            (label(true, 1), 3),
+            (label(false, 2), 2),
+        ],
+    )
+    .unwrap();
+    let other = GradedSpace::try_new_with_arc(
+        Arc::clone(&provider),
+        [(label(false, 0), 2), (label(true, 1), 1)],
+    )
+    .unwrap();
+    let source: TensorMap<_, Complex64> =
+        TensorMap::rand_with_seed(&runtime, [&leg, &other], [&other], 59).unwrap();
+
+    let selected = [(label(true, 1), 1..3), (label(false, 2), 0..1)];
+    let selection = LegSelection::try_new(&leg, selected.iter().cloned()).unwrap();
+    let start = |sector: &_| {
+        selected
+            .iter()
+            .find(|(candidate, _)| candidate == sector)
+            .map_or(0, |(_, range)| range.start)
+    };
+    let restricted = source.restrict_leg(0, &selection).unwrap();
+
+    // The product rule has no physical-basis expansion, so the oracle here is
+    // the inclusion isometry, applied with `compose` only.
+    let iota_dagger = TensorMap::<_, Complex64>::from_block_fn(
+        &runtime,
+        [selection.subspace()],
+        [&leg],
+        |trees, indices| {
+            if indices[1] == start(&trees.codomain_uncoupled()[0]) + indices[0] {
+                Complex64::new(1.0, 0.0)
+            } else {
+                Complex64::new(0.0, 0.0)
+            }
+        },
+    )
+    .unwrap();
+    let iota = TensorMap::<_, Complex64>::from_block_fn(
+        &runtime,
+        [&leg],
+        [selection.subspace()],
+        |trees, indices| {
+            if indices[0] == start(&trees.domain_uncoupled()[0]) + indices[1] {
+                Complex64::new(1.0, 0.0)
+            } else {
+                Complex64::new(0.0, 0.0)
+            }
+        },
+    )
+    .unwrap();
+    let spectator_id = TensorMap::<_, Complex64>::id(&runtime, [&other]).unwrap();
+
+    let expected = iota_dagger
+        .otimes(&spectator_id)
+        .unwrap()
+        .compose(&source)
+        .unwrap();
+    assert_eq!(restricted.codomain(), expected.codomain());
+    assert_close_complex(restricted.data(), expected.data());
+
+    let embedded = restricted.embed_leg(0, &selection).unwrap();
+    let expected = iota
+        .otimes(&spectator_id)
+        .unwrap()
+        .compose(&restricted)
+        .unwrap();
+    assert_eq!(embedded.codomain(), expected.codomain());
+    assert_close_complex(embedded.data(), expected.data());
+}
+
+#[test]
+fn a_rank_five_restriction_still_gathers_one_axis_only() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(U1FusionRule);
+    let leg = u1(&provider, &[(-1, 2), (0, 2), (1, 3)]);
+    let small = u1(&provider, &[(0, 1), (1, 2)]);
+    let source: TensorMap<_, f64> =
+        TensorMap::rand_with_seed(&runtime, [&small, &leg, &small], [&small, &small], 61).unwrap();
+    assert_eq!(source.rank(), 5);
+
+    let selected = [(U1Irrep::new(1), 1..3)];
+    let selection = LegSelection::try_new(&leg, selected.iter().cloned()).unwrap();
+    let restricted = source.restrict_leg(1, &selection).unwrap();
+
+    let (layout, ranges) = dense_plan(
+        &leg.sectors().unwrap(),
+        leg.degeneracies(),
+        |_| 1,
+        &selected,
+    );
+    let (small_layout, _) =
+        dense_plan::<U1Irrep>(&small.sectors().unwrap(), small.degeneracies(), |_| 1, &[]);
+    let dense = source.to_physical_dense().unwrap();
+    let maps = vec![
+        identity_gather(&small_layout),
+        axis_gather(&layout, &ranges),
+        identity_gather(&small_layout),
+        identity_gather(&small_layout),
+        identity_gather(&small_layout),
+    ];
+    let (shape, expected) = gather(&dense.shape, &dense.data, &maps);
+    let actual = restricted.to_physical_dense().unwrap();
+    assert_eq!(actual.shape, shape);
+    assert_close(&actual.data, &expected);
+}
+
+#[test]
+fn a_selection_built_on_another_rule_is_a_rule_mismatch() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let two = Arc::new(ZNFusionRule::new(2).unwrap());
+    let three = Arc::new(ZNFusionRule::new(3).unwrap());
+    let leg =
+        GradedSpace::try_new_with_arc(Arc::clone(&two), [(two.irrep(0), 2), (two.irrep(1), 2)])
+            .unwrap();
+    let foreign = GradedSpace::try_new_with_arc(
+        Arc::clone(&three),
+        [(three.irrep(0), 2), (three.irrep(1), 2)],
+    )
+    .unwrap();
+    let source = TensorMap::<_, f64>::zeros(&runtime, [&leg], [&leg]).unwrap();
+    let selection = LegSelection::try_new(&foreign, [(three.irrep(0), 0..1)]).unwrap();
+    let error = source.restrict_leg(0, &selection).unwrap_err();
+    assert!(
+        format!("{error}").contains("rule"),
+        "expected a rule mismatch, got {error}"
+    );
+    assert!(source.embed_leg(0, &selection).is_err());
+}
+
+#[test]
+fn restriction_commutes_with_permute_and_with_a_contraction_over_an_untouched_leg() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(FermionParityFusionRule);
+    let leg = fz2(&provider, &[(false, 2), (true, 3)]);
+    let spectator = fz2(&provider, &[(false, 2), (true, 2)]);
+    let bond = fz2(&provider, &[(false, 1), (true, 2)]);
+    let source: TensorMap<_, f64> =
+        TensorMap::rand_with_seed(&runtime, [&leg, &spectator], [&bond], 67).unwrap();
+    let partner: TensorMap<_, f64> =
+        TensorMap::rand_with_seed(&runtime, [&bond], [&spectator], 71).unwrap();
+    let selection = LegSelection::try_new(&leg, [(Z2Irrep::ODD, 1..3)]).unwrap();
+
+    // Swapping two codomain legs and restricting are independent.
+    let restrict_then_permute = source
+        .restrict_leg(0, &selection)
+        .unwrap()
+        .permute(&[1, 0], &[2])
+        .unwrap();
+    let permute_then_restrict = source
+        .permute(&[1, 0], &[2])
+        .unwrap()
+        .restrict_leg(1, &selection)
+        .unwrap();
+    assert_eq!(
+        restrict_then_permute.codomain(),
+        permute_then_restrict.codomain()
+    );
+    assert_close(restrict_then_permute.data(), permute_then_restrict.data());
+
+    // Contracting the untouched bond commutes with the restriction. Both
+    // sides run the same `contract`, so the fermionic supertrace twist on the
+    // dual contracted axis appears identically on each.
+    let restrict_then_contract = source
+        .restrict_leg(0, &selection)
+        .unwrap()
+        .contract(&partner, &[2], &[0], &[0, 1, 2])
+        .unwrap();
+    let contract_then_restrict = source
+        .contract(&partner, &[2], &[0], &[0, 1, 2])
+        .unwrap()
+        .restrict_leg(0, &selection)
+        .unwrap();
+    assert_eq!(
+        restrict_then_contract.codomain(),
+        contract_then_restrict.codomain()
+    );
+    assert_close(restrict_then_contract.data(), contract_then_restrict.data());
 }

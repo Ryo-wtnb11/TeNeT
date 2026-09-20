@@ -8327,13 +8327,25 @@ impl<R> GradedSpace<R> {
 /// selectors (`src/factorizations/truncation.jl`); for an arbitrary leg it is
 /// a contraction with `isometry(W ← V)`, which realises only leading-index
 /// selections. General offsets and dual legs have no direct counterpart there.
-#[derive(Clone)]
 pub struct LegSelection<R> {
     parent: GradedSpace<R>,
     subspace: GradedSpace<R>,
     // Sorted by `SectorId`, parallel to `subspace`'s stored sectors: the
     // kernels look the start up by the id they read from a block's own key.
     entries: Vec<(SectorId, std::ops::Range<usize>)>,
+}
+
+// Why hand-written: both fields clone through an `Arc`, exactly as
+// `GradedSpace` does, so the derive's `R: Clone` bound would be a provider
+// requirement that nothing here actually needs.
+impl<R> Clone for LegSelection<R> {
+    fn clone(&self) -> Self {
+        Self {
+            parent: self.parent.clone(),
+            subspace: self.subspace.clone(),
+            entries: self.entries.clone(),
+        }
+    }
 }
 
 impl<R> core::fmt::Debug for LegSelection<R> {
@@ -12470,9 +12482,8 @@ where
             .map_err(Error::from)
             .map_err(TypedFacadeError::<R>::from)?;
         let mut data = tenet_tensors::zeroed_payload::<D>(len);
-        let table: Vec<(SectorId, std::ops::Range<usize>)> = selection.entries.clone();
         let mut ranges: Vec<tenet_tensors::SectorRangeTable<'_>> = vec![None; self.rank()];
-        ranges[axis] = Some(table.as_slice());
+        ranges[axis] = Some(selection.entries.as_slice());
         let (source, source_data) = self.fusion_operand_and_data();
         tenet_tensors::fusion_scatter_add_assign(
             destination.space().structure(),

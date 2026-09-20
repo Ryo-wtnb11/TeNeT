@@ -24,6 +24,7 @@ struct CountingAllocator;
 thread_local! {
     static COUNTING: Cell<bool> = const { Cell::new(false) };
     static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
+    static ALLOCATED_BYTES: Cell<usize> = const { Cell::new(0) };
     static ZEROED_ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
     static ZEROED_SIZES: [Cell<usize>; ZEROED_LOG_CAPACITY] =
         const { [const { Cell::new(0) }; ZEROED_LOG_CAPACITY] };
@@ -34,6 +35,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
         let pointer = unsafe { System.alloc(layout) };
         if !pointer.is_null() && COUNTING.get() {
             ALLOCATIONS.set(ALLOCATIONS.get() + 1);
+            ALLOCATED_BYTES.set(ALLOCATED_BYTES.get() + layout.size());
         }
         pointer
     }
@@ -43,6 +45,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
         let pointer = unsafe { System.alloc_zeroed(layout) };
         if !pointer.is_null() && COUNTING.get() {
             ALLOCATIONS.set(ALLOCATIONS.get() + 1);
+            ALLOCATED_BYTES.set(ALLOCATED_BYTES.get() + layout.size());
             let index = ZEROED_ALLOCATIONS.get();
             ZEROED_ALLOCATIONS.set(index + 1);
             if index < ZEROED_LOG_CAPACITY {
@@ -60,6 +63,9 @@ unsafe impl GlobalAlloc for CountingAllocator {
         let pointer = unsafe { System.realloc(pointer, layout, new_size) };
         if !pointer.is_null() && COUNTING.get() {
             ALLOCATIONS.set(ALLOCATIONS.get() + 1);
+            // A realloc hands back a buffer of `new_size`, so charge all of
+            // it: a payload-sized temporary grown this way must show up.
+            ALLOCATED_BYTES.set(ALLOCATED_BYTES.get() + new_size);
         }
         pointer
     }
@@ -71,17 +77,20 @@ static MEASUREMENT_LOCK: Mutex<()> = Mutex::new(());
 
 struct Measurement {
     allocations: usize,
+    bytes: usize,
     zeroed_sizes: Vec<usize>,
 }
 
 fn measure(operation: impl FnOnce()) -> Measurement {
     ALLOCATIONS.set(0);
+    ALLOCATED_BYTES.set(0);
     ZEROED_ALLOCATIONS.set(0);
     COUNTING.set(true);
     operation();
     COUNTING.set(false);
     Measurement {
         allocations: ALLOCATIONS.get(),
+        bytes: ALLOCATED_BYTES.get(),
         zeroed_sizes: ZEROED_SIZES.with(|sizes| {
             sizes[..ZEROED_ALLOCATIONS.get().min(ZEROED_LOG_CAPACITY)]
                 .iter()
@@ -155,8 +164,18 @@ fn restrict_leg_allocates_one_zeroed_payload_and_degeneracy_independent_scratch(
             measurement.zeroed_sizes
         );
     }
-    // Structural work does not grow with the degeneracy dimensions.
+    // Structural work does not grow with the degeneracy dimensions. The byte
+    // budget is what rules out a second payload-sized buffer taken through
+    // plain `alloc`/`realloc`, which the zeroed-size log cannot see.
     assert_eq!(small.allocations, large.allocations);
+    assert_eq!(
+        small.bytes - small_bytes,
+        large.bytes - large_bytes,
+        "non-payload bytes must not depend on the degeneracy dimensions: \
+         {small:?} vs {large:?} bytes for payloads {small_bytes}/{large_bytes}",
+        small = small.bytes,
+        large = large.bytes
+    );
 }
 
 #[test]
