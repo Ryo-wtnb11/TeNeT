@@ -1,0 +1,10 @@
+   Compiling tenet-macros v0.1.1 (/data2/ryo-w/gpu-phase/gl3/tenet-macros)
+   Compiling tenet-sectors v0.1.1 (/data2/ryo-w/gpu-phase/gl3/tenet-sectors)
+   Compiling tenet-dense v0.1.1 (/data2/ryo-w/gpu-phase/gl3/tenet-dense)
+   Compiling tenet-core v0.1.1 (/data2/ryo-w/gpu-phase/gl3/tenet-core)
+   Compiling tenet-operations v0.1.1 (/data2/ryo-w/gpu-phase/gl3/tenet-operations)
+   Compiling tenet-tensors v0.1.1 (/data2/ryo-w/gpu-phase/gl3/tenet-tensors)
+   Compiling tenet-matrixalgebra v0.1.1 (/data2/ryo-w/gpu-phase/gl3/tenet-matrixalgebra)
+   Compiling tenet-rs v0.1.1 (/data2/ryo-w/gpu-phase/gl3/tenet)
+   Compiling tenet-network v0.1.1 (/data2/ryo-w/gpu-phase/gl3/tenet-network)
+    Finished `release` profile [optimized] target(s) in 30.66s

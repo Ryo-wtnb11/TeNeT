@@ -46,8 +46,18 @@ struct StructuralSnapshot<S> {
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 struct ProbeSector;
 
-/// One-sector provider whose dimension callback re-enters the public Runtime
-/// lock. A reduction deadlocks here if it calls provider code under that lock.
+/// Tiny device operation for the canary below: `to_cuda` takes the Runtime's
+/// device lease, on a provider that never calls back into the Runtime.
+fn device_lease_probe(runtime: &Runtime) {
+    let leg = GradedSpace::try_new(U1FusionRule, [(U1Irrep::new(0), 1)]).unwrap();
+    let probe: TensorMap<_, f64> = TensorMap::zeros(runtime, [&leg], [&leg]).unwrap();
+    probe.to_cuda().unwrap();
+}
+
+/// One-sector provider whose dimension callback re-enters the Runtime's device
+/// lease. A reduction deadlocks here if it calls provider code under that
+/// lease. (Before #1281 the callback re-entered the coarse state lock through
+/// `cuda_device_ordinal`, which no longer locks anything.)
 struct ReentrantDimensionRule {
     runtime: Runtime,
     calls: Arc<AtomicUsize>,
@@ -100,6 +110,7 @@ impl MultiplicityFreeFusionSymbols for ReentrantDimensionRule {
 impl MultiplicityFreeRigidSymbols for ReentrantDimensionRule {
     fn dim_scalar(&self, _: SectorId) -> f64 {
         assert_eq!(self.runtime.cuda_device_ordinal(), Some(0));
+        device_lease_probe(&self.runtime);
         self.calls.fetch_add(1, Ordering::SeqCst);
         1.0
     }
