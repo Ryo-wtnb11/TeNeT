@@ -1,44 +1,53 @@
 //! CUDA storage and GEMM seams for the symmetry-free replay layer.
 //!
-//! `CudaStorage` is a flat f64 device buffer implementing [`TensorStorage`]
-//! (never host-readable: no silent transfers), and [`CudaStorageGemm`]
-//! implements the [`StorageGemm`] device replay seam by delegating each
-//! coupled-sector matrix GEMM to the tenet-dense CUDA boundary.
+//! `CudaStorage<D>` is a flat device buffer of [`CudaScalar`] payload `D`
+//! implementing [`TensorStorage`] (never host-readable: no silent transfers),
+//! and [`CudaStorageGemm`] implements the [`StorageGemm`] device replay seam by
+//! delegating each coupled-sector matrix GEMM to the tenet-dense CUDA boundary.
+//!
+//! The payload dtype is the only thing that varies: structural (fusion-tree)
+//! coefficients stay real, and operand conjugation stays a GEMM flag rather
+//! than a materialized buffer.
+
+use std::marker::PhantomData;
 
 use tenet_core::{Placement, TensorStorage};
 use tenet_dense::{
     cuda_gemm_region_with_ops_into, cuda_matmul_region_into, CudaDenseContext, CudaDenseStorage,
-    MatrixOp,
+    CudaScalar, MatrixOp,
 };
 
 use crate::fusion_replay::StorageGemm;
 use crate::OperationError;
 
-/// Flat f64 device buffer usable as replay storage.
-pub struct CudaStorage(pub CudaDenseStorage);
+/// Flat device buffer of payload `D` usable as replay storage.
+///
+/// The default `D = f64` keeps the historical `CudaStorage` spelling valid.
+pub struct CudaStorage<D: CudaScalar = f64>(pub CudaDenseStorage, PhantomData<D>);
 
-impl std::fmt::Debug for CudaStorage {
+impl<D: CudaScalar> std::fmt::Debug for CudaStorage<D> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CudaStorage")
             .field("len", &self.0.len())
+            .field("dtype", &self.0.dtype())
             .field("device", &self.0.device())
             .finish()
     }
 }
 
-impl CudaStorage {
-    pub fn upload(ctx: &CudaDenseContext, data: &[f64]) -> Result<Self, OperationError> {
-        CudaDenseStorage::upload_f64(ctx, data)
-            .map(Self)
+impl<D: CudaScalar> CudaStorage<D> {
+    pub fn upload(ctx: &CudaDenseContext, data: &[D]) -> Result<Self, OperationError> {
+        CudaDenseStorage::upload(ctx, data)
+            .map(|storage| Self(storage, PhantomData))
             .map_err(OperationError::Dense)
     }
 
-    pub fn download(&self, ctx: &CudaDenseContext) -> Result<Vec<f64>, OperationError> {
-        self.0.download_f64(ctx).map_err(OperationError::Dense)
+    pub fn download(&self, ctx: &CudaDenseContext) -> Result<Vec<D>, OperationError> {
+        self.0.download(ctx).map_err(OperationError::Dense)
     }
 }
 
-impl TensorStorage<f64> for CudaStorage {
+impl<D: CudaScalar> TensorStorage<D> for CudaStorage<D> {
     fn len(&self) -> usize {
         self.0.len()
     }
@@ -46,6 +55,12 @@ impl TensorStorage<f64> for CudaStorage {
     fn placement(&self) -> Placement {
         Placement::Cuda(self.0.device())
     }
+}
+
+/// Operand orientations the device GEMM seam accepts. `Transpose` has no
+/// conjugation-free device analogue here and is rejected before device work.
+fn cuda_operand_is_supported(op: MatrixOp) -> bool {
+    matches!(op, MatrixOp::Identity | MatrixOp::Adjoint)
 }
 
 /// [`StorageGemm`] over CUDA storage: one tenferro dot-general per
@@ -60,25 +75,26 @@ impl<'a> CudaStorageGemm<'a> {
     }
 }
 
-impl StorageGemm<f64, CudaStorage, CudaStorage, CudaStorage> for CudaStorageGemm<'_> {
+impl<D: CudaScalar> StorageGemm<D, CudaStorage<D>, CudaStorage<D>, CudaStorage<D>>
+    for CudaStorageGemm<'_>
+{
     fn supports_matmul_with_ops_scaled(&self, lhs_op: MatrixOp, rhs_op: MatrixOp) -> bool {
-        let supported = |op| matches!(op, MatrixOp::Identity | MatrixOp::Adjoint);
-        supported(lhs_op) && supported(rhs_op)
+        cuda_operand_is_supported(lhs_op) && cuda_operand_is_supported(rhs_op)
     }
 
     fn matmul_range_into(
         &mut self,
-        dst: &mut CudaStorage,
+        dst: &mut CudaStorage<D>,
         dst_offset: usize,
-        lhs: &CudaStorage,
+        lhs: &CudaStorage<D>,
         lhs_offset: usize,
-        rhs: &CudaStorage,
+        rhs: &CudaStorage<D>,
         rhs_offset: usize,
         rows: usize,
         contracted: usize,
         cols: usize,
     ) -> Result<(), OperationError> {
-        cuda_matmul_region_into(
+        cuda_matmul_region_into::<D>(
             self.ctx, &mut dst.0, dst_offset, &lhs.0, lhs_offset, &rhs.0, rhs_offset, rows,
             contracted, cols,
         )
@@ -87,27 +103,39 @@ impl StorageGemm<f64, CudaStorage, CudaStorage, CudaStorage> for CudaStorageGemm
 
     fn matmul_range_with_ops_scaled_into(
         &mut self,
-        dst: &mut CudaStorage,
+        dst: &mut CudaStorage<D>,
         dst_offset: usize,
-        lhs: &CudaStorage,
+        lhs: &CudaStorage<D>,
         lhs_offset: usize,
-        rhs: &CudaStorage,
+        rhs: &CudaStorage<D>,
         rhs_offset: usize,
         rows: usize,
         contracted: usize,
         cols: usize,
         lhs_op: MatrixOp,
         rhs_op: MatrixOp,
-        alpha: f64,
+        alpha: D,
     ) -> Result<(), OperationError> {
-        if !self.supports_matmul_with_ops_scaled(lhs_op, rhs_op) {
+        if !(cuda_operand_is_supported(lhs_op) && cuda_operand_is_supported(rhs_op)) {
             return Err(OperationError::UnsupportedTensorContractScope {
-                message: "CUDA storage GEMM supports only identity and f64 adjoint operands",
+                message: "CUDA storage GEMM supports only identity and adjoint operands",
             });
         }
-        cuda_gemm_region_with_ops_into(
-            self.ctx, &mut dst.0, dst_offset, &lhs.0, lhs_offset, &rhs.0, rhs_offset, rows,
-            contracted, cols, lhs_op, rhs_op, alpha, 0.0,
+        cuda_gemm_region_with_ops_into::<D>(
+            self.ctx,
+            &mut dst.0,
+            dst_offset,
+            &lhs.0,
+            lhs_offset,
+            &rhs.0,
+            rhs_offset,
+            rows,
+            contracted,
+            cols,
+            lhs_op,
+            rhs_op,
+            alpha,
+            D::ZERO,
         )
         .map_err(OperationError::Dense)
     }

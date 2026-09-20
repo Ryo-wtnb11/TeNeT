@@ -366,7 +366,9 @@ Build one `Runtime` and reuse or clone it for related tensors. Host execution
 is the default. The builder selects thread counts, dense backends, and the
 `tensor!` optimizer. With the `cuda` feature, `.cuda(device)` attaches a device
 to the runtime; tensors remain on Host storage until `to_cuda()` transfers them
-explicitly.
+explicitly. Device payloads are `f64` and `Complex64`; single precision has no
+device payload, and device factorizations (`qr_compact`, `svd_compact`,
+`svd_trunc`, `eigh_full`, `eigh_trunc`) are still `f64`-only.
 
 ```rust
 use tenet::prelude::*;

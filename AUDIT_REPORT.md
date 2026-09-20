@@ -22,12 +22,14 @@ contraction/composition. Reductions, decompositions, lazy adjoint, several
 index operations, and network execution remain unsupported there. SU(N) must
 therefore not yet be described as a generally complete tensor provider.
 
-CUDA is a narrower explicit `f64` multiplicity-free execution surface. It has
-real-device tests for selected transfer, arithmetic, reductions, canonical
-contraction, QR/SVD/EIGH, and canonical network paths. General recoupling,
-noncanonical contraction, c64, checked Generic execution, and much of the Host
-matrix-algebra surface remain unsupported. No silent general Host fallback was
-identified in the inspected public paths.
+CUDA is a narrower explicit multiplicity-free execution surface over `f64` and
+`Complex64` payloads. It has real-device tests for selected transfer,
+arithmetic, reductions, canonical contraction, and canonical network paths in
+both dtypes, and for QR/SVD/EIGH in `f64`. Device factorizations for `c64`
+([#1268](https://github.com/Ryo-wtnb11/TeNeT/issues/1268)), general
+recoupling, noncanonical contraction, checked Generic execution, and much of
+the Host matrix-algebra surface remain unsupported. No silent general Host
+fallback was identified in the inspected public paths.
 
 The cache/ownership review is substantially stronger than the documentation
 and release state. Primitive generated coefficients remain provider/Racah
@@ -146,8 +148,9 @@ important boundaries are:
 | checked Generic / SU(N) Host | Construction/readback, transforms, otimes, contract/compose, reductions, arithmetic, spectra, and current SVD/QR/LQ leaves; unit/cat, factor-returning EIG/EIGH, null/polar, matrix functions, and network remain unsupported |
 | Fibonacci | Expert category data exists; canonical typed tensors unsupported |
 | trivial/no symmetry | No canonical public provider identified |
-| CUDA f64 multiplicity-free | Selected explicit operations and canonical network execution |
-| CUDA c64 / checked Generic execution | Unsupported |
+| CUDA f64 multiplicity-free | Selected explicit operations, factorizations, and canonical network execution |
+| CUDA c64 multiplicity-free | Transfer, lazy adjoint, arithmetic, reductions, canonical contraction/compose, and canonical network execution; factorizations unsupported ([#1268](https://github.com/Ryo-wtnb11/TeNeT/issues/1268)) |
+| CUDA checked Generic execution | Unsupported |
 | serialization | Unsupported |
 
 `PROVED` is row-local and revision-local. It does not imply exhaustive ranks,

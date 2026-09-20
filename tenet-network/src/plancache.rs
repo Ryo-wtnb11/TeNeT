@@ -33,9 +33,9 @@ use lru::LruCache;
 use tenet::core::{CheckedFusionAlgebra, MultiplicityFreeRigidSymbols, SectorCodec};
 use tenet::core::{TensorStorage, TypedSectorAdmission};
 use tenet::prelude::{Error, Runtime, TensorScalar};
-#[cfg(feature = "cuda")]
-use tenet::typed::CudaStorage;
 use tenet::typed::TensorMap;
+#[cfg(feature = "cuda")]
+use tenet::typed::{CudaPayload, CudaStorage};
 
 pub use tenet::plancache::{
     Optimizer, PlanCacheConfig, PlanCacheStats, ReplanPolicy, DEFAULT_PLAN_CACHE_CAPACITY,
@@ -476,12 +476,13 @@ impl CachedPlan {
     }
 
     #[cfg(feature = "cuda")]
-    pub(crate) fn execute_cuda<R>(
+    pub(crate) fn execute_cuda<R, D>(
         &self,
-        tensors: &[&TensorMap<R, f64, CudaStorage>],
-    ) -> Result<TensorMap<R, f64, CudaStorage>, Error>
+        tensors: &[&TensorMap<R, D, CudaStorage<D>>],
+    ) -> Result<TensorMap<R, D, CudaStorage<D>>, Error>
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+        D: CudaPayload,
     {
         self.planned.execute_cuda(tensors)
     }

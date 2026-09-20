@@ -19,7 +19,7 @@ use tenet::core::{
 };
 use tenet::prelude::{Error, Runtime, TensorScalar};
 #[cfg(feature = "cuda")]
-use tenet::typed::CudaStorage;
+use tenet::typed::{CudaPayload, CudaStorage};
 use tenet::typed::{
     GradedSpace, NetworkDegeneracyRestriction, NetworkReuseClass, RuntimeDetachedTensorMap,
     TensorMap, TypedSpaceModeDispatch, TypedTensorAdjointDispatch, TypedTensorContractDispatch,
@@ -1475,12 +1475,13 @@ impl PlannedNetwork {
     /// The complete schedule is preflighted before any output allocation or kernel;
     /// unsupported layouts fail without a Host fallback or transfer.
     #[cfg(feature = "cuda")]
-    pub fn execute_cuda<R>(
+    pub fn execute_cuda<R, D>(
         &self,
-        tensors: &[&TensorMap<R, f64, CudaStorage>],
-    ) -> Result<TensorMap<R, f64, CudaStorage>, Error>
+        tensors: &[&TensorMap<R, D, CudaStorage<D>>],
+    ) -> Result<TensorMap<R, D, CudaStorage<D>>, Error>
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+        D: CudaPayload,
     {
         if tensors.len() != self.schedule.input_ranks.len() {
             return Err(invalid(format!(
@@ -1540,7 +1541,7 @@ impl PlannedNetwork {
             .collect::<Vec<_>>();
         self.preflight_cuda_schedule(&input_shapes)?;
 
-        let mut slots: Vec<Option<TensorMap<R, f64, CudaStorage>>> =
+        let mut slots: Vec<Option<TensorMap<R, D, CudaStorage<D>>>> =
             (0..self.schedule.slot_count).map(|_| None).collect();
         for (index, &tensor) in tensors.iter().enumerate() {
             slots[index] = Some(if self.conj[index] {
@@ -2497,21 +2498,24 @@ where
 }
 
 #[cfg(feature = "cuda")]
-impl<R> static_operand_sealed::Sealed for TensorMap<R, f64, CudaStorage> where
-    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
-        + MultiplicityFreeRigidSymbols<Scalar = f64>
-        + CheckedFusionAlgebra
-        + SectorCodec
-{
-}
-
-#[cfg(feature = "cuda")]
-impl<R> StaticNetworkOperand for TensorMap<R, f64, CudaStorage>
+impl<R, D> static_operand_sealed::Sealed for TensorMap<R, D, CudaStorage<D>>
 where
     R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
         + MultiplicityFreeRigidSymbols<Scalar = f64>
         + CheckedFusionAlgebra
         + SectorCodec,
+    D: CudaPayload,
+{
+}
+
+#[cfg(feature = "cuda")]
+impl<R, D> StaticNetworkOperand for TensorMap<R, D, CudaStorage<D>>
+where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec,
+    D: CudaPayload,
 {
     type Error = Error;
 
@@ -2541,12 +2545,13 @@ where
 }
 
 #[cfg(feature = "cuda")]
-impl<R> StaticTraceNetworkOperand for TensorMap<R, f64, CudaStorage>
+impl<R, D> StaticTraceNetworkOperand for TensorMap<R, D, CudaStorage<D>>
 where
     R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
         + MultiplicityFreeRigidSymbols<Scalar = f64>
         + CheckedFusionAlgebra
         + SectorCodec,
+    D: CudaPayload,
 {
     fn contract_static_trace(
         _tensors: &[&Self],

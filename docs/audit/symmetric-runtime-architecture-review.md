@@ -546,7 +546,7 @@ The diagram is intentionally not seven mandatory cached Rust structs. The existi
 - **Prerequisite:** Phase 2 and stable device storage.
 - **Changes:** backend sidecar, device task buffer, workspace sizing, generic N-D permutation; optional small-rank kernels only after evidence.
 - **Benefit:** resident permutation/braid/repartition.
-- **Bench/test:** host/device parity for the current f64 capability, alias cases, many-small launch counts. Complex coefficients require a separate complex device-storage prerequisite; current `CudaStorage` is f64-only.
+- **Bench/test:** host/device parity for the current f64 capability, alias cases, many-small launch counts. `CudaStorage<D>` owns `f64` and `Complex64` payloads; complex *structural coefficients* (as opposed to complex payloads) still require a separate prerequisite.
 - **Risk:** medium/high.
 
 ### Phase 4 — CUDA network plan admission

@@ -7,6 +7,7 @@ use tenet::core::{
     MultiplicityFreeAdmissionMode, MultiplicityFreeRigidSymbols, ProductFusionRuleExt,
     SU2FusionRule, SU2Irrep, SectorCodec, TypedSectorAdmission, U1FusionRule, U1Irrep, Z2Irrep,
 };
+use tenet::prelude::Complex64;
 use tenet::typed::{CudaStorage, GradedSpace, Runtime, TensorMap};
 use tenet_network::{
     plan_cache_stats, tensor, ContractionPlan, ContractionStep, GreedyDenseOptimizer, Network,
@@ -311,4 +312,78 @@ fn canonical_cuda_network_provider_matrix_chain_and_lazy_conj() {
     let stats = plan_cache_stats(&runtime);
     assert_eq!(stats.workspaces_created, 0);
     assert_eq!(stats.idle_workspaces, 0);
+}
+
+/// G1a (#1268): canonical `tensor!` device execution with a genuinely complex
+/// payload, including a lazy conjugate operand. Noncanonical routes and
+/// intra-operand trace stay rejected without publishing a plan.
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn canonical_cuda_network_executes_complex_payloads_and_still_rejects_the_rest() {
+    let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+    let u1 = GradedSpace::try_new_with_arc(
+        Arc::new(U1FusionRule),
+        [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
+    )
+    .unwrap();
+    let complex_entry = |indices: &[usize], seed: f64| {
+        let ramp = indices.iter().map(|&index| index as f64).sum::<f64>();
+        Complex64::new(ramp + seed, -(ramp + seed + 0.75))
+    };
+    let host: Vec<TensorMap<U1FusionRule, Complex64>> = (0..3)
+        .map(|index| {
+            TensorMap::from_block_fn(&runtime, [&u1], [&u1], |_, indices| {
+                complex_entry(indices, 1.0 + index as f64)
+            })
+            .unwrap()
+        })
+        .collect();
+    let device: Vec<_> = host
+        .iter()
+        .map(|tensor| tensor.to_cuda().unwrap())
+        .collect();
+
+    let refs: [&TensorMap<U1FusionRule, Complex64, CudaStorage<Complex64>>; 2] =
+        [&device[0], &device[1]];
+    let planned = pair_network().plan(&refs, &GreedyDenseOptimizer).unwrap();
+    let executed = planned.execute_cuda(&refs).unwrap();
+    let host_oracle = host[0].contract(&host[1], &[1], &[0], &[0, 1]).unwrap();
+    assert_eq!(executed.placement(), device[0].placement());
+    assert_close_c64(executed.to_host().unwrap().data(), host_oracle.data());
+
+    let chain =
+        tensor!([a; d] = (device[0])[a; b] * (device[1])[b; c] * (device[2])[c; d]).unwrap();
+    let chain_oracle = host[0]
+        .contract(&host[1], &[1], &[0], &[0, 1])
+        .unwrap()
+        .contract(&host[2], &[1], &[0], &[0, 1])
+        .unwrap();
+    assert_close_c64(chain.to_host().unwrap().data(), chain_oracle.data());
+
+    let conj = tensor!([i; j] = conj((device[0]))[k; i] * (device[1])[k; j]).unwrap();
+    let conj_oracle = host[0]
+        .adjoint()
+        .unwrap()
+        .contract(&host[1], &[1], &[0], &[0, 1])
+        .unwrap();
+    assert_close_c64(conj.to_host().unwrap().data(), conj_oracle.data());
+
+    let trace_error = tensor!([] = (device[0])[i; i]).unwrap_err();
+    assert!(matches!(
+        trace_error,
+        tenet::prelude::Error::UnsupportedOnDevice(_)
+    ));
+    assert_unsupported_cuda_network(
+        tensor!([k; i] = (device[0])[i; j] * (device[1])[j; k]).unwrap_err(),
+    );
+}
+
+fn assert_close_c64(actual: &[Complex64], expected: &[Complex64]) {
+    assert_eq!(actual.len(), expected.len());
+    for (&actual, &expected) in actual.iter().zip(expected) {
+        assert!(
+            (actual - expected).norm() <= 1e-12 * (1.0 + expected.norm()),
+            "actual {actual:?}, expected {expected:?}"
+        );
+    }
 }

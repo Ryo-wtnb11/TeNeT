@@ -156,7 +156,7 @@ impl DenseTensor {
 }
 
 #[cfg(feature = "tenferro")]
-fn dense_dtype_from_tenferro(dtype: tenferro_tensor::DType) -> DenseDType {
+pub(crate) fn dense_dtype_from_tenferro(dtype: tenferro_tensor::DType) -> DenseDType {
     match dtype {
         tenferro_tensor::DType::F32 => DenseDType::F32,
         tenferro_tensor::DType::F64 => DenseDType::F64,

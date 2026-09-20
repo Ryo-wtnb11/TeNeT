@@ -51,5 +51,5 @@ pub use tenferro_cpu::CpuBackendKind;
 pub use cuda_adapter::{
     cuda_eigh_region, cuda_gemm_region_into, cuda_gemm_region_with_ops_into,
     cuda_is_hermitian_region, cuda_matmul_region_into, cuda_qr_region, cuda_svd_region,
-    CudaDenseContext, CudaDenseStorage,
+    CudaDenseContext, CudaDenseStorage, CudaScalar,
 };
