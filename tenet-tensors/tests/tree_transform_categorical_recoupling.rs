@@ -11,8 +11,9 @@
 mod categorical_recoupling;
 
 use categorical_recoupling::{
-    assert_close, compile, expected, fermionic_space, fermionic_su2_rule, fixtures,
-    four_leg_channels, host_replay, non_symmetric_fixture, su2_space, Compiled, TestScalar,
+    alphas, assert_close, compile, expected, expected_scaled, fermionic_space, fermionic_su2_rule,
+    fixtures, four_leg_channels, host_replay, host_replay_scaled, non_symmetric_fixture, su2_space,
+    Compiled, TestScalar,
 };
 use num_complex::Complex64;
 use tenet_core::{FermionParityFusionRule, SU2FusionRule};
@@ -31,13 +32,41 @@ where
         .map(|index| T::from_parts(-3.0 - index as f64, 0.5))
         .collect();
     for overwrite in [true, false] {
-        let what = format!("{} / {} / overwrite = {overwrite}", fixture.name, T::NAME);
-        assert_close(
-            &host_replay(fixture, &source, &destination, overwrite),
-            &expected(fixture, &source, &destination, overwrite),
-            &what,
-        );
+        for alpha in alphas::<T>() {
+            let what = format!(
+                "{} / {} / overwrite = {overwrite} / alpha = {alpha:?}",
+                fixture.name,
+                T::NAME
+            );
+            assert_close(
+                &host_replay_scaled(fixture, &source, &destination, overwrite, alpha),
+                &expected_scaled(fixture, &source, &destination, overwrite, alpha),
+                &what,
+            );
+        }
     }
+}
+
+#[test]
+fn the_caller_scale_multiplies_a_recoupled_block_once() {
+    // Negative control for where alpha enters provider-compiled recoupling: the
+    // host applies it once, at the scatter. Applying it at the pack as well
+    // would give `alpha^2 * (U x)` — which is exactly what the oracle computes
+    // for `alpha * alpha` — so the two must differ and the host must land on
+    // the single application.
+    let fixture = non_symmetric_fixture();
+    let source = fixture.source::<f64>();
+    let destination = vec![0.0_f64; fixture.len()];
+    let alpha = -2.5_f64;
+
+    let once = expected_scaled(&fixture, &source, &destination, true, alpha);
+    let twice = expected_scaled(&fixture, &source, &destination, true, alpha * alpha);
+    assert_ne!(once, twice, "alpha applied twice must change the result");
+    assert_close(
+        &host_replay_scaled(&fixture, &source, &destination, true, alpha),
+        &once,
+        "alpha applied once at the scatter",
+    );
 }
 
 #[test]

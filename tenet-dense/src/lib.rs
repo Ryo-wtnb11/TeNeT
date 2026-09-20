@@ -61,7 +61,7 @@ pub use cuda_adapter::{
     cuda_is_hermitian_region, cuda_matmul_region_into, cuda_qr_region, cuda_region_axpby,
     cuda_region_zero, cuda_svd_region, cuda_transfer_stats, cuda_zero_prefix,
     reset_cuda_transfer_stats, CudaDenseContext, CudaDenseStorage, CudaPlanCacheStats,
-    CudaRegionBeta, CudaScalar, CudaTransferStats,
+    CudaRegionBeta, CudaRegionCoefficient, CudaScalar, CudaTransferStats,
 };
 #[cfg(feature = "cuda")]
 pub use cuda_region::CudaRegion;
