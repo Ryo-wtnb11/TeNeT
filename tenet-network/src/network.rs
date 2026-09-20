@@ -21,10 +21,10 @@ use tenet::prelude::{Error, Runtime, TensorScalar};
 #[cfg(feature = "cuda")]
 use tenet::typed::{CudaPayload, CudaStorage};
 use tenet::typed::{
-    GradedSpace, NetworkDegeneracyRestriction, NetworkReuseClass, RuntimeDetachedTensorMap,
-    TensorMap, TypedSpaceModeDispatch, TypedTensorAdjointDispatch, TypedTensorContractDispatch,
-    TypedTensorModeDispatch, TypedTensorRootDispatch, TypedTensorTraceDispatch,
-    TypedTensorTransformDispatch,
+    GradedSpace, NetworkDegeneracyRestriction, NetworkPayloadStorage, NetworkReuseClass,
+    RuntimeDetachedTensorMap, TensorMap, TypedSpaceModeDispatch, TypedTensorAdjointDispatch,
+    TypedTensorContractDispatch, TypedTensorModeDispatch, TypedTensorRootDispatch,
+    TypedTensorTraceDispatch, TypedTensorTransformDispatch,
 };
 use tenet::RuntimeIdentity;
 #[cfg(feature = "cuda")]
@@ -174,9 +174,15 @@ mod host_mode_sealed {
     impl Sealed for tenet::core::CheckedGenericAdmissionMode {}
 }
 
-/// Internal Host network policy selected by the provider's admission mode.
+/// Internal network policy selected by the provider's admission mode and the
+/// operand payload storage.
+///
+/// `S` defaults to Host `Vec<D>`, so `HostNetworkModeDispatch<R, D>` keeps
+/// naming the Host policy. A second instantiation per storage carries the
+/// device policy: which primitives exist there, whether destinations may be
+/// reused, and how an idle workspace is parked.
 #[doc(hidden)]
-pub trait HostNetworkModeDispatch<R, D>:
+pub trait HostNetworkModeDispatch<R, D, S = Vec<D>>:
     host_mode_sealed::Sealed
     + TypedTensorModeDispatch<R>
     + TypedSpaceModeDispatch<R>
@@ -187,37 +193,51 @@ pub trait HostNetworkModeDispatch<R, D>:
 where
     R: TypedSectorAdmission<Mode = Self>,
     D: TensorScalar,
+    S: NetworkPayloadStorage<D>,
 {
     const REUSE_DESTINATIONS: bool;
 
-    fn leg_dims<S: TensorStorage<D>>(
-        tensor: &TensorMap<R, D, S>,
+    fn leg_dims<B: TensorStorage<D>>(
+        tensor: &TensorMap<R, D, B>,
     ) -> Result<Vec<usize>, HostNetworkError<R>>;
 
+    /// Lowers a `conj`-marked operand to its adjoint on this storage.
+    fn adjoint_operand(
+        tensor: &TensorMap<R, D, S>,
+    ) -> Result<TensorMap<R, D, S>, HostNetworkError<R>>;
+
     fn contract_step(
-        lhs: &TensorMap<R, D>,
-        rhs: &TensorMap<R, D>,
-        destination: &mut Option<TensorMap<R, D>>,
+        lhs: &TensorMap<R, D, S>,
+        rhs: &TensorMap<R, D, S>,
+        destination: &mut Option<TensorMap<R, D, S>>,
         lhs_axes: &[usize],
         rhs_axes: &[usize],
         output_axes: &[usize],
-    ) -> Result<StepOutput<TensorMap<R, D>>, HostNetworkError<R>>;
+    ) -> Result<StepOutput<TensorMap<R, D, S>>, HostNetworkError<R>>;
 
     fn permute_step(
-        tensor: &TensorMap<R, D>,
-        destination: &mut Option<TensorMap<R, D>>,
+        tensor: &TensorMap<R, D, S>,
+        destination: &mut Option<TensorMap<R, D, S>>,
         codomain: &[usize],
         domain: &[usize],
-    ) -> Result<StepOutput<TensorMap<R, D>>, HostNetworkError<R>>;
+    ) -> Result<StepOutput<TensorMap<R, D, S>>, HostNetworkError<R>>;
+
+    /// Reorients the final schedule result, which never has a reusable
+    /// destination because it leaves the workspace.
+    fn permute_final(
+        tensor: &TensorMap<R, D, S>,
+        codomain: &[usize],
+        domain: &[usize],
+    ) -> Result<TensorMap<R, D, S>, HostNetworkError<R>>;
 
     fn activate_parked(
-        workspace: &mut NetworkExecutionWorkspace<R, D>,
+        workspace: &mut NetworkExecutionWorkspace<R, D, S>,
         runtime: &Runtime,
-        tensors: &[&TensorMap<R, D>],
+        tensors: &[&TensorMap<R, D, S>],
         steps: &[CompiledStep],
     ) -> Result<(), HostNetworkError<R>>;
 
-    fn park_workspace(workspace: &mut NetworkExecutionWorkspace<R, D>);
+    fn park_workspace(workspace: &mut NetworkExecutionWorkspace<R, D, S>);
 }
 
 #[cfg(feature = "cuda")]
@@ -546,7 +566,7 @@ impl Network {
             PayloadMeter::new(measured_payload_ceiling, &accumulator).map_err(map_payload_error)?;
         if bound.plan.slices().nslices() == 0 {
             meter
-                .observe::<R, D>(&[], &[], &[])
+                .observe::<R, D, Vec<D>>(&[], &[], &[])
                 .map_err(map_payload_error)?;
             return Ok((accumulator, meter.stats()));
         }
@@ -803,14 +823,15 @@ where
     Ok(())
 }
 
-fn validate_typed_contracted_pairs<R, D>(
-    tensors: &[TensorMap<R, D>],
+fn validate_typed_contracted_pairs<R, D, S>(
+    tensors: &[TensorMap<R, D, S>],
     pairs: &[InputLegPair],
 ) -> Result<(), HostNetworkError<R>>
 where
     R: TypedSectorAdmission,
-    R::Mode: HostNetworkModeDispatch<R, D>,
+    R::Mode: HostNetworkModeDispatch<R, D, S>,
     D: TensorScalar,
+    S: NetworkPayloadStorage<D>,
 {
     let spaces = tensors
         .iter()
@@ -832,7 +853,7 @@ fn typed_flat_spaces<R, D, S>(
 ) -> Result<Vec<GradedSpace<R>>, HostNetworkError<R>>
 where
     R: TypedSectorAdmission,
-    R::Mode: HostNetworkModeDispatch<R, D>,
+    R::Mode: TypedTensorModeDispatch<R>,
     D: TensorScalar,
     S: TensorStorage<D>,
 {
@@ -853,7 +874,7 @@ fn typed_effective_spaces<R, D, S>(
 ) -> Result<Vec<GradedSpace<R>>, HostNetworkError<R>>
 where
     R: TypedSectorAdmission,
-    R::Mode: HostNetworkModeDispatch<R, D>,
+    R::Mode: TypedTensorModeDispatch<R>,
     D: TensorScalar,
     S: TensorStorage<D>,
 {
@@ -869,35 +890,6 @@ where
             .collect::<Result<Vec<_>, _>>()?,
     );
     Ok(spaces)
-}
-
-#[cfg(feature = "cuda")]
-fn validate_typed_input_pairs<R, D, S>(
-    tensors: &[&TensorMap<R, D, S>],
-    adjoints: &[bool],
-    pairs: &[InputLegPair],
-) -> Result<(), Error>
-where
-    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
-        + MultiplicityFreeRigidSymbols<Scalar = f64>
-        + CheckedFusionAlgebra
-        + SectorCodec,
-    D: TensorScalar,
-    S: TensorStorage<D>,
-{
-    let spaces = tensors
-        .iter()
-        .zip(adjoints)
-        .map(|(&tensor, &adjoint)| typed_effective_spaces(tensor, adjoint))
-        .collect::<Result<Vec<_>, Error>>()?;
-    for &((lhs_slot, lhs_axis), (rhs_slot, rhs_axis)) in pairs {
-        if spaces[rhs_slot][rhs_axis] != spaces[lhs_slot][lhs_axis].try_dual()? {
-            return Err(invalid(format!(
-                "contracted input spaces mismatch between operand {lhs_slot} leg {lhs_axis} and operand {rhs_slot} leg {rhs_axis}"
-            )));
-        }
-    }
-    Ok(())
 }
 
 fn rotate<T: Clone>(items: &[T], split: usize) -> Vec<T> {
@@ -945,16 +937,21 @@ pub struct CompiledStep {
     authority_input_slot: usize,
 }
 
-/// Caller-owned Host replay state for one planned network at a time.
+/// Caller-owned replay state for one planned network at a time.
 ///
 /// The stored payload destinations are private implementation details. Host MF
 /// replay can reuse compatible intermediate buffers. Checked Generic replay
 /// reuses the plan and workspace containers but admits new intermediate
 /// tensors. The final tensor leaves the workspace in both modes.
-pub struct NetworkExecutionWorkspace<R, D> {
-    slots: Vec<Option<TensorMap<R, D>>>,
+///
+/// `S` is the operand payload storage and defaults to Host `Vec<D>`. A device
+/// storage uses the same ownership, parking, quarantine and budget model; what
+/// may be reused is decided per `(mode, storage)` by the mode dispatch's
+/// `REUSE_DESTINATIONS`.
+pub struct NetworkExecutionWorkspace<R, D, S = Vec<D>> {
+    slots: Vec<Option<TensorMap<R, D, S>>>,
     producers: Vec<Option<(usize, bool)>>,
-    intermediates: Vec<TypedIntermediateBuffers<R, D>>,
+    intermediates: Vec<TypedIntermediateBuffers<R, D, S>>,
     owner_token: Option<u64>,
     runtime: Option<RuntimeIdentity>,
     rule_identity: Option<RuleIdentity>,
@@ -966,11 +963,11 @@ struct TypedInputSnapshot {
     reuse_class: NetworkReuseClass,
 }
 
-struct TypedIntermediateBuffers<R, D> {
-    contracted: Option<TensorMap<R, D>>,
-    oriented: Option<TensorMap<R, D>>,
-    parked_contracted: Option<RuntimeDetachedTensorMap<D>>,
-    parked_oriented: Option<RuntimeDetachedTensorMap<D>>,
+struct TypedIntermediateBuffers<R, D, S = Vec<D>> {
+    contracted: Option<TensorMap<R, D, S>>,
+    oriented: Option<TensorMap<R, D, S>>,
+    parked_contracted: Option<RuntimeDetachedTensorMap<D, S>>,
+    parked_oriented: Option<RuntimeDetachedTensorMap<D, S>>,
 }
 
 struct PayloadMeter {
@@ -988,9 +985,9 @@ enum PayloadMeterError {
 }
 
 impl PayloadMeter {
-    fn new<R, D: TensorScalar>(
+    fn new<R, D: TensorScalar, S: NetworkPayloadStorage<D>>(
         limit: usize,
-        destination: &TensorMap<R, D>,
+        destination: &TensorMap<R, D, S>,
     ) -> std::result::Result<Self, PayloadMeterError> {
         let destination = destination
             .network_owned_payload()
@@ -1012,9 +1009,9 @@ impl PayloadMeter {
         }
     }
 
-    fn set_base<'a, R: 'a, D: TensorScalar + 'a>(
+    fn set_base<'a, R: 'a, D: TensorScalar + 'a, S: NetworkPayloadStorage<D> + 'a>(
         &mut self,
-        tensors: impl IntoIterator<Item = &'a TensorMap<R, D>>,
+        tensors: impl IntoIterator<Item = &'a TensorMap<R, D, S>>,
     ) {
         self.base.clear();
         self.base.extend(
@@ -1024,9 +1021,9 @@ impl PayloadMeter {
         );
     }
 
-    fn observe<R, D: TensorScalar>(
+    fn observe<R, D: TensorScalar, S: NetworkPayloadStorage<D>>(
         &mut self,
-        slots: &[Option<TensorMap<R, D>>],
+        slots: &[Option<TensorMap<R, D, S>>],
         producers: &[Option<(usize, bool)>],
         extra: &[Option<(usize, usize)>],
     ) -> std::result::Result<(), PayloadMeterError> {
@@ -1071,8 +1068,8 @@ impl PayloadMeter {
     }
 }
 
-fn intermediate_payloads<R, D: TensorScalar>(
-    intermediates: &[TypedIntermediateBuffers<R, D>],
+fn intermediate_payloads<R, D: TensorScalar, S: NetworkPayloadStorage<D>>(
+    intermediates: &[TypedIntermediateBuffers<R, D, S>],
 ) -> Vec<Option<(usize, usize)>> {
     #[cfg(test)]
     INTERMEDIATE_PAYLOAD_SNAPSHOT_CALLS.with(|calls| {
@@ -1159,8 +1156,12 @@ where
 {
     const REUSE_DESTINATIONS: bool = true;
 
-    fn leg_dims<S: TensorStorage<D>>(tensor: &TensorMap<R, D, S>) -> Result<Vec<usize>, Error> {
+    fn leg_dims<B: TensorStorage<D>>(tensor: &TensorMap<R, D, B>) -> Result<Vec<usize>, Error> {
         tensor.leg_dims()
+    }
+
+    fn adjoint_operand(tensor: &TensorMap<R, D>) -> Result<TensorMap<R, D>, Error> {
+        tensor.adjoint()
     }
 
     fn contract_step(
@@ -1205,6 +1206,14 @@ where
         }
     }
 
+    fn permute_final(
+        tensor: &TensorMap<R, D>,
+        codomain: &[usize],
+        domain: &[usize],
+    ) -> Result<TensorMap<R, D>, Error> {
+        tensor.permute(codomain, domain)
+    }
+
     fn activate_parked(
         workspace: &mut NetworkExecutionWorkspace<R, D>,
         runtime: &Runtime,
@@ -1229,8 +1238,8 @@ where
 {
     const REUSE_DESTINATIONS: bool = false;
 
-    fn leg_dims<S: TensorStorage<D>>(
-        tensor: &TensorMap<R, D, S>,
+    fn leg_dims<B: TensorStorage<D>>(
+        tensor: &TensorMap<R, D, B>,
     ) -> Result<Vec<usize>, HostNetworkError<R>> {
         tensor
             .codomain()
@@ -1238,6 +1247,10 @@ where
             .chain(tensor.domain())
             .map(|space| space.dim().map(|dimension| dimension.round() as usize))
             .collect()
+    }
+
+    fn adjoint_operand(tensor: &TensorMap<R, D>) -> Result<TensorMap<R, D>, HostNetworkError<R>> {
+        tensor.adjoint()
     }
 
     fn contract_step(
@@ -1265,6 +1278,14 @@ where
         Ok(StepOutput::Returned(tensor.permute(codomain, domain)?))
     }
 
+    fn permute_final(
+        tensor: &TensorMap<R, D>,
+        codomain: &[usize],
+        domain: &[usize],
+    ) -> Result<TensorMap<R, D>, HostNetworkError<R>> {
+        tensor.permute(codomain, domain)
+    }
+
     fn activate_parked(
         _workspace: &mut NetworkExecutionWorkspace<R, D>,
         _runtime: &Runtime,
@@ -1284,7 +1305,93 @@ where
     }
 }
 
-impl<R, D> Default for TypedIntermediateBuffers<R, D> {
+/// Device network policy: the returning CUDA contraction only.
+///
+/// The device carries no `contract_overwrite_into` and no `permute` yet, so
+/// destinations are not reused here (that is G3c-2) and any schedule that needs
+/// a permutation is rejected explicitly. `cuda_schedule_is_direct` already
+/// refuses such schedules before execution, so the permute arms are a typed
+/// capability boundary rather than a reachable path. Slots, producers, input
+/// snapshots and parking behave exactly as on Host, which is what lets one pool
+/// serve both placements.
+#[cfg(feature = "cuda")]
+impl<R, D> HostNetworkModeDispatch<R, D, CudaStorage<D>> for MultiplicityFreeAdmissionMode
+where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec,
+    D: CudaPayload,
+{
+    const REUSE_DESTINATIONS: bool = false;
+
+    fn leg_dims<B: TensorStorage<D>>(tensor: &TensorMap<R, D, B>) -> Result<Vec<usize>, Error> {
+        tensor.leg_dims()
+    }
+
+    fn adjoint_operand(
+        tensor: &TensorMap<R, D, CudaStorage<D>>,
+    ) -> Result<TensorMap<R, D, CudaStorage<D>>, Error> {
+        tensor.adjoint()
+    }
+
+    fn contract_step(
+        lhs: &TensorMap<R, D, CudaStorage<D>>,
+        rhs: &TensorMap<R, D, CudaStorage<D>>,
+        _destination: &mut Option<TensorMap<R, D, CudaStorage<D>>>,
+        lhs_axes: &[usize],
+        rhs_axes: &[usize],
+        output_axes: &[usize],
+    ) -> Result<StepOutput<TensorMap<R, D, CudaStorage<D>>>, Error> {
+        #[cfg(test)]
+        CUDA_NETWORK_CONTRACT_CALLS.fetch_add(1, Ordering::Relaxed);
+        Ok(StepOutput::Returned(lhs.contract(
+            rhs,
+            lhs_axes,
+            rhs_axes,
+            output_axes,
+        )?))
+    }
+
+    fn permute_step(
+        _tensor: &TensorMap<R, D, CudaStorage<D>>,
+        _destination: &mut Option<TensorMap<R, D, CudaStorage<D>>>,
+        _codomain: &[usize],
+        _domain: &[usize],
+    ) -> Result<StepOutput<TensorMap<R, D, CudaStorage<D>>>, Error> {
+        Err(unsupported_cuda_permutation())
+    }
+
+    fn permute_final(
+        _tensor: &TensorMap<R, D, CudaStorage<D>>,
+        _codomain: &[usize],
+        _domain: &[usize],
+    ) -> Result<TensorMap<R, D, CudaStorage<D>>, Error> {
+        Err(unsupported_cuda_permutation())
+    }
+
+    fn activate_parked(
+        workspace: &mut NetworkExecutionWorkspace<R, D, CudaStorage<D>>,
+        runtime: &Runtime,
+        tensors: &[&TensorMap<R, D, CudaStorage<D>>],
+        steps: &[CompiledStep],
+    ) -> Result<(), Error> {
+        workspace.activate_parked(runtime, tensors, steps)
+    }
+
+    fn park_workspace(workspace: &mut NetworkExecutionWorkspace<R, D, CudaStorage<D>>) {
+        workspace.park_runtime_owners();
+    }
+}
+
+#[cfg(feature = "cuda")]
+fn unsupported_cuda_permutation() -> Error {
+    Error::UnsupportedOnDevice(
+        "typed CUDA network execution has no device leg permutation".to_string(),
+    )
+}
+
+impl<R, D, S> Default for TypedIntermediateBuffers<R, D, S> {
     fn default() -> Self {
         Self {
             contracted: None,
@@ -1295,7 +1402,7 @@ impl<R, D> Default for TypedIntermediateBuffers<R, D> {
     }
 }
 
-impl<R, D> Default for NetworkExecutionWorkspace<R, D> {
+impl<R, D, S> Default for NetworkExecutionWorkspace<R, D, S> {
     fn default() -> Self {
         Self {
             slots: Vec::new(),
@@ -1309,7 +1416,7 @@ impl<R, D> Default for NetworkExecutionWorkspace<R, D> {
     }
 }
 
-impl<R, D> NetworkExecutionWorkspace<R, D> {
+impl<R, D, S> NetworkExecutionWorkspace<R, D, S> {
     #[cfg(test)]
     pub(crate) fn with_test_slot_capacity(capacity: usize) -> Self {
         Self {
@@ -1345,11 +1452,14 @@ impl<R, D> NetworkExecutionWorkspace<R, D> {
     /// budget therefore remains a ceiling even if that workspace is the last
     /// owner of a shared layout descendant. Runtime/provider owners are
     /// detached while idle; the provider-neutral rule identity is charged.
-    pub(crate) fn retained_idle_bytes(&self) -> usize {
+    pub(crate) fn retained_idle_bytes(&self) -> usize
+    where
+        S: NetworkPayloadStorage<D>,
+    {
         let mut bytes = self
             .slots
             .capacity()
-            .saturating_mul(std::mem::size_of::<Option<TensorMap<R, D>>>())
+            .saturating_mul(std::mem::size_of::<Option<TensorMap<R, D, S>>>())
             .saturating_add(
                 self.producers
                     .capacity()
@@ -1358,7 +1468,7 @@ impl<R, D> NetworkExecutionWorkspace<R, D> {
             .saturating_add(
                 self.intermediates
                     .capacity()
-                    .saturating_mul(std::mem::size_of::<TypedIntermediateBuffers<R, D>>()),
+                    .saturating_mul(std::mem::size_of::<TypedIntermediateBuffers<R, D, S>>()),
             )
             .saturating_add(
                 self.input_snapshot
@@ -1413,7 +1523,7 @@ impl<R, D> NetworkExecutionWorkspace<R, D> {
     fn activate_parked(
         &mut self,
         runtime: &Runtime,
-        tensors: &[&TensorMap<R, D>],
+        tensors: &[&TensorMap<R, D, S>],
         steps: &[CompiledStep],
     ) -> Result<(), Error>
     where
@@ -1480,96 +1590,91 @@ impl PlannedNetwork {
         tensors: &[&TensorMap<R, D, CudaStorage<D>>],
     ) -> Result<TensorMap<R, D, CudaStorage<D>>, Error>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+        R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+            + MultiplicityFreeRigidSymbols<Scalar = f64>
+            + CheckedFusionAlgebra
+            + SectorCodec,
         D: CudaPayload,
     {
-        if tensors.len() != self.schedule.input_ranks.len() {
-            return Err(invalid(format!(
-                "plan has {} operands but {} tensors were given",
-                self.schedule.input_ranks.len(),
-                tensors.len()
-            )));
-        }
-        let runtime = tensors
+        self.execute_cuda_with_workspace(tensors, &mut NetworkExecutionWorkspace::default())
+    }
+
+    /// Device execution with reusable private replay state.
+    ///
+    /// Placement and schedule admission are device-specific and are checked
+    /// here; everything after them — operand count, Runtime and rule identity,
+    /// topology drift, contracted-leg spaces, replay-state revalidation, the
+    /// step loop and the workspace lifecycle — is the same storage-generic body
+    /// Host runs.
+    #[cfg(feature = "cuda")]
+    pub(crate) fn execute_cuda_with_workspace<R, D>(
+        &self,
+        tensors: &[&TensorMap<R, D, CudaStorage<D>>],
+        workspace: &mut NetworkExecutionWorkspace<R, D, CudaStorage<D>>,
+    ) -> Result<TensorMap<R, D, CudaStorage<D>>, Error>
+    where
+        R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+            + MultiplicityFreeRigidSymbols<Scalar = f64>
+            + CheckedFusionAlgebra
+            + SectorCodec,
+        D: CudaPayload,
+    {
+        self.validate_cuda_placement(tensors)?;
+        self.execute_with_workspace(tensors, workspace)
+    }
+
+    /// Device-only admission: every operand resides on this Runtime's CUDA
+    /// device, and the compiled schedule needs no primitive the device lacks.
+    #[cfg(feature = "cuda")]
+    fn validate_cuda_placement<R, D>(
+        &self,
+        tensors: &[&TensorMap<R, D, CudaStorage<D>>],
+    ) -> Result<(), Error>
+    where
+        R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+            + MultiplicityFreeRigidSymbols<Scalar = f64>
+            + CheckedFusionAlgebra
+            + SectorCodec,
+        D: CudaPayload,
+    {
+        let device = tensors
             .first()
             .ok_or_else(|| invalid("network execution requires at least one operand"))?
-            .runtime();
-        let runtime_identity = runtime.identity();
-        let rule_identity = TypedSectorAdmission::typed_rule_identity(tensors[0].provider());
-        let device = runtime.cuda_device_ordinal().ok_or_else(|| {
-            invalid(
-                "this runtime was built without a CUDA device; use Runtime::builder().cuda(device)",
-            )
-        })?;
-        for (index, &tensor) in tensors.iter().enumerate() {
-            if !runtime_identity.matches(tensor.runtime()) {
-                return Err(invalid(format!("operand {index} uses a different Runtime")));
-            }
-            if rule_identity != TypedSectorAdmission::typed_rule_identity(tensor.provider()) {
-                return Err(Error::RuleMismatch);
-            }
-            if tensor.rank() != self.schedule.input_ranks[index]
-                || tensor.codomain_rank() != self.input_codomain_ranks[index]
-            {
-                return Err(invalid(format!(
-                    "operand {index} topology drifted: planned rank/split {}/{}, got {}/{}",
-                    self.schedule.input_ranks[index],
-                    self.input_codomain_ranks[index],
-                    tensor.rank(),
-                    tensor.codomain_rank()
-                )));
-            }
+            .runtime()
+            .cuda_device_ordinal()
+            .ok_or_else(|| {
+                invalid(
+                    "this runtime was built without a CUDA device; use Runtime::builder().cuda(device)",
+                )
+            })?;
+        for &tensor in tensors {
             if tensor.placement() != Placement::Cuda(device) {
                 return Err(Error::PlacementMismatch);
             }
         }
-        validate_typed_input_pairs(tensors, &self.conj, &self.schedule.contracted_input_pairs)?;
-
-        let input_shapes = tensors
+        // Why recomputed rather than read from the plan-time `cuda_direct`
+        // flag: a caller (and the in-crate rejection test) can hold a plan
+        // whose schedule was edited after planning, and this is the check that
+        // keeps such a schedule from reaching the first device kernel.
+        let input_shapes = self
+            .schedule
+            .input_ranks
             .iter()
+            .copied()
             .enumerate()
-            .map(|(index, tensor)| {
+            .map(|(index, rank)| {
+                let codomain_rank = self.input_codomain_ranks[index];
                 (
-                    tensor.rank(),
+                    rank,
                     if self.conj[index] {
-                        tensor.domain_rank()
+                        rank.saturating_sub(codomain_rank)
                     } else {
-                        tensor.codomain_rank()
+                        codomain_rank
                     },
                 )
             })
             .collect::<Vec<_>>();
-        self.preflight_cuda_schedule(&input_shapes)?;
-
-        let mut slots: Vec<Option<TensorMap<R, D, CudaStorage<D>>>> =
-            (0..self.schedule.slot_count).map(|_| None).collect();
-        for (index, &tensor) in tensors.iter().enumerate() {
-            slots[index] = Some(if self.conj[index] {
-                tensor.adjoint()?
-            } else {
-                tensor.clone()
-            });
-        }
-        for step in &self.schedule.steps {
-            let lhs = slots[step.lhs_slot]
-                .take()
-                .ok_or_else(|| invalid("lhs operand already consumed"))?;
-            let rhs = slots[step.rhs_slot]
-                .take()
-                .ok_or_else(|| invalid("rhs operand already consumed"))?;
-            #[cfg(all(test, feature = "cuda"))]
-            CUDA_NETWORK_CONTRACT_CALLS.fetch_add(1, Ordering::Relaxed);
-            let result = lhs.contract(
-                &rhs,
-                &step.lhs_contract_axes,
-                &step.rhs_contract_axes,
-                &step.contract_output_axes,
-            )?;
-            slots[step.result_slot] = Some(result);
-        }
-        slots[self.schedule.final_slot]
-            .take()
-            .ok_or_else(|| invalid("network execution produced no final tensor"))
+        self.preflight_cuda_schedule(&input_shapes)
     }
 
     #[cfg(feature = "cuda")]
@@ -1634,15 +1739,16 @@ impl PlannedNetwork {
     ///
     /// This does not accept or preserve a caller-owned output destination;
     /// successful execution returns a new owned tensor.
-    pub fn execute_with_workspace<R, D>(
+    pub fn execute_with_workspace<R, D, S>(
         &self,
-        tensors: &[&TensorMap<R, D>],
-        workspace: &mut NetworkExecutionWorkspace<R, D>,
-    ) -> Result<TensorMap<R, D>, HostNetworkError<R>>
+        tensors: &[&TensorMap<R, D, S>],
+        workspace: &mut NetworkExecutionWorkspace<R, D, S>,
+    ) -> Result<TensorMap<R, D, S>, HostNetworkError<R>>
     where
         R: TypedSectorAdmission,
-        R::Mode: HostNetworkModeDispatch<R, D>,
+        R::Mode: HostNetworkModeDispatch<R, D, S>,
         D: TensorScalar,
+        S: NetworkPayloadStorage<D>,
     {
         match self.execute_with_workspace_meter(tensors, workspace, None) {
             Ok(result) => Ok(result),
@@ -1653,16 +1759,17 @@ impl PlannedNetwork {
         }
     }
 
-    fn execute_with_workspace_meter<R, D>(
+    fn execute_with_workspace_meter<R, D, S>(
         &self,
-        tensors: &[&TensorMap<R, D>],
-        workspace: &mut NetworkExecutionWorkspace<R, D>,
+        tensors: &[&TensorMap<R, D, S>],
+        workspace: &mut NetworkExecutionWorkspace<R, D, S>,
         mut meter: Option<&mut PayloadMeter>,
-    ) -> std::result::Result<TensorMap<R, D>, MeteredNetworkError<HostNetworkError<R>>>
+    ) -> std::result::Result<TensorMap<R, D, S>, MeteredNetworkError<HostNetworkError<R>>>
     where
         R: TypedSectorAdmission,
-        R::Mode: HostNetworkModeDispatch<R, D>,
+        R::Mode: HostNetworkModeDispatch<R, D, S>,
         D: TensorScalar,
+        S: NetworkPayloadStorage<D>,
     {
         let prepared: Result<_, HostNetworkError<R>> = (|| {
             if tensors.len() != self.schedule.input_ranks.len() {
@@ -1722,7 +1829,7 @@ impl PlannedNetwork {
                 .enumerate()
                 .map(|(index, tensor)| {
                     if self.conj[index] {
-                        tensor.adjoint()
+                        <R::Mode as HostNetworkModeDispatch<R, D, S>>::adjoint_operand(tensor)
                     } else {
                         Ok((*tensor).clone())
                     }
@@ -1750,7 +1857,7 @@ impl PlannedNetwork {
                         .collect::<Vec<_>>(),
                 )
             };
-            let reuse_enabled = <R::Mode as HostNetworkModeDispatch<R, D>>::REUSE_DESTINATIONS
+            let reuse_enabled = <R::Mode as HostNetworkModeDispatch<R, D, S>>::REUSE_DESTINATIONS
                 && new_snapshot
                     .as_ref()
                     .unwrap_or(&workspace.input_snapshot)
@@ -1766,7 +1873,7 @@ impl PlannedNetwork {
         })();
         let (runtime_identity, rule_identity, lowered, new_snapshot, reuse_enabled) = prepared?;
         if new_snapshot.is_none() && reuse_enabled {
-            <R::Mode as HostNetworkModeDispatch<R, D>>::activate_parked(
+            <R::Mode as HostNetworkModeDispatch<R, D, S>>::activate_parked(
                 workspace,
                 tensors[0].runtime(),
                 tensors,
@@ -1849,7 +1956,7 @@ impl PlannedNetwork {
             } else {
                 &mut *contracted_buffer
             };
-            let contracted = <R::Mode as HostNetworkModeDispatch<R, D>>::contract_step(
+            let contracted = <R::Mode as HostNetworkModeDispatch<R, D, S>>::contract_step(
                 lhs,
                 rhs,
                 contract_buffer,
@@ -1871,7 +1978,7 @@ impl PlannedNetwork {
             let result = if fused {
                 contracted.take(oriented_buffer)
             } else if let Some((codomain, domain)) = &step.result_permutation {
-                let oriented = <R::Mode as HostNetworkModeDispatch<R, D>>::permute_step(
+                let oriented = <R::Mode as HostNetworkModeDispatch<R, D, S>>::permute_step(
                     contracted.get(contracted_buffer),
                     oriented_buffer,
                     codomain,
@@ -1919,7 +2026,9 @@ impl PlannedNetwork {
             .as_ref()
             .ok_or_else(|| HostNetworkError::<R>::from(invalid("no final tensor produced")))?;
         if let Some((codomain, domain)) = &self.schedule.final_permutation {
-            let output = result.permute(codomain, domain)?;
+            let output = <R::Mode as HostNetworkModeDispatch<R, D, S>>::permute_final(
+                result, codomain, domain,
+            )?;
             if let Some(meter) = meter {
                 let mut payloads = intermediate_payloads(intermediates);
                 payloads.push(output.network_owned_payload());
@@ -1941,9 +2050,9 @@ impl PlannedNetwork {
     }
 }
 
-fn return_typed_intermediate<R, D>(
-    intermediates: &mut [TypedIntermediateBuffers<R, D>],
-    tensor: TensorMap<R, D>,
+fn return_typed_intermediate<R, D, S>(
+    intermediates: &mut [TypedIntermediateBuffers<R, D, S>],
+    tensor: TensorMap<R, D, S>,
     producer: Option<(usize, bool)>,
     reuse_enabled: bool,
 ) {
@@ -2503,7 +2612,9 @@ where
     R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
         + MultiplicityFreeRigidSymbols<Scalar = f64>
         + CheckedFusionAlgebra
-        + SectorCodec,
+        + SectorCodec
+        + Send
+        + Sync,
     D: CudaPayload,
 {
 }
@@ -2514,7 +2625,9 @@ where
     R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
         + MultiplicityFreeRigidSymbols<Scalar = f64>
         + CheckedFusionAlgebra
-        + SectorCodec,
+        + SectorCodec
+        + Send
+        + Sync,
     D: CudaPayload,
 {
     type Error = Error;
@@ -2550,7 +2663,9 @@ where
     R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
         + MultiplicityFreeRigidSymbols<Scalar = f64>
         + CheckedFusionAlgebra
-        + SectorCodec,
+        + SectorCodec
+        + Send
+        + Sync,
     D: CudaPayload,
 {
     fn contract_static_trace(

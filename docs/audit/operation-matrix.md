@@ -126,8 +126,15 @@ trivial/dense provider exists.
 | SVD/EIGH | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | PROVED |
 | QR | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | [UNSUPPORTED](https://github.com/Ryo-wtnb11/TeNeT/issues/1270) |
 | EIG/null/polar/solve/matrix functions | PROVED | PROVED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
-| Network ordinary replay | PROVED | PROVED | INTENTIONAL-DIFFERENCE | PROVED | UNSUPPORTED | PROVED |
+| Network ordinary replay [8] | PROVED | PROVED | INTENTIONAL-DIFFERENCE | PROVED | UNSUPPORTED | PROVED |
 | v1 typed snapshot (`f64`/`Complex64`) [7] | PROVED | PROVED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
+
+[8] Device network replay leases a workspace from the same per-plan pool,
+quarantine and byte-budget machinery as Host, keyed by `(provider, dtype,
+storage)`. It reuses slots, producers and the input snapshot only; payload
+destinations are not yet reused on the device, because `contract_overwrite_into`
+has no device implementation — that is
+[#1274](https://github.com/Ryo-wtnb11/TeNeT/issues/1274)'s successor G3c-2.
 
 The two storage `NEEDS-PROOF` cells describe future storage implementations,
 not provider conformance. Host/device checked-Generic parity belongs to
