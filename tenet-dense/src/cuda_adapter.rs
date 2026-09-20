@@ -16,7 +16,9 @@ use tenferro_tensor::{
 };
 
 use super::{DenseBackend, DenseDType, DenseError, MatrixOp};
-use crate::cuda_region::{validate_destination_layout, validate_region, CudaRegion};
+use crate::cuda_region::{
+    permute_operand_offset_is_aligned, validate_destination_layout, validate_region, CudaRegion,
+};
 use crate::tensor::dense_dtype_from_tenferro;
 
 mod cuda_scalar_sealed {
@@ -166,7 +168,8 @@ pub struct CudaPlanCacheStats {
 ///   `cuda_gemm_region_strided_into` and from the region primitives
 ///   ([`cuda_region_axpby`], [`cuda_region_zero`]) alike.
 /// - `solver_calls`: cuSOLVER region calls (SVD, QR, EIGH).
-/// - `copy_calls`: `cuda_copy_region_into` calls that move data.
+/// - `copy_calls`: `cuda_copy_region_into` calls that move data, on either
+///   of its two routes; the region route also counts one `gemm_calls`.
 ///
 /// The counters are `Relaxed` and process-wide: a snapshot taken while another
 /// thread submits work is a consistent-per-field sample, not a global instant.
@@ -1503,7 +1506,8 @@ fn expect_dtype<D: CudaScalar>(
 /// multiplies every element and consumes an entry of the contraction plan LRU
 /// that the caller's GEMMs share. A packed prefix needs neither, and the
 /// template prefix is exactly the compact offset-0 source `copy_read_into`
-/// requires.
+/// requires. Both operands sit at element offset 0, so this route is unaffected
+/// by the descriptor-alignment hazard [`cuda_copy_region_into`] guards against.
 ///
 /// Transfer contract: it uploads (or grows) the template on first use of a
 /// length and dtype, and nothing afterwards. Size it once with
@@ -1550,6 +1554,40 @@ pub fn cuda_zero_prefix<D: CudaScalar>(
 /// leading `rows * cols` elements of a compact buffer are themselves compact,
 /// which is what lets one maximum-length zero template reset every
 /// destination a `tensor!` workspace retains.
+///
+/// Route: a destination whose byte offset keeps the alignment Tenferro 0.5.0
+/// advertises to cuTENSOR (256 bytes, `cuda_region::permute_operand_offset_is_aligned`) is
+/// moved by `copy_read_into` — one `cutensorPermute` with its own plan cache.
+/// Every other destination is moved by [`cuda_region_axpby`] instead
+/// ([`CudaRegionCoefficient::One`], `alpha = 1`,
+/// [`CudaRegionBeta::Overwrite`]), whose contraction descriptors report the
+/// truthful per-element view alignment
+/// (`tenferro-gpu-0.5.0/src/cubecl/gemm.rs:630`) and therefore never select a
+/// vectorized kernel the pointer cannot satisfy. The rejected route is not a
+/// slower one for the same work: both move `rows * cols` elements in one
+/// submission. It costs one entry of the contraction plan LRU the caller's
+/// GEMMs share instead of one entry of the permutation cache, and it
+/// multiplies by `1` rather than copying bits, which for [`Complex64`] turns
+/// an infinite payload into `NaN` (disclosed on [`cuda_region_axpby`]). A
+/// factor a device SVD or QR produced is finite whenever its input was, so
+/// this route cannot introduce an infinity that was not already there.
+///
+/// Transfer contract of the region route: the *first* such call per context
+/// and dtype uploads that context's one-element `1`, which is one H2D call and
+/// one device allocation; every later call of either route transfers nothing.
+///
+/// Both routes still count one `copy_calls`; the region route additionally
+/// counts one `gemm_calls`, because that is the submission it makes.
+///
+/// Errors: for *valid* input the two routes are equivalent. For invalid input
+/// they are not interchangeable — the region route validates through
+/// [`cuda_region_axpby`], so a dtype or device mismatch, an out-of-bounds
+/// region or a non-injective destination is reported with `op` =
+/// `"cuda_region_axpby"` (and, for a dtype mismatch,
+/// [`DenseError::DTypeMismatch`] rather than a `"cuda_region"` backend error).
+/// Which variant and `op` a caller sees therefore depends on the destination
+/// offset. No caller branches on either, and both routes reject the same
+/// inputs.
 pub fn cuda_copy_region_into<D: CudaScalar>(
     ctx: &mut CudaDenseContext,
     dst: &mut CudaDenseStorage,
@@ -1573,6 +1611,21 @@ pub fn cuda_copy_region_into<D: CudaScalar>(
                 src.len
             ),
         ));
+    }
+    if !permute_operand_offset_is_aligned(dst_offset, std::mem::size_of::<D>()) {
+        let src_region = CudaRegion::packed(&[rows, cols], 0)?;
+        let dst_region = CudaRegion::new(vec![rows, cols], vec![1, dst_ld], dst_offset)?;
+        return cuda_region_axpby::<D>(
+            ctx,
+            src,
+            &src_region,
+            false,
+            D::ONE,
+            CudaRegionCoefficient::One,
+            CudaRegionBeta::Overwrite,
+            dst,
+            &dst_region,
+        );
     }
     let src_view = src.region_view::<D>(rows, cols, rows, 0)?;
     let dst_view = dst.region_view_mut::<D>(rows, cols, dst_ld, dst_offset)?;

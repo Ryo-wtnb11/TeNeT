@@ -2832,3 +2832,47 @@ fn typed_cuda_contract_overwrite_into_matches_the_returning_contraction() {
             .data()
     );
 }
+
+/// #1320: a factor block that starts at an odd element offset of the flat
+/// device buffer.
+///
+/// The aligned whole-factor route copies each block straight into its sector
+/// region, and Tenferro 0.5.0 told cuTENSOR that an offset destination view is
+/// 256-byte aligned when it is not, so the launch faulted with
+/// `cudaErrorMisalignedAddress` at the next synchronizing call. Every
+/// degeneracy pair here puts the second sector's block at an offset whose byte
+/// product is not a multiple of 256: `(3, 2)` at element 9, `(5, 2)` at 25,
+/// `(3, 3)` at 9. The `(4, 2)` and `(2, 2)` pairs are the controls that passed
+/// before the fix.
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn typed_cuda_factorizations_handle_blocks_at_unaligned_offsets() {
+    let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+    let u1 = Arc::new(U1FusionRule);
+
+    for (d0, d1) in [(3usize, 2usize), (5, 2), (3, 3), (4, 2), (2, 2)] {
+        let leg = GradedSpace::try_new_with_arc(
+            Arc::clone(&u1),
+            [(U1Irrep::new(0), d0), (U1Irrep::new(1), d1)],
+        )
+        .unwrap();
+        let square = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+            if indices[0] == indices[1] {
+                4.0 + indices[0] as f64
+            } else {
+                (1 + indices[0] + 2 * indices[1]) as f64
+            }
+        })
+        .unwrap();
+        assert_typed_cuda_svd_matches_host(&square);
+        assert_typed_cuda_qr_matches_host(&square);
+
+        // Complex64 doubles the element size, so the same block offsets are a
+        // different multiple of 256; device QR stays unsupported for c64
+        // (#1271), so only SVD is exercised.
+        let complex =
+            TensorMap::<_, Complex64>::from_block_fn(&runtime, [&leg], [&leg], distinct_c64_fill())
+                .unwrap();
+        assert_c64_svd_matches_host(&complex);
+    }
+}
