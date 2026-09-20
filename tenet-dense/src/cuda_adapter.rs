@@ -108,13 +108,103 @@ fn dtype_mismatch<D: CudaScalar>(op: &'static str, tensor: &Tensor) -> DenseErro
     }
 }
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 #[cfg(test)]
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
 
 #[cfg(test)]
 static CUDA_FULL_DOWNLOAD_BYTES: AtomicUsize = AtomicUsize::new(0);
 #[cfg(test)]
 static CUDA_METADATA_DOWNLOAD_BYTES: AtomicUsize = AtomicUsize::new(0);
+
+static H2D_CALLS: AtomicU64 = AtomicU64::new(0);
+static H2D_BYTES: AtomicU64 = AtomicU64::new(0);
+static D2H_CALLS: AtomicU64 = AtomicU64::new(0);
+static D2H_BYTES: AtomicU64 = AtomicU64::new(0);
+static DEVICE_ALLOCS: AtomicU64 = AtomicU64::new(0);
+static GEMM_CALLS: AtomicU64 = AtomicU64::new(0);
+static SOLVER_CALLS: AtomicU64 = AtomicU64::new(0);
+static COPY_CALLS: AtomicU64 = AtomicU64::new(0);
+
+/// A snapshot of the process-wide CUDA boundary observation counters.
+///
+/// Observability only: nothing in this module reads these values back, so no
+/// execution decision, dispatch, or capability depends on them. They exist so
+/// a benchmark or a device test can attribute host/device traffic and backend
+/// submissions to a measured phase without re-deriving them from an external
+/// profiler.
+///
+/// Scope, as counted at *this* seam:
+///
+/// - `h2d_*` / `d2h_*`: every host buffer this module uploads or downloads,
+///   including the one-element scalar uploads and reduction/spectrum
+///   downloads. Bytes are the host-side payload bytes.
+/// - `device_allocs`: device buffers this module creates or takes ownership
+///   of, i.e. uploads plus tenferro-produced tensors wrapped as
+///   [`CudaDenseStorage`] (factorization factors). Tenferro's own solver
+///   workspaces and the intermediate tensors of `cuda_is_hermitian_region`
+///   (`abs`, `div`, `sub`, the reductions) allocate on device but are not
+///   visible as buffers here and are therefore not counted.
+/// - `gemm_calls`: `dot_general` submissions from
+///   `cuda_gemm_region_strided_into`.
+/// - `solver_calls`: cuSOLVER region calls (SVD, QR, EIGH).
+/// - `copy_calls`: `cuda_copy_region_into` calls that move data.
+///
+/// The counters are `Relaxed` and process-wide: a snapshot taken while another
+/// thread submits work is a consistent-per-field sample, not a global instant.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct CudaTransferStats {
+    pub h2d_calls: u64,
+    pub h2d_bytes: u64,
+    pub d2h_calls: u64,
+    pub d2h_bytes: u64,
+    pub device_allocs: u64,
+    pub gemm_calls: u64,
+    pub solver_calls: u64,
+    pub copy_calls: u64,
+}
+
+/// Reads the CUDA boundary observation counters. See [`CudaTransferStats`].
+pub fn cuda_transfer_stats() -> CudaTransferStats {
+    CudaTransferStats {
+        h2d_calls: H2D_CALLS.load(Ordering::Relaxed),
+        h2d_bytes: H2D_BYTES.load(Ordering::Relaxed),
+        d2h_calls: D2H_CALLS.load(Ordering::Relaxed),
+        d2h_bytes: D2H_BYTES.load(Ordering::Relaxed),
+        device_allocs: DEVICE_ALLOCS.load(Ordering::Relaxed),
+        gemm_calls: GEMM_CALLS.load(Ordering::Relaxed),
+        solver_calls: SOLVER_CALLS.load(Ordering::Relaxed),
+        copy_calls: COPY_CALLS.load(Ordering::Relaxed),
+    }
+}
+
+/// Zeroes the CUDA boundary observation counters. See [`CudaTransferStats`].
+pub fn reset_cuda_transfer_stats() {
+    for counter in [
+        &H2D_CALLS,
+        &H2D_BYTES,
+        &D2H_CALLS,
+        &D2H_BYTES,
+        &DEVICE_ALLOCS,
+        &GEMM_CALLS,
+        &SOLVER_CALLS,
+        &COPY_CALLS,
+    ] {
+        counter.store(0, Ordering::Relaxed);
+    }
+}
+
+fn record_h2d(bytes: usize) {
+    H2D_CALLS.fetch_add(1, Ordering::Relaxed);
+    H2D_BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
+    DEVICE_ALLOCS.fetch_add(1, Ordering::Relaxed);
+}
+
+fn record_d2h(bytes: usize) {
+    D2H_CALLS.fetch_add(1, Ordering::Relaxed);
+    D2H_BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
+}
 
 fn cuda_error(op: &'static str, err: impl std::fmt::Display) -> DenseError {
     DenseError::Backend {
@@ -199,6 +289,7 @@ impl CudaDenseStorage {
             .map_err(|err| cuda_error("cuda_upload", err))?;
         let tensor = upload_tensor(ctx.backend.runtime(), &host)
             .map_err(|err| cuda_error("cuda_upload", err))?;
+        record_h2d(std::mem::size_of_val(data));
         Ok(Self {
             tensor,
             len: data.len(),
@@ -217,6 +308,7 @@ impl CudaDenseStorage {
         let data = D::as_slice(&host).map_err(|err| cuda_error("cuda_download", err))?;
         #[cfg(test)]
         CUDA_FULL_DOWNLOAD_BYTES.fetch_add(std::mem::size_of_val(data), Ordering::Relaxed);
+        record_d2h(std::mem::size_of_val(data));
         Ok(data.to_vec())
     }
 
@@ -240,6 +332,7 @@ impl CudaDenseStorage {
     /// Wraps a device tensor produced by a tenferro op (e.g. a cuSOLVER
     /// factor) as flat storage.
     fn from_tensor(tensor: Tensor, device: usize) -> Self {
+        DEVICE_ALLOCS.fetch_add(1, Ordering::Relaxed);
         let len = tensor.shape().iter().product();
         Self {
             tensor,
@@ -479,6 +572,7 @@ fn cuda_gemm_region_strided_into<D: CudaScalar>(
         alpha: alpha.contraction_scalar(),
         beta: beta.contraction_scalar(),
     };
+    GEMM_CALLS.fetch_add(1, Ordering::Relaxed);
     ctx.backend
         .dot_general_read_into_accum(
             TensorRead::from_view(lhs_view),
@@ -504,6 +598,7 @@ fn download_values(ctx: &CudaDenseContext, tensor: &Tensor) -> Result<Vec<f64>, 
                 #[cfg(test)]
                 CUDA_METADATA_DOWNLOAD_BYTES
                     .fetch_add(std::mem::size_of_val(data), Ordering::Relaxed);
+                record_d2h(std::mem::size_of_val(data));
                 data.to_vec()
             })
             .map_err(|err| cuda_error("cuda_download", err)),
@@ -535,7 +630,10 @@ fn download_scalar(
 fn upload_scalar(ctx: &CudaDenseContext, value: f64) -> Result<Tensor, DenseError> {
     let host = Tensor::from_vec_col_major(vec![], vec![value])
         .map_err(|err| cuda_error("cuda_hermitian", err))?;
-    upload_tensor(ctx.backend.runtime(), &host).map_err(|err| cuda_error("cuda_hermitian", err))
+    let tensor = upload_tensor(ctx.backend.runtime(), &host)
+        .map_err(|err| cuda_error("cuda_hermitian", err))?;
+    record_h2d(std::mem::size_of::<f64>());
+    Ok(tensor)
 }
 
 fn scaled_hermitian_residual_accepts(input_ss: f64, residual_scale: f64, residual_ss: f64) -> bool {
@@ -713,6 +811,7 @@ pub fn cuda_copy_region_into<D: CudaScalar>(
     if rows == 0 || cols == 0 {
         return Ok(());
     }
+    COPY_CALLS.fetch_add(1, Ordering::Relaxed);
     if src.len != rows * cols {
         return Err(cuda_error(
             OP,
@@ -745,6 +844,7 @@ pub fn cuda_svd_region<D: CudaScalar>(
 ) -> Result<(CudaDenseStorage, Vec<f64>, CudaDenseStorage), DenseError> {
     ensure_cuda_device(ctx.device, "cuda_svd", &[("src", src.device)])?;
     let view = src.region_view::<D>(rows, cols, rows, offset)?;
+    SOLVER_CALLS.fetch_add(1, Ordering::Relaxed);
     let (u, s, vt) = with_cuda_linalg(&mut ctx.backend, |exec| {
         TensorRead::from_view(view).svd_read(exec)
     })
@@ -793,6 +893,7 @@ pub fn cuda_qr_region<D: CudaScalar>(
     ensure_cuda_device(ctx.device, "cuda_qr", &[("src", src.device)])?;
     let view = src.region_view::<D>(rows, cols, rows, offset)?;
     let options = QrOptions::default().gauge(QrGauge::PositiveDiagonal);
+    SOLVER_CALLS.fetch_add(1, Ordering::Relaxed);
     let (q, r) = with_cuda_linalg(&mut ctx.backend, |exec| {
         TensorRead::from_view(view).qr_with_options_read(options, exec)
     })
@@ -833,6 +934,7 @@ pub fn cuda_eigh_region<D: CudaScalar>(
 ) -> Result<(Vec<f64>, CudaDenseStorage), DenseError> {
     ensure_cuda_device(ctx.device, "cuda_eigh", &[("src", src.device)])?;
     let view = src.region_view::<D>(n, n, n, offset)?;
+    SOLVER_CALLS.fetch_add(1, Ordering::Relaxed);
     let (values, vectors) = with_cuda_linalg(&mut ctx.backend, |exec| {
         TensorRead::from_view(view).eigh_read(exec)
     })
@@ -862,6 +964,10 @@ fn validate_eigh_factor_shapes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The observation counters are process-wide, so the device tests that
+    /// assert on their deltas must not overlap with each other.
+    static COUNTER_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn rectangular_operand_views_use_parent_native_strides() {
@@ -952,6 +1058,7 @@ mod tests {
     #[test]
     #[ignore = "requires a real CUDA device"]
     fn cuda_hermitian_region_is_scaled_and_downloads_only_scalar_metadata() {
+        let _serialized = COUNTER_TESTS.lock().unwrap_or_else(|err| err.into_inner());
         let mut ctx = CudaDenseContext::new(0).unwrap();
         let n = 4;
         let mut data = vec![0.0; n * n];
@@ -1002,6 +1109,7 @@ mod tests {
     #[test]
     #[ignore = "requires a real CUDA device"]
     fn cuda_transfer_bytes_scale_with_the_payload_dtype() {
+        let _serialized = COUNTER_TESTS.lock().unwrap_or_else(|err| err.into_inner());
         // #1268: a complex payload must move the same *number* of buffers as
         // the real one and exactly `size_of::<Complex64>() / size_of::<f64>()`
         // times the bytes for the same element count.
@@ -1046,6 +1154,60 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    #[ignore = "requires a real CUDA device"]
+    fn cuda_transfer_counters_attribute_one_upload_download_and_gemm() {
+        let _serialized = COUNTER_TESTS.lock().unwrap_or_else(|err| err.into_inner());
+        let mut ctx = CudaDenseContext::new(0).unwrap();
+        let n = 2;
+        let lhs_host = vec![1.0_f64, 2.0, 3.0, 4.0];
+        let rhs_host = vec![5.0_f64, 6.0, 7.0, 8.0];
+
+        reset_cuda_transfer_stats();
+        CUDA_FULL_DOWNLOAD_BYTES.store(0, Ordering::Relaxed);
+        let lhs = CudaDenseStorage::upload::<f64>(&ctx, &lhs_host).unwrap();
+        let rhs = CudaDenseStorage::upload::<f64>(&ctx, &rhs_host).unwrap();
+        let mut dst = CudaDenseStorage::upload::<f64>(&ctx, &vec![0.0_f64; n * n]).unwrap();
+        let after_uploads = cuda_transfer_stats();
+        assert_eq!(after_uploads.h2d_calls, 3);
+        assert_eq!(
+            after_uploads.h2d_bytes,
+            (3 * n * n * std::mem::size_of::<f64>()) as u64
+        );
+        assert_eq!(after_uploads.device_allocs, 3);
+        assert_eq!(after_uploads.d2h_calls, 0);
+        assert_eq!(after_uploads.gemm_calls, 0);
+
+        cuda_gemm_region_into::<f64>(
+            &mut ctx, &mut dst, 0, n, &lhs, 0, n, &rhs, 0, n, n, n, n, 1.0, 0.0,
+        )
+        .unwrap();
+        let after_gemm = cuda_transfer_stats();
+        assert_eq!(after_gemm.gemm_calls, 1);
+        assert_eq!(after_gemm.h2d_calls, after_uploads.h2d_calls);
+        assert_eq!(after_gemm.d2h_calls, 0);
+
+        let values = dst.download::<f64>(&ctx).unwrap();
+        let after_download = cuda_transfer_stats();
+        assert_eq!(after_download.d2h_calls, 1);
+        assert_eq!(
+            after_download.d2h_bytes,
+            (n * n * std::mem::size_of::<f64>()) as u64
+        );
+        // Column-major 2x2 product, so the counters above describe a real GEMM.
+        assert_eq!(values, vec![23.0, 34.0, 31.0, 46.0]);
+
+        // The finer-grained test counter stays consistent with the always
+        // compiled one for the same download.
+        assert_eq!(
+            CUDA_FULL_DOWNLOAD_BYTES.swap(0, Ordering::Relaxed) as u64,
+            after_download.d2h_bytes
+        );
+
+        reset_cuda_transfer_stats();
+        assert_eq!(cuda_transfer_stats(), CudaTransferStats::default());
     }
 
     #[test]
