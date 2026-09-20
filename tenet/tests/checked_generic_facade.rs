@@ -227,7 +227,7 @@ fn checked_generic_powi_i32_min_on_identity_is_exact() {
 #[cfg(feature = "racah-generated")]
 fn assert_sun_checked_generic_powi_outer_multiplicity<D>(n: usize, adjoint: Vec<i64>)
 where
-    D: tenet::typed::TensorScalar + fmt::Debug + PartialEq,
+    D: tenet::typed::AdvancedLinalgScalar + fmt::Debug + PartialEq,
 {
     use tenet::typed::SUNFusionRule;
 
@@ -385,7 +385,7 @@ fn assert_sun_checked_generic_eigh<D>(
     norm_squared: f64,
     close: impl Fn(D, D) -> f64 + Copy,
 ) where
-    D: tenet::typed::TensorScalar + fmt::Debug,
+    D: tenet::typed::FactorizationScalar + fmt::Debug,
 {
     use std::cell::Cell;
 
@@ -546,7 +546,7 @@ fn sun_checked_generic_eigh_cross_mu_projectors_for_both_dtypes() {
 
 #[cfg(feature = "racah-generated")]
 trait SunEigInput:
-    tenet::typed::TensorScalar + tenet_matrixalgebra::FactorScalar<Eig = Complex64> + fmt::Debug
+    tenet::typed::AdvancedLinalgScalar + tenet_matrixalgebra::FactorScalar<Eig = Complex64> + fmt::Debug
 {
     fn to_complex(
         source: &TensorMap<tenet::typed::SUNFusionRule, Self>,
@@ -2172,7 +2172,7 @@ fn sun_checked_generic_full_svd_preserves_provider_reconstructs_and_rejects_lazy
 #[cfg(feature = "racah-generated")]
 fn assert_sun_checked_generic_inv<D>(n: usize, label: Vec<i64>)
 where
-    D: tenet::typed::TensorScalar + fmt::Debug + PartialEq,
+    D: tenet::typed::AdvancedLinalgScalar + fmt::Debug + PartialEq,
 {
     use tenet::typed::SUNFusionRule;
 
@@ -2583,7 +2583,7 @@ fn assert_checked_generic_eigh_factors<D>(
     close: impl Fn(D, D) -> f64 + Copy,
     adjoint: impl Fn(D) -> D + Copy,
 ) where
-    D: tenet::typed::TensorScalar + fmt::Debug,
+    D: tenet::typed::FactorizationScalar + fmt::Debug,
 {
     let (d, v) = source.eigh_full().unwrap();
     assert!(std::ptr::eq(d.provider(), source.provider()));
@@ -4363,7 +4363,7 @@ fn assert_sun_checked_generic_null_projectors<D>(
     adjoint: impl Fn(D) -> D,
     close: impl Fn(D, D) -> f64,
 ) where
-    D: tenet::typed::TensorScalar + fmt::Debug + PartialEq,
+    D: tenet::typed::FactorizationScalar + fmt::Debug + PartialEq,
 {
     use tenet::typed::SUNFusionRule;
 
@@ -4524,7 +4524,7 @@ fn assert_sun_checked_generic_pinv<D>(
     off_diagonal: D,
     close: impl Fn(D, D) -> f64,
 ) where
-    D: tenet::typed::TensorScalar + fmt::Debug + PartialEq,
+    D: tenet::typed::AdvancedLinalgScalar + fmt::Debug + PartialEq,
 {
     use tenet::typed::SUNFusionRule;
 
@@ -4660,7 +4660,7 @@ fn assert_sun_checked_generic_polar_qh<D>(
     h: [[D; 2]; 2],
     close: impl Fn(D, D) -> f64 + Copy,
 ) where
-    D: tenet::typed::TensorScalar + fmt::Debug + PartialEq,
+    D: tenet::typed::FactorizationScalar + fmt::Debug + PartialEq,
 {
     use tenet::typed::SUNFusionRule;
 
@@ -4756,7 +4756,7 @@ fn assert_sun_checked_generic_solve_right<D>(
     off_diagonal: D,
     close: impl Fn(D, D) -> f64,
 ) where
-    D: tenet::typed::TensorScalar + fmt::Debug + PartialEq,
+    D: tenet::typed::AdvancedLinalgScalar + fmt::Debug + PartialEq,
 {
     use tenet::typed::SUNFusionRule;
 
