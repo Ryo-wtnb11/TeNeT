@@ -338,6 +338,43 @@ impl TensorScalar for num_complex::Complex64 {}
 ///     let _ = tensor.svd_compact();
 /// }
 /// ```
+///
+/// The same pair for `qr_compact`:
+///
+/// ```compile_fail
+/// use tenet::prelude::{TensorMap, TensorScalar, U1FusionRule};
+///
+/// fn base_only<D: TensorScalar>(tensor: &TensorMap<U1FusionRule, D>) {
+///     let _ = tensor.qr_compact();
+/// }
+/// ```
+///
+/// ```
+/// use tenet::prelude::{FactorizationScalar, TensorMap, U1FusionRule};
+///
+/// fn factorizing<D: FactorizationScalar>(tensor: &TensorMap<U1FusionRule, D>) {
+///     let _ = tensor.qr_compact();
+/// }
+/// ```
+///
+/// and for [`TensorMap::is_posdef`], which is gated by a per-method `where`
+/// clause rather than by its impl block:
+///
+/// ```compile_fail
+/// use tenet::prelude::{TensorMap, TensorScalar, U1FusionRule};
+///
+/// fn base_only<D: TensorScalar>(tensor: &TensorMap<U1FusionRule, D>) {
+///     let _ = tensor.is_posdef(0.0);
+/// }
+/// ```
+///
+/// ```
+/// use tenet::prelude::{FactorizationScalar, TensorMap, U1FusionRule};
+///
+/// fn factorizing<D: FactorizationScalar>(tensor: &TensorMap<U1FusionRule, D>) {
+///     let _ = tensor.is_posdef(0.0);
+/// }
+/// ```
 pub trait FactorizationScalar: TensorScalar {}
 
 impl FactorizationScalar for f64 {}
@@ -386,6 +423,71 @@ impl FactorizationScalar for num_complex::Complex64 {}
 ///     let _ = tensor.exp();
 ///     let _ = tensor.inv();
 ///     let _ = tensor.solve(tensor);
+/// }
+/// ```
+///
+/// [`TensorMap::inv`] on its own, so the pair above cannot pass on `exp` alone:
+///
+/// ```compile_fail
+/// use tenet::prelude::{FactorizationScalar, TensorMap, U1FusionRule};
+///
+/// fn factorizing_only<D: FactorizationScalar>(tensor: &TensorMap<U1FusionRule, D>) {
+///     let _ = tensor.inv();
+/// }
+/// ```
+///
+/// ```
+/// use tenet::prelude::{AdvancedLinalgScalar, TensorMap, U1FusionRule};
+///
+/// fn advanced<D: AdvancedLinalgScalar>(tensor: &TensorMap<U1FusionRule, D>) {
+///     let _ = tensor.inv();
+/// }
+/// ```
+///
+/// [`TensorMap::sqrt`], which is gated by a per-method `where` clause rather
+/// than by its impl block:
+///
+/// ```compile_fail
+/// use tenet::prelude::{FactorizationScalar, TensorMap, U1FusionRule};
+///
+/// fn factorizing_only<D: FactorizationScalar>(tensor: &TensorMap<U1FusionRule, D>) {
+///     let _ = tensor.sqrt();
+/// }
+/// ```
+///
+/// ```
+/// use tenet::prelude::{AdvancedLinalgScalar, TensorMap, U1FusionRule};
+///
+/// fn advanced<D: AdvancedLinalgScalar>(tensor: &TensorMap<U1FusionRule, D>) {
+///     let _ = tensor.sqrt();
+/// }
+/// ```
+///
+/// And the general eigendecomposition, whose pre-existing
+/// `FactorScalar<Eig = Complex64>` bound is held constant across the pair so
+/// that only the marker differs:
+///
+/// ```compile_fail
+/// use tenet::prelude::{Complex64, FactorizationScalar, TensorMap, U1FusionRule};
+/// use tenet_matrixalgebra::FactorScalar;
+///
+/// fn factorizing_only<D>(tensor: &TensorMap<U1FusionRule, D>)
+/// where
+///     D: FactorizationScalar + FactorScalar<Eig = Complex64>,
+/// {
+///     let _ = tensor.eig_full();
+/// }
+/// ```
+///
+/// ```
+/// use tenet::prelude::{AdvancedLinalgScalar, Complex64, TensorMap, U1FusionRule};
+/// use tenet_matrixalgebra::FactorScalar;
+///
+/// fn advanced<D>(tensor: &TensorMap<U1FusionRule, D>)
+/// where
+///     D: AdvancedLinalgScalar + FactorScalar<Eig = Complex64>,
+/// {
+///     let _ = tensor.eig_full();
 /// }
 /// ```
 pub trait AdvancedLinalgScalar: FactorizationScalar {}
@@ -960,7 +1062,7 @@ where
             Error = <R as CheckedGenericFusion>::Error,
             Mode = CheckedGenericAdmissionMode,
         > + CheckedGenericRigidSymbols<Scalar = f64>,
-    D: TensorScalar,
+    D: FactorizationScalar,
 {
     fn svd_trunc_checked_generic(
         &self,
@@ -1013,7 +1115,7 @@ where
             Error = <R as CheckedGenericFusion>::Error,
             Mode = CheckedGenericAdmissionMode,
         > + CheckedGenericFusion,
-    D: TensorScalar,
+    D: AdvancedLinalgScalar,
 {
     /// Checked-Generic general eigenvalues for owned host tensors.
     fn eig_vals_checked_generic(&self) -> CheckedGenericSpectrumResult<R, num_complex::Complex64> {
@@ -1048,7 +1150,7 @@ where
             Error = <R as CheckedGenericFusion>::Error,
             Mode = CheckedGenericAdmissionMode,
         > + CheckedGenericFusion,
-    D: TensorScalar,
+    D: FactorizationScalar,
 {
     /// Checked-Generic Hermitian eigenvalues for owned host tensors.
     fn eigh_vals_checked_generic(&self) -> CheckedGenericSpectrumResult<R, f64> {
@@ -1083,7 +1185,7 @@ where
             Error = <R as CheckedGenericFusion>::Error,
             Mode = CheckedGenericAdmissionMode,
         > + CheckedGenericFusion,
-    D: TensorScalar,
+    D: FactorizationScalar,
 {
     fn eigh_full_checked_generic(
         &self,
@@ -1116,7 +1218,7 @@ where
             Error = <R as CheckedGenericFusion>::Error,
             Mode = CheckedGenericAdmissionMode,
         > + CheckedGenericRigidSymbols<Scalar = f64>,
-    D: TensorScalar,
+    D: FactorizationScalar,
 {
     fn eigh_trunc_checked_generic(
         &self,
@@ -1265,7 +1367,7 @@ where
             Error = <R as CheckedGenericFusion>::Error,
             Mode = CheckedGenericAdmissionMode,
         > + CheckedGenericFusion,
-    D: TensorScalar,
+    D: FactorizationScalar,
 {
     /// Checked-Generic full QR for owned host tensors.
     fn qr_full_checked_generic(
@@ -1293,7 +1395,7 @@ where
             Error = <R as CheckedGenericFusion>::Error,
             Mode = CheckedGenericAdmissionMode,
         > + CheckedGenericFusion,
-    D: TensorScalar,
+    D: FactorizationScalar,
 {
     /// Checked-Generic singular values only for owned host tensors.
     fn svd_vals_checked_generic(&self) -> CheckedGenericSpectrumResult<R, f64> {
@@ -1328,7 +1430,7 @@ where
             Error = <R as CheckedGenericFusion>::Error,
             Mode = CheckedGenericAdmissionMode,
         > + CheckedGenericFusion,
-    D: TensorScalar,
+    D: FactorizationScalar,
 {
     /// Checked-Generic compact LQ for owned host tensors.
     fn lq_compact_checked_generic(
@@ -1356,7 +1458,7 @@ where
             Error = <R as CheckedGenericFusion>::Error,
             Mode = CheckedGenericAdmissionMode,
         > + CheckedGenericFusion,
-    D: TensorScalar,
+    D: FactorizationScalar,
 {
     fn svd_full_checked_generic(
         &self,
@@ -1442,7 +1544,7 @@ where
             Error = <R as CheckedGenericFusion>::Error,
             Mode = CheckedGenericAdmissionMode,
         > + CheckedGenericFusion,
-    D: TensorScalar,
+    D: FactorizationScalar,
 {
     /// Checked-Generic compact QR for owned host tensors.
     ///
@@ -10757,6 +10859,30 @@ impl<R, D: CudaPayload> TensorMap<R, D, CudaStorage<D>> {
 ///     let _ = tensor.svd_trunc(&Truncation::Full);
 /// }
 /// ```
+///
+/// The device payload marker alone does not admit a device factorization
+/// either — [`FactorizationScalar`] is required on top of it, exactly as on the
+/// host:
+///
+/// ```compile_fail
+/// use tenet::prelude::U1FusionRule;
+/// use tenet::typed::{CudaPayload, CudaStorage, TensorMap};
+///
+/// fn device_payload_only<D: CudaPayload>(tensor: &TensorMap<U1FusionRule, D, CudaStorage<D>>) {
+///     let _ = tensor.svd_compact();
+/// }
+/// ```
+///
+/// ```
+/// use tenet::prelude::{FactorizationScalar, U1FusionRule};
+/// use tenet::typed::{CudaPayload, CudaStorage, TensorMap};
+///
+/// fn device_factorizing<D: CudaPayload + FactorizationScalar>(
+///     tensor: &TensorMap<U1FusionRule, D, CudaStorage<D>>,
+/// ) {
+///     let _ = tensor.svd_compact();
+/// }
+/// ```
 impl<R, D> TensorMap<R, D, CudaStorage<D>>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
@@ -15877,7 +16003,10 @@ where
     /// assert!(max_err < 1e-12);
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
-    fn svd_compact_multiplicity_free(&self) -> Result<(Self, Self, Self), Error> {
+    fn svd_compact_multiplicity_free(&self) -> Result<(Self, Self, Self), Error>
+    where
+        D: FactorizationScalar,
+    {
         // Dense lease only: a factorization runs entirely on the dense-executor
         // boundary, so leasing the (scarcer)
         // recoupling context here would serialize unrelated work for nothing.
@@ -15920,7 +16049,10 @@ where
     /// # Errors
     ///
     /// As [`Self::svd_compact`]: the seam's own errors, unfiltered.
-    fn svd_full_multiplicity_free(&self) -> Result<(Self, Self, Self), Error> {
+    fn svd_full_multiplicity_free(&self) -> Result<(Self, Self, Self), Error>
+    where
+        D: FactorizationScalar,
+    {
         let mut dense = self.runtime.lease_dense();
         let out = match &self.repr {
             TypedTensorRepr::Adjoint(view) => tenet_matrixalgebra::svd_full_adjoint_dyn(
@@ -15955,10 +16087,10 @@ where
     /// [`Error::Operation`] / [`Error::Core`] / [`Error::FusionAlgebra`] from
     /// the seam, including a malformed `truncation` — the truncation policy is
     /// validated where it is applied, not here.
-    fn svd_trunc_multiplicity_free(
-        &self,
-        truncation: &Truncation,
-    ) -> Result<SvdTrunc<R, D>, Error> {
+    fn svd_trunc_multiplicity_free(&self, truncation: &Truncation) -> Result<SvdTrunc<R, D>, Error>
+    where
+        D: FactorizationScalar,
+    {
         let mut dense = self.runtime.lease_dense();
         // The `_factors_` seam, for the reason `svd_compact` gives.
         let (u, vh, singular_values, error) = match &self.repr {
@@ -15996,7 +16128,10 @@ where
     /// [`Error::Operation`] / [`Error::Core`] from the seam, plus
     /// [`Error::FusionAlgebra`] when the provider cannot decode a coupled
     /// sector its own algebra produced.
-    fn svd_vals_multiplicity_free(&self) -> Result<Vec<SectorSpectrum<R::Sector, f64>>, Error> {
+    fn svd_vals_multiplicity_free(&self) -> Result<Vec<SectorSpectrum<R::Sector, f64>>, Error>
+    where
+        D: FactorizationScalar,
+    {
         let mut dense = self.runtime.lease_dense();
         // Singular values and coupled-sector ids are invariant under adjoint,
         // so an oriented input or logical-payload copy cannot change this output.
@@ -16248,7 +16383,10 @@ where
     /// it dispatches dense per block), and the
     /// issue #613 Group 4 contract requires any compact fast path to be
     /// individually re-proven — out of scope here.
-    fn left_polar_multiplicity_free(&self) -> Result<(Self, Self), Error> {
+    fn left_polar_multiplicity_free(&self) -> Result<(Self, Self), Error>
+    where
+        D: FactorizationScalar,
+    {
         if let TypedTensorRepr::Adjoint(view) = &self.repr {
             let mut dense = self.runtime.lease_dense();
             let mut lease = self.runtime.lease_context()?;
@@ -16295,7 +16433,10 @@ where
     ///
     /// As [`Self::left_polar`]: `O(Σ_c n_c³)`, sectorwise, with a
     /// compact-diagonal payload materialized first.
-    fn right_polar_multiplicity_free(&self) -> Result<(Self, Self), Error> {
+    fn right_polar_multiplicity_free(&self) -> Result<(Self, Self), Error>
+    where
+        D: FactorizationScalar,
+    {
         if let TypedTensorRepr::Adjoint(view) = &self.repr {
             let mut dense = self.runtime.lease_dense();
             let mut lease = self.runtime.lease_context()?;
@@ -16340,7 +16481,10 @@ where
     /// coupled blocks are not Hermitian, and otherwise
     /// [`Error::Core`] / [`Error::FusionAlgebra`] from the seam — which owns
     /// those rules, so they are not re-checked here.
-    fn eigh_full_multiplicity_free(&self) -> Result<(Self, Self), Error> {
+    fn eigh_full_multiplicity_free(&self) -> Result<(Self, Self), Error>
+    where
+        D: FactorizationScalar,
+    {
         if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
             return self
                 .materialized_tensor_uncached()?
@@ -16368,7 +16512,10 @@ where
     fn eigh_trunc_multiplicity_free(
         &self,
         truncation: &Truncation,
-    ) -> Result<EighTrunc<R, D>, Error> {
+    ) -> Result<EighTrunc<R, D>, Error>
+    where
+        D: FactorizationScalar,
+    {
         if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
             return self
                 .materialized_tensor_uncached()?
@@ -16396,7 +16543,10 @@ where
     ///
     /// [`Self::eigh_full`]'s, plus [`Error::FusionAlgebra`] when the provider
     /// cannot decode a coupled sector its own algebra produced.
-    fn eigh_vals_multiplicity_free(&self) -> Result<Vec<SectorSpectrum<R::Sector>>, Error> {
+    fn eigh_vals_multiplicity_free(&self) -> Result<Vec<SectorSpectrum<R::Sector>>, Error>
+    where
+        D: FactorizationScalar,
+    {
         if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
             return self
                 .materialized_tensor_uncached()?
@@ -16442,6 +16592,7 @@ where
         Error,
     >
     where
+        D: AdvancedLinalgScalar,
         <D as FactorScalar>::Eig: TensorScalar,
     {
         if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
@@ -16471,6 +16622,7 @@ where
     /// Exactly [`Self::eig_full`]'s, plus a malformed `truncation`.
     fn eig_trunc_multiplicity_free(&self, truncation: &Truncation) -> Result<EigTrunc<R, D>, Error>
     where
+        D: AdvancedLinalgScalar,
         // See [`Self::eig_full`] for why this bound is per-method.
         <D as FactorScalar>::Eig: TensorScalar,
     {
@@ -16507,6 +16659,7 @@ where
         &self,
     ) -> Result<Vec<SectorSpectrum<R::Sector, num_complex::Complex64>>, Error>
     where
+        D: AdvancedLinalgScalar,
         // Carried across the whole row even though this member builds no
         // factor: the three are one API surface, and a caller who can spell two
         // of them but not the third would be reading an accident.
@@ -16523,7 +16676,10 @@ where
     }
 
     /// Multiplicity-free implementation of the public mode-dispatched exponential.
-    fn exp_multiplicity_free(&self) -> Result<Self, Error> {
+    fn exp_multiplicity_free(&self) -> Result<Self, Error>
+    where
+        D: AdvancedLinalgScalar,
+    {
         if let Some(spectrum) = self.spectrum() {
             // Why the spectrum is exponentiated unconditionally while the dense
             // arm asks about hermiticity: the dense question picks an algorithm
@@ -16692,7 +16848,10 @@ where
     }
 
     /// Multiplicity-free implementation of [`Self::pinv`].
-    fn pinv_multiplicity_free(&self, rcond: f64) -> Result<Self, Error> {
+    fn pinv_multiplicity_free(&self, rcond: f64) -> Result<Self, Error>
+    where
+        D: AdvancedLinalgScalar,
+    {
         // Ahead of the storage split, so both arms answer alike: the seam
         // repeats this check for its own callers, but the compact arm never
         // reaches the seam.

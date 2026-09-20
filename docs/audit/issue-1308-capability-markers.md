@@ -1,7 +1,9 @@
 # Payload-dtype capability markers — public entry-point classification
 
-Authority: TeNeT `98ebb52904633ac9346dfe96515060d9dad03dfa` (`origin/main` at the
-time of the split), issue
+Authority: TeNeT `053d5a74` (`origin/main` the branch was rebased onto; the
+classification was made at `98ebb52904633ac9346dfe96515060d9dad03dfa` and
+`git range-diff` reports the patch identical — #1309 adds no public
+`TensorMap` method or impl block), issue
 [#1308](https://github.com/Ryo-wtnb11/TeNeT/issues/1308), plan
 [#1065](https://github.com/Ryo-wtnb11/TeNeT/issues/1065), survey
 `reviews/gpu-phase-20260920/single-precision-survey.md`.
@@ -117,9 +119,16 @@ factorization and advanced logic —
 and
 `TypedTensor{Inv,Solve,Pinv,Exp,Powi,Eig,EigVals,EigTrunc}Dispatch` —
 are themselves unnameable for a `D: TensorScalar`-only caller, because their own
-`where` clauses now require the marker. The private
-`*_multiplicity_free` implementations of those operations carry the matching
-per-method bound for the same reason.
+`where` clauses now require the marker.
+
+The private implementations of those operations carry the matching bound for
+the same reason: every `*_multiplicity_free` helper that calls a factorization
+or matrix-function kernel has a per-method `where` clause, and every
+single-purpose `*_checked_generic` impl block is bounded at its header. Not
+only the ten that would not otherwise compile — a future *base* method added to
+the same impl block must not be able to call
+`self.svd_compact_multiplicity_free()` without a compile error, which is the
+regression this leaf exists to prevent and which no doctest would catch.
 
 ## Re-bounded sites
 
@@ -129,10 +138,11 @@ per-method bound for the same reason.
 | `MultiplicityFreeAdmissionMode` dispatch impls | 12 | 8 |
 | `CheckedGenericAdmissionMode` dispatch impls | 12 | 8 |
 | Public `TensorMap` inherent impl blocks | 12 | 10 (8 public + 2 Checked-Generic `eig` blocks) |
+| Private single-helper `*_checked_generic` impl blocks | 9 | 1 |
 | Device `CudaStorage` impl block | 1 | 0 |
-| Per-method `where` clauses | 1 (`is_posdef`) | 1 (`sqrt`) |
-| Private `*_multiplicity_free` helpers | 6 | 4 |
-| **Production total** | **56** | **39** |
+| Per-method `where` clauses on public methods | 1 (`is_posdef`) | 1 (`sqrt`) |
+| Per-method `where` clauses on private `*_multiplicity_free` helpers | 15 | 9 |
+| **Production total** | **74** | **45** |
 | Test/example helpers in this workspace | 7 (+5 outside `typed.rs`) | 6 (+6 outside `typed.rs`) |
 
 ## Workspace-internal generic callers that had to be re-bounded
@@ -155,15 +165,58 @@ such callers inside this workspace are test scaffolding:
 No production call site outside `typed.rs` needed a bound: `tenet-network`,
 `tenet-krylov` and the persistence codec never reach a narrowed method.
 
+## Known exceptions and boundaries outside the markers
+
+**`tenet::matrixalgebra::svd_compact`** (`tenet/src/lib.rs:145-149`) is a public
+expert-layer path bounded `D: FactorScalar`, over `core::TensorMap` with a
+caller-supplied dense executor. `FactorScalar` is implemented for `f32` and
+`Complex32` today
+(`tenet-matrixalgebra/src/factorize.rs:192`, `:299`), so that entry point
+already admits single precision — independently of `impl TensorScalar for f32`.
+This is pre-existing and outside the scope of #1308, whose invariant is about
+the *typed* API; it is recorded here so "no public path reaches a factorization
+without the marker" is not read more widely than it holds. Tracked by the #1065
+plan.
+
+**Krylov entry points.** #1308's table lists them under `AdvancedLinalgScalar`,
+but nothing was bounded: `tenet-krylov` does not depend on `tenet`, it is
+generic over a caller-implemented `KrylovVector` with `f64` scalars
+(`tenet-krylov/src/lib.rs`), and no `TensorMap` implements that trait. There is
+no payload-generic Krylov entry point to gate. Its `CgOptions::default().rtol =
+1e-12` (`cg.rs:21`, survey T4) stays a hazard for whichever later leaf admits a
+single-precision operator, not for this one.
+
+## Notes for later leaves
+
+- Device compact QR is `impl<R> TensorMap<R, f64, CudaStorage>`
+  (`typed.rs`): a concrete payload, so it needs no marker today. When it is
+  generalised over the device payload it must take
+  `CudaPayload + FactorizationScalar`, like its SVD/EIGH sibling block.
+  Complex64 device QR remains [#1271](https://github.com/Ryo-wtnb11/TeNeT/issues/1271).
+- The multiplicity-free `eig_*` helpers carry `<D as FactorScalar>::Eig:
+  TensorScalar` per method. Admitting `Complex32` to the base marker is
+  therefore a precondition of admitting `f32` to the general
+  eigendecomposition, not an independent choice.
+
 ## Evidence
 
 - `tenet/tests/capability_markers.rs` — positive static assertions: each
   family's representative entry points type-check under exactly its marker, for
   both admitted dtypes.
-- `compile_fail` doctests on `FactorizationScalar` and `AdvancedLinalgScalar` —
-  a `D: TensorScalar` caller reaches neither `svd_compact` nor `exp`, and a
-  `D: FactorizationScalar` caller does not reach `exp`. Each is paired with a
-  compiling twin so a `compile_fail` cannot pass for an unrelated reason.
+- `compile_fail` doctests, each paired with a compiling twin that differs only
+  in the bound, so a `compile_fail` cannot pass for an unrelated reason:
+  - on `FactorizationScalar` — a `D: TensorScalar` caller reaches neither
+    `svd_compact`, nor `qr_compact`, nor `is_posdef`;
+  - on `AdvancedLinalgScalar` — neither a `D: TensorScalar` nor a
+    `D: FactorizationScalar` caller reaches `exp`, and a
+    `D: FactorizationScalar` caller reaches neither `inv`, nor `sqrt`, nor
+    `eig_full` (the `FactorScalar<Eig = Complex64>` bound is held constant
+    across that pair so only the marker differs);
+  - on the device factorization impl block (`cuda` feature) — a
+    `D: CudaPayload` caller does not reach the device `svd_compact`.
+  `sqrt` and `is_posdef` are covered explicitly because they are the two methods
+  gated by a per-method `where` clause rather than by their impl header, and so
+  the easiest to lose in a refactor.
 
 No benchmark: the change adds only marker traits with no methods and no
 associated items, so every call still monomorphizes to the same code. Generated
