@@ -9,6 +9,46 @@ use crate::{
 
 use std::sync::Arc;
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static SESSIONS_OPENED: AtomicU64 = AtomicU64::new(0);
+
+/// A snapshot of the process-wide TeNeT CPU-session observation counter.
+///
+/// Observability only: nothing here reads the value back, so no execution
+/// decision, dispatch, or capability depends on it. It exists so a test or a
+/// benchmark can attribute Tenferro session entries — a process-global
+/// execution permit plus, on faer, a Rayon pool handoff — to a measured phase.
+///
+/// Scope: `sessions_opened` counts the sessions [`DefaultDenseExecutor`] opens
+/// *itself* (the linear-algebra scope, the op-bearing serial GEMM batch, the
+/// owned full SVD). Sessions that Tenferro opens internally for a plain
+/// backend-level dot call are invisible at this seam and are **not** counted,
+/// so this is a lower bound on the sessions a phase actually enters.
+///
+/// The counter is `Relaxed` and process-wide: a snapshot taken while another
+/// thread executes is a sample, not a global instant.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct CpuSessionStats {
+    pub sessions_opened: u64,
+}
+
+/// Reads the CPU-session observation counter. See [`CpuSessionStats`].
+pub fn cpu_session_stats() -> CpuSessionStats {
+    CpuSessionStats {
+        sessions_opened: SESSIONS_OPENED.load(Ordering::Relaxed),
+    }
+}
+
+/// Zeroes the CPU-session observation counter. See [`CpuSessionStats`].
+pub fn reset_cpu_session_stats() {
+    SESSIONS_OPENED.store(0, Ordering::Relaxed);
+}
+
+fn note_session_opened() {
+    SESSIONS_OPENED.fetch_add(1, Ordering::Relaxed);
+}
+
 #[cfg(all(test, feature = "cpu-faer", not(feature = "provider-inject")))]
 use std::cell::RefCell;
 
@@ -32,9 +72,9 @@ use tenferro_cpu::with_cpu_exec_session;
 use tenferro_cpu::{CpuBackend, CpuBackendKind, CpuContext};
 #[cfg(not(feature = "provider-inject"))]
 use tenferro_linalg::{LinalgBackend, TensorLinalgExt, TensorReadLinalgExt};
-#[cfg(not(feature = "provider-inject"))]
-use tenferro_tensor::backend::{BackendSession, BackendSessionHost};
-use tenferro_tensor::backend::{GroupedGemmConfig, GroupedGemmJob};
+use tenferro_tensor::backend::{
+    BackendSession, BackendSessionHost, GroupedGemmConfig, GroupedGemmJob,
+};
 use tenferro_tensor::{
     BackendCachedDot, BackendRuntimeCache, DotGeneralConfig, TensorDot, TensorRead, TensorView,
     TensorViewMut, TensorWrite, TypedTensorView, TypedTensorViewMut,
@@ -373,9 +413,12 @@ impl DefaultDenseExecutor {
         wrap_read: R,
     ) -> Result<(), DenseError>
     where
-        T: 'static,
-        W: for<'x> Fn(DenseViewMut<'x, T>) -> DenseWrite<'x> + Copy,
-        R: for<'x> Fn(DenseView<'x, T>) -> DenseRead<'x> + Copy,
+        // `Send` and the shared-reference `Sync`: the serial route below runs
+        // its job loop inside a Tenferro session, whose closure Tenferro may
+        // install on its own Rayon worker.
+        T: 'static + Send + Sync,
+        W: for<'x> Fn(DenseViewMut<'x, T>) -> DenseWrite<'x> + Copy + Send,
+        R: for<'x> Fn(DenseView<'x, T>) -> DenseRead<'x> + Copy + Send,
     {
         // A valid covering partition with one entry per job contains only
         // singletons; malformed equal-count partitions need the same fallback.
@@ -445,11 +488,86 @@ impl DefaultDenseExecutor {
         wrap_read: R,
     ) -> Result<(), DenseError>
     where
+        T: 'static + Send + Sync,
+        W: for<'x> Fn(DenseViewMut<'x, T>) -> DenseWrite<'x> + Send,
+        R: for<'x> Fn(DenseView<'x, T>) -> DenseRead<'x> + Send,
+    {
+        let output_base = output.offset();
+        // One session for the whole job loop instead of one per job: Tenferro
+        // charges execution-domain admission, the engine mutex, and (on faer) a
+        // synchronous Rayon worker handoff per session, and that cost is what
+        // dominates a batch of small GEMMs. The jobs, their kernels, their
+        // submission order, their alpha/beta and their conjugation flags are
+        // unchanged, and each still uses the executor's own plan-cache slot, so
+        // the results are bitwise identical to the per-job path.
+        //
+        // A CPU session is a process-wide critical section: it holds the global
+        // execution permit (faer: CpuSet compatibility; BLAS: provider
+        // exclusive, so every other thread's Tenferro call blocks) and, on
+        // faer, runs this closure on Tenferro's Rayon pool for the whole scope.
+        // The scope therefore covers the numerical loop only. Nothing inside it
+        // compiles a plan, runs a provider callback, reads an
+        // allocation-observing thread-local, forks with `rayon::join`, or waits
+        // on another thread, and nothing inside it calls a backend-level entry
+        // — that re-entry panics in release.
+        let Self {
+            backend,
+            matmul_config,
+            grouped_cache,
+            #[cfg(test)]
+            seam_dispatches,
+            ..
+        } = self;
+        note_session_opened();
+        backend.with_backend_session_cached(grouped_cache, |session| {
+            Self::run_batch_jobs_in_session(
+                session,
+                matmul_config,
+                #[cfg(test)]
+                seam_dispatches,
+                output,
+                output_base,
+                lhs,
+                rhs,
+                jobs,
+                cache_start,
+                lhs_op,
+                rhs_op,
+                alpha,
+                beta,
+                wrap_write,
+                wrap_read,
+            )
+        })
+    }
+
+    /// The numerical body of [`Self::matmul_batch_axpby_ops_serial_typed`],
+    /// running inside one already-entered Tenferro session. Every dot goes
+    /// through the session's own entry point: a backend-level call here would
+    /// re-enter the execution arbiter and panic.
+    #[allow(clippy::too_many_arguments)]
+    fn run_batch_jobs_in_session<T, W, R>(
+        session: &mut dyn BackendSession,
+        matmul_config: &DotGeneralConfig,
+        #[cfg(test)] seam_dispatches: &mut usize,
+        output: &mut DenseViewMut<'_, T>,
+        output_base: usize,
+        lhs: DenseView<'_, T>,
+        rhs: DenseView<'_, T>,
+        jobs: &[DenseGemmBatchJob],
+        cache_start: usize,
+        lhs_op: MatrixOp,
+        rhs_op: MatrixOp,
+        alpha: DenseScalar,
+        beta: DenseScalar,
+        wrap_write: W,
+        wrap_read: R,
+    ) -> Result<(), DenseError>
+    where
         T: 'static,
         W: for<'x> Fn(DenseViewMut<'x, T>) -> DenseWrite<'x>,
         R: for<'x> Fn(DenseView<'x, T>) -> DenseRead<'x>,
     {
-        let output_base = output.offset();
         for (relative_slot, job) in jobs.iter().enumerate() {
             let lhs_shape = [job.rows, job.contracted];
             let lhs_strides = match lhs_op {
@@ -492,19 +610,18 @@ impl DefaultDenseExecutor {
             };
             #[cfg(test)]
             {
-                self.seam_dispatches += 1;
+                *seam_dispatches += 1;
             }
-            BackendCachedDot::dot_general_read_into_accum_cached(
-                &mut self.backend,
-                &mut self.grouped_cache,
-                Some(cache_start + relative_slot),
-                lhs,
-                rhs,
-                &self.matmul_config,
-                accumulation,
-                output,
-            )
-            .map_err(|err| tenferro_error("matmul_batch_axpby_with_ops_into", err))?;
+            session
+                .dot_general_read_into_accum_cached(
+                    Some(cache_start + relative_slot),
+                    lhs,
+                    rhs,
+                    matmul_config,
+                    accumulation,
+                    output,
+                )
+                .map_err(|err| tenferro_error("matmul_batch_axpby_with_ops_into", err))?;
         }
         Ok(())
     }
@@ -808,6 +925,7 @@ impl DenseExecutor for DefaultDenseExecutor {
                 };
                 pointers.borrow_mut().push(pointer);
             });
+            note_session_opened();
             let outputs = self
                 .backend
                 .with_backend_session(|session| {
@@ -1006,13 +1124,20 @@ impl DenseExecutor for DefaultDenseExecutor {
         #[cfg(not(feature = "provider-inject"))]
         {
             let input = tenferro_view(input)?;
-            let owned = self
-                .backend
-                .with_backend_session(|exec| exec.to_contiguous_read(TensorRead::from_view(input)))
-                .map_err(|err| tenferro_error("eig_values", err))?;
-            with_cpu_linalg(&mut self.backend, |exec| owned.eigvals(exec))
-                .map(DenseTensor::from_tenferro)
-                .map_err(|err| tenferro_error("eig_values", err))
+            // One session for the contiguity pre-pass and the values call: a
+            // Tenferro CPU session is a process-wide critical section (global
+            // execution permit, engine mutex, and on faer a Rayon pool
+            // handoff), so this scope holds only the numerical stage. Nothing
+            // inside it compiles a plan, runs a provider callback, reads an
+            // allocation-observing thread-local, forks with `rayon::join`, or
+            // waits on another thread, and nothing inside it calls a
+            // backend-level entry (that re-entry panics in release).
+            with_cpu_linalg(&mut self.backend, |exec| {
+                let owned = exec.to_contiguous_read(TensorRead::from_view(input))?;
+                owned.eigvals(exec)
+            })
+            .map(DenseTensor::from_tenferro)
+            .map_err(|err| tenferro_error("eig_values", err))
         }
     }
 
@@ -1342,6 +1467,7 @@ fn with_cpu_linalg<R: Send>(
     backend: &mut CpuBackend,
     f: impl FnOnce(&mut dyn BackendSession) -> tenferro_tensor::Result<R> + Send,
 ) -> tenferro_tensor::Result<R> {
+    note_session_opened();
     backend.with_backend_session(f)
 }
 
