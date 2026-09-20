@@ -1,5 +1,6 @@
 //! Host-side planning for device tree-transform replay: the region triples a
-//! Single block lowers to, the distinct cuTENSOR plan signatures a structure
+//! Single block lowers to, the pack → GEMM → scatter lowering of a Multi
+//! (recoupling) block, the distinct cuTENSOR plan signatures a structure
 //! submits, and the keyed cache that owns one uploaded coefficient vector per
 //! structure.
 //!
@@ -10,8 +11,11 @@
 //! feature (the same split `tenet-dense`'s `cuda_region` makes).
 
 use core::any::TypeId;
+use core::ops::Range;
 use std::collections::HashSet;
 use std::sync::Weak;
+
+use tenet_dense::DenseGemmBatchJob;
 
 use crate::task_view::TreeTransformTaskView;
 use crate::{OperationError, TreeTransformBlock};
@@ -24,9 +28,14 @@ pub(crate) struct DeviceRegionSpec {
     pub(crate) offset: usize,
 }
 
-/// One Single block lowered to a device region move: the same `dims` on both
-/// sides, the axis permutation carried by the destination strides, and the
-/// index of the block's coefficient in the structure's coefficient payload.
+/// One block, pack column or scatter column lowered to a device region move:
+/// the same `dims` on both sides, the axis permutation carried by the
+/// destination strides, and the coefficient the move is scaled by.
+///
+/// `coefficient` is the index of the block's scalar in the structure's
+/// coefficient payload for a Single block, and `None` for a pack or scatter
+/// column, which the host copies unscaled and the device therefore submits
+/// against the context's shared `1`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct DeviceMoveSpec {
     pub(crate) dims: Vec<usize>,
@@ -34,19 +43,52 @@ pub(crate) struct DeviceMoveSpec {
     pub(crate) src_strides: Vec<usize>,
     pub(crate) dst_offset: usize,
     pub(crate) src_offset: usize,
-    pub(crate) coefficient: usize,
+    pub(crate) coefficient: Option<usize>,
 }
 
-/// The device lowering of one completed structure's Single blocks and, for the
-/// Overwrite destination mode, of its inactive destination layouts.
+/// One Multi block lowered to the host's pack → `Uᵀ` GEMM → scatter sequence.
+///
+/// `packs` read the source storage into the workspace source column of `job`,
+/// `job` multiplies that column block by the transposed recoupling matrix into
+/// the workspace destination, and `scatters` write the result columns out.
+/// Every offset in `job` addresses the structure-wide workspace the compile-time
+/// recoupling plan sized, so the device reuses the plan's own arithmetic
+/// instead of re-deriving per-block offsets.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct DeviceRecouplingSpec {
+    pub(crate) packs: Vec<DeviceMoveSpec>,
+    pub(crate) scatters: Vec<DeviceMoveSpec>,
+    pub(crate) job: DenseGemmBatchJob,
+}
+
+/// The device lowering of one completed structure: its Single blocks, its Multi
+/// blocks, and — for the Overwrite destination mode — its inactive destination
+/// layouts.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct DeviceTransformPlan {
     pub(crate) moves: Vec<DeviceMoveSpec>,
+    pub(crate) recouplings: Vec<DeviceRecouplingSpec>,
     pub(crate) zeros: Vec<DeviceRegionSpec>,
+    /// Ranges of the structure's coefficient payload holding each Multi block's
+    /// recoupling matrix, in the recoupling plan's own entry order — the order
+    /// the jobs' `rhs_offset`s address.
+    pub(crate) coefficient_ranges: Vec<Range<usize>>,
+    /// Workspace elements the packs write and the GEMMs read.
+    pub(crate) workspace_source_len: usize,
+    /// Workspace elements the GEMMs write and the scatters read.
+    pub(crate) workspace_destination_len: usize,
     /// Longest inactive layout, so the zero template is sized once.
     pub(crate) max_zero_len: usize,
     /// Distinct cuTENSOR operand signatures this plan submits.
     pub(crate) plan_signatures: usize,
+}
+
+impl DeviceTransformPlan {
+    /// Recoupling matrix elements the device holds beside the structure's
+    /// coefficient vector, in plan-entry order.
+    pub(crate) fn coefficient_len(&self) -> usize {
+        self.coefficient_ranges.iter().map(Range::len).sum()
+    }
 }
 
 fn unsupported(message: &'static str) -> OperationError {
@@ -80,14 +122,8 @@ fn packed_strides(dims: &[usize]) -> Result<Vec<usize>, OperationError> {
     Ok(strides)
 }
 
-/// Whether the structure contains a recoupling (pack → `Uᵀ` → scatter) block.
-pub(crate) fn contains_multi_blocks<C: Copy>(task: TreeTransformTaskView<'_, C>) -> bool {
-    task.blocks()
-        .iter()
-        .any(|block| matches!(block, TreeTransformBlock::Multi { .. }))
-}
-
-/// Lowers every Single block of `task` to a device region move, skipping the
+/// Lowers every Single block of `task` to a device region move and every Multi
+/// block to the host's pack → `Uᵀ` → scatter sequence, skipping the
 /// zero-extent ones, plus every inactive destination layout to a region the
 /// Overwrite destination mode fills with zeros.
 ///
@@ -95,10 +131,14 @@ pub(crate) fn contains_multi_blocks<C: Copy>(task: TreeTransformTaskView<'_, C>)
 /// zero fills, exactly as host replay returns before touching inactive layouts
 /// when `beta == 1`.
 ///
-/// The move's `(dims, dst_strides, src_strides)` is the structure's own baked
+/// Every move's `(dims, dst_strides, src_strides)` is the structure's own baked
 /// fused layout, which is the canonical stride signature the host normalizer
 /// produced at compile time: using it keeps the device's plan-key diversity at
-/// the structural minimum instead of one plan per raw block rank.
+/// the structural minimum instead of one plan per raw block rank. The host
+/// bakes a Multi source entry with the packed column as its destination and a
+/// Multi destination entry with the packed column as its source
+/// (`bake_fused_layouts`), so pack and scatter read the same arena the host
+/// kernels do rather than a device-local re-derivation.
 pub(crate) fn compile_device_plan<C: Copy>(
     task: TreeTransformTaskView<'_, C>,
 ) -> Result<DeviceTransformPlan, OperationError> {
@@ -111,9 +151,7 @@ pub(crate) fn compile_device_plan<C: Copy>(
             coefficient,
         } = *block
         else {
-            return Err(unsupported(
-                "device tree transform replays Single blocks only",
-            ));
+            continue;
         };
         let baked = layouts.fused_baked(dst_layout).ok_or_else(|| {
             unsupported("device tree transform requires a baked fused layout per Single block")
@@ -133,7 +171,75 @@ pub(crate) fn compile_device_plan<C: Copy>(
             )?,
             dst_offset: offset_to_usize(layouts.entry(dst_layout).offset)?,
             src_offset: offset_to_usize(layouts.entry(src_layout).offset)?,
-            coefficient,
+            coefficient: Some(coefficient),
+        });
+    }
+
+    let recoupling_plan = task.recoupling_plan();
+    let mut recouplings = Vec::with_capacity(recoupling_plan.jobs().len());
+    let mut coefficient_ranges = Vec::with_capacity(recoupling_plan.jobs().len());
+    for (block_index, job) in recoupling_plan.entries() {
+        let block = task
+            .blocks()
+            .get(block_index)
+            .ok_or_else(|| unsupported("device tree transform recoupling plan is out of range"))?;
+        let TreeTransformBlock::Multi {
+            dst_layout_start,
+            dst_count,
+            src_layout_start,
+            src_count,
+            coefficient_start,
+            element_count,
+        } = *block
+        else {
+            return Err(unsupported(
+                "device tree transform recoupling plan names a Single block",
+            ));
+        };
+        // The device reuses the plan's offsets, so a plan that disagrees with
+        // the block it names would silently read another block's column.
+        if job.rows != element_count || job.contracted != src_count || job.cols != dst_count {
+            return Err(unsupported(
+                "device tree transform recoupling job disagrees with its block",
+            ));
+        }
+        let coefficient_end = src_count
+            .checked_mul(dst_count)
+            .and_then(|len| coefficient_start.checked_add(len))
+            .ok_or(OperationError::ElementCountOverflow)?;
+        if coefficient_end > task.coefficients().len() {
+            return Err(OperationError::CoefficientCountMismatch {
+                expected: coefficient_end,
+                actual: task.coefficients().len(),
+            });
+        }
+        coefficient_ranges.push(coefficient_start..coefficient_end);
+        let mut packs = Vec::with_capacity(src_count);
+        for src_index in 0..src_count {
+            let entry = src_layout_start + src_index;
+            let column = element_count
+                .checked_mul(src_index)
+                .and_then(|start| job.lhs_offset.checked_add(start))
+                .ok_or(OperationError::ElementCountOverflow)?;
+            if let Some(pack) = column_move(task, entry, column, PackDirection::IntoColumn)? {
+                packs.push(pack);
+            }
+        }
+        let mut scatters = Vec::with_capacity(dst_count);
+        for dst_index in 0..dst_count {
+            let entry = dst_layout_start + dst_index;
+            let column = element_count
+                .checked_mul(dst_index)
+                .and_then(|start| job.dst_offset.checked_add(start))
+                .ok_or(OperationError::ElementCountOverflow)?;
+            if let Some(scatter) = column_move(task, entry, column, PackDirection::OutOfColumn)? {
+                scatters.push(scatter);
+            }
+        }
+        recouplings.push(DeviceRecouplingSpec {
+            packs,
+            scatters,
+            job: *job,
         });
     }
 
@@ -160,13 +266,70 @@ pub(crate) fn compile_device_plan<C: Copy>(
         });
     }
 
-    let plan_signatures = distinct_plan_signatures(&moves, &zeros)?;
+    let plan_signatures = distinct_plan_signatures(&moves, &recouplings, &zeros)?;
     Ok(DeviceTransformPlan {
         moves,
+        recouplings,
         zeros,
+        coefficient_ranges,
+        workspace_source_len: recoupling_plan.source_len(),
+        workspace_destination_len: recoupling_plan.destination_len(),
         max_zero_len,
         plan_signatures,
     })
+}
+
+/// Which side of a pack/scatter move the compact workspace column is on.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum PackDirection {
+    /// Pack: block storage → workspace column.
+    IntoColumn,
+    /// Scatter: workspace column → block storage.
+    OutOfColumn,
+}
+
+/// Lowers one Multi layout entry to the region move between its block storage
+/// and its compact workspace column at `column`.
+///
+/// `None` for a zero-extent entry, which addresses nothing and is never
+/// submitted — the host's `shape.contains(&0)` rule.
+fn column_move<C: Copy>(
+    task: TreeTransformTaskView<'_, C>,
+    entry: usize,
+    column: usize,
+    direction: PackDirection,
+) -> Result<Option<DeviceMoveSpec>, OperationError> {
+    let layouts = task.layouts();
+    let baked = layouts.fused_baked(entry).ok_or_else(|| {
+        unsupported("device tree transform requires a baked fused layout per recoupling column")
+    })?;
+    if baked.dims.contains(&0) {
+        return Ok(None);
+    }
+    let dims = baked.dims.to_vec();
+    let dst_strides = non_negative(
+        baked.dst_strides,
+        "device replay requires non-negative destination strides",
+    )?;
+    let src_strides = non_negative(
+        baked.src_strides,
+        "device replay requires non-negative source strides",
+    )?;
+    let block_offset = offset_to_usize(layouts.entry(entry).offset)?;
+    let (dst_offset, src_offset) = match direction {
+        PackDirection::IntoColumn => (column, block_offset),
+        PackDirection::OutOfColumn => (block_offset, column),
+    };
+    Ok(Some(DeviceMoveSpec {
+        dims,
+        dst_strides,
+        src_strides,
+        dst_offset,
+        src_offset,
+        // Host packs and scatters copy unscaled (`T::one()`); the block's own
+        // coefficients are the recoupling matrix the GEMM applies.
+        coefficient: None,
+    }))
 }
 
 /// Distinct cuTENSOR contraction signatures this plan submits.
@@ -184,10 +347,14 @@ pub(crate) fn compile_device_plan<C: Copy>(
 /// structures share, which is the safe direction for a cap.
 fn distinct_plan_signatures(
     moves: &[DeviceMoveSpec],
+    recouplings: &[DeviceRecouplingSpec],
     zeros: &[DeviceRegionSpec],
 ) -> Result<usize, OperationError> {
     let mut seen: HashSet<(&[usize], &[usize], Vec<usize>)> = HashSet::new();
-    for entry in moves {
+    let columns = recouplings
+        .iter()
+        .flat_map(|entry| entry.packs.iter().chain(&entry.scatters));
+    for entry in moves.iter().chain(columns) {
         seen.insert((
             entry.dims.as_slice(),
             entry.dst_strides.as_slice(),
@@ -201,7 +368,14 @@ fn distinct_plan_signatures(
             packed_strides(&zero.dims)?,
         ));
     }
-    Ok(seen.len())
+    // A recoupling GEMM is a contraction of three dense column-major operands,
+    // so its plan key is its `(rows, contracted, cols)` shape; jobs of equal
+    // shape share one plan.
+    let gemms: HashSet<(usize, usize, usize)> = recouplings
+        .iter()
+        .map(|entry| (entry.job.rows, entry.job.contracted, entry.job.cols))
+        .collect();
+    Ok(seen.len().saturating_add(gemms.len()))
 }
 
 /// Entries of a cuTENSOR contraction plan cost about this much retained state
@@ -243,7 +417,17 @@ struct CacheEntry<V> {
     value: V,
 }
 
-/// Small LRU cache of per-structure device state, bounded by retained bytes.
+/// Entries a [`StructureCache`] keeps, whatever the byte budget allows.
+///
+/// A byte budget alone bounds the device memory but not the entry count, so a
+/// replay alternating thousands of tiny structures would grow the cache without
+/// limit. The cap is also what keeps the lookup O(1): the scan is over at most
+/// this many keys. A hash key would have to be the `Weak`'s address, which a
+/// later allocation can reuse, so the identity comparison stays a `ptr_eq`.
+pub(crate) const MAX_STRUCTURE_CACHE_ENTRIES: usize = 32;
+
+/// Small LRU cache of per-structure device state, bounded by retained bytes and
+/// by [`MAX_STRUCTURE_CACHE_ENTRIES`].
 ///
 /// Ownership is singular: the cached value is the only copy of that device
 /// state, and dropping the entry frees it. Bytes are reported so the owner of
@@ -251,6 +435,7 @@ struct CacheEntry<V> {
 pub(crate) struct StructureCache<V> {
     entries: Vec<CacheEntry<V>>,
     budget_bytes: usize,
+    max_entries: usize,
     bytes: usize,
 }
 
@@ -259,6 +444,7 @@ impl<V> StructureCache<V> {
         Self {
             entries: Vec::new(),
             budget_bytes,
+            max_entries: MAX_STRUCTURE_CACHE_ENTRIES,
             bytes: 0,
         }
     }
@@ -282,6 +468,15 @@ impl<V> StructureCache<V> {
         self.entries.last().map(|entry| &entry.value)
     }
 
+    /// The entry for `key` without changing the recency order, for callers that
+    /// only describe the state they already prepared.
+    pub(crate) fn peek(&self, key: &StructureKey) -> Option<&V> {
+        self.entries
+            .iter()
+            .find(|entry| entry.key.matches(key))
+            .map(|entry| &entry.value)
+    }
+
     /// Drops every entry whose structure no longer exists.
     pub(crate) fn purge_dead(&mut self) {
         self.entries.retain(|entry| {
@@ -303,7 +498,9 @@ impl<V> StructureCache<V> {
         self.purge_dead();
         self.entries.push(CacheEntry { key, bytes, value });
         self.bytes = self.bytes.saturating_add(bytes);
-        while self.bytes > self.budget_bytes && self.entries.len() > 1 {
+        while (self.bytes > self.budget_bytes || self.entries.len() > self.max_entries)
+            && self.entries.len() > 1
+        {
             let evicted = self.entries.remove(0);
             self.bytes = self.bytes.saturating_sub(evicted.bytes);
         }
@@ -348,9 +545,127 @@ mod tests {
         assert_eq!(entry.dims.len(), entry.dst_strides.len());
         assert_eq!(entry.dims.len(), entry.src_strides.len());
         assert_ne!(entry.dst_strides, entry.src_strides);
-        assert_eq!(entry.coefficient, 0);
+        assert_eq!(entry.coefficient, Some(0));
         assert!(plan.zeros.is_empty());
         assert_eq!(plan.plan_signatures, 1);
+    }
+
+    #[test]
+    fn a_multi_block_lowers_to_pack_gemm_and_scatter_over_the_plans_offsets() {
+        // What: a recoupling block becomes one pack per source layout, one GEMM
+        // whose shape is (element_count, src_count, dst_count), and one scatter
+        // per destination layout — with every workspace offset taken from the
+        // compile-time recoupling plan, and with no per-column coefficient.
+        let dst_space = structure(vec![vec![2, 3], vec![2, 3]]);
+        let src_space = structure(vec![vec![3, 2], vec![3, 2], vec![3, 2]]);
+        let compiled = TreeTransformStructure::compile_structures(
+            &dst_space,
+            &src_space,
+            &[TreeTransformBlockSpec::multi(
+                vec![0, 1],
+                vec![0, 1, 2],
+                vec![1.0_f64, 2.0, 3.0, 4.0, 5.0, 6.0],
+            )
+            .with_source_axes([1, 0])],
+        )
+        .unwrap();
+        let plan = compile_device_plan(compiled.task_view().unwrap()).unwrap();
+
+        assert!(plan.moves.is_empty(), "no Single block");
+        assert_eq!(plan.recouplings.len(), 1);
+        let entry = &plan.recouplings[0];
+        assert_eq!(entry.packs.len(), 3);
+        assert_eq!(entry.scatters.len(), 2);
+        assert_eq!(entry.job.rows, 6, "element count");
+        assert_eq!(entry.job.contracted, 3, "source count");
+        assert_eq!(entry.job.cols, 2, "destination count");
+        for column in entry.packs.iter().chain(&entry.scatters) {
+            assert_eq!(column.coefficient, None, "columns copy unscaled");
+            assert_eq!(column.dims.iter().product::<usize>(), 6);
+        }
+        // Pack i writes column i of the job's source; scatter j reads column j
+        // of its destination.
+        let packed: Vec<usize> = entry.packs.iter().map(|pack| pack.dst_offset).collect();
+        assert_eq!(packed, vec![0, 6, 12]);
+        let scattered: Vec<usize> = entry
+            .scatters
+            .iter()
+            .map(|scatter| scatter.src_offset)
+            .collect();
+        assert_eq!(scattered, vec![0, 6]);
+        assert_eq!(plan.workspace_source_len, 18);
+        assert_eq!(plan.workspace_destination_len, 12);
+        assert_eq!(plan.coefficient_ranges, vec![0..6]);
+        assert_eq!(plan.coefficient_len(), 6);
+    }
+
+    #[test]
+    fn several_multi_blocks_keep_the_recoupling_plans_order_and_offsets() {
+        // What: the plan sorts jobs by element count, so its order is not the
+        // block order; the device must address each block's columns through the
+        // plan's own offsets, and the coefficient ranges must follow the same
+        // order so a job's `rhs_offset` names its own matrix.
+        let space = structure(vec![
+            vec![2, 3],
+            vec![2, 3],
+            vec![2, 2],
+            vec![2, 2],
+            vec![2, 2],
+        ]);
+        let compiled = TreeTransformStructure::compile_structures(
+            &space,
+            &space,
+            &[
+                // Declared first, but 6 elements wide, so the plan runs it second.
+                TreeTransformBlockSpec::multi(vec![0, 1], vec![0, 1], vec![1.0_f64, 2.0, 3.0, 4.0]),
+                TreeTransformBlockSpec::multi(vec![2, 3], vec![2, 3], vec![5.0_f64, 6.0, 7.0, 8.0]),
+                TreeTransformBlockSpec::single(4, 4, -1.0_f64),
+            ],
+        )
+        .unwrap();
+        let plan = compile_device_plan(compiled.task_view().unwrap()).unwrap();
+
+        assert_eq!(plan.moves.len(), 1, "the Single block is still lowered");
+        let shapes: Vec<usize> = plan
+            .recouplings
+            .iter()
+            .map(|entry| entry.job.rows)
+            .collect();
+        assert_eq!(shapes, vec![4, 6], "sorted by element count");
+        // Disjoint, contiguous workspace columns in that same order.
+        assert_eq!(plan.recouplings[0].job.lhs_offset, 0);
+        assert_eq!(plan.recouplings[1].job.lhs_offset, 8);
+        assert_eq!(plan.workspace_source_len, 20);
+        assert_eq!(plan.workspace_destination_len, 20);
+        // The 4-element block was declared second, so its matrix is the second
+        // range of the payload but the first of the plan.
+        assert_eq!(plan.coefficient_ranges, vec![4..8, 0..4]);
+        assert_eq!(plan.recouplings[0].job.rhs_offset, 0);
+        assert_eq!(plan.recouplings[1].job.rhs_offset, 4);
+    }
+
+    #[test]
+    fn the_cache_evicts_the_least_recently_used_beyond_its_entry_cap() {
+        // What: the byte budget alone would let an unbounded number of tiny
+        // structures accumulate, so the entry cap bounds the cache — and with
+        // it the lookup scan — independently of size.
+        let structures: Vec<Arc<()>> = (0..MAX_STRUCTURE_CACHE_ENTRIES + 1)
+            .map(|_| Arc::new(()))
+            .collect();
+        let key = |index: usize| StructureKey {
+            structure: Arc::downgrade(&structures[index]),
+            scalar: TypeId::of::<f64>(),
+            context: 3,
+        };
+        let mut cache = StructureCache::new(usize::MAX);
+        for index in 0..structures.len() {
+            cache.insert(key(index), index, 1);
+        }
+
+        assert_eq!(cache.entry_count(), MAX_STRUCTURE_CACHE_ENTRIES);
+        assert_eq!(cache.get(&key(0)), None, "the oldest entry was evicted");
+        assert_eq!(cache.get(&key(1)), Some(&1));
+        assert_eq!(cache.retained_bytes(), MAX_STRUCTURE_CACHE_ENTRIES);
     }
 
     #[test]
@@ -392,7 +707,7 @@ mod tests {
             src_strides: vec![1],
             dst_offset: 0,
             src_offset: 8,
-            coefficient: 1,
+            coefficient: Some(1),
         };
         let mut twin = same.clone();
         twin.dst_offset = 16;
@@ -402,7 +717,7 @@ mod tests {
             src_strides: vec![1, 2],
             dst_offset: 0,
             src_offset: 0,
-            coefficient: 0,
+            coefficient: Some(0),
         };
         let zero = DeviceRegionSpec {
             dims: vec![4],
@@ -411,15 +726,15 @@ mod tests {
         };
 
         assert_eq!(
-            distinct_plan_signatures(&[same.clone(), twin], &[]).unwrap(),
+            distinct_plan_signatures(&[same.clone(), twin], &[], &[]).unwrap(),
             1
         );
         assert_eq!(
-            distinct_plan_signatures(&[same.clone(), other], &[]).unwrap(),
+            distinct_plan_signatures(&[same.clone(), other], &[], &[]).unwrap(),
             2
         );
         // The fill's source is packed [1], identical to `same`'s source.
-        assert_eq!(distinct_plan_signatures(&[same], &[zero]).unwrap(), 1);
+        assert_eq!(distinct_plan_signatures(&[same], &[], &[zero]).unwrap(), 1);
     }
 
     #[test]

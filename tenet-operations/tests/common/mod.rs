@@ -151,8 +151,31 @@ pub struct Pair {
     pub coefficient: f64,
 }
 
-/// A complete tree-transform fixture: two block structures, the block pairs the
-/// transform replays, and whether the source is read conjugated.
+/// One replayed recoupling group: every destination block is the `u`-weighted
+/// sum of every source block, each source read through `axes`.
+///
+/// `u` is row-major `U[dst][src]`, i.e. `u[dst * src_blocks.len() + src]` — the
+/// layout `TreeTransformBlockSpec::multi` documents. The oracle applies it as
+/// the plain sum below and never reads the compiled structure's recoupling
+/// plan, its packed columns or its GEMM orientation, so the two statements stay
+/// independent.
+#[derive(Clone, Debug)]
+pub struct Group {
+    pub dst_blocks: Vec<usize>,
+    pub src_blocks: Vec<usize>,
+    pub axes: Vec<usize>,
+    pub u: Vec<f64>,
+}
+
+impl Group {
+    fn coefficient(&self, dst_index: usize, src_index: usize) -> f64 {
+        self.u[dst_index * self.src_blocks.len() + src_index]
+    }
+}
+
+/// A complete tree-transform fixture: two block structures, the block pairs and
+/// recoupling groups the transform replays, and whether the source is read
+/// conjugated.
 #[derive(Clone, Debug)]
 pub struct Fixture {
     pub name: &'static str,
@@ -160,6 +183,7 @@ pub struct Fixture {
     pub dst_blocks: Vec<Block>,
     pub src_blocks: Vec<Block>,
     pub pairs: Vec<Pair>,
+    pub groups: Vec<Group>,
     pub conjugate: bool,
 }
 
@@ -216,6 +240,14 @@ impl Fixture {
                 TreeTransformBlockSpec::single(pair.dst_block, pair.src_block, pair.coefficient)
                     .with_source_axes(pair.axes.iter().copied())
             })
+            .chain(self.groups.iter().map(|group| {
+                TreeTransformBlockSpec::multi(
+                    group.dst_blocks.clone(),
+                    group.src_blocks.clone(),
+                    group.u.clone(),
+                )
+                .with_source_axes(group.axes.iter().copied())
+            }))
             .collect();
         TreeTransformStructure::compile_structures_with_storage_conjugation(
             &self.dst_structure(),
@@ -245,7 +277,16 @@ impl Fixture {
     ) -> Vec<T> {
         let mut expected = destination.to_vec();
         if overwrite {
-            let written: Vec<usize> = self.pairs.iter().map(|pair| pair.dst_block).collect();
+            let written: Vec<usize> = self
+                .pairs
+                .iter()
+                .map(|pair| pair.dst_block)
+                .chain(
+                    self.groups
+                        .iter()
+                        .flat_map(|group| group.dst_blocks.clone()),
+                )
+                .collect();
             for (index, block) in self.dst_blocks.iter().enumerate() {
                 if written.contains(&index) {
                     continue;
@@ -272,6 +313,32 @@ impl Fixture {
                 } else {
                     expected[dst_position].add(value)
                 };
+            }
+        }
+        let identity: Vec<usize> = (0..self.rank).collect();
+        for group in &self.groups {
+            for (dst_index, &dst_block) in group.dst_blocks.iter().enumerate() {
+                let dst = &self.dst_blocks[dst_block];
+                let dst_positions: Vec<usize> = positions(dst, &identity).collect();
+                let mut column = vec![T::zero(); dst_positions.len()];
+                for (src_index, &src_block) in group.src_blocks.iter().enumerate() {
+                    let coefficient = group.coefficient(dst_index, src_index);
+                    let src = &self.src_blocks[src_block];
+                    for (slot, src_position) in column.iter_mut().zip(positions(src, &group.axes)) {
+                        let mut value = source[src_position];
+                        if self.conjugate {
+                            value = value.conjugate();
+                        }
+                        *slot = slot.add(value.scale(coefficient));
+                    }
+                }
+                for (&dst_position, value) in dst_positions.iter().zip(column) {
+                    expected[dst_position] = if overwrite {
+                        value
+                    } else {
+                        expected[dst_position].add(value)
+                    };
+                }
             }
         }
         expected
@@ -339,6 +406,7 @@ fn single_pair_fixture(
         dst_blocks: vec![dst],
         src_blocks: vec![src],
         pairs: vec![pair],
+        groups: Vec::new(),
         conjugate,
     }
 }
@@ -431,6 +499,7 @@ pub fn interleaved_multi_block() -> Fixture {
                 coefficient: 2.5,
             },
         ],
+        groups: Vec::new(),
         conjugate: false,
     }
 }
@@ -455,6 +524,7 @@ pub fn inactive_destination_layouts() -> Fixture {
             axes: vec![1, 0],
             coefficient: -1.0,
         }],
+        groups: Vec::new(),
         conjugate: false,
     }
 }
@@ -491,6 +561,7 @@ pub fn many_distinct_signatures(blocks: usize) -> Fixture {
         dst_blocks,
         src_blocks,
         pairs,
+        groups: Vec::new(),
         conjugate: false,
     }
 }
@@ -530,6 +601,7 @@ pub fn zero_extent_block() -> Fixture {
                 coefficient: 1.0,
             },
         ],
+        groups: Vec::new(),
         conjugate: false,
     }
 }
@@ -557,17 +629,201 @@ pub fn expert_interleaved_destination() -> Fixture {
             axes: vec![1, 0],
             coefficient: 1.0,
         }],
+        groups: Vec::new(),
         conjugate: false,
     }
 }
 
 /// The fixtures whose every coefficient is exactly 1, where an f64 device move
 /// is a multiply by one and therefore bit-identical to the host's copy.
+///
+/// A recoupling group never qualifies: its destination is a GEMM result, not a
+/// move, so bit-equality with the host's own GEMM is not a contract.
 pub fn unit_coefficient_fixtures() -> Vec<Fixture> {
     all_fixtures()
         .into_iter()
-        .filter(|fixture| fixture.pairs.iter().all(|pair| pair.coefficient == 1.0))
+        .filter(|fixture| {
+            fixture.groups.is_empty() && fixture.pairs.iter().all(|pair| pair.coefficient == 1.0)
+        })
         .collect()
+}
+
+/// A square recoupling group whose `U` is *not* symmetric, so replaying it with
+/// `U` where the host uses `Uᵀ` gives a different answer.
+///
+/// Both destination blocks are the weighted sum of both transposed source
+/// blocks, which is the shape of an SU(2) recoupling over two fusion channels
+/// of one coupled sector: the degeneracy box is permuted and the channels mix.
+pub fn recoupling_non_symmetric_u() -> Fixture {
+    Fixture {
+        name: "recoupling_non_symmetric_u",
+        rank: 2,
+        dst_blocks: vec![Block::packed(vec![2, 3], 0), Block::packed(vec![2, 3], 6)],
+        src_blocks: vec![Block::packed(vec![3, 2], 0), Block::packed(vec![3, 2], 6)],
+        pairs: Vec::new(),
+        groups: vec![Group {
+            dst_blocks: vec![0, 1],
+            src_blocks: vec![0, 1],
+            axes: vec![1, 0],
+            // U[0] = [1, 2], U[1] = [0.5, -3]: U != U^T, and no row or column
+            // is a multiple of another, so neither a transposed nor a
+            // conjugated orientation reproduces it.
+            u: vec![1.0, 2.0, 0.5, -3.0],
+        }],
+        conjugate: false,
+    }
+}
+
+/// A recoupling group with more sources than destinations, where `U` is not
+/// even square: a transposed orientation is a shape error rather than a wrong
+/// value, and the `(rows, contracted, cols)` triple is pinned by construction.
+pub fn recoupling_rectangular() -> Fixture {
+    Fixture {
+        name: "recoupling_rectangular",
+        rank: 2,
+        dst_blocks: vec![Block::packed(vec![2, 3], 0), Block::packed(vec![2, 3], 6)],
+        src_blocks: vec![
+            Block::packed(vec![3, 2], 0),
+            Block::packed(vec![3, 2], 6),
+            Block::packed(vec![3, 2], 12),
+        ],
+        pairs: Vec::new(),
+        groups: vec![Group {
+            dst_blocks: vec![0, 1],
+            src_blocks: vec![0, 1, 2],
+            axes: vec![1, 0],
+            u: vec![1.0, 2.0, 3.0, -0.5, 0.25, 4.0],
+        }],
+        conjugate: false,
+    }
+}
+
+/// Recoupling groups and Single blocks in one structure, over interleaved
+/// destination layouts and beside a destination block nothing writes.
+///
+/// The two groups have different element counts, so the compile-time recoupling
+/// plan sorts them into an order that is not the block order and gives them
+/// different workspace offsets — the device must follow the plan's offsets, not
+/// the block's.
+pub fn mixed_single_and_multi() -> Fixture {
+    let dst_blocks = vec![
+        // Even and odd columns of one 4x4 parent: the two group destinations
+        // interleave in memory.
+        Block {
+            shape: vec![4, 2],
+            strides: vec![1, 8],
+            offset: 0,
+        },
+        Block {
+            shape: vec![4, 2],
+            strides: vec![1, 8],
+            offset: 4,
+        },
+        Block::packed(vec![3, 2], 16),
+        Block::packed(vec![3, 2], 22),
+        Block::packed(vec![2, 2], 28),
+        // Never written: Overwrite must zero it.
+        Block::packed(vec![2, 2], 32),
+    ];
+    let src_blocks = vec![
+        Block::packed(vec![2, 4], 0),
+        Block::packed(vec![2, 4], 8),
+        Block::packed(vec![2, 3], 16),
+        Block::packed(vec![2, 3], 22),
+        Block::packed(vec![2, 2], 28),
+    ];
+    Fixture {
+        name: "mixed_single_and_multi",
+        rank: 2,
+        dst_blocks,
+        src_blocks,
+        pairs: vec![Pair {
+            dst_block: 4,
+            src_block: 4,
+            axes: vec![1, 0],
+            coefficient: -1.5,
+        }],
+        groups: vec![
+            Group {
+                dst_blocks: vec![0, 1],
+                src_blocks: vec![0, 1],
+                axes: vec![1, 0],
+                u: vec![0.25, -2.0, 1.0, 0.5],
+            },
+            Group {
+                dst_blocks: vec![2, 3],
+                src_blocks: vec![2, 3],
+                axes: vec![1, 0],
+                u: vec![1.0, -0.75, 2.5, 0.125],
+            },
+        ],
+        conjugate: false,
+    }
+}
+
+/// A rank-3 recoupling group read from a conjugated source, with a coefficient
+/// that is neither 1 nor -1 on every entry of `U`.
+pub fn conjugated_recoupling() -> Fixture {
+    Fixture {
+        name: "conjugated_recoupling",
+        rank: 3,
+        dst_blocks: vec![
+            Block::packed(vec![2, 3, 2], 0),
+            Block::packed(vec![2, 3, 2], 12),
+        ],
+        src_blocks: vec![
+            Block::packed(vec![3, 2, 2], 0),
+            Block::packed(vec![3, 2, 2], 12),
+        ],
+        pairs: Vec::new(),
+        groups: vec![Group {
+            dst_blocks: vec![0, 1],
+            src_blocks: vec![0, 1],
+            axes: vec![1, 0, 2],
+            u: vec![0.625, -1.25, 2.0, 0.375],
+        }],
+        conjugate: true,
+    }
+}
+
+/// A recoupling group one of whose scatter destinations is the interleaved
+/// layout only the host's exact overlap fallback admits.
+///
+/// The device must reject the whole structure — including the pack columns and
+/// the coefficient upload it would otherwise do first — on the strength of that
+/// one scatter region.
+pub fn expert_interleaved_recoupling_destination() -> Fixture {
+    Fixture {
+        name: "expert_interleaved_recoupling_destination",
+        rank: 2,
+        dst_blocks: vec![
+            Block::packed(vec![3, 2], 0),
+            Block {
+                shape: vec![3, 2],
+                strides: vec![2, 3],
+                offset: 6,
+            },
+        ],
+        src_blocks: vec![Block::packed(vec![2, 3], 0), Block::packed(vec![2, 3], 6)],
+        pairs: Vec::new(),
+        groups: vec![Group {
+            dst_blocks: vec![0, 1],
+            src_blocks: vec![0, 1],
+            axes: vec![1, 0],
+            u: vec![1.0, 2.0, 0.5, -3.0],
+        }],
+        conjugate: false,
+    }
+}
+
+/// The recoupling fixtures, for tests that are about the Multi path itself.
+pub fn recoupling_fixtures() -> Vec<Fixture> {
+    vec![
+        recoupling_non_symmetric_u(),
+        recoupling_rectangular(),
+        mixed_single_and_multi(),
+        conjugated_recoupling(),
+    ]
 }
 
 /// Every fixture the device and host suites both replay.
@@ -576,5 +832,6 @@ pub fn all_fixtures() -> Vec<Fixture> {
     fixtures.push(interleaved_multi_block());
     fixtures.push(inactive_destination_layouts());
     fixtures.push(zero_extent_block());
+    fixtures.extend(recoupling_fixtures());
     fixtures
 }
