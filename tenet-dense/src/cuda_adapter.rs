@@ -14,6 +14,7 @@ use tenferro_tensor::{
 };
 
 use super::{DenseBackend, DenseDType, DenseError, MatrixOp};
+use crate::cuda_region::{validate_destination_layout, validate_region, CudaRegion};
 use crate::tensor::dense_dtype_from_tenferro;
 
 mod cuda_scalar_sealed {
@@ -146,8 +147,9 @@ static COPY_CALLS: AtomicU64 = AtomicU64::new(0);
 ///   workspaces and the intermediate tensors of `cuda_is_hermitian_region`
 ///   (`abs`, `div`, `sub`, the reductions) allocate on device but are not
 ///   visible as buffers here and are therefore not counted.
-/// - `gemm_calls`: `dot_general` submissions from
-///   `cuda_gemm_region_strided_into`.
+/// - `gemm_calls`: `dot_general` submissions, from
+///   `cuda_gemm_region_strided_into` and from the region primitives
+///   ([`cuda_region_axpby`], [`cuda_region_zero`]) alike.
 /// - `solver_calls`: cuSOLVER region calls (SVD, QR, EIGH).
 /// - `copy_calls`: `cuda_copy_region_into` calls that move data.
 ///
@@ -252,10 +254,27 @@ fn ensure_cuda_device(
     Ok(())
 }
 
+/// The device operands a region call needs but never varies: the `1` used as
+/// the 1x1 coefficient of an unscaled move, and the zero template read as the
+/// packed source of a region fill.
+///
+/// One pair per payload dtype, created on first use of that dtype rather than
+/// at [`CudaDenseContext::warm_up`], so the warm-up's documented fixed cost
+/// and its counter deltas are unchanged. The zero template grows monotonically
+/// to the longest region filled so far; it is bounded by the largest single
+/// destination region a caller has asked to zero, not by the number of calls.
+#[derive(Default)]
+struct ScalarOperands {
+    ones: Option<CudaDenseStorage>,
+    zeros: Option<CudaDenseStorage>,
+}
+
 /// Owns the tenferro CUDA backend for one device ordinal.
 pub struct CudaDenseContext {
     backend: CudaBackend,
     device: usize,
+    real_operands: ScalarOperands,
+    complex_operands: ScalarOperands,
 }
 
 impl CudaDenseContext {
@@ -264,7 +283,114 @@ impl CudaDenseContext {
             .map_err(|_| cuda_error("cuda_context", "device ordinal exceeds u32"))?;
         let backend = CudaBackend::new(CudaDeviceId::from_ordinal(ordinal))
             .map_err(|err| cuda_error("cuda_context", err))?;
-        Ok(Self { backend, device })
+        Ok(Self {
+            backend,
+            device,
+            real_operands: ScalarOperands::default(),
+            complex_operands: ScalarOperands::default(),
+        })
+    }
+
+    fn operands<D: CudaScalar>(&self) -> &ScalarOperands {
+        if D::IS_COMPLEX {
+            &self.complex_operands
+        } else {
+            &self.real_operands
+        }
+    }
+
+    fn operands_mut<D: CudaScalar>(&mut self) -> &mut ScalarOperands {
+        if D::IS_COMPLEX {
+            &mut self.complex_operands
+        } else {
+            &mut self.real_operands
+        }
+    }
+
+    /// Uploads this dtype's `1` operand unless it is already resident.
+    fn ensure_ones<D: CudaScalar>(&mut self) -> Result<(), DenseError> {
+        if self.operands::<D>().ones.is_none() {
+            let ones = CudaDenseStorage::upload_owned(self, vec![D::ONE])?;
+            self.operands_mut::<D>().ones = Some(ones);
+        }
+        Ok(())
+    }
+
+    /// Uploads this dtype's zero template unless a resident one already holds
+    /// at least `len` elements. A prefix of a compact zero buffer is itself a
+    /// compact zero buffer, so a longer template serves every shorter fill.
+    fn ensure_zeros<D: CudaScalar>(&mut self, len: usize) -> Result<(), DenseError> {
+        let usable = self
+            .operands::<D>()
+            .zeros
+            .as_ref()
+            .is_some_and(|zeros| zeros.len() >= len);
+        if !usable {
+            // Drop the short template before allocating the longer one, so the
+            // device holds one of them rather than both.
+            self.operands_mut::<D>().zeros = None;
+            let zeros = CudaDenseStorage::upload_owned(self, vec![D::ZERO; len])?;
+            self.operands_mut::<D>().zeros = Some(zeros);
+        }
+        Ok(())
+    }
+
+    /// Sizes this dtype's zero template for `len` elements up front.
+    ///
+    /// [`cuda_region_zero`] grows the template to the fill it is given, so a
+    /// caller that visits `k` regions in ascending size pays `k` uploads for
+    /// what is one buffer. A caller that knows its largest region — a device
+    /// transform knows the largest inactive destination layout of its
+    /// structure on the host, before any replay — reserves once here and pays
+    /// none. It never shrinks an already longer template.
+    ///
+    /// The bytes it pins stay resident until [`Self::release_scalar_operands`]
+    /// or the context is dropped, and are reported by
+    /// [`Self::scalar_operand_bytes`]. The device transform executor (G2a-2)
+    /// is expected to charge them to the device workspace budget, exactly as
+    /// the G3c workspace charges its own `CudaZeroTemplate`; those two zero
+    /// sources should become one authority once a caller owns both (or vanish
+    /// together with tenferro-rs#1834's native device fill). This leaf
+    /// deliberately does not consolidate them.
+    pub fn reserve_zero_template<D: CudaScalar>(&mut self, len: usize) -> Result<(), DenseError> {
+        if len == 0 {
+            return Ok(());
+        }
+        self.ensure_zeros::<D>(len)
+    }
+
+    /// Device bytes the lazily created scalar operands currently pin, over
+    /// every dtype. Observability for the caller that owns the device memory
+    /// budget; nothing here reads it back.
+    pub fn scalar_operand_bytes(&self) -> usize {
+        fn bytes(operands: &ScalarOperands, element: usize) -> usize {
+            operands.ones.as_ref().map_or(0, CudaDenseStorage::len) * element
+                + operands.zeros.as_ref().map_or(0, CudaDenseStorage::len) * element
+        }
+        bytes(&self.real_operands, std::mem::size_of::<f64>())
+            + bytes(&self.complex_operands, std::mem::size_of::<Complex64>())
+    }
+
+    /// Frees every lazily created scalar operand. The next region call that
+    /// needs one re-creates it, so this is a memory decision, never a
+    /// correctness one.
+    pub fn release_scalar_operands(&mut self) {
+        self.real_operands = ScalarOperands::default();
+        self.complex_operands = ScalarOperands::default();
+    }
+
+    /// Hands out the backend and this dtype's scalar operands at once.
+    ///
+    /// A whole-`self` accessor cannot express this: submitting against a
+    /// context-owned operand needs `&mut` on the backend and `&` on the
+    /// operand simultaneously, which is only sound because they are disjoint
+    /// fields.
+    fn split_operands<D: CudaScalar>(&mut self) -> (&mut CudaBackend, &ScalarOperands) {
+        if D::IS_COMPLEX {
+            (&mut self.backend, &self.complex_operands)
+        } else {
+            (&mut self.backend, &self.real_operands)
+        }
     }
 
     pub fn device(&self) -> usize {
@@ -299,7 +425,13 @@ impl CudaDenseContext {
     /// a CubeCL concern, not a TeNeT one; its PTX disk cache is configured
     /// through CubeCL's own `cubecl.toml` (`[compilation] cache`) and is off by
     /// default. The cuTENSOR plan cache is also per contraction shape, so a
-    /// user contraction still builds its own plan. Tenferro's runtime-owned
+    /// user contraction still builds its own plan. The region primitive's
+    /// scalar operands are not warmed either: they are created on first use
+    /// of their dtype, which keeps this warm-up's fixed cost, its counter
+    /// deltas, and "every device buffer created here is dropped" true as
+    /// written.
+    ///
+    /// Tenferro's runtime-owned
     /// blas1 cuBLAS handle (tenferro-gpu `cubecl/runtime.rs:688`) is also not
     /// warmed, because TeNeT reaches no blas1 entry point; extend the warm-up
     /// if that changes.
@@ -458,6 +590,44 @@ impl CudaDenseStorage {
         tensor
             .backend_region_view(shape.to_vec(), strides, offset)
             .map(D::tensor_view)
+            .map_err(|err| cuda_error("cuda_region", err))
+    }
+
+    /// Rank-N counterpart of [`Self::region_view_strided`]. The caller owns
+    /// the bounds and dtype proof only in the sense that both are re-checked
+    /// here (dtype) and by [`validate_region`] (bounds) before any submission.
+    fn region_view_nd<D: CudaScalar>(
+        &self,
+        dims: &[usize],
+        strides: &[isize],
+        offset: isize,
+    ) -> Result<TensorView<'_>, DenseError> {
+        let Some(tensor) = D::typed(&self.tensor) else {
+            return Err(dtype_mismatch::<D>("cuda_region", &self.tensor));
+        };
+        tensor
+            .backend_region_view(dims.to_vec(), strides.to_vec(), offset)
+            .map(D::tensor_view)
+            .map_err(|err| cuda_error("cuda_region", err))
+    }
+
+    fn region_view_nd_mut<D: CudaScalar>(
+        &mut self,
+        dims: &[usize],
+        strides: &[isize],
+        offset: isize,
+    ) -> Result<TensorViewMut<'_>, DenseError> {
+        let actual = dense_dtype_from_tenferro(self.tensor.dtype());
+        let Some(tensor) = D::typed_mut(&mut self.tensor) else {
+            return Err(DenseError::DTypeMismatch {
+                op: "cuda_region",
+                expected: D::DTYPE,
+                actual,
+            });
+        };
+        tensor
+            .backend_region_view_mut(dims.to_vec(), strides.to_vec(), offset)
+            .map(D::tensor_view_mut)
             .map_err(|err| cuda_error("cuda_region", err))
     }
 
@@ -668,6 +838,286 @@ fn cuda_gemm_region_strided_into<D: CudaScalar>(
             TensorWrite::from_view(dst_view),
         )
         .map_err(|err| cuda_error("cuda_matmul", err))
+}
+
+/// How a region call treats the destination it writes.
+///
+/// Only these two exist: Tenferro 0.5.0 has no in-place strided scale, so a
+/// general `beta` is a capability boundary rather than a parameter. The host
+/// replay never needs one either — an overwriting transform zeroes its
+/// inactive layouts and assigns the active ones, and an accumulating caller
+/// uses `beta = 1`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CudaRegionBeta {
+    /// `dst_region = coefficient * src_region` (`beta = 0`).
+    Overwrite,
+    /// `dst_region += coefficient * src_region` (`beta = 1`).
+    Accumulate,
+}
+
+impl CudaRegionBeta {
+    fn scalar<D: CudaScalar>(self) -> ContractionScalar {
+        match self {
+            Self::Overwrite => D::ZERO.contraction_scalar(),
+            Self::Accumulate => D::ONE.contraction_scalar(),
+        }
+    }
+}
+
+/// The payload dtype of an operand, checked before any device work rather
+/// than at view construction, so a mismatched call cannot have uploaded a
+/// lazily created scalar operand first.
+fn ensure_payload_dtype<D: CudaScalar>(
+    op: &'static str,
+    storage: &CudaDenseStorage,
+) -> Result<(), DenseError> {
+    let actual = storage.dtype();
+    if actual != D::DTYPE {
+        return Err(DenseError::DTypeMismatch {
+            op,
+            expected: D::DTYPE,
+            actual,
+        });
+    }
+    Ok(())
+}
+
+/// Submits one validated region move. Takes the backend rather than the whole
+/// context so a caller can pass a coefficient the context itself owns.
+#[allow(clippy::too_many_arguments)]
+fn submit_region_axpby<D: CudaScalar>(
+    backend: &mut CudaBackend,
+    op: &'static str,
+    src: &CudaDenseStorage,
+    src_region: &CudaRegion,
+    conj: bool,
+    coeff: &CudaDenseStorage,
+    coeff_offset: usize,
+    beta: CudaRegionBeta,
+    dst: &mut CudaDenseStorage,
+    dst_region: &CudaRegion,
+) -> Result<(), DenseError> {
+    let rank = src_region.dims().len();
+    let (view_dims, src_strides) = src_region.contraction_view_metadata()?;
+    let (_, dst_strides) = dst_region.contraction_view_metadata()?;
+    let coeff_offset = isize::try_from(coeff_offset).map_err(|_| DenseError::OffsetOverflow {
+        value: coeff_offset,
+    })?;
+
+    let lhs = src.region_view_nd::<D>(&view_dims, &src_strides, src_region.offset_isize()?)?;
+    let rhs = coeff.region_view_nd::<D>(&[1, 1], &[1, 1], coeff_offset)?;
+    let out = dst.region_view_nd_mut::<D>(&view_dims, &dst_strides, dst_region.offset_isize()?)?;
+
+    let config = DotGeneralConfig {
+        lhs_contracting_dims: vec![rank],
+        rhs_contracting_dims: vec![0],
+        lhs_batch_dims: Vec::new(),
+        rhs_batch_dims: Vec::new(),
+    };
+    // The coefficient is the 1x1 *operand*, never the descriptor alpha: a
+    // descriptor alpha of 0 lets CUDA skip the source read and erase NaN/Inf,
+    // where the host multiplies and propagates it (typed.rs `cuda_axpby_owned`).
+    let accumulation = DotGeneralAccumulation {
+        lhs_conj: conj,
+        rhs_conj: false,
+        alpha: D::ONE.contraction_scalar(),
+        beta: beta.scalar::<D>(),
+    };
+    GEMM_CALLS.fetch_add(1, Ordering::Relaxed);
+    backend
+        .dot_general_read_into_accum(
+            TensorRead::from_view(lhs),
+            TensorRead::from_view(rhs),
+            &config,
+            accumulation,
+            TensorWrite::from_view(out),
+        )
+        .map_err(|err| cuda_error(op, err))
+}
+
+/// `dst_region = c * [conj] src_region + beta * dst_region`, where `c` is a
+/// 1x1 **data** operand read from `coeff`.
+///
+/// This is the single strided data-movement primitive the device structural
+/// operations are built on: one strided, offset, rank-N source region of one
+/// buffer moved into a strided, offset, rank-N destination region of another,
+/// with the axis permutation carried by the destination strides. It submits
+/// one `dot_general` against the 1x1 coefficient and allocates no device
+/// buffer of its own.
+///
+/// Transfer contract: a call with `coeff = Some(..)` moves nothing across the
+/// host boundary, ever. A call with `coeff = None` uploads this context's
+/// one-element `1` the first time that dtype is used, and nothing afterwards
+/// (see [`CudaDenseContext::scalar_operand_bytes`]).
+///
+/// `coeff` is `Some((buffer, offset))` to read the coefficient from a
+/// caller-owned device vector — block `b` of a structure's uploaded
+/// coefficients is the 1x1 view at offset `b` — or `None` to use the
+/// context's own `1`, for a move that only relayouts. It is never the
+/// contraction's descriptor alpha, which stays 1: a descriptor alpha lets
+/// CUDA skip the source read when it is 0 and so erases NaN/Inf that the host
+/// propagates.
+///
+/// One numerical deviation from the host is disclosed and pinned by the device
+/// tests: the host copies bit-exactly when the coefficient is 1, while this
+/// path always multiplies, and an infinite complex payload is observed to come
+/// back as `NaN` in both components: `inf * 0` in the complex product already
+/// yields a `NaN` component, which the remaining multiply spreads across both.
+/// `f64` infinities and every finite payload are unaffected. See
+/// `benchmarks/history/cuda-region-axpby-2026-09-20.md`.
+///
+/// Validation order, all of it before any device work:
+///
+/// 1. every operand is on the context's device;
+/// 2. every operand has payload dtype `D` (`DTypeMismatch`);
+/// 3. source and destination `dims` are equal (`ShapeMismatch`);
+/// 4. the coefficient offset is inside `coeff` (`OutOfBounds`);
+/// 5. the element count does not overflow (`ElementCountOverflow`) — a
+///    zero-extent region returns `Ok` here, with no submission;
+/// 6. the destination layout is injective (`Unsupported`);
+/// 7. both regions stay inside their buffers and fit `isize`
+///    (`OutOfBounds` / `OffsetOverflow` / `StrideOverflow`).
+///
+/// Two further constraints are type boundaries rather than checks: strides
+/// cannot be negative ([`CudaRegion`]), and `src`, `coeff` and `dst` cannot be
+/// the same buffer, because [`CudaDenseStorage`] is neither `Clone` nor
+/// refcounted, so a shared and an exclusive borrow of one buffer cannot
+/// coexist. An in-place strided transform is therefore inexpressible here.
+///
+/// No rank limit is imposed: the probe accepted every mode count up to 72,
+/// far above any rank a fusion tree reaches.
+///
+/// Disclosed cost: Tenferro's stream slots are per thread, so a context-owned
+/// operand (`coeff = None`, or any [`cuda_region_zero`]) that is used from a
+/// thread other than the one that created it can force a device-wide
+/// synchronize per call. Today every such call happens under the device lease,
+/// which serializes them; a future multi-threaded device executor should keep
+/// operand creation and use on the same stream slot or pass its own
+/// coefficient buffer.
+#[allow(clippy::too_many_arguments)]
+pub fn cuda_region_axpby<D: CudaScalar>(
+    ctx: &mut CudaDenseContext,
+    src: &CudaDenseStorage,
+    src_region: &CudaRegion,
+    conj: bool,
+    coeff: Option<(&CudaDenseStorage, usize)>,
+    beta: CudaRegionBeta,
+    dst: &mut CudaDenseStorage,
+    dst_region: &CudaRegion,
+) -> Result<(), DenseError> {
+    const OP: &str = "cuda_region_axpby";
+    match coeff {
+        Some((coeff, _)) => ensure_cuda_device(
+            ctx.device,
+            OP,
+            &[
+                ("src", src.device),
+                ("coefficient", coeff.device),
+                ("dst", dst.device),
+            ],
+        )?,
+        None => ensure_cuda_device(ctx.device, OP, &[("src", src.device), ("dst", dst.device)])?,
+    }
+    ensure_payload_dtype::<D>(OP, src)?;
+    ensure_payload_dtype::<D>(OP, dst)?;
+    if let Some((coeff, _)) = coeff {
+        ensure_payload_dtype::<D>(OP, coeff)?;
+    }
+    if src_region.dims() != dst_region.dims() {
+        return Err(DenseError::ShapeMismatch {
+            op: OP,
+            expected: dst_region.dims().to_vec(),
+            actual: src_region.dims().to_vec(),
+        });
+    }
+    if let Some((coeff, offset)) = coeff {
+        if offset >= coeff.len {
+            return Err(DenseError::OutOfBounds);
+        }
+    }
+    if src_region.is_empty() {
+        return Ok(());
+    }
+    src_region.element_count()?;
+    validate_destination_layout(OP, dst_region)?;
+    validate_region(src_region, src.len)?;
+    validate_region(dst_region, dst.len)?;
+
+    match coeff {
+        Some((coeff, offset)) => submit_region_axpby::<D>(
+            &mut ctx.backend,
+            OP,
+            src,
+            src_region,
+            conj,
+            coeff,
+            offset,
+            beta,
+            dst,
+            dst_region,
+        ),
+        None => {
+            ctx.ensure_ones::<D>()?;
+            let (backend, operands) = ctx.split_operands::<D>();
+            let Some(ones) = operands.ones.as_ref() else {
+                return Err(cuda_error(OP, "context scalar operand is missing"));
+            };
+            submit_region_axpby::<D>(
+                backend, OP, src, src_region, conj, ones, 0, beta, dst, dst_region,
+            )
+        }
+    }
+}
+
+/// Writes zeros over `dst_region`, reading the context's zero template as a
+/// packed source of the same extents.
+///
+/// This is the overwrite-mode destination rule expressed with the same
+/// primitive: an inactive destination layout is zeroed rather than left
+/// alone, so the result is independent of what the caller's buffer held —
+/// including a NaN. It is a region move, not a fill kernel, so it inherits
+/// exactly the validation of [`cuda_region_axpby`].
+///
+/// Transfer contract: it uploads the context's `1` and its zero template on
+/// first use of a dtype, and re-uploads the template whenever a fill is longer
+/// than the resident one. Size the template once with
+/// [`CudaDenseContext::reserve_zero_template`] to make every later fill of a
+/// replay transfer-free; otherwise a sequence of ascending fills pays one
+/// upload each.
+pub fn cuda_region_zero<D: CudaScalar>(
+    ctx: &mut CudaDenseContext,
+    dst: &mut CudaDenseStorage,
+    dst_region: &CudaRegion,
+) -> Result<(), DenseError> {
+    const OP: &str = "cuda_region_zero";
+    ensure_cuda_device(ctx.device, OP, &[("dst", dst.device)])?;
+    ensure_payload_dtype::<D>(OP, dst)?;
+    if dst_region.is_empty() {
+        return Ok(());
+    }
+    let count = dst_region.element_count()?;
+    validate_destination_layout(OP, dst_region)?;
+    validate_region(dst_region, dst.len)?;
+    let src_region = CudaRegion::packed(dst_region.dims(), 0)?;
+
+    ctx.ensure_ones::<D>()?;
+    ctx.ensure_zeros::<D>(count)?;
+    let (backend, operands) = ctx.split_operands::<D>();
+    let (Some(ones), Some(zeros)) = (operands.ones.as_ref(), operands.zeros.as_ref()) else {
+        return Err(cuda_error(OP, "context scalar operands are missing"));
+    };
+    submit_region_axpby::<D>(
+        backend,
+        OP,
+        zeros,
+        &src_region,
+        false,
+        ones,
+        0,
+        CudaRegionBeta::Overwrite,
+        dst,
+        dst_region,
+    )
 }
 
 /// Downloads a small real (f64) device tensor as host values. Only used for
