@@ -23,12 +23,13 @@ probe (#1298) already recorded the plan-cache and transfer constants.
 
 ## Runs
 
-New binary, `tenet-dense/tests/cuda_region_axpby.rs` (12 `#[ignore]` tests):
+New binary, `tenet-dense/tests/cuda_region_axpby.rs` (14 `#[ignore]` tests,
+after the independent source review's P2 follow-ups):
 
 ```
 cargo test -p tenet-dense --no-default-features --features cuda,cpu-faer \
   --test cuda_region_axpby -- --ignored --test-threads=1 --nocapture
-test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.22s
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.89s
 ```
 
 Full device suite:
@@ -37,7 +38,7 @@ Full device suite:
 cargo test --workspace --lib --tests --no-default-features --features cuda,cpu-faer \
   --no-fail-fast -- --ignored --skip measure_checked_generic_transform_phases \
   --skip axioms_ --skip itebd_ --skip cross_library --test-threads=1
-97 `test result: ok` lines, 74 device tests passed, 0 failed
+97 `test result: ok` lines, 76 device tests passed, 0 failed
 ```
 
 The pre-existing device results are unchanged, including
@@ -49,7 +50,7 @@ warm-up, so the warm-up's documented counter deltas still hold exactly.
 
 | Test | Evidence |
 |---|---|
-| `nd_region_axpby_matches_a_host_strided_loop_f64` / `_c64` | ranks 3–6, source and destination axis orders differing, leading strides > 1, three blocks per buffer at unrelated offsets, `conj` on/off, `beta` ∈ {overwrite, accumulate}, coefficient 1 from the context and real/complex coefficients read from a shared coefficient vector at the block's own offset — against an independent host strided walk |
+| `nd_region_axpby_matches_a_host_strided_loop_f64` / `_c64` | ranks 3–6, source and destination axis orders differing, leading strides > 1, three blocks per buffer at unrelated offsets, `conj` on/off, `beta` ∈ {overwrite, accumulate}, coefficient 1 from the context and real/complex coefficients read from a shared coefficient vector at the block's own offset — against an independent host strided walk. Coefficient-1 cases are compared **bitwise**, so "finite payloads are unaffected by the multiply" is tested, not assumed; other coefficients at `1e-12` relative |
 | `a_zero_coefficient_propagates_nan_from_the_source` | coefficient 0 read as a data operand keeps `0 * NaN = NaN`, as the host does; a descriptor alpha of 0 would have erased it |
 | `overwrite_is_independent_of_a_nan_poisoned_destination` | `beta = 0` into an all-NaN destination writes clean values; untouched positions keep their NaN |
 | `infinite_payload_behaviour_is_recorded` | see below |
@@ -60,6 +61,8 @@ warm-up, so the warm-up's documented counter deltas still hold exactly.
 | `every_rejection_is_typed_and_submits_no_device_work` | dims mismatch, coefficient offset out of bounds, source/destination out of bounds, non-injective destination, dtype mismatch — each the exact typed `DenseError`, with `h2d_calls`, `d2h_calls`, `device_allocs`, `gemm_calls`, `solver_calls` and `copy_calls` all 0 across the whole rejection phase |
 | `a_zero_extent_region_is_a_no_op_without_a_submission` | a zero-extent region returns `Ok`, touches nothing, and submits nothing |
 | `the_call_phase_moves_nothing_across_the_host_boundary` | 16 region calls: `h2d_calls = 0`, `h2d_bytes = 0`, `d2h_calls = 0`, `device_allocs = 0`, `gemm_calls = 16` |
+| `gapped_and_interleaved_destinations_are_accepted` | a sub-block of a wider parent (`s_{k+1} > d_k·s_k`) and the boundary case `dims [2,2] strides [2,3]` — the layouts that separate the host's cumulative-span rule from a stricter one — are accepted by the backend and land exactly where the host walk says |
+| `a_reserved_zero_template_makes_every_later_fill_transfer_free` | `reserve_zero_template` sizes the template once, three fills of different sizes then cost one upload in total (the `1` operand), `scalar_operand_bytes` reports the pinned bytes, and `release_scalar_operands` returns them |
 
 ## Recorded non-finite behaviour (the one disclosed deviation)
 
@@ -75,11 +78,39 @@ The host copies bit-exactly when the coefficient is 1
 always multiplies by the 1x1 operand. For `f64` that is exact and infinities
 survive. For `Complex64` the device's complex product evaluates a difference of
 products that is `inf - inf` for `(inf, 0)` and for `(0, -inf)`, so **both**
-components come back `NaN` — stronger than the design's prediction that such a
-payload would merely "gain NaN components". Finite payloads, and NaN
+components come back `NaN`: the complex product's `inf * 0` term is already
+`NaN`, and the remaining multiply spreads it across both components. This is
+stronger than the design's prediction that such a payload would merely "gain
+NaN components". Finite payloads, and NaN
 propagation through a zero coefficient, are unaffected; this is recorded, not
 worked around, because hiding it would mean reintroducing a descriptor alpha
 and losing NaN propagation everywhere else.
+
+## Transfer contract, stated exactly
+
+`cuda_region_axpby` with a caller-owned coefficient moves nothing across the
+host boundary, ever, and allocates no device buffer. The context-owned
+operands are the only exception, and they are one-off: `coeff = None` uploads
+the one-element `1` on first use of a dtype, and `cuda_region_zero`
+additionally uploads a zero template, re-uploading it only when a fill is
+longer than the resident one. `reserve_zero_template` sizes it once so a
+replay pays none; `scalar_operand_bytes` reports what is pinned and
+`release_scalar_operands` frees it. G2a-2 is expected to charge those bytes to
+the device workspace budget and to converge this template with the G3c
+`CudaZeroTemplate` (`tenet/src/typed.rs`); this leaf deliberately does not
+consolidate them.
+
+Disclosed cost: Tenferro's stream slots are per thread, so a context-owned
+operand used from another thread can force a device-wide synchronize per call.
+Every such call today happens under the device lease, which serializes them.
+
+## CI coverage
+
+`cuda-check` only `cargo check`s the `cuda` feature, so the device tests and
+the adapter are compile-checked there, not executed. The region descriptor and
+every layout rule it enforces therefore live in `tenet-dense/src/cuda_region.rs`,
+which is compiled (and tested) without the `cuda` feature: its 7 unit tests run
+in the ordinary `cargo test -p tenet-dense` that CI does execute.
 
 ## Constraints this adapter honours
 
@@ -88,10 +119,13 @@ before any device work:
 
 1. **Non-negative strides.** `CudaRegion` stores unsigned strides, so a
    negative one is not expressible rather than rejected at the contraction.
-2. **Injective destination.** Checked on the host (each axis of extent > 1
-   must start beyond the span of every faster axis) and reported as
-   `DenseError::Unsupported`, instead of relying on Tenferro's view
-   constructor.
+2. **Injective destination.** Checked on the host with the same
+   cumulative-span rule the host proves block layouts with
+   (`tenet-core` `block_structure.rs::block_layout_is_proven_injective`) and
+   reported as `DenseError::Unsupported`, instead of relying on Tenferro's
+   view constructor. Device admission therefore equals the host's *proven*
+   class; layouts the host admits only through its exact overlap fallback are
+   `Unsupported` on device.
 3. **No in-place transform.** `CudaDenseStorage` is neither `Clone` nor
    refcounted, so a shared and an exclusive borrow of one buffer cannot
    coexist; source, coefficient and destination are necessarily distinct.

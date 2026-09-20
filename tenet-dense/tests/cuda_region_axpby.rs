@@ -249,7 +249,15 @@ fn nd_case<D: RegionScalar>(
         "rank {} dims {dims:?} src {src_order:?} dst {dst_order:?} conj {conj} context_one {use_context_one}",
         dims.len()
     );
-    assert_close(&actual, &expected, &what);
+    // A coefficient of 1 is a pure copy, conjugation or single add, and the
+    // probe established that the device reproduces the host's element order
+    // exactly there. Asserting it bitwise is what makes "finite payloads are
+    // unaffected by the multiply" a tested claim rather than a tolerance.
+    if use_context_one || coefficients.iter().all(|value| *value == D::ONE) {
+        assert_bitwise(&actual, &expected, &what);
+    } else {
+        assert_close(&actual, &expected, &what);
+    }
 }
 
 fn nd_sweep<D: RegionScalar>(ctx: &mut CudaDenseContext) {
@@ -437,10 +445,11 @@ fn infinite_payload_behaviour_is_recorded() {
     println!("Complex64 +/-inf through a coefficient of 1: {complex:?}");
     // Recorded on an A100 (cuTENSOR 2.5.0): a complex infinity does not
     // survive the multiply by the 1x1 operand at all — *both* components come
-    // back NaN, for `(inf, 0)` and for `(0, -inf)` alike. The device's complex
-    // product evaluates a difference of products that is `inf - inf` for these
-    // inputs, where the host's `alpha == 1` path copies the value bit-exactly
-    // and keeps the infinity. This is the one numerical deviation of the
+    // back NaN, for `(inf, 0)` and for `(0, -inf)` alike: the complex
+    // product's `inf * 0` term is already NaN, and the remaining multiply
+    // spreads it across both components, where the host's `alpha == 1` path
+    // copies the value bit-exactly and keeps the infinity. It is the one
+    // numerical deviation of the
     // device path; it affects only non-finite complex payloads, and the f64
     // leg above shows real infinities are unaffected.
     for value in &complex {
@@ -618,6 +627,113 @@ fn a_diagonal_source_view_extracts_the_block_diagonal() {
         })
         .collect();
     assert_bitwise(&actual, &expected, "conjugated block diagonal");
+}
+
+/// A sub-block of a wider parent: the slower axis steps by the parent's
+/// leading dimension, so its stride strictly *exceeds* the span of the faster
+/// axis instead of being a multiple of it. This is the real destination form
+/// of a transform that writes into one sector of a larger allocation, and the
+/// interleaved `dims [2,2] strides [2,3]` layout below is the boundary case of
+/// the host's cumulative-span rule — admitted here exactly as the host admits
+/// it, and accepted by the backend.
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn gapped_and_interleaved_destinations_are_accepted() {
+    let mut ctx = context();
+    let src_host: Vec<f64> = (0..64).map(|index| 1.0 + index as f64).collect();
+    let src = upload::<f64>(&ctx, &src_host);
+
+    // Gapped: a 2x3 block inside a parent whose leading dimension is 5.
+    let dims = [2usize, 3];
+    let src_strides = [1usize, 2];
+    let dst_strides = [1usize, 5];
+    let parent: Vec<f64> = (0..32).map(|index| -(index as f64)).collect();
+    let mut dst = upload::<f64>(&ctx, &parent);
+    cuda_region_axpby::<f64>(
+        &mut ctx,
+        &src,
+        &region(&dims, &src_strides, 3),
+        false,
+        None,
+        CudaRegionBeta::Overwrite,
+        &mut dst,
+        &region(&dims, &dst_strides, 4),
+    )
+    .expect("a gapped destination sub-block");
+
+    let actual = download::<f64>(&ctx, &dst);
+    let mut expected = parent.clone();
+    for (&from, &to) in region_offsets(&dims, &src_strides, 3)
+        .iter()
+        .zip(&region_offsets(&dims, &dst_strides, 4))
+    {
+        expected[to] = src_host[from];
+    }
+    assert_bitwise(&actual, &expected, "gapped destination sub-block");
+
+    // Interleaved but injective: positions 0, 2, 3, 5 of the destination.
+    let dims = [2usize, 2];
+    let dst_strides = [2usize, 3];
+    let mut dst = upload::<f64>(&ctx, &parent);
+    cuda_region_axpby::<f64>(
+        &mut ctx,
+        &src,
+        &region(&dims, &[1, 2], 0),
+        false,
+        None,
+        CudaRegionBeta::Overwrite,
+        &mut dst,
+        &region(&dims, &dst_strides, 1),
+    )
+    .expect("an interleaved-but-injective destination the host also proves");
+
+    let actual = download::<f64>(&ctx, &dst);
+    let mut expected = parent.clone();
+    for (&from, &to) in region_offsets(&dims, &[1, 2], 0)
+        .iter()
+        .zip(&region_offsets(&dims, &dst_strides, 1))
+    {
+        expected[to] = src_host[from];
+    }
+    assert_bitwise(&actual, &expected, "interleaved destination");
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn a_reserved_zero_template_makes_every_later_fill_transfer_free() {
+    let _serialized = COUNTER_TESTS.lock().unwrap_or_else(|err| err.into_inner());
+    let mut ctx = context();
+    assert_eq!(ctx.scalar_operand_bytes(), 0);
+    let mut dst = upload::<f64>(&ctx, &[1.0f64; 64]);
+
+    // Size once from what the caller knows, then fill in any order.
+    ctx.reserve_zero_template::<f64>(32).expect("reserve");
+    let reserved = ctx.scalar_operand_bytes();
+    assert_eq!(reserved, 32 * std::mem::size_of::<f64>());
+
+    reset_cuda_transfer_stats();
+    for region_dims in [[8usize, 4], [2, 2], [4, 4]] {
+        cuda_region_zero::<f64>(&mut ctx, &mut dst, &region(&region_dims, &[1, 8], 0))
+            .expect("fill");
+    }
+    // Only the one-element `1` is still missing; the template is never
+    // re-uploaded, where ascending fills without the reservation would have
+    // paid one upload each.
+    let stats = cuda_transfer_stats();
+    assert_eq!(stats.h2d_calls, 1, "{stats:?}");
+    assert_eq!(
+        ctx.scalar_operand_bytes(),
+        reserved + std::mem::size_of::<f64>()
+    );
+
+    // Releasing frees both, and the next call re-creates what it needs.
+    ctx.release_scalar_operands();
+    assert_eq!(ctx.scalar_operand_bytes(), 0);
+    reset_cuda_transfer_stats();
+    cuda_region_zero::<f64>(&mut ctx, &mut dst, &region(&[2, 2], &[1, 8], 0))
+        .expect("after release");
+    assert_eq!(cuda_transfer_stats().h2d_calls, 2);
+    reset_cuda_transfer_stats();
 }
 
 // ---------------------------------------------------------------------------

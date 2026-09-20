@@ -14,6 +14,7 @@ use tenferro_tensor::{
 };
 
 use super::{DenseBackend, DenseDType, DenseError, MatrixOp};
+use crate::cuda_region::{validate_destination_layout, validate_region, CudaRegion};
 use crate::tensor::dense_dtype_from_tenferro;
 
 mod cuda_scalar_sealed {
@@ -334,6 +335,50 @@ impl CudaDenseContext {
         Ok(())
     }
 
+    /// Sizes this dtype's zero template for `len` elements up front.
+    ///
+    /// [`cuda_region_zero`] grows the template to the fill it is given, so a
+    /// caller that visits `k` regions in ascending size pays `k` uploads for
+    /// what is one buffer. A caller that knows its largest region — a device
+    /// transform knows the largest inactive destination layout of its
+    /// structure on the host, before any replay — reserves once here and pays
+    /// none. It never shrinks an already longer template.
+    ///
+    /// The bytes it pins stay resident until [`Self::release_scalar_operands`]
+    /// or the context is dropped, and are reported by
+    /// [`Self::scalar_operand_bytes`]. The device transform executor (G2a-2)
+    /// is expected to charge them to the device workspace budget, exactly as
+    /// the G3c workspace charges its own `CudaZeroTemplate`; those two zero
+    /// sources should become one authority once a caller owns both (or vanish
+    /// together with tenferro-rs#1834's native device fill). This leaf
+    /// deliberately does not consolidate them.
+    pub fn reserve_zero_template<D: CudaScalar>(&mut self, len: usize) -> Result<(), DenseError> {
+        if len == 0 {
+            return Ok(());
+        }
+        self.ensure_zeros::<D>(len)
+    }
+
+    /// Device bytes the lazily created scalar operands currently pin, over
+    /// every dtype. Observability for the caller that owns the device memory
+    /// budget; nothing here reads it back.
+    pub fn scalar_operand_bytes(&self) -> usize {
+        fn bytes(operands: &ScalarOperands, element: usize) -> usize {
+            operands.ones.as_ref().map_or(0, CudaDenseStorage::len) * element
+                + operands.zeros.as_ref().map_or(0, CudaDenseStorage::len) * element
+        }
+        bytes(&self.real_operands, std::mem::size_of::<f64>())
+            + bytes(&self.complex_operands, std::mem::size_of::<Complex64>())
+    }
+
+    /// Frees every lazily created scalar operand. The next region call that
+    /// needs one re-creates it, so this is a memory decision, never a
+    /// correctness one.
+    pub fn release_scalar_operands(&mut self) {
+        self.real_operands = ScalarOperands::default();
+        self.complex_operands = ScalarOperands::default();
+    }
+
     /// Hands out the backend and this dtype's scalar operands at once.
     ///
     /// A whole-`self` accessor cannot express this: submitting against a
@@ -381,10 +426,10 @@ impl CudaDenseContext {
     /// through CubeCL's own `cubecl.toml` (`[compilation] cache`) and is off by
     /// default. The cuTENSOR plan cache is also per contraction shape, so a
     /// user contraction still builds its own plan. The region primitive's
-    /// scalar operands ([`ScalarOperands`]) are not warmed either: they are
-    /// created on first use of their dtype, which keeps this warm-up's fixed
-    /// cost, its counter deltas, and "every device buffer created here is
-    /// dropped" true as written.
+    /// scalar operands are not warmed either: they are created on first use
+    /// of their dtype, which keeps this warm-up's fixed cost, its counter
+    /// deltas, and "every device buffer created here is dropped" true as
+    /// written.
     ///
     /// Tenferro's runtime-owned
     /// blas1 cuBLAS handle (tenferro-gpu `cubecl/runtime.rs:688`) is also not
@@ -795,148 +840,6 @@ fn cuda_gemm_region_strided_into<D: CudaScalar>(
         .map_err(|err| cuda_error("cuda_matmul", err))
 }
 
-/// A strided, offset, rank-N region of a flat device buffer.
-///
-/// Strides are element counts and unsigned. Tenferro's CUDA dot-general
-/// rejects a negative view stride outright ("requires nonnegative view
-/// strides", `benchmarks/history/cuda-strided-region-probe-2026-09-20.md`
-/// item 4), so the sign is a type boundary here rather than a runtime check:
-/// a reversed axis must be canonicalized into the destination's stride
-/// pattern by whoever bakes the layout.
-///
-/// Source and destination carry the *same* `dims` in the same axis order; an
-/// axis permutation is expressed entirely by the destination's strides, which
-/// is the `(dims, dst_strides, src_strides)` triple the host transform layout
-/// already bakes.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CudaRegion {
-    dims: Vec<usize>,
-    strides: Vec<usize>,
-    offset: usize,
-}
-
-impl CudaRegion {
-    /// Region of `dims` extents with `strides` (element units) from `offset`.
-    ///
-    /// Bounds, injectivity and overflow are checked against the buffer at the
-    /// call site, because they depend on the storage this region is used with.
-    pub fn new(dims: Vec<usize>, strides: Vec<usize>, offset: usize) -> Result<Self, DenseError> {
-        if dims.len() != strides.len() {
-            return Err(DenseError::RankMismatch {
-                shape: dims.len(),
-                strides: strides.len(),
-            });
-        }
-        Ok(Self {
-            dims,
-            strides,
-            offset,
-        })
-    }
-
-    /// Compact column-major region of `dims` extents starting at `offset`.
-    pub fn packed(dims: &[usize], offset: usize) -> Result<Self, DenseError> {
-        let mut strides = Vec::with_capacity(dims.len());
-        let mut running = 1usize;
-        for &dim in dims {
-            strides.push(running);
-            running = running
-                .checked_mul(dim)
-                .ok_or(DenseError::ElementCountOverflow)?;
-        }
-        Ok(Self {
-            dims: dims.to_vec(),
-            strides,
-            offset,
-        })
-    }
-
-    pub fn dims(&self) -> &[usize] {
-        &self.dims
-    }
-
-    pub fn strides(&self) -> &[usize] {
-        &self.strides
-    }
-
-    pub fn offset(&self) -> usize {
-        self.offset
-    }
-
-    /// Number of elements the region addresses.
-    pub fn element_count(&self) -> Result<usize, DenseError> {
-        self.dims
-            .iter()
-            .try_fold(1usize, |count, dim| count.checked_mul(*dim))
-            .ok_or(DenseError::ElementCountOverflow)
-    }
-
-    /// The `(dims ++ [1], strides ++ [1])` operand metadata `dot_general`
-    /// wants: the trailing unit mode is the one contracted against the 1x1
-    /// coefficient.
-    fn contraction_view_metadata(&self) -> Result<(Vec<usize>, Vec<isize>), DenseError> {
-        let mut dims = Vec::with_capacity(self.dims.len() + 1);
-        dims.extend_from_slice(&self.dims);
-        dims.push(1);
-        let mut strides = Vec::with_capacity(self.strides.len() + 1);
-        for &stride in &self.strides {
-            strides.push(
-                isize::try_from(stride)
-                    .map_err(|_| DenseError::StrideOverflow { value: stride })?,
-            );
-        }
-        strides.push(1);
-        Ok((dims, strides))
-    }
-
-    fn offset_isize(&self) -> Result<isize, DenseError> {
-        isize::try_from(self.offset).map_err(|_| DenseError::OffsetOverflow { value: self.offset })
-    }
-
-    /// Highest flat position the region reads or writes. Only meaningful for a
-    /// non-empty region; an empty one addresses nothing.
-    fn last_position(&self) -> Result<usize, DenseError> {
-        self.dims
-            .iter()
-            .zip(&self.strides)
-            .try_fold(self.offset, |position, (dim, stride)| {
-                dim.checked_sub(1)
-                    .and_then(|span| span.checked_mul(*stride))
-                    .and_then(|span| position.checked_add(span))
-            })
-            .ok_or(DenseError::OffsetOverflow { value: self.offset })
-    }
-
-    /// Whether distinct index tuples map to distinct flat positions.
-    ///
-    /// Sufficient, not necessary: each axis of extent > 1 must start beyond
-    /// the span of every faster axis. That accepts every permuted dense
-    /// layout — which is all a fusion-tree block layout ever is — and rejects
-    /// interleaved layouts that happen to be injective. A rejection is a
-    /// typed `Unsupported`, never a wrong answer.
-    fn is_injective(&self) -> bool {
-        let mut axes: Vec<(usize, usize)> = self
-            .dims
-            .iter()
-            .zip(&self.strides)
-            .filter(|(dim, _)| **dim > 1)
-            .map(|(dim, stride)| (*dim, *stride))
-            .collect();
-        axes.sort_unstable_by_key(|(_, stride)| *stride);
-        let mut reach = 1usize;
-        for (dim, stride) in axes {
-            if stride < reach {
-                return false;
-            }
-            match dim.checked_mul(stride) {
-                Some(span) => reach = span,
-                None => return false,
-            }
-        }
-        true
-    }
-}
-
 /// How a region call treats the destination it writes.
 ///
 /// Only these two exist: Tenferro 0.5.0 has no in-place strided scale, so a
@@ -979,14 +882,6 @@ fn ensure_payload_dtype<D: CudaScalar>(
     Ok(())
 }
 
-/// Bounds and isize-representability of one region against its buffer.
-fn validate_region(region: &CudaRegion, len: usize) -> Result<(), DenseError> {
-    if region.last_position()? >= len {
-        return Err(DenseError::OutOfBounds);
-    }
-    region.contraction_view_metadata().map(|_| ())
-}
-
 /// Submits one validated region move. Takes the backend rather than the whole
 /// context so a caller can pass a coefficient the context itself owns.
 #[allow(clippy::too_many_arguments)]
@@ -1002,7 +897,7 @@ fn submit_region_axpby<D: CudaScalar>(
     dst: &mut CudaDenseStorage,
     dst_region: &CudaRegion,
 ) -> Result<(), DenseError> {
-    let rank = src_region.dims.len();
+    let rank = src_region.dims().len();
     let (view_dims, src_strides) = src_region.contraction_view_metadata()?;
     let (_, dst_strides) = dst_region.contraction_view_metadata()?;
     let coeff_offset = isize::try_from(coeff_offset).map_err(|_| DenseError::OffsetOverflow {
@@ -1046,9 +941,14 @@ fn submit_region_axpby<D: CudaScalar>(
 /// This is the single strided data-movement primitive the device structural
 /// operations are built on: one strided, offset, rank-N source region of one
 /// buffer moved into a strided, offset, rank-N destination region of another,
-/// with the axis permutation carried by the destination strides. It allocates
-/// nothing, transfers nothing, and submits one `dot_general` against the 1x1
-/// coefficient.
+/// with the axis permutation carried by the destination strides. It submits
+/// one `dot_general` against the 1x1 coefficient and allocates no device
+/// buffer of its own.
+///
+/// Transfer contract: a call with `coeff = Some(..)` moves nothing across the
+/// host boundary, ever. A call with `coeff = None` uploads this context's
+/// one-element `1` the first time that dtype is used, and nothing afterwards
+/// (see [`CudaDenseContext::scalar_operand_bytes`]).
 ///
 /// `coeff` is `Some((buffer, offset))` to read the coefficient from a
 /// caller-owned device vector — block `b` of a structure's uploaded
@@ -1060,9 +960,10 @@ fn submit_region_axpby<D: CudaScalar>(
 ///
 /// One numerical deviation from the host is disclosed and pinned by the device
 /// tests: the host copies bit-exactly when the coefficient is 1, while this
-/// path always multiplies, and the device's complex product turns an infinite
-/// complex payload into `NaN` in both components (`f64` infinities and every
-/// finite payload are unaffected). See
+/// path always multiplies, and an infinite complex payload is observed to come
+/// back as `NaN` in both components: `inf * 0` in the complex product already
+/// yields a `NaN` component, which the remaining multiply spreads across both.
+/// `f64` infinities and every finite payload are unaffected. See
 /// `benchmarks/history/cuda-region-axpby-2026-09-20.md`.
 ///
 /// Validation order, all of it before any device work:
@@ -1085,6 +986,14 @@ fn submit_region_axpby<D: CudaScalar>(
 ///
 /// No rank limit is imposed: the probe accepted every mode count up to 72,
 /// far above any rank a fusion tree reaches.
+///
+/// Disclosed cost: Tenferro's stream slots are per thread, so a context-owned
+/// operand (`coeff = None`, or any [`cuda_region_zero`]) that is used from a
+/// thread other than the one that created it can force a device-wide
+/// synchronize per call. Today every such call happens under the device lease,
+/// which serializes them; a future multi-threaded device executor should keep
+/// operand creation and use on the same stream slot or pass its own
+/// coefficient buffer.
 #[allow(clippy::too_many_arguments)]
 pub fn cuda_region_axpby<D: CudaScalar>(
     ctx: &mut CudaDenseContext,
@@ -1114,11 +1023,11 @@ pub fn cuda_region_axpby<D: CudaScalar>(
     if let Some((coeff, _)) = coeff {
         ensure_payload_dtype::<D>(OP, coeff)?;
     }
-    if src_region.dims != dst_region.dims {
+    if src_region.dims() != dst_region.dims() {
         return Err(DenseError::ShapeMismatch {
             op: OP,
-            expected: dst_region.dims.clone(),
-            actual: src_region.dims.clone(),
+            expected: dst_region.dims().to_vec(),
+            actual: src_region.dims().to_vec(),
         });
     }
     if let Some((coeff, offset)) = coeff {
@@ -1126,9 +1035,10 @@ pub fn cuda_region_axpby<D: CudaScalar>(
             return Err(DenseError::OutOfBounds);
         }
     }
-    if src_region.element_count()? == 0 {
+    if src_region.is_empty() {
         return Ok(());
     }
+    src_region.element_count()?;
     validate_destination_layout(OP, dst_region)?;
     validate_region(src_region, src.len)?;
     validate_region(dst_region, dst.len)?;
@@ -1166,8 +1076,14 @@ pub fn cuda_region_axpby<D: CudaScalar>(
 /// primitive: an inactive destination layout is zeroed rather than left
 /// alone, so the result is independent of what the caller's buffer held —
 /// including a NaN. It is a region move, not a fill kernel, so it inherits
-/// exactly the validation and the zero-transfer contract of
-/// [`cuda_region_axpby`].
+/// exactly the validation of [`cuda_region_axpby`].
+///
+/// Transfer contract: it uploads the context's `1` and its zero template on
+/// first use of a dtype, and re-uploads the template whenever a fill is longer
+/// than the resident one. Size the template once with
+/// [`CudaDenseContext::reserve_zero_template`] to make every later fill of a
+/// replay transfer-free; otherwise a sequence of ascending fills pays one
+/// upload each.
 pub fn cuda_region_zero<D: CudaScalar>(
     ctx: &mut CudaDenseContext,
     dst: &mut CudaDenseStorage,
@@ -1176,13 +1092,13 @@ pub fn cuda_region_zero<D: CudaScalar>(
     const OP: &str = "cuda_region_zero";
     ensure_cuda_device(ctx.device, OP, &[("dst", dst.device)])?;
     ensure_payload_dtype::<D>(OP, dst)?;
-    let count = dst_region.element_count()?;
-    if count == 0 {
+    if dst_region.is_empty() {
         return Ok(());
     }
+    let count = dst_region.element_count()?;
     validate_destination_layout(OP, dst_region)?;
     validate_region(dst_region, dst.len)?;
-    let src_region = CudaRegion::packed(&dst_region.dims, 0)?;
+    let src_region = CudaRegion::packed(dst_region.dims(), 0)?;
 
     ctx.ensure_ones::<D>()?;
     ctx.ensure_zeros::<D>(count)?;
@@ -1202,23 +1118,6 @@ pub fn cuda_region_zero<D: CudaScalar>(
         dst,
         dst_region,
     )
-}
-
-fn validate_destination_layout(
-    op: &'static str,
-    dst_region: &CudaRegion,
-) -> Result<(), DenseError> {
-    if dst_region.is_injective() {
-        return Ok(());
-    }
-    Err(DenseError::Unsupported {
-        op,
-        message: format!(
-            "destination region dims {:?} strides {:?} writes a buffer position more than once; \
-             the backend requires an injective destination view",
-            dst_region.dims, dst_region.strides
-        ),
-    })
 }
 
 /// Downloads a small real (f64) device tensor as host values. Only used for
@@ -1609,102 +1508,6 @@ mod tests {
     /// The observation counters are process-wide, so the device tests that
     /// assert on their deltas must not overlap with each other.
     static COUNTER_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    // ---------------------------------------------------------------------
-    // Region descriptor and region validation. Pure metadata logic: no
-    // device, so these run wherever the `cuda` feature compiles.
-    // ---------------------------------------------------------------------
-
-    #[test]
-    fn region_rank_disagreement_is_a_typed_rank_mismatch() {
-        assert!(matches!(
-            CudaRegion::new(vec![2, 3], vec![1], 0),
-            Err(DenseError::RankMismatch {
-                shape: 2,
-                strides: 1
-            })
-        ));
-    }
-
-    #[test]
-    fn packed_region_strides_are_column_major() {
-        let region = CudaRegion::packed(&[2, 3, 4], 7).unwrap();
-        assert_eq!(region.strides(), &[1, 2, 6]);
-        assert_eq!(region.offset(), 7);
-        assert_eq!(region.element_count().unwrap(), 24);
-    }
-
-    #[test]
-    fn permuted_dense_layouts_are_injective_and_repeats_are_not() {
-        // Every axis order of a dense block is injective, which is the only
-        // destination form a baked tree layout produces.
-        for strides in [vec![1, 2, 6], vec![12, 1, 3], vec![6, 2, 1]] {
-            let region = CudaRegion::new(vec![2, 3, 2], strides.clone(), 0).unwrap();
-            assert!(region.is_injective(), "{strides:?} must be injective");
-        }
-        // A repeated (stride 0) axis of extent > 1 writes one position twice.
-        let broadcast = CudaRegion::new(vec![4, 4], vec![1, 0], 0).unwrap();
-        assert!(!broadcast.is_injective());
-        // A stride 0 axis of extent 1 addresses one element, so it is fine.
-        let unit = CudaRegion::new(vec![4, 1], vec![1, 0], 0).unwrap();
-        assert!(unit.is_injective());
-        // Overlapping spans are rejected conservatively.
-        let overlapping = CudaRegion::new(vec![3, 3], vec![1, 2], 0).unwrap();
-        assert!(!overlapping.is_injective());
-    }
-
-    #[test]
-    fn region_bounds_are_checked_against_the_buffer_length() {
-        let region = CudaRegion::new(vec![2, 3], vec![1, 4], 2).unwrap();
-        // Last position is 2 + 1*1 + 2*4 = 11.
-        assert_eq!(region.last_position().unwrap(), 11);
-        assert!(validate_region(&region, 12).is_ok());
-        assert!(matches!(
-            validate_region(&region, 11),
-            Err(DenseError::OutOfBounds)
-        ));
-    }
-
-    #[test]
-    fn region_metadata_overflow_is_typed_rather_than_wrapping() {
-        let huge = CudaRegion::new(vec![usize::MAX, 2], vec![1, 1], 0).unwrap();
-        assert!(matches!(
-            huge.element_count(),
-            Err(DenseError::ElementCountOverflow)
-        ));
-        let far = CudaRegion::new(vec![3], vec![usize::MAX], 1).unwrap();
-        assert!(matches!(
-            far.last_position(),
-            Err(DenseError::OffsetOverflow { value: 1 })
-        ));
-        let wide = CudaRegion::new(vec![2], vec![usize::MAX], 0).unwrap();
-        assert!(matches!(
-            wide.contraction_view_metadata(),
-            Err(DenseError::StrideOverflow { value: usize::MAX })
-        ));
-    }
-
-    #[test]
-    fn contraction_view_metadata_appends_the_contracted_unit_mode() {
-        let region = CudaRegion::new(vec![2, 3], vec![3, 1], 5).unwrap();
-        let (dims, strides) = region.contraction_view_metadata().unwrap();
-        assert_eq!(dims, vec![2, 3, 1]);
-        assert_eq!(strides, vec![3, 1, 1]);
-    }
-
-    #[test]
-    fn a_non_injective_destination_is_reported_as_unsupported() {
-        let region = CudaRegion::new(vec![4, 4], vec![1, 0], 0).unwrap();
-        let err = validate_destination_layout("cuda_region_axpby", &region).unwrap_err();
-        assert!(matches!(
-            err,
-            DenseError::Unsupported {
-                op: "cuda_region_axpby",
-                ..
-            }
-        ));
-        assert!(err.to_string().contains("injective"), "{err}");
-    }
 
     #[test]
     fn rectangular_operand_views_use_parent_native_strides() {
