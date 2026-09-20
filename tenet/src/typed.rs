@@ -4007,11 +4007,13 @@ pub(crate) fn upload_selector<D: CudaPayload>(
     for (row, col, value) in entries {
         data[row + rows * col] = value;
     }
-    let selector = CudaStorage::upload(cuda, &data).map_err(Error::from)?;
+    #[cfg(test)]
+    let entries = data.len();
+    let selector = CudaStorage::upload_owned(cuda, data).map_err(Error::from)?;
     #[cfg(test)]
     {
         observe_cuda_qr_selector_upload();
-        observe_cuda_svd_trunc_allocation("selector", data.len());
+        observe_cuda_svd_trunc_allocation("selector", entries);
     }
     Ok(selector)
 }
@@ -9381,7 +9383,10 @@ impl<D: CudaPayload> CudaZeroTemplate<D> {
         });
         if !usable {
             self.storage = None;
-            self.storage = Some(CudaStorage::upload(cuda, &vec![D::from_real(0.0); len])?);
+            self.storage = Some(CudaStorage::upload_owned(
+                cuda,
+                vec![D::from_real(0.0); len],
+            )?);
         }
         self.storage
             .as_ref()
@@ -10042,7 +10047,7 @@ impl<R, D: CudaPayload> TensorMap<R, D> {
                         spectrum,
                         &|value| value,
                     )?;
-                    CudaStorage::upload(cuda, &dense)?
+                    CudaStorage::upload_owned(cuda, dense)?
                 }
             };
             Ok::<_, Error>(Arc::new(TypedTensorBody::dense(
@@ -10493,10 +10498,10 @@ where
         let (left_data, middle_data, right_data) = {
             let mut lease = self.runtime.lease_cuda()?;
             let cuda = &mut *lease;
-            let mut left_data = CudaStorage::upload(cuda, &vec![D::ZERO; left_len])?;
+            let mut left_data = CudaStorage::upload_owned(cuda, vec![D::ZERO; left_len])?;
             #[cfg(test)]
             observe_cuda_svd_final_storage_creation();
-            let mut right_data = CudaStorage::upload(cuda, &vec![D::ZERO; right_len])?;
+            let mut right_data = CudaStorage::upload_owned(cuda, vec![D::ZERO; right_len])?;
             #[cfg(test)]
             observe_cuda_svd_final_storage_creation();
             let mut spectra = Vec::with_capacity(plan.routes.len());
@@ -10560,7 +10565,7 @@ where
 
             let mut middle_host = vec![D::ZERO; middle_len];
             fill_diagonal_values(middle_space.space().structure(), &mut middle_host, &spectra)?;
-            let middle_data = CudaStorage::upload(cuda, &middle_host)?;
+            let middle_data = CudaStorage::upload_owned(cuda, middle_host)?;
             #[cfg(test)]
             observe_cuda_svd_final_storage_creation();
             (left_data, middle_data, right_data)
@@ -10584,8 +10589,10 @@ where
 
     fn upload_cuda_svd_trunc_final(
         cuda: &CudaDenseContext,
-        values: &[D],
+        values: Vec<D>,
     ) -> Result<CudaStorage<D>, Error> {
+        #[cfg(test)]
+        let extent = values.len();
         #[cfg(test)]
         {
             observe_cuda_svd_trunc_event("final_storage");
@@ -10594,7 +10601,7 @@ where
                 let Some(extents) = extents.as_mut() else {
                     return 0;
                 };
-                extents.push(values.len());
+                extents.push(extent);
                 extents.len()
             });
             if CUDA_SVD_TRUNC_FAILURE.with(|failure| failure.get()) == Some(("final", ordinal)) {
@@ -10603,11 +10610,11 @@ where
                 ));
             }
         }
-        let storage = CudaStorage::upload(cuda, values)?;
+        let storage = CudaStorage::upload_owned(cuda, values)?;
         #[cfg(test)]
         {
             observe_cuda_svd_trunc_final_storage_creation();
-            observe_cuda_svd_trunc_allocation("final", values.len());
+            observe_cuda_svd_trunc_allocation("final", extent);
         }
         Ok(storage)
     }
@@ -10779,10 +10786,9 @@ where
             #[cfg(test)]
             let _lock_observation = CudaSvdTruncLockObservationGuard::new();
             let cuda = &mut *lease;
-            let mut left_data = Self::upload_cuda_svd_trunc_final(cuda, &vec![D::ZERO; left_len])?;
-            let middle_data = Self::upload_cuda_svd_trunc_final(cuda, &middle_host)?;
-            let mut right_data =
-                Self::upload_cuda_svd_trunc_final(cuda, &vec![D::ZERO; right_len])?;
+            let mut left_data = Self::upload_cuda_svd_trunc_final(cuda, vec![D::ZERO; left_len])?;
+            let middle_data = Self::upload_cuda_svd_trunc_final(cuda, middle_host)?;
+            let mut right_data = Self::upload_cuda_svd_trunc_final(cuda, vec![D::ZERO; right_len])?;
             #[cfg(test)]
             let mut assembly_ordinal = 0;
             for route in plan.routes.iter() {
@@ -11033,8 +11039,8 @@ where
         let (diagonal_data, vector_data) = {
             let mut lease = self.runtime.lease_cuda()?;
             let cuda = &mut *lease;
-            let diagonal_data = CudaStorage::upload(cuda, &diagonal_host)?;
-            let mut vector_data = CudaStorage::upload(cuda, &vec![D::ZERO; vector_len])?;
+            let diagonal_data = CudaStorage::upload_owned(cuda, diagonal_host)?;
+            let mut vector_data = CudaStorage::upload_owned(cuda, vec![D::ZERO; vector_len])?;
             #[cfg(test)]
             let mut assembly_ordinal = 0;
             for route in plan.routes.iter() {
@@ -11179,10 +11185,10 @@ where
         let (left_data, right_data) = {
             let mut lease = self.runtime.lease_cuda()?;
             let cuda = &mut *lease;
-            let mut left_data = CudaStorage::upload(cuda, &vec![0.0; left_len])?;
+            let mut left_data = CudaStorage::upload_owned(cuda, vec![0.0; left_len])?;
             #[cfg(test)]
             observe_cuda_qr_output_upload();
-            let mut right_data = CudaStorage::upload(cuda, &vec![0.0; right_len])?;
+            let mut right_data = CudaStorage::upload_owned(cuda, vec![0.0; right_len])?;
             #[cfg(test)]
             observe_cuda_qr_output_upload();
             for route in &plan.routes {
@@ -11343,10 +11349,10 @@ where
         // Keep coefficients as data operands: descriptor alpha == 0 permits
         // CUDA to skip source reads and erase NaN/Inf propagation. Arithmetic
         // does not promise signed-zero bit parity across storage backends.
-        let coefficients = CudaStorage::upload(cuda, &coefficient_values)?;
+        let coefficients = CudaStorage::upload_owned(cuda, coefficient_values)?;
         #[cfg(test)]
         observe_cuda_arithmetic(0, 1, 0);
-        let mut output = CudaStorage::upload(cuda, &vec![D::from_real(0.0); required_len])?;
+        let mut output = CudaStorage::upload_owned(cuda, vec![D::from_real(0.0); required_len])?;
         #[cfg(test)]
         observe_cuda_arithmetic(1, 0, 0);
         if required_len != 0 {
@@ -11409,7 +11415,7 @@ where
             required_len,
             source.len(),
         )?;
-        let output = CudaStorage::upload(cuda, &vec![D::from_real(0.0); required_len])?;
+        let output = CudaStorage::upload_owned(cuda, vec![D::from_real(0.0); required_len])?;
         #[cfg(test)]
         observe_cuda_arithmetic(1, 0, 0);
         Ok(output)
@@ -11563,7 +11569,7 @@ where
         // ponytail: #740 keeps the proven host-zero upload until a native
         // allocation has correct cross-stream publication and measured value.
         let mut partials =
-            CudaStorage::upload(cuda, &vec![D::from_real(0.0); regions.len().max(1)])?;
+            CudaStorage::upload_owned(cuda, vec![D::from_real(0.0); regions.len().max(1)])?;
         {
             let mut gemm = CudaStorageGemm::new(cuda);
             for (index, region) in regions.iter().enumerate() {
@@ -11735,9 +11741,9 @@ where
         }
         // ponytail: the existing device seam initializes by uploading zeros;
         // replace this only with a measured native allocation/memset leaf.
-        let mut dst = CudaStorage::upload(
+        let mut dst = CudaStorage::upload_owned(
             cuda,
-            &vec![D::from_real(0.0); dst_space.space().required_len()?],
+            vec![D::from_real(0.0); dst_space.space().required_len()?],
         )?;
         tenet_tensors::tensorcontract_fusion_dyn_prelowered_direct_on_storage(
             &mut CudaStorageGemm::new(cuda),
@@ -12038,9 +12044,9 @@ where
         {
             return Err(Error::PlacementMismatch);
         }
-        let mut dst = CudaStorage::upload(
+        let mut dst = CudaStorage::upload_owned(
             cuda,
-            &vec![D::from_real(0.0); dst_space.space().required_len()?],
+            vec![D::from_real(0.0); dst_space.space().required_len()?],
         )?;
         tenet_tensors::tensorcompose_fusion_dyn_prelowered_direct_on_storage(
             &mut CudaStorageGemm::new(cuda),

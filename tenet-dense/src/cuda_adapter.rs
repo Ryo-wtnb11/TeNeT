@@ -339,21 +339,47 @@ pub struct CudaDenseStorage {
 }
 
 impl CudaDenseStorage {
-    /// Uploads host data as a flat device buffer.
+    /// Uploads borrowed host data as a flat device buffer.
+    ///
+    /// Tenferro uploads an owned host tensor (`upload_tensor`, tenferro-gpu
+    /// `cubecl/memory.rs:31`), so borrowed data costs exactly one host copy
+    /// here: the payload is duplicated into the host tensor that is then
+    /// staged to the device. That copy is required by the backend contract,
+    /// not by TeNeT. A caller that already owns its buffer — a zero buffer, a
+    /// selector, a coefficient or diagonal vector — uses
+    /// [`Self::upload_owned`] instead and pays none.
     pub fn upload<D: CudaScalar>(ctx: &CudaDenseContext, data: &[D]) -> Result<Self, DenseError> {
-        let host = Tensor::from_vec_col_major(vec![data.len()], data.to_vec())
+        Self::upload_owned(ctx, data.to_vec())
+    }
+
+    /// Uploads owned host data as a flat device buffer, moving `data` into the
+    /// host tensor Tenferro uploads instead of copying it.
+    ///
+    /// Counting, device traffic and the resulting buffer are identical to
+    /// [`Self::upload`]; only the redundant host copy is gone.
+    pub fn upload_owned<D: CudaScalar>(
+        ctx: &CudaDenseContext,
+        data: Vec<D>,
+    ) -> Result<Self, DenseError> {
+        let len = data.len();
+        let bytes = std::mem::size_of_val(data.as_slice());
+        let host = Tensor::from_vec_col_major(vec![len], data)
             .map_err(|err| cuda_error("cuda_upload", err))?;
         let tensor = upload_tensor(ctx.backend.runtime(), &host)
             .map_err(|err| cuda_error("cuda_upload", err))?;
-        record_h2d(std::mem::size_of_val(data));
+        record_h2d(bytes);
         Ok(Self {
             tensor,
-            len: data.len(),
+            len,
             device: ctx.device,
         })
     }
 
     /// Downloads the flat device buffer back to host data.
+    ///
+    /// The returned vector is the one Tenferro's download produced: the host
+    /// tensor is consumed (`TypedTensor::into_host_vec`, tenferro-tensor
+    /// `types.rs:7248`) rather than copied out of again.
     pub fn download<D: CudaScalar>(&self, ctx: &CudaDenseContext) -> Result<Vec<D>, DenseError> {
         ensure_cuda_device(ctx.device, "cuda_download", &[("source", self.device)])?;
         let host = download_tensor(ctx.backend.runtime(), &self.tensor)
@@ -361,11 +387,15 @@ impl CudaDenseStorage {
         if host.dtype() != D::dtype() {
             return Err(dtype_mismatch::<D>("cuda_download", &host));
         }
-        let data = D::as_slice(&host).map_err(|err| cuda_error("cuda_download", err))?;
+        let typed = D::into_typed(host).map_err(|err| cuda_error("cuda_download", err))?;
+        let data = typed
+            .into_host_vec()
+            .map_err(|err| cuda_error("cuda_download", err))?;
+        let bytes = std::mem::size_of_val(data.as_slice());
         #[cfg(test)]
-        CUDA_FULL_DOWNLOAD_BYTES.fetch_add(std::mem::size_of_val(data), Ordering::Relaxed);
-        record_d2h(std::mem::size_of_val(data));
-        Ok(data.to_vec())
+        CUDA_FULL_DOWNLOAD_BYTES.fetch_add(bytes, Ordering::Relaxed);
+        record_d2h(bytes);
+        Ok(data)
     }
 
     /// The payload dtype this device buffer owns.
@@ -649,13 +679,12 @@ fn download_values(ctx: &CudaDenseContext, tensor: &Tensor) -> Result<Vec<f64>, 
         .map_err(|err| cuda_error("cuda_download", err))?;
     match host {
         Tensor::F64(tensor) => tensor
-            .host_data()
-            .map(|data| {
+            .into_host_vec()
+            .inspect(|values| {
+                let bytes = std::mem::size_of_val(values.as_slice());
                 #[cfg(test)]
-                CUDA_METADATA_DOWNLOAD_BYTES
-                    .fetch_add(std::mem::size_of_val(data), Ordering::Relaxed);
-                record_d2h(std::mem::size_of_val(data));
-                data.to_vec()
+                CUDA_METADATA_DOWNLOAD_BYTES.fetch_add(bytes, Ordering::Relaxed);
+                record_d2h(bytes);
             })
             .map_err(|err| cuda_error("cuda_download", err)),
         other => Err(cuda_error(
