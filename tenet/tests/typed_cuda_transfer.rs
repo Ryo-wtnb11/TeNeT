@@ -8,6 +8,8 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use num_complex::Complex64;
+
 use tenet::core::{
     product_sector, BraidingStyleKind, CheckedFusionAlgebra, FermionParityFusionRule,
     FusionAlgebraError, FusionRule, FusionStyleKind, MultiplicityFreeFusionRule,
@@ -15,6 +17,7 @@ use tenet::core::{
     RuleIdentity, SU2FusionRule, SU2Irrep, SectorCodec, SectorId, SectorVec, U1FusionRule, U1Irrep,
     Z2Irrep, ZNFusionRule,
 };
+use tenet::prelude::TensorScalar;
 use tenet::typed::{BlockFusionTrees, CudaStorage, GradedSpace, Runtime, TensorMap, Truncation};
 
 #[derive(Debug, Eq, PartialEq)]
@@ -161,9 +164,10 @@ impl SectorCodec for ReentrantDimensionRule {
     }
 }
 
-fn structural_snapshot<R>(tensor: &TensorMap<R, f64>) -> StructuralSnapshot<R::Sector>
+fn structural_snapshot<R, D>(tensor: &TensorMap<R, D>) -> StructuralSnapshot<R::Sector>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: TensorScalar,
 {
     let leg_snapshot = |leg: GradedSpace<R>| LegSnapshot {
         sectors: leg.sectors().unwrap(),
@@ -1738,4 +1742,507 @@ fn typed_cuda_direct_supports_canonical_lazy_and_rejects_other_scopes_before_mut
         .unwrap();
     assert_eq!(zero_output.block_count(), 0);
     assert!(zero_output.data().is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Complex64 device payload (#1268, G1a). Every fixture below has nonzero
+// imaginary parts in every stored entry: a real value cast to `Complex64`
+// cannot distinguish a conjugation defect from a transpose.
+// ---------------------------------------------------------------------------
+
+/// Genuinely complex fill: `im` is never zero for any admitted index tuple.
+fn complex_entry(indices: &[usize], seed: f64) -> Complex64 {
+    let ramp = indices.iter().map(|&index| index as f64).sum::<f64>();
+    Complex64::new(ramp + seed, -(ramp + seed + 0.75))
+}
+
+fn assert_close_c64(actual: &[Complex64], expected: &[Complex64], tolerance: f64) {
+    assert_eq!(actual.len(), expected.len());
+    for (&actual, &expected) in actual.iter().zip(expected) {
+        assert!(
+            (actual - expected).norm() <= tolerance * (1.0 + expected.norm()),
+            "actual {actual:?}, expected {expected:?}"
+        );
+    }
+}
+
+fn assert_c64_roundtrip<R>(source: TensorMap<R, Complex64>)
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+{
+    let provider = source.provider() as *const R;
+    let runtime = source.runtime().identity();
+    let structure = structural_snapshot(&source);
+    let expected = source.data().to_vec();
+    assert!(
+        expected.iter().all(|value| value.im != 0.0),
+        "fixture must have nonzero imaginary parts"
+    );
+
+    let device = source.to_cuda().unwrap();
+    assert_eq!(device.placement(), tenet::core::Placement::Cuda(0));
+    let restored = device.clone().to_host().unwrap();
+
+    assert!(std::ptr::eq(restored.provider(), provider));
+    assert!(runtime.matches(restored.runtime()));
+    assert_eq!(restored.data(), expected);
+    assert_eq!(structural_snapshot(&restored), structure);
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn typed_cuda_c64_roundtrip_is_bit_exact_across_providers() {
+    let runtime = Runtime::builder().cuda(0).build().unwrap();
+
+    let u1 = GradedSpace::try_new_with_arc(
+        Arc::new(U1FusionRule),
+        [(U1Irrep::new(-1), 1), (U1Irrep::new(0), 2)],
+    )
+    .unwrap();
+    assert_c64_roundtrip(
+        TensorMap::<_, Complex64>::from_block_fn(&runtime, [&u1], [&u1], |_, indices| {
+            complex_entry(indices, 1.0)
+        })
+        .unwrap(),
+    );
+
+    let fz2 = GradedSpace::try_new_with_arc(
+        Arc::new(FermionParityFusionRule),
+        [(Z2Irrep::EVEN, 1), (Z2Irrep::ODD, 2)],
+    )
+    .unwrap();
+    assert_c64_roundtrip(
+        TensorMap::<_, Complex64>::from_block_fn(&runtime, [&fz2], [&fz2], |_, indices| {
+            complex_entry(indices, 2.0)
+        })
+        .unwrap(),
+    );
+
+    let su2 = GradedSpace::try_new_with_arc(
+        Arc::new(SU2FusionRule),
+        [
+            (SU2Irrep::from_twice_spin(0), 1),
+            (SU2Irrep::from_twice_spin(1), 2),
+        ],
+    )
+    .unwrap();
+    assert_c64_roundtrip(
+        TensorMap::<_, Complex64>::from_block_fn(
+            &runtime,
+            [&su2, &su2, &su2],
+            [&su2, &su2],
+            |_, indices| complex_entry(indices, 3.0),
+        )
+        .unwrap(),
+    );
+
+    let product = GradedSpace::try_new_with_arc(
+        Arc::new(U1FusionRule.product(FermionParityFusionRule)),
+        [
+            (product_sector(U1Irrep::new(0), Z2Irrep::EVEN), 1),
+            (product_sector(U1Irrep::new(1), Z2Irrep::ODD), 2),
+        ],
+    )
+    .unwrap();
+    assert_c64_roundtrip(
+        TensorMap::<_, Complex64>::from_block_fn(&runtime, [&product], [&product], |_, indices| {
+            complex_entry(indices, 4.0)
+        })
+        .unwrap(),
+    );
+
+    // The real path is unchanged by the generic payload.
+    assert_roundtrip(
+        TensorMap::from_block_fn(&runtime, [&u1], [&u1], |_, indices| indices[0] as f64 + 1.0)
+            .unwrap(),
+    );
+}
+
+#[allow(deprecated)]
+fn assert_c64_contract_and_compose<R>(lhs: &TensorMap<R, Complex64>, rhs: &TensorMap<R, Complex64>)
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+{
+    let lhs_axes: Vec<_> = (lhs.codomain_rank()..lhs.rank()).collect();
+    let rhs_axes: Vec<_> = (0..rhs.codomain_rank()).collect();
+    let output_axes: Vec<_> = (0..lhs.codomain_rank() + rhs.domain_rank()).collect();
+    let expected_contract = lhs
+        .contract(rhs, &lhs_axes, &rhs_axes, &output_axes)
+        .unwrap();
+    let expected_compose = lhs.compose(rhs).unwrap();
+    let lhs_device = lhs.to_cuda().unwrap();
+    let rhs_device = rhs.to_cuda().unwrap();
+
+    let contract = lhs_device
+        .contract(&rhs_device, &lhs_axes, &rhs_axes, &output_axes)
+        .unwrap()
+        .to_host()
+        .unwrap();
+    let ordered = lhs_device
+        .contract_ordered(&rhs_device, &lhs_axes, &rhs_axes, &output_axes)
+        .unwrap()
+        .to_host()
+        .unwrap();
+    let compose = lhs_device.compose(&rhs_device).unwrap().to_host().unwrap();
+    for (actual, expected) in [
+        (&contract, &expected_contract),
+        (&ordered, &expected_contract),
+        (&compose, &expected_compose),
+    ] {
+        assert_close_c64(actual.data(), expected.data(), 1e-12);
+        assert_eq!(structural_snapshot(actual), structural_snapshot(expected));
+    }
+
+    // Lazy conjugate-transpose operands on either side must route the
+    // conjugation through the GEMM flag, never a materialized buffer.
+    // `A^H . A` and `B . B^H` are composable for every split.
+    let host_left = lhs.adjoint().unwrap().compose(lhs).unwrap();
+    let device_left = lhs_device
+        .adjoint()
+        .unwrap()
+        .compose(&lhs_device)
+        .unwrap()
+        .to_host()
+        .unwrap();
+    assert_close_c64(device_left.data(), host_left.data(), 1e-12);
+    let host_right = rhs.compose(&rhs.adjoint().unwrap()).unwrap();
+    let device_right = rhs_device
+        .compose(&rhs_device.adjoint().unwrap())
+        .unwrap()
+        .to_host()
+        .unwrap();
+    assert_close_c64(device_right.data(), host_right.data(), 1e-12);
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn typed_cuda_c64_contract_and_compose_match_host() {
+    let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+
+    let u1 = GradedSpace::try_new_with_arc(
+        Arc::new(U1FusionRule),
+        [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
+    )
+    .unwrap();
+    assert_c64_contract_and_compose(
+        &TensorMap::<_, Complex64>::from_block_fn(&runtime, [&u1], [&u1], |_, indices| {
+            complex_entry(indices, 1.0)
+        })
+        .unwrap(),
+        &TensorMap::<_, Complex64>::from_block_fn(&runtime, [&u1], [&u1], |_, indices| {
+            complex_entry(indices, 2.0)
+        })
+        .unwrap(),
+    );
+
+    let su2 = GradedSpace::try_new_with_arc(
+        Arc::new(SU2FusionRule),
+        [
+            (SU2Irrep::from_twice_spin(0), 1),
+            (SU2Irrep::from_twice_spin(1), 2),
+        ],
+    )
+    .unwrap();
+    assert_c64_contract_and_compose(
+        &TensorMap::<_, Complex64>::from_block_fn(
+            &runtime,
+            [&su2, &su2, &su2],
+            [&su2, &su2],
+            |_, indices| complex_entry(indices, 1.0),
+        )
+        .unwrap(),
+        &TensorMap::<_, Complex64>::from_block_fn(
+            &runtime,
+            [&su2, &su2],
+            [&su2, &su2, &su2],
+            |_, indices| complex_entry(indices, 3.0),
+        )
+        .unwrap(),
+    );
+
+    // Fermionic provider: contract carries the twist, compose does not, so
+    // the two results stay distinct for complex payloads too.
+    let fz2 = GradedSpace::try_new_with_arc(
+        Arc::new(FermionParityFusionRule),
+        [(Z2Irrep::EVEN, 2), (Z2Irrep::ODD, 1)],
+    )
+    .unwrap();
+    let fz2_dual = GradedSpace::try_new_with_arc(
+        Arc::new(FermionParityFusionRule),
+        [(Z2Irrep::EVEN, 2), (Z2Irrep::ODD, 1)],
+    )
+    .and_then(|space| space.try_dual())
+    .unwrap();
+    assert_c64_contract_and_compose(
+        &TensorMap::<_, Complex64>::from_block_fn(
+            &runtime,
+            [&fz2],
+            [&fz2_dual, &fz2_dual],
+            |_, indices| complex_entry(indices, 1.0),
+        )
+        .unwrap(),
+        &TensorMap::<_, Complex64>::from_block_fn(
+            &runtime,
+            [&fz2_dual, &fz2_dual],
+            [&fz2],
+            |_, indices| complex_entry(indices, 2.0),
+        )
+        .unwrap(),
+    );
+
+    // Unsupported scopes are rejected in the same order as for f64, before
+    // any device mutation.
+    let lhs = TensorMap::<_, Complex64>::from_block_fn(&runtime, [&u1], [&u1], |_, indices| {
+        complex_entry(indices, 5.0)
+    })
+    .unwrap()
+    .to_cuda()
+    .unwrap();
+    let rhs = TensorMap::<_, Complex64>::from_block_fn(&runtime, [&u1], [&u1], |_, indices| {
+        complex_entry(indices, 6.0)
+    })
+    .unwrap()
+    .to_cuda()
+    .unwrap();
+    assert!(lhs.contract(&rhs, &[0], &[1], &[0, 1]).is_err());
+    assert!(lhs.contract(&rhs, &[1], &[0], &[1, 0]).is_err());
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn typed_cuda_c64_inner_is_conjugate_linear_in_the_first_argument() {
+    let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+    let i = Complex64::new(0.0, 1.0);
+
+    for (sectors, seed) in [(0_usize, 1.0_f64), (1, 7.0)] {
+        let su2 = GradedSpace::try_new_with_arc(
+            Arc::new(SU2FusionRule),
+            [
+                (SU2Irrep::from_twice_spin(0), 1 + sectors),
+                (SU2Irrep::from_twice_spin(1), 2),
+            ],
+        )
+        .unwrap();
+        let a = TensorMap::<_, Complex64>::from_block_fn(&runtime, [&su2], [&su2], |_, indices| {
+            complex_entry(indices, seed)
+        })
+        .unwrap();
+        let b = TensorMap::<_, Complex64>::from_block_fn(&runtime, [&su2], [&su2], |_, indices| {
+            complex_entry(indices, seed + 2.0)
+        })
+        .unwrap();
+        let host_inner = a.inner(&b).unwrap();
+        let host_norm = a.norm().unwrap();
+        assert!(
+            host_inner.im != 0.0,
+            "the fixture must exercise a complex inner product"
+        );
+
+        let a_device = a.to_cuda().unwrap();
+        let b_device = b.to_cuda().unwrap();
+        let inner = a_device.inner(&b_device).unwrap();
+        let tolerance = 1e-12 * (1.0 + host_inner.norm());
+        assert!((inner - host_inner).norm() <= tolerance);
+        assert!((b_device.inner(&a_device).unwrap() - inner.conj()).norm() <= tolerance);
+        let scaled = a_device.scale(i).unwrap();
+        assert_close_c64(scaled.to_host().unwrap().data(), a.scale(i).data(), 1e-12);
+        assert!((scaled.inner(&b_device).unwrap() - (-i) * inner).norm() <= tolerance);
+        assert!(
+            (a_device.inner(&b_device.scale(i).unwrap()).unwrap() - i * inner).norm() <= tolerance
+        );
+
+        let norm = a_device.norm().unwrap();
+        assert!((norm - host_norm).abs() <= 1e-12 * (1.0 + host_norm));
+        let self_inner = a_device.inner(&a_device).unwrap();
+        assert!(self_inner.im.abs() <= 1e-12 * (1.0 + self_inner.norm()));
+        assert!((self_inner.re - norm * norm).abs() <= 1e-12 * (1.0 + self_inner.norm()));
+
+        #[allow(deprecated)]
+        {
+            assert_eq!(a_device.dot(&b_device).unwrap(), inner);
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn typed_cuda_c64_scale_and_add_match_host_including_the_lazy_fold() {
+    let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+    let u1 = GradedSpace::try_new_with_arc(
+        Arc::new(U1FusionRule),
+        [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
+    )
+    .unwrap();
+    let alpha = Complex64::new(2.0, -3.0);
+    let beta = Complex64::new(-0.5, 1.25);
+
+    let a = TensorMap::<_, Complex64>::from_block_fn(&runtime, [&u1], [&u1], |_, indices| {
+        complex_entry(indices, 1.0)
+    })
+    .unwrap();
+    let b = TensorMap::<_, Complex64>::from_block_fn(&runtime, [&u1], [&u1], |_, indices| {
+        complex_entry(indices, 4.0)
+    })
+    .unwrap();
+    let a_device = a.to_cuda().unwrap();
+    let b_device = b.to_cuda().unwrap();
+
+    assert_close_c64(
+        a_device.scale(alpha).unwrap().to_host().unwrap().data(),
+        a.scale(alpha).data(),
+        1e-12,
+    );
+    assert_close_c64(
+        a_device
+            .add(&b_device, alpha, beta)
+            .unwrap()
+            .to_host()
+            .unwrap()
+            .data(),
+        a.add(&b, alpha, beta).unwrap().data(),
+        1e-12,
+    );
+    assert_close_c64(
+        a_device.zeros_like().unwrap().to_host().unwrap().data(),
+        &vec![Complex64::new(0.0, 0.0); a.data().len()],
+        0.0,
+    );
+    assert_close_c64(
+        a_device.normalize().unwrap().to_host().unwrap().data(),
+        a.normalize().unwrap().data(),
+        1e-12,
+    );
+
+    // `(alpha A^H + beta B^H) == (conj(alpha) A + conj(beta) B)^H`.
+    let lazy_a = a_device.adjoint().unwrap();
+    let lazy_b = b_device.adjoint().unwrap();
+    let host_fold = a
+        .adjoint()
+        .unwrap()
+        .add(&b.adjoint().unwrap(), alpha, beta)
+        .unwrap();
+    assert_close_c64(
+        lazy_a
+            .add(&lazy_b, alpha, beta)
+            .unwrap()
+            .to_host()
+            .unwrap()
+            .data(),
+        host_fold.data(),
+        1e-12,
+    );
+    for factor in [Complex64::new(0.0, 1.0), Complex64::new(1.0, 2.0), alpha] {
+        assert_close_c64(
+            lazy_a.scale(factor).unwrap().to_host().unwrap().data(),
+            a.adjoint().unwrap().scale(factor).data(),
+            1e-12,
+        );
+    }
+    assert!(matches!(
+        lazy_a.add(&b_device, alpha, beta),
+        Err(tenet::typed::Error::UnsupportedOnDevice(_))
+    ));
+}
+
+/// Independent oracle for the conjugation flag itself.
+///
+/// Host and device both lower operand conjugation to the same Tenferro
+/// `DotGeneralAccumulation` flags, so a Host-vs-device comparison alone cannot
+/// catch a shared misreading of those flags. This computes `A^H . B` for a
+/// one-sector U(1) fixture by explicit conjugate-transpose loops over the
+/// reduced block and compares both the Host and the device result against it.
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn typed_cuda_c64_lazy_adjoint_contract_matches_a_hand_expansion() {
+    let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+    let u1 = GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
+    let a = TensorMap::<_, Complex64>::from_block_fn(&runtime, [&u1], [&u1], |_, indices| {
+        complex_entry(indices, 1.0) * Complex64::new(1.0, indices[1] as f64 + 1.0)
+    })
+    .unwrap();
+    let b = TensorMap::<_, Complex64>::from_block_fn(&runtime, [&u1], [&u1], |_, indices| {
+        complex_entry(indices, 3.0) * Complex64::new(indices[0] as f64 + 1.0, -1.0)
+    })
+    .unwrap();
+    assert_eq!(a.block_count(), 1);
+
+    fn reduced_block(
+        tensor: &TensorMap<U1FusionRule, Complex64>,
+    ) -> impl Fn(usize, usize) -> Complex64 {
+        let block = tensor.block(0).unwrap();
+        assert_eq!(block.shape(), [2, 2]);
+        let offset = block.offset();
+        let strides = block.strides().to_vec();
+        let data = tensor.data().to_vec();
+        move |row: usize, col: usize| data[offset + row * strides[0] + col * strides[1]]
+    }
+    let a_block = reduced_block(&a);
+    let b_block = reduced_block(&b);
+
+    // (A^H B)[i, j] = sum_k conj(A[k, i]) * B[k, j].
+    let mut expected = [[Complex64::new(0.0, 0.0); 2]; 2];
+    for (i, row) in expected.iter_mut().enumerate() {
+        for (j, entry) in row.iter_mut().enumerate() {
+            for k in 0..2 {
+                *entry += a_block(k, i).conj() * b_block(k, j);
+            }
+        }
+    }
+
+    let a_device = a.to_cuda().unwrap();
+    let b_device = b.to_cuda().unwrap();
+    // Both device entry points: `compose` (twist-free compiler) and `contract`
+    // (which lowers the lazy operand through `TensorContractSpec::
+    // new_with_conjugation`). U(1) is bosonic, so both must equal the same
+    // conjugate-transposed product.
+    let results = [
+        (
+            "compose",
+            a.adjoint().unwrap().compose(&b).unwrap(),
+            a_device
+                .adjoint()
+                .unwrap()
+                .compose(&b_device)
+                .unwrap()
+                .to_host()
+                .unwrap(),
+        ),
+        (
+            "contract",
+            a.adjoint()
+                .unwrap()
+                .contract(&b, &[1], &[0], &[0, 1])
+                .unwrap(),
+            a_device
+                .adjoint()
+                .unwrap()
+                .contract(&b_device, &[1], &[0], &[0, 1])
+                .unwrap()
+                .to_host()
+                .unwrap(),
+        ),
+    ];
+    for (label, host, device) in &results {
+        let result_block = host.block(0).unwrap();
+        let (offset, strides) = (result_block.offset(), result_block.strides().to_vec());
+        for (i, row) in expected.iter().enumerate() {
+            for (j, &value) in row.iter().enumerate() {
+                let index = offset + i * strides[0] + j * strides[1];
+                assert!(
+                    (host.data()[index] - value).norm() <= 1e-12 * (1.0 + value.norm()),
+                    "host {label} {:?} != hand {value:?}",
+                    host.data()[index]
+                );
+                assert!(
+                    (device.data()[index] - value).norm() <= 1e-12 * (1.0 + value.norm()),
+                    "device {label} {:?} != hand {value:?}",
+                    device.data()[index]
+                );
+            }
+        }
+    }
+    assert!(
+        expected.iter().flatten().any(|value| value.im != 0.0),
+        "the oracle must distinguish conjugation from transposition"
+    );
 }

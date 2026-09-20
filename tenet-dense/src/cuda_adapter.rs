@@ -3,16 +3,105 @@
 //! tenet workspace that touches tenferro GPU types; upper layers see opaque
 //! storage handles and `DenseError`.
 
+use num_complex::Complex64;
 use tenferro_gpu::cuda::{download_tensor, upload_tensor, CudaBackend, CudaDeviceId};
 use tenferro_linalg::TensorReadLinalgExt;
 use tenferro_tensor::backend::{BackendSession, BackendSessionHost};
 use tenferro_tensor::{
     ContractionScalar, DotGeneralAccumulation, DotGeneralConfig, Tensor, TensorDot,
-    TensorElementwise, TensorRead, TensorReduction, TensorStructural, TensorView,
-    TensorViewCanonicalization, TensorViewMut, TensorWrite,
+    TensorElementwise, TensorRead, TensorReduction, TensorScalar as TenferroScalar,
+    TensorStructural, TensorView, TensorViewCanonicalization, TensorViewMut, TensorWrite,
+    TypedTensor,
 };
 
-use super::{DenseBackend, DenseError, MatrixOp};
+use super::{DenseBackend, DenseDType, DenseError, MatrixOp};
+use crate::tensor::dense_dtype_from_tenferro;
+
+mod cuda_scalar_sealed {
+    pub trait Sealed {}
+    impl Sealed for f64 {}
+    impl Sealed for num_complex::Complex64 {}
+}
+
+/// Payload dtypes a TeNeT CUDA buffer may own.
+///
+/// Sealed to `f64` and [`Complex64`]: structural (fusion-tree) coefficients
+/// stay real, so only the *payload* varies, and `f32`/`Complex32` remain a
+/// compile-time unsupported boundary rather than a runtime error. Conjugation
+/// is never a payload property here — it is carried as a GEMM operand flag.
+pub trait CudaScalar: TenferroScalar + cuda_scalar_sealed::Sealed {
+    /// TeNeT-side dtype tag, used for [`DenseError::DTypeMismatch`].
+    const DTYPE: DenseDType;
+    /// Additive identity, for `beta = 0` overwriting GEMMs.
+    const ZERO: Self;
+    /// Multiplicative identity, for unscaled GEMMs.
+    const ONE: Self;
+
+    /// The backend's dtype-erased GEMM coefficient for this payload.
+    fn contraction_scalar(self) -> ContractionScalar;
+
+    /// The typed tensor behind a dtype-erased device buffer, if the dtypes agree.
+    fn typed(tensor: &Tensor) -> Option<&TypedTensor<Self>>;
+
+    /// Mutable counterpart of [`CudaScalar::typed`].
+    fn typed_mut(tensor: &mut Tensor) -> Option<&mut TypedTensor<Self>>;
+}
+
+impl CudaScalar for f64 {
+    const DTYPE: DenseDType = DenseDType::F64;
+    const ZERO: Self = 0.0;
+    const ONE: Self = 1.0;
+
+    fn contraction_scalar(self) -> ContractionScalar {
+        ContractionScalar::F64(self)
+    }
+
+    fn typed(tensor: &Tensor) -> Option<&TypedTensor<Self>> {
+        match tensor {
+            Tensor::F64(tensor) => Some(tensor),
+            _ => None,
+        }
+    }
+
+    fn typed_mut(tensor: &mut Tensor) -> Option<&mut TypedTensor<Self>> {
+        match tensor {
+            Tensor::F64(tensor) => Some(tensor),
+            _ => None,
+        }
+    }
+}
+
+impl CudaScalar for Complex64 {
+    const DTYPE: DenseDType = DenseDType::C64;
+    const ZERO: Self = Complex64::new(0.0, 0.0);
+    const ONE: Self = Complex64::new(1.0, 0.0);
+
+    fn contraction_scalar(self) -> ContractionScalar {
+        ContractionScalar::C64(self)
+    }
+
+    fn typed(tensor: &Tensor) -> Option<&TypedTensor<Self>> {
+        match tensor {
+            Tensor::C64(tensor) => Some(tensor),
+            _ => None,
+        }
+    }
+
+    fn typed_mut(tensor: &mut Tensor) -> Option<&mut TypedTensor<Self>> {
+        match tensor {
+            Tensor::C64(tensor) => Some(tensor),
+            _ => None,
+        }
+    }
+}
+
+fn dtype_mismatch<D: CudaScalar>(op: &'static str, tensor: &Tensor) -> DenseError {
+    DenseError::DTypeMismatch {
+        op,
+        expected: D::DTYPE,
+        actual: dense_dtype_from_tenferro(tensor.dtype()),
+    }
+}
 
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -88,7 +177,10 @@ impl CudaDenseContext {
     }
 }
 
-/// Flat f64 buffer resident on one CUDA device.
+/// Flat [`CudaScalar`] buffer resident on one CUDA device.
+///
+/// The handle itself is dtype-erased; every typed access names the payload
+/// dtype and reports a mismatch as [`DenseError::DTypeMismatch`].
 pub struct CudaDenseStorage {
     tensor: Tensor,
     len: usize,
@@ -97,7 +189,7 @@ pub struct CudaDenseStorage {
 
 impl CudaDenseStorage {
     /// Uploads host data as a flat device buffer.
-    pub fn upload_f64(ctx: &CudaDenseContext, data: &[f64]) -> Result<Self, DenseError> {
+    pub fn upload<D: CudaScalar>(ctx: &CudaDenseContext, data: &[D]) -> Result<Self, DenseError> {
         let host = Tensor::from_vec_col_major(vec![data.len()], data.to_vec())
             .map_err(|err| cuda_error("cuda_upload", err))?;
         let tensor = upload_tensor(ctx.backend.runtime(), &host)
@@ -110,25 +202,22 @@ impl CudaDenseStorage {
     }
 
     /// Downloads the flat device buffer back to host data.
-    pub fn download_f64(&self, ctx: &CudaDenseContext) -> Result<Vec<f64>, DenseError> {
+    pub fn download<D: CudaScalar>(&self, ctx: &CudaDenseContext) -> Result<Vec<D>, DenseError> {
         ensure_cuda_device(ctx.device, "cuda_download", &[("source", self.device)])?;
         let host = download_tensor(ctx.backend.runtime(), &self.tensor)
             .map_err(|err| cuda_error("cuda_download", err))?;
-        match host {
-            Tensor::F64(tensor) => tensor
-                .host_data()
-                .map(|data| {
-                    #[cfg(test)]
-                    CUDA_FULL_DOWNLOAD_BYTES
-                        .fetch_add(data.len() * std::mem::size_of::<f64>(), Ordering::Relaxed);
-                    data.to_vec()
-                })
-                .map_err(|err| cuda_error("cuda_download", err)),
-            other => Err(cuda_error(
-                "cuda_download",
-                format!("expected f64 device buffer, got {:?}", other.dtype()),
-            )),
+        if host.dtype() != D::dtype() {
+            return Err(dtype_mismatch::<D>("cuda_download", &host));
         }
+        let data = D::as_slice(&host).map_err(|err| cuda_error("cuda_download", err))?;
+        #[cfg(test)]
+        CUDA_FULL_DOWNLOAD_BYTES.fetch_add(std::mem::size_of_val(data), Ordering::Relaxed);
+        Ok(data.to_vec())
+    }
+
+    /// The payload dtype this device buffer owns.
+    pub fn dtype(&self) -> DenseDType {
+        dense_dtype_from_tenferro(self.tensor.dtype())
     }
 
     pub fn len(&self) -> usize {
@@ -156,24 +245,24 @@ impl CudaDenseStorage {
 
     /// Column-major matrix view over a buffer region with an explicit
     /// leading dimension (`ld >= rows`, `ld == rows` for a packed region).
-    fn region_view(
+    fn region_view<D: CudaScalar>(
         &self,
         rows: usize,
         cols: usize,
         ld: usize,
         offset: usize,
     ) -> Result<TensorView<'_>, DenseError> {
-        self.region_view_strided([rows, cols], [1, ld], offset)
+        self.region_view_strided::<D>([rows, cols], [1, ld], offset)
     }
 
-    fn region_view_strided(
+    fn region_view_strided<D: CudaScalar>(
         &self,
         shape: [usize; 2],
         strides: [usize; 2],
         offset: usize,
     ) -> Result<TensorView<'_>, DenseError> {
-        let Tensor::F64(tensor) = &self.tensor else {
-            return Err(cuda_error("cuda_region", "device buffer is not f64"));
+        let Some(tensor) = D::typed(&self.tensor) else {
+            return Err(dtype_mismatch::<D>("cuda_region", &self.tensor));
         };
         let offset = isize::try_from(offset)
             .map_err(|_| cuda_error("cuda_region", "offset does not fit in isize"))?;
@@ -184,19 +273,24 @@ impl CudaDenseStorage {
             .map_err(|_| cuda_error("cuda_region", "stride does not fit in isize"))?;
         tensor
             .backend_region_view(shape.to_vec(), strides, offset)
-            .map(TensorView::F64)
+            .map(D::tensor_view)
             .map_err(|err| cuda_error("cuda_region", err))
     }
 
-    fn region_view_mut(
+    fn region_view_mut<D: CudaScalar>(
         &mut self,
         rows: usize,
         cols: usize,
         ld: usize,
         offset: usize,
     ) -> Result<TensorViewMut<'_>, DenseError> {
-        let Tensor::F64(tensor) = &mut self.tensor else {
-            return Err(cuda_error("cuda_region", "device buffer is not f64"));
+        let actual = dense_dtype_from_tenferro(self.tensor.dtype());
+        let Some(tensor) = D::typed_mut(&mut self.tensor) else {
+            return Err(DenseError::DTypeMismatch {
+                op: "cuda_region",
+                expected: D::DTYPE,
+                actual,
+            });
         };
         let offset = isize::try_from(offset)
             .map_err(|_| cuda_error("cuda_region", "offset does not fit in isize"))?;
@@ -204,7 +298,7 @@ impl CudaDenseStorage {
             .map_err(|_| cuda_error("cuda_region", "leading dimension does not fit in isize"))?;
         tensor
             .backend_region_view_mut(vec![rows, cols], vec![1, ld_isize], offset)
-            .map(TensorViewMut::F64)
+            .map(D::tensor_view_mut)
             .map_err(|err| cuda_error("cuda_region", err))
     }
 }
@@ -212,7 +306,7 @@ impl CudaDenseStorage {
 /// Column-major matrix GEMM over device buffer regions:
 /// `dst[dst_offset..][rows x cols] = lhs_part * rhs_part` (overwrite).
 #[allow(clippy::too_many_arguments)]
-pub fn cuda_matmul_region_into(
+pub fn cuda_matmul_region_into<D: CudaScalar>(
     ctx: &mut CudaDenseContext,
     dst: &mut CudaDenseStorage,
     dst_offset: usize,
@@ -224,9 +318,22 @@ pub fn cuda_matmul_region_into(
     contracted: usize,
     cols: usize,
 ) -> Result<(), DenseError> {
-    cuda_gemm_region_into(
-        ctx, dst, dst_offset, rows, lhs, lhs_offset, rows, rhs, rhs_offset, contracted, rows,
-        contracted, cols, 1.0, 0.0,
+    cuda_gemm_region_into::<D>(
+        ctx,
+        dst,
+        dst_offset,
+        rows,
+        lhs,
+        lhs_offset,
+        rows,
+        rhs,
+        rhs_offset,
+        contracted,
+        rows,
+        contracted,
+        cols,
+        D::ONE,
+        D::ZERO,
     )
 }
 
@@ -240,7 +347,7 @@ pub fn cuda_matmul_region_into(
 /// ones operand (`k = n = 1`), and factor assembly through small selector
 /// matrices (identity / prefix / sign / permutation).
 #[allow(clippy::too_many_arguments)]
-pub fn cuda_gemm_region_into(
+pub fn cuda_gemm_region_into<D: CudaScalar>(
     ctx: &mut CudaDenseContext,
     dst: &mut CudaDenseStorage,
     dst_offset: usize,
@@ -254,10 +361,10 @@ pub fn cuda_gemm_region_into(
     m: usize,
     k: usize,
     n: usize,
-    alpha: f64,
-    beta: f64,
+    alpha: D,
+    beta: D,
 ) -> Result<(), DenseError> {
-    cuda_gemm_region_strided_into(
+    cuda_gemm_region_strided_into::<D>(
         ctx,
         dst,
         dst_offset,
@@ -278,12 +385,13 @@ pub fn cuda_gemm_region_into(
     )
 }
 
-/// GEMM over logical matrix views of packed parent regions. For f64,
-/// `Adjoint` changes the two strides and carries conjugation metadata without
-/// creating a transposed payload.
+/// GEMM over logical matrix views of packed parent regions. `Adjoint` changes
+/// the two strides and carries conjugation metadata without creating a
+/// transposed or conjugated payload: for a complex payload the conjugation is
+/// a backend operand flag, and for `f64` it is a no-op.
 #[doc(hidden)]
 #[allow(clippy::too_many_arguments)]
-pub fn cuda_gemm_region_with_ops_into(
+pub fn cuda_gemm_region_with_ops_into<D: CudaScalar>(
     ctx: &mut CudaDenseContext,
     dst: &mut CudaDenseStorage,
     dst_offset: usize,
@@ -296,12 +404,12 @@ pub fn cuda_gemm_region_with_ops_into(
     n: usize,
     lhs_op: MatrixOp,
     rhs_op: MatrixOp,
-    alpha: f64,
-    beta: f64,
+    alpha: D,
+    beta: D,
 ) -> Result<(), DenseError> {
     let (lhs_strides, lhs_conj) = cuda_operand_view(lhs_op, m, k);
     let (rhs_strides, rhs_conj) = cuda_operand_view(rhs_op, k, n);
-    cuda_gemm_region_strided_into(
+    cuda_gemm_region_strided_into::<D>(
         ctx,
         dst,
         dst_offset,
@@ -323,7 +431,7 @@ pub fn cuda_gemm_region_with_ops_into(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn cuda_gemm_region_strided_into(
+fn cuda_gemm_region_strided_into<D: CudaScalar>(
     ctx: &mut CudaDenseContext,
     dst: &mut CudaDenseStorage,
     dst_offset: usize,
@@ -339,8 +447,8 @@ fn cuda_gemm_region_strided_into(
     m: usize,
     k: usize,
     n: usize,
-    alpha: f64,
-    beta: f64,
+    alpha: D,
+    beta: D,
 ) -> Result<(), DenseError> {
     ensure_cuda_device(
         ctx.device,
@@ -351,9 +459,9 @@ fn cuda_gemm_region_strided_into(
             ("rhs", rhs.device),
         ],
     )?;
-    let lhs_view = lhs.region_view_strided([m, k], lhs_strides, lhs_offset)?;
-    let rhs_view = rhs.region_view_strided([k, n], rhs_strides, rhs_offset)?;
-    let dst_view = dst.region_view_mut(m, n, dst_ld, dst_offset)?;
+    let lhs_view = lhs.region_view_strided::<D>([m, k], lhs_strides, lhs_offset)?;
+    let rhs_view = rhs.region_view_strided::<D>([k, n], rhs_strides, rhs_offset)?;
+    let dst_view = dst.region_view_mut::<D>(m, n, dst_ld, dst_offset)?;
     let config = DotGeneralConfig {
         lhs_contracting_dims: vec![1],
         rhs_contracting_dims: vec![0],
@@ -363,8 +471,8 @@ fn cuda_gemm_region_strided_into(
     let accumulation = DotGeneralAccumulation {
         lhs_conj,
         rhs_conj,
-        alpha: ContractionScalar::F64(alpha),
-        beta: ContractionScalar::F64(beta),
+        alpha: alpha.contraction_scalar(),
+        beta: beta.contraction_scalar(),
     };
     ctx.backend
         .dot_general_read_into_accum(
@@ -454,7 +562,7 @@ pub fn cuda_is_hermitian_region(
         return Ok(true);
     }
 
-    let normal_view = src.region_view_strided([n, n], [1, n], offset)?;
+    let normal_view = src.region_view_strided::<f64>([n, n], [1, n], offset)?;
     let normal = ctx
         .backend
         .to_contiguous_read(TensorRead::from_view(normal_view))
@@ -477,7 +585,7 @@ pub fn cuda_is_hermitian_region(
         return Ok(true);
     }
 
-    let transpose_view = src.region_view_strided([n, n], [n, 1], offset)?;
+    let transpose_view = src.region_view_strided::<f64>([n, n], [n, 1], offset)?;
     let transpose = ctx
         .backend
         .to_contiguous_read(TensorRead::from_view(transpose_view))
@@ -560,7 +668,7 @@ pub fn cuda_svd_region(
     cols: usize,
 ) -> Result<(CudaDenseStorage, Vec<f64>, CudaDenseStorage), DenseError> {
     ensure_cuda_device(ctx.device, "cuda_svd", &[("src", src.device)])?;
-    let view = src.region_view(rows, cols, rows, offset)?;
+    let view = src.region_view::<f64>(rows, cols, rows, offset)?;
     let (u, s, vt) = with_cuda_linalg(&mut ctx.backend, |exec| {
         TensorRead::from_view(view).svd_read(exec)
     })
@@ -604,7 +712,7 @@ pub fn cuda_qr_region(
     cols: usize,
 ) -> Result<(CudaDenseStorage, CudaDenseStorage, Vec<f64>), DenseError> {
     ensure_cuda_device(ctx.device, "cuda_qr", &[("src", src.device)])?;
-    let view = src.region_view(rows, cols, rows, offset)?;
+    let view = src.region_view::<f64>(rows, cols, rows, offset)?;
     let (q, r) = with_cuda_linalg(&mut ctx.backend, |exec| {
         TensorRead::from_view(view).qr_read(exec)
     })
@@ -669,7 +777,7 @@ pub fn cuda_eigh_region(
     n: usize,
 ) -> Result<(Vec<f64>, CudaDenseStorage), DenseError> {
     ensure_cuda_device(ctx.device, "cuda_eigh", &[("src", src.device)])?;
-    let view = src.region_view(n, n, n, offset)?;
+    let view = src.region_view::<f64>(n, n, n, offset)?;
     let (values, vectors) = with_cuda_linalg(&mut ctx.backend, |exec| {
         TensorRead::from_view(view).eigh_read(exec)
     })
@@ -797,7 +905,7 @@ mod tests {
         }
         data[0 + n] = 32.0 * f64::EPSILON;
         data[1] = data[0 + n];
-        let storage = CudaDenseStorage::upload_f64(&ctx, &data).unwrap();
+        let storage = CudaDenseStorage::upload::<f64>(&ctx, &data).unwrap();
 
         CUDA_FULL_DOWNLOAD_BYTES.store(0, Ordering::Relaxed);
         CUDA_METADATA_DOWNLOAD_BYTES.store(0, Ordering::Relaxed);
@@ -808,32 +916,81 @@ mod tests {
         let near_threshold = |ctx: &CudaDenseContext, delta: f64| {
             // For [[1, delta], [0, 1]], the shared half-residual rule changes
             // truth value at delta = 128 eps up to negligible O(delta^2).
-            CudaDenseStorage::upload_f64(ctx, &[1.0, 0.0, delta, 1.0]).unwrap()
+            CudaDenseStorage::upload::<f64>(ctx, &[1.0, 0.0, delta, 1.0]).unwrap()
         };
         let below = near_threshold(&ctx, 120.0 * f64::EPSILON);
         let above = near_threshold(&ctx, 136.0 * f64::EPSILON);
         assert!(cuda_is_hermitian_region(&mut ctx, &below, 0, 2).unwrap());
         assert!(!cuda_is_hermitian_region(&mut ctx, &above, 0, 2).unwrap());
 
-        let zero = CudaDenseStorage::upload_f64(&ctx, &vec![0.0; n * n]).unwrap();
+        let zero = CudaDenseStorage::upload::<f64>(&ctx, &vec![0.0; n * n]).unwrap();
         assert!(cuda_is_hermitian_region(&mut ctx, &zero, 0, n).unwrap());
 
         data[0 + n] = 256.0 * f64::EPSILON;
-        let asymmetric = CudaDenseStorage::upload_f64(&ctx, &data).unwrap();
+        let asymmetric = CudaDenseStorage::upload::<f64>(&ctx, &data).unwrap();
         assert!(!cuda_is_hermitian_region(&mut ctx, &asymmetric, 0, n).unwrap());
 
         for scale in [f64::from_bits(0x0010_0000_0000_0000), 2.0_f64.powi(500)] {
             let scaled: Vec<_> = data.iter().map(|value| value * scale).collect();
-            let scaled = CudaDenseStorage::upload_f64(&ctx, &scaled).unwrap();
+            let scaled = CudaDenseStorage::upload::<f64>(&ctx, &scaled).unwrap();
             assert!(!cuda_is_hermitian_region(&mut ctx, &scaled, 0, n).unwrap());
         }
 
         for bad in [f64::NAN, f64::INFINITY] {
             let mut nonfinite = vec![0.0; n * n];
             nonfinite[0] = bad;
-            let nonfinite = CudaDenseStorage::upload_f64(&ctx, &nonfinite).unwrap();
+            let nonfinite = CudaDenseStorage::upload::<f64>(&ctx, &nonfinite).unwrap();
             assert!(!cuda_is_hermitian_region(&mut ctx, &nonfinite, 0, n).unwrap());
         }
+    }
+
+    #[test]
+    #[ignore = "requires a real CUDA device"]
+    fn cuda_transfer_bytes_scale_with_the_payload_dtype() {
+        // #1268: a complex payload must move the same *number* of buffers as
+        // the real one and exactly `size_of::<Complex64>() / size_of::<f64>()`
+        // times the bytes for the same element count.
+        let ctx = CudaDenseContext::new(0).unwrap();
+        let elements = 16;
+        let real: Vec<f64> = (0..elements).map(|index| index as f64).collect();
+        let complex: Vec<Complex64> = (0..elements)
+            .map(|index| Complex64::new(index as f64, -(index as f64) - 0.5))
+            .collect();
+
+        CUDA_FULL_DOWNLOAD_BYTES.store(0, Ordering::Relaxed);
+        let real_device = CudaDenseStorage::upload::<f64>(&ctx, &real).unwrap();
+        assert_eq!(real_device.dtype(), DenseDType::F64);
+        assert_eq!(real_device.download::<f64>(&ctx).unwrap(), real);
+        let real_bytes = CUDA_FULL_DOWNLOAD_BYTES.swap(0, Ordering::Relaxed);
+
+        let complex_device = CudaDenseStorage::upload::<Complex64>(&ctx, &complex).unwrap();
+        assert_eq!(complex_device.dtype(), DenseDType::C64);
+        assert_eq!(complex_device.download::<Complex64>(&ctx).unwrap(), complex);
+        let complex_bytes = CUDA_FULL_DOWNLOAD_BYTES.swap(0, Ordering::Relaxed);
+
+        assert_eq!(real_bytes, elements * std::mem::size_of::<f64>());
+        assert_eq!(
+            complex_bytes,
+            real_bytes * std::mem::size_of::<Complex64>() / std::mem::size_of::<f64>()
+        );
+
+        // A dtype mismatch is a typed error, never a reinterpretation.
+        assert!(matches!(
+            complex_device.download::<f64>(&ctx),
+            Err(DenseError::DTypeMismatch {
+                expected: DenseDType::F64,
+                actual: DenseDType::C64,
+                ..
+            })
+        ));
+        assert!(matches!(
+            real_device.region_view::<Complex64>(4, 4, 4, 0),
+            Err(DenseError::DTypeMismatch {
+                expected: DenseDType::C64,
+                actual: DenseDType::F64,
+                ..
+            })
+        ));
     }
 
     #[test]

@@ -288,6 +288,22 @@ pub trait TensorScalar: ScalarOps {}
 impl TensorScalar for f64 {}
 impl TensorScalar for num_complex::Complex64 {}
 
+/// Scalar payloads a [`CudaStorage`] device buffer can own.
+///
+/// This bundles the typed payload trait [`TensorScalar`] (whose `ScalarOps`
+/// half selects the matching multiplicity-free execution context) with the
+/// device dtype [`tenet_dense::CudaScalar`]. It is implemented for `f64` and
+/// [`num_complex::Complex64`] only, so `f32`/`Complex32` device payloads are a
+/// compile-time boundary rather than a runtime error.
+#[cfg(feature = "cuda")]
+#[doc(hidden)]
+pub trait CudaPayload: TensorScalar + tenet_dense::CudaScalar {}
+
+#[cfg(feature = "cuda")]
+impl CudaPayload for f64 {}
+#[cfg(feature = "cuda")]
+impl CudaPayload for num_complex::Complex64 {}
+
 /// One tensor-local restriction used by the internal network slice executor.
 #[doc(hidden)]
 pub struct NetworkDegeneracyRestriction {
@@ -4076,7 +4092,7 @@ pub(crate) fn assemble_left_factor(
             .find(|source_tree| source_tree.tree() == target_tree.tree())
             .map(|source_tree| source_tree.offset())
             .ok_or_else(|| internal_layout_error("codomain tree missing in the source sector"))?;
-        cuda_gemm_region_into(
+        cuda_gemm_region_into::<f64>(
             cuda,
             &mut dst.0,
             target.range().start + target_tree.offset(),
@@ -4126,7 +4142,7 @@ pub(crate) fn assemble_right_factor(
             .find(|source_tree| source_tree.tree() == target_tree.tree())
             .map(|source_tree| source_tree.offset())
             .ok_or_else(|| internal_layout_error("domain tree missing in the source sector"))?;
-        cuda_gemm_region_into(
+        cuda_gemm_region_into::<f64>(
             cuda,
             &mut dst.0,
             target.range().start + target.rows() * target_tree.offset(),
@@ -4454,10 +4470,10 @@ fn validate_cuda_reduction_placement(
 }
 
 #[cfg(feature = "cuda")]
-fn download_cuda_reduction_partials(
-    partials: &CudaStorage,
+fn download_cuda_reduction_partials<D: CudaPayload>(
+    partials: &CudaStorage<D>,
     cuda: &CudaDenseContext,
-) -> Result<Vec<f64>, Error> {
+) -> Result<Vec<D>, Error> {
     #[cfg(test)]
     let device_len = partials.len();
     #[cfg(test)]
@@ -9760,8 +9776,9 @@ where
 }
 
 #[cfg(feature = "cuda")]
-impl<R> TensorMap<R, f64> {
-    /// Uploads host f64 ownership to this tensor's Runtime CUDA context.
+impl<R, D: CudaPayload> TensorMap<R, D> {
+    /// Uploads host ownership of a device-capable payload to this tensor's
+    /// Runtime CUDA context.
     ///
     /// Dense storage uploads directly. Compact diagonal storage is expanded
     /// operation-locally and becomes dense on device; the source's reusable
@@ -9769,17 +9786,19 @@ impl<R> TensorMap<R, f64> {
     /// recovering compactness. A lazy adjoint transfers only its canonical
     /// parent and rebuilds a cold lazy view over the device parent.
     ///
-    /// CUDA transfer is deliberately unavailable for c64 payloads:
+    /// The supported device payloads are `f64` and `Complex64`; single
+    /// precision has no device payload in this leaf:
     ///
     /// ```compile_fail
+    /// use num_complex::Complex32;
     /// use tenet::core::U1FusionRule;
     /// use tenet::typed::TensorMap;
     ///
-    /// fn no_c64_upload(tensor: &TensorMap<U1FusionRule, num_complex::Complex64>) {
+    /// fn no_c32_upload(tensor: &TensorMap<U1FusionRule, Complex32>) {
     ///     let _ = tensor.to_cuda();
     /// }
     /// ```
-    pub fn to_cuda(&self) -> Result<TensorMap<R, f64, CudaStorage>, Error> {
+    pub fn to_cuda(&self) -> Result<TensorMap<R, D, CudaStorage<D>>, Error> {
         let state = self.runtime.lock();
         let cuda = state.cuda.as_ref().ok_or_else(|| {
             Error::InvalidArgument(
@@ -9788,7 +9807,7 @@ impl<R> TensorMap<R, f64> {
                     .to_string(),
             )
         })?;
-        let upload = |body: &Arc<TypedTensorBody<R, f64>>| {
+        let upload = |body: &Arc<TypedTensorBody<R, D>>| {
             let storage = match body.data.as_ref() {
                 TypedData::Dense(data) => CudaStorage::upload(cuda, data)?,
                 TypedData::Diagonal(spectrum) => {
@@ -9826,8 +9845,8 @@ impl<R> TensorMap<R, f64> {
 }
 
 #[cfg(feature = "cuda")]
-impl<R> TensorMap<R, f64, CudaStorage> {
-    /// Downloads device f64 ownership into one final dense host buffer.
+impl<R, D: CudaPayload> TensorMap<R, D, CudaStorage<D>> {
+    /// Downloads device ownership into one final dense host buffer.
     ///
     /// A lazy adjoint downloads only its canonical parent and rebuilds a cold
     /// host lazy view. No receiver-sized logical adjoint is materialized.
@@ -9841,12 +9860,12 @@ impl<R> TensorMap<R, f64, CudaStorage> {
     ///     let _ = tensor.data();
     /// }
     /// ```
-    pub fn to_host(&self) -> Result<TensorMap<R, f64>, Error> {
+    pub fn to_host(&self) -> Result<TensorMap<R, D>, Error> {
         let state = self.runtime.lock();
         let cuda = state.cuda.as_ref().ok_or_else(|| {
             Error::InvalidArgument("this runtime was built without a CUDA device".to_string())
         })?;
-        let download = |body: &Arc<TypedTensorBody<R, f64, CudaStorage>>| {
+        let download = |body: &Arc<TypedTensorBody<R, D, CudaStorage<D>>>| {
             let TypedData::Dense(storage) = body.data.as_ref() else {
                 unreachable!("typed CUDA transfer never produces compact storage")
             };
@@ -9874,64 +9893,11 @@ impl<R> TensorMap<R, f64, CudaStorage> {
 }
 
 #[cfg(feature = "cuda")]
-/// Checked Generic providers deliberately have no device execution methods in
-/// this leaf:
+/// Device factorizations. These stay `f64`-only in this leaf: the positive
+/// diagonal gauge, the Hermitian residual test, and the selector dtype are a
+/// separate complex-payload slice.
 ///
-/// ```compile_fail
-/// use tenet::core::{
-///     CheckedGenericAdmissionMode, CheckedGenericFusion, CheckedGenericRigidSymbols,
-///     TypedSectorAdmission,
-/// };
-/// use tenet::typed::{CudaStorage, TensorMap};
-///
-/// fn no_checked_generic_cuda_operations<R>(
-///     lhs: &TensorMap<R, f64, CudaStorage>,
-///     rhs: &TensorMap<R, f64, CudaStorage>,
-/// ) where
-///     R: TypedSectorAdmission<Mode = CheckedGenericAdmissionMode>
-///         + CheckedGenericFusion
-///         + CheckedGenericRigidSymbols<Scalar = f64>,
-/// {
-///     let _ = lhs.norm();
-///     let _ = lhs.inner(rhs);
-///     let _ = lhs.scale(2.0);
-///     let _ = lhs.add(rhs, 2.0, -3.0);
-///     let _ = lhs.zeros_like();
-///     let _ = lhs.normalize();
-///     let _ = lhs.qr_compact();
-///     let _ = lhs.svd_compact();
-/// }
-/// ```
-///
-/// Complex CUDA reductions are likewise absent: CUDA storage currently owns
-/// f64 payloads only.
-///
-/// ```compile_fail
-/// use num_complex::Complex64;
-/// use tenet::core::U1FusionRule;
-/// use tenet::typed::{CudaStorage, TensorMap};
-///
-/// fn no_c64_cuda_operations(
-///     lhs: &TensorMap<U1FusionRule, Complex64, CudaStorage>,
-///     rhs: &TensorMap<U1FusionRule, Complex64, CudaStorage>,
-/// ) {
-///     let _ = lhs.norm();
-///     let _ = lhs.inner(rhs);
-///     let _ = lhs.scale(Complex64::new(2.0, 0.0));
-///     let _ = lhs.add(
-///         rhs,
-///         Complex64::new(2.0, 0.0),
-///         Complex64::new(-3.0, 0.0),
-///     );
-///     let _ = lhs.zeros_like();
-///     let _ = lhs.normalize();
-///     let _ = lhs.qr_compact();
-///     let _ = lhs.svd_compact();
-/// }
-/// ```
-///
-/// Compact QR remains unavailable for checked-Generic and complex CUDA
-/// tensors independently of the reduction/arithmetic surface above:
+/// Checked Generic providers deliberately have no device factorizations:
 ///
 /// ```compile_fail
 /// use tenet::core::{
@@ -9950,12 +9916,16 @@ impl<R> TensorMap<R, f64, CudaStorage> {
 /// }
 /// ```
 ///
+/// A complex device payload has no compact QR either:
+///
 /// ```compile_fail
 /// use num_complex::Complex64;
 /// use tenet::core::U1FusionRule;
 /// use tenet::typed::{CudaStorage, TensorMap};
 ///
-/// fn no_complex_cuda_qr(tensor: &TensorMap<U1FusionRule, Complex64, CudaStorage>) {
+/// fn no_complex_cuda_qr(
+///     tensor: &TensorMap<U1FusionRule, Complex64, CudaStorage<Complex64>>,
+/// ) {
 ///     let _ = tensor.qr_compact();
 /// }
 /// ```
@@ -9984,7 +9954,9 @@ impl<R> TensorMap<R, f64, CudaStorage> {
 /// use tenet::core::U1FusionRule;
 /// use tenet::typed::{CudaStorage, TensorMap};
 ///
-/// fn no_complex_cuda_svd(tensor: &TensorMap<U1FusionRule, Complex64, CudaStorage>) {
+/// fn no_complex_cuda_svd(
+///     tensor: &TensorMap<U1FusionRule, Complex64, CudaStorage<Complex64>>,
+/// ) {
 ///     let _ = tensor.svd_compact();
 /// }
 /// ```
@@ -10014,7 +9986,7 @@ impl<R> TensorMap<R, f64, CudaStorage> {
 /// use tenet::typed::{CudaStorage, TensorMap, Truncation};
 ///
 /// fn no_complex_cuda_svd_trunc(
-///     tensor: &TensorMap<U1FusionRule, Complex64, CudaStorage>,
+///     tensor: &TensorMap<U1FusionRule, Complex64, CudaStorage<Complex64>>,
 /// ) {
 ///     let _ = tensor.svd_trunc(&Truncation::Full);
 /// }
@@ -10023,42 +9995,6 @@ impl<R> TensorMap<R, f64, CudaStorage>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
 {
-    /// Lazy categorical adjoint over the same parent device allocation.
-    pub fn adjoint(&self) -> Result<Self, Error> {
-        self.dense_adjoint_view()
-    }
-
-    fn direct_cuda_storage(&self, operation: &'static str) -> Result<&CudaStorage, Error> {
-        match &self.repr {
-            TypedTensorRepr::Owned(body) => match body.data.as_ref() {
-                TypedData::Dense(storage) => Ok(storage),
-                TypedData::Diagonal(_) => Err(Error::UnsupportedOnDevice(format!(
-                    "{operation} requires dense CUDA storage"
-                ))),
-            },
-            TypedTensorRepr::Adjoint(_) => Err(Error::UnsupportedOnDevice(format!(
-                "{operation} does not support lazy adjoint CUDA operands"
-            ))),
-        }
-    }
-
-    fn validate_cuda_owned_metadata(
-        expected: Placement,
-        actual: Placement,
-        required_len: usize,
-        actual_len: usize,
-    ) -> Result<(), Error> {
-        if actual != expected {
-            return Err(Error::PlacementMismatch);
-        }
-        if actual_len != required_len {
-            return Err(internal_layout_error(
-                "CUDA payload length does not match its admitted tensor space",
-            ));
-        }
-        Ok(())
-    }
-
     fn compile_cuda_qr_plan(
         &self,
         source_regions: Arc<[CoupledSectorRegion]>,
@@ -11082,13 +11018,90 @@ where
             error,
         })
     }
+}
+
+#[cfg(feature = "cuda")]
+/// Device transfer, arithmetic, reductions, and contraction over a
+/// [`CudaStorage`] payload.
+///
+/// The payload dtype is the only degree of freedom: structural coefficients
+/// stay real (`R::Scalar = f64`), and operand conjugation is carried as a GEMM
+/// flag, never as a materialized conjugated buffer. `f32`/`Complex32` have no
+/// device payload and are a compile-time boundary (see [`Self::to_host`]).
+///
+/// Checked Generic providers deliberately have no device execution methods in
+/// this leaf:
+///
+/// ```compile_fail
+/// use tenet::core::{
+///     CheckedGenericAdmissionMode, CheckedGenericFusion, CheckedGenericRigidSymbols,
+///     TypedSectorAdmission,
+/// };
+/// use tenet::typed::{CudaStorage, TensorMap};
+///
+/// fn no_checked_generic_cuda_operations<R>(
+///     lhs: &TensorMap<R, f64, CudaStorage>,
+///     rhs: &TensorMap<R, f64, CudaStorage>,
+/// ) where
+///     R: TypedSectorAdmission<Mode = CheckedGenericAdmissionMode>
+///         + CheckedGenericFusion
+///         + CheckedGenericRigidSymbols<Scalar = f64>,
+/// {
+///     let _ = lhs.norm();
+///     let _ = lhs.inner(rhs);
+///     let _ = lhs.scale(2.0);
+///     let _ = lhs.add(rhs, 2.0, -3.0);
+///     let _ = lhs.zeros_like();
+///     let _ = lhs.normalize();
+/// }
+/// ```
+impl<R, D> TensorMap<R, D, CudaStorage<D>>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: CudaPayload,
+{
+    /// Lazy categorical adjoint over the same parent device allocation.
+    pub fn adjoint(&self) -> Result<Self, Error> {
+        self.dense_adjoint_view()
+    }
+
+    fn direct_cuda_storage(&self, operation: &'static str) -> Result<&CudaStorage<D>, Error> {
+        match &self.repr {
+            TypedTensorRepr::Owned(body) => match body.data.as_ref() {
+                TypedData::Dense(storage) => Ok(storage),
+                TypedData::Diagonal(_) => Err(Error::UnsupportedOnDevice(format!(
+                    "{operation} requires dense CUDA storage"
+                ))),
+            },
+            TypedTensorRepr::Adjoint(_) => Err(Error::UnsupportedOnDevice(format!(
+                "{operation} does not support lazy adjoint CUDA operands"
+            ))),
+        }
+    }
+
+    fn validate_cuda_owned_metadata(
+        expected: Placement,
+        actual: Placement,
+        required_len: usize,
+        actual_len: usize,
+    ) -> Result<(), Error> {
+        if actual != expected {
+            return Err(Error::PlacementMismatch);
+        }
+        if actual_len != required_len {
+            return Err(internal_layout_error(
+                "CUDA payload length does not match its admitted tensor space",
+            ));
+        }
+        Ok(())
+    }
 
     fn cuda_axpby_owned(
         &self,
         required_len: usize,
-        lhs: (&CudaStorage, f64),
-        rhs: Option<(&CudaStorage, f64)>,
-    ) -> Result<CudaStorage, Error> {
+        lhs: (&CudaStorage<D>, D),
+        rhs: Option<(&CudaStorage<D>, D)>,
+    ) -> Result<CudaStorage<D>, Error> {
         let (lhs, alpha) = lhs;
         let mut state = self.runtime.lock();
         let cuda = state.cuda.as_mut().ok_or_else(|| {
@@ -11116,11 +11129,11 @@ where
         let coefficients = CudaStorage::upload(cuda, &coefficient_values)?;
         #[cfg(test)]
         observe_cuda_arithmetic(0, 1, 0);
-        let mut output = CudaStorage::upload(cuda, &vec![0.0; required_len])?;
+        let mut output = CudaStorage::upload(cuda, &vec![D::from_real(0.0); required_len])?;
         #[cfg(test)]
         observe_cuda_arithmetic(1, 0, 0);
         if required_len != 0 {
-            cuda_gemm_region_into(
+            cuda_gemm_region_into::<D>(
                 cuda,
                 &mut output.0,
                 0,
@@ -11134,14 +11147,14 @@ where
                 required_len,
                 1,
                 1,
-                1.0,
-                0.0,
+                D::from_real(1.0),
+                D::from_real(0.0),
             )
             .map_err(|err| Error::from(tenet_tensors::OperationError::Dense(err)))?;
             #[cfg(test)]
             observe_cuda_arithmetic(0, 0, 1);
             if let Some((rhs, _)) = rhs {
-                cuda_gemm_region_into(
+                cuda_gemm_region_into::<D>(
                     cuda,
                     &mut output.0,
                     0,
@@ -11155,8 +11168,8 @@ where
                     required_len,
                     1,
                     1,
-                    1.0,
-                    1.0,
+                    D::from_real(1.0),
+                    D::from_real(1.0),
                 )
                 .map_err(|err| Error::from(tenet_tensors::OperationError::Dense(err)))?;
                 #[cfg(test)]
@@ -11169,8 +11182,8 @@ where
     fn cuda_zeros_owned(
         &self,
         required_len: usize,
-        source: &CudaStorage,
-    ) -> Result<CudaStorage, Error> {
+        source: &CudaStorage<D>,
+    ) -> Result<CudaStorage<D>, Error> {
         let mut state = self.runtime.lock();
         let cuda = state.cuda.as_mut().ok_or_else(|| {
             Error::InvalidArgument(
@@ -11185,7 +11198,7 @@ where
             required_len,
             source.len(),
         )?;
-        let output = CudaStorage::upload(cuda, &vec![0.0; required_len])?;
+        let output = CudaStorage::upload(cuda, &vec![D::from_real(0.0); required_len])?;
         #[cfg(test)]
         observe_cuda_arithmetic(1, 0, 0);
         Ok(output)
@@ -11194,7 +11207,7 @@ where
     fn preflight_owned_cuda_arithmetic(
         &self,
         required_len: usize,
-        storage: &CudaStorage,
+        storage: &CudaStorage<D>,
     ) -> Result<(), Error> {
         let mut state = self.runtime.lock();
         let cuda = state.cuda.as_mut().ok_or_else(|| {
@@ -11212,7 +11225,7 @@ where
         )
     }
 
-    fn with_owned_cuda_storage(&self, storage: CudaStorage) -> Self {
+    fn with_owned_cuda_storage(&self, storage: CudaStorage<D>) -> Self {
         let body = self
             .owned_body()
             .expect("CUDA arithmetic output authority must be owned");
@@ -11225,14 +11238,16 @@ where
     /// Fresh device result `factor * self` for owned storage; a lazy adjoint
     /// redirects algebraically through its canonical parent. Zero factors
     /// preserve nonfinite propagation, but signed-zero bits are backend-local.
-    pub fn scale(&self, factor: f64) -> Result<Self, Error> {
+    pub fn scale(&self, factor: D) -> Result<Self, Error> {
         let required_len = self.logical_space().space().required_len()?;
         if let TypedTensorRepr::Adjoint(view) = &self.repr {
             let parent = Self {
                 runtime: self.runtime.clone(),
                 repr: TypedTensorRepr::Owned(Arc::clone(&view.parent)),
             };
-            return parent.scale(factor)?.adjoint();
+            // `alpha * A^H == (conj(alpha) * A)^H`, matching the adjoint arm
+            // of the Host `scale_multiplicity_free`.
+            return parent.scale(FactorScalar::adjoint(factor))?.adjoint();
         }
         let source = self.direct_cuda_storage("scale")?;
         let output = self.cuda_axpby_owned(required_len, (source, factor), None)?;
@@ -11241,7 +11256,7 @@ where
 
     /// Fresh device result `alpha * self + beta * other`. Zero coefficients
     /// preserve nonfinite propagation, but signed-zero bits are backend-local.
-    pub fn add(&self, other: &Self, alpha: f64, beta: f64) -> Result<Self, Error> {
+    pub fn add(&self, other: &Self, alpha: D, beta: D) -> Result<Self, Error> {
         let required_len = self.logical_space().space().required_len()?;
         if !self.runtime.same_runtime(&other.runtime) {
             return Err(Error::RuntimeMismatch);
@@ -11261,7 +11276,16 @@ where
                     runtime: other.runtime.clone(),
                     repr: TypedTensorRepr::Owned(Arc::clone(&rhs.parent)),
                 };
-                return lhs.add(&rhs, alpha, beta)?.adjoint();
+                // `(alpha A^H + beta B^H) == (conj(alpha) A + conj(beta) B)^H`,
+                // so the folded coefficients are conjugated before the parents
+                // are combined.
+                return lhs
+                    .add(
+                        &rhs,
+                        FactorScalar::adjoint(alpha),
+                        FactorScalar::adjoint(beta),
+                    )?
+                    .adjoint();
             }
             (TypedTensorRepr::Adjoint(_), TypedTensorRepr::Owned(_))
             | (TypedTensorRepr::Owned(_), TypedTensorRepr::Adjoint(_)) => {
@@ -11305,14 +11329,23 @@ where
         }
         let storage = self.direct_cuda_storage("normalize")?;
         self.preflight_owned_cuda_arithmetic(required_len, storage)?;
-        self.scale(1.0 / self.norm()?)
+        self.scale(D::from_real(1.0 / self.norm()?))
     }
 
-    /// Quantum-dimension-weighted Frobenius reduction over owned CUDA storage.
+    /// Quantum-dimension-weighted Frobenius reduction over owned CUDA storage,
+    /// **conjugate-linear in `lhs`** like the Host `coupled_region_inner`.
+    ///
+    /// The conjugation is the GEMM operand flag `MatrixOp::Adjoint`: the left
+    /// row-vector view of a coupled region has extent 1 along its first axis,
+    /// so the adjoint strides `[len, 1]` address exactly the same elements as
+    /// the identity strides `[1, 1]`, and the orientation only sets
+    /// `lhs_conj`. For `D = f64` that flag is a no-op, so the reduction has
+    /// the same operands and produces the same values as the unconjugated
+    /// form it replaces.
     ///
     /// The device returns one scalar per coupled sector. Category weights stay
     /// with the tensor and are applied only after releasing the Runtime lock.
-    fn weighted_inner_cuda(&self, lhs: &CudaStorage, rhs: &CudaStorage) -> Result<f64, Error> {
+    fn weighted_inner_cuda(&self, lhs: &CudaStorage<D>, rhs: &CudaStorage<D>) -> Result<D, Error> {
         let space = self.logical_space().space();
         let regions = sector_regions(space.structure(), space.nout())?;
         let mut state = self.runtime.lock();
@@ -11330,7 +11363,8 @@ where
         )?;
         // ponytail: #740 keeps the proven host-zero upload until a native
         // allocation has correct cross-stream publication and measured value.
-        let mut partials = CudaStorage::upload(cuda, &vec![0.0; regions.len().max(1)])?;
+        let mut partials =
+            CudaStorage::upload(cuda, &vec![D::from_real(0.0); regions.len().max(1)])?;
         {
             let mut gemm = CudaStorageGemm::new(cuda);
             for (index, region) in regions.iter().enumerate() {
@@ -11338,7 +11372,7 @@ where
                 if len == 0 {
                     continue;
                 }
-                gemm.matmul_range_into(
+                gemm.matmul_range_with_ops_scaled_into(
                     &mut partials,
                     index,
                     lhs,
@@ -11348,6 +11382,9 @@ where
                     1,
                     len,
                     1,
+                    tenet_dense::MatrixOp::Adjoint,
+                    tenet_dense::MatrixOp::Identity,
+                    D::from_real(1.0),
                 )?;
             }
         }
@@ -11358,9 +11395,9 @@ where
             .iter()
             .zip(values)
             .map(|(region, value)| {
-                value * self.logical_space().provider().dim_scalar(region.coupled())
+                value * D::from_real(self.logical_space().provider().dim_scalar(region.coupled()))
             })
-            .sum())
+            .fold(D::from_real(0.0), |total, term| total + term))
     }
 
     /// Quantum-dimension-weighted Frobenius norm of a device tensor.
@@ -11376,13 +11413,21 @@ where
             .norm();
         }
         let storage = self.direct_cuda_storage("norm")?;
-        Ok(self.weighted_inner_cuda(storage, storage)?.sqrt())
+        // `<t, t>` is real up to rounding; the norm is its real part's root,
+        // matching the Host `norm_multiplicity_free`.
+        Ok(self
+            .weighted_inner_cuda(storage, storage)?
+            .widen_complex()
+            .re
+            .sqrt())
     }
 
-    /// Quantum-dimension-weighted Frobenius inner product of owned f64 device
-    /// tensors. Lazy adjoints remain an explicit unsupported device scope.
+    /// TensorKit `dot(x, y)`: the quantum-dimension-weighted Frobenius inner
+    /// product with **`self` conjugated**, matching the Host
+    /// `inner_multiplicity_free`. Lazy adjoints remain an explicit
+    /// unsupported device scope.
     #[doc(alias = "dot")]
-    pub fn inner(&self, other: &Self) -> Result<f64, Error> {
+    pub fn inner(&self, other: &Self) -> Result<D, Error> {
         if !self.runtime.same_runtime(&other.runtime) {
             return Err(Error::RuntimeMismatch);
         }
@@ -11399,7 +11444,7 @@ where
     /// Deprecated alias of [`Self::inner`].
     #[deprecated(since = "0.1.0", note = "use inner instead")]
     #[inline]
-    pub fn dot(&self, other: &Self) -> Result<f64, Error> {
+    pub fn dot(&self, other: &Self) -> Result<D, Error> {
         self.inner(other)
     }
 
@@ -11410,7 +11455,7 @@ where
         (
             &BoundDynamicFusionMapSpace<R>,
             tenet_tensors::FusionOperand<'_>,
-            &CudaStorage,
+            &CudaStorage<D>,
         ),
         Error,
     > {
@@ -11498,24 +11543,26 @@ where
         }
         // ponytail: the existing device seam initializes by uploading zeros;
         // replace this only with a measured native allocation/memset leaf.
-        let mut dst = CudaStorage::upload(cuda, &vec![0.0; dst_space.space().required_len()?])?;
-        mf.f64
-            .tensorcontract_fusion_dyn_prelowered_direct_on_storage(
-                &mut CudaStorageGemm::new(cuda),
-                &dst_space,
-                &mut dst,
-                lhs_operand,
-                lhs_storage,
-                rhs_operand,
-                rhs_storage,
-                tenet_tensors::TensorContractSpec::new_with_conjugation(
-                    lhs_axes,
-                    rhs_axes,
-                    OutputAxisOrder::identity(),
-                    lhs_operand.storage_conjugate(),
-                    rhs_operand.storage_conjugate(),
-                ),
-            )?;
+        let mut dst = CudaStorage::upload(
+            cuda,
+            &vec![D::from_real(0.0); dst_space.space().required_len()?],
+        )?;
+        D::ctx_of(mf).tensorcontract_fusion_dyn_prelowered_direct_on_storage(
+            &mut CudaStorageGemm::new(cuda),
+            &dst_space,
+            &mut dst,
+            lhs_operand,
+            lhs_storage,
+            rhs_operand,
+            rhs_storage,
+            tenet_tensors::TensorContractSpec::new_with_conjugation(
+                lhs_axes,
+                rhs_axes,
+                OutputAxisOrder::identity(),
+                lhs_operand.storage_conjugate(),
+                rhs_operand.storage_conjugate(),
+            ),
+        )?;
         drop(state);
         Ok(Self {
             runtime: self.runtime.clone(),
@@ -11566,19 +11613,21 @@ where
         {
             return Err(Error::PlacementMismatch);
         }
-        let mut dst = CudaStorage::upload(cuda, &vec![0.0; dst_space.space().required_len()?])?;
-        mf.f64
-            .tensorcompose_fusion_dyn_prelowered_direct_on_storage(
-                &mut CudaStorageGemm::new(cuda),
-                &dst_space,
-                &mut dst,
-                lhs_operand,
-                lhs_storage,
-                rhs_operand,
-                rhs_storage,
-                &lhs_axes,
-                &rhs_axes,
-            )?;
+        let mut dst = CudaStorage::upload(
+            cuda,
+            &vec![D::from_real(0.0); dst_space.space().required_len()?],
+        )?;
+        D::ctx_of(mf).tensorcompose_fusion_dyn_prelowered_direct_on_storage(
+            &mut CudaStorageGemm::new(cuda),
+            &dst_space,
+            &mut dst,
+            lhs_operand,
+            lhs_storage,
+            rhs_operand,
+            rhs_storage,
+            &lhs_axes,
+            &rhs_axes,
+        )?;
         drop(state);
         Ok(Self {
             runtime: self.runtime.clone(),
@@ -18970,6 +19019,97 @@ mod representation_gates {
         assert!(host_view.materialized.get().is_none());
         assert_eq!(materialized_adjoint_builds(&lazy), 0);
         assert_eq!(lazy_host.data(), expected_lazy);
+    }
+
+    /// #1268: a `Complex64` device payload must perform exactly the same
+    /// number of device allocations, coefficient uploads, kernels, and
+    /// reduction downloads as the `f64` payload on the same structure. Only
+    /// the bytes per element change (covered in `tenet-dense`).
+    #[cfg(feature = "cuda")]
+    #[test]
+    #[ignore = "requires a real CUDA device"]
+    fn typed_cuda_complex_payload_costs_the_same_device_calls_as_f64() {
+        let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+        let provider = Arc::new(U1FusionRule);
+        let leg = GradedSpace::try_new_with_arc(
+            Arc::clone(&provider),
+            [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
+        )
+        .unwrap();
+        let real: TensorMap<_, f64> =
+            TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+                indices.iter().sum::<usize>() as f64 + 1.0
+            })
+            .unwrap();
+        let complex: TensorMap<_, Complex64> =
+            TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+                let ramp = indices.iter().sum::<usize>() as f64;
+                Complex64::new(ramp + 1.0, -(ramp + 1.75))
+            })
+            .unwrap();
+
+        fn observe<T>(run: impl FnOnce() -> T) -> ((usize, usize, usize), (usize, usize, usize)) {
+            CUDA_ARITHMETIC_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0))));
+            CUDA_REDUCTION_BUFFER_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0))));
+            drop(run());
+            let arithmetic = CUDA_ARITHMETIC_OBSERVATION.with(|observation| {
+                let observed = observation.get().unwrap();
+                observation.set(None);
+                observed
+            });
+            let reduction = CUDA_REDUCTION_BUFFER_OBSERVATION.with(|observation| {
+                let observed = observation.get().unwrap();
+                observation.set(None);
+                observed
+            });
+            (arithmetic, reduction)
+        }
+
+        let real_device = real.to_cuda().unwrap();
+        let complex_device = complex.to_cuda().unwrap();
+        assert_eq!(
+            observe(|| real_device.scale(-2.0).unwrap()),
+            observe(|| complex_device.scale(Complex64::new(-2.0, 0.5)).unwrap())
+        );
+        assert_eq!(
+            observe(|| real_device.add(&real_device, 2.0, -3.0).unwrap()),
+            observe(|| complex_device
+                .add(
+                    &complex_device,
+                    Complex64::new(2.0, 1.0),
+                    Complex64::new(-3.0, 0.25),
+                )
+                .unwrap())
+        );
+        assert_eq!(
+            observe(|| real_device.zeros_like().unwrap()),
+            observe(|| complex_device.zeros_like().unwrap())
+        );
+        assert_eq!(
+            observe(|| real_device.normalize().unwrap()),
+            observe(|| complex_device.normalize().unwrap())
+        );
+        assert_eq!(
+            observe(|| real_device.inner(&real_device).unwrap()),
+            observe(|| complex_device.inner(&complex_device).unwrap())
+        );
+        // Contraction allocates its destination and runs its kernels inside
+        // the replay seam, which has no arithmetic/reduction hooks: both
+        // dtypes must leave those counters untouched rather than falling back
+        // to the axpby or reduction paths.
+        let untouched = ((0, 0, 0), (0, 0, 0));
+        assert_eq!(
+            observe(|| real_device
+                .contract(&real_device, &[1], &[0], &[0, 1])
+                .unwrap()),
+            untouched
+        );
+        assert_eq!(
+            observe(|| complex_device
+                .contract(&complex_device, &[1], &[0], &[0, 1])
+                .unwrap()),
+            untouched
+        );
     }
 
     #[cfg(feature = "cuda")]

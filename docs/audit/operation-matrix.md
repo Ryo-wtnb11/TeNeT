@@ -115,24 +115,27 @@ trivial/dense provider exists.
 
 | Capability | Host MF `Vec<D>` | Host checked Generic `Vec<D>` | other Host-readable `S` | CUDA f64 MF | CUDA f64 checked Generic | CUDA c64 |
 |---|---|---|---|---|---|---|
-| Metadata, provider ownership, handle clone | PROVED | PROVED | PROVED | PROVED | PROVED | UNSUPPORTED |
+| Metadata, provider ownership, handle clone | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED |
 | Stable `data() -> &[D]` | PROVED | PROVED | INTENTIONAL-DIFFERENCE | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
 | Physical expansion/projection [2] | PROVED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
-| Explicit Host/device transfer | PROVED | PROVED | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/3) | PROVED | PROVED | UNSUPPORTED |
-| Lazy adjoint | PROVED | PROVED | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/3) | PROVED | UNSUPPORTED | UNSUPPORTED |
+| Explicit Host/device transfer | PROVED | PROVED | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/3) | PROVED | PROVED | PROVED |
+| Lazy adjoint | PROVED | PROVED | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/3) | PROVED | UNSUPPORTED | PROVED |
 | Permute/braid/recoupling | PROVED | PROVED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
-| Canonical contraction/compose | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | UNSUPPORTED |
-| Arithmetic/reductions | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | UNSUPPORTED |
-| QR/SVD/EIGH | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | UNSUPPORTED |
+| Canonical contraction/compose | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | PROVED |
+| Arithmetic/reductions | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | PROVED |
+| QR/SVD/EIGH | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | [UNSUPPORTED](https://github.com/Ryo-wtnb11/TeNeT/issues/1268) |
 | EIG/null/polar/solve/matrix functions | PROVED | PROVED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
-| Network ordinary replay | PROVED | PROVED | INTENTIONAL-DIFFERENCE | PROVED | UNSUPPORTED | UNSUPPORTED |
+| Network ordinary replay | PROVED | PROVED | INTENTIONAL-DIFFERENCE | PROVED | UNSUPPORTED | PROVED |
 | v1 typed snapshot (`f64`/`Complex64`) [7] | PROVED | PROVED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
 
 The two storage `NEEDS-PROOF` cells describe future storage implementations,
 not provider conformance. Host/device checked-Generic parity belongs to
 [#3](https://github.com/Ryo-wtnb11/TeNeT/issues/3). CUDA `PROVED` means a
 real-device test exists and is ignored without CUDA; default CI is not claimed
-to run it. Release/feature topology remains [#129](https://github.com/Ryo-wtnb11/TeNeT/issues/129).
+to run it. The CUDA c64 column is the `Complex64` device payload of
+[#1268](https://github.com/Ryo-wtnb11/TeNeT/issues/1268): device
+factorizations (positive-diagonal gauge, Hermitian residual, selector dtype)
+stay `f64`-only and are a separate leaf. Release/feature topology remains [#129](https://github.com/Ryo-wtnb11/TeNeT/issues/129).
 
 Standalone checked-Generic compact construction is `PROVED` by
 [#1004](https://github.com/Ryo-wtnb11/TeNeT/issues/1004). Compact diagonal
@@ -150,7 +153,7 @@ its diagonal factor densely.
 | Decompositions/matrix functions | Factor-space admission and sector matricization | Request-local dense calls; publish all factors only after successful staging |
 | Left/right solve | Receiver-owned output HomSpace and exact receiver provider `Arc` | One sector solve per populated block; direct/lazy work remains operation-local |
 | Network | `Network::plan` plus runtime plan cache | Each step calls ordinary typed contraction/permutation; bounded workspace reuse |
-| CUDA | MF-only typed device impl | Explicit transfer/device kernels; unsupported scopes reject before publication |
+| CUDA | MF-only typed device impl, payload `f64`/`Complex64` | Explicit transfer/device kernels; conjugation is a GEMM operand flag; unsupported scopes reject before publication |
 
 Key source anchors at the pinned revision:
 
@@ -212,7 +215,7 @@ ownership/cache audit is #783.
   allocation contracts.
 - `tenet/tests/typed_cuda_transfer.rs` and
   `tenet-network/tests/typed_cuda_network.rs`: real-device MF transfer,
-  operation and canonical-network gates.
+  operation and canonical-network gates, for both device payload dtypes.
 - `tenet/tests/physical_dense.rs`: U(1)/SU(2) Host physical expansion and
   projection, real and complex SU(2) round trips, and an independent
   TensorKit SU(2) coefficient oracle.
