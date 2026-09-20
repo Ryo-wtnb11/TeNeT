@@ -1565,7 +1565,9 @@ where
             .legs()
             .iter()
             .chain(source_space.homspace().domain().legs());
-        for ((destination_leg, source_leg), range) in destination_legs.zip(source_legs).zip(ranges)
+        let mut sliced = Vec::new();
+        for (axis, ((destination_leg, source_leg), range)) in
+            destination_legs.zip(source_legs).zip(ranges).enumerate()
         {
             match range {
                 None if source_leg == destination_leg => {}
@@ -1592,8 +1594,16 @@ where
                                 .to_string(),
                         ));
                     }
+                    sliced.push((axis, [(sector, range.clone())]));
                 }
             }
+        }
+        // The sliced source leg carries exactly one sector (checked above), so
+        // each restricted axis needs a single-entry table; the kernel reads the
+        // sector back from each source block's own key.
+        let mut scatter_ranges: Vec<tenet_tensors::SectorRangeTable<'_>> = vec![None; ranges.len()];
+        for (axis, table) in &sliced {
+            scatter_ranges[*axis] = Some(table.as_slice());
         }
         let source_is_dense = match &source.repr {
             TypedTensorRepr::Owned(body) => matches!(body.data.as_ref(), TypedData::Dense(_)),
@@ -1632,7 +1642,7 @@ where
             source_structure,
             source_operand,
             source_data,
-            ranges,
+            &scatter_ranges,
         )
         .map_err(Error::from)
     }
@@ -8290,6 +8300,181 @@ impl<R> GradedSpace<R> {
     }
 }
 
+/// A subspace of one graded leg, given as a half-open degeneracy range per
+/// sector.
+///
+/// For a leg `V = ⊕_c ℂ^{n_c} ⊗ R_c`, a selection `σ = { c ↦ [a_c, b_c) }`
+/// names the subspace `W = ⊕_{c ∈ σ} ℂ^{b_c − a_c} ⊗ R_c` and the inclusion
+/// isometry `ι_σ : W → V`, which is the identity on every irrep and a
+/// coordinate inclusion on the degeneracy spaces. Ranges therefore never cut
+/// into a multiplet: for a non-Abelian sector they select whole copies of
+/// `R_c`, exactly as TensorKit's `dim(V, c)` counts degeneracy and its
+/// truncation keeps or drops whole multiplets.
+///
+/// Sectors are named in the leg's **own** labels, as [`GradedSpace::sectors`]
+/// reports them. For a dual leg those are already the dualised labels; a
+/// caller never dualises a label itself.
+///
+/// A selection is validated once, against its parent leg, and then reused:
+/// [`TensorMap::restrict_leg`] requires the tensor's leg to equal
+/// [`Self::parent`], [`TensorMap::embed_leg`] requires it to equal
+/// [`Self::subspace`].
+///
+/// # TensorKit correspondence
+///
+/// TensorKit has no per-leg selection primitive. Its production route for a
+/// bond is `truncate_domain!`/`truncate_codomain!` with per-sector index
+/// selectors (`src/factorizations/truncation.jl`); for an arbitrary leg it is
+/// a contraction with `isometry(W ← V)`, which realises only leading-index
+/// selections. General offsets and dual legs have no direct counterpart there.
+pub struct LegSelection<R> {
+    parent: GradedSpace<R>,
+    subspace: GradedSpace<R>,
+    // Sorted by `SectorId`, parallel to `subspace`'s stored sectors: the
+    // kernels look the start up by the id they read from a block's own key.
+    entries: Vec<(SectorId, std::ops::Range<usize>)>,
+}
+
+// Why hand-written: both fields clone through an `Arc`, exactly as
+// `GradedSpace` does, so the derive's `R: Clone` bound would be a provider
+// requirement that nothing here actually needs.
+impl<R> Clone for LegSelection<R> {
+    fn clone(&self) -> Self {
+        Self {
+            parent: self.parent.clone(),
+            subspace: self.subspace.clone(),
+            entries: self.entries.clone(),
+        }
+    }
+}
+
+impl<R> core::fmt::Debug for LegSelection<R> {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("LegSelection")
+            .field("parent", &self.parent)
+            .field("entries", &self.entries)
+            .finish()
+    }
+}
+
+impl<R> LegSelection<R>
+where
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorModeDispatch<R>,
+{
+    /// Validates `pairs` against `parent` and records the resulting subspace.
+    ///
+    /// Input order does not matter; entries are stored in the provider's
+    /// [`tenet_core::SectorId`] order, as the leg itself stores them.
+    ///
+    /// # Complexity
+    ///
+    /// `O(k log k)` for `k` pairs; no payload is touched.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidArgument`] when `pairs` is empty, a label is
+    /// repeated, two labels encode to the same id, a range is empty or
+    /// reversed, a sector is absent from `parent`, or a range exceeds that
+    /// sector's degeneracy.
+    pub fn try_new<Pairs>(
+        parent: &GradedSpace<R>,
+        pairs: Pairs,
+    ) -> Result<Self, TypedFacadeError<R>>
+    where
+        Pairs: IntoIterator<Item = (R::Sector, std::ops::Range<usize>)>,
+    {
+        let pairs: Vec<(R::Sector, std::ops::Range<usize>)> = pairs.into_iter().collect();
+        if pairs.is_empty() {
+            return Err(Error::InvalidArgument(
+                "leg selection must name at least one sector".to_string(),
+            )
+            .into());
+        }
+        // Diagnose duplicates on the label, not on the encoded id: the leg can
+        // only ever name a `SectorId`, which would not tell a caller's repeat
+        // apart from a codec that aliases two labels onto one id.
+        let mut sorted: Vec<&R::Sector> = pairs.iter().map(|(label, _)| label).collect();
+        sorted.sort_unstable();
+        if let Some(window) = sorted.windows(2).find(|window| window[0] == window[1]) {
+            return Err(Error::InvalidArgument(format!(
+                "sector label {:?} is selected more than once",
+                window[0]
+            ))
+            .into());
+        }
+
+        let mut entries = Vec::with_capacity(pairs.len());
+        for (label, range) in &pairs {
+            if range.start >= range.end {
+                return Err(Error::InvalidArgument(format!(
+                    "leg selection for sector {label:?} must be nonempty, got [{}, {})",
+                    range.start, range.end
+                ))
+                .into());
+            }
+            let id = TypedSectorAdmission::try_encode_label(parent.provider(), label)
+                .map_err(<R::Mode as TypedTensorModeDispatch<R>>::map_provider_error)?;
+            let degeneracy = parent.leg().degeneracy(id).ok_or_else(|| {
+                TypedFacadeError::<R>::from(Error::InvalidArgument(format!(
+                    "sector {label:?} is absent from the selected leg"
+                )))
+            })?;
+            if range.end > degeneracy {
+                return Err(Error::InvalidArgument(format!(
+                    "leg selection [{}, {}) for sector {label:?} exceeds its degeneracy {degeneracy}",
+                    range.start, range.end
+                ))
+                .into());
+            }
+            entries.push((id, range.clone()));
+        }
+        entries.sort_unstable_by_key(|(id, _)| *id);
+        if let Some(window) = entries.windows(2).find(|window| window[0].0 == window[1].0) {
+            return Err(Error::InvalidArgument(format!(
+                "SectorCodec law violation: two selected labels both encode to {:?}",
+                window[0].0
+            ))
+            .into());
+        }
+
+        // The subspace is built on the parent's own dual flag and stored ids:
+        // going through `GradedSpace::try_new` + `try_dual` would dualise the
+        // labels and name a different leg.
+        let leg = SectorLeg::try_new(
+            entries
+                .iter()
+                .map(|(id, range)| (*id, range.end - range.start)),
+            parent.is_dual(),
+        )
+        .map_err(|error| TypedFacadeError::<R>::from(Error::InvalidArgument(error.to_string())))?;
+        Ok(Self {
+            parent: parent.clone(),
+            subspace: GradedSpace {
+                provider: Arc::clone(parent.provider_arc()),
+                leg,
+            },
+            entries,
+        })
+    }
+}
+
+impl<R> LegSelection<R> {
+    /// The leg this selection was validated against.
+    #[inline]
+    pub fn parent(&self) -> &GradedSpace<R> {
+        &self.parent
+    }
+
+    /// The selected subspace: the selected sectors with degeneracy
+    /// `end − start`, the parent's dual flag, and the parent's provider.
+    #[inline]
+    pub fn subspace(&self) -> &GradedSpace<R> {
+        &self.subspace
+    }
+}
+
 /// The provider-labelled identity of one stored block: the fusion tree on each
 /// side of the tensor map, decoded through the codec — the labelled
 /// counterpart of [`tenet_core::FusionTreePairKey`], named after TensorKit's
@@ -12100,6 +12285,220 @@ where
         }
     }
 
+    /// Checks that this tensor can have leg `axis` exchanged for `expected`.
+    fn require_selected_leg(
+        &self,
+        axis: usize,
+        expected: &GradedSpace<R>,
+        operation: &str,
+    ) -> Result<(), TypedFacadeError<R>>
+    where
+        R: TypedSectorAdmission,
+        R::Mode: TypedTensorModeDispatch<R>,
+    {
+        if self.network_has_compact_payload() {
+            return Err(Error::InvalidArgument(format!(
+                "{operation} requires a dense Host payload"
+            ))
+            .into());
+        }
+        let rank = self.rank();
+        if axis >= rank {
+            return Err(Error::InvalidArgument(format!(
+                "{operation}: axis {axis} is out of range for rank {rank}"
+            ))
+            .into());
+        }
+        if TypedSectorAdmission::typed_rule_identity(self.provider())
+            != TypedSectorAdmission::typed_rule_identity(expected.provider())
+        {
+            return Err(Error::RuleMismatch.into());
+        }
+        let codomain_rank = self.codomain_rank();
+        let homspace = self.logical_space().space().homspace();
+        let leg = if axis < codomain_rank {
+            &homspace.codomain().legs()[axis]
+        } else {
+            &homspace.domain().legs()[axis - codomain_rank]
+        };
+        if leg != expected.leg() {
+            return Err(Error::InvalidArgument(format!(
+                "{operation}: axis {axis} is not the leg this selection was built from"
+            ))
+            .into());
+        }
+        Ok(())
+    }
+
+    /// This tensor's hom-space with leg `axis` replaced, built into a root
+    /// layout of the same provider.
+    fn root_with_replaced_leg(
+        &self,
+        axis: usize,
+        replacement: &SectorLeg,
+    ) -> Result<BoundDynamicFusionMapSpace<R>, TypedFacadeError<R>>
+    where
+        R: TypedSectorAdmission,
+        R::Mode: TypedTensorRootDispatch<R>,
+    {
+        let homspace = self.logical_space().space().homspace();
+        let codomain_rank = homspace.codomain().len();
+        let replaced = |product: &FusionProductSpace, base: usize| {
+            FusionProductSpace::new(
+                product
+                    .legs()
+                    .iter()
+                    .enumerate()
+                    .map(|(offset, leg)| {
+                        if base + offset == axis {
+                            replacement.clone()
+                        } else {
+                            leg.clone()
+                        }
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let homspace = FusionTreeHomSpace::new(
+            replaced(homspace.codomain(), 0),
+            replaced(homspace.domain(), codomain_rank),
+        );
+        <R::Mode as TypedTensorRootDispatch<R>>::build_root(
+            Arc::clone(self.logical_space().provider_arc()),
+            homspace,
+        )
+    }
+
+    /// Restricts leg `axis` to the subspace named by `selection`.
+    ///
+    /// This is composition with the inclusion isometry `ι_σ` of
+    /// [`LegSelection`] on that leg — `ι_σ^† ∘ t` for a codomain leg, `t ∘ ι_σ`
+    /// for a domain leg. The tensor stays invariant, the leg keeps its dual
+    /// flag, and every surviving fusion tree keeps its inner lines and
+    /// vertices: `ι_σ` is the identity on irreps, so no structural
+    /// coefficient, braid or fermionic sign enters. Selecting a single
+    /// degeneracy index of sector `q` leaves a leg equal to the one-dimensional
+    /// space of `q`, so the charge stays explicit on the leg.
+    ///
+    /// [`Self::embed_leg`] is the adjoint: `restrict_leg` after `embed_leg` is
+    /// the identity, `embed_leg` after `restrict_leg` is the orthogonal
+    /// projector onto the subspace.
+    ///
+    /// # Cost
+    ///
+    /// One strided copy per block, `O(selected payload)` data movement, no
+    /// matrix multiplication and no recoupling. One payload allocation plus
+    /// `O(rank + blocks)` structural work, independent of the degeneracy
+    /// dimensions. (TensorKit pays a contraction with an explicit isometry
+    /// tensor instead; TeNeT addresses the degeneracy axis inside each reduced
+    /// block directly.)
+    ///
+    /// Defined for Host payloads: device storage has no such method, so an
+    /// unsupported placement is a compile-time absence rather than a runtime
+    /// error.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidArgument`] when the payload is a compact
+    /// diagonal one, `axis` is out of range, or `axis` is not the leg
+    /// `selection` was built from, and [`Error::RuleMismatch`] when the
+    /// selection belongs to a different rule. Nothing is allocated before
+    /// every check has passed.
+    pub fn restrict_leg(
+        &self,
+        axis: usize,
+        selection: &LegSelection<R>,
+    ) -> Result<Self, TypedFacadeError<R>>
+    where
+        R: TypedSectorAdmission,
+        R::Mode: TypedTensorRootDispatch<R>,
+    {
+        self.require_selected_leg(axis, selection.parent(), "restrict_leg")?;
+        let destination = self.root_with_replaced_leg(axis, selection.subspace().leg())?;
+        let len = destination
+            .space()
+            .required_len()
+            .map_err(Error::from)
+            .map_err(TypedFacadeError::<R>::from)?;
+        let mut data = tenet_tensors::zeroed_payload::<D>(len);
+        let table: Vec<(SectorId, usize)> = selection
+            .entries
+            .iter()
+            .map(|(sector, range)| (*sector, range.start))
+            .collect();
+        let mut starts: Vec<tenet_tensors::SectorStartTable<'_>> = vec![None; self.rank()];
+        starts[axis] = Some(table.as_slice());
+        let (source, source_data) = self.fusion_operand_and_data();
+        tenet_tensors::oriented_fusion_restrict_into(
+            destination.space().structure(),
+            &mut data,
+            source,
+            source_data,
+            &starts,
+        )
+        .map_err(Error::from)?;
+        Ok(Self {
+            runtime: self.runtime.clone(),
+            repr: owned_repr(TypedTensorBody::dense(destination, data)),
+        })
+    }
+
+    /// Embeds leg `axis` back into the parent leg of `selection`, zero-padding
+    /// the degeneracy indices the selection does not name.
+    ///
+    /// This is the adjoint of [`Self::restrict_leg`]: composition with `ι_σ`
+    /// on a codomain leg and with `ι_σ^†` on a domain leg. The receiver's leg
+    /// `axis` must equal [`LegSelection::subspace`]; the result carries
+    /// [`LegSelection::parent`] on that axis. No target space is passed
+    /// separately — the selection already owns both legs, so they cannot
+    /// disagree.
+    ///
+    /// # Cost
+    ///
+    /// `O(source payload)` data movement into an allocator-zeroed output of
+    /// `O(destination payload)`, no matrix multiplication and no recoupling.
+    ///
+    /// Defined for Host payloads only, as [`Self::restrict_leg`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::restrict_leg`], with `axis` checked against
+    /// [`LegSelection::subspace`]. Every block is preflighted before the first
+    /// destination element is written.
+    pub fn embed_leg(
+        &self,
+        axis: usize,
+        selection: &LegSelection<R>,
+    ) -> Result<Self, TypedFacadeError<R>>
+    where
+        R: TypedSectorAdmission,
+        R::Mode: TypedTensorRootDispatch<R>,
+    {
+        self.require_selected_leg(axis, selection.subspace(), "embed_leg")?;
+        let destination = self.root_with_replaced_leg(axis, selection.parent().leg())?;
+        let len = destination
+            .space()
+            .required_len()
+            .map_err(Error::from)
+            .map_err(TypedFacadeError::<R>::from)?;
+        let mut data = tenet_tensors::zeroed_payload::<D>(len);
+        let mut ranges: Vec<tenet_tensors::SectorRangeTable<'_>> = vec![None; self.rank()];
+        ranges[axis] = Some(selection.entries.as_slice());
+        let (source, source_data) = self.fusion_operand_and_data();
+        tenet_tensors::fusion_scatter_add_assign(
+            destination.space().structure(),
+            &mut data,
+            self.logical_space().space().structure(),
+            source,
+            source_data,
+            &ranges,
+        )
+        .map_err(Error::from)?;
+        Ok(Self {
+            runtime: self.runtime.clone(),
+            repr: owned_repr(TypedTensorBody::dense(destination, data)),
+        })
+    }
     /// Restricts tensor-local logical degeneracy coordinates for network
     /// slicing without exposing provider allocation or storage orientation.
     ///
@@ -12244,10 +12643,17 @@ where
             .required_len()
             .map_err(Error::from)
             .map_err(TypedFacadeError::<R>::from)?;
-        let mut data = vec![D::from_real(0.0); len];
-        let mut starts = vec![0; rank];
-        for &(axis, _, start, _) in &staged {
-            starts[axis] = start;
+        let mut data = tenet_tensors::zeroed_payload::<D>(len);
+        // One single-entry table per restricted axis: this path always names
+        // exactly one sector per axis, and the kernel reads the sector back
+        // from each destination block's own key.
+        let tables: Vec<[(SectorId, usize); 1]> = staged
+            .iter()
+            .map(|&(_, sector, start, _)| [(sector, start)])
+            .collect();
+        let mut starts: Vec<tenet_tensors::SectorStartTable<'_>> = vec![None; rank];
+        for (table, &(axis, ..)) in tables.iter().zip(&staged) {
+            starts[axis] = Some(table.as_slice());
         }
         let (source, source_data) = self.fusion_operand_and_data();
         tenet_tensors::oriented_fusion_restrict_into(
@@ -18068,6 +18474,65 @@ mod representation_gates {
             .unwrap();
         assert_eq!(restricted.data(), &[11.0, 21.0, 12.0, 22.0]);
         assert_eq!(materialized_adjoint_builds(&lazy), 0);
+    }
+
+    #[test]
+    fn network_degeneracy_restriction_keeps_its_validation_order_after_the_shared_kernel() {
+        // The shared per-sector kernel must not move any of this path's own
+        // checks: axis/duplicate, then empty range, then sector presence, then
+        // the degeneracy bound, all before a destination exists.
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let provider = Arc::new(U1FusionRule);
+        let zero = U1Irrep::new(0);
+        let leg = GradedSpace::try_new_with_arc(Arc::clone(&provider), [(zero, 3)]).unwrap();
+        let source: TensorMap<_, f64> =
+            TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| indices[0] as f64)
+                .unwrap();
+        let zero_id = TypedSectorAdmission::try_encode_label(provider.as_ref(), &zero).unwrap();
+        let absent_id =
+            TypedSectorAdmission::try_encode_label(provider.as_ref(), &U1Irrep::new(4)).unwrap();
+        let message = |restrictions: &[NetworkDegeneracyRestriction]| {
+            let Err(error) = source.network_restrict_degeneracies(false, restrictions) else {
+                panic!("request must be rejected");
+            };
+            error.to_string()
+        };
+        let restriction = |effective_axis, authority_sector, range: std::ops::Range<usize>| {
+            NetworkDegeneracyRestriction {
+                effective_axis,
+                authority_sector,
+                range,
+                partner: false,
+            }
+        };
+
+        // Out-of-range axis outranks an empty range and an absent sector.
+        assert!(message(&[restriction(2, absent_id, 1..1)])
+            .contains("invalid or duplicate effective restriction axis"));
+        // A duplicate axis outranks everything that follows it.
+        assert!(
+            message(&[restriction(0, zero_id, 0..1), restriction(0, zero_id, 0..1)])
+                .contains("invalid or duplicate effective restriction axis")
+        );
+        // An empty range outranks an absent sector.
+        assert!(message(&[restriction(0, absent_id, 1..1)]).contains("must be nonempty"));
+        // An absent sector outranks the degeneracy bound.
+        assert!(
+            message(&[restriction(0, absent_id, 0..9)]).contains("is absent from effective axis")
+        );
+        assert!(message(&[restriction(0, zero_id, 0..9)]).contains("exceeds axis"));
+        // The tensor itself is untouched and a valid request still works.
+        assert_eq!(
+            source.data(),
+            &[0.0, 1.0, 2.0, 0.0, 1.0, 2.0, 0.0, 1.0, 2.0]
+        );
+        assert_eq!(
+            source
+                .network_restrict_degeneracies(false, &[restriction(0, zero_id, 1..3)])
+                .unwrap()
+                .data(),
+            &[1.0, 2.0, 1.0, 2.0, 1.0, 2.0]
+        );
     }
 
     #[test]

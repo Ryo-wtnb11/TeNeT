@@ -1,7 +1,7 @@
 use core::ops::{Add, Mul, Range};
 
 use num_traits::{One, Zero};
-use tenet_core::{BlockKey, BlockStructure, SectorId};
+use tenet_core::{BlockKey, BlockStructure, FusionTreePairKey, SectorId};
 use tenet_operations::{
     bilinear_raw_strided_kernel_mapped, tensoradd_raw_strided_kernel_mapped, ConjugateValue,
     OperationError,
@@ -59,15 +59,63 @@ pub fn validate_oriented_fusion_layout(
     Ok(())
 }
 
-/// Copies one logical degeneracy rectangle from an owned or lazy-adjoint
-/// fusion tensor into a compact destination.
+/// The uncoupled sector a fusion-tree pair key carries on one logical axis.
+///
+/// Codomain axes index the codomain tree, the remaining axes the domain tree,
+/// which is the same split the block shape uses.
+fn logical_axis_sector(key: &FusionTreePairKey, axis: usize) -> Result<SectorId, OperationError> {
+    let codomain = key.codomain_uncoupled();
+    if let Some(&sector) = codomain.get(axis) {
+        return Ok(sector);
+    }
+    key.domain_uncoupled()
+        .get(axis - codomain.len())
+        .copied()
+        .ok_or(OperationError::StructureMismatch {
+            tensor: "oriented elementwise axis sector",
+        })
+}
+
+/// Looks a block's sector up in a per-axis selection table.
+///
+/// Tables are sorted by [`SectorId`]; an unsorted table can only make this
+/// miss, which every caller turns into `StructureMismatch`, never into a
+/// different sector's entry.
+fn selected_for_sector<T>(table: &[(SectorId, T)], sector: SectorId) -> Option<&T> {
+    table
+        .binary_search_by_key(&sector, |(candidate, _)| *candidate)
+        .ok()
+        .map(|index| &table[index].1)
+}
+
+/// One axis' destination ranges in a scatter, keyed by the sector the block
+/// carries on that axis, or `None` when the axis is not sliced.
+#[doc(hidden)]
+pub type SectorRangeTable<'a> = Option<&'a [(SectorId, Range<usize>)]>;
+
+/// One axis' source starts in a restriction, keyed by the sector the
+/// destination block carries on that axis, or `None` for a start of zero.
+#[doc(hidden)]
+pub type SectorStartTable<'a> = Option<&'a [(SectorId, usize)]>;
+
+/// Copies one logical degeneracy rectangle per block from an owned or
+/// lazy-adjoint fusion tensor into a compact destination.
+///
+/// `logical_starts` holds one entry per logical axis: `None` starts that axis
+/// at zero for every sector, `Some(table)` gives the start per uncoupled
+/// sector of the destination block's own key, sorted by [`SectorId`]. A block
+/// whose sector is absent from a `Some` table is a `StructureMismatch` rather
+/// than an implicit zero start, so a caller that forgot a sector cannot get a
+/// silently misaligned copy. The extent always comes from the destination
+/// block's own shape, and `start + destination extent <= source extent` is
+/// checked per block and axis.
 #[doc(hidden)]
 pub fn oriented_fusion_restrict_into<D>(
     destination: &BlockStructure,
     destination_data: &mut [D],
     source: FusionOperand<'_>,
     source_data: &[D],
-    logical_starts: &[usize],
+    logical_starts: &[SectorStartTable<'_>],
 ) -> Result<(), OperationError>
 where
     D: Copy
@@ -107,7 +155,14 @@ where
                 .map_err(|_| OperationError::ElementCountOverflow)
         };
         let mut source_offset = source_block.offset();
-        for (axis, &logical_start) in logical_starts.iter().take(destination.rank()).enumerate() {
+        for (axis, table) in logical_starts.iter().take(destination.rank()).enumerate() {
+            let logical_start = match table {
+                None => 0,
+                Some(table) => *selected_for_sector(table, logical_axis_sector(logical_key, axis)?)
+                    .ok_or(OperationError::StructureMismatch {
+                        tensor: "oriented degeneracy restriction sector",
+                    })?,
+            };
             let storage_axis = source.storage_axis(axis)?;
             let source_extent = source_block.shape()[storage_axis];
             let end = logical_start
@@ -192,6 +247,12 @@ fn preflight_scatter_bounds(
 ///
 /// All keys, ranks, shapes, ranges, strides, offsets, and storage bounds are
 /// preflighted for every block before the first destination element is changed.
+///
+/// `ranges` holds one entry per logical axis: `None` requires the source and
+/// destination extents to be equal, `Some(table)` gives the destination range
+/// per uncoupled sector of the source block's own key, sorted by [`SectorId`].
+/// A block whose sector is absent from a `Some` table is a preflight
+/// `StructureMismatch`. Accumulation is `beta = 1`.
 #[doc(hidden)]
 pub fn fusion_scatter_add_assign<D>(
     destination: &BlockStructure,
@@ -199,7 +260,7 @@ pub fn fusion_scatter_add_assign<D>(
     logical_source: &BlockStructure,
     source: FusionOperand<'_>,
     source_data: &[D],
-    ranges: &[Option<Range<usize>>],
+    ranges: &[SectorRangeTable<'_>],
 ) -> Result<(), OperationError>
 where
     D: Copy
@@ -247,9 +308,19 @@ where
             });
         }
         let mut destination_offset = destination_block.offset();
-        for (axis, range) in ranges.iter().enumerate() {
+        for (axis, table) in ranges.iter().enumerate() {
             let source_extent = logical_block.shape()[axis];
             let destination_extent = destination_block.shape()[axis];
+            let range = match table {
+                None => None,
+                Some(table) => Some(
+                    selected_for_sector(table, logical_axis_sector(logical_key, axis)?).ok_or(
+                        OperationError::StructureMismatch {
+                            tensor: "fusion scatter sliced sector",
+                        },
+                    )?,
+                ),
+            };
             let start = match range {
                 None if source_extent == destination_extent => 0,
                 None => {
@@ -589,6 +660,12 @@ mod tests {
         (logical, padded, direct, parent)
     }
 
+    /// Both Z2 sectors sliced to the same destination range, sorted by id, as
+    /// every scatter caller passes it.
+    fn sliced_both_sectors() -> [(SectorId, Range<usize>); 2] {
+        [(SectorId::new(0), 1..2), (SectorId::new(1), 1..2)]
+    }
+
     fn two_key_destination() -> BlockStructure {
         let rule = Z2FusionRule;
         let even = SectorId::new(0);
@@ -675,7 +752,7 @@ mod tests {
             source.structure(),
             FusionOperand::direct(&source),
             &[1.0, 2.0, 3.0, 4.0],
-            &[Some(1..2), None],
+            &[Some(&sliced_both_sectors()[..]), None],
         )
         .unwrap();
         assert_eq!(
@@ -697,11 +774,50 @@ mod tests {
                 source.structure(),
                 FusionOperand::direct(&source),
                 &[1.0; 6],
-                &[Some(1..2), None],
+                &[Some(&sliced_both_sectors()[..]), None],
             ),
             Err(OperationError::StructureMismatch { .. })
         ));
         assert_eq!(output, before);
+    }
+
+    #[test]
+    fn per_sector_tables_reject_a_missing_sector_instead_of_starting_at_zero() {
+        // A table that names only one of the two Z2 sectors must not let the
+        // other block through with an implicit start of 0.
+        let destination = two_key_destination();
+        let source = source_with_shapes(&destination, &[vec![1, 2], vec![1, 2]]);
+        let mut output = vec![7.0; destination.required_len().unwrap()];
+        let before = output.clone();
+        assert!(matches!(
+            fusion_scatter_add_assign(
+                &destination,
+                &mut output,
+                source.structure(),
+                FusionOperand::direct(&source),
+                &[1.0, 2.0, 3.0, 4.0],
+                &[Some(&[(SectorId::new(0), 1..2)][..]), None],
+            ),
+            Err(OperationError::StructureMismatch { .. })
+        ));
+        assert_eq!(output, before);
+
+        let mut restricted = vec![0.0; source.required_len().unwrap()];
+        assert!(matches!(
+            oriented_fusion_restrict_into(
+                source.structure(),
+                &mut restricted,
+                FusionOperand::direct(&destination_operand()),
+                &[0.0; 12],
+                &[Some(&[(SectorId::new(0), 1)][..]), None],
+            ),
+            Err(OperationError::StructureMismatch { .. })
+        ));
+    }
+
+    /// The full two-sector space, read as a restriction source.
+    fn destination_operand() -> crate::DynamicFusionMapSpace {
+        bind_source(two_key_destination(), &[vec![3, 2], vec![3, 2]])
     }
 
     #[test]
@@ -728,7 +844,7 @@ mod tests {
                 source.structure(),
                 FusionOperand::direct(&source),
                 &[1.0, 2.0, 3.0, 4.0],
-                &[Some(1..2), None],
+                &[Some(&sliced_both_sectors()[..]), None],
             ),
             Err(OperationError::StrideOverflow { value: usize::MAX })
         ));

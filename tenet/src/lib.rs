@@ -83,8 +83,8 @@ pub mod prelude {
     pub use crate::typed::{
         CheckedGenericEigTrunc, CheckedGenericEighTrunc, DecodeError, DecodeLimits, EigTrunc,
         EighTrunc, EncodeError, GenericTensorError, GenericUnitTensorMapExt, GradedSpace,
-        PhysicalDense, PhysicalDenseError, SectorSpectrum, SvdTrunc, TensorMap, TensorScalar,
-        TypedPersistenceCodec,
+        LegSelection, PhysicalDense, PhysicalDenseError, SectorSpectrum, SvdTrunc, TensorMap,
+        TensorScalar, TypedPersistenceCodec,
     };
     pub use num_complex::Complex64;
     #[allow(deprecated)]
