@@ -39,6 +39,8 @@ pub trait TestScalar: Copy + std::fmt::Debug + PartialEq + 'static {
     }
     fn scale(self, factor: f64) -> Self;
     fn add(self, other: Self) -> Self;
+    /// Payload multiplication, for the caller scale `alpha`.
+    fn mul(self, other: Self) -> Self;
     fn conjugate(self) -> Self;
     fn distance(self, other: Self) -> f64;
     /// Deterministic, non-degenerate sample for buffer index `index`.
@@ -61,6 +63,10 @@ impl TestScalar for f64 {
 
     fn add(self, other: Self) -> Self {
         self + other
+    }
+
+    fn mul(self, other: Self) -> Self {
+        self * other
     }
 
     fn conjugate(self) -> Self {
@@ -89,6 +95,10 @@ impl TestScalar for Complex64 {
 
     fn add(self, other: Self) -> Self {
         self + other
+    }
+
+    fn mul(self, other: Self) -> Self {
+        self * other
     }
 
     fn conjugate(self) -> Self {
@@ -519,6 +529,37 @@ pub fn expected<T: TestScalar>(
     destination: &[T],
     overwrite: bool,
 ) -> Vec<T> {
+    expected_scaled(
+        fixture,
+        source,
+        destination,
+        overwrite,
+        T::from_parts(1.0, 0.0),
+    )
+}
+
+/// The caller scales the executors must reproduce.
+pub fn alphas<T: TestScalar>() -> Vec<T> {
+    vec![
+        T::from_parts(1.0, 0.0),
+        T::from_parts(-2.5, 0.0),
+        T::from_parts(0.0, 0.0),
+        T::from_parts(-0.0, -0.0),
+        T::from_parts(0.5, -1.25),
+    ]
+}
+
+/// [`expected`] with the caller scale `alpha`, applied where the host applies
+/// it: `(alpha * coefficient) * src` per Single block and `alpha * (U x)` per
+/// Multi block — never inside the recoupling sum. `alpha = 0` multiplies rather
+/// than short-circuiting, so a non-finite source still reaches the destination.
+pub fn expected_scaled<T: TestScalar>(
+    fixture: &Compiled,
+    source: &[T],
+    destination: &[T],
+    overwrite: bool,
+    alpha: T,
+) -> Vec<T> {
     let structure = &fixture.structure;
     let coefficients = structure.recoupling_coefficients_dst_src();
     let mut expected = if overwrite {
@@ -546,7 +587,7 @@ pub fn expected<T: TestScalar>(
                     .into_iter()
                     .zip(positions(structure, src_layout))
                 {
-                    let value = read(src_position).scale(coefficient);
+                    let value = alpha.scale(coefficient).mul(read(src_position));
                     expected[dst_position] = expected[dst_position].add(value);
                 }
             }
@@ -560,15 +601,20 @@ pub fn expected<T: TestScalar>(
             } => {
                 for dst_index in 0..dst_count {
                     let dst_positions = positions(structure, dst_layout_start + dst_index);
+                    // The recoupling sum first, the caller scale once on the
+                    // result: `alpha * (U x)`, which is where the host applies
+                    // it — at the scatter, not at the pack or the GEMM.
+                    let mut column = vec![T::zero(); dst_positions.len()];
                     for src_index in 0..src_count {
                         let coefficient =
                             coefficients[coefficient_start + dst_index * src_count + src_index];
                         let src_positions = positions(structure, src_layout_start + src_index);
-                        for (dst_position, src_position) in dst_positions.iter().zip(&src_positions)
-                        {
-                            let value = read(*src_position).scale(coefficient);
-                            expected[*dst_position] = expected[*dst_position].add(value);
+                        for (slot, src_position) in column.iter_mut().zip(&src_positions) {
+                            *slot = slot.add(read(*src_position).scale(coefficient));
                         }
+                    }
+                    for (dst_position, value) in dst_positions.iter().zip(column) {
+                        expected[*dst_position] = expected[*dst_position].add(alpha.mul(value));
                     }
                 }
             }
@@ -600,6 +646,29 @@ where
         + tenet_operations::RecouplingCoefficientAction<f64>
         + tenet_operations::DenseBlockScalar,
 {
+    host_replay_scaled(
+        fixture,
+        source,
+        destination,
+        overwrite,
+        T::from_parts(1.0, 0.0),
+    )
+}
+
+/// Host replay of `fixture` with the caller scale `alpha`.
+pub fn host_replay_scaled<T>(
+    fixture: &Compiled,
+    source: &[T],
+    destination: &[T],
+    overwrite: bool,
+    alpha: T,
+) -> Vec<T>
+where
+    T: TestScalar
+        + tenet_operations::TreeTransformScalar
+        + tenet_operations::RecouplingCoefficientAction<f64>
+        + tenet_operations::DenseBlockScalar,
+{
     let mut kernels = tenet_operations::StridedHostKernelAdapter::default();
     let mut workspace = tenet_tensors::TreeTransformWorkspace::<T>::default();
     let mut data = destination.to_vec();
@@ -613,7 +682,7 @@ where
             &fixture.space,
             &mut data,
             source,
-            one,
+            alpha,
         )
         .unwrap();
     } else {
@@ -625,7 +694,7 @@ where
             &fixture.space,
             &mut data,
             source,
-            one,
+            alpha,
             one,
         )
         .unwrap();

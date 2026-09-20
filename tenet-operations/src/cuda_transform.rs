@@ -30,7 +30,7 @@ use std::sync::Arc;
 use tenet_core::{BlockStructure, Placement, TensorStorage};
 use tenet_dense::{
     cuda_matmul_region_into, cuda_region_axpby, cuda_region_zero, CudaDenseContext,
-    CudaDenseStorage, CudaRegion, CudaRegionBeta, CudaScalar, DenseError,
+    CudaDenseStorage, CudaRegion, CudaRegionBeta, CudaRegionCoefficient, CudaScalar, DenseError,
 };
 
 use crate::cuda::CudaStorage;
@@ -185,8 +185,10 @@ impl Default for CudaTreeTransformExecutor {
 }
 
 impl CudaTreeTransformExecutor {
-    /// An executor whose prepared-structure cache is bounded by
-    /// [`DEFAULT_STRUCTURE_CACHE_ENTRIES`] entries.
+    /// An executor whose prepared-structure cache keeps at most 256 structures
+    /// — the host transform cache's own entry bound, so a working set that is
+    /// warm on the host stays warm here. Use [`Self::with_structure_entries`]
+    /// for another bound.
     pub fn new(coefficient_budget_bytes: usize, plan_cache_budget_bytes: usize) -> Self {
         Self::with_structure_entries(
             coefficient_budget_bytes,
@@ -246,6 +248,12 @@ impl CudaTreeTransformExecutor {
     /// Distinct cuTENSOR operand signatures the currently prepared structures
     /// submit together, i.e. the plan-cache size a thrash-free warm replay of
     /// all of them needs.
+    ///
+    /// The caller scale does not enter it. A zero scale swaps the buffer the
+    /// 1x1 coefficient operand is read from, but not that operand's view
+    /// metadata (`[1, 1]` extents and strides) nor its alignment, which is
+    /// `size_of::<D>()` for every view, and the accumulation scalars are not in
+    /// a contraction plan key at all.
     pub fn required_plan_entries(&self) -> usize {
         self.required_plan_entries
     }
@@ -270,6 +278,38 @@ impl CudaTreeTransformExecutor {
     /// The source conjugation baked into the structure (`storage_conjugate`) is
     /// honoured as a flag on the read, never as a materialized buffer.
     ///
+    /// # Caller scale
+    ///
+    /// `alpha` is the caller's scale on the transformed source, the host's own
+    /// `alpha` argument (`dst = alpha * T(src)` under [`Overwrite`], plus
+    /// `1 * dst` under [`Axpby(1)`]). It reaches exactly where the host applies
+    /// it: every Single-block move and every Multi-block *scatter*, never the
+    /// pack columns and never the recoupling GEMM, which the host runs with
+    /// `1`. Zero fills of inactive destination layouts ignore it, as they do on
+    /// the host, so [`Overwrite`] still cleans a poisoned destination.
+    ///
+    /// `alpha == 0` (IEEE comparison, so `-0.0` is a zero scale) is *not* a
+    /// short circuit: the host multiplies there too, so a NaN or infinite
+    /// source must still poison the destination. It is submitted as an exact
+    /// zero 1x1 *operand* with descriptor `1`, because a descriptor `alpha` of
+    /// zero lets CUDA skip the source read.
+    ///
+    /// Disclosed differences from the host's arithmetic, all within dtype
+    /// tolerance and none of them a change of the written block set:
+    ///
+    /// - a Single block rounds as `alpha * (c * x)` where the host folds the
+    ///   scales first and rounds as `(alpha * c) * x`; the overflow position
+    ///   moves with it. Multi blocks agree exactly in order (`alpha * (U x)`);
+    /// - at `alpha == 0` the written zeros carry the sign of `0 * x` alone,
+    ///   where the host's carries `sign(alpha) * sign(c)` as well;
+    /// - the caller scale is not part of any cache or plan key: the 1x1 operand
+    ///   keeps the same view metadata and alignment whichever buffer it is read
+    ///   from, so an `alpha == 0` replay adds no cuTENSOR plan signature to
+    ///   [`Self::required_plan_entries`] and no prepared-structure entry.
+    ///
+    /// [`Overwrite`]: CudaTreeTransformDestination::Overwrite
+    /// [`Axpby(1)`]: CudaTreeTransformDestination::Axpby
+    ///
     /// # Capability boundaries
     ///
     /// All of these are reported before any device work — no upload, no
@@ -287,7 +327,7 @@ impl CudaTreeTransformExecutor {
     ///
     /// One `dot_general` submission per non-empty Single block, per pack and
     /// scatter column and per inactive destination layout, plus one GEMM per
-    /// recoupling job — the same counts as the host's strided passes and its
+    /// recoupling job — independent of `alpha`, which costs nothing — the same counts as the host's strided passes and its
     /// `matmul_batch_axpby_into` jobs. The first replay of a structure uploads
     /// its coefficient vector, sizes the context zero template and grows the
     /// transform workspace to `Σ_b element_count_b × (src_count_b + dst_count_b)`
@@ -305,6 +345,7 @@ impl CudaTreeTransformExecutor {
         src_structure: &Arc<BlockStructure>,
         dst: &mut CudaStorage<D>,
         src: &CudaStorage<D>,
+        alpha: D,
         mode: CudaTreeTransformDestination<D>,
     ) -> Result<(), OperationError>
     where
@@ -389,11 +430,33 @@ impl CudaTreeTransformExecutor {
             &admission,
         )?;
 
+        // The host never short-circuits the caller scale: with `alpha == 0` it
+        // still computes `0 * src`, so a NaN or infinite source reaches the
+        // destination (`kernel_adapter.rs` Overwrite kernel, `alpha * value`).
+        // A descriptor alpha of 0 would let CUDA skip the read instead, so a
+        // zero scale is submitted as the zero *operand* with descriptor 1.
+        // `-0.0 == 0.0` under IEEE comparison, which is exactly the intended
+        // test: a caller scale of `-0.0` multiplies by zero too.
+        let scale = if alpha == D::ZERO {
+            CallerScale::ZeroOperand
+        } else {
+            CallerScale::Descriptor(alpha)
+        };
+
         // Idempotent once the template is long enough, so a warm replay uploads
         // nothing; sized from the structure's longest inactive layout rather
         // than grown one fill at a time. After Stage C, so no admission verdict
-        // is still outstanding when it uploads.
-        ctx.reserve_zero_template::<D>(prepared.max_zero_len)
+        // is still outstanding when it uploads — the design's "reserve before
+        // Stage C" wording would upload ahead of a verdict that can still
+        // reject, which the rejection-order contract forbids; reserving here is
+        // still before every submission, which is what the zero operand needs.
+        // A zero caller scale reads element 0 of the same template as its 1x1
+        // operand, so one element is reserved even for a structure with no
+        // inactive destination layout.
+        let template_len = prepared
+            .max_zero_len
+            .max(usize::from(matches!(scale, CallerScale::ZeroOperand)));
+        ctx.reserve_zero_template::<D>(template_len)
             .map_err(OperationError::Dense)?;
 
         let conjugate = task.storage_conjugate();
@@ -409,6 +472,7 @@ impl CudaTreeTransformExecutor {
                 prepared.coefficients.as_ref(),
                 entry,
                 conjugate,
+                scale,
                 beta,
                 &mut dst.0,
             )?;
@@ -440,6 +504,9 @@ impl CudaTreeTransformExecutor {
                     None,
                     pack,
                     conjugate,
+                    // The host packs and multiplies unscaled and applies the
+                    // caller scale at the scatter alone.
+                    CallerScale::Descriptor(D::ONE),
                     CudaRegionBeta::Overwrite,
                     &mut scratch.source,
                 )?;
@@ -475,6 +542,7 @@ impl CudaTreeTransformExecutor {
                     // The host scatter copies the packed column unconjugated:
                     // the conjugation was already applied on the pack.
                     false,
+                    scale,
                     beta,
                     &mut dst.0,
                 )?;
@@ -715,9 +783,23 @@ fn unsupported_layout(error: DenseError) -> OperationError {
     }
 }
 
+/// How the caller's scale reaches one submission.
+///
+/// Two variants rather than one scalar because a zero scale is not expressible
+/// as a descriptor alpha without changing what the submission computes.
+#[derive(Clone, Copy)]
+enum CallerScale<D> {
+    /// Descriptor alpha: the caller's scale where it is non-zero, and `1` for
+    /// the packs and the recoupling GEMM, which the host leaves unscaled.
+    Descriptor(D),
+    /// A zero caller scale: descriptor `1` and the context zero template as the
+    /// 1x1 operand, so `0 * src` is computed rather than skipped.
+    ZeroOperand,
+}
+
 /// Submits one prepared move, taking the 1x1 coefficient operand from the
 /// structure's uploaded vector or, where the host copies unscaled, from the
-/// context's shared `1`.
+/// context's shared `1` — or, for a zero caller scale, from its zero template.
 #[allow(clippy::too_many_arguments)]
 fn submit_move<D: CudaScalar>(
     ctx: &mut CudaDenseContext,
@@ -725,25 +807,33 @@ fn submit_move<D: CudaScalar>(
     coefficients: Option<&CudaDenseStorage>,
     entry: &PreparedMove,
     conjugate: bool,
+    scale: CallerScale<D>,
     beta: CudaRegionBeta,
     dst: &mut CudaDenseStorage,
 ) -> Result<(), OperationError> {
-    let coefficient = match entry.coefficient {
-        Some(index) => {
-            let Some(coefficients) = coefficients else {
-                return Err(OperationError::InvalidArgument {
-                    message: "device tree transform block has no uploaded coefficient",
-                });
+    let (alpha, coefficient) = match scale {
+        CallerScale::ZeroOperand => (D::ONE, CudaRegionCoefficient::Zero),
+        CallerScale::Descriptor(alpha) => {
+            let coefficient = match entry.coefficient {
+                Some(index) => {
+                    let Some(coefficients) = coefficients else {
+                        return Err(OperationError::InvalidArgument {
+                            message: "device tree transform block has no uploaded coefficient",
+                        });
+                    };
+                    CudaRegionCoefficient::Buffer(coefficients, index)
+                }
+                None => CudaRegionCoefficient::One,
             };
-            Some((coefficients, index))
+            (alpha, coefficient)
         }
-        None => None,
     };
     cuda_region_axpby::<D>(
         ctx,
         src,
         &entry.source,
         conjugate,
+        alpha,
         coefficient,
         beta,
         dst,

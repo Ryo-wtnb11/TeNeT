@@ -31,7 +31,7 @@ mod cuda_scalar_sealed {
 /// stay real, so only the *payload* varies, and `f32`/`Complex32` remain a
 /// compile-time unsupported boundary rather than a runtime error. Conjugation
 /// is never a payload property here — it is carried as a GEMM operand flag.
-pub trait CudaScalar: TenferroScalar + cuda_scalar_sealed::Sealed {
+pub trait CudaScalar: TenferroScalar + PartialEq + cuda_scalar_sealed::Sealed {
     /// TeNeT-side dtype tag, used for [`DenseError::DTypeMismatch`].
     const DTYPE: DenseDType;
     /// Additive identity, for `beta = 0` overwriting GEMMs.
@@ -964,6 +964,28 @@ fn ensure_payload_dtype<D: CudaScalar>(
     Ok(())
 }
 
+/// Rejects a descriptor scale of zero, which the backend is free to answer by
+/// skipping the source read.
+///
+/// Every other scale is a plain multiplication, so the caller's NaN and
+/// infinities survive it; a zero one is the single value whose backend
+/// behaviour does not match `alpha * src`, and silently answering it with a
+/// cleared destination is a wrong answer rather than a slow one. The zero
+/// scale is expressible — as an exact zero *data* operand — so this is a
+/// misuse of the argument, not a missing capability.
+fn reject_zero_alpha<D: CudaScalar>(op: &'static str, alpha: D) -> Result<(), DenseError> {
+    // IEEE comparison, so `-0.0` is rejected too: it skips the read just as
+    // `0.0` does.
+    if alpha != D::ZERO {
+        return Ok(());
+    }
+    Err(DenseError::Unsupported {
+        op,
+        message: "a descriptor alpha of zero would let the backend skip the source read and                   erase NaN/Inf; pass alpha = 1 with CudaRegionCoefficient::Zero to multiply                   by an exact zero instead"
+            .to_string(),
+    })
+}
+
 /// Submits one validated region move. Takes the backend rather than the whole
 /// context so a caller can pass a coefficient the context itself owns.
 #[allow(clippy::too_many_arguments)]
@@ -973,6 +995,7 @@ fn submit_region_axpby<D: CudaScalar>(
     src: &CudaDenseStorage,
     src_region: &CudaRegion,
     conj: bool,
+    alpha: D,
     coeff: &CudaDenseStorage,
     coeff_offset: usize,
     beta: CudaRegionBeta,
@@ -996,13 +1019,16 @@ fn submit_region_axpby<D: CudaScalar>(
         lhs_batch_dims: Vec::new(),
         rhs_batch_dims: Vec::new(),
     };
-    // The coefficient is the 1x1 *operand*, never the descriptor alpha: a
-    // descriptor alpha of 0 lets CUDA skip the source read and erase NaN/Inf,
-    // where the host multiplies and propagates it (typed.rs `cuda_axpby_owned`).
+    // The structural coefficient is the 1x1 *operand*, never the descriptor
+    // alpha: a descriptor alpha of 0 lets CUDA skip the source read and erase
+    // NaN/Inf, where the host multiplies and propagates it (typed.rs
+    // `cuda_axpby_owned`). The caller's own scale rides the descriptor, and a
+    // caller whose scale is zero passes it as the zero *operand* instead
+    // ([`CudaRegionCoefficient::Zero`]) for the same reason.
     let accumulation = DotGeneralAccumulation {
         lhs_conj: conj,
         rhs_conj: false,
-        alpha: D::ONE.contraction_scalar(),
+        alpha: alpha.contraction_scalar(),
         beta: beta.scalar::<D>(),
     };
     GEMM_CALLS.fetch_add(1, Ordering::Relaxed);
@@ -1017,8 +1043,9 @@ fn submit_region_axpby<D: CudaScalar>(
         .map_err(|err| cuda_error(op, err))
 }
 
-/// `dst_region = c * [conj] src_region + beta * dst_region`, where `c` is a
-/// 1x1 **data** operand read from `coeff`.
+/// `dst_region = alpha * c * [conj] src_region + beta * dst_region`, where `c`
+/// is a 1x1 **data** operand chosen by `coeff` and `alpha` is the caller's own
+/// scale, carried by the contraction descriptor.
 ///
 /// This is the single strided data-movement primitive the device structural
 /// operations are built on: one strided, offset, rank-N source region of one
@@ -1027,18 +1054,30 @@ fn submit_region_axpby<D: CudaScalar>(
 /// one `dot_general` against the 1x1 coefficient and allocates no device
 /// buffer of its own.
 ///
-/// Transfer contract: a call with `coeff = Some(..)` moves nothing across the
-/// host boundary, ever. A call with `coeff = None` uploads this context's
-/// one-element `1` the first time that dtype is used, and nothing afterwards
-/// (see [`CudaDenseContext::scalar_operand_bytes`]).
+/// Transfer contract: a call with [`CudaRegionCoefficient::Buffer`] moves
+/// nothing across the host boundary, ever. A call with
+/// [`CudaRegionCoefficient::One`] uploads this context's one-element `1` the
+/// first time that dtype is used, and a call with
+/// [`CudaRegionCoefficient::Zero`] its one-element zero template, and nothing
+/// afterwards (see [`CudaDenseContext::scalar_operand_bytes`] and
+/// [`CudaDenseContext::reserve_zero_template`]).
 ///
-/// `coeff` is `Some((buffer, offset))` to read the coefficient from a
-/// caller-owned device vector — block `b` of a structure's uploaded
-/// coefficients is the 1x1 view at offset `b` — or `None` to use the
-/// context's own `1`, for a move that only relayouts. It is never the
-/// contraction's descriptor alpha, which stays 1: a descriptor alpha lets
-/// CUDA skip the source read when it is 0 and so erases NaN/Inf that the host
-/// propagates.
+/// The structural coefficient is a data operand and never the descriptor
+/// alpha, because a descriptor alpha lets CUDA skip the source read when it is
+/// 0 and so erases NaN/Inf that the host propagates. `alpha` is the caller's
+/// *own* scale, which the host applies as one more multiplication. A zero
+/// `alpha` is therefore **rejected** (`Unsupported`, IEEE comparison so `-0.0`
+/// too), before any device work: pass `alpha = D::ONE` with
+/// [`CudaRegionCoefficient::Zero`] to multiply by an exact zero and keep the
+/// host's NaN/Inf propagation. Passing `alpha = D::ONE` is the unscaled default
+/// this primitive had before it carried a caller scale.
+///
+/// Disclosed differences from a host `alpha * (c * x)` chain: this path rounds
+/// as `alpha * (c * x)` where a host that folds the two scales first rounds as
+/// `(alpha * c) * x` (one rounding position, values equal to dtype tolerance,
+/// and either order overflows where the other need not); and with
+/// [`CudaRegionCoefficient::Zero`] the written zeros carry the sign of
+/// `0 * src` alone, not the sign of the caller's `-0.0` or of `c`.
 ///
 /// One numerical deviation from the host is disclosed and pinned by the device
 /// tests: the host copies bit-exactly when the coefficient is 1, while this
@@ -1050,6 +1089,7 @@ fn submit_region_axpby<D: CudaScalar>(
 ///
 /// Validation order, all of it before any device work:
 ///
+/// 0. the descriptor scale is not zero (`Unsupported`);
 /// 1. every operand is on the context's device;
 /// 2. every operand has payload dtype `D` (`DTypeMismatch`);
 /// 3. source and destination `dims` are equal (`ShapeMismatch`);
@@ -1070,7 +1110,8 @@ fn submit_region_axpby<D: CudaScalar>(
 /// far above any rank a fusion tree reaches.
 ///
 /// Disclosed cost: Tenferro's stream slots are per thread, so a context-owned
-/// operand (`coeff = None`, or any [`cuda_region_zero`]) that is used from a
+/// operand (a context `1` or zero-template coefficient, or any
+/// [`cuda_region_zero`]) that is used from a
 /// thread other than the one that created it can force a device-wide
 /// synchronize per call. Today every such call happens under the device lease,
 /// which serializes them; a future multi-threaded device executor should keep
@@ -1082,14 +1123,16 @@ pub fn cuda_region_axpby<D: CudaScalar>(
     src: &CudaDenseStorage,
     src_region: &CudaRegion,
     conj: bool,
-    coeff: Option<(&CudaDenseStorage, usize)>,
+    alpha: D,
+    coeff: CudaRegionCoefficient<'_>,
     beta: CudaRegionBeta,
     dst: &mut CudaDenseStorage,
     dst_region: &CudaRegion,
 ) -> Result<(), DenseError> {
     const OP: &str = "cuda_region_axpby";
+    reject_zero_alpha::<D>(OP, alpha)?;
     match coeff {
-        Some((coeff, _)) => ensure_cuda_device(
+        CudaRegionCoefficient::Buffer(coeff, _) => ensure_cuda_device(
             ctx.device,
             OP,
             &[
@@ -1098,11 +1141,13 @@ pub fn cuda_region_axpby<D: CudaScalar>(
                 ("dst", dst.device),
             ],
         )?,
-        None => ensure_cuda_device(ctx.device, OP, &[("src", src.device), ("dst", dst.device)])?,
+        CudaRegionCoefficient::One | CudaRegionCoefficient::Zero => {
+            ensure_cuda_device(ctx.device, OP, &[("src", src.device), ("dst", dst.device)])?;
+        }
     }
     ensure_payload_dtype::<D>(OP, src)?;
     ensure_payload_dtype::<D>(OP, dst)?;
-    if let Some((coeff, _)) = coeff {
+    if let CudaRegionCoefficient::Buffer(coeff, _) = coeff {
         ensure_payload_dtype::<D>(OP, coeff)?;
     }
     if src_region.dims() != dst_region.dims() {
@@ -1112,7 +1157,7 @@ pub fn cuda_region_axpby<D: CudaScalar>(
             actual: src_region.dims().to_vec(),
         });
     }
-    if let Some((coeff, offset)) = coeff {
+    if let CudaRegionCoefficient::Buffer(coeff, offset) = coeff {
         if offset >= coeff.len {
             return Err(DenseError::OutOfBounds);
         }
@@ -1126,29 +1171,63 @@ pub fn cuda_region_axpby<D: CudaScalar>(
     validate_region(dst_region, dst.len)?;
 
     match coeff {
-        Some((coeff, offset)) => submit_region_axpby::<D>(
+        CudaRegionCoefficient::Buffer(coeff, offset) => submit_region_axpby::<D>(
             &mut ctx.backend,
             OP,
             src,
             src_region,
             conj,
+            alpha,
             coeff,
             offset,
             beta,
             dst,
             dst_region,
         ),
-        None => {
+        CudaRegionCoefficient::One => {
             ctx.ensure_ones::<D>()?;
             let (backend, operands) = ctx.split_operands::<D>();
             let Some(ones) = operands.ones.as_ref() else {
                 return Err(cuda_error(OP, "context scalar operand is missing"));
             };
             submit_region_axpby::<D>(
-                backend, OP, src, src_region, conj, ones, 0, beta, dst, dst_region,
+                backend, OP, src, src_region, conj, alpha, ones, 0, beta, dst, dst_region,
+            )
+        }
+        CudaRegionCoefficient::Zero => {
+            // Idempotent once the caller has reserved the template, which is
+            // what keeps a warm replay upload-free; one element is all this
+            // operand reads.
+            ctx.ensure_zeros::<D>(1)?;
+            let (backend, operands) = ctx.split_operands::<D>();
+            let Some(zeros) = operands.zeros.as_ref() else {
+                return Err(cuda_error(OP, "context scalar operand is missing"));
+            };
+            submit_region_axpby::<D>(
+                backend, OP, src, src_region, conj, alpha, zeros, 0, beta, dst, dst_region,
             )
         }
     }
+}
+
+/// Where [`cuda_region_axpby`] reads its 1x1 coefficient operand.
+///
+/// The variants exist because the operand is data, not a descriptor scalar: a
+/// caller that needs an exact `0` there — a caller scale of zero, which the
+/// host still multiplies by — cannot express it as a descriptor alpha without
+/// letting CUDA skip the source read.
+#[derive(Clone, Copy)]
+pub enum CudaRegionCoefficient<'a> {
+    /// The context's shared `1`: an unscaled move, the default for a pure
+    /// relayout.
+    One,
+    /// The first element of the context's zero template. Reserve it with
+    /// [`CudaDenseContext::reserve_zero_template`] to keep the submission
+    /// upload-free.
+    Zero,
+    /// A caller-owned device vector at an element offset — block `b` of a
+    /// structure's uploaded coefficients is the 1x1 view at offset `b`.
+    Buffer(&'a CudaDenseStorage, usize),
 }
 
 /// Writes zeros over `dst_region`, reading the context's zero template as a
@@ -1194,6 +1273,7 @@ pub fn cuda_region_zero<D: CudaScalar>(
         zeros,
         &src_region,
         false,
+        D::ONE,
         ones,
         0,
         CudaRegionBeta::Overwrite,
@@ -1648,6 +1728,43 @@ mod tests {
         assert_eq!(cuda_operand_view(MatrixOp::Adjoint, 2, 3), ([3, 1], true));
         assert_eq!(cuda_operand_view(MatrixOp::Identity, 3, 4), ([1, 3], false));
         assert_eq!(cuda_operand_view(MatrixOp::Adjoint, 3, 4), ([4, 1], true));
+    }
+
+    #[test]
+    fn a_zero_descriptor_scale_is_rejected_before_any_device_work() {
+        // What: `alpha = 0` is the one scale whose backend behaviour is not
+        // `alpha * src` — the source read may be skipped, erasing NaN/Inf — so
+        // it is a typed rejection rather than a silently different answer. The
+        // check needs no device, which is what makes it precede every upload.
+        for alpha in [0.0_f64, -0.0] {
+            let err = reject_zero_alpha::<f64>("cuda_region_axpby", alpha)
+                .expect_err("a zero descriptor scale must be rejected");
+            assert!(
+                matches!(
+                    err,
+                    DenseError::Unsupported {
+                        op: "cuda_region_axpby",
+                        ..
+                    }
+                ),
+                "{err}"
+            );
+            assert!(
+                err.to_string().contains("CudaRegionCoefficient::Zero"),
+                "{err}"
+            );
+        }
+        let complex_zero = Complex64::new(-0.0, 0.0);
+        assert!(reject_zero_alpha::<Complex64>("cuda_region_axpby", complex_zero).is_err());
+
+        // Every other scale passes, including the non-finite ones: they are
+        // ordinary multiplications.
+        for alpha in [1.0_f64, -2.5, f64::NAN, f64::INFINITY] {
+            assert!(reject_zero_alpha::<f64>("cuda_region_axpby", alpha).is_ok());
+        }
+        assert!(
+            reject_zero_alpha::<Complex64>("cuda_region_axpby", Complex64::new(0.0, -1.0)).is_ok()
+        );
     }
 
     #[test]

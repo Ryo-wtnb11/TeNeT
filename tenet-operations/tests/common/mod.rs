@@ -25,6 +25,8 @@ pub trait TestScalar: Copy + std::fmt::Debug + PartialEq + 'static {
     }
     fn scale(self, factor: f64) -> Self;
     fn add(self, other: Self) -> Self;
+    /// Payload multiplication, for the caller scale `alpha`.
+    fn mul(self, other: Self) -> Self;
     fn conjugate(self) -> Self;
     fn distance(self, other: Self) -> f64;
     /// Deterministic, non-degenerate sample for buffer index `index`.
@@ -47,6 +49,10 @@ impl TestScalar for f64 {
 
     fn add(self, other: Self) -> Self {
         self + other
+    }
+
+    fn mul(self, other: Self) -> Self {
+        self * other
     }
 
     fn conjugate(self) -> Self {
@@ -75,6 +81,10 @@ impl TestScalar for Complex64 {
 
     fn add(self, other: Self) -> Self {
         self + other
+    }
+
+    fn mul(self, other: Self) -> Self {
+        self * other
     }
 
     fn conjugate(self) -> Self {
@@ -275,6 +285,22 @@ impl Fixture {
         destination: &[T],
         overwrite: bool,
     ) -> Vec<T> {
+        self.expected_scaled(source, destination, overwrite, T::from_parts(1.0, 0.0))
+    }
+
+    /// [`Self::expected`] with the caller scale `alpha`, applied where the host
+    /// applies it: `(alpha * coefficient) * src` for a Single block and
+    /// `alpha * (U x)` for a recoupling group — never on a pack, never inside
+    /// the recoupling sum, and never on a zero fill, which stays an exact zero
+    /// whatever `alpha` is. `alpha = 0` is not a short circuit: it multiplies,
+    /// so a NaN source poisons the destination.
+    pub fn expected_scaled<T: TestScalar>(
+        &self,
+        source: &[T],
+        destination: &[T],
+        overwrite: bool,
+        alpha: T,
+    ) -> Vec<T> {
         let mut expected = destination.to_vec();
         if overwrite {
             let written: Vec<usize> = self
@@ -307,7 +333,7 @@ impl Fixture {
                 if self.conjugate {
                     value = value.conjugate();
                 }
-                let value = value.scale(pair.coefficient);
+                let value = alpha.scale(pair.coefficient).mul(value);
                 expected[dst_position] = if overwrite {
                     value
                 } else {
@@ -333,6 +359,7 @@ impl Fixture {
                     }
                 }
                 for (&dst_position, value) in dst_positions.iter().zip(column) {
+                    let value = alpha.mul(value);
                     expected[dst_position] = if overwrite {
                         value
                     } else {

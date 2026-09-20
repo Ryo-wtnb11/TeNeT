@@ -17,7 +17,8 @@
 mod categorical_recoupling;
 
 use categorical_recoupling::{
-    assert_close, expected, fixtures, host_replay, non_symmetric_fixture, Compiled, TestScalar,
+    alphas, assert_close, expected, expected_scaled, fixtures, host_replay, host_replay_scaled,
+    non_symmetric_fixture, Compiled, TestScalar,
 };
 use num_complex::Complex64;
 use tenet_dense::{cuda_transfer_stats, CudaDenseContext, CudaScalar, CudaTransferStats};
@@ -50,6 +51,27 @@ fn device_replay<T: DeviceScalar>(
     destination: &[T],
     overwrite: bool,
 ) -> Vec<T> {
+    device_replay_scaled(
+        ctx,
+        executor,
+        fixture,
+        source,
+        destination,
+        overwrite,
+        T::from_parts(1.0, 0.0),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn device_replay_scaled<T: DeviceScalar>(
+    ctx: &mut CudaDenseContext,
+    executor: &mut CudaTreeTransformExecutor,
+    fixture: &Compiled,
+    source: &[T],
+    destination: &[T],
+    overwrite: bool,
+    alpha: T,
+) -> Vec<T> {
     let mut device_dst = CudaStorage::<T>::upload(ctx, destination).unwrap();
     let device_src = CudaStorage::<T>::upload(ctx, source).unwrap();
     let mode = if overwrite {
@@ -65,6 +87,7 @@ fn device_replay<T: DeviceScalar>(
             &fixture.space,
             &mut device_dst,
             &device_src,
+            alpha,
             mode,
         )
         .unwrap();
@@ -187,6 +210,7 @@ fn a_warm_provider_structure_replay_transfers_nothing() {
                 &fixture.space,
                 dst,
                 &device_src,
+                1.0,
                 CudaTreeTransformDestination::Overwrite,
             )
             .unwrap();
@@ -216,4 +240,58 @@ fn a_warm_provider_structure_replay_transfers_nothing() {
         &expected(&fixture, &source, &destination, true),
         "warm provider-structure replay",
     );
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn every_caller_scale_matches_the_host_on_provider_compiled_recoupling() {
+    // What: the caller scale on genuine 6j data — Single blocks and Multi
+    // scatters scaled, packs and the recoupling GEMM not — for
+    // alpha in {1, -2.5, 0, -0.0, complex}, both dtypes and both destination
+    // modes. The oracle applies alpha at the scatter alone and is pinned
+    // against the host in CI, including an `alpha^2` negative control.
+    let mut ctx = context();
+    let mut executor = CudaTreeTransformExecutor::default();
+    let fixture = non_symmetric_fixture();
+    check_scales::<f64>(&mut ctx, &mut executor, &fixture);
+    check_scales::<Complex64>(&mut ctx, &mut executor, &fixture);
+}
+
+fn check_scales<T: DeviceScalar>(
+    ctx: &mut CudaDenseContext,
+    executor: &mut CudaTreeTransformExecutor,
+    fixture: &Compiled,
+) {
+    let source = fixture.source::<T>();
+    let destination: Vec<T> = (0..fixture.len())
+        .map(|index| T::from_parts(-3.0 - index as f64, 0.5))
+        .collect();
+    for overwrite in [true, false] {
+        for alpha in alphas::<T>() {
+            let what = format!(
+                "{} / {} / overwrite = {overwrite} / alpha = {alpha:?}",
+                fixture.name,
+                T::NAME
+            );
+            let device = device_replay_scaled(
+                ctx,
+                executor,
+                fixture,
+                &source,
+                &destination,
+                overwrite,
+                alpha,
+            );
+            assert_close(
+                &device,
+                &expected_scaled(fixture, &source, &destination, overwrite, alpha),
+                &format!("{what}: device vs oracle"),
+            );
+            assert_close(
+                &device,
+                &host_replay_scaled(fixture, &source, &destination, overwrite, alpha),
+                &format!("{what}: device vs host"),
+            );
+        }
+    }
 }

@@ -13,8 +13,8 @@ mod common;
 use common::{
     all_fixtures, expert_interleaved_destination, expert_interleaved_recoupling_destination,
     inactive_destination_layouts, interleaved_multi_block, many_distinct_signatures,
-    recoupling_fixtures, recoupling_non_symmetric_u, unit_coefficient_fixtures, Fixture,
-    TestScalar,
+    mixed_single_and_multi, recoupling_fixtures, recoupling_non_symmetric_u,
+    unit_coefficient_fixtures, Fixture, TestScalar,
 };
 use num_complex::Complex64;
 use tenet_operations::{
@@ -25,6 +25,42 @@ use tenet_operations::{
 
 /// Host replay of `fixture` in either destination mode, on host slices.
 fn host_replay<T>(fixture: &Fixture, source: &[T], destination: &[T], overwrite: bool) -> Vec<T>
+where
+    T: TestScalar
+        + tenet_operations::TreeTransformScalar
+        + tenet_operations::RecouplingCoefficientAction<f64>
+        + tenet_operations::DenseBlockScalar,
+{
+    host_replay_scaled(
+        fixture,
+        source,
+        destination,
+        overwrite,
+        T::from_parts(1.0, 0.0),
+    )
+}
+
+/// The caller scales the device executor must reproduce: one, a scale that is
+/// neither 1 nor -1, both signed zeros, and a genuinely complex one (which is
+/// its real part on `f64`).
+fn alphas<T: TestScalar>() -> Vec<T> {
+    vec![
+        T::from_parts(1.0, 0.0),
+        T::from_parts(-2.5, 0.0),
+        T::from_parts(0.0, 0.0),
+        T::from_parts(-0.0, -0.0),
+        T::from_parts(0.5, -1.25),
+    ]
+}
+
+/// Host replay of `fixture` with the caller scale `alpha`.
+fn host_replay_scaled<T>(
+    fixture: &Fixture,
+    source: &[T],
+    destination: &[T],
+    overwrite: bool,
+    alpha: T,
+) -> Vec<T>
 where
     T: TestScalar
         + tenet_operations::TreeTransformScalar
@@ -47,7 +83,7 @@ where
             &src_structure,
             &mut data,
             source,
-            one,
+            alpha,
         )
         .unwrap();
     } else {
@@ -59,7 +95,7 @@ where
             &src_structure,
             &mut data,
             source,
-            one,
+            alpha,
             one,
         )
         .unwrap();
@@ -89,13 +125,19 @@ where
         .map(|index| T::from_parts(-3.0 - index as f64, 0.5))
         .collect();
     for overwrite in [true, false] {
-        let expected = fixture.expected(&source, &destination, overwrite);
-        let host = host_replay(fixture, &source, &destination, overwrite);
-        assert_close(
-            &host,
-            &expected,
-            &format!("{} / {} / overwrite = {overwrite}", fixture.name, T::NAME,),
-        );
+        for alpha in alphas::<T>() {
+            let expected = fixture.expected_scaled(&source, &destination, overwrite, alpha);
+            let host = host_replay_scaled(fixture, &source, &destination, overwrite, alpha);
+            assert_close(
+                &host,
+                &expected,
+                &format!(
+                    "{} / {} / overwrite = {overwrite} / alpha = {alpha:?}",
+                    fixture.name,
+                    T::NAME,
+                ),
+            );
+        }
     }
 }
 
@@ -265,5 +307,143 @@ fn the_oracle_is_sensitive_to_the_coefficient_and_to_the_permutation() {
         unpermuted.expected(&source, &destination, true),
         expected,
         "the oracle must depend on the axis map"
+    );
+}
+
+#[test]
+fn the_caller_scale_multiplies_the_scatter_once_and_not_the_pack() {
+    // Negative control for where alpha enters a recoupling group: the host
+    // applies it at the scatter alone (`alpha * (U x)`). An implementation that
+    // also scaled the packed columns would compute `alpha^2 * (U x)`, which the
+    // oracle below expresses by folding alpha into U as well. The two must
+    // disagree, and the host must land on the single-application one.
+    let fixture = mixed_single_and_multi();
+    let source = fixture.source::<f64>();
+    let destination = vec![0.0_f64; fixture.dst_len()];
+    let alpha = -2.5_f64;
+
+    // Only the recoupling matrices are folded: that is exactly the wrong
+    // implementation's extra multiplication (alpha at the pack as well as the
+    // scatter). The Single blocks keep their coefficients, so a difference can
+    // only come from a Multi block's positions.
+    let mut doubled = fixture.clone();
+    for group in &mut doubled.groups {
+        for entry in &mut group.u {
+            *entry *= alpha;
+        }
+    }
+
+    for overwrite in [true, false] {
+        let once = fixture.expected_scaled(&source, &destination, overwrite, alpha);
+        let twice = doubled.expected_scaled(&source, &destination, overwrite, alpha);
+        let differing: Vec<usize> = once
+            .iter()
+            .zip(&twice)
+            .enumerate()
+            .filter(|(_, (left, right))| left != right)
+            .map(|(index, _)| index)
+            .collect();
+        assert!(
+            !differing.is_empty(),
+            "alpha applied twice must change the result / overwrite = {overwrite}"
+        );
+        // The Single block of this fixture writes positions 28..32; none of
+        // them may move, or the control would also be sensitive to a Single
+        // block's scale and prove less than it claims.
+        assert!(
+            differing.iter().all(|index| !(28..32).contains(index)),
+            "the control must isolate the recoupled positions, changed: {differing:?}"
+        );
+        assert_close(
+            &host_replay_scaled(&fixture, &source, &destination, overwrite, alpha),
+            &once,
+            &format!("mixed_single_and_multi / alpha once / overwrite = {overwrite}"),
+        );
+    }
+}
+
+#[test]
+fn a_zero_caller_scale_multiplies_rather_than_skipping_the_source() {
+    // What: the host has no alpha short circuit, so a zero scale propagates a
+    // NaN source into every written element and leaves the zero fills of
+    // Overwrite exact. This is the contract the device reproduces with a zero
+    // 1x1 operand instead of a zero descriptor scale; here it is pinned on the
+    // host, which is what the device is compared against.
+    let fixture = mixed_single_and_multi();
+    let poisoned = vec![f64::NAN; fixture.src_len()];
+    let destination = vec![0.0_f64; fixture.dst_len()];
+
+    for alpha in [0.0_f64, -0.0_f64] {
+        let host = host_replay_scaled(&fixture, &poisoned, &destination, true, alpha);
+        assert!(
+            host.iter().any(|value| value.is_nan()),
+            "a zero scale must still multiply the source: {host:?}"
+        );
+        let oracle = fixture.expected_scaled(&poisoned, &destination, true, alpha);
+        for (index, (left, right)) in host.iter().zip(&oracle).enumerate() {
+            assert_eq!(
+                left.is_nan(),
+                right.is_nan(),
+                "element {index}: host {left} vs oracle {right}"
+            );
+            assert!(left.is_nan() || left == right, "element {index}");
+        }
+        // The inactive destination layout is an exact zero whatever the scale.
+        let clean = host_replay_scaled(
+            &fixture,
+            &fixture.source::<f64>(),
+            &destination,
+            true,
+            alpha,
+        );
+        assert!(
+            clean.iter().all(|value| *value == 0.0),
+            "a zero scale over a finite source writes zeros: {clean:?}"
+        );
+    }
+}
+
+/// Elementwise equality that treats NaN as a value, for the scales whose result
+/// is not comparable within a tolerance.
+fn assert_same<T: TestScalar>(actual: &[T], expected: &[T], what: &str) {
+    assert_eq!(actual.len(), expected.len(), "{what}: length");
+    for (index, (left, right)) in actual.iter().zip(expected).enumerate() {
+        let same = if left.is_nan() || right.is_nan() {
+            left.is_nan() && right.is_nan()
+        } else {
+            left == right
+        };
+        assert!(
+            same,
+            "{what}: element {index} is {left:?}, expected {right:?}"
+        );
+    }
+}
+
+#[test]
+fn a_nan_caller_scale_poisons_exactly_the_written_elements() {
+    // What: a non-finite scale is an ordinary multiplication on the host — no
+    // short circuit — so every written element becomes NaN while the zero fills
+    // of Overwrite stay exact zeros. That NaN *pattern* is what the device is
+    // compared against, so pin it here against the oracle first.
+    let fixture = mixed_single_and_multi();
+    let source = fixture.source::<f64>();
+    let destination = vec![0.0_f64; fixture.dst_len()];
+
+    let host = host_replay_scaled(&fixture, &source, &destination, true, f64::NAN);
+    assert_same(
+        &host,
+        &fixture.expected_scaled(&source, &destination, true, f64::NAN),
+        "NaN scale / overwrite",
+    );
+    assert!(
+        host.iter().any(|value| value.is_nan()),
+        "a NaN scale must reach the written elements: {host:?}"
+    );
+    // The never-written destination block (positions 32..36) is a zero fill,
+    // which ignores the scale.
+    assert!(
+        host[32..36].iter().all(|value| *value == 0.0),
+        "the zero fill must ignore the scale: {host:?}"
     );
 }
