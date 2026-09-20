@@ -73,6 +73,15 @@ pub(crate) struct ExecutorSnapshot {
     pub(crate) supports_strided: bool,
     pub(crate) supports_matrix: bool,
     pub(crate) scalar: TypeId,
+    /// How many workers need their own host fused-index scratch row.
+    ///
+    /// Executor-declared, because it is a fact about the executor rather than
+    /// about the task: host replay sizes one row per worker, while a device
+    /// executor reads the structure's baked fused layout and declares `0`. A
+    /// zero here means the workspace owes no fused-index buffer at all, which
+    /// is what keeps Stage C from demanding a Host allocation of an executor
+    /// that never touches host memory.
+    pub(crate) fused_index_workers: usize,
 }
 
 /// Stage-A-issued checked arithmetic result. Private fields prevent later
@@ -185,7 +194,6 @@ pub(crate) fn validate_stage_a<D: 'static, C: Copy>(
     dst: StorageSnapshot,
     src: StorageSnapshot,
     executor: ExecutorSnapshot,
-    workers: usize,
 ) -> Result<AdmissionRequirements, TreeTransformAdmissionError> {
     // Stage A order: completed structure and checked arithmetic, exact lengths,
     // then executor-local placement, context, and finite capabilities.
@@ -199,8 +207,8 @@ pub(crate) fn validate_stage_a<D: 'static, C: Copy>(
     ] {
         Layout::array::<D>(len).map_err(|_| TreeTransformAdmissionError::ArithmeticOverflow)?;
     }
-    let fused_index_len = workers
-        .max(1)
+    let fused_index_len = executor
+        .fused_index_workers
         .checked_mul(requirements.fused_index_len_per_worker)
         .ok_or(TreeTransformAdmissionError::ArithmeticOverflow)?;
     Layout::array::<usize>(fused_index_len)
@@ -290,7 +298,8 @@ pub(crate) fn validate_stage_c<D: 'static, C: Copy>(
             return Err(TreeTransformAdmissionError::WorkspaceCapacity(name));
         }
     }
-    if workspace.fused_index_placement != Placement::Host {
+    // Only an executor that asked for fused-index rows owes a host buffer.
+    if admission.fused_index_len != 0 && workspace.fused_index_placement != Placement::Host {
         return Err(TreeTransformAdmissionError::Placement("fused indices"));
     }
     if workspace.fused_index_capacity < admission.fused_index_len {
@@ -486,6 +495,7 @@ mod tests {
                 supports_strided: true,
                 supports_matrix: true,
                 scalar: TypeId::of::<f64>(),
+                fused_index_workers: workers.max(1),
             };
             let mut dst = self.storage_snapshot(
                 self.destination.len(),
@@ -508,7 +518,7 @@ mod tests {
                 _ => {}
             }
             let admission =
-                validate_stage_a::<f64, _>(task, structure, structure, dst, src, executor, workers)
+                validate_stage_a::<f64, _>(task, structure, structure, dst, src, executor)
                     .map_err(MockError::Admission)?;
 
             // Stage B invalidates readiness before any allocation/conversion.
@@ -854,6 +864,7 @@ mod tests {
             supports_strided: true,
             supports_matrix: true,
             scalar: TypeId::of::<f64>(),
+            fused_index_workers: 3,
         };
         let storage = |allocation, capacity| StorageSnapshot {
             active_len: capacity,
@@ -865,8 +876,7 @@ mod tests {
         let dst = storage(1, 4);
         let src = storage(2, 4);
         let admission =
-            validate_stage_a::<f64, _>(task, &structure, &structure, dst, src, executor, 3)
-                .unwrap();
+            validate_stage_a::<f64, _>(task, &structure, &structure, dst, src, executor).unwrap();
         assert_eq!(admission.fused_index_len(), 3);
         let structure_and_layout = task.admission_identity();
         let workspace = WorkspaceSnapshot {

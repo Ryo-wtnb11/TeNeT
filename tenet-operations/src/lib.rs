@@ -23,6 +23,13 @@ compile_error!(
 pub mod axis;
 #[cfg(feature = "cuda")]
 pub mod cuda;
+#[cfg(feature = "cuda")]
+pub mod cuda_transform;
+// Host-side planning only: compiled (and tested) without the `cuda` feature so
+// CI, which merely `cargo check`s that feature, still executes these rules.
+#[cfg(any(feature = "cuda", test))]
+#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+mod cuda_transform_plan;
 mod error;
 pub mod fusion_replay;
 mod host_scalar_kernels;
@@ -45,6 +52,11 @@ pub mod transform_structure;
 mod tree_profile;
 
 pub use axis::*;
+#[cfg(feature = "cuda")]
+pub use cuda_transform::{
+    CudaTreeTransformDestination, CudaTreeTransformExecutor, CUTENSOR_PLAN_ENTRY_BYTES,
+    DEFAULT_COEFFICIENT_BUDGET_BYTES, DEFAULT_PLAN_CACHE_BUDGET_BYTES,
+};
 pub use error::OperationError;
 pub use fusion_replay::{
     direct_group_matrix_offset, fusion_scale_block_layouts_excluding, ContractDestinationInit,

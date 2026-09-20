@@ -3,6 +3,8 @@
 //! tenet workspace that touches tenferro GPU types; upper layers see opaque
 //! storage handles and `DenseError`.
 
+use std::num::NonZeroUsize;
+
 use num_complex::Complex64;
 use tenferro_gpu::cuda::{download_tensor, upload_tensor, CudaBackend, CudaDeviceId};
 use tenferro_linalg::{QrGauge, QrOptions, TensorReadLinalgExt};
@@ -127,6 +129,19 @@ static DEVICE_ALLOCS: AtomicU64 = AtomicU64::new(0);
 static GEMM_CALLS: AtomicU64 = AtomicU64::new(0);
 static SOLVER_CALLS: AtomicU64 = AtomicU64::new(0);
 static COPY_CALLS: AtomicU64 = AtomicU64::new(0);
+
+/// A snapshot of the backend's cuTENSOR contraction plan cache.
+///
+/// Mirrors Tenferro's own cache statistics; it exists so TeNeT callers never
+/// name a tenferro type. Observability only.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct CudaPlanCacheStats {
+    pub entries: usize,
+    pub retained_bytes: usize,
+    pub hits: u64,
+    pub misses: u64,
+    pub evictions: u64,
+}
 
 /// A snapshot of the process-wide CUDA boundary observation counters.
 ///
@@ -273,9 +288,15 @@ struct ScalarOperands {
 pub struct CudaDenseContext {
     backend: CudaBackend,
     device: usize,
+    identity: u64,
     real_operands: ScalarOperands,
     complex_operands: ScalarOperands,
 }
+
+/// Process-wide context counter. A monotonic ticket rather than the context's
+/// address, so a cache keyed by context identity can never mistake a freshly
+/// allocated context for a dropped one that happened to reuse its address.
+static NEXT_CONTEXT_IDENTITY: AtomicU64 = AtomicU64::new(1);
 
 impl CudaDenseContext {
     pub fn new(device: usize) -> Result<Self, DenseError> {
@@ -286,9 +307,19 @@ impl CudaDenseContext {
         Ok(Self {
             backend,
             device,
+            identity: NEXT_CONTEXT_IDENTITY.fetch_add(1, Ordering::Relaxed),
             real_operands: ScalarOperands::default(),
             complex_operands: ScalarOperands::default(),
         })
+    }
+
+    /// Process-unique identity of this context, never reused while it lives.
+    ///
+    /// Device state cached against a context — an uploaded coefficient vector,
+    /// a prepared plan — belongs to exactly one context, and this is the key
+    /// that says so.
+    pub fn identity(&self) -> u64 {
+        self.identity
     }
 
     fn operands<D: CudaScalar>(&self) -> &ScalarOperands {
@@ -395,6 +426,57 @@ impl CudaDenseContext {
 
     pub fn device(&self) -> usize {
         self.device
+    }
+
+    /// cuTENSOR contraction plan cache observation for this context's backend.
+    ///
+    /// Every region move and every GEMM submitted here builds or reuses one
+    /// cuTENSOR plan per distinct operand signature, so `evictions` growing
+    /// during a replay is the observable form of plan-cache thrash.
+    pub fn plan_cache_stats(&self) -> Result<CudaPlanCacheStats, DenseError> {
+        let stats = self
+            .backend
+            .cutensor_plan_cache_stats()
+            .map_err(|err| cuda_error("cuda_plan_cache", err))?;
+        Ok(CudaPlanCacheStats {
+            entries: stats.entries,
+            retained_bytes: stats.retained_bytes,
+            hits: stats.hits,
+            misses: stats.misses,
+            evictions: stats.evictions,
+        })
+    }
+
+    /// The cuTENSOR contraction plan entry bound (Tenferro's default is 64).
+    pub fn plan_cache_max_entries(&self) -> Result<usize, DenseError> {
+        self.backend
+            .cutensor_plan_cache_max_entries()
+            .map(NonZeroUsize::get)
+            .map_err(|err| cuda_error("cuda_plan_cache", err))
+    }
+
+    /// Raises the cuTENSOR contraction plan entry bound to `entries`.
+    ///
+    /// Monotonic by construction: a request below the current bound is
+    /// ignored rather than shrinking a cache another caller sized. A caller
+    /// that knows how many distinct operand signatures it is about to submit
+    /// — a compiled transform structure knows exactly — uses this so a replay
+    /// larger than the default bound does not evict the plan it will need
+    /// again on the next block.
+    pub fn raise_plan_cache_max_entries(&self, entries: usize) -> Result<(), DenseError> {
+        let Some(entries) = NonZeroUsize::new(entries) else {
+            return Ok(());
+        };
+        let current = self
+            .backend
+            .cutensor_plan_cache_max_entries()
+            .map_err(|err| cuda_error("cuda_plan_cache", err))?;
+        if entries <= current {
+            return Ok(());
+        }
+        self.backend
+            .set_cutensor_plan_cache_max_entries(entries)
+            .map_err(|err| cuda_error("cuda_plan_cache", err))
     }
 
     /// Runs the smallest real operation against each backend library this
