@@ -1104,3 +1104,143 @@ fn overwrite_cleans_a_nan_poisoned_destination_around_recoupling_blocks() {
         "accumulation must keep the destination's NaN: {accumulated:?}"
     );
 }
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn a_replay_after_a_non_finite_one_reuses_the_workspace_cleanly() {
+    // What: the pack/scatter workspace is execution scratch, not state — every
+    // column is fully written by a pack (beta = 0) or by the GEMM (beta = 0)
+    // before it is read — so a replay whose source held NaN cannot leave
+    // anything behind that the next replay's result depends on. Without this,
+    // a workspace kept across replays would be an invisible channel between
+    // two unrelated transforms.
+    let mut ctx = context();
+    let mut executor = CudaTreeTransformExecutor::default();
+    let fixture = mixed_single_and_multi();
+    let clean = fixture.source::<f64>();
+    let destination = vec![0.0_f64; fixture.dst_len()];
+    let expected = fixture.expected(&clean, &destination, true);
+
+    let reference = device_replay(
+        &mut ctx,
+        &mut executor,
+        &fixture,
+        &clean,
+        &destination,
+        true,
+    );
+    assert_close(&reference, &expected, "clean replay before poisoning");
+
+    let poisoned: Vec<f64> = clean
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            if index % 3 == 0 {
+                f64::NAN
+            } else if index % 3 == 1 {
+                f64::INFINITY
+            } else {
+                *value
+            }
+        })
+        .collect();
+    let poisoned_result = device_replay(
+        &mut ctx,
+        &mut executor,
+        &fixture,
+        &poisoned,
+        &destination,
+        true,
+    );
+    // Negative control: the poisoned source really does reach the workspace and
+    // the destination, so the recovery below is not vacuous.
+    assert!(
+        poisoned_result.iter().any(|value| !value.is_finite()),
+        "the poisoned source never reached the destination: {poisoned_result:?}"
+    );
+    let workspace_bytes = executor.workspace_device_bytes();
+
+    let recovered = device_replay(
+        &mut ctx,
+        &mut executor,
+        &fixture,
+        &clean,
+        &destination,
+        true,
+    );
+
+    assert_close(&recovered, &expected, "replay after a non-finite one");
+    assert_eq!(
+        executor.workspace_device_bytes(),
+        workspace_bytes,
+        "the recovery replay reallocated the workspace instead of reusing it"
+    );
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn alternating_complex_recoupling_structures_upload_their_matrices_once_each() {
+    // What: the per-(structure, dtype, context) key and the shared workspace
+    // behave the same for a complex payload, where every coefficient and every
+    // packed column is twice as wide.
+    let _guard = COUNTER_TESTS.lock().unwrap();
+    let mut ctx = context();
+    let mut executor = CudaTreeTransformExecutor::default();
+    let fixtures = [mixed_single_and_multi(), recoupling_non_symmetric_u()];
+    let prepared: Vec<_> = fixtures
+        .iter()
+        .map(|fixture| (fixture.compile(), fixture.clone()))
+        .collect();
+    let mut buffers: Vec<_> = prepared
+        .iter()
+        .map(|(_, fixture)| {
+            (
+                CudaStorage::<Complex64>::upload(
+                    &ctx,
+                    &vec![Complex64::new(0.0, 0.0); fixture.dst_len()],
+                )
+                .unwrap(),
+                CudaStorage::<Complex64>::upload(&ctx, &fixture.source::<Complex64>()).unwrap(),
+            )
+        })
+        .collect();
+
+    let before = cuda_transfer_stats();
+    let mut after_first_round = before;
+    for round in 0..3 {
+        for (index, (structure, fixture)) in prepared.iter().enumerate() {
+            let (dst, src) = &mut buffers[index];
+            executor
+                .replay(
+                    &mut ctx,
+                    structure,
+                    &fixture.dst_structure(),
+                    &fixture.src_structure(),
+                    dst,
+                    src,
+                    CudaTreeTransformDestination::Overwrite,
+                )
+                .unwrap();
+        }
+        if round == 0 {
+            after_first_round = cuda_transfer_stats();
+        }
+    }
+    let warm = stats_delta(after_first_round, cuda_transfer_stats());
+
+    assert_eq!(executor.prepared_structures(), 2);
+    assert_eq!(warm.h2d_calls, 0, "a switch re-uploaded: {warm:?}");
+    assert_eq!(warm.device_allocs, 0, "a switch allocated: {warm:?}");
+    for (index, (_, fixture)) in prepared.iter().enumerate() {
+        let (dst, _) = &buffers[index];
+        assert_close(
+            &dst.download(&ctx).unwrap(),
+            &fixture.expected(
+                &fixture.source::<Complex64>(),
+                &vec![Complex64::new(0.0, 0.0); fixture.dst_len()],
+                true,
+            ),
+            fixture.name,
+        );
+    }
+}

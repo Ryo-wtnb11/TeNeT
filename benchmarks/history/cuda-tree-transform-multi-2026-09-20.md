@@ -1,8 +1,9 @@
 # Device tree-transform executor: recoupling (Multi) blocks — 2026-09-20
 
-Leaf G2a-3 (issue #1310). Base `origin/main` 053d5a74, branch
+Leaf G2a-3 (issue #1310). Base `origin/main` f032d121, branch
 `g2a3-multi-block-executor`. Design authority `reviews/gpu-phase-20260920/g2-design.md`
-§8; host authority `tenet-operations/src/transform_replay.rs`.
+§8; host authority `tenet-operations/src/transform_replay.rs`. Second revision
+after `g2a3-independent-source-review.md` (P1 + nine P2s).
 
 ## Environment
 
@@ -36,7 +37,7 @@ normalizer's canonical `(dims, dst_strides, src_strides)` triples.
 
 ### GEMM orientation
 
-TensorKit `mul!(dst, src, transpose(U))` (indexmanipulations.jl:626/:731
+TensorKit `mul!(dst, src, transpose(U))` (indexmanipulations.jl:629/:701
 @cfaa073); host `recoupling_gemm_batch` reinterprets the row-major `U[dst, src]`
 payload as the column-major `(src_count × dst_count)` matrix `Uᵀ`. The device
 reads the same buffer as the `[k, n]` operand with leading dimension
@@ -48,21 +49,55 @@ transposed `U` gives a *different* expected buffer and that the host reproduces
 the untransposed one, and `recoupling_rectangular` makes a transposed
 orientation a shape error outright.
 
+## Categorical evidence (provider-compiled structures)
+
+The acceptance gate's SU(2) and fermionic recoupling evidence is in
+`tenet-tensors/tests/`, reached through the public
+`TreeTransformCache::get_or_compile_tree_pair_structures_with_storage_conjugation`
+— one level below the typed `TensorMap` API, so no G2b surface is needed.
+
+- Fixtures: SU(2) permute / braid / planar transpose over the four-leg
+  two-channel F move (degeneracy 1 and 2), and over a six-leg **five-channel**
+  space whose `U` is **not** symmetric; the fZ2 ⊠ SU(2) counterparts of both,
+  with and without `storage_conjugate`. Twelve compiled fixtures in total.
+- **Which fermionic rule recouples:** plain fZ2 is `FusionStyleKind::Unique`, so
+  every fusion tree of a key is forced, every F move is 1×1 and the compiled
+  structure has `Single` blocks only — pinned by
+  `a_fermionic_abelian_rule_compiles_to_single_blocks_only`. The product
+  **fZ2 ⊠ SU(2)** keeps `BraidingStyleKind::Fermionic`
+  (`Fermionic ⊞ Bosonic = Fermionic`) while `Unique ⊞ Simple = Simple` supplies
+  the channels, so it is the one rule here whose recoupling matrix carries
+  fermionic signs; `the_fermionic_recoupling_matrix_differs_from_the_bosonic_one`
+  pins that its coefficients are not the bosonic ones.
+- Oracle: a triple loop over `blocks()`, `layouts().{entry,shape,strides}` and
+  `recoupling_coefficients_dst_src()` with **unbaked** strides — no baked arena,
+  no recoupling plan, no packed column, no GEMM.
+- Orientation on provider data: the two-channel SU(2) matrix is its own
+  transpose (real 6j data, but blind to a reversed orientation), so the control
+  uses the five-channel one, where the transposed walk gives a different buffer
+  and both host and device land on the untransposed one.
+
 ## Cache and workspace accounting
 
 - Structure cache: key `(Weak structure identity, dtype, context)`; bounded by
-  `DEFAULT_COEFFICIENT_BUDGET_BYTES` (16 MiB) and now also by
-  `MAX_STRUCTURE_CACHE_ENTRIES` (32), which is what keeps the lookup scan O(1).
-  One entry holds `len(coefficients) + Σ_j src_count_j·dst_count_j` elements.
+  `DEFAULT_COEFFICIENT_BUDGET_BYTES` (16 MiB) and by a constructor-supplied
+  entry count defaulting to `DEFAULT_STRUCTURE_CACHE_ENTRIES` (256) — the host
+  transform cache's own bound, so a working set that is warm on the host stays
+  warm here. One entry holds `len(coefficients)` elements: the whole converted
+  payload, indexed exactly as the structure indexes it, with **no re-pack** of
+  the recoupling matrices (a Multi block's matrix is the run at its own
+  `coefficient_start`). One key scan per replay resolves the entry to an index.
 - Workspace: one pair of buffers per (dtype, context), sized
   `Σ_b element_count_b · src_count_b` and `Σ_b element_count_b · dst_count_b`,
   never shrunk, reported by `workspace_device_bytes()` and included in
   `retained_device_bytes()`.
-- Disclosed constants: Tenferro 0.5.0 creates a device buffer only by uploading
-  one, so each workspace growth costs one H2D of zeros (values irrelevant —
-  every column is fully written before it is read). Pack and scatter multiply by
-  the context's `1` where the host copies, the same disclosed deviation G2a-1
-  recorded for Single blocks.
+- Disclosed constants: each workspace growth costs one H2D of zeros, the way
+  every other device allocation in TeNeT is made (#740); Tenferro 0.5.0's
+  `cubecl::Session::alloc_zero_output` is unusable here (broken for complex
+  dtypes, tenferro-rs#1833; unpublished for kernel-written outputs), and G3c
+  does not use it either. Values are irrelevant — every column is fully written
+  before it is read. Pack and scatter multiply by the context's `1` where the
+  host copies, the same disclosed deviation G2a-1 recorded for Single blocks.
 
 Measured on A100 for `alternating_recoupling_structures_…`: the first round of
 two alternating Multi structures pays 6 H2D calls (one coefficient-and-matrix
@@ -74,41 +109,44 @@ allocations, workspace bytes unchanged, 12 submissions (1 Single + 1 zero fill +
 
 ## Device suite
 
-New/changed tests, `cargo test -p tenet-operations --test cuda_tree_transform …
--- --ignored --test-threads=1`:
+New/changed tests, `cargo test -p tenet-operations --test cuda_tree_transform
+-p tenet-tensors --test cuda_tree_transform_categorical … -- --ignored
+--test-threads=1`:
 
 ```
-test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.87s
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.32s
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.41s
 ```
 
 Full device suite, `cargo test --workspace --lib --tests --no-default-features
 --features cuda,cpu-faer --no-fail-fast -- --ignored --skip
 measure_checked_generic_transform_phases --skip axioms_ --skip itebd_ --skip
-cross_library --test-threads=1` — 102 result lines, all `ok`, 111 tests passed,
+cross_library --test-threads=1` — 105 result lines, all `ok`, 116 tests passed,
 0 failed, no panic and no `error:` in the log. Non-empty binaries:
 
 ```
-test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 71 filtered out; finished in 1.92s
-test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.77s
-test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.49s
-test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.14s
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 71 filtered out; finished in 1.79s
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.56s
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.04s
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.93s
 test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.54s
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 50 filtered out; finished in 0.89s
-test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.46s
-test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.62s
-test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 116 filtered out; finished in 5.52s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 50 filtered out; finished in 0.88s
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.52s
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.04s
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 116 filtered out; finished in 5.22s
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 82 filtered out; finished in 0.88s
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.89s
-test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.38s
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 539 filtered out; finished in 0.89s
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.18s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 539 filtered out; finished in 0.85s
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.39s
 ```
 
 ## Residuals
 
-- Real symmetry-provider fixtures (SU(2), fermionic product rules) exercise this
-  path only through the typed `TensorMap` API, which is leaf G2b. The Multi
-  semantics are covered here at the structure level with an independent oracle;
-  the categorical fixtures land with G2b.
+- A codomain/domain **repartition** needs a second tree-pair space (the
+  destination's trees are split differently), so the categorical suite covers
+  the `Transpose` *kind* through a planar rotation and leaves the repartitioning
+  variant to G2b, where the typed API builds both spaces.
 - The GEMM is submitted one job at a time, as the host's serial driver does.
   Grouping equal-shape jobs into one strided batch is Tenferro wishlist W9.
 - A dtype change reallocates that (dtype, context)'s workspace rather than

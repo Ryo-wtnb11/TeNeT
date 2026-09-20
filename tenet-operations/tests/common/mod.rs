@@ -786,6 +786,91 @@ pub fn conjugated_recoupling() -> Fixture {
     }
 }
 
+/// A recoupling group with one source and several destinations, and its
+/// mirror with several sources and one destination.
+///
+/// `1xN` and `Nx1` are the shapes a real fusion-tree population produces
+/// whenever a coupled sector has one channel on one side and several on the
+/// other. They also pin the GEMM's degenerate dimensions: a `1xN` job is
+/// `contracted == 1` and an `Nx1` job is `cols == 1`, either of which a
+/// shape-inferring lowering could silently transpose.
+pub fn recoupling_one_to_many() -> Fixture {
+    Fixture {
+        name: "recoupling_one_to_many",
+        rank: 2,
+        dst_blocks: vec![
+            Block::packed(vec![2, 3], 0),
+            Block::packed(vec![2, 3], 6),
+            Block::packed(vec![2, 3], 12),
+        ],
+        src_blocks: vec![Block::packed(vec![3, 2], 0)],
+        pairs: Vec::new(),
+        groups: vec![Group {
+            dst_blocks: vec![0, 1, 2],
+            src_blocks: vec![0],
+            axes: vec![1, 0],
+            u: vec![1.5, -0.25, 3.0],
+        }],
+        conjugate: false,
+    }
+}
+
+pub fn recoupling_many_to_one() -> Fixture {
+    Fixture {
+        name: "recoupling_many_to_one",
+        rank: 2,
+        dst_blocks: vec![Block::packed(vec![2, 3], 0)],
+        src_blocks: vec![
+            Block::packed(vec![3, 2], 0),
+            Block::packed(vec![3, 2], 6),
+            Block::packed(vec![3, 2], 12),
+        ],
+        pairs: Vec::new(),
+        groups: vec![Group {
+            dst_blocks: vec![0],
+            src_blocks: vec![0, 1, 2],
+            axes: vec![1, 0],
+            u: vec![1.5, -0.25, 3.0],
+        }],
+        conjugate: false,
+    }
+}
+
+/// Two recoupling groups of exactly the same `(element_count, src_count,
+/// dst_count)`, so their GEMMs share one cuTENSOR plan and the recoupling plan
+/// orders them by block index rather than by shape.
+///
+/// This is the common case in a real fusion-tree population — many coupled
+/// sectors with the same channel count — and the one where a device that
+/// addressed a job's matrix by anything but its own offset would silently use
+/// its neighbour's.
+pub fn equal_shape_recoupling_jobs() -> Fixture {
+    Fixture {
+        name: "equal_shape_recoupling_jobs",
+        rank: 2,
+        dst_blocks: (0..4).map(|i| Block::packed(vec![2, 3], i * 6)).collect(),
+        src_blocks: (0..4).map(|i| Block::packed(vec![3, 2], i * 6)).collect(),
+        pairs: Vec::new(),
+        groups: vec![
+            Group {
+                dst_blocks: vec![0, 1],
+                src_blocks: vec![0, 1],
+                axes: vec![1, 0],
+                u: vec![1.0, 2.0, 0.5, -3.0],
+            },
+            Group {
+                dst_blocks: vec![2, 3],
+                src_blocks: vec![2, 3],
+                axes: vec![1, 0],
+                // Deliberately a different matrix of the same shape: swapping
+                // the two jobs' matrices must change the answer.
+                u: vec![-0.75, 4.0, 2.25, 1.0],
+            },
+        ],
+        conjugate: false,
+    }
+}
+
 /// A recoupling group one of whose scatter destinations is the interleaved
 /// layout only the host's exact overlap fallback admits.
 ///
@@ -821,6 +906,9 @@ pub fn recoupling_fixtures() -> Vec<Fixture> {
     vec![
         recoupling_non_symmetric_u(),
         recoupling_rectangular(),
+        recoupling_one_to_many(),
+        recoupling_many_to_one(),
+        equal_shape_recoupling_jobs(),
         mixed_single_and_multi(),
         conjugated_recoupling(),
     ]

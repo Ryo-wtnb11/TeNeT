@@ -19,7 +19,7 @@
 //! `add_transform!` / `add_transform_kernel!`
 //! (src/tensors/indexmanipulations.jl:547/:579/:648/:660 @cfaa073), whose
 //! recoupling step is `mul!(dst, src, transpose(U))`
-//! (indexmanipulations.jl:626/:731 @cfaa073), and QSpace `Permute`/`permute`
+//! (indexmanipulations.jl:629/:701 @cfaa073), and QSpace `Permute`/`permute`
 //! (Source/QSpace.hh:2837/:2890 @dd2cc7e). Host authority for the lowering is
 //! `transform_replay.rs`: `pack_layout_into_column`, `recoupling_gemm_batch`,
 //! `scatter_column_into_layout`.
@@ -36,7 +36,7 @@ use tenet_dense::{
 use crate::cuda::CudaStorage;
 use crate::cuda_transform_plan::{
     compile_device_plan, plan_cache_entries_for, DeviceMoveSpec, DeviceTransformPlan,
-    StructureCache, StructureKey,
+    StructureCache, StructureKey, DEFAULT_STRUCTURE_CACHE_ENTRIES,
 };
 use crate::opaque_admission::{
     validate_stage_a, validate_stage_c, AllocationIdentity, CoefficientReadiness, ContextIdentity,
@@ -77,10 +77,12 @@ struct PreparedRecoupling {
     packs: Vec<PreparedMove>,
     scatters: Vec<PreparedMove>,
     /// Workspace destination offset, workspace source offset, and the offset of
-    /// this block's recoupling matrix inside the uploaded coefficient vector.
+    /// this block's recoupling matrix inside the uploaded coefficient vector —
+    /// the block's own `coefficient_start`, because the device holds the whole
+    /// converted payload and needs no re-pack.
     dst_offset: usize,
     lhs_offset: usize,
-    rhs_offset: usize,
+    matrix_offset: usize,
     rows: usize,
     contracted: usize,
     cols: usize,
@@ -97,17 +99,20 @@ struct PreparedStructure {
     zeros: Vec<CudaRegion>,
     max_zero_len: usize,
     plan_signatures: usize,
-    /// The structure's coefficients converted to the payload dtype and
-    /// uploaded as one device vector, followed by the recoupling matrices
-    /// re-packed in the recoupling plan's job order. Block `b`'s scalar is the
-    /// 1x1 operand at its own index; job `j`'s matrix starts at
-    /// `recoupling_base + job.rhs_offset`. `None` only for a structure with no
+    /// The structure's whole coefficient payload converted to the payload dtype
+    /// and uploaded as one device vector. Block `b`'s scalar is the 1x1 operand
+    /// at its own index and Multi block `b`'s recoupling matrix is the
+    /// `S_b x D_b` run at its own `coefficient_start`, both addressed exactly as
+    /// the structure indexes them. `None` only for a structure with no
     /// coefficients at all.
     coefficients: Option<CudaDenseStorage>,
-    /// Where the re-packed recoupling matrices start in `coefficients`.
-    recoupling_base: usize,
-    /// How many elements of `coefficients` the recoupling matrices occupy.
+    /// How many elements of the payload the recoupling matrices occupy, which
+    /// is what Stage C requires of the converted-coefficient slot.
     recoupling_len: usize,
+    /// The coefficient-readiness fact, recorded when the upload happened rather
+    /// than rebuilt from the lookup key at replay time: Stage C then checks
+    /// something this executor observed, not something it restated.
+    readiness: CoefficientReadiness,
 }
 
 /// The device scratch a Multi replay packs into and scatters out of, held per
@@ -151,6 +156,7 @@ pub struct CudaTreeTransformExecutor {
     /// structure so that two structures of the same dtype reuse one allocation.
     workspaces: Vec<DeviceWorkspace>,
     coefficient_budget_bytes: usize,
+    structure_entries: usize,
     plan_cache_budget_bytes: usize,
     required_plan_entries: usize,
 }
@@ -179,11 +185,34 @@ impl Default for CudaTreeTransformExecutor {
 }
 
 impl CudaTreeTransformExecutor {
+    /// An executor whose prepared-structure cache is bounded by
+    /// [`DEFAULT_STRUCTURE_CACHE_ENTRIES`] entries.
     pub fn new(coefficient_budget_bytes: usize, plan_cache_budget_bytes: usize) -> Self {
+        Self::with_structure_entries(
+            coefficient_budget_bytes,
+            plan_cache_budget_bytes,
+            DEFAULT_STRUCTURE_CACHE_ENTRIES,
+        )
+    }
+
+    /// An executor whose prepared-structure cache keeps at most
+    /// `structure_entries` structures.
+    ///
+    /// The bound belongs to the caller because it is the device half of the
+    /// host transform cache's own bound: a workload whose structures are warm
+    /// on the host must stay warm here, or the zero-transfer replay contract
+    /// quietly stops holding. Sizing it below the host's is a memory decision,
+    /// never a correctness one.
+    pub fn with_structure_entries(
+        coefficient_budget_bytes: usize,
+        plan_cache_budget_bytes: usize,
+        structure_entries: usize,
+    ) -> Self {
         Self {
-            prepared: StructureCache::new(coefficient_budget_bytes),
+            prepared: StructureCache::new(coefficient_budget_bytes, structure_entries),
             workspaces: Vec::new(),
             coefficient_budget_bytes,
+            structure_entries,
             plan_cache_budget_bytes,
             required_plan_entries: 0,
         }
@@ -224,7 +253,7 @@ impl CudaTreeTransformExecutor {
     /// Drops every prepared structure. The next replay re-prepares whatever it
     /// needs, so this is a memory decision, never a correctness one.
     pub fn clear(&mut self) {
-        self.prepared = StructureCache::new(self.coefficient_budget_bytes);
+        self.prepared = StructureCache::new(self.coefficient_budget_bytes, self.structure_entries);
         self.workspaces.clear();
         self.required_plan_entries = 0;
     }
@@ -322,9 +351,35 @@ impl CudaTreeTransformExecutor {
             scalar: TypeId::of::<D>(),
             context: ctx.identity(),
         };
-        self.prepare::<D, C>(ctx, task, &key)?;
+        // One key scan per replay: the entry is resolved to an index here and
+        // everything below reads it through that index.
+        let index = match self.prepared.position(&key) {
+            Some(index) => index,
+            None => {
+                self.prepare::<D, C>(ctx, task, &key)?;
+                self.prepared
+                    .position(&key)
+                    .ok_or(OperationError::InvalidArgument {
+                        message: "device tree transform state was not prepared",
+                    })?
+            }
+        };
 
-        let workspace = self.workspace_snapshot::<D>(&key, executor)?;
+        let Self {
+            prepared,
+            workspaces,
+            ..
+        } = self;
+        let prepared = prepared
+            .touch(index)
+            .ok_or(OperationError::InvalidArgument {
+                message: "device tree transform state disappeared between preparation and replay",
+            })?;
+        let scratch = workspaces.iter().position(|workspace| {
+            workspace.scalar == TypeId::of::<D>() && workspace.context == key.context
+        });
+        let workspace =
+            workspace_snapshot::<D>(prepared, scratch.map(|index| &workspaces[index]), executor);
         validate_stage_c::<D, C>(
             task,
             dst_snapshot,
@@ -334,18 +389,14 @@ impl CudaTreeTransformExecutor {
             &admission,
         )?;
 
-        let Self {
-            prepared,
-            workspaces,
-            ..
-        } = self;
-        let prepared = prepared
-            .get(&key)
-            .ok_or_else(|| OperationError::InvalidArgument {
-                message: "device tree transform state disappeared between preparation and replay",
-            })?;
-        let conjugate = task.storage_conjugate();
+        // Idempotent once the template is long enough, so a warm replay uploads
+        // nothing; sized from the structure's longest inactive layout rather
+        // than grown one fill at a time. After Stage C, so no admission verdict
+        // is still outstanding when it uploads.
+        ctx.reserve_zero_template::<D>(prepared.max_zero_len)
+            .map_err(OperationError::Dense)?;
 
+        let conjugate = task.storage_conjugate();
         if matches!(mode, CudaTreeTransformDestination::Overwrite) {
             for zero in &prepared.zeros {
                 cuda_region_zero::<D>(ctx, &mut dst.0, zero).map_err(OperationError::Dense)?;
@@ -365,20 +416,17 @@ impl CudaTreeTransformExecutor {
         if !prepared.needs_workspace {
             return Ok(());
         }
-        let scratch = workspaces
-            .iter_mut()
-            .find(|workspace| {
-                workspace.scalar == TypeId::of::<D>() && workspace.context == key.context
-            })
-            .ok_or_else(|| OperationError::InvalidArgument {
+        let scratch = scratch.map(|index| &mut workspaces[index]).ok_or(
+            OperationError::InvalidArgument {
                 message:
                     "device tree transform workspace disappeared between preparation and replay",
-            })?;
+            },
+        )?;
         let coefficients =
             prepared
                 .coefficients
                 .as_ref()
-                .ok_or_else(|| OperationError::InvalidArgument {
+                .ok_or(OperationError::InvalidArgument {
                     message: "device tree transform recoupling block has no uploaded matrix",
                 })?;
         // Host order exactly: pack every source column of one job, multiply,
@@ -411,7 +459,7 @@ impl CudaTreeTransformExecutor {
                     &scratch.source,
                     recoupling.lhs_offset,
                     coefficients,
-                    prepared.recoupling_base + recoupling.rhs_offset,
+                    recoupling.matrix_offset,
                     recoupling.rows,
                     recoupling.contracted,
                     recoupling.cols,
@@ -435,62 +483,6 @@ impl CudaTreeTransformExecutor {
         Ok(())
     }
 
-    /// Describes the device workspace and the uploaded recoupling matrices for
-    /// Stage C, exactly as they now exist.
-    fn workspace_snapshot<D: CudaScalar + 'static>(
-        &self,
-        key: &StructureKey,
-        executor: ExecutorSnapshot,
-    ) -> Result<WorkspaceSnapshot, OperationError> {
-        let prepared = self
-            .prepared
-            .peek(key)
-            .ok_or_else(|| OperationError::InvalidArgument {
-                message: "device tree transform state disappeared between preparation and replay",
-            })?;
-        let scratch = self.workspaces.iter().find(|workspace| {
-            workspace.scalar == TypeId::of::<D>() && workspace.context == key.context
-        });
-        // The whole resident buffer is the slot's capacity: Stage C compares it
-        // with what this structure requires, so reporting the high-water mark a
-        // longer structure grew it to is the honest number.
-        let slot = |storage: Option<&CudaDenseStorage>, start: usize, capacity: usize| {
-            storage.map_or_else(
-                || empty_workspace_snapshot(executor),
-                |storage| device_slot_snapshot::<D>(storage, executor, start, capacity),
-            )
-        };
-        Ok(WorkspaceSnapshot {
-            packed_source: slot(scratch.map(|scratch| &scratch.source), 0, usize::MAX),
-            packed_destination: slot(scratch.map(|scratch| &scratch.destination), 0, usize::MAX),
-            converted_coefficients: if prepared.recoupling_len == 0 {
-                empty_workspace_snapshot(executor)
-            } else {
-                slot(
-                    prepared.coefficients.as_ref(),
-                    prepared.recoupling_base,
-                    prepared.recoupling_len,
-                )
-            },
-            fused_index_capacity: 0,
-            fused_index_placement: executor.placement,
-            coefficient_readiness: Some(CoefficientReadiness {
-                structure_and_layout: key.structure.clone(),
-                scalar: TypeId::of::<D>(),
-                context: executor.context,
-            }),
-        })
-    }
-
-    /// Builds this structure's device regions and uploads its coefficient
-    /// vector, unless the state is already prepared for this dtype and
-    /// context. Runs after Stage A, so nothing is uploaded for a task the
-    /// admission rejects.
-    ///
-    /// Every layout the replay will submit is validated *before* the upload,
-    /// so a structure the device cannot express leaves no trace: no upload, no
-    /// cache entry, no plan-cache change, and a destination the caller still
-    /// owns untouched.
     fn prepare<D, C>(
         &mut self,
         ctx: &mut CudaDenseContext,
@@ -501,72 +493,45 @@ impl CudaTreeTransformExecutor {
         D: CudaScalar + RecouplingCoefficientAction<C> + 'static,
         C: Copy,
     {
-        if self.prepared.get(key).is_none() {
-            // Everything that can reject the structure runs here, before the
-            // first byte crosses to the device: every region's expressibility
-            // and destination-writability, the recoupling plan's agreement
-            // with its blocks, and the workspace size arithmetic.
-            let plan = compile_device_plan(task)?;
-            task.validate_workspace_requirements::<D>()?;
-            let mut prepared = prepared_structure(&plan)?;
+        // Everything that can reject the structure runs here, before the first
+        // byte crosses to the device: every region's expressibility and
+        // destination-writability, the recoupling plan's agreement with its
+        // blocks, and the workspace size arithmetic.
+        let plan = compile_device_plan(task)?;
+        task.validate_workspace_requirements::<D>()?;
+        let mut prepared = prepared_structure(
+            &plan,
+            CoefficientReadiness {
+                structure_and_layout: key.structure.clone(),
+                scalar: TypeId::of::<D>(),
+                context: ContextIdentity(key.context),
+            },
+            task.workspace_requirements().converted_coefficient_len,
+        )?;
 
-            self.grow_workspace::<D>(
-                ctx,
-                key.context,
-                plan.workspace_source_len,
-                plan.workspace_destination_len,
-            )?;
+        self.grow_workspace::<D>(
+            ctx,
+            key.context,
+            plan.workspace_source_len,
+            plan.workspace_destination_len,
+        )?;
 
-            // One upload holds both: the block coefficients indexed as the
-            // structure indexes them, followed by the recoupling matrices
-            // re-packed in the recoupling plan's job order, which is the order
-            // the jobs' `rhs_offset`s address (host
-            // `ensure_recoupling_coefficients`).
-            let mut values: Vec<D> = Vec::with_capacity(
-                task.coefficients()
-                    .len()
-                    .saturating_add(plan.coefficient_len()),
+        // The whole payload, converted once, indexed exactly as the structure
+        // indexes it: a Single block's scalar at its own coefficient index and a
+        // Multi block's matrix as the run at its own `coefficient_start`.
+        let values: Vec<D> = task
+            .coefficients()
+            .iter()
+            .map(|coefficient| D::coefficient_as_data(*coefficient))
+            .collect();
+        let device_bytes = core::mem::size_of_val(values.as_slice());
+        if !values.is_empty() {
+            prepared.coefficients = Some(
+                CudaDenseStorage::upload_owned::<D>(ctx, values).map_err(OperationError::Dense)?,
             );
-            values.extend(
-                task.coefficients()
-                    .iter()
-                    .map(|coefficient| D::coefficient_as_data(*coefficient)),
-            );
-            prepared.recoupling_base = values.len();
-            for range in &plan.coefficient_ranges {
-                let matrix = task.coefficients().get(range.clone()).ok_or(
-                    OperationError::CoefficientCountMismatch {
-                        expected: range.end,
-                        actual: task.coefficients().len(),
-                    },
-                )?;
-                values.extend(
-                    matrix
-                        .iter()
-                        .map(|coefficient| D::coefficient_as_data(*coefficient)),
-                );
-            }
-            prepared.recoupling_len = values.len() - prepared.recoupling_base;
-            let device_bytes = core::mem::size_of_val(values.as_slice());
-            if !values.is_empty() {
-                prepared.coefficients = Some(
-                    CudaDenseStorage::upload_owned::<D>(ctx, values)
-                        .map_err(OperationError::Dense)?,
-                );
-            }
-            self.prepared.insert(key.clone(), prepared, device_bytes);
-            self.refresh_plan_cache(ctx)?;
         }
-        // Idempotent once the template is long enough, so a warm replay
-        // uploads nothing; sized from the structure's longest inactive layout
-        // rather than grown one fill at a time.
-        let max_zero_len = self
-            .prepared
-            .get(key)
-            .map_or(0, |prepared| prepared.max_zero_len);
-        ctx.reserve_zero_template::<D>(max_zero_len)
-            .map_err(OperationError::Dense)?;
-        Ok(())
+        self.prepared.insert(key.clone(), prepared, device_bytes);
+        self.refresh_plan_cache(ctx)
     }
 
     /// Makes this (dtype, context)'s transform workspace hold at least
@@ -604,10 +569,13 @@ impl CudaTreeTransformExecutor {
             .checked_add(destination_len)
             .and_then(|len| len.checked_mul(core::mem::size_of::<D>()))
             .ok_or(OperationError::ElementCountOverflow)?;
-        // Tenferro 0.5.0 creates a device buffer only by uploading one, so the
-        // growth costs one host↔device transfer of zeros. The values are
-        // irrelevant — every column is fully written before it is read — and a
-        // warm replay pays none of it.
+        // Growth costs one host↔device transfer of zeros per buffer, the same
+        // way every other device allocation in TeNeT is made (#740).
+        // `cubecl::Session::alloc_zero_output` exists in Tenferro 0.5.0 but is
+        // unusable here: it is broken for complex dtypes (tenferro-rs#1833) and
+        // unpublished for kernel-written outputs. The values are irrelevant —
+        // every column is fully written before it is read — and a warm replay
+        // pays none of it.
         let source = CudaDenseStorage::upload_owned::<D>(ctx, vec![D::ZERO; source_len])
             .map_err(OperationError::Dense)?;
         let destination = CudaDenseStorage::upload_owned::<D>(ctx, vec![D::ZERO; destination_len])
@@ -653,7 +621,11 @@ impl CudaTreeTransformExecutor {
 /// all-or-nothing capability boundary instead of a partial overwrite. Pack
 /// columns are checked too: they write the workspace, and a source layout the
 /// device cannot read is caught by the same region construction.
-fn prepared_structure(plan: &DeviceTransformPlan) -> Result<PreparedStructure, OperationError> {
+fn prepared_structure(
+    plan: &DeviceTransformPlan,
+    readiness: CoefficientReadiness,
+    recoupling_len: usize,
+) -> Result<PreparedStructure, OperationError> {
     let mut moves = Vec::with_capacity(plan.moves.len());
     for entry in &plan.moves {
         moves.push(prepared_move(entry)?);
@@ -673,7 +645,7 @@ fn prepared_structure(plan: &DeviceTransformPlan) -> Result<PreparedStructure, O
             scatters,
             dst_offset: entry.job.dst_offset,
             lhs_offset: entry.job.lhs_offset,
-            rhs_offset: entry.job.rhs_offset,
+            matrix_offset: entry.matrix_offset,
             rows: entry.job.rows,
             contracted: entry.job.contracted,
             cols: entry.job.cols,
@@ -694,8 +666,8 @@ fn prepared_structure(plan: &DeviceTransformPlan) -> Result<PreparedStructure, O
         max_zero_len: plan.max_zero_len,
         plan_signatures: plan.plan_signatures,
         coefficients: None,
-        recoupling_base: 0,
-        recoupling_len: 0,
+        recoupling_len,
+        readiness,
     })
 }
 
@@ -819,21 +791,46 @@ fn storage_snapshot<D: CudaScalar>(
     }
 }
 
-/// Admission facts of a slice of a device buffer this executor owns: the
-/// transform workspace, or the recoupling matrices inside the uploaded
-/// coefficient vector.
+/// Describes the device workspace and the uploaded recoupling matrices for
+/// Stage C, exactly as they now exist.
 ///
-/// `start` and `capacity` are the slice's own element range, so Stage C's
-/// aliasing check sees the recoupling matrices as distinct from the block
-/// coefficients in the same allocation, and a workspace that happens to be
-/// longer than the structure needs is reported at its true capacity.
+/// The whole resident workspace buffer is the slot's capacity: Stage C compares
+/// it with what this structure requires, so reporting the high-water mark a
+/// wider structure grew it to is the honest number. The coefficient slot is the
+/// whole uploaded payload, of which the recoupling matrices are the part Stage C
+/// counts.
+fn workspace_snapshot<D: CudaScalar>(
+    prepared: &PreparedStructure,
+    scratch: Option<&DeviceWorkspace>,
+    executor: ExecutorSnapshot,
+) -> WorkspaceSnapshot {
+    let slot = |storage: Option<&CudaDenseStorage>| {
+        storage.map_or_else(
+            || empty_workspace_snapshot(executor),
+            |storage| device_slot_snapshot::<D>(storage, executor),
+        )
+    };
+    WorkspaceSnapshot {
+        packed_source: slot(scratch.map(|scratch| &scratch.source)),
+        packed_destination: slot(scratch.map(|scratch| &scratch.destination)),
+        converted_coefficients: if prepared.recoupling_len == 0 {
+            empty_workspace_snapshot(executor)
+        } else {
+            slot(prepared.coefficients.as_ref())
+        },
+        fused_index_capacity: 0,
+        fused_index_placement: executor.placement,
+        coefficient_readiness: Some(prepared.readiness.clone()),
+    }
+}
+
+/// Admission facts of a device buffer this executor owns: a transform workspace
+/// buffer, or the uploaded coefficient payload.
 fn device_slot_snapshot<D: CudaScalar>(
     storage: &CudaDenseStorage,
     executor: ExecutorSnapshot,
-    start: usize,
-    capacity: usize,
 ) -> StorageSnapshot {
-    let capacity = capacity.min(storage.len().saturating_sub(start));
+    let capacity = storage.len();
     StorageSnapshot {
         active_len: capacity,
         usable_capacity: capacity,
@@ -845,7 +842,7 @@ fn device_slot_snapshot<D: CudaScalar>(
             StorageRegion::Bytes {
                 domain: StorageDomain(storage.device() as u64),
                 allocation: AllocationIdentity(std::ptr::from_ref(storage) as u64),
-                start: start.saturating_mul(core::mem::size_of::<D>()),
+                start: 0,
                 len: capacity.saturating_mul(core::mem::size_of::<D>()),
             }
         },

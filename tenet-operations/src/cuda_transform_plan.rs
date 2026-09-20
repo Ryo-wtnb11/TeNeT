@@ -11,7 +11,6 @@
 //! feature (the same split `tenet-dense`'s `cuda_region` makes).
 
 use core::any::TypeId;
-use core::ops::Range;
 use std::collections::HashSet;
 use std::sync::Weak;
 
@@ -59,6 +58,17 @@ pub(crate) struct DeviceRecouplingSpec {
     pub(crate) packs: Vec<DeviceMoveSpec>,
     pub(crate) scatters: Vec<DeviceMoveSpec>,
     pub(crate) job: DenseGemmBatchJob,
+    /// Where this block's recoupling matrix starts in the structure's own
+    /// coefficient payload.
+    ///
+    /// The host re-packs the matrices into a dense scratch vector in plan order
+    /// and addresses them through `job.rhs_offset`, because its scratch holds
+    /// only the converted matrices. The device uploads the *whole* converted
+    /// payload — it needs the Single blocks' scalars from it anyway — so the
+    /// block's own `coefficient_start` already names its matrix, with its
+    /// row-major interior untouched. Re-packing would upload `Σ_b S_b·D_b`
+    /// elements a second time for no addressing gain.
+    pub(crate) matrix_offset: usize,
 }
 
 /// The device lowering of one completed structure: its Single blocks, its Multi
@@ -69,10 +79,6 @@ pub(crate) struct DeviceTransformPlan {
     pub(crate) moves: Vec<DeviceMoveSpec>,
     pub(crate) recouplings: Vec<DeviceRecouplingSpec>,
     pub(crate) zeros: Vec<DeviceRegionSpec>,
-    /// Ranges of the structure's coefficient payload holding each Multi block's
-    /// recoupling matrix, in the recoupling plan's own entry order — the order
-    /// the jobs' `rhs_offset`s address.
-    pub(crate) coefficient_ranges: Vec<Range<usize>>,
     /// Workspace elements the packs write and the GEMMs read.
     pub(crate) workspace_source_len: usize,
     /// Workspace elements the GEMMs write and the scatters read.
@@ -81,14 +87,6 @@ pub(crate) struct DeviceTransformPlan {
     pub(crate) max_zero_len: usize,
     /// Distinct cuTENSOR operand signatures this plan submits.
     pub(crate) plan_signatures: usize,
-}
-
-impl DeviceTransformPlan {
-    /// Recoupling matrix elements the device holds beside the structure's
-    /// coefficient vector, in plan-entry order.
-    pub(crate) fn coefficient_len(&self) -> usize {
-        self.coefficient_ranges.iter().map(Range::len).sum()
-    }
 }
 
 fn unsupported(message: &'static str) -> OperationError {
@@ -177,7 +175,6 @@ pub(crate) fn compile_device_plan<C: Copy>(
 
     let recoupling_plan = task.recoupling_plan();
     let mut recouplings = Vec::with_capacity(recoupling_plan.jobs().len());
-    let mut coefficient_ranges = Vec::with_capacity(recoupling_plan.jobs().len());
     for (block_index, job) in recoupling_plan.entries() {
         let block = task
             .blocks()
@@ -213,7 +210,6 @@ pub(crate) fn compile_device_plan<C: Copy>(
                 actual: task.coefficients().len(),
             });
         }
-        coefficient_ranges.push(coefficient_start..coefficient_end);
         let mut packs = Vec::with_capacity(src_count);
         for src_index in 0..src_count {
             let entry = src_layout_start + src_index;
@@ -240,6 +236,7 @@ pub(crate) fn compile_device_plan<C: Copy>(
             packs,
             scatters,
             job: *job,
+            matrix_offset: coefficient_start,
         });
     }
 
@@ -266,12 +263,12 @@ pub(crate) fn compile_device_plan<C: Copy>(
         });
     }
 
-    let plan_signatures = distinct_plan_signatures(&moves, &recouplings, &zeros)?;
+    let plan_signatures =
+        distinct_plan_signatures(&moves, &recouplings, &zeros, task.storage_conjugate())?;
     Ok(DeviceTransformPlan {
         moves,
         recouplings,
         zeros,
-        coefficient_ranges,
         workspace_source_len: recoupling_plan.source_len(),
         workspace_destination_len: recoupling_plan.destination_len(),
         max_zero_len,
@@ -334,31 +331,53 @@ fn column_move<C: Copy>(
 
 /// Distinct cuTENSOR contraction signatures this plan submits.
 ///
-/// One plan is built per `(dims, destination strides, source strides)` triple;
-/// a zero fill reads a packed template of the fill's own extents, so its source
-/// strides are the packed ones.
+/// One plan is built per `(dims, destination strides, source strides,
+/// source conjugation)` triple; a zero fill reads a packed template of the
+/// fill's own extents, so its source strides are the packed ones.
 ///
-/// Exact per conjugation value: Tenferro's contraction plan key is (dtype,
-/// the three operand layouts, their alignments, the operand operators,
-/// workspace preference). Alignment is the constant `size_of::<D>()` for every
-/// view, so offsets do not multiply keys, and the accumulation scalars are not
-/// in the key at all; conjugation is, and it is one value per structure. The
-/// per-executor *sum* of these counts therefore over-counts signatures two
-/// structures share, which is the safe direction for a cap.
+/// Exact per operand operator: Tenferro's contraction plan key is (dtype, the
+/// three operand layouts, their alignments, the operand operators, workspace
+/// preference). Alignment is the constant `size_of::<D>()` for every view, so
+/// offsets do not multiply keys, and the accumulation scalars are not in the
+/// key at all. Conjugation *is* in the key, and a structure submits two values
+/// of it once `storage_conjugate` is set: the Single blocks and the pack
+/// columns read the conjugated source, while the scatter columns and the zero
+/// fills read the workspace and the zero template unconjugated. A pack and a
+/// scatter that normalise to the same triple — two contiguous columns are both
+/// `([N], [1], [1])` — are therefore two plans, and counting them once would
+/// under-raise the cap by exactly the amount a conjugated transform needs.
+///
+/// The per-executor *sum* of these counts over-counts signatures two structures
+/// share, which is the safe direction for a cap.
+/// `(dims, destination strides, source strides, source conjugation)` — the
+/// operand facts a cuTENSOR plan is keyed on, for the region moves this plan
+/// submits.
+type RegionSignature<'a> = (&'a [usize], &'a [usize], Vec<usize>, bool);
+
 fn distinct_plan_signatures(
     moves: &[DeviceMoveSpec],
     recouplings: &[DeviceRecouplingSpec],
     zeros: &[DeviceRegionSpec],
+    storage_conjugate: bool,
 ) -> Result<usize, OperationError> {
-    let mut seen: HashSet<(&[usize], &[usize], Vec<usize>)> = HashSet::new();
-    let columns = recouplings
+    let mut seen: HashSet<RegionSignature<'_>> = HashSet::new();
+    let conjugated = moves
         .iter()
-        .flat_map(|entry| entry.packs.iter().chain(&entry.scatters));
-    for entry in moves.iter().chain(columns) {
+        .chain(recouplings.iter().flat_map(|entry| entry.packs.iter()));
+    for entry in conjugated {
         seen.insert((
             entry.dims.as_slice(),
             entry.dst_strides.as_slice(),
             entry.src_strides.clone(),
+            storage_conjugate,
+        ));
+    }
+    for entry in recouplings.iter().flat_map(|entry| entry.scatters.iter()) {
+        seen.insert((
+            entry.dims.as_slice(),
+            entry.dst_strides.as_slice(),
+            entry.src_strides.clone(),
+            false,
         ));
     }
     for zero in zeros {
@@ -366,6 +385,7 @@ fn distinct_plan_signatures(
             zero.dims.as_slice(),
             zero.strides.as_slice(),
             packed_strides(&zero.dims)?,
+            false,
         ));
     }
     // A recoupling GEMM is a contraction of three dense column-major operands,
@@ -417,17 +437,20 @@ struct CacheEntry<V> {
     value: V,
 }
 
-/// Entries a [`StructureCache`] keeps, whatever the byte budget allows.
+/// Entries a [`StructureCache`] keeps by default, whatever the byte budget
+/// allows.
 ///
 /// A byte budget alone bounds the device memory but not the entry count, so a
 /// replay alternating thousands of tiny structures would grow the cache without
-/// limit. The cap is also what keeps the lookup O(1): the scan is over at most
-/// this many keys. A hash key would have to be the `Weak`'s address, which a
-/// later allocation can reuse, so the identity comparison stays a `ptr_eq`.
-pub(crate) const MAX_STRUCTURE_CACHE_ENTRIES: usize = 32;
+/// limit. The default is the host transform cache's own entry bound
+/// (`tenet-tensors` `DEFAULT_TREE_TRANSFORM_CACHE_ENTRIES`): a workload whose
+/// working set of structures is warm on the host must not silently fall out of
+/// the device cache and pay an upload per replay, so the two bounds are the
+/// same number by construction rather than by coincidence.
+pub(crate) const DEFAULT_STRUCTURE_CACHE_ENTRIES: usize = 256;
 
 /// Small LRU cache of per-structure device state, bounded by retained bytes and
-/// by [`MAX_STRUCTURE_CACHE_ENTRIES`].
+/// by an entry count (see [`DEFAULT_STRUCTURE_CACHE_ENTRIES`]).
 ///
 /// Ownership is singular: the cached value is the only copy of that device
 /// state, and dropping the entry frees it. Bytes are reported so the owner of
@@ -440,11 +463,11 @@ pub(crate) struct StructureCache<V> {
 }
 
 impl<V> StructureCache<V> {
-    pub(crate) fn new(budget_bytes: usize) -> Self {
+    pub(crate) fn new(budget_bytes: usize, max_entries: usize) -> Self {
         Self {
             entries: Vec::new(),
             budget_bytes,
-            max_entries: MAX_STRUCTURE_CACHE_ENTRIES,
+            max_entries,
             bytes: 0,
         }
     }
@@ -457,24 +480,34 @@ impl<V> StructureCache<V> {
         self.entries.len()
     }
 
-    /// The entry for `key`, promoted to most-recently-used.
-    pub(crate) fn get(&mut self, key: &StructureKey) -> Option<&V> {
-        let index = self
-            .entries
-            .iter()
-            .position(|entry| entry.key.matches(key))?;
+    /// Where `key` sits, without changing the recency order.
+    ///
+    /// A replay resolves its entry once through this and then holds the index,
+    /// so the key scan happens at most once per replay rather than once per
+    /// thing the replay needs from the entry. The scan is bounded by the entry
+    /// cap; a map keyed on `Weak::as_ptr` would be sound too — a live `Weak`
+    /// pins its allocation, so the address cannot be reused while the entry
+    /// exists — and is the shape to reach for if the cap ever grows enough for
+    /// the scan to matter.
+    pub(crate) fn position(&self, key: &StructureKey) -> Option<usize> {
+        self.entries.iter().position(|entry| entry.key.matches(key))
+    }
+
+    /// The entry at `index`, promoted to most-recently-used.
+    pub(crate) fn touch(&mut self, index: usize) -> Option<&V> {
+        if index >= self.entries.len() {
+            return None;
+        }
         let entry = self.entries.remove(index);
         self.entries.push(entry);
         self.entries.last().map(|entry| &entry.value)
     }
 
-    /// The entry for `key` without changing the recency order, for callers that
-    /// only describe the state they already prepared.
-    pub(crate) fn peek(&self, key: &StructureKey) -> Option<&V> {
-        self.entries
-            .iter()
-            .find(|entry| entry.key.matches(key))
-            .map(|entry| &entry.value)
+    /// The entry for `key`, promoted to most-recently-used.
+    #[cfg(test)]
+    pub(crate) fn get(&mut self, key: &StructureKey) -> Option<&V> {
+        let index = self.position(key)?;
+        self.touch(index)
     }
 
     /// Drops every entry whose structure no longer exists.
@@ -595,8 +628,9 @@ mod tests {
         assert_eq!(scattered, vec![0, 6]);
         assert_eq!(plan.workspace_source_len, 18);
         assert_eq!(plan.workspace_destination_len, 12);
-        assert_eq!(plan.coefficient_ranges, vec![0..6]);
-        assert_eq!(plan.coefficient_len(), 6);
+        // No device re-pack: the block's matrix is addressed at its own
+        // `coefficient_start` in the structure's payload.
+        assert_eq!(entry.matrix_offset, 0);
     }
 
     #[test]
@@ -638,8 +672,15 @@ mod tests {
         assert_eq!(plan.workspace_source_len, 20);
         assert_eq!(plan.workspace_destination_len, 20);
         // The 4-element block was declared second, so its matrix is the second
-        // range of the payload but the first of the plan.
-        assert_eq!(plan.coefficient_ranges, vec![4..8, 0..4]);
+        // run of the payload although it is the first job of the plan: the
+        // device addresses it where the structure put it, not where the host's
+        // re-packed scratch would.
+        let matrices: Vec<usize> = plan
+            .recouplings
+            .iter()
+            .map(|entry| entry.matrix_offset)
+            .collect();
+        assert_eq!(matrices, vec![4, 0]);
         assert_eq!(plan.recouplings[0].job.rhs_offset, 0);
         assert_eq!(plan.recouplings[1].job.rhs_offset, 4);
     }
@@ -649,7 +690,7 @@ mod tests {
         // What: the byte budget alone would let an unbounded number of tiny
         // structures accumulate, so the entry cap bounds the cache — and with
         // it the lookup scan — independently of size.
-        let structures: Vec<Arc<()>> = (0..MAX_STRUCTURE_CACHE_ENTRIES + 1)
+        let structures: Vec<Arc<()>> = (0..DEFAULT_STRUCTURE_CACHE_ENTRIES + 1)
             .map(|_| Arc::new(()))
             .collect();
         let key = |index: usize| StructureKey {
@@ -657,15 +698,15 @@ mod tests {
             scalar: TypeId::of::<f64>(),
             context: 3,
         };
-        let mut cache = StructureCache::new(usize::MAX);
+        let mut cache = StructureCache::new(usize::MAX, DEFAULT_STRUCTURE_CACHE_ENTRIES);
         for index in 0..structures.len() {
             cache.insert(key(index), index, 1);
         }
 
-        assert_eq!(cache.entry_count(), MAX_STRUCTURE_CACHE_ENTRIES);
+        assert_eq!(cache.entry_count(), DEFAULT_STRUCTURE_CACHE_ENTRIES);
         assert_eq!(cache.get(&key(0)), None, "the oldest entry was evicted");
         assert_eq!(cache.get(&key(1)), Some(&1));
-        assert_eq!(cache.retained_bytes(), MAX_STRUCTURE_CACHE_ENTRIES);
+        assert_eq!(cache.retained_bytes(), DEFAULT_STRUCTURE_CACHE_ENTRIES);
     }
 
     #[test]
@@ -726,15 +767,59 @@ mod tests {
         };
 
         assert_eq!(
-            distinct_plan_signatures(&[same.clone(), twin], &[], &[]).unwrap(),
+            distinct_plan_signatures(&[same.clone(), twin], &[], &[], false).unwrap(),
             1
         );
         assert_eq!(
-            distinct_plan_signatures(&[same.clone(), other], &[], &[]).unwrap(),
+            distinct_plan_signatures(&[same.clone(), other], &[], &[], false).unwrap(),
             2
         );
         // The fill's source is packed [1], identical to `same`'s source.
-        assert_eq!(distinct_plan_signatures(&[same], &[], &[zero]).unwrap(), 1);
+        assert_eq!(
+            distinct_plan_signatures(&[same], &[], &[zero], false).unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_conjugated_structure_counts_its_pack_and_scatter_plans_separately() {
+        // What: with `storage_conjugate`, a pack reads the source conjugated
+        // and a scatter reads the workspace plain. Two contiguous columns
+        // normalise to the same ([N], [1], [1]) triple, so counting them once
+        // would leave the cuTENSOR cap one plan short of what the replay
+        // submits — exactly the entry a warm replay would then evict.
+        let column = |dst_offset, src_offset| DeviceMoveSpec {
+            dims: vec![4],
+            dst_strides: vec![1],
+            src_strides: vec![1],
+            dst_offset,
+            src_offset,
+            coefficient: None,
+        };
+        let recoupling = DeviceRecouplingSpec {
+            packs: vec![column(0, 0), column(4, 8)],
+            scatters: vec![column(0, 0), column(8, 4)],
+            job: DenseGemmBatchJob {
+                dst_offset: 0,
+                lhs_offset: 0,
+                rhs_offset: 0,
+                rows: 4,
+                contracted: 2,
+                cols: 2,
+            },
+            matrix_offset: 0,
+        };
+
+        // Unconjugated: one column plan shared by both directions, plus the GEMM.
+        assert_eq!(
+            distinct_plan_signatures(&[], std::slice::from_ref(&recoupling), &[], false).unwrap(),
+            2
+        );
+        // Conjugated: the packs are their own plan.
+        assert_eq!(
+            distinct_plan_signatures(&[], &[recoupling], &[], true).unwrap(),
+            3
+        );
     }
 
     #[test]
@@ -755,7 +840,7 @@ mod tests {
             scalar,
             context,
         };
-        let mut cache = StructureCache::new(1024);
+        let mut cache = StructureCache::new(1024, DEFAULT_STRUCTURE_CACHE_ENTRIES);
         cache.insert(key(&live, TypeId::of::<f64>(), 1), "f64@1", 8);
 
         assert_eq!(
@@ -772,7 +857,7 @@ mod tests {
     fn a_dropped_structure_is_purged_and_its_bytes_released() {
         let live = Arc::new(());
         let doomed = Arc::new(());
-        let mut cache = StructureCache::new(1024);
+        let mut cache = StructureCache::new(1024, DEFAULT_STRUCTURE_CACHE_ENTRIES);
         cache.insert(
             StructureKey {
                 structure: Arc::downgrade(&doomed),
@@ -809,7 +894,7 @@ mod tests {
             scalar: TypeId::of::<f64>(),
             context: 7,
         };
-        let mut cache = StructureCache::new(100);
+        let mut cache = StructureCache::new(100, DEFAULT_STRUCTURE_CACHE_ENTRIES);
         cache.insert(key(0), 0, 60);
         cache.insert(key(1), 1, 30);
         // Touching 0 makes 1 the least recently used.
