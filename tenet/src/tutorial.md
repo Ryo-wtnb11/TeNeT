@@ -391,6 +391,20 @@ CUDA operations reject unsupported combinations rather than silently moving
 work back to the CPU. Build the runtime once at program setup; `clone` shares
 its execution configuration for work submitted from another thread.
 
+Building a CUDA runtime pays the backend library initialization (CUDA context,
+cuTENSOR, cuSOLVER/cuBLAS handles) up front — a few hundred milliseconds that
+would otherwise land on whichever user operation happened to be first, and that
+is one more reason to build the runtime once. Because that happens at
+construction, `build()` requires cuSOLVER and cuBLAS to be loadable as well as
+cuTENSOR, even for a program that only contracts: a missing or unloadable
+library is the same typed dense error as before, reported when the runtime is
+built rather than at the first factorization. Tenferro resolves the three
+through `TENFERRO_CUTENSOR_PATH`, `TENFERRO_CUSOLVER_PATH` and
+`TENFERRO_CUBLAS_PATH` when the default locations do not apply. The first use
+of each CubeCL kernel family still compiles it (NVRTC) in that process; that
+compile is CubeCL's, and so is its PTX disk cache, enabled through CubeCL's
+`cubecl.toml` (`[compilation] cache`), not through a TeNeT setting.
+
 `tensor!` does not accept hyperedges: a label may appear at most twice.
 It does not promote scalar types automatically. Slicing is explicit rather
 than selected automatically by the macro.

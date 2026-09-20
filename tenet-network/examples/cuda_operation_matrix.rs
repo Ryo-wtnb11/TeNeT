@@ -484,6 +484,36 @@ mod device {
              downloads are recorded, in the barrier_* columns, and none of its traffic is \
              included in the phase columns"
         );
+        // #1278 moved the tenferro backend library initialization
+        // (cuTENSOR, cuSOLVER/cuBLAS handles) from the first submission to
+        // Runtime construction, so the cost that used to sit in every `cold`
+        // cell is reported here instead of disappearing. `first` is this
+        // process's first CUDA Runtime and also pays CUDA context creation;
+        // `second` is a second fresh Runtime in the same process, where the
+        // context is warm but the backend instance, and therefore the
+        // warm-up, is new. Both are one observation, not a median.
+        let build_start = Instant::now();
+        let first_runtime = Runtime::builder()
+            .cuda(config.device)
+            .dense_threads(1)
+            .build()
+            .expect("CUDA Runtime for the construction measurement");
+        let first_build_ns = build_start.elapsed().as_nanos();
+        drop(first_runtime);
+        let build_start = Instant::now();
+        let second_runtime = Runtime::builder()
+            .cuda(config.device)
+            .dense_threads(1)
+            .build()
+            .expect("CUDA Runtime for the construction measurement");
+        let second_build_ns = build_start.elapsed().as_nanos();
+        drop(second_runtime);
+        println!(
+            "# runtime_build_ns first={first_build_ns} second={second_build_ns} \
+             scope=one Runtime::builder().cuda(device).dense_threads(1).build() each, one \
+             observation, first includes CUDA context creation, both include the #1278 \
+             backend warm-up"
+        );
         println!(
             "# tensorkit_cuda_comparison=absent: neither TensorKit nor QSpace has a matched \
              CUDA fixture for these rows at this revision"

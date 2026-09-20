@@ -1219,10 +1219,16 @@ impl RuntimeBuilder {
         }
         #[cfg(feature = "cuda")]
         if let Some(device) = self.cuda_device {
-            state.cuda = Some(
-                tenet_dense::CudaDenseContext::new(device)
-                    .map_err(tenet_tensors::OperationError::Dense)?,
-            );
+            // The backend libraries (cuTENSOR, cuSOLVER/cuBLAS) initialize
+            // lazily inside tenferro, so without this the first user operation
+            // on this Runtime pays a one-time ~0.2 s unrelated to its size.
+            // Construction is where that cost belongs; a failure here is a
+            // build failure, never a half-initialized Runtime.
+            let mut cuda = tenet_dense::CudaDenseContext::new(device)
+                .map_err(tenet_tensors::OperationError::Dense)?;
+            cuda.warm_up()
+                .map_err(tenet_tensors::OperationError::Dense)?;
+            state.cuda = Some(cuda);
         }
         // One warm context/executor per core covers a thread-per-core driver;
         // fall back to a small count if the core count is unavailable.

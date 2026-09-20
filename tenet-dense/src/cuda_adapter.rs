@@ -270,6 +270,62 @@ impl CudaDenseContext {
     pub fn device(&self) -> usize {
         self.device
     }
+
+    /// Runs the smallest real operation against each backend library this
+    /// context can reach, so their one-time initialization is paid here
+    /// rather than by the first user operation.
+    ///
+    /// Why: tenferro 0.5.0 loads cuTENSOR (`dlopen` + `cutensorCreate`) and
+    /// the cuSOLVER/cuBLAS handles lazily, per `CudaBackend` instance, on the
+    /// first submission that needs them, and exposes no warm-up entry point.
+    /// The measured cost is 185-657 ms
+    /// (`benchmarks/history/cuda-baseline-2026-09-20.md`), independent of the
+    /// operation, provider, dtype and size that happens to pay it. The cost is
+    /// unavoidable; attributing it to context construction is the honest
+    /// placement, and it is not a cache: nothing is memoized on the TeNeT side
+    /// and no result changes.
+    ///
+    /// Because both libraries are touched here, a caller that only contracts
+    /// still needs cuSOLVER and cuBLAS to be loadable, not just cuTENSOR: a
+    /// missing library is the same typed [`DenseError::Backend`] as before,
+    /// surfaced by whoever calls this (`RuntimeBuilder::build`) instead of by
+    /// the first factorization. Tenferro resolves the three through
+    /// `TENFERRO_CUTENSOR_PATH`, `TENFERRO_CUSOLVER_PATH` and
+    /// `TENFERRO_CUBLAS_PATH`.
+    ///
+    /// What is *not* warmed: CubeCL compiles each kernel family with NVRTC on
+    /// its first use (per process, per device), so the first elementwise,
+    /// reduction or copy of each family still pays a JIT compile here. That is
+    /// a CubeCL concern, not a TeNeT one; its PTX disk cache is configured
+    /// through CubeCL's own `cubecl.toml` (`[compilation] cache`) and is off by
+    /// default. The cuTENSOR plan cache is also per contraction shape, so a
+    /// user contraction still builds its own plan. Tenferro's runtime-owned
+    /// blas1 cuBLAS handle (tenferro-gpu `cubecl/runtime.rs:688`) is also not
+    /// warmed, because TeNeT reaches no blas1 entry point; extend the warm-up
+    /// if that changes.
+    ///
+    /// Observation counters ([`cuda_transfer_stats`]) are process-wide and are
+    /// deliberately *not* reset here, so a caller's deltas are honest about the
+    /// work this seam did. Each call adds exactly: `h2d_calls` 3,
+    /// `h2d_bytes` 24, `device_allocs` 4 (three uploads plus the eigenvector
+    /// factor), `gemm_calls` 1, `solver_calls` 1, `d2h_calls` 1, `d2h_bytes` 8,
+    /// `copy_calls` 0.
+    ///
+    /// Every device buffer created here is dropped before returning.
+    pub fn warm_up(&mut self) -> Result<(), DenseError> {
+        // cuTENSOR: handle, library load and one plan, through the same seam
+        // every contraction uses.
+        let lhs = CudaDenseStorage::upload::<f64>(self, &[1.0_f64])?;
+        let rhs = CudaDenseStorage::upload::<f64>(self, &[1.0_f64])?;
+        let mut dst = CudaDenseStorage::upload::<f64>(self, &[0.0_f64])?;
+        cuda_gemm_region_into::<f64>(
+            self, &mut dst, 0, 1, &lhs, 0, 1, &rhs, 0, 1, 1, 1, 1, 1.0, 0.0,
+        )?;
+        // cuSOLVER + cuBLAS: a 1x1 region is trivially Hermitian, so this is a
+        // real `eigh` with no host-side precondition to fake.
+        let (_values, _vectors) = cuda_eigh_region::<f64>(self, &lhs, 0, 1)?;
+        Ok(())
+    }
 }
 
 /// Flat [`CudaScalar`] buffer resident on one CUDA device.
@@ -1213,6 +1269,44 @@ mod tests {
 
         reset_cuda_transfer_stats();
         assert_eq!(cuda_transfer_stats(), CudaTransferStats::default());
+    }
+
+    #[test]
+    #[ignore = "requires a real CUDA device"]
+    fn warm_up_costs_one_gemm_one_solver_call_and_a_bounded_fixed_traffic() {
+        let _serialized = COUNTER_TESTS.lock().unwrap_or_else(|err| err.into_inner());
+        // A context built directly here has never submitted work: only
+        // `RuntimeBuilder::build` warms one, so this is a cold backend.
+        let mut ctx = CudaDenseContext::new(0).unwrap();
+
+        reset_cuda_transfer_stats();
+        ctx.warm_up().unwrap();
+        let after = cuda_transfer_stats();
+        // The documented fixed cost of the warm-up, as the rustdoc states it.
+        // `device_allocs` counts the three 1-element uploads plus the
+        // eigenvector factor; all four are local to `warm_up` and dropped
+        // before it returns, so nothing of this survives construction. There is
+        // no live/peak device-buffer observation at this seam to assert on.
+        assert_eq!(
+            after,
+            CudaTransferStats {
+                h2d_calls: 3,
+                h2d_bytes: 3 * std::mem::size_of::<f64>() as u64,
+                d2h_calls: 1,
+                d2h_bytes: std::mem::size_of::<f64>() as u64,
+                device_allocs: 4,
+                gemm_calls: 1,
+                solver_calls: 1,
+                copy_calls: 0,
+            }
+        );
+
+        // Warming an already warm context repeats the same bounded work rather
+        // than growing with the number of calls.
+        reset_cuda_transfer_stats();
+        ctx.warm_up().unwrap();
+        assert_eq!(cuda_transfer_stats(), after);
+        reset_cuda_transfer_stats();
     }
 
     #[test]

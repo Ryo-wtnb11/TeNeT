@@ -24,6 +24,13 @@ Mirrors `benchmarks/operation_matrix.md`:
   one iteration. Nothing calls the operation before this: `bench` hands the
   first call's output back to the caller, which is what the correctness check
   consumes.
+  Since #1278, `Runtime` construction warms the tenferro backend libraries
+  (cuTENSOR, cuSOLVER/cuBLAS handles), so `cold` no longer contains that
+  one-time handle initialization; it happens before the fixture is built. What
+  a `cold` cell still carries beyond the warm cost is CubeCL's NVRTC compile of
+  each kernel family it first touches and the cuTENSOR plan for its shape.
+  Records taken before that change (`cuda-baseline-2026-09-20.md`) include the
+  initialization in every `cold` cell.
 - `first_after_setup`: used instead of `cold` for the two transfer rows, whose
   measured operation (`to_cuda`) also runs while the fixture is built. This
   follows the Host harness, which labels a phase that way whenever a preflight
@@ -47,6 +54,16 @@ Mirrors `benchmarks/operation_matrix.md`:
 One process per invocation. The Host `operation_matrix.sh` wrapper takes a
 three-process median; this runner does not, so a timing is this process's
 per-iteration median with no between-process variance estimate.
+
+### Runtime construction
+
+The header line `# runtime_build_ns first=... second=...` reports one
+`Runtime::builder().cuda(device).dense_threads(1).build()` each, as single
+observations rather than medians. `first` is the process's first CUDA Runtime
+and also pays CUDA context creation; `second` is a second fresh Runtime in the
+same process, whose CUDA context is warm but whose tenferro backend instance,
+and so whose #1278 warm-up, is new. The line exists so that the backend
+initialization the `cold` cells no longer carry stays visible.
 
 ### Synchronization and the completion barrier
 
