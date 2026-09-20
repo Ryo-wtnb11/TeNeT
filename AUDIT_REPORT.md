@@ -25,8 +25,9 @@ therefore not yet be described as a generally complete tensor provider.
 CUDA is a narrower explicit multiplicity-free execution surface over `f64` and
 `Complex64` payloads. It has real-device tests for selected transfer,
 arithmetic, reductions, canonical contraction, and canonical network paths in
-both dtypes, and for QR/SVD/EIGH in `f64`. Device factorizations for `c64`
-([#1268](https://github.com/Ryo-wtnb11/TeNeT/issues/1268)), general
+both dtypes, and for compact SVD/EIGH in both dtypes and compact QR in `f64`. Complex
+device QR, full and values-only factorizations, `eig`, matrix functions,
+general
 recoupling, noncanonical contraction, checked Generic execution, and much of
 the Host matrix-algebra surface remain unsupported. No silent general Host
 fallback was identified in the inspected public paths.
@@ -149,7 +150,7 @@ important boundaries are:
 | Fibonacci | Expert category data exists; canonical typed tensors unsupported |
 | trivial/no symmetry | No canonical public provider identified |
 | CUDA f64 multiplicity-free | Selected explicit operations, factorizations, and canonical network execution |
-| CUDA c64 multiplicity-free | Transfer, lazy adjoint, arithmetic, reductions, canonical contraction/compose, and canonical network execution; factorizations unsupported ([#1268](https://github.com/Ryo-wtnb11/TeNeT/issues/1268)) |
+| CUDA c64 multiplicity-free | Transfer, lazy adjoint, arithmetic, reductions, canonical contraction/compose, canonical network execution, and compact SVD/EIGH (raw device SVD gauge); compact QR is a compile-time boundary while tenferro-gpu's `triu` kernel does not compile for `Complex64` |
 | CUDA checked Generic execution | Unsupported |
 | serialization | Unsupported |
 

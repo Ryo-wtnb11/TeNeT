@@ -123,7 +123,8 @@ trivial/dense provider exists.
 | Permute/braid/recoupling | PROVED | PROVED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
 | Canonical contraction/compose | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | PROVED |
 | Arithmetic/reductions | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | PROVED |
-| QR/SVD/EIGH | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | [UNSUPPORTED](https://github.com/Ryo-wtnb11/TeNeT/issues/1268) |
+| SVD/EIGH | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | PROVED |
+| QR | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | [UNSUPPORTED](https://github.com/Ryo-wtnb11/TeNeT/issues/1270) |
 | EIG/null/polar/solve/matrix functions | PROVED | PROVED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
 | Network ordinary replay | PROVED | PROVED | INTENTIONAL-DIFFERENCE | PROVED | UNSUPPORTED | PROVED |
 | v1 typed snapshot (`f64`/`Complex64`) [7] | PROVED | PROVED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
@@ -133,9 +134,21 @@ not provider conformance. Host/device checked-Generic parity belongs to
 [#3](https://github.com/Ryo-wtnb11/TeNeT/issues/3). CUDA `PROVED` means a
 real-device test exists and is ignored without CUDA; default CI is not claimed
 to run it. The CUDA c64 column is the `Complex64` device payload of
-[#1268](https://github.com/Ryo-wtnb11/TeNeT/issues/1268): device
-factorizations (positive-diagonal gauge, Hermitian residual, selector dtype)
-stay `f64`-only and are a separate leaf. Release/feature topology remains [#129](https://github.com/Ryo-wtnb11/TeNeT/issues/129).
+[#1268](https://github.com/Ryo-wtnb11/TeNeT/issues/1268). `svd_compact`, `svd_trunc`,
+`eigh_full` and `eigh_trunc` carry both device payloads: EIGH admits a block
+only when it equals its conjugate transpose, and `u`/`vh` keep the raw device
+SVD gauge rather than the Host largest-pivot gauge — an intentional,
+documented device difference that leaves `u s vh` and the spectra identical.
+`qr_compact` is `f64`-only, and deliberately a compile-time boundary rather
+than a runtime error: every tenferro-gpu 0.5.0 path to the `R` factor calls its
+`triu` kernel, whose zero constant (`src/kernels/helpers.rs:84`
+`E::cast_from(0u32)`) emits `cuDoubleComplex(uint32(0))` and fails NVRTC
+compilation for `Complex64`. `qr_compact` in the positive-diagonal gauge
+(`R_jj` real and non-negative, phase 1 kept at zero) is otherwise implemented
+for both payloads and becomes available when that backend kernel is fixed.
+Full/values factorizations, `eig`, and matrix functions stay
+device-unsupported for both payloads.
+Release/feature topology remains [#129](https://github.com/Ryo-wtnb11/TeNeT/issues/129).
 
 Standalone checked-Generic compact construction is `PROVED` by
 [#1004](https://github.com/Ryo-wtnb11/TeNeT/issues/1004). Compact diagonal

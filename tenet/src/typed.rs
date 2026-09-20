@@ -220,7 +220,7 @@ use tenet_core::{
 };
 #[cfg(feature = "cuda")]
 use tenet_dense::{
-    cuda_eigh_region, cuda_gemm_region_into,
+    cuda_copy_region_into, cuda_eigh_region, cuda_gemm_region_into,
     cuda_is_hermitian_region as dense_cuda_is_hermitian_region,
     cuda_qr_region as dense_cuda_qr_region, cuda_svd_region as dense_cuda_svd_region,
     CudaDenseContext, CudaDenseStorage,
@@ -3728,7 +3728,7 @@ thread_local! {
         std::cell::Cell<Option<(usize, usize, usize)>> = const {
             std::cell::Cell::new(None)
         };
-    /// `(qr_calls, diagonal_values, selector_uploads, output_uploads,
+    /// `(qr_calls, factor_copies, selector_uploads, output_uploads,
     /// assembly_gemms, live_route_scratch, peak_route_scratch)`.
     static CUDA_QR_OBSERVATION: std::cell::Cell<Option<CudaQrObservation>> = const {
             std::cell::Cell::new(None)
@@ -3908,38 +3908,41 @@ fn update_cuda_qr_observation(update: impl FnOnce(CudaQrObservation) -> CudaQrOb
 }
 
 #[cfg(all(test, feature = "cuda"))]
-pub(crate) fn observe_cuda_qr_decomposition(diagonal_values: usize) {
-    update_cuda_qr_observation(|(qr, diagonal, selectors, outputs, gemms, live, peak)| {
-        (
-            qr + 1,
-            diagonal + diagonal_values,
-            selectors,
-            outputs,
-            gemms,
-            live,
-            peak,
-        )
+pub(crate) fn observe_cuda_qr_decomposition() {
+    update_cuda_qr_observation(|(qr, copies, selectors, outputs, gemms, live, peak)| {
+        (qr + 1, copies, selectors, outputs, gemms, live, peak)
+    });
+}
+
+/// One whole-factor device copy on a layout-aligned assembly route.
+///
+/// Shared by compact QR and compact SVD: both assemble through
+/// [`copy_whole_factor`], so both gate tests arm and assert this observation.
+#[cfg(all(test, feature = "cuda"))]
+pub(crate) fn observe_cuda_factor_copy() {
+    update_cuda_qr_observation(|(qr, copies, selectors, outputs, gemms, live, peak)| {
+        (qr, copies + 1, selectors, outputs, gemms, live, peak)
     });
 }
 
 #[cfg(all(test, feature = "cuda"))]
 pub(crate) fn observe_cuda_qr_selector_upload() {
-    update_cuda_qr_observation(|(qr, diagonal, selectors, outputs, gemms, live, peak)| {
-        (qr, diagonal, selectors + 1, outputs, gemms, live, peak)
+    update_cuda_qr_observation(|(qr, copies, selectors, outputs, gemms, live, peak)| {
+        (qr, copies, selectors + 1, outputs, gemms, live, peak)
     });
 }
 
 #[cfg(all(test, feature = "cuda"))]
 pub(crate) fn observe_cuda_qr_assembly_gemm() {
-    update_cuda_qr_observation(|(qr, diagonal, selectors, outputs, gemms, live, peak)| {
-        (qr, diagonal, selectors, outputs, gemms + 1, live, peak)
+    update_cuda_qr_observation(|(qr, copies, selectors, outputs, gemms, live, peak)| {
+        (qr, copies, selectors, outputs, gemms + 1, live, peak)
     });
 }
 
 #[cfg(all(test, feature = "cuda"))]
 fn observe_cuda_qr_output_upload() {
-    update_cuda_qr_observation(|(qr, diagonal, selectors, outputs, gemms, live, peak)| {
-        (qr, diagonal, selectors, outputs + 1, gemms, live, peak)
+    update_cuda_qr_observation(|(qr, copies, selectors, outputs, gemms, live, peak)| {
+        (qr, copies, selectors, outputs + 1, gemms, live, peak)
     });
 }
 
@@ -3994,13 +3997,13 @@ pub(crate) fn decide_kept<R: MultiplicityFreeRigidSymbols<Scalar = f64>>(
 /// Uploads a small host-built selector matrix (`rows x cols`, column-major,
 /// zero except `entries`) used by the assembly GEMMs.
 #[cfg(feature = "cuda")]
-pub(crate) fn upload_selector(
+pub(crate) fn upload_selector<D: CudaPayload>(
     cuda: &mut CudaDenseContext,
     rows: usize,
     cols: usize,
-    entries: impl Iterator<Item = (usize, usize, f64)>,
-) -> Result<CudaStorage, Error> {
-    let mut data = vec![0.0; rows * cols];
+    entries: impl Iterator<Item = (usize, usize, D)>,
+) -> Result<CudaStorage<D>, Error> {
+    let mut data = vec![D::ZERO; rows * cols];
     for (row, col, value) in entries {
         data[row + rows * col] = value;
     }
@@ -4015,29 +4018,30 @@ pub(crate) fn upload_selector(
 
 #[cfg(feature = "cuda")]
 #[inline]
-pub(crate) fn cuda_qr_region(
+pub(crate) fn cuda_qr_region<D: CudaPayload>(
     cuda: &mut CudaDenseContext,
     source: &CudaDenseStorage,
     offset: usize,
     rows: usize,
     cols: usize,
-) -> Result<(CudaDenseStorage, CudaDenseStorage, Vec<f64>), Error> {
-    let factors = dense_cuda_qr_region(cuda, source, offset, rows, cols).map_err(dense_err)?;
+) -> Result<(CudaDenseStorage, CudaDenseStorage), Error> {
+    let factors = dense_cuda_qr_region::<D>(cuda, source, offset, rows, cols).map_err(dense_err)?;
     #[cfg(test)]
-    observe_cuda_qr_decomposition(factors.2.len());
+    observe_cuda_qr_decomposition();
     Ok(factors)
 }
 
 #[cfg(feature = "cuda")]
 #[inline]
-pub(crate) fn cuda_svd_region(
+pub(crate) fn cuda_svd_region<D: CudaPayload>(
     cuda: &mut CudaDenseContext,
     source: &CudaDenseStorage,
     offset: usize,
     rows: usize,
     cols: usize,
 ) -> Result<(CudaDenseStorage, Vec<f64>, CudaDenseStorage), Error> {
-    let factors = dense_cuda_svd_region(cuda, source, offset, rows, cols).map_err(dense_err)?;
+    let factors =
+        dense_cuda_svd_region::<D>(cuda, source, offset, rows, cols).map_err(dense_err)?;
     #[cfg(test)]
     observe_cuda_svd_decomposition(factors.1.len());
     Ok(factors)
@@ -4045,24 +4049,24 @@ pub(crate) fn cuda_svd_region(
 
 #[cfg(feature = "cuda")]
 #[inline]
-pub(crate) fn cuda_is_hermitian_region(
+pub(crate) fn cuda_is_hermitian_region<D: CudaPayload>(
     cuda: &mut CudaDenseContext,
     source: &CudaDenseStorage,
     offset: usize,
     n: usize,
 ) -> Result<bool, Error> {
-    dense_cuda_is_hermitian_region(cuda, source, offset, n).map_err(dense_err)
+    dense_cuda_is_hermitian_region::<D>(cuda, source, offset, n).map_err(dense_err)
 }
 
 #[cfg(feature = "cuda")]
 #[inline]
-pub(crate) fn typed_cuda_eigh_region(
+pub(crate) fn typed_cuda_eigh_region<D: CudaPayload>(
     cuda: &mut CudaDenseContext,
     source: &CudaDenseStorage,
     offset: usize,
     n: usize,
 ) -> Result<(Vec<f64>, CudaDenseStorage), Error> {
-    cuda_eigh_region(cuda, source, offset, n).map_err(dense_err)
+    cuda_eigh_region::<D>(cuda, source, offset, n).map_err(dense_err)
 }
 
 /// Writes `factor_rows x kept` slices of `factor * selector` into the target
@@ -4071,14 +4075,14 @@ pub(crate) fn typed_cuda_eigh_region(
 /// matching between the source and factor spaces.
 #[cfg(feature = "cuda")]
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn assemble_left_factor(
+pub(crate) fn assemble_left_factor<D: CudaPayload>(
     cuda: &mut CudaDenseContext,
-    dst: &mut CudaStorage,
+    dst: &mut CudaStorage<D>,
     target: &CoupledSectorRegion,
     source: &CoupledSectorRegion,
     factor: &CudaDenseStorage,
     k_full: usize,
-    selector: &CudaStorage,
+    selector: &CudaStorage<D>,
     kept: usize,
 ) -> Result<(), Error> {
     for target_tree in target.row_trees() {
@@ -4092,7 +4096,7 @@ pub(crate) fn assemble_left_factor(
             .find(|source_tree| source_tree.tree() == target_tree.tree())
             .map(|source_tree| source_tree.offset())
             .ok_or_else(|| internal_layout_error("codomain tree missing in the source sector"))?;
-        cuda_gemm_region_into::<f64>(
+        cuda_gemm_region_into::<D>(
             cuda,
             &mut dst.0,
             target.range().start + target_tree.offset(),
@@ -4106,8 +4110,8 @@ pub(crate) fn assemble_left_factor(
             sub_rows,
             k_full,
             kept,
-            1.0,
-            0.0,
+            D::ONE,
+            D::ZERO,
         )
         .map_err(dense_err)?;
         #[cfg(test)]
@@ -4121,12 +4125,12 @@ pub(crate) fn assemble_left_factor(
 /// tree.
 #[cfg(feature = "cuda")]
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn assemble_right_factor(
+pub(crate) fn assemble_right_factor<D: CudaPayload>(
     cuda: &mut CudaDenseContext,
-    dst: &mut CudaStorage,
+    dst: &mut CudaStorage<D>,
     target: &CoupledSectorRegion,
     source: &CoupledSectorRegion,
-    selector: &CudaStorage,
+    selector: &CudaStorage<D>,
     kept: usize,
     k_full: usize,
     factor: &CudaDenseStorage,
@@ -4142,7 +4146,7 @@ pub(crate) fn assemble_right_factor(
             .find(|source_tree| source_tree.tree() == target_tree.tree())
             .map(|source_tree| source_tree.offset())
             .ok_or_else(|| internal_layout_error("domain tree missing in the source sector"))?;
-        cuda_gemm_region_into::<f64>(
+        cuda_gemm_region_into::<D>(
             cuda,
             &mut dst.0,
             target.range().start + target.rows() * target_tree.offset(),
@@ -4156,8 +4160,8 @@ pub(crate) fn assemble_right_factor(
             kept,
             k_full,
             sub_cols,
-            1.0,
-            0.0,
+            D::ONE,
+            D::ZERO,
         )
         .map_err(dense_err)?;
         #[cfg(test)]
@@ -4166,12 +4170,40 @@ pub(crate) fn assemble_right_factor(
     Ok(())
 }
 
+/// Copies a whole compact device factor into its target sector region.
+///
+/// Only valid on a route the plan proved layout-aligned: the target region's
+/// tree sequence equals the source's (same trees, extents and offsets), so the
+/// region is exactly the compact factor and the identity-selector GEMM reduces
+/// to one device copy. The per-tree GEMM stays the general assembly path.
+#[cfg(feature = "cuda")]
+pub(crate) fn copy_whole_factor<D: CudaPayload>(
+    cuda: &mut CudaDenseContext,
+    dst: &mut CudaStorage<D>,
+    target: &CoupledSectorRegion,
+    factor: &CudaDenseStorage,
+) -> Result<(), Error> {
+    cuda_copy_region_into::<D>(
+        cuda,
+        &mut dst.0,
+        target.range().start,
+        target.rows(),
+        factor,
+        target.rows(),
+        target.cols(),
+    )
+    .map_err(dense_err)?;
+    #[cfg(test)]
+    observe_cuda_factor_copy();
+    Ok(())
+}
+
 /// Fills the diagonal of a coupled-layout `W <- W` buffer from per-sector
 /// spectra, mirroring the host `diagonal_bond_tensor_dyn`.
 #[cfg(feature = "cuda")]
-pub(crate) fn fill_diagonal_values(
+pub(crate) fn fill_diagonal_values<D: CudaPayload>(
     structure: &BlockStructure,
-    data: &mut [f64],
+    data: &mut [D],
     spectra: &[tenet_matrixalgebra::SectorSpectrum<f64>],
 ) -> Result<(), Error> {
     for index in 0..structure.block_count() {
@@ -4187,34 +4219,32 @@ pub(crate) fn fill_diagonal_values(
         let offset = block.offset();
         let count = block.shape()[0].min(block.shape()[1]);
         for position in 0..count {
-            data[offset + position * (strides[0] + strides[1])] = entry.values[position];
+            data[offset + position * (strides[0] + strides[1])] =
+                D::from_real(entry.values[position]);
         }
     }
     Ok(())
 }
 
 #[cfg(feature = "cuda")]
-struct TypedCudaQrScratch {
+struct TypedCudaQrScratch<D: CudaPayload> {
     left: CudaDenseStorage,
     right: CudaDenseStorage,
-    selector: CudaStorage,
+    /// `None` when both assembly routes are layout-aligned and copy instead.
+    selector: Option<CudaStorage<D>>,
 }
 
 #[cfg(feature = "cuda")]
-impl TypedCudaQrScratch {
-    fn new(left: CudaDenseStorage, right: CudaDenseStorage, selector: CudaStorage) -> Self {
+impl<D: CudaPayload> TypedCudaQrScratch<D> {
+    fn new(
+        left: CudaDenseStorage,
+        right: CudaDenseStorage,
+        selector: Option<CudaStorage<D>>,
+    ) -> Self {
         #[cfg(test)]
-        update_cuda_qr_observation(|(qr, diagonal, selectors, outputs, gemms, live, peak)| {
+        update_cuda_qr_observation(|(qr, copies, selectors, outputs, gemms, live, peak)| {
             let live = live + 1;
-            (
-                qr,
-                diagonal,
-                selectors,
-                outputs,
-                gemms,
-                live,
-                peak.max(live),
-            )
+            (qr, copies, selectors, outputs, gemms, live, peak.max(live))
         });
         Self {
             left,
@@ -4225,24 +4255,29 @@ impl TypedCudaQrScratch {
 }
 
 #[cfg(all(test, feature = "cuda"))]
-impl Drop for TypedCudaQrScratch {
+impl<D: CudaPayload> Drop for TypedCudaQrScratch<D> {
     fn drop(&mut self) {
-        update_cuda_qr_observation(|(qr, diagonal, selectors, outputs, gemms, live, peak)| {
-            (qr, diagonal, selectors, outputs, gemms, live - 1, peak)
+        update_cuda_qr_observation(|(qr, copies, selectors, outputs, gemms, live, peak)| {
+            (qr, copies, selectors, outputs, gemms, live - 1, peak)
         });
     }
 }
 
 #[cfg(feature = "cuda")]
-struct TypedCudaSvdScratch {
+struct TypedCudaSvdScratch<D: CudaPayload> {
     left: CudaDenseStorage,
     right: CudaDenseStorage,
-    selector: CudaStorage,
+    /// `None` when both assembly routes are layout-aligned and copy instead.
+    selector: Option<CudaStorage<D>>,
 }
 
 #[cfg(feature = "cuda")]
-impl TypedCudaSvdScratch {
-    fn new(left: CudaDenseStorage, right: CudaDenseStorage, selector: CudaStorage) -> Self {
+impl<D: CudaPayload> TypedCudaSvdScratch<D> {
+    fn new(
+        left: CudaDenseStorage,
+        right: CudaDenseStorage,
+        selector: Option<CudaStorage<D>>,
+    ) -> Self {
         #[cfg(test)]
         update_cuda_svd_observation(|(results, total, creations, live, peak)| {
             let live = live + 1;
@@ -4257,7 +4292,7 @@ impl TypedCudaSvdScratch {
 }
 
 #[cfg(all(test, feature = "cuda"))]
-impl Drop for TypedCudaSvdScratch {
+impl<D: CudaPayload> Drop for TypedCudaSvdScratch<D> {
     fn drop(&mut self) {
         update_cuda_svd_observation(|(results, total, creations, live, peak)| {
             (results, total, creations, live - 1, peak)
@@ -4275,7 +4310,7 @@ struct TypedCudaSvdRetainedFactors {
 
 #[cfg(feature = "cuda")]
 impl TypedCudaSvdRetainedFactors {
-    fn new(
+    fn new<D: CudaPayload>(
         left: CudaDenseStorage,
         right: CudaDenseStorage,
         rows: usize,
@@ -4283,12 +4318,12 @@ impl TypedCudaSvdRetainedFactors {
         rank: usize,
     ) -> Result<Self, Error> {
         #[cfg(not(test))]
-        let _ = (rows, cols, rank);
+        let _ = (rows, cols, rank, std::mem::size_of::<D>());
         #[cfg(test)]
         let bytes = rows
             .checked_add(cols)
             .and_then(|sum| sum.checked_mul(rank))
-            .and_then(|elements| elements.checked_mul(std::mem::size_of::<f64>()))
+            .and_then(|elements| elements.checked_mul(std::mem::size_of::<D>()))
             .ok_or_else(|| internal_layout_error("retained CUDA SVD factor bytes overflow"))?;
         #[cfg(test)]
         update_cuda_svd_trunc_observation(
@@ -4341,6 +4376,12 @@ struct TypedCudaQrRoute {
     left: usize,
     right: usize,
     rank: usize,
+    /// The left factor's target region has the source's codomain tree layout,
+    /// so it can be written by one whole-factor copy instead of a per-tree
+    /// identity-selector GEMM. Proved at plan time, never a size heuristic.
+    aligned_left: bool,
+    /// The same proof for the right factor's domain tree layout.
+    aligned_right: bool,
 }
 
 #[cfg(feature = "cuda")]
@@ -4372,6 +4413,37 @@ struct TypedCudaSvdTruncPlan<R> {
     left_regions: Arc<[CoupledSectorRegion]>,
     right_regions: Arc<[CoupledSectorRegion]>,
     routes: Vec<TypedCudaSvdTruncRoute>,
+}
+
+/// Whether a factor region reproduces its source's tree layout exactly: the
+/// same trees in the same order, with equal extents and equal offsets, tiling
+/// `[0, extent)` without gaps.
+///
+/// `cuda_qr_tree_extents_match` is deliberately order-insensitive because the
+/// general assembly never relies on enumeration order. This stricter predicate
+/// is the proof that lets an aligned route skip the identity-selector GEMM.
+#[cfg(feature = "cuda")]
+fn cuda_factor_layout_is_aligned(
+    source: &[CoupledTreeExtent],
+    factor: &[CoupledTreeExtent],
+    extent: usize,
+) -> Result<bool, Error> {
+    if source.len() != factor.len() {
+        return Ok(false);
+    }
+    let mut covered = 0usize;
+    for (source_tree, factor_tree) in source.iter().zip(factor) {
+        let size = source_tree.extent()?;
+        if source_tree.tree() != factor_tree.tree()
+            || size != factor_tree.extent()?
+            || source_tree.offset() != covered
+            || factor_tree.offset() != covered
+        {
+            return Ok(false);
+        }
+        covered += size;
+    }
+    Ok(covered == extent)
 }
 
 #[cfg(feature = "cuda")]
@@ -4446,15 +4518,6 @@ fn validate_cuda_svd_middle_regions<R>(
         }
     }
     Ok(())
-}
-
-#[cfg(feature = "cuda")]
-fn cuda_qr_diagonal_sign(value: f64) -> f64 {
-    if value < 0.0 {
-        -1.0
-    } else {
-        1.0
-    }
 }
 
 #[cfg(feature = "cuda")]
@@ -9893,44 +9956,20 @@ impl<R, D: CudaPayload> TensorMap<R, D, CudaStorage<D>> {
 }
 
 #[cfg(feature = "cuda")]
-/// Device factorizations. These stay `f64`-only in this leaf: the positive
-/// diagonal gauge, the Hermitian residual test, and the selector dtype are a
-/// separate complex-payload slice.
+/// Device compact SVD (`svd_compact`, `svd_trunc`) and Hermitian
+/// eigendecomposition (`eigh_full`, `eigh_trunc`) over either device payload
+/// (`f64` or `Complex64`).
 ///
-/// Checked Generic providers deliberately have no device factorizations:
+/// `u` and `vh` keep the raw device SVD gauge for both dtypes; unlike the Host
+/// methods, these do not impose TensorKit's largest-pivot gauge.
+/// `eigh_full`/`eigh_trunc` admit a block only when it equals its *conjugate*
+/// transpose, so a complex-symmetric non-Hermitian block is rejected before
+/// any factorization.
 ///
-/// ```compile_fail
-/// use tenet::core::{
-///     CheckedGenericAdmissionMode, CheckedGenericFusion, CheckedGenericRigidSymbols,
-///     TypedSectorAdmission,
-/// };
-/// use tenet::typed::{CudaStorage, TensorMap};
+/// Compact QR is not here: it is `f64`-only and lives in its own impl below.
 ///
-/// fn no_checked_generic_cuda_qr<R>(tensor: &TensorMap<R, f64, CudaStorage>)
-/// where
-///     R: TypedSectorAdmission<Mode = CheckedGenericAdmissionMode>
-///         + CheckedGenericFusion
-///         + CheckedGenericRigidSymbols<Scalar = f64>,
-/// {
-///     let _ = tensor.qr_compact();
-/// }
-/// ```
-///
-/// A complex device payload has no compact QR either:
-///
-/// ```compile_fail
-/// use num_complex::Complex64;
-/// use tenet::core::U1FusionRule;
-/// use tenet::typed::{CudaStorage, TensorMap};
-///
-/// fn no_complex_cuda_qr(
-///     tensor: &TensorMap<U1FusionRule, Complex64, CudaStorage<Complex64>>,
-/// ) {
-///     let _ = tensor.qr_compact();
-/// }
-/// ```
-///
-/// Compact SVD has the same deliberately narrow typed CUDA surface:
+/// Checked Generic providers deliberately have no device factorizations, and
+/// compact SVD has the same deliberately narrow typed CUDA surface:
 ///
 /// ```compile_fail
 /// use tenet::core::{
@@ -9949,19 +9988,7 @@ impl<R, D: CudaPayload> TensorMap<R, D, CudaStorage<D>> {
 /// }
 /// ```
 ///
-/// ```compile_fail
-/// use num_complex::Complex64;
-/// use tenet::core::U1FusionRule;
-/// use tenet::typed::{CudaStorage, TensorMap};
-///
-/// fn no_complex_cuda_svd(
-///     tensor: &TensorMap<U1FusionRule, Complex64, CudaStorage<Complex64>>,
-/// ) {
-///     let _ = tensor.svd_compact();
-/// }
-/// ```
-///
-/// Truncated SVD is absent at the same checked-Generic/complex boundaries:
+/// Truncated SVD is absent at the same checked-Generic boundary:
 ///
 /// ```compile_fail
 /// use tenet::core::{
@@ -9979,22 +10006,35 @@ impl<R, D: CudaPayload> TensorMap<R, D, CudaStorage<D>> {
 ///     let _ = tensor.svd_trunc(&Truncation::Full);
 /// }
 /// ```
-///
-/// ```compile_fail
-/// use num_complex::Complex64;
-/// use tenet::core::U1FusionRule;
-/// use tenet::typed::{CudaStorage, TensorMap, Truncation};
-///
-/// fn no_complex_cuda_svd_trunc(
-///     tensor: &TensorMap<U1FusionRule, Complex64, CudaStorage<Complex64>>,
-/// ) {
-///     let _ = tensor.svd_trunc(&Truncation::Full);
-/// }
-/// ```
-impl<R> TensorMap<R, f64, CudaStorage>
+impl<R, D> TensorMap<R, D, CudaStorage<D>>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: CudaPayload,
 {
+    /// The `k x k` identity selector the non-aligned assembly GEMMs need.
+    /// A fully aligned route assembles by copy and uploads nothing.
+    fn identity_selector(
+        cuda: &mut CudaDenseContext,
+        route: &TypedCudaQrRoute,
+    ) -> Result<Option<CudaStorage<D>>, Error> {
+        if route.aligned_left && route.aligned_right {
+            return Ok(None);
+        }
+        upload_selector(
+            cuda,
+            route.rank,
+            route.rank,
+            (0..route.rank).map(|index| (index, index, D::ONE)),
+        )
+        .map(Some)
+    }
+
+    fn route_selector(selector: &Option<CudaStorage<D>>) -> Result<&CudaStorage<D>, Error> {
+        selector.as_ref().ok_or_else(|| {
+            internal_layout_error("a non-aligned factor route has no assembly selector")
+        })
+    }
+
     fn compile_cuda_qr_plan(
         &self,
         source_regions: Arc<[CoupledSectorRegion]>,
@@ -10065,6 +10105,16 @@ where
                 left,
                 right,
                 rank,
+                aligned_left: cuda_factor_layout_is_aligned(
+                    region.row_trees(),
+                    left_region.row_trees(),
+                    region.rows(),
+                )?,
+                aligned_right: cuda_factor_layout_is_aligned(
+                    region.col_trees(),
+                    right_region.col_trees(),
+                    region.cols(),
+                )?,
             });
         }
         if routes.len() != left_regions.len() || routes.len() != right_regions.len() {
@@ -10231,108 +10281,6 @@ where
         })
     }
 
-    /// Streamed compact QR of owned dense CUDA storage. Each nonempty coupled
-    /// sector is gauge-fixed on device; only its compact R diagonal is read
-    /// back for the exact sign decision.
-    pub fn qr_compact(&self) -> Result<(Self, Self), Error> {
-        let source = self.direct_cuda_storage("qr_compact")?;
-        let source_space = self.logical_space().space();
-        let required_len = source_space.required_len()?;
-        let source_regions = sector_regions(source_space.structure(), source_space.nout())?;
-
-        {
-            let mut state = self.runtime.lock();
-            let cuda = state.cuda.as_mut().ok_or_else(|| {
-                Error::InvalidArgument(
-                    "this runtime was built without a CUDA device; use \
-                     Runtime::builder().cuda(device)"
-                        .to_string(),
-                )
-            })?;
-            Self::validate_cuda_owned_metadata(
-                Placement::Cuda(cuda.device()),
-                source.placement(),
-                required_len,
-                source.len(),
-            )?;
-        }
-
-        // Provider queries and final HomSpace admission belong outside the
-        // execution lock; the plan owns every source-to-factor route.
-        let plan = self.compile_cuda_qr_plan(source_regions)?;
-        let left_len = plan.left_space.space().required_len()?;
-        let right_len = plan.right_space.space().required_len()?;
-
-        let (left_data, right_data) = {
-            let mut state = self.runtime.lock();
-            let cuda = state.cuda.as_mut().ok_or_else(|| {
-                Error::InvalidArgument(
-                    "this runtime was built without a CUDA device; use \
-                     Runtime::builder().cuda(device)"
-                        .to_string(),
-                )
-            })?;
-            let mut left_data = CudaStorage::upload(cuda, &vec![0.0; left_len])?;
-            #[cfg(test)]
-            observe_cuda_qr_output_upload();
-            let mut right_data = CudaStorage::upload(cuda, &vec![0.0; right_len])?;
-            #[cfg(test)]
-            observe_cuda_qr_output_upload();
-            for route in &plan.routes {
-                let source_region = &plan.source_regions[route.source];
-                let left_region = &plan.left_regions[route.left];
-                let right_region = &plan.right_regions[route.right];
-                let (raw_left, raw_right, diagonal) = cuda_qr_region(
-                    cuda,
-                    &source.0,
-                    source_region.range().start,
-                    source_region.rows(),
-                    source_region.cols(),
-                )?;
-                let signs = diagonal.iter().copied().map(cuda_qr_diagonal_sign);
-                let selector = upload_selector(
-                    cuda,
-                    route.rank,
-                    route.rank,
-                    signs.enumerate().map(|(index, sign)| (index, index, sign)),
-                )?;
-                let scratch = TypedCudaQrScratch::new(raw_left, raw_right, selector);
-                assemble_left_factor(
-                    cuda,
-                    &mut left_data,
-                    left_region,
-                    source_region,
-                    &scratch.left,
-                    route.rank,
-                    &scratch.selector,
-                    route.rank,
-                )?;
-                assemble_right_factor(
-                    cuda,
-                    &mut right_data,
-                    right_region,
-                    source_region,
-                    &scratch.selector,
-                    route.rank,
-                    route.rank,
-                    &scratch.right,
-                )?;
-            }
-            (left_data, right_data)
-        };
-
-        Ok((
-            Self {
-                runtime: self.runtime.clone(),
-                repr: owned_repr(TypedTensorBody::dense(plan.left_space, left_data)),
-            },
-            Self {
-                runtime: self.runtime.clone(),
-                repr: owned_repr(TypedTensorBody::dense(plan.right_space, right_data)),
-            },
-        ))
-    }
-
     /// Streamed compact SVD of owned dense CUDA storage.
     ///
     /// Each nonempty coupled-sector route is decomposed and assembled before
@@ -10392,10 +10340,10 @@ where
                         .to_string(),
                 )
             })?;
-            let mut left_data = CudaStorage::upload(cuda, &vec![0.0; left_len])?;
+            let mut left_data = CudaStorage::upload(cuda, &vec![D::ZERO; left_len])?;
             #[cfg(test)]
             observe_cuda_svd_final_storage_creation();
-            let mut right_data = CudaStorage::upload(cuda, &vec![0.0; right_len])?;
+            let mut right_data = CudaStorage::upload(cuda, &vec![D::ZERO; right_len])?;
             #[cfg(test)]
             observe_cuda_svd_final_storage_creation();
             let mut spectra = Vec::with_capacity(plan.routes.len());
@@ -10404,7 +10352,7 @@ where
                 let source_region = &plan.source_regions[route.source];
                 let left_region = &plan.left_regions[route.left];
                 let right_region = &plan.right_regions[route.right];
-                let (raw_left, values, raw_right) = cuda_svd_region(
+                let (raw_left, values, raw_right) = cuda_svd_region::<D>(
                     cuda,
                     &source.0,
                     source_region.range().start,
@@ -10416,43 +10364,48 @@ where
                         "compact SVD spectrum length does not match its source route",
                     ));
                 }
-                let selector = upload_selector(
-                    cuda,
-                    route.rank,
-                    route.rank,
-                    (0..route.rank).map(|index| (index, index, 1.0)),
-                )?;
+                let selector = Self::identity_selector(cuda, route)?;
                 // The scratch owns all route-local allocations. It is dropped
                 // at the end of this iteration, bounding peak raw-factor
                 // storage independently of the number of sectors.
                 let scratch = TypedCudaSvdScratch::new(raw_left, raw_right, selector);
-                assemble_left_factor(
-                    cuda,
-                    &mut left_data,
-                    left_region,
-                    source_region,
-                    &scratch.left,
-                    route.rank,
-                    &scratch.selector,
-                    route.rank,
-                )?;
-                assemble_right_factor(
-                    cuda,
-                    &mut right_data,
-                    right_region,
-                    source_region,
-                    &scratch.selector,
-                    route.rank,
-                    route.rank,
-                    &scratch.right,
-                )?;
+                // Compact SVD keeps the full rank by construction, so the same
+                // proved layout identity applies as for QR.
+                if route.aligned_left {
+                    copy_whole_factor(cuda, &mut left_data, left_region, &scratch.left)?;
+                } else {
+                    assemble_left_factor(
+                        cuda,
+                        &mut left_data,
+                        left_region,
+                        source_region,
+                        &scratch.left,
+                        route.rank,
+                        Self::route_selector(&scratch.selector)?,
+                        route.rank,
+                    )?;
+                }
+                if route.aligned_right {
+                    copy_whole_factor(cuda, &mut right_data, right_region, &scratch.right)?;
+                } else {
+                    assemble_right_factor(
+                        cuda,
+                        &mut right_data,
+                        right_region,
+                        source_region,
+                        Self::route_selector(&scratch.selector)?,
+                        route.rank,
+                        route.rank,
+                        &scratch.right,
+                    )?;
+                }
                 spectra.push(tenet_matrixalgebra::SectorSpectrum {
                     sector: source_region.coupled(),
                     values,
                 });
             }
 
-            let mut middle_host = vec![0.0; middle_len];
+            let mut middle_host = vec![D::ZERO; middle_len];
             fill_diagonal_values(middle_space.space().structure(), &mut middle_host, &spectra)?;
             let middle_data = CudaStorage::upload(cuda, &middle_host)?;
             #[cfg(test)]
@@ -10478,8 +10431,8 @@ where
 
     fn upload_cuda_svd_trunc_final(
         cuda: &CudaDenseContext,
-        values: &[f64],
-    ) -> Result<CudaStorage, Error> {
+        values: &[D],
+    ) -> Result<CudaStorage<D>, Error> {
         #[cfg(test)]
         {
             observe_cuda_svd_trunc_event("final_storage");
@@ -10535,7 +10488,7 @@ where
     pub fn svd_trunc(
         &self,
         truncation: &Truncation,
-    ) -> Result<SvdTrunc<R, f64, CudaStorage>, Error> {
+    ) -> Result<SvdTrunc<R, D, CudaStorage<D>>, Error> {
         let source = self.direct_cuda_storage("svd_trunc")?;
         let source_space = self.logical_space().space();
         let required_len = source_space.required_len()?;
@@ -10600,7 +10553,7 @@ where
                 }
                 #[cfg(test)]
                 observe_cuda_svd_trunc_event("decomposition");
-                let (raw_left, values, raw_right) = cuda_svd_region(
+                let (raw_left, values, raw_right) = cuda_svd_region::<D>(
                     cuda,
                     &source.0,
                     region.range().start,
@@ -10614,7 +10567,7 @@ where
                         "truncated SVD spectrum length does not match its source route",
                     ));
                 }
-                let factors = TypedCudaSvdRetainedFactors::new(
+                let factors = TypedCudaSvdRetainedFactors::new::<D>(
                     raw_left,
                     raw_right,
                     region.rows(),
@@ -10672,7 +10625,7 @@ where
         let left_len = plan.left_space.space().required_len()?;
         let middle_len = plan.middle_space.space().required_len()?;
         let right_len = plan.right_space.space().required_len()?;
-        let mut middle_host = vec![0.0; middle_len];
+        let mut middle_host = vec![D::ZERO; middle_len];
         fill_diagonal_values(
             plan.middle_space.space().structure(),
             &mut middle_host,
@@ -10690,9 +10643,10 @@ where
                         .to_string(),
                 )
             })?;
-            let mut left_data = Self::upload_cuda_svd_trunc_final(cuda, &vec![0.0; left_len])?;
+            let mut left_data = Self::upload_cuda_svd_trunc_final(cuda, &vec![D::ZERO; left_len])?;
             let middle_data = Self::upload_cuda_svd_trunc_final(cuda, &middle_host)?;
-            let mut right_data = Self::upload_cuda_svd_trunc_final(cuda, &vec![0.0; right_len])?;
+            let mut right_data =
+                Self::upload_cuda_svd_trunc_final(cuda, &vec![D::ZERO; right_len])?;
             #[cfg(test)]
             let mut assembly_ordinal = 0;
             for route in plan.routes.iter() {
@@ -10710,7 +10664,7 @@ where
                     cuda,
                     route.full_rank,
                     route.kept,
-                    (0..route.kept).map(|index| (index, index, 1.0)),
+                    (0..route.kept).map(|index| (index, index, D::ONE)),
                 )?;
                 assemble_left_factor(
                     cuda,
@@ -10728,7 +10682,7 @@ where
                     cuda,
                     route.kept,
                     route.full_rank,
-                    (0..route.kept).map(|index| (index, index, 1.0)),
+                    (0..route.kept).map(|index| (index, index, D::ONE)),
                 )?;
                 assemble_right_factor(
                     cuda,
@@ -10796,7 +10750,7 @@ where
     pub fn eigh_trunc(
         &self,
         truncation: &Truncation,
-    ) -> Result<EighTrunc<R, f64, CudaStorage>, Error> {
+    ) -> Result<EighTrunc<R, D, CudaStorage<D>>, Error> {
         let source = self.direct_cuda_storage("eigh_trunc")?;
         let source_space = self.logical_space().space();
         if source_space.homspace().codomain() != source_space.homspace().domain() {
@@ -10853,8 +10807,12 @@ where
                 )
             })?;
             for region in source_plan.source_regions.iter() {
-                if !cuda_is_hermitian_region(cuda, &source.0, region.range().start, region.rows())?
-                {
+                if !cuda_is_hermitian_region::<D>(
+                    cuda,
+                    &source.0,
+                    region.range().start,
+                    region.rows(),
+                )? {
                     return Err(
                         tenet_tensors::OperationError::UnsupportedTensorContractScope {
                             message: "eigh requires every coupled-sector block to be Hermitian",
@@ -10891,7 +10849,7 @@ where
                     continue;
                 }
                 let (values, vector) =
-                    typed_cuda_eigh_region(cuda, &source.0, region.range().start, n)?;
+                    typed_cuda_eigh_region::<D>(cuda, &source.0, region.range().start, n)?;
                 #[cfg(test)]
                 {
                     decomposition_ordinal += 1;
@@ -10946,7 +10904,7 @@ where
             .compile_cuda_svd_trunc_plan(Arc::clone(&source_plan.source_regions), &kept_spectra)?;
         let vector_len = plan.left_space.space().required_len()?;
         let diagonal_len = plan.middle_space.space().required_len()?;
-        let mut diagonal_host = vec![0.0; diagonal_len];
+        let mut diagonal_host = vec![D::ZERO; diagonal_len];
         fill_diagonal_values(
             plan.middle_space.space().structure(),
             &mut diagonal_host,
@@ -10963,7 +10921,7 @@ where
                 )
             })?;
             let diagonal_data = CudaStorage::upload(cuda, &diagonal_host)?;
-            let mut vector_data = CudaStorage::upload(cuda, &vec![0.0; vector_len])?;
+            let mut vector_data = CudaStorage::upload(cuda, &vec![D::ZERO; vector_len])?;
             #[cfg(test)]
             let mut assembly_ordinal = 0;
             for route in plan.routes.iter() {
@@ -10989,7 +10947,7 @@ where
                     order[..route.kept]
                         .iter()
                         .enumerate()
-                        .map(|(column, &row)| (row, column, 1.0)),
+                        .map(|(column, &row)| (row, column, D::ONE)),
                 )?;
                 assemble_left_factor(
                     cuda,
@@ -11017,6 +10975,169 @@ where
             eigenvalues,
             error,
         })
+    }
+}
+
+#[cfg(feature = "cuda")]
+/// Device compact QR, `f64` payload only.
+///
+/// `qr_compact` returns the positive-diagonal gauge (`R_jj` real and
+/// non-negative, phase 1 kept where `R_jj == 0`), applied on device by the
+/// backend's own QR primitive rather than re-derived here.
+///
+/// A `Complex64` device QR is a compile-time boundary until tenferro-rs#1833:
+/// every backend path to the `R` factor routes through tenferro-gpu's `triu`
+/// kernel, whose zero constant (`tenferro-gpu-0.5.0`
+/// `src/kernels/helpers.rs:84` `E::cast_from(0u32)`, used by
+/// `src/kernels/diagonal.rs:76 triu_kernel`, called from
+/// `tenferro-linalg-0.5.0/src/gpu/linalg/householder_qr.rs:660` and
+/// `src/gpu/linalg.rs:2619`) emits `cuDoubleComplex(uint32(0))` and fails
+/// NVRTC compilation. That is a missing backend kernel, not a semantic
+/// restriction, so it is a boundary rather than a runtime backend error;
+/// `svd_compact`, `svd_trunc`, `eigh_full` and `eigh_trunc` are unaffected and
+/// carry both payloads.
+///
+/// Checked Generic providers have no device QR either:
+///
+/// ```compile_fail
+/// use tenet::core::{
+///     CheckedGenericAdmissionMode, CheckedGenericFusion, CheckedGenericRigidSymbols,
+///     TypedSectorAdmission,
+/// };
+/// use tenet::typed::{CudaStorage, TensorMap};
+///
+/// fn no_checked_generic_cuda_qr<R>(tensor: &TensorMap<R, f64, CudaStorage>)
+/// where
+///     R: TypedSectorAdmission<Mode = CheckedGenericAdmissionMode>
+///         + CheckedGenericFusion
+///         + CheckedGenericRigidSymbols<Scalar = f64>,
+/// {
+///     let _ = tensor.qr_compact();
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use num_complex::Complex64;
+/// use tenet::core::U1FusionRule;
+/// use tenet::typed::{CudaStorage, TensorMap};
+///
+/// fn no_complex_cuda_qr(
+///     tensor: &TensorMap<U1FusionRule, Complex64, CudaStorage<Complex64>>,
+/// ) {
+///     let _ = tensor.qr_compact();
+/// }
+/// ```
+impl<R> TensorMap<R, f64, CudaStorage>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+{
+    /// Streamed compact QR of owned dense CUDA storage.
+    ///
+    /// Each nonempty coupled sector is gauge-fixed on device by the backend's
+    /// positive-diagonal QR: `R_jj` is real and non-negative, and a zero
+    /// diagonal entry keeps phase 1. Nothing of either factor crosses to the
+    /// host. A route whose factor region reproduces the source's tree layout
+    /// is assembled by one whole-factor device copy; any other route keeps the
+    /// per-tree identity-selector GEMM.
+    pub fn qr_compact(&self) -> Result<(Self, Self), Error> {
+        let source = self.direct_cuda_storage("qr_compact")?;
+        let source_space = self.logical_space().space();
+        let required_len = source_space.required_len()?;
+        let source_regions = sector_regions(source_space.structure(), source_space.nout())?;
+
+        {
+            let mut state = self.runtime.lock();
+            let cuda = state.cuda.as_mut().ok_or_else(|| {
+                Error::InvalidArgument(
+                    "this runtime was built without a CUDA device; use \
+                     Runtime::builder().cuda(device)"
+                        .to_string(),
+                )
+            })?;
+            Self::validate_cuda_owned_metadata(
+                Placement::Cuda(cuda.device()),
+                source.placement(),
+                required_len,
+                source.len(),
+            )?;
+        }
+
+        // Provider queries and final HomSpace admission belong outside the
+        // execution lock; the plan owns every source-to-factor route.
+        let plan = self.compile_cuda_qr_plan(source_regions)?;
+        let left_len = plan.left_space.space().required_len()?;
+        let right_len = plan.right_space.space().required_len()?;
+
+        let (left_data, right_data) = {
+            let mut state = self.runtime.lock();
+            let cuda = state.cuda.as_mut().ok_or_else(|| {
+                Error::InvalidArgument(
+                    "this runtime was built without a CUDA device; use \
+                     Runtime::builder().cuda(device)"
+                        .to_string(),
+                )
+            })?;
+            let mut left_data = CudaStorage::upload(cuda, &vec![0.0; left_len])?;
+            #[cfg(test)]
+            observe_cuda_qr_output_upload();
+            let mut right_data = CudaStorage::upload(cuda, &vec![0.0; right_len])?;
+            #[cfg(test)]
+            observe_cuda_qr_output_upload();
+            for route in &plan.routes {
+                let source_region = &plan.source_regions[route.source];
+                let left_region = &plan.left_regions[route.left];
+                let right_region = &plan.right_regions[route.right];
+                let (raw_left, raw_right) = cuda_qr_region::<f64>(
+                    cuda,
+                    &source.0,
+                    source_region.range().start,
+                    source_region.rows(),
+                    source_region.cols(),
+                )?;
+                let selector = Self::identity_selector(cuda, route)?;
+                let scratch = TypedCudaQrScratch::new(raw_left, raw_right, selector);
+                if route.aligned_left {
+                    copy_whole_factor(cuda, &mut left_data, left_region, &scratch.left)?;
+                } else {
+                    assemble_left_factor(
+                        cuda,
+                        &mut left_data,
+                        left_region,
+                        source_region,
+                        &scratch.left,
+                        route.rank,
+                        Self::route_selector(&scratch.selector)?,
+                        route.rank,
+                    )?;
+                }
+                if route.aligned_right {
+                    copy_whole_factor(cuda, &mut right_data, right_region, &scratch.right)?;
+                } else {
+                    assemble_right_factor(
+                        cuda,
+                        &mut right_data,
+                        right_region,
+                        source_region,
+                        Self::route_selector(&scratch.selector)?,
+                        route.rank,
+                        route.rank,
+                        &scratch.right,
+                    )?;
+                }
+            }
+            (left_data, right_data)
+        };
+
+        Ok((
+            Self {
+                runtime: self.runtime.clone(),
+                repr: owned_repr(TypedTensorBody::dense(plan.left_space, left_data)),
+            },
+            Self {
+                runtime: self.runtime.clone(),
+                repr: owned_repr(TypedTensorBody::dense(plan.right_space, right_data)),
+            },
+        ))
     }
 }
 
@@ -17964,6 +18085,37 @@ mod representation_gates {
         ));
     }
 
+    /// `(factor_copies, selector_uploads, assembly_gemms)` a compact QR or
+    /// compact SVD assembly must perform for this plan: an aligned side is one
+    /// whole-factor copy and no selector upload, a non-aligned side is one GEMM
+    /// per nonempty target tree.
+    #[cfg(feature = "cuda")]
+    fn cuda_route_assembly_counts<R>(plan: &TypedCudaQrPlan<R>) -> (usize, usize, usize) {
+        let nonempty_trees = |trees: &[CoupledTreeExtent]| {
+            trees
+                .iter()
+                .filter(|tree| tree.extent().is_ok_and(|extent| extent != 0))
+                .count()
+        };
+        let mut counts = (0, 0, 0);
+        for route in &plan.routes {
+            if route.aligned_left {
+                counts.0 += 1;
+            } else {
+                counts.2 += nonempty_trees(plan.left_regions[route.left].row_trees());
+            }
+            if route.aligned_right {
+                counts.0 += 1;
+            } else {
+                counts.2 += nonempty_trees(plan.right_regions[route.right].col_trees());
+            }
+            if !(route.aligned_left && route.aligned_right) {
+                counts.1 += 1;
+            }
+        }
+        counts
+    }
+
     #[cfg(feature = "cuda")]
     #[test]
     fn typed_cuda_qr_tree_route_validation_is_order_independent_and_bijective() {
@@ -17983,14 +18135,19 @@ mod representation_gates {
         assert!(cuda_qr_tree_extents_match(trees, &reordered).unwrap());
         reordered.pop();
         assert!(!cuda_qr_tree_extents_match(trees, &reordered).unwrap());
-    }
 
-    #[cfg(feature = "cuda")]
-    #[test]
-    fn typed_cuda_qr_sign_keeps_exact_zero_and_flips_tiny_negative_pivots() {
-        assert_eq!(cuda_qr_diagonal_sign(0.0), 1.0);
-        assert_eq!(cuda_qr_diagonal_sign(-0.0), 1.0);
-        assert_eq!(cuda_qr_diagonal_sign(-1.0e-300), -1.0);
+        // The aligned-copy dispatch is the stricter, order-sensitive predicate:
+        // a permuted tree sequence carries the same blocks but a different
+        // layout, so it must fall back to the per-tree GEMM.
+        let extent: usize = trees.iter().map(|tree| tree.extent().unwrap()).sum();
+        assert!(cuda_factor_layout_is_aligned(trees, trees, extent).unwrap());
+        let mut permuted = trees.to_vec();
+        permuted.reverse();
+        assert!(!cuda_factor_layout_is_aligned(trees, &permuted, extent).unwrap());
+        assert!(
+            !cuda_factor_layout_is_aligned(trees, trees, extent + 1).unwrap(),
+            "trees that do not tile the region are never aligned"
+        );
     }
 
     #[cfg(feature = "cuda")]
@@ -18210,26 +18367,32 @@ mod representation_gates {
             .iter()
             .filter(|region| region.rows() != 0 && region.cols() != 0)
             .count();
-        let diagonal_values = regions
-            .iter()
-            .map(|region| region.rows().min(region.cols()))
-            .sum();
-        let assembly_gemms = regions
-            .iter()
-            .map(|region| {
-                region
-                    .row_trees()
-                    .iter()
-                    .filter(|tree| tree.extent().is_ok_and(|extent| extent != 0))
-                    .count()
-                    + region
-                        .col_trees()
-                        .iter()
-                        .filter(|tree| tree.extent().is_ok_and(|extent| extent != 0))
-                        .count()
-            })
-            .sum();
         let source_device = source.to_cuda().unwrap();
+        // Per-route transfer and kernel counts follow the proved layout flag.
+        let plan = source_device
+            .compile_cuda_qr_plan(Arc::clone(&regions))
+            .unwrap();
+        let (factor_copies, selector_uploads, assembly_gemms) = cuda_route_assembly_counts(&plan);
+        assert_eq!(plan.routes.len(), nonempty);
+        // Both factor spaces of this fixture reproduce the source tree layout,
+        // so every route takes the whole-factor copy and the assembly uploads
+        // and downloads nothing. The non-aligned fallback is a layout
+        // property, not a workload one, and is covered by
+        // `typed_cuda_qr_tree_route_validation_is_order_independent_and_bijective`.
+        assert!(
+            plan.routes
+                .iter()
+                .all(|route| route.aligned_left && route.aligned_right),
+            "expected an all-aligned route mix, got {:?}",
+            plan.routes
+                .iter()
+                .map(|route| (route.aligned_left, route.aligned_right))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            (factor_copies, selector_uploads, assembly_gemms),
+            (2 * plan.routes.len(), 0, 0)
+        );
 
         CUDA_QR_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0, 0, 0))));
         source_device.qr_compact().unwrap();
@@ -18238,8 +18401,8 @@ mod representation_gates {
                 observation.get(),
                 Some((
                     nonempty,
-                    diagonal_values,
-                    nonempty,
+                    factor_copies,
+                    selector_uploads,
                     2,
                     assembly_gemms,
                     0,
@@ -18251,7 +18414,7 @@ mod representation_gates {
 
         let malformed_storage = {
             let state = runtime.lock();
-            CudaStorage::upload(state.cuda.as_ref().unwrap(), &[]).unwrap()
+            CudaStorage::<f64>::upload(state.cuda.as_ref().unwrap(), &[]).unwrap()
         };
         let malformed = TensorMap {
             runtime: runtime.clone(),
@@ -18337,7 +18500,14 @@ mod representation_gates {
             .map(|region| region.rows().min(region.cols()))
             .sum();
         let source_device = source.to_cuda().unwrap();
+        // Compact SVD assembles through the same aligned-copy dispatch as QR
+        // and shares its copy/selector/GEMM observation.
+        let plan = source_device
+            .compile_cuda_qr_plan(Arc::clone(&regions))
+            .unwrap();
+        let (factor_copies, selector_uploads, assembly_gemms) = cuda_route_assembly_counts(&plan);
         CUDA_SVD_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0))));
+        CUDA_QR_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0, 0, 0))));
         source_device.svd_compact().unwrap();
         CUDA_SVD_OBSERVATION.with(|observation| {
             assert_eq!(
@@ -18346,10 +18516,19 @@ mod representation_gates {
             );
             observation.set(None);
         });
+        CUDA_QR_OBSERVATION.with(|observation| {
+            // No device QR and no QR output upload happen here; the shared
+            // slots record only this assembly's copies, selectors and GEMMs.
+            assert_eq!(
+                observation.get(),
+                Some((0, factor_copies, selector_uploads, 0, assembly_gemms, 0, 0))
+            );
+            observation.set(None);
+        });
 
         let malformed_storage = {
             let state = runtime.lock();
-            CudaStorage::upload(state.cuda.as_ref().unwrap(), &[]).unwrap()
+            CudaStorage::<f64>::upload(state.cuda.as_ref().unwrap(), &[]).unwrap()
         };
         let malformed = TensorMap {
             runtime: runtime.clone(),
@@ -18906,7 +19085,7 @@ mod representation_gates {
         let source_device = source.to_cuda().unwrap();
         let empty_storage = {
             let state = runtime.lock();
-            CudaStorage::upload(state.cuda.as_ref().unwrap(), &[]).unwrap()
+            CudaStorage::<f64>::upload(state.cuda.as_ref().unwrap(), &[]).unwrap()
         };
         let malformed_length = TensorMap {
             runtime: runtime.clone(),
@@ -19176,15 +19355,9 @@ mod representation_gates {
                 };
                 let lhs_device = device_operand(&lhs, lhs_adjoint);
                 let rhs_device = device_operand(&rhs, rhs_adjoint);
-                let contracted = if upload_parent_first {
-                    lhs_device
-                        .contract(&rhs_device, &[1], &[0], &[0, 1])
-                        .unwrap()
-                } else {
-                    lhs_device
-                        .contract(&rhs_device, &[1], &[0], &[0, 1])
-                        .unwrap()
-                };
+                let contracted = lhs_device
+                    .contract(&rhs_device, &[1], &[0], &[0, 1])
+                    .unwrap();
                 let composed = lhs_device.compose(&rhs_device).unwrap();
                 let contracted = contracted.to_host().unwrap();
                 let composed = composed.to_host().unwrap();
