@@ -17,12 +17,13 @@ mod common;
 use std::sync::{Arc, Mutex};
 
 use common::{
-    all_fixtures, inactive_destination_layouts, many_distinct_signatures, rank_sweep, Fixture,
-    TestScalar,
+    all_fixtures, expert_interleaved_destination, inactive_destination_layouts,
+    many_distinct_signatures, rank_sweep, unit_coefficient_fixtures, Fixture, TestScalar,
 };
 use num_complex::Complex64;
 use tenet_dense::{
-    cuda_transfer_stats, reset_cuda_transfer_stats, CudaDenseContext, CudaScalar, CudaTransferStats,
+    cuda_transfer_stats, reset_cuda_transfer_stats, CudaDenseContext, CudaScalar,
+    CudaTransferStats, DenseError,
 };
 use tenet_operations::cuda::CudaStorage;
 use tenet_operations::{
@@ -459,6 +460,83 @@ fn more_signatures_than_the_default_plan_bound_raise_the_cap_without_thrashing()
         &fixture.expected(&source, &destination, true),
         "many signatures",
     );
+
+    // Negative control: an executor whose plan budget buys nothing raises no
+    // cap, and the same structure then thrashes the 64-entry default. A fresh
+    // context is required because the cap is per backend instance and this
+    // test just raised the one above.
+    let mut starved_ctx = context();
+    let mut starved = CudaTreeTransformExecutor::new(1 << 20, 0);
+    let mut starved_dst = CudaStorage::<f64>::upload(&starved_ctx, &destination).unwrap();
+    let starved_src = CudaStorage::<f64>::upload(&starved_ctx, &source).unwrap();
+    let starved_replay = |ctx: &mut CudaDenseContext,
+                          executor: &mut CudaTreeTransformExecutor,
+                          dst: &mut CudaStorage<f64>| {
+        executor
+            .replay(
+                ctx,
+                &structure,
+                &fixture.dst_structure(),
+                &fixture.src_structure(),
+                dst,
+                &starved_src,
+                CudaTreeTransformDestination::Overwrite,
+            )
+            .unwrap();
+    };
+    starved_replay(&mut starved_ctx, &mut starved, &mut starved_dst);
+    assert_eq!(
+        starved_ctx.plan_cache_max_entries().unwrap(),
+        default_bound,
+        "a zero plan budget must raise nothing"
+    );
+    let starved_before = starved_ctx.plan_cache_stats().unwrap();
+    starved_replay(&mut starved_ctx, &mut starved, &mut starved_dst);
+    let starved_after = starved_ctx.plan_cache_stats().unwrap();
+    assert!(
+        starved_after.evictions > starved_before.evictions,
+        "without the raise the warm replay must thrash: {starved_before:?} -> {starved_after:?}"
+    );
+    assert_close(
+        &starved_dst.download(&starved_ctx).unwrap(),
+        &fixture.expected(&source, &destination, true),
+        "many signatures, thrashing plan cache",
+    );
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn a_coefficient_of_one_moves_f64_payloads_bitwise() {
+    // What: where the host copies bit-exactly, the device's multiply by the
+    // uploaded `1` is exact too, so the two agree to the last bit for finite
+    // f64 payloads. (Not a contract for other coefficients or for complex
+    // payloads: see the +-inf deviation recorded in G2a-1.)
+    let mut ctx = context();
+    let mut executor = CudaTreeTransformExecutor::default();
+    for fixture in unit_coefficient_fixtures() {
+        let source = fixture.source::<f64>();
+        let destination = vec![0.0_f64; fixture.dst_len()];
+        let device = device_replay(
+            &mut ctx,
+            &mut executor,
+            &fixture,
+            &source,
+            &destination,
+            true,
+        );
+        assert_eq!(
+            device,
+            host_replay(&fixture, &source, &destination, true),
+            "{} must match the host bitwise",
+            fixture.name
+        );
+        assert_eq!(
+            device,
+            fixture.expected(&source, &destination, true),
+            "{} must match the oracle bitwise",
+            fixture.name
+        );
+    }
 }
 
 #[test]
@@ -491,6 +569,15 @@ fn unsupported_modes_are_rejected_before_any_device_work() {
     .unwrap();
     let mut multi_dst = CudaStorage::<f64>::upload(&ctx, &[0.0_f64; 4]).unwrap();
     let multi_src = CudaStorage::<f64>::upload(&ctx, &[1.0_f64; 4]).unwrap();
+
+    // A structure whose destination layout the host proves injective only
+    // through its exact overlap fallback, which the device region primitive
+    // cannot express.
+    let expert = expert_interleaved_destination();
+    let expert_structure = expert.compile();
+    let expert_destination: Vec<f64> = (0..expert.dst_len()).map(|i| 100.0 + i as f64).collect();
+    let mut expert_dst = CudaStorage::<f64>::upload(&ctx, &expert_destination).unwrap();
+    let expert_src = CudaStorage::<f64>::upload(&ctx, &expert.source::<f64>()).unwrap();
 
     reset_cuda_transfer_stats();
     let before = cuda_transfer_stats();
@@ -529,7 +616,40 @@ fn unsupported_modes_are_rejected_before_any_device_work() {
         "a recoupling structure gave {error:?}"
     );
 
+    let layout = executor
+        .replay(
+            &mut ctx,
+            &expert_structure,
+            &expert.dst_structure(),
+            &expert.src_structure(),
+            &mut expert_dst,
+            &expert_src,
+            CudaTreeTransformDestination::Overwrite,
+        )
+        .unwrap_err();
+    assert!(
+        matches!(
+            layout,
+            OperationError::Dense(DenseError::Unsupported {
+                op: "cuda_tree_transform",
+                ..
+            })
+        ),
+        "an inexpressible destination layout gave {layout:?}"
+    );
+    assert_eq!(
+        expert_dst.download(&ctx).unwrap(),
+        expert_destination,
+        "a rejected layout must leave the caller's destination untouched"
+    );
+
     let delta = stats_delta(before, cuda_transfer_stats());
+    // The one download above is the test's own read-back.
+    let delta = CudaTransferStats {
+        d2h_calls: delta.d2h_calls - 1,
+        d2h_bytes: delta.d2h_bytes - (expert_destination.len() * size_of::<f64>()) as u64,
+        ..delta
+    };
     assert_eq!(delta, CudaTransferStats::default(), "rejection did work");
     assert_eq!(
         ctx.plan_cache_stats().unwrap(),

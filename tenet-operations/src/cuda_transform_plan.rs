@@ -173,10 +173,15 @@ pub(crate) fn compile_device_plan<C: Copy>(
 ///
 /// One plan is built per `(dims, destination strides, source strides)` triple;
 /// a zero fill reads a packed template of the fill's own extents, so its source
-/// strides are the packed ones. Disclosed lower bound: operand alignment and
-/// the accumulation scalars are also part of Tenferro's plan key, so the real
-/// count can exceed this; it is never below it, which is what a monotonic cap
-/// raise needs.
+/// strides are the packed ones.
+///
+/// Exact per conjugation value: Tenferro's contraction plan key is (dtype,
+/// the three operand layouts, their alignments, the operand operators,
+/// workspace preference). Alignment is the constant `size_of::<D>()` for every
+/// view, so offsets do not multiply keys, and the accumulation scalars are not
+/// in the key at all; conjugation is, and it is one value per structure. The
+/// per-executor *sum* of these counts therefore over-counts signatures two
+/// structures share, which is the safe direction for a cap.
 fn distinct_plan_signatures(
     moves: &[DeviceMoveSpec],
     zeros: &[DeviceRegionSpec],
@@ -204,8 +209,9 @@ fn distinct_plan_signatures(
 /// backend's plan entry cap.
 pub(crate) const CUTENSOR_PLAN_BYTES: usize = 14 * 1024;
 
-/// How many plan entries `budget_bytes` pays for, never below Tenferro's own
-/// default bound, which the backend keeps anyway.
+/// How many plan entries `budget_bytes` pays for: the requirement, truncated
+/// to what the budget affords. It can be below Tenferro's own default bound,
+/// in which case the caller raises nothing and the backend keeps that default.
 pub(crate) fn plan_cache_entries_for(required: usize, budget_bytes: usize) -> usize {
     required.min(budget_bytes / CUTENSOR_PLAN_BYTES)
 }

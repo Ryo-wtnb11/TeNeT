@@ -534,6 +534,42 @@ pub fn zero_extent_block() -> Fixture {
     }
 }
 
+/// A destination layout the host proves injective only through its exact
+/// overlap fallback: dims [3, 2] with strides [2, 3] addresses 0, 2, 4, 3, 5, 7
+/// — distinct, but each stride does not exceed the span of the faster axis, so
+/// the device's cumulative-span rule (and Tenferro's) rejects it.
+///
+/// Host replays it; the device must report it as a capability boundary, and
+/// must do so before it has cost the caller anything.
+pub fn expert_interleaved_destination() -> Fixture {
+    Fixture {
+        name: "expert_interleaved_destination",
+        rank: 2,
+        dst_blocks: vec![Block {
+            shape: vec![3, 2],
+            strides: vec![2, 3],
+            offset: 0,
+        }],
+        src_blocks: vec![Block::packed(vec![2, 3], 0)],
+        pairs: vec![Pair {
+            dst_block: 0,
+            src_block: 0,
+            axes: vec![1, 0],
+            coefficient: 1.0,
+        }],
+        conjugate: false,
+    }
+}
+
+/// The fixtures whose every coefficient is exactly 1, where an f64 device move
+/// is a multiply by one and therefore bit-identical to the host's copy.
+pub fn unit_coefficient_fixtures() -> Vec<Fixture> {
+    all_fixtures()
+        .into_iter()
+        .filter(|fixture| fixture.pairs.iter().all(|pair| pair.coefficient == 1.0))
+        .collect()
+}
+
 /// Every fixture the device and host suites both replay.
 pub fn all_fixtures() -> Vec<Fixture> {
     let mut fixtures = rank_sweep();

@@ -32,7 +32,7 @@ use tenet_dense::{
 use crate::cuda::CudaStorage;
 use crate::cuda_transform_plan::{
     compile_device_plan, contains_multi_blocks, plan_cache_entries_for, DeviceTransformPlan,
-    StructureCache, StructureKey, CUTENSOR_PLAN_BYTES,
+    StructureCache, StructureKey,
 };
 use crate::opaque_admission::{
     validate_stage_a, validate_stage_c, AllocationIdentity, CoefficientReadiness, ContextIdentity,
@@ -87,7 +87,10 @@ struct PreparedStructure {
 ///
 /// One executor belongs next to one device execution context. Entries of other
 /// contexts can never be read back, because the context identity is part of
-/// every key.
+/// every key. Because a replay needs `&mut self` and `&mut CudaDenseContext`
+/// at once, its owner in G2b is the runtime's device state beside the
+/// `CudaDenseContext`, inside the same device mutex the GL-3 lease takes; it
+/// is deliberately not global and not owned by any structure.
 pub struct CudaTreeTransformExecutor {
     prepared: StructureCache<PreparedStructure>,
     coefficient_budget_bytes: usize,
@@ -102,9 +105,11 @@ pub struct CudaTreeTransformExecutor {
 pub const DEFAULT_COEFFICIENT_BUDGET_BYTES: usize = 16 * 1024 * 1024;
 
 /// Default ceiling on the cuTENSOR plan entries this executor asks for: 8 MiB
-/// at roughly 14 KB per plan, about 585 distinct operand signatures. Tenferro's
-/// own default bound is 64, which a transform with more distinct block layouts
-/// than that would thrash.
+/// at an estimated 14 KB per plan, about 585 distinct operand signatures.
+/// Tenferro's own default bound is 64, which a transform with more distinct
+/// block layouts than that would thrash. The per-plan figure is an estimate of
+/// a Tenferro internal, so it bounds only how far this executor is willing to
+/// raise the bound.
 pub const DEFAULT_PLAN_CACHE_BUDGET_BYTES: usize = 8 * 1024 * 1024;
 
 impl Default for CudaTreeTransformExecutor {
@@ -307,10 +312,15 @@ impl CudaTreeTransformExecutor {
         Ok(())
     }
 
-    /// Uploads this structure's coefficient vector and sizes the shared device
-    /// operands, unless the state is already prepared for this dtype and
+    /// Builds this structure's device regions and uploads its coefficient
+    /// vector, unless the state is already prepared for this dtype and
     /// context. Runs after Stage A, so nothing is uploaded for a task the
     /// admission rejects.
+    ///
+    /// Every layout the replay will submit is validated *before* the upload,
+    /// so a structure the device cannot express leaves no trace: no upload, no
+    /// cache entry, no plan-cache change, and a destination the caller still
+    /// owns untouched.
     fn prepare<D, C>(
         &mut self,
         ctx: &mut CudaDenseContext,
@@ -327,26 +337,20 @@ impl CudaTreeTransformExecutor {
             context: context.0,
         };
         if self.prepared.get(&key).is_none() {
-            let plan = compile_device_plan(task)?;
+            let mut prepared = prepared_structure(compile_device_plan(task)?)?;
             let values: Vec<D> = task
                 .coefficients()
                 .iter()
                 .map(|coefficient| D::coefficient_as_data(*coefficient))
                 .collect();
             let device_bytes = core::mem::size_of_val(values.as_slice());
-            let coefficients = if values.is_empty() {
-                None
-            } else {
-                Some(
+            if !values.is_empty() {
+                prepared.coefficients = Some(
                     CudaDenseStorage::upload_owned::<D>(ctx, values)
                         .map_err(OperationError::Dense)?,
-                )
-            };
-            self.prepared.insert(
-                key.clone(),
-                prepared_structure(plan, coefficients)?,
-                device_bytes,
-            );
+                );
+            }
+            self.prepared.insert(key.clone(), prepared, device_bytes);
             self.refresh_plan_cache(ctx)?;
         }
         // Idempotent once the template is long enough, so a warm replay
@@ -379,49 +383,62 @@ impl CudaTreeTransformExecutor {
     }
 }
 
-/// Turns the host plan into the device regions the primitive takes. Every
-/// layout rule the regions must satisfy is checked by the primitive itself on
-/// each call; what is done once here is only the descriptor construction.
-fn prepared_structure(
-    plan: DeviceTransformPlan,
-    coefficients: Option<CudaDenseStorage>,
-) -> Result<PreparedStructure, OperationError> {
+/// Turns the host plan into the device regions the primitive takes, rejecting
+/// every destination layout the device cannot write before the caller's
+/// structure has cost anything on device.
+///
+/// The layout verdict depends on the region alone, so checking it here is the
+/// same answer the submission would give — only early enough to be an
+/// all-or-nothing capability boundary instead of a partial overwrite.
+fn prepared_structure(plan: DeviceTransformPlan) -> Result<PreparedStructure, OperationError> {
+    const OP: &str = "cuda_tree_transform";
     let mut moves = Vec::with_capacity(plan.moves.len());
     for entry in plan.moves {
+        let destination = CudaRegion::new(entry.dims.clone(), entry.dst_strides, entry.dst_offset)
+            .map_err(OperationError::Dense)?;
+        destination
+            .validate_as_destination(OP)
+            .map_err(OperationError::Dense)?;
         moves.push(PreparedMove {
-            source: CudaRegion::new(entry.dims.clone(), entry.src_strides, entry.src_offset)
+            source: CudaRegion::new(entry.dims, entry.src_strides, entry.src_offset)
                 .map_err(OperationError::Dense)?,
-            destination: CudaRegion::new(entry.dims, entry.dst_strides, entry.dst_offset)
-                .map_err(OperationError::Dense)?,
+            destination,
             coefficient: entry.coefficient,
         });
     }
     let mut zeros = Vec::with_capacity(plan.zeros.len());
     for zero in plan.zeros {
-        zeros.push(
-            CudaRegion::new(zero.dims, zero.strides, zero.offset).map_err(OperationError::Dense)?,
-        );
+        let region =
+            CudaRegion::new(zero.dims, zero.strides, zero.offset).map_err(OperationError::Dense)?;
+        region
+            .validate_as_destination(OP)
+            .map_err(OperationError::Dense)?;
+        zeros.push(region);
     }
     Ok(PreparedStructure {
         moves,
         zeros,
         max_zero_len: plan.max_zero_len,
         plan_signatures: plan.plan_signatures,
-        coefficients,
+        coefficients: None,
     })
 }
 
-/// Bytes one cuTENSOR plan is assumed to retain, re-exported for callers
-/// sizing the plan-cache budget.
-pub const CUTENSOR_PLAN_ENTRY_BYTES: usize = CUTENSOR_PLAN_BYTES;
-
 /// Admission facts of one device buffer.
+///
+/// Placement is read from the buffer itself, so a buffer resident on another
+/// device is rejected by Stage A rather than by the first primitive call —
+/// after the coefficient upload.
 ///
 /// The allocation identity is the address of the storage handle. That is a
 /// sound identity for the duration of the call: `CudaDenseStorage` is neither
 /// `Clone` nor refcounted and owns its device allocation exclusively, so two
 /// live handles at the same address cannot exist, and the snapshot never
 /// outlives the borrows it is taken from.
+///
+/// Context is the executor's: a device buffer carries no context tag, and the
+/// device ordinal is what distinguishes the resources a wrong context would
+/// reach. Tenferro re-checks the operand's device at submission either way.
 fn storage_snapshot<D: CudaScalar>(
     storage: &CudaStorage<D>,
     executor: ExecutorSnapshot,
@@ -440,7 +457,7 @@ fn storage_snapshot<D: CudaScalar>(
     StorageSnapshot {
         active_len: len,
         usable_capacity: len,
-        placement: executor.placement,
+        placement: TensorStorage::<D>::placement(storage),
         context: executor.context,
         region,
     }

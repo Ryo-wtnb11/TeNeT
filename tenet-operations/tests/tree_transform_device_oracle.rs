@@ -11,8 +11,9 @@
 mod common;
 
 use common::{
-    all_fixtures, inactive_destination_layouts, interleaved_multi_block, many_distinct_signatures,
-    Fixture, TestScalar,
+    all_fixtures, expert_interleaved_destination, inactive_destination_layouts,
+    interleaved_multi_block, many_distinct_signatures, unit_coefficient_fixtures, Fixture,
+    TestScalar,
 };
 use num_complex::Complex64;
 use tenet_operations::{
@@ -107,6 +108,42 @@ fn the_explicit_index_oracle_agrees_with_host_replay_for_every_fixture() {
         check_fixture::<Complex64>(&fixture);
     }
     check_fixture::<f64>(&many_distinct_signatures(70));
+}
+
+#[test]
+fn the_host_replays_the_layout_the_device_reports_as_unsupported() {
+    // What: the fixture the device rejection test uses is a *legal* transform
+    // the host executes, so that rejection is a device capability boundary and
+    // not a malformed fixture.
+    let fixture = expert_interleaved_destination();
+    let source = fixture.source::<f64>();
+    let destination = vec![0.0; fixture.dst_len()];
+
+    let host = host_replay(&fixture, &source, &destination, true);
+
+    assert_close(
+        &host,
+        &fixture.expected(&source, &destination, true),
+        "expert_interleaved_destination / overwrite",
+    );
+}
+
+#[test]
+fn unit_coefficient_fixtures_exist_and_are_exact_on_host() {
+    // What: the device suite asserts bit-exactness for these, so there must be
+    // some, and the host side must itself be exact.
+    let fixtures = unit_coefficient_fixtures();
+    assert!(!fixtures.is_empty(), "no unit-coefficient fixture");
+    for fixture in fixtures {
+        let source = fixture.source::<f64>();
+        let destination = vec![0.0; fixture.dst_len()];
+        assert_eq!(
+            host_replay(&fixture, &source, &destination, true),
+            fixture.expected(&source, &destination, true),
+            "{}",
+            fixture.name
+        );
+    }
 }
 
 #[test]
