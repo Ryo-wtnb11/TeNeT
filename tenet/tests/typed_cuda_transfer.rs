@@ -2608,3 +2608,216 @@ fn typed_cuda_c64_eigh_admits_hermitian_and_rejects_complex_symmetric_input() {
         .unwrap();
     assert!(hand_symmetric.to_cuda().unwrap().eigh_full().is_err());
 }
+
+/// G3c-2 (#1276): the device destination-overwrite entry writes exactly what
+/// the returning device contraction returns, including the `+0.0` of every
+/// destination block no GEMM reaches, and every rejection leaves the
+/// destination's bytes untouched.
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn typed_cuda_contract_overwrite_into_matches_the_returning_contraction() {
+    let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+    // `k` carries only charge 0, so the destination's charge-1 block has no
+    // contributing GEMM and must come out as exactly `+0.0` from the reset.
+    let outer = GradedSpace::try_new_with_arc(
+        Arc::new(U1FusionRule),
+        [(U1Irrep::new(0), 2), (U1Irrep::new(1), 3)],
+    )
+    .unwrap();
+    let inner =
+        GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
+    let lhs = TensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&outer], [&inner], 761_000)
+        .unwrap()
+        .to_cuda()
+        .unwrap();
+    let rhs = TensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&inner], [&outer], 761_001)
+        .unwrap()
+        .to_cuda()
+        .unwrap();
+
+    let expected = lhs.contract(&rhs, &[1], &[0], &[0, 1]).unwrap();
+    let expected_data = expected.to_host().unwrap().data().to_vec();
+    assert!(
+        expected_data.contains(&0.0),
+        "fixture must contain a destination block no GEMM reaches"
+    );
+
+    let poisoned = || {
+        TensorMap::<U1FusionRule, f64>::from_block_fn(&runtime, [&outer], [&outer], |_, _| 7.5)
+            .unwrap()
+            .to_cuda()
+            .unwrap()
+    };
+    let mut destination = poisoned();
+    lhs.contract_overwrite_into(&rhs, &mut destination, &[1], &[0], &[0, 1], 1.0)
+        .unwrap();
+    let written = destination.to_host().unwrap().data().to_vec();
+    assert_eq!(written.len(), expected_data.len());
+    for (index, (&actual, &expected)) in written.iter().zip(&expected_data).enumerate() {
+        assert_eq!(
+            actual.to_bits(),
+            expected.to_bits(),
+            "element {index}: {actual} != {expected}"
+        );
+        if expected == 0.0 {
+            assert_eq!(
+                actual.to_bits(),
+                0,
+                "unreachable element {index} must be +0.0"
+            );
+        }
+    }
+
+    // Every rejection is refused before a device write: the poisoned bytes
+    // survive each one unchanged.
+    let poison_data = poisoned().to_host().unwrap().data().to_vec();
+    let assert_rejected =
+        |label: &str,
+         result: Result<(), tenet::prelude::Error>,
+         dst: &TensorMap<U1FusionRule, f64, CudaStorage>| {
+            assert!(result.is_err(), "{label} must be rejected");
+            assert_eq!(
+                dst.to_host().unwrap().data(),
+                poison_data.as_slice(),
+                "{label} wrote to the destination before rejecting"
+            );
+        };
+
+    // Alias: the destination shares the lhs payload body, directly and through
+    // a lazy adjoint view of the same parent.
+    let lhs_data = lhs.to_host().unwrap().data().to_vec();
+    let mut lhs_alias = lhs.clone();
+    assert!(
+        lhs.contract_overwrite_into(&rhs, &mut lhs_alias, &[1], &[0], &[0, 1], 1.0)
+            .is_err(),
+        "an lhs alias must be rejected"
+    );
+    assert_eq!(lhs_alias.to_host().unwrap().data(), lhs_data.as_slice());
+    let mut adjoint_alias = lhs.clone();
+    assert!(lhs
+        .adjoint()
+        .unwrap()
+        .contract_overwrite_into(&rhs, &mut adjoint_alias, &[0], &[0], &[0, 1], 1.0)
+        .is_err());
+    assert_eq!(adjoint_alias.to_host().unwrap().data(), lhs_data.as_slice());
+
+    // Same required length, different block charges: the space check must
+    // catch what the length check cannot.
+    let drifted = GradedSpace::try_new_with_arc(
+        Arc::new(U1FusionRule),
+        [(U1Irrep::new(0), 2), (U1Irrep::new(4), 3)],
+    )
+    .unwrap();
+    let mut wrong_space =
+        TensorMap::<U1FusionRule, f64>::from_block_fn(&runtime, [&drifted], [&drifted], |_, _| 7.5)
+            .unwrap()
+            .to_cuda()
+            .unwrap();
+    let wrong_space_before = wrong_space.to_host().unwrap().data().to_vec();
+    assert_eq!(
+        wrong_space_before.len(),
+        expected_data.len(),
+        "the drifted destination must have the same required length"
+    );
+    assert!(
+        lhs.contract_overwrite_into(&rhs, &mut wrong_space, &[1], &[0], &[0, 1], 1.0)
+            .is_err(),
+        "a destination whose block layout differs must be rejected"
+    );
+    assert_eq!(
+        wrong_space.to_host().unwrap().data(),
+        wrong_space_before.as_slice()
+    );
+
+    let mut short =
+        TensorMap::<U1FusionRule, f64>::from_block_fn(&runtime, [&inner], [&inner], |_, _| 7.5)
+            .unwrap()
+            .to_cuda()
+            .unwrap();
+    let short_before = short.to_host().unwrap().data().to_vec();
+    assert!(
+        lhs.contract_overwrite_into(&rhs, &mut short, &[1], &[0], &[0, 1], 1.0)
+            .is_err(),
+        "a destination of the wrong length must be rejected"
+    );
+    assert_eq!(short.to_host().unwrap().data(), short_before.as_slice());
+
+    let mut destination = poisoned();
+    let shared = destination.clone();
+    assert_rejected(
+        "shared ownership",
+        lhs.contract_overwrite_into(&rhs, &mut destination, &[1], &[0], &[0, 1], 1.0),
+        &destination,
+    );
+    drop(shared);
+    assert_rejected(
+        "alpha other than one",
+        lhs.contract_overwrite_into(&rhs, &mut destination, &[1], &[0], &[0, 1], 2.0),
+        &destination,
+    );
+    assert_rejected(
+        "non-canonical output order",
+        lhs.contract_overwrite_into(&rhs, &mut destination, &[1], &[0], &[1, 0], 1.0),
+        &destination,
+    );
+
+    // A destination whose blocks all exist but none of which any GEMM reaches:
+    // the reset alone produces the whole result.
+    let disjoint =
+        GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(7), 2)]).unwrap();
+    let empty_lhs =
+        TensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&outer], [&disjoint], 761_002)
+            .unwrap()
+            .to_cuda()
+            .unwrap();
+    let empty_rhs =
+        TensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&disjoint], [&outer], 761_003)
+            .unwrap()
+            .to_cuda()
+            .unwrap();
+    let empty_expected = empty_lhs.contract(&empty_rhs, &[1], &[0], &[0, 1]).unwrap();
+    let mut empty_destination = poisoned();
+    empty_lhs
+        .contract_overwrite_into(&empty_rhs, &mut empty_destination, &[1], &[0], &[0, 1], 1.0)
+        .unwrap();
+    assert_eq!(
+        empty_destination.to_host().unwrap().data(),
+        empty_expected.to_host().unwrap().data()
+    );
+
+    // A destination space with no coupled sector at all: `required_len` is 0,
+    // so the reset is skipped entirely and the replay writes nothing.
+    let single =
+        GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
+    let zero_lhs =
+        TensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&single], [&single], 761_004)
+            .unwrap()
+            .to_cuda()
+            .unwrap();
+    let zero_rhs =
+        TensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&single], [&disjoint], 761_005)
+            .unwrap()
+            .to_cuda()
+            .unwrap();
+    let mut zero_destination =
+        TensorMap::<U1FusionRule, f64>::from_block_fn(&runtime, [&single], [&disjoint], |_, _| 7.5)
+            .unwrap()
+            .to_cuda()
+            .unwrap();
+    assert!(
+        zero_destination.to_host().unwrap().data().is_empty(),
+        "the fixture must have a zero-length destination"
+    );
+    zero_lhs
+        .contract_overwrite_into(&zero_rhs, &mut zero_destination, &[1], &[0], &[0, 1], 1.0)
+        .unwrap();
+    assert_eq!(
+        zero_destination.to_host().unwrap().data(),
+        zero_lhs
+            .contract(&zero_rhs, &[1], &[0], &[0, 1])
+            .unwrap()
+            .to_host()
+            .unwrap()
+            .data()
+    );
+}

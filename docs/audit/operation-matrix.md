@@ -131,10 +131,15 @@ trivial/dense provider exists.
 
 [8] Device network replay leases a workspace from the same per-plan pool,
 quarantine and byte-budget machinery as Host, keyed by `(provider, dtype,
-storage)`. It reuses slots, producers and the input snapshot only; payload
-destinations are not yet reused on the device, because `contract_overwrite_into`
-has no device implementation — that is
-[#1274](https://github.com/Ryo-wtnb11/TeNeT/issues/1274)'s successor G3c-2.
+storage)`, and reuses slots, producers, the input snapshot and the payload
+destinations of every intermediate step through the device
+`contract_overwrite_into`. The final schedule slot leaves the workspace and so
+still allocates and uploads a fresh returning output
+([#740](https://github.com/Ryo-wtnb11/TeNeT/issues/740)). Resetting a reused
+device destination costs one D2D copy from one workspace-owned zero template of
+the maximum retained length, charged to the same budget; that template is an
+interim for tenferro-rs#1834 (`fill_zero_write`), which would reset the buffer
+in place instead.
 
 The two storage `NEEDS-PROOF` cells describe future storage implementations,
 not provider conformance. Host/device checked-Generic parity belongs to

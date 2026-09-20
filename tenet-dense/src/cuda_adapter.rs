@@ -791,12 +791,17 @@ fn expect_dtype<D: CudaScalar>(
     Ok(CudaDenseStorage::from_tensor(tensor, device))
 }
 
-/// Copies a whole compact device factor into a packed sub-region of `dst`.
+/// Copies the leading compact `rows x cols` block of a device buffer into a
+/// packed sub-region of `dst`.
 ///
 /// Tenferro's `copy_read_into` accepts an offset/strided destination view but
-/// requires a compact source view at offset 0, so this is a whole-factor copy;
-/// the caller owns the proof that the destination region's tree layout is
-/// identical to the factor's (see `compile_cuda_qr_plan`).
+/// requires a compact source view at offset 0, so the source is read from its
+/// start; the caller owns the proof that the destination region's tree layout
+/// is identical to what it reads (see `compile_cuda_qr_plan`). A source longer
+/// than the region is accepted because contiguity is a layout predicate: the
+/// leading `rows * cols` elements of a compact buffer are themselves compact,
+/// which is what lets one maximum-length zero template reset every
+/// destination a `tensor!` workspace retains.
 pub fn cuda_copy_region_into<D: CudaScalar>(
     ctx: &mut CudaDenseContext,
     dst: &mut CudaDenseStorage,
@@ -812,11 +817,11 @@ pub fn cuda_copy_region_into<D: CudaScalar>(
         return Ok(());
     }
     COPY_CALLS.fetch_add(1, Ordering::Relaxed);
-    if src.len != rows * cols {
+    if src.len < rows * cols {
         return Err(cuda_error(
             OP,
             format!(
-                "source factor holds {} elements; expected {rows} x {cols}",
+                "source factor holds {} elements; expected at least {rows} x {cols}",
                 src.len
             ),
         ));
