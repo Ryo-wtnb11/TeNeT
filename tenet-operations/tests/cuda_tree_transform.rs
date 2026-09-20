@@ -22,7 +22,7 @@ use common::{
     many_distinct_signatures, mixed_single_and_multi, rank_sweep, recoupling_non_symmetric_u,
     unit_coefficient_fixtures, Fixture, TestScalar,
 };
-use num_complex::Complex64;
+use num_complex::{Complex32, Complex64};
 use tenet_dense::{
     cuda_transfer_stats, reset_cuda_transfer_stats, CudaDenseContext, CudaScalar, CudaTransferStats,
 };
@@ -49,7 +49,9 @@ trait DeviceScalar:
 {
 }
 
+impl DeviceScalar for f32 {}
 impl DeviceScalar for f64 {}
+impl DeviceScalar for Complex32 {}
 impl DeviceScalar for Complex64 {}
 
 fn context() -> CudaDenseContext {
@@ -181,8 +183,12 @@ fn device_replay_scaled<T: DeviceScalar>(
 fn assert_close<T: TestScalar>(actual: &[T], expected: &[T], what: &str) {
     assert_eq!(actual.len(), expected.len(), "{what}: length");
     for (index, (left, right)) in actual.iter().zip(expected).enumerate() {
+        // A replayed move is one multiply by the block coefficient, so the
+        // budget is a few epsilons of the payload's own real lane, relative to
+        // the magnitude compared. Written in epsilons, never as an absolute.
+        let scale = right.distance(T::zero()).max(1.0);
         assert!(
-            left.distance(*right) <= 1e-12,
+            left.distance(*right) <= 64.0 * T::EPSILON * scale,
             "{what}: element {index} is {left:?}, expected {right:?}"
         );
     }
@@ -218,12 +224,14 @@ fn check_fixture<T: DeviceScalar>(
 fn device_replay_matches_the_oracle_and_the_host_for_every_fixture() {
     // What: rank 2-6 permutes, transposes, fermionic signs, coefficients that
     // are neither 1 nor -1, conjugated sources, interleaved multi-block
-    // layouts, inactive layouts and a zero-extent block, in both payload
-    // dtypes and both destination modes.
+    // layouts, inactive layouts and a zero-extent block, in all four payload
+    // dtypes (#1326) and both destination modes.
     let mut ctx = context();
     let mut executor = CudaTreeTransformExecutor::default();
     for fixture in all_fixtures() {
+        check_fixture::<f32>(&mut ctx, &mut executor, &fixture);
         check_fixture::<f64>(&mut ctx, &mut executor, &fixture);
+        check_fixture::<Complex32>(&mut ctx, &mut executor, &fixture);
         check_fixture::<Complex64>(&mut ctx, &mut executor, &fixture);
     }
 }

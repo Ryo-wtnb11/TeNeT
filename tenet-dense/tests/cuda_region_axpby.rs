@@ -19,7 +19,7 @@
 use std::fmt::Debug;
 use std::sync::Mutex;
 
-use num_complex::Complex64;
+use num_complex::{Complex32, Complex64};
 use tenet_dense::{
     cuda_region_axpby, cuda_region_zero, cuda_transfer_stats, reset_cuda_transfer_stats,
     CudaDenseContext, CudaDenseStorage, CudaRegion, CudaRegionBeta, CudaRegionCoefficient,
@@ -35,6 +35,10 @@ trait RegionScalar:
     CudaScalar + Copy + Debug + PartialEq + std::ops::Add<Output = Self> + std::ops::Mul<Output = Self>
 {
     const NAME: &'static str;
+    /// Machine epsilon of this payload's real lane, widened. The scaled
+    /// comparisons below are written in epsilons so nothing here is a
+    /// platform-dependent absolute constant.
+    const EPSILON: f64;
 
     fn from_parts(re: f64, im: f64) -> Self;
     fn re(self) -> f64;
@@ -47,8 +51,59 @@ trait RegionScalar:
     }
 }
 
+impl RegionScalar for f32 {
+    const NAME: &'static str = "f32";
+    const EPSILON: f64 = f32::EPSILON as f64;
+
+    fn from_parts(re: f64, _im: f64) -> Self {
+        re as Self
+    }
+
+    fn re(self) -> f64 {
+        f64::from(self)
+    }
+
+    fn im(self) -> f64 {
+        0.0
+    }
+
+    fn conj(self) -> Self {
+        self
+    }
+
+    fn distance(self, other: Self) -> f64 {
+        f64::from((self - other).abs())
+    }
+}
+
+impl RegionScalar for Complex32 {
+    const NAME: &'static str = "Complex32";
+    const EPSILON: f64 = f32::EPSILON as f64;
+
+    fn from_parts(re: f64, im: f64) -> Self {
+        Complex32::new(re as f32, im as f32)
+    }
+
+    fn re(self) -> f64 {
+        f64::from(self.re)
+    }
+
+    fn im(self) -> f64 {
+        f64::from(self.im)
+    }
+
+    fn conj(self) -> Self {
+        Complex32::conj(&self)
+    }
+
+    fn distance(self, other: Self) -> f64 {
+        f64::from((self - other).norm())
+    }
+}
+
 impl RegionScalar for f64 {
     const NAME: &'static str = "f64";
+    const EPSILON: f64 = f64::EPSILON;
 
     fn from_parts(re: f64, _im: f64) -> Self {
         re
@@ -73,6 +128,7 @@ impl RegionScalar for f64 {
 
 impl RegionScalar for Complex64 {
     const NAME: &'static str = "Complex64";
+    const EPSILON: f64 = f64::EPSILON;
 
     fn from_parts(re: f64, im: f64) -> Self {
         Complex64::new(re, im)
@@ -151,8 +207,10 @@ fn assert_close<D: RegionScalar>(actual: &[D], expected: &[D], what: &str) {
     assert_eq!(actual.len(), expected.len(), "{what}: length");
     for (index, (got, want)) in actual.iter().zip(expected).enumerate() {
         let scale = 1.0_f64.max(want.distance(D::from_parts(0.0, 0.0)));
+        // A move is one multiply by the coefficient, so a handful of epsilons
+        // of the payload's own lane is the whole error budget.
         assert!(
-            got.distance(*want) <= 1e-12 * scale,
+            got.distance(*want) <= 16.0 * D::EPSILON * scale,
             "{what}: element {index} ({}) got {got:?} want {want:?}",
             D::NAME
         );
@@ -300,6 +358,18 @@ fn nd_region_axpby_matches_a_host_strided_loop_f64() {
 
 #[test]
 #[ignore = "requires a real CUDA device"]
+fn nd_region_axpby_matches_a_host_strided_loop_f32() {
+    nd_sweep::<f32>(&mut context());
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn nd_region_axpby_matches_a_host_strided_loop_c32() {
+    nd_sweep::<Complex32>(&mut context());
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
 fn nd_region_axpby_matches_a_host_strided_loop_c64() {
     nd_sweep::<Complex64>(&mut context());
 }
@@ -349,7 +419,9 @@ fn zero_coefficient_case<D: RegionScalar>(ctx: &mut CudaDenseContext) {
 #[ignore = "requires a real CUDA device"]
 fn a_zero_coefficient_propagates_nan_from_the_source() {
     let mut ctx = context();
+    zero_coefficient_case::<f32>(&mut ctx);
     zero_coefficient_case::<f64>(&mut ctx);
+    zero_coefficient_case::<Complex32>(&mut ctx);
     zero_coefficient_case::<Complex64>(&mut ctx);
 }
 
@@ -396,7 +468,9 @@ fn poisoned_destination_case<D: RegionScalar>(ctx: &mut CudaDenseContext) {
 #[ignore = "requires a real CUDA device"]
 fn overwrite_is_independent_of_a_nan_poisoned_destination() {
     let mut ctx = context();
+    poisoned_destination_case::<f32>(&mut ctx);
     poisoned_destination_case::<f64>(&mut ctx);
+    poisoned_destination_case::<Complex32>(&mut ctx);
     poisoned_destination_case::<Complex64>(&mut ctx);
 }
 
@@ -515,7 +589,9 @@ fn zero_fill_case<D: RegionScalar>(ctx: &mut CudaDenseContext) {
 #[ignore = "requires a real CUDA device"]
 fn the_context_zero_template_overwrites_exactly_its_region() {
     let mut ctx = context();
+    zero_fill_case::<f32>(&mut ctx);
     zero_fill_case::<f64>(&mut ctx);
+    zero_fill_case::<Complex32>(&mut ctx);
     zero_fill_case::<Complex64>(&mut ctx);
 }
 
@@ -547,7 +623,31 @@ fn the_zero_template_is_uploaded_once_per_dtype_and_grows_monotonically() {
     cuda_region_zero::<f64>(&mut ctx, &mut dst, &region(&[8, 4], &[1, 8], 32)).expect("again");
     assert_eq!(cuda_transfer_stats().h2d_calls, 0);
 
-    // The other dtype has its own pair, and taking it does not disturb this one.
+    // Every *other* dtype has its own pair, and taking one does not disturb
+    // the others: the operands are payload-typed, so a slot shared between
+    // `f32` and `f64` (or between the two complex dtypes) would hand the next
+    // call a buffer of the wrong dtype. Each of the three remaining dtypes
+    // therefore pays its own two uploads, and the `f64` pair stays resident
+    // throughout.
+    let mut single_dst = upload::<f32>(&ctx, &[1.0f32; 64]);
+    reset_cuda_transfer_stats();
+    cuda_region_zero::<f32>(&mut ctx, &mut single_dst, &region(&[4, 4], &[1, 4], 0)).expect("f32");
+    assert_eq!(cuda_transfer_stats().h2d_calls, 2, "f32 owns its own pair");
+
+    let mut single_complex_dst = upload::<Complex32>(&ctx, &[Complex32::new(1.0, 1.0); 64]);
+    reset_cuda_transfer_stats();
+    cuda_region_zero::<Complex32>(
+        &mut ctx,
+        &mut single_complex_dst,
+        &region(&[4, 4], &[1, 4], 0),
+    )
+    .expect("Complex32");
+    assert_eq!(
+        cuda_transfer_stats().h2d_calls,
+        2,
+        "Complex32 owns its own pair"
+    );
+
     let mut complex_dst = upload::<Complex64>(&ctx, &[Complex64::new(1.0, 1.0); 64]);
     reset_cuda_transfer_stats();
     cuda_region_zero::<Complex64>(&mut ctx, &mut complex_dst, &region(&[4, 4], &[1, 4], 0))
@@ -557,6 +657,16 @@ fn the_zero_template_is_uploaded_once_per_dtype_and_grows_monotonically() {
     cuda_region_zero::<f64>(&mut ctx, &mut dst, &region(&[8, 4], &[1, 8], 32)).expect("f64 again");
     assert_eq!(cuda_transfer_stats().h2d_calls, 0);
     reset_cuda_transfer_stats();
+
+    // The pinned per-dtype byte accounting: each slot charges its own element
+    // size, so the four resident pairs are not all counted as `f64`.
+    let expected_bytes = (32 + 1) * std::mem::size_of::<f64>()
+        + (16 + 1) * std::mem::size_of::<f32>()
+        + (16 + 1) * std::mem::size_of::<Complex32>()
+        + (16 + 1) * std::mem::size_of::<Complex64>();
+    assert_eq!(ctx.scalar_operand_bytes(), expected_bytes);
+    ctx.release_scalar_operands();
+    assert_eq!(ctx.scalar_operand_bytes(), 0);
 }
 
 // ---------------------------------------------------------------------------

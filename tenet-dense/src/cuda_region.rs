@@ -371,11 +371,26 @@ mod tests {
     /// The fast copy route is admitted exactly when the shifted operand
     /// pointer still meets the 256-byte alignment the descriptor claims, so
     /// the `f64` offsets the issue's fixture produces (9, 25) are rejected and
-    /// offset 0 — the zero-template reset — is not.
+    /// offset 0 — the zero-template reset — is not. The element size is the
+    /// payload's, so admitting single precision moves the boundary: 4 bytes
+    /// and 8 bytes admit different offsets, and both routes must stay correct.
     #[test]
     fn permute_offsets_are_admitted_by_the_descriptor_promise() {
-        for element_bytes in [8usize, 16] {
+        for element_bytes in [4usize, 8, 16] {
             assert!(permute_operand_offset_is_aligned(0, element_bytes));
+        }
+        // f32: 256 bytes is 64 elements, so the element size decides which
+        // offsets route where — offset 32 is aligned for `f64` and not for
+        // `f32`, and offset 8 is aligned for `Complex32` and not for `f32`.
+        assert!(permute_operand_offset_is_aligned(64, 4));
+        assert!(permute_operand_offset_is_aligned(128, 4));
+        for offset in [1usize, 2, 4, 9, 25, 32, 63, 65] {
+            assert!(!permute_operand_offset_is_aligned(offset, 4), "{offset}");
+        }
+        // Complex32: 256 bytes is 32 elements, the same count as `f64`.
+        assert!(permute_operand_offset_is_aligned(32, 8));
+        for offset in [1usize, 2, 8, 9, 16, 25, 31, 33] {
+            assert!(!permute_operand_offset_is_aligned(offset, 8), "{offset}");
         }
         // f64: 256 bytes is 32 elements.
         assert!(permute_operand_offset_is_aligned(32, 8));

@@ -23,7 +23,7 @@
 use std::fmt::Debug;
 use std::sync::Mutex;
 
-use num_complex::Complex64;
+use num_complex::{Complex32, Complex64};
 use tenet_dense::{
     cuda_copy_region_into, cuda_transfer_stats, reset_cuda_transfer_stats, CudaDenseContext,
     CudaDenseStorage, CudaScalar,
@@ -40,6 +40,33 @@ trait CopyScalar: CudaScalar + Copy + Debug + PartialEq {
     const NAME: &'static str;
     fn sample(index: usize) -> Self;
     fn sentinel(index: usize) -> Self;
+}
+
+impl CopyScalar for f32 {
+    const NAME: &'static str = "f32";
+
+    fn sample(index: usize) -> Self {
+        (1.0 + index as f64 * 0.25) as Self
+    }
+
+    fn sentinel(index: usize) -> Self {
+        (-1000.0 - index as f64) as Self
+    }
+}
+
+impl CopyScalar for Complex32 {
+    const NAME: &'static str = "Complex32";
+
+    fn sample(index: usize) -> Self {
+        Complex32::new(
+            (1.0 + index as f64 * 0.25) as f32,
+            (-0.5 - index as f64 * 0.125) as f32,
+        )
+    }
+
+    fn sentinel(index: usize) -> Self {
+        Complex32::new((-1000.0 - index as f64) as f32, (7.0 + index as f64) as f32)
+    }
 }
 
 impl CopyScalar for f64 {
@@ -157,12 +184,19 @@ fn alignment_sweep<D: CopyScalar>(ctx: &mut CudaDenseContext) {
 /// #1320: a destination at an odd element offset with an even extent is the
 /// exact shape that faulted; every offset in the sweep must now both produce
 /// the right bytes and take the route its byte offset admits.
+///
+/// All four payload dtypes, because the route is decided by the *byte* offset:
+/// 4-byte and 8-byte elements send the same element offset down different
+/// routes (offset 32 is the permute route for `f64`/[`Complex32`] and the
+/// region route for `f32`), so neither element size proves the other.
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn copy_region_is_correct_at_every_destination_offset() {
     let _guard = COUNTER_TESTS.lock().unwrap_or_else(|err| err.into_inner());
     reset_cuda_transfer_stats();
     let mut ctx = context();
+    alignment_sweep::<f32>(&mut ctx);
     alignment_sweep::<f64>(&mut ctx);
+    alignment_sweep::<Complex32>(&mut ctx);
     alignment_sweep::<Complex64>(&mut ctx);
 }

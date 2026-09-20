@@ -5,7 +5,7 @@
 
 use std::num::NonZeroUsize;
 
-use num_complex::Complex64;
+use num_complex::{Complex32, Complex64};
 use tenferro_gpu::cuda::{download_tensor, upload_tensor, CudaBackend, CudaDeviceId};
 use tenferro_linalg::{QrGauge, QrOptions, TensorReadLinalgExt};
 use tenferro_tensor::backend::{BackendSession, BackendSessionHost};
@@ -16,6 +16,7 @@ use tenferro_tensor::{
 };
 
 use super::{DenseBackend, DenseDType, DenseError, MatrixOp};
+use crate::cuda_hermitian::{scaled_hermitian_residual_accepts, HERMITIAN_TOLERANCE_EPSILONS};
 use crate::cuda_region::{
     permute_operand_offset_is_aligned, validate_destination_layout, validate_region, CudaRegion,
 };
@@ -23,17 +24,34 @@ use crate::tensor::dense_dtype_from_tenferro;
 
 mod cuda_scalar_sealed {
     pub trait Sealed {}
+    impl Sealed for f32 {}
     impl Sealed for f64 {}
+    impl Sealed for num_complex::Complex32 {}
     impl Sealed for num_complex::Complex64 {}
 }
 
 /// Payload dtypes a TeNeT CUDA buffer may own.
 ///
-/// Sealed to `f64` and [`Complex64`]: structural (fusion-tree) coefficients
-/// stay real, so only the *payload* varies, and `f32`/`Complex32` remain a
-/// compile-time unsupported boundary rather than a runtime error. Conjugation
-/// is never a payload property here — it is carried as a GEMM operand flag.
-pub trait CudaScalar: TenferroScalar + PartialEq + cuda_scalar_sealed::Sealed {
+/// Sealed to the four floating payloads `f32`, `f64`, [`Complex32`] and
+/// [`Complex64`]: structural (fusion-tree) coefficients stay real, so only the
+/// *payload* varies. Conjugation is never a payload property here — it is
+/// carried as a GEMM operand flag.
+///
+/// Every payload names a **real lane** ([`TenferroScalar::Real`]: `f32` for
+/// `f32` and [`Complex32`], `f64` for `f64` and [`Complex64`]). Real device
+/// metadata — a spectrum, a reduction, the rank-0 divisor of the Hermitian
+/// test — is produced and consumed in that lane rather than in `f64` by
+/// assumption: Tenferro answers a single-precision payload with `F32`
+/// metadata and rejects an `F64` rank-0 divisor against it
+/// (`benchmarks/history/cuda-single-precision-probe-2026-09-20.md`). Metadata
+/// TeNeT decides on is widened to `f64` at the download, so the host-side
+/// spectrum contract is unchanged.
+///
+/// Admitting a dtype here does not open a typed tensor API for it: `tenet`'s
+/// `CudaPayload` stays `f64`/[`Complex64`] (leaf C2).
+pub trait CudaScalar:
+    TenferroScalar<Real: CudaRealScalar> + PartialEq + cuda_scalar_sealed::Sealed
+{
     /// TeNeT-side dtype tag, used for [`DenseError::DTypeMismatch`].
     const DTYPE: DenseDType;
     /// Additive identity, for `beta = 0` overwriting GEMMs.
@@ -45,6 +63,37 @@ pub trait CudaScalar: TenferroScalar + PartialEq + cuda_scalar_sealed::Sealed {
     /// invariant, not a size or workload heuristic.
     const IS_COMPLEX: bool;
 
+    /// Whether a device kernel that *materializes* a payload-typed constant
+    /// compiles for this dtype.
+    ///
+    /// `false` for both complex payloads, `true` for both real ones.
+    /// Tenferro 0.5.0 builds such a constant as `E::cast_from(0u32)` /
+    /// `E::cast_from(1u32)` (tenferro-gpu 0.5.0
+    /// `src/kernels/helpers.rs:84-86`), and NVRTC has no constructor from
+    /// `uint32` to either `float2` or `double2`, so the QR gauge's `triu` fill
+    /// and LU's identity fill fail inside the launch. Both arms are observed
+    /// on an A100 with CUDA 12.6: the [`Complex32`] one is tenferro-rs#1833
+    /// (`benchmarks/history/cuda-single-precision-probe-2026-09-20.md`) and
+    /// the [`Complex64`] one is #1271
+    /// (`benchmarks/history/cuda-scalar-single-precision-2026-09-21.md`);
+    /// both are fixed upstream but not in the pinned 0.5.0. Gating only the
+    /// single-precision arm would leave the identical defect reported as an
+    /// NVRTC compile log for the other caller of the same kernel.
+    ///
+    /// It is a dtype capability, not a size or workload heuristic, so the
+    /// operations that need such a kernel reject the dtype before any device
+    /// work. No TeNeT path regresses: the typed layer reaches device QR for
+    /// `f64` only, and the [`Complex64`] device QR it does not offer is
+    /// exactly what #1271 tracks.
+    const DEVICE_CONSTANT_KERNELS: bool;
+
+    /// Which of the context's lazily created scalar-operand slots this dtype
+    /// owns. One slot per admitted dtype: the operands are *payload*-typed, so
+    /// a slot shared between `f32` and `f64` would hand a buffer of the wrong
+    /// dtype to the next call.
+    #[doc(hidden)]
+    const OPERAND_SLOT: usize;
+
     /// The backend's dtype-erased GEMM coefficient for this payload.
     fn contraction_scalar(self) -> ContractionScalar;
 
@@ -55,11 +104,114 @@ pub trait CudaScalar: TenferroScalar + PartialEq + cuda_scalar_sealed::Sealed {
     fn typed_mut(tensor: &mut Tensor) -> Option<&mut TypedTensor<Self>>;
 }
 
+/// The real lane of a [`CudaScalar`] payload.
+///
+/// Sealed to `f32` and `f64`, which are exactly the
+/// [`TenferroScalar::Real`] types of the admitted payloads. It exists so the
+/// adapter's real-metadata paths — spectrum and reduction downloads, the
+/// rank-0 divisor upload, the Hermitian tolerance — are typed by the payload
+/// instead of assuming double precision, while the values TeNeT's host-side
+/// decisions consume stay `f64`.
+pub trait CudaRealScalar: TenferroScalar + cuda_scalar_sealed::Sealed {
+    /// This lane's machine epsilon, in the `f64` the host decides in.
+    const EPSILON: f64;
+
+    /// Widens one downloaded metadata value to the host decision type. Exact:
+    /// every `f32` is an `f64`.
+    fn widen(self) -> f64;
+
+    /// Narrows a host scalar to this lane, for a rank-0 device divisor. The
+    /// only values narrowed here are device reductions of this lane's own
+    /// data, so the value round-trips.
+    fn narrow(value: f64) -> Self;
+}
+
+impl CudaRealScalar for f32 {
+    const EPSILON: f64 = f32::EPSILON as f64;
+
+    fn widen(self) -> f64 {
+        f64::from(self)
+    }
+
+    fn narrow(value: f64) -> Self {
+        value as Self
+    }
+}
+
+impl CudaRealScalar for f64 {
+    const EPSILON: f64 = f64::EPSILON;
+
+    fn widen(self) -> f64 {
+        self
+    }
+
+    fn narrow(value: f64) -> Self {
+        value
+    }
+}
+
+impl CudaScalar for f32 {
+    const DTYPE: DenseDType = DenseDType::F32;
+    const ZERO: Self = 0.0;
+    const ONE: Self = 1.0;
+    const IS_COMPLEX: bool = false;
+    const DEVICE_CONSTANT_KERNELS: bool = true;
+    const OPERAND_SLOT: usize = 0;
+
+    fn contraction_scalar(self) -> ContractionScalar {
+        ContractionScalar::F32(self)
+    }
+
+    fn typed(tensor: &Tensor) -> Option<&TypedTensor<Self>> {
+        match tensor {
+            Tensor::F32(tensor) => Some(tensor),
+            _ => None,
+        }
+    }
+
+    fn typed_mut(tensor: &mut Tensor) -> Option<&mut TypedTensor<Self>> {
+        match tensor {
+            Tensor::F32(tensor) => Some(tensor),
+            _ => None,
+        }
+    }
+}
+
+impl CudaScalar for Complex32 {
+    const DTYPE: DenseDType = DenseDType::C32;
+    const ZERO: Self = Complex32::new(0.0, 0.0);
+    const ONE: Self = Complex32::new(1.0, 0.0);
+    const IS_COMPLEX: bool = true;
+    // tenferro-rs#1833: NVRTC cannot construct a `float2` from `uint32`.
+    const DEVICE_CONSTANT_KERNELS: bool = false;
+    const OPERAND_SLOT: usize = 2;
+
+    fn contraction_scalar(self) -> ContractionScalar {
+        ContractionScalar::C32(self)
+    }
+
+    fn typed(tensor: &Tensor) -> Option<&TypedTensor<Self>> {
+        match tensor {
+            Tensor::C32(tensor) => Some(tensor),
+            _ => None,
+        }
+    }
+
+    fn typed_mut(tensor: &mut Tensor) -> Option<&mut TypedTensor<Self>> {
+        match tensor {
+            Tensor::C32(tensor) => Some(tensor),
+            _ => None,
+        }
+    }
+}
+
 impl CudaScalar for f64 {
     const DTYPE: DenseDType = DenseDType::F64;
     const ZERO: Self = 0.0;
     const ONE: Self = 1.0;
     const IS_COMPLEX: bool = false;
+    const DEVICE_CONSTANT_KERNELS: bool = true;
+    const OPERAND_SLOT: usize = 1;
 
     fn contraction_scalar(self) -> ContractionScalar {
         ContractionScalar::F64(self)
@@ -85,6 +237,9 @@ impl CudaScalar for Complex64 {
     const ZERO: Self = Complex64::new(0.0, 0.0);
     const ONE: Self = Complex64::new(1.0, 0.0);
     const IS_COMPLEX: bool = true;
+    // #1271: NVRTC cannot construct a `double2` from `uint32` either.
+    const DEVICE_CONSTANT_KERNELS: bool = false;
+    const OPERAND_SLOT: usize = 3;
 
     fn contraction_scalar(self) -> ContractionScalar {
         ContractionScalar::C64(self)
@@ -281,19 +436,29 @@ fn ensure_cuda_device(
 /// and its counter deltas are unchanged. The zero template grows monotonically
 /// to the longest region filled so far; it is bounded by the largest single
 /// destination region a caller has asked to zero, not by the number of calls.
+///
+/// The operands are payload-typed, so the slot is keyed by the dtype
+/// ([`CudaScalar::OPERAND_SLOT`]), not by realness: an `f32` call must never
+/// be handed the `f64` context `1`.
 #[derive(Default)]
 struct ScalarOperands {
     ones: Option<CudaDenseStorage>,
     zeros: Option<CudaDenseStorage>,
+    /// Payload bytes per element of this slot's dtype, recorded when a buffer
+    /// is created so [`CudaDenseContext::scalar_operand_bytes`] needs no dtype
+    /// parameter. Zero while the slot is empty.
+    element_bytes: usize,
 }
+
+/// One [`ScalarOperands`] slot per admitted payload dtype.
+const SCALAR_OPERAND_SLOTS: usize = 4;
 
 /// Owns the tenferro CUDA backend for one device ordinal.
 pub struct CudaDenseContext {
     backend: CudaBackend,
     device: usize,
     identity: u64,
-    real_operands: ScalarOperands,
-    complex_operands: ScalarOperands,
+    operands: [ScalarOperands; SCALAR_OPERAND_SLOTS],
 }
 
 /// Process-wide context counter. A monotonic ticket rather than the context's
@@ -311,8 +476,7 @@ impl CudaDenseContext {
             backend,
             device,
             identity: NEXT_CONTEXT_IDENTITY.fetch_add(1, Ordering::Relaxed),
-            real_operands: ScalarOperands::default(),
-            complex_operands: ScalarOperands::default(),
+            operands: std::array::from_fn(|_| ScalarOperands::default()),
         })
     }
 
@@ -326,26 +490,20 @@ impl CudaDenseContext {
     }
 
     fn operands<D: CudaScalar>(&self) -> &ScalarOperands {
-        if D::IS_COMPLEX {
-            &self.complex_operands
-        } else {
-            &self.real_operands
-        }
+        &self.operands[D::OPERAND_SLOT]
     }
 
     fn operands_mut<D: CudaScalar>(&mut self) -> &mut ScalarOperands {
-        if D::IS_COMPLEX {
-            &mut self.complex_operands
-        } else {
-            &mut self.real_operands
-        }
+        &mut self.operands[D::OPERAND_SLOT]
     }
 
     /// Uploads this dtype's `1` operand unless it is already resident.
     fn ensure_ones<D: CudaScalar>(&mut self) -> Result<(), DenseError> {
         if self.operands::<D>().ones.is_none() {
             let ones = CudaDenseStorage::upload_owned(self, vec![D::ONE])?;
-            self.operands_mut::<D>().ones = Some(ones);
+            let slot = self.operands_mut::<D>();
+            slot.element_bytes = std::mem::size_of::<D>();
+            slot.ones = Some(ones);
         }
         Ok(())
     }
@@ -364,7 +522,9 @@ impl CudaDenseContext {
             // device holds one of them rather than both.
             self.operands_mut::<D>().zeros = None;
             let zeros = CudaDenseStorage::upload_owned(self, vec![D::ZERO; len])?;
-            self.operands_mut::<D>().zeros = Some(zeros);
+            let slot = self.operands_mut::<D>();
+            slot.element_bytes = std::mem::size_of::<D>();
+            slot.zeros = Some(zeros);
         }
         Ok(())
     }
@@ -397,20 +557,21 @@ impl CudaDenseContext {
     /// every dtype. Observability for the caller that owns the device memory
     /// budget; nothing here reads it back.
     pub fn scalar_operand_bytes(&self) -> usize {
-        fn bytes(operands: &ScalarOperands, element: usize) -> usize {
-            operands.ones.as_ref().map_or(0, CudaDenseStorage::len) * element
-                + operands.zeros.as_ref().map_or(0, CudaDenseStorage::len) * element
-        }
-        bytes(&self.real_operands, std::mem::size_of::<f64>())
-            + bytes(&self.complex_operands, std::mem::size_of::<Complex64>())
+        self.operands
+            .iter()
+            .map(|operands| {
+                let elements = operands.ones.as_ref().map_or(0, CudaDenseStorage::len)
+                    + operands.zeros.as_ref().map_or(0, CudaDenseStorage::len);
+                elements * operands.element_bytes
+            })
+            .sum()
     }
 
     /// Frees every lazily created scalar operand. The next region call that
     /// needs one re-creates it, so this is a memory decision, never a
     /// correctness one.
     pub fn release_scalar_operands(&mut self) {
-        self.real_operands = ScalarOperands::default();
-        self.complex_operands = ScalarOperands::default();
+        self.operands = std::array::from_fn(|_| ScalarOperands::default());
     }
 
     /// Hands out the backend and this dtype's scalar operands at once.
@@ -420,11 +581,7 @@ impl CudaDenseContext {
     /// operand simultaneously, which is only sound because they are disjoint
     /// fields.
     fn split_operands<D: CudaScalar>(&mut self) -> (&mut CudaBackend, &ScalarOperands) {
-        if D::IS_COMPLEX {
-            (&mut self.backend, &self.complex_operands)
-        } else {
-            (&mut self.backend, &self.real_operands)
-        }
+        (&mut self.backend, &self.operands[D::OPERAND_SLOT])
     }
 
     pub fn device(&self) -> usize {
@@ -527,6 +684,17 @@ impl CudaDenseContext {
     /// `h2d_bytes` 24, `device_allocs` 4 (three uploads plus the eigenvector
     /// factor), `gemm_calls` 1, `solver_calls` 1, `d2h_calls` 1, `d2h_bytes` 8,
     /// `copy_calls` 0.
+    ///
+    /// Single precision changes none of this. The warm-up submits `f64` work
+    /// only, so a caller that never touches `f32`/[`Complex32`] pays exactly
+    /// what it paid before: the libraries this loads (cuTENSOR, cuSOLVER,
+    /// cuBLAS) are per backend instance, not per dtype, and the probe measured
+    /// no notable per-dtype NVRTC stall
+    /// (`benchmarks/history/cuda-single-precision-probe-2026-09-20.md`,
+    /// finding 6). What a single-precision caller still pays on its own first
+    /// use is the CubeCL kernel JIT for its dtype and the context's `f32`/
+    /// `Complex32` scalar operands, both of which are lazy per dtype for the
+    /// same reason the `f64` ones are.
     ///
     /// Every device buffer created here is dropped before returning.
     pub fn warm_up(&mut self) -> Result<(), DenseError> {
@@ -967,6 +1135,32 @@ fn ensure_payload_dtype<D: CudaScalar>(
     Ok(())
 }
 
+/// Rejects a dtype whose device constant kernels do not compile, before any
+/// device work.
+///
+/// Same boundary style as the [`Complex64`] device QR of #1271: an explicit,
+/// typed capability error at the operation that needs the kernel, never a
+/// silent host fallback and never an NVRTC compile log surfaced as a backend
+/// failure. See [`CudaScalar::DEVICE_CONSTANT_KERNELS`].
+fn ensure_device_constant_kernels<D: CudaScalar>(
+    op: &'static str,
+    kernel: &str,
+) -> Result<(), DenseError> {
+    if D::DEVICE_CONSTANT_KERNELS {
+        return Ok(());
+    }
+    Err(DenseError::Unsupported {
+        op,
+        message: format!(
+            "{:?} device {kernel} is unsupported: tenferro 0.5.0 materializes the kernel's \
+             payload constant as a cast from `uint32`, which NVRTC cannot construct for a \
+             complex payload (tenferro-rs#1833 for `cuFloatComplex`, #1271 for \
+             `cuDoubleComplex`). Use the host path for this dtype.",
+            D::DTYPE
+        ),
+    })
+}
+
 /// Rejects a descriptor scale of zero, which the backend is free to answer by
 /// skipping the source read.
 ///
@@ -1285,36 +1479,46 @@ pub fn cuda_region_zero<D: CudaScalar>(
     )
 }
 
-/// Downloads a small real (f64) device tensor as host values. Only used for
-/// spectra / diagonals — the sole tensor-shaped data that is allowed to
-/// cross the device boundary implicitly (truncation decisions are host
-/// scalar logic).
-fn download_values(ctx: &CudaDenseContext, tensor: &Tensor) -> Result<Vec<f64>, DenseError> {
+/// Downloads a small real device tensor of the payload's lane `R` as host
+/// values, widened to `f64`. Only used for spectra / diagonals / reductions —
+/// the sole tensor-shaped data that is allowed to cross the device boundary
+/// implicitly (truncation decisions are host scalar logic).
+///
+/// The lane is the caller's, not `f64` by assumption: a single-precision
+/// payload's singular values, eigenvalues and reductions come back as `F32`
+/// (probe `cuda-single-precision-probe-2026-09-20.md`), and demanding `F64`
+/// here is what used to make every such call an error. Widening happens on
+/// the host after the transfer, so the bytes moved are the lane's own and
+/// TeNeT's spectrum contract stays `f64`.
+fn download_values<R: CudaRealScalar>(
+    ctx: &CudaDenseContext,
+    tensor: &Tensor,
+) -> Result<Vec<f64>, DenseError> {
     let host = download_tensor(ctx.backend.runtime(), tensor)
         .map_err(|err| cuda_error("cuda_download", err))?;
-    match host {
-        Tensor::F64(tensor) => tensor
-            .into_host_vec()
-            .inspect(|values| {
-                let bytes = std::mem::size_of_val(values.as_slice());
-                #[cfg(test)]
-                CUDA_METADATA_DOWNLOAD_BYTES.fetch_add(bytes, Ordering::Relaxed);
-                record_d2h(bytes);
-            })
-            .map_err(|err| cuda_error("cuda_download", err)),
-        other => Err(cuda_error(
+    if host.dtype() != R::dtype() {
+        return Err(cuda_error(
             "cuda_download",
-            format!("expected f64 values, got {:?}", other.dtype()),
-        )),
+            format!("expected {:?} values, got {:?}", R::dtype(), host.dtype()),
+        ));
     }
+    let typed = R::into_typed(host).map_err(|err| cuda_error("cuda_download", err))?;
+    let values = typed
+        .into_host_vec()
+        .map_err(|err| cuda_error("cuda_download", err))?;
+    let bytes = std::mem::size_of_val(values.as_slice());
+    #[cfg(test)]
+    CUDA_METADATA_DOWNLOAD_BYTES.fetch_add(bytes, Ordering::Relaxed);
+    record_d2h(bytes);
+    Ok(values.into_iter().map(R::widen).collect())
 }
 
-fn download_scalar(
+fn download_scalar<R: CudaRealScalar>(
     ctx: &CudaDenseContext,
     tensor: &Tensor,
     op: &'static str,
 ) -> Result<f64, DenseError> {
-    let values = download_values(ctx, tensor)?;
+    let values = download_values::<R>(ctx, tensor)?;
     if values.len() != 1 {
         return Err(cuda_error(
             op,
@@ -1327,23 +1531,28 @@ fn download_scalar(
     Ok(values[0])
 }
 
-fn upload_scalar(ctx: &CudaDenseContext, value: f64) -> Result<Tensor, DenseError> {
-    let host = Tensor::from_vec_col_major(vec![], vec![value])
+/// Uploads a rank-0 divisor in the payload's **real** lane.
+///
+/// The lane is not a symmetry: Tenferro rejects an `F64` rank-0 divisor
+/// against an `F32` or `C32` tensor as a dtype mismatch, and rejects a
+/// *payload*-typed complex divisor as a shape mismatch, so "complex tensor
+/// divided by a real rank-0 scalar" is the one production shape (probe
+/// `cuda-single-precision-probe-2026-09-20.md`, finding 3).
+fn upload_scalar<R: CudaRealScalar>(
+    ctx: &CudaDenseContext,
+    value: f64,
+) -> Result<Tensor, DenseError> {
+    let host = R::into_tensor(vec![], vec![R::narrow(value)])
         .map_err(|err| cuda_error("cuda_hermitian", err))?;
     let tensor = upload_tensor(ctx.backend.runtime(), &host)
         .map_err(|err| cuda_error("cuda_hermitian", err))?;
-    record_h2d(std::mem::size_of::<f64>());
+    record_h2d(std::mem::size_of::<R>());
     Ok(tensor)
 }
 
-fn scaled_hermitian_residual_accepts(input_ss: f64, residual_scale: f64, residual_ss: f64) -> bool {
-    input_ss.is_finite()
-        && input_ss >= 0.0
-        && residual_scale.is_finite()
-        && residual_scale >= 0.0
-        && residual_ss.is_finite()
-        && residual_ss >= 0.0
-        && 0.5 * residual_scale * residual_ss.sqrt() <= 64.0 * f64::EPSILON * input_ss.sqrt()
+/// The relative anti-Hermitian residual this payload's real lane admits.
+fn hermitian_tolerance<D: CudaScalar>() -> f64 {
+    HERMITIAN_TOLERANCE_EPSILONS * <D::Real as CudaRealScalar>::EPSILON
 }
 
 /// Real magnitudes of a device tensor, so the real-only sum-of-squares
@@ -1365,8 +1574,14 @@ fn magnitudes_for_sum_squares<D: CudaScalar>(
 }
 
 /// Tests one packed CUDA matrix region with the host EIGH rule
-/// `||(A - A^H)/2||_F <= 64 eps ||A||_F`. The residual uses the *conjugate*
-/// transpose, so a complex-symmetric non-Hermitian block is rejected.
+/// `||(A - A^H)/2||_F <= 64 eps(real(D)) ||A||_F`. The residual uses the
+/// *conjugate* transpose, so a complex-symmetric non-Hermitian block is
+/// rejected.
+///
+/// The epsilon is the payload's own real lane
+/// ([`crate::cuda_hermitian::HERMITIAN_TOLERANCE_EPSILONS`]), matching the
+/// host twin `normwise_hermitian`; the `f64` and [`Complex64`] decisions are
+/// bit-for-bit what they were.
 ///
 /// The normal and conjugate-transposed views are materialized and reduced on
 /// device. Only scalar norm metadata is downloaded; the receiver region is
@@ -1397,7 +1612,7 @@ pub fn cuda_is_hermitian_region<D: CudaScalar>(
         .backend
         .reduce_max(&input_abs, &[0, 1])
         .map_err(|err| cuda_error(OP, err))?;
-    let input_scale = download_scalar(ctx, &input_max, OP)?;
+    let input_scale = download_scalar::<D::Real>(ctx, &input_max, OP)?;
     // Pinned Tenferro's CUDA reduce_max propagates NaN. Keep this check before
     // the zero fast path so an otherwise-zero matrix containing NaN is rejected.
     if !input_scale.is_finite() {
@@ -1420,7 +1635,7 @@ pub fn cuda_is_hermitian_region<D: CudaScalar>(
     } else {
         transpose
     };
-    let scale = upload_scalar(ctx, input_scale)?;
+    let scale = upload_scalar::<D::Real>(ctx, input_scale)?;
     let normal_scaled = ctx
         .backend
         .div(&normal, &scale)
@@ -1437,7 +1652,7 @@ pub fn cuda_is_hermitian_region<D: CudaScalar>(
             &[0, 1],
         )
         .map_err(|err| cuda_error(OP, err))?;
-    let input_ss = download_scalar(ctx, &input_ss, OP)?;
+    let input_ss = download_scalar::<D::Real>(ctx, &input_ss, OP)?;
 
     let residual = ctx
         .backend
@@ -1451,7 +1666,7 @@ pub fn cuda_is_hermitian_region<D: CudaScalar>(
         .backend
         .reduce_max(&residual_abs, &[0, 1])
         .map_err(|err| cuda_error(OP, err))?;
-    let residual_scale = download_scalar(ctx, &residual_max, OP)?;
+    let residual_scale = download_scalar::<D::Real>(ctx, &residual_max, OP)?;
     if !residual_scale.is_finite() {
         return Ok(false);
     }
@@ -1459,7 +1674,7 @@ pub fn cuda_is_hermitian_region<D: CudaScalar>(
         return Ok(input_ss.is_finite() && input_ss >= 0.0);
     }
 
-    let residual_scale_tensor = upload_scalar(ctx, residual_scale)?;
+    let residual_scale_tensor = upload_scalar::<D::Real>(ctx, residual_scale)?;
     let residual_normalized = ctx
         .backend
         .div(&residual, &residual_scale_tensor)
@@ -1472,11 +1687,12 @@ pub fn cuda_is_hermitian_region<D: CudaScalar>(
             &[0, 1],
         )
         .map_err(|err| cuda_error(OP, err))?;
-    let residual_ss = download_scalar(ctx, &residual_ss, OP)?;
+    let residual_ss = download_scalar::<D::Real>(ctx, &residual_ss, OP)?;
     Ok(scaled_hermitian_residual_accepts(
         input_ss,
         residual_scale,
         residual_ss,
+        hermitian_tolerance::<D>(),
     ))
 }
 
@@ -1656,7 +1872,7 @@ pub fn cuda_svd_region<D: CudaScalar>(
     })
     .map_err(|err| cuda_error("cuda_svd", err))?;
     let vt = expect_dtype::<D>("cuda_svd", vt, ctx.device)?;
-    let s = download_values(ctx, &s)?;
+    let s = download_values::<D::Real>(ctx, &s)?;
     let u = expect_dtype::<D>("cuda_svd", u, ctx.device)?;
     validate_svd_factor_shapes(u.tensor.shape(), s.len(), vt.tensor.shape(), rows, cols)?;
     Ok((u, s, vt))
@@ -1689,6 +1905,15 @@ fn validate_svd_factor_shapes(
 /// The gauge is Tenferro's own [`QrGauge::PositiveDiagonal`]: it is applied on
 /// device inside the QR primitive, so no diagonal crosses to the host and no
 /// TeNeT-side re-gauging selector exists.
+///
+/// Both complex payloads are an explicit [`DenseError::Unsupported`] here,
+/// reported before any device work: the positive-diagonal gauge runs a `triu`
+/// kernel that materializes a complex zero, which the pinned Tenferro cannot
+/// compile for `cuFloatComplex` (tenferro-rs#1833) or `cuDoubleComplex`
+/// (#1271). [`Complex64`] previously reached the launch and failed there with
+/// an NVRTC compile log; it now fails the same way [`Complex32`] does, at the
+/// boundary. No caller regresses — the typed layer offers device QR for `f64`
+/// only. Both real payloads, `f32` included, are fully supported.
 pub fn cuda_qr_region<D: CudaScalar>(
     ctx: &mut CudaDenseContext,
     src: &CudaDenseStorage,
@@ -1696,6 +1921,7 @@ pub fn cuda_qr_region<D: CudaScalar>(
     rows: usize,
     cols: usize,
 ) -> Result<(CudaDenseStorage, CudaDenseStorage), DenseError> {
+    ensure_device_constant_kernels::<D>("cuda_qr", "QR (positive-diagonal `triu` fill)")?;
     ensure_cuda_device(ctx.device, "cuda_qr", &[("src", src.device)])?;
     let view = src.region_view::<D>(rows, cols, rows, offset)?;
     let options = QrOptions::default().gauge(QrGauge::PositiveDiagonal);
@@ -1746,7 +1972,7 @@ pub fn cuda_eigh_region<D: CudaScalar>(
     })
     .map_err(|err| cuda_error("cuda_eigh", err))?;
     let vectors = expect_dtype::<D>("cuda_eigh", vectors, ctx.device)?;
-    let values = download_values(ctx, &values)?;
+    let values = download_values::<D::Real>(ctx, &values)?;
     validate_eigh_factor_shapes(values.len(), vectors.tensor.shape(), n)?;
     Ok((values, vectors))
 }
@@ -1876,26 +2102,68 @@ mod tests {
         assert!(validate_eigh_factor_shapes(3, &[3, 2], 3).is_err());
     }
 
+    /// The tolerance the Hermitian rule is given is the payload's own lane:
+    /// unchanged for the double-precision payloads, ~5e8 wider for the
+    /// single-precision ones. The rule itself is tested in `cuda_hermitian`,
+    /// which ordinary CI runs.
     #[test]
-    fn scaled_hermitian_rule_uses_the_shared_half_residual_threshold() {
-        let input_ss: f64 = 2.0;
-        let threshold = 64.0 * f64::EPSILON * input_ss.sqrt();
-        assert!(scaled_hermitian_residual_accepts(
-            input_ss,
-            2.0 * threshold * 0.99,
-            1.0,
-        ));
-        assert!(!scaled_hermitian_residual_accepts(
-            input_ss,
-            2.0 * threshold * 1.01,
-            1.0,
-        ));
-        assert!(!scaled_hermitian_residual_accepts(input_ss, f64::NAN, 1.0,));
-        assert!(!scaled_hermitian_residual_accepts(
-            input_ss,
-            1.0,
-            f64::INFINITY,
-        ));
+    fn the_hermitian_tolerance_follows_the_payload_real_lane() {
+        assert_eq!(hermitian_tolerance::<f64>(), 64.0 * f64::EPSILON);
+        assert_eq!(hermitian_tolerance::<Complex64>(), 64.0 * f64::EPSILON);
+        let single = 64.0 * f64::from(f32::EPSILON);
+        assert_eq!(hermitian_tolerance::<f32>(), single);
+        assert_eq!(hermitian_tolerance::<Complex32>(), single);
+        assert!(hermitian_tolerance::<f32>() > hermitian_tolerance::<f64>());
+    }
+
+    /// The per-dtype capability boundary, as pure logic: both complex dtypes
+    /// are blocked by the same Tenferro constant-kernel defect, and the
+    /// rejection is typed and names it.
+    #[test]
+    fn neither_complex_dtype_has_device_constant_kernels() {
+        for supported in [
+            ensure_device_constant_kernels::<f32>("cuda_qr", "QR"),
+            ensure_device_constant_kernels::<f64>("cuda_qr", "QR"),
+        ] {
+            assert!(supported.is_ok());
+        }
+        for (dtype, blocked) in [
+            (
+                DenseDType::C32,
+                ensure_device_constant_kernels::<Complex32>("cuda_qr", "QR"),
+            ),
+            (
+                DenseDType::C64,
+                ensure_device_constant_kernels::<Complex64>("cuda_qr", "QR"),
+            ),
+        ] {
+            let err =
+                blocked.expect_err("a complex device QR must be unsupported in tenferro 0.5.0");
+            assert!(
+                matches!(err, DenseError::Unsupported { op: "cuda_qr", .. }),
+                "{dtype:?}: {err}"
+            );
+            assert!(err.to_string().contains("1833"), "{dtype:?}: {err}");
+        }
+    }
+
+    /// Each admitted dtype owns its own scalar-operand slot, so a context used
+    /// from two dtypes never hands one of them the other's payload-typed `1`.
+    #[test]
+    fn every_admitted_dtype_owns_a_distinct_operand_slot() {
+        let slots = [
+            f32::OPERAND_SLOT,
+            f64::OPERAND_SLOT,
+            Complex32::OPERAND_SLOT,
+            Complex64::OPERAND_SLOT,
+        ];
+        for (index, slot) in slots.iter().enumerate() {
+            assert!(*slot < SCALAR_OPERAND_SLOTS);
+            assert!(
+                !slots[..index].contains(slot),
+                "slot {slot} is claimed twice"
+            );
+        }
     }
 
     #[test]
