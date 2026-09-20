@@ -52,9 +52,11 @@ pub use backend::{
     TensorContractWorkspace,
 };
 pub use context::{
-    tensorcontract_into_with_context, HostTreeFusionExecutionContext, PreparedTensorContractFusion,
-    TensorContractCache, TensorContractCacheStats, TensorContractExecutionContext,
-    TensorContractFusionExecutionContext, TensorContractPlanKey,
+    tensorcompose_fusion_dyn_prelowered_direct_on_storage,
+    tensorcontract_fusion_dyn_prelowered_direct_on_storage, tensorcontract_into_with_context,
+    HostTreeFusionExecutionContext, PreparedTensorContractFusion, TensorContractCache,
+    TensorContractCacheStats, TensorContractExecutionContext, TensorContractFusionExecutionContext,
+    TensorContractPlanKey,
 };
 #[cfg(test)]
 pub(crate) use dynamic_space::{

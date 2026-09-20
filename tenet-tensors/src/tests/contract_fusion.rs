@@ -3458,30 +3458,27 @@ fn oriented_storage_contract_and_compose_use_parent_rectangular_views() {
                 }
             })
             .collect::<Vec<_>>();
-        let mut context =
-            crate::TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
         crate::contract::reset_fusion_operand_projection_prepares();
 
         let mut contracted = vec![0.0; dst.space().required_len().unwrap()];
         let mut contract_gemm = CpuOrientedGemm::default();
-        context
-            .tensorcontract_fusion_dyn_prelowered_direct_on_storage(
-                &mut contract_gemm,
-                &dst,
-                &mut contracted,
-                lhs_operand,
-                &lhs_values,
-                rhs_operand,
-                &rhs_values,
-                TensorContractSpec::new_with_conjugation(
-                    &[1],
-                    &[0],
-                    crate::OutputAxisOrder::identity(),
-                    lhs_adjoint,
-                    rhs_adjoint,
-                ),
-            )
-            .unwrap();
+        crate::contract::tensorcontract_fusion_dyn_prelowered_direct_on_storage(
+            &mut contract_gemm,
+            &dst,
+            &mut contracted,
+            lhs_operand,
+            &lhs_values,
+            rhs_operand,
+            &rhs_values,
+            TensorContractSpec::new_with_conjugation(
+                &[1],
+                &[0],
+                crate::OutputAxisOrder::identity(),
+                lhs_adjoint,
+                rhs_adjoint,
+            ),
+        )
+        .unwrap();
         assert_eq!(contracted, expected);
         assert_eq!(contract_gemm.calls.len(), 2);
         assert!(contract_gemm.calls[1].0 > 0 && contract_gemm.calls[1].1 > 0);
@@ -3503,19 +3500,18 @@ fn oriented_storage_contract_and_compose_use_parent_rectangular_views() {
         );
 
         let mut composed = vec![0.0; dst.space().required_len().unwrap()];
-        context
-            .tensorcompose_fusion_dyn_prelowered_direct_on_storage(
-                &mut CpuOrientedGemm::default(),
-                &dst,
-                &mut composed,
-                lhs_operand,
-                &lhs_values,
-                rhs_operand,
-                &rhs_values,
-                &[1],
-                &[0],
-            )
-            .unwrap();
+        crate::contract::tensorcompose_fusion_dyn_prelowered_direct_on_storage(
+            &mut CpuOrientedGemm::default(),
+            &dst,
+            &mut composed,
+            lhs_operand,
+            &lhs_values,
+            rhs_operand,
+            &rhs_values,
+            &[1],
+            &[0],
+        )
+        .unwrap();
         assert_eq!(composed, expected);
         assert_eq!(crate::contract::fusion_operand_projection_prepares(), 0);
 
@@ -3531,7 +3527,7 @@ fn oriented_storage_contract_and_compose_use_parent_rectangular_views() {
             let mut rejected = sentinel.clone();
             let mut rejected_gemm = CpuOrientedGemm::default();
             assert!(matches!(
-                context.tensorcompose_fusion_dyn_prelowered_direct_on_storage(
+                crate::contract::tensorcompose_fusion_dyn_prelowered_direct_on_storage(
                     &mut rejected_gemm,
                     &outer_dst,
                     &mut rejected,
@@ -3613,47 +3609,43 @@ fn oriented_fermionic_storage_keeps_contract_and_compose_signs_distinct() {
         } else {
             crate::FusionOperand::direct(&rhs_parent)
         };
-        let mut context =
-            crate::TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
         crate::contract::reset_fusion_operand_projection_prepares();
 
         let mut contracted = vec![0.0];
         let mut contract_gemm = CpuOrientedGemm::default();
-        context
-            .tensorcontract_fusion_dyn_prelowered_direct_on_storage(
-                &mut contract_gemm,
-                &dst,
-                &mut contracted,
-                lhs,
-                &lhs_values,
-                rhs,
-                &rhs_values,
-                TensorContractSpec::new_with_conjugation(
-                    &[1],
-                    &[0],
-                    crate::OutputAxisOrder::identity(),
-                    lhs_adjoint,
-                    rhs_adjoint,
-                ),
-            )
-            .unwrap();
+        crate::contract::tensorcontract_fusion_dyn_prelowered_direct_on_storage(
+            &mut contract_gemm,
+            &dst,
+            &mut contracted,
+            lhs,
+            &lhs_values,
+            rhs,
+            &rhs_values,
+            TensorContractSpec::new_with_conjugation(
+                &[1],
+                &[0],
+                crate::OutputAxisOrder::identity(),
+                lhs_adjoint,
+                rhs_adjoint,
+            ),
+        )
+        .unwrap();
         assert_eq!(contracted, [-6.0]);
         assert_eq!(contract_gemm.calls[0].4, -1.0);
 
         let mut composed = vec![0.0];
-        context
-            .tensorcompose_fusion_dyn_prelowered_direct_on_storage(
-                &mut CpuOrientedGemm::default(),
-                &dst,
-                &mut composed,
-                lhs,
-                &lhs_values,
-                rhs,
-                &rhs_values,
-                &[1],
-                &[0],
-            )
-            .unwrap();
+        crate::contract::tensorcompose_fusion_dyn_prelowered_direct_on_storage(
+            &mut CpuOrientedGemm::default(),
+            &dst,
+            &mut composed,
+            lhs,
+            &lhs_values,
+            rhs,
+            &rhs_values,
+            &[1],
+            &[0],
+        )
+        .unwrap();
         assert_eq!(composed, [6.0]);
         assert_eq!(crate::contract::fusion_operand_projection_prepares(), 0);
     }

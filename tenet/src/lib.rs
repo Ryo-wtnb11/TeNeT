@@ -26,8 +26,12 @@
 //! mutex for the full operation. The `tensor!` path uses plan-local workspace
 //! pools. Pool checkout and return, plan-cache and structural-store access, and
 //! dense providers may still synchronize; an injected non-mintable executor
-//! serializes factorization through the Runtime state lock. Consequently no
-//! general lock-free or outer-thread scaling guarantee is made. See
+//! serializes factorization through the Runtime state lock. Device operations
+//! take only a device-local mutex over the runtime's single CUDA context (and
+//! the device backend's own handle and plan locks), never the state mutex, so
+//! Host work is not blocked by device work; device operations still serialize
+//! against each other there. Consequently no
+//! general lock-free, overlap, or outer-thread scaling guarantee is made. See
 //! `docs/backend_policy.md` for the ownership and synchronization model.
 //!
 #![doc = include_str!("tutorial.md")]

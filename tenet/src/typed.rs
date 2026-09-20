@@ -10031,14 +10031,8 @@ impl<R, D: CudaPayload> TensorMap<R, D> {
     /// }
     /// ```
     pub fn to_cuda(&self) -> Result<TensorMap<R, D, CudaStorage<D>>, Error> {
-        let state = self.runtime.lock();
-        let cuda = state.cuda.as_ref().ok_or_else(|| {
-            Error::InvalidArgument(
-                "this runtime was built without a CUDA device; use \
-                 Runtime::builder().cuda(device)"
-                    .to_string(),
-            )
-        })?;
+        let mut lease = self.runtime.lease_cuda()?;
+        let cuda = &mut *lease;
         let upload = |body: &Arc<TypedTensorBody<R, D>>| {
             let storage = match body.data.as_ref() {
                 TypedData::Dense(data) => CudaStorage::upload(cuda, data)?,
@@ -10093,10 +10087,11 @@ impl<R, D: CudaPayload> TensorMap<R, D, CudaStorage<D>> {
     /// }
     /// ```
     pub fn to_host(&self) -> Result<TensorMap<R, D>, Error> {
-        let state = self.runtime.lock();
-        let cuda = state.cuda.as_ref().ok_or_else(|| {
+        // ponytail: this message predates `lease_cuda`; kept byte-identical.
+        let mut lease = self.runtime.lease_cuda().map_err(|_| {
             Error::InvalidArgument("this runtime was built without a CUDA device".to_string())
         })?;
+        let cuda = &mut *lease;
         let download = |body: &Arc<TypedTensorBody<R, D, CudaStorage<D>>>| {
             let TypedData::Dense(storage) = body.data.as_ref() else {
                 unreachable!("typed CUDA transfer never produces compact storage")
@@ -10467,16 +10462,11 @@ where
         let source_regions = sector_regions(source_space.structure(), source_space.nout())?;
 
         {
-            let mut state = self.runtime.lock();
-            let cuda = state.cuda.as_mut().ok_or_else(|| {
-                Error::InvalidArgument(
-                    "this runtime was built without a CUDA device; use \
-                     Runtime::builder().cuda(device)"
-                        .to_string(),
-                )
-            })?;
+            // Preflight only: the ordinal is immutable, so this placement
+            // check takes no device lock at all.
+            let device = self.runtime.cuda_device_ordinal_checked()?;
             Self::validate_cuda_owned_metadata(
-                Placement::Cuda(cuda.device()),
+                Placement::Cuda(device),
                 source.placement(),
                 required_len,
                 source.len(),
@@ -10501,14 +10491,8 @@ where
         let middle_len = middle_space.space().required_len()?;
         let right_len = plan.right_space.space().required_len()?;
         let (left_data, middle_data, right_data) = {
-            let mut state = self.runtime.lock();
-            let cuda = state.cuda.as_mut().ok_or_else(|| {
-                Error::InvalidArgument(
-                    "this runtime was built without a CUDA device; use \
-                     Runtime::builder().cuda(device)"
-                        .to_string(),
-                )
-            })?;
+            let mut lease = self.runtime.lease_cuda()?;
+            let cuda = &mut *lease;
             let mut left_data = CudaStorage::upload(cuda, &vec![D::ZERO; left_len])?;
             #[cfg(test)]
             observe_cuda_svd_final_storage_creation();
@@ -10664,16 +10648,11 @@ where
         let source_regions = sector_regions(source_space.structure(), source_space.nout())?;
 
         {
-            let mut state = self.runtime.lock();
-            let cuda = state.cuda.as_mut().ok_or_else(|| {
-                Error::InvalidArgument(
-                    "this runtime was built without a CUDA device; use \
-                     Runtime::builder().cuda(device)"
-                        .to_string(),
-                )
-            })?;
+            // Preflight only: the ordinal is immutable, so this placement
+            // check takes no device lock at all.
+            let device = self.runtime.cuda_device_ordinal_checked()?;
             Self::validate_cuda_owned_metadata(
-                Placement::Cuda(cuda.device()),
+                Placement::Cuda(device),
                 source.placement(),
                 required_len,
                 source.len(),
@@ -10692,16 +10671,10 @@ where
         // spaces are not published; the kept spaces are admitted below.
         let source_plan = self.compile_cuda_qr_plan(source_regions)?;
         let (raw_spectra, mut retained) = {
-            let mut state = self.runtime.lock();
+            let mut lease = self.runtime.lease_cuda()?;
             #[cfg(test)]
             let _lock_observation = CudaSvdTruncLockObservationGuard::new();
-            let cuda = state.cuda.as_mut().ok_or_else(|| {
-                Error::InvalidArgument(
-                    "this runtime was built without a CUDA device; use \
-                     Runtime::builder().cuda(device)"
-                        .to_string(),
-                )
-            })?;
+            let cuda = &mut *lease;
             let mut spectra = Vec::with_capacity(source_plan.source_regions.len());
             let mut retained = Vec::with_capacity(source_plan.source_regions.len());
             #[cfg(test)]
@@ -10802,16 +10775,10 @@ where
         )?;
 
         let (left_data, middle_data, right_data) = {
-            let mut state = self.runtime.lock();
+            let mut lease = self.runtime.lease_cuda()?;
             #[cfg(test)]
             let _lock_observation = CudaSvdTruncLockObservationGuard::new();
-            let cuda = state.cuda.as_mut().ok_or_else(|| {
-                Error::InvalidArgument(
-                    "this runtime was built without a CUDA device; use \
-                     Runtime::builder().cuda(device)"
-                        .to_string(),
-                )
-            })?;
+            let cuda = &mut *lease;
             let mut left_data = Self::upload_cuda_svd_trunc_final(cuda, &vec![D::ZERO; left_len])?;
             let middle_data = Self::upload_cuda_svd_trunc_final(cuda, &middle_host)?;
             let mut right_data =
@@ -10942,16 +10909,11 @@ where
         }
 
         {
-            let mut state = self.runtime.lock();
-            let cuda = state.cuda.as_mut().ok_or_else(|| {
-                Error::InvalidArgument(
-                    "this runtime was built without a CUDA device; use \
-                     Runtime::builder().cuda(device)"
-                        .to_string(),
-                )
-            })?;
+            // Preflight only: the ordinal is immutable, so this placement
+            // check takes no device lock at all.
+            let device = self.runtime.cuda_device_ordinal_checked()?;
             Self::validate_cuda_owned_metadata(
-                Placement::Cuda(cuda.device()),
+                Placement::Cuda(device),
                 source.placement(),
                 required_len,
                 source.len(),
@@ -10967,14 +10929,8 @@ where
         // Admission is complete. Validate every block before the first EIGH so
         // a late non-Hermitian sector cannot trigger partial numerical work.
         {
-            let mut state = self.runtime.lock();
-            let cuda = state.cuda.as_mut().ok_or_else(|| {
-                Error::InvalidArgument(
-                    "this runtime was built without a CUDA device; use \
-                     Runtime::builder().cuda(device)"
-                        .to_string(),
-                )
-            })?;
+            let mut lease = self.runtime.lease_cuda()?;
+            let cuda = &mut *lease;
             for region in source_plan.source_regions.iter() {
                 if !cuda_is_hermitian_region::<D>(
                     cuda,
@@ -10993,14 +10949,8 @@ where
         }
 
         let (raw_spectra, mut raw_vectors, orders) = {
-            let mut state = self.runtime.lock();
-            let cuda = state.cuda.as_mut().ok_or_else(|| {
-                Error::InvalidArgument(
-                    "this runtime was built without a CUDA device; use \
-                     Runtime::builder().cuda(device)"
-                        .to_string(),
-                )
-            })?;
+            let mut lease = self.runtime.lease_cuda()?;
+            let cuda = &mut *lease;
             let mut spectra = Vec::with_capacity(source_plan.source_regions.len());
             let mut vectors = Vec::with_capacity(source_plan.source_regions.len());
             let mut orders = Vec::with_capacity(source_plan.source_regions.len());
@@ -11081,14 +11031,8 @@ where
         )?;
 
         let (diagonal_data, vector_data) = {
-            let mut state = self.runtime.lock();
-            let cuda = state.cuda.as_mut().ok_or_else(|| {
-                Error::InvalidArgument(
-                    "this runtime was built without a CUDA device; use \
-                     Runtime::builder().cuda(device)"
-                        .to_string(),
-                )
-            })?;
+            let mut lease = self.runtime.lease_cuda()?;
+            let cuda = &mut *lease;
             let diagonal_data = CudaStorage::upload(cuda, &diagonal_host)?;
             let mut vector_data = CudaStorage::upload(cuda, &vec![D::ZERO; vector_len])?;
             #[cfg(test)]
@@ -11215,16 +11159,11 @@ where
         let source_regions = sector_regions(source_space.structure(), source_space.nout())?;
 
         {
-            let mut state = self.runtime.lock();
-            let cuda = state.cuda.as_mut().ok_or_else(|| {
-                Error::InvalidArgument(
-                    "this runtime was built without a CUDA device; use \
-                     Runtime::builder().cuda(device)"
-                        .to_string(),
-                )
-            })?;
+            // Preflight only: the ordinal is immutable, so this placement
+            // check takes no device lock at all.
+            let device = self.runtime.cuda_device_ordinal_checked()?;
             Self::validate_cuda_owned_metadata(
-                Placement::Cuda(cuda.device()),
+                Placement::Cuda(device),
                 source.placement(),
                 required_len,
                 source.len(),
@@ -11238,14 +11177,8 @@ where
         let right_len = plan.right_space.space().required_len()?;
 
         let (left_data, right_data) = {
-            let mut state = self.runtime.lock();
-            let cuda = state.cuda.as_mut().ok_or_else(|| {
-                Error::InvalidArgument(
-                    "this runtime was built without a CUDA device; use \
-                     Runtime::builder().cuda(device)"
-                        .to_string(),
-                )
-            })?;
+            let mut lease = self.runtime.lease_cuda()?;
+            let cuda = &mut *lease;
             let mut left_data = CudaStorage::upload(cuda, &vec![0.0; left_len])?;
             #[cfg(test)]
             observe_cuda_qr_output_upload();
@@ -11393,14 +11326,8 @@ where
         rhs: Option<(&CudaStorage<D>, D)>,
     ) -> Result<CudaStorage<D>, Error> {
         let (lhs, alpha) = lhs;
-        let mut state = self.runtime.lock();
-        let cuda = state.cuda.as_mut().ok_or_else(|| {
-            Error::InvalidArgument(
-                "this runtime was built without a CUDA device; use \
-                 Runtime::builder().cuda(device)"
-                    .to_string(),
-            )
-        })?;
+        let mut lease = self.runtime.lease_cuda()?;
+        let cuda = &mut *lease;
         let expected = Placement::Cuda(cuda.device());
         Self::validate_cuda_owned_metadata(expected, lhs.placement(), required_len, lhs.len())?;
         if let Some((rhs, _)) = rhs {
@@ -11474,14 +11401,8 @@ where
         required_len: usize,
         source: &CudaStorage<D>,
     ) -> Result<CudaStorage<D>, Error> {
-        let mut state = self.runtime.lock();
-        let cuda = state.cuda.as_mut().ok_or_else(|| {
-            Error::InvalidArgument(
-                "this runtime was built without a CUDA device; use \
-                 Runtime::builder().cuda(device)"
-                    .to_string(),
-            )
-        })?;
+        let mut lease = self.runtime.lease_cuda()?;
+        let cuda = &mut *lease;
         Self::validate_cuda_owned_metadata(
             Placement::Cuda(cuda.device()),
             source.placement(),
@@ -11499,16 +11420,10 @@ where
         required_len: usize,
         storage: &CudaStorage<D>,
     ) -> Result<(), Error> {
-        let mut state = self.runtime.lock();
-        let cuda = state.cuda.as_mut().ok_or_else(|| {
-            Error::InvalidArgument(
-                "this runtime was built without a CUDA device; use \
-                 Runtime::builder().cuda(device)"
-                    .to_string(),
-            )
-        })?;
+        // Preflight only: the ordinal is immutable, so this placement check
+        // takes no device lock at all.
         Self::validate_cuda_owned_metadata(
-            Placement::Cuda(cuda.device()),
+            Placement::Cuda(self.runtime.cuda_device_ordinal_checked()?),
             storage.placement(),
             required_len,
             storage.len(),
@@ -11638,14 +11553,8 @@ where
     fn weighted_inner_cuda(&self, lhs: &CudaStorage<D>, rhs: &CudaStorage<D>) -> Result<D, Error> {
         let space = self.logical_space().space();
         let regions = sector_regions(space.structure(), space.nout())?;
-        let mut state = self.runtime.lock();
-        let cuda = state.cuda.as_mut().ok_or_else(|| {
-            Error::InvalidArgument(
-                "this runtime was built without a CUDA device; use \
-                 Runtime::builder().cuda(device)"
-                    .to_string(),
-            )
-        })?;
+        let mut lease = self.runtime.lease_cuda()?;
+        let cuda = &mut *lease;
         validate_cuda_reduction_placement(
             Placement::Cuda(cuda.device()),
             lhs.placement(),
@@ -11679,7 +11588,7 @@ where
             }
         }
         let values = download_cuda_reduction_partials(&partials, cuda)?;
-        drop(state);
+        drop(lease);
 
         Ok(regions
             .iter()
@@ -11816,15 +11725,8 @@ where
             rhs_axes,
             OutputAxisOrder::identity(),
         )?;
-        let mut state = self.runtime.lock();
-        let crate::runtime::RuntimeState { mf, cuda, .. } = &mut *state;
-        let cuda = cuda.as_mut().ok_or_else(|| {
-            Error::InvalidArgument(
-                "this runtime was built without a CUDA device; use \
-                 Runtime::builder().cuda(device)"
-                    .to_string(),
-            )
-        })?;
+        let mut lease = self.runtime.lease_cuda()?;
+        let cuda = &mut *lease;
         let expected_placement = Placement::Cuda(cuda.device());
         if lhs_storage.placement() != expected_placement
             || rhs_storage.placement() != expected_placement
@@ -11837,7 +11739,7 @@ where
             cuda,
             &vec![D::from_real(0.0); dst_space.space().required_len()?],
         )?;
-        D::ctx_of(mf).tensorcontract_fusion_dyn_prelowered_direct_on_storage(
+        tenet_tensors::tensorcontract_fusion_dyn_prelowered_direct_on_storage(
             &mut CudaStorageGemm::new(cuda),
             &dst_space,
             &mut dst,
@@ -11853,7 +11755,7 @@ where
                 rhs_operand.storage_conjugate(),
             ),
         )?;
-        drop(state);
+        drop(lease);
         Ok(Self {
             runtime: self.runtime.clone(),
             repr: owned_repr(TypedTensorBody::dense(dst_space, dst)),
@@ -12051,15 +11953,8 @@ where
         }
         let destination_placement = destination_storage.placement();
 
-        let mut state = self.runtime.lock();
-        let crate::runtime::RuntimeState { mf, cuda, .. } = &mut *state;
-        let cuda = cuda.as_mut().ok_or_else(|| {
-            Error::InvalidArgument(
-                "this runtime was built without a CUDA device; use \
-                 Runtime::builder().cuda(device)"
-                    .to_string(),
-            )
-        })?;
+        let mut lease = self.runtime.lease_cuda()?;
+        let cuda = &mut *lease;
         let expected_placement = Placement::Cuda(cuda.device());
         if lhs_storage.placement() != expected_placement
             || rhs_storage.placement() != expected_placement
@@ -12101,7 +11996,7 @@ where
             )
             .map_err(dense_err)?;
         }
-        D::ctx_of(mf).tensorcontract_fusion_dyn_prelowered_direct_on_storage(
+        tenet_tensors::tensorcontract_fusion_dyn_prelowered_direct_on_storage(
             &mut CudaStorageGemm::new(cuda),
             &execution_destination,
             destination_data,
@@ -12135,15 +12030,8 @@ where
         let dst_space = BoundDynamicFusionMapSpace::contracted_multiplicity_free(
             lhs_space, rhs_space, &lhs_axes, &rhs_axes,
         )?;
-        let mut state = self.runtime.lock();
-        let crate::runtime::RuntimeState { mf, cuda, .. } = &mut *state;
-        let cuda = cuda.as_mut().ok_or_else(|| {
-            Error::InvalidArgument(
-                "this runtime was built without a CUDA device; use \
-                 Runtime::builder().cuda(device)"
-                    .to_string(),
-            )
-        })?;
+        let mut lease = self.runtime.lease_cuda()?;
+        let cuda = &mut *lease;
         let expected_placement = Placement::Cuda(cuda.device());
         if lhs_storage.placement() != expected_placement
             || rhs_storage.placement() != expected_placement
@@ -12154,7 +12042,7 @@ where
             cuda,
             &vec![D::from_real(0.0); dst_space.space().required_len()?],
         )?;
-        D::ctx_of(mf).tensorcompose_fusion_dyn_prelowered_direct_on_storage(
+        tenet_tensors::tensorcompose_fusion_dyn_prelowered_direct_on_storage(
             &mut CudaStorageGemm::new(cuda),
             &dst_space,
             &mut dst,
@@ -12165,7 +12053,7 @@ where
             &lhs_axes,
             &rhs_axes,
         )?;
-        drop(state);
+        drop(lease);
         Ok(Self {
             runtime: self.runtime.clone(),
             repr: owned_repr(TypedTensorBody::dense(dst_space, dst)),
@@ -18814,8 +18702,8 @@ mod representation_gates {
         });
 
         let malformed_storage = {
-            let state = runtime.lock();
-            CudaStorage::<f64>::upload(state.cuda.as_ref().unwrap(), &[]).unwrap()
+            let lease = runtime.lease_cuda().unwrap();
+            CudaStorage::<f64>::upload(&lease, &[]).unwrap()
         };
         let malformed = TensorMap {
             runtime: runtime.clone(),
@@ -18836,8 +18724,8 @@ mod representation_gates {
         });
 
         let stranded_storage = {
-            let state = runtime.lock();
-            CudaStorage::upload(state.cuda.as_ref().unwrap(), source.data()).unwrap()
+            let lease = runtime.lease_cuda().unwrap();
+            CudaStorage::upload(&lease, source.data()).unwrap()
         };
         let stranded = TensorMap {
             runtime: Runtime::builder().build().unwrap(),
@@ -18928,8 +18816,8 @@ mod representation_gates {
         });
 
         let malformed_storage = {
-            let state = runtime.lock();
-            CudaStorage::<f64>::upload(state.cuda.as_ref().unwrap(), &[]).unwrap()
+            let lease = runtime.lease_cuda().unwrap();
+            CudaStorage::<f64>::upload(&lease, &[]).unwrap()
         };
         let malformed = TensorMap {
             runtime: runtime.clone(),
@@ -18953,8 +18841,8 @@ mod representation_gates {
         }
 
         let stranded_storage = {
-            let state = runtime.lock();
-            CudaStorage::upload(state.cuda.as_ref().unwrap(), source.data()).unwrap()
+            let lease = runtime.lease_cuda().unwrap();
+            CudaStorage::upload(&lease, source.data()).unwrap()
         };
         let stranded = TensorMap {
             runtime: Runtime::builder().build().unwrap(),
@@ -19485,8 +19373,8 @@ mod representation_gates {
 
         let source_device = source.to_cuda().unwrap();
         let empty_storage = {
-            let state = runtime.lock();
-            CudaStorage::<f64>::upload(state.cuda.as_ref().unwrap(), &[]).unwrap()
+            let lease = runtime.lease_cuda().unwrap();
+            CudaStorage::<f64>::upload(&lease, &[]).unwrap()
         };
         let malformed_length = TensorMap {
             runtime: runtime.clone(),
@@ -24924,5 +24812,151 @@ mod representation_gates {
         };
         assert!(owned(&reused).dense_cache.get().is_none());
         assert_ne!(reused.data().as_ptr(), materialized);
+    }
+
+    /// GL-3 (#1281): a device operation must not need the coarse Runtime
+    /// state mutex. The reverse direction is the observable one: Host
+    /// standalone contraction never takes `state`, so only a parked holder of
+    /// that lock can prove a device operation is independent of it.
+    #[cfg(feature = "cuda")]
+    #[test]
+    #[ignore = "requires a real CUDA device"]
+    fn device_work_completes_while_another_thread_holds_the_runtime_state_lock() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::mpsc;
+        use std::sync::Barrier;
+        use std::time::Duration;
+
+        let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+        let provider = Arc::new(U1FusionRule);
+        let leg = GradedSpace::try_new_with_arc(
+            Arc::clone(&provider),
+            [(U1Irrep::new(0), 2), (U1Irrep::new(1), 2)],
+        )
+        .unwrap();
+        let lhs = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+            indices[0] as f64 + 1.0
+        })
+        .unwrap();
+        let rhs = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+            indices[1] as f64 + 2.0
+        })
+        .unwrap();
+
+        // Independent oracle for the device result, computed on Host before
+        // the state lock is parked.
+        let host_expected = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+            indices[0] as f64 + 1.0
+        })
+        .unwrap()
+        .contract(
+            &TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+                indices[1] as f64 + 2.0
+            })
+            .unwrap(),
+            &[1],
+            &[0],
+            &[0, 1],
+        )
+        .unwrap();
+
+        let holding = Arc::new(Barrier::new(2));
+        let release = Arc::new(AtomicBool::new(false));
+        let (sender, receiver) = mpsc::channel();
+
+        let values = std::thread::scope(|scope| {
+            let holder_runtime = runtime.clone();
+            let holder_barrier = Arc::clone(&holding);
+            let holder_release = Arc::clone(&release);
+            scope.spawn(move || {
+                let _state = holder_runtime.lock();
+                holder_barrier.wait();
+                while !holder_release.load(Ordering::SeqCst) {
+                    std::thread::yield_now();
+                }
+            });
+
+            holding.wait();
+            scope.spawn(move || {
+                let device = lhs
+                    .to_cuda()
+                    .and_then(|lhs| Ok((lhs, rhs.to_cuda()?)))
+                    .and_then(|(lhs, rhs)| lhs.contract(&rhs, &[1], &[0], &[0, 1]))
+                    .and_then(|out| out.to_host());
+                let _ = sender.send(device.map(|out| out.data().to_vec()));
+            });
+
+            let outcome = receiver.recv_timeout(Duration::from_secs(30));
+            release.store(true, Ordering::SeqCst);
+            outcome
+                .expect("device transfer and contraction blocked on the Runtime state lock")
+                .expect("device contraction failed")
+        });
+
+        // The device result under the parked state lock is the Host result.
+        assert_eq!(values.len(), host_expected.data().len());
+        assert!(values.iter().any(|value| *value != 0.0));
+        for (actual, expected) in values.iter().zip(host_expected.data()) {
+            assert!(
+                (actual - expected).abs() < 1.0e-12,
+                "device value {actual} differs from the Host oracle {expected}"
+            );
+        }
+    }
+
+    /// GL-3 (#1281): the device lock nests with the CPU leases in either
+    /// order without deadlocking, because it is a separate mutex.
+    #[cfg(feature = "cuda")]
+    #[test]
+    #[ignore = "requires a real CUDA device"]
+    fn device_lease_nests_with_cpu_leases_in_both_orders() {
+        let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+
+        {
+            let cuda = runtime.lease_cuda().unwrap();
+            let context = runtime.lease_context().unwrap();
+            let dense = runtime.lease_dense();
+            drop(dense);
+            // A CPU lease released under the device guard must not deadlock.
+            drop(context);
+            drop(cuda);
+        }
+
+        let context = runtime.lease_context().unwrap();
+        let cuda = runtime.lease_cuda().unwrap();
+        drop(context);
+        drop(cuda);
+    }
+
+    /// GL-3 (#1281): device lowering touches no execution context, so a
+    /// device contraction leaves the Runtime tree-transform cache untouched.
+    #[cfg(feature = "cuda")]
+    #[test]
+    #[ignore = "requires a real CUDA device"]
+    fn device_contraction_leaves_the_tree_transform_cache_unchanged() {
+        let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+        let provider = Arc::new(U1FusionRule);
+        let leg = GradedSpace::try_new_with_arc(
+            Arc::clone(&provider),
+            [(U1Irrep::new(0), 2), (U1Irrep::new(1), 2)],
+        )
+        .unwrap();
+        let lhs = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+            indices[0] as f64 + 1.0
+        })
+        .unwrap()
+        .to_cuda()
+        .unwrap();
+        let rhs = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+            indices[1] as f64 + 2.0
+        })
+        .unwrap()
+        .to_cuda()
+        .unwrap();
+
+        let before = runtime.tree_transform_cache_info();
+        let product = lhs.contract(&rhs, &[1], &[0], &[0, 1]).unwrap();
+        assert_eq!(product.placement(), Placement::Cuda(0));
+        assert_eq!(runtime.tree_transform_cache_info(), before);
     }
 }

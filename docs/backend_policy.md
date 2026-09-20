@@ -107,6 +107,12 @@ resources are distinct from the process-global Rayon configuration and from
 provider-internal synchronization. Consequently this design makes no general
 lock-free, byte-identical warm-path, or outer-thread scaling guarantee.
 
+Device operations take only a device-local mutex over the runtime's single
+CUDA context and Tenferro's internal handle and plan locks, not the Runtime
+state mutex, so Host work on the same runtime is not blocked by device work.
+This is not a concurrency, overlap, or multi-stream claim: device operations
+still serialize against each other on that device mutex.
+
 ## Historical context
 
 Issues #155 and #176 record earlier implementation work; they are not current

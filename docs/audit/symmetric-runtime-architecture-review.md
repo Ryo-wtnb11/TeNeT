@@ -297,11 +297,11 @@ The inspected warm loop does not allocate FusionTrees, evaluate F/R, search sect
 
 **Location:** typed runtime/CUDA context and operation entry points in `tenet/src/typed.rs`; `tenet-operations/src/cuda.rs`.
 
-**Current:** CUDA typed operations take the coarse `RuntimeState` mutex and hold it across allocation and execution (`tenet/src/typed.rs:11349-11384`); CUDA does not use the Host execution-lane lease model. There is no explicit device/stream/event task scheduler.
+**Current:** since #1281, CUDA typed operations validate, then take only a device-local mutex over the runtime's single CUDA context (`Runtime::lease_cuda`), never the coarse `RuntimeState` mutex, so Host work is not blocked by device work; this is not a concurrency, overlap, or multi-stream claim, as device operations still serialize on that device mutex and on Tenferro's internal handle and plan locks. There is still no explicit device/stream/event task scheduler.
 
 **Problem:** a single mutable execution authority is adequate for correctness but cannot express concurrent streams, per-device workspaces, transfers, collectives, or multi-GPU placement.
 
-**Hot path:** confirmed coarse lock scope can serialize callers. Direct contraction also creates and uploads a Host `Vec<f64>` of zeros for each destination while holding this lock (`typed.rs:11364-11366`), already tracked by #740. **CPU:** none. **GPU:** can limit overlap and adds a host allocation/upload. **Maintenance:** prematurely adding distributed scheduling now would be over-engineering.
+**Hot path:** the device lock scope can still serialize device callers, but no longer Host callers. Direct contraction also creates and uploads a Host `Vec<f64>` of zeros for each destination while holding that lock (`typed.rs:11364-11366`), already tracked by #740. **CPU:** none. **GPU:** can limit overlap and adds a host allocation/upload. **Maintenance:** prematurely adding distributed scheduling now would be over-engineering.
 
 **Recommended:** first measure lock/lease scope and single-device concurrency; then introduce device-local execution leases and scheduler-owned stream/event/workspace resources. **Keep current:** appropriate for the present single-device baseline. **Size:** medium then large.
 

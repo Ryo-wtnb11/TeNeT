@@ -350,12 +350,14 @@ macro_rules! define_runtime_state {
     ($( $field:ident: $key:ty ),+ $(,)?) => {
         /// Expert-layer execution contexts for the multiplicity-free and
         /// Generic-fusion namespaces, plus the rule-independent dense executor.
+        ///
+        /// CPU state only: a CUDA device context lives behind its own
+        /// device-local mutex on `RuntimeInner`, so a device operation never
+        /// holds this lock.
         pub(crate) struct RuntimeState {
             $(pub(crate) $field: Ctxs<$key>,)+
             mf_c64_coeff_c64: CoefficientCtx<Complex64, RuleIdentity, Complex64>,
             pub(crate) dense: Box<dyn tenet_dense::DenseExecutor + Send>,
-            #[cfg(feature = "cuda")]
-            pub(crate) cuda: Option<tenet_dense::CudaDenseContext>,
         }
 
         impl RuntimeState {
@@ -380,8 +382,6 @@ macro_rules! define_runtime_state {
                         complex_tree_transform_store,
                     )?,
                     dense,
-                    #[cfg(feature = "cuda")]
-                    cuda: None,
                 })
             }
 
@@ -483,8 +483,9 @@ impl RuntimeTreeTransformStores {
 struct RuntimeInner {
     // Standalone CPU ops normally lease from `context_pool`/`executor_pool`,
     // while network execution uses per-plan workspace pools. Pool checkout,
-    // cache access, provider resources, CUDA state, and a non-mintable injected
-    // executor can still synchronize.
+    // cache access, provider resources, and a non-mintable injected executor
+    // can still synchronize. Device operations do not take this lock: they
+    // serialize on the device-local `cuda` mutex below instead.
     state: Mutex<RuntimeState>,
     rand_counter: AtomicU64,
     execution_config: RuntimeExecutionConfig,
@@ -507,6 +508,16 @@ struct RuntimeInner {
     /// Contraction-plan cache behind its own mutex, separate from `state` but
     /// still synchronized while cache work is in progress.
     plan_cache: Mutex<PlanCacheHome>,
+    /// The single CUDA context of this runtime, behind a device-local mutex:
+    /// device tensors are bound to one backend instance, so device operations
+    /// serialize here (and on Tenferro's internal handle/plan locks) instead
+    /// of on `state`.
+    #[cfg(feature = "cuda")]
+    cuda: Option<Mutex<tenet_dense::CudaDenseContext>>,
+    /// Device ordinal of `cuda`, fixed at build time and readable without a
+    /// lock so placement preflight takes no device lock at all.
+    #[cfg(feature = "cuda")]
+    cuda_device: Option<usize>,
 }
 
 /// Pool entry for `RuntimeInner::context_pool`. Boxed: a context owns both the
@@ -529,6 +540,22 @@ fn mint_dense(config: &RuntimeExecutionConfig) -> Box<dyn tenet_dense::DenseExec
             config.linalg_kind,
         )
         .expect("dense executor config validated at Runtime build time"),
+    )
+}
+
+/// RAII lease of this runtime's single CUDA context, held only for the device
+/// portion of one device operation. A device context cannot be pooled: device
+/// tensors are bound to one backend instance, so the guard is the lease.
+#[cfg(feature = "cuda")]
+pub(crate) type CudaLease<'a> = MutexGuard<'a, tenet_dense::CudaDenseContext>;
+
+/// The one error a device operation reports when its runtime has no device.
+#[cfg(feature = "cuda")]
+fn missing_cuda_device() -> Error {
+    Error::InvalidArgument(
+        "this runtime was built without a CUDA device; use \
+         Runtime::builder().cuda(device)"
+            .to_string(),
     )
 }
 
@@ -641,7 +668,11 @@ pub(crate) struct RuntimeExecutionConfig {
 /// Concurrency: standalone tensor operations can lease independent execution
 /// contexts instead of holding the coarse state mutex for their full duration.
 /// Pool checkout, shared stores, the plan cache, and dense providers retain
-/// their own synchronization and capability limits.
+/// their own synchronization and capability limits. Device operations take
+/// only a device-local mutex over this runtime's single CUDA context, not the
+/// state mutex, so Host work is not blocked by device work; device operations
+/// still serialize against each other there and inside the device backend's
+/// own handle and plan locks.
 ///
 /// # Examples
 ///
@@ -892,11 +923,36 @@ impl Runtime {
         f(&home.config, &mut home.slot)
     }
 
-    /// CUDA device ordinal fixed when this runtime was built.
+    /// CUDA device ordinal fixed when this runtime was built. Lock-free: the
+    /// ordinal is immutable, so placement preflight needs no device lock.
     #[cfg(feature = "cuda")]
     #[doc(hidden)]
     pub fn cuda_device_ordinal(&self) -> Option<usize> {
-        self.lock().cuda.as_ref().map(|cuda| cuda.device())
+        self.inner.cuda_device
+    }
+
+    /// The device ordinal, or the missing-device error every device operation
+    /// reports. Preflight-only sites use this instead of a lease.
+    #[cfg(feature = "cuda")]
+    pub(crate) fn cuda_device_ordinal_checked(&self) -> Result<usize, Error> {
+        self.inner.cuda_device.ok_or_else(missing_cuda_device)
+    }
+
+    /// Leases this runtime's single CUDA context for one device operation.
+    ///
+    /// Device operations validate first, then lease, then execute: they hold
+    /// only this device-local lock, never the coarse `state` lock, so Host
+    /// work on the same runtime is not blocked by device work. Device
+    /// operations still serialize against each other here and inside
+    /// Tenferro's handle and plan locks.
+    #[cfg(feature = "cuda")]
+    pub(crate) fn lease_cuda(&self) -> Result<CudaLease<'_>, Error> {
+        // ponytail: poisoning treated as fatal, as for `lock()` and the pools.
+        self.inner
+            .cuda
+            .as_ref()
+            .ok_or_else(missing_cuda_device)
+            .map(|cuda| cuda.lock().expect("tenet cuda context poisoned"))
     }
 
     /// Deterministic per-runtime stream position for
@@ -1218,18 +1274,21 @@ impl RuntimeBuilder {
             state.set_recoupling_threads(threads);
         }
         #[cfg(feature = "cuda")]
-        if let Some(device) = self.cuda_device {
+        let cuda = match self.cuda_device {
             // The backend libraries (cuTENSOR, cuSOLVER/cuBLAS) initialize
             // lazily inside tenferro, so without this the first user operation
             // on this Runtime pays a one-time ~0.2 s unrelated to its size.
             // Construction is where that cost belongs; a failure here is a
             // build failure, never a half-initialized Runtime.
-            let mut cuda = tenet_dense::CudaDenseContext::new(device)
-                .map_err(tenet_tensors::OperationError::Dense)?;
-            cuda.warm_up()
-                .map_err(tenet_tensors::OperationError::Dense)?;
-            state.cuda = Some(cuda);
-        }
+            Some(device) => {
+                let mut cuda = tenet_dense::CudaDenseContext::new(device)
+                    .map_err(tenet_tensors::OperationError::Dense)?;
+                cuda.warm_up()
+                    .map_err(tenet_tensors::OperationError::Dense)?;
+                Some(Mutex::new(cuda))
+            }
+            None => None,
+        };
         // One warm context/executor per core covers a thread-per-core driver;
         // fall back to a small count if the core count is unavailable.
         let max_idle = std::thread::available_parallelism()
@@ -1254,6 +1313,10 @@ impl RuntimeBuilder {
                 executor_mintable,
                 max_idle,
                 plan_cache: Mutex::new(plan_cache),
+                #[cfg(feature = "cuda")]
+                cuda,
+                #[cfg(feature = "cuda")]
+                cuda_device: self.cuda_device,
             }),
         })
     }
