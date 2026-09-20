@@ -565,6 +565,14 @@ fn unsupported_modes_are_rejected_before_any_device_work() {
     let mut expert_dst = CudaStorage::<f64>::upload(&ctx, &expert_destination).unwrap();
     let expert_src = CudaStorage::<f64>::upload(&ctx, &expert.source::<f64>()).unwrap();
 
+    let recoupling = expert_interleaved_recoupling_destination();
+    let recoupling_structure = recoupling.compile();
+    let recoupling_destination: Vec<f64> = (0..recoupling.dst_len())
+        .map(|i| 200.0 + i as f64)
+        .collect();
+    let mut recoupling_dst = CudaStorage::<f64>::upload(&ctx, &recoupling_destination).unwrap();
+    let recoupling_src = CudaStorage::<f64>::upload(&ctx, &recoupling.source::<f64>()).unwrap();
+
     reset_cuda_transfer_stats();
     let before = cuda_transfer_stats();
     let plans_before = ctx.plan_cache_stats().unwrap();
@@ -610,13 +618,6 @@ fn unsupported_modes_are_rejected_before_any_device_work() {
         "a rejected layout must leave the caller's destination untouched"
     );
 
-    let recoupling = expert_interleaved_recoupling_destination();
-    let recoupling_structure = recoupling.compile();
-    let recoupling_destination: Vec<f64> = (0..recoupling.dst_len())
-        .map(|i| 200.0 + i as f64)
-        .collect();
-    let mut recoupling_dst = CudaStorage::<f64>::upload(&ctx, &recoupling_destination).unwrap();
-    let recoupling_src = CudaStorage::<f64>::upload(&ctx, &recoupling.source::<f64>()).unwrap();
     let scatter = executor
         .replay(
             &mut ctx,
@@ -1008,7 +1009,8 @@ fn alternating_recoupling_structures_upload_their_matrices_exactly_once_each() {
         .collect();
 
     let before = cuda_transfer_stats();
-    for _ in 0..3 {
+    let mut after_first_round = before;
+    for round in 0..3 {
         for (index, (structure, fixture)) in prepared.iter().enumerate() {
             let (dst, src) = &mut buffers[index];
             executor
@@ -1023,16 +1025,24 @@ fn alternating_recoupling_structures_upload_their_matrices_exactly_once_each() {
                 )
                 .unwrap();
         }
+        if round == 0 {
+            after_first_round = cuda_transfer_stats();
+        }
     }
-    let delta = stats_delta(before, cuda_transfer_stats());
+    let cold = stats_delta(before, after_first_round);
+    let warm = stats_delta(after_first_round, cuda_transfer_stats());
 
     assert_eq!(executor.prepared_structures(), 2);
-    // One coefficient-and-matrix upload per structure, plus the two workspace
-    // buffers the first Multi structure allocates and the second reuses.
-    assert_eq!(
-        delta.h2d_calls, 4,
-        "one upload per structure plus one workspace pair: {delta:?}"
-    );
+    // Switching structures again uploads nothing at all: each structure's
+    // matrices are resident and the workspace is shared.
+    assert_eq!(warm.h2d_calls, 0, "a switch re-uploaded: {warm:?}");
+    assert_eq!(warm.device_allocs, 0, "a switch allocated: {warm:?}");
+    // The first round pays six: one coefficient-and-matrix vector per
+    // structure, the two workspace buffers the wider structure allocates and
+    // the narrower one reuses, the context's shared `1` that pack and scatter
+    // read as their coefficient, and the zero template the wider structure's
+    // inactive destination layout needs.
+    assert_eq!(cold.h2d_calls, 6, "cold uploads changed: {cold:?}");
     for (index, (_, fixture)) in prepared.iter().enumerate() {
         let (dst, _) = &buffers[index];
         assert_close(
