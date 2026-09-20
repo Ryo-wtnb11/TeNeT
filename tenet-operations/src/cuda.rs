@@ -36,8 +36,15 @@ impl<D: CudaScalar> std::fmt::Debug for CudaStorage<D> {
 }
 
 impl<D: CudaScalar> CudaStorage<D> {
+    /// Uploads borrowed host data. Costs the one host copy Tenferro's
+    /// owned-host-tensor upload requires; see [`CudaDenseStorage::upload`].
     pub fn upload(ctx: &CudaDenseContext, data: &[D]) -> Result<Self, OperationError> {
-        CudaDenseStorage::upload(ctx, data)
+        Self::upload_owned(ctx, data.to_vec())
+    }
+
+    /// Uploads owned host data by moving it into the uploaded host tensor.
+    pub fn upload_owned(ctx: &CudaDenseContext, data: Vec<D>) -> Result<Self, OperationError> {
+        CudaDenseStorage::upload_owned(ctx, data)
             .map(|storage| Self(storage, PhantomData))
             .map_err(OperationError::Dense)
     }
