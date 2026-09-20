@@ -185,8 +185,10 @@ impl Default for CudaTreeTransformExecutor {
 }
 
 impl CudaTreeTransformExecutor {
-    /// An executor whose prepared-structure cache is bounded by
-    /// [`DEFAULT_STRUCTURE_CACHE_ENTRIES`] entries.
+    /// An executor whose prepared-structure cache keeps at most 256 structures
+    /// — the host transform cache's own entry bound, so a working set that is
+    /// warm on the host stays warm here. Use [`Self::with_structure_entries`]
+    /// for another bound.
     pub fn new(coefficient_budget_bytes: usize, plan_cache_budget_bytes: usize) -> Self {
         Self::with_structure_entries(
             coefficient_budget_bytes,
