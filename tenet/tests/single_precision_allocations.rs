@@ -24,7 +24,7 @@ use std::hint::black_box;
 use std::sync::Arc;
 
 use tenet::core::{U1FusionRule, U1Irrep};
-use tenet::prelude::{Complex32, Complex64, GradedSpace, Runtime, TensorMap};
+use tenet::prelude::{Complex32, Complex64, GradedSpace, Runtime, TensorMap, Truncation};
 use tenet_matrixalgebra::FactorScalar;
 
 struct CountingAllocator;
@@ -204,5 +204,94 @@ fn single_precision_allocates_as_often_as_double_and_half_the_payload_bytes() {
         c64_bytes - c32_bytes,
         3 * payload * (size_of::<Complex64>() - size_of::<Complex32>()),
         "Complex32 must allocate exactly half the payload bytes of Complex64"
+    );
+}
+
+/// Builds a tensor and factorizes it, at one payload dtype (#1324).
+///
+/// The same public sequence at every dtype: a QR, an SVD and a truncated SVD.
+/// The spectra are `f64` at every payload dtype by contract, so only the
+/// *factor payloads* narrow — which is exactly what the byte assertion counts.
+macro_rules! measure_factorizations {
+    ($runtime:expr, $dtype:ty, $space:expr) => {{
+        let space = $space;
+        let warm: TensorMap<U1FusionRule, $dtype> =
+            TensorMap::rand_with_seed($runtime, [space, space], [space], 7_501).unwrap();
+        black_box(warm.qr_compact().unwrap());
+        black_box(warm.svd_compact().unwrap());
+        black_box(warm.svd_trunc(&Truncation::rank(4)).unwrap());
+
+        measured(|| {
+            let tensor: TensorMap<U1FusionRule, $dtype> =
+                TensorMap::rand_with_seed($runtime, [space, space], [space], 7_502).unwrap();
+            let (q, r) = tensor.qr_compact().unwrap();
+            let (u, s, vh) = tensor.svd_compact().unwrap();
+            let truncated = tensor.svd_trunc(&Truncation::rank(4)).unwrap();
+            let produced = tensor.data().len()
+                + q.data().len()
+                + r.data().len()
+                + u.data().len()
+                + s.data().len()
+                + vh.data().len()
+                + truncated.u.data().len()
+                + truncated.s.data().len()
+                + truncated.vh.data().len();
+            black_box((q, r, u, s, vh, truncated));
+            produced
+        })
+    }};
+}
+
+#[test]
+fn single_precision_factorizations_allocate_as_often_as_double() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let space = u1_space();
+
+    let (f64_payload, f64_calls, f64_bytes) = measure_factorizations!(&runtime, f64, &space);
+    let (f32_payload, f32_calls, f32_bytes) = measure_factorizations!(&runtime, f32, &space);
+    let (c64_payload, c64_calls, c64_bytes) = measure_factorizations!(&runtime, Complex64, &space);
+    let (c32_payload, c32_calls, c32_bytes) = measure_factorizations!(&runtime, Complex32, &space);
+
+    eprintln!(
+        "factorizations: f64 {f64_calls} calls/{f64_bytes} B ({f64_payload} entries), \
+         f32 {f32_calls}/{f32_bytes} ({f32_payload}), \
+         c64 {c64_calls}/{c64_bytes} ({c64_payload}), c32 {c32_calls}/{c32_bytes} ({c32_payload})"
+    );
+
+    assert_eq!(
+        f32_payload, f64_payload,
+        "the twins must produce factors of the same shape"
+    );
+    assert_eq!(c32_payload, c64_payload, "Complex32 against Complex64");
+    // Not equality: the four dtypes already differ here among themselves at
+    // `origin/main` — `f64` and `Complex64` do not agree either, because
+    // `FactorScalar::compute_f64_spectrum` is overridden for the
+    // double-precision pair and allocates a fresh spectrum vector where the
+    // single-precision pair reuses the caller's scratch. The contract that is
+    // structural, and the one a regression would break, is that narrowing the
+    // payload never makes the factorization allocate *more*.
+    assert!(
+        f32_calls <= f64_calls,
+        "f32 made {f32_calls} allocation calls against f64's {f64_calls}"
+    );
+    assert!(
+        c32_calls <= c64_calls,
+        "Complex32 made {c32_calls} allocation calls against Complex64's {c64_calls}"
+    );
+
+    // Every entry of every factor the sequence returns is half as wide; the
+    // scratch the factorization allocates on top is not necessarily payload
+    // typed, so this is the lower bound the returned factors alone guarantee.
+    assert!(
+        f64_bytes - f32_bytes >= f64_payload * (size_of::<f64>() - size_of::<f32>()),
+        "f32 saved {} bytes, less than the {} its factors alone are narrower by",
+        f64_bytes - f32_bytes,
+        f64_payload * (size_of::<f64>() - size_of::<f32>())
+    );
+    assert!(
+        c64_bytes - c32_bytes >= c64_payload * (size_of::<Complex64>() - size_of::<Complex32>()),
+        "Complex32 saved {} bytes, less than the {} its factors alone are narrower by",
+        c64_bytes - c32_bytes,
+        c64_payload * (size_of::<Complex64>() - size_of::<Complex32>())
     );
 }

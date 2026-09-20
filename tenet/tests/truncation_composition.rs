@@ -524,16 +524,20 @@ fn signed_cross_sector_eigenvalue_ties_are_broken_as_host_breaks_them() {
     let runtime = runtime();
     let identity: TensorMap<_, f64> = TensorMap::id(&runtime, [&leg]).unwrap();
     // diag(+2, -2) in every sector: three sectors x two magnitudes, all equal.
-    let source = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
-        if indices[0] != indices[1] {
-            0.0
-        } else if indices[0] == 0 {
-            2.0
-        } else {
-            -2.0
-        }
-    })
-    .unwrap();
+    // Annotated: the payload dtype is taken solely from float literals, and
+    // `f32` reaching `FactorizationScalar` (#1324) means `eigh_full` no longer
+    // pins `{float}` to `f64` before `value.abs()` below resolves.
+    let source: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+            if indices[0] != indices[1] {
+                0.0
+            } else if indices[0] == 0 {
+                2.0
+            } else {
+                -2.0
+            }
+        })
+        .unwrap();
     assert_eq!(identity.block_count(), source.block_count());
     let magnitudes: Vec<f64> = source
         .eigh_full()

@@ -367,25 +367,10 @@ pub use serialization::{DecodeError, DecodeLimits, EncodeError, TypedPersistence
 /// Each rejection below is paired with the same body at `f64`, which is what
 /// shows the `compile_fail` is the payload dtype and not an unrelated mistake.
 ///
-/// A factorization:
-///
-/// ```compile_fail
-/// use tenet::core::U1FusionRule;
-/// use tenet::typed::TensorMap;
-///
-/// fn no_single_precision_svd(tensor: &TensorMap<U1FusionRule, f32>) {
-///     let _ = tensor.svd_compact();
-/// }
-/// ```
-///
-/// ```
-/// use tenet::core::U1FusionRule;
-/// use tenet::typed::TensorMap;
-///
-/// fn double_precision_svd(tensor: &TensorMap<U1FusionRule, f64>) {
-///     let _ = tensor.svd_compact();
-/// }
-/// ```
+/// Factorizations are *not* in this list: single precision reaches
+/// [`FactorizationScalar`] under
+/// <https://github.com/Ryo-wtnb11/TeNeT/issues/1324>, so `svd_compact` and its
+/// siblings compile at `f32` and [`num_complex::Complex32`].
 ///
 /// A matrix function:
 ///
@@ -406,6 +391,47 @@ pub use serialization::{DecodeError, DecodeLimits, EncodeError, TypedPersistence
 ///
 /// fn double_precision_exp(tensor: &TensorMap<U1FusionRule, Complex64>) {
 ///     let _ = tensor.exp();
+/// }
+/// ```
+///
+/// An inverse, which is the same family:
+///
+/// ```compile_fail
+/// use tenet::core::U1FusionRule;
+/// use tenet::typed::TensorMap;
+///
+/// fn no_single_precision_inv(tensor: &TensorMap<U1FusionRule, f32>) {
+///     let _ = tensor.inv();
+/// }
+/// ```
+///
+/// ```
+/// use tenet::core::U1FusionRule;
+/// use tenet::typed::TensorMap;
+///
+/// fn double_precision_inv(tensor: &TensorMap<U1FusionRule, f64>) {
+///     let _ = tensor.inv();
+/// }
+/// ```
+///
+/// The general (non-Hermitian) eigendecomposition, which would otherwise widen
+/// a single-precision payload to `Complex64` on the Checked-Generic path:
+///
+/// ```compile_fail
+/// use tenet::core::U1FusionRule;
+/// use tenet::typed::TensorMap;
+///
+/// fn no_single_precision_eig(tensor: &TensorMap<U1FusionRule, f32>) {
+///     let _ = tensor.eig_full();
+/// }
+/// ```
+///
+/// ```
+/// use tenet::core::U1FusionRule;
+/// use tenet::typed::TensorMap;
+///
+/// fn double_precision_eig(tensor: &TensorMap<U1FusionRule, f64>) {
+///     let _ = tensor.eig_full();
 /// }
 /// ```
 ///
@@ -465,11 +491,58 @@ impl TensorScalar for num_complex::Complex32 {}
 /// [`GradedSpace::find_truncated`] carries no payload and stays on
 /// [`TensorScalar`].
 ///
-/// Sealed through [`TensorScalar`]: implemented for `f64` and
-/// [`num_complex::Complex64`] only. A single-precision payload admitted to
-/// [`TensorScalar`] under
-/// <https://github.com/Ryo-wtnb11/TeNeT/issues/1065> does *not* reach this
-/// family until its factorization tolerances are reviewed separately.
+/// Sealed through [`TensorScalar`]: implemented for `f64`,
+/// [`num_complex::Complex64`], `f32` and [`num_complex::Complex32`]. Matrix
+/// functions, `inv`/`pinv`/`solve` and the general eigendecomposition stay on
+/// [`AdvancedLinalgScalar`], which the single-precision payloads do not reach.
+///
+/// # Single-precision tolerances
+///
+/// Every factorization here is backward stable in the payload's own working
+/// precision, so a result computed at `f32`/[`num_complex::Complex32`] agrees
+/// with the `f64`/[`num_complex::Complex64`] factorization of the *same*
+/// (exactly widened) input only to `eps(real(D))`, not to `f64::EPSILON`:
+/// `f32::EPSILON` is `1.19e-7`, about `9e8` times coarser. Concretely,
+///
+/// * every `tol` this crate takes is the caller's and has no default
+///   ([`TensorMap::is_posdef`], [`TensorMap::is_hermitian`],
+///   [`TensorMap::is_isometric`]). A `tol` chosen for `f64` — `1e-12` in most
+///   of the doctests here — rejects a perfectly good single-precision result.
+///   Scale it with the payload: MatrixAlgebraKit's `defaulttol`
+///   (`src/common/defaults.jl`) is `eps(real(T))^(2/3)`, which is `3.7e-11` at
+///   `f64` and `2.4e-5` at `f32`; TensorKit's `isapprox` default is
+///   `sqrt(eps(real(T)))`, `1.5e-8` and `3.5e-4`;
+/// * the truncation policies that take tolerances
+///   ([`Truncation::relative_cutoff`], [`Truncation::relative_error`]) are the same
+///   story: a cutoff below the payload's own noise floor keeps noise. The
+///   spectra themselves, the truncation `error` and every norm this crate
+///   returns are `f64` at *every* payload dtype (they are widened, not
+///   recomputed), so the `f64` type of a tolerance says nothing about the
+///   precision of the values it is compared against;
+/// * **the kept/discarded sets near a tie may legitimately differ from the
+///   double-precision run of the same physics.** The singular values and
+///   Hermitian eigenvalues of a single-precision block carry a relative error
+///   of order `eps(f32)` times the condition number, so two values separated
+///   by less than that are not ordered reliably, and a magnitude-driven
+///   policy ([`Truncation::rank`], [`Truncation::relative_cutoff`],
+///   [`Truncation::relative_error`]) can keep a different one of them. The
+///   *weight* discarded still matches the double-precision run to that same
+///   accuracy — it is the identity of the kept states, not the quality of the
+///   approximation, that moves. Separate the spectrum by more than
+///   `eps(real(D)) * cond` if the identity of the kept states has to be
+///   reproducible across dtypes.
+///
+/// # Source compatibility
+///
+/// The `E0689` note on [`TensorScalar`] applies here too, one level further
+/// in: a payload dtype taken *solely* from float literals used to be pinned to
+/// `f64` by calling a factorization on it, because `f64` and
+/// [`num_complex::Complex64`] were the only implementors. With four, inference
+/// waits for the end-of-function fallback, which is too late for a method call
+/// on the result — `t.eigh_full()?.0.diagview()?[0].values[0].abs()` on an
+/// un-annotated `from_block_fn` tensor now needs the payload dtype written
+/// down. The same holds for [`GradedSpace::find_truncated`], whose spectrum
+/// type is `SpectrumMagnitude` and now has four implementors.
 ///
 /// A caller generic over the base marker cannot reach a factorization:
 ///
@@ -532,6 +605,8 @@ pub trait FactorizationScalar: TensorScalar {}
 
 impl FactorizationScalar for f64 {}
 impl FactorizationScalar for num_complex::Complex64 {}
+impl FactorizationScalar for f32 {}
+impl FactorizationScalar for num_complex::Complex32 {}
 
 /// Scalar payloads admitted to the advanced linear-algebra family.
 ///
@@ -17896,6 +17971,14 @@ where
     /// Strict, like TensorKit's Cholesky-based test: a positive *semi*definite
     /// spectrum — an eigenvalue at zero — is `false`. With `tol = 0.0` this is
     /// exact strict positivity up to floating point.
+    ///
+    /// Scale `tol` to the payload dtype. The eigenvalues are computed in the
+    /// payload's working precision and only then widened to `f64`, so at
+    /// `f32`/`Complex32` a `tol` of `1e-12` is far below the noise of the
+    /// decomposition and this predicate decides on rounding error; see
+    /// [`FactorizationScalar`] for the scaling the references use. With
+    /// `tol = 0.0` a matrix whose smallest eigenvalue sits within
+    /// `eps(real(D))` of zero can answer either way at either precision.
     ///
     /// # Errors
     ///

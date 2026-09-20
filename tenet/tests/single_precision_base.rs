@@ -1,18 +1,8 @@
 //! Base-family oracle for the single-precision payloads (#1315).
 //!
-//! The oracle for every check here is the **`f64`/`Complex64` result of the
-//! same operation on the widened input**. Both tensors are filled through
-//! `from_block_fn` from one 24-bit pseudo-random stream, so the double tensor
-//! holds exactly `f64::from` of every single-precision entry and the widening
-//! contributes no error of its own. The double path is a different execution
-//! lane with a different dense kernel, and it is the path the existing
-//! TensorKit/QSpace conformance suites already validate, so it is independent
-//! of the code under test.
-//!
-//! Tolerance is `K * sqrt(n) * eps(real(D)) * max(1, max|expected|)` with
-//! `K = 32` and `n` the number of payload entries the reduction or kernel sums
-//! over — the standard bound for a naive length-`n` floating sum, with `K`
-//! covering the recoupling coefficients applied on top of it.
+//! Oracle, tolerance and fixtures come from `single_precision_oracle`, the
+//! module this suite shares with the factorization suite (#1324); its rationale
+//! is documented there.
 //!
 //! Both dtypes are driven from one `Runtime`. That is deliberate: the
 //! single-precision lanes, their contract workspaces and their coefficient
@@ -20,181 +10,16 @@
 //! `f32` tensor must never read the `f64` lane's converted recoupling matrix
 //! for the same structure identity.
 
-use std::sync::Arc;
+mod single_precision_oracle;
 
 use num_complex::{Complex32, Complex64};
-use tenet::core::{
-    product_sector, FermionParityFusionRule, ProductFusionRule, ProductFusionRuleExt,
-    SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep, Z2Irrep,
+use tenet::core::{U1FusionRule, U1Irrep};
+use tenet::prelude::{LegSelection, SectorSpectrum, TensorMap};
+
+use single_precision_oracle::{
+    assert_payloads_agree, assert_scalars_agree, draw_parts, fermion_su2_leg, one as wide_of_one,
+    runtime, u1_leg, Parts,
 };
-use tenet::prelude::{GradedSpace, LegSelection, Runtime, SectorSpectrum, TensorMap};
-
-/// `K` of the `K * sqrt(n) * eps` bound in the module docs.
-const K: f64 = 32.0;
-
-fn runtime() -> Runtime {
-    Runtime::builder().dense_threads(1).build().unwrap()
-}
-
-/// Payload values that a single-precision tensor and its double-precision twin
-/// can both hold exactly.
-///
-/// `parts` takes `f32` components on purpose: `f64::from(re)` is exact, so the
-/// twin is the widening of the single-precision tensor entry by entry, with no
-/// rounding to account for before the operation under test runs.
-trait Parts: Copy {
-    fn parts(re: f32, im: f32) -> Self;
-    fn wide(self) -> Complex64;
-}
-
-impl Parts for f32 {
-    fn parts(re: f32, _im: f32) -> Self {
-        re
-    }
-    fn wide(self) -> Complex64 {
-        Complex64::new(f64::from(self), 0.0)
-    }
-}
-
-impl Parts for f64 {
-    fn parts(re: f32, _im: f32) -> Self {
-        f64::from(re)
-    }
-    fn wide(self) -> Complex64 {
-        Complex64::new(self, 0.0)
-    }
-}
-
-impl Parts for Complex32 {
-    fn parts(re: f32, im: f32) -> Self {
-        Self::new(re, im)
-    }
-    fn wide(self) -> Complex64 {
-        Complex64::new(f64::from(self.re), f64::from(self.im))
-    }
-}
-
-impl Parts for Complex64 {
-    fn parts(re: f32, im: f32) -> Self {
-        Self::new(f64::from(re), f64::from(im))
-    }
-    fn wide(self) -> Complex64 {
-        self
-    }
-}
-
-/// One 24-bit draw in `[-1, 1)`: exactly representable in `f32`, so the two
-/// twins receive the same number and not two roundings of one.
-fn draw(state: &mut u64) -> f32 {
-    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
-    let mut value = *state;
-    value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    value ^= value >> 31;
-    ((value >> 40) as f32) / ((1_u32 << 23) as f32) - 1.0
-}
-
-fn draw_parts<D: Parts>(state: &mut u64) -> D {
-    let re = draw(state);
-    let im = draw(state);
-    D::parts(re, im)
-}
-
-/// Builds the same tensor at two precisions on one runtime.
-///
-/// A macro rather than a function: the payload dtype is the only thing that
-/// varies, and the alternative is repeating the eight dispatch bounds of
-/// `from_block_fn` for both instantiations.
-macro_rules! twin {
-    ($rt:expr, $narrow:ty, $wide:ty, $codomain:expr, $domain:expr, $seed:expr) => {{
-        let mut state = $seed;
-        let narrow: TensorMap<_, $narrow> =
-            TensorMap::from_block_fn($rt, $codomain, $domain, |_, _| draw_parts(&mut state))
-                .unwrap();
-        let mut state = $seed;
-        let wide: TensorMap<_, $wide> =
-            TensorMap::from_block_fn($rt, $codomain, $domain, |_, _| draw_parts(&mut state))
-                .unwrap();
-        (narrow, wide)
-    }};
-}
-
-/// Asserts the two payloads agree within the module's tolerance, and that the
-/// twins really did describe the same tensor (equal length, equal blocks).
-fn assert_payloads_agree<D: Parts, W: Parts>(what: &str, narrow: &[D], wide: &[W], terms: usize) {
-    assert_eq!(
-        narrow.len(),
-        wide.len(),
-        "{what}: the twins hold different payload lengths"
-    );
-    let scale = wide
-        .iter()
-        .map(|&value| value.wide().norm())
-        .fold(0.0f64, f64::max)
-        .max(1.0);
-    let tolerance = K * (terms as f64).sqrt() * f64::from(f32::EPSILON) * scale;
-    for (index, (&got, &expected)) in narrow.iter().zip(wide).enumerate() {
-        let error = (got.wide() - expected.wide()).norm();
-        assert!(
-            error <= tolerance,
-            "{what}: entry {index} is {got:?} against the widened oracle {expected:?} \
-             (error {error:e} > tolerance {tolerance:e})",
-            got = got.wide(),
-            expected = expected.wide(),
-        );
-    }
-}
-
-fn assert_scalars_agree(what: &str, narrow: Complex64, wide: Complex64, terms: usize) {
-    let tolerance = K * (terms as f64).sqrt() * f64::from(f32::EPSILON) * wide.norm().max(1.0);
-    let error = (narrow - wide).norm();
-    assert!(
-        error <= tolerance,
-        "{what}: {narrow} against the widened oracle {wide} \
-         (error {error:e} > tolerance {tolerance:e})"
-    );
-}
-
-/// U(1): abelian, several blocks, nontrivial degeneracies.
-fn u1_leg() -> GradedSpace<U1FusionRule> {
-    GradedSpace::try_new_with_arc(
-        Arc::new(U1FusionRule),
-        [
-            (U1Irrep::new(-1), 2),
-            (U1Irrep::new(0), 3),
-            (U1Irrep::new(1), 2),
-        ],
-    )
-    .unwrap()
-}
-
-type FermionU1Rule = ProductFusionRule<FermionParityFusionRule, U1FusionRule>;
-type FermionSu2Rule = ProductFusionRule<FermionU1Rule, SU2FusionRule>;
-
-/// fZ2 x U(1) x SU(2): fermionic signs, nontrivial braiding and non-abelian
-/// recoupling with `dim(c) != 1` in one provider.
-fn fermion_su2_leg() -> GradedSpace<FermionSu2Rule> {
-    let provider = Arc::new(
-        FermionParityFusionRule
-            .product(U1FusionRule)
-            .product(SU2FusionRule),
-    );
-    let label = |parity, charge, twice_spin| {
-        product_sector(
-            product_sector(parity, U1Irrep::new(charge)),
-            SU2Irrep::from_twice_spin(twice_spin),
-        )
-    };
-    GradedSpace::try_new_with_arc(
-        provider,
-        [
-            (label(Z2Irrep::EVEN, 0, 0), 2),
-            (label(Z2Irrep::ODD, 1, 1), 2),
-            (label(Z2Irrep::EVEN, 2, 2), 1),
-        ],
-    )
-    .unwrap()
-}
 
 /// Everything below is generated once per admitted single-precision dtype.
 macro_rules! base_suite {
@@ -544,11 +369,6 @@ fn diagonal_spectra<D: Parts>(mut state: u64) -> [SectorSpectrum<U1Irrep, D>; 3]
     })
 }
 
-/// Multiplicative unit of a payload dtype, for the `beta` of `add`.
-fn wide_of_one<D: Parts>() -> D {
-    D::parts(1.0, 0.0)
-}
-
 base_suite!(f32_payload, f32, f64);
 base_suite!(complex32_payload, Complex32, Complex64);
 
@@ -560,7 +380,10 @@ base_suite!(complex32_payload, Complex32, Complex64);
 /// cannot reach.
 #[cfg(feature = "racah-generated")]
 mod checked_generic {
+    use std::sync::Arc;
+
     use super::*;
+    use tenet::prelude::GradedSpace;
     use tenet::typed::SUNFusionRule;
 
     macro_rules! checked_generic_suite {
