@@ -94,6 +94,13 @@ pub enum OperationError {
     UnsupportedTensorContractScope {
         message: &'static str,
     },
+    /// A tree transform the device executor cannot replay: a recoupling
+    /// (Multi) block, a destination mode outside its capability, or a layout
+    /// the device region primitive cannot express. The host executor replays
+    /// all of them, so this is a placement boundary, never a compile defect.
+    UnsupportedDeviceTreeTransform {
+        message: &'static str,
+    },
     MissingBlockKey {
         key: Box<BlockKey>,
     },
@@ -222,6 +229,9 @@ impl fmt::Display for OperationError {
             }
             Self::UnsupportedTensorContractScope { message } => {
                 write!(f, "unsupported tensor contraction scope: {message}")
+            }
+            Self::UnsupportedDeviceTreeTransform { message } => {
+                write!(f, "unsupported device tree transform: {message}")
             }
             Self::MissingBlockKey { key } => {
                 write!(f, "missing matching block for key {key:?}")

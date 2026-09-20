@@ -73,6 +73,15 @@ pub(crate) struct ExecutorSnapshot {
     pub(crate) supports_strided: bool,
     pub(crate) supports_matrix: bool,
     pub(crate) scalar: TypeId,
+    /// How many workers need their own host fused-index scratch row.
+    ///
+    /// Executor-declared, because it is a fact about the executor rather than
+    /// about the task: host replay sizes one row per worker, while a device
+    /// executor reads the structure's baked fused layout and declares `0`. A
+    /// zero here means the workspace owes no fused-index buffer at all, which
+    /// is what keeps Stage C from demanding a Host allocation of an executor
+    /// that never touches host memory.
+    pub(crate) fused_index_workers: usize,
 }
 
 /// Stage-A-issued checked arithmetic result. Private fields prevent later
@@ -185,7 +194,6 @@ pub(crate) fn validate_stage_a<D: 'static, C: Copy>(
     dst: StorageSnapshot,
     src: StorageSnapshot,
     executor: ExecutorSnapshot,
-    workers: usize,
 ) -> Result<AdmissionRequirements, TreeTransformAdmissionError> {
     // Stage A order: completed structure and checked arithmetic, exact lengths,
     // then executor-local placement, context, and finite capabilities.
@@ -199,8 +207,8 @@ pub(crate) fn validate_stage_a<D: 'static, C: Copy>(
     ] {
         Layout::array::<D>(len).map_err(|_| TreeTransformAdmissionError::ArithmeticOverflow)?;
     }
-    let fused_index_len = workers
-        .max(1)
+    let fused_index_len = executor
+        .fused_index_workers
         .checked_mul(requirements.fused_index_len_per_worker)
         .ok_or(TreeTransformAdmissionError::ArithmeticOverflow)?;
     Layout::array::<usize>(fused_index_len)
@@ -290,7 +298,8 @@ pub(crate) fn validate_stage_c<D: 'static, C: Copy>(
             return Err(TreeTransformAdmissionError::WorkspaceCapacity(name));
         }
     }
-    if workspace.fused_index_placement != Placement::Host {
+    // Only an executor that asked for fused-index rows owes a host buffer.
+    if admission.fused_index_len != 0 && workspace.fused_index_placement != Placement::Host {
         return Err(TreeTransformAdmissionError::Placement("fused indices"));
     }
     if workspace.fused_index_capacity < admission.fused_index_len {
@@ -486,6 +495,7 @@ mod tests {
                 supports_strided: true,
                 supports_matrix: true,
                 scalar: TypeId::of::<f64>(),
+                fused_index_workers: workers.max(1),
             };
             let mut dst = self.storage_snapshot(
                 self.destination.len(),
@@ -508,7 +518,7 @@ mod tests {
                 _ => {}
             }
             let admission =
-                validate_stage_a::<f64, _>(task, structure, structure, dst, src, executor, workers)
+                validate_stage_a::<f64, _>(task, structure, structure, dst, src, executor)
                     .map_err(MockError::Admission)?;
 
             // Stage B invalidates readiness before any allocation/conversion.
@@ -833,6 +843,88 @@ mod tests {
     }
 
     #[test]
+    fn a_fused_index_buffer_is_owed_only_by_an_executor_that_asked_for_rows() {
+        // What: the fused-index scratch is an executor-declared fact. An
+        // executor that declares no workers (a device executor reads the
+        // structure's baked fused layout instead) owes no Host buffer, while
+        // one that declares workers still must provide Host rows.
+        let (structure, transform) = scalar_fixture();
+        let task = transform.task_view().unwrap();
+        let context = ContextIdentity(11);
+        let device = Placement::Cuda(0);
+        let executor = |placement, workers| ExecutorSnapshot {
+            placement,
+            context,
+            supports_strided: true,
+            supports_matrix: true,
+            scalar: TypeId::of::<f64>(),
+            fused_index_workers: workers,
+        };
+        let storage = |placement, allocation, capacity: usize| StorageSnapshot {
+            active_len: capacity,
+            usable_capacity: capacity,
+            placement,
+            context,
+            region: if capacity == 0 {
+                StorageRegion::Empty
+            } else {
+                region(1, allocation, 0, capacity * size_of::<f64>())
+            },
+        };
+        let workspace = |placement, capacity| WorkspaceSnapshot {
+            packed_source: storage(placement, 3, 0),
+            packed_destination: storage(placement, 4, 0),
+            converted_coefficients: storage(placement, 5, 0),
+            fused_index_capacity: capacity,
+            fused_index_placement: placement,
+            coefficient_readiness: None,
+        };
+
+        // Zero workers: no rows required, and the workspace may report the
+        // executor's own placement for a buffer that does not exist.
+        let device_executor = executor(device, 0);
+        let dst = storage(device, 1, 4);
+        let src = storage(device, 2, 4);
+        let admission =
+            validate_stage_a::<f64, _>(task, &structure, &structure, dst, src, device_executor)
+                .unwrap();
+        assert_eq!(admission.fused_index_len(), 0);
+        validate_stage_c::<f64, _>(
+            task,
+            dst,
+            src,
+            &workspace(device, 0),
+            device_executor,
+            &admission,
+        )
+        .unwrap();
+
+        // One worker: rows are required and they must live on the host.
+        let host_executor = executor(Placement::Host, 1);
+        let dst = storage(Placement::Host, 1, 4);
+        let src = storage(Placement::Host, 2, 4);
+        let admission =
+            validate_stage_a::<f64, _>(task, &structure, &structure, dst, src, host_executor)
+                .unwrap();
+        assert_eq!(admission.fused_index_len(), 1);
+        validate_stage_c::<f64, _>(
+            task,
+            dst,
+            src,
+            &workspace(Placement::Host, 1),
+            host_executor,
+            &admission,
+        )
+        .unwrap();
+        let mut elsewhere = workspace(Placement::Host, 1);
+        elsewhere.fused_index_placement = device;
+        assert_eq!(
+            validate_stage_c::<f64, _>(task, dst, src, &elsewhere, host_executor, &admission),
+            Err(TreeTransformAdmissionError::Placement("fused indices"))
+        );
+    }
+
+    #[test]
     fn stage_a_and_c_validate_completed_multi_task() {
         let structure =
             Arc::new(BlockStructure::packed_column_major(1, [vec![2], vec![2]]).unwrap());
@@ -854,6 +946,7 @@ mod tests {
             supports_strided: true,
             supports_matrix: true,
             scalar: TypeId::of::<f64>(),
+            fused_index_workers: 3,
         };
         let storage = |allocation, capacity| StorageSnapshot {
             active_len: capacity,
@@ -865,8 +958,7 @@ mod tests {
         let dst = storage(1, 4);
         let src = storage(2, 4);
         let admission =
-            validate_stage_a::<f64, _>(task, &structure, &structure, dst, src, executor, 3)
-                .unwrap();
+            validate_stage_a::<f64, _>(task, &structure, &structure, dst, src, executor).unwrap();
         assert_eq!(admission.fused_index_len(), 3);
         let structure_and_layout = task.admission_identity();
         let workspace = WorkspaceSnapshot {

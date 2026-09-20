@@ -3,6 +3,8 @@
 //! tenet workspace that touches tenferro GPU types; upper layers see opaque
 //! storage handles and `DenseError`.
 
+use std::num::NonZeroUsize;
+
 use num_complex::Complex64;
 use tenferro_gpu::cuda::{download_tensor, upload_tensor, CudaBackend, CudaDeviceId};
 use tenferro_linalg::{QrGauge, QrOptions, TensorReadLinalgExt};
@@ -127,6 +129,19 @@ static DEVICE_ALLOCS: AtomicU64 = AtomicU64::new(0);
 static GEMM_CALLS: AtomicU64 = AtomicU64::new(0);
 static SOLVER_CALLS: AtomicU64 = AtomicU64::new(0);
 static COPY_CALLS: AtomicU64 = AtomicU64::new(0);
+
+/// A snapshot of the backend's cuTENSOR contraction plan cache.
+///
+/// Mirrors Tenferro's own cache statistics; it exists so TeNeT callers never
+/// name a tenferro type. Observability only.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct CudaPlanCacheStats {
+    pub entries: usize,
+    pub retained_bytes: usize,
+    pub hits: u64,
+    pub misses: u64,
+    pub evictions: u64,
+}
 
 /// A snapshot of the process-wide CUDA boundary observation counters.
 ///
@@ -273,9 +288,15 @@ struct ScalarOperands {
 pub struct CudaDenseContext {
     backend: CudaBackend,
     device: usize,
+    identity: u64,
     real_operands: ScalarOperands,
     complex_operands: ScalarOperands,
 }
+
+/// Process-wide context counter. A monotonic ticket rather than the context's
+/// address, so a cache keyed by context identity can never mistake a freshly
+/// allocated context for a dropped one that happened to reuse its address.
+static NEXT_CONTEXT_IDENTITY: AtomicU64 = AtomicU64::new(1);
 
 impl CudaDenseContext {
     pub fn new(device: usize) -> Result<Self, DenseError> {
@@ -286,9 +307,19 @@ impl CudaDenseContext {
         Ok(Self {
             backend,
             device,
+            identity: NEXT_CONTEXT_IDENTITY.fetch_add(1, Ordering::Relaxed),
             real_operands: ScalarOperands::default(),
             complex_operands: ScalarOperands::default(),
         })
+    }
+
+    /// Process-unique identity of this context, never reused while it lives.
+    ///
+    /// Device state cached against a context — an uploaded coefficient vector,
+    /// a prepared plan — belongs to exactly one context, and this is the key
+    /// that says so.
+    pub fn identity(&self) -> u64 {
+        self.identity
     }
 
     fn operands<D: CudaScalar>(&self) -> &ScalarOperands {
@@ -395,6 +426,57 @@ impl CudaDenseContext {
 
     pub fn device(&self) -> usize {
         self.device
+    }
+
+    /// cuTENSOR contraction plan cache observation for this context's backend.
+    ///
+    /// Every region move and every GEMM submitted here builds or reuses one
+    /// cuTENSOR plan per distinct operand signature, so `evictions` growing
+    /// during a replay is the observable form of plan-cache thrash.
+    pub fn plan_cache_stats(&self) -> Result<CudaPlanCacheStats, DenseError> {
+        let stats = self
+            .backend
+            .cutensor_plan_cache_stats()
+            .map_err(|err| cuda_error("cuda_plan_cache", err))?;
+        Ok(CudaPlanCacheStats {
+            entries: stats.entries,
+            retained_bytes: stats.retained_bytes,
+            hits: stats.hits,
+            misses: stats.misses,
+            evictions: stats.evictions,
+        })
+    }
+
+    /// The cuTENSOR contraction plan entry bound (Tenferro's default is 64).
+    pub fn plan_cache_max_entries(&self) -> Result<usize, DenseError> {
+        self.backend
+            .cutensor_plan_cache_max_entries()
+            .map(NonZeroUsize::get)
+            .map_err(|err| cuda_error("cuda_plan_cache", err))
+    }
+
+    /// Raises the cuTENSOR contraction plan entry bound to `entries`.
+    ///
+    /// Monotonic by construction: a request below the current bound is
+    /// ignored rather than shrinking a cache another caller sized. A caller
+    /// that knows how many distinct operand signatures it is about to submit
+    /// — a compiled transform structure knows exactly — uses this so a replay
+    /// larger than the default bound does not evict the plan it will need
+    /// again on the next block.
+    pub fn raise_plan_cache_max_entries(&self, entries: usize) -> Result<(), DenseError> {
+        let Some(entries) = NonZeroUsize::new(entries) else {
+            return Ok(());
+        };
+        let current = self
+            .backend
+            .cutensor_plan_cache_max_entries()
+            .map_err(|err| cuda_error("cuda_plan_cache", err))?;
+        if entries <= current {
+            return Ok(());
+        }
+        self.backend
+            .set_cutensor_plan_cache_max_entries(entries)
+            .map_err(|err| cuda_error("cuda_plan_cache", err))
     }
 
     /// Runs the smallest real operation against each backend library this
@@ -1324,6 +1406,57 @@ fn expect_dtype<D: CudaScalar>(
         return Err(dtype_mismatch::<D>(op, &tensor));
     }
     Ok(CudaDenseStorage::from_tensor(tensor, device))
+}
+
+/// Writes zeros over the leading `len` elements of `dst`, copying them from
+/// this context's zero template.
+///
+/// This is the reset a caller that retains a device destination pays before
+/// overwriting it: Tenferro 0.5 cannot fill an existing device buffer
+/// (tenferro-rs#1834), so a zero *source* has to exist somewhere, and the
+/// context owns the only one — it is the same template [`cuda_region_zero`]
+/// reads, grown monotonically to the longest prefix any caller reserves.
+///
+/// Why `copy_read_into` rather than the region primitive: both move `len`
+/// elements, but this is `cutensorPermute` — a pure copy with its own plan
+/// cache — while a region fill is a contraction against the `1` operand, which
+/// multiplies every element and consumes an entry of the contraction plan LRU
+/// that the caller's GEMMs share. A packed prefix needs neither, and the
+/// template prefix is exactly the compact offset-0 source `copy_read_into`
+/// requires.
+///
+/// Transfer contract: it uploads (or grows) the template on first use of a
+/// length and dtype, and nothing afterwards. Size it once with
+/// [`CudaDenseContext::reserve_zero_template`] to make every later reset
+/// transfer-free.
+pub fn cuda_zero_prefix<D: CudaScalar>(
+    ctx: &mut CudaDenseContext,
+    dst: &mut CudaDenseStorage,
+    len: usize,
+) -> Result<(), DenseError> {
+    const OP: &str = "cuda_zero_prefix";
+    ensure_cuda_device(ctx.device, OP, &[("dst", dst.device)])?;
+    ensure_payload_dtype::<D>(OP, dst)?;
+    if len == 0 {
+        return Ok(());
+    }
+    if dst.len < len {
+        return Err(DenseError::OutOfBounds);
+    }
+    ctx.ensure_zeros::<D>(len)?;
+    let (backend, operands) = ctx.split_operands::<D>();
+    let Some(zeros) = operands.zeros.as_ref() else {
+        return Err(cuda_error(OP, "context zero template is missing"));
+    };
+    let src_view = zeros.region_view::<D>(len, 1, len, 0)?;
+    let dst_view = dst.region_view_mut::<D>(len, 1, len, 0)?;
+    COPY_CALLS.fetch_add(1, Ordering::Relaxed);
+    backend
+        .copy_read_into(
+            TensorRead::from_view(src_view),
+            TensorWrite::from_view(dst_view),
+        )
+        .map_err(|err| cuda_error(OP, err))
 }
 
 /// Copies the leading compact `rows x cols` block of a device buffer into a

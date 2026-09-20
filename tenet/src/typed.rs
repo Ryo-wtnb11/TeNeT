@@ -223,7 +223,7 @@ use tenet_dense::{
     cuda_copy_region_into, cuda_eigh_region, cuda_gemm_region_into,
     cuda_is_hermitian_region as dense_cuda_is_hermitian_region,
     cuda_qr_region as dense_cuda_qr_region, cuda_svd_region as dense_cuda_svd_region,
-    CudaDenseContext, CudaDenseStorage,
+    cuda_zero_prefix, CudaDenseContext, CudaDenseStorage,
 };
 #[cfg(feature = "cuda")]
 use tenet_operations::StorageGemm;
@@ -9794,35 +9794,40 @@ impl<D: CudaPayload> NetworkPayloadStorage<D> for CudaStorage<D> {
     }
 
     fn reset_scratch_retained_bytes(scratch: &CudaZeroTemplate<D>) -> usize {
-        scratch.retained_bytes()
+        CudaZeroTemplate::<D>::retained_bytes(scratch)
     }
 }
 
-/// One device buffer of zeros, at least as long as every destination the owning
-/// `tensor!` workspace resets.
+/// The `tensor!` workspace's claim on the device zero template every retained
+/// destination is reset from.
 ///
 /// Interim: Tenferro 0.5 can write a buffer only by uploading or by reading
 /// another device buffer, so resetting a retained destination costs one D2D
-/// copy from this template instead of a device-local fill. tenferro-rs#1834
-/// (`fill_zero_write`) would replace the template and the copy with one call,
-/// at which point this type and its `NetworkPayloadStorage::ResetScratch` seam
-/// disappear.
+/// copy from a zero template rather than a device-local fill. tenferro-rs#1834
+/// (`fill_zero_write`) would remove the template and this type together with
+/// its `NetworkPayloadStorage::ResetScratch` seam.
 ///
-/// One template of the maximum length serves every destination: the template is
-/// compact, so its `len` prefix is a valid compact source for a shorter
-/// destination. It is uploaded once per workspace, re-uploaded only when a
-/// longer destination or another device appears, charged to the single
-/// `workspace_budget_bytes` ledger, and dropped with the workspace.
+/// The template itself belongs to the [`CudaDenseContext`], which is the single
+/// owner of every shared device operand (the `1` of a region move and the zeros
+/// of a region fill) and grows it monotonically to the longest region any
+/// caller reserves — one buffer for the whole runtime instead of one per
+/// workspace. What this type carries is the length this workspace caused to be
+/// reserved, so `workspace_budget_bytes` keeps charging that reservation to the
+/// workspace that needs it.
 #[cfg(feature = "cuda")]
 #[doc(hidden)]
 pub struct CudaZeroTemplate<D: CudaPayload> {
-    storage: Option<CudaStorage<D>>,
+    reserved_len: usize,
+    payload: std::marker::PhantomData<D>,
 }
 
 #[cfg(feature = "cuda")]
 impl<D: CudaPayload> Default for CudaZeroTemplate<D> {
     fn default() -> Self {
-        Self { storage: None }
+        Self {
+            reserved_len: 0,
+            payload: std::marker::PhantomData,
+        }
     }
 }
 
@@ -9830,7 +9835,7 @@ impl<D: CudaPayload> Default for CudaZeroTemplate<D> {
 impl<D: CudaPayload> std::fmt::Debug for CudaZeroTemplate<D> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CudaZeroTemplate")
-            .field("len", &self.storage.as_ref().map_or(0, TensorStorage::len))
+            .field("reserved_len", &self.reserved_len)
             .finish()
     }
 }
@@ -9838,33 +9843,28 @@ impl<D: CudaPayload> std::fmt::Debug for CudaZeroTemplate<D> {
 #[cfg(feature = "cuda")]
 impl<D: CudaPayload> CudaZeroTemplate<D> {
     pub(crate) fn retained_bytes(&self) -> usize {
-        self.storage
-            .as_ref()
-            .map_or(0, NetworkPayloadStorage::network_retained_bytes)
+        self.reserved_len.saturating_mul(std::mem::size_of::<D>())
     }
 
-    /// Returns a compact zero source of at least `len` elements on `cuda`'s
-    /// device, uploading a new one only when the held template is too short or
-    /// belongs to another device.
-    pub(crate) fn compact_source(
+    /// Writes zeros over the first `len` elements of `destination`, copying
+    /// them from the context-owned zero template. The template is sized once
+    /// here and then re-read by every later reset, so a warm workspace
+    /// transfers nothing.
+    ///
+    /// The kernel is the copy it has always been (`cuda_zero_prefix` →
+    /// `copy_read_into`); only the template's owner moved to the context.
+    pub(crate) fn reset_prefix(
         &mut self,
-        cuda: &CudaDenseContext,
+        cuda: &mut CudaDenseContext,
+        destination: &mut CudaStorage<D>,
         len: usize,
-    ) -> Result<&CudaStorage<D>, Error> {
-        let placement = Placement::Cuda(cuda.device());
-        let usable = self.storage.as_ref().is_some_and(|storage| {
-            TensorStorage::len(storage) >= len && storage.placement() == placement
-        });
-        if !usable {
-            self.storage = None;
-            self.storage = Some(CudaStorage::upload_owned(
-                cuda,
-                vec![D::from_real(0.0); len],
-            )?);
+    ) -> Result<(), Error> {
+        if len == 0 {
+            return Ok(());
         }
-        self.storage
-            .as_ref()
-            .ok_or_else(|| internal_layout_error("CUDA zero template upload produced no buffer"))
+        cuda.reserve_zero_template::<D>(len).map_err(dense_err)?;
+        self.reserved_len = self.reserved_len.max(len);
+        cuda_zero_prefix::<D>(cuda, &mut destination.0, len).map_err(dense_err)
     }
 }
 
@@ -12459,23 +12459,12 @@ where
             ));
         };
 
-        // Interim reset: one D2D copy of the workspace's zero prefix. Tenferro
-        // 0.5 has no fill for an existing device buffer (tenferro-rs#1834), and
-        // the direct replay below writes only the blocks a GEMM contributes to,
-        // exactly as the returning path relies on its freshly uploaded zeros.
-        if required_destination > 0 {
-            let template = zero_template.compact_source(cuda, required_destination)?;
-            cuda_copy_region_into::<D>(
-                cuda,
-                &mut destination_data.0,
-                0,
-                required_destination,
-                &template.0,
-                required_destination,
-                1,
-            )
-            .map_err(dense_err)?;
-        }
+        // Interim reset: one device read of the context's zero template.
+        // Tenferro 0.5 has no fill for an existing device buffer
+        // (tenferro-rs#1834), and the direct replay below writes only the
+        // blocks a GEMM contributes to, exactly as the returning path relies on
+        // its freshly uploaded zeros.
+        zero_template.reset_prefix(cuda, destination_data, required_destination)?;
         tenet_tensors::tensorcontract_fusion_dyn_prelowered_direct_on_storage(
             &mut CudaStorageGemm::new(cuda),
             &execution_destination,

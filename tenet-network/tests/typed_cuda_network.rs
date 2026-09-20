@@ -668,9 +668,12 @@ fn warm_cuda_destination_reuse_matches_the_returning_chain_for_every_provider() 
 
 /// G3c-2 (#1276): the warm device replay of an N-tensor chain performs no
 /// host-to-device traffic and no device allocation for its N-2 intermediate
-/// steps; each of them is reset by one D2D copy from the workspace's zero
-/// template. Only the final, returned output still uploads its zeros
-/// (#740/G3b).
+/// steps; each of them is reset by one D2D copy from the zero template. Only
+/// the final, returned output still uploads its zeros (#740/G3b).
+///
+/// Since #1304 the template belongs to the `CudaDenseContext` — one buffer per
+/// runtime and dtype instead of one per workspace — but the reset is the same
+/// copy kernel and costs the same counters.
 ///
 /// The counters are process-wide, so this test must not run beside another
 /// device test; the device suite runs with `--test-threads=1`.
@@ -711,7 +714,7 @@ fn warm_cuda_chain_uploads_nothing_for_its_reused_destinations() {
             after_second.copy_calls - before_second.copy_calls,
         ),
         (2, 2),
-        "the zero template costs exactly one upload, once per workspace"
+        "the zero template costs exactly one upload, once per context"
     );
 
     // Call 3 onward is the steady state this contract describes.

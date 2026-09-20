@@ -126,6 +126,21 @@ impl CudaRegion {
             .ok_or(DenseError::OffsetOverflow { value: self.offset })
     }
 
+    /// Checks that this region can be written as a destination, so a caller
+    /// that prepares regions ahead of submitting them can reject an
+    /// inexpressible layout before it does any device work.
+    ///
+    /// This is exactly the check the region calls make on their destination,
+    /// and it depends on nothing but the region itself, so passing here
+    /// guarantees the submission will not fail on the layout. An empty region
+    /// is accepted, because it addresses nothing and is never submitted.
+    pub fn validate_as_destination(&self, op: &'static str) -> Result<(), DenseError> {
+        if self.is_empty() {
+            return Ok(());
+        }
+        validate_destination_layout(op, self)
+    }
+
     /// Whether distinct index tuples map to distinct flat positions.
     ///
     /// This is the cumulative-span rule the host proves block layouts with
@@ -285,6 +300,20 @@ mod tests {
         assert_eq!(dims, vec![2, 3, 1]);
         assert_eq!(strides, vec![3, 1, 1]);
         assert_eq!(region.offset_isize().unwrap(), 5);
+    }
+
+    #[test]
+    fn the_destination_check_is_available_before_any_submission() {
+        // What: a caller preparing regions ahead of time gets the same verdict
+        // the submission would give, without a device.
+        let interleaved = CudaRegion::new(vec![3, 2], vec![2, 3], 0).unwrap();
+        assert!(interleaved
+            .validate_as_destination("cuda_tree_transform")
+            .is_err());
+        let ok = CudaRegion::new(vec![3, 2], vec![1, 3], 0).unwrap();
+        assert!(ok.validate_as_destination("cuda_tree_transform").is_ok());
+        let empty = CudaRegion::new(vec![0, 2], vec![1, 0], 0).unwrap();
+        assert!(empty.validate_as_destination("cuda_tree_transform").is_ok());
     }
 
     #[test]
