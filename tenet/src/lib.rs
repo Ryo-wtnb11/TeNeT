@@ -87,7 +87,7 @@ pub mod prelude {
         SectorSpectrum, SvdTrunc, TensorMap, TensorScalar, TruncatedSelection,
         TypedPersistenceCodec,
     };
-    pub use num_complex::Complex64;
+    pub use num_complex::{Complex32, Complex64};
     #[allow(deprecated)]
     pub use tenet_core::FusionTreeBlockKey;
     pub use tenet_core::{

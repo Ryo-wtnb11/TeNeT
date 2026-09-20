@@ -13,8 +13,24 @@ use std::alloc::{alloc_zeroed, handle_alloc_error};
 /// pairs of them satisfy this.
 pub unsafe trait ZeroBytes: Copy {}
 
+// SAFETY: IEEE 754 binary64 encodes `+0.0` as all-zero bits, `f64` has no
+// padding and no niche, and `size_of::<f64>() == 8 != 0`. Any number of zeroed
+// bytes at `align_of::<f64>()` is therefore that many initialised `+0.0`
+// values, and `+0.0 == <f64 as Zero>::zero()`.
 unsafe impl ZeroBytes for f64 {}
+// SAFETY: `num_complex::Complex<T>` is `#[repr(C)] { re: T, im: T }` (num-complex
+// 0.4 `src/lib.rs`), so `Complex64` is exactly two `f64` with no padding and no
+// niche: all-zero bytes are `0.0 + 0.0i`, which is `Complex64::zero()`.
+// `size_of::<Complex64>() == 16 != 0`.
 unsafe impl ZeroBytes for num_complex::Complex64 {}
+// SAFETY: IEEE 754 binary32 encodes `+0.0` as all-zero bits, `f32` has no
+// padding and no niche, and `size_of::<f32>() == 4 != 0`; same argument as the
+// `f64` impl above.
+unsafe impl ZeroBytes for f32 {}
+// SAFETY: same `#[repr(C)]` two-field layout as `Complex64`, over `f32`: no
+// padding, no niche, all-zero bytes are `0.0 + 0.0i == Complex32::zero()`, and
+// `size_of::<Complex32>() == 8 != 0`.
+unsafe impl ZeroBytes for num_complex::Complex32 {}
 
 /// `len` zero scalars zeroed by the allocator (calloc), not by a scalar loop.
 ///
@@ -103,7 +119,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn zeroed_payload_holds_len_zero_values_for_both_scalar_types() {
+    fn zeroed_payload_holds_len_zero_values_for_every_scalar_type() {
         // What: `zeroed_payload` returns `len` values bit-equal to the
         // positive zero of each supported scalar; Miri checks that every
         // element is initialised and the allocation layout round-trips.
@@ -119,7 +135,35 @@ mod tests {
             assert!(complex
                 .iter()
                 .all(|value| value.re.to_bits() == 0 && value.im.to_bits() == 0));
+
+            let single = zeroed_payload::<f32>(len);
+            assert_eq!(single.len(), len);
+            assert_eq!(single.capacity(), len);
+            assert!(single.iter().all(|value| value.to_bits() == 0));
+
+            let single_complex = zeroed_payload::<num_complex::Complex32>(len);
+            assert_eq!(single_complex.len(), len);
+            assert_eq!(single_complex.capacity(), len);
+            assert!(single_complex
+                .iter()
+                .all(|value| value.re.to_bits() == 0 && value.im.to_bits() == 0));
         }
+    }
+
+    #[test]
+    fn zeroed_payload_single_precision_vec_can_grow_and_drop() {
+        // What: the `alloc_zeroed` allocation carries a `Vec`-compatible
+        // layout for the 4- and 8-byte scalars too, so reallocation and drop
+        // of the returned buffer are sound (the Miri check of the new impls).
+        let mut values = zeroed_payload::<num_complex::Complex32>(3);
+        values.push(num_complex::Complex32::new(1.0, 2.0));
+        assert_eq!(values.len(), 4);
+        assert_eq!(values[3].re, 1.0);
+
+        let mut reals = zeroed_payload::<f32>(5);
+        reals.push(1.5);
+        assert_eq!(reals.len(), 6);
+        assert_eq!(reals[5], 1.5);
     }
 
     #[test]

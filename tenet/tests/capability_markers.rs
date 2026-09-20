@@ -87,6 +87,11 @@ where
 fn each_family_is_callable_under_exactly_its_marker() {
     let _: fn(&TensorMap<U1FusionRule, f64>) = base_family;
     let _: fn(&TensorMap<U1FusionRule, num_complex::Complex64>) = base_family;
+    // The single-precision payloads (#1315) reach the base family and nothing
+    // else; the three helpers below are deliberately not instantiated for
+    // them, and the `compile_fail` doctests on `TensorScalar` pin that.
+    let _: fn(&TensorMap<U1FusionRule, f32>) = base_family;
+    let _: fn(&TensorMap<U1FusionRule, num_complex::Complex32>) = base_family;
     let _: fn(&TensorMap<U1FusionRule, f64>) = factorization_family;
     let _: fn(&TensorMap<U1FusionRule, num_complex::Complex64>) = factorization_family;
     let _: fn(&TensorMap<U1FusionRule, f64>) = advanced_family;

@@ -8,7 +8,7 @@ use std::cell::Cell;
 use std::hint::black_box;
 use std::sync::{Arc, Mutex};
 
-use num_complex::Complex64;
+use num_complex::{Complex32, Complex64};
 use tenet::core::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
 use tenet::prelude::Runtime;
 use tenet::typed::{GradedSpace, TensorMap, TensorScalar};
@@ -178,8 +178,9 @@ fn owned_c64_contraction_output_is_one_allocator_zeroed_payload() {
     u1_contract_measurement::<Complex64>(TOTAL_ALLOCATIONS_U1, 1_212_002);
 }
 
-#[test]
-fn owned_su2_contraction_with_inactive_sectors_is_one_allocator_zeroed_payload() {
+/// SU(2) compose: non-abelian recoupling, so this is the fixture where the
+/// coefficient scratch is converted per structure identity.
+fn su2_compose_measurement<D: TensorScalar>(seed: u64) -> usize {
     let _measurement = MEASUREMENT_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -190,20 +191,19 @@ fn owned_su2_contraction_with_inactive_sectors_is_one_allocator_zeroed_payload()
     let a = su2_space(&provider, &[(0, 2), (2, 3)]);
     let c = su2_space(&provider, &[(1, 2)]);
     let b = su2_space(&provider, &[(1, 3)]);
-    let lhs: TensorMap<_, f64> =
-        TensorMap::rand_with_seed(&runtime, [&a, &c], [&b], 1_212_003).unwrap();
-    let rhs: TensorMap<_, f64> =
-        TensorMap::rand_with_seed(&runtime, [&b], [&a, &c], 1_212_004).unwrap();
+    let lhs: TensorMap<_, D> = TensorMap::rand_with_seed(&runtime, [&a, &c], [&b], seed).unwrap();
+    let rhs: TensorMap<_, D> =
+        TensorMap::rand_with_seed(&runtime, [&b], [&a, &c], seed + 1).unwrap();
     let warm = lhs.compose(&rhs).unwrap();
     let measurement = measure(|| {
         black_box(lhs.compose(&rhs).unwrap());
     });
-    // Pre-change: 36 calls / 3468 bytes, one 1088-byte zeroed payload;
-    // unchanged after #1212.
+    let payload_bytes = std::mem::size_of_val(warm.data());
     assert_eq!(
-        measurement.zeroed_allocations_of(std::mem::size_of_val(warm.data())),
+        measurement.zeroed_allocations_of(payload_bytes),
         1,
-        "zeroed sizes {:?}",
+        "the owned output must be exactly one allocator-zeroed payload of \
+         {payload_bytes} bytes; zeroed sizes {:?}",
         measurement.zeroed_sizes
     );
     assert!(
@@ -211,4 +211,29 @@ fn owned_su2_contraction_with_inactive_sectors_is_one_allocator_zeroed_payload()
         "owned SU(2) compose allocated {} times",
         measurement.allocations
     );
+    measurement.allocations
+}
+
+#[test]
+fn owned_su2_contraction_with_inactive_sectors_is_one_allocator_zeroed_payload() {
+    // Pre-change: 36 calls / 3468 bytes, one 1088-byte zeroed payload;
+    // unchanged after #1212.
+    su2_compose_measurement::<f64>(1_212_003);
+}
+
+/// #1315: a single-precision payload must run the same algorithm on the
+/// recoupling path, not a different one. Same fixture, same call count; only
+/// the zeroed payload is half the size, which
+/// `zeroed_allocations_of(size_of_val(data))` checks per dtype.
+#[test]
+fn owned_su2_single_precision_contraction_allocates_like_double() {
+    let double = su2_compose_measurement::<f64>(1_315_003);
+    let single = su2_compose_measurement::<f32>(1_315_003);
+    assert_eq!(
+        single, double,
+        "f32 SU(2) compose allocated {single} times against {double} for f64"
+    );
+    let complex_double = su2_compose_measurement::<Complex64>(1_315_005);
+    let complex_single = su2_compose_measurement::<Complex32>(1_315_005);
+    assert_eq!(complex_single, complex_double);
 }

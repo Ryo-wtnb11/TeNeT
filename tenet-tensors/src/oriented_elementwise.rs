@@ -4,7 +4,7 @@ use num_traits::{One, Zero};
 use tenet_core::{BlockKey, BlockStructure, FusionTreePairKey, SectorId};
 use tenet_operations::{
     bilinear_raw_strided_kernel_mapped, tensoradd_raw_strided_kernel_mapped, ConjugateValue,
-    OperationError,
+    OperationError, RecouplingCoefficientAction, WideScalar,
 };
 
 use crate::FusionOperand;
@@ -506,7 +506,12 @@ where
 
 /// Quantum-dimension-weighted oriented inner product.
 ///
-/// `sector_weight` supplies `dim(c)` per logical block.
+/// `sector_weight` supplies `dim(c)` per logical block, as the provider's own
+/// `f64` scalar: both the per-block sums and the weighted total accumulate in
+/// [`WideScalar::Wide`], so a single-precision payload neither narrows the
+/// weight nor sums the products in single precision. The result is narrowed to
+/// the payload type once, at the end. For `f64`/`Complex64` `Wide` is the
+/// payload type and every step is the arithmetic this function always did.
 #[doc(hidden)]
 pub fn oriented_fusion_inner<D>(
     logical: &BlockStructure,
@@ -514,10 +519,10 @@ pub fn oriented_fusion_inner<D>(
     lhs_data: &[D],
     rhs: FusionOperand<'_>,
     rhs_data: &[D],
-    mut sector_weight: impl FnMut(SectorId) -> D,
+    mut sector_weight: impl FnMut(SectorId) -> f64,
 ) -> Result<D, OperationError>
 where
-    D: Copy + Add<D, Output = D> + Mul<D, Output = D> + Zero + ConjugateValue,
+    D: WideScalar,
 {
     oriented_fusion_inner_with(logical, lhs, lhs_data, rhs, rhs_data, |sector| {
         Ok::<_, OperationError>(sector_weight(sector))
@@ -532,10 +537,10 @@ pub fn oriented_fusion_inner_with<D, E>(
     lhs_data: &[D],
     rhs: FusionOperand<'_>,
     rhs_data: &[D],
-    mut sector_weight: impl FnMut(SectorId) -> Result<D, E>,
+    mut sector_weight: impl FnMut(SectorId) -> Result<f64, E>,
 ) -> Result<D, E>
 where
-    D: Copy + Add<D, Output = D> + Mul<D, Output = D> + Zero + ConjugateValue,
+    D: WideScalar,
     E: From<OperationError>,
 {
     if lhs_data.len()
@@ -556,7 +561,7 @@ where
     }
     validate_oriented_fusion_layout(logical, lhs)?;
     validate_oriented_fusion_layout(logical, rhs)?;
-    let mut total = D::zero();
+    let mut total = D::Wide::zero();
     for logical_index in 0..logical.block_count() {
         let logical_block = logical.block(logical_index).map_err(OperationError::from)?;
         let BlockKey::FusionTree(logical_key) = logical_block.key() else {
@@ -596,9 +601,17 @@ where
             !lhs.storage_conjugate(),
             rhs.storage_conjugate(),
         )?;
-        total = total + partial * sector_weight(logical_key.codomain_tree().coupled())?;
+        // `coefficient_as_data` then `*`, not `scale_by_coefficient`: for a
+        // complex accumulator the former is `partial * (w + 0i)`, the exact
+        // expression this loop used before the accumulator was widened, so
+        // `Complex64` keeps its results bit for bit — including the signed
+        // zeros and non-finite cases where the two forms differ.
+        let weight = <D::Wide as RecouplingCoefficientAction<f64>>::coefficient_as_data(
+            sector_weight(logical_key.codomain_tree().coupled())?,
+        );
+        total = total + partial * weight;
     }
-    Ok(total)
+    Ok(D::narrow(total))
 }
 
 #[cfg(test)]
@@ -913,7 +926,7 @@ mod tests {
                 &direct,
                 adjoint_operand,
                 &parent,
-                |_| Complex64::one(),
+                |_| 1.0,
             )
             .unwrap(),
             expected_inner
@@ -925,7 +938,7 @@ mod tests {
                 &direct,
                 adjoint_operand,
                 &parent,
-                |_| Ok::<_, OperationError>(Complex64::one()),
+                |_| Ok::<_, OperationError>(1.0),
             )
             .unwrap(),
             expected_inner
@@ -937,7 +950,7 @@ mod tests {
                 &parent,
                 direct_operand,
                 &direct,
-                |_| Complex64::one(),
+                |_| 1.0,
             )
             .unwrap(),
             expected_inner.conj()

@@ -20,7 +20,9 @@ and `tenet/tests/capability_markers.rs` are.
 | `FactorizationScalar` | `pub trait FactorizationScalar: TensorScalar {}` | inherited from `TensorScalar`, the pattern `CudaPayload` already uses |
 | `AdvancedLinalgScalar` | `pub trait AdvancedLinalgScalar: FactorizationScalar {}` | inherited from `TensorScalar` |
 
-All three are implemented for `f64` and `num_complex::Complex64` only. No new
+All three are implemented for `f64` and `num_complex::Complex64` only. (As of
+#1315, `f32` and `Complex32` also implement `TensorScalar`, and nothing else;
+see `issue-1315-single-precision-base.md`.) No new
 dtype, no tolerance change, no renamed public item; `TensorScalar` keeps both
 its name and its base family, so every f64/Complex64 caller that compiles today
 still compiles.

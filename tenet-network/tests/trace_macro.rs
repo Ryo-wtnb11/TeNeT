@@ -264,7 +264,7 @@ fn two_trace_pairs_reduce_to_scalar() {
 fn compact_full_trace_preserves_positive_and_supertrace_oracles() {
     let runtime = Runtime::builder().build().unwrap();
     let u1 = GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), 3)]).unwrap();
-    let compact = TensorMap::diagonal(
+    let compact: TensorMap<_, f64> = TensorMap::diagonal(
         &runtime,
         &u1,
         [SectorSpectrum {
@@ -279,7 +279,7 @@ fn compact_full_trace_preserves_positive_and_supertrace_oracles() {
     assert!((compact.tr().unwrap() - 10.0).abs() <= 1e-12);
 
     let fz2 = fz2_space();
-    let compact = TensorMap::diagonal(
+    let compact: TensorMap<_, f64> = TensorMap::diagonal(
         &runtime,
         &fz2,
         [

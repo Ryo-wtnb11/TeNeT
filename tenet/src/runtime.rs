@@ -7,7 +7,7 @@ use std::hash::Hash;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
-use num_complex::Complex64;
+use num_complex::{Complex32, Complex64};
 use tenet_core::{HomSpaceId, RuleIdentity};
 pub use tenet_tensors::RuntimeTreeTransformCacheInfo;
 use tenet_tensors::{
@@ -42,14 +42,40 @@ mod coefficient_lane_private {
 pub(crate) trait MultiplicityFreeCoefficientLane<C: tenet_tensors::DenseBlockScalar>:
     ScalarOps + tenet_tensors::RecouplingCoefficientAction<C> + coefficient_lane_private::Sealed<C>
 {
-    fn lane(context: &mut TensorExecutionContext) -> &mut CoefficientCtx<Self, RuleIdentity, C>;
+    fn lane(
+        context: &mut TensorExecutionContext,
+    ) -> Result<&mut CoefficientCtx<Self, RuleIdentity, C>, Error>;
 }
 /// The supported payload/coefficient execution contexts for one cache-key
-/// namespace. Existing operations dispatch on the stored dtype to the two
+/// namespace. Existing operations dispatch on the stored dtype to the
 /// real-coefficient lanes.
+///
+/// The double-precision lanes are built with the runtime; the single-precision
+/// ones are built on first use. Every admitted payload dtype needs its own
+/// dense executors and contract workspace, so building all four eagerly would
+/// charge every runtime for dtypes the program never names. `lane_config`
+/// carries what [`Ctxs::with_config`] was given, plus the settings applied
+/// afterwards, so a lane created later is configured exactly like an eager one.
 pub struct Ctxs<Key: Clone + Eq + Hash + Send + Sync + 'static> {
     pub(crate) f64: Ctx<f64, Key>,
     pub(crate) c64: Ctx<Complex64, Key>,
+    pub(crate) f32: Option<Box<Ctx<f32, Key>>>,
+    pub(crate) c32: Option<Box<Ctx<Complex32, Key>>>,
+    lane_config: LaneConfig,
+}
+
+/// What a deferred [`Ctxs`] lane needs to be built exactly like an eager one.
+#[derive(Clone)]
+struct LaneConfig {
+    /// `None` for a `Default` [`Ctxs`], whose lanes own private env-driven
+    /// pools rather than a runtime's shared CPU context.
+    shared: Option<(
+        tenet_dense::SharedCpuContext,
+        Option<tenet_dense::CpuBackendKind>,
+        Weak<RuntimeTreeTransformStore<f64>>,
+    )>,
+    cache_policy: OperationCachePolicy,
+    recoupling_threads: Option<usize>,
 }
 
 impl<Key: Clone + Eq + Hash + Send + Sync + 'static> Default for Ctxs<Key> {
@@ -57,6 +83,13 @@ impl<Key: Clone + Eq + Hash + Send + Sync + 'static> Default for Ctxs<Key> {
         Self {
             f64: Ctx::default(),
             c64: Ctx::default(),
+            f32: None,
+            c32: None,
+            lane_config: LaneConfig {
+                shared: None,
+                cache_policy: OperationCachePolicy::default(),
+                recoupling_threads: None,
+            },
         }
     }
 }
@@ -104,6 +137,17 @@ impl<Key: Clone + Eq + Hash + Send + Sync + 'static> Ctxs<Key> {
                     f64,
                 >>::Workspace::default(),
             ),
+            f32: None,
+            c32: None,
+            lane_config: LaneConfig {
+                shared: Some((
+                    ctx.clone(),
+                    gemm_kind,
+                    Weak::clone(&real_tree_transform_store),
+                )),
+                cache_policy: OperationCachePolicy::NoCache,
+                recoupling_threads: None,
+            },
         };
         ctxs.set_cache_policy(OperationCachePolicy::NoCache);
         ctxs.f64
@@ -117,12 +161,67 @@ impl<Key: Clone + Eq + Hash + Send + Sync + 'static> Ctxs<Key> {
         Ok(ctxs)
     }
 
+    /// Builds one deferred lane the way [`Self::with_config`] built the eager
+    /// ones, then replays the settings applied since.
+    fn make_lane<D: ScalarOps>(config: &LaneConfig) -> Result<Box<Ctx<D, Key>>, Error> {
+        let mut lane = match &config.shared {
+            Some((ctx, gemm_kind, store)) => {
+                let mut lane = Ctx::with_parts(
+                    tenet_tensors::TreeTransformExecutionContext::new(make_transform_ops(
+                        ctx, *gemm_kind,
+                    )?),
+                    make_transform_ops(ctx, *gemm_kind)?,
+                    <DenseTreeTransformOperations as tenet_tensors::TensorContractBackend<
+                        D,
+                        f64,
+                    >>::Workspace::default(),
+                );
+                lane.tree_context_mut()
+                    .cache_mut()
+                    .bind_runtime_store(Weak::clone(store));
+                lane
+            }
+            None => Ctx::default(),
+        };
+        lane.set_cache_policy(config.cache_policy);
+        if let Some(threads) = config.recoupling_threads {
+            lane.tree_context_mut()
+                .backend_mut()
+                .set_recoupling_threads(threads);
+        }
+        Ok(Box::new(lane))
+    }
+
+    pub(crate) fn f32_lane(&mut self) -> Result<&mut Ctx<f32, Key>, Error> {
+        let lane = match self.f32.take() {
+            Some(lane) => lane,
+            None => Self::make_lane(&self.lane_config)?,
+        };
+        Ok(self.f32.insert(lane))
+    }
+
+    pub(crate) fn c32_lane(&mut self) -> Result<&mut Ctx<Complex32, Key>, Error> {
+        let lane = match self.c32.take() {
+            Some(lane) => lane,
+            None => Self::make_lane(&self.lane_config)?,
+        };
+        Ok(self.c32.insert(lane))
+    }
+
     fn set_cache_policy(&mut self, policy: OperationCachePolicy) {
+        self.lane_config.cache_policy = policy;
         self.f64.set_cache_policy(policy);
         self.c64.set_cache_policy(policy);
+        if let Some(lane) = self.f32.as_mut() {
+            lane.set_cache_policy(policy);
+        }
+        if let Some(lane) = self.c32.as_mut() {
+            lane.set_cache_policy(policy);
+        }
     }
 
     pub(crate) fn set_recoupling_threads(&mut self, threads: usize) {
+        self.lane_config.recoupling_threads = Some(threads);
         self.f64
             .tree_context_mut()
             .backend_mut()
@@ -131,6 +230,16 @@ impl<Key: Clone + Eq + Hash + Send + Sync + 'static> Ctxs<Key> {
             .tree_context_mut()
             .backend_mut()
             .set_recoupling_threads(threads);
+        if let Some(lane) = self.f32.as_mut() {
+            lane.tree_context_mut()
+                .backend_mut()
+                .set_recoupling_threads(threads);
+        }
+        if let Some(lane) = self.c32.as_mut() {
+            lane.tree_context_mut()
+                .backend_mut()
+                .set_recoupling_threads(threads);
+        }
     }
 
     #[cfg(test)]
@@ -146,11 +255,26 @@ impl<Key: Clone + Eq + Hash + Send + Sync + 'static> Ctxs<Key> {
                 .backend_mut()
                 .recoupling_threads()
                 == expected
+            && self.f32.as_mut().is_none_or(|lane| {
+                lane.tree_context_mut().backend_mut().recoupling_threads() == expected
+            })
+            && self.c32.as_mut().is_none_or(|lane| {
+                lane.tree_context_mut().backend_mut().recoupling_threads() == expected
+            })
     }
 
     #[cfg(test)]
     pub(crate) fn local_cache_policy_is(&self, expected: OperationCachePolicy) -> bool {
-        self.f64.local_cache_policy_is(expected) && self.c64.local_cache_policy_is(expected)
+        self.f64.local_cache_policy_is(expected)
+            && self.c64.local_cache_policy_is(expected)
+            && self
+                .f32
+                .as_ref()
+                .is_none_or(|lane| lane.local_cache_policy_is(expected))
+            && self
+                .c32
+                .as_ref()
+                .is_none_or(|lane| lane.local_cache_policy_is(expected))
     }
 
     #[cfg(test)]
@@ -176,6 +300,29 @@ impl<Key: Clone + Eq + Hash + Send + Sync + 'static> Ctxs<Key> {
                 .contract_backend()
                 .dense()
                 .shares_cpu_context(shared)
+            && self.f32.as_mut().is_none_or(|lane| {
+                lane.tree_context_mut()
+                    .backend_mut()
+                    .dense()
+                    .shares_cpu_context(shared)
+                    && lane.contract_backend().dense().shares_cpu_context(shared)
+            })
+            && self.c32.as_mut().is_none_or(|lane| {
+                lane.tree_context_mut()
+                    .backend_mut()
+                    .dense()
+                    .shares_cpu_context(shared)
+                    && lane.contract_backend().dense().shares_cpu_context(shared)
+            })
+    }
+
+    /// Builds both deferred lanes, so a test can assert that a lane created
+    /// after the runtime carries the same configuration as an eager one.
+    #[cfg(test)]
+    pub(crate) fn force_single_precision_lanes(&mut self) -> Result<(), Error> {
+        self.f32_lane()?;
+        self.c32_lane()?;
+        Ok(())
     }
 }
 
@@ -257,7 +404,7 @@ macro_rules! define_tensor_execution_context {
             /// execution remains behind its provider-specific boundary.
             pub(crate) fn multiplicity_free_lane<D: ScalarOps>(
                 &mut self,
-            ) -> &mut Ctx<D, tenet_core::RuleIdentity> {
+            ) -> Result<&mut Ctx<D, tenet_core::RuleIdentity>, Error> {
                 D::ctx_of(&mut self.mf)
             }
 
@@ -275,7 +422,7 @@ macro_rules! define_tensor_execution_context {
 
             pub(crate) fn generic_lane<D: ScalarOps>(
                 &mut self,
-            ) -> &mut Ctx<D, tenet_core::RuleIdentity> {
+            ) -> Result<&mut Ctx<D, tenet_core::RuleIdentity>, Error> {
                 #[cfg(all(test, feature = "racah-generated"))]
                 {
                     self.generic_lane_uses += 1;
@@ -331,7 +478,9 @@ macro_rules! define_tensor_execution_context {
 }
 
 impl<D: ScalarOps> MultiplicityFreeCoefficientLane<f64> for D {
-    fn lane(context: &mut TensorExecutionContext) -> &mut CoefficientCtx<Self, RuleIdentity, f64> {
+    fn lane(
+        context: &mut TensorExecutionContext,
+    ) -> Result<&mut CoefficientCtx<Self, RuleIdentity, f64>, Error> {
         Self::ctx_of(&mut context.mf)
     }
 }
@@ -339,8 +488,8 @@ impl<D: ScalarOps> MultiplicityFreeCoefficientLane<f64> for D {
 impl MultiplicityFreeCoefficientLane<Complex64> for Complex64 {
     fn lane(
         context: &mut TensorExecutionContext,
-    ) -> &mut CoefficientCtx<Self, RuleIdentity, Complex64> {
-        &mut context.mf_c64_coeff_c64
+    ) -> Result<&mut CoefficientCtx<Self, RuleIdentity, Complex64>, Error> {
+        Ok(&mut context.mf_c64_coeff_c64)
     }
 }
 
@@ -1615,6 +1764,41 @@ mod tests {
         let mut network_context =
             TensorExecutionContext::for_config(runtime.execution_config()).expect("context");
         assert!(network_context.shares_cpu_context(&shared));
+    }
+
+    // What: a lane built after the runtime carries the configuration the
+    // eager lanes were given. Deferring construction is the whole reason a
+    // program that never touches single precision pays nothing for it, and the
+    // deferral is only sound if the late lane is indistinguishable.
+    #[test]
+    fn lazily_built_single_precision_lanes_inherit_the_runtime_configuration() {
+        let runtime = Runtime::builder()
+            .recoupling_threads(3)
+            .build()
+            .expect("runtime");
+        let shared = runtime.execution_config().shared_ctx.clone();
+
+        let mut state = runtime.lock();
+        state.mf.force_single_precision_lanes().expect("mf lanes");
+        state
+            .generic
+            .force_single_precision_lanes()
+            .expect("generic lanes");
+        assert!(state.recoupling_threads_are(3));
+        assert!(state.shares_cpu_context(&shared));
+        assert!(state.local_cache_policy_is(OperationCachePolicy::NoCache));
+        drop(state);
+
+        let mut context =
+            TensorExecutionContext::for_config(runtime.execution_config()).expect("context");
+        context.mf.force_single_precision_lanes().expect("mf lanes");
+        context
+            .generic
+            .force_single_precision_lanes()
+            .expect("generic lanes");
+        assert!(context.recoupling_threads_are(3));
+        assert!(context.shares_cpu_context(&shared));
+        assert!(context.local_cache_policy_is(OperationCachePolicy::NoCache));
     }
 
     #[test]

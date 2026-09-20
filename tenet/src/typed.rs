@@ -291,17 +291,167 @@ pub use serialization::{DecodeError, DecodeLimits, EncodeError, TypedPersistence
 /// Factorizations need [`FactorizationScalar`]; matrix functions, inverses,
 /// solves and the general eigendecomposition need [`AdvancedLinalgScalar`].
 ///
-/// This trait is sealed; the supported scalar types are `f64` and
-/// [`num_complex::Complex64`]. Single precision (`f32`/`Complex32`) is staged
-/// per family under <https://github.com/Ryo-wtnb11/TeNeT/issues/1065>, which
-/// is why admission is split across three markers rather than one: a new
+/// This trait is sealed; the supported scalar types are `f64`,
+/// [`num_complex::Complex64`], `f32` and [`num_complex::Complex32`]. Single
+/// precision is admitted here and *only* here: factorizations, matrix
+/// functions, persistence and device payloads stay double-precision, which is
+/// why admission is split across markers rather than carried by one trait — a
 /// payload dtype joins one family at a time, with its own review and its own
-/// tolerance evidence.
+/// tolerance evidence (<https://github.com/Ryo-wtnb11/TeNeT/issues/1065>).
+///
+/// # Precision
+///
+/// The structural coefficients of a symmetry (F/R symbols, quantum
+/// dimensions, fermionic signs) stay `f64` for every payload dtype and act on
+/// a single-precision payload through the existing coefficient actions, so an
+/// `f32` tensor carries `f32` data recoupled by exactly-computed `f64`
+/// algebraic numbers. This follows TensorKit, whose
+/// `promote_permute(Float32, I)` stays `Float32` for a real sector scalar
+/// type (`indexmanipulations.jl`). A provider with *complex* structural
+/// coefficients and a single-precision payload remains a compile-time
+/// boundary.
+///
+/// [`TensorMap::norm`], [`TensorMap::norm_inf`] and [`TensorMap::norm_p`]
+/// return `f64` for every payload dtype and accumulate in `f64`;
+/// [`TensorMap::inner`], [`TensorMap::dot`] and [`TensorMap::tr`] return the
+/// payload type, as TensorKit's do, but also sum in double precision.
+///
+/// Tolerances are the caller's: the predicates that take a `tol` have no
+/// default, and a tolerance chosen for `f64` (`1e-12` in the examples of this
+/// crate) rejects everything at `f32`. Scale it by the payload's own epsilon
+/// — `f32::EPSILON` is about `1.2e-7` — as TensorKit's `rtoldefault` does.
+///
+/// Execution state is per payload dtype, but the *plan* caches are not: plans
+/// are structural, so [`Runtime::tree_transform_cache_info`] and
+/// [`Runtime::clear_tree_transform_cache`] report and clear single- and
+/// double-precision activity together, in one shared store.
+///
+/// # Annotate the payload dtype
+///
+/// With `f64` the only real payload, a float literal used to select it on its
+/// own. With two, inference waits for the end-of-function `f64` fallback,
+/// which arrives too late for method resolution: a payload dtype taken
+/// *solely* from float literals, whose result then has a method called on it,
+/// now fails with `E0689 ambiguous numeric type {float}`. It affects
+/// [`TensorMap::diagonal`], [`TensorMap::from_block_fn`] closures returning
+/// literals, and `scale`/`add` coefficients on an un-annotated
+/// `zeros`/`id`/`rand`:
+///
+/// ```
+/// use tenet::core::{U1FusionRule, U1Irrep};
+/// use tenet::typed::{GradedSpace, Runtime, SectorSpectrum, TensorMap};
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let runtime = Runtime::builder().dense_threads(1).build()?;
+/// let leg = GradedSpace::try_new(U1FusionRule, [(U1Irrep::new(0), 2)])?;
+/// // Annotated, so the literals have a type to be.
+/// let t: TensorMap<U1FusionRule, f64> = TensorMap::diagonal(
+///     &runtime,
+///     &leg,
+///     [SectorSpectrum { sector: U1Irrep::new(0), values: vec![2.0, 3.0] }],
+/// )?;
+/// assert!((t.tr()?.abs() - 5.0).abs() < 1e-12);
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Passing such a result to an `f64` parameter, comparing it, or never
+/// pinning it still compiles, because the fallback does arrive. Only a method
+/// call on it does not.
+///
+/// # What single precision does *not* reach
+///
+/// Each rejection below is paired with the same body at `f64`, which is what
+/// shows the `compile_fail` is the payload dtype and not an unrelated mistake.
+///
+/// A factorization:
+///
+/// ```compile_fail
+/// use tenet::core::U1FusionRule;
+/// use tenet::typed::TensorMap;
+///
+/// fn no_single_precision_svd(tensor: &TensorMap<U1FusionRule, f32>) {
+///     let _ = tensor.svd_compact();
+/// }
+/// ```
+///
+/// ```
+/// use tenet::core::U1FusionRule;
+/// use tenet::typed::TensorMap;
+///
+/// fn double_precision_svd(tensor: &TensorMap<U1FusionRule, f64>) {
+///     let _ = tensor.svd_compact();
+/// }
+/// ```
+///
+/// A matrix function:
+///
+/// ```compile_fail
+/// use num_complex::Complex32;
+/// use tenet::core::U1FusionRule;
+/// use tenet::typed::TensorMap;
+///
+/// fn no_single_precision_exp(tensor: &TensorMap<U1FusionRule, Complex32>) {
+///     let _ = tensor.exp();
+/// }
+/// ```
+///
+/// ```
+/// use num_complex::Complex64;
+/// use tenet::core::U1FusionRule;
+/// use tenet::typed::TensorMap;
+///
+/// fn double_precision_exp(tensor: &TensorMap<U1FusionRule, Complex64>) {
+///     let _ = tensor.exp();
+/// }
+/// ```
+///
+/// Persistence, whose wire format has tags for the double-precision pair only:
+///
+/// ```compile_fail
+/// use tenet::core::U1FusionRule;
+/// use tenet::typed::{TensorMap, TypedPersistenceCodec};
+///
+/// fn no_single_precision_encode<C: TypedPersistenceCodec<U1FusionRule>>(
+///     tensor: &TensorMap<U1FusionRule, f32>,
+///     codec: &C,
+/// ) {
+///     let _ = tensor.to_bytes_with(codec);
+/// }
+/// ```
+///
+/// ```
+/// use tenet::core::U1FusionRule;
+/// use tenet::typed::{TensorMap, TypedPersistenceCodec};
+///
+/// fn double_precision_encode<C: TypedPersistenceCodec<U1FusionRule>>(
+///     tensor: &TensorMap<U1FusionRule, f64>,
+///     codec: &C,
+/// ) {
+///     let _ = tensor.to_bytes_with(codec);
+/// }
+/// ```
+///
+/// A device payload: the rejection is pinned next to `TensorMap::to_cuda`
+/// itself, and this is its compiling twin.
+#[cfg_attr(
+    feature = "cuda",
+    doc = "```
+use tenet::core::U1FusionRule;
+use tenet::typed::TensorMap;
+
+fn double_precision_upload(tensor: &TensorMap<U1FusionRule, f64>) {
+    let _ = tensor.to_cuda();
+}
+```"
+)]
 #[allow(private_bounds)]
 pub trait TensorScalar: ScalarOps {}
 
 impl TensorScalar for f64 {}
 impl TensorScalar for num_complex::Complex64 {}
+impl TensorScalar for f32 {}
+impl TensorScalar for num_complex::Complex32 {}
 
 /// Scalar payloads admitted to the factorization family.
 ///
@@ -521,12 +671,31 @@ pub struct NetworkDegeneracyRestriction {
 }
 
 /// Internal scalar operations shared by typed tensor execution.
+/// The reduction accumulator is [`tenet_tensors::WideScalar::Wide`], which
+/// owns that decision for every crate: `Self` for the double-precision pair
+/// (so those reductions are unchanged, down to the emitted arithmetic) and the
+/// double-precision scalar of the same field for a single-precision payload.
+/// `Wide: FactorScalar` because the typed reductions form conjugated products
+/// in the accumulator and widen it to `Complex64` at the end.
+///
+/// TensorKit reaches comparable accuracy differently — `LinearAlgebra.norm`
+/// scales each block — so accumulating wide is a deliberate TeNeT choice,
+/// recorded in <https://github.com/Ryo-wtnb11/TeNeT/issues/1315>.
 pub(crate) trait ScalarOps:
-    FactorScalar + tenet_tensors::RecouplingCoefficientAction<f64> + tenet_tensors::ZeroBytes
+    FactorScalar
+    + tenet_tensors::RecouplingCoefficientAction<f64>
+    + tenet_tensors::ZeroBytes
+    + tenet_tensors::WideScalar<Wide: FactorScalar>
 {
+    /// Returns the execution lane for this payload dtype, building it if the
+    /// runtime has not needed it yet.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the dense-executor construction error of a deferred lane.
     fn ctx_of<Key: Clone + Eq + Hash + Send + Sync + 'static>(
         ctxs: &mut Ctxs<Key>,
-    ) -> &mut Ctx<Self, Key>;
+    ) -> Result<&mut Ctx<Self, Key>, Error>;
     fn rand_unit(state: &mut u64) -> Self;
     fn abs_value(self) -> f64;
     fn exp_value(self) -> Self;
@@ -2265,8 +2434,8 @@ where
 impl ScalarOps for f64 {
     fn ctx_of<Key: Clone + Eq + Hash + Send + Sync + 'static>(
         ctxs: &mut Ctxs<Key>,
-    ) -> &mut Ctx<Self, Key> {
-        &mut ctxs.f64
+    ) -> Result<&mut Ctx<Self, Key>, Error> {
+        Ok(&mut ctxs.f64)
     }
 
     fn rand_unit(state: &mut u64) -> Self {
@@ -2300,8 +2469,8 @@ impl ScalarOps for f64 {
 impl ScalarOps for num_complex::Complex64 {
     fn ctx_of<Key: Clone + Eq + Hash + Send + Sync + 'static>(
         ctxs: &mut Ctxs<Key>,
-    ) -> &mut Ctx<Self, Key> {
-        &mut ctxs.c64
+    ) -> Result<&mut Ctx<Self, Key>, Error> {
+        Ok(&mut ctxs.c64)
     }
 
     fn rand_unit(state: &mut u64) -> Self {
@@ -2325,13 +2494,93 @@ impl ScalarOps for num_complex::Complex64 {
     }
 }
 
+impl ScalarOps for f32 {
+    fn ctx_of<Key: Clone + Eq + Hash + Send + Sync + 'static>(
+        ctxs: &mut Ctxs<Key>,
+    ) -> Result<&mut Ctx<Self, Key>, Error> {
+        ctxs.f32_lane()
+    }
+
+    fn rand_unit(state: &mut u64) -> Self {
+        random_unit_f32(state)
+    }
+
+    fn abs_value(self) -> f64 {
+        f64::from(self.abs())
+    }
+
+    fn exp_value(self) -> Self {
+        self.exp()
+    }
+
+    fn recip_value(self) -> Self {
+        1.0 / self
+    }
+
+    fn sqrt_value(self) -> Result<Self, Error> {
+        if self < 0.0 {
+            Err(Error::InvalidArgument(format!(
+                "sqrt of a negative diagonal entry {self}; convert to a complex \
+                 payload for the complex square root"
+            )))
+        } else {
+            Ok(self.sqrt())
+        }
+    }
+}
+
+impl ScalarOps for num_complex::Complex32 {
+    fn ctx_of<Key: Clone + Eq + Hash + Send + Sync + 'static>(
+        ctxs: &mut Ctxs<Key>,
+    ) -> Result<&mut Ctx<Self, Key>, Error> {
+        ctxs.c32_lane()
+    }
+
+    fn rand_unit(state: &mut u64) -> Self {
+        Self::new(random_unit_f32(state), random_unit_f32(state))
+    }
+
+    fn abs_value(self) -> f64 {
+        // Via `Complex64` rather than `Complex32::norm`: the f32 hypot can
+        // overflow or flush to zero for components that the f64 return type
+        // represents exactly.
+        tenet_tensors::WideScalar::widen(self).norm()
+    }
+
+    fn exp_value(self) -> Self {
+        self.exp()
+    }
+
+    fn recip_value(self) -> Self {
+        Self::new(1.0, 0.0) / self
+    }
+
+    fn sqrt_value(self) -> Result<Self, Error> {
+        Ok(self.sqrt())
+    }
+}
+
 fn random_unit(state: &mut u64) -> f64 {
+    ((splitmix64(state) >> 11) as f64) / ((1_u64 << 52) as f64) - 1.0
+}
+
+/// The `f32` twin of [`random_unit`], drawn in the payload type.
+///
+/// Why not `random_unit(state) as f32`: the 53-bit draw in `[-1, 1)` rounds to
+/// exactly `1.0` whenever it exceeds `1 - 2^-25`, so the half-open range the
+/// name promises would not survive narrowing. Taking 24 bits — the `f32`
+/// significand — and dividing by `2^23` keeps every draw exactly representable
+/// and the upper bound open, mirroring the 53-bit/`2^52` double draw above.
+fn random_unit_f32(state: &mut u64) -> f32 {
+    ((splitmix64(state) >> 40) as f32) / ((1_u32 << 23) as f32) - 1.0
+}
+
+fn splitmix64(state: &mut u64) -> u64 {
     *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
     let mut value = *state;
     value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    value ^= value >> 31;
-    ((value >> 11) as f64) / ((1_u64 << 52) as f64) - 1.0
+    value ^ (value >> 31)
 }
 
 /// Enumerates the coupled-sector matrix regions of a coupled-layout block
@@ -2384,9 +2633,11 @@ where
         let rhs = b.get(range).ok_or_else(|| {
             internal_layout_error("coupled-sector region exceeds the right scalar buffer")
         })?;
-        let mut partial = D::from_real(0.0);
+        // Accumulated in `D::Wide` (see `tenet_tensors::WideScalar`): the identity for
+        // the double-precision payloads, double precision for the single ones.
+        let mut partial = D::Wide::from_real(0.0);
         for (&ai, &bi) in lhs.iter().zip(rhs) {
-            partial = partial + FactorScalar::adjoint(ai) * bi;
+            partial = partial + FactorScalar::adjoint(ai.widen()) * bi.widen();
         }
         total += partial.widen_complex() * weight_of(region.coupled())?;
     }
@@ -2416,9 +2667,9 @@ where
     // (vectorinterface.jl:124, linalg.jl:277). Non-abelian keeps the weighted
     // block loop below, where `dim(c) != 1`.
     if rule.fusion_style() == tenet_core::FusionStyleKind::Unique {
-        let mut total = D::from_real(0.0);
+        let mut total = D::Wide::from_real(0.0);
         for (&ai, &bi) in a.iter().zip(b) {
-            total = total + FactorScalar::adjoint(ai) * bi;
+            total = total + FactorScalar::adjoint(ai.widen()) * bi.widen();
         }
         return Ok(total.widen_complex());
     }
@@ -2470,14 +2721,14 @@ where
                     .zip(region.col_trees())
                     .enumerate()
                 {
-                    let mut partial = D::from_real(0.0);
+                    let mut partial = D::Wide::from_real(0.0);
                     let start = region.range().start + row.offset() + region.rows() * col.offset();
                     let row_end = region
                         .row_trees()
                         .get(tree_index + 1)
                         .map_or(region.rows(), CoupledTreeExtent::offset);
                     for diagonal in 0..row_end - row.offset() {
-                        partial = partial + data[start + diagonal * step];
+                        partial = partial + data[start + diagonal * step].widen();
                     }
                     total += partial.widen_complex() * weight;
                 }
@@ -2509,7 +2760,7 @@ where
         // diagonally (axis i and axis nout+i share the index) — the degeneracy
         // trace of this coupled sub-block.
         let count: usize = shape[..nout].iter().product();
-        let mut partial = D::from_real(0.0);
+        let mut partial = D::Wide::from_real(0.0);
         for linear in 0..count {
             let mut remainder = linear;
             let mut position = offset;
@@ -2518,7 +2769,7 @@ where
                 remainder /= shape[axis];
                 position += coordinate * (strides[axis] + strides[nout + axis]);
             }
-            partial = partial + data[position];
+            partial = partial + data[position].widen();
         }
         total += partial.widen_complex() * weight;
     }
@@ -6852,7 +7103,7 @@ where
         // accessor, while the run cache needs neither.
         let provider = tensor.logical_space().provider();
         let mut last: Option<(SectorId, f64)> = None;
-        let mut weight_of = move |sector: SectorId| match last {
+        let weight_of = move |sector: SectorId| match last {
             Some((cached, weight)) if cached == sector => Ok(weight),
             _ => {
                 let weight = <R::Mode as TypedSpaceModeDispatch<R>>::dim(provider, sector)?;
@@ -6871,7 +7122,7 @@ where
                 lhs_data,
                 rhs_operand,
                 rhs_data,
-                |sector| weight_of(sector).map(D::from_real),
+                weight_of,
             );
         }
         let value = coupled_region_inner(
@@ -7074,7 +7325,7 @@ where
         };
         let mut lease = tensor.runtime.lease_context()?;
         let (space, data) = tree_transform_dyn_owned_checked_generic_input_in_context(
-            lease.context().generic_lane::<D>().tree_context_mut(),
+            lease.context().generic_lane::<D>()?.tree_context_mut(),
             operation,
             input,
             D::from_real(1.0),
@@ -7613,7 +7864,7 @@ where
         };
         let mut lease = lhs.runtime.lease_context()?;
         let (space, data) = tensorcontract_owned_checked_generic_in_context(
-            lease.context().generic_lane::<D>(),
+            lease.context().generic_lane::<D>()?,
             &lhs_body.space,
             lhs_body.materialized_dense_data(),
             &rhs_body.space,
@@ -7827,7 +8078,7 @@ where
             (&lhs.repr, &rhs.repr)
         {
             tensorcontract_owned_multiplicity_free(
-                lease.context().multiplicity_free_lane::<D>(),
+                lease.context().multiplicity_free_lane::<D>()?,
                 BoundDynamicTensorRef::try_new(
                     &lhs_body.space,
                     lhs_body.materialized_dense_data(),
@@ -7844,7 +8095,7 @@ where
             let (lhs_operand, lhs_data) = lhs.fusion_operand_and_data();
             let (rhs_operand, rhs_data) = rhs.fusion_operand_and_data();
             tensorcontract_oriented_multiplicity_free(
-                lease.context().multiplicity_free_lane::<D>(),
+                lease.context().multiplicity_free_lane::<D>()?,
                 lhs.logical_space(),
                 lhs_operand,
                 lhs_data,
@@ -7895,7 +8146,7 @@ where
             (&lhs.repr, &rhs.repr)
         {
             tensorcompose_owned_multiplicity_free(
-                D::lane(lease.context()),
+                D::lane(lease.context())?,
                 BoundDynamicTensorRef::try_new(
                     &lhs_body.space,
                     lhs_body.materialized_dense_data(),
@@ -7911,7 +8162,7 @@ where
             let (lhs_operand, lhs_data) = lhs.fusion_operand_and_data();
             let (rhs_operand, rhs_data) = rhs.fusion_operand_and_data();
             tensorcontract_oriented_multiplicity_free(
-                D::lane(lease.context()),
+                D::lane(lease.context())?,
                 lhs.logical_space(),
                 lhs_operand,
                 lhs_data,
@@ -10707,8 +10958,12 @@ impl<R, D: CudaPayload> TensorMap<R, D> {
     /// recovering compactness. A lazy adjoint transfers only its canonical
     /// parent and rebuilds a cold lazy view over the device parent.
     ///
-    /// The supported device payloads are `f64` and `Complex64`; single
-    /// precision has no device payload in this leaf:
+    /// The supported device payloads are `f64` and `Complex64`. `f32` and
+    /// `Complex32` are host payloads only: the device Hermitian admission
+    /// constant and the spectra download are still written for double
+    /// precision, so single precision stays a compile-time boundary rather
+    /// than a silent misuse. These two pins only compile under the `cuda`
+    /// feature, so a host-only CI run does not exercise them.
     ///
     /// ```compile_fail
     /// use num_complex::Complex32;
@@ -10719,6 +10974,18 @@ impl<R, D: CudaPayload> TensorMap<R, D> {
     ///     let _ = tensor.to_cuda();
     /// }
     /// ```
+    ///
+    /// ```compile_fail
+    /// use tenet::core::U1FusionRule;
+    /// use tenet::typed::TensorMap;
+    ///
+    /// fn no_f32_upload(tensor: &TensorMap<U1FusionRule, f32>) {
+    ///     let _ = tensor.to_cuda();
+    /// }
+    /// ```
+    ///
+    /// The compiling twin of both, differing only in the payload dtype, is on
+    /// [`TensorScalar`].
     pub fn to_cuda(&self) -> Result<TensorMap<R, D, CudaStorage<D>>, Error> {
         let mut lease = self.runtime.lease_cuda()?;
         let cuda = &mut *lease;
@@ -13858,6 +14125,8 @@ where
     /// This matches TensorKit `isdiag` for finite data at `tol = 0`; positive
     /// tolerance uses `max_offdiag <= tol * max(norm_inf, 1)`. Negative and
     /// non-finite tolerances are rejected before every shortcut.
+    ///
+    /// Scale `tol` to the payload dtype, as [`Self::is_hermitian`] describes.
     pub fn is_diagonal(&self, tol: f64) -> Result<bool, Error> {
         if !tol.is_finite() || tol < 0.0 {
             return Err(Error::InvalidArgument(
@@ -14686,7 +14955,7 @@ where
             let mut lease = self.runtime.lease_context()?;
             let context = lease
                 .context()
-                .multiplicity_free_lane::<D>()
+                .multiplicity_free_lane::<D>()?
                 .tree_context_mut();
             let TypedTensorRepr::Owned(destination_body) = &mut destination.repr else {
                 unreachable!("ordinary destination checked above")
@@ -14818,7 +15087,7 @@ where
         }
 
         let mut lease = self.runtime.lease_context()?;
-        let context = lease.context().multiplicity_free_lane::<D>();
+        let context = lease.context().multiplicity_free_lane::<D>()?;
         let TypedTensorRepr::Owned(destination_body) = &mut destination.repr else {
             unreachable!("ordinary destination checked above")
         };
@@ -15190,7 +15459,7 @@ where
         let mut lease = self.runtime.lease_context()?;
         let body = self.owned_body().expect("owned tree transform input");
         let (space, data) = tree_transform_owned_multiplicity_free(
-            D::lane(lease.context()),
+            D::lane(lease.context())?,
             BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())?,
             operation,
         )?;
@@ -15249,7 +15518,7 @@ where
         let mut lease = self.runtime.lease_context()?;
         let body = self.owned_body().expect("owned tree transform input");
         let (space, data) = tree_transform_owned_multiplicity_free(
-            lease.context().multiplicity_free_lane::<D>(),
+            lease.context().multiplicity_free_lane::<D>()?,
             BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())?,
             operation,
         )?;
@@ -16446,7 +16715,7 @@ where
             let mut lease = self.runtime.lease_context()?;
             let (w, p) = tenet_matrixalgebra::left_polar_adjoint_parent_dyn(
                 dense.dense(),
-                lease.context().multiplicity_free_lane::<D>(),
+                lease.context().multiplicity_free_lane::<D>()?,
                 &BoundDynamicTensorRef::try_new(
                     &view.parent.space,
                     view.parent.materialized_dense_data(),
@@ -16461,7 +16730,7 @@ where
         let mut lease = self.runtime.lease_context()?;
         let (w, p) = tenet_matrixalgebra::left_polar_dyn(
             dense.dense(),
-            lease.context().multiplicity_free_lane::<D>(),
+            lease.context().multiplicity_free_lane::<D>()?,
             &self.bound_ref()?,
         )?;
         Ok((self.wrap_bound_factor(w), self.wrap_bound_factor(p)))
@@ -16496,7 +16765,7 @@ where
             let mut lease = self.runtime.lease_context()?;
             let (p, w) = tenet_matrixalgebra::right_polar_adjoint_parent_dyn(
                 dense.dense(),
-                lease.context().multiplicity_free_lane::<D>(),
+                lease.context().multiplicity_free_lane::<D>()?,
                 &BoundDynamicTensorRef::try_new(
                     &view.parent.space,
                     view.parent.materialized_dense_data(),
@@ -16509,7 +16778,7 @@ where
         let mut lease = self.runtime.lease_context()?;
         let (p, w) = tenet_matrixalgebra::right_polar_dyn(
             dense.dense(),
-            lease.context().multiplicity_free_lane::<D>(),
+            lease.context().multiplicity_free_lane::<D>()?,
             &self.bound_ref()?,
         )?;
         Ok((self.wrap_bound_factor(p), self.wrap_bound_factor(w)))
@@ -16753,7 +17022,7 @@ where
             .unwrap_or_else(|| self.owned_body().expect("owned representation"));
         let out = tenet_matrixalgebra::exp_dyn(
             dense.dense(),
-            lease.context().multiplicity_free_lane::<D>(),
+            lease.context().multiplicity_free_lane::<D>()?,
             &BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())?,
         )?;
         Ok(self.wrap_bound_factor(out))
@@ -16936,7 +17205,7 @@ where
         let out = match &self.repr {
             TypedTensorRepr::Adjoint(view) => tenet_matrixalgebra::pinv_adjoint_parent_dyn(
                 dense.dense(),
-                lease.context().multiplicity_free_lane::<D>(),
+                lease.context().multiplicity_free_lane::<D>()?,
                 &BoundDynamicTensorRef::try_new(
                     &view.parent.space,
                     view.parent.materialized_dense_data(),
@@ -16945,7 +17214,7 @@ where
             )?,
             TypedTensorRepr::Owned(_) => tenet_matrixalgebra::pinv_dyn(
                 dense.dense(),
-                lease.context().multiplicity_free_lane::<D>(),
+                lease.context().multiplicity_free_lane::<D>()?,
                 &self.bound_ref()?,
                 rcond,
             )?,
@@ -16978,9 +17247,12 @@ where
             if left.sector != right.sector || left.values.len() != right.values.len() {
                 return Err(spectra_disagree());
             }
-            let mut partial = D::from_real(0.0);
+            // `D::Wide` for the same reason as `coupled_region_inner`: the
+            // identity for the double pair, double precision for the single
+            // one, so a compact `norm`/`inner` answers like its dense twin.
+            let mut partial = D::Wide::from_real(0.0);
             for (&a, &b) in left.values.iter().zip(&right.values) {
-                partial = partial + FactorScalar::adjoint(a) * b;
+                partial = partial + FactorScalar::adjoint(a.widen()) * b.widen();
             }
             total += partial.widen_complex() * provider.dim_scalar(left.sector);
         }
@@ -17344,9 +17616,9 @@ where
                     } else {
                         provider.dim_scalar(entry.sector) * provider.twist_scalar(entry.sector)
                     };
-                    let mut partial: D = D::from_real(0.0);
+                    let mut partial = D::Wide::from_real(0.0);
                     for &value in &entry.values {
-                        partial = partial + value;
+                        partial = partial + value.widen();
                     }
                     total += partial.widen_complex() * coefficient;
                 }
@@ -17636,7 +17908,7 @@ where
                         rhs.parent.materialized_dense_data(),
                         tenet_tensors::FusionOperand::direct(lhs.parent.space.space()),
                         lhs.parent.materialized_dense_data(),
-                        |sector| D::from_real(provider.dim_scalar(sector)),
+                        |sector| provider.dim_scalar(sector),
                     )?
                 }
                 _ => tenet_tensors::oriented_fusion_inner(
@@ -17645,7 +17917,7 @@ where
                     lhs_data,
                     rhs_operand,
                     rhs_data,
-                    |sector| D::from_real(provider.dim_scalar(sector)),
+                    |sector| provider.dim_scalar(sector),
                 )?,
             };
             return Ok(value);
@@ -17704,9 +17976,9 @@ where
             let provider = self.logical_space().provider();
             let mut total = num_complex::Complex64::new(0.0, 0.0);
             for entry in spectrum {
-                let mut partial = D::from_real(0.0);
+                let mut partial = D::Wide::from_real(0.0);
                 for &value in &entry.values {
-                    partial = partial + value;
+                    partial = partial + value.widen();
                 }
                 total += partial.widen_complex() * provider.dim_scalar(entry.sector);
             }
@@ -17737,6 +18009,16 @@ where
     /// as an error; TensorKit throws. A predicate that can only be called after
     /// another predicate is not one.
     ///
+    /// `tol` has no default and must be scaled to the payload dtype: this
+    /// family of predicates compares a *residual norm* against `tol` times the
+    /// tensor's own norm, and a residual that an `f64` payload keeps near
+    /// `1e-16` sits near `1e-7` in `f32`. A `tol` copied from a
+    /// double-precision example therefore rejects a perfectly good
+    /// single-precision tensor. TensorKit's `isapprox` default is
+    /// `sqrt(eps(real(T)))` — about `1.5e-8` for `f64` and `3.5e-4` for `f32`
+    /// — and scaling a chosen `f64` tolerance by
+    /// `f32::EPSILON / f64::EPSILON` reproduces the same intent.
+    ///
     /// # Errors
     ///
     /// [`Self::add`]'s and [`Self::adjoint`]'s, which is where the work happens.
@@ -17751,7 +18033,8 @@ where
 
     /// Whether the tensor equals minus its own adjoint within `tol`
     /// (TensorKit `isantihermitian`). A non-endomorphism is `false`, as for
-    /// [`Self::is_hermitian`].
+    /// [`Self::is_hermitian`], whose note on scaling `tol` to the payload
+    /// dtype applies here unchanged.
     ///
     /// # Errors
     ///
@@ -17768,6 +18051,8 @@ where
     /// Whether `t† ∘ t` is the identity on the domain within `tol`
     /// (TensorKit `isisometric`): the columns are orthonormal. Defined for any
     /// shape, not only square ones.
+    ///
+    /// Scale `tol` to the payload dtype, as [`Self::is_hermitian`] describes.
     ///
     /// # Errors
     ///
