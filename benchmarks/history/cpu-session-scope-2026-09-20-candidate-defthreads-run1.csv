@@ -1,0 +1,77 @@
+# tenet_authority=unknown
+# tenferro_authority=unknown
+# features=cpu-faer:true blas-provider:false cuda:false gemm_backend=faer
+# degeneracy=8
+# threads=RAYON_NUM_THREADS:unset OPENBLAS_NUM_THREADS:unset OMP_NUM_THREADS:unset MKL_NUM_THREADS:unset
+# cold_scope=fresh Runtime tree-transform store; process-global interned structures may already be warm
+# cache_mode=enabled
+# allocation_scope=caller-thread Rust allocation calls and requested bytes during the measured phase; excludes worker threads, native BLAS allocation, frees, and peak/live bytes
+# unavailable_counters=exact_layout_admission,operation_local_scratch_bytes,provider_queries,transform_passes,gemm_calls,host_device_transfers
+# oriented_uniform_run_scope=DenseAdapter caller-owned destination retained; U1Public owned result first-value/length observation and drop inside every measured call
+# oriented_uniform_run_fixtures=many_small:L32:4x3x5;few_large:L4:64x48x56;minimum_run:L2:4x3x5;singleton:L1:64x48x56;heterogeneous:L8:alternating
+# oriented_uniform_run_shape_cycles=many_small:L32:[4x3x5,5x4x6,3x6x4];few_large:L4:[64x48x56,56x40x64,72x56x48]
+# oriented_uniform_run_public=many_small:32_sectors:d4;few_large:4_sectors:d32;shape_degeneracies:[d,d+1,d-1]
+# oriented_uniform_run_first_scope=fresh executor or Runtime after separate full oracle preflight; process-global metadata may already be warm
+# adapter_runtime_cache_provider_counters=NA
+# comparison_protocol=unconditional A-baseline,B-candidate,B-candidate,A-baseline; three fresh child processes per position
+symmetry,operation,form,phase,iterations,us_per_iter,tree_hits,tree_misses,tree_evictions,tree_bypasses,tree_entries_delta,tree_charged_payload_bytes_before,tree_charged_payload_bytes_after,tree_charged_payload_bytes_delta,fusion_layout_misses,fusion_layout_evictions,fusion_layout_bypasses,fusion_layout_entries_delta,fusion_layout_charged_payload_bytes_before,fusion_layout_charged_payload_bytes_after,fusion_layout_charged_payload_bytes_delta,complete_hom_hits,complete_hom_misses,complete_hom_admissions,complete_hom_evictions,complete_hom_bypasses,complete_hom_entries_delta,complete_hom_charged_bytes_before,complete_hom_charged_bytes_after,complete_hom_charged_bytes_delta,exact_layout_admission,caller_allocation_calls,caller_requested_allocation_bytes,operation_local_scratch_bytes,provider_queries,transform_passes,gemm_calls,host_device_transfers
+DenseAdapter,oriented_uniform_run,many_small_f64_II,first_fresh_executor_after_preflight,1,4.042,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,3,1344,NA,NA,NA,NA,NA
+DenseAdapter,oriented_uniform_run,many_small_f64_II,warm_fixed,10762,1.859,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,0,0,NA,NA,NA,NA,NA
+DenseAdapter,oriented_uniform_run,few_large_f64_II,first_fresh_executor_after_preflight,1,34.166,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,11,91000,NA,NA,NA,NA,NA
+DenseAdapter,oriented_uniform_run,few_large_f64_II,warm_fixed,636,31.464,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,5088,57021216,NA,NA,NA,NA,NA
+DenseAdapter,oriented_uniform_run,many_small_f64_TI,first_fresh_executor_after_preflight,1,3.709,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,3,1344,NA,NA,NA,NA,NA
+DenseAdapter,oriented_uniform_run,many_small_f64_TI,warm_fixed,8466,2.363,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,0,0,NA,NA,NA,NA,NA
+DenseAdapter,oriented_uniform_run,few_large_f64_TI,first_fresh_executor_after_preflight,1,35.250,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,11,189304,NA,NA,NA,NA,NA
+DenseAdapter,oriented_uniform_run,few_large_f64_TI,warm_fixed,623,32.150,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,4984,117099080,NA,NA,NA,NA,NA
+DenseAdapter,oriented_uniform_run,many_small_c64_II,first_fresh_executor_after_preflight,1,3.709,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,3,1344,NA,NA,NA,NA,NA
+DenseAdapter,oriented_uniform_run,many_small_c64_II,warm_fixed,8997,2.223,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,0,0,NA,NA,NA,NA,NA
+DenseAdapter,oriented_uniform_run,few_large_c64_II,first_fresh_executor_after_preflight,1,138.125,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,11,178228,NA,NA,NA,NA,NA
+DenseAdapter,oriented_uniform_run,few_large_c64_II,warm_fixed,157,127.430,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,1256,27770788,NA,NA,NA,NA,NA
+DenseAdapter,oriented_uniform_run,many_small_c64_AI,first_fresh_executor_after_preflight,1,4.084,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,3,1344,NA,NA,NA,NA,NA
+DenseAdapter,oriented_uniform_run,many_small_c64_AI,warm_fixed,6230,3.210,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,0,0,NA,NA,NA,NA,NA
+DenseAdapter,oriented_uniform_run,few_large_c64_AI,first_fresh_executor_after_preflight,1,128.834,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,11,380980,NA,NA,NA,NA,NA
+DenseAdapter,oriented_uniform_run,few_large_c64_AI,warm_fixed,155,129.173,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,1240,58843580,NA,NA,NA,NA,NA
+DenseAdapter,oriented_uniform_run,many_small_c64_AA,first_fresh_executor_after_preflight,1,3.958,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,3,1344,NA,NA,NA,NA,NA
+DenseAdapter,oriented_uniform_run,many_small_c64_AA,warm_fixed,6293,3.178,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,0,0,NA,NA,NA,NA,NA
+DenseAdapter,oriented_uniform_run,few_large_c64_AA,first_fresh_executor_after_preflight,1,129.708,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,11,380980,NA,NA,NA,NA,NA
+DenseAdapter,oriented_uniform_run,few_large_c64_AA,warm_fixed,156,128.838,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,1248,59223216,NA,NA,NA,NA,NA
+DenseAdapter,oriented_uniform_run,minimum_run_f64_TI,first_fresh_executor_after_preflight,1,2.417,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,3,1344,NA,NA,NA,NA,NA
+DenseAdapter,oriented_uniform_run,minimum_run_f64_TI,warm_fixed,16391,1.220,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,0,0,NA,NA,NA,NA,NA
+DenseAdapter,oriented_uniform_run,minimum_run_c64_AI,first_fresh_executor_after_preflight,1,2.084,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,3,1344,NA,NA,NA,NA,NA
+DenseAdapter,oriented_uniform_run,minimum_run_c64_AI,warm_fixed,15174,1.318,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,0,0,NA,NA,NA,NA,NA
+DenseAdapter,oriented_uniform_run,singleton_c64_AI,first_fresh_executor_after_preflight,1,34.459,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,5,96253,NA,NA,NA,NA,NA
+DenseAdapter,oriented_uniform_run,singleton_c64_AI,warm_fixed,614,32.588,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,1228,58274126,NA,NA,NA,NA,NA
+DenseAdapter,oriented_uniform_run,heterogeneous_c64_AI,first_fresh_executor_after_preflight,1,8.750,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,6,18368,NA,NA,NA,NA,NA
+DenseAdapter,oriented_uniform_run,heterogeneous_c64_AI,warm_fixed,3484,5.741,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,0,0,NA,NA,NA,NA,NA
+DenseAdapter,oriented_uniform_run,many_small_f64_TI_shape_cycle,warm_shape_cycle,6969,2.871,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,0,0,NA,NA,NA,NA,NA
+DenseAdapter,oriented_uniform_run,many_small_c64_AI_shape_cycle,warm_shape_cycle,5304,3.773,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,0,0,NA,NA,NA,NA,NA
+DenseAdapter,oriented_uniform_run,few_large_f64_TI_shape_cycle,warm_shape_cycle,630,31.812,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,5040,292422480,NA,NA,NA,NA,NA
+DenseAdapter,oriented_uniform_run,few_large_c64_AI_shape_cycle,warm_shape_cycle,162,123.901,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,1296,136634040,NA,NA,NA,NA,NA
+U1Public,oriented_uniform_run,many_small_f64_direct_compose,first_fresh_runtime_after_preflight,1,25.250,0,0,0,0,0,0,0,0,0,0,0,0,11456,11456,0,1,0,0,0,0,0,31864,31864,0,NA,411,115300,NA,NA,NA,NA,NA
+U1Public,oriented_uniform_run,many_small_f64_direct_compose,warm_fixed,2467,8.110,0,0,0,0,0,0,0,0,0,0,0,0,11456,11456,0,2467,0,0,0,0,0,31864,31864,0,NA,76477,23762144,NA,NA,NA,NA,NA
+U1Public,oriented_uniform_run,many_small_f64_lazy_lhs_compose,first_fresh_runtime_after_preflight,1,23.291,0,0,0,0,0,0,0,0,0,0,0,0,11456,11456,0,1,0,0,0,0,0,31864,31864,0,NA,408,115222,NA,NA,NA,NA,NA
+U1Public,oriented_uniform_run,many_small_f64_lazy_lhs_compose,warm_fixed,2289,8.739,0,0,0,0,0,0,0,0,0,0,0,0,11456,11456,0,2289,0,0,0,0,0,31864,31864,0,NA,64092,21869106,NA,NA,NA,NA,NA
+U1Public,oriented_uniform_run,many_small_f64_lazy_lhs_contract,first_fresh_runtime_after_preflight,1,23.000,0,0,0,0,0,0,0,0,0,0,0,0,11456,11456,0,1,0,0,0,0,0,31864,31864,0,NA,406,115192,NA,NA,NA,NA,NA
+U1Public,oriented_uniform_run,many_small_f64_lazy_lhs_contract,warm_fixed,2313,8.649,0,0,0,0,0,0,0,0,0,0,0,0,11456,11456,0,2313,0,0,0,0,0,31864,31864,0,NA,60138,22029012,NA,NA,NA,NA,NA
+U1Public,oriented_uniform_run,many_small_c64_direct_compose,first_fresh_runtime_after_preflight,1,24.583,0,0,0,0,0,0,0,0,0,0,0,0,11456,11456,0,1,0,0,0,0,0,31864,31864,0,NA,411,119396,NA,NA,NA,NA,NA
+U1Public,oriented_uniform_run,many_small_c64_direct_compose,warm_fixed,2317,8.632,0,0,0,0,0,0,0,0,0,0,0,0,11456,11456,0,2317,0,0,0,0,0,31864,31864,0,NA,71827,31807776,NA,NA,NA,NA,NA
+U1Public,oriented_uniform_run,many_small_c64_lazy_lhs_compose,first_fresh_runtime_after_preflight,1,25.791,0,0,0,0,0,0,0,0,0,0,0,0,11456,11456,0,1,0,0,0,0,0,31864,31864,0,NA,408,119318,NA,NA,NA,NA,NA
+U1Public,oriented_uniform_run,many_small_c64_lazy_lhs_compose,warm_fixed,2103,9.510,0,0,0,0,0,0,0,0,0,0,0,0,11456,11456,0,2103,0,0,0,0,0,31864,31864,0,NA,58884,28705950,NA,NA,NA,NA,NA
+U1Public,oriented_uniform_run,many_small_c64_lazy_lhs_contract,first_fresh_runtime_after_preflight,1,24.084,0,0,0,0,0,0,0,0,0,0,0,0,11456,11456,0,1,0,0,0,0,0,31864,31864,0,NA,406,119288,NA,NA,NA,NA,NA
+U1Public,oriented_uniform_run,many_small_c64_lazy_lhs_contract,warm_fixed,2105,9.505,0,0,0,0,0,0,0,0,0,0,0,0,11456,11456,0,2105,0,0,0,0,0,31864,31864,0,NA,54730,28670100,NA,NA,NA,NA,NA
+U1Public,oriented_uniform_run,few_large_f64_direct_compose,first_fresh_runtime_after_preflight,1,19.958,0,0,0,0,0,0,0,0,0,0,0,0,13288,13288,0,1,0,0,0,0,0,36632,36632,0,NA,243,127540,NA,NA,NA,NA,NA
+U1Public,oriented_uniform_run,few_large_f64_direct_compose,warm_fixed,2090,9.573,0,0,0,0,0,0,0,0,0,0,0,0,13288,13288,0,2090,0,0,0,0,0,36632,36632,0,NA,77330,152327560,NA,NA,NA,NA,NA
+U1Public,oriented_uniform_run,few_large_f64_lazy_lhs_compose,first_fresh_runtime_after_preflight,1,20.167,0,0,0,0,0,0,0,0,0,0,0,0,13288,13288,0,1,0,0,0,0,0,36632,36632,0,NA,240,160230,NA,NA,NA,NA,NA
+U1Public,oriented_uniform_run,few_large_f64_lazy_lhs_compose,warm_fixed,1932,10.355,0,0,0,0,0,0,0,0,0,0,0,0,13288,13288,0,1932,0,0,0,0,0,36632,36632,0,NA,65688,203968968,NA,NA,NA,NA,NA
+U1Public,oriented_uniform_run,few_large_f64_lazy_lhs_contract,first_fresh_runtime_after_preflight,1,19.333,0,0,0,0,0,0,0,0,0,0,0,0,13288,13288,0,1,0,0,0,0,0,36632,36632,0,NA,238,160200,NA,NA,NA,NA,NA
+U1Public,oriented_uniform_run,few_large_f64_lazy_lhs_contract,warm_fixed,1939,10.317,0,0,0,0,0,0,0,0,0,0,0,0,13288,13288,0,1939,0,0,0,0,0,36632,36632,0,NA,62048,204649816,NA,NA,NA,NA,NA
+U1Public,oriented_uniform_run,few_large_c64_direct_compose,first_fresh_runtime_after_preflight,1,37.416,0,0,0,0,0,0,0,0,0,0,0,0,13288,13288,0,1,0,0,0,0,0,36632,36632,0,NA,243,194896,NA,NA,NA,NA,NA
+U1Public,oriented_uniform_run,few_large_c64_direct_compose,warm_fixed,741,27.019,0,0,0,0,0,0,0,0,0,0,0,0,13288,13288,0,741,0,0,0,0,0,36632,36632,0,NA,27417,103917840,NA,NA,NA,NA,NA
+U1Public,oriented_uniform_run,few_large_c64_lazy_lhs_compose,first_fresh_runtime_after_preflight,1,37.834,0,0,0,0,0,0,0,0,0,0,0,0,13288,13288,0,1,0,0,0,0,0,36632,36632,0,NA,240,262402,NA,NA,NA,NA,NA
+U1Public,oriented_uniform_run,few_large_c64_lazy_lhs_compose,warm_fixed,710,28.181,0,0,0,0,0,0,0,0,0,0,0,0,13288,13288,0,710,0,0,0,0,0,36632,36632,0,NA,24140,147499660,NA,NA,NA,NA,NA
+U1Public,oriented_uniform_run,few_large_c64_lazy_lhs_contract,first_fresh_runtime_after_preflight,1,38.125,0,0,0,0,0,0,0,0,0,0,0,0,13288,13288,0,1,0,0,0,0,0,36632,36632,0,NA,238,262372,NA,NA,NA,NA,NA
+U1Public,oriented_uniform_run,few_large_c64_lazy_lhs_contract,warm_fixed,702,28.513,0,0,0,0,0,0,0,0,0,0,0,0,13288,13288,0,702,0,0,0,0,0,36632,36632,0,NA,22464,145816632,NA,NA,NA,NA,NA
+U1Public,oriented_uniform_run,many_small_f64_lazy_lhs_compose_shape_cycle,warm_shape_cycle,2046,9.777,0,0,0,0,0,0,0,0,0,0,0,0,13288,13288,0,2046,0,0,0,0,0,100360,100360,0,NA,57288,19896668,NA,NA,NA,NA,NA
+U1Public,oriented_uniform_run,many_small_c64_lazy_lhs_compose_shape_cycle,warm_shape_cycle,1899,10.533,0,0,0,0,0,0,0,0,0,0,0,0,13288,13288,0,1899,0,0,0,0,0,100360,100360,0,NA,53172,26569542,NA,NA,NA,NA,NA
+U1Public,oriented_uniform_run,few_large_f64_lazy_lhs_compose_shape_cycle,warm_shape_cycle,1734,11.552,0,0,0,0,0,0,0,0,0,0,0,0,13288,13288,0,1734,0,0,0,0,0,78032,78032,0,NA,58956,190801268,NA,NA,NA,NA,NA
+U1Public,oriented_uniform_run,few_large_c64_lazy_lhs_compose_shape_cycle,warm_shape_cycle,681,29.483,0,0,0,0,0,0,0,0,0,0,0,0,13288,13288,0,681,0,0,0,0,0,78032,78032,0,NA,23154,143599746,NA,NA,NA,NA,NA
