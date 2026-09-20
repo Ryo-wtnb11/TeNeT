@@ -1,7 +1,7 @@
 # Single-precision base admission — what H1 opened and what stayed closed
 
-Authority: TeNeT `f032d121` (`origin/main`, which carries the marker split
-#1308), issue
+Authority: TeNeT `89b1cde6` (`origin/main`; the branch was rebased onto it
+after the independent review, and it carries the marker split #1308), issue
 [#1315](https://github.com/Ryo-wtnb11/TeNeT/issues/1315), plan
 [#1065](https://github.com/Ryo-wtnb11/TeNeT/issues/1065), survey
 `reviews/gpu-phase-20260920/single-precision-survey.md`, and the #1308
@@ -33,7 +33,8 @@ structural transforms, trace, `restrict_leg`/`embed_leg`/`restrict_diagonal`/
 | Site | Change |
 | --- | --- |
 | `tenet-operations/src/owned_overwrite_buffer.rs` | `unsafe impl ZeroBytes for f32` / `Complex32`, with the all-zero-bytes invariant stated per impl |
-| `tenet/src/typed.rs` `ScalarOps` | impls for `f32` / `Complex32`; new associated type `Wide` |
+| `tenet/src/typed.rs` `ScalarOps` | impls for `f32` / `Complex32`; new supertrait `WideScalar<Wide: FactorScalar>` |
+| `tenet-operations/src/scalar.rs` | new `WideScalar` trait (the reduction accumulator, one authority for every crate) |
 | `tenet/src/typed.rs` `TensorScalar` | `impl TensorScalar for f32` / `Complex32` |
 | `tenet/src/runtime.rs` `Ctxs` | `f32` / `c32` lanes, built on first use |
 | `tenet/src/lib.rs` | `pub use num_complex::Complex32` |
@@ -73,13 +74,47 @@ four dtypes before this leaf; no dtype dispatch was added there.
   is bound into every real-coefficient lane, including the new ones: the plans
   are structural, not payload-typed, so nothing is duplicated per dtype.
 * **`norm`/`norm_inf`/`norm_p` return `f64`; `inner`/`tr` return `D`.** Every
-  region partial sum now accumulates in `ScalarOps::Wide` — `Self` for the
-  double-precision pair, the double-precision member of the same field for the
-  single-precision pair. `f64` and `Complex64` results are bitwise unchanged
-  (`Wide = Self`, `widen` is the identity, and the emitted arithmetic is the
-  same); `f32`/`Complex32` gain the accuracy of a double accumulator over a
-  naive `f32` sum, which TeNeT chooses deliberately over TensorKit's scaled
-  per-block `LinearAlgebra.norm`.
+  reduction that sums a whole block, coupled region or spectrum accumulates in
+  `WideScalar::Wide` — `Self` for the double-precision pair, the
+  double-precision member of the same field for the single-precision pair. The
+  claim covers **all** of them, on every storage form, which is what the
+  independent review returned the first revision for:
+
+  | Path | Site |
+  | --- | --- |
+  | dense coupled region | `typed.rs::coupled_region_inner`, `weighted_inner`, `weighted_trace` |
+  | compact diagonal | `typed.rs::compact_inner`, `tr_multiplicity_free`, `trace_pairs_multiplicity_free` |
+  | lazy adjoint | `tenet-tensors/src/oriented_elementwise.rs::oriented_fusion_inner[_with]` and the `tenet-operations` kernel it calls, `bilinear_raw_strided_kernel_mapped` |
+
+  `f64` and `Complex64` results are unchanged **bit for bit**: `Wide = Self`,
+  `widen`/`narrow` are the identity, and where the oriented total applies a
+  quantum-dimension weight the accumulator is multiplied by
+  `coefficient_as_data(w)` — `w + 0i` for a complex accumulator — which is the
+  exact expression the loop used before, rather than the componentwise
+  `scale_by_coefficient`, so even the signed zeros and the non-finite cases
+  agree. Pinned by
+  `tenet/tests/reduction_accumulator_precision.rs::double_precision_reductions_are_bit_for_bit_unchanged`
+  against bit patterns captured on `origin/main` 89b1cde6.
+  `f32`/`Complex32` gain the accuracy and the range of a double accumulator
+  over a naive `f32` sum, which TeNeT chooses deliberately over TensorKit's
+  scaled per-block `LinearAlgebra.norm`.
+* **Plan-cache observability is aggregated, not per dtype.**
+  `Runtime::tree_transform_cache_info` and `clear_tree_transform_cache` report
+  and clear single- and double-precision activity together, because the plans
+  are structural and the store is shared. Recorded in the `TensorScalar`
+  rustdoc. Nothing dtype-dependent is stored under a dtype-free key: the
+  recoupling scratch is a `Vec<D>` inside a `Ctx<D>` workspace, so cross-dtype
+  reuse is impossible by type, and the network pools key on `TypeId<(R,D,S)>`.
+* **A new payload dtype is a minor source break (RFC 1105).** A payload dtype
+  inferred *solely* from float literals, whose result then has a method called
+  on it, now fails with `E0689`: with one float impl rustc unified `{float}`
+  with `f64` through impl selection eagerly, with two it waits for the
+  end-of-function fallback, which is too late for method resolution. Affects
+  `diagonal`, `from_block_fn` closures returning literals, and `scale`/`add`
+  coefficients on an un-annotated `zeros`/`id`/`rand`; the fix is to annotate
+  the payload type. Documented in the `TensorScalar` rustdoc with a compiling
+  example. One in-tree call site needed it
+  (`tenet-network/tests/trace_macro.rs`).
 * **Mixed payload dtypes stay a compile error**, exactly as `f64 × Complex64`
   already was.
 * **`rand` draws in the payload type.** `f32` takes 24 bits and divides by
@@ -101,7 +136,12 @@ four dtypes before this leaf; no dtype dispatch was added there.
 The 144 bytes are the two `Option<Box<_>>` lane slots and the retained lane
 configuration per `Ctxs`, inside allocations the runtime already made. A lane
 costs about 66 allocation calls, and is paid only by a program that names the
-dtype. Pinned by `tenet/tests/single_precision_allocations.rs`.
+dtype — but it is paid *per `Ctxs`*, not per `Runtime`: each pooled
+`TensorExecutionContext` has an `mf` and a `generic` namespace, so a program
+that uses single precision on `max_idle` pooled contexts builds up to
+`2 * max_idle` lanes per dtype. That is the same shape as the double-precision
+lanes it already pays for eagerly. Pinned by
+`tenet/tests/single_precision_allocations.rs`.
 
 The same test pins the per-operation contract: at a 605-entry payload, `f32`
 and `f64` perform the identical 25 allocation calls, and `f32` allocates
@@ -123,6 +163,17 @@ payload-sized buffers the measured pipeline produces. `Complex32` against
 - `tenet-network/tests/single_precision_network.rs` — `tensor!` chains, macro
   trace and plan-cache replay, same oracle.
 - `tenet/tests/single_precision_allocations.rs` — the two cost contracts above.
+- `tenet/tests/contraction_output_allocations.rs::owned_su2_single_precision_contraction_allocates_like_double`
+  — the same contract on the SU(2) compose fixture, which is where the
+  coefficient scratch is converted per structure identity.
+- `tenet/tests/reduction_accumulator_precision.rs` — where the reductions
+  accumulate: the `f64`/`Complex64` bit-for-bit pins, and three
+  single-precision pins that distinguish a wide from a narrow accumulator by
+  construction (one entry of `8192.0f32` and the rest `1.0f32`: `8192^2` is
+  `2^26`, whose `f32` step is 8, so a narrow accumulator swallows every `1.0`
+  and a wide one does not — the difference survives narrowing back to `f32`),
+  plus an overflow fixture (`1e20f32`) whose `norm` must be finite on dense,
+  compact and lazy-adjoint storage.
 - `tenet/src/runtime.rs::lazily_built_single_precision_lanes_inherit_the_runtime_configuration`
   — a deferred lane carries the eager lanes' CPU context, recoupling threads
   and cache policy.
@@ -163,6 +214,21 @@ constant.
 - **Checked-Generic `eig`** returns `Complex64` rather than `D::Eig`; admitting
   a single-precision payload to `AdvancedLinalgScalar` before H6 would widen
   silently.
+- **T8 (H5):** `tenet-matrixalgebra/src/matrix_functions.rs` Padé-13 constants
+  are double-precision. They are representable and correct for `f32`, so this
+  is an accepted cost (an over-accurate degree), not a defect — but H5 should
+  record it rather than rediscover it.
+- **C0/C4:** `Complex32` on CUDA must be assumed to share the unreleased
+  complex-kernel defect that blocks `Complex64` device QR (tenferro-rs#1833:
+  complex `zero_value` in `triu`/fill/diagonal kernels), and `f32` itself is
+  unverified on NVRTC/cuTENSOR — TensorKit reports a Float32 cuTENSOR failure
+  in its own wrapper. A device probe leaf comes first.
+- **C3:** `tenet-dense/src/cuda_adapter.rs::warm_up` exercises `f64` only, so
+  the first single-precision device call would pay NVRTC/cuSOLVER
+  initialisation.
+- **CI:** the Checked-Generic (SU(3)) coverage added here is behind
+  `racah-generated`. Whether that feature's job runs these files is tracked in
+  #1293; until it does, that acceptance bullet is verified locally only.
 - **`tenet::matrixalgebra::svd_compact`** on `core::TensorMap` already accepts
   `D: FactorScalar`, hence `f32`, outside every marker. Pre-existing expert-layer
   exception, unchanged by this leaf (#1308 review, P2-3).

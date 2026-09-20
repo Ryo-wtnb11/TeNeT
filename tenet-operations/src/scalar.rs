@@ -220,3 +220,88 @@ impl_dense_block_scalar!(f32, F32, F32);
 impl_dense_block_scalar!(f64, F64, F64);
 impl_dense_block_scalar!(Complex32, C32, C32);
 impl_dense_block_scalar!(Complex64, C64, C64);
+
+/// Pairs a payload scalar with the double-precision member of its own field.
+///
+/// Reductions that sum a whole block, coupled region or spectrum accumulate in
+/// [`WideScalar::Wide`] rather than in the payload type. For `f64` and
+/// `Complex64` that is the payload type itself and [`WideScalar::widen`] is the
+/// identity, so those reductions sum exactly the values they summed before,
+/// with the same emitted arithmetic. For `f32` and `Complex32` it is double
+/// precision: a naive single-precision sum of `n` products loses up to
+/// `n * 6e-8` relative (about `sqrt(n) * 6e-8` in practice) and saturates to
+/// infinity near `1.8e19`, while the result is widened to `Complex64`
+/// immediately afterwards in every caller — so accumulating narrow buys
+/// nothing and costs accuracy and range.
+///
+/// The `Wide` type carries `RecouplingCoefficientAction<f64>` so a
+/// quantum-dimension weight can be applied to the accumulator without first
+/// narrowing it to the payload type.
+pub trait WideScalar: DenseBlockScalar + RecouplingCoefficientAction<f64> {
+    /// The double-precision scalar of the same field: real for a real payload,
+    /// complex for a complex one.
+    type Wide: DenseBlockScalar + RecouplingCoefficientAction<f64> + WideScalar<Wide = Self::Wide>;
+
+    /// Exact widening. The identity when `Wide = Self`.
+    fn widen(self) -> Self::Wide;
+
+    /// Narrows a finished accumulator back to the payload type, rounding to
+    /// nearest. The identity when `Wide = Self`.
+    fn narrow(wide: Self::Wide) -> Self;
+}
+
+impl WideScalar for f64 {
+    type Wide = Self;
+
+    #[inline]
+    fn widen(self) -> Self::Wide {
+        self
+    }
+
+    #[inline]
+    fn narrow(wide: Self::Wide) -> Self {
+        wide
+    }
+}
+
+impl WideScalar for Complex64 {
+    type Wide = Self;
+
+    #[inline]
+    fn widen(self) -> Self::Wide {
+        self
+    }
+
+    #[inline]
+    fn narrow(wide: Self::Wide) -> Self {
+        wide
+    }
+}
+
+impl WideScalar for f32 {
+    type Wide = f64;
+
+    #[inline]
+    fn widen(self) -> Self::Wide {
+        f64::from(self)
+    }
+
+    #[inline]
+    fn narrow(wide: Self::Wide) -> Self {
+        wide as f32
+    }
+}
+
+impl WideScalar for Complex32 {
+    type Wide = Complex64;
+
+    #[inline]
+    fn widen(self) -> Self::Wide {
+        Complex64::new(f64::from(self.re), f64::from(self.im))
+    }
+
+    #[inline]
+    fn narrow(wide: Self::Wide) -> Self {
+        Self::new(wide.re as f32, wide.im as f32)
+    }
+}

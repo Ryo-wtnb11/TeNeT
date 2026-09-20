@@ -161,6 +161,13 @@ where
     )
 }
 
+/// Conjugated dot product over one strided block, accumulated in
+/// [`WideScalar::Wide`].
+///
+/// The sum runs over the whole block, so its length is the payload's, not a
+/// constant: a single-precision accumulator would lose digits in proportion to
+/// the block and saturate near `1.8e19`. `Wide` is the payload type itself for
+/// `f64`/`Complex64`, so this is the same arithmetic it always performed.
 #[doc(hidden)]
 #[allow(clippy::too_many_arguments)]
 pub fn bilinear_raw_strided_kernel_mapped<T, L, R>(
@@ -173,9 +180,9 @@ pub fn bilinear_raw_strided_kernel_mapped<T, L, R>(
     rhs_offset: isize,
     lhs_conjugate: bool,
     rhs_conjugate: bool,
-) -> Result<T, OperationError>
+) -> Result<T::Wide, OperationError>
 where
-    T: Copy + Add<T, Output = T> + Mul<T, Output = T> + Zero + ConjugateValue,
+    T: crate::WideScalar,
     L: Copy + Fn(usize) -> Result<isize, OperationError>,
     R: Copy + Fn(usize) -> Result<isize, OperationError>,
 {
@@ -183,13 +190,15 @@ where
     validate_raw_strided_bounds_mapped(rhs_data.len(), shape, rhs_stride, rhs_offset)?;
     let len = crate::strided::element_count(shape)?;
     if len == 0 {
-        return Ok(T::zero());
+        return Ok(T::Wide::zero());
     }
     if shape.is_empty() {
-        return Ok(
-            lhs_data[checked_offset_to_index(lhs_offset)?].maybe_conj(lhs_conjugate)
-                * rhs_data[checked_offset_to_index(rhs_offset)?].maybe_conj(rhs_conjugate),
-        );
+        return Ok(lhs_data[checked_offset_to_index(lhs_offset)?]
+            .widen()
+            .maybe_conj(lhs_conjugate)
+            * rhs_data[checked_offset_to_index(rhs_offset)?]
+                .widen()
+                .maybe_conj(rhs_conjugate));
     }
     bilinear_raw_strided_recurse_mapped(
         shape.len() - 1,
@@ -259,13 +268,13 @@ fn bilinear_raw_strided_recurse_mapped<T, L, R>(
     rhs_base: isize,
     lhs_conjugate: bool,
     rhs_conjugate: bool,
-) -> Result<T, OperationError>
+) -> Result<T::Wide, OperationError>
 where
-    T: Copy + Add<T, Output = T> + Mul<T, Output = T> + Zero + ConjugateValue,
+    T: crate::WideScalar,
     L: Copy + Fn(usize) -> Result<isize, OperationError>,
     R: Copy + Fn(usize) -> Result<isize, OperationError>,
 {
-    let mut sum = T::zero();
+    let mut sum = T::Wide::zero();
     if axis == 0 {
         let lhs_stride = lhs_stride(0)?;
         let rhs_stride = rhs_stride(0)?;
@@ -275,8 +284,8 @@ where
             let rhs_index =
                 checked_offset_to_index(checked_strided_offset(rhs_base, index, rhs_stride)?)?;
             sum = sum
-                + lhs_data[lhs_index].maybe_conj(lhs_conjugate)
-                    * rhs_data[rhs_index].maybe_conj(rhs_conjugate);
+                + lhs_data[lhs_index].widen().maybe_conj(lhs_conjugate)
+                    * rhs_data[rhs_index].widen().maybe_conj(rhs_conjugate);
         }
         return Ok(sum);
     }

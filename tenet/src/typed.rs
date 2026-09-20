@@ -321,6 +321,44 @@ pub use serialization::{DecodeError, DecodeLimits, EncodeError, TypedPersistence
 /// crate) rejects everything at `f32`. Scale it by the payload's own epsilon
 /// — `f32::EPSILON` is about `1.2e-7` — as TensorKit's `rtoldefault` does.
 ///
+/// Execution state is per payload dtype, but the *plan* caches are not: plans
+/// are structural, so [`Runtime::tree_transform_cache_info`] and
+/// [`Runtime::clear_tree_transform_cache`] report and clear single- and
+/// double-precision activity together, in one shared store.
+///
+/// # Annotate the payload dtype
+///
+/// With `f64` the only real payload, a float literal used to select it on its
+/// own. With two, inference waits for the end-of-function `f64` fallback,
+/// which arrives too late for method resolution: a payload dtype taken
+/// *solely* from float literals, whose result then has a method called on it,
+/// now fails with `E0689 ambiguous numeric type {float}`. It affects
+/// [`TensorMap::diagonal`], [`TensorMap::from_block_fn`] closures returning
+/// literals, and `scale`/`add` coefficients on an un-annotated
+/// `zeros`/`id`/`rand`:
+///
+/// ```
+/// use tenet::core::{U1FusionRule, U1Irrep};
+/// use tenet::typed::{GradedSpace, Runtime, SectorSpectrum, TensorMap};
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let runtime = Runtime::builder().dense_threads(1).build()?;
+/// let leg = GradedSpace::try_new(U1FusionRule, [(U1Irrep::new(0), 2)])?;
+/// // Annotated, so the literals have a type to be.
+/// let t: TensorMap<U1FusionRule, f64> = TensorMap::diagonal(
+///     &runtime,
+///     &leg,
+///     [SectorSpectrum { sector: U1Irrep::new(0), values: vec![2.0, 3.0] }],
+/// )?;
+/// assert!((t.tr()?.abs() - 5.0).abs() < 1e-12);
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Passing such a result to an `f64` parameter, comparing it, or never
+/// pinning it still compiles, because the fallback does arrive. Only a method
+/// call on it does not.
+///
 /// # What single precision does *not* reach
 ///
 /// Each rejection below is paired with the same body at `f64`, which is what
@@ -633,26 +671,22 @@ pub struct NetworkDegeneracyRestriction {
 }
 
 /// Internal scalar operations shared by typed tensor execution.
+/// The reduction accumulator is [`tenet_tensors::WideScalar::Wide`], which
+/// owns that decision for every crate: `Self` for the double-precision pair
+/// (so those reductions are unchanged, down to the emitted arithmetic) and the
+/// double-precision scalar of the same field for a single-precision payload.
+/// `Wide: FactorScalar` because the typed reductions form conjugated products
+/// in the accumulator and widen it to `Complex64` at the end.
+///
+/// TensorKit reaches comparable accuracy differently — `LinearAlgebra.norm`
+/// scales each block — so accumulating wide is a deliberate TeNeT choice,
+/// recorded in <https://github.com/Ryo-wtnb11/TeNeT/issues/1315>.
 pub(crate) trait ScalarOps:
-    FactorScalar + tenet_tensors::RecouplingCoefficientAction<f64> + tenet_tensors::ZeroBytes
+    FactorScalar
+    + tenet_tensors::RecouplingCoefficientAction<f64>
+    + tenet_tensors::ZeroBytes
+    + tenet_tensors::WideScalar<Wide: FactorScalar>
 {
-    /// Accumulator for the reductions that sum over a whole coupled region
-    /// (`inner`, `norm`, `tr`): the double-precision member of the same field.
-    ///
-    /// `f64::Wide = f64` and `Complex64::Wide = Complex64`, so [`Self::widen`]
-    /// is the identity there and those reductions keep summing exactly the
-    /// values they summed before. A single-precision payload accumulates in
-    /// double instead: a region holds up to `N` products, the naive `f32` sum
-    /// carries a relative error of order `N * 6e-8` and overflows near
-    /// `1.8e19`, while the widening is exact and the extra cost is one
-    /// conversion per element, not an allocation. TensorKit reaches the same
-    /// place differently — `LinearAlgebra.norm` scales each block — so this is
-    /// a deliberate TeNeT choice, recorded in
-    /// <https://github.com/Ryo-wtnb11/TeNeT/issues/1315>.
-    type Wide: FactorScalar;
-
-    fn widen(self) -> Self::Wide;
-
     /// Returns the execution lane for this payload dtype, building it if the
     /// runtime has not needed it yet.
     ///
@@ -2398,12 +2432,6 @@ where
 }
 
 impl ScalarOps for f64 {
-    type Wide = Self;
-
-    fn widen(self) -> Self::Wide {
-        self
-    }
-
     fn ctx_of<Key: Clone + Eq + Hash + Send + Sync + 'static>(
         ctxs: &mut Ctxs<Key>,
     ) -> Result<&mut Ctx<Self, Key>, Error> {
@@ -2439,12 +2467,6 @@ impl ScalarOps for f64 {
 }
 
 impl ScalarOps for num_complex::Complex64 {
-    type Wide = Self;
-
-    fn widen(self) -> Self::Wide {
-        self
-    }
-
     fn ctx_of<Key: Clone + Eq + Hash + Send + Sync + 'static>(
         ctxs: &mut Ctxs<Key>,
     ) -> Result<&mut Ctx<Self, Key>, Error> {
@@ -2473,12 +2495,6 @@ impl ScalarOps for num_complex::Complex64 {
 }
 
 impl ScalarOps for f32 {
-    type Wide = f64;
-
-    fn widen(self) -> Self::Wide {
-        f64::from(self)
-    }
-
     fn ctx_of<Key: Clone + Eq + Hash + Send + Sync + 'static>(
         ctxs: &mut Ctxs<Key>,
     ) -> Result<&mut Ctx<Self, Key>, Error> {
@@ -2514,12 +2530,6 @@ impl ScalarOps for f32 {
 }
 
 impl ScalarOps for num_complex::Complex32 {
-    type Wide = num_complex::Complex64;
-
-    fn widen(self) -> Self::Wide {
-        num_complex::Complex64::new(f64::from(self.re), f64::from(self.im))
-    }
-
     fn ctx_of<Key: Clone + Eq + Hash + Send + Sync + 'static>(
         ctxs: &mut Ctxs<Key>,
     ) -> Result<&mut Ctx<Self, Key>, Error> {
@@ -2534,7 +2544,7 @@ impl ScalarOps for num_complex::Complex32 {
         // Via `Complex64` rather than `Complex32::norm`: the f32 hypot can
         // overflow or flush to zero for components that the f64 return type
         // represents exactly.
-        ScalarOps::widen(self).norm()
+        tenet_tensors::WideScalar::widen(self).norm()
     }
 
     fn exp_value(self) -> Self {
@@ -2623,7 +2633,7 @@ where
         let rhs = b.get(range).ok_or_else(|| {
             internal_layout_error("coupled-sector region exceeds the right scalar buffer")
         })?;
-        // Accumulated in `D::Wide` (see `ScalarOps::Wide`): the identity for
+        // Accumulated in `D::Wide` (see `tenet_tensors::WideScalar`): the identity for
         // the double-precision payloads, double precision for the single ones.
         let mut partial = D::Wide::from_real(0.0);
         for (&ai, &bi) in lhs.iter().zip(rhs) {
@@ -7093,7 +7103,7 @@ where
         // accessor, while the run cache needs neither.
         let provider = tensor.logical_space().provider();
         let mut last: Option<(SectorId, f64)> = None;
-        let mut weight_of = move |sector: SectorId| match last {
+        let weight_of = move |sector: SectorId| match last {
             Some((cached, weight)) if cached == sector => Ok(weight),
             _ => {
                 let weight = <R::Mode as TypedSpaceModeDispatch<R>>::dim(provider, sector)?;
@@ -7112,7 +7122,7 @@ where
                 lhs_data,
                 rhs_operand,
                 rhs_data,
-                |sector| weight_of(sector).map(D::from_real),
+                weight_of,
             );
         }
         let value = coupled_region_inner(
@@ -10948,8 +10958,12 @@ impl<R, D: CudaPayload> TensorMap<R, D> {
     /// recovering compactness. A lazy adjoint transfers only its canonical
     /// parent and rebuilds a cold lazy view over the device parent.
     ///
-    /// The supported device payloads are `f64` and `Complex64`; single
-    /// precision has no device payload in this leaf:
+    /// The supported device payloads are `f64` and `Complex64`. `f32` and
+    /// `Complex32` are host payloads only: the device Hermitian admission
+    /// constant and the spectra download are still written for double
+    /// precision, so single precision stays a compile-time boundary rather
+    /// than a silent misuse. These two pins only compile under the `cuda`
+    /// feature, so a host-only CI run does not exercise them.
     ///
     /// ```compile_fail
     /// use num_complex::Complex32;
@@ -10960,6 +10974,18 @@ impl<R, D: CudaPayload> TensorMap<R, D> {
     ///     let _ = tensor.to_cuda();
     /// }
     /// ```
+    ///
+    /// ```compile_fail
+    /// use tenet::core::U1FusionRule;
+    /// use tenet::typed::TensorMap;
+    ///
+    /// fn no_f32_upload(tensor: &TensorMap<U1FusionRule, f32>) {
+    ///     let _ = tensor.to_cuda();
+    /// }
+    /// ```
+    ///
+    /// The compiling twin of both, differing only in the payload dtype, is on
+    /// [`TensorScalar`].
     pub fn to_cuda(&self) -> Result<TensorMap<R, D, CudaStorage<D>>, Error> {
         let mut lease = self.runtime.lease_cuda()?;
         let cuda = &mut *lease;
@@ -17221,9 +17247,12 @@ where
             if left.sector != right.sector || left.values.len() != right.values.len() {
                 return Err(spectra_disagree());
             }
-            let mut partial = D::from_real(0.0);
+            // `D::Wide` for the same reason as `coupled_region_inner`: the
+            // identity for the double pair, double precision for the single
+            // one, so a compact `norm`/`inner` answers like its dense twin.
+            let mut partial = D::Wide::from_real(0.0);
             for (&a, &b) in left.values.iter().zip(&right.values) {
-                partial = partial + FactorScalar::adjoint(a) * b;
+                partial = partial + FactorScalar::adjoint(a.widen()) * b.widen();
             }
             total += partial.widen_complex() * provider.dim_scalar(left.sector);
         }
@@ -17587,9 +17616,9 @@ where
                     } else {
                         provider.dim_scalar(entry.sector) * provider.twist_scalar(entry.sector)
                     };
-                    let mut partial: D = D::from_real(0.0);
+                    let mut partial = D::Wide::from_real(0.0);
                     for &value in &entry.values {
-                        partial = partial + value;
+                        partial = partial + value.widen();
                     }
                     total += partial.widen_complex() * coefficient;
                 }
@@ -17879,7 +17908,7 @@ where
                         rhs.parent.materialized_dense_data(),
                         tenet_tensors::FusionOperand::direct(lhs.parent.space.space()),
                         lhs.parent.materialized_dense_data(),
-                        |sector| D::from_real(provider.dim_scalar(sector)),
+                        |sector| provider.dim_scalar(sector),
                     )?
                 }
                 _ => tenet_tensors::oriented_fusion_inner(
@@ -17888,7 +17917,7 @@ where
                     lhs_data,
                     rhs_operand,
                     rhs_data,
-                    |sector| D::from_real(provider.dim_scalar(sector)),
+                    |sector| provider.dim_scalar(sector),
                 )?,
             };
             return Ok(value);
@@ -17947,9 +17976,9 @@ where
             let provider = self.logical_space().provider();
             let mut total = num_complex::Complex64::new(0.0, 0.0);
             for entry in spectrum {
-                let mut partial = D::from_real(0.0);
+                let mut partial = D::Wide::from_real(0.0);
                 for &value in &entry.values {
-                    partial = partial + value;
+                    partial = partial + value.widen();
                 }
                 total += partial.widen_complex() * provider.dim_scalar(entry.sector);
             }

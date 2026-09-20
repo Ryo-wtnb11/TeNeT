@@ -123,7 +123,7 @@ pub use tenet_operations::{
 pub use tenet_operations::{zeroed_payload, ZeroBytes};
 pub use tenet_operations::{
     ConjugateValue, DenseBlockScalar, DenseRecouplingScalar, RealStructuralCoefficient,
-    RecouplingCoefficientAction, TreeTransformScalar,
+    RecouplingCoefficientAction, TreeTransformScalar, WideScalar,
 };
 pub use tenet_operations::{
     DenseTreeTransformOperations, HostAllocator, HostTensorOperations, HostTensorOperationsBackend,

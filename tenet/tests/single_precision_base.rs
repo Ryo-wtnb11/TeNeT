@@ -355,9 +355,12 @@ macro_rules! base_suite {
                     "the fZ2 twist must change the payload of an odd-sector fixture"
                 );
 
-                // Round trip: the inverse permutation restores the input
-                // exactly, because the recoupling of a permutation and its
-                // inverse is the identity matrix at any payload precision.
+                // Round trip: the inverse permutation restores the input to
+                // within the module tolerance. The recoupling of a
+                // permutation and its inverse is the identity matrix, but the
+                // two transforms are still executed, so the payload makes a
+                // round trip through the dense kernel rather than being
+                // returned untouched.
                 let restored = a.permute(&[1, 2], &[3, 0]).unwrap();
                 assert_payloads_agree(
                     "permute round trip",
