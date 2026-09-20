@@ -796,6 +796,24 @@ fn typed_cuda_reductions_cover_weights_providers_lazy_and_preflight() {
     );
     assert!(callback_count.load(Ordering::SeqCst) > calls_before_reduction);
 
+    // Same canary for a device structural transform (#1322). This provider's
+    // `dim_scalar` re-enters `lease_cuda`, so any provider callback made while
+    // the device lease is held deadlocks on a non-re-entrant mutex. Today the
+    // transform's compile needs F and R symbols but no dimension for this
+    // one-sector rule, so the counter is not asserted to move — what is
+    // guarded is that a future edit which does need a dimension cannot make
+    // that call under the lease.
+    let probe_device = probe_lhs.to_cuda().unwrap();
+    assert_eq!(
+        probe_device
+            .permute(&[1], &[0])
+            .unwrap()
+            .to_host()
+            .unwrap()
+            .data(),
+        probe_lhs.permute(&[1], &[0]).unwrap().data()
+    );
+
     let other_runtime = Runtime::builder().cuda(0).build().unwrap();
     let foreign = TensorMap::from_block_fn(&other_runtime, [&u1_leg], [&u1_leg], |_, _| 1.0)
         .unwrap()

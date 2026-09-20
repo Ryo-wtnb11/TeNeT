@@ -5,6 +5,8 @@ use std::any::Any;
 use std::cell::RefCell;
 use std::hash::Hash;
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(feature = "cuda")]
+use std::sync::PoisonError;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
 use num_complex::{Complex32, Complex64};
@@ -662,7 +664,7 @@ struct RuntimeInner {
     /// serialize here (and on Tenferro's internal handle/plan locks) instead
     /// of on `state`.
     #[cfg(feature = "cuda")]
-    cuda: Option<Mutex<tenet_dense::CudaDenseContext>>,
+    cuda: Option<Mutex<CudaDeviceState>>,
     /// Device ordinal of `cuda`, fixed at build time and readable without a
     /// lock so placement preflight takes no device lock at all.
     #[cfg(feature = "cuda")]
@@ -692,11 +694,97 @@ fn mint_dense(config: &RuntimeExecutionConfig) -> Box<dyn tenet_dense::DenseExec
     )
 }
 
+/// The device-local state one CUDA device operation may need: the dense
+/// context every device kernel is submitted through, and the tree-transform
+/// executor that holds the per-structure device state (uploaded coefficient
+/// vectors, pack/scatter workspaces).
+///
+/// The executor lives here rather than beside the host caches because a replay
+/// needs `&mut CudaDenseContext` and `&mut CudaTreeTransformExecutor` at the
+/// same instant, and because its entries are keyed by the device context's own
+/// identity: they are meaningless without it. Putting both behind one mutex is
+/// what lets a device transform take exactly one lock.
+#[cfg(feature = "cuda")]
+pub(crate) struct CudaDeviceState {
+    dense: tenet_dense::CudaDenseContext,
+    tree_transform: tenet_operations::CudaTreeTransformExecutor,
+}
+
 /// RAII lease of this runtime's single CUDA context, held only for the device
 /// portion of one device operation. A device context cannot be pooled: device
 /// tensors are bound to one backend instance, so the guard is the lease.
+///
+/// It dereferences to the [`tenet_dense::CudaDenseContext`], so every device
+/// operation that needs nothing else reads exactly as it did before the
+/// tree-transform executor moved in beside it; a transform takes both halves
+/// through [`Self::split`].
+///
+/// Nothing reached while this lease is held may lease again: `std::sync::Mutex`
+/// is not re-entrant, so a second `lease_cuda()` under it deadlocks. Host-side
+/// planning — structure compilation, cache lookup, space derivation — is
+/// finished, and the host context lease dropped, before this one is taken.
 #[cfg(feature = "cuda")]
-pub(crate) type CudaLease<'a> = MutexGuard<'a, tenet_dense::CudaDenseContext>;
+pub(crate) struct CudaLease<'a>(MutexGuard<'a, CudaDeviceState>);
+
+#[cfg(feature = "cuda")]
+impl CudaLease<'_> {
+    /// Borrows the dense context and the tree-transform executor at once, which
+    /// a replay needs because the executor submits its work through the
+    /// context.
+    pub(crate) fn split(
+        &mut self,
+    ) -> (
+        &mut tenet_dense::CudaDenseContext,
+        &mut tenet_operations::CudaTreeTransformExecutor,
+    ) {
+        let state = &mut *self.0;
+        (&mut state.dense, &mut state.tree_transform)
+    }
+}
+
+#[cfg(feature = "cuda")]
+impl std::ops::Deref for CudaLease<'_> {
+    type Target = tenet_dense::CudaDenseContext;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0.dense
+    }
+}
+
+#[cfg(feature = "cuda")]
+impl std::ops::DerefMut for CudaLease<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0.dense
+    }
+}
+
+/// Device bytes this Runtime's tree-transform executor and its device context
+/// hold for reuse, each counted once.
+///
+/// Read-only: nothing here is a knob. `executor_bytes` is what the executor
+/// retains (uploaded coefficient and recoupling vectors plus the pack/scatter
+/// workspaces) and is released by
+/// [`Runtime::clear_tree_transform_cache`]. `context_scalar_operand_bytes` is
+/// the device context's own shared `1` and zero template, which many device
+/// operations share and which the executor does not own; the two are reported
+/// separately so neither is charged twice. Neither is charged to
+/// `PlanCacheConfig::workspace_budget_bytes`, which admits idle *network*
+/// workspaces and has no eviction protocol for a Runtime singleton.
+#[cfg(feature = "cuda")]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct CudaTreeTransformStats {
+    /// Structures with device state currently prepared.
+    pub prepared_structures: usize,
+    /// Device bytes the executor retains: coefficient vectors and workspaces.
+    pub executor_bytes: usize,
+    /// Of `executor_bytes`, what the pack/scatter workspaces hold.
+    pub workspace_bytes: usize,
+    /// Device bytes the shared context scalar operands hold, owned by the
+    /// device context rather than by the executor.
+    pub context_scalar_operand_bytes: usize,
+    /// Distinct cuTENSOR operand signatures the prepared structures submit.
+    pub required_plan_entries: usize,
+}
 
 /// The one error a device operation reports when its runtime has no device.
 #[cfg(feature = "cuda")]
@@ -907,8 +995,23 @@ impl Runtime {
     }
 
     /// Clears this Runtime's completed tree-transform cache.
+    ///
+    /// The device tree-transform executor's prepared state is dropped too, and
+    /// strictly after the host store clear has returned: the two locks are
+    /// taken one after the other, never nested, so this can never invert a
+    /// lock order. Dropping device state is a memory decision, never a
+    /// correctness one — the next device transform re-prepares what it needs.
+    /// On a Runtime with a device this call therefore blocks behind a device
+    /// operation in progress. A device lock poisoned by an earlier panic is
+    /// recovered rather than propagated: dropping prepared device state is
+    /// always safe, and a cache clear is the wrong place to re-raise someone
+    /// else's panic.
     pub fn clear_tree_transform_cache(&self) {
         self.inner.tree_transform_stores.clear();
+        #[cfg(feature = "cuda")]
+        if let Some(mut lease) = self.lease_cuda_for_maintenance() {
+            lease.split().1.clear();
+        }
     }
 
     pub(crate) fn admitted_tree_pair_operation<R>(
@@ -1087,6 +1190,23 @@ impl Runtime {
         self.inner.cuda_device.ok_or_else(missing_cuda_device)
     }
 
+    /// Leases the device state for a path that only drops or reads it.
+    ///
+    /// Unlike [`Self::lease_cuda`], a poisoned mutex is recovered rather than
+    /// re-panicked: clearing prepared device state and reading its byte
+    /// counters are safe whatever a panicking device operation left behind —
+    /// every entry is a dtype conversion of data the structure still owns, and
+    /// the workspaces are fully rewritten before they are read. Turning
+    /// another thread's panic into a panic in a cache-clear or a statistics
+    /// read would be the worse contract.
+    #[cfg(feature = "cuda")]
+    fn lease_cuda_for_maintenance(&self) -> Option<CudaLease<'_>> {
+        self.inner
+            .cuda
+            .as_ref()
+            .map(|cuda| CudaLease(cuda.lock().unwrap_or_else(PoisonError::into_inner)))
+    }
+
     /// Leases this runtime's single CUDA context for one device operation.
     ///
     /// Device operations validate first, then lease, then execute: they hold
@@ -1101,7 +1221,27 @@ impl Runtime {
             .cuda
             .as_ref()
             .ok_or_else(missing_cuda_device)
-            .map(|cuda| cuda.lock().expect("tenet cuda context poisoned"))
+            .map(|cuda| CudaLease(cuda.lock().expect("tenet cuda context poisoned")))
+    }
+
+    /// Device state this Runtime's tree-transform executor and device context
+    /// retain, or `None` when the Runtime has no device.
+    ///
+    /// Read-only observation; it takes the device lease, so it waits behind a
+    /// device operation in progress. A device lock poisoned by an earlier
+    /// panic is recovered and the recovered state's counters are returned,
+    /// rather than panicking inside a statistics read.
+    #[cfg(feature = "cuda")]
+    pub fn cuda_tree_transform_stats(&self) -> Option<CudaTreeTransformStats> {
+        let mut lease = self.lease_cuda_for_maintenance()?;
+        let (dense, executor) = lease.split();
+        Some(CudaTreeTransformStats {
+            prepared_structures: executor.prepared_structures(),
+            executor_bytes: executor.executor_device_bytes(),
+            workspace_bytes: executor.workspace_device_bytes(),
+            context_scalar_operand_bytes: dense.scalar_operand_bytes(),
+            required_plan_entries: executor.required_plan_entries(),
+        })
     }
 
     /// Deterministic per-runtime stream position for
@@ -1434,7 +1574,22 @@ impl RuntimeBuilder {
                     .map_err(tenet_tensors::OperationError::Dense)?;
                 cuda.warm_up()
                     .map_err(tenet_tensors::OperationError::Dense)?;
-                Some(Mutex::new(cuda))
+                // The executor's prepared-structure bound is the host transform
+                // cache's own bound, read from this Runtime's configuration
+                // rather than restated: a structure warm on the host must stay
+                // warm on device, or the warm replay's no-upload contract
+                // quietly stops holding. (One host structure can back two
+                // device entries, f64 and Complex64, so equal counts are not
+                // equal coverage — this bounds memory, never correctness.)
+                Some(Mutex::new(CudaDeviceState {
+                    dense: cuda,
+                    tree_transform:
+                        tenet_operations::CudaTreeTransformExecutor::with_structure_entries(
+                            tenet_operations::DEFAULT_COEFFICIENT_BUDGET_BYTES,
+                            tenet_operations::DEFAULT_PLAN_CACHE_BUDGET_BYTES,
+                            tree_transform_stores.info().entry_capacity().max(1),
+                        ),
+                }))
             }
             None => None,
         };
@@ -2053,5 +2208,19 @@ mod tests {
         assert_eq!(config.capacity, 7);
         assert_eq!(config.workspace_budget_bytes, 0);
         runtime.with_extension_slot(|slot| assert!(slot.is_none()));
+    }
+
+    /// Compile-level gate for the device-state ownership of #1322: the lease is
+    /// still a `CudaDenseContext` for every caller that wants only the dense
+    /// context, and a transform reaches both halves through `split()` without
+    /// leasing twice. It is never executed — a device would be needed to
+    /// obtain a lease — but it fails the build if either shape regresses.
+    #[cfg(feature = "cuda")]
+    #[allow(dead_code)]
+    fn cuda_lease_still_derefs_to_the_dense_context_and_splits(mut lease: CudaLease<'_>) {
+        let dense: &mut tenet_dense::CudaDenseContext = &mut lease;
+        let _ = dense.device();
+        let (dense, executor) = lease.split();
+        let _ = executor.retained_device_bytes(dense);
     }
 }
