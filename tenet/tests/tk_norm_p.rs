@@ -268,3 +268,131 @@ fn compact_norm_p_equals_the_dense_answer() {
         );
     }
 }
+
+// --- `norm(t, Inf)` on non-finite payloads (issue #1286) ------------------
+//
+// TensorKit reduces with `mapreduce(max, …)` (`src/tensors/linalg.jl:_norm`,
+// revision cfaa073) and Julia's `max` returns NaN when either argument is NaN.
+// Rust's `f64::max` is IEEE `maxNum`, which *discards* NaN — folding with it
+// would let a poisoned tensor report a finite magnitude, which is exactly what
+// overflow control in a long contraction sequence reads this value to detect.
+// QSpace has no max-abs production helper (concrete absence).
+//
+// The poison sits in the *last* coupled sector below, so a fold that dropped
+// NaN would still return the finite maximum of the earlier blocks.
+
+/// The coupled sector poisoned by the fixtures below: the `+1` block is last in
+/// the U(1) bond's engine order and is not where the clean maximum lives.
+fn poisoned(trees: &tenet::typed::BlockFusionTrees<U1Irrep>) -> bool {
+    *trees.coupled() == U1Irrep::new(1)
+}
+
+fn u1_real_with(value: f64) -> TensorMap<U1FusionRule, f64> {
+    let rt = runtime();
+    let (v, w) = typed_u1();
+    TensorMap::from_block_fn(&rt, [&v], [&w], |trees, indices| {
+        if poisoned(trees) && indices == [0, 0] {
+            value
+        } else {
+            real_fill(indices)
+        }
+    })
+    .unwrap()
+}
+
+#[test]
+fn norm_inf_propagates_nan_from_any_block() {
+    let poisoned = u1_real_with(f64::NAN);
+    assert!(
+        poisoned.norm_inf().unwrap().is_nan(),
+        "a NaN entry must reach norm_inf, not be dropped for the finite maximum"
+    );
+    assert!(
+        poisoned.norm_p(f64::INFINITY).unwrap().is_nan(),
+        "norm_p(Inf) must stay identical to norm_inf"
+    );
+    // The finite entries alone still have the clean maximum, so the NaN is the
+    // only reason the assertions above hold.
+    assert_close(
+        u1_real_with(0.0).norm_inf().unwrap(),
+        U1_F64[3],
+        "u1 f64 norm_inf() with the poisoned entry zeroed",
+    );
+}
+
+#[test]
+fn norm_inf_propagates_nan_hidden_in_the_imaginary_part() {
+    let rt = runtime();
+    let (v, w) = typed_u1();
+    let tensor: TensorMap<U1FusionRule, Complex64> =
+        TensorMap::from_block_fn(&rt, [&v], [&w], |trees, indices| {
+            if poisoned(trees) && indices == [0, 0] {
+                // Finite real part: only |z| = hypot(re, im) sees the NaN.
+                Complex64::new(1.0, f64::NAN)
+            } else {
+                complex_fill(indices)
+            }
+        })
+        .unwrap();
+    assert!(tensor.norm_inf().unwrap().is_nan(), "c64 NaN in Im(z)");
+}
+
+#[test]
+fn norm_inf_propagates_nan_through_compact_and_lazy_storage() {
+    let rt = runtime();
+    let (bond, _) = typed_u1();
+    let compact = TensorMap::<_, f64>::diagonal(
+        &rt,
+        &bond,
+        [
+            tenet::typed::SectorSpectrum {
+                sector: U1Irrep::new(-1),
+                values: vec![2.0, 3.0],
+            },
+            tenet::typed::SectorSpectrum {
+                sector: U1Irrep::new(0),
+                values: vec![1.0, 4.0, 5.0],
+            },
+            tenet::typed::SectorSpectrum {
+                sector: U1Irrep::new(1),
+                values: vec![f64::NAN, 1.0, 1.0, 1.0],
+            },
+        ],
+    )
+    .unwrap();
+    assert!(
+        compact.norm_inf().unwrap().is_nan(),
+        "the compact arm reads the stored spectrum and must fold it the same way"
+    );
+
+    // `adjoint` on dense storage is a lazy parent-backed view, and `norm_inf`
+    // reads the parent payload without materializing it: a third fold site.
+    let lazy = u1_real_with(f64::NAN).adjoint().unwrap();
+    assert!(lazy.norm_inf().unwrap().is_nan(), "lazy adjoint arm");
+}
+
+#[test]
+fn norm_inf_reports_infinity_and_zero_payloads() {
+    for entry in [f64::INFINITY, f64::NEG_INFINITY] {
+        assert_eq!(
+            u1_real_with(entry).norm_inf().unwrap(),
+            f64::INFINITY,
+            "|{entry}| is +inf, and no finite entry can exceed it"
+        );
+    }
+
+    let rt = runtime();
+    let (v, w) = typed_u1();
+    let zeros: TensorMap<U1FusionRule, f64> = TensorMap::zeros(&rt, [&v], [&w]).unwrap();
+    assert_eq!(zeros.norm_inf().unwrap(), 0.0, "all-zero payload");
+
+    // No coupled sector is shared, so there is no stored entry at all and the
+    // fold returns its identity rather than `-inf` or a panic.
+    let rule = Arc::new(U1FusionRule);
+    let only_zero =
+        GradedSpace::try_new_with_arc(Arc::clone(&rule), [(U1Irrep::new(0), 2)]).unwrap();
+    let only_one = GradedSpace::try_new_with_arc(rule, [(U1Irrep::new(1), 3)]).unwrap();
+    let empty: TensorMap<U1FusionRule, f64> =
+        TensorMap::zeros(&rt, [&only_zero], [&only_one]).unwrap();
+    assert_eq!(empty.norm_inf().unwrap(), 0.0, "no stored entries");
+}

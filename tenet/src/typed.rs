@@ -2320,6 +2320,22 @@ pub(crate) fn validate_norm_p(p: f64) -> Result<(), Error> {
     Ok(())
 }
 
+/// Julia's `max` for the `norm(t, Inf)` reduction: NaN in either argument wins.
+///
+/// `f64::max` implements IEEE `maxNum`, which *discards* a NaN operand, so a
+/// payload poisoned by a single NaN would fold to a finite magnitude and hide
+/// the overflow that produced it. TensorKit reduces with `mapreduce(max, …)`
+/// (`src/tensors/linalg.jl:_norm`), and Julia's `max` propagates NaN.
+fn max_propagating_nan(accumulator: f64, magnitude: f64) -> f64 {
+    if accumulator.is_nan() || magnitude.is_nan() {
+        f64::NAN
+    } else if magnitude > accumulator {
+        magnitude
+    } else {
+        accumulator
+    }
+}
+
 /// TensorKit `_norm(blocks(t), p, 0)` for finite `p > 0` (`linalg.jl:262-270`):
 /// `(Σ_c dim(c) · Σ_{x ∈ block_c} |x|^p)^(1/p)` over the coupled-sector regions
 /// of one dense payload.
@@ -16197,6 +16213,11 @@ where
     /// storage it is the maximum over the whole payload. Unlike [`Self::norm`]
     /// this is **not** quantum-dimension weighted.
     ///
+    /// Non-finite entries follow the reference reduction: a payload holding
+    /// any NaN — including a complex entry whose real or imaginary part alone
+    /// is NaN — returns NaN, and an infinite entry returns `+inf`. A tensor
+    /// with no stored entries, like an all-zero one, returns `0.0`.
+    ///
     /// # Errors
     ///
     /// None today; the `Result` keeps the shape of [`Self::norm`], which the
@@ -16210,7 +16231,7 @@ where
                 .iter()
                 .flat_map(|entry| entry.values.iter())
                 .map(|&value| value.widen_complex().norm())
-                .fold(0.0, f64::max));
+                .fold(0.0, max_propagating_nan));
         }
         if let TypedTensorRepr::Adjoint(view) = &self.repr {
             return Ok(view
@@ -16218,7 +16239,7 @@ where
                 .materialized_dense_data()
                 .iter()
                 .map(|&value| value.widen_complex().norm())
-                .fold(0.0, f64::max));
+                .fold(0.0, max_propagating_nan));
         }
         Ok(self
             .owned_body()
@@ -16226,7 +16247,7 @@ where
             .materialized_dense_data()
             .iter()
             .map(|&value| value.widen_complex().norm())
-            .fold(0.0, f64::max))
+            .fold(0.0, max_propagating_nan))
     }
 
     /// TensorKit `norm(t, p)` for a general exponent:
