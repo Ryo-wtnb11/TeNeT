@@ -668,15 +668,12 @@ fn warm_cuda_destination_reuse_matches_the_returning_chain_for_every_provider() 
 
 /// G3c-2 (#1276): the warm device replay of an N-tensor chain performs no
 /// host-to-device traffic and no device allocation for its N-2 intermediate
-/// steps; each of them is reset by one device region write reading the
-/// context's zero template. Only the final, returned output still uploads its
-/// zeros (#740/G3b).
+/// steps; each of them is reset by one D2D copy from the zero template. Only
+/// the final, returned output still uploads its zeros (#740/G3b).
 ///
-/// Since #1304 the reset is `cuda_region_zero`, so it is counted as a
-/// `dot_general` submission (`gemm_calls`) rather than as a `copy_calls`
-/// entry, and the template itself belongs to the `CudaDenseContext` — one
-/// buffer per runtime and dtype, uploaded together with the `1` operand on
-/// first use, instead of one buffer per workspace.
+/// Since #1304 the template belongs to the `CudaDenseContext` — one buffer per
+/// runtime and dtype instead of one per workspace — but the reset is the same
+/// copy kernel and costs the same counters.
 ///
 /// The counters are process-wide, so this test must not run beside another
 /// device test; the device suite runs with `--test-threads=1`.
@@ -706,9 +703,8 @@ fn warm_cuda_chain_uploads_nothing_for_its_reused_destinations() {
     };
     // Call 1 has nothing retained yet, so every step returns.
     drop(run());
-    // Call 2 is the first to overwrite: it creates the context's two shared
-    // region operands (the `1` and the zero template) once, on top of the
-    // returned output's own zeros.
+    // Call 2 is the first to overwrite: it uploads the zero template once, on
+    // top of the returned output's own zeros.
     let before_second = cuda_transfer_stats();
     drop(run());
     let after_second = cuda_transfer_stats();
@@ -717,8 +713,8 @@ fn warm_cuda_chain_uploads_nothing_for_its_reused_destinations() {
             after_second.h2d_calls - before_second.h2d_calls,
             after_second.copy_calls - before_second.copy_calls,
         ),
-        (3, 0),
-        "the shared region operands cost one upload each, once per context"
+        (2, 2),
+        "the zero template costs exactly one upload, once per context"
     );
 
     // Call 3 onward is the steady state this contract describes.
@@ -734,9 +730,8 @@ fn warm_cuda_chain_uploads_nothing_for_its_reused_destinations() {
             after.d2h_calls - before.d2h_calls,
             after.gemm_calls - before.gemm_calls,
         ),
-        (1, 1, 0, 0, 8),
-        "(h2d, device_allocs, d2d_copies, d2h, submissions) for the warm 4-tensor chain: \
-         two of the eight submissions are the destination resets"
+        (1, 1, 2, 0, 6),
+        "(h2d, device_allocs, d2d_copies, d2h, gemm) for the warm 4-tensor chain"
     );
     drop(warm);
 }

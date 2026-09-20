@@ -222,8 +222,8 @@ use tenet_core::{
 use tenet_dense::{
     cuda_copy_region_into, cuda_eigh_region, cuda_gemm_region_into,
     cuda_is_hermitian_region as dense_cuda_is_hermitian_region,
-    cuda_qr_region as dense_cuda_qr_region, cuda_region_zero,
-    cuda_svd_region as dense_cuda_svd_region, CudaDenseContext, CudaDenseStorage, CudaRegion,
+    cuda_qr_region as dense_cuda_qr_region, cuda_svd_region as dense_cuda_svd_region,
+    cuda_zero_prefix, CudaDenseContext, CudaDenseStorage,
 };
 #[cfg(feature = "cuda")]
 use tenet_operations::StorageGemm;
@@ -9802,8 +9802,8 @@ impl<D: CudaPayload> NetworkPayloadStorage<D> for CudaStorage<D> {
 /// destination is reset from.
 ///
 /// Interim: Tenferro 0.5 can write a buffer only by uploading or by reading
-/// another device buffer, so resetting a retained destination costs one device
-/// read of a zero template rather than a device-local fill. tenferro-rs#1834
+/// another device buffer, so resetting a retained destination costs one D2D
+/// copy from a zero template rather than a device-local fill. tenferro-rs#1834
 /// (`fill_zero_write`) would remove the template and this type together with
 /// its `NetworkPayloadStorage::ResetScratch` seam.
 ///
@@ -9846,9 +9846,13 @@ impl<D: CudaPayload> CudaZeroTemplate<D> {
         self.reserved_len.saturating_mul(std::mem::size_of::<D>())
     }
 
-    /// Writes zeros over the first `len` elements of `destination`, reading the
-    /// context-owned zero template. The template is sized once here and then
-    /// re-read by every later reset, so a warm workspace transfers nothing.
+    /// Writes zeros over the first `len` elements of `destination`, copying
+    /// them from the context-owned zero template. The template is sized once
+    /// here and then re-read by every later reset, so a warm workspace
+    /// transfers nothing.
+    ///
+    /// The kernel is the copy it has always been (`cuda_zero_prefix` →
+    /// `copy_read_into`); only the template's owner moved to the context.
     pub(crate) fn reset_prefix(
         &mut self,
         cuda: &mut CudaDenseContext,
@@ -9860,8 +9864,7 @@ impl<D: CudaPayload> CudaZeroTemplate<D> {
         }
         cuda.reserve_zero_template::<D>(len).map_err(dense_err)?;
         self.reserved_len = self.reserved_len.max(len);
-        let region = CudaRegion::packed(&[len], 0).map_err(dense_err)?;
-        cuda_region_zero::<D>(cuda, &mut destination.0, &region).map_err(dense_err)
+        cuda_zero_prefix::<D>(cuda, &mut destination.0, len).map_err(dense_err)
     }
 }
 

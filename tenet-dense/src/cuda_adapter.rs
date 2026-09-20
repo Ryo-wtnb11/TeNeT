@@ -1408,6 +1408,57 @@ fn expect_dtype<D: CudaScalar>(
     Ok(CudaDenseStorage::from_tensor(tensor, device))
 }
 
+/// Writes zeros over the leading `len` elements of `dst`, copying them from
+/// this context's zero template.
+///
+/// This is the reset a caller that retains a device destination pays before
+/// overwriting it: Tenferro 0.5 cannot fill an existing device buffer
+/// (tenferro-rs#1834), so a zero *source* has to exist somewhere, and the
+/// context owns the only one — it is the same template [`cuda_region_zero`]
+/// reads, grown monotonically to the longest prefix any caller reserves.
+///
+/// Why `copy_read_into` rather than the region primitive: both move `len`
+/// elements, but this is `cutensorPermute` — a pure copy with its own plan
+/// cache — while a region fill is a contraction against the `1` operand, which
+/// multiplies every element and consumes an entry of the contraction plan LRU
+/// that the caller's GEMMs share. A packed prefix needs neither, and the
+/// template prefix is exactly the compact offset-0 source `copy_read_into`
+/// requires.
+///
+/// Transfer contract: it uploads (or grows) the template on first use of a
+/// length and dtype, and nothing afterwards. Size it once with
+/// [`CudaDenseContext::reserve_zero_template`] to make every later reset
+/// transfer-free.
+pub fn cuda_zero_prefix<D: CudaScalar>(
+    ctx: &mut CudaDenseContext,
+    dst: &mut CudaDenseStorage,
+    len: usize,
+) -> Result<(), DenseError> {
+    const OP: &str = "cuda_zero_prefix";
+    ensure_cuda_device(ctx.device, OP, &[("dst", dst.device)])?;
+    ensure_payload_dtype::<D>(OP, dst)?;
+    if len == 0 {
+        return Ok(());
+    }
+    if dst.len < len {
+        return Err(DenseError::OutOfBounds);
+    }
+    ctx.ensure_zeros::<D>(len)?;
+    let (backend, operands) = ctx.split_operands::<D>();
+    let Some(zeros) = operands.zeros.as_ref() else {
+        return Err(cuda_error(OP, "context zero template is missing"));
+    };
+    let src_view = zeros.region_view::<D>(len, 1, len, 0)?;
+    let dst_view = dst.region_view_mut::<D>(len, 1, len, 0)?;
+    COPY_CALLS.fetch_add(1, Ordering::Relaxed);
+    backend
+        .copy_read_into(
+            TensorRead::from_view(src_view),
+            TensorWrite::from_view(dst_view),
+        )
+        .map_err(|err| cuda_error(OP, err))
+}
+
 /// Copies the leading compact `rows x cols` block of a device buffer into a
 /// packed sub-region of `dst`.
 ///

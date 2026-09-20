@@ -59,9 +59,9 @@ pub use tenferro_cpu::CpuBackendKind;
 pub use cuda_adapter::{
     cuda_copy_region_into, cuda_eigh_region, cuda_gemm_region_into, cuda_gemm_region_with_ops_into,
     cuda_is_hermitian_region, cuda_matmul_region_into, cuda_qr_region, cuda_region_axpby,
-    cuda_region_zero, cuda_svd_region, cuda_transfer_stats, reset_cuda_transfer_stats,
-    CudaDenseContext, CudaDenseStorage, CudaPlanCacheStats, CudaRegionBeta, CudaScalar,
-    CudaTransferStats,
+    cuda_region_zero, cuda_svd_region, cuda_transfer_stats, cuda_zero_prefix,
+    reset_cuda_transfer_stats, CudaDenseContext, CudaDenseStorage, CudaPlanCacheStats,
+    CudaRegionBeta, CudaScalar, CudaTransferStats,
 };
 #[cfg(feature = "cuda")]
 pub use cuda_region::CudaRegion;
