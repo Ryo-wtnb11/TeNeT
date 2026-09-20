@@ -1,4 +1,4 @@
-//! Device tests for the Single-block tree-transform executor (issue #1304).
+//! Device tests for the tree-transform executor (issues #1304, #1310).
 //!
 //! Oracles: the explicit-index walk in `common`, which never reads a
 //! `TreeTransformStructure` and is itself pinned against the host executor by
@@ -14,23 +14,23 @@
 
 mod common;
 
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use common::{
-    all_fixtures, expert_interleaved_destination, inactive_destination_layouts,
-    many_distinct_signatures, rank_sweep, unit_coefficient_fixtures, Fixture, TestScalar,
+    all_fixtures, expert_interleaved_destination, expert_interleaved_recoupling_destination,
+    inactive_destination_layouts, many_distinct_signatures, mixed_single_and_multi, rank_sweep,
+    recoupling_non_symmetric_u, unit_coefficient_fixtures, Fixture, TestScalar,
 };
 use num_complex::Complex64;
 use tenet_dense::{
-    cuda_transfer_stats, reset_cuda_transfer_stats, CudaDenseContext, CudaScalar,
-    CudaTransferStats, DenseError,
+    cuda_transfer_stats, reset_cuda_transfer_stats, CudaDenseContext, CudaScalar, CudaTransferStats,
 };
 use tenet_operations::cuda::CudaStorage;
 use tenet_operations::{
     tree_transform_structure_overwrite_with_strided_kernel_raw,
     tree_transform_structure_with_strided_kernel_raw, CudaTreeTransformDestination,
-    CudaTreeTransformExecutor, OperationError, StridedHostKernelAdapter, TreeTransformBlockSpec,
-    TreeTransformStructure, TreeTransformWorkspace, DEFAULT_PLAN_CACHE_BUDGET_BYTES,
+    CudaTreeTransformExecutor, OperationError, StridedHostKernelAdapter, TreeTransformWorkspace,
+    DEFAULT_PLAN_CACHE_BUDGET_BYTES,
 };
 
 /// The boundary counters are process-wide, so tests that assert on their
@@ -542,9 +542,11 @@ fn a_coefficient_of_one_moves_f64_payloads_bitwise() {
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn unsupported_modes_are_rejected_before_any_device_work() {
-    // What: a recoupling block and a beta the device cannot express are typed
+    // What: a beta and a destination layout the device cannot express are typed
     // capability errors reported before any upload, allocation, submission or
-    // plan-cache change.
+    // plan-cache change — for a Single-block structure and for a recoupling
+    // structure, whose pack columns and coefficient upload must not happen on
+    // the strength of one unwritable scatter region.
     let _guard = COUNTER_TESTS.lock().unwrap();
     let mut ctx = context();
     let mut executor = CudaTreeTransformExecutor::default();
@@ -554,22 +556,6 @@ fn unsupported_modes_are_rejected_before_any_device_work() {
     let mut dst = CudaStorage::<f64>::upload(&ctx, &destination).unwrap();
     let src = CudaStorage::<f64>::upload(&ctx, &source).unwrap();
 
-    // A structure whose single block is a recoupling GEMM (leaf G2a-3).
-    let space =
-        Arc::new(tenet_core::BlockStructure::packed_column_major(1, [vec![2], vec![2]]).unwrap());
-    let multi = TreeTransformStructure::compile_structures(
-        &space,
-        &space,
-        &[TreeTransformBlockSpec::multi(
-            vec![0, 1],
-            vec![0, 1],
-            vec![1.0_f64, 0.0, 0.0, 1.0],
-        )],
-    )
-    .unwrap();
-    let mut multi_dst = CudaStorage::<f64>::upload(&ctx, &[0.0_f64; 4]).unwrap();
-    let multi_src = CudaStorage::<f64>::upload(&ctx, &[1.0_f64; 4]).unwrap();
-
     // A structure whose destination layout the host proves injective only
     // through its exact overlap fallback, which the device region primitive
     // cannot express.
@@ -578,6 +564,14 @@ fn unsupported_modes_are_rejected_before_any_device_work() {
     let expert_destination: Vec<f64> = (0..expert.dst_len()).map(|i| 100.0 + i as f64).collect();
     let mut expert_dst = CudaStorage::<f64>::upload(&ctx, &expert_destination).unwrap();
     let expert_src = CudaStorage::<f64>::upload(&ctx, &expert.source::<f64>()).unwrap();
+
+    let recoupling = expert_interleaved_recoupling_destination();
+    let recoupling_structure = recoupling.compile();
+    let recoupling_destination: Vec<f64> = (0..recoupling.dst_len())
+        .map(|i| 200.0 + i as f64)
+        .collect();
+    let mut recoupling_dst = CudaStorage::<f64>::upload(&ctx, &recoupling_destination).unwrap();
+    let recoupling_src = CudaStorage::<f64>::upload(&ctx, &recoupling.source::<f64>()).unwrap();
 
     reset_cuda_transfer_stats();
     let before = cuda_transfer_stats();
@@ -600,22 +594,6 @@ fn unsupported_modes_are_rejected_before_any_device_work() {
             "beta {beta} gave {error:?}"
         );
     }
-    let error = executor
-        .replay(
-            &mut ctx,
-            &multi,
-            &space,
-            &space,
-            &mut multi_dst,
-            &multi_src,
-            CudaTreeTransformDestination::Overwrite,
-        )
-        .unwrap_err();
-    assert!(
-        matches!(error, OperationError::UnsupportedDeviceTreeTransform { .. }),
-        "a recoupling structure gave {error:?}"
-    );
-
     let layout = executor
         .replay(
             &mut ctx,
@@ -630,10 +608,7 @@ fn unsupported_modes_are_rejected_before_any_device_work() {
     assert!(
         matches!(
             layout,
-            OperationError::Dense(DenseError::Unsupported {
-                op: "cuda_tree_transform",
-                ..
-            })
+            OperationError::UnsupportedDeviceTreeTransform { .. }
         ),
         "an inexpressible destination layout gave {layout:?}"
     );
@@ -643,11 +618,41 @@ fn unsupported_modes_are_rejected_before_any_device_work() {
         "a rejected layout must leave the caller's destination untouched"
     );
 
+    let scatter = executor
+        .replay(
+            &mut ctx,
+            &recoupling_structure,
+            &recoupling.dst_structure(),
+            &recoupling.src_structure(),
+            &mut recoupling_dst,
+            &recoupling_src,
+            CudaTreeTransformDestination::Overwrite,
+        )
+        .unwrap_err();
+    assert!(
+        matches!(
+            scatter,
+            OperationError::UnsupportedDeviceTreeTransform { .. }
+        ),
+        "an inexpressible scatter destination gave {scatter:?}"
+    );
+    assert_eq!(
+        recoupling_dst.download(&ctx).unwrap(),
+        recoupling_destination,
+        "a rejected recoupling must leave the caller's destination untouched"
+    );
+    assert_eq!(
+        executor.workspace_device_bytes(),
+        0,
+        "a rejected recoupling must not have grown the workspace"
+    );
+
     let delta = stats_delta(before, cuda_transfer_stats());
-    // The one download above is the test's own read-back.
+    // The two downloads above are the test's own read-backs.
+    let read_back = (expert_destination.len() + recoupling_destination.len()) * size_of::<f64>();
     let delta = CudaTransferStats {
-        d2h_calls: delta.d2h_calls - 1,
-        d2h_bytes: delta.d2h_bytes - (expert_destination.len() * size_of::<f64>()) as u64,
+        d2h_calls: delta.d2h_calls - 2,
+        d2h_bytes: delta.d2h_bytes - read_back as u64,
         ..delta
     };
     assert_eq!(delta, CudaTransferStats::default(), "rejection did work");
@@ -659,8 +664,10 @@ fn unsupported_modes_are_rejected_before_any_device_work() {
     assert_eq!(executor.prepared_structures(), 0);
     assert_eq!(executor.required_plan_entries(), 0);
 
-    // Negative control: the same structure with beta = 1 is accepted, so the
-    // rejections above are about the mode, not about the fixture.
+    // Negative control: the same structure with beta = 1 is accepted, and a
+    // recoupling structure whose destinations *are* writable replays, so the
+    // rejections above are about the mode and the layout, not about Multi
+    // blocks or about the fixtures.
     executor
         .replay(
             &mut ctx,
@@ -673,6 +680,24 @@ fn unsupported_modes_are_rejected_before_any_device_work() {
         )
         .unwrap();
     assert_eq!(executor.prepared_structures(), 1);
+
+    let accepted = recoupling_non_symmetric_u();
+    let accepted_source = accepted.source::<f64>();
+    let accepted_destination = vec![0.0_f64; accepted.dst_len()];
+    let device = device_replay(
+        &mut ctx,
+        &mut executor,
+        &accepted,
+        &accepted_source,
+        &accepted_destination,
+        true,
+    );
+    assert_close(
+        &device,
+        &accepted.expected(&accepted_source, &accepted_destination, true),
+        "an accepted recoupling structure",
+    );
+    assert!(executor.workspace_device_bytes() > 0);
 }
 
 #[test]
@@ -835,4 +860,387 @@ fn both_payload_dtypes_share_one_structure_with_their_own_coefficients() {
         }
     }
     assert_eq!(executor.prepared_structures(), 2, "one entry per dtype");
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn a_warm_recoupling_replay_transfers_nothing_and_reuses_the_workspace() {
+    // What: the pack/scatter workspace and the uploaded recoupling matrices are
+    // the whole per-structure device state, so replaying a Multi structure a
+    // second time moves nothing across the boundary, allocates nothing, and
+    // grows the workspace by nothing.
+    let _guard = COUNTER_TESTS.lock().unwrap();
+    let mut ctx = context();
+    let mut executor = CudaTreeTransformExecutor::default();
+    let fixture = mixed_single_and_multi();
+    let structure = fixture.compile();
+    let source = fixture.source::<f64>();
+    let destination = vec![0.0_f64; fixture.dst_len()];
+    let mut device_dst = CudaStorage::<f64>::upload(&ctx, &destination).unwrap();
+    let device_src = CudaStorage::<f64>::upload(&ctx, &source).unwrap();
+    let replay = |ctx: &mut CudaDenseContext,
+                  executor: &mut CudaTreeTransformExecutor,
+                  dst: &mut CudaStorage<f64>| {
+        executor
+            .replay(
+                ctx,
+                &structure,
+                &fixture.dst_structure(),
+                &fixture.src_structure(),
+                dst,
+                &device_src,
+                CudaTreeTransformDestination::Overwrite,
+            )
+            .unwrap();
+    };
+
+    replay(&mut ctx, &mut executor, &mut device_dst);
+    let cold = cuda_transfer_stats();
+    let cold_workspace = executor.workspace_device_bytes();
+    assert!(cold_workspace > 0, "a Multi structure needs a workspace");
+    replay(&mut ctx, &mut executor, &mut device_dst);
+    let warm = stats_delta(cold, cuda_transfer_stats());
+
+    assert_eq!(warm.h2d_calls, 0, "warm replay uploaded: {warm:?}");
+    assert_eq!(warm.d2h_calls, 0, "warm replay downloaded: {warm:?}");
+    assert_eq!(warm.device_allocs, 0, "warm replay allocated: {warm:?}");
+    assert_eq!(
+        executor.workspace_device_bytes(),
+        cold_workspace,
+        "warm replay grew the workspace"
+    );
+    // Two GEMM jobs, four packs, four scatters, one Single block and one
+    // inactive destination layout: every one of them is a submission.
+    assert_eq!(warm.gemm_calls, 12, "submissions changed: {warm:?}");
+    assert_close(
+        &device_dst.download(&ctx).unwrap(),
+        &fixture.expected(&source, &destination, true),
+        "warm recoupling replay",
+    );
+
+    // Negative control: a wider recoupling structure does grow the workspace
+    // and does upload, so the equalities above are reuse, not dead counters.
+    let wider = many_distinct_recoupling_columns(8);
+    let before = cuda_transfer_stats();
+    let _ = device_replay(
+        &mut ctx,
+        &mut executor,
+        &wider,
+        &wider.source::<f64>(),
+        &vec![0.0_f64; wider.dst_len()],
+        true,
+    );
+    let delta = stats_delta(before, cuda_transfer_stats());
+    assert!(
+        delta.h2d_calls > 0,
+        "a new structure must upload: {delta:?}"
+    );
+    assert!(
+        executor.workspace_device_bytes() > cold_workspace,
+        "a wider structure must grow the workspace"
+    );
+
+    // And replaying the narrow structure again neither shrinks the workspace
+    // nor re-uploads: growth is monotonic and the buffers are shared.
+    let before = cuda_transfer_stats();
+    let grown = executor.workspace_device_bytes();
+    replay(&mut ctx, &mut executor, &mut device_dst);
+    let delta = stats_delta(before, cuda_transfer_stats());
+    assert_eq!(delta.h2d_calls, 0, "re-upload after growth: {delta:?}");
+    assert_eq!(delta.device_allocs, 0, "re-allocation after growth");
+    assert_eq!(executor.workspace_device_bytes(), grown, "workspace shrank");
+}
+
+/// A recoupling structure with `columns` sources and `columns` destinations of
+/// a larger degeneracy box than [`mixed_single_and_multi`], used as the
+/// workspace-growth control.
+fn many_distinct_recoupling_columns(columns: usize) -> Fixture {
+    let element_count = 12;
+    let mut dst_blocks = Vec::with_capacity(columns);
+    let mut src_blocks = Vec::with_capacity(columns);
+    for index in 0..columns {
+        dst_blocks.push(common::Block::packed(vec![3, 4], index * element_count));
+        src_blocks.push(common::Block::packed(vec![4, 3], index * element_count));
+    }
+    let u = (0..columns * columns)
+        .map(|index| 0.5 + (index as f64) * 0.25)
+        .collect();
+    Fixture {
+        name: "many_distinct_recoupling_columns",
+        rank: 2,
+        dst_blocks,
+        src_blocks,
+        pairs: Vec::new(),
+        groups: vec![common::Group {
+            dst_blocks: (0..columns).collect(),
+            src_blocks: (0..columns).collect(),
+            axes: vec![1, 0],
+            u,
+        }],
+        conjugate: false,
+    }
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn alternating_recoupling_structures_upload_their_matrices_exactly_once_each() {
+    // What: the recoupling matrices are cached with the block coefficients
+    // under the same (structure, dtype, context) key, so a replay alternating
+    // two Multi structures uploads each structure's matrices once and shares
+    // one workspace between them.
+    let _guard = COUNTER_TESTS.lock().unwrap();
+    let mut ctx = context();
+    let mut executor = CudaTreeTransformExecutor::default();
+    // Widest first, so the workspace is allocated once and the narrower
+    // structure reuses it: growth is monotonic and shared across structures.
+    let fixtures = [mixed_single_and_multi(), recoupling_non_symmetric_u()];
+    let prepared: Vec<_> = fixtures
+        .iter()
+        .map(|fixture| (fixture.compile(), fixture.clone()))
+        .collect();
+    let mut buffers: Vec<_> = prepared
+        .iter()
+        .map(|(_, fixture)| {
+            (
+                CudaStorage::<f64>::upload(&ctx, &vec![0.0_f64; fixture.dst_len()]).unwrap(),
+                CudaStorage::<f64>::upload(&ctx, &fixture.source::<f64>()).unwrap(),
+            )
+        })
+        .collect();
+
+    let before = cuda_transfer_stats();
+    let mut after_first_round = before;
+    for round in 0..3 {
+        for (index, (structure, fixture)) in prepared.iter().enumerate() {
+            let (dst, src) = &mut buffers[index];
+            executor
+                .replay(
+                    &mut ctx,
+                    structure,
+                    &fixture.dst_structure(),
+                    &fixture.src_structure(),
+                    dst,
+                    src,
+                    CudaTreeTransformDestination::Overwrite,
+                )
+                .unwrap();
+        }
+        if round == 0 {
+            after_first_round = cuda_transfer_stats();
+        }
+    }
+    let cold = stats_delta(before, after_first_round);
+    let warm = stats_delta(after_first_round, cuda_transfer_stats());
+
+    assert_eq!(executor.prepared_structures(), 2);
+    // Switching structures again uploads nothing at all: each structure's
+    // matrices are resident and the workspace is shared.
+    assert_eq!(warm.h2d_calls, 0, "a switch re-uploaded: {warm:?}");
+    assert_eq!(warm.device_allocs, 0, "a switch allocated: {warm:?}");
+    // The first round pays six: one coefficient-and-matrix vector per
+    // structure, the two workspace buffers the wider structure allocates and
+    // the narrower one reuses, the context's shared `1` that pack and scatter
+    // read as their coefficient, and the zero template the wider structure's
+    // inactive destination layout needs.
+    assert_eq!(cold.h2d_calls, 6, "cold uploads changed: {cold:?}");
+    for (index, (_, fixture)) in prepared.iter().enumerate() {
+        let (dst, _) = &buffers[index];
+        assert_close(
+            &dst.download(&ctx).unwrap(),
+            &fixture.expected(
+                &fixture.source::<f64>(),
+                &vec![0.0_f64; fixture.dst_len()],
+                true,
+            ),
+            fixture.name,
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn recoupling_replays_match_the_oracle_in_both_dtypes_and_modes() {
+    // What: the Multi path itself — non-symmetric square U, rectangular U, a
+    // conjugated source, and Single and Multi blocks in one structure — over
+    // both payload dtypes and both destination modes, against the oracle and
+    // against the host executor replaying the same compiled structure.
+    let mut ctx = context();
+    let mut executor = CudaTreeTransformExecutor::default();
+    for fixture in common::recoupling_fixtures() {
+        check_fixture::<f64>(&mut ctx, &mut executor, &fixture);
+        check_fixture::<Complex64>(&mut ctx, &mut executor, &fixture);
+    }
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn overwrite_cleans_a_nan_poisoned_destination_around_recoupling_blocks() {
+    // What: Overwrite is destination-independent for a Multi structure too —
+    // the scatter assigns and the untouched layout beside it is zeroed, so a
+    // poisoned buffer cannot leak through a recoupling block.
+    let mut ctx = context();
+    let mut executor = CudaTreeTransformExecutor::default();
+    let fixture = mixed_single_and_multi();
+    let source = fixture.source::<f64>();
+    let poisoned = vec![f64::NAN; fixture.dst_len()];
+
+    let device = device_replay(&mut ctx, &mut executor, &fixture, &source, &poisoned, true);
+
+    assert!(
+        device.iter().all(|value| !value.is_nan()),
+        "overwrite left NaN behind: {device:?}"
+    );
+    assert_close(
+        &device,
+        &fixture.expected(&source, &poisoned, true),
+        "poisoned destination around recoupling",
+    );
+
+    // Negative control: accumulation keeps the NaN, so the cleanliness above is
+    // the Overwrite rule and not an artefact of the fixture.
+    let accumulated = device_replay(&mut ctx, &mut executor, &fixture, &source, &poisoned, false);
+    assert!(
+        accumulated.iter().any(|value| value.is_nan()),
+        "accumulation must keep the destination's NaN: {accumulated:?}"
+    );
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn a_replay_after_a_non_finite_one_reuses_the_workspace_cleanly() {
+    // What: the pack/scatter workspace is execution scratch, not state — every
+    // column is fully written by a pack (beta = 0) or by the GEMM (beta = 0)
+    // before it is read — so a replay whose source held NaN cannot leave
+    // anything behind that the next replay's result depends on. Without this,
+    // a workspace kept across replays would be an invisible channel between
+    // two unrelated transforms.
+    let mut ctx = context();
+    let mut executor = CudaTreeTransformExecutor::default();
+    let fixture = mixed_single_and_multi();
+    let clean = fixture.source::<f64>();
+    let destination = vec![0.0_f64; fixture.dst_len()];
+    let expected = fixture.expected(&clean, &destination, true);
+
+    let reference = device_replay(
+        &mut ctx,
+        &mut executor,
+        &fixture,
+        &clean,
+        &destination,
+        true,
+    );
+    assert_close(&reference, &expected, "clean replay before poisoning");
+
+    let poisoned: Vec<f64> = clean
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            if index % 3 == 0 {
+                f64::NAN
+            } else if index % 3 == 1 {
+                f64::INFINITY
+            } else {
+                *value
+            }
+        })
+        .collect();
+    let poisoned_result = device_replay(
+        &mut ctx,
+        &mut executor,
+        &fixture,
+        &poisoned,
+        &destination,
+        true,
+    );
+    // Negative control: the poisoned source really does reach the workspace and
+    // the destination, so the recovery below is not vacuous.
+    assert!(
+        poisoned_result.iter().any(|value| !value.is_finite()),
+        "the poisoned source never reached the destination: {poisoned_result:?}"
+    );
+    let workspace_bytes = executor.workspace_device_bytes();
+
+    let recovered = device_replay(
+        &mut ctx,
+        &mut executor,
+        &fixture,
+        &clean,
+        &destination,
+        true,
+    );
+
+    assert_close(&recovered, &expected, "replay after a non-finite one");
+    assert_eq!(
+        executor.workspace_device_bytes(),
+        workspace_bytes,
+        "the recovery replay reallocated the workspace instead of reusing it"
+    );
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn alternating_complex_recoupling_structures_upload_their_matrices_once_each() {
+    // What: the per-(structure, dtype, context) key and the shared workspace
+    // behave the same for a complex payload, where every coefficient and every
+    // packed column is twice as wide.
+    let _guard = COUNTER_TESTS.lock().unwrap();
+    let mut ctx = context();
+    let mut executor = CudaTreeTransformExecutor::default();
+    let fixtures = [mixed_single_and_multi(), recoupling_non_symmetric_u()];
+    let prepared: Vec<_> = fixtures
+        .iter()
+        .map(|fixture| (fixture.compile(), fixture.clone()))
+        .collect();
+    let mut buffers: Vec<_> = prepared
+        .iter()
+        .map(|(_, fixture)| {
+            (
+                CudaStorage::<Complex64>::upload(
+                    &ctx,
+                    &vec![Complex64::new(0.0, 0.0); fixture.dst_len()],
+                )
+                .unwrap(),
+                CudaStorage::<Complex64>::upload(&ctx, &fixture.source::<Complex64>()).unwrap(),
+            )
+        })
+        .collect();
+
+    let before = cuda_transfer_stats();
+    let mut after_first_round = before;
+    for round in 0..3 {
+        for (index, (structure, fixture)) in prepared.iter().enumerate() {
+            let (dst, src) = &mut buffers[index];
+            executor
+                .replay(
+                    &mut ctx,
+                    structure,
+                    &fixture.dst_structure(),
+                    &fixture.src_structure(),
+                    dst,
+                    src,
+                    CudaTreeTransformDestination::Overwrite,
+                )
+                .unwrap();
+        }
+        if round == 0 {
+            after_first_round = cuda_transfer_stats();
+        }
+    }
+    let warm = stats_delta(after_first_round, cuda_transfer_stats());
+
+    assert_eq!(executor.prepared_structures(), 2);
+    assert_eq!(warm.h2d_calls, 0, "a switch re-uploaded: {warm:?}");
+    assert_eq!(warm.device_allocs, 0, "a switch allocated: {warm:?}");
+    for (index, (_, fixture)) in prepared.iter().enumerate() {
+        let (dst, _) = &buffers[index];
+        assert_close(
+            &dst.download(&ctx).unwrap(),
+            &fixture.expected(
+                &fixture.source::<Complex64>(),
+                &vec![Complex64::new(0.0, 0.0); fixture.dst_len()],
+                true,
+            ),
+            fixture.name,
+        );
+    }
 }

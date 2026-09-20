@@ -11,8 +11,9 @@
 mod common;
 
 use common::{
-    all_fixtures, expert_interleaved_destination, inactive_destination_layouts,
-    interleaved_multi_block, many_distinct_signatures, unit_coefficient_fixtures, Fixture,
+    all_fixtures, expert_interleaved_destination, expert_interleaved_recoupling_destination,
+    inactive_destination_layouts, interleaved_multi_block, many_distinct_signatures,
+    recoupling_fixtures, recoupling_non_symmetric_u, unit_coefficient_fixtures, Fixture,
     TestScalar,
 };
 use num_complex::Complex64;
@@ -126,6 +127,18 @@ fn the_host_replays_the_layout_the_device_reports_as_unsupported() {
         &fixture.expected(&source, &destination, true),
         "expert_interleaved_destination / overwrite",
     );
+
+    // The same, for the recoupling fixture whose *scatter* destination is the
+    // inexpressible layout.
+    let fixture = expert_interleaved_recoupling_destination();
+    let source = fixture.source::<f64>();
+    let destination = vec![0.0_f64; fixture.dst_len()];
+
+    assert_close(
+        &host_replay(&fixture, &source, &destination, true),
+        &fixture.expected(&source, &destination, true),
+        "expert_interleaved_recoupling_destination / overwrite",
+    );
 }
 
 #[test]
@@ -170,6 +183,62 @@ fn overwrite_cleans_inactive_layouts_and_accumulate_leaves_them_alone() {
     assert!(
         accumulated.iter().any(|value| value.is_nan()),
         "accumulation into NaN stays NaN: {accumulated:?}"
+    );
+}
+
+#[test]
+fn the_recoupling_oracle_agrees_with_host_replay() {
+    // What: the pack -> U^T -> scatter pipeline the device lowers means, element
+    // for element, the plain weighted sum `dst[d] = sum_s U[d][s] * src[s]` the
+    // oracle computes — in both destination modes and both payload dtypes, for
+    // a non-symmetric square U, a rectangular U, a conjugated source, and a
+    // structure mixing Single and Multi blocks.
+    for fixture in recoupling_fixtures() {
+        check_fixture::<f64>(&fixture);
+        check_fixture::<Complex64>(&fixture);
+    }
+}
+
+#[test]
+fn the_recoupling_oracle_distinguishes_u_from_its_transpose() {
+    // Negative control for the GEMM orientation: the host applies `U^T` on the
+    // right (`mul!(dst, src, transpose(U))`). If the oracle's `U[d][s]` and the
+    // host's agreed only up to a transpose, every agreement test above would
+    // pass with the orientation reversed — so prove the fixture's own U is
+    // asymmetric enough to tell the two apart, and that the *host* picks the
+    // one the oracle does.
+    let fixture = recoupling_non_symmetric_u();
+    let source = fixture.source::<f64>();
+    let destination = vec![0.0_f64; fixture.dst_len()];
+    let expected = fixture.expected(&source, &destination, true);
+
+    let mut transposed = fixture.clone();
+    let group = &mut transposed.groups[0];
+    let rows = group.dst_blocks.len();
+    let columns = group.src_blocks.len();
+    let original = group.u.clone();
+    for row in 0..rows {
+        for column in 0..columns {
+            group.u[row * columns + column] = original[column * rows + row];
+        }
+    }
+    assert_ne!(
+        transposed.expected(&source, &destination, true),
+        expected,
+        "the fixture's U must not be symmetric"
+    );
+
+    assert_close(
+        &host_replay(&fixture, &source, &destination, true),
+        &expected,
+        "recoupling_non_symmetric_u / overwrite",
+    );
+    // And the host replaying the *transposed* fixture is the transposed result,
+    // not the original one: the orientation is carried end to end.
+    assert_close(
+        &host_replay(&transposed, &source, &destination, true),
+        &transposed.expected(&source, &destination, true),
+        "transposed U / overwrite",
     );
 }
 
