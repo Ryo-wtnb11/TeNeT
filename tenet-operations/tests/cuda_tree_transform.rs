@@ -17,9 +17,10 @@ mod common;
 use std::sync::Mutex;
 
 use common::{
-    all_fixtures, expert_interleaved_destination, expert_interleaved_recoupling_destination,
-    inactive_destination_layouts, many_distinct_signatures, mixed_single_and_multi, rank_sweep,
-    recoupling_non_symmetric_u, unit_coefficient_fixtures, Fixture, TestScalar,
+    all_fixtures, conjugated_recoupling, expert_interleaved_destination,
+    expert_interleaved_recoupling_destination, inactive_destination_layouts,
+    many_distinct_signatures, mixed_single_and_multi, rank_sweep, recoupling_non_symmetric_u,
+    unit_coefficient_fixtures, Fixture, TestScalar,
 };
 use num_complex::Complex64;
 use tenet_dense::{
@@ -1340,6 +1341,11 @@ fn caller_scale_fixtures() -> Vec<Fixture> {
         rank_sweep().remove(3),
         rank_sweep().remove(4),
         mixed_single_and_multi(),
+        // A recoupling group read from a conjugated source: with a complex
+        // scale this is the one fixture where a scale applied on the wrong side
+        // of the conjugation, or folded into the pack, is visible in the
+        // imaginary part.
+        conjugated_recoupling(),
     ]
 }
 
@@ -1482,6 +1488,90 @@ fn a_zero_caller_scale_over_a_poisoned_destination_matches_the_host() {
 
 #[test]
 #[ignore = "requires a real CUDA device"]
+fn a_nan_caller_scale_reproduces_the_hosts_nan_pattern() {
+    // What: a non-finite scale is an ordinary descriptor multiplication on both
+    // ends, so the device must poison exactly the elements the host poisons and
+    // leave the zero fills exact. Pinned against the host, whose own pattern is
+    // pinned against the oracle in CI.
+    let mut ctx = context();
+    let mut executor = CudaTreeTransformExecutor::default();
+    let fixture = mixed_single_and_multi();
+    let source = fixture.source::<f64>();
+    let destination = vec![0.0_f64; fixture.dst_len()];
+
+    let device = device_replay_scaled(
+        &mut ctx,
+        &mut executor,
+        &fixture,
+        &source,
+        &destination,
+        true,
+        f64::NAN,
+    );
+
+    assert!(
+        device.iter().any(|value| value.is_nan()),
+        "a NaN scale must reach the written elements: {device:?}"
+    );
+    assert_same(
+        &device,
+        &host_replay_scaled(&fixture, &source, &destination, true, f64::NAN),
+        "NaN scale",
+    );
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn a_zero_scale_sizes_the_template_of_a_structure_with_no_zero_fill() {
+    // What: a structure whose destination layouts are all written sizes no zero
+    // template of its own, so the zero-scale operand is the only reason one
+    // exists. It must still be reserved — before the first submission — and the
+    // result must be the host's.
+    let mut ctx = context();
+    let mut executor = CudaTreeTransformExecutor::default();
+    let fixture = rank_sweep().remove(3);
+    let source = fixture.source::<f64>();
+    let poisoned = vec![f64::NAN; fixture.src_len()];
+    let destination = vec![-1.0_f64; fixture.dst_len()];
+
+    for alpha in [0.0_f64, -0.0] {
+        let device = device_replay_scaled(
+            &mut ctx,
+            &mut executor,
+            &fixture,
+            &source,
+            &destination,
+            true,
+            alpha,
+        );
+        assert_same(
+            &device,
+            &host_replay_scaled(&fixture, &source, &destination, true, alpha),
+            "no zero fill, finite source",
+        );
+        let poisoned_device = device_replay_scaled(
+            &mut ctx,
+            &mut executor,
+            &fixture,
+            &poisoned,
+            &destination,
+            true,
+            alpha,
+        );
+        assert!(
+            poisoned_device.iter().all(|value| value.is_nan()),
+            "the zero operand must still read the source: {poisoned_device:?}"
+        );
+        assert_same(
+            &poisoned_device,
+            &host_replay_scaled(&fixture, &poisoned, &destination, true, alpha),
+            "no zero fill, NaN source",
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
 fn a_warm_replay_is_transfer_free_and_plan_stable_for_every_caller_scale() {
     // What: the caller scale is an execution-time argument — it is in no cache
     // key, and the zero-scale operand reads the same context zero template the
@@ -1489,18 +1579,32 @@ fn a_warm_replay_is_transfer_free_and_plan_stable_for_every_caller_scale() {
     // allocation-free for every scale including 0, the prepared-structure count
     // does not grow, and the zero-scale signature evicts no cuTENSOR plan.
     let _guard = COUNTER_TESTS.lock().unwrap();
+    warm_scale_sweep::<f64>();
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn a_warm_complex_replay_is_transfer_free_and_plan_stable_for_every_caller_scale() {
+    // The same contract for the complex payload, whose scale, coefficient
+    // operand and zero template are a different dtype's buffers — the real-only
+    // twin above would not notice a complex one uploaded per call.
+    let _guard = COUNTER_TESTS.lock().unwrap();
+    warm_scale_sweep::<Complex64>();
+}
+
+fn warm_scale_sweep<T: DeviceScalar>() {
     let mut ctx = context();
     let mut executor = CudaTreeTransformExecutor::default();
     let fixture = mixed_single_and_multi();
     let structure = fixture.compile();
-    let source = fixture.source::<f64>();
-    let destination = vec![0.0_f64; fixture.dst_len()];
-    let mut dst = CudaStorage::<f64>::upload(&ctx, &destination).unwrap();
-    let src = CudaStorage::<f64>::upload(&ctx, &source).unwrap();
+    let source = fixture.source::<T>();
+    let destination = vec![T::from_parts(0.0, 0.0); fixture.dst_len()];
+    let mut dst = CudaStorage::<T>::upload(&ctx, &destination).unwrap();
+    let src = CudaStorage::<T>::upload(&ctx, &source).unwrap();
     let replay = |ctx: &mut CudaDenseContext,
                   executor: &mut CudaTreeTransformExecutor,
-                  dst: &mut CudaStorage<f64>,
-                  alpha: f64| {
+                  dst: &mut CudaStorage<T>,
+                  alpha: T| {
         executor
             .replay(
                 ctx,
@@ -1516,17 +1620,18 @@ fn a_warm_replay_is_transfer_free_and_plan_stable_for_every_caller_scale() {
     };
 
     // Cold, and cold again with a zero scale: the first call uploads the
-    // coefficients and sizes the zero template, the second may size the
-    // template's single element if the first had no inactive layout to size it.
-    replay(&mut ctx, &mut executor, &mut dst, 1.0);
+    // coefficients and sizes the zero template, the second reads element 0 of
+    // that template as its coefficient operand.
+    replay(&mut ctx, &mut executor, &mut dst, T::from_parts(1.0, 0.0));
     let after_unit = ctx.plan_cache_stats().unwrap();
-    replay(&mut ctx, &mut executor, &mut dst, 0.0);
+    replay(&mut ctx, &mut executor, &mut dst, T::from_parts(0.0, 0.0));
     let after_zero = ctx.plan_cache_stats().unwrap();
     // The claim `required_plan_entries` rests on: the zero-scale operand is a
     // 1x1 view like every other coefficient operand, so it is no new plan.
     assert_eq!(
         after_zero.misses, after_unit.misses,
-        "the zero-scale operand added a plan signature the executor does not count:          {after_unit:?} -> {after_zero:?}"
+        "the zero-scale operand added a plan signature the executor does not count: \
+         {after_unit:?} -> {after_zero:?}"
     );
     let entries = executor.required_plan_entries();
     let structures = executor.prepared_structures();
@@ -1534,7 +1639,8 @@ fn a_warm_replay_is_transfer_free_and_plan_stable_for_every_caller_scale() {
     let plans_before = ctx.plan_cache_stats().unwrap();
     let before = cuda_transfer_stats();
 
-    for alpha in [1.0_f64, -2.5, 0.0, -0.0, 0.5] {
+    let last = T::from_parts(0.5, -1.25);
+    for alpha in alphas::<T>() {
         replay(&mut ctx, &mut executor, &mut dst, alpha);
     }
     let warm = stats_delta(before, cuda_transfer_stats());
@@ -1566,7 +1672,7 @@ fn a_warm_replay_is_transfer_free_and_plan_stable_for_every_caller_scale() {
     );
     assert_close(
         &dst.download(&ctx).unwrap(),
-        &fixture.expected_scaled(&source, &destination, true, 0.5),
+        &fixture.expected_scaled(&source, &destination, true, last),
         "the last warm scaled replay",
     );
 }

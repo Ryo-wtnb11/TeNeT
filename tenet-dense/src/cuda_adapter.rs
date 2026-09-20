@@ -31,7 +31,7 @@ mod cuda_scalar_sealed {
 /// stay real, so only the *payload* varies, and `f32`/`Complex32` remain a
 /// compile-time unsupported boundary rather than a runtime error. Conjugation
 /// is never a payload property here — it is carried as a GEMM operand flag.
-pub trait CudaScalar: TenferroScalar + cuda_scalar_sealed::Sealed {
+pub trait CudaScalar: TenferroScalar + PartialEq + cuda_scalar_sealed::Sealed {
     /// TeNeT-side dtype tag, used for [`DenseError::DTypeMismatch`].
     const DTYPE: DenseDType;
     /// Additive identity, for `beta = 0` overwriting GEMMs.
@@ -964,6 +964,28 @@ fn ensure_payload_dtype<D: CudaScalar>(
     Ok(())
 }
 
+/// Rejects a descriptor scale of zero, which the backend is free to answer by
+/// skipping the source read.
+///
+/// Every other scale is a plain multiplication, so the caller's NaN and
+/// infinities survive it; a zero one is the single value whose backend
+/// behaviour does not match `alpha * src`, and silently answering it with a
+/// cleared destination is a wrong answer rather than a slow one. The zero
+/// scale is expressible — as an exact zero *data* operand — so this is a
+/// misuse of the argument, not a missing capability.
+fn reject_zero_alpha<D: CudaScalar>(op: &'static str, alpha: D) -> Result<(), DenseError> {
+    // IEEE comparison, so `-0.0` is rejected too: it skips the read just as
+    // `0.0` does.
+    if alpha != D::ZERO {
+        return Ok(());
+    }
+    Err(DenseError::Unsupported {
+        op,
+        message: "a descriptor alpha of zero would let the backend skip the source read and                   erase NaN/Inf; pass alpha = 1 with CudaRegionCoefficient::Zero to multiply                   by an exact zero instead"
+            .to_string(),
+    })
+}
+
 /// Submits one validated region move. Takes the backend rather than the whole
 /// context so a caller can pass a coefficient the context itself owns.
 #[allow(clippy::too_many_arguments)]
@@ -1043,11 +1065,12 @@ fn submit_region_axpby<D: CudaScalar>(
 /// The structural coefficient is a data operand and never the descriptor
 /// alpha, because a descriptor alpha lets CUDA skip the source read when it is
 /// 0 and so erases NaN/Inf that the host propagates. `alpha` is the caller's
-/// *own* scale, which the host applies as one more multiplication; a caller
-/// whose scale is exactly zero must therefore pass `alpha = D::ONE` together
-/// with [`CudaRegionCoefficient::Zero`] rather than `alpha = D::ZERO`, so that
-/// `0 * src` is computed instead of skipped. Passing `alpha = D::ONE` is the
-/// unscaled default this primitive had before it carried a caller scale.
+/// *own* scale, which the host applies as one more multiplication. A zero
+/// `alpha` is therefore **rejected** (`Unsupported`, IEEE comparison so `-0.0`
+/// too), before any device work: pass `alpha = D::ONE` with
+/// [`CudaRegionCoefficient::Zero`] to multiply by an exact zero and keep the
+/// host's NaN/Inf propagation. Passing `alpha = D::ONE` is the unscaled default
+/// this primitive had before it carried a caller scale.
 ///
 /// Disclosed differences from a host `alpha * (c * x)` chain: this path rounds
 /// as `alpha * (c * x)` where a host that folds the two scales first rounds as
@@ -1066,6 +1089,7 @@ fn submit_region_axpby<D: CudaScalar>(
 ///
 /// Validation order, all of it before any device work:
 ///
+/// 0. the descriptor scale is not zero (`Unsupported`);
 /// 1. every operand is on the context's device;
 /// 2. every operand has payload dtype `D` (`DTypeMismatch`);
 /// 3. source and destination `dims` are equal (`ShapeMismatch`);
@@ -1106,6 +1130,7 @@ pub fn cuda_region_axpby<D: CudaScalar>(
     dst_region: &CudaRegion,
 ) -> Result<(), DenseError> {
     const OP: &str = "cuda_region_axpby";
+    reject_zero_alpha::<D>(OP, alpha)?;
     match coeff {
         CudaRegionCoefficient::Buffer(coeff, _) => ensure_cuda_device(
             ctx.device,
@@ -1703,6 +1728,43 @@ mod tests {
         assert_eq!(cuda_operand_view(MatrixOp::Adjoint, 2, 3), ([3, 1], true));
         assert_eq!(cuda_operand_view(MatrixOp::Identity, 3, 4), ([1, 3], false));
         assert_eq!(cuda_operand_view(MatrixOp::Adjoint, 3, 4), ([4, 1], true));
+    }
+
+    #[test]
+    fn a_zero_descriptor_scale_is_rejected_before_any_device_work() {
+        // What: `alpha = 0` is the one scale whose backend behaviour is not
+        // `alpha * src` — the source read may be skipped, erasing NaN/Inf — so
+        // it is a typed rejection rather than a silently different answer. The
+        // check needs no device, which is what makes it precede every upload.
+        for alpha in [0.0_f64, -0.0] {
+            let err = reject_zero_alpha::<f64>("cuda_region_axpby", alpha)
+                .expect_err("a zero descriptor scale must be rejected");
+            assert!(
+                matches!(
+                    err,
+                    DenseError::Unsupported {
+                        op: "cuda_region_axpby",
+                        ..
+                    }
+                ),
+                "{err}"
+            );
+            assert!(
+                err.to_string().contains("CudaRegionCoefficient::Zero"),
+                "{err}"
+            );
+        }
+        let complex_zero = Complex64::new(-0.0, 0.0);
+        assert!(reject_zero_alpha::<Complex64>("cuda_region_axpby", complex_zero).is_err());
+
+        // Every other scale passes, including the non-finite ones: they are
+        // ordinary multiplications.
+        for alpha in [1.0_f64, -2.5, f64::NAN, f64::INFINITY] {
+            assert!(reject_zero_alpha::<f64>("cuda_region_axpby", alpha).is_ok());
+        }
+        assert!(
+            reject_zero_alpha::<Complex64>("cuda_region_axpby", Complex64::new(0.0, -1.0)).is_ok()
+        );
     }
 
     #[test]

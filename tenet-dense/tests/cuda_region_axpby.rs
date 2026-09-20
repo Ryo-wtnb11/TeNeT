@@ -976,3 +976,196 @@ fn the_call_phase_moves_nothing_across_the_host_boundary() {
     assert_eq!(stats.gemm_calls, 16, "one submission per region call");
     reset_cuda_transfer_stats();
 }
+
+/// `dst = alpha * c * [conj] src` over a strided region, against a host loop.
+fn scaled_move_matches_a_host_loop<D: RegionScalar>(ctx: &mut CudaDenseContext, alpha: D) {
+    let dims = [2usize, 3];
+    let src_strides = [3usize, 1];
+    let dst_strides = [1usize, 2];
+    let src_host: Vec<D> = (0..6).map(D::sample).collect();
+    let coefficient = D::from_parts(-0.75, 0.5);
+    let src = upload::<D>(ctx, &src_host);
+    let coeff = upload::<D>(ctx, &[D::ONE, coefficient]);
+    let dst_host = vec![D::from_parts(9.0, -9.0); 6];
+    let mut dst = upload::<D>(ctx, &dst_host);
+
+    cuda_region_axpby::<D>(
+        ctx,
+        &src,
+        &region(&dims, &src_strides, 0),
+        false,
+        alpha,
+        CudaRegionCoefficient::Buffer(&coeff, 1),
+        CudaRegionBeta::Overwrite,
+        &mut dst,
+        &region(&dims, &dst_strides, 0),
+    )
+    .expect("a scaled move");
+
+    let actual = download::<D>(ctx, &dst);
+    let mut expected = dst_host.clone();
+    for (&from, &to) in region_offsets(&dims, &src_strides, 0)
+        .iter()
+        .zip(&region_offsets(&dims, &dst_strides, 0))
+    {
+        expected[to] = alpha * coefficient * src_host[from];
+    }
+    for (index, (left, right)) in actual.iter().zip(&expected).enumerate() {
+        assert!(
+            left.distance(*right) <= 1e-12,
+            "{}: element {index} is {left:?}, expected {right:?}",
+            D::NAME
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn a_descriptor_scale_multiplies_the_move_in_both_dtypes() {
+    // What: the caller's scale rides the contraction descriptor while the
+    // structural coefficient stays a data operand, so the written values are
+    // the product of both — for a real scale and for a genuinely complex one,
+    // whose imaginary part a real-only descriptor would drop.
+    let mut ctx = context();
+    scaled_move_matches_a_host_loop::<f64>(&mut ctx, -2.5);
+    scaled_move_matches_a_host_loop::<Complex64>(&mut ctx, Complex64::new(0.5, -1.25));
+    scaled_move_matches_a_host_loop::<Complex64>(&mut ctx, Complex64::new(-2.5, 0.0));
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn the_zero_coefficient_operand_multiplies_on_a_fresh_context() {
+    // What: `CudaRegionCoefficient::Zero` is an exact zero *operand*, so the
+    // source is still read and multiplied — a NaN survives it, where a
+    // descriptor scale of zero (now rejected) would have erased it. The context
+    // is fresh, so this also executes the lazy one-element template upload and
+    // proves the second call needs none.
+    let _guard = COUNTER_TESTS.lock().unwrap();
+    let mut ctx = context();
+    let dims = [2usize, 2];
+    let strides = [1usize, 2];
+    let poisoned = upload::<f64>(&ctx, &[f64::NAN, 1.0, f64::INFINITY, 2.0]);
+    let mut dst = upload::<f64>(&ctx, &[7.0; 4]);
+
+    reset_cuda_transfer_stats();
+    let before = cuda_transfer_stats();
+    cuda_region_axpby::<f64>(
+        &mut ctx,
+        &poisoned,
+        &region(&dims, &strides, 0),
+        false,
+        1.0,
+        CudaRegionCoefficient::Zero,
+        CudaRegionBeta::Overwrite,
+        &mut dst,
+        &region(&dims, &strides, 0),
+    )
+    .expect("a zero coefficient operand");
+    let cold = cuda_transfer_stats();
+
+    let actual = download::<f64>(&ctx, &dst);
+    assert!(actual[0].is_nan(), "0 * NaN must be NaN: {actual:?}");
+    assert!(actual[2].is_nan(), "0 * inf must be NaN: {actual:?}");
+    assert_eq!(actual[1], 0.0, "0 * finite must be zero: {actual:?}");
+    assert_eq!(actual[3], 0.0, "0 * finite must be zero: {actual:?}");
+    assert!(
+        cold.h2d_calls > before.h2d_calls,
+        "a fresh context must create its scalar operands: {before:?} -> {cold:?}"
+    );
+
+    // Warm: the one-element template is resident, so nothing crosses again.
+    let finite = upload::<f64>(&ctx, &[3.0; 4]);
+    let warm_before = cuda_transfer_stats();
+    cuda_region_axpby::<f64>(
+        &mut ctx,
+        &finite,
+        &region(&dims, &strides, 0),
+        false,
+        1.0,
+        CudaRegionCoefficient::Zero,
+        CudaRegionBeta::Overwrite,
+        &mut dst,
+        &region(&dims, &strides, 0),
+    )
+    .expect("a warm zero coefficient operand");
+    let warm = cuda_transfer_stats();
+    assert_eq!(
+        warm.h2d_calls, warm_before.h2d_calls,
+        "a warm zero operand must upload nothing: {warm_before:?} -> {warm:?}"
+    );
+    assert!(download::<f64>(&ctx, &dst)
+        .iter()
+        .all(|value| *value == 0.0));
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn a_zero_descriptor_scale_and_a_rejected_zero_operand_cost_nothing() {
+    // What: the zero-scale rejection and every other rejection happen before
+    // any device work — including before the lazy zero-template upload the
+    // accepted call would have done.
+    let _guard = COUNTER_TESTS.lock().unwrap();
+    let mut ctx = context();
+    let src = upload::<f64>(&ctx, &[1.0, 2.0, 3.0, 4.0]);
+    let mut dst = upload::<f64>(&ctx, &[0.0; 4]);
+
+    reset_cuda_transfer_stats();
+    let before = cuda_transfer_stats();
+
+    for alpha in [0.0_f64, -0.0] {
+        let err = cuda_region_axpby::<f64>(
+            &mut ctx,
+            &src,
+            &region(&[2, 2], &[1, 2], 0),
+            false,
+            alpha,
+            CudaRegionCoefficient::One,
+            CudaRegionBeta::Overwrite,
+            &mut dst,
+            &region(&[2, 2], &[1, 2], 0),
+        )
+        .expect_err("a zero descriptor scale must be rejected");
+        assert!(
+            matches!(
+                err,
+                DenseError::Unsupported {
+                    op: "cuda_region_axpby",
+                    ..
+                }
+            ),
+            "{err}"
+        );
+    }
+
+    // A zero *operand* call that fails validation must not upload the template
+    // either: the extents disagree, which is checked first.
+    let err = cuda_region_axpby::<f64>(
+        &mut ctx,
+        &src,
+        &region(&[2, 2], &[1, 2], 0),
+        false,
+        1.0,
+        CudaRegionCoefficient::Zero,
+        CudaRegionBeta::Overwrite,
+        &mut dst,
+        &region(&[4, 1], &[1, 4], 0),
+    )
+    .expect_err("mismatched extents must be rejected");
+    assert!(
+        matches!(
+            err,
+            DenseError::ShapeMismatch {
+                op: "cuda_region_axpby",
+                ..
+            }
+        ),
+        "{err}"
+    );
+
+    let after = cuda_transfer_stats();
+    assert_eq!(
+        (after.h2d_calls, after.device_allocs, after.gemm_calls),
+        (before.h2d_calls, before.device_allocs, before.gemm_calls),
+        "a rejection did device work: {before:?} -> {after:?}"
+    );
+}
