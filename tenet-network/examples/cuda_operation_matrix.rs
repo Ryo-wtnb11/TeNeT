@@ -805,6 +805,63 @@ mod device {
             }
         }
 
+        // structural transforms (#1322): the same public call on both targets,
+        // written once per row and expanded against the device and the Host
+        // receiver, so the two arms cannot drift.
+        macro_rules! transform_row {
+            ($name:expr, |$t:ident| $call:expr) => {{
+                let fixture = fixture::<R, D>(config, space, 1);
+                let host_source = &fixture.host[0];
+                let device_source = &fixture.device[0];
+                let barrier = || {
+                    let _ = device_source.norm();
+                };
+                match bench(
+                    config,
+                    "cold",
+                    || {
+                        let $t = device_source;
+                        $call
+                    },
+                    barrier,
+                ) {
+                    Err(reason) => skip_row(label($name), &reason),
+                    Ok((device_first, device_rows)) => {
+                        let (host_first, host_rows) = bench(
+                            config,
+                            "cold",
+                            || {
+                                Ok::<_, Never>(
+                                    {
+                                        let $t = host_source;
+                                        $call
+                                    }
+                                    .expect("Host transform"),
+                                )
+                            },
+                            || {},
+                        )
+                        .expect("Host transform arm");
+                        let check = verdict(
+                            payload_close(
+                                device_first.to_host().expect("download").data(),
+                                host_first.data(),
+                                tolerance,
+                            ),
+                            "host_value_equality",
+                        );
+                        print_rows(label($name), "cuda", &device_rows, &check);
+                        print_rows(label($name), "host", &host_rows, &check);
+                    }
+                }
+            }};
+        }
+        transform_row!("permute", |t| t.permute(&[1], &[0]));
+        transform_row!("braid", |t| t.braid(&[1], &[0], &[1, 2]));
+        transform_row!("transpose", |t| t.transpose());
+        transform_row!("transpose_axes", |t| t.transpose_axes(&[1], &[0]));
+        transform_row!("repartition", |t| t.repartition(0));
+
         // scale
         {
             let fixture = fixture::<R, D>(config, space, 1);

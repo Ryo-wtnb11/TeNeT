@@ -226,7 +226,7 @@ use tenet_dense::{
     cuda_zero_prefix, CudaDenseContext, CudaDenseStorage,
 };
 #[cfg(feature = "cuda")]
-use tenet_operations::StorageGemm;
+use tenet_operations::{CudaTreeTransformDestination, StorageGemm};
 use tenet_tensors::{
     expand_physical_host, project_physical_host, tensorcontract_owned_checked_generic_in_context,
     tree_transform_dyn_owned_checked_generic_input_in_context, BoundDynamicFusionMapSpace,
@@ -10402,6 +10402,18 @@ impl<R, D, S> TensorMap<R, D, S> {
         self.codomain_rank() + self.domain_rank()
     }
 
+    /// Exact current split and axis order, checked without constructing a
+    /// transform operation (whose inline axis storage can spill at high rank).
+    ///
+    /// Storage-generic so the host and device transform facades cannot drift
+    /// on what "identity" means, which is what each of them short-circuits on.
+    #[inline]
+    fn axes_are_identity(&self, codomain_axes: &[usize], domain_axes: &[usize]) -> bool {
+        let codomain_rank = self.codomain_rank();
+        codomain_axes.iter().copied().eq(0..codomain_rank)
+            && domain_axes.iter().copied().eq(codomain_rank..self.rank())
+    }
+
     /// Deprecated alias of [`Self::codomain_rank`].
     #[deprecated(since = "0.1.0", note = "use codomain_rank instead")]
     #[inline]
@@ -12570,6 +12582,300 @@ where
             runtime: self.runtime.clone(),
             repr: owned_repr(TypedTensorBody::dense(dst_space, dst)),
         })
+    }
+
+    /// Device lowering shared by every structural transform, mirroring Host
+    /// `tree_transform_multiplicity_free_real` branch for branch.
+    ///
+    /// Everything categorical is the Host's, unchanged: the same
+    /// [`TreeTransformOperation`], the same rule validation, the same
+    /// categorical group plan, the same `RuleIdentity`-keyed transform cache
+    /// and the same completed `TreeTransformStructure`. Only the executor
+    /// below that structure differs, so a device result is the Host result up
+    /// to dtype tolerance.
+    ///
+    /// Lock order — and the reason the two phases are written apart: planning
+    /// runs under the pooled Host context lease, which is dropped before the
+    /// device lease is taken, and nothing reached under the device lease
+    /// leases again (`std::sync::Mutex` is not re-entrant). Exactly one device
+    /// lease per replay.
+    fn tree_transform_cuda(
+        &self,
+        operation_name: &'static str,
+        operation: TreeTransformOperation,
+    ) -> Result<Self, Error> {
+        // Host order: a lazy adjoint lowers the operation onto its parent and
+        // re-wraps the owned result, rather than materializing the adjoint.
+        // `.adjoint()` is itself lease-free, so this recursion never nests a
+        // device lease.
+        if let TypedTensorRepr::Adjoint(view) = &self.repr {
+            let parent_space = view.parent.space.space();
+            let lowered = lower_adjoint_tree_transform_operation(
+                parent_space.nout(),
+                parent_space.nin(),
+                &operation,
+            )?;
+            let parent = Self {
+                runtime: self.runtime.clone(),
+                repr: TypedTensorRepr::Owned(Arc::clone(&view.parent)),
+            };
+            return parent
+                .tree_transform_cuda(operation_name, lowered)?
+                .adjoint();
+        }
+        // Host's compact-diagonal arm is unreachable here — `to_cuda`
+        // densifies a diagonal — but a device tensor that somehow carried one
+        // is an explicit capability error, never a silent dense fallback.
+        let src = self.direct_cuda_storage(operation_name)?;
+        let body = self
+            .owned_body()
+            .ok_or_else(|| internal_layout_error("owned device tree transform input"))?;
+        let dst_space = body.space.transformed_multiplicity_free(&operation)?;
+        let required_len = dst_space.space().required_len()?;
+
+        let structure = {
+            let mut lease = self.runtime.lease_context()?;
+            lease
+                .context()
+                .multiplicity_free_lane::<D>()
+                .tree_context_mut()
+                .compile_tree_pair_structure(
+                    body.space.provider(),
+                    &operation,
+                    dst_space.space().structure(),
+                    body.space.space().structure(),
+                )?
+        };
+
+        let mut lease = self.runtime.lease_cuda()?;
+        let (cuda, executor) = lease.split();
+        if src.placement() != Placement::Cuda(cuda.device()) {
+            return Err(Error::PlacementMismatch);
+        }
+        // ponytail: #740 — the device seam still initializes an output by
+        // uploading zeros; replace only with a measured native allocation.
+        let mut dst = CudaStorage::upload_owned(cuda, vec![D::from_real(0.0); required_len])?;
+        executor.replay(
+            cuda,
+            &structure,
+            dst_space.space().structure(),
+            body.space.space().structure(),
+            &mut dst,
+            src,
+            D::from_real(1.0),
+            CudaTreeTransformDestination::Overwrite,
+        )?;
+        drop(lease);
+        Ok(Self {
+            runtime: self.runtime.clone(),
+            repr: owned_repr(TypedTensorBody::dense(dst_space, dst)),
+        })
+    }
+
+    /// Shared body of the three planar device operations, mirroring Host
+    /// `planar`: derive the planar axis order, let the expert layer validate
+    /// it, and run it as a transpose — never as a permute, because domain
+    /// trees run opposite to the planar boundary.
+    fn planar_cuda(
+        &self,
+        operation_name: &'static str,
+        kind: PlanarRequestKind<'_>,
+    ) -> Result<Self, Error> {
+        let operation = with_planar_axes(
+            self.codomain_rank(),
+            self.rank(),
+            kind,
+            |codomain_axes, domain_axes| {
+                Ok(TreeTransformOperation::transpose(
+                    codomain_axes.iter().copied(),
+                    domain_axes.iter().copied(),
+                ))
+            },
+        )?;
+        self.tree_transform_cuda(operation_name, operation)
+    }
+
+    /// TensorKit `permute` on a device tensor: the Host
+    /// [`TensorMap::permute`] semantics, executed on the device.
+    ///
+    /// # Cost
+    ///
+    /// A warm call uploads no structure data and downloads nothing. Its only
+    /// transfer is the output initialisation (#740): exactly one H2D of
+    /// `required_len * size_of::<D>()` bytes, from one host `Vec` of that
+    /// size, and its only device allocation is the returned output. The first
+    /// call for a given structure additionally uploads that structure's
+    /// coefficient payload once and may grow the pack/scatter workspace once.
+    ///
+    /// That warm contract holds only while this Runtime's Host transform store
+    /// admits the structure: with a tree-transform cache byte budget of zero,
+    /// or for a structure whose entry exceeds the store's per-entry limit, the
+    /// store hands back a fresh allocation per call and the device therefore
+    /// re-uploads its coefficients per call.
+    ///
+    /// # Numerics
+    ///
+    /// Inherited from the device executor: the block set written is the Host's
+    /// exactly; coefficient-`1` `f64` moves are bitwise, and everything else
+    /// agrees to dtype tolerance, with one rounding position moved for Single
+    /// blocks (`alpha * (c * x)` where the Host folds the scales and rounds as
+    /// `(alpha * c) * x`) and with the recoupling GEMM's summation order that
+    /// of cuTENSOR rather than the Host kernel.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::UnsupportedOnDevice`] for diagonal storage;
+    /// [`Error::PlacementMismatch`] for a payload on another device; the
+    /// expert layer's own [`Error::Operation`] / [`Error::Core`] /
+    /// [`Error::FusionAlgebra`] for malformed axis lists — all before any
+    /// device write.
+    ///
+    /// Checked-Generic, Generic and complex-coefficient providers are excluded
+    /// by this impl's bound, so they are a compile-time boundary:
+    ///
+    /// ```compile_fail
+    /// use tenet::core::{
+    ///     CheckedGenericAdmissionMode, CheckedGenericFusion, CheckedGenericRigidSymbols,
+    ///     TypedSectorAdmission,
+    /// };
+    /// use tenet::typed::{CudaStorage, TensorMap};
+    ///
+    /// fn no_checked_generic_cuda_permute<R>(tensor: &TensorMap<R, f64, CudaStorage>)
+    /// where
+    ///     R: TypedSectorAdmission<Mode = CheckedGenericAdmissionMode>
+    ///         + CheckedGenericFusion
+    ///         + CheckedGenericRigidSymbols<Scalar = f64>,
+    /// {
+    ///     let _ = tensor.permute(&[1], &[0]);
+    /// }
+    /// ```
+    ///
+    /// ```compile_fail
+    /// use tenet::core::FibonacciFusionRule;
+    /// use tenet::typed::{CudaStorage, TensorMap};
+    ///
+    /// fn no_generic_cuda_permute(tensor: &TensorMap<FibonacciFusionRule, f64, CudaStorage>) {
+    ///     let _ = tensor.permute(&[1], &[0]);
+    /// }
+    /// ```
+    ///
+    /// The multiplicity-free twin compiles, for either device payload:
+    ///
+    /// ```
+    /// use tenet::prelude::U1FusionRule;
+    /// use tenet::typed::{CudaPayload, CudaStorage, TensorMap};
+    ///
+    /// fn device_permute<D: CudaPayload>(tensor: &TensorMap<U1FusionRule, D, CudaStorage<D>>) {
+    ///     let _ = tensor.permute(&[1], &[0]);
+    ///     let _ = tensor.braid(&[1], &[0], &[0, 1]);
+    ///     let _ = tensor.transpose();
+    ///     let _ = tensor.transpose_axes(&[1], &[0]);
+    ///     let _ = tensor.repartition(0);
+    /// }
+    /// ```
+    pub fn permute(&self, codomain_axes: &[usize], domain_axes: &[usize]) -> Result<Self, Error> {
+        if self.axes_are_identity(codomain_axes, domain_axes) {
+            return Ok(self.clone());
+        }
+        self.tree_transform_cuda(
+            "permute",
+            TreeTransformOperation::permute(
+                codomain_axes.iter().copied(),
+                domain_axes.iter().copied(),
+            ),
+        )
+    }
+
+    /// TensorKit `braid` on a device tensor: the Host [`TensorMap::braid`]
+    /// semantics, executed on the device.
+    ///
+    /// Cost, numerics and provider boundary are [`Self::permute`]'s.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArgument`] when `levels` does not list one level per
+    /// source axis — checked **before** the identity short circuit, as on
+    /// Host, so a mis-lengthed `levels` is reported even for an identity
+    /// permutation. Otherwise as [`Self::permute`].
+    pub fn braid(
+        &self,
+        codomain_axes: &[usize],
+        domain_axes: &[usize],
+        levels: &[usize],
+    ) -> Result<Self, Error> {
+        let rank = self.rank();
+        if levels.len() != rank {
+            return Err(Error::InvalidArgument(format!(
+                "braid levels must list one level per source axis \
+                 (expected {rank}, got {})",
+                levels.len()
+            )));
+        }
+        if self.axes_are_identity(codomain_axes, domain_axes) {
+            return Ok(self.clone());
+        }
+        let nout = self.codomain_rank();
+        self.tree_transform_cuda(
+            "braid",
+            TreeTransformOperation::braid(
+                codomain_axes.iter().copied(),
+                domain_axes.iter().copied(),
+                levels[..nout].iter().copied(),
+                levels[nout..].iter().copied(),
+            ),
+        )
+    }
+
+    /// TensorKit `repartition(t, N1, N2)` on a device tensor: the Host
+    /// [`TensorMap::repartition`] semantics, executed on the device.
+    ///
+    /// Requesting the split the tensor already has returns a clone and does no
+    /// device work at all.
+    ///
+    /// Cost, numerics and provider boundary are [`Self::permute`]'s.
+    pub fn repartition(&self, num_codomain: usize) -> Result<Self, Error> {
+        if num_codomain == self.codomain_rank() {
+            return Ok(self.clone());
+        }
+        self.planar_cuda(
+            "repartition",
+            PlanarRequestKind::Repartition { num_codomain },
+        )
+    }
+
+    /// TensorKit `transpose` on a device tensor: the Host
+    /// [`TensorMap::transpose`] semantics, executed on the device.
+    ///
+    /// A rank-0 tensor returns a clone and does no device work.
+    ///
+    /// Cost, numerics and provider boundary are [`Self::permute`]'s.
+    pub fn transpose(&self) -> Result<Self, Error> {
+        if self.rank() == 0 {
+            return Ok(self.clone());
+        }
+        self.planar_cuda("transpose", PlanarRequestKind::FullTranspose)
+    }
+
+    /// TensorKit `transpose` with an explicit cyclic axis map on a device
+    /// tensor: the Host [`TensorMap::transpose_axes`] semantics, executed on
+    /// the device.
+    ///
+    /// Cost, numerics and provider boundary are [`Self::permute`]'s.
+    pub fn transpose_axes(
+        &self,
+        codomain_axes: &[usize],
+        domain_axes: &[usize],
+    ) -> Result<Self, Error> {
+        if self.axes_are_identity(codomain_axes, domain_axes) {
+            return Ok(self.clone());
+        }
+        self.planar_cuda(
+            "transpose_axes",
+            PlanarRequestKind::Explicit {
+                codomain_axes,
+                domain_axes,
+            },
+        )
     }
 }
 
@@ -14835,15 +15141,6 @@ where
             codomain_axes,
             domain_axes,
         })
-    }
-
-    /// Exact current split and axis order, checked without constructing a
-    /// transform operation (whose inline axis storage can spill at high rank).
-    #[inline]
-    fn axes_are_identity(&self, codomain_axes: &[usize], domain_axes: &[usize]) -> bool {
-        let codomain_rank = self.codomain_rank();
-        codomain_axes.iter().copied().eq(0..codomain_rank)
-            && domain_axes.iter().copied().eq(codomain_rank..self.rank())
     }
 
     /// Shared body of the three planar operations: derive the planar axis
@@ -23384,7 +23681,7 @@ mod representation_gates {
     {
         assert_parent_native_transform(source, |tensor| tensor.permute(&[2, 0], &[1]));
         assert_parent_native_transform(source, |tensor| tensor.braid(&[2, 0], &[1], &[17, 3, 11]));
-        assert_parent_native_transform(source, TensorMap::transpose);
+        assert_parent_native_transform(source, |tensor| tensor.transpose());
         assert_parent_native_transform(source, |tensor| tensor.transpose_axes(&[2, 1], &[0]));
         assert_parent_native_transform(source, |tensor| tensor.repartition(2));
     }

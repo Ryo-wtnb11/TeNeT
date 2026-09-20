@@ -77,6 +77,8 @@ pub mod prelude {
     pub use crate::plancache::{
         Optimizer, PlanCacheConfig, ReplanPolicy, DEFAULT_WORKSPACE_BUDGET_BYTES,
     };
+    #[cfg(feature = "cuda")]
+    pub use crate::runtime::CudaTreeTransformStats;
     pub use crate::runtime::{
         LinalgBackend, Runtime, RuntimeBuilder, RuntimeTreeTransformCacheInfo,
     };

@@ -225,10 +225,18 @@ impl CudaTreeTransformExecutor {
     /// context's shared scalar operands (the `1` and the zero template) pin on
     /// its behalf. This is the number the device workspace budget charges.
     pub fn retained_device_bytes(&self, ctx: &CudaDenseContext) -> usize {
+        self.executor_device_bytes()
+            .saturating_add(ctx.scalar_operand_bytes())
+    }
+
+    /// Device bytes the executor itself retains: the uploaded coefficient and
+    /// recoupling vectors plus the transform workspaces, and nothing the
+    /// context owns. This is [`Self::retained_device_bytes`] without the shared
+    /// context operands, so a caller reporting both can count each once.
+    pub fn executor_device_bytes(&self) -> usize {
         self.prepared
             .retained_bytes()
             .saturating_add(self.workspace_device_bytes())
-            .saturating_add(ctx.scalar_operand_bytes())
     }
 
     /// Device bytes the transform workspaces hold. Separate from

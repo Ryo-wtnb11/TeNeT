@@ -825,6 +825,44 @@ where
         )
     }
 
+    /// Compiles — or takes from the cache — the completed
+    /// [`TreeTransformStructure`] for one multiplicity-free operation, without
+    /// replaying it.
+    ///
+    /// This is the seam a *non-host* executor needs: everything categorical
+    /// (validation, the group plan, F/R moves, the `RuleIdentity`-keyed cache)
+    /// happens here, on the host, and what comes back is layout-only. A device
+    /// replay compiles through this before it takes its device lease, so the
+    /// host caches and the device lock are never held at the same time.
+    ///
+    /// `storage_conjugate` is fixed to `false`: a lazy adjoint is lowered onto
+    /// its parent by the caller, exactly as the host facade does.
+    ///
+    /// This concrete cross-crate entrypoint is internal and unstable despite
+    /// being public for `tenet`; downstream callers must not rely on it.
+    #[doc(hidden)]
+    pub fn compile_tree_pair_structure<R>(
+        &mut self,
+        rule: &R,
+        operation: &TreeTransformOperation,
+        dst_structure: &Arc<BlockStructure>,
+        src_structure: &Arc<BlockStructure>,
+    ) -> Result<Arc<TreeTransformStructure<C>>, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
+    {
+        self.cache
+            .set_recoupling_threads(self.backend.recoupling_threads());
+        self.cache
+            .get_or_compile_tree_pair_structures_with_storage_conjugation_ref(
+                rule,
+                operation,
+                dst_structure,
+                src_structure,
+                false,
+            )
+    }
+
     pub(crate) fn get_or_compile_tree_pair_structure_with_storage_conjugation<R>(
         &mut self,
         rule: &R,
