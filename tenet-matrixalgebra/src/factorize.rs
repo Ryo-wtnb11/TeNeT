@@ -2684,7 +2684,12 @@ where
 /// selection magnitude is `|value|` and each `spectra` entry is stored
 /// descending by magnitude (the `*_full` output contract), so the kept set is
 /// always a per-sector prefix.
-fn decide_bond_truncation<R, V>(
+///
+/// Public and `doc(hidden)` so the typed facade's `GradedSpace::find_truncated`
+/// reaches the very same decision — weight, validation and error bits — instead
+/// of growing a fourth copy of this adapter.
+#[doc(hidden)]
+pub fn decide_bond_truncation<R, V>(
     rule: &R,
     spectra: &[SectorSpectrum<V>],
     truncation: &Truncation,
@@ -10214,7 +10219,10 @@ where
     select_truncation(&weighted, truncation, &rule.rule_identity()).map_err(OperationError::from)
 }
 
-fn decide_bond_truncation_generic_checked<R, V>(
+/// Checked-Generic sibling of [`decide_bond_truncation`], public for the same
+/// reason.
+#[doc(hidden)]
+pub fn decide_bond_truncation_generic_checked<R, V>(
     rule: &R,
     spectra: &[SectorSpectrum<V>],
     truncation: &Truncation,

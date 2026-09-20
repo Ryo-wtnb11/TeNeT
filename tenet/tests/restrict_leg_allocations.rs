@@ -232,3 +232,47 @@ fn the_network_restriction_still_takes_one_allocation_for_several_axes() {
         measurement.zeroed_sizes
     );
 }
+
+/// One compact `restrict_diagonal` on an `s : bond <- bond` whose degeneracies
+/// are `scale` times a base shape, keeping a fixed prefix of each sector.
+fn restrict_diagonal_measurement(scale: usize) -> Measurement {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(U1FusionRule);
+    let leg = u1(&provider, &[(-1, 2 * scale), (0, 3 * scale)]);
+    let source: TensorMap<_, f64> =
+        TensorMap::rand_with_seed(&runtime, [&leg], [&leg], 47).unwrap();
+    let (_, s, _) = source.svd_compact().unwrap();
+    let bond = s.domain()[0].clone();
+    let selection =
+        LegSelection::try_new(&bond, [(U1Irrep::new(-1), 0..2), (U1Irrep::new(0), 0..3)]).unwrap();
+
+    let warm = s.restrict_diagonal(&selection).unwrap();
+    assert!(
+        warm.diagonal_spectrum().unwrap().is_some(),
+        "a compact receiver must stay compact"
+    );
+
+    let mut output = None;
+    let measurement = measure(|| {
+        output = Some(black_box(s.restrict_diagonal(&selection).unwrap()));
+    });
+    assert_eq!(
+        output.unwrap().diagonal_spectrum().unwrap(),
+        warm.diagonal_spectrum().unwrap()
+    );
+    measurement
+}
+
+#[test]
+fn compact_restrict_diagonal_costs_the_kept_values_and_nothing_per_discarded_one() {
+    let _guard = MEASUREMENT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // The kept prefix is the same in both; only the discarded tail grows. A
+    // compact restriction must therefore cost exactly the same, which is the
+    // `O(sum_c k'_c)` contract: no dense block is ever materialized.
+    let small = restrict_diagonal_measurement(1);
+    let large = restrict_diagonal_measurement(16);
+    assert_eq!(small.allocations, large.allocations);
+    assert_eq!(small.bytes, large.bytes);
+}
