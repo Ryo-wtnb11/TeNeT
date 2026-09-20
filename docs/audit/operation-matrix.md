@@ -259,8 +259,14 @@ ownership/cache audit is #783.
   `permute`/`braid`/`transpose`/`transpose_axes`/`repartition` against the Host
   answer for U(1), SU(2), fZ2, fZ2xU(1) and fZ2xSU(2), both device payload
   dtypes, plus the transfer, allocation, statistics and rejection contracts.
-  Their device-free half — the dense physical-basis oracle pinned against the
-  Host, and the device-less Runtime state — is
+  The same two files carry the device
+  `permute`/`transpose`/`transpose_axes`/`repartition` `*_overwrite_into`
+  gates: device == Host for every caller scale including `0` and `-0.0`, a
+  NaN-poisoned destination, the Host precondition order with the Host's error
+  text, the warm 0 H2D / 0 D2H / 0 device-allocation contract and exact-layout
+  admission. Their device-free half — the dense physical-basis oracle pinned
+  against the Host, the device-less Runtime state, and the Host
+  `*_overwrite_into` precondition order and wording the device mirrors — is
   `tenet/tests/typed_transform_host_side.rs`, which is not feature gated.
 - `tenet/tests/physical_dense.rs`: U(1)/SU(2) Host physical expansion and
   projection, real and complex SU(2) round trips, and an independent

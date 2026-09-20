@@ -12998,6 +12998,414 @@ where
             },
         )
     }
+
+    /// Overwrites `destination` with `alpha * self.permute(...)` on the
+    /// device, without replacing its provider, space, body, or device
+    /// allocation.
+    ///
+    /// The admission sequence is the Host one
+    /// ([`TensorMap::permute_overwrite_into`]) plus the device's own placement
+    /// check: same Runtime, same rule identity, an owned dense device source
+    /// (a lazy adjoint is *rejected*, not lowered onto its parent, exactly as
+    /// on Host — the destination is the caller's, so there is no re-wrapping
+    /// to do), an owned dense device destination that does not alias the
+    /// source payload, the admitted tree-pair operation or else the
+    /// transform's own fusion space and block layout, the exact destination
+    /// length, and unique destination ownership. Every one of them, and the
+    /// structure compilation, happens before the device lease is taken; the
+    /// placement check is the first thing under it. After a successful replay
+    /// the exact source/destination layout pair is admitted on the Runtime,
+    /// so a second call with the same pair skips the layout derivation — the
+    /// same store, and the same admitted path, a Host call would take.
+    ///
+    /// There is no identity short circuit, because Host has none here: an
+    /// identity axis list still writes `alpha * self` into the destination.
+    ///
+    /// # Cost
+    ///
+    /// A warm call transfers nothing in either direction and allocates no
+    /// device buffer: 0 H2D, 0 D2H, 0 device allocations. Unlike the returning
+    /// [`Self::permute`] it pays no output initialisation — the destination is
+    /// the caller's and the replay's overwrite mode zeroes every inactive
+    /// layout itself. The first call for a given structure uploads that
+    /// structure's coefficient payload once, may grow the pack/scatter
+    /// workspace once, and reserves the context zero template; that warm
+    /// contract holds only while this Runtime's Host transform store admits
+    /// the structure, as for [`Self::permute`].
+    ///
+    /// # Numerics
+    ///
+    /// [`Self::permute`]'s, with the caller scale applied as the executor's
+    /// rule: a Single block rounds as `alpha * (c * x)` where the Host folds
+    /// the scales and rounds as `(alpha * c) * x`; Multi blocks agree in order
+    /// with the Host (`alpha * (U x)`). `alpha == 0` — `-0.0` included, by
+    /// IEEE comparison — is not short-circuited, so a NaN or infinite source
+    /// poisons the destination exactly as it does on Host; only the sign of an
+    /// exact zero may differ.
+    ///
+    /// # Errors
+    ///
+    /// The Host variants and messages, with the storage noun naming the
+    /// placement (as for [`Self::contract_overwrite_into`]), plus
+    /// [`Error::PlacementMismatch`] for a payload on another device.
+    /// Validation and plan-construction failures leave `destination`
+    /// untouched — no byte of it is written before the last rejection is
+    /// decided. A backend error after replay begins may leave it partially
+    /// overwritten.
+    ///
+    /// # Source compatibility
+    ///
+    /// As for [`Self::permute`], the `cuda` feature adds these four names to a
+    /// second `impl`, so the *path* forms `TensorMap::permute_overwrite_into`,
+    /// `TensorMap::transpose_overwrite_into`,
+    /// `TensorMap::transpose_axes_overwrite_into` and
+    /// `TensorMap::repartition_overwrite_into` become ambiguous (`E0034`).
+    /// Method-call syntax and `TensorMap::<R, D>::permute_overwrite_into` keep
+    /// working.
+    pub fn permute_overwrite_into(
+        &self,
+        destination: &mut Self,
+        codomain_axes: &[usize],
+        domain_axes: &[usize],
+        alpha: D,
+    ) -> Result<(), Error> {
+        self.overwrite_tree_transform_cuda(
+            destination,
+            alpha,
+            |_, _| {
+                Ok(TreeTransformOperation::permute(
+                    codomain_axes.iter().copied(),
+                    domain_axes.iter().copied(),
+                ))
+            },
+            |operation| {
+                tree_operation_matches_axes(
+                    operation,
+                    TreeTransformOperationKind::Permute,
+                    codomain_axes,
+                    domain_axes,
+                )
+            },
+        )
+    }
+
+    /// Overwrites `destination` with `alpha * self.transpose()` on the device.
+    /// Validation, cost, numerics and failure behavior are
+    /// [`Self::permute_overwrite_into`]'s.
+    pub fn transpose_overwrite_into(&self, destination: &mut Self, alpha: D) -> Result<(), Error> {
+        let source_codomain_rank = self.codomain_rank();
+        let source_rank = self.rank();
+        self.overwrite_tree_transform_cuda(
+            destination,
+            alpha,
+            |source, _| {
+                with_planar_axes(
+                    source.codomain_rank(),
+                    source.rank(),
+                    PlanarRequestKind::FullTranspose,
+                    |codomain_axes, domain_axes| {
+                        Ok(TreeTransformOperation::transpose(
+                            codomain_axes.iter().copied(),
+                            domain_axes.iter().copied(),
+                        ))
+                    },
+                )
+            },
+            |operation| {
+                operation.kind() == TreeTransformOperationKind::Transpose
+                    && operation
+                        .codomain_permutation()
+                        .iter()
+                        .copied()
+                        .eq((source_codomain_rank..source_rank).rev())
+                    && operation
+                        .domain_permutation()
+                        .iter()
+                        .copied()
+                        .eq((0..source_codomain_rank).rev())
+            },
+        )
+    }
+
+    /// Overwrites `destination` with
+    /// `alpha * self.transpose_axes(codomain_axes, domain_axes)` on the
+    /// device. Validation, cost, numerics and failure behavior are
+    /// [`Self::permute_overwrite_into`]'s.
+    pub fn transpose_axes_overwrite_into(
+        &self,
+        destination: &mut Self,
+        codomain_axes: &[usize],
+        domain_axes: &[usize],
+        alpha: D,
+    ) -> Result<(), Error> {
+        self.overwrite_tree_transform_cuda(
+            destination,
+            alpha,
+            |source, _| {
+                with_planar_axes(
+                    source.codomain_rank(),
+                    source.rank(),
+                    PlanarRequestKind::Explicit {
+                        codomain_axes,
+                        domain_axes,
+                    },
+                    |codomain_axes, domain_axes| {
+                        Ok(TreeTransformOperation::transpose(
+                            codomain_axes.iter().copied(),
+                            domain_axes.iter().copied(),
+                        ))
+                    },
+                )
+            },
+            |operation| {
+                tree_operation_matches_axes(
+                    operation,
+                    TreeTransformOperationKind::Transpose,
+                    codomain_axes,
+                    domain_axes,
+                )
+            },
+        )
+    }
+
+    /// Overwrites `destination` with
+    /// `alpha * self.repartition(destination.codomain_rank())` on the device.
+    /// Validation, cost, numerics and failure behavior are
+    /// [`Self::permute_overwrite_into`]'s.
+    pub fn repartition_overwrite_into(
+        &self,
+        destination: &mut Self,
+        alpha: D,
+    ) -> Result<(), Error> {
+        let source_codomain_rank = self.codomain_rank();
+        let source_rank = self.rank();
+        let destination_codomain_rank = destination.codomain_rank();
+        self.overwrite_tree_transform_cuda(
+            destination,
+            alpha,
+            |source, destination| {
+                if destination.rank() != source.rank() {
+                    return Err(Error::InvalidArgument(format!(
+                        "repartition destination rank {} does not match source rank {}",
+                        destination.rank(),
+                        source.rank()
+                    )));
+                }
+                with_planar_axes(
+                    source.codomain_rank(),
+                    source.rank(),
+                    PlanarRequestKind::Repartition {
+                        num_codomain: destination.codomain_rank(),
+                    },
+                    |codomain_axes, domain_axes| {
+                        Ok(TreeTransformOperation::transpose(
+                            codomain_axes.iter().copied(),
+                            domain_axes.iter().copied(),
+                        ))
+                    },
+                )
+            },
+            |operation| {
+                let planar_axis = |position: usize| {
+                    if position < source_codomain_rank {
+                        position
+                    } else {
+                        source_rank - 1 - (position - source_codomain_rank)
+                    }
+                };
+                operation.kind() == TreeTransformOperationKind::Transpose
+                    && operation
+                        .codomain_permutation()
+                        .iter()
+                        .copied()
+                        .eq((0..destination_codomain_rank).map(planar_axis))
+                    && operation
+                        .domain_permutation()
+                        .iter()
+                        .copied()
+                        .eq((destination_codomain_rank..source_rank)
+                            .rev()
+                            .map(planar_axis))
+            },
+        )
+    }
+
+    /// One admission and replay boundary for every typed device overwrite,
+    /// mirroring Host `overwrite_tree_transform` step for step.
+    ///
+    /// The destination is the caller's device buffer, so — unlike the
+    /// returning [`Self::tree_transform_cuda`], which owns a freshly uploaded
+    /// output and may therefore spend it before the executor's layout verdict
+    /// — nothing here may write before every rejection has been decided. That
+    /// holds without a new preflight: the executor decides Stage A, the
+    /// prepared-structure layout expressibility and Stage C before its first
+    /// submission, so a rejected replay leaves the destination byte-identical.
+    ///
+    /// Lock order is [`Self::tree_transform_cuda`]'s: the pooled Host context
+    /// lease that compiles the structure is dropped before the device lease,
+    /// and nothing under the device lease leases again.
+    fn overwrite_tree_transform_cuda(
+        &self,
+        destination: &mut Self,
+        alpha: D,
+        operation: impl FnOnce(&Self, &Self) -> Result<TreeTransformOperation, Error>,
+        admitted_operation_matches: impl FnMut(&TreeTransformOperation) -> bool,
+    ) -> Result<(), Error> {
+        if !self.runtime.same_runtime(&destination.runtime) {
+            return Err(Error::RuntimeMismatch);
+        }
+        let identity = TypedSectorAdmission::typed_rule_identity(self.provider());
+        if identity != TypedSectorAdmission::typed_rule_identity(destination.provider()) {
+            return Err(Error::RuleMismatch);
+        }
+
+        // Same error kinds, wording and order as Host; only the storage noun
+        // names the placement, as in `contract_overwrite_into_with_template`.
+        // A lazy adjoint source is rejected rather than lowered: Host rejects
+        // it here too, because lowering would produce a result shaped like the
+        // adjoint's parent, not like the caller's destination.
+        let (source_body, source_storage) =
+            match &self.repr {
+                TypedTensorRepr::Owned(body) => match body.data.as_ref() {
+                    TypedData::Dense(storage) => (body, storage),
+                    TypedData::Diagonal(_) => return Err(Error::InvalidArgument(
+                        "typed destination tree transform requires an ordinary dense CUDA source"
+                            .to_string(),
+                    )),
+                },
+                TypedTensorRepr::Adjoint(_) => {
+                    return Err(Error::InvalidArgument(
+                        "typed destination tree transform requires an ordinary dense CUDA source"
+                            .to_string(),
+                    ))
+                }
+            };
+        let (destination_body, destination_storage) = match &destination.repr {
+            TypedTensorRepr::Owned(body) => match body.data.as_ref() {
+                TypedData::Dense(storage) => (body, storage),
+                TypedData::Diagonal(_) => {
+                    return Err(Error::InvalidArgument(
+                        "destination must use ordinary dense CUDA storage".to_string(),
+                    ))
+                }
+            },
+            TypedTensorRepr::Adjoint(_) => {
+                return Err(Error::InvalidArgument(
+                    "destination must use ordinary dense CUDA storage".to_string(),
+                ))
+            }
+        };
+        if Arc::ptr_eq(&source_body.data, &destination_body.data) {
+            return Err(Error::InvalidArgument(
+                "destination storage must not alias an input".to_string(),
+            ));
+        }
+
+        let admitted_operation = self.runtime.admitted_tree_pair_operation(
+            &identity,
+            &source_body.space,
+            &destination_body.space,
+            admitted_operation_matches,
+        );
+        let exact_layout_admitted = admitted_operation.is_some();
+        let operation = match admitted_operation {
+            Some(operation) => operation,
+            None => operation(self, destination)?,
+        };
+        if !exact_layout_admitted {
+            let expected = source_body
+                .space
+                .transformed_multiplicity_free(&operation)?;
+            if destination_body.space.space() != expected.space() {
+                return Err(Error::InvalidArgument(
+                    "destination fusion space or block layout does not match the operation result"
+                        .to_string(),
+                ));
+            }
+        }
+        let required = destination_body.space.space().required_len()?;
+        let actual = TensorStorage::len(destination_storage);
+        if actual != required {
+            return Err(Error::InvalidArgument(format!(
+                "destination storage length {actual} does not match required length {required}"
+            )));
+        }
+        if Arc::strong_count(destination_body) != 1
+            || Arc::strong_count(&destination_body.data) != 1
+        {
+            return Err(Error::InvalidArgument(
+                "destination storage must be uniquely owned".to_string(),
+            ));
+        }
+        let destination_placement = destination_storage.placement();
+
+        let source_structure = Arc::clone(source_body.space.space().structure());
+        let destination_structure = Arc::clone(destination_body.space.space().structure());
+        // Host compiles the structure inside its replay entry point, under the
+        // same pooled context lease; here it must happen before the device
+        // lease is taken, as in `tree_transform_cuda`. The destination's
+        // provider is the authority, exactly as Host's
+        // `tree_transform_dyn_overwrite_into_ref` call passes it.
+        let structure = {
+            let mut lease = self.runtime.lease_context()?;
+            lease
+                .context()
+                .multiplicity_free_lane::<D>()?
+                .tree_context_mut()
+                .compile_tree_pair_structure(
+                    destination_body.space.provider(),
+                    &operation,
+                    &destination_structure,
+                    &source_structure,
+                )?
+        };
+
+        {
+            let mut lease = self.runtime.lease_cuda()?;
+            let (cuda, executor) = lease.split();
+            let expected_placement = Placement::Cuda(cuda.device());
+            if source_storage.placement() != expected_placement
+                || destination_placement != expected_placement
+            {
+                return Err(Error::PlacementMismatch);
+            }
+            let TypedTensorRepr::Owned(destination_body) = &mut destination.repr else {
+                return Err(internal_layout_error(
+                    "ordinary CUDA destination checked above",
+                ));
+            };
+            let destination_body = Arc::get_mut(destination_body).ok_or_else(|| {
+                internal_layout_error("unique CUDA destination body checked above")
+            })?;
+            let destination_data = Arc::get_mut(&mut destination_body.data).ok_or_else(|| {
+                internal_layout_error("unique CUDA destination payload checked above")
+            })?;
+            let TypedData::Dense(destination_data) = destination_data else {
+                return Err(internal_layout_error(
+                    "dense CUDA destination checked above",
+                ));
+            };
+            executor.replay(
+                cuda,
+                &structure,
+                &destination_structure,
+                &source_structure,
+                destination_data,
+                source_storage,
+                alpha,
+                CudaTreeTransformDestination::Overwrite,
+            )?;
+        }
+        if !exact_layout_admitted {
+            self.runtime.admit_exact_tree_pair_layout(
+                identity,
+                &operation,
+                &source_body.space,
+                destination.logical_space(),
+            );
+        }
+        Ok(())
+    }
 }
 
 impl<R, D> TensorMap<R, D>

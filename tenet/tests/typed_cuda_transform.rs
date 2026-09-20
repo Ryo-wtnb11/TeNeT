@@ -50,6 +50,8 @@ use tenet::typed::{GradedSpace, TensorMap};
 /// The two device payload dtypes, with the comparisons the gates need.
 trait Payload: TensorScalar + Copy + PartialEq + std::fmt::Debug {
     fn parts(self) -> (f64, f64);
+    /// The NaN of this dtype, used to poison an overwrite destination.
+    fn nan() -> Self;
     fn distance(self, other: Self) -> f64 {
         let (ar, ai) = self.parts();
         let (br, bi) = other.parts();
@@ -65,11 +67,17 @@ impl Payload for f64 {
     fn parts(self) -> (f64, f64) {
         (self, 0.0)
     }
+    fn nan() -> Self {
+        f64::NAN
+    }
 }
 
 impl Payload for Complex64 {
     fn parts(self) -> (f64, f64) {
         (self.re, self.im)
+    }
+    fn nan() -> Self {
+        Complex64::new(f64::NAN, f64::NAN)
     }
 }
 
@@ -804,4 +812,414 @@ fn device_transforms_of_an_empty_tensor_produce_an_empty_tensor() {
         .unwrap()
         .data()
         .is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// `*_overwrite_into` (issue #1329, G2b-3)
+// ---------------------------------------------------------------------------
+
+/// A destination whose every element is NaN, on the model's space. Overwrite
+/// mode must clear it — every inactive destination layout included — so a
+/// surviving NaN proves a block the replay failed to write.
+fn poisoned_like<R, D>(model: &TensorMap<R, D>) -> TensorMap<R, D>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: Payload,
+{
+    let poisoned = model.scale(D::nan());
+    assert!(
+        poisoned.data().iter().all(|value| value.parts().0.is_nan()),
+        "the poisoned destination must be all NaN"
+    );
+    poisoned
+}
+
+/// Payload comparison that treats NaN as equal to NaN, which
+/// [`assert_payload_close`] cannot: `alpha == 0` over a NaN source, and a
+/// destination block the replay left untouched, both have to be compared
+/// against the Host's own NaN pattern.
+fn assert_payload_matches<D: Payload>(actual: &[D], expected: &[D], what: &str) {
+    assert_eq!(actual.len(), expected.len(), "{what}: payload length");
+    let agree = |left: f64, right: f64| {
+        (left.is_nan() && right.is_nan()) || (left - right).abs() <= 1e-12 * (1.0 + right.abs())
+    };
+    for (index, (&left, &right)) in actual.iter().zip(expected).enumerate() {
+        let (lr, li) = left.parts();
+        let (rr, ri) = right.parts();
+        assert!(
+            agree(lr, rr) && agree(li, ri),
+            "{what}: element {index} is {left:?}, expected {right:?}"
+        );
+    }
+}
+
+/// Runs one `*_overwrite_into` on the Host and on the device, into two
+/// independently built NaN-poisoned destinations on the same space, and
+/// asserts the device destination is the Host destination — payload to dtype
+/// tolerance (NaN for NaN), spaces and block identities exactly.
+///
+/// `$body` is written once and expanded against both receiver types, so the
+/// Host and device calls cannot drift.
+macro_rules! device_overwrite_matches_host {
+    ($what:expr, $host:expr, $model:expr, |$t:ident, $d:ident| $body:expr) => {{
+        let host_source = &$host;
+        let device_source = host_source.to_cuda().unwrap();
+
+        let mut host_destination = poisoned_like(&$model);
+        {
+            let $t = host_source;
+            let $d = &mut host_destination;
+            $body
+        }
+        .unwrap();
+
+        let mut device_destination = poisoned_like(&$model).to_cuda().unwrap();
+        {
+            let $t = &device_source;
+            let $d = &mut device_destination;
+            $body
+        }
+        .unwrap();
+
+        let what: &str = $what;
+        let actual = device_destination.to_host().unwrap();
+        assert_payload_matches(actual.data(), host_destination.data(), what);
+        assert_eq!(layout(&actual), layout(&host_destination), "{what}: layout");
+        actual
+    }};
+}
+
+/// The real scales the acceptance gate names, `-0.0` included: it compares
+/// equal to `0.0` under IEEE, which is exactly the executor's zero test.
+const REAL_ALPHAS: [f64; 4] = [1.0, -2.5, 0.0, -0.0];
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn device_overwrite_into_matches_the_host_for_every_alpha_and_method() {
+    let runtime = runtime();
+    let u1 = u1_leg(&[(-1, 2), (0, 1), (1, 2)], false);
+    let u1_dual = u1_leg(&[(-1, 1), (0, 2), (1, 1)], true);
+    let real: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&u1, &u1_dual], [&u1, &u1], real_fill).unwrap();
+    assert!(real.block_count() >= 2, "multi-block fixture");
+    let complex: TensorMap<_, Complex64> =
+        TensorMap::from_block_fn(&runtime, [&u1, &u1_dual], [&u1, &u1], complex_fill).unwrap();
+
+    let permuted = real.permute(&[2, 0], &[1, 3]).unwrap();
+    let transposed = real.transpose().unwrap();
+    let cyclic = real.transpose_axes(&[1, 3], &[0, 2]).unwrap();
+    let bent = real.repartition(1).unwrap();
+    for alpha in REAL_ALPHAS {
+        let written = device_overwrite_matches_host!(
+            &format!("U1/f64 permute_overwrite_into alpha={alpha}"),
+            real,
+            permuted,
+            |t, d| t.permute_overwrite_into(d, &[2, 0], &[1, 3], alpha)
+        );
+        if alpha != 0.0 {
+            assert_moved(real.data(), written.data(), "U1/f64 permute_overwrite_into");
+        }
+        device_overwrite_matches_host!(
+            &format!("U1/f64 transpose_overwrite_into alpha={alpha}"),
+            real,
+            transposed,
+            |t, d| t.transpose_overwrite_into(d, alpha)
+        );
+        device_overwrite_matches_host!(
+            &format!("U1/f64 transpose_axes_overwrite_into alpha={alpha}"),
+            real,
+            cyclic,
+            |t, d| t.transpose_axes_overwrite_into(d, &[1, 3], &[0, 2], alpha)
+        );
+        device_overwrite_matches_host!(
+            &format!("U1/f64 repartition_overwrite_into alpha={alpha}"),
+            real,
+            bent,
+            |t, d| t.repartition_overwrite_into(d, alpha)
+        );
+    }
+
+    // Complex payload, including a genuinely complex scale.
+    let permuted = complex.permute(&[2, 0], &[1, 3]).unwrap();
+    let transposed = complex.transpose().unwrap();
+    let bent = complex.repartition(3).unwrap();
+    let complex_alphas = [
+        Complex64::new(1.0, 0.0),
+        Complex64::new(-2.5, 0.0),
+        Complex64::new(0.0, 0.0),
+        Complex64::new(-0.0, -0.0),
+        Complex64::new(0.75, -0.25),
+    ];
+    for alpha in complex_alphas {
+        device_overwrite_matches_host!(
+            &format!("U1/c64 permute_overwrite_into alpha={alpha}"),
+            complex,
+            permuted,
+            |t, d| t.permute_overwrite_into(d, &[2, 0], &[1, 3], alpha)
+        );
+        device_overwrite_matches_host!(
+            &format!("U1/c64 transpose_overwrite_into alpha={alpha}"),
+            complex,
+            transposed,
+            |t, d| t.transpose_overwrite_into(d, alpha)
+        );
+        device_overwrite_matches_host!(
+            &format!("U1/c64 repartition_overwrite_into alpha={alpha}"),
+            complex,
+            bent,
+            |t, d| t.repartition_overwrite_into(d, alpha)
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn device_overwrite_into_matches_the_host_for_recoupling_and_fermionic_providers() {
+    let runtime = runtime();
+
+    // SU(2): Multi blocks, so the caller scale reaches the scatter rather than
+    // a Single move, and the coefficients are not 1.
+    let su2 = su2_leg();
+    let su2_real: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&su2, &su2], [&su2, &su2], real_fill).unwrap();
+    let su2_complex: TensorMap<_, Complex64> =
+        TensorMap::from_block_fn(&runtime, [&su2, &su2], [&su2, &su2], complex_fill).unwrap();
+    let permuted = su2_real.permute(&[1, 2], &[3, 0]).unwrap();
+    let transposed = su2_real.transpose().unwrap();
+    let bent = su2_real.repartition(3).unwrap();
+    for alpha in REAL_ALPHAS {
+        let written = device_overwrite_matches_host!(
+            &format!("SU2/f64 permute_overwrite_into alpha={alpha}"),
+            su2_real,
+            permuted,
+            |t, d| t.permute_overwrite_into(d, &[1, 2], &[3, 0], alpha)
+        );
+        if alpha != 0.0 {
+            assert_not_a_reordering(su2_real.data(), written.data(), "SU2 overwrite_into");
+        }
+        device_overwrite_matches_host!(
+            &format!("SU2/f64 transpose_overwrite_into alpha={alpha}"),
+            su2_real,
+            transposed,
+            |t, d| t.transpose_overwrite_into(d, alpha)
+        );
+        device_overwrite_matches_host!(
+            &format!("SU2/f64 repartition_overwrite_into alpha={alpha}"),
+            su2_real,
+            bent,
+            |t, d| t.repartition_overwrite_into(d, alpha)
+        );
+    }
+    let su2_permuted_c = su2_complex.permute(&[1, 2], &[3, 0]).unwrap();
+    let written = device_overwrite_matches_host!(
+        "SU2/c64 permute_overwrite_into complex alpha",
+        su2_complex,
+        su2_permuted_c,
+        |t, d| t.permute_overwrite_into(d, &[1, 2], &[3, 0], Complex64::new(0.75, -0.25))
+    );
+    assert_not_a_reordering(su2_complex.data(), written.data(), "SU2/c64 overwrite_into");
+
+    // fZ2 x U(1): fermionic signs on a charge grading.
+    let rule = Arc::new(FermionParityFusionRule.product(U1FusionRule));
+    let leg = GradedSpace::try_new_with_arc(
+        Arc::clone(&rule),
+        [
+            (product_sector(Z2Irrep::EVEN, U1Irrep::new(0)), 2),
+            (product_sector(Z2Irrep::ODD, U1Irrep::new(1)), 1),
+            (product_sector(Z2Irrep::EVEN, U1Irrep::new(2)), 1),
+        ],
+    )
+    .unwrap();
+    let host: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], real_fill).unwrap();
+    let permuted = host.permute(&[2, 1], &[0, 3]).unwrap();
+    let cyclic = host.transpose_axes(&[1, 3], &[0, 2]).unwrap();
+    let bent = host.repartition(1).unwrap();
+    for alpha in REAL_ALPHAS {
+        let written = device_overwrite_matches_host!(
+            &format!("fZ2xU1 permute_overwrite_into alpha={alpha}"),
+            host,
+            permuted,
+            |t, d| t.permute_overwrite_into(d, &[2, 1], &[0, 3], alpha)
+        );
+        if alpha != 0.0 {
+            assert_not_a_reordering(host.data(), written.data(), "fZ2xU1 overwrite_into");
+        }
+        device_overwrite_matches_host!(
+            &format!("fZ2xU1 transpose_axes_overwrite_into alpha={alpha}"),
+            host,
+            cyclic,
+            |t, d| t.transpose_axes_overwrite_into(d, &[1, 3], &[0, 2], alpha)
+        );
+        device_overwrite_matches_host!(
+            &format!("fZ2xU1 repartition_overwrite_into alpha={alpha}"),
+            host,
+            bent,
+            |t, d| t.repartition_overwrite_into(d, alpha)
+        );
+    }
+
+    // fZ2 (x) SU(2): fermionic signs *and* recoupling, complex payload.
+    let rule = Arc::new(FermionParityFusionRule.product(SU2FusionRule));
+    let leg = GradedSpace::try_new_with_arc(
+        Arc::clone(&rule),
+        [
+            (
+                product_sector(Z2Irrep::EVEN, SU2Irrep::from_twice_spin(0)),
+                2,
+            ),
+            (
+                product_sector(Z2Irrep::ODD, SU2Irrep::from_twice_spin(1)),
+                1,
+            ),
+            (
+                product_sector(Z2Irrep::EVEN, SU2Irrep::from_twice_spin(2)),
+                1,
+            ),
+        ],
+    )
+    .unwrap();
+    let host: TensorMap<_, Complex64> =
+        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], complex_fill).unwrap();
+    let permuted = host.permute(&[1, 2], &[3, 0]).unwrap();
+    let transposed = host.transpose().unwrap();
+    let bent = host.repartition(3).unwrap();
+    for alpha in [
+        Complex64::new(1.0, 0.0),
+        Complex64::new(-2.5, 0.0),
+        Complex64::new(0.0, 0.0),
+        Complex64::new(-0.0, -0.0),
+        Complex64::new(0.75, -0.25),
+    ] {
+        let written = device_overwrite_matches_host!(
+            &format!("fZ2xSU2 permute_overwrite_into alpha={alpha}"),
+            host,
+            permuted,
+            |t, d| t.permute_overwrite_into(d, &[1, 2], &[3, 0], alpha)
+        );
+        if alpha != Complex64::new(0.0, 0.0) {
+            assert_not_a_reordering(host.data(), written.data(), "fZ2xSU2 overwrite_into");
+        }
+        device_overwrite_matches_host!(
+            &format!("fZ2xSU2 transpose_overwrite_into alpha={alpha}"),
+            host,
+            transposed,
+            |t, d| t.transpose_overwrite_into(d, alpha)
+        );
+        device_overwrite_matches_host!(
+            &format!("fZ2xSU2 repartition_overwrite_into alpha={alpha}"),
+            host,
+            bent,
+            |t, d| t.repartition_overwrite_into(d, alpha)
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn device_overwrite_into_propagates_a_nan_source_at_alpha_zero_like_the_host() {
+    // The caller scale is never short-circuited: at `alpha == 0` the device
+    // still computes `0 * src`, so a NaN or infinite source poisons the
+    // destination exactly where the Host's does — which is also what proves
+    // the zero *operand* route, not a descriptor alpha of zero, was taken.
+    let runtime = runtime();
+    let u1 = u1_leg(&[(-1, 2), (0, 1), (1, 2)], false);
+    let poisoned_source: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&u1, &u1], [&u1, &u1], |trees, idx| {
+            if idx.iter().sum::<usize>() % 3 == 0 {
+                f64::NAN
+            } else if idx[0] == 1 {
+                f64::INFINITY
+            } else {
+                real_fill(trees, idx)
+            }
+        })
+        .unwrap();
+    assert!(poisoned_source.data().iter().any(|value| value.is_nan()));
+    assert!(poisoned_source
+        .data()
+        .iter()
+        .any(|value| value.is_infinite()));
+    let model = poisoned_source.permute(&[1, 2], &[3, 0]).unwrap();
+
+    for alpha in [0.0, -0.0, 1.0] {
+        let written = device_overwrite_matches_host!(
+            &format!("NaN source overwrite_into alpha={alpha}"),
+            poisoned_source,
+            model,
+            |t, d| t.permute_overwrite_into(d, &[1, 2], &[3, 0], alpha)
+        );
+        assert!(
+            written.data().iter().any(|value| value.is_nan()),
+            "a NaN source must reach the destination even at alpha = {alpha}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn device_overwrite_into_has_no_identity_short_circuit() {
+    // Host `overwrite_tree_transform` has none: an identity axis list still
+    // writes `alpha * self` into the caller's destination. A device clone
+    // short circuit would silently leave the destination poisoned.
+    let runtime = runtime();
+    let u1 = u1_leg(&[(-1, 2), (0, 1), (1, 2)], false);
+    let host: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&u1, &u1], [&u1, &u1], real_fill).unwrap();
+    let written =
+        device_overwrite_matches_host!("identity permute_overwrite_into", host, host, |t, d| t
+            .permute_overwrite_into(d, &[0, 1], &[2, 3], -2.5));
+    assert_payload_close(
+        written.data(),
+        host.scale(-2.5).data(),
+        "identity permute_overwrite_into writes alpha * self",
+    );
+
+    // Same split for `repartition`, and a rank-0 `transpose`: the returning
+    // device methods clone there, the overwriting ones must still write.
+    let written = device_overwrite_matches_host!(
+        "same-split repartition_overwrite_into",
+        host,
+        host,
+        |t, d| t.repartition_overwrite_into(d, 2.0)
+    );
+    assert_payload_close(
+        written.data(),
+        host.scale(2.0).data(),
+        "same-split repartition_overwrite_into writes alpha * self",
+    );
+
+    let square: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&u1], [&u1], real_fill).unwrap();
+    let scalar = square.trace_pairs(&[(0, 1)]).unwrap();
+    assert_eq!(scalar.rank(), 0);
+    let written = device_overwrite_matches_host!(
+        "rank-0 transpose_overwrite_into",
+        scalar,
+        scalar,
+        |t, d| t.transpose_overwrite_into(d, -0.5)
+    );
+    assert_payload_close(
+        written.data(),
+        scalar.scale(-0.5).data(),
+        "rank-0 transpose_overwrite_into writes alpha * self",
+    );
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn device_overwrite_into_of_an_empty_tensor_succeeds() {
+    let runtime = runtime();
+    let codomain = u1_leg(&[(1, 2)], false);
+    let domain = u1_leg(&[(0, 3)], false);
+    let host: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&codomain], [&domain], |_, _| 1.0).unwrap();
+    assert_eq!(host.block_count(), 0);
+    let model = host.permute(&[1], &[0]).unwrap();
+    let source = host.to_cuda().unwrap();
+    let mut destination = model.to_cuda().unwrap();
+    source
+        .permute_overwrite_into(&mut destination, &[1], &[0], 2.0)
+        .unwrap();
+    assert!(destination.to_host().unwrap().data().is_empty());
 }
