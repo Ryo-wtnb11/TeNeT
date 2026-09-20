@@ -79,7 +79,9 @@ mod device {
     };
     use tenet::dense::{cuda_transfer_stats, CudaTransferStats};
     use tenet::prelude::Complex64;
-    use tenet::typed::{CudaStorage, GradedSpace, Runtime, SectorSpectrum, TensorMap, Truncation};
+    use tenet::typed::{
+        CudaStorage, GradedSpace, Runtime, SpectrumMagnitude, TensorMap, Truncation,
+    };
     use tenet_network::tensor;
 
     /// Fixture families. The parameters are explicit CLI inputs; nothing in
@@ -149,12 +151,11 @@ mod device {
     /// Payload dtypes this baseline covers. Both are real device payloads;
     /// the fixture values differ only in carrying an imaginary part.
     pub(super) trait HarnessScalar:
-        tenet::typed::FactorizationScalar + tenet::typed::CudaPayload
+        tenet::typed::FactorizationScalar + tenet::typed::CudaPayload + SpectrumMagnitude
     {
         const NAME: &'static str;
         fn entry(real: f64, imaginary: f64) -> Self;
         fn distance(self, other: Self) -> f64;
-        fn magnitude(self) -> f64;
     }
 
     impl HarnessScalar for f64 {
@@ -165,9 +166,6 @@ mod device {
         fn distance(self, other: Self) -> f64 {
             (self - other).abs()
         }
-        fn magnitude(self) -> f64 {
-            self.abs()
-        }
     }
 
     impl HarnessScalar for Complex64 {
@@ -177,9 +175,6 @@ mod device {
         }
         fn distance(self, other: Self) -> f64 {
             (self - other).norm()
-        }
-        fn magnitude(self) -> f64 {
-            self.norm()
         }
     }
 
@@ -1036,19 +1031,8 @@ mod device {
                     s.to_host().map_err(|e| e.to_string())?,
                     vh.to_host().map_err(|e| e.to_string())?,
                 );
-                // `SpectrumMagnitude` is not nameable outside `tenet`, so a
-                // dtype-generic caller maps the spectrum to magnitudes itself.
-                let spectra: Vec<_> = s
-                    .diagview()
-                    .map_err(|e| e.to_string())?
-                    .into_iter()
-                    .map(|entry| SectorSpectrum {
-                        sector: entry.sector,
-                        values: entry.values.into_iter().map(|v| v.magnitude()).collect(),
-                    })
-                    .collect();
                 let found = s.domain()[0]
-                    .find_truncated(&spectra, &truncation)
+                    .find_truncated(&s.diagview().map_err(|e| e.to_string())?, &truncation)
                     .map_err(|e| e.to_string())?;
                 let u = u
                     .restrict_leg(u.codomain_rank(), &found.selection)
@@ -1071,7 +1055,14 @@ mod device {
                         || {},
                     )
                     .expect("Host svd_trunc arm");
-                    let kept = device_first.1.diagview().expect("kept spectrum");
+                    // `diagview` orders by encoded sector and Host
+                    // `singular_values` by decoded label, so the device
+                    // spectrum is sorted by label before the two are zipped;
+                    // position then means the same sector on both sides. (The
+                    // sector labels themselves are compared in the equivalence
+                    // tests, where the two `Sector` projections unify.)
+                    let mut kept = device_first.1.diagview().expect("kept spectrum");
+                    kept.sort_by(|left, right| left.sector.cmp(&right.sector));
                     let kept_match = kept.len() == host_first.singular_values.len()
                         && kept.iter().zip(&host_first.singular_values).all(
                             |(actual, expected)| {

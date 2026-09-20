@@ -439,18 +439,16 @@ fn assert_typed_cuda_svd_trunc_composition_matches_host<R>(
     for (actual, expected) in [(&u, &expected.u), (&s, &expected.s), (&vh, &expected.vh)] {
         assert_eq!(structural_snapshot(actual), structural_snapshot(expected));
     }
-    let kept: Vec<f64> = s
-        .diagview()
-        .unwrap()
-        .iter()
-        .flat_map(|entry| entry.values.iter().copied())
-        .collect();
-    let host_kept: Vec<f64> = expected
-        .singular_values
-        .iter()
-        .flat_map(|entry| entry.values.iter().copied())
-        .collect();
-    assert_close(&kept, &host_kept, 1e-10);
+    // Per sector and matched by provider label: `diagview` orders by encoded
+    // `SectorId`, Host `singular_values` by decoded label, and those two
+    // orders are not the same contract.
+    let mut kept = s.diagview().unwrap();
+    kept.sort_by(|left, right| left.sector.cmp(&right.sector));
+    assert_eq!(kept.len(), expected.singular_values.len());
+    for (actual, expected) in kept.iter().zip(&expected.singular_values) {
+        assert_eq!(actual.sector, expected.sector);
+        assert_close(&actual.values, &expected.values, 1e-10);
+    }
     assert!((found.error - expected.error).abs() <= 1e-10 * (1.0 + expected.error));
 
     assert!(u.is_isometric(1e-10).unwrap());
@@ -1280,6 +1278,9 @@ fn typed_cuda_svd_trunc_composition_matches_host_policies_structure_and_ownershi
     assert_typed_cuda_svd_trunc_composition_matches_host(&reentrant_source, &Truncation::rank(1));
     assert!(dimension_calls.load(Ordering::SeqCst) > 0);
 
+    // `[3, 2] <- [3, 2]` factors put a 2x2 block at element offset 9, the
+    // unaligned destination that used to fault the device factor copy
+    // (#1320); these two fixtures cover that layout through the composition.
     let rank_deficient = TensorMap::from_block_fn(&runtime, [&rows], [&rows], |_, indices| {
         (indices[0] + 1) as f64 * (indices[1] + 1) as f64
     })
@@ -1378,7 +1379,10 @@ fn typed_cuda_svd_trunc_composition_matches_host_policies_structure_and_ownershi
         );
     }
     // No lease, no plan, no allocation, no transfer: every device counter is
-    // exactly where it was before the two rejected calls.
+    // exactly where it was before the two rejected calls. `cuda_transfer_stats`
+    // is process-wide, so this equality only holds because the device suite
+    // runs with `--test-threads=1`; the operand-independent evidence is the
+    // non-device unit test in `typed.rs`.
     assert_eq!(tenet::dense::cuda_transfer_stats(), before);
 }
 
@@ -2405,18 +2409,14 @@ fn assert_c64_svd_trunc_composition_matches_host<R>(
     for (actual, expected) in [(&u, &expected.u), (&s, &expected.s), (&vh, &expected.vh)] {
         assert_eq!(structural_snapshot(actual), structural_snapshot(expected));
     }
-    let kept: Vec<f64> = s
-        .diagview()
-        .unwrap()
-        .iter()
-        .flat_map(|entry| entry.values.iter().map(|value| value.re))
-        .collect();
-    let host_kept: Vec<f64> = expected
-        .singular_values
-        .iter()
-        .flat_map(|entry| entry.values.iter().copied())
-        .collect();
-    assert_close(&kept, &host_kept, 1e-9);
+    let mut kept = s.diagview().unwrap();
+    kept.sort_by(|left, right| left.sector.cmp(&right.sector));
+    assert_eq!(kept.len(), expected.singular_values.len());
+    for (actual, expected) in kept.iter().zip(&expected.singular_values) {
+        assert_eq!(actual.sector, expected.sector);
+        let values: Vec<f64> = actual.values.iter().map(|value| value.re).collect();
+        assert_close(&values, &expected.values, 1e-9);
+    }
     assert!((found.error - expected.error).abs() <= 1e-9 * (1.0 + expected.error));
 
     assert!(u.is_isometric(1e-10).unwrap(), "U^H U = I");
@@ -2499,18 +2499,14 @@ fn assert_c64_eigh_trunc_composition_matches_host<R>(
         d.data().iter().all(|value| value.im.abs() <= 1e-10),
         "eigenvalues must be real"
     );
-    let kept: Vec<f64> = d
-        .diagview()
-        .unwrap()
-        .iter()
-        .flat_map(|entry| entry.values.iter().map(|value| value.re))
-        .collect();
-    let host_kept: Vec<f64> = expected
-        .eigenvalues
-        .iter()
-        .flat_map(|entry| entry.values.iter().copied())
-        .collect();
-    assert_close(&kept, &host_kept, 1e-9);
+    let mut kept = d.diagview().unwrap();
+    kept.sort_by(|left, right| left.sector.cmp(&right.sector));
+    assert_eq!(kept.len(), expected.eigenvalues.len());
+    for (actual, expected) in kept.iter().zip(&expected.eigenvalues) {
+        assert_eq!(actual.sector, expected.sector);
+        let values: Vec<f64> = actual.values.iter().map(|value| value.re).collect();
+        assert_close(&values, &expected.values, 1e-9);
+    }
     assert!((found.error - expected.error).abs() <= 1e-9 * (1.0 + expected.error));
 
     assert!(v.is_isometric(1e-10).unwrap(), "V^H V = I");

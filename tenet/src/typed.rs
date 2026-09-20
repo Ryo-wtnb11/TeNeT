@@ -256,6 +256,11 @@ pub use crate::error::Error;
 /// here is what lets a caller glob-import this module alone. The canonical
 /// [`TensorMap`] and [`GradedSpace`] are also re-exported by [`crate::prelude`].
 pub use crate::runtime::Runtime;
+/// The spectrum-magnitude bound of [`GradedSpace::find_truncated`]. Concrete
+/// `f64`/`Complex64` callers never name it, but a caller generic over the
+/// payload must, so it is re-exported here rather than left unnameable
+/// outside the crate.
+pub use tenet_matrixalgebra::SpectrumMagnitude;
 /// Re-exported for the same reason as [`Error`] and [`Runtime`]:
 /// [`TensorMap::svd_trunc`] takes one, so `use tenet::typed::*` would not be
 /// self-sufficient without it.
@@ -5203,7 +5208,7 @@ where
         truncation: &Truncation,
     ) -> Result<tenet_matrixalgebra::TruncationDecision, Self::FacadeError>
     where
-        V: tenet_matrixalgebra::SpectrumMagnitude;
+        V: SpectrumMagnitude;
 }
 
 #[doc(hidden)]
@@ -5609,7 +5614,7 @@ where
         truncation: &Truncation,
     ) -> Result<tenet_matrixalgebra::TruncationDecision, Error>
     where
-        V: tenet_matrixalgebra::SpectrumMagnitude,
+        V: SpectrumMagnitude,
     {
         // `false`: the public primitive is magnitude-based, as MatrixAlgebraKit
         // `findtruncated` is. For the non-negative singular values Host
@@ -5633,7 +5638,7 @@ where
         truncation: &Truncation,
     ) -> Result<tenet_matrixalgebra::TruncationDecision, Self::FacadeError>
     where
-        V: tenet_matrixalgebra::SpectrumMagnitude,
+        V: SpectrumMagnitude,
     {
         tenet_matrixalgebra::decide_bond_truncation_generic_checked(provider, spectra, truncation)
             .map_err(Into::into)
@@ -8614,7 +8619,7 @@ where
         truncation: &Truncation,
     ) -> Result<TruncatedSelection<R>, TypedFacadeError<R>>
     where
-        V: tenet_matrixalgebra::SpectrumMagnitude,
+        V: SpectrumMagnitude,
     {
         let expected = self.leg.sectors().len();
         if spectra.len() != expected {

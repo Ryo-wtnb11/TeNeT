@@ -71,7 +71,7 @@ made, not skipped.
 | `left_null`, `right_null` | `TypedTensorNullDispatch` |
 | `left_polar`, `right_polar` | `TypedTensorPolarDispatch` |
 | `is_posdef` | per-method `where D: FactorizationScalar` |
-| device `svd_compact`, `svd_trunc`, `eigh_full`, `eigh_trunc` | `impl<R, D> TensorMap<R, D, CudaStorage<D>> where D: CudaPayload + FactorizationScalar` |
+| device `svd_compact`, `svd_trunc`, `eigh_full`, `eigh_trunc` | `impl<R, D> TensorMap<R, D, CudaStorage<D>> where D: CudaPayload + FactorizationScalar` (since [#1297](https://github.com/Ryo-wtnb11/TeNeT/issues/1297) the two truncated methods are an `UnsupportedOnDevice` boundary in that block, not an implementation; the marker they carry is unchanged) |
 
 ### `AdvancedLinalgScalar`
 

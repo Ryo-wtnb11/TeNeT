@@ -40,7 +40,9 @@ use tenet::core::{
     U1FusionRule, U1Irrep, Z2Irrep,
 };
 use tenet::prelude::{Error, Runtime, TensorMap, Truncation};
-use tenet::typed::{GradedSpace, LegSelection, SectorSpectrum};
+use tenet::typed::{
+    GradedSpace, LegSelection, SectorSpectrum, SpectrumMagnitude, TruncatedSelection,
+};
 
 fn runtime() -> Runtime {
     Runtime::builder().dense_threads(1).build().unwrap()
@@ -904,4 +906,52 @@ fn a_selection_from_another_leg_is_rejected_by_both_appliers() {
     let tensor: TensorMap<_, f64> = TensorMap::zeros(&runtime, [&leg], [&leg]).unwrap();
     assert!(tensor.restrict_diagonal(&selection).is_err());
     assert!(tensor.restrict_leg(0, &selection).is_err());
+}
+
+/// A caller generic over the payload can name every bound `find_truncated`
+/// needs: `SpectrumMagnitude` is re-exported from `tenet::typed`, so the
+/// device recipe does not have to map the spectrum to `f64` magnitudes first
+/// (#1300 left it unnameable outside the crate; #1297 exports it).
+fn find_truncated_generically<R, D>(
+    s: &TensorMap<R, D>,
+    truncation: &Truncation,
+) -> TruncatedSelection<R>
+where
+    R: tenet::core::MultiplicityFreeRigidSymbols<Scalar = f64>
+        + tenet::core::CheckedFusionAlgebra
+        + tenet::typed::SectorCodec,
+    D: tenet::prelude::TensorScalar + SpectrumMagnitude,
+{
+    s.domain()[0]
+        .find_truncated(&s.diagview().unwrap(), truncation)
+        .unwrap()
+}
+
+#[test]
+fn a_payload_generic_caller_can_name_the_find_truncated_bound() {
+    let runtime = runtime();
+    let leg = u1_leg(&[(0, 3), (1, 2)]);
+    let truncation = Truncation::rank(2);
+
+    let mut state = 7;
+    let real: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| fill(&mut state)).unwrap();
+    let (_, s, _) = real.svd_compact().unwrap();
+    let found = find_truncated_generically(&s, &truncation);
+    assert_eq!(
+        found.error.to_bits(),
+        real.svd_trunc(&truncation).unwrap().error.to_bits()
+    );
+
+    let complex: TensorMap<_, Complex64> =
+        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| {
+            Complex64::new(fill(&mut state), fill(&mut state))
+        })
+        .unwrap();
+    let (_, s, _) = complex.svd_compact().unwrap();
+    let found = find_truncated_generically(&s, &truncation);
+    assert_eq!(
+        found.error.to_bits(),
+        complex.svd_trunc(&truncation).unwrap().error.to_bits()
+    );
 }

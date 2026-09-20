@@ -123,11 +123,17 @@ trivial/dense provider exists.
 | Permute/braid/recoupling | PROVED | PROVED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
 | Canonical contraction/compose | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | PROVED |
 | Arithmetic/reductions | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | PROVED |
-| SVD/EIGH | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | PROVED |
+| SVD/EIGH [9] | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | PROVED |
 | QR | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | [UNSUPPORTED](https://github.com/Ryo-wtnb11/TeNeT/issues/1270) |
 | EIG/null/polar/solve/matrix functions | PROVED | PROVED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
 | Network ordinary replay [8] | PROVED | PROVED | INTENTIONAL-DIFFERENCE | PROVED | UNSUPPORTED | PROVED |
 | v1 typed snapshot (`f64`/`Complex64`) [7] | PROVED | PROVED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
+
+[9] The CUDA cells cover the *compact/full* factorizations (`svd_compact`,
+`eigh_full`, and `qr_compact` in its own row). The truncated variants
+`svd_trunc`/`eigh_trunc` are an explicit `UnsupportedOnDevice` boundary
+([#1297](https://github.com/Ryo-wtnb11/TeNeT/issues/1297)); the device result
+is composed on the host as described below the table.
 
 [8] Device network replay leases a workspace from the same per-plan pool,
 quarantine and byte-budget machinery as Host, keyed by `(provider, dtype,
