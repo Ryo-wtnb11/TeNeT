@@ -79,7 +79,7 @@ mod device {
     };
     use tenet::dense::{cuda_transfer_stats, CudaTransferStats};
     use tenet::prelude::Complex64;
-    use tenet::typed::{CudaStorage, GradedSpace, Runtime, TensorMap, Truncation};
+    use tenet::typed::{CudaStorage, GradedSpace, Runtime, SectorSpectrum, TensorMap, Truncation};
     use tenet_network::tensor;
 
     /// Fixture families. The parameters are explicit CLI inputs; nothing in
@@ -1016,7 +1016,11 @@ mod device {
             }
         }
 
-        // svd_trunc, one policy
+        // Truncated SVD as the composition that replaces the removed device
+        // `svd_trunc`: device compact SVD, one D2H per factor, then the Host
+        // selection and restriction. The device and Host arms are therefore
+        // not the same amount of work; the row exists to price the recipe the
+        // rustdoc gives, not to compare one kernel with another.
         {
             let fixture = fixture::<R, D>(config, space, 1);
             let source = &fixture.host[0];
@@ -1025,13 +1029,40 @@ mod device {
             let barrier = || {
                 let _ = source_device.norm();
             };
-            match bench(
-                config,
-                "cold",
-                || source_device.svd_trunc(&truncation),
-                barrier,
-            ) {
-                Err(reason) => skip_row(label("svd_trunc_rank"), &reason),
+            let composed = || -> Result<_, String> {
+                let (u, s, vh) = source_device.svd_compact().map_err(|e| e.to_string())?;
+                let (u, s, vh) = (
+                    u.to_host().map_err(|e| e.to_string())?,
+                    s.to_host().map_err(|e| e.to_string())?,
+                    vh.to_host().map_err(|e| e.to_string())?,
+                );
+                // `SpectrumMagnitude` is not nameable outside `tenet`, so a
+                // dtype-generic caller maps the spectrum to magnitudes itself.
+                let spectra: Vec<_> = s
+                    .diagview()
+                    .map_err(|e| e.to_string())?
+                    .into_iter()
+                    .map(|entry| SectorSpectrum {
+                        sector: entry.sector,
+                        values: entry.values.into_iter().map(|v| v.magnitude()).collect(),
+                    })
+                    .collect();
+                let found = s.domain()[0]
+                    .find_truncated(&spectra, &truncation)
+                    .map_err(|e| e.to_string())?;
+                let u = u
+                    .restrict_leg(u.codomain_rank(), &found.selection)
+                    .map_err(|e| e.to_string())?;
+                let s = s
+                    .restrict_diagonal(&found.selection)
+                    .map_err(|e| e.to_string())?;
+                let vh = vh
+                    .restrict_leg(0, &found.selection)
+                    .map_err(|e| e.to_string())?;
+                Ok((u, s, vh, found.error))
+            };
+            match bench(config, "cold", composed, barrier) {
+                Err(reason) => skip_row(label("svd_trunc_composition"), &reason),
                 Ok((device_first, device_rows)) => {
                     let (host_first, host_rows) = bench(
                         config,
@@ -1040,29 +1071,27 @@ mod device {
                         || {},
                     )
                     .expect("Host svd_trunc arm");
-                    let kept_match = device_first.singular_values.len()
-                        == host_first.singular_values.len()
-                        && device_first
-                            .singular_values
-                            .iter()
-                            .zip(&host_first.singular_values)
-                            .all(|(actual, expected)| {
+                    let kept = device_first.1.diagview().expect("kept spectrum");
+                    let kept_match = kept.len() == host_first.singular_values.len()
+                        && kept.iter().zip(&host_first.singular_values).all(
+                            |(actual, expected)| {
                                 actual.values.len() == expected.values.len()
                                     && actual.values.iter().zip(&expected.values).all(
-                                        |(actual, expected)| {
-                                            (actual - expected).abs()
+                                        |(&actual, &expected)| {
+                                            actual.distance(D::entry(expected, 0.0))
                                                 <= tolerance * (1.0 + expected.abs())
                                         },
                                     )
-                            });
+                            },
+                        );
                     let check = verdict(
                         kept_match
-                            && (device_first.error - host_first.error).abs()
+                            && (device_first.3 - host_first.error).abs()
                                 <= tolerance * (1.0 + host_first.error.abs()),
                         "host_spectrum_and_discard_weight",
                     );
-                    print_rows(label("svd_trunc_rank"), "cuda", &device_rows, &check);
-                    print_rows(label("svd_trunc_rank"), "host", &host_rows, &check);
+                    print_rows(label("svd_trunc_composition"), "cuda", &device_rows, &check);
+                    print_rows(label("svd_trunc_composition"), "host", &host_rows, &check);
                 }
             }
         }

@@ -95,16 +95,25 @@ buffers, not bytes retained.
 | provider | `U1`, `fZ2`, `SU2`, `U1xfZ2` (fermion parity x U(1) product) |
 | dtype | `f64`, `c64` (`qr_compact` is `f64` only: the device payload is) |
 | family | `many-small`, `few-large` |
-| operation | `to_cuda`, `to_host`, `contract_direct`, `contract_lazy_adjoint_lhs`, `compose`, `scale`, `add_owned`, `add_lazy_fold`, `norm`, `inner`, `svd_compact`, `svd_trunc_rank`, `eigh_full`, `qr_compact`, `network_chain3` |
+| operation | `to_cuda`, `to_host`, `contract_direct`, `contract_lazy_adjoint_lhs`, `compose`, `scale`, `add_owned`, `add_lazy_fold`, `norm`, `inner`, `svd_compact`, `svd_trunc_composition`, `eigh_full`, `qr_compact`, `network_chain3` |
 | target | `cuda`, `host` |
 | phase | `cold` (or `first_after_setup` for the transfer rows), `warm`, `skipped` |
 
 All fixtures are rank-2 endomorphisms `[V; V]`, which is what every existing
 device test uses and what the device contract/compose route accepts (whole
 codomain against whole domain, canonical order, identity output order).
-`eigh_full` uses a separately built Hermitian fixture; `svd_trunc_rank` uses
-`Truncation::rank(degeneracy)`; `network_chain3` is the canonical three-tensor
+`eigh_full` uses a separately built Hermitian fixture; `svd_trunc_composition`
+uses `Truncation::rank(degeneracy)`; `network_chain3` is the canonical three-tensor
 `tensor!([p; s] = a[p; q] * b[q; r] * c[r; s])` chain.
+
+`svd_trunc_composition` replaces the `svd_trunc_rank` row of earlier
+revisions (#1297): device `svd_trunc` is now an explicit `UnsupportedOnDevice`
+boundary, so the `cuda` arm of that row measures the composition that replaces
+it — device `svd_compact`, a D2H of all three factors, then the Host
+`diagview` / `find_truncated` / `restrict_leg` / `restrict_diagonal` chain —
+against the same Host `svd_trunc` arm. The two arms are therefore not the same
+work, and rows named `svd_trunc_rank` in the pinned baselines under
+`benchmarks/history/` measure the removed fused device path, not this one.
 
 A row whose device probe returns an error is printed once per target with
 `phase=skipped` and the error text in `check`, so an unsupported boundary stays
@@ -158,7 +167,7 @@ library reads them back, so no execution decision depends on them.
 | `contract_*`, `compose`, `scale`, `add_*`, `network_chain3` | downloaded device result equals the Host result to `1e-9` relative |
 | `norm`, `inner` | device scalar equals the Host scalar to `1e-9` relative |
 | `svd_compact`, `eigh_full`, `qr_compact` | the device factors recompose on device to the source (gauge-independent) |
-| `svd_trunc_rank` | kept spectrum per coupled sector and discarded weight match Host |
+| `svd_trunc_composition` | kept spectrum per coupled sector and discarded weight match Host |
 
 ## Absent references
 
