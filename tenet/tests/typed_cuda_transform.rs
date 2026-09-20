@@ -15,7 +15,9 @@
 //! 3. a dense oracle independent of both runs where a transform really is a
 //!    plain axis permutation of the physical array: a bosonic permute within
 //!    one side, for the two providers that have a physical basis (U(1), SU(2)).
-//!    Its own agreement with the Host is checked on CPU, in CI.
+//!    Its own agreement with the Host is pinned by
+//!    `typed_transform_host_side.rs`, which is not feature gated and so runs
+//!    in ordinary CI.
 //!
 //! Every fixture additionally asserts non-vacuity — either that the payload
 //! actually moved, or that the transform is not a bare reordering, which is
@@ -26,7 +28,11 @@
 
 #![cfg(feature = "cuda")]
 
+mod common;
+
 use std::sync::Arc;
+
+use common::permute_dense;
 
 use num_complex::Complex64;
 use tenet::core::CheckedFusionAlgebra;
@@ -237,76 +243,6 @@ fn fz2_rank_three(runtime: &Runtime) -> TensorMap<FermionParityFusionRule, f64> 
 // ---------------------------------------------------------------------------
 // Dense oracle (bosonic permute within one side)
 // ---------------------------------------------------------------------------
-
-/// Permutes the axes of a row-major dense array: `out[i] = data[perm(i)]`,
-/// where axis `k` of the output is axis `perm[k]` of the input.
-fn permute_dense<D: Payload>(shape: &[usize], data: &[D], perm: &[usize]) -> (Vec<usize>, Vec<D>) {
-    let out_shape: Vec<usize> = perm.iter().map(|&axis| shape[axis]).collect();
-    let stride = |shape: &[usize]| {
-        let mut strides = vec![1usize; shape.len()];
-        for axis in (0..shape.len().saturating_sub(1)).rev() {
-            strides[axis] = strides[axis + 1] * shape[axis + 1];
-        }
-        strides
-    };
-    let in_strides = stride(shape);
-    let out_strides = stride(&out_shape);
-    let total: usize = out_shape.iter().product();
-    let mut out = Vec::with_capacity(total);
-    for flat in 0..total {
-        let mut source = 0usize;
-        for (axis, &source_axis) in perm.iter().enumerate() {
-            let index = (flat / out_strides[axis]) % out_shape[axis].max(1);
-            source += index * in_strides[source_axis];
-        }
-        out.push(data[source]);
-    }
-    (out_shape, out)
-}
-
-/// The physical-basis oracle: a permute that stays within the codomain and
-/// within the domain is, in the physical carrier basis, exactly that axis
-/// permutation of the dense array — however many F moves the reduced-block
-/// replay had to make to produce it.
-macro_rules! assert_dense_oracle {
-    ($what:expr, $tensor:expr, $codomain_axes:expr, $domain_axes:expr) => {{
-        let tensor = &$tensor;
-        let codomain_axes: &[usize] = $codomain_axes;
-        let domain_axes: &[usize] = $domain_axes;
-        let permuted = tensor.permute(codomain_axes, domain_axes).unwrap();
-        let source = tensor.to_physical_dense().unwrap();
-        let moved = permuted.to_physical_dense().unwrap();
-        let perm: Vec<usize> = codomain_axes
-            .iter()
-            .chain(domain_axes.iter())
-            .copied()
-            .collect();
-        let (shape, data) = permute_dense(&source.shape, &source.data, &perm);
-        assert_eq!(moved.shape, shape, "{}: dense oracle shape", $what);
-        assert_payload_close(&moved.data, &data, concat!($what, ": dense oracle"));
-    }};
-}
-
-/// CPU gate for the oracle itself (#1322 acceptance: the oracle must be
-/// independent evidence, so it is pinned against the Host before any device
-/// result is compared to it). Runs in CI: no device is touched.
-#[test]
-fn the_dense_permute_oracle_agrees_with_the_host_for_u1_and_su2() {
-    let runtime = Runtime::builder().build().unwrap();
-    let u1 = u1_leg(&[(-1, 2), (0, 1), (1, 2)], false);
-    let u1_tensor: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&u1, &u1], [&u1, &u1], real_fill).unwrap();
-    assert_dense_oracle!("U(1) within-side permute", u1_tensor, &[1, 0], &[3, 2]);
-
-    let su2 = su2_leg();
-    let su2_tensor: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&su2, &su2], [&su2, &su2], real_fill).unwrap();
-    assert_dense_oracle!("SU(2) within-side permute", su2_tensor, &[1, 0], &[3, 2]);
-    // The SU(2) case is the interesting one: the reduced-block replay must
-    // recouple, so the payload is not a reordering of the source.
-    let permuted = su2_tensor.permute(&[1, 0], &[3, 2]).unwrap();
-    assert_not_a_reordering(su2_tensor.data(), permuted.data(), "SU(2) permute");
-}
 
 // ---------------------------------------------------------------------------
 // Device gates
@@ -703,14 +639,52 @@ fn device_lazy_adjoint_transforms_lower_onto_the_parent_like_the_host() {
     // Device twin of `lazy_adjoint_shared_owner.rs`: every transform of a lazy
     // adjoint lowers onto the parent and re-wraps, so it must equal the Host's
     // transform of the same lazy adjoint.
+    //
+    // The witness is taken against the *lazy adjoint's own* payload, not the
+    // parent's: the adjoint alone already rearranges the parent, so comparing
+    // with the parent would pass even if the transform did nothing.
     let runtime = runtime();
     let a = u1_leg(&[(-1, 2), (0, 1), (1, 3)], false);
     let b = u1_leg(&[(0, 2), (1, 1)], true);
     let c = u1_leg(&[(-1, 1), (1, 2)], false);
     let d = u1_leg(&[(-2, 2), (-1, 3), (0, 1), (1, 2), (2, 1)], false);
-    let parent: TensorMap<_, Complex64> =
+    let u1_parent: TensorMap<_, Complex64> =
         TensorMap::from_block_fn(&runtime, [&a, &b, &c], [&d], complex_fill).unwrap();
-    assert!(parent.block_count() >= 4, "multi-block lazy fixture");
+    assert!(u1_parent.block_count() >= 4, "multi-block lazy fixture");
+    assert_lazy_adjoint_transforms_match_host(&u1_parent, "U(1) c64 lazy", false);
+
+    // SU(2): the lowered operation recouples, so the transformed adjoint is
+    // not a reordering of the adjoint itself.
+    let su2 = su2_leg();
+    let su2_parent: TensorMap<_, Complex64> =
+        TensorMap::from_block_fn(&runtime, [&su2, &su2], [&su2], complex_fill).unwrap();
+    assert_lazy_adjoint_transforms_match_host(&su2_parent, "SU(2) c64 lazy", true);
+
+    // fZ2: fermionic signs under a lazy adjoint, real payload.
+    let fz2 = fz2_leg();
+    let fz2_parent: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&fz2, &fz2], [&fz2], real_fill).unwrap();
+    assert_lazy_adjoint_transforms_match_host(&fz2_parent, "fZ2 f64 lazy", true);
+}
+
+/// Runs the five transforms on a lazy adjoint, on Host and on device, and
+/// asserts they agree.
+///
+/// The non-vacuity witnesses are counted over the five operations rather than
+/// demanded of each: which individual transform of a given fixture moves the
+/// flat payload, and which applies a coefficient other than `1`, is a property
+/// of that fixture's geometry and provider (fZ2 `repartition`, for instance,
+/// is sign free *and* layout preserving on a small fixture). What must hold is
+/// that the set as a whole exercises motion, and — for a provider that
+/// recouples — a coefficient.
+fn assert_lazy_adjoint_transforms_match_host<R, D>(
+    parent: &TensorMap<R, D>,
+    what: &str,
+    recouples: bool,
+) where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: Payload + tenet::typed::CudaPayload,
+{
     let host_lazy = parent.adjoint().unwrap();
     let device_lazy = parent.to_cuda().unwrap().adjoint().unwrap();
 
@@ -729,12 +703,12 @@ fn device_lazy_adjoint_transforms_lower_onto_the_parent_like_the_host() {
 
     let pairs = [
         (
-            "lazy permute",
+            "permute",
             host_lazy.permute(codomain_axes, domain_axes).unwrap(),
             device_lazy.permute(codomain_axes, domain_axes).unwrap(),
         ),
         (
-            "lazy braid",
+            "braid",
             host_lazy
                 .braid(codomain_axes, domain_axes, &levels)
                 .unwrap(),
@@ -743,17 +717,17 @@ fn device_lazy_adjoint_transforms_lower_onto_the_parent_like_the_host() {
                 .unwrap(),
         ),
         (
-            "lazy repartition",
+            "repartition",
             host_lazy.repartition(new_split).unwrap(),
             device_lazy.repartition(new_split).unwrap(),
         ),
         (
-            "lazy transpose",
+            "transpose",
             host_lazy.transpose().unwrap(),
             device_lazy.transpose().unwrap(),
         ),
         (
-            "lazy transpose_axes",
+            "transpose_axes",
             host_lazy
                 .transpose_axes(cyclic_codomain, &cyclic_domain)
                 .unwrap(),
@@ -762,10 +736,72 @@ fn device_lazy_adjoint_transforms_lower_onto_the_parent_like_the_host() {
                 .unwrap(),
         ),
     ];
-    for (what, expected, actual) in pairs {
+    let adjoint_payload = host_lazy.data().to_vec();
+    let mut moved = 0usize;
+    let mut scaled = 0usize;
+    for (operation, expected, actual) in pairs {
+        let label = format!("{what} {operation}");
         let actual = actual.to_host().unwrap();
-        assert_payload_close(actual.data(), expected.data(), what);
-        assert_eq!(layout(&actual), layout(&expected), "{what}: layout");
-        assert_moved(parent.data(), actual.data(), what);
+        assert_payload_close(actual.data(), expected.data(), &label);
+        assert_eq!(layout(&actual), layout(&expected), "{label}: layout");
+        if adjoint_payload
+            .iter()
+            .zip(actual.data())
+            .any(|(before, after)| before != after)
+        {
+            moved += 1;
+        }
+        if sorted_values(&adjoint_payload) != sorted_values(actual.data()) {
+            scaled += 1;
+        }
     }
+    assert!(
+        moved >= 1,
+        "{what}: no transform moved the adjoint's payload, so none of them          proves anything"
+    );
+    if recouples {
+        assert!(
+            scaled >= 1,
+            "{what}: no transform applied a coefficient other than 1 or mixed              a recoupling block"
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn device_transforms_of_an_empty_tensor_produce_an_empty_tensor() {
+    // `required_len == 0`: the output upload, the replay and the download all
+    // have to survive a structure with no admissible block at all.
+    let runtime = runtime();
+    let codomain = u1_leg(&[(1, 2)], false);
+    let domain = u1_leg(&[(0, 3)], false);
+    let host: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&codomain], [&domain], |_, _| 1.0).unwrap();
+    assert_eq!(host.block_count(), 0);
+    assert!(host.data().is_empty());
+    let device = host.to_cuda().unwrap();
+
+    for (what, actual) in [
+        ("permute", device.permute(&[1], &[0]).unwrap()),
+        ("braid", device.braid(&[1], &[0], &[1, 2]).unwrap()),
+        ("transpose", device.transpose().unwrap()),
+        ("repartition", device.repartition(0).unwrap()),
+    ] {
+        let actual = actual.to_host().unwrap();
+        assert!(
+            actual.data().is_empty(),
+            "{what}: expected an empty payload"
+        );
+        assert_eq!(actual.block_count(), 0, "{what}: expected no blocks");
+    }
+    // The lazy-adjoint lowering must survive it too.
+    assert!(device
+        .adjoint()
+        .unwrap()
+        .transpose()
+        .unwrap()
+        .to_host()
+        .unwrap()
+        .data()
+        .is_empty());
 }

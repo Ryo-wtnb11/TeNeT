@@ -120,7 +120,7 @@ trivial/dense provider exists.
 | Physical expansion/projection [2] | PROVED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
 | Explicit Host/device transfer | PROVED | PROVED | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/3) | PROVED | PROVED | PROVED |
 | Lazy adjoint | PROVED | PROVED | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/3) | PROVED | UNSUPPORTED | PROVED |
-| Permute/braid/recoupling | PROVED | PROVED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
+| Permute/braid/recoupling | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | PROVED |
 | Canonical contraction/compose | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | PROVED |
 | Arithmetic/reductions | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | PROVED |
 | SVD/EIGH [9] | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | PROVED |
@@ -254,6 +254,14 @@ ownership/cache audit is #783.
 - `tenet/tests/typed_cuda_transfer.rs` and
   `tenet-network/tests/typed_cuda_network.rs`: real-device MF transfer,
   operation and canonical-network gates, for both device payload dtypes.
+- `tenet/tests/typed_cuda_transform.rs` and
+  `tenet/tests/typed_cuda_transform_contracts.rs`: real-device
+  `permute`/`braid`/`transpose`/`transpose_axes`/`repartition` against the Host
+  answer for U(1), SU(2), fZ2, fZ2xU(1) and fZ2xSU(2), both device payload
+  dtypes, plus the transfer, allocation, statistics and rejection contracts.
+  Their device-free half — the dense physical-basis oracle pinned against the
+  Host, and the device-less Runtime state — is
+  `tenet/tests/typed_transform_host_side.rs`, which is not feature gated.
 - `tenet/tests/physical_dense.rs`: U(1)/SU(2) Host physical expansion and
   projection, real and complex SU(2) round trips, and an independent
   TensorKit SU(2) coefficient oracle.

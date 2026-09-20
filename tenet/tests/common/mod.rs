@@ -180,3 +180,35 @@ pub fn literal_weighted_trace<S: PartialEq, D: Copy>(
         });
     }
 }
+
+/// Permutes the axes of a row-major dense array: axis `k` of the output is
+/// axis `perm[k]` of the input.
+///
+/// This is the whole of the physical-basis oracle for a bosonic permute that
+/// stays within the codomain and within the domain — the reduced-block replay
+/// may have to recouple to produce it, but the physical array only moves.
+/// Shared so the Host pin (`typed_transform_host_side.rs`) and the device
+/// gate (`typed_cuda_transform.rs`) compare against one definition.
+pub fn permute_dense<D: Copy>(shape: &[usize], data: &[D], perm: &[usize]) -> (Vec<usize>, Vec<D>) {
+    let out_shape: Vec<usize> = perm.iter().map(|&axis| shape[axis]).collect();
+    let strides = |shape: &[usize]| {
+        let mut strides = vec![1usize; shape.len()];
+        for axis in (0..shape.len().saturating_sub(1)).rev() {
+            strides[axis] = strides[axis + 1] * shape[axis + 1];
+        }
+        strides
+    };
+    let in_strides = strides(shape);
+    let out_strides = strides(&out_shape);
+    let total: usize = out_shape.iter().product();
+    let mut out = Vec::with_capacity(total);
+    for flat in 0..total {
+        let mut source = 0usize;
+        for (axis, &source_axis) in perm.iter().enumerate() {
+            let index = (flat / out_strides[axis]) % out_shape[axis].max(1);
+            source += index * in_strides[source_axis];
+        }
+        out.push(data[source]);
+    }
+    (out_shape, out)
+}

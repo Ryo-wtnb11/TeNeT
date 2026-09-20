@@ -12637,7 +12637,7 @@ where
             let mut lease = self.runtime.lease_context()?;
             lease
                 .context()
-                .multiplicity_free_lane::<D>()
+                .multiplicity_free_lane::<D>()?
                 .tree_context_mut()
                 .compile_tree_pair_structure(
                     body.space.provider(),
@@ -12654,6 +12654,17 @@ where
         }
         // ponytail: #740 — the device seam still initializes an output by
         // uploading zeros; replace only with a measured native allocation.
+        //
+        // Why not report an inexpressible destination layout before spending
+        // this upload: a returning transform cannot produce one. `dst_space`
+        // comes from `transformed_multiplicity_free`, i.e. the canonical
+        // final-homspace layout, never from the source's strides, and block
+        // strides are `usize`, so both arms of the executor's layout rejection
+        // are unreachable here; the buffer is this method's own and is dropped
+        // on any error, so no caller-visible state is touched either way.
+        // G2b-3 has no such argument — its destination is the caller's — so it
+        // must validate before it writes, and must redo this reasoning if it
+        // admits a non-canonical layout through `admit_exact_tree_pair_layout`.
         let mut dst = CudaStorage::upload_owned(cuda, vec![D::from_real(0.0); required_len])?;
         executor.replay(
             cuda,
@@ -12707,6 +12718,14 @@ where
     /// call for a given structure additionally uploads that structure's
     /// coefficient payload once and may grow the pack/scatter workspace once.
     ///
+    /// On device the replay runs in overwrite mode, so it also zero-fills
+    /// every *inactive* destination layout on the device — redundant work over
+    /// an output that was just uploaded as zeros, costing one submission and
+    /// `Σ(inactive layout elements)` device writes per call. It is kept
+    /// because it is what makes the executor's destination mode independent of
+    /// what the destination held, which `*_overwrite_into` relies on; removing
+    /// it here would need a second replay mode for no transfer saving.
+    ///
     /// That warm contract holds only while this Runtime's Host transform store
     /// admits the structure: with a tree-transform cache byte budget of zero,
     /// or for a structure whose entry exceeds the store's per-entry limit, the
@@ -12758,6 +12777,17 @@ where
     ///     let _ = tensor.permute(&[1], &[0]);
     /// }
     /// ```
+    ///
+    /// # Source compatibility
+    ///
+    /// Enabling the `cuda` feature adds these five names to a second `impl`,
+    /// so the *path* forms `TensorMap::permute`, `TensorMap::braid`,
+    /// `TensorMap::transpose`, `TensorMap::transpose_axes` and
+    /// `TensorMap::repartition` become ambiguous (`E0034`) where they were not
+    /// before — the same non-additivity the device `adjoint`, `norm` and
+    /// `scale` already have. Method-call syntax (`tensor.permute(..)`), a
+    /// closure (`|t| t.permute(..)`) or a fully qualified
+    /// `TensorMap::<R, D>::permute` all keep working.
     ///
     /// The multiplicity-free twin compiles, for either device payload:
     ///

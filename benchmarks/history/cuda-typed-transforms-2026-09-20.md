@@ -1,7 +1,10 @@
 # Typed structural transforms on device tensors (G2b-2, issue #1322)
 
-Base: origin/main `f7d324fe` (executor with caller alpha, #1319). Branch
-`g2b2-typed-device-transforms`. No dependency change.
+Base: origin/main `a06c3a78` (#1321, which made
+`TensorExecutionContext::multiplicity_free_lane` fallible; the device transform
+takes its lane with `?`, inside the Host-lease block, so a lane failure is
+reported before `lease_cuda()`). Rebased from `f7d324fe` (#1319, the executor's
+caller scale). Branch `g2b2-typed-device-transforms`. No dependency change.
 
 ## What landed
 
@@ -90,13 +93,31 @@ of which submit `dot_general`. `cuda_zero_prefix` and `cuda_copy_region_into`
 confirmation: `copy_calls = 0` in every operation-matrix transform row, cold
 and warm. No fixture was excluded for #1320.
 
-## Device suite
+## Device suite and the device-free half
 
-`cargo test --workspace --lib --tests --no-default-features --features
-cuda,cpu-faer --no-fail-fast -- --ignored --skip
-measure_checked_generic_transform_phases --skip axioms_ --skip itebd_ --skip
-cross_library --test-threads=1` on A100 (GPU 0, no other process):
-**142 passed, 0 failed**, including the two new binaries (9 and 5 tests).
+Recorded on A100 (GPU 0, no other process on it), source replica
+`/data2/ryo-w/gpu-phase/g2b2`, private target `g2b2-target` (deleted
+afterwards):
+
+- `cargo test --workspace --lib --tests --no-default-features --features
+  cuda,cpu-faer --no-fail-fast -- --ignored --skip
+  measure_checked_generic_transform_phases --skip axioms_ --skip itebd_ --skip
+  cross_library --test-threads=1` → **143 passed, 0 failed, exit 0**, including
+  `typed_cuda_transform` (10) and `typed_cuda_transform_contracts` (5).
+- the same binaries **without** `--ignored`, plus the ungated
+  `typed_transform_host_side` → 2 passed, 0 failed (the two cuda binaries are
+  ignored-only by construction).
+- `cargo test -p tenet-rs -p tenet-tensors -p tenet-operations -p tenet-network
+  --lib --tests --no-default-features --features cuda,cpu-faer` (non-ignored,
+  the touched crates) → **1554 passed, 0 failed, exit 0**.
+- `cargo test -p tenet-rs --no-default-features --features cuda,cpu-faer --doc`
+  → **78 passed, 0 failed, 1 ignored**, which is where the two `compile_fail`
+  provider boundaries and their compiling twin execute.
+
+The device-free evidence deliberately does **not** live behind
+`#[cfg(feature = "cuda")]`: `tenet/tests/typed_transform_host_side.rs` is
+ungated, so ordinary CI runs both the dense-oracle pin (without which the dense
+oracle is not independent evidence) and the device-less Runtime state test.
 
 ## Scope of this evidence
 

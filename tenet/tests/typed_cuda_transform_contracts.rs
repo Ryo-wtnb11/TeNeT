@@ -5,6 +5,10 @@
 //! they live in their own test binary and run single-threaded: another test
 //! submitting device work in the same process would perturb every delta.
 //!
+//! Every test here needs a real device. The Host half of the same contract —
+//! a device-less Runtime reporting no device state and still clearing its
+//! store — is in the ungated `typed_transform_host_side.rs`.
+//!
 //! Run with `cargo test -p tenet-rs --features cuda,cpu-faer --test \
 //! typed_cuda_transform_contracts -- --ignored --test-threads=1`.
 
@@ -54,26 +58,6 @@ fn delta<T>(body: impl FnOnce() -> T) -> (T, CudaTransferStats) {
             copy_calls: after.copy_calls - before.copy_calls,
         },
     )
-}
-
-// ---------------------------------------------------------------------------
-// CI-runnable: no device required
-// ---------------------------------------------------------------------------
-
-#[test]
-fn a_runtime_without_a_device_reports_no_device_transform_state_and_still_clears() {
-    // The clear path reaches the executor only through the device lease, so a
-    // device-less Runtime must clear its Host store and do nothing else.
-    let runtime = Runtime::builder().build().unwrap();
-    assert!(runtime.cuda_tree_transform_stats().is_none());
-    let v = leg();
-    let tensor: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&v, &v], [&v, &v], |_, _| 1.0).unwrap();
-    let _ = tensor.permute(&[1, 0], &[3, 2]).unwrap();
-    assert!(runtime.tree_transform_cache_info().entries() > 0);
-    runtime.clear_tree_transform_cache();
-    assert_eq!(runtime.tree_transform_cache_info().entries(), 0);
-    assert!(runtime.cuda_tree_transform_stats().is_none());
 }
 
 // ---------------------------------------------------------------------------
@@ -211,28 +195,41 @@ fn device_transform_rejections_happen_before_any_device_work() {
     let _ = device.permute(&[2, 0], &[1, 3]).unwrap();
     let before = runtime.cuda_tree_transform_stats().unwrap();
 
+    let host = fixture(&runtime);
+    // Each rejection is written once and expanded against both receivers, so
+    // the device error *mapping* is gated, not merely "an error came back".
+    macro_rules! rejects_like_host {
+        (|$t:ident| $call:expr) => {{
+            let expected = {
+                let $t = &host;
+                $call
+            }
+            .unwrap_err()
+            .to_string();
+            let actual = {
+                let $t = &device;
+                $call
+            }
+            .unwrap_err()
+            .to_string();
+            assert_eq!(actual, expected, "device error text must be the Host's");
+            actual
+        }};
+    }
+
     let (errors, counters) = delta(|| {
         [
             // The braid levels-length check precedes the identity detection,
             // exactly as on Host: identity axes with a short levels list is an
             // error, not a clone.
-            device
-                .braid(&[0, 1], &[2, 3], &[1, 2, 3])
-                .unwrap_err()
-                .to_string(),
-            device
-                .braid(&[2, 0], &[1, 3], &[1, 2, 3, 4, 5])
-                .unwrap_err()
-                .to_string(),
+            rejects_like_host!(|t| t.braid(&[0, 1], &[2, 3], &[1, 2, 3])),
+            rejects_like_host!(|t| t.braid(&[2, 0], &[1, 3], &[1, 2, 3, 4, 5])),
             // Malformed axes come back from the expert layer.
-            device.permute(&[0, 0], &[2, 3]).unwrap_err().to_string(),
+            rejects_like_host!(|t| t.permute(&[0, 0], &[2, 3])),
             // A non-planar re-arrangement is refused rather than braided.
-            device
-                .transpose_axes(&[1, 2], &[3, 0])
-                .unwrap_err()
-                .to_string(),
+            rejects_like_host!(|t| t.transpose_axes(&[1, 2], &[3, 0])),
             // A split beyond the rank has no planar reading.
-            device.repartition(5).unwrap_err().to_string(),
+            rejects_like_host!(|t| t.repartition(5)),
         ]
     });
     assert!(

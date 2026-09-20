@@ -5,6 +5,8 @@ use std::any::Any;
 use std::cell::RefCell;
 use std::hash::Hash;
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(feature = "cuda")]
+use std::sync::PoisonError;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
 use num_complex::{Complex32, Complex64};
@@ -1000,11 +1002,14 @@ impl Runtime {
     /// lock order. Dropping device state is a memory decision, never a
     /// correctness one — the next device transform re-prepares what it needs.
     /// On a Runtime with a device this call therefore blocks behind a device
-    /// operation in progress.
+    /// operation in progress. A device lock poisoned by an earlier panic is
+    /// recovered rather than propagated: dropping prepared device state is
+    /// always safe, and a cache clear is the wrong place to re-raise someone
+    /// else's panic.
     pub fn clear_tree_transform_cache(&self) {
         self.inner.tree_transform_stores.clear();
         #[cfg(feature = "cuda")]
-        if let Ok(mut lease) = self.lease_cuda() {
+        if let Some(mut lease) = self.lease_cuda_for_maintenance() {
             lease.split().1.clear();
         }
     }
@@ -1185,6 +1190,23 @@ impl Runtime {
         self.inner.cuda_device.ok_or_else(missing_cuda_device)
     }
 
+    /// Leases the device state for a path that only drops or reads it.
+    ///
+    /// Unlike [`Self::lease_cuda`], a poisoned mutex is recovered rather than
+    /// re-panicked: clearing prepared device state and reading its byte
+    /// counters are safe whatever a panicking device operation left behind —
+    /// every entry is a dtype conversion of data the structure still owns, and
+    /// the workspaces are fully rewritten before they are read. Turning
+    /// another thread's panic into a panic in a cache-clear or a statistics
+    /// read would be the worse contract.
+    #[cfg(feature = "cuda")]
+    fn lease_cuda_for_maintenance(&self) -> Option<CudaLease<'_>> {
+        self.inner
+            .cuda
+            .as_ref()
+            .map(|cuda| CudaLease(cuda.lock().unwrap_or_else(PoisonError::into_inner)))
+    }
+
     /// Leases this runtime's single CUDA context for one device operation.
     ///
     /// Device operations validate first, then lease, then execute: they hold
@@ -1206,10 +1228,12 @@ impl Runtime {
     /// retain, or `None` when the Runtime has no device.
     ///
     /// Read-only observation; it takes the device lease, so it waits behind a
-    /// device operation in progress.
+    /// device operation in progress. A device lock poisoned by an earlier
+    /// panic is recovered and the recovered state's counters are returned,
+    /// rather than panicking inside a statistics read.
     #[cfg(feature = "cuda")]
     pub fn cuda_tree_transform_stats(&self) -> Option<CudaTreeTransformStats> {
-        let mut lease = self.lease_cuda().ok()?;
+        let mut lease = self.lease_cuda_for_maintenance()?;
         let (dense, executor) = lease.split();
         Some(CudaTreeTransformStats {
             prepared_structures: executor.prepared_structures(),
