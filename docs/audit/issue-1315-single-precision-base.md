@@ -93,8 +93,12 @@ four dtypes before this leaf; no dtype dispatch was added there.
   exact expression the loop used before, rather than the componentwise
   `scale_by_coefficient`, so even the signed zeros and the non-finite cases
   agree. Pinned by
-  `tenet/tests/reduction_accumulator_precision.rs::double_precision_reductions_are_bit_for_bit_unchanged`
-  against bit patterns captured on `origin/main` 89b1cde6.
+  `tenet/tests/reduction_accumulator_precision.rs` against bit patterns
+  captured on `origin/main` 89b1cde6 in a detached worktree with its own
+  target directory. Signed zeros and the componentwise-versus-full-complex
+  weight product are the one difference no public input can expose, because a
+  signed zero is flattened by the `+0.0` the accumulator starts from; the
+  conservative form is kept regardless, and the test records why.
   `f32`/`Complex32` gain the accuracy and the range of a double accumulator
   over a naive `f32` sum, which TeNeT chooses deliberately over TensorKit's
   scaled per-block `LinearAlgebra.norm`.
@@ -127,21 +131,31 @@ four dtypes before this leaf; no dtype dispatch was added there.
 
 ## Costs
 
+Measured on macOS/aarch64, `dense_threads(1)`, debug build. These are
+**evidence, not assertions**: an absolute allocation count depends on the
+platform, the allocator and the core count the CPU context sizes its pool
+from, so the tests assert only relations between measurements taken in the
+same process.
+
 | Measurement | Before (`f032d121`) | After |
 | --- | --- | --- |
 | `Runtime::build()` allocation calls | 199 | 199 |
 | `Runtime::build()` allocation bytes | 68 512 | 68 656 |
-| first `Complex32` tensor on that runtime | — | 76 calls, against 10 for the second |
+| first `Complex32` permute on a runtime already warmed with `f64` | — | 58 calls, against 22 for the second |
 
 The 144 bytes are the two `Option<Box<_>>` lane slots and the retained lane
 configuration per `Ctxs`, inside allocations the runtime already made. A lane
-costs about 66 allocation calls, and is paid only by a program that names the
+costs about 36 allocation calls, and is paid only by a program that names the
 dtype — but it is paid *per `Ctxs`*, not per `Runtime`: each pooled
 `TensorExecutionContext` has an `mf` and a `generic` namespace, so a program
 that uses single precision on `max_idle` pooled contexts builds up to
 `2 * max_idle` lanes per dtype. That is the same shape as the double-precision
-lanes it already pays for eagerly. Pinned by
-`tenet/tests/single_precision_allocations.rs`.
+lanes it already pays for eagerly. The contract the test pins is structural and platform-independent: building a
+`Runtime` costs the same whether or not single precision was used earlier in
+the process, and on a runtime already warmed with the `f64` operation — which
+fills the layout admission and the structure-keyed, `f64`-keyed plan store the
+lanes share — the first single-precision operation still allocates more than
+the second. That remaining difference *is* the lane.
 
 The same test pins the per-operation contract: at a 605-entry payload, `f32`
 and `f64` perform the identical 25 allocation calls, and `f32` allocates
@@ -167,9 +181,16 @@ payload-sized buffers the measured pipeline produces. `Complex32` against
   — the same contract on the SU(2) compose fixture, which is where the
   coefficient scratch is converted per structure identity.
 - `tenet/tests/reduction_accumulator_precision.rs` — where the reductions
-  accumulate: the `f64`/`Complex64` bit-for-bit pins, and three
-  single-precision pins that distinguish a wide from a narrow accumulator by
-  construction (one entry of `8192.0f32` and the rest `1.0f32`: `8192^2` is
+  accumulate: 39 `f64`/`Complex64` bit-for-bit pins plus 10 Checked-Generic
+  ones (SU(3), behind `racah-generated`), over dense, compact-diagonal and
+  lazy-adjoint storage, `norm`/`inner`/`tr`/full trace, an abelian provider
+  with `dim(c) == 1` and a non-abelian one with `dim(c) == 2`, and a `-0.0`
+  fixture on the lazy-adjoint complex path. The entries are non-dyadic, so a
+  reordered or re-associated accumulation changes the bits — visible in the
+  table itself, where `f64 su2 dense inner` and `f64 su2 lazy adjoint inner`
+  differ in the last bit because the two paths sum in different orders. And
+  three single-precision pins that distinguish a wide from a narrow
+  accumulator by construction (one entry of `8192.0f32` and the rest `1.0f32`: `8192^2` is
   `2^26`, whose `f32` step is 8, so a narrow accumulator swallows every `1.0`
   and a wide one does not — the difference survives narrowing back to `f32`),
   plus an overflow fixture (`1e20f32`) whose `norm` must be finite on dense,

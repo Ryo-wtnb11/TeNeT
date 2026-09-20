@@ -237,6 +237,7 @@ impl_dense_block_scalar!(Complex64, C64, C64);
 /// The `Wide` type carries `RecouplingCoefficientAction<f64>` so a
 /// quantum-dimension weight can be applied to the accumulator without first
 /// narrowing it to the payload type.
+#[doc(hidden)]
 pub trait WideScalar: DenseBlockScalar + RecouplingCoefficientAction<f64> {
     /// The double-precision scalar of the same field: real for a real payload,
     /// complex for a complex one.

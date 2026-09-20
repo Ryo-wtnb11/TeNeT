@@ -9,6 +9,13 @@
 //!   its double-precision twin and allocates exactly half the payload bytes.
 //!   Narrowing the payload must not change the algorithm, only the bytes it
 //!   moves.
+//!
+//! Every assertion here is *relative*: two measurements taken in this same
+//! process compared against each other. Absolute allocation counts depend on
+//! the platform, the allocator and the core count — the CPU context sizes its
+//! pool from the available parallelism — so a number measured on one machine
+//! is evidence, not a contract. The measured figures live in
+//! `docs/audit/issue-1315-single-precision-base.md`.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -18,6 +25,7 @@ use std::sync::Arc;
 
 use tenet::core::{U1FusionRule, U1Irrep};
 use tenet::prelude::{Complex32, Complex64, GradedSpace, Runtime, TensorMap};
+use tenet_matrixalgebra::FactorScalar;
 
 struct CountingAllocator;
 
@@ -63,44 +71,64 @@ fn measured<T>(operation: impl FnOnce() -> T) -> (T, usize, usize) {
     (value, ALLOCATIONS.get(), BYTES.get())
 }
 
-/// Measured at `origin/main` f032d121, before `f32`/`Complex32` were admitted
-/// to `TensorScalar`: 199 allocation calls, 68512 bytes. After admission the
-/// call count is unchanged and the bytes grow by 144 — the two `Option<Box<_>>`
-/// lane slots and the retained lane configuration inside the same allocation.
-/// Building all four lanes eagerly instead would add four contexts, each with
-/// two dense executors and a contract workspace, to every runtime.
-const F64_ONLY_CONSTRUCTION_CALLS: usize = 199;
+fn build_runtime() -> Runtime {
+    Runtime::builder().dense_threads(1).build().unwrap()
+}
+
+/// A permute at one payload dtype, which is the cheapest public operation
+/// that leases the runtime's execution lane for that dtype.
+macro_rules! permuted {
+    ($runtime:expr, $dtype:ty, $space:expr, $seed:expr) => {{
+        let tensor: TensorMap<U1FusionRule, $dtype> =
+            TensorMap::rand_with_seed($runtime, [$space, $space], [$space], $seed).unwrap();
+        black_box(tensor.permute(&[1], &[2, 0]).unwrap());
+    }};
+}
 
 #[test]
 fn runtime_construction_does_not_build_unused_dtype_lanes() {
-    // Warm anything the first runtime initialises lazily and process-wide
-    // (thread pools, env parsing) so the measured build is steady state.
-    black_box(Runtime::builder().dense_threads(1).build().unwrap());
-
-    let (runtime, calls, bytes) = measured(|| Runtime::builder().dense_threads(1).build().unwrap());
-    eprintln!("Runtime::build: {calls} allocation calls, {bytes} bytes");
-    assert!(
-        calls <= F64_ONLY_CONSTRUCTION_CALLS,
-        "admitting a payload dtype must not charge runtime construction: \
-         {calls} allocation calls against {F64_ONLY_CONSTRUCTION_CALLS} before admission"
-    );
-
-    // The lane is built on first use, so the first single-precision tensor on
-    // this runtime pays for it and the second does not.
+    // Warm anything the process initialises once (thread pools, env parsing)
+    // so every build measured below is steady state.
+    black_box(build_runtime());
     let space =
         GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
-    let build = |seed| {
-        TensorMap::<U1FusionRule, Complex32>::rand_with_seed(&runtime, [&space], [&space], seed)
-            .unwrap()
-    };
-    let (cold, cold_calls, _) = measured(|| build(1));
-    let (warm, warm_calls, _) = measured(|| build(2));
-    black_box((cold, warm));
-    eprintln!("first Complex32 tensor: {cold_calls} calls, second: {warm_calls} calls");
-    assert!(
-        cold_calls > warm_calls,
-        "the Complex32 lane should be constructed on first use, not at Runtime::build"
+
+    let (_, baseline, baseline_bytes) = measured(build_runtime);
+    eprintln!("Runtime::build baseline: {baseline} allocation calls, {baseline_bytes} bytes");
+
+    // Using single precision must not make the *next* runtime more expensive
+    // to build: the lanes belong to the runtime that needed them, and nothing
+    // about them is global or sticky.
+    let user = build_runtime();
+    permuted!(&user, Complex32, &space, 1);
+    let (_, after_use, _) = measured(build_runtime);
+    assert_eq!(
+        after_use, baseline,
+        "constructing a Runtime cost {after_use} allocation calls after single precision \
+         had been used in this process, against {baseline} before"
     );
+
+    // Isolating the lane: on a fresh runtime, run the *double-precision*
+    // operation first. That warms everything this runtime caches by structure
+    // rather than by dtype — the layout admission and the tree-transform plan
+    // store, which is shared and keyed on the f64 coefficients. What the first
+    // single-precision operation then pays for, and the second does not, is
+    // its own lane. Two rounds, each on a new runtime, so the lane is shown to
+    // be per-runtime rather than process-global.
+    for round in 0..2 {
+        let runtime = build_runtime();
+        permuted!(&runtime, f64, &space, 10 + round);
+        permuted!(&runtime, f64, &space, 20 + round);
+
+        let (_, cold, _) = measured(|| permuted!(&runtime, Complex32, &space, 30 + round));
+        let (_, warm, _) = measured(|| permuted!(&runtime, Complex32, &space, 40 + round));
+        eprintln!("round {round}: first Complex32 permute {cold} calls, second {warm}");
+        assert!(
+            cold > warm,
+            "round {round}: the Complex32 lane should be constructed on first use, not at \
+             Runtime::build ({cold} cold against {warm} warm)"
+        );
+    }
 }
 
 fn u1_space() -> GradedSpace<U1FusionRule> {
@@ -133,9 +161,11 @@ macro_rules! measure_pipeline {
             let tensor: TensorMap<U1FusionRule, $dtype> =
                 TensorMap::rand_with_seed($runtime, [space, space], [space], 5_502).unwrap();
             let permuted = tensor.permute(&[1], &[2, 0]).unwrap();
-            let sum = tensor
-                .add(&tensor, <$dtype>::from(1.0), <$dtype>::from(1.0))
-                .unwrap();
+            // `FactorScalar::from_real`, not `<$dtype>::from(1.0)`: an
+            // unsuffixed float literal has no type to fall back to that every
+            // instantiation of this macro accepts.
+            let one = <$dtype as FactorScalar>::from_real(1.0);
+            let sum = tensor.add(&tensor, one, one).unwrap();
             black_box((permuted, sum, tensor.norm().unwrap(), tensor.data().len()))
         })
     }};
