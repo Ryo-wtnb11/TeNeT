@@ -10,8 +10,8 @@ use tenet::core::{
 use tenet::prelude::Complex64;
 use tenet::typed::{CudaStorage, GradedSpace, Runtime, TensorMap};
 use tenet_network::{
-    plan_cache_stats, tensor, ContractionPlan, ContractionStep, GreedyDenseOptimizer, Network,
-    TemporaryLabel, TensorId,
+    clear_plan_cache, configure_plan_cache, plan_cache_stats, tensor, ContractionPlan,
+    ContractionStep, GreedyDenseOptimizer, Network, PlanCacheConfig, TemporaryLabel, TensorId,
 };
 
 fn labels(names: &[&str]) -> Vec<TemporaryLabel> {
@@ -504,9 +504,13 @@ fn a_failed_cuda_step_quarantines_the_lease_and_the_next_call_rebuilds() {
     );
 }
 
-/// G3c-1 (#1274): shape drift that keeps the payload length identical but
-/// changes the block layout still discards the cached replay state. The length
-/// check alone would accept it; the per-operand sector snapshot must not.
+/// G3c-1 (#1274), tightened by G3c-2 (#1276): shape drift that keeps the
+/// payload length identical but changes the block layout still discards the
+/// cached replay state. The length check alone would accept it; the per-operand
+/// sector snapshot must not. Now that destinations are reused, a retained
+/// device buffer of the other charge would survive the drift, so the drifted
+/// result — and the undrifted result computed after it — are direct evidence
+/// that the stale payload was dropped.
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn equal_length_block_layout_drift_discards_the_device_replay_state() {
@@ -545,4 +549,233 @@ fn equal_length_block_layout_drift_discards_the_device_replay_state() {
         after_drift.workspace_reuses > after_first.workspace_reuses,
         "the drifted call still leases the pooled device workspace"
     );
+
+    // Back to the original charges: the workspace rebuilt for the drifted
+    // layout must not leak into this one either.
+    let restored = tensor!([i; k] = a0_cuda[i; j] * b0_cuda[j; k]).unwrap();
+    assert_eq!(
+        restored.to_host().unwrap().data(),
+        first.to_host().unwrap().data()
+    );
+}
+
+type ChainPair<R> = (Vec<TensorMap<R, f64>>, Vec<TensorMap<R, f64, CudaStorage>>);
+
+/// A three-tensor canonical chain, which is the smallest schedule with a
+/// reusable destination: step 0 overwrites the retained intermediate, step 1
+/// produces the returned final output.
+fn cuda_chain_tensors<R>(runtime: &Runtime, space: &GradedSpace<R>, seed: u64) -> ChainPair<R>
+where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec
+        + Send
+        + Sync,
+{
+    let host: Vec<_> = (0..3)
+        .map(|index| {
+            TensorMap::<R, f64>::rand_with_seed(runtime, [space], [space], seed + index).unwrap()
+        })
+        .collect();
+    let device = host.iter().map(|t| t.to_cuda().unwrap()).collect();
+    (host, device)
+}
+
+fn cuda_chain_reuse_matches_returning<R>(runtime: &Runtime, space: &GradedSpace<R>, seed: u64)
+where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec
+        + Send
+        + Sync,
+{
+    let (host, device) = cuda_chain_tensors(runtime, space, seed);
+    let returning = device[0]
+        .contract(&device[1], &[1], &[0], &[0, 1])
+        .unwrap()
+        .contract(&device[2], &[1], &[0], &[0, 1])
+        .unwrap();
+    let host_oracle = host[0]
+        .contract(&host[1], &[1], &[0], &[0, 1])
+        .unwrap()
+        .contract(&host[2], &[1], &[0], &[0, 1])
+        .unwrap();
+    let cold = tensor!([a; d] = (device[0])[a; b] * (device[1])[b; c] * (device[2])[c; d]).unwrap();
+    let warm = tensor!([a; d] = (device[0])[a; b] * (device[1])[b; c] * (device[2])[c; d]).unwrap();
+    assert_eq!(cold.to_host().unwrap().data(), host_oracle.data());
+    // The warm replay submits the same kernels in the same order to the same
+    // device, so f64 is bitwise equal to the returning result. This relies on
+    // cuBLAS/cuTENSOR determinism for identical submissions, as the existing
+    // device equality assertions already do.
+    assert_eq!(
+        warm.to_host().unwrap().data(),
+        returning.to_host().unwrap().data()
+    );
+}
+
+/// G3c-2 (#1276): warm `tensor!` reuses its retained device destinations and
+/// still returns exactly the returning contraction, for every admitted
+/// categorical structure.
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn warm_cuda_destination_reuse_matches_the_returning_chain_for_every_provider() {
+    let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+    let u1 = GradedSpace::try_new_with_arc(
+        Arc::new(U1FusionRule),
+        [(U1Irrep::new(0), 2), (U1Irrep::new(1), 3)],
+    )
+    .unwrap();
+    cuda_chain_reuse_matches_returning(&runtime, &u1, 761_100);
+    let su2 =
+        GradedSpace::try_new_with_arc(Arc::new(SU2FusionRule), [(SU2Irrep::from_twice_spin(0), 2)])
+            .unwrap();
+    cuda_chain_reuse_matches_returning(&runtime, &su2, 761_110);
+    let fz2 = GradedSpace::try_new_with_arc(Arc::new(FermionParityFusionRule), [(Z2Irrep::ODD, 2)])
+        .unwrap();
+    cuda_chain_reuse_matches_returning(&runtime, &fz2, 761_120);
+    let product = GradedSpace::try_new_with_arc(
+        Arc::new(FermionParityFusionRule.product(U1FusionRule)),
+        [(product_sector(Z2Irrep::ODD, U1Irrep::new(0)), 2)],
+    )
+    .unwrap();
+    cuda_chain_reuse_matches_returning(&runtime, &product, 761_130);
+
+    // Complex payloads take the same route; the device kernels differ, so this
+    // is a tolerance comparison against the Host oracle.
+    let device: Vec<_> = (0..3)
+        .map(|index| {
+            TensorMap::<U1FusionRule, Complex64>::rand_with_seed(
+                &runtime,
+                [&u1],
+                [&u1],
+                761_140 + index,
+            )
+            .unwrap()
+        })
+        .collect();
+    let cuda: Vec<_> = device.iter().map(|t| t.to_cuda().unwrap()).collect();
+    let oracle = device[0]
+        .contract(&device[1], &[1], &[0], &[0, 1])
+        .unwrap()
+        .contract(&device[2], &[1], &[0], &[0, 1])
+        .unwrap();
+    drop(tensor!([a; d] = (cuda[0])[a; b] * (cuda[1])[b; c] * (cuda[2])[c; d]).unwrap());
+    let warm = tensor!([a; d] = (cuda[0])[a; b] * (cuda[1])[b; c] * (cuda[2])[c; d]).unwrap();
+    assert_close_c64(warm.to_host().unwrap().data(), oracle.data());
+}
+
+/// G3c-2 (#1276): the warm device replay of an N-tensor chain performs no
+/// host-to-device traffic and no device allocation for its N-2 intermediate
+/// steps; each of them is reset by one D2D copy from the workspace's zero
+/// template. Only the final, returned output still uploads its zeros
+/// (#740/G3b).
+///
+/// The counters are process-wide, so this test must not run beside another
+/// device test; the device suite runs with `--test-threads=1`.
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn warm_cuda_chain_uploads_nothing_for_its_reused_destinations() {
+    use tenet::dense::cuda_transfer_stats;
+
+    let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+    let u1 = GradedSpace::try_new_with_arc(
+        Arc::new(U1FusionRule),
+        [(U1Irrep::new(0), 4), (U1Irrep::new(1), 2)],
+    )
+    .unwrap();
+    let (_, device) = cuda_chain_tensors(&runtime, &u1, 761_200);
+    let (_, extra) = cuda_chain_tensors(&runtime, &u1, 761_300);
+
+    // Four tensors: three steps, two of them over retained destinations.
+    let run = || {
+        tensor!(
+            [a; e] = (device[0])[a; b]
+                * (device[1])[b; c]
+                * (device[2])[c; d]
+                * (extra[0])[d; e]
+        )
+        .unwrap()
+    };
+    // Call 1 has nothing retained yet, so every step returns.
+    drop(run());
+    // Call 2 is the first to overwrite: it uploads the zero template once, on
+    // top of the returned output's own zeros.
+    let before_second = cuda_transfer_stats();
+    drop(run());
+    let after_second = cuda_transfer_stats();
+    assert_eq!(
+        (
+            after_second.h2d_calls - before_second.h2d_calls,
+            after_second.copy_calls - before_second.copy_calls,
+        ),
+        (2, 2),
+        "the zero template costs exactly one upload, once per workspace"
+    );
+
+    // Call 3 onward is the steady state this contract describes.
+    let before = cuda_transfer_stats();
+    let warm = run();
+    let after = cuda_transfer_stats();
+
+    assert_eq!(
+        (
+            after.h2d_calls - before.h2d_calls,
+            after.device_allocs - before.device_allocs,
+            after.copy_calls - before.copy_calls,
+            after.d2h_calls - before.d2h_calls,
+            after.gemm_calls - before.gemm_calls,
+        ),
+        (1, 1, 2, 0, 6),
+        "(h2d, device_allocs, d2d_copies, d2h, gemm) for the warm 4-tensor chain"
+    );
+    drop(warm);
+}
+
+/// G3c-2 (#1276): the device workspace's zero template is charged to the one
+/// `workspace_budget_bytes` ledger, so a budget short by exactly the template
+/// rejects the idle workspace whole.
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn the_device_zero_template_is_charged_to_the_workspace_budget() {
+    let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+    // One sector of degeneracy 8: every intermediate holds one 8x8 block, so
+    // the template is exactly 64 f64 elements.
+    let u1 = GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), 8)]).unwrap();
+    let (_, device) = cuda_chain_tensors(&runtime, &u1, 761_400);
+    let template_bytes = 8 * 8 * std::mem::size_of::<f64>();
+
+    drop(tensor!([a; d] = (device[0])[a; b] * (device[1])[b; c] * (device[2])[c; d]).unwrap());
+    let charge = plan_cache_stats(&runtime).retained_workspace_bytes;
+    assert!(
+        charge > template_bytes,
+        "the device charge {charge} must include the {template_bytes}-byte template"
+    );
+
+    clear_plan_cache(&runtime);
+    configure_plan_cache(
+        &runtime,
+        PlanCacheConfig {
+            workspace_budget_bytes: charge - template_bytes,
+            ..Default::default()
+        },
+    );
+    drop(tensor!([a; d] = (device[0])[a; b] * (device[1])[b; c] * (device[2])[c; d]).unwrap());
+    let rejected = plan_cache_stats(&runtime);
+    assert_eq!(rejected.retained_workspace_bytes, 0);
+    assert_eq!(rejected.idle_workspaces, 0);
+    assert_eq!(rejected.workspace_byte_rejections, 1);
+
+    configure_plan_cache(
+        &runtime,
+        PlanCacheConfig {
+            workspace_budget_bytes: charge,
+            ..Default::default()
+        },
+    );
+    drop(tensor!([a; d] = (device[0])[a; b] * (device[1])[b; c] * (device[2])[c; d]).unwrap());
+    let admitted = plan_cache_stats(&runtime);
+    assert_eq!(admitted.retained_workspace_bytes, charge);
+    assert_eq!(admitted.idle_workspaces, 1);
 }
