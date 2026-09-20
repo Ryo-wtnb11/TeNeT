@@ -604,7 +604,12 @@ fn discarded_norm(spectra: &[WeightedSpectrum<'_>], kept: &[usize]) -> f64 {
                     .map(|value| value * value)
                     .sum::<f64>()
         })
-        .sum::<f64>()
+        // Not `sum()`: its f64 identity is `-0.0`, so a decision that discards
+        // nothing would report `sqrt(-0.0) = -0.0`. The discarded norm is a
+        // magnitude a caller prints and compares, and `-0` is not one. Folding
+        // from `+0.0` normalizes it without changing any other total, because
+        // `0.0 + x == x` for every `x` that is not `-0.0`.
+        .fold(0.0_f64, |total, sector| total + sector)
         .sqrt()
 }
 
@@ -652,6 +657,25 @@ mod tests {
             rule(),
             pairs.map(|(sector, rank)| (SectorId::new(sector), rank)),
         )
+    }
+
+    #[test]
+    fn a_decision_that_discards_nothing_reports_positive_zero() {
+        // Rust's f64 `Sum` identity is `-0.0`, so an empty discarded tail would
+        // report `sqrt(-0.0) = -0.0`. The magnitude a caller prints and compares
+        // bitwise against another path's zero must be `+0.0`.
+        let entries = [(1.0, vec![2.0, 1.0]), (3.0, vec![4.0, 0.5])];
+        let spectra = spectra(&entries);
+        for truncation in [Truncation::Full, Truncation::rank(usize::MAX)] {
+            let decision = select(&spectra, &truncation).unwrap();
+            assert_eq!(decision.kept, vec![2, 2]);
+            assert_eq!(
+                decision.error.to_bits(),
+                0.0_f64.to_bits(),
+                "{truncation:?} discarded nothing and must report +0.0, got {}",
+                decision.error
+            );
+        }
     }
 
     #[test]

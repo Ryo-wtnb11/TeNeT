@@ -8367,9 +8367,10 @@ where
     /// # Complexity
     ///
     /// Spectrum-sized only, never payload-sized: `O(K)` to copy and validate
-    /// the `K = sum_c k_c` values, plus the decision's own cost (`O(K log G)`
-    /// for [`Truncation::Rank`], `O(K)` otherwise) and `O(G log G)` to build
-    /// the selection for `G` sectors.
+    /// the `K = sum_c k_c` values, plus the decision's own cost — `O(K log G)`
+    /// for [`Truncation::Rank`], `O(G + D log G)` for
+    /// [`Truncation::DiscardWeight`] over `D` discarded values, `O(K)`
+    /// otherwise — and `O(G log G)` to build the selection for `G` sectors.
     ///
     /// # Errors
     ///
@@ -13436,10 +13437,12 @@ where
     ///
     /// # Cost
     ///
-    /// Compact input: one `O(sum_c k'_c)` allocation and no payload pass.
-    /// Dense input: one zeroed output payload and one strided copy per block,
-    /// the same single kernel call [`Self::restrict_leg`] makes, with both axes
-    /// restricted at once.
+    /// Compact input: one `Vec` per kept sector, `O(sum_c k'_c)` values copied
+    /// in total, plus the destination root build; the discarded values are
+    /// never touched, and no dense block is materialized. Dense input: one
+    /// zeroed output payload and one strided copy per block — the same single
+    /// kernel call [`Self::restrict_leg`] makes, with both axes restricted at
+    /// once.
     ///
     /// # Errors
     ///
@@ -13483,10 +13486,14 @@ where
             TypedData::Diagonal(spectrum) => {
                 let mut kept = Vec::with_capacity(selection.entries.len());
                 for (sector, range) in &selection.entries {
+                    // Both lists are in canonical `SectorId` order, so this is
+                    // a lookup, not a scan. A violated order can only make the
+                    // search miss, which is the typed error below — never a
+                    // match on the wrong sector, because the key is compared.
                     let values = spectrum
-                        .iter()
-                        .find(|entry| entry.sector == *sector)
-                        .and_then(|entry| entry.values.get(range.clone()))
+                        .binary_search_by_key(sector, |entry| entry.sector)
+                        .ok()
+                        .and_then(|index| spectrum[index].values.get(range.clone()))
                         .ok_or_else(|| {
                             TypedFacadeError::<R>::from(Error::InvalidArgument(format!(
                                 "restrict_diagonal: the compact payload has no [{}, {}) for sector {:?}",

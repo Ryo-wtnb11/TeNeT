@@ -16,7 +16,8 @@
 //! 2. **payload bits** — `assert_eq!` on the raw `f64`/`Complex64` slices, not
 //!    a tolerance. Host slices with a leading-prefix copy and the restriction
 //!    kernel dispatches to a bit-exact `Copy`, so any difference is a defect.
-//! 3. **truncation error bits** — the same `select_truncation` call.
+//! 3. **truncation error bits** — `to_bits()`, not `==`, so a `-0.0` on one
+//!    side and a `+0.0` on the other would fail rather than pass.
 //!
 //! ## Cross-sector exact ties
 //!
@@ -43,6 +44,28 @@ use tenet::typed::{GradedSpace, LegSelection, SectorSpectrum};
 
 fn runtime() -> Runtime {
     Runtime::builder().dense_threads(1).build().unwrap()
+}
+
+/// Asserts that the fixture really is degenerate: every value of every sector
+/// is the *same bit pattern*, so a backend change cannot silently de-tie the
+/// spectrum and turn the tie sweeps below into ordinary cuts.
+macro_rules! assert_every_value_is_the_same_bit_pattern {
+    ($tensor:expr) => {{
+        let spectra = $tensor.diagview().unwrap();
+        let mut all = spectra.iter().flat_map(|entry| entry.values.iter());
+        let first = all.next().expect("a nonempty spectrum").to_bits();
+        assert!(
+            spectra
+                .iter()
+                .flat_map(|entry| entry.values.iter())
+                .all(|value| value.to_bits() == first),
+            "the fixture must be exactly degenerate for a tie test, got {spectra:?}"
+        );
+        assert!(
+            spectra.len() > 1,
+            "a cross-sector tie needs several sectors"
+        );
+    }};
 }
 
 /// Deterministic structureless fill, so no policy can accidentally reproduce a
@@ -122,7 +145,13 @@ macro_rules! assert_svd_composition {
             "{case}: s compact storage"
         );
 
-        assert_eq!(found.error, host.error, "{case}: truncation error bits");
+        assert_eq!(
+            found.error.to_bits(),
+            host.error.to_bits(),
+            "{case}: truncation error bits ({} vs {})",
+            found.error,
+            host.error
+        );
         let kept: usize = host.singular_values.iter().map(|e| e.values.len()).sum();
         let offered: usize = spectra.iter().map(|e| e.values.len()).sum();
         assert_eq!(
@@ -161,7 +190,25 @@ macro_rules! assert_eigh_composition {
         assert_same_layout!(got_v, host.v, format!("{case}: v"));
         assert_eq!(got_d.data(), host.d.data(), "{case}: d payload bits");
         assert_eq!(got_v.data(), host.v.data(), "{case}: v payload bits");
-        assert_eq!(found.error, host.error, "{case}: truncation error bits");
+        assert_eq!(
+            got_d.diagonal_spectrum().unwrap(),
+            host.d.diagonal_spectrum().unwrap(),
+            "{case}: d compact storage"
+        );
+        assert_eq!(
+            found.error.to_bits(),
+            host.error.to_bits(),
+            "{case}: truncation error bits ({} vs {})",
+            found.error,
+            host.error
+        );
+        let kept: usize = host.eigenvalues.iter().map(|e| e.values.len()).sum();
+        let offered: usize = spectra.iter().map(|e| e.values.len()).sum();
+        assert_eq!(
+            selection.is_full(),
+            kept == offered,
+            "{case}: is_full agrees with the kept count"
+        );
         found
     }};
 }
@@ -428,6 +475,7 @@ fn within_sector_ties_at_the_cut_are_broken_as_host_breaks_them() {
     // exactly equal, so `Rank` has to cut inside a run of identical values.
     let leg = u1_leg(&[(0, 3), (1, 3)]);
     let source: TensorMap<_, f64> = TensorMap::id(&runtime(), [&leg]).unwrap().scale(2.5);
+    assert_every_value_is_the_same_bit_pattern!(source.svd_compact().unwrap().1);
     for rank in [1usize, 2, 3, 4, 5] {
         assert_svd_composition!(source, Truncation::rank(rank), &format!("tie rank {rank}"));
     }
@@ -439,6 +487,7 @@ fn cross_sector_exact_ties_are_broken_as_host_breaks_them() {
     // a multiple of the sector count lands on an exact cross-sector tie.
     let leg = u1_leg(&[(0, 3), (1, 3), (2, 3)]);
     let source: TensorMap<_, f64> = TensorMap::id(&runtime(), [&leg]).unwrap();
+    assert_every_value_is_the_same_bit_pattern!(source.svd_compact().unwrap().1);
     for rank in 0..=9usize {
         assert_svd_composition!(
             source,
@@ -453,12 +502,129 @@ fn su2_cross_sector_exact_ties_are_broken_as_host_breaks_them() {
     // Same, with dim(c) != 1: the weighted budget overflows mid-tie.
     let leg = su2_leg(&[(0, 2), (1, 2), (2, 2)]);
     let source: TensorMap<_, f64> = TensorMap::id(&runtime(), [&leg]).unwrap();
+    assert_every_value_is_the_same_bit_pattern!(source.svd_compact().unwrap().1);
     for rank in 0..=12usize {
         assert_svd_composition!(
             source,
             Truncation::rank(rank),
             &format!("su2 cross tie rank {rank}")
         );
+    }
+}
+
+#[test]
+fn signed_cross_sector_eigenvalue_ties_are_broken_as_host_breaks_them() {
+    // `|lambda|` ties across sectors with *opposite signs*: the selection is
+    // magnitude-driven, so +2 in one sector and -2 in another are an exact tie
+    // that only the slice order can break, and the published `eigh_full` order
+    // is by descending |lambda|, not by signed value.
+    let leg = u1_leg(&[(0, 2), (1, 2), (2, 2)]);
+    let runtime = runtime();
+    let identity: TensorMap<_, f64> = TensorMap::id(&runtime, [&leg]).unwrap();
+    // diag(+2, -2) in every sector: three sectors x two magnitudes, all equal.
+    let source = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+        if indices[0] != indices[1] {
+            0.0
+        } else if indices[0] == 0 {
+            2.0
+        } else {
+            -2.0
+        }
+    })
+    .unwrap();
+    assert_eq!(identity.block_count(), source.block_count());
+    let magnitudes: Vec<f64> = source
+        .eigh_full()
+        .unwrap()
+        .0
+        .diagview()
+        .unwrap()
+        .iter()
+        .flat_map(|entry| entry.values.iter().map(|value| value.abs()))
+        .collect();
+    assert!(
+        magnitudes
+            .iter()
+            .all(|value| value.to_bits() == 2.0f64.to_bits()),
+        "every |lambda| must be exactly 2.0 for this to be a tie test, got {magnitudes:?}"
+    );
+    for rank in 0..=6usize {
+        assert_eigh_composition!(
+            source,
+            Truncation::rank(rank),
+            &format!("signed cross tie rank {rank}")
+        );
+    }
+}
+
+#[test]
+fn find_truncated_ignores_the_order_the_spectra_arrive_in() {
+    // The documented contract: input order is irrelevant because the spectra
+    // are ordered by `SectorId` before the decision. Reversing the input must
+    // therefore change neither the subspace nor the error bits — and an exact
+    // cross-sector tie is where it would show if the sort were missing.
+    let leg = u1_leg(&[(0, 3), (1, 3), (2, 3)]);
+    let source: TensorMap<_, f64> = TensorMap::id(&runtime(), [&leg]).unwrap();
+    let (_, s, _) = source.svd_compact().unwrap();
+    let bond = s.domain()[0].clone();
+    let canonical = s.diagview().unwrap();
+    let mut reversed = canonical.clone();
+    reversed.reverse();
+    assert_ne!(
+        canonical.iter().map(|e| e.sector).collect::<Vec<_>>(),
+        reversed.iter().map(|e| e.sector).collect::<Vec<_>>(),
+        "the permuted input must actually differ"
+    );
+    for rank in 0..=9usize {
+        let truncation = Truncation::rank(rank);
+        let want = bond.find_truncated(&canonical, &truncation).unwrap();
+        let got = bond.find_truncated(&reversed, &truncation).unwrap();
+        assert_eq!(
+            got.selection.subspace(),
+            want.selection.subspace(),
+            "rank {rank}"
+        );
+        assert_eq!(got.error.to_bits(), want.error.to_bits(), "rank {rank}");
+        assert_eq!(
+            s.restrict_diagonal(&got.selection).unwrap().data(),
+            s.restrict_diagonal(&want.selection).unwrap().data(),
+            "rank {rank}"
+        );
+    }
+}
+
+#[test]
+fn dense_restrict_diagonal_equals_two_restrict_leg_calls() {
+    // `restrict_diagonal`'s dense arm restricts both axes in one kernel call.
+    // Its oracle is the already-merged single-axis primitive applied twice,
+    // which shares no code path with the two-axis start table.
+    let leg = u1_leg(&[(0, 4), (1, 3)]);
+    let runtime = runtime();
+    let mut state = 0x1357_9bdfu64;
+    let dense: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg], [&leg], move |_, _| fill(&mut state)).unwrap();
+    assert!(
+        dense.diagonal_spectrum().unwrap().is_none(),
+        "this fixture must exercise the dense arm"
+    );
+    for pairs in [
+        vec![(U1Irrep::new(0), 0..2), (U1Irrep::new(1), 0..1)],
+        // A non-prefix range: `find_truncated` never produces one, but
+        // `restrict_diagonal` must not assume a leading prefix.
+        vec![(U1Irrep::new(0), 1..4), (U1Irrep::new(1), 2..3)],
+        // A sector dropped entirely.
+        vec![(U1Irrep::new(1), 1..3)],
+    ] {
+        let selection = LegSelection::try_new(&leg, pairs.clone()).unwrap();
+        let once = dense.restrict_diagonal(&selection).unwrap();
+        let twice = dense
+            .restrict_leg(0, &selection)
+            .unwrap()
+            .restrict_leg(1, &selection)
+            .unwrap();
+        assert_eq!(once.codomain(), twice.codomain(), "{pairs:?}");
+        assert_eq!(once.domain(), twice.domain(), "{pairs:?}");
+        assert_eq!(once.data(), twice.data(), "{pairs:?}");
     }
 }
 
@@ -510,7 +676,7 @@ fn a_no_op_decision_is_reported_as_full_and_copies_the_same_bits() {
         .find_truncated(&s.diagview().unwrap(), &Truncation::Full)
         .unwrap();
     assert!(found.selection.is_full());
-    assert_eq!(found.error, 0.0);
+    assert_eq!(found.error.to_bits(), 0.0_f64.to_bits());
     assert_eq!(
         u.restrict_leg(u.codomain_rank(), &found.selection)
             .unwrap()
@@ -527,7 +693,7 @@ fn is_full_holds_for_the_only_selection_of_an_empty_leg() {
         .find_truncated(&[] as &[SectorSpectrum<U1Irrep, f64>], &Truncation::rank(5))
         .unwrap();
     assert!(found.selection.is_full());
-    assert_eq!(found.error, 0.0);
+    assert_eq!(found.error.to_bits(), 0.0_f64.to_bits());
 }
 
 // ---------------------------------------------------------------------------
