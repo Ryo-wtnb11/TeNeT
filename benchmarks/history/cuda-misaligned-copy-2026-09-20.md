@@ -57,9 +57,9 @@ Device evidence for the raw Tenferro behaviour:
 
 `tenferro-gpu-0.5.0/src/cubecl/permutation.rs`:
 
-- `resolve_prepared_device_region` (line 723) folds the view's element offset
-  into the operand pointer (lines 741–751) but returns
-  `alignment: CUDA_ALLOCATION_ALIGNMENT` (256) unconditionally (line 754).
+- `resolve_prepared_device_region` (line 726) folds the view's element offset
+  into the operand pointer (lines 743–752) but returns
+  `alignment: CUDA_ALLOCATION_ALIGNMENT` (256) unconditionally (line 755).
 - `copy_view_into` (lines 480–481, comment 493–498) passes those resolved
   values as the cuTENSOR *descriptor* alignment requirement for both operands.
 
@@ -69,7 +69,7 @@ a launch the hardware cannot execute.
 
 Sibling paths are already truthful and show why the workaround works:
 
-- `permutation.rs:396` `to_contiguous_view` uses
+- `permutation.rs:397` (`to_contiguous_view`'s input operand) uses
   `view_descriptor_alignment_requirement::<T>()` (= `size_of::<T>()`).
 - `gemm.rs:630` / `gemm.rs:677` return the same per-element value for every
   `View(_)` operand of a contraction. `dot_general_read_into_accum` — and
@@ -89,7 +89,8 @@ every offset copy in TeNeT routes through — branches on the destination offset
 
 - byte offset a multiple of 256 → `copy_read_into` (`cutensorPermute`),
   unchanged;
-- otherwise → `cuda_region_axpby` with coefficient `None` (the context's `1`),
+- otherwise → `cuda_region_axpby` with `alpha = 1` and
+  `CudaRegionCoefficient::One` (the context's shared `1`),
   `CudaRegionBeta::Overwrite`, source `CudaRegion::packed([rows, cols], 0)`,
   destination `CudaRegion::new([rows, cols], [1, dst_ld], dst_offset)`.
 
@@ -103,9 +104,16 @@ The condition is the descriptor contract itself, not the kernel heuristic:
 
 1. Tenferro advertises `CUDA_ALLOCATION_ALIGNMENT` = 256 bytes for both
    permutation operands of `copy_view_into`.
-2. The base allocation satisfies 256 (`cudaMalloc`; this is the same
-   assumption `resolve_owned_operand` already makes for every offset-0
-   operand, and every offset-0 copy in production relies on it).
+2. The base address satisfies 256. CubeCL's CUDA runtime reports
+   `mem_alignment = 512` (`t4a-cubecl-cuda-0.10.0/src/runtime.rs:76`) and its
+   memory pool pads every slice start to that alignment
+   (`t4a-cubecl-runtime-0.10.0` `memory_pool/memory_page.rs:125-146`,
+   `memory_management/memory_manage.rs:226` and `:253`), over pages obtained
+   from `cuMemAllocAsync`/`cudaMalloc`. Nothing checks this at runtime, in
+   TeNeT or in Tenferro: it is exactly the assumption
+   `resolve_owned_operand` (`permutation.rs:680`) already makes for every
+   owned operand, so the guard is no weaker than the offset-0 path that has
+   been in production since G1b.
 3. The operand pointer is `base + offset * size_of::<D>()`. Its alignment is
    ≥ 256 iff `offset * size_of::<D>() ≡ 0 (mod 256)`.
 4. So the advertisement is truthful exactly on that set, and false everywhere
@@ -128,7 +136,24 @@ plan LRU the caller's GEMMs share.
 Cost difference per guarded call: one entry of the cuTENSOR contraction plan
 cache (keyed by the region shape) instead of one entry of the permutation plan
 cache; one `dot_general` submission instead of one `cutensorPermute`. Both move
-`rows * cols` elements in one submission; neither allocates.
+`rows * cols` elements in one submission.
+
+Allocation: steady state is allocation-free on both routes, but the *first*
+region-route call per (context, dtype) uploads that context's one-element `1`
+operand — one H2D call and one device allocation, counted as `h2d_calls` and
+`device_allocs`. It is a one-off per context and dtype, shared with every
+other `cuda_region_axpby`/`cuda_region_zero` user, and is already part of the
+region primitive's documented transfer contract.
+
+Errors: for valid input the routes are equivalent. For *invalid* input they
+are not interchangeable — the region route validates through
+`cuda_region_axpby`, so a dtype or device mismatch, an out-of-bounds region or
+a non-injective destination is reported with `op = "cuda_region_axpby"` (and a
+dtype mismatch becomes `DenseError::DTypeMismatch` rather than a
+`"cuda_region"` backend error). The variant and `op` a caller observes
+therefore depend on the destination offset. Both routes reject the same
+inputs, no caller branches on either, and no test pins them; this is disclosed
+on `cuda_copy_region_into`.
 
 Disclosed deviation: `cuda_region_axpby` multiplies by a 1x1 `1` operand
 rather than copying bits, and a Complex64 `±inf` payload comes back as `NaN`
@@ -150,7 +175,8 @@ Every TeNeT use of a Tenferro copy/permute with a possibly-offset view:
 | `cuda_adapter.rs cuda_zero_prefix` (+ `CudaZeroTemplate::reset_prefix`, G3c reset / zero template) | both operands at element offset 0 | unaffected — the 256-byte promise holds at offset 0 |
 | `cuda_adapter.rs cuda_region_axpby` / `cuda_region_zero`, `tenet-operations/src/cuda_transform.rs` replay | arbitrary | unaffected — contraction path; this is the safe route the fix uses |
 | `cuda_svd_region` / `cuda_qr_region` / `cuda_eigh_region` | offset source views | unaffected — cuSOLVER through `tenferro-linalg`, not `copy_view_into` |
-| `cuda_matmul_region_into`, `cuda_gemm_region_*`, `cuda_is_hermitian_region` | arbitrary | unaffected — contraction path |
+| `cuda_matmul_region_into`, `cuda_gemm_region_*` | arbitrary | unaffected — contraction path |
+| `cuda_is_hermitian_region` | offset source view | unaffected — it materializes through `to_contiguous_view`, whose input descriptor advertises the truthful `size_of::<T>()` (`permutation.rs:397`), not because it is a contraction |
 
 `cuda_copy_region_into` and `cuda_zero_prefix` are the only two TeNeT call
 sites of `copy_read_into` outside tests.

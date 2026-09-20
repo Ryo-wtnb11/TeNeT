@@ -1558,8 +1558,10 @@ pub fn cuda_zero_prefix<D: CudaScalar>(
 /// Route: a destination whose byte offset keeps the alignment Tenferro 0.5.0
 /// advertises to cuTENSOR (256 bytes, `cuda_region::permute_operand_offset_is_aligned`) is
 /// moved by `copy_read_into` — one `cutensorPermute` with its own plan cache.
-/// Every other destination is moved by the region primitive instead, whose
-/// contraction descriptors report the truthful per-element view alignment
+/// Every other destination is moved by [`cuda_region_axpby`] instead
+/// ([`CudaRegionCoefficient::One`], `alpha = 1`,
+/// [`CudaRegionBeta::Overwrite`]), whose contraction descriptors report the
+/// truthful per-element view alignment
 /// (`tenferro-gpu-0.5.0/src/cubecl/gemm.rs:630`) and therefore never select a
 /// vectorized kernel the pointer cannot satisfy. The rejected route is not a
 /// slower one for the same work: both move `rows * cols` elements in one
@@ -1570,8 +1572,22 @@ pub fn cuda_zero_prefix<D: CudaScalar>(
 /// factor a device SVD or QR produced is finite whenever its input was, so
 /// this route cannot introduce an infinity that was not already there.
 ///
+/// Transfer contract of the region route: the *first* such call per context
+/// and dtype uploads that context's one-element `1`, which is one H2D call and
+/// one device allocation; every later call of either route transfers nothing.
+///
 /// Both routes still count one `copy_calls`; the region route additionally
 /// counts one `gemm_calls`, because that is the submission it makes.
+///
+/// Errors: for *valid* input the two routes are equivalent. For invalid input
+/// they are not interchangeable — the region route validates through
+/// [`cuda_region_axpby`], so a dtype or device mismatch, an out-of-bounds
+/// region or a non-injective destination is reported with `op` =
+/// `"cuda_region_axpby"` (and, for a dtype mismatch,
+/// [`DenseError::DTypeMismatch`] rather than a `"cuda_region"` backend error).
+/// Which variant and `op` a caller sees therefore depends on the destination
+/// offset. No caller branches on either, and both routes reject the same
+/// inputs.
 pub fn cuda_copy_region_into<D: CudaScalar>(
     ctx: &mut CudaDenseContext,
     dst: &mut CudaDenseStorage,
