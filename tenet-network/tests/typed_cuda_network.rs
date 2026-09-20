@@ -44,7 +44,9 @@ where
     R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
         + MultiplicityFreeRigidSymbols<Scalar = f64>
         + CheckedFusionAlgebra
-        + SectorCodec,
+        + SectorCodec
+        + Send
+        + Sync,
 {
     let lhs = TensorMap::<R, f64>::rand_with_seed(runtime, [space], [space], seed).unwrap();
     let rhs = TensorMap::<R, f64>::rand_with_seed(runtime, [space], [space], seed + 1).unwrap();
@@ -59,8 +61,10 @@ where
         .unwrap();
     assert_eq!(host_plan.plan().steps(), cuda_plan.plan().steps());
     let actual = cuda_plan.execute_cuda(&cuda_refs).unwrap();
+    let before_macro = plan_cache_stats(runtime);
     let macro_actual = tensor!([a; b] = lhs_cuda[a; k] * rhs_cuda[k; b]).unwrap();
     let macro_warm = tensor!([a; b] = lhs_cuda[a; k] * rhs_cuda[k; b]).unwrap();
+    let after_macro = plan_cache_stats(runtime);
     let manual = lhs_cuda.contract(&rhs_cuda, &[1], &[0], &[0, 1]).unwrap();
     let host_oracle = lhs.contract(&rhs, &[1], &[0], &[0, 1]).unwrap();
     assert_eq!(actual.placement(), lhs_cuda.placement());
@@ -73,8 +77,31 @@ where
     assert_eq!(macro_actual.to_host().unwrap().data(), host_oracle.data());
     assert_eq!(macro_warm.to_host().unwrap().data(), host_oracle.data());
     assert_eq!(macro_actual.placement(), lhs_cuda.placement());
-    assert_eq!(plan_cache_stats(runtime).workspaces_created, 0);
-    assert_eq!(plan_cache_stats(runtime).idle_workspaces, 0);
+    // The warm device replay reproduces the returning result exactly: identical
+    // submissions to the same device kernels, so f64 is bitwise equal.
+    assert_eq!(
+        macro_warm.to_host().unwrap().data(),
+        actual.to_host().unwrap().data()
+    );
+    // This provider contributes exactly one device pool for `(R, f64,
+    // CudaStorage<f64>)`; the second call leases that pool's idle workspace.
+    assert_eq!(
+        after_macro.workspaces_created - before_macro.workspaces_created,
+        1,
+        "one device workspace per (provider, dtype, storage)"
+    );
+    assert!(
+        after_macro.workspace_reuses > before_macro.workspace_reuses,
+        "the warm replay must reuse the leased workspace, not build a new one"
+    );
+    // Each cached plan keeps at most two typed pools of at most two idle
+    // workspaces, so the runtime-wide idle count stays inside that bound.
+    assert!(
+        after_macro.idle_workspaces >= 1 && after_macro.idle_workspaces <= 4 * after_macro.entries,
+        "idle workspaces {} outside the plan-wide bound for {} entries",
+        after_macro.idle_workspaces,
+        after_macro.entries
+    );
 }
 
 #[test]
@@ -310,8 +337,16 @@ fn canonical_cuda_network_provider_matrix_chain_and_lazy_conj() {
         scalar.to_host().unwrap().data()
     );
     let stats = plan_cache_stats(&runtime);
-    assert_eq!(stats.workspaces_created, 0);
-    assert_eq!(stats.idle_workspaces, 0);
+    assert!(
+        stats.workspaces_created >= 4,
+        "each of the four providers leases its own device workspace"
+    );
+    assert!(
+        stats.idle_workspaces <= 4 * stats.entries,
+        "idle workspaces {} outside the plan-wide bound for {} entries",
+        stats.idle_workspaces,
+        stats.entries
+    );
 }
 
 /// G1a (#1268): canonical `tensor!` device execution with a genuinely complex
@@ -359,6 +394,9 @@ fn canonical_cuda_network_executes_complex_payloads_and_still_rejects_the_rest()
         .contract(&host[2], &[1], &[0], &[0, 1])
         .unwrap();
     assert_close_c64(chain.to_host().unwrap().data(), chain_oracle.data());
+    let chain_warm =
+        tensor!([a; d] = (device[0])[a; b] * (device[1])[b; c] * (device[2])[c; d]).unwrap();
+    assert_close_c64(chain_warm.to_host().unwrap().data(), chain_oracle.data());
 
     let conj = tensor!([i; j] = conj((device[0]))[k; i] * (device[1])[k; j]).unwrap();
     let conj_oracle = host[0]
@@ -386,4 +424,125 @@ fn assert_close_c64(actual: &[Complex64], expected: &[Complex64]) {
             "actual {actual:?}, expected {expected:?}"
         );
     }
+}
+
+fn u1_pair(
+    runtime: &Runtime,
+    space: &GradedSpace<U1FusionRule>,
+    seed: u64,
+) -> (
+    TensorMap<U1FusionRule, f64>,
+    TensorMap<U1FusionRule, f64, CudaStorage>,
+) {
+    let host =
+        TensorMap::<U1FusionRule, f64>::rand_with_seed(runtime, [space], [space], seed).unwrap();
+    let device = host.to_cuda().unwrap();
+    (host, device)
+}
+
+/// G3c-1 (#1274): Host and device execution of one topology and one `(R, D)`
+/// key separate workspace pools. A shared key would hand the device lease a
+/// `NetworkExecutionWorkspace<_, _, Vec<f64>>` and panic in the registry
+/// downcast.
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn host_and_cuda_macros_of_one_topology_use_separate_workspace_pools() {
+    let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+    let u1 = GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
+    let (a, a_cuda) = u1_pair(&runtime, &u1, 748_400);
+    let (b, b_cuda) = u1_pair(&runtime, &u1, 748_401);
+
+    let host = tensor!([i; k] = a[i; j] * b[j; k]).unwrap();
+    let device = tensor!([i; k] = a_cuda[i; j] * b_cuda[j; k]).unwrap();
+    assert_eq!(device.to_host().unwrap().data(), host.data());
+
+    let stats = plan_cache_stats(&runtime);
+    assert_eq!(stats.entries, 1, "one structural topology is shared");
+    assert_eq!(
+        stats.workspaces_created, 2,
+        "storage is part of the pool key: one Host pool and one device pool"
+    );
+}
+
+/// G3c-1 (#1274): a failed device step quarantines its lease instead of
+/// returning buffers whose contents the failure may have disturbed, and the
+/// next valid call rebuilds from a fresh workspace.
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn a_failed_cuda_step_quarantines_the_lease_and_the_next_call_rebuilds() {
+    let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+    let u1 = GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
+    let wrong =
+        GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), 3)]).unwrap();
+    let (_, a_cuda) = u1_pair(&runtime, &u1, 748_410);
+    let (_, b_cuda) = u1_pair(&runtime, &u1, 748_411);
+    let (_, mismatched) = u1_pair(&runtime, &wrong, 748_412);
+
+    let warm = tensor!([i; k] = a_cuda[i; j] * b_cuda[j; k]).unwrap();
+    let after_warm = plan_cache_stats(&runtime);
+    assert_eq!(
+        after_warm.idle_workspaces, 1,
+        "a successful device call recycles its lease"
+    );
+
+    assert!(tensor!([i; k] = a_cuda[i; j] * mismatched[j; k]).is_err());
+    let after_failure = plan_cache_stats(&runtime);
+    assert_eq!(
+        after_failure.idle_workspaces, 0,
+        "the failed lease is quarantined, not recycled"
+    );
+
+    let rebuilt = tensor!([i; k] = a_cuda[i; j] * b_cuda[j; k]).unwrap();
+    assert_eq!(
+        rebuilt.to_host().unwrap().data(),
+        warm.to_host().unwrap().data()
+    );
+    assert_eq!(
+        plan_cache_stats(&runtime).workspaces_created,
+        after_failure.workspaces_created + 1,
+        "the quarantined workspace is replaced, not resurrected"
+    );
+}
+
+/// G3c-1 (#1274): shape drift that keeps the payload length identical but
+/// changes the block layout still discards the cached replay state. The length
+/// check alone would accept it; the per-operand sector snapshot must not.
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn equal_length_block_layout_drift_discards_the_device_replay_state() {
+    let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+    // Both spaces carry one sector of degeneracy 2, so `[v; v]` has a single
+    // 2x2 coupled block and exactly the same `required_len` either way.
+    let charge_zero =
+        GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
+    let charge_three =
+        GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(3), 2)]).unwrap();
+    let (a0, a0_cuda) = u1_pair(&runtime, &charge_zero, 748_420);
+    let (b0, b0_cuda) = u1_pair(&runtime, &charge_zero, 748_421);
+    let (a3, a3_cuda) = u1_pair(&runtime, &charge_three, 748_422);
+    let (b3, b3_cuda) = u1_pair(&runtime, &charge_three, 748_423);
+    assert_eq!(a0.data().len(), a3.data().len());
+
+    let first = tensor!([i; k] = a0_cuda[i; j] * b0_cuda[j; k]).unwrap();
+    assert_eq!(
+        first.to_host().unwrap().data(),
+        a0.contract(&b0, &[1], &[0], &[0, 1]).unwrap().data()
+    );
+    let after_first = plan_cache_stats(&runtime);
+
+    let drifted = tensor!([i; k] = a3_cuda[i; j] * b3_cuda[j; k]).unwrap();
+    assert_eq!(
+        drifted.to_host().unwrap().data(),
+        a3.contract(&b3, &[1], &[0], &[0, 1]).unwrap().data()
+    );
+
+    let after_drift = plan_cache_stats(&runtime);
+    assert_eq!(
+        after_drift.workspaces_created, after_first.workspaces_created,
+        "drift discards the replay state inside the pooled workspace, not the workspace"
+    );
+    assert!(
+        after_drift.workspace_reuses > after_first.workspace_reuses,
+        "the drifted call still leases the pooled device workspace"
+    );
 }

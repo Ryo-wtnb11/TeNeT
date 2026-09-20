@@ -30,7 +30,10 @@ use std::sync::{Arc, Mutex, Weak};
 
 use lru::LruCache;
 #[cfg(feature = "cuda")]
-use tenet::core::{CheckedFusionAlgebra, MultiplicityFreeRigidSymbols, SectorCodec};
+use tenet::core::{
+    CheckedFusionAlgebra, FusionAlgebraError, MultiplicityFreeAdmissionMode,
+    MultiplicityFreeRigidSymbols, SectorCodec,
+};
 use tenet::core::{TensorStorage, TypedSectorAdmission};
 use tenet::prelude::{Error, Runtime, TensorScalar};
 use tenet::typed::TensorMap;
@@ -48,6 +51,7 @@ use crate::network::{
     StaticTopologySpec,
 };
 use crate::optimizer::GreedyDenseOptimizer;
+use tenet::typed::NetworkPayloadStorage;
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct OperandTopology {
@@ -195,25 +199,27 @@ struct WorkspacePools {
     accepting: AtomicBool,
 }
 
-struct WorkspacePool<R, D>
+struct WorkspacePool<R, D, S = Vec<D>>
 where
     R: TypedSectorAdmission,
-    R::Mode: HostNetworkModeDispatch<R, D>,
+    R::Mode: HostNetworkModeDispatch<R, D, S>,
     D: TensorScalar,
+    S: NetworkPayloadStorage<D>,
 {
-    available: Mutex<Vec<IdleWorkspace<R, D>>>,
+    available: Mutex<Vec<IdleWorkspace<R, D, S>>>,
     counters: Arc<WorkspacePoolCounters>,
     budget: Arc<WorkspaceBudget>,
     registered: AtomicBool,
 }
 
-struct IdleWorkspace<R, D>
+struct IdleWorkspace<R, D, S = Vec<D>>
 where
     R: TypedSectorAdmission,
-    R::Mode: HostNetworkModeDispatch<R, D>,
+    R::Mode: HostNetworkModeDispatch<R, D, S>,
     D: TensorScalar,
+    S: NetworkPayloadStorage<D>,
 {
-    workspace: NetworkExecutionWorkspace<R, D>,
+    workspace: NetworkExecutionWorkspace<R, D, S>,
     charge: usize,
 }
 
@@ -226,14 +232,15 @@ trait ErasedWorkspacePool: Any + Send + Sync {
     fn deactivate(&self);
 }
 
-struct WorkspaceLease<R, D>
+struct WorkspaceLease<R, D, S = Vec<D>>
 where
     R: TypedSectorAdmission,
-    R::Mode: HostNetworkModeDispatch<R, D>,
+    R::Mode: HostNetworkModeDispatch<R, D, S>,
     D: TensorScalar,
+    S: NetworkPayloadStorage<D>,
 {
-    pool: Arc<WorkspacePool<R, D>>,
-    workspace: Option<NetworkExecutionWorkspace<R, D>>,
+    pool: Arc<WorkspacePool<R, D, S>>,
+    workspace: Option<NetworkExecutionWorkspace<R, D, S>>,
     recyclable: bool,
 }
 
@@ -274,11 +281,17 @@ impl WorkspacePools {
         }
     }
 
-    fn host_pool<R, D>(&self) -> Arc<WorkspacePool<R, D>>
+    /// The pool serving one `(provider, dtype, storage)` triple.
+    ///
+    /// Storage is part of the key: a Host and a device execution of the same
+    /// topology and `(R, D)` are different workspace types, and the erased
+    /// registry must never hand one to the other.
+    fn pool<R, D, S>(&self) -> Arc<WorkspacePool<R, D, S>>
     where
         R: TypedSectorAdmission + Send + Sync,
-        R::Mode: HostNetworkModeDispatch<R, D>,
+        R::Mode: HostNetworkModeDispatch<R, D, S>,
         D: TensorScalar + Send + Sync + 'static,
+        S: NetworkPayloadStorage<D> + Send + Sync,
     {
         if !self.accepting.load(Ordering::SeqCst) {
             return Arc::new(WorkspacePool {
@@ -288,7 +301,7 @@ impl WorkspacePools {
                 registered: AtomicBool::new(false),
             });
         }
-        let key = TypeId::of::<(R, D)>();
+        let key = TypeId::of::<(R, D, S)>();
         let mut pools = self.pools.lock().expect("network pool registry poisoned");
         if !self.accepting.load(Ordering::SeqCst) {
             return Arc::new(WorkspacePool {
@@ -301,7 +314,7 @@ impl WorkspacePools {
         if let Some(pool) = pools.get(&key) {
             return Arc::clone(pool)
                 .as_any_arc()
-                .downcast::<WorkspacePool<R, D>>()
+                .downcast::<WorkspacePool<R, D, S>>()
                 .expect("workspace TypeId mapped to the wrong pool type");
         }
         let pool = Arc::new(WorkspacePool {
@@ -319,11 +332,12 @@ impl WorkspacePools {
     }
 }
 
-impl<R, D> ErasedWorkspacePool for WorkspacePool<R, D>
+impl<R, D, S> ErasedWorkspacePool for WorkspacePool<R, D, S>
 where
     R: TypedSectorAdmission + Send + Sync,
-    R::Mode: HostNetworkModeDispatch<R, D>,
+    R::Mode: HostNetworkModeDispatch<R, D, S>,
     D: TensorScalar + Send + Sync + 'static,
+    S: NetworkPayloadStorage<D> + Send + Sync,
 {
     fn as_any_arc(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
         self
@@ -343,13 +357,14 @@ where
     }
 }
 
-impl<R, D> WorkspacePool<R, D>
+impl<R, D, S> WorkspacePool<R, D, S>
 where
     R: TypedSectorAdmission,
-    R::Mode: HostNetworkModeDispatch<R, D>,
+    R::Mode: HostNetworkModeDispatch<R, D, S>,
     D: TensorScalar,
+    S: NetworkPayloadStorage<D>,
 {
-    fn lease(self: &Arc<Self>) -> WorkspaceLease<R, D> {
+    fn lease(self: &Arc<Self>) -> WorkspaceLease<R, D, S> {
         let workspace = {
             let mut available = self
                 .available
@@ -382,13 +397,14 @@ where
     }
 }
 
-impl<R, D> WorkspaceLease<R, D>
+impl<R, D, S> WorkspaceLease<R, D, S>
 where
     R: TypedSectorAdmission,
-    R::Mode: HostNetworkModeDispatch<R, D>,
+    R::Mode: HostNetworkModeDispatch<R, D, S>,
     D: TensorScalar,
+    S: NetworkPayloadStorage<D>,
 {
-    fn workspace(&mut self) -> &mut NetworkExecutionWorkspace<R, D> {
+    fn workspace(&mut self) -> &mut NetworkExecutionWorkspace<R, D, S> {
         self.workspace
             .as_mut()
             .expect("workspace lease always owns a workspace")
@@ -399,11 +415,12 @@ where
     }
 }
 
-impl<R, D> Drop for WorkspaceLease<R, D>
+impl<R, D, S> Drop for WorkspaceLease<R, D, S>
 where
     R: TypedSectorAdmission,
-    R::Mode: HostNetworkModeDispatch<R, D>,
+    R::Mode: HostNetworkModeDispatch<R, D, S>,
     D: TensorScalar,
+    S: NetworkPayloadStorage<D>,
 {
     fn drop(&mut self) {
         if std::thread::panicking() || !self.recyclable {
@@ -412,7 +429,7 @@ where
         }
         if let Some(mut workspace) = self.workspace.take() {
             workspace.clear_slots();
-            <R::Mode as HostNetworkModeDispatch<R, D>>::park_workspace(&mut workspace);
+            <R::Mode as HostNetworkModeDispatch<R, D, S>>::park_workspace(&mut workspace);
             let mut available = self
                 .pool
                 .available
@@ -457,12 +474,48 @@ impl CachedPlan {
         R::Mode: HostNetworkModeDispatch<R, D>,
         D: TensorScalar + Send + Sync + 'static,
     {
-        let pool = self.workspaces.host_pool::<R, D>();
+        self.execute_leased(tensors, PlannedNetwork::execute_with_workspace)
+    }
+
+    #[cfg(feature = "cuda")]
+    pub(crate) fn execute_cuda<R, D>(
+        &self,
+        tensors: &[&TensorMap<R, D, CudaStorage<D>>],
+    ) -> Result<TensorMap<R, D, CudaStorage<D>>, Error>
+    where
+        R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+            + MultiplicityFreeRigidSymbols<Scalar = f64>
+            + CheckedFusionAlgebra
+            + SectorCodec
+            + Send
+            + Sync,
+        D: CudaPayload,
+    {
+        self.execute_leased(tensors, PlannedNetwork::execute_cuda_with_workspace)
+    }
+
+    /// One lease lifecycle for every placement: take a workspace from this
+    /// plan's `(R, D, S)` pool, run `execute`, and recycle only on success so a
+    /// failed or panicking step quarantines the buffers it may have touched.
+    fn execute_leased<R, D, S>(
+        &self,
+        tensors: &[&TensorMap<R, D, S>],
+        execute: impl FnOnce(
+            &PlannedNetwork,
+            &[&TensorMap<R, D, S>],
+            &mut NetworkExecutionWorkspace<R, D, S>,
+        ) -> Result<TensorMap<R, D, S>, HostNetworkError<R>>,
+    ) -> Result<TensorMap<R, D, S>, HostNetworkError<R>>
+    where
+        R: TypedSectorAdmission + Send + Sync,
+        R::Mode: HostNetworkModeDispatch<R, D, S>,
+        D: TensorScalar + Send + Sync + 'static,
+        S: NetworkPayloadStorage<D> + Send + Sync,
+    {
+        let pool = self.workspaces.pool::<R, D, S>();
         let mut lease = pool.lease();
         let previous_capacity = lease.workspace().slot_capacity();
-        let result = self
-            .planned
-            .execute_with_workspace(tensors, lease.workspace());
+        let result = execute(&self.planned, tensors, lease.workspace());
         if lease.workspace().slot_capacity() > previous_capacity {
             self.workspaces
                 .counters
@@ -473,18 +526,6 @@ impl CachedPlan {
             lease.commit_recycling();
         }
         result
-    }
-
-    #[cfg(feature = "cuda")]
-    pub(crate) fn execute_cuda<R, D>(
-        &self,
-        tensors: &[&TensorMap<R, D, CudaStorage<D>>],
-    ) -> Result<TensorMap<R, D, CudaStorage<D>>, Error>
-    where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
-        D: CudaPayload,
-    {
-        self.planned.execute_cuda(tensors)
     }
 }
 
@@ -1376,7 +1417,7 @@ mod tests {
     #[test]
     fn panic_quarantines_typed_workspace_lease() {
         let pools = WorkspacePools::default();
-        let pool = pools.host_pool::<U1FusionRule, f64>();
+        let pool = pools.pool::<U1FusionRule, f64, Vec<f64>>();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe({
             let pool = pool.clone();
             move || {
@@ -1401,11 +1442,11 @@ mod tests {
     #[test]
     fn active_lease_return_after_typed_pool_eviction_is_not_retained() {
         let pools = WorkspacePools::default();
-        let first = pools.host_pool::<U1FusionRule, f64>();
+        let first = pools.pool::<U1FusionRule, f64, Vec<f64>>();
         let mut lease = first.lease();
         lease.commit_recycling();
-        drop(pools.host_pool::<U1FusionRule, Complex64>());
-        drop(pools.host_pool::<SU2FusionRule, f64>());
+        drop(pools.pool::<U1FusionRule, Complex64, Vec<Complex64>>());
+        drop(pools.pool::<SU2FusionRule, f64, Vec<f64>>());
         assert!(!first.registered.load(Ordering::SeqCst));
         drop(lease);
         assert!(first.available.lock().unwrap().is_empty());
@@ -1415,7 +1456,7 @@ mod tests {
     #[test]
     fn active_lease_return_after_plan_clear_is_not_retained() {
         let pools = WorkspacePools::default();
-        let pool = pools.host_pool::<U1FusionRule, f64>();
+        let pool = pools.pool::<U1FusionRule, f64, Vec<f64>>();
         let mut lease = pool.lease();
         lease.commit_recycling();
         pools.deactivate_all();
@@ -1428,7 +1469,7 @@ mod tests {
     fn deactivated_registry_rejects_late_typed_pool_creation() {
         let pools = WorkspacePools::default();
         pools.deactivate_all();
-        let pool = pools.host_pool::<U1FusionRule, f64>();
+        let pool = pools.pool::<U1FusionRule, f64, Vec<f64>>();
         assert!(!pool.registered.load(Ordering::SeqCst));
         let mut lease = pool.lease();
         lease.workspace = Some(NetworkExecutionWorkspace::with_test_slot_capacity(16));
@@ -1442,7 +1483,7 @@ mod tests {
     fn budget_rotation_rejects_old_return_and_accepts_new_pool() {
         let budget = Arc::new(WorkspaceBudget::new(usize::MAX));
         let pools = WorkspacePools::new(Arc::clone(&budget));
-        let old = pools.host_pool::<U1FusionRule, f64>();
+        let old = pools.pool::<U1FusionRule, f64, Vec<f64>>();
         let mut stale = old.lease();
         stale.workspace = Some(NetworkExecutionWorkspace::with_test_slot_capacity(16));
         stale.commit_recycling();
@@ -1450,7 +1491,7 @@ mod tests {
         drop(stale);
         assert!(old.available.lock().unwrap().is_empty());
 
-        let current = pools.host_pool::<U1FusionRule, f64>();
+        let current = pools.pool::<U1FusionRule, f64, Vec<f64>>();
         assert!(current.registered.load(Ordering::SeqCst));
         let mut lease = current.lease();
         lease.workspace = Some(NetworkExecutionWorkspace::with_test_slot_capacity(16));
@@ -1469,7 +1510,7 @@ mod tests {
         assert!(charge > 0);
         let budget = Arc::new(WorkspaceBudget::new(charge));
         let pools = WorkspacePools::new(Arc::clone(&budget));
-        let pool = pools.host_pool::<U1FusionRule, f64>();
+        let pool = pools.pool::<U1FusionRule, f64, Vec<f64>>();
         let mut first = pool.lease();
         let mut second = pool.lease();
         first.workspace = Some(probe);
@@ -1505,8 +1546,8 @@ mod tests {
         let budget = Arc::new(WorkspaceBudget::new(f64_charge + complex_charge - 1));
         let pools = WorkspacePools::new(Arc::clone(&budget));
 
-        let f64_pool = pools.host_pool::<U1FusionRule, f64>();
-        let complex_pool = pools.host_pool::<U1FusionRule, Complex64>();
+        let f64_pool = pools.pool::<U1FusionRule, f64, Vec<f64>>();
+        let complex_pool = pools.pool::<U1FusionRule, Complex64, Vec<Complex64>>();
         let mut f64_lease = f64_pool.lease();
         let mut complex_lease = complex_pool.lease();
         f64_lease.workspace = Some(f64_probe);
@@ -1527,7 +1568,7 @@ mod tests {
     fn lifo_small_return_keeps_one_large_bottom_workspace_charged() {
         let budget = Arc::new(WorkspaceBudget::new(usize::MAX));
         let pools = WorkspacePools::new(Arc::clone(&budget));
-        let pool = pools.host_pool::<U1FusionRule, f64>();
+        let pool = pools.pool::<U1FusionRule, f64, Vec<f64>>();
         let mut first = pool.lease();
         let mut second = pool.lease();
         first.workspace = Some(NetworkExecutionWorkspace::with_test_slot_capacity(64));

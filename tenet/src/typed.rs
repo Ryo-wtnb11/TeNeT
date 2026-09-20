@@ -9236,17 +9236,58 @@ impl<R, D, S> AsRef<Self> for TensorMap<R, D, S> {
     }
 }
 
-/// Host tensor authority parked without retaining its [`Runtime`].
+/// Tensor authority parked without retaining its [`Runtime`].
 ///
 /// This is an internal ownership seam for the Runtime-owned `tensor!` workspace
 /// pool. It retains only a validated provider-neutral layout and an owned dense
 /// payload; detach/attach never copies or materializes tensor data, and attach
 /// binds the layout to the current execution authority's exact provider.
+///
+/// `S` is the parked payload storage. Host storage parks a `Vec<D>` allocation;
+/// a device storage parks its resident device buffer. Parking is a *Runtime and
+/// provider* ownership operation only — it never moves or frees the payload.
 #[doc(hidden)]
-pub struct RuntimeDetachedTensorMap<D> {
+pub struct RuntimeDetachedTensorMap<D, S = Vec<D>> {
     runtime: RuntimeIdentity,
     layout: ValidatedDynamicFusionLayout,
-    data: Arc<TypedData<D, Vec<D>>>,
+    data: Arc<TypedData<D, S>>,
+}
+
+mod network_payload_sealed {
+    pub trait Sealed {}
+}
+
+/// Payload storage whose retained-byte cost the `tensor!` workspace budget can
+/// charge.
+///
+/// Host storage reports the bytes its allocation *holds* ([`Vec::capacity`]),
+/// because a pooled Host destination keeps its spare capacity and reuses it.
+/// Device storage reports `len` bytes: a device buffer is allocated at its
+/// exact length and has no separate capacity.
+#[doc(hidden)]
+pub trait NetworkPayloadStorage<D>:
+    TensorStorage<D> + network_payload_sealed::Sealed + 'static
+{
+    /// Bytes this allocation retains while it is held for reuse.
+    fn network_retained_bytes(&self) -> usize;
+}
+
+impl<D: 'static> network_payload_sealed::Sealed for Vec<D> {}
+
+impl<D: 'static> NetworkPayloadStorage<D> for Vec<D> {
+    fn network_retained_bytes(&self) -> usize {
+        self.capacity().saturating_mul(std::mem::size_of::<D>())
+    }
+}
+
+#[cfg(feature = "cuda")]
+impl<D: tenet_dense::CudaScalar> network_payload_sealed::Sealed for CudaStorage<D> {}
+
+#[cfg(feature = "cuda")]
+impl<D: tenet_dense::CudaScalar> NetworkPayloadStorage<D> for CudaStorage<D> {
+    fn network_retained_bytes(&self) -> usize {
+        TensorStorage::len(self).saturating_mul(std::mem::size_of::<D>())
+    }
 }
 
 /// Storage route used by typed network replay admission.
@@ -9272,14 +9313,18 @@ impl<R, D, S> Clone for TensorMap<R, D, S> {
     }
 }
 
-impl<R, D> TensorMap<R, D>
+impl<R, D, S> TensorMap<R, D, S>
 where
     R: tenet_core::FusionRule,
 {
-    /// Removes Runtime and provider ownership from an ordinary dense Host
+    /// Removes Runtime and provider ownership from an ordinary dense
     /// destination while preserving its validated layout and payload allocation.
+    ///
+    /// This is storage-generic: a device destination parks its resident buffer
+    /// exactly as a Host destination parks its `Vec`, because detaching only
+    /// drops the [`Runtime`] and provider handles.
     #[doc(hidden)]
-    pub fn detach_runtime(self) -> Option<RuntimeDetachedTensorMap<D>> {
+    pub fn detach_runtime(self) -> Option<RuntimeDetachedTensorMap<D, S>> {
         let TensorMap { runtime, repr } = self;
         let TypedTensorRepr::Owned(body) = repr else {
             return None;
@@ -9297,24 +9342,27 @@ where
     }
 }
 
-impl<D> RuntimeDetachedTensorMap<D> {
-    /// Dense allocation capacity and conservative dependent-layout bytes
-    /// retained by this parked destination.
+impl<D, S> RuntimeDetachedTensorMap<D, S> {
+    /// Dense allocation bytes and conservative dependent-layout bytes retained
+    /// by this parked destination.
     ///
     /// Shared layout descendants are charged per parked destination. This can
     /// over-count, but it keeps the Runtime budget a true ceiling even when the
     /// workspace is the last owner of an Arc-backed layout allocation.
     #[doc(hidden)]
-    pub fn retained_dense_capacity_bytes(&self) -> usize {
+    pub fn retained_dense_capacity_bytes(&self) -> usize
+    where
+        S: NetworkPayloadStorage<D>,
+    {
         let payload_capacity = match self.data.as_ref() {
-            TypedData::Dense(data) => data.capacity().saturating_mul(std::mem::size_of::<D>()),
+            TypedData::Dense(data) => data.network_retained_bytes(),
             TypedData::Diagonal(_) => {
                 debug_assert!(false, "runtime-detached destinations are always dense");
                 0
             }
         };
         payload_capacity
-            .saturating_add(std::mem::size_of::<TypedData<D, Vec<D>>>())
+            .saturating_add(std::mem::size_of::<TypedData<D, S>>())
             .saturating_add(2 * std::mem::size_of::<usize>())
             .saturating_add(self.layout.charged_retained_bytes())
     }
@@ -9328,7 +9376,11 @@ impl<D> RuntimeDetachedTensorMap<D> {
     /// Validates Runtime identity and layout rebinding against the current
     /// authority without consuming this parked destination.
     #[doc(hidden)]
-    pub fn can_attach<R>(&self, runtime: &Runtime, authority: &TensorMap<R, D>) -> Result<(), Error>
+    pub fn can_attach<R>(
+        &self,
+        runtime: &Runtime,
+        authority: &TensorMap<R, D, S>,
+    ) -> Result<(), Error>
     where
         R: tenet_core::FusionRule,
     {
@@ -9345,8 +9397,8 @@ impl<D> RuntimeDetachedTensorMap<D> {
     pub fn attach_runtime<R>(
         self,
         runtime: &Runtime,
-        authority: &TensorMap<R, D>,
-    ) -> Result<TensorMap<R, D>, Error>
+        authority: &TensorMap<R, D, S>,
+    ) -> Result<TensorMap<R, D, S>, Error>
     where
         R: tenet_core::FusionRule,
     {
@@ -9386,6 +9438,24 @@ where
 }
 
 impl<R, D, S> TensorMap<R, D, S> {
+    /// Identity and retained bytes of the dense payload allocation owned by
+    /// this tensor. Network metering uses the identity to avoid charging Arc
+    /// aliases twice.
+    #[doc(hidden)]
+    pub fn network_owned_payload(&self) -> Option<(usize, usize)>
+    where
+        S: NetworkPayloadStorage<D>,
+    {
+        let body = self.storage_body();
+        let TypedData::Dense(data) = body.data.as_ref() else {
+            return None;
+        };
+        Some((
+            Arc::as_ptr(&body.data) as usize,
+            data.network_retained_bytes(),
+        ))
+    }
+
     /// Classifies the representation produced after an optional adjoint.
     #[doc(hidden)]
     pub fn network_reuse_class(&self, adjoint: bool) -> NetworkReuseClass {
@@ -11936,21 +12006,6 @@ where
             runtime: self.runtime.clone(),
             repr: owned_repr(TypedTensorBody::dense(destination, data)),
         })
-    }
-
-    /// Identity and capacity of the dense payload allocation owned by this
-    /// Host tensor. Network metering uses the identity to avoid charging Arc
-    /// aliases twice.
-    #[doc(hidden)]
-    pub fn network_owned_payload(&self) -> Option<(usize, usize)> {
-        let body = self.storage_body();
-        let TypedData::Dense(data) = body.data.as_ref() else {
-            return None;
-        };
-        Some((
-            Arc::as_ptr(&body.data) as usize,
-            data.capacity().saturating_mul(std::mem::size_of::<D>()),
-        ))
     }
 
     #[doc(hidden)]
