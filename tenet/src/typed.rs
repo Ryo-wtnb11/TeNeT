@@ -256,13 +256,16 @@ pub use crate::error::Error;
 /// here is what lets a caller glob-import this module alone. The canonical
 /// [`TensorMap`] and [`GradedSpace`] are also re-exported by [`crate::prelude`].
 pub use crate::runtime::Runtime;
+/// The spectrum-magnitude bound of [`GradedSpace::find_truncated`]. Concrete
+/// `f64`/`Complex64` callers never name it, but a caller generic over the
+/// payload must, so it is re-exported here rather than left unnameable
+/// outside the crate.
+pub use tenet_matrixalgebra::SpectrumMagnitude;
 /// Re-exported for the same reason as [`Error`] and [`Runtime`]:
 /// [`TensorMap::svd_trunc`] takes one, so `use tenet::typed::*` would not be
 /// self-sufficient without it.
 pub use tenet_matrixalgebra::{Truncation, TruncationSpace};
 
-#[cfg(feature = "cuda")]
-use tenet_matrixalgebra::{select_truncation, WeightedSpectrum};
 use tenet_matrixalgebra::{BoundDynFactor, CheckedGenericFactorPlanError, FactorScalar};
 
 use crate::runtime::{Ctx, Ctxs};
@@ -4225,30 +4228,7 @@ thread_local! {
     static CUDA_SVD_OBSERVATION: std::cell::Cell<Option<CudaSvdObservation>> = const {
             std::cell::Cell::new(None)
         };
-    /// `(successful_results, spectrum_scalars, final_storage_creations,
-    /// live_raw_factors, peak_raw_factors, live_raw_bytes, peak_raw_bytes)`.
-    static CUDA_SVD_TRUNC_OBSERVATION: std::cell::Cell<Option<CudaSvdTruncObservation>> = const {
-            std::cell::Cell::new(None)
-        };
-    static CUDA_SVD_TRUNC_EVENTS: std::cell::RefCell<Option<Vec<(&'static str, usize)>>> = const {
-        std::cell::RefCell::new(None)
-    };
-    static CUDA_SVD_TRUNC_LOCK_DEPTH: std::cell::Cell<usize> = const {
-        std::cell::Cell::new(0)
-    };
-    static CUDA_SVD_TRUNC_FINAL_EXTENTS: std::cell::RefCell<Option<Vec<usize>>> = const {
-        std::cell::RefCell::new(None)
-    };
-    static CUDA_SVD_TRUNC_ALLOCATIONS: std::cell::RefCell<Option<Vec<(&'static str, usize)>>> = const {
-        std::cell::RefCell::new(None)
-    };
-    static CUDA_SVD_TRUNC_RELEASES: std::cell::RefCell<Option<Vec<(usize, usize)>>> = const {
-        std::cell::RefCell::new(None)
-    };
     /// `(stage, one-based ordinal)` for operation-local failure injection.
-    static CUDA_SVD_TRUNC_FAILURE: std::cell::Cell<Option<(&'static str, usize)>> = const {
-        std::cell::Cell::new(None)
-    };
     static CUDA_EIGH_FAILURE: std::cell::Cell<Option<(&'static str, usize)>> = const {
         std::cell::Cell::new(None)
     };
@@ -4258,96 +4238,6 @@ thread_local! {
 type CudaQrObservation = (usize, usize, usize, usize, usize, usize, usize);
 #[cfg(all(test, feature = "cuda"))]
 type CudaSvdObservation = (usize, usize, usize, usize, usize);
-#[cfg(all(test, feature = "cuda"))]
-type CudaSvdTruncObservation = (usize, usize, usize, usize, usize, usize, usize);
-
-#[cfg(all(test, feature = "cuda"))]
-fn update_cuda_svd_trunc_observation(
-    update: impl FnOnce(CudaSvdTruncObservation) -> CudaSvdTruncObservation,
-) {
-    CUDA_SVD_TRUNC_OBSERVATION.with(|observation| {
-        if let Some(current) = observation.get() {
-            observation.set(Some(update(current)));
-        }
-    });
-}
-
-#[cfg(all(test, feature = "cuda"))]
-fn observe_cuda_svd_trunc_decomposition(values: usize) {
-    update_cuda_svd_trunc_observation(
-        |(results, total, creations, live, peak, bytes, peak_bytes)| {
-            (
-                results + 1,
-                total + values,
-                creations,
-                live,
-                peak,
-                bytes,
-                peak_bytes,
-            )
-        },
-    );
-}
-
-#[cfg(all(test, feature = "cuda"))]
-fn observe_cuda_svd_trunc_final_storage_creation() {
-    update_cuda_svd_trunc_observation(
-        |(results, total, creations, live, peak, bytes, peak_bytes)| {
-            (results, total, creations + 1, live, peak, bytes, peak_bytes)
-        },
-    );
-}
-
-#[cfg(all(test, feature = "cuda"))]
-pub(crate) fn observe_cuda_svd_trunc_allocation(kind: &'static str, extent: usize) {
-    CUDA_SVD_TRUNC_ALLOCATIONS.with(|allocations| {
-        if let Some(allocations) = allocations.borrow_mut().as_mut() {
-            allocations.push((kind, extent));
-        }
-    });
-}
-
-#[cfg(all(test, feature = "cuda"))]
-fn observe_cuda_svd_trunc_release() {
-    CUDA_SVD_TRUNC_OBSERVATION.with(|observation| {
-        let Some((_, _, _, live, _, bytes, _)) = observation.get() else {
-            return;
-        };
-        CUDA_SVD_TRUNC_RELEASES.with(|releases| {
-            if let Some(releases) = releases.borrow_mut().as_mut() {
-                releases.push((live, bytes));
-            }
-        });
-    });
-}
-
-#[cfg(all(test, feature = "cuda"))]
-fn observe_cuda_svd_trunc_event(event: &'static str) {
-    let depth = CUDA_SVD_TRUNC_LOCK_DEPTH.with(|depth| depth.get());
-    CUDA_SVD_TRUNC_EVENTS.with(|events| {
-        if let Some(events) = events.borrow_mut().as_mut() {
-            events.push((event, depth));
-        }
-    });
-}
-
-#[cfg(all(test, feature = "cuda"))]
-struct CudaSvdTruncLockObservationGuard;
-
-#[cfg(all(test, feature = "cuda"))]
-impl CudaSvdTruncLockObservationGuard {
-    fn new() -> Self {
-        CUDA_SVD_TRUNC_LOCK_DEPTH.with(|depth| depth.set(depth.get() + 1));
-        Self
-    }
-}
-
-#[cfg(all(test, feature = "cuda"))]
-impl Drop for CudaSvdTruncLockObservationGuard {
-    fn drop(&mut self) {
-        CUDA_SVD_TRUNC_LOCK_DEPTH.with(|depth| depth.set(depth.get() - 1));
-    }
-}
 
 #[cfg(all(test, feature = "cuda"))]
 fn update_cuda_svd_observation(update: impl FnOnce(CudaSvdObservation) -> CudaSvdObservation) {
@@ -4438,49 +4328,6 @@ pub(crate) fn dense_err(err: tenet_dense::DenseError) -> Error {
     Error::from(tenet_tensors::OperationError::Dense(err))
 }
 
-/// Shared host-side truncation decision (exactly the host cores' flow:
-/// `select_truncation` over quantum-dimension-weighted magnitudes, kept
-/// prefixes, empty sectors dropped, discarded weighted 2-norm as `error`;
-/// a no-op decision keeps the full factorization with `error == 0`).
-#[cfg(feature = "cuda")]
-pub(crate) fn decide_kept<R: MultiplicityFreeRigidSymbols<Scalar = f64>>(
-    rule: &R,
-    spectra: &[tenet_matrixalgebra::SectorSpectrum<f64>],
-    truncation: Option<&Truncation>,
-) -> Result<(Vec<tenet_matrixalgebra::SectorSpectrum<f64>>, f64), Error> {
-    let Some(truncation) = truncation else {
-        return Ok((spectra.to_vec(), 0.0));
-    };
-    let magnitudes: Vec<Vec<f64>> = spectra
-        .iter()
-        .map(|entry| entry.values.iter().map(|value| value.abs()).collect())
-        .collect();
-    let weighted: Vec<WeightedSpectrum<'_>> = spectra
-        .iter()
-        .zip(&magnitudes)
-        .map(|(entry, values)| WeightedSpectrum {
-            sector: entry.sector,
-            weight: rule.dim_scalar(entry.sector),
-            values,
-        })
-        .collect();
-    let decision = select_truncation(&weighted, truncation, &rule.rule_identity())
-        .map_err(|err| Error::InvalidArgument(err.to_string()))?;
-    if spectra
-        .iter()
-        .zip(&decision.kept)
-        .all(|(entry, &count)| entry.values.len() == count)
-    {
-        return Ok((spectra.to_vec(), 0.0));
-    }
-    let mut kept = spectra.to_vec();
-    for (entry, &count) in kept.iter_mut().zip(&decision.kept) {
-        entry.values.truncate(count);
-    }
-    kept.retain(|entry| !entry.values.is_empty());
-    Ok((kept, decision.error))
-}
-
 /// Uploads a small host-built selector matrix (`rows x cols`, column-major,
 /// zero except `entries`) used by the assembly GEMMs.
 #[cfg(feature = "cuda")]
@@ -4494,14 +4341,9 @@ pub(crate) fn upload_selector<D: CudaPayload>(
     for (row, col, value) in entries {
         data[row + rows * col] = value;
     }
-    #[cfg(test)]
-    let extent = data.len();
     let selector = CudaStorage::upload_owned(cuda, data).map_err(Error::from)?;
     #[cfg(test)]
-    {
-        observe_cuda_qr_selector_upload();
-        observe_cuda_svd_trunc_allocation("selector", extent);
-    }
+    observe_cuda_qr_selector_upload();
     Ok(selector)
 }
 
@@ -4799,75 +4641,6 @@ impl<D: CudaPayload> Drop for TypedCudaSvdScratch<D> {
 }
 
 #[cfg(feature = "cuda")]
-struct TypedCudaSvdRetainedFactors {
-    left: CudaDenseStorage,
-    right: CudaDenseStorage,
-    #[cfg(test)]
-    bytes: usize,
-}
-
-#[cfg(feature = "cuda")]
-impl TypedCudaSvdRetainedFactors {
-    fn new<D: CudaPayload>(
-        left: CudaDenseStorage,
-        right: CudaDenseStorage,
-        rows: usize,
-        cols: usize,
-        rank: usize,
-    ) -> Result<Self, Error> {
-        #[cfg(not(test))]
-        let _ = (rows, cols, rank, std::mem::size_of::<D>());
-        #[cfg(test)]
-        let bytes = rows
-            .checked_add(cols)
-            .and_then(|sum| sum.checked_mul(rank))
-            .and_then(|elements| elements.checked_mul(std::mem::size_of::<D>()))
-            .ok_or_else(|| internal_layout_error("retained CUDA SVD factor bytes overflow"))?;
-        #[cfg(test)]
-        update_cuda_svd_trunc_observation(
-            |(results, total, creations, live, peak, live_bytes, peak_bytes)| {
-                let live = live + 1;
-                let live_bytes = live_bytes + bytes;
-                (
-                    results,
-                    total,
-                    creations,
-                    live,
-                    peak.max(live),
-                    live_bytes,
-                    peak_bytes.max(live_bytes),
-                )
-            },
-        );
-        Ok(Self {
-            left,
-            right,
-            #[cfg(test)]
-            bytes,
-        })
-    }
-}
-
-#[cfg(all(test, feature = "cuda"))]
-impl Drop for TypedCudaSvdRetainedFactors {
-    fn drop(&mut self) {
-        update_cuda_svd_trunc_observation(
-            |(results, total, creations, live, peak, bytes, peak_bytes)| {
-                (
-                    results,
-                    total,
-                    creations,
-                    live - 1,
-                    peak,
-                    bytes - self.bytes,
-                    peak_bytes,
-                )
-            },
-        );
-    }
-}
-
-#[cfg(feature = "cuda")]
 #[derive(Clone, Copy)]
 struct TypedCudaQrRoute {
     source: usize,
@@ -4894,23 +4667,22 @@ struct TypedCudaQrPlan<R> {
 
 #[cfg(feature = "cuda")]
 #[derive(Clone, Copy)]
-struct TypedCudaSvdTruncRoute {
+struct TypedCudaEighRoute {
     source: usize,
     left: usize,
-    right: usize,
     full_rank: usize,
     kept: usize,
 }
 
+/// The eigenvector (`left`) and diagonal (`middle`) factor spaces and routes
+/// of a device EIGH, for a bond of the given per-sector rank.
 #[cfg(feature = "cuda")]
-struct TypedCudaSvdTruncPlan<R> {
+struct TypedCudaEighPlan<R> {
     left_space: BoundDynamicFusionMapSpace<R>,
     middle_space: BoundDynamicFusionMapSpace<R>,
-    right_space: BoundDynamicFusionMapSpace<R>,
     source_regions: Arc<[CoupledSectorRegion]>,
     left_regions: Arc<[CoupledSectorRegion]>,
-    right_regions: Arc<[CoupledSectorRegion]>,
-    routes: Vec<TypedCudaSvdTruncRoute>,
+    routes: Vec<TypedCudaEighRoute>,
 }
 
 /// Whether a factor region reproduces its source's tree layout exactly: the
@@ -5436,7 +5208,7 @@ where
         truncation: &Truncation,
     ) -> Result<tenet_matrixalgebra::TruncationDecision, Self::FacadeError>
     where
-        V: tenet_matrixalgebra::SpectrumMagnitude;
+        V: SpectrumMagnitude;
 }
 
 #[doc(hidden)]
@@ -5842,7 +5614,7 @@ where
         truncation: &Truncation,
     ) -> Result<tenet_matrixalgebra::TruncationDecision, Error>
     where
-        V: tenet_matrixalgebra::SpectrumMagnitude,
+        V: SpectrumMagnitude,
     {
         // `false`: the public primitive is magnitude-based, as MatrixAlgebraKit
         // `findtruncated` is. For the non-negative singular values Host
@@ -5866,7 +5638,7 @@ where
         truncation: &Truncation,
     ) -> Result<tenet_matrixalgebra::TruncationDecision, Self::FacadeError>
     where
-        V: tenet_matrixalgebra::SpectrumMagnitude,
+        V: SpectrumMagnitude,
     {
         tenet_matrixalgebra::decide_bond_truncation_generic_checked(provider, spectra, truncation)
             .map_err(Into::into)
@@ -8847,7 +8619,7 @@ where
         truncation: &Truncation,
     ) -> Result<TruncatedSelection<R>, TypedFacadeError<R>>
     where
-        V: tenet_matrixalgebra::SpectrumMagnitude,
+        V: SpectrumMagnitude,
     {
         let expected = self.leg.sectors().len();
         if spectra.len() != expected {
@@ -9537,9 +9309,11 @@ pub struct SectorSpectrum<S, V = f64> {
 /// Successful multiplicity-free truncated SVD `t ~= u * s * vh`.
 ///
 /// The factor fields are in reconstruction order: `u : codomain(t) <- bond`,
-/// `s : bond <- bond`, and `vh : bond <- domain(t)`. On the host, `u` and `vh`
-/// are dense while `s` uses compact diagonal storage. With `CudaStorage`,
-/// all three factors are dense device tensors.
+/// `s : bond <- bond`, and `vh : bond <- domain(t)`. `u` and `vh` are dense
+/// while `s` uses compact diagonal storage. Only host tensors produce this
+/// result: the `CudaStorage` `svd_trunc` is an explicit
+/// [`Error::UnsupportedOnDevice`] boundary, and the device truncation is
+/// composed from `svd_compact` plus the host restriction primitives.
 ///
 /// [`Self::singular_values`] contains the kept values by provider-labelled
 /// sector, and [`Self::error`] is the quantum-dimension-weighted 2-norm of all
@@ -9549,10 +9323,8 @@ pub struct SectorSpectrum<S, V = f64> {
 pub struct SvdTrunc<R: SectorCodec, D, S = Vec<D>> {
     /// Left isometry `u : codomain <- bond`.
     pub u: TensorMap<R, D, S>,
-    /// Singular-value factor `s : bond <- bond`. Host storage keeps TensorKit's
-    /// compact `DiagonalTensorMap` representation; CUDA storage returns the
-    /// same factor as a dense device block diagonal because CUDA diagonal
-    /// storage is not part of the current typed contract.
+    /// Singular-value factor `s : bond <- bond`, in TensorKit's compact
+    /// `DiagonalTensorMap` representation.
     pub s: TensorMap<R, D, S>,
     /// Right isometry `vh : bond <- domain`.
     pub vh: TensorMap<R, D, S>,
@@ -9901,15 +9673,17 @@ fn is_diagonal_bond_space(space: &DynamicFusionMapSpace) -> bool {
 ///
 /// Fields are ordered `(d, v)`: `d : bond <- bond` holds the signed real
 /// eigenvalues, and `v : codomain(t) <- bond` is the selected eigenvector
-/// isometry. On the host, `d` uses compact diagonal storage and `v` is dense; with
-/// `CudaStorage`, both factors are dense device tensors.
+/// isometry. `d` uses compact diagonal storage and `v` is dense. Only host
+/// tensors produce this result: the `CudaStorage` `eigh_trunc` is an explicit
+/// [`Error::UnsupportedOnDevice`] boundary, and the device truncation is
+/// composed from `eigh_full` plus the host restriction primitives.
 ///
 /// [`Self::eigenvalues`] contains the kept values by provider-labelled sector,
 /// and [`Self::error`] is the quantum-dimension-weighted 2-norm of all
 /// discarded eigenvalues.
 // The `SectorCodec` bound is the field types' own, exactly as for [`SvdTrunc`].
 pub struct EighTrunc<R: SectorCodec, D, S = Vec<D>> {
-    /// Eigenvalue factor `d : bond <- bond`; compact on Host and dense on CUDA.
+    /// Compact diagonal eigenvalue factor `d : bond <- bond`.
     pub d: TensorMap<R, D, S>,
     /// Eigenvector isometry `v : codomain <- bond`.
     pub v: TensorMap<R, D, S>,
@@ -11076,15 +10850,20 @@ impl<R, D: CudaPayload> TensorMap<R, D, CudaStorage<D>> {
 }
 
 #[cfg(feature = "cuda")]
-/// Device compact SVD (`svd_compact`, `svd_trunc`) and Hermitian
-/// eigendecomposition (`eigh_full`, `eigh_trunc`) over either device payload
-/// (`f64` or `Complex64`).
+/// Device compact SVD (`svd_compact`) and Hermitian eigendecomposition
+/// (`eigh_full`) over either device payload (`f64` or `Complex64`).
+///
+/// The *truncated* factorizations are deliberately absent here: `svd_trunc`
+/// and `eigh_trunc` return [`Error::UnsupportedOnDevice`], because a
+/// truncation is a decision over quantum-dimension-weighted spectra across all
+/// coupled sectors and belongs on the host. Their rustdoc carries the
+/// composition that replaces them.
 ///
 /// `u` and `vh` keep the raw device SVD gauge for both dtypes; unlike the Host
-/// methods, these do not impose TensorKit's largest-pivot gauge.
-/// `eigh_full`/`eigh_trunc` admit a block only when it equals its *conjugate*
-/// transpose, so a complex-symmetric non-Hermitian block is rejected before
-/// any factorization.
+/// methods, these do not impose TensorKit's largest-pivot gauge. `eigh_full`
+/// admits a block only when it equals its *conjugate* transpose, so a
+/// complex-symmetric non-Hermitian block is rejected before any
+/// factorization.
 ///
 /// Compact QR is not here: it is `f64`-only and lives in its own impl below.
 ///
@@ -11276,15 +11055,17 @@ where
         })
     }
 
-    fn compile_cuda_svd_trunc_plan(
+    /// Admits the eigenvector and diagonal factor spaces for `spectra` and
+    /// routes every coupled sector from its source region to them.
+    fn compile_cuda_eigh_plan(
         &self,
         source_regions: Arc<[CoupledSectorRegion]>,
-        kept_spectra: &[tenet_matrixalgebra::SectorSpectrum<f64>],
-    ) -> Result<TypedCudaSvdTruncPlan<R>, Error> {
+        spectra: &[tenet_matrixalgebra::SectorSpectrum<f64>],
+    ) -> Result<TypedCudaEighPlan<R>, Error> {
         let source_space = self.logical_space().space();
         let hom = source_space.homspace();
         let bond = SectorLeg::new(
-            kept_spectra
+            spectra
                 .iter()
                 .map(|entry| (entry.sector, entry.values.len())),
             false,
@@ -11295,32 +11076,11 @@ where
                     FusionProductSpace::new(hom.codomain().legs().iter().cloned()),
                     FusionProductSpace::new([bond.clone()]),
                 ))?;
-        #[cfg(test)]
-        {
-            observe_cuda_svd_trunc_event("admission_left");
-            if CUDA_SVD_TRUNC_FAILURE.with(|failure| failure.get()) == Some(("admission", 1)) {
-                let invalid_bond = SectorLeg::new([(SectorId::new(usize::MAX), 1)], false);
-                self.logical_space()
-                    .derive_from_final_homspace(FusionTreeHomSpace::new(
-                        FusionProductSpace::new(hom.codomain().legs().iter().cloned()),
-                        FusionProductSpace::new([invalid_bond]),
-                    ))?;
-                return Err(internal_layout_error(
-                    "provider accepted an invalid final-admission sector",
-                ));
-            }
-        }
         let middle_space =
             self.logical_space()
                 .derive_from_final_homspace(FusionTreeHomSpace::new(
                     FusionProductSpace::new([bond.clone()]),
-                    FusionProductSpace::new([bond.clone()]),
-                ))?;
-        let right_space =
-            self.logical_space()
-                .derive_from_final_homspace(FusionTreeHomSpace::new(
                     FusionProductSpace::new([bond]),
-                    FusionProductSpace::new(hom.domain().legs().iter().cloned()),
                 ))?;
         let left_regions =
             sector_regions(left_space.space().structure(), left_space.space().nout())?;
@@ -11328,14 +11088,12 @@ where
             middle_space.space().structure(),
             middle_space.space().nout(),
         )?;
-        let right_regions =
-            sector_regions(right_space.space().structure(), right_space.space().nout())?;
         let index_by_sector = |regions: &[CoupledSectorRegion]| {
             let mut indices = HashMap::with_capacity(regions.len());
             for (index, region) in regions.iter().enumerate() {
                 if indices.insert(region.coupled(), index).is_some() {
                     return Err(internal_layout_error(
-                        "compact SVD truncated factor contains a duplicate coupled sector",
+                        "CUDA EIGH factor contains a duplicate coupled sector",
                     ));
                 }
             }
@@ -11344,83 +11102,70 @@ where
         let source_by_sector = index_by_sector(&source_regions)?;
         let left_by_sector = index_by_sector(&left_regions)?;
         let middle_by_sector = index_by_sector(&middle_regions)?;
-        let right_by_sector = index_by_sector(&right_regions)?;
-        let mut routes = Vec::with_capacity(kept_spectra.len());
-        for spectrum in kept_spectra {
+        let mut routes = Vec::with_capacity(spectra.len());
+        for spectrum in spectra {
             let kept = spectrum.values.len();
             if kept == 0 {
                 return Err(internal_layout_error(
-                    "compact SVD truncated plan retained an empty sector",
+                    "CUDA EIGH plan retained an empty sector",
                 ));
             }
             let source = *source_by_sector.get(&spectrum.sector).ok_or_else(|| {
-                internal_layout_error("compact SVD truncated factor is missing a source sector")
+                internal_layout_error("CUDA EIGH factor is missing a source sector")
             })?;
             let source_region = &source_regions[source];
             let full_rank = source_region.rows().min(source_region.cols());
             if kept > full_rank {
                 return Err(internal_layout_error(
-                    "compact SVD truncated rank exceeds its source route",
+                    "CUDA EIGH rank exceeds its source route",
                 ));
             }
             let left = *left_by_sector.get(&spectrum.sector).ok_or_else(|| {
-                internal_layout_error("compact SVD truncated left factor is missing a sector")
+                internal_layout_error("CUDA EIGH eigenvector factor is missing a sector")
             })?;
             let middle = *middle_by_sector.get(&spectrum.sector).ok_or_else(|| {
-                internal_layout_error("compact SVD truncated diagonal factor is missing a sector")
-            })?;
-            let right = *right_by_sector.get(&spectrum.sector).ok_or_else(|| {
-                internal_layout_error("compact SVD truncated right factor is missing a sector")
+                internal_layout_error("CUDA EIGH diagonal factor is missing a sector")
             })?;
             let left_region = &left_regions[left];
             let middle_region = &middle_regions[middle];
-            let right_region = &right_regions[right];
             let middle_len = middle_region
                 .range()
                 .end
                 .checked_sub(middle_region.range().start)
-                .ok_or_else(|| internal_layout_error("truncated SVD middle range is invalid"))?;
+                .ok_or_else(|| internal_layout_error("CUDA EIGH diagonal range is invalid"))?;
             if (left_region.rows(), left_region.cols()) != (source_region.rows(), kept)
                 || (middle_region.rows(), middle_region.cols()) != (kept, kept)
                 || middle_len
                     != kept.checked_mul(kept).ok_or_else(|| {
-                        internal_layout_error("truncated SVD middle length overflows")
+                        internal_layout_error("CUDA EIGH diagonal length overflows")
                     })?
-                || (right_region.rows(), right_region.cols()) != (kept, source_region.cols())
                 || !cuda_qr_tree_extents_match(source_region.row_trees(), left_region.row_trees())?
                 || !cuda_qr_tree_extents_match(
                     middle_region.row_trees(),
                     middle_region.col_trees(),
                 )?
-                || !cuda_qr_tree_extents_match(source_region.col_trees(), right_region.col_trees())?
             {
                 return Err(internal_layout_error(
-                    "compact SVD truncated factor region does not match its source route",
+                    "CUDA EIGH factor region does not match its source route",
                 ));
             }
-            routes.push(TypedCudaSvdTruncRoute {
+            routes.push(TypedCudaEighRoute {
                 source,
                 left,
-                right,
                 full_rank,
                 kept,
             });
         }
-        if routes.len() != left_regions.len()
-            || routes.len() != middle_regions.len()
-            || routes.len() != right_regions.len()
-        {
+        if routes.len() != left_regions.len() || routes.len() != middle_regions.len() {
             return Err(internal_layout_error(
-                "compact SVD truncated factor contains an unrouted coupled sector",
+                "CUDA EIGH factor contains an unrouted coupled sector",
             ));
         }
-        Ok(TypedCudaSvdTruncPlan {
+        Ok(TypedCudaEighPlan {
             left_space,
             middle_space,
-            right_space,
             source_regions,
             left_regions,
-            right_regions,
             routes,
         })
     }
@@ -11562,281 +11307,64 @@ where
         ))
     }
 
-    fn upload_cuda_svd_trunc_final(
-        cuda: &CudaDenseContext,
-        values: Vec<D>,
-    ) -> Result<CudaStorage<D>, Error> {
-        #[cfg(test)]
-        let extent = values.len();
-        #[cfg(test)]
-        {
-            observe_cuda_svd_trunc_event("final_storage");
-            let ordinal = CUDA_SVD_TRUNC_FINAL_EXTENTS.with(|extents| {
-                let mut extents = extents.borrow_mut();
-                let Some(extents) = extents.as_mut() else {
-                    return 0;
-                };
-                extents.push(extent);
-                extents.len()
-            });
-            if CUDA_SVD_TRUNC_FAILURE.with(|failure| failure.get()) == Some(("final", ordinal)) {
-                return Err(Error::InvalidArgument(
-                    "injected truncated SVD final storage failure".to_string(),
-                ));
-            }
-        }
-        let storage = CudaStorage::upload_owned(cuda, values)?;
-        #[cfg(test)]
-        {
-            observe_cuda_svd_trunc_final_storage_creation();
-            observe_cuda_svd_trunc_allocation("final", extent);
-        }
-        Ok(storage)
-    }
-
-    #[cfg(test)]
-    fn inject_cuda_svd_trunc_assembly_failure(ordinal: usize) -> Result<(), Error> {
-        observe_cuda_svd_trunc_event("assembly");
-        if CUDA_SVD_TRUNC_FAILURE.with(|failure| failure.get()) == Some(("assembly", ordinal)) {
-            return Err(Error::InvalidArgument(
-                "injected truncated SVD assembly failure".to_string(),
-            ));
-        }
-        Ok(())
-    }
-
-    #[cfg(test)]
-    fn inject_cuda_svd_trunc_failure(stage: &'static str, ordinal: usize) -> Result<(), Error> {
-        if CUDA_SVD_TRUNC_FAILURE.with(|failure| failure.get()) == Some((stage, ordinal)) {
-            return Err(Error::InvalidArgument(format!(
-                "injected truncated SVD {stage} failure"
-            )));
-        }
-        Ok(())
-    }
-
-    /// One-pass truncated SVD of owned dense CUDA storage.
+    /// Truncated SVD is not a device operation.
     ///
-    /// Raw per-sector U/Vh factors remain device-resident until the global,
-    /// quantum-dimension-weighted truncation decision is known. The returned
-    /// `s` is dense CUDA storage; U/Vh retain the raw CUDA backend gauge.
+    /// Truncation is a decision over quantum-dimension-weighted spectra across
+    /// all coupled sectors, which belongs on the host; placement stays the
+    /// caller's explicit choice. This method therefore returns
+    /// [`Error::UnsupportedOnDevice`] before any lease, plan, allocation or
+    /// transfer, and the truncation is composed from general primitives —
+    /// device [`Self::svd_compact`], `to_host`, [`TensorMap::diagview`],
+    /// [`GradedSpace::find_truncated`], [`TensorMap::restrict_leg`] and
+    /// [`TensorMap::restrict_diagonal`]:
+    ///
+    /// ```no_run
+    /// use std::sync::Arc;
+    ///
+    /// use tenet::core::U1Irrep;
+    /// use tenet::prelude::{Runtime, TensorMap, Truncation, U1FusionRule};
+    /// use tenet::typed::GradedSpace;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let runtime = Runtime::builder().cuda(0).build()?;
+    /// let leg = GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), 4)])?;
+    /// let device = TensorMap::<_, f64>::from_block_fn(&runtime, [&leg], [&leg], |_, index| {
+    ///     (index[0] + 2 * index[1]) as f64
+    /// })?
+    /// .to_cuda()?;
+    /// let truncation = Truncation::rank(2);
+    ///
+    /// let (u, s, vh) = device.svd_compact()?;
+    /// // Until a device `restrict_leg` lands, the factors move to the host once.
+    /// let (u, s, vh) = (u.to_host()?, s.to_host()?, vh.to_host()?);
+    /// let found = s.domain()[0].find_truncated(&s.diagview()?, &truncation)?;
+    /// let u = u.restrict_leg(u.codomain_rank(), &found.selection)?;
+    /// let s = s.restrict_diagonal(&found.selection)?;
+    /// let vh = vh.restrict_leg(0, &found.selection)?;
+    /// let truncation_error = found.error;
+    /// # let _ = (u, s, vh, truncation_error);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// The composition returns exactly what Host `svd_trunc` returns for
+    /// host-resident factors; device factors keep the raw cuSOLVER gauge.
+    ///
+    /// # Errors
+    ///
+    /// Always [`Error::UnsupportedOnDevice`]. The capability boundary precedes
+    /// every operand check, so a compact-diagonal or lazy-adjoint device
+    /// receiver reports the missing capability rather than its storage.
     pub fn svd_trunc(
         &self,
-        truncation: &Truncation,
+        _truncation: &Truncation,
     ) -> Result<SvdTrunc<R, D, CudaStorage<D>>, Error> {
-        let source = self.direct_cuda_storage("svd_trunc")?;
-        let source_space = self.logical_space().space();
-        let required_len = source_space.required_len()?;
-        let source_regions = sector_regions(source_space.structure(), source_space.nout())?;
-
-        {
-            // Preflight only: the ordinal is immutable, so this placement
-            // check takes no device lock at all.
-            let device = self.runtime.cuda_device_ordinal_checked()?;
-            Self::validate_cuda_owned_metadata(
-                Placement::Cuda(device),
-                source.placement(),
-                required_len,
-                source.len(),
-            )?;
-        }
-
-        // The shared selector remains the sole truncation-policy authority.
-        // An empty spectrum validates the policy and every TruncationSpace
-        // identity without invoking dimension queries or CUDA work.
-        #[cfg(test)]
-        observe_cuda_svd_trunc_event("policy_identity");
-        decide_kept(self.logical_space().provider(), &[], Some(truncation))?;
-
-        // This performs the same complete source/factor route preflight as
-        // compact SVD before the first decomposition. Its full-rank factor
-        // spaces are not published; the kept spaces are admitted below.
-        let source_plan = self.compile_cuda_qr_plan(source_regions)?;
-        let (raw_spectra, mut retained) = {
-            let mut lease = self.runtime.lease_cuda()?;
-            #[cfg(test)]
-            let _lock_observation = CudaSvdTruncLockObservationGuard::new();
-            let cuda = &mut *lease;
-            let mut spectra = Vec::with_capacity(source_plan.source_regions.len());
-            let mut retained = Vec::with_capacity(source_plan.source_regions.len());
-            #[cfg(test)]
-            let mut decomposition_ordinal = 0;
-            for region in source_plan.source_regions.iter() {
-                #[cfg(test)]
-                {
-                    decomposition_ordinal += 1;
-                }
-                let rank = region.rows().min(region.cols());
-                if rank == 0 {
-                    spectra.push(tenet_matrixalgebra::SectorSpectrum {
-                        sector: region.coupled(),
-                        values: Vec::new(),
-                    });
-                    retained.push(None);
-                    continue;
-                }
-                #[cfg(test)]
-                observe_cuda_svd_trunc_event("decomposition");
-                let (raw_left, values, raw_right) = cuda_svd_region::<D>(
-                    cuda,
-                    &source.0,
-                    region.range().start,
-                    region.rows(),
-                    region.cols(),
-                )?;
-                #[cfg(test)]
-                observe_cuda_svd_trunc_decomposition(values.len());
-                if values.len() != rank {
-                    return Err(internal_layout_error(
-                        "truncated SVD spectrum length does not match its source route",
-                    ));
-                }
-                let factors = TypedCudaSvdRetainedFactors::new::<D>(
-                    raw_left,
-                    raw_right,
-                    region.rows(),
-                    region.cols(),
-                    rank,
-                )?;
-                #[cfg(test)]
-                Self::inject_cuda_svd_trunc_failure("decomposition", decomposition_ordinal)?;
-                spectra.push(tenet_matrixalgebra::SectorSpectrum {
-                    sector: region.coupled(),
-                    values,
-                });
-                retained.push(Some(factors));
-            }
-            (spectra, retained)
-        };
-
-        // Provider dimension queries, global selection, label decoding, and
-        // every kept-space admission are intentionally outside the CUDA lock.
-        #[cfg(test)]
-        {
-            observe_cuda_svd_trunc_event("selection");
-            Self::inject_cuda_svd_trunc_failure("selection", 1)?;
-        }
-        let (kept_spectra, error) = decide_kept(
-            self.logical_space().provider(),
-            &raw_spectra,
-            Some(truncation),
-        )?;
-        let kept_sectors: HashSet<_> = kept_spectra.iter().map(|entry| entry.sector).collect();
-        for (index, region) in source_plan.source_regions.iter().enumerate() {
-            if !kept_sectors.contains(&region.coupled()) {
-                retained[index] = None;
-            }
-        }
-        #[cfg(test)]
-        observe_cuda_svd_trunc_event("decode");
-        let mut singular_values: Vec<SectorSpectrum<R::Sector>> = kept_spectra
-            .iter()
-            .map(|entry| {
-                Ok(SectorSpectrum {
-                    sector: self
-                        .logical_space()
-                        .provider()
-                        .decode_sector(entry.sector)?,
-                    values: entry.values.clone(),
-                })
-            })
-            .collect::<Result<_, Error>>()?;
-        singular_values.sort_by(|left, right| left.sector.cmp(&right.sector));
-        #[cfg(test)]
-        observe_cuda_svd_trunc_event("final_admission");
-        let plan = self
-            .compile_cuda_svd_trunc_plan(Arc::clone(&source_plan.source_regions), &kept_spectra)?;
-        let left_len = plan.left_space.space().required_len()?;
-        let middle_len = plan.middle_space.space().required_len()?;
-        let right_len = plan.right_space.space().required_len()?;
-        let mut middle_host = vec![D::ZERO; middle_len];
-        fill_diagonal_values(
-            plan.middle_space.space().structure(),
-            &mut middle_host,
-            &kept_spectra,
-        )?;
-
-        let (left_data, middle_data, right_data) = {
-            let mut lease = self.runtime.lease_cuda()?;
-            #[cfg(test)]
-            let _lock_observation = CudaSvdTruncLockObservationGuard::new();
-            let cuda = &mut *lease;
-            let mut left_data = Self::upload_cuda_svd_trunc_final(cuda, vec![D::ZERO; left_len])?;
-            let middle_data = Self::upload_cuda_svd_trunc_final(cuda, middle_host)?;
-            let mut right_data = Self::upload_cuda_svd_trunc_final(cuda, vec![D::ZERO; right_len])?;
-            #[cfg(test)]
-            let mut assembly_ordinal = 0;
-            for route in plan.routes.iter() {
-                #[cfg(test)]
-                {
-                    assembly_ordinal += 1;
-                }
-                let source_region = &plan.source_regions[route.source];
-                let factors = retained[route.source].take().ok_or_else(|| {
-                    internal_layout_error("kept truncated SVD route has no retained factors")
-                })?;
-                #[cfg(test)]
-                Self::inject_cuda_svd_trunc_assembly_failure(assembly_ordinal)?;
-                let left_selector = upload_selector(
-                    cuda,
-                    route.full_rank,
-                    route.kept,
-                    (0..route.kept).map(|index| (index, index, D::ONE)),
-                )?;
-                assemble_left_factor(
-                    cuda,
-                    &mut left_data,
-                    &plan.left_regions[route.left],
-                    source_region,
-                    &factors.left,
-                    route.full_rank,
-                    &left_selector,
-                    route.kept,
-                )?;
-                #[cfg(test)]
-                Self::inject_cuda_svd_trunc_failure("right_assembly", assembly_ordinal)?;
-                let right_selector = upload_selector(
-                    cuda,
-                    route.kept,
-                    route.full_rank,
-                    (0..route.kept).map(|index| (index, index, D::ONE)),
-                )?;
-                assemble_right_factor(
-                    cuda,
-                    &mut right_data,
-                    &plan.right_regions[route.right],
-                    source_region,
-                    &right_selector,
-                    route.kept,
-                    route.full_rank,
-                    &factors.right,
-                )?;
-                drop(factors);
-                #[cfg(test)]
-                observe_cuda_svd_trunc_release();
-            }
-            (left_data, middle_data, right_data)
-        };
-
-        #[cfg(test)]
-        observe_cuda_svd_trunc_event("publication");
-
-        Ok(SvdTrunc {
-            u: Self {
-                runtime: self.runtime.clone(),
-                repr: owned_repr(TypedTensorBody::dense(plan.left_space, left_data)),
-            },
-            s: Self {
-                runtime: self.runtime.clone(),
-                repr: owned_repr(TypedTensorBody::dense(plan.middle_space, middle_data)),
-            },
-            vh: Self {
-                runtime: self.runtime.clone(),
-                repr: owned_repr(TypedTensorBody::dense(plan.right_space, right_data)),
-            },
-            singular_values,
-            error,
-        })
+        Err(Error::UnsupportedOnDevice(
+            "svd_trunc has no device implementation: compose it from device svd_compact, \
+             to_host, diagview, GradedSpace::find_truncated and \
+             restrict_leg/restrict_diagonal"
+                .to_string(),
+        ))
     }
 
     /// Hermitian eigendecomposition of an owned dense CUDA endomorphism.
@@ -11845,49 +11373,12 @@ where
     /// on the source device. A lazy-adjoint receiver is rejected explicitly;
     /// no receiver-sized payload is downloaded or materialized.
     ///
-    /// The full decomposition makes no truncation decision: the raw spectra
-    /// leave the device already ordered by descending `|λ|` and are assembled
-    /// as they are.
+    /// No truncation decision is made: every eigenpair is kept. Eigenvalues are
+    /// the only numerical payload that crosses to the host, where they are
+    /// sorted by descending `|λ|`; the eigenvectors stay on the device and
+    /// their columns are gathered into that order by the assembly selector.
     pub fn eigh_full(&self) -> Result<(Self, Self), Error> {
-        let (source_regions, spectra, vectors, orders) =
-            self.decompose_cuda_eigh("eigh_full", None)?;
-        let (d, v, _) = self.assemble_cuda_eigh(source_regions, &spectra, vectors, &orders)?;
-        Ok((d, v))
-    }
-
-    #[cfg(test)]
-    fn inject_cuda_eigh_failure(stage: &'static str, ordinal: usize) -> Result<(), Error> {
-        if CUDA_EIGH_FAILURE.with(|failure| failure.get()) == Some((stage, ordinal)) {
-            return Err(Error::InvalidArgument(format!(
-                "injected CUDA EIGH {stage} failure"
-            )));
-        }
-        Ok(())
-    }
-
-    /// Device EIGH up to its raw per-sector spectra: admission, the sectorwise
-    /// Hermiticity gate, and one cuSOLVER pass per coupled sector. Eigenvalues
-    /// are returned in descending `|λ|` order, `orders` carries the matching
-    /// eigenvector column permutation, and the eigenvectors stay on device.
-    ///
-    /// `policy`, when present, is validated at the point the truncated entry
-    /// point admits it, before any device work; nothing else here depends on
-    /// a truncation.
-    #[allow(clippy::type_complexity)]
-    fn decompose_cuda_eigh(
-        &self,
-        operation: &'static str,
-        policy: Option<&Truncation>,
-    ) -> Result<
-        (
-            Arc<[CoupledSectorRegion]>,
-            Vec<tenet_matrixalgebra::SectorSpectrum<f64>>,
-            Vec<Option<CudaDenseStorage>>,
-            Vec<Vec<usize>>,
-        ),
-        Error,
-    > {
-        let source = self.direct_cuda_storage(operation)?;
+        let source = self.direct_cuda_storage("eigh_full")?;
         let source_space = self.logical_space().space();
         if source_space.homspace().codomain() != source_space.homspace().domain() {
             return Err(
@@ -11920,10 +11411,6 @@ where
             )?;
         }
 
-        // Validate the policy and every provider identity before device work.
-        if let Some(truncation) = policy {
-            decide_kept(self.logical_space().provider(), &[], Some(truncation))?;
-        }
         // The existing compact factor plan is the canonical source -> left
         // factor route. EIGH needs that left route only; no new plan hierarchy.
         let source_plan = self.compile_cuda_qr_plan(source_regions)?;
@@ -11950,7 +11437,7 @@ where
             }
         }
 
-        let (raw_spectra, raw_vectors, orders) = {
+        let (spectra, mut raw_vectors, orders) = {
             let mut lease = self.runtime.lease_cuda()?;
             let cuda = &mut *lease;
             let mut spectra = Vec::with_capacity(source_plan.source_regions.len());
@@ -11999,45 +11486,16 @@ where
             (spectra, vectors, orders)
         };
 
-        Ok((source_plan.source_regions, raw_spectra, raw_vectors, orders))
-    }
-
-    /// Assembles the device EIGH factors for an already decided spectrum:
-    /// the dense diagonal `d` and the eigenvector factor `v`, whose columns
-    /// are gathered through the `|λ|`-order selector.
-    #[allow(clippy::type_complexity)]
-    fn assemble_cuda_eigh(
-        &self,
-        source_regions: Arc<[CoupledSectorRegion]>,
-        kept_spectra: &[tenet_matrixalgebra::SectorSpectrum<f64>],
-        mut raw_vectors: Vec<Option<CudaDenseStorage>>,
-        orders: &[Vec<usize>],
-    ) -> Result<(Self, Self, Vec<SectorSpectrum<R::Sector>>), Error> {
-        let mut eigenvalues: Vec<SectorSpectrum<R::Sector>> = kept_spectra
-            .iter()
-            .map(|entry| {
-                Ok(SectorSpectrum {
-                    sector: self
-                        .logical_space()
-                        .provider()
-                        .decode_sector(entry.sector)?,
-                    values: entry.values.clone(),
-                })
-            })
-            .collect::<Result<_, Error>>()?;
-        eigenvalues.sort_by(|left, right| left.sector.cmp(&right.sector));
-
-        // Reuse the existing kept-rank space/route proof. Its right-factor
-        // fields are intentionally unused; measured need, not EIGH alone,
-        // would justify splitting another private plan type.
-        let plan = self.compile_cuda_svd_trunc_plan(source_regions, kept_spectra)?;
+        // Every factor-space admission is provider work on the host: no CUDA
+        // lease is held from here until the assembly below.
+        let plan = self.compile_cuda_eigh_plan(source_plan.source_regions, &spectra)?;
         let vector_len = plan.left_space.space().required_len()?;
         let diagonal_len = plan.middle_space.space().required_len()?;
         let mut diagonal_host = vec![D::ZERO; diagonal_len];
         fill_diagonal_values(
             plan.middle_space.space().structure(),
             &mut diagonal_host,
-            kept_spectra,
+            &spectra,
         )?;
 
         let (diagonal_data, vector_data) = {
@@ -12054,13 +11512,13 @@ where
                     Self::inject_cuda_eigh_failure("assembly", assembly_ordinal)?;
                 }
                 let source_region = &plan.source_regions[route.source];
-                let raw = raw_vectors[route.source].take().ok_or_else(|| {
-                    internal_layout_error("kept CUDA EIGH route has no eigenvectors")
-                })?;
+                let raw = raw_vectors[route.source]
+                    .take()
+                    .ok_or_else(|| internal_layout_error("CUDA EIGH route has no eigenvectors"))?;
                 let order = &orders[route.source];
                 if route.kept > order.len() {
                     return Err(internal_layout_error(
-                        "kept CUDA EIGH rank exceeds its eigenvector order",
+                        "CUDA EIGH rank exceeds its eigenvector order",
                     ));
                 }
                 let selector = upload_selector(
@@ -12095,34 +11553,65 @@ where
                 runtime: self.runtime.clone(),
                 repr: owned_repr(TypedTensorBody::dense(plan.left_space, vector_data)),
             },
-            eigenvalues,
         ))
     }
 
-    /// Truncated Hermitian eigendecomposition of an owned dense CUDA tensor.
+    #[cfg(test)]
+    fn inject_cuda_eigh_failure(stage: &'static str, ordinal: usize) -> Result<(), Error> {
+        if CUDA_EIGH_FAILURE.with(|failure| failure.get()) == Some((stage, ordinal)) {
+            return Err(Error::InvalidArgument(format!(
+                "injected CUDA EIGH {stage} failure"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Truncated Hermitian eigendecomposition is not a device operation.
     ///
-    /// Hermiticity is checked sectorwise on device before the first cuSOLVER
-    /// call. Only scalar residual metadata and eigenvalues cross to the host;
-    /// eigenvectors and both returned factors remain device-resident.
+    /// Like [`Self::svd_trunc`], the truncation decision belongs on the host.
+    /// This method returns [`Error::UnsupportedOnDevice`] before any lease,
+    /// plan, allocation or transfer; the truncation is composed from device
+    /// [`Self::eigh_full`] and the host primitives:
+    ///
+    /// ```no_run
+    /// use std::sync::Arc;
+    ///
+    /// use tenet::core::U1Irrep;
+    /// use tenet::prelude::{Runtime, TensorMap, Truncation, U1FusionRule};
+    /// use tenet::typed::GradedSpace;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let runtime = Runtime::builder().cuda(0).build()?;
+    /// let leg = GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), 4)])?;
+    /// let hermitian = TensorMap::<_, f64>::from_block_fn(&runtime, [&leg], [&leg], |_, index| {
+    ///     (index[0] + index[1]) as f64
+    /// })?;
+    /// let truncation = Truncation::rank(2);
+    ///
+    /// let (d, v) = hermitian.to_cuda()?.eigh_full()?;
+    /// let (d, v) = (d.to_host()?, v.to_host()?);
+    /// let found = d.domain()[0].find_truncated(&d.diagview()?, &truncation)?;
+    /// let d = d.restrict_diagonal(&found.selection)?;
+    /// let v = v.restrict_leg(v.codomain_rank(), &found.selection)?;
+    /// let truncation_error = found.error;
+    /// # let _ = (d, v, truncation_error);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Always [`Error::UnsupportedOnDevice`], before every operand check.
     pub fn eigh_trunc(
         &self,
-        truncation: &Truncation,
+        _truncation: &Truncation,
     ) -> Result<EighTrunc<R, D, CudaStorage<D>>, Error> {
-        let (source_regions, raw_spectra, raw_vectors, orders) =
-            self.decompose_cuda_eigh("eigh_trunc", Some(truncation))?;
-        let (kept_spectra, error) = decide_kept(
-            self.logical_space().provider(),
-            &raw_spectra,
-            Some(truncation),
-        )?;
-        let (d, v, eigenvalues) =
-            self.assemble_cuda_eigh(source_regions, &kept_spectra, raw_vectors, &orders)?;
-        Ok(EighTrunc {
-            d,
-            v,
-            eigenvalues,
-            error,
-        })
+        Err(Error::UnsupportedOnDevice(
+            "eigh_trunc has no device implementation: compose it from device eigh_full, \
+             to_host, diagview, GradedSpace::find_truncated and \
+             restrict_leg/restrict_diagonal"
+                .to_string(),
+        ))
     }
 }
 
@@ -12142,8 +11631,7 @@ where
 /// `src/gpu/linalg.rs:2619`) emits `cuDoubleComplex(uint32(0))` and fails
 /// NVRTC compilation. That is a missing backend kernel, not a semantic
 /// restriction, so it is a boundary rather than a runtime backend error;
-/// `svd_compact`, `svd_trunc`, `eigh_full` and `eigh_trunc` are unaffected and
-/// carry both payloads.
+/// `svd_compact` and `eigh_full` are unaffected and carry both payloads.
 ///
 /// Checked Generic providers have no device QR either:
 ///
@@ -20056,7 +19544,7 @@ mod representation_gates {
 
     #[cfg(feature = "cuda")]
     #[test]
-    fn typed_cuda_factorizations_reject_compact_and_lazy_before_runtime_work() {
+    fn typed_cuda_factorizations_reject_compact_lazy_and_truncation_before_runtime_work() {
         let diagonal = u1_lazy_fixture().svd_compact().unwrap().1;
         let TypedData::Diagonal(spectrum) = owned(&diagonal).data.as_ref() else {
             unreachable!("SVD factor is compact")
@@ -20077,13 +19565,29 @@ mod representation_gates {
             Err(Error::UnsupportedOnDevice(message)) if message.contains("dense CUDA storage")
         ));
         assert!(matches!(
-            device_diagonal.svd_trunc(&Truncation::Full),
-            Err(Error::UnsupportedOnDevice(message)) if message.contains("dense CUDA storage")
-        ));
-        assert!(matches!(
             device_diagonal.eigh_full(),
             Err(Error::UnsupportedOnDevice(message)) if message.contains("dense CUDA storage")
         ));
+        // The truncated factorizations have no device implementation at all,
+        // so their capability boundary precedes the storage and receiver
+        // checks above: the message names the missing operation and its
+        // composition, not the operand.
+        for (operation, error) in [
+            (
+                "svd_trunc",
+                device_diagonal.svd_trunc(&Truncation::Full).err(),
+            ),
+            (
+                "eigh_trunc",
+                device_diagonal.eigh_trunc(&Truncation::Full).err(),
+            ),
+        ] {
+            assert!(
+                matches!(error, Some(Error::UnsupportedOnDevice(ref message))
+                    if message.contains(operation) && message.contains("find_truncated")),
+                "{operation}: {error:?}"
+            );
+        }
         let lazy = device_diagonal.adjoint().unwrap();
         assert!(matches!(
             lazy.qr_compact(),
@@ -20094,19 +19598,25 @@ mod representation_gates {
             Err(Error::UnsupportedOnDevice(message)) if message.contains("lazy adjoint")
         ));
         assert!(matches!(
-            lazy.svd_trunc(&Truncation::Full),
+            lazy.eigh_full(),
             Err(Error::UnsupportedOnDevice(message)) if message.contains("lazy adjoint")
         ));
-        assert!(matches!(
-            lazy.eigh_trunc(&Truncation::Full),
-            Err(Error::UnsupportedOnDevice(message)) if message.contains("lazy adjoint")
-        ));
+        for (operation, error) in [
+            ("svd_trunc", lazy.svd_trunc(&Truncation::Full).err()),
+            ("eigh_trunc", lazy.eigh_trunc(&Truncation::Full).err()),
+        ] {
+            assert!(
+                matches!(error, Some(Error::UnsupportedOnDevice(ref message))
+                    if message.contains(operation) && message.contains("find_truncated")),
+                "{operation}: {error:?}"
+            );
+        }
     }
 
     #[cfg(feature = "cuda")]
     #[test]
     #[ignore = "requires a real CUDA device"]
-    fn typed_cuda_eigh_full_and_trunc_match_host_without_hidden_materialization() {
+    fn typed_cuda_eigh_full_matches_host_without_hidden_materialization() {
         let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
         let provider = Arc::new(U1FusionRule);
         let leg = GradedSpace::try_new_with_arc(
@@ -20144,39 +19654,6 @@ mod representation_gates {
             1.0e-10,
         );
 
-        let truncation = Truncation::rank(3);
-        let expected_trunc = source.eigh_trunc(&truncation).unwrap();
-        let actual_trunc = device.eigh_trunc(&truncation).unwrap();
-        assert_eq!(
-            actual_trunc.eigenvalues.len(),
-            expected_trunc.eigenvalues.len()
-        );
-        for (actual, expected) in actual_trunc
-            .eigenvalues
-            .iter()
-            .zip(&expected_trunc.eigenvalues)
-        {
-            assert_eq!(actual.sector, expected.sector);
-            assert_eq!(actual.values.len(), expected.values.len());
-            assert!(actual
-                .values
-                .iter()
-                .zip(&expected.values)
-                .all(|(actual, expected)| (actual - expected).abs() < 1.0e-10));
-        }
-        assert!((actual_trunc.error - expected_trunc.error).abs() < 1.0e-12);
-        let d = actual_trunc.d.to_host().unwrap();
-        let v = actual_trunc.v.to_host().unwrap();
-        assert_eq!(
-            v.logical_space().space(),
-            expected_trunc.v.logical_space().space()
-        );
-        assert_typed_map_close(&d, &expected_trunc.d, 1.0e-10);
-        assert_typed_map_close(
-            &source.compose(&v).unwrap(),
-            &v.compose(&d).unwrap(),
-            1.0e-10,
-        );
         assert_eq!(materialized_adjoint_builds(&device), 0);
 
         let su2_provider = Arc::new(SU2FusionRule);
@@ -20472,387 +19949,6 @@ mod representation_gates {
             assert_eq!(observation.get(), Some((0, 0, 0, 0, 0)));
             observation.set(None);
         });
-    }
-
-    #[cfg(feature = "cuda")]
-    #[test]
-    #[ignore = "requires a real CUDA device"]
-    fn typed_cuda_svd_trunc_has_two_lock_phases_and_transactional_cleanup() {
-        // What: one-pass lifetime accounting, lock ordering, exact final-body
-        // allocation, rank-zero semantics, and every late failure stay atomic.
-        let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
-        let provider = Arc::new(SU2FusionRule);
-        let leg = GradedSpace::try_new_with_arc(
-            Arc::clone(&provider),
-            [
-                (SU2Irrep::from_twice_spin(0), 2),
-                (SU2Irrep::from_twice_spin(1), 2),
-            ],
-        )
-        .unwrap();
-        let source = TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], |_, indices| {
-            indices.iter().sum::<usize>() as f64 + 1.0
-        })
-        .unwrap();
-        let regions = sector_regions(
-            source.logical_space().space().structure(),
-            source.logical_space().space().nout(),
-        )
-        .unwrap();
-        let nonempty = regions
-            .iter()
-            .filter(|region| region.rows() != 0 && region.cols() != 0)
-            .count();
-        let spectrum_scalars = regions
-            .iter()
-            .map(|region| region.rows().min(region.cols()))
-            .sum();
-        let raw_bytes = regions
-            .iter()
-            .map(|region| {
-                (region.rows() + region.cols())
-                    * region.rows().min(region.cols())
-                    * std::mem::size_of::<f64>()
-            })
-            .sum();
-        let route_bytes: Vec<_> = regions
-            .iter()
-            .filter(|region| region.rows() != 0 && region.cols() != 0)
-            .map(|region| {
-                (region.rows() + region.cols())
-                    * region.rows().min(region.cols())
-                    * std::mem::size_of::<f64>()
-            })
-            .collect();
-        assert!(nonempty >= 2, "fixture must exercise later-route failures");
-        let device = source.to_cuda().unwrap();
-
-        CUDA_SVD_TRUNC_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0, 0, 0))));
-        CUDA_SVD_TRUNC_EVENTS.with(|events| *events.borrow_mut() = Some(Vec::new()));
-        CUDA_SVD_TRUNC_FINAL_EXTENTS.with(|extents| *extents.borrow_mut() = Some(Vec::new()));
-        CUDA_SVD_TRUNC_ALLOCATIONS.with(|allocations| *allocations.borrow_mut() = Some(Vec::new()));
-        CUDA_SVD_TRUNC_RELEASES.with(|releases| *releases.borrow_mut() = Some(Vec::new()));
-        let actual = device.svd_trunc(&Truncation::Full).unwrap();
-        let extents =
-            CUDA_SVD_TRUNC_FINAL_EXTENTS.with(|extents| extents.borrow().clone().unwrap());
-        assert_eq!(
-            extents,
-            vec![
-                actual.u.to_host().unwrap().data().len(),
-                actual.s.to_host().unwrap().data().len(),
-                actual.vh.to_host().unwrap().data().len(),
-            ]
-        );
-        let allocations =
-            CUDA_SVD_TRUNC_ALLOCATIONS.with(|allocations| allocations.borrow().clone().unwrap());
-        assert_eq!(
-            allocations
-                .iter()
-                .filter(|(kind, _)| *kind == "final")
-                .map(|(_, extent)| *extent)
-                .collect::<Vec<_>>(),
-            extents
-        );
-        assert_eq!(allocations.len(), 3 + 2 * nonempty);
-        assert!(allocations
-            .iter()
-            .all(|(kind, _)| matches!(*kind, "final" | "selector")));
-        assert_eq!(
-            allocations
-                .iter()
-                .filter(|(_, extent)| extents.contains(extent))
-                .count(),
-            3,
-            "an operation-local scratch allocation reused a final-output extent"
-        );
-        let mut remaining_bytes = raw_bytes;
-        let expected_releases = route_bytes
-            .iter()
-            .enumerate()
-            .map(|(index, bytes)| {
-                remaining_bytes -= bytes;
-                (nonempty - index - 1, remaining_bytes)
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            CUDA_SVD_TRUNC_RELEASES.with(|releases| releases.borrow().clone().unwrap()),
-            expected_releases
-        );
-        CUDA_SVD_TRUNC_OBSERVATION.with(|observation| {
-            assert_eq!(
-                observation.get(),
-                Some((nonempty, spectrum_scalars, 3, 0, nonempty, 0, raw_bytes,))
-            );
-        });
-        CUDA_SVD_TRUNC_EVENTS.with(|events| {
-            let events = events.borrow();
-            let events = events.as_ref().unwrap();
-            assert!(events.iter().all(|(name, depth)| match *name {
-                "decomposition" | "final_storage" | "assembly" => *depth == 1,
-                _ => *depth == 0,
-            }));
-            let admission = events
-                .iter()
-                .position(|(name, _)| *name == "final_admission")
-                .unwrap();
-            let allocation = events
-                .iter()
-                .position(|(name, _)| *name == "final_storage")
-                .unwrap();
-            let publication = events
-                .iter()
-                .position(|(name, _)| *name == "publication")
-                .unwrap();
-            assert!(admission < allocation && allocation < publication);
-        });
-
-        CUDA_SVD_TRUNC_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0, 0, 0))));
-        CUDA_SVD_TRUNC_FINAL_EXTENTS.with(|extents| *extents.borrow_mut() = Some(Vec::new()));
-        let rank_zero = device.svd_trunc(&Truncation::rank(0)).unwrap();
-        assert!(rank_zero.singular_values.is_empty());
-        assert_eq!(
-            rank_zero.error,
-            source.svd_trunc(&Truncation::rank(0)).unwrap().error
-        );
-        assert_eq!(
-            CUDA_SVD_TRUNC_FINAL_EXTENTS.with(|extents| extents.borrow().clone().unwrap()),
-            vec![0, 0, 0]
-        );
-        CUDA_SVD_TRUNC_OBSERVATION.with(|observation| {
-            let observed = observation.get().unwrap();
-            assert_eq!(
-                (observed.0, observed.1, observed.2),
-                (nonempty, spectrum_scalars, 3)
-            );
-            assert_eq!((observed.3, observed.5), (0, 0));
-        });
-
-        let second_nonempty = regions
-            .iter()
-            .enumerate()
-            .filter(|(_, region)| region.rows() != 0 && region.cols() != 0)
-            .nth(1)
-            .map(|(index, _)| index)
-            .unwrap()
-            + 1;
-        let failures = [
-            ("decomposition", second_nonempty),
-            ("selection", 1),
-            ("admission", 1),
-            ("final", 1),
-            ("final", 2),
-            ("final", 3),
-            ("assembly", 2),
-            ("right_assembly", 2),
-        ];
-        for failure in failures {
-            CUDA_SVD_TRUNC_OBSERVATION
-                .with(|observation| observation.set(Some((0, 0, 0, 0, 0, 0, 0))));
-            CUDA_SVD_TRUNC_EVENTS.with(|events| *events.borrow_mut() = Some(Vec::new()));
-            CUDA_SVD_TRUNC_FINAL_EXTENTS.with(|extents| *extents.borrow_mut() = Some(Vec::new()));
-            CUDA_SVD_TRUNC_ALLOCATIONS
-                .with(|allocations| *allocations.borrow_mut() = Some(Vec::new()));
-            CUDA_SVD_TRUNC_RELEASES.with(|releases| *releases.borrow_mut() = Some(Vec::new()));
-            CUDA_SVD_TRUNC_FAILURE.with(|injected| injected.set(Some(failure)));
-            assert!(device.svd_trunc(&Truncation::Full).is_err());
-            CUDA_SVD_TRUNC_FAILURE.with(|injected| injected.set(None));
-            CUDA_SVD_TRUNC_OBSERVATION.with(|observation| {
-                let observed = observation.get().unwrap();
-                assert_eq!((observed.3, observed.5), (0, 0));
-                if failure.0 == "decomposition" {
-                    assert_eq!((observed.0, observed.4), (2, 2));
-                }
-            });
-            assert!(CUDA_SVD_TRUNC_EVENTS.with(|events| events
-                .borrow()
-                .as_ref()
-                .unwrap()
-                .iter()
-                .all(|(name, _)| *name != "publication")));
-            if failure.0 == "final" {
-                let attempted =
-                    CUDA_SVD_TRUNC_FINAL_EXTENTS.with(|extents| extents.borrow().clone().unwrap());
-                assert_eq!(
-                    CUDA_SVD_TRUNC_ALLOCATIONS
-                        .with(|allocations| allocations.borrow().clone().unwrap()),
-                    attempted[..failure.1 - 1]
-                        .iter()
-                        .map(|&extent| ("final", extent))
-                        .collect::<Vec<_>>()
-                );
-            }
-            if matches!(failure.0, "assembly" | "right_assembly") {
-                assert_eq!(
-                    CUDA_SVD_TRUNC_RELEASES.with(|releases| releases.borrow().clone().unwrap()),
-                    vec![expected_releases[0]]
-                );
-            }
-            if failure.0 == "admission" {
-                assert!(CUDA_SVD_TRUNC_EVENTS.with(|events| events
-                    .borrow()
-                    .as_ref()
-                    .unwrap()
-                    .iter()
-                    .any(|(name, depth)| *name == "admission_left" && *depth == 0)));
-                assert!(CUDA_SVD_TRUNC_ALLOCATIONS.with(|allocations| allocations
-                    .borrow()
-                    .as_ref()
-                    .unwrap()
-                    .is_empty()));
-            }
-            assert!(device.svd_trunc(&Truncation::Full).is_ok());
-        }
-
-        CUDA_SVD_TRUNC_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0, 0, 0))));
-        CUDA_SVD_TRUNC_FINAL_EXTENTS.with(|extents| *extents.borrow_mut() = Some(Vec::new()));
-        let foreign_provider = Arc::new(U1FusionRule);
-        let foreign_space =
-            GradedSpace::try_new_with_arc(foreign_provider, [(U1Irrep::new(0), 1)]).unwrap();
-        assert!(device
-            .svd_trunc(&Truncation::space(foreign_space.truncspace()))
-            .is_err());
-        assert_eq!(
-            CUDA_SVD_TRUNC_OBSERVATION.with(|observation| observation.get()),
-            Some((0, 0, 0, 0, 0, 0, 0))
-        );
-        assert!(CUDA_SVD_TRUNC_FINAL_EXTENTS.with(|extents| extents
-            .borrow()
-            .as_ref()
-            .unwrap()
-            .is_empty()));
-
-        CUDA_SVD_TRUNC_OBSERVATION.with(|observation| observation.set(None));
-        CUDA_SVD_TRUNC_EVENTS.with(|events| *events.borrow_mut() = None);
-        CUDA_SVD_TRUNC_FINAL_EXTENTS.with(|extents| *extents.borrow_mut() = None);
-        CUDA_SVD_TRUNC_ALLOCATIONS.with(|allocations| *allocations.borrow_mut() = None);
-        CUDA_SVD_TRUNC_RELEASES.with(|releases| *releases.borrow_mut() = None);
-    }
-
-    #[cfg(feature = "cuda")]
-    #[test]
-    #[ignore = "requires a real CUDA device"]
-    fn typed_cuda_svd_trunc_observes_empty_mixed_and_discard_all_routes() {
-        // What: structural emptiness and policy-selected emptiness create no
-        // selectors, while mixed inputs decompose only their matched route.
-        let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
-        let provider = Arc::new(U1FusionRule);
-        let mixed_rows = GradedSpace::try_new_with_arc(
-            Arc::clone(&provider),
-            [(U1Irrep::new(0), 2), (U1Irrep::new(1), 2)],
-        )
-        .unwrap();
-        let mixed_cols = GradedSpace::try_new_with_arc(
-            Arc::clone(&provider),
-            [(U1Irrep::new(0), 3), (U1Irrep::new(2), 1)],
-        )
-        .unwrap();
-        let mixed =
-            TensorMap::from_block_fn(&runtime, [&mixed_rows], [&mixed_cols], |_, indices| {
-                (1 + indices[0] + 2 * indices[1]) as f64
-            })
-            .unwrap();
-        let mixed_regions = sector_regions(
-            mixed.logical_space().space().structure(),
-            mixed.logical_space().space().nout(),
-        )
-        .unwrap();
-        let mixed_nonempty = mixed_regions
-            .iter()
-            .filter(|region| region.rows() != 0 && region.cols() != 0)
-            .count();
-        let mixed_scalars = mixed_regions
-            .iter()
-            .map(|region| region.rows().min(region.cols()))
-            .sum();
-        assert_eq!(mixed_nonempty, 1);
-        let mixed_device = mixed.to_cuda().unwrap();
-
-        CUDA_SVD_TRUNC_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0, 0, 0))));
-        CUDA_SVD_TRUNC_FINAL_EXTENTS.with(|extents| *extents.borrow_mut() = Some(Vec::new()));
-        CUDA_SVD_TRUNC_ALLOCATIONS.with(|allocations| *allocations.borrow_mut() = Some(Vec::new()));
-        let mixed_result = mixed_device.svd_trunc(&Truncation::Full).unwrap();
-        let mixed_extents = vec![
-            mixed_result.u.to_host().unwrap().data().len(),
-            mixed_result.s.to_host().unwrap().data().len(),
-            mixed_result.vh.to_host().unwrap().data().len(),
-        ];
-        assert_eq!(
-            CUDA_SVD_TRUNC_FINAL_EXTENTS.with(|extents| extents.borrow().clone().unwrap()),
-            mixed_extents
-        );
-        CUDA_SVD_TRUNC_OBSERVATION.with(|observation| {
-            let observed = observation.get().unwrap();
-            assert_eq!((observed.0, observed.1, observed.2), (1, mixed_scalars, 3));
-            assert_eq!((observed.3, observed.5), (0, 0));
-        });
-        assert_eq!(
-            CUDA_SVD_TRUNC_ALLOCATIONS.with(|allocations| allocations
-                .borrow()
-                .as_ref()
-                .unwrap()
-                .len()),
-            3 + 2 * mixed_nonempty
-        );
-
-        let empty_rows =
-            GradedSpace::try_new_with_arc(Arc::clone(&provider), [(U1Irrep::new(4), 2)]).unwrap();
-        let empty: TensorMap<_, f64> =
-            TensorMap::from_block_fn(&runtime, [&empty_rows], [&mixed_cols], |_, _| 1.0).unwrap();
-        assert!(empty.data().is_empty());
-        CUDA_SVD_TRUNC_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0, 0, 0))));
-        CUDA_SVD_TRUNC_FINAL_EXTENTS.with(|extents| *extents.borrow_mut() = Some(Vec::new()));
-        CUDA_SVD_TRUNC_ALLOCATIONS.with(|allocations| *allocations.borrow_mut() = Some(Vec::new()));
-        empty
-            .to_cuda()
-            .unwrap()
-            .svd_trunc(&Truncation::Full)
-            .unwrap();
-        assert_eq!(
-            CUDA_SVD_TRUNC_OBSERVATION.with(|observation| observation.get()),
-            Some((0, 0, 3, 0, 0, 0, 0))
-        );
-        assert_eq!(
-            CUDA_SVD_TRUNC_FINAL_EXTENTS.with(|extents| extents.borrow().clone().unwrap()),
-            vec![0, 0, 0]
-        );
-        assert_eq!(
-            CUDA_SVD_TRUNC_ALLOCATIONS.with(|allocations| allocations.borrow().clone().unwrap()),
-            vec![("final", 0), ("final", 0), ("final", 0)]
-        );
-
-        let absent = GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(9), 1)])
-            .unwrap()
-            .truncspace();
-        for policy in [
-            Truncation::space(absent.clone()),
-            Truncation::rank(usize::MAX).and(Truncation::space(absent.clone())),
-        ] {
-            CUDA_SVD_TRUNC_OBSERVATION
-                .with(|observation| observation.set(Some((0, 0, 0, 0, 0, 0, 0))));
-            CUDA_SVD_TRUNC_FINAL_EXTENTS.with(|extents| *extents.borrow_mut() = Some(Vec::new()));
-            CUDA_SVD_TRUNC_ALLOCATIONS
-                .with(|allocations| *allocations.borrow_mut() = Some(Vec::new()));
-            let result = mixed_device.svd_trunc(&policy).unwrap();
-            assert!(result.singular_values.is_empty());
-            CUDA_SVD_TRUNC_OBSERVATION.with(|observation| {
-                let observed = observation.get().unwrap();
-                assert_eq!((observed.0, observed.1, observed.2), (1, mixed_scalars, 3));
-                assert_eq!((observed.3, observed.5), (0, 0));
-            });
-            assert_eq!(
-                CUDA_SVD_TRUNC_FINAL_EXTENTS.with(|extents| extents.borrow().clone().unwrap()),
-                vec![0, 0, 0]
-            );
-            assert_eq!(
-                CUDA_SVD_TRUNC_ALLOCATIONS
-                    .with(|allocations| allocations.borrow().clone().unwrap()),
-                vec![("final", 0), ("final", 0), ("final", 0)]
-            );
-        }
-
-        CUDA_SVD_TRUNC_OBSERVATION.with(|observation| observation.set(None));
-        CUDA_SVD_TRUNC_FINAL_EXTENTS.with(|extents| *extents.borrow_mut() = None);
-        CUDA_SVD_TRUNC_ALLOCATIONS.with(|allocations| *allocations.borrow_mut() = None);
     }
 
     #[cfg(feature = "cuda")]

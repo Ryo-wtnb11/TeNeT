@@ -367,10 +367,16 @@ is the default. The builder selects thread counts, dense backends, and the
 `tensor!` optimizer. With the `cuda` feature, `.cuda(device)` attaches a device
 to the runtime; tensors remain on Host storage until `to_cuda()` transfers them
 explicitly. Device payloads are `f64` and `Complex64`; single precision has no
-device payload. `svd_compact`, `svd_trunc`, `eigh_full` and
-`eigh_trunc` run on device for both payloads: EIGH admits a block only when it
-equals its conjugate transpose, and `u`/`vh` keep the raw device SVD gauge
-instead of the Host largest-pivot gauge. `qr_compact` returns the
+device payload. `svd_compact` and `eigh_full` run on device for both
+payloads: EIGH admits a block only when it equals its conjugate transpose, and
+`u`/`vh` keep the raw device SVD gauge instead of the Host largest-pivot gauge.
+`svd_trunc` and `eigh_trunc` have no device implementation and return
+`UnsupportedOnDevice`: truncation is a global decision over
+quantum-dimension-weighted spectra and stays on the host. Compose it from the
+device factorization and the host primitives — `svd_compact` (or `eigh_full`),
+`to_host`, `diagview`, `GradedSpace::find_truncated`, then `restrict_leg` on
+the bond leg of `u`/`vh` (or `v`) and `restrict_diagonal` on `s` (or `d`); the
+factors move to the host once until a device `restrict_leg` lands. `qr_compact` returns the
 positive-diagonal gauge and is device-available for `f64` only.
 
 ```rust
