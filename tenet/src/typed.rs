@@ -278,15 +278,120 @@ use crate::RuntimeIdentity;
 mod serialization;
 pub use serialization::{DecodeError, DecodeLimits, EncodeError, TypedPersistenceCodec};
 
-/// Scalar payloads supported by [`TensorMap`].
+/// Scalar payloads supported by [`TensorMap`], base capability.
+///
+/// Admits the payload-dtype-independent half of the typed API: construction
+/// and inspection, [`TensorMap::adjoint`], `scale`/`add`/`normalize`, the
+/// reductions (`norm`, `norm_inf`, `norm_p`, `inner`, `dot`, `tr`),
+/// contraction/`compose`/`otimes`/`cat`, the structural transforms
+/// (`permute`, `braid`, `transpose`, `repartition`, `twist`, `flip`),
+/// `restrict_leg`/`embed_leg`/`restrict_diagonal`/`diagview`, trace, and
+/// `tensor!` network execution.
+///
+/// Factorizations need [`FactorizationScalar`]; matrix functions, inverses,
+/// solves and the general eigendecomposition need [`AdvancedLinalgScalar`].
 ///
 /// This trait is sealed; the supported scalar types are `f64` and
-/// [`num_complex::Complex64`].
+/// [`num_complex::Complex64`]. Single precision (`f32`/`Complex32`) is staged
+/// per family under <https://github.com/Ryo-wtnb11/TeNeT/issues/1065>, which
+/// is why admission is split across three markers rather than one: a new
+/// payload dtype joins one family at a time, with its own review and its own
+/// tolerance evidence.
 #[allow(private_bounds)]
 pub trait TensorScalar: ScalarOps {}
 
 impl TensorScalar for f64 {}
 impl TensorScalar for num_complex::Complex64 {}
+
+/// Scalar payloads admitted to the factorization family.
+///
+/// Adds, on top of [`TensorScalar`]: QR/LQ (compact and full), SVD (compact,
+/// full, values, truncated), Hermitian eigendecomposition (full, values,
+/// truncated), `left_orth`/`right_orth`, left/right null spaces, left/right
+/// polar, and the predicates that factorize ([`TensorMap::is_posdef`]).
+/// [`GradedSpace::find_truncated`] carries no payload and stays on
+/// [`TensorScalar`].
+///
+/// Sealed through [`TensorScalar`]: implemented for `f64` and
+/// [`num_complex::Complex64`] only. A single-precision payload admitted to
+/// [`TensorScalar`] under
+/// <https://github.com/Ryo-wtnb11/TeNeT/issues/1065> does *not* reach this
+/// family until its factorization tolerances are reviewed separately.
+///
+/// A caller generic over the base marker cannot reach a factorization:
+///
+/// ```compile_fail
+/// use tenet::prelude::{TensorMap, TensorScalar, U1FusionRule};
+///
+/// fn base_only<D: TensorScalar>(tensor: &TensorMap<U1FusionRule, D>) {
+///     let _ = tensor.svd_compact();
+/// }
+/// ```
+///
+/// The same body compiles once the caller asks for this marker, which is what
+/// shows the rejection above is the bound and not an unrelated mistake:
+///
+/// ```
+/// use tenet::prelude::{FactorizationScalar, TensorMap, U1FusionRule};
+///
+/// fn factorizing<D: FactorizationScalar>(tensor: &TensorMap<U1FusionRule, D>) {
+///     let _ = tensor.svd_compact();
+/// }
+/// ```
+pub trait FactorizationScalar: TensorScalar {}
+
+impl FactorizationScalar for f64 {}
+impl FactorizationScalar for num_complex::Complex64 {}
+
+/// Scalar payloads admitted to the advanced linear-algebra family.
+///
+/// Adds, on top of [`FactorizationScalar`]: the matrix functions
+/// ([`TensorMap::exp`], [`TensorMap::sqrt`], [`TensorMap::powi`]),
+/// [`TensorMap::inv`], [`TensorMap::pinv`], [`TensorMap::solve`] /
+/// [`TensorMap::solve_right`], and the general (non-Hermitian)
+/// eigendecomposition (`eig_full`, `eig_vals`, `eig_trunc`).
+///
+/// These are the operations whose accuracy depends on conditioning rather than
+/// on one backend call, so they are the last family a new payload dtype joins.
+///
+/// Sealed through [`TensorScalar`]: implemented for `f64` and
+/// [`num_complex::Complex64`] only. Single precision is staged under
+/// <https://github.com/Ryo-wtnb11/TeNeT/issues/1065>.
+///
+/// Neither the base marker nor [`FactorizationScalar`] reaches a matrix
+/// function:
+///
+/// ```compile_fail
+/// use tenet::prelude::{TensorMap, TensorScalar, U1FusionRule};
+///
+/// fn base_only<D: TensorScalar>(tensor: &TensorMap<U1FusionRule, D>) {
+///     let _ = tensor.exp();
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use tenet::prelude::{FactorizationScalar, TensorMap, U1FusionRule};
+///
+/// fn factorizing_only<D: FactorizationScalar>(tensor: &TensorMap<U1FusionRule, D>) {
+///     let _ = tensor.exp();
+/// }
+/// ```
+///
+/// This marker does:
+///
+/// ```
+/// use tenet::prelude::{AdvancedLinalgScalar, TensorMap, U1FusionRule};
+///
+/// fn advanced<D: AdvancedLinalgScalar>(tensor: &TensorMap<U1FusionRule, D>) {
+///     let _ = tensor.exp();
+///     let _ = tensor.inv();
+///     let _ = tensor.solve(tensor);
+/// }
+/// ```
+pub trait AdvancedLinalgScalar: FactorizationScalar {}
+
+impl AdvancedLinalgScalar for f64 {}
+impl AdvancedLinalgScalar for num_complex::Complex64 {}
 
 /// Scalar payloads a [`CudaStorage`] device buffer can own.
 ///
@@ -477,7 +582,7 @@ impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
     R::Mode: TypedTensorSolveDispatch<R, D>,
-    D: TensorScalar,
+    D: AdvancedLinalgScalar,
 {
     /// Solves `self * x = rhs` independently in every coupled sector, without
     /// forming an inverse.
@@ -625,7 +730,7 @@ impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
     R::Mode: TypedTensorPinvDispatch<R, D>,
-    D: TensorScalar,
+    D: AdvancedLinalgScalar,
 {
     /// TensorKit 0.17 / MatrixAlgebraKit `pinv`: the Moore-Penrose
     /// thresholded pseudo-inverse `t⁺ = V S⁺ Uᴴ`, where `t = U S Vᴴ` is the compact SVD and
@@ -1064,7 +1169,7 @@ where
             Error = <R as CheckedGenericFusion>::Error,
             Mode = CheckedGenericAdmissionMode,
         > + CheckedGenericFusion,
-    D: TensorScalar + FactorScalar<Eig = num_complex::Complex64>,
+    D: AdvancedLinalgScalar + FactorScalar<Eig = num_complex::Complex64>,
 {
     #[expect(
         clippy::type_complexity,
@@ -1107,7 +1212,7 @@ where
             Error = <R as CheckedGenericFusion>::Error,
             Mode = CheckedGenericAdmissionMode,
         > + CheckedGenericRigidSymbols<Scalar = f64>,
-    D: TensorScalar + FactorScalar<Eig = num_complex::Complex64>,
+    D: AdvancedLinalgScalar + FactorScalar<Eig = num_complex::Complex64>,
 {
     fn eig_trunc_checked_generic(
         &self,
@@ -1366,7 +1471,7 @@ impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
     R::Mode: TypedTensorQrDispatch<R, D>,
-    D: TensorScalar,
+    D: FactorizationScalar,
 {
     /// Returns the compact QR factorization `self = q * r` as `(q, r)`.
     ///
@@ -1421,7 +1526,7 @@ impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
     R::Mode: TypedTensorSvdDispatch<R, D>,
-    D: TensorScalar,
+    D: FactorizationScalar,
 {
     /// Returns the compact singular-value decomposition
     /// `self = u * s * vh` as `(u, s, vh)`.
@@ -1479,7 +1584,7 @@ impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
     R::Mode: TypedTensorLqDispatch<R, D>,
-    D: TensorScalar,
+    D: FactorizationScalar,
 {
     /// Returns the compact LQ factorization `self = l * q` as `(l, q)`.
     ///
@@ -1696,7 +1801,10 @@ where
     /// root itself is still only `Σ_c n_c` square roots. A dense lazy adjoint
     /// builds one operation-local logical payload without publishing its
     /// reusable receiver cache.
-    pub fn sqrt(&self) -> Result<Self, Error> {
+    pub fn sqrt(&self) -> Result<Self, Error>
+    where
+        D: AdvancedLinalgScalar,
+    {
         // Use the same [`is_diagonal_bond_space`] predicate as compact
         // destinations; here it is asked of the receiver.
         if !is_diagonal_bond_space(self.logical_space().space()) {
@@ -1749,7 +1857,7 @@ impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
     R::Mode: TypedTensorFullQrDispatch<R, D>,
-    D: TensorScalar,
+    D: FactorizationScalar,
 {
     /// Returns the full QR factorization `self = q * r` as `(q, r)`.
     ///
@@ -1770,7 +1878,7 @@ impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
     R::Mode: TypedTensorFullLqDispatch<R, D>,
-    D: TensorScalar,
+    D: FactorizationScalar,
 {
     /// Returns the full LQ factorization `self = l * q` as `(l, q)`.
     ///
@@ -1792,7 +1900,7 @@ impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
     R::Mode: TypedTensorSvdValsDispatch<R, D>,
-    D: TensorScalar,
+    D: FactorizationScalar,
 {
     /// Returns only the singular values, grouped by provider-labelled coupled
     /// sector and descending within each sector.
@@ -1817,7 +1925,7 @@ impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
     R::Mode: TypedTensorSvdTruncDispatch<R, D>,
-    D: TensorScalar,
+    D: FactorizationScalar,
 {
     /// Returns `self ~= u * s * vh` after applying `truncation` globally across
     /// the sector spectra.
@@ -1847,7 +1955,7 @@ impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
     R::Mode: TypedTensorEighValsDispatch<R, D>,
-    D: TensorScalar,
+    D: FactorizationScalar,
 {
     /// Returns only the real Hermitian eigenvalues, grouped by
     /// provider-labelled coupled sector and descending by absolute value.
@@ -1872,7 +1980,7 @@ impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
     R::Mode: TypedTensorEighDispatch<R, D>,
-    D: TensorScalar,
+    D: FactorizationScalar,
 {
     /// Returns the Hermitian eigendecomposition `self = v * d * v^H` as
     /// `(d, v)`.
@@ -1922,7 +2030,7 @@ impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
     R::Mode: TypedTensorEighTruncDispatch<R, D>,
-    D: TensorScalar,
+    D: FactorizationScalar,
 {
     /// Returns selected Hermitian eigenpairs after applying `truncation`
     /// globally to eigenvalue magnitudes.
@@ -1948,7 +2056,7 @@ impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
     R::Mode: TypedTensorEigValsDispatch<R, D>,
-    D: TensorScalar,
+    D: AdvancedLinalgScalar,
 {
     /// Returns only the general eigenvalues as `Complex64`, grouped by
     /// provider-labelled sector and descending by magnitude.
@@ -1972,7 +2080,7 @@ impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
     R::Mode: TypedTensorEigDispatch<R, D>,
-    D: TensorScalar,
+    D: AdvancedLinalgScalar,
 {
     /// Returns the general eigendecomposition `self * v = v * d` as complex
     /// `(d, v)`.
@@ -2030,7 +2138,7 @@ impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
     R::Mode: TypedTensorEigTruncDispatch<R, D>,
-    D: TensorScalar,
+    D: AdvancedLinalgScalar,
 {
     /// Returns selected general eigenpairs after applying `truncation` globally
     /// to eigenvalue magnitudes.
@@ -5018,7 +5126,7 @@ where
 pub trait TypedTensorInvDispatch<R, D>: TypedTensorModeDispatch<R>
 where
     R: TypedSectorAdmission,
-    D: TensorScalar,
+    D: AdvancedLinalgScalar,
 {
     fn inv(tensor: &TensorMap<R, D>) -> Result<TensorMap<R, D>, Self::FacadeError>;
 }
@@ -5027,7 +5135,7 @@ where
 pub trait TypedTensorSolveDispatch<R, D>: TypedTensorModeDispatch<R>
 where
     R: TypedSectorAdmission,
-    D: TensorScalar,
+    D: AdvancedLinalgScalar,
 {
     fn solve(
         tensor: &TensorMap<R, D>,
@@ -5043,7 +5151,7 @@ where
 pub trait TypedTensorPinvDispatch<R, D>: TypedTensorModeDispatch<R>
 where
     R: TypedSectorAdmission,
-    D: TensorScalar,
+    D: AdvancedLinalgScalar,
 {
     fn pinv(tensor: &TensorMap<R, D>, rcond: f64) -> Result<TensorMap<R, D>, Self::FacadeError>;
 }
@@ -5052,7 +5160,7 @@ where
 pub trait TypedTensorNullDispatch<R, D>: TypedTensorModeDispatch<R>
 where
     R: TypedSectorAdmission,
-    D: TensorScalar,
+    D: FactorizationScalar,
 {
     fn left_null(tensor: &TensorMap<R, D>) -> Result<TensorMap<R, D>, Self::FacadeError>;
     fn right_null(tensor: &TensorMap<R, D>) -> Result<TensorMap<R, D>, Self::FacadeError>;
@@ -5062,7 +5170,7 @@ where
 pub trait TypedTensorPolarDispatch<R, D>: TypedTensorModeDispatch<R>
 where
     R: TypedSectorAdmission,
-    D: TensorScalar,
+    D: FactorizationScalar,
 {
     #[expect(
         clippy::type_complexity,
@@ -5084,7 +5192,7 @@ where
 pub trait TypedTensorExpDispatch<R, D>: TypedTensorModeDispatch<R>
 where
     R: TypedSectorAdmission,
-    D: TensorScalar,
+    D: AdvancedLinalgScalar,
 {
     fn exp(tensor: &TensorMap<R, D>) -> Result<TensorMap<R, D>, Self::FacadeError>;
 }
@@ -5093,7 +5201,7 @@ where
 pub trait TypedTensorPowiDispatch<R, D>: TypedTensorModeDispatch<R>
 where
     R: TypedSectorAdmission,
-    D: TensorScalar,
+    D: AdvancedLinalgScalar,
 {
     fn powi(tensor: &TensorMap<R, D>, exponent: i32) -> Result<TensorMap<R, D>, Self::FacadeError>;
 }
@@ -5102,7 +5210,7 @@ where
 pub trait TypedTensorQrDispatch<R, D>: TypedTensorModeDispatch<R>
 where
     R: TypedSectorAdmission,
-    D: TensorScalar,
+    D: FactorizationScalar,
 {
     #[expect(
         clippy::type_complexity,
@@ -5117,7 +5225,7 @@ where
 pub trait TypedTensorSvdDispatch<R, D>: TypedTensorModeDispatch<R>
 where
     R: TypedSectorAdmission,
-    D: TensorScalar,
+    D: FactorizationScalar,
 {
     #[expect(
         clippy::type_complexity,
@@ -5139,7 +5247,7 @@ where
 pub trait TypedTensorLqDispatch<R, D>: TypedTensorModeDispatch<R>
 where
     R: TypedSectorAdmission,
-    D: TensorScalar,
+    D: FactorizationScalar,
 {
     #[expect(
         clippy::type_complexity,
@@ -5154,7 +5262,7 @@ where
 pub trait TypedTensorFullQrDispatch<R, D>: TypedTensorModeDispatch<R>
 where
     R: TypedSectorAdmission,
-    D: TensorScalar,
+    D: FactorizationScalar,
 {
     #[expect(
         clippy::type_complexity,
@@ -5169,7 +5277,7 @@ where
 pub trait TypedTensorFullLqDispatch<R, D>: TypedTensorModeDispatch<R>
 where
     R: TypedSectorAdmission,
-    D: TensorScalar,
+    D: FactorizationScalar,
 {
     #[expect(
         clippy::type_complexity,
@@ -5184,7 +5292,7 @@ where
 pub trait TypedTensorSvdValsDispatch<R, D>: TypedTensorModeDispatch<R>
 where
     R: TypedSectorAdmission,
-    D: TensorScalar,
+    D: FactorizationScalar,
 {
     fn svd_vals(
         tensor: &TensorMap<R, D>,
@@ -5195,7 +5303,7 @@ where
 pub trait TypedTensorSvdTruncDispatch<R, D>: TypedTensorModeDispatch<R>
 where
     R: TypedSectorAdmission,
-    D: TensorScalar,
+    D: FactorizationScalar,
 {
     type Output;
     fn svd_trunc(
@@ -5208,7 +5316,7 @@ where
 pub trait TypedTensorEighValsDispatch<R, D>: TypedTensorModeDispatch<R>
 where
     R: TypedSectorAdmission,
-    D: TensorScalar,
+    D: FactorizationScalar,
 {
     fn eigh_vals(
         tensor: &TensorMap<R, D>,
@@ -5219,7 +5327,7 @@ where
 pub trait TypedTensorEighDispatch<R, D>: TypedTensorModeDispatch<R>
 where
     R: TypedSectorAdmission,
-    D: TensorScalar,
+    D: FactorizationScalar,
 {
     #[expect(
         clippy::type_complexity,
@@ -5234,7 +5342,7 @@ where
 pub trait TypedTensorEighTruncDispatch<R, D>: TypedTensorModeDispatch<R>
 where
     R: TypedSectorAdmission,
-    D: TensorScalar,
+    D: FactorizationScalar,
 {
     type Output;
     fn eigh_trunc(
@@ -5247,7 +5355,7 @@ where
 pub trait TypedTensorEigValsDispatch<R, D>: TypedTensorModeDispatch<R>
 where
     R: TypedSectorAdmission,
-    D: TensorScalar,
+    D: AdvancedLinalgScalar,
 {
     fn eig_vals(
         tensor: &TensorMap<R, D>,
@@ -5261,7 +5369,7 @@ where
 pub trait TypedTensorEigDispatch<R, D>: TypedTensorModeDispatch<R>
 where
     R: TypedSectorAdmission,
-    D: TensorScalar,
+    D: AdvancedLinalgScalar,
 {
     #[expect(
         clippy::type_complexity,
@@ -5282,7 +5390,7 @@ where
 pub trait TypedTensorEigTruncDispatch<R, D>: TypedTensorModeDispatch<R>
 where
     R: TypedSectorAdmission,
-    D: TensorScalar,
+    D: AdvancedLinalgScalar,
 {
     type Output;
     fn eig_trunc(
@@ -5494,7 +5602,7 @@ where
         + MultiplicityFreeRigidSymbols<Scalar = f64>
         + CheckedFusionAlgebra
         + SectorCodec,
-    D: TensorScalar,
+    D: AdvancedLinalgScalar,
 {
     fn inv(tensor: &TensorMap<R, D>) -> Result<TensorMap<R, D>, Error> {
         tensor.inv_multiplicity_free()
@@ -5507,7 +5615,7 @@ where
         + MultiplicityFreeRigidSymbols<Scalar = f64>
         + CheckedFusionAlgebra
         + SectorCodec,
-    D: TensorScalar,
+    D: AdvancedLinalgScalar,
 {
     fn solve(tensor: &TensorMap<R, D>, rhs: &TensorMap<R, D>) -> Result<TensorMap<R, D>, Error> {
         tensor.solve_multiplicity_free(rhs)
@@ -5527,7 +5635,7 @@ where
         + MultiplicityFreeRigidSymbols<Scalar = f64>
         + CheckedFusionAlgebra
         + SectorCodec,
-    D: TensorScalar,
+    D: AdvancedLinalgScalar,
 {
     fn pinv(tensor: &TensorMap<R, D>, rcond: f64) -> Result<TensorMap<R, D>, Error> {
         tensor.pinv_multiplicity_free(rcond)
@@ -5540,7 +5648,7 @@ where
         + MultiplicityFreeRigidSymbols<Scalar = f64>
         + CheckedFusionAlgebra
         + SectorCodec,
-    D: TensorScalar,
+    D: FactorizationScalar,
 {
     fn left_null(tensor: &TensorMap<R, D>) -> Result<TensorMap<R, D>, Error> {
         tensor.left_null_multiplicity_free()
@@ -5557,7 +5665,7 @@ where
         + MultiplicityFreeRigidSymbols<Scalar = f64>
         + CheckedFusionAlgebra
         + SectorCodec,
-    D: TensorScalar,
+    D: FactorizationScalar,
 {
     fn left_polar(tensor: &TensorMap<R, D>) -> Result<(TensorMap<R, D>, TensorMap<R, D>), Error> {
         tensor.left_polar_multiplicity_free()
@@ -5574,7 +5682,7 @@ where
         + MultiplicityFreeRigidSymbols<Scalar = f64>
         + CheckedFusionAlgebra
         + SectorCodec,
-    D: TensorScalar,
+    D: AdvancedLinalgScalar,
 {
     fn exp(tensor: &TensorMap<R, D>) -> Result<TensorMap<R, D>, Error> {
         tensor.exp_multiplicity_free()
@@ -5587,7 +5695,7 @@ where
         + MultiplicityFreeRigidSymbols<Scalar = f64>
         + CheckedFusionAlgebra
         + SectorCodec,
-    D: TensorScalar,
+    D: AdvancedLinalgScalar,
 {
     fn powi(tensor: &TensorMap<R, D>, exponent: i32) -> Result<TensorMap<R, D>, Error> {
         tensor.powi_multiplicity_free(exponent)
@@ -5600,7 +5708,7 @@ where
         + MultiplicityFreeRigidSymbols<Scalar = f64>
         + CheckedFusionAlgebra
         + SectorCodec,
-    D: TensorScalar,
+    D: FactorizationScalar,
 {
     fn qr_compact(tensor: &TensorMap<R, D>) -> Result<(TensorMap<R, D>, TensorMap<R, D>), Error> {
         tensor.qr_compact_multiplicity_free()
@@ -5613,7 +5721,7 @@ where
         + MultiplicityFreeRigidSymbols<Scalar = f64>
         + CheckedFusionAlgebra
         + SectorCodec,
-    D: TensorScalar,
+    D: FactorizationScalar,
 {
     fn svd_compact(
         tensor: &TensorMap<R, D>,
@@ -5634,7 +5742,7 @@ where
         + MultiplicityFreeRigidSymbols<Scalar = f64>
         + CheckedFusionAlgebra
         + SectorCodec,
-    D: TensorScalar,
+    D: FactorizationScalar,
 {
     fn lq_compact(tensor: &TensorMap<R, D>) -> Result<(TensorMap<R, D>, TensorMap<R, D>), Error> {
         tensor.lq_compact_multiplicity_free()
@@ -5647,7 +5755,7 @@ where
         + MultiplicityFreeRigidSymbols<Scalar = f64>
         + CheckedFusionAlgebra
         + SectorCodec,
-    D: TensorScalar,
+    D: FactorizationScalar,
 {
     fn qr_full(tensor: &TensorMap<R, D>) -> Result<(TensorMap<R, D>, TensorMap<R, D>), Error> {
         tensor.qr_full_multiplicity_free()
@@ -5660,7 +5768,7 @@ where
         + MultiplicityFreeRigidSymbols<Scalar = f64>
         + CheckedFusionAlgebra
         + SectorCodec,
-    D: TensorScalar,
+    D: FactorizationScalar,
 {
     fn lq_full(tensor: &TensorMap<R, D>) -> Result<(TensorMap<R, D>, TensorMap<R, D>), Error> {
         tensor.lq_full_multiplicity_free()
@@ -5676,7 +5784,7 @@ where
         > + MultiplicityFreeRigidSymbols<Scalar = f64>
         + CheckedFusionAlgebra
         + SectorCodec,
-    D: TensorScalar,
+    D: FactorizationScalar,
 {
     fn svd_vals(
         tensor: &TensorMap<R, D>,
@@ -5691,7 +5799,7 @@ where
         + MultiplicityFreeRigidSymbols<Scalar = f64>
         + CheckedFusionAlgebra
         + SectorCodec,
-    D: TensorScalar,
+    D: FactorizationScalar,
 {
     type Output = SvdTrunc<R, D>;
     fn svd_trunc(tensor: &TensorMap<R, D>, truncation: &Truncation) -> Result<Self::Output, Error> {
@@ -5708,7 +5816,7 @@ where
         > + MultiplicityFreeRigidSymbols<Scalar = f64>
         + CheckedFusionAlgebra
         + SectorCodec,
-    D: TensorScalar,
+    D: FactorizationScalar,
 {
     fn eigh_vals(
         tensor: &TensorMap<R, D>,
@@ -5723,7 +5831,7 @@ where
         + MultiplicityFreeRigidSymbols<Scalar = f64>
         + CheckedFusionAlgebra
         + SectorCodec,
-    D: TensorScalar,
+    D: FactorizationScalar,
 {
     fn eigh_full(tensor: &TensorMap<R, D>) -> Result<(TensorMap<R, D>, TensorMap<R, D>), Error> {
         tensor.eigh_full_multiplicity_free()
@@ -5736,7 +5844,7 @@ where
         + MultiplicityFreeRigidSymbols<Scalar = f64>
         + CheckedFusionAlgebra
         + SectorCodec,
-    D: TensorScalar,
+    D: FactorizationScalar,
 {
     type Output = EighTrunc<R, D>;
     fn eigh_trunc(
@@ -5756,7 +5864,7 @@ where
         > + MultiplicityFreeRigidSymbols<Scalar = f64>
         + CheckedFusionAlgebra
         + SectorCodec,
-    D: TensorScalar,
+    D: AdvancedLinalgScalar,
     <D as FactorScalar>::Eig: TensorScalar,
 {
     fn eig_vals(
@@ -5775,7 +5883,7 @@ where
         + MultiplicityFreeRigidSymbols<Scalar = f64>
         + CheckedFusionAlgebra
         + SectorCodec,
-    D: TensorScalar + FactorScalar<Eig = num_complex::Complex64>,
+    D: AdvancedLinalgScalar + FactorScalar<Eig = num_complex::Complex64>,
 {
     fn eig_full(
         tensor: &TensorMap<R, D>,
@@ -5796,7 +5904,7 @@ where
         + MultiplicityFreeRigidSymbols<Scalar = f64>
         + CheckedFusionAlgebra
         + SectorCodec,
-    D: TensorScalar + FactorScalar<Eig = num_complex::Complex64>,
+    D: AdvancedLinalgScalar + FactorScalar<Eig = num_complex::Complex64>,
 {
     type Output = EigTrunc<R, D>;
     fn eig_trunc(tensor: &TensorMap<R, D>, truncation: &Truncation) -> Result<Self::Output, Error> {
@@ -5845,7 +5953,7 @@ where
             Error = <R as CheckedGenericFusion>::Error,
             Mode = CheckedGenericAdmissionMode,
         > + CheckedGenericFusion,
-    D: TensorScalar,
+    D: AdvancedLinalgScalar,
 {
     fn inv(
         tensor: &TensorMap<R, D>,
@@ -5904,7 +6012,7 @@ where
             Error = <R as CheckedGenericFusion>::Error,
             Mode = CheckedGenericAdmissionMode,
         > + CheckedGenericFusion,
-    D: TensorScalar,
+    D: AdvancedLinalgScalar,
 {
     fn solve(
         tensor: &TensorMap<R, D>,
@@ -6079,7 +6187,7 @@ where
             Error = <R as CheckedGenericFusion>::Error,
             Mode = CheckedGenericAdmissionMode,
         > + CheckedGenericFusion,
-    D: TensorScalar,
+    D: AdvancedLinalgScalar,
 {
     fn pinv(
         tensor: &TensorMap<R, D>,
@@ -6129,7 +6237,7 @@ where
             Error = <R as CheckedGenericFusion>::Error,
             Mode = CheckedGenericAdmissionMode,
         > + CheckedGenericFusion,
-    D: TensorScalar,
+    D: FactorizationScalar,
 {
     fn left_null(
         tensor: &TensorMap<R, D>,
@@ -6180,7 +6288,7 @@ where
             Error = <R as CheckedGenericFusion>::Error,
             Mode = CheckedGenericAdmissionMode,
         > + CheckedGenericFusion,
-    D: TensorScalar,
+    D: FactorizationScalar,
 {
     fn left_polar(
         tensor: &TensorMap<R, D>,
@@ -6265,7 +6373,7 @@ where
             Error = <R as CheckedGenericFusion>::Error,
             Mode = CheckedGenericAdmissionMode,
         > + CheckedGenericFusion,
-    D: TensorScalar,
+    D: AdvancedLinalgScalar,
 {
     fn exp(
         tensor: &TensorMap<R, D>,
@@ -6305,7 +6413,7 @@ where
             Error = <R as CheckedGenericFusion>::Error,
             Mode = CheckedGenericAdmissionMode,
         > + CheckedGenericRigidSymbols<Scalar = f64>,
-    D: TensorScalar,
+    D: AdvancedLinalgScalar,
 {
     fn powi(
         tensor: &TensorMap<R, D>,
@@ -6353,7 +6461,7 @@ where
             Error = <R as CheckedGenericFusion>::Error,
             Mode = CheckedGenericAdmissionMode,
         > + CheckedGenericFusion,
-    D: TensorScalar,
+    D: FactorizationScalar,
 {
     fn qr_compact(
         tensor: &TensorMap<R, D>,
@@ -6371,7 +6479,7 @@ where
             Error = <R as CheckedGenericFusion>::Error,
             Mode = CheckedGenericAdmissionMode,
         > + CheckedGenericFusion,
-    D: TensorScalar,
+    D: FactorizationScalar,
 {
     fn svd_compact(
         tensor: &TensorMap<R, D>,
@@ -6398,7 +6506,7 @@ where
             Error = <R as CheckedGenericFusion>::Error,
             Mode = CheckedGenericAdmissionMode,
         > + CheckedGenericFusion,
-    D: TensorScalar,
+    D: FactorizationScalar,
 {
     fn lq_compact(
         tensor: &TensorMap<R, D>,
@@ -6416,7 +6524,7 @@ where
             Error = <R as CheckedGenericFusion>::Error,
             Mode = CheckedGenericAdmissionMode,
         > + CheckedGenericFusion,
-    D: TensorScalar,
+    D: FactorizationScalar,
 {
     fn qr_full(
         tensor: &TensorMap<R, D>,
@@ -6434,7 +6542,7 @@ where
             Error = <R as CheckedGenericFusion>::Error,
             Mode = CheckedGenericAdmissionMode,
         > + CheckedGenericFusion,
-    D: TensorScalar,
+    D: FactorizationScalar,
 {
     fn lq_full(
         tensor: &TensorMap<R, D>,
@@ -6464,7 +6572,7 @@ where
             Error = <R as CheckedGenericFusion>::Error,
             Mode = CheckedGenericAdmissionMode,
         > + CheckedGenericFusion,
-    D: TensorScalar,
+    D: FactorizationScalar,
 {
     fn svd_vals(
         tensor: &TensorMap<R, D>,
@@ -6482,7 +6590,7 @@ where
             Error = <R as CheckedGenericFusion>::Error,
             Mode = CheckedGenericAdmissionMode,
         > + CheckedGenericRigidSymbols<Scalar = f64>,
-    D: TensorScalar,
+    D: FactorizationScalar,
 {
     type Output = CheckedGenericSvdTrunc<R, D>;
     fn svd_trunc(
@@ -6499,7 +6607,7 @@ where
             Error = <R as CheckedGenericFusion>::Error,
             Mode = CheckedGenericAdmissionMode,
         > + CheckedGenericFusion,
-    D: TensorScalar,
+    D: FactorizationScalar,
 {
     fn eigh_vals(
         tensor: &TensorMap<R, D>,
@@ -6517,7 +6625,7 @@ where
             Error = <R as CheckedGenericFusion>::Error,
             Mode = CheckedGenericAdmissionMode,
         > + CheckedGenericFusion,
-    D: TensorScalar,
+    D: FactorizationScalar,
 {
     fn eigh_full(
         tensor: &TensorMap<R, D>,
@@ -6535,7 +6643,7 @@ where
             Error = <R as CheckedGenericFusion>::Error,
             Mode = CheckedGenericAdmissionMode,
         > + CheckedGenericRigidSymbols<Scalar = f64>,
-    D: TensorScalar,
+    D: FactorizationScalar,
 {
     type Output = CheckedGenericEighTrunc<R, D>;
     fn eigh_trunc(
@@ -6552,7 +6660,7 @@ where
             Error = <R as CheckedGenericFusion>::Error,
             Mode = CheckedGenericAdmissionMode,
         > + CheckedGenericFusion,
-    D: TensorScalar,
+    D: AdvancedLinalgScalar,
 {
     fn eig_vals(
         tensor: &TensorMap<R, D>,
@@ -6570,7 +6678,7 @@ where
             Error = <R as CheckedGenericFusion>::Error,
             Mode = CheckedGenericAdmissionMode,
         > + CheckedGenericFusion,
-    D: TensorScalar + FactorScalar<Eig = num_complex::Complex64>,
+    D: AdvancedLinalgScalar + FactorScalar<Eig = num_complex::Complex64>,
 {
     fn eig_full(
         tensor: &TensorMap<R, D>,
@@ -6591,7 +6699,7 @@ where
             Error = <R as CheckedGenericFusion>::Error,
             Mode = CheckedGenericAdmissionMode,
         > + CheckedGenericRigidSymbols<Scalar = f64>,
-    D: TensorScalar + FactorScalar<Eig = num_complex::Complex64>,
+    D: AdvancedLinalgScalar + FactorScalar<Eig = num_complex::Complex64>,
 {
     type Output = CheckedGenericEigTrunc<R>;
     fn eig_trunc(
@@ -7813,7 +7921,7 @@ impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
     R::Mode: TypedTensorInvDispatch<R, D>,
-    D: TensorScalar,
+    D: AdvancedLinalgScalar,
 {
     /// TensorKit 0.17 / MatrixAlgebraKit `inv`: the true inverse `t^-1` of a
     /// nonsingular map, defined by `t * t^-1 = id` on the codomain and
@@ -7868,7 +7976,7 @@ impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
     R::Mode: TypedTensorExpDispatch<R, D>,
-    D: TensorScalar,
+    D: AdvancedLinalgScalar,
 {
     /// The matrix exponential `exp(t) = Σ_k t^k / k!`, evaluated per coupled
     /// sector — TensorKit's `exp`, which copies and calls `exp!`: check
@@ -7940,7 +8048,7 @@ impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
     R::Mode: TypedTensorPowiDispatch<R, D>,
-    D: TensorScalar,
+    D: AdvancedLinalgScalar,
 {
     /// Integer tensor-map power (TensorKit `t ^ p`), using `O(log |p|)`
     /// compositions. Zero returns the multiplicative identity (staying compact
@@ -10652,7 +10760,7 @@ impl<R, D: CudaPayload> TensorMap<R, D, CudaStorage<D>> {
 impl<R, D> TensorMap<R, D, CudaStorage<D>>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
-    D: CudaPayload,
+    D: CudaPayload + FactorizationScalar,
 {
     /// The `k x k` identity selector the non-aligned assembly GEMMs need.
     /// A fully aligned route assembles by copy and uploads nothing.
@@ -15339,7 +15447,10 @@ where
     /// for compact input); negative powers invert once.
     ///
     /// Returns [`Error::InvalidArgument`] unless this is an endomorphism.
-    fn powi_multiplicity_free(&self, exponent: i32) -> Result<Self, Error> {
+    fn powi_multiplicity_free(&self, exponent: i32) -> Result<Self, Error>
+    where
+        D: AdvancedLinalgScalar,
+    {
         if !self.is_endomorphism() {
             return Err(Error::InvalidArgument(
                 "powi() requires an endomorphism (domain == codomain)".to_string(),
@@ -15924,7 +16035,10 @@ where
     /// (MatrixAlgebraKit's `DiagonalAlgorithm`); that fast path is not adopted
     /// here — the issue #613 Group 4 contract requires every compact fast path
     /// to be re-proven individually, the same deferral the polars record.
-    fn qr_compact_multiplicity_free(&self) -> Result<(Self, Self), Error> {
+    fn qr_compact_multiplicity_free(&self) -> Result<(Self, Self), Error>
+    where
+        D: FactorizationScalar,
+    {
         if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
             return self.materialized_tensor_uncached()?.qr_compact();
         }
@@ -15949,7 +16063,10 @@ where
     /// it in the receiver cache. A compact-diagonal payload is materialized
     /// dense first (TensorKit's `DiagonalAlgorithm` covers `qr_full!` too —
     /// same non-adoption, same #613 Group 4 deferral).
-    fn qr_full_multiplicity_free(&self) -> Result<(Self, Self), Error> {
+    fn qr_full_multiplicity_free(&self) -> Result<(Self, Self), Error>
+    where
+        D: FactorizationScalar,
+    {
         if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
             return self.materialized_tensor_uncached()?.qr_full();
         }
@@ -15973,7 +16090,10 @@ where
     /// neither parent factor buffer. A compact-diagonal payload is materialized
     /// dense first (TensorKit's `DiagonalAlgorithm` covers the LQ pair as well
     /// — same non-adoption, same #613 Group 4 deferral).
-    fn lq_compact_multiplicity_free(&self) -> Result<(Self, Self), Error> {
+    fn lq_compact_multiplicity_free(&self) -> Result<(Self, Self), Error>
+    where
+        D: FactorizationScalar,
+    {
         if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
             let (q, r) = self.adjoint()?.qr_compact()?;
             return Ok((
@@ -16001,7 +16121,10 @@ where
     /// additional costs. A lazy adjoint uses the parent full-QR route and two
     /// detached owned output payloads. A compact-diagonal payload is
     /// materialized dense first.
-    fn lq_full_multiplicity_free(&self) -> Result<(Self, Self), Error> {
+    fn lq_full_multiplicity_free(&self) -> Result<(Self, Self), Error>
+    where
+        D: FactorizationScalar,
+    {
         if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
             let (q, r) = self.adjoint()?.qr_full()?;
             return Ok((
@@ -16043,7 +16166,10 @@ where
     /// [`Self::qr_compact`]. A lazy adjoint runs the owned parent's
     /// [`Self::right_null`] and returns its detached adjoint, without
     /// materializing the receiver.
-    fn left_null_multiplicity_free(&self) -> Result<Self, Error> {
+    fn left_null_multiplicity_free(&self) -> Result<Self, Error>
+    where
+        D: FactorizationScalar,
+    {
         if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
             return self
                 .adjoint()?
@@ -16076,7 +16202,10 @@ where
     /// As [`Self::left_null`]: sectorwise cubic, compact-diagonal payload
     /// materialized dense first. A lazy adjoint mirrors the parent redirect
     /// described there.
-    fn right_null_multiplicity_free(&self) -> Result<Self, Error> {
+    fn right_null_multiplicity_free(&self) -> Result<Self, Error>
+    where
+        D: FactorizationScalar,
+    {
         if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
             return self
                 .adjoint()?
@@ -16421,7 +16550,10 @@ where
     }
 
     /// Multiplicity-free implementation of the public mode-dispatched inverse.
-    fn inv_multiplicity_free(&self) -> Result<Self, Error> {
+    fn inv_multiplicity_free(&self) -> Result<Self, Error>
+    where
+        D: AdvancedLinalgScalar,
+    {
         if let Some(spectrum) = self.spectrum() {
             // Why `== 0` and not a tolerance: the dense arm has none either
             // (the solve either fails or it does not), and a compact arm that
@@ -16459,7 +16591,10 @@ where
     /// keeps `self`'s exact provider allocation. Dense blocks are written
     /// directly into the final output; compact diagonal divisors reuse the
     /// elementwise reciprocal and bond-scaling path.
-    fn solve_multiplicity_free(&self, rhs: &Self) -> Result<Self, Error> {
+    fn solve_multiplicity_free(&self, rhs: &Self) -> Result<Self, Error>
+    where
+        D: AdvancedLinalgScalar,
+    {
         if !self.runtime.same_runtime(&rhs.runtime) {
             return Err(Error::RuntimeMismatch);
         }
@@ -16544,7 +16679,10 @@ where
     }
 
     /// Multiplicity-free implementation of the public mode-dispatched right solve.
-    fn solve_right_multiplicity_free(&self, rhs: &Self) -> Result<Self, Error> {
+    fn solve_right_multiplicity_free(&self, rhs: &Self) -> Result<Self, Error>
+    where
+        D: AdvancedLinalgScalar,
+    {
         if !self.runtime.same_runtime(&rhs.runtime) {
             return Err(Error::RuntimeMismatch);
         }
@@ -17449,7 +17587,10 @@ where
     /// # Errors
     ///
     /// [`Self::is_hermitian`]'s and [`Self::eigh_vals`]'s.
-    pub fn is_posdef(&self, tol: f64) -> Result<bool, Error> {
+    pub fn is_posdef(&self, tol: f64) -> Result<bool, Error>
+    where
+        D: FactorizationScalar,
+    {
         if !self.is_hermitian(tol)? {
             return Ok(false);
         }
@@ -17710,7 +17851,7 @@ impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
     R::Mode: TypedTensorNullDispatch<R, D>,
-    D: TensorScalar,
+    D: FactorizationScalar,
 {
     /// Returns an orthonormal basis `n : codomain(self) <- W` for the numerical
     /// left null space, satisfying `n^H * self ~= 0`.
@@ -17765,7 +17906,7 @@ impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
     R::Mode: TypedTensorPolarDispatch<R, D>,
-    D: TensorScalar,
+    D: FactorizationScalar,
 {
     /// Returns the left polar decomposition `self = w * p` as `(w, p)`.
     ///
@@ -21286,7 +21427,7 @@ mod representation_gates {
     fn assert_compact_svd_reads_parent<R, D>(source: &TensorMap<R, D>)
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
-        D: TensorScalar + core::fmt::Debug,
+        D: FactorizationScalar + core::fmt::Debug,
     {
         let eager = eager_adjoint_oracle(source);
         let lazy = source.adjoint().unwrap();
@@ -21352,7 +21493,7 @@ mod representation_gates {
     fn assert_full_svd_reads_parent<R, D>(source: &TensorMap<R, D>, compare_factor_bytes: bool)
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
-        D: TensorScalar + core::fmt::Debug,
+        D: FactorizationScalar + core::fmt::Debug,
     {
         let eager = eager_adjoint_oracle(source);
         let lazy = source.adjoint().unwrap();
@@ -21475,7 +21616,7 @@ mod representation_gates {
     fn assert_null_redirect<R, D>(source: &TensorMap<R, D>)
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
-        D: TensorScalar + core::fmt::Debug,
+        D: FactorizationScalar + core::fmt::Debug,
     {
         let target = eager_adjoint_oracle(source);
         let lazy = source.adjoint().unwrap();
@@ -21590,7 +21731,7 @@ mod representation_gates {
     fn assert_polar_redirect<R, D>(source: &TensorMap<R, D>, left: bool)
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
-        D: TensorScalar + core::fmt::Debug,
+        D: FactorizationScalar + core::fmt::Debug,
     {
         let target = eager_adjoint_oracle(source);
         let lazy = source.adjoint().unwrap();
@@ -22017,7 +22158,7 @@ mod representation_gates {
             + Send
             + Sync
             + 'static,
-        D: TensorScalar + core::fmt::Debug + Send + Sync + 'static,
+        D: AdvancedLinalgScalar + core::fmt::Debug + Send + Sync + 'static,
     {
         let eager = eager_adjoint_oracle(source);
         let expected = eager.exp().unwrap();
@@ -22134,7 +22275,7 @@ mod representation_gates {
             + Send
             + Sync
             + 'static,
-        D: TensorScalar + core::fmt::Debug + Send + Sync + 'static,
+        D: AdvancedLinalgScalar + core::fmt::Debug + Send + Sync + 'static,
     {
         let expected = eager_adjoint_oracle(source).sqrt().unwrap();
         let parent = Arc::clone(owned(source));
@@ -22301,7 +22442,7 @@ mod representation_gates {
         left: bool,
     ) where
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
-        D: TensorScalar + core::fmt::Debug,
+        D: FactorizationScalar + core::fmt::Debug,
     {
         let reconstructed = actual.0.compose(&actual.1).unwrap();
         assert_typed_map_close(&reconstructed, target, 1e-10);
@@ -22342,7 +22483,7 @@ mod representation_gates {
     fn assert_rank_deficient_polar_support<R, D>(source: &TensorMap<R, D>, left: bool)
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
-        D: TensorScalar + core::fmt::Debug,
+        D: AdvancedLinalgScalar + core::fmt::Debug,
     {
         let target = eager_adjoint_oracle(source);
         let target_pinv = target.pinv(1e-10).unwrap();
@@ -22396,7 +22537,7 @@ mod representation_gates {
             + Send
             + Sync
             + 'static,
-        D: TensorScalar + core::fmt::Debug + Send + Sync + 'static,
+        D: AdvancedLinalgScalar + core::fmt::Debug + Send + Sync + 'static,
     {
         let eager = eager_adjoint_oracle(source);
         let expected = eager.inv().unwrap();
@@ -22752,7 +22893,7 @@ mod representation_gates {
     #[cfg(feature = "racah-generated")]
     fn assert_checked_generic_solve_acceptance<D>()
     where
-        D: TensorScalar + core::fmt::Debug,
+        D: AdvancedLinalgScalar + core::fmt::Debug,
     {
         use tenet_core::SUNFusionRule;
 
@@ -22902,7 +23043,7 @@ mod representation_gates {
             + Send
             + Sync
             + 'static,
-        D: TensorScalar + core::fmt::Debug + Send + Sync + 'static,
+        D: AdvancedLinalgScalar + core::fmt::Debug + Send + Sync + 'static,
     {
         let eager = eager_adjoint_oracle(source);
         let expected = eager.pinv(rcond).unwrap();
@@ -23212,7 +23353,7 @@ mod representation_gates {
     fn assert_qr_lq_keeps_input_cache_cold<R, D>(source: &TensorMap<R, D>)
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
-        D: TensorScalar + core::fmt::Debug,
+        D: FactorizationScalar + core::fmt::Debug,
     {
         let target = eager_adjoint_oracle(source);
         let lazy = source.adjoint().unwrap();
@@ -23390,7 +23531,7 @@ mod representation_gates {
     fn assert_truncated_svd_reads_parent<R, D>(source: &TensorMap<R, D>)
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
-        D: TensorScalar + core::fmt::Debug,
+        D: FactorizationScalar + core::fmt::Debug,
     {
         let eager = eager_adjoint_oracle(source);
         let lazy = source.adjoint().unwrap();

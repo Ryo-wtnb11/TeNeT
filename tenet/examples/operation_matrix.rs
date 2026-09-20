@@ -2255,7 +2255,7 @@ fn run_mf_eig<D>(
     min_time: Duration,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
-    D: HarnessScalar<Eig = Complex64> + tenet::typed::TensorScalar,
+    D: HarnessScalar<Eig = Complex64> + tenet::typed::AdvancedLinalgScalar,
 {
     let runtime = benchmark_runtime()?;
     let make = |d| -> Result<_, Box<dyn std::error::Error>> {

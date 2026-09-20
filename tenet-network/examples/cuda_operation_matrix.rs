@@ -79,7 +79,7 @@ mod device {
     };
     use tenet::dense::{cuda_transfer_stats, CudaTransferStats};
     use tenet::prelude::Complex64;
-    use tenet::typed::{CudaStorage, GradedSpace, Runtime, TensorMap, TensorScalar, Truncation};
+    use tenet::typed::{CudaStorage, GradedSpace, Runtime, TensorMap, Truncation};
     use tenet_network::tensor;
 
     /// Fixture families. The parameters are explicit CLI inputs; nothing in
@@ -148,7 +148,9 @@ mod device {
 
     /// Payload dtypes this baseline covers. Both are real device payloads;
     /// the fixture values differ only in carrying an imaginary part.
-    pub(super) trait HarnessScalar: TensorScalar + tenet::typed::CudaPayload {
+    pub(super) trait HarnessScalar:
+        tenet::typed::FactorizationScalar + tenet::typed::CudaPayload
+    {
         const NAME: &'static str;
         fn entry(real: f64, imaginary: f64) -> Self;
         fn distance(self, other: Self) -> f64;

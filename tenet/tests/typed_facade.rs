@@ -6003,7 +6003,7 @@ fn compact_bond_trace<R, D>(
 ) -> TensorMap<R, D>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
-    D: tenet::prelude::TensorScalar + std::fmt::Debug,
+    D: tenet::prelude::FactorizationScalar + std::fmt::Debug,
 {
     let mut next: f64 = 0.0;
     let typed: TensorMap<R, D> =
