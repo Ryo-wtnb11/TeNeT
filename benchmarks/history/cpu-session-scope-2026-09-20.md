@@ -14,9 +14,27 @@ hash differently:
 
 Cargo lock `cad23363c997e3895a5391be45ee97fb3cfe19ca049c53593bbc8f60580f59b2`,
 features `cpu-faer,racah-generated`, `--locked --offline --release`.
-Raw medians: `cpu-session-scope-2026-09-20-baseline.csv` /
-`-candidate.csv` (one `benchmarks/operation_matrix.sh` run each,
-`OP_MATRIX_OPERATION=oriented_uniform_run`).
+Candidate SHA `55eb6ca9` is the pre-amend commit that was measured; its source
+tree is identical to the committed `812fd7c7`, and it becomes unreachable once
+this branch is squash-merged.
+
+Raw data, all committed next to this file
+(`OP_MATRIX_OPERATION=oriented_uniform_run` throughout):
+
+- `cpu-session-scope-2026-09-20-{baseline,candidate}-run{1,2,3}.csv` — three
+  `benchmarks/operation_matrix.sh` runs per revision (threads=1 table). Each
+  file holds the three raw process samples as `# raw_sample=N,...` comment
+  lines plus the script's own per-key median-of-three data rows.
+- `cpu-session-scope-2026-09-20-{baseline,candidate}-defthreads-run{1,2,3}.csv`
+  — the `operation_matrix` binary run directly, three process samples per
+  revision, one file each (default threads table). These carry no
+  `tenet_sha` header because they did not go through the script; they are
+  attributable by the binary hashes above.
+
+Aggregation rule for both tables: for each `(symmetry=DenseAdapter, form,
+phase)` key take the `us_per_iter` data row of each of that revision's three
+files and report their median. Both tables below are exactly reproducible from
+the committed files under that rule.
 
 ## Which rows reach the changed code
 
@@ -48,9 +66,19 @@ takes it. No new benchmark row was added — the coverage already existed.
 | site | before | after |
 |---|---:|---:|
 | op-bearing serial batch, `heterogeneous_c64_AI` (8 jobs) | 8 | 1 |
+| op-bearing serial batch, empty job list | 0 | 0 |
 | op-bearing serial batch, `singleton_c64_AI` (1 job) | 1 | 1 |
 | `eig_vals` | 2 | 1 |
 | grouped / strided batch routes, all other adapter rows | 1 | 1 |
+
+The guarantee is one session per *serial-fallback call*, not one per dense
+phase in general: a mixed partition (e.g. `runs = [4, 1, 1, 1]`) calls
+`matmul_batch_axpby_ops_serial_typed` once per non-batchable run, so k adjacent
+singleton runs still open k sessions. That is no worse than before (one session
+per job in those runs), and the fully heterogeneous fixture measured here is
+the best case. Coalescing adjacent non-batchable runs into one serial call is a
+follow-up; the plan-cache slots are already absolute through `cache_start`, so
+identity would be preserved.
 
 Before, each session was opened by Tenferro inside the backend-level dot;
 after, TeNeT opens one itself and issues the jobs through it. The new
@@ -60,7 +88,7 @@ reads 0 on the baseline for these rows and 1 on the candidate — the tests in
 
 ## Host operation matrix
 
-### RAYON_NUM_THREADS=1 (benchmarks/operation_matrix.sh, 3 script runs x 3 process samples)
+### RAYON_NUM_THREADS=1 (benchmarks/operation_matrix.sh, 3 script runs x 3 process samples each)
 
 | form | phase | base us/iter | candidate us/iter | delta |
 |---|---|---:|---:|---:|
@@ -97,7 +125,7 @@ reads 0 on the baseline for these rows and 1 on the candidate — the tests in
 | singleton_c64_AI | first_fresh_executor_after_preflight | 36.125 | 37.792 | +4.6% |
 | singleton_c64_AI | warm_fixed | 32.708 | 32.223 | -1.5% |
 
-### default threads (binaries run directly, 3 runs x 3 process samples)
+### default threads (binaries run directly, 3 process samples per revision)
 
 | form | phase | base us/iter | candidate us/iter | delta |
 |---|---|---:|---:|---:|
@@ -144,8 +172,28 @@ code drift by a few percent in both directions. `many_small_c64_AA warm_fixed`
 is consistently +6.6% at threads=1 (3.05/2.99/3.02 → 3.22/3.18/3.24) while
 being neutral (+1.1%) at default threads. That row takes the strided-batch
 route, which this change does not touch; it is unexplained binary-layout or
-machine drift and is not claimed as a cost of the change. The
-`first_fresh_executor_after_preflight` rows are single-iteration samples and
+machine drift and is not claimed as a cost of the change.
+
+`few_large_f64_II warm_fixed` (+1.2%) and `many_small_f64_II warm_fixed`
+(-1.9%) are the two rows whose individual process samples are widest, and a
+single raw file can read far worse than the medians above. Both take
+`matmul_batch_axpby_into` with two Identity ops, which the diff does not touch.
+Their per-child samples are bimodal at roughly 2x in *both* revisions, not one
+of them — `many_small_f64_II warm_fixed` (us/iter, samples 0/1/2 per run):
+
+```
+base run1 5.871/1.787/1.868   run2 5.543/6.029/4.726   run3 1.793/5.596/1.819
+cand run1 2.979/2.326/1.961   run2 4.220/1.828/1.832   run3 1.823/2.735/1.797
+```
+
+`few_large_f64_II warm_fixed` moves with it child-for-child (base run1
+58.905/30.375/30.631, cand run1 42.136/33.438/31.572), i.e. the slow samples
+are whole-child warm-up, not a per-form effect. Taking the run-1 files alone
+would read +9.2% / +24.5% on these two rows; the medians above are why the
+three-run aggregation exists. Nothing on the changed route shows this
+dispersion.
+
+The `first_fresh_executor_after_preflight` rows are single-iteration samples and
 are not evidence in either direction.
 
 ## Concurrency and BLAS
@@ -167,9 +215,16 @@ thread.
 | Accelerate BLAS | 1 | 132.5 | 134.4 | +1.5% |
 | Accelerate BLAS | 2 | 316.6 | 290.6 | −8% |
 
+Every thread in this harness issues the same 8-job batch, so it measures
+aggregate throughput under symmetric contention, not the latency a *different*,
+short Tenferro call sees while another thread holds the 8-job scope. That
+victim-latency case — the one that matters on BLAS, where the session is
+provider-exclusive — is not measured here.
+
 Both revisions scale worse than linearly with threads — the permit serializes
-execution either way — but the candidate is uniformly faster, so the longer
-scope does not make contention worse here. Under faer with default threads the
+execution either way — and the candidate is faster in every row above except
+Accelerate at one thread (+1.5%), so the longer scope does not make contention
+worse here. Under faer with default threads the
 per-session Rayon pool install dominates, which is why the gap is largest
 there; note that this harness lets faer use all workers, while the
 operation-matrix rows above pin `RAYON_NUM_THREADS=1`.

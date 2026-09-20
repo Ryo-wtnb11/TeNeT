@@ -146,20 +146,57 @@ fn op_bearing_serial_batch_uses_one_session_f64() {
     );
 }
 
+// The three operand-op pairs the tensor layer actually emits
+// (`fusion_block.rs:1718-1719`, `:1742-1743`, `:1848-1852`); `Transpose` is
+// never produced there.
 #[test]
 #[allow(clippy::redundant_closure)]
 fn op_bearing_serial_batch_uses_one_session_c64() {
-    serial_route_is_one_session_and_bitwise_equal(
-        |i| Complex64::new(0.5 + 0.25 * i as f64, -0.75 + 0.125 * i as f64),
-        |i| Complex64::new(2.0 + 0.05 * i as f64, -1.0 - 0.025 * i as f64),
-        DenseScalar::C64(Complex64::new(0.75, -0.5)),
-        DenseScalar::C64(Complex64::new(-0.25, 0.125)),
-        MatrixOp::Adjoint,
-        MatrixOp::Adjoint,
-        // Constructor functions fix one lifetime; the closures stay generic.
-        |view| DenseWrite::C64(view),
-        |view| DenseRead::C64(view),
-    );
+    for (lhs_op, rhs_op) in [
+        (MatrixOp::Adjoint, MatrixOp::Identity),
+        (MatrixOp::Identity, MatrixOp::Adjoint),
+        (MatrixOp::Adjoint, MatrixOp::Adjoint),
+    ] {
+        serial_route_is_one_session_and_bitwise_equal(
+            |i| Complex64::new(0.5 + 0.25 * i as f64, -0.75 + 0.125 * i as f64),
+            |i| Complex64::new(2.0 + 0.05 * i as f64, -1.0 - 0.025 * i as f64),
+            DenseScalar::C64(Complex64::new(0.75, -0.5)),
+            DenseScalar::C64(Complex64::new(-0.25, 0.125)),
+            lhs_op,
+            rhs_op,
+            // Constructor functions fix one lifetime; the closures stay generic.
+            |view| DenseWrite::C64(view),
+            |view| DenseRead::C64(view),
+        );
+    }
+}
+
+// An empty job list is a supported call on the op-bearing route
+// (`runs.len() == jobs.len()` with both empty). A session is a process-wide
+// critical section, so it must not be taken for an empty loop.
+#[test]
+fn op_bearing_empty_batch_opens_no_session() {
+    let _guard = counter_lock();
+    let strides = [1usize];
+    let mut output = [3.0f64];
+    let mut executor = DefaultDenseExecutor::with_threads(1).unwrap();
+
+    let before = sessions_opened();
+    executor
+        .matmul_batch_axpby_with_ops_into(
+            DenseWrite::F64(DenseViewMut::new(&mut output, &[1], &strides, 0).unwrap()),
+            DenseRead::F64(DenseView::new(&[1.0], &[1], &strides, 0).unwrap()),
+            DenseRead::F64(DenseView::new(&[2.0], &[1], &strides, 0).unwrap()),
+            &[],
+            &[],
+            MatrixOp::Transpose,
+            MatrixOp::Identity,
+            DenseScalar::F64(1.0),
+            DenseScalar::F64(0.0),
+        )
+        .unwrap();
+    assert_eq!(sessions_opened() - before, 0);
+    assert_eq!(output, [3.0]);
 }
 
 // A failure raised inside the session must surface the same typed error the

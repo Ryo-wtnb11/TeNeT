@@ -492,6 +492,11 @@ impl DefaultDenseExecutor {
         W: for<'x> Fn(DenseViewMut<'x, T>) -> DenseWrite<'x> + Send,
         R: for<'x> Fn(DenseView<'x, T>) -> DenseRead<'x> + Send,
     {
+        if jobs.is_empty() {
+            // A session is a process-wide critical section; do not take it for
+            // an empty loop. The pre-change path opened zero sessions here.
+            return Ok(());
+        }
         let output_base = output.offset();
         // One session for the whole job loop instead of one per job: Tenferro
         // charges execution-domain admission, the engine mutex, and (on faer) a
