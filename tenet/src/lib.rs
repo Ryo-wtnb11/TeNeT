@@ -84,7 +84,7 @@ pub mod prelude {
         CheckedGenericEigTrunc, CheckedGenericEighTrunc, DecodeError, DecodeLimits, EigTrunc,
         EighTrunc, EncodeError, GenericTensorError, GenericUnitTensorMapExt, GradedSpace,
         LegSelection, PhysicalDense, PhysicalDenseError, SectorSpectrum, SvdTrunc, TensorMap,
-        TensorScalar, TypedPersistenceCodec,
+        TensorScalar, TruncatedSelection, TypedPersistenceCodec,
     };
     pub use num_complex::Complex64;
     #[allow(deprecated)]

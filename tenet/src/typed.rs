@@ -4959,6 +4959,25 @@ where
     ) -> Result<f64, <Self as TypedTensorModeDispatch<R>>::FacadeError>;
 }
 
+/// The bond-truncation decision, selected by a provider-owned mode.
+///
+/// Both arms call the same `tenet_matrixalgebra::decide_bond_truncation*` that
+/// Host `svd_trunc`/`eigh_trunc` call, so the quantum-dimension weight, the
+/// spectrum validation and the returned error bits cannot drift from them.
+#[doc(hidden)]
+pub trait TypedTruncationDispatch<R>: TypedTensorModeDispatch<R>
+where
+    R: TypedSectorAdmission,
+{
+    fn decide_bond_truncation<V>(
+        provider: &R,
+        spectra: &[tenet_matrixalgebra::SectorSpectrum<V>],
+        truncation: &Truncation,
+    ) -> Result<tenet_matrixalgebra::TruncationDecision, Self::FacadeError>
+    where
+        V: tenet_matrixalgebra::SpectrumMagnitude;
+}
+
 #[doc(hidden)]
 pub trait TypedTensorReductionDispatch<R, D>: TypedTensorModeDispatch<R>
 where
@@ -5348,6 +5367,48 @@ where
             .try_sqrt_dim_scalar(sector)
             .map(|sqrt_dim| sqrt_dim * sqrt_dim)
             .map_err(<Self as TypedTensorModeDispatch<R>>::map_provider_error)
+    }
+}
+
+impl<R> TypedTruncationDispatch<R> for MultiplicityFreeAdmissionMode
+where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    fn decide_bond_truncation<V>(
+        provider: &R,
+        spectra: &[tenet_matrixalgebra::SectorSpectrum<V>],
+        truncation: &Truncation,
+    ) -> Result<tenet_matrixalgebra::TruncationDecision, Error>
+    where
+        V: tenet_matrixalgebra::SpectrumMagnitude,
+    {
+        // `false`: the public primitive is magnitude-based, as MatrixAlgebraKit
+        // `findtruncated` is. For the non-negative singular values Host
+        // `svd_trunc` passes with `true`, `|v|` is the same f64, so the
+        // decision and the error are bit-identical either way.
+        tenet_matrixalgebra::decide_bond_truncation(provider, spectra, truncation, false)
+            .map_err(Error::from)
+    }
+}
+
+impl<R> TypedTruncationDispatch<R> for CheckedGenericAdmissionMode
+where
+    R: TypedSectorAdmission<
+            Error = <R as CheckedGenericFusion>::Error,
+            Mode = CheckedGenericAdmissionMode,
+        > + CheckedGenericRigidSymbols<Scalar = f64>,
+{
+    fn decide_bond_truncation<V>(
+        provider: &R,
+        spectra: &[tenet_matrixalgebra::SectorSpectrum<V>],
+        truncation: &Truncation,
+    ) -> Result<tenet_matrixalgebra::TruncationDecision, Self::FacadeError>
+    where
+        V: tenet_matrixalgebra::SpectrumMagnitude,
+    {
+        tenet_matrixalgebra::decide_bond_truncation_generic_checked(provider, spectra, truncation)
+            .map_err(Into::into)
     }
 }
 
@@ -8264,6 +8325,130 @@ where
     }
 }
 
+impl<R> GradedSpace<R>
+where
+    R: TypedSectorAdmission,
+    R::Mode: TypedTruncationDispatch<R>,
+{
+    /// Decides which states of this leg a [`Truncation`] keeps, and how much
+    /// weight it discards.
+    ///
+    /// This is MatrixAlgebraKit's `findtruncated_svd` plus `truncation_error`
+    /// in one call: `spectra` are per-sector magnitudes, already descending, as
+    /// every TeNeT `*_compact` / `*_full` factorization publishes them, and the
+    /// result names the surviving bond states. Compose it with
+    /// [`TensorMap::restrict_leg`] on `u` and `vh` and
+    /// [`TensorMap::restrict_diagonal`] on `s` to obtain exactly what
+    /// [`TensorMap::svd_trunc`] returns.
+    ///
+    /// # Naming deviation
+    ///
+    /// MatrixAlgebraKit's `findtruncated` is a free function over a
+    /// `SectorVector`, which carries the sector structure with the values.
+    /// TeNeT's `&[SectorSpectrum]` carries neither the fusion rule (needed for
+    /// the quantum-dimension weight and for rejecting a foreign
+    /// [`TruncationSpace`]) nor the degeneracies (needed to validate the input
+    /// and to build the selection's parent), so the leg is the receiver: it is
+    /// the Rust equivalent of the `SectorVector`'s structure.
+    ///
+    /// # Input contract
+    ///
+    /// `spectra` must name every sector of this leg exactly once, each with
+    /// `values.len()` equal to that sector's degeneracy. Input order does not
+    /// matter: the spectra are ordered by [`SectorId`] — TensorKit's
+    /// `SectorVector` parent order — before the decision, and that order is
+    /// what breaks exact ties between sectors.
+    ///
+    /// Values are selected by magnitude (`|v|`), so signed `eigh` eigenvalues
+    /// and complex `eig` eigenvalues can be passed as published. Magnitudes
+    /// must be descending within a sector and finite; non-finite values are
+    /// rejected by the same check Host `svd_trunc` applies.
+    ///
+    /// # Complexity
+    ///
+    /// Spectrum-sized only, never payload-sized: `O(K)` to copy and validate
+    /// the `K = sum_c k_c` values, plus the decision's own cost — `O(K log G)`
+    /// for [`Truncation::Rank`], `O(G + D log G)` for
+    /// [`Truncation::DiscardWeight`] over `D` discarded values, `O(K)`
+    /// otherwise — and `O(G log G)` to build the selection for `G` sectors.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArgument`] when a sector is missing, repeated, unknown
+    /// to this leg, or carries a spectrum of the wrong length, and for a
+    /// malformed policy or an invalid spectrum; [`Error::RuleMismatch`]
+    /// (through the operation error, as Host `svd_trunc` reports it) for a
+    /// [`TruncationSpace`] built against another rule. Provider label-encoding
+    /// failures are returned unchanged.
+    pub fn find_truncated<V>(
+        &self,
+        spectra: &[SectorSpectrum<R::Sector, V>],
+        truncation: &Truncation,
+    ) -> Result<TruncatedSelection<R>, TypedFacadeError<R>>
+    where
+        V: tenet_matrixalgebra::SpectrumMagnitude,
+    {
+        let expected = self.leg.sectors().len();
+        if spectra.len() != expected {
+            return Err(Error::InvalidArgument(format!(
+                "find_truncated needs one spectrum per leg sector, got {} for {expected}",
+                spectra.len()
+            ))
+            .into());
+        }
+        let mut encoded = Vec::with_capacity(spectra.len());
+        for entry in spectra {
+            let sector = TypedSectorAdmission::try_encode_label(self.provider(), &entry.sector)
+                .map_err(<R::Mode as TypedTensorModeDispatch<R>>::map_provider_error)?;
+            let degeneracy = self.leg.degeneracy(sector).ok_or_else(|| {
+                TypedFacadeError::<R>::from(Error::InvalidArgument(format!(
+                    "sector {:?} is absent from the truncated leg",
+                    entry.sector
+                )))
+            })?;
+            if entry.values.len() != degeneracy {
+                return Err(Error::InvalidArgument(format!(
+                    "spectrum for sector {:?} has {} values, expected the leg degeneracy {degeneracy}",
+                    entry.sector,
+                    entry.values.len()
+                ))
+                .into());
+            }
+            encoded.push(tenet_matrixalgebra::SectorSpectrum {
+                sector,
+                values: entry.values.clone(),
+            });
+        }
+        encoded.sort_unstable_by_key(|entry| entry.sector);
+        if let Some(pair) = encoded
+            .windows(2)
+            .find(|pair| pair[0].sector == pair[1].sector)
+        {
+            return Err(Error::InvalidArgument(format!(
+                "sector {:?} carries more than one spectrum",
+                pair[0].sector
+            ))
+            .into());
+        }
+        let decision = <R::Mode as TypedTruncationDispatch<R>>::decide_bond_truncation(
+            self.provider(),
+            &encoded,
+            truncation,
+        )?;
+        let selection = LegSelection::from_prefix_counts(
+            self,
+            encoded
+                .iter()
+                .map(|entry| entry.sector)
+                .zip(decision.kept.iter().copied()),
+        )?;
+        Ok(TruncatedSelection {
+            selection,
+            error: decision.error,
+        })
+    }
+}
+
 impl<R> GradedSpace<R> {
     /// Returns per-sector degeneracies parallel to [`Self::sectors`].
     #[inline]
@@ -8460,6 +8645,83 @@ where
     }
 }
 
+impl<R> LegSelection<R>
+where
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorModeDispatch<R>,
+{
+    /// Builds the selection of leading prefixes `0..count` that a truncation
+    /// decision produced. `kept` must be ascending by [`SectorId`] and name
+    /// only sectors of `parent`, which [`GradedSpace::find_truncated`] has
+    /// already established.
+    ///
+    /// Why not [`Self::try_new`]: a decision that discards everything leaves no
+    /// sector to name, and Host `svd_trunc` represents that outcome as an
+    /// ordinary bond leg with no sectors. An empty list from a *caller* is
+    /// almost always a bug, so `try_new` keeps rejecting it.
+    fn from_prefix_counts(
+        parent: &GradedSpace<R>,
+        kept: impl IntoIterator<Item = (SectorId, usize)>,
+    ) -> Result<Self, TypedFacadeError<R>> {
+        let entries: Vec<(SectorId, std::ops::Range<usize>)> = kept
+            .into_iter()
+            .filter(|&(_, count)| count > 0)
+            .map(|(sector, count)| (sector, 0..count))
+            .collect();
+        let leg = SectorLeg::try_new(
+            entries
+                .iter()
+                .map(|(sector, range)| (*sector, range.end - range.start)),
+            parent.is_dual(),
+        )
+        .map_err(|error| TypedFacadeError::<R>::from(Error::InvalidArgument(error.to_string())))?;
+        Ok(Self {
+            parent: parent.clone(),
+            subspace: GradedSpace {
+                provider: Arc::clone(parent.provider_arc()),
+                leg,
+            },
+            entries,
+        })
+    }
+}
+
+/// The outcome of [`GradedSpace::find_truncated`]: what survives, and the norm
+/// of what does not.
+///
+/// MatrixAlgebraKit returns the same pair as `ind` from `findtruncated` plus
+/// `truncation_error!`; TeNeT names the index set a [`LegSelection`] so that
+/// [`TensorMap::restrict_leg`] and [`TensorMap::restrict_diagonal`] can apply
+/// it to the three factors of one decomposition.
+pub struct TruncatedSelection<R> {
+    /// The kept bond subspace. It is empty exactly when the policy discarded
+    /// every state, which is the bond Host `svd_trunc` returns for `Rank(0)`.
+    pub selection: LegSelection<R>,
+    /// MatrixAlgebraKit `truncation_error`: `sqrt(sum_c dim(c) sum_discarded v^2)`.
+    pub error: f64,
+}
+
+// Hand-written for the reason `LegSelection`'s are: the derives would demand
+// `R: Clone`/`R: Debug`, and the provider lives behind an `Arc`.
+impl<R> Clone for TruncatedSelection<R> {
+    fn clone(&self) -> Self {
+        Self {
+            selection: self.selection.clone(),
+            error: self.error,
+        }
+    }
+}
+
+impl<R> core::fmt::Debug for TruncatedSelection<R> {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("TruncatedSelection")
+            .field("selection", &self.selection)
+            .field("error", &self.error)
+            .finish()
+    }
+}
+
 impl<R> LegSelection<R> {
     /// The leg this selection was validated against.
     #[inline]
@@ -8472,6 +8734,17 @@ impl<R> LegSelection<R> {
     #[inline]
     pub fn subspace(&self) -> &GradedSpace<R> {
         &self.subspace
+    }
+
+    /// Whether this selection is the whole parent leg, so that restricting
+    /// with it would only copy.
+    ///
+    /// True exactly when every parent sector is selected over its full
+    /// degeneracy — including the degenerate case of a parent with no sectors,
+    /// where the only selection is also the whole leg.
+    #[inline]
+    pub fn is_full(&self) -> bool {
+        self.subspace.leg == self.parent.leg
     }
 }
 
@@ -13041,6 +13314,228 @@ where
             runtime: runtime.clone(),
             repr: owned_repr(TypedTensorBody::diagonal(space, spectrum)),
         })
+    }
+
+    /// The leg of a `bond <- bond` endomorphism, after proving that is what
+    /// the receiver is.
+    fn bond_endomorphism_leg(&self, operation: &str) -> Result<&SectorLeg, TypedFacadeError<R>> {
+        let homspace = self.logical_space().space().homspace();
+        if homspace.codomain().len() != 1 || homspace.domain().len() != 1 {
+            return Err(Error::InvalidArgument(format!(
+                "{operation} requires a rank-(1,1) bond <- bond map, got rank {}|{}",
+                homspace.codomain().len(),
+                homspace.domain().len()
+            ))
+            .into());
+        }
+        let codomain = &homspace.codomain().legs()[0];
+        if codomain != &homspace.domain().legs()[0] {
+            return Err(Error::InvalidArgument(format!(
+                "{operation} requires equal codomain and domain legs"
+            ))
+            .into());
+        }
+        Ok(codomain)
+    }
+
+    /// Returns the per-coupled-sector diagonal of a `bond <- bond` map.
+    ///
+    /// MatrixAlgebraKit's `diagview`, and the spectrum reader for a factor that
+    /// is diagonal by construction but not stored compactly — a checked-Generic
+    /// `s`, or a device `s`/`d` brought back with `to_host`. Compact storage is
+    /// cloned; dense storage is read one strided diagonal per block.
+    /// Off-diagonal entries are never inspected, so this returns the diagonal
+    /// of an arbitrary endomorphism, not a proof that it is diagonal — use
+    /// [`Self::is_diagonal`] for that.
+    ///
+    /// [`Self::diagonal_spectrum`] is a different question and is unchanged: it
+    /// answers whether the payload *is* compact.
+    ///
+    /// # Complexity
+    ///
+    /// `O(sum_c k_c)` reads and one output allocation per sector; no dense
+    /// block is materialized and no payload-sized copy is made.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArgument`] for a lazy adjoint (adjoin the result of the
+    /// owned parent instead), for a receiver that is not `bond <- bond`, and
+    /// for a layout whose blocks are not fusion-tree keyed.
+    pub fn diagview(&self) -> Result<Vec<SectorSpectrum<R::Sector, D>>, TypedFacadeError<R>> {
+        let body = self.owned_body().ok_or_else(|| {
+            TypedFacadeError::<R>::from(Error::InvalidArgument(
+                "diagview requires an owned tensor, not a lazy adjoint".to_string(),
+            ))
+        })?;
+        self.bond_endomorphism_leg("diagview")?;
+        let raw: Vec<tenet_matrixalgebra::SectorSpectrum<D>> = match body.data.as_ref() {
+            TypedData::Diagonal(spectrum) => spectrum.clone(),
+            TypedData::Dense(_) => {
+                let structure = self.logical_space().space().structure();
+                let data = body.materialized_dense_data();
+                let mut collected = Vec::with_capacity(structure.block_count());
+                for index in 0..structure.block_count() {
+                    let block = structure
+                        .block(index)
+                        .map_err(Error::from)
+                        .map_err(TypedFacadeError::<R>::from)?;
+                    let BlockKey::FusionTree(key) = block.key() else {
+                        return Err(Error::InvalidArgument(
+                            "diagview requires a fusion-tree block layout".to_string(),
+                        )
+                        .into());
+                    };
+                    let offset = block.offset();
+                    let step = block.strides()[0] + block.strides()[1];
+                    let count = block.shape()[0].min(block.shape()[1]);
+                    collected.push(tenet_matrixalgebra::SectorSpectrum {
+                        sector: key.codomain_tree().coupled(),
+                        values: (0..count)
+                            .map(|step_index| data[offset + step_index * step])
+                            .collect(),
+                    });
+                }
+                // Canonical bond-sector order, as compact storage already keeps
+                // it, so the two arms are interchangeable for the caller.
+                collected.sort_unstable_by_key(|entry| entry.sector);
+                if let Some(pair) = collected
+                    .windows(2)
+                    .find(|pair| pair[0].sector == pair[1].sector)
+                {
+                    return Err(Error::InvalidArgument(format!(
+                        "diagview: coupled sector {:?} names more than one block",
+                        pair[0].sector
+                    ))
+                    .into());
+                }
+                collected
+            }
+        };
+        raw.into_iter()
+            .map(|entry| {
+                Ok(SectorSpectrum {
+                    sector: TypedSectorAdmission::try_decode_label(
+                        self.logical_space().provider(),
+                        entry.sector,
+                    )
+                    .map_err(<R::Mode as TypedTensorModeDispatch<R>>::map_provider_error)?,
+                    values: entry.values,
+                })
+            })
+            .collect()
+    }
+
+    /// Restricts both legs of a `bond <- bond` map to `selection`.
+    ///
+    /// TensorKit's internal `truncate_diagonal!`, and the third of the three
+    /// calls that turn a compact factorization plus a
+    /// [`GradedSpace::find_truncated`] decision into a truncated one: `u` and
+    /// `vh` lose their bond with [`Self::restrict_leg`], `s` loses both of its
+    /// legs here. The result lives on `subspace <- subspace`, so a compact
+    /// payload stays compact — a single-leg restriction could not, because
+    /// `bond' <- bond` is no longer an endomorphism.
+    ///
+    /// # Cost
+    ///
+    /// Compact input: one `Vec` per kept sector, `O(sum_c k'_c)` values copied
+    /// in total, plus the destination root build; the discarded values are
+    /// never touched, and no dense block is materialized. Dense input: one
+    /// zeroed output payload and one strided copy per block — the same single
+    /// kernel call [`Self::restrict_leg`] makes, with both axes restricted at
+    /// once.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArgument`] for a lazy adjoint, for a receiver that is
+    /// not `bond <- bond`, and when that bond is not
+    /// [`LegSelection::parent`]; [`Error::RuleMismatch`] when the selection
+    /// belongs to another rule. Nothing is allocated before every check has
+    /// passed.
+    pub fn restrict_diagonal(
+        &self,
+        selection: &LegSelection<R>,
+    ) -> Result<Self, TypedFacadeError<R>> {
+        let body = self.owned_body().ok_or_else(|| {
+            TypedFacadeError::<R>::from(Error::InvalidArgument(
+                "restrict_diagonal requires an owned tensor, not a lazy adjoint".to_string(),
+            ))
+        })?;
+        if TypedSectorAdmission::typed_rule_identity(self.provider())
+            != TypedSectorAdmission::typed_rule_identity(selection.parent().provider())
+        {
+            return Err(Error::RuleMismatch.into());
+        }
+        let bond = self.bond_endomorphism_leg("restrict_diagonal")?;
+        if bond != selection.parent().leg() {
+            return Err(Error::InvalidArgument(
+                "restrict_diagonal: this map's bond is not the leg this selection was built from"
+                    .to_string(),
+            )
+            .into());
+        }
+        let subspace = selection.subspace().leg();
+        let homspace = FusionTreeHomSpace::new(
+            FusionProductSpace::new([subspace.clone()]),
+            FusionProductSpace::new([subspace.clone()]),
+        );
+        let destination = <R::Mode as TypedTensorRootDispatch<R>>::build_root(
+            Arc::clone(self.logical_space().provider_arc()),
+            homspace,
+        )?;
+        match body.data.as_ref() {
+            TypedData::Diagonal(spectrum) => {
+                let mut kept = Vec::with_capacity(selection.entries.len());
+                for (sector, range) in &selection.entries {
+                    // Both lists are in canonical `SectorId` order, so this is
+                    // a lookup, not a scan. A violated order can only make the
+                    // search miss, which is the typed error below — never a
+                    // match on the wrong sector, because the key is compared.
+                    let values = spectrum
+                        .binary_search_by_key(sector, |entry| entry.sector)
+                        .ok()
+                        .and_then(|index| spectrum[index].values.get(range.clone()))
+                        .ok_or_else(|| {
+                            TypedFacadeError::<R>::from(Error::InvalidArgument(format!(
+                                "restrict_diagonal: the compact payload has no [{}, {}) for sector {:?}",
+                                range.start, range.end, sector
+                            )))
+                        })?;
+                    kept.push(tenet_matrixalgebra::SectorSpectrum {
+                        sector: *sector,
+                        values: values.to_vec(),
+                    });
+                }
+                Ok(self.with_spectrum_on(destination, kept))
+            }
+            TypedData::Dense(_) => {
+                let len = destination
+                    .space()
+                    .required_len()
+                    .map_err(Error::from)
+                    .map_err(TypedFacadeError::<R>::from)?;
+                let mut data = tenet_tensors::zeroed_payload::<D>(len);
+                let table: Vec<(SectorId, usize)> = selection
+                    .entries
+                    .iter()
+                    .map(|(sector, range)| (*sector, range.start))
+                    .collect();
+                let starts: Vec<tenet_tensors::SectorStartTable<'_>> =
+                    vec![Some(table.as_slice()); 2];
+                let (source, source_data) = self.fusion_operand_and_data();
+                tenet_tensors::oriented_fusion_restrict_into(
+                    destination.space().structure(),
+                    &mut data,
+                    source,
+                    source_data,
+                    &starts,
+                )
+                .map_err(Error::from)?;
+                Ok(Self {
+                    runtime: self.runtime.clone(),
+                    repr: owned_repr(TypedTensorBody::dense(destination, data)),
+                })
+            }
+        }
     }
 
     /// Returns the compact diagonal spectrum without materializing dense data.
