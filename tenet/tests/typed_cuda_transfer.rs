@@ -336,14 +336,18 @@ where
     assert_eq!(source_device.to_host().unwrap().data(), source_data);
 }
 
+/// Host and device `(u, s, vh)` triples, as `svd_compact` returns them.
+type HostSvdFactors<R, D> = (TensorMap<R, D>, TensorMap<R, D>, TensorMap<R, D>);
+type DeviceSvdFactors<R, D> = (
+    TensorMap<R, D, CudaStorage<D>>,
+    TensorMap<R, D, CudaStorage<D>>,
+    TensorMap<R, D, CudaStorage<D>>,
+);
+
 fn assert_cuda_svd_result<R>(
     source: &TensorMap<R, f64>,
-    expected: &(TensorMap<R, f64>, TensorMap<R, f64>, TensorMap<R, f64>),
-    factors: (
-        TensorMap<R, f64, CudaStorage>,
-        TensorMap<R, f64, CudaStorage>,
-        TensorMap<R, f64, CudaStorage>,
-    ),
+    expected: &HostSvdFactors<R, f64>,
+    factors: DeviceSvdFactors<R, f64>,
 ) where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
 {
@@ -2245,4 +2249,362 @@ fn typed_cuda_c64_lazy_adjoint_contract_matches_a_hand_expansion() {
         expected.iter().flatten().any(|value| value.im != 0.0),
         "the oracle must distinguish conjugation from transposition"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Complex64 device factorizations
+// ---------------------------------------------------------------------------
+
+/// Deterministic, genuinely complex, generically full-rank fill.
+///
+/// A ramp fill such as [`complex_entry`] makes every coupled-sector block
+/// rank two at most, which neither exercises the positive-diagonal gauge on a
+/// full-rank sector nor lets Host factors be compared at all. Every element
+/// gets its own hashed value instead.
+fn pseudo_random_c64(ordinal: usize) -> Complex64 {
+    fn mix(seed: u64) -> f64 {
+        let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0xD1B5_4A32_D192_ED03;
+        state ^= state >> 29;
+        state = state.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        state ^= state >> 32;
+        ((state >> 11) as f64) / ((1u64 << 53) as f64) - 0.5
+    }
+    let ordinal = ordinal as u64 + 1;
+    Complex64::new(mix(ordinal), mix(ordinal.wrapping_add(0x0005_DEEC_E66D)))
+}
+
+/// Per-element counter fill; see [`pseudo_random_c64`].
+fn distinct_c64_fill<S>() -> impl FnMut(&BlockFusionTrees<S>, &[usize]) -> Complex64 {
+    let mut ordinal = 0usize;
+    move |_, _| {
+        ordinal += 1;
+        pseudo_random_c64(ordinal)
+    }
+}
+
+fn assert_device_factor_handles<R, const N: usize>(
+    source: &TensorMap<R, Complex64>,
+    factors: [&TensorMap<R, Complex64, CudaStorage<Complex64>>; N],
+) where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+{
+    let provider = source.provider() as *const R;
+    let runtime = source.runtime().identity();
+    for factor in factors {
+        assert!(std::ptr::eq(factor.provider(), provider));
+        assert!(runtime.matches(factor.runtime()));
+        assert_eq!(factor.placement(), tenet::core::Placement::Cuda(0));
+    }
+}
+
+fn assert_c64_svd_matches_host<R>(source: &TensorMap<R, Complex64>)
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+{
+    let source_data = source.data().to_vec();
+    let expected = source.svd_compact().unwrap();
+    let device = source.to_cuda().unwrap();
+    let (u_device, s_device, vh_device) = device.svd_compact().unwrap();
+    assert_device_factor_handles(source, [&u_device, &s_device, &vh_device]);
+
+    let u = u_device.to_host().unwrap();
+    let s = s_device.to_host().unwrap();
+    let vh = vh_device.to_host().unwrap();
+    for (actual, expected) in [(&u, &expected.0), (&s, &expected.1), (&vh, &expected.2)] {
+        assert_eq!(structural_snapshot(actual), structural_snapshot(expected));
+    }
+    // `u`/`vh` keep the raw device gauge, so only gauge-invariant quantities
+    // are compared: the spectrum, both orthonormality relations, and `u s vh`.
+    assert_close_c64(s.data(), expected.1.data(), 1e-9);
+    assert!(u.is_isometric(1e-10).unwrap(), "U^H U = I");
+    assert!(
+        vh.adjoint().unwrap().is_isometric(1e-10).unwrap(),
+        "V^H V = I"
+    );
+    assert_close_c64(
+        u.compose(&s).unwrap().compose(&vh).unwrap().data(),
+        &source_data,
+        1e-9,
+    );
+    assert_eq!(device.to_host().unwrap().data(), source_data);
+}
+
+fn assert_c64_svd_trunc_matches_host<R>(source: &TensorMap<R, Complex64>, truncation: &Truncation)
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+{
+    let source_data = source.data().to_vec();
+    let expected = source.svd_trunc(truncation).unwrap();
+    let device = source.to_cuda().unwrap();
+    let actual = device.svd_trunc(truncation).unwrap();
+    assert_device_factor_handles(source, [&actual.u, &actual.s, &actual.vh]);
+
+    assert_eq!(actual.singular_values.len(), expected.singular_values.len());
+    for (actual, expected) in actual.singular_values.iter().zip(&expected.singular_values) {
+        assert_eq!(actual.sector, expected.sector);
+        assert_close(&actual.values, &expected.values, 1e-9);
+    }
+    assert!((actual.error - expected.error).abs() <= 1e-9 * (1.0 + expected.error));
+
+    let u = actual.u.to_host().unwrap();
+    let s = actual.s.to_host().unwrap();
+    let vh = actual.vh.to_host().unwrap();
+    for (actual, expected) in [(&u, &expected.u), (&s, &expected.s), (&vh, &expected.vh)] {
+        assert_eq!(structural_snapshot(actual), structural_snapshot(expected));
+    }
+    assert_close_c64(s.data(), expected.s.data(), 1e-9);
+    assert!(u.is_isometric(1e-10).unwrap(), "U^H U = I");
+    assert!(
+        vh.adjoint().unwrap().is_isometric(1e-10).unwrap(),
+        "V^H V = I"
+    );
+    let actual_rebuilt = u.compose(&s).unwrap().compose(&vh).unwrap();
+    let expected_rebuilt = expected
+        .u
+        .compose(&expected.s)
+        .unwrap()
+        .compose(&expected.vh)
+        .unwrap();
+    assert_close_c64(actual_rebuilt.data(), expected_rebuilt.data(), 1e-9);
+    assert_eq!(device.to_host().unwrap().data(), source_data);
+}
+
+/// `a + a^H` as a Hermitian fixture with nonzero imaginary off-diagonals: a
+/// transpose-only admission rule would reject it.
+fn hermitian_c64<R>(source: &TensorMap<R, Complex64>) -> TensorMap<R, Complex64>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+{
+    let hermitian = source
+        .add(
+            &source.adjoint().unwrap(),
+            Complex64::new(1.0, 0.0),
+            Complex64::new(1.0, 0.0),
+        )
+        .unwrap();
+    assert!(
+        hermitian.block_count() > 0
+            && (0..hermitian.block_count()).any(|index| {
+                let block = hermitian.block(index).unwrap();
+                (0..block.shape()[0]).any(|row| {
+                    (0..block.shape()[1]).any(|col| {
+                        row != col
+                            && hermitian.data()[block.offset()
+                                + row * block.strides()[0]
+                                + col * block.strides()[1]]
+                                .im
+                                .abs()
+                                > 1e-6
+                    })
+                })
+            }),
+        "Hermitian fixture must have nonzero imaginary off-diagonal entries"
+    );
+    hermitian
+}
+
+fn assert_c64_eigh_matches_host<R>(source: &TensorMap<R, Complex64>, truncation: &Truncation)
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+{
+    let source_data = source.data().to_vec();
+    let expected = source.eigh_trunc(truncation).unwrap();
+    let device = source.to_cuda().unwrap();
+    let actual = device.eigh_trunc(truncation).unwrap();
+    assert_device_factor_handles(source, [&actual.d, &actual.v]);
+
+    assert_eq!(actual.eigenvalues.len(), expected.eigenvalues.len());
+    for (actual, expected) in actual.eigenvalues.iter().zip(&expected.eigenvalues) {
+        assert_eq!(actual.sector, expected.sector);
+        assert_close(&actual.values, &expected.values, 1e-9);
+    }
+    assert!((actual.error - expected.error).abs() <= 1e-9 * (1.0 + expected.error));
+
+    let d = actual.d.to_host().unwrap();
+    let v = actual.v.to_host().unwrap();
+    assert_eq!(structural_snapshot(&d), structural_snapshot(&expected.d));
+    assert_eq!(structural_snapshot(&v), structural_snapshot(&expected.v));
+    // Hermitian eigenvalues are real for a complex payload too.
+    assert!(
+        d.data().iter().all(|value| value.im.abs() <= 1e-10),
+        "eigenvalues must be real"
+    );
+    assert_close_c64(d.data(), expected.d.data(), 1e-9);
+    assert!(v.is_isometric(1e-10).unwrap(), "V^H V = I");
+    if matches!(truncation, Truncation::Full) {
+        let rebuilt = v
+            .compose(&d)
+            .unwrap()
+            .compose(&v.adjoint().unwrap())
+            .unwrap();
+        assert_close_c64(rebuilt.data(), &source_data, 1e-9);
+    }
+    assert_eq!(device.to_host().unwrap().data(), source_data);
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn typed_cuda_c64_svd_matches_host_spectra_and_truncation_policies() {
+    let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+    let u1 = Arc::new(U1FusionRule);
+    let rows = GradedSpace::try_new_with_arc(
+        Arc::clone(&u1),
+        [(U1Irrep::new(0), 3), (U1Irrep::new(1), 2)],
+    )
+    .unwrap();
+    let cols = GradedSpace::try_new_with_arc(
+        Arc::clone(&u1),
+        [(U1Irrep::new(0), 2), (U1Irrep::new(1), 3)],
+    )
+    .unwrap();
+    let rectangular =
+        TensorMap::<_, Complex64>::from_block_fn(&runtime, [&rows], [&cols], distinct_c64_fill())
+            .unwrap();
+    assert_c64_svd_matches_host(&rectangular);
+
+    let su2 = GradedSpace::try_new_with_arc(
+        Arc::new(SU2FusionRule),
+        [
+            (SU2Irrep::from_twice_spin(0), 2),
+            (SU2Irrep::from_twice_spin(1), 2),
+        ],
+    )
+    .unwrap();
+    let su2_tensor = TensorMap::<_, Complex64>::from_block_fn(
+        &runtime,
+        [&su2, &su2, &su2],
+        [&su2, &su2],
+        distinct_c64_fill(),
+    )
+    .unwrap();
+    assert_c64_svd_matches_host(&su2_tensor);
+
+    let unmatched_space = GradedSpace::try_new_with_arc(
+        Arc::new(U1FusionRule),
+        [(U1Irrep::new(0), 1), (U1Irrep::new(1), 1)],
+    )
+    .unwrap();
+    let policies = [
+        // Full, discard-all, and mixed keep/drop decisions.
+        Truncation::Full,
+        Truncation::rank(0),
+        Truncation::rank(2),
+        Truncation::rank(usize::MAX),
+        Truncation::absolute_cutoff(0.25).unwrap(),
+        Truncation::relative_inf_cutoff(0.2).unwrap(),
+        Truncation::relative_error(0.1).unwrap(),
+        Truncation::space(unmatched_space.truncspace()),
+        Truncation::rank(3).and(Truncation::absolute_cutoff(0.1).unwrap()),
+    ];
+    for policy in &policies {
+        assert_c64_svd_trunc_matches_host(&rectangular, policy);
+    }
+    assert_c64_svd_trunc_matches_host(&su2_tensor, &Truncation::rank(2));
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn typed_cuda_c64_eigh_admits_hermitian_and_rejects_complex_symmetric_input() {
+    let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+    let u1 = GradedSpace::try_new_with_arc(
+        Arc::new(U1FusionRule),
+        [(U1Irrep::new(0), 3), (U1Irrep::new(1), 2)],
+    )
+    .unwrap();
+    let hermitian = hermitian_c64(
+        &TensorMap::<_, Complex64>::from_block_fn(&runtime, [&u1], [&u1], distinct_c64_fill())
+            .unwrap(),
+    );
+    assert_c64_eigh_matches_host(&hermitian, &Truncation::Full);
+    assert_c64_eigh_matches_host(&hermitian, &Truncation::rank(2));
+
+    let (d, v) = hermitian.to_cuda().unwrap().eigh_full().unwrap();
+    let d = d.to_host().unwrap();
+    let v = v.to_host().unwrap();
+    assert!(v.is_isometric(1e-10).unwrap(), "V^H V = I");
+    assert_close_c64(
+        v.compose(&d)
+            .unwrap()
+            .compose(&v.adjoint().unwrap())
+            .unwrap()
+            .data(),
+        hermitian.data(),
+        1e-9,
+    );
+
+    let su2 = GradedSpace::try_new_with_arc(
+        Arc::new(SU2FusionRule),
+        [
+            (SU2Irrep::from_twice_spin(0), 2),
+            (SU2Irrep::from_twice_spin(1), 2),
+        ],
+    )
+    .unwrap();
+    let su2_hermitian = hermitian_c64(
+        &TensorMap::<_, Complex64>::from_block_fn(
+            &runtime,
+            [&su2, &su2],
+            [&su2, &su2],
+            distinct_c64_fill(),
+        )
+        .unwrap(),
+    );
+    assert_c64_eigh_matches_host(&su2_hermitian, &Truncation::Full);
+
+    // `a^T = a` but `a^H != a`: a transpose-only admission rule would accept.
+    let complex_symmetric =
+        TensorMap::<_, Complex64>::from_block_fn(&runtime, [&u1], [&u1], |_, indices| {
+            let (row, col) = (indices[0].min(indices[1]), indices[0].max(indices[1]));
+            Complex64::new(1.0 + row as f64, 1.0 + col as f64)
+        })
+        .unwrap();
+    assert!(
+        complex_symmetric.eigh_full().is_err(),
+        "the Host oracle rejects a complex-symmetric non-Hermitian input"
+    );
+    let device_error = complex_symmetric
+        .to_cuda()
+        .unwrap()
+        .eigh_full()
+        .expect_err("device EIGH must reject a complex-symmetric non-Hermitian input");
+    assert!(
+        matches!(
+            &device_error,
+            tenet::typed::Error::Operation(error)
+                if matches!(
+                    **error,
+                    tenet::operations::OperationError::UnsupportedTensorContractScope { .. }
+                )
+        ),
+        "unexpected error: {device_error:?}"
+    );
+
+    // A 2x2 hand case: `[[1, i], [-i, 1]]` is Hermitian, `[[1, i], [i, 1]]` is
+    // complex-symmetric and must be rejected.
+    let leg =
+        GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
+    let hand_hermitian =
+        TensorMap::<_, Complex64>::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+            match (indices[0], indices[1]) {
+                (0, 1) => Complex64::new(0.0, 1.0),
+                (1, 0) => Complex64::new(0.0, -1.0),
+                _ => Complex64::new(1.0, 0.0),
+            }
+        })
+        .unwrap();
+    let (d, _) = hand_hermitian.to_cuda().unwrap().eigh_full().unwrap();
+    let mut values: Vec<f64> = d.to_host().unwrap().data().iter().map(|z| z.re).collect();
+    values.sort_by(f64::total_cmp);
+    assert_close(&values, &[0.0, 0.0, 0.0, 2.0], 1e-10);
+
+    let hand_symmetric =
+        TensorMap::<_, Complex64>::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+            if indices[0] == indices[1] {
+                Complex64::new(1.0, 0.0)
+            } else {
+                Complex64::new(0.0, 1.0)
+            }
+        })
+        .unwrap();
+    assert!(hand_symmetric.to_cuda().unwrap().eigh_full().is_err());
 }

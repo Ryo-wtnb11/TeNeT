@@ -367,8 +367,11 @@ is the default. The builder selects thread counts, dense backends, and the
 `tensor!` optimizer. With the `cuda` feature, `.cuda(device)` attaches a device
 to the runtime; tensors remain on Host storage until `to_cuda()` transfers them
 explicitly. Device payloads are `f64` and `Complex64`; single precision has no
-device payload, and device factorizations (`qr_compact`, `svd_compact`,
-`svd_trunc`, `eigh_full`, `eigh_trunc`) are still `f64`-only.
+device payload. `svd_compact`, `svd_trunc`, `eigh_full` and
+`eigh_trunc` run on device for both payloads: EIGH admits a block only when it
+equals its conjugate transpose, and `u`/`vh` keep the raw device SVD gauge
+instead of the Host largest-pivot gauge. `qr_compact` returns the
+positive-diagonal gauge and is device-available for `f64` only.
 
 ```rust
 use tenet::prelude::*;

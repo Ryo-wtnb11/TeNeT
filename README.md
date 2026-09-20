@@ -90,8 +90,9 @@ capability bounds. Checked Generic providers have a separate Host-only path for
 construction, transforms, tensor products, owned composition and trace, static
 N-ary networks, and explicit sliced execution, subject to each operation's
 bounds. Supported typed CUDA paths are an explicit-transfer,
-multiplicity-free `f64` and `Complex64` subset; device factorizations remain
-`f64`-only. A failed checked operation returns no output
+multiplicity-free `f64` and `Complex64` subset, including compact SVD and
+EIGH in both payloads and compact QR in `f64`. A failed checked operation
+returns no output
 tensor or partial factor tuple.
 
 SU(2) representation algebra itself is not reimplemented here: `tenet-sectors`
@@ -256,7 +257,7 @@ The Python side calls `cotengra.array_contract_tree(...)` and returns
 | `blas-openblas` | OpenBLAS-backed BLAS/LAPACK feature wiring. |
 | `blas-mkl` | MKL-backed BLAS/LAPACK feature wiring. |
 | `provider-inject` | Allow injecting a dense backend explicitly. |
-| `cuda` | Compile the supported typed CUDA paths: multiplicity-free `f64` and `Complex64` payloads, with device factorizations still `f64`-only; a CPU feature is also required for Host-only execution used elsewhere. |
+| `cuda` | Compile the supported typed CUDA paths: multiplicity-free `f64` and `Complex64` payloads, including compact SVD/EIGH in both and compact QR in `f64`; a CPU feature is also required for Host-only execution used elsewhere. |
 | `racah-generated` | Enable Racah-generated coefficient data and the checked Generic SUN provider through `tenet-sectors`, `tenet-core`, `tenet`, and `tenet-network`. |
 | `opt-path` | Enable `opt-einsum-path` optimizers in `tenet-network`. Enable it on `tenet-network`, not on `tenet`: on `tenet` it is a marker that only adds the `Optimizer::{Optimal, DynamicProgramming, AutoHq}` variants. |
 | `cotengra-python` | Enable the Python cotengra planner bridge in `tenet-network`. Same marker relationship: on `tenet` it only adds `Optimizer::CotengraPython` and its config types. |
@@ -275,8 +276,12 @@ TENET_COTENGRA_UV_PROJECT=tools/cotengra-python \
 - Checked Generic providers are Host-only. Representative tested typed scope
   includes construction, transforms, tensor products, owned composition and
   trace, static N-ary networks, and explicit sliced execution. CUDA supports a
-  multiplicity-free `f64`/`Complex64` subset after explicit transfer;
-  device factorizations remain `f64`-only.
+  multiplicity-free `f64`/`Complex64` subset after explicit transfer,
+  including compact SVD and EIGH in both payloads. Device SVD keeps the raw
+  backend gauge on `u`/`vh` rather than the Host largest-pivot gauge. Device
+  `qr_compact` is `f64`-only because tenferro-gpu 0.5.0's `triu` kernel does
+  not compile for a `Complex64` payload; full and values-only factorizations,
+  `eig`, and matrix functions have no device path.
 - Execution crates reject a no-default-features build because their convenience
   APIs require a concrete executor. Use `tenet-sectors` / `tenet-core` for
   backend-free types, or enable a CPU feature or `provider-inject` for the full

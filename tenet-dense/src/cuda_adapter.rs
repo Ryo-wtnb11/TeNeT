@@ -5,13 +5,12 @@
 
 use num_complex::Complex64;
 use tenferro_gpu::cuda::{download_tensor, upload_tensor, CudaBackend, CudaDeviceId};
-use tenferro_linalg::TensorReadLinalgExt;
+use tenferro_linalg::{QrGauge, QrOptions, TensorReadLinalgExt};
 use tenferro_tensor::backend::{BackendSession, BackendSessionHost};
 use tenferro_tensor::{
     ContractionScalar, DotGeneralAccumulation, DotGeneralConfig, Tensor, TensorDot,
     TensorElementwise, TensorRead, TensorReduction, TensorScalar as TenferroScalar,
-    TensorStructural, TensorView, TensorViewCanonicalization, TensorViewMut, TensorWrite,
-    TypedTensor,
+    TensorStructural, TensorView, TensorViewMut, TensorWrite, TypedTensor,
 };
 
 use super::{DenseBackend, DenseDType, DenseError, MatrixOp};
@@ -36,6 +35,10 @@ pub trait CudaScalar: TenferroScalar + cuda_scalar_sealed::Sealed {
     const ZERO: Self;
     /// Multiplicative identity, for unscaled GEMMs.
     const ONE: Self;
+    /// Whether this payload has an imaginary part. Used to skip the
+    /// value-preserving `conj`/`abs` passes on the real dtype; it is a dtype
+    /// invariant, not a size or workload heuristic.
+    const IS_COMPLEX: bool;
 
     /// The backend's dtype-erased GEMM coefficient for this payload.
     fn contraction_scalar(self) -> ContractionScalar;
@@ -51,6 +54,7 @@ impl CudaScalar for f64 {
     const DTYPE: DenseDType = DenseDType::F64;
     const ZERO: Self = 0.0;
     const ONE: Self = 1.0;
+    const IS_COMPLEX: bool = false;
 
     fn contraction_scalar(self) -> ContractionScalar {
         ContractionScalar::F64(self)
@@ -75,6 +79,7 @@ impl CudaScalar for Complex64 {
     const DTYPE: DenseDType = DenseDType::C64;
     const ZERO: Self = Complex64::new(0.0, 0.0);
     const ONE: Self = Complex64::new(1.0, 0.0);
+    const IS_COMPLEX: bool = true;
 
     fn contraction_scalar(self) -> ContractionScalar {
         ContractionScalar::C64(self)
@@ -498,7 +503,7 @@ fn download_values(ctx: &CudaDenseContext, tensor: &Tensor) -> Result<Vec<f64>, 
             .map(|data| {
                 #[cfg(test)]
                 CUDA_METADATA_DOWNLOAD_BYTES
-                    .fetch_add(data.len() * std::mem::size_of::<f64>(), Ordering::Relaxed);
+                    .fetch_add(std::mem::size_of_val(data), Ordering::Relaxed);
                 data.to_vec()
             })
             .map_err(|err| cuda_error("cuda_download", err)),
@@ -543,14 +548,33 @@ fn scaled_hermitian_residual_accepts(input_ss: f64, residual_scale: f64, residua
         && 0.5 * residual_scale * residual_ss.sqrt() <= 64.0 * f64::EPSILON * input_ss.sqrt()
 }
 
-/// Tests one packed f64 CUDA matrix region with the host EIGH rule
-/// `||(A - A^T)/2||_F <= 64 eps ||A||_F`.
+/// Real magnitudes of a device tensor, so the real-only sum-of-squares
+/// reduction sees `|z|^2` for a complex payload. `abs` leaves an `f64` tensor
+/// numerically unchanged under that reduction, so the extra pass is skipped
+/// there on the dtype invariant.
+fn magnitudes_for_sum_squares<D: CudaScalar>(
+    ctx: &mut CudaDenseContext,
+    op: &'static str,
+    tensor: &Tensor,
+) -> Result<Option<Tensor>, DenseError> {
+    if !D::IS_COMPLEX {
+        return Ok(None);
+    }
+    ctx.backend
+        .abs(tensor)
+        .map(Some)
+        .map_err(|err| cuda_error(op, err))
+}
+
+/// Tests one packed CUDA matrix region with the host EIGH rule
+/// `||(A - A^H)/2||_F <= 64 eps ||A||_F`. The residual uses the *conjugate*
+/// transpose, so a complex-symmetric non-Hermitian block is rejected.
 ///
-/// The normal and transposed views are materialized and reduced on device.
-/// Only scalar norm metadata is downloaded; the receiver region is never
-/// copied to the host. Operation-local workspaces are dropped on return.
+/// The normal and conjugate-transposed views are materialized and reduced on
+/// device. Only scalar norm metadata is downloaded; the receiver region is
+/// never copied to the host. Operation-local workspaces are dropped on return.
 #[doc(hidden)]
-pub fn cuda_is_hermitian_region(
+pub fn cuda_is_hermitian_region<D: CudaScalar>(
     ctx: &mut CudaDenseContext,
     src: &CudaDenseStorage,
     offset: usize,
@@ -562,7 +586,7 @@ pub fn cuda_is_hermitian_region(
         return Ok(true);
     }
 
-    let normal_view = src.region_view_strided::<f64>([n, n], [1, n], offset)?;
+    let normal_view = src.region_view_strided::<D>([n, n], [1, n], offset)?;
     let normal = ctx
         .backend
         .to_contiguous_read(TensorRead::from_view(normal_view))
@@ -585,11 +609,19 @@ pub fn cuda_is_hermitian_region(
         return Ok(true);
     }
 
-    let transpose_view = src.region_view_strided::<f64>([n, n], [n, 1], offset)?;
+    let transpose_view = src.region_view_strided::<D>([n, n], [n, 1], offset)?;
     let transpose = ctx
         .backend
         .to_contiguous_read(TensorRead::from_view(transpose_view))
         .map_err(|err| cuda_error(OP, err))?;
+    // Conjugation is a backend op on the transposed copy, never a TeNeT loop.
+    let transpose = if D::IS_COMPLEX {
+        ctx.backend
+            .conj(&transpose)
+            .map_err(|err| cuda_error(OP, err))?
+    } else {
+        transpose
+    };
     let scale = upload_scalar(ctx, input_scale)?;
     let normal_scaled = ctx
         .backend
@@ -599,9 +631,13 @@ pub fn cuda_is_hermitian_region(
         .backend
         .div(&transpose, &scale)
         .map_err(|err| cuda_error(OP, err))?;
+    let input_magnitudes = magnitudes_for_sum_squares::<D>(ctx, OP, &normal_scaled)?;
     let input_ss = ctx
         .backend
-        .reduce_sum_squares_read(TensorRead::from_tensor(&normal_scaled), &[0, 1])
+        .reduce_sum_squares_read(
+            TensorRead::from_tensor(input_magnitudes.as_ref().unwrap_or(&normal_scaled)),
+            &[0, 1],
+        )
         .map_err(|err| cuda_error(OP, err))?;
     let input_ss = download_scalar(ctx, &input_ss, OP)?;
 
@@ -630,9 +666,13 @@ pub fn cuda_is_hermitian_region(
         .backend
         .div(&residual, &residual_scale_tensor)
         .map_err(|err| cuda_error(OP, err))?;
+    let residual_magnitudes = magnitudes_for_sum_squares::<D>(ctx, OP, &residual_normalized)?;
     let residual_ss = ctx
         .backend
-        .reduce_sum_squares_read(TensorRead::from_tensor(&residual_normalized), &[0, 1])
+        .reduce_sum_squares_read(
+            TensorRead::from_tensor(residual_magnitudes.as_ref().unwrap_or(&residual_normalized)),
+            &[0, 1],
+        )
         .map_err(|err| cuda_error(OP, err))?;
     let residual_ss = download_scalar(ctx, &residual_ss, OP)?;
     Ok(scaled_hermitian_residual_accepts(
@@ -642,25 +682,61 @@ pub fn cuda_is_hermitian_region(
     ))
 }
 
-fn expect_f64(
+fn expect_dtype<D: CudaScalar>(
     op: &'static str,
     tensor: Tensor,
     device: usize,
 ) -> Result<CudaDenseStorage, DenseError> {
-    match &tensor {
-        Tensor::F64(_) => Ok(CudaDenseStorage::from_tensor(tensor, device)),
-        other => Err(cuda_error(
-            op,
-            format!("expected an f64 device factor, got {:?}", other.dtype()),
-        )),
+    if D::typed(&tensor).is_none() {
+        return Err(dtype_mismatch::<D>(op, &tensor));
     }
+    Ok(CudaDenseStorage::from_tensor(tensor, device))
+}
+
+/// Copies a whole compact device factor into a packed sub-region of `dst`.
+///
+/// Tenferro's `copy_read_into` accepts an offset/strided destination view but
+/// requires a compact source view at offset 0, so this is a whole-factor copy;
+/// the caller owns the proof that the destination region's tree layout is
+/// identical to the factor's (see `compile_cuda_qr_plan`).
+pub fn cuda_copy_region_into<D: CudaScalar>(
+    ctx: &mut CudaDenseContext,
+    dst: &mut CudaDenseStorage,
+    dst_offset: usize,
+    dst_ld: usize,
+    src: &CudaDenseStorage,
+    rows: usize,
+    cols: usize,
+) -> Result<(), DenseError> {
+    const OP: &str = "cuda_copy_region";
+    ensure_cuda_device(ctx.device, OP, &[("dst", dst.device), ("src", src.device)])?;
+    if rows == 0 || cols == 0 {
+        return Ok(());
+    }
+    if src.len != rows * cols {
+        return Err(cuda_error(
+            OP,
+            format!(
+                "source factor holds {} elements; expected {rows} x {cols}",
+                src.len
+            ),
+        ));
+    }
+    let src_view = src.region_view::<D>(rows, cols, rows, 0)?;
+    let dst_view = dst.region_view_mut::<D>(rows, cols, dst_ld, dst_offset)?;
+    ctx.backend
+        .copy_read_into(
+            TensorRead::from_view(src_view),
+            TensorWrite::from_view(dst_view),
+        )
+        .map_err(|err| cuda_error(OP, err))
 }
 
 /// cuSOLVER SVD of one packed column-major `rows x cols` region:
 /// `region = U * diag(s) * Vt` with `k = min(rows, cols)`. `U` (`rows x k`)
 /// and `Vt` (`k x cols`) stay device-resident; only the singular values
 /// (descending) are downloaded.
-pub fn cuda_svd_region(
+pub fn cuda_svd_region<D: CudaScalar>(
     ctx: &mut CudaDenseContext,
     src: &CudaDenseStorage,
     offset: usize,
@@ -668,14 +744,14 @@ pub fn cuda_svd_region(
     cols: usize,
 ) -> Result<(CudaDenseStorage, Vec<f64>, CudaDenseStorage), DenseError> {
     ensure_cuda_device(ctx.device, "cuda_svd", &[("src", src.device)])?;
-    let view = src.region_view::<f64>(rows, cols, rows, offset)?;
+    let view = src.region_view::<D>(rows, cols, rows, offset)?;
     let (u, s, vt) = with_cuda_linalg(&mut ctx.backend, |exec| {
         TensorRead::from_view(view).svd_read(exec)
     })
     .map_err(|err| cuda_error("cuda_svd", err))?;
-    let vt = expect_f64("cuda_svd", vt, ctx.device)?;
+    let vt = expect_dtype::<D>("cuda_svd", vt, ctx.device)?;
     let s = download_values(ctx, &s)?;
-    let u = expect_f64("cuda_svd", u, ctx.device)?;
+    let u = expect_dtype::<D>("cuda_svd", u, ctx.device)?;
     validate_svd_factor_shapes(u.tensor.shape(), s.len(), vt.tensor.shape(), rows, cols)?;
     Ok((u, s, vt))
 }
@@ -701,51 +777,30 @@ fn validate_svd_factor_shapes(
 
 /// cuSOLVER QR of one packed column-major `rows x cols` region:
 /// `region = Q * R` with `k = min(rows, cols)`, `Q` (`rows x k`) and `R`
-/// (`k x cols`) device-resident. Also returns the host copy of `R`'s
-/// diagonal so the caller can apply the positive-diagonal gauge (matching
-/// the host `qr_compact`) via sign selectors.
-pub fn cuda_qr_region(
+/// (`k x cols`) device-resident, in the positive-diagonal gauge
+/// (`R_jj` real and non-negative, phase 1 kept when `R_jj == 0`).
+///
+/// The gauge is Tenferro's own [`QrGauge::PositiveDiagonal`]: it is applied on
+/// device inside the QR primitive, so no diagonal crosses to the host and no
+/// TeNeT-side re-gauging selector exists.
+pub fn cuda_qr_region<D: CudaScalar>(
     ctx: &mut CudaDenseContext,
     src: &CudaDenseStorage,
     offset: usize,
     rows: usize,
     cols: usize,
-) -> Result<(CudaDenseStorage, CudaDenseStorage, Vec<f64>), DenseError> {
+) -> Result<(CudaDenseStorage, CudaDenseStorage), DenseError> {
     ensure_cuda_device(ctx.device, "cuda_qr", &[("src", src.device)])?;
-    let view = src.region_view::<f64>(rows, cols, rows, offset)?;
+    let view = src.region_view::<D>(rows, cols, rows, offset)?;
+    let options = QrOptions::default().gauge(QrGauge::PositiveDiagonal);
     let (q, r) = with_cuda_linalg(&mut ctx.backend, |exec| {
-        TensorRead::from_view(view).qr_read(exec)
+        TensorRead::from_view(view).qr_with_options_read(options, exec)
     })
     .map_err(|err| cuda_error("cuda_qr", err))?;
-    let r = expect_f64("cuda_qr", r, ctx.device)?;
-    let q = expect_f64("cuda_qr", q, ctx.device)?;
-    let k = rows.min(cols);
+    let r = expect_dtype::<D>("cuda_qr", r, ctx.device)?;
+    let q = expect_dtype::<D>("cuda_qr", q, ctx.device)?;
     validate_qr_factor_shapes(q.tensor.shape(), r.tensor.shape(), rows, cols)?;
-    // R's diagonal as a strided [k] view (stride k + 1), compacted on
-    // device, then downloaded: k scalars, not the factor.
-    let diag = {
-        let Tensor::F64(tensor) = &r.tensor else {
-            return Err(cuda_error("cuda_qr", "device R factor is not f64"));
-        };
-        let diag_view = tensor
-            .backend_region_view(vec![k], vec![k as isize + 1], 0)
-            .map_err(|err| cuda_error("cuda_qr", err))?;
-        let compact = ctx
-            .backend
-            .to_contiguous(&diag_view)
-            .map_err(|err| cuda_error("cuda_qr", err))?;
-        download_values(ctx, &Tensor::F64(compact))?
-    };
-    if diag.len() != k {
-        return Err(cuda_error(
-            "cuda_qr",
-            format!(
-                "device QR returned diagonal length {}; expected {k}",
-                diag.len()
-            ),
-        ));
-    }
-    Ok((q, r, diag))
+    Ok((q, r))
 }
 
 fn validate_qr_factor_shapes(
@@ -770,19 +825,19 @@ fn validate_qr_factor_shapes(
 /// `n x n` region: eigenvalues are downloaded (host truncation / ordering
 /// decisions), eigenvectors stay device-resident (`n x n`, one eigenvector
 /// per column, in cuSOLVER's ascending-eigenvalue order).
-pub fn cuda_eigh_region(
+pub fn cuda_eigh_region<D: CudaScalar>(
     ctx: &mut CudaDenseContext,
     src: &CudaDenseStorage,
     offset: usize,
     n: usize,
 ) -> Result<(Vec<f64>, CudaDenseStorage), DenseError> {
     ensure_cuda_device(ctx.device, "cuda_eigh", &[("src", src.device)])?;
-    let view = src.region_view::<f64>(n, n, n, offset)?;
+    let view = src.region_view::<D>(n, n, n, offset)?;
     let (values, vectors) = with_cuda_linalg(&mut ctx.backend, |exec| {
         TensorRead::from_view(view).eigh_read(exec)
     })
     .map_err(|err| cuda_error("cuda_eigh", err))?;
-    let vectors = expect_f64("cuda_eigh", vectors, ctx.device)?;
+    let vectors = expect_dtype::<D>("cuda_eigh", vectors, ctx.device)?;
     let values = download_values(ctx, &values)?;
     validate_eigh_factor_shapes(values.len(), vectors.tensor.shape(), n)?;
     Ok((values, vectors))
@@ -903,13 +958,13 @@ mod tests {
         for i in 0..n {
             data[i + n * i] = 1.0;
         }
-        data[0 + n] = 32.0 * f64::EPSILON;
-        data[1] = data[0 + n];
+        data[n] = 32.0 * f64::EPSILON;
+        data[1] = data[n];
         let storage = CudaDenseStorage::upload::<f64>(&ctx, &data).unwrap();
 
         CUDA_FULL_DOWNLOAD_BYTES.store(0, Ordering::Relaxed);
         CUDA_METADATA_DOWNLOAD_BYTES.store(0, Ordering::Relaxed);
-        assert!(cuda_is_hermitian_region(&mut ctx, &storage, 0, n).unwrap());
+        assert!(cuda_is_hermitian_region::<f64>(&mut ctx, &storage, 0, n).unwrap());
         assert_eq!(CUDA_FULL_DOWNLOAD_BYTES.load(Ordering::Relaxed), 0);
         assert!(CUDA_METADATA_DOWNLOAD_BYTES.load(Ordering::Relaxed) <= 4 * 8);
 
@@ -920,27 +975,27 @@ mod tests {
         };
         let below = near_threshold(&ctx, 120.0 * f64::EPSILON);
         let above = near_threshold(&ctx, 136.0 * f64::EPSILON);
-        assert!(cuda_is_hermitian_region(&mut ctx, &below, 0, 2).unwrap());
-        assert!(!cuda_is_hermitian_region(&mut ctx, &above, 0, 2).unwrap());
+        assert!(cuda_is_hermitian_region::<f64>(&mut ctx, &below, 0, 2).unwrap());
+        assert!(!cuda_is_hermitian_region::<f64>(&mut ctx, &above, 0, 2).unwrap());
 
         let zero = CudaDenseStorage::upload::<f64>(&ctx, &vec![0.0; n * n]).unwrap();
-        assert!(cuda_is_hermitian_region(&mut ctx, &zero, 0, n).unwrap());
+        assert!(cuda_is_hermitian_region::<f64>(&mut ctx, &zero, 0, n).unwrap());
 
-        data[0 + n] = 256.0 * f64::EPSILON;
+        data[n] = 256.0 * f64::EPSILON;
         let asymmetric = CudaDenseStorage::upload::<f64>(&ctx, &data).unwrap();
-        assert!(!cuda_is_hermitian_region(&mut ctx, &asymmetric, 0, n).unwrap());
+        assert!(!cuda_is_hermitian_region::<f64>(&mut ctx, &asymmetric, 0, n).unwrap());
 
         for scale in [f64::from_bits(0x0010_0000_0000_0000), 2.0_f64.powi(500)] {
             let scaled: Vec<_> = data.iter().map(|value| value * scale).collect();
             let scaled = CudaDenseStorage::upload::<f64>(&ctx, &scaled).unwrap();
-            assert!(!cuda_is_hermitian_region(&mut ctx, &scaled, 0, n).unwrap());
+            assert!(!cuda_is_hermitian_region::<f64>(&mut ctx, &scaled, 0, n).unwrap());
         }
 
         for bad in [f64::NAN, f64::INFINITY] {
             let mut nonfinite = vec![0.0; n * n];
             nonfinite[0] = bad;
             let nonfinite = CudaDenseStorage::upload::<f64>(&ctx, &nonfinite).unwrap();
-            assert!(!cuda_is_hermitian_region(&mut ctx, &nonfinite, 0, n).unwrap());
+            assert!(!cuda_is_hermitian_region::<f64>(&mut ctx, &nonfinite, 0, n).unwrap());
         }
     }
 
