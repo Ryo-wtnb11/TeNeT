@@ -11577,9 +11577,15 @@ where
     /// Returns `(d, v)` with `self = v * d * v.adjoint()`. Both factors remain
     /// on the source device. A lazy-adjoint receiver is rejected explicitly;
     /// no receiver-sized payload is downloaded or materialized.
+    ///
+    /// The full decomposition makes no truncation decision: the raw spectra
+    /// leave the device already ordered by descending `|λ|` and are assembled
+    /// as they are.
     pub fn eigh_full(&self) -> Result<(Self, Self), Error> {
-        let out = self.eigh_trunc(&Truncation::Full)?;
-        Ok((out.d, out.v))
+        let (source_regions, spectra, vectors, orders) =
+            self.decompose_cuda_eigh("eigh_full", None)?;
+        let (d, v, _) = self.assemble_cuda_eigh(source_regions, &spectra, vectors, &orders)?;
+        Ok((d, v))
     }
 
     #[cfg(test)]
@@ -11592,16 +11598,29 @@ where
         Ok(())
     }
 
-    /// Truncated Hermitian eigendecomposition of an owned dense CUDA tensor.
+    /// Device EIGH up to its raw per-sector spectra: admission, the sectorwise
+    /// Hermiticity gate, and one cuSOLVER pass per coupled sector. Eigenvalues
+    /// are returned in descending `|λ|` order, `orders` carries the matching
+    /// eigenvector column permutation, and the eigenvectors stay on device.
     ///
-    /// Hermiticity is checked sectorwise on device before the first cuSOLVER
-    /// call. Only scalar residual metadata and eigenvalues cross to the host;
-    /// eigenvectors and both returned factors remain device-resident.
-    pub fn eigh_trunc(
+    /// `policy`, when present, is validated at the point the truncated entry
+    /// point admits it, before any device work; nothing else here depends on
+    /// a truncation.
+    #[allow(clippy::type_complexity)]
+    fn decompose_cuda_eigh(
         &self,
-        truncation: &Truncation,
-    ) -> Result<EighTrunc<R, D, CudaStorage<D>>, Error> {
-        let source = self.direct_cuda_storage("eigh_trunc")?;
+        operation: &'static str,
+        policy: Option<&Truncation>,
+    ) -> Result<
+        (
+            Arc<[CoupledSectorRegion]>,
+            Vec<tenet_matrixalgebra::SectorSpectrum<f64>>,
+            Vec<Option<CudaDenseStorage>>,
+            Vec<Vec<usize>>,
+        ),
+        Error,
+    > {
+        let source = self.direct_cuda_storage(operation)?;
         let source_space = self.logical_space().space();
         if source_space.homspace().codomain() != source_space.homspace().domain() {
             return Err(
@@ -11635,7 +11654,9 @@ where
         }
 
         // Validate the policy and every provider identity before device work.
-        decide_kept(self.logical_space().provider(), &[], Some(truncation))?;
+        if let Some(truncation) = policy {
+            decide_kept(self.logical_space().provider(), &[], Some(truncation))?;
+        }
         // The existing compact factor plan is the canonical source -> left
         // factor route. EIGH needs that left route only; no new plan hierarchy.
         let source_plan = self.compile_cuda_qr_plan(source_regions)?;
@@ -11662,7 +11683,7 @@ where
             }
         }
 
-        let (raw_spectra, mut raw_vectors, orders) = {
+        let (raw_spectra, raw_vectors, orders) = {
             let mut lease = self.runtime.lease_cuda()?;
             let cuda = &mut *lease;
             let mut spectra = Vec::with_capacity(source_plan.source_regions.len());
@@ -11711,11 +11732,20 @@ where
             (spectra, vectors, orders)
         };
 
-        let (kept_spectra, error) = decide_kept(
-            self.logical_space().provider(),
-            &raw_spectra,
-            Some(truncation),
-        )?;
+        Ok((source_plan.source_regions, raw_spectra, raw_vectors, orders))
+    }
+
+    /// Assembles the device EIGH factors for an already decided spectrum:
+    /// the dense diagonal `d` and the eigenvector factor `v`, whose columns
+    /// are gathered through the `|λ|`-order selector.
+    #[allow(clippy::type_complexity)]
+    fn assemble_cuda_eigh(
+        &self,
+        source_regions: Arc<[CoupledSectorRegion]>,
+        kept_spectra: &[tenet_matrixalgebra::SectorSpectrum<f64>],
+        mut raw_vectors: Vec<Option<CudaDenseStorage>>,
+        orders: &[Vec<usize>],
+    ) -> Result<(Self, Self, Vec<SectorSpectrum<R::Sector>>), Error> {
         let mut eigenvalues: Vec<SectorSpectrum<R::Sector>> = kept_spectra
             .iter()
             .map(|entry| {
@@ -11733,15 +11763,14 @@ where
         // Reuse the existing kept-rank space/route proof. Its right-factor
         // fields are intentionally unused; measured need, not EIGH alone,
         // would justify splitting another private plan type.
-        let plan = self
-            .compile_cuda_svd_trunc_plan(Arc::clone(&source_plan.source_regions), &kept_spectra)?;
+        let plan = self.compile_cuda_svd_trunc_plan(source_regions, kept_spectra)?;
         let vector_len = plan.left_space.space().required_len()?;
         let diagonal_len = plan.middle_space.space().required_len()?;
         let mut diagonal_host = vec![D::ZERO; diagonal_len];
         fill_diagonal_values(
             plan.middle_space.space().structure(),
             &mut diagonal_host,
-            &kept_spectra,
+            kept_spectra,
         )?;
 
         let (diagonal_data, vector_data) = {
@@ -11790,15 +11819,40 @@ where
             (diagonal_data, vector_data)
         };
 
-        Ok(EighTrunc {
-            d: Self {
+        Ok((
+            Self {
                 runtime: self.runtime.clone(),
                 repr: owned_repr(TypedTensorBody::dense(plan.middle_space, diagonal_data)),
             },
-            v: Self {
+            Self {
                 runtime: self.runtime.clone(),
                 repr: owned_repr(TypedTensorBody::dense(plan.left_space, vector_data)),
             },
+            eigenvalues,
+        ))
+    }
+
+    /// Truncated Hermitian eigendecomposition of an owned dense CUDA tensor.
+    ///
+    /// Hermiticity is checked sectorwise on device before the first cuSOLVER
+    /// call. Only scalar residual metadata and eigenvalues cross to the host;
+    /// eigenvectors and both returned factors remain device-resident.
+    pub fn eigh_trunc(
+        &self,
+        truncation: &Truncation,
+    ) -> Result<EighTrunc<R, D, CudaStorage<D>>, Error> {
+        let (source_regions, raw_spectra, raw_vectors, orders) =
+            self.decompose_cuda_eigh("eigh_trunc", Some(truncation))?;
+        let (kept_spectra, error) = decide_kept(
+            self.logical_space().provider(),
+            &raw_spectra,
+            Some(truncation),
+        )?;
+        let (d, v, eigenvalues) =
+            self.assemble_cuda_eigh(source_regions, &kept_spectra, raw_vectors, &orders)?;
+        Ok(EighTrunc {
+            d,
+            v,
             eigenvalues,
             error,
         })
