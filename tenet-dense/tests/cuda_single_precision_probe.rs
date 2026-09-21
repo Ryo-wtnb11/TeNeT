@@ -1213,32 +1213,17 @@ fn qr_region_f32() {
     qr_case::<f32>(&mut probe, 4, 4).expect("f32 device QR");
 }
 
-/// Device QR of a `Complex32` region is expected to fail exactly like
-/// `Complex64` does (#1271): the `triu` kernel materializes its zero as
-/// `E::cast_from(0u32)` (tenferro-gpu `kernels/helpers.rs:84-86`), which NVRTC
-/// rejects for `cuFloatComplex`/`cuDoubleComplex` (tenferro-rs#1833, fixed
-/// upstream but unreleased in 0.5.0). The failure is the probe result: leaf
-/// C4 must keep C32 device QR an explicit compile-time boundary next to the
-/// C64 one.
+/// Raw Tenferro device QR of a `Complex32` region. Up to Tenferro 0.5.0 it
+/// failed like `Complex64` (#1271): the `triu` zero `E::cast_from(0u32)` did
+/// not compile for `cuFloatComplex` (tenferro-rs#1833). Tenferro 0.6.0 pins
+/// the t4a-cubecl 0.10.1 fix (#1837), so this probe now requires the
+/// reconstruction and gauge checks of `qr_case`. TeNeT's own complex device
+/// constant gate is unchanged until its leaf (#1271) lifts it.
 #[test]
 #[ignore = "requires a real CUDA device"]
-fn qr_region_c32_is_blocked_by_the_complex_zero_kernel() {
+fn qr_region_c32() {
     let mut probe = Probe::new();
-    match qr_case::<Complex32>(&mut probe, 5, 3) {
-        Ok(()) => panic!(
-            "Complex32 device QR now succeeds -- tenferro-rs#1833 appears fixed; \
-             re-scope leaf C4 and #1271"
-        ),
-        Err(err) => {
-            let text = err.to_string();
-            println!("Complex32 QR rejected with:\n{text}");
-            assert!(
-                text.contains("no suitable constructor exists to convert from")
-                    && text.contains("cuFloatComplex"),
-                "unexpected Complex32 QR failure (not the #1833 zero-value class): {text}"
-            );
-        }
-    }
+    qr_case::<Complex32>(&mut probe, 5, 3).expect("Complex32 device QR");
 }
 
 #[test]
@@ -1342,11 +1327,11 @@ fn lu_and_solve_behaviour_f32() {
     lu_solve_case::<f32>(&mut Probe::new(), false);
 }
 
-/// `Complex32` `lu`/`solve` share the #1833 complex-constant kernel defect
-/// with QR: the failure is the recorded probe result, and leaf C1/C4 must keep
-/// them unsupported.
+/// `Complex32` `lu`/`solve` shared the #1833 complex-constant kernel defect
+/// with QR up to Tenferro 0.5.0; 0.6.0 carries the fix (#1837), so the probe
+/// now asserts a real residual. TeNeT still keeps them unsupported (#1271).
 #[test]
 #[ignore = "requires a real CUDA device"]
-fn lu_and_solve_behaviour_c32_is_blocked() {
-    lu_solve_case::<Complex32>(&mut Probe::new(), true);
+fn lu_and_solve_behaviour_c32() {
+    lu_solve_case::<Complex32>(&mut Probe::new(), false);
 }
