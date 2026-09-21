@@ -126,12 +126,40 @@ for default and `--no-default-features --features cuda,cpu-faer`;
 `cargo test -p tenet-rs -p tenet-network -p tenet-operations` (0 failures);
 doctests for both feature sets; `RUSTDOCFLAGS=-D warnings cargo doc`.
 
-Device (qg1, A100): see the run summaries recorded with this leaf's report.
+### A100 run (qg1)
+
+**Tree**: `12fb5848a09d3005f81379ea5661f62c18e9d7f9`, rebased onto `origin/main`
+`ff60d9a5`. The only later commit on this branch touches this file and nothing
+else — check with `git diff 12fb5848 HEAD --stat`.
+
+**Host**: qg1, `CUDA_VISIBLE_DEVICES=4` (GPU 4, `GPU-9e24f6d6-dd6f-5ffd-e0ed-2af80e55464b`,
+A100). Before the run: `nvidia-smi --query-compute-apps` empty on every GPU,
+no `rustup/toolchains/*/bin/{cargo,rustc}` of ours active, `/data2` at 45 %.
+Env: `source /data2/ryo-w/gpu-phase/g2p-env.sh`, one private
+`CARGO_TARGET_DIR=/data2/ryo-w/gpu-phase/g2b3-target`, deleted after the run.
+Build mode: `dev` (correctness gate, not a benchmark), `--test-threads=1`.
+
+| Phase | Command (after `cargo test -p tenet-rs --no-default-features --features cuda,cpu-faer`) | Result |
+|---|---|---|
+| Leaf, device | `--test typed_cuda_transform --test typed_cuda_transform_contracts --test typed_transform_host_side --no-fail-fast -- --ignored --test-threads=1` | `typed_cuda_transform` **15 passed, 0 failed**; `typed_cuda_transform_contracts` **8 passed, 0 failed**; `typed_transform_host_side` 0 passed, 4 filtered out |
+| Leaf, non-ignored | same without `--ignored` | 15 + 8 ignored; `typed_transform_host_side` **4 passed, 0 failed** |
+| Doctests | `cargo test -p tenet-rs --doc --no-default-features --features cuda,cpu-faer` | **82 passed, 0 failed, 1 ignored** |
+| Full device suite | `cargo test --workspace --lib --tests --no-default-features --features cuda,cpu-faer --no-fail-fast -- --ignored --skip measure_checked_generic_transform_phases --skip axioms_ --skip itebd_ --skip cross_library --test-threads=1` | **152 passed, 0 failed, 0 ignored**, zero `FAILED` result lines |
+
+The full-suite run also serves as the merged-main device confirmation of
+#1322 / #1328 / #1332 at this base.
 
 ## Residual
 
-The storage-length mismatch (step 8) is mirrored and reachable in code, but is
-not constructible through the public device API: every device tensor is built
-with `required_len` storage and `validate_cuda_owned_metadata` rejects
-anything else. It is covered by the Host twin's pinned message plus source
-review, not by a device fixture.
+The storage-length mismatch (step 8) is mirrored in code but is **not
+constructible through the public device API**: `to_cuda` is the only public
+producer of `TensorMap<_, _, CudaStorage>`, and every internal producer sizes
+the payload from `required_len` and passes `validate_cuda_owned_metadata`.
+
+What covers it is therefore **the mirrored code plus independent source
+review** (`reviews/gpu-phase-20260920/g2b3-independent-source-review.md` §6,
+which confirmed the unconstructibility from the producer set) — *not* a test.
+The ungated Host pin has no storage-length case either: the Host unit test
+that reaches the branch does so through private field access inside
+`typed.rs`, which an integration test cannot use. No test-only device
+constructor was added for it.
