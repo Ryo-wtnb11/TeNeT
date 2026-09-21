@@ -1251,8 +1251,9 @@ fn a_rank_tie_the_single_precision_payload_cannot_resolve_keeps_the_other_sector
 /// had none, and documentation. These pins make that claim falsifiable from
 /// here on: the fixtures are non-dyadic (multiples of a tenth, so no partial
 /// sum is exact) and two of them sit within a rounding of the budget, which is
-/// where the `budget + 1e-15` slack in `tenet-matrixalgebra/src/truncation.rs`
-/// decides. A reordered, re-associated or re-scaled accumulation moves these
+/// where the rounding slack in `tenet-matrixalgebra/src/truncation.rs` decides
+/// (absolute `1e-15` when pinned; budget-relative since #1333, with every pin
+/// below unchanged). A reordered, re-associated or re-scaled accumulation moves these
 /// bits.
 ///
 /// The expected values were measured on a detached `origin/main` worktree at
@@ -1306,9 +1307,10 @@ fn double_precision_truncation_decisions_are_bitwise_unchanged() {
             0x3FD9_9999_9999_999A,
         ),
         // The budget is exactly the weight of the two smallest tails, so the
-        // `budget + 1e-15` slack is what decides: `0.1 * 0.1` twice sums to
+        // rounding slack is what decides: `0.1 * 0.1` twice sums to
         // `0.020000000000000004`, four ulps above the budget, and only the
-        // slack lets the second tail go. Without it this case keeps 8.
+        // budget-relative `(n + 3) * eps` slack (#1333) lets the second tail
+        // go. Without it this case keeps 8.
         (
             Truncation::relative_error((1.0f64 / 90.0).sqrt()).unwrap(),
             7,
