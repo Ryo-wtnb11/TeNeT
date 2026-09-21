@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use num_complex::Complex64;
+use num_complex::{Complex32, Complex64};
 use tenet_core::{BlockKey, BlockSpec, BlockStructure};
 use tenet_operations::{TreeTransformBlockSpec, TreeTransformStructure};
 
@@ -19,6 +19,9 @@ use tenet_operations::{TreeTransformBlockSpec, TreeTransformStructure};
 /// scalar contract with the code under test.
 pub trait TestScalar: Copy + std::fmt::Debug + PartialEq + 'static {
     const NAME: &'static str;
+    /// Machine epsilon of this payload's real lane, widened, so a tolerance
+    /// can be written in epsilons rather than as an absolute constant.
+    const EPSILON: f64;
     fn from_parts(re: f64, im: f64) -> Self;
     fn zero() -> Self {
         Self::from_parts(0.0, 0.0)
@@ -36,8 +39,75 @@ pub trait TestScalar: Copy + std::fmt::Debug + PartialEq + 'static {
     fn is_nan(self) -> bool;
 }
 
+impl TestScalar for f32 {
+    const NAME: &'static str = "f32";
+    const EPSILON: f64 = f32::EPSILON as f64;
+
+    fn from_parts(re: f64, _im: f64) -> Self {
+        re as Self
+    }
+
+    fn scale(self, factor: f64) -> Self {
+        self * factor as Self
+    }
+
+    fn add(self, other: Self) -> Self {
+        self + other
+    }
+
+    fn mul(self, other: Self) -> Self {
+        self * other
+    }
+
+    fn conjugate(self) -> Self {
+        self
+    }
+
+    fn distance(self, other: Self) -> f64 {
+        f64::from((self - other).abs())
+    }
+
+    fn is_nan(self) -> bool {
+        f32::is_nan(self)
+    }
+}
+
+impl TestScalar for Complex32 {
+    const NAME: &'static str = "Complex32";
+    const EPSILON: f64 = f32::EPSILON as f64;
+
+    fn from_parts(re: f64, im: f64) -> Self {
+        Complex32::new(re as f32, im as f32)
+    }
+
+    fn scale(self, factor: f64) -> Self {
+        self * factor as f32
+    }
+
+    fn add(self, other: Self) -> Self {
+        self + other
+    }
+
+    fn mul(self, other: Self) -> Self {
+        self * other
+    }
+
+    fn conjugate(self) -> Self {
+        Complex32::new(self.re, -self.im)
+    }
+
+    fn distance(self, other: Self) -> f64 {
+        f64::from((self - other).norm())
+    }
+
+    fn is_nan(self) -> bool {
+        self.re.is_nan() || self.im.is_nan()
+    }
+}
+
 impl TestScalar for f64 {
     const NAME: &'static str = "f64";
+    const EPSILON: f64 = f64::EPSILON;
 
     fn from_parts(re: f64, _im: f64) -> Self {
         re
@@ -70,6 +140,7 @@ impl TestScalar for f64 {
 
 impl TestScalar for Complex64 {
     const NAME: &'static str = "Complex64";
+    const EPSILON: f64 = f64::EPSILON;
 
     fn from_parts(re: f64, im: f64) -> Self {
         Complex64::new(re, im)

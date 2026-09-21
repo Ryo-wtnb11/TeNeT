@@ -22,7 +22,7 @@ use common::{
     many_distinct_signatures, mixed_single_and_multi, rank_sweep, recoupling_non_symmetric_u,
     unit_coefficient_fixtures, Fixture, TestScalar,
 };
-use num_complex::Complex64;
+use num_complex::{Complex32, Complex64};
 use tenet_dense::{
     cuda_transfer_stats, reset_cuda_transfer_stats, CudaDenseContext, CudaScalar, CudaTransferStats,
 };
@@ -49,7 +49,9 @@ trait DeviceScalar:
 {
 }
 
+impl DeviceScalar for f32 {}
 impl DeviceScalar for f64 {}
+impl DeviceScalar for Complex32 {}
 impl DeviceScalar for Complex64 {}
 
 fn context() -> CudaDenseContext {
@@ -178,11 +180,19 @@ fn device_replay_scaled<T: DeviceScalar>(
     device_dst.download(ctx).unwrap()
 }
 
+/// The bound a replayed move is held to: the `1e-12` this file has always used
+/// for the double-precision payloads, and the same number of epsilons of its
+/// own real lane for each single-precision one. A tighter double-precision
+/// bound would assert the contraction order of whichever GPU runs the suite.
+fn move_tolerance<T: TestScalar>() -> f64 {
+    1e-12 * (T::EPSILON / f64::EPSILON)
+}
+
 fn assert_close<T: TestScalar>(actual: &[T], expected: &[T], what: &str) {
     assert_eq!(actual.len(), expected.len(), "{what}: length");
     for (index, (left, right)) in actual.iter().zip(expected).enumerate() {
         assert!(
-            left.distance(*right) <= 1e-12,
+            left.distance(*right) <= move_tolerance::<T>(),
             "{what}: element {index} is {left:?}, expected {right:?}"
         );
     }
@@ -218,12 +228,14 @@ fn check_fixture<T: DeviceScalar>(
 fn device_replay_matches_the_oracle_and_the_host_for_every_fixture() {
     // What: rank 2-6 permutes, transposes, fermionic signs, coefficients that
     // are neither 1 nor -1, conjugated sources, interleaved multi-block
-    // layouts, inactive layouts and a zero-extent block, in both payload
-    // dtypes and both destination modes.
+    // layouts, inactive layouts and a zero-extent block, in all four payload
+    // dtypes (#1326) and both destination modes.
     let mut ctx = context();
     let mut executor = CudaTreeTransformExecutor::default();
     for fixture in all_fixtures() {
+        check_fixture::<f32>(&mut ctx, &mut executor, &fixture);
         check_fixture::<f64>(&mut ctx, &mut executor, &fixture);
+        check_fixture::<Complex32>(&mut ctx, &mut executor, &fixture);
         check_fixture::<Complex64>(&mut ctx, &mut executor, &fixture);
     }
 }
@@ -1353,7 +1365,7 @@ fn caller_scale_fixtures() -> Vec<Fixture> {
 #[ignore = "requires a real CUDA device"]
 fn every_caller_scale_matches_the_host_and_the_oracle() {
     // What: the caller scale reaches Single moves and Multi scatters and
-    // nothing else, in both destination modes, both payload dtypes and for
+    // nothing else, in both destination modes, all four payload dtypes and for
     // alpha in {1, -2.5, 0, -0.0, complex}. The oracle is the explicit index
     // walk, which applies alpha where the host does and is pinned against the
     // host in CI, so a device that scaled the packs or the GEMM instead fails
@@ -1362,7 +1374,9 @@ fn every_caller_scale_matches_the_host_and_the_oracle() {
     let mut executor = CudaTreeTransformExecutor::default();
     for fixture in caller_scale_fixtures() {
         for overwrite in [true, false] {
+            check_scales::<f32>(&mut ctx, &mut executor, &fixture, overwrite);
             check_scales::<f64>(&mut ctx, &mut executor, &fixture, overwrite);
+            check_scales::<Complex32>(&mut ctx, &mut executor, &fixture, overwrite);
             check_scales::<Complex64>(&mut ctx, &mut executor, &fixture, overwrite);
         }
     }
@@ -1579,16 +1593,19 @@ fn a_warm_replay_is_transfer_free_and_plan_stable_for_every_caller_scale() {
     // allocation-free for every scale including 0, the prepared-structure count
     // does not grow, and the zero-scale signature evicts no cuTENSOR plan.
     let _guard = COUNTER_TESTS.lock().unwrap();
+    warm_scale_sweep::<f32>();
     warm_scale_sweep::<f64>();
 }
 
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn a_warm_complex_replay_is_transfer_free_and_plan_stable_for_every_caller_scale() {
-    // The same contract for the complex payload, whose scale, coefficient
+    // The same contract for the complex payloads, whose scale, coefficient
     // operand and zero template are a different dtype's buffers — the real-only
-    // twin above would not notice a complex one uploaded per call.
+    // twin above would not notice a complex one uploaded per call. Each dtype
+    // owns its own context operand slot, so each needs its own sweep.
     let _guard = COUNTER_TESTS.lock().unwrap();
+    warm_scale_sweep::<Complex32>();
     warm_scale_sweep::<Complex64>();
 }
 

@@ -18,6 +18,11 @@ mod view;
 
 #[cfg(feature = "cuda")]
 mod cuda_adapter;
+// Pure host arithmetic: compiled (and tested) without the `cuda` feature for
+// the same reason `cuda_region` is.
+#[cfg(any(feature = "cuda", test))]
+#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+mod cuda_hermitian;
 // Layout metadata only: compiled (and tested) without the `cuda` feature so
 // CI, which merely `cargo check`s that feature, still executes these rules.
 #[cfg(any(feature = "cuda", test))]
@@ -61,7 +66,7 @@ pub use cuda_adapter::{
     cuda_is_hermitian_region, cuda_matmul_region_into, cuda_qr_region, cuda_region_axpby,
     cuda_region_zero, cuda_svd_region, cuda_transfer_stats, cuda_zero_prefix,
     reset_cuda_transfer_stats, CudaDenseContext, CudaDenseStorage, CudaPlanCacheStats,
-    CudaRegionBeta, CudaRegionCoefficient, CudaScalar, CudaTransferStats,
+    CudaRealScalar, CudaRegionBeta, CudaRegionCoefficient, CudaScalar, CudaTransferStats,
 };
 #[cfg(feature = "cuda")]
 pub use cuda_region::CudaRegion;
