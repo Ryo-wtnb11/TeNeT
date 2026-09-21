@@ -11,8 +11,8 @@
 use num_complex::Complex64;
 use tenet_dense::{
     cpu_session_stats, reset_cpu_session_stats, strided_batch_runs, CpuSessionStats,
-    DefaultDenseExecutor, DenseError, DenseExecutor, DenseGemmBatchJob, DenseRead, DenseScalar,
-    DenseView, DenseViewMut, DenseWrite, MatrixOp,
+    DefaultDenseExecutor, DenseError, DenseExecutor, DenseFactorization, DenseGemmBatchJob,
+    DenseRead, DenseScalar, DenseView, DenseViewMut, DenseWrite, MatrixOp,
 };
 
 fn assert_close(got: f64, want: f64, tol: f64) {
@@ -349,4 +349,119 @@ fn cpu_session_stats_reset_and_scope() {
         .unwrap();
     assert_eq!(cpu_session_stats().sessions_opened, 0);
     reset_cpu_session_stats();
+}
+
+fn tensor_bits(tensor: &tenet_dense::DenseTensor) -> (Vec<usize>, Vec<u64>) {
+    let bits = match (tensor.as_f64_slice(), tensor.as_c64_slice()) {
+        (Ok(values), _) => values.iter().map(|v| v.to_bits()).collect(),
+        (_, Ok(values)) => values
+            .iter()
+            .flat_map(|v| [v.re.to_bits(), v.im.to_bits()])
+            .collect(),
+        _ => panic!("fixture outputs are f64 or c64"),
+    };
+    (tensor.shape().to_vec(), bits)
+}
+
+// A coupled-sector factorization loop is one `factorize_batch`: it must enter
+// one session for every matrix, and land bitwise what the per-matrix entries
+// return, since the same kernels run in the same order.
+fn factorize_batch_is_one_session_and_bitwise_equal<T: Copy>(
+    value: impl Fn(usize) -> T,
+    wrap: impl for<'x> Fn(DenseView<'x, T>) -> DenseRead<'x>,
+) {
+    let _guard = counter_lock();
+    let shapes = [(3usize, 2usize), (2, 4), (4, 4), (1, 3), (5, 2)];
+    let data = shapes
+        .iter()
+        .enumerate()
+        .map(|(block, &(rows, cols))| {
+            (0..rows * cols)
+                .map(|i| value(31 * block + i))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let layouts = shapes
+        .iter()
+        .map(|&(rows, cols)| ([rows, cols], [1usize, rows]))
+        .collect::<Vec<_>>();
+    let inputs = data
+        .iter()
+        .zip(&layouts)
+        .map(|(block, (shape, strides))| wrap(DenseView::new(block, shape, strides, 0).unwrap()))
+        .collect::<Vec<_>>();
+
+    for op in [DenseFactorization::Qr, DenseFactorization::Svd] {
+        let mut executor = DefaultDenseExecutor::new();
+        let before = sessions_opened();
+        let batched = executor.factorize_batch(op, &inputs).unwrap();
+        assert_eq!(
+            sessions_opened() - before,
+            1,
+            "{op:?}: one session per batch"
+        );
+
+        let mut reference = DefaultDenseExecutor::new();
+        let before = sessions_opened();
+        let per_call = inputs
+            .iter()
+            .map(|&input| match op {
+                DenseFactorization::Qr => reference.qr(input),
+                DenseFactorization::Svd => reference.svd(input),
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            sessions_opened() - before,
+            inputs.len() as u64,
+            "{op:?}: the per-call entry opens one session per matrix"
+        );
+        assert_eq!(batched.len(), per_call.len());
+        for (got, want) in batched.iter().zip(&per_call) {
+            let got = got.iter().map(tensor_bits).collect::<Vec<_>>();
+            let want = want.iter().map(tensor_bits).collect::<Vec<_>>();
+            assert_eq!(
+                got, want,
+                "{op:?}: batch must be bitwise the per-call result"
+            );
+        }
+    }
+}
+
+#[test]
+#[allow(clippy::redundant_closure)]
+fn factorize_batch_is_one_session_and_bitwise_equal_f64() {
+    factorize_batch_is_one_session_and_bitwise_equal(
+        |i| ((i * 7 + 3) % 11) as f64 - 4.5,
+        // Constructor functions fix one lifetime; the closure stays generic.
+        |view| DenseRead::F64(view),
+    );
+}
+
+#[test]
+#[allow(clippy::redundant_closure)]
+fn factorize_batch_is_one_session_and_bitwise_equal_c64() {
+    factorize_batch_is_one_session_and_bitwise_equal(
+        |i| {
+            Complex64::new(
+                ((i * 7 + 3) % 11) as f64 - 4.5,
+                ((i * 5 + 1) % 7) as f64 - 3.0,
+            )
+        },
+        |view| DenseRead::C64(view),
+    );
+}
+
+// An empty batch is a supported call and must not take the process-wide
+// execution permit for an empty loop.
+#[test]
+fn factorize_batch_empty_opens_no_session() {
+    let _guard = counter_lock();
+    let mut executor = DefaultDenseExecutor::new();
+    let before = sessions_opened();
+    let outputs = executor
+        .factorize_batch(DenseFactorization::Qr, &[])
+        .unwrap();
+    assert!(outputs.is_empty());
+    assert_eq!(sessions_opened() - before, 0);
 }

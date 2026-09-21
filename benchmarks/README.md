@@ -23,6 +23,7 @@ exists.
 
 - [July 2026 contraction microbenchmark](history/contraction-microbench-2026-07-11.md)
 - [Eager per-call overhead ledger](history/eager-overhead-ledger-2026-09-21.md)
+- [One CPU session per compact factorization](history/factorization-session-2026-09-21.md)
 - [Generic-path performance review](issue_1007_current_main.md)
 - [Checked Generic values input borrowing](history/checked-generic-values-borrow-2026-09-13.md)
 - [Warm-cache audit](issue_118_warm_cache.md)

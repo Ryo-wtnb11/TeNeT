@@ -39,10 +39,39 @@ pub enum DenseOwned {
     C64(Vec<Complex64>),
 }
 
+/// The per-matrix factorization a [`DenseExecutor::factorize_batch`] issues.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DenseFactorization {
+    /// [`DenseExecutor::svd`].
+    Svd,
+    /// [`DenseExecutor::qr`].
+    Qr,
+}
+
 pub trait DenseExecutor {
     fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError>;
     fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError>;
     fn eigh(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError>;
+
+    /// Applies `op` to each input in order and returns each input's outputs,
+    /// exactly as the per-matrix entry returns them; stops at the first error.
+    ///
+    /// The default issues one per-matrix call per input. An executor whose
+    /// per-call entry carries a fixed admission cost overrides this to pay it
+    /// once per batch, not once per matrix.
+    fn factorize_batch(
+        &mut self,
+        op: DenseFactorization,
+        inputs: &[DenseRead<'_>],
+    ) -> Result<Vec<Vec<DenseTensor>>, DenseError> {
+        inputs
+            .iter()
+            .map(|&input| match op {
+                DenseFactorization::Svd => self.svd(input),
+                DenseFactorization::Qr => self.qr(input),
+            })
+            .collect()
+    }
 
     /// Whether this executor supports native full SVD for every [`DenseOwned`]
     /// dtype. The default is false.

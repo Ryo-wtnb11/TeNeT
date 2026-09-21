@@ -1040,6 +1040,59 @@ impl DenseExecutor for DefaultDenseExecutor {
         }
     }
 
+    // One session for the whole batch: the per-session admission (global
+    // execution permit, engine mutex, and on faer a Rayon pool handoff) is
+    // otherwise paid once per coupled sector. The scope holds the per-matrix
+    // calls the per-call entries make, in the same order, plus only the pure
+    // view lowering; output wrapping stays outside it. Outputs land in one flat
+    // vector so the batch adds no per-matrix container beyond the returned one.
+    #[cfg(not(feature = "provider-inject"))]
+    fn factorize_batch(
+        &mut self,
+        op: crate::DenseFactorization,
+        inputs: &[DenseRead<'_>],
+    ) -> Result<Vec<Vec<DenseTensor>>, DenseError> {
+        use crate::DenseFactorization;
+        if inputs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let (arity, error_op) = match op {
+            DenseFactorization::Svd => (3, "svd_read"),
+            DenseFactorization::Qr => (2, "qr_read"),
+        };
+        let mut flat = Vec::with_capacity(arity * inputs.len());
+        with_cpu_linalg(&mut self.backend, |exec| {
+            let mut run = || -> Result<(), DenseError> {
+                for &input in inputs {
+                    let input = TensorRead::from_view(tenferro_view(input)?);
+                    let backend = |err| tenferro_error(error_op, err);
+                    match op {
+                        DenseFactorization::Svd => {
+                            let (u, s, vt) = input.svd_read(&mut *exec).map_err(backend)?;
+                            flat.extend([u, s, vt]);
+                        }
+                        DenseFactorization::Qr => {
+                            let (q, r) = input.qr_read(&mut *exec).map_err(backend)?;
+                            flat.extend([q, r]);
+                        }
+                    }
+                }
+                Ok(())
+            };
+            Ok(run())
+        })
+        .map_err(|err| tenferro_error(error_op, err))??;
+        let mut flat = flat.into_iter();
+        (0..inputs.len())
+            .map(|_| {
+                flat.by_ref()
+                    .take(arity)
+                    .map(DenseTensor::from_tenferro)
+                    .collect()
+            })
+            .collect()
+    }
+
     fn solve_into(
         &mut self,
         a: DenseRead<'_>,

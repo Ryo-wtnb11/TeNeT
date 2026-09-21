@@ -17,8 +17,8 @@ use tenet_core::{
     SectorId, SectorLeg, SectorStructure, TensorMap, TensorMapSpace,
 };
 use tenet_dense::{
-    DenseBackend, DenseDotConfig, DenseError, DenseExecutor, DenseOwned, DenseTensor, DenseView,
-    DenseViewMut,
+    DenseBackend, DenseDotConfig, DenseError, DenseExecutor, DenseFactorization, DenseOwned,
+    DenseTensor, DenseView, DenseViewMut,
 };
 
 pub use tenet_tensors::BoundDynamicTensorRef;
@@ -2485,6 +2485,17 @@ where
     let mut vh_regions = vec![None; plan.right_regions.len()];
     let mut singular_values = Vec::with_capacity(plan.routes.len());
 
+    let blocks = plan
+        .routes
+        .iter()
+        .filter(|route| route.rank != 0)
+        .map(|route| {
+            let region = &plan.source_regions[route.source_region];
+            (&input.data()[region.range()], region.rows(), region.cols())
+        })
+        .collect::<Vec<_>>();
+    let mut factors = compact_svd_owned_batch(dense, &blocks)?.into_iter();
+
     for route in plan.routes.iter().copied() {
         let region = &plan.source_regions[route.source_region];
         let rank = route.rank;
@@ -2497,12 +2508,9 @@ where
         }
         let left_region = route.left_region.expect("nonzero route has left region");
         let right_region = route.right_region.expect("nonzero route has right region");
-        let (mut u, spectrum, mut vh) = compact_svd_owned(
-            dense,
-            &input.data()[region.range()],
-            region.rows(),
-            region.cols(),
-        )?;
+        let (mut u, spectrum, mut vh) = factors
+            .next()
+            .expect("one batch output per nonzero-rank route");
         match gauge {
             CompactSvdGauge::Left => svd_compact_gauge(
                 &mut u,
@@ -5624,10 +5632,14 @@ where
     let matricizations = sector_matricizations(space.structure(), input.data(), space.nout())?;
     #[cfg(test)]
     record_compact_qr_input_pack(&matricizations);
+    let blocks = matricizations
+        .iter()
+        .map(|matrix| (matrix.data.as_slice(), matrix.rows, matrix.cols))
+        .collect::<Vec<_>>();
+    let factors = compact_qr_owned_batch(dense, &blocks)?;
     let mut pairs = Vec::with_capacity(matricizations.len());
-    for matrix in &matricizations {
+    for (matrix, (mut q, mut r)) in matricizations.iter().zip(factors) {
         let rank = matrix.rows.min(matrix.cols);
-        let (mut q, mut r) = compact_qr_owned(dense, &matrix.data, matrix.rows, matrix.cols)?;
         positive_diagonal_gauge_strided(
             &mut q,
             matrix.rows,
@@ -5675,17 +5687,22 @@ where
         .map(|_| None)
         .collect::<Vec<_>>();
 
-    for route in plan.routes.iter().copied() {
-        if route.rank == 0 {
-            continue;
-        }
+    let routes = plan
+        .routes
+        .iter()
+        .copied()
+        .filter(|route| route.rank != 0)
+        .collect::<Vec<_>>();
+    let blocks = routes
+        .iter()
+        .map(|route| {
+            let source = &plan.source_regions[route.source_region];
+            (&input.data()[source.range()], source.rows(), source.cols())
+        })
+        .collect::<Vec<_>>();
+    let factors = compact_qr_owned_batch(dense, &blocks)?;
+    for (route, (mut left_data, mut right_data)) in routes.into_iter().zip(factors) {
         let source = &plan.source_regions[route.source_region];
-        let (mut left_data, mut right_data) = compact_qr_owned(
-            dense,
-            &input.data()[source.range()],
-            source.rows(),
-            source.cols(),
-        )?;
         positive_diagonal_gauge_strided(
             &mut left_data,
             source.rows(),
@@ -5977,14 +5994,69 @@ where
     E: DenseExecutor + ?Sized,
     D: FactorScalar,
 {
-    let rank = rows.min(cols);
     let input_shape = [rows, cols];
     let input_strides = [1usize, rows];
     let input_view =
         DenseView::new(input, &input_shape, &input_strides, 0).map_err(OperationError::Dense)?;
-    let mut outputs = dense
+    let outputs = dense
         .qr(D::dense_read(input_view))
         .map_err(OperationError::Dense)?;
+    compact_qr_outputs(outputs, rows, cols)
+}
+
+/// Compact QR of each column-major `(data, rows, cols)` block, submitted as one
+/// executor batch so the backend admits the whole coupled-sector loop once.
+#[expect(
+    clippy::type_complexity,
+    reason = "the dense QR ownership boundary returns one documented Q, R pair per block"
+)]
+fn compact_qr_owned_batch<E, D>(
+    dense: &mut E,
+    blocks: &[(&[D], usize, usize)],
+) -> Result<Vec<(Vec<D>, Vec<D>)>, OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    D: FactorScalar,
+{
+    factorize_col_major_batch(dense, DenseFactorization::Qr, blocks)?
+        .into_iter()
+        .zip(blocks)
+        .map(|(outputs, &(_, rows, cols))| compact_qr_outputs(outputs, rows, cols))
+        .collect()
+}
+
+fn factorize_col_major_batch<E, D>(
+    dense: &mut E,
+    op: DenseFactorization,
+    blocks: &[(&[D], usize, usize)],
+) -> Result<Vec<Vec<DenseTensor>>, OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    D: FactorScalar,
+{
+    let layouts = blocks
+        .iter()
+        .map(|&(_, rows, cols)| ([rows, cols], [1usize, rows]))
+        .collect::<Vec<_>>();
+    let inputs = blocks
+        .iter()
+        .zip(&layouts)
+        .map(|(&(data, _, _), (shape, strides))| {
+            DenseView::new(data, shape, strides, 0).map(D::dense_read)
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(OperationError::Dense)?;
+    dense
+        .factorize_batch(op, &inputs)
+        .map_err(OperationError::Dense)
+}
+
+fn compact_qr_outputs<D: FactorScalar>(
+    mut outputs: Vec<DenseTensor>,
+    rows: usize,
+    cols: usize,
+) -> Result<(Vec<D>, Vec<D>), OperationError> {
+    let rank = rows.min(cols);
     if outputs.len() != 2 {
         return Err(OperationError::Dense(DenseError::Backend {
             backend: DenseBackend::Tenferro,
@@ -6013,14 +6085,47 @@ where
     E: DenseExecutor + ?Sized,
     D: FactorScalar,
 {
-    let rank = rows.min(cols);
     let input_shape = [rows, cols];
     let input_strides = [1usize, rows];
     let input_view =
         DenseView::new(input, &input_shape, &input_strides, 0).map_err(OperationError::Dense)?;
-    let mut outputs = dense
+    let outputs = dense
         .svd(D::dense_read(input_view))
         .map_err(OperationError::Dense)?;
+    compact_svd_outputs(outputs, rows, cols)
+}
+
+/// Compact SVD of each column-major `(data, rows, cols)` block, submitted as one
+/// executor batch so the backend admits the whole coupled-sector loop once.
+#[expect(
+    clippy::type_complexity,
+    reason = "the dense SVD ownership boundary returns its documented U, S, Vt tuple"
+)]
+fn compact_svd_owned_batch<E, D>(
+    dense: &mut E,
+    blocks: &[(&[D], usize, usize)],
+) -> Result<Vec<(Vec<D>, Vec<f64>, Vec<D>)>, OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    D: FactorScalar,
+{
+    factorize_col_major_batch(dense, DenseFactorization::Svd, blocks)?
+        .into_iter()
+        .zip(blocks)
+        .map(|(outputs, &(_, rows, cols))| compact_svd_outputs(outputs, rows, cols))
+        .collect()
+}
+
+#[expect(
+    clippy::type_complexity,
+    reason = "the dense SVD ownership boundary returns its documented U, S, Vt tuple"
+)]
+fn compact_svd_outputs<D: FactorScalar>(
+    mut outputs: Vec<DenseTensor>,
+    rows: usize,
+    cols: usize,
+) -> Result<(Vec<D>, Vec<f64>, Vec<D>), OperationError> {
+    let rank = rows.min(cols);
     if outputs.len() != 3 {
         return Err(OperationError::Dense(DenseError::Backend {
             backend: DenseBackend::Tenferro,
@@ -10650,10 +10755,14 @@ where
     let matrices = sector_matricizations_generic(space.structure(), input.data(), space.nout())?;
     #[cfg(test)]
     record_compact_qr_input_pack(&matrices);
+    let blocks = matrices
+        .iter()
+        .map(|matrix| (matrix.data.as_slice(), matrix.rows, matrix.cols))
+        .collect::<Vec<_>>();
+    let factors = compact_qr_owned_batch(dense, &blocks)?;
     let mut pairs = Vec::with_capacity(matrices.len());
-    for matrix in &matrices {
+    for (matrix, (mut q, mut r)) in matrices.iter().zip(factors) {
         let rank = matrix.rows.min(matrix.cols);
-        let (mut q, mut r) = compact_qr_owned(dense, &matrix.data, matrix.rows, matrix.cols)?;
         positive_diagonal_gauge_strided(
             &mut q,
             matrix.rows,
@@ -10717,16 +10826,23 @@ where
     if let InputMatricizations::Packed(matrices) = &matrices {
         record_compact_qr_input_pack(matrices);
     }
-    let mut pairs = Vec::with_capacity(matrices.len());
-    for index in 0..matrices.len() {
-        let matrix = matrices
-            .get(index)
-            .map_err(CheckedGenericFactorPlanError::from)?;
-        #[cfg(test)]
+    let matrix_refs = (0..matrices.len())
+        .map(|index| matrices.get(index))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(CheckedGenericFactorPlanError::from)?;
+    #[cfg(test)]
+    for matrix in &matrix_refs {
         record_checked_compact_input(CheckedCompactOperation::Qr, input.data(), matrix.data, None);
+    }
+    let blocks = matrix_refs
+        .iter()
+        .map(|matrix| (matrix.data, matrix.rows, matrix.cols))
+        .collect::<Vec<_>>();
+    let factors =
+        compact_qr_owned_batch(dense, &blocks).map_err(CheckedGenericFactorPlanError::from)?;
+    let mut pairs = Vec::with_capacity(matrices.len());
+    for (matrix, (mut q, mut r)) in matrix_refs.iter().zip(factors) {
         let rank = matrix.rows.min(matrix.cols);
-        let (mut q, mut r) = compact_qr_owned(dense, matrix.data, matrix.rows, matrix.cols)
-            .map_err(CheckedGenericFactorPlanError::from)?;
         positive_diagonal_gauge_strided(
             &mut q,
             matrix.rows,
