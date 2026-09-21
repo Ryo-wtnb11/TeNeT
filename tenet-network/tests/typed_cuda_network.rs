@@ -1660,10 +1660,11 @@ fn warm_general_cuda_networks_transfer_only_the_returned_output() {
 /// G2c-3 (#1348): the device rejection classes reachable through `tensor!`
 /// are decided before the plan cache publishes, a workspace is leased or the
 /// device is touched: plan cache, pools, transfer counters, cuTENSOR plans,
-/// scratch and executor state are all unchanged. (Anyonic braiding and a
-/// compact operand are not constructible as device operands of this impl;
-/// their preflight is the device-free `device_operand_admission` test.) The
-/// trace pre-step's rejections (G2c-5) are in
+/// scratch and executor state are all unchanged. (A compact operand is not
+/// constructible as a device operand of this impl; its preflight, and the
+/// anyonic contraction class, are in the device-free `device_operand_admission`
+/// test.) The trace pre-step's rejections (G2c-5), an anyonic operand
+/// included, are in
 /// `rejected_cuda_trace_prestep_leaves_every_device_state_unchanged`.
 #[test]
 #[ignore = "requires a real CUDA device"]
@@ -1684,6 +1685,10 @@ fn rejected_cuda_networks_leave_every_device_state_unchanged() {
     drop(tensor!([i; k] = a[i; j] * a[j; k]).unwrap());
     let before = device_state(&runtime);
 
+    // A fresh topology, i.e. the plan-cache miss path only: this pins that the
+    // mismatch is raised before a miss publishes. On a topology hit it is
+    // raised by the execution body, after the hit is counted and a workspace
+    // leased (#1371).
     assert!(tensor!([k; i] = a[i; j] * mismatched[j; k]).is_err());
     assert_eq!(
         device_state(&runtime),
@@ -2178,7 +2183,9 @@ fn warm_trace_prestep_transfers_only_the_trace_and_returned_outputs() {
 /// and executor state unchanged, with the Host's error. A contracted-leg
 /// mismatch between the reduced operands is the Host's own post-trace input
 /// error: it is raised after the traces ran (their uploads are its only
-/// transfers) and publishes no plan.
+/// transfers) and publishes no plan; deciding it before the traces and the
+/// plan lookup is #1371. An anyonic traced operand is rejected by the trace
+/// compile, with the Host's error, before any trace runs.
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn rejected_cuda_trace_prestep_leaves_every_device_state_unchanged() {
@@ -2221,9 +2228,8 @@ fn rejected_cuda_trace_prestep_leaves_every_device_state_unchanged() {
     let before = device_state(&runtime);
     assert!(tensor!([a; x] = (o.tb)[j, a; j, w] * mismatch[i, w; i, x]).is_err());
     let after = device_state(&runtime);
-    // The storage-generic body rejects it after the plan lookup, as on Host
-    // and as for any failed execution: a hit on the published plan whose
-    // leased workspace is quarantined, never a new plan.
+    // This pins only that no plan is published; the hit counted and the
+    // workspace quarantined by the failed execution are #1371.
     assert_eq!(
         (
             after.plans.entries,
@@ -2243,4 +2249,154 @@ fn rejected_cuda_trace_prestep_leaves_every_device_state_unchanged() {
         "reduced contracted-leg mismatch: exactly the two trace outputs"
     );
     assert_eq!(after.transfers.d2h_calls, before.transfers.d2h_calls);
+}
+
+/// A one-sector real rule that reports anyonic braiding (every symbol is 1):
+/// a valid device operand, so the anyonic boundary is reachable on device.
+struct RealAnyonicProbe;
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+struct AnyonicProbeSector;
+
+impl tenet::core::FusionRule for RealAnyonicProbe {
+    fn rule_identity(&self) -> tenet::core::RuleIdentity {
+        tenet::core::RuleIdentity::from_canonical_bytes::<Self>(
+            0x1350_0000_0000_0001,
+            Arc::<[u8]>::from([]),
+        )
+    }
+    fn fusion_style(&self) -> tenet::core::FusionStyleKind {
+        tenet::core::FusionStyleKind::Unique
+    }
+    fn braiding_style(&self) -> tenet::core::BraidingStyleKind {
+        tenet::core::BraidingStyleKind::Anyonic
+    }
+    fn vacuum(&self) -> tenet::core::SectorId {
+        tenet::core::SectorId::new(0)
+    }
+    fn fusion_channels(
+        &self,
+        _: tenet::core::SectorId,
+        _: tenet::core::SectorId,
+    ) -> tenet::core::SectorVec {
+        core::iter::once(tenet::core::SectorId::new(0)).collect()
+    }
+}
+
+impl tenet::core::MultiplicityFreeFusionRule for RealAnyonicProbe {}
+
+impl tenet::core::MultiplicityFreeFusionSymbols for RealAnyonicProbe {
+    type Scalar = f64;
+    fn f_symbol_scalar(
+        &self,
+        _: tenet::core::SectorId,
+        _: tenet::core::SectorId,
+        _: tenet::core::SectorId,
+        _: tenet::core::SectorId,
+        _: tenet::core::SectorId,
+        _: tenet::core::SectorId,
+    ) -> f64 {
+        1.0
+    }
+    fn r_symbol_scalar(
+        &self,
+        _: tenet::core::SectorId,
+        _: tenet::core::SectorId,
+        _: tenet::core::SectorId,
+    ) -> f64 {
+        1.0
+    }
+}
+
+impl MultiplicityFreeRigidSymbols for RealAnyonicProbe {
+    fn dim_scalar(&self, _: tenet::core::SectorId) -> f64 {
+        1.0
+    }
+    fn inv_dim_scalar(&self, _: tenet::core::SectorId) -> f64 {
+        1.0
+    }
+    fn sqrt_dim_scalar(&self, _: tenet::core::SectorId) -> f64 {
+        1.0
+    }
+    fn inv_sqrt_dim_scalar(&self, _: tenet::core::SectorId) -> f64 {
+        1.0
+    }
+    fn twist_scalar(&self, _: tenet::core::SectorId) -> f64 {
+        1.0
+    }
+    fn frobenius_schur_phase_scalar(&self, _: tenet::core::SectorId) -> f64 {
+        1.0
+    }
+}
+
+impl CheckedFusionAlgebra for RealAnyonicProbe {
+    fn try_dual_sector(
+        &self,
+        sector: tenet::core::SectorId,
+    ) -> Result<tenet::core::SectorId, FusionAlgebraError> {
+        Ok(sector)
+    }
+    fn try_fusion_channels(
+        &self,
+        left: tenet::core::SectorId,
+        right: tenet::core::SectorId,
+    ) -> Result<tenet::core::SectorVec, FusionAlgebraError> {
+        Ok(tenet::core::FusionRule::fusion_channels(self, left, right))
+    }
+    fn try_nsymbol(
+        &self,
+        left: tenet::core::SectorId,
+        right: tenet::core::SectorId,
+        coupled: tenet::core::SectorId,
+    ) -> Result<usize, FusionAlgebraError> {
+        Ok(tenet::core::FusionRule::nsymbol(self, left, right, coupled))
+    }
+}
+
+impl SectorCodec for RealAnyonicProbe {
+    type Sector = AnyonicProbeSector;
+    fn encode_sector(
+        &self,
+        _: &AnyonicProbeSector,
+    ) -> Result<tenet::core::SectorId, FusionAlgebraError> {
+        Ok(tenet::core::SectorId::new(0))
+    }
+    fn decode_sector(
+        &self,
+        sector: tenet::core::SectorId,
+    ) -> Result<AnyonicProbeSector, FusionAlgebraError> {
+        if sector == tenet::core::SectorId::new(0) {
+            Ok(AnyonicProbeSector)
+        } else {
+            Err(FusionAlgebraError::InvalidSector { sector })
+        }
+    }
+}
+
+/// G2c-5 (#1350): an anyonic traced operand is rejected by the trace compile
+/// with the Host's error before any trace runs, leaving every device state
+/// unchanged.
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn anyonic_cuda_trace_prestep_rejects_like_host_before_device_work() {
+    let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+    let leg = GradedSpace::try_new(RealAnyonicProbe, [(AnyonicProbeSector, 2)]).unwrap();
+    let host = TensorMap::<_, f64>::rand_with_seed(&runtime, [&leg], [&leg], 1_356_000).unwrap();
+    let device = host.to_cuda().unwrap();
+    let host_error = tensor!([] = host[i; i]).unwrap_err();
+    let before = device_state(&runtime);
+    let device_error = tensor!([] = device[i; i]).unwrap_err();
+    assert!(
+        matches!(
+            &device_error,
+            tenet::prelude::Error::Operation(operation)
+                if matches!(
+                    **operation,
+                    tenet::operations::OperationError::UnsupportedTensorContractScope { .. }
+                )
+        ),
+        "{device_error:?}"
+    );
+    assert_eq!(device_error.to_string(), host_error.to_string());
+    assert_eq!(device_state(&runtime), before, "anyonic traced operand");
 }
