@@ -427,6 +427,25 @@ impl SpectrumMagnitude for Complex64 {
     }
 }
 
+// The single-precision magnitudes widen *before* the absolute value or the
+// hypotenuse, so a `Complex32` whose components straddle the `f32` range still
+// reports a finite magnitude and the truncation policies compare the same
+// `f64` quantities they compare for a double-precision payload. There is no
+// `nonnegative_f64_slice` fast path: an `f32` slice is not an `f64` slice, so
+// the selection materializes the magnitudes, exactly as `Complex64` already
+// does.
+impl SpectrumMagnitude for f32 {
+    fn magnitude(self) -> f64 {
+        f64::from(self).abs()
+    }
+}
+
+impl SpectrumMagnitude for num_complex::Complex32 {
+    fn magnitude(self) -> f64 {
+        Complex64::new(f64::from(self.re), f64::from(self.im)).norm()
+    }
+}
+
 /// One coupled sector's factorization spectrum, stored descending by
 /// magnitude: singular values (`f64`), Hermitian eigenvalues (signed `f64`),
 /// or general eigenvalues (`Complex64`).

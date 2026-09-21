@@ -324,6 +324,42 @@ fn u1_complex_svd_composition_matches_host_for_every_policy() {
     svd_policy_sweep!(source, u1_leg(&[(-1, 1), (0, 2)]), "u1 c64");
 }
 
+/// The same bitwise composition at single precision (#1324).
+///
+/// `svd_trunc` is `svd_compact` + `find_truncated(diagview(s))` +
+/// `restrict_*`, and the equality is bitwise at `f32`/`Complex32` for the same
+/// reason it is at `f64`: `real_spectrum` widens the payload's singular values
+/// into the `f64` the decision runs on, `s` stores `from_real` of those same
+/// widened values, and `SpectrumMagnitude` for `f32` / `Complex32` is
+/// `f64::from(v).abs()` / `hypot(re, 0)`. Both routes therefore hand the
+/// selection the identical `f64` slice. This is the path the single-precision
+/// `SpectrumMagnitude` impls exist for, so it is pinned rather than argued.
+#[test]
+fn u1_single_precision_svd_composition_matches_host_for_every_policy() {
+    let left = u1_leg(&[(-1, 2), (0, 3), (1, 2)]);
+    let right = u1_leg(&[(-1, 3), (0, 2), (1, 3)]);
+    let mut state = 0x3333_4444u64;
+    let source: TensorMap<_, f32> =
+        TensorMap::from_block_fn(&runtime(), [&left], [&right], move |_, _| {
+            fill(&mut state) as f32
+        })
+        .unwrap();
+    svd_policy_sweep!(source, u1_leg(&[(-1, 1), (0, 2)]), "u1 f32");
+}
+
+#[test]
+fn u1_complex32_svd_composition_matches_host_for_every_policy() {
+    let left = u1_leg(&[(-1, 2), (0, 3), (1, 2)]);
+    let right = u1_leg(&[(-1, 3), (0, 2), (1, 3)]);
+    let mut state = 0x5555_6666u64;
+    let source: TensorMap<_, num_complex::Complex32> =
+        TensorMap::from_block_fn(&runtime(), [&left], [&right], move |_, _| {
+            num_complex::Complex32::new(fill(&mut state) as f32, fill(&mut state) as f32)
+        })
+        .unwrap();
+    svd_policy_sweep!(source, u1_leg(&[(-1, 1), (0, 2)]), "u1 c32");
+}
+
 #[test]
 fn su2_svd_composition_matches_host_for_every_policy() {
     // SU(2): dim(c) = 2j+1, so the rank budget is quantum-dimension weighted
@@ -524,16 +560,20 @@ fn signed_cross_sector_eigenvalue_ties_are_broken_as_host_breaks_them() {
     let runtime = runtime();
     let identity: TensorMap<_, f64> = TensorMap::id(&runtime, [&leg]).unwrap();
     // diag(+2, -2) in every sector: three sectors x two magnitudes, all equal.
-    let source = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
-        if indices[0] != indices[1] {
-            0.0
-        } else if indices[0] == 0 {
-            2.0
-        } else {
-            -2.0
-        }
-    })
-    .unwrap();
+    // Annotated: the payload dtype is taken solely from float literals, and
+    // `f32` reaching `FactorizationScalar` (#1324) means `eigh_full` no longer
+    // pins `{float}` to `f64` before `value.abs()` below resolves.
+    let source: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+            if indices[0] != indices[1] {
+                0.0
+            } else if indices[0] == 0 {
+                2.0
+            } else {
+                -2.0
+            }
+        })
+        .unwrap();
     assert_eq!(identity.block_count(), source.block_count());
     let magnitudes: Vec<f64> = source
         .eigh_full()

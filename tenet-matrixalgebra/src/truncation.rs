@@ -65,6 +65,31 @@ impl TruncationSpace {
 }
 
 /// Truncation policy over per-sector descending spectra.
+///
+/// # Tolerances and the payload's precision
+///
+/// Every tolerance here is `f64` and every spectrum reaching a decision is
+/// `f64`, at *every* payload dtype: [`crate::FactorScalar::real_spectrum`]
+/// widens a single-precision spectrum rather than recomputing it. The `f64`
+/// type therefore says nothing about how accurate the values are. A spectrum
+/// produced by an `f32`/`Complex32` factorization carries a relative error of
+/// order `f32::EPSILON` times the block's condition number, so a cutoff chosen
+/// at `f64` scale keeps that noise, and two values closer together than that
+/// noise are not ordered reliably.
+///
+/// Every policy here keeps its postcondition against the spectrum it was
+/// handed — a kept value is at or above that run's threshold, the reported
+/// error is the weighted 2-norm of what that run discarded — at every payload
+/// dtype. Comparing two *runs* is what single precision can break, and by how
+/// much depends on the policy: [`Truncation::Rank`] at a tie swaps two
+/// interchangeable states, so the kept count and the discarded weight survive;
+/// [`Truncation::Tolerance`] and [`Truncation::DiscardWeight`] have a
+/// boundary, and a value within noise of the threshold, or a tail whose
+/// cumulative weight is within noise of the budget, is kept by one run and
+/// dropped by the other — a whole state's difference in both the count and the
+/// weight. MatrixAlgebraKit scales its own default with the element type
+/// (`src/common/defaults.jl` `defaulttol(x) = eps(real(float(one(eltype(x)))))^(2/3)`);
+/// TeNeT has no defaults, so the scaling is the caller's.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Truncation {
     /// Keep everything.
@@ -435,6 +460,24 @@ fn kept_counts(spectra: &[WeightedSpectrum<'_>], truncation: &Truncation) -> Vec
             let mut discarded = 0.0;
             while let Some(TailCandidate { value, sector }) = tails.pop() {
                 let next = discarded + spectra[sector].weight * value * value;
+                // Why the slack is not scaled by the payload's epsilon: it
+                // guards the rounding of *this* accumulation, and `discarded`,
+                // `weight` and `value` are `f64` whatever the payload dtype is
+                // (`FactorScalar::real_spectrum` widens a single-precision
+                // spectrum instead of recomputing it). The arithmetic being
+                // guarded is bit-for-bit the same at `f32` as at `f64`, so a
+                // payload-dependent slack here would change the *policy*, not
+                // absorb a payload-dependent error. It would also be a
+                // deviation, not a fix: MatrixAlgebraKit `_truncerr_impl`
+                // (`src/implementations/truncation.jl:91-102`) compares the
+                // cumulative tail against the budget with no slack at all, and
+                // it accumulates in the element type, so TeNeT is already the
+                // more accurate of the two at single precision.
+                //
+                // The slack being *absolute* rather than relative to the
+                // budget is a scale dependence that affects `f64` exactly as
+                // much as `f32`; changing it is a decision about the
+                // double-precision contract and belongs to its own leaf.
                 if next > budget + 1e-15 {
                     break;
                 }

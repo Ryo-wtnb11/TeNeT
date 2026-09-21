@@ -24,7 +24,7 @@ use std::hint::black_box;
 use std::sync::Arc;
 
 use tenet::core::{U1FusionRule, U1Irrep};
-use tenet::prelude::{Complex32, Complex64, GradedSpace, Runtime, TensorMap};
+use tenet::prelude::{Complex32, Complex64, GradedSpace, Runtime, TensorMap, Truncation};
 use tenet_matrixalgebra::FactorScalar;
 
 struct CountingAllocator;
@@ -205,4 +205,160 @@ fn single_precision_allocates_as_often_as_double_and_half_the_payload_bytes() {
         3 * payload * (size_of::<Complex64>() - size_of::<Complex32>()),
         "Complex32 must allocate exactly half the payload bytes of Complex64"
     );
+}
+
+/// Builds a tensor and factorizes it, at one payload dtype (#1324).
+///
+/// The same public sequence at every dtype: a QR, an SVD and a truncated SVD.
+/// The spectra are `f64` at every payload dtype by contract, so only the
+/// *factor payloads* narrow — which is exactly what the byte assertion counts.
+/// Builds a tensor and factorizes it, at one payload dtype (#1324).
+///
+/// Returns `(produced, spectrum_sectors, calls, bytes)` for one **steady-state**
+/// iteration: `produced` is the total payload length of every factor the
+/// sequence returns, `spectrum_sectors` the number of coupled sectors across
+/// the spectrum factors it builds.
+///
+/// Steady state, not "one warm pass", is the whole point. A single iteration of
+/// this sequence measured cold includes one-time growth of the dense backend's
+/// buffer pool, which is amortized across dtypes through process-global state:
+/// measured that way the counts depend on *which dtype ran first* (a
+/// complex-payload pipeline run after a real one was seen to cost 321 calls and
+/// 287 when it ran after another complex one, the two numbers swapping when the
+/// dtype order was swapped) and even on whether the allocator hook itself does
+/// extra work. After four identical iterations the per-iteration count is
+/// exactly reproducible and independent of the dtype order and of the runtime
+/// instance, which is what makes it a property of the algorithm rather than of
+/// the process.
+macro_rules! measure_factorizations {
+    ($runtime:expr, $dtype:ty, $space:expr) => {{
+        let space = $space;
+        let sequence = || {
+            let tensor: TensorMap<U1FusionRule, $dtype> =
+                TensorMap::rand_with_seed($runtime, [space, space], [space], 7_502).unwrap();
+            let (q, r) = tensor.qr_compact().unwrap();
+            let (u, s, vh) = tensor.svd_compact().unwrap();
+            let truncated = tensor.svd_trunc(&Truncation::rank(4)).unwrap();
+            (tensor, q, r, u, s, vh, truncated)
+        };
+        // Warm: every one-time backend workspace growth is paid here.
+        for _ in 0..4 {
+            black_box(sequence());
+        }
+        // Shape observation, outside the counter: `diagview` allocates.
+        let (tensor, q, r, u, s, vh, truncated) = sequence();
+        let produced = tensor.data().len()
+            + q.data().len()
+            + r.data().len()
+            + u.data().len()
+            + s.data().len()
+            + vh.data().len()
+            + truncated.u.data().len()
+            + truncated.s.data().len()
+            + truncated.vh.data().len();
+        let spectrum_sectors = s.diagview().unwrap().len() + truncated.s.diagview().unwrap().len();
+        black_box((tensor, q, r, u, s, vh, truncated));
+
+        let (_, calls, bytes) = measured(|| black_box(sequence()));
+        (produced, spectrum_sectors, calls, bytes)
+    }};
+}
+
+#[test]
+fn single_precision_factorizations_allocate_like_double() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let space = u1_space();
+
+    let (f64_payload, f64_sectors, f64_calls, f64_bytes) =
+        measure_factorizations!(&runtime, f64, &space);
+    let (f32_payload, f32_sectors, f32_calls, f32_bytes) =
+        measure_factorizations!(&runtime, f32, &space);
+    let (c64_payload, c64_sectors, c64_calls, c64_bytes) =
+        measure_factorizations!(&runtime, Complex64, &space);
+    let (c32_payload, c32_sectors, c32_calls, c32_bytes) =
+        measure_factorizations!(&runtime, Complex32, &space);
+
+    eprintln!(
+        "factorizations: f64 {f64_calls} calls/{f64_bytes} B ({f64_payload} entries, \
+         {f64_sectors} spectrum sectors), f32 {f32_calls}/{f32_bytes} ({f32_payload}, \
+         {f32_sectors}), c64 {c64_calls}/{c64_bytes} ({c64_payload}, {c64_sectors}), \
+         c32 {c32_calls}/{c32_bytes} ({c32_payload}, {c32_sectors})"
+    );
+
+    assert_eq!(
+        (f32_payload, f32_sectors),
+        (f64_payload, f64_sectors),
+        "the twins must produce factors of the same shape"
+    );
+    assert_eq!(
+        (c32_payload, c32_sectors),
+        (c64_payload, c64_sectors),
+        "Complex32 against Complex64"
+    );
+
+    // The one dtype-asymmetric allocation on this path, and the reason the
+    // bound below is not plain equality.
+    //
+    // `typed.rs::diagonal_factor_on` builds a spectrum factor by
+    // `entry.values.into_iter().map(to_scalar).collect()`, turning the `Vec<f64>`
+    // spectrum into a `Vec<D>` payload. When `D` is `f64` that is the identity
+    // map over a `Vec` of the same element size and alignment, so the standard
+    // library's in-place collect reuses the source buffer and the factor costs
+    // no allocation at all. `f32` (4 bytes, align 4), `Complex32` (8 bytes,
+    // align 4) and `Complex64` (16 bytes) all fail that layout test, so each
+    // allocates one `Vec<D>` per coupled sector of every spectrum factor built.
+    //
+    // So the asymmetry is not "single precision costs more": `Complex64` pays
+    // it too and has since long before single precision existed. `f64` is the
+    // one payload dtype that gets its spectrum factor for free, and the term
+    // below is derived from the fixture (the sector count measured above),
+    // never hardcoded. Found by diffing a per-call-site allocation-backtrace
+    // histogram between the `f64` and `f32` runs; the dense backend's own SVD
+    // entry points and conversion chain are allocation-identical at all four
+    // dtypes.
+    for (single, double, extra, what) in [
+        (f32_calls, f64_calls, f32_sectors, "f32 against f64"),
+        (c32_calls, c64_calls, 0, "Complex32 against Complex64"),
+    ] {
+        assert!(
+            single >= double,
+            "{what}: narrowing the payload must not make the factorization \
+             allocate less ({single} against {double}) — that would mean it ran \
+             a different algorithm"
+        );
+        assert!(
+            single <= double + extra,
+            "{what}: {single} allocation calls against {double} plus the {extra} \
+             spectrum-factor collects that only an f64 payload avoids"
+        );
+    }
+
+    // Every entry of every factor the sequence returns is half as wide; the
+    // scratch the factorization allocates on top is not necessarily payload
+    // typed, so this is the lower bound the returned factors alone guarantee.
+    for (wide_bytes, narrow_bytes, payload, step, what) in [
+        (
+            f64_bytes,
+            f32_bytes,
+            f64_payload,
+            size_of::<f64>() - size_of::<f32>(),
+            "f32 against f64",
+        ),
+        (
+            c64_bytes,
+            c32_bytes,
+            c64_payload,
+            size_of::<Complex64>() - size_of::<Complex32>(),
+            "Complex32 against Complex64",
+        ),
+    ] {
+        // Addition, not subtraction: a regression must fail the assertion, not
+        // panic on a `usize` underflow before reaching it.
+        assert!(
+            narrow_bytes + payload * step <= wide_bytes,
+            "{what}: the narrow run allocated {narrow_bytes} B against {wide_bytes} B, \
+             less than the {} B its factors alone are narrower by",
+            payload * step
+        );
+    }
 }
