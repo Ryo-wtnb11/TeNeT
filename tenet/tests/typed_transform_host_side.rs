@@ -126,3 +126,223 @@ fn a_runtime_without_a_device_reports_no_device_transform_state_and_still_clears
     #[cfg(feature = "cuda")]
     assert!(runtime.cuda_tree_transform_stats().is_none());
 }
+
+// ---------------------------------------------------------------------------
+// The Host contract the device `*_overwrite_into` mirrors (issue #1329)
+// ---------------------------------------------------------------------------
+
+/// The positions that hold a NaN, so a NaN *pattern* can be compared rather
+/// than merely "some NaN survived".
+fn nan_positions(data: &[f64]) -> Vec<usize> {
+    data.iter()
+        .enumerate()
+        .filter(|(_, value)| value.is_nan())
+        .map(|(index, _)| index)
+        .collect()
+}
+
+/// The Host precondition order and wording that `typed_cuda_transform_contracts
+/// .rs` mirrors on the device. Pinned here, without a device and without the
+/// `cuda` feature, so ordinary CI catches a Host drift that would silently
+/// make the device mirror wrong rather than failing it.
+///
+/// Only the two storage nouns differ on device ("host" becomes "CUDA"), which
+/// is why this test spells them out.
+#[test]
+fn the_host_overwrite_into_preconditions_have_a_fixed_order_and_wording() {
+    let runtime = Runtime::builder().build().unwrap();
+    let v = u1_leg();
+    let source: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&v, &v], [&v, &v], real_fill).unwrap();
+    // Fresh, uniquely owned destinations: a `clone()` shares the payload `Arc`
+    // and would trip the unique-ownership check instead.
+    let destination = || source.permute(&[2, 0], &[1, 3]).unwrap();
+
+    let message = |error: tenet::prelude::Error| error.to_string();
+
+    // Runtime mismatch precedes a rule mismatch.
+    let other = Runtime::builder().build().unwrap();
+    let z2 = Arc::new(tenet::core::ZNFusionRule::new(2).unwrap());
+    let z3 = Arc::new(tenet::core::ZNFusionRule::new(3).unwrap());
+    let z2_leg = GradedSpace::try_new_with_arc(Arc::clone(&z2), [(z2.irrep(0), 2)]).unwrap();
+    let z3_leg = GradedSpace::try_new_with_arc(Arc::clone(&z3), [(z3.irrep(0), 2)]).unwrap();
+    let zn_fill = |_: &_, indices: &[usize]| indices.iter().map(|&i| i as f64 + 1.0).sum::<f64>();
+    let z2_source = TensorMap::from_block_fn(&runtime, [&z2_leg], [&z2_leg], zn_fill).unwrap();
+    let mut foreign =
+        TensorMap::from_block_fn(&other, [&z3_leg], [&z3_leg], |_, _| f64::NAN).unwrap();
+    assert_eq!(
+        z2_source
+            .permute_overwrite_into(&mut foreign, &[0], &[1], 1.0)
+            .unwrap_err(),
+        tenet::prelude::Error::RuntimeMismatch
+    );
+
+    // Rule mismatch precedes a lazy-adjoint source.
+    let mut z3_destination =
+        TensorMap::from_block_fn(&runtime, [&z3_leg], [&z3_leg], |_, _| f64::NAN).unwrap();
+    assert_eq!(
+        z2_source
+            .adjoint()
+            .unwrap()
+            .permute_overwrite_into(&mut z3_destination, &[0], &[1], 1.0)
+            .unwrap_err(),
+        tenet::prelude::Error::RuleMismatch
+    );
+
+    // A lazy-adjoint source is rejected — not lowered onto its parent — and
+    // is reported before a lazy-adjoint destination.
+    let lazy_source = source.adjoint().unwrap();
+    let mut lazy_destination = destination().adjoint().unwrap();
+    assert_eq!(
+        message(
+            lazy_source
+                .permute_overwrite_into(&mut lazy_destination, &[2, 0], &[1, 3], 1.0)
+                .unwrap_err()
+        ),
+        "invalid argument: typed destination tree transform requires an ordinary \
+         dense host source"
+    );
+    assert_eq!(
+        message(
+            source
+                .permute_overwrite_into(&mut lazy_destination, &[2, 0], &[1, 3], 1.0)
+                .unwrap_err()
+        ),
+        "invalid argument: destination must use ordinary dense host storage"
+    );
+
+    // The alias check precedes the operation build, so malformed axes do not
+    // mask it.
+    let mut alias = source.clone();
+    assert_eq!(
+        message(
+            source
+                .permute_overwrite_into(&mut alias, &[0, 0], &[1, 3], 1.0)
+                .unwrap_err()
+        ),
+        "invalid argument: destination storage must not alias an input"
+    );
+
+    // The space check precedes the unique-ownership check.
+    let mut wrong_space = source.transpose().unwrap();
+    let wrong_space_handle = wrong_space.clone();
+    assert_eq!(
+        message(
+            source
+                .permute_overwrite_into(&mut wrong_space, &[2, 0], &[1, 3], 1.0)
+                .unwrap_err()
+        ),
+        "invalid argument: destination fusion space or block layout does not match \
+         the operation result"
+    );
+    drop(wrong_space_handle);
+
+    let mut shared = destination();
+    let shared_handle = shared.clone();
+    assert_eq!(
+        message(
+            source
+                .permute_overwrite_into(&mut shared, &[2, 0], &[1, 3], 1.0)
+                .unwrap_err()
+        ),
+        "invalid argument: destination storage must be uniquely owned"
+    );
+    drop(shared_handle);
+
+    // `repartition_overwrite_into` onto a destination of another rank.
+    let mut rank_three =
+        TensorMap::from_block_fn(&runtime, [&v, &v], [&v], |_, _| f64::NAN).unwrap();
+    assert_eq!(
+        message(
+            source
+                .repartition_overwrite_into(&mut rank_three, 1.0)
+                .unwrap_err()
+        ),
+        "invalid argument: repartition destination rank 3 does not match source rank 4"
+    );
+}
+
+#[test]
+fn host_overwrite_into_clears_a_poisoned_destination_and_never_short_circuits() {
+    // The three destination semantics the device must reproduce: Overwrite
+    // clears whatever the destination held, `alpha == 0` still computes
+    // `0 * src` so a NaN source propagates, and an identity axis list is still
+    // written rather than short circuited.
+    let runtime = Runtime::builder().build().unwrap();
+    let v = u1_leg();
+    let source: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&v, &v], [&v, &v], real_fill).unwrap();
+
+    let mut poisoned = source.permute(&[2, 0], &[1, 3]).unwrap().scale(f64::NAN);
+    assert!(poisoned.data().iter().all(|value| value.is_nan()));
+    source
+        .permute_overwrite_into(&mut poisoned, &[2, 0], &[1, 3], 1.0)
+        .unwrap();
+    assert!(
+        poisoned.data().iter().all(|value| value.is_finite()),
+        "Overwrite mode must clear every destination layout, inactive ones included"
+    );
+    assert_eq!(
+        poisoned.data(),
+        source.permute(&[2, 0], &[1, 3]).unwrap().data()
+    );
+
+    // No identity short circuit: `alpha * self` is written.
+    let mut identity = source.scale(f64::NAN);
+    source
+        .permute_overwrite_into(&mut identity, &[0, 1], &[2, 3], -2.5)
+        .unwrap();
+    assert_eq!(identity.data(), source.scale(-2.5).data());
+    let mut same_split = source.scale(f64::NAN);
+    source
+        .repartition_overwrite_into(&mut same_split, 2.0)
+        .unwrap();
+    assert_eq!(same_split.data(), source.scale(2.0).data());
+
+    // `alpha == 0`, `-0.0` included, is not short circuited: a NaN source
+    // poisons the destination.
+    let nan_source: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&v, &v], [&v, &v], |trees, idx| {
+            if idx.iter().sum::<usize>() % 3 == 0 {
+                f64::NAN
+            } else {
+                real_fill(trees, idx)
+            }
+        })
+        .unwrap();
+    // The expected NaN *set*, computed from the source's own poisoned
+    // positions carried through the permute — not read back off the call
+    // under test. `0 * NaN` is NaN, so every NaN of the permuted source, and
+    // only those, must survive at alpha = 0.
+    let permuted_source = nan_source.permute(&[1, 2], &[3, 0]).unwrap();
+    let expected_nans = nan_positions(permuted_source.data());
+    assert!(
+        !expected_nans.is_empty(),
+        "the fixture must carry NaNs through the permute"
+    );
+    assert!(
+        expected_nans.len() < permuted_source.data().len(),
+        "the fixture must also carry finite entries, so the set is a real pattern"
+    );
+    for alpha in [0.0, -0.0] {
+        let mut destination = nan_source.permute(&[1, 2], &[3, 0]).unwrap();
+        nan_source
+            .permute_overwrite_into(&mut destination, &[1, 2], &[3, 0], alpha)
+            .unwrap();
+        assert_eq!(
+            nan_positions(destination.data()),
+            expected_nans,
+            "alpha = {alpha} must still compute 0 * src at every poisoned position"
+        );
+        // Everything else is an exact zero: `alpha == 0` is a multiplication,
+        // not a skip, and the Overwrite zero fills clear the rest.
+        assert!(
+            destination
+                .data()
+                .iter()
+                .enumerate()
+                .all(|(index, value)| expected_nans.contains(&index) || *value == 0.0),
+            "alpha = {alpha}: every finite position must be an exact zero"
+        );
+    }
+}
