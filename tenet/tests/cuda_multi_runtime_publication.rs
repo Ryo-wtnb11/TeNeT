@@ -1,6 +1,7 @@
-//! Public-API gate for #1384: a device output returned by one `Runtime` must
-//! be fully written before a thread that also uses a second `Runtime` on the
-//! same device reads it.
+//! Public-API gate for #1384: a fresh device output returned by one `Runtime`
+//! must be fully written before a thread that also uses a second `Runtime` on
+//! the same device reads it. It covers fresh outputs only; an overwrite
+//! destination or reused buffer is the overwrite/reused-buffer leaf (#1391).
 //!
 //! `tenet-dense/tests/cuda_multi_context_publication.rs` forces the exact
 //! interleaving at the adapter seam. Here the same steps run through
@@ -16,10 +17,12 @@
 //!    operands, so every element equals the sector degeneracy.
 //!
 //! Before the per-device lock (`runtime.rs`, `cuda_device_lock`) this read a
-//! stale `O` in 13/60 iterations. The lock makes step 2 wait for `compose`'s
+//! stale `O` in 13/120 iterations on an A100. The lock makes step 2 wait for `compose`'s
 //! whole lease, so B's sync can no longer land between `O`'s bind and write.
 //! The one-Runtime control reads `T` through R1, whose lease orders it after
-//! `compose`, and must always pass. Both assert no stale read.
+//! `compose`, and must always pass. Both assert no stale read. Sensitivity is
+//! timing-based: the sweep is placed from one measured `compose`, so on other
+//! hardware a pre-fix build may miss the window; a pass there is not proof.
 //!
 //! The ordering test runs many threads over two Runtimes on one device,
 //! interleaving uploads, `compose`, cross-Runtime reads and device

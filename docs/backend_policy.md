@@ -113,16 +113,27 @@ locks, not the Runtime state mutex, so Host work on the same runtime is not
 blocked by device work. This is not a concurrency, overlap, or multi-stream
 claim: device operations of every Runtime on one device serialize their
 host-side enqueue on that device lock (GPU execution stays asynchronous; the
-lock adds no host synchronization).
+lock adds no host synchronization). A host synchronization that already
+happens under a lease — `to_host`, scalar and spectrum downloads in
+reductions and factorizations, and Tenferro's cross-thread `synchronize()` —
+now stalls every Runtime on the device, not only the caller.
 
 The device lock is shared across Runtimes because CubeCL's client is
 process-wide per device and publishes a binding's stream cursor only when it
 is bound, not when a later kernel writes it (tensor4all/cubecl#16). Without
 it, a second Runtime could sync past an output's bind before its write and
-then read it unfinished (#1384). CubeCL or Tenferro users of the same device
-in the same process that are not TeNeT do not take this lock and remain
-exposed to that race until cubecl#16 is fixed; do not share a device with
-them concurrently.
+then read it unfinished (#1384). The lock covers outputs bound and fully
+written within one lease, which is every operation that returns a new tensor.
+It does not cover a buffer bound in an earlier lease and written again later:
+a `*_overwrite_into` destination, or reused scratch (`CudaContractScratch`,
+pooled `tensor!` network intermediates). If another thread syncs past such a
+buffer's bind between the two leases, it can read the later write
+unfinished, even within one Runtime (the overwrite/reused-buffer leaf, #1391).
+CubeCL or Tenferro users of the same device in the same process that are not
+TeNeT do not take this lock either. Both remain exposed until cubecl#16 is
+fixed; do not share a device with such users concurrently, and do not pass an
+overwrite destination to another thread for reading while it may be
+overwritten.
 
 ## Historical context
 

@@ -736,15 +736,19 @@ struct CudaHome {
 /// device and records a binding's stream cursor only when it is bound, not
 /// when a later kernel writes it (tensor4all/cubecl#16). A stale read of an
 /// output `O` needs some other submission that syncs a stream past `O`'s bind
-/// cursor between that bind and `O`'s last write. Every TeNeT operation binds
-/// and writes its outputs inside one lease, and this lock excludes every
-/// other lease on the device, so no TeNeT submission can fall in that window.
+/// cursor between that bind and `O`'s last write. For a fresh output — bound
+/// and fully written inside one lease, as in every operation that returns a
+/// new tensor — this lock excludes every other lease on the device, so no
+/// TeNeT submission can fall in that window.
 /// Any later reader's sync to the writer's stream then either happened before
 /// the writer's lease (its synced cursor is below `O`'s bind cursor, so it
 /// waits on a fresh event) or after it (the event already covers every write
 /// into `O`). No host synchronization is added: the lock orders enqueue only.
-/// Submissions from outside TeNeT (another CubeCL or Tenferro user of the
-/// device in this process) do not take it and stay unsafe until cubecl#16.
+/// Not covered, until cubecl#16: a buffer bound in one lease and written in a
+/// later one (`*_overwrite_into` destinations, `CudaContractScratch`, pooled
+/// `tensor!` network intermediates), whose window spans two leases (the
+/// overwrite/reused-buffer leaf, #1391); and submissions from outside TeNeT
+/// (another CubeCL or Tenferro user of the device in this process).
 ///
 /// One leaked entry per ordinal that built a device context, so the registry
 /// is bounded by the device count. The lock guards no data, so a poison left
@@ -776,7 +780,10 @@ fn lock_device(lock: &'static Mutex<()>) -> MutexGuard<'static, ()> {
 ///
 /// It holds the device's process-wide lock ([`cuda_device_lock`]) first and
 /// this Runtime's state second, so every lease on one device, from any
-/// Runtime, excludes every other.
+/// Runtime, excludes every other. That protects what is bound and fully
+/// written within one lease; a buffer written again in a later lease is not
+/// covered (see [`cuda_device_lock`]). A host sync under the lease stalls
+/// every Runtime on the device.
 ///
 /// Nothing reached while this lease is held may lease again — on this Runtime
 /// or on any other Runtime of the same device: neither mutex is re-entrant.
@@ -994,13 +1001,20 @@ pub(crate) struct RuntimeExecutionConfig {
 /// CUDA: every device operation of every `Runtime` built for the same device
 /// ordinal holds one process-wide lock for that device while it submits work,
 /// so device operations on one device serialize their host-side enqueue across
-/// Runtimes (the GPU work itself stays asynchronous; no host sync is added).
-/// This is what makes a device output returned by one Runtime safe to read
-/// through another Runtime on the same device (#1384). Other CubeCL or
-/// Tenferro users of the same device in the same process do not take this
-/// lock: until tensor4all/cubecl#16 publishes a binding's cursor on write,
-/// such a user may read a TeNeT output (or TeNeT one of theirs) before it is
-/// fully written, so do not share a device with them concurrently.
+/// Runtimes (the GPU work itself stays asynchronous; the lock adds no host
+/// sync). A host sync that already happens under a lease — `to_host`, scalar
+/// and spectrum downloads, Tenferro's cross-thread stream sync — therefore
+/// stalls every Runtime on the device, not only the caller. This is what makes
+/// a fresh device output, returned by any operation that creates a new
+/// tensor, safe to read through another Runtime on the same device (#1384).
+///
+/// Until tensor4all/cubecl#16 publishes a binding's cursor on write, two cases
+/// stay exposed. First, a buffer bound in an earlier lease and written again
+/// later (a `*_overwrite_into` destination, or reused scratch) can be read
+/// unfinished by another thread that synced past its bind in between, even
+/// within one Runtime (the overwrite/reused-buffer leaf, #1391). Second, other
+/// CubeCL or Tenferro users of the same device in this process do not take
+/// the lock: do not share a device with them concurrently.
 ///
 /// # Examples
 ///

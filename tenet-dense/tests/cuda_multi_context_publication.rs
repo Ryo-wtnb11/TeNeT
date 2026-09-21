@@ -3,8 +3,8 @@
 //! context on the same device.
 //!
 //! Both contexts share CubeCL's process-wide per-device client and its
-//! per-thread streams, but a TeNeT `Runtime` serializes only its own context
-//! (`RuntimeInner::cuda`). CubeCL records a binding's cursor only at bind, so a
+//! per-thread streams, and nothing here serializes the two contexts (a TeNeT
+//! `Runtime` would, through its per-device lock). CubeCL records a binding's cursor only at bind, so a
 //! later write into that binding is not published (tensor4all/cubecl#16).
 //! The test forces the interleaving from the issue, step by step, with the
 //! same seam `TypedTensor::contract` uses (`upload_owned` zeros, then GEMM,
