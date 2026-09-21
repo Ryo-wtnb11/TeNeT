@@ -1496,6 +1496,17 @@ mod tests {
             .map_err(|error| error.to_string())
     }
 
+    /// A contraction of two codomain legs, neither read as a dual.
+    fn codomain_pair<R, S>(a: &TensorMap<R, f64, S>, b: &TensorMap<R, f64, S>) -> Result<(), String>
+    where
+        TensorMap<R, f64, S>: crate::StaticNetworkOperand,
+        <TensorMap<R, f64, S> as crate::StaticNetworkOperand>::Error: std::fmt::Display,
+    {
+        crate::tensor!([i; k] = a[i, j;] * b[j, k;])
+            .map(drop)
+            .map_err(|error| error.to_string())
+    }
+
     /// The operands of the #1371 tests, every leg of dimension 2: `v` has two
     /// sectors, `w` one, and `v*` is `v`'s dual.
     struct Rejections<T, P> {
@@ -1509,6 +1520,12 @@ mod tests {
         probe_a: P,
         probe_b: P,
         probe_t: P,
+        /// `[x, x;]`, `[x*, x;]` and its two impostors for a contraction of
+        /// two undualised codomain legs, `x = {0: 1, 1: 2}`.
+        cc_a: T,
+        cc_b: T,
+        cc_degeneracy: T,
+        cc_flag: T,
     }
 
     type ProbeMap<const ANYONIC: bool> =
@@ -1525,8 +1542,33 @@ mod tests {
             [(U1Irrep::new(0), 1), (U1Irrep::new(1), 1)],
         )
         .unwrap();
-        let w = GradedSpace::try_new_with_arc(provider, [(U1Irrep::new(0), 2)]).unwrap();
+        let w =
+            GradedSpace::try_new_with_arc(Arc::clone(&provider), [(U1Irrep::new(0), 2)]).unwrap();
         let v_dual = v.try_dual().unwrap();
+        let x = GradedSpace::try_new_with_arc(
+            Arc::clone(&provider),
+            [(U1Irrep::new(0), 1), (U1Irrep::new(1), 2)],
+        )
+        .unwrap();
+        // The sectors of `x*` with the degeneracies swapped, and the sectors
+        // and degeneracies of `x*` on a leg that is not dual.
+        let x_degeneracy = GradedSpace::try_new_with_arc(
+            Arc::clone(&provider),
+            [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
+        )
+        .unwrap()
+        .try_dual()
+        .unwrap();
+        let x_flag = GradedSpace::try_new_with_arc(
+            Arc::clone(&provider),
+            [(U1Irrep::new(0), 1), (U1Irrep::new(-1), 2)],
+        )
+        .unwrap();
+        let x_dual = x.try_dual().unwrap();
+        // Oracle: the dualise-and-compare the preflight replaced.
+        assert!(x_degeneracy != x_dual && x_flag != x_dual);
+        assert_eq!(x_degeneracy.dim().unwrap(), x_dual.dim().unwrap());
+        assert_eq!(x_flag.dim().unwrap(), x_dual.dim().unwrap());
         let p = GradedSpace::try_new(RealBraidingProbe::<true>, [(ProbeSector, 2)]).unwrap();
         let u1 = |codomain: &[&GradedSpace<U1FusionRule>],
                   domain: &[&GradedSpace<U1FusionRule>],
@@ -1553,6 +1595,10 @@ mod tests {
             probe_a: probe(1, 1_371_007),
             probe_b: probe(1, 1_371_008),
             probe_t: probe(2, 1_371_009),
+            cc_a: u1(&[&x, &x], &[], 1_371_010),
+            cc_b: u1(&[&x_dual, &x], &[], 1_371_011),
+            cc_degeneracy: u1(&[&x_degeneracy, &x], &[], 1_371_012),
+            cc_flag: u1(&[&x_flag, &x], &[], 1_371_013),
         }
     }
 
@@ -1616,7 +1662,20 @@ mod tests {
         let none = || ();
         let accept_pair = || pair(&o.a, &o.b);
         let accept_traced = || traced(&o.t, &o.b);
+        let accept_codomain = || codomain_pair(&o.cc_a, &o.cc_b);
         for (what, accept, reject, label) in [
+            (
+                "degeneracy",
+                &accept_codomain as Call<'_>,
+                &(|| codomain_pair(&o.cc_a, &o.cc_degeneracy)) as Call<'_>,
+                "j",
+            ),
+            (
+                "undualised flag",
+                &accept_codomain,
+                &|| codomain_pair(&o.cc_a, &o.cc_flag),
+                "j",
+            ),
             (
                 "sector",
                 &accept_pair as Call<'_>,
@@ -1691,14 +1750,33 @@ mod tests {
         let transfers = tenet::dense::cuda_transfer_stats;
         let accept_pair = || pair(&a, &b);
         let accept_traced = || traced(&t, &b);
+        let (cc_a, cc_b, cc_degeneracy, cc_flag) = (
+            lift(&h.cc_a),
+            lift(&h.cc_b),
+            lift(&h.cc_degeneracy),
+            lift(&h.cc_flag),
+        );
+        let accept_codomain = || codomain_pair(&cc_a, &cc_b);
         // Warm the device context so lazily created state is not attributed
         // to the rejected calls.
         accept_pair().unwrap();
         accept_traced().unwrap();
         for (what, accept, reject, host) in [
             (
+                "degeneracy",
+                &accept_codomain as Call<'_>,
+                &(|| codomain_pair(&cc_a, &cc_degeneracy)) as Call<'_>,
+                codomain_pair(&h.cc_a, &h.cc_degeneracy),
+            ),
+            (
+                "undualised flag",
+                &accept_codomain,
+                &|| codomain_pair(&cc_a, &cc_flag),
+                codomain_pair(&h.cc_a, &h.cc_flag),
+            ),
+            (
                 "sector",
-                &accept_pair as Call<'_>,
+                &accept_pair,
                 &(|| pair(&a, &b_sector)) as Call<'_>,
                 pair(&h.a, &h.b_sector),
             ),

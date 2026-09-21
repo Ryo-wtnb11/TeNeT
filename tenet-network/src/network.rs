@@ -907,8 +907,10 @@ where
 
 /// Whether two lowered legs, each a stored leg and whether it is read as that
 /// leg's dual, may be contracted: the second must be the dual of the first,
-/// exactly as `GradedSpace::try_dual` would build it. The dual map is an
-/// involution, so the two dualisations cancel and only their parity matters.
+/// as `GradedSpace::try_dual` would build it. Only the parity of the two
+/// dualisations matters: when exactly one side is dualised the stored legs
+/// must be equal, which is TensorKit's `space(A, i) == space(B, j)'` with a
+/// structural dual.
 fn legs_contract<R>(
     provider: &R,
     (lhs, lhs_dualised): (&SectorLeg, bool),
@@ -921,13 +923,16 @@ where
     if lhs_dualised != rhs_dualised {
         return Ok(lhs == rhs);
     }
-    Ok(maps_into_dual(provider, lhs, rhs)? && maps_into_dual(provider, rhs, lhs)?)
+    is_dual_of(provider, lhs, rhs)
 }
 
-/// Every sector of `from` has its dual in `into` with the same degeneracy,
-/// `into` has the opposite duality flag and as many sectors; both directions
-/// together are `into == dual(from)` for the sorted legs.
-fn maps_into_dual<R>(
+/// `into == dual(from)` for sorted, duplicate-free legs: the opposite duality
+/// flag, as many sectors, and the dual of every sector of `from` in `into`
+/// with the same degeneracy. The round trip `dual(dual(s)) == s` proves the
+/// dual injective on `from`, so its image fills `into` exactly; a provider
+/// whose dual is not an involution is rejected with the error
+/// `GradedSpace::try_dual` raises for a non-injective dual, not accepted.
+fn is_dual_of<R>(
     provider: &R,
     from: &SectorLeg,
     into: &SectorLeg,
@@ -939,9 +944,18 @@ where
     if from.is_dual() == into.is_dual() || from.sectors().len() != into.sectors().len() {
         return Ok(false);
     }
+    let dual_of = |sector| {
+        TypedSectorAdmission::try_dual_id(provider, sector)
+            .map_err(<R::Mode as TypedTensorModeDispatch<R>>::map_provider_error)
+    };
     for (&sector, &degeneracy) in from.sectors().iter().zip(from.degeneracies()) {
-        let dual = TypedSectorAdmission::try_dual_id(provider, sector)
-            .map_err(<R::Mode as TypedTensorModeDispatch<R>>::map_provider_error)?;
+        let dual = dual_of(sector)?;
+        if dual_of(dual)? != sector {
+            return Err(invalid(format!(
+                "dual map is not injective: sector {dual:?} appears multiple times"
+            ))
+            .into());
+        }
         match into.sectors().binary_search(&dual) {
             Ok(position) if into.degeneracies()[position] == degeneracy => {}
             _ => return Ok(false),
@@ -4947,5 +4961,98 @@ mod typed_replay_tests {
                 .execute_with_workspace(&refs, &mut workspace)
                 .unwrap(),
         );
+    }
+}
+
+#[cfg(test)]
+mod leg_contract_tests {
+    use std::sync::Arc;
+
+    use tenet::core::{
+        BraidingStyleKind, CheckedFusionAlgebra, FusionAlgebraError, FusionRule, FusionStyleKind,
+        RuleIdentity, SectorCodec, SectorId, SectorLeg, SectorVec,
+    };
+    use tenet::typed::GradedSpace;
+
+    /// A faulty rule whose dual is not an involution: `a* = b* = c`,
+    /// `c* = a`, `d* = b`. `{a, b}` and `{c, d}` then pass a one-way sector
+    /// match in both directions although `{a, b}` has no dual leg.
+    struct CollapsingDual;
+
+    #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+    struct Label(usize);
+
+    const DUAL: [usize; 4] = [2, 2, 0, 1];
+
+    impl FusionRule for CollapsingDual {
+        fn rule_identity(&self) -> RuleIdentity {
+            RuleIdentity::from_canonical_bytes::<Self>(0x1371_d0a1, Arc::<[u8]>::from([]))
+        }
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Unique
+        }
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::Bosonic
+        }
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(0)
+        }
+        fn fusion_channels(&self, _: SectorId, _: SectorId) -> SectorVec {
+            core::iter::once(SectorId::new(0)).collect()
+        }
+    }
+
+    impl CheckedFusionAlgebra for CollapsingDual {
+        fn try_dual_sector(&self, sector: SectorId) -> Result<SectorId, FusionAlgebraError> {
+            Ok(SectorId::new(DUAL[sector.id()]))
+        }
+        fn try_fusion_channels(
+            &self,
+            left: SectorId,
+            right: SectorId,
+        ) -> Result<SectorVec, FusionAlgebraError> {
+            Ok(self.fusion_channels(left, right))
+        }
+        fn try_nsymbol(
+            &self,
+            _: SectorId,
+            _: SectorId,
+            _: SectorId,
+        ) -> Result<usize, FusionAlgebraError> {
+            Ok(1)
+        }
+    }
+
+    impl SectorCodec for CollapsingDual {
+        type Sector = Label;
+        fn encode_sector(&self, label: &Label) -> Result<SectorId, FusionAlgebraError> {
+            Ok(SectorId::new(label.0))
+        }
+        fn decode_sector(&self, sector: SectorId) -> Result<Label, FusionAlgebraError> {
+            Ok(Label(sector.id()))
+        }
+    }
+
+    /// #1371 review P2-A: the allocation-free leg comparison enforces the dual
+    /// round trip, so a non-involutive provider is rejected with
+    /// `GradedSpace::try_dual`'s own error rather than accepted.
+    #[test]
+    fn a_non_involutive_dual_is_rejected_like_try_dual() {
+        let leg = |sectors: [usize; 2], dual: bool| {
+            SectorLeg::try_new(sectors.map(|sector| (SectorId::new(sector), 2)), dual).unwrap()
+        };
+        // `{a, b}` against `{c, d}` of the opposite flag: every sector of either
+        // side has its dual on the other, so only the round trip rejects.
+        let (from, into) = (leg([0, 1], false), leg([2, 3], true));
+        let oracle = GradedSpace::try_new(CollapsingDual, [(Label(0), 2), (Label(1), 2)])
+            .unwrap()
+            .try_dual()
+            .unwrap_err()
+            .to_string();
+        let error = super::legs_contract(&CollapsingDual, (&from, false), (&into, false))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, oracle);
+        assert!(error.contains("dual map is not injective"), "{error}");
     }
 }
