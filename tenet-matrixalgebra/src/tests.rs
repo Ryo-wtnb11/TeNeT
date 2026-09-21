@@ -15,7 +15,7 @@ use tenet_tensors::{
 };
 
 use crate::factorize::{
-    dyn_space_of, map_square_sectors_dyn_into, truncate_svd, typed_from_bound_factor,
+    dyn_space_of, map_square_sectors_dyn_into, pinv_cutoff, truncate_svd, typed_from_bound_factor,
     typed_from_dyn, validate_eigenvector_singular_values, validate_inverse_region_routes_for_test,
     BoundTensorMap,
 };
@@ -15861,4 +15861,24 @@ fn noncanonical_mf_svd_and_eigh_scatter_each_output_block_once() {
         }
     );
     assert!(probe.left_grouped + probe.left_visits < 4 * b_v);
+}
+
+#[test]
+fn pinv_cutoff_rejects_a_non_finite_singular_value_instead_of_dropping_it() {
+    // What: both dense pinv routes (`inverted_pinv_spectrum`, the staged
+    // checked-Generic fold) take their cutoff from `pinv_cutoff`. A NaN in a
+    // later sector must not vanish into `f64::max` and leave the finite
+    // `rcond * 4` cutoff the other sectors alone would give.
+    let sectors: [&[f64]; 3] = [&[4.0, 1.0], &[f64::NAN, 0.5], &[2.0]];
+    let flat = || sectors.iter().flat_map(|values| values.iter().copied());
+    assert!(matches!(
+        pinv_cutoff(flat(), 0.25),
+        Err(OperationError::InvalidArgument { .. })
+    ));
+    for poison in [f64::INFINITY, f64::NEG_INFINITY] {
+        assert!(pinv_cutoff([1.0, poison], 0.0).is_err(), "{poison}");
+    }
+    // Finite spectra keep the global `rcond * sigma_max`, max in any sector.
+    assert_eq!(pinv_cutoff([1.0, 0.5, 4.0, 2.0], 0.25).unwrap(), 1.0);
+    assert_eq!(pinv_cutoff(std::iter::empty(), 0.25).unwrap(), 0.0);
 }

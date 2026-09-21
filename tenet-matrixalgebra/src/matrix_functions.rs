@@ -15,7 +15,7 @@ use crate::compose::compose_bound_dyn;
 use crate::factorize::{
     adjoint_bound_factor, eigh_full_dyn, inverse_by_sector_dyn, inverse_by_sector_dyn_into,
     is_hermitian_endomorphism_dyn, map_square_sectors_dyn, map_square_sectors_dyn_into,
-    pinv_by_sector_dyn_into, scale_axis_by_spectrum, solve_left_by_sector_dyn,
+    pinv_by_sector_dyn_into, pinv_cutoff, scale_axis_by_spectrum, solve_left_by_sector_dyn,
     solve_left_by_sector_dyn_into, svd_compact_factors_dyn, typed_from_bound_factor,
     BoundDynFactor, BoundDynamicTensorRef, BoundTensorMap, BoundTensorMapRef, FactorScalar,
     SectorSpectrum, SvdFactorsDyn,
@@ -881,13 +881,17 @@ fn validate_pinv_rcond(rcond: f64) -> Result<(), OperationError> {
     Ok(())
 }
 
-fn inverted_pinv_spectrum(singular_values: &[SectorSpectrum], rcond: f64) -> Vec<SectorSpectrum> {
-    let sigma_max = singular_values
-        .iter()
-        .flat_map(|entry| entry.values.iter().copied())
-        .fold(0.0_f64, f64::max);
-    let cutoff = rcond * sigma_max;
-    singular_values
+fn inverted_pinv_spectrum(
+    singular_values: &[SectorSpectrum],
+    rcond: f64,
+) -> Result<Vec<SectorSpectrum>, OperationError> {
+    let cutoff = pinv_cutoff(
+        singular_values
+            .iter()
+            .flat_map(|entry| entry.values.iter().copied()),
+        rcond,
+    )?;
+    Ok(singular_values
         .iter()
         .map(|entry| SectorSpectrum {
             sector: entry.sector,
@@ -897,7 +901,7 @@ fn inverted_pinv_spectrum(singular_values: &[SectorSpectrum], rcond: f64) -> Vec
                 .map(|&sigma| if sigma > cutoff { 1.0 / sigma } else { 0.0 })
                 .collect(),
         })
-        .collect()
+        .collect())
 }
 
 /// Applies the public `pinv` cutoff to compact SVD factors before the
@@ -915,7 +919,7 @@ where
     D: FactorScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
 {
     let (u, vh, singular_values) = factors;
-    let inverted = inverted_pinv_spectrum(&singular_values, rcond);
+    let inverted = inverted_pinv_spectrum(&singular_values, rcond)?;
     inverse_from_factors(context, u, vh, &inverted)
 }
 
@@ -941,7 +945,7 @@ where
 {
     validate_pinv_rcond(rcond)?;
     let (mut u, vh, singular_values) = svd_compact_factors_dyn(dense, parent)?;
-    let inverted = inverted_pinv_spectrum(&singular_values, rcond);
+    let inverted = inverted_pinv_spectrum(&singular_values, rcond)?;
     let (space, data) = u.raw_space_and_data_mut();
     scale_axis_by_spectrum(space, data, None, &inverted)?;
     compose_bound_dyn(context, &u, &vh)

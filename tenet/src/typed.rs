@@ -1199,6 +1199,9 @@ where
     ///
     /// - [`Error::InvalidArgument`] when `rcond` is not finite or is negative,
     ///   checked before any provider work or dense allocation.
+    /// - A non-finite singular value (compact entry magnitude) is rejected
+    ///   rather than cut: [`Error::InvalidArgument`] on the compact arm, an
+    ///   [`Error::Operation`] invalid-argument on the dense arm.
     /// - [`Error::Operation`] / [`Error::Core`] from dense SVD or recomposition.
     ///
     /// There is no singular-input failure: sending the offending directions to
@@ -18152,11 +18155,20 @@ where
             ));
         }
         if let Some(spectrum) = self.spectrum() {
-            let cutoff = rcond
-                * spectrum
-                    .iter()
-                    .flat_map(|entry| entry.values.iter())
-                    .fold(0.0f64, |largest, &value| largest.max(value.abs_value()));
+            // A non-finite entry is rejected rather than folded: `f64::max`
+            // would drop a NaN and `NaN > cutoff` would then zero it, a
+            // silent finite answer (the dense arm's `pinv_cutoff` contract).
+            let sigma_max = spectrum
+                .iter()
+                .flat_map(|entry| entry.values.iter())
+                .try_fold(0.0f64, |largest, &value| {
+                    let magnitude = value.abs_value();
+                    magnitude.is_finite().then(|| largest.max(magnitude))
+                })
+                .ok_or_else(|| {
+                    Error::InvalidArgument("pinv singular values must be finite".to_string())
+                })?;
+            let cutoff = rcond * sigma_max;
             // Strict `>`, matching the dense fold: a
             // value exactly on the cutoff is cut. Changing it to `>=` is what
             // `pinv_cuts_a_singular_value_sitting_exactly_on_the_cutoff` kills.

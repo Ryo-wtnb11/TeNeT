@@ -7301,6 +7301,31 @@ where
     )
 }
 
+/// `rcond * sigma_max` over every sector's singular values, rejecting a
+/// non-finite one in the same pass.
+///
+/// Why an error rather than NaN propagation: `f64::max` discards NaN, and even
+/// a NaN-propagating maximum only yields `sigma > NaN == false`, i.e. a silent
+/// all-zero pseudo-inverse. The references are no better — Julia
+/// `LinearAlgebra.pinv` (`tol2 = max(rtol*maximum(S), atol)`, `S .> tol2`)
+/// zeroes every value under a NaN tolerance — so the only answer that does not
+/// hide the NaN is a typed failure, matching `select_truncation`'s
+/// `InvalidSpectrum`.
+pub(crate) fn pinv_cutoff(
+    singular_values: impl IntoIterator<Item = f64>,
+    rcond: f64,
+) -> Result<f64, OperationError> {
+    let sigma_max = singular_values
+        .into_iter()
+        .try_fold(0.0_f64, |largest, sigma| {
+            sigma.is_finite().then(|| largest.max(sigma))
+        })
+        .ok_or(OperationError::InvalidArgument {
+            message: "pinv singular values must be finite",
+        })?;
+    Ok(rcond * sigma_max)
+}
+
 /// Coefficient-free pseudo-inverse into an already admitted swapped space.
 ///
 /// All layout checks happen before staging or dense work.  The local staging
@@ -7407,11 +7432,12 @@ where
             vt,
         });
     }
-    let cutoff = rcond
-        * staged
+    let cutoff = pinv_cutoff(
+        staged
             .iter()
-            .flat_map(|stage| stage.singular_values.iter().copied())
-            .fold(0.0_f64, f64::max);
+            .flat_map(|stage| stage.singular_values.iter().copied()),
+        rcond,
+    )?;
     for stage in staged {
         if stage.rank == 0 {
             continue;
