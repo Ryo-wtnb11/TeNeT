@@ -94,23 +94,24 @@ where
     );
 }
 
+/// G2c-5 (#1350): a full trace, the network with no contraction step, runs on
+/// the device and equals the Host.
 #[test]
 #[ignore = "requires a real CUDA device"]
-fn cuda_macro_rejects_trace_before_cache_or_execution() {
+fn cuda_macro_full_trace_equals_host() {
     let runtime = Runtime::builder().cuda(0).build().unwrap();
     let space =
         GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
-    let tensor = TensorMap::<_, f64>::rand_with_seed(&runtime, [&space], [&space], 748_090)
-        .unwrap()
-        .to_cuda()
-        .unwrap();
-    let error = tensor!([] = tensor[i; i]).unwrap_err();
-    assert!(matches!(
-        error,
-        tenet::prelude::Error::UnsupportedOnDevice(_)
-    ));
-    assert_eq!(plan_cache_stats(&runtime).entries, 0);
-    assert_eq!(plan_cache_stats(&runtime).workspaces_created, 0);
+    let host = TensorMap::<_, f64>::rand_with_seed(&runtime, [&space], [&space], 748_090).unwrap();
+    let tensor = host.to_cuda().unwrap();
+    let device = tensor!([] = tensor[i; i]).unwrap();
+    assert_eq!(device.placement(), tensor.placement());
+    assert_close_dyn(
+        device.to_host().unwrap().data(),
+        tensor!([] = host[i; i]).unwrap().data(),
+        f64::EPSILON,
+        "full trace",
+    );
 }
 
 /// G2c-3 (#1348): the reversed-output product the canonical predicate refused
@@ -347,8 +348,8 @@ fn canonical_cuda_network_provider_matrix_chain_and_lazy_conj() {
 }
 
 /// G1a (#1268): canonical `tensor!` device execution with a genuinely complex
-/// payload, including a lazy conjugate operand. Intra-operand trace stays
-/// rejected; since G2c-3 (#1348) a reversed output runs.
+/// payload, including a lazy conjugate operand. Since G2c-3 (#1348) a
+/// reversed output runs, and since G2c-5 (#1350) an intra-operand trace.
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn canonical_cuda_network_executes_complex_payloads_and_still_rejects_the_rest() {
@@ -403,11 +404,9 @@ fn canonical_cuda_network_executes_complex_payloads_and_still_rejects_the_rest()
         .unwrap();
     assert_close_c64(conj.to_host().unwrap().data(), conj_oracle.data());
 
-    let trace_error = tensor!([] = (device[0])[i; i]).unwrap_err();
-    assert!(matches!(
-        trace_error,
-        tenet::prelude::Error::UnsupportedOnDevice(_)
-    ));
+    let trace = tensor!([] = (device[0])[i; i]).unwrap();
+    let trace_oracle = tensor!([] = (host[0])[i; i]).unwrap();
+    assert_close_c64(trace.to_host().unwrap().data(), trace_oracle.data());
     // G2c-3 (#1348): the reversed output the canonical predicate refused runs.
     let reversed = tensor!([k; i] = (device[0])[i; j] * (device[1])[j; k]).unwrap();
     let reversed_oracle = tensor!([k; i] = (host[0])[i; j] * (host[1])[j; k]).unwrap();
@@ -1661,9 +1660,12 @@ fn warm_general_cuda_networks_transfer_only_the_returned_output() {
 /// G2c-3 (#1348): the device rejection classes reachable through `tensor!`
 /// are decided before the plan cache publishes, a workspace is leased or the
 /// device is touched: plan cache, pools, transfer counters, cuTENSOR plans,
-/// scratch and executor state are all unchanged. (Anyonic braiding and a
-/// compact operand are not constructible as device operands of this impl;
-/// their preflight is the device-free `device_operand_admission` test.)
+/// scratch and executor state are all unchanged. (A compact operand is not
+/// constructible as a device operand of this impl; its preflight, and the
+/// anyonic contraction class, are in the device-free `device_operand_admission`
+/// test.) The trace pre-step's rejections (G2c-5), an anyonic operand
+/// included, are in
+/// `rejected_cuda_trace_prestep_leaves_every_device_state_unchanged`.
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn rejected_cuda_networks_leave_every_device_state_unchanged() {
@@ -1683,17 +1685,718 @@ fn rejected_cuda_networks_leave_every_device_state_unchanged() {
     drop(tensor!([i; k] = a[i; j] * a[j; k]).unwrap());
     let before = device_state(&runtime);
 
-    let trace = tensor!([] = a[i; i]).unwrap_err();
-    assert!(matches!(
-        trace,
-        tenet::prelude::Error::UnsupportedOnDevice(_)
-    ));
-    assert_eq!(device_state(&runtime), before, "intra-operand trace");
-
+    // A fresh topology, i.e. the plan-cache miss path only: this pins that the
+    // mismatch is raised before a miss publishes. On a topology hit it is
+    // raised by the execution body, after the hit is counted and a workspace
+    // leased (#1371).
     assert!(tensor!([k; i] = a[i; j] * mismatched[j; k]).is_err());
     assert_eq!(
         device_state(&runtime),
         before,
         "contracted-leg space mismatch"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Device `tensor!` trace pre-step (G2c-5, #1350)
+// ---------------------------------------------------------------------------
+
+/// Traced operands over three spaces `v`, `w`, `p` of one provider:
+///
+/// - `ta: [v, w; v, p]`, `tb: [p, v; p, w]`, `tt: [v, w; v, w]` — traces
+///   between a codomain and a domain leg, so the physical-basis dense
+///   expansion traces by a plain diagonal sum;
+/// - `td: [v, v*, w; p]` (codomain–codomain) and `te: [p; v, w, w*]`
+///   (domain–domain) — dual traced legs;
+/// - `c: [v; w]` untraced.
+struct TraceOperands<T> {
+    ta: T,
+    tb: T,
+    tt: T,
+    td: T,
+    te: T,
+    c: T,
+}
+
+impl<T> TraceOperands<T> {
+    fn map<U>(&self, lift: impl Fn(&T) -> U) -> TraceOperands<U> {
+        TraceOperands {
+            ta: lift(&self.ta),
+            tb: lift(&self.tb),
+            tt: lift(&self.tt),
+            td: lift(&self.td),
+            te: lift(&self.te),
+            c: lift(&self.c),
+        }
+    }
+}
+
+fn trace_operands<R, D>(
+    runtime: &Runtime,
+    [v, w, p]: [&GradedSpace<R>; 3],
+    seed: u64,
+) -> TraceOperands<TensorMap<R, D>>
+where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec,
+    D: tenet::typed::CudaPayload,
+{
+    let rand = |codomain: &[&GradedSpace<R>], domain: &[&GradedSpace<R>], salt: u64| {
+        TensorMap::<R, D>::rand_with_seed(
+            runtime,
+            codomain.iter().copied(),
+            domain.iter().copied(),
+            seed + salt,
+        )
+        .unwrap()
+    };
+    let (v_dual, w_dual) = (v.try_dual().unwrap(), w.try_dual().unwrap());
+    TraceOperands {
+        ta: rand(&[v, w], &[v, p], 0),
+        tb: rand(&[p, v], &[p, w], 1),
+        tt: rand(&[v, w], &[v, w], 2),
+        td: rand(&[v, &v_dual, w], &[p], 3),
+        te: rand(&[p], &[v, w, &w_dual], 4),
+        c: rand(&[v], &[w], 5),
+    }
+}
+
+/// Every trace-bearing network on Host and device (cold, warm): traces on one,
+/// two and three operands, open outputs on both sides, a split-changing final
+/// permutation, dual traced legs on either side, a lazy conjugate traced
+/// operand, and a full two-pair trace with no contraction step.
+#[allow(clippy::type_complexity)]
+fn trace_networks<R, D>(
+    host: &TraceOperands<TensorMap<R, D>>,
+    device: &TraceOperands<TensorMap<R, D, CudaStorage<D>>>,
+) -> Vec<(
+    &'static str,
+    TensorMap<R, D>,
+    TensorMap<R, D, CudaStorage<D>>,
+    TensorMap<R, D, CudaStorage<D>>,
+)>
+where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec
+        + Send
+        + Sync,
+    D: tenet::typed::CudaPayload + Send + Sync + 'static,
+{
+    let mut runs = Vec::new();
+    let (h, cold, warm) = host_cold_warm!(o = host, device;
+        [a; x] = (o.tb)[j, a; j, w] * (o.ta)[i, w; i, x]);
+    runs.push(("two traced operands", h, cold, warm));
+    let (h, cold, warm) = host_cold_warm!(o = host, device;
+        [b; x] = (o.c)[b; w] * (o.ta)[i, w; i, x]);
+    runs.push(("traced and untraced", h, cold, warm));
+    let (h, cold, warm) = host_cold_warm!(o = host, device;
+        [x, a;] = (o.tb)[j, a; j, w] * (o.ta)[i, w; i, x]);
+    runs.push(("split-changing final permutation", h, cold, warm));
+    let (h, cold, warm) = host_cold_warm!(o = host, device;
+        [y; x] = (o.td)[k, k, y; p] * (o.te)[p; x, u, u]);
+    runs.push(("dual traced legs", h, cold, warm));
+    let (h, cold, warm) = host_cold_warm!(o = host, device;
+        [a; x] = (o.tb)[j, a; j, w] * (o.ta)[i, w; i, p] * (o.te)[p; x, u, u]);
+    runs.push(("three traced operands", h, cold, warm));
+    let (h, cold, warm) = host_cold_warm!(o = host, device;
+        [y; x] = conj((o.ta))[i, x; i, p] * (o.ta)[j, y; j, p]);
+    runs.push(("lazy conj traced operand", h, cold, warm));
+    let (h, cold, warm) = host_cold_warm!(o = host, device; [] = (o.tt)[i, j; i, j]);
+    runs.push(("full two-pair trace", h, cold, warm));
+    runs
+}
+
+fn assert_trace_networks_match_host<R, D>(
+    runtime: &Runtime,
+    spaces: [&GradedSpace<R>; 3],
+    seed: u64,
+    epsilon: f64,
+    provider: &str,
+) where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec
+        + Send
+        + Sync,
+    D: tenet::typed::CudaPayload + Send + Sync + 'static + std::fmt::Debug,
+{
+    let operands = trace_operands::<R, D>(runtime, spaces, seed);
+    let device = operands.map(|tensor| tensor.to_cuda().unwrap());
+    for (name, host, cold, warm) in trace_networks(&operands, &device) {
+        let what = format!("{provider} {name}");
+        for (phase, result) in [("cold", cold), ("warm", warm)] {
+            assert_eq!(result.placement(), device.ta.placement(), "{what} {phase}");
+            assert!(std::ptr::eq(result.provider(), host.provider()), "{what}");
+            assert_eq!(result.codomain(), host.codomain(), "{what} {phase}");
+            assert_eq!(result.domain(), host.domain(), "{what} {phase}");
+            assert_close_dyn(
+                result.to_host().unwrap().data(),
+                host.data(),
+                epsilon,
+                &format!("{what} {phase}"),
+            );
+        }
+    }
+}
+
+/// Dense-expansion oracle for the codomain–domain traces: Host, device cold
+/// and device warm each equal the physical-basis einsum, in which a label
+/// written twice on one operand is its diagonal sum.
+fn assert_trace_dense_oracle<R>(
+    runtime: &Runtime,
+    spaces: [&GradedSpace<R>; 3],
+    seed: u64,
+    provider: &str,
+) where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + tenet::core::PhysicalFusionBasis<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec
+        + Send
+        + Sync,
+{
+    let o = trace_operands::<R, f64>(runtime, spaces, seed);
+    let device = o.map(|tensor| tensor.to_cuda().unwrap());
+    type Runs<R> = (
+        TensorMap<R, f64>,
+        TensorMap<R, f64, CudaStorage>,
+        TensorMap<R, f64, CudaStorage>,
+    );
+    let results =
+        |(host, cold, warm): Runs<R>| [host, cold.to_host().unwrap(), warm.to_host().unwrap()];
+    let dense = |tensor: &TensorMap<R, f64>| widened(tensor.to_physical_dense().unwrap());
+    let (ta, tb, tt, c) = (dense(&o.ta), dense(&o.tb), dense(&o.tt), dense(&o.c));
+    let ta_adjoint = dense(&o.ta.adjoint().unwrap());
+    type DenseOperands<'a> = Vec<(&'a tenet::prelude::PhysicalDense<Complex64>, &'a [&'a str])>;
+    type DenseCase<'a, R> = (
+        &'a str,
+        [TensorMap<R, f64>; 3],
+        DenseOperands<'a>,
+        &'a [&'a str],
+    );
+    let cases: [DenseCase<'_, R>; 4] = [
+        (
+            "two traced operands",
+            results(host_cold_warm!(o = &o, &device;
+                [a; x] = (o.tb)[j, a; j, w] * (o.ta)[i, w; i, x])),
+            vec![
+                (&tb, &["j", "a", "j", "w"][..]),
+                (&ta, &["i", "w", "i", "x"][..]),
+            ],
+            &["a", "x"],
+        ),
+        (
+            "traced and untraced",
+            results(host_cold_warm!(o = &o, &device;
+                [b; x] = (o.c)[b; w] * (o.ta)[i, w; i, x])),
+            vec![(&c, &["b", "w"][..]), (&ta, &["i", "w", "i", "x"][..])],
+            &["b", "x"],
+        ),
+        (
+            "lazy conj traced operand",
+            results(host_cold_warm!(o = &o, &device;
+                [y; x] = conj((o.ta))[i, x; i, p] * (o.ta)[j, y; j, p])),
+            vec![
+                (&ta_adjoint, &["i", "p", "i", "x"][..]),
+                (&ta, &["j", "y", "j", "p"][..]),
+            ],
+            &["y", "x"],
+        ),
+        (
+            "full two-pair trace",
+            results(host_cold_warm!(o = &o, &device; [] = (o.tt)[i, j; i, j])),
+            vec![(&tt, &["i", "j", "i", "j"][..])],
+            &[],
+        ),
+    ];
+    for (name, runs, operands, output) in cases {
+        let (shape, expected) = dense_einsum(&operands, output);
+        for (phase, result) in ["host", "device cold", "device warm"]
+            .into_iter()
+            .zip(&runs)
+        {
+            let actual = dense(result);
+            assert_eq!(
+                actual.shape, shape,
+                "{provider} {name} {phase}: dense shape"
+            );
+            assert_close_dyn(
+                &actual.data,
+                &expected,
+                f64::EPSILON,
+                &format!("{provider} {name} {phase} dense"),
+            );
+        }
+    }
+}
+
+fn fermion_u1_trace_spaces(
+) -> [GradedSpace<tenet::core::ProductFusionRule<FermionParityFusionRule, U1FusionRule>>; 3] {
+    let rule = Arc::new(FermionParityFusionRule.product(U1FusionRule));
+    let space = |sectors: &[(bool, i32, usize)]| {
+        GradedSpace::try_new_with_arc(
+            Arc::clone(&rule),
+            sectors.iter().map(|&(odd, charge, degeneracy)| {
+                (
+                    product_sector(
+                        if odd { Z2Irrep::ODD } else { Z2Irrep::EVEN },
+                        U1Irrep::new(charge),
+                    ),
+                    degeneracy,
+                )
+            }),
+        )
+        .unwrap()
+    };
+    // `p` holds the vacuum, so the domain–domain trace of `te` is not empty.
+    [
+        space(&[(false, 0, 2), (true, 1, 1), (true, -1, 1)]),
+        space(&[(false, 0, 1), (true, 1, 2), (true, -1, 1)]),
+        space(&[(false, 0, 1), (true, 1, 2), (false, 1, 1)]),
+    ]
+}
+
+fn fermion_su2_trace_spaces(
+) -> [GradedSpace<tenet::core::ProductFusionRule<FermionParityFusionRule, SU2FusionRule>>; 3] {
+    let rule = Arc::new(FermionParityFusionRule.product(SU2FusionRule));
+    let space = |sectors: &[(bool, usize, usize)]| {
+        GradedSpace::try_new_with_arc(
+            Arc::clone(&rule),
+            sectors.iter().map(|&(odd, twice, degeneracy)| {
+                (
+                    product_sector(
+                        if odd { Z2Irrep::ODD } else { Z2Irrep::EVEN },
+                        SU2Irrep::from_twice_spin(twice),
+                    ),
+                    degeneracy,
+                )
+            }),
+        )
+        .unwrap()
+    };
+    [
+        space(&[(false, 0, 2), (true, 1, 1)]),
+        space(&[(true, 1, 2), (false, 2, 1)]),
+        space(&[(false, 0, 1), (true, 1, 2)]),
+    ]
+}
+
+/// G2c-5 (#1350): `tensor!` networks with an intra-operand trace pre-step run
+/// on device and equal the Host run of the same expression, cold and warm,
+/// for U(1) (all four device dtypes), SU(2), fZ2×U(1) and fZ2⊠SU(2) (`f64`
+/// and `Complex64`), dual traced legs included; the codomain–domain traces of
+/// U(1) and SU(2) also equal the physical-basis dense expansion.
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn trace_prestep_cuda_networks_match_host_and_dense_oracles() {
+    let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+
+    let (v, w, p) = (
+        u1_space(&[(-1, 2), (0, 1), (1, 2)]),
+        u1_space(&[(0, 2), (1, 1)]),
+        u1_space(&[(-1, 1), (0, 2), (1, 1)]),
+    );
+    let u1 = [&v, &w, &p];
+    assert_trace_networks_match_host::<_, f64>(&runtime, u1, 1_350_000, f64::EPSILON, "U(1)");
+    assert_trace_networks_match_host::<_, Complex64>(&runtime, u1, 1_350_100, f64::EPSILON, "U(1)");
+    let single = f64::from(f32::EPSILON);
+    assert_trace_networks_match_host::<_, f32>(&runtime, u1, 1_350_200, single, "U(1)");
+    assert_trace_networks_match_host::<_, Complex32>(&runtime, u1, 1_350_300, single, "U(1)");
+    assert_trace_dense_oracle(&runtime, u1, 1_350_400, "U(1)");
+
+    let (v, w, p) = (
+        su2_space(&[(0, 2), (1, 1)]),
+        su2_space(&[(1, 2), (2, 1)]),
+        su2_space(&[(0, 1), (1, 2)]),
+    );
+    let su2 = [&v, &w, &p];
+    assert_trace_networks_match_host::<_, f64>(&runtime, su2, 1_351_000, f64::EPSILON, "SU(2)");
+    assert_trace_networks_match_host::<_, Complex64>(
+        &runtime,
+        su2,
+        1_351_100,
+        f64::EPSILON,
+        "SU(2)",
+    );
+    assert_trace_dense_oracle(&runtime, su2, 1_351_200, "SU(2)");
+
+    let [v, w, p] = fermion_u1_trace_spaces();
+    let fu1 = [&v, &w, &p];
+    assert_trace_networks_match_host::<_, f64>(&runtime, fu1, 1_352_000, f64::EPSILON, "fZ2xU(1)");
+    assert_trace_networks_match_host::<_, Complex64>(
+        &runtime,
+        fu1,
+        1_352_100,
+        f64::EPSILON,
+        "fZ2xU(1)",
+    );
+
+    let [v, w, p] = fermion_su2_trace_spaces();
+    let fsu2 = [&v, &w, &p];
+    assert_trace_networks_match_host::<_, f64>(
+        &runtime,
+        fsu2,
+        1_353_000,
+        f64::EPSILON,
+        "fZ2xSU(2)",
+    );
+    assert_trace_networks_match_host::<_, Complex64>(
+        &runtime,
+        fsu2,
+        1_353_100,
+        f64::EPSILON,
+        "fZ2xSU(2)",
+    );
+}
+
+/// G2c-5 (#1350) warm-cost contract: a warm trace-bearing network transfers
+/// exactly one #740 zero upload per traced operand (its trace output, which is
+/// call-local like the Host's) plus, when the network has a contraction step,
+/// the returned output's; it allocates exactly those outputs, downloads
+/// nothing, misses and evicts no cuTENSOR plan, and grows no scratch and no
+/// executor state. A network without a step returns its trace output itself.
+///
+/// The counters are process-wide: run with `--test-threads=1`.
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn warm_trace_prestep_transfers_only_the_trace_and_returned_outputs() {
+    fn bytes<R, D>(tensor: &TensorMap<R, D>) -> u64
+    where
+        D: tenet::typed::CudaPayload,
+    {
+        std::mem::size_of_val(tensor.data()) as u64
+    }
+
+    fn warm<R, D>(runtime: &Runtime, spaces: [&GradedSpace<R>; 3], seed: u64, what: &str)
+    where
+        R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+            + MultiplicityFreeRigidSymbols<Scalar = f64>
+            + CheckedFusionAlgebra
+            + SectorCodec
+            + Send
+            + Sync,
+        D: tenet::typed::CudaPayload + Send + Sync + 'static,
+    {
+        let h = trace_operands::<R, D>(runtime, spaces, seed);
+        let o = h.map(|tensor| tensor.to_cuda().unwrap());
+        let traced = |tensor: &TensorMap<R, D>, pairs: &[(usize, usize)]| {
+            bytes(&tensor.trace_pairs(pairs).unwrap())
+        };
+        let two = || tensor!([a; x] = (o.tb)[j, a; j, w] * (o.ta)[i, w; i, x]).unwrap();
+        let dual = || tensor!([y; x] = (o.td)[k, k, y; p] * (o.te)[p; x, u, u]).unwrap();
+        let full = || tensor!([] = (o.tt)[i, j; i, j]).unwrap();
+        type Run<'a, R, D> = (
+            &'a str,
+            &'a dyn Fn() -> TensorMap<R, D, CudaStorage<D>>,
+            u64,
+            u64,
+            bool,
+        );
+        let runs: [Run<'_, R, D>; 3] = [
+            (
+                "two traced operands",
+                &two,
+                2,
+                traced(&h.tb, &[(0, 2)]) + traced(&h.ta, &[(0, 2)]),
+                true,
+            ),
+            (
+                "dual traced legs",
+                &dual,
+                2,
+                traced(&h.td, &[(0, 1)]) + traced(&h.te, &[(2, 3)]),
+                true,
+            ),
+            (
+                "full two-pair trace",
+                &full,
+                1,
+                traced(&h.tt, &[(0, 2), (1, 3)]),
+                false,
+            ),
+        ];
+        for (name, run, traces, trace_bytes, steps) in runs {
+            drop(run());
+            drop(run());
+            let before = device_state(runtime);
+            let output = run();
+            let after = device_state(runtime);
+            let output_bytes = bytes(&output.to_host().unwrap());
+            let (calls, h2d_bytes) = if steps {
+                (traces + 1, trace_bytes + output_bytes)
+            } else {
+                (traces, trace_bytes)
+            };
+            let what = format!("{what} {name}");
+            assert_eq!(
+                (
+                    after.transfers.h2d_calls - before.transfers.h2d_calls,
+                    after.transfers.h2d_bytes - before.transfers.h2d_bytes,
+                    after.transfers.d2h_calls - before.transfers.d2h_calls,
+                    after.transfers.device_allocs - before.transfers.device_allocs,
+                ),
+                (calls, h2d_bytes, 0, calls),
+                "{what}: (h2d calls, h2d bytes, d2h calls, device allocations)"
+            );
+            assert_eq!(after.cutensor.misses, before.cutensor.misses, "{what}");
+            assert_eq!(
+                after.cutensor.evictions, before.cutensor.evictions,
+                "{what}"
+            );
+            assert!(
+                after.cutensor.hits > before.cutensor.hits,
+                "{what}: vacuous"
+            );
+            assert_eq!(after.scratch_bytes, before.scratch_bytes, "{what}");
+            assert_eq!(after.transforms, before.transforms, "{what}");
+            assert_eq!(after.plans.entries, before.plans.entries, "{what}");
+            assert_eq!(after.plans.misses, before.plans.misses, "{what}");
+            assert_eq!(
+                after.plans.workspaces_created, before.plans.workspaces_created,
+                "{what}"
+            );
+        }
+    }
+
+    let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+    let (v, w, p) = (
+        u1_space(&[(-1, 2), (0, 1), (1, 2)]),
+        u1_space(&[(0, 2), (1, 1)]),
+        u1_space(&[(-1, 1), (0, 2), (1, 1)]),
+    );
+    warm::<_, f64>(&runtime, [&v, &w, &p], 1_354_000, "U(1) f64");
+    warm::<_, Complex64>(&runtime, [&v, &w, &p], 1_354_100, "U(1) c64");
+    let [v, w, p] = fermion_u1_trace_spaces();
+    warm::<_, f64>(&runtime, [&v, &w, &p], 1_354_200, "fZ2xU(1) f64");
+}
+
+/// G2c-5 (#1350): every trace of an expression is validated and compiled on
+/// the Host before the first one runs, so a trace rejection on a later operand
+/// — mutually non-dual traced legs, a label count that is not the operand's
+/// rank — leaves plan cache, pools, transfer counters, cuTENSOR plans, scratch
+/// and executor state unchanged, with the Host's error. A contracted-leg
+/// mismatch between the reduced operands is the Host's own post-trace input
+/// error: it is raised after the traces ran (their uploads are its only
+/// transfers) and publishes no plan; deciding it before the traces and the
+/// plan lookup is #1371. An anyonic traced operand is rejected by the trace
+/// compile, with the Host's error, before any trace runs.
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn rejected_cuda_trace_prestep_leaves_every_device_state_unchanged() {
+    let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+    let (v, w, p) = (
+        u1_space(&[(-1, 2), (0, 1), (1, 2)]),
+        u1_space(&[(0, 2), (1, 1)]),
+        u1_space(&[(-1, 1), (0, 2), (1, 1)]),
+    );
+    let h = trace_operands::<_, f64>(&runtime, [&v, &w, &p], 1_355_000);
+    let o = h.map(|tensor| tensor.to_cuda().unwrap());
+    let host_bad =
+        TensorMap::<_, f64>::rand_with_seed(&runtime, [&v, &w], [&p, &w], 1_355_100).unwrap();
+    let bad = host_bad.to_cuda().unwrap();
+    let host_mismatch =
+        TensorMap::<_, f64>::rand_with_seed(&runtime, [&v, &p], [&v, &w], 1_355_200).unwrap();
+    let mismatch = host_mismatch.to_cuda().unwrap();
+    drop(tensor!([a; x] = (o.tb)[j, a; j, w] * (o.ta)[i, w; i, x]).unwrap());
+    let before = device_state(&runtime);
+
+    let host_error = tensor!([a; x] = (h.tb)[j, a; j, w] * host_bad[i, w; i, x]).unwrap_err();
+    let device_error = tensor!([a; x] = (o.tb)[j, a; j, w] * bad[i, w; i, x]).unwrap_err();
+    assert_eq!(device_error.to_string(), host_error.to_string());
+    assert_eq!(device_state(&runtime), before, "non-dual traced legs");
+
+    let host_error = tensor!([a; x] = (h.tb)[j, a; j, w] * (h.c)[i, w; i, x]).unwrap_err();
+    let device_error = tensor!([a; x] = (o.tb)[j, a; j, w] * (o.c)[i, w; i, x]).unwrap_err();
+    assert!(matches!(
+        device_error,
+        tenet::prelude::Error::InvalidArgument(_)
+    ));
+    assert_eq!(device_error.to_string(), host_error.to_string());
+    assert_eq!(
+        device_state(&runtime),
+        before,
+        "label count is not the rank"
+    );
+
+    assert!(tensor!([a; x] = (h.tb)[j, a; j, w] * host_mismatch[i, w; i, x]).is_err());
+    let before = device_state(&runtime);
+    assert!(tensor!([a; x] = (o.tb)[j, a; j, w] * mismatch[i, w; i, x]).is_err());
+    let after = device_state(&runtime);
+    // This pins only that no plan is published; the hit counted and the
+    // workspace quarantined by the failed execution are #1371.
+    assert_eq!(
+        (
+            after.plans.entries,
+            after.plans.misses,
+            after.plans.topology_materializations
+        ),
+        (
+            before.plans.entries,
+            before.plans.misses,
+            before.plans.topology_materializations
+        ),
+        "reduced contracted-leg mismatch publishes no plan"
+    );
+    assert_eq!(
+        after.transfers.h2d_calls - before.transfers.h2d_calls,
+        2,
+        "reduced contracted-leg mismatch: exactly the two trace outputs"
+    );
+    assert_eq!(after.transfers.d2h_calls, before.transfers.d2h_calls);
+}
+
+/// A one-sector real rule that reports anyonic braiding (every symbol is 1):
+/// a valid device operand, so the anyonic boundary is reachable on device.
+struct RealAnyonicProbe;
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+struct AnyonicProbeSector;
+
+impl tenet::core::FusionRule for RealAnyonicProbe {
+    fn rule_identity(&self) -> tenet::core::RuleIdentity {
+        tenet::core::RuleIdentity::from_canonical_bytes::<Self>(
+            0x1350_0000_0000_0001,
+            Arc::<[u8]>::from([]),
+        )
+    }
+    fn fusion_style(&self) -> tenet::core::FusionStyleKind {
+        tenet::core::FusionStyleKind::Unique
+    }
+    fn braiding_style(&self) -> tenet::core::BraidingStyleKind {
+        tenet::core::BraidingStyleKind::Anyonic
+    }
+    fn vacuum(&self) -> tenet::core::SectorId {
+        tenet::core::SectorId::new(0)
+    }
+    fn fusion_channels(
+        &self,
+        _: tenet::core::SectorId,
+        _: tenet::core::SectorId,
+    ) -> tenet::core::SectorVec {
+        core::iter::once(tenet::core::SectorId::new(0)).collect()
+    }
+}
+
+impl tenet::core::MultiplicityFreeFusionRule for RealAnyonicProbe {}
+
+impl tenet::core::MultiplicityFreeFusionSymbols for RealAnyonicProbe {
+    type Scalar = f64;
+    fn f_symbol_scalar(
+        &self,
+        _: tenet::core::SectorId,
+        _: tenet::core::SectorId,
+        _: tenet::core::SectorId,
+        _: tenet::core::SectorId,
+        _: tenet::core::SectorId,
+        _: tenet::core::SectorId,
+    ) -> f64 {
+        1.0
+    }
+    fn r_symbol_scalar(
+        &self,
+        _: tenet::core::SectorId,
+        _: tenet::core::SectorId,
+        _: tenet::core::SectorId,
+    ) -> f64 {
+        1.0
+    }
+}
+
+impl MultiplicityFreeRigidSymbols for RealAnyonicProbe {
+    fn dim_scalar(&self, _: tenet::core::SectorId) -> f64 {
+        1.0
+    }
+    fn inv_dim_scalar(&self, _: tenet::core::SectorId) -> f64 {
+        1.0
+    }
+    fn sqrt_dim_scalar(&self, _: tenet::core::SectorId) -> f64 {
+        1.0
+    }
+    fn inv_sqrt_dim_scalar(&self, _: tenet::core::SectorId) -> f64 {
+        1.0
+    }
+    fn twist_scalar(&self, _: tenet::core::SectorId) -> f64 {
+        1.0
+    }
+    fn frobenius_schur_phase_scalar(&self, _: tenet::core::SectorId) -> f64 {
+        1.0
+    }
+}
+
+impl CheckedFusionAlgebra for RealAnyonicProbe {
+    fn try_dual_sector(
+        &self,
+        sector: tenet::core::SectorId,
+    ) -> Result<tenet::core::SectorId, FusionAlgebraError> {
+        Ok(sector)
+    }
+    fn try_fusion_channels(
+        &self,
+        left: tenet::core::SectorId,
+        right: tenet::core::SectorId,
+    ) -> Result<tenet::core::SectorVec, FusionAlgebraError> {
+        Ok(tenet::core::FusionRule::fusion_channels(self, left, right))
+    }
+    fn try_nsymbol(
+        &self,
+        left: tenet::core::SectorId,
+        right: tenet::core::SectorId,
+        coupled: tenet::core::SectorId,
+    ) -> Result<usize, FusionAlgebraError> {
+        Ok(tenet::core::FusionRule::nsymbol(self, left, right, coupled))
+    }
+}
+
+impl SectorCodec for RealAnyonicProbe {
+    type Sector = AnyonicProbeSector;
+    fn encode_sector(
+        &self,
+        _: &AnyonicProbeSector,
+    ) -> Result<tenet::core::SectorId, FusionAlgebraError> {
+        Ok(tenet::core::SectorId::new(0))
+    }
+    fn decode_sector(
+        &self,
+        sector: tenet::core::SectorId,
+    ) -> Result<AnyonicProbeSector, FusionAlgebraError> {
+        if sector == tenet::core::SectorId::new(0) {
+            Ok(AnyonicProbeSector)
+        } else {
+            Err(FusionAlgebraError::InvalidSector { sector })
+        }
+    }
+}
+
+/// G2c-5 (#1350): an anyonic traced operand is rejected by the trace compile
+/// with the Host's error before any trace runs, leaving every device state
+/// unchanged.
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn anyonic_cuda_trace_prestep_rejects_like_host_before_device_work() {
+    let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+    let leg = GradedSpace::try_new(RealAnyonicProbe, [(AnyonicProbeSector, 2)]).unwrap();
+    let host = TensorMap::<_, f64>::rand_with_seed(&runtime, [&leg], [&leg], 1_356_000).unwrap();
+    let device = host.to_cuda().unwrap();
+    let host_error = tensor!([] = host[i; i]).unwrap_err();
+    let before = device_state(&runtime);
+    let device_error = tensor!([] = device[i; i]).unwrap_err();
+    assert!(
+        matches!(
+            &device_error,
+            tenet::prelude::Error::Operation(operation)
+                if matches!(
+                    **operation,
+                    tenet::operations::OperationError::UnsupportedTensorContractScope { .. }
+                )
+        ),
+        "{device_error:?}"
+    );
+    assert_eq!(device_error.to_string(), host_error.to_string());
+    assert_eq!(device_state(&runtime), before, "anyonic traced operand");
 }

@@ -24,7 +24,8 @@
 //! a borrow of one). Host execution reuses a typed per-plan workspace; CUDA
 //! execution runs the same schedule on device tensors (general contraction
 //! axes, permutations, fermionic twists), reusing retained device
-//! intermediates, and rejects intra-operand traces.
+//! intermediates, with intra-operand traces lowered first by device
+//! `trace_pairs`.
 //!
 //! **Fermionic semantics**: `tensor!` follows TensorKit `@tensor` /
 //! `tensorcontract!` — dual contracted legs are twisted with the fermionic

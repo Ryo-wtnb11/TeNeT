@@ -160,8 +160,8 @@ destinations against the Host and the same oracles, with a warm call
 transferring and allocating nothing. Device `tensor!` networks run every
 compiled schedule — general steps, result and final permutations, open
 outputs, dual contracted legs — through these device operations
-([#1348](https://github.com/Ryo-wtnb11/TeNeT/issues/1348)); only traces stay
-an explicit boundary. Behaviour change: an anyonic device
+([#1348](https://github.com/Ryo-wtnb11/TeNeT/issues/1348)), intra-operand
+traces included (see [13]). Behaviour change: an anyonic device
 `contract` is now `UnsupportedTensorContractScope` even in canonical form,
 as on Host (it was accepted before). The Host checked-Generic cell is
 `NEEDS-PROOF` for a named gap: `tensorcontract_owned_checked_generic_in_context`
@@ -185,8 +185,16 @@ dtype, owned and lazy-adjoint, U(1)/SU(2)/U(1)xSU(2)/fZ2xU(1)/fZ2(x)SU(2);
 device == the physical-basis diagonal sum and the identity contraction, both
 pinned against the Host by the ungated `typed_trace_host_oracle.rs`; device ==
 the hand-valued fZ2 supertrace) and by the unmerged-index oracle of
-`tenet-dense/tests/cuda_region_trace.rs`. The `tensor!` trace pre-step on
-device is still rejected (G2c-5).
+`tenet-dense/tests/cuda_region_trace.rs`. The `tensor!` trace pre-step runs
+on device with this `trace_pairs` (G2c-5,
+[#1350](https://github.com/Ryo-wtnb11/TeNeT/issues/1350)): every trace of the
+expression is validated and compiled on the Host before the first executes,
+so a trace rejection on any operand leaves the device untouched; the reduced
+network then takes the device network path. Each traced operand costs its own
+#740 output upload on every call (trace outputs are call-local, as on Host,
+not retained workspace). Gated by the trace gates of
+`tenet-network/tests/typed_cuda_network.rs` (device == Host `tensor!`, and the
+physical-basis einsum for U(1)/SU(2)).
 
 [10] The `CUDA f32/c32 MF` column is the single-precision device payload of
 [#1336](https://github.com/Ryo-wtnb11/TeNeT/issues/1336) (leaf C2), gated by
