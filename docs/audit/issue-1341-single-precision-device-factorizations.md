@@ -120,7 +120,7 @@ payload. Four sites, three of them already correct:
 | `fill_diagonal_values` writing `D::from_real(value)` | already correct: `FactorScalar::from_real` narrows per dtype (`tenet-matrixalgebra/src/factorize.rs:216` for `f32`, `:323` for `Complex32`) |
 | the Hermitian admission tolerance | already correct: `HERMITIAN_TOLERANCE_EPSILONS * <D::Real as CudaRealScalar>::EPSILON` since C1 — the *reason* an `f32` block is admitted at all |
 | the `#[cfg(test)]` observation hooks | already correct: they count *calls* (decompositions, copies, selector uploads, assembly GEMMs, output uploads), never bytes, so a 4-byte element changes nothing they record |
-| the `#1320` alignment guard `permute_operand_offset_is_aligned(offset, size_of::<D>())` | already correct **and now load-bearing at a new set of offsets**: aligned iff `offset * size_of::<D>() ≡ 0 (mod 256)`, so `f32` needs `offset ≡ 0 (mod 64)` where `f64` needed `≡ 0 (mod 32)` |
+| the `#1320` alignment guard `permute_operand_offset_is_aligned(offset, size_of::<D>())` | already correct **and now load-bearing at a new set of offsets**: aligned iff `offset * size_of::<D>() ≡ 0 (mod 256)`, so `f32` needs `offset ≡ 0 (mod 64)` where `f64` needed `≡ 0 (mod 32)` *(Superseded by #1376: Tenferro 0.6.0 reports the true device address alignment, and the guard was removed.)* |
 
 There is no host-side threshold, no `as f64` narrowing and no absolute constant
 anywhere in the block.
