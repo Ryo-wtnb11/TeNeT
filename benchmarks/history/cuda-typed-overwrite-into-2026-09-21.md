@@ -107,6 +107,17 @@ inactive layout itself. Cold: one coefficient upload per structure, at most one
 workspace growth, one zero-template reservation. Asserted for all four methods
 by `a_warm_device_overwrite_into_transfers_nothing_and_allocates_nothing`.
 
+Measured disclosure from the A100 run: `alpha == 0` takes its 1x1 operand from
+element 0 of the *context* zero template, so the first zero-scale replay on a
+context whose template is still empty pays one `size_of::<D>()`-byte upload and
+one device allocation. Once per context, not per call — the second zero-scale
+call measures 0/0/0. This is in the rustdoc.
+
+Kernel submission counters (`gemm_calls`, `copy_calls`) are non-zero on a warm
+call by construction; the contract is about transfers and allocations, which is
+why the tests compare those five fields rather than the whole
+`CudaTransferStats`.
+
 ## Verification
 
 Local (macOS, private target dir, removed afterwards):

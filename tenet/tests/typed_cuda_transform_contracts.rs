@@ -310,6 +310,34 @@ fn as_device_message(host: &str) -> String {
         .replace("ordinary dense host storage", "ordinary dense CUDA storage")
 }
 
+/// The warm contract: no transfer in either direction and no device
+/// allocation. Kernel submission counts (`gemm_calls`, `copy_calls`) are not
+/// transfers and are expected to be non-zero.
+fn assert_transfer_free(stats: &CudaTransferStats) {
+    assert_eq!(stats.h2d_calls, 0, "{stats:?}");
+    assert_eq!(stats.h2d_bytes, 0, "{stats:?}");
+    assert_eq!(stats.d2h_calls, 0, "{stats:?}");
+    assert_eq!(stats.d2h_bytes, 0, "{stats:?}");
+    assert_eq!(stats.device_allocs, 0, "{stats:?}");
+}
+
+/// A device payload as raw bits, so a NaN-poisoned destination compares equal
+/// to itself.
+fn payload_bits<R>(tensor: &TensorMap<R, f64, tenet::typed::CudaStorage>) -> Vec<u64>
+where
+    R: tenet::core::MultiplicityFreeRigidSymbols<Scalar = f64>
+        + tenet::core::CheckedFusionAlgebra
+        + tenet::core::SectorCodec,
+{
+    tensor
+        .to_host()
+        .unwrap()
+        .data()
+        .iter()
+        .map(|value| value.to_bits())
+        .collect()
+}
+
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn a_warm_device_overwrite_into_transfers_nothing_and_allocates_nothing() {
@@ -345,11 +373,23 @@ fn a_warm_device_overwrite_into_transfers_nothing_and_allocates_nothing() {
         "a warm overwrite grows no device state"
     );
 
-    // A zero caller scale takes the zero-operand route, which reads the
-    // context template already reserved above: still nothing transferred.
-    let (_, zero) = delta(|| {
+    // A zero caller scale takes the zero-operand route. Its 1x1 operand is
+    // element 0 of the context's zero template, so the *first* zero-scale
+    // replay on a context whose template is shorter than one element sizes it
+    // — one 8-byte upload and one device allocation, once per context, not per
+    // call. Warm, it transfers nothing like any other scale.
+    let (_, first_zero) = delta(|| {
         source
             .permute_overwrite_into(&mut destination, &[2, 0], &[1, 3], 0.0)
+            .unwrap()
+    });
+    assert!(
+        first_zero.h2d_bytes <= std::mem::size_of::<f64>() as u64,
+        "the zero template is one element, not a buffer: {first_zero:?}"
+    );
+    let (_, zero) = delta(|| {
+        source
+            .permute_overwrite_into(&mut destination, &[2, 0], &[1, 3], -0.0)
             .unwrap()
     });
     assert_eq!(zero.h2d_calls, 0, "{zero:?}");
@@ -366,12 +406,12 @@ fn a_warm_device_overwrite_into_transfers_nothing_and_allocates_nothing() {
             .transpose_overwrite_into(&mut transposed, 1.0)
             .unwrap()
     });
-    assert_eq!(warm, CudaTransferStats::default(), "{warm:?}");
+    assert_transfer_free(&warm);
 
     let mut bent = fixture(&runtime).repartition(1).unwrap().to_cuda().unwrap();
     source.repartition_overwrite_into(&mut bent, 1.0).unwrap();
     let (_, warm) = delta(|| source.repartition_overwrite_into(&mut bent, 1.0).unwrap());
-    assert_eq!(warm, CudaTransferStats::default(), "{warm:?}");
+    assert_transfer_free(&warm);
 
     let mut cyclic = fixture(&runtime)
         .transpose_axes(&[1, 3], &[0, 2])
@@ -386,7 +426,7 @@ fn a_warm_device_overwrite_into_transfers_nothing_and_allocates_nothing() {
             .transpose_axes_overwrite_into(&mut cyclic, &[1, 3], &[0, 2], 1.0)
             .unwrap()
     });
-    assert_eq!(warm, CudaTransferStats::default(), "{warm:?}");
+    assert_transfer_free(&warm);
 }
 
 #[test]
@@ -469,7 +509,9 @@ fn device_overwrite_into_rejections_happen_before_any_device_work() {
     macro_rules! rejects_like_host {
         ($what:expr, $host_call:expr, $witness:ident, $device_call:expr) => {{
             let expected_message = as_device_message(&$host_call.unwrap_err().to_string());
-            let before = $witness.to_host().unwrap().data().to_vec();
+            // Bitwise: the poisoned destinations are NaN, which is not equal
+            // to itself.
+            let before = payload_bits(&$witness);
             let (error, counters) = delta(|| $device_call.unwrap_err());
             assert_eq!(error.to_string(), expected_message, "{}", $what);
             assert_eq!(
@@ -479,7 +521,7 @@ fn device_overwrite_into_rejections_happen_before_any_device_work() {
                 $what
             );
             assert_eq!(
-                $witness.to_host().unwrap().data(),
+                payload_bits(&$witness),
                 before,
                 "{}: the caller's destination must be untouched",
                 $what

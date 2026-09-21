@@ -13031,7 +13031,11 @@ where
     /// structure's coefficient payload once, may grow the pack/scatter
     /// workspace once, and reserves the context zero template; that warm
     /// contract holds only while this Runtime's Host transform store admits
-    /// the structure, as for [`Self::permute`].
+    /// the structure, as for [`Self::permute`]. `alpha == 0` takes its 1x1
+    /// operand from element 0 of that same context zero template, so the first
+    /// zero-scale call on a context whose template is still empty pays one
+    /// `size_of::<D>()`-byte upload and one device allocation — once per
+    /// context, not per call.
     ///
     /// # Numerics
     ///
