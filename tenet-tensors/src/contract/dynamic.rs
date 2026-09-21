@@ -852,6 +852,17 @@ impl<C: DenseBlockScalar> DynamicTreeExecutionArtifact<C> {
         scales
     }
 
+    /// The destination space of the physical lhs (`true`) or rhs source
+    /// transform, whichever orientation the artifact has.
+    #[cfg(test)]
+    pub(crate) fn physical_core_space(&self, lhs: bool) -> &DynamicFusionMapSpace {
+        if lhs {
+            &self.lhs_transform.space
+        } else {
+            &self.rhs_transform.space
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn core_right_transform_structure(&self) -> &TreeTransformStructure<C> {
         if self.orientation == FusionContractOrientation::RhsLhs {
@@ -2548,6 +2559,24 @@ where
         }
     }
     Ok(actions.into())
+}
+
+/// The Host twist compiler's `(offset, θ)` list for `space`, sorted: the test
+/// oracle for one physical operand's twist, independent of any artifact.
+#[cfg(test)]
+pub(super) fn rhs_contract_twist_scales<R>(
+    rule: &R,
+    space: &DynamicFusionMapSpace,
+    rhs_contracting_axes: &[usize],
+) -> Result<Vec<(usize, R::Scalar)>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
+{
+    let mut scales = Vec::new();
+    compile_rhs_contract_twist(rule, space, rhs_contracting_axes, Some(&mut scales))?;
+    scales.sort_unstable_by_key(|&(offset, _)| offset);
+    Ok(scales)
 }
 
 /// θ_b of the destination block at `offset`: one where `scales` (sorted by

@@ -154,14 +154,15 @@ fn rhs_identity_case() -> Case<U1FusionRule> {
 
 /// The artifact of one forced axis-order candidate and orientation — the
 /// test-only plan builder reaches both, the typed API only the scorer's
-/// choice — together with its Host replay over `lhs`/`rhs`.
+/// choice — together with its Host replay over `lhs`/`rhs` and the core-right
+/// contracted axes of its plan.
 fn forced_artifact<R, D>(
     case: &Case<R>,
     candidate: &crate::contract::fusion::ContractAxisOrderCandidate,
     orientation: FusionContractOrientation,
     lhs: &[D],
     rhs: &[D],
-) -> (DynamicTreeExecutionArtifact<f64>, Vec<D>)
+) -> (DynamicTreeExecutionArtifact<f64>, Vec<D>, Vec<usize>)
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>
         + crate::TreeTransformRuleCacheKey<Key = RuleIdentity>,
@@ -213,7 +214,8 @@ where
         D::zero(),
     )
     .unwrap();
-    (artifact, host)
+    let core_right_contracting = plan.core_axes().as_spec().rhs_contracting_axes().to_vec();
+    (artifact, host, core_right_contracting)
 }
 
 fn orientations() -> [FusionContractOrientation; 2] {
@@ -346,34 +348,103 @@ fn host_data(space: &crate::DynamicFusionMapSpace, salt: usize) -> Vec<f64> {
         .collect()
 }
 
-/// Every forced candidate and orientation of one fermionic case: the
-/// destination-scale list is the Host's per-block twist (same loop, sorted,
-/// empty blocks dropped), and the compile-time uniform-per-Multi assertion
-/// passed. Returns whether any artifact twisted, and whether any twisted
-/// core-right transform had a Multi block.
-fn check_destination_scales<R>(case: &Case<R>, what: &str) -> (bool, bool)
+/// The Host's per-block twist of one physical operand's transformed source,
+/// recomputed from that space alone (`lhs` names the side) by the Host twist
+/// compiler, as the sorted `(offset, θ)` of its non-empty twisted blocks.
+fn physical_twist<R>(
+    case: &Case<R>,
+    artifact: &DynamicTreeExecutionArtifact<f64>,
+    lhs: bool,
+    contracting: &[usize],
+) -> Vec<(usize, f64)>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    super::dynamic::rhs_contract_twist_scales(
+        case.lhs.provider(),
+        artifact.physical_core_space(lhs),
+        contracting,
+    )
+    .unwrap()
+}
+
+/// The eager Host contraction of `case` over the `lhs`/`rhs` payloads: the
+/// production answer every forced artifact must reproduce.
+fn eager_host<R>(case: &Case<R>, lhs: &[f64], rhs: &[f64]) -> Vec<f64>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>
+        + crate::TreeTransformRuleCacheKey<Key = RuleIdentity>,
+{
+    let dst = case.dst();
+    let mut out = vec![0.0; dst.space().required_len().unwrap()];
+    Context::<f64>::default()
+        .tensorcontract_fusion_dyn_prelowered_into(
+            &dst,
+            &mut out,
+            FusionOperand::direct(case.lhs.space()),
+            lhs,
+            FusionOperand::direct(case.rhs.space()),
+            rhs,
+            case.axes(),
+            1.0,
+            0.0,
+        )
+        .unwrap();
+    out
+}
+
+/// Every forced candidate and orientation of one fermionic case:
+///
+/// - the destination-scale list is the Host's per-block twist of the
+///   *physical* core-right operand's transformed source — the physical lhs
+///   under `RhsLhs`, the physical rhs under `LhsRhs` — recomputed from that
+///   space alone, and equals the artifact's own in-place twist actions;
+/// - the compile-time uniform-per-Multi assertion passed;
+/// - the Host replay of the forced artifact equals the eager Host
+///   `contract`, so every forced orientation is tied to the production
+///   answer, not only to a device replay of the same artifact.
+///
+/// Returns, per orientation (`[LhsRhs, RhsLhs]`), whether any artifact
+/// twisted, and whether any twisted core-right transform had a Multi block.
+fn check_destination_scales<R>(case: &Case<R>, what: &str) -> ([bool; 2], bool)
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>
         + crate::TreeTransformRuleCacheKey<Key = RuleIdentity>,
 {
     let lhs = host_data(case.lhs.space(), 1);
     let rhs = host_data(case.rhs.space(), 2);
-    let (mut twisted, mut multi) = (false, false);
+    let eager = eager_host(case, &lhs, &rhs);
+    let scale = eager
+        .iter()
+        .fold(0.0_f64, |max, value| max.max(value.abs()));
+    assert!(scale > 1e-3, "{what}: vacuous all-zero eager result");
+    let (mut twisted, mut multi) = ([false; 2], false);
     for candidate in
         crate::contract::contracted_axis_order_candidates(&case.lhs_axes, &case.rhs_axes)
     {
-        for orientation in orientations() {
-            let (artifact, _) = forced_artifact(case, &candidate, orientation, &lhs, &rhs);
+        for (slot, orientation) in orientations().into_iter().enumerate() {
+            let where_ = format!("{what} {candidate:?} {orientation:?}");
+            let (artifact, host, contracting) =
+                forced_artifact(case, &candidate, orientation, &lhs, &rhs);
             let scales = artifact.core_right_destination_scales();
+            let core_right_is_lhs = orientation == FusionContractOrientation::RhsLhs;
             assert_eq!(
                 scales,
-                artifact.host_twist_scales().as_slice(),
-                "{what} {candidate:?} {orientation:?}"
+                physical_twist(case, &artifact, core_right_is_lhs, &contracting).as_slice(),
+                "{where_}: not the physical core-right operand's twist"
             );
+            assert_eq!(scales, artifact.host_twist_scales().as_slice(), "{where_}");
             assert!(scales.windows(2).all(|pair| pair[0].0 < pair[1].0));
             assert!(scales.iter().all(|&(_, theta)| theta == -1.0));
+            assert_eq!(host.len(), eager.len(), "{where_}");
+            for (index, (&forced, &production)) in host.iter().zip(&eager).enumerate() {
+                assert!(
+                    (forced - production).abs() <= 1e-12 * (1.0 + scale),
+                    "{where_}: element {index} is {forced}, eager Host {production}"
+                );
+            }
             if !scales.is_empty() {
-                twisted = true;
+                twisted[slot] = true;
                 multi |= artifact
                     .core_right_transform_structure()
                     .blocks()
@@ -389,15 +460,33 @@ where
 
 #[test]
 fn the_destination_scale_list_is_the_hosts_per_block_twist_in_both_orientations() {
-    for (what, case) in fermionic_cases() {
-        let (twisted, _) = check_destination_scales(&case, what);
-        assert!(twisted, "{what}: no forced artifact twisted");
-    }
+    let mut report = Vec::new();
     let mut any_multi = false;
-    for (what, case) in fermionic_su2_cases() {
-        let (twisted, multi) = check_destination_scales(&case, what);
-        assert!(twisted, "{what}: no forced artifact twisted");
+    let mut record = |what: &str, (twisted, multi): ([bool; 2], bool)| {
+        report.push(format!(
+            "{what}: LhsRhs {} RhsLhs {}",
+            twisted[0], twisted[1]
+        ));
         any_multi |= multi;
+        twisted
+    };
+    let mut u1 = Vec::new();
+    for (what, case) in fermionic_cases() {
+        u1.push(record(what, check_destination_scales(&case, what)));
+    }
+    let mut su2 = Vec::new();
+    for (what, case) in fermionic_su2_cases() {
+        su2.push(record(what, check_destination_scales(&case, what)));
+    }
+    // What: every fixture twists its physical rhs under LhsRhs, and for each
+    // provider some fixture also twists its physical lhs under RhsLhs, so
+    // neither core-right side is covered only vacuously. (With `u` not dual
+    // the lhs's contracted legs are all non-dual: under RhsLhs that fixture
+    // carries no core-right twist, and its forced replays still equal the
+    // eager Host result above.)
+    for twisted in [&u1, &su2] {
+        assert!(twisted.iter().all(|t| t[0]), "{report:?}");
+        assert!(twisted.iter().any(|t| t[0] && t[1]), "{report:?}");
     }
     // What: the uniform-per-Multi assertion was really exercised.
     assert!(any_multi, "no twisted core-right transform recoupled");
@@ -418,7 +507,7 @@ fn a_scale_list_that_varies_within_one_multi_block_is_an_internal_error() {
             crate::contract::contracted_axis_order_candidates(&case.lhs_axes, &case.rhs_axes)
         {
             for orientation in orientations() {
-                let (artifact, _) = forced_artifact(&case, &candidate, orientation, &lhs, &rhs);
+                let (artifact, _, _) = forced_artifact(&case, &candidate, orientation, &lhs, &rhs);
                 let structure = artifact.core_right_transform_structure();
                 let scales = artifact.core_right_destination_scales();
                 assert!(
@@ -928,7 +1017,7 @@ mod device {
             let dst = case.dst();
             let lhs = data::<D>(case.lhs.space(), 1);
             let rhs = data::<D>(case.rhs.space(), 2);
-            let (artifact, host) = forced_artifact(case, candidate, orientation, &lhs, &rhs);
+            let (artifact, host, _) = forced_artifact(case, candidate, orientation, &lhs, &rhs);
             let borrowed = artifact.borrowed_sources();
             let twisted = artifact.requires_core_right_twist();
             let resolution = StorageContractResolution {

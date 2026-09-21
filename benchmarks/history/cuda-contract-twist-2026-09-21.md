@@ -102,8 +102,13 @@ skipped when the list is empty).
 - Ungated, artifact level (`tenet-tensors/src/contract/storage_contract_tests.rs`):
   for every forced axis-order candidate and **both** orientations of fZ2 x
   U(1) and fZ2 (x) SU(2) fixtures (twist on one or both contracted legs,
-  canonical non-uniform), the scale list equals the Host's per-block twist
-  actions, is strictly sorted and ±1-valued; some artifact twists per fixture
+  canonical non-uniform), the scale list equals the Host twist compiler's
+  per-block twist of the *physical* core-right operand's transformed source
+  (the physical rhs under LhsRhs, the physical lhs under RhsLhs, recomputed
+  from that space alone) and the artifact's own in-place actions, is strictly
+  sorted and ±1-valued; every fixture twists under LhsRhs and, per provider,
+  the mixed-θ and canonical fixtures also under RhsLhs; each forced
+  orientation's Host replay equals the eager Host contraction (review P2s); some artifact twists per fixture
   and some twisted core-right transform recoupled (the uniform assertion is
   exercised). A list flipped on one destination of a Multi block is an
   `InvalidArgument`. The canonical non-uniform case: the device core route
