@@ -12275,6 +12275,15 @@ where
 
     /// Dimension-weighted unit normalization. Zero norm deliberately follows
     /// Host IEEE behavior and produces non-finite stored entries.
+    ///
+    /// The divisor is [`Self::norm`], so this inherits that method's
+    /// accumulation contract. One consequence is worth stating here, because
+    /// it is silent: at `f32`/`Complex32` a norm that overflows the
+    /// within-sector device sum is `inf`, and dividing by `inf` returns an
+    /// **all-zero tensor with no error**. Host does the same at `f64`
+    /// overflow; single precision merely reaches the boundary sooner. Rescale
+    /// before normalizing — on Host, by the reciprocal of
+    /// [`TensorMap::norm_inf`] — when that range is reachable.
     pub fn normalize(&self) -> Result<Self, Error> {
         let required_len = self.logical_space().space().required_len()?;
         if let TypedTensorRepr::Adjoint(view) = &self.repr {
@@ -12320,9 +12329,14 @@ where
     ///   `f32` (`gemm.rs:101`), `..._64F` for `f64` (`gemm.rs:134`). A widened
     ///   device sum would need a second pass over the region. So an
     ///   `f32`/`Complex32` sector total carries the error of a
-    ///   single-precision accumulation of `len` terms: bounded by
-    ///   `len * eps(f32)` relative (about `sqrt(len) * eps(f32)` in practice),
-    ///   and **saturating to infinity near `3.4e38`** where the Host, which
+    ///   single-precision accumulation of `len` terms, bounded by
+    ///   `len * eps(real(D))` times **`sum |conj(a_i) * b_i|`** — the sum of
+    ///   the absolute products, not the magnitude of the result. For a
+    ///   cancelling inner product the absolute error is therefore governed by
+    ///   the terms, and the *relative* error of a near-zero `inner` is
+    ///   unbounded; about `sqrt(len) * eps(real(D))` of that same sum in
+    ///   practice. The sum also **saturates to infinity near `3.4e38`** where
+    ///   the Host, which
     ///   accumulates in [`tenet_tensors::WideScalar::Wide`], still returns a
     ///   finite value. A device `norm` of a large single-precision tensor may
     ///   therefore be `inf` while the host `norm` of the same tensor is
@@ -12407,6 +12421,41 @@ where
     ///
     /// A lazy adjoint delegates to its canonical parent because this norm is
     /// adjoint invariant; no logical-adjoint payload is materialized.
+    ///
+    /// # Accumulation and range
+    ///
+    /// This reduction, [`Self::inner`], [`Self::dot`] and [`Self::normalize`]
+    /// all accumulate in two halves, and the halves differ:
+    ///
+    /// * **within one coupled sector** the device sums the `len` products in
+    ///   the *payload dtype*, inside the backend GEMM. Tenferro 0.5.0 offers
+    ///   no widening reduction and a widened device sum would cost a second
+    ///   pass, so this is a deliberate boundary rather than an oversight. The
+    ///   error is bounded by `len * eps(real(D))` times `sum |conj(a_i)*b_i|`,
+    ///   the sum of the **absolute** products — not times the magnitude of the
+    ///   result, so a cancelling inner product has a small absolute but
+    ///   possibly large relative error;
+    /// * **across coupled sectors** the quantum-dimension weighting and the
+    ///   final sum run on the host in
+    ///   [`tenet_tensors::WideScalar::Wide`], like every Host reduction, so
+    ///   the number of sectors never degrades the result. For `f64` and
+    ///   `Complex64` `Wide = Self`, so those results are unchanged down to the
+    ///   emitted arithmetic and this section describes no difference from
+    ///   Host.
+    ///
+    /// At `f32`/`Complex32` the within-sector sum also **saturates near
+    /// `3.4e38`**, where the Host reduction — which accumulates the same sum
+    /// in `f64` — still returns a finite value. A device `norm` can therefore
+    /// be `inf` while the Host `norm` of the same tensor is finite. That is
+    /// reported as `inf` rather than as an error, exactly as the same overflow
+    /// is at `f64`, and [`Self::normalize`] then divides by it and returns an
+    /// all-zero tensor with no error — the same code shape, and the same
+    /// silent outcome, Host has at `f64` overflow.
+    ///
+    /// If that range is reachable for your data, rescale before reducing:
+    /// download with [`TensorMap::to_host`] and take
+    /// [`TensorMap::norm_inf`] (which is a maximum, so it cannot overflow),
+    /// scale by its reciprocal, and multiply the resulting norm back.
     pub fn norm(&self) -> Result<f64, Error> {
         if let TypedTensorRepr::Adjoint(view) = &self.repr {
             return Self {
@@ -12429,6 +12478,13 @@ where
     /// product with **`self` conjugated**, matching the Host
     /// `inner_multiplicity_free`. Lazy adjoints remain an explicit
     /// unsupported device scope.
+    ///
+    /// Accumulates as [`Self::norm`] documents: in the payload dtype within a
+    /// coupled sector, wide across sectors. At `f32`/`Complex32` the
+    /// within-sector error is bounded by `len * eps(real(D))` times the sum of
+    /// the absolute products `sum |conj(a_i)*b_i|` — so a cancelling inner
+    /// product keeps a small absolute error but not a small relative one — and
+    /// that sum can saturate to a non-finite result where Host stays finite.
     #[doc(alias = "dot")]
     pub fn inner(&self, other: &Self) -> Result<D, Error> {
         if !self.runtime.same_runtime(&other.runtime) {
@@ -12444,7 +12500,7 @@ where
         self.weighted_inner_cuda(lhs, rhs)
     }
 
-    /// Deprecated alias of [`Self::inner`].
+    /// Deprecated alias of [`Self::inner`], with its accumulation contract.
     #[deprecated(since = "0.1.0", note = "use inner instead")]
     #[inline]
     pub fn dot(&self, other: &Self) -> Result<D, Error> {

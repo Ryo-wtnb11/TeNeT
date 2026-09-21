@@ -83,8 +83,10 @@ test single_precision_costs_the_same_device_calls_and_half_the_bytes ... ok
 test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 3.53s
 ```
 
-The three filtered-out tests are the device-free gates below, which do not
-carry `#[ignore]` and run in the non-ignored phase.
+The three filtered-out tests were the device-free gates below, which do not
+carry `#[ignore]` and run in the non-ignored phase; one of the three was
+deleted on review afterwards (see phase 3). No `#[ignore]` gate changed after
+the run.
 
 Suites instantiated, each as one generic body over all four device dtypes with
 the host result of the same dtype as oracle:
@@ -124,10 +126,13 @@ live here, so ordinary `cargo test --features cuda` runs them:
 exit_nonignored=0
 ```
 
-40 test binaries, **415 passed, 0 failed**. The three device-free gates this
-leaf adds are `every_base_family_payload_is_a_device_payload`,
-`a_device_less_runtime_rejects_every_payload_the_same_way` and
-`device_storage_is_distinct_per_payload`.
+40 test binaries, **415 passed, 0 failed**. The device-free gates this leaf
+adds are `every_base_family_payload_is_a_device_payload` and
+`a_device_less_runtime_rejects_every_payload_the_same_way`. (A third,
+`device_storage_is_distinct_per_payload`, ran in this phase and was deleted
+afterwards on review: comparing `type_name::<CudaStorage<D>>()` across dtypes
+cannot fail, so it asserted nothing. Its removal is the only test change after
+the device run, and it removes a test rather than a gate.)
 
 Doctests of `tenet-rs` with the `cuda` feature, which is where every
 `compile_fail` pin and its compiling twin lives:

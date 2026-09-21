@@ -41,9 +41,7 @@ use tenet::core::{
     U1Irrep, Z2Irrep,
 };
 use tenet::dense::cuda_transfer_stats;
-use tenet::typed::{
-    BlockFusionTrees, CudaPayload, CudaStorage, Error, GradedSpace, Runtime, TensorMap,
-};
+use tenet::typed::{BlockFusionTrees, CudaPayload, Error, GradedSpace, Runtime, TensorMap};
 
 // ---------------------------------------------------------------------------
 // The payload dtypes under test
@@ -148,13 +146,29 @@ fn elementwise_tolerance<D: DevicePayload>(terms: usize, scale: f64) -> f64 {
 }
 
 /// Bound for a reduction the device accumulated *in the payload dtype*:
-/// `2 * terms * eps(real(D)) * scale`, the worst-case error of a sequential
-/// single-precision sum of `terms` products, not the host's wide-accumulator
-/// tolerance.
+/// `2 * terms * eps(real(D)) * scale`, where the caller passes `scale` as an
+/// upper bound on `sum |conj(a_i) * b_i|` — the sum of the **absolute**
+/// products, which is what the documented device bound on
+/// `TensorMap::<..., CudaStorage<D>>::norm` is relative to. It is not the
+/// host's wide-accumulator tolerance, and it is not relative to the magnitude
+/// of the result.
 fn reduction_tolerance<D: DevicePayload>(terms: usize, scale: f64) -> f64 {
     2.0 * (terms as f64) * D::EPS * scale.max(1.0)
 }
 
+/// Compares against `tolerance * (1 + |expected|)`.
+///
+/// That relative factor is right for the elementwise families, whose
+/// `elementwise_tolerance` is a *relative* bound. For the reductions it makes
+/// the asserted bound `reduction_tolerance(..) * (1 + |expected|)`, which is
+/// **looser** than the absolute device bound those tests document: the
+/// documented bound is already absolute, so multiplying it again is slack, not
+/// rigour. The slack is kept rather than removed here because tightening a
+/// device tolerance cannot be validated without a device run, and it is
+/// carried into leaf C4 with the rest of the device-test follow-ups. What the
+/// reduction gates prove today is therefore the documented bound *or looser by
+/// a factor `(1 + |expected|)`; they still fail for any device reduction that
+/// is wrong by more than that, which is what they exist to catch.
 fn assert_close<D: DevicePayload>(actual: &[D], expected: &[D], tolerance: f64, what: &str) {
     assert_eq!(actual.len(), expected.len(), "{what} [{}]: length", D::NAME);
     for (index, (&left, &right)) in actual.iter().zip(expected).enumerate() {
@@ -414,13 +428,16 @@ where
     let a = TensorMap::<R, D>::from_block_fn(runtime, [leg], [leg], fill::<D, _>(1.5)).unwrap();
     let b = TensorMap::<R, D>::from_block_fn(runtime, [leg], [leg], fill::<D, _>(-2.25)).unwrap();
     let terms = a.data().len();
-    let scale = a
-        .data()
-        .iter()
-        .map(|value| value.magnitude())
-        .fold(0.0_f64, f64::max)
-        .powi(2)
-        * terms as f64;
+    // An upper bound on `sum |conj(a_i) * b_i|`, which is what the device
+    // reduction's error bound is relative to.
+    let peak = |tensor: &TensorMap<R, D>| {
+        tensor
+            .data()
+            .iter()
+            .map(|value| value.magnitude())
+            .fold(0.0_f64, f64::max)
+    };
+    let scale = peak(&a) * peak(&b) * terms as f64;
     let tolerance = reduction_tolerance::<D>(terms, scale);
 
     let device_a = a.to_cuda().unwrap();
@@ -492,7 +509,14 @@ fn device_reductions_match_the_host_within_the_device_accumulation_bound() {
 fn device_single_precision_norm_can_overflow_where_the_host_stays_finite() {
     let runtime = runtime();
     let leg = u1_leg();
-    // `|value|^2 ~ 1e38` is inside `f32` range; summing 25 of them is not.
+    // The fixture is `[leg] <- [leg]` over `u1_leg`, so its three coupled
+    // sectors hold 2x2, 1x1 and 2x2 blocks: 9 entries, at most **4** in one
+    // sector. Each `|value|^2` is `1e38`, inside `f32` range; the largest
+    // per-sector sum is `4e38`, which is not — `f32::MAX` is `3.4028e38`, a
+    // margin of about 1.18x. Every term is positive and of equal magnitude,
+    // so no summation order or FMA contraction inside the GEMM avoids the
+    // saturation. The Host sums all 9 in `f64`, where `9e38` is nine orders
+    // short of `f64::MAX`.
     let big = 1.0e19_f64;
     let host =
         TensorMap::<U1FusionRule, f32>::from_block_fn(&runtime, [&leg], [&leg], |_, _| big as f32)
@@ -1060,24 +1084,4 @@ fn a_device_less_runtime_rejects_every_payload_the_same_way() {
     assert_eq!(reject::<f32>(&runtime, &leg), double);
     assert_eq!(reject::<Complex32>(&runtime, &leg), double);
     assert_eq!(reject::<Complex64>(&runtime, &leg), double);
-}
-
-/// `CudaStorage` typed state is per payload dtype, so a single-precision
-/// device tensor cannot be mistaken for a double-precision one.
-#[test]
-fn device_storage_is_distinct_per_payload() {
-    fn name_of<D: DevicePayload>() -> &'static str {
-        std::any::type_name::<CudaStorage<D>>()
-    }
-
-    let names = [
-        name_of::<f64>(),
-        name_of::<Complex64>(),
-        name_of::<f32>(),
-        name_of::<Complex32>(),
-    ];
-    let mut unique = names.to_vec();
-    unique.sort_unstable();
-    unique.dedup();
-    assert_eq!(unique.len(), names.len(), "{names:?}");
 }

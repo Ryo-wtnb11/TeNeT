@@ -136,7 +136,23 @@ already has. Pinned by
 double-precision twin of the same fixture shape stays finite on both sides.
 
 Reduction *tests* therefore use a stated device-accumulation bound,
-`2 * terms * eps(real(D)) * scale`, not the host's wide-accumulator tolerance.
+`2 * terms * eps(real(D)) * scale`, where `scale` is an upper bound on
+`sum |conj(a_i) * b_i|` — the sum of the **absolute** products, which is what
+the device error is relative to. It is neither the host's wide-accumulator
+tolerance nor a bound relative to the magnitude of the result: a cancelling
+inner product keeps a small absolute error and may have a large relative one.
+The shared `assert_close` then multiplies by `(1 + |expected|)`, which is
+correct for the elementwise families but leaves the reductions asserting a
+bound *looser* than the documented one by that factor; the slack is recorded
+in the helper's own rustdoc and carried into leaf C4, because tightening a
+device tolerance cannot be validated without a device run.
+
+The contract is documented on the **public** device `norm`, `inner`, `dot` and
+`normalize`, not only on the private helper, and `normalize`'s entry names the
+silent case: dividing by an overflowed `inf` norm returns an all-zero tensor
+with no error, as it already does on Host at `f64` overflow. Callers whose data
+can reach that range are told to rescale first — on Host, by the reciprocal of
+`norm_inf`, which is a maximum and cannot overflow.
 
 ## Evidence
 
