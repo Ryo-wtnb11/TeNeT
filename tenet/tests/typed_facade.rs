@@ -9405,6 +9405,7 @@ fn is_unsupported_contract_scope(error: &tenet::prelude::Error) -> bool {
 
 #[test]
 fn anyonic_overwrite_and_compact_trace_reject_like_contract_and_dense_trace() {
+    let _guard = cache_lock();
     let runtime = runtime();
     let [lhs, rhs, mut destination] = anyonic_probe_operands(&runtime);
     let before = destination.data().to_vec();
@@ -9448,6 +9449,7 @@ fn anyonic_overwrite_and_compact_trace_reject_like_contract_and_dense_trace() {
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn anyonic_device_overwrite_rejects_like_contract_before_device_work() {
+    let _guard = cache_lock();
     let runtime = Runtime::builder().cuda(0).build().unwrap();
     let [lhs, rhs, destination] = anyonic_probe_operands(&runtime);
     let (lhs, rhs, mut destination) = (

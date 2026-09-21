@@ -7898,6 +7898,13 @@ where
     }
 }
 
+/// The error message of [`reject_anyonic_contraction`], shared with the
+/// device network preflight so a network rejection and a typed `contract`
+/// rejection are indistinguishable.
+#[doc(hidden)]
+pub const ANYONIC_CONTRACTION_UNSUPPORTED: &str =
+    "ordinary contraction is undefined for anyonic braiding; use an explicit planar operation";
+
 /// The ordinary-contraction boundary of every `contract` entry, returning or
 /// overwriting, Host or device (TensorKit `blas_contract!` requires symmetric
 /// braiding).
@@ -7908,9 +7915,11 @@ fn reject_anyonic_contraction<R: tenet_core::FusionRule + ?Sized>(
     provider: &R,
 ) -> Result<(), tenet_tensors::OperationError> {
     if provider.braiding_style() == tenet_core::BraidingStyleKind::Anyonic {
-        return Err(tenet_tensors::OperationError::UnsupportedTensorContractScope {
-            message: "ordinary contraction is undefined for anyonic braiding; use an explicit planar operation",
-        });
+        return Err(
+            tenet_tensors::OperationError::UnsupportedTensorContractScope {
+                message: ANYONIC_CONTRACTION_UNSUPPORTED,
+            },
+        );
     }
     Ok(())
 }
@@ -18609,7 +18618,7 @@ where
                 if !self.provider().braiding_style().is_symmetric() {
                     return Err(
                         tenet_tensors::OperationError::UnsupportedTensorContractScope {
-                            message: "fusion tensortrace requires symmetric braiding",
+                            message: tenet_tensors::FUSION_TENSORTRACE_REQUIRES_SYMMETRIC_BRAIDING,
                         }
                         .into(),
                     );
