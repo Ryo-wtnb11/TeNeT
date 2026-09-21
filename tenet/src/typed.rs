@@ -525,12 +525,28 @@ impl TensorScalar for num_complex::Complex32 {}
 ///   of order `eps(f32)` times the condition number, so two values separated
 ///   by less than that are not ordered reliably, and a magnitude-driven
 ///   policy ([`Truncation::rank`], [`Truncation::relative_cutoff`],
-///   [`Truncation::relative_error`]) can keep a different one of them. The
-///   *weight* discarded still matches the double-precision run to that same
-///   accuracy — it is the identity of the kept states, not the quality of the
-///   approximation, that moves. Separate the spectrum by more than
-///   `eps(real(D)) * cond` if the identity of the kept states has to be
-///   reproducible across dtypes.
+///   [`Truncation::relative_error`]) can act on a different order.
+///
+///   What holds at every payload dtype is the policy's **postcondition
+///   against the spectrum that run actually computed**: a kept value is at or
+///   above the threshold of that run, and the reported `error` is the weighted
+///   2-norm of what that run discarded, within its budget. What does *not*
+///   carry across dtypes is a comparison of the two runs' outcomes, and how
+///   far it fails depends on the policy:
+///
+///   * [`Truncation::rank`] at a tie swaps two interchangeable states, so the
+///     kept count is the budget either way and the discarded weight agrees to
+///     the accuracy of the values themselves;
+///   * [`Truncation::relative_cutoff`] and [`Truncation::relative_error`] have
+///     a *boundary*, not a tie: a value within noise of the threshold, or a
+///     tail whose cumulative weight is within noise of the budget, is kept by
+///     one run and dropped by the other. Then the kept count differs by one
+///     state and the discarded weight differs by that whole state's weight —
+///     not by `eps * cond`.
+///
+///   Separate the spectrum by more than `eps(real(D)) * cond`, and keep the
+///   budget away from a cumulative-weight boundary by the same margin, if the
+///   outcome has to be reproducible across dtypes.
 ///
 /// # Source compatibility
 ///

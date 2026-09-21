@@ -75,9 +75,19 @@ impl TruncationSpace {
 /// produced by an `f32`/`Complex32` factorization carries a relative error of
 /// order `f32::EPSILON` times the block's condition number, so a cutoff chosen
 /// at `f64` scale keeps that noise, and two values closer together than that
-/// noise are not ordered reliably — the kept set near a tie may differ from
-/// the double-precision run of the same physics while the discarded *weight*
-/// still agrees. MatrixAlgebraKit scales its own default with the element type
+/// noise are not ordered reliably.
+///
+/// Every policy here keeps its postcondition against the spectrum it was
+/// handed — a kept value is at or above that run's threshold, the reported
+/// error is the weighted 2-norm of what that run discarded — at every payload
+/// dtype. Comparing two *runs* is what single precision can break, and by how
+/// much depends on the policy: [`Truncation::Rank`] at a tie swaps two
+/// interchangeable states, so the kept count and the discarded weight survive;
+/// [`Truncation::Tolerance`] and [`Truncation::DiscardWeight`] have a
+/// boundary, and a value within noise of the threshold, or a tail whose
+/// cumulative weight is within noise of the budget, is kept by one run and
+/// dropped by the other — a whole state's difference in both the count and the
+/// weight. MatrixAlgebraKit scales its own default with the element type
 /// (`src/common/defaults.jl` `defaulttol(x) = eps(real(float(one(eltype(x)))))^(2/3)`);
 /// TeNeT has no defaults, so the scaling is the caller's.
 #[derive(Clone, Debug, PartialEq)]

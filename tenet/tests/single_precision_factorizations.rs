@@ -778,6 +778,12 @@ mod checked_generic {
                     );
                     let terms = wide_tall.data().len();
                     let kappa = measured_kappa!(&wide_tall);
+                    let short_kappa = measured_kappa!(&wide_short);
+                    assert!(
+                        kappa < 1e4 && short_kappa < 1e4,
+                        "{name}: the fixture is too ill-conditioned to be a \
+                         single-precision oracle (kappa {kappa:e}, {short_kappa:e})"
+                    );
 
                     // QR, gauge-fixed by the positive diagonal of R.
                     let (q, r) = tall.qr_compact().unwrap();
@@ -885,10 +891,14 @@ mod checked_generic {
                         &h.eigh_vals().unwrap(),
                         h_terms
                     );
-                    assert_eq!(
-                        v.codomain().len(),
-                        1,
-                        "{name}: eigh_full must return an eigenvector map"
+                    // `v` is checked by the law that does not need an adjoint
+                    // operand: `h ∘ v == v ∘ d`, with `h` and `d` both owned.
+                    assert_reconstruction!(
+                        format!("{name}: eigh_full h∘v == v∘d"),
+                        &h.compose(&v).unwrap(),
+                        &v.compose(&d).unwrap(),
+                        h_terms,
+                        $narrow
                     );
                     assert_spectra_agree!(
                         format!("{name}: eigh_vals"),
@@ -1072,106 +1082,164 @@ mod compact_diagonal {
     compact_suite!(complex32_payload, Complex32, Complex64);
 }
 
-/// The documented near-tie case.
+/// Exact widening makes `find_truncated` dtype-independent on a spectrum both
+/// payloads can hold exactly.
 ///
-/// Two states in different coupled sectors are separated by one `f32` ulp. A
-/// magnitude-driven policy therefore has no reliable order to follow, and the
-/// state it keeps may differ from the double-precision run of the same
-/// physics. What does *not* move is the quality of the approximation: the
-/// discarded weight agrees to the noise of the decomposition, because the two
-/// candidates are interchangeable to that accuracy.
-///
-/// This is an evidence test for the contract stated on `FactorizationScalar`
-/// and `Truncation`, not a pin on which candidate wins — that is exactly the
-/// thing this test says is not contractual.
+/// This is the oracle the rest of this file rests on, stated as a test: when a
+/// spectrum is exactly `f32`-representable, the single- and double-precision
+/// `diagview`s widen to bit-identical `f64` inputs, the decision arithmetic is
+/// `f64` at both dtypes, and so every policy must return the *same* selection
+/// and the same `error` bits. Nothing about the payload dtype can enter here —
+/// which is why a genuine cross-dtype difference needs a spectrum the narrow
+/// payload cannot represent, the subject of the next test.
 #[test]
-fn a_near_tie_may_keep_a_different_state_but_not_a_different_weight() {
+fn find_truncated_is_dtype_independent_on_an_exactly_representable_spectrum() {
     use tenet::prelude::SectorSpectrum;
 
     let rt = runtime();
-    let leg = u1_leg_with([1, 1, 1]);
-    // `4.0` and its `f32` successor: one ulp apart at `f32`, `2.4e-7`
-    // relatively — below the noise an `f32` decomposition carries, and exactly
-    // representable at both precisions so the twins hold the same numbers.
-    let tie_lo = 4.0f32;
-    let tie_hi = f32::from_bits(tie_lo.to_bits() + 1);
-    let values = [(U1Irrep::new(-1), tie_hi), (U1Irrep::new(0), tie_lo)];
-
+    let leg = u1_leg_with([2, 3, 2]);
+    let values: [(U1Irrep, &[f32]); 3] = [
+        (U1Irrep::new(-1), &[8.0, 2.0]),
+        (U1Irrep::new(0), &[4.0, 1.0, 0.5]),
+        (U1Irrep::new(1), &[3.0, 0.25]),
+    ];
     let narrow: TensorMap<U1FusionRule, f32> = TensorMap::diagonal(
         &rt,
         &leg,
-        [
-            SectorSpectrum {
-                sector: values[0].0,
-                values: vec![values[0].1],
-            },
-            SectorSpectrum {
-                sector: values[1].0,
-                values: vec![values[1].1],
-            },
-            SectorSpectrum {
-                sector: U1Irrep::new(1),
-                values: vec![0.25f32],
-            },
-        ],
+        values.map(|(sector, v)| SectorSpectrum {
+            sector,
+            values: v.to_vec(),
+        }),
     )
     .unwrap();
     let wide: TensorMap<U1FusionRule, f64> = TensorMap::diagonal(
         &rt,
         &leg,
-        [
-            SectorSpectrum {
-                sector: values[0].0,
-                values: vec![f64::from(values[0].1)],
-            },
-            SectorSpectrum {
-                sector: values[1].0,
-                values: vec![f64::from(values[1].1)],
-            },
-            SectorSpectrum {
-                sector: U1Irrep::new(1),
-                values: vec![0.25f64],
-            },
-        ],
+        values.map(|(sector, v)| SectorSpectrum {
+            sector,
+            values: v.iter().copied().map(f64::from).collect(),
+        }),
     )
     .unwrap();
 
-    let policy = Truncation::rank(1);
-    let got = leg
-        .find_truncated(&narrow.diagview().unwrap(), &policy)
+    let narrow_view = narrow.diagview().unwrap();
+    let wide_view = wide.diagview().unwrap();
+    for policy in [
+        Truncation::rank(3),
+        Truncation::relative_cutoff(0.2).unwrap(),
+        Truncation::relative_error(0.1).unwrap(),
+        Truncation::relative_inf_cutoff(0.4).unwrap(),
+    ] {
+        let got = leg.find_truncated(&narrow_view, &policy).unwrap();
+        let expected = leg.find_truncated(&wide_view, &policy).unwrap();
+        assert_eq!(
+            got.selection.subspace(),
+            expected.selection.subspace(),
+            "{policy:?}: exact widening must give the same selection"
+        );
+        assert_eq!(
+            got.error.to_bits(),
+            expected.error.to_bits(),
+            "{policy:?}: exact widening must give the same error bits \
+             ({} vs {})",
+            got.error,
+            expected.error
+        );
+    }
+}
+
+/// The documented near-tie case: a difference the `f32` payload cannot see.
+///
+/// Two coupled blocks whose largest singular values differ by a relative
+/// `2^-27` — five times finer than `f32::EPSILON`. The `f64` twin resolves the
+/// difference and its `rank(1)` budget keeps the larger one; the `f32` twin
+/// cannot hold it at all (`4 * (1 + 2^-27)` rounds to exactly `4` in `f32`), so
+/// the two candidates are bit-identical to it and the documented positional
+/// tie-break picks the other sector. The kept sector therefore *does* differ
+/// from the double-precision run of the same physics, deterministically.
+///
+/// What is asserted is the contract [`FactorizationScalar`] states: the kept
+/// *count* is the budget either way, and the discarded weight agrees to the
+/// accuracy of the values themselves — a rank budget at a tie swaps two
+/// interchangeable states. Which sector wins is reported, not asserted, except
+/// for the one assertion that makes this test non-vacuous: the two runs really
+/// do disagree about it.
+#[test]
+fn a_rank_tie_the_single_precision_payload_cannot_resolve_keeps_the_other_sector() {
+    let rt = runtime();
+    let leg = u1_leg_with([2, 2, 1]);
+    let tie = 4.0f64;
+    let nudged = tie * (1.0 + f64::powi(2.0, -27));
+    assert_eq!(
+        nudged as f32, tie as f32,
+        "the nudge must vanish in f32 for this fixture to mean anything"
+    );
+    assert_ne!(nudged, tie, "and must survive in f64");
+
+    // One 2x2 block per coupled sector: sector 0 carries `diag(4, 1)`, sector
+    // -1 carries `diag(4 * (1 + 2^-27), 1)`.
+    let entry = |block_sector: i32, index: &[usize]| -> f64 {
+        if index[0] != index[1] {
+            return 0.0;
+        }
+        let top = if block_sector == 0 { tie } else { nudged };
+        if index[0] == 0 {
+            top
+        } else {
+            1.0
+        }
+    };
+    let wide: TensorMap<U1FusionRule, f64> =
+        TensorMap::from_block_fn(&rt, [&leg], [&leg], |trees, index| {
+            entry(trees.coupled().charge(), index)
+        })
         .unwrap();
-    let expected = leg
-        .find_truncated(&wide.diagview().unwrap(), &policy)
+    let narrow: TensorMap<U1FusionRule, f32> =
+        TensorMap::from_block_fn(&rt, [&leg], [&leg], |trees, index| {
+            entry(trees.coupled().charge(), index) as f32
+        })
         .unwrap();
 
+    let policy = Truncation::rank(1);
+    let got = narrow.svd_trunc(&policy).unwrap();
+    let expected = wide.svd_trunc(&policy).unwrap();
+
+    let kept = |t: &tenet::prelude::GradedSpace<U1FusionRule>| -> usize {
+        t.sectors()
+            .unwrap()
+            .iter()
+            .map(|sector| t.degeneracy(sector).unwrap())
+            .sum()
+    };
     assert_eq!(
-        got.selection.subspace().sectors().unwrap().len(),
+        kept(&got.s.domain()[0]),
         1,
         "the rank budget keeps exactly one state"
     );
     assert_eq!(
-        got.selection.subspace().sectors().unwrap().len(),
-        expected.selection.subspace().sectors().unwrap().len(),
-        "how *many* states survive is a property of the budget, not of the dtype"
+        kept(&got.s.domain()[0]),
+        kept(&expected.s.domain()[0]),
+        "how many states survive is a property of the budget, not of the dtype"
     );
-    // The permitted difference: which of the two tied sectors survived. Report
-    // it rather than assert it.
-    if got.selection.subspace().sectors().unwrap()
-        != expected.selection.subspace().sectors().unwrap()
-    {
-        eprintln!(
-            "near tie: f32 kept {:?}, f64 kept {:?} — permitted, the two candidates are one \
-             f32 ulp apart",
-            got.selection.subspace().sectors().unwrap(),
-            expected.selection.subspace().sectors().unwrap()
-        );
-    }
-    // The invariant that does hold: the discarded weight.
+
+    let got_sectors = got.s.domain()[0].sectors().unwrap();
+    let expected_sectors = expected.s.domain()[0].sectors().unwrap();
+    eprintln!("near tie: f32 kept {got_sectors:?}, f64 kept {expected_sectors:?}");
+    assert_ne!(
+        got_sectors, expected_sectors,
+        "the fixture is built so the two runs disagree about which of the two \
+         interchangeable states survives; if they now agree the fixture has \
+         stopped exercising the documented near-tie behaviour"
+    );
+
+    // And the invariant that does hold at a rank tie: the discarded weight.
+    // The two candidates differ by a relative 2^-27, so swapping them moves the
+    // error by far less than the module tolerance.
     assert_scalars_agree(
         "near-tie truncation error",
         Complex64::new(got.error, 0.0),
         Complex64::new(expected.error, 0.0),
-        3,
+        4,
     );
 }
 
