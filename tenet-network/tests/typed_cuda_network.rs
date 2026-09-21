@@ -816,9 +816,10 @@ where
     (host, device)
 }
 
-/// Leaf C2 (#1336): a `tensor!` device chain at `f32` and `Complex32` produces
-/// the host result of the same dtype, cold and warm, and the warm replay keeps
-/// the retained-destination contract of the `f64` chain.
+/// Leaf C2 (#1336), extended in C4 (#1341) to a non-Abelian provider: a
+/// `tensor!` device chain at `f32` and `Complex32` produces the host result of
+/// the same dtype, cold and warm, and the warm replay keeps the
+/// retained-destination contract of the `f64` chain.
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn single_precision_device_chains_match_the_host_and_reuse_their_destinations() {
@@ -828,15 +829,34 @@ fn single_precision_device_chains_match_the_host_and_reuse_their_destinations() 
         [(U1Irrep::new(0), 4), (U1Irrep::new(1), 2)],
     )
     .unwrap();
+    // SU(2): several coupled sectors carrying different quantum dimensions, so
+    // the chain's recoupling — not only its GEMMs — runs at single precision.
+    let su2 = GradedSpace::try_new_with_arc(
+        Arc::new(SU2FusionRule),
+        [
+            (SU2Irrep::from_twice_spin(0), 3),
+            (SU2Irrep::from_twice_spin(1), 2),
+        ],
+    )
+    .unwrap();
 
-    // `eps(f32)` scaled by the chain's term count and magnitude; the fixtures
-    // are unit-scale random blocks, so `1e-4` is generous but far below the
-    // `1e-12` a double-precision comparison would demand.
-    fn assert_chain<D>(runtime: &Runtime, u1: &GradedSpace<U1FusionRule>, seed: u64, tolerance: f64)
+    /// `K * sqrt(terms) * eps(real(D))` at the chain's own scale: derived from
+    /// the payload's epsilon, never an absolute platform constant.
+    fn chain_tolerance(epsilon: f64) -> f64 {
+        32.0 * (64.0_f64).sqrt() * epsilon
+    }
+
+    fn assert_chain<R, D>(runtime: &Runtime, space: &GradedSpace<R>, seed: u64, tolerance: f64)
     where
+        R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+            + MultiplicityFreeRigidSymbols<Scalar = f64>
+            + CheckedFusionAlgebra
+            + SectorCodec
+            + Send
+            + Sync,
         D: tenet::typed::CudaPayload + Copy + std::fmt::Debug,
     {
-        let (host, device) = cuda_chain_tensors_at::<U1FusionRule, D>(runtime, u1, seed);
+        let (host, device) = cuda_chain_tensors_at::<R, D>(runtime, space, seed);
         let oracle = host[0]
             .contract(&host[1], &[1], &[0], &[0, 1])
             .unwrap()
@@ -859,10 +879,18 @@ fn single_precision_device_chains_match_the_host_and_reuse_their_destinations() 
         }
     }
 
-    assert_chain::<f64>(&runtime, &u1, 762_100, 1e-12);
-    assert_chain::<f32>(&runtime, &u1, 762_200, 1e-4);
-    assert_chain::<Complex64>(&runtime, &u1, 762_300, 1e-12);
-    assert_chain::<Complex32>(&runtime, &u1, 762_400, 1e-4);
+    let double = chain_tolerance(f64::EPSILON);
+    let single = chain_tolerance(f64::from(f32::EPSILON));
+
+    assert_chain::<_, f64>(&runtime, &u1, 762_100, double);
+    assert_chain::<_, f32>(&runtime, &u1, 762_200, single);
+    assert_chain::<_, Complex64>(&runtime, &u1, 762_300, double);
+    assert_chain::<_, Complex32>(&runtime, &u1, 762_400, single);
+
+    assert_chain::<_, f64>(&runtime, &su2, 762_500, double);
+    assert_chain::<_, f32>(&runtime, &su2, 762_600, single);
+    assert_chain::<_, Complex64>(&runtime, &su2, 762_700, double);
+    assert_chain::<_, Complex32>(&runtime, &su2, 762_800, single);
 }
 
 /// Leaf C2 (#1336): the warm single-precision chain costs the same device
@@ -911,15 +939,32 @@ fn a_warm_single_precision_chain_costs_the_same_calls_and_half_the_bytes() {
         )
     }
 
-    let double = warm_cost::<f64>(&runtime, &u1, 763_100);
-    let single = warm_cost::<f32>(&runtime, &u1, 763_200);
-
-    assert_eq!(
-        (single.0, single.2, single.3, single.4, single.5),
-        (double.0, double.2, double.3, double.4, double.5),
-        "(h2d_calls, d2h_calls, device_allocs, copy_calls, gemm_calls) must not depend on the dtype"
-    );
-    eprintln!("warm chain: f32 {single:?} f64 {double:?}");
-    assert!(double.1 > 0, "vacuous byte count");
-    assert_eq!(single.1 * 2, double.1, "warm h2d bytes must be halved");
+    // Both real and complex lanes: the complex twin is what shows the halving
+    // is the *element size*, not the real/complex split (#1341).
+    for (name, single, double) in [
+        (
+            "f32/f64",
+            warm_cost::<f32>(&runtime, &u1, 763_200),
+            warm_cost::<f64>(&runtime, &u1, 763_100),
+        ),
+        (
+            "c32/c64",
+            warm_cost::<Complex32>(&runtime, &u1, 763_400),
+            warm_cost::<Complex64>(&runtime, &u1, 763_300),
+        ),
+    ] {
+        eprintln!("warm chain {name}: narrow {single:?} wide {double:?}");
+        assert_eq!(
+            (single.0, single.2, single.3, single.4, single.5),
+            (double.0, double.2, double.3, double.4, double.5),
+            "{name}: (h2d_calls, d2h_calls, device_allocs, copy_calls, gemm_calls) must not \
+             depend on the dtype"
+        );
+        assert!(double.1 > 0, "{name}: vacuous byte count");
+        assert_eq!(
+            single.1 * 2,
+            double.1,
+            "{name}: warm h2d bytes must be halved"
+        );
+    }
 }

@@ -78,7 +78,7 @@ mod device {
         SU2FusionRule, SU2Irrep, SectorCodec, TypedSectorAdmission, U1FusionRule, U1Irrep, Z2Irrep,
     };
     use tenet::dense::{cuda_transfer_stats, CudaTransferStats};
-    use tenet::prelude::Complex64;
+    use tenet::prelude::{Complex32, Complex64};
     use tenet::typed::{
         CudaStorage, GradedSpace, Runtime, SpectrumMagnitude, TensorMap, Truncation,
     };
@@ -148,23 +148,38 @@ mod device {
         config
     }
 
-    /// Payload dtypes this baseline covers. Both are double-precision device
-    /// payloads; the fixture values differ only in carrying an imaginary part.
+    /// Payload dtypes this baseline covers: all four device payloads, which
+    /// differ in element size and in whether they carry an imaginary part.
     ///
-    /// The bound is `CudaFactorizationPayload` because the matrix runs device
-    /// factorizations, which `f32`/`Complex32` do not reach (#1336, residual
-    /// C4). Adding single-precision rows means splitting this harness into a
-    /// base half and a factorization half first.
+    /// The bound stays `CudaFactorizationPayload` because the matrix runs
+    /// device factorizations. #1336 could not add single-precision rows
+    /// because that marker excluded `f32`/`Complex32`, and expected a split
+    /// into a base half and a factorization half; #1341 admitted both dtypes
+    /// to the marker instead, so the rows are an instantiation and the harness
+    /// stays one piece. Device QR is narrower still ([`CudaQrPayload`]) and
+    /// keeps its own row set.
+    ///
+    /// `CHECK_TOLERANCE` is the correctness verdict's bound, not a measured
+    /// quantity. It is stated per real lane rather than shared, so a
+    /// single-precision row is not judged against a double-precision epsilon.
+    /// The double-precision values are unchanged, so the pinned baseline CSVs
+    /// keep their `check` column bit for bit.
     pub(super) trait HarnessScalar:
         tenet::typed::CudaFactorizationPayload + SpectrumMagnitude
     {
         const NAME: &'static str;
+        const CHECK_TOLERANCE: f64;
         fn entry(real: f64, imaginary: f64) -> Self;
         fn distance(self, other: Self) -> f64;
     }
 
+    /// The double-precision verdict bound, unchanged from the revision the
+    /// baseline CSVs were pinned at.
+    const DOUBLE_CHECK_TOLERANCE: f64 = 1.0e-9;
+
     impl HarnessScalar for f64 {
         const NAME: &'static str = "f64";
+        const CHECK_TOLERANCE: f64 = DOUBLE_CHECK_TOLERANCE;
         fn entry(real: f64, _imaginary: f64) -> Self {
             real
         }
@@ -175,11 +190,40 @@ mod device {
 
     impl HarnessScalar for Complex64 {
         const NAME: &'static str = "c64";
+        const CHECK_TOLERANCE: f64 = DOUBLE_CHECK_TOLERANCE;
         fn entry(real: f64, imaginary: f64) -> Self {
             Complex64::new(real, imaginary)
         }
         fn distance(self, other: Self) -> f64 {
             (self - other).norm()
+        }
+    }
+
+    /// The same verdict on the single-precision lane, scaled by `2^15` — the
+    /// next power of two above `sqrt(eps(f32) / eps(f64)) = 2^14.5`, because a
+    /// forward-error bound grows with the square root of the epsilon ratio,
+    /// not with the ratio. About `3.3e-5`.
+    const SINGLE_CHECK_TOLERANCE: f64 = DOUBLE_CHECK_TOLERANCE * 32768.0;
+
+    impl HarnessScalar for f32 {
+        const NAME: &'static str = "f32";
+        const CHECK_TOLERANCE: f64 = SINGLE_CHECK_TOLERANCE;
+        fn entry(real: f64, _imaginary: f64) -> Self {
+            real as f32
+        }
+        fn distance(self, other: Self) -> f64 {
+            f64::from((self - other).abs())
+        }
+    }
+
+    impl HarnessScalar for Complex32 {
+        const NAME: &'static str = "c32";
+        const CHECK_TOLERANCE: f64 = SINGLE_CHECK_TOLERANCE;
+        fn entry(real: f64, imaginary: f64) -> Self {
+            Complex32::new(real as f32, imaginary as f32)
+        }
+        fn distance(self, other: Self) -> f64 {
+            f64::from((self - other).norm())
         }
     }
 
@@ -634,7 +678,7 @@ mod device {
             degeneracy,
             operation,
         };
-        let tolerance = 1.0e-9;
+        let tolerance = D::CHECK_TOLERANCE;
         let alpha = D::entry(1.5, 0.25);
         let beta = D::entry(-0.5, 0.125);
         let factor = D::entry(2.0, -0.5);
@@ -1230,8 +1274,9 @@ mod device {
         }
     }
 
-    /// `qr_compact` has an `f64`-only device payload, so it is its own row set.
-    fn run_qr<R>(
+    /// `qr_compact` admits the *real* device payloads only (`CudaQrPayload`),
+    /// so it is its own row set rather than part of `run_dtype`.
+    fn run_qr<R, D>(
         config: &Config,
         provider: &str,
         family: &str,
@@ -1246,16 +1291,17 @@ mod device {
             + Send
             + Sync
             + 'static,
+        D: HarnessScalar + tenet::typed::CudaQrPayload,
     {
         let labels = Labels {
             provider,
-            dtype: <f64 as HarnessScalar>::NAME,
+            dtype: D::NAME,
             family,
             blocks,
             degeneracy,
             operation: "qr_compact",
         };
-        let fixture = fixture::<R, f64>(config, space, 1);
+        let fixture = fixture::<R, D>(config, space, 1);
         let source = &fixture.host[0];
         let source_device = &fixture.device[0];
         let barrier = || {
@@ -1277,7 +1323,7 @@ mod device {
                     .to_host()
                     .expect("download");
                 let check = verdict(
-                    payload_close(rebuilt.data(), source.data(), 1.0e-9),
+                    payload_close(rebuilt.data(), source.data(), D::CHECK_TOLERANCE),
                     "device_reconstruction",
                 );
                 print_rows(labels, "cuda", &device_rows, &check);
@@ -1293,8 +1339,14 @@ mod device {
                 let degeneracy = $config.degeneracy[index];
                 let space = ($build)(blocks, degeneracy);
                 run_dtype::<_, f64>($config, $name, family, blocks, degeneracy, &space);
-                run_qr::<_>($config, $name, family, blocks, degeneracy, &space);
+                run_qr::<_, f64>($config, $name, family, blocks, degeneracy, &space);
                 run_dtype::<_, Complex64>($config, $name, family, blocks, degeneracy, &space);
+                // Single precision (#1341). Appended after the
+                // double-precision rows so the pinned baseline CSVs keep their
+                // existing row order and content.
+                run_dtype::<_, f32>($config, $name, family, blocks, degeneracy, &space);
+                run_qr::<_, f32>($config, $name, family, blocks, degeneracy, &space);
+                run_dtype::<_, Complex32>($config, $name, family, blocks, degeneracy, &space);
             }
         }};
     }
