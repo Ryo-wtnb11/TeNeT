@@ -2984,8 +2984,8 @@ fn typed_cuda_contract_overwrite_into_matches_the_returning_contraction() {
 ///
 /// The aligned whole-factor route copies each block straight into its sector
 /// region, and Tenferro 0.5.0 told cuTENSOR that an offset destination view is
-/// 256-byte aligned when it is not (0.6.0 reports the true alignment; the
-/// guard stays pending leaf M2), so the launch faulted with
+/// 256-byte aligned when it is not (0.6.0 reports the true alignment, so the
+/// copy now runs at every offset), so on 0.5.0 the launch faulted with
 /// `cudaErrorMisalignedAddress` at the next synchronizing call. Every
 /// degeneracy pair here puts the second sector's block at an offset whose byte
 /// product is not a multiple of 256: `(3, 2)` at element 9, `(5, 2)` at 25,

@@ -17,9 +17,7 @@ use tenferro_tensor::{
 
 use super::{DenseBackend, DenseDType, DenseError, MatrixOp};
 use crate::cuda_hermitian::{scaled_hermitian_residual_accepts, HERMITIAN_TOLERANCE_EPSILONS};
-use crate::cuda_region::{
-    permute_operand_offset_is_aligned, validate_destination_layout, validate_region, CudaRegion,
-};
+use crate::cuda_region::{validate_destination_layout, validate_region, CudaRegion};
 use crate::tensor::dense_dtype_from_tenferro;
 
 mod cuda_scalar_sealed {
@@ -244,8 +242,7 @@ pub struct CudaPlanCacheStats {
 ///   `cuda_gemm_region_strided_into` and from the region primitives
 ///   ([`cuda_region_axpby`], [`cuda_region_zero`]) alike.
 /// - `solver_calls`: cuSOLVER region calls (SVD, QR, EIGH).
-/// - `copy_calls`: `cuda_copy_region_into` calls that move data, on either
-///   of its two routes; the region route also counts one `gemm_calls`.
+/// - `copy_calls`: `cuda_copy_region_into` calls that move data.
 ///
 /// The counters are `Relaxed` and process-wide: a snapshot taken while another
 /// thread submits work is a consistent-per-field sample, not a global instant.
@@ -1815,42 +1812,18 @@ pub fn cuda_is_hermitian_region<D: CudaScalar>(
 /// leading `rows * cols` elements of a compact buffer are themselves compact,
 /// so one maximum-length buffer can serve every shorter region.
 ///
-/// Route: a destination whose byte offset keeps the 256-byte alignment
-/// Tenferro 0.5.0 advertised to cuTENSOR for every permutation operand
-/// (`cuda_region::permute_operand_offset_is_aligned`; kept pending leaf M2,
-/// since 0.6.0 reports the true alignment) is
-/// moved by `copy_read_into` — one `cutensorPermute` with its own plan cache.
-/// Every other destination is moved by [`cuda_region_axpby`] instead
-/// ([`CudaRegionCoefficient::One`], `alpha = 1`,
-/// [`CudaRegionBeta::Overwrite`]), whose contraction descriptors report the
-/// truthful per-element view alignment
-/// (`read_operand_alignment_requirement`, tenferro-gpu `cubecl/gemm.rs:637` in
-/// 0.6.0) and therefore never select a
-/// vectorized kernel the pointer cannot satisfy. The rejected route is not a
-/// slower one for the same work: both move `rows * cols` elements in one
-/// submission. It costs one entry of the contraction plan LRU the caller's
-/// GEMMs share instead of one entry of the permutation cache, and it
-/// multiplies by `1` rather than copying bits, which for [`Complex64`] turns
-/// an infinite payload into `NaN` (disclosed on [`cuda_region_axpby`]). A
-/// factor a device SVD or QR produced is finite whenever its input was, so
-/// this route cannot introduce an infinity that was not already there.
+/// One `cutensorPermute` through `copy_read_into` at every destination
+/// offset: Tenferro 0.6.0 advertises the shifted operand address's true
+/// alignment to cuTENSOR (`device_address_alignment`, tenferro-gpu
+/// `cubecl/permutation.rs:771`, tensor4all/tenferro-rs#1836), so an offset view
+/// never selects a vectorized kernel its pointer cannot satisfy (#1320). It
+/// counts one `copy_calls` and transfers nothing.
 ///
-/// Transfer contract of the region route: the *first* such call per context
-/// and dtype uploads that context's one-element `1`, which is one H2D call and
-/// one device allocation; every later call of either route transfers nothing.
-///
-/// Both routes still count one `copy_calls`; the region route additionally
-/// counts one `gemm_calls`, because that is the submission it makes.
-///
-/// Errors: for *valid* input the two routes are equivalent. For invalid input
-/// they are not interchangeable — the region route validates through
-/// [`cuda_region_axpby`], so a dtype or device mismatch, an out-of-bounds
-/// region or a non-injective destination is reported with `op` =
-/// `"cuda_region_axpby"` (and, for a dtype mismatch,
-/// [`DenseError::DTypeMismatch`] rather than a `"cuda_region"` backend error).
-/// Which variant and `op` a caller sees therefore depends on the destination
-/// offset. No caller branches on either, and both routes reject the same
-/// inputs.
+/// Values pass through cuTENSOR's `alpha = 1` scaling: non-NaN real values
+/// (signed zeros, infinities and subnormals included) and finite complex
+/// values with no negative-zero component arrive bit-exact. NaN payloads may
+/// be canonicalized, and a complex value with a negative-zero or non-finite
+/// component follows IEEE multiplication by `(1, 0)`.
 pub fn cuda_copy_region_into<D: CudaScalar>(
     ctx: &mut CudaDenseContext,
     dst: &mut CudaDenseStorage,
@@ -1874,21 +1847,6 @@ pub fn cuda_copy_region_into<D: CudaScalar>(
                 src.len
             ),
         ));
-    }
-    if !permute_operand_offset_is_aligned(dst_offset, std::mem::size_of::<D>()) {
-        let src_region = CudaRegion::packed(&[rows, cols], 0)?;
-        let dst_region = CudaRegion::new(vec![rows, cols], vec![1, dst_ld], dst_offset)?;
-        return cuda_region_axpby::<D>(
-            ctx,
-            src,
-            &src_region,
-            false,
-            D::ONE,
-            CudaRegionCoefficient::One,
-            CudaRegionBeta::Overwrite,
-            dst,
-            &dst_region,
-        );
     }
     let src_view = src.region_view::<D>(rows, cols, rows, 0)?;
     let dst_view = dst.region_view_mut::<D>(rows, cols, dst_ld, dst_offset)?;

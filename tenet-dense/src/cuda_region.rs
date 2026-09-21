@@ -205,45 +205,6 @@ pub(crate) fn validate_destination_layout(
     })
 }
 
-/// Byte alignment Tenferro 0.5.0's `copy_read_into` advertised to cuTENSOR
-/// for *both* operands of a permutation.
-///
-/// In 0.5.0, `resolve_prepared_device_region` (tenferro-gpu
-/// `src/cubecl/permutation.rs:726`) folded a view's element offset into the
-/// operand pointer but still reported the allocation's alignment
-/// (`permutation.rs:755`), and `copy_view_into` (`permutation.rs:480`) passed
-/// that number straight into the descriptor. cuTENSOR selects a vectorized
-/// kernel from it, so an operand that started mid-allocation faulted the
-/// launch with `cudaErrorMisalignedAddress` (#1320). Tenferro 0.6.0 reports
-/// the shifted address's true alignment (`device_address_alignment`,
-/// `permutation.rs:771`, tensor4all/tenferro-rs#1836); this guard is kept
-/// unchanged until leaf M2 removes it with its own device evidence.
-pub(crate) const CUTENSOR_PERMUTE_DESCRIPTOR_ALIGNMENT: usize = 256;
-
-/// Whether a permutation operand starting at `offset` elements of
-/// `element_bytes` each can keep the alignment promise above.
-///
-/// The base address satisfies 256 bytes because CubeCL's CUDA runtime reports
-/// `mem_alignment = 512` (`t4a-cubecl-cuda-0.10.0/src/runtime.rs:76`) and its
-/// memory pool pads every slice start to that value
-/// (`memory_page.rs:125-146`, `memory_manage.rs:226`/`253`), over pages taken
-/// from `cuMemAllocAsync`/`cudaMalloc`. So the promise survives the shift
-/// exactly when the byte offset is a multiple of 256. Nothing verifies the
-/// base alignment at runtime, here or in Tenferro — it is the same unchecked
-/// assumption Tenferro makes for every owned operand
-/// (`permutation.rs:680` `resolve_owned_operand`), so this guard is no weaker
-/// than the offset-0 path already in production.
-///
-/// The condition is the descriptor contract itself, not the kernel heuristic
-/// that happens to fault today: any narrower rule would depend on which
-/// vector width cuTENSOR picks for a given extent.
-pub(crate) fn permute_operand_offset_is_aligned(offset: usize, element_bytes: usize) -> bool {
-    matches!(
-        offset.checked_mul(element_bytes),
-        Some(bytes) if bytes % CUTENSOR_PERMUTE_DESCRIPTOR_ALIGNMENT == 0
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -367,49 +328,5 @@ mod tests {
             }
         ));
         assert!(err.to_string().contains("injective"), "{err}");
-    }
-
-    /// The fast copy route is admitted exactly when the shifted operand
-    /// pointer still meets the 256-byte alignment the descriptor claims, so
-    /// the `f64` offsets the issue's fixture produces (9, 25) are rejected and
-    /// offset 0 — the zero-template reset — is not. The element size is the
-    /// payload's, so admitting single precision moves the boundary: 4 bytes
-    /// and 8 bytes admit different offsets, and both routes must stay correct.
-    #[test]
-    fn permute_offsets_are_admitted_by_the_descriptor_promise() {
-        for element_bytes in [4usize, 8, 16] {
-            assert!(permute_operand_offset_is_aligned(0, element_bytes));
-        }
-        // f32: 256 bytes is 64 elements, so the element size decides which
-        // offsets route where — offset 32 is aligned for `f64` and not for
-        // `f32`, and offset 8 is aligned for `Complex32` and not for `f32`.
-        assert!(permute_operand_offset_is_aligned(64, 4));
-        assert!(permute_operand_offset_is_aligned(128, 4));
-        for offset in [1usize, 2, 4, 9, 25, 32, 63, 65] {
-            assert!(!permute_operand_offset_is_aligned(offset, 4), "{offset}");
-        }
-        // Complex32: 256 bytes is 32 elements, the same count as `f64`.
-        assert!(permute_operand_offset_is_aligned(32, 8));
-        for offset in [1usize, 2, 8, 9, 16, 25, 31, 33] {
-            assert!(!permute_operand_offset_is_aligned(offset, 8), "{offset}");
-        }
-        // f64: 256 bytes is 32 elements.
-        assert!(permute_operand_offset_is_aligned(32, 8));
-        assert!(permute_operand_offset_is_aligned(64, 8));
-        for offset in [1usize, 2, 4, 9, 16, 25, 31, 33] {
-            assert!(!permute_operand_offset_is_aligned(offset, 8), "{offset}");
-        }
-        // Complex64: 256 bytes is 16 elements.
-        assert!(permute_operand_offset_is_aligned(16, 16));
-        for offset in [1usize, 2, 8, 9, 15, 17] {
-            assert!(!permute_operand_offset_is_aligned(offset, 16), "{offset}");
-        }
-    }
-
-    /// An offset whose byte product overflows cannot be proven aligned, so it
-    /// takes the safe route rather than wrapping into a multiple of 256.
-    #[test]
-    fn permute_offset_overflow_is_not_admitted() {
-        assert!(!permute_operand_offset_is_aligned(usize::MAX, 8));
     }
 }

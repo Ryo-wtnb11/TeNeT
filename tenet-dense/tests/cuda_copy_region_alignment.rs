@@ -1,107 +1,132 @@
-//! Device gates for `cuda_copy_region_into`'s destination-offset routing
-//! (#1320).
+//! Device oracle for `cuda_copy_region_into` at arbitrary destination offsets
+//! (#1320, #1376).
 //!
-//! Tenferro 0.5.0's `copy_read_into` advertised the *allocation's* 256-byte
-//! alignment to cuTENSOR even for a destination view that starts mid-buffer
-//! (`tenferro-gpu-0.5.0/src/cubecl/permutation.rs:723`), so cuTENSOR could pick
-//! a vectorized kernel the shifted pointer cannot satisfy and the launch failed
-//! with `cudaErrorMisalignedAddress`. Tenferro 0.6.0 reports the true
-//! alignment (`permutation.rs:771`); the guard is kept pending leaf M2, and
-//! these gates stay its regression fixtures. The adapter routes a
-//! destination whose byte offset is not a multiple of 256 through the region
-//! primitive, whose contraction descriptors report the truthful per-element
-//! view alignment.
+//! Tenferro 0.5.0's `copy_read_into` folded a view's element offset into the
+//! operand pointer but advertised the allocation's 256-byte alignment to
+//! cuTENSOR (`tenferro-gpu-0.5.0/src/cubecl/permutation.rs:755`), so cuTENSOR
+//! could select a vectorized kernel the shifted pointer cannot satisfy and the
+//! launch failed with `cudaErrorMisalignedAddress` (observed on an A100 at
+//! `f64` offset 9, `2x2`). Tenferro 0.6.0 reports the shifted address's true
+//! alignment (`device_address_alignment`, `permutation.rs:771`), and the
+//! adapter now sends every offset through that copy.
 //!
-//! The oracle here is a host scatter over the same index space; nothing is
-//! derived from the adapter's own metadata. The routing expectation is
-//! recomputed from the byte offset rather than read from the predicate under
-//! test.
+//! The oracle therefore drives the direct copy — it asserts one copy and no
+//! `dot_general` fallback — at destination byte offsets that are not a
+//! multiple of 256, including odd element offsets and every power-of-two
+//! sub-256-byte shift, for all four payload dtypes. Values are compared
+//! **bitwise** against a host scatter over the same index space. Real payloads
+//! include negative zero, infinities and subnormals, which cuTENSOR's
+//! `alpha = 1` permutation carries exactly; the removed multiply-by-one
+//! contraction turned a real `-0.0` into `+0.0`. Complex payloads are finite
+//! with no negative-zero component, the set `x * (1, 0)` leaves bit-exact, and
+//! NaN payloads are excluded because the permutation canonicalizes `f32` NaNs.
 //!
 //! Run with `cargo test -p tenet-dense --features cuda,cpu-faer --test \
 //! cuda_copy_region_alignment -- --ignored` on a CUDA host.
 
 #![cfg(feature = "cuda")]
 
-use std::fmt::Debug;
-use std::sync::Mutex;
-
 use num_complex::{Complex32, Complex64};
 use tenet_dense::{
-    cuda_copy_region_into, cuda_transfer_stats, reset_cuda_transfer_stats, CudaDenseContext,
-    CudaDenseStorage, CudaScalar,
+    cuda_copy_region_into, cuda_transfer_stats, CudaDenseContext, CudaDenseStorage, CudaScalar,
 };
 
-/// The boundary counters are process-wide, so the routing assertions must not
-/// overlap.
-static COUNTER_TESTS: Mutex<()> = Mutex::new(());
-
-/// The alignment Tenferro's permutation descriptor claims for both operands.
-const CUTENSOR_DESCRIPTOR_ALIGNMENT: usize = 256;
-
-trait CopyScalar: CudaScalar + Copy + Debug + PartialEq {
+trait CopyScalar: CudaScalar + Copy {
     const NAME: &'static str;
     fn sample(index: usize) -> Self;
     fn sentinel(index: usize) -> Self;
+    fn bits(self) -> (u64, u64);
+}
+
+/// Real payloads cycled through the source: infinities, negative zero and the
+/// subnormal `tiny`, all of which IEEE multiplication by `1` preserves bit for
+/// bit.
+fn special(index: usize, tiny: f64) -> Option<f64> {
+    match index % 7 {
+        1 => Some(f64::INFINITY),
+        3 => Some(-0.0),
+        5 => Some(tiny),
+        _ if index % 11 == 4 => Some(f64::NEG_INFINITY),
+        _ => None,
+    }
+}
+
+/// Finite complex payloads with subnormal and positive-zero components but no
+/// `-0.0`, the set multiplication by `(1, 0)` preserves bit for bit.
+fn complex_parts(index: usize, tiny: f64) -> (f64, f64) {
+    let re = if index % 7 == 5 { tiny } else { finite(index) };
+    let im = match index % 5 {
+        2 => 0.0,
+        4 => -tiny,
+        _ => -finite(index) * 0.5,
+    };
+    (re, im)
+}
+
+const TINY_F32: f64 = f32::MIN_POSITIVE as f64 / 8.0;
+const TINY_F64: f64 = f64::MIN_POSITIVE / 8.0;
+
+fn finite(index: usize) -> f64 {
+    1.0 + index as f64 * 0.25
 }
 
 impl CopyScalar for f32 {
     const NAME: &'static str = "f32";
-
     fn sample(index: usize) -> Self {
-        (1.0 + index as f64 * 0.25) as Self
+        special(index, TINY_F32).unwrap_or(finite(index)) as f32
     }
-
     fn sentinel(index: usize) -> Self {
-        (-1000.0 - index as f64) as Self
+        (-1000.0 - index as f64) as f32
     }
-}
-
-impl CopyScalar for Complex32 {
-    const NAME: &'static str = "Complex32";
-
-    fn sample(index: usize) -> Self {
-        Complex32::new(
-            (1.0 + index as f64 * 0.25) as f32,
-            (-0.5 - index as f64 * 0.125) as f32,
-        )
-    }
-
-    fn sentinel(index: usize) -> Self {
-        Complex32::new((-1000.0 - index as f64) as f32, (7.0 + index as f64) as f32)
+    fn bits(self) -> (u64, u64) {
+        (u64::from(self.to_bits()), 0)
     }
 }
 
 impl CopyScalar for f64 {
     const NAME: &'static str = "f64";
-
     fn sample(index: usize) -> Self {
-        1.0 + index as f64 * 0.25
+        special(index, TINY_F64).unwrap_or(finite(index))
     }
-
     fn sentinel(index: usize) -> Self {
         -1000.0 - index as f64
+    }
+    fn bits(self) -> (u64, u64) {
+        (self.to_bits(), 0)
+    }
+}
+
+impl CopyScalar for Complex32 {
+    const NAME: &'static str = "Complex32";
+    fn sample(index: usize) -> Self {
+        let (re, im) = complex_parts(index, TINY_F32);
+        Complex32::new(re as f32, im as f32)
+    }
+    fn sentinel(index: usize) -> Self {
+        Complex32::new((-1000.0 - index as f64) as f32, (7.0 + index as f64) as f32)
+    }
+    fn bits(self) -> (u64, u64) {
+        (u64::from(self.re.to_bits()), u64::from(self.im.to_bits()))
     }
 }
 
 impl CopyScalar for Complex64 {
     const NAME: &'static str = "Complex64";
-
     fn sample(index: usize) -> Self {
-        Complex64::new(1.0 + index as f64 * 0.25, -0.5 - index as f64 * 0.125)
+        let (re, im) = complex_parts(index, TINY_F64);
+        Complex64::new(re, im)
     }
-
     fn sentinel(index: usize) -> Self {
         Complex64::new(-1000.0 - index as f64, 7.0 + index as f64)
     }
-}
-
-fn context() -> CudaDenseContext {
-    CudaDenseContext::new(0).expect("CUDA device 0 must be available for the device suite")
+    fn bits(self) -> (u64, u64) {
+        (self.re.to_bits(), self.im.to_bits())
+    }
 }
 
 /// One copy of a compact `rows x cols` source into `dst[offset..]` with
-/// leading dimension `ld`, checked bitwise against a host scatter and checked
-/// for which of the two routes ran.
+/// leading dimension `ld`, checked bitwise against a host scatter, and checked
+/// to be exactly one direct copy with no contraction and no transfer.
 fn copy_case<D: CopyScalar>(
     ctx: &mut CudaDenseContext,
     offset: usize,
@@ -109,11 +134,9 @@ fn copy_case<D: CopyScalar>(
     cols: usize,
     ld: usize,
 ) {
-    const LEN: usize = 512;
-    assert!(offset + rows + (cols - 1) * ld <= LEN);
-
+    let len = offset + rows + (cols - 1) * ld + 3;
     let source: Vec<D> = (0..rows * cols).map(D::sample).collect();
-    let initial: Vec<D> = (0..LEN).map(D::sentinel).collect();
+    let initial: Vec<D> = (0..len).map(D::sentinel).collect();
     let mut expected = initial.clone();
     for col in 0..cols {
         for row in 0..rows {
@@ -131,74 +154,97 @@ fn copy_case<D: CopyScalar>(
             D::NAME
         )
     });
-    let actual = dst.download::<D>(ctx).expect("download");
     let after = cuda_transfer_stats();
-
-    for (index, (got, want)) in actual.iter().zip(&expected).enumerate() {
-        assert_eq!(
-            got,
-            want,
-            "{}: element {index} after a {rows}x{cols} copy at offset {offset} (ld {ld})",
+    let actual = dst.download::<D>(ctx).unwrap_or_else(|err| {
+        panic!(
+            "{} download after a copy at offset {offset} ({rows}x{cols}, ld {ld}) failed: {err}",
             D::NAME
-        );
-    }
+        )
+    });
 
-    let byte_offset = offset * std::mem::size_of::<D>();
-    let takes_region_route = !byte_offset.is_multiple_of(CUTENSOR_DESCRIPTOR_ALIGNMENT);
+    let case = format!(
+        "{} {rows}x{cols} copy at offset {offset} ({} bytes), ld {ld}",
+        D::NAME,
+        offset * std::mem::size_of::<D>()
+    );
+    assert_eq!(actual.len(), len, "{case}");
+    for (index, (got, want)) in actual.iter().zip(&expected).enumerate() {
+        assert_eq!(got.bits(), want.bits(), "{case}: element {index}");
+    }
     assert_eq!(
         after.copy_calls - before.copy_calls,
         1,
-        "{}: every route is one copy call (offset {offset})",
-        D::NAME
+        "{case}: copy calls"
     );
     assert_eq!(
         after.gemm_calls - before.gemm_calls,
-        u64::from(takes_region_route),
-        "{}: offset {offset} ({byte_offset} bytes) took the wrong route",
-        D::NAME
+        0,
+        "{case}: gemm calls"
+    );
+    assert_eq!(after.h2d_calls, before.h2d_calls, "{case}: h2d calls");
+    assert_eq!(after.d2h_calls, before.d2h_calls, "{case}: d2h calls");
+    assert_eq!(
+        after.device_allocs, before.device_allocs,
+        "{case}: device allocations"
     );
 }
 
-/// The offsets a multi-sector tensor actually produces, including the 9 and 25
-/// of #1320's `[(0,3),(1,2)]` fixture, against square and rectangular blocks
-/// and against a leading dimension wider than the block.
-fn alignment_sweep<D: CopyScalar>(ctx: &mut CudaDenseContext) {
-    let aligned = CUTENSOR_DESCRIPTOR_ALIGNMENT / std::mem::size_of::<D>();
-    for &offset in &[
+/// Odd element offsets, #1320's 9 and 25, every power-of-two byte shift below
+/// 256 that the element size can express, and the neighbours of the first two
+/// 256-byte boundaries. Blocks range from scalars to extents cuTENSOR can
+/// vectorize by 2, 4 and 8 along a contiguous or gapped leading dimension.
+fn offset_sweep<D: CopyScalar>(ctx: &mut CudaDenseContext) {
+    let size = std::mem::size_of::<D>();
+    let per_256 = 256 / size;
+    let mut offsets = vec![
         0,
         1,
-        2,
         3,
+        5,
+        7,
         9,
         25,
-        aligned - 1,
-        aligned,
-        aligned + 1,
-        2 * aligned,
-    ] {
-        for &(rows, cols) in &[(1, 1), (2, 2), (3, 3), (2, 3), (3, 2), (4, 1), (1, 4)] {
-            copy_case::<D>(ctx, offset, rows, cols, rows);
-            copy_case::<D>(ctx, offset, rows, cols, rows + 2);
+        per_256 - 1,
+        per_256 + 1,
+        2 * per_256 - 1,
+    ];
+    offsets.extend(
+        [4usize, 8, 16, 32, 64, 128]
+            .into_iter()
+            .filter(|bytes| bytes % size == 0)
+            .map(|bytes| bytes / size),
+    );
+    offsets.push(per_256);
+    offsets.sort_unstable();
+    offsets.dedup();
+
+    for &offset in &offsets {
+        for &(rows, cols) in &[
+            (1, 1),
+            (2, 2),
+            (3, 3),
+            (2, 3),
+            (3, 2),
+            (4, 1),
+            (1, 4),
+            (8, 8),
+            (16, 4),
+            (5, 7),
+        ] {
+            for ld in [rows, rows + 1, rows + 2] {
+                copy_case::<D>(ctx, offset, rows, cols, ld);
+            }
         }
     }
 }
 
-/// #1320: a destination at an odd element offset with an even extent is the
-/// exact shape that faulted; every offset in the sweep must now both produce
-/// the right bytes and take the route its byte offset admits.
-///
-/// All four payload dtypes, because the route is decided by the *byte* offset:
-/// 4-byte and 8-byte elements send the same element offset down different
-/// routes (offset 32 is the permute route for `f64`/[`Complex32`] and the
-/// region route for `f32`), so neither element size proves the other.
 #[test]
 #[ignore = "requires a real CUDA device"]
-fn copy_region_is_correct_at_every_destination_offset() {
-    let _guard = COUNTER_TESTS.lock().unwrap_or_else(|err| err.into_inner());
-    reset_cuda_transfer_stats();
-    let mut ctx = context();
-    alignment_sweep::<f32>(&mut ctx);
-    alignment_sweep::<f64>(&mut ctx);
-    alignment_sweep::<Complex32>(&mut ctx);
-    alignment_sweep::<Complex64>(&mut ctx);
+fn copy_region_is_a_bitwise_direct_copy_at_every_destination_offset() {
+    let mut ctx =
+        CudaDenseContext::new(0).expect("CUDA device 0 must be available for the device suite");
+    offset_sweep::<f32>(&mut ctx);
+    offset_sweep::<f64>(&mut ctx);
+    offset_sweep::<Complex32>(&mut ctx);
+    offset_sweep::<Complex64>(&mut ctx);
 }
