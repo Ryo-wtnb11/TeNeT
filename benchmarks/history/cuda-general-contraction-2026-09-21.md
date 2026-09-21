@@ -13,7 +13,7 @@ arbitrary contracted and output axes, owned or lazy-adjoint.
 
 | Seam | Where | Visibility |
 |---|---|---|
-| `TensorContractFusionExecutionContext::compile_storage_contract_resolution` — the Host compile entry | `tenet-tensors/src/contract/context.rs` | `#[doc(hidden)] pub` |
+| `try_compile_storage_contract_core_route` (free, lock-free) + `TensorContractFusionExecutionContext::compile_storage_contract_dynamic_tree`; `compile_storage_contract_resolution` = the two in order — the Host compile entry | `tenet-tensors/src/contract/context.rs` | `#[doc(hidden)] pub` |
 | `StorageContractResolution` (opaque `Core` / `DynamicTree` route; `requires_core_right_twist`, `is_dynamic_tree`) | `tenet-tensors/src/contract/resolution.rs` | `#[doc(hidden)] pub` |
 | `execute_storage_contract_resolution_on_cuda` + `CudaContractScratch` | `tenet-tensors/src/contract/dynamic/cuda.rs` (`cfg(feature = "cuda")`) | `#[doc(hidden)] pub` |
 | `FusionBlockContractPlan::inactive_destination_regions` | `tenet-operations/src/fusion_replay.rs` | `pub` |
@@ -52,13 +52,32 @@ used. Reused rather than duplicated, as the design required.
 | `prepare_dst` (full `fill_zero`) + `execute_raw(β = 0)` into core scratch | `cuda_region_zero` of exactly `inactive_destination_regions()`, then the prezeroed core |
 | output transform `tree_transform_structure_into_raw(.., 1, β = 0)` | `replay(.., 1, Overwrite)` |
 
-Route order is the Host's: the `mul!` form keeps the existing storage-direct
-core (lazy adjoints as GEMM operand flags; a uniform fermionic twist as per-job
-alpha — unchanged); everything else compiles the artifact with the owned entry
-(two owned operands) or the prelowered entry (a lazy adjoint), as Host does.
-Where Host picks its dense `Structure` route (conjugated, all-self-dual
-operand) the device builds the `DynamicTree` artifact instead — equal to dtype
-tolerance, never bitwise. Diagonal operands stay `UnsupportedOnDevice`.
+Route choice. The `mul!` form keeps the existing storage-direct core (lazy
+adjoints as GEMM operand flags; a uniform fermionic twist as per-job alpha —
+unchanged), resolved by the free `try_compile_storage_contract_core_route`
+with no Host context lock; everything else compiles the artifact with the
+owned entry (two owned operands) or the prelowered entry (a lazy adjoint), the
+same entries Host uses. The device route equals the Host's except in three
+classes, each with equal results to dtype tolerance, never bitwise:
+
+- Host `Structure` (a conjugated operand whose sectors are all self-dual, in
+  core-form source order, with a non-core output): the device runs the
+  prelowered `DynamicTree` artifact, a path the Host never takes for that
+  class. Gated on SU(2), multi-block, degeneracy > 1, lazy lhs and lazy rhs,
+  all four dtypes (`where_the_host_takes_its_structure_route_…`), with the
+  Host resolution pinned as `Structure` in `storage_contract_tests.rs`;
+- canonical owned operands with a uniform fermionic twist: Host takes
+  `DynamicTree` with an in-place twist, the device the pre-existing scaled
+  storage core;
+- owned core geometry over a non-canonical storage layout (expert layouts
+  only): Host packs/scatters in its core, the device takes `DynamicTree`.
+
+Diagonal operands stay `UnsupportedOnDevice`. Behaviour change: an anyonic
+device `contract` now errors even in canonical form, as on Host.
+
+The GEMM seam now bounds every matrix view by the active length
+(`check_matrix_bound`), not only by the allocation, so a narrowed buffer is
+safe against any future caller, not only the ones that validate first.
 
 Rust deviations: the scratch is narrowed to each replay's exact length
 (`set_active_len`) instead of being a slice view, because a `CudaStorage` is a
@@ -89,8 +108,8 @@ block).
 ## Lock / lease order
 
 All admission (runtime, anyonic, operand storage, destination derivation and
-the Host's axis / leg validation) → Host context lease → compile the
-resolution → drop it → twist check → lock-free placement check → **one**
+the Host's axis / leg validation) → the lock-free canonical core route; only on
+a miss the Host context lease → compile the artifact → drop it → twist check → lock-free placement check → **one**
 device lease (`split_contract`) → output upload → replay → drop. Nothing
 under the device lease leases again.
 
@@ -177,6 +196,34 @@ tenet-tensors -p tenet-operations -p tenet-network` (1637 passed, 0 failed);
 doctests 68 (default) and 92 (cuda) passed; `RUSTDOCFLAGS="-D warnings" cargo
 doc --workspace --no-deps` and the cuda doc build of tenet-dense,
 tenet-operations, tenet-tensors, tenet-rs.
+
+## Device rerun after the independent source review
+
+The review's P1 added the Host-`Structure` class fixture
+(`su2_structure_cases`, pinned Host-side as `Structure` by
+`a_self_dual_core_form_lazy_contraction_is_host_structure_and_device_dynamic_tree`)
+and its P2s: the lock-free canonical core route, the active-length GEMM view
+bound, tolerance-based compares with length asserts, the route-difference
+wording, the anyonic disclosure and the checked-Generic gap. Same qg1 rules,
+GPU 0, fresh private target (removed afterwards). Verbatim:
+
+```
+tenet-tensors storage_contract -- --ignored
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 540 filtered out; finished in 4.54s
+tenet-tensors storage_contract (non-ignored, cuda build)
+test result: ok. 7 passed; 0 failed; 3 ignored; 0 measured; 533 filtered out; finished in 0.76s
+tests/typed_cuda_contract.rs -- --ignored
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.92s
+tests/typed_cuda_contract.rs (non-ignored)
+test result: ok. 0 passed; 0 failed; 8 ignored; 0 measured; 0 filtered out; finished in 0.00s
+tests/typed_contract_host_oracle.rs
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.40s
+cargo test -p tenet-rs --doc --no-default-features --features cuda,cpu-faer
+test result: ok. 92 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 9.87s
+```
+
+Full device suite (same command as above), 121 binaries: **204 passed, 0
+failed**.
 
 ## Residuals
 

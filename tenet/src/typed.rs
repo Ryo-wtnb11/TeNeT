@@ -12672,7 +12672,8 @@ where
     /// `blas_contract!` dataflow and QSpace's `contract` dataflow, so FLOPs,
     /// bytes moved and working set are the Host's. A contraction already in
     /// TensorKit `mul!` form keeps the fully-direct GEMM route over the parent
-    /// buffers, with lazy adjoints as GEMM operand flags and no transform.
+    /// buffers, with lazy adjoints as GEMM operand flags and no transform; it
+    /// takes no Host context lock.
     ///
     /// # Cost
     ///
@@ -12707,7 +12708,8 @@ where
     ///
     /// In this order, all before any device work: [`Error::RuntimeMismatch`];
     /// [`tenet_tensors::OperationError::UnsupportedTensorContractScope`] for
-    /// anyonic providers (as on Host); [`Error::UnsupportedOnDevice`] for
+    /// anyonic providers, as on Host — a behaviour change since G2c-1a: the
+    /// canonical anyonic device contraction was accepted before; [`Error::UnsupportedOnDevice`] for
     /// diagonal storage; the Host's own errors for malformed axes, output
     /// orders or mismatched legs; [`Error::UnsupportedOnDevice`] for a
     /// fermionic contraction that needs the twist of a dual contracted leg on
@@ -12764,14 +12766,29 @@ where
             lhs_operand.storage_conjugate(),
             rhs_operand.storage_conjugate(),
         );
-        // Lock order: the Host context lease plans and is dropped before the
-        // device lease is taken; nothing under the device lease leases again.
-        let resolution = {
-            let mut lease = self.runtime.lease_context()?;
-            lease
-                .context()
-                .multiplicity_free_lane::<D>()?
-                .compile_storage_contract_resolution(&dst_space, lhs_operand, rhs_operand, axes)?
+        // The canonical core route resolves from the operands alone and takes
+        // no lock. Otherwise the Host context lease compiles the artifact and
+        // is dropped before the device lease is taken; nothing under the
+        // device lease leases again.
+        let resolution = match tenet_tensors::try_compile_storage_contract_core_route(
+            &dst_space,
+            lhs_operand,
+            rhs_operand,
+            axes,
+        )? {
+            Some(core) => core,
+            None => {
+                let mut lease = self.runtime.lease_context()?;
+                lease
+                    .context()
+                    .multiplicity_free_lane::<D>()?
+                    .compile_storage_contract_dynamic_tree(
+                        &dst_space,
+                        lhs_operand,
+                        rhs_operand,
+                        axes,
+                    )?
+            }
         };
         if resolution.requires_core_right_twist() {
             return Err(Error::UnsupportedOnDevice(

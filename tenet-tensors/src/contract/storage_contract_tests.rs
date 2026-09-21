@@ -238,6 +238,89 @@ fn canonical_axes_keep_the_direct_core_route_and_others_compile_one_dynamic_tree
     assert!(!lazy.requires_core_right_twist());
 }
 
+/// The geometry of `tenet/tests/contract_cases::su2_structure_cases`: the
+/// Host resolves it to its dense `Structure` route, the storage compile
+/// entry to the prelowered `DynamicTree` artifact. Pinned so the device
+/// fixture cannot silently stop covering the Host-`Structure` class.
+#[test]
+fn a_self_dual_core_form_lazy_contraction_is_host_structure_and_device_dynamic_tree() {
+    let provider = Arc::new(SU2FusionRule);
+    let s = su2_leg;
+    // Lazy lhs: `X^H` against `rhs` over `X^H`'s whole domain, output bent.
+    let x = space(&provider, vec![s(), s()], vec![s(), s()]);
+    let rhs = space(&provider, vec![s(), s()], vec![s()]);
+    // Lazy rhs: `lhs` against `Y^H` over `Y^H`'s whole codomain, output swapped.
+    let lhs = space(&provider, vec![s()], vec![s(), s()]);
+    let y = space(&provider, vec![s()], vec![s(), s()]);
+    let cases = [
+        (
+            x.adjoint_view().unwrap(),
+            FusionOperand::adjoint(x.space()),
+            rhs.clone(),
+            FusionOperand::direct(rhs.space()),
+            vec![2, 3],
+            vec![0, 1],
+            vec![2, 0, 1],
+            (true, false),
+        ),
+        (
+            lhs.clone(),
+            FusionOperand::direct(lhs.space()),
+            y.adjoint_view().unwrap(),
+            FusionOperand::adjoint(y.space()),
+            vec![1, 2],
+            vec![0, 1],
+            vec![1, 0],
+            (false, true),
+        ),
+    ];
+    for (lhs_logical, lhs_operand, rhs_logical, rhs_operand, lhs_axes, rhs_axes, output, conj) in
+        cases
+    {
+        let dst = BoundDynamicFusionMapSpace::contracted_multiplicity_free_ordered(
+            &lhs_logical,
+            &rhs_logical,
+            &lhs_axes,
+            &rhs_axes,
+            OutputAxisOrder::from_axes(&output),
+        )
+        .unwrap();
+        let axes = TensorContractSpec::new_with_conjugation(
+            &lhs_axes,
+            &rhs_axes,
+            OutputAxisOrder::from_axes(&output),
+            conj.0,
+            conj.1,
+        );
+        let lhs_data = vec![0.5; lhs_operand.storage_space().required_len().unwrap()];
+        let rhs_data = vec![0.25; rhs_operand.storage_space().required_len().unwrap()];
+        let mut out = vec![0.0; dst.space().required_len().unwrap()];
+        let mut context = Context::<f64>::default();
+        context
+            .tensorcontract_fusion_dyn_prelowered_into(
+                &dst,
+                &mut out,
+                lhs_operand,
+                &lhs_data,
+                rhs_operand,
+                &rhs_data,
+                axes,
+                1.0,
+                0.0,
+            )
+            .unwrap();
+        // What: neither Core nor DynamicTree (which records an orientation),
+        // i.e. the Host took its `Structure` route.
+        assert!(!context.last_resolution_is_core(), "{output:?}");
+        assert_eq!(context.last_resolution_orientation(), None, "{output:?}");
+        assert!(out.iter().any(|&value| value != 0.0));
+        let storage = context
+            .compile_storage_contract_resolution(&dst, lhs_operand, rhs_operand, axes)
+            .unwrap();
+        assert!(storage.is_dynamic_tree(), "{output:?}");
+    }
+}
+
 #[test]
 fn a_fermionic_dual_contracted_leg_on_a_transformed_operand_reports_the_twist() {
     let provider = Arc::new(FermionParityFusionRule);

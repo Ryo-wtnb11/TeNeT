@@ -147,7 +147,13 @@ the supertrace twist is `UnsupportedOnDevice` before any device work
 `contract_overwrite_into` stays canonical-only
 ([#1346](https://github.com/Ryo-wtnb11/TeNeT/issues/1346)); device `tensor!`
 networks keep their canonical schedule predicate
-([#1348](https://github.com/Ryo-wtnb11/TeNeT/issues/1348)).
+([#1348](https://github.com/Ryo-wtnb11/TeNeT/issues/1348)). Behaviour change: an anyonic device
+`contract` is now `UnsupportedTensorContractScope` even in canonical form,
+as on Host (it was accepted before). The Host checked-Generic cell is
+`NEEDS-PROOF` for a named gap: `tensorcontract_owned_checked_generic_in_context`
+accepts arbitrary axes for owned operands (lazy adjoints are
+`InvalidArgument`), but no fixture gates a non-canonical checked-Generic
+contraction against an independent oracle.
 
 [10] The `CUDA f32/c32 MF` column is the single-precision device payload of
 [#1336](https://github.com/Ryo-wtnb11/TeNeT/issues/1336) (leaf C2), gated by

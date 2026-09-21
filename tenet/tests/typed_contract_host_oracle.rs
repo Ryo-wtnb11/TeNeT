@@ -15,7 +15,8 @@ mod contract_cases;
 
 use contract_cases::{
     assert_close, blas_contract_oracle, dense_oracle, lazy_cases, product_general, su2_bent,
-    su2_reordered, u1_lhs_identity, u1_rank_five, u1_reordered, u1_rhs_identity, Case, Payload,
+    su2_reordered, su2_structure_cases, u1_lhs_identity, u1_rank_five, u1_reordered,
+    u1_rhs_identity, Case, Payload,
 };
 use num_complex::{Complex32, Complex64};
 use tenet::core::{CheckedFusionAlgebra, MultiplicityFreeRigidSymbols, SectorCodec};
@@ -53,6 +54,9 @@ fn every_fixture<D: Payload>() {
         check_blas(case);
     }
     for case in lazy_cases(&product_general::<D>(&runtime).lhs, "U(1) x SU(2) lazy") {
+        check_blas(case);
+    }
+    for case in su2_structure_cases::<D>(&runtime) {
         check_blas(case);
     }
 }

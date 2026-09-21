@@ -1767,14 +1767,20 @@ fn typed_cuda_direct_supports_canonical_lazy_and_rejects_other_scopes_before_mut
             .unwrap_err()
             .to_string()
     );
-    assert_eq!(
+    let close = |actual: &[f64], expected: &[f64]| {
+        assert_eq!(actual.len(), expected.len());
+        for (actual, expected) in actual.iter().zip(expected) {
+            assert!((actual - expected).abs() <= 1e-12 * (1.0 + expected.abs()));
+        }
+    };
+    close(
         device
             .contract(&device, &[1], &[0], &[1, 0])
             .unwrap()
             .to_host()
             .unwrap()
             .data(),
-        host.contract(&host, &[1], &[0], &[1, 0]).unwrap().data()
+        host.contract(&host, &[1], &[0], &[1, 0]).unwrap().data(),
     );
     let lazy_host = host.adjoint().unwrap();
     let expected_lazy_compose = lazy_host.compose(&host).unwrap();
@@ -1789,15 +1795,10 @@ fn typed_cuda_direct_supports_canonical_lazy_and_rejects_other_scopes_before_mut
     );
     let lazy_general = lazy.contract(&device, &[1], &[0], &[1, 0]).unwrap();
     let expected_lazy_general = lazy_host.contract(&host, &[1], &[0], &[1, 0]).unwrap();
-    for (actual, expected) in lazy_general
-        .to_host()
-        .unwrap()
-        .data()
-        .iter()
-        .zip(expected_lazy_general.data())
-    {
-        assert!((actual - expected).abs() <= 1e-12 * (1.0 + expected.abs()));
-    }
+    close(
+        lazy_general.to_host().unwrap().data(),
+        expected_lazy_general.data(),
+    );
     assert_eq!(device.to_host().unwrap().data(), expected);
 
     let zn3 = Arc::new(ZNFusionRule::new(3).unwrap());
@@ -2103,6 +2104,7 @@ fn typed_cuda_c64_contract_and_compose_match_host() {
             .unwrap()
             .to_host()
             .unwrap();
+        assert_eq!(actual.data().len(), expected.data().len());
         for (actual, expected) in actual.data().iter().zip(expected.data()) {
             assert!((actual - expected).norm() <= 1e-12 * (1.0 + expected.norm()));
         }

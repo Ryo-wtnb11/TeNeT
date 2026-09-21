@@ -63,7 +63,8 @@ pub use contract::{
 pub use contract::{
     tensorcompose_fusion_dyn_prelowered_direct_on_storage,
     tensorcontract_fusion_dyn_prelowered_direct_on_storage, tensorcontract_owned_checked_generic,
-    tensorcontract_owned_checked_generic_in_context, StorageContractResolution,
+    tensorcontract_owned_checked_generic_in_context, try_compile_storage_contract_core_route,
+    StorageContractResolution,
 };
 pub use contract::{
     BoundDynamicFusionMapSpace, DynamicFusionMapSpace, FusionOperand,

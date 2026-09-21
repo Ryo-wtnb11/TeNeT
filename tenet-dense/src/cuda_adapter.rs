@@ -827,6 +827,31 @@ impl CudaDenseStorage {
         Ok(())
     }
 
+    /// Bounds a matrix view by the active length rather than the
+    /// allocation: after [`Self::set_active_len`] the two differ, and the
+    /// backend view itself only checks the allocation.
+    fn check_matrix_bound(
+        &self,
+        shape: [usize; 2],
+        strides: [usize; 2],
+        offset: usize,
+    ) -> Result<(), DenseError> {
+        if shape.contains(&0) {
+            return Ok(());
+        }
+        let last = shape
+            .iter()
+            .zip(strides)
+            .try_fold(offset, |end, (&dim, stride)| {
+                (dim - 1).checked_mul(stride)?.checked_add(end)
+            })
+            .ok_or(DenseError::ElementCountOverflow)?;
+        if last >= self.len {
+            return Err(DenseError::OutOfBounds);
+        }
+        Ok(())
+    }
+
     /// Wraps a device tensor produced by a tenferro op (e.g. a cuSOLVER
     /// factor) as flat storage.
     fn from_tensor(tensor: Tensor, device: usize) -> Self {
@@ -857,6 +882,7 @@ impl CudaDenseStorage {
         strides: [usize; 2],
         offset: usize,
     ) -> Result<TensorView<'_>, DenseError> {
+        self.check_matrix_bound(shape, strides, offset)?;
         let Some(tensor) = D::typed(&self.tensor) else {
             return Err(dtype_mismatch::<D>("cuda_region", &self.tensor));
         };
@@ -918,6 +944,7 @@ impl CudaDenseStorage {
         ld: usize,
         offset: usize,
     ) -> Result<TensorViewMut<'_>, DenseError> {
+        self.check_matrix_bound([rows, cols], [1, ld], offset)?;
         let actual = dense_dtype_from_tenferro(self.tensor.dtype());
         let Some(tensor) = D::typed_mut(&mut self.tensor) else {
             return Err(DenseError::DTypeMismatch {

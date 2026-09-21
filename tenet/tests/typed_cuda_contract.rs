@@ -31,7 +31,8 @@ use std::sync::Arc;
 use common::{DevicePayload, DeviceRule};
 use contract_cases::{
     assert_close, blas_contract_oracle, dense_oracle, fill, lazy_cases, product_general, su2_bent,
-    su2_reordered, u1_lhs_identity, u1_rank_five, u1_reordered, u1_rhs_identity, Case,
+    su2_reordered, su2_structure_cases, u1_lhs_identity, u1_rank_five, u1_reordered,
+    u1_rhs_identity, Case,
 };
 use num_complex::{Complex32, Complex64};
 use tenet::core::{FermionParityFusionRule, Z2Irrep};
@@ -154,6 +155,23 @@ fn lazy_at<D: DevicePayload>(runtime: &Runtime) {
     for case in lazy_cases(&product_general::<D>(runtime).lhs, "U(1) x SU(2) lazy") {
         check(case);
     }
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn where_the_host_takes_its_structure_route_the_device_agrees_at_every_dtype() {
+    // The device runs the prelowered DynamicTree artifact for this class,
+    // a path the Host itself never takes for it (it picks `Structure`).
+    let runtime = Runtime::builder().cuda(0).build().unwrap();
+    fn at<D: DevicePayload>(runtime: &Runtime) {
+        for case in su2_structure_cases::<D>(runtime) {
+            check(case);
+        }
+    }
+    at::<f64>(&runtime);
+    at::<Complex64>(&runtime);
+    at::<f32>(&runtime);
+    at::<Complex32>(&runtime);
 }
 
 #[test]
