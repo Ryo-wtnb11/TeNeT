@@ -14,7 +14,10 @@
 //! 3. independence: device == TensorKit's `blas_contract!` step sequence on
 //!    Host typed ops (bosonic providers), and device == the physical-basis
 //!    dense contraction (U(1), SU(2)). Both oracles are pinned against the
-//!    Host by the ungated `typed_contract_host_oracle.rs`.
+//!    Host by the ungated `typed_contract_host_oracle.rs`;
+//! 4. fermionic providers (G2c-2, #1347): device == Host == TensorKit's
+//!    sequence with the twist on either role, and the TensorKit-valued FZ2
+//!    loops as explicit device `contract` calls.
 //!
 //! The contract tests read the process-wide transfer counters, hence
 //! `--test-threads=1`. Run with `cargo test -p tenet-rs --no-default-features
@@ -24,20 +27,19 @@
 #![cfg(feature = "cuda")]
 
 mod common;
+#[macro_use]
 mod contract_cases;
-
-use std::sync::Arc;
 
 use common::{DevicePayload, DeviceRule};
 use contract_cases::{
-    assert_close, blas_contract_oracle, dense_oracle, fill, lazy_cases, product_general, su2_bent,
-    su2_reordered, su2_structure_cases, u1_lhs_identity, u1_rank_five, u1_reordered,
-    u1_rhs_identity, Case,
+    assert_close, blas_contract_oracle, dense_oracle, fermion_su2, fermionic_blas_contract_oracle,
+    fermionic_general, fz2_tensorkit_loops, lazy_cases, product_general, su2_bent, su2_reordered,
+    su2_structure_cases, u1_lhs_identity, u1_rank_five, u1_reordered, u1_rhs_identity, Case,
+    TwistRole,
 };
 use num_complex::{Complex32, Complex64};
-use tenet::core::{FermionParityFusionRule, Z2Irrep};
 use tenet::dense::{cuda_transfer_stats, CudaTransferStats};
-use tenet::typed::{Error, GradedSpace, Runtime, TensorMap};
+use tenet::typed::{Runtime, TensorMap};
 
 fn delta<T>(body: impl FnOnce() -> T) -> (T, CudaTransferStats) {
     let before = cuda_transfer_stats();
@@ -303,42 +305,114 @@ fn the_scratch_grows_only_at_a_high_water_mark_and_is_released_by_the_clear_path
     );
 }
 
-fn fermionic_fixture(
-    runtime: &Runtime,
-) -> (
-    TensorMap<FermionParityFusionRule, f64>,
-    TensorMap<FermionParityFusionRule, f64>,
-) {
-    let leg = GradedSpace::try_new_with_arc(
-        Arc::new(FermionParityFusionRule),
-        [(Z2Irrep::EVEN, 2), (Z2Irrep::ODD, 2)],
-    )
-    .unwrap();
-    let dual = leg.try_dual().unwrap();
-    let lhs = TensorMap::from_block_fn(runtime, [&leg, &leg], [&leg], fill(21)).unwrap();
-    let rhs = TensorMap::from_block_fn(runtime, [&leg, &dual], [&leg], fill(22)).unwrap();
-    (lhs, rhs)
+fn device_contract<R: DeviceRule, D: DevicePayload>(case: &Case<R, D>) -> TensorMap<R, D> {
+    case.lhs
+        .to_cuda()
+        .unwrap()
+        .contract(
+            &case.rhs.to_cuda().unwrap(),
+            &case.lhs_axes,
+            &case.rhs_axes,
+            &case.output_axes,
+        )
+        .unwrap()
+        .to_host()
+        .unwrap()
+}
+
+/// Device == Host and device == TensorKit's `blas_contract!` with the twist
+/// on the B role and on the A role (G2c-2, #1347).
+fn check_fermionic<R, D>(
+    case: Case<R, D>,
+    twist: impl Fn(&TensorMap<R, D>, &[usize]) -> TensorMap<R, D> + Copy,
+) where
+    R: DeviceRule,
+    D: DevicePayload,
+{
+    let device = device_contract(&case);
+    let host = case.host();
+    assert_eq!(
+        device.codomain_rank(),
+        host.codomain_rank(),
+        "{}",
+        case.name
+    );
+    assert_close(device.data(), host.data(), case.terms(), case.name);
+    for role in [TwistRole::B, TwistRole::A] {
+        let oracle = fermionic_blas_contract_oracle(&case, role, twist);
+        assert_close(
+            device.data(),
+            oracle.data(),
+            case.terms(),
+            &format!("{} vs the {role:?}-role oracle", case.name),
+        );
+    }
 }
 
 #[test]
 #[ignore = "requires a real CUDA device"]
-fn a_fermionic_dual_contracted_leg_is_unsupported_before_any_device_work() {
+fn fermionic_contractions_match_the_host_and_both_tensorkit_twist_roles_at_every_dtype() {
+    // General axes with the twist on one or both contracted legs, the
+    // canonical form whose θ varies within one coupled sector (lifted from
+    // the storage core route to DynamicTree), and lazy adjoints on either
+    // side; fZ2 x U(1) and fZ2 (x) SU(2). Non-vacuity — the twist changes
+    // every one of these results — is pinned on the Host, ungated.
     let runtime = Runtime::builder().cuda(0).build().unwrap();
-    let (lhs, rhs) = fermionic_fixture(&runtime);
-    // The Host runs it (its twist is an in-place scale the device lacks).
-    let _ = lhs.contract(&rhs, &[2, 0], &[0, 1], &[0, 1]).unwrap();
-    let lhs = lhs.to_cuda().unwrap();
-    let rhs = rhs.to_cuda().unwrap();
-    let transforms = runtime.cuda_tree_transform_stats().unwrap();
-    let scratch = runtime.cuda_contract_scratch_bytes().unwrap();
-    let (error, counters) = delta(|| lhs.contract(&rhs, &[2, 0], &[0, 1], &[0, 1]).unwrap_err());
-    assert!(
-        matches!(&error, Error::UnsupportedOnDevice(message) if message.contains("twist")),
-        "{error:?}"
+    for_each_fermionic_fixture!(&runtime, f64, check_fermionic);
+    for_each_fermionic_fixture!(&runtime, Complex64, check_fermionic);
+    for_each_fermionic_fixture!(&runtime, f32, check_fermionic);
+    for_each_fermionic_fixture!(&runtime, Complex32, check_fermionic);
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn fz2_loops_as_explicit_device_contracts_match_tensorkit() {
+    let runtime = Runtime::builder().cuda(0).build().unwrap();
+    let loops = fz2_tensorkit_loops(
+        &runtime,
+        |tensor| tensor.to_cuda().unwrap(),
+        |x, y, lhs, rhs, output| x.contract(y, lhs, rhs, output).unwrap(),
+        |tensor| tensor.to_host().unwrap().scalar().unwrap(),
     );
-    assert_eq!(counters, CudaTransferStats::default(), "{counters:?}");
-    assert_eq!(runtime.cuda_tree_transform_stats().unwrap(), transforms);
+    for (name, value, expected) in loops {
+        assert!(
+            (value - expected).abs() < 1e-12,
+            "{name}: {value} vs {expected}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn a_warm_fermionic_contraction_uploads_only_its_output() {
+    // What: θ travels as descriptor scalars, so a warm twisted contraction
+    // costs exactly what an untwisted one does — the #740 output upload.
+    let runtime = Runtime::builder().cuda(0).build().unwrap();
+    let case: Case<_, f64> = fermionic_general(&runtime, &fermion_su2(), true, "fZ2xSU2", 51);
+    let output_bytes = std::mem::size_of_val(case.host().data()) as u64;
+    let lhs = case.lhs.to_cuda().unwrap();
+    let rhs = case.rhs.to_cuda().unwrap();
+    let call = || {
+        lhs.contract(&rhs, &case.lhs_axes, &case.rhs_axes, &case.output_axes)
+            .unwrap()
+    };
+    let _ = call();
+    let scratch = runtime.cuda_contract_scratch_bytes().unwrap();
+    let transforms = runtime.cuda_tree_transform_stats().unwrap();
+    let (result, warm) = delta(call);
+    assert_eq!(warm.h2d_calls, 1, "{warm:?}");
+    assert_eq!(warm.h2d_bytes, output_bytes, "{warm:?}");
+    assert_eq!(warm.d2h_calls, 0, "{warm:?}");
+    assert_eq!(warm.device_allocs, 1, "{warm:?}");
     assert_eq!(runtime.cuda_contract_scratch_bytes().unwrap(), scratch);
+    assert_eq!(runtime.cuda_tree_transform_stats().unwrap(), transforms);
+    assert_close(
+        result.to_host().unwrap().data(),
+        case.host().data(),
+        case.terms(),
+        "warm",
+    );
+    println!("fZ2xSU2 mixed θ f64: output {output_bytes} B; warm {warm:?}; {transforms:?}");
 }
 
 #[test]

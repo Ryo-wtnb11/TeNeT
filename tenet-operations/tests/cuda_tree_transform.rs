@@ -1769,3 +1769,286 @@ fn a_zero_caller_scale_is_rejected_in_the_same_order() {
     assert_eq!(executor.prepared_structures(), 0);
     assert_eq!(executor.required_plan_entries(), 0);
 }
+
+/// θ = −1 on every other non-empty destination block, starting with the
+/// first (so a one-block fixture is scaled too), as the sorted
+/// `(offset, θ)` list `replay_with_destination_scales` takes (G2c-2, #1347).
+/// Alternating per block, not per Multi group: the executor scales each
+/// write by its own block's θ, which is exact whether or not a group is
+/// uniform.
+fn alternating_scales(fixture: &Fixture) -> Vec<(usize, f64)> {
+    let structure = fixture.dst_structure();
+    let mut scales: Vec<(usize, f64)> = (0..structure.block_count())
+        .map(|index| structure.block(index).unwrap())
+        .filter(|block| !block.shape().contains(&0))
+        .enumerate()
+        .filter(|(position, _)| position % 2 == 0)
+        .map(|(_, block)| (block.offset(), -1.0))
+        .collect();
+    scales.sort_unstable_by_key(|&(offset, _)| offset);
+    scales
+}
+
+/// The host's order: the unscaled-by-θ replay, then an in-place scale of each
+/// listed block, by an explicit index walk over the block's shape and strides
+/// (not a production kernel).
+fn host_replay_then_scale<T: DeviceScalar>(
+    fixture: &Fixture,
+    source: &[T],
+    destination: &[T],
+    alpha: T,
+    scales: &[(usize, f64)],
+) -> Vec<T> {
+    let mut data = host_replay_scaled(fixture, source, destination, true, alpha);
+    let structure = fixture.dst_structure();
+    for index in 0..structure.block_count() {
+        let block = structure.block(index).unwrap();
+        let Ok(position) = scales.binary_search_by_key(&block.offset(), |&(offset, _)| offset)
+        else {
+            continue;
+        };
+        let shape = block.shape();
+        let total: usize = shape.iter().product();
+        let mut multi = vec![0usize; shape.len()];
+        for _ in 0..total {
+            let element = block.offset()
+                + multi
+                    .iter()
+                    .zip(block.strides())
+                    .map(|(i, stride)| i * stride)
+                    .sum::<usize>();
+            data[element] = data[element].scale(scales[position].1);
+            for (axis, value) in multi.iter_mut().enumerate() {
+                *value += 1;
+                if *value < shape[axis] {
+                    break;
+                }
+                *value = 0;
+            }
+        }
+    }
+    data
+}
+
+#[allow(clippy::too_many_arguments)]
+fn device_replay_with_scales<T: DeviceScalar>(
+    ctx: &mut CudaDenseContext,
+    executor: &mut CudaTreeTransformExecutor,
+    fixture: &Fixture,
+    source: &[T],
+    destination: &[T],
+    alpha: T,
+    scales: &[(usize, f64)],
+) -> Vec<T> {
+    let structure = fixture.compile();
+    let mut device_dst = CudaStorage::<T>::upload(ctx, destination).unwrap();
+    let device_src = CudaStorage::<T>::upload(ctx, source).unwrap();
+    executor
+        .replay_with_destination_scales(
+            ctx,
+            &structure,
+            &fixture.dst_structure(),
+            &fixture.src_structure(),
+            &mut device_dst,
+            &device_src,
+            alpha,
+            CudaTreeTransformDestination::Overwrite,
+            scales,
+        )
+        .unwrap();
+    device_dst.download(ctx).unwrap()
+}
+
+fn check_destination_scales<T: DeviceScalar>(
+    ctx: &mut CudaDenseContext,
+    executor: &mut CudaTreeTransformExecutor,
+    fixture: &Fixture,
+) {
+    let scales = alternating_scales(fixture);
+    assert!(!scales.is_empty(), "{}: no block to scale", fixture.name);
+    let source = fixture.source::<T>();
+    let destination: Vec<T> = (0..fixture.dst_len())
+        .map(|index| T::from_parts(-3.0 - index as f64, 0.5))
+        .collect();
+    for alpha in [
+        T::from_parts(1.0, 0.0),
+        T::from_parts(0.0, 0.0),
+        T::from_parts(-2.5, 0.0),
+    ] {
+        let what = format!("{} / {} / alpha = {alpha:?}", fixture.name, T::NAME);
+        let device = device_replay_with_scales(
+            ctx,
+            executor,
+            fixture,
+            &source,
+            &destination,
+            alpha,
+            &scales,
+        );
+        let expected = host_replay_then_scale(fixture, &source, &destination, alpha, &scales);
+        assert_close(
+            &device,
+            &expected,
+            &format!("{what}: device vs host + scale"),
+        );
+        if alpha != T::from_parts(0.0, 0.0) {
+            // Negative control: θ really moved something.
+            let unscaled = host_replay_scaled(fixture, &source, &destination, true, alpha);
+            assert!(
+                device
+                    .iter()
+                    .zip(&unscaled)
+                    .any(|(left, right)| left.distance(*right) > 1e3 * move_tolerance::<T>()),
+                "{what}: the scales changed nothing"
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn destination_scales_match_the_host_replay_followed_by_an_in_place_block_scale() {
+    // What: θ_b reaches exactly the Single move or Multi scatter writing block
+    // b — never a pack, the recoupling GEMM or a zero fill — for alpha in
+    // {1, 0, -2.5} x θ, all four payload dtypes, Single, conjugated and
+    // recoupling fixtures.
+    let mut ctx = context();
+    let mut executor = CudaTreeTransformExecutor::default();
+    for fixture in caller_scale_fixtures() {
+        check_destination_scales::<f32>(&mut ctx, &mut executor, &fixture);
+        check_destination_scales::<f64>(&mut ctx, &mut executor, &fixture);
+        check_destination_scales::<Complex32>(&mut ctx, &mut executor, &fixture);
+        check_destination_scales::<Complex64>(&mut ctx, &mut executor, &fixture);
+    }
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn a_zero_caller_scale_with_destination_scales_keeps_the_hosts_nan_pattern() {
+    // What: alpha = 0 keeps the zero-operand route whatever θ is, so a NaN
+    // source still poisons every written element, as the host's θ * (0 * x).
+    let mut ctx = context();
+    let mut executor = CudaTreeTransformExecutor::default();
+    let fixture = mixed_single_and_multi();
+    let scales = alternating_scales(&fixture);
+    let poisoned = vec![f64::NAN; fixture.src_len()];
+    let destination = vec![0.0_f64; fixture.dst_len()];
+    for alpha in [0.0_f64, -0.0_f64] {
+        let device = device_replay_with_scales(
+            &mut ctx,
+            &mut executor,
+            &fixture,
+            &poisoned,
+            &destination,
+            alpha,
+            &scales,
+        );
+        assert!(device.iter().any(|value| value.is_nan()), "{device:?}");
+        assert_same(
+            &device,
+            &host_replay_then_scale(&fixture, &poisoned, &destination, alpha, &scales),
+            &format!("alpha = {alpha} with destination scales over a NaN source"),
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn destination_scales_reuse_the_unscaled_structure_and_transfer_nothing_warm() {
+    // What: θ is in no key and uploads nothing — a scaled replay after an
+    // unscaled one of the same structure prepares no structure, asks for no
+    // plan entry, misses no plan and moves no byte.
+    let _guard = COUNTER_TESTS.lock().unwrap();
+    let mut ctx = context();
+    let mut executor = CudaTreeTransformExecutor::default();
+    let fixture = mixed_single_and_multi();
+    let scales = alternating_scales(&fixture);
+    let structure = fixture.compile();
+    let source = fixture.source::<f64>();
+    let mut dst = CudaStorage::<f64>::upload(&ctx, &vec![0.0; fixture.dst_len()]).unwrap();
+    let src = CudaStorage::<f64>::upload(&ctx, &source).unwrap();
+    let mut replay = |ctx: &mut CudaDenseContext, scales: &[(usize, f64)]| {
+        executor
+            .replay_with_destination_scales(
+                ctx,
+                &structure,
+                &fixture.dst_structure(),
+                &fixture.src_structure(),
+                &mut dst,
+                &src,
+                1.0,
+                CudaTreeTransformDestination::Overwrite,
+                scales,
+            )
+            .unwrap();
+    };
+    replay(&mut ctx, &[]);
+    replay(&mut ctx, &[]);
+    let plans = ctx.plan_cache_stats().unwrap();
+    let before = cuda_transfer_stats();
+    replay(&mut ctx, &scales);
+    replay(&mut ctx, &scales);
+    let warm = stats_delta(before, cuda_transfer_stats());
+    let plans_after = ctx.plan_cache_stats().unwrap();
+    assert_eq!(warm.h2d_calls, 0, "{warm:?}");
+    assert_eq!(warm.d2h_calls, 0, "{warm:?}");
+    assert_eq!(warm.device_allocs, 0, "{warm:?}");
+    assert_eq!(executor.prepared_structures(), 1);
+    assert_eq!(
+        plans_after.misses, plans.misses,
+        "{plans:?} -> {plans_after:?}"
+    );
+    assert_eq!(plans_after.evictions, plans.evictions);
+    assert_close(
+        &dst.download(&ctx).unwrap(),
+        &host_replay_then_scale(
+            &fixture,
+            &source,
+            &vec![0.0; fixture.dst_len()],
+            1.0,
+            &scales,
+        ),
+        "warm scaled replay",
+    );
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn unsorted_or_vanishing_destination_scales_are_rejected_before_any_device_work() {
+    let _guard = COUNTER_TESTS.lock().unwrap();
+    let mut ctx = context();
+    let mut executor = CudaTreeTransformExecutor::default();
+    let fixture = mixed_single_and_multi();
+    let mut scales = alternating_scales(&fixture);
+    assert!(scales.len() >= 2, "fixture has too few blocks");
+    scales.swap(0, 1);
+    let structure = fixture.compile();
+    let mut dst = CudaStorage::<f64>::upload(&ctx, &vec![0.0; fixture.dst_len()]).unwrap();
+    let src = CudaStorage::<f64>::upload(&ctx, &fixture.source::<f64>()).unwrap();
+    let vanishing = vec![(alternating_scales(&fixture)[0].0, 0.0)];
+    let before = cuda_transfer_stats();
+    for scales in [&scales, &vanishing] {
+        let error = executor
+            .replay_with_destination_scales(
+                &mut ctx,
+                &structure,
+                &fixture.dst_structure(),
+                &fixture.src_structure(),
+                &mut dst,
+                &src,
+                1.0,
+                CudaTreeTransformDestination::Overwrite,
+                scales,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(error, OperationError::InvalidArgument { .. }),
+            "{error:?}"
+        );
+    }
+    assert_eq!(
+        stats_delta(before, cuda_transfer_stats()),
+        CudaTransferStats::default()
+    );
+    assert_eq!(executor.prepared_structures(), 0);
+}

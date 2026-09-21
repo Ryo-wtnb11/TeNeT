@@ -12704,6 +12704,17 @@ where
     /// Exact zeros may differ in sign (Host `-0.0` where the device writes
     /// `+0.0`).
     ///
+    /// # Fermionic twist
+    ///
+    /// A fermionic contraction over dual contracted legs twists the
+    /// core-right operand (TensorKit's `twist!` in `blas_contract!`). The
+    /// canonical form with a twist uniform per coupled sector folds it into
+    /// the GEMM alpha; every other case — general axes, or a twist that
+    /// varies within one coupled sector — folds `θ_b` into the descriptor
+    /// alpha of the source-transform move writing core-right block `b`, where
+    /// the Host scales the transformed operand in place afterwards: the same
+    /// values, one pass fewer, and no extra upload.
+    ///
     /// # Errors
     ///
     /// In this order, all before any device work: [`Error::RuntimeMismatch`];
@@ -12711,10 +12722,7 @@ where
     /// anyonic providers, as on Host — a behaviour change since G2c-1a: the
     /// canonical anyonic device contraction was accepted before; [`Error::UnsupportedOnDevice`] for
     /// diagonal storage; the Host's own errors for malformed axes, output
-    /// orders or mismatched legs; [`Error::UnsupportedOnDevice`] for a
-    /// fermionic contraction that needs the twist of a dual contracted leg on
-    /// a transformed operand (the canonical form folds a uniform twist into
-    /// the GEMM and is supported); [`Error::PlacementMismatch`].
+    /// orders or mismatched legs; [`Error::PlacementMismatch`].
     #[doc(alias = "contract_ordered")]
     pub fn contract(
         &self,
@@ -12790,13 +12798,6 @@ where
                     )?
             }
         };
-        if resolution.requires_core_right_twist() {
-            return Err(Error::UnsupportedOnDevice(
-                "contract of a fermionic dual contracted leg outside the canonical composition \
-                 form needs the core-operand twist, which has no device executor yet"
-                    .to_string(),
-            ));
-        }
         let device = Placement::Cuda(self.runtime.cuda_device_ordinal_checked()?);
         if lhs_storage.placement() != device || rhs_storage.placement() != device {
             return Err(Error::PlacementMismatch);

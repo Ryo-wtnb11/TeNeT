@@ -24,9 +24,9 @@
 use std::sync::Arc;
 
 use tenet::core::{
-    product_sector, CheckedFusionAlgebra, MultiplicityFreeRigidSymbols, PhysicalFusionBasis,
-    ProductFusionRule, ProductFusionRuleExt, SU2FusionRule, SU2Irrep, SectorCodec, U1FusionRule,
-    U1Irrep,
+    product_sector, CheckedFusionAlgebra, FermionParityFusionRule, MultiplicityFreeRigidSymbols,
+    PhysicalFusionBasis, ProductFusionRule, ProductFusionRuleExt, SU2FusionRule, SU2Irrep,
+    SectorCodec, U1FusionRule, U1Irrep, Z2Irrep,
 };
 use tenet::typed::{BlockFusionTrees, GradedSpace, Runtime, TensorMap};
 
@@ -104,6 +104,45 @@ pub fn u1_su2() -> GradedSpace<U1Su2> {
             (
                 product_sector(U1Irrep::new(-1), SU2Irrep::from_twice_spin(1)),
                 2,
+            ),
+        ],
+    )
+    .unwrap()
+}
+
+pub type FermionU1 = ProductFusionRule<FermionParityFusionRule, U1FusionRule>;
+pub type FermionSu2 = ProductFusionRule<FermionParityFusionRule, SU2FusionRule>;
+
+/// fZ2 x U(1): odd sectors of both charge signs, degeneracy > 1.
+pub fn fermion_u1() -> GradedSpace<FermionU1> {
+    GradedSpace::try_new_with_arc(
+        Arc::new(FermionParityFusionRule.product(U1FusionRule)),
+        [
+            (product_sector(Z2Irrep::EVEN, U1Irrep::new(0)), 2),
+            (product_sector(Z2Irrep::ODD, U1Irrep::new(1)), 2),
+            (product_sector(Z2Irrep::ODD, U1Irrep::new(-1)), 1),
+            (product_sector(Z2Irrep::EVEN, U1Irrep::new(1)), 1),
+        ],
+    )
+    .unwrap()
+}
+
+/// fZ2 (x) SU(2): fermionic signs over non-Abelian recoupling.
+pub fn fermion_su2() -> GradedSpace<FermionSu2> {
+    GradedSpace::try_new_with_arc(
+        Arc::new(FermionParityFusionRule.product(SU2FusionRule)),
+        [
+            (
+                product_sector(Z2Irrep::EVEN, SU2Irrep::from_twice_spin(0)),
+                2,
+            ),
+            (
+                product_sector(Z2Irrep::ODD, SU2Irrep::from_twice_spin(1)),
+                2,
+            ),
+            (
+                product_sector(Z2Irrep::EVEN, SU2Irrep::from_twice_spin(2)),
+                1,
             ),
         ],
     )
@@ -343,6 +382,130 @@ pub fn su2_structure_cases<D: Payload>(runtime: &Runtime) -> [Case<SU2FusionRule
     ]
 }
 
+/// Rank 4 against rank 4 over mixed sides, out of order. B's codomain leg 1
+/// is `v*` (a dual contracted leg on B's codomain side) and B's domain leg 3
+/// is `u`, which reaches the permuted B's codomain as `u*`: dual — a dual
+/// contracted leg from B's domain side — unless `u` is itself dual. With both
+/// twisted, θ of a core-right block is the parity of its coupled sector
+/// (uniform per coupled sector); with `u_dual` only `v*` is twisted, so
+/// the row trees of one coupled sector carry both signs.
+pub fn fermionic_general<R, D>(
+    runtime: &Runtime,
+    v: &GradedSpace<R>,
+    u_dual: bool,
+    name: &'static str,
+    salt: usize,
+) -> Case<R, D>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: Payload,
+{
+    let v_dual = v.try_dual().unwrap();
+    let u = if u_dual { v_dual.clone() } else { v.clone() };
+    Case {
+        name,
+        lhs: tensor(runtime, &[v, &u], &[v, v], salt),
+        rhs: tensor(runtime, &[v, &v_dual], &[v, &u], salt + 1),
+        lhs_axes: vec![1, 0],
+        rhs_axes: vec![3, 1],
+        output_axes: vec![2, 0, 3, 1],
+        dense: false,
+    }
+}
+
+/// The canonical `mul!` form (A's whole domain against B's whole codomain,
+/// in order, identity output) with B's codomain `(v, v*)`: only the second
+/// leg is twisted, so θ varies within one coupled-sector matrix and no
+/// per-job GEMM alpha expresses it.
+pub fn fermionic_canonical_nonuniform<R, D>(
+    runtime: &Runtime,
+    v: &GradedSpace<R>,
+    name: &'static str,
+    salt: usize,
+) -> Case<R, D>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: Payload,
+{
+    let v_dual = v.try_dual().unwrap();
+    Case {
+        name,
+        lhs: tensor(runtime, &[v, v], &[v, &v_dual], salt),
+        rhs: tensor(runtime, &[v, &v_dual], &[v], salt + 1),
+        lhs_axes: vec![2, 3],
+        rhs_axes: vec![0, 1],
+        output_axes: vec![0, 1, 2],
+        dense: false,
+    }
+}
+
+/// Which operand TensorKit's `blas_contract!` twists for a fermionic
+/// contraction (tensoroperations.jl:398-431 @cfaa073).
+#[derive(Clone, Copy, Debug)]
+pub enum TwistRole {
+    /// No twist: the bosonic sequence, or the twist-free control.
+    None,
+    /// `twist!(Anew, filter(!isdual ∘ space(Anew), domainind(Anew)))`.
+    A,
+    /// `twist!(Bnew, filter(isdual ∘ space(Bnew), codomainind(Bnew)))`.
+    B,
+}
+
+/// TensorKit `blas_contract!` on Host typed operations, with the fermionic
+/// twist placed on `role`. TensorKit's `space(Anew, i)` of a domain index is
+/// the dual of the stored domain leg, so `!isdual(space(Anew, i))` is
+/// `Anew.domain()[j].is_dual()`.
+///
+/// `twist` is the typed `TensorMap::twist`, passed in because its dispatch
+/// bound is per provider mode.
+pub fn fermionic_blas_contract_oracle<R, D>(
+    case: &Case<R, D>,
+    role: TwistRole,
+    twist: impl Fn(&TensorMap<R, D>, &[usize]) -> TensorMap<R, D>,
+) -> TensorMap<R, D>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: Payload,
+{
+    let open = |rank: usize, contracted: &[usize]| -> Vec<usize> {
+        (0..rank)
+            .filter(|axis| !contracted.contains(axis))
+            .collect()
+    };
+    let lhs_open = open(case.lhs.rank(), &case.lhs_axes);
+    let rhs_open = open(case.rhs.rank(), &case.rhs_axes);
+    let mut a = case.lhs.permute(&lhs_open, &case.lhs_axes).unwrap();
+    let mut b = case.rhs.permute(&case.rhs_axes, &rhs_open).unwrap();
+    match role {
+        TwistRole::None => {}
+        TwistRole::A => {
+            let nout = a.codomain_rank();
+            let legs: Vec<usize> = a
+                .domain()
+                .iter()
+                .enumerate()
+                .filter(|(_, leg)| leg.is_dual())
+                .map(|(j, _)| nout + j)
+                .collect();
+            a = twist(&a, &legs);
+        }
+        TwistRole::B => {
+            let legs: Vec<usize> = b
+                .codomain()
+                .iter()
+                .enumerate()
+                .filter(|(_, leg)| leg.is_dual())
+                .map(|(i, _)| i)
+                .collect();
+            b = twist(&b, &legs);
+        }
+    }
+    let c = a.compose(&b).unwrap();
+    let split = lhs_open.len();
+    c.permute(&case.output_axes[..split], &case.output_axes[split..])
+        .unwrap()
+}
+
 /// TensorKit `blas_contract!` on Host typed operations.
 pub fn blas_contract_oracle<R, D>(case: &Case<R, D>) -> TensorMap<R, D>
 where
@@ -446,4 +609,128 @@ where
         output[offset] = total;
     });
     (output_shape, output)
+}
+
+/// Degeneracy-1 FZ2 map `V <- V` with `even`/`odd` block values: the tensor
+/// `build(f)` produces in the TensorKit reference
+/// (`benchmarks/tensorkit_semantic_oracle.jl` §3, pinned values in
+/// `tenet-network/tests/tk_fermionic_correspondence.rs`).
+pub fn fz2_map(runtime: &Runtime, even: f64, odd: f64) -> TensorMap<FermionParityFusionRule, f64> {
+    let v = GradedSpace::try_new_with_arc(
+        Arc::new(FermionParityFusionRule),
+        [(Z2Irrep::EVEN, 1), (Z2Irrep::ODD, 1)],
+    )
+    .unwrap();
+    TensorMap::from_block_fn(runtime, [&v], [&v], move |trees, _| {
+        if *trees.coupled() == Z2Irrep::EVEN {
+            even
+        } else {
+            odd
+        }
+    })
+    .unwrap()
+}
+
+/// The TensorKit-valued FZ2 closed loops of `tk_fermionic_correspondence`,
+/// written as explicit `contract` calls so they run through the general
+/// contraction on whichever storage `lift` places the operands: every loop
+/// closes a codomain leg against a domain leg, which bends a leg into B's
+/// codomain as a dual leg and fires the supertrace twist. `S` is the dense
+/// `diag(3, 2)` the reference's SVD produces. Returns `(name, value,
+/// TensorKit value)`.
+pub fn fz2_tensorkit_loops<T>(
+    runtime: &Runtime,
+    lift: impl Fn(TensorMap<FermionParityFusionRule, f64>) -> T,
+    contract: impl Fn(&T, &T, &[usize], &[usize], &[usize]) -> T,
+    scalar: impl Fn(T) -> f64,
+) -> Vec<(&'static str, f64, f64)> {
+    let a = lift(fz2_map(runtime, 1.0, 4.0));
+    let b = lift(fz2_map(runtime, 2.0, 1.5));
+    let c = lift(fz2_map(runtime, 0.5, 2.5));
+    let s = lift(fz2_map(runtime, 3.0, 2.0));
+    // `x[i; j] y[j; i]`: x's domain against y's codomain, x's codomain
+    // against y's domain.
+    let close = |x: &T, y: &T| scalar(contract(x, y, &[1, 0], &[0, 1], &[]));
+    let chain = |x: &T, y: &T| contract(x, y, &[1], &[0], &[0, 1]);
+    vec![
+        ("tr(A B)", close(&a, &b), -4.0),
+        ("tr(A B C)", close(&chain(&a, &b), &c), -14.0),
+        ("tr(A S B)", close(&chain(&a, &s), &b), -6.0),
+        ("tr(S A B)", close(&chain(&s, &a), &b), -6.0),
+    ]
+}
+
+/// Every fermionic fixture (G2c-2, #1347), handed to `check` with the
+/// provider's typed twist; shared by the Host pin and the device gate. A
+/// macro because each provider's twist has its own dispatch bound.
+macro_rules! for_each_fermionic_fixture {
+    ($runtime:expr, $payload:ty, $check:ident) => {{
+        let runtime = $runtime;
+        let fu1 = $crate::contract_cases::fermion_u1();
+        let fsu2 = $crate::contract_cases::fermion_su2();
+        let twist_u1 =
+            |t: &tenet::typed::TensorMap<$crate::contract_cases::FermionU1, $payload>,
+             legs: &[usize]| t.twist(legs).unwrap();
+        let twist_su2 =
+            |t: &tenet::typed::TensorMap<$crate::contract_cases::FermionSu2, $payload>,
+             legs: &[usize]| t.twist(legs).unwrap();
+        $check(
+            $crate::contract_cases::fermionic_general(
+                runtime,
+                &fu1,
+                false,
+                "fZ2xU1 both sides",
+                31,
+            ),
+            twist_u1,
+        );
+        $check(
+            $crate::contract_cases::fermionic_general(runtime, &fu1, true, "fZ2xU1 mixed θ", 33),
+            twist_u1,
+        );
+        $check(
+            $crate::contract_cases::fermionic_general(
+                runtime,
+                &fsu2,
+                false,
+                "fZ2xSU2 both sides",
+                35,
+            ),
+            twist_su2,
+        );
+        $check(
+            $crate::contract_cases::fermionic_general(runtime, &fsu2, true, "fZ2xSU2 mixed θ", 37),
+            twist_su2,
+        );
+        $check(
+            $crate::contract_cases::fermionic_canonical_nonuniform(
+                runtime,
+                &fu1,
+                "fZ2xU1 canonical nonuniform",
+                39,
+            ),
+            twist_u1,
+        );
+        $check(
+            $crate::contract_cases::fermionic_canonical_nonuniform(
+                runtime,
+                &fsu2,
+                "fZ2xSU2 canonical nonuniform",
+                41,
+            ),
+            twist_su2,
+        );
+        // `u` not dual: both lazy orderings then contract a leg that reaches
+        // B's codomain dual, so each one is twisted.
+        let lazy_u1: tenet::typed::TensorMap<$crate::contract_cases::FermionU1, $payload> =
+            $crate::contract_cases::fermionic_general(runtime, &fu1, false, "", 43).lhs;
+        for case in $crate::contract_cases::lazy_cases(&lazy_u1, "fZ2xU1 lazy") {
+            $check(case, twist_u1);
+        }
+        let lazy_su2: tenet::typed::TensorMap<$crate::contract_cases::FermionSu2, $payload> =
+            $crate::contract_cases::fermionic_general(runtime, &fsu2, false, "", 45).lhs;
+        for case in $crate::contract_cases::lazy_cases(&lazy_su2, "fZ2xSU2 lazy") {
+            $check(case, twist_su2);
+        }
+    }};
 }

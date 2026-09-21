@@ -140,11 +140,18 @@ TensorKit `mul!` form keeps the storage-direct core route. Gated by
 owned and lazy-adjoint, and device == TensorKit's `blas_contract!` sequence and
 the physical-basis contraction, both oracles pinned against the Host by the
 ungated `typed_contract_host_oracle.rs`) and by the forced-orientation replays
-of `tenet-tensors/src/contract/storage_contract_tests.rs`. Still explicit
-boundaries: a fermionic contraction whose transformed core-right operand needs
-the supertrace twist is `UnsupportedOnDevice` before any device work
-([#1347](https://github.com/Ryo-wtnb11/TeNeT/issues/1347)); device
-`contract_overwrite_into` stays canonical-only
+of `tenet-tensors/src/contract/storage_contract_tests.rs`. The fermionic
+supertrace twist of the core-right operand is folded into that operand's
+source transform as per-destination-block descriptor scales (G2c-2,
+[#1347](https://github.com/Ryo-wtnb11/TeNeT/issues/1347)), including the
+canonical form whose twist varies within one coupled sector, which now leaves
+the storage-direct core for `DynamicTree` on device; gated against TensorKit's
+`blas_contract!` with the twist on the B role and on the A role (fZ2 x U(1),
+fZ2 (x) SU(2), all four device dtypes, lazy adjoints, both orientations forced
+at artifact level) and by the TensorKit-valued FZ2 loops as explicit device
+`contract` calls. Still explicit boundaries: device
+`contract_overwrite_into` stays canonical-only, and the Host storage-direct
+entries it uses keep rejecting a non-uniform twist
 ([#1346](https://github.com/Ryo-wtnb11/TeNeT/issues/1346)); device `tensor!`
 networks keep their canonical schedule predicate
 ([#1348](https://github.com/Ryo-wtnb11/TeNeT/issues/1348)). Behaviour change: an anyonic device
