@@ -7906,6 +7906,55 @@ where
     }
 }
 
+/// The axis lists a validated `trace_pairs` pair list stands for.
+struct TracePairAxes {
+    output_axes: Vec<usize>,
+    destination_codomain_rank: usize,
+    trace_lhs: Vec<usize>,
+    trace_rhs: Vec<usize>,
+}
+
+/// Validates a `trace_pairs` pair list and derives the untraced output axes in
+/// order; `None` for an empty list, whose trace is a clone. Shared by every
+/// storage so the Host and device reject a malformed list with one message.
+///
+/// Why this validation is kept rather than left to the seam: `seen` is not a
+/// check, it is the derivation of `output_axes` — the seam cannot supply it,
+/// and a malformed list would otherwise produce a silently wrong output order
+/// rather than an error. Same precedent as `braid`'s levels pre-check.
+fn trace_pair_axes(
+    rank: usize,
+    codomain_rank: usize,
+    pairs: &[(usize, usize)],
+) -> Result<Option<TracePairAxes>, Error> {
+    let mut seen = vec![false; rank];
+    for &(lhs, rhs) in pairs {
+        for axis in [lhs, rhs] {
+            if axis >= rank || seen[axis] {
+                return Err(Error::InvalidArgument(format!(
+                    "invalid trace pair list {pairs:?} for rank {rank} \
+                     (axes must be in range and distinct)"
+                )));
+            }
+            seen[axis] = true;
+        }
+    }
+    if pairs.is_empty() {
+        return Ok(None);
+    }
+    let output_axes: Vec<usize> = (0..rank).filter(|&axis| !seen[axis]).collect();
+    let destination_codomain_rank = output_axes
+        .iter()
+        .filter(|&&axis| axis < codomain_rank)
+        .count();
+    Ok(Some(TracePairAxes {
+        output_axes,
+        destination_codomain_rank,
+        trace_lhs: pairs.iter().map(|&(lhs, _)| lhs).collect(),
+        trace_rhs: pairs.iter().map(|&(_, rhs)| rhs).collect(),
+    }))
+}
+
 fn trace_pairs_checked_generic<R, D>(
     tensor: &TensorMap<R, D>,
     pairs: &[(usize, usize)],
@@ -7917,29 +7966,15 @@ where
         > + CheckedGenericPivotal<Scalar = f64>,
     D: TensorScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
 {
-    let rank = tensor.rank();
-    let mut seen = vec![false; rank];
-    for &(lhs, rhs) in pairs {
-        for axis in [lhs, rhs] {
-            if axis >= rank || seen[axis] {
-                return Err(Error::InvalidArgument(format!(
-                    "invalid trace pair list {pairs:?} for rank {rank} (axes must be in range and distinct)"
-                ))
-                .into());
-            }
-            seen[axis] = true;
-        }
-    }
-    if pairs.is_empty() {
+    let Some(TracePairAxes {
+        output_axes,
+        destination_codomain_rank,
+        trace_lhs,
+        trace_rhs,
+    }) = trace_pair_axes(tensor.rank(), tensor.codomain_rank(), pairs)?
+    else {
         return Ok(tensor.clone());
-    }
-    let output_axes: Vec<usize> = (0..rank).filter(|&axis| !seen[axis]).collect();
-    let destination_codomain_rank = output_axes
-        .iter()
-        .filter(|&&axis| axis < tensor.codomain_rank())
-        .count();
-    let trace_lhs: Vec<usize> = pairs.iter().map(|&(lhs, _)| lhs).collect();
-    let trace_rhs: Vec<usize> = pairs.iter().map(|&(_, rhs)| rhs).collect();
+    };
     let mapped_output_axes;
     let mapped_trace_lhs;
     let mapped_trace_rhs;
@@ -13786,6 +13821,135 @@ where
         self.twist_with_inverse_cuda(legs, true)
     }
 
+    /// TensorKit `tensortrace!` on a device tensor: the Host
+    /// [`TensorMap::trace_pairs`] semantics — the categorical partial trace
+    /// of each mutually dual `(lhs, rhs)` pair, remaining legs kept in order
+    /// and on their side, owned or lazy-adjoint — executed on the device.
+    ///
+    /// # One planning authority
+    ///
+    /// The destination space and the trace structure come from the compile
+    /// the Host trace runs: the valid (source tree, destination tree) terms,
+    /// each with the recoupling coefficient times `dim(c)/dim(a_1)` times the
+    /// twist of every non-dual traced leg after the first (the fermionic
+    /// supertrace), and every block stride. The device only replays it: one
+    /// contraction per term, reading the source block through one merged
+    /// diagonal axis per pair (extent `t_k`, stride `s_lhs + s_rhs`; pairs are
+    /// never merged with each other) against the context ones template, with
+    /// descriptor scale `coefficient`, accumulated (`beta = 1`) into the
+    /// zero-initialised output, so a destination block with several producers
+    /// receives their sum. A lazy adjoint traces its parent with the Host's
+    /// parent axes and a conjugated read.
+    ///
+    /// # Cost
+    ///
+    /// A warm call transfers only the #740 output initialisation: one H2D of
+    /// `required_len * size_of::<D>()` bytes, one device allocation (the
+    /// output), no download and no new cuTENSOR plan. The first call whose
+    /// largest traced extent `prod t_k` exceeds the resident ones template
+    /// grows it once (one upload, reported by
+    /// [`crate::prelude::CudaTreeTransformStats::context_scalar_operand_bytes`]).
+    /// One submission per term; FLOPs are the Host's `sum_terms |out| * prod t_k`
+    /// with one multiply per term element that a reduction would not need.
+    ///
+    /// # Numerics
+    ///
+    /// Device and Host agree to dtype tolerance, never bitwise: the sum order
+    /// is cuTENSOR's and the coefficient is applied as `(alpha * c) * sum`
+    /// where the Host rounds `(alpha * sum) * c`. A zero coefficient reads the
+    /// source against the zero template, so NaN/Inf propagate as on Host.
+    ///
+    /// # Errors
+    ///
+    /// In the Host's order, all before any device work: the Host's
+    /// [`Error::InvalidArgument`] for a malformed pair list and its errors for
+    /// legs that are not mutually dual; [`Error::UnsupportedOnDevice`] for a
+    /// compact (diagonal) device payload, where the Host takes its
+    /// compact-spectrum arm; the Host compile's own errors;
+    /// [`Error::PlacementMismatch`]. A rejected call leaves the device and the
+    /// Runtime unchanged.
+    pub fn trace_pairs(&self, pairs: &[(usize, usize)]) -> Result<Self, Error> {
+        let Some(TracePairAxes {
+            output_axes,
+            destination_codomain_rank,
+            trace_lhs,
+            trace_rhs,
+        }) = trace_pair_axes(self.rank(), self.codomain_rank(), pairs)?
+        else {
+            return Ok(self.clone());
+        };
+        let mapped_output_axes;
+        let mapped_trace_lhs;
+        let mapped_trace_rhs;
+        let (source_space, source_data, axes) = match &self.repr {
+            TypedTensorRepr::Owned(body) => (
+                &body.space,
+                body.data.as_ref(),
+                tenet_tensors::TensorTraceAxisSpec::new(&output_axes, &trace_lhs, &trace_rhs),
+            ),
+            TypedTensorRepr::Adjoint(view) => {
+                let parent = view.parent.space.space();
+                mapped_output_axes =
+                    logical_adjoint_axes_to_parent(parent.nout(), parent.nin(), &output_axes);
+                mapped_trace_lhs =
+                    logical_adjoint_axes_to_parent(parent.nout(), parent.nin(), &trace_lhs);
+                mapped_trace_rhs =
+                    logical_adjoint_axes_to_parent(parent.nout(), parent.nin(), &trace_rhs);
+                (
+                    &view.parent.space,
+                    view.parent.data.as_ref(),
+                    tenet_tensors::TensorTraceAxisSpec::new_with_conjugation(
+                        &mapped_output_axes,
+                        &mapped_trace_lhs,
+                        &mapped_trace_rhs,
+                        true,
+                    ),
+                )
+            }
+        };
+        let homspace = tenet_tensors::tensortrace_fusion_dyn_selected_homspace_checked(
+            source_space,
+            axes,
+            destination_codomain_rank,
+        )?;
+        let space = source_space.derive_from_final_homspace(homspace)?;
+        let TypedData::Dense(source) = source_data else {
+            return Err(Error::UnsupportedOnDevice(
+                "trace_pairs requires dense CUDA storage".to_string(),
+            ));
+        };
+        let structure = tenet_tensors::TensorTraceFusionStructure::compile_fusion_dyn_checked(
+            &space,
+            source_space,
+            axes,
+        )?;
+        if source.placement() != Placement::Cuda(self.runtime.cuda_device_ordinal_checked()?) {
+            return Err(Error::PlacementMismatch);
+        }
+        let required_len = space.space().required_len()?;
+
+        let mut lease = self.runtime.lease_cuda()?;
+        let cuda = &mut *lease;
+        // ponytail: #740 — the device seam initializes an output by uploading
+        // zeros; replace only with a measured native allocation. The zeros are
+        // also what the accumulating replay starts from.
+        let mut output = CudaStorage::upload_owned(cuda, vec![D::from_real(0.0); required_len])?;
+        tenet_tensors::tensortrace_fusion_structure_accumulate_on_cuda(
+            cuda,
+            &structure,
+            space.space().structure(),
+            &mut output,
+            source_space.space().structure(),
+            source,
+            D::from_real(1.0),
+        )?;
+        drop(lease);
+        Ok(Self {
+            runtime: self.runtime.clone(),
+            repr: owned_repr(TypedTensorBody::dense(space, output)),
+        })
+    }
+
     fn twist_with_inverse_cuda(&self, legs: &[usize], inverse: bool) -> Result<Self, Error> {
         let rank = self.rank();
         let name = if inverse { "twist_inverse" } else { "twist" };
@@ -18309,34 +18473,16 @@ where
     /// [`Error::FusionAlgebra`] from the seam, which owns the rest of the
     /// validation (legs that are not mutually dual, above all).
     fn trace_pairs_multiplicity_free(&self, pairs: &[(usize, usize)]) -> Result<Self, Error> {
-        // Why this validation is kept rather than left to the seam, unlike
-        // everywhere else in this facade: `seen` is not a check, it is the
-        // derivation of `output_axes` below — the seam cannot supply it, and a
-        // malformed list would otherwise produce a silently wrong output order
-        // rather than an error. Same precedent as `braid`'s levels pre-check.
         let rank = self.rank();
-        let mut seen = vec![false; rank];
-        for &(lhs, rhs) in pairs {
-            for axis in [lhs, rhs] {
-                if axis >= rank || seen[axis] {
-                    return Err(Error::InvalidArgument(format!(
-                        "invalid trace pair list {pairs:?} for rank {rank} \
-                         (axes must be in range and distinct)"
-                    )));
-                }
-                seen[axis] = true;
-            }
-        }
-        if pairs.is_empty() {
+        let Some(TracePairAxes {
+            output_axes,
+            destination_codomain_rank,
+            trace_lhs,
+            trace_rhs,
+        }) = trace_pair_axes(rank, self.codomain_rank(), pairs)?
+        else {
             return Ok(self.clone());
-        }
-        let output_axes: Vec<usize> = (0..rank).filter(|&axis| !seen[axis]).collect();
-        let destination_codomain_rank = output_axes
-            .iter()
-            .filter(|&&axis| axis < self.codomain_rank())
-            .count();
-        let trace_lhs: Vec<usize> = pairs.iter().map(|&(lhs, _)| lhs).collect();
-        let trace_rhs: Vec<usize> = pairs.iter().map(|&(_, rhs)| rhs).collect();
+        };
         let mapped_output_axes;
         let mapped_trace_lhs;
         let mapped_trace_rhs;

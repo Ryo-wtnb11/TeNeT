@@ -125,6 +125,7 @@ trivial/dense provider exists.
 | Canonical contraction/compose | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | PROVED | PROVED |
 | General-axes `contract` [12] | PROVED | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/3) | UNSUPPORTED | PROVED | UNSUPPORTED | PROVED | PROVED |
 | Arithmetic/reductions | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | PROVED | INTENTIONAL-DIFFERENCE [10] |
+| `trace_pairs` [13] | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | PROVED | PROVED |
 | SVD/EIGH [9] | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | PROVED | PROVED [11] |
 | QR | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | [UNSUPPORTED](https://github.com/Ryo-wtnb11/TeNeT/issues/1270) | f32 PROVED, c32 UNSUPPORTED [11] |
 | EIG/null/polar/solve/matrix functions | PROVED | PROVED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
@@ -167,6 +168,23 @@ as on Host (it was accepted before). The Host checked-Generic cell is
 accepts arbitrary axes for owned operands (lazy adjoints are
 `InvalidArgument`), but no fixture gates a non-canonical checked-Generic
 contraction against an independent oracle.
+
+[13] Device `trace_pairs` replays the Host trace structure — its valid
+tree-pair terms, their coefficients (recoupling row, `dim(c)/dim(a_1)`, the
+fermionic supertrace twist) and every stride — as one contraction per term:
+the source block read through one merged diagonal axis per traced pair
+(extent `t_k`, stride `s_lhs + s_rhs`; pairs never merged with each other)
+against the context-owned ones template, accumulated with `beta = 1` into the
+zero-initialised output, so repeated destinations sum (G2c-4,
+[#1349](https://github.com/Ryo-wtnb11/TeNeT/issues/1349)). A warm call
+transfers only the #740 output initialisation and misses no cuTENSOR plan.
+Gated by `tenet/tests/typed_cuda_trace.rs` (device == Host at every device
+dtype, owned and lazy-adjoint, U(1)/SU(2)/U(1)xSU(2)/fZ2xU(1)/fZ2(x)SU(2);
+device == the physical-basis diagonal sum and the identity contraction, both
+pinned against the Host by the ungated `typed_trace_host_oracle.rs`; device ==
+the hand-valued fZ2 supertrace) and by the unmerged-index oracle of
+`tenet-dense/tests/cuda_region_trace.rs`. The `tensor!` trace pre-step on
+device is still rejected (G2c-5).
 
 [10] The `CUDA f32/c32 MF` column is the single-precision device payload of
 [#1336](https://github.com/Ryo-wtnb11/TeNeT/issues/1336) (leaf C2), gated by

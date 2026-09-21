@@ -30,6 +30,12 @@ use tenet_operations::{
 use tenet_operations::{try_tensortrace_owned_raw, OperationError, OwnedTraceTerm};
 use tenet_operations::{ConjugateValue, RealStructuralCoefficient, RecouplingCoefficientAction};
 
+#[cfg(feature = "cuda")]
+mod cuda;
+#[cfg(feature = "cuda")]
+#[doc(hidden)]
+pub use cuda::tensortrace_fusion_structure_accumulate_on_cuda;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TensorTraceStructure {
     dst_rank: usize,
@@ -351,6 +357,22 @@ impl<C> TensorTraceFusionStructure<C> {
         C: Clone + Add<Output = C> + Mul<Output = C> + Zero + RealStructuralCoefficient,
     {
         Self::compile_fusion_dyn_raw_with_preflight(rule, dst, src, axes, |_, _| Ok(None))
+    }
+
+    /// The compile [`tensortrace_fusion_dyn_owned_checked`] runs, returned
+    /// instead of executed, so a device executor replays exactly the Host's
+    /// terms, coefficients and strides.
+    #[doc(hidden)]
+    pub fn compile_fusion_dyn_checked<R>(
+        dst: &BoundDynamicFusionMapSpace<R>,
+        src: &BoundDynamicFusionMapSpace<R>,
+        axes: TensorTraceAxisSpec<'_>,
+    ) -> Result<Self, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = C> + CheckedFusionAlgebra,
+        C: Clone + Add<Output = C> + Mul<Output = C> + Zero + RealStructuralCoefficient,
+    {
+        Self::compile_fusion_dyn_checked_raw(src.provider(), dst.space(), src.space(), axes)
     }
 
     fn compile_fusion_dyn_checked_raw<R>(
