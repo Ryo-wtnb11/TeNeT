@@ -1661,9 +1661,9 @@ fn warm_general_cuda_networks_transfer_only_the_returned_output() {
 /// are decided before the plan cache publishes, a workspace is leased or the
 /// device is touched: plan cache, pools, transfer counters, cuTENSOR plans,
 /// scratch and executor state are all unchanged. (A compact operand is not
-/// constructible as a device operand of this impl; its preflight, and the
-/// anyonic contraction class, are in the device-free `device_operand_admission`
-/// test.) The trace pre-step's rejections (G2c-5), an anyonic operand
+/// constructible as a device operand of this impl; its preflight is in the
+/// device-free `device_operand_admission` test, and the non-symmetric braiding
+/// class in `non_symmetric_cuda_macro_contraction_rejects_like_host_before_device_work`.) The trace pre-step's rejections (G2c-5), an anyonic operand
 /// included, are in
 /// `rejected_cuda_trace_prestep_leaves_every_device_state_unchanged`.
 #[test]
@@ -2251,127 +2251,9 @@ fn rejected_cuda_trace_prestep_leaves_every_device_state_unchanged() {
     assert_eq!(after.transfers.d2h_calls, before.transfers.d2h_calls);
 }
 
-/// A one-sector real rule that reports anyonic braiding (every symbol is 1):
-/// a valid device operand, so the anyonic boundary is reachable on device.
-struct RealAnyonicProbe;
-
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-struct AnyonicProbeSector;
-
-impl tenet::core::FusionRule for RealAnyonicProbe {
-    fn rule_identity(&self) -> tenet::core::RuleIdentity {
-        tenet::core::RuleIdentity::from_canonical_bytes::<Self>(
-            0x1350_0000_0000_0001,
-            Arc::<[u8]>::from([]),
-        )
-    }
-    fn fusion_style(&self) -> tenet::core::FusionStyleKind {
-        tenet::core::FusionStyleKind::Unique
-    }
-    fn braiding_style(&self) -> tenet::core::BraidingStyleKind {
-        tenet::core::BraidingStyleKind::Anyonic
-    }
-    fn vacuum(&self) -> tenet::core::SectorId {
-        tenet::core::SectorId::new(0)
-    }
-    fn fusion_channels(
-        &self,
-        _: tenet::core::SectorId,
-        _: tenet::core::SectorId,
-    ) -> tenet::core::SectorVec {
-        core::iter::once(tenet::core::SectorId::new(0)).collect()
-    }
-}
-
-impl tenet::core::MultiplicityFreeFusionRule for RealAnyonicProbe {}
-
-impl tenet::core::MultiplicityFreeFusionSymbols for RealAnyonicProbe {
-    type Scalar = f64;
-    fn f_symbol_scalar(
-        &self,
-        _: tenet::core::SectorId,
-        _: tenet::core::SectorId,
-        _: tenet::core::SectorId,
-        _: tenet::core::SectorId,
-        _: tenet::core::SectorId,
-        _: tenet::core::SectorId,
-    ) -> f64 {
-        1.0
-    }
-    fn r_symbol_scalar(
-        &self,
-        _: tenet::core::SectorId,
-        _: tenet::core::SectorId,
-        _: tenet::core::SectorId,
-    ) -> f64 {
-        1.0
-    }
-}
-
-impl MultiplicityFreeRigidSymbols for RealAnyonicProbe {
-    fn dim_scalar(&self, _: tenet::core::SectorId) -> f64 {
-        1.0
-    }
-    fn inv_dim_scalar(&self, _: tenet::core::SectorId) -> f64 {
-        1.0
-    }
-    fn sqrt_dim_scalar(&self, _: tenet::core::SectorId) -> f64 {
-        1.0
-    }
-    fn inv_sqrt_dim_scalar(&self, _: tenet::core::SectorId) -> f64 {
-        1.0
-    }
-    fn twist_scalar(&self, _: tenet::core::SectorId) -> f64 {
-        1.0
-    }
-    fn frobenius_schur_phase_scalar(&self, _: tenet::core::SectorId) -> f64 {
-        1.0
-    }
-}
-
-impl CheckedFusionAlgebra for RealAnyonicProbe {
-    fn try_dual_sector(
-        &self,
-        sector: tenet::core::SectorId,
-    ) -> Result<tenet::core::SectorId, FusionAlgebraError> {
-        Ok(sector)
-    }
-    fn try_fusion_channels(
-        &self,
-        left: tenet::core::SectorId,
-        right: tenet::core::SectorId,
-    ) -> Result<tenet::core::SectorVec, FusionAlgebraError> {
-        Ok(tenet::core::FusionRule::fusion_channels(self, left, right))
-    }
-    fn try_nsymbol(
-        &self,
-        left: tenet::core::SectorId,
-        right: tenet::core::SectorId,
-        coupled: tenet::core::SectorId,
-    ) -> Result<usize, FusionAlgebraError> {
-        Ok(tenet::core::FusionRule::nsymbol(self, left, right, coupled))
-    }
-}
-
-impl SectorCodec for RealAnyonicProbe {
-    type Sector = AnyonicProbeSector;
-    fn encode_sector(
-        &self,
-        _: &AnyonicProbeSector,
-    ) -> Result<tenet::core::SectorId, FusionAlgebraError> {
-        Ok(tenet::core::SectorId::new(0))
-    }
-    fn decode_sector(
-        &self,
-        sector: tenet::core::SectorId,
-    ) -> Result<AnyonicProbeSector, FusionAlgebraError> {
-        if sector == tenet::core::SectorId::new(0) {
-            Ok(AnyonicProbeSector)
-        } else {
-            Err(FusionAlgebraError::InvalidSector { sector })
-        }
-    }
-}
+#[path = "../../tenet/tests/braiding_probe/mod.rs"]
+mod braiding_probe;
+use braiding_probe::{ProbeSector, RealBraidingProbe};
 
 /// G2c-5 (#1350): an anyonic traced operand is rejected by the trace compile
 /// with the Host's error before any trace runs, leaving every device state
@@ -2380,7 +2262,7 @@ impl SectorCodec for RealAnyonicProbe {
 #[ignore = "requires a real CUDA device"]
 fn anyonic_cuda_trace_prestep_rejects_like_host_before_device_work() {
     let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
-    let leg = GradedSpace::try_new(RealAnyonicProbe, [(AnyonicProbeSector, 2)]).unwrap();
+    let leg = GradedSpace::try_new(RealBraidingProbe::<true>, [(ProbeSector, 2)]).unwrap();
     let host = TensorMap::<_, f64>::rand_with_seed(&runtime, [&leg], [&leg], 1_356_000).unwrap();
     let device = host.to_cuda().unwrap();
     let host_error = tensor!([] = host[i; i]).unwrap_err();
@@ -2399,4 +2281,43 @@ fn anyonic_cuda_trace_prestep_rejects_like_host_before_device_work() {
     );
     assert_eq!(device_error.to_string(), host_error.to_string());
     assert_eq!(device_state(&runtime), before, "anyonic traced operand");
+}
+
+/// #1372: a device `tensor!` contraction on a non-symmetric (unbraided or
+/// anyonic) rule is rejected by the network preflight with the typed
+/// `contract`'s error — the Host `tensor!` error — even for the canonical
+/// network, before any device work or plan publication.
+fn assert_cuda_macro_contraction_rejects_non_symmetric<const ANYONIC: bool>() {
+    let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+    let leg = GradedSpace::try_new(RealBraidingProbe::<ANYONIC>, [(ProbeSector, 2)]).unwrap();
+    let host_lhs =
+        TensorMap::<_, f64>::rand_with_seed(&runtime, [&leg], [&leg], 1_372_100).unwrap();
+    let host_rhs =
+        TensorMap::<_, f64>::rand_with_seed(&runtime, [&leg], [&leg], 1_372_101).unwrap();
+    let (lhs, rhs) = (host_lhs.to_cuda().unwrap(), host_rhs.to_cuda().unwrap());
+    let host_error = tensor!([a; b] = host_lhs[a; k] * host_rhs[k; b]).unwrap_err();
+    let before = device_state(&runtime);
+    let device_error = tensor!([a; b] = lhs[a; k] * rhs[k; b]).unwrap_err();
+    assert!(
+        matches!(
+            &device_error,
+            tenet::prelude::Error::Operation(operation)
+                if matches!(
+                    **operation,
+                    tenet::operations::OperationError::UnsupportedTensorContractScope {
+                        message: tenet::typed::NON_SYMMETRIC_CONTRACTION_UNSUPPORTED
+                    }
+                )
+        ),
+        "{device_error:?}"
+    );
+    assert_eq!(device_error.to_string(), host_error.to_string());
+    assert_eq!(device_state(&runtime), before, "ANYONIC = {ANYONIC}");
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn non_symmetric_cuda_macro_contraction_rejects_like_host_before_device_work() {
+    assert_cuda_macro_contraction_rejects_non_symmetric::<false>();
+    assert_cuda_macro_contraction_rejects_non_symmetric::<true>();
 }

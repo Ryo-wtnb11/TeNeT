@@ -10,6 +10,9 @@ use tenet::prelude::{Complex64, Error, TensorScalar};
 use tenet::typed::{GradedSpace, Runtime, TensorMap, Truncation};
 use tenet_network::{plan_cache_stats, tensor};
 
+#[path = "../../tenet/tests/braiding_probe/mod.rs"]
+mod braiding_probe;
+
 fn space() -> GradedSpace<U1FusionRule> {
     GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap()
 }
@@ -429,4 +432,46 @@ fn factorization_fields_and_tuple_fields_contract_without_parentheses() {
     let qr = tensor.qr_compact().unwrap();
     let recomposed = tensor!([i, j; m] = qr.0[i, j; k] * qr.1[k; m]).unwrap();
     assert_close(recomposed.data(), tensor.data(), 1e-10);
+}
+
+/// #1372: the Host `tensor!` pairwise step is the typed `contract`, so a
+/// non-symmetric (unbraided or anyonic) rule is rejected with its one error
+/// even for the canonical, crossing-free network, which is exactly `compose`
+/// (still admitted).
+fn assert_host_macro_contraction_rejects_non_symmetric<const ANYONIC: bool>() {
+    let runtime = Runtime::builder().build().unwrap();
+    let leg = GradedSpace::try_new(
+        braiding_probe::RealBraidingProbe::<ANYONIC>,
+        [(braiding_probe::ProbeSector, 2)],
+    )
+    .unwrap();
+    let lhs = TensorMap::<_, f64>::rand_with_seed(&runtime, [&leg], [&leg], 1_372_000).unwrap();
+    let rhs = TensorMap::<_, f64>::rand_with_seed(&runtime, [&leg], [&leg], 1_372_001).unwrap();
+    let error = tensor!([a; b] = lhs[a; k] * rhs[k; b]).unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            Error::Operation(operation)
+                if matches!(
+                    **operation,
+                    tenet::operations::OperationError::UnsupportedTensorContractScope {
+                        message: tenet::typed::NON_SYMMETRIC_CONTRACTION_UNSUPPORTED
+                    }
+                )
+        ),
+        "{error:?}"
+    );
+    assert_eq!(
+        error.to_string(),
+        lhs.contract(&rhs, &[1], &[0], &[0, 1])
+            .unwrap_err()
+            .to_string()
+    );
+    assert!(lhs.compose(&rhs).is_ok());
+}
+
+#[test]
+fn host_tensor_macro_contraction_requires_symmetric_braiding() {
+    assert_host_macro_contraction_rejects_non_symmetric::<false>();
+    assert_host_macro_contraction_rejects_non_symmetric::<true>();
 }
