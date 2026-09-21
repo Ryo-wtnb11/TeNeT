@@ -308,3 +308,36 @@ fn rejections_match_the_host_in_order_and_do_no_device_work() {
     assert_eq!(counters, CudaTransferStats::default());
     assert_eq!(clone.to_host().unwrap().data(), case.tensor.data());
 }
+
+/// A trace with more distinct term signatures than Tenferro's default bound
+/// of 64 plans: `V` has nine charges of degeneracies 1..=9 and `W` nine of
+/// its own, charges spaced so every coupled sector has one `(a, w)` pair, so
+/// `trace(T, (0, 2))` of `T: V ⊗ W ← V ⊗ W` has 81 terms of distinct block
+/// extents. The executor raises the plan bound by that count, so the second
+/// call misses no plan.
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn a_warm_trace_past_the_default_plan_bound_rebuilds_no_plan() {
+    let runtime = Runtime::builder().cuda(0).build().unwrap();
+    let v = u1(&(0..9).map(|a| (a, a as usize + 1)).collect::<Vec<_>>());
+    let w = u1(&(0..9)
+        .map(|j| (100 * j, j as usize + 1))
+        .collect::<Vec<_>>());
+    let host: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&v, &w], [&v, &w], fill(71)).unwrap();
+    assert_eq!(host.block_count(), 81);
+    let source = host.to_cuda().unwrap();
+    let cold = source.trace_pairs(&[(0, 2)]).unwrap();
+    assert_close(
+        cold.to_host().unwrap().data(),
+        host.trace_pairs(&[(0, 2)]).unwrap().data(),
+        64,
+        "81-signature trace",
+    );
+    let plans = runtime.cuda_plan_cache_stats().unwrap().unwrap();
+    let _ = source.trace_pairs(&[(0, 2)]).unwrap();
+    let after = runtime.cuda_plan_cache_stats().unwrap().unwrap();
+    assert!(plans.entries > 64, "{plans:?}");
+    assert_eq!(after.misses, plans.misses, "{plans:?} -> {after:?}");
+    assert_eq!(after.evictions, plans.evictions, "{plans:?} -> {after:?}");
+}

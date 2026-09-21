@@ -222,7 +222,7 @@ impl CudaTreeTransformExecutor {
 
     /// Device bytes this executor retains for reuse: the uploaded coefficient
     /// and recoupling vectors, the transform workspaces, and the bytes the
-    /// context's shared scalar operands (the `1` and the zero template) pin on
+    /// context's shared scalar operands (the ones and zero templates) pin on
     /// its behalf. This is the number the device workspace budget charges.
     pub fn retained_device_bytes(&self, ctx: &CudaDenseContext) -> usize {
         self.executor_device_bytes()
@@ -264,6 +264,24 @@ impl CudaTreeTransformExecutor {
     /// a contraction plan key at all.
     pub fn required_plan_entries(&self) -> usize {
         self.required_plan_entries
+    }
+
+    /// Raises the backend's plan entry bound to what the prepared structures
+    /// need plus `signatures` more, under this executor's plan-cache budget:
+    /// the same rule [`Self::required_plan_entries`] is raised by, for a
+    /// caller that submits through the same context without a prepared
+    /// structure (the device trace). Monotonic like every raise.
+    pub fn raise_plan_cache_for_additional(
+        &self,
+        ctx: &CudaDenseContext,
+        signatures: usize,
+    ) -> Result<(), OperationError> {
+        let entries = plan_cache_entries_for(
+            self.required_plan_entries.saturating_add(signatures),
+            self.plan_cache_budget_bytes,
+        );
+        ctx.raise_plan_cache_max_entries(entries)
+            .map_err(OperationError::Dense)
     }
 
     /// Drops every prepared structure. The next replay re-prepares whatever it

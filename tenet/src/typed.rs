@@ -13845,7 +13845,10 @@ where
     ///
     /// A warm call transfers only the #740 output initialisation: one H2D of
     /// `required_len * size_of::<D>()` bytes, one device allocation (the
-    /// output), no download and no new cuTENSOR plan. The first call whose
+    /// output), no download and no new cuTENSOR plan while the trace's
+    /// distinct term signatures fit the plan-cache budget the transform
+    /// executor raises the bound under (about 585 plans together with the
+    /// prepared transforms; beyond it a warm call rebuilds plans). The first call whose
     /// largest traced extent `prod t_k` exceeds the resident ones template
     /// grows it once (one upload, reported by
     /// [`crate::prelude::CudaTreeTransformStats::context_scalar_operand_bytes`]).
@@ -13929,13 +13932,14 @@ where
         let required_len = space.space().required_len()?;
 
         let mut lease = self.runtime.lease_cuda()?;
-        let cuda = &mut *lease;
+        let (cuda, transforms) = lease.split();
         // ponytail: #740 — the device seam initializes an output by uploading
         // zeros; replace only with a measured native allocation. The zeros are
         // also what the accumulating replay starts from.
         let mut output = CudaStorage::upload_owned(cuda, vec![D::from_real(0.0); required_len])?;
         tenet_tensors::tensortrace_fusion_structure_accumulate_on_cuda(
             cuda,
+            transforms,
             &structure,
             space.space().structure(),
             &mut output,

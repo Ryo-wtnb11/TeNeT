@@ -177,7 +177,9 @@ the source block read through one merged diagonal axis per traced pair
 against the context-owned ones template, accumulated with `beta = 1` into the
 zero-initialised output, so repeated destinations sum (G2c-4,
 [#1349](https://github.com/Ryo-wtnb11/TeNeT/issues/1349)). A warm call
-transfers only the #740 output initialisation and misses no cuTENSOR plan.
+transfers only the #740 output initialisation and, while its distinct term
+signatures fit the transform executor's plan-cache budget (the bound is
+raised by that count under the same rule), misses no cuTENSOR plan.
 Gated by `tenet/tests/typed_cuda_trace.rs` (device == Host at every device
 dtype, owned and lazy-adjoint, U(1)/SU(2)/U(1)xSU(2)/fZ2xU(1)/fZ2(x)SU(2);
 device == the physical-basis diagonal sum and the identity contraction, both
