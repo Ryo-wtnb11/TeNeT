@@ -13644,6 +13644,166 @@ where
         }
         Ok(())
     }
+
+    /// TensorKit `twist(t, inds)` on a device tensor: each fusion-tree block
+    /// is multiplied by the product over `legs` (flat leg indices, codomain
+    /// first) of that leg's ribbon-twist eigenvalue.
+    ///
+    /// Same branches, in the same order, as the Host `twist`: an out-of-range
+    /// leg is rejected before the empty-list short circuit, a `NoBraiding`
+    /// provider is preflighted for non-unit legs, a twist that is the identity
+    /// on every block returns a body-sharing clone without touching the
+    /// device, and a lazy adjoint redirects through its parent with the
+    /// inverse operation. A twist does not change the space, so the result
+    /// keeps the receiver's layout.
+    ///
+    /// Reference: TensorKit `twist!`
+    /// (`src/tensors/indexmanipulations.jl:62-77` @`cfaa073`), which tests
+    /// `has_shared_twist` and then `scale!(t[f₁,f₂], θ)` per fusion-tree
+    /// block. QSpace has no ribbon-twist path at all — a concrete absence, not
+    /// an unexamined one — so the block-scaling decomposition follows
+    /// TensorKit and only the dataflow below is Rust/device specific.
+    ///
+    /// # Cost
+    ///
+    /// θ is built on the Host from the block structure alone, before the
+    /// device lease, and reaches the kernel as the contraction descriptor's
+    /// own scale: for every provider this impl admits (`Scalar = f64`) a
+    /// ribbon twist is a real sign, never zero, so the descriptor cannot let
+    /// CUDA skip a source read and NaN/Inf propagate exactly as on Host. No θ
+    /// table is uploaded. A warm call therefore transfers only the #740 output
+    /// initialisation — one H2D of the output bytes — downloads nothing,
+    /// allocates exactly one device buffer and submits one strided move per
+    /// non-empty block. Residual: a whole-buffer bitwise device copy followed
+    /// by in-place per-block scaling would submit fewer kernels, but Tenferro
+    /// 0.5.0 has no in-place strided scale (`cuda_region_axpby` cannot alias
+    /// its source and destination), so it is not expressible today.
+    ///
+    /// Flat elements that belong to no block — only reachable under a padded
+    /// expert layout — are zero here, where Host copies the source bytes
+    /// through; device structural results have carried that convention since
+    /// the transform leaf.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::UnsupportedOnDevice`] for a compact (diagonal) device payload:
+    /// the Host's compact-spectrum arm needs a representation `to_cuda` never
+    /// produces, and a silent dense fallback would hide the cost.
+    ///
+    /// Under the `cuda` feature `TensorMap<R, D, CudaStorage<D>>` and the Host
+    /// `TensorMap<R, D>` both have a `twist`; they are distinct inherent
+    /// methods on distinct types, so a path-form call must name the storage.
+    pub fn twist(&self, legs: &[usize]) -> Result<Self, Error> {
+        self.twist_with_inverse_cuda(legs, false)
+    }
+
+    /// The inverse ribbon twist on `legs`; see [`Self::twist`].
+    pub fn twist_inverse(&self, legs: &[usize]) -> Result<Self, Error> {
+        self.twist_with_inverse_cuda(legs, true)
+    }
+
+    fn twist_with_inverse_cuda(&self, legs: &[usize], inverse: bool) -> Result<Self, Error> {
+        let rank = self.rank();
+        let name = if inverse { "twist_inverse" } else { "twist" };
+        if let Some(&leg) = legs.iter().find(|&&leg| leg >= rank) {
+            return Err(Error::InvalidArgument(format!(
+                "{name} leg {leg} out of range for rank {rank}"
+            )));
+        }
+        if legs.is_empty() {
+            return Ok(self.clone());
+        }
+        let provider = self.logical_space().provider();
+        reject_unbraided_nonunit_legs(
+            provider,
+            self.logical_space().space().homspace(),
+            legs,
+            name,
+            true,
+        )?;
+        // Host order: the lazy adjoint lowers onto its parent with the
+        // opposite direction rather than materializing itself. `.adjoint()` is
+        // lease-free, so this recursion never nests a device lease.
+        if let TypedTensorRepr::Adjoint(view) = &self.repr {
+            let parent = Self {
+                runtime: self.runtime.clone(),
+                repr: TypedTensorRepr::Owned(Arc::clone(&view.parent)),
+            };
+            let axes = logical_adjoint_axes_to_parent(
+                view.parent.space.space().nout(),
+                view.parent.space.space().nin(),
+                legs,
+            );
+            return parent.twist_with_inverse_cuda(&axes, !inverse)?.adjoint();
+        }
+        let nout = self.codomain_rank();
+        let space = self.logical_space().clone();
+        // Ahead of the storage kind, as on Host, where an all-ones twist
+        // leaves even a compact spectrum untouched.
+        if twist_is_identity_over_blocks(provider, space.space().structure(), nout, legs)? {
+            return Ok(self.clone());
+        }
+        let src = self.direct_cuda_storage(name)?;
+        let structure = space.space().structure();
+        let required_len = space.space().required_len()?;
+        // The whole θ table, on the Host, before the lease: one region per
+        // block with that block's factor as the descriptor scale. A block
+        // whose factor is 1 still has to be moved — the output starts as
+        // zeros, where the Host started from a copy of the source.
+        let blocks = (0..structure.block_count())
+            .map(|index| {
+                let block = structure.block(index)?;
+                let factor = match block.key() {
+                    BlockKey::FusionTree(key) => {
+                        twist_block_factor(provider, key, nout, legs, inverse)
+                    }
+                    _ => 1.0,
+                };
+                let region = tenet_dense::CudaRegion::new(
+                    block.shape().to_vec(),
+                    block.strides().to_vec(),
+                    block.offset(),
+                )
+                .and_then(|region| region.validate_as_destination(name).map(|()| region))
+                .map_err(|err| Error::from(tenet_tensors::OperationError::Dense(err)))?;
+                Ok((region, D::from_real(factor)))
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+
+        let mut lease = self.runtime.lease_cuda()?;
+        let cuda = &mut *lease;
+        Self::validate_cuda_owned_metadata(
+            Placement::Cuda(cuda.device()),
+            src.placement(),
+            required_len,
+            src.len(),
+        )?;
+        // ponytail: #740 — the device seam still initializes an output by
+        // uploading zeros; replace only with a measured native allocation.
+        let mut dst = CudaStorage::upload_owned(cuda, vec![D::from_real(0.0); required_len])?;
+        for (region, factor) in &blocks {
+            // A ribbon twist is never zero, so the factor rides the descriptor
+            // scale: no coefficient buffer, and CUDA still has to read the
+            // source, which is what keeps NaN/Inf propagation equal to Host.
+            tenet_dense::cuda_region_axpby::<D>(
+                cuda,
+                &src.0,
+                region,
+                false,
+                *factor,
+                tenet_dense::CudaRegionCoefficient::One,
+                tenet_dense::CudaRegionBeta::Overwrite,
+                &mut dst.0,
+                region,
+            )
+            .map_err(|err| Error::from(tenet_tensors::OperationError::Dense(err)))?;
+        }
+        drop(lease);
+        Ok(Self {
+            runtime: self.runtime.clone(),
+            repr: owned_repr(TypedTensorBody::dense(space, dst)),
+        })
+    }
 }
 
 impl<R, D> TensorMap<R, D>

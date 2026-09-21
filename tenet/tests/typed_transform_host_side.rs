@@ -346,3 +346,101 @@ fn host_overwrite_into_clears_a_poisoned_destination_and_never_short_circuits() 
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Device twist (#1330, G2b-t): the Host-side decisions its lowering rests on
+// ---------------------------------------------------------------------------
+
+/// The device `twist` puts the per-block factor on the contraction
+/// descriptor's own scale instead of uploading a factor table. That is only
+/// sound because, for every provider the device impl admits (`Scalar = f64`),
+/// a ribbon twist is a real sign and never zero — a zero would be rejected by
+/// `cuda_region_axpby`, and would also let CUDA skip the source read.
+///
+/// This pins the value domain observationally, without a device: a Host twist
+/// may keep an entry or negate it, and nothing else. It also pins that some
+/// blocks really do keep their factor of one, which is why the device has to
+/// move every block rather than only the scaled ones.
+#[test]
+fn a_fermionic_twist_only_ever_keeps_or_negates_an_entry() {
+    let runtime = Runtime::builder().build().unwrap();
+    let leg = GradedSpace::try_new_with_arc(
+        Arc::new(tenet::core::FermionParityFusionRule),
+        [
+            (tenet::core::Z2Irrep::EVEN, 2),
+            (tenet::core::Z2Irrep::ODD, 1),
+        ],
+    )
+    .unwrap();
+    let dual = leg.try_dual().unwrap();
+    let tensor: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg, &dual], [&leg, &leg], real_fill).unwrap();
+
+    for legs in [
+        &[0usize][..],
+        &[1][..],
+        &[3][..],
+        &[0, 3][..],
+        &[1, 2, 3][..],
+    ] {
+        for twisted in [
+            tensor.twist(legs).unwrap(),
+            tensor.twist_inverse(legs).unwrap(),
+        ] {
+            let mut kept = 0usize;
+            let mut negated = 0usize;
+            for (&before, &after) in tensor.data().iter().zip(twisted.data()) {
+                if after == before {
+                    kept += 1;
+                } else {
+                    assert_eq!(after, -before, "twist {legs:?} scaled by something else");
+                    negated += 1;
+                }
+            }
+            assert!(negated > 0, "twist {legs:?} changed nothing");
+            assert!(
+                kept > 0,
+                "twist {legs:?} scaled every entry, so no unscaled block is covered"
+            );
+        }
+    }
+
+    // Twisting *every* leg is the identity on a parity-conserving block: the
+    // factors multiply to the block's total parity, which is even. So this is
+    // the identity short circuit, not a scaled copy — the device gate asserts
+    // the same case does no device work at all.
+    for legs in [&[0usize, 1, 2, 3][..], &[0, 1, 2, 3, 0, 1, 2, 3][..]] {
+        assert_eq!(tensor.twist(legs).unwrap().data(), tensor.data());
+        assert_eq!(tensor.twist_inverse(legs).unwrap().data(), tensor.data());
+    }
+
+    // An inverse twist undoes a twist exactly, which is what lets the device
+    // gate compare the two runs for equality rather than to a tolerance.
+    let round_trip = tensor
+        .twist(&[0, 2])
+        .unwrap()
+        .twist_inverse(&[0, 2])
+        .unwrap();
+    assert_eq!(round_trip.data(), tensor.data());
+}
+
+/// The empty-tensor fixture of the device gate: a space with no coupled
+/// sector at all still twists, and stays empty.
+#[test]
+fn a_twist_of_an_empty_space_stays_empty() {
+    let runtime = Runtime::builder().build().unwrap();
+    let even = GradedSpace::try_new_with_arc(
+        Arc::new(tenet::core::FermionParityFusionRule),
+        [(tenet::core::Z2Irrep::EVEN, 2)],
+    )
+    .unwrap();
+    let odd = GradedSpace::try_new_with_arc(
+        Arc::new(tenet::core::FermionParityFusionRule),
+        [(tenet::core::Z2Irrep::ODD, 1)],
+    )
+    .unwrap();
+    let empty: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&even], [&odd], real_fill).unwrap();
+    assert!(empty.data().is_empty(), "the fixture must carry no element");
+    assert!(empty.twist(&[0, 1]).unwrap().data().is_empty());
+}
