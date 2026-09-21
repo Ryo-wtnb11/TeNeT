@@ -96,6 +96,36 @@ mod device {
         pub iterations: usize,
         pub warmup: usize,
         pub device: usize,
+        pub precision: Precision,
+    }
+
+    /// Which payload lanes one invocation emits.
+    ///
+    /// Not "all four by default", and the reason is a resource limit rather
+    /// than a preference: the protocol builds a **fresh `Runtime` per row**,
+    /// and each one creates a CUDA context and a cuTENSOR handle. Emitting all
+    /// four lanes in one process roughly triples the row count and the run
+    /// dies before the last provider with `cutensorCreate returned status 14`
+    /// (observed on an A100, CUDA 12.6, cuTENSOR 2.5.0; see
+    /// `benchmarks/history/cuda-typed-single-precision-factorizations-2026-09-21.md`).
+    /// Splitting the lanes across invocations keeps each process inside the
+    /// limit and leaves the pinned double-precision baseline exactly the rows
+    /// and order it always had.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub(super) enum Precision {
+        Double,
+        Single,
+        All,
+    }
+
+    impl Precision {
+        fn double(self) -> bool {
+            matches!(self, Self::Double | Self::All)
+        }
+
+        fn single(self) -> bool {
+            matches!(self, Self::Single | Self::All)
+        }
     }
 
     fn parse_pair(name: &str, raw: &str) -> [usize; 2] {
@@ -124,6 +154,7 @@ mod device {
             iterations: 20,
             warmup: 3,
             device: 0,
+            precision: Precision::Double,
         };
         let mut args = std::env::args().skip(1);
         while let Some(flag) = args.next() {
@@ -138,9 +169,19 @@ mod device {
                 }
                 "--warmup" => config.warmup = value.parse().expect("--warmup must be an integer"),
                 "--device" => config.device = value.parse().expect("--device must be an integer"),
+                "--precision" => {
+                    config.precision = match value.as_str() {
+                        "double" => Precision::Double,
+                        "single" => Precision::Single,
+                        "all" => Precision::All,
+                        other => {
+                            panic!("--precision takes `double`, `single` or `all`, not `{other}`")
+                        }
+                    }
+                }
                 other => panic!(
                     "unknown flag `{other}`; supported: --blocks, --degeneracy, --iterations, \
-                     --warmup, --device"
+                     --warmup, --device, --precision"
                 ),
             }
         }
@@ -1338,15 +1379,19 @@ mod device {
                 let blocks = $config.blocks[index];
                 let degeneracy = $config.degeneracy[index];
                 let space = ($build)(blocks, degeneracy);
-                run_dtype::<_, f64>($config, $name, family, blocks, degeneracy, &space);
-                run_qr::<_, f64>($config, $name, family, blocks, degeneracy, &space);
-                run_dtype::<_, Complex64>($config, $name, family, blocks, degeneracy, &space);
-                // Single precision (#1341). Appended after the
-                // double-precision rows so the pinned baseline CSVs keep their
-                // existing row order and content.
-                run_dtype::<_, f32>($config, $name, family, blocks, degeneracy, &space);
-                run_qr::<_, f32>($config, $name, family, blocks, degeneracy, &space);
-                run_dtype::<_, Complex32>($config, $name, family, blocks, degeneracy, &space);
+                if $config.precision.double() {
+                    run_dtype::<_, f64>($config, $name, family, blocks, degeneracy, &space);
+                    run_qr::<_, f64>($config, $name, family, blocks, degeneracy, &space);
+                    run_dtype::<_, Complex64>($config, $name, family, blocks, degeneracy, &space);
+                }
+                // Single precision (#1341), appended after the
+                // double-precision rows so a `--precision all` run keeps the
+                // baseline row order as its prefix.
+                if $config.precision.single() {
+                    run_dtype::<_, f32>($config, $name, family, blocks, degeneracy, &space);
+                    run_qr::<_, f32>($config, $name, family, blocks, degeneracy, &space);
+                    run_dtype::<_, Complex32>($config, $name, family, blocks, degeneracy, &space);
+                }
             }
         }};
     }

@@ -174,12 +174,46 @@ From the #1336 review:
 * The `DevicePayload` harness trait moved to `tenet/tests/common/mod.rs`, so
   the base and factorization device suites share one definition.
 * `tenet-network/examples/cuda_operation_matrix.rs` gained `f32` and
-  `Complex32` rows. The base/factorization harness split #1336 expected turned
-  out to be unnecessary — it existed only because `f32` was not a
+  `Complex32` rows behind a new `--precision double|single|all` flag,
+  defaulting to `double`. The base/factorization harness split #1336 expected
+  turned out to be unnecessary — it existed only because `f32` was not a
   `CudaFactorizationPayload`. Smoke run only; the pinned baseline CSVs are
-  untouched and the double-precision rows are emitted first and unchanged.
+  untouched.
+
+  **The flag is a resource limit, not a preference.** The first smoke run
+  emitted all four lanes in one process and died 1900 rows in, inside the last
+  provider, at `Runtime::builder().cuda(..).build()`:
+
+  ```
+  thread 'main' panicked at tenet-network/examples/cuda_operation_matrix.rs:607:14:
+  CUDA Runtime for the measured row: Operation(Dense(Backend { backend: Cuda,
+    op: "cuda_matmul", message: "cuda_cutensor: extension cuda failed:
+    cuTENSOR call cutensorCreate returned status 14" }))
+  ```
+
+  The harness protocol builds a **fresh `Runtime` per row**, so each row
+  creates a CUDA context and a cuTENSOR handle, and roughly tripling the row
+  count crosses a limit. The failure is cumulative, not dtype-specific: it
+  struck an `f64` row set after every single-precision row of the three
+  preceding providers had passed. Emitting the lanes in separate invocations
+  keeps each process inside the limit; `--precision single` then completes with
+  `EXIT=0`, 1234 lines, every provider and family, and zero `not-ok` verdicts.
+
+  The underlying per-`Runtime` device-resource retention is a pre-existing
+  property of this harness that single precision merely made visible. It is
+  **not** fixed here — that is a `Runtime`/backend lifetime question, not a
+  test-fixture one — and it is left as a residual below.
 
 ## Residuals
+
+**The operation-matrix harness retains device resources per row.** A fresh
+`Runtime` per row is the protocol, and the resources each one takes are not
+fully returned when it drops, so a long enough single process fails at
+`cutensorCreate`. The `--precision` flag keeps every invocation short enough,
+which is a workaround and is labelled as one. Whether `Runtime` — or the
+tenferro CUDA backend behind it — should release its cuTENSOR handle on drop
+belongs to its own issue; no production caller builds one `Runtime` per
+operation, so the library's own device path is unaffected.
 
 See the audit note. In short: a compact-diagonal *device* receiver is
 unreachable through the public API (`to_cuda` densifies), so only the

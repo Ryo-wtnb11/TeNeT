@@ -156,8 +156,13 @@ halved; no absolute platform constant appears.
 * **`tenet-network/examples/cuda_operation_matrix.rs`** gained `f32` and
   `Complex32` rows *without* the base/factorization harness split #1336
   expected: that split existed only to work around `f32` not being a
-  `CudaFactorizationPayload`, which this leaf removed. Its pinned baseline CSVs
-  are untouched and the double-precision rows are emitted first and unchanged,
-  including their `check` column.
+  `CudaFactorizationPayload`, which this leaf removed. The rows sit behind a
+  new `--precision double|single|all` flag whose default is `double`, so the
+  pinned baseline CSVs keep their rows, their order and their `check` column.
+  The flag exists because the harness builds a fresh `Runtime` per row and
+  three lanes in one process exhaust cuTENSOR handles (`cutensorCreate` status
+  14 after ~1900 rows on an A100); that retention is a pre-existing property of
+  the harness, is not fixed here, and is recorded in
+  `benchmarks/history/cuda-typed-single-precision-factorizations-2026-09-21.md`.
 * **Persistence** (`WireScalar`) and the host advanced-linalg family stay
   closed for single precision; leaves H8 and H5, unchanged here.
