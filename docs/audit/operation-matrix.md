@@ -167,7 +167,12 @@ as on Host (it was accepted before). The Host checked-Generic cell is
 `NEEDS-PROOF` for a named gap: `tensorcontract_owned_checked_generic_in_context`
 accepts arbitrary axes for owned operands (lazy adjoints are
 `InvalidArgument`), but no fixture gates a non-canonical checked-Generic
-contraction against an independent oracle.
+contraction against an independent oracle. Host and device
+`contract_overwrite_into` reject anyonic providers with `contract`'s error
+right after the Runtime check, and the Host compact-spectrum `trace_pairs` arm
+rejects non-symmetric braiding with the dense trace's error, as TensorKit
+`blas_contract!` / `trace_permute!` do
+([#1355](https://github.com/Ryo-wtnb11/TeNeT/issues/1355)).
 
 [13] Device `trace_pairs` replays the Host trace structure — its valid
 tree-pair terms, their coefficients (recoupling row, `dim(c)/dim(a_1)`, the
