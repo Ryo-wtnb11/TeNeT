@@ -135,6 +135,10 @@ reported as `inf`, not as a typed error — the same convention `f64` overflow
 already has. Pinned by
 `device_single_precision_norm_can_overflow_where_the_host_stays_finite`, whose
 double-precision twin of the same fixture shape stays finite on both sides.
+*Superseded for `norm`/`normalize` by
+[#1344](https://github.com/Ryo-wtnb11/TeNeT/issues/1344): the device `norm`
+now widens a single-precision payload and accumulates in `f64`; `inner` keeps
+the behaviour described here.*
 
 Reduction *tests* therefore use a stated device-accumulation bound,
 `2 * terms * eps(real(D)) * scale`, where `scale` is an upper bound on
