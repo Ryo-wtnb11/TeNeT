@@ -197,8 +197,8 @@ same dtype*.
 
 The reductions are an `INTENTIONAL-DIFFERENCE` rather than `PROVED` because
 their two halves accumulate differently: within one coupled sector the device
-sums in the payload dtype inside the backend GEMM (Tenferro 0.5.0 exposes no
-widening reduction), while across coupled sectors the host half accumulates in
+sums in the payload dtype inside the backend GEMM (Tenferro 0.5.0 and 0.6.0
+expose no widening reduction), while across coupled sectors the host half accumulates in
 `WideScalar::Wide` like every host reduction. A `norm` finite on the host can
 therefore be `inf` on the device at single precision; it is reported as `inf`,
 the same convention `f64` overflow already has. Both halves are documented on
@@ -211,10 +211,11 @@ the same convention `f64` overflow already has. Both halves are documented on
 implemented for all four device payloads, and `qr_compact` off the narrower
 `CudaQrPayload`, implemented for `f64` and `f32`. Device QR for either complex
 payload stays a **compile-time** boundary, because the backend's
-positive-diagonal gauge runs a `triu` kernel whose complex zero constant the
-pinned Tenferro cannot compile (tenferro-rs#1833 for `cuFloatComplex`,
+positive-diagonal gauge runs a `triu` kernel whose complex zero constant
+Tenferro 0.5.0 could not compile (tenferro-rs#1833 for `cuFloatComplex`,
 [#1271](https://github.com/Ryo-wtnb11/TeNeT/issues/1271) for
-`cuDoubleComplex`). That capability has one authority — the adapter's
+`cuDoubleComplex`). Tenferro 0.6.0 compiles it; the boundary stays until
+#1271 verifies TeNeT's complex device QR. That capability has one authority — the adapter's
 `CudaScalar::DEVICE_CONSTANT_KERNELS` — and `CudaQrPayload` is a projection of
 it held equal by a `const` assertion in `tenet/src/typed.rs`, so an upstream
 kernel fix cannot leave a dtype silently locked out.
@@ -288,12 +289,13 @@ device result is composed from `svd_compact`/`eigh_full`, `to_host`,
 `diagview`, `GradedSpace::find_truncated` and
 `restrict_leg`/`restrict_diagonal`.
 `qr_compact` is `f64`-only, and deliberately a compile-time boundary rather
-than a runtime error: every tenferro-gpu 0.5.0 path to the `R` factor calls its
+than a runtime error: every tenferro-gpu path to the `R` factor calls its
 `triu` kernel, whose zero constant (`src/kernels/helpers.rs:84`
-`E::cast_from(0u32)`) emits `cuDoubleComplex(uint32(0))` and fails NVRTC
-compilation for `Complex64`. `qr_compact` in the positive-diagonal gauge
-(`R_jj` real and non-negative, phase 1 kept at zero) is otherwise implemented
-for both payloads and becomes available when that backend kernel is fixed.
+`E::cast_from(0u32)`) emitted `cuDoubleComplex(uint32(0))` and failed NVRTC
+compilation for `Complex64` up to Tenferro 0.5.0. Tenferro 0.6.0 compiles it;
+`qr_compact` in the positive-diagonal gauge (`R_jj` real and non-negative,
+phase 1 kept at zero) is otherwise implemented for both payloads and becomes
+available once #1271 verifies it on device.
 Full/values factorizations, `eig`, and matrix functions stay
 device-unsupported for both payloads.
 Release/feature topology remains [#129](https://github.com/Ryo-wtnb11/TeNeT/issues/129).

@@ -175,3 +175,45 @@ pub(crate) fn dense_dtype_from_tenferro(
         }
     })
 }
+
+#[cfg(all(test, feature = "tenferro"))]
+mod tests {
+    use super::*;
+
+    /// A real `DType::External` tensor needs `tenferro_tensor_core::ErasedHostTensor`,
+    /// which `tenferro-tensor` does not re-export and TeNeT does not depend on, so
+    /// the boundary is pinned on the mapping every constructor routes through.
+    #[test]
+    fn external_tenferro_dtype_is_a_typed_unsupported_error() {
+        let err = dense_dtype_from_tenferro(tenferro_tensor::DType::External(
+            std::any::TypeId::of::<u8>(),
+        ))
+        .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                DenseError::Unsupported {
+                    op: "tenferro_dtype",
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn native_tenferro_dtypes_map_one_to_one() {
+        use tenferro_tensor::DType;
+        for (tenferro, dense) in [
+            (DType::F32, DenseDType::F32),
+            (DType::F64, DenseDType::F64),
+            (DType::I32, DenseDType::I32),
+            (DType::I64, DenseDType::I64),
+            (DType::Bool, DenseDType::Bool),
+            (DType::C32, DenseDType::C32),
+            (DType::C64, DenseDType::C64),
+        ] {
+            assert_eq!(dense_dtype_from_tenferro(tenferro).unwrap(), dense);
+        }
+    }
+}

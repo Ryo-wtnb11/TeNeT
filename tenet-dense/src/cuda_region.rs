@@ -205,18 +205,19 @@ pub(crate) fn validate_destination_layout(
     })
 }
 
-/// Byte alignment Tenferro 0.5.0's `copy_read_into` advertises to cuTENSOR
+/// Byte alignment Tenferro 0.5.0's `copy_read_into` advertised to cuTENSOR
 /// for *both* operands of a permutation.
 ///
-/// `resolve_prepared_device_region`
-/// (`tenferro-gpu-0.5.0/src/cubecl/permutation.rs:726`) folds a view's element
-/// offset into the operand pointer but still reports the allocation's
-/// alignment (`permutation.rs:755`), and `copy_view_into`
-/// (`permutation.rs:480`) passes that number straight into the descriptor.
-/// cuTENSOR selects a vectorized kernel from it, so an operand that starts
-/// mid-allocation faults the launch with `cudaErrorMisalignedAddress`.
-/// Tenferro main fixed this in `25379dd` (tensor4all/tenferro-rs#1836,
-/// `device_address_alignment`); the pinned 0.5.0 release did not get it.
+/// In 0.5.0, `resolve_prepared_device_region` (tenferro-gpu
+/// `src/cubecl/permutation.rs:726`) folded a view's element offset into the
+/// operand pointer but still reported the allocation's alignment
+/// (`permutation.rs:755`), and `copy_view_into` (`permutation.rs:480`) passed
+/// that number straight into the descriptor. cuTENSOR selects a vectorized
+/// kernel from it, so an operand that started mid-allocation faulted the
+/// launch with `cudaErrorMisalignedAddress` (#1320). Tenferro 0.6.0 reports
+/// the shifted address's true alignment (`device_address_alignment`,
+/// `permutation.rs:771`, tensor4all/tenferro-rs#1836); this guard is kept
+/// unchanged until leaf M2 removes it with its own device evidence.
 pub(crate) const CUTENSOR_PERMUTE_DESCRIPTOR_ALIGNMENT: usize = 256;
 
 /// Whether a permutation operand starting at `offset` elements of

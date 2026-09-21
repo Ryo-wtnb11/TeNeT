@@ -105,12 +105,13 @@ accumulators, and the difference is observable only at single precision.
 
 | Half | Where | Accumulator | Why |
 | --- | --- | --- | --- |
-| within one coupled sector | device, inside the backend GEMM | the payload dtype | Tenferro 0.5.0 offers no widening reduction |
+| within one coupled sector | device, inside the backend GEMM | the payload dtype | Tenferro (0.5.0 and 0.6.0) offers no widening reduction |
 | across coupled sectors (quantum-dimension weighting and the total) | host, after the lease is released | `WideScalar::Wide` | the same accumulator every host reduction uses |
 
 The device half is not TeNeT's choice to make. `dot_general_read_into_accum`
-(`tenferro-gpu-0.5.0/src/cubecl/gemm.rs:726`) dispatches on the single dtype
-shared by both operands and the destination, and `accum_erased` (`:743`) reads
+(`tenferro-gpu-0.6.0/src/cubecl/gemm.rs:777`; `:726` in 0.5.0) dispatches on
+the single dtype shared by both operands and the destination, and
+`accum_erased` (`:794`; `:743` in 0.5.0) reads
 all three as one `T`; the cuTENSOR compute descriptor is fixed per dtype with
 no caller control — `CUTENSOR_COMPUTE_DESC_32F` for `f32` (`gemm.rs:101`),
 `..._64F` for `f64` (`gemm.rs:134`). A widened device sum would need a second

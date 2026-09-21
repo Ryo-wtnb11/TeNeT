@@ -65,28 +65,24 @@ pub trait CudaScalar:
     /// invariant, not a size or workload heuristic.
     const IS_COMPLEX: bool;
 
-    /// Whether a device kernel that *materializes* a payload-typed constant
-    /// compiles for this dtype.
+    /// Whether TeNeT admits device kernels that *materialize* a payload-typed
+    /// constant (the QR gauge's `triu` fill, LU's identity fill) for this dtype.
     ///
-    /// `false` for both complex payloads, `true` for both real ones.
-    /// Tenferro 0.5.0 builds such a constant as `E::cast_from(0u32)` /
-    /// `E::cast_from(1u32)` (tenferro-gpu 0.5.0
-    /// `src/kernels/helpers.rs:84-86`), and NVRTC has no constructor from
-    /// `uint32` to either `float2` or `double2`, so the QR gauge's `triu` fill
-    /// and LU's identity fill fail inside the launch. Both arms are observed
-    /// on an A100 with CUDA 12.6: the [`Complex32`] one is tenferro-rs#1833
-    /// (`benchmarks/history/cuda-single-precision-probe-2026-09-20.md`) and
-    /// the [`Complex64`] one is #1271
-    /// (`benchmarks/history/cuda-scalar-single-precision-2026-09-21.md`);
-    /// both are fixed upstream but not in the pinned 0.5.0. Gating only the
-    /// single-precision arm would leave the identical defect reported as an
-    /// NVRTC compile log for the other caller of the same kernel.
+    /// `false` for both complex payloads, `true` for both real ones. Up to
+    /// Tenferro 0.5.0 those kernels did not compile for a complex payload
+    /// (tenferro-rs#1833 for [`Complex32`], #1271 for [`Complex64`]; A100
+    /// records in `benchmarks/history/cuda-single-precision-probe-2026-09-20.md`
+    /// and `cuda-scalar-single-precision-2026-09-21.md`). Tenferro 0.6.0
+    /// compiles them (t4a-cubecl 0.10.1, tenferro-rs#1837), and the raw
+    /// Tenferro probes in `tests/cuda_single_precision_probe.rs` pass on an
+    /// A100, but TeNeT's own complex device QR/LU/solve paths are not yet
+    /// verified; the gate stays until #1271 supplies that evidence.
     ///
     /// It is a dtype capability, not a size or workload heuristic, so the
     /// operations that need such a kernel reject the dtype before any device
     /// work. The typed layer reaches device QR for `f64` and `f32`; complex
-    /// device QR is a capability boundary there (tenferro-rs#1833 / #1271),
-    /// not a runtime error it can reach.
+    /// device QR is a capability boundary there (#1271), not a runtime error
+    /// it can reach.
     const DEVICE_CONSTANT_KERNELS: bool;
 
     /// Which of the context's lazily created scalar-operand slots this dtype
@@ -174,7 +170,7 @@ impl CudaScalar for Complex32 {
     const ZERO: Self = Complex32::new(0.0, 0.0);
     const ONE: Self = Complex32::new(1.0, 0.0);
     const IS_COMPLEX: bool = true;
-    // tenferro-rs#1833: NVRTC cannot construct a `float2` from `uint32`.
+    // #1271: unverified on device; Tenferro 0.6.0 fixed the compile defect (tenferro-rs#1833).
     const DEVICE_CONSTANT_KERNELS: bool = false;
     const OPERAND_SLOT: usize = 2;
 
@@ -616,9 +612,10 @@ impl CudaDenseContext {
     /// context can reach, so their one-time initialization is paid here
     /// rather than by the first user operation.
     ///
-    /// Why: tenferro 0.5.0 loads cuTENSOR (`dlopen` + `cutensorCreate`) and
-    /// the cuSOLVER/cuBLAS handles lazily, per `CudaBackend` instance, on the
-    /// first submission that needs them, and exposes no warm-up entry point.
+    /// Why: Tenferro (0.5.0, and 0.6.0 exposes no warm-up entry point either)
+    /// loads cuTENSOR (`dlopen` + `cutensorCreate`) and the cuSOLVER/cuBLAS
+    /// handles lazily, per `CudaBackend` instance, on the first submission
+    /// that needs them.
     /// The measured cost is 185-657 ms
     /// (`benchmarks/history/cuda-baseline-2026-09-20.md`), independent of the
     /// operation, provider, dtype and size that happens to pay it. The cost is
@@ -828,16 +825,24 @@ impl CudaDenseStorage {
     }
 
     /// Wraps a device tensor produced by a tenferro op (e.g. a cuSOLVER
-    /// factor) as flat storage.
-    fn from_tensor<D: CudaScalar>(tensor: Tensor, device: usize) -> Self {
+    /// factor) as flat storage, after proving it carries `D`'s payload — the
+    /// dtype recorded here.
+    fn from_tensor<D: CudaScalar>(
+        op: &'static str,
+        tensor: Tensor,
+        device: usize,
+    ) -> Result<Self, DenseError> {
+        if D::typed(&tensor).is_none() {
+            return Err(dtype_mismatch::<D>(op, &tensor));
+        }
         DEVICE_ALLOCS.fetch_add(1, Ordering::Relaxed);
         let len = tensor.shape().iter().product();
-        Self {
+        Ok(Self {
             tensor,
             dtype: D::DTYPE,
             len,
             device,
-        }
+        })
     }
 
     /// Column-major matrix view over a buffer region with an explicit
@@ -1125,7 +1130,8 @@ fn cuda_gemm_region_strided_into<D: CudaScalar>(
 
 /// How a region call treats the destination it writes.
 ///
-/// Only these two exist: Tenferro 0.5.0 has no in-place strided scale, so a
+/// Only these two exist: Tenferro has no in-place strided scale
+/// (`scale_tensor_write` is compact-only in 0.5.0 and 0.6.0), so a
 /// general `beta` is a capability boundary rather than a parameter. The host
 /// replay never needs one either — an overwriting transform zeroes its
 /// inactive layouts and assigns the active ones, and an accumulating caller
@@ -1182,10 +1188,9 @@ fn ensure_device_constant_kernels<D: CudaScalar>(
     Err(DenseError::Unsupported {
         op,
         message: format!(
-            "{:?} device {kernel} is unsupported: tenferro 0.5.0 materializes the kernel's \
-             payload constant as a cast from `uint32`, which NVRTC cannot construct for a \
-             complex payload (tenferro-rs#1833 for `cuFloatComplex`, #1271 for \
-             `cuDoubleComplex`). Use the host path for this dtype.",
+            "{:?} device {kernel} is unsupported: TeNeT has not yet verified complex device \
+             kernels that materialize a payload constant (#1271; the Tenferro compile defect \
+             tenferro-rs#1833 is fixed in 0.6.0). Use the host path for this dtype.",
             D::DTYPE
         ),
     })
@@ -1518,9 +1523,9 @@ pub fn cuda_region_zero<D: CudaScalar>(
 /// trailing axes are contracted jointly against the packed first `prod t_k`
 /// elements of the context's ones template, one `dot_general` in all
 /// (TensorOperations' cuTENSOR trace builds the same diagonal-stride
-/// descriptor and hands it to a reduction, which Tenferro 0.5.0 does not
-/// expose on views). Pairs are never merged with one another, so no pair
-/// needs a stride commensurate with another's.
+/// descriptor and hands it to a reduction, which Tenferro did not expose on
+/// views when this route was written against 0.5.0). Pairs are never merged
+/// with one another, so no pair needs a stride commensurate with another's.
 ///
 /// `alpha` rides the contraction descriptor. A zero `alpha` would let the
 /// backend skip the source read and erase NaN/Inf the host propagates, so it
@@ -1851,36 +1856,29 @@ pub fn cuda_is_hermitian_region<D: CudaScalar>(
     ))
 }
 
-fn expect_dtype<D: CudaScalar>(
-    op: &'static str,
-    tensor: Tensor,
-    device: usize,
-) -> Result<CudaDenseStorage, DenseError> {
-    if D::typed(&tensor).is_none() {
-        return Err(dtype_mismatch::<D>(op, &tensor));
-    }
-    Ok(CudaDenseStorage::from_tensor::<D>(tensor, device))
-}
-
 /// Copies the leading compact `rows x cols` block of a device buffer into a
 /// packed sub-region of `dst`.
 ///
-/// Tenferro's `copy_read_into` accepts an offset/strided destination view but
-/// requires a compact source view at offset 0, so the source is read from its
-/// start; the caller owns the proof that the destination region's tree layout
+/// Tenferro 0.5.0's `copy_read_into` accepted an offset/strided destination
+/// view but required a compact source view at offset 0 (0.6.0 accepts strided
+/// sources, tenferro-rs#1836; adopting that is leaf M4), so the source is read
+/// from its start; the caller owns the proof that the destination region's tree layout
 /// is identical to what it reads (see `compile_cuda_qr_plan`). A source longer
 /// than the region is accepted because contiguity is a layout predicate: the
 /// leading `rows * cols` elements of a compact buffer are themselves compact,
 /// so one maximum-length buffer can serve every shorter region.
 ///
-/// Route: a destination whose byte offset keeps the alignment Tenferro 0.5.0
-/// advertises to cuTENSOR (256 bytes, `cuda_region::permute_operand_offset_is_aligned`) is
+/// Route: a destination whose byte offset keeps the 256-byte alignment
+/// Tenferro 0.5.0 advertised to cuTENSOR for every permutation operand
+/// (`cuda_region::permute_operand_offset_is_aligned`; kept pending leaf M2,
+/// since 0.6.0 reports the true alignment) is
 /// moved by `copy_read_into` — one `cutensorPermute` with its own plan cache.
 /// Every other destination is moved by [`cuda_region_axpby`] instead
 /// ([`CudaRegionCoefficient::One`], `alpha = 1`,
 /// [`CudaRegionBeta::Overwrite`]), whose contraction descriptors report the
 /// truthful per-element view alignment
-/// (`tenferro-gpu-0.5.0/src/cubecl/gemm.rs:630`) and therefore never select a
+/// (`read_operand_alignment_requirement`, tenferro-gpu `cubecl/gemm.rs:637` in
+/// 0.6.0) and therefore never select a
 /// vectorized kernel the pointer cannot satisfy. The rejected route is not a
 /// slower one for the same work: both move `rows * cols` elements in one
 /// submission. It costs one entry of the contraction plan LRU the caller's
@@ -1973,9 +1971,9 @@ pub fn cuda_svd_region<D: CudaScalar>(
         TensorRead::from_view(view).svd_read(exec)
     })
     .map_err(|err| cuda_error("cuda_svd", err))?;
-    let vt = expect_dtype::<D>("cuda_svd", vt, ctx.device)?;
+    let vt = CudaDenseStorage::from_tensor::<D>("cuda_svd", vt, ctx.device)?;
     let s = download_values::<D::Real>(ctx, &s)?;
-    let u = expect_dtype::<D>("cuda_svd", u, ctx.device)?;
+    let u = CudaDenseStorage::from_tensor::<D>("cuda_svd", u, ctx.device)?;
     validate_svd_factor_shapes(u.tensor.shape(), s.len(), vt.tensor.shape(), rows, cols)?;
     Ok((u, s, vt))
 }
@@ -2010,13 +2008,13 @@ fn validate_svd_factor_shapes(
 ///
 /// Both complex payloads are an explicit [`DenseError::Unsupported`] here,
 /// reported before any device work: the positive-diagonal gauge runs a `triu`
-/// kernel that materializes a complex zero, which the pinned Tenferro cannot
-/// compile for `cuFloatComplex` (tenferro-rs#1833) or `cuDoubleComplex`
-/// (#1271). [`Complex64`] previously reached the launch and failed there with
-/// an NVRTC compile log; it now fails the same way [`Complex32`] does, at the
-/// boundary. Both real payloads, `f32` included, are fully supported, and the
-/// typed layer offers device QR for exactly those two; complex device QR is a
-/// compile-time boundary there (tenferro-rs#1833 / #1271).
+/// kernel that materializes a complex zero. Tenferro 0.5.0 could not compile
+/// it (tenferro-rs#1833 / #1271); 0.6.0 can, but TeNeT keeps the boundary
+/// until #1271 verifies the complex path (see
+/// [`CudaScalar::DEVICE_CONSTANT_KERNELS`]). Both real payloads, `f32`
+/// included, are fully supported, and the typed layer offers device QR for
+/// exactly those two; complex device QR is a compile-time boundary there
+/// (#1271).
 pub fn cuda_qr_region<D: CudaScalar>(
     ctx: &mut CudaDenseContext,
     src: &CudaDenseStorage,
@@ -2033,8 +2031,8 @@ pub fn cuda_qr_region<D: CudaScalar>(
         TensorRead::from_view(view).qr_with_options_read(options, exec)
     })
     .map_err(|err| cuda_error("cuda_qr", err))?;
-    let r = expect_dtype::<D>("cuda_qr", r, ctx.device)?;
-    let q = expect_dtype::<D>("cuda_qr", q, ctx.device)?;
+    let r = CudaDenseStorage::from_tensor::<D>("cuda_qr", r, ctx.device)?;
+    let q = CudaDenseStorage::from_tensor::<D>("cuda_qr", q, ctx.device)?;
     validate_qr_factor_shapes(q.tensor.shape(), r.tensor.shape(), rows, cols)?;
     Ok((q, r))
 }
@@ -2074,7 +2072,7 @@ pub fn cuda_eigh_region<D: CudaScalar>(
         TensorRead::from_view(view).eigh_read(exec)
     })
     .map_err(|err| cuda_error("cuda_eigh", err))?;
-    let vectors = expect_dtype::<D>("cuda_eigh", vectors, ctx.device)?;
+    let vectors = CudaDenseStorage::from_tensor::<D>("cuda_eigh", vectors, ctx.device)?;
     let values = download_values::<D::Real>(ctx, &values)?;
     validate_eigh_factor_shapes(values.len(), vectors.tensor.shape(), n)?;
     Ok((values, vectors))
@@ -2240,13 +2238,12 @@ mod tests {
                 ensure_device_constant_kernels::<Complex64>("cuda_qr", "QR"),
             ),
         ] {
-            let err =
-                blocked.expect_err("a complex device QR must be unsupported in tenferro 0.5.0");
+            let err = blocked.expect_err("a complex device QR must stay unsupported until #1271");
             assert!(
                 matches!(err, DenseError::Unsupported { op: "cuda_qr", .. }),
                 "{dtype:?}: {err}"
             );
-            assert!(err.to_string().contains("1833"), "{dtype:?}: {err}");
+            assert!(err.to_string().contains("1271"), "{dtype:?}: {err}");
         }
     }
 

@@ -522,8 +522,8 @@ fn region_svd_obeys_its_laws_for_every_dtype() {
     }
 }
 
-/// Only the real payloads: both complex dtypes fail Tenferro 0.5.0's
-/// positive-diagonal `triu` kernel and are rejected at the boundary instead
+/// Only the real payloads: both complex dtypes are rejected at TeNeT's
+/// boundary until #1271 verifies them
 /// (`complex_device_qr_is_rejected_before_any_device_work`).
 #[test]
 #[ignore = "requires a real CUDA device"]
@@ -845,11 +845,10 @@ fn the_complex_rule_is_conservative_outside_the_square_of_its_lane() {
 }
 
 /// The positive-diagonal gauge's `triu` kernel materializes a complex zero,
-/// which the pinned Tenferro's NVRTC cannot construct for `cuFloatComplex`
-/// (tenferro-rs#1833) or `cuDoubleComplex` (#1271). The adapter rejects both
-/// dtypes *before* any device work, which is observable as untouched
-/// counters — the failure would otherwise arrive as an NVRTC compile log
-/// wrapped in a backend error, after a submission.
+/// which Tenferro 0.5.0's NVRTC could not construct for `cuFloatComplex`
+/// (tenferro-rs#1833) or `cuDoubleComplex`; 0.6.0 compiles it, but TeNeT has
+/// not verified the complex path yet (#1271). The adapter rejects both dtypes
+/// *before* any device work, which is observable as untouched counters.
 fn qr_rejection_case<D: ProbeScalar>(ctx: &mut CudaDenseContext) {
     let (payload, _) = fixture::<D>(4, 3, 0.0);
     let src = upload::<D>(ctx, &payload);
@@ -865,7 +864,7 @@ fn qr_rejection_case<D: ProbeScalar>(ctx: &mut CudaDenseContext) {
         "{}: expected a typed capability error, got {err}",
         D::NAME
     );
-    assert!(err.to_string().contains("1833"), "{}: {err}", D::NAME);
+    assert!(err.to_string().contains("1271"), "{}: {err}", D::NAME);
     assert_eq!(
         after.solver_calls,
         before.solver_calls,

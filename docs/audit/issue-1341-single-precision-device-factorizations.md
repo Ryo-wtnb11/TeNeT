@@ -50,9 +50,11 @@ enumerable list (below) rather than a rewrite.
 
 Device QR is *narrower* than the device factorization family, and the reason is
 not precision. The backend's positive-diagonal gauge runs a `triu` kernel whose
-zero constant pinned Tenferro materializes as `E::cast_from(0u32)`
-(`tenferro-gpu-0.5.0/src/kernels/helpers.rs:84`), which NVRTC cannot construct
-for `cuFloatComplex` (tenferro-rs#1833) or `cuDoubleComplex` (#1271). It is a
+zero constant Tenferro 0.5.0 materialized as `E::cast_from(0u32)`
+(`tenferro-gpu-0.5.0/src/kernels/helpers.rs:84`), which NVRTC could not construct
+for `cuFloatComplex` (tenferro-rs#1833) or `cuDoubleComplex` (#1271). Tenferro
+0.6.0 compiles it; TeNeT keeps the gate until #1271 verifies the complex path.
+It is a
 **dtype capability**, and the adapter already owns it as
 `CudaScalar::DEVICE_CONSTANT_KERNELS`, enforced before any device work by
 `ensure_device_constant_kernels` (`tenet-dense/src/cuda_adapter.rs:1145`).
@@ -175,9 +177,9 @@ halved; no absolute platform constant appears.
   `direct_cuda_storage` is defensive and has no public reproduction. Only the
   lazy-adjoint half of the "compact and lazy receivers" rejection order is
   testable here; the compact half is pinned on the host.
-* **`Complex32` / `Complex64` device QR** stay closed pending tenferro-rs#1833
-  and #1271. Both are fixed upstream but not in the pinned 0.5.0; adopting a
-  newer dependency is a design decision, not a leaf.
+* **`Complex32` / `Complex64` device QR** stay closed pending #1271. The
+  compile defect (tenferro-rs#1833) is fixed in Tenferro 0.6.0, which TeNeT
+  adopted in #1370; lifting the gate needs its own device evidence.
 * **`tenet-network/examples/cuda_operation_matrix.rs`** gained `f32` and
   `Complex32` rows *without* the base/factorization harness split #1336
   expected: that split existed only to work around `f32` not being a

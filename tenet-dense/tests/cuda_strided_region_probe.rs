@@ -9,7 +9,8 @@
 //! N-D generalization of the production `cuda_axpby_owned` pattern
 //! (`tenet/src/typed.rs:11328`). Only rank-2 regions have device evidence
 //! today. This file converts the source-level claim into device evidence, and
-//! records the exact rejection text where 0.5.0 declines.
+//! records the exact rejection text where Tenferro declines (written against
+//! 0.5.0; runs against the pinned 0.6.0).
 //!
 //! The oracle is an independent host strided loop over the same index space;
 //! nothing here is derived from a TeNeT descriptor. Comparison is bitwise

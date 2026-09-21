@@ -724,8 +724,9 @@ fn device_factorization_rejections_do_not_depend_on_the_payload() {
 /// #1320 at 4- and 8-byte elements.
 ///
 /// The aligned whole-factor route copies each block straight into its sector
-/// region, and pinned Tenferro tells cuTENSOR that an offset destination view
-/// is 256-byte aligned when it is not. Which offsets are affected depends on
+/// region, and Tenferro 0.5.0 told cuTENSOR that an offset destination view
+/// is 256-byte aligned when it is not (0.6.0 reports the true alignment; the
+/// guard stays pending leaf M2). Which offsets are affected depends on
 /// the element size, so admitting `f32` (4 bytes) and `Complex32` (8 bytes)
 /// changes the set: every degeneracy pair below puts the second sector's
 /// block at an **odd** element offset (9, 25, 9), which is unaligned for all
