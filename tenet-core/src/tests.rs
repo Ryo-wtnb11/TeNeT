@@ -10211,6 +10211,160 @@ mod tests {
         assert_eq!(after_second.admissions(), after_first.admissions());
     }
 
+    fn finalize_complete<R>(rule: &R, hom: &FusionTreeHomSpace) -> Result<Arc<BlockStructure>, CoreError>
+    where
+        R: MultiplicityFreeFusionRule + CheckedFusionAlgebra,
+    {
+        let prepared = hom.prepare_fusion_tree_layout_checked(rule).unwrap();
+        let structure = prepared.build_complete_from_leg_degeneracies(hom)?;
+        prepared.commit();
+        Ok(structure)
+    }
+
+    /// Side derivations of one full extent walk over `hom`.
+    fn one_walk_side_derivations<R>(rule: &R, hom: &FusionTreeHomSpace) -> usize
+    where
+        R: MultiplicityFreeFusionRule,
+    {
+        hom.fusion_tree_layout_data_uncached(rule)
+            .sectors
+            .iter()
+            .map(|sector| sector.row_count + sector.col_count)
+            .sum()
+    }
+
+    #[test]
+    fn complete_structure_hit_skips_extent_walk_until_evicted() {
+        // What: the miss walks the per-block extents exactly once (inside the
+        // builder); a hit walks none; after FIFO eviction the next call is a
+        // miss that walks exactly once again.
+        let _guard = test_support::CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reset_core_intern_tables();
+        let leg = SectorLeg::new([(u1(-1), 2), (u1(0), 3), (u1(2), 1)], false);
+        let hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new([leg.clone(), leg.clone()]),
+            FusionProductSpace::new([leg.clone(), leg]),
+        );
+        let walk = one_walk_side_derivations(&U1FusionRule, &hom);
+        assert!(walk > 2);
+
+        reset_coupled_grid_build_observations();
+        let first = finalize_complete(&U1FusionRule, &hom).unwrap();
+        assert_eq!(coupled_grid_build_observations().1, walk);
+        let after_miss = complete_hom_space_structure_cache_info();
+        assert_eq!((after_miss.misses(), after_miss.admissions()), (1, 1));
+
+        reset_coupled_grid_build_observations();
+        let second = finalize_complete(&U1FusionRule, &hom).unwrap();
+        assert_eq!(coupled_grid_build_observations().1, 0);
+        assert!(Arc::ptr_eq(&first, &second));
+        let after_hit = complete_hom_space_structure_cache_info();
+        assert_eq!(after_hit.hits(), after_miss.hits() + 1);
+        assert_eq!(after_hit.misses(), after_miss.misses());
+
+        let capacity = after_hit.entry_capacity();
+        for degeneracy in 0..capacity {
+            let other = FusionTreeHomSpace::from_sectors(
+                [(u1(0), degeneracy + 10)],
+                [(u1(0), 1)],
+            );
+            finalize_complete(&U1FusionRule, &other).unwrap();
+        }
+        let filled = complete_hom_space_structure_cache_info();
+        assert!(filled.evictions() > after_hit.evictions());
+
+        drop((first, second));
+        reset_coupled_grid_build_observations();
+        finalize_complete(&U1FusionRule, &hom).unwrap();
+        assert_eq!(coupled_grid_build_observations().1, walk);
+        let rewalked = complete_hom_space_structure_cache_info();
+        assert_eq!(rewalked.misses(), filled.misses() + 1);
+        assert_eq!(rewalked.admissions(), filled.admissions() + 1);
+        assert_eq!(rewalked.hits(), filled.hits());
+    }
+
+    #[test]
+    fn complete_structure_split_and_fermionic_rule_force_misses() {
+        // What: equal legs under another codomain/domain split, and equal
+        // sectors under Z2 versus fermion parity, are misses that admit their
+        // own entries rather than hits on a same-content neighbour.
+        let _guard = test_support::CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reset_core_intern_tables();
+        let leg = SectorLeg::new([(u1(0), 2), (u1(1), 3)], false);
+        let split = |nout: usize| {
+            let legs = [leg.clone(), leg.clone(), leg.clone()];
+            FusionTreeHomSpace::new(
+                FusionProductSpace::new(legs[..nout].iter().cloned()),
+                FusionProductSpace::new(legs[nout..].iter().cloned()),
+            )
+        };
+        let two_one = finalize_complete(&U1FusionRule, &split(2)).unwrap();
+        let before = complete_hom_space_structure_cache_info();
+        let one_two = finalize_complete(&U1FusionRule, &split(1)).unwrap();
+        let after = complete_hom_space_structure_cache_info();
+        assert_ne!(two_one.content_id(), one_two.content_id());
+        assert_eq!(after.misses(), before.misses() + 1);
+        assert_eq!(after.admissions(), before.admissions() + 1);
+        assert_eq!(after.hits(), before.hits());
+
+        let parity_leg = SectorLeg::new([(z2_even(), 2), (z2_odd(), 3)], false);
+        let parity_hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new([parity_leg.clone(), parity_leg.clone()]),
+            FusionProductSpace::new([parity_leg]),
+        );
+        let bosonic = finalize_complete(&Z2FusionRule, &parity_hom).unwrap();
+        let before = complete_hom_space_structure_cache_info();
+        reset_coupled_grid_build_observations();
+        let fermionic = finalize_complete(&FermionParityFusionRule, &parity_hom).unwrap();
+        let after = complete_hom_space_structure_cache_info();
+        // Equal content ids are expected: the block-structure interner keys
+        // on rank and blocks only, so the rule shows up in the cache key.
+        assert_eq!(bosonic.content_id(), fermionic.content_id());
+        assert!(coupled_grid_build_observations().1 > 0);
+        assert_eq!(after.misses(), before.misses() + 1);
+        assert_eq!(after.admissions(), before.admissions() + 1);
+        assert_eq!(after.entries(), before.entries() + 1);
+        assert_eq!(after.hits(), before.hits());
+    }
+
+    #[test]
+    fn complete_structure_overflow_is_rejected_beside_cached_neighbour() {
+        // What: an extent overflow whose sectors and duals equal a cached
+        // valid neighbour is still walked and rejected without touching the
+        // statistics, and the neighbour keeps hitting without a walk.
+        let _guard = test_support::CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reset_core_intern_tables();
+        let hom = |first_degeneracy: usize| {
+            FusionTreeHomSpace::new(
+                FusionProductSpace::new([
+                    SectorLeg::new([(u1(0), first_degeneracy)], false),
+                    SectorLeg::new([(u1(0), 2)], false),
+                ]),
+                FusionProductSpace::new([SectorLeg::new([(u1(0), 2)], false)]),
+            )
+        };
+        let neighbour = hom(3);
+        let cached = finalize_complete(&U1FusionRule, &neighbour).unwrap();
+        let overflow = hom(usize::MAX);
+        let before = complete_hom_space_structure_cache_info();
+
+        let error = finalize_complete(&U1FusionRule, &overflow).unwrap_err();
+        assert_eq!(error, CoreError::ElementCountOverflow);
+        assert_eq!(complete_hom_space_structure_cache_info(), before);
+
+        reset_coupled_grid_build_observations();
+        let hit = finalize_complete(&U1FusionRule, &neighbour).unwrap();
+        assert!(Arc::ptr_eq(&cached, &hit));
+        assert_eq!(coupled_grid_build_observations().1, 0);
+        assert_eq!(complete_hom_space_structure_cache_info().hits(), before.hits() + 1);
+    }
+
     #[test]
     fn prepared_lowered_final_structure_checks_signature_but_reads_target_degeneracies() {
         // What: a prepared layout rejects another same-rank sector signature
@@ -10811,25 +10965,26 @@ mod tests {
                     + std::mem::size_of::<BlockStructure>()
         );
 
-        cache.admit(Arc::clone(&key0), Arc::clone(&structure), 10);
-        cache.admit(Arc::clone(&key1), Arc::clone(&structure), 10);
-        assert!(cache.lookup(&key0).is_some());
-        cache.admit(Arc::clone(&key2), Arc::clone(&structure), 10);
-        assert!(cache.lookup(&key0).is_none());
-        assert!(cache.lookup(&key1).is_some());
-        assert!(cache.lookup(&key2).is_some());
+        cache.admit_built(Arc::clone(&key0), Arc::clone(&structure), 10);
+        cache.admit_built(Arc::clone(&key1), Arc::clone(&structure), 10);
+        assert!(cache.peek_counting_hit(&key0).is_some());
+        cache.admit_built(Arc::clone(&key2), Arc::clone(&structure), 10);
+        assert!(cache.peek_counting_hit(&key0).is_none());
+        assert!(cache.peek_counting_hit(&key1).is_some());
+        assert!(cache.peek_counting_hit(&key2).is_some());
         assert_eq!(cache.info().entries(), 2);
         assert_eq!(cache.info().charged_bytes(), 20);
         assert_eq!(cache.info().evictions(), 1);
 
         let oversize = key();
-        let returned = cache.admit(Arc::clone(&oversize), Arc::clone(&structure), 11);
+        let returned = cache.admit_built(Arc::clone(&oversize), Arc::clone(&structure), 11);
         assert!(Arc::ptr_eq(&returned, &structure));
-        assert!(cache.lookup(&oversize).is_none());
+        assert!(cache.peek_counting_hit(&oversize).is_none());
         assert_eq!(cache.info().entries(), 2);
         assert_eq!(cache.info().bypasses(), 1);
         assert_eq!(cache.info().hits(), 3);
-        assert_eq!(cache.info().misses(), 2);
+        // Misses are completed builds reaching admission, bypass included.
+        assert_eq!(cache.info().misses(), 4);
         assert_eq!(cache.info().admissions(), 3);
 
         cache.clear();

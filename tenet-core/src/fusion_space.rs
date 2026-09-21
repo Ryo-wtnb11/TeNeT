@@ -827,11 +827,16 @@ impl PreparedFusionTreeLayout {
         homspace: &FusionTreeHomSpace,
     ) -> Result<Arc<BlockStructure>, CoreError> {
         self.validate_homspace_signature(homspace)?;
-        visit_coupled_leg_blocks(homspace, self.layout_data(), |_| Ok(()))?;
         let key = CompleteHomSpaceStructureCacheKey {
             rule: self.cache_key().rule.clone(),
             homspace: Arc::clone(&homspace.content),
         };
+        // Why no extent walk before the lookup: entries are admitted only
+        // after the builder's walk succeeded over an equal (rule identity,
+        // complete HomSpace content) key, and that walk is a pure function of
+        // the key because `RuleIdentity` determines the fusion enumeration.
+        // A hit therefore proves the walk would succeed; a miss walks once,
+        // inside the builder, before any statistic changes.
         if let Some(structure) = complete_hom_space_structure_cached(&key) {
             return Ok(structure);
         }
@@ -1284,13 +1289,16 @@ impl CompleteHomSpaceStructureCache {
         }
     }
 
-    fn lookup(
+    /// Counts only hits; a miss is recorded at admission, after its builder
+    /// succeeded, so rejected input never changes the statistics.
+    fn peek_counting_hit(
         &self,
         key: &CompleteHomSpaceStructureCacheKey,
     ) -> Option<CompleteHomSpaceStructureLookup> {
         let found = self.peek(key);
-        let counter = if found.is_some() { &self.hits } else { &self.misses };
-        counter.fetch_add(1, Ordering::Relaxed);
+        if found.is_some() {
+            self.hits.fetch_add(1, Ordering::Relaxed);
+        }
         found
     }
 
@@ -1314,6 +1322,18 @@ impl CompleteHomSpaceStructureCache {
             entry.content = structure.content_key();
             entry.wrapper = Arc::downgrade(structure);
         }
+    }
+
+    /// Records the miss of a completed build, then admits it; the only
+    /// production admission path.
+    fn admit_built(
+        &mut self,
+        key: Arc<CompleteHomSpaceStructureCacheKey>,
+        structure: Arc<BlockStructure>,
+        charged_bytes: usize,
+    ) -> Arc<BlockStructure> {
+        self.misses.fetch_add(1, Ordering::Relaxed);
+        self.admit(key, structure, charged_bytes)
     }
 
     fn admit(
@@ -1409,6 +1429,9 @@ impl CompleteHomSpaceStructureCacheInfo {
     pub fn byte_budget(self) -> usize { self.byte_budget }
     pub fn max_entry_bytes(self) -> usize { self.max_entry_bytes }
     pub fn hits(self) -> usize { self.hits }
+    /// Completed builds that reached admission, including bypassed entries
+    /// and racing duplicates. Failed builds are not counted, and a hit peek
+    /// counts no miss, so `hits + misses` is not the lookup count.
     pub fn misses(self) -> usize { self.misses }
     pub fn admissions(self) -> usize { self.admissions }
     pub fn evictions(self) -> usize { self.evictions }
@@ -1441,7 +1464,7 @@ fn reset_complete_hom_space_structure_cache() {
         .clear();
 }
 
-/// Hit path: one cache read, a stack key (`Arc<K>: Borrow<K>`), and the
+/// Hit path: one cache read with an uncounted-miss peek, a stack key (`Arc<K>: Borrow<K>`), and the
 /// canonical wrapper returned as-is. A dead wrapper keeps the content hit and
 /// rebuilds only the wrapper, repointing the entry under the write lock.
 fn complete_hom_space_structure_cached(
@@ -1451,7 +1474,7 @@ fn complete_hom_space_structure_cached(
     let found = cache
         .read()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .lookup(key);
+        .peek_counting_hit(key);
     match found? {
         CompleteHomSpaceStructureLookup::Wrapper(structure) => Some(structure),
         CompleteHomSpaceStructureLookup::Content(content) => {
@@ -1473,7 +1496,7 @@ fn admit_complete_hom_space_structure(
     complete_hom_space_structure_cache()
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .admit(Arc::new(key), structure, charged_bytes)
+        .admit_built(Arc::new(key), structure, charged_bytes)
 }
 
 fn charged_complete_hom_space_structure_bytes(
