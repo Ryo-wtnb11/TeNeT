@@ -338,9 +338,12 @@ fn device_twist_on_a_lazy_adjoint_matches_the_host() {
 
 #[test]
 #[ignore = "requires a real CUDA device"]
-fn device_twist_handles_an_empty_tensor_and_rejects_a_leg_past_the_rank() {
+fn device_twist_handles_a_space_with_no_coupled_sector_and_rejects_a_leg_past_the_rank() {
     let runtime = runtime();
-    // No coupled sector: zero blocks, zero elements, and still a real call.
+    // No coupled sector: zero blocks, zero elements. With no block the
+    // identity detection is vacuously true, so this short-circuits to a clone
+    // rather than reaching the zero-length upload — it proves the degenerate
+    // space is handled, not that path.
     let even =
         GradedSpace::try_new_with_arc(Arc::new(FermionParityFusionRule), [(Z2Irrep::EVEN, 2)])
             .unwrap();

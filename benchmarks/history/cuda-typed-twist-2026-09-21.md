@@ -1,7 +1,15 @@
 # Device `twist` / `twist_inverse` — evidence record (G2b-t, #1330)
 
-Base: `origin/main` ab47d16c (device `*_overwrite_into` #1339). Branch
-`g2bt-device-twist`. No dependency change.
+Base: `origin/main` 91d15f97 (single-precision device payloads #1340), rebased
+from ab47d16c (device `*_overwrite_into` #1339), on which the device run below
+was taken; the rebase touched only the operation matrix, and the typed hunk
+merged unchanged. Branch `g2bt-device-twist`. No dependency change.
+
+The body is one generic over `CudaPayload`, so after #1340 it is instantiated
+for `f32`/`Complex32` as well. `±1` is exact in single precision, so no new
+numerical question arises, but there is no single-precision twist fixture: the
+matrix records that column as `NEEDS-PROOF` under
+[#1336](https://github.com/Ryo-wtnb11/TeNeT/issues/1336), not as proved.
 
 ## What landed
 
@@ -67,16 +75,23 @@ the value domain:
 
 A zero would have been fatal twice over: `cuda_region_axpby` rejects a zero
 descriptor alpha outright, and a zero alpha lets CUDA skip the source read,
-which erases the NaN/Inf propagation the Host has. Since θ is never zero, the
-descriptor scale keeps Host's propagation exactly, and a warm call uploads
-nothing but its output.
+which erases the NaN/Inf propagation the Host has. Since θ is never zero, NaN
+and real infinities propagate as on Host, and a warm call uploads nothing but
+its output.
+
+Not exactly Host, in one disclosed case: Host skips a factor-1 block with a bit
+copy while the device always multiplies, so an infinite **complex** entry comes
+back NaN in both components — for θ = -1 Host gives `(-inf, NaN)` where the
+device gives `(NaN, NaN)`. This is the #1301 deviation already disclosed at
+`tenet-dense/src/cuda_adapter.rs:1279-1285`; `f64` and every finite payload are
+exact.
 
 Complex twist factors (Fibonacci is `Scalar = Complex64`) are excluded at
 compile time by the impl bound, not at runtime; if a `Scalar = f64` provider
 ever returned a non-`±1` value the descriptor scale would still be correct, and
 only a zero would be a boundary. The value domain is pinned **without a device**
 by `tenet/tests/typed_transform_host_side.rs::a_fermionic_twist_only_ever_keeps_or_negates_an_entry`,
-which runs in ordinary CI.
+which runs in ordinary CI for fZ2, fZ2 x U(1) and fZ2 (x) SU(2).
 
 ## Cost contract
 
@@ -106,7 +121,16 @@ Residuals, disclosed rather than fixed here:
    device operation;
 3. flat elements belonging to no block are zero here where Host copies them
    through. Only reachable under a padded expert layout; the same convention
-   the device structural transforms have had since #1322.
+   the device structural transforms have had since #1322;
+4. the device NoBraiding preflight has no test of its own. No production
+   provider is `NoBraiding`, so one needs a custom provider, and a device
+   tensor over a custom provider needs both the `cuda` feature and a real GPU —
+   an ungated test cannot reach the device call site. The call is the same
+   statement on the same shared helper as Host, whose rejection *is* gated
+   ungated by `tenet/tests/typed_facade.rs` (planar Z2 fixture, `:8919`);
+5. the zero-length upload path (`required_len == 0` with blocks present, i.e.
+   a zero extent) is not reached by any fixture: a space with no coupled sector
+   has no block and short-circuits first.
 
 ## Correctness evidence
 
@@ -114,8 +138,9 @@ Device (`--ignored`, A100, `tenet/tests/typed_cuda_twist.rs`): device == Host
 for fZ2 (dual and non-dual legs, codomain and domain, single-axis, multi-axis,
 repeated legs), fZ2 x U(1) and fZ2 (x) SU(2), `f64` and `Complex64`, on lazy
 adjoint operands for both directions, plus `twist ∘ twist_inverse == id`
-exactly, the bosonic clone, the empty leg list, an empty (no coupled sector)
-space and the out-of-range rejection with the Host's own message. Every
+exactly, the bosonic clone, the empty leg list, a space with no coupled sector
+(zero blocks, so a clone — the zero-length upload path is not reached by it)
+and the out-of-range rejection with the Host's own message. Every
 fermionic fixture asserts non-vacuity through `assert_signs_only`: at least one
 entry is negated, and no entry is scaled by anything but `±1`.
 
