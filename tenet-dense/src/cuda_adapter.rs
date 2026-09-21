@@ -1900,6 +1900,42 @@ pub fn cuda_copy_region_into<D: CudaScalar>(
         .map_err(|err| cuda_error(OP, err))
 }
 
+/// Widens a single-precision device buffer to its double-precision lane,
+/// `f32 -> f64` or `Complex32 -> Complex64`, with one device cast
+/// (tenferro-gpu 0.6.0 `TensorStructural::cast`, `cubecl/mod.rs:5781`).
+///
+/// Why: Tenferro 0.6.0 has no reduction that accumulates wider than its
+/// operands — the GEMM, `norm_squared_read` (cuBLAS self-`dot`) and
+/// `reduce_sum_squares` all sum in the payload dtype — so a reduction that
+/// must accumulate as wide as the Host does widens its operand once and then
+/// runs the ordinary double-precision reduction. Exact: every `f32` is an
+/// `f64`. Costs one device allocation of `capacity * size_of::<W>()` bytes
+/// (the whole allocation is cast; [`CudaDenseStorage::len`] carries over) and
+/// one elementwise pass; no host transfer.
+pub fn cuda_widen<W: CudaScalar>(
+    ctx: &mut CudaDenseContext,
+    src: &CudaDenseStorage,
+) -> Result<CudaDenseStorage, DenseError> {
+    const OP: &str = "cuda_widen";
+    ensure_cuda_device(ctx.device, OP, &[("src", src.device)])?;
+    if !matches!(
+        (src.dtype, W::DTYPE),
+        (DenseDType::F32, DenseDType::F64) | (DenseDType::C32, DenseDType::C64)
+    ) {
+        return Err(cuda_error(
+            OP,
+            format!("{:?} does not widen to {:?}", src.dtype, W::DTYPE),
+        ));
+    }
+    let tensor = ctx
+        .backend
+        .cast(&src.tensor, W::dtype())
+        .map_err(|err| cuda_error(OP, err))?;
+    let mut wide = CudaDenseStorage::from_tensor::<W>(OP, tensor, ctx.device)?;
+    wide.len = src.len;
+    Ok(wide)
+}
+
 /// cuSOLVER SVD of one packed column-major `rows x cols` region:
 /// `region = U * diag(s) * Vt` with `k = min(rows, cols)`. `U` (`rows x k`)
 /// and `Vt` (`k x cols`) stay device-resident; only the singular values

@@ -206,4 +206,6 @@ halved; no absolute platform constant appears.
 * **`normalize` of an overflowed single-precision device norm** returns zeros
   with no error; that is a known limitation tracked in Ryo-wtnb11/TeNeT#1344,
   characterised (not endorsed) by
-  `device_single_precision_normalize_of_an_overflowed_norm_is_all_zero`.
+  `device_single_precision_normalize_of_an_overflowed_norm_is_all_zero`. *Resolved by #1344: the
+  device `norm` accumulates in `f64`; that test was replaced by
+  `device_norm_and_normalize_match_the_host_where_a_payload_sum_would_overflow_or_underflow`.*

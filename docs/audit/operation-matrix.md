@@ -222,14 +222,18 @@ body instantiated for all four device dtypes against the host result *of the
 same dtype*.
 
 The reductions are an `INTENTIONAL-DIFFERENCE` rather than `PROVED` because
-their two halves accumulate differently: within one coupled sector the device
-sums in the payload dtype inside the backend GEMM (Tenferro 0.5.0 and 0.6.0
-expose no widening reduction), while across coupled sectors the host half accumulates in
-`WideScalar::Wide` like every host reduction. A `norm` finite on the host can
-therefore be `inf` on the device at single precision; it is reported as `inf`,
-the same convention `f64` overflow already has. Both halves are documented on
-`weighted_inner_cuda` and pinned by
-`device_single_precision_norm_can_overflow_where_the_host_stays_finite`.
+`inner`'s two halves accumulate differently: within one coupled sector the
+device sums in the payload dtype inside the backend GEMM (Tenferro 0.5.0 and
+0.6.0 expose no widening reduction), while across coupled sectors the host half
+accumulates in `WideScalar::Wide` like every host reduction; this is documented
+on `weighted_inner_cuda`. `norm` (and therefore `normalize`) is not affected
+since [#1344](https://github.com/Ryo-wtnb11/TeNeT/issues/1344): a
+single-precision payload is widened on the device by one Tenferro `cast`
+before the per-sector reduction, so it accumulates in `f64` like the host and
+stays finite and nonzero wherever the host does, pinned by
+`device_norm_and_normalize_match_the_host_where_a_payload_sum_would_overflow_or_underflow`
+(cost: one extra device allocation, pinned by
+`a_warm_single_precision_norm_costs_one_extra_device_allocation`).
 
 [11] The device factorizations are open for single precision since leaf C4
 ([#1341](https://github.com/Ryo-wtnb11/TeNeT/issues/1341)): `svd_compact` and

@@ -12308,16 +12308,12 @@ where
     /// Dimension-weighted unit normalization. Zero norm deliberately follows
     /// Host IEEE behavior and produces non-finite stored entries.
     ///
-    /// The divisor is [`Self::norm`], so this inherits that method's
-    /// accumulation contract. One consequence is a **known limitation**, not
-    /// an intended contract (tracked in Ryo-wtnb11/TeNeT#1344): at
-    /// `f32`/`Complex32` a norm that overflows the within-sector device sum is
-    /// `inf`, and dividing by `inf` returns an **all-zero tensor with no
-    /// error**, where the Host norm of the same tensor stays finite. Host does
-    /// the same at `f64` overflow; single precision merely reaches the
-    /// boundary sooner. Until the device reduction is overflow-safe, rescale
-    /// before normalizing — on Host, by the reciprocal of
-    /// [`TensorMap::norm_inf`] — when that range is reachable.
+    /// The divisor is [`Self::norm`], which accumulates in `f64` at every
+    /// payload dtype (#1344), so a single-precision tensor whose entries are
+    /// finite normalizes like the Host: its norm neither saturates near
+    /// `f32::MAX` nor underflows below the `f32` subnormal range. As on Host,
+    /// the reciprocal `1 / norm` is narrowed to the payload dtype, so a norm
+    /// below `1 / f32::MAX` at single precision gives non-finite entries.
     pub fn normalize(&self) -> Result<Self, Error> {
         let required_len = self.logical_space().space().required_len()?;
         if let TypedTensorRepr::Adjoint(view) = &self.repr {
@@ -12352,51 +12348,40 @@ where
     /// difference is observable at single precision:
     ///
     /// * **Within one coupled sector** the sum of `len` products runs on the
-    ///   device, inside the backend GEMM, in the payload dtype. TeNeT cannot
-    ///   widen it: Tenferro (0.5.0 and 0.6.0) exposes no widening reduction.
-    ///   Its GEMM entry point dispatches on the single dtype shared by both
-    ///   operands and the destination (tenferro-gpu 0.6.0
-    ///   `src/cubecl/gemm.rs:777` `dot_general_read_into_accum`, whose
-    ///   `accum_erased` at `:794` reads all three as one `T`), and the
-    ///   cuTENSOR compute descriptor is fixed per dtype with no caller
-    ///   control — `CUTENSOR_COMPUTE_DESC_32F` for `f32` (`gemm.rs:99`),
-    ///   `..._64F` for `f64` (`gemm.rs:129`). A widened
-    ///   device sum would need a second pass over the region. So an
+    ///   device, inside the backend GEMM, in the dtype of the operands.
+    ///   Tenferro (0.5.0 and 0.6.0) exposes no widening reduction: its GEMM
+    ///   entry point dispatches on the single dtype shared by both operands
+    ///   and the destination (tenferro-gpu 0.6.0 `src/cubecl/gemm.rs:777`
+    ///   `dot_general_read_into_accum`, whose `accum_erased` at `:794` reads
+    ///   all three as one `T`), and the cuTENSOR compute descriptor is fixed
+    ///   per dtype — `CUTENSOR_COMPUTE_DESC_32F` for `f32` (`gemm.rs:99`),
+    ///   `..._64F` for `f64` (`gemm.rs:129`). [`Self::norm`] therefore widens
+    ///   a single-precision operand first ([`CudaStorage::widened`]) and runs
+    ///   this reduction in `f64`. [`Self::inner`] does not: its
     ///   `f32`/`Complex32` sector total carries the error of a
     ///   single-precision accumulation of `len` terms, bounded by
     ///   `len * eps(real(D))` times **`sum |conj(a_i) * b_i|`** — the sum of
-    ///   the absolute products, not the magnitude of the result. For a
-    ///   cancelling inner product the absolute error is therefore governed by
-    ///   the terms, and the *relative* error of a near-zero `inner` is
-    ///   unbounded; about `sqrt(len) * eps(real(D))` of that same sum in
-    ///   practice. The sum also **saturates to infinity near `3.4e38`** where
-    ///   the Host, which
-    ///   accumulates in [`tenet_tensors::WideScalar::Wide`], still returns a
-    ///   finite value. A device `norm` of a large single-precision tensor may
-    ///   therefore be `inf` while the host `norm` of the same tensor is
-    ///   finite; that is a precision boundary of the device reduction, not an
-    ///   error condition, and it is reported as `inf`, exactly as the same
-    ///   overflow is at `f64`.
+    ///   the absolute products, not the magnitude of the result, so the
+    ///   *relative* error of a near-zero `inner` is unbounded — and it
+    ///   **saturates to infinity near `3.4e38`** where the Host, which
+    ///   accumulates in [`tenet_tensors::WideScalar::Wide`], stays finite.
     /// * **Across coupled sectors** the quantum-dimension weighting and the
     ///   final sum run on the host, and they accumulate in
     ///   `WideScalar::Wide` — the same accumulator the Host reductions use, so
     ///   the *number of sectors* never degrades the result. For `f64` and
     ///   `Complex64` `Wide = Self` and `widen`/`narrow` are the identity, so
     ///   those results are unchanged down to the emitted arithmetic.
-    ///
-    /// [`Self::norm`] takes its square root from the wide accumulator, before
-    /// any narrowing.
     fn weighted_inner_cuda(&self, lhs: &CudaStorage<D>, rhs: &CudaStorage<D>) -> Result<D, Error> {
         self.weighted_inner_cuda_wide(lhs, rhs).map(D::narrow)
     }
 
     /// [`Self::weighted_inner_cuda`] before the final narrowing: the
     /// cross-sector total in the wide accumulator.
-    fn weighted_inner_cuda_wide(
+    fn weighted_inner_cuda_wide<E: CudaPayload>(
         &self,
-        lhs: &CudaStorage<D>,
-        rhs: &CudaStorage<D>,
-    ) -> Result<<D as tenet_tensors::WideScalar>::Wide, Error> {
+        lhs: &CudaStorage<E>,
+        rhs: &CudaStorage<E>,
+    ) -> Result<<E as tenet_tensors::WideScalar>::Wide, Error> {
         let space = self.logical_space().space();
         let regions = sector_regions(space.structure(), space.nout())?;
         let mut lease = self.runtime.lease_cuda()?;
@@ -12409,7 +12394,7 @@ where
         // ponytail: #740 keeps the proven host-zero upload until a native
         // allocation has correct cross-stream publication and measured value.
         let mut partials =
-            CudaStorage::upload_owned(cuda, vec![D::from_real(0.0); regions.len().max(1)])?;
+            CudaStorage::upload_owned(cuda, vec![E::from_real(0.0); regions.len().max(1)])?;
         {
             let mut gemm = CudaStorageGemm::new(cuda);
             for (index, region) in regions.iter().enumerate() {
@@ -12429,7 +12414,7 @@ where
                     1,
                     tenet_dense::MatrixOp::Adjoint,
                     tenet_dense::MatrixOp::Identity,
-                    D::from_real(1.0),
+                    E::from_real(1.0),
                 )?;
             }
         }
@@ -12441,12 +12426,12 @@ where
             .zip(values)
             .map(|(region, value)| {
                 value.widen()
-                    * <<D as tenet_tensors::WideScalar>::Wide as FactorScalar>::from_real(
+                    * <<E as tenet_tensors::WideScalar>::Wide as FactorScalar>::from_real(
                         self.logical_space().provider().dim_scalar(region.coupled()),
                     )
             })
             .fold(
-                <<D as tenet_tensors::WideScalar>::Wide as FactorScalar>::from_real(0.0),
+                <<E as tenet_tensors::WideScalar>::Wide as FactorScalar>::from_real(0.0),
                 |total, term| total + term,
             ))
     }
@@ -12458,40 +12443,16 @@ where
     ///
     /// # Accumulation and range
     ///
-    /// This reduction, [`Self::inner`], [`Self::dot`] and [`Self::normalize`]
-    /// all accumulate in two halves, and the halves differ:
-    ///
-    /// * **within one coupled sector** the device sums the `len` products in
-    ///   the *payload dtype*, inside the backend GEMM. Tenferro (0.5.0 and
-    ///   0.6.0) offers no widening reduction and a widened device sum would cost a second
-    ///   pass, so this is a deliberate boundary rather than an oversight. The
-    ///   error is bounded by `len * eps(real(D))` times `sum |conj(a_i)*b_i|`,
-    ///   the sum of the **absolute** products — not times the magnitude of the
-    ///   result, so a cancelling inner product has a small absolute but
-    ///   possibly large relative error;
-    /// * **across coupled sectors** the quantum-dimension weighting and the
-    ///   final sum run on the host in
-    ///   [`tenet_tensors::WideScalar::Wide`], like every Host reduction, so
-    ///   the number of sectors never degrades the result. For `f64` and
-    ///   `Complex64` `Wide = Self`, so those results are unchanged down to the
-    ///   emitted arithmetic and this section describes no difference from
-    ///   Host.
-    ///
-    /// At `f32`/`Complex32` the within-sector sum also **saturates near
-    /// `3.4e38`**, where the Host reduction — which accumulates the same sum
-    /// in `f64` — still returns a finite value. A device `norm` can therefore
-    /// be `inf` while the Host `norm` of the same tensor is finite. That is
-    /// reported as `inf` rather than as an error, exactly as the same overflow
-    /// is at `f64`, and [`Self::normalize`] then divides by it and returns an
-    /// all-zero tensor with no error — the same code shape, and the same
-    /// silent outcome, Host has at `f64` overflow. This is a known
-    /// limitation, not an intended contract: overflow-safe (scaled) device
-    /// reductions, or a typed error, are tracked in Ryo-wtnb11/TeNeT#1344.
-    ///
-    /// If that range is reachable for your data, rescale before reducing:
-    /// download with [`TensorMap::to_host`] and take
-    /// [`TensorMap::norm_inf`] (which is a maximum, so it cannot overflow),
-    /// scale by its reciprocal, and multiply the resulting norm back.
+    /// The norm accumulates in `f64` at every payload dtype, within and
+    /// across coupled sectors, exactly like the Host `norm`: an
+    /// `f32`/`Complex32` payload is widened on the device by one cast
+    /// (one device allocation of twice the payload bytes and one elementwise
+    /// pass) before the per-sector reduction, because Tenferro 0.6.0 offers no
+    /// widening reduction. Its result is therefore finite wherever every entry
+    /// is finite, and nonzero wherever some entry is, matching the Host within
+    /// `f64` rounding (#1344). `f64`/`Complex64` payloads take the unwidened
+    /// reduction and pay nothing extra. [`Self::inner`] keeps the payload-dtype
+    /// within-sector sum documented on `weighted_inner_cuda`.
     pub fn norm(&self) -> Result<f64, Error> {
         if let TypedTensorRepr::Adjoint(view) = &self.repr {
             return Self {
@@ -12502,12 +12463,54 @@ where
         }
         let storage = self.direct_cuda_storage("norm")?;
         // `<t, t>` is real up to rounding; the norm is its real part's root,
-        // matching the Host `norm_multiplicity_free`.
-        Ok(self
-            .weighted_inner_cuda_wide(storage, storage)?
-            .widen_complex()
-            .re
-            .sqrt())
+        // matching the Host `norm_multiplicity_free`. Dispatch is on the
+        // payload dtype alone: a single-precision payload is widened so the
+        // within-sector sum accumulates in `f64` like the Host's; a
+        // double-precision one already does.
+        let total = match D::DTYPE {
+            tenet_dense::DenseDType::F32 => {
+                self.weighted_self_inner_widened_cuda::<f64>(storage)?
+            }
+            tenet_dense::DenseDType::C32 => {
+                self.weighted_self_inner_widened_cuda::<num_complex::Complex64>(storage)?
+            }
+            _ => self
+                .weighted_inner_cuda_wide(storage, storage)?
+                .widen_complex(),
+        };
+        Ok(total.re.sqrt())
+    }
+
+    /// `<t, t>` of a single-precision device tensor, accumulated in its
+    /// double-precision lane `E` within *and* across coupled sectors.
+    ///
+    /// Why widen rather than rescale by `norm_inf` (#1344): the reference
+    /// only needs *some* overflow-safe sum — LinearAlgebra's `generic_norm2`
+    /// accumulates a `Float32` sum in `Float64` and rescales by `normInf`
+    /// only when `length * maxabs^2` leaves the payload range — and the Host
+    /// already meets it by accumulating every square in `f64`, where an `f32`
+    /// payload can neither overflow nor underflow. Widening reproduces that
+    /// Host arithmetic exactly in one extra device pass; a scaled norm would
+    /// need a max-abs pass, a host round trip for the scale and a scaled copy
+    /// before the same reduction, and would still round each square in `f32`.
+    ///
+    /// The selected reference dispatches are narrower. Julia routes a strided
+    /// `BlasFloat` array of `length >= NRM2_CUTOFF` to `BLAS.nrm2`
+    /// (`LinearAlgebra/src/dense.jl:107`), a scaled sum in the payload
+    /// precision. TensorKit 0.17.1 `norm` (`src/tensors/linalg.jl:277`) takes
+    /// `norm(t.data)` for `UniqueFusion` and otherwise `_norm` (`:261`), which
+    /// adds `dim(c) * norm(b)^2` in `float(real(scalartype))` — `Float32` for
+    /// a `Float32` tensor — so it returns `Inf` once one weighted block square
+    /// exceeds `f32::MAX` (the "big" SU(2) fixture of
+    /// `typed_cuda_single_precision`). The Host and this device norm
+    /// accumulate every square and the cross-sector combine in `f64`, which is
+    /// strictly wider than that dispatch.
+    fn weighted_self_inner_widened_cuda<E: CudaPayload>(
+        &self,
+        storage: &CudaStorage<D>,
+    ) -> Result<num_complex::Complex64, Error> {
+        let wide = storage.widened::<E>(&mut *self.runtime.lease_cuda()?)?;
+        Ok(self.weighted_inner_cuda_wide(&wide, &wide)?.widen_complex())
     }
 
     /// TensorKit `dot(x, y)`: the quantum-dimension-weighted Frobenius inner
@@ -12515,8 +12518,8 @@ where
     /// `inner_multiplicity_free`. Lazy adjoints remain an explicit
     /// unsupported device scope.
     ///
-    /// Accumulates as [`Self::norm`] documents: in the payload dtype within a
-    /// coupled sector, wide across sectors. At `f32`/`Complex32` the
+    /// Unlike [`Self::norm`], accumulates in the payload dtype within a
+    /// coupled sector and wide across sectors. At `f32`/`Complex32` the
     /// within-sector error is bounded by `len * eps(real(D))` times the sum of
     /// the absolute products `sum |conj(a_i)*b_i|` — so a cancelling inner
     /// product keeps a small absolute error but not a small relative one — and

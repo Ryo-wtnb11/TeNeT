@@ -13,8 +13,8 @@ use std::marker::PhantomData;
 
 use tenet_core::{Placement, TensorStorage};
 use tenet_dense::{
-    cuda_gemm_region_with_ops_into, cuda_matmul_region_into, CudaDenseContext, CudaDenseStorage,
-    CudaScalar, MatrixOp,
+    cuda_gemm_region_with_ops_into, cuda_matmul_region_into, cuda_widen, CudaDenseContext,
+    CudaDenseStorage, CudaScalar, MatrixOp,
 };
 
 use crate::fusion_replay::StorageGemm;
@@ -51,6 +51,17 @@ impl<D: CudaScalar> CudaStorage<D> {
 
     pub fn download(&self, ctx: &CudaDenseContext) -> Result<Vec<D>, OperationError> {
         self.0.download(ctx).map_err(OperationError::Dense)
+    }
+
+    /// This buffer widened to the double-precision lane `W` on the device;
+    /// see [`cuda_widen`].
+    pub fn widened<W: CudaScalar>(
+        &self,
+        ctx: &mut CudaDenseContext,
+    ) -> Result<CudaStorage<W>, OperationError> {
+        cuda_widen::<W>(ctx, &self.0)
+            .map(|storage| CudaStorage(storage, PhantomData))
+            .map_err(OperationError::Dense)
     }
 }
 
