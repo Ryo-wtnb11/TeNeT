@@ -534,8 +534,10 @@ fn assert_norm_is_overflow_and_underflow_safe<R, D>(
                     "{what} [{}]: squares must overflow f32",
                     D::NAME
                 );
+                // Complex32: the saturated `re * im - im * re` is `inf - inf`,
+                // so the saturated inner is non-finite rather than `inf`.
                 assert!(
-                    inner.is_infinite(),
+                    !inner.is_finite(),
                     "{what} [{}]: the payload-dtype inner must still saturate, got {inner}",
                     D::NAME
                 );
