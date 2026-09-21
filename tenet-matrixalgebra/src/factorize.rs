@@ -73,18 +73,6 @@ pub trait FactorScalar: DenseRecouplingScalar {
     /// precision block reach a factor around `2^970`, and `from_real` of that
     /// is `inf` in `f32`.
     fn safe_minimum() -> f64;
-    fn compute_f64_spectrum<E, F>(
-        rank: usize,
-        scratch: &mut Vec<Self::Real>,
-        compute: F,
-    ) -> Result<Vec<f64>, E>
-    where
-        F: FnOnce(&mut [Self::Real]) -> Result<(), E>,
-    {
-        scratch.resize(rank, Self::Real::zero());
-        compute(&mut scratch[..rank])?;
-        Ok(scratch[..rank].iter().copied().map(Into::into).collect())
-    }
 }
 
 #[cfg(test)]
@@ -281,19 +269,6 @@ impl FactorScalar for f64 {
     fn safe_minimum() -> f64 {
         f64::MIN_POSITIVE
     }
-
-    fn compute_f64_spectrum<E, F>(
-        rank: usize,
-        _scratch: &mut Vec<Self::Real>,
-        compute: F,
-    ) -> Result<Vec<f64>, E>
-    where
-        F: FnOnce(&mut [Self::Real]) -> Result<(), E>,
-    {
-        let mut values = vec![0.0; rank];
-        compute(&mut values)?;
-        Ok(values)
-    }
 }
 
 impl FactorScalar for num_complex::Complex32 {
@@ -387,19 +362,6 @@ impl FactorScalar for Complex64 {
 
     fn safe_minimum() -> f64 {
         f64::MIN_POSITIVE
-    }
-
-    fn compute_f64_spectrum<E, F>(
-        rank: usize,
-        _scratch: &mut Vec<Self::Real>,
-        compute: F,
-    ) -> Result<Vec<f64>, E>
-    where
-        F: FnOnce(&mut [Self::Real]) -> Result<(), E>,
-    {
-        let mut values = vec![0.0; rank];
-        compute(&mut values)?;
-        Ok(values)
     }
 }
 
