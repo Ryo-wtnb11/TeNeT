@@ -100,10 +100,14 @@ pub trait CudaScalar:
     fn contraction_scalar(self) -> ContractionScalar;
 
     /// The typed tensor behind a dtype-erased device buffer, if the dtypes agree.
-    fn typed(tensor: &Tensor) -> Option<&TypedTensor<Self>>;
+    fn typed(tensor: &Tensor) -> Option<&TypedTensor<Self>> {
+        tensor.as_typed::<Self>()
+    }
 
     /// Mutable counterpart of [`CudaScalar::typed`].
-    fn typed_mut(tensor: &mut Tensor) -> Option<&mut TypedTensor<Self>>;
+    fn typed_mut(tensor: &mut Tensor) -> Option<&mut TypedTensor<Self>> {
+        tensor.as_typed_mut::<Self>()
+    }
 }
 
 /// The real lane of a [`CudaScalar`] payload.
@@ -163,20 +167,6 @@ impl CudaScalar for f32 {
     fn contraction_scalar(self) -> ContractionScalar {
         ContractionScalar::F32(self)
     }
-
-    fn typed(tensor: &Tensor) -> Option<&TypedTensor<Self>> {
-        match tensor {
-            Tensor::F32(tensor) => Some(tensor),
-            _ => None,
-        }
-    }
-
-    fn typed_mut(tensor: &mut Tensor) -> Option<&mut TypedTensor<Self>> {
-        match tensor {
-            Tensor::F32(tensor) => Some(tensor),
-            _ => None,
-        }
-    }
 }
 
 impl CudaScalar for Complex32 {
@@ -191,20 +181,6 @@ impl CudaScalar for Complex32 {
     fn contraction_scalar(self) -> ContractionScalar {
         ContractionScalar::C32(self)
     }
-
-    fn typed(tensor: &Tensor) -> Option<&TypedTensor<Self>> {
-        match tensor {
-            Tensor::C32(tensor) => Some(tensor),
-            _ => None,
-        }
-    }
-
-    fn typed_mut(tensor: &mut Tensor) -> Option<&mut TypedTensor<Self>> {
-        match tensor {
-            Tensor::C32(tensor) => Some(tensor),
-            _ => None,
-        }
-    }
 }
 
 impl CudaScalar for f64 {
@@ -217,20 +193,6 @@ impl CudaScalar for f64 {
 
     fn contraction_scalar(self) -> ContractionScalar {
         ContractionScalar::F64(self)
-    }
-
-    fn typed(tensor: &Tensor) -> Option<&TypedTensor<Self>> {
-        match tensor {
-            Tensor::F64(tensor) => Some(tensor),
-            _ => None,
-        }
-    }
-
-    fn typed_mut(tensor: &mut Tensor) -> Option<&mut TypedTensor<Self>> {
-        match tensor {
-            Tensor::F64(tensor) => Some(tensor),
-            _ => None,
-        }
     }
 }
 
@@ -246,27 +208,16 @@ impl CudaScalar for Complex64 {
     fn contraction_scalar(self) -> ContractionScalar {
         ContractionScalar::C64(self)
     }
-
-    fn typed(tensor: &Tensor) -> Option<&TypedTensor<Self>> {
-        match tensor {
-            Tensor::C64(tensor) => Some(tensor),
-            _ => None,
-        }
-    }
-
-    fn typed_mut(tensor: &mut Tensor) -> Option<&mut TypedTensor<Self>> {
-        match tensor {
-            Tensor::C64(tensor) => Some(tensor),
-            _ => None,
-        }
-    }
 }
 
 fn dtype_mismatch<D: CudaScalar>(op: &'static str, tensor: &Tensor) -> DenseError {
-    DenseError::DTypeMismatch {
-        op,
-        expected: D::DTYPE,
-        actual: dense_dtype_from_tenferro(tensor.dtype()),
+    match dense_dtype_from_tenferro(tensor.dtype()) {
+        Ok(actual) => DenseError::DTypeMismatch {
+            op,
+            expected: D::DTYPE,
+            actual,
+        },
+        Err(err) => err,
     }
 }
 
@@ -741,6 +692,9 @@ impl CudaDenseContext {
 /// dtype and reports a mismatch as [`DenseError::DTypeMismatch`].
 pub struct CudaDenseStorage {
     tensor: Tensor,
+    // Fixed by the typed constructor, so `dtype()` never re-maps Tenferro's
+    // dtype, which since 0.6.0 includes the unmappable `DType::External`.
+    dtype: DenseDType,
     len: usize,
     device: usize,
 }
@@ -777,6 +731,7 @@ impl CudaDenseStorage {
         record_h2d(bytes);
         Ok(Self {
             tensor,
+            dtype: D::DTYPE,
             len,
             device: ctx.device,
         })
@@ -810,7 +765,7 @@ impl CudaDenseStorage {
 
     /// The payload dtype this device buffer owns.
     pub fn dtype(&self) -> DenseDType {
-        dense_dtype_from_tenferro(self.tensor.dtype())
+        self.dtype
     }
 
     pub fn len(&self) -> usize {
@@ -874,11 +829,12 @@ impl CudaDenseStorage {
 
     /// Wraps a device tensor produced by a tenferro op (e.g. a cuSOLVER
     /// factor) as flat storage.
-    fn from_tensor(tensor: Tensor, device: usize) -> Self {
+    fn from_tensor<D: CudaScalar>(tensor: Tensor, device: usize) -> Self {
         DEVICE_ALLOCS.fetch_add(1, Ordering::Relaxed);
         let len = tensor.shape().iter().product();
         Self {
             tensor,
+            dtype: D::DTYPE,
             len,
             device,
         }
@@ -943,7 +899,7 @@ impl CudaDenseStorage {
         strides: &[isize],
         offset: isize,
     ) -> Result<TensorViewMut<'_>, DenseError> {
-        let actual = dense_dtype_from_tenferro(self.tensor.dtype());
+        let actual = self.dtype;
         let Some(tensor) = D::typed_mut(&mut self.tensor) else {
             return Err(DenseError::DTypeMismatch {
                 op: "cuda_region",
@@ -965,7 +921,7 @@ impl CudaDenseStorage {
         offset: usize,
     ) -> Result<TensorViewMut<'_>, DenseError> {
         self.check_matrix_bound([rows, cols], [1, ld], offset)?;
-        let actual = dense_dtype_from_tenferro(self.tensor.dtype());
+        let actual = self.dtype;
         let Some(tensor) = D::typed_mut(&mut self.tensor) else {
             return Err(DenseError::DTypeMismatch {
                 op: "cuda_region",
@@ -1903,7 +1859,7 @@ fn expect_dtype<D: CudaScalar>(
     if D::typed(&tensor).is_none() {
         return Err(dtype_mismatch::<D>(op, &tensor));
     }
-    Ok(CudaDenseStorage::from_tensor(tensor, device))
+    Ok(CudaDenseStorage::from_tensor::<D>(tensor, device))
 }
 
 /// Copies the leading compact `rows x cols` block of a device buffer into a

@@ -79,8 +79,12 @@ trait ProbeScalar:
     fn conj(self) -> Self;
     fn magnitude(self) -> f64;
     fn contraction_scalar(self) -> ContractionScalar;
-    fn typed(tensor: &Tensor) -> Option<&TypedTensor<Self>>;
-    fn typed_mut(tensor: &mut Tensor) -> Option<&mut TypedTensor<Self>>;
+    fn typed(tensor: &Tensor) -> Option<&TypedTensor<Self>> {
+        tensor.as_typed::<Self>()
+    }
+    fn typed_mut(tensor: &mut Tensor) -> Option<&mut TypedTensor<Self>> {
+        tensor.as_typed_mut::<Self>()
+    }
 
     fn distance(self, other: Self) -> f64 {
         (self - other).magnitude()
@@ -123,20 +127,6 @@ impl ProbeScalar for f32 {
     fn contraction_scalar(self) -> ContractionScalar {
         ContractionScalar::F32(self)
     }
-
-    fn typed(tensor: &Tensor) -> Option<&TypedTensor<Self>> {
-        match tensor {
-            Tensor::F32(tensor) => Some(tensor),
-            _ => None,
-        }
-    }
-
-    fn typed_mut(tensor: &mut Tensor) -> Option<&mut TypedTensor<Self>> {
-        match tensor {
-            Tensor::F32(tensor) => Some(tensor),
-            _ => None,
-        }
-    }
 }
 
 impl ProbeScalar for Complex32 {
@@ -165,20 +155,6 @@ impl ProbeScalar for Complex32 {
 
     fn contraction_scalar(self) -> ContractionScalar {
         ContractionScalar::C32(self)
-    }
-
-    fn typed(tensor: &Tensor) -> Option<&TypedTensor<Self>> {
-        match tensor {
-            Tensor::C32(tensor) => Some(tensor),
-            _ => None,
-        }
-    }
-
-    fn typed_mut(tensor: &mut Tensor) -> Option<&mut TypedTensor<Self>> {
-        match tensor {
-            Tensor::C32(tensor) => Some(tensor),
-            _ => None,
-        }
     }
 }
 
@@ -227,15 +203,19 @@ impl Probe {
     fn download_real(&mut self, tensor: &Tensor, what: &str) -> Vec<f64> {
         let dtype = tensor.dtype();
         let host = download_tensor(self.backend.runtime(), tensor).expect("download");
-        let values = match host {
-            Tensor::F32(tensor) => tensor
-                .into_host_vec()
+        let values = match dtype {
+            DType::F32 => host
+                .into_typed::<f32>()
+                .and_then(TypedTensor::into_host_vec)
                 .expect("host vec")
                 .into_iter()
                 .map(f64::from)
                 .collect(),
-            Tensor::F64(tensor) => tensor.into_host_vec().expect("host vec"),
-            other => panic!("{what}: unexpected metadata dtype {:?}", other.dtype()),
+            DType::F64 => host
+                .into_typed::<f64>()
+                .and_then(TypedTensor::into_host_vec)
+                .expect("host vec"),
+            other => panic!("{what}: unexpected metadata dtype {other:?}"),
         };
         println!("  {what}: dtype {dtype:?}, {} value(s)", values.len());
         values

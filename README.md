@@ -279,8 +279,9 @@ TENET_COTENGRA_UV_PROJECT=tools/cotengra-python \
   multiplicity-free `f64`/`Complex64` subset after explicit transfer,
   including compact SVD and EIGH in both payloads. Device SVD keeps the raw
   backend gauge on `u`/`vh` rather than the Host largest-pivot gauge. Device
-  `qr_compact` is `f64`-only because tenferro-gpu 0.5.0's `triu` kernel does
-  not compile for a `Complex64` payload; full and values-only factorizations,
+  `qr_compact` is `f64`-only: TeNeT keeps its complex device-constant gate
+  (#1271) until the complex `triu` kernels that Tenferro 0.6.0 compiles are
+  verified on device; full and values-only factorizations,
   `eig`, and matrix functions have no device path.
 - Execution crates reject a no-default-features build because their convenience
   APIs require a concrete executor. Use `tenet-sectors` / `tenet-core` for
