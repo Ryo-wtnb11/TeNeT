@@ -12039,6 +12039,52 @@ where
 }
 
 #[cfg(feature = "cuda")]
+/// A device [`TensorMap::trace_pairs`] validated and compiled on the Host,
+/// not yet executed: executing it is the only step that touches the device.
+#[doc(hidden)]
+pub struct CudaTracePairs<'a, R, D: CudaPayload> {
+    runtime: &'a Runtime,
+    source_space: &'a BoundDynamicFusionMapSpace<R>,
+    source: &'a CudaStorage<D>,
+    space: BoundDynamicFusionMapSpace<R>,
+    structure: tenet_tensors::TensorTraceFusionStructure<f64>,
+}
+
+#[cfg(feature = "cuda")]
+impl<R, D> CudaTracePairs<'_, R, D>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: CudaPayload,
+{
+    /// Runs the compiled trace: the #740 output upload, then one accumulating
+    /// contraction per term, under one device lease.
+    pub fn execute(self) -> Result<TensorMap<R, D, CudaStorage<D>>, Error> {
+        let required_len = self.space.space().required_len()?;
+        let mut lease = self.runtime.lease_cuda()?;
+        let (cuda, transforms) = lease.split();
+        // ponytail: #740 — the device seam initializes an output by uploading
+        // zeros; replace only with a measured native allocation. The zeros are
+        // also what the accumulating replay starts from.
+        let mut output = CudaStorage::upload_owned(cuda, vec![D::from_real(0.0); required_len])?;
+        tenet_tensors::tensortrace_fusion_structure_accumulate_on_cuda(
+            cuda,
+            transforms,
+            &self.structure,
+            self.space.space().structure(),
+            &mut output,
+            self.source_space.space().structure(),
+            self.source,
+            D::from_real(1.0),
+        )?;
+        drop(lease);
+        Ok(TensorMap {
+            runtime: self.runtime.clone(),
+            repr: owned_repr(TypedTensorBody::dense(self.space, output)),
+        })
+    }
+}
+
+#[cfg(feature = "cuda")]
 /// Device transfer, arithmetic, reductions, and contraction over a
 /// [`CudaStorage`] payload.
 ///
@@ -13871,6 +13917,22 @@ where
     /// [`Error::PlacementMismatch`]. A rejected call leaves the device and the
     /// Runtime unchanged.
     pub fn trace_pairs(&self, pairs: &[(usize, usize)]) -> Result<Self, Error> {
+        match self.prepare_trace_pairs(pairs)? {
+            Some(trace) => trace.execute(),
+            None => Ok(self.clone()),
+        }
+    }
+
+    /// Everything [`Self::trace_pairs`] decides before the device lease — the
+    /// pair list, duality, storage kind, the Host compile and placement —
+    /// with the compiled structure kept for [`CudaTracePairs::execute`];
+    /// `None` for an empty pair list. Lets `tensor!` decide every trace of a
+    /// network before the first one allocates, at no second compile.
+    #[doc(hidden)]
+    pub fn prepare_trace_pairs(
+        &self,
+        pairs: &[(usize, usize)],
+    ) -> Result<Option<CudaTracePairs<'_, R, D>>, Error> {
         let Some(TracePairAxes {
             output_axes,
             destination_codomain_rank,
@@ -13878,7 +13940,7 @@ where
             trace_rhs,
         }) = trace_pair_axes(self.rank(), self.codomain_rank(), pairs)?
         else {
-            return Ok(self.clone());
+            return Ok(None);
         };
         let mapped_output_axes;
         let mapped_trace_lhs;
@@ -13928,29 +13990,13 @@ where
         if source.placement() != Placement::Cuda(self.runtime.cuda_device_ordinal_checked()?) {
             return Err(Error::PlacementMismatch);
         }
-        let required_len = space.space().required_len()?;
-
-        let mut lease = self.runtime.lease_cuda()?;
-        let (cuda, transforms) = lease.split();
-        // ponytail: #740 — the device seam initializes an output by uploading
-        // zeros; replace only with a measured native allocation. The zeros are
-        // also what the accumulating replay starts from.
-        let mut output = CudaStorage::upload_owned(cuda, vec![D::from_real(0.0); required_len])?;
-        tenet_tensors::tensortrace_fusion_structure_accumulate_on_cuda(
-            cuda,
-            transforms,
-            &structure,
-            space.space().structure(),
-            &mut output,
-            source_space.space().structure(),
+        Ok(Some(CudaTracePairs {
+            runtime: &self.runtime,
+            source_space,
             source,
-            D::from_real(1.0),
-        )?;
-        drop(lease);
-        Ok(Self {
-            runtime: self.runtime.clone(),
-            repr: owned_repr(TypedTensorBody::dense(space, output)),
-        })
+            space,
+            structure,
+        }))
     }
 
     fn twist_with_inverse_cuda(&self, legs: &[usize], inverse: bool) -> Result<Self, Error> {

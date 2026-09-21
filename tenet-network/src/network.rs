@@ -1628,8 +1628,9 @@ impl PlannedNetwork {
     /// contraction's own remaining boundaries are unreachable from a compiled
     /// schedule: every step passes `alpha = 1`, every retained destination is
     /// a canonical device result of the same step, and schedules are produced
-    /// only by `compile_schedule`. Intra-operand traces are rejected earlier,
-    /// by the trace entry of `tensor!`.
+    /// only by `compile_schedule`. A `tensor!` trace pre-step runs the operand
+    /// half of this preflight and prepares every trace before the first one
+    /// executes; this check then admits the reduced network.
     #[cfg(feature = "cuda")]
     pub(crate) fn validate_cuda_admission<R, D>(
         &self,
@@ -1639,29 +1640,44 @@ impl PlannedNetwork {
         R: TypedSectorAdmission + tenet::core::FusionRule,
         D: CudaPayload,
     {
-        let device = tensors
-            .first()
-            .ok_or_else(|| invalid("network execution requires at least one operand"))?
-            .runtime()
-            .cuda_device_ordinal()
-            .ok_or_else(|| {
-                invalid(
-                    "this runtime was built without a CUDA device; use Runtime::builder().cuda(device)",
-                )
-            })?;
-        for &tensor in tensors {
-            if tensor.placement() != Placement::Cuda(device) {
-                return Err(Error::PlacementMismatch);
-            }
-        }
-        device_operand_admission(
-            !self.schedule.steps.is_empty(),
-            tensors[0].provider().braiding_style(),
-            tensors
-                .iter()
-                .map(|tensor| tensor.network_reuse_class(false)),
-        )
+        cuda_operand_admission(tensors, !self.schedule.steps.is_empty())
     }
+}
+
+/// The operand half of the device network preflight, shared with the
+/// `tensor!` trace pre-step: a Runtime with a device, every operand on it,
+/// then [`device_operand_admission`].
+#[cfg(feature = "cuda")]
+fn cuda_operand_admission<R, D>(
+    tensors: &[&TensorMap<R, D, CudaStorage<D>>],
+    contracts: bool,
+) -> Result<(), Error>
+where
+    R: TypedSectorAdmission + tenet::core::FusionRule,
+    D: CudaPayload,
+{
+    let device = tensors
+        .first()
+        .ok_or_else(|| invalid("network execution requires at least one operand"))?
+        .runtime()
+        .cuda_device_ordinal()
+        .ok_or_else(|| {
+            invalid(
+                "this runtime was built without a CUDA device; use Runtime::builder().cuda(device)",
+            )
+        })?;
+    for &tensor in tensors {
+        if tensor.placement() != Placement::Cuda(device) {
+            return Err(Error::PlacementMismatch);
+        }
+    }
+    device_operand_admission(
+        contracts,
+        tensors[0].provider().braiding_style(),
+        tensors
+            .iter()
+            .map(|tensor| tensor.network_reuse_class(false)),
+    )
 }
 
 /// Representation and category checks of the device network preflight,
@@ -2508,49 +2524,20 @@ where
             .first()
             .map(|tensor| tensor.runtime().plan_cache_config().optimizer)
             .unwrap_or_default();
-        let mut inputs = Vec::with_capacity(tensors.len());
-        let mut conj = Vec::with_capacity(tensors.len());
-        let mut splits = Vec::with_capacity(tensors.len());
+        let lowering = StaticTraceLowering::new(tensors, spec)?;
         let mut lowered = Vec::with_capacity(tensors.len());
-        for (index, tensor) in tensors.iter().enumerate() {
-            let written = spec.inputs[index]
-                .iter()
-                .map(|label| TemporaryLabel::from(*label))
-                .collect::<Vec<_>>();
-            if !has_intra_operand_pair(&written) {
-                inputs.push(written);
-                conj.push(spec.conj[index]);
-                splits.push(spec.codomain_splits[index]);
-                lowered.push(None);
-                continue;
-            }
-            if written.len() != tensor.rank() {
-                return Err(invalid(format!(
-                    "operand {index} has {} labels but tensor rank {}",
-                    written.len(),
-                    tensor.rank()
-                ))
-                .into());
-            }
-            if let Some(split) = spec.codomain_splits[index] {
-                if split != tensor.codomain_rank() {
-                    return Err(invalid(format!(
-                        "operand {index} puts {split} label(s) before `;` but the tensor's codomain rank is {}",
-                        tensor.codomain_rank()
-                    ))
-                    .into());
+        for (tensor, trace) in tensors.iter().zip(&lowering.traces) {
+            lowered.push(match trace {
+                None => None,
+                Some((adjoint, pairs)) => {
+                    let value = if *adjoint {
+                        tensor.adjoint()?
+                    } else {
+                        (*tensor).clone()
+                    };
+                    Some(value.trace_pairs(pairs)?)
                 }
-            }
-            let (value, labels) = if spec.conj[index] {
-                (tensor.adjoint()?, rotate(&written, tensor.codomain_rank()))
-            } else {
-                ((*tensor).clone(), written)
-            };
-            let (pairs, reduced) = split_trace_pairs(index, &labels)?;
-            lowered.push(Some(value.trace_pairs(&pairs)?));
-            inputs.push(reduced);
-            conj.push(false);
-            splits.push(None);
+            });
         }
         let reduced = tensors
             .iter()
@@ -2563,18 +2550,7 @@ where
             &codomain_ranks,
             &optimizer,
             |_| Ok(()),
-            || {
-                Network::new(
-                    inputs,
-                    conj,
-                    splits,
-                    spec.output
-                        .iter()
-                        .map(|label| TemporaryLabel::from(*label))
-                        .collect(),
-                    spec.output_codomain_rank,
-                )
-            },
+            || lowering.network(spec),
         )?
         .execute_host(&reduced)
     }
@@ -2642,13 +2618,154 @@ where
         + Sync,
     D: CudaPayload,
 {
+    /// The Host trace pre-step with device `trace_pairs`. Every trace of the
+    /// network is validated and compiled on the Host before the first one
+    /// runs, so a rejection on any operand leaves the device untouched; the
+    /// reduced network then takes the ordinary device path.
     fn contract_static_trace(
-        _tensors: &[&Self],
-        _spec: &'static StaticTopologySpec,
+        tensors: &[&Self],
+        spec: &'static StaticTopologySpec,
     ) -> Result<Self, Self::Error> {
-        Err(Error::UnsupportedOnDevice(
-            "tensor! intra-operand trace is not supported on CUDA".to_string(),
-        ))
+        validate_static_shape(tensors, spec)?;
+        // Contraction admission of the reduced network is decided by its own
+        // preflight; an anyonic trace is rejected below with the Host's trace
+        // error, which the Host raises first as well.
+        cuda_operand_admission(tensors, false)?;
+        let codomain_ranks = tensors
+            .iter()
+            .map(|tensor| tensor.codomain_rank())
+            .collect::<Vec<_>>();
+        let optimizer = tensors
+            .first()
+            .map(|tensor| tensor.runtime().plan_cache_config().optimizer)
+            .unwrap_or_default();
+        let lowering = StaticTraceLowering::new(tensors, spec)?;
+        let sources = tensors
+            .iter()
+            .zip(&lowering.traces)
+            .map(|(tensor, trace)| {
+                trace
+                    .as_ref()
+                    .map(|(adjoint, pairs)| {
+                        let value = if *adjoint {
+                            tensor.adjoint()?
+                        } else {
+                            (*tensor).clone()
+                        };
+                        Ok((value, pairs))
+                    })
+                    .transpose()
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        let prepared = sources
+            .iter()
+            .map(|source| match source {
+                Some((value, pairs)) => value.prepare_trace_pairs(pairs),
+                None => Ok(None),
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        let lowered = prepared
+            .into_iter()
+            .map(|trace| trace.map(|trace| trace.execute()).transpose())
+            .collect::<Result<Vec<_>, Error>>()?;
+        let reduced = tensors
+            .iter()
+            .zip(&lowered)
+            .map(|(tensor, traced)| traced.as_ref().unwrap_or(tensor))
+            .collect::<Vec<_>>();
+        crate::plancache::get_or_plan_static(
+            spec,
+            &reduced,
+            &codomain_ranks,
+            &optimizer,
+            |planned| planned.validate_cuda_admission(&reduced),
+            || lowering.network(spec),
+        )?
+        .execute_cuda(&reduced)
+    }
+}
+
+/// The call-local trace lowering of a `tensor!` expression, decided from its
+/// labels and the operands' ranks alone: the reduced network's operand
+/// labels, and per traced operand whether it is read through its adjoint and
+/// its intra-operand pairs. Host and device execute the same lowering.
+struct StaticTraceLowering {
+    inputs: Vec<Vec<TemporaryLabel>>,
+    conj: Vec<bool>,
+    splits: Vec<Option<usize>>,
+    traces: Vec<Option<StaticTrace>>,
+}
+
+/// One operand's trace: whether it is read through its adjoint, and its pairs.
+type StaticTrace = (bool, Vec<(usize, usize)>);
+
+impl StaticTraceLowering {
+    fn new<R, D, S>(
+        tensors: &[&TensorMap<R, D, S>],
+        spec: &StaticTopologySpec,
+    ) -> Result<Self, Error>
+    where
+        D: TensorScalar,
+        S: TensorStorage<D>,
+    {
+        let mut lowering = Self {
+            inputs: Vec::with_capacity(tensors.len()),
+            conj: Vec::with_capacity(tensors.len()),
+            splits: Vec::with_capacity(tensors.len()),
+            traces: Vec::with_capacity(tensors.len()),
+        };
+        for (index, tensor) in tensors.iter().enumerate() {
+            let written = spec.inputs[index]
+                .iter()
+                .map(|label| TemporaryLabel::from(*label))
+                .collect::<Vec<_>>();
+            if !has_intra_operand_pair(&written) {
+                lowering.inputs.push(written);
+                lowering.conj.push(spec.conj[index]);
+                lowering.splits.push(spec.codomain_splits[index]);
+                lowering.traces.push(None);
+                continue;
+            }
+            if written.len() != tensor.rank() {
+                return Err(invalid(format!(
+                    "operand {index} has {} labels but tensor rank {}",
+                    written.len(),
+                    tensor.rank()
+                )));
+            }
+            if let Some(split) = spec.codomain_splits[index] {
+                if split != tensor.codomain_rank() {
+                    return Err(invalid(format!(
+                        "operand {index} puts {split} label(s) before `;` but the tensor's codomain rank is {}",
+                        tensor.codomain_rank()
+                    )));
+                }
+            }
+            let labels = if spec.conj[index] {
+                rotate(&written, tensor.codomain_rank())
+            } else {
+                written
+            };
+            let (pairs, reduced) = split_trace_pairs(index, &labels)?;
+            lowering.inputs.push(reduced);
+            lowering.conj.push(false);
+            lowering.splits.push(None);
+            lowering.traces.push(Some((spec.conj[index], pairs)));
+        }
+        Ok(lowering)
+    }
+
+    fn network(&self, spec: &StaticTopologySpec) -> Result<Network, Error> {
+        Network::new(
+            self.inputs.clone(),
+            self.conj.clone(),
+            self.splits.clone(),
+            spec.output
+                .iter()
+                .map(|label| TemporaryLabel::from(*label))
+                .collect(),
+            spec.output_codomain_rank,
+        )
     }
 }
 
@@ -3911,6 +4028,78 @@ mod typed_replay_tests {
                     [NetworkReuseClass::OwnedDense, NetworkReuseClass::Compact],
                 ),
                 Err(Error::UnsupportedOnDevice(_))
+            ));
+        }
+    }
+
+    /// The trace pre-step's decisions come from labels and ranks alone, so
+    /// the device can take all of them — and reject — before any trace runs.
+    #[test]
+    fn static_trace_lowering_is_decided_from_labels_and_ranks() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let space = GradedSpace::try_new(U1FusionRule, [(U1Irrep::new(0), 2)]).unwrap();
+        let a = TensorMap::<U1FusionRule, f64>::rand_with_seed(
+            &runtime,
+            [&space, &space],
+            [&space],
+            1_350_000,
+        )
+        .unwrap();
+        let b =
+            TensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&space], [&space], 1_350_001)
+                .unwrap();
+        let spec = |inputs, conj, codomain_splits| StaticTopologySpec {
+            inputs,
+            conj,
+            codomain_splits,
+            output: &["k"],
+            output_codomain_rank: None,
+        };
+        let owned: Vec<Vec<TemporaryLabel>> = vec![vec![label("j")], vec![label("j"), label("k")]];
+
+        // What: a traced operand loses its pairs and its split, keeps its
+        // open labels in written order; an untraced operand is untouched.
+        let lowering = StaticTraceLowering::new(
+            &[&a, &b],
+            &spec(
+                &[&["i", "j", "i"], &["j", "k"]],
+                &[false, false],
+                &[Some(2), Some(1)],
+            ),
+        )
+        .unwrap();
+        assert_eq!(lowering.inputs, owned);
+        assert_eq!(lowering.conj, [false, false]);
+        assert_eq!(lowering.splits, [None, Some(1)]);
+        assert_eq!(lowering.traces, [Some((false, vec![(0, 2)])), None]);
+
+        // What: a conjugated traced operand is traced through its adjoint,
+        // whose axes are the written labels rotated by the codomain rank.
+        let lowering = StaticTraceLowering::new(
+            &[&a, &b],
+            &spec(
+                &[&["i", "i", "j"], &["j", "k"]],
+                &[true, false],
+                &[Some(2), Some(1)],
+            ),
+        )
+        .unwrap();
+        assert_eq!(lowering.inputs, owned);
+        assert_eq!(lowering.conj, [false, false]);
+        assert_eq!(lowering.traces, [Some((true, vec![(1, 2)])), None]);
+
+        // What: rank and split mismatches and a thrice-written label are
+        // rejected, each from metadata.
+        type Case = (&'static [&'static [&'static str]], &'static [Option<usize>]);
+        const MALFORMED: [Case; 3] = [
+            (&[&["i", "i"], &["j", "k"]], &[None, Some(1)]),
+            (&[&["i", "j", "i"], &["j", "k"]], &[Some(1), Some(1)]),
+            (&[&["i", "i", "i"], &["j", "k"]], &[None, Some(1)]),
+        ];
+        for (inputs, splits) in MALFORMED {
+            assert!(matches!(
+                StaticTraceLowering::new(&[&a, &b], &spec(inputs, &[false, false], splits)),
+                Err(Error::InvalidArgument(_))
             ));
         }
     }
