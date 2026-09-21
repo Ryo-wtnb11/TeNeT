@@ -2,7 +2,11 @@
 
 Date 2026-09-21. Host: Apple M4 Max (12 P + 4 E cores), macOS 15.5 (24F74),
 rustc 1.96.0 / cargo 1.96.0. TeNeT revision `origin/main` `28a9c67d` plus this
-commit's benchmark sources only (no production code changed). Cargo lock
+commit's benchmark sources only (no production code changed). The commit was
+later rebased onto `b360984a`; the intervening changes are CUDA- or test-only
+on the CPU paths measured here, so the numbers hold, but cited line numbers
+refer to `28a9c67d` (e.g. `SharedCpuContext::from_env` in `tenet/src/runtime.rs`
+is near :1597–1601 at `b360984a`). Cargo lock
 `cad23363c997e3895a5391be45ee97fb3cfe19ca049c53593bbc8f60580f59b2`, default
 features (`cpu-faer`), `cargo build --release --locked --offline -p tenet-rs
 --example eager_overhead_ledger` with `CARGO_PROFILE_RELEASE_DEBUG=line-tables-only`
@@ -59,7 +63,11 @@ and median over the batches. BenchmarkTools is not in the pinned Julia
 environment and adding it would change a reference environment, so the same
 manual estimator is used on both sides. Allocation: one warm call (TeNeT: counting
 global allocator, calls + requested bytes on the calling thread, result drop
-included; TensorKit: `@timed`, `gc_alloc_count` + bytes).
+included; TensorKit: `@timed`, `gc_alloc_count` + bytes). Caveats: TeNeT counts the
+calling thread only, so the `default` and `tenet1` CSVs undercount work done on
+pool workers (e.g. QR at r2: 34 calls there vs 122 at one thread) — compare
+allocations on the `one` layout. TensorKit's `gc_alloc_count` counts Julia GC
+objects, a different unit from allocator calls; compare trends, not counts.
 
 Thread layouts (`LEDGER_THREADS`): `one` = `Runtime::builder().dense_threads(1)`
 (TeNeT's Rayon global pool and the Tenferro CPU context both 1); `default` = no
@@ -354,43 +362,27 @@ per-block granularity (TensorKit and QSpace also factor per block); the
 
 ## Proposed follow-up leaves (one invariant each)
 
-1. **TeNeT: result layouts are looked up, not rebuilt.** Invariant: a warm eager
-   permute/repartition/restrict/compose/contract performs no
-   `build_complete_from_leg_degeneracies` for a (rule, hom space) whose
-   complete structure is already interned; asserted with a call counter
-   (`observe_final_result_layout_build` exists) and bounded, keyed, resettable
-   storage per policy. Constant 2.
-2. **TeNeT: contraction plan work per call is O(rank) or reused.** Invariant: a
-   warm `contract`/`compose` compiles no axis/route/core plan for an axis pattern
-   and operand structure it has seen; counter-asserted. Constant 3.
-3. **TeNeT: no eager error construction on hot success paths.** Invariant: zero
-   `drop_in_place::<CoreError|OperationError>` calls on a successful warm
-   eager operation; mechanical `ok_or` → `ok_or_else` on the listed paths plus
-   the `clippy::or_fun_call` lint so it stays fixed. Constant 4.
-4. **TeNeT: one Tenferro session per factorization phase.** Invariant:
-   `qr_compact` (and the other compact factorizations) opens one CPU session per
-   call regardless of the coupled-sector count, as #1283 did for grouped GEMM;
-   `cpu_session_stats().sessions_opened` asserts it. Constants 1 and 5 (divides
-   both by the block count).
-5. **TeNeT: restrict/embed use the strided block copy.** Invariant:
-   `restrict_leg`/`embed_leg` move each block with one bounds-checked-once
-   strided copy (the kernel permute uses) and write an uninitialized
-   destination; per-element cost within the permute kernel's on the same
-   payload. Constant 6 (destination part with #1290).
-6. **Thread policy for small dense phases (with Tenferro).** Invariant: under
-   default threads a dense phase below a structural work gate runs on the
-   calling thread, so no small eager operation is slower than at one thread.
-   Needs a Tenferro capability (inline execution / work-size gate in
-   `CpuContext::install`) — file upstream, mark this leaf blocked; the TeNeT
-   side is only choosing the gate at the owning layer. Constant 1.
-7. **Tenferro upstream (issue only): per-session entry cost.** Invariant: a
-   one-thread CPU session entry costs O(1) small constant without by-value
-   copies of large session structs or clock reads; QR returns into a
-   caller-provided buffer. Constant 5. Candidate for the batched Tenferro
-   wish-list.
-8. **TeNeT: complex norm kernel parity.** Invariant: Complex64 abelian `norm`
-   within TensorKit's `nrm2` time on the flat payload. Constant 8; fold into
-   #875 if that issue owns the reduction path.
+Filed after the independent review (`reviews/batched-symmetric-20260920/e1-independent-review.md`
+in the supervisor workspace), with its corrections:
+
+1. #1358 — warm eager result layouts are looked up, not rebuilt (constant 2;
+   workload cache in the runtime-owned byte-budgeted store; highest TeNeT-owned
+   priority).
+2. #1359 — reuse the compiled storage-contract resolution across warm calls,
+   keyed on #1358's layout identity; a miss costs O(coupled blocks) (constant 3).
+3. #1360 — no error values constructed on eager success paths; gated by review
+   and a before/after stack sample (`clippy::or_fun_call` does not flag variant
+   constructors) (constant 4).
+4. #1361 — one CPU linalg session per compact factorization call; removes the
+   per-block session entry only (constants 1 and 5).
+5. #1362 — `restrict_leg`/`embed_leg` strided block copy, bounds checked once
+   per block; uninitialized destination stays with #1290 (constant 6).
+6. #1363 — small dense phases not slower under default threads than at one
+   thread; Tenferro inline/work-gate capability or a TeNeT-side pool-less
+   context, maintainer decision (constant 1).
+7. Tenferro per-session entry cost and QR into a caller buffer: batched
+   upstream wish-list (constant 5).
+8. Complex64 `norm` parity folded into #875 (constant 8).
 
 ## Issue impact
 
