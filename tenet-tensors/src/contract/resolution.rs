@@ -38,6 +38,48 @@ pub(crate) enum Resolution<C = f64> {
     Structure(Arc<TensorContractStructure<C>>),
 }
 
+/// Host-compiled, owned route of one contraction whose payloads are not
+/// host slices (the device path): everything categorical — route choice,
+/// orientation and axis order, source/output transform structures, borrow
+/// decisions, core plan and twist classification — is decided here, on the
+/// host, by the same compilers the Host contraction runs; a storage executor
+/// only replays it.
+///
+/// Created by
+/// [`TensorContractFusionExecutionContext::compile_storage_contract_resolution`](super::TensorContractFusionExecutionContext::compile_storage_contract_resolution).
+#[doc(hidden)]
+#[derive(Clone, Debug)]
+pub struct StorageContractResolution<C = f64> {
+    pub(crate) route: StorageContractRoute<C>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum StorageContractRoute<C> {
+    /// Canonical fully-direct coupled-sector GEMM batch over the parent
+    /// buffers (lazy adjoints as GEMM operand flags, a uniform fermionic twist
+    /// as per-job alpha).
+    #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+    Core(Arc<FusionBlockContractPlan<C>>),
+    /// Source tree transforms → fully-direct core GEMM → output transform.
+    DynamicTree(Arc<super::dynamic::DynamicTreeExecutionArtifact<C>>),
+}
+
+impl<C: DenseBlockScalar> StorageContractResolution<C> {
+    /// True when the route needs the in-place fermionic twist of the
+    /// core-right operand, which no device executor applies yet (G2c-2).
+    pub fn requires_core_right_twist(&self) -> bool {
+        match &self.route {
+            StorageContractRoute::Core(_) => false,
+            StorageContractRoute::DynamicTree(artifact) => artifact.requires_core_right_twist(),
+        }
+    }
+
+    /// True when the route runs source/output tree transforms around the core.
+    pub fn is_dynamic_tree(&self) -> bool {
+        matches!(self.route, StorageContractRoute::DynamicTree(_))
+    }
+}
+
 /// Compiles the route and plan for one ordinary contraction.
 pub(crate) fn compile_resolution<R>(
     rule: &R,

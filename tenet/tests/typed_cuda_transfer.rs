@@ -1756,16 +1756,26 @@ fn typed_cuda_direct_supports_canonical_lazy_and_rejects_other_scopes_before_mut
         device.compose(&other_device).unwrap_err(),
         tenet::typed::Error::RuntimeMismatch
     );
-    assert!(matches!(
-        device.contract(&device, &[0], &[0], &[0, 1]),
-        Err(tenet::typed::Error::Operation(error))
-            if matches!(*error, tenet::operations::OperationError::UnsupportedTensorContractScope { .. })
-    ));
-    assert!(matches!(
-        device.contract(&device, &[1], &[0], &[1, 0]),
-        Err(tenet::typed::Error::Operation(error))
-            if matches!(*error, tenet::operations::OperationError::UnsupportedTensorContractScope { .. })
-    ));
+    // General axes are admitted since G2c-1a (#1345): a mismatched pairing is
+    // the Host's own error, and a permuted output is the Host's result.
+    assert_eq!(
+        device
+            .contract(&device, &[0], &[0], &[0, 1])
+            .unwrap_err()
+            .to_string(),
+        host.contract(&host, &[0], &[0], &[0, 1])
+            .unwrap_err()
+            .to_string()
+    );
+    assert_eq!(
+        device
+            .contract(&device, &[1], &[0], &[1, 0])
+            .unwrap()
+            .to_host()
+            .unwrap()
+            .data(),
+        host.contract(&host, &[1], &[0], &[1, 0]).unwrap().data()
+    );
     let lazy_host = host.adjoint().unwrap();
     let expected_lazy_compose = lazy_host.compose(&host).unwrap();
     let lazy = lazy_host.to_cuda().unwrap();
@@ -1777,11 +1787,17 @@ fn typed_cuda_direct_supports_canonical_lazy_and_rejects_other_scopes_before_mut
         structural_snapshot(&lazy_compose),
         structural_snapshot(&expected_lazy_compose)
     );
-    assert!(matches!(
-        lazy.contract(&device, &[1], &[0], &[1, 0]),
-        Err(tenet::typed::Error::Operation(error))
-            if matches!(*error, tenet::operations::OperationError::UnsupportedTensorContractScope { .. })
-    ));
+    let lazy_general = lazy.contract(&device, &[1], &[0], &[1, 0]).unwrap();
+    let expected_lazy_general = lazy_host.contract(&host, &[1], &[0], &[1, 0]).unwrap();
+    for (actual, expected) in lazy_general
+        .to_host()
+        .unwrap()
+        .data()
+        .iter()
+        .zip(expected_lazy_general.data())
+    {
+        assert!((actual - expected).abs() <= 1e-12 * (1.0 + expected.abs()));
+    }
     assert_eq!(device.to_host().unwrap().data(), expected);
 
     let zn3 = Arc::new(ZNFusionRule::new(3).unwrap());
@@ -2064,22 +2080,33 @@ fn typed_cuda_c64_contract_and_compose_match_host() {
         .unwrap(),
     );
 
-    // Unsupported scopes are rejected in the same order as for f64, before
-    // any device mutation.
-    let lhs = TensorMap::<_, Complex64>::from_block_fn(&runtime, [&u1], [&u1], |_, indices| {
-        complex_entry(indices, 5.0)
-    })
-    .unwrap()
-    .to_cuda()
-    .unwrap();
-    let rhs = TensorMap::<_, Complex64>::from_block_fn(&runtime, [&u1], [&u1], |_, indices| {
-        complex_entry(indices, 6.0)
-    })
-    .unwrap()
-    .to_cuda()
-    .unwrap();
-    assert!(lhs.contract(&rhs, &[0], &[1], &[0, 1]).is_err());
-    assert!(lhs.contract(&rhs, &[1], &[0], &[1, 0]).is_err());
+    // General axes are admitted since G2c-1a (#1345): the formerly rejected
+    // scopes now agree with the Host.
+    let host_lhs =
+        TensorMap::<_, Complex64>::from_block_fn(&runtime, [&u1], [&u1], |_, indices| {
+            complex_entry(indices, 5.0)
+        })
+        .unwrap();
+    let host_rhs =
+        TensorMap::<_, Complex64>::from_block_fn(&runtime, [&u1], [&u1], |_, indices| {
+            complex_entry(indices, 6.0)
+        })
+        .unwrap();
+    let lhs = host_lhs.to_cuda().unwrap();
+    let rhs = host_rhs.to_cuda().unwrap();
+    for (lhs_axes, rhs_axes, output) in [(&[0], &[1], &[0, 1]), (&[1], &[0], &[1, 0])] {
+        let expected = host_lhs
+            .contract(&host_rhs, lhs_axes, rhs_axes, output)
+            .unwrap();
+        let actual = lhs
+            .contract(&rhs, lhs_axes, rhs_axes, output)
+            .unwrap()
+            .to_host()
+            .unwrap();
+        for (actual, expected) in actual.data().iter().zip(expected.data()) {
+            assert!((actual - expected).norm() <= 1e-12 * (1.0 + expected.norm()));
+        }
+    }
 }
 
 #[test]

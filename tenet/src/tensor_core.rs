@@ -451,26 +451,22 @@ pub(crate) enum OrientedContractionKind {
     Compose,
 }
 
+/// The destination space of a lazy-adjoint-aware contraction, with the
+/// Host's validation order: rule identity, axis counts, axis sets, output
+/// permutation, then the oriented homspace. Shared by the Host contraction
+/// and the device one, so both derive one destination from one authority.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn tensorcontract_oriented_multiplicity_free<R, D>(
-    context: &mut CoefficientCtx<D, RuleIdentity, R::Scalar>,
+pub(crate) fn oriented_contract_destination<R>(
     lhs_authority: &BoundDynamicFusionMapSpace<R>,
     lhs: FusionOperand<'_>,
-    lhs_data: &[D],
     rhs_authority: &BoundDynamicFusionMapSpace<R>,
     rhs: FusionOperand<'_>,
-    rhs_data: &[D],
     lhs_axes: &[usize],
     rhs_axes: &[usize],
     output_order: OutputAxisOrder<'_>,
-    kind: OrientedContractionKind,
-) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), tenet_tensors::OperationError>
+) -> Result<BoundDynamicFusionMapSpace<R>, tenet_tensors::OperationError>
 where
-    R: MultiplicityFreeRigidSymbols
-        + CheckedFusionAlgebra
-        + TreeTransformRuleCacheKey<Key = RuleIdentity>,
-    R::Scalar: CategoricalScalar + tenet_tensors::DenseRecouplingScalar,
-    D: ScalarOps + RecouplingCoefficientAction<R::Scalar>,
+    R: MultiplicityFreeRigidSymbols + CheckedFusionAlgebra,
 {
     if lhs_authority.provider().rule_identity() != rhs_authority.provider().rule_identity() {
         return Err(tenet_tensors::OperationError::from_core_preserving_context(
@@ -565,7 +561,39 @@ where
             message: "unknown checked fusion metadata error",
         },
     })?;
-    let destination = lhs_authority.derive_from_final_homspace(homspace)?;
+    lhs_authority.derive_from_final_homspace(homspace)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn tensorcontract_oriented_multiplicity_free<R, D>(
+    context: &mut CoefficientCtx<D, RuleIdentity, R::Scalar>,
+    lhs_authority: &BoundDynamicFusionMapSpace<R>,
+    lhs: FusionOperand<'_>,
+    lhs_data: &[D],
+    rhs_authority: &BoundDynamicFusionMapSpace<R>,
+    rhs: FusionOperand<'_>,
+    rhs_data: &[D],
+    lhs_axes: &[usize],
+    rhs_axes: &[usize],
+    output_order: OutputAxisOrder<'_>,
+    kind: OrientedContractionKind,
+) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), tenet_tensors::OperationError>
+where
+    R: MultiplicityFreeRigidSymbols
+        + CheckedFusionAlgebra
+        + TreeTransformRuleCacheKey<Key = RuleIdentity>,
+    R::Scalar: CategoricalScalar + tenet_tensors::DenseRecouplingScalar,
+    D: ScalarOps + RecouplingCoefficientAction<R::Scalar>,
+{
+    let destination = oriented_contract_destination(
+        lhs_authority,
+        lhs,
+        rhs_authority,
+        rhs,
+        lhs_axes,
+        rhs_axes,
+        output_order,
+    )?;
     let mut data = zeroed_payload(destination.space().required_len()?);
     match kind {
         OrientedContractionKind::Compose => context.tensorcompose_fusion_dyn_into_with_init(

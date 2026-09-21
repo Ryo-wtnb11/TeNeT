@@ -42,7 +42,7 @@ use super::resolution::{
     compile_composition_plan, compile_core_plan, compile_prelowered_resolution, compile_resolution,
     compile_storage_resolution, try_compile_oriented_canonical_core_resolution,
     try_compile_oriented_storage_composition_plan, try_compile_oriented_storage_contract_plan,
-    Resolution,
+    Resolution, StorageContractResolution, StorageContractRoute,
 };
 use super::scratch::DynamicFusionScratchWorkspace;
 use super::structure::{TensorContractAxisPlan, TensorContractStructure};
@@ -1546,6 +1546,136 @@ where
                 })
             }
         }
+    }
+
+    /// Compiles, on the host, the owned route a storage-resident (device)
+    /// contraction replays: the single planning authority for device
+    /// contraction, so a device executor never re-derives a permutation.
+    ///
+    /// Route order is the Host's:
+    ///
+    /// 1. the canonical fully-direct core over the parent buffers — the
+    ///    existing storage-direct route, lazy adjoints as GEMM operand flags
+    ///    and a uniform fermionic twist folded into per-job alpha, unchanged;
+    /// 2. otherwise the Host `DynamicTree` artifact, compiled by the same entry
+    ///    the Host contraction uses for this representation — the owned
+    ///    compiler for two owned operands, the prelowered compiler when either
+    ///    is a lazy adjoint — with this context's space cache and tree context,
+    ///    so its transform structures are the Arcs a device executor's
+    ///    prepared cache is keyed by.
+    ///
+    /// Why not mirror the Host's `Structure` route: it is a dense one-shot
+    /// optimization over this same faithful path (declined for conjugated
+    /// operands exactly as `compile_structure = None` would), and a device has
+    /// no kernel for it. Where the Host picks it, the two results agree to
+    /// dtype tolerance, not bitwise.
+    ///
+    /// A non-empty core-right twist is reported by
+    /// [`StorageContractResolution::requires_core_right_twist`], not rejected
+    /// here: the capability boundary belongs to the executor's caller.
+    #[doc(hidden)]
+    pub fn compile_storage_contract_resolution<R>(
+        &mut self,
+        dst_space: &BoundDynamicFusionMapSpace<R>,
+        lhs: FusionOperand<'_>,
+        rhs: FusionOperand<'_>,
+        axes: TensorContractSpec<'_>,
+    ) -> Result<StorageContractResolution<C>, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
+    {
+        let rule = dst_space.provider();
+        validate_fusion_contract_rule(
+            rule,
+            dst_space.space(),
+            lhs.storage_space(),
+            rhs.storage_space(),
+        )?;
+        if axes.lhs_conjugate() != lhs.storage_conjugate()
+            || axes.rhs_conjugate() != rhs.storage_conjugate()
+        {
+            return Err(OperationError::InvalidArgument {
+                message: "prelowered operand flags must match the contraction request",
+            });
+        }
+        if let Some(plan) =
+            try_compile_oriented_storage_contract_plan(rule, dst_space.space(), lhs, rhs, axes)?
+        {
+            if !plan.is_fully_direct() {
+                return Err(OperationError::UnsupportedTensorContractScope {
+                    message: "storage-direct contraction supports only canonical fully-direct \
+                              oriented operands",
+                });
+            }
+            return Ok(StorageContractResolution {
+                route: StorageContractRoute::Core(plan),
+            });
+        }
+        let layout_primer = dst_space.layout_primer();
+        let artifact = if !lhs.storage_conjugate() && !rhs.storage_conjugate() {
+            let (lhs_space, rhs_space) = (lhs.storage_space(), rhs.storage_space());
+            let plan = prepare_tensorcontract_fusion_plan_dyn_raw_canonical(
+                rule,
+                dst_space.space(),
+                lhs_space,
+                rhs_space,
+                axes,
+            )?;
+            super::dynamic::compile_dynamic_tree_execution_artifact::<_, _, _, _, _, false>(
+                &mut self.tree_context,
+                &mut self.dynamic_space_cache,
+                rule,
+                layout_primer,
+                &plan,
+                dst_space.space(),
+                lhs_space,
+                lhs_space.structure(),
+                rhs_space,
+                rhs_space.structure(),
+                None,
+            )?
+        } else {
+            let lhs_layout = lhs.prepare(rule, layout_primer)?;
+            let rhs_layout = rhs.prepare(rule, layout_primer)?;
+            let plan = prelowered_plan_builder(
+                rule,
+                dst_space.space(),
+                &lhs_layout,
+                &rhs_layout,
+                axes,
+                layout_primer,
+            )?;
+            super::dynamic::compile_prelowered_dynamic_tree_execution_artifact::<
+                _,
+                _,
+                _,
+                _,
+                _,
+                false,
+            >(
+                &mut self.tree_context,
+                &mut self.dynamic_space_cache,
+                rule,
+                layout_primer,
+                &plan,
+                dst_space.space(),
+                &lhs_layout,
+                &rhs_layout,
+                None,
+            )?
+        };
+        // Transformed sources are canonical coupled layouts, so the core plan
+        // is fully direct for every typed operand; a violation is an internal
+        // inconsistency, reported before any device work.
+        if !artifact.block_plan_is_fully_direct() {
+            return Err(OperationError::UnsupportedTensorContractScope {
+                message: "dynamic-tree core plan over transformed sources is not fully direct",
+            });
+        }
+        Ok(StorageContractResolution {
+            route: StorageContractRoute::DynamicTree(Arc::new(artifact)),
+        })
     }
 
     #[allow(clippy::too_many_arguments)]

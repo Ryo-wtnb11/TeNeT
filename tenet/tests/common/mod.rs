@@ -217,18 +217,20 @@ pub fn permute_dense<D: Copy>(shape: &[usize], data: &[D], perm: &[usize]) -> (V
 // Device payload harness (`cuda` only)
 // ---------------------------------------------------------------------------
 
-/// Every admitted device payload, with the comparisons the device suites need.
+/// Every admitted device payload dtype, with the comparisons the payload
+/// suites need.
 ///
-/// It lives here rather than in one test binary because both device
-/// single-precision suites — the base family (#1336) and the factorizations
-/// (#1341) — are generic over exactly this set, and a second copy is a second
-/// place for `EPS` or a conversion to drift.
+/// It lives here rather than in one test binary because several suites are
+/// generic over exactly this set — the device single-precision suites (#1336,
+/// #1341), the device general contraction (#1345) and its ungated Host oracle
+/// pin — and a second copy is a second place for `EPS` or a conversion to
+/// drift. It needs no device, so a Host pin can share it; [`DevicePayload`]
+/// adds the device bound.
 ///
 /// `entry` never receives an un-suffixed float literal in a single-precision
 /// context: the caller passes `f64` and each impl performs its own conversion,
 /// which is also what keeps the fixtures dyadic and therefore exact.
-#[cfg(feature = "cuda")]
-pub trait DevicePayload: tenet::typed::CudaPayload + Copy + PartialEq + std::fmt::Debug {
+pub trait Payload: tenet::prelude::TensorScalar + Copy + PartialEq + std::fmt::Debug {
     const NAME: &'static str;
     /// `eps` of the payload's *real lane* — the precision the device sums in.
     const EPS: f64;
@@ -248,8 +250,7 @@ pub trait DevicePayload: tenet::typed::CudaPayload + Copy + PartialEq + std::fmt
     }
 }
 
-#[cfg(feature = "cuda")]
-impl DevicePayload for f64 {
+impl Payload for f64 {
     const NAME: &'static str = "f64";
     const EPS: f64 = f64::EPSILON;
 
@@ -262,8 +263,7 @@ impl DevicePayload for f64 {
     }
 }
 
-#[cfg(feature = "cuda")]
-impl DevicePayload for num_complex::Complex64 {
+impl Payload for num_complex::Complex64 {
     const NAME: &'static str = "c64";
     const EPS: f64 = f64::EPSILON;
 
@@ -276,8 +276,7 @@ impl DevicePayload for num_complex::Complex64 {
     }
 }
 
-#[cfg(feature = "cuda")]
-impl DevicePayload for f32 {
+impl Payload for f32 {
     const NAME: &'static str = "f32";
     const EPS: f64 = f32::EPSILON as f64;
 
@@ -290,8 +289,7 @@ impl DevicePayload for f32 {
     }
 }
 
-#[cfg(feature = "cuda")]
-impl DevicePayload for num_complex::Complex32 {
+impl Payload for num_complex::Complex32 {
     const NAME: &'static str = "c32";
     const EPS: f64 = f32::EPSILON as f64;
 
@@ -303,6 +301,13 @@ impl DevicePayload for num_complex::Complex32 {
         (f64::from(self.re), f64::from(self.im))
     }
 }
+
+/// A [`Payload`] the device admits.
+#[cfg(feature = "cuda")]
+pub trait DevicePayload: Payload + tenet::typed::CudaPayload {}
+
+#[cfg(feature = "cuda")]
+impl<D: Payload + tenet::typed::CudaPayload> DevicePayload for D {}
 
 /// Symmetry providers the device generic bodies are instantiated over.
 #[cfg(feature = "cuda")]

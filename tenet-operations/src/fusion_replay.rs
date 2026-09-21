@@ -365,6 +365,14 @@ where
         self.irregular.is_empty()
     }
 
+    /// The destination blocks no GEMM or scatter job writes. A replay into a
+    /// retained (non-zeroed) destination must initialise exactly these; a
+    /// fresh zero destination needs nothing (see
+    /// [`ContractDestinationInit::Zeroed`]).
+    pub fn inactive_destination_regions(&self) -> &[FusionScaleBlockLayout] {
+        &self.inactive_dst_scale_blocks
+    }
+
     /// Assembles a compiled plan; called by the symmetric compile layer.
     /// Direct groups form one backend batch, while each irregular group owns a
     /// fixed group-local pack/scatter descriptor in coupled-sector order.
@@ -4156,6 +4164,19 @@ mod tests {
         assert_eq!(plan.direct_batch().len(), 1);
         let required = dst_structure.required_len().unwrap();
         assert_eq!(required, 2 * 2 + 3 * 3);
+        // What: the accessor names exactly the odd 3x3 block no job writes, as
+        // one contiguous range — the set a retained device destination must
+        // zero (G2c-1a).
+        assert_eq!(
+            plan.inactive_destination_regions(),
+            [FusionScaleBlockLayout {
+                block: FusionStridedBlockLayout {
+                    shape: vec![9],
+                    strides: vec![1],
+                    offset: 4,
+                },
+            }]
+        );
         let lhs_data = vec![1.0; lhs_structure.required_len().unwrap()];
         let rhs_data = vec![2.0; rhs_structure.required_len().unwrap()];
 

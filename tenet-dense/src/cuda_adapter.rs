@@ -775,10 +775,13 @@ impl CudaDenseStorage {
             return Err(dtype_mismatch::<D>("cuda_download", &host));
         }
         let typed = D::into_typed(host).map_err(|err| cuda_error("cuda_download", err))?;
-        let data = typed
+        let mut data = typed
             .into_host_vec()
             .map_err(|err| cuda_error("cuda_download", err))?;
         let bytes = std::mem::size_of_val(data.as_slice());
+        // A narrowed buffer (`set_active_len`) still transfers its whole
+        // allocation; only the active prefix is the value.
+        data.truncate(self.len);
         #[cfg(test)]
         CUDA_FULL_DOWNLOAD_BYTES.fetch_add(bytes, Ordering::Relaxed);
         record_d2h(bytes);
@@ -800,6 +803,28 @@ impl CudaDenseStorage {
 
     pub fn device(&self) -> usize {
         self.device
+    }
+
+    /// Elements the device allocation holds; at least [`Self::len`].
+    #[doc(hidden)]
+    pub fn capacity(&self) -> usize {
+        self.tensor.shape().iter().product()
+    }
+
+    /// Sets the active prefix [`Self::len`] reports, and every region bound
+    /// is checked against, to `len` elements of the allocation.
+    ///
+    /// Why: a grow-only device scratch reused across operands of different
+    /// sizes must present exactly the length each consumer admits without a
+    /// reallocation (and without the zero upload a reallocation costs, #740).
+    /// Only the bound narrows; the allocation and its contents are unchanged.
+    #[doc(hidden)]
+    pub fn set_active_len(&mut self, len: usize) -> Result<(), DenseError> {
+        if len > self.capacity() {
+            return Err(DenseError::OutOfBounds);
+        }
+        self.len = len;
+        Ok(())
     }
 
     /// Wraps a device tensor produced by a tenferro op (e.g. a cuSOLVER
