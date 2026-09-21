@@ -1704,7 +1704,7 @@ fn device_operand_admission(
     }
     if contracts && braiding == tenet::core::BraidingStyleKind::Anyonic {
         return Err(OperationError::UnsupportedTensorContractScope {
-            message: "ordinary contraction is undefined for anyonic braiding; use an explicit planar operation",
+            message: tenet::typed::ANYONIC_CONTRACTION_UNSUPPORTED,
         }
         .into());
     }

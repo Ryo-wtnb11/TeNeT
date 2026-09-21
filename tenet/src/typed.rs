@@ -7800,15 +7800,7 @@ where
         rhs_axes: &[usize],
         output_axes: &[usize],
     ) -> Result<TensorMap<R, D>, Self::FacadeError> {
-        if lhs.logical_space().provider().braiding_style() == tenet_core::BraidingStyleKind::Anyonic
-        {
-            // Why not infer a braid from these axes: ordinary contraction has
-            // no planar embedding or over/under-crossing data; #633 owns that API.
-            return Err(tenet_tensors::OperationError::UnsupportedTensorContractScope {
-                message: "ordinary contraction is undefined for anyonic braiding; use an explicit planar operation",
-            }
-            .into());
-        }
+        reject_anyonic_contraction(lhs.logical_space().provider())?;
         D::contract(lhs, rhs, lhs_axes, rhs_axes, output_axes)
     }
 
@@ -7904,6 +7896,32 @@ where
     ) -> Result<TensorMap<R, D>, Self::FacadeError> {
         trace_pairs_checked_generic(tensor, pairs)
     }
+}
+
+/// The error message of [`reject_anyonic_contraction`], shared with the
+/// device network preflight so a network rejection and a typed `contract`
+/// rejection are indistinguishable.
+#[doc(hidden)]
+pub const ANYONIC_CONTRACTION_UNSUPPORTED: &str =
+    "ordinary contraction is undefined for anyonic braiding; use an explicit planar operation";
+
+/// The ordinary-contraction boundary of every `contract` entry, returning or
+/// overwriting, Host or device (TensorKit `blas_contract!` requires symmetric
+/// braiding).
+///
+/// Why not infer a braid from the axes: ordinary contraction has no planar
+/// embedding or over/under-crossing data; #633 owns that API.
+fn reject_anyonic_contraction<R: tenet_core::FusionRule + ?Sized>(
+    provider: &R,
+) -> Result<(), tenet_tensors::OperationError> {
+    if provider.braiding_style() == tenet_core::BraidingStyleKind::Anyonic {
+        return Err(
+            tenet_tensors::OperationError::UnsupportedTensorContractScope {
+                message: ANYONIC_CONTRACTION_UNSUPPORTED,
+            },
+        );
+    }
+    Ok(())
 }
 
 /// The axis lists a validated `trace_pairs` pair list stands for.
@@ -12713,14 +12731,7 @@ where
         if !self.runtime.same_runtime(&other.runtime) {
             return Err(Error::RuntimeMismatch);
         }
-        if self.logical_space().provider().braiding_style()
-            == tenet_core::BraidingStyleKind::Anyonic
-        {
-            return Err(tenet_tensors::OperationError::UnsupportedTensorContractScope {
-                message: "ordinary contraction is undefined for anyonic braiding; use an explicit planar operation",
-            }
-            .into());
-        }
+        reject_anyonic_contraction(self.logical_space().provider())?;
         let (lhs_space, lhs_operand, lhs_storage) = self.cuda_fusion_operand("contract")?;
         let (rhs_space, rhs_operand, rhs_storage) = other.cuda_fusion_operand("contract")?;
         let output_order = OutputAxisOrder::from_axes(output_axes);
@@ -12827,7 +12838,8 @@ where
     ///
     /// The admission sequence is the Host one
     /// ([`TensorMap::contract_overwrite_into`]) plus the device's own
-    /// boundaries: same Runtime, same rule identity, an owned dense device
+    /// boundaries: same Runtime, the anyonic boundary of [`Self::contract`],
+    /// same rule identity, an owned dense device
     /// destination that aliases neither operand's payload body, the
     /// contraction's fusion space and block layout (malformed axes report the
     /// Host's errors here), exact operand and destination lengths, and unique
@@ -12863,6 +12875,7 @@ where
         {
             return Err(Error::RuntimeMismatch);
         }
+        reject_anyonic_contraction(self.logical_space().provider())?;
         let identity = TypedSectorAdmission::typed_rule_identity(self.provider());
         if identity != TypedSectorAdmission::typed_rule_identity(other.provider())
             || identity != TypedSectorAdmission::typed_rule_identity(destination.provider())
@@ -16018,8 +16031,11 @@ where
     ///
     /// # Errors
     ///
-    /// Admission failures through runtime-context leasing leave `destination`
-    /// unchanged. The destination is cleared immediately before shared-engine
+    /// [`tenet_tensors::OperationError::UnsupportedTensorContractScope`] for
+    /// anyonic providers, right after the Runtime check, as for
+    /// [`Self::contract`]. Admission failures through runtime-context leasing
+    /// leave `destination` unchanged. The destination is cleared immediately
+    /// before shared-engine
     /// compilation/replay, so a later engine error may leave it zeroed or
     /// partially overwritten.
     #[doc(alias = "contract_ordered_overwrite_into")]
@@ -16038,6 +16054,7 @@ where
         {
             return Err(Error::RuntimeMismatch);
         }
+        reject_anyonic_contraction(self.logical_space().provider())?;
         let identity = TypedSectorAdmission::typed_rule_identity(self.provider());
         if identity != TypedSectorAdmission::typed_rule_identity(other.provider())
             || identity != TypedSectorAdmission::typed_rule_identity(destination.provider())
@@ -18595,6 +18612,17 @@ where
         // `tests/typed_facade.rs`.
         if let Some(spectrum) = self.spectrum() {
             if rank == 2 && self.codomain_rank() == 1 && pairs.len() == 1 {
+                // The dense arm's compile rejects these; a spectrum reduction
+                // must not answer where the categorical trace is undefined
+                // (TensorKit `trace_permute!` requires symmetric braiding).
+                if !self.provider().braiding_style().is_symmetric() {
+                    return Err(
+                        tenet_tensors::OperationError::UnsupportedTensorContractScope {
+                            message: tenet_tensors::FUSION_TENSORTRACE_REQUIRES_SYMMETRIC_BRAIDING,
+                        }
+                        .into(),
+                    );
+                }
                 let traced_leg_is_dual: bool =
                     self.logical_space().space().homspace().codomain().legs()[0].is_dual();
                 let provider: &R = self.logical_space().provider();

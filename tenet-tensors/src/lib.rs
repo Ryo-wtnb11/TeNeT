@@ -140,6 +140,8 @@ pub use tenet_operations::{OutputAxisOrder, TensorContractSpec, TensorTraceAxisS
 #[cfg(feature = "cuda")]
 #[doc(hidden)]
 pub use tensortrace::tensortrace_fusion_structure_accumulate_on_cuda;
+#[doc(hidden)]
+pub use tensortrace::FUSION_TENSORTRACE_REQUIRES_SYMMETRIC_BRAIDING;
 pub use tensortrace::{
     tensortrace_fusion_dyn_into, tensortrace_fusion_dyn_into_checked, tensortrace_fusion_dyn_owned,
     tensortrace_fusion_dyn_owned_checked, tensortrace_fusion_dyn_owned_generic_checked,

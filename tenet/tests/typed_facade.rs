@@ -9281,3 +9281,190 @@ fn contract_on_the_external_z3_provider_matches_the_hand_product() {
         [76.0, 100.0, 103.0, 136.0, 130.0, 172.0, 157.0, 208.0]
     );
 }
+
+// ---------------------------------------------------------------------------
+// Anyonic boundary of the destination and compact entries (#1355).
+// ---------------------------------------------------------------------------
+
+/// A one-sector real rule that reports anyonic braiding: every symbol is 1,
+/// so any operation that runs anyway produces a value, and only an explicit
+/// braiding guard can reject. (No built-in `Scalar = f64` provider is
+/// anyonic; Fibonacci is complex.)
+struct RealAnyonicProbe;
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+struct AnyonicProbeSector;
+
+impl FusionRule for RealAnyonicProbe {
+    fn rule_identity(&self) -> RuleIdentity {
+        RuleIdentity::from_canonical_bytes::<Self>(0x1355_0000_0000_0001, Arc::<[u8]>::from([]))
+    }
+    fn fusion_style(&self) -> FusionStyleKind {
+        FusionStyleKind::Unique
+    }
+    fn braiding_style(&self) -> BraidingStyleKind {
+        BraidingStyleKind::Anyonic
+    }
+    fn vacuum(&self) -> SectorId {
+        SectorId::new(0)
+    }
+    fn fusion_channels(&self, _: SectorId, _: SectorId) -> SectorVec {
+        core::iter::once(SectorId::new(0)).collect()
+    }
+}
+
+impl MultiplicityFreeFusionRule for RealAnyonicProbe {}
+
+impl MultiplicityFreeFusionSymbols for RealAnyonicProbe {
+    type Scalar = f64;
+    fn f_symbol_scalar(
+        &self,
+        _: SectorId,
+        _: SectorId,
+        _: SectorId,
+        _: SectorId,
+        _: SectorId,
+        _: SectorId,
+    ) -> f64 {
+        1.0
+    }
+    fn r_symbol_scalar(&self, _: SectorId, _: SectorId, _: SectorId) -> f64 {
+        1.0
+    }
+}
+
+impl MultiplicityFreeRigidSymbols for RealAnyonicProbe {
+    fn dim_scalar(&self, _: SectorId) -> f64 {
+        1.0
+    }
+    fn inv_dim_scalar(&self, _: SectorId) -> f64 {
+        1.0
+    }
+    fn sqrt_dim_scalar(&self, _: SectorId) -> f64 {
+        1.0
+    }
+    fn inv_sqrt_dim_scalar(&self, _: SectorId) -> f64 {
+        1.0
+    }
+    fn twist_scalar(&self, _: SectorId) -> f64 {
+        1.0
+    }
+    fn frobenius_schur_phase_scalar(&self, _: SectorId) -> f64 {
+        1.0
+    }
+}
+
+impl CheckedFusionAlgebra for RealAnyonicProbe {
+    fn try_dual_sector(&self, sector: SectorId) -> Result<SectorId, FusionAlgebraError> {
+        Ok(sector)
+    }
+    fn try_fusion_channels(
+        &self,
+        left: SectorId,
+        right: SectorId,
+    ) -> Result<SectorVec, FusionAlgebraError> {
+        Ok(self.fusion_channels(left, right))
+    }
+    fn try_nsymbol(
+        &self,
+        left: SectorId,
+        right: SectorId,
+        coupled: SectorId,
+    ) -> Result<usize, FusionAlgebraError> {
+        Ok(self.nsymbol(left, right, coupled))
+    }
+}
+
+impl SectorCodec for RealAnyonicProbe {
+    type Sector = AnyonicProbeSector;
+    fn encode_sector(&self, _: &AnyonicProbeSector) -> Result<SectorId, FusionAlgebraError> {
+        Ok(SectorId::new(0))
+    }
+    fn decode_sector(&self, sector: SectorId) -> Result<AnyonicProbeSector, FusionAlgebraError> {
+        if sector == SectorId::new(0) {
+            Ok(AnyonicProbeSector)
+        } else {
+            Err(FusionAlgebraError::InvalidSector { sector })
+        }
+    }
+}
+
+fn anyonic_probe_operands(runtime: &Runtime) -> [TensorMap<RealAnyonicProbe, f64>; 3] {
+    let leg = GradedSpace::try_new(RealAnyonicProbe, [(AnyonicProbeSector, 2)]).unwrap();
+    [1_355_000, 1_355_001, 1_355_002]
+        .map(|seed| TensorMap::rand_with_seed(runtime, [&leg], [&leg], seed).unwrap())
+}
+
+fn is_unsupported_contract_scope(error: &tenet::prelude::Error) -> bool {
+    matches!(
+        error,
+        tenet::prelude::Error::Operation(operation)
+            if matches!(**operation, tenet::operations::OperationError::UnsupportedTensorContractScope { .. })
+    )
+}
+
+#[test]
+fn anyonic_overwrite_and_compact_trace_reject_like_contract_and_dense_trace() {
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let [lhs, rhs, mut destination] = anyonic_probe_operands(&runtime);
+    let before = destination.data().to_vec();
+
+    // What: the canonical form, which needs no permute, is rejected by
+    // `contract_overwrite_into` with `contract`'s error, and the destination
+    // keeps its values.
+    let contract = lhs.contract(&rhs, &[1], &[0], &[0, 1]).unwrap_err();
+    let overwrite = lhs
+        .contract_overwrite_into(&rhs, &mut destination, &[1], &[0], &[0, 1], 1.0)
+        .unwrap_err();
+    assert!(is_unsupported_contract_scope(&overwrite), "{overwrite:?}");
+    assert_eq!(overwrite.to_string(), contract.to_string());
+    assert_eq!(destination.data(), &before[..]);
+
+    // What: the rank-(1,1) compact-spectrum trace is rejected with the dense
+    // trace's error instead of answering from the spectrum.
+    let leg = GradedSpace::try_new(RealAnyonicProbe, [(AnyonicProbeSector, 2)]).unwrap();
+    let compact: TensorMap<RealAnyonicProbe, f64> = TensorMap::diagonal(
+        &runtime,
+        &leg,
+        [tenet::typed::SectorSpectrum {
+            sector: AnyonicProbeSector,
+            values: vec![1.0, 2.0],
+        }],
+    )
+    .unwrap();
+    let compact_error = compact.trace_pairs(&[(0, 1)]).unwrap_err();
+    let dense_error = lhs.trace_pairs(&[(0, 1)]).unwrap_err();
+    assert!(
+        is_unsupported_contract_scope(&compact_error),
+        "{compact_error:?}"
+    );
+    assert_eq!(compact_error.to_string(), dense_error.to_string());
+}
+
+/// Device `contract_overwrite_into` follows the Host order: the anyonic
+/// rejection comes before any device work and leaves the destination as it
+/// was.
+#[cfg(feature = "cuda")]
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn anyonic_device_overwrite_rejects_like_contract_before_device_work() {
+    let _guard = cache_lock();
+    let runtime = Runtime::builder().cuda(0).build().unwrap();
+    let [lhs, rhs, destination] = anyonic_probe_operands(&runtime);
+    let (lhs, rhs, mut destination) = (
+        lhs.to_cuda().unwrap(),
+        rhs.to_cuda().unwrap(),
+        destination.to_cuda().unwrap(),
+    );
+    let before = destination.to_host().unwrap().data().to_vec();
+    let contract = lhs.contract(&rhs, &[1], &[0], &[0, 1]).unwrap_err();
+    let transfers = tenet::dense::cuda_transfer_stats();
+    let overwrite = lhs
+        .contract_overwrite_into(&rhs, &mut destination, &[1], &[0], &[0, 1], 1.0)
+        .unwrap_err();
+    assert_eq!(tenet::dense::cuda_transfer_stats(), transfers);
+    assert!(is_unsupported_contract_scope(&overwrite), "{overwrite:?}");
+    assert_eq!(overwrite.to_string(), contract.to_string());
+    assert_eq!(destination.to_host().unwrap().data(), &before[..]);
+}
