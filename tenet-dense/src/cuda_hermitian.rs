@@ -10,7 +10,7 @@
 /// The constant is the host twin's, not a device-specific one: the CPU rule is
 /// `||(A - A†)/2||_F <= 64 * eps(R) * ||A||_F` with
 /// `R::relative_tolerance() == 64 * R::EPSILON` for `R` in `{f32, f64}`
-/// (`tenet-matrixalgebra/src/factorize.rs:796` `normwise_hermitian`, `:177`
+/// (`tenet-matrixalgebra/src/factorize.rs:6796` `normwise_hermitian`, `:177`
 /// and `:187`). TensorKit agrees on the *shape*, not on the number: its
 /// `ishermitian` (`TensorKit.jl` `cfaa073e`
 /// `src/factorizations/factorizations.jl:67`) forwards each block to

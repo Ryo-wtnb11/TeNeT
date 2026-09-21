@@ -12,7 +12,7 @@ No typed tensor API opens here: `tenet`'s `CudaPayload` stays `f64`/`Complex64`
 
 | | |
 |---|---|
-| TeNeT base | `origin/main` `eb9d50ce`, branch `c1-cuda-scalar-single-precision` |
+| TeNeT base | `origin/main` `4442fef8` (#1331), branch `c1-cuda-scalar-single-precision` |
 | Host | `qg1`, `/data2/ryo-w/gpu-phase/c1`, private target `/data2/ryo-w/gpu-phase/c1-target` (removed after the run) |
 | GPU | NVIDIA A100-SXM4-40GB, `CUDA_VISIBLE_DEVICES=1` (GPU 1 had no process of any user for the whole run) |
 | CUDA / cuTENSOR | 12.6 (`/usr/local/cuda-12.6`) / `libcutensor.so.2.5.0` via `TENFERRO_CUTENSOR_PATH` |
@@ -45,7 +45,7 @@ decision consumes, and the bytes moved are the lane's own.
 
 `tenet-dense/src/cuda_hermitian.rs` now owns the admission rule as pure host
 arithmetic, with the tolerance as a parameter. The constant is the Host twin's:
-`normwise_hermitian` (`tenet-matrixalgebra/src/factorize.rs:796`) tests
+`normwise_hermitian` (`tenet-matrixalgebra/src/factorize.rs:6796`) tests
 `||(A - A†)/2||_F <= R::relative_tolerance() * ||A||_F` with
 `relative_tolerance() == 64 * R::EPSILON` for `R` in `{f32, f64}`
 (`factorize.rs:177`, `:187`).
@@ -120,14 +120,21 @@ real payloads are unaffected, and `f32` QR is exercised here against its laws.
 
 ## Device results
 
-All runs: `qg1`, GPU 1 (no process of any user on it for the whole run), `dev`
-profile, `--test-threads=1`, private target `/data2/ryo-w/gpu-phase/c1-target`
-(removed afterwards). Log `/data2/ryo-w/gpu-phase/c1-final2.log`.
+`qg1`, `dev` profile, `--test-threads=1`, private target
+`/data2/ryo-w/gpu-phase/c1-target` (removed afterwards), log
+`/data2/ryo-w/gpu-phase/c1-final3.log`. The run picks a GPU with no compute
+app of any user and waits for any Rust build of ours to finish first; it took
+**GPU 0**, and `nvidia-smi --query-compute-apps` was empty at the end of the
+run. (Another user's eight-way job was rotating across the machine while this
+leaf was being prepared; it held no process on GPU 0 for this run, and no
+timing claim is made either way.)
 
-Targeted device tests of the touched crates, non-ignored tests with the `cuda`
-feature set, their doctests, and the full workspace device suite, in one run:
+Targeted device tests of the touched crates, their non-ignored tests with the
+`cuda` feature set, their doctests, and the full workspace device suite, in one
+run on the tree rebased onto `4442fef8`:
 
 ```
+picked GPU 0
 === targeted ignored
 exit_targeted=0
 === non-ignored
@@ -138,14 +145,13 @@ exit_doc=0
 exit_suite=0
 ```
 
-535 tests passed, 0 failed in total; the full-suite section alone is
-`passed 141 failed 0`.
+550 tests passed, 0 failed across the four phases; the full-suite phase alone
+is `passed 155 failed 0`. That phase is also the merged-main device
+confirmation for #1331 and #1328, which landed under this leaf.
 
-The new four-dtype suite `tenet-dense/tests/cuda_scalar_dtypes.rs` (rerun
-verbatim against the final source):
+The four-dtype adapter suite `tenet-dense/tests/cuda_scalar_dtypes.rs`:
 
 ```
-running 8 tests
 test complex_device_qr_is_rejected_before_any_device_work ... ok
 test device_spectra_are_widened_to_f64_for_every_dtype ... ok
 test every_admitted_dtype_reports_its_own_tag_and_rejects_the_others ... ok
@@ -153,9 +159,8 @@ test region_eigh_obeys_its_laws_for_every_dtype ... ok
 test region_gemm_matches_a_double_precision_oracle_for_every_dtype_and_op_pair ... ok
 test region_qr_obeys_its_laws_for_every_supported_dtype ... ok
 test region_svd_obeys_its_laws_for_every_dtype ... ok
+test the_complex_rule_is_conservative_outside_the_square_of_its_lane ... ok
 test the_hermitian_rule_scales_with_the_payload_real_lane ... ok
-
-test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.85s
 ```
 
 The region primitive and the copy-route guard at all four dtypes:
@@ -172,30 +177,36 @@ test overwrite_is_independent_of_a_nan_poisoned_destination ... ok
 test copy_region_is_correct_at_every_destination_offset ... ok
 ```
 
-The `f64`/`Complex64` neutrality pins, unchanged and still passing:
+The `f64`/`Complex64` neutrality pins, unchanged source and still passing, and
+the device-free rules ordinary CI now runs:
 
 ```
 test cuda_adapter::tests::cuda_hermitian_region_is_scaled_and_downloads_only_scalar_metadata ... ok
 test cuda_adapter::tests::cuda_transfer_bytes_scale_with_the_payload_dtype ... ok
 test cuda_adapter::tests::cuda_transfer_counters_attribute_one_upload_download_and_gemm ... ok
 test cuda_adapter::tests::warm_up_costs_one_gemm_one_solver_call_and_a_bounded_fixed_traffic ... ok
+test cuda_adapter::tests::every_admitted_dtype_owns_a_distinct_operand_slot ... ok
+test cuda_adapter::tests::neither_complex_dtype_has_device_constant_kernels ... ok
+test cuda_adapter::tests::the_hermitian_tolerance_follows_the_payload_real_lane ... ok
 ```
 
-The tree-transform executor, now instantiated for all four dtypes over the
-structure-level and categorical fixtures:
+The tree-transform executor over all four dtypes, including the caller-scale
+and warm-replay contracts the review asked for (P2-3):
 
 ```
 test device_replay_matches_the_oracle_and_the_host_for_every_fixture ... ok
 test every_caller_scale_matches_the_host_and_the_oracle ... ok
+test a_warm_replay_is_transfer_free_and_plan_stable_for_every_caller_scale ... ok
+test a_warm_complex_replay_is_transfer_free_and_plan_stable_for_every_caller_scale ... ok
 test overwrite_cleans_a_nan_poisoned_destination_including_inactive_layouts ... ok
 test overwrite_cleans_a_nan_poisoned_destination_around_recoupling_blocks ... ok
-test a_warm_complex_replay_is_transfer_free_and_plan_stable_for_every_caller_scale ... ok
 test alternating_complex_recoupling_structures_upload_their_matrices_once_each ... ok
 ```
 
 No timing claim is made: `dev` profile, correctness only. One device, one
-cuTENSOR (2.5.0), one CUDA (12.6), small fixtures — this proves capability and
-semantics, not `f32` conditioning on realistic block sizes.
+cuTENSOR (2.5.0), one CUDA (12.6); fixtures are small apart from the
+`512 x 512` Hermitian blocks, so this proves capability and semantics, not
+`f32` conditioning across realistic block shapes.
 
 ## Residuals
 

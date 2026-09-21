@@ -34,6 +34,23 @@ trait ProbeScalar: CudaScalar + Copy + Debug + PartialEq {
     const NAME: &'static str;
     /// Machine epsilon of this payload's real lane, widened.
     const EPSILON: f64;
+    /// The scale window over which the device Hermitian rule is required to be
+    /// scale-invariant for this payload: a small magnitude and a large one,
+    /// both exact powers of two, so scaling a fixture only moves exponents.
+    ///
+    /// For a **real** payload the window is the lane's own smallest and
+    /// largest normal magnitudes, mirroring the `f64` case the adapter's
+    /// device test already pins. For a **complex** one it stops at their
+    /// square roots, because the rule's magnitude pass squares the components
+    /// before any normalization: outside that the squares underflow or
+    /// overflow and the device answer stops being a statement about
+    /// Hermiticity. Recorded by
+    /// `the_complex_rule_is_conservative_outside_the_square_of_its_lane`.
+    const TINY: f64;
+    const HUGE: f64;
+    /// The lane's own extremes, whatever the window above is.
+    const SMALLEST_NORMAL: f64;
+    const LARGEST_NORMAL: f64;
 
     /// The payload value nearest `value`, i.e. the fixture as the device sees
     /// it. The oracle runs on `widen(narrow(z))`, so the comparison isolates
@@ -45,6 +62,10 @@ trait ProbeScalar: CudaScalar + Copy + Debug + PartialEq {
 impl ProbeScalar for f32 {
     const NAME: &'static str = "f32";
     const EPSILON: f64 = f32::EPSILON as f64;
+    const TINY: f64 = f32::MIN_POSITIVE as f64;
+    const HUGE: f64 = 1.267_650_600_228_229_4e30; // 2^100
+    const SMALLEST_NORMAL: f64 = f32::MIN_POSITIVE as f64;
+    const LARGEST_NORMAL: f64 = 2.126_764_793_255_87e37; // 2^124
 
     fn narrow(value: Complex64) -> Self {
         value.re as Self
@@ -58,6 +79,10 @@ impl ProbeScalar for f32 {
 impl ProbeScalar for f64 {
     const NAME: &'static str = "f64";
     const EPSILON: f64 = f64::EPSILON;
+    const TINY: f64 = f64::MIN_POSITIVE;
+    const HUGE: f64 = 3.273_390_607_896_142e150; // 2^500
+    const SMALLEST_NORMAL: f64 = f64::MIN_POSITIVE;
+    const LARGEST_NORMAL: f64 = 1.117_902_744_918_257e307; // 2^1020
 
     fn narrow(value: Complex64) -> Self {
         value.re
@@ -71,6 +96,12 @@ impl ProbeScalar for f64 {
 impl ProbeScalar for Complex32 {
     const NAME: &'static str = "Complex32";
     const EPSILON: f64 = f32::EPSILON as f64;
+    // The square root of the lane's normal range: the magnitude pass squares
+    // the components, so this is the widest window it can answer over.
+    const TINY: f64 = 1.084_202_172_485_504_4e-19; // 2^-63, ~sqrt(MIN_POSITIVE)
+    const HUGE: f64 = 1.125_899_906_842_624e15; // 2^50, ~sqrt(MAX)
+    const SMALLEST_NORMAL: f64 = f32::MIN_POSITIVE as f64;
+    const LARGEST_NORMAL: f64 = 2.126_764_793_255_87e37; // 2^124
 
     fn narrow(value: Complex64) -> Self {
         Complex32::new(value.re as f32, value.im as f32)
@@ -84,6 +115,11 @@ impl ProbeScalar for Complex32 {
 impl ProbeScalar for Complex64 {
     const NAME: &'static str = "Complex64";
     const EPSILON: f64 = f64::EPSILON;
+    // The square root of the lane's normal range, as for `Complex32`.
+    const TINY: f64 = 1.491_668_146_240_041_3e-154; // 2^-511, ~sqrt(MIN_POSITIVE)
+    const HUGE: f64 = 1.809_251_394_333_065_6e76; // 2^253, ~sqrt(MAX)
+    const SMALLEST_NORMAL: f64 = f64::MIN_POSITIVE;
+    const LARGEST_NORMAL: f64 = 1.117_902_744_918_257e307; // 2^1020
 
     fn narrow(value: Complex64) -> Self {
         value
@@ -122,17 +158,29 @@ fn fixture<D: ProbeScalar>(rows: usize, cols: usize, seed: f64) -> (Vec<D>, Vec<
     (payload, wide)
 }
 
-/// `k * sqrt(n) * eps(real(D))`, relative to the magnitude being compared:
-/// the error a chain of `n` accumulated products of this lane is entitled to.
-fn tolerance<D: ProbeScalar>(terms: usize, scale: f64) -> f64 {
-    16.0 * (terms as f64).sqrt() * D::EPSILON * scale.max(1.0)
+/// `k * sqrt(n) * eps(real(D))` of the magnitude the arithmetic actually
+/// passed through — the sum of `|term|` over the `n` accumulated products,
+/// never the magnitude of the *result*. A cancelling sum has a small result
+/// and a large error budget, and pinning it to the result instead would make
+/// this suite fail on the first GPU whose contraction order or FMA fusion
+/// differs from this one's.
+fn tolerance<D: ProbeScalar>(terms: usize, magnitude: f64) -> f64 {
+    16.0 * (terms as f64).sqrt() * D::EPSILON * magnitude
 }
 
-fn assert_close<D: ProbeScalar>(actual: &[D], expected: &[Complex64], terms: usize, what: &str) {
+/// `magnitudes[i]` is the sum of the absolute values the oracle accumulated
+/// for element `i`, so the bound follows the arithmetic rather than the
+/// answer.
+fn assert_close<D: ProbeScalar>(
+    actual: &[D],
+    expected: &[Complex64],
+    magnitudes: &[f64],
+    terms: usize,
+    what: &str,
+) {
     assert_eq!(actual.len(), expected.len(), "{what}: length");
     for (index, (got, want)) in actual.iter().zip(expected).enumerate() {
-        let scale = want.norm();
-        let allowed = tolerance::<D>(terms, scale);
+        let allowed = tolerance::<D>(terms, magnitudes[index]);
         assert!(
             (got.widen() - want).norm() <= allowed,
             "{what} ({}): element {index} got {got:?} want {want} (allowed {allowed:e})",
@@ -204,13 +252,18 @@ fn gemm_case<D: ProbeScalar>(
     let beta = D::narrow(beta).widen();
     let lhs_view = operand(lhs_op, &lhs_wide, m, k);
     let rhs_view = operand(rhs_op, &rhs_wide, k, n);
+    let mut magnitudes = vec![0.0; m * n];
     let expected: Vec<Complex64> = (0..m * n)
         .map(|index| {
             let (row, col) = (index % m, index / m);
             let mut acc = Complex64::new(0.0, 0.0);
+            let mut magnitude = 0.0;
             for step in 0..k {
-                acc += lhs_view[row + step * m] * rhs_view[step + col * k];
+                let term = lhs_view[row + step * m] * rhs_view[step + col * k];
+                acc += term;
+                magnitude += term.norm();
             }
+            magnitudes[index] = alpha.norm() * magnitude + beta.norm() * dst_wide[index].norm();
             alpha * acc + beta * dst_wide[index]
         })
         .collect();
@@ -218,6 +271,7 @@ fn gemm_case<D: ProbeScalar>(
     assert_close::<D>(
         &download::<D>(ctx, &dst),
         &expected,
+        &magnitudes,
         k + 1,
         &format!("GEMM {lhs_op:?}/{rhs_op:?} {m}x{k}x{n}"),
     );
@@ -555,29 +609,81 @@ fn device_spectra_are_widened_to_f64_for_every_dtype() {
 /// payload-typed complex divisor are both rejected by Tenferro, so a block
 /// this test admits is evidence that the divisor is typed by the lane: the
 /// whole chain would error out otherwise, not merely answer differently.
-fn hermitian_admits_an_exactly_hermitian_block<D: ProbeScalar>(ctx: &mut CudaDenseContext) {
-    let n = 3usize;
-    let payload: Vec<D> = (0..n * n)
+/// An `n x n` block that is Hermitian by construction — element `(row, col)`
+/// and `(col, row)` are built from the same pair of magnitudes with the
+/// imaginary part negated — scaled by an exact power of two so no rounding is
+/// introduced by the scaling itself.
+fn hermitian_block<D: ProbeScalar>(n: usize, scale: f64) -> Vec<D> {
+    (0..n * n)
         .map(|index| {
             let (row, col) = (index % n, index / n);
             let (low, high) = (row.min(col), row.max(col));
-            let magnitude = 1.0 + (low as f64) + 0.25 * (high as f64);
-            let imaginary = if row == col {
-                0.0
-            } else if row < col {
-                0.5 + low as f64
-            } else {
-                -(0.5 + low as f64)
+            // Bounded regardless of `n`, so a large block stays in range for
+            // the single-precision lane.
+            let magnitude = 1.0 + 0.5 * ((low % 7) as f64) + 0.25 * ((high % 5) as f64);
+            let magnitude_imaginary = 0.5 + ((low % 3) as f64);
+            let imaginary = match row.cmp(&col) {
+                std::cmp::Ordering::Equal => 0.0,
+                std::cmp::Ordering::Less => magnitude_imaginary,
+                std::cmp::Ordering::Greater => -magnitude_imaginary,
             };
-            D::narrow(Complex64::new(magnitude, imaginary))
+            D::narrow(Complex64::new(magnitude * scale, imaginary * scale))
         })
-        .collect();
-    let src = upload::<D>(ctx, &payload);
-    assert!(
-        cuda_is_hermitian_region::<D>(ctx, &src, 0, n).expect("hermitian"),
-        "{}: an exactly Hermitian block must be admitted",
-        D::NAME
-    );
+        .collect()
+}
+
+fn hermitian_admits_an_exactly_hermitian_block<D: ProbeScalar>(ctx: &mut CudaDenseContext) {
+    // A small block, and one past the 512 the survey asks for: the device rule
+    // reduces over the whole region, so block size is a real variable of it and
+    // a single-precision sum over 512^2 elements is where a lane-typed
+    // reduction would show up if it were still `f64`-shaped.
+    for n in [3usize, 512] {
+        let src = upload::<D>(ctx, &hermitian_block::<D>(n, 1.0));
+        assert!(
+            cuda_is_hermitian_region::<D>(ctx, &src, 0, n).expect("hermitian"),
+            "{}: an exactly Hermitian {n}x{n} block must be admitted",
+            D::NAME
+        );
+    }
+}
+
+/// Scale invariance and non-finite rejection, in the payload's own lane: the
+/// rule normalizes by the input maximum before reducing, so an exactly
+/// Hermitian block stays Hermitian and a clearly asymmetric one stays rejected
+/// at the smallest normal magnitude of the lane and at a large one. A NaN or
+/// infinity anywhere rejects rather than propagating into the decision.
+fn hermitian_extremes_case<D: ProbeScalar>(ctx: &mut CudaDenseContext) {
+    let n = 4usize;
+    for scale in [D::TINY, D::HUGE] {
+        let src = upload::<D>(ctx, &hermitian_block::<D>(n, scale));
+        assert!(
+            cuda_is_hermitian_region::<D>(ctx, &src, 0, n).expect("hermitian"),
+            "{}: a Hermitian block scaled by {scale:e} must still be admitted",
+            D::NAME
+        );
+
+        let mut asymmetric = hermitian_block::<D>(n, scale);
+        // One off-diagonal pair broken by a whole unit of the block's own
+        // magnitude: a relative defect no tolerance may absorb.
+        asymmetric[1] = D::narrow(asymmetric[1].widen() + Complex64::new(scale, 0.0));
+        let src = upload::<D>(ctx, &asymmetric);
+        assert!(
+            !cuda_is_hermitian_region::<D>(ctx, &src, 0, n).expect("hermitian"),
+            "{}: a block asymmetric by a whole unit at scale {scale:e} must be rejected",
+            D::NAME
+        );
+    }
+
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let mut poisoned = hermitian_block::<D>(n, 1.0);
+        poisoned[0] = D::narrow(Complex64::new(bad, 0.0));
+        let src = upload::<D>(ctx, &poisoned);
+        assert!(
+            !cuda_is_hermitian_region::<D>(ctx, &src, 0, n).expect("hermitian"),
+            "{}: a non-finite ({bad}) block must be rejected",
+            D::NAME
+        );
+    }
 }
 
 /// The C1 tolerance change, on device: a block whose anti-Hermitian residual
@@ -646,20 +752,97 @@ fn the_hermitian_rule_scales_with_the_payload_real_lane() {
     hermitian_tolerance_case::<Complex32>(&mut ctx);
     hermitian_tolerance_case::<Complex64>(&mut ctx);
 
-    // The hazard itself: at 120 single-precision epsilons the `f32` block is
-    // Hermitian, while the same *relative* residual in `f64` — which is what
-    // the pre-C1 constant measured every dtype against — is not.
-    let single = 120.0 * f32::EPSILON;
-    let double_lane_residual = f64::from(single) / f64::EPSILON;
+    hermitian_extremes_case::<f32>(&mut ctx);
+    hermitian_extremes_case::<f64>(&mut ctx);
+    hermitian_extremes_case::<Complex32>(&mut ctx);
+    hermitian_extremes_case::<Complex64>(&mut ctx);
+
+    // The hazard itself, as a device decision rather than host arithmetic: the
+    // residual an `f32` block is entitled to, expressed in `f64` epsilons, is
+    // what the pre-C1 constant measured every payload against. The same
+    // *element pattern* is therefore Hermitian in the single-precision lane and
+    // not in the double-precision one — the one comparison that fails if the
+    // tolerance stops following `D::Real`.
+    let single = |ctx: &CudaDenseContext| {
+        upload::<f32>(
+            ctx,
+            &[1.0, 0.0, (120.0 * f64::from(f32::EPSILON)) as f32, 1.0],
+        )
+    };
+    let double = |ctx: &CudaDenseContext| {
+        upload::<f64>(ctx, &[1.0, 0.0, 120.0 * f64::from(f32::EPSILON), 1.0])
+    };
+    let single = single(&ctx);
+    let double = double(&ctx);
     assert!(
-        double_lane_residual > 128.0,
-        "the f32 fixture must be far outside the f64 threshold, not merely near it"
+        cuda_is_hermitian_region::<f32>(&mut ctx, &single, 0, 2).expect("f32"),
+        "the f32 lane must admit its own rounding residual"
+    );
+    assert!(
+        !cuda_is_hermitian_region::<f64>(&mut ctx, &double, 0, 2).expect("f64"),
+        "the f64 lane must reject the same residual, which is what makes the lane the decision"
     );
 }
 
 // ---------------------------------------------------------------------------
 // Capability boundary: Complex32 device QR.
 // ---------------------------------------------------------------------------
+
+/// Recorded behaviour, not a promise: outside the square root of its lane's
+/// normal range, a **complex** block is not decided by magnitudes any more.
+///
+/// The rule takes the input maximum of `abs(A)` and normalizes by it before
+/// reducing. For a complex payload `abs` squares the components, so at the
+/// lane's own extremes those squares underflow to zero or overflow to
+/// infinity *before* any normalization can rescue them. Observed on an A100
+/// with CUDA 12.6 / cuTENSOR 2.5.0, for an exactly Hermitian `Complex32`
+/// block: scaled to `f32::MIN_POSITIVE` and scaled to `2^100`, both come back
+/// **rejected**.
+///
+/// That direction is the safe one — the caller is denied the Hermitian fast
+/// path and keeps the general one — and it is why `TINY`/`HUGE` stop at the
+/// square roots for the complex payloads, where `hermitian_extremes_case`
+/// requires real scale invariance. What this test pins at the lane's actual
+/// extremes is the part that is a contract: the call returns a *decision*
+/// rather than erroring or letting a NaN out of the reduction, a real payload
+/// is still decided correctly, and an asymmetric block is never admitted at
+/// any scale.
+fn conservative_outside_the_square_case<D: ProbeScalar>(ctx: &mut CudaDenseContext) {
+    let n = 4usize;
+    for scale in [D::SMALLEST_NORMAL, D::LARGEST_NORMAL] {
+        let hermitian = upload::<D>(ctx, &hermitian_block::<D>(n, scale));
+        let decided = cuda_is_hermitian_region::<D>(ctx, &hermitian, 0, n)
+            .unwrap_or_else(|err| panic!("{}: the rule must decide, not fail: {err}", D::NAME));
+        if !D::IS_COMPLEX {
+            // A real payload's `abs` does not square, so it stays
+            // scale-invariant across its whole normal range.
+            assert!(
+                decided,
+                "{}: a real payload must stay scale-invariant at {scale:e}",
+                D::NAME
+            );
+        }
+
+        let mut asymmetric = hermitian_block::<D>(n, scale);
+        asymmetric[1] = D::narrow(asymmetric[1].widen() + Complex64::new(scale, 0.0));
+        let asymmetric = upload::<D>(ctx, &asymmetric);
+        assert!(
+            !cuda_is_hermitian_region::<D>(ctx, &asymmetric, 0, n).expect("asymmetric"),
+            "{}: an asymmetric block must never be admitted, at {scale:e} or anywhere",
+            D::NAME
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn the_complex_rule_is_conservative_outside_the_square_of_its_lane() {
+    let mut ctx = context();
+    conservative_outside_the_square_case::<f32>(&mut ctx);
+    conservative_outside_the_square_case::<f64>(&mut ctx);
+    conservative_outside_the_square_case::<Complex32>(&mut ctx);
+    conservative_outside_the_square_case::<Complex64>(&mut ctx);
+}
 
 /// The positive-diagonal gauge's `triu` kernel materializes a complex zero,
 /// which the pinned Tenferro's NVRTC cannot construct for `cuFloatComplex`
