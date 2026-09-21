@@ -1,7 +1,7 @@
 //! Per-call cost of the public eager primitives on small many-block tensors
 //! (#1313): warm per-call minimum/median and allocation calls/bytes for
 //! `compose`, `contract`, `permute`, `repartition`, `qr_compact`,
-//! `restrict_leg`, `scale`, `add`, and `norm` over U(1), fZ2×U(1), and SU(2),
+//! `svd_compact`, `restrict_leg`, `scale`, `add`, and `norm` over U(1), fZ2×U(1), and SU(2),
 //! `f64` and `Complex64`, ranks 2–5.
 //!
 //! ```text
@@ -309,6 +309,9 @@ macro_rules! ledger {
             });
             run_op(config, &prefix, "qr_compact", || {
                 black_box(&a).qr_compact().unwrap()
+            });
+            run_op(config, &prefix, "svd_compact", || {
+                black_box(&a).svd_compact().unwrap()
             });
             run_op(config, &prefix, "restrict_leg", || {
                 black_box(&a).restrict_leg(0, &selection).unwrap()
