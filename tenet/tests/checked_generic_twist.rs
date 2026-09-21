@@ -889,3 +889,70 @@ fn sun_checked_generic_flip_preserves_full_key_layout_and_inverse_roundtrip() {
         Complex64::new(value as f64, -(value as f64))
     });
 }
+
+#[test]
+fn checked_generic_contract_requires_symmetric_braiding_before_the_engine() {
+    // What (#1372): the checked-Generic `contract` shares the ordinary
+    // contraction's symmetric-braiding boundary and error, canonical axes
+    // included, while `compose` does not route through it: its non-bosonic
+    // rejection is the checked-Generic engine's own Bosonic-only scope (a
+    // restriction of that engine, not of TensorKit `mul!`). The bosonic toy is
+    // the negative control, contracting and composing to the hand oracle.
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    for (tag, braiding) in [
+        (20, BraidingStyleKind::NoBraiding),
+        (21, BraidingStyleKind::Anyonic),
+        (22, BraidingStyleKind::Bosonic),
+    ] {
+        let provider = Arc::new(CheckedPivotalToy::new(tag, braiding, 1.0));
+        let unit =
+            GradedSpace::try_new_with_arc(Arc::clone(&provider), [(Label::Unit, 2)]).unwrap();
+        let matrix = |offset: f64| -> TensorMap<_, f64> {
+            TensorMap::from_block_fn(&runtime, [&unit], [&unit], |_, index| {
+                offset + (2 * index[0] + index[1]) as f64
+            })
+            .unwrap()
+        };
+        let (lhs, rhs) = (matrix(1.0), matrix(5.0));
+        let contract = lhs.contract(&rhs, &[1], &[0], &[0, 1]);
+        let compose = lhs.compose(&rhs);
+        if braiding == BraidingStyleKind::Bosonic {
+            // Hand oracle: the one block is [[1,2],[3,4]]·[[5,6],[7,8]].
+            let expected = TensorMap::from_block_fn(&runtime, [&unit], [&unit], |_, index| {
+                [[19.0, 22.0], [43.0, 50.0]][index[0]][index[1]]
+            })
+            .unwrap();
+            assert_eq!(contract.unwrap().data(), expected.data());
+            assert_eq!(compose.unwrap().data(), expected.data());
+            continue;
+        }
+        assert!(
+            matches!(
+                &contract,
+                Err(GenericTensorError::Facade(Error::Operation(operation)))
+                    if matches!(
+                        **operation,
+                        tenet::operations::OperationError::UnsupportedTensorContractScope {
+                            message: tenet::typed::NON_SYMMETRIC_CONTRACTION_UNSUPPORTED
+                        }
+                    )
+            ),
+            "{braiding:?}: {:?}",
+            contract.err()
+        );
+        assert!(
+            matches!(
+                &compose,
+                Err(GenericTensorError::Plan(CheckedGenericPlanError::Operation(operation)))
+                    if !matches!(
+                        operation,
+                        tenet::operations::OperationError::UnsupportedTensorContractScope {
+                            message: tenet::typed::NON_SYMMETRIC_CONTRACTION_UNSUPPORTED
+                        }
+                    )
+            ),
+            "{braiding:?}: {:?}",
+            compose.err()
+        );
+    }
+}

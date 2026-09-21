@@ -173,6 +173,19 @@ right after the Runtime check, and the Host compact-spectrum `trace_pairs` arm
 rejects non-symmetric braiding with the dense trace's error, as TensorKit
 `blas_contract!` / `trace_permute!` do
 ([#1355](https://github.com/Ryo-wtnb11/TeNeT/issues/1355)).
+Since [#1372](https://github.com/Ryo-wtnb11/TeNeT/issues/1372) every ordinary
+contraction entry — Host and device `contract`, `contract_ordered`,
+`contract_overwrite_into` (and its deprecated `contract_ordered_overwrite_into`
+alias), the checked-Generic `contract`, and Host and device `tensor!`
+contraction steps — admits only symmetric braiding (Bosonic, Fermionic) and
+rejects `Anyonic` and `NoBraiding` with one shared
+`UnsupportedTensorContractScope` error (`NON_SYMMETRIC_CONTRACTION_UNSUPPORTED`),
+canonical axes included, as TensorKit 0.17.1 `blas_contract!` does before any
+layout test. Behaviour change: a canonical `NoBraiding` contraction was
+accepted before. `compose` (TensorKit `mul!`) does not route through this
+boundary; planar contraction for non-symmetric categories is
+[#1070](https://github.com/Ryo-wtnb11/TeNeT/issues/1070). The checked-Generic
+engine itself still restricts contraction and `compose` to Bosonic braiding.
 
 [13] Device `trace_pairs` replays the Host trace structure — its valid
 tree-pair terms, their coefficients (recoupling row, `dim(c)/dim(a_1)`, the
@@ -267,7 +280,7 @@ storage)`, and reuses slots, producers, the input snapshot and the payload
 destinations of every intermediate step through the device
 `contract_overwrite_into` and `permute_overwrite_into`. Since
 [#1348](https://github.com/Ryo-wtnb11/TeNeT/issues/1348) the schedule is not
-restricted: device admission (placement, compact operands, anyonic braiding)
+restricted: device admission (placement, compact operands, non-symmetric braiding)
 is decided from the schedule and operand metadata before the plan cache
 publishes or a workspace is leased, gated in
 `tenet-network/tests/typed_cuda_network.rs` against the Host `tensor!` run

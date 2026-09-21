@@ -9286,113 +9286,35 @@ fn contract_on_the_external_z3_provider_matches_the_hand_product() {
 // Anyonic boundary of the destination and compact entries (#1355).
 // ---------------------------------------------------------------------------
 
-/// A one-sector real rule that reports anyonic braiding: every symbol is 1,
-/// so any operation that runs anyway produces a value, and only an explicit
-/// braiding guard can reject. (No built-in `Scalar = f64` provider is
-/// anyonic; Fibonacci is complex.)
-struct RealAnyonicProbe;
+mod braiding_probe;
+use braiding_probe::{ProbeSector, RealBraidingProbe};
 
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-struct AnyonicProbeSector;
-
-impl FusionRule for RealAnyonicProbe {
-    fn rule_identity(&self) -> RuleIdentity {
-        RuleIdentity::from_canonical_bytes::<Self>(0x1355_0000_0000_0001, Arc::<[u8]>::from([]))
-    }
-    fn fusion_style(&self) -> FusionStyleKind {
-        FusionStyleKind::Unique
-    }
-    fn braiding_style(&self) -> BraidingStyleKind {
-        BraidingStyleKind::Anyonic
-    }
-    fn vacuum(&self) -> SectorId {
-        SectorId::new(0)
-    }
-    fn fusion_channels(&self, _: SectorId, _: SectorId) -> SectorVec {
-        core::iter::once(SectorId::new(0)).collect()
-    }
+fn probe_leg<const ANYONIC: bool>() -> GradedSpace<RealBraidingProbe<ANYONIC>> {
+    GradedSpace::try_new(RealBraidingProbe::<ANYONIC>, [(ProbeSector, 2)]).unwrap()
 }
 
-impl MultiplicityFreeFusionRule for RealAnyonicProbe {}
-
-impl MultiplicityFreeFusionSymbols for RealAnyonicProbe {
-    type Scalar = f64;
-    fn f_symbol_scalar(
-        &self,
-        _: SectorId,
-        _: SectorId,
-        _: SectorId,
-        _: SectorId,
-        _: SectorId,
-        _: SectorId,
-    ) -> f64 {
-        1.0
-    }
-    fn r_symbol_scalar(&self, _: SectorId, _: SectorId, _: SectorId) -> f64 {
-        1.0
-    }
+/// Entry `(i, j)` of the one 2x2 block is `offset + 2 i + j`.
+fn probe_value(offset: f64, row: usize, column: usize) -> f64 {
+    offset + (2 * row + column) as f64
 }
 
-impl MultiplicityFreeRigidSymbols for RealAnyonicProbe {
-    fn dim_scalar(&self, _: SectorId) -> f64 {
-        1.0
-    }
-    fn inv_dim_scalar(&self, _: SectorId) -> f64 {
-        1.0
-    }
-    fn sqrt_dim_scalar(&self, _: SectorId) -> f64 {
-        1.0
-    }
-    fn inv_sqrt_dim_scalar(&self, _: SectorId) -> f64 {
-        1.0
-    }
-    fn twist_scalar(&self, _: SectorId) -> f64 {
-        1.0
-    }
-    fn frobenius_schur_phase_scalar(&self, _: SectorId) -> f64 {
-        1.0
-    }
+fn probe_matrix<const ANYONIC: bool>(
+    runtime: &Runtime,
+    offset: f64,
+) -> TensorMap<RealBraidingProbe<ANYONIC>, f64> {
+    let leg = probe_leg::<ANYONIC>();
+    TensorMap::from_block_fn(runtime, [&leg], [&leg], |_, index| {
+        probe_value(offset, index[0], index[1])
+    })
+    .unwrap()
 }
 
-impl CheckedFusionAlgebra for RealAnyonicProbe {
-    fn try_dual_sector(&self, sector: SectorId) -> Result<SectorId, FusionAlgebraError> {
-        Ok(sector)
-    }
-    fn try_fusion_channels(
-        &self,
-        left: SectorId,
-        right: SectorId,
-    ) -> Result<SectorVec, FusionAlgebraError> {
-        Ok(self.fusion_channels(left, right))
-    }
-    fn try_nsymbol(
-        &self,
-        left: SectorId,
-        right: SectorId,
-        coupled: SectorId,
-    ) -> Result<usize, FusionAlgebraError> {
-        Ok(self.nsymbol(left, right, coupled))
-    }
-}
-
-impl SectorCodec for RealAnyonicProbe {
-    type Sector = AnyonicProbeSector;
-    fn encode_sector(&self, _: &AnyonicProbeSector) -> Result<SectorId, FusionAlgebraError> {
-        Ok(SectorId::new(0))
-    }
-    fn decode_sector(&self, sector: SectorId) -> Result<AnyonicProbeSector, FusionAlgebraError> {
-        if sector == SectorId::new(0) {
-            Ok(AnyonicProbeSector)
-        } else {
-            Err(FusionAlgebraError::InvalidSector { sector })
-        }
-    }
-}
-
-fn anyonic_probe_operands(runtime: &Runtime) -> [TensorMap<RealAnyonicProbe, f64>; 3] {
-    let leg = GradedSpace::try_new(RealAnyonicProbe, [(AnyonicProbeSector, 2)]).unwrap();
-    [1_355_000, 1_355_001, 1_355_002]
-        .map(|seed| TensorMap::rand_with_seed(runtime, [&leg], [&leg], seed).unwrap())
+/// Hand oracle of `lhs.compose(rhs)` for the offsets 1 and 5: the one block
+/// is the 2x2 matrix product.
+fn probe_composition(row: usize, column: usize) -> f64 {
+    (0..2)
+        .map(|k| probe_value(1.0, row, k) * probe_value(5.0, k, column))
+        .sum()
 }
 
 fn is_unsupported_contract_scope(error: &tenet::prelude::Error) -> bool {
@@ -9403,38 +9325,106 @@ fn is_unsupported_contract_scope(error: &tenet::prelude::Error) -> bool {
     )
 }
 
-#[test]
-fn anyonic_overwrite_and_compact_trace_reject_like_contract_and_dense_trace() {
-    let _guard = cache_lock();
+fn is_non_symmetric_contraction(error: &tenet::prelude::Error) -> bool {
+    matches!(
+        error,
+        tenet::prelude::Error::Operation(operation)
+            if matches!(
+                **operation,
+                tenet::operations::OperationError::UnsupportedTensorContractScope {
+                    message: tenet::typed::NON_SYMMETRIC_CONTRACTION_UNSUPPORTED
+                }
+            )
+    )
+}
+
+/// Every Host contraction entry rejects a non-symmetric braiding with one
+/// error, even on the canonical axes, before touching the destination, while
+/// `compose` of the same operands is admitted (TensorKit `blas_contract!`
+/// versus `mul!`).
+fn assert_host_contract_entries_reject_but_compose_admits<const ANYONIC: bool>() {
     let runtime = runtime();
-    let [lhs, rhs, mut destination] = anyonic_probe_operands(&runtime);
+    let lhs = probe_matrix::<ANYONIC>(&runtime, 1.0);
+    let rhs = probe_matrix::<ANYONIC>(&runtime, 5.0);
+    let mut destination = probe_matrix::<ANYONIC>(&runtime, 9.0);
     let before = destination.data().to_vec();
 
-    // What: the canonical form, which needs no permute, is rejected by
-    // `contract_overwrite_into` with `contract`'s error, and the destination
-    // keeps its values.
     let contract = lhs.contract(&rhs, &[1], &[0], &[0, 1]).unwrap_err();
+    assert!(is_non_symmetric_contraction(&contract), "{contract:?}");
+    #[allow(deprecated)]
+    let ordered = lhs.contract_ordered(&rhs, &[1], &[0], &[0, 1]).unwrap_err();
     let overwrite = lhs
         .contract_overwrite_into(&rhs, &mut destination, &[1], &[0], &[0, 1], 1.0)
         .unwrap_err();
-    assert!(is_unsupported_contract_scope(&overwrite), "{overwrite:?}");
-    assert_eq!(overwrite.to_string(), contract.to_string());
+    #[allow(deprecated)]
+    let ordered_overwrite = lhs
+        .contract_ordered_overwrite_into(&rhs, &mut destination, &[1], &[0], &[0, 1], 1.0)
+        .unwrap_err();
+    for error in [&ordered, &overwrite, &ordered_overwrite] {
+        assert!(is_non_symmetric_contraction(error), "{error:?}");
+    }
     assert_eq!(destination.data(), &before[..]);
 
-    // What: the rank-(1,1) compact-spectrum trace is rejected with the dense
-    // trace's error instead of answering from the spectrum.
-    let leg = GradedSpace::try_new(RealAnyonicProbe, [(AnyonicProbeSector, 2)]).unwrap();
-    let compact: TensorMap<RealAnyonicProbe, f64> = TensorMap::diagonal(
+    let composed = lhs.compose(&rhs).unwrap();
+    let leg = probe_leg::<ANYONIC>();
+    let expected: TensorMap<RealBraidingProbe<ANYONIC>, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, index| {
+            probe_composition(index[0], index[1])
+        })
+        .unwrap();
+    assert_eq!(composed.data(), expected.data());
+}
+
+#[test]
+fn non_symmetric_contract_entries_reject_canonical_axes_but_compose_admits() {
+    let _guard = cache_lock();
+    assert_host_contract_entries_reject_but_compose_admits::<false>();
+    assert_host_contract_entries_reject_but_compose_admits::<true>();
+}
+
+#[test]
+fn symmetric_canonical_contract_is_admitted_as_the_negative_control() {
+    // What: the same one-sector 2x2 operands under a bosonic rule contract on
+    // the canonical axes to the composition oracle, so the rejections above
+    // are the braiding boundary alone.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let leg = GradedSpace::try_new_with_arc(
+        Arc::new(tenet::core::U1FusionRule),
+        [(tenet::core::U1Irrep::new(0), 2)],
+    )
+    .unwrap();
+    let matrix = |offset: f64| -> TensorMap<tenet::core::U1FusionRule, f64> {
+        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, index| {
+            probe_value(offset, index[0], index[1])
+        })
+        .unwrap()
+    };
+    let expected: TensorMap<tenet::core::U1FusionRule, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, index| {
+            probe_composition(index[0], index[1])
+        })
+        .unwrap();
+    let contracted = matrix(1.0)
+        .contract(&matrix(5.0), &[1], &[0], &[0, 1])
+        .unwrap();
+    assert_eq!(contracted.data(), expected.data());
+}
+
+fn assert_compact_trace_rejects_like_dense_trace<const ANYONIC: bool>() {
+    let runtime = runtime();
+    let dense = probe_matrix::<ANYONIC>(&runtime, 1.0);
+    let compact: TensorMap<RealBraidingProbe<ANYONIC>, f64> = TensorMap::diagonal(
         &runtime,
-        &leg,
+        &probe_leg::<ANYONIC>(),
         [tenet::typed::SectorSpectrum {
-            sector: AnyonicProbeSector,
+            sector: ProbeSector,
             values: vec![1.0, 2.0],
         }],
     )
     .unwrap();
     let compact_error = compact.trace_pairs(&[(0, 1)]).unwrap_err();
-    let dense_error = lhs.trace_pairs(&[(0, 1)]).unwrap_err();
+    let dense_error = dense.trace_pairs(&[(0, 1)]).unwrap_err();
     assert!(
         is_unsupported_contract_scope(&compact_error),
         "{compact_error:?}"
@@ -9442,29 +9432,50 @@ fn anyonic_overwrite_and_compact_trace_reject_like_contract_and_dense_trace() {
     assert_eq!(compact_error.to_string(), dense_error.to_string());
 }
 
-/// Device `contract_overwrite_into` follows the Host order: the anyonic
-/// rejection comes before any device work and leaves the destination as it
-/// was.
-#[cfg(feature = "cuda")]
 #[test]
-#[ignore = "requires a real CUDA device"]
-fn anyonic_device_overwrite_rejects_like_contract_before_device_work() {
+fn non_symmetric_compact_trace_rejects_like_dense_trace() {
+    // What: the rank-(1,1) compact-spectrum trace is rejected with the dense
+    // trace's error instead of answering from the spectrum (#1355).
     let _guard = cache_lock();
+    assert_compact_trace_rejects_like_dense_trace::<false>();
+    assert_compact_trace_rejects_like_dense_trace::<true>();
+}
+
+/// The device entries follow the Host order: the rejection comes before any
+/// device work and leaves the destination as it was; device `compose` is
+/// admitted and agrees with the Host.
+#[cfg(feature = "cuda")]
+fn assert_device_contract_entries_reject_but_compose_admits<const ANYONIC: bool>() {
     let runtime = Runtime::builder().cuda(0).build().unwrap();
-    let [lhs, rhs, destination] = anyonic_probe_operands(&runtime);
-    let (lhs, rhs, mut destination) = (
-        lhs.to_cuda().unwrap(),
-        rhs.to_cuda().unwrap(),
-        destination.to_cuda().unwrap(),
-    );
+    let host_lhs = probe_matrix::<ANYONIC>(&runtime, 1.0);
+    let host_rhs = probe_matrix::<ANYONIC>(&runtime, 5.0);
+    let lhs = host_lhs.to_cuda().unwrap();
+    let rhs = host_rhs.to_cuda().unwrap();
+    let mut destination = probe_matrix::<ANYONIC>(&runtime, 9.0).to_cuda().unwrap();
     let before = destination.to_host().unwrap().data().to_vec();
-    let contract = lhs.contract(&rhs, &[1], &[0], &[0, 1]).unwrap_err();
+
     let transfers = tenet::dense::cuda_transfer_stats();
+    let contract = lhs.contract(&rhs, &[1], &[0], &[0, 1]).unwrap_err();
+    #[allow(deprecated)]
+    let ordered = lhs.contract_ordered(&rhs, &[1], &[0], &[0, 1]).unwrap_err();
     let overwrite = lhs
         .contract_overwrite_into(&rhs, &mut destination, &[1], &[0], &[0, 1], 1.0)
         .unwrap_err();
     assert_eq!(tenet::dense::cuda_transfer_stats(), transfers);
-    assert!(is_unsupported_contract_scope(&overwrite), "{overwrite:?}");
-    assert_eq!(overwrite.to_string(), contract.to_string());
+    for error in [&contract, &ordered, &overwrite] {
+        assert!(is_non_symmetric_contraction(error), "{error:?}");
+    }
     assert_eq!(destination.to_host().unwrap().data(), &before[..]);
+
+    let composed = lhs.compose(&rhs).unwrap().to_host().unwrap();
+    assert_eq!(composed.data(), host_lhs.compose(&host_rhs).unwrap().data());
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn non_symmetric_device_contract_entries_reject_but_compose_admits() {
+    let _guard = cache_lock();
+    assert_device_contract_entries_reject_but_compose_admits::<false>();
+    assert_device_contract_entries_reject_but_compose_admits::<true>();
 }

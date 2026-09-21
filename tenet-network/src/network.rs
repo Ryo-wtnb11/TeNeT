@@ -19,7 +19,7 @@ use tenet::core::{
     MultiplicityFreeRigidSymbols, RuleIdentity, SectorCodec, SectorLeg, TensorStorage,
     TypedSectorAdmission,
 };
-#[cfg(any(feature = "cuda", test))]
+#[cfg(test)]
 use tenet::operations::OperationError;
 use tenet::prelude::{Error, Runtime, TensorScalar};
 #[cfg(feature = "cuda")]
@@ -1573,7 +1573,7 @@ impl PlannedNetwork {
     /// Executes the compiled schedule on device tensors: the Host step
     /// sequence, each step through the device twin of the Host typed
     /// operation. Every device rejection — another placement, a compact
-    /// operand, anyonic braiding — is decided before any allocation or
+    /// operand, non-symmetric braiding — is decided before any allocation or
     /// kernel, and
     /// nothing falls back to Host or transfers.
     #[cfg(feature = "cuda")]
@@ -1624,7 +1624,7 @@ impl PlannedNetwork {
     ///
     /// Classes: an operand on another placement ([`Error::PlacementMismatch`])
     /// or a Runtime without a device; then [`device_operand_admission`] — a
-    /// compact (diagonal) operand and anyonic braiding. The device
+    /// compact (diagonal) operand and non-symmetric braiding. The device
     /// contraction's own remaining boundaries are unreachable from a compiled
     /// schedule: every step passes `alpha = 1`, every retained destination is
     /// a canonical device result of the same step, and schedules are produced
@@ -1685,8 +1685,9 @@ where
 ///
 /// A compact (diagonal) operand has no device payload form (`to_cuda`
 /// densifies), so no device contraction or permute accepts one. A schedule
-/// with a contraction step on an anyonic provider is the typed `contract`'s
-/// own boundary (TensorKit `blas_contract!` requires symmetric braiding);
+/// with a contraction step on a non-symmetric (anyonic or unbraided) provider
+/// is the typed `contract`'s own boundary, checked by the same function
+/// (TensorKit `blas_contract!` requires symmetric braiding);
 /// deciding it here, not at the step, keeps earlier steps from allocating.
 #[cfg(any(feature = "cuda", test))]
 fn device_operand_admission(
@@ -1702,11 +1703,8 @@ fn device_operand_admission(
             "typed CUDA network execution requires dense device operands".to_string(),
         ));
     }
-    if contracts && braiding == tenet::core::BraidingStyleKind::Anyonic {
-        return Err(OperationError::UnsupportedTensorContractScope {
-            message: tenet::typed::ANYONIC_CONTRACTION_UNSUPPORTED,
-        }
-        .into());
+    if contracts {
+        tenet::typed::reject_non_symmetric_contraction(braiding)?;
     }
     Ok(())
 }
@@ -3994,11 +3992,7 @@ mod typed_replay_tests {
             NetworkReuseClass::OwnedDense,
             NetworkReuseClass::LazyAdjoint,
         ];
-        for braiding in [
-            BraidingStyleKind::NoBraiding,
-            BraidingStyleKind::Bosonic,
-            BraidingStyleKind::Fermionic,
-        ] {
+        for braiding in [BraidingStyleKind::Bosonic, BraidingStyleKind::Fermionic] {
             // What: symmetric braiding, fermionic included since the device
             // contraction carries the core-right twist, is admitted with or
             // without contraction steps.
@@ -4006,14 +4000,19 @@ mod typed_replay_tests {
                 assert!(device_operand_admission(contracts, braiding, dense).is_ok());
             }
         }
-        // What: anyonic braiding is the contraction's boundary only.
-        assert!(device_operand_admission(false, BraidingStyleKind::Anyonic, dense).is_ok());
-        match device_operand_admission(true, BraidingStyleKind::Anyonic, dense) {
-            Err(Error::Operation(error)) => assert!(matches!(
-                error.as_ref(),
-                OperationError::UnsupportedTensorContractScope { .. }
-            )),
-            other => panic!("anyonic contraction must be unsupported, got {other:?}"),
+        // What: non-symmetric braiding (#1372: unbraided as well as anyonic)
+        // is the contraction's boundary only, with the typed error.
+        for braiding in [BraidingStyleKind::NoBraiding, BraidingStyleKind::Anyonic] {
+            assert!(device_operand_admission(false, braiding, dense).is_ok());
+            match device_operand_admission(true, braiding, dense) {
+                Err(Error::Operation(error)) => assert!(matches!(
+                    error.as_ref(),
+                    OperationError::UnsupportedTensorContractScope {
+                        message: tenet::typed::NON_SYMMETRIC_CONTRACTION_UNSUPPORTED
+                    }
+                )),
+                other => panic!("{braiding:?} contraction must be unsupported, got {other:?}"),
+            }
         }
         // What: a compact operand is rejected whatever the schedule, and
         // before the braiding check.

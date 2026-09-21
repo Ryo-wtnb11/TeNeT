@@ -7756,7 +7756,7 @@ where
         rhs_axes: &[usize],
         output_axes: &[usize],
     ) -> Result<TensorMap<R, D>, Self::FacadeError> {
-        reject_anyonic_contraction(lhs.logical_space().provider())?;
+        reject_non_symmetric_contraction(lhs.logical_space().provider().braiding_style())?;
         D::contract(lhs, rhs, lhs_axes, rhs_axes, output_axes)
     }
 
@@ -7783,27 +7783,11 @@ where
         rhs_axes: &[usize],
         output_axes: &[usize],
     ) -> Result<TensorMap<R, D>, Self::FacadeError> {
-        let (TypedTensorRepr::Owned(lhs_body), TypedTensorRepr::Owned(rhs_body)) =
-            (&lhs.repr, &rhs.repr)
-        else {
-            return Err(Error::InvalidArgument(
-                "checked Generic contraction currently requires direct owned tensors".to_string(),
-            )
-            .into());
-        };
-        let mut lease = lhs.runtime.lease_context()?;
-        let (space, data) = tensorcontract_owned_checked_generic_in_context(
-            lease.context().generic_lane::<D>()?,
-            &lhs_body.space,
-            lhs_body.materialized_dense_data(),
-            &rhs_body.space,
-            rhs_body.materialized_dense_data(),
-            TensorContractSpec::new(lhs_axes, rhs_axes, OutputAxisOrder::from_axes(output_axes)),
-        )?;
-        Ok(TensorMap {
-            runtime: lhs.runtime.clone(),
-            repr: owned_repr(TypedTensorBody::dense(space, data)),
-        })
+        reject_non_symmetric_contraction(CheckedGenericFusion::braiding_style(
+            lhs.logical_space().provider(),
+        ))
+        .map_err(Error::from)?;
+        contract_checked_generic(lhs, rhs, lhs_axes, rhs_axes, output_axes)
     }
 
     fn compose(
@@ -7812,7 +7796,9 @@ where
     ) -> Result<TensorMap<R, D>, Self::FacadeError> {
         let lhs_axes = (lhs.codomain_rank()..lhs.rank()).collect::<Vec<_>>();
         let rhs_axes = (0..rhs.codomain_rank()).collect::<Vec<_>>();
-        Self::contract(
+        // The canonical axes need no braid, so composition bypasses
+        // `contract`'s symmetric-braiding boundary (TensorKit `mul!`).
+        contract_checked_generic(
             lhs,
             rhs,
             &lhs_axes,
@@ -7820,6 +7806,43 @@ where
             &(0..lhs.codomain_rank() + rhs.domain_rank()).collect::<Vec<_>>(),
         )
     }
+}
+
+fn contract_checked_generic<R, D>(
+    lhs: &TensorMap<R, D>,
+    rhs: &TensorMap<R, D>,
+    lhs_axes: &[usize],
+    rhs_axes: &[usize],
+    output_axes: &[usize],
+) -> Result<TensorMap<R, D>, GenericTensorError<<R as CheckedGenericFusion>::Error>>
+where
+    R: TypedSectorAdmission<
+            Error = <R as CheckedGenericFusion>::Error,
+            Mode = CheckedGenericAdmissionMode,
+        > + CheckedGenericRigidSymbols<Scalar = f64>,
+    D: TensorScalar,
+{
+    let (TypedTensorRepr::Owned(lhs_body), TypedTensorRepr::Owned(rhs_body)) =
+        (&lhs.repr, &rhs.repr)
+    else {
+        return Err(Error::InvalidArgument(
+            "checked Generic contraction currently requires direct owned tensors".to_string(),
+        )
+        .into());
+    };
+    let mut lease = lhs.runtime.lease_context()?;
+    let (space, data) = tensorcontract_owned_checked_generic_in_context(
+        lease.context().generic_lane::<D>()?,
+        &lhs_body.space,
+        lhs_body.materialized_dense_data(),
+        &rhs_body.space,
+        rhs_body.materialized_dense_data(),
+        TensorContractSpec::new(lhs_axes, rhs_axes, OutputAxisOrder::from_axes(output_axes)),
+    )?;
+    Ok(TensorMap {
+        runtime: lhs.runtime.clone(),
+        repr: owned_repr(TypedTensorBody::dense(space, data)),
+    })
 }
 
 impl<R, D> TypedTensorTraceDispatch<R, D> for MultiplicityFreeAdmissionMode
@@ -7854,26 +7877,34 @@ where
     }
 }
 
-/// The error message of [`reject_anyonic_contraction`], shared with the
+/// The error message of [`reject_non_symmetric_contraction`], shared with the
 /// device network preflight so a network rejection and a typed `contract`
 /// rejection are indistinguishable.
 #[doc(hidden)]
-pub const ANYONIC_CONTRACTION_UNSUPPORTED: &str =
-    "ordinary contraction is undefined for anyonic braiding; use an explicit planar operation";
+pub const NON_SYMMETRIC_CONTRACTION_UNSUPPORTED: &str =
+    "ordinary contraction requires symmetric (bosonic or fermionic) braiding; \
+     use compose for the composition of morphisms (planar contraction is TeNeT#1070)";
 
 /// The ordinary-contraction boundary of every `contract` entry, returning or
-/// overwriting, Host or device (TensorKit `blas_contract!` requires symmetric
-/// braiding).
+/// overwriting, Host or device, typed or `tensor!`: only a symmetric braiding
+/// (TensorKit `SymmetricBraiding`: Bosonic, Fermionic) is admitted, as by
+/// TensorKit `blas_contract!` before any layout test.
 ///
-/// Why not infer a braid from the axes: ordinary contraction has no planar
-/// embedding or over/under-crossing data; #633 owns that API.
-fn reject_anyonic_contraction<R: tenet_core::FusionRule + ?Sized>(
-    provider: &R,
+/// Why not admit the canonical axes of a `NoBraiding` or `Anyonic` rule:
+/// general-axes contraction is defined by braiding legs into place, which is
+/// well defined for arbitrary permutations only under a symmetric braiding.
+/// The one axis pattern that needs no braid is exactly [`TensorMap::compose`]
+/// (TensorKit `mul!`), which stays admitted for every braiding style; planar
+/// contraction for non-symmetric categories is a separate named operation
+/// (#1070).
+#[doc(hidden)]
+pub fn reject_non_symmetric_contraction(
+    braiding: tenet_core::BraidingStyleKind,
 ) -> Result<(), tenet_tensors::OperationError> {
-    if provider.braiding_style() == tenet_core::BraidingStyleKind::Anyonic {
+    if !braiding.is_symmetric() {
         return Err(
             tenet_tensors::OperationError::UnsupportedTensorContractScope {
-                message: ANYONIC_CONTRACTION_UNSUPPORTED,
+                message: NON_SYMMETRIC_CONTRACTION_UNSUPPORTED,
             },
         );
     }
@@ -12610,8 +12641,10 @@ where
     ///
     /// In this order, all before any device work: [`Error::RuntimeMismatch`];
     /// [`tenet_tensors::OperationError::UnsupportedTensorContractScope`] for
-    /// anyonic providers, as on Host — a behaviour change since G2c-1a: the
-    /// canonical anyonic device contraction was accepted before; [`Error::UnsupportedOnDevice`] for
+    /// non-symmetric (anyonic or `NoBraiding`) providers whatever the axes,
+    /// as on Host — a behaviour change: the canonical anyonic (before G2c-1a)
+    /// and `NoBraiding` (before #1372) device contractions were accepted;
+    /// [`Error::UnsupportedOnDevice`] for
     /// diagonal storage; the Host's own errors for malformed axes, output
     /// orders or mismatched legs; [`Error::PlacementMismatch`].
     #[doc(alias = "contract_ordered")]
@@ -12625,7 +12658,7 @@ where
         if !self.runtime.same_runtime(&other.runtime) {
             return Err(Error::RuntimeMismatch);
         }
-        reject_anyonic_contraction(self.logical_space().provider())?;
+        reject_non_symmetric_contraction(self.logical_space().provider().braiding_style())?;
         let (lhs_space, lhs_operand, lhs_storage) = self.cuda_fusion_operand("contract")?;
         let (rhs_space, rhs_operand, rhs_storage) = other.cuda_fusion_operand("contract")?;
         let output_order = OutputAxisOrder::from_axes(output_axes);
@@ -12732,7 +12765,8 @@ where
     ///
     /// The admission sequence is the Host one
     /// ([`TensorMap::contract_overwrite_into`]) plus the device's own
-    /// boundaries: same Runtime, the anyonic boundary of [`Self::contract`],
+    /// boundaries: same Runtime, the symmetric-braiding boundary of
+    /// [`Self::contract`],
     /// same rule identity, an owned dense device
     /// destination that aliases neither operand's payload body, the
     /// contraction's fusion space and block layout (malformed axes report the
@@ -12769,7 +12803,7 @@ where
         {
             return Err(Error::RuntimeMismatch);
         }
-        reject_anyonic_contraction(self.logical_space().provider())?;
+        reject_non_symmetric_contraction(self.logical_space().provider().braiding_style())?;
         let identity = TypedSectorAdmission::typed_rule_identity(self.provider());
         if identity != TypedSectorAdmission::typed_rule_identity(other.provider())
             || identity != TypedSectorAdmission::typed_rule_identity(destination.provider())
@@ -12934,7 +12968,8 @@ where
 
     /// Tensor-map composition on owned or lazy-adjoint device tensors. This uses the
     /// twist-free composition compiler and therefore remains distinct from
-    /// [`Self::contract`] for fermionic providers.
+    /// [`Self::contract`] for fermionic providers, and it admits every
+    /// braiding style, as on Host, where `contract` requires a symmetric one.
     #[doc(alias = "mul")]
     pub fn compose(&self, other: &Self) -> Result<Self, Error> {
         if !self.runtime.same_runtime(&other.runtime) {
@@ -15926,8 +15961,8 @@ where
     /// # Errors
     ///
     /// [`tenet_tensors::OperationError::UnsupportedTensorContractScope`] for
-    /// anyonic providers, right after the Runtime check, as for
-    /// [`Self::contract`]. Admission failures through runtime-context leasing
+    /// non-symmetric (anyonic or `NoBraiding`) providers, right after the
+    /// Runtime check, as for [`Self::contract`]. Admission failures through runtime-context leasing
     /// leave `destination` unchanged. The destination is cleared immediately
     /// before shared-engine
     /// compilation/replay, so a later engine error may leave it zeroed or
@@ -15948,7 +15983,7 @@ where
         {
             return Err(Error::RuntimeMismatch);
         }
-        reject_anyonic_contraction(self.logical_space().provider())?;
+        reject_non_symmetric_contraction(self.logical_space().provider().braiding_style())?;
         let identity = TypedSectorAdmission::typed_rule_identity(self.provider());
         if identity != TypedSectorAdmission::typed_rule_identity(other.provider())
             || identity != TypedSectorAdmission::typed_rule_identity(destination.provider())
@@ -16518,10 +16553,14 @@ where
     /// of which side of either operand those axes came from.
     ///
     /// **Braiding scope**: ordinary contraction is available only for
-    /// symmetric braiding. An anyonic provider is rejected even when these
-    /// axes look crossing-free: the call carries no planar embedding or braid
-    /// direction, so inferring either would choose an unspecified morphism.
-    /// General planar contraction remains outside this API (#633).
+    /// symmetric braiding (Bosonic, Fermionic), as TensorKit `blas_contract!`.
+    /// An anyonic or unbraided (`NoBraiding`) provider is rejected even when
+    /// these axes are the canonical, crossing-free ones: general axes are
+    /// defined by braiding legs into place, and the call carries no planar
+    /// embedding or braid direction. The crossing-free case is exactly
+    /// [`Self::compose`], which every braiding style admits; general planar
+    /// contraction is a separate operation (#1070). Behaviour change (#1372):
+    /// a canonical `NoBraiding` contraction was accepted before.
     ///
     /// For fermionic symmetric braiding this **twists**
     /// dual contracted legs with the fermionic supertrace twist — unlike
@@ -16579,7 +16618,7 @@ where
     ///   runtimes.
     /// - [`Error::Operation`] with
     ///   [`tenet_tensors::OperationError::UnsupportedTensorContractScope`] for
-    ///   anyonic providers.
+    ///   non-symmetric (anyonic or `NoBraiding`) providers, whatever the axes.
     /// - [`Error::Operation`] / [`Error::Core`] / [`Error::FusionAlgebra`] for
     ///   malformed axis lists, an output order that is not a permutation of
     ///   the open axes, mismatched contracted legs, or operands whose
@@ -16750,9 +16789,12 @@ where
     /// multiplication of tensor maps, and for `contract` when you mean
     /// index-notation contraction.
     ///
-    /// **Anyonic semantics**: composition remains coupled-sector block
-    /// multiplication. The fixed domain/codomain boundary supplies the whole
-    /// geometry, so no legs are exchanged and no R symbol is used.
+    /// **Anyonic and unbraided semantics**: composition remains
+    /// coupled-sector block multiplication for every braiding style,
+    /// `NoBraiding` included, as TensorKit `mul!` checks none. The fixed
+    /// domain/codomain boundary supplies the whole geometry, so no legs are
+    /// exchanged and no R symbol is used; this is why `compose` is admitted
+    /// where [`Self::contract`] rejects the same canonical axes.
     ///
     /// The axes are not arguments, deliberately: composition is defined by the
     /// codomain/domain split itself, and TensorKit's `*` takes none.
