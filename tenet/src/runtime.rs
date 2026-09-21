@@ -789,7 +789,7 @@ impl std::ops::DerefMut for CudaLease<'_> {
 /// retains (uploaded coefficient and recoupling vectors plus the pack/scatter
 /// workspaces) and is released by
 /// [`Runtime::clear_tree_transform_cache`]. `context_scalar_operand_bytes` is
-/// the device context's own shared `1` and zero template, which many device
+/// the device context's own ones and zero templates, which many device
 /// operations share and which the executor does not own; the two are reported
 /// separately so neither is charged twice. Neither is charged to
 /// `PlanCacheConfig::workspace_budget_bytes`, which admits idle *network*

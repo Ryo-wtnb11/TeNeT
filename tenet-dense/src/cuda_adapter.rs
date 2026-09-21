@@ -429,15 +429,17 @@ fn ensure_cuda_device(
     Ok(())
 }
 
-/// The device operands a region call needs but never varies: the `1` used as
-/// the 1x1 coefficient of an unscaled move, and the zero template read as the
-/// packed source of a region fill.
+/// The device operands a region call needs but never varies: the ones
+/// template, whose first element is the 1x1 coefficient of an unscaled move
+/// and whose packed prefix a trace contracts its diagonal against, and the
+/// zero template read as the packed source of a region fill.
 ///
 /// One pair per payload dtype, created on first use of that dtype rather than
 /// at [`CudaDenseContext::warm_up`], so the warm-up's documented fixed cost
-/// and its counter deltas are unchanged. The zero template grows monotonically
-/// to the longest region filled so far; it is bounded by the largest single
-/// destination region a caller has asked to zero, not by the number of calls.
+/// and its counter deltas are unchanged. Each template grows monotonically to
+/// the longest region it has served; it is bounded by the largest single
+/// region (fill, or traced extent `prod t_k`) a caller has submitted, not by
+/// the number of calls.
 ///
 /// The operands are payload-typed, so the slot is keyed by the dtype
 /// ([`CudaScalar::OPERAND_SLOT`]), not by realness: an `f32` call must never
@@ -499,15 +501,37 @@ impl CudaDenseContext {
         &mut self.operands[D::OPERAND_SLOT]
     }
 
-    /// Uploads this dtype's `1` operand unless it is already resident.
-    fn ensure_ones<D: CudaScalar>(&mut self) -> Result<(), DenseError> {
-        if self.operands::<D>().ones.is_none() {
-            let ones = CudaDenseStorage::upload_owned(self, vec![D::ONE])?;
+    /// Uploads this dtype's ones template unless a resident one already holds
+    /// at least `len` elements. Its first element is the `1` coefficient of an
+    /// unscaled move; a longer prefix is the packed ones operand a trace
+    /// contracts its diagonal against ([`cuda_region_trace_accumulate`]).
+    fn ensure_ones<D: CudaScalar>(&mut self, len: usize) -> Result<(), DenseError> {
+        let usable = self
+            .operands::<D>()
+            .ones
+            .as_ref()
+            .is_some_and(|ones| ones.len() >= len);
+        if !usable {
+            self.operands_mut::<D>().ones = None;
+            let ones = CudaDenseStorage::upload_owned(self, vec![D::ONE; len.max(1)])?;
             let slot = self.operands_mut::<D>();
             slot.element_bytes = std::mem::size_of::<D>();
             slot.ones = Some(ones);
         }
         Ok(())
+    }
+
+    /// Sizes this dtype's ones template for `len` elements up front, the
+    /// counterpart of [`Self::reserve_zero_template`]: a caller that knows the
+    /// largest trace extent it will submit reserves once and every later
+    /// [`cuda_region_trace_accumulate`] is upload-free. Never shrinks; the
+    /// bytes are reported by [`Self::scalar_operand_bytes`] and released by
+    /// [`Self::release_scalar_operands`].
+    pub fn reserve_ones_template<D: CudaScalar>(&mut self, len: usize) -> Result<(), DenseError> {
+        if len == 0 {
+            return Ok(());
+        }
+        self.ensure_ones::<D>(len)
     }
 
     /// Uploads this dtype's zero template unless a resident one already holds
@@ -1432,7 +1456,7 @@ pub fn cuda_region_axpby<D: CudaScalar>(
             dst_region,
         ),
         CudaRegionCoefficient::One => {
-            ctx.ensure_ones::<D>()?;
+            ctx.ensure_ones::<D>(1)?;
             let (backend, operands) = ctx.split_operands::<D>();
             let Some(ones) = operands.ones.as_ref() else {
                 return Err(cuda_error(OP, "context scalar operand is missing"));
@@ -1508,7 +1532,7 @@ pub fn cuda_region_zero<D: CudaScalar>(
     validate_region(dst_region, dst.len)?;
     let src_region = CudaRegion::packed(dst_region.dims(), 0)?;
 
-    ctx.ensure_ones::<D>()?;
+    ctx.ensure_ones::<D>(1)?;
     ctx.ensure_zeros::<D>(count)?;
     let (backend, operands) = ctx.split_operands::<D>();
     let (Some(ones), Some(zeros)) = (operands.ones.as_ref(), operands.zeros.as_ref()) else {
@@ -1527,6 +1551,131 @@ pub fn cuda_region_zero<D: CudaScalar>(
         dst,
         dst_region,
     )
+}
+
+/// `dst_region += alpha * [conj] trace(src_region)`: the partial trace of one
+/// strided source region, accumulated into a strided destination region.
+///
+/// `src_region` carries the destination's `dims` followed by one axis per
+/// traced pair, each already *merged*: extent `t_k` and stride `s_lhs + s_rhs`
+/// of the pair's two source axes, so its index walks the diagonal. The
+/// trailing axes are contracted jointly against the packed first `prod t_k`
+/// elements of the context's ones template, one `dot_general` in all
+/// (TensorOperations' cuTENSOR trace builds the same diagonal-stride
+/// descriptor and hands it to a reduction, which Tenferro 0.5.0 does not
+/// expose on views). Pairs are never merged with one another, so no pair
+/// needs a stride commensurate with another's.
+///
+/// `alpha` rides the contraction descriptor. A zero `alpha` would let the
+/// backend skip the source read and erase NaN/Inf the host propagates, so it
+/// contracts against the zero template instead with a unit descriptor scale:
+/// `dst += 1 * sum(src * 0)`, which is the host's `dst + 0 * sum(src)`.
+///
+/// Transfer contract: the ones (or zero) template grows to `prod t_k` on first
+/// need and nothing is uploaded afterwards; reserve it with
+/// [`CudaDenseContext::reserve_ones_template`] to pay one upload for a whole
+/// replay.
+///
+/// Validation, all before any device work: devices, payload dtypes, the
+/// source rank and leading extents against the destination (`ShapeMismatch`),
+/// element counts, an injective destination, and both regions inside their
+/// buffers. An empty destination or an empty traced extent adds nothing and
+/// returns `Ok` with no submission.
+#[allow(clippy::too_many_arguments)]
+pub fn cuda_region_trace_accumulate<D: CudaScalar>(
+    ctx: &mut CudaDenseContext,
+    src: &CudaDenseStorage,
+    src_region: &CudaRegion,
+    conj: bool,
+    alpha: D,
+    dst: &mut CudaDenseStorage,
+    dst_region: &CudaRegion,
+) -> Result<(), DenseError> {
+    const OP: &str = "cuda_region_trace_accumulate";
+    ensure_cuda_device(ctx.device, OP, &[("src", src.device), ("dst", dst.device)])?;
+    ensure_payload_dtype::<D>(OP, src)?;
+    ensure_payload_dtype::<D>(OP, dst)?;
+    let rank = dst_region.dims().len();
+    if src_region.dims().len() < rank || src_region.dims()[..rank] != *dst_region.dims() {
+        return Err(DenseError::ShapeMismatch {
+            op: OP,
+            expected: dst_region.dims().to_vec(),
+            actual: src_region.dims().to_vec(),
+        });
+    }
+    if src_region.is_empty() {
+        return Ok(());
+    }
+    src_region.element_count()?;
+    let trace_dims = &src_region.dims()[rank..];
+    let trace_len = trace_dims
+        .iter()
+        .try_fold(1usize, |count, dim| count.checked_mul(*dim))
+        .ok_or(DenseError::ElementCountOverflow)?;
+    validate_destination_layout(OP, dst_region)?;
+    validate_region(src_region, src.len)?;
+    validate_region(dst_region, dst.len)?;
+
+    let zero = alpha == D::ZERO;
+    if zero {
+        ctx.ensure_zeros::<D>(trace_len)?;
+    } else {
+        ctx.ensure_ones::<D>(trace_len)?;
+    }
+    let (backend, operands) = ctx.split_operands::<D>();
+    let template = if zero {
+        operands.zeros.as_ref()
+    } else {
+        operands.ones.as_ref()
+    };
+    let Some(template) = template else {
+        return Err(cuda_error(OP, "context scalar operand is missing"));
+    };
+
+    let src_strides = src_region
+        .strides()
+        .iter()
+        .map(|&stride| {
+            isize::try_from(stride).map_err(|_| DenseError::StrideOverflow { value: stride })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut ones_dims = trace_dims.to_vec();
+    ones_dims.push(1);
+    let mut ones_strides = Vec::with_capacity(ones_dims.len());
+    let mut running = 1isize;
+    for &dim in &ones_dims {
+        ones_strides.push(running);
+        running *= dim as isize;
+    }
+    let (out_dims, out_strides) = dst_region.contraction_view_metadata()?;
+
+    let lhs =
+        src.region_view_nd::<D>(src_region.dims(), &src_strides, src_region.offset_isize()?)?;
+    let rhs = template.region_view_nd::<D>(&ones_dims, &ones_strides, 0)?;
+    let out = dst.region_view_nd_mut::<D>(&out_dims, &out_strides, dst_region.offset_isize()?)?;
+    let traced = trace_dims.len();
+    let config = DotGeneralConfig {
+        lhs_contracting_dims: (rank..rank + traced).collect(),
+        rhs_contracting_dims: (0..traced).collect(),
+        lhs_batch_dims: Vec::new(),
+        rhs_batch_dims: Vec::new(),
+    };
+    let accumulation = DotGeneralAccumulation {
+        lhs_conj: conj,
+        rhs_conj: false,
+        alpha: if zero { D::ONE } else { alpha }.contraction_scalar(),
+        beta: D::ONE.contraction_scalar(),
+    };
+    GEMM_CALLS.fetch_add(1, Ordering::Relaxed);
+    backend
+        .dot_general_read_into_accum(
+            TensorRead::from_view(lhs),
+            TensorRead::from_view(rhs),
+            &config,
+            accumulation,
+            TensorWrite::from_view(out),
+        )
+        .map_err(|err| cuda_error(OP, err))
 }
 
 /// Downloads a small real device tensor of the payload's lane `R` as host

@@ -137,6 +137,9 @@ pub use tenet_operations::{
 pub(crate) use tenet_operations::{HostKernelAdapter, StridedHostKernelAdapter};
 pub use tenet_operations::{HostTreeTransformWorkspace, TreeTransformWorkspace};
 pub use tenet_operations::{OutputAxisOrder, TensorContractSpec, TensorTraceAxisSpec};
+#[cfg(feature = "cuda")]
+#[doc(hidden)]
+pub use tensortrace::tensortrace_fusion_structure_accumulate_on_cuda;
 pub use tensortrace::{
     tensortrace_fusion_dyn_into, tensortrace_fusion_dyn_into_checked, tensortrace_fusion_dyn_owned,
     tensortrace_fusion_dyn_owned_checked, tensortrace_fusion_dyn_owned_generic_checked,
