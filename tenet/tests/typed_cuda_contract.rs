@@ -46,6 +46,61 @@ use num_complex::{Complex32, Complex64};
 use tenet::dense::{cuda_transfer_stats, CudaTransferStats};
 use tenet::typed::{Runtime, TensorMap};
 
+/// Counts Host allocations made by the thread that set `COUNTING` (device
+/// runtime threads never do), for the warm host-allocation contract.
+mod host_allocations {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
+
+    thread_local! {
+        static COUNTING: Cell<bool> = const { Cell::new(false) };
+        static CALLS: Cell<u64> = const { Cell::new(0) };
+    }
+
+    struct Counting;
+
+    fn record() {
+        // `try_with`: the allocator also runs during thread teardown.
+        let _ = COUNTING.try_with(|counting| {
+            if counting.get() {
+                let _ = CALLS.try_with(|calls| calls.set(calls.get() + 1));
+            }
+        });
+    }
+
+    // SAFETY: every call forwards unchanged to `System`; the bookkeeping only
+    // touches thread-local `Cell`s and never allocates.
+    unsafe impl GlobalAlloc for Counting {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            record();
+            unsafe { System.alloc(layout) }
+        }
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            record();
+            unsafe { System.alloc_zeroed(layout) }
+        }
+        unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+            unsafe { System.dealloc(pointer, layout) }
+        }
+        unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
+            record();
+            unsafe { System.realloc(pointer, layout, size) }
+        }
+    }
+
+    #[global_allocator]
+    static ALLOCATOR: Counting = Counting;
+
+    /// Host allocation calls `body` makes on this thread.
+    pub fn count(body: impl FnOnce()) -> u64 {
+        CALLS.with(|calls| calls.set(0));
+        COUNTING.with(|counting| counting.set(true));
+        body();
+        COUNTING.with(|counting| counting.set(false));
+        CALLS.with(Cell::get)
+    }
+}
+
 fn delta<T>(body: impl FnOnce() -> T) -> (T, CudaTransferStats) {
     let before = cuda_transfer_stats();
     let value = body();
@@ -591,7 +646,37 @@ fn a_warm_overwrite_transfers_and_allocates_nothing() {
         call();
         let scratch = runtime.cuda_contract_scratch_bytes().unwrap();
         let transforms = runtime.cuda_tree_transform_stats().unwrap();
+        let plans = runtime.cuda_plan_cache_stats().unwrap().unwrap();
         let ((), counters) = delta(&mut call);
+        let after_plans = runtime.cuda_plan_cache_stats().unwrap().unwrap();
+        // #1348: a warm overwrite builds no cuTENSOR plan, observed through
+        // the typed Runtime accessor rather than the executor.
+        assert_eq!(
+            (after_plans.misses, after_plans.evictions),
+            (plans.misses, plans.evictions),
+            "{}: cuTENSOR plan cache",
+            case.name
+        );
+        assert!(after_plans.hits > plans.hits, "{}: vacuous", case.name);
+        // #1348: the warm Host allocation count is a steady state — the
+        // same on every warm call. The Host route, including the
+        // inactive-region list `StorageContractResolution::new` converts, is
+        // compiled on every call, so this pins no per-call saving; only the
+        // device replay itself converts no layout.
+        let host_allocations = [
+            host_allocations::count(&mut call),
+            host_allocations::count(&mut call),
+            host_allocations::count(&mut call),
+        ];
+        eprintln!("{}: warm host allocations {host_allocations:?}", case.name);
+        assert!(host_allocations[0] > 0, "{}: vacuous count", case.name);
+        assert!(
+            host_allocations
+                .iter()
+                .all(|&count| count == host_allocations[0]),
+            "{}: warm host allocations {host_allocations:?} are not steady",
+            case.name
+        );
         assert_eq!(
             (
                 counters.h2d_calls,

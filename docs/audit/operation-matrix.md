@@ -156,9 +156,11 @@ core GEMMs write the destination directly exactly the plan's inactive blocks
 are zeroed (G2c-1b, [#1346](https://github.com/Ryo-wtnb11/TeNeT/issues/1346));
 `alpha` other than `1` stays `UnsupportedOnDevice`; gated into NaN-poisoned
 destinations against the Host and the same oracles, with a warm call
-transferring and allocating nothing. Still an explicit boundary: device
-`tensor!` networks keep their canonical schedule predicate
-([#1348](https://github.com/Ryo-wtnb11/TeNeT/issues/1348)). Behaviour change: an anyonic device
+transferring and allocating nothing. Device `tensor!` networks run every
+compiled schedule — general steps, result and final permutations, open
+outputs, dual contracted legs — through these device operations
+([#1348](https://github.com/Ryo-wtnb11/TeNeT/issues/1348)); only traces stay
+an explicit boundary. Behaviour change: an anyonic device
 `contract` is now `UnsupportedTensorContractScope` even in canonical form,
 as on Host (it was accepted before). The Host checked-Generic cell is
 `NEEDS-PROOF` for a named gap: `tensorcontract_owned_checked_generic_in_context`
@@ -233,7 +235,15 @@ is composed on the host as described below the table.
 quarantine and byte-budget machinery as Host, keyed by `(provider, dtype,
 storage)`, and reuses slots, producers, the input snapshot and the payload
 destinations of every intermediate step through the device
-`contract_overwrite_into`. The final schedule slot leaves the workspace and so
+`contract_overwrite_into` and `permute_overwrite_into`. Since
+[#1348](https://github.com/Ryo-wtnb11/TeNeT/issues/1348) the schedule is not
+restricted: device admission (placement, compact operands, anyonic braiding)
+is decided from the schedule and operand metadata before the plan cache
+publishes or a workspace is leased, gated in
+`tenet-network/tests/typed_cuda_network.rs` against the Host `tensor!` run
+(U(1), SU(2), U(1)×SU(2), fZ2×U(1), fZ2⊠SU(2)) and the physical-basis dense
+expansion (U(1), SU(2)); a warm general network transfers and allocates only
+its returned output and misses no cuTENSOR plan. The final schedule slot leaves the workspace and so
 still allocates and uploads a fresh returning output
 ([#740](https://github.com/Ryo-wtnb11/TeNeT/issues/740)). A reused device
 destination is not reset: the contraction zeroes only the blocks no GEMM

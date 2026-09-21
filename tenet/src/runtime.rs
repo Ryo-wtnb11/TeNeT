@@ -1289,6 +1289,27 @@ impl Runtime {
         Some(lease.split_contract().2.device_bytes())
     }
 
+    /// Snapshot of the cuTENSOR plan cache of this Runtime's device context,
+    /// or `Ok(None)` when the Runtime has no device.
+    ///
+    /// Read-only observation for warm-cost contracts: every region move,
+    /// zero fill and GEMM a device operation submits builds or reuses one
+    /// cuTENSOR plan per operand signature, so `misses` not growing across a
+    /// warm call shows it rebuilt no plan, and `evictions` growing shows
+    /// thrash. Nothing reads it back to decide execution. Takes the device
+    /// lease like [`Self::cuda_tree_transform_stats`]; an error is the
+    /// backend's own statistics query failing.
+    #[cfg(feature = "cuda")]
+    pub fn cuda_plan_cache_stats(&self) -> Result<Option<tenet_dense::CudaPlanCacheStats>, Error> {
+        let Some(lease) = self.lease_cuda_for_maintenance() else {
+            return Ok(None);
+        };
+        lease
+            .plan_cache_stats()
+            .map(Some)
+            .map_err(|error| Error::from(tenet_operations::OperationError::Dense(error)))
+    }
+
     /// Deterministic per-runtime stream position for
     /// [`crate::prelude::TensorMap::rand`].
     pub(crate) fn next_rand_seed(&self) -> u64 {

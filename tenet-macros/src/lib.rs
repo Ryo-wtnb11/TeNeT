@@ -22,7 +22,9 @@
 //!
 //! Every operand must be a homogeneous provider-typed `TensorMap<R, D>` (or
 //! a borrow of one). Host execution reuses a typed per-plan workspace; CUDA
-//! execution is returning-only and rejects intra-operand traces.
+//! execution runs the same schedule on device tensors (general contraction
+//! axes, permutations, fermionic twists), reusing retained device
+//! intermediates, and rejects intra-operand traces.
 //!
 //! **Fermionic semantics**: `tensor!` follows TensorKit `@tensor` /
 //! `tensorcontract!` — dual contracted legs are twisted with the fermionic

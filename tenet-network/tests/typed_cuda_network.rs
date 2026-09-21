@@ -29,16 +29,6 @@ fn pair_network() -> Network {
     .unwrap()
 }
 
-fn assert_unsupported_cuda_network(error: tenet::prelude::Error) {
-    match error {
-        tenet::prelude::Error::Operation(error) => assert!(matches!(
-            error.as_ref(),
-            tenet::operations::OperationError::UnsupportedTensorContractScope { .. }
-        )),
-        other => panic!("expected unsupported tensor-contract scope, got {other:?}"),
-    }
-}
-
 fn cuda_pair<R>(runtime: &Runtime, space: &GradedSpace<R>, seed: u64)
 where
     R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
@@ -123,9 +113,12 @@ fn cuda_macro_rejects_trace_before_cache_or_execution() {
     assert_eq!(plan_cache_stats(&runtime).workspaces_created, 0);
 }
 
+/// G2c-3 (#1348): the reversed-output product the canonical predicate refused
+/// runs on the device, equals the Host run, and shares the structural plan the
+/// Host call published (one entry, a hit).
 #[test]
 #[ignore = "requires a real CUDA device"]
-fn noncanonical_cuda_macro_never_publishes_or_touches_cache_state() {
+fn a_noncanonical_cuda_macro_runs_and_shares_the_host_plan() {
     let runtime = Runtime::builder().cuda(0).build().unwrap();
     let space =
         GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
@@ -134,22 +127,26 @@ fn noncanonical_cuda_macro_never_publishes_or_touches_cache_state() {
     let a_cuda = a.to_cuda().unwrap();
     let b_cuda = b.to_cuda().unwrap();
 
-    assert!(runtime.with_extension_slot(|slot| slot.is_none()));
+    let host = tensor!([k; i] = a[i; j] * b[j; k]).unwrap();
+    let published = plan_cache_stats(&runtime);
+    assert_eq!(published.entries, 1);
     for _ in 0..2 {
-        let error = tensor!([k; i] = a_cuda[i; j] * b_cuda[j; k]).unwrap_err();
-        assert_unsupported_cuda_network(error);
-        assert!(runtime.with_extension_slot(|slot| slot.is_none()));
+        let device = tensor!([k; i] = a_cuda[i; j] * b_cuda[j; k]).unwrap();
+        assert_eq!(device.codomain(), host.codomain());
+        assert_eq!(device.domain(), host.domain());
+        assert_close_dyn(
+            device.to_host().unwrap().data(),
+            host.data(),
+            f64::EPSILON,
+            "reversed pair",
+        );
     }
-
-    // Publish the same structural plan from Host. CUDA must validate the
-    // cached plan before alias/LRU promotion or hit-counter mutation.
-    drop(tensor!([k; i] = a[i; j] * b[j; k]).unwrap());
-    let preseeded = plan_cache_stats(&runtime);
-    for _ in 0..2 {
-        let error = tensor!([k; i] = a_cuda[i; j] * b_cuda[j; k]).unwrap_err();
-        assert_unsupported_cuda_network(error);
-        assert_eq!(plan_cache_stats(&runtime), preseeded);
-    }
+    let after = plan_cache_stats(&runtime);
+    assert_eq!(
+        after.entries, 1,
+        "Host and device share one structural plan"
+    );
+    assert!(after.hits > published.hits);
 }
 
 #[test]
@@ -350,8 +347,8 @@ fn canonical_cuda_network_provider_matrix_chain_and_lazy_conj() {
 }
 
 /// G1a (#1268): canonical `tensor!` device execution with a genuinely complex
-/// payload, including a lazy conjugate operand. Noncanonical routes and
-/// intra-operand trace stay rejected without publishing a plan.
+/// payload, including a lazy conjugate operand. Intra-operand trace stays
+/// rejected; since G2c-3 (#1348) a reversed output runs.
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn canonical_cuda_network_executes_complex_payloads_and_still_rejects_the_rest() {
@@ -411,9 +408,10 @@ fn canonical_cuda_network_executes_complex_payloads_and_still_rejects_the_rest()
         trace_error,
         tenet::prelude::Error::UnsupportedOnDevice(_)
     ));
-    assert_unsupported_cuda_network(
-        tensor!([k; i] = (device[0])[i; j] * (device[1])[j; k]).unwrap_err(),
-    );
+    // G2c-3 (#1348): the reversed output the canonical predicate refused runs.
+    let reversed = tensor!([k; i] = (device[0])[i; j] * (device[1])[j; k]).unwrap();
+    let reversed_oracle = tensor!([k; i] = (host[0])[i; j] * (host[1])[j; k]).unwrap();
+    assert_close_c64(reversed.to_host().unwrap().data(), reversed_oracle.data());
 }
 
 fn assert_close_c64(actual: &[Complex64], expected: &[Complex64]) {
@@ -962,4 +960,740 @@ fn a_warm_single_precision_chain_costs_the_same_calls_and_half_the_bytes() {
             "{name}: warm h2d bytes must be halved"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// General device networks (G2c-3, #1348)
+// ---------------------------------------------------------------------------
+
+/// Device result against a reference of the same dtype, compared at the
+/// payload's own epsilon (never bitwise: the device GEMM order is cuTENSOR's
+/// and exact zeros may differ in sign).
+fn assert_close_dyn<D: tenet::typed::CudaPayload + std::fmt::Debug>(
+    actual: &[D],
+    expected: &[D],
+    epsilon: f64,
+    what: &str,
+) {
+    assert_eq!(actual.len(), expected.len(), "{what}: payload length");
+    let scale = expected
+        .iter()
+        .map(|value| value.widen_complex().norm())
+        .fold(0.0_f64, f64::max);
+    assert!(scale > 0.0, "{what}: all-zero reference proves nothing");
+    let tolerance = 256.0 * epsilon * (1.0 + scale);
+    for (index, (&got, &want)) in actual.iter().zip(expected).enumerate() {
+        let distance = (got.widen_complex() - want.widen_complex()).norm();
+        assert!(
+            distance <= tolerance,
+            "{what}: element {index} is {got:?}, expected {want:?} (tolerance {tolerance:e})"
+        );
+    }
+}
+
+/// Runs one `tensor!` expression over `$t` bound to the Host operands, then
+/// twice — cold and warm — over `$t` bound to the device operands.
+macro_rules! host_cold_warm {
+    ($t:ident = $host:expr, $device:expr; $($net:tt)*) => {{
+        let host = {
+            let $t = $host;
+            tensor!($($net)*).unwrap()
+        };
+        let (cold, warm) = {
+            let $t = $device;
+            (tensor!($($net)*).unwrap(), tensor!($($net)*).unwrap())
+        };
+        (host, cold, warm)
+    }};
+}
+
+/// The operands of the general networks, over three spaces `v`, `w`, `p` of
+/// one provider (degeneracy > 1 in each):
+///
+/// - `a: [v, w; p]`, `b: [p, w; v, p]`, `c: [v; w]`, `e: [w; w]`, and `t` with
+///   `conj(t)` shaped like `b` — codomain↔domain contractions only, so the
+///   physical-basis dense expansion is a plain index sum;
+/// - `f: [v, w; p]`, `g: [v*, w; p*]`, `h: [w*, v;]` — codomain↔codomain and
+///   domain↔domain pairs, i.e. dual contracted legs (the fermionic twist).
+struct Operands<T> {
+    a: T,
+    b: T,
+    c: T,
+    e: T,
+    t: T,
+    f: T,
+    g: T,
+    h: T,
+}
+
+impl<T> Operands<T> {
+    fn map<U>(&self, lift: impl Fn(&T) -> U) -> Operands<U> {
+        Operands {
+            a: lift(&self.a),
+            b: lift(&self.b),
+            c: lift(&self.c),
+            e: lift(&self.e),
+            t: lift(&self.t),
+            f: lift(&self.f),
+            g: lift(&self.g),
+            h: lift(&self.h),
+        }
+    }
+}
+
+fn general_operands<R, D>(
+    runtime: &Runtime,
+    [v, w, p]: [&GradedSpace<R>; 3],
+    seed: u64,
+) -> Operands<TensorMap<R, D>>
+where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec,
+    D: tenet::typed::CudaPayload,
+{
+    let rand = |codomain: &[&GradedSpace<R>], domain: &[&GradedSpace<R>], salt: u64| {
+        TensorMap::<R, D>::rand_with_seed(
+            runtime,
+            codomain.iter().copied(),
+            domain.iter().copied(),
+            seed + salt,
+        )
+        .unwrap()
+    };
+    let (v_dual, w_dual, p_dual) = (
+        v.try_dual().unwrap(),
+        w.try_dual().unwrap(),
+        p.try_dual().unwrap(),
+    );
+    Operands {
+        a: rand(&[v, w], &[p], 0),
+        b: rand(&[p, w], &[v, p], 1),
+        c: rand(&[v], &[w], 2),
+        e: rand(&[w], &[w], 3),
+        t: rand(&[v, p], &[p, w], 4),
+        f: rand(&[v, w], &[p], 5),
+        g: rand(&[&v_dual, w], &[&p_dual], 6),
+        h: rand(&[&w_dual, v], &[], 7),
+    }
+}
+
+/// Every general network on Host and device (cold, warm): general contraction
+/// axes, open outputs on both sides, result and final permutations (a
+/// split-changing one included), a lazy conjugate operand, dual contracted
+/// legs, and a four-tensor chain whose two intermediates are reused warm.
+/// Returns `(name, host, device cold, device warm)`.
+#[allow(clippy::type_complexity)]
+fn general_networks<R, D>(
+    host: &Operands<TensorMap<R, D>>,
+    device: &Operands<TensorMap<R, D, CudaStorage<D>>>,
+) -> Vec<(
+    &'static str,
+    TensorMap<R, D>,
+    TensorMap<R, D, CudaStorage<D>>,
+    TensorMap<R, D, CudaStorage<D>>,
+)>
+where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec
+        + Send
+        + Sync,
+    D: tenet::typed::CudaPayload + Send + Sync + 'static,
+{
+    let mut runs = Vec::new();
+    let (host_result, cold, warm) = host_cold_warm!(o = host, device;
+        [x, q; y] = (o.a)[a, w; p] * (o.b)[p, x; a, y] * (o.c)[q; w]);
+    runs.push(("xq;y", host_result, cold, warm));
+    let (host_result, cold, warm) = host_cold_warm!(o = host, device;
+        [q, x; y] = (o.a)[a, w; p] * (o.b)[p, x; a, y] * (o.c)[q; w]);
+    runs.push(("qx;y", host_result, cold, warm));
+    let (host_result, cold, warm) = host_cold_warm!(o = host, device;
+        [y, q; x] = (o.a)[a, w; p] * (o.b)[p, x; a, y] * (o.c)[q; w]);
+    runs.push(("yq;x split-changing", host_result, cold, warm));
+    let (host_result, cold, warm) = host_cold_warm!(o = host, device;
+        [x, q; y] = (o.a)[a, w; p] * conj((o.t))[a, y; p, x] * (o.c)[q; w]);
+    runs.push(("xq;y lazy conj", host_result, cold, warm));
+    let (host_result, cold, warm) = host_cold_warm!(o = host, device;
+        [x, q; y] = (o.a)[a, w; p] * (o.b)[p, x; a, y] * (o.c)[q; u] * (o.e)[u; w]);
+    runs.push(("xq;y four tensors", host_result, cold, warm));
+    let (host_result, cold, warm) = host_cold_warm!(o = host, device;
+        [z, x;] = (o.f)[a, w; p] * (o.g)[a, x; p] * (o.h)[w, z;]);
+    runs.push(("zx; dual legs", host_result, cold, warm));
+    let (host_result, cold, warm) = host_cold_warm!(o = host, device;
+        [x; z] = (o.f)[a, w; p] * (o.g)[a, x; p] * (o.h)[w, z;]);
+    runs.push(("x;z dual legs split-changing", host_result, cold, warm));
+    runs
+}
+
+fn assert_general_networks_match_host<R, D>(
+    runtime: &Runtime,
+    spaces: [&GradedSpace<R>; 3],
+    seed: u64,
+    epsilon: f64,
+    provider: &str,
+) where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec
+        + Send
+        + Sync,
+    D: tenet::typed::CudaPayload + Send + Sync + 'static + std::fmt::Debug,
+{
+    let operands = general_operands::<R, D>(runtime, spaces, seed);
+    let device = operands.map(|tensor| tensor.to_cuda().unwrap());
+    for (name, host, cold, warm) in general_networks(&operands, &device) {
+        let what = format!("{provider} {name}");
+        for (phase, result) in [("cold", cold), ("warm", warm)] {
+            assert_eq!(result.placement(), device.a.placement(), "{what} {phase}");
+            assert!(std::ptr::eq(result.provider(), host.provider()), "{what}");
+            assert_eq!(result.codomain(), host.codomain(), "{what} {phase}");
+            assert_eq!(result.domain(), host.domain(), "{what} {phase}");
+            assert_close_dyn(
+                result.to_host().unwrap().data(),
+                host.data(),
+                epsilon,
+                &format!("{what} {phase}"),
+            );
+        }
+    }
+}
+
+fn column_major_offset(shape: &[usize], index: &[usize]) -> usize {
+    index
+        .iter()
+        .zip(shape)
+        .rev()
+        .fold(0, |offset, (&i, &extent)| offset * extent + i)
+}
+
+/// Physical-basis einsum: every operand `(dense, labels)` in codomain-then-
+/// domain axis order, summed over every label not in `output`. Plain index
+/// pairing is exact for codomain↔domain contractions and legs that stay on
+/// their side, which is all the dense-checked networks use.
+fn dense_einsum(
+    operands: &[(&tenet::prelude::PhysicalDense<Complex64>, &[&str])],
+    output: &[&str],
+) -> (Vec<usize>, Vec<Complex64>) {
+    let mut labels: Vec<&str> = Vec::new();
+    let mut extents = Vec::new();
+    for (dense, operand_labels) in operands {
+        assert_eq!(dense.shape.len(), operand_labels.len());
+        for (&label, &extent) in operand_labels.iter().zip(&dense.shape) {
+            match labels.iter().position(|&known| known == label) {
+                Some(position) => assert_eq!(extents[position], extent, "label {label}"),
+                None => {
+                    labels.push(label);
+                    extents.push(extent);
+                }
+            }
+        }
+    }
+    let position = |label: &str| labels.iter().position(|&known| known == label).unwrap();
+    let output_shape: Vec<usize> = output
+        .iter()
+        .map(|&label| extents[position(label)])
+        .collect();
+    let mut result = vec![Complex64::new(0.0, 0.0); output_shape.iter().product()];
+    let total: usize = extents.iter().product();
+    let mut index = vec![0usize; labels.len()];
+    for _ in 0..total {
+        let mut product = Complex64::new(1.0, 0.0);
+        for (dense, operand_labels) in operands {
+            let local: Vec<usize> = operand_labels.iter().map(|&l| index[position(l)]).collect();
+            product *= dense.data[column_major_offset(&dense.shape, &local)];
+        }
+        let out: Vec<usize> = output.iter().map(|&l| index[position(l)]).collect();
+        result[column_major_offset(&output_shape, &out)] += product;
+        for (axis, value) in index.iter_mut().enumerate() {
+            *value += 1;
+            if *value < extents[axis] {
+                break;
+            }
+            *value = 0;
+        }
+    }
+    (output_shape, result)
+}
+
+fn widened(dense: tenet::prelude::PhysicalDense<f64>) -> tenet::prelude::PhysicalDense<Complex64> {
+    tenet::prelude::PhysicalDense {
+        shape: dense.shape,
+        data: dense
+            .data
+            .into_iter()
+            .map(|x| Complex64::new(x, 0.0))
+            .collect(),
+    }
+}
+
+/// Dense-expansion oracle for the codomain↔domain networks on a provider with
+/// a physical basis: the Host result and the device results, cold and warm,
+/// each equal the physical-basis einsum of the operands.
+fn assert_dense_oracle<R>(
+    runtime: &Runtime,
+    spaces: [&GradedSpace<R>; 3],
+    seed: u64,
+    provider: &str,
+) where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + tenet::core::PhysicalFusionBasis<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec
+        + Send
+        + Sync,
+{
+    let o = general_operands::<R, f64>(runtime, spaces, seed);
+    let device = o.map(|tensor| tensor.to_cuda().unwrap());
+    // Host, device cold and device warm results of one expression, each to be
+    // checked against the einsum independently.
+    type Runs<R> = (
+        TensorMap<R, f64>,
+        TensorMap<R, f64, CudaStorage>,
+        TensorMap<R, f64, CudaStorage>,
+    );
+    let results =
+        |(host, cold, warm): Runs<R>| [host, cold.to_host().unwrap(), warm.to_host().unwrap()];
+    let dense = |tensor: &TensorMap<R, f64>| widened(tensor.to_physical_dense().unwrap());
+    let (a, b, c, e) = (dense(&o.a), dense(&o.b), dense(&o.c), dense(&o.e));
+    let t_adjoint = dense(&o.t.adjoint().unwrap());
+    type DenseOperands<'a> = Vec<(&'a tenet::prelude::PhysicalDense<Complex64>, &'a [&'a str])>;
+    type DenseCase<'a, R> = (
+        &'a str,
+        [TensorMap<R, f64>; 3],
+        DenseOperands<'a>,
+        &'a [&'a str],
+    );
+    let cases: [DenseCase<'_, R>; 4] = [
+        (
+            "xq;y",
+            results(
+                host_cold_warm!(o = &o, &device; [x, q; y] = (o.a)[a, w; p] * (o.b)[p, x; a, y] * (o.c)[q; w]),
+            ),
+            vec![
+                (&a, &["a", "w", "p"][..]),
+                (&b, &["p", "x", "a", "y"][..]),
+                (&c, &["q", "w"][..]),
+            ],
+            &["x", "q", "y"],
+        ),
+        (
+            "qx;y",
+            results(
+                host_cold_warm!(o = &o, &device; [q, x; y] = (o.a)[a, w; p] * (o.b)[p, x; a, y] * (o.c)[q; w]),
+            ),
+            vec![
+                (&a, &["a", "w", "p"][..]),
+                (&b, &["p", "x", "a", "y"][..]),
+                (&c, &["q", "w"][..]),
+            ],
+            &["q", "x", "y"],
+        ),
+        (
+            "xq;y lazy conj",
+            results(
+                host_cold_warm!(o = &o, &device; [x, q; y] = (o.a)[a, w; p] * conj((o.t))[a, y; p, x] * (o.c)[q; w]),
+            ),
+            vec![
+                (&a, &["a", "w", "p"][..]),
+                (&t_adjoint, &["p", "x", "a", "y"][..]),
+                (&c, &["q", "w"][..]),
+            ],
+            &["x", "q", "y"],
+        ),
+        (
+            "xq;y four tensors",
+            results(
+                host_cold_warm!(o = &o, &device; [x, q; y] = (o.a)[a, w; p] * (o.b)[p, x; a, y] * (o.c)[q; u] * (o.e)[u; w]),
+            ),
+            vec![
+                (&a, &["a", "w", "p"][..]),
+                (&b, &["p", "x", "a", "y"][..]),
+                (&c, &["q", "u"][..]),
+                (&e, &["u", "w"][..]),
+            ],
+            &["x", "q", "y"],
+        ),
+    ];
+    for (name, runs, operands, output) in cases {
+        let (shape, expected) = dense_einsum(&operands, output);
+        for (phase, result) in ["host", "device cold", "device warm"]
+            .into_iter()
+            .zip(&runs)
+        {
+            let actual = dense(result);
+            assert_eq!(
+                actual.shape, shape,
+                "{provider} {name} {phase}: dense shape"
+            );
+            assert_close_dyn(
+                &actual.data,
+                &expected,
+                f64::EPSILON,
+                &format!("{provider} {name} {phase} dense"),
+            );
+        }
+    }
+}
+
+fn u1_space(sectors: &[(i32, usize)]) -> GradedSpace<U1FusionRule> {
+    GradedSpace::try_new_with_arc(
+        Arc::new(U1FusionRule),
+        sectors
+            .iter()
+            .map(|&(charge, degeneracy)| (U1Irrep::new(charge), degeneracy)),
+    )
+    .unwrap()
+}
+
+fn su2_space(sectors: &[(usize, usize)]) -> GradedSpace<SU2FusionRule> {
+    GradedSpace::try_new_with_arc(
+        Arc::new(SU2FusionRule),
+        sectors
+            .iter()
+            .map(|&(twice, degeneracy)| (SU2Irrep::from_twice_spin(twice), degeneracy)),
+    )
+    .unwrap()
+}
+
+/// G2c-3 (#1348): general `tensor!` networks on device equal the Host run of
+/// the same expression, cold and warm, for U(1), SU(2), U(1)×SU(2),
+/// fZ2×U(1) and fZ2⊠SU(2) at `f64` and `Complex64` (U(1) also at the single
+/// precision payloads); the codomain↔domain networks of U(1) and SU(2) also
+/// equal the physical-basis dense expansion.
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn general_cuda_networks_match_host_and_dense_oracles() {
+    let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+
+    let (v, w, p) = (
+        u1_space(&[(-1, 2), (0, 1), (1, 2)]),
+        u1_space(&[(0, 2), (1, 1)]),
+        u1_space(&[(-1, 1), (0, 2), (1, 1)]),
+    );
+    assert_general_networks_match_host::<_, f64>(
+        &runtime,
+        [&v, &w, &p],
+        790_000,
+        f64::EPSILON,
+        "U(1)",
+    );
+    assert_general_networks_match_host::<_, Complex64>(
+        &runtime,
+        [&v, &w, &p],
+        790_100,
+        f64::EPSILON,
+        "U(1)",
+    );
+    assert_general_networks_match_host::<_, f32>(
+        &runtime,
+        [&v, &w, &p],
+        790_200,
+        f64::from(f32::EPSILON),
+        "U(1)",
+    );
+    assert_general_networks_match_host::<_, Complex32>(
+        &runtime,
+        [&v, &w, &p],
+        790_300,
+        f64::from(f32::EPSILON),
+        "U(1)",
+    );
+    assert_dense_oracle(&runtime, [&v, &w, &p], 790_400, "U(1)");
+
+    let (v, w, p) = (
+        su2_space(&[(0, 2), (1, 1)]),
+        su2_space(&[(1, 2), (2, 1)]),
+        su2_space(&[(0, 1), (1, 2)]),
+    );
+    assert_general_networks_match_host::<_, f64>(
+        &runtime,
+        [&v, &w, &p],
+        791_000,
+        f64::EPSILON,
+        "SU(2)",
+    );
+    assert_general_networks_match_host::<_, Complex64>(
+        &runtime,
+        [&v, &w, &p],
+        791_100,
+        f64::EPSILON,
+        "SU(2)",
+    );
+    assert_dense_oracle(&runtime, [&v, &w, &p], 791_200, "SU(2)");
+
+    let u1_su2 = Arc::new(U1FusionRule.product(SU2FusionRule));
+    let product = |sectors: &[(i32, usize, usize)]| {
+        GradedSpace::try_new_with_arc(
+            Arc::clone(&u1_su2),
+            sectors.iter().map(|&(charge, twice, degeneracy)| {
+                (
+                    product_sector(U1Irrep::new(charge), SU2Irrep::from_twice_spin(twice)),
+                    degeneracy,
+                )
+            }),
+        )
+        .unwrap()
+    };
+    let (v, w, p) = (
+        // Charge parity equals twice-spin parity in every sector (the
+        // Hubbard-like correlation), so every fusion product meets its
+        // partner and no network result is trivially empty.
+        product(&[(0, 0, 2), (1, 1, 1)]),
+        product(&[(0, 0, 1), (1, 1, 2), (-1, 1, 1)]),
+        product(&[(0, 0, 1), (1, 1, 2), (2, 0, 1)]),
+    );
+    assert_general_networks_match_host::<_, f64>(
+        &runtime,
+        [&v, &w, &p],
+        792_000,
+        f64::EPSILON,
+        "U(1)xSU(2)",
+    );
+    assert_general_networks_match_host::<_, Complex64>(
+        &runtime,
+        [&v, &w, &p],
+        792_100,
+        f64::EPSILON,
+        "U(1)xSU(2)",
+    );
+
+    let fz2_u1 = Arc::new(FermionParityFusionRule.product(U1FusionRule));
+    let fermion_u1 = |sectors: &[(bool, i32, usize)]| {
+        GradedSpace::try_new_with_arc(
+            Arc::clone(&fz2_u1),
+            sectors.iter().map(|&(odd, charge, degeneracy)| {
+                (
+                    product_sector(
+                        if odd { Z2Irrep::ODD } else { Z2Irrep::EVEN },
+                        U1Irrep::new(charge),
+                    ),
+                    degeneracy,
+                )
+            }),
+        )
+        .unwrap()
+    };
+    let (v, w, p) = (
+        fermion_u1(&[(false, 0, 2), (true, 1, 1), (true, -1, 1)]),
+        fermion_u1(&[(false, 0, 1), (true, 1, 2)]),
+        fermion_u1(&[(true, 0, 1), (false, 1, 2), (true, 1, 1)]),
+    );
+    assert_general_networks_match_host::<_, f64>(
+        &runtime,
+        [&v, &w, &p],
+        793_000,
+        f64::EPSILON,
+        "fZ2xU(1)",
+    );
+    assert_general_networks_match_host::<_, Complex64>(
+        &runtime,
+        [&v, &w, &p],
+        793_100,
+        f64::EPSILON,
+        "fZ2xU(1)",
+    );
+
+    let fz2_su2 = Arc::new(FermionParityFusionRule.product(SU2FusionRule));
+    let fermion_su2 = |sectors: &[(bool, usize, usize)]| {
+        GradedSpace::try_new_with_arc(
+            Arc::clone(&fz2_su2),
+            sectors.iter().map(|&(odd, twice, degeneracy)| {
+                (
+                    product_sector(
+                        if odd { Z2Irrep::ODD } else { Z2Irrep::EVEN },
+                        SU2Irrep::from_twice_spin(twice),
+                    ),
+                    degeneracy,
+                )
+            }),
+        )
+        .unwrap()
+    };
+    let (v, w, p) = (
+        fermion_su2(&[(false, 0, 2), (true, 1, 1)]),
+        fermion_su2(&[(true, 1, 2), (false, 2, 1)]),
+        fermion_su2(&[(false, 0, 1), (true, 1, 2)]),
+    );
+    assert_general_networks_match_host::<_, f64>(
+        &runtime,
+        [&v, &w, &p],
+        794_000,
+        f64::EPSILON,
+        "fZ2xSU(2)",
+    );
+    assert_general_networks_match_host::<_, Complex64>(
+        &runtime,
+        [&v, &w, &p],
+        794_100,
+        f64::EPSILON,
+        "fZ2xSU(2)",
+    );
+}
+
+/// Device state a rejected or warm call must leave unchanged, or change only
+/// as its contract states: the plan cache, the process-wide transfer
+/// counters, the cuTENSOR plan cache, the contraction scratch and the
+/// tree-transform executor.
+#[derive(Debug, PartialEq)]
+struct DeviceState {
+    plans: tenet_network::PlanCacheStats,
+    transfers: tenet::dense::CudaTransferStats,
+    cutensor: tenet::dense::CudaPlanCacheStats,
+    scratch_bytes: usize,
+    transforms: tenet::prelude::CudaTreeTransformStats,
+}
+
+fn device_state(runtime: &Runtime) -> DeviceState {
+    DeviceState {
+        plans: plan_cache_stats(runtime),
+        transfers: tenet::dense::cuda_transfer_stats(),
+        cutensor: runtime.cuda_plan_cache_stats().unwrap().unwrap(),
+        scratch_bytes: runtime.cuda_contract_scratch_bytes().unwrap(),
+        transforms: runtime.cuda_tree_transform_stats().unwrap(),
+    }
+}
+
+/// G2c-3 (#1348) warm-cost contract: a warm general network — general axes,
+/// result and final permutations, reused intermediates, and for the fermion
+/// the dual-leg twist — transfers exactly the returned output's #740 zero
+/// upload (one H2D of its bytes) and allocates exactly that output, downloads
+/// nothing, misses and evicts no cuTENSOR plan, and grows no scratch and no
+/// executor state. Every intermediate step overwrites its retained buffer.
+///
+/// The counters are process-wide: run with `--test-threads=1`.
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn warm_general_cuda_networks_transfer_only_the_returned_output() {
+    fn warm<R, D>(runtime: &Runtime, spaces: [&GradedSpace<R>; 3], seed: u64, what: &str)
+    where
+        R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+            + MultiplicityFreeRigidSymbols<Scalar = f64>
+            + CheckedFusionAlgebra
+            + SectorCodec
+            + Send
+            + Sync,
+        D: tenet::typed::CudaPayload + Send + Sync + 'static,
+    {
+        let o =
+            general_operands::<R, D>(runtime, spaces, seed).map(|tensor| tensor.to_cuda().unwrap());
+        let chain = || {
+            tensor!([y, q; x] = (o.a)[a, w; p] * (o.b)[p, x; a, y] * (o.c)[q; u] * (o.e)[u; w])
+                .unwrap()
+        };
+        let dual = || tensor!([x; z] = (o.f)[a, w; p] * (o.g)[a, x; p] * (o.h)[w, z;]).unwrap();
+        type Run<'a, R, D> = (&'a str, &'a dyn Fn() -> TensorMap<R, D, CudaStorage<D>>);
+        let runs: [Run<'_, R, D>; 2] = [("four-tensor chain", &chain), ("dual legs", &dual)];
+        for (name, run) in runs {
+            // Call 1 has nothing retained; call 2 is the first to overwrite.
+            drop(run());
+            drop(run());
+            let before = device_state(runtime);
+            let output = run();
+            let after = device_state(runtime);
+            let output_bytes = std::mem::size_of_val(output.to_host().unwrap().data()) as u64;
+            let what = format!("{what} {name}");
+            assert_eq!(
+                (
+                    after.transfers.h2d_calls - before.transfers.h2d_calls,
+                    after.transfers.h2d_bytes - before.transfers.h2d_bytes,
+                    after.transfers.d2h_calls - before.transfers.d2h_calls,
+                    after.transfers.device_allocs - before.transfers.device_allocs,
+                ),
+                (1, output_bytes, 0, 1),
+                "{what}: (h2d calls, h2d bytes, d2h calls, device allocations)"
+            );
+            assert_eq!(after.cutensor.misses, before.cutensor.misses, "{what}");
+            assert_eq!(
+                after.cutensor.evictions, before.cutensor.evictions,
+                "{what}"
+            );
+            assert!(
+                after.cutensor.hits > before.cutensor.hits,
+                "{what}: vacuous"
+            );
+            assert_eq!(after.scratch_bytes, before.scratch_bytes, "{what}");
+            assert_eq!(after.transforms, before.transforms, "{what}");
+            assert_eq!(after.plans.entries, before.plans.entries, "{what}");
+            assert_eq!(
+                after.plans.workspaces_created, before.plans.workspaces_created,
+                "{what}"
+            );
+        }
+    }
+
+    let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+    let (v, w, p) = (
+        u1_space(&[(-1, 2), (0, 1), (1, 2)]),
+        u1_space(&[(0, 2), (1, 1)]),
+        u1_space(&[(-1, 1), (0, 2), (1, 1)]),
+    );
+    warm::<_, f64>(&runtime, [&v, &w, &p], 795_000, "U(1) f64");
+    warm::<_, Complex64>(&runtime, [&v, &w, &p], 795_100, "U(1) c64");
+    let fz2_u1 = Arc::new(FermionParityFusionRule.product(U1FusionRule));
+    let space = |sectors: &[(bool, i32, usize)]| {
+        GradedSpace::try_new_with_arc(
+            Arc::clone(&fz2_u1),
+            sectors.iter().map(|&(odd, charge, degeneracy)| {
+                (
+                    product_sector(
+                        if odd { Z2Irrep::ODD } else { Z2Irrep::EVEN },
+                        U1Irrep::new(charge),
+                    ),
+                    degeneracy,
+                )
+            }),
+        )
+        .unwrap()
+    };
+    let (v, w, p) = (
+        space(&[(false, 0, 2), (true, 1, 1), (true, -1, 1)]),
+        space(&[(false, 0, 1), (true, 1, 2)]),
+        space(&[(true, 0, 1), (false, 1, 2), (true, 1, 1)]),
+    );
+    warm::<_, f64>(&runtime, [&v, &w, &p], 795_200, "fZ2xU(1) f64");
+}
+
+/// G2c-3 (#1348): the device rejection classes reachable through `tensor!`
+/// are decided before the plan cache publishes, a workspace is leased or the
+/// device is touched: plan cache, pools, transfer counters, cuTENSOR plans,
+/// scratch and executor state are all unchanged. (Anyonic braiding and a
+/// compact operand are not constructible as device operands of this impl;
+/// their preflight is the device-free `device_operand_admission` test.)
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn rejected_cuda_networks_leave_every_device_state_unchanged() {
+    let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+    let space = u1_space(&[(0, 2), (1, 1)]);
+    let wrong = u1_space(&[(0, 3)]);
+    let a = TensorMap::<_, f64>::rand_with_seed(&runtime, [&space], [&space], 796_000)
+        .unwrap()
+        .to_cuda()
+        .unwrap();
+    let mismatched = TensorMap::<_, f64>::rand_with_seed(&runtime, [&wrong], [&space], 796_001)
+        .unwrap()
+        .to_cuda()
+        .unwrap();
+    // Warm the device context so lazily created state is not attributed to
+    // the rejected calls.
+    drop(tensor!([i; k] = a[i; j] * a[j; k]).unwrap());
+    let before = device_state(&runtime);
+
+    let trace = tensor!([] = a[i; i]).unwrap_err();
+    assert!(matches!(
+        trace,
+        tenet::prelude::Error::UnsupportedOnDevice(_)
+    ));
+    assert_eq!(device_state(&runtime), before, "intra-operand trace");
+
+    assert!(tensor!([k; i] = a[i; j] * mismatched[j; k]).is_err());
+    assert_eq!(
+        device_state(&runtime),
+        before,
+        "contracted-leg space mismatch"
+    );
 }

@@ -149,8 +149,8 @@ important boundaries are:
 | checked Generic / SU(N) Host | Construction/readback, transforms, otimes, contract/compose, reductions, arithmetic, spectra, and current SVD/QR/LQ leaves; unit/cat, factor-returning EIG/EIGH, null/polar, matrix functions, and network remain unsupported |
 | Fibonacci | Expert category data exists; canonical typed tensors unsupported |
 | trivial/no symmetry | No canonical public provider identified |
-| CUDA f64 multiplicity-free | Selected explicit operations, factorizations, and canonical network execution |
-| CUDA c64 multiplicity-free | Transfer, lazy adjoint, arithmetic, reductions, canonical contraction/compose, canonical network execution, and compact SVD/EIGH (raw device SVD gauge); compact QR is a compile-time boundary while tenferro-gpu's `triu` kernel does not compile for `Complex64` |
+| CUDA f64 multiplicity-free | Selected explicit operations, factorizations, and general `tensor!` network execution (traces excluded) |
+| CUDA c64 multiplicity-free | Transfer, lazy adjoint, arithmetic, reductions, general-axes contraction, canonical compose, general `tensor!` network execution (traces excluded), and compact SVD/EIGH (raw device SVD gauge); compact QR is a compile-time boundary while tenferro-gpu's `triu` kernel does not compile for `Complex64` |
 | CUDA checked Generic execution | Unsupported |
 | serialization | Unsupported |
 

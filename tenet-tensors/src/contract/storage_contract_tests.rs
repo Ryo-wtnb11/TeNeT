@@ -1134,9 +1134,10 @@ mod device {
             let (artifact, host, _) = forced_artifact(case, candidate, orientation, &lhs, &rhs);
             let borrowed = artifact.borrowed_sources();
             let twisted = artifact.requires_core_right_twist();
-            let resolution = StorageContractResolution {
-                route: StorageContractRoute::DynamicTree(Arc::new(artifact)),
-            };
+            let resolution = StorageContractResolution::new(StorageContractRoute::DynamicTree(
+                Arc::new(artifact),
+            ))
+            .unwrap();
             let device = self.execute(&resolution, &dst, &lhs, &rhs);
             (device, host, borrowed, twisted)
         }
