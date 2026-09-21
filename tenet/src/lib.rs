@@ -27,10 +27,17 @@
 //! pools. Pool checkout and return, plan-cache and structural-store access, and
 //! dense providers may still synchronize; an injected non-mintable executor
 //! serializes factorization through the Runtime state lock. Device operations
-//! take only a device-local mutex over the runtime's single CUDA context (and
-//! the device backend's own handle and plan locks), never the state mutex, so
-//! Host work is not blocked by device work; device operations still serialize
-//! against each other there. Consequently no
+//! take only a process-wide lock per CUDA device and the runtime's own CUDA
+//! context (and the device backend's own handle and plan locks), never the
+//! state mutex, so Host work is not blocked by device work; device operations
+//! of every Runtime on one device serialize their enqueue on that device lock,
+//! which is what lets one Runtime safely read a fresh device output returned
+//! by another (#1384). A host sync under a lease (`to_host`, scalar and
+//! spectrum downloads, Tenferro's cross-thread stream sync) therefore stalls
+//! every Runtime on that device. Not covered until tensor4all/cubecl#16:
+//! non-TeNeT CubeCL/Tenferro users of the same device, and `*_overwrite_into`
+//! destinations or reused buffers read from another thread, even within one
+//! Runtime (the overwrite/reused-buffer leaf, #1391). Consequently no
 //! general lock-free, overlap, or outer-thread scaling guarantee is made. See
 //! `docs/backend_policy.md` for the ownership and synchronization model.
 //!
