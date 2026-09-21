@@ -1698,9 +1698,7 @@ where
                 message: "dynamic-tree core plan over transformed sources is not fully direct",
             });
         }
-        Ok(StorageContractResolution {
-            route: StorageContractRoute::DynamicTree(Arc::new(artifact)),
-        })
+        StorageContractResolution::new(StorageContractRoute::DynamicTree(Arc::new(artifact)))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2710,9 +2708,7 @@ where
                       operands",
         });
     }
-    Ok(Some(StorageContractResolution {
-        route: StorageContractRoute::Core(plan),
-    }))
+    StorageContractResolution::new(StorageContractRoute::Core(plan)).map(Some)
 }
 
 /// Canonical storage contraction over parent buffers with lazy operand

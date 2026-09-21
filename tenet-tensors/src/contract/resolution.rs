@@ -51,6 +51,13 @@ pub(crate) enum Resolution<C = f64> {
 #[derive(Clone, Debug)]
 pub struct StorageContractResolution<C = f64> {
     pub(crate) route: StorageContractRoute<C>,
+    /// The core plan's inactive destination blocks as device regions, built
+    /// with the route so replay converts no layout and allocates no region
+    /// list, and so a negatively strided inactive block is rejected at
+    /// compile, before the device lease. Zeroed only where the destination is
+    /// not already zero (see `execute_storage_contract_resolution_on_cuda`).
+    #[cfg(feature = "cuda")]
+    pub(crate) core_zero_regions: Box<[tenet_dense::CudaRegion]>,
 }
 
 #[derive(Clone, Debug)]
@@ -65,6 +72,19 @@ pub(crate) enum StorageContractRoute<C> {
 }
 
 impl<C: DenseBlockScalar> StorageContractResolution<C> {
+    pub(crate) fn new(route: StorageContractRoute<C>) -> Result<Self, OperationError> {
+        #[cfg(feature = "cuda")]
+        let core_zero_regions = super::dynamic::cuda::inactive_regions(match &route {
+            StorageContractRoute::Core(plan) => plan,
+            StorageContractRoute::DynamicTree(artifact) => artifact.block_plan(),
+        })?;
+        Ok(Self {
+            route,
+            #[cfg(feature = "cuda")]
+            core_zero_regions,
+        })
+    }
+
     /// True when the route needs the fermionic twist of the core-right
     /// operand: the Host scales it in place after its source transform, the
     /// device folds it into that transform's destination writes.

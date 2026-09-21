@@ -8,7 +8,7 @@
 //! dimensions and never touches tensor data. Explicit execution uses homogeneous
 //! typed Host [`tenet::typed::TensorMap`] operands and a caller-owned typed
 //! workspace. The `tensor!` macro dispatches directly to that typed Host path
-//! (or to the returning-only CUDA path when enabled).
+//! (or, for device operands, to the same schedule on CUDA when enabled).
 //!
 //! ## Pipeline
 //!

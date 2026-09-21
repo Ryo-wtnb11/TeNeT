@@ -829,6 +829,11 @@ impl<C: DenseBlockScalar> DynamicTreeExecutionArtifact<C> {
         &self.core_right_destination_scales
     }
 
+    #[cfg(feature = "cuda")]
+    pub(crate) fn block_plan(&self) -> &FusionBlockContractPlan<C> {
+        &self.block_plan
+    }
+
     pub(crate) fn block_plan_is_fully_direct(&self) -> bool {
         self.block_plan.is_fully_direct()
     }

@@ -11,12 +11,16 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(feature = "cuda")]
+use tenet::core::Placement;
 use tenet::core::{
     CheckedFusionAlgebra, CheckedGenericAdmissionMode, CheckedGenericFusion,
     CheckedGenericRigidSymbols, FusionAlgebraError, MultiplicityFreeAdmissionMode,
     MultiplicityFreeRigidSymbols, RuleIdentity, SectorCodec, SectorLeg, TensorStorage,
     TypedSectorAdmission,
 };
+#[cfg(any(feature = "cuda", test))]
+use tenet::operations::OperationError;
 use tenet::prelude::{Error, Runtime, TensorScalar};
 #[cfg(feature = "cuda")]
 use tenet::typed::{CudaPayload, CudaStorage};
@@ -27,8 +31,6 @@ use tenet::typed::{
     TypedTensorTraceDispatch, TypedTensorTransformDispatch,
 };
 use tenet::RuntimeIdentity;
-#[cfg(feature = "cuda")]
-use tenet::{core::Placement, operations::OperationError};
 
 use crate::cost::{DenseCostModel, DenseTensorInfo};
 use crate::error::{SliceError, SymmetricSliceExecutionError, SymmetricSliceLowerError};
@@ -238,14 +240,6 @@ where
     ) -> Result<(), HostNetworkError<R>>;
 
     fn park_workspace(workspace: &mut NetworkExecutionWorkspace<R, D, S>);
-}
-
-#[cfg(feature = "cuda")]
-fn unsupported_cuda_network() -> Error {
-    OperationError::UnsupportedTensorContractScope {
-        message: "typed CUDA network execution supports only canonical whole-domain/whole-codomain contractions with identity intermediate and final output order",
-    }
-    .into()
 }
 
 impl Network {
@@ -692,24 +686,12 @@ impl Network {
             self.output_codomain_rank,
             &lowered_codomain_ranks,
         )?;
-        #[cfg(feature = "cuda")]
-        let cuda_direct = cuda_schedule_is_direct(
-            &schedule,
-            &schedule
-                .input_ranks
-                .iter()
-                .copied()
-                .zip(lowered_codomain_ranks.iter().copied())
-                .collect::<Vec<_>>(),
-        );
         Ok(PlannedNetwork {
             owner_token: NEXT_PLAN_OWNER_TOKEN.fetch_add(1, Ordering::Relaxed),
             plan,
             conj: self.conj.clone(),
             input_codomain_ranks,
             schedule,
-            #[cfg(feature = "cuda")]
-            cuda_direct,
         })
     }
 
@@ -909,8 +891,6 @@ pub struct PlannedNetwork {
     conj: Vec<bool>,
     input_codomain_ranks: Vec<usize>,
     schedule: CompiledSchedule,
-    #[cfg(feature = "cuda")]
-    cuda_direct: bool,
 }
 
 struct CompiledSchedule {
@@ -1308,17 +1288,19 @@ where
     }
 }
 
-/// Device network policy: canonical CUDA contraction, with retained device
-/// destinations.
+/// Device network policy: the Host step sequence on device tensors, with
+/// retained device destinations.
 ///
-/// Every step but the last overwrites a destination the workspace kept from the
-/// previous call (the device contraction needs no reset of it); the final schedule slot leaves the workspace and therefore always allocates
-/// a fresh returning output. The device has no `permute`, so any schedule that
-/// needs one is rejected explicitly — `cuda_schedule_is_direct` already refuses
-/// such schedules before execution, so the permute arms are a typed capability
-/// boundary rather than a reachable path. Slots, producers, input snapshots and
-/// parking behave exactly as on Host, which is what lets one pool serve both
-/// placements.
+/// Each arm is the Host arm with the device twin of the same typed operation:
+/// general-axes `contract` / `contract_overwrite_into` (the Host-compiled
+/// DynamicTree or core route, fermionic twist included) and `permute` /
+/// `permute_overwrite_into`. Every step but the last overwrites a destination
+/// the workspace kept from the previous call (neither device overwrite needs a
+/// reset of it); the final schedule slot leaves the workspace and therefore
+/// always allocates a fresh returning output. Slots, producers, input
+/// snapshots and parking behave exactly as on Host, which is what lets one
+/// pool serve both placements. Admission is decided before the first step by
+/// `PlannedNetwork::validate_cuda_admission`.
 #[cfg(feature = "cuda")]
 impl<R, D> HostNetworkModeDispatch<R, D, CudaStorage<D>> for MultiplicityFreeAdmissionMode
 where
@@ -1371,20 +1353,25 @@ where
     }
 
     fn permute_step(
-        _tensor: &TensorMap<R, D, CudaStorage<D>>,
-        _destination: &mut Option<TensorMap<R, D, CudaStorage<D>>>,
-        _codomain: &[usize],
-        _domain: &[usize],
+        tensor: &TensorMap<R, D, CudaStorage<D>>,
+        destination: &mut Option<TensorMap<R, D, CudaStorage<D>>>,
+        codomain: &[usize],
+        domain: &[usize],
     ) -> Result<StepOutput<TensorMap<R, D, CudaStorage<D>>>, Error> {
-        Err(unsupported_cuda_permutation())
+        if let Some(destination) = destination {
+            tensor.permute_overwrite_into(destination, codomain, domain, D::from_real(1.0))?;
+            Ok(StepOutput::Overwritten)
+        } else {
+            Ok(StepOutput::Returned(tensor.permute(codomain, domain)?))
+        }
     }
 
     fn permute_final(
-        _tensor: &TensorMap<R, D, CudaStorage<D>>,
-        _codomain: &[usize],
-        _domain: &[usize],
+        tensor: &TensorMap<R, D, CudaStorage<D>>,
+        codomain: &[usize],
+        domain: &[usize],
     ) -> Result<TensorMap<R, D, CudaStorage<D>>, Error> {
-        Err(unsupported_cuda_permutation())
+        tensor.permute(codomain, domain)
     }
 
     fn activate_parked(
@@ -1399,13 +1386,6 @@ where
     fn park_workspace(workspace: &mut NetworkExecutionWorkspace<R, D, CudaStorage<D>>) {
         workspace.park_runtime_owners();
     }
-}
-
-#[cfg(feature = "cuda")]
-fn unsupported_cuda_permutation() -> Error {
-    Error::UnsupportedOnDevice(
-        "typed CUDA network execution has no device leg permutation".to_string(),
-    )
 }
 
 impl<R, D, S> Default for TypedIntermediateBuffers<R, D, S> {
@@ -1590,20 +1570,12 @@ impl PlannedNetwork {
         &self.plan
     }
 
-    /// Pure, allocation-free validation used before a CUDA macro call may
-    /// observe or publish plan-cache state.
-    #[cfg(feature = "cuda")]
-    pub(crate) fn validate_cuda_plan_structure(&self) -> Result<(), Error> {
-        if self.cuda_direct {
-            Ok(())
-        } else {
-            Err(unsupported_cuda_network())
-        }
-    }
-
-    /// Executes a schedule expressible entirely by the canonical returning CUDA kernel.
-    /// The complete schedule is preflighted before any output allocation or kernel;
-    /// unsupported layouts fail without a Host fallback or transfer.
+    /// Executes the compiled schedule on device tensors: the Host step
+    /// sequence, each step through the device twin of the Host typed
+    /// operation. Every device rejection — another placement, a compact
+    /// operand, anyonic braiding — is decided before any allocation or
+    /// kernel, and
+    /// nothing falls back to Host or transfers.
     #[cfg(feature = "cuda")]
     pub fn execute_cuda<R, D>(
         &self,
@@ -1621,11 +1593,10 @@ impl PlannedNetwork {
 
     /// Device execution with reusable private replay state.
     ///
-    /// Placement and schedule admission are device-specific and are checked
-    /// here; everything after them — operand count, Runtime and rule identity,
-    /// topology drift, contracted-leg spaces, replay-state revalidation, the
-    /// step loop and the workspace lifecycle — is the same storage-generic body
-    /// Host runs.
+    /// Device admission is checked here; everything after it — operand count,
+    /// Runtime and rule identity, topology drift, contracted-leg spaces,
+    /// replay-state revalidation, the step loop and the workspace lifecycle —
+    /// is the same storage-generic body Host runs.
     #[cfg(feature = "cuda")]
     pub(crate) fn execute_cuda_with_workspace<R, D>(
         &self,
@@ -1639,22 +1610,33 @@ impl PlannedNetwork {
             + SectorCodec,
         D: CudaPayload,
     {
-        self.validate_cuda_placement(tensors)?;
+        self.validate_cuda_admission(tensors)?;
         self.execute_with_workspace(tensors, workspace)
     }
 
-    /// Device-only admission: every operand resides on this Runtime's CUDA
-    /// device, and the compiled schedule needs no primitive the device lacks.
+    /// The device network preflight: every rejection class a device step
+    /// could raise that the storage-generic body would not already raise
+    /// before its first step, decided from the compiled schedule and the
+    /// operands' metadata alone — no allocation, no lock, no device work. The
+    /// `tensor!` path runs it before the plan cache publishes or promotes a
+    /// plan, so a rejection leaves cache, pools and device counters as they
+    /// were.
+    ///
+    /// Classes: an operand on another placement ([`Error::PlacementMismatch`])
+    /// or a Runtime without a device; then [`device_operand_admission`] — a
+    /// compact (diagonal) operand and anyonic braiding. The device
+    /// contraction's own remaining boundaries are unreachable from a compiled
+    /// schedule: every step passes `alpha = 1`, every retained destination is
+    /// a canonical device result of the same step, and schedules are produced
+    /// only by `compile_schedule`. Intra-operand traces are rejected earlier,
+    /// by the trace entry of `tensor!`.
     #[cfg(feature = "cuda")]
-    fn validate_cuda_placement<R, D>(
+    pub(crate) fn validate_cuda_admission<R, D>(
         &self,
         tensors: &[&TensorMap<R, D, CudaStorage<D>>],
     ) -> Result<(), Error>
     where
-        R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
-            + MultiplicityFreeRigidSymbols<Scalar = f64>
-            + CheckedFusionAlgebra
-            + SectorCodec,
+        R: TypedSectorAdmission + tenet::core::FusionRule,
         D: CudaPayload,
     {
         let device = tensors
@@ -1672,73 +1654,45 @@ impl PlannedNetwork {
                 return Err(Error::PlacementMismatch);
             }
         }
-        // Why recomputed rather than read from the plan-time `cuda_direct`
-        // flag: a caller (and the in-crate rejection test) can hold a plan
-        // whose schedule was edited after planning, and this is the check that
-        // keeps such a schedule from reaching the first device kernel.
-        let input_shapes = self
-            .schedule
-            .input_ranks
-            .iter()
-            .copied()
-            .enumerate()
-            .map(|(index, rank)| {
-                let codomain_rank = self.input_codomain_ranks[index];
-                (
-                    rank,
-                    if self.conj[index] {
-                        rank.saturating_sub(codomain_rank)
-                    } else {
-                        codomain_rank
-                    },
-                )
-            })
-            .collect::<Vec<_>>();
-        self.preflight_cuda_schedule(&input_shapes)
-    }
-
-    #[cfg(feature = "cuda")]
-    fn preflight_cuda_schedule(&self, input_shapes: &[(usize, usize)]) -> Result<(), Error> {
-        if cuda_schedule_is_direct(&self.schedule, input_shapes) {
-            Ok(())
-        } else {
-            Err(unsupported_cuda_network())
-        }
+        device_operand_admission(
+            !self.schedule.steps.is_empty(),
+            tensors[0].provider().braiding_style(),
+            tensors
+                .iter()
+                .map(|tensor| tensor.network_reuse_class(false)),
+        )
     }
 }
 
-#[cfg(feature = "cuda")]
-fn cuda_schedule_is_direct(schedule: &CompiledSchedule, input_shapes: &[(usize, usize)]) -> bool {
-    let mut shapes = vec![None; schedule.slot_count];
-    for (index, &shape) in input_shapes.iter().enumerate() {
-        shapes[index] = Some(shape);
+/// Representation and category checks of the device network preflight,
+/// written over metadata only so they are testable without a device.
+///
+/// A compact (diagonal) operand has no device payload form (`to_cuda`
+/// densifies), so no device contraction or permute accepts one. A schedule
+/// with a contraction step on an anyonic provider is the typed `contract`'s
+/// own boundary (TensorKit `blas_contract!` requires symmetric braiding);
+/// deciding it here, not at the step, keeps earlier steps from allocating.
+#[cfg(any(feature = "cuda", test))]
+fn device_operand_admission(
+    contracts: bool,
+    braiding: tenet::core::BraidingStyleKind,
+    representations: impl IntoIterator<Item = NetworkReuseClass>,
+) -> Result<(), Error> {
+    if representations
+        .into_iter()
+        .any(|class| class == NetworkReuseClass::Compact)
+    {
+        return Err(Error::UnsupportedOnDevice(
+            "typed CUDA network execution requires dense device operands".to_string(),
+        ));
     }
-    for step in &schedule.steps {
-        let Some((lhs_rank, lhs_codomain_rank)) = shapes[step.lhs_slot].take() else {
-            return false;
-        };
-        let Some((rhs_rank, rhs_codomain_rank)) = shapes[step.rhs_slot].take() else {
-            return false;
-        };
-        let result_rank = lhs_codomain_rank + rhs_rank - rhs_codomain_rank;
-        if !step
-            .lhs_contract_axes
-            .iter()
-            .copied()
-            .eq(lhs_codomain_rank..lhs_rank)
-            || !step
-                .rhs_contract_axes
-                .iter()
-                .copied()
-                .eq(0..rhs_codomain_rank)
-            || !step.contract_output_axes.iter().copied().eq(0..result_rank)
-            || step.result_permutation.is_some()
-        {
-            return false;
+    if contracts && braiding == tenet::core::BraidingStyleKind::Anyonic {
+        return Err(OperationError::UnsupportedTensorContractScope {
+            message: "ordinary contraction is undefined for anyonic braiding; use an explicit planar operation",
         }
-        shapes[step.result_slot] = Some((result_rank, lhs_codomain_rank));
+        .into());
     }
-    schedule.final_permutation.is_none()
+    Ok(())
 }
 
 impl PlannedNetwork {
@@ -2670,7 +2624,7 @@ where
             tensors,
             &codomain_ranks,
             &optimizer,
-            PlannedNetwork::validate_cuda_plan_structure,
+            |planned| planned.validate_cuda_admission(tensors),
             || spec.network(),
         )?
         .execute_cuda(tensors)
@@ -3913,155 +3867,82 @@ mod typed_replay_tests {
             conj: vec![false; 3],
             input_codomain_ranks: vec![1; 3],
             schedule,
-            #[cfg(feature = "cuda")]
-            cuda_direct: false,
         }
     }
 
-    #[cfg(feature = "cuda")]
     #[test]
-    fn cuda_schedule_preflight_accepts_only_the_complete_direct_subset() {
+    fn device_operand_admission_decides_each_class_from_metadata() {
+        use tenet::core::BraidingStyleKind;
+        let dense = [
+            NetworkReuseClass::OwnedDense,
+            NetworkReuseClass::LazyAdjoint,
+        ];
+        for braiding in [
+            BraidingStyleKind::NoBraiding,
+            BraidingStyleKind::Bosonic,
+            BraidingStyleKind::Fermionic,
+        ] {
+            // What: symmetric braiding, fermionic included since the device
+            // contraction carries the core-right twist, is admitted with or
+            // without contraction steps.
+            for contracts in [false, true] {
+                assert!(device_operand_admission(contracts, braiding, dense).is_ok());
+            }
+        }
+        // What: anyonic braiding is the contraction's boundary only.
+        assert!(device_operand_admission(false, BraidingStyleKind::Anyonic, dense).is_ok());
+        match device_operand_admission(true, BraidingStyleKind::Anyonic, dense) {
+            Err(Error::Operation(error)) => assert!(matches!(
+                error.as_ref(),
+                OperationError::UnsupportedTensorContractScope { .. }
+            )),
+            other => panic!("anyonic contraction must be unsupported, got {other:?}"),
+        }
+        // What: a compact operand is rejected whatever the schedule, and
+        // before the braiding check.
+        for (contracts, braiding) in [
+            (false, BraidingStyleKind::Bosonic),
+            (true, BraidingStyleKind::Anyonic),
+        ] {
+            assert!(matches!(
+                device_operand_admission(
+                    contracts,
+                    braiding,
+                    [NetworkReuseClass::OwnedDense, NetworkReuseClass::Compact],
+                ),
+                Err(Error::UnsupportedOnDevice(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn host_diagonal_operands_classify_as_compact_for_device_admission() {
+        // Why: the device preflight reads only `network_reuse_class`; this
+        // pins that a diagonal payload reports `Compact` through it.
         let runtime = Runtime::builder().build().unwrap();
         let space =
             GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
-        let tensors = (0..3)
-            .map(|seed| {
-                TensorMap::<U1FusionRule, f64>::rand_with_seed(
-                    &runtime,
-                    [&space],
-                    [&space],
-                    748_200 + seed,
-                )
-                .unwrap()
-            })
-            .collect::<Vec<_>>();
-        let labels = |names: &[&str]| names.iter().copied().map(label).collect::<Vec<_>>();
-        let pair = Network::new(
-            vec![labels(&["a", "b"]), labels(&["b", "c"])],
-            vec![false; 2],
-            vec![Some(1); 2],
-            labels(&["a", "c"]),
-            Some(1),
-        )
-        .unwrap()
-        .plan(&[&tensors[0], &tensors[1]], &GreedyDenseOptimizer)
-        .unwrap();
-        assert!(pair.preflight_cuda_schedule(&[(2, 1), (2, 1)]).is_ok());
-
-        let chain_network = Network::new(
-            vec![
-                labels(&["a", "b"]),
-                labels(&["b", "c"]),
-                labels(&["c", "d"]),
-            ],
-            vec![false; 3],
-            vec![Some(1); 3],
-            labels(&["a", "d"]),
-            Some(1),
-        )
-        .unwrap();
-        let chain_order = ContractionPlan::new(
-            3,
-            labels(&["a", "d"]),
-            vec![
-                ContractionStep::new(
-                    TensorId::new(0),
-                    TensorId::new(1),
-                    TensorId::new(3),
-                    0,
-                    labels(&["a", "c"]),
-                ),
-                ContractionStep::new(
-                    TensorId::new(3),
-                    TensorId::new(2),
-                    TensorId::new(4),
-                    0,
-                    labels(&["a", "d"]),
-                ),
+        let dense =
+            TensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&space], [&space], 748_200)
+                .unwrap();
+        let (_, compact, _) = dense.svd_compact().unwrap();
+        assert!(device_operand_admission(
+            true,
+            tenet::core::FusionRule::braiding_style(dense.provider()),
+            [
+                dense.network_reuse_class(false),
+                dense.network_reuse_class(true)
             ],
         )
-        .unwrap();
-        let chain = chain_network
-            .plan_with(&[&tensors[0], &tensors[1], &tensors[2]], chain_order)
-            .unwrap();
-        assert!(
-            chain
-                .preflight_cuda_schedule(&[(2, 1), (2, 1), (2, 1)])
-                .is_ok(),
-            "steps={:?}",
-            chain
-                .schedule
-                .steps
-                .iter()
-                .map(|step| (
-                    &step.lhs_contract_axes,
-                    &step.rhs_contract_axes,
-                    &step.contract_output_axes,
-                    &step.result_permutation
-                ))
-                .collect::<Vec<_>>()
-        );
-
-        let mut late_invalid = chain;
-        late_invalid.schedule.steps[1].result_permutation = Some((vec![1], vec![0]));
-        assert!(late_invalid
-            .preflight_cuda_schedule(&[(2, 1), (2, 1), (2, 1)])
-            .is_err());
-        assert!(crossed_plan()
-            .preflight_cuda_schedule(&[(2, 1), (2, 1), (2, 1)])
-            .is_err());
-
-        let final_permutation = Network::new(
-            vec![labels(&["a", "b"]), labels(&["b", "c"])],
-            vec![false; 2],
-            vec![Some(1); 2],
-            labels(&["c", "a"]),
-            Some(1),
-        )
-        .unwrap()
-        .plan(&[&tensors[0], &tensors[1]], &GreedyDenseOptimizer)
-        .unwrap();
-        assert!(final_permutation
-            .preflight_cuda_schedule(&[(2, 1), (2, 1)])
-            .is_err());
-
-        let single = Network::new(
-            vec![labels(&["a", "b"])],
-            vec![false],
-            vec![Some(1)],
-            labels(&["a", "b"]),
-            Some(1),
-        )
-        .unwrap()
-        .plan(&[&tensors[0]], &GreedyDenseOptimizer)
-        .unwrap();
-        assert!(single.preflight_cuda_schedule(&[(2, 1)]).is_ok());
-
-        let ket = TensorMap::<U1FusionRule, f64>::rand_with_seed(
-            &runtime,
-            std::iter::empty::<&GradedSpace<U1FusionRule>>(),
-            [&space],
-            748_210,
-        )
-        .unwrap();
-        let bra = TensorMap::rand_with_seed(
-            &runtime,
-            [&space],
-            std::iter::empty::<&GradedSpace<U1FusionRule>>(),
-            748_211,
-        )
-        .unwrap();
-        let scalar = Network::new(
-            vec![labels(&["k"]), labels(&["k"])],
-            vec![false; 2],
-            vec![Some(0), Some(1)],
-            vec![],
-            Some(0),
-        )
-        .unwrap()
-        .plan(&[&ket, &bra], &GreedyDenseOptimizer)
-        .unwrap();
-        assert!(scalar.preflight_cuda_schedule(&[(1, 0), (1, 1)]).is_ok());
+        .is_ok());
+        assert!(matches!(
+            device_operand_admission(
+                true,
+                tenet::core::FusionRule::braiding_style(compact.provider()),
+                [compact.network_reuse_class(false)],
+            ),
+            Err(Error::UnsupportedOnDevice(_))
+        ));
     }
 
     #[cfg(feature = "cuda")]
@@ -4131,69 +4012,6 @@ mod typed_replay_tests {
                 cuda_tensor.leg_dims().unwrap()
             );
         }
-    }
-
-    #[cfg(feature = "cuda")]
-    #[test]
-    fn greedy_three_tensor_chain_has_a_direct_cuda_schedule() {
-        let runtime = Runtime::builder().build().unwrap();
-        let space =
-            GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
-        let tensors = (0..3)
-            .map(|seed| {
-                TensorMap::<U1FusionRule, f64>::rand_with_seed(
-                    &runtime,
-                    [&space],
-                    [&space],
-                    750_300 + seed,
-                )
-                .unwrap()
-            })
-            .collect::<Vec<_>>();
-        let network = Network::new(
-            vec![
-                vec![label("a"), label("b")],
-                vec![label("b"), label("c")],
-                vec![label("c"), label("d")],
-            ],
-            vec![false; 3],
-            vec![Some(1); 3],
-            vec![label("a"), label("d")],
-            Some(1),
-        )
-        .unwrap();
-        let refs = [&tensors[0], &tensors[1], &tensors[2]];
-        let planned = network.plan(&refs, &GreedyDenseOptimizer).unwrap();
-        assert!(
-            planned.validate_cuda_plan_structure().is_ok(),
-            "greedy steps: {:?}",
-            planned.plan().steps()
-        );
-    }
-
-    #[cfg(feature = "cuda")]
-    #[test]
-    fn reversed_final_output_is_a_valid_but_nondirect_cuda_schedule() {
-        let runtime = Runtime::builder().build().unwrap();
-        let space =
-            GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
-        let a =
-            TensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&space], [&space], 750_310)
-                .unwrap();
-        let b =
-            TensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&space], [&space], 750_311)
-                .unwrap();
-        let network = Network::new(
-            vec![vec![label("i"), label("j")], vec![label("j"), label("k")]],
-            vec![false; 2],
-            vec![Some(1); 2],
-            vec![label("k"), label("i")],
-            Some(1),
-        )
-        .unwrap();
-        let planned = network.plan(&[&a, &b], &GreedyDenseOptimizer).unwrap();
-        assert!(planned.validate_cuda_plan_structure().is_err());
-        assert!(planned.schedule.final_permutation.is_some());
     }
 
     #[cfg(feature = "cuda")]
@@ -4347,23 +4165,36 @@ mod typed_replay_tests {
             host_tensors[0].leg_dims().unwrap(),
             tensors[0].leg_dims().unwrap()
         );
-        let mut split_changing = network.plan_with(&refs, canonical_order()).unwrap();
-        split_changing.schedule.steps[1].result_permutation = Some((vec![0, 1], vec![]));
-        CUDA_NETWORK_CONTRACT_CALLS.store(0, Ordering::Relaxed);
-        assert!(split_changing.execute_cuda(&refs).is_err());
-        assert_eq!(CUDA_NETWORK_CONTRACT_CALLS.load(Ordering::Relaxed), 0);
-
-        let mut nonidentity_pab = network.plan_with(&refs, canonical_order()).unwrap();
-        nonidentity_pab.schedule.steps[1].contract_output_axes = vec![1, 0];
-        CUDA_NETWORK_CONTRACT_CALLS.store(0, Ordering::Relaxed);
-        assert!(nonidentity_pab.execute_cuda(&refs).is_err());
-        assert_eq!(CUDA_NETWORK_CONTRACT_CALLS.load(Ordering::Relaxed), 0);
-
-        let mut final_permutation = network.plan_with(&refs, canonical_order()).unwrap();
-        final_permutation.schedule.final_permutation = Some((vec![1], vec![0]));
-        CUDA_NETWORK_CONTRACT_CALLS.store(0, Ordering::Relaxed);
-        assert!(final_permutation.execute_cuda(&refs).is_err());
-        assert_eq!(CUDA_NETWORK_CONTRACT_CALLS.load(Ordering::Relaxed), 0);
+        // A schedule the canonical predicate refused — a split-changing
+        // result permutation, a non-identity pAB, a final permutation — is an
+        // ordinary device schedule now: each edit runs the Host step sequence
+        // on the device and equals the Host run of the same edited plan.
+        type Edit = fn(&mut CompiledSchedule);
+        let edits: [(&str, Edit); 3] = [
+            ("split-changing result permutation", |schedule| {
+                schedule.steps[1].result_permutation = Some((vec![0, 1], vec![]));
+            }),
+            ("non-identity pAB", |schedule| {
+                schedule.steps[1].contract_output_axes = vec![1, 0];
+            }),
+            ("final permutation", |schedule| {
+                schedule.final_permutation = Some((vec![1], vec![0]));
+            }),
+        ];
+        for (what, edit) in edits {
+            let mut host_edited = network.plan_with(&host_refs, canonical_order()).unwrap();
+            edit(&mut host_edited.schedule);
+            let mut cuda_edited = network.plan_with(&refs, canonical_order()).unwrap();
+            edit(&mut cuda_edited.schedule);
+            let host = host_edited.execute(&host_refs).unwrap();
+            let device = cuda_edited.execute_cuda(&refs).unwrap().to_host().unwrap();
+            assert_eq!(device.codomain(), host.codomain(), "{what}");
+            assert_eq!(device.domain(), host.domain(), "{what}");
+            assert_eq!(device.data().len(), host.data().len(), "{what}");
+            for (&got, &want) in device.data().iter().zip(host.data()) {
+                assert!((got - want).abs() <= 1e-12 * (1.0 + want.abs()), "{what}");
+            }
+        }
 
         let bad_rhs =
             TensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&bad], [&good], 748_230)

@@ -211,24 +211,23 @@ where
 {
     match &resolution.route {
         StorageContractRoute::Core(plan) => {
-            let dst_zero_regions = if dst_is_zeroed {
-                Vec::new()
-            } else {
-                inactive_regions(plan)?
-            };
             plan.execute_direct_on_storage_prezeroed(
                 &mut CudaStorageGemm::new(ctx),
                 dst,
                 lhs,
                 rhs,
             )?;
-            zero_regions(ctx, dst, &dst_zero_regions)
+            if dst_is_zeroed {
+                return Ok(());
+            }
+            zero_regions(ctx, dst, &resolution.core_zero_regions)
         }
         StorageContractRoute::DynamicTree(artifact) => execute_dynamic_tree_on_cuda(
             ctx,
             transforms,
             scratch,
             artifact,
+            &resolution.core_zero_regions,
             dst_structure,
             dst,
             dst_is_zeroed,
@@ -258,6 +257,7 @@ fn execute_dynamic_tree_on_cuda<D, C>(
     transforms: &mut CudaTreeTransformExecutor,
     scratch: &mut CudaContractScratch,
     artifact: &DynamicTreeExecutionArtifact<C>,
+    core_inactive_regions: &[CudaRegion],
     dst_structure: &Arc<BlockStructure>,
     dst: &mut CudaStorage<D>,
     dst_is_zeroed: bool,
@@ -291,9 +291,9 @@ where
     // otherwise `dst` itself; either way only a non-zeroed buffer needs its
     // inactive blocks zeroed.
     let core_zero_regions = if artifact.core_dst.is_some() || !dst_is_zeroed {
-        inactive_regions(&artifact.block_plan)?
+        core_inactive_regions
     } else {
-        Vec::new()
+        &[]
     };
 
     let (bytes, buffers) = scratch.entry::<D>(ctx.identity())?;
@@ -366,10 +366,10 @@ where
             core_left,
             core_right,
         )?;
-        return zero_regions(ctx, dst, &core_zero_regions);
+        return zero_regions(ctx, dst, core_zero_regions);
     };
     let core_buffer = grow(ctx, dst_slot, bytes, core_dst_len)?;
-    zero_regions(ctx, core_buffer, &core_zero_regions)?;
+    zero_regions(ctx, core_buffer, core_zero_regions)?;
     artifact.block_plan.execute_direct_on_storage_prezeroed(
         &mut CudaStorageGemm::new(ctx),
         core_buffer,
@@ -399,9 +399,9 @@ fn materialized<D: CudaScalar>(
 /// The core plan's inactive destination blocks as device regions: the exact
 /// set a retained core-destination buffer must zero (the host clears the
 /// whole buffer instead, `prepare_zeroed_scratch_slot`).
-fn inactive_regions<C>(
+pub(crate) fn inactive_regions<C>(
     plan: &tenet_operations::FusionBlockContractPlan<C>,
-) -> Result<Vec<CudaRegion>, OperationError>
+) -> Result<Box<[CudaRegion]>, OperationError>
 where
     C: Copy + PartialEq + num_traits::One,
 {
