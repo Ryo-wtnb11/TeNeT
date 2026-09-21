@@ -6046,9 +6046,25 @@ where
         })
         .collect::<Result<Vec<_>, _>>()
         .map_err(OperationError::Dense)?;
-    dense
+    let outputs = dense
         .factorize_batch(op, &inputs)
-        .map_err(OperationError::Dense)
+        .map_err(OperationError::Dense)?;
+    // An overriding executor is outside this crate: a short batch would
+    // otherwise drop a sector silently or panic in a consumer. Each entry's
+    // factor count is checked by `compact_{qr,svd}_outputs`, with the same
+    // error the per-matrix path reports.
+    if outputs.len() != blocks.len() {
+        return Err(OperationError::Dense(DenseError::Backend {
+            backend: DenseBackend::Tenferro,
+            op: "factorize_batch",
+            message: format!(
+                "dense factorize_batch returned {} entries for {} inputs",
+                outputs.len(),
+                blocks.len()
+            ),
+        }));
+    }
+    Ok(outputs)
 }
 
 fn compact_qr_outputs<D: FactorScalar>(

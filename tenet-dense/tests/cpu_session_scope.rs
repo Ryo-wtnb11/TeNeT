@@ -408,6 +408,7 @@ fn factorize_batch_is_one_session_and_bitwise_equal<T: Copy>(
             .map(|&input| match op {
                 DenseFactorization::Qr => reference.qr(input),
                 DenseFactorization::Svd => reference.svd(input),
+                _ => unreachable!("fixture exercises QR and SVD only"),
             })
             .collect::<Result<Vec<_>, _>>()
             .unwrap();

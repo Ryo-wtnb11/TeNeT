@@ -15946,3 +15946,78 @@ fn pinv_cutoff_rejects_a_non_finite_singular_value_instead_of_dropping_it() {
     assert_eq!(pinv_cutoff([1.0, 0.5, 4.0, 2.0], 0.25).unwrap(), 1.0);
     assert_eq!(pinv_cutoff(std::iter::empty(), 0.25).unwrap(), 0.0);
 }
+
+/// Returns a batch that violates the `factorize_batch` contract: one input's
+/// entry missing, or one entry missing a factor.
+struct MalformedBatch {
+    inner: tenet_dense::DefaultDenseExecutor,
+    drop_entry: bool,
+}
+
+impl DenseExecutor for MalformedBatch {
+    fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        self.inner.svd(input)
+    }
+
+    fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        self.inner.qr(input)
+    }
+
+    fn eigh(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        self.inner.eigh(input)
+    }
+
+    fn factorize_batch(
+        &mut self,
+        op: tenet_dense::DenseFactorization,
+        inputs: &[DenseRead<'_>],
+    ) -> Result<Vec<Vec<DenseTensor>>, DenseError> {
+        let mut outputs = self.inner.factorize_batch(op, inputs)?;
+        if self.drop_entry {
+            outputs.pop();
+        } else {
+            outputs[0].pop();
+        }
+        Ok(outputs)
+    }
+
+    fn dot_general_into(
+        &mut self,
+        _: DenseWrite<'_>,
+        _: DenseRead<'_>,
+        _: DenseRead<'_>,
+        _: &DenseDotConfig,
+    ) -> Result<(), DenseError> {
+        panic!("test only exercises factorizations")
+    }
+}
+
+#[test]
+fn compact_factorizations_reject_a_malformed_executor_batch() {
+    // What: a batch with a missing input entry, or an entry missing a factor,
+    // is a typed backend error, never a dropped sector or a panic. A missing
+    // factor keeps the per-matrix path's "exactly (...)" error.
+    let rule = Z2FusionRule;
+    let tensor = tsvd_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
+    let bound = bound_tensor(Arc::new(rule), &tensor);
+    let input = bound.as_ref();
+    for (drop_entry, qr_op, svd_op) in [
+        (true, "factorize_batch", "factorize_batch"),
+        (false, "qr_into", "svd_into"),
+    ] {
+        let mut dense = MalformedBatch {
+            inner: tenet_dense::DefaultDenseExecutor::new(),
+            drop_entry,
+        };
+        let is_backend_error = |error: &OperationError, expected: &str| {
+            matches!(
+                error,
+                OperationError::Dense(DenseError::Backend { op, .. }) if *op == expected
+            )
+        };
+        let qr = qr_compact(&mut dense, &input).map(|_| ()).unwrap_err();
+        assert!(is_backend_error(&qr, qr_op), "qr_compact: {qr:?}");
+        let svd = svd_compact(&mut dense, &input).map(|_| ()).unwrap_err();
+        assert!(is_backend_error(&svd, svd_op), "svd_compact: {svd:?}");
+    }
+}

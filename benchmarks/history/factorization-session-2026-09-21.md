@@ -1,7 +1,9 @@
 # One CPU linalg session per compact factorization call (#1361)
 
 Date 2026-09-21. Host: Apple M4 Max (12 P + 4 E cores), macOS 15.5,
-rustc 1.96.0. Baseline `origin/main` `ae51bf84`; candidate is this commit.
+rustc 1.96.0. Baseline `origin/main` `ae51bf84`; candidate `cd3fe84e` (the
+first commit of this change, before its rebase). The follow-up commit adds only
+a batch-shape check and tests, which allocate nothing on the success path.
 Both binaries were built from the same `tenet/examples/eager_overhead_ledger.rs`
 (this commit adds its `svd_compact` row; the baseline build used the same
 example source), one after the other into separate target directories, with
@@ -21,8 +23,13 @@ per-run medians. The allocation columns come from run 1. They count calls on
 the calling thread only, so they are valid for the `one` layout only: under
 `default`, the session body runs on a Tenferro pool worker (see the E1 record).
 
-Timing is an observation, not a gate. The gate is the session-count test
-`tenet/tests/factorization_session_scope.rs`:
+Timing is an observation, not a gate. The gate is the session-count tests.
+`tenet/tests/factorization_session_scope.rs` covers the direct-region QR and
+SVD routes under both the default and the one-thread layout.
+`tenet-matrixalgebra/tests/factorization_session_scope.rs` covers the
+multiplicity-free and Generic matricization QR fallbacks and the
+checked-Generic QR, again under both layouts. The facade fixtures below also
+give the before counts:
 
 | fixture | coupled sectors | sessions per qr_compact / left_orth / svd_compact, base → candidate |
 |---|---|---|
@@ -92,6 +99,28 @@ Timing is an observation, not a gate. The gate is the session-count test
   extra calls are the batch's block, view, and flat-output vectors. The count
   does not grow with the sector count. Peak working set is unchanged, because
   the covered loops already kept every block's factors until the final concat.
+
+## Sites still factorizing one session per block
+
+These loops scatter or consume each block's factors before the next
+factorization, so a batch would hold every block's input or output at once.
+That is a working-set tradeoff outside this change; the follow-up is a
+streaming scope, not a batch.
+
+- LQ: `lq_compact_dyn` (matricization), `lq_compact_direct_regions`,
+  `lq_compact_dyn_generic`, `lq_compact_dyn_checked_generic` (and therefore
+  `right_orth`).
+- eigh: `eigh_full_direct_regions`, `eigh_full_dyn` (matricization),
+  `eigh_full_dyn_checked_generic`.
+- SVD: the multiplicity-free matricization fallback of
+  `svd_compact_factors_dyn_with_direction` and the Generic SVD
+  (`svd_compact_factors_dyn_generic`).
+- `compact_svd_numerical_stage` (the checked SVD and pinv callers),
+  `numerical_rank_and_compact_basis` (null spaces), and the pinv sector loop.
+
+The one-thread saving is about 0.2 µs per block. That supersedes the ~2 µs
+per QR block that the E1 ledger and the #1361 issue body attribute to session
+entry: the rest of that share is per-op work that stays.
 
 ## Reference
 

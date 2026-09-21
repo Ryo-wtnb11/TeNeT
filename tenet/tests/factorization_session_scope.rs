@@ -1,5 +1,11 @@
 //! #1361: a compact QR or SVD enters one CPU linear-algebra session per call,
-//! however many coupled sectors it factorizes.
+//! however many coupled sectors it factorizes, under both the default and the
+//! one-thread CPU layout.
+//!
+//! Routes: the multiplicity-free fixtures are canonical coupled-sector matrix
+//! layouts, so they take the direct-region QR and SVD. The matricization,
+//! Generic and checked-Generic QR routes are gated in
+//! `tenet-matrixalgebra/tests/factorization_session_scope.rs`.
 //!
 //! Its own test binary: `cpu_session_stats` is a process-wide counter, so a
 //! delta means something only when no unrelated test opens a session in the
@@ -45,6 +51,13 @@ macro_rules! assert_one_session_per_factorization {
     }};
 }
 
+fn runtimes() -> [Runtime; 2] {
+    [
+        Runtime::builder().build().unwrap(),
+        Runtime::builder().dense_threads(1).build().unwrap(),
+    ]
+}
+
 fn centered(count: i32) -> impl Iterator<Item = i32> {
     let low = -((count - 1) / 2);
     (0..count).map(move |i| low + i)
@@ -52,24 +65,25 @@ fn centered(count: i32) -> impl Iterator<Item = i32> {
 
 #[test]
 fn u1_compact_factorizations_open_one_session() {
-    let runtime = Runtime::builder().build().unwrap();
     let sectors = || centered(8).map(U1Irrep::new).collect::<Vec<_>>();
-    assert_one_session_per_factorization!(&runtime, U1FusionRule, f64, sectors(), 1, 1);
-    assert_one_session_per_factorization!(&runtime, U1FusionRule, Complex64, sectors(), 2, 2);
+    for runtime in runtimes() {
+        assert_one_session_per_factorization!(&runtime, U1FusionRule, f64, sectors(), 1, 1);
+        assert_one_session_per_factorization!(&runtime, U1FusionRule, Complex64, sectors(), 2, 2);
+    }
 }
 
 #[test]
 fn su2_compact_factorizations_open_one_session() {
-    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let sectors = || (0..4).map(SU2Irrep::from_twice_spin).collect::<Vec<_>>();
-    assert_one_session_per_factorization!(&runtime, SU2FusionRule, f64, sectors(), 2, 1);
-    assert_one_session_per_factorization!(&runtime, SU2FusionRule, Complex64, sectors(), 2, 2);
+    for runtime in runtimes() {
+        assert_one_session_per_factorization!(&runtime, SU2FusionRule, f64, sectors(), 2, 1);
+        assert_one_session_per_factorization!(&runtime, SU2FusionRule, Complex64, sectors(), 2, 2);
+    }
 }
 
 #[test]
 fn fz2_u1_compact_factorizations_open_one_session() {
     type Fz2U1 = ProductFusionRule<FermionParityFusionRule, U1FusionRule>;
-    let runtime = Runtime::builder().build().unwrap();
     let sectors = || {
         centered(6)
             .map(|q| {
@@ -83,6 +97,8 @@ fn fz2_u1_compact_factorizations_open_one_session() {
             .collect::<Vec<_>>()
     };
     let rule = || Fz2U1::new(FermionParityFusionRule, U1FusionRule);
-    assert_one_session_per_factorization!(&runtime, rule(), f64, sectors(), 1, 1);
-    assert_one_session_per_factorization!(&runtime, rule(), Complex64, sectors(), 2, 1);
+    for runtime in runtimes() {
+        assert_one_session_per_factorization!(&runtime, rule(), f64, sectors(), 1, 1);
+        assert_one_session_per_factorization!(&runtime, rule(), Complex64, sectors(), 2, 1);
+    }
 }
