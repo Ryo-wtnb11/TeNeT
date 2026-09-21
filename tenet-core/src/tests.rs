@@ -10965,25 +10965,26 @@ mod tests {
                     + std::mem::size_of::<BlockStructure>()
         );
 
-        cache.admit(Arc::clone(&key0), Arc::clone(&structure), 10);
-        cache.admit(Arc::clone(&key1), Arc::clone(&structure), 10);
-        assert!(cache.lookup(&key0).is_some());
-        cache.admit(Arc::clone(&key2), Arc::clone(&structure), 10);
-        assert!(cache.lookup(&key0).is_none());
-        assert!(cache.lookup(&key1).is_some());
-        assert!(cache.lookup(&key2).is_some());
+        cache.admit_built(Arc::clone(&key0), Arc::clone(&structure), 10);
+        cache.admit_built(Arc::clone(&key1), Arc::clone(&structure), 10);
+        assert!(cache.peek_counting_hit(&key0).is_some());
+        cache.admit_built(Arc::clone(&key2), Arc::clone(&structure), 10);
+        assert!(cache.peek_counting_hit(&key0).is_none());
+        assert!(cache.peek_counting_hit(&key1).is_some());
+        assert!(cache.peek_counting_hit(&key2).is_some());
         assert_eq!(cache.info().entries(), 2);
         assert_eq!(cache.info().charged_bytes(), 20);
         assert_eq!(cache.info().evictions(), 1);
 
         let oversize = key();
-        let returned = cache.admit(Arc::clone(&oversize), Arc::clone(&structure), 11);
+        let returned = cache.admit_built(Arc::clone(&oversize), Arc::clone(&structure), 11);
         assert!(Arc::ptr_eq(&returned, &structure));
-        assert!(cache.lookup(&oversize).is_none());
+        assert!(cache.peek_counting_hit(&oversize).is_none());
         assert_eq!(cache.info().entries(), 2);
         assert_eq!(cache.info().bypasses(), 1);
         assert_eq!(cache.info().hits(), 3);
-        assert_eq!(cache.info().misses(), 2);
+        // Misses are completed builds reaching admission, bypass included.
+        assert_eq!(cache.info().misses(), 4);
         assert_eq!(cache.info().admissions(), 3);
 
         cache.clear();

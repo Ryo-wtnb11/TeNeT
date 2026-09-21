@@ -8,8 +8,8 @@ use tenet_tensors::{reset_global_operation_caches, BoundDynamicFusionMapSpace, O
 
 #[test]
 fn lowered_complete_cache_preflight_preserves_statistics_and_hits() {
-    // What: a lowered leg-extent overflow is rejected before the complete
-    // structure cache observes a lookup, admission, or resource change.
+    // What: a lowered leg-extent overflow is rejected without changing any
+    // complete structure cache statistic or resource.
     reset_global_operation_caches();
     tenet_core::reset_core_intern_tables();
     let vacuum = U1Irrep::new(0).sector_id();

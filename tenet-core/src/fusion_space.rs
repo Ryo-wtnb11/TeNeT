@@ -1289,18 +1289,6 @@ impl CompleteHomSpaceStructureCache {
         }
     }
 
-    #[cfg(test)]
-    fn lookup(
-        &self,
-        key: &CompleteHomSpaceStructureCacheKey,
-    ) -> Option<CompleteHomSpaceStructureLookup> {
-        let found = self.peek_counting_hit(key);
-        if found.is_none() {
-            self.misses.fetch_add(1, Ordering::Relaxed);
-        }
-        found
-    }
-
     /// Counts only hits; a miss is recorded at admission, after its builder
     /// succeeded, so rejected input never changes the statistics.
     fn peek_counting_hit(
@@ -1334,6 +1322,18 @@ impl CompleteHomSpaceStructureCache {
             entry.content = structure.content_key();
             entry.wrapper = Arc::downgrade(structure);
         }
+    }
+
+    /// Records the miss of a completed build, then admits it; the only
+    /// production admission path.
+    fn admit_built(
+        &mut self,
+        key: Arc<CompleteHomSpaceStructureCacheKey>,
+        structure: Arc<BlockStructure>,
+        charged_bytes: usize,
+    ) -> Arc<BlockStructure> {
+        self.misses.fetch_add(1, Ordering::Relaxed);
+        self.admit(key, structure, charged_bytes)
     }
 
     fn admit(
@@ -1429,6 +1429,9 @@ impl CompleteHomSpaceStructureCacheInfo {
     pub fn byte_budget(self) -> usize { self.byte_budget }
     pub fn max_entry_bytes(self) -> usize { self.max_entry_bytes }
     pub fn hits(self) -> usize { self.hits }
+    /// Completed builds that reached admission, including bypassed entries
+    /// and racing duplicates. Failed builds are not counted, and a hit peek
+    /// counts no miss, so `hits + misses` is not the lookup count.
     pub fn misses(self) -> usize { self.misses }
     pub fn admissions(self) -> usize { self.admissions }
     pub fn evictions(self) -> usize { self.evictions }
@@ -1490,11 +1493,10 @@ fn admit_complete_hom_space_structure(
     structure: Arc<BlockStructure>,
 ) -> Arc<BlockStructure> {
     let charged_bytes = charged_complete_hom_space_structure_bytes(&key, &structure.content_key());
-    let mut cache = complete_hom_space_structure_cache()
+    complete_hom_space_structure_cache()
         .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    cache.misses.fetch_add(1, Ordering::Relaxed);
-    cache.admit(Arc::new(key), structure, charged_bytes)
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .admit_built(Arc::new(key), structure, charged_bytes)
 }
 
 fn charged_complete_hom_space_structure_bytes(
