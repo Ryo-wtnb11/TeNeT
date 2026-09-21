@@ -386,8 +386,62 @@ pub struct CudaDenseContext {
 /// allocated context for a dropped one that happened to reuse its address.
 static NEXT_CONTEXT_IDENTITY: AtomicU64 = AtomicU64::new(1);
 
+/// Puts every CubeCL command and every Tenferro vendor call of this process
+/// on one CUDA stream per device, or reports why it cannot (#1391).
+///
+/// Why: CubeCL decides whether a stream must wait for a buffer's origin
+/// stream from a cursor it records only when the buffer is bound, not when a
+/// later command writes it (tensor4all/cubecl#16). Once a stream has synced
+/// past a buffer's bind, it reads a later write to that buffer, or overwrites
+/// a buffer another stream still reads, without waiting. With one stream all
+/// work runs in enqueue order, which follows happens-before between threads
+/// (the CubeCL server queue is FIFO, Tenferro flushes it before a vendor call
+/// on the same stream), so that cursor is never consulted for correctness.
+/// Tenferro sizes its vendor-stream slots from the same setting, so cuBLAS,
+/// cuSOLVER and cuTENSOR share the stream too, and its cross-slot host sync
+/// disappears.
+///
+/// Why not a TeNeT-side sync per overwrite: it covers only destinations TeNeT
+/// knows it rewrote, not scratch, workspaces or pooled intermediates read in
+/// flight by another thread, and costs a host sync per call.
+///
+/// The configuration is process-wide and fixed at CubeCL's first read of it,
+/// so this sets it only if nothing has read it yet: from the same
+/// `cubecl.toml` and environment CubeCL would read, with `max_streams = 1`
+/// (a file value is overridden). If something else loaded it first with
+/// another count, the device cannot be opened safely and this fails.
+fn single_cubecl_stream() -> Result<(), DenseError> {
+    use cubecl_runtime::config::{CubeClRuntimeConfig, RuntimeConfig};
+
+    let mut slot = CubeClRuntimeConfig::storage().lock();
+    let max_streams = match slot.as_ref() {
+        Some(config) => config.streaming.max_streams,
+        None => {
+            let mut config = CubeClRuntimeConfig::from_current_dir().override_from_env();
+            config.streaming.max_streams = 1;
+            *slot = Some(std::sync::Arc::new(config));
+            1
+        }
+    };
+    if max_streams != 1 {
+        return Err(DenseError::Unsupported {
+            op: "cuda_context",
+            message: format!(
+                "CubeCL was configured with streaming.max_streams = {max_streams} before \
+                 the first CUDA context opened; TeNeT needs 1 so that a buffer written \
+                 after its bind is never read early (tensor4all/cubecl#16)"
+            ),
+        });
+    }
+    Ok(())
+}
+
 impl CudaDenseContext {
+    /// Opens `device`. The first call in the process also fixes CubeCL to one
+    /// stream per device (see `single_cubecl_stream`), and every call fails with
+    /// [`DenseError::Unsupported`] if CubeCL was already configured otherwise.
     pub fn new(device: usize) -> Result<Self, DenseError> {
+        single_cubecl_stream()?;
         let ordinal = u32::try_from(device)
             .map_err(|_| cuda_error("cuda_context", "device ordinal exceeds u32"))?;
         let backend = CudaBackend::new(CudaDeviceId::from_ordinal(ordinal))
