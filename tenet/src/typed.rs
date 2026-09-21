@@ -12493,6 +12493,18 @@ where
     /// Host arithmetic exactly in one extra device pass; a scaled norm would
     /// need a max-abs pass, a host round trip for the scale and a scaled copy
     /// before the same reduction, and would still round each square in `f32`.
+    ///
+    /// The selected reference dispatches are narrower. Julia routes a strided
+    /// `BlasFloat` array of `length >= NRM2_CUTOFF` to `BLAS.nrm2`
+    /// (`LinearAlgebra/src/dense.jl:107`), a scaled sum in the payload
+    /// precision. TensorKit 0.17.1 `norm` (`src/tensors/linalg.jl:277`) takes
+    /// `norm(t.data)` for `UniqueFusion` and otherwise `_norm` (`:261`), which
+    /// adds `dim(c) * norm(b)^2` in `float(real(scalartype))` — `Float32` for
+    /// a `Float32` tensor — so it returns `Inf` once one weighted block square
+    /// exceeds `f32::MAX` (the "big" SU(2) fixture of
+    /// `typed_cuda_single_precision`). The Host and this device norm
+    /// accumulate every square and the cross-sector combine in `f64`, which is
+    /// strictly wider than that dispatch.
     fn weighted_self_inner_widened_cuda<E: CudaPayload>(
         &self,
         storage: &CudaStorage<D>,

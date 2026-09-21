@@ -475,46 +475,43 @@ where
 ///   is below the smallest `f32` subnormal and rounds to zero.
 ///
 /// Oracles: the Host `norm` (wide accumulation, independent code path) and a
-/// hand value `|x| * sqrt(W)`, `W = sum_c dim(c) * len_c` read off the
-/// unit-magnitude Host norm (and `W = n` by hand for the abelian providers).
+/// hand value `|x| * sqrt(W)`, `W = sum_c dim(c) * len_c`, which the caller
+/// computes from the leg's sectors and degeneracies. For `[leg] <- [leg]`
+/// every coupled sector `c` is one leg sector of degeneracy `d_c`, so its
+/// block is `d_c x d_c` and `W = sum_c dim(c) * d_c^2`.
 /// The unchanged payload-dtype `inner` is the device-side non-vacuity check:
 /// on the same fixtures it still saturates / underflows at single precision.
 /// `f64`/`Complex64` run the same fixtures as the control.
 fn assert_norm_is_overflow_and_underflow_safe<R, D>(
     runtime: &Runtime,
     leg: &GradedSpace<R>,
-    abelian: bool,
+    hand_weight: f64,
 ) where
     R: DeviceRule,
     D: DevicePayload,
 {
     let single = D::EPS > f64::EPSILON;
-    let (unit, unit_magnitude) = constant_magnitude::<R, D>(runtime, leg, |_| 1.0);
-    let weight = (unit.norm().unwrap() / unit_magnitude).powi(2);
-    let n = unit.data().len();
-    if abelian {
-        assert!(
-            (weight - n as f64).abs() <= 4.0 * n as f64 * f64::EPSILON * weight,
-            "abelian weight [{}] must be the entry count {n}, got {weight}",
-            D::NAME
-        );
-    }
-
     let big: fn(usize) -> f64 = |n| f64::from(f32::MAX) / (2.0 * (n as f64).sqrt());
     let tiny: fn(usize) -> f64 = |_| f64::from(f32::MIN_POSITIVE).sqrt() * f64::from(f32::EPSILON);
     let fixtures = [(big, "big", true), (tiny, "tiny", false)];
     for (fixture, what, overflows) in fixtures {
         let (host, magnitude) = constant_magnitude::<R, D>(runtime, leg, fixture);
+        let n = host.data().len();
         let device = host.to_cuda().unwrap();
         // Both norms are f64 sums of exactly widened squares.
         let wide_tolerance = 4.0 * n as f64 * f64::EPSILON;
 
         let host_norm = host.norm().unwrap();
-        let hand = magnitude * weight.sqrt();
+        let hand = magnitude * hand_weight.sqrt();
         let device_norm = device.norm().unwrap();
         assert!(
             device_norm.is_finite() && device_norm > 0.0,
             "{what} norm [{}] must be finite and nonzero, got {device_norm}",
+            D::NAME
+        );
+        assert!(
+            (host_norm - hand).abs() <= wide_tolerance * hand,
+            "{what} norm [{}]: host {host_norm}, hand {hand}",
             D::NAME
         );
         for (oracle, name) in [(host_norm, "host"), (hand, "hand")] {
@@ -605,16 +602,21 @@ fn device_norm_and_normalize_match_the_host_where_a_payload_sum_would_overflow_o
     let su2 = su2_leg();
     let fz2_u1 = fz2_u1_leg();
 
-    assert_norm_is_overflow_and_underflow_safe::<_, f64>(&runtime, &u1, true);
-    assert_norm_is_overflow_and_underflow_safe::<_, Complex64>(&runtime, &u1, true);
-    assert_norm_is_overflow_and_underflow_safe::<_, f32>(&runtime, &u1, true);
-    assert_norm_is_overflow_and_underflow_safe::<_, Complex32>(&runtime, &u1, true);
+    // Hand weights `W = sum_c dim(c) * d_c^2` from the leg definitions:
+    // u1_leg: charges -1, 0, 1 of degeneracy 2, 1, 2 -> 4 + 1 + 4;
+    // su2_leg: spin 0 (dim 1) x2 and spin 1 (dim 3) x1 -> 1 * 4 + 3 * 1;
+    // fz2_u1_leg: degeneracies 2, 1, 2, all dim 1 -> 4 + 1 + 4.
+    let (u1_weight, su2_weight, fz2_u1_weight) = (9.0, 7.0, 9.0);
+    assert_norm_is_overflow_and_underflow_safe::<_, f64>(&runtime, &u1, u1_weight);
+    assert_norm_is_overflow_and_underflow_safe::<_, Complex64>(&runtime, &u1, u1_weight);
+    assert_norm_is_overflow_and_underflow_safe::<_, f32>(&runtime, &u1, u1_weight);
+    assert_norm_is_overflow_and_underflow_safe::<_, Complex32>(&runtime, &u1, u1_weight);
     // SU(2): quantum-dimension weights in the cross-sector combine.
-    assert_norm_is_overflow_and_underflow_safe::<_, f64>(&runtime, &su2, false);
-    assert_norm_is_overflow_and_underflow_safe::<_, f32>(&runtime, &su2, false);
-    assert_norm_is_overflow_and_underflow_safe::<_, Complex32>(&runtime, &su2, false);
-    assert_norm_is_overflow_and_underflow_safe::<_, f32>(&runtime, &fz2_u1, true);
-    assert_norm_is_overflow_and_underflow_safe::<_, Complex32>(&runtime, &fz2_u1, true);
+    assert_norm_is_overflow_and_underflow_safe::<_, f64>(&runtime, &su2, su2_weight);
+    assert_norm_is_overflow_and_underflow_safe::<_, f32>(&runtime, &su2, su2_weight);
+    assert_norm_is_overflow_and_underflow_safe::<_, Complex32>(&runtime, &su2, su2_weight);
+    assert_norm_is_overflow_and_underflow_safe::<_, f32>(&runtime, &fz2_u1, fz2_u1_weight);
+    assert_norm_is_overflow_and_underflow_safe::<_, Complex32>(&runtime, &fz2_u1, fz2_u1_weight);
 }
 
 /// What the widening costs, warm: a single-precision `norm` runs the same
