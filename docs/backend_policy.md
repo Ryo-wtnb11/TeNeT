@@ -107,11 +107,22 @@ resources are distinct from the process-global Rayon configuration and from
 provider-internal synchronization. Consequently this design makes no general
 lock-free, byte-identical warm-path, or outer-thread scaling guarantee.
 
-Device operations take only a device-local mutex over the runtime's single
-CUDA context and Tenferro's internal handle and plan locks, not the Runtime
-state mutex, so Host work on the same runtime is not blocked by device work.
-This is not a concurrency, overlap, or multi-stream claim: device operations
-still serialize against each other on that device mutex.
+Device operations take only a process-wide lock per CUDA device ordinal, the
+runtime's own CUDA-context mutex, and Tenferro's internal handle and plan
+locks, not the Runtime state mutex, so Host work on the same runtime is not
+blocked by device work. This is not a concurrency, overlap, or multi-stream
+claim: device operations of every Runtime on one device serialize their
+host-side enqueue on that device lock (GPU execution stays asynchronous; the
+lock adds no host synchronization).
+
+The device lock is shared across Runtimes because CubeCL's client is
+process-wide per device and publishes a binding's stream cursor only when it
+is bound, not when a later kernel writes it (tensor4all/cubecl#16). Without
+it, a second Runtime could sync past an output's bind before its write and
+then read it unfinished (#1384). CubeCL or Tenferro users of the same device
+in the same process that are not TeNeT do not take this lock and remain
+exposed to that race until cubecl#16 is fixed; do not share a device with
+them concurrently.
 
 ## Historical context
 

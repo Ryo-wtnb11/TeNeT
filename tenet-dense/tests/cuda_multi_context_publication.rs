@@ -1,5 +1,6 @@
-//! Probe for #1384: a device output written by one `CudaDenseContext` can be
-//! read early by a thread that also uses a second context on the same device.
+//! Canary for tensor4all/cubecl#16 (#1384): a device output written by one
+//! `CudaDenseContext` can be read early by a thread that also uses a second
+//! context on the same device.
 //!
 //! Both contexts share CubeCL's process-wide per-device client and its
 //! per-thread streams, but a TeNeT `Runtime` serializes only its own context
@@ -22,11 +23,13 @@
 //! The no-sync control keeps two contexts but skips step 2, so a failure there
 //! would mean the race is not the cursor skip.
 //!
-//! This file drives the adapter directly, below any TeNeT `Runtime` lock, so
-//! no TeNeT-side boundary can make the forced case pass: it is a canary for
-//! the dependency and asserts that the stale read still happens. When it
-//! fails, cubecl#16 has landed and the #1384 boundary can be revisited. The
-//! TeNeT gate is `tenet/tests/cuda_multi_runtime_publication.rs`.
+//! This is a canary for tensor4all/cubecl#16, not a TeNeT gate. It drives
+//! the adapter directly, below the per-device lock every TeNeT `Runtime`
+//! takes, which is also where a non-TeNeT CubeCL user of the device sits, so
+//! no TeNeT-side boundary can make the forced case pass: it asserts that the
+//! stale read still happens. When it fails, cubecl#16 has landed and the
+//! #1384 device lock can be revisited. The TeNeT gate is
+//! `tenet/tests/cuda_multi_runtime_publication.rs`.
 //!
 //! Run with `cargo test -p tenet-dense --features cuda,cpu-faer --test \
 //! cuda_multi_context_publication -- --ignored --nocapture --test-threads=1`.
