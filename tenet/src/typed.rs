@@ -1199,9 +1199,8 @@ where
     ///
     /// - [`Error::InvalidArgument`] when `rcond` is not finite or is negative,
     ///   checked before any provider work or dense allocation.
-    /// - A non-finite singular value (compact entry magnitude) is rejected
-    ///   rather than cut: [`Error::InvalidArgument`] on the compact arm, an
-    ///   [`Error::Operation`] invalid-argument on the dense arm.
+    /// - [`Error::InvalidArgument`] for a non-finite singular value (compact
+    ///   entry magnitude), rejected rather than cut, on every storage arm.
     /// - [`Error::Operation`] / [`Error::Core`] from dense SVD or recomposition.
     ///
     /// There is no singular-input failure: sending the offending directions to
@@ -2960,6 +2959,19 @@ pub(crate) fn validate_norm_p(p: f64) -> Result<(), Error> {
         )));
     }
     Ok(())
+}
+
+/// Surfaces a pinv seam's argument rejection (a non-finite singular value)
+/// as [`Error::InvalidArgument`], the variant the facade already uses for a
+/// bad `rcond` and the compact arm uses for the same non-finite condition, so
+/// the storage form does not pick the public error.
+fn pinv_seam_error(error: tenet_tensors::OperationError) -> Error {
+    match error {
+        tenet_tensors::OperationError::InvalidArgument { message } => {
+            Error::InvalidArgument(message.to_string())
+        }
+        other => other.into(),
+    }
 }
 
 /// Julia's `max` for the `norm(t, Inf)` reduction: NaN in either argument wins.
@@ -6519,7 +6531,7 @@ where
             output,
             rcond,
         )
-        .map_err(Error::from)?;
+        .map_err(pinv_seam_error)?;
         Ok(wrap_factor_on(&tensor.runtime, factor))
     }
 }
@@ -18191,13 +18203,15 @@ where
                     view.parent.materialized_dense_data(),
                 )?,
                 rcond,
-            )?,
+            )
+            .map_err(pinv_seam_error)?,
             TypedTensorRepr::Owned(_) => tenet_matrixalgebra::pinv_dyn(
                 dense.dense(),
                 lease.context().multiplicity_free_lane::<D>()?,
                 &self.bound_ref()?,
                 rcond,
-            )?,
+            )
+            .map_err(pinv_seam_error)?,
         };
         Ok(self.wrap_bound_factor(out))
     }

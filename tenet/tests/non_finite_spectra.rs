@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use num_complex::Complex64;
 use tenet::core::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
+use tenet::operations::OperationError;
 use tenet::prelude::{Error, Runtime, TensorMap, Truncation};
 use tenet::typed::{GradedSpace, SectorSpectrum};
 
@@ -149,4 +150,46 @@ fn compact_pinv_of_a_finite_diagonal_is_unchanged() {
         .unwrap();
     assert_eq!(image[0].values, vec![0.25, 1.0]);
     assert_eq!(image[1].values, vec![0.5, 0.0]);
+}
+
+/// A NaN tensor through the dense multiplicity-free pinv routes (owned and
+/// lazy adjoint). Today's CPU backend refuses the NaN SVD before any cutoff
+/// runs, so that typed backend error is what is pinned here; a backend that
+/// returned NaN singular values instead would reach `pinv_cutoff` and answer
+/// `Error::InvalidArgument`. Either way the result is never `Ok`.
+#[test]
+fn dense_pinv_of_a_nan_tensor_is_a_typed_backend_error() {
+    let runtime = runtime();
+    let leg = u1();
+    let real: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |trees, index: &[usize]| {
+            if *trees.coupled() == U1Irrep::new(1) && index == [0, 0] {
+                f64::NAN
+            } else if index[0] == index[1] {
+                2.0
+            } else {
+                0.5
+            }
+        })
+        .unwrap();
+    let complex = real.to_c64();
+    for (case, result) in [
+        ("f64 owned", real.pinv(0.1).map(|_| ())),
+        ("f64 adjoint", real.adjoint().unwrap().pinv(0.1).map(|_| ())),
+        ("c64 owned", complex.pinv(0.1).map(|_| ())),
+        (
+            "c64 adjoint",
+            complex.adjoint().unwrap().pinv(0.1).map(|_| ()),
+        ),
+    ] {
+        match result {
+            Err(Error::Operation(error)) => {
+                assert!(
+                    matches!(*error, OperationError::Dense(_)),
+                    "{case}: {error:?}"
+                )
+            }
+            other => panic!("{case}: expected the backend SVD rejection, got {other:?}"),
+        }
+    }
 }
