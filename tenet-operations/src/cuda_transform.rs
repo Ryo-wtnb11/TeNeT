@@ -360,6 +360,101 @@ impl CudaTreeTransformExecutor {
         D: CudaScalar + RecouplingCoefficientAction<C> + PartialEq + 'static,
         C: Copy,
     {
+        self.replay_with_destination_scales(
+            ctx,
+            structure,
+            dst_structure,
+            src_structure,
+            dst,
+            src,
+            alpha,
+            mode,
+            &[],
+        )
+    }
+
+    /// [`Self::replay`] with the caller scale of destination block `b`
+    /// multiplied by `θ_b`: block `b` receives `alpha * θ_b * T(src)_b` —
+    /// under [`Overwrite`], the plain replay followed by scaling block `b` by
+    /// `θ_b` (up to the sign of the zeros it writes to inactive layouts); under
+    /// [`Axpby(1)`], `dst_b + alpha * θ_b * T(src)_b`. `destination_scales`
+    /// lists `(destination block offset, θ_b)` sorted by strictly increasing
+    /// offset; a block it does not list has `θ_b = 1`. This is the fermionic
+    /// core-right twist of a general
+    /// contraction, which the host applies as a separate in-place scale of
+    /// the transformed operand (`execute_rhs_contract_twist`, TensorKit's
+    /// `twist!` after `tensoradd!` in `blas_contract!`, tensoroperations.jl:429
+    /// @cfaa073) and QSpace folds into its per-block GEMM scalar
+    /// (QSpace_aux.cc:105-115 @dd2cc7e).
+    ///
+    /// The θ reaches only the descriptor alpha of the Single move or Multi
+    /// scatter that writes block `b`, which becomes `alpha * θ_b`. Packs, the
+    /// recoupling GEMM and the inactive-layout zero fills stay unscaled, so the
+    /// write pass the host follows with a scale pass does both: one pass
+    /// fewer than the host and TensorKit. A Multi block's GEMM is shared by
+    /// its destination layouts, and scaling each scatter by its own θ is exact
+    /// either way; the contraction compiler additionally asserts θ is uniform
+    /// per Multi block, which is what makes this the host's "scale after the
+    /// transform".
+    ///
+    /// The prepared structure, its uploaded coefficient vector and its cache
+    /// key are those of the unscaled replay — θ is in no key — and a scaled
+    /// replay uploads nothing more: θ is a descriptor scalar, not an operand.
+    ///
+    /// `alpha == 0` keeps the zero-operand route of [`Self::replay`] and ignores
+    /// θ: the written values are `0 * x`, NaN for a NaN source, as the host's
+    /// `θ * (0 * x)`; only the sign of an exact zero may differ (never compare
+    /// bitwise). A fermionic twist is `±1`, so `alpha * θ_b` is non-zero for
+    /// every non-zero `alpha`; a θ that would make it zero is rejected, since a
+    /// zero descriptor alpha would let CUDA skip the source read.
+    ///
+    /// [`Overwrite`]: CudaTreeTransformDestination::Overwrite
+    /// [`Axpby(1)`]: CudaTreeTransformDestination::Axpby
+    ///
+    /// # Errors
+    ///
+    /// Those of [`Self::replay`], and `InvalidArgument` — before any device
+    /// work — for offsets that are not strictly increasing or, with a
+    /// non-zero `alpha`, a θ for which `alpha * θ` is zero.
+    #[doc(hidden)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the replay boundary plus the per-destination-block scale list"
+    )]
+    pub fn replay_with_destination_scales<D, C>(
+        &mut self,
+        ctx: &mut CudaDenseContext,
+        structure: &TreeTransformStructure<C>,
+        dst_structure: &Arc<BlockStructure>,
+        src_structure: &Arc<BlockStructure>,
+        dst: &mut CudaStorage<D>,
+        src: &CudaStorage<D>,
+        alpha: D,
+        mode: CudaTreeTransformDestination<D>,
+        destination_scales: &[(usize, C)],
+    ) -> Result<(), OperationError>
+    where
+        D: CudaScalar + RecouplingCoefficientAction<C> + PartialEq + 'static,
+        C: Copy,
+    {
+        if destination_scales
+            .windows(2)
+            .any(|pair| pair[0].0 >= pair[1].0)
+        {
+            return Err(OperationError::InvalidArgument {
+                message: "device tree transform destination scales must have strictly \
+                          increasing offsets",
+            });
+        }
+        if alpha != D::ZERO
+            && destination_scales
+                .iter()
+                .any(|&(_, theta)| alpha.scale_by_coefficient(theta) == D::ZERO)
+        {
+            return Err(OperationError::InvalidArgument {
+                message: "device tree transform destination scale must not vanish",
+            });
+        }
         let beta = match mode {
             CudaTreeTransformDestination::Overwrite => CudaRegionBeta::Overwrite,
             CudaTreeTransformDestination::Axpby(beta) if beta == D::ONE => {
@@ -480,7 +575,7 @@ impl CudaTreeTransformExecutor {
                 prepared.coefficients.as_ref(),
                 entry,
                 conjugate,
-                scale,
+                destination_scaled(scale, destination_scales, entry),
                 beta,
                 &mut dst.0,
             )?;
@@ -550,7 +645,7 @@ impl CudaTreeTransformExecutor {
                     // The host scatter copies the packed column unconjugated:
                     // the conjugation was already applied on the pack.
                     false,
-                    scale,
+                    destination_scaled(scale, destination_scales, scatter),
                     beta,
                     &mut dst.0,
                 )?;
@@ -803,6 +898,28 @@ enum CallerScale<D> {
     /// A zero caller scale: descriptor `1` and the context zero template as the
     /// 1x1 operand, so `0 * src` is computed rather than skipped.
     ZeroOperand,
+}
+
+/// The caller scale of the submission writing `entry`'s destination block:
+/// `alpha * θ_b` where `scales` lists that block. A zero caller scale stays the
+/// zero operand, whose product with any θ is the same `0 * x`; a non-zero one
+/// times θ is non-zero, which the replay checked before any device work.
+fn destination_scaled<D, C>(
+    scale: CallerScale<D>,
+    scales: &[(usize, C)],
+    entry: &PreparedMove,
+) -> CallerScale<D>
+where
+    D: RecouplingCoefficientAction<C>,
+    C: Copy,
+{
+    let CallerScale::Descriptor(alpha) = scale else {
+        return scale;
+    };
+    match scales.binary_search_by_key(&entry.destination.offset(), |&(offset, _)| offset) {
+        Ok(index) => CallerScale::Descriptor(alpha.scale_by_coefficient(scales[index].1)),
+        Err(_) => scale,
+    }
 }
 
 /// Submits one prepared move, taking the 1x1 coefficient operand from the

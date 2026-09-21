@@ -12,11 +12,22 @@ use std::sync::Arc;
 
 use tenet_core::{
     FermionParityFusionRule, FusionProductSpace, FusionTreeHomSpace, MultiplicityFreeRigidSymbols,
-    SU2FusionRule, SU2Irrep, SectorId, SectorLeg, U1FusionRule, U1Irrep,
+    ProductFusionRule, ProductFusionRuleExt, SU2FusionRule, SU2Irrep, SectorId, SectorLeg,
+    U1FusionRule, U1Irrep,
 };
 use tenet_operations::{OutputAxisOrder, TensorContractSpec};
 
-use crate::{BoundDynamicFusionMapSpace, FusionOperand, RuleIdentity};
+use crate::contract::dynamic::{
+    compile_dynamic_tree_execution_artifact, execute_dynamic_tree_execution_artifact,
+    DynamicFusionSpaceCache, DynamicTreeExecutionArtifact,
+};
+use crate::contract::fusion::FusionContractOrientation;
+use crate::contract::scratch::DynamicFusionScratchWorkspace;
+use crate::tree_context::TreeTransformExecutionContext;
+use crate::{
+    BoundDynamicFusionMapSpace, DenseRecouplingScalar, DenseTreeTransformOperations, FusionOperand,
+    RecouplingCoefficientAction, RuleIdentity,
+};
 
 type Context<D> = crate::TensorContractFusionExecutionContext<D, RuleIdentity>;
 
@@ -139,6 +150,479 @@ fn rhs_identity_case() -> Case<U1FusionRule> {
         rhs_axes: vec![0],
         output_axes: vec![1, 0, 2, 3],
     }
+}
+
+/// The artifact of one forced axis-order candidate and orientation — the
+/// test-only plan builder reaches both, the typed API only the scorer's
+/// choice — together with its Host replay over `lhs`/`rhs` and the core-right
+/// contracted axes of its plan.
+fn forced_artifact<R, D>(
+    case: &Case<R>,
+    candidate: &crate::contract::fusion::ContractAxisOrderCandidate,
+    orientation: FusionContractOrientation,
+    lhs: &[D],
+    rhs: &[D],
+) -> (DynamicTreeExecutionArtifact<f64>, Vec<D>, Vec<usize>)
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>
+        + crate::TreeTransformRuleCacheKey<Key = RuleIdentity>,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+{
+    let rule = case.lhs.provider();
+    let dst = case.dst();
+    let plan =
+        crate::contract::prepare_tensorcontract_fusion_plan_dyn_raw_with_axis_order_and_orientation(
+            rule,
+            dst.space(),
+            case.lhs.space(),
+            case.rhs.space(),
+            case.axes(),
+            candidate,
+            orientation,
+        )
+        .unwrap();
+    let mut tree_context =
+        TreeTransformExecutionContext::new(DenseTreeTransformOperations::default_executor());
+    let mut cache = DynamicFusionSpaceCache::default();
+    let artifact = compile_dynamic_tree_execution_artifact::<_, _, _, D, _, false>(
+        &mut tree_context,
+        &mut cache,
+        rule,
+        crate::contract::encoded_layout_primer::<R>,
+        &plan,
+        dst.space(),
+        case.lhs.space(),
+        case.lhs.space().structure(),
+        case.rhs.space(),
+        case.rhs.space().structure(),
+        None,
+    )
+    .unwrap();
+    let mut host = vec![D::zero(); dst.space().required_len().unwrap()];
+    execute_dynamic_tree_execution_artifact(
+        &mut tree_context,
+        &mut DenseTreeTransformOperations::default(),
+        &mut crate::contract::backend::TensorContractWorkspace::default(),
+        &mut crate::contract::fusion_block::FusionBlockContractWorkspace::default(),
+        &mut DynamicFusionScratchWorkspace::default(),
+        &artifact,
+        dst.space().structure(),
+        &mut host,
+        lhs,
+        rhs,
+        D::one(),
+        D::zero(),
+    )
+    .unwrap();
+    let core_right_contracting = plan.core_axes().as_spec().rhs_contracting_axes().to_vec();
+    (artifact, host, core_right_contracting)
+}
+
+fn orientations() -> [FusionContractOrientation; 2] {
+    [
+        FusionContractOrientation::LhsRhs,
+        FusionContractOrientation::RhsLhs,
+    ]
+}
+
+type FermionU1 = ProductFusionRule<FermionParityFusionRule, U1FusionRule>;
+type FermionSu2 = ProductFusionRule<FermionParityFusionRule, SU2FusionRule>;
+
+const EVEN: SectorId = SectorId::new(0);
+const ODD: SectorId = SectorId::new(1);
+
+/// fZ2 x U(1), degeneracy > 1, odd sectors of both charge signs. A dual leg
+/// stores the conjugate charges (the typed `GradedSpace::try_dual`).
+fn fermion_u1_leg(rule: &FermionU1, dual: bool) -> SectorLeg {
+    let charge = |q: i32| U1Irrep::new(if dual { -q } else { q }).sector_id();
+    SectorLeg::new(
+        [
+            (rule.encode_sector(EVEN, charge(0)), 2),
+            (rule.encode_sector(ODD, charge(1)), 2),
+            (rule.encode_sector(ODD, charge(-1)), 1),
+            (rule.encode_sector(EVEN, charge(1)), 1),
+        ],
+        dual,
+    )
+}
+
+/// fZ2 (x) SU(2): the fermionic rule whose transforms recouple (Multi blocks).
+fn fermion_su2_leg(rule: &FermionSu2, dual: bool) -> SectorLeg {
+    SectorLeg::new(
+        [
+            (
+                rule.encode_sector(EVEN, SU2Irrep::from_twice_spin(0).sector_id()),
+                2,
+            ),
+            (
+                rule.encode_sector(ODD, SU2Irrep::from_twice_spin(1).sector_id()),
+                2,
+            ),
+            (
+                rule.encode_sector(EVEN, SU2Irrep::from_twice_spin(2).sector_id()),
+                1,
+            ),
+        ],
+        dual,
+    )
+}
+
+/// The geometry of `tenet/tests/contract_cases::fermionic_general`: rank 4
+/// against rank 4 over mixed sides, B's codomain leg `v*` and B's domain leg
+/// `u` contracted (dual on B's codomain side, and dual after bending from
+/// its domain side unless `u` is itself dual — then θ is mixed within one
+/// coupled sector).
+fn fermionic_general_case<R: MultiplicityFreeRigidSymbols<Scalar = f64>>(
+    provider: &Arc<R>,
+    leg: impl Fn(bool) -> SectorLeg,
+    u_dual: bool,
+) -> Case<R> {
+    Case {
+        lhs: space(
+            provider,
+            vec![leg(false), leg(u_dual)],
+            vec![leg(false), leg(false)],
+        ),
+        rhs: space(
+            provider,
+            vec![leg(false), leg(true)],
+            vec![leg(false), leg(u_dual)],
+        ),
+        lhs_axes: vec![1, 0],
+        rhs_axes: vec![3, 1],
+        output_axes: vec![2, 0, 3, 1],
+    }
+}
+
+/// The canonical `mul!` form with B's codomain `(v, v*)`: θ varies within one
+/// coupled-sector matrix (`contract_cases::fermionic_canonical_nonuniform`).
+fn fermionic_canonical_case<R: MultiplicityFreeRigidSymbols<Scalar = f64>>(
+    provider: &Arc<R>,
+    leg: impl Fn(bool) -> SectorLeg,
+) -> Case<R> {
+    Case {
+        lhs: space(
+            provider,
+            vec![leg(false), leg(false)],
+            vec![leg(false), leg(true)],
+        ),
+        rhs: space(provider, vec![leg(false), leg(true)], vec![leg(false)]),
+        lhs_axes: vec![2, 3],
+        rhs_axes: vec![0, 1],
+        output_axes: vec![0, 1, 2],
+    }
+}
+
+fn fermionic_cases() -> Vec<(&'static str, Case<FermionU1>)> {
+    let provider = Arc::new(FermionParityFusionRule.product(U1FusionRule));
+    let leg = |dual| fermion_u1_leg(&provider, dual);
+    vec![
+        ("fZ2xU1 both", fermionic_general_case(&provider, leg, false)),
+        ("fZ2xU1 mixed", fermionic_general_case(&provider, leg, true)),
+        ("fZ2xU1 canonical", fermionic_canonical_case(&provider, leg)),
+    ]
+}
+
+fn fermionic_su2_cases() -> Vec<(&'static str, Case<FermionSu2>)> {
+    let provider = Arc::new(FermionParityFusionRule.product(SU2FusionRule));
+    let leg = |dual| fermion_su2_leg(&provider, dual);
+    vec![
+        (
+            "fZ2xSU2 both",
+            fermionic_general_case(&provider, leg, false),
+        ),
+        (
+            "fZ2xSU2 mixed",
+            fermionic_general_case(&provider, leg, true),
+        ),
+        (
+            "fZ2xSU2 canonical",
+            fermionic_canonical_case(&provider, leg),
+        ),
+    ]
+}
+
+fn host_data(space: &crate::DynamicFusionMapSpace, salt: usize) -> Vec<f64> {
+    (0..space.required_len().unwrap())
+        .map(|index| ((index * 7 + salt) as f64 * 0.37 + 0.1).sin())
+        .collect()
+}
+
+/// The Host's per-block twist of one physical operand's transformed source,
+/// recomputed from that space alone (`lhs` names the side) by the Host twist
+/// compiler, as the sorted `(offset, θ)` of its non-empty twisted blocks.
+fn physical_twist<R>(
+    case: &Case<R>,
+    artifact: &DynamicTreeExecutionArtifact<f64>,
+    lhs: bool,
+    contracting: &[usize],
+) -> Vec<(usize, f64)>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    super::dynamic::rhs_contract_twist_scales(
+        case.lhs.provider(),
+        artifact.physical_core_space(lhs),
+        contracting,
+    )
+    .unwrap()
+}
+
+/// The eager Host contraction of `case` over the `lhs`/`rhs` payloads: the
+/// production answer every forced artifact must reproduce.
+fn eager_host<R>(case: &Case<R>, lhs: &[f64], rhs: &[f64]) -> Vec<f64>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>
+        + crate::TreeTransformRuleCacheKey<Key = RuleIdentity>,
+{
+    let dst = case.dst();
+    let mut out = vec![0.0; dst.space().required_len().unwrap()];
+    Context::<f64>::default()
+        .tensorcontract_fusion_dyn_prelowered_into(
+            &dst,
+            &mut out,
+            FusionOperand::direct(case.lhs.space()),
+            lhs,
+            FusionOperand::direct(case.rhs.space()),
+            rhs,
+            case.axes(),
+            1.0,
+            0.0,
+        )
+        .unwrap();
+    out
+}
+
+/// Every forced candidate and orientation of one fermionic case:
+///
+/// - the destination-scale list is the Host's per-block twist of the
+///   *physical* core-right operand's transformed source — the physical lhs
+///   under `RhsLhs`, the physical rhs under `LhsRhs` — recomputed from that
+///   space alone, and equals the artifact's own in-place twist actions;
+/// - the compile-time uniform-per-Multi assertion passed;
+/// - the Host replay of the forced artifact equals the eager Host
+///   `contract`, so every forced orientation is tied to the production
+///   answer, not only to a device replay of the same artifact.
+///
+/// Returns, per orientation (`[LhsRhs, RhsLhs]`), whether any artifact
+/// twisted, and whether any twisted core-right transform had a Multi block.
+fn check_destination_scales<R>(case: &Case<R>, what: &str) -> ([bool; 2], bool)
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>
+        + crate::TreeTransformRuleCacheKey<Key = RuleIdentity>,
+{
+    let lhs = host_data(case.lhs.space(), 1);
+    let rhs = host_data(case.rhs.space(), 2);
+    let eager = eager_host(case, &lhs, &rhs);
+    let scale = eager
+        .iter()
+        .fold(0.0_f64, |max, value| max.max(value.abs()));
+    assert!(scale > 1e-3, "{what}: vacuous all-zero eager result");
+    let (mut twisted, mut multi) = ([false; 2], false);
+    for candidate in
+        crate::contract::contracted_axis_order_candidates(&case.lhs_axes, &case.rhs_axes)
+    {
+        for (slot, orientation) in orientations().into_iter().enumerate() {
+            let where_ = format!("{what} {candidate:?} {orientation:?}");
+            let (artifact, host, contracting) =
+                forced_artifact(case, &candidate, orientation, &lhs, &rhs);
+            let scales = artifact.core_right_destination_scales();
+            let core_right_is_lhs = orientation == FusionContractOrientation::RhsLhs;
+            assert_eq!(
+                scales,
+                physical_twist(case, &artifact, core_right_is_lhs, &contracting).as_slice(),
+                "{where_}: not the physical core-right operand's twist"
+            );
+            assert_eq!(scales, artifact.host_twist_scales().as_slice(), "{where_}");
+            assert!(scales.windows(2).all(|pair| pair[0].0 < pair[1].0));
+            assert!(scales.iter().all(|&(_, theta)| theta == -1.0));
+            assert_eq!(host.len(), eager.len(), "{where_}");
+            for (index, (&forced, &production)) in host.iter().zip(&eager).enumerate() {
+                assert!(
+                    (forced - production).abs() <= 1e-12 * (1.0 + scale),
+                    "{where_}: element {index} is {forced}, eager Host {production}"
+                );
+            }
+            if !scales.is_empty() {
+                twisted[slot] = true;
+                multi |= artifact
+                    .core_right_transform_structure()
+                    .blocks()
+                    .iter()
+                    .any(|block| {
+                        matches!(block, tenet_operations::TreeTransformBlock::Multi { .. })
+                    });
+            }
+        }
+    }
+    (twisted, multi)
+}
+
+#[test]
+fn the_destination_scale_list_is_the_hosts_per_block_twist_in_both_orientations() {
+    let mut report = Vec::new();
+    let mut any_multi = false;
+    let mut record = |what: &str, (twisted, multi): ([bool; 2], bool)| {
+        report.push(format!(
+            "{what}: LhsRhs {} RhsLhs {}",
+            twisted[0], twisted[1]
+        ));
+        any_multi |= multi;
+        twisted
+    };
+    let mut u1 = Vec::new();
+    for (what, case) in fermionic_cases() {
+        u1.push(record(what, check_destination_scales(&case, what)));
+    }
+    let mut su2 = Vec::new();
+    for (what, case) in fermionic_su2_cases() {
+        su2.push(record(what, check_destination_scales(&case, what)));
+    }
+    // What: every fixture twists its physical rhs under LhsRhs, and for each
+    // provider some fixture also twists its physical lhs under RhsLhs, so
+    // neither core-right side is covered only vacuously. (With `u` not dual
+    // the lhs's contracted legs are all non-dual: under RhsLhs that fixture
+    // carries no core-right twist, and its forced replays still equal the
+    // eager Host result above.)
+    for twisted in [&u1, &su2] {
+        assert!(twisted.iter().all(|t| t[0]), "{report:?}");
+        assert!(twisted.iter().any(|t| t[0] && t[1]), "{report:?}");
+    }
+    // What: the uniform-per-Multi assertion was really exercised.
+    assert!(any_multi, "no twisted core-right transform recoupled");
+}
+
+#[test]
+fn a_scale_list_that_varies_within_one_multi_block_is_an_internal_error() {
+    let lhs_rhs = |case: &Case<FermionSu2>| {
+        (
+            host_data(case.lhs.space(), 1),
+            host_data(case.rhs.space(), 2),
+        )
+    };
+    let mut checked = false;
+    for (what, case) in fermionic_su2_cases() {
+        let (lhs, rhs) = lhs_rhs(&case);
+        for candidate in
+            crate::contract::contracted_axis_order_candidates(&case.lhs_axes, &case.rhs_axes)
+        {
+            for orientation in orientations() {
+                let (artifact, _, _) = forced_artifact(&case, &candidate, orientation, &lhs, &rhs);
+                let structure = artifact.core_right_transform_structure();
+                let scales = artifact.core_right_destination_scales();
+                assert!(
+                    super::dynamic::validate_uniform_multi_scales(structure, scales).is_ok(),
+                    "{what}"
+                );
+                let layouts = structure.layouts();
+                let Some(first) = structure.blocks().iter().find_map(|block| match *block {
+                    tenet_operations::TreeTransformBlock::Multi {
+                        dst_layout_start,
+                        dst_count,
+                        ..
+                    } => {
+                        let live: Vec<usize> = (dst_layout_start..dst_layout_start + dst_count)
+                            .filter(|&index| layouts.entry(index).element_count != 0)
+                            .map(|index| usize::try_from(layouts.entry(index).offset).unwrap())
+                            .collect();
+                        (live.len() >= 2).then(|| live[0])
+                    }
+                    tenet_operations::TreeTransformBlock::Single { .. } => None,
+                }) else {
+                    continue;
+                };
+                // Flip θ of one destination layout of that Multi block only.
+                let mut tampered = scales.to_vec();
+                match tampered.binary_search_by_key(&first, |&(offset, _)| offset) {
+                    Ok(index) => {
+                        tampered.remove(index);
+                    }
+                    Err(index) => tampered.insert(index, (first, -1.0)),
+                }
+                let error = super::dynamic::validate_uniform_multi_scales(structure, &tampered)
+                    .unwrap_err();
+                assert!(
+                    matches!(error, crate::OperationError::InvalidArgument { .. }),
+                    "{error:?}"
+                );
+                checked = true;
+            }
+        }
+    }
+    assert!(
+        checked,
+        "no fixture had a Multi block with two live destinations"
+    );
+}
+
+/// A storage GEMM the Host storage-direct entry must reject before reaching.
+struct RejectingGemm;
+
+impl tenet_operations::fusion_replay::StorageGemm<f64, Vec<f64>, Vec<f64>, Vec<f64>>
+    for RejectingGemm
+{
+    fn matmul_range_into(
+        &mut self,
+        _dst: &mut Vec<f64>,
+        _dst_offset: usize,
+        _lhs: &Vec<f64>,
+        _lhs_offset: usize,
+        _rhs: &Vec<f64>,
+        _rhs_offset: usize,
+        _rows: usize,
+        _contracted: usize,
+        _cols: usize,
+    ) -> Result<(), crate::OperationError> {
+        panic!("the storage-direct entry must reject a nonuniform twist before any GEMM")
+    }
+}
+
+/// Why the device lifts the canonical non-uniform-θ case to DynamicTree: no
+/// per-job GEMM alpha expresses a twist that varies within one coupled-sector
+/// matrix. The device core route declines it; the Host storage-direct entry
+/// keeps its existing error (unchanged); the compiled artifact carries the
+/// twist.
+#[test]
+fn a_canonical_nonuniform_twist_leaves_the_device_core_route_for_dynamic_tree() {
+    let (_, case) = fermionic_cases().remove(2);
+    let dst = case.dst();
+    let (lhs, rhs) = (
+        FusionOperand::direct(case.lhs.space()),
+        FusionOperand::direct(case.rhs.space()),
+    );
+    assert!(
+        crate::try_compile_storage_contract_core_route(&dst, lhs, rhs, case.axes())
+            .unwrap()
+            .is_none()
+    );
+    let resolution = Context::<f64>::default()
+        .compile_storage_contract_resolution(&dst, lhs, rhs, case.axes())
+        .unwrap();
+    assert!(resolution.is_dynamic_tree());
+    assert!(resolution.requires_core_right_twist());
+
+    let lhs_data = host_data(case.lhs.space(), 1);
+    let rhs_data = host_data(case.rhs.space(), 2);
+    let mut out = vec![0.0; dst.space().required_len().unwrap()];
+    let error = crate::tensorcontract_fusion_dyn_prelowered_direct_on_storage(
+        &mut RejectingGemm,
+        &dst,
+        &mut out,
+        lhs,
+        &lhs_data,
+        rhs,
+        &rhs_data,
+        case.axes(),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            crate::OperationError::UnsupportedTensorContractScope { message }
+                if message.contains("nonuniform")
+        ),
+        "{error:?}"
+    );
 }
 
 #[test]
@@ -309,10 +793,8 @@ fn a_self_dual_core_form_lazy_contraction_is_host_structure_and_device_dynamic_t
                 0.0,
             )
             .unwrap();
-        // What: neither Core nor DynamicTree (which records an orientation),
-        // i.e. the Host took its `Structure` route.
-        assert!(!context.last_resolution_is_core(), "{output:?}");
-        assert_eq!(context.last_resolution_orientation(), None, "{output:?}");
+        // What: the Host took its `Structure` route.
+        assert!(context.last_resolution_is_structure(), "{output:?}");
         assert!(out.iter().any(|&value| value != 0.0));
         let storage = context
             .compile_storage_contract_resolution(&dst, lhs_operand, rhs_operand, axes)
@@ -356,7 +838,8 @@ fn a_fermionic_dual_contracted_leg_on_a_transformed_operand_reports_the_twist() 
             TensorContractSpec::new(&lhs_axes, &rhs_axes, OutputAxisOrder::identity()),
         )
         .unwrap();
-    // What: the classification the typed device boundary rejects on (G2c-2).
+    // What: the twist travels in the artifact, which the device now replays
+    // with destination scales (G2c-2).
     assert!(resolution.is_dynamic_tree());
     assert!(resolution.requires_core_right_twist());
 }
@@ -423,18 +906,8 @@ mod device {
     use tenet_operations::cuda::CudaStorage;
     use tenet_operations::CudaTreeTransformExecutor;
 
-    use crate::contract::dynamic::{
-        compile_dynamic_tree_execution_artifact, execute_dynamic_tree_execution_artifact,
-        DynamicFusionSpaceCache,
-    };
-    use crate::contract::fusion::FusionContractOrientation;
     use crate::contract::resolution::{StorageContractResolution, StorageContractRoute};
-    use crate::contract::scratch::DynamicFusionScratchWorkspace;
-    use crate::tree_context::TreeTransformExecutionContext;
-    use crate::{
-        CudaContractScratch, DenseRecouplingScalar, DenseTreeTransformOperations,
-        RecouplingCoefficientAction,
-    };
+    use crate::CudaContractScratch;
 
     trait Payload:
         CudaScalar + DenseRecouplingScalar + RecouplingCoefficientAction<f64> + std::fmt::Debug
@@ -526,61 +999,32 @@ mod device {
             R: MultiplicityFreeRigidSymbols<Scalar = f64>
                 + crate::TreeTransformRuleCacheKey<Key = RuleIdentity>,
         {
-            let rule = case.lhs.provider();
+            let (device, host, borrowed, _) = self.run_twisted(case, candidate, orientation);
+            (device, host, borrowed.0, borrowed.1)
+        }
+
+        /// [`Self::run`], also reporting whether the artifact twisted.
+        fn run_twisted<R>(
+            &mut self,
+            case: &Case<R>,
+            candidate: &crate::contract::fusion::ContractAxisOrderCandidate,
+            orientation: FusionContractOrientation,
+        ) -> (Vec<D>, Vec<D>, (bool, bool), bool)
+        where
+            R: MultiplicityFreeRigidSymbols<Scalar = f64>
+                + crate::TreeTransformRuleCacheKey<Key = RuleIdentity>,
+        {
             let dst = case.dst();
-            let plan =
-                crate::contract::prepare_tensorcontract_fusion_plan_dyn_raw_with_axis_order_and_orientation(
-                    rule,
-                    dst.space(),
-                    case.lhs.space(),
-                    case.rhs.space(),
-                    case.axes(),
-                    candidate,
-                    orientation,
-                )
-                .unwrap();
-            let mut tree_context = TreeTransformExecutionContext::new(
-                DenseTreeTransformOperations::default_executor(),
-            );
-            let mut cache = DynamicFusionSpaceCache::default();
-            let artifact = compile_dynamic_tree_execution_artifact::<_, _, _, D, _, false>(
-                &mut tree_context,
-                &mut cache,
-                rule,
-                crate::contract::encoded_layout_primer::<R>,
-                &plan,
-                dst.space(),
-                case.lhs.space(),
-                case.lhs.space().structure(),
-                case.rhs.space(),
-                case.rhs.space().structure(),
-                None,
-            )
-            .unwrap();
             let lhs = data::<D>(case.lhs.space(), 1);
             let rhs = data::<D>(case.rhs.space(), 2);
-            let mut host = vec![D::ZERO; dst.space().required_len().unwrap()];
-            execute_dynamic_tree_execution_artifact(
-                &mut tree_context,
-                &mut DenseTreeTransformOperations::default(),
-                &mut crate::contract::backend::TensorContractWorkspace::default(),
-                &mut crate::contract::fusion_block::FusionBlockContractWorkspace::default(),
-                &mut DynamicFusionScratchWorkspace::default(),
-                &artifact,
-                dst.space().structure(),
-                &mut host,
-                &lhs,
-                &rhs,
-                D::ONE,
-                D::ZERO,
-            )
-            .unwrap();
+            let (artifact, host, _) = forced_artifact(case, candidate, orientation, &lhs, &rhs);
             let borrowed = artifact.borrowed_sources();
+            let twisted = artifact.requires_core_right_twist();
             let resolution = StorageContractResolution {
                 route: StorageContractRoute::DynamicTree(Arc::new(artifact)),
             };
             let device = self.execute(&resolution, &dst, &lhs, &rhs);
-            (device, host, borrowed.0, borrowed.1)
+            (device, host, borrowed, twisted)
         }
 
         fn execute<R>(
@@ -713,5 +1157,51 @@ mod device {
         let (second, host, _, _) = replay.run(&case, &candidate, FusionContractOrientation::LhsRhs);
         assert!(second.iter().all(|value| value.is_finite()), "{second:?}");
         assert_close(&second, &host, "after poisoning");
+    }
+
+    fn every_fermionic_candidate_and_orientation<R, D>(case: &Case<R>, what: &str)
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64>
+            + crate::TreeTransformRuleCacheKey<Key = RuleIdentity>,
+        D: Payload,
+    {
+        let mut replay = Replay::<D>::new();
+        let mut twisted = [false; 2];
+        for candidate in
+            crate::contract::contracted_axis_order_candidates(&case.lhs_axes, &case.rhs_axes)
+        {
+            for (slot, orientation) in orientations().into_iter().enumerate() {
+                let (device, host, _, twist) = replay.run_twisted(case, &candidate, orientation);
+                twisted[slot] |= twist;
+                assert_close(
+                    &device,
+                    &host,
+                    &format!("{what} {candidate:?} {orientation:?}"),
+                );
+            }
+        }
+        assert!(
+            twisted.iter().any(|&twist| twist),
+            "{what}: nothing twisted"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a real CUDA device"]
+    fn a_twisted_artifact_replays_with_destination_scales_as_the_host_scales_in_place() {
+        // What: for every forced candidate and both orientations — the
+        // core-right operand is the physical rhs under LhsRhs and the
+        // physical lhs under RhsLhs — the device's θ-scaled source transform
+        // equals the Host's transform followed by its in-place twist, on the
+        // same artifact; fZ2 x U(1) and fZ2 (x) SU(2) (recoupling), the twist
+        // on one or both contracted legs, and the canonical non-uniform form.
+        for (what, case) in fermionic_cases() {
+            every_fermionic_candidate_and_orientation::<_, f64>(&case, what);
+            every_fermionic_candidate_and_orientation::<_, Complex64>(&case, what);
+        }
+        for (what, case) in fermionic_su2_cases() {
+            every_fermionic_candidate_and_orientation::<_, f64>(&case, what);
+            every_fermionic_candidate_and_orientation::<_, Complex64>(&case, what);
+        }
     }
 }

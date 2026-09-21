@@ -177,9 +177,15 @@ fn grow<'a, D: CudaScalar>(
 /// inactive blocks — and only those — are zeroed first, followed by the
 /// output transform into `dst` in overwrite mode.
 ///
+/// The fermionic core-right twist (the physical rhs under `LhsRhs`, the
+/// physical lhs under `RhsLhs`) is folded into that operand's source
+/// transform: the move writing core-right block `b` runs with descriptor
+/// alpha `θ_b` (`replay_with_destination_scales`), where the host scales the
+/// materialized operand in place afterwards — the same values in one pass
+/// fewer. A twisted operand is never borrowed, so the transform always runs.
+///
 /// Every check that can reject the route runs before the first device
-/// submission. A route that needs the fermionic core-right twist is an
-/// explicit error: no device executor applies it yet (G2c-2).
+/// submission.
 #[doc(hidden)]
 #[allow(clippy::too_many_arguments)]
 pub fn execute_storage_contract_resolution_on_cuda<D, C>(
@@ -228,9 +234,16 @@ where
     D: CudaScalar + RecouplingCoefficientAction<C> + PartialEq + 'static,
     C: DenseBlockScalar,
 {
-    if artifact.requires_core_right_twist() {
-        return Err(OperationError::UnsupportedTensorContractScope {
-            message: "device contraction does not apply the fermionic core-right twist yet",
+    let reverse = artifact.orientation == FusionContractOrientation::RhsLhs;
+    let scales = artifact.core_right_destination_scales();
+    let core_right_borrowed = if reverse {
+        artifact.lhs_borrowed
+    } else {
+        artifact.rhs_borrowed
+    };
+    if core_right_borrowed && !scales.is_empty() {
+        return Err(OperationError::InvalidArgument {
+            message: "device contraction artifact borrows its twisted core-right operand",
         });
     }
     let lhs_len = artifact.lhs_transform.space.required_len()?;
@@ -251,13 +264,20 @@ where
         rhs: rhs_slot,
         dst: dst_slot,
     } = buffers;
-    for (borrowed, transform, slot, source, len) in [
+    let no_scales: &[(usize, C)] = &[];
+    let (lhs_scales, rhs_scales) = if reverse {
+        (scales, no_scales)
+    } else {
+        (no_scales, scales)
+    };
+    for (borrowed, transform, slot, source, len, destination_scales) in [
         (
             artifact.lhs_borrowed,
             &artifact.lhs_transform,
             &mut *lhs_slot,
             lhs,
             lhs_len,
+            lhs_scales,
         ),
         (
             artifact.rhs_borrowed,
@@ -265,13 +285,14 @@ where
             &mut *rhs_slot,
             rhs,
             rhs_len,
+            rhs_scales,
         ),
     ] {
         if borrowed {
             continue;
         }
         let buffer = grow(ctx, slot, bytes, len)?;
-        transforms.replay(
+        transforms.replay_with_destination_scales(
             ctx,
             transform.transform_structure.as_ref(),
             transform.space.structure(),
@@ -280,6 +301,7 @@ where
             source,
             D::ONE,
             CudaTreeTransformDestination::Overwrite,
+            destination_scales,
         )?;
     }
 
@@ -293,7 +315,7 @@ where
     } else {
         materialized(rhs_slot)?
     };
-    let (core_left, core_right) = if artifact.orientation == FusionContractOrientation::RhsLhs {
+    let (core_left, core_right) = if reverse {
         (physical_rhs, physical_lhs)
     } else {
         (physical_lhs, physical_rhs)

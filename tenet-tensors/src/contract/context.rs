@@ -42,7 +42,7 @@ use super::resolution::{
     compile_composition_plan, compile_core_plan, compile_prelowered_resolution, compile_resolution,
     compile_storage_resolution, try_compile_oriented_canonical_core_resolution,
     try_compile_oriented_storage_composition_plan, try_compile_oriented_storage_contract_plan,
-    Resolution, StorageContractResolution, StorageContractRoute,
+    NonuniformTwist, Resolution, StorageContractResolution, StorageContractRoute,
 };
 use super::scratch::DynamicFusionScratchWorkspace;
 use super::structure::{TensorContractAxisPlan, TensorContractStructure};
@@ -495,6 +495,8 @@ pub struct TensorContractFusionExecutionContext<
     last_top_level_resolution_was_core: bool,
     #[cfg(test)]
     last_top_level_resolution_orientation: Option<FusionContractOrientation>,
+    #[cfg(test)]
+    last_top_level_resolution_was_structure: bool,
 }
 
 pub type HostTreeFusionExecutionContext<D, RuleKey> = TensorContractFusionExecutionContext<
@@ -528,6 +530,8 @@ where
             last_top_level_resolution_was_core: false,
             #[cfg(test)]
             last_top_level_resolution_orientation: None,
+            #[cfg(test)]
+            last_top_level_resolution_was_structure: false,
         }
     }
 
@@ -613,8 +617,15 @@ where
     }
 
     #[cfg(test)]
+    pub(crate) fn last_resolution_is_structure(&self) -> bool {
+        self.last_top_level_resolution_was_structure
+    }
+
+    #[cfg(test)]
     fn record_top_level_resolution(&mut self, resolution: &Resolution<C>) {
         self.last_top_level_resolution_was_core = matches!(resolution, Resolution::Core(_));
+        self.last_top_level_resolution_was_structure =
+            matches!(resolution, Resolution::Structure(_));
         self.last_top_level_resolution_orientation = match resolution {
             Resolution::DynamicTree(plan) => Some(plan.orientation()),
             Resolution::Core(_) | Resolution::Structure(_) => None,
@@ -1294,6 +1305,7 @@ where
         {
             self.last_top_level_resolution_was_core = true;
             self.last_top_level_resolution_orientation = None;
+            self.last_top_level_resolution_was_structure = false;
         }
         self.execute_resolution_dyn(
             &Resolution::Core(plan),
@@ -1480,6 +1492,7 @@ where
         {
             self.last_top_level_resolution_was_core = true;
             self.last_top_level_resolution_orientation = None;
+            self.last_top_level_resolution_was_structure = false;
         }
         plan.execute_direct_on_storage_prezeroed(gemm, dst, lhs, rhs)
     }
@@ -1598,9 +1611,16 @@ where
     ///   packs/scatters in its core route, the device takes this artifact
     ///   (only reachable from expert layouts, never from typed tensors).
     ///
-    /// A non-empty core-right twist is reported by
-    /// [`StorageContractResolution::requires_core_right_twist`], not rejected
-    /// here: the capability boundary belongs to the executor's caller.
+    /// A fermionic core-right twist travels in the artifact, both as the
+    /// Host's in-place scale actions and as the sorted per-block scale list
+    /// the device folds into the core-right source transform. A canonical
+    /// contraction whose twist varies within one coupled sector reaches here
+    /// too (the first half declines it); the Host eager contraction runs the
+    /// same artifact class for it, while the Host storage-direct entries
+    /// keep rejecting it.
+    ///
+    /// Validates the request itself (provider against the spaces, operand
+    /// flags against `axes`), so it is sound to call without the first half.
     #[doc(hidden)]
     pub fn compile_storage_contract_dynamic_tree<R>(
         &mut self,
@@ -1613,6 +1633,9 @@ where
         R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
         D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
     {
+        // Re-run here, not only in the first half: this entry is callable on
+        // its own, and the artifact compilers assume a validated request.
+        validate_storage_contract_request(dst_space, lhs, rhs, axes)?;
         let rule = dst_space.provider();
         let layout_primer = dst_space.layout_primer();
         let artifact = if !lhs.storage_conjugate() && !rhs.storage_conjugate() {
@@ -2616,6 +2639,35 @@ pub struct PreparedTensorContractFusion<RuleKey, C = f64> {
     dynamic_artifact: Option<Arc<super::dynamic::DynamicTreeExecutionArtifact<C>>>,
 }
 
+/// The request checks both halves of the storage contraction route run: the
+/// provider against the three spaces, and the operand conjugation flags
+/// against the request.
+fn validate_storage_contract_request<R>(
+    dst_space: &BoundDynamicFusionMapSpace<R>,
+    lhs: FusionOperand<'_>,
+    rhs: FusionOperand<'_>,
+    axes: TensorContractSpec<'_>,
+) -> Result<(), OperationError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
+{
+    validate_fusion_contract_rule(
+        dst_space.provider(),
+        dst_space.space(),
+        lhs.storage_space(),
+        rhs.storage_space(),
+    )?;
+    if axes.lhs_conjugate() != lhs.storage_conjugate()
+        || axes.rhs_conjugate() != rhs.storage_conjugate()
+    {
+        return Err(OperationError::InvalidArgument {
+            message: "prelowered operand flags must match the contraction request",
+        });
+    }
+    Ok(())
+}
+
 /// First half of the storage (device) contraction route: validation and
 /// the canonical fully-direct core over the parent buffers — the
 /// storage-direct route, lazy adjoints as GEMM operand flags and a uniform
@@ -2638,21 +2690,17 @@ where
     R::Scalar: DenseBlockScalar,
 {
     let rule = dst_space.provider();
-    validate_fusion_contract_rule(
+    validate_storage_contract_request(dst_space, lhs, rhs, axes)?;
+    // A twist that is not uniform within one coupled-sector matrix has no
+    // per-job alpha; the DynamicTree artifact applies it per block instead.
+    let Some(plan) = try_compile_oriented_storage_contract_plan(
         rule,
         dst_space.space(),
-        lhs.storage_space(),
-        rhs.storage_space(),
-    )?;
-    if axes.lhs_conjugate() != lhs.storage_conjugate()
-        || axes.rhs_conjugate() != rhs.storage_conjugate()
-    {
-        return Err(OperationError::InvalidArgument {
-            message: "prelowered operand flags must match the contraction request",
-        });
-    }
-    let Some(plan) =
-        try_compile_oriented_storage_contract_plan(rule, dst_space.space(), lhs, rhs, axes)?
+        lhs,
+        rhs,
+        axes,
+        NonuniformTwist::Decline,
+    )?
     else {
         return Ok(None);
     };
@@ -2696,25 +2744,20 @@ where
     DRhs: TensorStorage<D>,
 {
     let rule = dst_space.provider();
-    validate_fusion_contract_rule(
+    validate_storage_contract_request(dst_space, lhs, rhs, axes)?;
+    let plan = try_compile_oriented_storage_contract_plan(
         rule,
         dst_space.space(),
-        lhs.storage_space(),
-        rhs.storage_space(),
-    )?;
-    if axes.lhs_conjugate() != lhs.storage_conjugate()
-        || axes.rhs_conjugate() != rhs.storage_conjugate()
-    {
-        return Err(OperationError::InvalidArgument {
-            message: "prelowered operand flags must match the contraction request",
-        });
-    }
-    let plan = try_compile_oriented_storage_contract_plan(rule, dst_space.space(), lhs, rhs, axes)?
-        .filter(|plan| plan.is_fully_direct())
-        .ok_or(OperationError::UnsupportedTensorContractScope {
-            message:
-                "storage-direct contraction supports only canonical fully-direct oriented operands",
-        })?;
+        lhs,
+        rhs,
+        axes,
+        NonuniformTwist::Reject,
+    )?
+    .filter(|plan| plan.is_fully_direct())
+    .ok_or(OperationError::UnsupportedTensorContractScope {
+        message:
+            "storage-direct contraction supports only canonical fully-direct oriented operands",
+    })?;
     plan.execute_direct_on_storage_prezeroed(gemm, dst, lhs_storage, rhs_storage)
 }
 

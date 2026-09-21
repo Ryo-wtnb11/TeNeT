@@ -8,19 +8,25 @@
 //! * TensorKit's `blas_contract!` step sequence on Host typed ops, for every
 //!   fixture and payload dtype;
 //! * the physical-basis dense contraction, for the U(1) and SU(2) fixtures
-//!   whose contracted legs do not bend.
+//!   whose contracted legs do not bend;
+//! * for fermionic providers (G2c-2, #1347), the same sequence with
+//!   TensorKit's `twist!` on the B role and on the A role — which must agree
+//!   with each other and with the Host — and a twist-free control the Host
+//!   must *not* match, so every fixture really exercises the twist;
+//! * the TensorKit-valued FZ2 closed loops as explicit `contract` calls.
 
 mod common;
+#[macro_use]
 mod contract_cases;
 
 use contract_cases::{
-    assert_close, blas_contract_oracle, dense_oracle, lazy_cases, product_general, su2_bent,
-    su2_reordered, su2_structure_cases, u1_lhs_identity, u1_rank_five, u1_reordered,
-    u1_rhs_identity, Case, Payload,
+    assert_close, blas_contract_oracle, dense_oracle, fermionic_blas_contract_oracle,
+    fz2_tensorkit_loops, lazy_cases, product_general, su2_bent, su2_reordered, su2_structure_cases,
+    u1_lhs_identity, u1_rank_five, u1_reordered, u1_rhs_identity, Case, Payload, TwistRole,
 };
 use num_complex::{Complex32, Complex64};
 use tenet::core::{CheckedFusionAlgebra, MultiplicityFreeRigidSymbols, SectorCodec};
-use tenet::typed::Runtime;
+use tenet::typed::{Runtime, TensorMap};
 
 fn check_blas<R, D>(case: Case<R, D>)
 where
@@ -91,4 +97,56 @@ fn host_contract_matches_the_physical_basis_contraction() {
     check_dense(u1_reordered::<Complex64>(&runtime));
     check_dense(su2_reordered::<f64>(&runtime));
     check_dense(su2_reordered::<Complex64>(&runtime));
+}
+
+fn check_fermionic<R, D>(
+    case: Case<R, D>,
+    twist: impl Fn(&TensorMap<R, D>, &[usize]) -> TensorMap<R, D> + Copy,
+) where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: Payload,
+{
+    let host = case.host();
+    let b_role = fermionic_blas_contract_oracle(&case, TwistRole::B, twist);
+    let a_role = fermionic_blas_contract_oracle(&case, TwistRole::A, twist);
+    assert_close(a_role.data(), b_role.data(), case.terms(), case.name);
+    assert_close(host.data(), b_role.data(), case.terms(), case.name);
+    let untwisted = fermionic_blas_contract_oracle(&case, TwistRole::None, twist);
+    let scale = host
+        .data()
+        .iter()
+        .map(|value| value.magnitude())
+        .fold(0.0_f64, f64::max);
+    let differs = host
+        .data()
+        .iter()
+        .zip(untwisted.data())
+        .any(|(&left, &right)| left.distance(right) > 1e-3 * scale);
+    assert!(differs, "{}: the twist changes nothing here", case.name);
+}
+
+#[test]
+fn host_fermionic_contract_matches_both_tensorkit_twist_roles_at_every_dtype() {
+    let runtime = Runtime::builder().build().unwrap();
+    for_each_fermionic_fixture!(&runtime, f64, check_fermionic);
+    for_each_fermionic_fixture!(&runtime, Complex64, check_fermionic);
+    for_each_fermionic_fixture!(&runtime, f32, check_fermionic);
+    for_each_fermionic_fixture!(&runtime, Complex32, check_fermionic);
+}
+
+#[test]
+fn host_fz2_loops_as_explicit_contracts_match_tensorkit() {
+    let runtime = Runtime::builder().build().unwrap();
+    let loops = fz2_tensorkit_loops(
+        &runtime,
+        |tensor| tensor,
+        |x, y, lhs, rhs, output| x.contract(y, lhs, rhs, output).unwrap(),
+        |tensor| tensor.scalar().unwrap(),
+    );
+    for (name, value, expected) in loops {
+        assert!(
+            (value - expected).abs() < 1e-12,
+            "{name}: {value} vs {expected}"
+        );
+    }
 }

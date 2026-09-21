@@ -65,8 +65,9 @@ pub(crate) enum StorageContractRoute<C> {
 }
 
 impl<C: DenseBlockScalar> StorageContractResolution<C> {
-    /// True when the route needs the in-place fermionic twist of the
-    /// core-right operand, which no device executor applies yet (G2c-2).
+    /// True when the route needs the fermionic twist of the core-right
+    /// operand: the Host scales it in place after its source transform, the
+    /// device folds it into that transform's destination writes.
     pub fn requires_core_right_twist(&self) -> bool {
         match &self.route {
             StorageContractRoute::Core(_) => false,
@@ -325,6 +326,7 @@ where
                     lhs,
                     rhs,
                     FusionTreePairOrientation::Direct,
+                    NonuniformTwist::Reject,
                 )? {
                     return Ok(Resolution::Core(Arc::new(plan)));
                 }
@@ -342,6 +344,20 @@ where
     Ok(Resolution::DynamicTree(compile_dynamic()?))
 }
 
+/// What the storage-direct Core route does with a fermionic twist that is not
+/// uniform within one RHS coupled-sector matrix, which no per-job GEMM alpha
+/// can express.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum NonuniformTwist {
+    /// Report `UnsupportedTensorContractScope`: the Host storage-direct
+    /// entries, which keep their existing error.
+    Reject,
+    /// Decline the Core route (`Ok(None)`), so the caller compiles the
+    /// `DynamicTree` artifact, which applies the twist per block: the device
+    /// contraction.
+    Decline,
+}
+
 fn try_compile_scaled_storage_contract_plan<R>(
     rule: &R,
     validated: &ValidatedCoreContract<'_, R>,
@@ -349,6 +365,7 @@ fn try_compile_scaled_storage_contract_plan<R>(
     lhs: &DynamicFusionMapSpace,
     rhs: &DynamicFusionMapSpace,
     rhs_orientation: FusionTreePairOrientation,
+    nonuniform: NonuniformTwist,
 ) -> Result<Option<FusionBlockContractPlan<R::Scalar>>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols,
@@ -387,6 +404,9 @@ where
                 extent.tree(),
             )? != alpha
             {
+                if nonuniform == NonuniformTwist::Decline {
+                    return Ok(None);
+                }
                 return Err(OperationError::UnsupportedTensorContractScope {
                     message: "fermionic twist is nonuniform within one RHS coupled-sector matrix",
                 });
@@ -405,6 +425,7 @@ pub(crate) fn try_compile_oriented_storage_contract_plan<R>(
     lhs: FusionOperand<'_>,
     rhs: FusionOperand<'_>,
     axes: TensorContractSpec<'_>,
+    nonuniform: NonuniformTwist,
 ) -> Result<Option<Arc<FusionBlockContractPlan<R::Scalar>>>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols,
@@ -428,6 +449,7 @@ where
             lhs.storage_space(),
             rhs.storage_space(),
             rhs.orientation(),
+            nonuniform,
         )?
     } else {
         try_compile_oriented_canonical_core_plan(
