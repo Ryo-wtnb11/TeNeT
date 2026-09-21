@@ -827,11 +827,16 @@ impl PreparedFusionTreeLayout {
         homspace: &FusionTreeHomSpace,
     ) -> Result<Arc<BlockStructure>, CoreError> {
         self.validate_homspace_signature(homspace)?;
-        visit_coupled_leg_blocks(homspace, self.layout_data(), |_| Ok(()))?;
         let key = CompleteHomSpaceStructureCacheKey {
             rule: self.cache_key().rule.clone(),
             homspace: Arc::clone(&homspace.content),
         };
+        // Why no extent walk before the lookup: entries are admitted only
+        // after the builder's walk succeeded over an equal (rule identity,
+        // complete HomSpace content) key, and that walk is a pure function of
+        // the key because `RuleIdentity` determines the fusion enumeration.
+        // A hit therefore proves the walk would succeed; a miss walks once,
+        // inside the builder, before any statistic changes.
         if let Some(structure) = complete_hom_space_structure_cached(&key) {
             return Ok(structure);
         }
@@ -1284,13 +1289,28 @@ impl CompleteHomSpaceStructureCache {
         }
     }
 
+    #[cfg(test)]
     fn lookup(
         &self,
         key: &CompleteHomSpaceStructureCacheKey,
     ) -> Option<CompleteHomSpaceStructureLookup> {
+        let found = self.peek_counting_hit(key);
+        if found.is_none() {
+            self.misses.fetch_add(1, Ordering::Relaxed);
+        }
+        found
+    }
+
+    /// Counts only hits; a miss is recorded at admission, after its builder
+    /// succeeded, so rejected input never changes the statistics.
+    fn peek_counting_hit(
+        &self,
+        key: &CompleteHomSpaceStructureCacheKey,
+    ) -> Option<CompleteHomSpaceStructureLookup> {
         let found = self.peek(key);
-        let counter = if found.is_some() { &self.hits } else { &self.misses };
-        counter.fetch_add(1, Ordering::Relaxed);
+        if found.is_some() {
+            self.hits.fetch_add(1, Ordering::Relaxed);
+        }
         found
     }
 
@@ -1441,7 +1461,7 @@ fn reset_complete_hom_space_structure_cache() {
         .clear();
 }
 
-/// Hit path: one cache read, a stack key (`Arc<K>: Borrow<K>`), and the
+/// Hit path: one cache read with an uncounted-miss peek, a stack key (`Arc<K>: Borrow<K>`), and the
 /// canonical wrapper returned as-is. A dead wrapper keeps the content hit and
 /// rebuilds only the wrapper, repointing the entry under the write lock.
 fn complete_hom_space_structure_cached(
@@ -1451,7 +1471,7 @@ fn complete_hom_space_structure_cached(
     let found = cache
         .read()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .lookup(key);
+        .peek_counting_hit(key);
     match found? {
         CompleteHomSpaceStructureLookup::Wrapper(structure) => Some(structure),
         CompleteHomSpaceStructureLookup::Content(content) => {
@@ -1470,10 +1490,11 @@ fn admit_complete_hom_space_structure(
     structure: Arc<BlockStructure>,
 ) -> Arc<BlockStructure> {
     let charged_bytes = charged_complete_hom_space_structure_bytes(&key, &structure.content_key());
-    complete_hom_space_structure_cache()
+    let mut cache = complete_hom_space_structure_cache()
         .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .admit(Arc::new(key), structure, charged_bytes)
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    cache.misses.fetch_add(1, Ordering::Relaxed);
+    cache.admit(Arc::new(key), structure, charged_bytes)
 }
 
 fn charged_complete_hom_space_structure_bytes(

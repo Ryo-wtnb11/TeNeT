@@ -303,16 +303,22 @@ TensorKit. µs are f64, one thread, from the phase ledger.
    up to 8.6 µs (SU(2) contract).** Owners: `transformed_with_primer`,
    `contracted_multiplicity_free_ordered`, `core_dst_with_primer`, all ending
    in `PreparedFusionTreeLayout::build_complete_from_leg_degeneracies`.
-   Structural cause: the block layout of a result space is a pure function of
-   (rule identity, interned hom space), but it is rebuilt — O(blocks × rank)
-   work plus allocations — on every call. The runtime's per-context caches are
-   set to `OperationCachePolicy::NoCache` (`tenet/src/runtime.rs:150,154,344`),
-   so `DynamicFusionSpaceCache::get_or_compile_transformed_source` always takes
-   its miss branch (`tenet-tensors/src/contract/dynamic.rs:2011-2033`), and
-   the output spaces have no cache at all. TensorKit: O(rank) `HomSpace` tuple
-   plus a hashed lookup of the `@cached` structure. This is the largest single
-   TeNeT-owned constant and the main reason small `contract` is 3–3.6×
-   TensorKit.
+   *Correction (#1358 design survey, `b360984a`):* no result layout is rebuilt
+   on warm calls. `OperationCachePolicy::NoCache` only disables the
+   tensors-level `DynamicFusionSpaceCache`; the core-owned
+   `CompleteHomSpaceStructureCache` (#499) is hit on every warm call of every
+   E1 row (0 misses, admissions, and evictions over U(1), SU(2), fZ2×U(1)).
+   The per-call O(blocks × rank) cost measured here was mostly the extent
+   walk `visit_coupled_leg_blocks` that ran *before* that lookup, plus the
+   per-block `storage_end_exclusive` error values it constructed (constant 4).
+   #1358 removes only that pre-lookup walk; the before/after numbers are in
+   `eager-structure-hit-walk-2026-09-21.md`. Remaining warm per-call
+   structure costs, each with its own owner: the process-global write lock in
+   `PreparedFusionTreeLayout::commit_layout` (#1366), the lookup-key
+   allocation in `prepare_fusion_tree_layout_with` (#1367), and the
+   conjugated-source `adjoint_block_structure_view` rebuild (#1368, outside E1
+   coverage). TensorKit: O(rank) `HomSpace` tuple plus a hashed lookup of the
+   `@cached` structure.
 3. **Per-call contraction plan compilation — 2.2–2.7 µs (contract), 0.36–0.48
    µs (compose).** Owners listed under *plan* above. Structural cause: the axis
    plan, route, and core plan are recompiled from the operand spaces on every
@@ -365,9 +371,9 @@ per-block granularity (TensorKit and QSpace also factor per block); the
 Filed after the independent review (`reviews/batched-symmetric-20260920/e1-independent-review.md`
 in the supervisor workspace), with its corrections:
 
-1. #1358 — warm eager result layouts are looked up, not rebuilt (constant 2;
-   workload cache in the runtime-owned byte-budgeted store; highest TeNeT-owned
-   priority).
+1. #1358 — cached complete hom-space structure hits skip the per-block extent
+   walk (constant 2, corrected above: no runtime-owned store; residuals #1366,
+   #1367, #1368).
 2. #1359 — reuse the compiled storage-contract resolution across warm calls,
    keyed on #1358's layout identity; a miss costs O(coupled blocks) (constant 3).
 3. #1360 — no error values constructed on eager success paths; gated by review
