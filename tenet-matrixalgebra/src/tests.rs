@@ -2019,6 +2019,70 @@ fn generic_compact_svd_interleaved_complex_fallback_preserves_source_order() {
 }
 
 #[test]
+fn generic_svd_trunc_on_the_interleaved_layout_breaks_exact_ties_like_the_canonical_one() {
+    // What: the interleaved expert layout feeds the decision sectors [1, 0].
+    // Every singular value is exactly 2 (sector 0: [2]; sector 1: 2 * I with
+    // weight 1 + sqrt 2), so every cut below is decided by the tie rule, and
+    // the producer's kept counts must reach the factors in its own order.
+    // Hand-computed, ascending SectorId: rank(1) keeps sector 0 only; rank(4)
+    // keeps one of each; the unsorted [1, 0] feed would keep [0, 0] and
+    // [0, 1] (sector 1 first, weight 2.414).
+    let (canonical_space, template, _) = generic_values_endomorphism_input();
+    let mut canonical_data = vec![Complex64::zero(); template.len()];
+    for region in canonical_space
+        .space()
+        .structure()
+        .coupled_sector_regions(2)
+        .unwrap()
+        .unwrap()
+        .iter()
+    {
+        let two = Complex64::new(2.0, 0.0);
+        let values: &[Complex64] = match region.coupled().id() {
+            0 => &[two],
+            _ => &[two, Complex64::zero(), Complex64::zero(), two],
+        };
+        canonical_data[region.range()].copy_from_slice(values);
+    }
+    let (interleaved_space, interleaved_data) =
+        interleaved_generic_endomorphism_input(&canonical_space, &canonical_data);
+    let canonical = BoundDynamicTensorRef::try_new(&canonical_space, &canonical_data).unwrap();
+    let interleaved =
+        BoundDynamicTensorRef::try_new(&interleaved_space, &interleaved_data).unwrap();
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+
+    let full = svd_trunc_dyn_generic(&mut dense, &canonical, &Truncation::Full).unwrap();
+    assert!(full
+        .singular_values()
+        .iter()
+        .flat_map(|entry| &entry.values)
+        .all(|value| value.to_bits() == 2.0f64.to_bits()));
+    let kept = |svd: &SvdTruncDyn<FactorGenericRule, Complex64>, sector: usize| {
+        svd.singular_values()
+            .iter()
+            .find(|entry| entry.sector == SectorId::new(sector))
+            .map_or(0, |entry| entry.values.len())
+    };
+    for (policy, expected) in [
+        (Truncation::rank(1), [1, 0]),
+        (Truncation::rank(4), [1, 1]),
+        (Truncation::rank(6), [1, 2]),
+    ] {
+        let reference = svd_trunc_dyn_generic(&mut dense, &canonical, &policy).unwrap();
+        let fallback = svd_trunc_dyn_generic(&mut dense, &interleaved, &policy).unwrap();
+        for svd in [&reference, &fallback] {
+            assert_eq!([kept(svd, 0), kept(svd, 1)], expected, "{policy:?}");
+        }
+        assert_eq!(fallback.error().to_bits(), reference.error().to_bits());
+        // The factors carry the same kept bond: one nonzero S entry per state.
+        for svd in [&reference, &fallback] {
+            let nonzero = svd.s().data().iter().filter(|v| !v.is_zero()).count();
+            assert_eq!(nonzero, expected.iter().sum::<usize>(), "{policy:?}");
+        }
+    }
+}
+
+#[test]
 fn generic_compact_svd_padded_complex_rectangular_fallback_matches_canonical_gauge() {
     let (canonical_space, canonical_data) = generic_svd_truncation_input::<Complex64>(true);
     let (padded_space, padded_data) =

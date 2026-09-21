@@ -292,9 +292,12 @@ pub fn select_truncation(
     validate_truncation(truncation)?;
     validate_spectra(spectra)?;
     // Cross-sector ties go to the earlier slice position and the norms sum in
-    // slice order, so the decision is defined on ascending `sector` order —
-    // TensorKit's `SectorVector` parent order — whatever order the producer
-    // encountered its blocks in. Why sort instead of rejecting: expert
+    // slice order, so the decision is defined on ascending `SectorId` order,
+    // a deterministic tie rule, whatever order the producer encountered its
+    // blocks in. It is TensorKit's `SectorVector` (sorted, `isless`) order
+    // only where the sector codec is monotone in `isless`; U(1) ids are
+    // zigzag-encoded (0, -1, +1, ...) while TensorKit orders 0, +1, -1, ...,
+    // so an exact +-q tie keeps the other sector than TensorKit does. Why sort instead of rejecting: expert
     // layouts may legitimately store coupled sectors out of order, and the
     // O(G log G) permutation of G slice headers is spectrum-free work.
     if spectra
@@ -593,7 +596,9 @@ impl Ord for TailCandidate {
 }
 
 /// Candidates as `(sector, index)` sorted by descending value; ties keep the
-/// parent storage order, matching TensorKit `sortperm(parent(values); rev=true)`.
+/// slice order (ascending `SectorId` after `select_truncation`), the same
+/// stable rule as TensorKit `sortperm(parent(values); rev=true)` over its own
+/// sector order.
 fn descending_candidates(spectra: &[WeightedSpectrum<'_>]) -> Vec<(usize, usize)> {
     let total = spectra.iter().map(|spectrum| spectrum.values.len()).sum();
     let mut heap = BinaryHeap::with_capacity(spectra.len());
