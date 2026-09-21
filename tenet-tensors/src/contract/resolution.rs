@@ -52,9 +52,12 @@ pub(crate) enum Resolution<C = f64> {
 pub struct StorageContractResolution<C = f64> {
     pub(crate) route: StorageContractRoute<C>,
     /// The core plan's inactive destination blocks as device regions, built
-    /// with the route so replay converts no layout and allocates no region
-    /// list, and so a negatively strided inactive block is rejected at
-    /// compile, before the device lease. Zeroed only where the destination is
+    /// with the route so the device replay converts no layout and a
+    /// negatively strided inactive block is rejected at compile, before the
+    /// device lease. The resolution is compiled on every call, so this moves
+    /// the region list's allocations to compile time — it adds them to a
+    /// returning contraction that never zeroes — rather than removing them;
+    /// reusing the compiled resolution is the follow-up that removes them. Zeroed only where the destination is
     /// not already zero (see `execute_storage_contract_resolution_on_cuda`).
     #[cfg(feature = "cuda")]
     pub(crate) core_zero_regions: Box<[tenet_dense::CudaRegion]>,

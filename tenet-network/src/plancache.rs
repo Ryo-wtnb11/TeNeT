@@ -1394,6 +1394,128 @@ mod tests {
         assert_eq!(config.timeout, Some(Duration::from_secs(1)));
     }
 
+    /// G2c-3 (#1348): a plan the placement-specific `validate_plan` rejects
+    /// is never published, promoted or counted, on every lookup path of
+    /// `get_or_plan_static` — disabled cache, miss, topology hit and static
+    /// alias hit. The device preflight relies on exactly this.
+    #[test]
+    fn a_rejected_plan_leaves_the_cache_untouched_on_every_path() {
+        use super::{
+            configure_plan_cache, existing_cache_mut, get_or_plan_static, plan_cache_stats,
+            PlanCacheConfig, StaticTopologySpec,
+        };
+        use crate::network::PlannedNetwork;
+        use tenet::core::U1Irrep;
+        use tenet::prelude::{Error, Runtime};
+        use tenet::typed::{GradedSpace, TensorMap};
+
+        fn spec(labels: [&'static str; 3]) -> &'static StaticTopologySpec {
+            let [i, j, k] = labels;
+            Box::leak(Box::new(StaticTopologySpec {
+                inputs: Box::leak(Box::new([
+                    &*Box::leak(Box::new([i, j])) as &[&str],
+                    &*Box::leak(Box::new([j, k])),
+                ])),
+                conj: &[false, false],
+                codomain_splits: &[Some(1), Some(1)],
+                output: Box::leak(Box::new([i, k])),
+                output_codomain_rank: Some(1),
+            }))
+        }
+        let reject = |_: &PlannedNetwork| Err(Error::UnsupportedOnDevice("test".to_string()));
+        let accept = |_: &PlannedNetwork| Ok(());
+        let lookup =
+            |_runtime: &Runtime,
+             tensors: &[&TensorMap<U1FusionRule, f64>],
+             spec: &'static StaticTopologySpec,
+             validate: &dyn Fn(&PlannedNetwork) -> Result<(), Error>| {
+                get_or_plan_static(
+                    spec,
+                    tensors,
+                    &[1, 1],
+                    &Default::default(),
+                    validate,
+                    || spec.network(),
+                )
+                .map(drop)
+            };
+        let aliases = |runtime: &Runtime| {
+            runtime.with_extension_slot(|slot| {
+                existing_cache_mut(slot).map(|cache| {
+                    cache
+                        .static_aliases
+                        .iter()
+                        .map(|(_, aliases)| aliases.len())
+                        .sum::<usize>()
+                })
+            })
+        };
+
+        let runtime = Runtime::builder().build().unwrap();
+        let space =
+            GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
+        let a = TensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&space], [&space], 1)
+            .unwrap();
+        let b = TensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&space], [&space], 2)
+            .unwrap();
+        let tensors = [&a, &b];
+        let spec_ijk = spec(["i", "j", "k"]);
+
+        // Disabled cache: nothing to publish, and the rejection still wins.
+        configure_plan_cache(
+            &runtime,
+            PlanCacheConfig {
+                enabled: false,
+                ..Default::default()
+            },
+        );
+        let disabled = plan_cache_stats(&runtime);
+        assert!(lookup(&runtime, &tensors, spec_ijk, &reject).is_err());
+        assert_eq!(plan_cache_stats(&runtime), disabled, "disabled");
+        configure_plan_cache(&runtime, PlanCacheConfig::default());
+
+        // Miss: the rejected fresh plan is not inserted and no miss is counted.
+        let empty = plan_cache_stats(&runtime);
+        let empty_aliases = aliases(&runtime);
+        assert!(lookup(&runtime, &tensors, spec_ijk, &reject).is_err());
+        assert_eq!(plan_cache_stats(&runtime), empty, "miss");
+        assert_eq!(aliases(&runtime), empty_aliases, "miss aliases");
+
+        // Publish once. With the static aliases dropped the next lookup is a
+        // topology hit; with them in place it is an alias hit. Rejecting
+        // either counts no hit, promotes nothing and installs no alias.
+        lookup(&runtime, &tensors, spec_ijk, &accept).unwrap();
+        let clear_aliases = |runtime: &Runtime| {
+            runtime.with_extension_slot(|slot| {
+                existing_cache_mut(slot).unwrap().static_aliases.clear();
+            })
+        };
+        let published = plan_cache_stats(&runtime);
+        assert_eq!(published.entries, 1);
+        for (path, drop_aliases) in [("topology hit", true), ("alias hit", false)] {
+            if drop_aliases {
+                clear_aliases(&runtime);
+            }
+            let before = plan_cache_stats(&runtime);
+            let before_aliases = aliases(&runtime);
+            assert_eq!(
+                before_aliases,
+                Some(usize::from(!drop_aliases)),
+                "{path} setup"
+            );
+            assert!(lookup(&runtime, &tensors, spec_ijk, &reject).is_err());
+            assert_eq!(plan_cache_stats(&runtime), before, "{path}");
+            assert_eq!(aliases(&runtime), before_aliases, "{path} aliases");
+            // Non-vacuity: the same lookup accepted is a hit of this path
+            // (the topology hit reinstalls the alias the next pass uses).
+            lookup(&runtime, &tensors, spec_ijk, &accept).unwrap();
+            let hit = plan_cache_stats(&runtime);
+            assert_eq!((hit.entries, hit.misses), (1, published.misses), "{path}");
+            assert_eq!(hit.hits, before.hits + 1, "{path} counted");
+            assert_eq!(aliases(&runtime), Some(1), "{path} alias installed");
+        }
+    }
+
     #[test]
     fn replan_policy_matches_dimension_drift_semantics() {
         let snapshot = vec![vec![2, 3]];

@@ -1231,8 +1231,8 @@ fn widened(dense: tenet::prelude::PhysicalDense<f64>) -> tenet::prelude::Physica
 }
 
 /// Dense-expansion oracle for the codomain↔domain networks on a provider with
-/// a physical basis: the Host `tensor!` result (already proved equal to the
-/// device) equals the physical-basis einsum of the operands.
+/// a physical basis: the Host result and the device results, cold and warm,
+/// each equal the physical-basis einsum of the operands.
 fn assert_dense_oracle<R>(
     runtime: &Runtime,
     spaces: [&GradedSpace<R>; 3],
@@ -1248,15 +1248,32 @@ fn assert_dense_oracle<R>(
         + Sync,
 {
     let o = general_operands::<R, f64>(runtime, spaces, seed);
+    let device = o.map(|tensor| tensor.to_cuda().unwrap());
+    // Host, device cold and device warm results of one expression, each to be
+    // checked against the einsum independently.
+    type Runs<R> = (
+        TensorMap<R, f64>,
+        TensorMap<R, f64, CudaStorage>,
+        TensorMap<R, f64, CudaStorage>,
+    );
+    let results =
+        |(host, cold, warm): Runs<R>| [host, cold.to_host().unwrap(), warm.to_host().unwrap()];
     let dense = |tensor: &TensorMap<R, f64>| widened(tensor.to_physical_dense().unwrap());
     let (a, b, c, e) = (dense(&o.a), dense(&o.b), dense(&o.c), dense(&o.e));
     let t_adjoint = dense(&o.t.adjoint().unwrap());
     type DenseOperands<'a> = Vec<(&'a tenet::prelude::PhysicalDense<Complex64>, &'a [&'a str])>;
-    type DenseCase<'a, R> = (&'a str, TensorMap<R, f64>, DenseOperands<'a>, &'a [&'a str]);
+    type DenseCase<'a, R> = (
+        &'a str,
+        [TensorMap<R, f64>; 3],
+        DenseOperands<'a>,
+        &'a [&'a str],
+    );
     let cases: [DenseCase<'_, R>; 4] = [
         (
             "xq;y",
-            tensor!([x, q; y] = (o.a)[a, w; p] * (o.b)[p, x; a, y] * (o.c)[q; w]).unwrap(),
+            results(
+                host_cold_warm!(o = &o, &device; [x, q; y] = (o.a)[a, w; p] * (o.b)[p, x; a, y] * (o.c)[q; w]),
+            ),
             vec![
                 (&a, &["a", "w", "p"][..]),
                 (&b, &["p", "x", "a", "y"][..]),
@@ -1266,7 +1283,9 @@ fn assert_dense_oracle<R>(
         ),
         (
             "qx;y",
-            tensor!([q, x; y] = (o.a)[a, w; p] * (o.b)[p, x; a, y] * (o.c)[q; w]).unwrap(),
+            results(
+                host_cold_warm!(o = &o, &device; [q, x; y] = (o.a)[a, w; p] * (o.b)[p, x; a, y] * (o.c)[q; w]),
+            ),
             vec![
                 (&a, &["a", "w", "p"][..]),
                 (&b, &["p", "x", "a", "y"][..]),
@@ -1276,7 +1295,9 @@ fn assert_dense_oracle<R>(
         ),
         (
             "xq;y lazy conj",
-            tensor!([x, q; y] = (o.a)[a, w; p] * conj((o.t))[a, y; p, x] * (o.c)[q; w]).unwrap(),
+            results(
+                host_cold_warm!(o = &o, &device; [x, q; y] = (o.a)[a, w; p] * conj((o.t))[a, y; p, x] * (o.c)[q; w]),
+            ),
             vec![
                 (&a, &["a", "w", "p"][..]),
                 (&t_adjoint, &["p", "x", "a", "y"][..]),
@@ -1286,8 +1307,9 @@ fn assert_dense_oracle<R>(
         ),
         (
             "xq;y four tensors",
-            tensor!([x, q; y] = (o.a)[a, w; p] * (o.b)[p, x; a, y] * (o.c)[q; u] * (o.e)[u; w])
-                .unwrap(),
+            results(
+                host_cold_warm!(o = &o, &device; [x, q; y] = (o.a)[a, w; p] * (o.b)[p, x; a, y] * (o.c)[q; u] * (o.e)[u; w]),
+            ),
             vec![
                 (&a, &["a", "w", "p"][..]),
                 (&b, &["p", "x", "a", "y"][..]),
@@ -1297,16 +1319,24 @@ fn assert_dense_oracle<R>(
             &["x", "q", "y"],
         ),
     ];
-    for (name, host, operands, output) in cases {
+    for (name, runs, operands, output) in cases {
         let (shape, expected) = dense_einsum(&operands, output);
-        let actual = dense(&host);
-        assert_eq!(actual.shape, shape, "{provider} {name}: dense shape");
-        assert_close_dyn(
-            &actual.data,
-            &expected,
-            f64::EPSILON,
-            &format!("{provider} {name} dense"),
-        );
+        for (phase, result) in ["host", "device cold", "device warm"]
+            .into_iter()
+            .zip(&runs)
+        {
+            let actual = dense(result);
+            assert_eq!(
+                actual.shape, shape,
+                "{provider} {name} {phase}: dense shape"
+            );
+            assert_close_dyn(
+                &actual.data,
+                &expected,
+                f64::EPSILON,
+                &format!("{provider} {name} {phase} dense"),
+            );
+        }
     }
 }
 
