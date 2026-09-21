@@ -504,13 +504,15 @@ where
 fn device_qr_compact_obeys_its_laws_on_rank_deficient_and_dual_multileg_blocks() {
     fn cases<D: FactorPayload>(runtime: &Runtime) {
         let leg = u1_leg([2, 3, 2]);
-        // `a_ij = u_i v_j`: every coupled block has rank one.
+        // `a_ij = u_i v_j`, the product formed in `D` itself, so every coupled
+        // block has rank one at every payload: a real `D` drops the imaginary
+        // part of `u` and `v` before the product, not of the product.
         let rank_one =
             TensorMap::<U1FusionRule, D>::from_block_fn(runtime, [&leg], [&leg], |_, index| {
                 let (i, j) = (index[0] as f64, index[1] as f64);
-                // (1 + i/2 + i i/4)(1 + j/4 - j i/8), multiplied out.
-                let (ur, ui, vr, vi) = (1.0 + 0.5 * i, 0.25 * i, 1.0 + 0.25 * j, -0.125 * j);
-                D::entry(ur * vr - ui * vi, ur * vi + ui * vr)
+                let u = D::entry(1.0 + 0.5 * i, 0.25 * i);
+                let v = D::entry(1.0 + 0.25 * j, -0.125 * j);
+                u * v
             })
             .unwrap();
         assert_device_qr_laws(&rank_one, "rank-one qr");

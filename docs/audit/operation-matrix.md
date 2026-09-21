@@ -226,7 +226,8 @@ implemented for all four device payloads. `qr_compact` joined them in
 positive-diagonal gauge runs a `triu` kernel whose complex zero constant
 Tenferro 0.5.0 could not compile (tenferro-rs#1833); 0.6.0 compiles it, and
 the complex device QR is verified against Host `qr_compact` in
-`tenet/tests/typed_cuda_single_precision_factorizations.rs`.
+`tenet/tests/typed_cuda_single_precision_factorizations.rs` (A100 record
+`benchmarks/history/cuda-complex-qr-2026-09-21.md`).
 
 Single-precision device factorization evidence:
 `tenet/tests/typed_cuda_single_precision_factorizations.rs` and
