@@ -149,11 +149,15 @@ the storage-direct core for `DynamicTree` on device; gated against TensorKit's
 `blas_contract!` with the twist on the B role and on the A role (fZ2 x U(1),
 fZ2 (x) SU(2), all four device dtypes, lazy adjoints, both orientations forced
 at artifact level) and by the TensorKit-valued FZ2 loops as explicit device
-`contract` calls. Still explicit boundaries: device
-`contract_overwrite_into` stays canonical-only, and the Host storage-direct
-entries it uses keep rejecting a non-uniform twist
-([#1346](https://github.com/Ryo-wtnb11/TeNeT/issues/1346)); device `tensor!`
-networks keep their canonical schedule predicate
+`contract` calls. Device `contract_overwrite_into` takes the same
+resolution for arbitrary axes and twists, writing the caller's destination
+with no reset: an output transform overwrites every element, and where the
+core GEMMs write the destination directly exactly the plan's inactive blocks
+are zeroed (G2c-1b, [#1346](https://github.com/Ryo-wtnb11/TeNeT/issues/1346));
+`alpha` other than `1` stays `UnsupportedOnDevice`; gated into NaN-poisoned
+destinations against the Host and the same oracles, with a warm call
+transferring and allocating nothing. Still an explicit boundary: device
+`tensor!` networks keep their canonical schedule predicate
 ([#1348](https://github.com/Ryo-wtnb11/TeNeT/issues/1348)). Behaviour change: an anyonic device
 `contract` is now `UnsupportedTensorContractScope` even in canonical form,
 as on Host (it was accepted before). The Host checked-Generic cell is
@@ -231,11 +235,10 @@ storage)`, and reuses slots, producers, the input snapshot and the payload
 destinations of every intermediate step through the device
 `contract_overwrite_into`. The final schedule slot leaves the workspace and so
 still allocates and uploads a fresh returning output
-([#740](https://github.com/Ryo-wtnb11/TeNeT/issues/740)). Resetting a reused
-device destination costs one D2D copy from one workspace-owned zero template of
-the maximum retained length, charged to the same budget; that template is an
-interim for tenferro-rs#1834 (`fill_zero_write`), which would reset the buffer
-in place instead.
+([#740](https://github.com/Ryo-wtnb11/TeNeT/issues/740)). A reused device
+destination is not reset: the contraction zeroes only the blocks no GEMM
+writes, from the context's zero source
+([#1346](https://github.com/Ryo-wtnb11/TeNeT/issues/1346)).
 
 The two storage `NEEDS-PROOF` cells describe future storage implementations,
 not provider conformance. Host/device checked-Generic parity belongs to

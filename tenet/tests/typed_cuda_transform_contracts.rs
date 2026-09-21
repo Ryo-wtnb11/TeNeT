@@ -303,7 +303,7 @@ fn a_cold_device_transform_uploads_one_coefficient_payload_per_structure() {
 
 /// The device wording of a Host message. The device mirrors Host's error
 /// variants, messages and order; only the storage noun names the placement,
-/// as in `contract_overwrite_into_with_template`. That these are the exact
+/// as in `contract_overwrite_into`. That these are the exact
 /// Host strings is pinned without a device in `typed_transform_host_side.rs`.
 fn as_device_message(host: &str) -> String {
     host.replace("ordinary dense host source", "ordinary dense CUDA source")

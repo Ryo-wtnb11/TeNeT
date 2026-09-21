@@ -370,14 +370,15 @@ where
 
 /// The eager Host contraction of `case` over the `lhs`/`rhs` payloads: the
 /// production answer every forced artifact must reproduce.
-fn eager_host<R>(case: &Case<R>, lhs: &[f64], rhs: &[f64]) -> Vec<f64>
+fn eager_host<R, D>(case: &Case<R>, lhs: &[D], rhs: &[D]) -> Vec<D>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>
         + crate::TreeTransformRuleCacheKey<Key = RuleIdentity>,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
 {
     let dst = case.dst();
-    let mut out = vec![0.0; dst.space().required_len().unwrap()];
-    Context::<f64>::default()
+    let mut out = vec![D::zero(); dst.space().required_len().unwrap()];
+    Context::<D>::default()
         .tensorcontract_fusion_dyn_prelowered_into(
             &dst,
             &mut out,
@@ -386,8 +387,8 @@ where
             FusionOperand::direct(case.rhs.space()),
             rhs,
             case.axes(),
-            1.0,
-            0.0,
+            D::one(),
+            D::zero(),
         )
         .unwrap();
     out
@@ -897,6 +898,119 @@ fn a_zero_degeneracy_sector_never_yields_a_zero_extent_core_job() {
     assert!(resolution.is_dynamic_tree());
 }
 
+/// `wide` carries charge 2 that `narrow` lacks, so a destination block
+/// coupled at charge 2 has no GEMM job.
+fn wide_leg() -> SectorLeg {
+    SectorLeg::new(
+        [
+            (U1Irrep::new(0).sector_id(), 1),
+            (U1Irrep::new(1).sector_id(), 2),
+            (U1Irrep::new(2).sector_id(), 1),
+        ],
+        false,
+    )
+}
+
+fn narrow_leg(dual: bool) -> SectorLeg {
+    let sign = if dual { -1 } else { 1 };
+    SectorLeg::new(
+        [
+            (U1Irrep::new(0).sector_id(), 2),
+            (U1Irrep::new(sign).sector_id(), 1),
+        ],
+        dual,
+    )
+}
+
+/// One geometry per way the device completes a destination it did not
+/// allocate (`contract_overwrite_into`), with the core plan's inactive
+/// destination-block count when the core GEMMs write that destination
+/// directly (`None`: an output transform writes it).
+fn overwrite_cases() -> Vec<(&'static str, Case<U1FusionRule>, Option<usize>)> {
+    let provider = Arc::new(U1FusionRule);
+    let (v, w) = (wide_leg, || narrow_leg(false));
+    let case = |lhs, rhs, lhs_axes: &[usize], rhs_axes: &[usize], output_axes: &[usize]| Case {
+        lhs,
+        rhs,
+        lhs_axes: lhs_axes.to_vec(),
+        rhs_axes: rhs_axes.to_vec(),
+        output_axes: output_axes.to_vec(),
+    };
+    vec![
+        (
+            "core route, inactive block",
+            case(
+                space(&provider, vec![v(), v()], vec![w()]),
+                space(&provider, vec![w()], vec![v()]),
+                &[2],
+                &[0],
+                &[0, 1, 2],
+            ),
+            Some(1),
+        ),
+        (
+            "transformed lhs, identity output, inactive block",
+            case(
+                space(&provider, vec![v()], vec![w(), v()]),
+                space(&provider, vec![w()], vec![v()]),
+                &[1],
+                &[0],
+                &[0, 1, 2],
+            ),
+            Some(1),
+        ),
+        (
+            "transformed rhs, identity output, fully covered",
+            case(
+                space(&provider, vec![v(), v()], vec![w()]),
+                space(&provider, vec![v()], vec![narrow_leg(true)]),
+                &[2],
+                &[1],
+                &[0, 1, 2],
+            ),
+            Some(0),
+        ),
+        (
+            "output transform over an inactive core block",
+            case(
+                space(&provider, vec![v(), v()], vec![w()]),
+                space(&provider, vec![w()], vec![v()]),
+                &[2],
+                &[0],
+                &[1, 0, 2],
+            ),
+            None,
+        ),
+    ]
+}
+
+#[test]
+fn each_way_a_device_overwrite_completes_its_destination_has_a_fixture() {
+    // Why: the device gate replays these into a NaN-poisoned destination; it
+    // proves the zeroing rule only if the Host compiler really resolves each
+    // geometry to the writer it names.
+    for (what, case, expected) in overwrite_cases() {
+        let resolution = Context::<f64>::default()
+            .compile_storage_contract_resolution(
+                &case.dst(),
+                FusionOperand::direct(case.lhs.space()),
+                FusionOperand::direct(case.rhs.space()),
+                case.axes(),
+            )
+            .unwrap();
+        assert_eq!(
+            resolution.direct_destination_inactive_blocks(),
+            expected,
+            "{what}"
+        );
+        assert_eq!(
+            what.starts_with("core route"),
+            !resolution.is_dynamic_tree(),
+            "{what}"
+        );
+    }
+}
+
 #[cfg(feature = "cuda")]
 mod device {
     use super::*;
@@ -1027,6 +1141,10 @@ mod device {
             (device, host, borrowed, twisted)
         }
 
+        /// Replays `resolution` into a fresh zero destination and into a
+        /// retained NaN-poisoned one (`dst_is_zeroed = false`, the
+        /// `contract_overwrite_into` mode), asserts the two agree, and
+        /// returns the first.
         fn execute<R>(
             &mut self,
             resolution: &StorageContractResolution<f64>,
@@ -1037,23 +1155,34 @@ mod device {
             let ctx = &mut self.ctx;
             let lhs = CudaStorage::<D>::upload(ctx, lhs).unwrap();
             let rhs = CudaStorage::<D>::upload(ctx, rhs).unwrap();
-            let mut out = CudaStorage::<D>::upload_owned(
-                ctx,
-                vec![D::ZERO; dst.space().required_len().unwrap()],
-            )
-            .unwrap();
-            crate::execute_storage_contract_resolution_on_cuda(
-                ctx,
-                &mut self.transforms,
-                &mut self.scratch,
-                resolution,
-                dst.space().structure(),
-                &mut out,
-                &lhs,
-                &rhs,
-            )
-            .unwrap();
-            out.download(ctx).unwrap()
+            let len = dst.space().required_len().unwrap();
+            let mut results = Vec::new();
+            for (fill, dst_is_zeroed) in [(D::ZERO, true), (D::nan(), false)] {
+                let mut out = CudaStorage::<D>::upload_owned(ctx, vec![fill; len]).unwrap();
+                crate::execute_storage_contract_resolution_on_cuda(
+                    ctx,
+                    &mut self.transforms,
+                    &mut self.scratch,
+                    resolution,
+                    dst.space().structure(),
+                    &mut out,
+                    dst_is_zeroed,
+                    &lhs,
+                    &rhs,
+                )
+                .unwrap();
+                results.push(out.download(ctx).unwrap());
+            }
+            let overwritten = results.pop().unwrap();
+            let zeroed = results.pop().unwrap();
+            assert_eq!(overwritten.len(), zeroed.len());
+            for (index, (&left, &right)) in overwritten.iter().zip(&zeroed).enumerate() {
+                assert!(
+                    left.distance(right) <= 1e-12 * (1.0 + right.magnitude()),
+                    "retained destination element {index} is {left:?}, fresh {right:?}"
+                );
+            }
+            zeroed
         }
     }
 
@@ -1203,5 +1332,34 @@ mod device {
             every_fermionic_candidate_and_orientation::<_, f64>(&case, what);
             every_fermionic_candidate_and_orientation::<_, Complex64>(&case, what);
         }
+    }
+
+    #[test]
+    #[ignore = "requires a real CUDA device"]
+    fn a_retained_destination_is_completed_by_every_destination_writer() {
+        // What: into a NaN-poisoned destination the core route and an
+        // identity output zero exactly the plan's inactive blocks, a fully
+        // covered one needs none, and an output transform writes everything
+        // itself — each equal to the eager Host contraction.
+        fn at<D: Payload>() {
+            let mut replay = Replay::<D>::new();
+            for (what, case, _) in overwrite_cases() {
+                let dst = case.dst();
+                let lhs = data::<D>(case.lhs.space(), 1);
+                let rhs = data::<D>(case.rhs.space(), 2);
+                let resolution = Context::<D>::default()
+                    .compile_storage_contract_resolution(
+                        &dst,
+                        FusionOperand::direct(case.lhs.space()),
+                        FusionOperand::direct(case.rhs.space()),
+                        case.axes(),
+                    )
+                    .unwrap();
+                let device = replay.execute(&resolution, &dst, &lhs, &rhs);
+                assert_close(&device, &eager_host(&case, &lhs, &rhs), what);
+            }
+        }
+        at::<f64>();
+        at::<Complex64>();
     }
 }

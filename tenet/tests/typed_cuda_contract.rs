@@ -17,7 +17,12 @@
 //!    Host by the ungated `typed_contract_host_oracle.rs`;
 //! 4. fermionic providers (G2c-2, #1347): device == Host == TensorKit's
 //!    sequence with the twist on either role, and the TensorKit-valued FZ2
-//!    loops as explicit device `contract` calls.
+//!    loops as explicit device `contract` calls;
+//! 5. `contract_overwrite_into` (G2c-1b, #1346): into a NaN-poisoned device
+//!    destination, device == Host eager `contract` (whose overwrite twin is
+//!    pinned ungated) == the same independent oracles, on every fixture
+//!    above plus destinations with blocks no GEMM writes; warm calls transfer
+//!    and allocate nothing; rejections leave the destination untouched.
 //!
 //! The contract tests read the process-wide transfer counters, hence
 //! `--test-threads=1`. Run with `cargo test -p tenet-rs --no-default-features
@@ -33,9 +38,9 @@ mod contract_cases;
 use common::{DevicePayload, DeviceRule};
 use contract_cases::{
     assert_close, blas_contract_oracle, dense_oracle, fermion_su2, fermionic_blas_contract_oracle,
-    fermionic_general, fz2_tensorkit_loops, lazy_cases, product_general, su2_bent, su2_reordered,
-    su2_structure_cases, u1_lhs_identity, u1_rank_five, u1_reordered, u1_rhs_identity, Case,
-    TwistRole,
+    fermionic_general, fz2_tensorkit_loops, lazy_cases, poisoned_destination, product_general,
+    su2_bent, su2_reordered, su2_structure_cases, u1_inactive_cases, u1_lhs_identity, u1_rank_five,
+    u1_reordered, u1_rhs_identity, Case, TwistRole,
 };
 use num_complex::{Complex32, Complex64};
 use tenet::dense::{cuda_transfer_stats, CudaTransferStats};
@@ -465,6 +470,280 @@ fn rejections_happen_before_any_device_work_and_match_the_host() {
         counters,
         CudaTransferStats::default(),
         "a rejected contraction must submit nothing: {counters:?}"
+    );
+    assert_eq!(runtime.cuda_tree_transform_stats().unwrap(), transforms);
+    assert_eq!(runtime.cuda_contract_scratch_bytes().unwrap(), scratch);
+}
+
+// ---------------------------------------------------------------------------
+// `contract_overwrite_into` (G2c-1b, #1346)
+// ---------------------------------------------------------------------------
+
+/// Device `contract_overwrite_into` of `case` into a NaN-poisoned device
+/// destination, downloaded.
+fn device_overwrite<R: DeviceRule, D: DevicePayload>(case: &Case<R, D>) -> TensorMap<R, D> {
+    let mut destination = poisoned_destination(case).to_cuda().unwrap();
+    case.lhs
+        .to_cuda()
+        .unwrap()
+        .contract_overwrite_into(
+            &case.rhs.to_cuda().unwrap(),
+            &mut destination,
+            &case.lhs_axes,
+            &case.rhs_axes,
+            &case.output_axes,
+            D::entry(1.0, 0.0),
+        )
+        .unwrap();
+    destination.to_host().unwrap()
+}
+
+fn check_overwrite<R: DeviceRule, D: DevicePayload>(case: Case<R, D>) {
+    let written = device_overwrite(&case);
+    assert_close(written.data(), case.host().data(), case.terms(), case.name);
+    let oracle = blas_contract_oracle(&case);
+    assert_close(written.data(), oracle.data(), case.terms(), case.name);
+}
+
+fn check_overwrite_fermionic<R, D>(
+    case: Case<R, D>,
+    twist: impl Fn(&TensorMap<R, D>, &[usize]) -> TensorMap<R, D> + Copy,
+) where
+    R: DeviceRule,
+    D: DevicePayload,
+{
+    let written = device_overwrite(&case);
+    assert_close(written.data(), case.host().data(), case.terms(), case.name);
+    for role in [TwistRole::B, TwistRole::A] {
+        let oracle = fermionic_blas_contract_oracle(&case, role, twist);
+        assert_close(
+            written.data(),
+            oracle.data(),
+            case.terms(),
+            &format!("{} overwrite vs the {role:?}-role oracle", case.name),
+        );
+    }
+}
+
+fn every_overwrite_fixture<D: DevicePayload>(runtime: &Runtime) {
+    check_overwrite(u1_rank_five::<D>(runtime));
+    check_overwrite(u1_reordered::<D>(runtime));
+    check_overwrite(su2_reordered::<D>(runtime));
+    check_overwrite(su2_bent::<D>(runtime));
+    check_overwrite(product_general::<D>(runtime));
+    check_overwrite(u1_lhs_identity::<D>(runtime));
+    check_overwrite(u1_rhs_identity::<D>(runtime));
+    for case in u1_inactive_cases::<D>(runtime) {
+        check_overwrite(case);
+    }
+    for case in lazy_cases(&u1_rank_five::<D>(runtime).lhs, "U(1) rank 5 lazy") {
+        check_overwrite(case);
+    }
+    for case in lazy_cases(&su2_reordered::<D>(runtime).lhs, "SU(2) lazy") {
+        check_overwrite(case);
+    }
+    for case in lazy_cases(&product_general::<D>(runtime).lhs, "U(1) x SU(2) lazy") {
+        check_overwrite(case);
+    }
+    for case in su2_structure_cases::<D>(runtime) {
+        check_overwrite(case);
+    }
+    for_each_fermionic_fixture!(runtime, D, check_overwrite_fermionic);
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn overwrite_into_a_poisoned_destination_matches_the_host_and_the_oracles_at_every_dtype() {
+    // What: general axes, lazy adjoints, the Host-`Structure` class, both
+    // fermionic twist roles, and destinations with blocks no GEMM writes —
+    // by the core route, by an identity output and under an output transform
+    // — each rewritten over NaN.
+    let runtime = Runtime::builder().cuda(0).build().unwrap();
+    every_overwrite_fixture::<f64>(&runtime);
+    every_overwrite_fixture::<Complex64>(&runtime);
+    every_overwrite_fixture::<f32>(&runtime);
+    every_overwrite_fixture::<Complex32>(&runtime);
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn a_warm_overwrite_transfers_and_allocates_nothing() {
+    // What: no reset and no output initialisation — a warm overwrite costs
+    // no upload, no download, no device allocation, no scratch growth and no
+    // transform preparation, for a transformed general contraction, a
+    // twisted one, and a core-route destination with an inactive block.
+    let runtime = Runtime::builder().cuda(0).build().unwrap();
+    fn warm<R: DeviceRule>(runtime: &Runtime, case: Case<R, f64>) {
+        let lhs = case.lhs.to_cuda().unwrap();
+        let rhs = case.rhs.to_cuda().unwrap();
+        let mut destination = poisoned_destination(&case).to_cuda().unwrap();
+        let mut call = || {
+            lhs.contract_overwrite_into(
+                &rhs,
+                &mut destination,
+                &case.lhs_axes,
+                &case.rhs_axes,
+                &case.output_axes,
+                1.0,
+            )
+            .unwrap()
+        };
+        call();
+        let scratch = runtime.cuda_contract_scratch_bytes().unwrap();
+        let transforms = runtime.cuda_tree_transform_stats().unwrap();
+        let ((), counters) = delta(&mut call);
+        assert_eq!(
+            (
+                counters.h2d_calls,
+                counters.d2h_calls,
+                counters.device_allocs
+            ),
+            (0, 0, 0),
+            "{}: {counters:?}",
+            case.name
+        );
+        assert!(counters.gemm_calls > 0, "{}: vacuous", case.name);
+        assert_eq!(runtime.cuda_contract_scratch_bytes().unwrap(), scratch);
+        assert_eq!(runtime.cuda_tree_transform_stats().unwrap(), transforms);
+        assert_close(
+            destination.to_host().unwrap().data(),
+            case.host().data(),
+            case.terms(),
+            case.name,
+        );
+    }
+    warm(&runtime, u1_rank_five::<f64>(&runtime));
+    warm(
+        &runtime,
+        fermionic_general(&runtime, &fermion_su2(), true, "fZ2xSU2 mixed θ", 51),
+    );
+    let [core, identity_output, output_transform] = u1_inactive_cases::<f64>(&runtime);
+    warm(&runtime, core);
+    warm(&runtime, identity_output);
+    warm(&runtime, output_transform);
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn overwrite_rejections_match_the_host_in_order_and_leave_the_destination_untouched() {
+    let runtime = Runtime::builder().cuda(0).build().unwrap();
+    let other = Runtime::builder().cuda(0).build().unwrap();
+    let case = u1_rank_five::<f64>(&runtime);
+    let (host_lhs, host_rhs) = (&case.lhs, &case.rhs);
+    let lhs = host_lhs.to_cuda().unwrap();
+    let rhs = host_rhs.to_cuda().unwrap();
+    let poison = || case.host().scale(7.5);
+    let poison_data = poison().data().to_vec();
+    let _ = lhs
+        .contract(&rhs, &case.lhs_axes, &case.rhs_axes, &case.output_axes)
+        .unwrap();
+    let transforms = runtime.cuda_tree_transform_stats().unwrap();
+    let scratch = runtime.cuda_contract_scratch_bytes().unwrap();
+    let device_text = |text: String| text.replace("host storage", "CUDA storage");
+
+    // Host-shared rejections, each against a fresh poisoned destination:
+    // malformed axes, an output order that is not a permutation, a pairing
+    // of two equal (not dual) legs, and a destination of another space.
+    let malformed: [(&[usize], &[usize], &[usize]); 4] = [
+        (&[3, 7], &[0, 3], &[2, 0, 4, 1, 3]),
+        (&[3, 3], &[0, 3], &[2, 0, 4, 1, 3]),
+        (&[3, 1], &[0, 3], &[2, 0, 4, 1, 1]),
+        (&[0], &[0], &[0, 1, 2, 3, 4, 5, 6]),
+    ];
+    let foreign = || u1_reordered::<f64>(&runtime).host().scale(7.5);
+    let cases = malformed.into_iter().map(|axes| (axes, poison())).chain([(
+        (
+            &case.lhs_axes[..],
+            &case.rhs_axes[..],
+            &case.output_axes[..],
+        ),
+        foreign(),
+    )]);
+    for ((lhs_axes, rhs_axes, output), host_destination) in cases {
+        let before = host_destination.data().to_vec();
+        let mut destination = host_destination.to_cuda().unwrap();
+        let mut host_destination = host_destination;
+        let expected = host_lhs
+            .contract_overwrite_into(
+                host_rhs,
+                &mut host_destination,
+                lhs_axes,
+                rhs_axes,
+                output,
+                1.0,
+            )
+            .unwrap_err()
+            .to_string();
+        let (actual, counters) = delta(|| {
+            lhs.contract_overwrite_into(&rhs, &mut destination, lhs_axes, rhs_axes, output, 1.0)
+                .unwrap_err()
+                .to_string()
+        });
+        assert_eq!(actual, device_text(expected), "{lhs_axes:?} {output:?}");
+        assert_eq!(counters, CudaTransferStats::default(), "{actual}");
+        assert_eq!(destination.to_host().unwrap().data(), before.as_slice());
+    }
+
+    // Runtime, shared ownership and alias, then the device's own alpha
+    // boundary.
+    let mut destination = poison().to_cuda().unwrap();
+    let stranger = u1_rank_five::<f64>(&other).rhs.to_cuda().unwrap();
+    let shared = destination.clone();
+    let (errors, counters) = delta(|| {
+        let axes = (
+            &case.lhs_axes[..],
+            &case.rhs_axes[..],
+            &case.output_axes[..],
+        );
+        let mut errors = vec![
+            lhs.contract_overwrite_into(&stranger, &mut destination, axes.0, axes.1, axes.2, 1.0)
+                .unwrap_err(),
+            lhs.contract_overwrite_into(&rhs, &mut destination, axes.0, axes.1, axes.2, 1.0)
+                .unwrap_err(),
+        ];
+        let mut lhs_alias = lhs.clone();
+        errors.push(
+            lhs.contract_overwrite_into(&rhs, &mut lhs_alias, axes.0, axes.1, axes.2, 1.0)
+                .unwrap_err(),
+        );
+        errors
+    });
+    assert!(
+        matches!(errors[0], tenet::prelude::Error::RuntimeMismatch),
+        "{:?}",
+        errors[0]
+    );
+    assert!(
+        errors[1].to_string().contains("uniquely owned"),
+        "{}",
+        errors[1]
+    );
+    assert!(errors[2].to_string().contains("alias"), "{}", errors[2]);
+    drop(shared);
+    let (alpha, alpha_counters) = delta(|| {
+        lhs.contract_overwrite_into(
+            &rhs,
+            &mut destination,
+            &case.lhs_axes,
+            &case.rhs_axes,
+            &case.output_axes,
+            2.0,
+        )
+        .unwrap_err()
+    });
+    assert!(
+        matches!(alpha, tenet::prelude::Error::UnsupportedOnDevice(_)),
+        "{alpha:?}"
+    );
+    assert_eq!(counters, CudaTransferStats::default(), "{counters:?}");
+    assert_eq!(
+        alpha_counters,
+        CudaTransferStats::default(),
+        "{alpha_counters:?}"
+    );
+    assert_eq!(
+        destination.to_host().unwrap().data(),
+        poison_data.as_slice()
     );
     assert_eq!(runtime.cuda_tree_transform_stats().unwrap(), transforms);
     assert_eq!(runtime.cuda_contract_scratch_bytes().unwrap(), scratch);

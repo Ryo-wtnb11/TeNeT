@@ -165,8 +165,14 @@ fn grow<'a, D: CudaScalar>(
 }
 
 /// Replays a Host-compiled storage contraction route on `ctx`'s device into
-/// `dst`, which the caller provides zero-filled (the returning path's fresh
-/// #740 output).
+/// `dst`, overwriting it.
+///
+/// `dst_is_zeroed` says whether the caller provides `dst` zero-filled (the
+/// returning path's fresh #740 output). When it does not (a retained
+/// destination, `contract_overwrite_into`), the blocks the core GEMMs write
+/// directly are completed by zeroing exactly the core plan's inactive blocks;
+/// an output transform in overwrite mode writes every element itself, so it
+/// needs nothing. The host clears the whole destination instead.
 ///
 /// `Core`: one storage GEMM per coupled-sector job over the parent buffers.
 /// `DynamicTree`: each non-borrowed source is replayed into its scratch
@@ -195,6 +201,7 @@ pub fn execute_storage_contract_resolution_on_cuda<D, C>(
     resolution: &StorageContractResolution<C>,
     dst_structure: &Arc<BlockStructure>,
     dst: &mut CudaStorage<D>,
+    dst_is_zeroed: bool,
     lhs: &CudaStorage<D>,
     rhs: &CudaStorage<D>,
 ) -> Result<(), OperationError>
@@ -204,7 +211,18 @@ where
 {
     match &resolution.route {
         StorageContractRoute::Core(plan) => {
-            plan.execute_direct_on_storage_prezeroed(&mut CudaStorageGemm::new(ctx), dst, lhs, rhs)
+            let dst_zero_regions = if dst_is_zeroed {
+                Vec::new()
+            } else {
+                inactive_regions(plan)?
+            };
+            plan.execute_direct_on_storage_prezeroed(
+                &mut CudaStorageGemm::new(ctx),
+                dst,
+                lhs,
+                rhs,
+            )?;
+            zero_regions(ctx, dst, &dst_zero_regions)
         }
         StorageContractRoute::DynamicTree(artifact) => execute_dynamic_tree_on_cuda(
             ctx,
@@ -213,10 +231,25 @@ where
             artifact,
             dst_structure,
             dst,
+            dst_is_zeroed,
             lhs,
             rhs,
         ),
     }
+}
+
+/// Zeroes `regions` of `dst`. A plan's inactive blocks are disjoint from
+/// every block its GEMMs write, so the fill may follow them; it runs after,
+/// so the plan's own range validation still precedes every write to `dst`.
+fn zero_regions<D: CudaScalar>(
+    ctx: &mut CudaDenseContext,
+    dst: &mut CudaStorage<D>,
+    regions: &[CudaRegion],
+) -> Result<(), OperationError> {
+    for region in regions {
+        cuda_region_zero::<D>(ctx, &mut dst.0, region).map_err(OperationError::Dense)?;
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -227,6 +260,7 @@ fn execute_dynamic_tree_on_cuda<D, C>(
     artifact: &DynamicTreeExecutionArtifact<C>,
     dst_structure: &Arc<BlockStructure>,
     dst: &mut CudaStorage<D>,
+    dst_is_zeroed: bool,
     lhs: &CudaStorage<D>,
     rhs: &CudaStorage<D>,
 ) -> Result<(), OperationError>
@@ -253,9 +287,13 @@ where
         .as_ref()
         .map(|core_dst| core_dst.space.required_len())
         .transpose()?;
-    let zero_regions = match artifact.core_dst {
-        Some(_) => inactive_regions(&artifact.block_plan)?,
-        None => Vec::new(),
+    // The core destination is the retained scratch with an output transform,
+    // otherwise `dst` itself; either way only a non-zeroed buffer needs its
+    // inactive blocks zeroed.
+    let core_zero_regions = if artifact.core_dst.is_some() || !dst_is_zeroed {
+        inactive_regions(&artifact.block_plan)?
+    } else {
+        Vec::new()
     };
 
     let (bytes, buffers) = scratch.entry::<D>(ctx.identity())?;
@@ -322,17 +360,16 @@ where
     };
 
     let (Some(core_dst), Some(core_dst_len)) = (artifact.core_dst.as_ref(), core_dst_len) else {
-        return artifact.block_plan.execute_direct_on_storage_prezeroed(
+        artifact.block_plan.execute_direct_on_storage_prezeroed(
             &mut CudaStorageGemm::new(ctx),
             dst,
             core_left,
             core_right,
-        );
+        )?;
+        return zero_regions(ctx, dst, &core_zero_regions);
     };
     let core_buffer = grow(ctx, dst_slot, bytes, core_dst_len)?;
-    for region in &zero_regions {
-        cuda_region_zero::<D>(ctx, &mut core_buffer.0, region).map_err(OperationError::Dense)?;
-    }
+    zero_regions(ctx, core_buffer, &core_zero_regions)?;
     artifact.block_plan.execute_direct_on_storage_prezeroed(
         &mut CudaStorageGemm::new(ctx),
         core_buffer,

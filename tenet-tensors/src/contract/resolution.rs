@@ -75,6 +75,19 @@ impl<C: DenseBlockScalar> StorageContractResolution<C> {
         }
     }
 
+    /// The core plan's inactive destination blocks when the core GEMMs write
+    /// the caller's destination directly (the `Core` route, or an identity
+    /// output); `None` when an output transform writes it.
+    #[cfg(test)]
+    pub(crate) fn direct_destination_inactive_blocks(&self) -> Option<usize> {
+        match &self.route {
+            StorageContractRoute::Core(plan) => Some(plan.inactive_destination_regions().len()),
+            StorageContractRoute::DynamicTree(artifact) => {
+                artifact.direct_destination_inactive_blocks()
+            }
+        }
+    }
+
     /// True when the route runs source/output tree transforms around the core.
     pub fn is_dynamic_tree(&self) -> bool {
         matches!(self.route, StorageContractRoute::DynamicTree(_))

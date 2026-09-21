@@ -666,14 +666,11 @@ fn warm_cuda_destination_reuse_matches_the_returning_chain_for_every_provider() 
     assert_close_c64(warm.to_host().unwrap().data(), oracle.data());
 }
 
-/// G3c-2 (#1276): the warm device replay of an N-tensor chain performs no
-/// host-to-device traffic and no device allocation for its N-2 intermediate
-/// steps; each of them is reset by one D2D copy from the zero template. Only
-/// the final, returned output still uploads its zeros (#740/G3b).
-///
-/// Since #1304 the template belongs to the `CudaDenseContext` — one buffer per
-/// runtime and dtype instead of one per workspace — but the reset is the same
-/// copy kernel and costs the same counters.
+/// G3c-2 (#1276), G2c-1b (#1346): the warm device replay of an N-tensor chain
+/// performs no host-to-device traffic, no device allocation and no copy for
+/// its N-2 intermediate steps: every destination block of this chain has a
+/// GEMM, so a retained destination needs no reset at all. Only the final,
+/// returned output still uploads its zeros (#740/G3b).
 ///
 /// The counters are process-wide, so this test must not run beside another
 /// device test; the device suite runs with `--test-threads=1`.
@@ -703,8 +700,8 @@ fn warm_cuda_chain_uploads_nothing_for_its_reused_destinations() {
     };
     // Call 1 has nothing retained yet, so every step returns.
     drop(run());
-    // Call 2 is the first to overwrite: it uploads the zero template once, on
-    // top of the returned output's own zeros.
+    // Call 2 is the first to overwrite: nothing but the returned output's own
+    // zeros is uploaded, and nothing is reset.
     let before_second = cuda_transfer_stats();
     drop(run());
     let after_second = cuda_transfer_stats();
@@ -713,8 +710,8 @@ fn warm_cuda_chain_uploads_nothing_for_its_reused_destinations() {
             after_second.h2d_calls - before_second.h2d_calls,
             after_second.copy_calls - before_second.copy_calls,
         ),
-        (2, 2),
-        "the zero template costs exactly one upload, once per context"
+        (1, 0),
+        "overwriting a retained destination uploads and copies nothing"
     );
 
     // Call 3 onward is the steady state this contract describes.
@@ -730,37 +727,35 @@ fn warm_cuda_chain_uploads_nothing_for_its_reused_destinations() {
             after.d2h_calls - before.d2h_calls,
             after.gemm_calls - before.gemm_calls,
         ),
-        (1, 1, 2, 0, 6),
+        (1, 1, 0, 0, 6),
         "(h2d, device_allocs, d2d_copies, d2h, gemm) for the warm 4-tensor chain"
     );
     drop(warm);
 }
 
-/// G3c-2 (#1276): the device workspace's zero template is charged to the one
-/// `workspace_budget_bytes` ledger, so a budget short by exactly the template
-/// rejects the idle workspace whole.
+/// G3c-2 (#1276): an idle device workspace is charged to the one
+/// `workspace_budget_bytes` ledger, so a budget one byte short of its charge
+/// rejects it whole. Since G2c-1b (#1346) the charge holds no reset scratch:
+/// a retained device destination is overwritten without a reset.
 #[test]
 #[ignore = "requires a real CUDA device"]
-fn the_device_zero_template_is_charged_to_the_workspace_budget() {
+fn the_device_workspace_is_charged_to_the_workspace_budget() {
     let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
-    // One sector of degeneracy 8: every intermediate holds one 8x8 block, so
-    // the template is exactly 64 f64 elements.
     let u1 = GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), 8)]).unwrap();
     let (_, device) = cuda_chain_tensors(&runtime, &u1, 761_400);
-    let template_bytes = 8 * 8 * std::mem::size_of::<f64>();
 
     drop(tensor!([a; d] = (device[0])[a; b] * (device[1])[b; c] * (device[2])[c; d]).unwrap());
     let charge = plan_cache_stats(&runtime).retained_workspace_bytes;
     assert!(
-        charge > template_bytes,
-        "the device charge {charge} must include the {template_bytes}-byte template"
+        charge > 0,
+        "the idle device workspace retains its destinations"
     );
 
     clear_plan_cache(&runtime);
     configure_plan_cache(
         &runtime,
         PlanCacheConfig {
-            workspace_budget_bytes: charge - template_bytes,
+            workspace_budget_bytes: charge - 1,
             ..Default::default()
         },
     );
@@ -922,8 +917,8 @@ fn a_warm_single_precision_chain_costs_the_same_calls_and_half_the_bytes() {
         let (_, device) = cuda_chain_tensors_at::<U1FusionRule, D>(runtime, u1, seed);
         let run =
             || tensor!([a; d] = (device[0])[a; b] * (device[1])[b; c] * (device[2])[c; d]).unwrap();
-        // Two warm-up runs: the first has nothing retained, the second pays the
-        // one-time zero-template upload of this dtype.
+        // Two warm-up runs: the first has nothing retained, the second is the
+        // first to overwrite retained destinations.
         drop(run());
         drop(run());
         let before = cuda_transfer_stats();

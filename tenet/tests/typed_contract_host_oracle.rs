@@ -13,7 +13,10 @@
 //!   TensorKit's `twist!` on the B role and on the A role — which must agree
 //!   with each other and with the Host — and a twist-free control the Host
 //!   must *not* match, so every fixture really exercises the twist;
-//! * the TensorKit-valued FZ2 closed loops as explicit `contract` calls.
+//! * the TensorKit-valued FZ2 closed loops as explicit `contract` calls;
+//! * `contract_overwrite_into` over a NaN-poisoned destination equals the
+//!   returning contraction on every fixture (G2c-1b, #1346), so the Host
+//!   overwrite is the same oracle the device overwrite is gated against.
 
 mod common;
 #[macro_use]
@@ -21,8 +24,9 @@ mod contract_cases;
 
 use contract_cases::{
     assert_close, blas_contract_oracle, dense_oracle, fermionic_blas_contract_oracle,
-    fz2_tensorkit_loops, lazy_cases, product_general, su2_bent, su2_reordered, su2_structure_cases,
-    u1_lhs_identity, u1_rank_five, u1_reordered, u1_rhs_identity, Case, Payload, TwistRole,
+    fz2_tensorkit_loops, lazy_cases, poisoned_destination, product_general, su2_bent,
+    su2_reordered, su2_structure_cases, u1_inactive_cases, u1_lhs_identity, u1_rank_five,
+    u1_reordered, u1_rhs_identity, Case, Payload, TwistRole,
 };
 use num_complex::{Complex32, Complex64};
 use tenet::core::{CheckedFusionAlgebra, MultiplicityFreeRigidSymbols, SectorCodec};
@@ -149,4 +153,70 @@ fn host_fz2_loops_as_explicit_contracts_match_tensorkit() {
             "{name}: {value} vs {expected}"
         );
     }
+}
+
+fn check_overwrite<R, D>(case: Case<R, D>)
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: Payload,
+{
+    let mut destination = poisoned_destination(&case);
+    case.lhs
+        .contract_overwrite_into(
+            &case.rhs,
+            &mut destination,
+            &case.lhs_axes,
+            &case.rhs_axes,
+            &case.output_axes,
+            D::entry(1.0, 0.0),
+        )
+        .unwrap();
+    assert_close(
+        destination.data(),
+        case.host().data(),
+        case.terms(),
+        case.name,
+    );
+}
+
+fn check_overwrite_fermionic<R, D>(
+    case: Case<R, D>,
+    _twist: impl Fn(&TensorMap<R, D>, &[usize]) -> TensorMap<R, D> + Copy,
+) where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: Payload,
+{
+    check_overwrite(case);
+}
+
+fn every_overwrite_fixture<D: Payload>() {
+    let runtime = Runtime::builder().build().unwrap();
+    check_overwrite(u1_rank_five::<D>(&runtime));
+    check_overwrite(u1_reordered::<D>(&runtime));
+    check_overwrite(su2_reordered::<D>(&runtime));
+    check_overwrite(su2_bent::<D>(&runtime));
+    check_overwrite(product_general::<D>(&runtime));
+    check_overwrite(u1_lhs_identity::<D>(&runtime));
+    check_overwrite(u1_rhs_identity::<D>(&runtime));
+    for case in u1_inactive_cases::<D>(&runtime) {
+        check_overwrite(case);
+    }
+    for case in lazy_cases(&u1_rank_five::<D>(&runtime).lhs, "U(1) lazy") {
+        check_overwrite(case);
+    }
+    for case in lazy_cases(&su2_reordered::<D>(&runtime).lhs, "SU(2) lazy") {
+        check_overwrite(case);
+    }
+    for case in su2_structure_cases::<D>(&runtime) {
+        check_overwrite(case);
+    }
+    for_each_fermionic_fixture!(&runtime, D, check_overwrite_fermionic);
+}
+
+#[test]
+fn host_overwrite_into_a_poisoned_destination_matches_the_returning_contraction() {
+    every_overwrite_fixture::<f64>();
+    every_overwrite_fixture::<Complex64>();
+    every_overwrite_fixture::<f32>();
+    every_overwrite_fixture::<Complex32>();
 }

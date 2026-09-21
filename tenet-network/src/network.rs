@@ -19,7 +19,7 @@ use tenet::core::{
 };
 use tenet::prelude::{Error, Runtime, TensorScalar};
 #[cfg(feature = "cuda")]
-use tenet::typed::{CudaPayload, CudaStorage, CudaZeroTemplate};
+use tenet::typed::{CudaPayload, CudaStorage};
 use tenet::typed::{
     GradedSpace, NetworkDegeneracyRestriction, NetworkPayloadStorage, NetworkReuseClass,
     RuntimeDetachedTensorMap, TensorMap, TypedSpaceModeDispatch, TypedTensorAdjointDispatch,
@@ -206,13 +206,10 @@ where
         tensor: &TensorMap<R, D, S>,
     ) -> Result<TensorMap<R, D, S>, HostNetworkError<R>>;
 
-    /// `reset_scratch` is the workspace-owned scratch a reused destination is
-    /// reset with; Host needs none, the device resets from its zero template.
     fn contract_step(
         lhs: &TensorMap<R, D, S>,
         rhs: &TensorMap<R, D, S>,
         destination: &mut Option<TensorMap<R, D, S>>,
-        reset_scratch: &mut S::ResetScratch,
         lhs_axes: &[usize],
         rhs_axes: &[usize],
         output_axes: &[usize],
@@ -962,9 +959,6 @@ where
     runtime: Option<RuntimeIdentity>,
     rule_identity: Option<RuleIdentity>,
     input_snapshot: Vec<TypedInputSnapshot>,
-    /// Scratch the reused destinations are reset with. `()` on Host; on the
-    /// device, the one zero template all retained destinations copy from.
-    reset_scratch: S::ResetScratch,
 }
 
 struct TypedInputSnapshot {
@@ -1177,7 +1171,6 @@ where
         lhs: &TensorMap<R, D>,
         rhs: &TensorMap<R, D>,
         destination: &mut Option<TensorMap<R, D>>,
-        (): &mut (),
         lhs_axes: &[usize],
         rhs_axes: &[usize],
         output_axes: &[usize],
@@ -1267,7 +1260,6 @@ where
         lhs: &TensorMap<R, D>,
         rhs: &TensorMap<R, D>,
         _destination: &mut Option<TensorMap<R, D>>,
-        (): &mut (),
         lhs_axes: &[usize],
         rhs_axes: &[usize],
         output_axes: &[usize],
@@ -1320,8 +1312,7 @@ where
 /// destinations.
 ///
 /// Every step but the last overwrites a destination the workspace kept from the
-/// previous call, resetting it on device from the workspace's zero template;
-/// the final schedule slot leaves the workspace and therefore always allocates
+/// previous call (the device contraction needs no reset of it); the final schedule slot leaves the workspace and therefore always allocates
 /// a fresh returning output. The device has no `permute`, so any schedule that
 /// needs one is rejected explicitly — `cuda_schedule_is_direct` already refuses
 /// such schedules before execution, so the permute arms are a typed capability
@@ -1353,7 +1344,6 @@ where
         lhs: &TensorMap<R, D, CudaStorage<D>>,
         rhs: &TensorMap<R, D, CudaStorage<D>>,
         destination: &mut Option<TensorMap<R, D, CudaStorage<D>>>,
-        zero_template: &mut CudaZeroTemplate<D>,
         lhs_axes: &[usize],
         rhs_axes: &[usize],
         output_axes: &[usize],
@@ -1361,10 +1351,9 @@ where
         #[cfg(test)]
         CUDA_NETWORK_CONTRACT_CALLS.fetch_add(1, Ordering::Relaxed);
         if let Some(destination) = destination {
-            lhs.contract_overwrite_into_with_template(
+            lhs.contract_overwrite_into(
                 rhs,
                 destination,
-                zero_template,
                 lhs_axes,
                 rhs_axes,
                 output_axes,
@@ -1443,7 +1432,6 @@ where
             runtime: None,
             rule_identity: None,
             input_snapshot: Vec::new(),
-            reset_scratch: S::ResetScratch::default(),
         }
     }
 }
@@ -1486,35 +1474,32 @@ where
     /// complete provider-neutral validated layout conservatively; the Runtime
     /// budget therefore remains a ceiling even if that workspace is the last
     /// owner of a shared layout descendant. Runtime/provider owners are
-    /// detached while idle; the provider-neutral rule identity is charged, as
-    /// is the reset scratch (on the device, its zero template).
+    /// detached while idle; the provider-neutral rule identity is charged.
     pub(crate) fn retained_idle_bytes(&self) -> usize {
-        let mut bytes = S::reset_scratch_retained_bytes(&self.reset_scratch);
-        bytes = bytes.saturating_add(
-            self.slots
-                .capacity()
-                .saturating_mul(std::mem::size_of::<Option<TensorMap<R, D, S>>>())
-                .saturating_add(
-                    self.producers
-                        .capacity()
-                        .saturating_mul(std::mem::size_of::<Option<(usize, bool)>>()),
-                )
-                .saturating_add(
-                    self.intermediates
-                        .capacity()
-                        .saturating_mul(std::mem::size_of::<TypedIntermediateBuffers<R, D, S>>()),
-                )
-                .saturating_add(
-                    self.input_snapshot
-                        .capacity()
-                        .saturating_mul(std::mem::size_of::<TypedInputSnapshot>()),
-                )
-                .saturating_add(
-                    self.rule_identity
-                        .as_ref()
-                        .map_or(0, RuleIdentity::charged_retained_bytes),
-                ),
-        );
+        let mut bytes = self
+            .slots
+            .capacity()
+            .saturating_mul(std::mem::size_of::<Option<TensorMap<R, D, S>>>())
+            .saturating_add(
+                self.producers
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<Option<(usize, bool)>>()),
+            )
+            .saturating_add(
+                self.intermediates
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<TypedIntermediateBuffers<R, D, S>>()),
+            )
+            .saturating_add(
+                self.input_snapshot
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<TypedInputSnapshot>()),
+            )
+            .saturating_add(
+                self.rule_identity
+                    .as_ref()
+                    .map_or(0, RuleIdentity::charged_retained_bytes),
+            );
         for snapshot in &self.input_snapshot {
             bytes = bytes.saturating_add(
                 snapshot
@@ -1972,7 +1957,6 @@ impl PlannedNetwork {
         let slots = &mut workspace.slots;
         let producers = &mut workspace.producers;
         let intermediates = &mut workspace.intermediates;
-        let reset_scratch = &mut workspace.reset_scratch;
         for (step_index, step) in self.schedule.steps.iter().enumerate() {
             let retained_payloads = meter.as_ref().map(|_| intermediate_payloads(intermediates));
             let lhs = slots[step.lhs_slot].as_ref().ok_or_else(|| {
@@ -1996,7 +1980,6 @@ impl PlannedNetwork {
                 lhs,
                 rhs,
                 contract_buffer,
-                reset_scratch,
                 &step.lhs_contract_axes,
                 &step.rhs_contract_axes,
                 &step.contract_output_axes,
