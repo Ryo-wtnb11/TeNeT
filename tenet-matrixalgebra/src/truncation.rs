@@ -199,7 +199,15 @@ impl Truncation {
     }
 
     /// Bound the relative truncation error (weighted 2-norm of the discarded
-    /// tail) by `rtol`.
+    /// tail) by `rtol`: `error <= rtol * norm` up to a rounding slack of
+    /// `(n + 5) * f64::EPSILON` relative to the budget (`n` the total number
+    /// of values).
+    ///
+    /// A state whose discard meets the budget exactly, up to that rounding,
+    /// is discarded (TensorKit `SectorVector` `TruncationByError`, which
+    /// breaks on `> budget`; MatrixAlgebraKit's strict `>=` would keep it).
+    /// `rtol = 0` therefore discards exactly the zero values and nothing
+    /// else.
     pub fn relative_error(rtol: f64) -> Result<Self, TruncationError> {
         validate_nonnegative_finite(
             rtol,
@@ -488,21 +496,33 @@ fn kept_counts(spectra: &[WeightedSpectrum<'_>], truncation: &Truncation) -> Vec
             let norm = full_norm(spectra);
             let budget = (rtol * norm) * (rtol * norm);
             // Slack for the rounding of the two quantities compared, both of
-            // order `budget`: `norm^2` sums `n` weighted squares and `budget`
-            // adds a sqrt, a product and a square, `(n + 1)u + 4u`; the
-            // running `discarded` sums at most `n` more, `(n + 1)u` (Higham
-            // gamma bounds, `u = eps / 2`). Relative to `budget`, so rescaling
-            // the spectrum rescales the slack with it and cannot flip an exact
-            // decision; an absolute constant swamped tiny spectra and vanished
+            // order `budget` (`u = eps / 2`, `n` values, Higham gamma bounds
+            // in this exact evaluation order):
+            // - `discarded`: each term `(w * v) * v` rounds twice, then at
+            //   most `n - 1` sequential additions: `(n + 1)u`.
+            // - `norm^2`: `v * v`, the per-sector sum, `weight *` and the sum
+            //   over sectors: `(n + 1)u`. `budget = (rtol * sqrt(.))^2`
+            //   squares the sqrt and the `rtol *` roundings (`4u`) and rounds
+            //   once more: `(n + 6)u`.
+            // - `limit = budget * (1 + k eps)`: the factor is exact, the
+            //   product rounds once: `u`.
+            // Total `(2n + 8)u = (n + 4) eps` to first order; `n + 5` leaves
+            // one eps for the second-order terms.
+            //
+            // Relative to `budget`, so a power-of-two rescaling cannot move a
+            // decision; any other rescaling can move one only for a tail
+            // whose exact weight lies within about this slack of the budget.
+            // The former absolute `1e-15` swamped tiny spectra and vanished
             // for large ones. `f64::EPSILON` because every quantity here is
             // `f64` at every payload dtype (see the type-level docs).
             //
-            // MatrixAlgebraKit `_truncerr_impl` uses no slack; TensorKit's
-            // `SectorVector` `TruncationByError` discards while the running
-            // error is `<= budget`, which this keeps, so a budget met exactly
-            // up to rounding discards that state.
+            // MatrixAlgebraKit `_truncerr_impl` uses no slack and a strict
+            // `>=` break; TensorKit's `SectorVector` `TruncationByError`
+            // discards while the running error is `<= budget`, which this
+            // keeps, so a budget met exactly up to rounding discards that
+            // state.
             let values: usize = spectra.iter().map(|spectrum| spectrum.values.len()).sum();
-            let limit = budget * (1.0 + (values + 3) as f64 * f64::EPSILON);
+            let limit = budget * (1.0 + (values + 5) as f64 * f64::EPSILON);
             let mut kept: Vec<usize> = spectra
                 .iter()
                 .map(|spectrum| spectrum.values.len())
@@ -1030,7 +1050,7 @@ mod tests {
         let norm = full_norm(spectra);
         let budget = (rtol * norm) * (rtol * norm);
         let count: usize = spectra.iter().map(|spectrum| spectrum.values.len()).sum();
-        let limit = budget * (1.0 + (count + 3) as f64 * f64::EPSILON);
+        let limit = budget * (1.0 + (count + 5) as f64 * f64::EPSILON);
         let mut flat: Vec<(f64, usize, usize)> = spectra
             .iter()
             .enumerate()

@@ -1309,7 +1309,7 @@ fn double_precision_truncation_decisions_are_bitwise_unchanged() {
         // The budget is exactly the weight of the two smallest tails, so the
         // rounding slack is what decides: `0.1 * 0.1` twice sums to
         // `0.020000000000000004`, four ulps above the budget, and only the
-        // budget-relative `(n + 3) * eps` slack (#1333) lets the second tail
+        // budget-relative `(n + 5) * eps` slack (#1333) lets the second tail
         // go. Without it this case keeps 8.
         (
             Truncation::relative_error((1.0f64 / 90.0).sqrt()).unwrap(),
