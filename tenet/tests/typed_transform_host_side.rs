@@ -405,10 +405,11 @@ fn a_fermionic_twist_only_ever_keeps_or_negates_an_entry() {
         }
     }
 
-    // Twisting *every* leg is the identity on a parity-conserving block: the
-    // factors multiply to the block's total parity, which is even. So this is
-    // the identity short circuit, not a scaled copy — the device gate asserts
-    // the same case does no device work at all.
+    // Twisting *every* leg is the identity in value on a parity-conserving
+    // block: the factors multiply to the block's total parity, which is even.
+    // It is not a short circuit — the detection tests each leg's own factor,
+    // not the product — so the device gate expects the ordinary per-block
+    // work here, and this pins the value it must produce.
     for legs in [&[0usize, 1, 2, 3][..], &[0, 1, 2, 3, 0, 1, 2, 3][..]] {
         assert_eq!(tensor.twist(legs).unwrap().data(), tensor.data());
         assert_eq!(tensor.twist_inverse(legs).unwrap().data(), tensor.data());

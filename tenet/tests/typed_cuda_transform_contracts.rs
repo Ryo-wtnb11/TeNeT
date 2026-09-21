@@ -805,13 +805,19 @@ fn device_twist_short_circuits_do_no_device_work() {
         assert_eq!(result.to_host().unwrap().data(), expected);
     }
 
-    // Fermionic, but the identity all the same: the factors of *all* legs of a
-    // block multiply to its total parity, which is even.
+    // Fermionic, and the identity in *value* — the factors of all legs of a
+    // block multiply to its total parity, which is even — but not a short
+    // circuit: Host's detection tests each leg's own factor, not the product,
+    // so it publishes a fresh unscaled copy. The device does exactly the same
+    // work rather than inventing a cheaper answer.
+    let _ = fermionic.twist(&[0, 3]).unwrap();
     let (all_legs, counters) = delta(|| fermionic.twist(&[0, 1, 2, 3]).unwrap());
+    assert_eq!(counters.h2d_calls, 1, "{counters:?}");
+    assert_eq!(counters.device_allocs, 1, "{counters:?}");
     assert_eq!(
-        counters,
-        CudaTransferStats::default(),
-        "an all-legs fermionic twist is the identity: {counters:?}"
+        counters.gemm_calls,
+        fermionic_host.block_count() as u64,
+        "one submission per block, as for any other twist: {counters:?}"
     );
     assert_eq!(all_legs.to_host().unwrap().data(), fermionic_host.data());
 }
