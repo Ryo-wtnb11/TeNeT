@@ -197,8 +197,7 @@ mod device {
     /// because that marker excluded `f32`/`Complex32`, and expected a split
     /// into a base half and a factorization half; #1341 admitted both dtypes
     /// to the marker instead, so the rows are an instantiation and the harness
-    /// stays one piece. Device QR is narrower still ([`CudaQrPayload`]) and
-    /// keeps its own row set.
+    /// stays one piece. Device QR keeps its own row set (below).
     ///
     /// `CHECK_TOLERANCE` is the correctness verdict's bound, not a measured
     /// quantity. It is stated per real lane rather than shared, so a
@@ -1316,8 +1315,9 @@ mod device {
         }
     }
 
-    /// `qr_compact` admits the *real* device payloads only (`CudaQrPayload`),
-    /// so it is its own row set rather than part of `run_dtype`.
+    /// `qr_compact` rows, kept apart from `run_dtype` and real-payload only so
+    /// the pinned baseline CSVs keep their row set; device QR itself admits
+    /// every `CudaFactorizationPayload` since #1271.
     fn run_qr<R, D>(
         config: &Config,
         provider: &str,
@@ -1333,7 +1333,7 @@ mod device {
             + Send
             + Sync
             + 'static,
-        D: HarnessScalar + tenet::typed::CudaQrPayload,
+        D: HarnessScalar,
     {
         let labels = Labels {
             provider,

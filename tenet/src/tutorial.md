@@ -377,7 +377,7 @@ device factorization and the host primitives — `svd_compact` (or `eigh_full`),
 `to_host`, `diagview`, `GradedSpace::find_truncated`, then `restrict_leg` on
 the bond leg of `u`/`vh` (or `v`) and `restrict_diagonal` on `s` (or `d`); the
 factors move to the host once until a device `restrict_leg` lands. `qr_compact` returns the
-positive-diagonal gauge and is device-available for `f64` only.
+positive-diagonal gauge and is device-available for every device payload.
 
 ```rust
 use tenet::prelude::*;

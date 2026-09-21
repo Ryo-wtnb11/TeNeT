@@ -1217,8 +1217,7 @@ fn qr_region_f32() {
 /// failed like `Complex64` (#1271): the `triu` zero `E::cast_from(0u32)` did
 /// not compile for `cuFloatComplex` (tenferro-rs#1833). Tenferro 0.6.0 pins
 /// the t4a-cubecl 0.10.1 fix (#1837), so this probe now requires the
-/// reconstruction and gauge checks of `qr_case`. TeNeT's own complex device
-/// constant gate is unchanged until its leaf (#1271) lifts it.
+/// reconstruction and gauge checks of `qr_case`; #1271 admits it in TeNeT.
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn qr_region_c32() {
@@ -1250,19 +1249,11 @@ fn eigh_region_c32() {
 /// Device `solve` must reach the host residual `A x - b`, and device `lu` must
 /// reconstruct `P A = L U` with `L` lower and `U` upper triangular, all checked
 /// on the host against the host fixture, never against device output alone.
-fn lu_solve_case<D: ProbeScalar>(probe: &mut Probe) {
-    // Diagonally dominant 3x3, column-major.
-    let a: Vec<D> = vec![
-        D::from_parts(4.0, 0.0),
-        D::from_parts(1.0, 0.5),
-        D::from_parts(0.0, -0.25),
-        D::from_parts(1.0, -0.5),
-        D::from_parts(5.0, 0.0),
-        D::from_parts(1.0, 0.25),
-        D::from_parts(0.0, 0.25),
-        D::from_parts(1.0, -0.25),
-        D::from_parts(6.0, 0.0),
-    ];
+///
+/// `expected_p[row]` is the column of the one in row `row` of `P`, from partial
+/// pivoting by hand.
+fn lu_solve_case<D: ProbeScalar>(probe: &mut Probe, a: [(f64, f64); 9], expected_p: [usize; 3]) {
+    let a: Vec<D> = a.iter().map(|&(re, im)| D::from_parts(re, im)).collect();
     let b: Vec<D> = vec![
         D::from_parts(1.0, 0.5),
         D::from_parts(-2.0, 0.25),
@@ -1316,6 +1307,16 @@ fn lu_solve_case<D: ProbeScalar>(probe: &mut Probe) {
             let u = probe.download::<D>(&u);
             // Column-major 3x3: entry (row, col) is at `col * 3 + row`.
             let at = |m: &[D], row: usize, col: usize| m[col * 3 + row];
+            for (row, &one) in expected_p.iter().enumerate() {
+                for col in 0..3 {
+                    let want = if col == one {
+                        D::from_parts(1.0, 0.0)
+                    } else {
+                        D::ZERO
+                    };
+                    assert_eq!(at(&p, row, col), want, "{} lu P[{row},{col}]", D::NAME);
+                }
+            }
             let a_max = a.iter().map(|&x| x.magnitude()).fold(0.0_f64, f64::max);
             let tol = 16.0 * 3.0 * D::EPS * a_max;
             let mut worst = 0.0_f64;
@@ -1346,17 +1347,49 @@ fn lu_solve_case<D: ProbeScalar>(probe: &mut Probe) {
     }
 }
 
+/// Diagonally dominant, column-major: partial pivoting keeps `P = I`.
+const DOMINANT: [(f64, f64); 9] = [
+    (4.0, 0.0),
+    (1.0, 0.5),
+    (0.0, -0.25),
+    (1.0, -0.5),
+    (5.0, 0.0),
+    (1.0, 0.25),
+    (0.0, 0.25),
+    (1.0, -0.25),
+    (6.0, 0.0),
+];
+
+/// Rows `[0, 8+i/4, 0]`, `[2, 1, 0]`, `[4, 0, 1-i/2]`, column-major: a zero
+/// leading pivot. Step 1 swaps rows 1 and 3 (`|4|` is largest), step 2 swaps
+/// rows 2 and 3 (`|8+i/4| > |1|`), so `P A = [A_3; A_1; A_2]`. That `P` is a
+/// 3-cycle, not symmetric, so `P A = L U` and `A = P L U` disagree on it — the
+/// diagonally dominant fixture cannot tell the two conventions apart.
+const ROW_SWAP: [(f64, f64); 9] = [
+    (0.0, 0.0),
+    (2.0, 0.0),
+    (4.0, 0.0),
+    (8.0, 0.25),
+    (1.0, 0.0),
+    (0.0, 0.0),
+    (0.0, 0.0),
+    (0.0, 0.0),
+    (1.0, -0.5),
+];
+
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn lu_and_solve_behaviour_f32() {
-    lu_solve_case::<f32>(&mut Probe::new());
+    lu_solve_case::<f32>(&mut Probe::new(), DOMINANT, [0, 1, 2]);
+    lu_solve_case::<f32>(&mut Probe::new(), ROW_SWAP, [2, 0, 1]);
 }
 
 /// `Complex32` `lu`/`solve` shared the #1833 complex-constant kernel defect
 /// with QR up to Tenferro 0.5.0; 0.6.0 carries the fix (#1837), so the probe
-/// now asserts the host oracles. TeNeT still keeps them unsupported (#1271).
+/// asserts the host oracles. TeNeT exposes no device `lu`/`solve`.
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn lu_and_solve_behaviour_c32() {
-    lu_solve_case::<Complex32>(&mut Probe::new());
+    lu_solve_case::<Complex32>(&mut Probe::new(), DOMINANT, [0, 1, 2]);
+    lu_solve_case::<Complex32>(&mut Probe::new(), ROW_SWAP, [2, 0, 1]);
 }

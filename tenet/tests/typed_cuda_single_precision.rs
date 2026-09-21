@@ -1093,15 +1093,12 @@ fn single_precision_costs_the_same_device_calls_and_half_the_bytes() {
 // ---------------------------------------------------------------------------
 
 /// The admission table itself, as a compile-time fact: the base and
-/// factorization device families are open for all four payloads, and device QR
-/// for the two real ones. The negative half — a complex device QR, and a
-/// generic body that names only the wider marker — is pinned by the
-/// `compile_fail` doctests; this is their positive twin.
+/// factorization device families (device QR included, #1271) are open for all
+/// four payloads.
 #[test]
 fn the_device_admission_markers_hold_exactly_where_the_table_says() {
     fn device_payload<D: tenet::typed::CudaPayload>() {}
     fn device_factorization_payload<D: tenet::typed::CudaFactorizationPayload>() {}
-    fn device_qr_payload<D: tenet::typed::CudaQrPayload>() {}
 
     device_payload::<f64>();
     device_payload::<Complex64>();
@@ -1112,40 +1109,6 @@ fn the_device_admission_markers_hold_exactly_where_the_table_says() {
     device_factorization_payload::<Complex64>();
     device_factorization_payload::<f32>();
     device_factorization_payload::<Complex32>();
-
-    device_qr_payload::<f64>();
-    device_qr_payload::<f32>();
-}
-
-/// The `CudaQrPayload` membership is a projection of the adapter capability
-/// constant, and the constant is the authority.
-///
-/// The static assertion beside the marker enforces the same equality at
-/// compile time; this is the runtime statement of it, so the relationship is
-/// visible from the test suite and not only from a `const` block.
-#[test]
-fn device_qr_admission_follows_the_adapter_capability_constant() {
-    use tenet::dense::CudaScalar;
-
-    for (name, has_kernels, admitted) in [
-        ("f64", <f64 as CudaScalar>::DEVICE_CONSTANT_KERNELS, true),
-        ("f32", <f32 as CudaScalar>::DEVICE_CONSTANT_KERNELS, true),
-        (
-            "c64",
-            <Complex64 as CudaScalar>::DEVICE_CONSTANT_KERNELS,
-            false,
-        ),
-        (
-            "c32",
-            <Complex32 as CudaScalar>::DEVICE_CONSTANT_KERNELS,
-            false,
-        ),
-    ] {
-        assert_eq!(
-            has_kernels, admitted,
-            "{name}: device QR admission and DEVICE_CONSTANT_KERNELS disagree"
-        );
-    }
 }
 
 /// The rejection order does not depend on the payload dtype: a runtime built
