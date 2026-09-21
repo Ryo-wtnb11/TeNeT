@@ -37,6 +37,10 @@
 #[cfg(test)]
 extern crate self as tenet_network;
 
+#[cfg(test)]
+#[path = "../../tenet/tests/braiding_probe/mod.rs"]
+mod braiding_probe;
+
 mod cost;
 #[cfg(feature = "cotengra-python")]
 mod cotengra_python;

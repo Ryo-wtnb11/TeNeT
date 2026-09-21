@@ -204,8 +204,13 @@ fn concurrent_macro_calls_share_one_plan_and_bound_idle_pool() {
     assert!(stats.workspaces_created >= stats.idle_workspaces as u64);
 }
 
+/// #1371: an operand from another Runtime is a metadata rejection, decided
+/// before the plan lookup, so it leases (and quarantines) no workspace and the
+/// next valid call reuses the idle one. Quarantine of a lease whose execution
+/// fails is the lease-level `panic_quarantines_typed_workspace_lease` unit
+/// test; after the preflight only a runtime fault can fail an execution.
 #[test]
-fn failed_execution_quarantines_lease_and_next_valid_call_rebuilds() {
+fn a_metadata_rejection_leases_no_workspace_and_the_next_call_reuses_the_idle_one() {
     let runtime = Runtime::builder().build().unwrap();
     let other = Runtime::builder().build().unwrap();
     let local_space = space(Arc::new(U1FusionRule), 2);
@@ -213,10 +218,12 @@ fn failed_execution_quarantines_lease_and_next_valid_call_rebuilds() {
     let (a, b) = pair(&runtime, &local_space, 100);
     let (_, foreign) = pair(&other, &other_space, 110);
     drop(tensor!([i; k] = a[i; j] * b[j; k]).unwrap());
+    let warm = plan_cache_stats(&runtime);
     assert!(tensor!([i; k] = a[i; j] * foreign[j; k]).is_err());
+    assert_eq!(plan_cache_stats(&runtime), warm);
     drop(tensor!([i; k] = a[i; j] * b[j; k]).unwrap());
     let stats = plan_cache_stats(&runtime);
-    assert_eq!(stats.workspaces_created, 2);
+    assert_eq!(stats.workspaces_created, 1);
     assert_eq!(stats.workspace_reuses, 1);
     assert_eq!(stats.idle_workspaces, 1);
     assert_eq!(stats.workspace_byte_rejections, 0);

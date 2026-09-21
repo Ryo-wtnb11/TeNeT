@@ -1146,12 +1146,21 @@ fn install_static_alias(
 /// Static macro planning over reduced typed operands. `codomain_ranks` are
 /// from the original expressions and guard trace/conj lowering; dimensions
 /// and the structural plan come from `tensors` after call-local trace lowering.
+///
+/// Hits, misses, promotions and static aliases record the lookup, not the
+/// execution, so every caller decides each metadata rejection of its operands
+/// before calling this (#1371). A later execution failure is then a runtime
+/// fault of a plan that stays valid for these operands: the lookup stays
+/// counted, and only the workspace leased for that call is quarantined.
+///
+/// Why not count a hit only after a successful execution: a miss publishes
+/// the fresh plan before it runs, and withdrawing a valid plan (or its hit)
+/// on a provider or device fault would only cost the next call a search.
 pub(crate) fn get_or_plan_static<R, D, S>(
     spec: &'static StaticTopologySpec,
     tensors: &[&TensorMap<R, D, S>],
     codomain_ranks: &[usize],
     optimizer: &Optimizer,
-    validate_plan: impl Fn(&PlannedNetwork) -> Result<(), Error>,
     make_network: impl FnOnce() -> Result<Network, Error>,
 ) -> Result<CachedPlan, HostNetworkError<R>>
 where
@@ -1193,7 +1202,6 @@ where
             let Some(cached) = alias.cached() else {
                 return Ok(Lookup::Miss);
             };
-            validate_plan(&cached.planned)?;
             let topology = alias.topology.clone();
             cache.static_aliases.promote(&key);
             Ok(match promote_if_resident(cache, &topology, cached) {
@@ -1208,7 +1216,6 @@ where
     let network = make_network().map_err(HostNetworkError::<R>::from)?;
     if matches!(lookup, Lookup::Disabled) {
         let planned = Arc::new(plan_fresh(&network, tensors, optimizer)?);
-        validate_plan(&planned).map_err(HostNetworkError::<R>::from)?;
         return Ok(CachedPlan {
             planned,
             workspaces: Arc::new(WorkspacePools::unpooled()),
@@ -1237,7 +1244,6 @@ where
             // most-recently-used with an O(1) `promote`.
             match cache.map.peek(&topology) {
                 Some(entry) if !needs_replan(config.replan, &entry.dims_snapshot, &dims) => {
-                    validate_plan(&entry.planned).map_err(HostNetworkError::<R>::from)?;
                     let planned = CachedPlan {
                         planned: Arc::clone(&entry.planned),
                         workspaces: Arc::clone(&entry.workspaces),
@@ -1294,7 +1300,6 @@ where
             (fresh, plan_copy)
         }
     };
-    validate_plan(&planned).map_err(HostNetworkError::<R>::from)?;
     let workspace_budget = runtime.with_plan_cache(|config, slot| {
         Arc::clone(&cache_mut(slot, config.workspace_budget_bytes).workspace_budget)
     });
@@ -1315,7 +1320,6 @@ where
             }
             let cached = match cache.map.peek(&topology) {
                 Some(entry) if !needs_replan(config.replan, &entry.dims_snapshot, &dims) => {
-                    validate_plan(&entry.planned).map_err(HostNetworkError::<R>::from)?;
                     cache.hits += 1;
                     CachedPlan {
                         planned: Arc::clone(&entry.planned),
@@ -1372,6 +1376,7 @@ mod tests {
     use std::time::Duration;
     use tenet::core::{SU2FusionRule, U1FusionRule};
     use tenet::prelude::Complex64;
+    use tenet::typed::{GradedSpace, TensorMap};
 
     #[cfg(feature = "cotengra-python")]
     #[test]
@@ -1394,125 +1399,298 @@ mod tests {
         assert_eq!(config.timeout, Some(Duration::from_secs(1)));
     }
 
-    /// G2c-3 (#1348): a plan the placement-specific `validate_plan` rejects
-    /// is never published, promoted or counted, on every lookup path of
-    /// `get_or_plan_static` — disabled cache, miss, topology hit and static
-    /// alias hit. The device preflight relies on exactly this.
-    #[test]
-    fn a_rejected_plan_leaves_the_cache_untouched_on_every_path() {
-        use super::{
-            configure_plan_cache, existing_cache_mut, get_or_plan_static, plan_cache_stats,
-            PlanCacheConfig, StaticTopologySpec,
-        };
-        use crate::network::PlannedNetwork;
-        use tenet::core::U1Irrep;
-        use tenet::prelude::{Error, Runtime};
-        use tenet::typed::{GradedSpace, TensorMap};
+    /// Plan-cache state a metadata rejection must leave as it was: every
+    /// counter and workspace statistic, and the static aliases.
+    #[derive(Debug, PartialEq)]
+    struct CacheState {
+        stats: super::PlanCacheStats,
+        aliases: Option<usize>,
+    }
 
-        fn spec(labels: [&'static str; 3]) -> &'static StaticTopologySpec {
-            let [i, j, k] = labels;
-            Box::leak(Box::new(StaticTopologySpec {
-                inputs: Box::leak(Box::new([
-                    &*Box::leak(Box::new([i, j])) as &[&str],
-                    &*Box::leak(Box::new([j, k])),
-                ])),
-                conj: &[false, false],
-                codomain_splits: &[Some(1), Some(1)],
-                output: Box::leak(Box::new([i, k])),
-                output_codomain_rank: Some(1),
-            }))
-        }
-        let reject = |_: &PlannedNetwork| Err(Error::UnsupportedOnDevice("test".to_string()));
-        let accept = |_: &PlannedNetwork| Ok(());
-        let lookup =
-            |_runtime: &Runtime,
-             tensors: &[&TensorMap<U1FusionRule, f64>],
-             spec: &'static StaticTopologySpec,
-             validate: &dyn Fn(&PlannedNetwork) -> Result<(), Error>| {
-                get_or_plan_static(
-                    spec,
-                    tensors,
-                    &[1, 1],
-                    &Default::default(),
-                    validate,
-                    || spec.network(),
-                )
-                .map(drop)
-            };
-        let aliases = |runtime: &Runtime| {
-            runtime.with_extension_slot(|slot| {
-                existing_cache_mut(slot).map(|cache| {
+    fn cache_state(runtime: &tenet::prelude::Runtime) -> CacheState {
+        CacheState {
+            stats: super::plan_cache_stats(runtime),
+            aliases: runtime.with_extension_slot(|slot| {
+                super::existing_cache_mut(slot).map(|cache| {
                     cache
                         .static_aliases
                         .iter()
                         .map(|(_, aliases)| aliases.len())
                         .sum::<usize>()
                 })
-            })
-        };
+            }),
+        }
+    }
 
-        let runtime = Runtime::builder().build().unwrap();
-        let space =
-            GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
-        let a = TensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&space], [&space], 1)
-            .unwrap();
-        let b = TensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&space], [&space], 2)
-            .unwrap();
-        let tensors = [&a, &b];
-        let spec_ijk = spec(["i", "j", "k"]);
+    type Call<'a> = &'a dyn Fn() -> Result<(), String>;
 
-        // Disabled cache: nothing to publish, and the rejection still wins.
-        configure_plan_cache(
-            &runtime,
-            PlanCacheConfig {
-                enabled: false,
-                ..Default::default()
-            },
-        );
-        let disabled = plan_cache_stats(&runtime);
-        assert!(lookup(&runtime, &tensors, spec_ijk, &reject).is_err());
-        assert_eq!(plan_cache_stats(&runtime), disabled, "disabled");
-        configure_plan_cache(&runtime, PlanCacheConfig::default());
-
-        // Miss: the rejected fresh plan is not inserted and no miss is counted.
-        let empty = plan_cache_stats(&runtime);
-        let empty_aliases = aliases(&runtime);
-        assert!(lookup(&runtime, &tensors, spec_ijk, &reject).is_err());
-        assert_eq!(plan_cache_stats(&runtime), empty, "miss");
-        assert_eq!(aliases(&runtime), empty_aliases, "miss aliases");
-
-        // Publish once. With the static aliases dropped the next lookup is a
-        // topology hit; with them in place it is an alias hit. Rejecting
-        // either counts no hit, promotes nothing and installs no alias.
-        lookup(&runtime, &tensors, spec_ijk, &accept).unwrap();
-        let clear_aliases = |runtime: &Runtime| {
+    /// #1371: `reject` is rejected on the plan-cache miss, topology-hit and
+    /// static-alias-hit paths of the `tensor!` site that `accept` publishes,
+    /// leaving [`CacheState`] and `extra` (device transfers) unchanged, with
+    /// one error on every path, which is returned.
+    fn assert_rejected_before_the_lookup<X: PartialEq + std::fmt::Debug>(
+        runtime: &tenet::prelude::Runtime,
+        what: &str,
+        accept: Call<'_>,
+        reject: Call<'_>,
+        extra: &dyn Fn() -> X,
+    ) -> String {
+        let clear_aliases = || {
             runtime.with_extension_slot(|slot| {
-                existing_cache_mut(slot).unwrap().static_aliases.clear();
+                super::existing_cache_mut(slot)
+                    .unwrap()
+                    .static_aliases
+                    .clear();
             })
         };
-        let published = plan_cache_stats(&runtime);
-        assert_eq!(published.entries, 1);
-        for (path, drop_aliases) in [("topology hit", true), ("alias hit", false)] {
-            if drop_aliases {
-                clear_aliases(&runtime);
-            }
-            let before = plan_cache_stats(&runtime);
-            let before_aliases = aliases(&runtime);
-            assert_eq!(
-                before_aliases,
-                Some(usize::from(!drop_aliases)),
-                "{path} setup"
+        let rejected = |path: &str| {
+            let before = (cache_state(runtime), extra());
+            let error = reject().expect_err(what);
+            assert_eq!((cache_state(runtime), extra()), before, "{what}: {path}");
+            error
+        };
+
+        super::clear_plan_cache(runtime);
+        let error = rejected("miss");
+        assert_eq!(super::plan_cache_stats(runtime).entries, 0, "{what}");
+
+        accept().unwrap();
+        clear_aliases();
+        assert_eq!(cache_state(runtime).aliases, Some(0), "{what}: setup");
+        assert_eq!(rejected("topology hit"), error, "{what}: topology hit");
+        // Non-vacuity: the same site accepted is a topology hit, which
+        // installs the alias the next rejection meets.
+        let hits = super::plan_cache_stats(runtime).hits;
+        accept().unwrap();
+        assert_eq!(super::plan_cache_stats(runtime).hits, hits + 1, "{what}");
+        assert_eq!(cache_state(runtime).aliases, Some(1), "{what}: alias");
+
+        assert_eq!(rejected("alias hit"), error, "{what}: alias hit");
+        let hits = super::plan_cache_stats(runtime).hits;
+        accept().unwrap();
+        assert_eq!(super::plan_cache_stats(runtime).hits, hits + 1, "{what}");
+        error
+    }
+
+    /// The two `tensor!` sites of the #1371 tests, one untraced and one with a
+    /// trace pre-step whose reduced network is `[i; m] * [m; k]`. Each is one
+    /// spec for every provider and storage, so a probe operand meets the plan
+    /// a U(1) operand of the same leg dimensions published.
+    fn pair<R, S>(a: &TensorMap<R, f64, S>, b: &TensorMap<R, f64, S>) -> Result<(), String>
+    where
+        TensorMap<R, f64, S>: crate::StaticNetworkOperand,
+        <TensorMap<R, f64, S> as crate::StaticNetworkOperand>::Error: std::fmt::Display,
+    {
+        crate::tensor!([i; k] = a[i; j] * b[j; k])
+            .map(drop)
+            .map_err(|error| error.to_string())
+    }
+
+    fn traced<R, S>(t: &TensorMap<R, f64, S>, u: &TensorMap<R, f64, S>) -> Result<(), String>
+    where
+        TensorMap<R, f64, S>: crate::StaticTraceNetworkOperand,
+        <TensorMap<R, f64, S> as crate::StaticNetworkOperand>::Error: std::fmt::Display,
+    {
+        crate::tensor!([i; k] = t[j, i; j, m] * u[m; k])
+            .map(drop)
+            .map_err(|error| error.to_string())
+    }
+
+    /// The operands of the #1371 tests, every leg of dimension 2: `v` has two
+    /// sectors, `w` one, and `v*` is `v`'s dual.
+    struct Rejections<T, P> {
+        a: T,
+        b: T,
+        b_sector: T,
+        b_dual: T,
+        t: T,
+        u_sector: T,
+        u_dual: T,
+        probe_a: P,
+        probe_b: P,
+        probe_t: P,
+    }
+
+    type ProbeMap<const ANYONIC: bool> =
+        TensorMap<crate::braiding_probe::RealBraidingProbe<ANYONIC>, f64>;
+
+    fn rejections(
+        runtime: &tenet::prelude::Runtime,
+    ) -> Rejections<TensorMap<U1FusionRule, f64>, ProbeMap<true>> {
+        use crate::braiding_probe::{ProbeSector, RealBraidingProbe};
+        use tenet::core::U1Irrep;
+        let provider = Arc::new(U1FusionRule);
+        let v = GradedSpace::try_new_with_arc(
+            Arc::clone(&provider),
+            [(U1Irrep::new(0), 1), (U1Irrep::new(1), 1)],
+        )
+        .unwrap();
+        let w = GradedSpace::try_new_with_arc(provider, [(U1Irrep::new(0), 2)]).unwrap();
+        let v_dual = v.try_dual().unwrap();
+        let p = GradedSpace::try_new(RealBraidingProbe::<true>, [(ProbeSector, 2)]).unwrap();
+        let u1 = |codomain: &[&GradedSpace<U1FusionRule>],
+                  domain: &[&GradedSpace<U1FusionRule>],
+                  seed| {
+            TensorMap::<U1FusionRule, f64>::rand_with_seed(
+                runtime,
+                codomain.iter().copied(),
+                domain.iter().copied(),
+                seed,
+            )
+            .unwrap()
+        };
+        let probe = |rank: usize, seed| {
+            TensorMap::rand_with_seed(runtime, vec![&p; rank], vec![&p; rank], seed).unwrap()
+        };
+        Rejections {
+            a: u1(&[&v], &[&v], 1_371_000),
+            b: u1(&[&v], &[&v], 1_371_001),
+            b_sector: u1(&[&w], &[&v], 1_371_002),
+            b_dual: u1(&[&v_dual], &[&v], 1_371_003),
+            t: u1(&[&v, &v], &[&v, &v], 1_371_004),
+            u_sector: u1(&[&w], &[&v], 1_371_005),
+            u_dual: u1(&[&v_dual], &[&v], 1_371_006),
+            probe_a: probe(1, 1_371_007),
+            probe_b: probe(1, 1_371_008),
+            probe_t: probe(2, 1_371_009),
+        }
+    }
+
+    /// #1371: a Host `tensor!` whose operands after any trace pre-step are
+    /// inadmissible from metadata alone — a contracted leg of another sector
+    /// structure or of the wrong duality, or a non-symmetric braiding that
+    /// contracts — is rejected before the plan-cache lookup on the miss,
+    /// topology-hit and alias-hit paths: counters, workspaces and static
+    /// aliases stay as they were, and the error is one text on every path,
+    /// the typed `contract`'s for braiding. A traced network is rejected
+    /// before its trace runs.
+    #[test]
+    fn host_metadata_rejections_leave_the_plan_cache_untouched_on_every_path() {
+        let runtime = tenet::prelude::Runtime::builder().build().unwrap();
+        let o = rejections(&runtime);
+        let none = || ();
+        let accept_pair = || pair(&o.a, &o.b);
+        let accept_traced = || traced(&o.t, &o.b);
+        for (what, accept, reject, label) in [
+            (
+                "sector",
+                &accept_pair as Call<'_>,
+                &(|| pair(&o.a, &o.b_sector)) as Call<'_>,
+                "j",
+            ),
+            ("duality", &accept_pair, &|| pair(&o.a, &o.b_dual), "j"),
+            (
+                "traced sector",
+                &accept_traced,
+                &|| traced(&o.t, &o.u_sector),
+                "m",
+            ),
+            (
+                "traced duality",
+                &accept_traced,
+                &|| traced(&o.t, &o.u_dual),
+                "m",
+            ),
+        ] {
+            let error = assert_rejected_before_the_lookup(&runtime, what, accept, reject, &none);
+            assert!(
+                error.starts_with(&format!(
+                    "invalid argument: space mismatch for contracted label `{label}` between operand 0 leg 1 and operand 1 leg 0"
+                )),
+                "{what}: {error}"
             );
-            assert!(lookup(&runtime, &tensors, spec_ijk, &reject).is_err());
-            assert_eq!(plan_cache_stats(&runtime), before, "{path}");
-            assert_eq!(aliases(&runtime), before_aliases, "{path} aliases");
-            // Non-vacuity: the same lookup accepted is a hit of this path
-            // (the topology hit reinstalls the alias the next pass uses).
-            lookup(&runtime, &tensors, spec_ijk, &accept).unwrap();
-            let hit = plan_cache_stats(&runtime);
-            assert_eq!((hit.entries, hit.misses), (1, published.misses), "{path}");
-            assert_eq!(hit.hits, before.hits + 1, "{path} counted");
-            assert_eq!(aliases(&runtime), Some(1), "{path} alias installed");
+        }
+
+        let contract_error = o
+            .probe_a
+            .contract(&o.probe_b, &[1], &[0], &[0, 1])
+            .unwrap_err()
+            .to_string();
+        for (what, accept, reject) in [
+            (
+                "non-symmetric",
+                &accept_pair as Call<'_>,
+                &(|| pair(&o.probe_a, &o.probe_b)) as Call<'_>,
+            ),
+            ("traced non-symmetric", &accept_traced, &|| {
+                traced(&o.probe_t, &o.probe_b)
+            }),
+        ] {
+            let error = assert_rejected_before_the_lookup(&runtime, what, accept, reject, &none);
+            assert_eq!(error, contract_error, "{what}");
+        }
+    }
+
+    /// #1371 on the device: the same rejections, before any trace upload,
+    /// lease or plan lookup, with the Host's error.
+    ///
+    /// The transfer counters are process-wide: run with `--test-threads=1`.
+    #[cfg(feature = "cuda")]
+    #[test]
+    #[ignore = "requires a real CUDA device"]
+    fn device_metadata_rejections_leave_the_plan_cache_and_device_untouched_on_every_path() {
+        let runtime = tenet::prelude::Runtime::builder()
+            .cuda(0)
+            .dense_threads(1)
+            .build()
+            .unwrap();
+        let h = rejections(&runtime);
+        let lift = |tensor: &TensorMap<U1FusionRule, f64>| tensor.to_cuda().unwrap();
+        let (a, b, b_sector, b_dual) = (lift(&h.a), lift(&h.b), lift(&h.b_sector), lift(&h.b_dual));
+        let (t, u_sector, u_dual) = (lift(&h.t), lift(&h.u_sector), lift(&h.u_dual));
+        let (probe_a, probe_b, probe_t) = (
+            h.probe_a.to_cuda().unwrap(),
+            h.probe_b.to_cuda().unwrap(),
+            h.probe_t.to_cuda().unwrap(),
+        );
+        let transfers = tenet::dense::cuda_transfer_stats;
+        let accept_pair = || pair(&a, &b);
+        let accept_traced = || traced(&t, &b);
+        // Warm the device context so lazily created state is not attributed
+        // to the rejected calls.
+        accept_pair().unwrap();
+        accept_traced().unwrap();
+        for (what, accept, reject, host) in [
+            (
+                "sector",
+                &accept_pair as Call<'_>,
+                &(|| pair(&a, &b_sector)) as Call<'_>,
+                pair(&h.a, &h.b_sector),
+            ),
+            (
+                "duality",
+                &accept_pair,
+                &|| pair(&a, &b_dual),
+                pair(&h.a, &h.b_dual),
+            ),
+            (
+                "traced sector",
+                &accept_traced,
+                &|| traced(&t, &u_sector),
+                traced(&h.t, &h.u_sector),
+            ),
+            (
+                "traced duality",
+                &accept_traced,
+                &|| traced(&t, &u_dual),
+                traced(&h.t, &h.u_dual),
+            ),
+            (
+                "non-symmetric",
+                &accept_pair,
+                &|| pair(&probe_a, &probe_b),
+                pair(&h.probe_a, &h.probe_b),
+            ),
+            (
+                "traced non-symmetric",
+                &accept_traced,
+                &|| traced(&probe_t, &probe_b),
+                traced(&h.probe_t, &h.probe_b),
+            ),
+        ] {
+            let error =
+                assert_rejected_before_the_lookup(&runtime, what, accept, reject, &transfers);
+            assert_eq!(Err(error), host, "{what}");
         }
     }
 

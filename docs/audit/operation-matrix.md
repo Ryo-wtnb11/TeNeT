@@ -207,8 +207,10 @@ the hand-valued fZ2 supertrace) and by the unmerged-index oracle of
 on device with this `trace_pairs` (G2c-5,
 [#1350](https://github.com/Ryo-wtnb11/TeNeT/issues/1350)): every trace of the
 expression is validated and compiled on the Host before the first executes,
-so a trace rejection on any operand leaves the device untouched; the reduced
-network then takes the device network path. Each traced operand costs its own
+so a trace rejection on any operand leaves the device untouched; a
+contracted-leg mismatch between the reduced operands is decided from their
+spaces before any trace runs (#1371); the reduced network then takes the
+device network path. Each traced operand costs its own
 #740 output upload on every call (trace outputs are call-local, as on Host,
 not retained workspace). Gated by the trace gates of
 `tenet-network/tests/typed_cuda_network.rs` (device == Host `tensor!`, and the
@@ -285,8 +287,15 @@ destinations of every intermediate step through the device
 `contract_overwrite_into` and `permute_overwrite_into`. Since
 [#1348](https://github.com/Ryo-wtnb11/TeNeT/issues/1348) the schedule is not
 restricted: device admission (placement, compact operands, non-symmetric braiding)
-is decided from the schedule and operand metadata before the plan cache
-publishes or a workspace is leased, gated in
+is decided from the operand count and metadata before the plan-cache lookup
+or a workspace lease. Since
+[#1371](https://github.com/Ryo-wtnb11/TeNeT/issues/1371) the same holds for
+the storage-generic metadata rejections of a Host or device `tensor!` network
+(non-symmetric braiding that contracts, then a contracted-leg space or duality
+mismatch after any trace pre-step): a rejection counts no hit or miss,
+installs no static alias and leases no workspace, on the miss, topology-hit
+and alias-hit paths (the `metadata_rejections` unit tests of
+`tenet-network/src/plancache.rs`). Device execution is gated in
 `tenet-network/tests/typed_cuda_network.rs` against the Host `tensor!` run
 (U(1), SU(2), U(1)×SU(2), fZ2×U(1), fZ2⊠SU(2)) and the physical-basis dense
 expansion (U(1), SU(2)); a warm general network transfers and allocates only
