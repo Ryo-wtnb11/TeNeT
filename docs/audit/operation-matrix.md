@@ -32,7 +32,7 @@ exercised by the suite; none of these columns proves arbitrary moduli, products,
 or recursively nested `ProductFusionRule` values.
 
 | Operation family | U(1) | Z2 | ZN(3) | CU(1) | fZ2 | SU(2) | fZ2 x U(1) | (fZ2 x U(1)) x SU(2) | checked Generic seam [1] | Fibonacci |
-|---|---|---|---|---|---|---|---|---|---|---|
+|---|---|---|---|---|---|---|---|---|---|---|---|
 | Space/tensor construction and labelled block readback | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED |
 | Physical dense expansion and symmetric projection [2] | PROVED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | PROVED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
 | `adjoint` | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | UNSUPPORTED |
@@ -113,21 +113,44 @@ trivial/dense provider exists.
 
 ## Storage and device matrix
 
-| Capability | Host MF `Vec<D>` | Host checked Generic `Vec<D>` | other Host-readable `S` | CUDA f64 MF | CUDA f64 checked Generic | CUDA c64 |
+| Capability | Host MF `Vec<D>` | Host checked Generic `Vec<D>` | other Host-readable `S` | CUDA f64 MF | CUDA f64 checked Generic | CUDA c64 | CUDA f32/c32 MF [10] |
 |---|---|---|---|---|---|---|
-| Metadata, provider ownership, handle clone | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED |
-| Stable `data() -> &[D]` | PROVED | PROVED | INTENTIONAL-DIFFERENCE | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
-| Physical expansion/projection [2] | PROVED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
-| Explicit Host/device transfer | PROVED | PROVED | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/3) | PROVED | PROVED | PROVED |
-| Lazy adjoint | PROVED | PROVED | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/3) | PROVED | UNSUPPORTED | PROVED |
-| Permute/braid/recoupling | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | PROVED |
-| Canonical contraction/compose | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | PROVED |
-| Arithmetic/reductions | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | PROVED |
-| SVD/EIGH [9] | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | PROVED |
-| QR | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | [UNSUPPORTED](https://github.com/Ryo-wtnb11/TeNeT/issues/1270) |
-| EIG/null/polar/solve/matrix functions | PROVED | PROVED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
-| Network ordinary replay [8] | PROVED | PROVED | INTENTIONAL-DIFFERENCE | PROVED | UNSUPPORTED | PROVED |
-| v1 typed snapshot (`f64`/`Complex64`) [7] | PROVED | PROVED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
+| Metadata, provider ownership, handle clone | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED |
+| Stable `data() -> &[D]` | PROVED | PROVED | INTENTIONAL-DIFFERENCE | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
+| Physical expansion/projection [2] | PROVED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
+| Explicit Host/device transfer | PROVED | PROVED | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/3) | PROVED | PROVED | PROVED | PROVED |
+| Lazy adjoint | PROVED | PROVED | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/3) | PROVED | UNSUPPORTED | PROVED | PROVED |
+| Permute/braid/recoupling | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | PROVED | PROVED |
+| Canonical contraction/compose | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | PROVED | PROVED |
+| Arithmetic/reductions | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | PROVED | INTENTIONAL-DIFFERENCE [10] |
+| SVD/EIGH [9] | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED [10] |
+| QR | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | [UNSUPPORTED](https://github.com/Ryo-wtnb11/TeNeT/issues/1270) | UNSUPPORTED [10] |
+| EIG/null/polar/solve/matrix functions | PROVED | PROVED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
+| Network ordinary replay [8] | PROVED | PROVED | INTENTIONAL-DIFFERENCE | PROVED | UNSUPPORTED | PROVED | PROVED |
+| v1 typed snapshot (`f64`/`Complex64`) [7] | PROVED | PROVED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
+
+[10] The `CUDA f32/c32 MF` column is the single-precision device payload of
+[#1336](https://github.com/Ryo-wtnb11/TeNeT/issues/1336) (leaf C2), gated by
+`tenet/tests/typed_cuda_single_precision.rs` and the two `single_precision_*`
+gates of `tenet-network/tests/typed_cuda_network.rs`. Every cell is one generic
+body instantiated for all four device dtypes against the host result *of the
+same dtype*.
+
+The reductions are an `INTENTIONAL-DIFFERENCE` rather than `PROVED` because
+their two halves accumulate differently: within one coupled sector the device
+sums in the payload dtype inside the backend GEMM (Tenferro 0.5.0 exposes no
+widening reduction), while across coupled sectors the host half accumulates in
+`WideScalar::Wide` like every host reduction. A `norm` finite on the host can
+therefore be `inf` on the device at single precision; it is reported as `inf`,
+the same convention `f64` overflow already has. Both halves are documented on
+`weighted_inner_cuda` and pinned by
+`device_single_precision_norm_can_overflow_where_the_host_stays_finite`.
+
+The device factorizations are deliberately closed for single precision: they
+hang off the sealed marker `CudaFactorizationPayload`, implemented for `f64`
+and `Complex64` only, so `svd_compact`/`eigh_full`/`qr_compact` are a
+compile-time boundary rather than an untested numerical path. Opening them is
+leaf C4 of [#1065](https://github.com/Ryo-wtnb11/TeNeT/issues/1065).
 
 [9] The CUDA cells cover the *compact/full* factorizations (`svd_compact`,
 `eigh_full`, and `qr_compact` in its own row). The truncated variants
