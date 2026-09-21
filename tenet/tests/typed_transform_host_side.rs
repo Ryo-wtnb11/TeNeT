@@ -131,6 +131,16 @@ fn a_runtime_without_a_device_reports_no_device_transform_state_and_still_clears
 // The Host contract the device `*_overwrite_into` mirrors (issue #1329)
 // ---------------------------------------------------------------------------
 
+/// The positions that hold a NaN, so a NaN *pattern* can be compared rather
+/// than merely "some NaN survived".
+fn nan_positions(data: &[f64]) -> Vec<usize> {
+    data.iter()
+        .enumerate()
+        .filter(|(_, value)| value.is_nan())
+        .map(|(index, _)| index)
+        .collect()
+}
+
 /// The Host precondition order and wording that `typed_cuda_transform_contracts
 /// .rs` mirrors on the device. Pinned here, without a device and without the
 /// `cuda` feature, so ordinary CI catches a Host drift that would silently
@@ -300,14 +310,39 @@ fn host_overwrite_into_clears_a_poisoned_destination_and_never_short_circuits() 
             }
         })
         .unwrap();
+    // The expected NaN *set*, computed from the source's own poisoned
+    // positions carried through the permute — not read back off the call
+    // under test. `0 * NaN` is NaN, so every NaN of the permuted source, and
+    // only those, must survive at alpha = 0.
+    let permuted_source = nan_source.permute(&[1, 2], &[3, 0]).unwrap();
+    let expected_nans = nan_positions(permuted_source.data());
+    assert!(
+        !expected_nans.is_empty(),
+        "the fixture must carry NaNs through the permute"
+    );
+    assert!(
+        expected_nans.len() < permuted_source.data().len(),
+        "the fixture must also carry finite entries, so the set is a real pattern"
+    );
     for alpha in [0.0, -0.0] {
         let mut destination = nan_source.permute(&[1, 2], &[3, 0]).unwrap();
         nan_source
             .permute_overwrite_into(&mut destination, &[1, 2], &[3, 0], alpha)
             .unwrap();
+        assert_eq!(
+            nan_positions(destination.data()),
+            expected_nans,
+            "alpha = {alpha} must still compute 0 * src at every poisoned position"
+        );
+        // Everything else is an exact zero: `alpha == 0` is a multiplication,
+        // not a skip, and the Overwrite zero fills clear the rest.
         assert!(
-            destination.data().iter().any(|value| value.is_nan()),
-            "alpha = {alpha} must still compute 0 * src"
+            destination
+                .data()
+                .iter()
+                .enumerate()
+                .all(|(index, value)| expected_nans.contains(&index) || *value == 0.0),
+            "alpha = {alpha}: every finite position must be an exact zero"
         );
     }
 }

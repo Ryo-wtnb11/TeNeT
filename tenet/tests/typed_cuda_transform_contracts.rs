@@ -384,8 +384,10 @@ fn a_warm_device_overwrite_into_transfers_nothing_and_allocates_nothing() {
             .unwrap()
     });
     assert!(
-        first_zero.h2d_bytes <= std::mem::size_of::<f64>() as u64,
-        "the zero template is one element, not a buffer: {first_zero:?}"
+        first_zero.h2d_calls <= 1
+            && first_zero.h2d_bytes <= std::mem::size_of::<f64>() as u64
+            && first_zero.device_allocs <= 1,
+        "the zero template is one element uploaded once, not a buffer: {first_zero:?}"
     );
     let (_, zero) = delta(|| {
         source

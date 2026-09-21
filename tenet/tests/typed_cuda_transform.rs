@@ -841,11 +841,13 @@ where
 fn assert_payload_matches<D: Payload>(actual: &[D], expected: &[D], what: &str) {
     assert_eq!(actual.len(), expected.len(), "{what}: payload length");
     // Exact equality first: it is the only comparison that works for an
-    // infinity, whose difference with itself is NaN.
+    // infinity, whose difference with itself is NaN. The tolerance arm is
+    // then guarded on a finite expectation, because `1e-12 * (1.0 + inf)` is
+    // an infinite bound that every non-NaN value would clear.
     let agree = |left: f64, right: f64| {
         left == right
             || (left.is_nan() && right.is_nan())
-            || (left - right).abs() <= 1e-12 * (1.0 + right.abs())
+            || (right.is_finite() && (left - right).abs() <= 1e-12 * (1.0 + right.abs()))
     };
     for (index, (&left, &right)) in actual.iter().zip(expected).enumerate() {
         let (lr, li) = left.parts();
@@ -855,6 +857,19 @@ fn assert_payload_matches<D: Payload>(actual: &[D], expected: &[D], what: &str) 
             "{what}: element {index} is {left:?}, expected {right:?}"
         );
     }
+}
+
+/// The positions that hold a NaN, so a NaN *pattern* can be compared rather
+/// than merely "some NaN survived".
+fn nan_positions<D: Payload>(data: &[D]) -> Vec<usize> {
+    data.iter()
+        .enumerate()
+        .filter(|(_, value)| {
+            let (re, im) = value.parts();
+            re.is_nan() || im.is_nan()
+        })
+        .map(|(index, _)| index)
+        .collect()
 }
 
 /// Runs one `*_overwrite_into` on the Host and on the device, into two
@@ -940,6 +955,28 @@ fn device_overwrite_into_matches_the_host_for_every_alpha_and_method() {
             real,
             bent,
             |t, d| t.repartition_overwrite_into(d, alpha)
+        );
+    }
+
+    // A non-finite caller scale over a finite source. `alpha` reaches the
+    // block moves but not the Overwrite zero fills, so the written payload is
+    // NaN (or signed infinity) exactly where a block was moved and an exact
+    // zero everywhere else — and the device must reproduce the Host's pattern
+    // element for element.
+    let permuted_model = real.permute(&[2, 0], &[1, 3]).unwrap();
+    for alpha in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let written = device_overwrite_matches_host!(
+            &format!("U1/f64 non-finite alpha={alpha}"),
+            real,
+            permuted_model,
+            |t, d| t.permute_overwrite_into(d, &[2, 0], &[1, 3], alpha)
+        );
+        assert!(
+            written
+                .data()
+                .iter()
+                .any(|value| value.is_nan() || value.is_infinite()),
+            "alpha = {alpha} must reach the moved blocks"
         );
     }
 
@@ -1146,16 +1183,34 @@ fn device_overwrite_into_propagates_a_nan_source_at_alpha_zero_like_the_host() {
         .any(|value| value.is_infinite()));
     let model = poisoned_source.permute(&[1, 2], &[3, 0]).unwrap();
 
-    for alpha in [0.0, -0.0, 1.0] {
+    // A NaN and an infinite caller scale belong here too: the contract is
+    // "alpha is never short-circuited and equals the Host", not "alpha is
+    // finite". `NaN * x` and `inf * 0` are both NaN, so these also widen the
+    // NaN set the comparison has to reproduce.
+    for alpha in [0.0, -0.0, 1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
         let written = device_overwrite_matches_host!(
             &format!("NaN source overwrite_into alpha={alpha}"),
             poisoned_source,
             model,
             |t, d| t.permute_overwrite_into(d, &[1, 2], &[3, 0], alpha)
         );
+        // The exact NaN *set*, not merely "some NaN survived": `any` would
+        // pass if only one of the poisoned blocks propagated. `device ==
+        // Host` element by element is already asserted by the macro; this
+        // adds that the set is non-empty, so the case cannot pass vacuously.
+        let mut host_expected = poisoned_like(&model);
+        poisoned_source
+            .permute_overwrite_into(&mut host_expected, &[1, 2], &[3, 0], alpha)
+            .unwrap();
+        let expected_nans = nan_positions(host_expected.data());
         assert!(
-            written.data().iter().any(|value| value.is_nan()),
-            "a NaN source must reach the destination even at alpha = {alpha}"
+            !expected_nans.is_empty(),
+            "alpha = {alpha}: the fixture must propagate at least one NaN"
+        );
+        assert_eq!(
+            nan_positions(written.data()),
+            expected_nans,
+            "alpha = {alpha}: the NaN set must be the Host's exactly"
         );
     }
 }
