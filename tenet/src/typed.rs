@@ -461,13 +461,19 @@ pub use serialization::{DecodeError, DecodeLimits, EncodeError, TypedPersistence
 /// }
 /// ```
 ///
-/// A device payload: the rejection is pinned next to `TensorMap::to_cuda`
-/// itself, and this is its compiling twin.
+/// A device payload is *not* one of the closed gates: every dtype of this
+/// marker uploads (<https://github.com/Ryo-wtnb11/TeNeT/issues/1336>). What a
+/// single-precision device tensor cannot reach is the device factorization
+/// family, pinned on `CudaFactorizationPayload`.
 #[cfg_attr(
     feature = "cuda",
     doc = "```
 use tenet::core::U1FusionRule;
 use tenet::typed::TensorMap;
+
+fn single_precision_upload(tensor: &TensorMap<U1FusionRule, f32>) {
+    let _ = tensor.to_cuda();
+}
 
 fn double_precision_upload(tensor: &TensorMap<U1FusionRule, f64>) {
     let _ = tensor.to_cuda();
@@ -617,6 +623,33 @@ impl TensorScalar for num_complex::Complex32 {}
 ///     let _ = tensor.is_posdef(0.0);
 /// }
 /// ```
+/// This marker does not carry the *device* factorizations. `f32` and
+/// `Complex32` are device payloads (`CudaPayload`) and host factorization
+/// payloads, yet the device `svd_compact`/`eigh_full` stay closed for them
+/// behind `CudaFactorizationPayload`
+/// (<https://github.com/Ryo-wtnb11/TeNeT/issues/1336>, residual C4). The pair
+/// below only compiles under the `cuda` feature, so a host-only CI run does
+/// not exercise it.
+#[cfg_attr(
+    feature = "cuda",
+    doc = "```compile_fail
+use tenet::core::U1FusionRule;
+use tenet::typed::{CudaStorage, TensorMap};
+
+fn no_f32_device_svd(tensor: &TensorMap<U1FusionRule, f32, CudaStorage<f32>>) {
+    let _ = tensor.svd_compact();
+}
+```
+
+```
+use tenet::core::U1FusionRule;
+use tenet::typed::{CudaStorage, TensorMap};
+
+fn f64_device_svd(tensor: &TensorMap<U1FusionRule, f64, CudaStorage<f64>>) {
+    let _ = tensor.svd_compact();
+}
+```"
+)]
 pub trait FactorizationScalar: TensorScalar {}
 
 impl FactorizationScalar for f64 {}
@@ -743,9 +776,14 @@ impl AdvancedLinalgScalar for num_complex::Complex64 {}
 ///
 /// This bundles the typed payload trait [`TensorScalar`] (whose `ScalarOps`
 /// half selects the matching multiplicity-free execution context) with the
-/// device dtype [`tenet_dense::CudaScalar`]. It is implemented for `f64` and
-/// [`num_complex::Complex64`] only, so `f32`/`Complex32` device payloads are a
-/// compile-time boundary rather than a runtime error.
+/// device dtype [`tenet_dense::CudaScalar`]. All four payload dtypes of the
+/// base family are admitted: `f64`, [`num_complex::Complex64`], `f32` and
+/// [`num_complex::Complex32`].
+///
+/// This marker carries the *base* device family only — transfer, arithmetic,
+/// the reductions, contraction/`compose` and the structural transforms. The
+/// device factorizations need [`CudaFactorizationPayload`] on top of it, which
+/// the single-precision payloads do not implement.
 #[cfg(feature = "cuda")]
 #[doc(hidden)]
 pub trait CudaPayload: TensorScalar + tenet_dense::CudaScalar {}
@@ -754,6 +792,33 @@ pub trait CudaPayload: TensorScalar + tenet_dense::CudaScalar {}
 impl CudaPayload for f64 {}
 #[cfg(feature = "cuda")]
 impl CudaPayload for num_complex::Complex64 {}
+#[cfg(feature = "cuda")]
+impl CudaPayload for f32 {}
+#[cfg(feature = "cuda")]
+impl CudaPayload for num_complex::Complex32 {}
+
+/// Device payloads admitted to the *device* factorization family.
+///
+/// [`CudaPayload`] and [`FactorizationScalar`] are each too wide to gate the
+/// device factorizations on their own: since single precision joined the host
+/// factorization family, `f32` and [`num_complex::Complex32`] satisfy
+/// `CudaPayload + FactorizationScalar`, and the device `svd_compact` /
+/// `eigh_full` would open for them by accident. They are their own leaf
+/// (<https://github.com/Ryo-wtnb11/TeNeT/issues/1336>, residual C4): the
+/// device factorization gauge, the Hermitian admission rule and the truncation
+/// composition all need single-precision evidence of their own before a caller
+/// may reach them.
+///
+/// Sealed through [`CudaPayload`]: implemented for `f64` and
+/// [`num_complex::Complex64`] only.
+#[cfg(feature = "cuda")]
+#[doc(hidden)]
+pub trait CudaFactorizationPayload: CudaPayload + FactorizationScalar {}
+
+#[cfg(feature = "cuda")]
+impl CudaFactorizationPayload for f64 {}
+#[cfg(feature = "cuda")]
+impl CudaFactorizationPayload for num_complex::Complex64 {}
 
 /// One tensor-local restriction used by the internal network slice executor.
 #[doc(hidden)]
@@ -10835,34 +10900,30 @@ impl<R, D: CudaPayload> TensorMap<R, D> {
     /// recovering compactness. A lazy adjoint transfers only its canonical
     /// parent and rebuilds a cold lazy view over the device parent.
     ///
-    /// The supported device payloads are `f64` and `Complex64`. `f32` and
-    /// `Complex32` are host payloads only: the device Hermitian admission
-    /// constant and the spectra download are still written for double
-    /// precision, so single precision stays a compile-time boundary rather
-    /// than a silent misuse. These two pins only compile under the `cuda`
-    /// feature, so a host-only CI run does not exercise them.
+    /// Every payload of the base family uploads: `f64`, `Complex64`, `f32`
+    /// and `Complex32`. Single precision moves exactly half the bytes of its
+    /// double-precision twin for the same fixture, in the same number of
+    /// transfer and allocation calls. What single precision does *not* open is
+    /// the device factorization family — see [`CudaFactorizationPayload`].
     ///
-    /// ```compile_fail
+    /// ```
     /// use num_complex::Complex32;
     /// use tenet::core::U1FusionRule;
     /// use tenet::typed::TensorMap;
     ///
-    /// fn no_c32_upload(tensor: &TensorMap<U1FusionRule, Complex32>) {
+    /// fn c32_upload(tensor: &TensorMap<U1FusionRule, Complex32>) {
     ///     let _ = tensor.to_cuda();
     /// }
     /// ```
     ///
-    /// ```compile_fail
+    /// ```
     /// use tenet::core::U1FusionRule;
     /// use tenet::typed::TensorMap;
     ///
-    /// fn no_f32_upload(tensor: &TensorMap<U1FusionRule, f32>) {
+    /// fn f32_upload(tensor: &TensorMap<U1FusionRule, f32>) {
     ///     let _ = tensor.to_cuda();
     /// }
     /// ```
-    ///
-    /// The compiling twin of both, differing only in the payload dtype, is on
-    /// [`TensorScalar`].
     pub fn to_cuda(&self) -> Result<TensorMap<R, D, CudaStorage<D>>, Error> {
         let mut lease = self.runtime.lease_cuda()?;
         let cuda = &mut *lease;
@@ -11009,9 +11070,10 @@ impl<R, D: CudaPayload> TensorMap<R, D, CudaStorage<D>> {
 /// }
 /// ```
 ///
-/// The device payload marker alone does not admit a device factorization
-/// either — [`FactorizationScalar`] is required on top of it, exactly as on the
-/// host:
+/// The device payload marker alone does not admit a device factorization, and
+/// neither does it together with the *host* factorization marker: the gate is
+/// [`CudaFactorizationPayload`], which `f32` and `Complex32` do not implement
+/// even though they satisfy both halves.
 ///
 /// ```compile_fail
 /// use tenet::prelude::U1FusionRule;
@@ -11022,20 +11084,72 @@ impl<R, D: CudaPayload> TensorMap<R, D, CudaStorage<D>> {
 /// }
 /// ```
 ///
-/// ```
+/// ```compile_fail
 /// use tenet::prelude::{FactorizationScalar, U1FusionRule};
 /// use tenet::typed::{CudaPayload, CudaStorage, TensorMap};
 ///
-/// fn device_factorizing<D: CudaPayload + FactorizationScalar>(
+/// fn device_payload_and_host_factorizing<D: CudaPayload + FactorizationScalar>(
 ///     tensor: &TensorMap<U1FusionRule, D, CudaStorage<D>>,
 /// ) {
 ///     let _ = tensor.svd_compact();
 /// }
 /// ```
+///
+/// ```
+/// use tenet::prelude::U1FusionRule;
+/// use tenet::typed::{CudaFactorizationPayload, CudaStorage, TensorMap};
+///
+/// fn device_factorizing<D: CudaFactorizationPayload>(
+///     tensor: &TensorMap<U1FusionRule, D, CudaStorage<D>>,
+/// ) {
+///     let _ = tensor.svd_compact();
+/// }
+/// ```
+///
+/// Concretely, at the two single-precision device payloads — each paired with
+/// the double-precision twin that differs only in the dtype:
+///
+/// ```compile_fail
+/// use tenet::prelude::U1FusionRule;
+/// use tenet::typed::{CudaStorage, TensorMap};
+///
+/// fn no_f32_device_svd(tensor: &TensorMap<U1FusionRule, f32, CudaStorage<f32>>) {
+///     let _ = tensor.svd_compact();
+/// }
+/// ```
+///
+/// ```
+/// use tenet::prelude::U1FusionRule;
+/// use tenet::typed::{CudaStorage, TensorMap};
+///
+/// fn f64_device_svd(tensor: &TensorMap<U1FusionRule, f64, CudaStorage<f64>>) {
+///     let _ = tensor.svd_compact();
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use num_complex::Complex32;
+/// use tenet::prelude::U1FusionRule;
+/// use tenet::typed::{CudaStorage, TensorMap};
+///
+/// fn no_c32_device_eigh(tensor: &TensorMap<U1FusionRule, Complex32, CudaStorage<Complex32>>) {
+///     let _ = tensor.eigh_full();
+/// }
+/// ```
+///
+/// ```
+/// use num_complex::Complex64;
+/// use tenet::prelude::U1FusionRule;
+/// use tenet::typed::{CudaStorage, TensorMap};
+///
+/// fn c64_device_eigh(tensor: &TensorMap<U1FusionRule, Complex64, CudaStorage<Complex64>>) {
+///     let _ = tensor.eigh_full();
+/// }
+/// ```
 impl<R, D> TensorMap<R, D, CudaStorage<D>>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
-    D: CudaPayload + FactorizationScalar,
+    D: CudaFactorizationPayload,
 {
     /// The `k x k` identity selector the non-aligned assembly GEMMs need.
     /// A fully aligned route assembles by copy and uploads nothing.
@@ -11766,6 +11880,18 @@ where
 ///     let _ = tensor.qr_compact();
 /// }
 /// ```
+///
+/// Single precision is closed here for the same reason as the device SVD and
+/// `eigh` — it is leaf C4, not this block's `f64` payload:
+///
+/// ```compile_fail
+/// use tenet::core::U1FusionRule;
+/// use tenet::typed::{CudaStorage, TensorMap};
+///
+/// fn no_f32_cuda_qr(tensor: &TensorMap<U1FusionRule, f32, CudaStorage<f32>>) {
+///     let _ = tensor.qr_compact();
+/// }
+/// ```
 impl<R> TensorMap<R, f64, CudaStorage>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
@@ -12149,6 +12275,15 @@ where
 
     /// Dimension-weighted unit normalization. Zero norm deliberately follows
     /// Host IEEE behavior and produces non-finite stored entries.
+    ///
+    /// The divisor is [`Self::norm`], so this inherits that method's
+    /// accumulation contract. One consequence is worth stating here, because
+    /// it is silent: at `f32`/`Complex32` a norm that overflows the
+    /// within-sector device sum is `inf`, and dividing by `inf` returns an
+    /// **all-zero tensor with no error**. Host does the same at `f64`
+    /// overflow; single precision merely reaches the boundary sooner. Rescale
+    /// before normalizing — on Host, by the reciprocal of
+    /// [`TensorMap::norm_inf`] — when that range is reachable.
     pub fn normalize(&self) -> Result<Self, Error> {
         let required_len = self.logical_space().space().required_len()?;
         if let TypedTensorRepr::Adjoint(view) = &self.repr {
@@ -12176,7 +12311,58 @@ where
     ///
     /// The device returns one scalar per coupled sector. Category weights stay
     /// with the tensor and are applied only after releasing the Runtime lock.
+    ///
+    /// # Accumulation contract
+    ///
+    /// The two halves of this reduction accumulate differently, and the
+    /// difference is observable at single precision:
+    ///
+    /// * **Within one coupled sector** the sum of `len` products runs on the
+    ///   device, inside the backend GEMM, in the payload dtype. TeNeT cannot
+    ///   widen it: Tenferro 0.5.0 exposes no widening reduction. Its GEMM
+    ///   entry point dispatches on the single dtype shared by both operands
+    ///   and the destination
+    ///   (`tenferro-gpu-0.5.0/src/cubecl/gemm.rs:726`
+    ///   `dot_general_read_into_accum`, whose `accum_erased` at `:743` reads
+    ///   all three as one `T`), and the cuTENSOR compute descriptor is fixed
+    ///   per dtype with no caller control — `CUTENSOR_COMPUTE_DESC_32F` for
+    ///   `f32` (`gemm.rs:101`), `..._64F` for `f64` (`gemm.rs:134`). A widened
+    ///   device sum would need a second pass over the region. So an
+    ///   `f32`/`Complex32` sector total carries the error of a
+    ///   single-precision accumulation of `len` terms, bounded by
+    ///   `len * eps(real(D))` times **`sum |conj(a_i) * b_i|`** — the sum of
+    ///   the absolute products, not the magnitude of the result. For a
+    ///   cancelling inner product the absolute error is therefore governed by
+    ///   the terms, and the *relative* error of a near-zero `inner` is
+    ///   unbounded; about `sqrt(len) * eps(real(D))` of that same sum in
+    ///   practice. The sum also **saturates to infinity near `3.4e38`** where
+    ///   the Host, which
+    ///   accumulates in [`tenet_tensors::WideScalar::Wide`], still returns a
+    ///   finite value. A device `norm` of a large single-precision tensor may
+    ///   therefore be `inf` while the host `norm` of the same tensor is
+    ///   finite; that is a precision boundary of the device reduction, not an
+    ///   error condition, and it is reported as `inf`, exactly as the same
+    ///   overflow is at `f64`.
+    /// * **Across coupled sectors** the quantum-dimension weighting and the
+    ///   final sum run on the host, and they accumulate in
+    ///   `WideScalar::Wide` — the same accumulator the Host reductions use, so
+    ///   the *number of sectors* never degrades the result. For `f64` and
+    ///   `Complex64` `Wide = Self` and `widen`/`narrow` are the identity, so
+    ///   those results are unchanged down to the emitted arithmetic.
+    ///
+    /// [`Self::norm`] takes its square root from the wide accumulator, before
+    /// any narrowing.
     fn weighted_inner_cuda(&self, lhs: &CudaStorage<D>, rhs: &CudaStorage<D>) -> Result<D, Error> {
+        self.weighted_inner_cuda_wide(lhs, rhs).map(D::narrow)
+    }
+
+    /// [`Self::weighted_inner_cuda`] before the final narrowing: the
+    /// cross-sector total in the wide accumulator.
+    fn weighted_inner_cuda_wide(
+        &self,
+        lhs: &CudaStorage<D>,
+        rhs: &CudaStorage<D>,
+    ) -> Result<<D as tenet_tensors::WideScalar>::Wide, Error> {
         let space = self.logical_space().space();
         let regions = sector_regions(space.structure(), space.nout())?;
         let mut lease = self.runtime.lease_cuda()?;
@@ -12220,15 +12406,56 @@ where
             .iter()
             .zip(values)
             .map(|(region, value)| {
-                value * D::from_real(self.logical_space().provider().dim_scalar(region.coupled()))
+                value.widen()
+                    * <<D as tenet_tensors::WideScalar>::Wide as FactorScalar>::from_real(
+                        self.logical_space().provider().dim_scalar(region.coupled()),
+                    )
             })
-            .fold(D::from_real(0.0), |total, term| total + term))
+            .fold(
+                <<D as tenet_tensors::WideScalar>::Wide as FactorScalar>::from_real(0.0),
+                |total, term| total + term,
+            ))
     }
 
     /// Quantum-dimension-weighted Frobenius norm of a device tensor.
     ///
     /// A lazy adjoint delegates to its canonical parent because this norm is
     /// adjoint invariant; no logical-adjoint payload is materialized.
+    ///
+    /// # Accumulation and range
+    ///
+    /// This reduction, [`Self::inner`], [`Self::dot`] and [`Self::normalize`]
+    /// all accumulate in two halves, and the halves differ:
+    ///
+    /// * **within one coupled sector** the device sums the `len` products in
+    ///   the *payload dtype*, inside the backend GEMM. Tenferro 0.5.0 offers
+    ///   no widening reduction and a widened device sum would cost a second
+    ///   pass, so this is a deliberate boundary rather than an oversight. The
+    ///   error is bounded by `len * eps(real(D))` times `sum |conj(a_i)*b_i|`,
+    ///   the sum of the **absolute** products — not times the magnitude of the
+    ///   result, so a cancelling inner product has a small absolute but
+    ///   possibly large relative error;
+    /// * **across coupled sectors** the quantum-dimension weighting and the
+    ///   final sum run on the host in
+    ///   [`tenet_tensors::WideScalar::Wide`], like every Host reduction, so
+    ///   the number of sectors never degrades the result. For `f64` and
+    ///   `Complex64` `Wide = Self`, so those results are unchanged down to the
+    ///   emitted arithmetic and this section describes no difference from
+    ///   Host.
+    ///
+    /// At `f32`/`Complex32` the within-sector sum also **saturates near
+    /// `3.4e38`**, where the Host reduction — which accumulates the same sum
+    /// in `f64` — still returns a finite value. A device `norm` can therefore
+    /// be `inf` while the Host `norm` of the same tensor is finite. That is
+    /// reported as `inf` rather than as an error, exactly as the same overflow
+    /// is at `f64`, and [`Self::normalize`] then divides by it and returns an
+    /// all-zero tensor with no error — the same code shape, and the same
+    /// silent outcome, Host has at `f64` overflow.
+    ///
+    /// If that range is reachable for your data, rescale before reducing:
+    /// download with [`TensorMap::to_host`] and take
+    /// [`TensorMap::norm_inf`] (which is a maximum, so it cannot overflow),
+    /// scale by its reciprocal, and multiply the resulting norm back.
     pub fn norm(&self) -> Result<f64, Error> {
         if let TypedTensorRepr::Adjoint(view) = &self.repr {
             return Self {
@@ -12241,7 +12468,7 @@ where
         // `<t, t>` is real up to rounding; the norm is its real part's root,
         // matching the Host `norm_multiplicity_free`.
         Ok(self
-            .weighted_inner_cuda(storage, storage)?
+            .weighted_inner_cuda_wide(storage, storage)?
             .widen_complex()
             .re
             .sqrt())
@@ -12251,6 +12478,13 @@ where
     /// product with **`self` conjugated**, matching the Host
     /// `inner_multiplicity_free`. Lazy adjoints remain an explicit
     /// unsupported device scope.
+    ///
+    /// Accumulates as [`Self::norm`] documents: in the payload dtype within a
+    /// coupled sector, wide across sectors. At `f32`/`Complex32` the
+    /// within-sector error is bounded by `len * eps(real(D))` times the sum of
+    /// the absolute products `sum |conj(a_i)*b_i|` — so a cancelling inner
+    /// product keeps a small absolute error but not a small relative one — and
+    /// that sum can saturate to a non-finite result where Host stays finite.
     #[doc(alias = "dot")]
     pub fn inner(&self, other: &Self) -> Result<D, Error> {
         if !self.runtime.same_runtime(&other.runtime) {
@@ -12266,7 +12500,7 @@ where
         self.weighted_inner_cuda(lhs, rhs)
     }
 
-    /// Deprecated alias of [`Self::inner`].
+    /// Deprecated alias of [`Self::inner`], with its accumulation contract.
     #[deprecated(since = "0.1.0", note = "use inner instead")]
     #[inline]
     pub fn dot(&self, other: &Self) -> Result<D, Error> {

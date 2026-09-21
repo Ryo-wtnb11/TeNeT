@@ -148,10 +148,15 @@ mod device {
         config
     }
 
-    /// Payload dtypes this baseline covers. Both are real device payloads;
-    /// the fixture values differ only in carrying an imaginary part.
+    /// Payload dtypes this baseline covers. Both are double-precision device
+    /// payloads; the fixture values differ only in carrying an imaginary part.
+    ///
+    /// The bound is `CudaFactorizationPayload` because the matrix runs device
+    /// factorizations, which `f32`/`Complex32` do not reach (#1336, residual
+    /// C4). Adding single-precision rows means splitting this harness into a
+    /// base half and a factorization half first.
     pub(super) trait HarnessScalar:
-        tenet::typed::FactorizationScalar + tenet::typed::CudaPayload + SpectrumMagnitude
+        tenet::typed::CudaFactorizationPayload + SpectrumMagnitude
     {
         const NAME: &'static str;
         fn entry(real: f64, imaginary: f64) -> Self;

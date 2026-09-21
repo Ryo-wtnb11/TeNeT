@@ -7,7 +7,7 @@ use tenet::core::{
     MultiplicityFreeAdmissionMode, MultiplicityFreeRigidSymbols, ProductFusionRuleExt,
     SU2FusionRule, SU2Irrep, SectorCodec, TypedSectorAdmission, U1FusionRule, U1Irrep, Z2Irrep,
 };
-use tenet::prelude::Complex64;
+use tenet::prelude::{Complex32, Complex64};
 use tenet::typed::{CudaStorage, GradedSpace, Runtime, TensorMap};
 use tenet_network::{
     clear_plan_cache, configure_plan_cache, plan_cache_stats, tensor, ContractionPlan,
@@ -781,4 +781,145 @@ fn the_device_zero_template_is_charged_to_the_workspace_budget() {
     let admitted = plan_cache_stats(&runtime);
     assert_eq!(admitted.retained_workspace_bytes, charge);
     assert_eq!(admitted.idle_workspaces, 1);
+}
+
+// ---------------------------------------------------------------------------
+// Single-precision device networks (leaf C2, #1336)
+// ---------------------------------------------------------------------------
+
+/// The device network path is generic over the payload dtype, so the chain
+/// contracts have single-precision twins that run the same schedule. The
+/// oracle is the host chain *at the same dtype*; the tolerance is the payload's
+/// own, not `f64`'s.
+type TypedChainPair<R, D> = (Vec<TensorMap<R, D>>, Vec<TensorMap<R, D, CudaStorage<D>>>);
+
+fn cuda_chain_tensors_at<R, D>(
+    runtime: &Runtime,
+    space: &GradedSpace<R>,
+    seed: u64,
+) -> TypedChainPair<R, D>
+where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec
+        + Send
+        + Sync,
+    D: tenet::typed::CudaPayload,
+{
+    let host: Vec<_> = (0..3)
+        .map(|index| {
+            TensorMap::<R, D>::rand_with_seed(runtime, [space], [space], seed + index).unwrap()
+        })
+        .collect();
+    let device = host.iter().map(|t| t.to_cuda().unwrap()).collect();
+    (host, device)
+}
+
+/// Leaf C2 (#1336): a `tensor!` device chain at `f32` and `Complex32` produces
+/// the host result of the same dtype, cold and warm, and the warm replay keeps
+/// the retained-destination contract of the `f64` chain.
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn single_precision_device_chains_match_the_host_and_reuse_their_destinations() {
+    let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+    let u1 = GradedSpace::try_new_with_arc(
+        Arc::new(U1FusionRule),
+        [(U1Irrep::new(0), 4), (U1Irrep::new(1), 2)],
+    )
+    .unwrap();
+
+    // `eps(f32)` scaled by the chain's term count and magnitude; the fixtures
+    // are unit-scale random blocks, so `1e-4` is generous but far below the
+    // `1e-12` a double-precision comparison would demand.
+    fn assert_chain<D>(runtime: &Runtime, u1: &GradedSpace<U1FusionRule>, seed: u64, tolerance: f64)
+    where
+        D: tenet::typed::CudaPayload + Copy + std::fmt::Debug,
+    {
+        let (host, device) = cuda_chain_tensors_at::<U1FusionRule, D>(runtime, u1, seed);
+        let oracle = host[0]
+            .contract(&host[1], &[1], &[0], &[0, 1])
+            .unwrap()
+            .contract(&host[2], &[1], &[0], &[0, 1])
+            .unwrap();
+        let cold =
+            tensor!([a; d] = (device[0])[a; b] * (device[1])[b; c] * (device[2])[c; d]).unwrap();
+        let warm =
+            tensor!([a; d] = (device[0])[a; b] * (device[1])[b; c] * (device[2])[c; d]).unwrap();
+        for (label, result) in [("cold", cold), ("warm", warm)] {
+            let actual = result.to_host().unwrap();
+            assert_eq!(actual.data().len(), oracle.data().len());
+            for (index, (&got, &want)) in actual.data().iter().zip(oracle.data()).enumerate() {
+                let distance = (got.widen_complex() - want.widen_complex()).norm();
+                assert!(
+                    distance <= tolerance * (1.0 + want.widen_complex().norm()),
+                    "{label} chain element {index}: {got:?} vs {want:?} (distance {distance})"
+                );
+            }
+        }
+    }
+
+    assert_chain::<f64>(&runtime, &u1, 762_100, 1e-12);
+    assert_chain::<f32>(&runtime, &u1, 762_200, 1e-4);
+    assert_chain::<Complex64>(&runtime, &u1, 762_300, 1e-12);
+    assert_chain::<Complex32>(&runtime, &u1, 762_400, 1e-4);
+}
+
+/// Leaf C2 (#1336): the warm single-precision chain costs the same device
+/// calls as the `f64` chain of the same fixture and moves half the bytes.
+///
+/// Relative, same-process comparison: both dtypes run the same fixture in this
+/// binary, so no absolute platform constant appears. The counters are
+/// process-wide, so this test needs `--test-threads=1`.
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn a_warm_single_precision_chain_costs_the_same_calls_and_half_the_bytes() {
+    use tenet::dense::cuda_transfer_stats;
+
+    let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+    let u1 = GradedSpace::try_new_with_arc(
+        Arc::new(U1FusionRule),
+        [(U1Irrep::new(0), 4), (U1Irrep::new(1), 2)],
+    )
+    .unwrap();
+
+    fn warm_cost<D>(
+        runtime: &Runtime,
+        u1: &GradedSpace<U1FusionRule>,
+        seed: u64,
+    ) -> (u64, u64, u64, u64, u64, u64)
+    where
+        D: tenet::typed::CudaPayload,
+    {
+        let (_, device) = cuda_chain_tensors_at::<U1FusionRule, D>(runtime, u1, seed);
+        let run =
+            || tensor!([a; d] = (device[0])[a; b] * (device[1])[b; c] * (device[2])[c; d]).unwrap();
+        // Two warm-up runs: the first has nothing retained, the second pays the
+        // one-time zero-template upload of this dtype.
+        drop(run());
+        drop(run());
+        let before = cuda_transfer_stats();
+        drop(run());
+        let after = cuda_transfer_stats();
+        (
+            after.h2d_calls - before.h2d_calls,
+            after.h2d_bytes - before.h2d_bytes,
+            after.d2h_calls - before.d2h_calls,
+            after.device_allocs - before.device_allocs,
+            after.copy_calls - before.copy_calls,
+            after.gemm_calls - before.gemm_calls,
+        )
+    }
+
+    let double = warm_cost::<f64>(&runtime, &u1, 763_100);
+    let single = warm_cost::<f32>(&runtime, &u1, 763_200);
+
+    assert_eq!(
+        (single.0, single.2, single.3, single.4, single.5),
+        (double.0, double.2, double.3, double.4, double.5),
+        "(h2d_calls, d2h_calls, device_allocs, copy_calls, gemm_calls) must not depend on the dtype"
+    );
+    eprintln!("warm chain: f32 {single:?} f64 {double:?}");
+    assert!(double.1 > 0, "vacuous byte count");
+    assert_eq!(single.1 * 2, double.1, "warm h2d bytes must be halved");
 }
