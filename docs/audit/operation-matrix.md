@@ -121,6 +121,7 @@ trivial/dense provider exists.
 | Explicit Host/device transfer | PROVED | PROVED | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/3) | PROVED | PROVED | PROVED | PROVED |
 | Lazy adjoint | PROVED | PROVED | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/3) | PROVED | UNSUPPORTED | PROVED | PROVED |
 | Permute/braid/recoupling | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | PROVED | PROVED |
+| `twist`/`twist_inverse` [11] | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | PROVED | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1336) |
 | Canonical contraction/compose | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | PROVED | PROVED |
 | Arithmetic/reductions | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | PROVED | INTENTIONAL-DIFFERENCE [10] |
 | SVD/EIGH [9] | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED [10] |
@@ -151,6 +152,24 @@ hang off the sealed marker `CudaFactorizationPayload`, implemented for `f64`
 and `Complex64` only, so `svd_compact`/`eigh_full`/`qr_compact` are a
 compile-time boundary rather than an untested numerical path. Opening them is
 leaf C4 of [#1065](https://github.com/Ryo-wtnb11/TeNeT/issues/1065).
+
+[11] `flip` stays `UnsupportedOnDevice`. The device `twist` is not a tree
+transform: the per-block ribbon-twist factor is built on the Host from the
+block structure and rides the contraction descriptor's own scale, so no factor
+table is uploaded. That is sound only because the factor is a real sign for
+every provider the device impl admits (`Scalar = f64`) and never zero; the
+value domain is pinned without a device in `typed_transform_host_side.rs`. A
+compact (diagonal) device payload — the Host's compact-spectrum arm — is an
+explicit `UnsupportedOnDevice` boundary, and flat elements belonging to no
+block are zero where the Host copies them through, the convention device
+structural results have carried since
+[#1322](https://github.com/Ryo-wtnb11/TeNeT/issues/1322). NaN and real
+infinities propagate as on Host; an infinite *complex* entry becomes NaN in
+both components, because the device always multiplies where Host bit-copies a
+factor-1 block (the #1301 deviation). The body is one generic over
+`CudaPayload`, so it is instantiated for the single-precision payloads too and
+`±1` is exact there, but no single-precision twist fixture exists yet — hence
+`NEEDS-PROOF` rather than `PROVED` in that column.
 
 [9] The CUDA cells cover the *compact/full* factorizations (`svd_compact`,
 `eigh_full`, and `qr_compact` in its own row). The truncated variants
@@ -291,6 +310,14 @@ ownership/cache audit is #783.
   against the Host, the device-less Runtime state, and the Host
   `*_overwrite_into` precondition order and wording the device mirrors — is
   `tenet/tests/typed_transform_host_side.rs`, which is not feature gated.
+- `tenet/tests/typed_cuda_twist.rs`: real-device `twist`/`twist_inverse`
+  against the Host answer for fZ2, fZ2xU(1) and fZ2xSU(2), single-axis,
+  multi-axis, repeated, dual and lazy-adjoint operands, both device payload
+  dtypes, the exact `twist_inverse` round trip, the bosonic and all-legs
+  identity short circuits and an empty space. Its transfer, allocation and
+  rejection contracts are in `typed_cuda_transform_contracts.rs`; its
+  device-free half — the `±1` factor domain the descriptor-scale lowering
+  rests on — is in `typed_transform_host_side.rs`.
 - `tenet/tests/physical_dense.rs`: U(1)/SU(2) Host physical expansion and
   projection, real and complex SU(2) round trips, and an independent
   TensorKit SU(2) coefficient oracle.

@@ -709,3 +709,155 @@ fn device_overwrite_into_rejections_happen_before_any_device_work() {
         "no rejection may change the device executor state"
     );
 }
+
+// ---------------------------------------------------------------------------
+// `twist` / `twist_inverse` contracts (issue #1330, G2b-t)
+// ---------------------------------------------------------------------------
+
+/// fZ2 with both parities on every leg, so a twist really scales blocks.
+fn fermionic_fixture(runtime: &Runtime) -> TensorMap<tenet::core::FermionParityFusionRule, f64> {
+    let leg = GradedSpace::try_new_with_arc(
+        Arc::new(tenet::core::FermionParityFusionRule),
+        [
+            (tenet::core::Z2Irrep::EVEN, 2),
+            (tenet::core::Z2Irrep::ODD, 1),
+        ],
+    )
+    .unwrap();
+    TensorMap::from_block_fn(runtime, [&leg, &leg], [&leg, &leg], |_, indices| {
+        indices.iter().map(|&i| i as f64 + 1.0).sum::<f64>()
+    })
+    .unwrap()
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn a_warm_device_twist_uploads_only_its_output_and_downloads_nothing() {
+    let runtime = Runtime::builder().cuda(0).build().unwrap();
+    let host = fermionic_fixture(&runtime);
+    let device = host.to_cuda().unwrap();
+    let output_bytes = std::mem::size_of_val(host.data()) as u64;
+    let blocks = host.block_count() as u64;
+    assert!(blocks > 1, "multi-block fixture");
+
+    // A twist compiles no structure, so its only cold cost is the context's
+    // shared `1` coefficient operand, created once per dtype per context.
+    let before = runtime.cuda_tree_transform_stats().unwrap();
+    let _ = device.twist(&[0, 3]).unwrap();
+    let after = runtime.cuda_tree_transform_stats().unwrap();
+    assert_eq!(
+        after.prepared_structures, before.prepared_structures,
+        "a twist is not a tree transform and prepares no structure"
+    );
+    assert_eq!(after.executor_bytes, before.executor_bytes, "{after:?}");
+    assert_eq!(after.workspace_bytes, 0, "{after:?}");
+
+    // Warm: the #740 output initialisation and nothing else, with exactly one
+    // submission per block — no coefficient table is ever uploaded, because
+    // the twist factor rides the contraction descriptor's own scale.
+    let (twisted, warm) = delta(|| device.twist(&[0, 3]).unwrap());
+    assert_eq!(warm.h2d_calls, 1, "{warm:?}");
+    assert_eq!(warm.h2d_bytes, output_bytes, "{warm:?}");
+    assert_eq!(warm.d2h_calls, 0, "{warm:?}");
+    assert_eq!(warm.d2h_bytes, 0, "{warm:?}");
+    assert_eq!(warm.device_allocs, 1, "{warm:?}");
+    assert_eq!(
+        warm.gemm_calls, blocks,
+        "one submission per block: {warm:?}"
+    );
+    assert_eq!(
+        twisted.to_host().unwrap().data(),
+        host.twist(&[0, 3]).unwrap().data(),
+        "the measured call must still be the Host's answer"
+    );
+
+    let (_, warm_inverse) = delta(|| device.twist_inverse(&[0, 3]).unwrap());
+    assert_eq!(
+        warm_inverse, warm,
+        "twist_inverse has the same cost profile"
+    );
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn device_twist_short_circuits_do_no_device_work() {
+    let runtime = Runtime::builder().cuda(0).build().unwrap();
+    let bosonic = fixture(&runtime).to_cuda().unwrap();
+    let fermionic_host = fermionic_fixture(&runtime);
+    let fermionic = fermionic_host.to_cuda().unwrap();
+    let expected = fixture(&runtime).data().to_vec();
+
+    let (results, counters) = delta(|| {
+        [
+            // An empty leg list, and a bosonic provider whose every twist is
+            // one, both return a clone of the receiver.
+            bosonic.twist(&[]).unwrap(),
+            bosonic.twist(&[0, 2]).unwrap(),
+            bosonic.twist_inverse(&[1]).unwrap(),
+        ]
+    });
+    assert_eq!(
+        counters,
+        CudaTransferStats::default(),
+        "a short-circuited twist must submit nothing: {counters:?}"
+    );
+    for result in results {
+        assert_eq!(result.to_host().unwrap().data(), expected);
+    }
+
+    // Fermionic, and the identity in *value* — the factors of all legs of a
+    // block multiply to its total parity, which is even — but not a short
+    // circuit: Host's detection tests each leg's own factor, not the product,
+    // so it publishes a fresh unscaled copy. The device does exactly the same
+    // work rather than inventing a cheaper answer.
+    let _ = fermionic.twist(&[0, 3]).unwrap();
+    let (all_legs, counters) = delta(|| fermionic.twist(&[0, 1, 2, 3]).unwrap());
+    assert_eq!(counters.h2d_calls, 1, "{counters:?}");
+    assert_eq!(counters.device_allocs, 1, "{counters:?}");
+    assert_eq!(
+        counters.gemm_calls,
+        fermionic_host.block_count() as u64,
+        "one submission per block, as for any other twist: {counters:?}"
+    );
+    assert_eq!(all_legs.to_host().unwrap().data(), fermionic_host.data());
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn device_twist_rejections_happen_before_any_device_work() {
+    let runtime = Runtime::builder().cuda(0).build().unwrap();
+    let host = fermionic_fixture(&runtime);
+    let device = host.to_cuda().unwrap();
+    // Warm the shared coefficient operand first, so a rejection cannot be
+    // confused with a cold-path upload.
+    let _ = device.twist(&[0, 3]).unwrap();
+    let before = runtime.cuda_tree_transform_stats().unwrap();
+
+    let (errors, counters) = delta(|| {
+        [
+            // The range check precedes the empty-list short circuit and every
+            // categorical step, exactly as on Host.
+            (
+                device.twist(&[4]).unwrap_err().to_string(),
+                host.twist(&[4]).unwrap_err().to_string(),
+            ),
+            (
+                device.twist_inverse(&[1, 9]).unwrap_err().to_string(),
+                host.twist_inverse(&[1, 9]).unwrap_err().to_string(),
+            ),
+        ]
+    });
+    for (actual, expected) in &errors {
+        assert_eq!(actual, expected, "device error text must be the Host's");
+    }
+    assert!(
+        errors[0].0.contains("out of range for rank 4"),
+        "{errors:?}"
+    );
+    assert_eq!(
+        counters,
+        CudaTransferStats::default(),
+        "a rejected twist must submit nothing: {counters:?}"
+    );
+    assert_eq!(runtime.cuda_tree_transform_stats().unwrap(), before);
+}

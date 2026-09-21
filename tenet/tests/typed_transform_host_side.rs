@@ -18,7 +18,7 @@ mod common;
 use std::sync::Arc;
 
 use common::permute_dense;
-use tenet::core::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
+use tenet::core::{ProductFusionRuleExt, SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
 use tenet::typed::{GradedSpace, Runtime, TensorMap};
 
 fn assert_close(actual: &[f64], expected: &[f64], what: &str) {
@@ -345,4 +345,199 @@ fn host_overwrite_into_clears_a_poisoned_destination_and_never_short_circuits() 
             "alpha = {alpha}: every finite position must be an exact zero"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Device twist (#1330, G2b-t): the Host-side decisions its lowering rests on
+// ---------------------------------------------------------------------------
+
+/// Every twist of `$tensor` over `$cases` keeps an entry or negates it, and
+/// does both at least once — the `±1` domain, written once so each provider
+/// is checked identically. A macro rather than a generic function: the typed
+/// `twist` bound names the admission mode, which no test needs to spell out.
+macro_rules! assert_signs_only_over {
+    ($what:expr, $tensor:expr, $cases:expr) => {
+        for legs in $cases {
+            for twisted in [
+                $tensor.twist(legs).unwrap(),
+                $tensor.twist_inverse(legs).unwrap(),
+            ] {
+                let mut kept = 0usize;
+                let mut negated = 0usize;
+                for (&before, &after) in $tensor.data().iter().zip(twisted.data()) {
+                    if after == before {
+                        kept += 1;
+                    } else {
+                        assert_eq!(
+                            after, -before,
+                            "{} twist {legs:?} scaled by something else",
+                            $what
+                        );
+                        negated += 1;
+                    }
+                }
+                assert!(negated > 0, "{} twist {legs:?} changed nothing", $what);
+                assert!(
+                    kept > 0,
+                    "{} twist {legs:?} scaled every entry, so no unscaled block is covered",
+                    $what
+                );
+            }
+        }
+    };
+}
+
+/// The device `twist` puts the per-block factor on the contraction
+/// descriptor's own scale instead of uploading a factor table. That is only
+/// sound because, for every provider the device impl admits (`Scalar = f64`),
+/// a ribbon twist is a real sign and never zero — a zero would be rejected by
+/// `cuda_region_axpby`, and would also let CUDA skip the source read.
+///
+/// This pins the value domain observationally, without a device: a Host twist
+/// may keep an entry or negate it, and nothing else. It also pins that some
+/// blocks really do keep their factor of one, which is why the device has to
+/// move every block rather than only the scaled ones.
+#[test]
+fn a_fermionic_twist_only_ever_keeps_or_negates_an_entry() {
+    let runtime = Runtime::builder().build().unwrap();
+
+    // The fixtures are the device gate's own: fZ2 with a dual leg, and the two
+    // product providers, whose factors are products of the two rules' own.
+    let leg = GradedSpace::try_new_with_arc(
+        Arc::new(tenet::core::FermionParityFusionRule),
+        [
+            (tenet::core::Z2Irrep::EVEN, 2),
+            (tenet::core::Z2Irrep::ODD, 1),
+        ],
+    )
+    .unwrap();
+    let dual = leg.try_dual().unwrap();
+    let tensor: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg, &dual], [&leg, &leg], real_fill).unwrap();
+    assert_signs_only_over!(
+        "fZ2",
+        tensor,
+        [
+            &[0usize][..],
+            &[1][..],
+            &[3][..],
+            &[0, 3][..],
+            &[1, 2, 3][..]
+        ]
+    );
+
+    // fZ2 x U(1).
+    let rule = Arc::new(tenet::core::FermionParityFusionRule.product(U1FusionRule));
+    let leg_u1 = GradedSpace::try_new_with_arc(
+        Arc::clone(&rule),
+        [
+            (
+                tenet::core::product_sector(tenet::core::Z2Irrep::EVEN, U1Irrep::new(0)),
+                2,
+            ),
+            (
+                tenet::core::product_sector(tenet::core::Z2Irrep::ODD, U1Irrep::new(1)),
+                1,
+            ),
+            (
+                tenet::core::product_sector(tenet::core::Z2Irrep::EVEN, U1Irrep::new(2)),
+                1,
+            ),
+        ],
+    )
+    .unwrap();
+    let product_u1: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg_u1, &leg_u1], [&leg_u1, &leg_u1], real_fill)
+            .unwrap();
+    assert_signs_only_over!(
+        "fZ2 x U(1)",
+        product_u1,
+        [&[1usize][..], &[2][..], &[0, 2][..]]
+    );
+
+    // fZ2 (x) SU(2): the same sign domain with non-Abelian degeneracies.
+    let rule = Arc::new(tenet::core::FermionParityFusionRule.product(SU2FusionRule));
+    let leg_su2 = GradedSpace::try_new_with_arc(
+        Arc::clone(&rule),
+        [
+            (
+                tenet::core::product_sector(
+                    tenet::core::Z2Irrep::EVEN,
+                    SU2Irrep::from_twice_spin(0),
+                ),
+                2,
+            ),
+            (
+                tenet::core::product_sector(
+                    tenet::core::Z2Irrep::ODD,
+                    SU2Irrep::from_twice_spin(1),
+                ),
+                1,
+            ),
+            (
+                tenet::core::product_sector(
+                    tenet::core::Z2Irrep::EVEN,
+                    SU2Irrep::from_twice_spin(2),
+                ),
+                1,
+            ),
+        ],
+    )
+    .unwrap();
+    let product_su2: TensorMap<_, f64> = TensorMap::from_block_fn(
+        &runtime,
+        [&leg_su2, &leg_su2],
+        [&leg_su2, &leg_su2],
+        real_fill,
+    )
+    .unwrap();
+    assert_signs_only_over!(
+        "fZ2 (x) SU(2)",
+        product_su2,
+        [&[0usize][..], &[3][..], &[1, 3][..]]
+    );
+
+    // Twisting *every* leg is the identity in value on a parity-conserving
+    // block: the factors multiply to the block's total parity, which is even.
+    // It is not a short circuit — the detection tests each leg's own factor,
+    // not the product — so the device gate expects the ordinary per-block
+    // work here, and this pins the value it must produce.
+    for legs in [&[0usize, 1, 2, 3][..], &[0, 1, 2, 3, 0, 1, 2, 3][..]] {
+        assert_eq!(tensor.twist(legs).unwrap().data(), tensor.data());
+        assert_eq!(tensor.twist_inverse(legs).unwrap().data(), tensor.data());
+    }
+
+    // An inverse twist undoes a twist exactly, which is what lets the device
+    // gate compare the two runs for equality rather than to a tolerance.
+    let round_trip = tensor
+        .twist(&[0, 2])
+        .unwrap()
+        .twist_inverse(&[0, 2])
+        .unwrap();
+    assert_eq!(round_trip.data(), tensor.data());
+}
+
+/// The zero-block fixture of the device gate. A space with no coupled sector
+/// has no block, so `twist_is_identity_over_blocks` is vacuously true and the
+/// call short-circuits to a clone on both Host and device: it proves the
+/// degenerate space is handled, not that the zero-length upload path runs.
+/// Reaching that path needs blocks with a zero extent, which is a device-only
+/// distinction and is left untested.
+#[test]
+fn a_twist_of_a_space_with_no_coupled_sector_is_the_identity_short_circuit() {
+    let runtime = Runtime::builder().build().unwrap();
+    let even = GradedSpace::try_new_with_arc(
+        Arc::new(tenet::core::FermionParityFusionRule),
+        [(tenet::core::Z2Irrep::EVEN, 2)],
+    )
+    .unwrap();
+    let odd = GradedSpace::try_new_with_arc(
+        Arc::new(tenet::core::FermionParityFusionRule),
+        [(tenet::core::Z2Irrep::ODD, 1)],
+    )
+    .unwrap();
+    let empty: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&even], [&odd], real_fill).unwrap();
+    assert!(empty.data().is_empty(), "the fixture must carry no element");
+    assert!(empty.twist(&[0, 1]).unwrap().data().is_empty());
 }
