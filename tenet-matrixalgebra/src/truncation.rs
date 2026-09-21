@@ -278,7 +278,11 @@ pub struct TruncationDecision {
 /// [`TruncationError::RuleMismatch`] for a foreign profile,
 /// [`TruncationError::InvalidPolicy`] for a policy with a non-finite or
 /// negative tolerance, [`TruncationError::InvalidSpectrum`] for spectra that
-/// are not finite, non-negative and descending.
+/// are not finite, non-negative and descending, or that repeat a sector.
+///
+/// The decision does not depend on the order of `spectra`: it is taken in
+/// ascending [`WeightedSpectrum::sector`] order and `kept` is reported in the
+/// caller's order.
 pub fn select_truncation(
     spectra: &[WeightedSpectrum<'_>],
     truncation: &Truncation,
@@ -287,9 +291,47 @@ pub fn select_truncation(
     validate_rule(truncation, rule)?;
     validate_truncation(truncation)?;
     validate_spectra(spectra)?;
+    // Cross-sector ties go to the earlier slice position and the norms sum in
+    // slice order, so the decision is defined on ascending `SectorId` order,
+    // a deterministic tie rule, whatever order the producer encountered its
+    // blocks in. It is TensorKit's `SectorVector` (sorted, `isless`) order
+    // only where the sector codec is monotone in `isless`; U(1) ids are
+    // zigzag-encoded (0, -1, +1, ...) while TensorKit orders 0, +1, -1, ...,
+    // so an exact +-q tie keeps the other sector than TensorKit does. Why sort instead of rejecting: expert
+    // layouts may legitimately store coupled sectors out of order, and the
+    // O(G log G) permutation of G slice headers is spectrum-free work.
+    if spectra
+        .windows(2)
+        .all(|pair| pair[0].sector < pair[1].sector)
+    {
+        return Ok(decide(spectra, truncation));
+    }
+    let mut order: Vec<usize> = (0..spectra.len()).collect();
+    order.sort_unstable_by_key(|&index| spectra[index].sector);
+    if order
+        .windows(2)
+        .any(|pair| spectra[pair[0]].sector == spectra[pair[1]].sector)
+    {
+        return Err(TruncationError::InvalidSpectrum {
+            message: "each sector may carry only one spectrum",
+        });
+    }
+    let sorted: Vec<WeightedSpectrum<'_>> = order.iter().map(|&index| spectra[index]).collect();
+    let ascending = decide(&sorted, truncation);
+    let mut kept = vec![0; spectra.len()];
+    for (&index, count) in order.iter().zip(ascending.kept) {
+        kept[index] = count;
+    }
+    Ok(TruncationDecision {
+        kept,
+        error: ascending.error,
+    })
+}
+
+fn decide(spectra: &[WeightedSpectrum<'_>], truncation: &Truncation) -> TruncationDecision {
     let kept = kept_counts(spectra, truncation);
     let error = discarded_norm(spectra, &kept);
-    Ok(TruncationDecision { kept, error })
+    TruncationDecision { kept, error }
 }
 
 /// Rejects every [`Truncation::Space`] profile in `truncation` that was built
@@ -554,7 +596,9 @@ impl Ord for TailCandidate {
 }
 
 /// Candidates as `(sector, index)` sorted by descending value; ties keep the
-/// parent storage order, matching TensorKit `sortperm(parent(values); rev=true)`.
+/// slice order (ascending `SectorId` after `select_truncation`), the same
+/// stable rule as TensorKit `sortperm(parent(values); rev=true)` over its own
+/// sector order.
 fn descending_candidates(spectra: &[WeightedSpectrum<'_>]) -> Vec<(usize, usize)> {
     let total = spectra.iter().map(|spectrum| spectrum.values.len()).sum();
     let mut heap = BinaryHeap::with_capacity(spectra.len());
@@ -914,6 +958,57 @@ mod tests {
             ),
             Err(TruncationError::RuleMismatch)
         );
+    }
+
+    #[test]
+    fn a_shuffled_feed_decides_exactly_as_the_ascending_one() {
+        // What: the tie among the three 1.0 tails (and the 2.0 heads) is
+        // broken by ascending sector, so every permutation of the feed must
+        // report the same per-sector counts and the same error bits.
+        // Ascending oracle by hand: rank(4) keeps 3.0, 2.0, 2.0 and the first
+        // 1.0 (sector 0); rank(5) adds sector 1's 1.0. Sector 2 holds the
+        // largest value, so no permutation coincides with the ascending one
+        // by accident of magnitude.
+        let entries = [
+            (1.0, vec![2.0, 1.0]),
+            (1.0, vec![2.0, 1.0]),
+            (1.0, vec![3.0, 1.0]),
+        ];
+        let ascending = spectra(&entries);
+        let policies = [
+            (Truncation::rank(4), vec![2, 1, 1]),
+            (Truncation::rank(5), vec![2, 2, 1]),
+            // norm^2 = 20, budget 0.09 * 20 = 1.8: one 1.0 tail (sector 0).
+            (Truncation::relative_error(0.3).unwrap(), vec![1, 2, 2]),
+            (Truncation::relative_inf_cutoff(0.5).unwrap(), vec![1, 1, 1]),
+            (Truncation::Full, vec![2, 2, 2]),
+        ];
+        let permutations = [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ];
+        for (policy, expected) in policies {
+            let reference = select(&ascending, &policy).unwrap();
+            assert_eq!(reference.kept, expected, "{policy:?}");
+            for permutation in permutations {
+                let feed: Vec<_> = permutation.iter().map(|&i| ascending[i]).collect();
+                let decision = select(&feed, &policy).unwrap();
+                let back: Vec<usize> = permutation.iter().map(|&i| reference.kept[i]).collect();
+                assert_eq!(decision.kept, back, "{policy:?} {permutation:?}");
+                assert_eq!(decision.error.to_bits(), reference.error.to_bits());
+            }
+        }
+
+        let mut duplicated = ascending.clone();
+        duplicated[0].sector = duplicated[2].sector;
+        assert!(matches!(
+            select(&duplicated, &Truncation::Full),
+            Err(TruncationError::InvalidSpectrum { .. })
+        ));
     }
 
     #[test]

@@ -21,16 +21,13 @@
 //!
 //! ## Cross-sector exact ties
 //!
-//! `select_truncation` breaks an exact tie between two sectors by the position
-//! of the spectrum in the slice it is given. `find_truncated` fixes that order
-//! (ascending `SectorId`, TensorKit's `SectorVector` parent order); Host is
-//! order-*preserving* and inherits the first-encounter block order of the
-//! input. Those agree for every tensor constructible through the public API —
-//! every `BlockStructure` a user can reach groups blocks in ascending coupled
-//! order (`tenet-core/src/fusion_tree.rs:570`, `:806`;
-//! `tenet-core/src/block_structure.rs:2424`, `:2606`;
-//! `SectorLeg::try_new` sorts, `tenet-core/src/sector.rs:158`) — so the tie
-//! cases below are part of the bitwise gate.
+//! `select_truncation` breaks an exact tie between two sectors in ascending
+//! `SectorId` order (a deterministic TeNeT rule, not TensorKit's `isless`
+//! order for every sector type), sorting the
+//! feed itself when a producer hands it another order (#1305). Host feeds the
+//! first-encounter block order of the input and `find_truncated` a sorted
+//! one, so the tie cases below are part of the bitwise gate whatever order a
+//! `BlockStructure` stores its blocks in.
 
 use std::sync::Arc;
 
