@@ -489,8 +489,8 @@ fn assert_norm_is_overflow_and_underflow_safe<R, D>(
     D: DevicePayload,
 {
     let single = D::EPS > f64::EPSILON;
-    let (unit, _) = constant_magnitude::<R, D>(runtime, leg, |_| 1.0);
-    let weight = unit.norm().unwrap().powi(2) / D::entry(1.0, 1.0).magnitude().powi(2);
+    let (unit, unit_magnitude) = constant_magnitude::<R, D>(runtime, leg, |_| 1.0);
+    let weight = (unit.norm().unwrap() / unit_magnitude).powi(2);
     let n = unit.data().len();
     if abelian {
         assert!(
