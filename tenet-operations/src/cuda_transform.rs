@@ -341,8 +341,8 @@ impl CudaTreeTransformExecutor {
     /// All of these are reported before any device work — no upload, no
     /// allocation, no plan-cache change:
     ///
-    /// - `Axpby(beta)` with `beta != 1`. Tenferro 0.5.0 has no in-place
-    ///   strided scale, so a general `beta` is inexpressible; `beta == 0` is
+    /// - `Axpby(beta)` with `beta != 1`. Tenferro (0.5.0 and 0.6.0) has no
+    ///   in-place strided scale, so a general `beta` is inexpressible; `beta == 0` is
     ///   rejected as well rather than silently answered with `Overwrite`,
     ///   whose treatment of a NaN destination differs (host `0 * NaN` is NaN,
     ///   an overwriting device region write is clean);
@@ -760,9 +760,10 @@ impl CudaTreeTransformExecutor {
             .ok_or(OperationError::ElementCountOverflow)?;
         // Growth costs one host↔device transfer of zeros per buffer, the same
         // way every other device allocation in TeNeT is made (#740).
-        // `cubecl::Session::alloc_zero_output` exists in Tenferro 0.5.0 but is
-        // unusable here: it is broken for complex dtypes (tenferro-rs#1833) and
-        // unpublished for kernel-written outputs. The values are irrelevant —
+        // `cubecl::Session::alloc_zero_output` was unusable here in Tenferro
+        // 0.5.0: broken for complex dtypes (tenferro-rs#1833) and unpublished
+        // for kernel-written outputs. 0.6.0 routes it through a dtype-agnostic
+        // `fill_zero_write`; adopting that is leaf M3. The values are irrelevant —
         // every column is fully written before it is read — and a warm replay
         // pays none of it.
         let source = CudaDenseStorage::upload_owned::<D>(ctx, vec![D::ZERO; source_len])

@@ -834,7 +834,7 @@ impl CudaFactorizationPayload for num_complex::Complex32 {}
 /// `triu` fill materializes a payload-typed zero constant. Whether that kernel
 /// compiles for a dtype is the adapter's
 /// [`tenet_dense::CudaScalar::DEVICE_CONSTANT_KERNELS`], which is `false` for
-/// both complex payloads (tenferro-rs#1833 / #1271) — so device QR is a
+/// both complex payloads until #1271 verifies them on device — so device QR is a
 /// compile-time boundary for them, one level above the typed `Unsupported`
 /// the adapter would return.
 ///
@@ -11841,16 +11841,15 @@ where
 /// the assembly are the ones the device SVD shares. Which dtypes are admitted
 /// is [`CudaQrPayload`], projected from the adapter capability constant.
 ///
-/// A complex device QR is a compile-time boundary until tenferro-rs#1833:
-/// every backend path to the `R` factor routes through tenferro-gpu's `triu`
-/// kernel, whose zero constant (`tenferro-gpu-0.5.0`
-/// `src/kernels/helpers.rs:84` `E::cast_from(0u32)`, used by
-/// `src/kernels/diagonal.rs:76 triu_kernel`, called from
-/// `tenferro-linalg-0.5.0/src/gpu/linalg/householder_qr.rs:660` and
-/// `src/gpu/linalg.rs:2619`) emits `cuDoubleComplex(uint32(0))` and fails
-/// NVRTC compilation. That is a missing backend kernel, not a semantic
-/// restriction, so it is a boundary rather than a runtime backend error;
-/// `svd_compact` and `eigh_full` are unaffected and carry both payloads.
+/// A complex device QR is a compile-time boundary until #1271: every backend
+/// path to the `R` factor routes through tenferro-gpu's `triu` kernel, whose
+/// zero constant (`src/kernels/helpers.rs:84` `E::cast_from(0u32)`, used by
+/// `src/kernels/diagonal.rs:76 triu_kernel`) emitted
+/// `cuDoubleComplex(uint32(0))` and failed NVRTC compilation up to Tenferro
+/// 0.5.0 (tenferro-rs#1833). Tenferro 0.6.0 compiles it (t4a-cubecl 0.10.1),
+/// but TeNeT's complex device QR is not yet verified, so the boundary stays
+/// rather than becoming a runtime backend error; `svd_compact` and
+/// `eigh_full` are unaffected and carry both payloads.
 ///
 /// Checked Generic providers have no device QR either:
 ///
@@ -12365,14 +12364,14 @@ where
     ///
     /// * **Within one coupled sector** the sum of `len` products runs on the
     ///   device, inside the backend GEMM, in the payload dtype. TeNeT cannot
-    ///   widen it: Tenferro 0.5.0 exposes no widening reduction. Its GEMM
-    ///   entry point dispatches on the single dtype shared by both operands
-    ///   and the destination
-    ///   (`tenferro-gpu-0.5.0/src/cubecl/gemm.rs:726`
-    ///   `dot_general_read_into_accum`, whose `accum_erased` at `:743` reads
-    ///   all three as one `T`), and the cuTENSOR compute descriptor is fixed
-    ///   per dtype with no caller control — `CUTENSOR_COMPUTE_DESC_32F` for
-    ///   `f32` (`gemm.rs:101`), `..._64F` for `f64` (`gemm.rs:134`). A widened
+    ///   widen it: Tenferro (0.5.0 and 0.6.0) exposes no widening reduction.
+    ///   Its GEMM entry point dispatches on the single dtype shared by both
+    ///   operands and the destination (tenferro-gpu 0.6.0
+    ///   `src/cubecl/gemm.rs:777` `dot_general_read_into_accum`, whose
+    ///   `accum_erased` at `:794` reads all three as one `T`), and the
+    ///   cuTENSOR compute descriptor is fixed per dtype with no caller
+    ///   control — `CUTENSOR_COMPUTE_DESC_32F` for `f32` (`gemm.rs:99`),
+    ///   `..._64F` for `f64` (`gemm.rs:129`). A widened
     ///   device sum would need a second pass over the region. So an
     ///   `f32`/`Complex32` sector total carries the error of a
     ///   single-precision accumulation of `len` terms, bounded by
@@ -12474,8 +12473,8 @@ where
     /// all accumulate in two halves, and the halves differ:
     ///
     /// * **within one coupled sector** the device sums the `len` products in
-    ///   the *payload dtype*, inside the backend GEMM. Tenferro 0.5.0 offers
-    ///   no widening reduction and a widened device sum would cost a second
+    ///   the *payload dtype*, inside the backend GEMM. Tenferro (0.5.0 and
+    ///   0.6.0) offers no widening reduction and a widened device sum would cost a second
     ///   pass, so this is a deliberate boundary rather than an oversight. The
     ///   error is bounded by `len * eps(real(D))` times `sum |conj(a_i)*b_i|`,
     ///   the sum of the **absolute** products — not times the magnitude of the
@@ -13795,7 +13794,7 @@ where
     /// allocates exactly one device buffer and submits one strided move per
     /// non-empty block. Residual: a whole-buffer bitwise device copy followed
     /// by in-place per-block scaling would submit fewer kernels, but Tenferro
-    /// 0.5.0 has no in-place strided scale (`cuda_region_axpby` cannot alias
+    /// (0.5.0 and 0.6.0) has no in-place strided scale (`cuda_region_axpby` cannot alias
     /// its source and destination), so it is not expressible today.
     ///
     /// Flat elements that belong to no block — only reachable under a padded

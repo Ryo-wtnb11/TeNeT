@@ -1,5 +1,5 @@
 //! Device probe for single-precision (`f32` / `Complex32`) payloads on
-//! Tenferro 0.5.0 CUDA.
+//! Tenferro CUDA (written against 0.5.0; runs against the pinned 0.6.0).
 //!
 //! `reviews/gpu-phase-20260920/single-precision-survey.md` establishes, from
 //! Tenferro sources alone, that F32/C32 coverage is symmetric with F64/C64 in
@@ -8,7 +8,7 @@
 //! per dtype, and TensorKit's own CUDA suite records a Float32 cuTENSOR
 //! failure for the outer product (`test/cuda/tensors.jl:523`). This file turns
 //! the expectation into device evidence, or records the exact rejection text
-//! where 0.5.0 declines.
+//! where Tenferro declines.
 //!
 //! The operation list is exactly what `tenet-dense/src/cuda_adapter.rs` calls
 //! today, so leaf C1 (`CudaScalar` for f32/Complex32) has one probe per call
@@ -79,8 +79,12 @@ trait ProbeScalar:
     fn conj(self) -> Self;
     fn magnitude(self) -> f64;
     fn contraction_scalar(self) -> ContractionScalar;
-    fn typed(tensor: &Tensor) -> Option<&TypedTensor<Self>>;
-    fn typed_mut(tensor: &mut Tensor) -> Option<&mut TypedTensor<Self>>;
+    fn typed(tensor: &Tensor) -> Option<&TypedTensor<Self>> {
+        tensor.as_typed::<Self>()
+    }
+    fn typed_mut(tensor: &mut Tensor) -> Option<&mut TypedTensor<Self>> {
+        tensor.as_typed_mut::<Self>()
+    }
 
     fn distance(self, other: Self) -> f64 {
         (self - other).magnitude()
@@ -123,20 +127,6 @@ impl ProbeScalar for f32 {
     fn contraction_scalar(self) -> ContractionScalar {
         ContractionScalar::F32(self)
     }
-
-    fn typed(tensor: &Tensor) -> Option<&TypedTensor<Self>> {
-        match tensor {
-            Tensor::F32(tensor) => Some(tensor),
-            _ => None,
-        }
-    }
-
-    fn typed_mut(tensor: &mut Tensor) -> Option<&mut TypedTensor<Self>> {
-        match tensor {
-            Tensor::F32(tensor) => Some(tensor),
-            _ => None,
-        }
-    }
 }
 
 impl ProbeScalar for Complex32 {
@@ -165,20 +155,6 @@ impl ProbeScalar for Complex32 {
 
     fn contraction_scalar(self) -> ContractionScalar {
         ContractionScalar::C32(self)
-    }
-
-    fn typed(tensor: &Tensor) -> Option<&TypedTensor<Self>> {
-        match tensor {
-            Tensor::C32(tensor) => Some(tensor),
-            _ => None,
-        }
-    }
-
-    fn typed_mut(tensor: &mut Tensor) -> Option<&mut TypedTensor<Self>> {
-        match tensor {
-            Tensor::C32(tensor) => Some(tensor),
-            _ => None,
-        }
     }
 }
 
@@ -227,15 +203,19 @@ impl Probe {
     fn download_real(&mut self, tensor: &Tensor, what: &str) -> Vec<f64> {
         let dtype = tensor.dtype();
         let host = download_tensor(self.backend.runtime(), tensor).expect("download");
-        let values = match host {
-            Tensor::F32(tensor) => tensor
-                .into_host_vec()
+        let values = match dtype {
+            DType::F32 => host
+                .into_typed::<f32>()
+                .and_then(TypedTensor::into_host_vec)
                 .expect("host vec")
                 .into_iter()
                 .map(f64::from)
                 .collect(),
-            Tensor::F64(tensor) => tensor.into_host_vec().expect("host vec"),
-            other => panic!("{what}: unexpected metadata dtype {:?}", other.dtype()),
+            DType::F64 => host
+                .into_typed::<f64>()
+                .and_then(TypedTensor::into_host_vec)
+                .expect("host vec"),
+            other => panic!("{what}: unexpected metadata dtype {other:?}"),
         };
         println!("  {what}: dtype {dtype:?}, {} value(s)", values.len());
         values
@@ -1099,8 +1079,8 @@ fn gram_check<D: ProbeScalar>(m: &[D], rows: usize, k: usize, tol: f64, what: &s
     }
 }
 
-/// Returns the QR failure instead of panicking, so a dtype whose device QR is
-/// known-broken can assert the failure rather than fail the suite.
+/// Returns the QR failure instead of panicking so the caller names the dtype
+/// in its `expect`.
 fn qr_case<D: ProbeScalar>(
     probe: &mut Probe,
     rows: usize,
@@ -1233,32 +1213,17 @@ fn qr_region_f32() {
     qr_case::<f32>(&mut probe, 4, 4).expect("f32 device QR");
 }
 
-/// Device QR of a `Complex32` region is expected to fail exactly like
-/// `Complex64` does (#1271): the `triu` kernel materializes its zero as
-/// `E::cast_from(0u32)` (tenferro-gpu `kernels/helpers.rs:84-86`), which NVRTC
-/// rejects for `cuFloatComplex`/`cuDoubleComplex` (tenferro-rs#1833, fixed
-/// upstream but unreleased in 0.5.0). The failure is the probe result: leaf
-/// C4 must keep C32 device QR an explicit compile-time boundary next to the
-/// C64 one.
+/// Raw Tenferro device QR of a `Complex32` region. Up to Tenferro 0.5.0 it
+/// failed like `Complex64` (#1271): the `triu` zero `E::cast_from(0u32)` did
+/// not compile for `cuFloatComplex` (tenferro-rs#1833). Tenferro 0.6.0 pins
+/// the t4a-cubecl 0.10.1 fix (#1837), so this probe now requires the
+/// reconstruction and gauge checks of `qr_case`. TeNeT's own complex device
+/// constant gate is unchanged until its leaf (#1271) lifts it.
 #[test]
 #[ignore = "requires a real CUDA device"]
-fn qr_region_c32_is_blocked_by_the_complex_zero_kernel() {
+fn qr_region_c32() {
     let mut probe = Probe::new();
-    match qr_case::<Complex32>(&mut probe, 5, 3) {
-        Ok(()) => panic!(
-            "Complex32 device QR now succeeds -- tenferro-rs#1833 appears fixed; \
-             re-scope leaf C4 and #1271"
-        ),
-        Err(err) => {
-            let text = err.to_string();
-            println!("Complex32 QR rejected with:\n{text}");
-            assert!(
-                text.contains("no suitable constructor exists to convert from")
-                    && text.contains("cuFloatComplex"),
-                "unexpected Complex32 QR failure (not the #1833 zero-value class): {text}"
-            );
-        }
-    }
+    qr_case::<Complex32>(&mut probe, 5, 3).expect("Complex32 device QR");
 }
 
 #[test]
@@ -1279,13 +1244,13 @@ fn eigh_region_c32() {
 
 // ---------------------------------------------------------------------------
 // 8. `lu` / `solve`: not reached by TeNeT today (#1065 keeps solve behind its
-//    own gate), so behaviour is recorded rather than required.
+//    own gate); the raw Tenferro results are checked against host oracles.
 // ---------------------------------------------------------------------------
 
-/// `blocked` states the expectation this dtype carries into the probe: `false`
-/// asserts a real residual, `true` asserts the #1833 NVRTC rejection. Either
-/// way the exact text is printed.
-fn lu_solve_case<D: ProbeScalar>(probe: &mut Probe, blocked: bool) {
+/// Device `solve` must reach the host residual `A x - b`, and device `lu` must
+/// reconstruct `P A = L U` with `L` lower and `U` upper triangular, all checked
+/// on the host against the host fixture, never against device output alone.
+fn lu_solve_case<D: ProbeScalar>(probe: &mut Probe) {
     // Diagonally dominant 3x3, column-major.
     let a: Vec<D> = vec![
         D::from_parts(4.0, 0.0),
@@ -1321,17 +1286,13 @@ fn lu_solve_case<D: ProbeScalar>(probe: &mut Probe, blocked: bool) {
                 worst = worst.max(acc.distance(b[row]));
             }
             println!("{} solve: succeeded, residual {worst:.3e}", D::NAME);
-            assert!(!blocked, "{} solve unexpectedly succeeded", D::NAME);
             assert!(
                 worst <= factor_tol::<D>(9) * 10.0,
                 "{} solve residual {worst:e}",
                 D::NAME
             );
         }
-        Err(err) => {
-            println!("{} solve: FAILED with `{err}`", D::NAME);
-            assert!(blocked, "{} solve failed unexpectedly", D::NAME);
-        }
+        Err(err) => panic!("{} solve failed: {err}", D::NAME),
     }
 
     match probe
@@ -1347,26 +1308,55 @@ fn lu_solve_case<D: ProbeScalar>(probe: &mut Probe, blocked: bool) {
                 u.shape(),
                 parity.shape()
             );
-            assert!(!blocked, "{} lu unexpectedly succeeded", D::NAME);
+            for factor in [&p, &l, &u] {
+                assert_eq!(factor.shape(), [3, 3], "{} lu factor shape", D::NAME);
+            }
+            let p = probe.download::<D>(&p);
+            let l = probe.download::<D>(&l);
+            let u = probe.download::<D>(&u);
+            // Column-major 3x3: entry (row, col) is at `col * 3 + row`.
+            let at = |m: &[D], row: usize, col: usize| m[col * 3 + row];
+            let a_max = a.iter().map(|&x| x.magnitude()).fold(0.0_f64, f64::max);
+            let tol = 16.0 * 3.0 * D::EPS * a_max;
+            let mut worst = 0.0_f64;
+            for row in 0..3 {
+                for col in 0..3 {
+                    let mut pa = D::ZERO;
+                    let mut lu = D::ZERO;
+                    for k in 0..3 {
+                        pa = pa + at(&p, row, k) * at(&a, k, col);
+                        lu = lu + at(&l, row, k) * at(&u, k, col);
+                    }
+                    worst = worst.max(pa.distance(lu));
+                    if col > row {
+                        assert_eq!(at(&l, row, col), D::ZERO, "{} L not lower", D::NAME);
+                    }
+                    if row > col {
+                        assert_eq!(at(&u, row, col), D::ZERO, "{} U not upper", D::NAME);
+                    }
+                }
+            }
+            println!(
+                "{} lu: P A - L U residual {worst:.3e} (bound {tol:.3e})",
+                D::NAME
+            );
+            assert!(worst <= tol, "{} lu residual {worst:e} > {tol:e}", D::NAME);
         }
-        Err(err) => {
-            println!("{} lu: FAILED with `{err}`", D::NAME);
-            assert!(blocked, "{} lu failed unexpectedly", D::NAME);
-        }
+        Err(err) => panic!("{} lu failed: {err}", D::NAME),
     }
 }
 
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn lu_and_solve_behaviour_f32() {
-    lu_solve_case::<f32>(&mut Probe::new(), false);
+    lu_solve_case::<f32>(&mut Probe::new());
 }
 
-/// `Complex32` `lu`/`solve` share the #1833 complex-constant kernel defect
-/// with QR: the failure is the recorded probe result, and leaf C1/C4 must keep
-/// them unsupported.
+/// `Complex32` `lu`/`solve` shared the #1833 complex-constant kernel defect
+/// with QR up to Tenferro 0.5.0; 0.6.0 carries the fix (#1837), so the probe
+/// now asserts the host oracles. TeNeT still keeps them unsupported (#1271).
 #[test]
 #[ignore = "requires a real CUDA device"]
-fn lu_and_solve_behaviour_c32_is_blocked() {
-    lu_solve_case::<Complex32>(&mut Probe::new(), true);
+fn lu_and_solve_behaviour_c32() {
+    lu_solve_case::<Complex32>(&mut Probe::new());
 }

@@ -913,21 +913,18 @@ impl DenseExecutor for DefaultDenseExecutor {
             .map_err(|err| tenferro_error("svd_full_owned", err))?;
             #[cfg(all(test, feature = "cpu-faer", not(feature = "provider-inject")))]
             OWNED_FULL_SVD_INPUT_POINTERS.with(|pointers| {
-                let pointer = match &input {
-                    tenferro_tensor::Tensor::F32(tensor) => {
-                        tensor.as_slice().unwrap().as_ptr() as usize
-                    }
-                    tenferro_tensor::Tensor::F64(tensor) => {
-                        tensor.as_slice().unwrap().as_ptr() as usize
-                    }
-                    tenferro_tensor::Tensor::C32(tensor) => {
-                        tensor.as_slice().unwrap().as_ptr() as usize
-                    }
-                    tenferro_tensor::Tensor::C64(tensor) => {
-                        tensor.as_slice().unwrap().as_ptr() as usize
-                    }
-                    _ => unreachable!("DenseOwned only contains supported full-SVD dtypes"),
-                };
+                fn slice_ptr<T: tenferro_tensor::TensorScalar>(
+                    input: &tenferro_tensor::Tensor,
+                ) -> Option<usize> {
+                    input
+                        .as_typed::<T>()
+                        .map(|tensor| tensor.as_slice().unwrap().as_ptr() as usize)
+                }
+                let pointer = slice_ptr::<f32>(&input)
+                    .or_else(|| slice_ptr::<f64>(&input))
+                    .or_else(|| slice_ptr::<num_complex::Complex32>(&input))
+                    .or_else(|| slice_ptr::<num_complex::Complex64>(&input))
+                    .expect("DenseOwned only contains supported full-SVD dtypes");
                 pointers.borrow_mut().push(pointer);
             });
             note_session_opened();
@@ -948,10 +945,10 @@ impl DenseExecutor for DefaultDenseExecutor {
                     message: "dense full SVD must return exactly (U, S, Vh)".to_string(),
                 });
             }
-            Ok(outputs
+            outputs
                 .into_iter()
                 .map(DenseTensor::from_tenferro)
-                .collect())
+                .collect()
         }
     }
 
@@ -967,13 +964,13 @@ impl DenseExecutor for DefaultDenseExecutor {
             with_cpu_linalg(&mut self.backend, |exec| {
                 TensorRead::from_view(input).svd_read(exec)
             })
-            .map(|(u, s, vt)| {
+            .map_err(|err| tenferro_error("svd_read", err))
+            .and_then(|(u, s, vt)| {
                 vec![u, s, vt]
                     .into_iter()
                     .map(DenseTensor::from_tenferro)
                     .collect()
             })
-            .map_err(|err| tenferro_error("svd_read", err))
         }
     }
 
@@ -989,13 +986,13 @@ impl DenseExecutor for DefaultDenseExecutor {
             with_cpu_linalg(&mut self.backend, |exec| {
                 TensorRead::from_view(input).qr_read(exec)
             })
-            .map(|(q, r)| {
+            .map_err(|err| tenferro_error("qr_read", err))
+            .and_then(|(q, r)| {
                 vec![q, r]
                     .into_iter()
                     .map(DenseTensor::from_tenferro)
                     .collect()
             })
-            .map_err(|err| tenferro_error("qr_read", err))
         }
     }
 
@@ -1011,13 +1008,13 @@ impl DenseExecutor for DefaultDenseExecutor {
             with_cpu_linalg(&mut self.backend, |exec| {
                 TensorRead::from_view(input).eig_read(exec)
             })
-            .map(|(values, vectors)| {
+            .map_err(|err| tenferro_error("eig_read", err))
+            .and_then(|(values, vectors)| {
                 vec![values, vectors]
                     .into_iter()
                     .map(DenseTensor::from_tenferro)
                     .collect()
             })
-            .map_err(|err| tenferro_error("eig_read", err))
         }
     }
 
@@ -1033,13 +1030,13 @@ impl DenseExecutor for DefaultDenseExecutor {
             with_cpu_linalg(&mut self.backend, |exec| {
                 TensorRead::from_view(input).eigh_read(exec)
             })
-            .map(|(values, vectors)| {
+            .map_err(|err| tenferro_error("eigh_read", err))
+            .and_then(|(values, vectors)| {
                 vec![values, vectors]
                     .into_iter()
                     .map(DenseTensor::from_tenferro)
                     .collect()
             })
-            .map_err(|err| tenferro_error("eigh_read", err))
         }
     }
 
@@ -1098,8 +1095,8 @@ impl DenseExecutor for DefaultDenseExecutor {
             with_cpu_linalg(&mut self.backend, |exec| {
                 TensorRead::from_view(input).svdvals_read(exec)
             })
-            .map(DenseTensor::from_tenferro)
             .map_err(|err| tenferro_error("svd_values", err))
+            .and_then(DenseTensor::from_tenferro)
         }
     }
 
@@ -1115,8 +1112,8 @@ impl DenseExecutor for DefaultDenseExecutor {
             with_cpu_linalg(&mut self.backend, |exec| {
                 TensorRead::from_view(input).eigvalsh_read(exec)
             })
-            .map(DenseTensor::from_tenferro)
             .map_err(|err| tenferro_error("eigh_values", err))
+            .and_then(DenseTensor::from_tenferro)
         }
     }
 
@@ -1141,8 +1138,8 @@ impl DenseExecutor for DefaultDenseExecutor {
                 let owned = exec.to_contiguous_read(TensorRead::from_view(input))?;
                 owned.eigvals(exec)
             })
-            .map(DenseTensor::from_tenferro)
             .map_err(|err| tenferro_error("eig_values", err))
+            .and_then(DenseTensor::from_tenferro)
         }
     }
 

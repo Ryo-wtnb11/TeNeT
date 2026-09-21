@@ -8,6 +8,9 @@ use crate::tenferro_adapter::tenferro_error;
 #[derive(Debug)]
 pub struct DenseTensor {
     backend: DenseBackend,
+    // Checked once in `from_tenferro`, so `dtype()` stays infallible although
+    // Tenferro's `DType::External` has no `DenseDType`.
+    dtype: DenseDType,
     inner: DenseTensorInner,
 }
 
@@ -28,12 +31,7 @@ impl DenseTensor {
     }
 
     pub fn dtype(&self) -> DenseDType {
-        match &self.inner {
-            #[cfg(feature = "tenferro")]
-            DenseTensorInner::Tenferro(tensor) => dense_dtype_from_tenferro(tensor.dtype()),
-            #[cfg(not(feature = "tenferro"))]
-            DenseTensorInner::Empty(inner) => match *inner {},
-        }
+        self.dtype
     }
 
     pub fn shape(&self) -> &[usize] {
@@ -147,17 +145,20 @@ impl DenseTensor {
 
     #[cfg(feature = "tenferro")]
     #[cfg(not(feature = "provider-inject"))]
-    pub(crate) fn from_tenferro(tensor: tenferro_tensor::Tensor) -> Self {
-        Self {
+    pub(crate) fn from_tenferro(tensor: tenferro_tensor::Tensor) -> Result<Self, DenseError> {
+        Ok(Self {
             backend: DenseBackend::Tenferro,
+            dtype: dense_dtype_from_tenferro(tensor.dtype())?,
             inner: DenseTensorInner::Tenferro(tensor),
-        }
+        })
     }
 }
 
 #[cfg(feature = "tenferro")]
-pub(crate) fn dense_dtype_from_tenferro(dtype: tenferro_tensor::DType) -> DenseDType {
-    match dtype {
+pub(crate) fn dense_dtype_from_tenferro(
+    dtype: tenferro_tensor::DType,
+) -> Result<DenseDType, DenseError> {
+    Ok(match dtype {
         tenferro_tensor::DType::F32 => DenseDType::F32,
         tenferro_tensor::DType::F64 => DenseDType::F64,
         tenferro_tensor::DType::I32 => DenseDType::I32,
@@ -165,5 +166,54 @@ pub(crate) fn dense_dtype_from_tenferro(dtype: tenferro_tensor::DType) -> DenseD
         tenferro_tensor::DType::Bool => DenseDType::Bool,
         tenferro_tensor::DType::C32 => DenseDType::C32,
         tenferro_tensor::DType::C64 => DenseDType::C64,
+        tenferro_tensor::DType::External(_) => {
+            return Err(DenseError::Unsupported {
+                op: "tenferro_dtype",
+                message: "externally defined Tenferro scalar types have no TeNeT dense dtype"
+                    .to_string(),
+            });
+        }
+    })
+}
+
+#[cfg(all(test, feature = "tenferro"))]
+mod tests {
+    use super::*;
+
+    /// A real `DType::External` tensor needs `tenferro_tensor_core::ErasedHostTensor`,
+    /// which `tenferro-tensor` does not re-export and TeNeT does not depend on, so
+    /// the boundary is pinned on the mapping every constructor routes through.
+    #[test]
+    fn external_tenferro_dtype_is_a_typed_unsupported_error() {
+        let err = dense_dtype_from_tenferro(tenferro_tensor::DType::External(
+            std::any::TypeId::of::<u8>(),
+        ))
+        .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                DenseError::Unsupported {
+                    op: "tenferro_dtype",
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn native_tenferro_dtypes_map_one_to_one() {
+        use tenferro_tensor::DType;
+        for (tenferro, dense) in [
+            (DType::F32, DenseDType::F32),
+            (DType::F64, DenseDType::F64),
+            (DType::I32, DenseDType::I32),
+            (DType::I64, DenseDType::I64),
+            (DType::Bool, DenseDType::Bool),
+            (DType::C32, DenseDType::C32),
+            (DType::C64, DenseDType::C64),
+        ] {
+            assert_eq!(dense_dtype_from_tenferro(tenferro).unwrap(), dense);
+        }
     }
 }

@@ -1,11 +1,13 @@
 //! Device gates for `cuda_copy_region_into`'s destination-offset routing
 //! (#1320).
 //!
-//! Tenferro 0.5.0's `copy_read_into` advertises the *allocation's* 256-byte
+//! Tenferro 0.5.0's `copy_read_into` advertised the *allocation's* 256-byte
 //! alignment to cuTENSOR even for a destination view that starts mid-buffer
-//! (`tenferro-gpu-0.5.0/src/cubecl/permutation.rs:723`), so cuTENSOR may pick a
-//! vectorized kernel the shifted pointer cannot satisfy and the launch fails
-//! with `cudaErrorMisalignedAddress`. The adapter therefore routes a
+//! (`tenferro-gpu-0.5.0/src/cubecl/permutation.rs:723`), so cuTENSOR could pick
+//! a vectorized kernel the shifted pointer cannot satisfy and the launch failed
+//! with `cudaErrorMisalignedAddress`. Tenferro 0.6.0 reports the true
+//! alignment (`permutation.rs:771`); the guard is kept pending leaf M2, and
+//! these gates stay its regression fixtures. The adapter routes a
 //! destination whose byte offset is not a multiple of 256 through the region
 //! primitive, whose contraction descriptors report the truthful per-element
 //! view alignment.

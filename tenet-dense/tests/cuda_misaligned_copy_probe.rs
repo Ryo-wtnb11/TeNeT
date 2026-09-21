@@ -3,7 +3,8 @@
 //!
 //! It calls `tenferro_gpu` / `tenferro_tensor` directly, with no TeNeT
 //! production surface involved, so what it records is evidence about the
-//! pinned Tenferro 0.5.0 release rather than about the adapter.
+//! pinned Tenferro release rather than about the adapter (0.5.0 faulted;
+//! 0.6.0 carries the fix).
 //!
 //! A `cudaErrorMisalignedAddress` is a *sticky* CUDA error: once a launch
 //! fails, the context is unusable and every later device call in the same
@@ -12,8 +13,8 @@
 //! device suite.
 //!
 //! It records, it does not gate: the destination offsets it walks are exactly
-//! the ones the adapter now refuses to send down this route, and Tenferro main
-//! has already fixed the defect (`25379dd`, tensor4all/tenferro-rs#1836), so a
+//! the ones the adapter now refuses to send down this route, and Tenferro
+//! 0.6.0 carries the fix (tensor4all/tenferro-rs#1836), so a
 //! pass here after a dependency bump is the expected outcome, not a
 //! regression. Failures are printed per offset and the summary is asserted
 //! only to be non-empty.

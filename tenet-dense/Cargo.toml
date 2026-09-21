@@ -60,7 +60,7 @@ provider-inject = [
 
 [dependencies]
 num-complex = "0.4"
-tenferro-cpu = { version = "0.5.0", default-features = false, optional = true }
-tenferro-linalg = { version = "0.5.0", default-features = false, optional = true }
-tenferro-tensor = { version = "0.5.0", default-features = false, optional = true }
-tenferro-gpu = { version = "0.5.0", default-features = false, optional = true }
+tenferro-cpu = { version = "0.6.0", default-features = false, optional = true }
+tenferro-linalg = { version = "0.6.0", default-features = false, optional = true }
+tenferro-tensor = { version = "0.6.0", default-features = false, optional = true }
+tenferro-gpu = { version = "0.6.0", default-features = false, optional = true }
