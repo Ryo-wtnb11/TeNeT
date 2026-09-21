@@ -63,7 +63,8 @@ pub use contract::{
 pub use contract::{
     tensorcompose_fusion_dyn_prelowered_direct_on_storage,
     tensorcontract_fusion_dyn_prelowered_direct_on_storage, tensorcontract_owned_checked_generic,
-    tensorcontract_owned_checked_generic_in_context,
+    tensorcontract_owned_checked_generic_in_context, try_compile_storage_contract_core_route,
+    StorageContractResolution,
 };
 pub use contract::{
     BoundDynamicFusionMapSpace, DynamicFusionMapSpace, FusionOperand,
@@ -81,6 +82,9 @@ pub use oriented_elementwise::{
 };
 // Stage B3a: Generic-fusion (outer-multiplicity) facade siblings.
 pub use adjoint::adjoint_bound_space_dyn_generic_checked;
+#[cfg(feature = "cuda")]
+#[doc(hidden)]
+pub use contract::{execute_storage_contract_resolution_on_cuda, CudaContractScratch};
 pub use facade::{
     braid_into_generic, permute_into_generic, transpose_into_generic, tree_transform_into_generic,
     tree_transform_into_with_generic, tree_transform_structure_generic,

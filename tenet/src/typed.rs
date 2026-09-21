@@ -269,6 +269,8 @@ pub use tenet_matrixalgebra::{Truncation, TruncationSpace};
 use tenet_matrixalgebra::{BoundDynFactor, CheckedGenericFactorPlanError, FactorScalar};
 
 use crate::runtime::{Ctx, Ctxs};
+#[cfg(feature = "cuda")]
+use crate::tensor_core::oriented_contract_destination;
 pub use crate::tensor_core::CheckedGenericTensorProductError;
 use crate::tensor_core::{
     internal_layout_error, pow_by_squaring, tensorcompose_owned_multiplicity_free,
@@ -12654,9 +12656,65 @@ where
         .into()
     }
 
-    /// Contracts owned or lazy-adjoint device tensors through the canonical fully-direct
-    /// coupled-block route. Other layouts are explicit unsupported errors;
-    /// device data is never downloaded or materialized on host.
+    /// TensorKit `tensorcontract` on device tensors: the Host
+    /// [`TensorMap::contract`] semantics for arbitrary contracted and output
+    /// axes, on owned or lazy-adjoint operands, executed on the device.
+    ///
+    /// # One planning authority
+    ///
+    /// Everything categorical is the Host's, computed on the host before the
+    /// device is touched: the destination space (by the Host's own derivation
+    /// for owned or lazy operands), the route, the orientation and axis-order
+    /// candidate, the source and output transform structures, the operand
+    /// borrow decisions and the core plan. The device only replays that
+    /// artifact — each non-identity source transform into device scratch, the
+    /// coupled-sector GEMMs, the output transform — which is TensorKit's
+    /// `blas_contract!` dataflow and QSpace's `contract` dataflow, so FLOPs,
+    /// bytes moved and working set are the Host's. A contraction already in
+    /// TensorKit `mul!` form keeps the fully-direct GEMM route over the parent
+    /// buffers, with lazy adjoints as GEMM operand flags and no transform; it
+    /// takes no Host context lock.
+    ///
+    /// # Cost
+    ///
+    /// A warm call uploads nothing but the output initialisation (#740):
+    /// exactly one H2D of `required_len * size_of::<D>()` bytes, from one host
+    /// `Vec` of that size; its only device allocation is the returned output;
+    /// it downloads nothing. The first use of a transform structure uploads its
+    /// coefficient payload once (as the device [`Self::permute`] does), and a
+    /// new high-water mark of the operand or core-destination scratch costs one
+    /// zero upload of the new size per buffer; both then stay resident on the
+    /// Runtime (see [`crate::typed::Runtime::cuda_contract_scratch_bytes`]) until
+    /// [`crate::typed::Runtime::clear_tree_transform_cache`]. Per call the
+    /// device submits one region move per Single block / pack / scatter
+    /// column, one GEMM per recoupling job and per coupled-sector job, one
+    /// zero fill per inactive layout of each transform in overwrite mode, and
+    /// one zero fill per core-destination block no GEMM writes (the Host
+    /// clears its whole core destination instead).
+    ///
+    /// The warm contract holds while this Runtime's Host transform store
+    /// admits the structures (see [`Self::permute`]).
+    ///
+    /// # Numerics
+    ///
+    /// Device and Host agree to dtype tolerance, never bitwise: the GEMM
+    /// summation order is cuTENSOR's, a Single-block move rounds as
+    /// `alpha * (c * x)`, and where the Host picks its dense `Structure` route
+    /// for a conjugated operand the device runs the transform route instead.
+    /// Exact zeros may differ in sign (Host `-0.0` where the device writes
+    /// `+0.0`).
+    ///
+    /// # Errors
+    ///
+    /// In this order, all before any device work: [`Error::RuntimeMismatch`];
+    /// [`tenet_tensors::OperationError::UnsupportedTensorContractScope`] for
+    /// anyonic providers, as on Host — a behaviour change since G2c-1a: the
+    /// canonical anyonic device contraction was accepted before; [`Error::UnsupportedOnDevice`] for
+    /// diagonal storage; the Host's own errors for malformed axes, output
+    /// orders or mismatched legs; [`Error::UnsupportedOnDevice`] for a
+    /// fermionic contraction that needs the twist of a dual contracted leg on
+    /// a transformed operand (the canonical form folds a uniform twist into
+    /// the GEMM and is supported); [`Error::PlacementMismatch`].
     #[doc(alias = "contract_ordered")]
     pub fn contract(
         &self,
@@ -12668,56 +12726,97 @@ where
         if !self.runtime.same_runtime(&other.runtime) {
             return Err(Error::RuntimeMismatch);
         }
+        if self.logical_space().provider().braiding_style()
+            == tenet_core::BraidingStyleKind::Anyonic
+        {
+            return Err(tenet_tensors::OperationError::UnsupportedTensorContractScope {
+                message: "ordinary contraction is undefined for anyonic braiding; use an explicit planar operation",
+            }
+            .into());
+        }
         let (lhs_space, lhs_operand, lhs_storage) = self.cuda_fusion_operand("contract")?;
         let (rhs_space, rhs_operand, rhs_storage) = other.cuda_fusion_operand("contract")?;
-        if !lhs_axes
-            .iter()
-            .copied()
-            .eq(self.codomain_rank()..self.rank())
-            || !rhs_axes.iter().copied().eq(0..other.codomain_rank())
-        {
-            return Err(Self::unsupported_direct_contract());
-        }
-        let output_rank = self.codomain_rank() + other.domain_rank();
-        if !output_axes.iter().copied().eq(0..output_rank) {
-            return Err(Self::unsupported_direct_contract());
-        }
-        let dst_space = BoundDynamicFusionMapSpace::contracted_multiplicity_free_ordered(
-            lhs_space,
-            rhs_space,
-            lhs_axes,
-            rhs_axes,
-            OutputAxisOrder::identity(),
-        )?;
-        let mut lease = self.runtime.lease_cuda()?;
-        let cuda = &mut *lease;
-        let expected_placement = Placement::Cuda(cuda.device());
-        if lhs_storage.placement() != expected_placement
-            || rhs_storage.placement() != expected_placement
-        {
-            return Err(Error::PlacementMismatch);
-        }
-        // ponytail: the existing device seam initializes by uploading zeros;
-        // replace this only with a measured native allocation/memset leaf.
-        let mut dst = CudaStorage::upload_owned(
-            cuda,
-            vec![D::from_real(0.0); dst_space.space().required_len()?],
-        )?;
-        tenet_tensors::tensorcontract_fusion_dyn_prelowered_direct_on_storage(
-            &mut CudaStorageGemm::new(cuda),
-            &dst_space,
-            &mut dst,
-            lhs_operand,
-            lhs_storage,
-            rhs_operand,
-            rhs_storage,
-            tenet_tensors::TensorContractSpec::new_with_conjugation(
+        let output_order = OutputAxisOrder::from_axes(output_axes);
+        // The Host derives the destination per representation, and so does
+        // this: two owned operands through the owned derivation, a lazy
+        // adjoint through the oriented one.
+        let dst_space = if lhs_operand.storage_conjugate() || rhs_operand.storage_conjugate() {
+            oriented_contract_destination(
+                lhs_space,
+                lhs_operand,
+                rhs_space,
+                rhs_operand,
                 lhs_axes,
                 rhs_axes,
-                OutputAxisOrder::identity(),
-                lhs_operand.storage_conjugate(),
-                rhs_operand.storage_conjugate(),
-            ),
+                output_order,
+            )?
+        } else {
+            BoundDynamicFusionMapSpace::contracted_multiplicity_free_ordered(
+                lhs_space,
+                rhs_space,
+                lhs_axes,
+                rhs_axes,
+                output_order,
+            )?
+        };
+        let axes = tenet_tensors::TensorContractSpec::new_with_conjugation(
+            lhs_axes,
+            rhs_axes,
+            output_order,
+            lhs_operand.storage_conjugate(),
+            rhs_operand.storage_conjugate(),
+        );
+        // The canonical core route resolves from the operands alone and takes
+        // no lock. Otherwise the Host context lease compiles the artifact and
+        // is dropped before the device lease is taken; nothing under the
+        // device lease leases again.
+        let resolution = match tenet_tensors::try_compile_storage_contract_core_route(
+            &dst_space,
+            lhs_operand,
+            rhs_operand,
+            axes,
+        )? {
+            Some(core) => core,
+            None => {
+                let mut lease = self.runtime.lease_context()?;
+                lease
+                    .context()
+                    .multiplicity_free_lane::<D>()?
+                    .compile_storage_contract_dynamic_tree(
+                        &dst_space,
+                        lhs_operand,
+                        rhs_operand,
+                        axes,
+                    )?
+            }
+        };
+        if resolution.requires_core_right_twist() {
+            return Err(Error::UnsupportedOnDevice(
+                "contract of a fermionic dual contracted leg outside the canonical composition \
+                 form needs the core-operand twist, which has no device executor yet"
+                    .to_string(),
+            ));
+        }
+        let device = Placement::Cuda(self.runtime.cuda_device_ordinal_checked()?);
+        if lhs_storage.placement() != device || rhs_storage.placement() != device {
+            return Err(Error::PlacementMismatch);
+        }
+        let required_len = dst_space.space().required_len()?;
+
+        let mut lease = self.runtime.lease_cuda()?;
+        let (cuda, transforms, scratch) = lease.split_contract();
+        // ponytail: #740 — the device seam initializes an output by uploading
+        // zeros; replace only with a measured native allocation.
+        let mut dst = CudaStorage::upload_owned(cuda, vec![D::from_real(0.0); required_len])?;
+        tenet_tensors::execute_storage_contract_resolution_on_cuda(
+            cuda,
+            transforms,
+            scratch,
+            &resolution,
+            dst_space.space().structure(),
+            &mut dst,
+            lhs_storage,
+            rhs_storage,
         )?;
         drop(lease);
         Ok(Self {

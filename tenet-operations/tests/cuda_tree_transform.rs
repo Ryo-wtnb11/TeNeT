@@ -73,12 +73,14 @@ fn host_replay<T: DeviceScalar>(
     )
 }
 
-/// The caller scales the executor must reproduce: one, a scale that is neither
-/// 1 nor -1, both signed zeros, and a genuinely complex one (its real part on
-/// `f64`).
+/// The caller scales the executor must reproduce: one, minus one (the only
+/// other value a fermionic twist folded into a descriptor ever takes, G2c-2),
+/// a scale that is neither, both signed zeros, and a genuinely complex one
+/// (its real part on `f64`).
 fn alphas<T: DeviceScalar>() -> Vec<T> {
     vec![
         T::from_parts(1.0, 0.0),
+        T::from_parts(-1.0, 0.0),
         T::from_parts(-2.5, 0.0),
         T::from_parts(0.0, 0.0),
         T::from_parts(-0.0, -0.0),

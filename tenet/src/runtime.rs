@@ -695,9 +695,10 @@ fn mint_dense(config: &RuntimeExecutionConfig) -> Box<dyn tenet_dense::DenseExec
 }
 
 /// The device-local state one CUDA device operation may need: the dense
-/// context every device kernel is submitted through, and the tree-transform
+/// context every device kernel is submitted through, the tree-transform
 /// executor that holds the per-structure device state (uploaded coefficient
-/// vectors, pack/scatter workspaces).
+/// vectors, pack/scatter workspaces), and the general contraction's operand
+/// and core-destination scratch.
 ///
 /// The executor lives here rather than beside the host caches because a replay
 /// needs `&mut CudaDenseContext` and `&mut CudaTreeTransformExecutor` at the
@@ -708,6 +709,12 @@ fn mint_dense(config: &RuntimeExecutionConfig) -> Box<dyn tenet_dense::DenseExec
 pub(crate) struct CudaDeviceState {
     dense: tenet_dense::CudaDenseContext,
     tree_transform: tenet_operations::CudaTreeTransformExecutor,
+    /// Grow-only execution scratch, bounded by the largest contraction run
+    /// and observable through [`Runtime::cuda_contract_scratch_bytes`]. Like
+    /// the executor's workspaces it is not charged to
+    /// `PlanCacheConfig::workspace_budget_bytes`, which admits idle network
+    /// workspaces and has no eviction protocol for a Runtime singleton.
+    contract_scratch: tenet_tensors::CudaContractScratch,
 }
 
 /// RAII lease of this runtime's single CUDA context, held only for the device
@@ -739,6 +746,23 @@ impl CudaLease<'_> {
     ) {
         let state = &mut *self.0;
         (&mut state.dense, &mut state.tree_transform)
+    }
+
+    /// [`Self::split`] plus the contraction scratch, which a general device
+    /// contraction needs beside the transform executor it replays through.
+    pub(crate) fn split_contract(
+        &mut self,
+    ) -> (
+        &mut tenet_dense::CudaDenseContext,
+        &mut tenet_operations::CudaTreeTransformExecutor,
+        &mut tenet_tensors::CudaContractScratch,
+    ) {
+        let state = &mut *self.0;
+        (
+            &mut state.dense,
+            &mut state.tree_transform,
+            &mut state.contract_scratch,
+        )
     }
 }
 
@@ -1006,11 +1030,17 @@ impl Runtime {
     /// recovered rather than propagated: dropping prepared device state is
     /// always safe, and a cache clear is the wrong place to re-raise someone
     /// else's panic.
+    ///
+    /// The device contraction scratch is released under the same device lease:
+    /// it is execution scratch sized by the transformed operands, so it goes
+    /// with the transform state it was sized from.
     pub fn clear_tree_transform_cache(&self) {
         self.inner.tree_transform_stores.clear();
         #[cfg(feature = "cuda")]
         if let Some(mut lease) = self.lease_cuda_for_maintenance() {
-            lease.split().1.clear();
+            let (_, executor, scratch) = lease.split_contract();
+            executor.clear();
+            scratch.clear();
         }
     }
 
@@ -1242,6 +1272,21 @@ impl Runtime {
             context_scalar_operand_bytes: dense.scalar_operand_bytes(),
             required_plan_entries: executor.required_plan_entries(),
         })
+    }
+
+    /// Device bytes the general contraction's operand and core-destination
+    /// scratch holds, or `None` when the Runtime has no device.
+    ///
+    /// Read-only and grow-only: the scratch keeps its high-water allocation
+    /// per payload dtype until [`Self::clear_tree_transform_cache`]. It is
+    /// reported apart from [`CudaTreeTransformStats`] so each device byte is
+    /// counted once, and is not charged to
+    /// `PlanCacheConfig::workspace_budget_bytes`. Takes the device lease like
+    /// [`Self::cuda_tree_transform_stats`].
+    #[cfg(feature = "cuda")]
+    pub fn cuda_contract_scratch_bytes(&self) -> Option<usize> {
+        let mut lease = self.lease_cuda_for_maintenance()?;
+        Some(lease.split_contract().2.device_bytes())
     }
 
     /// Deterministic per-runtime stream position for
@@ -1589,6 +1634,7 @@ impl RuntimeBuilder {
                             tenet_operations::DEFAULT_PLAN_CACHE_BUDGET_BYTES,
                             tree_transform_stores.info().entry_capacity().max(1),
                         ),
+                    contract_scratch: tenet_tensors::CudaContractScratch::default(),
                 }))
             }
             None => None,

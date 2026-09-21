@@ -123,12 +123,37 @@ trivial/dense provider exists.
 | Permute/braid/recoupling | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | PROVED | PROVED |
 | `twist`/`twist_inverse` [11] | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | PROVED | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1336) |
 | Canonical contraction/compose | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | PROVED | PROVED |
+| General-axes `contract` [12] | PROVED | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/3) | UNSUPPORTED | PROVED | UNSUPPORTED | PROVED | PROVED |
 | Arithmetic/reductions | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | PROVED | INTENTIONAL-DIFFERENCE [10] |
 | SVD/EIGH [9] | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | PROVED | PROVED [11] |
 | QR | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | [UNSUPPORTED](https://github.com/Ryo-wtnb11/TeNeT/issues/1270) | f32 PROVED, c32 UNSUPPORTED [11] |
 | EIG/null/polar/solve/matrix functions | PROVED | PROVED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
 | Network ordinary replay [8] | PROVED | PROVED | INTENTIONAL-DIFFERENCE | PROVED | UNSUPPORTED | PROVED | PROVED |
 | v1 typed snapshot (`f64`/`Complex64`) [7] | PROVED | PROVED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
+
+[12] Device `contract`/`contract_ordered` with arbitrary contracted and output
+axes replay the Host `DynamicTree` artifact — source tree transforms, the
+fully-direct core GEMMs, the output transform — with the device executors
+(G2c-1a, [#1345](https://github.com/Ryo-wtnb11/TeNeT/issues/1345)); the
+TensorKit `mul!` form keeps the storage-direct core route. Gated by
+`tenet/tests/typed_cuda_contract.rs` (device == Host at every device dtype,
+owned and lazy-adjoint, and device == TensorKit's `blas_contract!` sequence and
+the physical-basis contraction, both oracles pinned against the Host by the
+ungated `typed_contract_host_oracle.rs`) and by the forced-orientation replays
+of `tenet-tensors/src/contract/storage_contract_tests.rs`. Still explicit
+boundaries: a fermionic contraction whose transformed core-right operand needs
+the supertrace twist is `UnsupportedOnDevice` before any device work
+([#1347](https://github.com/Ryo-wtnb11/TeNeT/issues/1347)); device
+`contract_overwrite_into` stays canonical-only
+([#1346](https://github.com/Ryo-wtnb11/TeNeT/issues/1346)); device `tensor!`
+networks keep their canonical schedule predicate
+([#1348](https://github.com/Ryo-wtnb11/TeNeT/issues/1348)). Behaviour change: an anyonic device
+`contract` is now `UnsupportedTensorContractScope` even in canonical form,
+as on Host (it was accepted before). The Host checked-Generic cell is
+`NEEDS-PROOF` for a named gap: `tensorcontract_owned_checked_generic_in_context`
+accepts arbitrary axes for owned operands (lazy adjoints are
+`InvalidArgument`), but no fixture gates a non-canonical checked-Generic
+contraction against an independent oracle.
 
 [10] The `CUDA f32/c32 MF` column is the single-precision device payload of
 [#1336](https://github.com/Ryo-wtnb11/TeNeT/issues/1336) (leaf C2), gated by

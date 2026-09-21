@@ -9,6 +9,9 @@ pub use checked_generic::{
 };
 mod context;
 mod dynamic;
+#[cfg(feature = "cuda")]
+#[doc(hidden)]
+pub use dynamic::cuda::{execute_storage_contract_resolution_on_cuda, CudaContractScratch};
 #[cfg(test)]
 pub(crate) use dynamic::{
     execute_dynamic_tree_execution_artifact_for_test,
@@ -29,7 +32,11 @@ pub(crate) use fusion::{
 };
 mod fusion_block;
 mod resolution;
+#[doc(hidden)]
+pub use resolution::StorageContractResolution;
 mod scratch;
+#[cfg(test)]
+mod storage_contract_tests;
 mod structure;
 
 pub use api::{
@@ -54,9 +61,9 @@ pub use backend::{
 pub use context::{
     tensorcompose_fusion_dyn_prelowered_direct_on_storage,
     tensorcontract_fusion_dyn_prelowered_direct_on_storage, tensorcontract_into_with_context,
-    HostTreeFusionExecutionContext, PreparedTensorContractFusion, TensorContractCache,
-    TensorContractCacheStats, TensorContractExecutionContext, TensorContractFusionExecutionContext,
-    TensorContractPlanKey,
+    try_compile_storage_contract_core_route, HostTreeFusionExecutionContext,
+    PreparedTensorContractFusion, TensorContractCache, TensorContractCacheStats,
+    TensorContractExecutionContext, TensorContractFusionExecutionContext, TensorContractPlanKey,
 };
 #[cfg(test)]
 pub(crate) use dynamic_space::{

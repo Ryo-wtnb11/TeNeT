@@ -775,10 +775,13 @@ impl CudaDenseStorage {
             return Err(dtype_mismatch::<D>("cuda_download", &host));
         }
         let typed = D::into_typed(host).map_err(|err| cuda_error("cuda_download", err))?;
-        let data = typed
+        let mut data = typed
             .into_host_vec()
             .map_err(|err| cuda_error("cuda_download", err))?;
         let bytes = std::mem::size_of_val(data.as_slice());
+        // A narrowed buffer (`set_active_len`) still transfers its whole
+        // allocation; only the active prefix is the value.
+        data.truncate(self.len);
         #[cfg(test)]
         CUDA_FULL_DOWNLOAD_BYTES.fetch_add(bytes, Ordering::Relaxed);
         record_d2h(bytes);
@@ -800,6 +803,53 @@ impl CudaDenseStorage {
 
     pub fn device(&self) -> usize {
         self.device
+    }
+
+    /// Elements the device allocation holds; at least [`Self::len`].
+    #[doc(hidden)]
+    pub fn capacity(&self) -> usize {
+        self.tensor.shape().iter().product()
+    }
+
+    /// Sets the active prefix [`Self::len`] reports, and every region bound
+    /// is checked against, to `len` elements of the allocation.
+    ///
+    /// Why: a grow-only device scratch reused across operands of different
+    /// sizes must present exactly the length each consumer admits without a
+    /// reallocation (and without the zero upload a reallocation costs, #740).
+    /// Only the bound narrows; the allocation and its contents are unchanged.
+    #[doc(hidden)]
+    pub fn set_active_len(&mut self, len: usize) -> Result<(), DenseError> {
+        if len > self.capacity() {
+            return Err(DenseError::OutOfBounds);
+        }
+        self.len = len;
+        Ok(())
+    }
+
+    /// Bounds a matrix view by the active length rather than the
+    /// allocation: after [`Self::set_active_len`] the two differ, and the
+    /// backend view itself only checks the allocation.
+    fn check_matrix_bound(
+        &self,
+        shape: [usize; 2],
+        strides: [usize; 2],
+        offset: usize,
+    ) -> Result<(), DenseError> {
+        if shape.contains(&0) {
+            return Ok(());
+        }
+        let last = shape
+            .iter()
+            .zip(strides)
+            .try_fold(offset, |end, (&dim, stride)| {
+                (dim - 1).checked_mul(stride)?.checked_add(end)
+            })
+            .ok_or(DenseError::ElementCountOverflow)?;
+        if last >= self.len {
+            return Err(DenseError::OutOfBounds);
+        }
+        Ok(())
     }
 
     /// Wraps a device tensor produced by a tenferro op (e.g. a cuSOLVER
@@ -832,6 +882,7 @@ impl CudaDenseStorage {
         strides: [usize; 2],
         offset: usize,
     ) -> Result<TensorView<'_>, DenseError> {
+        self.check_matrix_bound(shape, strides, offset)?;
         let Some(tensor) = D::typed(&self.tensor) else {
             return Err(dtype_mismatch::<D>("cuda_region", &self.tensor));
         };
@@ -893,6 +944,7 @@ impl CudaDenseStorage {
         ld: usize,
         offset: usize,
     ) -> Result<TensorViewMut<'_>, DenseError> {
+        self.check_matrix_bound([rows, cols], [1, ld], offset)?;
         let actual = dense_dtype_from_tenferro(self.tensor.dtype());
         let Some(tensor) = D::typed_mut(&mut self.tensor) else {
             return Err(DenseError::DTypeMismatch {
