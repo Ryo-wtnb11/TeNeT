@@ -294,8 +294,12 @@ the storage-generic metadata rejections of a Host or device `tensor!` network
 (non-symmetric braiding that contracts, then a contracted-leg space or duality
 mismatch after any trace pre-step): a rejection counts no hit or miss,
 installs no static alias and leases no workspace, on the miss, topology-hit
-and alias-hit paths (the `metadata_rejections` unit tests of
-`tenet-network/src/plancache.rs`). Device execution is gated in
+and alias-hit paths
+(`host_metadata_rejections_leave_the_plan_cache_untouched_on_every_path` and
+`device_metadata_rejections_leave_the_plan_cache_and_device_untouched_on_every_path`
+in `tenet-network/src/plancache.rs`). The preflight a warm hit runs allocates
+nothing (`the_warm_preflight_allocates_nothing` in
+`tenet-network/tests/preflight_allocations.rs`). Device execution is gated in
 `tenet-network/tests/typed_cuda_network.rs` against the Host `tensor!` run
 (U(1), SU(2), U(1)×SU(2), fZ2×U(1), fZ2⊠SU(2)) and the physical-basis dense
 expansion (U(1), SU(2)); a warm general network transfers and allocates only

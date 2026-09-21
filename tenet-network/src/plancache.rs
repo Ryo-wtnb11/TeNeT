@@ -1556,6 +1556,51 @@ mod tests {
         }
     }
 
+    /// G3c-1 (#1274): an execution that fails after the lease quarantines the
+    /// leased workspace instead of recycling buffers the failure may have
+    /// disturbed, and the next call builds a fresh one. After the #1371
+    /// preflight only a runtime fault fails an execution, so the fault is
+    /// injected through the executor `execute_leased` already takes.
+    #[test]
+    fn a_failed_execution_quarantines_its_lease() {
+        let runtime = tenet::prelude::Runtime::builder().build().unwrap();
+        let o = rejections(&runtime);
+        let tensors = [&o.a, &o.b];
+        let spec: &'static super::StaticTopologySpec =
+            Box::leak(Box::new(super::StaticTopologySpec {
+                inputs: &[&["i", "j"], &["j", "k"]],
+                conj: &[false, false],
+                codomain_splits: &[Some(1), Some(1)],
+                output: &["i", "k"],
+                output_codomain_rank: Some(1),
+            }));
+        let cached =
+            super::get_or_plan_static(spec, &tensors, &[1, 1], &Default::default(), || {
+                spec.network()
+            })
+            .unwrap();
+        cached.execute_host(&tensors).unwrap();
+        let warm = super::plan_cache_stats(&runtime);
+        assert_eq!(warm.idle_workspaces, 1, "a success recycles its lease");
+
+        let failed = cached.execute_leased(&tensors, |_, _, _| {
+            Err(tenet::prelude::Error::InvalidArgument(
+                "injected fault".to_string(),
+            ))
+        });
+        assert!(failed.is_err());
+        let after = super::plan_cache_stats(&runtime);
+        assert_eq!(after.idle_workspaces, 0, "the failed lease is quarantined");
+
+        cached.execute_host(&tensors).unwrap();
+        let rebuilt = super::plan_cache_stats(&runtime);
+        assert_eq!(
+            rebuilt.workspaces_created,
+            after.workspaces_created + 1,
+            "the quarantined workspace is replaced, not resurrected"
+        );
+    }
+
     /// #1371: a Host `tensor!` whose operands after any trace pre-step are
     /// inadmissible from metadata alone — a contracted leg of another sector
     /// structure or of the wrong duality, or a non-symmetric braiding that
