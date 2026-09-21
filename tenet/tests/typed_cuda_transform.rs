@@ -840,8 +840,12 @@ where
 /// against the Host's own NaN pattern.
 fn assert_payload_matches<D: Payload>(actual: &[D], expected: &[D], what: &str) {
     assert_eq!(actual.len(), expected.len(), "{what}: payload length");
+    // Exact equality first: it is the only comparison that works for an
+    // infinity, whose difference with itself is NaN.
     let agree = |left: f64, right: f64| {
-        (left.is_nan() && right.is_nan()) || (left - right).abs() <= 1e-12 * (1.0 + right.abs())
+        left == right
+            || (left.is_nan() && right.is_nan())
+            || (left - right).abs() <= 1e-12 * (1.0 + right.abs())
     };
     for (index, (&left, &right)) in actual.iter().zip(expected).enumerate() {
         let (lr, li) = left.parts();
