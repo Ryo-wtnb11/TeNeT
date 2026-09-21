@@ -47,8 +47,10 @@ mod cuda_scalar_sealed {
 /// TeNeT decides on is widened to `f64` at the download, so the host-side
 /// spectrum contract is unchanged.
 ///
-/// Admitting a dtype here does not open a typed tensor API for it: `tenet`'s
-/// `CudaPayload` stays `f64`/[`Complex64`] (leaf C2).
+/// Admitting a dtype here does not by itself open a typed tensor API for it;
+/// `tenet`'s `CudaPayload` admits all four (#1336), and its device QR marker
+/// `CudaQrPayload` admits only the dtypes whose
+/// [`CudaScalar::DEVICE_CONSTANT_KERNELS`] is `true`.
 pub trait CudaScalar:
     TenferroScalar<Real: CudaRealScalar> + PartialEq + cuda_scalar_sealed::Sealed
 {
@@ -82,9 +84,9 @@ pub trait CudaScalar:
     ///
     /// It is a dtype capability, not a size or workload heuristic, so the
     /// operations that need such a kernel reject the dtype before any device
-    /// work. No TeNeT path regresses: the typed layer reaches device QR for
-    /// `f64` only, and the [`Complex64`] device QR it does not offer is
-    /// exactly what #1271 tracks.
+    /// work. The typed layer reaches device QR for `f64` and `f32`; complex
+    /// device QR is a capability boundary there (tenferro-rs#1833 / #1271),
+    /// not a runtime error it can reach.
     const DEVICE_CONSTANT_KERNELS: bool;
 
     /// Which of the context's lazily created scalar-operand slots this dtype
@@ -1912,8 +1914,9 @@ fn validate_svd_factor_shapes(
 /// compile for `cuFloatComplex` (tenferro-rs#1833) or `cuDoubleComplex`
 /// (#1271). [`Complex64`] previously reached the launch and failed there with
 /// an NVRTC compile log; it now fails the same way [`Complex32`] does, at the
-/// boundary. No caller regresses — the typed layer offers device QR for `f64`
-/// only. Both real payloads, `f32` included, are fully supported.
+/// boundary. Both real payloads, `f32` included, are fully supported, and the
+/// typed layer offers device QR for exactly those two; complex device QR is a
+/// compile-time boundary there (tenferro-rs#1833 / #1271).
 pub fn cuda_qr_region<D: CudaScalar>(
     ctx: &mut CudaDenseContext,
     src: &CudaDenseStorage,

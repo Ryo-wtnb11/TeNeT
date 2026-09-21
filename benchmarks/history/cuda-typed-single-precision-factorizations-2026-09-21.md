@@ -157,10 +157,11 @@ double-precision twin of the same fixture. See the audit note.
 
 From the #1336 review:
 
-* `device_single_precision_normalize_of_an_overflowed_norm_is_all_zero` — the
-  documented silent case: `inner(a, a)` reports `+inf` at `f32` and
-  `normalize` returns an all-zero tensor with no error, with the `f64` twin of
-  the same fixture as the control.
+* `device_single_precision_normalize_of_an_overflowed_norm_is_all_zero` —
+  characterises a known limitation (Ryo-wtnb11/TeNeT#1344), not an intended
+  contract: `inner(a, a)` reports `+inf` at `f32` and `normalize` returns an
+  all-zero tensor with no error, with the `f64` twin of the same fixture as
+  the control.
 * `a_zero_scale_overwrite_into_clears_a_nan_poisoned_destination` — `alpha = 0`
   and `-0` over a `NaN`-poisoned destination, at all four payloads. The finite
   poison of the existing loop cannot tell an overwrite from a
@@ -212,8 +213,13 @@ fully returned when it drops, so a long enough single process fails at
 `cutensorCreate`. The `--precision` flag keeps every invocation short enough,
 which is a workaround and is labelled as one. Whether `Runtime` — or the
 tenferro CUDA backend behind it — should release its cuTENSOR handle on drop
-belongs to its own issue; no production caller builds one `Runtime` per
-operation, so the library's own device path is unaffected.
+belongs to its own issue, Ryo-wtnb11/TeNeT#1343; no production caller builds
+one `Runtime` per operation, so the library's own device path is unaffected.
+
+**Carried to a later device leaf** (independent review P2-2, P2-3): a nonzero
+64-element-aligned `f32` factor offset control (e.g. `d0 = 8`) for the #1320
+test, and an `f32`-vs-`f64` cost contract for device `qr_compact`. Neither
+needed a code change here, and no device run backs this follow-up commit.
 
 See the audit note. In short: a compact-diagonal *device* receiver is
 unreachable through the public API (`to_cuda` densifies), so only the

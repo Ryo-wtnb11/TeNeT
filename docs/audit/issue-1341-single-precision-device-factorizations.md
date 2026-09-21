@@ -8,6 +8,11 @@ the device payload leaf `docs/audit/issue-1336-single-precision-device-payload.m
 (C2), and the host factorization leaf
 `docs/audit/issue-1324-single-precision-factorizations.md`.
 
+Reference evidence: this leaf is dtype admission with no algorithm change. It
+inherits the reference record of #1324 (TensorKit `cfaa073`, MatrixAlgebraKit
+0.6.9 tolerance rules) and of the #1326 adapter leaf; QSpace has no
+corresponding path, because it is double-precision only.
+
 This artifact is revision-pinned evidence, not current capability authority:
 `tenet/src/typed.rs`, `tenet/tests/typed_cuda_single_precision_factorizations.rs`
 and `tenet-dense/src/cuda_adapter.rs` are. It supersedes the admission table of
@@ -73,6 +78,26 @@ const _: () = {
     );
 };
 ```
+
+That block ties the constant to literals, not to the marker's impl set, so it
+alone would let an extra `CudaQrPayload` impl for a dtype whose constant is
+`false` compile. The device `qr_compact` body therefore also asserts the
+constant for its own `D`:
+
+```rust
+const {
+    assert!(
+        <D as tenet_dense::CudaScalar>::DEVICE_CONSTANT_KERNELS,
+        "`CudaQrPayload` admits a dtype without device constant kernels: drop its impl"
+    );
+}
+```
+
+An inline `const` naming a generic parameter is evaluated at monomorphization,
+so such an impl fails the first build that instantiates device QR at it (the
+`f32_cuda_qr` doctest instantiates it at `f32`). The two checks cover opposite
+directions: the block fires on an upstream flip of the constant without any
+instantiation; the inline `const` fires on a new impl the block cannot see.
 
 The constant remains the only place the capability is *decided*; the marker
 cannot drift from it, because a drift fails the build with a message naming the
@@ -166,3 +191,17 @@ halved; no absolute platform constant appears.
   `benchmarks/history/cuda-typed-single-precision-factorizations-2026-09-21.md`.
 * **Persistence** (`WireScalar`) and the host advanced-linalg family stay
   closed for single precision; leaves H8 and H5, unchanged here.
+* **Carried to a later device leaf** from the independent review (P2-2, P2-3),
+  neither a C4 defect:
+  * the #1320 offset test has no *nonzero* 64-element-aligned `f32` factor
+    offset (e.g. `d0 = 8`, offset 64: aligned for `f32`, unaligned for
+    `f64`/`Complex32`/`Complex64`); its `(4,2)`/`(2,2)` "controls" are in fact
+    unaligned for three or all four dtypes;
+  * device `qr_compact` has no `f32`-vs-`f64` call/byte cost contract; only
+    SVD/EIGH are in the measured pair.
+* **Fresh-`Runtime` churn** exhausting cuTENSOR (`cutensorCreate` status 14) is
+  Ryo-wtnb11/TeNeT#1343.
+* **`normalize` of an overflowed single-precision device norm** returns zeros
+  with no error; that is a known limitation tracked in Ryo-wtnb11/TeNeT#1344,
+  characterised (not endorsed) by
+  `device_single_precision_normalize_of_an_overflowed_norm_is_all_zero`.

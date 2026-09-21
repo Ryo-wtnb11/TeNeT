@@ -838,9 +838,15 @@ impl CudaFactorizationPayload for num_complex::Complex32 {}
 ///
 /// **That constant is the single authority.** This marker cannot be written as
 /// a bound on it — stable Rust has no `where D::CONST == true` — so it is a
-/// hand-written projection of it, and the `const` block below fails the build
-/// if the two ever disagree. Fixing the upstream kernel therefore cannot leave
-/// a dtype silently locked out here: it breaks the compile that names it.
+/// hand-written projection of it, held equal to it from both sides:
+///
+/// * the `const` block below pins the constant for each of the four named
+///   payloads, so an upstream flip fails the build with the repair named — a
+///   fixed kernel cannot leave a dtype silently locked out here;
+/// * device `qr_compact` asserts the constant in an inline `const`, evaluated
+///   when it is monomorphized, so an impl of this marker for a dtype whose
+///   constant is `false` fails the first build that instantiates device QR at
+///   it instead of degrading to the adapter's runtime `Unsupported`.
 #[cfg(feature = "cuda")]
 #[doc(hidden)]
 pub trait CudaQrPayload: CudaFactorizationPayload {}
@@ -11993,6 +11999,12 @@ where
     /// is assembled by one whole-factor device copy; any other route keeps the
     /// per-tree identity-selector GEMM.
     pub fn qr_compact(&self) -> Result<(Self, Self), Error> {
+        const {
+            assert!(
+                <D as tenet_dense::CudaScalar>::DEVICE_CONSTANT_KERNELS,
+                "`CudaQrPayload` admits a dtype without device constant kernels: drop its impl"
+            );
+        }
         let source = self.direct_cuda_storage("qr_compact")?;
         let source_space = self.logical_space().space();
         let required_len = source_space.required_len()?;
@@ -12365,11 +12377,13 @@ where
     /// Host IEEE behavior and produces non-finite stored entries.
     ///
     /// The divisor is [`Self::norm`], so this inherits that method's
-    /// accumulation contract. One consequence is worth stating here, because
-    /// it is silent: at `f32`/`Complex32` a norm that overflows the
-    /// within-sector device sum is `inf`, and dividing by `inf` returns an
-    /// **all-zero tensor with no error**. Host does the same at `f64`
-    /// overflow; single precision merely reaches the boundary sooner. Rescale
+    /// accumulation contract. One consequence is a **known limitation**, not
+    /// an intended contract (tracked in Ryo-wtnb11/TeNeT#1344): at
+    /// `f32`/`Complex32` a norm that overflows the within-sector device sum is
+    /// `inf`, and dividing by `inf` returns an **all-zero tensor with no
+    /// error**, where the Host norm of the same tensor stays finite. Host does
+    /// the same at `f64` overflow; single precision merely reaches the
+    /// boundary sooner. Until the device reduction is overflow-safe, rescale
     /// before normalizing — on Host, by the reciprocal of
     /// [`TensorMap::norm_inf`] — when that range is reachable.
     pub fn normalize(&self) -> Result<Self, Error> {
@@ -12538,7 +12552,9 @@ where
     /// reported as `inf` rather than as an error, exactly as the same overflow
     /// is at `f64`, and [`Self::normalize`] then divides by it and returns an
     /// all-zero tensor with no error — the same code shape, and the same
-    /// silent outcome, Host has at `f64` overflow.
+    /// silent outcome, Host has at `f64` overflow. This is a known
+    /// limitation, not an intended contract: overflow-safe (scaled) device
+    /// reductions, or a typed error, are tracked in Ryo-wtnb11/TeNeT#1344.
     ///
     /// If that range is reachable for your data, rescale before reducing:
     /// download with [`TensorMap::to_host`] and take

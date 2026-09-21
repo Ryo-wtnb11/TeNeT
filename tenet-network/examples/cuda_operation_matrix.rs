@@ -240,10 +240,11 @@ mod device {
         }
     }
 
-    /// The same verdict on the single-precision lane, scaled by `2^15` — the
-    /// next power of two above `sqrt(eps(f32) / eps(f64)) = 2^14.5`, because a
-    /// forward-error bound grows with the square root of the epsilon ratio,
-    /// not with the ratio. About `3.3e-5`.
+    /// The verdict threshold on the single-precision lane, `2^15` times the
+    /// double one (about `3.3e-5`, roughly `275 * eps(f32)`). It is an
+    /// **empirical** verdict threshold, checked against the A100 smoke run
+    /// (zero `not-ok` rows), not derived from an error bound. The tests derive their bounds as
+    /// `K * sqrt(n) * kappa * eps(real(D))` instead.
     const SINGLE_CHECK_TOLERANCE: f64 = DOUBLE_CHECK_TOLERANCE * 32768.0;
 
     impl HarnessScalar for f32 {
@@ -1384,9 +1385,10 @@ mod device {
                     run_qr::<_, f64>($config, $name, family, blocks, degeneracy, &space);
                     run_dtype::<_, Complex64>($config, $name, family, blocks, degeneracy, &space);
                 }
-                // Single precision (#1341), appended after the
-                // double-precision rows so a `--precision all` run keeps the
-                // baseline row order as its prefix.
+                // Single precision (#1341). Under `--precision all` these rows
+                // follow the double rows of the same provider and size index,
+                // so the two lanes interleave; the baseline row order is only
+                // reproduced by the default `--precision double`.
                 if $config.precision.single() {
                     run_dtype::<_, f32>($config, $name, family, blocks, degeneracy, &space);
                     run_qr::<_, f32>($config, $name, family, blocks, degeneracy, &space);

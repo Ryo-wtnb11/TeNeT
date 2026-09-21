@@ -487,9 +487,11 @@ fn device_single_precision_norm_can_overflow_where_the_host_stays_finite() {
 /// `inner(a, a)` is the unrooted reduction, so it saturates first and reports
 /// `inf` — the same convention `f64` overflow already has, not a typed error.
 /// `normalize` then divides every entry by that `inf` and returns an
-/// **all-zero tensor with no error**: the documented silent case, asserted
-/// here so it cannot become a quiet `NaN` (which is what a `0/inf` on a zero
-/// entry, or an `inf/inf`, would produce) or a typed failure.
+/// **all-zero tensor with no error**. That is a **known limitation**, not an
+/// intended contract (Ryo-wtnb11/TeNeT#1344: the TensorKit reference norm is
+/// scaled and does not overflow). This test characterises the current
+/// behaviour so that a change to it — a quiet `NaN` (what an `inf/inf` would
+/// produce), a typed error, or the #1344 fix — is noticed and re-recorded.
 ///
 /// The `f64` twin of the same fixture shape is the control: it neither
 /// saturates nor zeroes.
