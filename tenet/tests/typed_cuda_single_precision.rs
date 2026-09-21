@@ -36,104 +36,15 @@ use std::sync::Arc;
 use num_complex::{Complex32, Complex64};
 
 use tenet::core::{
-    product_sector, CheckedFusionAlgebra, FermionParityFusionRule, MultiplicityFreeRigidSymbols,
-    ProductFusionRule, ProductFusionRuleExt, SU2FusionRule, SU2Irrep, SectorCodec, U1FusionRule,
-    U1Irrep, Z2Irrep,
+    product_sector, FermionParityFusionRule, ProductFusionRule, ProductFusionRuleExt,
+    SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep, Z2Irrep,
 };
 use tenet::dense::cuda_transfer_stats;
-use tenet::typed::{BlockFusionTrees, CudaPayload, Error, GradedSpace, Runtime, TensorMap};
+use tenet::typed::{BlockFusionTrees, Error, GradedSpace, Runtime, TensorMap};
 
-// ---------------------------------------------------------------------------
-// The payload dtypes under test
-// ---------------------------------------------------------------------------
+mod common;
 
-/// Every admitted device payload, with the comparisons these gates need.
-///
-/// `entry` never receives an un-suffixed float literal in a single-precision
-/// context: the caller passes `f64` and each impl performs its own conversion,
-/// which is also what keeps the fixtures dyadic and therefore exact.
-trait DevicePayload: CudaPayload + Copy + PartialEq + std::fmt::Debug {
-    const NAME: &'static str;
-    /// `eps` of the payload's *real lane* — the precision the device sums in.
-    const EPS: f64;
-
-    fn entry(real: f64, imaginary: f64) -> Self;
-    fn parts(self) -> (f64, f64);
-
-    fn distance(self, other: Self) -> f64 {
-        let (ar, ai) = self.parts();
-        let (br, bi) = other.parts();
-        ((ar - br).powi(2) + (ai - bi).powi(2)).sqrt()
-    }
-
-    fn magnitude(self) -> f64 {
-        let (re, im) = self.parts();
-        (re * re + im * im).sqrt()
-    }
-}
-
-impl DevicePayload for f64 {
-    const NAME: &'static str = "f64";
-    const EPS: f64 = f64::EPSILON;
-
-    fn entry(real: f64, _imaginary: f64) -> Self {
-        real
-    }
-
-    fn parts(self) -> (f64, f64) {
-        (self, 0.0)
-    }
-}
-
-impl DevicePayload for Complex64 {
-    const NAME: &'static str = "c64";
-    const EPS: f64 = f64::EPSILON;
-
-    fn entry(real: f64, imaginary: f64) -> Self {
-        Self::new(real, imaginary)
-    }
-
-    fn parts(self) -> (f64, f64) {
-        (self.re, self.im)
-    }
-}
-
-impl DevicePayload for f32 {
-    const NAME: &'static str = "f32";
-    const EPS: f64 = f32::EPSILON as f64;
-
-    fn entry(real: f64, _imaginary: f64) -> Self {
-        real as f32
-    }
-
-    fn parts(self) -> (f64, f64) {
-        (f64::from(self), 0.0)
-    }
-}
-
-impl DevicePayload for Complex32 {
-    const NAME: &'static str = "c32";
-    const EPS: f64 = f32::EPSILON as f64;
-
-    fn entry(real: f64, imaginary: f64) -> Self {
-        Self::new(real as f32, imaginary as f32)
-    }
-
-    fn parts(self) -> (f64, f64) {
-        (f64::from(self.re), f64::from(self.im))
-    }
-}
-
-/// Symmetry providers every generic body below is instantiated over.
-trait DeviceRule:
-    MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec
-{
-}
-
-impl<R> DeviceRule for R where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec
-{
-}
+use common::{DevicePayload, DeviceRule};
 
 // ---------------------------------------------------------------------------
 // Tolerances
@@ -158,24 +69,47 @@ fn reduction_tolerance<D: DevicePayload>(terms: usize, scale: f64) -> f64 {
 
 /// Compares against `tolerance * (1 + |expected|)`.
 ///
-/// That relative factor is right for the elementwise families, whose
-/// `elementwise_tolerance` is a *relative* bound. For the reductions it makes
-/// the asserted bound `reduction_tolerance(..) * (1 + |expected|)`, which is
-/// **looser** than the absolute device bound those tests document: the
-/// documented bound is already absolute, so multiplying it again is slack, not
-/// rigour. The slack is kept rather than removed here because tightening a
-/// device tolerance cannot be validated without a device run, and it is
-/// carried into leaf C4 with the rest of the device-test follow-ups. What the
-/// reduction gates prove today is therefore the documented bound *or looser by
-/// a factor `(1 + |expected|)`; they still fail for any device reduction that
-/// is wrong by more than that, which is what they exist to catch.
+/// The relative factor belongs to the elementwise families, whose
+/// `elementwise_tolerance` is a *relative* bound. The reductions use
+/// [`assert_close_absolutely`] instead: their documented bound is already
+/// absolute.
 fn assert_close<D: DevicePayload>(actual: &[D], expected: &[D], tolerance: f64, what: &str) {
+    assert_within(actual, expected, tolerance, what, true)
+}
+
+/// Compares against `tolerance` exactly, with no relative widening.
+///
+/// This is the bound `reduction_tolerance` documents, asserted as documented.
+/// #1336 left the extra `(1 + |expected|)` factor in place here because
+/// tightening a device tolerance cannot be validated without a device run;
+/// leaf C4 (#1341) removed it on the A100 record of this suite.
+fn assert_close_absolutely<D: DevicePayload>(
+    actual: &[D],
+    expected: &[D],
+    tolerance: f64,
+    what: &str,
+) {
+    assert_within(actual, expected, tolerance, what, false)
+}
+
+fn assert_within<D: DevicePayload>(
+    actual: &[D],
+    expected: &[D],
+    tolerance: f64,
+    what: &str,
+    relative: bool,
+) {
     assert_eq!(actual.len(), expected.len(), "{what} [{}]: length", D::NAME);
     for (index, (&left, &right)) in actual.iter().zip(expected).enumerate() {
+        let bound = if relative {
+            tolerance * (1.0 + right.magnitude())
+        } else {
+            tolerance
+        };
         assert!(
-            left.distance(right) <= tolerance * (1.0 + right.magnitude()),
+            left.distance(right) <= bound,
             "{what} [{}]: element {index} is {left:?}, expected {right:?} \
-             (distance {}, tolerance {tolerance})",
+             (distance {}, bound {bound})",
             D::NAME,
             left.distance(right)
         );
@@ -445,6 +379,9 @@ where
 
     let host_norm = a.norm().unwrap();
     let device_norm = device_a.norm().unwrap();
+    // `norm` takes a square root of the reduction, so its error is the
+    // reduction's own bound or the rounding of a result of that magnitude,
+    // whichever is larger. Both halves are absolute and documented.
     assert!(
         (device_norm - host_norm).abs() <= tolerance.max(host_norm * D::EPS * terms as f64),
         "norm [{}]: device {device_norm}, host {host_norm}",
@@ -452,7 +389,7 @@ where
     );
     assert!(host_norm > 0.0, "norm [{}] fixture is vacuous", D::NAME);
 
-    assert_close(
+    assert_close_absolutely(
         &[device_a.inner(&device_b).unwrap()],
         &[a.inner(&b).unwrap()],
         tolerance,
@@ -473,7 +410,7 @@ where
     let phase = D::entry(0.0, 1.0);
     if phase != D::entry(0.0, 0.0) {
         let scaled_lhs = device_a.scale(phase).unwrap();
-        assert_close(
+        assert_close_absolutely(
             &[scaled_lhs.inner(&device_b).unwrap()],
             &[a.scale(phase).inner(&b).unwrap()],
             tolerance,
@@ -542,6 +479,117 @@ fn device_single_precision_norm_can_overflow_where_the_host_stays_finite() {
         .unwrap();
     assert!(twin.norm().unwrap().is_finite());
     assert!(twin.to_cuda().unwrap().norm().unwrap().is_finite());
+}
+
+/// What the overflow above *does* to the two public operations that consume a
+/// device reduction, carried from the #1336 review.
+///
+/// `inner(a, a)` is the unrooted reduction, so it saturates first and reports
+/// `inf` — the same convention `f64` overflow already has, not a typed error.
+/// `normalize` then divides every entry by that `inf` and returns an
+/// **all-zero tensor with no error**. That is a **known limitation**, not an
+/// intended contract (Ryo-wtnb11/TeNeT#1344: the TensorKit reference norm is
+/// scaled and does not overflow). This test characterises the current
+/// behaviour so that a change to it — a quiet `NaN` (what an `inf/inf` would
+/// produce), a typed error, or the #1344 fix — is noticed and re-recorded.
+///
+/// The `f64` twin of the same fixture shape is the control: it neither
+/// saturates nor zeroes.
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn device_single_precision_normalize_of_an_overflowed_norm_is_all_zero() {
+    let runtime = runtime();
+    let leg = u1_leg();
+    let big = 1.0e19_f64;
+
+    let host =
+        TensorMap::<U1FusionRule, f32>::from_block_fn(&runtime, [&leg], [&leg], |_, _| big as f32)
+            .unwrap();
+    let device = host.to_cuda().unwrap();
+
+    let self_inner = device.inner(&device).unwrap();
+    assert!(
+        self_inner.is_infinite() && self_inner.is_sign_positive(),
+        "the device sums |x|^2 in f32 and saturates, got {self_inner}"
+    );
+
+    let normalized = device.normalize().unwrap().to_host().unwrap();
+    assert!(
+        !normalized.data().is_empty(),
+        "the fixture must carry a payload"
+    );
+    for (index, &value) in normalized.data().iter().enumerate() {
+        assert_eq!(
+            value, 0.0_f32,
+            "normalize by an overflowed norm must zero entry {index}, got {value}"
+        );
+    }
+
+    let twin = TensorMap::<U1FusionRule, f64>::from_block_fn(&runtime, [&leg], [&leg], |_, _| big)
+        .unwrap()
+        .to_cuda()
+        .unwrap();
+    assert!(twin.inner(&twin).unwrap().is_finite());
+    let twin_normalized = twin.normalize().unwrap().to_host().unwrap();
+    assert!(
+        twin_normalized.data().iter().all(|value| *value != 0.0),
+        "the double-precision control must not be zeroed"
+    );
+}
+
+/// Carried from the #1336 review: `alpha = 0` (and `-0`) on an
+/// `*_overwrite_into` transform must **overwrite**, not scale-and-accumulate.
+///
+/// The finite-poison loop in `assert_transforms_match_host` cannot tell the
+/// two apart — `0 * 7 == 0` either way. A `NaN`-poisoned destination can:
+/// `0 * NaN` is `NaN`, so any route that reads the destination before writing
+/// leaves `NaN` behind, while a true overwrite leaves an exact `+0`.
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn a_zero_scale_overwrite_into_clears_a_nan_poisoned_destination() {
+    fn assert_cleared<R, D>(runtime: &Runtime, leg: &GradedSpace<R>)
+    where
+        R: DeviceRule,
+        D: DevicePayload,
+    {
+        let host = TensorMap::<R, D>::from_block_fn(runtime, [leg, leg], [leg], fill::<D, _>(1.5))
+            .unwrap();
+        let device = host.to_cuda().unwrap();
+        let host_permuted = host.permute(&[1, 2], &[0]).unwrap();
+        let poisoned = host_permuted.scale(D::entry(f64::NAN, 0.0));
+        assert!(
+            !poisoned.data().is_empty()
+                && poisoned
+                    .data()
+                    .iter()
+                    .all(|value| value.magnitude().is_nan()),
+            "the poison fixture [{}] must be entirely NaN",
+            D::NAME
+        );
+
+        for alpha in [D::entry(0.0, 0.0), D::entry(-0.0, -0.0)] {
+            let mut destination = poisoned.to_cuda().unwrap();
+            device
+                .permute_overwrite_into(&mut destination, &[1, 2], &[0], alpha)
+                .unwrap();
+            for (index, &value) in destination.to_host().unwrap().data().iter().enumerate() {
+                assert_eq!(
+                    value,
+                    D::entry(0.0, 0.0),
+                    "permute_overwrite_into [{}] at alpha {alpha:?} left entry {index} as \
+                     {value:?}",
+                    D::NAME
+                );
+            }
+        }
+    }
+
+    let runtime = runtime();
+    let u1 = u1_leg();
+    assert_cleared::<_, f64>(&runtime, &u1);
+    assert_cleared::<_, Complex64>(&runtime, &u1);
+    assert_cleared::<_, f32>(&runtime, &u1);
+    assert_cleared::<_, Complex32>(&runtime, &u1);
 }
 
 // ---------------------------------------------------------------------------
@@ -1044,14 +1092,16 @@ fn single_precision_costs_the_same_device_calls_and_half_the_bytes() {
 // Device-free gates (no `#[ignore]`: a `cuda` build runs them anywhere)
 // ---------------------------------------------------------------------------
 
-/// The admission table itself, as a compile-time fact: the base device family
-/// is open for all four payloads, and the device factorization family is not.
-/// The negative half is pinned by the `compile_fail` doctests on
-/// `CudaFactorizationPayload`; this is their positive twin.
+/// The admission table itself, as a compile-time fact: the base and
+/// factorization device families are open for all four payloads, and device QR
+/// for the two real ones. The negative half — a complex device QR, and a
+/// generic body that names only the wider marker — is pinned by the
+/// `compile_fail` doctests; this is their positive twin.
 #[test]
-fn every_base_family_payload_is_a_device_payload() {
-    fn device_payload<D: CudaPayload>() {}
+fn the_device_admission_markers_hold_exactly_where_the_table_says() {
+    fn device_payload<D: tenet::typed::CudaPayload>() {}
     fn device_factorization_payload<D: tenet::typed::CudaFactorizationPayload>() {}
+    fn device_qr_payload<D: tenet::typed::CudaQrPayload>() {}
 
     device_payload::<f64>();
     device_payload::<Complex64>();
@@ -1060,6 +1110,42 @@ fn every_base_family_payload_is_a_device_payload() {
 
     device_factorization_payload::<f64>();
     device_factorization_payload::<Complex64>();
+    device_factorization_payload::<f32>();
+    device_factorization_payload::<Complex32>();
+
+    device_qr_payload::<f64>();
+    device_qr_payload::<f32>();
+}
+
+/// The `CudaQrPayload` membership is a projection of the adapter capability
+/// constant, and the constant is the authority.
+///
+/// The static assertion beside the marker enforces the same equality at
+/// compile time; this is the runtime statement of it, so the relationship is
+/// visible from the test suite and not only from a `const` block.
+#[test]
+fn device_qr_admission_follows_the_adapter_capability_constant() {
+    use tenet::dense::CudaScalar;
+
+    for (name, has_kernels, admitted) in [
+        ("f64", <f64 as CudaScalar>::DEVICE_CONSTANT_KERNELS, true),
+        ("f32", <f32 as CudaScalar>::DEVICE_CONSTANT_KERNELS, true),
+        (
+            "c64",
+            <Complex64 as CudaScalar>::DEVICE_CONSTANT_KERNELS,
+            false,
+        ),
+        (
+            "c32",
+            <Complex32 as CudaScalar>::DEVICE_CONSTANT_KERNELS,
+            false,
+        ),
+    ] {
+        assert_eq!(
+            has_kernels, admitted,
+            "{name}: device QR admission and DEVICE_CONSTANT_KERNELS disagree"
+        );
+    }
 }
 
 /// The rejection order does not depend on the payload dtype: a runtime built

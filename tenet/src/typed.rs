@@ -462,9 +462,8 @@ pub use serialization::{DecodeError, DecodeLimits, EncodeError, TypedPersistence
 /// ```
 ///
 /// A device payload is *not* one of the closed gates: every dtype of this
-/// marker uploads (<https://github.com/Ryo-wtnb11/TeNeT/issues/1336>). What a
-/// single-precision device tensor cannot reach is the device factorization
-/// family, pinned on `CudaFactorizationPayload`.
+/// marker uploads (<https://github.com/Ryo-wtnb11/TeNeT/issues/1336>) and, since
+/// <https://github.com/Ryo-wtnb11/TeNeT/issues/1341>, factorizes on device.
 #[cfg_attr(
     feature = "cuda",
     doc = "```
@@ -623,30 +622,34 @@ impl TensorScalar for num_complex::Complex32 {}
 ///     let _ = tensor.is_posdef(0.0);
 /// }
 /// ```
-/// This marker does not carry the *device* factorizations. `f32` and
-/// `Complex32` are device payloads (`CudaPayload`) and host factorization
-/// payloads, yet the device `svd_compact`/`eigh_full` stay closed for them
-/// behind `CudaFactorizationPayload`
-/// (<https://github.com/Ryo-wtnb11/TeNeT/issues/1336>, residual C4). The pair
-/// below only compiles under the `cuda` feature, so a host-only CI run does
-/// not exercise it.
+/// This marker still does not *by itself* carry the device factorizations:
+/// those are `CudaFactorizationPayload`, which every payload of this marker now
+/// implements (<https://github.com/Ryo-wtnb11/TeNeT/issues/1341>), and device QR
+/// is narrower again (`CudaQrPayload`, real payloads only). The examples below
+/// only compile under the `cuda` feature, so a host-only CI run does not
+/// exercise them.
 #[cfg_attr(
     feature = "cuda",
-    doc = "```compile_fail
+    doc = "```
 use tenet::core::U1FusionRule;
 use tenet::typed::{CudaStorage, TensorMap};
 
-fn no_f32_device_svd(tensor: &TensorMap<U1FusionRule, f32, CudaStorage<f32>>) {
+fn f32_device_svd(tensor: &TensorMap<U1FusionRule, f32, CudaStorage<f32>>) {
+    let _ = tensor.svd_compact();
+}
+
+fn f64_device_svd(tensor: &TensorMap<U1FusionRule, f64, CudaStorage<f64>>) {
     let _ = tensor.svd_compact();
 }
 ```
 
-```
+```compile_fail
+use num_complex::Complex32;
 use tenet::core::U1FusionRule;
 use tenet::typed::{CudaStorage, TensorMap};
 
-fn f64_device_svd(tensor: &TensorMap<U1FusionRule, f64, CudaStorage<f64>>) {
-    let _ = tensor.svd_compact();
+fn no_c32_device_qr(tensor: &TensorMap<U1FusionRule, Complex32, CudaStorage<Complex32>>) {
+    let _ = tensor.qr_compact();
 }
 ```"
 )]
@@ -782,8 +785,8 @@ impl AdvancedLinalgScalar for num_complex::Complex64 {}
 ///
 /// This marker carries the *base* device family only — transfer, arithmetic,
 /// the reductions, contraction/`compose` and the structural transforms. The
-/// device factorizations need [`CudaFactorizationPayload`] on top of it, which
-/// the single-precision payloads do not implement.
+/// device factorizations sit behind [`CudaFactorizationPayload`] on top of it,
+/// and device QR behind [`CudaQrPayload`] on top of that.
 #[cfg(feature = "cuda")]
 #[doc(hidden)]
 pub trait CudaPayload: TensorScalar + tenet_dense::CudaScalar {}
@@ -797,20 +800,19 @@ impl CudaPayload for f32 {}
 #[cfg(feature = "cuda")]
 impl CudaPayload for num_complex::Complex32 {}
 
-/// Device payloads admitted to the *device* factorization family.
+/// Device payloads admitted to the *device* factorization family
+/// (`svd_compact`, `eigh_full`).
 ///
-/// [`CudaPayload`] and [`FactorizationScalar`] are each too wide to gate the
-/// device factorizations on their own: since single precision joined the host
-/// factorization family, `f32` and [`num_complex::Complex32`] satisfy
-/// `CudaPayload + FactorizationScalar`, and the device `svd_compact` /
-/// `eigh_full` would open for them by accident. They are their own leaf
-/// (<https://github.com/Ryo-wtnb11/TeNeT/issues/1336>, residual C4): the
-/// device factorization gauge, the Hermitian admission rule and the truncation
-/// composition all need single-precision evidence of their own before a caller
-/// may reach them.
+/// The marker exists so that admitting a dtype to the device *base* family and
+/// to the *host* factorization family cannot, together, open the device
+/// factorizations by accident: those two admissions say nothing about the
+/// device SVD gauge, the device Hermitian admission rule or the host-side
+/// truncation composition at that dtype. All four payloads are admitted here
+/// since <https://github.com/Ryo-wtnb11/TeNeT/issues/1341> (leaf C4) supplied
+/// that evidence for `f32` and [`num_complex::Complex32`].
 ///
-/// Sealed through [`CudaPayload`]: implemented for `f64` and
-/// [`num_complex::Complex64`] only.
+/// Sealed through [`CudaPayload`]; device QR needs [`CudaQrPayload`] on top of
+/// it, because the backend cannot gauge a complex QR.
 #[cfg(feature = "cuda")]
 #[doc(hidden)]
 pub trait CudaFactorizationPayload: CudaPayload + FactorizationScalar {}
@@ -819,6 +821,55 @@ pub trait CudaFactorizationPayload: CudaPayload + FactorizationScalar {}
 impl CudaFactorizationPayload for f64 {}
 #[cfg(feature = "cuda")]
 impl CudaFactorizationPayload for num_complex::Complex64 {}
+#[cfg(feature = "cuda")]
+impl CudaFactorizationPayload for f32 {}
+#[cfg(feature = "cuda")]
+impl CudaFactorizationPayload for num_complex::Complex32 {}
+
+/// Device payloads admitted to device QR (`qr_compact`).
+///
+/// Device QR additionally needs the backend's positive-diagonal gauge, whose
+/// `triu` fill materializes a payload-typed zero constant. Whether that kernel
+/// compiles for a dtype is the adapter's
+/// [`tenet_dense::CudaScalar::DEVICE_CONSTANT_KERNELS`], which is `false` for
+/// both complex payloads (tenferro-rs#1833 / #1271) — so device QR is a
+/// compile-time boundary for them, one level above the typed `Unsupported`
+/// the adapter would return.
+///
+/// **That constant is the single authority.** This marker cannot be written as
+/// a bound on it — stable Rust has no `where D::CONST == true` — so it is a
+/// hand-written projection of it, held equal to it from both sides:
+///
+/// * the `const` block below pins the constant for each of the four named
+///   payloads, so an upstream flip fails the build with the repair named — a
+///   fixed kernel cannot leave a dtype silently locked out here;
+/// * device `qr_compact` asserts the constant in an inline `const`, evaluated
+///   when it is monomorphized, so an impl of this marker for a dtype whose
+///   constant is `false` fails the first build that instantiates device QR at
+///   it instead of degrading to the adapter's runtime `Unsupported`.
+#[cfg(feature = "cuda")]
+#[doc(hidden)]
+pub trait CudaQrPayload: CudaFactorizationPayload {}
+
+#[cfg(feature = "cuda")]
+impl CudaQrPayload for f64 {}
+#[cfg(feature = "cuda")]
+impl CudaQrPayload for f32 {}
+
+#[cfg(feature = "cuda")]
+const _: () = {
+    use tenet_dense::CudaScalar;
+    assert!(
+        <f64 as CudaScalar>::DEVICE_CONSTANT_KERNELS
+            && <f32 as CudaScalar>::DEVICE_CONSTANT_KERNELS,
+        "a real payload lost its device constant kernels: drop its `CudaQrPayload` impl"
+    );
+    assert!(
+        !<num_complex::Complex64 as CudaScalar>::DEVICE_CONSTANT_KERNELS
+            && !<num_complex::Complex32 as CudaScalar>::DEVICE_CONSTANT_KERNELS,
+        "a complex payload gained device constant kernels: give it a `CudaQrPayload` impl"
+    );
+};
 
 /// One tensor-local restriction used by the internal network slice executor.
 #[doc(hidden)]
@@ -11072,8 +11123,10 @@ impl<R, D: CudaPayload> TensorMap<R, D, CudaStorage<D>> {
 ///
 /// The device payload marker alone does not admit a device factorization, and
 /// neither does it together with the *host* factorization marker: the gate is
-/// [`CudaFactorizationPayload`], which `f32` and `Complex32` do not implement
-/// even though they satisfy both halves.
+/// [`CudaFactorizationPayload`]. Every payload implements it since #1341, but
+/// a *generic* body must still name it — the two bounds below are not enough,
+/// because neither says anything about the device gauge or the device
+/// Hermitian rule.
 ///
 /// ```compile_fail
 /// use tenet::prelude::U1FusionRule;
@@ -11106,44 +11159,45 @@ impl<R, D: CudaPayload> TensorMap<R, D, CudaStorage<D>> {
 /// }
 /// ```
 ///
-/// Concretely, at the two single-precision device payloads — each paired with
-/// the double-precision twin that differs only in the dtype:
+/// Concretely, at all four device payloads — the single-precision twins of the
+/// pins #1336 left here, which differ only in the dtype:
 ///
-/// ```compile_fail
+/// ```
 /// use tenet::prelude::U1FusionRule;
 /// use tenet::typed::{CudaStorage, TensorMap};
 ///
-/// fn no_f32_device_svd(tensor: &TensorMap<U1FusionRule, f32, CudaStorage<f32>>) {
+/// fn f32_device_svd(tensor: &TensorMap<U1FusionRule, f32, CudaStorage<f32>>) {
 ///     let _ = tensor.svd_compact();
 /// }
-/// ```
-///
-/// ```
-/// use tenet::prelude::U1FusionRule;
-/// use tenet::typed::{CudaStorage, TensorMap};
 ///
 /// fn f64_device_svd(tensor: &TensorMap<U1FusionRule, f64, CudaStorage<f64>>) {
 ///     let _ = tensor.svd_compact();
 /// }
 /// ```
 ///
-/// ```compile_fail
-/// use num_complex::Complex32;
+/// ```
+/// use num_complex::{Complex32, Complex64};
 /// use tenet::prelude::U1FusionRule;
 /// use tenet::typed::{CudaStorage, TensorMap};
 ///
-/// fn no_c32_device_eigh(tensor: &TensorMap<U1FusionRule, Complex32, CudaStorage<Complex32>>) {
+/// fn c32_device_eigh(tensor: &TensorMap<U1FusionRule, Complex32, CudaStorage<Complex32>>) {
+///     let _ = tensor.eigh_full();
+/// }
+///
+/// fn c64_device_eigh(tensor: &TensorMap<U1FusionRule, Complex64, CudaStorage<Complex64>>) {
 ///     let _ = tensor.eigh_full();
 /// }
 /// ```
 ///
-/// ```
-/// use num_complex::Complex64;
-/// use tenet::prelude::U1FusionRule;
-/// use tenet::typed::{CudaStorage, TensorMap};
+/// The truncated variants stay `UnsupportedOnDevice` at every payload (#1297),
+/// which is a runtime capability error, not a bound — so they *do* compile:
 ///
-/// fn c64_device_eigh(tensor: &TensorMap<U1FusionRule, Complex64, CudaStorage<Complex64>>) {
-///     let _ = tensor.eigh_full();
+/// ```
+/// use tenet::prelude::U1FusionRule;
+/// use tenet::typed::{CudaStorage, TensorMap, Truncation};
+///
+/// fn f32_device_svd_trunc(tensor: &TensorMap<U1FusionRule, f32, CudaStorage<f32>>) {
+///     let _ = tensor.svd_trunc(&Truncation::Full);
 /// }
 /// ```
 impl<R, D> TensorMap<R, D, CudaStorage<D>>
@@ -11833,13 +11887,17 @@ where
 }
 
 #[cfg(feature = "cuda")]
-/// Device compact QR, `f64` payload only.
+/// Device compact QR, real payloads (`f64` and `f32`).
 ///
 /// `qr_compact` returns the positive-diagonal gauge (`R_jj` real and
 /// non-negative, phase 1 kept where `R_jj == 0`), applied on device by the
 /// backend's own QR primitive rather than re-derived here.
 ///
-/// A `Complex64` device QR is a compile-time boundary until tenferro-rs#1833:
+/// The payload dtype is the only degree of freedom; the plan, the routes and
+/// the assembly are the ones the device SVD shares. Which dtypes are admitted
+/// is [`CudaQrPayload`], projected from the adapter capability constant.
+///
+/// A complex device QR is a compile-time boundary until tenferro-rs#1833:
 /// every backend path to the `R` factor routes through tenferro-gpu's `triu`
 /// kernel, whose zero constant (`tenferro-gpu-0.5.0`
 /// `src/kernels/helpers.rs:84` `E::cast_from(0u32)`, used by
@@ -11881,20 +11939,56 @@ where
 /// }
 /// ```
 ///
-/// Single precision is closed here for the same reason as the device SVD and
-/// `eigh` — it is leaf C4, not this block's `f64` payload:
-///
 /// ```compile_fail
+/// use num_complex::Complex32;
 /// use tenet::core::U1FusionRule;
 /// use tenet::typed::{CudaStorage, TensorMap};
 ///
-/// fn no_f32_cuda_qr(tensor: &TensorMap<U1FusionRule, f32, CudaStorage<f32>>) {
+/// fn no_complex32_cuda_qr(
+///     tensor: &TensorMap<U1FusionRule, Complex32, CudaStorage<Complex32>>,
+/// ) {
 ///     let _ = tensor.qr_compact();
 /// }
 /// ```
-impl<R> TensorMap<R, f64, CudaStorage>
+///
+/// Single precision is open: the defect is the complex zero constant, not the
+/// precision, and `f32` is a real payload.
+///
+/// ```
+/// use tenet::core::U1FusionRule;
+/// use tenet::typed::{CudaStorage, TensorMap};
+///
+/// fn f32_cuda_qr(tensor: &TensorMap<U1FusionRule, f32, CudaStorage<f32>>) {
+///     let _ = tensor.qr_compact();
+/// }
+/// ```
+///
+/// The marker, not a concrete payload, is the gate — a generic body bounded
+/// only on the device factorization family cannot reach it:
+///
+/// ```compile_fail
+/// use tenet::prelude::U1FusionRule;
+/// use tenet::typed::{CudaFactorizationPayload, CudaStorage, TensorMap};
+///
+/// fn device_factorizing_only<D: CudaFactorizationPayload>(
+///     tensor: &TensorMap<U1FusionRule, D, CudaStorage<D>>,
+/// ) {
+///     let _ = tensor.qr_compact();
+/// }
+/// ```
+///
+/// ```
+/// use tenet::prelude::U1FusionRule;
+/// use tenet::typed::{CudaQrPayload, CudaStorage, TensorMap};
+///
+/// fn device_qr<D: CudaQrPayload>(tensor: &TensorMap<U1FusionRule, D, CudaStorage<D>>) {
+///     let _ = tensor.qr_compact();
+/// }
+/// ```
+impl<R, D> TensorMap<R, D, CudaStorage<D>>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: CudaQrPayload,
 {
     /// Streamed compact QR of owned dense CUDA storage.
     ///
@@ -11905,6 +11999,12 @@ where
     /// is assembled by one whole-factor device copy; any other route keeps the
     /// per-tree identity-selector GEMM.
     pub fn qr_compact(&self) -> Result<(Self, Self), Error> {
+        const {
+            assert!(
+                <D as tenet_dense::CudaScalar>::DEVICE_CONSTANT_KERNELS,
+                "`CudaQrPayload` admits a dtype without device constant kernels: drop its impl"
+            );
+        }
         let source = self.direct_cuda_storage("qr_compact")?;
         let source_space = self.logical_space().space();
         let required_len = source_space.required_len()?;
@@ -11931,17 +12031,17 @@ where
         let (left_data, right_data) = {
             let mut lease = self.runtime.lease_cuda()?;
             let cuda = &mut *lease;
-            let mut left_data = CudaStorage::upload_owned(cuda, vec![0.0; left_len])?;
+            let mut left_data = CudaStorage::upload_owned(cuda, vec![D::ZERO; left_len])?;
             #[cfg(test)]
             observe_cuda_qr_output_upload();
-            let mut right_data = CudaStorage::upload_owned(cuda, vec![0.0; right_len])?;
+            let mut right_data = CudaStorage::upload_owned(cuda, vec![D::ZERO; right_len])?;
             #[cfg(test)]
             observe_cuda_qr_output_upload();
             for route in &plan.routes {
                 let source_region = &plan.source_regions[route.source];
                 let left_region = &plan.left_regions[route.left];
                 let right_region = &plan.right_regions[route.right];
-                let (raw_left, raw_right) = cuda_qr_region::<f64>(
+                let (raw_left, raw_right) = cuda_qr_region::<D>(
                     cuda,
                     &source.0,
                     source_region.range().start,
@@ -12001,8 +12101,8 @@ where
 ///
 /// The payload dtype is the only degree of freedom: structural coefficients
 /// stay real (`R::Scalar = f64`), and operand conjugation is carried as a GEMM
-/// flag, never as a materialized conjugated buffer. `f32`/`Complex32` have no
-/// device payload and are a compile-time boundary (see [`Self::to_host`]).
+/// flag, never as a materialized conjugated buffer. All four payload dtypes are
+/// admitted (#1336); see [`CudaPayload`].
 ///
 /// Checked Generic providers deliberately have no device execution methods in
 /// this leaf:
@@ -12277,11 +12377,13 @@ where
     /// Host IEEE behavior and produces non-finite stored entries.
     ///
     /// The divisor is [`Self::norm`], so this inherits that method's
-    /// accumulation contract. One consequence is worth stating here, because
-    /// it is silent: at `f32`/`Complex32` a norm that overflows the
-    /// within-sector device sum is `inf`, and dividing by `inf` returns an
-    /// **all-zero tensor with no error**. Host does the same at `f64`
-    /// overflow; single precision merely reaches the boundary sooner. Rescale
+    /// accumulation contract. One consequence is a **known limitation**, not
+    /// an intended contract (tracked in Ryo-wtnb11/TeNeT#1344): at
+    /// `f32`/`Complex32` a norm that overflows the within-sector device sum is
+    /// `inf`, and dividing by `inf` returns an **all-zero tensor with no
+    /// error**, where the Host norm of the same tensor stays finite. Host does
+    /// the same at `f64` overflow; single precision merely reaches the
+    /// boundary sooner. Until the device reduction is overflow-safe, rescale
     /// before normalizing — on Host, by the reciprocal of
     /// [`TensorMap::norm_inf`] — when that range is reachable.
     pub fn normalize(&self) -> Result<Self, Error> {
@@ -12450,7 +12552,9 @@ where
     /// reported as `inf` rather than as an error, exactly as the same overflow
     /// is at `f64`, and [`Self::normalize`] then divides by it and returns an
     /// all-zero tensor with no error — the same code shape, and the same
-    /// silent outcome, Host has at `f64` overflow.
+    /// silent outcome, Host has at `f64` overflow. This is a known
+    /// limitation, not an intended contract: overflow-safe (scaled) device
+    /// reductions, or a typed error, are tracked in Ryo-wtnb11/TeNeT#1344.
     ///
     /// If that range is reachable for your data, rescale before reducing:
     /// download with [`TensorMap::to_host`] and take

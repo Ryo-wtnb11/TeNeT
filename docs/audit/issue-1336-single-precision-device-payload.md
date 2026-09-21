@@ -183,7 +183,9 @@ platform constant appears.
   JIT and its own scalar operands, both lazy.
 * **C4** (device factorizations for single precision) — closed here by
   `CudaFactorizationPayload`, with the `compile_fail` pins above as the
-  handover. `Complex32` device QR additionally inherits the tenferro-rs#1833
+  handover. **Opened by #1341**; the current admission table is
+  `docs/audit/issue-1341-single-precision-device-factorizations.md`, which
+  supersedes the one above. `Complex32` device QR additionally inherits the tenferro-rs#1833
   `float2` constant defect, which the adapter already reports as a typed
   `Unsupported` (`DEVICE_CONSTANT_KERNELS = false` for both complex dtypes).
 * **`tenet-network/examples/cuda_operation_matrix.rs`** — not extended with

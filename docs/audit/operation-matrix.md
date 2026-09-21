@@ -124,8 +124,8 @@ trivial/dense provider exists.
 | `twist`/`twist_inverse` [11] | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | PROVED | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1336) |
 | Canonical contraction/compose | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | PROVED | PROVED |
 | Arithmetic/reductions | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | PROVED | INTENTIONAL-DIFFERENCE [10] |
-| SVD/EIGH [9] | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED [10] |
-| QR | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | [UNSUPPORTED](https://github.com/Ryo-wtnb11/TeNeT/issues/1270) | UNSUPPORTED [10] |
+| SVD/EIGH [9] | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | PROVED | PROVED [11] |
+| QR | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | [UNSUPPORTED](https://github.com/Ryo-wtnb11/TeNeT/issues/1270) | f32 PROVED, c32 UNSUPPORTED [11] |
 | EIG/null/polar/solve/matrix functions | PROVED | PROVED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
 | Network ordinary replay [8] | PROVED | PROVED | INTENTIONAL-DIFFERENCE | PROVED | UNSUPPORTED | PROVED | PROVED |
 | v1 typed snapshot (`f64`/`Complex64`) [7] | PROVED | PROVED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
@@ -147,11 +147,27 @@ the same convention `f64` overflow already has. Both halves are documented on
 `weighted_inner_cuda` and pinned by
 `device_single_precision_norm_can_overflow_where_the_host_stays_finite`.
 
-The device factorizations are deliberately closed for single precision: they
-hang off the sealed marker `CudaFactorizationPayload`, implemented for `f64`
-and `Complex64` only, so `svd_compact`/`eigh_full`/`qr_compact` are a
-compile-time boundary rather than an untested numerical path. Opening them is
-leaf C4 of [#1065](https://github.com/Ryo-wtnb11/TeNeT/issues/1065).
+[11] The device factorizations are open for single precision since leaf C4
+([#1341](https://github.com/Ryo-wtnb11/TeNeT/issues/1341)): `svd_compact` and
+`eigh_full` hang off the sealed marker `CudaFactorizationPayload`, now
+implemented for all four device payloads, and `qr_compact` off the narrower
+`CudaQrPayload`, implemented for `f64` and `f32`. Device QR for either complex
+payload stays a **compile-time** boundary, because the backend's
+positive-diagonal gauge runs a `triu` kernel whose complex zero constant the
+pinned Tenferro cannot compile (tenferro-rs#1833 for `cuFloatComplex`,
+[#1271](https://github.com/Ryo-wtnb11/TeNeT/issues/1271) for
+`cuDoubleComplex`). That capability has one authority — the adapter's
+`CudaScalar::DEVICE_CONSTANT_KERNELS` — and `CudaQrPayload` is a projection of
+it held equal by a `const` assertion in `tenet/src/typed.rs`, so an upstream
+kernel fix cannot leave a dtype silently locked out.
+
+Single-precision device factorization evidence:
+`tenet/tests/typed_cuda_single_precision_factorizations.rs` and
+`benchmarks/history/cuda-typed-single-precision-factorizations-2026-09-21.md`.
+The oracle is the host factorization of the same tensor at the same payload
+dtype, read through gauge-independent identities (reconstruction, isometry, the
+spectrum, the positive-diagonal gauge) — the device SVD and `eigh` keep the raw
+cuSOLVER gauge and their factor payloads are never compared pointwise.
 
 [11] `flip` stays `UnsupportedOnDevice`. The device `twist` is not a tree
 transform: the per-block ribbon-twist factor is built on the Host from the
