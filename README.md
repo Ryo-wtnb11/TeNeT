@@ -257,7 +257,7 @@ The Python side calls `cotengra.array_contract_tree(...)` and returns
 | `blas-openblas` | OpenBLAS-backed BLAS/LAPACK feature wiring. |
 | `blas-mkl` | MKL-backed BLAS/LAPACK feature wiring. |
 | `provider-inject` | Allow injecting a dense backend explicitly. |
-| `cuda` | Compile the supported typed CUDA paths: multiplicity-free `f64` and `Complex64` payloads, including compact SVD/EIGH in both and compact QR in `f64`; a CPU feature is also required for Host-only execution used elsewhere. |
+| `cuda` | Compile the supported typed CUDA paths: multiplicity-free `f64` and `Complex64` payloads, including compact SVD/EIGH/QR in both; a CPU feature is also required for Host-only execution used elsewhere. |
 | `racah-generated` | Enable Racah-generated coefficient data and the checked Generic SUN provider through `tenet-sectors`, `tenet-core`, `tenet`, and `tenet-network`. |
 | `opt-path` | Enable `opt-einsum-path` optimizers in `tenet-network`. Enable it on `tenet-network`, not on `tenet`: on `tenet` it is a marker that only adds the `Optimizer::{Optimal, DynamicProgramming, AutoHq}` variants. |
 | `cotengra-python` | Enable the Python cotengra planner bridge in `tenet-network`. Same marker relationship: on `tenet` it only adds `Optimizer::CotengraPython` and its config types. |
@@ -277,12 +277,10 @@ TENET_COTENGRA_UV_PROJECT=tools/cotengra-python \
   includes construction, transforms, tensor products, owned composition and
   trace, static N-ary networks, and explicit sliced execution. CUDA supports a
   multiplicity-free `f64`/`Complex64` subset after explicit transfer,
-  including compact SVD and EIGH in both payloads. Device SVD keeps the raw
-  backend gauge on `u`/`vh` rather than the Host largest-pivot gauge. Device
-  `qr_compact` is `f64`-only: TeNeT keeps its complex device-constant gate
-  (#1271) until the complex `triu` kernels that Tenferro 0.6.0 compiles are
-  verified on device; full and values-only factorizations,
-  `eig`, and matrix functions have no device path.
+  including compact SVD, EIGH and QR in both payloads. Device SVD keeps the raw
+  backend gauge on `u`/`vh` rather than the Host largest-pivot gauge; device
+  `qr_compact` returns the Host positive-diagonal gauge. Full and values-only
+  factorizations, `eig`, and matrix functions have no device path.
 - Execution crates reject a no-default-features build because their convenience
   APIs require a concrete executor. Use `tenet-sectors` / `tenet-core` for
   backend-free types, or enable a CPU feature or `provider-inject` for the full

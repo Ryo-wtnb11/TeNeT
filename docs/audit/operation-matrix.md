@@ -127,7 +127,7 @@ trivial/dense provider exists.
 | Arithmetic/reductions | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | PROVED | INTENTIONAL-DIFFERENCE [10] |
 | `trace_pairs` [13] | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | PROVED | PROVED |
 | SVD/EIGH [9] | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | PROVED | PROVED [11] |
-| QR | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | [UNSUPPORTED](https://github.com/Ryo-wtnb11/TeNeT/issues/1270) | f32 PROVED, c32 UNSUPPORTED [11] |
+| QR | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | PROVED [11] | PROVED [11] |
 | EIG/null/polar/solve/matrix functions | PROVED | PROVED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
 | Network ordinary replay [8] | PROVED | PROVED | INTENTIONAL-DIFFERENCE | PROVED | UNSUPPORTED | PROVED | PROVED |
 | v1 typed snapshot (`f64`/`Complex64`) [7] | PROVED | PROVED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
@@ -221,17 +221,13 @@ the same convention `f64` overflow already has. Both halves are documented on
 [11] The device factorizations are open for single precision since leaf C4
 ([#1341](https://github.com/Ryo-wtnb11/TeNeT/issues/1341)): `svd_compact` and
 `eigh_full` hang off the sealed marker `CudaFactorizationPayload`, now
-implemented for all four device payloads, and `qr_compact` off the narrower
-`CudaQrPayload`, implemented for `f64` and `f32`. Device QR for either complex
-payload stays a **compile-time** boundary, because the backend's
+implemented for all four device payloads. `qr_compact` joined them in
+[#1271](https://github.com/Ryo-wtnb11/TeNeT/issues/1271): the backend's
 positive-diagonal gauge runs a `triu` kernel whose complex zero constant
-Tenferro 0.5.0 could not compile (tenferro-rs#1833 for `cuFloatComplex`,
-[#1271](https://github.com/Ryo-wtnb11/TeNeT/issues/1271) for
-`cuDoubleComplex`). Tenferro 0.6.0 compiles it; the boundary stays until
-#1271 verifies TeNeT's complex device QR. That capability has one authority — the adapter's
-`CudaScalar::DEVICE_CONSTANT_KERNELS` — and `CudaQrPayload` is a projection of
-it held equal by a `const` assertion in `tenet/src/typed.rs`, so an upstream
-kernel fix cannot leave a dtype silently locked out.
+Tenferro 0.5.0 could not compile (tenferro-rs#1833); 0.6.0 compiles it, and
+the complex device QR is verified against Host `qr_compact` in
+`tenet/tests/typed_cuda_single_precision_factorizations.rs` (A100 record
+`benchmarks/history/cuda-complex-qr-2026-09-21.md`).
 
 Single-precision device factorization evidence:
 `tenet/tests/typed_cuda_single_precision_factorizations.rs` and
@@ -301,14 +297,9 @@ is global over quantum-dimension-weighted spectra and belongs on the host. The
 device result is composed from `svd_compact`/`eigh_full`, `to_host`,
 `diagview`, `GradedSpace::find_truncated` and
 `restrict_leg`/`restrict_diagonal`.
-`qr_compact` is `f64`-only, and deliberately a compile-time boundary rather
-than a runtime error: every tenferro-gpu path to the `R` factor calls its
-`triu` kernel, whose zero constant (`src/kernels/helpers.rs:84`
-`E::cast_from(0u32)`) emitted `cuDoubleComplex(uint32(0))` and failed NVRTC
-compilation for `Complex64` up to Tenferro 0.5.0. Tenferro 0.6.0 compiles it;
-`qr_compact` in the positive-diagonal gauge (`R_jj` real and non-negative,
-phase 1 kept at zero) is otherwise implemented for both payloads and becomes
-available once #1271 verifies it on device.
+`qr_compact` carries both payloads in the Host positive-diagonal gauge
+(`R_jj` real and non-negative, phase 1 kept at zero;
+[#1271](https://github.com/Ryo-wtnb11/TeNeT/issues/1271)).
 Full/values factorizations, `eig`, and matrix functions stay
 device-unsupported for both payloads.
 Release/feature topology remains [#129](https://github.com/Ryo-wtnb11/TeNeT/issues/129).

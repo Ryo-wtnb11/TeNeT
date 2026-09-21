@@ -48,9 +48,7 @@ mod cuda_scalar_sealed {
 /// spectrum contract is unchanged.
 ///
 /// Admitting a dtype here does not by itself open a typed tensor API for it;
-/// `tenet`'s `CudaPayload` admits all four (#1336), and its device QR marker
-/// `CudaQrPayload` admits only the dtypes whose
-/// [`CudaScalar::DEVICE_CONSTANT_KERNELS`] is `true`.
+/// `tenet`'s `CudaPayload` admits all four (#1336).
 pub trait CudaScalar:
     TenferroScalar<Real: CudaRealScalar> + PartialEq + cuda_scalar_sealed::Sealed
 {
@@ -64,26 +62,6 @@ pub trait CudaScalar:
     /// value-preserving `conj`/`abs` passes on the real dtype; it is a dtype
     /// invariant, not a size or workload heuristic.
     const IS_COMPLEX: bool;
-
-    /// Whether TeNeT admits device kernels that *materialize* a payload-typed
-    /// constant (the QR gauge's `triu` fill, LU's identity fill) for this dtype.
-    ///
-    /// `false` for both complex payloads, `true` for both real ones. Up to
-    /// Tenferro 0.5.0 those kernels did not compile for a complex payload
-    /// (tenferro-rs#1833 for [`Complex32`], #1271 for [`Complex64`]; A100
-    /// records in `benchmarks/history/cuda-single-precision-probe-2026-09-20.md`
-    /// and `cuda-scalar-single-precision-2026-09-21.md`). Tenferro 0.6.0
-    /// compiles them (t4a-cubecl 0.10.1, tenferro-rs#1837), and the raw
-    /// Tenferro probes in `tests/cuda_single_precision_probe.rs` pass on an
-    /// A100, but TeNeT's own complex device QR/LU/solve paths are not yet
-    /// verified; the gate stays until #1271 supplies that evidence.
-    ///
-    /// It is a dtype capability, not a size or workload heuristic, so the
-    /// operations that need such a kernel reject the dtype before any device
-    /// work. The typed layer reaches device QR for `f64` and `f32`; complex
-    /// device QR is a capability boundary there (#1271), not a runtime error
-    /// it can reach.
-    const DEVICE_CONSTANT_KERNELS: bool;
 
     /// Which of the context's lazily created scalar-operand slots this dtype
     /// owns. One slot per admitted dtype: the operands are *payload*-typed, so
@@ -157,7 +135,6 @@ impl CudaScalar for f32 {
     const ZERO: Self = 0.0;
     const ONE: Self = 1.0;
     const IS_COMPLEX: bool = false;
-    const DEVICE_CONSTANT_KERNELS: bool = true;
     const OPERAND_SLOT: usize = 0;
 
     fn contraction_scalar(self) -> ContractionScalar {
@@ -170,8 +147,6 @@ impl CudaScalar for Complex32 {
     const ZERO: Self = Complex32::new(0.0, 0.0);
     const ONE: Self = Complex32::new(1.0, 0.0);
     const IS_COMPLEX: bool = true;
-    // #1271: unverified on device; Tenferro 0.6.0 fixed the compile defect (tenferro-rs#1833).
-    const DEVICE_CONSTANT_KERNELS: bool = false;
     const OPERAND_SLOT: usize = 2;
 
     fn contraction_scalar(self) -> ContractionScalar {
@@ -184,7 +159,6 @@ impl CudaScalar for f64 {
     const ZERO: Self = 0.0;
     const ONE: Self = 1.0;
     const IS_COMPLEX: bool = false;
-    const DEVICE_CONSTANT_KERNELS: bool = true;
     const OPERAND_SLOT: usize = 1;
 
     fn contraction_scalar(self) -> ContractionScalar {
@@ -197,8 +171,6 @@ impl CudaScalar for Complex64 {
     const ZERO: Self = Complex64::new(0.0, 0.0);
     const ONE: Self = Complex64::new(1.0, 0.0);
     const IS_COMPLEX: bool = true;
-    // #1271: NVRTC cannot construct a `double2` from `uint32` either.
-    const DEVICE_CONSTANT_KERNELS: bool = false;
     const OPERAND_SLOT: usize = 3;
 
     fn contraction_scalar(self) -> ContractionScalar {
@@ -1171,31 +1143,6 @@ fn ensure_payload_dtype<D: CudaScalar>(
     Ok(())
 }
 
-/// Rejects a dtype whose device constant kernels do not compile, before any
-/// device work.
-///
-/// Same boundary style as the [`Complex64`] device QR of #1271: an explicit,
-/// typed capability error at the operation that needs the kernel, never a
-/// silent host fallback and never an NVRTC compile log surfaced as a backend
-/// failure. See [`CudaScalar::DEVICE_CONSTANT_KERNELS`].
-fn ensure_device_constant_kernels<D: CudaScalar>(
-    op: &'static str,
-    kernel: &str,
-) -> Result<(), DenseError> {
-    if D::DEVICE_CONSTANT_KERNELS {
-        return Ok(());
-    }
-    Err(DenseError::Unsupported {
-        op,
-        message: format!(
-            "{:?} device {kernel} is unsupported: TeNeT has not yet verified complex device \
-             kernels that materialize a payload constant (#1271; the Tenferro compile defect \
-             tenferro-rs#1833 is fixed in 0.6.0). Use the host path for this dtype.",
-            D::DTYPE
-        ),
-    })
-}
-
 /// Rejects a descriptor scale of zero, which the backend is free to answer by
 /// skipping the source read.
 ///
@@ -2006,15 +1953,9 @@ fn validate_svd_factor_shapes(
 /// device inside the QR primitive, so no diagonal crosses to the host and no
 /// TeNeT-side re-gauging selector exists.
 ///
-/// Both complex payloads are an explicit [`DenseError::Unsupported`] here,
-/// reported before any device work: the positive-diagonal gauge runs a `triu`
-/// kernel that materializes a complex zero. Tenferro 0.5.0 could not compile
-/// it (tenferro-rs#1833 / #1271); 0.6.0 can, but TeNeT keeps the boundary
-/// until #1271 verifies the complex path (see
-/// [`CudaScalar::DEVICE_CONSTANT_KERNELS`]). Both real payloads, `f32`
-/// included, are fully supported, and the typed layer offers device QR for
-/// exactly those two; complex device QR is a compile-time boundary there
-/// (#1271).
+/// Every [`CudaScalar`] payload is admitted. Up to Tenferro 0.5.0 the complex
+/// payloads could not be: the gauge's `triu` fill materialized its complex zero
+/// as `E::cast_from(0u32)`, which NVRTC rejected (tenferro-rs#1833, #1271).
 pub fn cuda_qr_region<D: CudaScalar>(
     ctx: &mut CudaDenseContext,
     src: &CudaDenseStorage,
@@ -2022,7 +1963,6 @@ pub fn cuda_qr_region<D: CudaScalar>(
     rows: usize,
     cols: usize,
 ) -> Result<(CudaDenseStorage, CudaDenseStorage), DenseError> {
-    ensure_device_constant_kernels::<D>("cuda_qr", "QR (positive-diagonal `triu` fill)")?;
     ensure_cuda_device(ctx.device, "cuda_qr", &[("src", src.device)])?;
     let view = src.region_view::<D>(rows, cols, rows, offset)?;
     let options = QrOptions::default().gauge(QrGauge::PositiveDiagonal);
@@ -2215,36 +2155,6 @@ mod tests {
         assert_eq!(hermitian_tolerance::<f32>(), single);
         assert_eq!(hermitian_tolerance::<Complex32>(), single);
         assert!(hermitian_tolerance::<f32>() > hermitian_tolerance::<f64>());
-    }
-
-    /// The per-dtype capability boundary, as pure logic: both complex dtypes
-    /// are blocked by the same Tenferro constant-kernel defect, and the
-    /// rejection is typed and names it.
-    #[test]
-    fn neither_complex_dtype_has_device_constant_kernels() {
-        for supported in [
-            ensure_device_constant_kernels::<f32>("cuda_qr", "QR"),
-            ensure_device_constant_kernels::<f64>("cuda_qr", "QR"),
-        ] {
-            assert!(supported.is_ok());
-        }
-        for (dtype, blocked) in [
-            (
-                DenseDType::C32,
-                ensure_device_constant_kernels::<Complex32>("cuda_qr", "QR"),
-            ),
-            (
-                DenseDType::C64,
-                ensure_device_constant_kernels::<Complex64>("cuda_qr", "QR"),
-            ),
-        ] {
-            let err = blocked.expect_err("a complex device QR must stay unsupported until #1271");
-            assert!(
-                matches!(err, DenseError::Unsupported { op: "cuda_qr", .. }),
-                "{dtype:?}: {err}"
-            );
-            assert!(err.to_string().contains("1271"), "{dtype:?}: {err}");
-        }
     }
 
     /// Each admitted dtype owns its own scalar-operand slot, so a context used

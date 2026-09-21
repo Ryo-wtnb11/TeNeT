@@ -43,8 +43,7 @@ use num_complex::{Complex32, Complex64};
 use tenet::core::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
 use tenet::dense::{cuda_transfer_stats, CudaScalar};
 use tenet::typed::{
-    CudaFactorizationPayload, CudaQrPayload, CudaStorage, Error, GradedSpace, Runtime, TensorMap,
-    Truncation,
+    CudaFactorizationPayload, CudaStorage, Error, GradedSpace, Runtime, TensorMap, Truncation,
 };
 
 mod common;
@@ -60,10 +59,6 @@ use single_precision_oracle::{fermion_su2_leg_with, K};
 /// A device payload admitted to the device factorization family.
 trait FactorPayload: DevicePayload + CudaFactorizationPayload {}
 impl<D> FactorPayload for D where D: DevicePayload + CudaFactorizationPayload {}
-
-/// A device payload additionally admitted to device QR (real payloads).
-trait QrPayload: FactorPayload + CudaQrPayload {}
-impl<D> QrPayload for D where D: FactorPayload + CudaQrPayload {}
 
 // ---------------------------------------------------------------------------
 // Tolerances
@@ -388,7 +383,7 @@ fn device_svd_compact_matches_the_host_at_every_payload() {
 }
 
 // ---------------------------------------------------------------------------
-// Compact QR (real payloads only)
+// Compact QR (every payload, #1271)
 // ---------------------------------------------------------------------------
 
 fn assert_device_qr_matches_host<R, D>(
@@ -397,7 +392,7 @@ fn assert_device_qr_matches_host<R, D>(
     domain: &GradedSpace<R>,
 ) where
     R: DeviceRule,
-    D: QrPayload,
+    D: FactorPayload,
 {
     let source = fixture::<R, D>(runtime, codomain, domain);
     let kappa = measured_kappa::<R, D>(runtime, codomain, domain, &POSITIVE);
@@ -430,19 +425,121 @@ fn assert_device_qr_matches_host<R, D>(
 
 #[test]
 #[ignore = "requires a real CUDA device"]
-fn device_qr_compact_matches_the_host_at_every_real_payload() {
+fn device_qr_compact_matches_the_host_at_every_payload() {
+    fn all_payloads<R: DeviceRule>(
+        runtime: &Runtime,
+        codomain: &GradedSpace<R>,
+        domain: &GradedSpace<R>,
+    ) {
+        assert_device_qr_matches_host::<_, f64>(runtime, codomain, domain);
+        assert_device_qr_matches_host::<_, Complex64>(runtime, codomain, domain);
+        assert_device_qr_matches_host::<_, f32>(runtime, codomain, domain);
+        assert_device_qr_matches_host::<_, Complex32>(runtime, codomain, domain);
+    }
+
     let runtime = runtime();
     let square = u1_leg([2, 3, 2]);
     let tall = u1_leg([3, 4, 3]);
     let su2 = su2_leg();
     let fermion = fermion_su2_leg_with([2, 2, 1]);
 
+    // Square, tall and wide blocks.
     for (codomain, domain) in [(&square, &square), (&tall, &square), (&square, &tall)] {
-        assert_device_qr_matches_host::<_, f64>(&runtime, codomain, domain);
-        assert_device_qr_matches_host::<_, f32>(&runtime, codomain, domain);
+        all_payloads(&runtime, codomain, domain);
     }
-    assert_device_qr_matches_host::<_, f32>(&runtime, &su2, &su2);
-    assert_device_qr_matches_host::<_, f32>(&runtime, &fermion, &fermion);
+    // Dual legs: the coupled sectors are the duals of the nondual case.
+    let dual_square = square.try_dual().unwrap();
+    let dual_tall = tall.try_dual().unwrap();
+    all_payloads(&runtime, &dual_tall, &dual_square);
+    // SU(2): several quantum dimensions. fZ2 x U(1) x SU(2): fermionic signs
+    // and non-Abelian recoupling in one provider.
+    all_payloads(&runtime, &su2, &su2);
+    all_payloads(&runtime, &fermion, &fermion);
+}
+
+/// The factorization laws where the QR is *not* unique, so no pointwise host
+/// comparison applies: `Q R = A`, `Q^H Q = 1`, block structure equal to the
+/// host's, and every `R_jj` real and non-negative.
+fn assert_device_qr_laws<R, D>(source: &TensorMap<R, D>, what: &str)
+where
+    R: DeviceRule,
+    D: FactorPayload,
+{
+    let runtime = source.runtime();
+    let terms = source.data().len().max(1);
+    let norm = source.norm().unwrap();
+    let bound = tolerance::<D>(terms, norm, 1.0);
+    let (host_q, host_r) = source.qr_compact().unwrap();
+    let (q, r) = source.to_cuda().unwrap().qr_compact().unwrap();
+    let q = q.to_host().unwrap();
+    let r = r.to_host().unwrap();
+    assert_eq!(structure(&q), structure(&host_q), "{what} q [{}]", D::NAME);
+    assert_eq!(structure(&r), structure(&host_r), "{what} r [{}]", D::NAME);
+    assert_residual(&q.compose(&r).unwrap(), source, bound, what);
+    assert_residual(
+        &q.adjoint().unwrap().compose(&q).unwrap(),
+        &TensorMap::<R, D>::id(runtime, q.domain().iter()).unwrap(),
+        tolerance::<D>(terms, 1.0, 1.0),
+        what,
+    );
+    for block in 0..r.block_count() {
+        let view = r.block(block).unwrap();
+        let (rows, cols) = (view.shape()[0], view.shape()[1]);
+        let (row_stride, col_stride) = (view.strides()[0], view.strides()[1]);
+        for j in 0..rows.min(cols) {
+            let (re, im) = r.data()[view.offset() + j * (row_stride + col_stride)].parts();
+            assert!(
+                re >= -bound && im.abs() <= bound,
+                "{what} R diagonal [{}]: block {block} entry {j} is {re}+{im}i",
+                D::NAME
+            );
+        }
+    }
+}
+
+/// Rank-deficient blocks (rank one per coupled sector) and a rank-2 codomain
+/// with a dual leg, at every payload.
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn device_qr_compact_obeys_its_laws_on_rank_deficient_and_dual_multileg_blocks() {
+    fn cases<D: FactorPayload>(runtime: &Runtime) {
+        let leg = u1_leg([2, 3, 2]);
+        // `a_ij = u_i v_j`, the product formed in `D` itself, so every coupled
+        // block has rank one at every payload: a real `D` drops the imaginary
+        // part of `u` and `v` before the product, not of the product.
+        let rank_one =
+            TensorMap::<U1FusionRule, D>::from_block_fn(runtime, [&leg], [&leg], |_, index| {
+                let (i, j) = (index[0] as f64, index[1] as f64);
+                let u = D::entry(1.0 + 0.5 * i, 0.25 * i);
+                let v = D::entry(1.0 + 0.25 * j, -0.125 * j);
+                u * v
+            })
+            .unwrap();
+        assert_device_qr_laws(&rank_one, "rank-one qr");
+
+        let small = u1_leg([1, 2, 1]);
+        let dual = small.try_dual().unwrap();
+        let multileg = TensorMap::<U1FusionRule, D>::from_block_fn(
+            runtime,
+            [&small, &dual],
+            [&small],
+            |_, index| {
+                let key = 3 * index[0] + 5 * index[1] + 7 * index[2];
+                D::entry(
+                    (key % 8) as f64 / 8.0 + if index[0] == index[2] { 2.0 } else { 0.0 },
+                    ((index[0] + 2 * index[1] + index[2]) % 4) as f64 / 8.0,
+                )
+            },
+        )
+        .unwrap();
+        assert_device_qr_laws(&multileg, "dual multileg qr");
+    }
+
+    let runtime = runtime();
+    cases::<f64>(&runtime);
+    cases::<Complex64>(&runtime);
+    cases::<f32>(&runtime);
+    cases::<Complex32>(&runtime);
 }
 
 /// The positive-diagonal gauge the backend applies on device, read through the
@@ -453,8 +550,8 @@ fn device_qr_compact_matches_the_host_at_every_real_payload() {
 /// the sign is applied as a multiplication.
 #[test]
 #[ignore = "requires a real CUDA device"]
-fn device_qr_returns_the_positive_diagonal_gauge_at_every_real_payload() {
-    fn assert_gauge<D: QrPayload>(runtime: &Runtime, leg: &GradedSpace<U1FusionRule>) {
+fn device_qr_returns_the_positive_diagonal_gauge_at_every_payload() {
+    fn assert_gauge<D: FactorPayload>(runtime: &Runtime, leg: &GradedSpace<U1FusionRule>) {
         let source = fixture::<U1FusionRule, D>(runtime, leg, leg);
         let terms = source.data().len().max(1);
         let (_, r) = source.to_cuda().unwrap().qr_compact().unwrap();
@@ -482,7 +579,52 @@ fn device_qr_returns_the_positive_diagonal_gauge_at_every_real_payload() {
     let runtime = runtime();
     let leg = u1_leg([2, 3, 2]);
     assert_gauge::<f64>(&runtime, &leg);
+    assert_gauge::<Complex64>(&runtime, &leg);
     assert_gauge::<f32>(&runtime, &leg);
+    assert_gauge::<Complex32>(&runtime, &leg);
+}
+
+/// A hand-computed complex phase: `A = [[-2i, 1+i], [0, 3i]]` is already upper
+/// triangular, so its positive-diagonal QR is `Q = diag(-i, i)` and
+/// `R = Q^H A = [[2, -1+i], [0, 3]]` — the phase of `R_jj` is complex, not a
+/// sign, so a gauge applied only as `+-1` fails here.
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn device_qr_fixes_a_hand_computed_complex_phase() {
+    fn case<D: FactorPayload>(runtime: &Runtime) {
+        let leg =
+            GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
+        let a = [[(0.0, -2.0), (1.0, 1.0)], [(0.0, 0.0), (0.0, 3.0)]];
+        let q_expected = [[(0.0, -1.0), (0.0, 0.0)], [(0.0, 0.0), (0.0, 1.0)]];
+        let r_expected = [[(2.0, 0.0), (-1.0, 1.0)], [(0.0, 0.0), (3.0, 0.0)]];
+        let source =
+            TensorMap::<U1FusionRule, D>::from_block_fn(runtime, [&leg], [&leg], |_, x| {
+                let (re, im) = a[x[0]][x[1]];
+                D::entry(re, im)
+            })
+            .unwrap();
+        let (q, r) = source.to_cuda().unwrap().qr_compact().unwrap();
+        let bound = tolerance::<D>(4, 3.0, 1.0);
+        for (factor, expected, what) in [(q, q_expected, "q"), (r, r_expected, "r")] {
+            let factor = factor.to_host().unwrap();
+            let view = factor.block(0).unwrap();
+            for (row, expected_row) in expected.iter().enumerate() {
+                for (col, &(re, im)) in expected_row.iter().enumerate() {
+                    let index = view.offset() + row * view.strides()[0] + col * view.strides()[1];
+                    let actual = factor.data()[index];
+                    assert!(
+                        actual.distance(D::entry(re, im)) <= bound,
+                        "hand qr {what} [{}] ({row}, {col}): {actual:?}, expected {re}+{im}i",
+                        D::NAME
+                    );
+                }
+            }
+        }
+    }
+
+    let runtime = runtime();
+    case::<Complex64>(&runtime);
+    case::<Complex32>(&runtime);
 }
 
 // ---------------------------------------------------------------------------
@@ -748,7 +890,9 @@ fn device_factorizations_handle_blocks_at_unaligned_offsets_at_every_payload() {
         assert_device_svd_matches_host::<_, f64>(&runtime, &leg, &leg);
         assert_device_svd_matches_host::<_, Complex64>(&runtime, &leg, &leg);
         assert_device_qr_matches_host::<_, f32>(&runtime, &leg, &leg);
+        assert_device_qr_matches_host::<_, Complex32>(&runtime, &leg, &leg);
         assert_device_qr_matches_host::<_, f64>(&runtime, &leg, &leg);
+        assert_device_qr_matches_host::<_, Complex64>(&runtime, &leg, &leg);
     }
 }
 
@@ -895,10 +1039,12 @@ fn device_factorizations_cost_the_same_calls_and_half_the_bytes() {
         // Warm the lane, the scalar operands and the kernels of this dtype.
         drop(device.svd_compact().unwrap());
         drop(device.eigh_full().unwrap());
+        drop(device.qr_compact().unwrap());
 
         let before = cuda_transfer_stats();
         drop(device.svd_compact().unwrap());
         drop(device.eigh_full().unwrap());
+        drop(device.qr_compact().unwrap());
         let after = cuda_transfer_stats();
         (
             after.h2d_calls - before.h2d_calls,
@@ -936,5 +1082,62 @@ fn device_factorizations_cost_the_same_calls_and_half_the_bytes() {
         assert!(wide.1 > 0 && wide.3 > 0, "{name}: vacuous byte counts");
         assert_eq!(narrow.1 * 2, wide.1, "{name}: h2d bytes must be halved");
         assert_eq!(narrow.3 * 2, wide.3, "{name}: d2h bytes must be halved");
+    }
+}
+
+/// Complex device QR does the real path's device work: the same calls,
+/// allocations, copies and GEMMs, no download, and exactly twice the uploaded
+/// bytes (a complex element is two real ones). Relative and same-process, so
+/// no platform constant appears.
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn complex_device_qr_costs_the_real_calls_and_twice_the_bytes() {
+    type Cost = (u64, u64, u64, u64, u64, u64, u64, u64);
+
+    fn measure<D: FactorPayload>(runtime: &Runtime, leg: &GradedSpace<U1FusionRule>) -> Cost {
+        let device = fixture::<U1FusionRule, D>(runtime, leg, leg)
+            .to_cuda()
+            .unwrap();
+        drop(device.qr_compact().unwrap());
+
+        let before = cuda_transfer_stats();
+        drop(device.qr_compact().unwrap());
+        let after = cuda_transfer_stats();
+        (
+            after.h2d_calls - before.h2d_calls,
+            after.h2d_bytes - before.h2d_bytes,
+            after.d2h_calls - before.d2h_calls,
+            after.d2h_bytes - before.d2h_bytes,
+            after.device_allocs - before.device_allocs,
+            after.copy_calls - before.copy_calls,
+            after.gemm_calls - before.gemm_calls,
+            after.solver_calls - before.solver_calls,
+        )
+    }
+
+    let runtime = runtime();
+    let leg = u1_leg([2, 3, 2]);
+    for (complex, real, name) in [
+        (
+            measure::<Complex64>(&runtime, &leg),
+            measure::<f64>(&runtime, &leg),
+            "c64/f64",
+        ),
+        (
+            measure::<Complex32>(&runtime, &leg),
+            measure::<f32>(&runtime, &leg),
+            "c32/f32",
+        ),
+    ] {
+        eprintln!("qr cost {name}: complex {complex:?} real {real:?}");
+        assert_eq!(
+            (complex.0, complex.2, complex.4, complex.5, complex.6, complex.7),
+            (real.0, real.2, real.4, real.5, real.6, real.7),
+            "{name}: (h2d_calls, d2h_calls, device_allocs, copy_calls, gemm_calls, \
+             solver_calls) must not depend on the field"
+        );
+        assert_eq!(complex.2, 0, "{name}: device QR downloads nothing");
+        assert!(real.1 > 0 && real.7 > 0, "{name}: vacuous cost");
+        assert_eq!(complex.1, real.1 * 2, "{name}: h2d bytes must be doubled");
     }
 }

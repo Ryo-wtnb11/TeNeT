@@ -4,8 +4,8 @@
 //! What this file owns that the `f64`/`Complex64` suites do not: the paths
 //! that were typed by `f64` rather than by the payload's real lane — the
 //! spectrum and reduction downloads, the rank-0 divisor of the Hermitian
-//! test, and its `64 * eps` tolerance — plus the one dtype the device cannot
-//! serve (complex device QR, tenferro-rs#1833 and #1271).
+//! test, and its `64 * eps` tolerance — plus complex device QR, the last
+//! dtype gate (tenferro-rs#1833, lifted by #1271).
 //!
 //! Oracles are host computations in **double precision** over the widened
 //! fixture: a single-precision device answer is compared against `f64` host
@@ -24,8 +24,8 @@ use std::fmt::Debug;
 use num_complex::{Complex32, Complex64};
 use tenet_dense::{
     cuda_eigh_region, cuda_gemm_region_with_ops_into, cuda_is_hermitian_region, cuda_qr_region,
-    cuda_svd_region, cuda_transfer_stats, CudaDenseContext, CudaDenseStorage, CudaScalar,
-    DenseDType, DenseError, MatrixOp,
+    cuda_svd_region, CudaDenseContext, CudaDenseStorage, CudaScalar, DenseDType, DenseError,
+    MatrixOp,
 };
 
 /// The payload dtypes under test, with just enough host arithmetic for a
@@ -522,16 +522,15 @@ fn region_svd_obeys_its_laws_for_every_dtype() {
     }
 }
 
-/// Only the real payloads: both complex dtypes are rejected at TeNeT's
-/// boundary until #1271 verifies them
-/// (`complex_device_qr_is_rejected_before_any_device_work`).
 #[test]
 #[ignore = "requires a real CUDA device"]
-fn region_qr_obeys_its_laws_for_every_supported_dtype() {
+fn region_qr_obeys_its_laws_for_every_dtype() {
     let mut ctx = context();
-    for &(rows, cols) in &[(5usize, 3usize), (4, 4)] {
+    for &(rows, cols) in &[(5usize, 3usize), (3, 5), (4, 4)] {
         qr_case::<f32>(&mut ctx, rows, cols);
         qr_case::<f64>(&mut ctx, rows, cols);
+        qr_case::<Complex32>(&mut ctx, rows, cols);
+        qr_case::<Complex64>(&mut ctx, rows, cols);
     }
 }
 
@@ -842,52 +841,6 @@ fn the_complex_rule_is_conservative_outside_the_square_of_its_lane() {
     conservative_outside_the_square_case::<f64>(&mut ctx);
     conservative_outside_the_square_case::<Complex32>(&mut ctx);
     conservative_outside_the_square_case::<Complex64>(&mut ctx);
-}
-
-/// The positive-diagonal gauge's `triu` kernel materializes a complex zero,
-/// which Tenferro 0.5.0's NVRTC could not construct for `cuFloatComplex`
-/// (tenferro-rs#1833) or `cuDoubleComplex`; 0.6.0 compiles it, but TeNeT has
-/// not verified the complex path yet (#1271). The adapter rejects both dtypes
-/// *before* any device work, which is observable as untouched counters.
-fn qr_rejection_case<D: ProbeScalar>(ctx: &mut CudaDenseContext) {
-    let (payload, _) = fixture::<D>(4, 3, 0.0);
-    let src = upload::<D>(ctx, &payload);
-
-    let before = cuda_transfer_stats();
-    let Err(err) = cuda_qr_region::<D>(ctx, &src, 0, 4, 3) else {
-        panic!("{} device QR must be unsupported", D::NAME);
-    };
-    let after = cuda_transfer_stats();
-
-    assert!(
-        matches!(err, DenseError::Unsupported { op: "cuda_qr", .. }),
-        "{}: expected a typed capability error, got {err}",
-        D::NAME
-    );
-    assert!(err.to_string().contains("1271"), "{}: {err}", D::NAME);
-    assert_eq!(
-        after.solver_calls,
-        before.solver_calls,
-        "{}: no cuSOLVER submission may happen",
-        D::NAME
-    );
-    assert_eq!(after.gemm_calls, before.gemm_calls);
-    assert_eq!(after.h2d_calls, before.h2d_calls);
-    assert_eq!(after.d2h_calls, before.d2h_calls);
-    assert_eq!(after.device_allocs, before.device_allocs);
-}
-
-#[test]
-#[ignore = "requires a real CUDA device"]
-fn complex_device_qr_is_rejected_before_any_device_work() {
-    let mut ctx = context();
-    qr_rejection_case::<Complex32>(&mut ctx);
-    qr_rejection_case::<Complex64>(&mut ctx);
-
-    // `f32` QR is supported: the boundary is complexity, not single precision.
-    let (single, _) = fixture::<f32>(4, 3, 0.0);
-    let single = upload::<f32>(&ctx, &single);
-    assert!(cuda_qr_region::<f32>(&mut ctx, &single, 0, 4, 3).is_ok());
 }
 
 /// A dtype mismatch stays a typed error for the new payloads too, rather than

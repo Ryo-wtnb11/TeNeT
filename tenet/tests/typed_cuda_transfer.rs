@@ -2428,6 +2428,41 @@ where
     assert_eq!(device.to_host().unwrap().data(), source_data);
 }
 
+/// Device QR is gauge-fixed like Host QR (positive diagonal), so the factors
+/// compare pointwise, at `64 sqrt(n) eps(f64) kappa` relative to the source
+/// norm, `kappa` the measured `sigma_max / sigma_min` of the source.
+fn assert_c64_qr_matches_host<R>(source: &TensorMap<R, Complex64>)
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+{
+    let source_data = source.data().to_vec();
+    let (mut largest, mut smallest) = (0.0_f64, f64::INFINITY);
+    for entry in &source.svd_vals().unwrap() {
+        for &value in &entry.values {
+            largest = largest.max(value);
+            smallest = smallest.min(value);
+        }
+    }
+    assert!(smallest > 0.0, "the QR fixture must have full rank");
+    let tolerance = 64.0
+        * f64::EPSILON
+        * (source_data.len().max(1) as f64).sqrt()
+        * source.norm().unwrap().max(1.0)
+        * (largest / smallest);
+    let (host_q, host_r) = source.qr_compact().unwrap();
+    let device = source.to_cuda().unwrap();
+    let (q_device, r_device) = device.qr_compact().unwrap();
+    assert_device_factor_handles(source, [&q_device, &r_device]);
+    let q = q_device.to_host().unwrap();
+    let r = r_device.to_host().unwrap();
+    assert_eq!(structural_snapshot(&q), structural_snapshot(&host_q));
+    assert_eq!(structural_snapshot(&r), structural_snapshot(&host_r));
+    assert_close_c64(q.data(), host_q.data(), tolerance);
+    assert_close_c64(r.data(), host_r.data(), tolerance);
+    assert_close_c64(q.compose(&r).unwrap().data(), &source_data, tolerance);
+    assert_eq!(device.to_host().unwrap().data(), source_data);
+}
+
 fn assert_c64_svd_trunc_composition_matches_host<R>(
     source: &TensorMap<R, Complex64>,
     truncation: &Truncation,
@@ -2980,11 +3015,11 @@ fn typed_cuda_factorizations_handle_blocks_at_unaligned_offsets() {
         assert_typed_cuda_qr_matches_host(&square);
 
         // Complex64 doubles the element size, so the same block offsets are a
-        // different multiple of 256; device QR stays unsupported for c64
-        // (#1271), so only SVD is exercised.
+        // different multiple of 256.
         let complex =
             TensorMap::<_, Complex64>::from_block_fn(&runtime, [&leg], [&leg], distinct_c64_fill())
                 .unwrap();
         assert_c64_svd_matches_host(&complex);
+        assert_c64_qr_matches_host(&complex);
     }
 }

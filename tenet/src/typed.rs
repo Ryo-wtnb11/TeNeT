@@ -626,8 +626,8 @@ impl TensorScalar for num_complex::Complex32 {}
 /// ```
 /// This marker still does not *by itself* carry the device factorizations:
 /// those are `CudaFactorizationPayload`, which every payload of this marker now
-/// implements (<https://github.com/Ryo-wtnb11/TeNeT/issues/1341>), and device QR
-/// is narrower again (`CudaQrPayload`, real payloads only). The examples below
+/// implements (<https://github.com/Ryo-wtnb11/TeNeT/issues/1341>), device QR
+/// included (<https://github.com/Ryo-wtnb11/TeNeT/issues/1271>). The examples below
 /// only compile under the `cuda` feature, so a host-only CI run does not
 /// exercise them.
 #[cfg_attr(
@@ -645,12 +645,12 @@ fn f64_device_svd(tensor: &TensorMap<U1FusionRule, f64, CudaStorage<f64>>) {
 }
 ```
 
-```compile_fail
+```
 use num_complex::Complex32;
 use tenet::core::U1FusionRule;
 use tenet::typed::{CudaStorage, TensorMap};
 
-fn no_c32_device_qr(tensor: &TensorMap<U1FusionRule, Complex32, CudaStorage<Complex32>>) {
+fn c32_device_qr(tensor: &TensorMap<U1FusionRule, Complex32, CudaStorage<Complex32>>) {
     let _ = tensor.qr_compact();
 }
 ```"
@@ -787,8 +787,8 @@ impl AdvancedLinalgScalar for num_complex::Complex64 {}
 ///
 /// This marker carries the *base* device family only — transfer, arithmetic,
 /// the reductions, contraction/`compose` and the structural transforms. The
-/// device factorizations sit behind [`CudaFactorizationPayload`] on top of it,
-/// and device QR behind [`CudaQrPayload`] on top of that.
+/// device factorizations, QR included, sit behind [`CudaFactorizationPayload`]
+/// on top of it.
 #[cfg(feature = "cuda")]
 #[doc(hidden)]
 pub trait CudaPayload: TensorScalar + tenet_dense::CudaScalar {}
@@ -803,7 +803,7 @@ impl CudaPayload for f32 {}
 impl CudaPayload for num_complex::Complex32 {}
 
 /// Device payloads admitted to the *device* factorization family
-/// (`svd_compact`, `eigh_full`).
+/// (`svd_compact`, `eigh_full`, `qr_compact`).
 ///
 /// The marker exists so that admitting a dtype to the device *base* family and
 /// to the *host* factorization family cannot, together, open the device
@@ -812,9 +812,10 @@ impl CudaPayload for num_complex::Complex32 {}
 /// truncation composition at that dtype. All four payloads are admitted here
 /// since <https://github.com/Ryo-wtnb11/TeNeT/issues/1341> (leaf C4) supplied
 /// that evidence for `f32` and [`num_complex::Complex32`].
+/// Device `qr_compact` joined all four in
+/// <https://github.com/Ryo-wtnb11/TeNeT/issues/1271>.
 ///
-/// Sealed through [`CudaPayload`]; device QR needs [`CudaQrPayload`] on top of
-/// it, because the backend cannot gauge a complex QR.
+/// Sealed through [`CudaPayload`].
 #[cfg(feature = "cuda")]
 #[doc(hidden)]
 pub trait CudaFactorizationPayload: CudaPayload + FactorizationScalar {}
@@ -827,51 +828,6 @@ impl CudaFactorizationPayload for num_complex::Complex64 {}
 impl CudaFactorizationPayload for f32 {}
 #[cfg(feature = "cuda")]
 impl CudaFactorizationPayload for num_complex::Complex32 {}
-
-/// Device payloads admitted to device QR (`qr_compact`).
-///
-/// Device QR additionally needs the backend's positive-diagonal gauge, whose
-/// `triu` fill materializes a payload-typed zero constant. Whether that kernel
-/// compiles for a dtype is the adapter's
-/// [`tenet_dense::CudaScalar::DEVICE_CONSTANT_KERNELS`], which is `false` for
-/// both complex payloads until #1271 verifies them on device — so device QR is a
-/// compile-time boundary for them, one level above the typed `Unsupported`
-/// the adapter would return.
-///
-/// **That constant is the single authority.** This marker cannot be written as
-/// a bound on it — stable Rust has no `where D::CONST == true` — so it is a
-/// hand-written projection of it, held equal to it from both sides:
-///
-/// * the `const` block below pins the constant for each of the four named
-///   payloads, so an upstream flip fails the build with the repair named — a
-///   fixed kernel cannot leave a dtype silently locked out here;
-/// * device `qr_compact` asserts the constant in an inline `const`, evaluated
-///   when it is monomorphized, so an impl of this marker for a dtype whose
-///   constant is `false` fails the first build that instantiates device QR at
-///   it instead of degrading to the adapter's runtime `Unsupported`.
-#[cfg(feature = "cuda")]
-#[doc(hidden)]
-pub trait CudaQrPayload: CudaFactorizationPayload {}
-
-#[cfg(feature = "cuda")]
-impl CudaQrPayload for f64 {}
-#[cfg(feature = "cuda")]
-impl CudaQrPayload for f32 {}
-
-#[cfg(feature = "cuda")]
-const _: () = {
-    use tenet_dense::CudaScalar;
-    assert!(
-        <f64 as CudaScalar>::DEVICE_CONSTANT_KERNELS
-            && <f32 as CudaScalar>::DEVICE_CONSTANT_KERNELS,
-        "a real payload lost its device constant kernels: drop its `CudaQrPayload` impl"
-    );
-    assert!(
-        !<num_complex::Complex64 as CudaScalar>::DEVICE_CONSTANT_KERNELS
-            && !<num_complex::Complex32 as CudaScalar>::DEVICE_CONSTANT_KERNELS,
-        "a complex payload gained device constant kernels: give it a `CudaQrPayload` impl"
-    );
-};
 
 /// One tensor-local restriction used by the internal network slice executor.
 #[doc(hidden)]
@@ -11849,27 +11805,19 @@ where
 }
 
 #[cfg(feature = "cuda")]
-/// Device compact QR, real payloads (`f64` and `f32`).
+/// Device compact QR, every device factorization payload (`f64`, `f32`,
+/// `Complex64`, `Complex32`).
 ///
-/// `qr_compact` returns the positive-diagonal gauge (`R_jj` real and
-/// non-negative, phase 1 kept where `R_jj == 0`), applied on device by the
-/// backend's own QR primitive rather than re-derived here.
+/// `qr_compact` returns the Host gauge exactly: positive diagonal (`R_jj` real
+/// and non-negative, phase 1 kept where `R_jj == 0`, MatrixAlgebraKit
+/// `positive = true`), applied on device by the backend's own QR primitive
+/// (`QrGauge::PositiveDiagonal`: `Q -> Q D`, `R -> D^H R` with
+/// `D = diag(R_jj / |R_jj|)`) rather than re-derived here.
 ///
 /// The payload dtype is the only degree of freedom; the plan, the routes and
-/// the assembly are the ones the device SVD shares. Which dtypes are admitted
-/// is [`CudaQrPayload`], projected from the adapter capability constant.
+/// the assembly are the ones the device SVD shares.
 ///
-/// A complex device QR is a compile-time boundary until #1271: every backend
-/// path to the `R` factor routes through tenferro-gpu's `triu` kernel, whose
-/// zero constant (`src/kernels/helpers.rs:84` `E::cast_from(0u32)`, used by
-/// `src/kernels/diagonal.rs:76 triu_kernel`) emitted
-/// `cuDoubleComplex(uint32(0))` and failed NVRTC compilation up to Tenferro
-/// 0.5.0 (tenferro-rs#1833). Tenferro 0.6.0 compiles it (t4a-cubecl 0.10.1),
-/// but TeNeT's complex device QR is not yet verified, so the boundary stays
-/// rather than becoming a runtime backend error; `svd_compact` and
-/// `eigh_full` are unaffected and carry both payloads.
-///
-/// Checked Generic providers have no device QR either:
+/// Checked Generic providers have no device QR:
 ///
 /// ```compile_fail
 /// use tenet::core::{
@@ -11888,68 +11836,20 @@ where
 /// }
 /// ```
 ///
-/// ```compile_fail
-/// use num_complex::Complex64;
-/// use tenet::core::U1FusionRule;
-/// use tenet::typed::{CudaStorage, TensorMap};
-///
-/// fn no_complex_cuda_qr(
-///     tensor: &TensorMap<U1FusionRule, Complex64, CudaStorage<Complex64>>,
-/// ) {
-///     let _ = tensor.qr_compact();
-/// }
 /// ```
-///
-/// ```compile_fail
-/// use num_complex::Complex32;
-/// use tenet::core::U1FusionRule;
-/// use tenet::typed::{CudaStorage, TensorMap};
-///
-/// fn no_complex32_cuda_qr(
-///     tensor: &TensorMap<U1FusionRule, Complex32, CudaStorage<Complex32>>,
-/// ) {
-///     let _ = tensor.qr_compact();
-/// }
-/// ```
-///
-/// Single precision is open: the defect is the complex zero constant, not the
-/// precision, and `f32` is a real payload.
-///
-/// ```
-/// use tenet::core::U1FusionRule;
-/// use tenet::typed::{CudaStorage, TensorMap};
-///
-/// fn f32_cuda_qr(tensor: &TensorMap<U1FusionRule, f32, CudaStorage<f32>>) {
-///     let _ = tensor.qr_compact();
-/// }
-/// ```
-///
-/// The marker, not a concrete payload, is the gate — a generic body bounded
-/// only on the device factorization family cannot reach it:
-///
-/// ```compile_fail
 /// use tenet::prelude::U1FusionRule;
 /// use tenet::typed::{CudaFactorizationPayload, CudaStorage, TensorMap};
 ///
-/// fn device_factorizing_only<D: CudaFactorizationPayload>(
+/// fn device_qr<D: CudaFactorizationPayload>(
 ///     tensor: &TensorMap<U1FusionRule, D, CudaStorage<D>>,
 /// ) {
-///     let _ = tensor.qr_compact();
-/// }
-/// ```
-///
-/// ```
-/// use tenet::prelude::U1FusionRule;
-/// use tenet::typed::{CudaQrPayload, CudaStorage, TensorMap};
-///
-/// fn device_qr<D: CudaQrPayload>(tensor: &TensorMap<U1FusionRule, D, CudaStorage<D>>) {
 ///     let _ = tensor.qr_compact();
 /// }
 /// ```
 impl<R, D> TensorMap<R, D, CudaStorage<D>>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
-    D: CudaQrPayload,
+    D: CudaFactorizationPayload,
 {
     /// Streamed compact QR of owned dense CUDA storage.
     ///
@@ -11960,12 +11860,6 @@ where
     /// is assembled by one whole-factor device copy; any other route keeps the
     /// per-tree identity-selector GEMM.
     pub fn qr_compact(&self) -> Result<(Self, Self), Error> {
-        const {
-            assert!(
-                <D as tenet_dense::CudaScalar>::DEVICE_CONSTANT_KERNELS,
-                "`CudaQrPayload` admits a dtype without device constant kernels: drop its impl"
-            );
-        }
         let source = self.direct_cuda_storage("qr_compact")?;
         let source_space = self.logical_space().space();
         let required_len = source_space.required_len()?;
