@@ -199,7 +199,15 @@ impl Truncation {
     }
 
     /// Bound the relative truncation error (weighted 2-norm of the discarded
-    /// tail) by `rtol`.
+    /// tail) by `rtol`: `error <= rtol * norm` up to a rounding slack of
+    /// `(n + 5) * f64::EPSILON` relative to the budget (`n` the total number
+    /// of values).
+    ///
+    /// A state whose discard meets the budget exactly, up to that rounding,
+    /// is discarded (TensorKit `SectorVector` `TruncationByError`, which
+    /// breaks on `> budget`; MatrixAlgebraKit's strict `>=` would keep it).
+    /// `rtol = 0` therefore discards exactly the zero values and nothing
+    /// else.
     pub fn relative_error(rtol: f64) -> Result<Self, TruncationError> {
         validate_nonnegative_finite(
             rtol,
@@ -487,6 +495,34 @@ fn kept_counts(spectra: &[WeightedSpectrum<'_>], truncation: &Truncation) -> Vec
         Truncation::DiscardWeight { rtol } => {
             let norm = full_norm(spectra);
             let budget = (rtol * norm) * (rtol * norm);
+            // Slack for the rounding of the two quantities compared, both of
+            // order `budget` (`u = eps / 2`, `n` values, Higham gamma bounds
+            // in this exact evaluation order):
+            // - `discarded`: each term `(w * v) * v` rounds twice, then at
+            //   most `n - 1` sequential additions: `(n + 1)u`.
+            // - `norm^2`: `v * v`, the per-sector sum, `weight *` and the sum
+            //   over sectors: `(n + 1)u`. `budget = (rtol * sqrt(.))^2`
+            //   squares the sqrt and the `rtol *` roundings (`4u`) and rounds
+            //   once more: `(n + 6)u`.
+            // - `limit = budget * (1 + k eps)`: the factor is exact, the
+            //   product rounds once: `u`.
+            // Total `(2n + 8)u = (n + 4) eps` to first order; `n + 5` leaves
+            // one eps for the second-order terms.
+            //
+            // Relative to `budget`, so a power-of-two rescaling cannot move a
+            // decision; any other rescaling can move one only for a tail
+            // whose exact weight lies within about this slack of the budget.
+            // The former absolute `1e-15` swamped tiny spectra and vanished
+            // for large ones. `f64::EPSILON` because every quantity here is
+            // `f64` at every payload dtype (see the type-level docs).
+            //
+            // MatrixAlgebraKit `_truncerr_impl` uses no slack and a strict
+            // `>=` break; TensorKit's `SectorVector` `TruncationByError`
+            // discards while the running error is `<= budget`, which this
+            // keeps, so a budget met exactly up to rounding discards that
+            // state.
+            let values: usize = spectra.iter().map(|spectrum| spectrum.values.len()).sum();
+            let limit = budget * (1.0 + (values + 5) as f64 * f64::EPSILON);
             let mut kept: Vec<usize> = spectra
                 .iter()
                 .map(|spectrum| spectrum.values.len())
@@ -502,25 +538,7 @@ fn kept_counts(spectra: &[WeightedSpectrum<'_>], truncation: &Truncation) -> Vec
             let mut discarded = 0.0;
             while let Some(TailCandidate { value, sector }) = tails.pop() {
                 let next = discarded + spectra[sector].weight * value * value;
-                // Why the slack is not scaled by the payload's epsilon: it
-                // guards the rounding of *this* accumulation, and `discarded`,
-                // `weight` and `value` are `f64` whatever the payload dtype is
-                // (`FactorScalar::real_spectrum` widens a single-precision
-                // spectrum instead of recomputing it). The arithmetic being
-                // guarded is bit-for-bit the same at `f32` as at `f64`, so a
-                // payload-dependent slack here would change the *policy*, not
-                // absorb a payload-dependent error. It would also be a
-                // deviation, not a fix: MatrixAlgebraKit `_truncerr_impl`
-                // (`src/implementations/truncation.jl:91-102`) compares the
-                // cumulative tail against the budget with no slack at all, and
-                // it accumulates in the element type, so TeNeT is already the
-                // more accurate of the two at single precision.
-                //
-                // The slack being *absolute* rather than relative to the
-                // budget is a scale dependence that affects `f64` exactly as
-                // much as `f32`; changing it is a decision about the
-                // double-precision contract and belongs to its own leaf.
-                if next > budget + 1e-15 {
+                if next > limit {
                     break;
                 }
                 discarded = next;
@@ -1031,6 +1049,8 @@ mod tests {
     fn discard_weight_oracle(spectra: &[WeightedSpectrum<'_>], rtol: f64) -> (Vec<usize>, f64) {
         let norm = full_norm(spectra);
         let budget = (rtol * norm) * (rtol * norm);
+        let count: usize = spectra.iter().map(|spectrum| spectrum.values.len()).sum();
+        let limit = budget * (1.0 + (count + 5) as f64 * f64::EPSILON);
         let mut flat: Vec<(f64, usize, usize)> = spectra
             .iter()
             .enumerate()
@@ -1052,7 +1072,7 @@ mod tests {
         let mut total = 0.0;
         for (value, sector, index) in flat {
             total += spectra[sector].weight * value * value;
-            if total > budget + 1e-15 {
+            if total > limit {
                 break;
             }
             discards[sector].push(index);
@@ -1072,6 +1092,87 @@ mod tests {
             .collect();
         let error = discarded_norm(spectra, &kept);
         (kept, error)
+    }
+
+    /// The #1324 pin fixture (non-dyadic tenths, so partial sums round) plus an
+    /// SU(2)-weighted one; `(1/90)^(1/2)` puts the budget on the two smallest
+    /// tails up to rounding.
+    fn scale_fixtures() -> Vec<Vec<(f64, Vec<f64>)>> {
+        vec![
+            vec![
+                (1.0, vec![0.9, 0.3, 0.1]),
+                (1.0, vec![0.7, 0.2, 0.1]),
+                (1.0, vec![0.5, 0.3, 0.1]),
+            ],
+            vec![
+                (1.0, vec![0.8, 0.4, 0.1]),
+                (2.0, vec![0.6, 0.3]),
+                (3.0, vec![0.2, 0.1]),
+            ],
+        ]
+    }
+
+    const SCALE_RTOLS: [f64; 5] = [0.05, 0.1, 0.2, 0.3, 0.105_409_255_338_945_98];
+
+    fn scaled(entries: &[(f64, Vec<f64>)], scale: impl Fn(f64) -> f64) -> Vec<(f64, Vec<f64>)> {
+        entries
+            .iter()
+            .map(|(weight, values)| (*weight, values.iter().map(|&v| scale(v)).collect()))
+            .collect()
+    }
+
+    #[test]
+    fn discard_weight_decision_is_invariant_under_uniform_rescaling() {
+        // What: spectrum * s scales the budget by s^2 with it, so the kept
+        // sets must not move. Powers of two scale exactly (f64 and f32
+        // spectra alike), so the error must scale bit for bit; powers of ten
+        // round every value and must still keep the same sets.
+        assert_eq!(SCALE_RTOLS[4], (1.0f64 / 90.0).sqrt());
+        let mut cases = 0;
+        for entries in scale_fixtures() {
+            let unit = spectra(&entries);
+            for rtol in SCALE_RTOLS {
+                let policy = Truncation::relative_error(rtol).unwrap();
+                let reference = select(&unit, &policy).unwrap();
+                for exponent in [-60, -30, -10, 0, 10, 30, 60] {
+                    let s = 2f64.powi(exponent);
+                    let f64_entries = scaled(&entries, |v| v * s);
+                    let f32_entries = scaled(&entries, |v| f64::from(v as f32 * s as f32));
+                    let f32_unit_entries = scaled(&entries, |v| f64::from(v as f32));
+                    let f32_reference = select(&spectra(&f32_unit_entries), &policy).unwrap();
+                    for (scaled_entries, expected) in
+                        [(&f64_entries, &reference), (&f32_entries, &f32_reference)]
+                    {
+                        let decision = select(&spectra(scaled_entries), &policy).unwrap();
+                        assert_eq!(decision.kept, expected.kept, "rtol {rtol} s 2^{exponent}");
+                        assert_eq!(decision.error.to_bits(), (expected.error * s).to_bits());
+                        cases += 1;
+                    }
+                }
+                for exponent in -6..=6 {
+                    let s = 10f64.powi(exponent);
+                    let decision = select(&spectra(&scaled(&entries, |v| v * s)), &policy).unwrap();
+                    assert_eq!(decision.kept, reference.kept, "rtol {rtol} s 1e{exponent}");
+                    assert!((decision.error - reference.error * s).abs() <= 1e-14 * s);
+                    cases += 1;
+                }
+            }
+        }
+        assert_eq!(cases, 2 * SCALE_RTOLS.len() * (7 * 2 + 13));
+    }
+
+    #[test]
+    fn discard_weight_discards_a_state_that_meets_the_budget_exactly() {
+        // What: TensorKit `SectorVector` `TruncationByError` semantics — the
+        // running error may equal the budget. norm = 2, rtol 0.5 -> budget
+        // exactly 1: one 1.0 goes, the second would make 2 > 1.
+        // (MatrixAlgebraKit `_truncerr_impl` breaks at `>= budget` and would
+        // keep all four.)
+        let entries = [(1.0, vec![1.0, 1.0, 1.0, 1.0])];
+        let spectra = spectra(&entries);
+        let decision = select(&spectra, &Truncation::relative_error(0.5).unwrap()).unwrap();
+        assert_eq!(decision.kept, vec![3]);
+        assert_eq!(decision.error, 1.0);
     }
 
     #[test]
