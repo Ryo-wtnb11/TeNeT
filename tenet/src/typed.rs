@@ -223,7 +223,7 @@ use tenet_dense::{
     cuda_copy_region_into, cuda_eigh_region, cuda_gemm_region_into,
     cuda_is_hermitian_region as dense_cuda_is_hermitian_region,
     cuda_qr_region as dense_cuda_qr_region, cuda_svd_region as dense_cuda_svd_region,
-    cuda_zero_prefix, CudaDenseContext, CudaDenseStorage,
+    CudaDenseContext, CudaDenseStorage,
 };
 #[cfg(feature = "cuda")]
 use tenet_operations::{CudaTreeTransformDestination, StorageGemm};
@@ -4724,8 +4724,8 @@ pub(crate) fn copy_whole_factor<D: CudaPayload>(
     factor: &CudaDenseStorage,
 ) -> Result<(), Error> {
     // `cuda_copy_region_into` accepts a source at least as long as the region
-    // so one zero template can reset every network destination; this route
-    // instead promises the factor *is* the region, so assert that here rather
+    // so one long buffer can serve every shorter region; this route instead
+    // promises the factor *is* the region, so assert that here rather
     // than silently copying a prefix of a longer factor.
     if factor.len() != target.rows().saturating_mul(target.cols()) {
         return Err(internal_layout_error(
@@ -10197,32 +10197,15 @@ mod network_payload_sealed {
 pub trait NetworkPayloadStorage<D>:
     TensorStorage<D> + network_payload_sealed::Sealed + 'static
 {
-    /// Scratch the network workspace owns so a retained destination can be
-    /// reset in place before it is overwritten.
-    ///
-    /// Host resets a `Vec` through `slice::fill`, which needs nothing, so this
-    /// is `()`. A device buffer has no host-free fill in Tenferro 0.5, so the
-    /// device carries one zero template here (see `CudaZeroTemplate`).
-    type ResetScratch: Default + Send + Sync + 'static;
-
     /// Bytes this allocation retains while it is held for reuse.
     fn network_retained_bytes(&self) -> usize;
-
-    /// Bytes the workspace's reset scratch retains while it is held for reuse.
-    fn reset_scratch_retained_bytes(scratch: &Self::ResetScratch) -> usize;
 }
 
 impl<D: 'static> network_payload_sealed::Sealed for Vec<D> {}
 
 impl<D: 'static> NetworkPayloadStorage<D> for Vec<D> {
-    type ResetScratch = ();
-
     fn network_retained_bytes(&self) -> usize {
         self.capacity().saturating_mul(std::mem::size_of::<D>())
-    }
-
-    fn reset_scratch_retained_bytes((): &()) -> usize {
-        0
     }
 }
 
@@ -10231,84 +10214,8 @@ impl<D: tenet_dense::CudaScalar> network_payload_sealed::Sealed for CudaStorage<
 
 #[cfg(feature = "cuda")]
 impl<D: CudaPayload> NetworkPayloadStorage<D> for CudaStorage<D> {
-    type ResetScratch = CudaZeroTemplate<D>;
-
     fn network_retained_bytes(&self) -> usize {
         TensorStorage::len(self).saturating_mul(std::mem::size_of::<D>())
-    }
-
-    fn reset_scratch_retained_bytes(scratch: &CudaZeroTemplate<D>) -> usize {
-        CudaZeroTemplate::<D>::retained_bytes(scratch)
-    }
-}
-
-/// The `tensor!` workspace's claim on the device zero template every retained
-/// destination is reset from.
-///
-/// Interim: Tenferro 0.5 can write a buffer only by uploading or by reading
-/// another device buffer, so resetting a retained destination costs one D2D
-/// copy from a zero template rather than a device-local fill. tenferro-rs#1834
-/// (`fill_zero_write`) would remove the template and this type together with
-/// its `NetworkPayloadStorage::ResetScratch` seam.
-///
-/// The template itself belongs to the [`CudaDenseContext`], which is the single
-/// owner of every shared device operand (the `1` of a region move and the zeros
-/// of a region fill) and grows it monotonically to the longest region any
-/// caller reserves — one buffer for the whole runtime instead of one per
-/// workspace. What this type carries is the length this workspace caused to be
-/// reserved, so `workspace_budget_bytes` keeps charging that reservation to the
-/// workspace that needs it.
-#[cfg(feature = "cuda")]
-#[doc(hidden)]
-pub struct CudaZeroTemplate<D: CudaPayload> {
-    reserved_len: usize,
-    payload: std::marker::PhantomData<D>,
-}
-
-#[cfg(feature = "cuda")]
-impl<D: CudaPayload> Default for CudaZeroTemplate<D> {
-    fn default() -> Self {
-        Self {
-            reserved_len: 0,
-            payload: std::marker::PhantomData,
-        }
-    }
-}
-
-#[cfg(feature = "cuda")]
-impl<D: CudaPayload> std::fmt::Debug for CudaZeroTemplate<D> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CudaZeroTemplate")
-            .field("reserved_len", &self.reserved_len)
-            .finish()
-    }
-}
-
-#[cfg(feature = "cuda")]
-impl<D: CudaPayload> CudaZeroTemplate<D> {
-    pub(crate) fn retained_bytes(&self) -> usize {
-        self.reserved_len.saturating_mul(std::mem::size_of::<D>())
-    }
-
-    /// Writes zeros over the first `len` elements of `destination`, copying
-    /// them from the context-owned zero template. The template is sized once
-    /// here and then re-read by every later reset, so a warm workspace
-    /// transfers nothing.
-    ///
-    /// The kernel is the copy it has always been (`cuda_zero_prefix` →
-    /// `copy_read_into`); only the template's owner moved to the context.
-    pub(crate) fn reset_prefix(
-        &mut self,
-        cuda: &mut CudaDenseContext,
-        destination: &mut CudaStorage<D>,
-        len: usize,
-    ) -> Result<(), Error> {
-        if len == 0 {
-            return Ok(());
-        }
-        cuda.reserve_zero_template::<D>(len).map_err(dense_err)?;
-        self.reserved_len = self.reserved_len.max(len);
-        cuda_zero_prefix::<D>(cuda, &mut destination.0, len).map_err(dense_err)
     }
 }
 
@@ -12648,14 +12555,6 @@ where
         }
     }
 
-    fn unsupported_direct_contract() -> Error {
-        tenet_tensors::OperationError::UnsupportedTensorContractScope {
-            message: "typed CUDA contraction supports only whole-domain/whole-codomain axes in \
-                      canonical order with identity output order",
-        }
-        .into()
-    }
-
     /// TensorKit `tensorcontract` on device tensors: the Host
     /// [`TensorMap::contract`] semantics for arbitrary contracted and output
     /// axes, on owned or lazy-adjoint operands, executed on the device.
@@ -12816,6 +12715,7 @@ where
             &resolution,
             dst_space.space().structure(),
             &mut dst,
+            true,
             lhs_storage,
             rhs_storage,
         )?;
@@ -12842,66 +12742,37 @@ where
     /// Overwrites `destination` with
     /// `alpha * self.contract(other, lhs_axes, rhs_axes, output_axes)` while
     /// preserving the destination's provider, space, body, and device
-    /// allocation.
+    /// allocation: arbitrary contracted and output axes, owned or lazy-adjoint
+    /// operands, through the same resolution as the returning [`Self::contract`].
     ///
     /// The admission sequence is the Host one
     /// ([`TensorMap::contract_overwrite_into`]) plus the device's own
-    /// placement check: same Runtime, same rule identity, an owned dense
-    /// device destination that aliases neither operand's payload body, the
-    /// contraction's fusion space and block layout, exact operand and
-    /// destination lengths, and unique destination ownership. Every rejection
-    /// happens before any device write. The destination is cleared immediately
-    /// before replay, so an error raised by compilation or a kernel may leave
-    /// it zeroed.
+    /// boundaries: same Runtime, same rule identity, an owned dense device
+    /// destination that aliases neither operand's payload body, the
+    /// contraction's fusion space and block layout (malformed axes report the
+    /// Host's errors here), exact operand and destination lengths, and unique
+    /// destination ownership; then `alpha = 1`, the compile of the Host route
+    /// and placement. Every rejection — including a compile error, which the
+    /// Host raises only after it has cleared its destination — happens before
+    /// any device work, so a rejected call leaves `destination` untouched.
     ///
-    /// The device contraction is the canonical fully-direct route only, so
-    /// `alpha` other than `1` and any non-canonical axis order are explicit
-    /// [`Error::UnsupportedOnDevice`] / unsupported-scope boundaries rather
-    /// than a Host fallback.
+    /// `alpha` other than `1` is [`Error::UnsupportedOnDevice`]: the device
+    /// contraction has no caller scale, rather than a Host fallback.
     ///
     /// # Cost
     ///
-    /// This public entry owns no reset scratch, so it uploads one
-    /// destination-sized zero buffer per call — the same host-to-device
-    /// traffic the returning [`Self::contract`] pays, with the destination
-    /// allocation saved. Repeated execution that wants the upload gone uses
-    /// the `tensor!` network path, whose workspace holds one
-    /// [`CudaZeroTemplate`] for all of its destinations.
+    /// No destination reset: an output transform writes every element in
+    /// overwrite mode, and where the core GEMMs write the destination directly
+    /// exactly the blocks no GEMM reaches are zeroed (the Host clears the
+    /// whole destination). A warm call therefore transfers nothing and
+    /// allocates nothing on the device; scratch and coefficient payloads are
+    /// as for [`Self::contract`].
     #[doc(alias = "contract_ordered_overwrite_into")]
     #[allow(clippy::too_many_arguments)]
     pub fn contract_overwrite_into(
         &self,
         other: &Self,
         destination: &mut Self,
-        lhs_axes: &[usize],
-        rhs_axes: &[usize],
-        output_axes: &[usize],
-        alpha: D,
-    ) -> Result<(), Error> {
-        self.contract_overwrite_into_with_template(
-            other,
-            destination,
-            &mut CudaZeroTemplate::default(),
-            lhs_axes,
-            rhs_axes,
-            output_axes,
-            alpha,
-        )
-    }
-
-    /// [`Self::contract_overwrite_into`] with a caller-owned zero template.
-    ///
-    /// The `tensor!` network workspace owns one template for every destination
-    /// it retains, which is what removes the per-step zero upload. The template
-    /// is scratch: it carries no semantics, and growing it changes nothing an
-    /// observer of the result can see.
-    #[doc(hidden)]
-    #[allow(clippy::too_many_arguments)]
-    pub fn contract_overwrite_into_with_template(
-        &self,
-        other: &Self,
-        destination: &mut Self,
-        zero_template: &mut CudaZeroTemplate<D>,
         lhs_axes: &[usize],
         rhs_axes: &[usize],
         output_axes: &[usize],
@@ -12947,33 +12818,13 @@ where
 
         let (lhs_space, lhs_operand, lhs_storage) = self.cuda_fusion_operand("contract")?;
         let (rhs_space, rhs_operand, rhs_storage) = other.cuda_fusion_operand("contract")?;
-        if !lhs_axes
-            .iter()
-            .copied()
-            .eq(self.codomain_rank()..self.rank())
-            || !rhs_axes.iter().copied().eq(0..other.codomain_rank())
-        {
-            return Err(Self::unsupported_direct_contract());
-        }
-        let output_rank = self.codomain_rank() + other.domain_rank();
-        if !output_axes.iter().copied().eq(0..output_rank) {
-            return Err(Self::unsupported_direct_contract());
-        }
-        // The device replay seam scales only by the plan's own recoupling
-        // coefficients; there is no `alpha` knob on the canonical direct route
-        // and the returning device `contract` has none either.
-        if alpha != D::from_real(1.0) {
-            return Err(Error::UnsupportedOnDevice(
-                "typed CUDA contraction supports only alpha = 1".to_string(),
-            ));
-        }
-
+        let output_order = OutputAxisOrder::from_axes(output_axes);
         let expected = BoundDynamicFusionMapSpace::contracted_multiplicity_free_ordered(
             lhs_space,
             rhs_space,
             lhs_axes,
             rhs_axes,
-            OutputAxisOrder::identity(),
+            output_order,
         )?;
         if destination_body.space.space() != expected.space() {
             return Err(Error::InvalidArgument(
@@ -13015,14 +12866,49 @@ where
                 "destination storage must be uniquely owned".to_string(),
             ));
         }
+        // The executors scale only by the plan's own coefficients and θ; a
+        // caller alpha would need the output-transform alpha rule of #1318.
+        if alpha != D::from_real(1.0) {
+            return Err(Error::UnsupportedOnDevice(
+                "typed CUDA contraction supports only alpha = 1".to_string(),
+            ));
+        }
         let destination_placement = destination_storage.placement();
 
-        let mut lease = self.runtime.lease_cuda()?;
-        let cuda = &mut *lease;
-        let expected_placement = Placement::Cuda(cuda.device());
-        if lhs_storage.placement() != expected_placement
-            || rhs_storage.placement() != expected_placement
-            || destination_placement != expected_placement
+        // Resolution exactly as the returning `contract`: the lock-free core
+        // route, otherwise the Host artifact under a context lease dropped
+        // before the device lease.
+        let axes = tenet_tensors::TensorContractSpec::new_with_conjugation(
+            lhs_axes,
+            rhs_axes,
+            output_order,
+            lhs_operand.storage_conjugate(),
+            rhs_operand.storage_conjugate(),
+        );
+        let resolution = match tenet_tensors::try_compile_storage_contract_core_route(
+            &execution_destination,
+            lhs_operand,
+            rhs_operand,
+            axes,
+        )? {
+            Some(core) => core,
+            None => {
+                let mut lease = self.runtime.lease_context()?;
+                lease
+                    .context()
+                    .multiplicity_free_lane::<D>()?
+                    .compile_storage_contract_dynamic_tree(
+                        &execution_destination,
+                        lhs_operand,
+                        rhs_operand,
+                        axes,
+                    )?
+            }
+        };
+        let device = Placement::Cuda(self.runtime.cuda_device_ordinal_checked()?);
+        if lhs_storage.placement() != device
+            || rhs_storage.placement() != device
+            || destination_placement != device
         {
             return Err(Error::PlacementMismatch);
         }
@@ -13043,27 +12929,18 @@ where
             ));
         };
 
-        // Interim reset: one device read of the context's zero template.
-        // Tenferro 0.5 has no fill for an existing device buffer
-        // (tenferro-rs#1834), and the direct replay below writes only the
-        // blocks a GEMM contributes to, exactly as the returning path relies on
-        // its freshly uploaded zeros.
-        zero_template.reset_prefix(cuda, destination_data, required_destination)?;
-        tenet_tensors::tensorcontract_fusion_dyn_prelowered_direct_on_storage(
-            &mut CudaStorageGemm::new(cuda),
-            &execution_destination,
+        let mut lease = self.runtime.lease_cuda()?;
+        let (cuda, transforms, scratch) = lease.split_contract();
+        tenet_tensors::execute_storage_contract_resolution_on_cuda(
+            cuda,
+            transforms,
+            scratch,
+            &resolution,
+            execution_destination.space().structure(),
             destination_data,
-            lhs_operand,
+            false,
             lhs_storage,
-            rhs_operand,
             rhs_storage,
-            tenet_tensors::TensorContractSpec::new_with_conjugation(
-                lhs_axes,
-                rhs_axes,
-                OutputAxisOrder::identity(),
-                lhs_operand.storage_conjugate(),
-                rhs_operand.storage_conjugate(),
-            ),
         )?;
         Ok(())
     }
@@ -13702,7 +13579,7 @@ where
         }
 
         // Same error kinds, wording and order as Host; only the storage noun
-        // names the placement, as in `contract_overwrite_into_with_template`.
+        // names the placement, as in `contract_overwrite_into`.
         // A lazy adjoint source is rejected rather than lowered: Host rejects
         // it here too, because lowering would produce a result shaped like the
         // adjoint's parent, not like the caller's destination.

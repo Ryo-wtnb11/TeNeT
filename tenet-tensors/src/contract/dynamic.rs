@@ -833,6 +833,16 @@ impl<C: DenseBlockScalar> DynamicTreeExecutionArtifact<C> {
         self.block_plan.is_fully_direct()
     }
 
+    /// The core plan's inactive destination blocks when the core GEMMs write
+    /// the caller's destination directly (identity output); `None` when an
+    /// output transform writes it.
+    #[cfg(test)]
+    pub(crate) fn direct_destination_inactive_blocks(&self) -> Option<usize> {
+        self.core_dst
+            .is_none()
+            .then(|| self.block_plan.inactive_destination_regions().len())
+    }
+
     #[cfg(all(test, feature = "cuda"))]
     pub(crate) fn borrowed_sources(&self) -> (bool, bool) {
         (self.lhs_borrowed, self.rhs_borrowed)

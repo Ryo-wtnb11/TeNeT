@@ -2744,7 +2744,8 @@ fn typed_cuda_c64_eigh_admits_hermitian_and_rejects_complex_symmetric_input() {
 fn typed_cuda_contract_overwrite_into_matches_the_returning_contraction() {
     let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
     // `k` carries only charge 0, so the destination's charge-1 block has no
-    // contributing GEMM and must come out as exactly `+0.0` from the reset.
+    // contributing GEMM and must come out as exactly `+0.0` from the zeroing
+    // of the plan's inactive blocks.
     let outer = GradedSpace::try_new_with_arc(
         Arc::new(U1FusionRule),
         [(U1Irrep::new(0), 2), (U1Irrep::new(1), 3)],
@@ -2881,14 +2882,9 @@ fn typed_cuda_contract_overwrite_into_matches_the_returning_contraction() {
         lhs.contract_overwrite_into(&rhs, &mut destination, &[1], &[0], &[0, 1], 2.0),
         &destination,
     );
-    assert_rejected(
-        "non-canonical output order",
-        lhs.contract_overwrite_into(&rhs, &mut destination, &[1], &[0], &[1, 0], 1.0),
-        &destination,
-    );
 
     // A destination whose blocks all exist but none of which any GEMM reaches:
-    // the reset alone produces the whole result.
+    // the inactive-block zeroing alone produces the whole result.
     let disjoint =
         GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(7), 2)]).unwrap();
     let empty_lhs =
@@ -2912,7 +2908,7 @@ fn typed_cuda_contract_overwrite_into_matches_the_returning_contraction() {
     );
 
     // A destination space with no coupled sector at all: `required_len` is 0,
-    // so the reset is skipped entirely and the replay writes nothing.
+    // so the replay writes nothing.
     let single =
         GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
     let zero_lhs =

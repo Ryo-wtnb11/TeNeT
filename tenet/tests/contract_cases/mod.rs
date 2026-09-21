@@ -309,6 +309,56 @@ pub fn u1_rhs_identity<D: Payload>(runtime: &Runtime) -> Case<U1FusionRule, D> {
     }
 }
 
+/// A destination of `case`'s result space holding NaN everywhere: a retained
+/// buffer `contract_overwrite_into` must rewrite element by element.
+pub fn poisoned_destination<R, D>(case: &Case<R, D>) -> TensorMap<R, D>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: Payload,
+{
+    case.host().scale(D::entry(f64::NAN, f64::NAN))
+}
+
+/// Destinations with a block no GEMM writes (`v` carries charge 2 that `w`
+/// lacks): the canonical core route, a transformed lhs with an identity
+/// output (the core GEMMs write the destination directly in both), and an
+/// output transform over the same inactive core block. The resolution of
+/// each geometry is pinned in
+/// `tenet-tensors/src/contract/storage_contract_tests.rs::overwrite_cases`.
+pub fn u1_inactive_cases<D: Payload>(runtime: &Runtime) -> [Case<U1FusionRule, D>; 3] {
+    let v = u1(&[(0, 1), (1, 2), (2, 1)]);
+    let w = u1(&[(0, 2), (1, 1)]);
+    [
+        Case {
+            name: "U(1) core route, inactive block",
+            lhs: tensor(runtime, &[&v, &v], &[&w], 51),
+            rhs: tensor(runtime, &[&w], &[&v], 52),
+            lhs_axes: vec![2],
+            rhs_axes: vec![0],
+            output_axes: vec![0, 1, 2],
+            dense: false,
+        },
+        Case {
+            name: "U(1) transformed lhs, identity output, inactive block",
+            lhs: tensor(runtime, &[&v], &[&w, &v], 53),
+            rhs: tensor(runtime, &[&w], &[&v], 54),
+            lhs_axes: vec![1],
+            rhs_axes: vec![0],
+            output_axes: vec![0, 1, 2],
+            dense: false,
+        },
+        Case {
+            name: "U(1) output transform over an inactive core block",
+            lhs: tensor(runtime, &[&v, &v], &[&w], 55),
+            rhs: tensor(runtime, &[&w], &[&v], 56),
+            lhs_axes: vec![2],
+            rhs_axes: vec![0],
+            output_axes: vec![1, 0, 2],
+            dense: false,
+        },
+    ]
+}
+
 /// `L^H` contracted with `L`, and `L` with `L^H`, on a subset of legs in a
 /// non-canonical order. Every leg of `L^H` is the dual of the matching leg
 /// of `L`, so the pairing is valid for any provider; `L^H` stays a lazy
