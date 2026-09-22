@@ -8560,6 +8560,54 @@ mod tests {
         )
         .unwrap();
         assert_eq!(checked, actual);
+
+        // What: the destination check proves equality from the legs alone,
+        // for both algebra contracts, and a different destination is
+        // rejected with the materializing comparison's answer.
+        let materializations = DESCRIPTOR_MATERIALIZATIONS.get();
+        let matches = |expected: &FusionTreeHomSpace| {
+            let unchecked = FusionTreeHomSpace::tensorcontract_homspace_matches(
+                rule,
+                lhs,
+                rhs,
+                lhs_axes,
+                rhs_axes,
+                output_axes,
+                nout,
+                expected,
+            )
+            .unwrap();
+            let checked = FusionTreeHomSpace::try_tensorcontract_homspace_matches_checked(
+                rule,
+                lhs,
+                rhs,
+                lhs_axes,
+                rhs_axes,
+                output_axes,
+                nout,
+                expected,
+            )
+            .unwrap();
+            assert_eq!(unchecked, checked);
+            unchecked
+        };
+        assert!(matches(&actual));
+        assert_eq!(DESCRIPTOR_MATERIALIZATIONS.get(), materializations);
+        let flipped_leg = |leg: &SectorLeg| SectorLeg::new(leg.iter(), !leg.is_dual());
+        let mut codomain = actual.codomain().legs().to_vec();
+        let mut domain = actual.domain().legs().to_vec();
+        if let Some(leg) = codomain.first_mut() {
+            *leg = flipped_leg(leg);
+        } else if let Some(leg) = domain.first_mut() {
+            *leg = flipped_leg(leg);
+        }
+        let other = FusionTreeHomSpace::new(
+            FusionProductSpace::new(codomain),
+            FusionProductSpace::new(domain),
+        );
+        if other != actual {
+            assert!(!matches(&other));
+        }
     }
 
     #[test]

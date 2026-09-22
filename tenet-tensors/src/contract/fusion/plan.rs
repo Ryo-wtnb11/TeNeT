@@ -1503,21 +1503,22 @@ where
     CONTRACT_PREFLIGHT_CALLS.set(CONTRACT_PREFLIGHT_CALLS.get() + 1);
     let axis_plan = TensorContractAxisPlan::compile(lhs.rank(), rhs.rank(), dst.rank(), axes)?;
     let primer = primer.unwrap_or(encoded_layout_primer::<R>);
-    let expected_homspace = match primer(
+    let matches = match primer(
         rule,
-        MetadataRequest::ContractHomSpace {
+        MetadataRequest::ContractHomSpaceMatches {
             lhs: lhs.homspace(),
             rhs: rhs.homspace(),
             lhs_axes: axes.lhs_contracting_axes(),
             rhs_axes: axes.rhs_contracting_axes(),
             output_axes: axis_plan.output_axes.as_slice(),
             dst_codomain_rank: dst.nout(),
+            expected: dst.homspace(),
         },
     )? {
-        MetadataOutput::UnpreparedHomSpace(homspace) => homspace,
-        _ => unreachable!("metadata dispatcher returned a prepared HomSpace response"),
+        MetadataOutput::Matches(matches) => matches,
+        _ => unreachable!("metadata dispatcher returned a non-match response"),
     };
-    if &expected_homspace != dst.homspace() {
+    if !matches {
         return Err(OperationError::StructureMismatch { tensor: "dst" });
     }
     Ok(())
@@ -1597,7 +1598,7 @@ mod tests {
         request: MetadataRequest<'_>,
     ) -> Result<MetadataOutput, crate::OperationError> {
         OPERAND_PREFLIGHT_CALLS.set(OPERAND_PREFLIGHT_CALLS.get() + 1);
-        if !matches!(request, MetadataRequest::ContractHomSpace { .. }) {
+        if !matches!(request, MetadataRequest::ContractHomSpaceMatches { .. }) {
             return Err(crate::OperationError::InvalidArgument {
                 message: "operand plan prepared a layout during preflight",
             });

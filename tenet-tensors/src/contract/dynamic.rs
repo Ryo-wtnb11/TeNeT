@@ -1239,12 +1239,11 @@ where
         .as_ref()
         .map_or(dst_space, |entry| entry.space.as_ref());
     let block_plan_start = PROFILED.then(std::time::Instant::now);
-    let block_plan = super::resolution::compile_core_plan(
+    let block_plan = super::resolution::compile_derived_core_plan(
         rule,
         block_dst_space,
         core_left_space,
         core_right_space,
-        plan.core_axes().as_spec(),
     )?;
     if let Some(start) = block_plan_start {
         profile

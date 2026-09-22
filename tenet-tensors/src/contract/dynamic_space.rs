@@ -66,13 +66,16 @@ pub(crate) enum MetadataRequest<'a> {
         output_axes: &'a [usize],
         dst_codomain_rank: usize,
     },
-    ContractHomSpace {
+    /// Whether the contracted HomSpace equals `expected`, answered without
+    /// building it when the legs prove equality.
+    ContractHomSpaceMatches {
         lhs: &'a FusionTreeHomSpace,
         rhs: &'a FusionTreeHomSpace,
         lhs_axes: &'a [usize],
         rhs_axes: &'a [usize],
         output_axes: &'a [usize],
         dst_codomain_rank: usize,
+        expected: &'a FusionTreeHomSpace,
     },
     DualSector {
         sector: SectorId,
@@ -96,7 +99,7 @@ pub(crate) enum MetadataOutput {
         homspace: FusionTreeHomSpace,
         prepared: PreparedLayoutKeys,
     },
-    UnpreparedHomSpace(FusionTreeHomSpace),
+    Matches(bool),
     Sector(SectorId),
     Leg(SectorLeg),
 }
@@ -159,6 +162,7 @@ where
         codomain_axes: &[usize],
         domain_axes: &[usize],
     ) -> Result<(FusionTreeHomSpace, PreparedLayoutKeys), OperationError> {
+        observe_derived_homspace_build();
         match (self.legacy_dispatch())(
             rule,
             MetadataRequest::Permute {
@@ -181,6 +185,7 @@ where
         output_axes: &[usize],
         dst_codomain_rank: usize,
     ) -> Result<(FusionTreeHomSpace, PreparedLayoutKeys), OperationError> {
+        observe_derived_homspace_build();
         match (self.legacy_dispatch())(
             rule,
             MetadataRequest::Contract {
@@ -313,14 +318,15 @@ where
         )
         .map(derived)
         .map_err(OperationError::from_core_preserving_context),
-        MetadataRequest::ContractHomSpace {
+        MetadataRequest::ContractHomSpaceMatches {
             lhs,
             rhs,
             lhs_axes,
             rhs_axes,
             output_axes,
             dst_codomain_rank,
-        } => FusionTreeHomSpace::tensorcontract_homspace(
+            expected,
+        } => FusionTreeHomSpace::tensorcontract_homspace_matches(
             rule,
             lhs,
             rhs,
@@ -328,8 +334,9 @@ where
             rhs_axes,
             output_axes,
             dst_codomain_rank,
+            expected,
         )
-        .map(MetadataOutput::UnpreparedHomSpace)
+        .map(MetadataOutput::Matches)
         .map_err(OperationError::from_core_preserving_context),
         MetadataRequest::DualSector { sector } => Ok(MetadataOutput::Sector(rule.dual(sector))),
         MetadataRequest::Select {
@@ -398,14 +405,15 @@ where
         )
         .map_err(checked_metadata_operation_error)
         .and_then(prepare),
-        MetadataRequest::ContractHomSpace {
+        MetadataRequest::ContractHomSpaceMatches {
             lhs,
             rhs,
             lhs_axes,
             rhs_axes,
             output_axes,
             dst_codomain_rank,
-        } => FusionTreeHomSpace::try_tensorcontract_homspace_checked(
+            expected,
+        } => FusionTreeHomSpace::try_tensorcontract_homspace_matches_checked(
             rule,
             lhs,
             rhs,
@@ -413,8 +421,9 @@ where
             rhs_axes,
             output_axes,
             dst_codomain_rank,
+            expected,
         )
-        .map(MetadataOutput::UnpreparedHomSpace)
+        .map(MetadataOutput::Matches)
         .map_err(checked_metadata_operation_error),
         MetadataRequest::DualSector { sector } => rule
             .try_dual_sector(sector)
@@ -541,6 +550,28 @@ thread_local! {
     static LOWERED_LAYOUT_COMMITS: std::cell::Cell<usize> = const {
         std::cell::Cell::new(0)
     };
+}
+
+#[cfg(test)]
+thread_local! {
+    static DERIVED_HOMSPACE_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Counts every permuted or contracted HomSpace a layout capability builds.
+#[inline]
+fn observe_derived_homspace_build() {
+    #[cfg(test)]
+    DERIVED_HOMSPACE_BUILDS.set(DERIVED_HOMSPACE_BUILDS.get() + 1);
+}
+
+#[cfg(test)]
+pub(crate) fn reset_derived_homspace_builds() {
+    DERIVED_HOMSPACE_BUILDS.set(0);
+}
+
+#[cfg(test)]
+pub(crate) fn derived_homspace_builds() -> usize {
+    DERIVED_HOMSPACE_BUILDS.get()
 }
 
 #[inline]
