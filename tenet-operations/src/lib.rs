@@ -82,7 +82,7 @@ pub use profile::{TensorContractFusionProfile, TensorContractFusionRoute};
 pub use replay_backend::*;
 pub use scalar::{
     ConjugateValue, DenseBlockScalar, DenseRecouplingScalar, RealStructuralCoefficient,
-    RecouplingCoefficientAction, TreeTransformScalar, WideScalar,
+    RecouplingCoefficientAction, TransformScale, TreeTransformScalar, WideScalar,
 };
 pub use tensoradd::*;
 pub use transform_key::{TreeTransformOperation, TreeTransformOperationKind};

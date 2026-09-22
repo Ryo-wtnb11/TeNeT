@@ -175,6 +175,58 @@ impl RecouplingCoefficientAction<f64> for Complex64 {
     }
 }
 
+/// How one Host transform block is scaled: TensorKit's `α * coeff`.
+///
+/// Why not a plain `D`: collapsing a real structural coefficient into a
+/// complex payload type turns a componentwise scale into a full complex
+/// multiply, so `(1+0i) * (inf+0i)` becomes `inf + NaN i` and the sign of a
+/// `-0` component is lost. TensorKit keeps the coefficient in
+/// `sectorscalartype(I)` (a `Float64` for U(1), SU(2) and fZ2×U(1)) all the way
+/// into `stridedtensoradd!`, where `ComplexF64 * Float64` is componentwise.
+/// `Structural` carries the same distinction in the type, and is selected when
+/// the caller's `α` is the multiplicative identity — TensorKit's `One()`.
+#[derive(Clone, Copy, Debug)]
+pub enum TransformScale<D, C> {
+    /// `α == 1`: the structural coefficient acts on the payload directly.
+    Structural(C),
+    /// `α != 1`: the coefficient is folded into the payload type, as before.
+    Data(D),
+}
+
+impl<D, C> TransformScale<D, C>
+where
+    D: RecouplingCoefficientAction<C> + One + PartialEq,
+    C: Copy,
+{
+    #[inline]
+    pub fn new(alpha: D, coefficient: C) -> Self {
+        if alpha.is_one() {
+            Self::Structural(coefficient)
+        } else {
+            Self::Data(alpha.scale_by_coefficient(coefficient))
+        }
+    }
+
+    /// The coefficient promoted to the payload type, for adapters that cannot
+    /// keep it real.
+    #[inline]
+    pub fn into_data(self) -> D {
+        match self {
+            Self::Structural(coefficient) => D::coefficient_as_data(coefficient),
+            Self::Data(scale) => scale,
+        }
+    }
+
+    /// Whether this scale is exactly one, so the transform must not multiply.
+    #[inline]
+    pub fn is_identity(self) -> bool {
+        match self {
+            Self::Structural(coefficient) => D::coefficient_as_data(coefficient).is_one(),
+            Self::Data(scale) => scale.is_one(),
+        }
+    }
+}
+
 #[doc(hidden)]
 pub trait DenseBlockScalar:
     Copy
