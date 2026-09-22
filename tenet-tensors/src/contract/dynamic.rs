@@ -1244,6 +1244,7 @@ where
         block_dst_space,
         core_left_space,
         core_right_space,
+        plan.core_axes().as_spec(),
     )?;
     if let Some(start) = block_plan_start {
         profile

@@ -152,3 +152,11 @@ Geometric mean after/before: 0.95 (range 0.89–1.03).
   artifact `Arc`s.
 - The destination derivation (#1358/L1) and the Tenferro session entry (E1
   constant 5) are outside this leaf.
+- **Above rank 8** the inline axis lists spill to the heap: each `AxisVec`
+  (`SmallVec<[usize; 8]>`) of a longer axis list is one allocation, a
+  constant number per plan rather than one per candidate. The counts above
+  are for ranks up to 7.
+- The crossing-leg allocation is pinned by
+  `warm_contract_compile_allocates_once_per_leg_that_changes_side`: the
+  E1-shaped DynamicTree compile is 20 allocations plus one per leg a source
+  transform moves across codomain and domain.

@@ -220,6 +220,43 @@ pub(crate) fn reset_core_contract_derivations() {
     super::dynamic_space::reset_derived_homspace_builds();
 }
 
+/// Asserts what [`super::resolution::compile_derived_core_plan`] relies on:
+/// the full core preflight and destination check accept the plan-derived
+/// operands. Leaves the compile counters as they were, so tests keep
+/// counting the production work only.
+#[cfg(debug_assertions)]
+pub(crate) fn debug_assert_core_geometry<R>(
+    rule: &R,
+    dst: &DynamicFusionMapSpace,
+    lhs: &DynamicFusionMapSpace,
+    rhs: &DynamicFusionMapSpace,
+    core_axes: TensorContractSpec<'_>,
+) where
+    R: FusionRule,
+{
+    #[cfg(test)]
+    let counts = (
+        CORE_CONTRACT_PREFLIGHTS.get(),
+        EXPECTED_CORE_HOMSPACE_DERIVATIONS.get(),
+        super::structure::tensor_contract_axis_plan_compiles(),
+    );
+    let checked = reject_fusion_contract_conjugation(core_axes).and_then(|()| {
+        CoreContractPreflight::compile(rule, dst, lhs, rhs, core_axes)?
+            .require_core_geometry()
+            .map(|_| ())
+    });
+    #[cfg(test)]
+    {
+        CORE_CONTRACT_PREFLIGHTS.set(counts.0);
+        EXPECTED_CORE_HOMSPACE_DERIVATIONS.set(counts.1);
+        super::structure::set_tensor_contract_axis_plan_compiles(counts.2);
+    }
+    debug_assert!(
+        checked.is_ok(),
+        "plan-derived core operands failed the core preflight: {checked:?}"
+    );
+}
+
 /// What one contraction compile did: core preflights, core destination
 /// checks, and permuted or contracted HomSpaces built.
 #[cfg(test)]

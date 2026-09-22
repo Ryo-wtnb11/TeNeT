@@ -190,3 +190,59 @@ fn warm_contract_compile_allocations_do_not_scale_with_rank() {
         assert_eq!(dynamic_tree, 25, "dynamic-tree route at rank {rank}");
     }
 }
+
+/// `A(V^codomain ← V^domain)` contracted on its codomain axis 0 with
+/// `M(V ← V)` on its domain axis, identity output (the E1 `contract` row):
+/// A's source transform sends leg 0 to the domain and its `domain` legs to
+/// the codomain, and M's transform swaps its two legs.
+#[test]
+fn warm_contract_compile_allocates_once_per_leg_that_changes_side() {
+    let _serial = SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Rank 2 is left out: there the planner takes the reversed orientation,
+    // whose source transforms keep every leg on its side.
+    for (codomain, domain) in [(2, 1), (1, 2), (2, 2), (3, 2), (2, 3), (3, 3)] {
+        let provider = Arc::new(U1FusionRule);
+        let lhs = space(&provider, codomain, domain);
+        let matrix = space(&provider, 1, 1);
+        let open = (0..codomain + domain).collect::<Vec<_>>();
+        let axes = || TensorContractSpec::new(&[0], &[1], OutputAxisOrder::from_axes(&open));
+        let dst = Space::contracted_multiplicity_free_ordered(
+            &lhs,
+            &matrix,
+            &[0],
+            &[1],
+            OutputAxisOrder::from_axes(&open),
+        )
+        .unwrap();
+        let store = Arc::new(RuntimeTreeTransformStore::new(
+            RuntimeTreeTransformStore::<f64>::DEFAULT_BYTE_BUDGET,
+        ));
+        let mut context = runtime_like_context(&store);
+        let allocations = warm_allocations(|| {
+            context
+                .compile_storage_contract_resolution(
+                    &dst,
+                    FusionOperand::direct(lhs.space()),
+                    FusionOperand::direct(matrix.space()),
+                    axes(),
+                )
+                .unwrap()
+        });
+        // What: the rank-independent DynamicTree compile (20 here: no core
+        // destination, the output transform is the identity) plus exactly one
+        // allocation per leg that changes side in a source transform. That
+        // one is `SectorLeg::dual` building the dual leg's sector data while
+        // the permuted HomSpace is formed; TensorKit's `dual(V)` shares the
+        // sector data instead, and removing it is its own leaf, not rank
+        // arithmetic this test could forbid.
+        let crossing_legs = (1 + domain) + 2;
+        assert_eq!(
+            allocations,
+            20 + crossing_legs,
+            "rank {}",
+            codomain + domain
+        );
+    }
+}

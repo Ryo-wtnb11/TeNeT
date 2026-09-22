@@ -564,11 +564,20 @@ pub(crate) fn compile_derived_core_plan<R>(
     dst: &DynamicFusionMapSpace,
     lhs: &DynamicFusionMapSpace,
     rhs: &DynamicFusionMapSpace,
+    core_axes: TensorContractSpec<'_>,
 ) -> Result<Arc<FusionBlockContractPlan<R::Scalar>>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: DenseBlockScalar,
 {
+    // Debug builds re-check the construction argument above, so an internal
+    // inconsistency (a wrong space-cache entry, diverging HomSpace
+    // derivations) still fails loudly in tests instead of reaching the block
+    // plan.
+    #[cfg(debug_assertions)]
+    super::fusion_block::debug_assert_core_geometry(rule, dst, lhs, rhs, core_axes);
+    #[cfg(not(debug_assertions))]
+    let _ = core_axes;
     compile_fusion_block_contract_plan_core_geometry(rule, dst, lhs, rhs).map(Arc::new)
 }
 

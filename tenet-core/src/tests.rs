@@ -9021,6 +9021,236 @@ mod tests {
         }
     }
 
+    /// U(1) with a deliberately broken dual: charges in `collide` all map
+    /// to the dual of the first of them (not injective), and `fail` has no
+    /// representable dual. Everything else is U(1).
+    #[derive(Clone)]
+    struct FaultyDualRule {
+        collide: Vec<SectorId>,
+        fail: Option<SectorId>,
+    }
+
+    impl FaultyDualRule {
+        fn mapped(&self, sector: SectorId) -> Result<SectorId, FusionAlgebraError> {
+            if Some(sector) == self.fail {
+                return Err(FusionAlgebraError::InvalidSector { sector });
+            }
+            let sector = if self.collide.contains(&sector) {
+                self.collide[0]
+            } else {
+                sector
+            };
+            U1FusionRule.try_dual_sector(sector)
+        }
+    }
+
+    impl FusionRule for FaultyDualRule {
+        fn rule_identity(&self) -> RuleIdentity {
+            RuleIdentity::of_type::<Self>()
+        }
+
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Unique
+        }
+
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::Bosonic
+        }
+
+        fn vacuum(&self) -> SectorId {
+            U1FusionRule.vacuum()
+        }
+
+        fn dual(&self, sector: SectorId) -> SectorId {
+            self.mapped(sector).unwrap()
+        }
+
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+            U1FusionRule.fusion_channels(left, right)
+        }
+    }
+
+    impl CheckedFusionAlgebra for FaultyDualRule {
+        fn try_dual_sector(&self, sector: SectorId) -> Result<SectorId, FusionAlgebraError> {
+            self.mapped(sector)
+        }
+
+        fn try_fusion_channels(
+            &self,
+            left: SectorId,
+            right: SectorId,
+        ) -> Result<SectorVec, FusionAlgebraError> {
+            U1FusionRule.try_fusion_channels(left, right)
+        }
+
+        fn try_nsymbol(
+            &self,
+            left: SectorId,
+            right: SectorId,
+            coupled: SectorId,
+        ) -> Result<usize, FusionAlgebraError> {
+            U1FusionRule.try_nsymbol(left, right, coupled)
+        }
+    }
+
+    /// `A(v ← w)` contracted with `B(w ← x)` over `w`, output `(x ← v)`:
+    /// both open legs change side, so the matcher sees two dualized views.
+    fn crossing_contraction(v: SectorLeg, x: SectorLeg) -> (FusionTreeHomSpace, FusionTreeHomSpace) {
+        let w = || SectorLeg::new([(u1(0), 2)], false);
+        (
+            FusionTreeHomSpace::new(
+                FusionProductSpace::new([v]),
+                FusionProductSpace::new([w()]),
+            ),
+            FusionTreeHomSpace::new(
+                FusionProductSpace::new([w()]),
+                FusionProductSpace::new([x]),
+            ),
+        )
+    }
+
+    /// The matcher's answer and the build path's answer for `expected`, both
+    /// unchecked and checked, plus whether the matcher materialized.
+    fn match_against_build<R: CheckedFusionAlgebra>(
+        rule: &R,
+        lhs: &FusionTreeHomSpace,
+        rhs: &FusionTreeHomSpace,
+        expected: &FusionTreeHomSpace,
+    ) -> (
+        Result<bool, CheckedFusionSpaceError>,
+        Result<bool, CheckedFusionSpaceError>,
+        usize,
+    ) {
+        let args = (&[1usize][..], &[0usize][..], &[1usize, 0][..], 1usize);
+        let built = FusionTreeHomSpace::try_tensorcontract_homspace_checked(
+            rule, lhs, rhs, args.0, args.1, args.2, args.3,
+        )
+        .map(|built| built == *expected);
+        let before = DESCRIPTOR_MATERIALIZATIONS.get();
+        let matched = FusionTreeHomSpace::try_tensorcontract_homspace_matches_checked(
+            rule, lhs, rhs, args.0, args.1, args.2, args.3, expected,
+        );
+        let materialized = DESCRIPTOR_MATERIALIZATIONS.get() - before;
+        (matched, built, materialized)
+    }
+
+    #[test]
+    fn homspace_matcher_falls_back_to_the_build_answer_on_every_unproven_leg() {
+        let rule = U1FusionRule;
+        let leg = |charges: std::ops::Range<i32>, dual| {
+            SectorLeg::new(charges.map(|charge| (u1(charge), (charge.unsigned_abs() % 3) as usize + 1)), dual)
+        };
+        let build = |lhs: &FusionTreeHomSpace, rhs: &FusionTreeHomSpace| {
+            FusionTreeHomSpace::tensorcontract_homspace(&rule, lhs, rhs, &[1], &[0], &[1, 0], 1)
+                .unwrap()
+        };
+        let unchecked = |lhs: &FusionTreeHomSpace,
+                         rhs: &FusionTreeHomSpace,
+                         expected: &FusionTreeHomSpace| {
+            FusionTreeHomSpace::tensorcontract_homspace_matches(
+                &rule,
+                lhs,
+                rhs,
+                &[1],
+                &[0],
+                &[1, 0],
+                1,
+                expected,
+            )
+            .unwrap()
+        };
+
+        // What: 64 sectors on a dualized leg are proven without building;
+        // 65 exceed the injectivity mask and fall back, with the same answer.
+        for (sectors, materializations) in [(64, 0), (65, 1)] {
+            let (lhs, rhs) = crossing_contraction(leg(0..3, false), leg(-32..sectors - 32, false));
+            let expected = build(&lhs, &rhs);
+            let (matched, built, materialized) = match_against_build(&rule, &lhs, &rhs, &expected);
+            assert_eq!((matched, built), (Ok(true), Ok(true)), "{sectors} sectors");
+            assert_eq!(materialized, materializations, "{sectors} sectors");
+            assert!(unchecked(&lhs, &rhs, &expected));
+        }
+
+        // What: a degeneracy mismatch and a sector mismatch on a dualized
+        // leg are rejected, after the same fallback build.
+        let (lhs, rhs) = crossing_contraction(leg(0..3, false), leg(-2..3, false));
+        let expected = build(&lhs, &rhs);
+        let replaced = |edit: fn(&mut [(SectorId, usize)])| {
+            let x = &expected.codomain().legs()[0];
+            FusionTreeHomSpace::new(
+                FusionProductSpace::new([SectorLeg::new(
+                    {
+                        let mut pairs = x.iter().collect::<Vec<_>>();
+                        edit(&mut pairs);
+                        pairs
+                    },
+                    x.is_dual(),
+                )]),
+                expected.domain().clone(),
+            )
+        };
+        let degeneracy = replaced(|pairs| pairs[1].1 += 1);
+        let sector = replaced(|pairs| pairs[4].0 = u1(7));
+        for wrong in [&degeneracy, &sector] {
+            let (matched, built, materialized) = match_against_build(&rule, &lhs, &rhs, wrong);
+            assert_eq!((matched, built), (Ok(false), Ok(false)));
+            assert_eq!(materialized, 1);
+            assert!(!unchecked(&lhs, &rhs, wrong));
+        }
+
+        // What: a dual that is not injective on one leg is never taken as
+        // proof: the checked matcher reports the build's DualNotInjective,
+        // and the unchecked one panics exactly where the build panics.
+        let collide = FaultyDualRule {
+            collide: vec![u1(1), u1(2)],
+            fail: None,
+        };
+        let (lhs, rhs) = crossing_contraction(leg(0..1, false), leg(0..4, false));
+        let candidate = FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new(
+                [(u1(0), 1), (u1(-1), 2), (u1(-3), 1)],
+                true,
+            )]),
+            FusionProductSpace::new([SectorLeg::new([(u1(0), 1)], true)]),
+        );
+        let (matched, built, _) = match_against_build(&collide, &lhs, &rhs, &candidate);
+        assert!(matches!(
+            built,
+            Err(CheckedFusionSpaceError::FusionAlgebra(ref error))
+                if matches!(**error, FusionAlgebraError::DualNotInjective { .. })
+        ));
+        assert_eq!(matched, built);
+        let panics = |run: &dyn Fn()| {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)).is_err()
+        };
+        assert!(panics(&|| {
+            let _ = FusionTreeHomSpace::tensorcontract_homspace(
+                &collide, &lhs, &rhs, &[1], &[0], &[1, 0], 1,
+            );
+        }));
+        assert!(panics(&|| {
+            let _ = FusionTreeHomSpace::tensorcontract_homspace_matches(
+                &collide, &lhs, &rhs, &[1], &[0], &[1, 0], 1, &candidate,
+            );
+        }));
+
+        // What: a dual error is the build path's first error, whether the
+        // matcher meets it before or after an unproven leg.
+        for fail in [u1(0), u1(1), u1(3)] {
+            let failing = FaultyDualRule {
+                collide: Vec::new(),
+                fail: Some(fail),
+            };
+            let (lhs, rhs) = crossing_contraction(leg(0..2, false), leg(0..4, false));
+            let proven = build(&lhs, &rhs);
+            for expected in [&proven, &degeneracy] {
+                let (matched, built, _) = match_against_build(&failing, &lhs, &rhs, expected);
+                assert!(built.is_err(), "{fail:?}");
+                assert_eq!(matched, built, "{fail:?}");
+            }
+        }
+    }
+
     fn assert_oriented_validation_dual_calls_are_linear<R>(
         rule: &DualCountingRule<R>,
         sectors: impl IntoIterator<Item = (SectorId, usize)>,

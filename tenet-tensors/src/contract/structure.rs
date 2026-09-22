@@ -660,6 +660,11 @@ pub(super) fn reset_tensor_contract_axis_plan_compiles() {
 }
 
 #[cfg(test)]
+pub(super) fn set_tensor_contract_axis_plan_compiles(count: usize) {
+    TENSOR_CONTRACT_AXIS_PLAN_COMPILES.set(count);
+}
+
+#[cfg(test)]
 pub(super) fn tensor_contract_axis_plan_compiles() -> usize {
     TENSOR_CONTRACT_AXIS_PLAN_COMPILES.get()
 }
