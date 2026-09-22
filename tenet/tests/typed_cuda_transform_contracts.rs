@@ -67,7 +67,7 @@ fn delta<T>(body: impl FnOnce() -> T) -> (T, CudaTransferStats) {
 
 #[test]
 #[ignore = "requires a real CUDA device"]
-fn a_warm_device_transform_uploads_only_its_output_and_downloads_nothing() {
+fn a_warm_device_transform_transfers_nothing() {
     let runtime = Runtime::builder().cuda(0).build().unwrap();
     let device = fixture(&runtime).to_cuda().unwrap();
     // Sized on the Host, so the device's first call below really is its cold
@@ -75,13 +75,14 @@ fn a_warm_device_transform_uploads_only_its_output_and_downloads_nothing() {
     let output_bytes =
         std::mem::size_of_val(fixture(&runtime).permute(&[2, 0], &[1, 3]).unwrap().data()) as u64;
 
-    // Cold: the output plus exactly one coefficient payload for the structure
-    // — a Single-block permute needs no pack/scatter workspace, so those two
-    // uploads are the whole of it.
+    // Cold: the device-zeroed output plus exactly one uploaded coefficient
+    // payload for the structure — a Single-block permute needs no pack/scatter
+    // workspace, so those two allocations and one upload are the whole of it
+    // (before #740 the output was a second upload).
     let cold_stats_before = runtime.cuda_tree_transform_stats().unwrap();
     let (_, cold) = delta(|| device.permute(&[2, 0], &[1, 3]).unwrap());
     let cold_stats_after = runtime.cuda_tree_transform_stats().unwrap();
-    assert_eq!(cold.h2d_calls, 2, "{cold:?}");
+    assert_eq!(cold.h2d_calls, 1, "{cold:?}");
     assert_eq!(cold.device_allocs, 2, "{cold:?}");
     assert_eq!(cold_stats_after.workspace_bytes, 0, "{cold_stats_after:?}");
     assert_eq!(cold.d2h_calls, 0, "no device transform downloads: {cold:?}");
@@ -91,11 +92,12 @@ fn a_warm_device_transform_uploads_only_its_output_and_downloads_nothing() {
         "exactly one device entry is prepared per structure"
     );
 
-    // Warm: exactly one H2D of the output bytes, one device allocation, no
-    // download. This is the #740 constant and nothing else.
+    // Warm: one device-zeroed allocation and no transfer; before #740 this
+    // was one H2D of `output_bytes`.
     let (_, warm) = delta(|| device.permute(&[2, 0], &[1, 3]).unwrap());
-    assert_eq!(warm.h2d_calls, 1, "{warm:?}");
-    assert_eq!(warm.h2d_bytes, output_bytes, "{warm:?}");
+    assert!(output_bytes > 0);
+    assert_eq!(warm.h2d_calls, 0, "{warm:?}");
+    assert_eq!(warm.h2d_bytes, 0, "{warm:?}");
     assert_eq!(warm.d2h_calls, 0, "{warm:?}");
     assert_eq!(warm.d2h_bytes, 0, "{warm:?}");
     assert_eq!(warm.device_allocs, 1, "{warm:?}");
@@ -276,8 +278,8 @@ fn a_cold_device_transform_uploads_one_coefficient_payload_per_structure() {
     let (_, cold) = delta(|| device.permute(&[1, 2], &[3, 0]).unwrap());
     let after = runtime.cuda_tree_transform_stats().unwrap();
     assert!(
-        cold.h2d_calls >= 2,
-        "a cold recoupling replay uploads the output and its coefficient payload: {cold:?}"
+        cold.h2d_calls >= 1,
+        "a cold recoupling replay uploads its coefficient payload: {cold:?}"
     );
     assert_eq!(cold.d2h_calls, 0, "{cold:?}");
     assert_eq!(after.prepared_structures, before.prepared_structures + 1);
@@ -287,11 +289,12 @@ fn a_cold_device_transform_uploads_one_coefficient_payload_per_structure() {
     );
     assert!(after.workspace_bytes > 0, "{after:?}");
 
-    // Warm: the #740 output initialisation and nothing else. No second payload,
-    // no workspace growth.
+    // Warm: one device-zeroed output and no transfer (before #740, one H2D of
+    // `output_bytes`). No second payload, no workspace growth.
     let (_, warm) = delta(|| device.permute(&[1, 2], &[3, 0]).unwrap());
-    assert_eq!(warm.h2d_calls, 1, "{warm:?}");
-    assert_eq!(warm.h2d_bytes, output_bytes, "{warm:?}");
+    assert!(output_bytes > 0);
+    assert_eq!(warm.h2d_calls, 0, "{warm:?}");
+    assert_eq!(warm.h2d_bytes, 0, "{warm:?}");
     assert_eq!(warm.d2h_calls, 0, "{warm:?}");
     assert_eq!(warm.device_allocs, 1, "{warm:?}");
     assert_eq!(runtime.cuda_tree_transform_stats().unwrap(), after);
@@ -356,7 +359,7 @@ fn a_warm_device_overwrite_into_transfers_nothing_and_allocates_nothing() {
     let cold = runtime.cuda_tree_transform_stats().unwrap();
 
     // Warm: the destination is the caller's, so unlike the returning
-    // `permute` there is no #740 output initialisation left to pay.
+    // `permute` there is no output allocation left to pay.
     let (_, warm) = delta(|| {
         source
             .permute_overwrite_into(&mut destination, &[2, 0], &[1, 3], -2.5)
@@ -376,18 +379,16 @@ fn a_warm_device_overwrite_into_transfers_nothing_and_allocates_nothing() {
     // A zero caller scale takes the zero-operand route. Its 1x1 operand is
     // element 0 of the context's zero template, so the *first* zero-scale
     // replay on a context whose template is shorter than one element sizes it
-    // — one 8-byte upload and one device allocation, once per context, not per
-    // call. Warm, it transfers nothing like any other scale.
+    // — one device-zeroed allocation (no upload since #740), once per context,
+    // not per call. Warm, it transfers nothing like any other scale.
     let (_, first_zero) = delta(|| {
         source
             .permute_overwrite_into(&mut destination, &[2, 0], &[1, 3], 0.0)
             .unwrap()
     });
     assert!(
-        first_zero.h2d_calls <= 1
-            && first_zero.h2d_bytes <= std::mem::size_of::<f64>() as u64
-            && first_zero.device_allocs <= 1,
-        "the zero template is one element uploaded once, not a buffer: {first_zero:?}"
+        first_zero.h2d_calls == 0 && first_zero.device_allocs <= 1,
+        "the zero template is one element zeroed on the device once: {first_zero:?}"
     );
     let (_, zero) = delta(|| {
         source
@@ -732,7 +733,7 @@ fn fermionic_fixture(runtime: &Runtime) -> TensorMap<tenet::core::FermionParityF
 
 #[test]
 #[ignore = "requires a real CUDA device"]
-fn a_warm_device_twist_uploads_only_its_output_and_downloads_nothing() {
+fn a_warm_device_twist_transfers_nothing() {
     let runtime = Runtime::builder().cuda(0).build().unwrap();
     let host = fermionic_fixture(&runtime);
     let device = host.to_cuda().unwrap();
@@ -752,12 +753,14 @@ fn a_warm_device_twist_uploads_only_its_output_and_downloads_nothing() {
     assert_eq!(after.executor_bytes, before.executor_bytes, "{after:?}");
     assert_eq!(after.workspace_bytes, 0, "{after:?}");
 
-    // Warm: the #740 output initialisation and nothing else, with exactly one
-    // submission per block — no coefficient table is ever uploaded, because
-    // the twist factor rides the contraction descriptor's own scale.
+    // Warm: one device-zeroed output and no transfer (before #740, one H2D of
+    // `output_bytes`), with exactly one submission per block — no coefficient
+    // table is ever uploaded, because the twist factor rides the contraction
+    // descriptor's own scale.
     let (twisted, warm) = delta(|| device.twist(&[0, 3]).unwrap());
-    assert_eq!(warm.h2d_calls, 1, "{warm:?}");
-    assert_eq!(warm.h2d_bytes, output_bytes, "{warm:?}");
+    assert!(output_bytes > 0);
+    assert_eq!(warm.h2d_calls, 0, "{warm:?}");
+    assert_eq!(warm.h2d_bytes, 0, "{warm:?}");
     assert_eq!(warm.d2h_calls, 0, "{warm:?}");
     assert_eq!(warm.d2h_bytes, 0, "{warm:?}");
     assert_eq!(warm.device_allocs, 1, "{warm:?}");
@@ -812,7 +815,7 @@ fn device_twist_short_circuits_do_no_device_work() {
     // work rather than inventing a cheaper answer.
     let _ = fermionic.twist(&[0, 3]).unwrap();
     let (all_legs, counters) = delta(|| fermionic.twist(&[0, 1, 2, 3]).unwrap());
-    assert_eq!(counters.h2d_calls, 1, "{counters:?}");
+    assert_eq!(counters.h2d_calls, 0, "{counters:?}");
     assert_eq!(counters.device_allocs, 1, "{counters:?}");
     assert_eq!(
         counters.gemm_calls,

@@ -11459,10 +11459,10 @@ where
         let (left_data, middle_data, right_data) = {
             let mut lease = self.runtime.lease_cuda()?;
             let cuda = &mut *lease;
-            let mut left_data = CudaStorage::upload_owned(cuda, vec![D::ZERO; left_len])?;
+            let mut left_data = CudaStorage::<D>::zeros(cuda, left_len)?;
             #[cfg(test)]
             observe_cuda_svd_final_storage_creation();
-            let mut right_data = CudaStorage::upload_owned(cuda, vec![D::ZERO; right_len])?;
+            let mut right_data = CudaStorage::<D>::zeros(cuda, right_len)?;
             #[cfg(test)]
             observe_cuda_svd_final_storage_creation();
             let mut spectra = Vec::with_capacity(plan.routes.len());
@@ -11743,7 +11743,7 @@ where
             let mut lease = self.runtime.lease_cuda()?;
             let cuda = &mut *lease;
             let diagonal_data = CudaStorage::upload_owned(cuda, diagonal_host)?;
-            let mut vector_data = CudaStorage::upload_owned(cuda, vec![D::ZERO; vector_len])?;
+            let mut vector_data = CudaStorage::<D>::zeros(cuda, vector_len)?;
             #[cfg(test)]
             let mut assembly_ordinal = 0;
             for route in plan.routes.iter() {
@@ -11938,10 +11938,10 @@ where
         let (left_data, right_data) = {
             let mut lease = self.runtime.lease_cuda()?;
             let cuda = &mut *lease;
-            let mut left_data = CudaStorage::upload_owned(cuda, vec![D::ZERO; left_len])?;
+            let mut left_data = CudaStorage::<D>::zeros(cuda, left_len)?;
             #[cfg(test)]
             observe_cuda_qr_output_upload();
-            let mut right_data = CudaStorage::upload_owned(cuda, vec![D::ZERO; right_len])?;
+            let mut right_data = CudaStorage::<D>::zeros(cuda, right_len)?;
             #[cfg(test)]
             observe_cuda_qr_output_upload();
             for route in &plan.routes {
@@ -12020,16 +12020,14 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
     D: CudaPayload,
 {
-    /// Runs the compiled trace: the #740 output upload, then one accumulating
+    /// Runs the compiled trace: a device-zeroed output, then one accumulating
     /// contraction per term, under one device lease.
     pub fn execute(self) -> Result<TensorMap<R, D, CudaStorage<D>>, Error> {
         let required_len = self.space.space().required_len()?;
         let mut lease = self.runtime.lease_cuda()?;
         let (cuda, transforms) = lease.split();
-        // ponytail: #740 — the device seam initializes an output by uploading
-        // zeros; replace only with a measured native allocation. The zeros are
-        // also what the accumulating replay starts from.
-        let mut output = CudaStorage::upload_owned(cuda, vec![D::from_real(0.0); required_len])?;
+        // The zeros are also what the accumulating replay starts from.
+        let mut output = CudaStorage::<D>::zeros(cuda, required_len)?;
         tenet_tensors::tensortrace_fusion_structure_accumulate_on_cuda(
             cuda,
             transforms,
@@ -12139,8 +12137,8 @@ where
             Self::validate_cuda_owned_metadata(expected, rhs.placement(), required_len, rhs.len())?;
         }
 
-        // ponytail: #740 keeps these proven Host uploads until native device
-        // allocation publishes cross-stream writes correctly and wins a bench.
+        // The coefficients are host values and stay an upload; the output is
+        // zeroed on the device (#740).
         let coefficient_values = match rhs {
             Some((_, beta)) => vec![alpha, beta],
             None => vec![alpha],
@@ -12151,7 +12149,7 @@ where
         let coefficients = CudaStorage::upload_owned(cuda, coefficient_values)?;
         #[cfg(test)]
         observe_cuda_arithmetic(0, 1, 0);
-        let mut output = CudaStorage::upload_owned(cuda, vec![D::from_real(0.0); required_len])?;
+        let mut output = CudaStorage::<D>::zeros(cuda, required_len)?;
         #[cfg(test)]
         observe_cuda_arithmetic(1, 0, 0);
         if required_len != 0 {
@@ -12214,7 +12212,7 @@ where
             required_len,
             source.len(),
         )?;
-        let output = CudaStorage::upload_owned(cuda, vec![D::from_real(0.0); required_len])?;
+        let output = CudaStorage::<D>::zeros(cuda, required_len)?;
         #[cfg(test)]
         observe_cuda_arithmetic(1, 0, 0);
         Ok(output)
@@ -12412,10 +12410,7 @@ where
             lhs.placement(),
             rhs.placement(),
         )?;
-        // ponytail: #740 keeps the proven host-zero upload until a native
-        // allocation has correct cross-stream publication and measured value.
-        let mut partials =
-            CudaStorage::upload_owned(cuda, vec![E::from_real(0.0); regions.len().max(1)])?;
+        let mut partials = CudaStorage::<E>::zeros(cuda, regions.len().max(1))?;
         {
             let mut gemm = CudaStorageGemm::new(cuda);
             for (index, region) in regions.iter().enumerate() {
@@ -12623,13 +12618,12 @@ where
     ///
     /// # Cost
     ///
-    /// A warm call uploads nothing but the output initialisation (#740):
-    /// exactly one H2D of `required_len * size_of::<D>()` bytes, from one host
-    /// `Vec` of that size; its only device allocation is the returned output;
-    /// it downloads nothing. The first use of a transform structure uploads its
+    /// A warm call transfers nothing: the output is zeroed on the device (#740),
+    /// its only device allocation is the returned output, and it downloads
+    /// nothing. The first use of a transform structure uploads its
     /// coefficient payload once (as the device [`Self::permute`] does), and a
     /// new high-water mark of the operand or core-destination scratch costs one
-    /// zero upload of the new size per buffer; both then stay resident on the
+    /// device-zeroed allocation of the new size per buffer; both then stay resident on the
     /// Runtime (see [`crate::typed::Runtime::cuda_contract_scratch_bytes`]) until
     /// [`crate::typed::Runtime::clear_tree_transform_cache`]. Per call the
     /// device submits one region move per Single block / pack / scatter
@@ -12747,9 +12741,7 @@ where
 
         let mut lease = self.runtime.lease_cuda()?;
         let (cuda, transforms, scratch) = lease.split_contract();
-        // ponytail: #740 — the device seam initializes an output by uploading
-        // zeros; replace only with a measured native allocation.
-        let mut dst = CudaStorage::upload_owned(cuda, vec![D::from_real(0.0); required_len])?;
+        let mut dst = CudaStorage::<D>::zeros(cuda, required_len)?;
         tenet_tensors::execute_storage_contract_resolution_on_cuda(
             cuda,
             transforms,
@@ -13014,10 +13006,7 @@ where
         {
             return Err(Error::PlacementMismatch);
         }
-        let mut dst = CudaStorage::upload_owned(
-            cuda,
-            vec![D::from_real(0.0); dst_space.space().required_len()?],
-        )?;
+        let mut dst = CudaStorage::<D>::zeros(cuda, dst_space.space().required_len()?)?;
         tenet_tensors::tensorcompose_fusion_dyn_prelowered_direct_on_storage(
             &mut CudaStorageGemm::new(cuda),
             &dst_space,
@@ -13104,11 +13093,8 @@ where
         if src.placement() != Placement::Cuda(cuda.device()) {
             return Err(Error::PlacementMismatch);
         }
-        // ponytail: #740 — the device seam still initializes an output by
-        // uploading zeros; replace only with a measured native allocation.
-        //
         // Why not report an inexpressible destination layout before spending
-        // this upload: a returning transform cannot produce one. `dst_space`
+        // this allocation: a returning transform cannot produce one. `dst_space`
         // comes from `transformed_multiplicity_free`, i.e. the canonical
         // final-homspace layout, never from the source's strides, and block
         // strides are `usize`, so both arms of the executor's layout rejection
@@ -13117,7 +13103,7 @@ where
         // G2b-3 has no such argument — its destination is the caller's — so it
         // must validate before it writes, and must redo this reasoning if it
         // admits a non-canonical layout through `admit_exact_tree_pair_layout`.
-        let mut dst = CudaStorage::upload_owned(cuda, vec![D::from_real(0.0); required_len])?;
+        let mut dst = CudaStorage::<D>::zeros(cuda, required_len)?;
         executor.replay(
             cuda,
             &structure,
@@ -13163,16 +13149,14 @@ where
     ///
     /// # Cost
     ///
-    /// A warm call uploads no structure data and downloads nothing. Its only
-    /// transfer is the output initialisation (#740): exactly one H2D of
-    /// `required_len * size_of::<D>()` bytes, from one host `Vec` of that
-    /// size, and its only device allocation is the returned output. The first
+    /// A warm call uploads no structure data and downloads nothing: the output
+    /// is zeroed on the device (#740) and is its only device allocation. The first
     /// call for a given structure additionally uploads that structure's
     /// coefficient payload once and may grow the pack/scatter workspace once.
     ///
     /// On device the replay runs in overwrite mode, so it also zero-fills
     /// every *inactive* destination layout on the device — redundant work over
-    /// an output that was just uploaded as zeros, costing one submission and
+    /// an output that was just zeroed on the device, costing one submission and
     /// `Σ(inactive layout elements)` device writes per call. It is kept
     /// because it is what makes the executor's destination mode independent of
     /// what the destination held, which `*_overwrite_into` relies on; removing
@@ -13801,8 +13785,8 @@ where
     /// An infinite *complex* entry instead becomes NaN in both components,
     /// because the device always multiplies where Host copies a factor-1 block
     /// (the #1301 deviation, disclosed by `cuda_region_axpby`); `f64` and every
-    /// finite payload are exact. No θ table is uploaded. A warm call therefore transfers only the #740 output
-    /// initialisation — one H2D of the output bytes — downloads nothing,
+    /// finite payload are exact. No θ table is uploaded. A warm call therefore transfers nothing (the
+    /// output is zeroed on the device, #740), downloads nothing,
     /// allocates exactly one device buffer and submits one strided move per
     /// non-empty block. Residual: a whole-buffer bitwise device copy followed
     /// by in-place per-block scaling would submit fewer kernels, but Tenferro
@@ -13854,9 +13838,8 @@ where
     ///
     /// # Cost
     ///
-    /// A warm call transfers only the #740 output initialisation: one H2D of
-    /// `required_len * size_of::<D>()` bytes, one device allocation (the
-    /// output), no download and no new cuTENSOR plan while the trace's
+    /// A warm call transfers nothing: one device-zeroed allocation (the
+    /// output, #740), no download and no new cuTENSOR plan while the trace's
     /// distinct term signatures fit the plan-cache budget the transform
     /// executor raises the bound under (about 585 plans together with the
     /// prepared transforms; beyond it a warm call rebuilds plans). The first call whose
@@ -14041,9 +14024,7 @@ where
             required_len,
             src.len(),
         )?;
-        // ponytail: #740 — the device seam still initializes an output by
-        // uploading zeros; replace only with a measured native allocation.
-        let mut dst = CudaStorage::upload_owned(cuda, vec![D::from_real(0.0); required_len])?;
+        let mut dst = CudaStorage::<D>::zeros(cuda, required_len)?;
         for (region, factor) in &blocks {
             // A ribbon twist is never zero, so the factor rides the descriptor
             // scale: no coefficient buffer, and CUDA still has to read the

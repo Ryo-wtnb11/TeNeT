@@ -758,18 +758,14 @@ impl CudaTreeTransformExecutor {
             .checked_add(destination_len)
             .and_then(|len| len.checked_mul(core::mem::size_of::<D>()))
             .ok_or(OperationError::ElementCountOverflow)?;
-        // Growth costs one host↔device transfer of zeros per buffer, the same
-        // way every other device allocation in TeNeT is made (#740).
-        // `cubecl::Session::alloc_zero_output` was unusable here in Tenferro
-        // 0.5.0: broken for complex dtypes (tenferro-rs#1833) and unpublished
-        // for kernel-written outputs. 0.6.0 routes it through a dtype-agnostic
-        // `fill_zero_write`; adopting that is leaf M3. The values are irrelevant —
+        // Growth costs one device-zeroed allocation per buffer and no host
+        // transfer (`CudaDenseStorage::zeros`, #740). The values are irrelevant —
         // every column is fully written before it is read — and a warm replay
         // pays none of it.
-        let source = CudaDenseStorage::upload_owned::<D>(ctx, vec![D::ZERO; source_len])
-            .map_err(OperationError::Dense)?;
-        let destination = CudaDenseStorage::upload_owned::<D>(ctx, vec![D::ZERO; destination_len])
-            .map_err(OperationError::Dense)?;
+        let source =
+            CudaDenseStorage::zeros::<D>(ctx, source_len).map_err(OperationError::Dense)?;
+        let destination =
+            CudaDenseStorage::zeros::<D>(ctx, destination_len).map_err(OperationError::Dense)?;
         let grown = DeviceWorkspace {
             scalar,
             context,

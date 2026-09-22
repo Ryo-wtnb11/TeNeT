@@ -49,6 +49,14 @@ impl<D: CudaScalar> CudaStorage<D> {
             .map_err(OperationError::Dense)
     }
 
+    /// A fresh buffer of `len` exact zeros, zeroed on the device with no host
+    /// transfer; see [`CudaDenseStorage::zeros`].
+    pub fn zeros(ctx: &CudaDenseContext, len: usize) -> Result<Self, OperationError> {
+        CudaDenseStorage::zeros::<D>(ctx, len)
+            .map(|storage| Self(storage, PhantomData))
+            .map_err(OperationError::Dense)
+    }
+
     pub fn download(&self, ctx: &CudaDenseContext) -> Result<Vec<D>, OperationError> {
         self.0.download(ctx).map_err(OperationError::Dense)
     }

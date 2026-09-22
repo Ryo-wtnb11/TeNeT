@@ -664,8 +664,9 @@ fn warm_cuda_destination_reuse_matches_the_returning_chain_for_every_provider() 
 /// G3c-2 (#1276), G2c-1b (#1346): the warm device replay of an N-tensor chain
 /// performs no host-to-device traffic, no device allocation and no copy for
 /// its N-2 intermediate steps: every destination block of this chain has a
-/// GEMM, so a retained destination needs no reset at all. Only the final,
-/// returned output still uploads its zeros (#740/G3b).
+/// GEMM, so a retained destination needs no reset at all. The final, returned
+/// output is its one allocation, zeroed on the device without a transfer
+/// (#740; before it, that output was the chain's one H2D).
 ///
 /// The counters are process-wide, so this test must not run beside another
 /// device test; the device suite runs with `--test-threads=1`.
@@ -695,8 +696,8 @@ fn warm_cuda_chain_uploads_nothing_for_its_reused_destinations() {
     };
     // Call 1 has nothing retained yet, so every step returns.
     drop(run());
-    // Call 2 is the first to overwrite: nothing but the returned output's own
-    // zeros is uploaded, and nothing is reset.
+    // Call 2 is the first to overwrite: nothing is uploaded (the returned
+    // output is zeroed on the device), and nothing is reset.
     let before_second = cuda_transfer_stats();
     drop(run());
     let after_second = cuda_transfer_stats();
@@ -705,7 +706,7 @@ fn warm_cuda_chain_uploads_nothing_for_its_reused_destinations() {
             after_second.h2d_calls - before_second.h2d_calls,
             after_second.copy_calls - before_second.copy_calls,
         ),
-        (1, 0),
+        (0, 0),
         "overwriting a retained destination uploads and copies nothing"
     );
 
@@ -722,7 +723,7 @@ fn warm_cuda_chain_uploads_nothing_for_its_reused_destinations() {
             after.d2h_calls - before.d2h_calls,
             after.gemm_calls - before.gemm_calls,
         ),
-        (1, 1, 0, 0, 6),
+        (0, 1, 0, 0, 6),
         "(h2d, device_allocs, d2d_copies, d2h, gemm) for the warm 4-tensor chain"
     );
     drop(warm);
@@ -884,14 +885,17 @@ fn single_precision_device_chains_match_the_host_and_reuse_their_destinations() 
 }
 
 /// Leaf C2 (#1336): the warm single-precision chain costs the same device
-/// calls as the `f64` chain of the same fixture and moves half the bytes.
+/// calls as the `f64` chain of the same fixture. Its one former transfer, the
+/// returned output's zero upload, is gone since #740 (the output is zeroed on
+/// the device), so neither lane moves a byte; the element-size halving that
+/// transfer showed is no longer observable here.
 ///
 /// Relative, same-process comparison: both dtypes run the same fixture in this
 /// binary, so no absolute platform constant appears. The counters are
 /// process-wide, so this test needs `--test-threads=1`.
 #[test]
 #[ignore = "requires a real CUDA device"]
-fn a_warm_single_precision_chain_costs_the_same_calls_and_half_the_bytes() {
+fn a_warm_single_precision_chain_costs_the_same_calls_and_moves_no_bytes() {
     use tenet::dense::cuda_transfer_stats;
 
     let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
@@ -929,8 +933,7 @@ fn a_warm_single_precision_chain_costs_the_same_calls_and_half_the_bytes() {
         )
     }
 
-    // Both real and complex lanes: the complex twin is what shows the halving
-    // is the *element size*, not the real/complex split (#1341).
+    // Both real and complex lanes (#1341).
     for (name, single, double) in [
         (
             "f32/f64",
@@ -950,11 +953,10 @@ fn a_warm_single_precision_chain_costs_the_same_calls_and_half_the_bytes() {
             "{name}: (h2d_calls, d2h_calls, device_allocs, copy_calls, gemm_calls) must not \
              depend on the dtype"
         );
-        assert!(double.1 > 0, "{name}: vacuous byte count");
         assert_eq!(
-            single.1 * 2,
-            double.1,
-            "{name}: warm h2d bytes must be halved"
+            (single.1, double.1),
+            (0, 0),
+            "{name}: a warm chain uploads no bytes"
         );
     }
 }
@@ -1557,15 +1559,15 @@ fn device_state(runtime: &Runtime) -> DeviceState {
 
 /// G2c-3 (#1348) warm-cost contract: a warm general network — general axes,
 /// result and final permutations, reused intermediates, and for the fermion
-/// the dual-leg twist — transfers exactly the returned output's #740 zero
-/// upload (one H2D of its bytes) and allocates exactly that output, downloads
-/// nothing, misses and evicts no cuTENSOR plan, and grows no scratch and no
+/// the dual-leg twist — transfers nothing (its returned output is zeroed on
+/// the device since #740; before, it was one H2D of the output bytes) and
+/// allocates exactly that output, downloads nothing, misses and evicts no cuTENSOR plan, and grows no scratch and no
 /// executor state. Every intermediate step overwrites its retained buffer.
 ///
 /// The counters are process-wide: run with `--test-threads=1`.
 #[test]
 #[ignore = "requires a real CUDA device"]
-fn warm_general_cuda_networks_transfer_only_the_returned_output() {
+fn warm_general_cuda_networks_transfer_nothing() {
     fn warm<R, D>(runtime: &Runtime, spaces: [&GradedSpace<R>; 3], seed: u64, what: &str)
     where
         R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
@@ -1592,7 +1594,7 @@ fn warm_general_cuda_networks_transfer_only_the_returned_output() {
             let before = device_state(runtime);
             let output = run();
             let after = device_state(runtime);
-            let output_bytes = std::mem::size_of_val(output.to_host().unwrap().data()) as u64;
+            assert!(!output.to_host().unwrap().data().is_empty());
             let what = format!("{what} {name}");
             assert_eq!(
                 (
@@ -1601,7 +1603,7 @@ fn warm_general_cuda_networks_transfer_only_the_returned_output() {
                     after.transfers.d2h_calls - before.transfers.d2h_calls,
                     after.transfers.device_allocs - before.transfers.device_allocs,
                 ),
-                (1, output_bytes, 0, 1),
+                (0, 0, 0, 1),
                 "{what}: (h2d calls, h2d bytes, d2h calls, device allocations)"
             );
             assert_eq!(after.cutensor.misses, before.cutensor.misses, "{what}");
@@ -2048,17 +2050,18 @@ fn trace_prestep_cuda_networks_match_host_and_dense_oracles() {
     );
 }
 
-/// G2c-5 (#1350) warm-cost contract: a warm trace-bearing network transfers
-/// exactly one #740 zero upload per traced operand (its trace output, which is
-/// call-local like the Host's) plus, when the network has a contraction step,
-/// the returned output's; it allocates exactly those outputs, downloads
+/// G2c-5 (#1350) warm-cost contract: a warm trace-bearing network allocates
+/// exactly one device-zeroed output per traced operand (its trace output, which
+/// is call-local like the Host's) plus, when the network has a contraction
+/// step, the returned output, and transfers nothing (before #740 each of those
+/// outputs was one H2D of its bytes); it allocates exactly those outputs, downloads
 /// nothing, misses and evicts no cuTENSOR plan, and grows no scratch and no
 /// executor state. A network without a step returns its trace output itself.
 ///
 /// The counters are process-wide: run with `--test-threads=1`.
 #[test]
 #[ignore = "requires a real CUDA device"]
-fn warm_trace_prestep_transfers_only_the_trace_and_returned_outputs() {
+fn warm_trace_prestep_transfers_nothing() {
     fn bytes<R, D>(tensor: &TensorMap<R, D>) -> u64
     where
         D: tenet::typed::CudaPayload,
@@ -2120,12 +2123,8 @@ fn warm_trace_prestep_transfers_only_the_trace_and_returned_outputs() {
             let before = device_state(runtime);
             let output = run();
             let after = device_state(runtime);
-            let output_bytes = bytes(&output.to_host().unwrap());
-            let (calls, h2d_bytes) = if steps {
-                (traces + 1, trace_bytes + output_bytes)
-            } else {
-                (traces, trace_bytes)
-            };
+            assert!(bytes(&output.to_host().unwrap()) > 0 && trace_bytes > 0);
+            let allocs = if steps { traces + 1 } else { traces };
             let what = format!("{what} {name}");
             assert_eq!(
                 (
@@ -2134,7 +2133,7 @@ fn warm_trace_prestep_transfers_only_the_trace_and_returned_outputs() {
                     after.transfers.d2h_calls - before.transfers.d2h_calls,
                     after.transfers.device_allocs - before.transfers.device_allocs,
                 ),
-                (calls, h2d_bytes, 0, calls),
+                (0, 0, 0, allocs),
                 "{what}: (h2d calls, h2d bytes, d2h calls, device allocations)"
             );
             assert_eq!(after.cutensor.misses, before.cutensor.misses, "{what}");

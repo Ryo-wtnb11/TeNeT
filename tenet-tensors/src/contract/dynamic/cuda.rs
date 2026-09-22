@@ -37,7 +37,7 @@ use crate::{DenseBlockScalar, OperationError, RecouplingCoefficientAction};
 ///
 /// Each buffer is narrowed to exactly the length the replay admits
 /// (`set_active_len`) rather than reallocated, so alternating operand sizes
-/// pay one allocation — one zero upload, #740 — per high-water mark only.
+/// pay one device-zeroed allocation per high-water mark only.
 #[derive(Default)]
 pub struct CudaContractScratch {
     entries: Vec<ScratchEntry>,
@@ -144,10 +144,9 @@ fn grow<'a, D: CudaScalar>(
 ) -> Result<&'a mut CudaStorage<D>, OperationError> {
     let capacity = slot.as_ref().map(|buffer| buffer.0.capacity());
     if capacity.is_none_or(|capacity| capacity < len) {
-        // Growth costs one host-to-device transfer of zeros, the only way a
-        // device buffer is made (#740). The values are irrelevant: every
-        // element a replay reads is written first.
-        let grown = CudaStorage::<D>::upload_owned(ctx, vec![D::ZERO; len])?;
+        // Growth costs one device-zeroed allocation and no host transfer. The
+        // values are irrelevant: every element a replay reads is written first.
+        let grown = CudaStorage::<D>::zeros(ctx, len)?;
         let size = core::mem::size_of::<D>();
         *bytes = bytes
             .saturating_sub(capacity.unwrap_or(0).saturating_mul(size))
@@ -168,7 +167,7 @@ fn grow<'a, D: CudaScalar>(
 /// `dst`, overwriting it.
 ///
 /// `dst_is_zeroed` says whether the caller provides `dst` zero-filled (the
-/// returning path's fresh #740 output). When it does not (a retained
+/// returning path's fresh device-zeroed output). When it does not (a retained
 /// destination, `contract_overwrite_into`), the blocks the core GEMMs write
 /// directly are completed by zeroing exactly the core plan's inactive blocks;
 /// an output transform in overwrite mode writes every element itself, so it

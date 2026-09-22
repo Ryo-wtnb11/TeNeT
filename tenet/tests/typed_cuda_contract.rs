@@ -248,7 +248,7 @@ fn lazy_adjoint_operands_match_the_host_at_every_dtype() {
 
 #[test]
 #[ignore = "requires a real CUDA device"]
-fn a_warm_general_contraction_uploads_only_its_output() {
+fn a_warm_general_contraction_transfers_nothing() {
     let runtime = Runtime::builder().cuda(0).build().unwrap();
     let case = u1_rank_five::<f64>(&runtime);
     let output_bytes = std::mem::size_of_val(case.host().data()) as u64;
@@ -259,19 +259,20 @@ fn a_warm_general_contraction_uploads_only_its_output() {
             .unwrap()
     };
 
-    // Cold: the output, the coefficient payloads and the scratch high-water
-    // zero uploads.
+    // Cold: only the coefficient payloads upload; the output and the scratch
+    // high-water buffers are zeroed on the device (#740).
     let (_, cold) = delta(call);
-    assert!(cold.h2d_calls > 1, "{cold:?}");
+    assert!(cold.h2d_calls > 0, "{cold:?}");
     assert_eq!(cold.d2h_calls, 0, "{cold:?}");
     let scratch = runtime.cuda_contract_scratch_bytes().unwrap();
     assert!(scratch > 0, "a transformed operand lives in the scratch");
     let transforms = runtime.cuda_tree_transform_stats().unwrap();
 
-    // Warm: exactly the #740 output initialisation.
+    // Warm: one device-zeroed allocation (the output) and no transfer at all;
+    // before #740 this was one H2D of `output_bytes`.
     let (_, warm) = delta(call);
-    assert_eq!(warm.h2d_calls, 1, "{warm:?}");
-    assert_eq!(warm.h2d_bytes, output_bytes, "{warm:?}");
+    assert_eq!(warm.h2d_calls, 0, "{warm:?}");
+    assert_eq!(warm.h2d_bytes, 0, "{warm:?}");
     assert_eq!(warm.d2h_calls, 0, "{warm:?}");
     assert_eq!(warm.d2h_bytes, 0, "{warm:?}");
     assert_eq!(warm.device_allocs, 1, "{warm:?}");
@@ -336,9 +337,10 @@ fn the_scratch_grows_only_at_a_high_water_mark_and_is_released_by_the_clear_path
             .unwrap()
     });
     // What: a smaller operand narrows the retained buffers instead of
-    // reallocating them — one allocation, the returned output.
+    // reallocating them — one allocation, the returned output, zeroed on the
+    // device without a transfer (#740).
     assert_eq!(counters.device_allocs, 1, "{counters:?}");
-    assert_eq!(counters.h2d_calls, 1, "{counters:?}");
+    assert_eq!(counters.h2d_calls, 0, "{counters:?}");
     assert_eq!(runtime.cuda_contract_scratch_bytes().unwrap(), high_water);
     assert_close(
         result.to_host().unwrap().data(),
@@ -444,9 +446,10 @@ fn fz2_loops_as_explicit_device_contracts_match_tensorkit() {
 
 #[test]
 #[ignore = "requires a real CUDA device"]
-fn a_warm_fermionic_contraction_uploads_only_its_output() {
+fn a_warm_fermionic_contraction_transfers_nothing() {
     // What: θ travels as descriptor scalars, so a warm twisted contraction
-    // costs exactly what an untwisted one does — the #740 output upload.
+    // costs exactly what an untwisted one does: one device-zeroed output and
+    // no transfer (#740).
     let runtime = Runtime::builder().cuda(0).build().unwrap();
     let case: Case<_, f64> = fermionic_general(&runtime, &fermion_su2(), true, "fZ2xSU2", 51);
     let output_bytes = std::mem::size_of_val(case.host().data()) as u64;
@@ -460,8 +463,8 @@ fn a_warm_fermionic_contraction_uploads_only_its_output() {
     let scratch = runtime.cuda_contract_scratch_bytes().unwrap();
     let transforms = runtime.cuda_tree_transform_stats().unwrap();
     let (result, warm) = delta(call);
-    assert_eq!(warm.h2d_calls, 1, "{warm:?}");
-    assert_eq!(warm.h2d_bytes, output_bytes, "{warm:?}");
+    assert_eq!(warm.h2d_calls, 0, "{warm:?}");
+    assert_eq!(warm.h2d_bytes, 0, "{warm:?}");
     assert_eq!(warm.d2h_calls, 0, "{warm:?}");
     assert_eq!(warm.device_allocs, 1, "{warm:?}");
     assert_eq!(runtime.cuda_contract_scratch_bytes().unwrap(), scratch);

@@ -9,7 +9,7 @@
 //! thread-B delay is swept across the late part of the call instead:
 //!
 //! 1. thread A uploads a tiny `T` through R2, then runs `compose` through R1
-//!    (zero upload binds `O`, then one GEMM per sector block writes it);
+//!    (the device zero fill binds `O`, then one GEMM per sector block writes it);
 //! 2. thread B, after the swept delay, reads `T` through R2; if that lands
 //!    between `O`'s bind and a later GEMM, B's stream records itself synced to
 //!    A's past `O`'s bind cursor (tensor4all/cubecl#16);
@@ -72,7 +72,7 @@ fn compose_time(runtime: &Runtime) -> Duration {
 }
 
 /// B's delay for `iter`: the window sits late in `compose` (after the zero
-/// upload), so the sweep covers its last 30%.
+/// fill), so the sweep covers its last 30%.
 fn delay(iter: usize, compose: Duration) -> Duration {
     compose.mul_f64(0.7 + 0.3 * iter as f64 / ITERS as f64)
 }

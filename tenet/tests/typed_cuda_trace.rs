@@ -223,7 +223,7 @@ fn repeated_destinations_accumulate_every_producer() {
 
 #[test]
 #[ignore = "requires a real CUDA device"]
-fn a_warm_trace_uploads_only_its_output() {
+fn a_warm_trace_transfers_nothing() {
     fn warm<R: DeviceRule>(runtime: &Runtime, case: &TraceCase<R, f64>) {
         let source = case.tensor.to_cuda().unwrap();
         let output_bytes = std::mem::size_of_val(case.host().data()) as u64;
@@ -238,8 +238,11 @@ fn a_warm_trace_uploads_only_its_output() {
         let plans = runtime.cuda_plan_cache_stats().unwrap().unwrap();
         let (_, warm) = delta(call);
         let after_plans = runtime.cuda_plan_cache_stats().unwrap().unwrap();
-        assert_eq!(warm.h2d_calls, 1, "{}: {warm:?}", case.name);
-        assert_eq!(warm.h2d_bytes, output_bytes, "{}: {warm:?}", case.name);
+        // The output is zeroed on the device (#740); before, this was one H2D
+        // of `output_bytes`.
+        assert!(output_bytes > 0, "{}: vacuous", case.name);
+        assert_eq!(warm.h2d_calls, 0, "{}: {warm:?}", case.name);
+        assert_eq!(warm.h2d_bytes, 0, "{}: {warm:?}", case.name);
         assert_eq!(warm.d2h_calls, 0, "{}: {warm:?}", case.name);
         assert_eq!(warm.device_allocs, 1, "{}: {warm:?}", case.name);
         assert!(warm.gemm_calls > 0, "{}: {warm:?}", case.name);

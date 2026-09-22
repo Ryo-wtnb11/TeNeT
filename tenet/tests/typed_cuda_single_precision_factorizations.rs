@@ -1086,12 +1086,12 @@ fn device_factorizations_cost_the_same_calls_and_half_the_bytes() {
 }
 
 /// Complex device QR does the real path's device work: the same calls,
-/// allocations, copies and GEMMs, no download, and exactly twice the uploaded
-/// bytes (a complex element is two real ones). Relative and same-process, so
+/// allocations, copies and GEMMs, no download and no upload (its outputs are
+/// zeroed on the device since #740; before, the uploaded bytes doubled). Relative and same-process, so
 /// no platform constant appears.
 #[test]
 #[ignore = "requires a real CUDA device"]
-fn complex_device_qr_costs_the_real_calls_and_twice_the_bytes() {
+fn complex_device_qr_costs_the_real_calls_and_uploads_nothing() {
     type Cost = (u64, u64, u64, u64, u64, u64, u64, u64);
 
     fn measure<D: FactorPayload>(runtime: &Runtime, leg: &GradedSpace<U1FusionRule>) -> Cost {
@@ -1137,7 +1137,14 @@ fn complex_device_qr_costs_the_real_calls_and_twice_the_bytes() {
              solver_calls) must not depend on the field"
         );
         assert_eq!(complex.2, 0, "{name}: device QR downloads nothing");
-        assert!(real.1 > 0 && real.7 > 0, "{name}: vacuous cost");
-        assert_eq!(complex.1, real.1 * 2, "{name}: h2d bytes must be doubled");
+        assert!(real.7 > 0, "{name}: vacuous cost");
+        // The QR outputs were its only uploads; since #740 they are zeroed on
+        // the device, so neither field uploads a byte (the doubling this
+        // pinned is no longer observable here).
+        assert_eq!(
+            (complex.1, real.1),
+            (0, 0),
+            "{name}: device QR uploads nothing"
+        );
     }
 }

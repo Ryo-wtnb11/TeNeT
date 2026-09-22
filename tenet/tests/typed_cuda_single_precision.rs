@@ -623,8 +623,9 @@ fn device_norm_and_normalize_match_the_host_where_a_payload_sum_would_overflow_o
 /// device schedule as its double-precision twin plus exactly one device
 /// allocation (the widened copy). Transferred bytes are *equal*, not halved,
 /// because the per-sector partials are downloaded in the wide lane. The
-/// double-precision schedule itself is pinned by hand: one partials upload,
-/// one download, one GEMM per nonempty coupled sector (three for `u1_leg`).
+/// double-precision schedule itself is pinned by hand: no upload (the
+/// partials are zeroed on the device since #740; before, they were one
+/// upload), one download, one GEMM per nonempty coupled sector (three for `u1_leg`).
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn a_warm_single_precision_norm_costs_one_extra_device_allocation() {
@@ -668,7 +669,7 @@ fn a_warm_single_precision_norm_costs_one_extra_device_allocation() {
         eprintln!("{what}: single {single:?} double {double:?}");
         assert_eq!(
             (double.0, double.2, double.4, double.5),
-            (1, 1, 1, 3),
+            (0, 1, 1, 3),
             "{what}: double-precision (h2d_calls, d2h_calls, device_allocs, gemm_calls)"
         );
         assert_eq!(
@@ -1078,8 +1079,8 @@ fn device_transforms_match_the_host_at_every_payload() {
 /// The warm `*_overwrite_into` contract of #1339 does not depend on the
 /// payload dtype: a warm replay over a caller-owned destination transfers
 /// nothing and allocates nothing at single precision too. The zero-scale route
-/// uploads at most one *element* of the payload's own zero template, once per
-/// context — half the bytes of the double-precision template, never a buffer.
+/// allocates at most one *element* of the payload's own zero template, once
+/// per context, zeroed on the device (#740) — never a buffer, never an upload.
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn a_warm_single_precision_overwrite_into_transfers_nothing() {
@@ -1134,9 +1135,9 @@ fn a_warm_single_precision_overwrite_into_transfers_nothing() {
             .unwrap();
         let after = cuda_transfer_stats();
         assert!(
-            after.h2d_calls - before.h2d_calls <= 1
-                && after.h2d_bytes - before.h2d_bytes <= std::mem::size_of::<D>() as u64,
-            "the zero template [{}] is one element, not a buffer",
+            after.h2d_calls - before.h2d_calls == 0
+                && after.device_allocs - before.device_allocs <= 1,
+            "the zero template [{}] is one element zeroed on the device",
             D::NAME
         );
 

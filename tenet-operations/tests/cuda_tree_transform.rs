@@ -1120,12 +1120,18 @@ fn alternating_recoupling_structures_upload_their_matrices_exactly_once_each() {
     // matrices are resident and the workspace is shared.
     assert_eq!(warm.h2d_calls, 0, "a switch re-uploaded: {warm:?}");
     assert_eq!(warm.device_allocs, 0, "a switch allocated: {warm:?}");
-    // The first round pays six: one coefficient-and-matrix vector per
-    // structure, the two workspace buffers the wider structure allocates and
-    // the narrower one reuses, the context's shared `1` that pack and scatter
-    // read as their coefficient, and the zero template the wider structure's
-    // inactive destination layout needs.
-    assert_eq!(cold.h2d_calls, 6, "cold uploads changed: {cold:?}");
+    // The first round allocates six buffers: one coefficient-and-matrix vector
+    // per structure, the two workspace buffers the wider structure allocates
+    // and the narrower one reuses, the context's shared `1` that pack and
+    // scatter read as their coefficient, and the zero template the wider
+    // structure's inactive destination layout needs. Only the two coefficient
+    // vectors and the `1` are host values; the workspace and the zero template
+    // are zeroed on the device (#740; before, all six were uploads).
+    assert_eq!(
+        (cold.h2d_calls, cold.device_allocs),
+        (3, 6),
+        "cold uploads changed: {cold:?}"
+    );
     for (index, (_, fixture)) in prepared.iter().enumerate() {
         let (dst, _) = &buffers[index];
         assert_close(

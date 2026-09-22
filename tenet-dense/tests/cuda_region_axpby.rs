@@ -602,42 +602,53 @@ fn the_context_zero_template_overwrites_exactly_its_region() {
 
 #[test]
 #[ignore = "requires a real CUDA device"]
-fn the_zero_template_is_uploaded_once_per_dtype_and_grows_monotonically() {
+fn the_zero_template_is_created_once_per_dtype_and_grows_monotonically() {
     let _serialized = COUNTER_TESTS.lock().unwrap_or_else(|err| err.into_inner());
     let mut ctx = context();
     let mut dst = upload::<f64>(&ctx, &[1.0f64; 64]);
+    // (uploads, device allocations) since the last reset. The zero template is
+    // zeroed on the device (#740), so it allocates without an upload; only the
+    // `1` operand is still a host value.
+    let costs = || {
+        let stats = cuda_transfer_stats();
+        (stats.h2d_calls, stats.device_allocs)
+    };
 
     // First fill of this dtype: the `1` operand and a 16-element template.
     reset_cuda_transfer_stats();
     cuda_region_zero::<f64>(&mut ctx, &mut dst, &region(&[4, 4], &[1, 4], 0)).expect("first");
     let first = cuda_transfer_stats();
-    assert_eq!(first.h2d_calls, 2, "ones plus the zero template");
+    assert_eq!(
+        (first.h2d_calls, first.device_allocs),
+        (1, 2),
+        "the uploaded ones plus the device-zeroed template"
+    );
     assert_eq!(first.d2h_calls, 0);
 
     // A shorter region is a prefix of the same template, and the `1` operand
-    // is already resident: no transfer at all.
+    // is already resident: no transfer and no allocation at all.
     reset_cuda_transfer_stats();
     cuda_region_zero::<f64>(&mut ctx, &mut dst, &region(&[2, 2], &[1, 8], 16)).expect("shorter");
-    assert_eq!(cuda_transfer_stats().h2d_calls, 0);
+    assert_eq!(costs(), (0, 0));
 
     // A longer region replaces the template exactly once.
     reset_cuda_transfer_stats();
     cuda_region_zero::<f64>(&mut ctx, &mut dst, &region(&[8, 4], &[1, 8], 32)).expect("longer");
-    assert_eq!(cuda_transfer_stats().h2d_calls, 1);
+    assert_eq!(costs(), (0, 1));
     reset_cuda_transfer_stats();
     cuda_region_zero::<f64>(&mut ctx, &mut dst, &region(&[8, 4], &[1, 8], 32)).expect("again");
-    assert_eq!(cuda_transfer_stats().h2d_calls, 0);
+    assert_eq!(costs(), (0, 0));
 
     // Every *other* dtype has its own pair, and taking one does not disturb
     // the others: the operands are payload-typed, so a slot shared between
     // `f32` and `f64` (or between the two complex dtypes) would hand the next
     // call a buffer of the wrong dtype. Each of the three remaining dtypes
-    // therefore pays its own two uploads, and the `f64` pair stays resident
-    // throughout.
+    // therefore pays its own upload and two allocations, and the `f64` pair
+    // stays resident throughout.
     let mut single_dst = upload::<f32>(&ctx, &[1.0f32; 64]);
     reset_cuda_transfer_stats();
     cuda_region_zero::<f32>(&mut ctx, &mut single_dst, &region(&[4, 4], &[1, 4], 0)).expect("f32");
-    assert_eq!(cuda_transfer_stats().h2d_calls, 2, "f32 owns its own pair");
+    assert_eq!(costs(), (1, 2), "f32 owns its own pair");
 
     let mut single_complex_dst = upload::<Complex32>(&ctx, &[Complex32::new(1.0, 1.0); 64]);
     reset_cuda_transfer_stats();
@@ -647,20 +658,16 @@ fn the_zero_template_is_uploaded_once_per_dtype_and_grows_monotonically() {
         &region(&[4, 4], &[1, 4], 0),
     )
     .expect("Complex32");
-    assert_eq!(
-        cuda_transfer_stats().h2d_calls,
-        2,
-        "Complex32 owns its own pair"
-    );
+    assert_eq!(costs(), (1, 2), "Complex32 owns its own pair");
 
     let mut complex_dst = upload::<Complex64>(&ctx, &[Complex64::new(1.0, 1.0); 64]);
     reset_cuda_transfer_stats();
     cuda_region_zero::<Complex64>(&mut ctx, &mut complex_dst, &region(&[4, 4], &[1, 4], 0))
         .expect("complex");
-    assert_eq!(cuda_transfer_stats().h2d_calls, 2);
+    assert_eq!(costs(), (1, 2));
     reset_cuda_transfer_stats();
     cuda_region_zero::<f64>(&mut ctx, &mut dst, &region(&[8, 4], &[1, 8], 32)).expect("f64 again");
-    assert_eq!(cuda_transfer_stats().h2d_calls, 0);
+    assert_eq!(costs(), (0, 0));
     reset_cuda_transfer_stats();
 
     // The pinned per-dtype byte accounting: each slot charges its own element
@@ -846,10 +853,10 @@ fn a_reserved_zero_template_makes_every_later_fill_transfer_free() {
             .expect("fill");
     }
     // Only the one-element `1` is still missing; the template is never
-    // re-uploaded, where ascending fills without the reservation would have
-    // paid one upload each.
+    // reallocated, where ascending fills without the reservation would have
+    // paid one allocation each.
     let stats = cuda_transfer_stats();
-    assert_eq!(stats.h2d_calls, 1, "{stats:?}");
+    assert_eq!((stats.h2d_calls, stats.device_allocs), (1, 1), "{stats:?}");
     assert_eq!(
         ctx.scalar_operand_bytes(),
         reserved + std::mem::size_of::<f64>()
@@ -861,7 +868,12 @@ fn a_reserved_zero_template_makes_every_later_fill_transfer_free() {
     reset_cuda_transfer_stats();
     cuda_region_zero::<f64>(&mut ctx, &mut dst, &region(&[2, 2], &[1, 8], 0))
         .expect("after release");
-    assert_eq!(cuda_transfer_stats().h2d_calls, 2);
+    let stats = cuda_transfer_stats();
+    assert_eq!(
+        (stats.h2d_calls, stats.device_allocs),
+        (1, 2),
+        "the uploaded ones and the device-zeroed template: {stats:?}"
+    );
     reset_cuda_transfer_stats();
 }
 
@@ -1153,7 +1165,7 @@ fn the_zero_coefficient_operand_multiplies_on_a_fresh_context() {
     // What: `CudaRegionCoefficient::Zero` is an exact zero *operand*, so the
     // source is still read and multiplied — a NaN survives it, where a
     // descriptor scale of zero (now rejected) would have erased it. The context
-    // is fresh, so this also executes the lazy one-element template upload and
+    // is fresh, so this also executes the lazy one-element template allocation and
     // proves the second call needs none.
     let _guard = COUNTER_TESTS.lock().unwrap();
     let mut ctx = context();
@@ -1184,8 +1196,8 @@ fn the_zero_coefficient_operand_multiplies_on_a_fresh_context() {
     assert_eq!(actual[1], 0.0, "0 * finite must be zero: {actual:?}");
     assert_eq!(actual[3], 0.0, "0 * finite must be zero: {actual:?}");
     assert!(
-        cold.h2d_calls > before.h2d_calls,
-        "a fresh context must create its scalar operands: {before:?} -> {cold:?}"
+        cold.device_allocs > before.device_allocs && cold.h2d_calls == before.h2d_calls,
+        "a fresh context must create its zero operand on the device: {before:?} -> {cold:?}"
     );
 
     // Warm: the one-element template is resident, so nothing crosses again.

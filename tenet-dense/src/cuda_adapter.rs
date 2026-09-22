@@ -6,7 +6,9 @@
 use std::num::NonZeroUsize;
 
 use num_complex::{Complex32, Complex64};
-use tenferro_gpu::cuda::{download_tensor, upload_tensor, CudaBackend, CudaDeviceId};
+use tenferro_gpu::cuda::{
+    download_tensor, upload_tensor, with_cuda_exec_session, CudaBackend, CudaDeviceId,
+};
 use tenferro_linalg::{QrGauge, QrOptions, TensorReadLinalgExt};
 use tenferro_tensor::backend::{BackendSession, BackendSessionHost};
 use tenferro_tensor::{
@@ -21,11 +23,28 @@ use crate::cuda_region::{validate_destination_layout, validate_region, CudaRegio
 use crate::tensor::dense_dtype_from_tenferro;
 
 mod cuda_scalar_sealed {
-    pub trait Sealed {}
-    impl Sealed for f32 {}
-    impl Sealed for f64 {}
-    impl Sealed for num_complex::Complex32 {}
-    impl Sealed for num_complex::Complex64 {}
+    use tenferro_gpu::cuda::cubecl::Session;
+    use tenferro_tensor::TypedTensor;
+
+    pub trait Sealed: Sized {
+        /// Tenferro's native zero constructor, which is bounded on CubeCL
+        /// element traits TeNeT cannot name; each concrete payload meets them.
+        fn alloc_zero(
+            session: &Session<'_>,
+            len: usize,
+        ) -> tenferro_tensor::Result<TypedTensor<Self>>;
+    }
+
+    macro_rules! sealed {
+        ($($ty:ty),*) => {$(
+            impl Sealed for $ty {
+                fn alloc_zero(session: &Session<'_>, len: usize) -> tenferro_tensor::Result<TypedTensor<Self>> {
+                    session.alloc_zero_output::<Self>(&[len])
+                }
+            }
+        )*};
+    }
+    sealed!(f32, f64, num_complex::Complex32, num_complex::Complex64);
 }
 
 /// Payload dtypes a TeNeT CUDA buffer may own.
@@ -233,7 +252,8 @@ pub struct CudaPlanCacheStats {
 ///   including the one-element scalar uploads and reduction/spectrum
 ///   downloads. Bytes are the host-side payload bytes.
 /// - `device_allocs`: device buffers this module creates or takes ownership
-///   of, i.e. uploads plus tenferro-produced tensors wrapped as
+///   of, i.e. uploads, device-zeroed buffers ([`CudaDenseStorage::zeros`],
+///   which transfer nothing) and tenferro-produced tensors wrapped as
 ///   [`CudaDenseStorage`] (factorization factors). Tenferro's own solver
 ///   workspaces and the intermediate tensors of `cuda_is_hermitian_region`
 ///   (`abs`, `div`, `sub`, the reductions) allocate on device but are not
@@ -513,8 +533,8 @@ impl CudaDenseContext {
         self.ensure_ones::<D>(len)
     }
 
-    /// Uploads this dtype's zero template unless a resident one already holds
-    /// at least `len` elements. A prefix of a compact zero buffer is itself a
+    /// Creates this dtype's zero template on the device (no upload) unless a
+    /// resident one already holds at least `len` elements. A prefix of a compact zero buffer is itself a
     /// compact zero buffer, so a longer template serves every shorter fill.
     fn ensure_zeros<D: CudaScalar>(&mut self, len: usize) -> Result<(), DenseError> {
         let usable = self
@@ -526,7 +546,7 @@ impl CudaDenseContext {
             // Drop the short template before allocating the longer one, so the
             // device holds one of them rather than both.
             self.operands_mut::<D>().zeros = None;
-            let zeros = CudaDenseStorage::upload_owned(self, vec![D::ZERO; len])?;
+            let zeros = CudaDenseStorage::zeros::<D>(self, len)?;
             let slot = self.operands_mut::<D>();
             slot.element_bytes = std::mem::size_of::<D>();
             slot.zeros = Some(zeros);
@@ -537,7 +557,7 @@ impl CudaDenseContext {
     /// Sizes this dtype's zero template for `len` elements up front.
     ///
     /// [`cuda_region_zero`] grows the template to the fill it is given, so a
-    /// caller that visits `k` regions in ascending size pays `k` uploads for
+    /// caller that visits `k` regions in ascending size pays `k` allocations for
     /// what is one buffer. A caller that knows its largest region — a device
     /// transform knows the largest inactive destination layout of its
     /// structure on the host, before any replay — reserves once here and pays
@@ -545,8 +565,9 @@ impl CudaDenseContext {
     ///
     /// The bytes it pins stay resident until [`Self::release_scalar_operands`]
     /// or the context is dropped, and are reported by
-    /// [`Self::scalar_operand_bytes`]. It is the only device zero source;
-    /// tenferro-rs#1834's native device fill would remove it.
+    /// [`Self::scalar_operand_bytes`]. It remains the zero *source* operand of
+    /// region moves (see [`cuda_region_zero`] for why a fill does not replace
+    /// it).
     pub fn reserve_zero_template<D: CudaScalar>(&mut self, len: usize) -> Result<(), DenseError> {
         if len == 0 {
             return Ok(());
@@ -766,6 +787,43 @@ impl CudaDenseStorage {
         })
     }
 
+    /// A fresh flat device buffer of `len` exact `+0.0` elements, zeroed on
+    /// the device: one allocation, no host buffer and no host-to-device copy.
+    ///
+    /// Tenferro binds the allocation, flushes CubeCL's queue and enqueues one
+    /// `cuMemsetD8Async` on the runtime stream (tenferro-gpu 0.6.0
+    /// `cubecl/interop.rs` `alloc_zero_output` / `fill_zero_span`). That is
+    /// ordered before every later use of the buffer only because TeNeT runs
+    /// all CubeCL and vendor work of a device on one stream
+    /// (`single_cubecl_stream`): the memset writes after the bind, which
+    /// CubeCL's cursor does not publish (tensor4all/cubecl#16).
+    ///
+    /// Why not Tenferro's fill kernel (`fill_zero_write` on a strided view):
+    /// a CubeCL kernel still queued unflushed can reach the stream after a
+    /// vendor call that skips `get_resource` (tensor4all/tenferro-rs#1868);
+    /// the memset is enqueued after a flush and is not exposed.
+    pub fn zeros<D: CudaScalar>(ctx: &CudaDenseContext, len: usize) -> Result<Self, DenseError> {
+        const OP: &str = "cuda_zeros";
+        // `with_backend_session` needs `&mut`; the backend is an `Arc` handle,
+        // so a clone keeps this `&ctx` like `upload_owned`.
+        let mut backend = ctx.backend.clone();
+        let typed = backend
+            .with_backend_session(|session| {
+                with_cuda_exec_session(session, |exec| {
+                    exec.with_cubecl(OP, |cubecl| D::alloc_zero(cubecl, len))
+                })
+            })
+            .ok_or_else(|| cuda_error(OP, "backend session is not a CUDA execution session"))?
+            .map_err(|err| cuda_error(OP, err))?;
+        DEVICE_ALLOCS.fetch_add(1, Ordering::Relaxed);
+        Ok(Self {
+            tensor: Tensor::from_typed(typed),
+            dtype: D::DTYPE,
+            len,
+            device: ctx.device,
+        })
+    }
+
     /// Downloads the flat device buffer back to host data.
     ///
     /// The returned vector is the one Tenferro's download produced: the host
@@ -820,7 +878,7 @@ impl CudaDenseStorage {
     ///
     /// Why: a grow-only device scratch reused across operands of different
     /// sizes must present exactly the length each consumer admits without a
-    /// reallocation (and without the zero upload a reallocation costs, #740).
+    /// reallocation (and without the device zero fill a reallocation costs).
     /// Only the bound narrows; the allocation and its contents are unchanged.
     #[doc(hidden)]
     pub fn set_active_len(&mut self, len: usize) -> Result<(), DenseError> {
@@ -1297,8 +1355,8 @@ fn submit_region_axpby<D: CudaScalar>(
 /// nothing across the host boundary, ever. A call with
 /// [`CudaRegionCoefficient::One`] uploads this context's one-element `1` the
 /// first time that dtype is used, and a call with
-/// [`CudaRegionCoefficient::Zero`] its one-element zero template, and nothing
-/// afterwards (see [`CudaDenseContext::scalar_operand_bytes`] and
+/// [`CudaRegionCoefficient::Zero`] allocates its one-element zero template on
+/// the device (no host transfer), and nothing afterwards (see [`CudaDenseContext::scalar_operand_bytes`] and
 /// [`CudaDenseContext::reserve_zero_template`]).
 ///
 /// The structural coefficient is a data operand and never the descriptor
@@ -1478,12 +1536,20 @@ pub enum CudaRegionCoefficient<'a> {
 /// including a NaN. It is a region move, not a fill kernel, so it inherits
 /// exactly the validation of [`cuda_region_axpby`].
 ///
-/// Transfer contract: it uploads the context's `1` and its zero template on
-/// first use of a dtype, and re-uploads the template whenever a fill is longer
-/// than the resident one. Size the template once with
+/// Transfer contract: it uploads the context's `1` on first use of a dtype.
+/// The zero template is zeroed on the device ([`CudaDenseStorage::zeros`]),
+/// never uploaded, and is reallocated whenever a fill is longer than the
+/// resident one. Size it once with
 /// [`CudaDenseContext::reserve_zero_template`] to make every later fill of a
-/// replay transfer-free; otherwise a sequence of ascending fills pays one
-/// upload each.
+/// replay allocation-free; otherwise a sequence of ascending fills pays one
+/// allocation each.
+///
+/// Why not Tenferro's `fill_zero_write` on the region: a strided region runs
+/// its CubeCL fill kernel, which a later vendor call on the same buffer can
+/// overtake (tensor4all/tenferro-rs#1868), so the template stays as a source
+/// operand for those; and a compact region's memset costs several blocking
+/// CubeCL round trips (session flushes, `get_resource`) where this move is one
+/// enqueued cuTENSOR call, a constant-factor trade not yet measured.
 pub fn cuda_region_zero<D: CudaScalar>(
     ctx: &mut CudaDenseContext,
     dst: &mut CudaDenseStorage,
