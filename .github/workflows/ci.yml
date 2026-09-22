@@ -153,6 +153,7 @@ jobs:
           # to the integration tests the issue names, not lib unit tests or
           # doctests, which the regression step below already covers.
           - { name: racah-generated-rs, package: tenet-rs, features: "racah-generated,cpu-faer", extra_args: "--tests" }
+          - { name: racah-generated-network, package: tenet-network, features: "racah-generated,cpu-faer", extra_args: "--test checked_generic_network" }
     steps:
       - uses: actions/checkout@v4
         with:
