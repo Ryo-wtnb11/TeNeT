@@ -19,6 +19,7 @@ use super::fusion::{
     external_axis_is_dual, rhs_contract_twist_factor_oriented, FusionContractPlan,
 };
 use super::fusion_block::{
+    compile_fusion_block_contract_plan_core_geometry,
     compile_fusion_block_contract_plan_prelowered_validated,
     compile_fusion_block_contract_plan_validated, try_compile_oriented_canonical_core_plan,
     try_compile_scaled_canonical_core_plan, CoreContractPreflight, ValidatedCoreContract,
@@ -51,16 +52,17 @@ pub(crate) enum Resolution<C = f64> {
 #[derive(Clone, Debug)]
 pub struct StorageContractResolution<C = f64> {
     pub(crate) route: StorageContractRoute<C>,
-    /// The core plan's inactive destination blocks as device regions, built
-    /// with the route so the device replay converts no layout and a
-    /// negatively strided inactive block is rejected at compile, before the
-    /// device lease. The resolution is compiled on every call, so this moves
-    /// the region list's allocations to compile time — it adds them to a
-    /// returning contraction that never zeroes — rather than removing them;
-    /// reusing the compiled resolution is the follow-up that removes them. Zeroed only where the destination is
-    /// not already zero (see `execute_storage_contract_resolution_on_cuda`).
+}
+
+impl<C: DenseBlockScalar> StorageContractRoute<C> {
+    /// The core plan whose GEMMs this route runs.
     #[cfg(feature = "cuda")]
-    pub(crate) core_zero_regions: Box<[tenet_dense::CudaRegion]>,
+    pub(crate) fn block_plan(&self) -> &FusionBlockContractPlan<C> {
+        match self {
+            Self::Core(plan) => plan,
+            Self::DynamicTree(artifact) => artifact.block_plan(),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -75,17 +77,13 @@ pub(crate) enum StorageContractRoute<C> {
 }
 
 impl<C: DenseBlockScalar> StorageContractResolution<C> {
+    /// A negatively strided inactive core block is rejected here, before the
+    /// device lease; the device replay converts the plan's inactive blocks
+    /// into its lease scratch only when it has to zero them.
     pub(crate) fn new(route: StorageContractRoute<C>) -> Result<Self, OperationError> {
         #[cfg(feature = "cuda")]
-        let core_zero_regions = super::dynamic::cuda::inactive_regions(match &route {
-            StorageContractRoute::Core(plan) => plan,
-            StorageContractRoute::DynamicTree(artifact) => artifact.block_plan(),
-        })?;
-        Ok(Self {
-            route,
-            #[cfg(feature = "cuda")]
-            core_zero_regions,
-        })
+        super::dynamic::cuda::validate_inactive_regions(route.block_plan())?;
+        Ok(Self { route })
     }
 
     /// True when the route needs the fermionic twist of the core-right
@@ -547,6 +545,42 @@ where
     compile_fusion_block_contract_plan_validated(validated, dst, lhs, rhs).map(Arc::new)
 }
 
+/// Compiles the coupled block plan of the core operands a
+/// [`FusionContractPlan`] derived from an already validated contraction.
+///
+/// Why no second [`CoreContractPreflight`]: the plan's source transforms
+/// place each operand's open and contracted legs in core order and its core
+/// axes are the canonical `(open, contracted) x (contracted, open)` pairing,
+/// so the core source and output form hold by construction. The core
+/// destination is either derived from these two operands with those core
+/// axes or, for an identity output transform, the destination whose
+/// contracted HomSpace the plan compile already checked. The contracted leg
+/// pairs are the checked pairs in candidate order, and every derived space
+/// is bound to `rule`. Re-running the preflight would only repeat those
+/// checks on every warm call; `compile_core_plan` keeps them for operands
+/// that did not come from such a plan.
+pub(crate) fn compile_derived_core_plan<R>(
+    rule: &R,
+    dst: &DynamicFusionMapSpace,
+    lhs: &DynamicFusionMapSpace,
+    rhs: &DynamicFusionMapSpace,
+    core_axes: TensorContractSpec<'_>,
+) -> Result<Arc<FusionBlockContractPlan<R::Scalar>>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
+{
+    // Debug builds re-check the construction argument above, so an internal
+    // inconsistency (a wrong space-cache entry, diverging HomSpace
+    // derivations) still fails loudly in tests instead of reaching the block
+    // plan.
+    #[cfg(debug_assertions)]
+    super::fusion_block::debug_assert_core_geometry(rule, dst, lhs, rhs, core_axes);
+    #[cfg(not(debug_assertions))]
+    let _ = core_axes;
+    compile_fusion_block_contract_plan_core_geometry(rule, dst, lhs, rhs).map(Arc::new)
+}
+
 /// Compiles TensorKit `mul!` composition without inserting a fermionic
 /// supertrace twist.
 #[allow(clippy::too_many_arguments)]
@@ -754,5 +788,165 @@ mod tests {
             super::super::fusion_block::core_contract_derivations(),
             (1, 1)
         );
+    }
+
+    mod warm_compile_counts {
+        use std::sync::Arc;
+
+        use tenet_core::{
+            FusionProductSpace, FusionTreeHomSpace, SectorLeg, U1FusionRule, U1Irrep,
+        };
+        use tenet_operations::{OutputAxisOrder, TensorContractSpec};
+
+        use crate::contract::fusion_block::{
+            contract_compile_counts, reset_core_contract_derivations, ContractCompileCounts,
+        };
+        use crate::contract::{BoundDynamicFusionMapSpace, FusionOperand};
+        use crate::{
+            ContractDestinationInit, OperationCachePolicy, RuleIdentity,
+            TensorContractFusionExecutionContext,
+        };
+
+        type Space = BoundDynamicFusionMapSpace<U1FusionRule>;
+
+        fn space(provider: &Arc<U1FusionRule>, codomain: usize, domain: usize) -> Space {
+            let leg = || {
+                SectorLeg::new(
+                    [
+                        (U1Irrep::new(-1).sector_id(), 2),
+                        (U1Irrep::new(0).sector_id(), 3),
+                        (U1Irrep::new(1).sector_id(), 1),
+                    ],
+                    false,
+                )
+            };
+            Space::from_final_homspace_multiplicity_free_checked(
+                Arc::clone(provider),
+                FusionTreeHomSpace::new(
+                    FusionProductSpace::new((0..codomain).map(|_| leg())),
+                    FusionProductSpace::new((0..domain).map(|_| leg())),
+                ),
+            )
+            .unwrap()
+        }
+
+        /// Counts of the third of three identical calls.
+        fn warm_counts(mut call: impl FnMut()) -> ContractCompileCounts {
+            call();
+            call();
+            reset_core_contract_derivations();
+            call();
+            contract_compile_counts()
+        }
+
+        #[test]
+        fn warm_contract_compile_runs_one_preflight_and_rebuilds_no_homspace() {
+            let provider = Arc::new(U1FusionRule);
+            let lhs = space(&provider, 2, 1);
+            let matrix = space(&provider, 1, 1);
+            let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
+            context.set_cache_policy(OperationCachePolicy::NoCache);
+            let lhs_data = vec![1.0; lhs.space().required_len().unwrap()];
+            let matrix_data = vec![0.5; matrix.space().required_len().unwrap()];
+            for output in [[0usize, 1, 2], [1, 0, 2]] {
+                let axes = TensorContractSpec::new(&[0], &[1], OutputAxisOrder::from_axes(&output));
+                let dst = Space::contracted_multiplicity_free_ordered(
+                    &lhs,
+                    &matrix,
+                    &[0],
+                    &[1],
+                    OutputAxisOrder::from_axes(&output),
+                )
+                .unwrap();
+                let mut dst_data = vec![0.0; dst.space().required_len().unwrap()];
+                let host = warm_counts(|| {
+                    context
+                        .tensorcontract_fusion_dyn_into_with_init(
+                            &dst,
+                            &mut dst_data,
+                            &lhs,
+                            &lhs_data,
+                            &matrix,
+                            &matrix_data,
+                            axes,
+                            1.0,
+                            ContractDestinationInit::Axpby(0.0),
+                        )
+                        .unwrap();
+                });
+                let mut core_dst = false;
+                let storage = warm_counts(|| {
+                    let resolution = context
+                        .compile_storage_contract_resolution(
+                            &dst,
+                            FusionOperand::direct(lhs.space()),
+                            FusionOperand::direct(matrix.space()),
+                            axes,
+                        )
+                        .unwrap();
+                    assert!(resolution.is_dynamic_tree());
+                    core_dst = resolution.direct_destination_inactive_blocks().is_none();
+                });
+                // What: one core preflight per call (the route's), no core
+                // destination check for a non-core request, and only the
+                // HomSpaces TensorKit also forms: one permuted HomSpace per
+                // transformed source plus the core destination when the
+                // output transform is not the identity.
+                // The fixture covers both output forms.
+                assert_eq!(core_dst, output != [0, 1, 2]);
+                let core_dst = usize::from(core_dst);
+                let expected = ContractCompileCounts {
+                    preflights: 1,
+                    core_destination_checks: 0,
+                    derived_homspace_builds: 2 + core_dst,
+                };
+                assert_eq!(host, expected, "host output order {output:?}");
+                assert_eq!(storage, expected, "storage output order {output:?}");
+            }
+        }
+
+        #[test]
+        fn warm_core_compile_checks_the_destination_once_without_building_it() {
+            let provider = Arc::new(U1FusionRule);
+            let lhs = space(&provider, 2, 2);
+            let square = space(&provider, 2, 2);
+            let dst = Space::contracted_multiplicity_free_ordered(
+                &lhs,
+                &square,
+                &[2, 3],
+                &[0, 1],
+                OutputAxisOrder::identity(),
+            )
+            .unwrap();
+            let axes = TensorContractSpec::with_default_output_order(&[2, 3], &[0, 1]);
+            let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
+            context.set_cache_policy(OperationCachePolicy::NoCache);
+            let lhs_data = vec![1.0; lhs.space().required_len().unwrap()];
+            let square_data = vec![0.5; square.space().required_len().unwrap()];
+            let mut dst_data = vec![0.0; dst.space().required_len().unwrap()];
+            let counts = warm_counts(|| {
+                context
+                    .tensorcontract_fusion_dyn_into_with_init(
+                        &dst,
+                        &mut dst_data,
+                        &lhs,
+                        &lhs_data,
+                        &square,
+                        &square_data,
+                        axes,
+                        1.0,
+                        ContractDestinationInit::Zeroed,
+                    )
+                    .unwrap();
+            });
+            assert_eq!(
+                counts,
+                ContractCompileCounts {
+                    preflights: 1,
+                    core_destination_checks: 1,
+                    derived_homspace_builds: 0,
+                }
+            );
+        }
     }
 }

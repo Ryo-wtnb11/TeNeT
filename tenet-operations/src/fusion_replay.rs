@@ -518,6 +518,16 @@ where
             return Ok(None);
         };
 
+        // Equal content ids are one structure content, whose coupled regions
+        // at one `nout` are one list: the same coupled sector then has the
+        // same tree extents on both sides, so the comparison is skipped.
+        let same_regions = |structure: &Arc<BlockStructure>, nout: usize, op: MatrixOp| {
+            op == MatrixOp::Identity
+                && nout == dst_nout
+                && structure.content_id() == dst_structure.content_id()
+        };
+        let dst_rows_are_lhs_rows = same_regions(lhs_storage_structure, lhs_storage_nout, lhs_op);
+        let dst_cols_are_rhs_cols = same_regions(rhs_storage_structure, rhs_storage_nout, rhs_op);
         let mut direct_batch = Vec::with_capacity(dst_regions.len());
         let mut inactive_dst_scale_blocks = Vec::new();
         let mut lhs_index = 0usize;
@@ -551,8 +561,8 @@ where
                 || dst.rows() != lhs.rows()
                 || dst.cols() != rhs.cols()
                 || lhs.col_trees() != rhs.row_trees()
-                || dst.row_trees() != lhs.row_trees()
-                || dst.col_trees() != rhs.col_trees()
+                || (!dst_rows_are_lhs_rows && dst.row_trees() != lhs.row_trees())
+                || (!dst_cols_are_rhs_cols && dst.col_trees() != rhs.col_trees())
             {
                 return Ok(None);
             }

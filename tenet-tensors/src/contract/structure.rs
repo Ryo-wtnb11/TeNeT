@@ -11,8 +11,8 @@ use crate::strided::{column_major_strides_usize, element_count, offset_to_isize}
 use crate::{DenseBlockScalar, OperationError, RecouplingCoefficientAction};
 use tenet_operations::structure_identity::validate_structure_identity;
 use tenet_operations::{
-    fusion_scale_block_layouts_excluding, permutation_axes, validate_destination_layouts_injective,
-    FusionScaleBlockLayout, TensorContractSpec,
+    fusion_scale_block_layouts_excluding, permutation_axes_inline,
+    validate_destination_layouts_injective, AxisVec, FusionScaleBlockLayout, TensorContractSpec,
 };
 
 use super::backend::TensorContractBackend;
@@ -355,9 +355,9 @@ where
             dst_rank,
             lhs_rank,
             rhs_rank,
-            lhs_contracting_axes: axis_plan.lhs_contracting_axes,
-            rhs_contracting_axes: axis_plan.rhs_contracting_axes,
-            output_axes: axis_plan.output_axes,
+            lhs_contracting_axes: axis_plan.lhs_contracting_axes.into_vec(),
+            rhs_contracting_axes: axis_plan.rhs_contracting_axes.into_vec(),
+            output_axes: axis_plan.output_axes.into_vec(),
             lhs_conjugate: axis_plan.lhs_conjugate,
             rhs_conjugate: axis_plan.rhs_conjugate,
             terms,
@@ -594,11 +594,11 @@ impl<C> TensorContractStructureTerm<C> {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct TensorContractAxisPlan {
-    pub(super) lhs_contracting_axes: Vec<usize>,
-    pub(super) rhs_contracting_axes: Vec<usize>,
-    pub(super) lhs_open_axes: Vec<usize>,
-    pub(super) rhs_open_axes: Vec<usize>,
-    pub(super) output_axes: Vec<usize>,
+    pub(super) lhs_contracting_axes: AxisVec,
+    pub(super) rhs_contracting_axes: AxisVec,
+    pub(super) lhs_open_axes: AxisVec,
+    pub(super) rhs_open_axes: AxisVec,
+    pub(super) output_axes: AxisVec,
     pub(super) lhs_conjugate: bool,
     pub(super) rhs_conjugate: bool,
 }
@@ -623,13 +623,13 @@ impl TensorContractAxisPlan {
 
         let lhs_open_axes = (0..lhs_rank)
             .filter(|&axis| !lhs_seen[axis])
-            .collect::<Vec<_>>();
+            .collect::<AxisVec>();
         let rhs_open_axes = (0..rhs_rank)
             .filter(|&axis| !rhs_seen[axis])
-            .collect::<Vec<_>>();
+            .collect::<AxisVec>();
         let core_output_rank = lhs_open_axes.len() + rhs_open_axes.len();
 
-        let output_axes = permutation_axes(axes.output_permutation(), core_output_rank)?;
+        let output_axes = permutation_axes_inline(axes.output_permutation(), core_output_rank)?;
         if output_axes.len() != dst_rank {
             return Err(OperationError::StructureRankMismatch {
                 expected: output_axes.len(),
@@ -638,8 +638,8 @@ impl TensorContractAxisPlan {
         }
 
         Ok(Self {
-            lhs_contracting_axes: axes.lhs_contracting_axes().to_vec(),
-            rhs_contracting_axes: axes.rhs_contracting_axes().to_vec(),
+            lhs_contracting_axes: AxisVec::from_slice(axes.lhs_contracting_axes()),
+            rhs_contracting_axes: AxisVec::from_slice(axes.rhs_contracting_axes()),
             lhs_open_axes,
             rhs_open_axes,
             output_axes,
@@ -657,6 +657,11 @@ thread_local! {
 #[cfg(test)]
 pub(super) fn reset_tensor_contract_axis_plan_compiles() {
     TENSOR_CONTRACT_AXIS_PLAN_COMPILES.set(0);
+}
+
+#[cfg(test)]
+pub(super) fn set_tensor_contract_axis_plan_compiles(count: usize) {
+    TENSOR_CONTRACT_AXIS_PLAN_COMPILES.set(count);
 }
 
 #[cfg(test)]
@@ -802,8 +807,8 @@ where
             dense_route_order: dense_route.order,
             lhs_contracting_axes: dense_route.lhs_contracting_axes,
             rhs_contracting_axes: dense_route.rhs_contracting_axes,
-            lhs_open_axes: axis_plan.lhs_open_axes.clone(),
-            rhs_open_axes: axis_plan.rhs_open_axes.clone(),
+            lhs_open_axes: axis_plan.lhs_open_axes.to_vec(),
+            rhs_open_axes: axis_plan.rhs_open_axes.to_vec(),
             lhs_conjugate: axis_plan.lhs_conjugate,
             rhs_conjugate: axis_plan.rhs_conjugate,
             terms: Vec::new(),
@@ -1373,8 +1378,8 @@ fn validate_axis_subset(
     tensor: &'static str,
     axes: &[usize],
     rank: usize,
-) -> Result<Vec<bool>, OperationError> {
-    let mut seen = vec![false; rank];
+) -> Result<smallvec::SmallVec<[bool; 16]>, OperationError> {
+    let mut seen = smallvec::SmallVec::from_elem(false, rank);
     for &axis in axes {
         if axis >= rank || seen[axis] {
             return Err(OperationError::InvalidAxisSet {

@@ -100,6 +100,8 @@ where
         rhs_homspace: OrientedFusionTreeHomSpace<'a>,
         axes: TensorContractSpec<'_>,
     ) -> Result<Self, OperationError> {
+        #[cfg(test)]
+        CORE_CONTRACT_PREFLIGHTS.set(CORE_CONTRACT_PREFLIGHTS.get() + 1);
         let axis_plan = TensorContractAxisPlan::compile(
             lhs_homspace.rank(),
             rhs_homspace.rank(),
@@ -136,16 +138,15 @@ where
         ) {
             return Ok(None);
         }
-        let expected_homspace = derive_expected_core_homspace(
+        if !core_homspace_matches(
             self.rule,
             self.lhs_homspace,
             self.rhs_homspace,
             self.axis_plan.lhs_contracting_axes.as_slice(),
             self.axis_plan.rhs_contracting_axes.as_slice(),
             self.axis_plan.output_axes.as_slice(),
-            self.dst_homspace.codomain().len(),
-        )?;
-        if expected_homspace != *self.dst_homspace {
+            self.dst_homspace,
+        )? {
             return Err(OperationError::StructureMismatch { tensor: "dst" });
         }
         Ok(Some(ValidatedCoreContract { preflight: self }))
@@ -175,28 +176,32 @@ impl<'a, R> ValidatedCoreContract<'a, R> {
     }
 }
 
-fn derive_expected_core_homspace<R>(
+/// The core destination check: `dst` must be the contracted HomSpace of
+/// the two oriented operands. Decided by leg comparison, without building
+/// that HomSpace, with its errors in its order.
+fn core_homspace_matches<R>(
     rule: &R,
     lhs: OrientedFusionTreeHomSpace<'_>,
     rhs: OrientedFusionTreeHomSpace<'_>,
     lhs_contracting_axes: &[usize],
     rhs_contracting_axes: &[usize],
     output_axes: &[usize],
-    dst_nout: usize,
-) -> Result<FusionTreeHomSpace, OperationError>
+    dst: &FusionTreeHomSpace,
+) -> Result<bool, OperationError>
 where
     R: FusionRule,
 {
     #[cfg(test)]
     EXPECTED_CORE_HOMSPACE_DERIVATIONS.set(EXPECTED_CORE_HOMSPACE_DERIVATIONS.get() + 1);
-    OrientedFusionTreeHomSpace::tensorcontract_homspace(
+    OrientedFusionTreeHomSpace::tensorcontract_homspace_matches(
         rule,
         lhs,
         rhs,
         lhs_contracting_axes,
         rhs_contracting_axes,
         output_axes,
-        dst_nout,
+        dst.codomain().len(),
+        dst,
     )
     .map_err(OperationError::from_core_preserving_context)
 }
@@ -204,12 +209,71 @@ where
 #[cfg(test)]
 thread_local! {
     static EXPECTED_CORE_HOMSPACE_DERIVATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static CORE_CONTRACT_PREFLIGHTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
 pub(crate) fn reset_core_contract_derivations() {
     super::structure::reset_tensor_contract_axis_plan_compiles();
     EXPECTED_CORE_HOMSPACE_DERIVATIONS.set(0);
+    CORE_CONTRACT_PREFLIGHTS.set(0);
+    super::dynamic_space::reset_derived_homspace_builds();
+}
+
+/// Asserts what [`super::resolution::compile_derived_core_plan`] relies on:
+/// the full core preflight and destination check accept the plan-derived
+/// operands. Leaves the compile counters as they were, so tests keep
+/// counting the production work only.
+#[cfg(debug_assertions)]
+pub(crate) fn debug_assert_core_geometry<R>(
+    rule: &R,
+    dst: &DynamicFusionMapSpace,
+    lhs: &DynamicFusionMapSpace,
+    rhs: &DynamicFusionMapSpace,
+    core_axes: TensorContractSpec<'_>,
+) where
+    R: FusionRule,
+{
+    #[cfg(test)]
+    let counts = (
+        CORE_CONTRACT_PREFLIGHTS.get(),
+        EXPECTED_CORE_HOMSPACE_DERIVATIONS.get(),
+        super::structure::tensor_contract_axis_plan_compiles(),
+    );
+    let checked = reject_fusion_contract_conjugation(core_axes).and_then(|()| {
+        CoreContractPreflight::compile(rule, dst, lhs, rhs, core_axes)?
+            .require_core_geometry()
+            .map(|_| ())
+    });
+    #[cfg(test)]
+    {
+        CORE_CONTRACT_PREFLIGHTS.set(counts.0);
+        EXPECTED_CORE_HOMSPACE_DERIVATIONS.set(counts.1);
+        super::structure::set_tensor_contract_axis_plan_compiles(counts.2);
+    }
+    debug_assert!(
+        checked.is_ok(),
+        "plan-derived core operands failed the core preflight: {checked:?}"
+    );
+}
+
+/// What one contraction compile did: core preflights, core destination
+/// checks, and permuted or contracted HomSpaces built.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ContractCompileCounts {
+    pub(crate) preflights: usize,
+    pub(crate) core_destination_checks: usize,
+    pub(crate) derived_homspace_builds: usize,
+}
+
+#[cfg(test)]
+pub(crate) fn contract_compile_counts() -> ContractCompileCounts {
+    ContractCompileCounts {
+        preflights: CORE_CONTRACT_PREFLIGHTS.get(),
+        core_destination_checks: EXPECTED_CORE_HOMSPACE_DERIVATIONS.get(),
+        derived_homspace_builds: super::dynamic_space::derived_homspace_builds(),
+    }
 }
 
 #[cfg(test)]
@@ -1786,8 +1850,27 @@ where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: DenseBlockScalar,
 {
-    let rule = validated.preflight.rule;
+    compile_fusion_block_contract_plan_core_geometry(
+        validated.preflight.rule,
+        dst_space,
+        lhs_space,
+        rhs_space,
+    )
+}
 
+/// The coupled block plan of three spaces whose core geometry is already
+/// established: by a [`ValidatedCoreContract`], or by construction for the
+/// core operands a [`super::fusion::FusionContractPlan`] derives.
+pub(crate) fn compile_fusion_block_contract_plan_core_geometry<R>(
+    rule: &R,
+    dst_space: &DynamicFusionMapSpace,
+    lhs_space: &DynamicFusionMapSpace,
+    rhs_space: &DynamicFusionMapSpace,
+) -> Result<FusionBlockContractPlan<R::Scalar>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
+{
     if let Some(plan) = compile_direct_coupled_region_plan(
         dst_space,
         lhs_space,

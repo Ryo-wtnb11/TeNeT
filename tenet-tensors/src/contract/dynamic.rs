@@ -127,19 +127,40 @@ pub(super) fn source_layout_metadata_is_borrowable<HomSpaceMatches>(
 where
     HomSpaceMatches: FnOnce() -> bool,
 {
+    operation.kind() == TreeTransformOperationKind::Permute
+        && source_layout_permutation_is_borrowable(
+            source_space,
+            core_nout,
+            core_rank,
+            homspace_matches,
+            operation.codomain_permutation(),
+            operation.domain_permutation(),
+            source_conjugate,
+        )
+}
+
+/// [`source_layout_metadata_is_borrowable`] for a permutation given as its
+/// two axis lists, before any `TreeTransformOperation` value exists.
+pub(super) fn source_layout_permutation_is_borrowable<HomSpaceMatches>(
+    source_space: &DynamicFusionMapSpace,
+    core_nout: usize,
+    core_rank: usize,
+    homspace_matches: HomSpaceMatches,
+    codomain_permutation: &[usize],
+    domain_permutation: &[usize],
+    source_conjugate: bool,
+) -> bool
+where
+    HomSpaceMatches: FnOnce() -> bool,
+{
     if source_conjugate {
         return false;
     }
-    if operation.kind() != TreeTransformOperationKind::Permute {
-        return false;
-    }
-    if !operation
-        .codomain_permutation()
+    if !codomain_permutation
         .iter()
         .copied()
         .eq(0..source_space.nout())
-        || !operation
-            .domain_permutation()
+        || !domain_permutation
             .iter()
             .copied()
             .eq(source_space.nout()..source_space.rank())
@@ -1218,7 +1239,7 @@ where
         .as_ref()
         .map_or(dst_space, |entry| entry.space.as_ref());
     let block_plan_start = PROFILED.then(std::time::Instant::now);
-    let block_plan = super::resolution::compile_core_plan(
+    let block_plan = super::resolution::compile_derived_core_plan(
         rule,
         block_dst_space,
         core_left_space,
@@ -2404,6 +2425,10 @@ where
     }
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "LRU order entries hold keys by value: boxing the core-destination key would allocate on every touch of a bounded cache"
+)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum DynamicFusionSpaceCacheEntryKey<RuleKey> {
     TransformedSource(DynamicFusionTransformedSourceSpaceKey<RuleKey>),
