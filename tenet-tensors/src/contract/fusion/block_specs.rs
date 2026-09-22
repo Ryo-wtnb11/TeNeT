@@ -329,7 +329,7 @@ where
                 logical_core
                     .get(position)
                     .ok_or(OperationError::InvalidPermutation {
-                        axes: logical_plan.output_axes.clone(),
+                        axes: logical_plan.output_axes.to_vec(),
                         rank: logical_core.len(),
                     })?;
             physical_core

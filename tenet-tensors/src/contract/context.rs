@@ -88,7 +88,7 @@ impl TensorContractPlanKey {
     ) -> Result<Self, OperationError> {
         let axis_plan = TensorContractAxisPlan::compile(lhs_rank, rhs_rank, dst_rank, axes)?;
         Ok(Self {
-            axes: TensorContractSpecOwned::new_with_conjugation(
+            axes: TensorContractSpecOwned::from_axis_vecs(
                 axis_plan.lhs_contracting_axes,
                 axis_plan.rhs_contracting_axes,
                 axis_plan.output_axes,

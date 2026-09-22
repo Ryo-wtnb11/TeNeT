@@ -2,9 +2,11 @@ use tenet_core::{
     FusionSpaceAdmission, FusionTensorMapSpace, FusionTreeHomSpace, MultiplicityFreeRigidSymbols,
 };
 
+use smallvec::SmallVec;
+
 use crate::lowering::lower_tensorcontract_adjoint_axes;
 use crate::{DenseBlockScalar, OperationError, TreeTransformOperation, TreeTransformOperationKind};
-use tenet_operations::{OutputAxisOrder, TensorContractSpec, TensorContractSpecOwned};
+use tenet_operations::{AxisVec, OutputAxisOrder, TensorContractSpec, TensorContractSpecOwned};
 
 use super::super::dynamic_space::{
     encoded_layout_primer, BoundDynamicFusionMapSpace, DynamicFusionMapSpace, FusionOperandLayout,
@@ -52,8 +54,8 @@ pub(crate) fn candidate_build_calls() -> (usize, usize) {
 /// it does not select a runtime winner yet.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ContractAxisOrderCandidate {
-    lhs: Vec<usize>,
-    rhs: Vec<usize>,
+    lhs: AxisVec,
+    rhs: AxisVec,
 }
 
 impl ContractAxisOrderCandidate {
@@ -192,45 +194,44 @@ struct ScoredFusionContractCandidate {
 pub(crate) fn contracted_axis_order_candidates(
     lhs: &[usize],
     rhs: &[usize],
-) -> Vec<ContractAxisOrderCandidate> {
+) -> SmallVec<[ContractAxisOrderCandidate; 2]> {
     assert_eq!(
         lhs.len(),
         rhs.len(),
         "paired contraction axes must have equal length"
     );
-    let mut lhs_order = (0..lhs.len()).collect::<Vec<_>>();
-    lhs_order.sort_by_key(|&i| lhs[i]);
-    let lhs_sorted = ContractAxisOrderCandidate {
-        lhs: lhs_order.iter().map(|&i| lhs[i]).collect(),
-        rhs: lhs_order.iter().map(|&i| rhs[i]).collect(),
+    let sorted_by = |keys: &[usize]| {
+        let mut order = (0..keys.len()).collect::<AxisVec>();
+        order.sort_by_key(|&i| keys[i]);
+        ContractAxisOrderCandidate {
+            lhs: order.iter().map(|&i| lhs[i]).collect(),
+            rhs: order.iter().map(|&i| rhs[i]).collect(),
+        }
     };
-    let mut rhs_order = (0..rhs.len()).collect::<Vec<_>>();
-    rhs_order.sort_by_key(|&i| rhs[i]);
-    let rhs_sorted = ContractAxisOrderCandidate {
-        lhs: rhs_order.iter().map(|&i| lhs[i]).collect(),
-        rhs: rhs_order.iter().map(|&i| rhs[i]).collect(),
-    };
-    let mut candidates = vec![lhs_sorted];
+    let lhs_sorted = sorted_by(lhs);
+    let rhs_sorted = sorted_by(rhs);
+    let mut candidates = SmallVec::new();
+    candidates.push(lhs_sorted);
     if !candidates.contains(&rhs_sorted) {
         candidates.push(rhs_sorted);
     }
     candidates
 }
 
-fn select_best_scored_contract_candidate<F>(
+fn select_best_scored_contract_candidate<P, F>(
     axes: TensorContractSpec<'_>,
     orientations: &[FusionContractOrientation],
     mut score: F,
-) -> Result<ScoredFusionContractCandidate, OperationError>
+) -> Result<(P, FusionContractCandidateFacts), OperationError>
 where
     F: FnMut(
         &ContractAxisOrderCandidate,
         FusionContractOrientation,
-    ) -> Result<ScoredFusionContractCandidate, OperationError>,
+    ) -> Result<(P, FusionContractCandidateFacts), OperationError>,
 {
     let candidates =
         contracted_axis_order_candidates(axes.lhs_contracting_axes(), axes.rhs_contracting_axes());
-    let mut best = None;
+    let mut best: Option<(P, FusionContractCandidateFacts)> = None;
     let mut first_error = None;
     for &orientation in orientations {
         for candidate in &candidates {
@@ -244,13 +245,9 @@ where
                     continue;
                 }
             };
-            if best
-                .as_ref()
-                .is_none_or(|best: &ScoredFusionContractCandidate| {
-                    scored.facts.total_materialized_elements()
-                        < best.facts.total_materialized_elements()
-                })
-            {
+            if best.as_ref().is_none_or(|best| {
+                scored.1.total_materialized_elements() < best.1.total_materialized_elements()
+            }) {
                 best = Some(scored);
             }
         }
@@ -258,6 +255,187 @@ where
     best.ok_or_else(|| {
         first_error.expect("paired contraction always has at least one stable candidate")
     })
+}
+
+/// One candidate [`FusionContractPlan`] with its permutations still as
+/// stack axis lists.
+///
+/// Why not score materialized plans: every `TreeTransformOperation` owns a
+/// shared heap slice, and only the selected candidate's operations outlive
+/// the selection. This is the single authority for the candidate lowering;
+/// [`CandidatePlan::materialize`] builds the plan value from it.
+#[derive(Clone, Debug)]
+struct CandidatePlan {
+    orientation: FusionContractOrientation,
+    lhs: [AxisVec; 2],
+    rhs: [AxisVec; 2],
+    output: [AxisVec; 2],
+    core_dst_open_lhs_rank: usize,
+    core_dst_open_rhs_rank: usize,
+    lhs_open_rank: usize,
+    lhs_contract_rank: usize,
+    rhs_contract_rank: usize,
+    rhs_open_rank: usize,
+    lhs_source_conjugate: bool,
+    rhs_source_conjugate: bool,
+}
+
+impl CandidatePlan {
+    #[allow(clippy::too_many_arguments)]
+    fn from_ranks(
+        dst_nout: usize,
+        dst_rank: usize,
+        lhs_rank: usize,
+        rhs_rank: usize,
+        axes: TensorContractSpec<'_>,
+        lhs_source_conjugate: bool,
+        rhs_source_conjugate: bool,
+    ) -> Result<Self, OperationError> {
+        let axis_plan = TensorContractAxisPlan::compile(lhs_rank, rhs_rank, dst_rank, axes)?;
+        let lhs_open_rank = axis_plan.lhs_open_axes.len();
+        let lhs_contract_rank = axis_plan.lhs_contracting_axes.len();
+        let rhs_contract_rank = axis_plan.rhs_contracting_axes.len();
+        let rhs_open_rank = axis_plan.rhs_open_axes.len();
+        Ok(Self {
+            orientation: FusionContractOrientation::LhsRhs,
+            lhs: [axis_plan.lhs_open_axes, axis_plan.lhs_contracting_axes],
+            rhs: [axis_plan.rhs_contracting_axes, axis_plan.rhs_open_axes],
+            output: [
+                AxisVec::from_slice(&axis_plan.output_axes[..dst_nout]),
+                AxisVec::from_slice(&axis_plan.output_axes[dst_nout..]),
+            ],
+            core_dst_open_lhs_rank: lhs_open_rank,
+            core_dst_open_rhs_rank: rhs_open_rank,
+            lhs_open_rank,
+            lhs_contract_rank,
+            rhs_contract_rank,
+            rhs_open_rank,
+            lhs_source_conjugate,
+            rhs_source_conjugate,
+        })
+    }
+
+    fn from_plan(plan: &FusionContractPlan) -> Self {
+        let permutation = |operation: &TreeTransformOperation| {
+            if operation.kind() != TreeTransformOperationKind::Permute {
+                unreachable!("fusion contraction lowering uses permutations");
+            }
+            [
+                AxisVec::from_slice(operation.codomain_permutation()),
+                AxisVec::from_slice(operation.domain_permutation()),
+            ]
+        };
+        Self {
+            orientation: plan.orientation,
+            lhs: permutation(&plan.lhs_transform),
+            rhs: permutation(&plan.rhs_transform),
+            output: permutation(&plan.output_transform),
+            core_dst_open_lhs_rank: plan.core_dst_open_lhs_rank,
+            core_dst_open_rhs_rank: plan.core_dst_open_rhs_rank,
+            lhs_open_rank: plan.lhs_open_rank,
+            lhs_contract_rank: plan.lhs_contract_rank,
+            rhs_contract_rank: plan.rhs_contract_rank,
+            rhs_open_rank: plan.rhs_open_rank,
+            lhs_source_conjugate: plan.lhs_source_conjugate,
+            rhs_source_conjugate: plan.rhs_source_conjugate,
+        }
+    }
+
+    fn orient(mut self, orientation: FusionContractOrientation) -> Self {
+        if orientation == FusionContractOrientation::RhsLhs {
+            let lhs_open_rank = self.lhs_open_rank;
+            let rhs_open_rank = self.rhs_open_rank;
+            let semantic_to_core = |axis: usize| {
+                if axis < lhs_open_rank {
+                    axis + rhs_open_rank
+                } else {
+                    axis - lhs_open_rank
+                }
+            };
+            let [output_codomain, output_domain] = &self.output;
+            self.output = [
+                output_codomain
+                    .iter()
+                    .copied()
+                    .map(semantic_to_core)
+                    .collect(),
+                output_domain
+                    .iter()
+                    .copied()
+                    .map(semantic_to_core)
+                    .collect(),
+            ];
+            let [lhs_open_axes, lhs_contracting_axes] = std::mem::take(&mut self.lhs);
+            let [rhs_contracting_axes, rhs_open_axes] = std::mem::take(&mut self.rhs);
+            self.orientation = orientation;
+            self.lhs = [lhs_contracting_axes, lhs_open_axes];
+            self.rhs = [rhs_open_axes, rhs_contracting_axes];
+            self.core_dst_open_lhs_rank = rhs_open_rank;
+            self.core_dst_open_rhs_rank = lhs_open_rank;
+        }
+        self
+    }
+
+    fn output_transform_is_identity(&self) -> bool {
+        output_permutation_is_identity(
+            &self.output[0],
+            &self.output[1],
+            self.core_dst_open_lhs_rank,
+            self.core_dst_open_rhs_rank,
+        )
+    }
+
+    /// [`TreeTransformOperation::is_identity_for`] of the lhs permutation.
+    fn lhs_transform_is_identity_for(&self, codomain_rank: usize, domain_rank: usize) -> bool {
+        output_permutation_is_identity(&self.lhs[0], &self.lhs[1], codomain_rank, domain_rank)
+    }
+
+    /// [`TreeTransformOperation::is_identity_for`] of the rhs permutation.
+    fn rhs_transform_is_identity_for(&self, codomain_rank: usize, domain_rank: usize) -> bool {
+        output_permutation_is_identity(&self.rhs[0], &self.rhs[1], codomain_rank, domain_rank)
+    }
+
+    fn materialize(&self) -> FusionContractPlan {
+        let permute = |[codomain, domain]: &[AxisVec; 2]| {
+            TreeTransformOperation::permute(codomain.iter().copied(), domain.iter().copied())
+        };
+        let open_lhs = self.core_dst_open_lhs_rank;
+        FusionContractPlan {
+            orientation: self.orientation,
+            lhs_transform: permute(&self.lhs),
+            rhs_transform: permute(&self.rhs),
+            output_transform: permute(&self.output),
+            core_axes: TensorContractSpecOwned::from_axis_vecs(
+                (open_lhs..open_lhs + self.lhs_contract_rank).collect(),
+                (0..self.rhs_contract_rank).collect(),
+                (0..open_lhs + self.core_dst_open_rhs_rank).collect(),
+                false,
+                false,
+            ),
+            core_dst_open_lhs_rank: self.core_dst_open_lhs_rank,
+            core_dst_open_rhs_rank: self.core_dst_open_rhs_rank,
+            lhs_open_rank: self.lhs_open_rank,
+            lhs_contract_rank: self.lhs_contract_rank,
+            rhs_contract_rank: self.rhs_contract_rank,
+            rhs_open_rank: self.rhs_open_rank,
+            lhs_source_conjugate: self.lhs_source_conjugate,
+            rhs_source_conjugate: self.rhs_source_conjugate,
+        }
+    }
+}
+
+/// True when `(codomain, domain)` is the exact current axis order and split.
+fn output_permutation_is_identity(
+    codomain: &[usize],
+    domain: &[usize],
+    codomain_rank: usize,
+    domain_rank: usize,
+) -> bool {
+    codomain.iter().copied().eq(0..codomain_rank)
+        && domain
+            .iter()
+            .copied()
+            .eq(codomain_rank..codomain_rank + domain_rank)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -323,20 +501,13 @@ impl FusionContractPlan {
     }
 
     pub(crate) fn output_transform_is_identity(&self) -> bool {
-        let core_rank = self.core_dst_open_lhs_rank + self.core_dst_open_rhs_rank;
         self.output_transform.kind() == TreeTransformOperationKind::Permute
-            && self
-                .output_transform
-                .codomain_permutation()
-                .iter()
-                .copied()
-                .eq(0..self.core_dst_open_lhs_rank)
-            && self
-                .output_transform
-                .domain_permutation()
-                .iter()
-                .copied()
-                .eq(self.core_dst_open_lhs_rank..core_rank)
+            && output_permutation_is_identity(
+                self.output_transform.codomain_permutation(),
+                self.output_transform.domain_permutation(),
+                self.core_dst_open_lhs_rank,
+                self.core_dst_open_rhs_rank,
+            )
     }
 
     #[inline]
@@ -604,56 +775,13 @@ where
 }
 
 pub(crate) fn orient_fusion_contract_plan(
-    mut plan: FusionContractPlan,
+    plan: FusionContractPlan,
     orientation: FusionContractOrientation,
 ) -> FusionContractPlan {
     if orientation == FusionContractOrientation::RhsLhs {
-        let lhs_open_rank = plan.lhs_open_rank;
-        let rhs_open_rank = plan.rhs_open_rank;
-        let contract_rank = plan.lhs_contract_rank;
-        let semantic_to_core = |axis: usize| {
-            if axis < lhs_open_rank {
-                axis + rhs_open_rank
-            } else {
-                axis - lhs_open_rank
-            }
-        };
-        if plan.output_transform.kind() != TreeTransformOperationKind::Permute {
-            unreachable!("fusion contraction output lowering uses a permutation");
-        }
-        let output_axes = plan
-            .output_transform
-            .codomain_permutation()
-            .iter()
-            .chain(plan.output_transform.domain_permutation())
-            .copied()
-            .map(semantic_to_core)
-            .collect::<Vec<_>>();
-        let dst_nout = plan.output_transform.codomain_permutation().len();
-        if plan.lhs_transform.kind() != TreeTransformOperationKind::Permute {
-            unreachable!("fusion contraction source lowering uses a permutation");
-        }
-        let lhs_open_axes = plan.lhs_transform.codomain_permutation().to_vec();
-        let lhs_contracting_axes = plan.lhs_transform.domain_permutation().to_vec();
-        if plan.rhs_transform.kind() != TreeTransformOperationKind::Permute {
-            unreachable!("fusion contraction source lowering uses a permutation");
-        }
-        let rhs_contracting_axes = plan.rhs_transform.codomain_permutation().to_vec();
-        let rhs_open_axes = plan.rhs_transform.domain_permutation().to_vec();
-        plan.orientation = orientation;
-        plan.lhs_transform = TreeTransformOperation::permute(lhs_contracting_axes, lhs_open_axes);
-        plan.rhs_transform = TreeTransformOperation::permute(rhs_open_axes, rhs_contracting_axes);
-        plan.core_axes = TensorContractSpecOwned::new(
-            (rhs_open_rank..rhs_open_rank + contract_rank).collect(),
-            (0..contract_rank).collect(),
-            (0..lhs_open_rank + rhs_open_rank).collect(),
-        );
-        plan.output_transform = TreeTransformOperation::permute(
-            output_axes[..dst_nout].iter().copied(),
-            output_axes[dst_nout..].iter().copied(),
-        );
-        plan.core_dst_open_lhs_rank = rhs_open_rank;
-        plan.core_dst_open_rhs_rank = lhs_open_rank;
+        return CandidatePlan::from_plan(&plan)
+            .orient(orientation)
+            .materialize();
     }
     plan
 }
@@ -966,18 +1094,16 @@ where
     select_best_scored_contract_candidate(axes, orientations, |candidate, orientation| {
         let candidate_axes =
             TensorContractSpec::new(candidate.lhs(), candidate.rhs(), axes.output_permutation());
-        let plan = orient_fusion_contract_plan(
-            compile_tensorcontract_fusion_plan_from_ranks(
-                dst.nout(),
-                dst.rank(),
-                lhs.rank(),
-                rhs.rank(),
-                candidate_axes,
-                lhs_source_conjugate,
-                rhs_source_conjugate,
-            )?,
-            orientation,
-        );
+        let shape = CandidatePlan::from_ranks(
+            dst.nout(),
+            dst.rank(),
+            lhs.rank(),
+            rhs.rank(),
+            candidate_axes,
+            lhs_source_conjugate,
+            rhs_source_conjugate,
+        )?
+        .orient(orientation);
         if complete {
             let facts = score_complete_fusion_contract_candidate(
                 rule,
@@ -985,23 +1111,34 @@ where
                 lhs,
                 rhs,
                 candidate.clone(),
-                &plan,
+                &shape,
             )?;
-            Ok(ScoredFusionContractCandidate { plan, facts })
+            Ok((SelectedPlan::Candidate(shape), facts))
         } else {
-            score_fusion_contract_candidate(
+            let scored = score_fusion_contract_candidate(
                 rule,
                 dst,
                 lhs,
                 rhs,
                 candidate.clone(),
-                plan,
+                shape.materialize(),
                 probe,
                 primer,
-            )
+            )?;
+            Ok((SelectedPlan::Materialized(scored.plan), scored.facts))
         }
     })
-    .map(|best| best.plan)
+    .map(|(best, _)| match best {
+        SelectedPlan::Candidate(shape) => shape.materialize(),
+        SelectedPlan::Materialized(plan) => plan,
+    })
+}
+
+/// The winner of a candidate selection: probing scorers already built the
+/// plan to probe its transformed layouts; Complete scoring never did.
+enum SelectedPlan {
+    Candidate(CandidatePlan),
+    Materialized(FusionContractPlan),
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1097,12 +1234,42 @@ struct FusionContractMaterializationInputs<'a> {
     output_required_len: CandidateRequiredLen<'a>,
 }
 
+/// The orientation, conjugation, and output-identity facts one candidate's
+/// cost depends on, read from either plan form.
+#[derive(Clone, Copy)]
+struct CandidateRoute {
+    orientation: FusionContractOrientation,
+    lhs_source_conjugate: bool,
+    rhs_source_conjugate: bool,
+    output_exact_identity: bool,
+}
+
+impl CandidateRoute {
+    fn of_plan(plan: &FusionContractPlan) -> Self {
+        Self {
+            orientation: plan.orientation(),
+            lhs_source_conjugate: plan.lhs_source_conjugate(),
+            rhs_source_conjugate: plan.rhs_source_conjugate(),
+            output_exact_identity: plan.output_transform_is_identity(),
+        }
+    }
+
+    fn of_candidate(plan: &CandidatePlan) -> Self {
+        Self {
+            orientation: plan.orientation,
+            lhs_source_conjugate: plan.lhs_source_conjugate,
+            rhs_source_conjugate: plan.rhs_source_conjugate,
+            output_exact_identity: plan.output_transform_is_identity(),
+        }
+    }
+}
+
 fn fusion_contract_candidate_facts(
     axis_order: ContractAxisOrderCandidate,
-    plan: &FusionContractPlan,
+    plan: CandidateRoute,
     inputs: FusionContractMaterializationInputs<'_>,
 ) -> Result<FusionContractCandidateFacts, OperationError> {
-    let reverse = plan.orientation() == FusionContractOrientation::RhsLhs;
+    let reverse = plan.orientation == FusionContractOrientation::RhsLhs;
     let lhs_requires_twist = reverse && inputs.core_right_requires_twist;
     let rhs_requires_twist = !reverse && inputs.core_right_requires_twist;
     let lhs_materialized_elements = if inputs.lhs_exact_identity_borrowable && !lhs_requires_twist {
@@ -1115,7 +1282,7 @@ fn fusion_contract_candidate_facts(
     } else {
         inputs.rhs_required_len.get()?
     };
-    let output_exact_identity = plan.output_transform_is_identity();
+    let output_exact_identity = plan.output_exact_identity;
     let output_materialized_elements = if output_exact_identity {
         0
     } else {
@@ -1131,9 +1298,9 @@ fn fusion_contract_candidate_facts(
         })?;
     Ok(FusionContractCandidateFacts {
         axis_order,
-        orientation: plan.orientation(),
-        lhs_conjugate: plan.lhs_source_conjugate(),
-        rhs_conjugate: plan.rhs_source_conjugate(),
+        orientation: plan.orientation,
+        lhs_conjugate: plan.lhs_source_conjugate,
+        rhs_conjugate: plan.rhs_source_conjugate,
         lhs_exact_identity_borrowable: inputs.lhs_exact_identity_borrowable,
         rhs_exact_identity_borrowable: inputs.rhs_exact_identity_borrowable,
         rhs_requires_twist,
@@ -1161,37 +1328,33 @@ pub(crate) fn select_complete_bosonic_contract_candidate(
     select_best_scored_contract_candidate(axes, &CACHED_ORIENTATIONS, |candidate, orientation| {
         let candidate_axes =
             TensorContractSpec::new(candidate.lhs(), candidate.rhs(), axes.output_permutation());
-        let plan = orient_fusion_contract_plan(
-            compile_tensorcontract_fusion_plan_from_ranks(
-                dst_nout,
-                output_rank,
-                lhs_rank,
-                rhs_rank,
-                candidate_axes,
-                false,
-                false,
-            )?,
-            orientation,
-        );
+        let shape = CandidatePlan::from_ranks(
+            dst_nout,
+            output_rank,
+            lhs_rank,
+            rhs_rank,
+            candidate_axes,
+            false,
+            false,
+        )?
+        .orient(orientation);
         let facts = fusion_contract_candidate_facts(
             candidate.clone(),
-            &plan,
+            CandidateRoute::of_candidate(&shape),
             FusionContractMaterializationInputs {
-                lhs_exact_identity_borrowable: plan
-                    .lhs_transform()
-                    .is_identity_for(lhs_nout, lhs_rank - lhs_nout),
-                rhs_exact_identity_borrowable: plan
-                    .rhs_transform()
-                    .is_identity_for(rhs_nout, rhs_rank - rhs_nout),
+                lhs_exact_identity_borrowable: shape
+                    .lhs_transform_is_identity_for(lhs_nout, lhs_rank - lhs_nout),
+                rhs_exact_identity_borrowable: shape
+                    .rhs_transform_is_identity_for(rhs_nout, rhs_rank - rhs_nout),
                 core_right_requires_twist: false,
                 lhs_required_len: CandidateRequiredLen::Known(lhs_required_len),
                 rhs_required_len: CandidateRequiredLen::Known(rhs_required_len),
                 output_required_len: CandidateRequiredLen::Known(destination_required_len),
             },
         )?;
-        Ok(ScoredFusionContractCandidate { plan, facts })
+        Ok((shape.orientation, facts))
     })
-    .map(|best| (best.facts.axis_order, best.plan.orientation()))
+    .map(|(orientation, facts)| (facts.axis_order, orientation))
 }
 
 fn score_complete_fusion_contract_candidate<R, S>(
@@ -1200,7 +1363,7 @@ fn score_complete_fusion_contract_candidate<R, S>(
     lhs: &S,
     rhs: &S,
     axis_order: ContractAxisOrderCandidate,
-    plan: &FusionContractPlan,
+    plan: &CandidatePlan,
 ) -> Result<FusionContractCandidateFacts, OperationError>
 where
     R: MultiplicityFreeRigidSymbols,
@@ -1212,23 +1375,27 @@ where
     // Why not probe the transformed layouts: Complete admission proves the
     // canonical full basis, so permutation preserves reduced element count and
     // an exact identity operation preserves the source structure.
-    let lhs_exact_identity_borrowable = super::super::dynamic::source_layout_metadata_is_borrowable(
-        lhs.storage_space(),
-        lhs.nout(),
-        lhs.rank(),
-        || true,
-        plan.lhs_transform(),
-        plan.lhs_source_conjugate(),
-    );
-    let rhs_exact_identity_borrowable = super::super::dynamic::source_layout_metadata_is_borrowable(
-        rhs.storage_space(),
-        rhs.nout(),
-        rhs.rank(),
-        || true,
-        plan.rhs_transform(),
-        plan.rhs_source_conjugate(),
-    );
-    let (core_right, core_right_axes) = match plan.orientation() {
+    let lhs_exact_identity_borrowable =
+        super::super::dynamic::source_layout_permutation_is_borrowable(
+            lhs.storage_space(),
+            lhs.nout(),
+            lhs.rank(),
+            || true,
+            &plan.lhs[0],
+            &plan.lhs[1],
+            plan.lhs_source_conjugate,
+        );
+    let rhs_exact_identity_borrowable =
+        super::super::dynamic::source_layout_permutation_is_borrowable(
+            rhs.storage_space(),
+            rhs.nout(),
+            rhs.rank(),
+            || true,
+            &plan.rhs[0],
+            &plan.rhs[1],
+            plan.rhs_source_conjugate,
+        );
+    let (core_right, core_right_axes) = match plan.orientation {
         FusionContractOrientation::LhsRhs => (rhs, axis_order.rhs()),
         FusionContractOrientation::RhsLhs => (lhs, axis_order.lhs()),
     };
@@ -1236,7 +1403,7 @@ where
         source_contract_homspace_requires_twist(rule, core_right.homspace(), core_right_axes)?;
     fusion_contract_candidate_facts(
         axis_order,
-        plan,
+        CandidateRoute::of_candidate(plan),
         FusionContractMaterializationInputs {
             lhs_exact_identity_borrowable,
             rhs_exact_identity_borrowable,
@@ -1306,7 +1473,7 @@ where
     )?;
     let facts = fusion_contract_candidate_facts(
         axis_order,
-        &plan,
+        CandidateRoute::of_plan(&plan),
         FusionContractMaterializationInputs {
             lhs_exact_identity_borrowable,
             rhs_exact_identity_borrowable,
@@ -1386,43 +1553,16 @@ pub(crate) fn compile_tensorcontract_fusion_plan_from_ranks(
     lhs_source_conjugate: bool,
     rhs_source_conjugate: bool,
 ) -> Result<FusionContractPlan, OperationError> {
-    let axis_plan = TensorContractAxisPlan::compile(lhs_rank, rhs_rank, dst_rank, axes)?;
-    let lhs_open_rank = axis_plan.lhs_open_axes.len();
-    let lhs_contract_rank = axis_plan.lhs_contracting_axes.len();
-    let rhs_contract_rank = axis_plan.rhs_contracting_axes.len();
-    let rhs_open_rank = axis_plan.rhs_open_axes.len();
-    let core_dst_open_lhs_rank = lhs_open_rank;
-    let core_dst_open_rhs_rank = rhs_open_rank;
-    let core_output_rank = core_dst_open_lhs_rank + core_dst_open_rhs_rank;
-    let output_transform = TreeTransformOperation::permute(
-        axis_plan.output_axes[..dst_nout].to_vec(),
-        axis_plan.output_axes[dst_nout..].to_vec(),
-    );
-    Ok(FusionContractPlan {
-        orientation: FusionContractOrientation::LhsRhs,
-        lhs_transform: TreeTransformOperation::permute(
-            axis_plan.lhs_open_axes,
-            axis_plan.lhs_contracting_axes,
-        ),
-        rhs_transform: TreeTransformOperation::permute(
-            axis_plan.rhs_contracting_axes,
-            axis_plan.rhs_open_axes,
-        ),
-        core_axes: TensorContractSpecOwned::new(
-            (lhs_open_rank..lhs_open_rank + lhs_contract_rank).collect(),
-            (0..rhs_contract_rank).collect(),
-            (0..core_output_rank).collect(),
-        ),
-        output_transform,
-        core_dst_open_lhs_rank,
-        core_dst_open_rhs_rank,
-        lhs_open_rank,
-        lhs_contract_rank,
-        rhs_contract_rank,
-        rhs_open_rank,
+    CandidatePlan::from_ranks(
+        dst_nout,
+        dst_rank,
+        lhs_rank,
+        rhs_rank,
+        axes,
         lhs_source_conjugate,
         rhs_source_conjugate,
-    })
+    )
+    .map(|plan| plan.materialize())
 }
 
 #[cfg(test)]
@@ -1773,7 +1913,7 @@ mod tests {
             &lhs,
             &rhs,
             axis_order.clone(),
-            &plan,
+            &super::CandidatePlan::from_plan(&plan),
         )
         .unwrap();
         let exact = super::score_fusion_contract_candidate(

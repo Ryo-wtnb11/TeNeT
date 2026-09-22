@@ -5,6 +5,8 @@
 use std::fmt;
 use std::sync::Arc;
 
+use smallvec::SmallVec;
+
 const INVALID_RAW_AXIS_POSITION: usize = usize::MAX - 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
@@ -129,7 +131,10 @@ impl TreeTransformOperation {
         CodomainLevels: IntoIterator<Item = usize>,
         DomainLevels: IntoIterator<Item = usize>,
     {
-        let mut data = Vec::new();
+        // Why a stack buffer: the operation is rebuilt on every eager
+        // contraction plan, and its only heap value should be the shared
+        // `Arc<[usize]>` itself.
+        let mut data = SmallVec::<[usize; 32]>::new();
         data.extend(codomain_permutation);
         let codomain_permutation_end = data.len();
         data.extend(domain_permutation);
@@ -143,22 +148,23 @@ impl TreeTransformOperation {
             TreeTransformOperationKind::Permute | TreeTransformOperationKind::Braid
         ) {
             let rank = domain_permutation_end;
-            let mut raw_positions = vec![usize::MAX; rank];
-            for (position, &axis) in data[..domain_permutation_end].iter().enumerate() {
+            data.extend(std::iter::repeat_n(usize::MAX, rank));
+            for position in 0..domain_permutation_end {
+                let axis = data[position];
                 if axis >= rank {
                     continue;
                 }
-                if raw_positions[axis] != usize::MAX {
-                    raw_positions[axis] = INVALID_RAW_AXIS_POSITION;
+                let raw = &mut data[domain_levels_end + axis];
+                if *raw != usize::MAX {
+                    *raw = INVALID_RAW_AXIS_POSITION;
                     continue;
                 }
-                raw_positions[axis] = position;
+                *raw = position;
             }
-            data.extend(raw_positions);
         }
         Self {
             kind,
-            data: data.into(),
+            data: Arc::from(data.as_slice()),
             ends: [
                 codomain_permutation_end,
                 domain_permutation_end,

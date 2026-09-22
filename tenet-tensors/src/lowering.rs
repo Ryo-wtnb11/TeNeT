@@ -4,7 +4,7 @@ use tenet_core::{
 
 use crate::{OperationError, TreeTransformOperation, TreeTransformOperationKind};
 use tenet_operations::{
-    permutation_axes, OutputAxisOrder, TensorContractSpec, TensorTraceAxisSpec,
+    permutation_axes_inline, AxisVec, OutputAxisOrder, TensorContractSpec, TensorTraceAxisSpec,
 };
 
 #[cfg(test)]
@@ -245,9 +245,9 @@ pub(crate) fn lower_tensortrace_source_adjoint_axes_dyn(
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct LoweredTensorContractSpec {
-    lhs_contracting_axes: Vec<usize>,
-    rhs_contracting_axes: Vec<usize>,
-    output_axes: Vec<usize>,
+    lhs_contracting_axes: AxisVec,
+    rhs_contracting_axes: AxisVec,
+    output_axes: AxisVec,
     lhs_storage_conjugate: bool,
     rhs_storage_conjugate: bool,
 }
@@ -305,16 +305,16 @@ pub(crate) fn lower_tensorcontract_adjoint_axes(
         .ok_or(OperationError::ElementCountOverflow)?;
     Ok(LoweredTensorContractSpec {
         lhs_contracting_axes: if axes.lhs_conjugate() {
-            adjoint_tensor_axes(lhs_nout, lhs_nin, axes.lhs_contracting_axes())?
+            adjoint_tensor_axes_inline(lhs_nout, lhs_nin, axes.lhs_contracting_axes())?
         } else {
-            axes.lhs_contracting_axes().to_vec()
+            AxisVec::from_slice(axes.lhs_contracting_axes())
         },
         rhs_contracting_axes: if axes.rhs_conjugate() {
-            adjoint_tensor_axes(rhs_nout, rhs_nin, axes.rhs_contracting_axes())?
+            adjoint_tensor_axes_inline(rhs_nout, rhs_nin, axes.rhs_contracting_axes())?
         } else {
-            axes.rhs_contracting_axes().to_vec()
+            AxisVec::from_slice(axes.rhs_contracting_axes())
         },
-        output_axes: permutation_axes(axes.output_permutation(), core_output_rank)?,
+        output_axes: permutation_axes_inline(axes.output_permutation(), core_output_rank)?,
         lhs_storage_conjugate: axes.lhs_conjugate(),
         rhs_storage_conjugate: axes.rhs_conjugate(),
     })
@@ -343,6 +343,14 @@ pub(crate) fn adjoint_tensor_axes(
     nin: usize,
     axes: &[usize],
 ) -> Result<Vec<usize>, OperationError> {
+    adjoint_tensor_axes_inline(nout, nin, axes).map(AxisVec::into_vec)
+}
+
+fn adjoint_tensor_axes_inline(
+    nout: usize,
+    nin: usize,
+    axes: &[usize],
+) -> Result<AxisVec, OperationError> {
     axes.iter()
         .copied()
         .map(|axis| adjoint_tensor_axis(nout, nin, axis))

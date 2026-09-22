@@ -1,4 +1,10 @@
+use smallvec::SmallVec;
+
 use crate::OperationError;
+
+/// Rank-sized axis list kept on the stack up to rank 8 (PEPS/MPS ranks), so
+/// per-call axis arithmetic does not allocate.
+pub type AxisVec = SmallVec<[usize; 8]>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OutputAxisOrder<'a> {
@@ -121,9 +127,9 @@ impl<'a> TensorContractSpec<'a> {
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct TensorContractSpecOwned {
-    lhs_contracting_axes: Vec<usize>,
-    rhs_contracting_axes: Vec<usize>,
-    output_axes: Vec<usize>,
+    lhs_contracting_axes: AxisVec,
+    rhs_contracting_axes: AxisVec,
+    output_axes: AxisVec,
     lhs_conjugate: bool,
     rhs_conjugate: bool,
 }
@@ -147,6 +153,23 @@ impl TensorContractSpecOwned {
         lhs_contracting_axes: Vec<usize>,
         rhs_contracting_axes: Vec<usize>,
         output_axes: Vec<usize>,
+        lhs_conjugate: bool,
+        rhs_conjugate: bool,
+    ) -> Self {
+        Self::from_axis_vecs(
+            AxisVec::from_vec(lhs_contracting_axes),
+            AxisVec::from_vec(rhs_contracting_axes),
+            AxisVec::from_vec(output_axes),
+            lhs_conjugate,
+            rhs_conjugate,
+        )
+    }
+
+    /// Allocation-free constructor for rank-sized axis lists.
+    pub fn from_axis_vecs(
+        lhs_contracting_axes: AxisVec,
+        rhs_contracting_axes: AxisVec,
+        output_axes: AxisVec,
         lhs_conjugate: bool,
         rhs_conjugate: bool,
     ) -> Self {
@@ -200,6 +223,14 @@ pub fn permutation_axes(
     permutation: OutputAxisOrder<'_>,
     rank: usize,
 ) -> Result<Vec<usize>, OperationError> {
+    permutation_axes_inline(permutation, rank).map(AxisVec::into_vec)
+}
+
+/// [`permutation_axes`] without a heap allocation up to rank 8.
+pub fn permutation_axes_inline(
+    permutation: OutputAxisOrder<'_>,
+    rank: usize,
+) -> Result<AxisVec, OperationError> {
     match permutation {
         OutputAxisOrder::Identity => Ok((0..rank).collect()),
         OutputAxisOrder::Axes(axes) => {
@@ -209,7 +240,7 @@ pub fn permutation_axes(
                     rank,
                 });
             }
-            let mut seen = vec![false; rank];
+            let mut seen = SmallVec::<[bool; 16]>::from_elem(false, rank);
             for &axis in axes {
                 if axis >= rank || seen[axis] {
                     return Err(OperationError::InvalidPermutation {
@@ -219,7 +250,7 @@ pub fn permutation_axes(
                 }
                 seen[axis] = true;
             }
-            Ok(axes.to_vec())
+            Ok(AxisVec::from_slice(axes))
         }
     }
 }
