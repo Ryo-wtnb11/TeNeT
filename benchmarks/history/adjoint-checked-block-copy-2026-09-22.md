@@ -44,6 +44,20 @@ bytes. Pinned by `tenet/tests/adjoint_view_allocations.rs`
 many blocks; `first_lazy_materialization_allocates_once_per_payload_not_per_block`:
 3 calls).
 
+Above rank 8 the counts are no longer equal to main. Past eight non-unit axes,
+`CheckedBlockAxes` spills three buffers per operand, and the adapter's
+normalization scratch spills three more. Both are reused across blocks, so this
+is a fixed cost per op, not per block.
+
+| rank-10 U(1) c64, one block or many | main | #1399 |
+|---|---:|---:|
+| lazy + owned `add` | 3 | 12 |
+| lazy + lazy `add` | 3 | 12 |
+| first `data()` of a lazy adjoint | 3 | 9 |
+
+These counts are pinned by
+`above_rank_eight_the_block_stride_buffers_spill_once_per_op`.
+
 
 ### add_adjoint
 
@@ -126,3 +140,27 @@ many blocks; `first_lazy_materialization_allocates_once_per_payload_not_per_bloc
   validating two extents, against a 4-element per-element loop. It is paid 16
   times per `add_adjoint` call. The owned `add` noise reference moves by up
   to ±19 % at this size.
+
+## Recorded small-shape tradeoff (independent review)
+
+The review ran a kernel microprobe on eight blocks with a column-major
+destination and a transposed source, running Copy then `Axpy{1}` in f64. The
+host was loaded, so only the ratios are meaningful.
+
+| block | old ns | new ns | ratio |
+|---|---:|---:|---:|
+| 1×1 | 227 | 259 | 1.14 |
+| 2×2 | 436 | 662 | 1.52 |
+| 3×3 | 567 | 655 | 1.15 |
+| 4×4 | 733 | 722 | 0.99 |
+| 8×8 | 1721 | 957 | 0.55 |
+| 16×16 | 5500 | 1950 | 0.35 |
+
+- **Cost.** Blocks of 9 elements or fewer pay +2–14 ns per kernel call.
+- **Where it goes.** About half is `CheckedBlockAxes::fill`, a first O(rank)
+  pass before the adapter's own normalization. The other half is the adapter's
+  fixed per-call cost, which the lazy add pays twice per block: once for the lhs
+  pass and once for the rhs pass.
+- **Crossover.** The crossover is 4×4, and from 8×8 up the path is 0.35–0.55×.
+- **Follow-up.** The structural fix is a fused two-source checked walk plus a
+  single-pass normalized fill, filed as its own leaf. No size threshold is used.

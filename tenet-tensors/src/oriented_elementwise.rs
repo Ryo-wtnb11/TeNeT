@@ -412,6 +412,11 @@ where
 /// rank than the adapter's own normalization scratch, which drops them too.
 /// Every axis' stride is still converted, so an unrepresentable stride is an
 /// error before any write, as it was per element before.
+///
+/// Past eight non-unit axes the buffers spill to the heap: three per operand,
+/// once per op and reused across blocks, on top of the adapter's own three.
+/// The per-element kernel this replaced allocated nothing at any rank; the
+/// count is pinned in `tenet/tests/adjoint_view_allocations.rs`.
 #[derive(Default)]
 pub(crate) struct CheckedBlockAxes {
     shape: SmallVec<[usize; 8]>,

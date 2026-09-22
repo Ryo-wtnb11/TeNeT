@@ -323,3 +323,34 @@ fn lazy_adjoint_materialization_and_add_are_exact_on_fz2_u1_legs() {
     assert_exact_adjoint!(Complex64, [&leg, &other], [&dual]);
     assert_exact_adjoint!(Complex64, [&dual], [&leg, &other]);
 }
+
+/// Checked-Generic `add` (`host_add_impl`) and materialization on SU(3):
+/// `adj ⊗ adj → adj` has outer multiplicity two, so blocks that differ only
+/// by their vertex label must each keep their own entries.
+#[cfg(feature = "racah-generated")]
+#[test]
+fn lazy_adjoint_materialization_and_add_are_exact_on_su3_multiplicity_legs() {
+    use tenet::typed::SUNFusionRule;
+
+    let provider = Arc::new(SUNFusionRule::new(3).unwrap());
+    let adjoint = vec![2i64, 2];
+    let trivial = vec![0i64, 0];
+    let leg =
+        GradedSpace::try_new_with_arc(Arc::clone(&provider), [(adjoint.clone(), 2), (trivial, 1)])
+            .unwrap();
+    let other = GradedSpace::try_new_with_arc(Arc::clone(&provider), [(adjoint, 3)]).unwrap();
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let probe =
+        TensorMap::<_, f64>::from_block_fn(&runtime, [&leg, &other], [&leg], |_, _| 0.0).unwrap();
+    assert!(
+        (0..probe.block_count()).any(|index| probe
+            .block_fusion_trees(index)
+            .unwrap()
+            .codomain_vertices()
+            .iter()
+            .any(|vertex| vertex.get() == 2)),
+        "fixture must carry a Generic vertex key mu = 2"
+    );
+    assert_exact_adjoint!(f64, [&leg, &other], [&leg]);
+    assert_exact_adjoint!(Complex64, [&leg, &other], [&other, &leg]);
+}
