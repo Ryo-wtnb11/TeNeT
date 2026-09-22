@@ -659,10 +659,9 @@ fn a_warm_overwrite_transfers_and_allocates_nothing() {
         );
         assert!(after_plans.hits > plans.hits, "{}: vacuous", case.name);
         // #1348: the warm Host allocation count is a steady state — the
-        // same on every warm call. The Host route, including the
-        // inactive-region list `StorageContractResolution::new` converts, is
-        // compiled on every call, so this pins no per-call saving; only the
-        // device replay itself converts no layout.
+        // same on every warm call. The Host route is compiled on every call
+        // (#1359 removed its rank-sized allocations); the inactive-region
+        // list is rewritten in place in the lease's contract scratch.
         let host_allocations = [
             host_allocations::count(&mut call),
             host_allocations::count(&mut call),

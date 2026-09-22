@@ -52,16 +52,17 @@ pub(crate) enum Resolution<C = f64> {
 #[derive(Clone, Debug)]
 pub struct StorageContractResolution<C = f64> {
     pub(crate) route: StorageContractRoute<C>,
-    /// The core plan's inactive destination blocks as device regions, built
-    /// with the route so the device replay converts no layout and a
-    /// negatively strided inactive block is rejected at compile, before the
-    /// device lease. The resolution is compiled on every call, so this moves
-    /// the region list's allocations to compile time — it adds them to a
-    /// returning contraction that never zeroes — rather than removing them;
-    /// reusing the compiled resolution is the follow-up that removes them. Zeroed only where the destination is
-    /// not already zero (see `execute_storage_contract_resolution_on_cuda`).
+}
+
+impl<C: DenseBlockScalar> StorageContractRoute<C> {
+    /// The core plan whose GEMMs this route runs.
     #[cfg(feature = "cuda")]
-    pub(crate) core_zero_regions: Box<[tenet_dense::CudaRegion]>,
+    pub(crate) fn block_plan(&self) -> &FusionBlockContractPlan<C> {
+        match self {
+            Self::Core(plan) => plan,
+            Self::DynamicTree(artifact) => artifact.block_plan(),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -76,17 +77,13 @@ pub(crate) enum StorageContractRoute<C> {
 }
 
 impl<C: DenseBlockScalar> StorageContractResolution<C> {
+    /// A negatively strided inactive core block is rejected here, before the
+    /// device lease; the device replay converts the plan's inactive blocks
+    /// into its lease scratch only when it has to zero them.
     pub(crate) fn new(route: StorageContractRoute<C>) -> Result<Self, OperationError> {
         #[cfg(feature = "cuda")]
-        let core_zero_regions = super::dynamic::cuda::inactive_regions(match &route {
-            StorageContractRoute::Core(plan) => plan,
-            StorageContractRoute::DynamicTree(artifact) => artifact.block_plan(),
-        })?;
-        Ok(Self {
-            route,
-            #[cfg(feature = "cuda")]
-            core_zero_regions,
-        })
+        super::dynamic::cuda::validate_inactive_regions(route.block_plan())?;
+        Ok(Self { route })
     }
 
     /// True when the route needs the fermionic twist of the core-right

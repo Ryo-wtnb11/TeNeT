@@ -38,9 +38,14 @@ use crate::{DenseBlockScalar, OperationError, RecouplingCoefficientAction};
 /// Each buffer is narrowed to exactly the length the replay admits
 /// (`set_active_len`) rather than reallocated, so alternating operand sizes
 /// pay one allocation — one zero upload, #740 — per high-water mark only.
+///
+/// It also holds the host region list the replay zeroes a destination's
+/// inactive core blocks through, rewritten in place from the core plan on
+/// each call that zeroes.
 #[derive(Default)]
 pub struct CudaContractScratch {
     entries: Vec<ScratchEntry>,
+    zero_regions: Vec<CudaRegion>,
 }
 
 struct ScratchEntry {
@@ -71,21 +76,23 @@ impl CudaContractScratch {
     /// one: the next contraction grows what it needs again.
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.zero_regions = Vec::new();
     }
+}
 
-    fn entry<D: CudaScalar + 'static>(
-        &mut self,
-        context: u64,
-    ) -> Result<(&mut usize, &mut ScratchBuffers<D>), OperationError> {
+fn scratch_entry<D: CudaScalar + 'static>(
+    entries: &mut Vec<ScratchEntry>,
+    context: u64,
+) -> Result<(&mut usize, &mut ScratchBuffers<D>), OperationError> {
+    {
         let scalar = TypeId::of::<D>();
-        let index = match self
-            .entries
+        let index = match entries
             .iter()
             .position(|entry| entry.scalar == scalar && entry.context == context)
         {
             Some(index) => index,
             None => {
-                self.entries.push(ScratchEntry {
+                entries.push(ScratchEntry {
                     scalar,
                     context,
                     bytes: 0,
@@ -95,10 +102,10 @@ impl CudaContractScratch {
                         dst: None,
                     }),
                 });
-                self.entries.len() - 1
+                entries.len() - 1
             }
         };
-        let ScratchEntry { bytes, buffers, .. } = &mut self.entries[index];
+        let ScratchEntry { bytes, buffers, .. } = &mut entries[index];
         let buffers =
             buffers
                 .downcast_mut::<ScratchBuffers<D>>()
@@ -211,23 +218,25 @@ where
 {
     match &resolution.route {
         StorageContractRoute::Core(plan) => {
+            // Converted before the first submission, like every other check.
+            let regions = if dst_is_zeroed {
+                &[][..]
+            } else {
+                fill_inactive_regions(&mut scratch.zero_regions, plan)?
+            };
             plan.execute_direct_on_storage_prezeroed(
                 &mut CudaStorageGemm::new(ctx),
                 dst,
                 lhs,
                 rhs,
             )?;
-            if dst_is_zeroed {
-                return Ok(());
-            }
-            zero_regions(ctx, dst, &resolution.core_zero_regions)
+            zero_regions(ctx, dst, regions)
         }
         StorageContractRoute::DynamicTree(artifact) => execute_dynamic_tree_on_cuda(
             ctx,
             transforms,
             scratch,
             artifact,
-            &resolution.core_zero_regions,
             dst_structure,
             dst,
             dst_is_zeroed,
@@ -257,7 +266,6 @@ fn execute_dynamic_tree_on_cuda<D, C>(
     transforms: &mut CudaTreeTransformExecutor,
     scratch: &mut CudaContractScratch,
     artifact: &DynamicTreeExecutionArtifact<C>,
-    core_inactive_regions: &[CudaRegion],
     dst_structure: &Arc<BlockStructure>,
     dst: &mut CudaStorage<D>,
     dst_is_zeroed: bool,
@@ -290,13 +298,17 @@ where
     // The core destination is the retained scratch with an output transform,
     // otherwise `dst` itself; either way only a non-zeroed buffer needs its
     // inactive blocks zeroed.
+    let CudaContractScratch {
+        entries,
+        zero_regions: region_scratch,
+    } = scratch;
     let core_zero_regions = if artifact.core_dst.is_some() || !dst_is_zeroed {
-        core_inactive_regions
+        fill_inactive_regions(region_scratch, artifact.block_plan())?
     } else {
         &[]
     };
 
-    let (bytes, buffers) = scratch.entry::<D>(ctx.identity())?;
+    let (bytes, buffers) = scratch_entry::<D>(entries, ctx.identity())?;
     let ScratchBuffers {
         lhs: lhs_slot,
         rhs: rhs_slot,
@@ -396,30 +408,60 @@ fn materialized<D: CudaScalar>(
     })
 }
 
-/// The core plan's inactive destination blocks as device regions: the exact
-/// set a retained core-destination buffer must zero (the host clears the
-/// whole buffer instead, `prepare_zeroed_scratch_slot`).
-pub(crate) fn inactive_regions<C>(
+/// Why a negatively strided inactive block is rejected: a device region's
+/// strides and offset are unsigned (see [`CudaRegion`]).
+fn inactive_region_unsupported() -> OperationError {
+    OperationError::UnsupportedTensorContractScope {
+        message: "device contraction cannot zero a negatively strided destination block",
+    }
+}
+
+/// Rejects, at compile time and without building them, the core plan's
+/// inactive destination blocks no device region can express.
+pub(crate) fn validate_inactive_regions<C>(
     plan: &tenet_operations::FusionBlockContractPlan<C>,
-) -> Result<Box<[CudaRegion]>, OperationError>
+) -> Result<(), OperationError>
 where
     C: Copy + PartialEq + num_traits::One,
 {
-    let unsupported = || OperationError::UnsupportedTensorContractScope {
-        message: "device contraction cannot zero a negatively strided destination block",
-    };
-    plan.inactive_destination_regions()
-        .iter()
-        .map(|layout| {
-            let strides = layout
-                .block
-                .strides
-                .iter()
-                .map(|&stride| usize::try_from(stride).map_err(|_| unsupported()))
-                .collect::<Result<Vec<_>, _>>()?;
-            let offset = usize::try_from(layout.block.offset).map_err(|_| unsupported())?;
-            CudaRegion::new(layout.block.shape.clone(), strides, offset)
-                .map_err(OperationError::Dense)
-        })
-        .collect()
+    for layout in plan.inactive_destination_regions() {
+        if layout.block.offset < 0 || layout.block.strides.iter().any(|&stride| stride < 0) {
+            return Err(inactive_region_unsupported());
+        }
+    }
+    Ok(())
+}
+
+/// The core plan's inactive destination blocks as device regions: the exact
+/// set a retained core-destination buffer must zero (the host clears the
+/// whole buffer instead, `prepare_zeroed_scratch_slot`), written into
+/// `regions` in place.
+fn fill_inactive_regions<'a, C>(
+    regions: &'a mut Vec<CudaRegion>,
+    plan: &tenet_operations::FusionBlockContractPlan<C>,
+) -> Result<&'a [CudaRegion], OperationError>
+where
+    C: Copy + PartialEq + num_traits::One,
+{
+    let layouts = plan.inactive_destination_regions();
+    regions.truncate(layouts.len());
+    for (index, layout) in layouts.iter().enumerate() {
+        let block = &layout.block;
+        if block.offset < 0 || block.strides.iter().any(|&stride| stride < 0) {
+            return Err(inactive_region_unsupported());
+        }
+        // Checked non-negative just above, so the casts are exact.
+        let strides = block.strides.iter().map(|&stride| stride as usize);
+        let offset = block.offset as usize;
+        match regions.get_mut(index) {
+            Some(region) => region
+                .assign(&block.shape, strides, offset)
+                .map_err(OperationError::Dense)?,
+            None => regions.push(
+                CudaRegion::new(block.shape.clone(), strides.collect(), offset)
+                    .map_err(OperationError::Dense)?,
+            ),
+        }
+    }
+    Ok(regions)
 }

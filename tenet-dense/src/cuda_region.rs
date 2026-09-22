@@ -46,6 +46,29 @@ impl CudaRegion {
         })
     }
 
+    /// Rewrites this region in place, reusing its buffers, so a replay that
+    /// describes the same regions on every call allocates only when a region
+    /// outgrows the rank it had.
+    pub fn assign(
+        &mut self,
+        dims: &[usize],
+        strides: impl IntoIterator<Item = usize>,
+        offset: usize,
+    ) -> Result<(), DenseError> {
+        self.dims.clear();
+        self.dims.extend_from_slice(dims);
+        self.strides.clear();
+        self.strides.extend(strides);
+        self.offset = offset;
+        if self.dims.len() != self.strides.len() {
+            return Err(DenseError::RankMismatch {
+                shape: self.dims.len(),
+                strides: self.strides.len(),
+            });
+        }
+        Ok(())
+    }
+
     /// Compact column-major region of `dims` extents starting at `offset`.
     pub fn packed(dims: &[usize], offset: usize) -> Result<Self, DenseError> {
         let mut strides = Vec::with_capacity(dims.len());
@@ -213,6 +236,20 @@ mod tests {
     fn region_rank_disagreement_is_a_typed_rank_mismatch() {
         assert!(matches!(
             CudaRegion::new(vec![2, 3], vec![1], 0),
+            Err(DenseError::RankMismatch {
+                shape: 2,
+                strides: 1
+            })
+        ));
+    }
+
+    #[test]
+    fn an_assigned_region_equals_a_new_one_and_keeps_its_rank_check() {
+        let mut region = CudaRegion::new(vec![2, 3, 4], vec![1, 2, 6], 5).unwrap();
+        region.assign(&[3, 2], [2, 1], 9).unwrap();
+        assert_eq!(region, CudaRegion::new(vec![3, 2], vec![2, 1], 9).unwrap());
+        assert!(matches!(
+            region.assign(&[2, 3], [1], 0),
             Err(DenseError::RankMismatch {
                 shape: 2,
                 strides: 1
