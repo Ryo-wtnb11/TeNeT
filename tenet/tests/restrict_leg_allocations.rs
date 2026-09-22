@@ -164,6 +164,10 @@ fn restrict_leg_allocates_one_zeroed_payload_and_degeneracy_independent_scratch(
             measurement.zeroed_sizes
         );
     }
+    // The block copy's scratch is inline (#1362), so every call is the
+    // result's structural objects or its payload: the same count as the
+    // per-element kernel it replaced.
+    assert_eq!(small.allocations, 11);
     // Structural work does not grow with the degeneracy dimensions. The byte
     // budget is what rules out a second payload-sized buffer taken through
     // plain `alloc`/`realloc`, which the zeroed-size log cannot see.

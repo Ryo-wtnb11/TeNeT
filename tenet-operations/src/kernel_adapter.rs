@@ -1,6 +1,7 @@
 use core::ops::{Add, Mul};
 
 use num_traits::{One, Zero};
+use smallvec::SmallVec;
 
 use crate::host_scalar_kernels::{
     raw_strided_action, validate_raw_strided_bounds, RawStridedAction,
@@ -11,11 +12,12 @@ use crate::{
     RecouplingCoefficientAction,
 };
 
+/// Inline up to rank 8 so a fresh adapter per eager call allocates nothing.
 #[derive(Debug, Default)]
 pub(crate) struct FusedLayoutScratch {
-    dims: Vec<usize>,
-    dst_strides: Vec<isize>,
-    src_strides: Vec<isize>,
+    dims: SmallVec<[usize; 8]>,
+    dst_strides: SmallVec<[isize; 8]>,
+    src_strides: SmallVec<[isize; 8]>,
 }
 
 impl FusedLayoutScratch {
@@ -35,7 +37,7 @@ impl FusedLayoutScratch {
 #[derive(Debug, Default)]
 struct StridedKernelScratch {
     layout: FusedLayoutScratch,
-    index: Vec<usize>,
+    index: SmallVec<[usize; 8]>,
 }
 
 /// Borrowed view of a prebaked fused loop layout (issue #232).
@@ -2082,6 +2084,10 @@ mod tests {
             (vec![2, 3, 4], vec![1, 2, 6], 0, vec![35, 1, 5], 2 + 5),
             // Extent-one axes, single-state restriction.
             (vec![1, 4, 1, 3], vec![1, 1, 4, 4], 1, vec![1, 5, 20, 20], 4),
+            // Negative strides on the source (reversed read) and on one
+            // destination axis (reversed write).
+            (vec![3, 4], vec![1, 3], 0, vec![-1, -5], 40),
+            (vec![3, 4], vec![-1, 3], 2, vec![5, 1], 6),
             // Rank zero and an empty block.
             (vec![], vec![], 2, vec![], 7),
             (vec![2, 0, 3], vec![1, 2, 2], 0, vec![1, 5, 5], 0),
