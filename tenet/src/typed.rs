@@ -4393,12 +4393,12 @@ thread_local! {
         std::cell::Cell<Option<(usize, usize, usize)>> = const {
             std::cell::Cell::new(None)
         };
-    /// `(payload_zero_uploads, coefficient_uploads, kernels)`.
+    /// `(output_creations, coefficient_uploads, kernels)`.
     static CUDA_ARITHMETIC_OBSERVATION:
         std::cell::Cell<Option<(usize, usize, usize)>> = const {
             std::cell::Cell::new(None)
         };
-    /// `(qr_calls, factor_copies, selector_uploads, output_uploads,
+    /// `(qr_calls, factor_copies, selector_uploads, output_creations,
     /// assembly_gemms, live_route_scratch, peak_route_scratch)`.
     static CUDA_QR_OBSERVATION: std::cell::Cell<Option<CudaQrObservation>> = const {
             std::cell::Cell::new(None)
@@ -4443,11 +4443,11 @@ fn observe_cuda_svd_final_storage_creation() {
 }
 
 #[cfg(all(test, feature = "cuda"))]
-fn observe_cuda_arithmetic(zero_uploads: usize, coefficient_uploads: usize, kernels: usize) {
+fn observe_cuda_arithmetic(output_creations: usize, coefficient_uploads: usize, kernels: usize) {
     CUDA_ARITHMETIC_OBSERVATION.with(|observation| {
-        if let Some((zeros, coefficients, calls)) = observation.get() {
+        if let Some((outputs, coefficients, calls)) = observation.get() {
             observation.set(Some((
-                zeros + zero_uploads,
+                outputs + output_creations,
                 coefficients + coefficient_uploads,
                 calls + kernels,
             )));
@@ -4497,7 +4497,7 @@ pub(crate) fn observe_cuda_qr_assembly_gemm() {
 }
 
 #[cfg(all(test, feature = "cuda"))]
-fn observe_cuda_qr_output_upload() {
+fn observe_cuda_qr_output_creation() {
     update_cuda_qr_observation(|(qr, copies, selectors, outputs, gemms, live, peak)| {
         (qr, copies, selectors, outputs + 1, gemms, live, peak)
     });
@@ -11940,10 +11940,10 @@ where
             let cuda = &mut *lease;
             let mut left_data = CudaStorage::<D>::zeros(cuda, left_len)?;
             #[cfg(test)]
-            observe_cuda_qr_output_upload();
+            observe_cuda_qr_output_creation();
             let mut right_data = CudaStorage::<D>::zeros(cuda, right_len)?;
             #[cfg(test)]
-            observe_cuda_qr_output_upload();
+            observe_cuda_qr_output_creation();
             for route in &plan.routes {
                 let source_region = &plan.source_regions[route.source];
                 let left_region = &plan.left_regions[route.left];
