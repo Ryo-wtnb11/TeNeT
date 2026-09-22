@@ -1,10 +1,11 @@
 use core::ops::{Add, Mul, Range};
 
 use num_traits::{One, Zero};
+use smallvec::SmallVec;
 use tenet_core::{BlockKey, BlockStructure, FusionTreePairKey, SectorId};
 use tenet_operations::{
     bilinear_raw_strided_kernel_mapped, tensoradd_raw_strided_kernel_mapped, ConjugateValue,
-    OperationError, RecouplingCoefficientAction, WideScalar,
+    OperationError, RecouplingCoefficientAction, StridedHostKernelAdapter, WideScalar,
 };
 
 use crate::FusionOperand;
@@ -135,6 +136,9 @@ where
             tensor: "oriented degeneracy restriction storage",
         });
     }
+    let mut kernels = StridedHostKernelAdapter::default();
+    let mut destination_strides = SmallVec::<[isize; 8]>::new();
+    let mut source_strides = SmallVec::<[isize; 8]>::new();
     for destination_index in 0..destination.block_count() {
         let destination_block = destination.block(destination_index)?;
         let BlockKey::FusionTree(logical_key) = destination_block.key() else {
@@ -146,14 +150,11 @@ where
             .storage_space()
             .structure()
             .block(source.storage_block_index(logical_key)?)?;
-        let destination_stride = |axis| {
-            isize::try_from(destination_block.strides()[axis])
-                .map_err(|_| OperationError::ElementCountOverflow)
+        let stride = |stride: usize| {
+            isize::try_from(stride).map_err(|_| OperationError::ElementCountOverflow)
         };
-        let source_stride = |axis| {
-            isize::try_from(source_block.strides()[source.storage_axis(axis)?])
-                .map_err(|_| OperationError::ElementCountOverflow)
-        };
+        destination_strides.clear();
+        source_strides.clear();
         let mut source_offset = source_block.offset();
         for (axis, table) in logical_starts.iter().take(destination.rank()).enumerate() {
             let logical_start = match table {
@@ -180,15 +181,15 @@ where
                         .ok_or(OperationError::ElementCountOverflow)?,
                 )
                 .ok_or(OperationError::ElementCountOverflow)?;
-            destination_stride(axis)?;
-            source_stride(axis)?;
+            destination_strides.push(stride(destination_block.strides()[axis])?);
+            source_strides.push(stride(source_block.strides()[storage_axis])?);
         }
-        tensoradd_raw_strided_kernel_mapped(
+        kernels.tensoradd_strided_checked(
             destination_data,
             source_data,
             destination_block.shape(),
-            destination_stride,
-            source_stride,
+            &destination_strides,
+            &source_strides,
             checked_offset(destination_block.offset())?,
             checked_offset(source_offset)?,
             source.storage_conjugate(),
@@ -385,13 +386,14 @@ where
             source_offset,
         });
     }
+    let mut kernels = StridedHostKernelAdapter::default();
     for block in &blocks {
-        tensoradd_raw_strided_kernel_mapped(
+        kernels.tensoradd_strided_checked(
             destination_data,
             source_data,
             &block.shape,
-            |axis| Ok(block.destination_strides[axis]),
-            |axis| Ok(block.source_strides[axis]),
+            &block.destination_strides,
+            &block.source_strides,
             block.destination_offset,
             block.source_offset,
             source.storage_conjugate(),

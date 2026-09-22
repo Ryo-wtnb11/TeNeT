@@ -391,7 +391,7 @@ where
 }
 
 #[derive(Clone, Copy, Debug)]
-enum RawStridedAction<T> {
+pub(crate) enum RawStridedAction<T> {
     /// `alpha == 1, beta == 0`: bit-exact copy (or conjugate). Why not
     /// `CopyScale { alpha: 1 }`: `1 * (inf + 0i)` is `inf + NaN i` for complex
     /// scalars, so a plain copy must not multiply (TensorKit skips the scale
@@ -409,7 +409,7 @@ enum RawStridedAction<T> {
     },
 }
 
-fn raw_strided_action<T>(alpha: T, beta: T) -> RawStridedAction<T>
+pub(crate) fn raw_strided_action<T>(alpha: T, beta: T) -> RawStridedAction<T>
 where
     T: Copy + PartialEq + Zero + One,
 {

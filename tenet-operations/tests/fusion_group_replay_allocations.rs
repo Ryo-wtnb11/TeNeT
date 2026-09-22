@@ -131,3 +131,45 @@ fn warmed_irregular_group_replay_allocates_nothing() {
     assert_eq!(ALLOCATIONS.get(), 0);
     assert_eq!(dst, [6.0]);
 }
+
+/// A fresh adapter per eager call, as degeneracy restriction and scatter
+/// build it, must not allocate its normalization or traversal scratch up to
+/// rank 8: the per-call cost is then independent of the call count.
+#[test]
+fn a_fresh_adapter_checked_block_copy_allocates_nothing_up_to_rank_eight() {
+    let shape = [2usize; 8];
+    let mut dst_strides = [0isize; 8];
+    let mut src_strides = [0isize; 8];
+    let (mut dst_stride, mut src_stride) = (1isize, 1isize);
+    for axis in 0..8 {
+        dst_strides[axis] = dst_stride;
+        src_strides[axis] = src_stride;
+        dst_stride *= 2;
+        // A window of a parent three wide on every axis: nothing fuses.
+        src_stride *= 3;
+    }
+    let src: Vec<f64> = (0..3usize.pow(8)).map(|value| value as f64).collect();
+    let mut dst = vec![0.0; 1 << 8];
+
+    COUNTING.with(|counting| counting.set(true));
+    ALLOCATIONS.with(|count| count.set(0));
+    for (alpha, beta) in [(1.0, 0.0), (1.0, 1.0), (2.0, 0.5)] {
+        StridedHostKernelAdapter::default()
+            .tensoradd_strided_checked(
+                &mut dst,
+                &src,
+                &shape,
+                &dst_strides,
+                &src_strides,
+                0,
+                1,
+                false,
+                alpha,
+                beta,
+            )
+            .unwrap();
+    }
+    COUNTING.with(|counting| counting.set(false));
+
+    assert_eq!(ALLOCATIONS.with(Cell::get), 0);
+}
