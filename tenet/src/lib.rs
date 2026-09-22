@@ -39,7 +39,11 @@
 //! including `*_overwrite_into` destinations and reused scratch, is ordered
 //! before every later read or write from any thread; building a device
 //! Runtime fails if CubeCL was already configured with more streams. GPU work
-//! of different threads therefore never overlaps. Consequently no
+//! of different threads therefore never overlaps. The setting is
+//! process-wide: it overrides a `cubecl.toml` value without notice, stays
+//! fixed even if opening the device then fails, also gives every other CubeCL
+//! client in the process (wgpu included) one stream, and makes a later
+//! `CubeClRuntimeConfig::set` panic. Consequently no
 //! general lock-free, overlap, or outer-thread scaling guarantee is made. See
 //! `docs/backend_policy.md` for the ownership and synchronization model.
 //!

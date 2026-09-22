@@ -143,6 +143,23 @@ process, provided TeNeT opens its device first. If something else loaded
 CubeCL's configuration first with more than one stream, opening a device
 fails with `DenseError::Unsupported` rather than running unordered.
 
+Enqueue order follows happens-before because CubeCL's server queue is FIFO
+and a vendor call drains it first: raw sessions, memsets and scalar downloads
+call `flush_cubecl`, while cuTENSOR and cuBLAS rely on the blocking
+`get_resource` in Tenferro's `typed_device_ptr`. That function skips the
+blocking call for a buffer created on the calling thread whose address it
+has cached, so a CubeCL kernel still queued unflushed into such a buffer can
+reach the stream after a later vendor call on it (tensor4all/tenferro-rs#1868;
+independent of the stream count, and possible within one thread). In TeNeT
+only the empty-contraction scale or fill of an owned destination queues such
+a kernel.
+
+Process-wide side effects: a `cubecl.toml` `streaming.max_streams` value is
+overridden without notice; the setting stays fixed even when opening the
+device then fails (for example without a GPU); every other CubeCL client in
+the process, including wgpu, also gets one stream; and a later
+`CubeClRuntimeConfig::set` panics, since CubeCL allows setting it only once.
+
 Cost: GPU work of different threads no longer overlaps on the device (it
 serializes on the stream, not only at enqueue), and Tenferro's cross-thread
 host `synchronize()` no longer happens because every thread shares one slot.

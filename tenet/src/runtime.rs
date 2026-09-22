@@ -1014,6 +1014,12 @@ pub(crate) struct RuntimeExecutionConfig {
 /// of every thread, TeNeT or not, runs in enqueue order and never overlaps on
 /// the GPU. Building a device Runtime fails with an unsupported error if
 /// CubeCL's configuration was already loaded with more streams.
+/// Process-wide side effects: a `cubecl.toml` `streaming.max_streams` value is
+/// overridden without notice, the setting stays fixed even if opening the
+/// device then fails, every other CubeCL client in the process (wgpu
+/// included) also gets one stream, and a later `CubeClRuntimeConfig::set`
+/// panics. One ordering residual, independent of the stream count, is tracked
+/// in tensor4all/tenferro-rs#1868 (see `docs/backend_policy.md`).
 ///
 /// # Examples
 ///

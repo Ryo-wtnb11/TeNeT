@@ -394,12 +394,21 @@ static NEXT_CONTEXT_IDENTITY: AtomicU64 = AtomicU64::new(1);
 /// later command writes it (tensor4all/cubecl#16). Once a stream has synced
 /// past a buffer's bind, it reads a later write to that buffer, or overwrites
 /// a buffer another stream still reads, without waiting. With one stream all
-/// work runs in enqueue order, which follows happens-before between threads
-/// (the CubeCL server queue is FIFO, Tenferro flushes it before a vendor call
-/// on the same stream), so that cursor is never consulted for correctness.
-/// Tenferro sizes its vendor-stream slots from the same setting, so cuBLAS,
-/// cuSOLVER and cuTENSOR share the stream too, and its cross-slot host sync
-/// disappears.
+/// work runs in enqueue order, so that cursor is never consulted for
+/// correctness. Tenferro sizes its vendor-stream slots from the same setting,
+/// so cuBLAS, cuSOLVER and cuTENSOR share the stream too, and its cross-slot
+/// host sync disappears.
+///
+/// Enqueue order follows happens-before between threads because CubeCL's
+/// server queue is FIFO and a vendor call first drains it: raw sessions
+/// (cuSOLVER), memsets and scalar downloads call `flush_cubecl`; cuTENSOR and
+/// cuBLAS rely on the blocking `get_resource` in Tenferro's `typed_device_ptr`.
+/// Residual (tensor4all/tenferro-rs#1868, independent of the stream count and
+/// present within one thread too): `typed_device_ptr` skips `get_resource`
+/// for a buffer created on the calling thread whose address it has cached, so
+/// a CubeCL kernel still queued unflushed into that buffer can reach the
+/// stream after a later vendor call on it. In TeNeT only the empty-contraction
+/// scale or fill of an owned destination can queue such a kernel.
 ///
 /// Why not a TeNeT-side sync per overwrite: it covers only destinations TeNeT
 /// knows it rewrote, not scratch, workspaces or pooled intermediates read in
