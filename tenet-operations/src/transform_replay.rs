@@ -30,8 +30,8 @@ use crate::transform_structure::{
 use crate::{
     tensoradd_raw_strided_kernel, tensoradd_raw_strided_kernel_trusted, BakedFusedLayout,
     ConjugateValue, DenseRecouplingScalar, HostAllocator, HostKernelAdapter, OperationError,
-    RecouplingCoefficientAction, ReportsPlacement, TensorAddStructure, TreeTransformBlock,
-    TreeTransformLayout, TreeTransformLayoutTable, TreeTransformReplayProfile,
+    RecouplingCoefficientAction, ReportsPlacement, TensorAddStructure, TransformScale,
+    TreeTransformBlock, TreeTransformLayout, TreeTransformLayoutTable, TreeTransformReplayProfile,
     TreeTransformStructure,
 };
 
@@ -2730,7 +2730,7 @@ where
                         dst_start,
                         src_data,
                         storage_conjugate,
-                        alpha.scale_by_coefficient(coefficients[item.coefficient]),
+                        TransformScale::new(alpha, coefficients[item.coefficient]),
                         fused_index,
                     )?;
                 }
@@ -3569,7 +3569,7 @@ fn write_uninit_layout_zero<D: Zero + Copy>(
 /// `dst_start`; layout offsets are rebased exactly as the initialised parallel
 /// replay rebases them.
 #[allow(clippy::too_many_arguments)]
-fn write_uninit_layout_from_source<D>(
+fn write_uninit_layout_from_source<D, C>(
     layouts: &TreeTransformLayoutTable,
     dst_index: usize,
     src_index: usize,
@@ -3577,25 +3577,87 @@ fn write_uninit_layout_from_source<D>(
     dst_start: isize,
     src: &[D],
     conjugate: bool,
-    scale: D,
+    scale: TransformScale<D, C>,
     fused_index: &mut [usize],
 ) -> Result<(), OperationError>
 where
-    D: Copy + Mul<D, Output = D> + ConjugateValue,
+    D: Copy
+        + Mul<D, Output = D>
+        + One
+        + PartialEq
+        + ConjugateValue
+        + RecouplingCoefficientAction<C>,
+    C: Copy,
+{
+    // The element op is chosen once per block, with the structural coefficient
+    // still in its own type; see `TransformScale`.
+    if scale.is_identity() {
+        return write_uninit_layout_mapped(
+            layouts,
+            dst_index,
+            src_index,
+            dst,
+            dst_start,
+            src,
+            fused_index,
+            move |value: D| value.maybe_conj(conjugate),
+        );
+    }
+    match scale {
+        TransformScale::Structural(coefficient) => write_uninit_layout_mapped(
+            layouts,
+            dst_index,
+            src_index,
+            dst,
+            dst_start,
+            src,
+            fused_index,
+            move |value: D| {
+                value
+                    .maybe_conj(conjugate)
+                    .scale_by_coefficient(coefficient)
+            },
+        ),
+        TransformScale::Data(scale) => write_uninit_layout_mapped(
+            layouts,
+            dst_index,
+            src_index,
+            dst,
+            dst_start,
+            src,
+            fused_index,
+            move |value: D| scale * value.maybe_conj(conjugate),
+        ),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_uninit_layout_mapped<D, F>(
+    layouts: &TreeTransformLayoutTable,
+    dst_index: usize,
+    src_index: usize,
+    dst: &mut [MaybeUninit<D>],
+    dst_start: isize,
+    src: &[D],
+    fused_index: &mut [usize],
+    map: F,
+) -> Result<(), OperationError>
+where
+    D: Copy,
+    F: Fn(D) -> D,
 {
     let dst_layout = layouts.entry(dst_index);
     let src_layout = layouts.entry(src_index);
     if let Some(baked) = layouts.fused_baked(dst_index) {
-        write_fused_uninit(
+        return write_fused_uninit(
             baked,
             dst,
             src,
             dst_layout.offset - dst_start,
             src_layout.offset,
             fused_index,
-            move |value| scale * value.maybe_conj(conjugate),
-        )?;
-        return Ok(());
+            map,
+        );
     }
     for linear in 0..dst_layout.element_count {
         let dst_index = layout_linear_offset(
@@ -3610,7 +3672,7 @@ where
             layouts.strides(src_layout),
             src_layout.offset,
         )?;
-        dst[dst_index].write(scale * src[src_index].maybe_conj(conjugate));
+        dst[dst_index].write(map(src[src_index]));
     }
     Ok(())
 }
@@ -3627,22 +3689,39 @@ fn write_uninit_layout_from_packed<D>(
     fused_index: &mut [usize],
 ) -> Result<(), OperationError>
 where
-    D: Copy + Mul<D, Output = D>,
+    D: Copy + Mul<D, Output = D> + One + PartialEq,
 {
     let layout = layouts.entry(dst_index);
+    // Why the identity arm: `1 * (inf + 0i)` is `inf + NaN i`, so the scatter
+    // must copy rather than multiply when the caller's alpha is one.
+    let identity = alpha.is_one();
     if let Some(baked) = layouts.fused_baked(dst_index) {
         // The scatter role bakes src = packed (column-major) strides, so the
         // fused walk over `packed` starting at `packed_offset` reproduces the
         // odometer's `packed[packed_offset + linear]` column-major gather.
-        write_fused_uninit(
-            baked,
-            dst,
-            packed,
-            layout.offset - dst_start,
-            offset_to_isize(packed_offset)?,
-            fused_index,
-            move |value| alpha * value,
-        )?;
+        let dst_offset = layout.offset - dst_start;
+        let src_offset = offset_to_isize(packed_offset)?;
+        if identity {
+            write_fused_uninit(
+                baked,
+                dst,
+                packed,
+                dst_offset,
+                src_offset,
+                fused_index,
+                |v| v,
+            )?;
+        } else {
+            write_fused_uninit(
+                baked,
+                dst,
+                packed,
+                dst_offset,
+                src_offset,
+                fused_index,
+                move |value| alpha * value,
+            )?;
+        }
         return Ok(());
     }
     for linear in 0..layout.element_count {
@@ -3652,7 +3731,8 @@ where
             layouts.strides(layout),
             layout.offset - dst_start,
         )?;
-        dst[dst_index].write(alpha * packed[packed_offset + linear]);
+        let value = packed[packed_offset + linear];
+        dst[dst_index].write(if identity { value } else { alpha * value });
     }
     Ok(())
 }
@@ -4233,37 +4313,25 @@ where
             let dst_layout = layouts.entry(item.dst_layout);
             let src_layout = layouts.entry(item.src_layout);
             let baked = layouts.fused_baked(item.dst_layout);
-            let scale = alpha.scale_by_coefficient(coefficients[item.coefficient]);
-            match mode {
-                DestinationMode::Axpby(beta) => kernels.add_strided_baked_with_index(
-                    &mut zero_strides,
-                    dst_data,
-                    src_data,
-                    layouts.shape(dst_layout),
-                    layouts.strides(dst_layout),
-                    layouts.strides(src_layout),
-                    dst_layout.offset - dst_start,
-                    src_layout.offset,
-                    storage_conjugate,
-                    scale,
-                    beta,
-                    baked,
-                    &mut *fused_index,
-                )?,
-                DestinationMode::Overwrite => kernels.copy_scale_strided_baked_with_index(
-                    dst_data,
-                    src_data,
-                    layouts.shape(dst_layout),
-                    layouts.strides(dst_layout),
-                    layouts.strides(src_layout),
-                    dst_layout.offset - dst_start,
-                    src_layout.offset,
-                    storage_conjugate,
-                    scale,
-                    baked,
-                    &mut *fused_index,
-                )?,
-            }
+            let scale = TransformScale::new(alpha, coefficients[item.coefficient]);
+            kernels.transform_strided_baked(
+                &mut zero_strides,
+                dst_data,
+                src_data,
+                layouts.shape(dst_layout),
+                layouts.strides(dst_layout),
+                layouts.strides(src_layout),
+                dst_layout.offset - dst_start,
+                src_layout.offset,
+                storage_conjugate,
+                scale,
+                match mode {
+                    DestinationMode::Axpby(beta) => Some(beta),
+                    DestinationMode::Overwrite => None,
+                },
+                baked,
+                Some(&mut *fused_index),
+            )?;
         }
         return Ok(());
     }
@@ -5000,70 +5068,31 @@ fn tree_transform_single_with_strided_kernel<A, D, C>(
 ) -> Result<(), OperationError>
 where
     A: HostKernelAdapter<D>,
-    D: Copy + RecouplingCoefficientAction<C>,
+    D: Copy + One + PartialEq + RecouplingCoefficientAction<C>,
     C: Copy,
 {
     let dst_layout = layouts.entry(dst_index);
     let src_layout = layouts.entry(src_index);
     let shape = layouts.shape(dst_layout);
     let baked = layouts.fused_baked(dst_index);
-    let scale = alpha.scale_by_coefficient(coefficient);
-    match (mode, fused_index) {
-        (DestinationMode::Axpby(beta), Some(index)) => kernels.add_strided_baked_with_index(
-            zero_strides,
-            dst_data,
-            src_data,
-            shape,
-            layouts.strides(dst_layout),
-            layouts.strides(src_layout),
-            dst_layout.offset,
-            src_layout.offset,
-            source_conjugate,
-            scale,
-            beta,
-            baked,
-            index,
-        ),
-        (DestinationMode::Overwrite, Some(index)) => kernels.copy_scale_strided_baked_with_index(
-            dst_data,
-            src_data,
-            shape,
-            layouts.strides(dst_layout),
-            layouts.strides(src_layout),
-            dst_layout.offset,
-            src_layout.offset,
-            source_conjugate,
-            scale,
-            baked,
-            index,
-        ),
-        (DestinationMode::Axpby(beta), None) => kernels.add_strided_baked(
-            zero_strides,
-            dst_data,
-            src_data,
-            shape,
-            layouts.strides(dst_layout),
-            layouts.strides(src_layout),
-            dst_layout.offset,
-            src_layout.offset,
-            source_conjugate,
-            scale,
-            beta,
-            baked,
-        ),
-        (DestinationMode::Overwrite, None) => kernels.copy_scale_strided_baked(
-            dst_data,
-            src_data,
-            shape,
-            layouts.strides(dst_layout),
-            layouts.strides(src_layout),
-            dst_layout.offset,
-            src_layout.offset,
-            source_conjugate,
-            scale,
-            baked,
-        ),
-    }
+    kernels.transform_strided_baked(
+        zero_strides,
+        dst_data,
+        src_data,
+        shape,
+        layouts.strides(dst_layout),
+        layouts.strides(src_layout),
+        dst_layout.offset,
+        src_layout.offset,
+        source_conjugate,
+        TransformScale::new(alpha, coefficient),
+        match mode {
+            DestinationMode::Axpby(beta) => Some(beta),
+            DestinationMode::Overwrite => None,
+        },
+        baked,
+        fused_index,
+    )
 }
 
 /// Applies a batch of Multi-block recoupling matrices over shared flat scratch

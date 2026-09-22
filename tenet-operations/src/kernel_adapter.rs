@@ -9,7 +9,7 @@ use crate::host_scalar_kernels::{
 use crate::{
     axpby_raw_strided_kernel_trusted, scale_raw_strided_kernel_trusted,
     tensoradd_raw_strided_kernel_trusted, ConjugateValue, OperationError,
-    RecouplingCoefficientAction,
+    RecouplingCoefficientAction, TransformScale,
 };
 
 /// Inline up to rank 8 so a fresh adapter per eager call allocates nothing.
@@ -766,6 +766,95 @@ pub trait HostKernelAdapter<T> {
         )
     }
 
+    /// `dst = scale * op(src) + beta * dst` over one tree-transform block,
+    /// with the structural coefficient still in its own type.
+    ///
+    /// Why this exists next to [`add_strided_baked`](Self::add_strided_baked):
+    /// those take the scale already promoted to the payload type `T`, which
+    /// turns a real coefficient into a complex multiply. `beta` is `None` for
+    /// an overwrite (the destination is never read) and `Some` for an
+    /// accumulate. The default promotes and forwards, so adapters that cannot
+    /// exploit a real coefficient keep their current behavior.
+    #[allow(clippy::too_many_arguments)]
+    fn transform_strided_baked<C>(
+        &mut self,
+        zero_strides: &mut Vec<isize>,
+        dst_data: &mut [T],
+        src_data: &[T],
+        shape: &[usize],
+        dst_strides: &[isize],
+        src_strides: &[isize],
+        dst_offset: isize,
+        src_offset: isize,
+        source_conjugate: bool,
+        scale: TransformScale<T, C>,
+        beta: Option<T>,
+        baked: Option<BakedFusedLayout<'_>>,
+        index: Option<&mut [usize]>,
+    ) -> Result<(), OperationError>
+    where
+        C: Copy,
+        T: RecouplingCoefficientAction<C> + One + PartialEq,
+    {
+        let alpha = scale.into_data();
+        match (beta, index) {
+            (Some(beta), Some(index)) => self.add_strided_baked_with_index(
+                zero_strides,
+                dst_data,
+                src_data,
+                shape,
+                dst_strides,
+                src_strides,
+                dst_offset,
+                src_offset,
+                source_conjugate,
+                alpha,
+                beta,
+                baked,
+                index,
+            ),
+            (Some(beta), None) => self.add_strided_baked(
+                zero_strides,
+                dst_data,
+                src_data,
+                shape,
+                dst_strides,
+                src_strides,
+                dst_offset,
+                src_offset,
+                source_conjugate,
+                alpha,
+                beta,
+                baked,
+            ),
+            (None, Some(index)) => self.copy_scale_strided_baked_with_index(
+                dst_data,
+                src_data,
+                shape,
+                dst_strides,
+                src_strides,
+                dst_offset,
+                src_offset,
+                source_conjugate,
+                alpha,
+                baked,
+                index,
+            ),
+            (None, None) => self.copy_scale_strided_baked(
+                dst_data,
+                src_data,
+                shape,
+                dst_strides,
+                src_strides,
+                dst_offset,
+                src_offset,
+                source_conjugate,
+                alpha,
+                baked,
+            ),
+        }
+    }
+
     /// `dst = beta * dst` over a strided block (inactive-block scale
     /// primitive).
     fn scale_strided(
@@ -962,25 +1051,35 @@ impl StridedHostKernelAdapter {
         validate_strided_ranks(shape, dst_strides, src_strides)?;
         if beta.is_zero() || beta.is_one() {
             let assign = beta.is_zero();
-            self.fused_pair_baked_dispatch(
-                index,
-                baked,
-                dst_data,
-                src_data,
-                shape,
-                dst_strides,
-                src_strides,
-                dst_offset,
-                src_offset,
-                move |dst, value| {
-                    if assign {
-                        *dst = value;
-                    } else {
-                        *dst = *dst + value;
-                    }
-                },
-                move |value: T| alpha * value.maybe_conj(source_conjugate),
-            )?;
+            macro_rules! run {
+                ($op:expr) => {
+                    self.fused_pair_baked_dispatch(
+                        index,
+                        baked,
+                        dst_data,
+                        src_data,
+                        shape,
+                        dst_strides,
+                        src_strides,
+                        dst_offset,
+                        src_offset,
+                        move |dst: &mut T, value| {
+                            if assign {
+                                *dst = value;
+                            } else {
+                                *dst = *dst + value;
+                            }
+                        },
+                        $op,
+                    )
+                };
+            }
+            // Why the identity arm: see `copy_scale_strided_baked_impl`.
+            if alpha.is_one() {
+                run!(move |value: T| value.maybe_conj(source_conjugate))?;
+            } else {
+                run!(move |value: T| alpha * value.maybe_conj(source_conjugate))?;
+            }
             zero_strides.clear();
             return Ok(());
         }
@@ -1027,25 +1126,34 @@ impl StridedHostKernelAdapter {
         validate_strided_ranks(shape, dst_strides, src_strides)?;
         if beta.is_zero() || beta.is_one() {
             let assign = beta.is_zero();
-            return self.fused_pair_baked_dispatch(
-                index,
-                baked,
-                dst_data,
-                src_data,
-                shape,
-                dst_strides,
-                src_strides,
-                dst_offset,
-                src_offset,
-                move |dst, value| {
-                    if assign {
-                        *dst = value;
-                    } else {
-                        *dst = *dst + value;
-                    }
-                },
-                move |value: T| alpha * value,
-            );
+            macro_rules! run {
+                ($op:expr) => {
+                    self.fused_pair_baked_dispatch(
+                        index,
+                        baked,
+                        dst_data,
+                        src_data,
+                        shape,
+                        dst_strides,
+                        src_strides,
+                        dst_offset,
+                        src_offset,
+                        move |dst: &mut T, value| {
+                            if assign {
+                                *dst = value;
+                            } else {
+                                *dst = *dst + value;
+                            }
+                        },
+                        $op,
+                    )
+                };
+            }
+            // Why the identity arm: see `copy_scale_strided_baked_impl`.
+            if alpha.is_one() {
+                return run!(|value: T| value);
+            }
+            return run!(move |value: T| alpha * value);
         }
         axpby_raw_strided_kernel_trusted(
             dst_data,
@@ -1086,19 +1194,135 @@ impl StridedHostKernelAdapter {
             + strided_kernel::MaybeSendSync,
     {
         validate_strided_ranks(shape, dst_strides, src_strides)?;
-        self.fused_pair_baked_dispatch(
-            index,
-            baked,
-            dst_data,
-            src_data,
-            shape,
-            dst_strides,
-            src_strides,
-            dst_offset,
-            src_offset,
-            |dst, value| *dst = value,
-            move |value: T| alpha * value.maybe_conj(source_conjugate),
-        )
+        macro_rules! run {
+            ($op:expr) => {
+                self.fused_pair_baked_dispatch(
+                    index,
+                    baked,
+                    dst_data,
+                    src_data,
+                    shape,
+                    dst_strides,
+                    src_strides,
+                    dst_offset,
+                    src_offset,
+                    |dst: &mut T, value| *dst = value,
+                    $op,
+                )
+            };
+        }
+        // Why the identity arm: `1 * (inf + 0i)` is `inf + NaN i`, so a pack or
+        // scatter at alpha = 1 must copy rather than multiply.
+        if alpha.is_one() {
+            return run!(move |value: T| value.maybe_conj(source_conjugate));
+        }
+        run!(move |value: T| alpha * value.maybe_conj(source_conjugate))
+    }
+
+    /// The structural-coefficient element op, chosen once per block.
+    ///
+    /// The three source forms are TensorKit's: no scale at all for `One()`, a
+    /// componentwise `payload * sectorscalar` for a real coefficient, and a
+    /// payload-type multiply only when `α` has already been folded in.
+    #[allow(clippy::too_many_arguments)]
+    fn transform_strided_baked_impl<T, C>(
+        &mut self,
+        dst_data: &mut [T],
+        src_data: &[T],
+        shape: &[usize],
+        dst_strides: &[isize],
+        src_strides: &[isize],
+        dst_offset: isize,
+        src_offset: isize,
+        source_conjugate: bool,
+        scale: TransformScale<T, C>,
+        beta: Option<T>,
+        baked: Option<BakedFusedLayout<'_>>,
+        index: Option<&mut [usize]>,
+    ) -> Result<(), OperationError>
+    where
+        C: Copy,
+        T: Copy
+            + Add<T, Output = T>
+            + Mul<T, Output = T>
+            + PartialEq
+            + Zero
+            + One
+            + ConjugateValue
+            + RecouplingCoefficientAction<C>
+            + strided_kernel::MaybeSendSync,
+    {
+        validate_strided_ranks(shape, dst_strides, src_strides)?;
+        macro_rules! run {
+            ($op:expr) => {{
+                let op = $op;
+                match beta {
+                    None => self.fused_pair_baked_dispatch(
+                        index,
+                        baked,
+                        dst_data,
+                        src_data,
+                        shape,
+                        dst_strides,
+                        src_strides,
+                        dst_offset,
+                        src_offset,
+                        |dst: &mut T, value| *dst = value,
+                        op,
+                    ),
+                    Some(beta) if beta.is_zero() => self.fused_pair_baked_dispatch(
+                        index,
+                        baked,
+                        dst_data,
+                        src_data,
+                        shape,
+                        dst_strides,
+                        src_strides,
+                        dst_offset,
+                        src_offset,
+                        |dst: &mut T, value| *dst = value,
+                        op,
+                    ),
+                    Some(beta) if beta.is_one() => self.fused_pair_baked_dispatch(
+                        index,
+                        baked,
+                        dst_data,
+                        src_data,
+                        shape,
+                        dst_strides,
+                        src_strides,
+                        dst_offset,
+                        src_offset,
+                        |dst: &mut T, value| *dst = *dst + value,
+                        op,
+                    ),
+                    Some(beta) => self.fused_pair_baked_dispatch(
+                        index,
+                        baked,
+                        dst_data,
+                        src_data,
+                        shape,
+                        dst_strides,
+                        src_strides,
+                        dst_offset,
+                        src_offset,
+                        move |dst: &mut T, value| *dst = beta * *dst + value,
+                        op,
+                    ),
+                }
+            }};
+        }
+        if scale.is_identity() {
+            return run!(move |value: T| value.maybe_conj(source_conjugate));
+        }
+        match scale {
+            TransformScale::Structural(coefficient) => run!(move |value: T| value
+                .maybe_conj(source_conjugate)
+                .scale_by_coefficient(coefficient)),
+            TransformScale::Data(alpha) => {
+                run!(move |value: T| alpha * value.maybe_conj(source_conjugate))
+            }
+        }
     }
 }
 
@@ -1372,6 +1596,45 @@ where
             baked,
             Some(index),
         )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn transform_strided_baked<C>(
+        &mut self,
+        zero_strides: &mut Vec<isize>,
+        dst_data: &mut [T],
+        src_data: &[T],
+        shape: &[usize],
+        dst_strides: &[isize],
+        src_strides: &[isize],
+        dst_offset: isize,
+        src_offset: isize,
+        source_conjugate: bool,
+        scale: TransformScale<T, C>,
+        beta: Option<T>,
+        baked: Option<BakedFusedLayout<'_>>,
+        index: Option<&mut [usize]>,
+    ) -> Result<(), OperationError>
+    where
+        C: Copy,
+        T: RecouplingCoefficientAction<C> + One + PartialEq,
+    {
+        let result = self.transform_strided_baked_impl(
+            dst_data,
+            src_data,
+            shape,
+            dst_strides,
+            src_strides,
+            dst_offset,
+            src_offset,
+            source_conjugate,
+            scale,
+            beta,
+            baked,
+            index,
+        );
+        zero_strides.clear();
+        result
     }
 
     fn scale_strided(

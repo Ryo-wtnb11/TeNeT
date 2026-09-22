@@ -671,6 +671,8 @@ where
         + Add<T, Output = T>
         + Mul<T, Output = T>
         + Zero
+        + One
+        + PartialEq
         + ConjugateValue
         + crate::RecouplingCoefficientAction<C>,
     C: Copy,
@@ -730,6 +732,8 @@ where
         + Add<T, Output = T>
         + Mul<T, Output = T>
         + Zero
+        + One
+        + PartialEq
         + ConjugateValue
         + crate::RecouplingCoefficientAction<C>,
     C: Copy,
@@ -791,6 +795,8 @@ where
         + Add<T, Output = T>
         + Mul<T, Output = T>
         + Zero
+        + One
+        + PartialEq
         + ConjugateValue
         + crate::RecouplingCoefficientAction<C>,
     C: Copy,
@@ -808,7 +814,10 @@ where
                 strided_linear_offset(trace_linear, trace_shape, src_trace_strides, src_base)?;
             sum = sum + src_data[src_index].maybe_conj(source_conjugate);
         }
-        let value = (alpha * sum).scale_by_coefficient(coefficient);
+        // Why not `alpha * sum` unconditionally: `1 * (inf + 0i)` is
+        // `inf + NaN i`, so an identity alpha must not multiply.
+        let scaled = if alpha.is_one() { sum } else { alpha * sum };
+        let value = scaled.scale_by_coefficient(coefficient);
         dst_data[dst_index] = dst_data[dst_index] + value;
     }
     Ok(())

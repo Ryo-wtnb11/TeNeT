@@ -1,7 +1,7 @@
 use core::mem::MaybeUninit;
 use core::ops::{Add, Mul};
 
-use num_traits::Zero;
+use num_traits::{One, Zero};
 use tenet_core::BlockStructure;
 
 use crate::owned_overwrite_buffer::initialize_owned;
@@ -183,6 +183,8 @@ where
             + Add<D, Output = D>
             + Mul<D, Output = D>
             + Zero
+            + One
+            + PartialEq
             + ConjugateValue
             + RecouplingCoefficientAction<C>,
     {
@@ -207,6 +209,8 @@ where
             + Add<D, Output = D>
             + Mul<D, Output = D>
             + Zero
+            + One
+            + PartialEq
             + ConjugateValue
             + RecouplingCoefficientAction<C>,
     {
@@ -253,7 +257,9 @@ where
                             ) as usize;
                             sum = sum + src[src_index].maybe_conj(self.source_conjugate);
                         }
-                        *value = *value + (alpha * sum).scale_by_coefficient(term.coefficient);
+                        // Why not `alpha * sum`: see the raw trace kernel.
+                        let scaled = if alpha.is_one() { sum } else { alpha * sum };
+                        *value = *value + scaled.scale_by_coefficient(term.coefficient);
                     }
                 }
 
@@ -310,6 +316,8 @@ where
         + Add<D, Output = D>
         + Mul<D, Output = D>
         + Zero
+        + One
+        + PartialEq
         + ConjugateValue
         + RecouplingCoefficientAction<C>,
     C: Copy + 't,
