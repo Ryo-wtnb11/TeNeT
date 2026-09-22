@@ -199,6 +199,10 @@ where
 {
     const REUSE_DESTINATIONS: bool;
 
+    /// The provider's braiding style, which decides whether a network that
+    /// contracts is admitted at all.
+    fn braiding_style(provider: &R) -> tenet::core::BraidingStyleKind;
+
     fn leg_dims<B: TensorStorage<D>>(
         tensor: &TensorMap<R, D, B>,
     ) -> Result<Vec<usize>, HostNetworkError<R>>;
@@ -539,6 +543,8 @@ impl Network {
                 invalid("symmetric sliced execution requires dense Host payloads").into(),
             ));
         }
+        reject_non_symmetric_network(tensors, self.inputs.len() > 1)
+            .map_err(SymmetricSliceExecutionError::Tensor)?;
 
         let bound = self
             .bind_symmetric_sliced_plan(tensors, plan)
@@ -713,58 +719,32 @@ impl Network {
             ))
             .into());
         }
-        let rule_identity = if let Some(first) = tensors.first() {
-            let runtime = first.runtime().identity();
-            let identity = TypedSectorAdmission::typed_rule_identity(first.provider());
-            for (index, tensor) in tensors.iter().enumerate().skip(1) {
-                if !runtime.matches(tensor.runtime()) {
-                    return Err(invalid(format!("operand {index} uses a different Runtime")).into());
-                }
-                if identity != TypedSectorAdmission::typed_rule_identity(tensor.provider()) {
-                    return Err(Error::RuleMismatch.into());
-                }
-            }
-            identity
-        } else {
+        let Some(rule_identity) = typed_operand_identity(tensors)? else {
             unreachable!("a validated Network has at least one operand")
         };
 
+        static_operand_preflight(
+            tensors,
+            &self.inputs,
+            &self.conj,
+            &self.codomain_splits,
+            &[],
+        )?;
         let mut lowered_labels = Vec::with_capacity(tensors.len());
         let mut infos = Vec::with_capacity(tensors.len());
         let mut lowered_spaces = Vec::with_capacity(tensors.len());
-        for (i, (&tensor, labels)) in tensors.iter().zip(&self.inputs).enumerate() {
-            if labels.len() != tensor.rank() {
-                return Err(invalid(format!(
-                    "operand {i} has {} labels but tensor rank {}",
-                    labels.len(),
-                    tensor.rank()
-                ))
-                .into());
-            }
-            if let Some(split) = self.codomain_splits[i] {
-                if split != tensor.codomain_rank() {
-                    return Err(invalid(format!(
-                        "operand {i} puts {split} label(s) before `;` but the tensor's codomain rank is {}",
-                        tensor.codomain_rank()
-                    ))
-                    .into());
-                }
-            }
-            let dims = if self.conj[i] {
-                let split = tensor.codomain_rank();
+        for ((&tensor, labels), &conj) in tensors.iter().zip(&self.inputs).zip(&self.conj) {
+            let dims = <R::Mode as HostNetworkModeDispatch<R, D>>::leg_dims(tensor)?;
+            let split = tensor.codomain_rank();
+            if conj {
                 lowered_labels.push(rotate(labels, split));
-                rotate(
-                    &<R::Mode as HostNetworkModeDispatch<R, D>>::leg_dims(tensor)?,
-                    split,
-                )
+                infos.push(DenseTensorInfo::new(rotate(&dims, split)));
             } else {
                 lowered_labels.push(labels.clone());
-                <R::Mode as HostNetworkModeDispatch<R, D>>::leg_dims(tensor)?
-            };
-            infos.push(DenseTensorInfo::new(dims));
-            lowered_spaces.push(typed_effective_spaces(tensor, self.conj[i])?);
+                infos.push(DenseTensorInfo::new(dims));
+            }
+            lowered_spaces.push(typed_effective_spaces(tensor, conj)?);
         }
-        validate_typed_contracted_leg_spaces::<R, D>(&lowered_labels, &lowered_spaces)?;
         let ir = NetworkIR::from_labels(lowered_labels, self.output.clone())
             .map_err(|error| HostNetworkError::<R>::from(invalid(error)))?;
         Ok(LoweredTypedNetwork {
@@ -776,33 +756,252 @@ impl Network {
     }
 }
 
-fn validate_typed_contracted_leg_spaces<R, D>(
-    labels: &[Vec<TemporaryLabel>],
-    spaces: &[Vec<GradedSpace<R>>],
+/// Runtime and rule identity of a network's operands, the first check of
+/// every lowering and preflight; `None` for no operand.
+fn typed_operand_identity<R, D, S>(
+    tensors: &[&TensorMap<R, D, S>],
+) -> Result<Option<RuleIdentity>, HostNetworkError<R>>
+where
+    R: TypedSectorAdmission,
+    R::Mode: HostNetworkModeDispatch<R, D>,
+    D: TensorScalar,
+    S: TensorStorage<D>,
+{
+    let Some(first) = tensors.first() else {
+        return Ok(None);
+    };
+    let runtime = first.runtime().identity();
+    let identity = TypedSectorAdmission::typed_rule_identity(first.provider());
+    for (index, tensor) in tensors.iter().enumerate().skip(1) {
+        if !runtime.matches(tensor.runtime()) {
+            return Err(invalid(format!("operand {index} uses a different Runtime")).into());
+        }
+        if identity != TypedSectorAdmission::typed_rule_identity(tensor.provider()) {
+            return Err(Error::RuleMismatch.into());
+        }
+    }
+    Ok(Some(identity))
+}
+
+/// The metadata preflight of a network, run by `tensor!` before any trace,
+/// plan lookup, lease or transfer and by every typed lowering: each operand's
+/// written rank and `;` split, then every contracted leg against the dual of
+/// its partner. A traced operand (`traces[i]`) enters with its reduced labels
+/// and its adjoint-read legs without the traced axes, which are the trace
+/// output's legs; `StaticTraceLowering::new` checked its rank and split. The
+/// caller decides braiding and on the device placement first.
+///
+/// Allocation-free, because a warm plan-cache hit runs it on every call and
+/// the cache key holds no sectors: legs are borrowed from the operands and
+/// compared through the dual map, labels are matched by a scan over the few
+/// operand legs rather than a map.
+fn static_operand_preflight<R, D, S, L>(
+    tensors: &[&TensorMap<R, D, S>],
+    inputs: &[impl AsRef<[L]>],
+    conj: &[bool],
+    splits: &[Option<usize>],
+    traces: &[Option<StaticTrace>],
 ) -> Result<(), HostNetworkError<R>>
 where
     R: TypedSectorAdmission,
     R::Mode: HostNetworkModeDispatch<R, D>,
     D: TensorScalar,
+    S: TensorStorage<D>,
+    L: PartialEq + std::fmt::Display,
 {
-    let mut seen: HashMap<&TemporaryLabel, (usize, usize)> = HashMap::new();
-    for (operand, operand_labels) in labels.iter().enumerate() {
-        for (axis, label) in operand_labels.iter().enumerate() {
-            let Some(&(previous_operand, previous_axis)) = seen.get(label) else {
-                seen.insert(label, (operand, axis));
+    typed_operand_identity(tensors)?;
+    let trace = |operand: usize| traces.get(operand).and_then(Option::as_ref);
+    for (index, &tensor) in tensors.iter().enumerate() {
+        if trace(index).is_some() {
+            continue;
+        }
+        let labels = inputs[index].as_ref();
+        if labels.len() != tensor.rank() {
+            return Err(invalid(format!(
+                "operand {index} has {} labels but tensor rank {}",
+                labels.len(),
+                tensor.rank()
+            ))
+            .into());
+        }
+        if let Some(split) = splits[index] {
+            if split != tensor.codomain_rank() {
+                return Err(invalid(format!(
+                    "operand {index} puts {split} label(s) before `;` but the tensor's codomain rank is {}",
+                    tensor.codomain_rank()
+                ))
+                .into());
+            }
+        }
+    }
+    let Some(first) = tensors.first() else {
+        return Ok(());
+    };
+    // Lowered (conj-rotated, trace-reduced) axis `axis` of `operand`: its label,
+    // and the stored leg with whether the lowered leg is that leg's dual.
+    let rank = |operand: usize| {
+        trace(operand).map_or(tensors[operand].rank(), |_| inputs[operand].as_ref().len())
+    };
+    let label = |operand: usize, axis: usize| {
+        let labels = inputs[operand].as_ref();
+        let tensor = tensors[operand];
+        if trace(operand).is_none() && conj[operand] {
+            &labels[(axis + tensor.codomain_rank()) % tensor.rank()]
+        } else {
+            &labels[axis]
+        }
+    };
+    let leg = |operand: usize, axis: usize| {
+        let tensor = tensors[operand];
+        let (adjoint, axis) = match trace(operand) {
+            Some((adjoint, pairs)) => (
+                *adjoint,
+                (0..tensor.rank())
+                    .filter(|&kept| !pairs.iter().any(|&(a, b)| kept == a || kept == b))
+                    .nth(axis),
+            ),
+            None => (conj[operand], Some(axis)),
+        };
+        let codomain_rank = tensor.codomain_rank();
+        let missing =
+            || HostNetworkError::<R>::from(invalid(format!("operand {operand} has no leg")));
+        let axis = axis.ok_or_else(missing)?;
+        let source = if adjoint {
+            (axis + codomain_rank) % tensor.rank()
+        } else {
+            axis
+        };
+        let stored = tensor.network_source_leg(source).ok_or_else(missing)?;
+        Ok::<_, HostNetworkError<R>>((stored, (source >= codomain_rank) != adjoint))
+    };
+    for operand in 0..tensors.len() {
+        for axis in 0..rank(operand) {
+            let written = label(operand, axis);
+            let Some((previous_operand, previous_axis)) = (0..=operand)
+                .flat_map(|previous| {
+                    let end = if previous == operand {
+                        axis
+                    } else {
+                        rank(previous)
+                    };
+                    (0..end).map(move |previous_axis| (previous, previous_axis))
+                })
+                .find(|&(previous, previous_axis)| label(previous, previous_axis) == written)
+            else {
                 continue;
             };
-            let lhs = &spaces[previous_operand][previous_axis];
-            let rhs = &spaces[operand][axis];
-            if rhs != &lhs.try_dual()? {
+            if !legs_contract(
+                first.provider(),
+                leg(previous_operand, previous_axis)?,
+                leg(operand, axis)?,
+            )? {
                 return Err(invalid(format!(
-                    "space mismatch for contracted label `{label}` between operand {previous_operand} leg {previous_axis} and operand {operand} leg {axis}"
+                    "space mismatch for contracted label `{written}` between operand {previous_operand} leg {previous_axis} and operand {operand} leg {axis}"
                 ))
                 .into());
             }
         }
     }
     Ok(())
+}
+
+/// Whether two lowered legs, each a stored leg and whether it is read as that
+/// leg's dual, may be contracted: the second must be the dual of the first,
+/// as `GradedSpace::try_dual` would build it. Only the parity of the two
+/// dualisations matters: when exactly one side is dualised the stored legs
+/// must be equal, which is TensorKit's `space(A, i) == space(B, j)'` with a
+/// structural dual.
+fn legs_contract<R>(
+    provider: &R,
+    (lhs, lhs_dualised): (&SectorLeg, bool),
+    (rhs, rhs_dualised): (&SectorLeg, bool),
+) -> Result<bool, HostNetworkError<R>>
+where
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorModeDispatch<R>,
+{
+    if lhs_dualised != rhs_dualised {
+        return Ok(lhs == rhs);
+    }
+    is_dual_of(provider, lhs, rhs)
+}
+
+/// `into == dual(from)` for sorted, duplicate-free legs: the opposite duality
+/// flag, as many sectors, and the dual of every sector of `from` in `into`
+/// with the same degeneracy. The round trip `dual(dual(s)) == s` proves the
+/// dual injective on `from`, so its image fills `into` exactly; a provider
+/// whose dual is not an involution is rejected with the error
+/// `GradedSpace::try_dual` raises for a non-injective dual, not accepted.
+fn is_dual_of<R>(
+    provider: &R,
+    from: &SectorLeg,
+    into: &SectorLeg,
+) -> Result<bool, HostNetworkError<R>>
+where
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorModeDispatch<R>,
+{
+    if from.is_dual() == into.is_dual() || from.sectors().len() != into.sectors().len() {
+        return Ok(false);
+    }
+    let dual_of = |sector| {
+        TypedSectorAdmission::try_dual_id(provider, sector)
+            .map_err(<R::Mode as TypedTensorModeDispatch<R>>::map_provider_error)
+    };
+    for (&sector, &degeneracy) in from.sectors().iter().zip(from.degeneracies()) {
+        let dual = dual_of(sector)?;
+        if dual_of(dual)? != sector {
+            return Err(invalid(format!(
+                "dual map is not injective: sector {dual:?} appears multiple times"
+            ))
+            .into());
+        }
+        match into.sectors().binary_search(&dual) {
+            Ok(position) if into.degeneracies()[position] == degeneracy => {}
+            _ => return Ok(false),
+        }
+    }
+    Ok(true)
+}
+
+/// [`static_operand_preflight`] of an untraced `tensor!` network, as both
+/// placements run it before the plan-cache lookup; public only so its
+/// allocation-free contract can be tested from a counting-allocator binary.
+#[doc(hidden)]
+pub fn static_network_operand_preflight<R, D, S>(
+    tensors: &[&TensorMap<R, D, S>],
+    spec: &StaticTopologySpec,
+) -> Result<(), HostNetworkError<R>>
+where
+    R: TypedSectorAdmission,
+    R::Mode: HostNetworkModeDispatch<R, D>,
+    D: TensorScalar,
+    S: TensorStorage<D>,
+{
+    static_operand_preflight(tensors, spec.inputs, spec.conj, spec.codomain_splits, &[])
+}
+
+/// The typed `contract`'s braiding boundary (TensorKit `blas_contract!`
+/// requires symmetric braiding), decided once for a network whose schedule
+/// contracts: the same error the first contraction step would raise, without
+/// the permutes, trace pre-step, sliced accumulator or plan lookup that would
+/// otherwise run before it.
+fn reject_non_symmetric_network<R, D, S>(
+    tensors: &[&TensorMap<R, D, S>],
+    contracts: bool,
+) -> Result<(), HostNetworkError<R>>
+where
+    R: TypedSectorAdmission,
+    R::Mode: HostNetworkModeDispatch<R, D, S>,
+    D: TensorScalar,
+    S: NetworkPayloadStorage<D>,
+{
+    let Some(first) = tensors.first().filter(|_| contracts) else {
+        return Ok(());
+    };
+    let braiding = <R::Mode as HostNetworkModeDispatch<R, D, S>>::braiding_style(first.provider());
+    tenet::typed::reject_non_symmetric_contraction(braiding)
+        .map_err(|error| HostNetworkError::<R>::from(Error::from(error)))
 }
 
 fn validate_typed_contracted_pairs<R, D, S>(
@@ -1139,6 +1338,10 @@ where
 {
     const REUSE_DESTINATIONS: bool = true;
 
+    fn braiding_style(provider: &R) -> tenet::core::BraidingStyleKind {
+        tenet::core::FusionRule::braiding_style(provider)
+    }
+
     fn leg_dims<B: TensorStorage<D>>(tensor: &TensorMap<R, D, B>) -> Result<Vec<usize>, Error> {
         tensor.leg_dims()
     }
@@ -1220,6 +1423,10 @@ where
     D: TensorScalar,
 {
     const REUSE_DESTINATIONS: bool = false;
+
+    fn braiding_style(provider: &R) -> tenet::core::BraidingStyleKind {
+        CheckedGenericFusion::braiding_style(provider)
+    }
 
     fn leg_dims<B: TensorStorage<D>>(
         tensor: &TensorMap<R, D, B>,
@@ -1311,6 +1518,10 @@ where
     D: CudaPayload,
 {
     const REUSE_DESTINATIONS: bool = true;
+
+    fn braiding_style(provider: &R) -> tenet::core::BraidingStyleKind {
+        tenet::core::FusionRule::braiding_style(provider)
+    }
 
     fn leg_dims<B: TensorStorage<D>>(tensor: &TensorMap<R, D, B>) -> Result<Vec<usize>, Error> {
         tensor.leg_dims()
@@ -1617,10 +1828,7 @@ impl PlannedNetwork {
     /// The device network preflight: every rejection class a device step
     /// could raise that the storage-generic body would not already raise
     /// before its first step, decided from the compiled schedule and the
-    /// operands' metadata alone — no allocation, no lock, no device work. The
-    /// `tensor!` path runs it before the plan cache publishes or promotes a
-    /// plan, so a rejection leaves cache, pools and device counters as they
-    /// were.
+    /// operands' metadata alone — no allocation, no lock, no device work.
     ///
     /// Classes: an operand on another placement ([`Error::PlacementMismatch`])
     /// or a Runtime without a device; then [`device_operand_admission`] — a
@@ -1628,11 +1836,11 @@ impl PlannedNetwork {
     /// contraction's own remaining boundaries are unreachable from a compiled
     /// schedule: every step passes `alpha = 1`, every retained destination is
     /// a canonical device result of the same step, and schedules are produced
-    /// only by `compile_schedule`. A `tensor!` trace pre-step runs the operand
-    /// half of this preflight and prepares every trace before the first one
-    /// executes; this check then admits the reduced network.
+    /// only by `compile_schedule`. `tensor!` decides the same classes from
+    /// its operand count, before any trace and the plan lookup
+    /// ([`cuda_operand_admission`]).
     #[cfg(feature = "cuda")]
-    pub(crate) fn validate_cuda_admission<R, D>(
+    fn validate_cuda_admission<R, D>(
         &self,
         tensors: &[&TensorMap<R, D, CudaStorage<D>>],
     ) -> Result<(), Error>
@@ -1645,8 +1853,9 @@ impl PlannedNetwork {
 }
 
 /// The operand half of the device network preflight, shared with the
-/// `tensor!` trace pre-step: a Runtime with a device, every operand on it,
-/// then [`device_operand_admission`].
+/// `tensor!` entries, which run it before any trace and the plan lookup: a
+/// Runtime with a device, every operand on it, then
+/// [`device_operand_admission`].
 #[cfg(feature = "cuda")]
 fn cuda_operand_admission<R, D>(
     tensors: &[&TensorMap<R, D, CudaStorage<D>>],
@@ -1768,6 +1977,7 @@ impl PlannedNetwork {
                 ))
                 .into());
             }
+            reject_non_symmetric_network(tensors, !self.schedule.steps.is_empty())?;
             let runtime = tensors
                 .first()
                 .ok_or_else(|| {
@@ -2483,6 +2693,8 @@ where
         spec: &'static StaticTopologySpec,
     ) -> Result<Self, Self::Error> {
         validate_static_shape(tensors, spec)?;
+        reject_non_symmetric_network(tensors, tensors.len() > 1)?;
+        static_network_operand_preflight(tensors, spec)?;
         let codomain_ranks = tensors
             .iter()
             .map(|tensor| tensor.codomain_rank())
@@ -2491,14 +2703,9 @@ where
             .first()
             .map(|tensor| tensor.runtime().plan_cache_config().optimizer)
             .unwrap_or_default();
-        crate::plancache::get_or_plan_static(
-            spec,
-            tensors,
-            &codomain_ranks,
-            &optimizer,
-            |_| Ok(()),
-            || spec.network(),
-        )?
+        crate::plancache::get_or_plan_static(spec, tensors, &codomain_ranks, &optimizer, || {
+            spec.network()
+        })?
         .execute_host(tensors)
     }
 }
@@ -2514,6 +2721,9 @@ where
         spec: &'static StaticTopologySpec,
     ) -> Result<Self, Self::Error> {
         validate_static_shape(tensors, spec)?;
+        // The trace pre-step keeps the operand count, so whether the reduced
+        // network contracts is known now.
+        reject_non_symmetric_network(tensors, tensors.len() > 1)?;
         let codomain_ranks = tensors
             .iter()
             .map(|tensor| tensor.codomain_rank())
@@ -2523,6 +2733,7 @@ where
             .map(|tensor| tensor.runtime().plan_cache_config().optimizer)
             .unwrap_or_default();
         let lowering = StaticTraceLowering::new(tensors, spec)?;
+        lowering.preflight(tensors)?;
         let mut lowered = Vec::with_capacity(tensors.len());
         for (tensor, trace) in tensors.iter().zip(&lowering.traces) {
             lowered.push(match trace {
@@ -2542,14 +2753,9 @@ where
             .zip(&lowered)
             .map(|(tensor, traced)| traced.as_ref().unwrap_or(tensor))
             .collect::<Vec<_>>();
-        crate::plancache::get_or_plan_static(
-            spec,
-            &reduced,
-            &codomain_ranks,
-            &optimizer,
-            |_| Ok(()),
-            || lowering.network(spec),
-        )?
+        crate::plancache::get_or_plan_static(spec, &reduced, &codomain_ranks, &optimizer, || {
+            lowering.network(spec)
+        })?
         .execute_host(&reduced)
     }
 }
@@ -2585,6 +2791,8 @@ where
         spec: &'static StaticTopologySpec,
     ) -> Result<Self, Error> {
         validate_static_shape(tensors, spec)?;
+        cuda_operand_admission(tensors, tensors.len() > 1)?;
+        static_network_operand_preflight(tensors, spec)?;
         let codomain_ranks = tensors
             .iter()
             .map(|tensor| tensor.codomain_rank())
@@ -2593,14 +2801,9 @@ where
             .first()
             .map(|tensor| tensor.runtime().plan_cache_config().optimizer)
             .unwrap_or_default();
-        crate::plancache::get_or_plan_static(
-            spec,
-            tensors,
-            &codomain_ranks,
-            &optimizer,
-            |planned| planned.validate_cuda_admission(tensors),
-            || spec.network(),
-        )?
+        crate::plancache::get_or_plan_static(spec, tensors, &codomain_ranks, &optimizer, || {
+            spec.network()
+        })?
         .execute_cuda(tensors)
     }
 }
@@ -2625,10 +2828,10 @@ where
         spec: &'static StaticTopologySpec,
     ) -> Result<Self, Self::Error> {
         validate_static_shape(tensors, spec)?;
-        // Contraction admission of the reduced network is decided by its own
-        // preflight; an anyonic trace is rejected below with the Host's trace
-        // error, which the Host raises first as well.
-        cuda_operand_admission(tensors, false)?;
+        // The trace pre-step keeps the operand count, so a reduced network
+        // that contracts is decided here; a non-symmetric trace alone is
+        // rejected below with the Host's trace error.
+        cuda_operand_admission(tensors, tensors.len() > 1)?;
         let codomain_ranks = tensors
             .iter()
             .map(|tensor| tensor.codomain_rank())
@@ -2638,6 +2841,7 @@ where
             .map(|tensor| tensor.runtime().plan_cache_config().optimizer)
             .unwrap_or_default();
         let lowering = StaticTraceLowering::new(tensors, spec)?;
+        lowering.preflight(tensors)?;
         let sources = tensors
             .iter()
             .zip(&lowering.traces)
@@ -2671,14 +2875,9 @@ where
             .zip(&lowered)
             .map(|(tensor, traced)| traced.as_ref().unwrap_or(tensor))
             .collect::<Vec<_>>();
-        crate::plancache::get_or_plan_static(
-            spec,
-            &reduced,
-            &codomain_ranks,
-            &optimizer,
-            |planned| planned.validate_cuda_admission(&reduced),
-            || lowering.network(spec),
-        )?
+        crate::plancache::get_or_plan_static(spec, &reduced, &codomain_ranks, &optimizer, || {
+            lowering.network(spec)
+        })?
         .execute_cuda(&reduced)
     }
 }
@@ -2751,6 +2950,24 @@ impl StaticTraceLowering {
             lowering.traces.push(Some((spec.conj[index], pairs)));
         }
         Ok(lowering)
+    }
+
+    /// [`static_operand_preflight`] of the reduced network, before any trace
+    /// runs.
+    fn preflight<R, D, S>(&self, tensors: &[&TensorMap<R, D, S>]) -> Result<(), HostNetworkError<R>>
+    where
+        R: TypedSectorAdmission,
+        R::Mode: HostNetworkModeDispatch<R, D>,
+        D: TensorScalar,
+        S: TensorStorage<D>,
+    {
+        static_operand_preflight(
+            tensors,
+            &self.inputs,
+            &self.conj,
+            &self.splits,
+            &self.traces,
+        )
     }
 
     fn network(&self, spec: &StaticTopologySpec) -> Result<Network, Error> {
@@ -4744,5 +4961,98 @@ mod typed_replay_tests {
                 .execute_with_workspace(&refs, &mut workspace)
                 .unwrap(),
         );
+    }
+}
+
+#[cfg(test)]
+mod leg_contract_tests {
+    use std::sync::Arc;
+
+    use tenet::core::{
+        BraidingStyleKind, CheckedFusionAlgebra, FusionAlgebraError, FusionRule, FusionStyleKind,
+        RuleIdentity, SectorCodec, SectorId, SectorLeg, SectorVec,
+    };
+    use tenet::typed::GradedSpace;
+
+    /// A faulty rule whose dual is not an involution: `a* = b* = c`,
+    /// `c* = a`, `d* = b`. `{a, b}` and `{c, d}` then pass a one-way sector
+    /// match in both directions although `{a, b}` has no dual leg.
+    struct CollapsingDual;
+
+    #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+    struct Label(usize);
+
+    const DUAL: [usize; 4] = [2, 2, 0, 1];
+
+    impl FusionRule for CollapsingDual {
+        fn rule_identity(&self) -> RuleIdentity {
+            RuleIdentity::from_canonical_bytes::<Self>(0x1371_d0a1, Arc::<[u8]>::from([]))
+        }
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Unique
+        }
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::Bosonic
+        }
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(0)
+        }
+        fn fusion_channels(&self, _: SectorId, _: SectorId) -> SectorVec {
+            core::iter::once(SectorId::new(0)).collect()
+        }
+    }
+
+    impl CheckedFusionAlgebra for CollapsingDual {
+        fn try_dual_sector(&self, sector: SectorId) -> Result<SectorId, FusionAlgebraError> {
+            Ok(SectorId::new(DUAL[sector.id()]))
+        }
+        fn try_fusion_channels(
+            &self,
+            left: SectorId,
+            right: SectorId,
+        ) -> Result<SectorVec, FusionAlgebraError> {
+            Ok(self.fusion_channels(left, right))
+        }
+        fn try_nsymbol(
+            &self,
+            _: SectorId,
+            _: SectorId,
+            _: SectorId,
+        ) -> Result<usize, FusionAlgebraError> {
+            Ok(1)
+        }
+    }
+
+    impl SectorCodec for CollapsingDual {
+        type Sector = Label;
+        fn encode_sector(&self, label: &Label) -> Result<SectorId, FusionAlgebraError> {
+            Ok(SectorId::new(label.0))
+        }
+        fn decode_sector(&self, sector: SectorId) -> Result<Label, FusionAlgebraError> {
+            Ok(Label(sector.id()))
+        }
+    }
+
+    /// #1371 review P2-A: the allocation-free leg comparison enforces the dual
+    /// round trip, so a non-involutive provider is rejected with
+    /// `GradedSpace::try_dual`'s own error rather than accepted.
+    #[test]
+    fn a_non_involutive_dual_is_rejected_like_try_dual() {
+        let leg = |sectors: [usize; 2], dual: bool| {
+            SectorLeg::try_new(sectors.map(|sector| (SectorId::new(sector), 2)), dual).unwrap()
+        };
+        // `{a, b}` against `{c, d}` of the opposite flag: every sector of either
+        // side has its dual on the other, so only the round trip rejects.
+        let (from, into) = (leg([0, 1], false), leg([2, 3], true));
+        let oracle = GradedSpace::try_new(CollapsingDual, [(Label(0), 2), (Label(1), 2)])
+            .unwrap()
+            .try_dual()
+            .unwrap_err()
+            .to_string();
+        let error = super::legs_contract(&CollapsingDual, (&from, false), (&into, false))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, oracle);
+        assert!(error.contains("dual map is not injective"), "{error}");
     }
 }

@@ -9283,7 +9283,8 @@ fn contract_on_the_external_z3_provider_matches_the_hand_product() {
 }
 
 // ---------------------------------------------------------------------------
-// Anyonic boundary of the destination and compact entries (#1355).
+// Non-symmetric braiding boundary of the destination and compact entries
+// (#1355, #1372).
 // ---------------------------------------------------------------------------
 
 mod braiding_probe;

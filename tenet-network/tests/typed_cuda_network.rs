@@ -461,12 +461,14 @@ fn host_and_cuda_macros_of_one_topology_use_separate_workspace_pools() {
     );
 }
 
-/// G3c-1 (#1274): a failed device step quarantines its lease instead of
-/// returning buffers whose contents the failure may have disturbed, and the
-/// next valid call rebuilds from a fresh workspace.
+/// G3c-1 (#1274), revised by #1371: a device call rejected from metadata
+/// leases no workspace, and the next valid call reuses the idle one. (Its
+/// former trigger, a leg mismatch on a plan-cache hit, no longer reaches
+/// execution; quarantine of a failing lease is the lease-level
+/// `panic_quarantines_typed_workspace_lease` unit test.)
 #[test]
 #[ignore = "requires a real CUDA device"]
-fn a_failed_cuda_step_quarantines_the_lease_and_the_next_call_rebuilds() {
+fn a_rejected_cuda_call_leases_no_workspace_and_the_next_call_reuses_the_idle_one() {
     let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
     let u1 = GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
     let wrong =
@@ -482,23 +484,19 @@ fn a_failed_cuda_step_quarantines_the_lease_and_the_next_call_rebuilds() {
         "a successful device call recycles its lease"
     );
 
+    // #1371: the contracted-leg mismatch is decided before the plan lookup,
+    // so no workspace is leased, let alone quarantined.
     assert!(tensor!([i; k] = a_cuda[i; j] * mismatched[j; k]).is_err());
-    let after_failure = plan_cache_stats(&runtime);
-    assert_eq!(
-        after_failure.idle_workspaces, 0,
-        "the failed lease is quarantined, not recycled"
-    );
+    assert_eq!(plan_cache_stats(&runtime), after_warm);
 
     let rebuilt = tensor!([i; k] = a_cuda[i; j] * b_cuda[j; k]).unwrap();
     assert_eq!(
         rebuilt.to_host().unwrap().data(),
         warm.to_host().unwrap().data()
     );
-    assert_eq!(
-        plan_cache_stats(&runtime).workspaces_created,
-        after_failure.workspaces_created + 1,
-        "the quarantined workspace is replaced, not resurrected"
-    );
+    let after = plan_cache_stats(&runtime);
+    assert_eq!(after.workspaces_created, after_warm.workspaces_created);
+    assert_eq!(after.idle_workspaces, 1, "the idle workspace is reused");
 }
 
 /// G3c-1 (#1274), tightened by G3c-2 (#1276): shape drift that keeps the
@@ -1657,15 +1655,13 @@ fn warm_general_cuda_networks_transfer_only_the_returned_output() {
     warm::<_, f64>(&runtime, [&v, &w, &p], 795_200, "fZ2xU(1) f64");
 }
 
-/// G2c-3 (#1348): the device rejection classes reachable through `tensor!`
-/// are decided before the plan cache publishes, a workspace is leased or the
-/// device is touched: plan cache, pools, transfer counters, cuTENSOR plans,
-/// scratch and executor state are all unchanged. (A compact operand is not
-/// constructible as a device operand of this impl; its preflight is in the
-/// device-free `device_operand_admission` test, and the non-symmetric braiding
-/// class in `non_symmetric_cuda_macro_contraction_rejects_like_host_before_device_work`.) The trace pre-step's rejections (G2c-5), an anyonic operand
-/// included, are in
-/// `rejected_cuda_trace_prestep_leaves_every_device_state_unchanged`.
+/// G2c-3 (#1348): a contracted-leg mismatch on a fresh topology (the
+/// plan-cache miss path) leaves plan cache, pools, transfer counters,
+/// cuTENSOR plans, scratch and executor state unchanged. The topology-hit and
+/// alias-hit paths of this and the non-symmetric class are the tenet-network
+/// unit test `device_metadata_rejections_leave_the_plan_cache_and_device_untouched_on_every_path`
+/// (#1371); the compact class, which is not constructible as a device operand
+/// of this impl, is the device-free `device_operand_admission` test.
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn rejected_cuda_networks_leave_every_device_state_unchanged() {
@@ -1685,10 +1681,7 @@ fn rejected_cuda_networks_leave_every_device_state_unchanged() {
     drop(tensor!([i; k] = a[i; j] * a[j; k]).unwrap());
     let before = device_state(&runtime);
 
-    // A fresh topology, i.e. the plan-cache miss path only: this pins that the
-    // mismatch is raised before a miss publishes. On a topology hit it is
-    // raised by the execution body, after the hit is counted and a workspace
-    // leased (#1371).
+    // A fresh topology, i.e. the plan-cache miss path only.
     assert!(tensor!([k; i] = a[i; j] * mismatched[j; k]).is_err());
     assert_eq!(
         device_state(&runtime),
@@ -2180,12 +2173,10 @@ fn warm_trace_prestep_transfers_only_the_trace_and_returned_outputs() {
 /// the Host before the first one runs, so a trace rejection on a later operand
 /// — mutually non-dual traced legs, a label count that is not the operand's
 /// rank — leaves plan cache, pools, transfer counters, cuTENSOR plans, scratch
-/// and executor state unchanged, with the Host's error. A contracted-leg
-/// mismatch between the reduced operands is the Host's own post-trace input
-/// error: it is raised after the traces ran (their uploads are its only
-/// transfers) and publishes no plan; deciding it before the traces and the
-/// plan lookup is #1371. An anyonic traced operand is rejected by the trace
-/// compile, with the Host's error, before any trace runs.
+/// and executor state unchanged, with the Host's error. So does a
+/// contracted-leg mismatch between the reduced operands, decided from their
+/// spaces before any trace runs (#1371). A non-symmetric traced operand is
+/// in `anyonic_cuda_trace_prestep_rejects_like_host_before_device_work`.
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn rejected_cuda_trace_prestep_leaves_every_device_state_unchanged() {
@@ -2224,31 +2215,15 @@ fn rejected_cuda_trace_prestep_leaves_every_device_state_unchanged() {
         "label count is not the rank"
     );
 
-    assert!(tensor!([a; x] = (h.tb)[j, a; j, w] * host_mismatch[i, w; i, x]).is_err());
+    let host_error = tensor!([a; x] = (h.tb)[j, a; j, w] * host_mismatch[i, w; i, x]).unwrap_err();
     let before = device_state(&runtime);
-    assert!(tensor!([a; x] = (o.tb)[j, a; j, w] * mismatch[i, w; i, x]).is_err());
-    let after = device_state(&runtime);
-    // This pins only that no plan is published; the hit counted and the
-    // workspace quarantined by the failed execution are #1371.
+    let device_error = tensor!([a; x] = (o.tb)[j, a; j, w] * mismatch[i, w; i, x]).unwrap_err();
+    assert_eq!(device_error.to_string(), host_error.to_string());
     assert_eq!(
-        (
-            after.plans.entries,
-            after.plans.misses,
-            after.plans.topology_materializations
-        ),
-        (
-            before.plans.entries,
-            before.plans.misses,
-            before.plans.topology_materializations
-        ),
-        "reduced contracted-leg mismatch publishes no plan"
+        device_state(&runtime),
+        before,
+        "reduced contracted-leg mismatch"
     );
-    assert_eq!(
-        after.transfers.h2d_calls - before.transfers.h2d_calls,
-        2,
-        "reduced contracted-leg mismatch: exactly the two trace outputs"
-    );
-    assert_eq!(after.transfers.d2h_calls, before.transfers.d2h_calls);
 }
 
 #[path = "../../tenet/tests/braiding_probe/mod.rs"]

@@ -10484,7 +10484,11 @@ impl<R, D, S> TensorMap<R, D, S> {
         })
     }
 
-    fn network_source_leg(&self, axis: usize) -> Option<&SectorLeg> {
+    /// The logical leg of source axis `axis` as stored (a domain leg is not
+    /// dualised), borrowed so network admission compares legs without
+    /// allocating.
+    #[doc(hidden)]
+    pub fn network_source_leg(&self, axis: usize) -> Option<&SectorLeg> {
         let homspace = self.logical_space().space().homspace();
         if axis < self.codomain_rank() {
             homspace.codomain().legs().get(axis)
