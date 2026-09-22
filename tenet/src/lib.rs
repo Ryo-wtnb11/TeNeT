@@ -33,11 +33,17 @@
 //! of every Runtime on one device serialize their enqueue on that device lock,
 //! which is what lets one Runtime safely read a fresh device output returned
 //! by another (#1384). A host sync under a lease (`to_host`, scalar and
-//! spectrum downloads, Tenferro's cross-thread stream sync) therefore stalls
-//! every Runtime on that device. Not covered until tensor4all/cubecl#16:
-//! non-TeNeT CubeCL/Tenferro users of the same device, and `*_overwrite_into`
-//! destinations or reused buffers read from another thread, even within one
-//! Runtime (the overwrite/reused-buffer leaf, #1391). Consequently no
+//! spectrum downloads) therefore stalls
+//! every Runtime on that device. Opening a device also pins CubeCL to one
+//! stream per device for the whole process (#1391), so every device write,
+//! including `*_overwrite_into` destinations and reused scratch, is ordered
+//! before every later read or write from any thread; building a device
+//! Runtime fails if CubeCL was already configured with more streams. GPU work
+//! of different threads therefore never overlaps. The setting is
+//! process-wide: it overrides a `cubecl.toml` value without notice, stays
+//! fixed even if opening the device then fails, also gives every other CubeCL
+//! client in the process (wgpu included) one stream, and makes a later
+//! `CubeClRuntimeConfig::set` panic. Consequently no
 //! general lock-free, overlap, or outer-thread scaling guarantee is made. See
 //! `docs/backend_policy.md` for the ownership and synchronization model.
 //!

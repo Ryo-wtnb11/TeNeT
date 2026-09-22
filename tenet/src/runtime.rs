@@ -744,11 +744,10 @@ struct CudaHome {
 /// the writer's lease (its synced cursor is below `O`'s bind cursor, so it
 /// waits on a fresh event) or after it (the event already covers every write
 /// into `O`). No host synchronization is added: the lock orders enqueue only.
-/// Not covered, until cubecl#16: a buffer bound in one lease and written in a
-/// later one (`*_overwrite_into` destinations, `CudaContractScratch`, pooled
-/// `tensor!` network intermediates), whose window spans two leases (the
-/// overwrite/reused-buffer leaf, #1391); and submissions from outside TeNeT
-/// (another CubeCL or Tenferro user of the device in this process).
+/// A buffer bound in one lease and written in a later one
+/// (`*_overwrite_into` destinations, `CudaContractScratch`, pooled `tensor!`
+/// network intermediates) spans two leases and is ordered instead by the
+/// single CubeCL stream `CudaDenseContext::new` pins (#1391).
 ///
 /// One leaked entry per ordinal that built a device context, so the registry
 /// is bounded by the device count. The lock guards no data, so a poison left
@@ -1003,18 +1002,24 @@ pub(crate) struct RuntimeExecutionConfig {
 /// so device operations on one device serialize their host-side enqueue across
 /// Runtimes (the GPU work itself stays asynchronous; the lock adds no host
 /// sync). A host sync that already happens under a lease — `to_host`, scalar
-/// and spectrum downloads, Tenferro's cross-thread stream sync — therefore
+/// and spectrum downloads — therefore
 /// stalls every Runtime on the device, not only the caller. This is what makes
 /// a fresh device output, returned by any operation that creates a new
 /// tensor, safe to read through another Runtime on the same device (#1384).
 ///
-/// Until tensor4all/cubecl#16 publishes a binding's cursor on write, two cases
-/// stay exposed. First, a buffer bound in an earlier lease and written again
-/// later (a `*_overwrite_into` destination, or reused scratch) can be read
-/// unfinished by another thread that synced past its bind in between, even
-/// within one Runtime (the overwrite/reused-buffer leaf, #1391). Second, other
-/// CubeCL or Tenferro users of the same device in this process do not take
-/// the lock: do not share a device with them concurrently.
+/// A buffer bound in an earlier lease and written again later (a
+/// `*_overwrite_into` destination, or reused scratch) is ordered by the
+/// device's single CubeCL stream instead (#1391): the first device Runtime of
+/// the process sets CubeCL's `streaming.max_streams` to 1, so all device work
+/// of every thread, TeNeT or not, runs in enqueue order and never overlaps on
+/// the GPU. Building a device Runtime fails with an unsupported error if
+/// CubeCL's configuration was already loaded with more streams.
+/// Process-wide side effects: a `cubecl.toml` `streaming.max_streams` value is
+/// overridden without notice, the setting stays fixed even if opening the
+/// device then fails, every other CubeCL client in the process (wgpu
+/// included) also gets one stream, and a later `CubeClRuntimeConfig::set`
+/// panics. One ordering residual, independent of the stream count, is tracked
+/// in tensor4all/tenferro-rs#1868 (see `docs/backend_policy.md`).
 ///
 /// # Examples
 ///

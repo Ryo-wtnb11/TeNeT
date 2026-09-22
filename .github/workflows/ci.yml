@@ -206,6 +206,10 @@ jobs:
           key: backend-cuda
       - run: cargo check --workspace --all-targets --no-default-features --features cuda,cpu-faer
         working-directory: tenet
+      # GPU-free: the single-stream configuration (#1391) is set and checked
+      # before any device access.
+      - run: cargo test -p tenet-dense --no-default-features --features cuda,cpu-faer --test cuda_stream_config_conflict --test cuda_stream_config_single
+        working-directory: tenet
 
   test-linux:
     name: cargo test (ubuntu-latest)

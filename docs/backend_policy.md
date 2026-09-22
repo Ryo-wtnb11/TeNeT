@@ -115,7 +115,7 @@ claim: device operations of every Runtime on one device serialize their
 host-side enqueue on that device lock (GPU execution stays asynchronous; the
 lock adds no host synchronization). A host synchronization that already
 happens under a lease — `to_host`, scalar and spectrum downloads in
-reductions and factorizations, and Tenferro's cross-thread `synchronize()` —
+reductions and factorizations —
 now stalls every Runtime on the device, not only the caller.
 
 The device lock is shared across Runtimes because CubeCL's client is
@@ -124,16 +124,45 @@ is bound, not when a later kernel writes it (tensor4all/cubecl#16). Without
 it, a second Runtime could sync past an output's bind before its write and
 then read it unfinished (#1384). The lock covers outputs bound and fully
 written within one lease, which is every operation that returns a new tensor.
-It does not cover a buffer bound in an earlier lease and written again later:
-a `*_overwrite_into` destination, or reused scratch (`CudaContractScratch`,
-pooled `tensor!` network intermediates). If another thread syncs past such a
-buffer's bind between the two leases, it can read the later write
-unfinished, even within one Runtime (the overwrite/reused-buffer leaf, #1391).
-CubeCL or Tenferro users of the same device in the same process that are not
-TeNeT do not take this lock either. Both remain exposed until cubecl#16 is
-fixed; do not share a device with such users concurrently, and do not pass an
-overwrite destination to another thread for reading while it may be
-overwritten.
+
+A buffer bound in an earlier lease and written again later — a
+`*_overwrite_into` destination, or reused scratch (`CudaContractScratch`,
+pooled `tensor!` network intermediates) — spans two leases, so the lock alone
+cannot order it: another thread that synced past its bind in between would
+read the later write unfinished, or overwrite it while an earlier read is
+still in flight (#1391; reproduced on an A100 for overwrite destinations).
+Opening the first CUDA context of the process (`CudaDenseContext::new`)
+therefore sets CubeCL's process-wide `streaming.max_streams` to 1, taking
+`cubecl.toml` and the environment as CubeCL would and overriding only that
+field. Every CubeCL command and every Tenferro vendor call (cuBLAS, cuSOLVER,
+cuTENSOR use the same stream slot) of every thread then runs on one CUDA
+stream per device, in enqueue order, which follows happens-before between
+threads; the unpublished cursor is never needed for ordering. This also
+covers CubeCL or Tenferro users of the device outside TeNeT in the same
+process, provided TeNeT opens its device first. If something else loaded
+CubeCL's configuration first with more than one stream, opening a device
+fails with `DenseError::Unsupported` rather than running unordered.
+
+Enqueue order follows happens-before because CubeCL's server queue is FIFO
+and a vendor call drains it first: raw sessions, memsets and scalar downloads
+call `flush_cubecl`, while cuTENSOR and cuBLAS rely on the blocking
+`get_resource` in Tenferro's `typed_device_ptr`. That function skips the
+blocking call for a buffer created on the calling thread whose address it
+has cached, so a CubeCL kernel still queued unflushed into such a buffer can
+reach the stream after a later vendor call on it (tensor4all/tenferro-rs#1868;
+independent of the stream count, and possible within one thread). In TeNeT
+only the empty-contraction scale or fill of an owned destination queues such
+a kernel.
+
+Process-wide side effects: a `cubecl.toml` `streaming.max_streams` value is
+overridden without notice; the setting stays fixed even when opening the
+device then fails (for example without a GPU); every other CubeCL client in
+the process, including wgpu, also gets one stream; and a later
+`CubeClRuntimeConfig::set` panics, since CubeCL allows setting it only once.
+
+Cost: GPU work of different threads no longer overlaps on the device (it
+serializes on the stream, not only at enqueue), and Tenferro's cross-thread
+host `synchronize()` no longer happens because every thread shares one slot.
 
 ## Historical context
 

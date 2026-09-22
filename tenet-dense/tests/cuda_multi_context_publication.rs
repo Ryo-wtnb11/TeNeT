@@ -1,35 +1,32 @@
-//! Canary for tensor4all/cubecl#16 (#1384): a device output written by one
-//! `CudaDenseContext` can be read early by a thread that also uses a second
-//! context on the same device.
+//! Gate for #1384/#1391 at the adapter seam: a device output written by one
+//! `CudaDenseContext` is never read early by a thread that also uses a second
+//! context on the same device, even with nothing serializing the two contexts
+//! (no TeNeT `Runtime` device lock).
 //!
-//! Both contexts share CubeCL's process-wide per-device client and its
-//! per-thread streams, and nothing here serializes the two contexts (a TeNeT
-//! `Runtime` would, through its per-device lock). CubeCL records a binding's cursor only at bind, so a
-//! later write into that binding is not published (tensor4all/cubecl#16).
-//! The test forces the interleaving from the issue, step by step, with the
-//! same seam `TypedTensor::contract` uses (`upload_owned` zeros, then GEMM,
-//! both under one context lock):
+//! Both contexts share CubeCL's process-wide per-device client. CubeCL records
+//! a binding's cursor only at bind, so a later write into that binding is not
+//! published (tensor4all/cubecl#16). The test forces the interleaving from the
+//! issue, step by step, with the same seam `TypedTensor::contract` uses
+//! (`upload_owned` zeros, then GEMM, both under one context lock):
 //!
 //! 1. thread A, holding context 1, uploads output `O` (bind at cursor `k`);
 //! 2. thread B, holding context 2, reads a fresh A-origin tensor `T`, which
 //!    records `B.last_synced[A] >= k`;
 //! 3. A enqueues a long accumulating GEMM into `O` and releases context 1;
-//! 4. B takes context 1 and downloads `O`: `k <= last_synced[A]`, so B's
-//!    stream skips the event and can race the GEMM.
+//! 4. B takes context 1 and downloads `O`: `k <= last_synced[A]`, so on
+//!    separate streams B would skip the event and race the GEMM.
+//!
+//! Until #1391 this read a stale `O` in 40/40 iterations on an A100 and the
+//! test asserted that it did. Since #1391 `CudaDenseContext::new` pins CubeCL
+//! to one stream per device (`streaming.max_streams = 1`), so A's GEMM and
+//! B's download run in enqueue order on that stream and the skipped event no
+//! longer matters. The forced case now asserts no stale read; it no longer
+//! detects a cubecl#16 fix, which only matters if the single stream is lifted.
 //!
 //! The oracle is a hand calculation: all-ones operands, so every element of
 //! `O` is exactly `REPS * N`. The single-context control runs the same steps
-//! with one shared lock, which forces step 2 after step 3 and must always pass.
-//! The no-sync control keeps two contexts but skips step 2, so a failure there
-//! would mean the race is not the cursor skip.
-//!
-//! This is a canary for tensor4all/cubecl#16, not a TeNeT gate. It drives
-//! the adapter directly, below the per-device lock every TeNeT `Runtime`
-//! takes, which is also where a non-TeNeT CubeCL user of the device sits, so
-//! no TeNeT-side boundary can make the forced case pass: it asserts that the
-//! stale read still happens. When it fails, cubecl#16 has landed and the
-//! #1384 device lock can be revisited. The TeNeT gate is
-//! `tenet/tests/cuda_multi_runtime_publication.rs`.
+//! with one shared lock, which forces step 2 after step 3. The no-sync control
+//! keeps two contexts but skips step 2.
 //!
 //! Run with `cargo test -p tenet-dense --features cuda,cpu-faer --test \
 //! cuda_multi_context_publication -- --ignored --nocapture --test-threads=1`.
@@ -158,15 +155,15 @@ fn context() -> Shared {
 
 #[test]
 #[ignore = "requires a CUDA device"]
-fn second_context_forced_interleaving_reads_stale_output_until_cubecl16() {
+fn second_context_forced_interleaving_reads_only_completed_outputs() {
     let ctx1 = context();
     let ctx2 = context();
     window(&ctx1);
     let stale = run(ctx1, ctx2, Mode::Forced);
     println!("two contexts: {stale}/{ITERS} iterations read a stale output");
-    assert!(
-        stale > 0,
-        "no stale read: cubecl#16 may be fixed; revisit #1384"
+    assert_eq!(
+        stale, 0,
+        "cross-stream stale read: is CubeCL still on one stream?"
     );
 }
 
