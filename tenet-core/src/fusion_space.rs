@@ -611,17 +611,64 @@ fn unit_tree_matches(
         && slice_matches_without(large.innerlines(), small.innerlines(), innerline)
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
-struct FusionTreeLegSetSignature {
-    sectors: SectorVec,
-    is_dual: bool,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+/// Semantic identity of one multiplicity-free fusion-tree layout: the rule
+/// plus the HomSpace sector signature.
+///
+/// Why the shared content rather than an owned per-leg signature: a warm
+/// lookup must construct this key without allocating, so it borrows the
+/// caller's content the way [`CompleteHomSpaceStructureCacheKey`] does.
+///
+/// Why not a derived `Eq`/`Hash` over that content: degeneracies are not part
+/// of the layout identity, and deriving would split one layout into one entry
+/// per degeneracy assignment. Equality and hashing therefore cover only the
+/// per-leg sectors and duality, exactly as the previous owned signature did.
+#[derive(Clone, Debug)]
 struct FusionTreeHomSpaceCacheKey {
     rule: RuleIdentity,
-    codomain: Vec<FusionTreeLegSetSignature>,
-    domain: Vec<FusionTreeLegSetSignature>,
+    homspace: Arc<FusionTreeHomSpaceContent>,
+}
+
+impl PartialEq for FusionTreeHomSpaceCacheKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.rule == other.rule
+            && (Arc::ptr_eq(&self.homspace, &other.homspace)
+                || (product_space_signature_eq(
+                    &self.homspace.codomain,
+                    &other.homspace.codomain,
+                ) && product_space_signature_eq(
+                    &self.homspace.domain,
+                    &other.homspace.domain,
+                )))
+    }
+}
+
+impl Eq for FusionTreeHomSpaceCacheKey {}
+
+impl std::hash::Hash for FusionTreeHomSpaceCacheKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.rule.hash(state);
+        hash_product_space_signature(&self.homspace.codomain, state);
+        hash_product_space_signature(&self.homspace.domain, state);
+    }
+}
+
+fn product_space_signature_eq(left: &FusionProductSpace, right: &FusionProductSpace) -> bool {
+    left.legs().len() == right.legs().len()
+        && left
+            .legs()
+            .iter()
+            .zip(right.legs())
+            .all(|(left, right)| {
+                left.is_dual() == right.is_dual() && left.sectors() == right.sectors()
+            })
+}
+
+fn hash_product_space_signature<H: std::hash::Hasher>(space: &FusionProductSpace, state: &mut H) {
+    space.legs().len().hash(state);
+    for leg in space.legs() {
+        leg.sectors().hash(state);
+        leg.is_dual().hash(state);
+    }
 }
 
 /// Semantic identity of one complete multiplicity-free block layout.
@@ -668,31 +715,9 @@ impl FusionTreeHomSpaceCacheKey {
     {
         Self {
             rule: rule.rule_identity(),
-            codomain: fusion_product_space_signature(homspace.codomain()),
-            domain: fusion_product_space_signature(homspace.domain()),
+            homspace: Arc::clone(&homspace.content),
         }
     }
-}
-
-fn fusion_product_space_signature(space: &FusionProductSpace) -> Vec<FusionTreeLegSetSignature> {
-    space
-        .legs()
-        .iter()
-        .map(|leg| FusionTreeLegSetSignature {
-            sectors: leg.sectors().iter().copied().collect(),
-            is_dual: leg.is_dual(),
-        })
-        .collect()
-}
-
-fn fusion_product_space_matches_signature(
-    space: &FusionProductSpace,
-    signature: &[FusionTreeLegSetSignature],
-) -> bool {
-    space.legs().len() == signature.len()
-        && space.legs().iter().zip(signature).all(|(leg, expected)| {
-            leg.is_dual() == expected.is_dual && leg.sectors() == expected.sectors.as_slice()
-        })
 }
 
 #[cfg(test)]
@@ -778,8 +803,8 @@ impl PreparedFusionTreeLayout {
 
     fn validate_homspace_signature(&self, homspace: &FusionTreeHomSpace) -> Result<(), CoreError> {
         let key = self.cache_key();
-        if !fusion_product_space_matches_signature(homspace.codomain(), &key.codomain)
-            || !fusion_product_space_matches_signature(homspace.domain(), &key.domain)
+        if !product_space_signature_eq(homspace.codomain(), &key.homspace.codomain)
+            || !product_space_signature_eq(homspace.domain(), &key.homspace.domain)
         {
             return Err(CoreError::MalformedFusionTree {
                 message: "prepared layout does not match HomSpace sector signature",
@@ -855,12 +880,22 @@ impl PreparedFusionTreeLayout {
     }
 
     fn commit_layout(self) -> Arc<FusionTreeHomSpaceLayout> {
+        let cache = fusion_tree_layout_cache();
+        // Why a read lock first: a warm commit only re-finds an entry that is
+        // already published, and taking the process-global write lock for that
+        // serializes concurrent warm calls. The admitting branches keep their
+        // own lookup, which still closes the race against a concurrent admit
+        // between this read lock and theirs.
+        if let Some(existing) = cache
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .lookup(self.cache_key())
+        {
+            return existing;
+        }
         match self.state {
             PreparedFusionTreeLayoutState::Cached { key, layout } => {
-                let cache = fusion_tree_layout_cache();
-                let mut write = cache
-                    .write()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let mut write = fusion_tree_layout_cache_write();
                 if let Some(existing) = write.lookup(&key) {
                     return existing;
                 }
@@ -868,10 +903,7 @@ impl PreparedFusionTreeLayout {
                 write.admit(Arc::new(key), layout, charged_bytes)
             }
             PreparedFusionTreeLayoutState::Cold { key, data } => {
-                let cache = fusion_tree_layout_cache();
-                let mut write = cache
-                    .write()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let mut write = fusion_tree_layout_cache_write();
                 if let Some(existing) = write.lookup(&key) {
                     return existing;
                 }
@@ -905,6 +937,9 @@ std::thread_local! {
         std::cell::Cell::new(0)
     };
     static FUSION_TREE_LAYOUT_ADMISSIONS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    static FUSION_TREE_LAYOUT_WRITE_LOCKS: std::cell::Cell<usize> = const {
         std::cell::Cell::new(0)
     };
     static COUPLED_GRID_BUILD_OBSERVATIONS: std::cell::Cell<(usize, usize)> =
@@ -1168,6 +1203,21 @@ fn fusion_tree_layout_cache() -> &'static RwLock<FusionTreeLayoutCache> {
     })
 }
 
+/// Acquires the layout cache for admission. Every commit-path writer goes
+/// through here, so tests can assert that a warm commit takes none.
+fn fusion_tree_layout_cache_write() -> std::sync::RwLockWriteGuard<'static, FusionTreeLayoutCache> {
+    #[cfg(test)]
+    FUSION_TREE_LAYOUT_WRITE_LOCKS.set(FUSION_TREE_LAYOUT_WRITE_LOCKS.get() + 1);
+    fusion_tree_layout_cache()
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(test)]
+pub(crate) fn fusion_tree_layout_write_locks() -> usize {
+    FUSION_TREE_LAYOUT_WRITE_LOCKS.get()
+}
+
 /// Returns entry and charged-payload bounds for the process-global layout cache.
 pub fn fusion_tree_layout_cache_info() -> FusionTreeLayoutCacheInfo {
     let cache = fusion_tree_layout_cache()
@@ -1180,27 +1230,10 @@ fn charged_fusion_tree_layout_bytes(
     identity: &FusionTreeHomSpaceCacheKey,
     layout: &FusionTreeHomSpaceLayout,
 ) -> usize {
-    let key_bytes = identity
-        .codomain
-        .iter()
-        .chain(identity.domain.iter())
-        .fold(
-            std::mem::size_of::<FusionTreeHomSpaceCacheKey>()
-                .saturating_add(
-                    identity
-                        .codomain
-                        .capacity()
-                        .saturating_add(identity.domain.capacity())
-                        .saturating_mul(std::mem::size_of::<FusionTreeLegSetSignature>()),
-                ),
-            |charged, leg| {
-                charged.saturating_add(
-                    leg.sectors
-                        .capacity()
-                        .saturating_mul(std::mem::size_of::<SectorId>()),
-                )
-            },
-        )
+    // The key now retains the caller's HomSpace content instead of an owned
+    // signature copy, so the charge covers that shared content.
+    let key_bytes = std::mem::size_of::<FusionTreeHomSpaceCacheKey>()
+        .saturating_add(identity.homspace.charged_retained_bytes())
         .saturating_add(identity.rule.charged_retained_bytes());
     let mut frozen_backings = rustc_hash::FxHashSet::default();
     let tree_bytes = layout

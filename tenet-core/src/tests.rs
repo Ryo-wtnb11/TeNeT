@@ -10402,6 +10402,32 @@ mod tests {
     }
 
     #[test]
+    fn warm_layout_commit_takes_no_write_lock() {
+        // What: publishing a layout takes the process-global writer exactly
+        // once; committing the same layout again re-finds it under the read
+        // lock, so concurrent warm calls do not serialize on that writer.
+        let _guard = test_support::CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reset_core_intern_tables();
+        let hom = singleton_rank_hom(su2(1), 5);
+
+        let before_cold = fusion_tree_layout_write_locks();
+        let cold = hom.cached_fusion_tree_layout(&SU2FusionRule);
+        assert_eq!(
+            fusion_tree_layout_write_locks(),
+            before_cold + 1
+        );
+
+        let warm = hom.cached_fusion_tree_layout(&SU2FusionRule);
+        assert_eq!(
+            fusion_tree_layout_write_locks(),
+            before_cold + 1
+        );
+        assert!(Arc::ptr_eq(&cold, &warm));
+    }
+
+    #[test]
     fn prepared_layout_publishes_only_at_commit() {
         // What: cold preparation enumerates exactly once but does not consume
         // identity or cache admission until its explicit commit point.
