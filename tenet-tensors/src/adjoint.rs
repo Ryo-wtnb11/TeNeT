@@ -22,11 +22,12 @@ use crate::contract::{
 use crate::contract::{
     dispatch_prepare, BoundDynamicFusionMapSpace, DynamicFusionMapSpace, LayoutKeyBuilder,
 };
+use crate::oriented_elementwise::CheckedBlockAxes;
 use crate::{CheckedGenericPlanError, ConjugateValue, FusionOperand, OperationError};
-use tenet_operations::tensoradd_raw_strided_kernel_mapped;
+use tenet_operations::StridedHostKernelAdapter;
 
 /// Scalar contract of the adjoint materialization: exactly what the shared
-/// strided owner `tensoradd_raw_strided_kernel_mapped` requires, in one place.
+/// strided owner `StridedHostKernelAdapter::tensoradd_strided_checked` requires, in one place.
 pub trait AdjointScalar:
     Copy
     + Add<Self, Output = Self>
@@ -299,7 +300,8 @@ where
 ///
 /// Per logical block this is one strided copy with conjugation from the
 /// parent block, read through [`FusionOperand::adjoint`] and the same owner
-/// (`tensoradd_raw_strided_kernel_mapped`) that the oriented add path uses, so
+/// (`StridedHostKernelAdapter::tensoradd_strided_checked`, bounds checked once
+/// per block) that the oriented add path uses, so
 /// the adjoint axis/key map lives in one place. The receiver-sized output copy itself is the retained limitation
 /// recorded on #1177.
 ///
@@ -322,6 +324,8 @@ where
     let source = FusionOperand::adjoint(space);
     let structure = space.structure();
     let result_structure = adjoint_space.structure();
+    let mut kernels = StridedHostKernelAdapter::default();
+    let mut axes = CheckedBlockAxes::default();
     for index in 0..result_structure.block_count() {
         let block = result_structure
             .block(index)
@@ -340,19 +344,16 @@ where
         let source_block = structure
             .block(source_index)
             .map_err(OperationError::from_core_preserving_context)?;
-        let result_stride = |axis: usize| {
-            isize::try_from(block.strides()[axis]).map_err(|_| OperationError::ElementCountOverflow)
-        };
-        let source_stride = |axis: usize| {
-            isize::try_from(source_block.strides()[source.storage_axis(axis)?])
-                .map_err(|_| OperationError::ElementCountOverflow)
-        };
-        tensoradd_raw_strided_kernel_mapped(
+        axes.fill(
+            block.shape(),
+            block.strides(),
+            source,
+            source_block.strides(),
+        )?;
+        axes.tensoradd(
+            &mut kernels,
             &mut result,
             data,
-            block.shape(),
-            result_stride,
-            source_stride,
             checked_offset(block.offset())?,
             checked_offset(source_block.offset())?,
             source.storage_conjugate(),

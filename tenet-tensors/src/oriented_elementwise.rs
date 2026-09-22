@@ -4,8 +4,8 @@ use num_traits::{One, Zero};
 use smallvec::SmallVec;
 use tenet_core::{BlockKey, BlockStructure, FusionTreePairKey, SectorId};
 use tenet_operations::{
-    bilinear_raw_strided_kernel_mapped, tensoradd_raw_strided_kernel_mapped, ConjugateValue,
-    OperationError, RecouplingCoefficientAction, StridedHostKernelAdapter, WideScalar,
+    bilinear_raw_strided_kernel_mapped, ConjugateValue, OperationError,
+    RecouplingCoefficientAction, StridedHostKernelAdapter, WideScalar,
 };
 
 use crate::FusionOperand;
@@ -404,6 +404,77 @@ where
     Ok(())
 }
 
+/// One logical block's shape and `isize` strides against one operand, in the
+/// form [`StridedHostKernelAdapter::tensoradd_strided_checked`] takes.
+///
+/// Extent-one axes are dropped: they move no element and reach no extra
+/// offset. Why not keep them: these inline buffers would then spill at a lower
+/// rank than the adapter's own normalization scratch, which drops them too.
+/// Every axis' stride is still converted, so an unrepresentable stride is an
+/// error before any write, as it was per element before.
+#[derive(Default)]
+pub(crate) struct CheckedBlockAxes {
+    shape: SmallVec<[usize; 8]>,
+    destination_strides: SmallVec<[isize; 8]>,
+    source_strides: SmallVec<[isize; 8]>,
+}
+
+impl CheckedBlockAxes {
+    pub(crate) fn fill(
+        &mut self,
+        shape: &[usize],
+        destination_strides: &[usize],
+        source: FusionOperand<'_>,
+        source_strides: &[usize],
+    ) -> Result<(), OperationError> {
+        let stride = |stride: usize| {
+            isize::try_from(stride).map_err(|_| OperationError::ElementCountOverflow)
+        };
+        self.shape.clear();
+        self.destination_strides.clear();
+        self.source_strides.clear();
+        for (axis, &extent) in shape.iter().enumerate() {
+            let destination = stride(destination_strides[axis])?;
+            let source = stride(source_strides[source.storage_axis(axis)?])?;
+            if extent != 1 {
+                self.shape.push(extent);
+                self.destination_strides.push(destination);
+                self.source_strides.push(source);
+            }
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn tensoradd<D>(
+        &self,
+        kernels: &mut StridedHostKernelAdapter,
+        destination_data: &mut [D],
+        source_data: &[D],
+        destination_offset: isize,
+        source_offset: isize,
+        source_conjugate: bool,
+        alpha: D,
+        beta: D,
+    ) -> Result<(), OperationError>
+    where
+        D: Copy + Add<D, Output = D> + Mul<D, Output = D> + PartialEq + Zero + One + ConjugateValue,
+    {
+        kernels.tensoradd_strided_checked(
+            destination_data,
+            source_data,
+            &self.shape,
+            &self.destination_strides,
+            &self.source_strides,
+            destination_offset,
+            source_offset,
+            source_conjugate,
+            alpha,
+            beta,
+        )
+    }
+}
+
 #[doc(hidden)]
 #[allow(clippy::too_many_arguments)]
 pub fn oriented_fusion_add_into<D>(
@@ -436,6 +507,9 @@ where
     }
     validate_oriented_fusion_layout(destination, lhs)?;
     validate_oriented_fusion_layout(destination, rhs)?;
+    let mut kernels = StridedHostKernelAdapter::default();
+    let mut lhs_axes = CheckedBlockAxes::default();
+    let mut rhs_axes = CheckedBlockAxes::default();
     for destination_index in 0..destination.block_count() {
         let destination_block = destination.block(destination_index)?;
         let BlockKey::FusionTree(logical_key) = destination_block.key() else {
@@ -451,33 +525,28 @@ where
             .storage_space()
             .structure()
             .block(rhs.storage_block_index(logical_key)?)?;
-        let destination_stride = |axis| {
-            isize::try_from(destination_block.strides()[axis])
-                .map_err(|_| OperationError::ElementCountOverflow)
-        };
-        let lhs_stride = |axis| {
-            isize::try_from(lhs_block.strides()[lhs.storage_axis(axis)?])
-                .map_err(|_| OperationError::ElementCountOverflow)
-        };
-        let rhs_stride = |axis| {
-            isize::try_from(rhs_block.strides()[rhs.storage_axis(axis)?])
-                .map_err(|_| OperationError::ElementCountOverflow)
-        };
+        // Both sources' layouts are converted before the first write of the
+        // block, whichever coefficients are zero.
+        lhs_axes.fill(
+            destination_block.shape(),
+            destination_block.strides(),
+            lhs,
+            lhs_block.strides(),
+        )?;
+        rhs_axes.fill(
+            destination_block.shape(),
+            destination_block.strides(),
+            rhs,
+            rhs_block.strides(),
+        )?;
         let destination_offset = checked_offset(destination_block.offset())?;
         let lhs_offset = checked_offset(lhs_block.offset())?;
         let rhs_offset = checked_offset(rhs_block.offset())?;
-        for axis in 0..destination_block.shape().len() {
-            destination_stride(axis)?;
-            lhs_stride(axis)?;
-            rhs_stride(axis)?;
-        }
         if !alpha.is_zero() {
-            tensoradd_raw_strided_kernel_mapped(
+            lhs_axes.tensoradd(
+                &mut kernels,
                 destination_data,
                 lhs_data,
-                destination_block.shape(),
-                destination_stride,
-                lhs_stride,
                 destination_offset,
                 lhs_offset,
                 lhs.storage_conjugate(),
@@ -486,12 +555,10 @@ where
             )?;
         }
         if !beta.is_zero() {
-            tensoradd_raw_strided_kernel_mapped(
+            rhs_axes.tensoradd(
+                &mut kernels,
                 destination_data,
                 rhs_data,
-                destination_block.shape(),
-                destination_stride,
-                rhs_stride,
                 destination_offset,
                 rhs_offset,
                 rhs.storage_conjugate(),

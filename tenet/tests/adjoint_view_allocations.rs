@@ -412,6 +412,41 @@ fn mixed_lazy_add_has_no_rank_dependent_stride_allocation() {
 }
 
 #[test]
+fn lazy_add_allocation_count_is_pinned_across_block_counts() {
+    let _measurement = MEASUREMENT_LOCK.lock().unwrap();
+    // What: `add` with a lazy-adjoint operand copies each block through one
+    // bounds-checked strided call (#1399) and allocates only its output and
+    // the tensor wrapping it, the same count as the per-element kernel it
+    // replaced, for one block or many.
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let alpha = num_complex::Complex64::new(0.5, 0.0);
+    let beta = num_complex::Complex64::new(-0.25, 0.0);
+    let mut counts = Vec::new();
+    for (rank, radius, degeneracy) in [(2, 0, 8), (2, 6, 2), (4, 3, 2), (6, 1, 2)] {
+        let sectors = || (-radius..=radius).map(|charge| (charge, degeneracy));
+        let parent = tensor(&runtime, sectors(), rank);
+        let other = tensor(&runtime, sectors(), rank);
+        let owned = other.clone();
+        let lazy = parent.adjoint().unwrap();
+        let other_lazy = other.adjoint().unwrap();
+        black_box(lazy.add(&owned, alpha, beta).unwrap());
+        black_box(lazy.add(&other_lazy, alpha, beta).unwrap());
+        let mixed = measure(|| {
+            black_box(lazy.add(&owned, alpha, beta).unwrap());
+        })
+        .0;
+        let pair = measure(|| {
+            black_box(lazy.add(&other_lazy, alpha, beta).unwrap());
+        })
+        .0;
+        counts.push((mixed, pair));
+    }
+    // Payload `Vec`, `Arc<TypedData>` and `Arc<TypedTensorBody>`: three,
+    // measured identical on the per-element kernel before #1399.
+    assert_eq!(counts, vec![(3, 3); 4]);
+}
+
+#[test]
 fn identity_adjoint_transform_cost_is_independent_of_rank_and_block_count() {
     let _measurement = MEASUREMENT_LOCK.lock().unwrap();
     // What: identity permute, braid, and repartition share the lazy view with
