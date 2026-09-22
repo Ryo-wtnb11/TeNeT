@@ -2,7 +2,9 @@
 //! (#1313): warm per-call minimum/median and allocation calls/bytes for
 //! `compose`, `contract`, `permute`, `repartition`, `qr_compact`,
 //! `svd_compact`, `restrict_leg`, `scale`, `add`, and `norm` over U(1), fZ2×U(1), and SU(2),
-//! `f64` and `Complex64`, ranks 2–5.
+//! `f64` and `Complex64`, ranks 2–5. Two lazy-adjoint rows follow them:
+//! `add_adjoint` (`a.adjoint() + b` on the adjoint space) and `adjoint_data`
+//! (a fresh `a.adjoint()` and its first `data()`, which materializes it).
 //!
 //! ```text
 //! cargo run --release --example eager_overhead_ledger -- [filter ...]
@@ -263,6 +265,13 @@ macro_rules! ledger {
                 3,
             )?;
             let matrix = TensorMap::<_, $dtype>::rand_with_seed($runtime, [&leg], [&leg], 4)?;
+            let on_adjoint = TensorMap::<_, $dtype>::rand_with_seed(
+                $runtime,
+                domain.iter().copied(),
+                codomain.iter().copied(),
+                5,
+            )?;
+            let lazy = a.adjoint()?;
             let selection = LegSelection::try_new(
                 &leg,
                 sectors.iter().map(|s| (s.clone(), 0..case.deg.div_ceil(2))),
@@ -321,6 +330,12 @@ macro_rules! ledger {
                 black_box(&a).add(&a2, one, one).unwrap()
             });
             run_op(config, &prefix, "norm", || black_box(&a).norm().unwrap());
+            run_op(config, &prefix, "add_adjoint", || {
+                black_box(&lazy).add(&on_adjoint, one, one).unwrap()
+            });
+            run_op(config, &prefix, "adjoint_data", || {
+                black_box(&a).adjoint().unwrap().data().len()
+            });
         }
     }};
 }

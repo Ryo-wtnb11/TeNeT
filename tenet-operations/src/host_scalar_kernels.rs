@@ -127,40 +127,6 @@ where
     )
 }
 
-#[doc(hidden)]
-#[allow(clippy::too_many_arguments)]
-pub fn tensoradd_raw_strided_kernel_mapped<T, D, S>(
-    dst_data: &mut [T],
-    src_data: &[T],
-    shape: &[usize],
-    dst_stride: D,
-    src_stride: S,
-    dst_offset: isize,
-    src_offset: isize,
-    source_conjugate: bool,
-    alpha: T,
-    beta: T,
-) -> Result<(), OperationError>
-where
-    T: Copy + Add<T, Output = T> + Mul<T, Output = T> + PartialEq + Zero + One + ConjugateValue,
-    D: Copy + Fn(usize) -> Result<isize, OperationError>,
-    S: Copy + Fn(usize) -> Result<isize, OperationError>,
-{
-    validate_raw_strided_bounds_mapped(dst_data.len(), shape, dst_stride, dst_offset)?;
-    validate_raw_strided_bounds_mapped(src_data.len(), shape, src_stride, src_offset)?;
-    raw_strided_combine_loop_mapped(
-        dst_data,
-        src_data,
-        shape,
-        dst_stride,
-        src_stride,
-        dst_offset,
-        src_offset,
-        source_conjugate,
-        raw_strided_action(alpha, beta),
-    )
-}
-
 /// Conjugated dot product over one strided block, accumulated in
 /// [`WideScalar::Wide`].
 ///
@@ -1107,51 +1073,6 @@ where
         shape,
         |axis| Ok(dst_strides[axis]),
         |axis| Ok(src_strides[axis]),
-        dst_offset,
-        src_offset,
-        source_conjugate,
-        action,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn raw_strided_combine_loop_mapped<T, D, S>(
-    dst_data: &mut [T],
-    src_data: &[T],
-    shape: &[usize],
-    dst_stride: D,
-    src_stride: S,
-    dst_offset: isize,
-    src_offset: isize,
-    source_conjugate: bool,
-    action: RawStridedAction<T>,
-) -> Result<(), OperationError>
-where
-    T: Copy + Add<T, Output = T> + Mul<T, Output = T> + ConjugateValue,
-    D: Copy + Fn(usize) -> Result<isize, OperationError>,
-    S: Copy + Fn(usize) -> Result<isize, OperationError>,
-{
-    let len = crate::strided::element_count(shape)?;
-    if len == 0 {
-        return Ok(());
-    }
-    if shape.is_empty() {
-        let dst_index = checked_offset_to_index(dst_offset)?;
-        let src_index = checked_offset_to_index(src_offset)?;
-        apply_raw_strided_action(
-            &mut dst_data[dst_index],
-            src_data[src_index].maybe_conj(source_conjugate),
-            action,
-        );
-        return Ok(());
-    }
-    raw_strided_combine_recurse_mapped(
-        shape.len() - 1,
-        dst_data,
-        src_data,
-        shape,
-        dst_stride,
-        src_stride,
         dst_offset,
         src_offset,
         source_conjugate,

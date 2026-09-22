@@ -412,6 +412,82 @@ fn mixed_lazy_add_has_no_rank_dependent_stride_allocation() {
 }
 
 #[test]
+fn lazy_add_allocation_count_is_pinned_across_block_counts() {
+    let _measurement = MEASUREMENT_LOCK.lock().unwrap();
+    // What: `add` with a lazy-adjoint operand copies each block through one
+    // bounds-checked strided call (#1399) and allocates only its output and
+    // the tensor wrapping it, the same count as the per-element kernel it
+    // replaced, for one block or many.
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let alpha = num_complex::Complex64::new(0.5, 0.0);
+    let beta = num_complex::Complex64::new(-0.25, 0.0);
+    let mut counts = Vec::new();
+    for (rank, radius, degeneracy) in [(2, 0, 8), (2, 6, 2), (4, 3, 2), (6, 1, 2)] {
+        let sectors = || (-radius..=radius).map(|charge| (charge, degeneracy));
+        let parent = tensor(&runtime, sectors(), rank);
+        let other = tensor(&runtime, sectors(), rank);
+        let owned = other.clone();
+        let lazy = parent.adjoint().unwrap();
+        let other_lazy = other.adjoint().unwrap();
+        black_box(lazy.add(&owned, alpha, beta).unwrap());
+        black_box(lazy.add(&other_lazy, alpha, beta).unwrap());
+        let mixed = measure(|| {
+            black_box(lazy.add(&owned, alpha, beta).unwrap());
+        })
+        .0;
+        let pair = measure(|| {
+            black_box(lazy.add(&other_lazy, alpha, beta).unwrap());
+        })
+        .0;
+        counts.push((mixed, pair));
+    }
+    // Payload `Vec`, `Arc<TypedData>` and `Arc<TypedTensorBody>`: three,
+    // measured identical on the per-element kernel before #1399.
+    assert_eq!(counts, vec![(3, 3); 4]);
+}
+
+#[test]
+fn above_rank_eight_the_block_stride_buffers_spill_once_per_op() {
+    let _measurement = MEASUREMENT_LOCK.lock().unwrap();
+    // What: past eight non-unit axes the inline per-block stride buffers
+    // (`CheckedBlockAxes`) and the adapter's normalization scratch spill to
+    // the heap (#1399). They are reused across blocks, so the count is fixed
+    // per op: the same for one rank-10 block as for many. This is an accepted
+    // tradeoff against main, recorded in
+    // benchmarks/history/adjoint-checked-block-copy-2026-09-22.md.
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let alpha = num_complex::Complex64::new(0.5, 0.0);
+    let beta = num_complex::Complex64::new(-0.25, 0.0);
+    let mut counts = Vec::new();
+    for sectors in [vec![(0, 2)], vec![(0, 2), (1, 1), (-1, 1)]] {
+        let parent = tensor(&runtime, sectors.clone(), 10);
+        let owned = tensor(&runtime, sectors, 10);
+        let other_lazy = owned.adjoint().unwrap();
+        let lazy = parent.adjoint().unwrap();
+        black_box(lazy.add(&owned, alpha, beta).unwrap());
+        black_box(lazy.add(&other_lazy, alpha, beta).unwrap());
+        let mixed = measure(|| {
+            black_box(lazy.add(&owned, alpha, beta).unwrap());
+        })
+        .0;
+        let pair = measure(|| {
+            black_box(lazy.add(&other_lazy, alpha, beta).unwrap());
+        })
+        .0;
+        let fresh = parent.adjoint().unwrap();
+        let materialize = measure(|| {
+            black_box(fresh.data().len());
+        })
+        .0;
+        counts.push((parent.block_count() > 1, mixed, pair, materialize));
+    }
+    // Main's per-element kernel made 3 (output only) at every rank. `add`
+    // adds 9: two operands' three stride buffers plus the adapter's three
+    // layout buffers. Materialization adds 6: one operand's three plus three.
+    assert_eq!(counts, vec![(false, 12, 12, 9), (true, 12, 12, 9)]);
+}
+
+#[test]
 fn identity_adjoint_transform_cost_is_independent_of_rank_and_block_count() {
     let _measurement = MEASUREMENT_LOCK.lock().unwrap();
     // What: identity permute, braid, and repartition share the lazy view with

@@ -72,7 +72,7 @@ pub use host_scalar_kernels::{
 };
 #[doc(hidden)]
 pub use host_scalar_kernels::{
-    bilinear_raw_strided_kernel_mapped, tensoradd_raw_strided_kernel_mapped,
+    bilinear_raw_strided_kernel_mapped,
     tensortrace_raw_strided_kernel_add_with_coefficient_trusted,
     tensortrace_raw_strided_kernel_trusted,
 };
