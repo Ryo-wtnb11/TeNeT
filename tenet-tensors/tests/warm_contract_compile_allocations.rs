@@ -182,12 +182,13 @@ fn warm_contract_compile_allocations_do_not_scale_with_rank() {
         // Core: the plan's job, coefficient, run and inactive-region lists
         // plus its `Arc`. Plan: one shared slice per transform operation.
         // DynamicTree: that plan and its `Arc`; per transformed source its
-        // permuted HomSpace, the layout lookup key (#1367), and the two
-        // `Arc`s the replay scratch shares; the same for the core
-        // destination; the core plan; the empty twist list; the artifact.
+        // permuted HomSpace and the two `Arc`s the replay scratch shares; the
+        // same for the core destination; the core plan; the empty twist list;
+        // the artifact. The layout lookup key is no longer one of them
+        // (#1367): it borrows the HomSpace content.
         assert_eq!(core, 5, "core route at rank {rank}");
         assert_eq!(plan, 3, "plan at rank {rank}");
-        assert_eq!(dynamic_tree, 25, "dynamic-tree route at rank {rank}");
+        assert_eq!(dynamic_tree, 19, "dynamic-tree route at rank {rank}");
     }
 }
 
@@ -230,17 +231,25 @@ fn warm_contract_compile_allocates_once_per_leg_that_changes_side() {
                 )
                 .unwrap()
         });
-        // What: the rank-independent DynamicTree compile (20 here: no core
-        // destination, the output transform is the identity) plus exactly one
+        // What: the rank-independent DynamicTree compile plus exactly one
         // allocation per leg that changes side in a source transform. That
         // one is `SectorLeg::dual` building the dual leg's sector data while
         // the permuted HomSpace is formed; TensorKit's `dual(V)` shares the
         // sector data instead, and removing it is its own leaf, not rank
         // arithmetic this test could forbid.
+        //
+        // Why two bases: the single base this test used before #1367 absorbed
+        // the per-lookup layout key, and what that key cost depended on the
+        // route (this shape compiles four layout lookups, the others three,
+        // and a permuted HomSpace with an empty side allocated one `Vec`
+        // instead of two). Now that a lookup allocates no key, the residual
+        // base is the compile itself: no core destination, identity output
+        // transform.
+        let base = if (codomain, domain) == (1, 2) { 14 } else { 16 };
         let crossing_legs = (1 + domain) + 2;
         assert_eq!(
             allocations,
-            20 + crossing_legs,
+            base + crossing_legs,
             "rank {}",
             codomain + domain
         );
