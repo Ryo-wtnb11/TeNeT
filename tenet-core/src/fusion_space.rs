@@ -880,12 +880,22 @@ impl PreparedFusionTreeLayout {
     }
 
     fn commit_layout(self) -> Arc<FusionTreeHomSpaceLayout> {
+        let cache = fusion_tree_layout_cache();
+        // Why a read lock first: a warm commit only re-finds an entry that is
+        // already published, and taking the process-global write lock for that
+        // serializes concurrent warm calls. The admitting branches keep their
+        // own lookup, which still closes the race against a concurrent admit
+        // between this read lock and theirs.
+        if let Some(existing) = cache
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .lookup(self.cache_key())
+        {
+            return existing;
+        }
         match self.state {
             PreparedFusionTreeLayoutState::Cached { key, layout } => {
-                let cache = fusion_tree_layout_cache();
-                let mut write = cache
-                    .write()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let mut write = fusion_tree_layout_cache_write();
                 if let Some(existing) = write.lookup(&key) {
                     return existing;
                 }
@@ -893,10 +903,7 @@ impl PreparedFusionTreeLayout {
                 write.admit(Arc::new(key), layout, charged_bytes)
             }
             PreparedFusionTreeLayoutState::Cold { key, data } => {
-                let cache = fusion_tree_layout_cache();
-                let mut write = cache
-                    .write()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let mut write = fusion_tree_layout_cache_write();
                 if let Some(existing) = write.lookup(&key) {
                     return existing;
                 }
@@ -930,6 +937,9 @@ std::thread_local! {
         std::cell::Cell::new(0)
     };
     static FUSION_TREE_LAYOUT_ADMISSIONS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    static FUSION_TREE_LAYOUT_WRITE_LOCKS: std::cell::Cell<usize> = const {
         std::cell::Cell::new(0)
     };
     static COUPLED_GRID_BUILD_OBSERVATIONS: std::cell::Cell<(usize, usize)> =
@@ -1191,6 +1201,21 @@ fn fusion_tree_layout_cache() -> &'static RwLock<FusionTreeLayoutCache> {
             FUSION_TREE_LAYOUT_CACHE_MAX_ENTRY_BYTES,
         ))
     })
+}
+
+/// Acquires the layout cache for admission. Every commit-path writer goes
+/// through here, so tests can assert that a warm commit takes none.
+fn fusion_tree_layout_cache_write() -> std::sync::RwLockWriteGuard<'static, FusionTreeLayoutCache> {
+    #[cfg(test)]
+    FUSION_TREE_LAYOUT_WRITE_LOCKS.set(FUSION_TREE_LAYOUT_WRITE_LOCKS.get() + 1);
+    fusion_tree_layout_cache()
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(test)]
+pub(crate) fn fusion_tree_layout_write_locks() -> usize {
+    FUSION_TREE_LAYOUT_WRITE_LOCKS.get()
 }
 
 /// Returns entry and charged-payload bounds for the process-global layout cache.
