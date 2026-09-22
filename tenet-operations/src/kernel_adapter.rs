@@ -2,6 +2,9 @@ use core::ops::{Add, Mul};
 
 use num_traits::{One, Zero};
 
+use crate::host_scalar_kernels::{
+    raw_strided_action, validate_raw_strided_bounds, RawStridedAction,
+};
 use crate::{
     axpby_raw_strided_kernel_trusted, scale_raw_strided_kernel_trusted,
     tensoradd_raw_strided_kernel_trusted, ConjugateValue, OperationError,
@@ -817,6 +820,65 @@ impl Clone for StridedHostKernelAdapter {
 }
 
 impl StridedHostKernelAdapter {
+    /// `dst = alpha * op(src) + beta * dst` over one block whose layout the
+    /// caller has not proved in bounds (degeneracy restriction and scatter).
+    ///
+    /// Both reachable extents are checked once, then the block runs the same
+    /// fused span walk as tree-transform replay, with no per-element offset
+    /// check. The element arithmetic is the scalar kernels' action, so
+    /// `alpha = 1, beta = 0` stays a bit-exact copy rather than `1 * src`.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn tensoradd_strided_checked<T>(
+        &mut self,
+        dst_data: &mut [T],
+        src_data: &[T],
+        shape: &[usize],
+        dst_strides: &[isize],
+        src_strides: &[isize],
+        dst_offset: isize,
+        src_offset: isize,
+        source_conjugate: bool,
+        alpha: T,
+        beta: T,
+    ) -> Result<(), OperationError>
+    where
+        T: Copy + Add<T, Output = T> + Mul<T, Output = T> + PartialEq + Zero + One + ConjugateValue,
+    {
+        validate_raw_strided_bounds(dst_data.len(), shape, dst_strides, dst_offset)?;
+        validate_raw_strided_bounds(src_data.len(), shape, src_strides, src_offset)?;
+        let op = move |value: T| value.maybe_conj(source_conjugate);
+        let scratch = &mut self.scratch;
+        macro_rules! run {
+            ($apply:expr) => {
+                fused_pair(
+                    scratch,
+                    dst_data,
+                    src_data,
+                    shape,
+                    dst_strides,
+                    src_strides,
+                    dst_offset,
+                    src_offset,
+                    $apply,
+                    op,
+                )
+            };
+        }
+        match raw_strided_action(alpha, beta) {
+            RawStridedAction::Copy => run!(|dst: &mut T, value| *dst = value),
+            RawStridedAction::CopyScale { alpha } => run!(move |dst: &mut T, value| {
+                *dst = alpha * value;
+            }),
+            RawStridedAction::Axpy { alpha } => run!(move |dst: &mut T, value| {
+                *dst = *dst + alpha * value;
+            }),
+            RawStridedAction::Axpby { alpha, beta } => run!(move |dst: &mut T, value| {
+                *dst = beta * *dst + alpha * value;
+            }),
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn fused_pair_baked_dispatch<T, Apply, ElementOp>(
         &mut self,
@@ -1411,6 +1473,7 @@ pub fn validate_recoupling_lens(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tensoradd_raw_strided_kernel;
 
     #[test]
     fn strided_host_adapter_add_strided_matches_axpby_semantics() {
@@ -2001,5 +2064,172 @@ mod tests {
         // scale_strided scales in place.
         adapter.scale_strided(&mut dst, &[2], &[1], 0, 2.0).unwrap();
         assert_eq!(dst, [-4.0, -6.0]);
+    }
+
+    /// Rectangular windows of a larger parent block, as a degeneracy
+    /// restriction or scatter reads them: `(shape, strides, offset)` per role.
+    /// `(shape, destination strides, destination offset, source strides,
+    /// source offset)`.
+    type CheckedCase = (Vec<usize>, Vec<isize>, isize, Vec<isize>, isize);
+
+    fn checked_cases() -> Vec<CheckedCase> {
+        vec![
+            // 3x4x2 window at (1, 2, 0) of a column-major 5x7x2 parent into a
+            // compact destination at offset 3.
+            (vec![3, 4, 2], vec![1, 3, 12], 3, vec![1, 5, 35], 1 + 2 * 5),
+            // Axis order permuted (lazy-adjoint storage): destination axis 0
+            // is the parent's slowest axis.
+            (vec![2, 3, 4], vec![1, 2, 6], 0, vec![35, 1, 5], 2 + 5),
+            // Extent-one axes, single-state restriction.
+            (vec![1, 4, 1, 3], vec![1, 1, 4, 4], 1, vec![1, 5, 20, 20], 4),
+            // Rank zero and an empty block.
+            (vec![], vec![], 2, vec![], 7),
+            (vec![2, 0, 3], vec![1, 2, 2], 0, vec![1, 5, 5], 0),
+        ]
+    }
+
+    fn assert_checked_matches_scalar_kernel<T>(
+        values: &[T],
+        alpha_beta: &[(T, T)],
+        bits: fn(T) -> u128,
+    ) where
+        T: Copy
+            + Add<T, Output = T>
+            + Mul<T, Output = T>
+            + PartialEq
+            + Zero
+            + One
+            + ConjugateValue
+            + strided_kernel::MaybeSendSync,
+    {
+        let mut adapter = StridedHostKernelAdapter::default();
+        for (shape, dst_strides, dst_offset, src_strides, src_offset) in checked_cases() {
+            for &(alpha, beta) in alpha_beta {
+                for conjugate in [false, true] {
+                    let src: Vec<T> = (0..80).map(|i| values[i % values.len()]).collect();
+                    let initial: Vec<T> = (0..30)
+                        .map(|i| values[(i * 7 + 3) % values.len()])
+                        .collect();
+                    let mut expected = initial.clone();
+                    tensoradd_raw_strided_kernel(
+                        &mut Vec::new(),
+                        &mut expected,
+                        &src,
+                        &shape,
+                        &dst_strides,
+                        &src_strides,
+                        dst_offset,
+                        src_offset,
+                        conjugate,
+                        alpha,
+                        beta,
+                    )
+                    .unwrap();
+                    let mut actual = initial.clone();
+                    adapter
+                        .tensoradd_strided_checked(
+                            &mut actual,
+                            &src,
+                            &shape,
+                            &dst_strides,
+                            &src_strides,
+                            dst_offset,
+                            src_offset,
+                            conjugate,
+                            alpha,
+                            beta,
+                        )
+                        .unwrap();
+                    let expected: Vec<u128> = expected.into_iter().map(bits).collect();
+                    let actual: Vec<u128> = actual.into_iter().map(bits).collect();
+                    assert_eq!(actual, expected, "shape {shape:?} conj {conjugate}");
+
+                    // A window one element past either end is rejected before
+                    // any destination element is written.
+                    if shape.iter().all(|&extent| extent > 0) {
+                        let mut untouched = initial.clone();
+                        let past_end = isize::try_from(src.len()).unwrap();
+                        assert!(adapter
+                            .tensoradd_strided_checked(
+                                &mut untouched,
+                                &src,
+                                &shape,
+                                &dst_strides,
+                                &src_strides,
+                                dst_offset,
+                                past_end,
+                                conjugate,
+                                alpha,
+                                beta,
+                            )
+                            .is_err());
+                        assert!(adapter
+                            .tensoradd_strided_checked(
+                                &mut untouched,
+                                &src,
+                                &shape,
+                                &dst_strides,
+                                &src_strides,
+                                -1,
+                                src_offset,
+                                conjugate,
+                                alpha,
+                                beta,
+                            )
+                            .is_err());
+                        let untouched: Vec<u128> = untouched.into_iter().map(bits).collect();
+                        let initial: Vec<u128> = initial.into_iter().map(bits).collect();
+                        assert_eq!(untouched, initial);
+                    }
+                }
+            }
+        }
+    }
+
+    /// The checked block copy is bit-identical to the per-element scalar
+    /// kernel it replaces for restriction and scatter, including signed
+    /// zeros and non-finite values, where `1 * src` and `0 + src` would not be.
+    #[test]
+    fn checked_block_copy_is_bit_identical_to_the_scalar_kernel() {
+        let reals = [
+            1.5,
+            -0.0,
+            0.0,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+            -2.25,
+            7.0,
+            f64::MIN_POSITIVE / 4.0,
+        ];
+        assert_checked_matches_scalar_kernel(
+            &reals,
+            &[(1.0, 0.0), (1.0, 1.0), (-2.0, 0.0), (0.5, -3.0)],
+            |value: f64| u128::from(value.to_bits()),
+        );
+
+        use num_complex::Complex64;
+        let complexes = [
+            Complex64::new(1.5, -0.0),
+            Complex64::new(-0.0, -1.0),
+            Complex64::new(f64::INFINITY, 0.0),
+            Complex64::new(0.0, f64::NEG_INFINITY),
+            Complex64::new(f64::NAN, 2.0),
+            Complex64::new(-3.0, 4.5),
+            Complex64::new(-0.0, 0.0),
+        ];
+        let one = Complex64::new(1.0, 0.0);
+        assert_checked_matches_scalar_kernel(
+            &complexes,
+            &[
+                (one, Complex64::new(0.0, 0.0)),
+                (one, one),
+                (Complex64::new(0.5, -1.0), Complex64::new(0.0, 0.0)),
+                (Complex64::new(2.0, 0.0), Complex64::new(-1.0, 0.5)),
+            ],
+            |value: Complex64| {
+                (u128::from(value.re.to_bits()) << 64) | u128::from(value.im.to_bits())
+            },
+        );
     }
 }

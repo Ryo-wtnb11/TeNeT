@@ -299,9 +299,8 @@ where
 ///
 /// Per logical block this is one strided copy with conjugation from the
 /// parent block, read through [`FusionOperand::adjoint`] and the same owner
-/// (`tensoradd_raw_strided_kernel_mapped`) that `oriented_fusion_restrict_into`
-/// and the oriented add path use, so the adjoint axis/key map lives in one
-/// place. The receiver-sized output copy itself is the retained limitation
+/// (`tensoradd_raw_strided_kernel_mapped`) that the oriented add path uses, so
+/// the adjoint axis/key map lives in one place. The receiver-sized output copy itself is the retained limitation
 /// recorded on #1177.
 ///
 /// This contains no provider work: callers must derive and admit

@@ -21,6 +21,7 @@ use tenet::core::{
     U1FusionRule, U1Irrep, Z2Irrep, ZNFusionRule,
 };
 use tenet::prelude::{GradedSpace, LegSelection, Runtime, TensorMap};
+use tenet::typed::BlockFusionTrees;
 
 /// `(degeneracy, carrier dimension)` per sector, in the leg's stored order.
 type AxisLayout = Vec<(usize, usize)>;
@@ -872,4 +873,248 @@ fn restriction_commutes_with_permute_and_with_a_contraction_over_an_untouched_le
         contract_then_restrict.codomain()
     );
     assert_close(restrict_then_contract.data(), contract_then_restrict.data());
+}
+
+/// A deterministic, nonzero, finite entry per `(fusion-tree pair, degeneracy
+/// index)`, so a block routed to the wrong tree or offset cannot coincide.
+trait ExactEntry: Copy {
+    const ZERO: Self;
+    fn entry<S: std::hash::Hash>(trees: &BlockFusionTrees<S>, indices: &[usize]) -> Self;
+    fn bits(self) -> (u64, u64);
+}
+
+fn hashed_nonzero<S: std::hash::Hash>(
+    trees: &BlockFusionTrees<S>,
+    indices: &[usize],
+    salt: u8,
+) -> f64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    (trees, indices, salt).hash(&mut hasher);
+    let bits = hasher.finish();
+    let magnitude = 0.5 + (bits >> 11) as f64 / (1u64 << 53) as f64;
+    let sign = if bits & 1 == 0 { 1.0 } else { -1.0 };
+    sign * magnitude * f64::powi(2.0, ((bits >> 1) % 16) as i32 - 8)
+}
+
+impl ExactEntry for f64 {
+    const ZERO: Self = 0.0;
+    fn entry<S: std::hash::Hash>(trees: &BlockFusionTrees<S>, indices: &[usize]) -> Self {
+        hashed_nonzero(trees, indices, 0)
+    }
+    fn bits(self) -> (u64, u64) {
+        (self.to_bits(), 0)
+    }
+}
+
+impl ExactEntry for Complex64 {
+    const ZERO: Self = Complex64::new(0.0, 0.0);
+    fn entry<S: std::hash::Hash>(trees: &BlockFusionTrees<S>, indices: &[usize]) -> Self {
+        Complex64::new(
+            hashed_nonzero(trees, indices, 0),
+            hashed_nonzero(trees, indices, 1),
+        )
+    }
+    fn bits(self) -> (u64, u64) {
+        (self.re.to_bits(), self.im.to_bits())
+    }
+}
+
+fn exact_bits<D: ExactEntry>(data: &[D]) -> Vec<(u64, u64)> {
+    data.iter().map(|value| value.bits()).collect()
+}
+
+/// The selected range of the sector the block carries on `axis`.
+fn selected_range<S: PartialEq>(
+    trees: &BlockFusionTrees<S>,
+    axis: usize,
+    codomain_rank: usize,
+    selected: &[(S, Range<usize>)],
+) -> Option<Range<usize>> {
+    let sector = if axis < codomain_rank {
+        &trees.codomain_uncoupled()[axis]
+    } else {
+        &trees.domain_uncoupled()[axis - codomain_rank]
+    };
+    selected
+        .iter()
+        .find(|(candidate, _)| candidate == sector)
+        .map(|(_, range)| range.clone())
+}
+
+/// Where a selection sits inside one sector of degeneracy at least three.
+#[derive(Clone, Copy)]
+enum Place {
+    Start,
+    Middle,
+    End,
+    Single,
+}
+
+impl Place {
+    fn range(self, degeneracy: usize) -> Range<usize> {
+        assert!(degeneracy >= 3);
+        match self {
+            Place::Start => 0..2,
+            Place::Middle => 1..degeneracy - 1,
+            Place::End => degeneracy - 1..degeneracy,
+            Place::Single => 1..2,
+        }
+    }
+}
+
+/// `restrict_leg`, `embed_leg` and their round trip, each against a reduced
+/// block oracle filled independently with `from_block_fn`: restriction is a
+/// pure copy, so every entry must match bit for bit.
+macro_rules! assert_exact_restrict_embed {
+    ($dtype:ty, [$($codomain:expr),+], [$($domain:expr),+], $axis:expr, $selected:expr) => {{
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let codomain = vec![$($codomain),+];
+        let domain = vec![$($domain),+];
+        let axis: usize = $axis;
+        let rank = codomain.len();
+        let parent = if axis < rank { codomain[axis] } else { domain[axis - rank] };
+        // Positions in the parent's own stored order, so a dual leg is
+        // selected in its own labels.
+        let selected: Vec<_> = parent
+            .sectors()
+            .unwrap()
+            .into_iter()
+            .zip(parent.degeneracies())
+            .zip($selected)
+            .filter_map(|((sector, &degeneracy), place)| {
+                place.map(|place: Place| (sector, place.range(degeneracy)))
+            })
+            .collect();
+        let selection = LegSelection::try_new(parent, selected.iter().cloned()).unwrap();
+        let replaced = |legs: &[&GradedSpace<_>], base: usize| {
+            legs.iter()
+                .enumerate()
+                .map(|(offset, &leg)| {
+                    if base + offset == axis {
+                        selection.subspace().clone()
+                    } else {
+                        leg.clone()
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        let sub_codomain = replaced(&codomain, 0);
+        let sub_domain = replaced(&domain, rank);
+
+        let source = TensorMap::<_, $dtype>::from_block_fn(
+            &runtime,
+            codomain.iter().copied(),
+            domain.iter().copied(),
+            |trees, indices| <$dtype as ExactEntry>::entry(trees, indices),
+        )
+        .unwrap();
+        let expected = TensorMap::<_, $dtype>::from_block_fn(
+            &runtime,
+            &sub_codomain,
+            &sub_domain,
+            |trees, indices| {
+                let start = selected_range(trees, axis, rank, &selected).unwrap().start;
+                let mut shifted = indices.to_vec();
+                shifted[axis] += start;
+                <$dtype as ExactEntry>::entry(trees, &shifted)
+            },
+        )
+        .unwrap();
+        let restricted = source.restrict_leg(axis, &selection).unwrap();
+        assert_eq!(restricted.codomain(), expected.codomain());
+        assert_eq!(restricted.domain(), expected.domain());
+        assert_eq!(exact_bits(restricted.data()), exact_bits(expected.data()));
+
+        let embedded = restricted.embed_leg(axis, &selection).unwrap();
+        let projected = TensorMap::<_, $dtype>::from_block_fn(
+            &runtime,
+            codomain.iter().copied(),
+            domain.iter().copied(),
+            |trees, indices| match selected_range(trees, axis, rank, &selected) {
+                Some(range) if range.contains(&indices[axis]) => {
+                    <$dtype as ExactEntry>::entry(trees, indices)
+                }
+                _ => <$dtype as ExactEntry>::ZERO,
+            },
+        )
+        .unwrap();
+        assert_eq!(embedded.codomain(), source.codomain());
+        assert_eq!(exact_bits(embedded.data()), exact_bits(projected.data()));
+        assert_eq!(
+            exact_bits(embedded.restrict_leg(axis, &selection).unwrap().data()),
+            exact_bits(restricted.data())
+        );
+    }};
+}
+
+#[test]
+fn restrict_and_embed_are_exact_block_copies_on_u1_legs() {
+    let provider = Arc::new(U1FusionRule);
+    let leg = u1(&provider, &[(-1, 3), (0, 4), (1, 5)]);
+    let dual = leg.try_dual().unwrap();
+    let other = u1(&provider, &[(-1, 1), (0, 2), (1, 3)]);
+    // Ranges at the start, in the middle and at the end of a sector, plus a
+    // single-state selection.
+    let ranges = [Some(Place::Start), Some(Place::Middle), Some(Place::End)];
+    let single = [None, Some(Place::Single), None];
+    for selected in [ranges, single] {
+        assert_exact_restrict_embed!(f64, [&leg, &other], [&other], 0, selected);
+        assert_exact_restrict_embed!(Complex64, [&other, &dual], [&other], 1, selected);
+        assert_exact_restrict_embed!(f64, [&other], [&other, &dual], 2, selected);
+        assert_exact_restrict_embed!(Complex64, [&other], [&leg, &other], 1, selected);
+    }
+}
+
+#[test]
+fn restrict_and_embed_are_exact_block_copies_on_su2_legs() {
+    let provider = Arc::new(SU2FusionRule);
+    let leg = su2(&provider, &[(0, 3), (1, 4), (2, 3)]);
+    let other = su2(&provider, &[(0, 1), (1, 2), (2, 1)]);
+    let ranges = [Some(Place::End), Some(Place::Middle), Some(Place::Start)];
+    let single = [None, Some(Place::Single), None];
+    for selected in [ranges, single] {
+        assert_exact_restrict_embed!(f64, [&leg, &other], [&other], 0, selected);
+        assert_exact_restrict_embed!(Complex64, [&other, &other], [&leg], 2, selected);
+        assert_exact_restrict_embed!(Complex64, [&other, &leg], [&other], 1, selected);
+        assert_exact_restrict_embed!(f64, [&other], [&other, &leg], 2, selected);
+    }
+}
+
+#[test]
+fn restrict_and_embed_are_exact_block_copies_on_fz2_u1_legs() {
+    let provider = Arc::new(FermionParityFusionRule.product(U1FusionRule));
+    let label = |odd: bool, charge: i32| {
+        product_sector(
+            if odd { Z2Irrep::ODD } else { Z2Irrep::EVEN },
+            U1Irrep::new(charge),
+        )
+    };
+    let leg = GradedSpace::try_new_with_arc(
+        Arc::clone(&provider),
+        [
+            (label(false, 0), 3),
+            (label(true, 1), 4),
+            (label(false, 2), 3),
+        ],
+    )
+    .unwrap();
+    let dual = leg.try_dual().unwrap();
+    let other = GradedSpace::try_new_with_arc(
+        Arc::clone(&provider),
+        [
+            (label(false, 0), 2),
+            (label(true, 1), 1),
+            (label(true, -1), 2),
+        ],
+    )
+    .unwrap();
+    let ranges = [Some(Place::Start), Some(Place::Middle), Some(Place::End)];
+    let single = [None, Some(Place::Single), None];
+    for selected in [ranges, single] {
+        assert_exact_restrict_embed!(Complex64, [&dual, &other], [&other], 0, selected);
+        assert_exact_restrict_embed!(f64, [&other, &leg], [&other], 1, selected);
+        assert_exact_restrict_embed!(f64, [&other], [&other, &dual], 2, selected);
+        assert_exact_restrict_embed!(Complex64, [&other], [&leg, &other], 1, selected);
+    }
 }
