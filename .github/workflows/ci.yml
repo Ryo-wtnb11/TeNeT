@@ -124,6 +124,17 @@ jobs:
           key: backend-${{ matrix.name }}
       - run: cargo check --workspace --all-targets --no-default-features --features "${{ matrix.features }}"
         working-directory: tenet
+      # The rows above are compile-only, so the direct full-SVD path a BLAS
+      # provider takes (#1163) never executed in CI. `accelerate` carries the
+      # runtime gate because its vendor is the system framework, so linking a
+      # test binary needs no setup its runner lacks; `cpu-blas` selects no
+      # vendor at all. Scoped to the two crates that own the path:
+      # the workspace suite is red here for an unrelated 1-ULP equality in
+      # tenet-rs's truncated-SVD adjoint gate.
+      - name: Run the BLAS full-SVD suites
+        if: matrix.name == 'accelerate'
+        working-directory: tenet
+        run: cargo test -p tenet-dense -p tenet-matrixalgebra --no-default-features --features blas-accelerate
 
   # opt-path (wraps opt-einsum-path) and cotengra-python (shells out to an
   # installed Python `cotengra`) have real code but, unlike the backend rows
