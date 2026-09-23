@@ -509,8 +509,11 @@ mod tests {
         for groups in [
             // A plain contraction over `m`.
             &[&["i", "j", "m"][..], &["m", "k", "l"][..]][..],
-            // A `conj` operand contracted over all three legs: written
-            // coordinates, which conj does not move.
+            // Every leg of one operand contracted with another. This
+            // function sees no `conj` flags: `conj` rotates the lowered
+            // axes at runtime, so the runtime fixture whose operand is
+            // `conj`, checked against this pairing by the preflight's
+            // `debug_assert!`, is what covers that rotation.
             &[&["m", "i", "j"][..], &["m", "i", "j"][..]][..],
             // A traced operand (`i` twice on operand 0) next to a partner.
             &[&["i", "j", "i"][..], &["j", "k"][..]][..],

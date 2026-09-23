@@ -118,6 +118,26 @@ static UNPAIRED: StaticTopologySpec = StaticTopologySpec {
     ..PAIR
 };
 
+/// A pairing that puts both ends of a pair inside one `conj` operand. That
+/// is a trace, which `tensor!` lowers through `StaticTrace`s instead, and the
+/// written order the pairing is in runs opposite to the lowered order the
+/// preflight walks a `conj` operand in, so its endpoints are not the scan's.
+static INTRA_OPERAND: StaticTopologySpec = StaticTopologySpec {
+    inputs: &[&["i", "j", "m"], &["t", "t", "m"]],
+    conj: &[false, true],
+    codomain_splits: &[Some(2), Some(1)],
+    output: &["i", "j"],
+    output_codomain_rank: Some(2),
+    contracted: &[&[None, None, None], &[None, Some((1, 0)), Some((0, 2))]],
+};
+
+/// `PAIR` with an endpoint outside its own pairing, which would panic if it
+/// were indexed.
+static OUT_OF_RANGE: StaticTopologySpec = StaticTopologySpec {
+    contracted: &[&[None, None, None], &[Some((0, 7)), None, None]],
+    ..PAIR
+};
+
 /// #1394: a spec whose pairing does not describe its operands is not trusted.
 /// Skipping a space check is a silent wrong answer, so the preflight falls
 /// back to the scan and still rejects `c`'s `m` leg.
@@ -127,6 +147,30 @@ fn a_spec_without_a_pairing_still_checks_every_contracted_leg() {
     let [a, b, c] = u1_operands(&runtime);
     static_network_operand_preflight(&[&a, &b], &UNPAIRED).unwrap();
     let error = static_network_operand_preflight(&[&a, &c], &UNPAIRED).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("space mismatch for contracted label `m`"),
+        "{error}"
+    );
+
+    // An endpoint outside the pairing is dropped the same way, instead of
+    // panicking where it would be indexed.
+    static_network_operand_preflight(&[&a, &b], &OUT_OF_RANGE).unwrap();
+    let error = static_network_operand_preflight(&[&a, &c], &OUT_OF_RANGE).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("space mismatch for contracted label `m`"),
+        "{error}"
+    );
+
+    // A pair inside one `conj` operand: the preflight walks that operand's
+    // axes in the opposite order, so trusting the pairing would pair the
+    // mirror axes — the `debug_assert!` fires if this one is trusted. It
+    // scans instead, and still rejects `conj(b)`'s `m` leg, whose duality is
+    // the one `b` contracts with, not `conj(b)`.
+    let error = static_network_operand_preflight(&[&a, &b], &INTRA_OPERAND).unwrap_err();
     assert!(
         error
             .to_string()

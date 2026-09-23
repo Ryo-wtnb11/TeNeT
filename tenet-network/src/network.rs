@@ -922,15 +922,27 @@ where
         let stored = tensor.network_source_leg(source).ok_or_else(missing)?;
         Ok::<_, HostNetworkError<R>>((stored, (source >= codomain_rank) != adjoint))
     };
-    // A pairing of the wrong shape would skip a space check, so it is
-    // dropped for the scan here rather than indexed blindly below.
+    // A pairing this pass does not accept would skip a space check or panic,
+    // so it is dropped for the scan here rather than indexed blindly below.
+    // Rejected in one O(N) sweep: a shape that is not the operands', an
+    // endpoint outside the pairing, and a pair inside one operand — which
+    // the written and the lowered order of a `conj` operand enumerate from
+    // opposite ends, so its endpoints would not be the scan's. An operand
+    // with an intra-operand pair is a trace, and `tensor!` lowers it through
+    // `StaticTrace`s and no static pairing.
     let contracted = contracted.filter(|pairs| {
         traces.is_empty()
             && pairs.len() == tensors.len()
             && pairs
                 .iter()
                 .zip(inputs)
-                .all(|(pairs, labels)| pairs.len() == labels.as_ref().len())
+                .enumerate()
+                .all(|(operand, (operand_pairs, labels))| {
+                    operand_pairs.len() == labels.as_ref().len()
+                        && operand_pairs.iter().flatten().all(|&(previous, written)| {
+                            previous < operand && written < pairs[previous].len()
+                        })
+                })
     });
     for operand in 0..tensors.len() {
         for axis in 0..rank(operand) {
