@@ -49,7 +49,11 @@ pub use tenferro_adapter::{
     cpu_session_stats, reset_cpu_session_stats, CpuSessionStats, DefaultDenseExecutor,
     SharedCpuContext,
 };
-#[cfg(all(test, feature = "cpu-faer", not(feature = "provider-inject")))]
+#[cfg(all(
+    test,
+    any(feature = "cpu-faer", feature = "cpu-blas-core"),
+    not(feature = "provider-inject")
+))]
 pub(crate) use tenferro_adapter::{
     owned_full_svd_input_pointers, reset_owned_full_svd_input_pointers,
 };

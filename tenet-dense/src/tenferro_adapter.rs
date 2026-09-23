@@ -49,20 +49,36 @@ fn note_session_opened() {
     SESSIONS_OPENED.fetch_add(1, Ordering::Relaxed);
 }
 
-#[cfg(all(test, feature = "cpu-faer", not(feature = "provider-inject")))]
+#[cfg(all(
+    test,
+    any(feature = "cpu-faer", feature = "cpu-blas-core"),
+    not(feature = "provider-inject")
+))]
 use std::cell::RefCell;
 
-#[cfg(all(test, feature = "cpu-faer", not(feature = "provider-inject")))]
+#[cfg(all(
+    test,
+    any(feature = "cpu-faer", feature = "cpu-blas-core"),
+    not(feature = "provider-inject")
+))]
 thread_local! {
     static OWNED_FULL_SVD_INPUT_POINTERS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
 }
 
-#[cfg(all(test, feature = "cpu-faer", not(feature = "provider-inject")))]
+#[cfg(all(
+    test,
+    any(feature = "cpu-faer", feature = "cpu-blas-core"),
+    not(feature = "provider-inject")
+))]
 pub(crate) fn reset_owned_full_svd_input_pointers() {
     OWNED_FULL_SVD_INPUT_POINTERS.with(|pointers| pointers.borrow_mut().clear());
 }
 
-#[cfg(all(test, feature = "cpu-faer", not(feature = "provider-inject")))]
+#[cfg(all(
+    test,
+    any(feature = "cpu-faer", feature = "cpu-blas-core"),
+    not(feature = "provider-inject")
+))]
 pub(crate) fn owned_full_svd_input_pointers() -> Vec<usize> {
     OWNED_FULL_SVD_INPUT_POINTERS.with(|pointers| pointers.borrow().clone())
 }
@@ -840,11 +856,22 @@ impl Default for DefaultDenseExecutor {
 
 impl DenseExecutor for DefaultDenseExecutor {
     fn supports_svd_full(&self) -> bool {
-        #[cfg(all(feature = "cpu-faer", not(feature = "provider-inject")))]
+        #[cfg(all(
+            any(feature = "cpu-faer", feature = "cpu-blas-core"),
+            not(feature = "provider-inject")
+        ))]
         {
-            self.backend.kind() == CpuBackendKind::Faer
+            // Both compiled CPU providers factorize the full matrices
+            // natively, so neither reaches the `[U1 | I]` QR completion.
+            matches!(
+                self.backend.kind(),
+                CpuBackendKind::Faer | CpuBackendKind::Blas
+            )
         }
-        #[cfg(any(not(feature = "cpu-faer"), feature = "provider-inject"))]
+        #[cfg(any(
+            not(any(feature = "cpu-faer", feature = "cpu-blas-core")),
+            feature = "provider-inject"
+        ))]
         {
             false
         }
@@ -911,7 +938,11 @@ impl DenseExecutor for DefaultDenseExecutor {
                 }
             }
             .map_err(|err| tenferro_error("svd_full_owned", err))?;
-            #[cfg(all(test, feature = "cpu-faer", not(feature = "provider-inject")))]
+            #[cfg(all(
+                test,
+                any(feature = "cpu-faer", feature = "cpu-blas-core"),
+                not(feature = "provider-inject")
+            ))]
             OWNED_FULL_SVD_INPUT_POINTERS.with(|pointers| {
                 fn slice_ptr<T: tenferro_tensor::TensorScalar>(
                     input: &tenferro_tensor::Tensor,
