@@ -1727,21 +1727,7 @@ impl<'a> OrientedLegView<'a> {
         if !self.dualize {
             return Ok(self.source.clone());
         }
-        let sectors = self
-            .source
-            .iter()
-            .map(|(sector, degeneracy)| {
-                rule.try_dual(sector)
-                    .map(|dual| (dual, degeneracy))
-                    .map_err(CheckedGenericStructureError::Provider)
-            })
-            .collect::<Result<SmallVec<[(SectorId, usize); 8]>, _>>()?;
-        SectorLeg::try_new(sectors, !self.source.is_dual()).map_err(|_| {
-            CoreError::MalformedFusionTree {
-                message: "checked Generic dual is not injective on one tensor leg",
-            }
-            .into()
-        })
+        self.source.try_dual_generic(rule)
     }
 }
 

@@ -19070,6 +19070,46 @@ mod tests {
     }
 
     #[test]
+    fn sector_leg_dual_shares_the_sector_data_the_dual_fixes() {
+        // What: #1403. A leg whose sector -> degeneracy map the rule's dual
+        // fixes shares its storage with its dual, as TensorKit's `dual(V)`
+        // shares `V.dims`; the dual is otherwise content-identical to the
+        // eagerly built leg, including equality and hashing.
+        let hash = |leg: &SectorLeg| {
+            let mut state = std::collections::hash_map::DefaultHasher::new();
+            leg.hash(&mut state);
+            state.finish()
+        };
+        let rule = U1FusionRule;
+
+        let fixed = SectorLeg::new([(u1(-1), 2), (u1(0), 3), (u1(1), 2)], false);
+        let dual = fixed.dual(&rule);
+        assert!(fixed.shares_sector_data_with(&dual));
+        assert!(dual.is_dual());
+        let built = SectorLeg::new([(u1(1), 2), (u1(0), 3), (u1(-1), 2)], true);
+        assert_eq!(dual, built);
+        assert_eq!(hash(&dual), hash(&built));
+        assert_ne!(dual, fixed);
+        assert_eq!(dual.dual(&rule), fixed);
+        assert!(dual.dual(&rule).shares_sector_data_with(&fixed));
+        assert_eq!(fixed.try_dual(&rule), Ok(dual.clone()));
+        assert!(fixed
+            .try_dual(&rule)
+            .unwrap()
+            .shares_sector_data_with(&fixed));
+
+        // What: the leg the dual moves keeps building its own sorted data,
+        // and the round trip still returns the source.
+        let moved = SectorLeg::new([(u1(-1), 2), (u1(1), 4)], false);
+        let moved_dual = moved.dual(&rule);
+        assert!(!moved.shares_sector_data_with(&moved_dual));
+        assert_eq!(moved_dual.sectors(), &[u1(-1), u1(1)]);
+        assert_eq!(moved_dual.degeneracies(), &[4, 2]);
+        assert!(moved_dual.is_dual());
+        assert_eq!(moved_dual.dual(&rule), moved);
+    }
+
+    #[test]
     fn checked_select_and_permute_reject_a_malformed_id_when_orientation_needs_it() {
         // What: moving an excluded raw U1 ID across the HomSpace boundary
         // reports it, while same-side selection and identity permutation do not
