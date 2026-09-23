@@ -24,8 +24,8 @@ use num_complex::{Complex32, Complex64};
 use num_traits::Zero;
 use std::{cell::Cell, convert::Infallible, fmt, sync::Arc};
 use tenet_dense::{
-    CpuBackendKind, DenseBackend, DenseDotConfig, DenseError, DenseExecutor, DenseOwned, DenseRead,
-    DenseTensor, DenseWrite,
+    DenseBackend, DenseDotConfig, DenseError, DenseExecutor, DenseOwned, DenseRead, DenseTensor,
+    DenseWrite,
 };
 
 struct RejectExecutorCalls;
@@ -169,31 +169,21 @@ struct FailSecondOwnedFullSvd {
     calls: usize,
 }
 
+/// The compiled default provider, so every feature set exercises the direct
+/// full-SVD path it actually ships; `None` only where no provider has one.
 fn native_full_svd_executor() -> Option<tenet_dense::DefaultDenseExecutor> {
-    match tenet_dense::DefaultDenseExecutor::with_kind(CpuBackendKind::Faer) {
-        Ok(executor) if executor.supports_svd_full() => Some(executor),
-        Ok(mut executor) => {
-            assert!(matches!(
-                executor.svd_full_owned(DenseOwned::F64(vec![1.0]), 1, 1),
-                Err(DenseError::Unsupported {
-                    op: "svd_full_owned",
-                    ..
-                })
-            ));
-            None
-        }
-        Err(_) => {
-            let mut executor = tenet_dense::DefaultDenseExecutor::new();
-            assert!(matches!(
-                executor.svd_full_owned(DenseOwned::F64(vec![1.0]), 1, 1),
-                Err(DenseError::Unsupported {
-                    op: "svd_full_owned",
-                    ..
-                })
-            ));
-            None
-        }
+    let mut executor = tenet_dense::DefaultDenseExecutor::new();
+    if executor.supports_svd_full() {
+        return Some(executor);
     }
+    assert!(matches!(
+        executor.svd_full_owned(DenseOwned::F64(vec![1.0]), 1, 1),
+        Err(DenseError::Unsupported {
+            op: "svd_full_owned",
+            ..
+        })
+    ));
+    None
 }
 
 impl NativeFullSvdSpy {
@@ -10568,6 +10558,180 @@ fn native_full_svd_reconstructs_complex_mixed_rectangular_sectors() {
             }
         }
     }
+}
+
+/// The single coupled sector of a one-sector fixture, widened to `Complex64`
+/// so one oracle serves every supported dtype.
+fn single_sector_block<R, D>(factor: &BoundDynFactor<R, D>) -> (usize, usize, Vec<Complex64>)
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    let space = factor.space().space();
+    let regions = space
+        .structure()
+        .coupled_sector_regions(space.nout())
+        .unwrap()
+        .unwrap();
+    let mut regions = regions.iter();
+    let region = regions.next().expect("the oracle fixture has one sector");
+    assert!(
+        regions.next().is_none(),
+        "the oracle fixture has one sector"
+    );
+    (
+        region.rows(),
+        region.cols(),
+        factor.data()[region.range()]
+            .iter()
+            .copied()
+            .map(FactorScalar::widen_complex)
+            .collect(),
+    )
+}
+
+/// Independent full-SVD oracle: reconstruction, unitarity of both square
+/// factors, and the Frobenius identity for the spectrum. Never factor entries
+/// — the basis spanning the null space is not unique, so it differs between
+/// the direct provider call and the `[U1 | I]` completion fallback.
+fn assert_native_full_svd_oracle<D: FactorScalar>(tol: f64) {
+    for (rows, cols) in [(3usize, 3usize), (4, 2), (2, 4)] {
+        for kind in ["generic", "rank-deficient", "repeated"] {
+            let entry = |index: usize| {
+                let (row, col) = (index % rows, index / rows);
+                match kind {
+                    // every column is a fixed multiple of the first: rank 1.
+                    "rank-deficient" => {
+                        let value = (((row * 7 + 3) % 13) as f64 - 6.0) * (col as f64 + 1.0);
+                        Complex64::new(value, 0.5 * value)
+                    }
+                    // sigma repeated min(rows, cols) times.
+                    "repeated" => {
+                        let value = if row == col { 2.0 } else { 0.0 };
+                        Complex64::new(value, 0.5 * value)
+                    }
+                    _ => Complex64::new(
+                        ((index * 11 + 2) % 19) as f64 - 7.0,
+                        ((index * 5 + 1) % 17) as f64 - 8.0,
+                    ),
+                }
+            };
+            let data = (0..rows * cols)
+                .map(|index| D::from_complex64(entry(index)))
+                .collect::<Vec<_>>();
+            let expected = data
+                .iter()
+                .copied()
+                .map(FactorScalar::widen_complex)
+                .collect::<Vec<_>>();
+            let norm = expected
+                .iter()
+                .map(|value| value.norm_sqr())
+                .sum::<f64>()
+                .sqrt();
+            let tensor = one_sector_rectangular_matrix(data, rows, cols);
+            let input = bound_tensor(Arc::new(Z2FusionRule), &tensor);
+            let Some(mut dense) = NativeFullSvdSpy::new() else {
+                return;
+            };
+
+            let full = svd_full_dyn(&mut dense, &input.as_ref().dynamic()).unwrap();
+
+            let context = format!("{kind} {rows}x{cols}");
+            assert_eq!(dense.full_calls, 1, "{context}: direct provider call");
+            let (u_rows, u_cols, u) = single_sector_block(full.u());
+            let (s_rows, s_cols, s) = single_sector_block(full.s());
+            let (vh_rows, vh_cols, vh) = single_sector_block(full.vh());
+            assert_eq!((u_rows, u_cols), (rows, rows), "{context}: U shape");
+            assert_eq!((s_rows, s_cols), (rows, cols), "{context}: S shape");
+            assert_eq!((vh_rows, vh_cols), (cols, cols), "{context}: Vh shape");
+
+            for left in 0..rows {
+                for right in 0..rows {
+                    let gram = (0..rows)
+                        .map(|inner| u[inner + rows * left].conj() * u[inner + rows * right])
+                        .sum::<Complex64>();
+                    let unit = f64::from(u8::from(left == right));
+                    assert!(
+                        (gram - Complex64::new(unit, 0.0)).norm() <= tol,
+                        "{context}: U column dot ({left},{right}) = {gram}"
+                    );
+                }
+            }
+            for upper in 0..cols {
+                for lower in 0..cols {
+                    let gram = (0..cols)
+                        .map(|inner| vh[upper + cols * inner] * vh[lower + cols * inner].conj())
+                        .sum::<Complex64>();
+                    let unit = f64::from(u8::from(upper == lower));
+                    assert!(
+                        (gram - Complex64::new(unit, 0.0)).norm() <= tol,
+                        "{context}: Vh row dot ({upper},{lower}) = {gram}"
+                    );
+                }
+            }
+
+            let rank = rows.min(cols);
+            for col in 0..cols {
+                for row in 0..rows {
+                    let actual = (0..rank)
+                        .map(|inner| {
+                            u[row + rows * inner] * s[inner + rows * inner] * vh[inner + cols * col]
+                        })
+                        .sum::<Complex64>();
+                    assert!(
+                        (actual - expected[row + rows * col]).norm() <= tol * norm,
+                        "{context}: reconstruction ({row},{col})"
+                    );
+                }
+            }
+
+            let spectra = full.singular_values();
+            assert_eq!(spectra.len(), 1, "{context}: one sector spectrum");
+            let values = &spectra[0].values;
+            assert_eq!(values.len(), rank, "{context}: spectrum length");
+            for (index, value) in values.iter().enumerate() {
+                assert!(*value >= 0.0, "{context}: sigma {index} is negative");
+                assert!(
+                    index == 0 || values[index - 1] >= *value,
+                    "{context}: sigma {index} breaks descending order"
+                );
+                assert!(
+                    (s[index + rows * index] - Complex64::new(*value, 0.0)).norm() <= tol * norm,
+                    "{context}: S diagonal {index} disagrees with the spectrum"
+                );
+            }
+            // Independent of the factors: the Frobenius norm is the 2-norm of
+            // the spectrum, so no singular value may be missing or spurious.
+            let spectrum_norm = values.iter().map(|value| value * value).sum::<f64>().sqrt();
+            assert!(
+                (spectrum_norm - norm).abs() <= tol * norm.max(1.0),
+                "{context}: ||sigma||_2 = {spectrum_norm} but ||A||_F = {norm}"
+            );
+            match kind {
+                "rank-deficient" => {
+                    assert!(values[0] > tol, "{context}: the rank-1 sigma vanished");
+                    assert!(
+                        values[1..].iter().all(|value| *value <= tol * norm),
+                        "{context}: a rank-deficient sigma is nonzero"
+                    );
+                }
+                "repeated" => assert!(
+                    (values[0] - values[rank - 1]).abs() <= tol * norm,
+                    "{context}: repeated singular values disagree"
+                ),
+                _ => assert!(values[rank - 1] > tol, "{context}: unexpected rank loss"),
+            }
+        }
+    }
+}
+
+#[test]
+fn native_full_svd_oracle_holds_for_every_builtin_dtype_shape_and_rank() {
+    assert_native_full_svd_oracle::<f32>(1.0e-4);
+    assert_native_full_svd_oracle::<f64>(1.0e-10);
+    assert_native_full_svd_oracle::<Complex32>(1.0e-4);
+    assert_native_full_svd_oracle::<Complex64>(1.0e-10);
 }
 
 #[test]

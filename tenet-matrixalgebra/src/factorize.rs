@@ -3789,10 +3789,14 @@ impl<R, D> SvdFullDyn<R, D> {
 
 /// Full fusion-tensor SVD through the device boundary.
 ///
-/// The unitaries are completed from the compact factors with an extra
-/// economy QR of `[U1 | I]` per sector (any orthonormal completion is exact
-/// because the corresponding rows/columns of `S` are zero), so the whole
-/// computation stays on the existing dense-executor boundary.
+/// A provider that advertises [`DenseExecutor::supports_svd_full`] factorizes
+/// the full matrices directly, one call per sector. Otherwise the unitaries
+/// are completed from the compact factors with an extra economy QR of
+/// `[U1 | I]` per sector (any orthonormal completion is exact because the
+/// corresponding rows/columns of `S` are zero), so every provider stays on the
+/// existing dense-executor boundary. The two routes agree on the reconstructed
+/// input, the spectrum and unitarity, but the basis spanning the null space is
+/// not unique and differs between them.
 pub fn svd_full<E, R, D, const NOUT: usize, const NIN: usize>(
     dense: &mut E,
     input: &BoundTensorMapRef<'_, R, D, NOUT, NIN>,

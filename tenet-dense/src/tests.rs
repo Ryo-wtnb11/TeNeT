@@ -1846,14 +1846,14 @@ fn default_executor_rejects_integer_linalg_view() {
     ));
 }
 
-#[cfg(all(feature = "cpu-faer", not(feature = "cpu-blas")))]
+#[cfg(all(feature = "cpu-faer", not(feature = "cpu-blas-core")))]
 #[test]
 fn faer_only_build_rejects_uncompiled_blas_provider() {
     let error = DefaultDenseExecutor::with_kind(CpuBackendKind::Blas).unwrap_err();
     assert!(error.to_string().contains("cpu-blas"));
 }
 
-#[cfg(all(feature = "cpu-blas", not(feature = "cpu-faer")))]
+#[cfg(all(feature = "cpu-blas-core", not(feature = "cpu-faer")))]
 #[test]
 fn blas_only_build_rejects_uncompiled_faer_provider() {
     let error = DefaultDenseExecutor::with_kind(CpuBackendKind::Faer).unwrap_err();
@@ -1988,18 +1988,22 @@ fn accumulate_form_matmul_default_overwrites_then_reports_unsupported() {
     );
 }
 
-#[cfg(all(feature = "cpu-faer", not(feature = "provider-inject")))]
+#[cfg(all(
+    any(feature = "cpu-faer", feature = "cpu-blas-core"),
+    not(feature = "provider-inject")
+))]
 #[test]
-fn default_executor_advertises_faer_owned_full_svd() {
-    assert!(DefaultDenseExecutor::with_kind(CpuBackendKind::Faer)
-        .unwrap()
-        .supports_svd_full());
+fn default_executor_advertises_native_owned_full_svd() {
+    assert!(DefaultDenseExecutor::new().supports_svd_full());
 }
 
-#[cfg(all(feature = "cpu-faer", not(feature = "provider-inject")))]
+#[cfg(all(
+    any(feature = "cpu-faer", feature = "cpu-blas-core"),
+    not(feature = "provider-inject")
+))]
 #[test]
-fn default_executor_runs_faer_owned_full_svd() {
-    let mut executor = DefaultDenseExecutor::with_kind(CpuBackendKind::Faer).unwrap();
+fn default_executor_runs_native_owned_full_svd() {
+    let mut executor = DefaultDenseExecutor::new();
     let outputs = executor
         .svd_full_owned(DenseOwned::F64(vec![1.0, 3.0, 2.0, 4.0, 5.0, 6.0]), 2, 3)
         .unwrap();
@@ -2010,10 +2014,13 @@ fn default_executor_runs_faer_owned_full_svd() {
     assert_eq!(outputs[2].shape(), [3, 3]);
 }
 
-#[cfg(all(feature = "cpu-faer", not(feature = "provider-inject")))]
+#[cfg(all(
+    any(feature = "cpu-faer", feature = "cpu-blas-core"),
+    not(feature = "provider-inject")
+))]
 #[test]
-fn faer_owned_full_svd_validates_overflow_length_then_zero_extent() {
-    let mut executor = DefaultDenseExecutor::with_kind(CpuBackendKind::Faer).unwrap();
+fn native_owned_full_svd_validates_overflow_length_then_zero_extent() {
+    let mut executor = DefaultDenseExecutor::new();
     reset_owned_full_svd_input_pointers();
 
     assert!(matches!(
@@ -2058,10 +2065,13 @@ fn faer_owned_full_svd_validates_overflow_length_then_zero_extent() {
     assert!(owned_full_svd_input_pointers().is_empty());
 }
 
-#[cfg(all(feature = "cpu-faer", not(feature = "provider-inject")))]
+#[cfg(all(
+    any(feature = "cpu-faer", feature = "cpu-blas-core"),
+    not(feature = "provider-inject")
+))]
 #[test]
-fn faer_owned_full_svd_moves_each_dtype_input_buffer() {
-    let mut executor = DefaultDenseExecutor::with_kind(CpuBackendKind::Faer).unwrap();
+fn native_owned_full_svd_moves_each_dtype_input_buffer() {
+    let mut executor = DefaultDenseExecutor::new();
     reset_owned_full_svd_input_pointers();
     let mut expected = Vec::new();
 
@@ -2673,12 +2683,7 @@ fn default_executor_values_only_preserves_rank_and_dtype_rejections() {
 
 #[cfg(all(
     not(feature = "provider-inject"),
-    any(
-        feature = "cpu-faer",
-        feature = "blas-accelerate",
-        feature = "blas-openblas",
-        feature = "blas-mkl"
-    )
+    any(feature = "cpu-faer", feature = "cpu-blas-core")
 ))]
 fn assert_values_only_for_explicit_cpu_provider(kind: CpuBackendKind) {
     let mut executor = DefaultDenseExecutor::with_kind(kind).unwrap();
