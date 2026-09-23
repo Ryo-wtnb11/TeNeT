@@ -77,7 +77,29 @@ fn leg(dual: bool) -> SectorLeg {
     )
 }
 
+/// Same sectors with a degeneracy profile the `q -> -q` dual does not fix, so
+/// the dual leg cannot share the source leg's sector data.
+fn asymmetric_leg(dual: bool) -> SectorLeg {
+    SectorLeg::new(
+        [
+            (U1Irrep::new(-1).sector_id(), 2),
+            (U1Irrep::new(0).sector_id(), 3),
+            (U1Irrep::new(1).sector_id(), 4),
+        ],
+        dual,
+    )
+}
+
 fn space(provider: &Arc<U1FusionRule>, codomain: usize, domain: usize) -> Space {
+    space_of(leg, provider, codomain, domain)
+}
+
+fn space_of(
+    leg: fn(bool) -> SectorLeg,
+    provider: &Arc<U1FusionRule>,
+    codomain: usize,
+    domain: usize,
+) -> Space {
     Space::from_final_homspace_multiplicity_free_checked(
         Arc::clone(provider),
         FusionTreeHomSpace::new(
@@ -192,61 +214,91 @@ fn warm_contract_compile_allocations_do_not_scale_with_rank() {
     }
 }
 
+/// Allocations of one warm DynamicTree compile of
 /// `A(V^codomain ← V^domain)` contracted on its codomain axis 0 with
 /// `M(V ← V)` on its domain axis, identity output (the E1 `contract` row):
 /// A's source transform sends leg 0 to the domain and its `domain` legs to
 /// the codomain, and M's transform swaps its two legs.
+fn crossing_compile_allocations(
+    leg: fn(bool) -> SectorLeg,
+    codomain: usize,
+    domain: usize,
+) -> usize {
+    let provider = Arc::new(U1FusionRule);
+    let lhs = space_of(leg, &provider, codomain, domain);
+    let matrix = space_of(leg, &provider, 1, 1);
+    let open = (0..codomain + domain).collect::<Vec<_>>();
+    let axes = || TensorContractSpec::new(&[0], &[1], OutputAxisOrder::from_axes(&open));
+    let dst = Space::contracted_multiplicity_free_ordered(
+        &lhs,
+        &matrix,
+        &[0],
+        &[1],
+        OutputAxisOrder::from_axes(&open),
+    )
+    .unwrap();
+    let store = Arc::new(RuntimeTreeTransformStore::new(
+        RuntimeTreeTransformStore::<f64>::DEFAULT_BYTE_BUDGET,
+    ));
+    let mut context = runtime_like_context(&store);
+    warm_allocations(|| {
+        context
+            .compile_storage_contract_resolution(
+                &dst,
+                FusionOperand::direct(lhs.space()),
+                FusionOperand::direct(matrix.space()),
+                axes(),
+            )
+            .unwrap()
+    })
+}
+
+/// The route's own allocation count, and the number of legs it dualizes
+/// while forming permuted HomSpaces.
+fn crossing_compile_base(codomain: usize, domain: usize) -> (usize, usize) {
+    if (codomain, domain) == (1, 2) {
+        (19, 0)
+    } else {
+        (16, (1 + domain) + 2)
+    }
+}
+
 #[test]
-fn warm_contract_compile_allocates_once_per_leg_that_changes_side() {
+fn warm_contract_compile_allocates_nothing_per_leg_that_changes_side() {
     let _serial = SERIAL
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     // Rank 2 is left out: there the planner takes the reversed orientation,
     // whose source transforms keep every leg on its side.
     for (codomain, domain) in [(2, 1), (1, 2), (2, 2), (3, 2), (2, 3), (3, 3)] {
-        let provider = Arc::new(U1FusionRule);
-        let lhs = space(&provider, codomain, domain);
-        let matrix = space(&provider, 1, 1);
-        let open = (0..codomain + domain).collect::<Vec<_>>();
-        let axes = || TensorContractSpec::new(&[0], &[1], OutputAxisOrder::from_axes(&open));
-        let dst = Space::contracted_multiplicity_free_ordered(
-            &lhs,
-            &matrix,
-            &[0],
-            &[1],
-            OutputAxisOrder::from_axes(&open),
-        )
-        .unwrap();
-        let store = Arc::new(RuntimeTreeTransformStore::new(
-            RuntimeTreeTransformStore::<f64>::DEFAULT_BYTE_BUDGET,
-        ));
-        let mut context = runtime_like_context(&store);
-        let allocations = warm_allocations(|| {
-            context
-                .compile_storage_contract_resolution(
-                    &dst,
-                    FusionOperand::direct(lhs.space()),
-                    FusionOperand::direct(matrix.space()),
-                    axes(),
-                )
-                .unwrap()
-        });
-        // What: the rank-independent DynamicTree compile plus exactly one
-        // allocation per leg that changes side in a source transform. That
-        // one is `SectorLeg::dual` building the dual leg's sector data while
-        // the permuted HomSpace is formed; TensorKit's `dual(V)` shares the
-        // sector data instead, and removing it is its own leaf, not rank
-        // arithmetic this test could forbid.
+        let allocations = crossing_compile_allocations(leg, codomain, domain);
+        // What: the rank-independent DynamicTree compile, and nothing per leg
+        // that changes side in a source transform. #1403 removed that
+        // per-leg allocation: forming the permuted HomSpace dualizes
+        // `(1 + domain) + 2` legs, and `SectorLeg::dual` now shares the
+        // source leg's sector data, as TensorKit's `dual(V)` shares `V.dims`.
         //
-        // Why two bases: the single base this test used before #1367 absorbed
-        // the per-lookup layout key, and what that key cost depended on the
-        // route (this shape compiles four layout lookups, the others three,
-        // and a permuted HomSpace with an empty side allocated one `Vec`
-        // instead of two). Now that a lookup allocates no key, the residual
-        // base is the compile itself: no core destination, identity output
-        // transform.
-        let base = if (codomain, domain) == (1, 2) { 14 } else { 16 };
-        let crossing_legs = (1 + domain) + 2;
+        // Why shape (1, 2) is apart: its route forms no permuted HomSpace
+        // with a crossing leg, so it never dualizes one. The twin test below
+        // measures the same 19 with legs whose dual cannot be shared, which
+        // is what proves the difference is the route and not the sharing.
+        let (base, _) = crossing_compile_base(codomain, domain);
+        assert_eq!(allocations, base, "rank {}", codomain + domain);
+    }
+}
+
+/// The residual of #1403: TeNeT stores a leg's sectors sorted, so a leg whose
+/// sector -> degeneracy map the dual does not fix still builds its own sector
+/// data, one allocation per crossing leg. Sharing that case needs dualization
+/// deferred to every accessor, which is a representation change, not this leaf.
+#[test]
+fn warm_contract_compile_allocates_once_per_crossing_leg_the_dual_does_not_fix() {
+    let _serial = SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for (codomain, domain) in [(2, 1), (1, 2), (2, 2), (3, 2), (2, 3), (3, 3)] {
+        let allocations = crossing_compile_allocations(asymmetric_leg, codomain, domain);
+        let (base, crossing_legs) = crossing_compile_base(codomain, domain);
         assert_eq!(
             allocations,
             base + crossing_legs,

@@ -152,10 +152,24 @@ impl SectorLeg {
         Pairs: IntoIterator<Item = (Sector, usize)>,
         Sector: Into<SectorId>,
     {
-        let mut pairs = pairs
+        let pairs = pairs
             .into_iter()
             .map(|(sector, degeneracy)| (sector.into(), degeneracy))
             .collect::<SmallVec<[(SectorId, usize); 8]>>();
+        Self::build(pairs, is_dual, None)
+    }
+
+    /// Shared body of [`Self::try_new`] and the dual constructors.
+    ///
+    /// `share` is the leg the result may share its sector data with when the
+    /// two carry the same sector -> degeneracy map: the legs then differ only
+    /// in their dual flag, which is the case TensorKit's `dual(V)` covers by
+    /// reusing the sector dictionary outright.
+    fn build(
+        mut pairs: SmallVec<[(SectorId, usize); 8]>,
+        is_dual: bool,
+        share: Option<&Self>,
+    ) -> Result<Self, SectorLegConstructionError> {
         pairs.sort_unstable_by_key(|&(sector, _)| sector);
         // Why not discard zeros first: duplicate validity must not depend on
         // input order or storage representation; TeNeT follows TensorKit's
@@ -164,6 +178,17 @@ impl SectorLeg {
             if window[0].0 == window[1].0 {
                 return Err(SectorLegConstructionError::DuplicateSector {
                     sector: window[0].0,
+                });
+            }
+        }
+        // Why compare before building: a leg whose map is unchanged by the
+        // rule's dual differs from its dual only in the flag, so the dual can
+        // borrow the same `Arc` and allocate nothing.
+        if let Some(share) = share {
+            if share.has_sorted_pairs(&pairs) {
+                return Ok(Self {
+                    data: Arc::clone(&share.data),
+                    is_dual,
                 });
             }
         }
@@ -231,11 +256,30 @@ impl SectorLeg {
     where
         R: FusionRule,
     {
-        Self::new(
+        Self::build(
             self.iter()
-                .map(|(sector, degeneracy)| (rule.dual(sector), degeneracy)),
+                .map(|(sector, degeneracy)| (rule.dual(sector), degeneracy))
+                .collect(),
             !self.is_dual,
+            Some(self),
         )
+        .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    /// Whether `pairs`, sorted by sector and free of zero degeneracies, is
+    /// this leg's own sector -> degeneracy map.
+    fn has_sorted_pairs(&self, pairs: &[(SectorId, usize)]) -> bool {
+        pairs.len() == self.data.sectors.len()
+            && pairs
+                .iter()
+                .zip(self.iter())
+                .all(|(&pair, own)| pair == own)
+    }
+
+    /// Whether `other` borrows this leg's sector and degeneracy storage.
+    #[doc(hidden)]
+    pub fn shares_sector_data_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.data, &other.data)
     }
 
     /// The dual leg, returning a finite-algebra error when any sector has no
@@ -261,7 +305,7 @@ impl SectorLeg {
         // `Result`-returning API. A dual is an involution on the sector set, so
         // a collision is the rule's rigidity structure being broken, not a
         // caller mistake, and it belongs in the algebra error.
-        Self::try_new(sectors, !self.is_dual).map_err(|error| match error {
+        Self::build(sectors, !self.is_dual, Some(self)).map_err(|error| match error {
             SectorLegConstructionError::DuplicateSector { sector } => {
                 FusionAlgebraError::DualNotInjective { dual: sector }
             }
@@ -286,7 +330,7 @@ impl SectorLeg {
                     .map_err(CheckedGenericStructureError::Provider)
             })
             .collect::<Result<SmallVec<[(SectorId, usize); 8]>, _>>()?;
-        Self::try_new(sectors, !self.is_dual).map_err(|_| {
+        Self::build(sectors, !self.is_dual, Some(self)).map_err(|_| {
             CoreError::MalformedFusionTree {
                 message: "checked Generic dual is not injective on one tensor leg",
             }
