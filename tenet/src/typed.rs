@@ -9770,22 +9770,32 @@ where
 /// `eig_*` family can build a `TensorMap<R, D::Eig>` from a `TensorMap<R, D>`.
 /// The payload type of a factor need not be the payload type of the tensor it
 /// came from, and an inherent method cannot say that.
+///
+/// Borrowed rather than consumed, and filled from a slice rather than by
+/// `into_iter().collect()`: the standard library's in-place collect reuses the
+/// source buffer only when `E` and `V` share size and alignment, so consuming
+/// the spectrum made the number of buffers a spectrum factor costs depend on
+/// the payload dtype — free for `f64`, one `Vec<E>` per coupled sector for
+/// `f32`, `Complex32` and `Complex64` (#1337). Borrowing also lets the
+/// truncating callers hand their spectrum to the public field afterwards
+/// instead of cloning it for one of the two uses.
 fn diagonal_factor_on<R, E, V>(
     runtime: &Runtime,
     authority: &BoundDynamicFusionMapSpace<R>,
-    mut spectrum: Vec<tenet_matrixalgebra::SectorSpectrum<V>>,
+    spectrum: &mut [tenet_matrixalgebra::SectorSpectrum<V>],
     to_scalar: impl Fn(V) -> E,
 ) -> Result<TensorMap<R, E>, Error>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    V: Copy,
 {
     spectrum.sort_unstable_by_key(|entry| entry.sector);
-    let space = tenet_matrixalgebra::diagonal_bond_bound_space_like(authority, &spectrum)?;
+    let space = tenet_matrixalgebra::diagonal_bond_bound_space_like(authority, spectrum)?;
     let data = spectrum
-        .into_iter()
+        .iter()
         .map(|entry| tenet_matrixalgebra::SectorSpectrum {
             sector: entry.sector,
-            values: entry.values.into_iter().map(&to_scalar).collect(),
+            values: entry.values.iter().map(|&value| to_scalar(value)).collect(),
         })
         .collect();
     Ok(TensorMap {
@@ -9809,11 +9819,13 @@ where
     spectrum.sort_unstable_by_key(|entry| entry.sector);
     let space =
         tenet_matrixalgebra::diagonal_bond_bound_space_generic_checked(provider, &spectrum)?;
+    // Same dtype-independent fill as [`diagonal_factor_on`], for the reason
+    // given there.
     let data = spectrum
-        .into_iter()
+        .iter()
         .map(|entry| tenet_matrixalgebra::SectorSpectrum {
             sector: entry.sector,
-            values: entry.values.into_iter().map(&to_scalar).collect(),
+            values: entry.values.iter().map(|&value| to_scalar(value)).collect(),
         })
         .collect();
     Ok(TensorMap {
@@ -17227,9 +17239,9 @@ where
     /// fields, not to storage; a stored payload never leaves this module.
     ///
     /// Sorted by sector id first because the bond leg is built from this order.
-    fn diagonal_factor<V>(
+    fn diagonal_factor<V: Copy>(
         &self,
-        spectrum: Vec<tenet_matrixalgebra::SectorSpectrum<V>>,
+        spectrum: &mut [tenet_matrixalgebra::SectorSpectrum<V>],
         to_scalar: impl Fn(V) -> D,
     ) -> Result<Self, Error> {
         diagonal_factor_on(&self.runtime, self.logical_space(), spectrum, to_scalar)
@@ -17326,7 +17338,7 @@ where
         // Why the `_factors_` seam rather than `svd_compact_dyn`: the latter
         // builds the dense block-diagonal `s` itself, so taking it and throwing
         // it away would pay the very `Σ_c k_c²` allocation this storage avoids.
-        let (u, vh, spectrum) = match &self.repr {
+        let (u, vh, mut spectrum) = match &self.repr {
             TypedTensorRepr::Adjoint(view) => tenet_matrixalgebra::svd_compact_adjoint_factors_dyn(
                 dense.dense(),
                 &BoundDynamicTensorRef::try_new(
@@ -17340,7 +17352,7 @@ where
         };
         Ok((
             self.wrap_bound_factor(u),
-            self.diagonal_factor(spectrum, D::from_real)?,
+            self.diagonal_factor(&mut spectrum, D::from_real)?,
             self.wrap_bound_factor(vh),
         ))
     }
@@ -17405,7 +17417,7 @@ where
     {
         let mut dense = self.runtime.lease_dense();
         // The `_factors_` seam, for the reason `svd_compact` gives.
-        let (u, vh, singular_values, error) = match &self.repr {
+        let (u, vh, mut singular_values, error) = match &self.repr {
             TypedTensorRepr::Adjoint(view) => tenet_matrixalgebra::svd_trunc_adjoint_factors_dyn(
                 dense.dense(),
                 &BoundDynamicTensorRef::try_new(
@@ -17422,7 +17434,7 @@ where
         };
         Ok(SvdTrunc {
             u: self.wrap_bound_factor(u),
-            s: self.diagonal_factor(singular_values.clone(), D::from_real)?,
+            s: self.diagonal_factor(&mut singular_values, D::from_real)?,
             vh: self.wrap_bound_factor(vh),
             singular_values: self.decode_spectrum(singular_values)?,
             error,
@@ -17804,9 +17816,9 @@ where
         }
         let mut dense = self.runtime.lease_dense();
         let out = tenet_matrixalgebra::eigh_full_dyn(dense.dense(), &self.bound_ref()?)?;
-        let (v, eigenvalues) = out.into_parts();
+        let (v, mut eigenvalues) = out.into_parts();
         Ok((
-            self.diagonal_factor(eigenvalues, D::from_real)?,
+            self.diagonal_factor(&mut eigenvalues, D::from_real)?,
             self.wrap_bound_factor(v),
         ))
     }
@@ -17836,9 +17848,9 @@ where
         let mut dense = self.runtime.lease_dense();
         let out =
             tenet_matrixalgebra::eigh_trunc_dyn(dense.dense(), &self.bound_ref()?, truncation)?;
-        let (v, eigenvalues, error) = out.into_parts();
+        let (v, mut eigenvalues, error) = out.into_parts();
         Ok(EighTrunc {
-            d: self.diagonal_factor(eigenvalues.clone(), D::from_real)?,
+            d: self.diagonal_factor(&mut eigenvalues, D::from_real)?,
             v: self.wrap_bound_factor(v),
             eigenvalues: self.decode_spectrum(eigenvalues)?,
             error,
@@ -17914,12 +17926,12 @@ where
         }
         let mut dense = self.runtime.lease_dense();
         let out = tenet_matrixalgebra::eig_full_dyn(dense.dense(), &self.bound_ref()?)?;
-        let (v, eigenvalues) = out.into_parts();
+        let (v, mut eigenvalues) = out.into_parts();
         Ok((
             diagonal_factor_on(
                 &self.runtime,
                 self.logical_space(),
-                eigenvalues,
+                &mut eigenvalues,
                 <<D as FactorScalar>::Eig as FactorScalar>::from_complex64,
             )?,
             wrap_factor_on(&self.runtime, v),
@@ -17946,12 +17958,12 @@ where
         let mut dense = self.runtime.lease_dense();
         let out =
             tenet_matrixalgebra::eig_trunc_dyn(dense.dense(), &self.bound_ref()?, truncation)?;
-        let (v, eigenvalues, error) = out.into_parts();
+        let (v, mut eigenvalues, error) = out.into_parts();
         Ok(EigTrunc {
             d: diagonal_factor_on(
                 &self.runtime,
                 self.logical_space(),
-                eigenvalues.clone(),
+                &mut eigenvalues,
                 <<D as FactorScalar>::Eig as FactorScalar>::from_complex64,
             )?,
             v: wrap_factor_on(&self.runtime, v),
@@ -27182,5 +27194,109 @@ mod representation_gates {
         let product = lhs.contract(&rhs, &[1], &[0], &[0, 1]).unwrap();
         assert_eq!(product.placement(), Placement::Cuda(0));
         assert_eq!(runtime.tree_transform_cache_info(), before);
+    }
+
+    /// #1337: filling the compact payload from a borrowed slice instead of
+    /// consuming the spectrum must move exactly the same bits, in the same
+    /// order, at every payload dtype.
+    ///
+    /// The expected values are written out rather than derived from
+    /// `FactorScalar::from_real`, so the assertion is independent of the
+    /// conversion under test. The fixture carries a zero, a negative value, an
+    /// `f64` subnormal (which `f32` must flush to `+0.0`, not to a NaN or a
+    /// denormal of its own) and an `f32` subnormal (which must survive), and
+    /// declares its sectors out of engine order so a factor that kept the
+    /// caller's order or reordered values inside a sector fails.
+    #[test]
+    fn diagonal_spectrum_factor_converts_every_value_bitwise() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let provider = Arc::new(U1FusionRule);
+        let zero = U1Irrep::new(0);
+        let one = U1Irrep::new(1);
+        let leg =
+            GradedSpace::try_new_with_arc(Arc::clone(&provider), [(zero, 3), (one, 2)]).unwrap();
+        let authority: TensorMap<_, f64> =
+            TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| 0.0).unwrap();
+        let id = |label| TypedSectorAdmission::try_encode_label(provider.as_ref(), &label).unwrap();
+
+        let tiny = f64::from(f32::MIN_POSITIVE) / 2.0;
+        let spectrum = || {
+            vec![
+                tenet_matrixalgebra::SectorSpectrum {
+                    sector: id(one),
+                    values: vec![0.0_f64, -1.5],
+                },
+                tenet_matrixalgebra::SectorSpectrum {
+                    sector: id(zero),
+                    values: vec![1.0_f64, f64::MIN_POSITIVE / 2.0, tiny],
+                },
+            ]
+        };
+
+        let mut wide = spectrum();
+        let wide_factor: TensorMap<_, f64> = diagonal_factor_on(
+            &runtime,
+            authority.logical_space(),
+            &mut wide,
+            <f64 as FactorScalar>::from_real,
+        )
+        .unwrap();
+        let seen = wide_factor.diagview().unwrap();
+        let bits: Vec<(U1Irrep, Vec<u64>)> = seen
+            .iter()
+            .map(|entry| {
+                (
+                    entry.sector,
+                    entry.values.iter().map(|value| value.to_bits()).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            bits,
+            vec![
+                (
+                    zero,
+                    vec![
+                        1.0_f64.to_bits(),
+                        (f64::MIN_POSITIVE / 2.0).to_bits(),
+                        tiny.to_bits()
+                    ]
+                ),
+                (one, vec![0.0_f64.to_bits(), (-1.5_f64).to_bits()]),
+            ]
+        );
+
+        let mut narrow = spectrum();
+        let narrow_factor: TensorMap<_, f32> = diagonal_factor_on(
+            &runtime,
+            authority.logical_space(),
+            &mut narrow,
+            <f32 as FactorScalar>::from_real,
+        )
+        .unwrap();
+        let seen = narrow_factor.diagview().unwrap();
+        let bits: Vec<(U1Irrep, Vec<u32>)> = seen
+            .iter()
+            .map(|entry| {
+                (
+                    entry.sector,
+                    entry.values.iter().map(|value| value.to_bits()).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            bits,
+            vec![
+                (
+                    zero,
+                    vec![
+                        1.0_f32.to_bits(),
+                        0.0_f32.to_bits(),
+                        (f32::MIN_POSITIVE / 2.0).to_bits()
+                    ]
+                ),
+                (one, vec![0.0_f32.to_bits(), (-1.5_f32).to_bits()]),
+            ]
+        );
     }
 }
