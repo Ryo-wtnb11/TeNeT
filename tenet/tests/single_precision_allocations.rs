@@ -296,40 +296,29 @@ fn single_precision_factorizations_allocate_like_double() {
         "Complex32 against Complex64"
     );
 
-    // The one dtype-asymmetric allocation on this path, and the reason the
-    // bound below is not plain equality.
-    //
-    // `typed.rs::diagonal_factor_on` builds a spectrum factor by
-    // `entry.values.into_iter().map(to_scalar).collect()`, turning the `Vec<f64>`
-    // spectrum into a `Vec<D>` payload. When `D` is `f64` that is the identity
-    // map over a `Vec` of the same element size and alignment, so the standard
-    // library's in-place collect reuses the source buffer and the factor costs
-    // no allocation at all. `f32` (4 bytes, align 4), `Complex32` (8 bytes,
-    // align 4) and `Complex64` (16 bytes) all fail that layout test, so each
-    // allocates one `Vec<D>` per coupled sector of every spectrum factor built.
-    //
-    // So the asymmetry is not "single precision costs more": `Complex64` pays
-    // it too and has since long before single precision existed. `f64` is the
-    // one payload dtype that gets its spectrum factor for free, and the term
-    // below is derived from the fixture (the sector count measured above),
-    // never hardcoded. Found by diffing a per-call-site allocation-backtrace
-    // histogram between the `f64` and `f32` runs; the dense backend's own SVD
-    // entry points and conversion chain are allocation-identical at all four
-    // dtypes.
-    for (single, double, extra, what) in [
-        (f32_calls, f64_calls, f32_sectors, "f32 against f64"),
-        (c32_calls, c64_calls, 0, "Complex32 against Complex64"),
+    // Equality, not a bound (#1337). This used to allow `f32`, `Complex32` and
+    // `Complex64` a slack of one allocation per coupled sector of every
+    // spectrum factor built: `typed.rs::diagonal_factor_on` converted the
+    // `Vec<f64>` spectrum into the `Vec<D>` payload by
+    // `into_iter().map(to_scalar).collect()`, and the standard library's
+    // in-place collect reuses the source buffer only when `D` matches `f64` in
+    // size *and* alignment — which `f32` (align 4), `Complex32` (align 4) and
+    // `Complex64` (16 bytes) all fail. The asymmetry was never "single
+    // precision costs more": `Complex64` paid it too, since long before single
+    // precision existed, and `f64` was the one payload dtype whose spectrum
+    // factor was free. The factor is now filled from a borrowed slice, so the
+    // buffer count is a property of the algorithm rather than of the payload
+    // layout. Found by diffing a per-call-site allocation-backtrace histogram
+    // between the `f64` and `f32` runs; the dense backend's own SVD entry
+    // points and conversion chain are allocation-identical at all four dtypes.
+    for (single, double, what) in [
+        (f32_calls, f64_calls, "f32 against f64"),
+        (c32_calls, c64_calls, "Complex32 against Complex64"),
     ] {
-        assert!(
-            single >= double,
-            "{what}: narrowing the payload must not make the factorization \
-             allocate less ({single} against {double}) — that would mean it ran \
-             a different algorithm"
-        );
-        assert!(
-            single <= double + extra,
-            "{what}: {single} allocation calls against {double} plus the {extra} \
-             spectrum-factor collects that only an f64 payload avoids"
+        assert_eq!(
+            single, double,
+            "{what}: narrowing the payload must not change how often the \
+             factorization allocates ({single} against {double})"
         );
     }
 
