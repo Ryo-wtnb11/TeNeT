@@ -2628,6 +2628,20 @@ fn assert_checked_generic_eigh_factors<D>(
     assert_eq!(truncated.eigenvalues.len(), 1);
     assert_eq!(truncated.eigenvalues[0].sector, Label::X);
     assert_eq!(truncated.eigenvalues[0].values, vec![-3.0, 2.0]);
+    // #1337: the compact payload is filled from the borrowed spectrum, which
+    // the factor sorts in place before the public field is decoded from it.
+    // Both must carry the same values in the same order, exactly — no
+    // rounding, and no reordering of the values inside a sector.
+    let compact = truncated.d.diagview().unwrap();
+    assert_eq!(compact.len(), 1);
+    assert_eq!(compact[0].sector, Label::X);
+    for (actual, expected) in compact[0]
+        .values
+        .iter()
+        .zip([D::from_real(-3.0), D::from_real(2.0)])
+    {
+        assert_eq!(close(*actual, expected), 0.0);
+    }
     let expected_error = (1.0 + 2.0_f64.sqrt()).sqrt();
     assert!((truncated.error - expected_error).abs() < 1e-12);
 }

@@ -1540,11 +1540,11 @@ where
         let input = BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())
             .map_err(|error| GenericTensorError::Facade(error.into()))?;
         let out = tenet_matrixalgebra::eigh_full_dyn_checked_generic(dense.dense(), &input)?;
-        let (v, eigenvalues) = out.into_parts();
+        let (v, mut eigenvalues) = out.into_parts();
         let d = diagonal_factor_on_checked(
             &self.runtime,
             Arc::clone(input.space().provider_arc()),
-            &eigenvalues,
+            &mut eigenvalues,
             D::from_real,
         )?;
         Ok((d, wrap_factor_on(&self.runtime, v)))
@@ -1576,11 +1576,11 @@ where
             .map_err(|error| GenericTensorError::Facade(error.into()))?;
         let out =
             tenet_matrixalgebra::eigh_trunc_dyn_checked_generic(dense.dense(), &input, truncation)?;
-        let (v, eigenvalues, error) = out.into_parts();
+        let (v, mut eigenvalues, error) = out.into_parts();
         let d = diagonal_factor_on_checked(
             &self.runtime,
             Arc::clone(input.space().provider_arc()),
-            &eigenvalues,
+            &mut eigenvalues,
             D::from_real,
         )?;
         let provider = input.space().provider();
@@ -1636,11 +1636,11 @@ where
         let input = BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())
             .map_err(|error| GenericTensorError::Facade(error.into()))?;
         let out = tenet_matrixalgebra::eig_full_dyn_checked_generic(dense.dense(), &input)?;
-        let (v, eigenvalues) = out.into_parts();
+        let (v, mut eigenvalues) = out.into_parts();
         let d = diagonal_factor_on_checked(
             &self.runtime,
             Arc::clone(input.space().provider_arc()),
-            &eigenvalues,
+            &mut eigenvalues,
             num_complex::Complex64::from_complex64,
         )?;
         Ok((d, wrap_factor_on(&self.runtime, v)))
@@ -1672,11 +1672,11 @@ where
             .map_err(|error| GenericTensorError::Facade(error.into()))?;
         let out =
             tenet_matrixalgebra::eig_trunc_dyn_checked_generic(dense.dense(), &input, truncation)?;
-        let (v, eigenvalues, error) = out.into_parts();
+        let (v, mut eigenvalues, error) = out.into_parts();
         let d = diagonal_factor_on_checked(
             &self.runtime,
             Arc::clone(input.space().provider_arc()),
-            &eigenvalues,
+            &mut eigenvalues,
             num_complex::Complex64::from_complex64,
         )?;
         let provider = input.space().provider();
@@ -9804,10 +9804,15 @@ where
     })
 }
 
+/// [`diagonal_factor_on`] for the checked-generic providers, and borrowing for
+/// the same reason. It used to deep-copy the spectrum just to sort it; every
+/// caller owns the spectrum as a local and re-sorts its public copy by decoded
+/// label afterwards, so sorting in place is free and the copy was one `Vec<V>`
+/// per coupled sector that nothing read.
 fn diagonal_factor_on_checked<R, E, V>(
     runtime: &Runtime,
     provider: Arc<R>,
-    spectrum: &[tenet_matrixalgebra::SectorSpectrum<V>],
+    spectrum: &mut [tenet_matrixalgebra::SectorSpectrum<V>],
     to_scalar: impl Fn(V) -> E,
 ) -> Result<TensorMap<R, E>, CheckedGenericFactorPlanError<R::Error>>
 where
@@ -9815,12 +9820,8 @@ where
     E: TensorScalar,
     V: Copy,
 {
-    let mut spectrum = spectrum.to_vec();
     spectrum.sort_unstable_by_key(|entry| entry.sector);
-    let space =
-        tenet_matrixalgebra::diagonal_bond_bound_space_generic_checked(provider, &spectrum)?;
-    // Same dtype-independent fill as [`diagonal_factor_on`], for the reason
-    // given there.
+    let space = tenet_matrixalgebra::diagonal_bond_bound_space_generic_checked(provider, spectrum)?;
     let data = spectrum
         .iter()
         .map(|entry| tenet_matrixalgebra::SectorSpectrum {
