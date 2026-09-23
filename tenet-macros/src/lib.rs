@@ -203,6 +203,46 @@ fn check_labels(inputs: &[Vec<String>], output: &[String]) -> Result<(), String>
     Ok(())
 }
 
+/// The contracted leg pairing of a validated label list, in *written*
+/// coordinates: for each operand and axis, the earlier `(operand, axis)`
+/// carrying the same label, or `None` when this axis is the label's first
+/// occurrence. [`check_labels`] has already rejected a label that occurs more
+/// than twice, so the earlier occurrence is unique.
+///
+/// This is the pairing the metadata preflight would otherwise rediscover per
+/// call with a scan that is quadratic in the total legs.
+fn contracted_pairs(inputs: &[Vec<String>]) -> Vec<Vec<Option<(usize, usize)>>> {
+    inputs
+        .iter()
+        .enumerate()
+        .map(|(operand, labels)| {
+            labels
+                .iter()
+                .enumerate()
+                .map(|(axis, label)| {
+                    inputs[..=operand]
+                        .iter()
+                        .enumerate()
+                        .flat_map(|(previous, previous_labels)| {
+                            let end = if previous == operand {
+                                axis
+                            } else {
+                                previous_labels.len()
+                            };
+                            previous_labels[..end].iter().enumerate().map(
+                                move |(previous_axis, previous_label)| {
+                                    ((previous, previous_axis), previous_label)
+                                },
+                            )
+                        })
+                        .find(|&(_, previous_label)| previous_label == label)
+                        .map(|(pair, _)| pair)
+                })
+                .collect()
+        })
+        .collect()
+}
+
 /// @tensor-style contraction over homogeneous provider-typed TeNeT tensors;
 /// see the crate docs for the syntax. Evaluates to
 /// `Result<TensorMap<R, D, S>, tenet::prelude::Error>`.
@@ -251,6 +291,15 @@ pub fn tensor(input: TokenStream) -> TokenStream {
         .operands
         .iter()
         .map(|op| option_tokens(op.group.split));
+    let contracted = contracted_pairs(&inputs).into_iter().map(|row| {
+        let cells = row.into_iter().map(|pair| match pair {
+            Some((operand, axis)) => {
+                quote!(::core::option::Option::Some((#operand, #axis)))
+            }
+            None => quote!(::core::option::Option::None),
+        });
+        quote!(&[#(#cells),*])
+    });
     let output = &parsed.output.labels;
     let out_split = option_tokens(parsed.output.split);
 
@@ -263,6 +312,7 @@ pub fn tensor(input: TokenStream) -> TokenStream {
                     codomain_splits: &[#(#splits),*],
                     output: &[#(#output),*],
                     output_codomain_rank: #out_split,
+                    contracted: &[#(#contracted),*],
                 };
             #(let #raw_bindings = #tensors;)*
             #(
@@ -287,7 +337,7 @@ fn option_tokens(value: Option<usize>) -> proc_macro2::TokenStream {
 
 #[cfg(test)]
 mod tests {
-    use super::{check_labels, Operand};
+    use super::{check_labels, contracted_pairs, Operand};
     use quote::ToTokens;
 
     fn parse_operand(source: &str) -> syn::Result<Operand> {
@@ -425,5 +475,67 @@ mod tests {
     fn label_thrice_on_one_operand_is_rejected() {
         let err = check_labels(&labels(&[&["a", "a", "a"]]), &out(&[])).unwrap_err();
         assert!(err.contains("label `a` appears 3 time(s)"), "{err}");
+    }
+
+    /// The pairing the macro emits is what the runtime preflight would find
+    /// by scanning the labels; a disagreement would make the preflight skip a
+    /// space check. Independently scanned here, in written coordinates (the
+    /// conj rotation is applied at runtime, so it does not enter this).
+    #[test]
+    fn emitted_pairs_match_a_label_scan() {
+        // Every label's earlier twin, found by brute force over all pairs.
+        fn scanned(inputs: &[Vec<String>]) -> Vec<Vec<Option<(usize, usize)>>> {
+            let mut pairs = Vec::new();
+            for (operand, group) in inputs.iter().enumerate() {
+                let mut row = Vec::new();
+                for (axis, label) in group.iter().enumerate() {
+                    let mut found = None;
+                    for (other, others) in inputs.iter().enumerate() {
+                        for (other_axis, other_label) in others.iter().enumerate() {
+                            let earlier =
+                                other < operand || (other == operand && other_axis < axis);
+                            if found.is_none() && earlier && other_label == label {
+                                found = Some((other, other_axis));
+                            }
+                        }
+                    }
+                    row.push(found);
+                }
+                pairs.push(row);
+            }
+            pairs
+        }
+
+        for groups in [
+            // A plain contraction over `m`.
+            &[&["i", "j", "m"][..], &["m", "k", "l"][..]][..],
+            // A `conj` operand contracted over all three legs: written
+            // coordinates, which conj does not move.
+            &[&["m", "i", "j"][..], &["m", "i", "j"][..]][..],
+            // A traced operand (`i` twice on operand 0) next to a partner.
+            &[&["i", "j", "i"][..], &["j", "k"][..]][..],
+            // Three tensors, with a leg pairing across non-adjacent operands.
+            &[
+                &["i", "m", "p"][..],
+                &["m", "k", "n"][..],
+                &["n", "p", "l"][..],
+            ][..],
+            // An operand with no contracted leg at all.
+            &[&["i", "j"][..]][..],
+        ] {
+            let inputs = labels(groups);
+            assert_eq!(contracted_pairs(&inputs), scanned(&inputs), "{groups:?}");
+        }
+
+        // Non-vacuity: the expected pairing of the three-tensor case, by hand.
+        let inputs = labels(&[&["i", "m", "p"], &["m", "k", "n"], &["n", "p", "l"]]);
+        assert_eq!(
+            contracted_pairs(&inputs),
+            vec![
+                vec![None, None, None],
+                vec![Some((0, 1)), None, None],
+                vec![Some((1, 2)), Some((0, 2)), None],
+            ]
+        );
     }
 }

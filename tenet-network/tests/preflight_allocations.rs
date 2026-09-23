@@ -94,6 +94,7 @@ static PAIR: StaticTopologySpec = StaticTopologySpec {
     codomain_splits: &[Some(2), Some(1)],
     output: &["i", "j", "k", "l"],
     output_codomain_rank: Some(2),
+    contracted: &[&[None, None, None], &[Some((0, 2)), None, None]],
 };
 
 /// `conj(b)` is `[v, v; w]`, so it contracts with `b` over all three legs.
@@ -103,7 +104,36 @@ static CONJ_PAIR: StaticTopologySpec = StaticTopologySpec {
     codomain_splits: &[Some(1), Some(1)],
     output: &[],
     output_codomain_rank: Some(0),
+    contracted: &[
+        &[None, None, None],
+        &[Some((0, 0)), Some((0, 1)), Some((0, 2))],
+    ],
 };
+
+/// `PAIR` with no precomputed pairing, which a runtime `Network` and a traced
+/// lowering also have: the preflight must fall back to the label scan rather
+/// than skip the space check.
+static UNPAIRED: StaticTopologySpec = StaticTopologySpec {
+    contracted: &[],
+    ..PAIR
+};
+
+/// #1394: a spec whose pairing does not describe its operands is not trusted.
+/// Skipping a space check is a silent wrong answer, so the preflight falls
+/// back to the scan and still rejects `c`'s `m` leg.
+#[test]
+fn a_spec_without_a_pairing_still_checks_every_contracted_leg() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let [a, b, c] = u1_operands(&runtime);
+    static_network_operand_preflight(&[&a, &b], &UNPAIRED).unwrap();
+    let error = static_network_operand_preflight(&[&a, &c], &UNPAIRED).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("space mismatch for contracted label `m`"),
+        "{error}"
+    );
+}
 
 /// #1371: the preflight a warm plan-cache hit runs on every call allocates
 /// nothing, with and without a `conj` operand, and still rejects a leg of the

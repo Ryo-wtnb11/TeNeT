@@ -52,6 +52,15 @@ pub struct StaticTopologySpec {
     pub codomain_splits: &'static [Option<usize>],
     pub output: &'static [&'static str],
     pub output_codomain_rank: Option<usize>,
+    /// The contracted leg pairing, resolved once at macro expansion: for each
+    /// operand and each *written* axis, the earlier `(operand, written axis)`
+    /// carrying the same label, or `None` when this axis is the label's first
+    /// occurrence. Shaped exactly like `inputs`.
+    ///
+    /// Written, not lowered, coordinates: the lowering rotates a `conj`
+    /// operand by its codomain rank, which is a runtime property of the
+    /// tensor, so the preflight applies that rotation per pair in O(1).
+    pub contracted: &'static [&'static [Option<(usize, usize)>]],
 }
 
 impl StaticTopologySpec {
@@ -729,6 +738,7 @@ impl Network {
             &self.conj,
             &self.codomain_splits,
             &[],
+            None,
         )?;
         let mut lowered_labels = Vec::with_capacity(tensors.len());
         let mut infos = Vec::with_capacity(tensors.len());
@@ -783,6 +793,9 @@ where
     Ok(Some(identity))
 }
 
+/// [`StaticTopologySpec::contracted`] as the preflight borrows it.
+type ContractedAxisPairs<'a> = &'a [&'a [Option<(usize, usize)>]];
+
 /// The metadata preflight of a network, run by `tensor!` before any trace,
 /// plan lookup, lease or transfer and by every typed lowering: each operand's
 /// written rank and `;` split, then every contracted leg against the dual of
@@ -793,14 +806,20 @@ where
 ///
 /// Allocation-free, because a warm plan-cache hit runs it on every call and
 /// the cache key holds no sectors: legs are borrowed from the operands and
-/// compared through the dual map, labels are matched by a scan over the few
-/// operand legs rather than a map.
+/// compared through the dual map, and no label map is built.
+///
+/// `contracted` is the pairing a `tensor!` spec resolved at macro expansion
+/// ([`StaticTopologySpec::contracted`]), which makes the pass O(N) in the
+/// total lowered legs N. Without it — a runtime [`Network`], or a traced
+/// lowering, whose pairs are not static — each axis rediscovers its partner
+/// by a scan over the earlier axes, which is O(N²) overall.
 fn static_operand_preflight<R, D, S, L>(
     tensors: &[&TensorMap<R, D, S>],
     inputs: &[impl AsRef<[L]>],
     conj: &[bool],
     splits: &[Option<usize>],
     traces: &[Option<StaticTrace>],
+    contracted: Option<ContractedAxisPairs<'_>>,
 ) -> Result<(), HostNetworkError<R>>
 where
     R: TypedSectorAdmission,
@@ -842,14 +861,43 @@ where
     let rank = |operand: usize| {
         trace(operand).map_or(tensors[operand].rank(), |_| inputs[operand].as_ref().len())
     };
-    let label = |operand: usize, axis: usize| {
-        let labels = inputs[operand].as_ref();
+    // A lowered axis and its written axis are the same, except on a `conj`
+    // operand, which is read through its adjoint: lowered axis `axis` is
+    // written axis `(axis + codomain_rank) % rank`.
+    let rotated = |operand: usize| trace(operand).is_none() && conj[operand];
+    let written_axis = |operand: usize, axis: usize| {
         let tensor = tensors[operand];
-        if trace(operand).is_none() && conj[operand] {
-            &labels[(axis + tensor.codomain_rank()) % tensor.rank()]
+        if rotated(operand) {
+            (axis + tensor.codomain_rank()) % tensor.rank()
         } else {
-            &labels[axis]
+            axis
         }
+    };
+    let lowered_axis = |operand: usize, written: usize| {
+        let tensor = tensors[operand];
+        if rotated(operand) {
+            (written + tensor.rank() - tensor.codomain_rank()) % tensor.rank()
+        } else {
+            written
+        }
+    };
+    let label =
+        |operand: usize, axis: usize| &inputs[operand].as_ref()[written_axis(operand, axis)];
+    // The partner of a lowered axis found by scanning the earlier axes: the
+    // fallback when the caller has no precomputed pairing, and the
+    // cross-check of one that it has.
+    let scan = |operand: usize, axis: usize| {
+        let written = label(operand, axis);
+        (0..=operand)
+            .flat_map(|previous| {
+                let end = if previous == operand {
+                    axis
+                } else {
+                    rank(previous)
+                };
+                (0..end).map(move |previous_axis| (previous, previous_axis))
+            })
+            .find(|&(previous, previous_axis)| label(previous, previous_axis) == written)
     };
     let leg = |operand: usize, axis: usize| {
         let tensor = tensors[operand];
@@ -874,22 +922,33 @@ where
         let stored = tensor.network_source_leg(source).ok_or_else(missing)?;
         Ok::<_, HostNetworkError<R>>((stored, (source >= codomain_rank) != adjoint))
     };
+    // A pairing of the wrong shape would skip a space check, so it is
+    // dropped for the scan here rather than indexed blindly below.
+    let contracted = contracted.filter(|pairs| {
+        traces.is_empty()
+            && pairs.len() == tensors.len()
+            && pairs
+                .iter()
+                .zip(inputs)
+                .all(|(pairs, labels)| pairs.len() == labels.as_ref().len())
+    });
     for operand in 0..tensors.len() {
         for axis in 0..rank(operand) {
-            let written = label(operand, axis);
-            let Some((previous_operand, previous_axis)) = (0..=operand)
-                .flat_map(|previous| {
-                    let end = if previous == operand {
-                        axis
-                    } else {
-                        rank(previous)
-                    };
-                    (0..end).map(move |previous_axis| (previous, previous_axis))
-                })
-                .find(|&(previous, previous_axis)| label(previous, previous_axis) == written)
-            else {
+            let pair = match contracted {
+                Some(pairs) => pairs[operand][written_axis(operand, axis)]
+                    .map(|(previous, written)| (previous, lowered_axis(previous, written))),
+                None => scan(operand, axis),
+            };
+            debug_assert!(
+                contracted.is_none() || pair == scan(operand, axis),
+                "precomputed pairing {pair:?} of operand {operand} lowered axis {axis} \
+                 disagrees with the label scan {:?}",
+                scan(operand, axis)
+            );
+            let Some((previous_operand, previous_axis)) = pair else {
                 continue;
             };
+            let written = label(operand, axis);
             if !legs_contract(
                 first.provider(),
                 leg(previous_operand, previous_axis)?,
@@ -978,7 +1037,14 @@ where
     D: TensorScalar,
     S: TensorStorage<D>,
 {
-    static_operand_preflight(tensors, spec.inputs, spec.conj, spec.codomain_splits, &[])
+    static_operand_preflight(
+        tensors,
+        spec.inputs,
+        spec.conj,
+        spec.codomain_splits,
+        &[],
+        Some(spec.contracted),
+    )
 }
 
 /// The typed `contract`'s braiding boundary (TensorKit `blas_contract!`
@@ -2967,6 +3033,7 @@ impl StaticTraceLowering {
             &self.conj,
             &self.splits,
             &self.traces,
+            None,
         )
     }
 
@@ -4270,6 +4337,9 @@ mod typed_replay_tests {
             codomain_splits,
             output: &["k"],
             output_codomain_rank: None,
+            // The traced lowering pairs from its `StaticTrace`s, not from a
+            // precomputed pairing.
+            contracted: &[],
         };
         let owned: Vec<Vec<TemporaryLabel>> = vec![vec![label("j")], vec![label("j"), label("k")]];
 
