@@ -1619,6 +1619,7 @@ mod tests {
                 codomain_splits: &[Some(1), Some(1)],
                 output: &["i", "k"],
                 output_codomain_rank: Some(1),
+                contracted: &[&[None, None], &[Some((0, 1)), None]],
             }));
         let cached =
             super::get_or_plan_static(spec, &tensors, &[1, 1], &Default::default(), || {
