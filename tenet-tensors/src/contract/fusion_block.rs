@@ -2081,8 +2081,9 @@ where
     )
 }
 
-/// Compiles the coefficient-free Bosonic Generic core GEMM against staged,
-/// uncommitted structures.
+/// Compiles the coefficient-free Generic core GEMM against staged,
+/// uncommitted structures. The core form crosses no legs, so braiding
+/// admission belongs to the caller that stages source and output transforms.
 ///
 /// The caller owns categorical validation and exact HomSpace derivation. This
 /// leaf only validates the preselected core geometry and compiles the existing

@@ -171,8 +171,21 @@ where
             .into());
         }
     }
+    Ok(provider)
+}
+
+/// General-axis contraction may braid, twist, and (for fermions) insert the
+/// supertrace sign; the checked Generic engine implements only the Bosonic
+/// case. Canonical composition crosses no legs and skips this boundary.
+fn require_bosonic_contract_braiding<P>(
+    lhs_space: &BoundDynamicFusionMapSpace<P>,
+    rhs_space: &BoundDynamicFusionMapSpace<P>,
+) -> Result<(), CheckedGenericPlanError<P::Error>>
+where
+    P: CheckedGenericRigidSymbols<Scalar = f64>,
+{
     for actual in [
-        provider.braiding_style(),
+        lhs_space.provider().braiding_style(),
         rhs_space.provider().braiding_style(),
     ] {
         if actual != BraidingStyleKind::Bosonic {
@@ -182,7 +195,7 @@ where
             .into());
         }
     }
-    Ok(provider)
+    Ok(())
 }
 
 fn staged_transform<'a, P>(
@@ -383,6 +396,7 @@ where
         axis_plan,
     } = validate_contract_local(lhs_space, lhs_data, rhs_space, rhs_data, axes, dst_nout)?;
     let provider = validate_contract_provider(lhs_space, rhs_space)?;
+    require_bosonic_contract_braiding(lhs_space, rhs_space)?;
     let destination_homspace = FusionTreeHomSpace::try_tensorcontract_homspace_generic_checked(
         provider,
         lhs_space.space().homspace(),
@@ -421,6 +435,77 @@ where
         transform_backend,
         transform_workspace,
         core_gemm,
+        fusion_workspace,
+    )
+}
+
+/// Canonical composition (TensorKit `mul!`) of two direct checked Generic
+/// tensors: `lhs.domain` is glued to `rhs.codomain` in order.
+///
+/// The canonical candidate needs no source or output tree transform, so the
+/// result is one coefficient-free block GEMM per coupled sector. No leg
+/// crosses another, hence no braiding style is required.
+#[doc(hidden)]
+pub fn tensorcompose_owned_checked_generic_in_context<P, D>(
+    context: &mut TensorContractFusionExecutionContext<D, RuleIdentity>,
+    lhs_space: &BoundDynamicFusionMapSpace<P>,
+    lhs_data: &[D],
+    rhs_space: &BoundDynamicFusionMapSpace<P>,
+    rhs_data: &[D],
+) -> CheckedContractResult<P, D>
+where
+    P: CheckedGenericRigidSymbols<Scalar = f64>,
+    D: DenseRecouplingScalar
+        + RecouplingCoefficientAction<f64>
+        + ConjugateValue
+        + Copy
+        + Zero
+        + ZeroBytes,
+{
+    let lhs_nout = lhs_space.space().nout();
+    let lhs_axes = (lhs_nout..lhs_space.space().rank()).collect::<Vec<_>>();
+    let rhs_axes = (0..rhs_space.space().nout()).collect::<Vec<_>>();
+    let axes = TensorContractSpec::with_default_output_order(&lhs_axes, &rhs_axes);
+    let CheckedContractLocal {
+        output_rank,
+        axis_plan,
+    } = validate_contract_local(lhs_space, lhs_data, rhs_space, rhs_data, axes, lhs_nout)?;
+    let provider = validate_contract_provider(lhs_space, rhs_space)?;
+    let destination_homspace = FusionTreeHomSpace::try_tensorcontract_homspace_generic_checked(
+        provider,
+        lhs_space.space().homspace(),
+        rhs_space.space().homspace(),
+        &lhs_axes,
+        &rhs_axes,
+        &axis_plan.output_axes,
+        lhs_nout,
+    )?;
+    let destination =
+        lhs_space.prepare_final_homspace_generic_with_checked(provider, destination_homspace)?;
+    // Both axis lists are ascending, so the sole candidate is the given order.
+    let candidate = super::fusion::contracted_axis_order_candidates(&lhs_axes, &rhs_axes).remove(0);
+    let (
+        transform_backend,
+        transform_workspace,
+        contract_backend,
+        contract_workspace,
+        fusion_workspace,
+    ) = context.checked_generic_resources_mut();
+    execute_preselected_checked_generic_contract(
+        lhs_space,
+        lhs_data,
+        rhs_space,
+        rhs_data,
+        axes,
+        lhs_nout,
+        &candidate,
+        FusionContractOrientation::LhsRhs,
+        provider,
+        output_rank,
+        destination,
+        transform_backend,
+        transform_workspace,
+        &mut BackendRank2Gemm::<_, _, f64>::new(contract_backend, contract_workspace),
         fusion_workspace,
     )
 }
@@ -519,6 +604,7 @@ where
         dst_nout,
     )?;
     let provider = validate_contract_provider(lhs_space, rhs_space)?;
+    require_bosonic_contract_braiding(lhs_space, rhs_space)?;
     let destination_homspace = FusionTreeHomSpace::try_tensorcontract_homspace_generic_checked(
         provider,
         lhs_space.space().homspace(),

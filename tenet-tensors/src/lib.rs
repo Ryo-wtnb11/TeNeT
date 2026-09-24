@@ -62,6 +62,7 @@ pub use contract::{
 #[doc(hidden)]
 pub use contract::{
     tensorcompose_fusion_dyn_prelowered_direct_on_storage,
+    tensorcompose_owned_checked_generic_in_context,
     tensorcontract_fusion_dyn_prelowered_direct_on_storage, tensorcontract_owned_checked_generic,
     tensorcontract_owned_checked_generic_in_context, try_compile_storage_contract_core_route,
     StorageContractResolution,
