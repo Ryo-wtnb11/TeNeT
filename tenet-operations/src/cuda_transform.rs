@@ -398,11 +398,11 @@ impl CudaTreeTransformExecutor {
     /// [`Axpby(1)`], `dst_b + alpha * θ_b * T(src)_b`. `destination_scales`
     /// lists `(destination block offset, θ_b)` sorted by strictly increasing
     /// offset; a block it does not list has `θ_b = 1`. This is the fermionic
-    /// core-right twist of a general
-    /// contraction, which the host applies as a separate in-place scale of
-    /// the transformed operand (`execute_rhs_contract_twist`, TensorKit's
-    /// `twist!` after `tensoradd!` in `blas_contract!`, tensoroperations.jl:429
-    /// @cfaa073) and QSpace folds into its per-block GEMM scalar
+    /// contraction twist of a general contraction on whichever operand is
+    /// materialized for it, which the host applies as a separate in-place
+    /// scale of the transformed operand (`execute_contract_twist`,
+    /// TensorKit's `twist!` after `tensoradd!` in `blas_contract!`,
+    /// tensoroperations.jl:419/429 @cfaa073) and QSpace folds into its per-block GEMM scalar
     /// (QSpace_aux.cc:105-115 @dd2cc7e).
     ///
     /// The θ reaches only the descriptor alpha of the Single move or Multi

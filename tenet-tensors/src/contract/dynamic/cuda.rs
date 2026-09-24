@@ -190,12 +190,13 @@ fn grow<'a, D: CudaScalar>(
 /// inactive blocks — and only those — are zeroed first, followed by the
 /// output transform into `dst` in overwrite mode.
 ///
-/// The fermionic core-right twist (the physical rhs under `LhsRhs`, the
-/// physical lhs under `RhsLhs`) is folded into that operand's source
-/// transform: the move writing core-right block `b` runs with descriptor
-/// alpha `θ_b` (`replay_with_destination_scales`), where the host scales the
-/// materialized operand in place afterwards — the same values in one pass
-/// fewer. A twisted operand is never borrowed, so the transform always runs.
+/// The fermionic contraction twist is folded into the source transform of
+/// the operand the artifact twists (the one already materialized, as in
+/// TensorKit's `blas_contract!`): the move writing its block `b` runs with
+/// descriptor alpha `θ_b` (`replay_with_destination_scales`), where the host
+/// scales the materialized operand in place afterwards — the same values in
+/// one pass fewer. A twisted operand is never borrowed, so the transform
+/// always runs.
 ///
 /// Every check that can reject the route runs before the first device
 /// submission.
@@ -277,15 +278,15 @@ where
     C: DenseBlockScalar,
 {
     let reverse = artifact.orientation == FusionContractOrientation::RhsLhs;
-    let scales = artifact.core_right_destination_scales();
-    let core_right_borrowed = if reverse {
+    let scales = artifact.source_twist_destination_scales();
+    let twisted_borrowed = if artifact.twists_lhs() {
         artifact.lhs_borrowed
     } else {
         artifact.rhs_borrowed
     };
-    if core_right_borrowed && !scales.is_empty() {
+    if twisted_borrowed && !scales.is_empty() {
         return Err(OperationError::InvalidArgument {
-            message: "device contraction artifact borrows its twisted core-right operand",
+            message: "device contraction artifact borrows its twisted operand",
         });
     }
     let lhs_len = artifact.lhs_transform.space.required_len()?;
@@ -315,7 +316,7 @@ where
         dst: dst_slot,
     } = buffers;
     let no_scales: &[(usize, C)] = &[];
-    let (lhs_scales, rhs_scales) = if reverse {
+    let (lhs_scales, rhs_scales) = if artifact.twists_lhs() {
         (scales, no_scales)
     } else {
         (no_scales, scales)

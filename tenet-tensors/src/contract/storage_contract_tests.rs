@@ -313,20 +313,96 @@ fn fermionic_canonical_case<R: MultiplicityFreeRigidSymbols<Scalar = f64>>(
     }
 }
 
+/// Which operands the `LhsRhs` layout of a [`fermionic_twist_role_cases`]
+/// fixture already copies, in `(A, B)` order.
+#[derive(Clone, Copy, Debug)]
+enum RoleCase {
+    ACopied,
+    Canonical,
+    BCopied,
+    BothCopied,
+}
+
+/// The geometries of `tenet/tests/contract_cases::fermionic_twist_roles`:
+/// one per operand-copy case of TensorKit's twist choice, each with a dual
+/// leg among B's contracted legs, and A smaller than B where size decides.
+fn fermionic_twist_role_cases<R: MultiplicityFreeRigidSymbols<Scalar = f64>>(
+    provider: &Arc<R>,
+    leg: impl Fn(bool) -> SectorLeg,
+) -> [(RoleCase, Case<R>); 4] {
+    let v = || leg(false);
+    let v_dual = || leg(true);
+    [
+        (
+            RoleCase::ACopied,
+            Case {
+                lhs: space(provider, vec![v(), v()], vec![v()]),
+                rhs: space(provider, vec![v_dual()], vec![v(), v()]),
+                lhs_axes: vec![1],
+                rhs_axes: vec![0],
+                output_axes: vec![0, 1, 2, 3],
+            },
+        ),
+        (
+            RoleCase::Canonical,
+            Case {
+                lhs: space(provider, vec![v()], vec![v(), v_dual()]),
+                rhs: space(provider, vec![v(), v_dual()], vec![v(), v()]),
+                lhs_axes: vec![1, 2],
+                rhs_axes: vec![0, 1],
+                output_axes: vec![0, 1, 2],
+            },
+        ),
+        (
+            RoleCase::BCopied,
+            Case {
+                lhs: space(provider, vec![v(), v()], vec![v_dual()]),
+                rhs: space(provider, vec![v()], vec![v(), v()]),
+                lhs_axes: vec![2],
+                rhs_axes: vec![1],
+                output_axes: vec![0, 1, 2, 3],
+            },
+        ),
+        (
+            RoleCase::BothCopied,
+            Case {
+                lhs: space(provider, vec![v(), v()], vec![v()]),
+                rhs: space(provider, vec![v(), v_dual()], vec![v(), v()]),
+                lhs_axes: vec![1, 0],
+                rhs_axes: vec![3, 1],
+                output_axes: vec![0, 1, 2],
+            },
+        ),
+    ]
+}
+
 fn fermionic_cases() -> Vec<(&'static str, Case<FermionU1>)> {
     let provider = Arc::new(FermionParityFusionRule.product(U1FusionRule));
     let leg = |dual| fermion_u1_leg(&provider, dual);
-    vec![
+    let mut cases = vec![
         ("fZ2xU1 both", fermionic_general_case(&provider, leg, false)),
         ("fZ2xU1 mixed", fermionic_general_case(&provider, leg, true)),
         ("fZ2xU1 canonical", fermionic_canonical_case(&provider, leg)),
-    ]
+    ];
+    let names = [
+        "fZ2xU1 A copied",
+        "fZ2xU1 canonical small A",
+        "fZ2xU1 B copied",
+        "fZ2xU1 both copied small A",
+    ];
+    cases.extend(
+        names
+            .into_iter()
+            .zip(fermionic_twist_role_cases(&provider, leg))
+            .map(|(name, (_, case))| (name, case)),
+    );
+    cases
 }
 
 fn fermionic_su2_cases() -> Vec<(&'static str, Case<FermionSu2>)> {
     let provider = Arc::new(FermionParityFusionRule.product(SU2FusionRule));
     let leg = |dual| fermion_su2_leg(&provider, dual);
-    vec![
+    let mut cases = vec![
         (
             "fZ2xSU2 both",
             fermionic_general_case(&provider, leg, false),
@@ -339,7 +415,20 @@ fn fermionic_su2_cases() -> Vec<(&'static str, Case<FermionSu2>)> {
             "fZ2xSU2 canonical",
             fermionic_canonical_case(&provider, leg),
         ),
-    ]
+    ];
+    let names = [
+        "fZ2xSU2 A copied",
+        "fZ2xSU2 canonical small A",
+        "fZ2xSU2 B copied",
+        "fZ2xSU2 both copied small A",
+    ];
+    cases.extend(
+        names
+            .into_iter()
+            .zip(fermionic_twist_role_cases(&provider, leg))
+            .map(|(name, (_, case))| (name, case)),
+    );
+    cases
 }
 
 fn host_data(space: &crate::DynamicFusionMapSpace, salt: usize) -> Vec<f64> {
@@ -354,15 +443,19 @@ fn host_data(space: &crate::DynamicFusionMapSpace, salt: usize) -> Vec<f64> {
 fn physical_twist<R>(
     case: &Case<R>,
     artifact: &DynamicTreeExecutionArtifact<f64>,
-    lhs: bool,
+    orientation: FusionContractOrientation,
     contracting: &[usize],
 ) -> Vec<(usize, f64)>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
-    super::dynamic::rhs_contract_twist_scales(
+    let core_right_is_lhs = orientation == FusionContractOrientation::RhsLhs;
+    let lhs = artifact.twists_lhs();
+    super::dynamic::contract_twist_scales(
         case.lhs.provider(),
         artifact.physical_core_space(lhs),
+        artifact.physical_core_space(core_right_is_lhs).homspace(),
+        lhs != core_right_is_lhs,
         contracting,
     )
     .unwrap()
@@ -397,9 +490,10 @@ where
 /// Every forced candidate and orientation of one fermionic case:
 ///
 /// - the destination-scale list is the Host's per-block twist of the
-///   *physical* core-right operand's transformed source — the physical lhs
-///   under `RhsLhs`, the physical rhs under `LhsRhs` — recomputed from that
-///   space alone, and equals the artifact's own in-place twist actions;
+///   *physical* operand the artifact twists — core-right or, when only
+///   core-left is already copied (or is the smaller), core-left — recomputed
+///   from that space and the core-right dual flags alone, and equals the
+///   artifact's own in-place twist actions;
 /// - the compile-time uniform-per-Multi assertion passed;
 /// - the Host replay of the forced artifact equals the eager Host
 ///   `contract`, so every forced orientation is tied to the production
@@ -427,12 +521,11 @@ where
             let where_ = format!("{what} {candidate:?} {orientation:?}");
             let (artifact, host, contracting) =
                 forced_artifact(case, &candidate, orientation, &lhs, &rhs);
-            let scales = artifact.core_right_destination_scales();
-            let core_right_is_lhs = orientation == FusionContractOrientation::RhsLhs;
+            let scales = artifact.source_twist_destination_scales();
             assert_eq!(
                 scales,
-                physical_twist(case, &artifact, core_right_is_lhs, &contracting).as_slice(),
-                "{where_}: not the physical core-right operand's twist"
+                physical_twist(case, &artifact, orientation, &contracting).as_slice(),
+                "{where_}: not the twisted physical operand's twist"
             );
             assert_eq!(scales, artifact.host_twist_scales().as_slice(), "{where_}");
             assert!(scales.windows(2).all(|pair| pair[0].0 < pair[1].0));
@@ -447,7 +540,7 @@ where
             if !scales.is_empty() {
                 twisted[slot] = true;
                 multi |= artifact
-                    .core_right_transform_structure()
+                    .twisted_transform_structure()
                     .blocks()
                     .iter()
                     .any(|block| {
@@ -479,18 +572,17 @@ fn the_destination_scale_list_is_the_hosts_per_block_twist_in_both_orientations(
     for (what, case) in fermionic_su2_cases() {
         su2.push(record(what, check_destination_scales(&case, what)));
     }
-    // What: every fixture twists its physical rhs under LhsRhs, and for each
-    // provider some fixture also twists its physical lhs under RhsLhs, so
-    // neither core-right side is covered only vacuously. (With `u` not dual
-    // the lhs's contracted legs are all non-dual: under RhsLhs that fixture
-    // carries no core-right twist, and its forced replays still equal the
-    // eager Host result above.)
+    // What: every fixture twists under LhsRhs, and for each provider some
+    // fixture also twists under RhsLhs, so neither orientation is covered
+    // only vacuously. (With `u` not dual the lhs's contracted legs are all
+    // non-dual: under RhsLhs that fixture carries no twist, and its forced
+    // replays still equal the eager Host result above.)
     for twisted in [&u1, &su2] {
         assert!(twisted.iter().all(|t| t[0]), "{report:?}");
         assert!(twisted.iter().any(|t| t[0] && t[1]), "{report:?}");
     }
     // What: the uniform-per-Multi assertion was really exercised.
-    assert!(any_multi, "no twisted core-right transform recoupled");
+    assert!(any_multi, "no twisted transform recoupled");
 }
 
 #[test]
@@ -509,8 +601,8 @@ fn a_scale_list_that_varies_within_one_multi_block_is_an_internal_error() {
         {
             for orientation in orientations() {
                 let (artifact, _, _) = forced_artifact(&case, &candidate, orientation, &lhs, &rhs);
-                let structure = artifact.core_right_transform_structure();
-                let scales = artifact.core_right_destination_scales();
+                let structure = artifact.twisted_transform_structure();
+                let scales = artifact.source_twist_destination_scales();
                 assert!(
                     super::dynamic::validate_uniform_multi_scales(structure, scales).is_ok(),
                     "{what}"
@@ -554,6 +646,155 @@ fn a_scale_list_that_varies_within_one_multi_block_is_an_internal_error() {
         checked,
         "no fixture had a Multi block with two live destinations"
     );
+}
+
+/// TensorKit's `blas_contract!` choice of the twisted operand
+/// (tensoroperations.jl:398-409 @cfaa073), in the `LhsRhs` orientation:
+/// the planner's cost, the compiled artifact's borrowing and the Host
+/// replay's source transforms all agree that the twist rides on the operand
+/// already copied (or on the smaller one) and adds no materialization.
+fn check_twist_role<R>(role: RoleCase, case: &Case<R>, what: &str) -> (usize, usize)
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>
+        + crate::TreeTransformRuleCacheKey<Key = RuleIdentity>,
+{
+    let rule = case.lhs.provider();
+    let dst = case.dst();
+    let e_a = case.lhs.space().required_len().unwrap();
+    let e_b = case.rhs.space().required_len().unwrap();
+    if matches!(role, RoleCase::Canonical | RoleCase::BothCopied) {
+        assert!(e_a < e_b, "{what}: A must be the smaller operand");
+    }
+    let facts = crate::contract::fusion::prepare_tensorcontract_fusion_candidate_facts_dyn_raw(
+        rule,
+        dst.space(),
+        case.lhs.space(),
+        case.rhs.space(),
+        case.axes(),
+    )
+    .unwrap();
+    // What: this candidate is also the one the production scorer selects.
+    let cheapest = facts.iter().map(|f| f.total_materialized_elements()).min();
+    let facts = &facts[0];
+    assert_eq!(
+        cheapest,
+        Some(facts.total_materialized_elements()),
+        "{what}"
+    );
+    assert_eq!(
+        facts.orientation(),
+        FusionContractOrientation::LhsRhs,
+        "{what}"
+    );
+    // (A copied by layout, B copied by layout, A twisted, total before #1351).
+    let (a_copied, b_copied, twist_a, before) = match role {
+        RoleCase::ACopied => (true, false, true, e_a + e_b),
+        RoleCase::Canonical => (false, false, true, e_b),
+        RoleCase::BCopied => (false, true, false, e_b),
+        RoleCase::BothCopied => (true, true, true, e_a + e_b),
+    };
+    assert_eq!(facts.lhs_exact_identity_borrowable(), !a_copied, "{what}");
+    assert_eq!(facts.rhs_exact_identity_borrowable(), !b_copied, "{what}");
+    assert!(facts.lhs_requires_twist() == twist_a, "{what}");
+    assert!(facts.rhs_requires_twist() != twist_a, "{what}");
+    let lhs_len = if a_copied || twist_a { e_a } else { 0 };
+    let rhs_len = if b_copied || !twist_a { e_b } else { 0 };
+    assert_eq!(facts.lhs_materialized_elements(), lhs_len, "{what}");
+    assert_eq!(facts.rhs_materialized_elements(), rhs_len, "{what}");
+
+    let lhs = host_data(case.lhs.space(), 1);
+    let rhs = host_data(case.rhs.space(), 2);
+    let candidate =
+        crate::contract::contracted_axis_order_candidates(&case.lhs_axes, &case.rhs_axes).remove(0);
+    let (artifact, host, _) = forced_artifact(
+        case,
+        &candidate,
+        FusionContractOrientation::LhsRhs,
+        &lhs,
+        &rhs,
+    );
+    assert!(artifact.requires_source_twist(), "{what}");
+    assert_eq!(artifact.twists_lhs(), twist_a, "{what}");
+    assert_eq!(
+        artifact.borrowed_sources(),
+        (lhs_len == 0, rhs_len == 0),
+        "{what}"
+    );
+
+    let mut tree_context = TreeTransformExecutionContext::<f64, RuleIdentity>::new(
+        DenseTreeTransformOperations::default_executor(),
+    );
+    let mut profile = tenet_operations::TensorContractFusionProfile::default();
+    let mut profiled = vec![0.0; dst.space().required_len().unwrap()];
+    super::dynamic::execute_dynamic_tree_execution_artifact_profiled(
+        &mut tree_context,
+        &mut DenseTreeTransformOperations::default(),
+        &mut crate::contract::backend::TensorContractWorkspace::default(),
+        &mut crate::contract::fusion_block::FusionBlockContractWorkspace::default(),
+        &mut DynamicFusionScratchWorkspace::default(),
+        &artifact,
+        dst.space().structure(),
+        &mut profiled,
+        &lhs,
+        &rhs,
+        1.0,
+        0.0,
+        &mut profile,
+    )
+    .unwrap();
+    assert_eq!(
+        profile.lhs_transform_calls,
+        usize::from(lhs_len != 0),
+        "{what}"
+    );
+    assert_eq!(
+        profile.rhs_transform_calls,
+        usize::from(rhs_len != 0),
+        "{what}"
+    );
+
+    let eager = eager_host(case, &lhs, &rhs);
+    let scale = eager
+        .iter()
+        .fold(0.0_f64, |max, value| max.max(value.abs()));
+    for (index, ((&forced, &replayed), &production)) in
+        host.iter().zip(&profiled).zip(&eager).enumerate()
+    {
+        assert!(
+            (forced - production).abs() <= 1e-12 * (1.0 + scale)
+                && (replayed - production).abs() <= 1e-12 * (1.0 + scale),
+            "{what}: element {index} is {forced}/{replayed}, eager Host {production}"
+        );
+    }
+    (lhs_len + rhs_len, before)
+}
+
+#[test]
+fn the_fermionic_twist_rides_on_the_operand_already_copied_or_the_smaller() {
+    let fu1 = Arc::new(FermionParityFusionRule.product(U1FusionRule));
+    let fsu2 = Arc::new(FermionParityFusionRule.product(SU2FusionRule));
+    let mut totals = Vec::new();
+    for (role, case) in fermionic_twist_role_cases(&fu1, |dual| fermion_u1_leg(&fu1, dual)) {
+        totals.push((
+            role,
+            check_twist_role(role, &case, &format!("fZ2xU1 {role:?}")),
+        ));
+    }
+    for (role, case) in fermionic_twist_role_cases(&fsu2, |dual| fermion_su2_leg(&fsu2, dual)) {
+        totals.push((
+            role,
+            check_twist_role(role, &case, &format!("fZ2xSU2 {role:?}")),
+        ));
+    }
+    // What: the E_B-sized materialization is gone exactly where only A was
+    // copied (A copied: E_A + E_B -> E_A; canonical with A smaller:
+    // E_B -> E_A); B copied and both copied are unchanged.
+    for (role, (after, before)) in totals {
+        match role {
+            RoleCase::ACopied | RoleCase::Canonical => assert!(after < before, "{role:?}"),
+            RoleCase::BCopied | RoleCase::BothCopied => assert_eq!(after, before, "{role:?}"),
+        }
+    }
 }
 
 /// A storage GEMM the Host storage-direct entry must reject before reaching.
@@ -600,7 +841,7 @@ fn a_canonical_nonuniform_twist_leaves_the_device_core_route_for_dynamic_tree() 
         .compile_storage_contract_resolution(&dst, lhs, rhs, case.axes())
         .unwrap();
     assert!(resolution.is_dynamic_tree());
-    assert!(resolution.requires_core_right_twist());
+    assert!(resolution.requires_source_twist());
 
     let lhs_data = host_data(case.lhs.space(), 1);
     let rhs_data = host_data(case.rhs.space(), 2);
@@ -657,7 +898,7 @@ fn canonical_axes_keep_the_direct_core_route_and_others_compile_one_dynamic_tree
     // What: arbitrary axes take the Host DynamicTree artifact, bosonic so no
     // core-right twist.
     assert!(general.is_dynamic_tree());
-    assert!(!general.requires_core_right_twist());
+    assert!(!general.requires_source_twist());
     let su2 = su2_case();
     let su2_resolution = Context::<f64>::default()
         .compile_storage_contract_resolution(
@@ -720,7 +961,7 @@ fn canonical_axes_keep_the_direct_core_route_and_others_compile_one_dynamic_tree
         )
         .unwrap();
     assert!(lazy.is_dynamic_tree());
-    assert!(!lazy.requires_core_right_twist());
+    assert!(!lazy.requires_source_twist());
 }
 
 /// The geometry of `tenet/tests/contract_cases::su2_structure_cases`: the
@@ -842,7 +1083,7 @@ fn a_fermionic_dual_contracted_leg_on_a_transformed_operand_reports_the_twist() 
     // What: the twist travels in the artifact, which the device now replays
     // with destination scales (G2c-2).
     assert!(resolution.is_dynamic_tree());
-    assert!(resolution.requires_core_right_twist());
+    assert!(resolution.requires_source_twist());
 }
 
 /// Why the device executor needs no zero fill for a core job with
@@ -1133,7 +1374,7 @@ mod device {
             let rhs = data::<D>(case.rhs.space(), 2);
             let (artifact, host, _) = forced_artifact(case, candidate, orientation, &lhs, &rhs);
             let borrowed = artifact.borrowed_sources();
-            let twisted = artifact.requires_core_right_twist();
+            let twisted = artifact.requires_source_twist();
             let resolution = StorageContractResolution::new(StorageContractRoute::DynamicTree(
                 Arc::new(artifact),
             ))
@@ -1320,8 +1561,8 @@ mod device {
     #[ignore = "requires a real CUDA device"]
     fn a_twisted_artifact_replays_with_destination_scales_as_the_host_scales_in_place() {
         // What: for every forced candidate and both orientations — the
-        // core-right operand is the physical rhs under LhsRhs and the
-        // physical lhs under RhsLhs — the device's θ-scaled source transform
+        // twisted operand is whichever one the artifact already materializes
+        // — the device's θ-scaled source transform
         // equals the Host's transform followed by its in-place twist, on the
         // same artifact; fZ2 x U(1) and fZ2 (x) SU(2) (recoupling), the twist
         // on one or both contracted legs, and the canonical non-uniform form.

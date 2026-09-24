@@ -489,6 +489,69 @@ where
     }
 }
 
+/// One fixture per operand-copy case of TensorKit's `blas_contract!` twist
+/// choice (tensoroperations.jl:398-409 @cfaa073), each with a dual leg among
+/// B's contracted legs, and A smaller than B where size decides; the cases
+/// name the `LhsRhs` layout:
+///
+/// - `a_copied`: A's contracted leg is in its codomain (A is permuted), B is
+///   already `[v*] <- [..]` (read in place): the twist goes on A.
+/// - `canonical`: both already in `mul!` form: the smaller, A, is copied.
+/// - `b_copied`: A already in form, B's contracted leg is in its domain.
+/// - `both_copied`: both permuted: the smaller, A, is twisted.
+///
+/// Returned in that order under `names`.
+pub fn fermionic_twist_roles<R, D>(
+    runtime: &Runtime,
+    v: &GradedSpace<R>,
+    names: [&'static str; 4],
+    salt: usize,
+) -> [Case<R, D>; 4]
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: Payload,
+{
+    let v_dual = v.try_dual().unwrap();
+    [
+        Case {
+            name: names[0],
+            lhs: tensor(runtime, &[v, v], &[v], salt),
+            rhs: tensor(runtime, &[&v_dual], &[v, v], salt + 1),
+            lhs_axes: vec![1],
+            rhs_axes: vec![0],
+            output_axes: vec![0, 1, 2, 3],
+            dense: false,
+        },
+        Case {
+            name: names[1],
+            lhs: tensor(runtime, &[v], &[v, &v_dual], salt + 2),
+            rhs: tensor(runtime, &[v, &v_dual], &[v, v], salt + 3),
+            lhs_axes: vec![1, 2],
+            rhs_axes: vec![0, 1],
+            output_axes: vec![0, 1, 2],
+            dense: false,
+        },
+        Case {
+            name: names[2],
+            lhs: tensor(runtime, &[v, v], &[&v_dual], salt + 4),
+            rhs: tensor(runtime, &[v], &[v, v], salt + 5),
+            lhs_axes: vec![2],
+            rhs_axes: vec![1],
+            output_axes: vec![0, 1, 2, 3],
+            dense: false,
+        },
+        Case {
+            name: names[3],
+            lhs: tensor(runtime, &[v, v], &[v], salt + 6),
+            rhs: tensor(runtime, &[v, &v_dual], &[v, v], salt + 7),
+            lhs_axes: vec![1, 0],
+            rhs_axes: vec![3, 1],
+            output_axes: vec![0, 1, 2],
+            dense: false,
+        },
+    ]
+}
+
 /// Which operand TensorKit's `blas_contract!` twists for a fermionic
 /// contraction (tensoroperations.jl:398-431 @cfaa073).
 #[derive(Clone, Copy, Debug)]
@@ -770,6 +833,32 @@ macro_rules! for_each_fermionic_fixture {
             ),
             twist_su2,
         );
+        for case in $crate::contract_cases::fermionic_twist_roles(
+            runtime,
+            &fu1,
+            [
+                "fZ2xU1 A copied",
+                "fZ2xU1 canonical small A",
+                "fZ2xU1 B copied",
+                "fZ2xU1 both copied small A",
+            ],
+            47,
+        ) {
+            $check(case, twist_u1);
+        }
+        for case in $crate::contract_cases::fermionic_twist_roles(
+            runtime,
+            &fsu2,
+            [
+                "fZ2xSU2 A copied",
+                "fZ2xSU2 canonical small A",
+                "fZ2xSU2 B copied",
+                "fZ2xSU2 both copied small A",
+            ],
+            55,
+        ) {
+            $check(case, twist_su2);
+        }
         // `u` not dual: both lazy orderings then contract a leg that reaches
         // B's codomain dual, so each one is twisted.
         let lazy_u1: tenet::typed::TensorMap<$crate::contract_cases::FermionU1, $payload> =

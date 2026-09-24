@@ -8,9 +8,9 @@ pub(crate) use plan::{
     reset_candidate_score_calls, FusionContractCandidateFacts,
 };
 pub(crate) use plan::{
-    compile_tensorcontract_fusion_plan_from_ranks, orient_fusion_contract_plan,
-    select_complete_bosonic_contract_candidate, ContractAxisOrderCandidate,
-    FusionContractOrientation,
+    compile_tensorcontract_fusion_plan_from_ranks, contract_twist_on_physical_lhs,
+    orient_fusion_contract_plan, select_complete_bosonic_contract_candidate,
+    ContractAxisOrderCandidate, FusionContractOrientation,
 };
 
 #[cfg(test)]

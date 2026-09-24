@@ -4496,6 +4496,127 @@ fn tensorcontract_fusion_fermion_twist_deg2_matches_tensorkit_reference() {
 }
 
 #[test]
+fn fermion_twist_lands_on_the_smaller_borrowable_operand_by_hand_calculation() {
+    // Both operands are already in core form, so TensorKit's `blas_contract!`
+    // (tensoroperations.jl:398-409 @cfaa073) copies and twists the smaller
+    // one, A (5 elements), not B (10): C[a; b w] = sum_k A[a; k] θ_k
+    // B[k; b w] with θ_odd = -1 on B's dual codomain leg V*. W is an even-only
+    // leg, so no other sign enters and the result is a hand calculation.
+    let rule = FermionParityFusionRule;
+    let even = SectorId::new(0);
+    let odd = SectorId::new(1);
+    let v = |dual: bool| SectorLeg::new([(even, 1), (odd, 2)], dual);
+    let w = || SectorLeg::new([(even, 2)], false);
+    let lhs_space = FusionTensorMapSpace::from_degeneracy_shapes(
+        TensorMapSpace::<1, 1>::from_dims([3], [3]).unwrap(),
+        FusionTreeHomSpace::new(
+            FusionProductSpace::new([v(false)]),
+            FusionProductSpace::new([v(true)]),
+        ),
+        &rule,
+        [vec![1, 1], vec![2, 2]],
+    )
+    .unwrap();
+    let rhs_space = FusionTensorMapSpace::from_degeneracy_shapes(
+        TensorMapSpace::<1, 2>::from_dims([3], [3, 2]).unwrap(),
+        FusionTreeHomSpace::new(
+            FusionProductSpace::new([v(true)]),
+            FusionProductSpace::new([v(false), w()]),
+        ),
+        &rule,
+        [vec![1, 1, 2], vec![2, 2, 2]],
+    )
+    .unwrap();
+    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+        TensorMapSpace::<1, 2>::from_dims([3], [3, 2]).unwrap(),
+        FusionTreeHomSpace::new(
+            FusionProductSpace::new([v(false)]),
+            FusionProductSpace::new([v(false), w()]),
+        ),
+        &rule,
+        [vec![1, 1, 2], vec![2, 2, 2]],
+    )
+    .unwrap();
+    // Dyadic values: every product and partial sum is exact.
+    let lhs_data = vec![0.5, 1.5, -2.5, 3.5, 4.25];
+    let rhs_data = vec![-1.25, 0.75, -0.75, -0.25, 0.25, 0.75, 1.5, -2.0, 0.5, 1.0];
+    let lhs =
+        TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(lhs_data.clone(), lhs_space).unwrap();
+    let rhs =
+        TensorMap::<f64, 1, 2>::from_vec_with_fusion_space(rhs_data.clone(), rhs_space).unwrap();
+    let initial = [0.25, -0.5, 1.0, -1.5, 2.0, 0.5, -0.25, 1.25, -1.0, 0.75];
+    let (alpha, beta) = (1.5, -0.25);
+
+    let mut contracted = [0.0; 10];
+    for col in 0..2 {
+        contracted[col] = lhs_data[0] * rhs_data[col];
+    }
+    for col in 0..4 {
+        for row in 0..2 {
+            contracted[2 + row + 2 * col] = (0..2)
+                .map(|k| lhs_data[1 + row + 2 * k] * -rhs_data[2 + k + 2 * col])
+                .sum();
+        }
+    }
+    let expected: [f64; 10] =
+        std::array::from_fn(|index| alpha * contracted[index] + beta * initial[index]);
+
+    let axes = TensorContractSpec::with_default_output_order(&[1], &[0]);
+    let facts: Vec<crate::contract::FusionContractCandidateFacts> =
+        crate::contract::prepare_tensorcontract_fusion_candidate_facts_dyn_raw(
+            &rule,
+            &DynamicFusionMapSpace::from_typed(&dst_space),
+            &DynamicFusionMapSpace::from_typed(lhs.fusion_space().unwrap()),
+            &DynamicFusionMapSpace::from_typed(rhs.fusion_space().unwrap()),
+            axes,
+        )
+        .unwrap();
+    // What: the selected LhsRhs candidate materializes only A for the twist
+    // (before #1351: B, 10 elements).
+    assert_eq!(
+        facts[0].orientation(),
+        crate::contract::FusionContractOrientation::LhsRhs
+    );
+    assert!(facts[0].lhs_exact_identity_borrowable());
+    assert!(facts[0].rhs_exact_identity_borrowable());
+    assert!(facts[0].lhs_requires_twist());
+    assert!(!facts[0].rhs_requires_twist());
+    assert_eq!(facts[0].lhs_materialized_elements(), 5);
+    assert_eq!(facts[0].rhs_materialized_elements(), 0);
+    assert_eq!(facts[0].total_materialized_elements(), 5);
+
+    let new_dst = || {
+        TensorMap::<f64, 1, 2>::from_vec_with_fusion_space(initial.to_vec(), dst_space.clone())
+            .unwrap()
+    };
+    // The plan-level Host path (`tensorcontract_fusion_dynamic_plan_into_with`).
+    let mut plain = new_dst();
+    tensorcontract_fusion_into(&rule, &mut plain, &lhs, &rhs, axes, alpha, beta).unwrap();
+    // The compiled-artifact Host path, profiled for its source transforms.
+    let mut artifact = new_dst();
+    let mut profile = TensorContractFusionProfile::default();
+    TensorContractFusionExecutionContext::<f64, _>::default()
+        .tensorcontract_fusion_into_profiled(
+            &rule,
+            &mut artifact,
+            &lhs,
+            &rhs,
+            axes,
+            alpha,
+            beta,
+            &mut profile,
+        )
+        .unwrap();
+    // What: one source transform, of the lhs; the rhs is read in place.
+    assert_eq!(profile.route, TensorContractFusionRoute::DynamicTreeCore);
+    assert_eq!(profile.lhs_transform_calls, 1);
+    assert_eq!(profile.rhs_transform_calls, 0);
+    // What: exact (dyadic) agreement with the hand calculation on both paths.
+    assert_eq!(plain.data(), &expected);
+    assert_eq!(artifact.data(), &expected);
+}
+
+#[test]
 fn tensorcontract_fusion_block_specs_enumerates_su2_innerline_blocks_from_homspace() {
     let rule = SU2FusionRule;
     let half = SectorId::new(1);
