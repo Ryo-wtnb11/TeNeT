@@ -150,7 +150,7 @@ The `blocks` column records the requested value.
 | `device_allocs` | device buffers created or taken ownership of: uploads plus tenferro tensors wrapped as `CudaDenseStorage`; excludes tenferro-internal solver workspaces and the intermediate tensors of the Hermiticity check |
 | `gemm_calls` | `dot_general` submissions |
 | `solver_calls` | cuSOLVER region calls (SVD, QR, EIGH) |
-| `copy_calls` | `cuda_copy_region_into` calls that move data |
+| `copy_calls` | `cuda_copy_region_into` calls that move data, and unscaled, unconjugated overwrite region moves (#1410) |
 | `barrier_d2h_calls`, `barrier_d2h_bytes` | the completion barrier's own downloads, outside the timed region |
 | `check` | `ok:<oracle>`, `MISMATCH:<oracle>`, or the skip reason |
 

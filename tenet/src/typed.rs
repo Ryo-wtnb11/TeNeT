@@ -14140,9 +14140,10 @@ where
     /// own scale: for every provider this impl admits (`Scalar = f64`) a
     /// ribbon twist is a real sign, never zero, so the descriptor cannot let
     /// CUDA skip a source read: NaN and real infinities propagate as on Host.
-    /// An infinite *complex* entry instead becomes NaN in both components,
-    /// because the device always multiplies where Host copies a factor-1 block
-    /// (the #1301 deviation, disclosed by `cuda_region_axpby`); `f64` and every
+    /// A `+1` block takes `cuda_region_axpby`'s copy route and is bit-exact for
+    /// every payload, as Host's factor-1 copy is. A `-1` block keeps the
+    /// multiply: its complex non-finite entries follow the device's full
+    /// complex product, not yet pinned against Host (#1407); `f64` and every
     /// finite payload are exact. No θ table is uploaded. A warm call therefore transfers only the #740 output
     /// initialisation — one H2D of the output bytes — downloads nothing,
     /// allocates exactly one device buffer and submits one strided move per
@@ -14393,9 +14394,8 @@ where
             // A ribbon twist is never zero, so the factor rides the descriptor
             // scale: no coefficient buffer, and CUDA still has to read the
             // source rather than skipping it as it may for a zero alpha. That
-            // keeps NaN and real infinities propagating as on Host; an infinite
-            // complex entry is the disclosed #1301 difference, because Host
-            // bit-copies a factor-1 block where this always multiplies.
+            // keeps NaN and real infinities propagating as on Host; a `+1`
+            // factor is the primitive's bit-exact copy route.
             tenet_dense::cuda_region_axpby::<D>(
                 cuda,
                 &src.0,

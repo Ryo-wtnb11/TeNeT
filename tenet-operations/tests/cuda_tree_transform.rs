@@ -410,9 +410,13 @@ fn alternating_structures_upload_their_coefficients_exactly_once_each() {
     }
     let delta = stats_delta(before, cuda_transfer_stats());
 
+    // Exactly one upload per structure: the interleaved structure's
+    // coefficient payload, and for the rank-3 structure, whose only
+    // coefficient is 1 and so is never read, the context's shared `1` that a
+    // scaled replay of it would read.
     assert_eq!(
         delta.h2d_calls, 2,
-        "exactly one coefficient upload per structure: {delta:?}"
+        "exactly one upload per structure: {delta:?}"
     );
 }
 
@@ -578,10 +582,9 @@ fn more_signatures_than_the_default_plan_bound_raise_the_cap_without_thrashing()
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn a_coefficient_of_one_moves_f64_payloads_bitwise() {
-    // What: where the host copies bit-exactly, the device's multiply by the
-    // uploaded `1` is exact too, so the two agree to the last bit for finite
-    // f64 payloads. (Not a contract for other coefficients or for complex
-    // payloads: see the +-inf deviation recorded in G2a-1.)
+    // What: where the host copies bit-exactly, the device copies too, so the
+    // two agree to the last bit; the non-finite payloads are pinned by
+    // `a_coefficient_of_one_copies_non_finite_and_signed_zero_payloads_bitwise`.
     let mut ctx = context();
     let mut executor = CudaTreeTransformExecutor::default();
     for fixture in unit_coefficient_fixtures() {
@@ -608,6 +611,61 @@ fn a_coefficient_of_one_moves_f64_payloads_bitwise() {
             fixture.name
         );
     }
+}
+
+/// Every unit-coefficient fixture, replayed unscaled over a source whose
+/// every other element is a payload a multiply by one would not preserve:
+/// the device copies it bit for bit, as the host's coefficient-1 copy does.
+fn unit_moves_match_the_host_bitwise<T: DeviceScalar>(specials: &[T]) {
+    let mut ctx = context();
+    let mut executor = CudaTreeTransformExecutor::default();
+    for fixture in unit_coefficient_fixtures() {
+        let mut source = fixture.source::<T>();
+        for (index, value) in source.iter_mut().enumerate().step_by(2) {
+            *value = specials[(index / 2) % specials.len()];
+        }
+        let destination = vec![T::from_parts(0.0, 0.0); fixture.dst_len()];
+        let bits = |values: &[T]| values.iter().map(|v| v.bit_pattern()).collect::<Vec<_>>();
+        let device = device_replay(
+            &mut ctx,
+            &mut executor,
+            &fixture,
+            &source,
+            &destination,
+            true,
+        );
+        assert_eq!(
+            bits(&device),
+            bits(&host_replay(&fixture, &source, &destination, true)),
+            "{} must match the host bitwise",
+            fixture.name
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn a_coefficient_of_one_copies_non_finite_and_signed_zero_payloads_bitwise() {
+    let real = [
+        -0.0,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::from_bits(1),
+        f64::from_bits(0x7ff4_0000_0000_0001),
+        f64::from_bits(0xfff8_dead_beef_0001),
+    ];
+    unit_moves_match_the_host_bitwise::<f64>(&real);
+    let complex: Vec<Complex64> = real
+        .iter()
+        .flat_map(|&x| {
+            [
+                Complex64::new(x, 1.5),
+                Complex64::new(-2.0, x),
+                Complex64::new(x, x),
+            ]
+        })
+        .collect();
+    unit_moves_match_the_host_bitwise::<Complex64>(&complex);
 }
 
 #[test]
@@ -992,9 +1050,11 @@ fn a_warm_recoupling_replay_transfers_nothing_and_reuses_the_workspace() {
         cold_workspace,
         "warm replay grew the workspace"
     );
-    // Two GEMM jobs, four packs, four scatters, one Single block and one
-    // inactive destination layout: every one of them is a submission.
-    assert_eq!(warm.gemm_calls, 12, "submissions changed: {warm:?}");
+    // Two GEMM jobs, the Single block (coefficient -1.5) and the inactive
+    // destination layout's zero fill are GEMM submissions; the four packs and
+    // four scatters are unscaled overwrites, so each is one copy.
+    assert_eq!(warm.gemm_calls, 4, "submissions changed: {warm:?}");
+    assert_eq!(warm.copy_calls, 8, "submissions changed: {warm:?}");
     assert_close(
         &device_dst.download(&ctx).unwrap(),
         &fixture.expected(&source, &destination, true),
@@ -1123,9 +1183,9 @@ fn alternating_recoupling_structures_upload_their_matrices_exactly_once_each() {
     assert_eq!(warm.device_allocs, 0, "a switch allocated: {warm:?}");
     // The first round pays six: one coefficient-and-matrix vector per
     // structure, the two workspace buffers the wider structure allocates and
-    // the narrower one reuses, the context's shared `1` that pack and scatter
-    // read as their coefficient, and the zero template the wider structure's
-    // inactive destination layout needs.
+    // the narrower one reuses, and the context's shared `1` and zero template
+    // that the wider structure's inactive destination layout's zero fill
+    // reads. Pack and scatter are copies and read no coefficient.
     assert_eq!(cold.h2d_calls, 6, "cold uploads changed: {cold:?}");
     for (index, (_, fixture)) in prepared.iter().enumerate() {
         let (dst, _) = &buffers[index];
@@ -1991,8 +2051,11 @@ fn a_zero_caller_scale_with_destination_scales_writes_the_hosts_zeros() {
 #[ignore = "requires a real CUDA device"]
 fn destination_scales_reuse_the_unscaled_structure_and_transfer_nothing_warm() {
     // What: θ is in no key and uploads nothing — a scaled replay after an
-    // unscaled one of the same structure prepares no structure, asks for no
-    // plan entry, misses no plan and moves no byte.
+    // unscaled one of the same structure prepares no structure and moves no
+    // byte, and from its second call on misses no plan. The first scaled call
+    // may miss: θ = -1 sends a scatter that the unscaled replay copies through
+    // the GEMM route, whose plan an unscaled replay never built. Those plans
+    // are inside the structure's counted signatures, so nothing is evicted.
     let _guard = COUNTER_TESTS.lock().unwrap();
     let mut ctx = context();
     let mut executor = CudaTreeTransformExecutor::default();
@@ -2019,9 +2082,9 @@ fn destination_scales_reuse_the_unscaled_structure_and_transfer_nothing_warm() {
     };
     replay(&mut ctx, &[]);
     replay(&mut ctx, &[]);
-    let plans = ctx.plan_cache_stats().unwrap();
     let before = cuda_transfer_stats();
     replay(&mut ctx, &scales);
+    let plans = ctx.plan_cache_stats().unwrap();
     replay(&mut ctx, &scales);
     let warm = stats_delta(before, cuda_transfer_stats());
     let plans_after = ctx.plan_cache_stats().unwrap();

@@ -268,9 +268,10 @@ explicit `UnsupportedOnDevice` boundary, and flat elements belonging to no
 block are zero where the Host copies them through, the convention device
 structural results have carried since
 [#1322](https://github.com/Ryo-wtnb11/TeNeT/issues/1322). NaN and real
-infinities propagate as on Host; an infinite *complex* entry becomes NaN in
-both components, because the device always multiplies where Host bit-copies a
-factor-1 block (the #1301 deviation). The body is one generic over
+infinities propagate as on Host; a factor-`+1` block is a bit-exact device
+copy, as on Host (#1410); a factor-`-1` block keeps the device multiply, whose
+complex non-finite entries follow the full complex product and are not yet
+pinned against Host (#1407). The body is one generic over
 `CudaPayload`, so it is instantiated for the single-precision payloads too and
 `±1` is exact there, but no single-precision twist fixture exists yet — hence
 `NEEDS-PROOF` rather than `PROVED` in that column.

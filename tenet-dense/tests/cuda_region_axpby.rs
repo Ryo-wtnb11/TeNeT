@@ -52,6 +52,11 @@ trait RegionScalar:
     fn im(self) -> f64;
     fn conj(self) -> Self;
     fn distance(self, other: Self) -> f64;
+    /// Payloads a multiply by one does not preserve bit for bit: signed
+    /// zeros, infinities, subnormals and NaNs with explicit payload bits
+    /// (signalling ones included), and for the complex dtypes every mix of
+    /// them across the two components.
+    fn specials() -> Vec<Self>;
     /// A deterministic, non-degenerate sample value for buffer index `index`.
     fn sample(index: usize) -> Self {
         Self::from_parts(1.0 + (index as f64) * 0.25, -0.5 + (index as f64) * 0.125)
@@ -60,6 +65,16 @@ trait RegionScalar:
 
 impl RegionScalar for f32 {
     const NAME: &'static str = "f32";
+    fn specials() -> Vec<Self> {
+        vec![
+            -0.0,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::from_bits(1),
+            f32::from_bits(0x7fa0_0001),
+            f32::from_bits(0xffc1_2345),
+        ]
+    }
     const EPSILON: f64 = f32::EPSILON as f64;
 
     fn from_parts(re: f64, _im: f64) -> Self {
@@ -85,6 +100,18 @@ impl RegionScalar for f32 {
 
 impl RegionScalar for Complex32 {
     const NAME: &'static str = "Complex32";
+    fn specials() -> Vec<Self> {
+        f32::specials()
+            .into_iter()
+            .flat_map(|x| {
+                [
+                    Complex32::new(x, 1.5),
+                    Complex32::new(-2.0, x),
+                    Complex32::new(x, x),
+                ]
+            })
+            .collect()
+    }
     const EPSILON: f64 = f32::EPSILON as f64;
 
     fn from_parts(re: f64, im: f64) -> Self {
@@ -110,6 +137,16 @@ impl RegionScalar for Complex32 {
 
 impl RegionScalar for f64 {
     const NAME: &'static str = "f64";
+    fn specials() -> Vec<Self> {
+        vec![
+            -0.0,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::from_bits(1),
+            f64::from_bits(0x7ff4_0000_0000_0001),
+            f64::from_bits(0xfff8_dead_beef_0001),
+        ]
+    }
     const EPSILON: f64 = f64::EPSILON;
 
     fn from_parts(re: f64, _im: f64) -> Self {
@@ -135,6 +172,18 @@ impl RegionScalar for f64 {
 
 impl RegionScalar for Complex64 {
     const NAME: &'static str = "Complex64";
+    fn specials() -> Vec<Self> {
+        f64::specials()
+            .into_iter()
+            .flat_map(|x| {
+                [
+                    Complex64::new(x, 1.5),
+                    Complex64::new(-2.0, x),
+                    Complex64::new(x, x),
+                ]
+            })
+            .collect()
+    }
     const EPSILON: f64 = f64::EPSILON;
 
     fn from_parts(re: f64, im: f64) -> Self {
@@ -479,72 +528,176 @@ fn overwrite_is_independent_of_a_nan_poisoned_destination() {
     poisoned_destination_case::<Complex64>(&mut ctx);
 }
 
-/// Records what the device does to an infinite payload multiplied by the 1x1
-/// coefficient operand. The host copies bit-exactly when the coefficient is 1;
-/// the device always multiplies, so a complex infinity can gain a NaN
-/// component. This test pins the behaviour rather than assuming it, because
-/// `benchmarks/history/cuda-region-axpby-2026-09-20.md` cites it as the one
-/// disclosed numerical deviation of the device path.
-#[test]
-#[ignore = "requires a real CUDA device"]
-fn infinite_payload_behaviour_is_recorded() {
-    let mut ctx = context();
-    let dims = [2usize];
-    let strides = [1usize];
+/// (dims, source axis order, source leading stride, source base, destination
+/// axis order, destination leading stride, destination base). The first case
+/// is a compact source at offset 0; the others are strided sources at an
+/// offset inside a larger buffer, written through a permuting destination.
+type CopyCase = (
+    &'static [usize],
+    &'static [usize],
+    usize,
+    usize,
+    &'static [usize],
+    usize,
+    usize,
+);
 
-    let real_src = upload::<f64>(&ctx, &[f64::INFINITY, f64::NEG_INFINITY]);
-    let mut real_dst = upload::<f64>(&ctx, &[0.0, 0.0]);
-    cuda_region_axpby::<f64>(
-        &mut ctx,
-        &real_src,
-        &region(&dims, &strides, 0),
+const COPY_CASES: &[CopyCase] = &[
+    (&[3, 4], &[0, 1], 1, 0, &[1, 0], 1, 5),
+    (&[3, 4], &[1, 0], 2, 7, &[0, 1], 3, 2),
+    (&[2, 3, 4], &[0, 1, 2], 2, 5, &[2, 0, 1], 3, 7),
+    (&[2, 3, 2, 2], &[3, 1, 0, 2], 1, 3, &[1, 3, 0, 2], 1, 11),
+];
+
+fn bits<D: RegionScalar>(values: &[D]) -> Vec<[u64; 2]> {
+    values.iter().map(|value| value.bit_pattern()).collect()
+}
+
+/// An unscaled, unconjugated overwrite is a transport: every payload arrives
+/// with its exact bit pattern, compared against a host scatter over the same
+/// index space, with the destination's own sentinels outside the region. Each
+/// move is one copy submission and nothing else.
+fn exact_copy_case<D: RegionScalar>(ctx: &mut CudaDenseContext, case: &CopyCase) {
+    let &(dims, src_order, src_lead, src_base, dst_order, dst_lead, dst_base) = case;
+    let block: usize = dims.iter().product();
+    let src_strides = permuted_strides(dims, src_order, src_lead);
+    let dst_strides = permuted_strides(dims, dst_order, dst_lead);
+    let specials = D::specials();
+    let src_host: Vec<D> = (0..src_base + src_lead * block + 4)
+        .map(|index| {
+            if index % 2 == 0 {
+                specials[(index / 2) % specials.len()]
+            } else {
+                D::sample(index)
+            }
+        })
+        .collect();
+    let dst_host: Vec<D> = (0..dst_base + dst_lead * block + 4)
+        .map(|index| D::sample(index + 1000))
+        .collect();
+    let src = upload::<D>(ctx, &src_host);
+    let mut dst = upload::<D>(ctx, &dst_host);
+
+    let _serialized = COUNTER_TESTS.lock().unwrap_or_else(|err| err.into_inner());
+    reset_cuda_transfer_stats();
+    cuda_region_axpby::<D>(
+        ctx,
+        &src,
+        &region(dims, &src_strides, src_base),
         false,
-        f64::ONE,
+        D::ONE,
         CudaRegionCoefficient::One,
         CudaRegionBeta::Overwrite,
-        &mut real_dst,
-        &region(&dims, &strides, 0),
+        &mut dst,
+        &region(dims, &dst_strides, dst_base),
     )
-    .expect("real infinity");
-    let real = download::<f64>(&ctx, &real_dst);
-    println!("f64 +/-inf through a coefficient of 1: {real:?}");
-    assert_eq!(real, vec![f64::INFINITY, f64::NEG_INFINITY]);
-
-    let complex_src = upload::<Complex64>(
-        &ctx,
-        &[
-            Complex64::new(f64::INFINITY, 0.0),
-            Complex64::new(0.0, f64::NEG_INFINITY),
-        ],
+    .expect("unscaled move");
+    let stats = cuda_transfer_stats();
+    let what = format!("{} dims {dims:?} src base {src_base}", D::NAME);
+    assert_eq!(
+        (
+            stats.copy_calls,
+            stats.gemm_calls,
+            stats.h2d_calls,
+            stats.d2h_calls,
+            stats.device_allocs
+        ),
+        (1, 0, 0, 0, 0),
+        "{what}: {stats:?}"
     );
-    let mut complex_dst = upload::<Complex64>(&ctx, &[Complex64::new(0.0, 0.0); 2]);
+
+    let mut expected = dst_host.clone();
+    let from = region_offsets(dims, &src_strides, src_base);
+    let to = region_offsets(dims, &dst_strides, dst_base);
+    for (&from, &to) in from.iter().zip(&to) {
+        expected[to] = src_host[from];
+    }
+    assert_eq!(bits(&download::<D>(ctx, &dst)), bits(&expected), "{what}");
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn an_unscaled_move_is_a_bit_exact_copy_of_every_payload() {
+    let mut ctx = context();
+    for case in COPY_CASES {
+        exact_copy_case::<f32>(&mut ctx, case);
+        exact_copy_case::<f64>(&mut ctx, case);
+        exact_copy_case::<Complex32>(&mut ctx, case);
+        exact_copy_case::<Complex64>(&mut ctx, case);
+    }
+}
+
+/// Every move that is not an unscaled overwrite keeps the GEMM route: a
+/// negative or conjugating unit move, an accumulation, and a buffer
+/// coefficient, even one that holds 1 (the device cannot see the value).
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn only_the_unscaled_overwrite_takes_the_copy_route() {
+    let mut ctx = context();
+    let dims = [3usize, 4];
+    let strides = [1usize, 3];
+    let src = upload::<Complex64>(&ctx, &(0..12).map(Complex64::sample).collect::<Vec<_>>());
+    let unit = upload::<Complex64>(&ctx, &[Complex64::ONE]);
+    let mut dst = upload::<Complex64>(&ctx, &[Complex64::ZERO; 12]);
+    // Warm the context `1`, so the counts below are the submissions alone.
     cuda_region_axpby::<Complex64>(
         &mut ctx,
-        &complex_src,
+        &src,
         &region(&dims, &strides, 0),
-        false,
+        true,
         Complex64::ONE,
         CudaRegionCoefficient::One,
         CudaRegionBeta::Overwrite,
-        &mut complex_dst,
+        &mut dst,
         &region(&dims, &strides, 0),
     )
-    .expect("complex infinity");
-    let complex = download::<Complex64>(&ctx, &complex_dst);
-    println!("Complex64 +/-inf through a coefficient of 1: {complex:?}");
-    // Recorded on an A100 (cuTENSOR 2.5.0): a complex infinity does not
-    // survive the multiply by the 1x1 operand at all — *both* components come
-    // back NaN, for `(inf, 0)` and for `(0, -inf)` alike: the complex
-    // product's `inf * 0` term is already NaN, and the remaining multiply
-    // spreads it across both components, where the host's `alpha == 1` path
-    // copies the value bit-exactly and keeps the infinity. It is the one
-    // numerical deviation of the
-    // device path; it affects only non-finite complex payloads, and the f64
-    // leg above shows real infinities are unaffected.
-    for value in &complex {
-        assert!(
-            value.re.is_nan() && value.im.is_nan(),
-            "recorded behaviour: a complex infinity becomes NaN, got {value:?}"
+    .expect("warm");
+    let calls: [(bool, Complex64, CudaRegionCoefficient<'_>, CudaRegionBeta); 4] = [
+        (
+            false,
+            -Complex64::ONE,
+            CudaRegionCoefficient::One,
+            CudaRegionBeta::Overwrite,
+        ),
+        (
+            true,
+            Complex64::ONE,
+            CudaRegionCoefficient::One,
+            CudaRegionBeta::Overwrite,
+        ),
+        (
+            false,
+            Complex64::ONE,
+            CudaRegionCoefficient::One,
+            CudaRegionBeta::Accumulate,
+        ),
+        (
+            false,
+            Complex64::ONE,
+            CudaRegionCoefficient::Buffer(&unit, 0),
+            CudaRegionBeta::Overwrite,
+        ),
+    ];
+    let _serialized = COUNTER_TESTS.lock().unwrap_or_else(|err| err.into_inner());
+    for (conj, alpha, coeff, beta) in calls {
+        reset_cuda_transfer_stats();
+        cuda_region_axpby::<Complex64>(
+            &mut ctx,
+            &src,
+            &region(&dims, &strides, 0),
+            conj,
+            alpha,
+            coeff,
+            beta,
+            &mut dst,
+            &region(&dims, &strides, 0),
+        )
+        .expect("gemm route");
+        let stats = cuda_transfer_stats();
+        assert_eq!(
+            (stats.gemm_calls, stats.copy_calls, stats.h2d_calls),
+            (1, 0, 0),
+            "conj {conj} alpha {alpha} beta {beta:?}: {stats:?}"
         );
     }
 }

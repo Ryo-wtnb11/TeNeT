@@ -10,9 +10,10 @@ use tenferro_gpu::cuda::{download_tensor, upload_tensor, CudaBackend, CudaDevice
 use tenferro_linalg::{QrGauge, QrOptions, TensorReadLinalgExt};
 use tenferro_tensor::backend::{BackendSession, BackendSessionHost};
 use tenferro_tensor::{
-    ContractionScalar, DotGeneralAccumulation, DotGeneralConfig, Tensor, TensorDot,
+    ContractionScalar, DotGeneralAccumulation, DotGeneralConfig, DynRank, Tensor, TensorDot,
     TensorElementwise, TensorRead, TensorReduction, TensorScalar as TenferroScalar,
-    TensorStructural, TensorView, TensorViewMut, TensorWrite, TypedTensor,
+    TensorStructural, TensorView, TensorViewCanonicalization, TensorViewMut, TensorWrite,
+    TypedTensor, TypedTensorView, TypedTensorViewMut,
 };
 
 use super::{DenseBackend, DenseDType, DenseError, MatrixOp};
@@ -94,6 +95,16 @@ pub trait CudaScalar:
     fn typed_mut(tensor: &mut Tensor) -> Option<&mut TypedTensor<Self>> {
         tensor.as_typed_mut::<Self>()
     }
+
+    /// Tenferro's typed strided view copy for this payload. A method rather
+    /// than a bound because `CudaBackend: TensorViewCanonicalization<Self, _>`
+    /// is not a supertrait, so a bound would spread to every generic caller.
+    #[doc(hidden)]
+    fn copy_view_into(
+        backend: &mut CudaBackend,
+        src: &TypedTensorView<'_, Self, DynRank>,
+        dst: &mut TypedTensorViewMut<'_, Self, DynRank>,
+    ) -> tenferro_tensor::Result<()>;
 }
 
 /// The real lane of a [`CudaScalar`] payload.
@@ -152,6 +163,14 @@ impl CudaScalar for f32 {
     fn contraction_scalar(self) -> ContractionScalar {
         ContractionScalar::F32(self)
     }
+
+    fn copy_view_into(
+        backend: &mut CudaBackend,
+        src: &TypedTensorView<'_, Self, DynRank>,
+        dst: &mut TypedTensorViewMut<'_, Self, DynRank>,
+    ) -> tenferro_tensor::Result<()> {
+        TensorViewCanonicalization::copy_into(backend, src, dst)
+    }
 }
 
 impl CudaScalar for Complex32 {
@@ -163,6 +182,14 @@ impl CudaScalar for Complex32 {
 
     fn contraction_scalar(self) -> ContractionScalar {
         ContractionScalar::C32(self)
+    }
+
+    fn copy_view_into(
+        backend: &mut CudaBackend,
+        src: &TypedTensorView<'_, Self, DynRank>,
+        dst: &mut TypedTensorViewMut<'_, Self, DynRank>,
+    ) -> tenferro_tensor::Result<()> {
+        TensorViewCanonicalization::copy_into(backend, src, dst)
     }
 }
 
@@ -176,6 +203,14 @@ impl CudaScalar for f64 {
     fn contraction_scalar(self) -> ContractionScalar {
         ContractionScalar::F64(self)
     }
+
+    fn copy_view_into(
+        backend: &mut CudaBackend,
+        src: &TypedTensorView<'_, Self, DynRank>,
+        dst: &mut TypedTensorViewMut<'_, Self, DynRank>,
+    ) -> tenferro_tensor::Result<()> {
+        TensorViewCanonicalization::copy_into(backend, src, dst)
+    }
 }
 
 impl CudaScalar for Complex64 {
@@ -187,6 +222,14 @@ impl CudaScalar for Complex64 {
 
     fn contraction_scalar(self) -> ContractionScalar {
         ContractionScalar::C64(self)
+    }
+
+    fn copy_view_into(
+        backend: &mut CudaBackend,
+        src: &TypedTensorView<'_, Self, DynRank>,
+        dst: &mut TypedTensorViewMut<'_, Self, DynRank>,
+    ) -> tenferro_tensor::Result<()> {
+        TensorViewCanonicalization::copy_into(backend, src, dst)
     }
 }
 
@@ -256,7 +299,8 @@ pub struct CudaPlanCacheStats {
 ///   `cuda_gemm_region_strided_into` and from the region primitives
 ///   ([`cuda_region_axpby`], [`cuda_region_zero`]) alike.
 /// - `solver_calls`: cuSOLVER region calls (SVD, QR, EIGH).
-/// - `copy_calls`: `cuda_copy_region_into` calls that move data.
+/// - `copy_calls`: `cuda_copy_region_into` calls that move data, and the
+///   unscaled, unconjugated overwrite moves of [`cuda_region_axpby`].
 ///
 /// The counters are `Relaxed` and process-wide: a snapshot taken while another
 /// thread submits work is a consistent-per-field sample, not a global instant.
@@ -1377,6 +1421,50 @@ fn submit_region_axpby<D: CudaScalar>(
         .map_err(|err| cuda_error(op, err))
 }
 
+/// Submits one validated unscaled, unconjugated overwrite move as Tenferro's
+/// typed strided view copy: a plain element assignment on the native CubeCL
+/// kernel (tenferro-gpu 0.7.1 `copy_view_to_view_typed`,
+/// `kernels/structural.rs` `strided_to_strided_kernel`).
+///
+/// Why not the dtype-erased `copy_read_into`: for float payloads it is a
+/// cuTENSOR permute with `alpha = 1`, which multiplies, so a complex infinity
+/// or a NaN payload does not survive it; the host copies these bytes as they
+/// are.
+fn submit_region_copy<D: CudaScalar>(
+    backend: &mut CudaBackend,
+    op: &'static str,
+    src: &CudaDenseStorage,
+    src_region: &CudaRegion,
+    dst: &mut CudaDenseStorage,
+    dst_region: &CudaRegion,
+) -> Result<(), DenseError> {
+    let (mut dims, mut src_strides) = src_region.contraction_view_metadata()?;
+    let (_, mut dst_strides) = dst_region.contraction_view_metadata()?;
+    // Drop the contracted unit mode the GEMM route appends.
+    dims.pop();
+    src_strides.pop();
+    dst_strides.pop();
+    let Some(src_tensor) = D::typed(&src.tensor) else {
+        return Err(dtype_mismatch::<D>(op, &src.tensor));
+    };
+    let src_view = src_tensor
+        .backend_region_view(dims.clone(), src_strides, src_region.offset_isize()?)
+        .map_err(|err| cuda_error(op, err))?;
+    let actual = dst.dtype;
+    let Some(dst_tensor) = D::typed_mut(&mut dst.tensor) else {
+        return Err(DenseError::DTypeMismatch {
+            op,
+            expected: D::DTYPE,
+            actual,
+        });
+    };
+    let mut dst_view = dst_tensor
+        .backend_region_view_mut(dims, dst_strides, dst_region.offset_isize()?)
+        .map_err(|err| cuda_error(op, err))?;
+    COPY_CALLS.fetch_add(1, Ordering::Relaxed);
+    D::copy_view_into(backend, &src_view, &mut dst_view).map_err(|err| cuda_error(op, err))
+}
+
 /// `dst_region = alpha * c * [conj] src_region + beta * dst_region`, where `c`
 /// is a 1x1 **data** operand chosen by `coeff` and `alpha` is the caller's own
 /// scale, carried by the contraction descriptor.
@@ -1384,14 +1472,30 @@ fn submit_region_axpby<D: CudaScalar>(
 /// This is the single strided data-movement primitive the device structural
 /// operations are built on: one strided, offset, rank-N source region of one
 /// buffer moved into a strided, offset, rank-N destination region of another,
-/// with the axis permutation carried by the destination strides. It submits
-/// one `dot_general` against the 1x1 coefficient and allocates no device
-/// buffer of its own.
+/// with the axis permutation carried by the destination strides. It allocates
+/// no device buffer of its own and submits exactly one of two routes:
 ///
-/// Transfer contract: a call with [`CudaRegionCoefficient::Buffer`] moves
-/// nothing across the host boundary, ever. A call with
-/// [`CudaRegionCoefficient::One`] uploads this context's one-element `1` the
-/// first time that dtype is used, and a call with
+/// - **copy** — [`CudaRegionCoefficient::One`], `conj = false`,
+///   `alpha == D::ONE` (IEEE comparison, the host's `is_one()`) and
+///   [`CudaRegionBeta::Overwrite`]: one Tenferro typed strided view copy on
+///   the native CubeCL kernel, counted in `copy_calls`. It assigns elements
+///   and never multiplies, so every payload arrives bit-exact — complex
+///   infinities, negative-zero components and NaN payloads included — as the
+///   host's coefficient-1 copy does. Source and destination keep their own
+///   strides and offsets; no cuTENSOR plan is built. Disclosed costs of
+///   Tenferro 0.7.1's kernel (`benchmarks/history/cuda-strided-copy-moves-2026-09-25.md`):
+///   its layout is compile-time, so each new fused block layout pays one NVRTC
+///   compile (about 40 ms on an A100) and stays in CubeCL's in-process kernel
+///   cache, and a large transposed block completes about 2x slower than
+///   cuTENSOR's permute because the kernel is not tiled.
+/// - **gemm** — every other call: one `dot_general` against the 1x1
+///   coefficient, counted in `gemm_calls`. A strided *accumulating* move stays
+///   here because Tenferro's `axpby` requires a compact destination.
+///
+/// Transfer contract: a call with [`CudaRegionCoefficient::Buffer`] and a
+/// copy-route call move nothing across the host boundary, ever. A gemm-route
+/// call with [`CudaRegionCoefficient::One`] uploads this context's one-element
+/// `1` the first time that dtype is used, and a call with
 /// [`CudaRegionCoefficient::Zero`] its one-element zero template, and nothing
 /// afterwards (see [`CudaDenseContext::scalar_operand_bytes`] and
 /// [`CudaDenseContext::reserve_zero_template`]).
@@ -1413,13 +1517,12 @@ fn submit_region_axpby<D: CudaScalar>(
 /// [`CudaRegionCoefficient::Zero`] the written zeros carry the sign of
 /// `0 * src` alone, not the sign of the caller's `-0.0` or of `c`.
 ///
-/// One numerical deviation from the host is disclosed and pinned by the device
-/// tests: the host copies bit-exactly when the coefficient is 1, while this
-/// path always multiplies, and an infinite complex payload is observed to come
-/// back as `NaN` in both components: `inf * 0` in the complex product already
-/// yields a `NaN` component, which the remaining multiply spreads across both.
-/// `f64` infinities and every finite payload are unaffected. See
-/// `benchmarks/history/cuda-region-axpby-2026-09-20.md`.
+/// The gemm route multiplies the payload by the coefficient as a full complex
+/// product, so a complex infinity picks up a `NaN` component (`inf * 0`) where
+/// a host that scales a real coefficient componentwise does not; that residual
+/// is #1407. The coefficient-1 case (#1301,
+/// `benchmarks/history/cuda-region-axpby-2026-09-20.md`) no longer deviates:
+/// it is the copy route.
 ///
 /// Validation order, all of it before any device work:
 ///
@@ -1503,6 +1606,15 @@ pub fn cuda_region_axpby<D: CudaScalar>(
     validate_destination_layout(OP, dst_region)?;
     validate_region(src_region, src.len)?;
     validate_region(dst_region, dst.len)?;
+
+    // IEEE comparison, as the host's `is_one()` decides its copy arm.
+    if matches!(coeff, CudaRegionCoefficient::One)
+        && !conj
+        && alpha == D::ONE
+        && matches!(beta, CudaRegionBeta::Overwrite)
+    {
+        return submit_region_copy::<D>(&mut ctx.backend, OP, src, src_region, dst, dst_region);
+    }
 
     match coeff {
         CudaRegionCoefficient::Buffer(coeff, offset) => submit_region_axpby::<D>(
@@ -1970,10 +2082,10 @@ pub fn cuda_is_hermitian_region<D: CudaScalar>(
 /// Copies the leading compact `rows x cols` block of a device buffer into a
 /// packed sub-region of `dst`.
 ///
-/// Tenferro 0.5.0's `copy_read_into` accepted an offset/strided destination
-/// view but required a compact source view at offset 0 (0.6.0 accepts strided
-/// sources, tenferro-rs#1836; adopting that is leaf M4), so the source is read
-/// from its start; the caller owns the proof that the destination region's tree layout
+/// The source is read from its start because no caller needs more: Tenferro
+/// has accepted a strided, offset source since 0.6.0 (tenferro-rs#1836), and
+/// the strided region moves use it through [`cuda_region_axpby`]'s copy route.
+/// The caller owns the proof that the destination region's tree layout
 /// is identical to what it reads (see `compile_cuda_qr_plan`). A source longer
 /// than the region is accepted because contiguity is a layout predicate: the
 /// leading `rows * cols` elements of a compact buffer are themselves compact,

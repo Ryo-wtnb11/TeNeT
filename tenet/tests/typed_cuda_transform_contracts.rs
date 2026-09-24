@@ -75,9 +75,10 @@ fn a_warm_device_transform_uploads_only_its_output_and_downloads_nothing() {
     let output_bytes =
         std::mem::size_of_val(fixture(&runtime).permute(&[2, 0], &[1, 3]).unwrap().data()) as u64;
 
-    // Cold: the output plus exactly one coefficient payload for the structure
-    // — a Single-block permute needs no pack/scatter workspace, so those two
-    // uploads are the whole of it.
+    // Cold: the output plus the context's shared `1`. U(1) coefficients are
+    // all 1, so an unscaled replay copies and no coefficient payload is
+    // uploaded; a Single-block permute needs no pack/scatter workspace either,
+    // so those two uploads are the whole of it.
     let cold_stats_before = runtime.cuda_tree_transform_stats().unwrap();
     let (_, cold) = delta(|| device.permute(&[2, 0], &[1, 3]).unwrap());
     let cold_stats_after = runtime.cuda_tree_transform_stats().unwrap();
@@ -118,7 +119,9 @@ fn a_warm_device_transform_uploads_only_its_output_and_downloads_nothing() {
 #[ignore = "requires a real CUDA device"]
 fn clearing_the_transform_cache_releases_the_device_executor_state() {
     let runtime = Runtime::builder().cuda(0).build().unwrap();
-    let device = fixture(&runtime).to_cuda().unwrap();
+    // fZ2, not U(1): its fermionic signs are coefficients a replay reads, so
+    // the executor retains a payload; U(1)'s unit coefficients upload none.
+    let device = fermionic_fixture(&runtime).to_cuda().unwrap();
     let _ = device.permute(&[2, 0], &[1, 3]).unwrap();
     let _ = device.transpose().unwrap();
     let before = runtime.cuda_tree_transform_stats().unwrap();
@@ -141,7 +144,9 @@ fn clearing_the_transform_cache_releases_the_device_executor_state() {
     assert_eq!(runtime.tree_transform_cache_info().entries(), 0);
 
     // Re-preparing after the clear still produces the same answer.
-    let expected = fixture(&runtime).permute(&[2, 0], &[1, 3]).unwrap();
+    let expected = fermionic_fixture(&runtime)
+        .permute(&[2, 0], &[1, 3])
+        .unwrap();
     let again = device.permute(&[2, 0], &[1, 3]).unwrap().to_host().unwrap();
     assert_eq!(again.data(), expected.data());
 }
@@ -745,7 +750,8 @@ fn a_warm_device_twist_uploads_only_its_output_and_downloads_nothing() {
     assert!(blocks > 1, "multi-block fixture");
 
     // A twist compiles no structure, so its only cold cost is the context's
-    // shared `1` coefficient operand, created once per dtype per context.
+    // shared `1` coefficient operand the `-1` blocks read, created once per
+    // dtype per context.
     let before = runtime.cuda_tree_transform_stats().unwrap();
     let _ = device.twist(&[0, 3]).unwrap();
     let after = runtime.cuda_tree_transform_stats().unwrap();
@@ -765,10 +771,16 @@ fn a_warm_device_twist_uploads_only_its_output_and_downloads_nothing() {
     assert_eq!(warm.d2h_calls, 0, "{warm:?}");
     assert_eq!(warm.d2h_bytes, 0, "{warm:?}");
     assert_eq!(warm.device_allocs, 1, "{warm:?}");
+    // Hand count: fZ2's twist is `-1` on an odd leg, so a block's factor is
+    // `(-1)^(p0 + p3)`. Of the eight blocks (four per coupled parity), two in
+    // each coupled sector have `p0 + p3` odd: those four multiply, and the
+    // four `+1` blocks are unscaled copies.
     assert_eq!(
-        warm.gemm_calls, blocks,
+        (warm.gemm_calls, warm.copy_calls),
+        (4, 4),
         "one submission per block: {warm:?}"
     );
+    assert_eq!(blocks, 8, "the hand count above assumes eight blocks");
     assert_eq!(
         twisted.to_host().unwrap().data(),
         host.twist(&[0, 3]).unwrap().data(),
@@ -818,9 +830,10 @@ fn device_twist_short_circuits_do_no_device_work() {
     let (all_legs, counters) = delta(|| fermionic.twist(&[0, 1, 2, 3]).unwrap());
     assert_eq!(counters.h2d_calls, 1, "{counters:?}");
     assert_eq!(counters.device_allocs, 1, "{counters:?}");
+    // Every block's factor is `+1`, so every submission is a copy.
     assert_eq!(
-        counters.gemm_calls,
-        fermionic_host.block_count() as u64,
+        (counters.gemm_calls, counters.copy_calls),
+        (0, fermionic_host.block_count() as u64),
         "one submission per block, as for any other twist: {counters:?}"
     );
     assert_eq!(all_legs.to_host().unwrap().data(), fermionic_host.data());

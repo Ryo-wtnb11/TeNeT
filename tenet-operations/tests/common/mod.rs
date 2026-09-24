@@ -648,7 +648,8 @@ pub fn many_distinct_signatures(blocks: usize) -> Fixture {
     let mut src_offset = 0usize;
     for index in 0..blocks {
         // Distinct extents give distinct fused signatures; the source is
-        // transposed so the move is never a plain copy.
+        // transposed and no coefficient is 1, so every move is a GEMM
+        // submission with a cuTENSOR plan of its own, never a copy.
         let shape = vec![2 + index % 7, 3 + index / 7];
         let dst = Block::packed(vec![shape[1], shape[0]], dst_offset);
         let src = Block::packed(shape, src_offset);
@@ -658,7 +659,7 @@ pub fn many_distinct_signatures(blocks: usize) -> Fixture {
             dst_block: index,
             src_block: index,
             axes: vec![1, 0],
-            coefficient: if index % 2 == 0 { 1.0 } else { -1.0 },
+            coefficient: if index % 2 == 0 { 1.5 } else { -1.0 },
         });
         dst_blocks.push(dst);
         src_blocks.push(src);

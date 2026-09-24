@@ -63,7 +63,8 @@ pub enum CudaTreeTransformDestination<D> {
 /// the host either.
 ///
 /// `coefficient` is the index of the 1x1 operand in the uploaded coefficient
-/// vector, or `None` where the host copies unscaled and the context's shared
+/// vector, or `None` where the host copies unscaled — a pack, a scatter, or a
+/// Single block whose coefficient is exactly one — and the context's shared
 /// `1` is the operand. `zero_coefficient` marks a Single block whose
 /// coefficient is zero: like the host (VectorInterface's `scale(x, 0) = 0`)
 /// it writes zeros under `Overwrite` and adds nothing under `Axpby(1)`,
@@ -110,8 +111,8 @@ struct PreparedStructure {
     /// and uploaded as one device vector. Block `b`'s scalar is the 1x1 operand
     /// at its own index and Multi block `b`'s recoupling matrix is the
     /// `S_b x D_b` run at its own `coefficient_start`, both addressed exactly as
-    /// the structure indexes them. `None` only for a structure with no
-    /// coefficients at all.
+    /// the structure indexes them. `None` for a structure whose submissions read
+    /// no coefficient: no recoupling and only unit or zero Single blocks.
     coefficients: Option<CudaDenseStorage>,
     /// How many elements of the payload the recoupling matrices occupy, which
     /// is what Stage C requires of the converted-coefficient slot.
@@ -358,13 +359,17 @@ impl CudaTreeTransformExecutor {
     ///
     /// # Cost
     ///
-    /// One `dot_general` submission per non-empty Single block, per pack and
-    /// scatter column and per inactive destination layout, plus one GEMM per
-    /// recoupling job — the same counts as the host's strided passes and its
-    /// `matmul_batch_axpby_into` jobs. A zero `alpha` submits only the zero
+    /// One submission per non-empty Single block, per pack and scatter column
+    /// and per inactive destination layout, plus one GEMM per recoupling job —
+    /// the same counts as the host's strided passes and its
+    /// `matmul_batch_axpby_into` jobs. A move the host copies (unit coefficient,
+    /// unit scale, unconjugated, `Overwrite`: every unconjugated pack, and
+    /// every scatter and unit Single block of an unscaled overwrite) is one
+    /// bit-exact copy; every other move is one `dot_general`. A zero `alpha` submits only the zero
     /// fills under `Overwrite` (the first one may grow the zero template to
     /// the largest written layout, one upload) and nothing under `Axpby(1)`. The first replay of a structure uploads
-    /// its coefficient vector, sizes the context zero template and grows the
+    /// its coefficient vector if a submission reads it, creates the context's
+    /// shared `1` if a move can read it, sizes the context zero template and grows the
     /// transform workspace to `Σ_b element_count_b × (src_count_b + dst_count_b)`
     /// elements; every later replay of the same structure on the same context
     /// and dtype transfers nothing and allocates no device buffer.
@@ -740,15 +745,41 @@ impl CudaTreeTransformExecutor {
             .map(|coefficient| D::coefficient_as_data(*coefficient))
             .collect();
         for entry in &mut prepared.moves {
-            entry.zero_coefficient = entry
-                .coefficient
-                .is_some_and(|index| values.get(index) == Some(&D::ZERO));
+            match entry.coefficient.and_then(|index| values.get(index)) {
+                Some(value) if *value == D::ZERO => entry.zero_coefficient = true,
+                // The host's `is_identity()`: a unit coefficient is a copy, not
+                // a multiply, so the move reads the shared `1` and an unscaled
+                // replay takes the primitive's bit-exact copy route.
+                Some(value) if *value == D::ONE => entry.coefficient = None,
+                _ => {}
+            }
         }
-        let device_bytes = core::mem::size_of_val(values.as_slice());
-        if !values.is_empty() {
+        // Upload the payload only if a submission reads it: a structure of
+        // unit and zero Single blocks alone never does.
+        let reads_payload = !prepared.recouplings.is_empty()
+            || prepared
+                .moves
+                .iter()
+                .any(|entry| entry.coefficient.is_some() && !entry.zero_coefficient);
+        let mut device_bytes = 0;
+        if reads_payload {
+            device_bytes = core::mem::size_of_val(values.as_slice());
             prepared.coefficients = Some(
                 CudaDenseStorage::upload_owned::<D>(ctx, values).map_err(OperationError::Dense)?,
             );
+        }
+        // An unscaled overwrite copies and reads no coefficient, but a scaled,
+        // conjugated or accumulating replay of the same structure reads the
+        // shared `1`. Creating it with the structure keeps every later replay
+        // transfer-free whatever its caller scale.
+        if !prepared.recouplings.is_empty()
+            || prepared
+                .moves
+                .iter()
+                .any(|entry| entry.coefficient.is_none())
+        {
+            ctx.reserve_ones_template::<D>(1)
+                .map_err(OperationError::Dense)?;
         }
         self.prepared.insert(key.clone(), prepared, device_bytes);
         self.refresh_plan_cache(ctx)
