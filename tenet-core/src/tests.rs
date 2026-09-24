@@ -10568,16 +10568,17 @@ mod tests {
         assert_eq!(after_hit.hits(), after_miss.hits() + 1);
         assert_eq!(after_hit.misses(), after_miss.misses());
 
-        let capacity = after_hit.entry_capacity();
-        for degeneracy in 0..capacity {
-            let other = FusionTreeHomSpace::from_sectors(
-                [(u1(0), degeneracy + 10)],
-                [(u1(0), 1)],
-            );
+        // Admit distinct neighbours until the first eviction, whichever bound
+        // binds; FIFO makes `hom`, the oldest admission, its victim.
+        let mut degeneracy = 10;
+        while complete_hom_space_structure_cache_info().evictions() == after_hit.evictions() {
+            let other = FusionTreeHomSpace::from_sectors([(u1(0), degeneracy)], [(u1(0), 1)]);
             finalize_complete(&U1FusionRule, &other).unwrap();
+            degeneracy += 1;
+            assert!(degeneracy <= after_hit.entry_capacity() + 10);
         }
         let filled = complete_hom_space_structure_cache_info();
-        assert!(filled.evictions() > after_hit.evictions());
+        assert_eq!(filled.evictions(), after_hit.evictions() + 1);
 
         drop((first, second));
         reset_coupled_grid_build_observations();
@@ -11300,6 +11301,87 @@ mod tests {
         assert_eq!(cleared.admissions(), 0);
         assert_eq!(cleared.evictions(), 0);
         assert_eq!(cleared.bypasses(), 0);
+    }
+
+    #[test]
+    fn complete_homspace_layout_cache_bounds_bind_by_bytes_and_bypass_outliers() {
+        // What: at the production bounds the byte budget, not the entry cap,
+        // evicts first for entries of the smallest measured median size
+        // (4455 bytes, #1365 census); the budget holds two maximum-size
+        // entries; an entry above the limit is returned uncached, one at the
+        // limit is retained; the global cache reports these bounds and reset
+        // zeroes only its activity.
+        let hom = FusionTreeHomSpace::from_sectors(
+            [(u1(0), 1)],
+            Vec::<(SectorId, usize)>::new(),
+        );
+        let structure = BlockStructure::trivial(&[1]).unwrap().into_shared();
+        let key = || {
+            Arc::new(CompleteHomSpaceStructureCacheKey {
+                rule: RuleIdentity::new_unique::<usize>(),
+                homspace: Arc::clone(&hom.content),
+            })
+        };
+        let mut cache = CompleteHomSpaceStructureCache::new(
+            COMPLETE_HOM_SPACE_STRUCTURE_CACHE_CAP,
+            COMPLETE_HOM_SPACE_STRUCTURE_CACHE_BYTE_BUDGET,
+            COMPLETE_HOM_SPACE_STRUCTURE_CACHE_MAX_ENTRY_BYTES,
+        );
+        let typical = 4455;
+        let fits = COMPLETE_HOM_SPACE_STRUCTURE_CACHE_BYTE_BUDGET / typical;
+        assert!(fits < COMPLETE_HOM_SPACE_STRUCTURE_CACHE_CAP);
+        for _ in 0..fits {
+            cache.admit_built(key(), Arc::clone(&structure), typical);
+        }
+        assert_eq!(cache.info().evictions(), 0);
+        cache.admit_built(key(), Arc::clone(&structure), typical);
+        let info = cache.info();
+        assert_eq!(info.evictions(), 1);
+        assert_eq!(info.entries(), fits);
+        assert!(info.charged_bytes() <= info.byte_budget());
+
+        let outlier = key();
+        let returned = cache.admit_built(
+            Arc::clone(&outlier),
+            Arc::clone(&structure),
+            COMPLETE_HOM_SPACE_STRUCTURE_CACHE_MAX_ENTRY_BYTES + 1,
+        );
+        assert!(Arc::ptr_eq(&returned, &structure));
+        assert!(cache.peek_counting_hit(&outlier).is_none());
+        assert_eq!(cache.info().bypasses(), 1);
+        cache.clear();
+        let at_limit = [key(), key()];
+        for limit_key in &at_limit {
+            cache.admit_built(
+                Arc::clone(limit_key),
+                Arc::clone(&structure),
+                COMPLETE_HOM_SPACE_STRUCTURE_CACHE_MAX_ENTRY_BYTES,
+            );
+        }
+        assert!(at_limit
+            .iter()
+            .all(|limit_key| cache.peek_counting_hit(limit_key).is_some()));
+        assert_eq!((cache.info().evictions(), cache.info().bypasses()), (0, 0));
+
+        let _guard = test_support::CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reset_core_intern_tables();
+        let global = complete_hom_space_structure_cache_info();
+        assert_eq!(global.entry_capacity(), 1024);
+        assert_eq!(global.byte_budget(), 4 * 1024 * 1024);
+        assert_eq!(
+            global.max_entry_bytes(),
+            COMPLETE_HOM_SPACE_STRUCTURE_CACHE_MAX_ENTRY_BYTES
+        );
+        assert_eq!(
+            (global.entries(), global.charged_bytes(), global.hits(), global.misses()),
+            (0, 0, 0, 0)
+        );
+        assert_eq!(
+            (global.admissions(), global.evictions(), global.bypasses()),
+            (0, 0, 0)
+        );
     }
 
     #[test]
