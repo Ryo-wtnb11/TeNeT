@@ -110,6 +110,13 @@ fn parallel_copy_matches_oracle_without_caller_allocations() {
         .num_threads(4)
         .build()
         .unwrap();
+    // Why not count from the first install: std's pthread `Condvar` boxes its
+    // OS condvar on its first `wait`, so a worker that parks for the first
+    // time inside the counted join allocates once. That is thread start-up,
+    // not replay; letting the idle pool park every worker settles it.
+    // ponytail: a 100 ms idle window, not a handshake; rayon does not expose
+    // whether a worker has parked.
+    std::thread::sleep(std::time::Duration::from_millis(100));
     for conjugate in [false, true] {
         let (dst, allocations) = pool.install(|| {
             assert_eq!(rayon::current_num_threads(), 4);
