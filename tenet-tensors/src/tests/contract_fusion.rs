@@ -690,13 +690,14 @@ fn tensorcontract_fusion_su2_swap_matches_explicit_permute_then_compose() {
             // The compiled artifact and the direct plan replay are two
             // executors of one plan whose SU2 recoupling sums may associate
             // differently, so their agreement is checked under the tolerance
-            // rule (terms bounded by the operand length). Profiling replays
+            // rule (terms bounded by len(lhs) * len(rhs), which covers the recoupled
+            // trees as well as the contracted length). Profiling replays
             // the same artifact and stays exact.
             numerics::assert_slices_close(
                 "compiled artifact vs direct plan replay",
                 artifact.data(),
                 actual.data(),
-                lhs.data().len(),
+                lhs.data().len() * rhs.data().len(),
             );
             assert_eq!(profiled.data(), artifact.data());
             for (&actual, &expected) in artifact.data().iter().zip(dst_compose.data()) {
@@ -1869,14 +1870,14 @@ fn crossed_axis_selection_preserves_asymmetric_fz2_u1_su2_result() {
             // half-spin product sector.
             assert_eq!(artifact.structure(), dst.structure());
             // Path-to-path agreement of two executors of one plan with SU2
-            // recoupling, under the tolerance rule (terms bounded by the
-            // operand length); the profiled replay of the same artifact stays
+            // recoupling, under the tolerance rule (terms bounded by
+            // len(lhs) * len(rhs), recoupled trees included); the profiled replay of the same artifact stays
             // exact.
             numerics::assert_slices_close(
                 "compiled artifact vs direct plan replay",
                 artifact.data(),
                 dst.data(),
-                lhs.data().len(),
+                lhs.data().len() * rhs.data().len(),
             );
             assert_eq!(profiled.data(), artifact.data());
             outputs.push(dst);
@@ -8461,8 +8462,14 @@ fn nested_product_lowered_dynamic_execution_matches_independent_encoded_oracles(
             .unwrap();
         // The encoded layout is the independent oracle for the lowered one;
         // SU2 recoupling makes the sums order-dependent, so the comparison
-        // uses the tolerance rule (terms bounded by the operand length).
-        numerics::assert_slices_close("lowered vs encoded", &lowered, &encoded, lhs_data.len());
+        // uses the tolerance rule (terms bounded by len(lhs) * len(rhs), which covers the recoupled
+        // trees as well as the contracted length).
+        numerics::assert_slices_close(
+            "lowered vs encoded",
+            &lowered,
+            &encoded,
+            lhs_data.len() * rhs_data.len(),
+        );
         let cold_misses = lowered_context.dynamic_fusion_space_cache_misses();
         let cold_hits = lowered_context.dynamic_fusion_space_cache_hits();
         assert!(cold_misses >= 3);
@@ -8580,7 +8587,7 @@ fn nested_product_lowered_dynamic_execution_matches_independent_encoded_oracles(
             "encoded lazy adjoint vs eager adjoint oracle",
             &encoded_lazy,
             &eager,
-            lhs_data.len(),
+            lhs_data.len() * rhs_data.len(),
         );
 
         reset_global_operation_caches();
@@ -8609,7 +8616,7 @@ fn nested_product_lowered_dynamic_execution_matches_independent_encoded_oracles(
             "lowered lazy adjoint vs eager adjoint oracle",
             &lazy,
             &eager,
-            lhs_data.len(),
+            lhs_data.len() * rhs_data.len(),
         );
         let cold_misses = lazy_context.dynamic_fusion_space_cache_misses();
         let cold_hits = lazy_context.dynamic_fusion_space_cache_hits();

@@ -4610,10 +4610,24 @@ fn eager_su2_dense_tree_pair_plan_matches_legacy_replay() {
     let direct =
         build_tree_pair_transform_group_plan(&SU2FusionRule, operation, &structure).unwrap();
     // The per-source core oracle and the prepared lowering compute the F-move
-    // coefficients by different routes, so keys and axes match exactly and the
-    // coefficients within the tolerance rule (a rank-4 recoupling chain).
+    // coefficients by different routes, so the entry form, keys and axes
+    // match exactly and the coefficients within the tolerance rule (a rank-4
+    // recoupling chain).
     assert_eq!(direct.specs().len(), legacy.specs().len());
+    // The Single/Multi entry form is private to tenet-operations; its Debug
+    // tag is the only test-visible witness, and it is compared, not parsed.
+    let entry_form = |spec: &dyn std::fmt::Debug| {
+        let text = format!("{spec:?}");
+        if text.contains("entries: Single") {
+            "Single"
+        } else if text.contains("entries: Multi") {
+            "Multi"
+        } else {
+            panic!("unrecognized spec entry form: {text}")
+        }
+    };
     for (actual, expected) in direct.specs().iter().zip(legacy.specs()) {
+        assert_eq!(entry_form(actual), entry_form(expected));
         assert_eq!(actual.group_key(), expected.group_key());
         assert_eq!(actual.src_keys(), expected.src_keys());
         assert_eq!(actual.dst_keys(), expected.dst_keys());

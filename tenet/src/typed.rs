@@ -25895,13 +25895,10 @@ mod representation_gates {
             .unwrap_or_else(|error| panic!("{label} overwrite failed: {error:?}"));
         }
 
-        // Owned and destination routes of one contraction; `terms` is the
-        // contracted length (the product of the contracted legs' degeneracies).
-        let lhs_legs: Vec<_> = lhs.codomain().into_iter().chain(lhs.domain()).collect();
-        let terms = lhs_axes
-            .iter()
-            .map(|&axis| lhs_legs[axis].degeneracies().iter().sum::<usize>())
-            .product();
+        // Owned and destination routes of one contraction. An entry is
+        // bilinear in the operands, so `len(lhs) * len(rhs)` bounds its
+        // terms, recoupled fusion trees (the cu1 output order) included.
+        let terms = lhs.data().len() * rhs.data().len();
         crate::test_numerics::numerics::assert_slices_close(
             label,
             destination.data(),

@@ -158,8 +158,9 @@ impl DoubleDouble {
 }
 
 /// `sum_k weight_k * x_k * y_k` over complex operands, accumulated exactly
-/// enough to serve as the oracle (`weight` is a small integer quantum
-/// dimension, so `weight * x` is exact).
+/// enough to serve as the oracle. `weight` is an integer quantum dimension:
+/// `weight * x` is exact for the dyadic weights 1 and 2 and rounds once for
+/// others (SU(3)'s 27), well inside the bound.
 fn oracle_dot(terms: impl IntoIterator<Item = (f64, Complex64, Complex64)>) -> Complex64 {
     let (mut re, mut im) = (DoubleDouble::default(), DoubleDouble::default());
     for (weight, x, y) in terms {

@@ -39,8 +39,8 @@ use std::sync::Arc;
 
 use num_complex::{Complex32, Complex64};
 use tenet::core::{
-    product_sector, FermionParityFusionRule, ProductFusionRuleExt, SU2FusionRule, SU2Irrep,
-    U1FusionRule, U1Irrep, Z2Irrep,
+    product_sector, FermionParityFusionRule, ProductFusionRuleExt, ProductSector, SU2FusionRule,
+    SU2Irrep, U1FusionRule, U1Irrep, Z2Irrep,
 };
 use tenet::prelude::{Error, Runtime, TensorMap, Truncation};
 use tenet::typed::{
@@ -117,13 +117,36 @@ macro_rules! assert_same_layout {
 }
 
 /// `dim(c)` of one sector, read from a one-sector space of degeneracy 1.
-macro_rules! quantum_dim {
-    ($leg:expr, $sector:expr) => {
-        GradedSpace::try_new($leg.provider().clone(), [($sector.clone(), 1)])
-            .unwrap()
-            .dim()
-            .unwrap()
-    };
+/// Closed-form quantum dimension of each sector type this file uses, so the
+/// discarded-weight oracle does not read `dim(c)` back from TeNeT: 1 for the
+/// abelian labels, `2j + 1` for SU(2), the product of the parts for a
+/// product sector.
+trait ClosedFormDim {
+    fn closed_form_dim(&self) -> f64;
+}
+
+impl ClosedFormDim for U1Irrep {
+    fn closed_form_dim(&self) -> f64 {
+        1.0
+    }
+}
+
+impl ClosedFormDim for Z2Irrep {
+    fn closed_form_dim(&self) -> f64 {
+        1.0
+    }
+}
+
+impl ClosedFormDim for SU2Irrep {
+    fn closed_form_dim(&self) -> f64 {
+        (self.twice_spin() + 1) as f64
+    }
+}
+
+impl<L: ClosedFormDim, R: ClosedFormDim> ClosedFormDim for ProductSector<L, R> {
+    fn closed_form_dim(&self) -> f64 {
+        self.left().closed_form_dim() * self.right().closed_form_dim()
+    }
 }
 
 /// Independent oracle for `TruncatedSelection::error`: the quantum-dimension
@@ -138,7 +161,7 @@ macro_rules! discarded_norm {
                 .iter()
                 .position(|sector| *sector == entry.sector)
                 .map_or(0, |index| kept.degeneracies()[index]);
-            let weight = quantum_dim!($bond, entry.sector);
+            let weight = ClosedFormDim::closed_form_dim(&entry.sector);
             for &value in &entry.values[prefix..] {
                 let magnitude = SpectrumMagnitude::magnitude(value);
                 sum += weight * magnitude * magnitude;

@@ -6494,12 +6494,11 @@ fn assert_nonzero(what: &str, data: &[f64]) {
     );
 }
 
-/// Upper bound on the length of any reduced-block sum over `legs`: the
-/// product of each leg's total degeneracy.
-fn contracted_terms<R>(legs: &[GradedSpace<R>]) -> usize {
-    legs.iter()
-        .map(|leg| leg.degeneracies().iter().sum::<usize>())
-        .product()
+/// Upper bound on the floating terms reaching one entry of a contraction,
+/// recoupled fusion trees included: an entry is bilinear in the operands, so
+/// it has at most `len(lhs) * len(rhs)` distinct products.
+fn bilinear_terms<R>(lhs: &TensorMap<R, f64>, rhs: &TensorMap<R, f64>) -> usize {
+    lhs.data().len() * rhs.data().len()
 }
 
 /// Contract, compose, and compact-SVD laws shared by all three provider families.
@@ -6536,8 +6535,8 @@ fn assert_contract_compose_compact_laws_hold<R>(
     assert_same_legs(&ordered_contract.codomain(), &permuted_default.codomain());
     assert_same_legs(&ordered_contract.domain(), &permuted_default.domain());
     // Routes that may recouple and accumulate in different orders: agreement
-    // within the tolerance rule is the law. `terms` is the contracted length.
-    let terms = contracted_terms(&typed.0.domain());
+    // within the tolerance rule is the law, with the bilinear `terms` bound.
+    let terms = bilinear_terms(typed.0, typed.1);
     numerics::assert_slices_close(
         &format!("{what}: order"),
         ordered_contract.data(),
@@ -6709,8 +6708,8 @@ fn the_fermionic_product_compose_is_contract_against_a_twisted_right_operand() {
     .unwrap();
 
     // The two routes may accumulate in different orders; within the tolerance
-    // rule, `terms` being the contracted length.
-    let terms = contracted_terms(&fermionic_a.domain());
+    // rule, with the bilinear `terms` bound.
+    let terms = bilinear_terms(&fermionic_a, &fermionic_b);
     numerics::assert_slices_close(
         "fZ2 x U1 x SU2: compose is contract against the twisted right operand",
         fermionic_a.compose(&fermionic_b).unwrap().data(),
@@ -6739,7 +6738,7 @@ fn the_fermionic_product_compose_is_contract_against_a_twisted_right_operand() {
             .unwrap()
             .data(),
         bosonic_a.compose(&bosonic_b).unwrap().data(),
-        contracted_terms(&bosonic_a.domain()),
+        bilinear_terms(&bosonic_a, &bosonic_b),
     );
 }
 

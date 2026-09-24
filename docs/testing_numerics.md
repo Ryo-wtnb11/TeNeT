@@ -35,11 +35,15 @@ the rule of `tenet/tests/single_precision_oracle/mod.rs`:
 
 - `eps` is `f32::EPSILON` for `f32`/`Complex32` and `f64::EPSILON` for
   `f64`/`Complex64`; complex values are compared by the modulus of the error;
-- `terms` is the number of floating terms that reach one compared entry
-  (the contracted length of a GEMM, the length of a reduction). When the
-  exact count depends on recoupling, use a bound computed from the fixture
-  shape (for example the product of the contracted legs' degeneracies) and
-  say so at the call site;
+- `terms` is an upper bound on the number of floating terms that reach one
+  compared entry, including every recoupled fusion-tree term, not only the
+  GEMM length. For a symmetric contraction it is the contracted inner
+  dimension of the coupled block (inner fusion trees times degeneracies)
+  times the number of source trees recoupled into one output entry. When
+  that count is impractical, `len(lhs) * len(rhs)` is always valid, because
+  an entry is bilinear in the operands; a linear operation (permute, trace,
+  transform) is bounded by the source length. State the bound at the call
+  site;
 - `scale` is the largest oracle magnitude.
 
 Factorizations and other results whose error grows with conditioning pass an
