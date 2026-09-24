@@ -2319,7 +2319,8 @@ mod tests {
     }
 
     /// Layouts of the given shape: column-major, reversed axis order,
-    /// negative strides, and a stride-0 (broadcast) source axis. Returns
+    /// negative strides, a stride-0 (broadcast) source axis, and a separated
+    /// but padded destination (column-major over extents `dim + 1`). Returns
     /// `(dst_strides, dst_offset, src_strides, src_offset)` with offsets
     /// making every reachable index nonnegative.
     fn layouts(shape: &[usize]) -> Vec<(Vec<isize>, isize, Vec<isize>, isize)> {
@@ -2350,6 +2351,15 @@ mod tests {
                 .collect();
             (strides, offset)
         };
+        let padded = {
+            let mut strides = vec![0isize; shape.len()];
+            let mut stride = 1isize;
+            for (axis, slot) in strides.iter_mut().enumerate() {
+                *slot = stride;
+                stride *= shape[axis] as isize + 1;
+            }
+            strides
+        };
         let (negative, negative_offset) = negate_even(&column_major(&forward));
         let mut broadcast = column_major(&reverse);
         if let Some(first) = broadcast.first_mut() {
@@ -2360,6 +2370,7 @@ mod tests {
             (column_major(&forward), 0, column_major(&reverse), 0),
             (column_major(&reverse), 0, negative.clone(), negative_offset),
             (negative, negative_offset, broadcast, 0),
+            (padded, 0, column_major(&reverse), 0),
         ]
     }
 
@@ -2387,7 +2398,8 @@ mod tests {
         }
         actions.push(RawStridedAction::Axpy { alpha: one });
         for shape in &shapes {
-            let len = shape.iter().product::<usize>().max(1);
+            // Covers the padded destination, whose extents are `dim + 1`.
+            let len = shape.iter().map(|&dim| dim + 1).product::<usize>();
             for (dst_strides, dst_offset, src_strides, src_offset) in layouts(shape) {
                 for &action in &actions {
                     for conjugate in [false, true] {

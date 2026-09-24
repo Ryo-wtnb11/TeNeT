@@ -90,3 +90,67 @@ fn raw_combine_actions_allocate_nothing_at_any_rank() {
         }
     }
 }
+
+#[test]
+fn parallel_copy_matches_oracle_without_caller_allocations() {
+    // What: a transposed 256 x 512 copy (131072 elements, above Strided's
+    // 32768-element parallel threshold), plain and conjugating, run inside an
+    // explicit 4-thread Rayon pool so `CopyPlan` fans out. Every element
+    // equals the transposed (conjugated) source bit for bit, and the thread
+    // running the call allocates nothing once warm.
+    let (rows, cols) = (256usize, 512usize);
+    let len = rows * cols;
+    let shape = [rows, cols];
+    let dst_strides = [1isize, rows as isize];
+    let src_strides = [cols as isize, 1];
+    let src: Vec<Complex64> = (0..len)
+        .map(|i| Complex64::new(i as f64 + 0.25, -(i as f64) - 0.5))
+        .collect();
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(4)
+        .build()
+        .unwrap();
+    for conjugate in [false, true] {
+        let (dst, allocations) = pool.install(|| {
+            assert_eq!(rayon::current_num_threads(), 4);
+            let mut dst = vec![Complex64::new(0.0, 0.0); len];
+            let mut zero_strides = Vec::new();
+            let mut run = |dst: &mut [Complex64]| {
+                tensoradd_raw_strided_kernel(
+                    &mut zero_strides,
+                    black_box(dst),
+                    black_box(&src),
+                    &shape,
+                    &dst_strides,
+                    &src_strides,
+                    0,
+                    0,
+                    conjugate,
+                    Complex64::new(1.0, 0.0),
+                    Complex64::new(0.0, 0.0),
+                )
+                .unwrap()
+            };
+            run(&mut dst);
+            dst.fill(Complex64::new(0.0, 0.0));
+            ALLOCATIONS.set(0);
+            COUNTING.set(true);
+            run(&mut dst);
+            COUNTING.set(false);
+            (dst, ALLOCATIONS.get())
+        });
+        assert_eq!(allocations, 0, "conj {conjugate}");
+        for col in 0..cols {
+            for row in 0..rows {
+                let source = src[row * cols + col];
+                let want = if conjugate { source.conj() } else { source };
+                let got = dst[row + col * rows];
+                assert_eq!(
+                    (got.re.to_bits(), got.im.to_bits()),
+                    (want.re.to_bits(), want.im.to_bits()),
+                    "conj {conjugate} ({row}, {col})"
+                );
+            }
+        }
+    }
+}
