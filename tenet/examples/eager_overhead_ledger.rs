@@ -2,9 +2,11 @@
 //! (#1313): warm per-call minimum/median and allocation calls/bytes for
 //! `compose`, `contract`, `permute`, `repartition`, `qr_compact`,
 //! `svd_compact`, `restrict_leg`, `scale`, `add`, and `norm` over U(1), fZ2×U(1), and SU(2),
-//! `f64` and `Complex64`, ranks 2–5. Two lazy-adjoint rows follow them:
-//! `add_adjoint` (`a.adjoint() + b` on the adjoint space) and `adjoint_data`
-//! (a fresh `a.adjoint()` and its first `data()`, which materializes it).
+//! `f64` and `Complex64`, ranks 2–5. Four lazy-adjoint rows follow them:
+//! `add_adjoint` (`a.adjoint() + b` on the adjoint space), `adjoint_data`
+//! (a fresh `a.adjoint()` and its first `data()`, which materializes it), and
+//! `contract_conj` / `compose_conj` (`contract` / `compose` with the lazy
+//! `a.adjoint()` as the conjugated left operand).
 //!
 //! ```text
 //! cargo run --release --example eager_overhead_ledger -- [filter ...]
@@ -335,6 +337,14 @@ macro_rules! ledger {
             });
             run_op(config, &prefix, "adjoint_data", || {
                 black_box(&a).adjoint().unwrap().data().len()
+            });
+            run_op(config, &prefix, "contract_conj", || {
+                black_box(&lazy)
+                    .contract(&matrix, &[0], &[1], &open)
+                    .unwrap()
+            });
+            run_op(config, &prefix, "compose_conj", || {
+                black_box(&lazy).compose(&a2).unwrap()
             });
         }
     }};
