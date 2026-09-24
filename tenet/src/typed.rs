@@ -228,7 +228,8 @@ use tenet_dense::{
 #[cfg(feature = "cuda")]
 use tenet_operations::{CudaTreeTransformDestination, StorageGemm};
 use tenet_tensors::{
-    expand_physical_host, project_physical_host, tensorcontract_owned_checked_generic_in_context,
+    expand_physical_host, project_physical_host, tensorcompose_owned_checked_generic_in_context,
+    tensorcontract_owned_checked_generic_in_context,
     tree_transform_dyn_owned_checked_generic_input_in_context, BoundDynamicFusionMapSpace,
     BoundDynamicTensorRef, CheckedTreeTransformInput, DynamicFusionMapSpace, OutputAxisOrder,
     OwnedCatCopy, OwnedCatSide, TensorContractSpec, TreeTransformOperation,
@@ -7809,18 +7810,41 @@ where
         lhs: &TensorMap<R, D>,
         rhs: &TensorMap<R, D>,
     ) -> Result<TensorMap<R, D>, Self::FacadeError> {
-        let lhs_axes = (lhs.codomain_rank()..lhs.rank()).collect::<Vec<_>>();
-        let rhs_axes = (0..rhs.codomain_rank()).collect::<Vec<_>>();
         // The canonical axes need no braid, so composition bypasses
-        // `contract`'s symmetric-braiding boundary (TensorKit `mul!`).
-        contract_checked_generic(
-            lhs,
-            rhs,
-            &lhs_axes,
-            &rhs_axes,
-            &(0..lhs.codomain_rank() + rhs.domain_rank()).collect::<Vec<_>>(),
-        )
+        // `contract`'s braiding boundaries (TensorKit `mul!`).
+        let (lhs_body, rhs_body) = checked_generic_owned_bodies(lhs, rhs)?;
+        let mut lease = lhs.runtime.lease_context()?;
+        let (space, data) = tensorcompose_owned_checked_generic_in_context(
+            lease.context().generic_lane::<D>()?,
+            &lhs_body.space,
+            lhs_body.materialized_dense_data(),
+            &rhs_body.space,
+            rhs_body.materialized_dense_data(),
+        )?;
+        Ok(TensorMap {
+            runtime: lhs.runtime.clone(),
+            repr: owned_repr(TypedTensorBody::dense(space, data)),
+        })
     }
+}
+
+#[allow(clippy::type_complexity)]
+fn checked_generic_owned_bodies<'a, R, D>(
+    lhs: &'a TensorMap<R, D>,
+    rhs: &'a TensorMap<R, D>,
+) -> Result<(&'a TypedTensorBody<R, D>, &'a TypedTensorBody<R, D>), Error>
+where
+    R: TypedSectorAdmission,
+    D: TensorScalar,
+{
+    let (TypedTensorRepr::Owned(lhs_body), TypedTensorRepr::Owned(rhs_body)) =
+        (&lhs.repr, &rhs.repr)
+    else {
+        return Err(Error::InvalidArgument(
+            "checked Generic contraction currently requires direct owned tensors".to_string(),
+        ));
+    };
+    Ok((lhs_body, rhs_body))
 }
 
 fn contract_checked_generic<R, D>(
@@ -7837,14 +7861,7 @@ where
         > + CheckedGenericRigidSymbols<Scalar = f64>,
     D: TensorScalar,
 {
-    let (TypedTensorRepr::Owned(lhs_body), TypedTensorRepr::Owned(rhs_body)) =
-        (&lhs.repr, &rhs.repr)
-    else {
-        return Err(Error::InvalidArgument(
-            "checked Generic contraction currently requires direct owned tensors".to_string(),
-        )
-        .into());
-    };
+    let (lhs_body, rhs_body) = checked_generic_owned_bodies(lhs, rhs)?;
     let mut lease = lhs.runtime.lease_context()?;
     let (space, data) = tensorcontract_owned_checked_generic_in_context(
         lease.context().generic_lane::<D>()?,

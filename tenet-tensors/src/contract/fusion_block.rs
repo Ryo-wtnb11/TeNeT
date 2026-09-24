@@ -2081,8 +2081,9 @@ where
     )
 }
 
-/// Compiles the coefficient-free Bosonic Generic core GEMM against staged,
-/// uncommitted structures.
+/// Compiles the coefficient-free Generic core GEMM against staged,
+/// uncommitted structures. The core form crosses no legs, so braiding
+/// admission belongs to the caller that stages source and output transforms.
 ///
 /// The caller owns categorical validation and exact HomSpace derivation. This
 /// leaf only validates the preselected core geometry and compiles the existing
@@ -2783,11 +2784,10 @@ impl FusionBlockMatrixGroupBuilder {
                 .and_then(|offset| offset.checked_add(row.offset))
                 .ok_or(OperationError::ElementCountOverflow)?;
             let matrix_offset = offset_to_isize(matrix_offset)?;
-            // SU(N) bosonic: no supertrace twist → coefficient 1.0 (TensorKit
-            // mul! parity, matching the mult-free `R::Scalar::one()`). This
-            // assumes a bosonic rule; `compile_fusion_block_contract_plan_generic`
-            // guards the entry against non-bosonic rules so that assumption is
-            // never silently violated here.
+            // The core form glues lhs.domain to rhs.codomain without crossing
+            // legs, so no braid, twist, or supertrace sign enters for any
+            // braiding style: the coefficient is 1 (TensorKit `mul!`). Any
+            // leg crossing belongs to a staged source or output transform.
             let coefficient = C::one();
             subblocks.push(FusionSubblockMatrixLayout {
                 block: FusionStridedBlockLayout {

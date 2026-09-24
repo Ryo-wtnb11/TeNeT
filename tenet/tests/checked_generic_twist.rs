@@ -890,19 +890,215 @@ fn sun_checked_generic_flip_preserves_full_key_layout_and_inverse_roundtrip() {
     });
 }
 
+type TreeKey = (Label, Vec<Label>, Vec<Label>, Vec<usize>);
+
+/// Every block as `(codomain tree, domain tree, shape, row-major values)`.
+fn tree_blocks<D>(
+    tensor: &TensorMap<CheckedPivotalToy, D>,
+) -> Vec<(TreeKey, TreeKey, Vec<usize>, Vec<D>)>
+where
+    D: TensorScalar,
+{
+    (0..tensor.block_count())
+        .map(|index| {
+            let block = tensor.block(index).unwrap();
+            let trees = tensor.block_fusion_trees(index).unwrap();
+            let codomain = (
+                *trees.coupled(),
+                trees.codomain_uncoupled().to_vec(),
+                trees.codomain_innerlines().to_vec(),
+                trees.codomain_vertices().iter().map(|m| m.get()).collect(),
+            );
+            let domain = (
+                *trees.coupled(),
+                trees.domain_uncoupled().to_vec(),
+                trees.domain_innerlines().to_vec(),
+                trees.domain_vertices().iter().map(|m| m.get()).collect(),
+            );
+            let shape = block.shape().to_vec();
+            let len = shape.iter().product::<usize>();
+            let values = (0..len)
+                .map(|linear| {
+                    let (mut remainder, mut position) = (linear, block.offset());
+                    for (&extent, &stride) in shape.iter().zip(block.strides()).rev() {
+                        position += (remainder % extent) * stride;
+                        remainder /= extent;
+                    }
+                    tensor.data()[position]
+                })
+                .collect();
+            (codomain, domain, shape, values)
+        })
+        .collect()
+}
+
+/// Hand oracle for canonical composition in the fusion-tree basis:
+/// `C[f1, f2][i, k] = sum_{t, j} A[f1, t][i, j] * B[t, f2][j, k]`, summed over
+/// every middle tree `t` (inner lines and vertex labels included) and its
+/// degeneracy multi-index `j`. No braid, twist, or sign enters.
+fn assert_compose_oracle<D>(
+    lhs: &TensorMap<CheckedPivotalToy, D>,
+    rhs: &TensorMap<CheckedPivotalToy, D>,
+    actual: &TensorMap<CheckedPivotalToy, D>,
+) where
+    D: TensorScalar + Into<Complex64>,
+{
+    let (lhs_nout, rhs_nout) = (lhs.codomain_rank(), rhs.codomain_rank());
+    let (lhs_blocks, rhs_blocks) = (tree_blocks(lhs), tree_blocks(rhs));
+    let actual_blocks = tree_blocks(actual);
+    assert!(actual_blocks.len() >= 2);
+    let mut nonzero = 0;
+    for (f1, f2, shape, values) in &actual_blocks {
+        let (rows, cols) = (
+            shape[..lhs_nout].iter().product::<usize>(),
+            shape[lhs_nout..].iter().product::<usize>(),
+        );
+        let mut expected = vec![Complex64::new(0.0, 0.0); rows * cols];
+        for (a1, t, a_shape, a) in &lhs_blocks {
+            if a1 != f1 {
+                continue;
+            }
+            for (t2, b2, b_shape, b) in &rhs_blocks {
+                if t2 != t || b2 != f2 {
+                    continue;
+                }
+                let middle = b_shape[..rhs_nout].iter().product::<usize>();
+                assert_eq!(middle, a_shape[lhs_nout..].iter().product::<usize>());
+                for i in 0..rows {
+                    for k in 0..cols {
+                        for j in 0..middle {
+                            expected[i * cols + k] +=
+                                a[i * middle + j].into() * b[j * cols + k].into();
+                        }
+                    }
+                }
+            }
+        }
+        nonzero += usize::from(expected.iter().any(|value| value.norm() != 0.0));
+        for (&got, want) in values.iter().zip(&expected) {
+            let got: Complex64 = got.into();
+            assert!(
+                (got - want).norm() <= 1e-12 * (1.0 + want.norm()),
+                "{got} != {want}"
+            );
+        }
+    }
+    // An empty middle reaches only the unit coupled sector; every other
+    // destination block must stay zero, which the value check above proves.
+    assert!(nonzero > 0);
+}
+
+fn assert_compose_any_braiding<D>(
+    braiding: BraidingStyleKind,
+    tag: u8,
+    value: impl Fn(usize) -> D + Copy,
+) where
+    D: TensorScalar + tenet::prelude::AdvancedLinalgScalar + Into<Complex64>,
+{
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedPivotalToy::new(tag, braiding, -1.0));
+    let v = GradedSpace::try_new_with_arc(Arc::clone(&provider), [(Label::Unit, 1), (Label::X, 2)])
+        .unwrap();
+    let w = GradedSpace::try_new_with_arc(Arc::clone(&provider), [(Label::Unit, 2), (Label::X, 3)])
+        .unwrap();
+    let filled = |offset: usize,
+                  codomain: &[&GradedSpace<CheckedPivotalToy>],
+                  domain: &[&GradedSpace<CheckedPivotalToy>]| {
+        TensorMap::from_block_fn(
+            &runtime,
+            codomain.to_vec(),
+            domain.to_vec(),
+            |trees, indices| {
+                value(
+                    offset
+                        + tree_marker(trees)
+                        + indices
+                            .iter()
+                            .enumerate()
+                            .map(|(axis, index)| (axis + 1) * index)
+                            .sum::<usize>(),
+                )
+            },
+        )
+        .unwrap()
+    };
+    // A: V ⊗ W ← V and B: V ← V ⊗ W, so both A∘B (middle V) and B∘A
+    // (middle V ⊗ W, with the μ = 1, 2 vertices of X ⊗ X → X) are compositions.
+    let a = filled(0, &[&v, &w], &[&v]);
+    let b = filled(3, &[&v], &[&v, &w]);
+    // Dual legs in both middles: A': V ⊗ W* ← V* and B': V* ← V ⊗ W*.
+    let (v_dual, w_dual) = (v.try_dual().unwrap(), w.try_dual().unwrap());
+    let a_dual = filled(5, &[&v, &w_dual], &[&v_dual]);
+    let b_dual = filled(7, &[&v_dual], &[&v, &w_dual]);
+    // Empty middle (outer product through the unit): V ← () and () ← W.
+    let column = filled(11, &[&v], &[]);
+    let row = filled(13, &[], &[&w]);
+    let composed = |lhs: &TensorMap<CheckedPivotalToy, D>,
+                    rhs: &TensorMap<CheckedPivotalToy, D>| {
+        let composed = lhs
+            .compose(rhs)
+            .unwrap_or_else(|error| panic!("{braiding:?}: {error:?}"));
+        assert!(std::ptr::eq(composed.provider(), provider.as_ref()));
+        assert_eq!(composed.codomain(), lhs.codomain());
+        assert_eq!(composed.domain(), rhs.domain());
+        assert_compose_oracle(lhs, rhs, &composed);
+        composed
+    };
+    for (lhs, rhs) in [
+        (&a, &b),
+        (&b, &a),
+        (&a_dual, &b_dual),
+        (&b_dual, &a_dual),
+        (&column, &row),
+    ] {
+        composed(lhs, rhs);
+    }
+    // `powi(2)` is one self-composition of the endomorphism A∘B.
+    let endomorphism = composed(&a, &b);
+    let squared = endomorphism.powi(2).unwrap();
+    assert_compose_oracle(&endomorphism, &endomorphism, &squared);
+    // Composition is not a contraction over mismatched spaces, and a lazy
+    // adjoint operand stays outside this engine's direct-operand scope.
+    assert!(matches!(a.compose(&a), Err(GenericTensorError::Plan(_))));
+    assert!(matches!(
+        a.adjoint().unwrap().compose(&a),
+        Err(GenericTensorError::Facade(Error::InvalidArgument(_)))
+    ));
+}
+
 #[test]
-fn checked_generic_contract_requires_symmetric_braiding_before_the_engine() {
-    // What (#1372): the checked-Generic `contract` shares the ordinary
-    // contraction's symmetric-braiding boundary and error, canonical axes
-    // included, while `compose` does not route through it: its non-bosonic
-    // rejection is the checked-Generic engine's own Bosonic-only scope (a
-    // restriction of that engine, not of TensorKit `mul!`). The bosonic toy is
-    // the negative control, contracting and composing to the hand oracle.
+fn checked_generic_compose_admits_every_braiding_like_tensorkit_mul() {
+    // What (#1378): canonical composition glues lhs.domain to rhs.codomain
+    // without crossing legs, so it is blockwise matrix multiplication for
+    // every braiding style (TensorKit `mul!`), with outer degeneracies,
+    // several coupled sectors, multiplicity-two vertices, real and complex
+    // payloads. Bosonic is the unchanged control.
+    for (tag, braiding) in [
+        (30, BraidingStyleKind::NoBraiding),
+        (31, BraidingStyleKind::Anyonic),
+        (32, BraidingStyleKind::Fermionic),
+        (33, BraidingStyleKind::Bosonic),
+    ] {
+        assert_compose_any_braiding(braiding, tag, |marker| marker as f64 / 1000.0);
+        assert_compose_any_braiding(braiding, tag, |marker| {
+            Complex64::new(marker as f64 / 1000.0, -(marker as f64) / 7000.0)
+        });
+    }
+}
+
+#[test]
+fn checked_generic_contract_keeps_its_braiding_boundaries() {
+    // What (#1372, #1378): general `contract` shares the ordinary contraction's
+    // symmetric-braiding boundary, canonical axes included, and the checked
+    // Generic engine keeps Fermionic general contraction explicitly
+    // unsupported (it needs the supertrace twist). `compose` on the same
+    // operands succeeds for every style; bosonic contracts to the hand oracle.
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     for (tag, braiding) in [
         (20, BraidingStyleKind::NoBraiding),
         (21, BraidingStyleKind::Anyonic),
         (22, BraidingStyleKind::Bosonic),
+        (23, BraidingStyleKind::Fermionic),
     ] {
         let provider = Arc::new(CheckedPivotalToy::new(tag, braiding, 1.0));
         let unit =
@@ -914,45 +1110,35 @@ fn checked_generic_contract_requires_symmetric_braiding_before_the_engine() {
             .unwrap()
         };
         let (lhs, rhs) = (matrix(1.0), matrix(5.0));
+        // Hand oracle: the one block is [[1,2],[3,4]]·[[5,6],[7,8]].
+        let expected = TensorMap::from_block_fn(&runtime, [&unit], [&unit], |_, index| {
+            [[19.0, 22.0], [43.0, 50.0]][index[0]][index[1]]
+        })
+        .unwrap();
+        assert_eq!(lhs.compose(&rhs).unwrap().data(), expected.data());
         let contract = lhs.contract(&rhs, &[1], &[0], &[0, 1]);
-        let compose = lhs.compose(&rhs);
-        if braiding == BraidingStyleKind::Bosonic {
-            // Hand oracle: the one block is [[1,2],[3,4]]·[[5,6],[7,8]].
-            let expected = TensorMap::from_block_fn(&runtime, [&unit], [&unit], |_, index| {
-                [[19.0, 22.0], [43.0, 50.0]][index[0]][index[1]]
-            })
-            .unwrap();
-            assert_eq!(contract.unwrap().data(), expected.data());
-            assert_eq!(compose.unwrap().data(), expected.data());
-            continue;
-        }
+        let expected_message = match braiding {
+            BraidingStyleKind::Bosonic => {
+                assert_eq!(contract.unwrap().data(), expected.data());
+                continue;
+            }
+            BraidingStyleKind::Fermionic => "checked Generic contraction requires Bosonic braiding",
+            _ => tenet::typed::NON_SYMMETRIC_CONTRACTION_UNSUPPORTED,
+        };
+        let operation = match &contract {
+            Err(GenericTensorError::Facade(Error::Operation(operation))) => &**operation,
+            Err(GenericTensorError::Plan(CheckedGenericPlanError::Operation(operation))) => {
+                operation
+            }
+            other => panic!("{braiding:?}: {:?}", other.as_ref().err()),
+        };
         assert!(
             matches!(
-                &contract,
-                Err(GenericTensorError::Facade(Error::Operation(operation)))
-                    if matches!(
-                        **operation,
-                        tenet::operations::OperationError::UnsupportedTensorContractScope {
-                            message: tenet::typed::NON_SYMMETRIC_CONTRACTION_UNSUPPORTED
-                        }
-                    )
+                operation,
+                tenet::operations::OperationError::UnsupportedTensorContractScope { message }
+                    if *message == expected_message
             ),
-            "{braiding:?}: {:?}",
-            contract.err()
-        );
-        assert!(
-            matches!(
-                &compose,
-                Err(GenericTensorError::Plan(CheckedGenericPlanError::Operation(operation)))
-                    if !matches!(
-                        operation,
-                        tenet::operations::OperationError::UnsupportedTensorContractScope {
-                            message: tenet::typed::NON_SYMMETRIC_CONTRACTION_UNSUPPORTED
-                        }
-                    )
-            ),
-            "{braiding:?}: {:?}",
-            compose.err()
+            "{braiding:?}: {operation:?}"
         );
     }
 }

@@ -1,6 +1,5 @@
 mod block_specs;
 mod plan;
-#[cfg(test)]
 pub(crate) use plan::contracted_axis_order_candidates;
 #[cfg(test)]
 pub(crate) use plan::{

@@ -5,7 +5,8 @@ mod backend;
 mod checked_generic;
 #[doc(hidden)]
 pub use checked_generic::{
-    tensorcontract_owned_checked_generic, tensorcontract_owned_checked_generic_in_context,
+    tensorcompose_owned_checked_generic_in_context, tensorcontract_owned_checked_generic,
+    tensorcontract_owned_checked_generic_in_context,
 };
 mod context;
 mod dynamic;
