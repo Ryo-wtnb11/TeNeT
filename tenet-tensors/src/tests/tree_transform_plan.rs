@@ -2457,7 +2457,7 @@ fn runtime_bound_adjoint_oriented_projection_errors_match_the_local_path() {
         (&duplicate, &[1, 2]),
     ];
     for (logical_keys, storage_indices) in malformed {
-        let mut compile = |cache: &mut TreeTransformCache<f64, RuleIdentity>| {
+        let compile = |cache: &mut TreeTransformCache<f64, RuleIdentity>| {
             let error = cache
                 .get_or_compile_tree_pair_oriented(
                     &SU2FusionRule,
