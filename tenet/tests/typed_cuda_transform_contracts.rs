@@ -373,21 +373,25 @@ fn a_warm_device_overwrite_into_transfers_nothing_and_allocates_nothing() {
         "a warm overwrite grows no device state"
     );
 
-    // A zero caller scale takes the zero-operand route. Its 1x1 operand is
-    // element 0 of the context's zero template, so the *first* zero-scale
-    // replay on a context whose template is shorter than one element sizes it
-    // — one 8-byte upload and one device allocation, once per context, not per
-    // call. Warm, it transfers nothing like any other scale.
+    // A zero caller scale writes zero fills over the written layouts
+    // (#1438), reading the context's zero template, so the *first* zero-scale
+    // replay may size that template to the largest written layout and create
+    // the `1` operand — at most two uploads bounded by the destination, once
+    // per context, not per call. Warm, it transfers nothing.
     let (_, first_zero) = delta(|| {
         source
             .permute_overwrite_into(&mut destination, &[2, 0], &[1, 3], 0.0)
             .unwrap()
     });
+    let destination_len = fixture(&runtime)
+        .permute(&[2, 0], &[1, 3])
+        .unwrap()
+        .data()
+        .len();
+    let bound = ((destination_len + 1) * std::mem::size_of::<f64>()) as u64;
     assert!(
-        first_zero.h2d_calls <= 1
-            && first_zero.h2d_bytes <= std::mem::size_of::<f64>() as u64
-            && first_zero.device_allocs <= 1,
-        "the zero template is one element uploaded once, not a buffer: {first_zero:?}"
+        first_zero.h2d_calls <= 2 && first_zero.h2d_bytes <= bound && first_zero.device_allocs <= 2,
+        "the zero template is bounded by the destination and uploaded once: {first_zero:?}"
     );
     let (_, zero) = delta(|| {
         source

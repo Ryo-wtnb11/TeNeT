@@ -1126,17 +1126,20 @@ fn a_warm_single_precision_overwrite_into_transfers_nothing() {
             D::NAME
         );
 
-        // The zero-scale route sizes the context zero template once, to one
-        // element of *this* payload.
+        // The zero-scale route writes zero fills over the written layouts
+        // (#1438), so its first call may size the context zero template to
+        // the largest written layout and the `1` operand of *this* payload
+        // once: at most two uploads, bounded by the destination.
         let before = cuda_transfer_stats();
         device
             .permute_overwrite_into(&mut destination, &[1, 2], &[0], D::entry(0.0, 0.0))
             .unwrap();
         let after = cuda_transfer_stats();
+        let destination_len = host.permute(&[1, 2], &[0]).unwrap().data().len();
+        let bound = ((destination_len + 1) * std::mem::size_of::<D>()) as u64;
         assert!(
-            after.h2d_calls - before.h2d_calls <= 1
-                && after.h2d_bytes - before.h2d_bytes <= std::mem::size_of::<D>() as u64,
-            "the zero template [{}] is one element, not a buffer",
+            after.h2d_calls - before.h2d_calls <= 2 && after.h2d_bytes - before.h2d_bytes <= bound,
+            "the zero template [{}] is bounded by the destination, uploaded once",
             D::NAME
         );
 

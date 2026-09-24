@@ -559,16 +559,21 @@ impl CudaDenseContext {
     }
 
     /// Sizes this dtype's scaled template (see [`cuda_region_trace_accumulate`])
-    /// for `len` elements up front, so a trace with a non-unit scale uploads
-    /// nothing afterwards: a later change of scale is a device refill. Never
-    /// shrinks; reported and released with the other scalar operands.
+    /// for `len` elements up front, together with the ones template of the
+    /// same length it is refilled from, so a trace with a non-unit scale
+    /// uploads nothing afterwards: a later change of scale is a device
+    /// refill. Never shrinks; reported and released with the other scalar
+    /// operands.
     pub fn reserve_scaled_template<D: CudaScalar>(&mut self, len: usize) -> Result<(), DenseError> {
-        if len == 0
-            || self
-                .operands::<D>()
-                .scaled
-                .as_ref()
-                .is_some_and(|s| s.len() >= len)
+        if len == 0 {
+            return Ok(());
+        }
+        self.ensure_ones::<D>(len)?;
+        if self
+            .operands::<D>()
+            .scaled
+            .as_ref()
+            .is_some_and(|scaled| scaled.len() >= len)
         {
             return Ok(());
         }
