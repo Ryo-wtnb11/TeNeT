@@ -14,6 +14,9 @@ use tenet_network::{
     ContractionStep, GreedyDenseOptimizer, Network, PlanCacheConfig, TemporaryLabel, TensorId,
 };
 
+#[path = "../../tests/support/numerics.rs"]
+mod numerics;
+
 fn labels(names: &[&str]) -> Vec<TemporaryLabel> {
     names.iter().copied().map(TemporaryLabel::from).collect()
 }
@@ -61,11 +64,29 @@ where
     assert!(std::ptr::eq(actual.provider(), lhs_cuda.provider()));
     assert_eq!(actual.codomain(), host_oracle.codomain());
     assert_eq!(actual.domain(), host_oracle.domain());
+    // Device GEMM order is the kernel's, so device results agree with the
+    // host oracle (and the device manual contract) under the tolerance rule.
+    let terms = space.dim().unwrap().ceil() as usize;
     let actual_host = actual.to_host().unwrap();
-    assert_eq!(actual_host.data(), manual.to_host().unwrap().data());
-    assert_eq!(actual_host.data(), host_oracle.data());
-    assert_eq!(macro_actual.to_host().unwrap().data(), host_oracle.data());
-    assert_eq!(macro_warm.to_host().unwrap().data(), host_oracle.data());
+    let close = |what, got: &[f64], want: &[f64]| {
+        numerics::assert_slices_close(what, got, want, terms);
+    };
+    close(
+        "network vs device contract",
+        actual_host.data(),
+        manual.to_host().unwrap().data(),
+    );
+    close("network vs host", actual_host.data(), host_oracle.data());
+    close(
+        "macro vs host",
+        macro_actual.to_host().unwrap().data(),
+        host_oracle.data(),
+    );
+    close(
+        "warm macro vs host",
+        macro_warm.to_host().unwrap().data(),
+        host_oracle.data(),
+    );
     assert_eq!(macro_actual.placement(), lhs_cuda.placement());
     // The warm device replay reproduces the returning result exactly: identical
     // submissions to the same device kernels, so f64 is bitwise equal.
@@ -223,13 +244,20 @@ fn canonical_cuda_network_provider_matrix_chain_and_lazy_conj() {
         tensor!([a; d] = (tensors[0])[a; b] * (tensors[1])[b; c] * (tensors[2])[c; d]).unwrap();
     assert_eq!(actual.codomain(), manual.codomain());
     assert_eq!(actual.domain(), manual.domain());
-    assert_eq!(
+    // The planned chain, the macro and the chained device contract may order
+    // the two length-2 contractions differently: path agreement within the
+    // tolerance rule over 2 * 2 terms.
+    numerics::assert_slices_close(
+        "chain vs device contract",
         actual.to_host().unwrap().data(),
-        manual.to_host().unwrap().data()
+        manual.to_host().unwrap().data(),
+        4,
     );
-    assert_eq!(
+    numerics::assert_slices_close(
+        "chain macro vs device contract",
         chain_macro.to_host().unwrap().data(),
-        manual.to_host().unwrap().data()
+        manual.to_host().unwrap().data(),
+        4,
     );
     assert_eq!(chain_macro.placement(), tensors[0].placement());
 
@@ -255,13 +283,17 @@ fn canonical_cuda_network_provider_matrix_chain_and_lazy_conj() {
     let conj_macro = tensor!([i; j] = conj((tensors[0]))[k; i] * (tensors[1])[k; j]).unwrap();
     assert_eq!(conj_actual.codomain(), conj_manual.codomain());
     assert_eq!(conj_actual.domain(), conj_manual.domain());
-    assert_eq!(
+    numerics::assert_slices_close(
+        "conj network vs device contract",
         conj_actual.to_host().unwrap().data(),
-        conj_manual.to_host().unwrap().data()
+        conj_manual.to_host().unwrap().data(),
+        2,
     );
-    assert_eq!(
+    numerics::assert_slices_close(
+        "conj macro vs device contract",
         conj_macro.to_host().unwrap().data(),
-        conj_manual.to_host().unwrap().data()
+        conj_manual.to_host().unwrap().data(),
+        2,
     );
 
     let single = Network::new(
@@ -330,9 +362,13 @@ fn canonical_cuda_network_provider_matrix_chain_and_lazy_conj() {
     assert!(scalar.codomain().is_empty());
     assert!(scalar.domain().is_empty());
     assert!(std::ptr::eq(scalar.provider(), ket.provider()));
-    assert_eq!(
+    // Macro and planned network are two device paths for one length-2 inner
+    // product; they agree within the tolerance rule.
+    numerics::assert_slices_close(
+        "scalar macro vs scalar network",
         scalar_macro.to_host().unwrap().data(),
-        scalar.to_host().unwrap().data()
+        scalar.to_host().unwrap().data(),
+        2,
     );
     let stats = plan_cache_stats(&runtime);
     assert!(
@@ -451,7 +487,12 @@ fn host_and_cuda_macros_of_one_topology_use_separate_workspace_pools() {
 
     let host = tensor!([i; k] = a[i; j] * b[j; k]).unwrap();
     let device = tensor!([i; k] = a_cuda[i; j] * b_cuda[j; k]).unwrap();
-    assert_eq!(device.to_host().unwrap().data(), host.data());
+    numerics::assert_slices_close(
+        "device vs host",
+        device.to_host().unwrap().data(),
+        host.data(),
+        2,
+    );
 
     let stats = plan_cache_stats(&runtime);
     assert_eq!(stats.entries, 1, "one structural topology is shared");
@@ -523,16 +564,20 @@ fn equal_length_block_layout_drift_discards_the_device_replay_state() {
     assert_eq!(a0.data().len(), a3.data().len());
 
     let first = tensor!([i; k] = a0_cuda[i; j] * b0_cuda[j; k]).unwrap();
-    assert_eq!(
+    numerics::assert_slices_close(
+        "device vs host",
         first.to_host().unwrap().data(),
-        a0.contract(&b0, &[1], &[0], &[0, 1]).unwrap().data()
+        a0.contract(&b0, &[1], &[0], &[0, 1]).unwrap().data(),
+        2,
     );
     let after_first = plan_cache_stats(&runtime);
 
     let drifted = tensor!([i; k] = a3_cuda[i; j] * b3_cuda[j; k]).unwrap();
-    assert_eq!(
+    numerics::assert_slices_close(
+        "drifted device vs host",
         drifted.to_host().unwrap().data(),
-        a3.contract(&b3, &[1], &[0], &[0, 1]).unwrap().data()
+        a3.contract(&b3, &[1], &[0], &[0, 1]).unwrap().data(),
+        2,
     );
 
     let after_drift = plan_cache_stats(&runtime);
@@ -599,7 +644,13 @@ where
         .unwrap();
     let cold = tensor!([a; d] = (device[0])[a; b] * (device[1])[b; c] * (device[2])[c; d]).unwrap();
     let warm = tensor!([a; d] = (device[0])[a; b] * (device[1])[b; c] * (device[2])[c; d]).unwrap();
-    assert_eq!(cold.to_host().unwrap().data(), host_oracle.data());
+    let terms = space.dim().unwrap().ceil() as usize;
+    numerics::assert_slices_close(
+        "cold device chain vs host",
+        cold.to_host().unwrap().data(),
+        host_oracle.data(),
+        terms * terms,
+    );
     // The warm replay submits the same kernels in the same order to the same
     // device, so f64 is bitwise equal to the returning result. This relies on
     // cuBLAS/cuTENSOR determinism for identical submissions, as the existing
