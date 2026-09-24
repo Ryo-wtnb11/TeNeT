@@ -7179,24 +7179,30 @@ where
                 repr: TypedTensorRepr::Owned(Arc::clone(&view.parent)),
             });
         }
-        let sum = Self::inner(tensor, tensor)?.widen_complex().re;
-        let data = tensor
-            .owned_body()
-            .expect("owned norm input")
-            .materialized_dense_data();
+        let body = tensor.owned_body().expect("owned norm input");
+        if matches!(body.data.as_ref(), TypedData::Diagonal(_)) {
+            return Err(Error::InvalidArgument(
+                "checked Generic reductions require dense payloads".to_string(),
+            )
+            .into());
+        }
+        let data = body.materialized_dense_data();
+        let structure = tensor.logical_space().space().structure();
+        let nout = tensor.logical_space().space().nout();
         let provider = tensor.logical_space().provider();
+        let weight_of = |sector| <R::Mode as TypedSpaceModeDispatch<R>>::dim(provider, sector);
+        // Why not `Self::inner(tensor, tensor)`: it narrows the wide sum to
+        // `D`, which for `f32`/`Complex32` rounds `|t|²` to single precision
+        // and can leave it subnormal, above the rescaling threshold.
+        let sum = coupled_region_inner(structure, nout, data, data, weight_of)?.re;
         rescaled_power_norm(
             sum,
             2.0,
             || max_abs(data.iter().copied()),
             |max| {
-                coupled_region_weighted_sum(
-                    tensor.logical_space().space().structure(),
-                    tensor.logical_space().space().nout(),
-                    data,
-                    |sector| <R::Mode as TypedSpaceModeDispatch<R>>::dim(provider, sector),
-                    |value| scaled_power(value, max, 2.0),
-                )
+                coupled_region_weighted_sum(structure, nout, data, weight_of, |value| {
+                    scaled_power(value, max, 2.0)
+                })
             },
         )
     }
