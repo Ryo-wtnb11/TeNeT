@@ -1155,13 +1155,13 @@ where
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn get_or_compile_tree_pair_oriented<R, FAxis>(
+    pub(crate) fn get_or_compile_tree_pair_oriented<'p, R, FIndices, FAxis>(
         &mut self,
         rule: &R,
         operation: &TreeTransformOperation,
         dst_structure: &Arc<BlockStructure>,
         logical_keys: &[FusionTreePairKey],
-        storage_indices: &[usize],
+        storage_indices: FIndices,
         storage_src_structure: &Arc<BlockStructure>,
         orientation: FusionTreePairOrientation,
         logical_rank: usize,
@@ -1171,13 +1171,20 @@ where
         R: MultiplicityFreeRigidSymbols<Scalar = T> + TreeTransformRuleCacheKey<Key = RuleKey>,
         T: 'static + Copy + Clone + Add<Output = T> + Mul<Output = T> + Zero + Send + Sync,
         RuleKey: 'static + Send + Sync,
+        FIndices: FnOnce() -> Result<&'p [usize], OperationError>,
         FAxis: Fn(usize) -> Result<usize, OperationError>,
     {
-        if logical_keys.len() != storage_indices.len() {
-            return Err(OperationError::StructureMismatch {
-                tensor: "oriented source projection",
-            });
-        }
+        // Why lazy: only a store miss reads the storage map, so a warm call
+        // derives no per-block projection.
+        let projection = || {
+            let storage_indices = storage_indices()?;
+            if logical_keys.len() != storage_indices.len() {
+                return Err(OperationError::StructureMismatch {
+                    tensor: "oriented source projection",
+                });
+            }
+            oriented_source_projection(logical_keys, storage_indices, storage_src_structure)
+        };
         let storage_conjugate = orientation == FusionTreePairOrientation::Adjoint;
         let threads = self.recoupling_threads;
         let compile = |projection: &FxHashMap<&FusionTreePairKey, usize>| {
@@ -1216,17 +1223,9 @@ where
                 storage_src_structure,
                 storage_conjugate,
             )?;
-            return store.get_or_compile(key, || {
-                let projection = oriented_source_projection(
-                    logical_keys,
-                    storage_indices,
-                    storage_src_structure,
-                )?;
-                compile(&projection).map(Arc::new)
-            });
+            return store.get_or_compile(key, || compile(&projection()?).map(Arc::new));
         }
-        let projection =
-            oriented_source_projection(logical_keys, storage_indices, storage_src_structure)?;
+        let projection = projection()?;
         self.stats.structure_misses += 1;
         compile(&projection).map(Arc::new)
     }

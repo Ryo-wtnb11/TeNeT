@@ -489,7 +489,7 @@ where
     // re-exporting it just to share these three syntax checks would widen the
     // expert API.
     for (tensor, axes, rank) in [("lhs", lhs_axes, lhs_rank), ("rhs", rhs_axes, rhs_rank)] {
-        let mut seen = vec![false; rank];
+        let mut seen = smallvec::SmallVec::<[bool; 16]>::from_elem(false, rank);
         if axes.iter().any(|&axis| {
             if axis >= rank || seen[axis] {
                 true
@@ -516,7 +516,7 @@ where
         OutputAxisOrder::Axes(axes) => axes,
     };
     if output_axes.len() != lhs_open_rank + rhs_open_rank || {
-        let mut seen = vec![false; output_axes.len()];
+        let mut seen = smallvec::SmallVec::<[bool; 16]>::from_elem(false, output_axes.len());
         output_axes.iter().any(|&axis| {
             if axis >= seen.len() || seen[axis] {
                 true

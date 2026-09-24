@@ -675,25 +675,31 @@ pub struct DynamicFusionMapSpace {
     homspace: Arc<FusionTreeHomSpace>,
     subblock_structure: Arc<BlockStructure>,
     admission: FusionSpaceAdmission,
-    /// The adjoint view's hom space and block structure, derived on first use.
+    /// The adjoint view's hom space and block structure, each derived on
+    /// first use.
     ///
     /// Why not the bounded complete-structure cache or a context cache: this
     /// is immutable data derived only from `nout`, `nin`, `homspace`, and
     /// `subblock_structure`, none of which is reassigned after construction,
     /// so it lives and dies with the space and needs no key, byte bound, or
     /// invalidation. Its cost is one adjoint hom space and block structure per
-    /// space that is ever adjointed. It stays out of `PartialEq` and the
+    /// space that is ever adjointed; a lazy-adjoint contraction fills only
+    /// the hom space. It stays out of `PartialEq` and the
     /// layout hash because it is a function of the compared fields; clones
-    /// share the filled value. The error is boxed so an unused slot adds only
-    /// two pointers and the once-state to every space.
+    /// share the filled value. It sits behind an `Arc` so an unused slot adds
+    /// only one pointer and the once-state to every space.
     ///
     /// Hazard: a struct update (`Self { subblock_structure, ..other }`) that
     /// replaces `nout`, `nin`, `homspace`, or `subblock_structure` must also
     /// reset this slot with `OnceLock::new()`, or it inherits a stale adjoint.
-    adjoint: OnceLock<Result<AdjointViewParts, Box<OperationError>>>,
+    adjoint: OnceLock<Arc<AdjointMemo>>,
 }
 
-type AdjointViewParts = (Arc<FusionTreeHomSpace>, Arc<BlockStructure>);
+#[derive(Debug)]
+struct AdjointMemo {
+    homspace: Arc<FusionTreeHomSpace>,
+    structure: OnceLock<Result<Arc<BlockStructure>, OperationError>>,
+}
 
 impl PartialEq for DynamicFusionMapSpace {
     fn eq(&self, other: &Self) -> bool {
@@ -735,7 +741,10 @@ enum FusionOperandProjection {
     Direct,
     Adjoint {
         logical_keys: Arc<[FusionTreePairKey]>,
-        storage_indices: Vec<usize>,
+        /// Filled on first use. Why not in `prepare`: a warm call takes its
+        /// plans from the Runtime store and never reads this map, while the
+        /// per-block lookups and the Vec cost a Complete parent on every call.
+        storage_indices: OnceLock<Result<Vec<usize>, OperationError>>,
     },
 }
 
@@ -813,17 +822,39 @@ impl<'a> FusionOperandLayout<'a> {
                 self.storage_space().structure().block(logical_index)?;
                 Ok(logical_index)
             }
-            FusionOperandProjection::Adjoint {
-                logical_keys,
-                storage_indices,
-            } => storage_indices.get(logical_index).copied().ok_or_else(|| {
-                OperationError::BlockIndexOutOfBounds {
+            FusionOperandProjection::Adjoint { logical_keys, .. } => self
+                .adjoint_storage_indices()?
+                .get(logical_index)
+                .copied()
+                .ok_or_else(|| OperationError::BlockIndexOutOfBounds {
                     tensor: "logical src",
                     index: logical_index,
                     count: logical_keys.len(),
-                }
-            }),
+                }),
         }
+    }
+
+    /// The parent storage index of each logical key, in logical order.
+    ///
+    /// Its errors are unreachable under the Complete admission invariant (the
+    /// parent holds exactly the canonical keys), which is why deferring them
+    /// past `prepare` is safe.
+    ///
+    /// # Panics
+    ///
+    /// On a direct operand, which has no projection.
+    pub(crate) fn adjoint_storage_indices(&self) -> Result<&[usize], OperationError> {
+        let FusionOperandProjection::Adjoint {
+            logical_keys,
+            storage_indices,
+        } = &self.projection
+        else {
+            unreachable!("only adjoint operands carry a storage projection")
+        };
+        storage_indices
+            .get_or_init(|| adjoint_storage_indices(self.storage_space(), logical_keys))
+            .as_deref()
+            .map_err(Clone::clone)
     }
 
     #[inline]
@@ -831,14 +862,12 @@ impl<'a> FusionOperandLayout<'a> {
         matches!(self.projection, FusionOperandProjection::Direct)
     }
 
+    /// The canonical logical keys of an adjoint operand; `None` when direct.
     #[inline]
-    pub(crate) fn adjoint_projection(&self) -> Option<(&[FusionTreePairKey], &[usize])> {
+    pub(crate) fn adjoint_logical_keys(&self) -> Option<&[FusionTreePairKey]> {
         match &self.projection {
             FusionOperandProjection::Direct => None,
-            FusionOperandProjection::Adjoint {
-                logical_keys,
-                storage_indices,
-            } => Some((logical_keys, storage_indices)),
+            FusionOperandProjection::Adjoint { logical_keys, .. } => Some(logical_keys),
         }
     }
 
@@ -974,53 +1003,48 @@ impl<'a> FusionOperand<'a> {
         #[cfg(test)]
         FUSION_OPERAND_PROJECTION_PREPARES.set(FUSION_OPERAND_PROJECTION_PREPARES.get() + 1);
 
-        let homspace: Cow<'a, FusionTreeHomSpace> =
-            Cow::Owned(self.oriented_homspace().materialize());
+        // The parent's memoized adjoint HomSpace equals
+        // `oriented_homspace().materialize()` without a per-call build.
+        let homspace = Cow::Borrowed(self.storage_space.adjoint_memo().homspace.as_ref());
         let prepared = dispatch_prepare(layout_primer, rule, homspace.as_ref())?;
-        let complete = matches!(
+        let all_logical_keys = prepared.keys(rule, homspace.as_ref());
+        let projection = if matches!(
             self.storage_space.admission(),
             FusionSpaceAdmission::Complete(_)
-        );
-        let all_logical_keys = prepared.keys(rule, homspace.as_ref());
-        let mut selected_keys =
-            (!complete).then(|| Vec::with_capacity(self.storage_space.structure().block_count()));
-        let mut selected_count = 0usize;
-        let mut storage_indices = Vec::with_capacity(self.storage_space.structure().block_count());
-        for logical_key in all_logical_keys.iter() {
-            let storage_index = self
-                .storage_space
-                .structure()
-                .find_block_index_by_adjoint_fusion_tree_pair(logical_key);
-            if let Some(storage_index) = storage_index {
-                if let Some(selected_keys) = selected_keys.as_mut() {
-                    selected_keys.push(logical_key.clone());
+        ) {
+            // A Complete parent holds every canonical key, so the logical keys
+            // are the canonical ones and the storage map can wait for a reader.
+            FusionOperandProjection::Adjoint {
+                logical_keys: all_logical_keys,
+                storage_indices: OnceLock::new(),
+            }
+        } else {
+            let structure = self.storage_space.structure();
+            let mut logical_keys = Vec::with_capacity(structure.block_count());
+            let mut storage_indices = Vec::with_capacity(structure.block_count());
+            for logical_key in all_logical_keys.iter() {
+                if let Some(index) =
+                    structure.find_block_index_by_adjoint_fusion_tree_pair(logical_key)
+                {
+                    logical_keys.push(logical_key.clone());
+                    storage_indices.push(index);
                 }
-                storage_indices.push(storage_index);
-                selected_count += 1;
-            } else if complete {
-                return Err(OperationError::MissingBlockKey {
-                    key: Box::new(BlockKey::from(logical_key.clone())),
+            }
+            if storage_indices.len() != structure.block_count() {
+                return Err(OperationError::StructureMismatch {
+                    tensor: "operand block projection",
                 });
             }
-        }
-        if selected_count != self.storage_space.structure().block_count() {
-            return Err(OperationError::StructureMismatch {
-                tensor: "operand block projection",
-            });
-        }
-        let logical_keys = if complete {
-            all_logical_keys
-        } else {
-            Arc::from(selected_keys.expect("subset projection collects logical keys"))
+            FusionOperandProjection::Adjoint {
+                logical_keys: Arc::from(logical_keys),
+                storage_indices: OnceLock::from(Ok(storage_indices)),
+            }
         };
         prepared.commit();
         Ok(FusionOperandLayout {
             operand: self,
             homspace,
-            projection: FusionOperandProjection::Adjoint {
-                logical_keys,
-                storage_indices,
-            },
+            projection,
         })
     }
 
@@ -1058,6 +1082,30 @@ impl<'a> FusionOperand<'a> {
             key: Box::new(BlockKey::from(logical_key.clone())),
         })
     }
+}
+
+/// Maps each canonical logical key of a Complete parent to its storage block.
+fn adjoint_storage_indices(
+    storage_space: &DynamicFusionMapSpace,
+    logical_keys: &[FusionTreePairKey],
+) -> Result<Vec<usize>, OperationError> {
+    let structure = storage_space.structure();
+    let storage_indices = logical_keys
+        .iter()
+        .map(|logical_key| {
+            structure
+                .find_block_index_by_adjoint_fusion_tree_pair(logical_key)
+                .ok_or_else(|| OperationError::MissingBlockKey {
+                    key: Box::new(BlockKey::from(logical_key.clone())),
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if storage_indices.len() != structure.block_count() {
+        return Err(OperationError::StructureMismatch {
+            tensor: "operand block projection",
+        });
+    }
+    Ok(storage_indices)
 }
 
 fn validate_bound_space_invariants(space: &DynamicFusionMapSpace) -> Result<(), OperationError> {
@@ -2029,7 +2077,13 @@ where
     /// Why not return [`DynamicFusionMapSpace`]: a raw value does not carry the
     /// complete-tree-grid proof established by the bound constructor.
     pub fn validated_layout(&self) -> ValidatedDynamicFusionLayout {
-        ValidatedDynamicFusionLayout(self.space.clone())
+        let mut space = self.space.clone();
+        // Why a fresh slot rather than charging the memo: a clone shares the
+        // filled `Arc<AdjointMemo>`, whose block structure can still fill after
+        // the layout was charged, so the charge would go stale. The parked
+        // layout never adjoints itself and a rebound space refills on demand.
+        space.adjoint = OnceLock::new();
+        ValidatedDynamicFusionLayout(space)
     }
 
     /// Rebinds a validated cached layout to this space's exact provider allocation.
@@ -2760,22 +2814,19 @@ impl DynamicFusionMapSpace {
     /// source layout, so this space is for replay bookkeeping, not for
     /// allocating fresh coupled storage.
     pub(crate) fn adjoint_view(&self) -> Result<Self, OperationError> {
-        let (homspace, structure) = self
-            .adjoint
+        let memo = self.adjoint_memo();
+        let homspace = Arc::clone(&memo.homspace);
+        let structure = memo
+            .structure
             .get_or_init(|| {
-                let homspace = FusionTreeHomSpace::new(
-                    self.homspace.domain().clone(),
-                    self.homspace.codomain().clone(),
-                );
-                let structure = crate::lowering::adjoint_block_structure_view(
+                crate::lowering::adjoint_block_structure_view(
                     self.nout,
                     self.nin,
                     &self.subblock_structure,
-                )?;
-                Ok((Arc::new(homspace), Arc::new(structure)))
+                )
+                .map(Arc::new)
             })
-            .clone()
-            .map_err(|error| *error)?;
+            .clone()?;
         debug_assert_eq!(structure.rank(), self.subblock_structure.rank());
         debug_assert_eq!(
             structure.block_count(),
@@ -2788,6 +2839,19 @@ impl DynamicFusionMapSpace {
             subblock_structure: structure,
             admission: self.admission.clone(),
             adjoint: OnceLock::new(),
+        })
+    }
+
+    /// The memoized adjoint hom space; the block structure fills on demand.
+    fn adjoint_memo(&self) -> &AdjointMemo {
+        self.adjoint.get_or_init(|| {
+            Arc::new(AdjointMemo {
+                homspace: Arc::new(FusionTreeHomSpace::new(
+                    self.homspace.domain().clone(),
+                    self.homspace.codomain().clone(),
+                )),
+                structure: OnceLock::new(),
+            })
         })
     }
 
@@ -3562,7 +3626,7 @@ mod bound_invariant_tests {
         assert_eq!(direct.storage_index(0).unwrap(), 0);
         assert_eq!(adjoint.storage_index(0).unwrap(), 0);
         assert!(direct.is_direct());
-        assert_eq!(adjoint.adjoint_projection().unwrap().1, [0].as_slice());
+        assert_eq!(adjoint.adjoint_storage_indices().unwrap(), [0].as_slice());
     }
 
     #[test]
@@ -5768,6 +5832,31 @@ mod scratch_cache_tests {
 
         assert!(weak.upgrade().is_none());
         assert_eq!(validated.required_len().unwrap(), 2);
+    }
+
+    #[test]
+    fn validated_layout_does_not_retain_the_adjoint_memo() {
+        // What: a layout taken after a lazy-adjoint contraction filled the
+        // parent's adjoint memo neither keeps that memo nor charges differently
+        // from a never-adjointed layout (#1419 detach_runtime trace).
+        let provider = Arc::new(Z2FusionRule);
+        let bound = BoundDynamicFusionMapSpace::bind_multiplicity_free(
+            z2_matrix_space(),
+            Arc::clone(&provider),
+        )
+        .unwrap();
+        let cold_charge = bound.validated_layout().charged_retained_bytes();
+        FusionOperand::adjoint(bound.space())
+            .prepare(&Z2FusionRule, encoded_layout_primer::<Z2FusionRule>)
+            .unwrap();
+        bound.space().adjoint_view().unwrap();
+        let memo = Arc::downgrade(bound.space().adjoint.get().expect("prepare fills the memo"));
+
+        let validated = bound.validated_layout();
+        drop(bound);
+
+        assert!(memo.upgrade().is_none());
+        assert_eq!(validated.charged_retained_bytes(), cold_charge);
     }
 
     fn z2_matrix_space() -> DynamicFusionMapSpace {

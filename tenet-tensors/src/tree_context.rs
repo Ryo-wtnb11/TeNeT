@@ -894,13 +894,13 @@ where
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn get_or_compile_tree_pair_structure_oriented<R, FAxis>(
+    pub(crate) fn get_or_compile_tree_pair_structure_oriented<'p, R, FIndices, FAxis>(
         &mut self,
         rule: &R,
         operation: &TreeTransformOperation,
         dst_structure: &Arc<BlockStructure>,
         logical_keys: &[tenet_core::FusionTreePairKey],
-        storage_indices: &[usize],
+        storage_indices: FIndices,
         storage_src_structure: &Arc<BlockStructure>,
         orientation: tenet_core::FusionTreePairOrientation,
         logical_rank: usize,
@@ -908,6 +908,7 @@ where
     ) -> Result<Arc<TreeTransformStructure<C>>, OperationError>
     where
         R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        FIndices: FnOnce() -> Result<&'p [usize], OperationError>,
         FAxis: Fn(usize) -> Result<usize, OperationError>,
     {
         self.cache
