@@ -1,7 +1,8 @@
 //! Per-call cost of the public eager primitives on small many-block tensors
 //! (#1313): warm per-call minimum/median and allocation calls/bytes for
 //! `compose`, `contract`, `permute`, `repartition`, `qr_compact`,
-//! `svd_compact`, `restrict_leg`, `scale`, `add`, and `norm` over U(1), fZ2×U(1), and SU(2),
+//! `svd_compact`, `lq_compact`, `left_null`, `eigh_full` (of the Hermitian
+//! `square' * square`), `restrict_leg`, `scale`, `add`, and `norm` over U(1), fZ2×U(1), and SU(2),
 //! `f64` and `Complex64`, ranks 2–5. Four lazy-adjoint rows follow them:
 //! `add_adjoint` (`a.adjoint() + b` on the adjoint space), `adjoint_data`
 //! (a fresh `a.adjoint()` and its first `data()`, which materializes it), and
@@ -273,6 +274,7 @@ macro_rules! ledger {
                 codomain.iter().copied(),
                 5,
             )?;
+            let hermitian = square.adjoint()?.compose(&square)?;
             let lazy = a.adjoint()?;
             let selection = LegSelection::try_new(
                 &leg,
@@ -323,6 +325,15 @@ macro_rules! ledger {
             });
             run_op(config, &prefix, "svd_compact", || {
                 black_box(&a).svd_compact().unwrap()
+            });
+            run_op(config, &prefix, "lq_compact", || {
+                black_box(&a).lq_compact().unwrap()
+            });
+            run_op(config, &prefix, "left_null", || {
+                black_box(&a).left_null().unwrap()
+            });
+            run_op(config, &prefix, "eigh_full", || {
+                black_box(&hermitian).eigh_full().unwrap()
             });
             run_op(config, &prefix, "restrict_leg", || {
                 black_box(&a).restrict_leg(0, &selection).unwrap()

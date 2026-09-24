@@ -2041,60 +2041,64 @@ where
     let index = PlacementIndex::new(&matricizations, &[FactorSide::Left, FactorSide::Right]);
     let u_groups = SectorBlockGroups::new(u_space.space().structure(), FactorSide::Left)?;
     let vt_groups = SectorBlockGroups::new(vt_space.space().structure(), FactorSide::Right)?;
-    for matrix in &matricizations {
-        let rank = matrix.rows.min(matrix.cols);
-        let (mut u, values, mut vt) =
-            compact_svd_owned(dense, &matrix.data, matrix.rows, matrix.cols)?;
-        match gauge {
-            CompactSvdGauge::Left => svd_compact_gauge(
-                &mut u,
-                matrix.rows,
-                matrix.rows,
-                &mut vt,
-                rank,
-                matrix.cols,
-                rank,
-            ),
-            CompactSvdGauge::AdjointLeft => svd_compact_adjoint_gauge(
-                &mut u,
-                matrix.rows,
-                matrix.rows,
-                &mut vt,
-                rank,
-                matrix.cols,
-                rank,
-            ),
-        }
-        #[cfg(test)]
-        record_mf_compact_svd_fallback_gauge(&u, &vt);
+    let (u_target, vt_target) = (u_space.space(), vt_space.space());
+    in_linalg_scope(dense, |dense| {
+        for matrix in &matricizations {
+            let rank = matrix.rows.min(matrix.cols);
+            let (mut u, values, mut vt) =
+                compact_svd_owned(dense, &matrix.data, matrix.rows, matrix.cols)?;
+            match gauge {
+                CompactSvdGauge::Left => svd_compact_gauge(
+                    &mut u,
+                    matrix.rows,
+                    matrix.rows,
+                    &mut vt,
+                    rank,
+                    matrix.cols,
+                    rank,
+                ),
+                CompactSvdGauge::AdjointLeft => svd_compact_adjoint_gauge(
+                    &mut u,
+                    matrix.rows,
+                    matrix.rows,
+                    &mut vt,
+                    rank,
+                    matrix.cols,
+                    rank,
+                ),
+            }
+            #[cfg(test)]
+            record_mf_compact_svd_fallback_gauge(&u, &vt);
 
-        singular_values.push(SectorSpectrum {
-            sector: matrix.sector,
-            values,
-        });
-        scatter_left_sector_blocks(
-            u_space.space(),
-            &mut u_data,
-            matrix,
-            &index,
-            &u_groups,
-            &u,
-            matrix.rows,
-        )?;
-        #[cfg(test)]
-        record_compact_svd_output_scatter::<D>(matrix.rows * rank);
-        scatter_right_sector_blocks(
-            vt_space.space(),
-            &mut vt_data,
-            matrix,
-            &index,
-            &vt_groups,
-            &vt,
-            rank,
-        )?;
-        #[cfg(test)]
-        record_compact_svd_output_scatter::<D>(rank * matrix.cols);
-    }
+            singular_values.push(SectorSpectrum {
+                sector: matrix.sector,
+                values,
+            });
+            scatter_left_sector_blocks(
+                u_target,
+                &mut u_data,
+                matrix,
+                &index,
+                &u_groups,
+                &u,
+                matrix.rows,
+            )?;
+            #[cfg(test)]
+            record_compact_svd_output_scatter::<D>(matrix.rows * rank);
+            scatter_right_sector_blocks(
+                vt_target,
+                &mut vt_data,
+                matrix,
+                &index,
+                &vt_groups,
+                &vt,
+                rank,
+            )?;
+            #[cfg(test)]
+            record_compact_svd_output_scatter::<D>(rank * matrix.cols);
+        }
+        Ok(())
+    })?;
 
     let u = BoundDynFactor::from_bound(u_space, u_data, space.nout(), 1)?;
     let vh = BoundDynFactor::from_bound(vt_space, vt_data, 1, space.nin())?;
@@ -3536,41 +3540,45 @@ where
     let mut eigenvalues = Vec::with_capacity(matricizations.len());
     let index = PlacementIndex::new(&matricizations, &[FactorSide::Left]);
     let v_groups = SectorBlockGroups::new(v_space.space().structure(), FactorSide::Left)?;
-    for matrix in &matricizations {
-        let n = matrix.rows;
-        let (real_values, mut vectors) = compact_eigh_owned(dense, &matrix.data, n)?;
-        validate_real_eigenvalues(&real_values)?;
+    let v_target = v_space.space();
+    in_linalg_scope(dense, |dense| {
+        for matrix in &matricizations {
+            let n = matrix.rows;
+            let (real_values, mut vectors) = compact_eigh_owned(dense, &matrix.data, n)?;
+            validate_real_eigenvalues(&real_values)?;
 
-        order.clear();
-        order.extend(0..n);
-        // Reorder bond states descending by |eigenvalue| (stable on ties).
-        order.sort_by(|&a, &b| {
-            real_values[b]
-                .abs()
-                .total_cmp(&real_values[a].abs())
-                .then(a.cmp(&b))
-        });
-        let sorted_values: Vec<f64> = order.iter().map(|&index| real_values[index]).collect();
-        reorder_columns_in_place(&mut vectors, n, &order, &mut visited, &mut column_scratch);
-        eigenvector_gauge(&mut vectors, n, n, n);
-        eigenvalues.push(SectorSpectrum {
-            sector: matrix.sector,
-            values: sorted_values,
-        });
-        #[cfg(test)]
-        record_eigh_owned_vector_before_scatter(&vectors);
-        scatter_left_sector_blocks(
-            v_space.space(),
-            &mut v_data,
-            matrix,
-            &index,
-            &v_groups,
-            &vectors,
-            n,
-        )?;
-        #[cfg(test)]
-        record_eigh_output_scatter::<D>(n * n);
-    }
+            order.clear();
+            order.extend(0..n);
+            // Reorder bond states descending by |eigenvalue| (stable on ties).
+            order.sort_by(|&a, &b| {
+                real_values[b]
+                    .abs()
+                    .total_cmp(&real_values[a].abs())
+                    .then(a.cmp(&b))
+            });
+            let sorted_values: Vec<f64> = order.iter().map(|&index| real_values[index]).collect();
+            reorder_columns_in_place(&mut vectors, n, &order, &mut visited, &mut column_scratch);
+            eigenvector_gauge(&mut vectors, n, n, n);
+            eigenvalues.push(SectorSpectrum {
+                sector: matrix.sector,
+                values: sorted_values,
+            });
+            #[cfg(test)]
+            record_eigh_owned_vector_before_scatter(&vectors);
+            scatter_left_sector_blocks(
+                v_target,
+                &mut v_data,
+                matrix,
+                &index,
+                &v_groups,
+                &vectors,
+                n,
+            )?;
+            #[cfg(test)]
+            record_eigh_output_scatter::<D>(n * n);
+        }
+        Ok(())
+    })?;
 
     Ok(EighFullDyn {
         v: BoundDynFactor::from_bound(v_space, v_data, space.nout(), 1)?,
@@ -3608,48 +3616,51 @@ where
     let mut next_left_region = 0;
     let mut output = None;
 
-    for route in plan.routes.iter().copied() {
-        let source = &plan.source_regions[route.source_region];
-        let n = source.rows();
-        if n == 0 {
-            eigenvalues.push(SectorSpectrum {
-                sector: route.sector,
-                values: Vec::new(),
-            });
-            continue;
-        }
-        let (real_values, mut vectors) =
-            compact_eigh_owned(dense, &input.data()[source.range()], n)?;
-        validate_real_eigenvalues(&real_values)?;
-
-        order.clear();
-        order.extend(0..n);
-        order.sort_by(|&a, &b| {
-            real_values[b]
-                .abs()
-                .total_cmp(&real_values[a].abs())
-                .then(a.cmp(&b))
-        });
-        let sorted_values = order.iter().map(|&index| real_values[index]).collect();
-        reorder_columns_in_place(&mut vectors, n, &order, &mut visited, &mut column_scratch);
-        eigenvector_gauge(&mut vectors, n, n, n);
-        regions[route.left_region.expect("nonzero route has left region")] = Some(vectors);
-        while next_left_region < plan.left_regions.len() {
-            if plan.left_regions[next_left_region].range().is_empty() {
-                next_left_region += 1;
+    let data = input.data();
+    in_linalg_scope(dense, |dense| {
+        for route in plan.routes.iter().copied() {
+            let source = &plan.source_regions[route.source_region];
+            let n = source.rows();
+            if n == 0 {
+                eigenvalues.push(SectorSpectrum {
+                    sector: route.sector,
+                    values: Vec::new(),
+                });
                 continue;
             }
-            let Some(region) = regions[next_left_region].take() else {
-                break;
-            };
-            append_owned_factor(&mut output, region, v_len);
-            next_left_region += 1;
+            let (real_values, mut vectors) = compact_eigh_owned(dense, &data[source.range()], n)?;
+            validate_real_eigenvalues(&real_values)?;
+
+            order.clear();
+            order.extend(0..n);
+            order.sort_by(|&a, &b| {
+                real_values[b]
+                    .abs()
+                    .total_cmp(&real_values[a].abs())
+                    .then(a.cmp(&b))
+            });
+            let sorted_values = order.iter().map(|&index| real_values[index]).collect();
+            reorder_columns_in_place(&mut vectors, n, &order, &mut visited, &mut column_scratch);
+            eigenvector_gauge(&mut vectors, n, n, n);
+            regions[route.left_region.expect("nonzero route has left region")] = Some(vectors);
+            while next_left_region < plan.left_regions.len() {
+                if plan.left_regions[next_left_region].range().is_empty() {
+                    next_left_region += 1;
+                    continue;
+                }
+                let Some(region) = regions[next_left_region].take() else {
+                    break;
+                };
+                append_owned_factor(&mut output, region, v_len);
+                next_left_region += 1;
+            }
+            eigenvalues.push(SectorSpectrum {
+                sector: route.sector,
+                values: sorted_values,
+            });
         }
-        eigenvalues.push(SectorSpectrum {
-            sector: route.sector,
-            values: sorted_values,
-        });
-    }
+        Ok(())
+    })?;
 
     Ok(EighFullDyn {
         v: BoundDynFactor::from_bound(v_space, output.unwrap_or_default(), space.nout(), 1)?,
@@ -5108,28 +5119,36 @@ where
         .codomain()
         .coupled_sector_block_dimensions(input.space().provider())?;
     let mut pairs = Vec::new();
-    for matrix in &matrices {
-        let (rows, cols) = (matrix.rows, matrix.cols);
-        let (rank, u_compact) =
-            numerical_rank_and_compact_basis(dense, &matrix.data, rows, cols, FactorSide::Left)?;
-        if rank == rows {
-            null_dimensions.remove(&matrix.sector);
-            continue;
+    in_linalg_scope(dense, |dense| {
+        for matrix in &matrices {
+            let (rows, cols) = (matrix.rows, matrix.cols);
+            let (rank, u_compact) = numerical_rank_and_compact_basis(
+                dense,
+                &matrix.data,
+                rows,
+                cols,
+                FactorSide::Left,
+            )?;
+            if rank == rows {
+                null_dimensions.remove(&matrix.sector);
+                continue;
+            }
+            // Only the left basis is completed: completing V would run an unused
+            // QR for this operation.
+            let u = orthonormal_completion(dense, &u_compact, rows, rows.min(cols))?;
+            let null_dim = rows - rank;
+            null_dimensions.insert(matrix.sector, null_dim);
+            pairs.push(FactorPair {
+                sector: matrix.sector,
+                kept: null_dim,
+                left: u[rows * rank..].to_vec(),
+                left_rows: rows,
+                right: Vec::new(),
+                right_leading: null_dim,
+            });
         }
-        // Only the left basis is completed: completing V would run an unused
-        // QR for this operation.
-        let u = orthonormal_completion(dense, &u_compact, rows, rows.min(cols))?;
-        let null_dim = rows - rank;
-        null_dimensions.insert(matrix.sector, null_dim);
-        pairs.push(FactorPair {
-            sector: matrix.sector,
-            kept: null_dim,
-            left: u[rows * rank..].to_vec(),
-            left_rows: rows,
-            right: Vec::new(),
-            right_leading: null_dim,
-        });
-    }
+        Ok(())
+    })?;
     build_bound_factor(
         input.space(),
         space.homspace(),
@@ -5177,28 +5196,36 @@ where
         .domain()
         .coupled_sector_block_dimensions(input.space().provider())?;
     let mut pairs = Vec::new();
-    for matrix in &matrices {
-        let (rows, cols) = (matrix.rows, matrix.cols);
-        let (rank, v_compact) =
-            numerical_rank_and_compact_basis(dense, &matrix.data, rows, cols, FactorSide::Right)?;
-        if rank == cols {
-            null_dimensions.remove(&matrix.sector);
-            continue;
+    in_linalg_scope(dense, |dense| {
+        for matrix in &matrices {
+            let (rows, cols) = (matrix.rows, matrix.cols);
+            let (rank, v_compact) = numerical_rank_and_compact_basis(
+                dense,
+                &matrix.data,
+                rows,
+                cols,
+                FactorSide::Right,
+            )?;
+            if rank == cols {
+                null_dimensions.remove(&matrix.sector);
+                continue;
+            }
+            // Only the right basis is completed: completing U would run an unused
+            // QR for this operation.
+            let v = orthonormal_completion(dense, &v_compact, cols, rows.min(cols))?;
+            let null_dim = cols - rank;
+            null_dimensions.insert(matrix.sector, null_dim);
+            pairs.push(FactorPair {
+                sector: matrix.sector,
+                kept: null_dim,
+                left: Vec::new(),
+                left_rows: rows,
+                right: adjoint_col_major(&v[cols * rank..], cols, null_dim),
+                right_leading: null_dim,
+            });
         }
-        // Only the right basis is completed: completing U would run an unused
-        // QR for this operation.
-        let v = orthonormal_completion(dense, &v_compact, cols, rows.min(cols))?;
-        let null_dim = cols - rank;
-        null_dimensions.insert(matrix.sector, null_dim);
-        pairs.push(FactorPair {
-            sector: matrix.sector,
-            kept: null_dim,
-            left: Vec::new(),
-            left_rows: rows,
-            right: adjoint_col_major(&v[cols * rank..], cols, null_dim),
-            right_leading: null_dim,
-        });
-    }
+        Ok(())
+    })?;
     build_bound_factor(
         input.space(),
         space.homspace(),
@@ -5233,33 +5260,39 @@ where
         provider.as_ref(),
     )?;
     let mut pairs = Vec::new();
-    for matrix in &matrices {
-        let (rank, u_compact) = numerical_rank_and_compact_basis(
-            dense,
-            &matrix.data,
-            matrix.rows,
-            matrix.cols,
-            FactorSide::Left,
-        )
-        .map_err(CheckedGenericFactorPlanError::from)?;
-        if rank == matrix.rows {
-            null_dimensions.remove(&matrix.sector);
-            continue;
+    in_linalg_scope(dense, |dense| {
+        for matrix in &matrices {
+            let (rank, u_compact) = numerical_rank_and_compact_basis(
+                dense,
+                &matrix.data,
+                matrix.rows,
+                matrix.cols,
+                FactorSide::Left,
+            )?;
+            if rank == matrix.rows {
+                null_dimensions.remove(&matrix.sector);
+                continue;
+            }
+            let u = orthonormal_completion(
+                dense,
+                &u_compact,
+                matrix.rows,
+                matrix.rows.min(matrix.cols),
+            )?;
+            let null_dim = matrix.rows - rank;
+            null_dimensions.insert(matrix.sector, null_dim);
+            pairs.push(FactorPair {
+                sector: matrix.sector,
+                kept: null_dim,
+                left: u[matrix.rows * rank..].to_vec(),
+                left_rows: matrix.rows,
+                right: Vec::new(),
+                right_leading: null_dim,
+            });
         }
-        let u =
-            orthonormal_completion(dense, &u_compact, matrix.rows, matrix.rows.min(matrix.cols))
-                .map_err(CheckedGenericFactorPlanError::from)?;
-        let null_dim = matrix.rows - rank;
-        null_dimensions.insert(matrix.sector, null_dim);
-        pairs.push(FactorPair {
-            sector: matrix.sector,
-            kept: null_dim,
-            left: u[matrix.rows * rank..].to_vec(),
-            left_rows: matrix.rows,
-            right: Vec::new(),
-            right_leading: null_dim,
-        });
-    }
+        Ok(())
+    })
+    .map_err(CheckedGenericFactorPlanError::from)?;
     build_bound_factor_generic_checked(
         provider,
         space.homspace(),
@@ -5291,33 +5324,39 @@ where
         provider.as_ref(),
     )?;
     let mut pairs = Vec::new();
-    for matrix in &matrices {
-        let (rank, v_compact) = numerical_rank_and_compact_basis(
-            dense,
-            &matrix.data,
-            matrix.rows,
-            matrix.cols,
-            FactorSide::Right,
-        )
-        .map_err(CheckedGenericFactorPlanError::from)?;
-        if rank == matrix.cols {
-            null_dimensions.remove(&matrix.sector);
-            continue;
+    in_linalg_scope(dense, |dense| {
+        for matrix in &matrices {
+            let (rank, v_compact) = numerical_rank_and_compact_basis(
+                dense,
+                &matrix.data,
+                matrix.rows,
+                matrix.cols,
+                FactorSide::Right,
+            )?;
+            if rank == matrix.cols {
+                null_dimensions.remove(&matrix.sector);
+                continue;
+            }
+            let v = orthonormal_completion(
+                dense,
+                &v_compact,
+                matrix.cols,
+                matrix.rows.min(matrix.cols),
+            )?;
+            let null_dim = matrix.cols - rank;
+            null_dimensions.insert(matrix.sector, null_dim);
+            pairs.push(FactorPair {
+                sector: matrix.sector,
+                kept: null_dim,
+                left: Vec::new(),
+                left_rows: matrix.rows,
+                right: adjoint_col_major(&v[matrix.cols * rank..], matrix.cols, null_dim),
+                right_leading: null_dim,
+            });
         }
-        let v =
-            orthonormal_completion(dense, &v_compact, matrix.cols, matrix.rows.min(matrix.cols))
-                .map_err(CheckedGenericFactorPlanError::from)?;
-        let null_dim = matrix.cols - rank;
-        null_dimensions.insert(matrix.sector, null_dim);
-        pairs.push(FactorPair {
-            sector: matrix.sector,
-            kept: null_dim,
-            left: Vec::new(),
-            left_rows: matrix.rows,
-            right: adjoint_col_major(&v[matrix.cols * rank..], matrix.cols, null_dim),
-            right_leading: null_dim,
-        });
-    }
+        Ok(())
+    })
+    .map_err(CheckedGenericFactorPlanError::from)?;
     build_bound_factor_generic_checked(
         provider,
         space.homspace(),
@@ -5775,34 +5814,37 @@ where
     #[cfg(test)]
     record_compact_lq_input_pack(&matricizations);
     let mut pairs = Vec::with_capacity(matricizations.len());
-    for matrix in &matricizations {
-        let rank = matrix.rows.min(matrix.cols);
-        let adjoint = adjoint_col_major(&matrix.data, matrix.rows, matrix.cols);
-        let (mut q_prime, mut r_prime) =
-            compact_qr_owned(dense, &adjoint, matrix.cols, matrix.rows)?;
-        positive_diagonal_gauge_strided(
-            &mut q_prime,
-            matrix.cols,
-            matrix.cols,
-            &mut r_prime,
-            rank,
-            rank,
-            matrix.rows,
-        );
-        #[cfg(test)]
-        {
-            record_compact_lq_output_scatter::<D>(r_prime.len());
-            record_compact_lq_output_scatter::<D>(q_prime.len());
+    in_linalg_scope(dense, |dense| {
+        for matrix in &matricizations {
+            let rank = matrix.rows.min(matrix.cols);
+            let adjoint = adjoint_col_major(&matrix.data, matrix.rows, matrix.cols);
+            let (mut q_prime, mut r_prime) =
+                compact_qr_owned(dense, &adjoint, matrix.cols, matrix.rows)?;
+            positive_diagonal_gauge_strided(
+                &mut q_prime,
+                matrix.cols,
+                matrix.cols,
+                &mut r_prime,
+                rank,
+                rank,
+                matrix.rows,
+            );
+            #[cfg(test)]
+            {
+                record_compact_lq_output_scatter::<D>(r_prime.len());
+                record_compact_lq_output_scatter::<D>(q_prime.len());
+            }
+            pairs.push(FactorPair {
+                sector: matrix.sector,
+                kept: rank,
+                left: adjoint_col_major(&r_prime, rank, matrix.rows),
+                left_rows: matrix.rows,
+                right: adjoint_col_major(&q_prime, matrix.cols, rank),
+                right_leading: rank,
+            });
         }
-        pairs.push(FactorPair {
-            sector: matrix.sector,
-            kept: rank,
-            left: adjoint_col_major(&r_prime, rank, matrix.rows),
-            left_rows: matrix.rows,
-            right: adjoint_col_major(&q_prime, matrix.cols, rank),
-            right_leading: rank,
-        });
-    }
+        Ok(())
+    })?;
     build_left_right_bound_pair(input.space(), space.homspace(), &matricizations, &mut pairs)
 }
 
@@ -5833,48 +5875,53 @@ where
     #[cfg(test)]
     record_compact_lq_scratch::<D>(max_adjoint_len);
 
-    for route in plan.routes.iter().copied() {
-        if route.rank == 0 {
-            continue;
-        }
-        let source = &plan.source_regions[route.source_region];
-        let left = &plan.left_regions[route.left_region.expect("nonzero route has left region")];
-        let right =
-            &plan.right_regions[route.right_region.expect("nonzero route has right region")];
-        let source_data = &input.data()[source.range()];
-        let adjoint = &mut adjoint_scratch[..source_data.len()];
-        adjoint_col_major_into(source_data, source.rows(), source.cols(), adjoint);
-        #[cfg(test)]
-        record_compact_lq_adjoint_fill::<D>(source_data.len());
+    let data = input.data();
+    in_linalg_scope(dense, |dense| {
+        for route in plan.routes.iter().copied() {
+            if route.rank == 0 {
+                continue;
+            }
+            let source = &plan.source_regions[route.source_region];
+            let left =
+                &plan.left_regions[route.left_region.expect("nonzero route has left region")];
+            let right =
+                &plan.right_regions[route.right_region.expect("nonzero route has right region")];
+            let source_data = &data[source.range()];
+            let adjoint = &mut adjoint_scratch[..source_data.len()];
+            adjoint_col_major_into(source_data, source.rows(), source.cols(), adjoint);
+            #[cfg(test)]
+            record_compact_lq_adjoint_fill::<D>(source_data.len());
 
-        let (mut q_prime, mut r_prime) =
-            compact_qr_owned(dense, adjoint, source.cols(), source.rows())?;
-        positive_diagonal_gauge_strided(
-            &mut q_prime,
-            source.cols(),
-            source.cols(),
-            &mut r_prime,
-            route.rank,
-            route.rank,
-            source.rows(),
-        );
-        adjoint_col_major_into(
-            &r_prime,
-            route.rank,
-            source.rows(),
-            &mut left_data[left.range()],
-        );
-        #[cfg(test)]
-        record_compact_lq_final_adjoint_copy::<D>(r_prime.len());
-        adjoint_col_major_into(
-            &q_prime,
-            source.cols(),
-            route.rank,
-            &mut right_data[right.range()],
-        );
-        #[cfg(test)]
-        record_compact_lq_final_adjoint_copy::<D>(q_prime.len());
-    }
+            let (mut q_prime, mut r_prime) =
+                compact_qr_owned(dense, adjoint, source.cols(), source.rows())?;
+            positive_diagonal_gauge_strided(
+                &mut q_prime,
+                source.cols(),
+                source.cols(),
+                &mut r_prime,
+                route.rank,
+                route.rank,
+                source.rows(),
+            );
+            adjoint_col_major_into(
+                &r_prime,
+                route.rank,
+                source.rows(),
+                &mut left_data[left.range()],
+            );
+            #[cfg(test)]
+            record_compact_lq_final_adjoint_copy::<D>(r_prime.len());
+            adjoint_col_major_into(
+                &q_prime,
+                source.cols(),
+                route.rank,
+                &mut right_data[right.range()],
+            );
+            #[cfg(test)]
+            record_compact_lq_final_adjoint_copy::<D>(q_prime.len());
+        }
+        Ok(())
+    })?;
 
     let left = BoundDynFactor::from_bound(left_space, left_data, space.nout(), 1)?;
     let right = BoundDynFactor::from_bound(right_space, right_data, 1, space.nin())?;
@@ -5985,6 +6032,37 @@ where
             D::dense_write(r_view),
         )
         .map_err(OperationError::Dense)
+}
+
+/// Runs one streaming per-block factorization loop inside a single executor
+/// linear-algebra scope: the backend admits the call once, while the loop
+/// still holds only one block's input and output at a time. Batching through
+/// `factorize_batch` would instead hold every block's factors at once.
+fn in_linalg_scope<E, T>(
+    dense: &mut E,
+    body: impl FnOnce(&mut dyn DenseExecutor) -> Result<T, OperationError> + Send,
+) -> Result<T, OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    T: Send,
+{
+    let mut body = Some(body);
+    let mut outcome = None;
+    dense
+        .with_linalg_scope(&mut |dense| {
+            if let Some(body) = body.take() {
+                outcome = Some(body(dense));
+            }
+            Ok(())
+        })
+        .map_err(OperationError::Dense)?;
+    outcome.unwrap_or_else(|| {
+        Err(OperationError::Dense(DenseError::Backend {
+            backend: DenseBackend::Tenferro,
+            op: "with_linalg_scope",
+            message: "dense executor returned without running the scope body".to_string(),
+        }))
+    })
 }
 
 /// Compact QR owns both dense outputs, so it can transfer the executor's host
@@ -7540,64 +7618,71 @@ where
 
     let mut output_data = vec![D::zero(); output_space.space().required_len()?];
     let mut staged = Vec::with_capacity(routes.len());
-    for route in routes {
-        let source = &source_regions[route.source];
-        let rows = source.rows();
-        let cols = source.cols();
-        let rank = rows.min(cols);
-        let (u, singular_values, vt) = if rank == 0 {
-            (Vec::new(), Vec::new(), Vec::new())
-        } else {
-            compact_svd_owned(dense, &input.data()[source.range()], rows, cols)?
-        };
-        staged.push(Stage {
-            route,
-            rows,
-            cols,
-            rank,
-            u,
-            singular_values,
-            vt,
-        });
-    }
-    let cutoff = pinv_cutoff(
-        staged
-            .iter()
-            .flat_map(|stage| stage.singular_values.iter().copied()),
-        rcond,
-    )?;
-    for stage in staged {
-        if stage.rank == 0 {
-            continue;
+    let data = input.data();
+    // One scope spans both passes: the staged SVDs and the per-sector
+    // reconstruction GEMMs.
+    in_linalg_scope(dense, |dense| {
+        for route in routes {
+            let source = &source_regions[route.source];
+            let rows = source.rows();
+            let cols = source.cols();
+            let rank = rows.min(cols);
+            let (u, singular_values, vt) = if rank == 0 {
+                (Vec::new(), Vec::new(), Vec::new())
+            } else {
+                compact_svd_owned(dense, &data[source.range()], rows, cols)?
+            };
+            staged.push(Stage {
+                route,
+                rows,
+                cols,
+                rank,
+                u,
+                singular_values,
+                vt,
+            });
         }
-        let mut vt = stage.vt;
-        for (row, &sigma) in stage.singular_values.iter().enumerate() {
-            let reciprocal = D::from_real(if sigma > cutoff { 1.0 / sigma } else { 0.0 });
-            for column in 0..stage.cols {
-                vt[row + stage.rank * column] = vt[row + stage.rank * column] * reciprocal;
+        let cutoff = pinv_cutoff(
+            staged
+                .iter()
+                .flat_map(|stage| stage.singular_values.iter().copied()),
+            rcond,
+        )?;
+        for stage in staged {
+            if stage.rank == 0 {
+                continue;
             }
+            let mut vt = stage.vt;
+            for (row, &sigma) in stage.singular_values.iter().enumerate() {
+                let reciprocal = D::from_real(if sigma > cutoff { 1.0 / sigma } else { 0.0 });
+                for column in 0..stage.cols {
+                    vt[row + stage.rank * column] = vt[row + stage.rank * column] * reciprocal;
+                }
+            }
+            let output = &mut output_data[output_regions[stage.route.output].range()];
+            let output_shape = [stage.cols, stage.rows];
+            let output_strides = [1, stage.cols];
+            let v_shape = [stage.cols, stage.rank];
+            let v_strides = [stage.rank, 1];
+            let uh_shape = [stage.rank, stage.rows];
+            let uh_strides = [stage.rows, 1];
+            let output_view = DenseViewMut::new(output, &output_shape, &output_strides, 0)
+                .map_err(OperationError::Dense)?;
+            let v_view =
+                DenseView::new(&vt, &v_shape, &v_strides, 0).map_err(OperationError::Dense)?;
+            let uh_view = DenseView::new(&stage.u, &uh_shape, &uh_strides, 0)
+                .map_err(OperationError::Dense)?;
+            dense
+                .dot_general_into(
+                    D::dense_write(output_view),
+                    D::dense_read(v_view),
+                    D::dense_read(uh_view),
+                    &DenseDotConfig::matmul().with_conjugation(true, true),
+                )
+                .map_err(OperationError::Dense)?;
         }
-        let output = &mut output_data[output_regions[stage.route.output].range()];
-        let output_shape = [stage.cols, stage.rows];
-        let output_strides = [1, stage.cols];
-        let v_shape = [stage.cols, stage.rank];
-        let v_strides = [stage.rank, 1];
-        let uh_shape = [stage.rank, stage.rows];
-        let uh_strides = [stage.rows, 1];
-        let output_view = DenseViewMut::new(output, &output_shape, &output_strides, 0)
-            .map_err(OperationError::Dense)?;
-        let v_view = DenseView::new(&vt, &v_shape, &v_strides, 0).map_err(OperationError::Dense)?;
-        let uh_view =
-            DenseView::new(&stage.u, &uh_shape, &uh_strides, 0).map_err(OperationError::Dense)?;
-        dense
-            .dot_general_into(
-                D::dense_write(output_view),
-                D::dense_read(v_view),
-                D::dense_read(uh_view),
-                &DenseDotConfig::matmul().with_conjugation(true, true),
-            )
-            .map_err(OperationError::Dense)?;
-    }
+        Ok(())
+    })?;
     BoundDynFactor::from_bound(
         output_space,
         output_data,
@@ -7938,27 +8023,29 @@ where
         direction,
     )?;
 
-    let mut stages = Vec::with_capacity(routes.len());
-    for route in &routes {
-        let region = &source_regions[route.source];
-        stages.push(
-            compact_svd_numerical_stage(
+    let data = input.data();
+    // One scope spans the staged SVDs and the per-sector polar products.
+    let (w_data, p_data) = in_linalg_scope(dense, |dense| {
+        let mut stages = Vec::with_capacity(routes.len());
+        for route in &routes {
+            let region = &source_regions[route.source];
+            stages.push(compact_svd_numerical_stage(
                 dense,
-                &input.data()[region.range()],
+                &data[region.range()],
                 region.rows(),
                 region.cols(),
-            )
-            .map_err(CheckedGenericFactorPlanError::from)?,
-        );
-    }
-    let mut w_data = vec![D::zero(); w_len];
-    let mut p_data = vec![D::zero(); p_len];
-    for (route, stage) in routes.iter().zip(&stages) {
-        let (w, p) = checked_generic_polar_products(dense, stage, direction)
-            .map_err(CheckedGenericFactorPlanError::from)?;
-        w_data[w_regions[route.w].range()].copy_from_slice(&w);
-        p_data[p_regions[route.p].range()].copy_from_slice(&p);
-    }
+            )?);
+        }
+        let mut w_data = vec![D::zero(); w_len];
+        let mut p_data = vec![D::zero(); p_len];
+        for (route, stage) in routes.iter().zip(&stages) {
+            let (w, p) = checked_generic_polar_products(dense, stage, direction)?;
+            w_data[w_regions[route.w].range()].copy_from_slice(&w);
+            p_data[p_regions[route.p].range()].copy_from_slice(&p);
+        }
+        Ok((w_data, p_data))
+    })
+    .map_err(CheckedGenericFactorPlanError::from)?;
 
     let w = BoundDynFactor::from_bound(w_space, w_data, source_space.nout(), source_space.nin())
         .map_err(CheckedGenericFactorPlanError::from)?;
@@ -10148,50 +10235,54 @@ where
     let index = PlacementIndex::new(&matricizations, &[FactorSide::Left, FactorSide::Right]);
     let u_groups = SectorBlockGroups::new(u_space.space().structure(), FactorSide::Left)?;
     let vt_groups = SectorBlockGroups::new(vt_space.space().structure(), FactorSide::Right)?;
-    for matrix in &matricizations {
-        let rank = matrix.rows.min(matrix.cols);
-        let (mut u, values, mut vt) =
-            compact_svd_owned(dense, &matrix.data, matrix.rows, matrix.cols)?;
-        svd_compact_gauge(
-            &mut u,
-            matrix.rows,
-            matrix.rows,
-            &mut vt,
-            rank,
-            matrix.cols,
-            rank,
-        );
-        #[cfg(test)]
-        record_generic_compact_svd_fallback_gauge(&u, &vt);
+    let (u_target, vt_target) = (u_space.space(), vt_space.space());
+    in_linalg_scope(dense, |dense| {
+        for matrix in &matricizations {
+            let rank = matrix.rows.min(matrix.cols);
+            let (mut u, values, mut vt) =
+                compact_svd_owned(dense, &matrix.data, matrix.rows, matrix.cols)?;
+            svd_compact_gauge(
+                &mut u,
+                matrix.rows,
+                matrix.rows,
+                &mut vt,
+                rank,
+                matrix.cols,
+                rank,
+            );
+            #[cfg(test)]
+            record_generic_compact_svd_fallback_gauge(&u, &vt);
 
-        singular_values.push(SectorSpectrum {
-            sector: matrix.sector,
-            values,
-        });
-        scatter_left_sector_blocks_generic(
-            u_space.space(),
-            &mut u_data,
-            matrix,
-            &index,
-            &u_groups,
-            &u,
-            matrix.rows,
-        )?;
-        scatter_right_sector_blocks_generic(
-            vt_space.space(),
-            &mut vt_data,
-            matrix,
-            &index,
-            &vt_groups,
-            &vt,
-            rank,
-        )?;
-        #[cfg(test)]
-        {
-            record_compact_svd_output_scatter::<D>(matrix.rows * rank);
-            record_compact_svd_output_scatter::<D>(rank * matrix.cols);
+            singular_values.push(SectorSpectrum {
+                sector: matrix.sector,
+                values,
+            });
+            scatter_left_sector_blocks_generic(
+                u_target,
+                &mut u_data,
+                matrix,
+                &index,
+                &u_groups,
+                &u,
+                matrix.rows,
+            )?;
+            scatter_right_sector_blocks_generic(
+                vt_target,
+                &mut vt_data,
+                matrix,
+                &index,
+                &vt_groups,
+                &vt,
+                rank,
+            )?;
+            #[cfg(test)]
+            {
+                record_compact_svd_output_scatter::<D>(matrix.rows * rank);
+                record_compact_svd_output_scatter::<D>(rank * matrix.cols);
+            }
         }
-    }
+        Ok(())
+    })?;
 
     let u = BoundDynFactor::from_bound(u_space, u_data, space.nout(), 1)?;
     let vh = BoundDynFactor::from_bound(vt_space, vt_data, 1, space.nin())?;
@@ -10940,32 +11031,30 @@ where
     }
     let mut pairs = Vec::with_capacity(matrices.len());
     let mut singular_values = Vec::with_capacity(matrices.len());
-    for index in 0..matrices.len() {
-        let matrix = matrices
-            .get(index)
-            .map_err(CheckedGenericFactorPlanError::from)?;
-        #[cfg(test)]
-        record_checked_compact_input(
-            CheckedCompactOperation::Svd,
-            input.data(),
-            matrix.data,
-            None,
-        );
-        let stage = compact_svd_numerical_stage(dense, matrix.data, matrix.rows, matrix.cols)
-            .map_err(CheckedGenericFactorPlanError::from)?;
-        singular_values.push(SectorSpectrum {
-            sector: matrix.sector,
-            values: stage.singular_values,
-        });
-        pairs.push(FactorPair {
-            sector: matrix.sector,
-            kept: stage.rank,
-            left: stage.u,
-            left_rows: stage.rows,
-            right: stage.vt,
-            right_leading: stage.rank,
-        });
-    }
+    #[cfg(test)]
+    let data = input.data();
+    in_linalg_scope(dense, |dense| {
+        for index in 0..matrices.len() {
+            let matrix = matrices.get(index)?;
+            #[cfg(test)]
+            record_checked_compact_input(CheckedCompactOperation::Svd, data, matrix.data, None);
+            let stage = compact_svd_numerical_stage(dense, matrix.data, matrix.rows, matrix.cols)?;
+            singular_values.push(SectorSpectrum {
+                sector: matrix.sector,
+                values: stage.singular_values,
+            });
+            pairs.push(FactorPair {
+                sector: matrix.sector,
+                kept: stage.rank,
+                left: stage.u,
+                left_rows: stage.rows,
+                right: stage.vt,
+                right_leading: stage.rank,
+            });
+        }
+        Ok(())
+    })
+    .map_err(CheckedGenericFactorPlanError::from)?;
     let (u, vh) = build_checked_pair_from_input(provider, space.homspace(), &matrices, pairs)?;
     let s = diagonal_bond_svd_factor_generic_checked(
         Arc::clone(provider),
@@ -11000,42 +11089,45 @@ where
         record_compact_lq_input_pack(matrices);
     }
     let mut pairs = Vec::with_capacity(matrices.len());
-    for index in 0..matrices.len() {
-        let matrix = matrices
-            .get(index)
-            .map_err(CheckedGenericFactorPlanError::from)?;
-        let rank = matrix.rows.min(matrix.cols);
-        #[cfg(test)]
-        record_compact_lq_adjoint_fill::<D>(matrix.data.len());
-        let adjoint = adjoint_col_major(matrix.data, matrix.rows, matrix.cols);
-        #[cfg(test)]
-        record_checked_compact_input(
-            CheckedCompactOperation::Lq,
-            input.data(),
-            matrix.data,
-            Some(&adjoint),
-        );
-        let (mut q_prime, mut r_prime) =
-            compact_qr_owned(dense, &adjoint, matrix.cols, matrix.rows)
-                .map_err(CheckedGenericFactorPlanError::from)?;
-        positive_diagonal_gauge_strided(
-            &mut q_prime,
-            matrix.cols,
-            matrix.cols,
-            &mut r_prime,
-            rank,
-            rank,
-            matrix.rows,
-        );
-        pairs.push(FactorPair {
-            sector: matrix.sector,
-            kept: rank,
-            left: adjoint_col_major(&r_prime, rank, matrix.rows),
-            left_rows: matrix.rows,
-            right: adjoint_col_major(&q_prime, matrix.cols, rank),
-            right_leading: rank,
-        });
-    }
+    #[cfg(test)]
+    let data = input.data();
+    in_linalg_scope(dense, |dense| {
+        for index in 0..matrices.len() {
+            let matrix = matrices.get(index)?;
+            let rank = matrix.rows.min(matrix.cols);
+            #[cfg(test)]
+            record_compact_lq_adjoint_fill::<D>(matrix.data.len());
+            let adjoint = adjoint_col_major(matrix.data, matrix.rows, matrix.cols);
+            #[cfg(test)]
+            record_checked_compact_input(
+                CheckedCompactOperation::Lq,
+                data,
+                matrix.data,
+                Some(&adjoint),
+            );
+            let (mut q_prime, mut r_prime) =
+                compact_qr_owned(dense, &adjoint, matrix.cols, matrix.rows)?;
+            positive_diagonal_gauge_strided(
+                &mut q_prime,
+                matrix.cols,
+                matrix.cols,
+                &mut r_prime,
+                rank,
+                rank,
+                matrix.rows,
+            );
+            pairs.push(FactorPair {
+                sector: matrix.sector,
+                kept: rank,
+                left: adjoint_col_major(&r_prime, rank, matrix.rows),
+                left_rows: matrix.rows,
+                right: adjoint_col_major(&q_prime, matrix.cols, rank),
+                right_leading: rank,
+            });
+        }
+        Ok(())
+    })
+    .map_err(CheckedGenericFactorPlanError::from)?;
     build_checked_pair_from_input(provider, space.homspace(), &matrices, pairs)
 }
 
@@ -11360,35 +11452,38 @@ where
     let mut column_scratch = vec![D::zero(); max_n];
     let mut eigenvalues = Vec::with_capacity(matrices.len());
     let mut pairs = Vec::with_capacity(matrices.len());
-    for matrix in &matrices {
-        let n = matrix.rows;
-        let (real_values, mut vectors) = compact_eigh_owned(dense, &matrix.data, n)
-            .map_err(CheckedGenericFactorPlanError::from)?;
-        validate_real_eigenvalues(&real_values).map_err(CheckedGenericFactorPlanError::from)?;
-        order.clear();
-        order.extend(0..n);
-        order.sort_by(|&a, &b| {
-            real_values[b]
-                .abs()
-                .total_cmp(&real_values[a].abs())
-                .then(a.cmp(&b))
-        });
-        let sorted_values = order.iter().map(|&index| real_values[index]).collect();
-        reorder_columns_in_place(&mut vectors, n, &order, &mut visited, &mut column_scratch);
-        eigenvector_gauge(&mut vectors, n, n, n);
-        eigenvalues.push(SectorSpectrum {
-            sector: matrix.sector,
-            values: sorted_values,
-        });
-        pairs.push(FactorPair {
-            sector: matrix.sector,
-            kept: n,
-            left: vectors,
-            left_rows: n,
-            right: Vec::new(),
-            right_leading: 0,
-        });
-    }
+    in_linalg_scope(dense, |dense| {
+        for matrix in &matrices {
+            let n = matrix.rows;
+            let (real_values, mut vectors) = compact_eigh_owned(dense, &matrix.data, n)?;
+            validate_real_eigenvalues(&real_values)?;
+            order.clear();
+            order.extend(0..n);
+            order.sort_by(|&a, &b| {
+                real_values[b]
+                    .abs()
+                    .total_cmp(&real_values[a].abs())
+                    .then(a.cmp(&b))
+            });
+            let sorted_values = order.iter().map(|&index| real_values[index]).collect();
+            reorder_columns_in_place(&mut vectors, n, &order, &mut visited, &mut column_scratch);
+            eigenvector_gauge(&mut vectors, n, n, n);
+            eigenvalues.push(SectorSpectrum {
+                sector: matrix.sector,
+                values: sorted_values,
+            });
+            pairs.push(FactorPair {
+                sector: matrix.sector,
+                kept: n,
+                left: vectors,
+                left_rows: n,
+                right: Vec::new(),
+                right_leading: 0,
+            });
+        }
+        Ok(())
+    })
+    .map_err(CheckedGenericFactorPlanError::from)?;
     let dimensions = matrices
         .iter()
         .map(|matrix| (matrix.sector, matrix.rows))
@@ -11840,29 +11935,32 @@ where
     #[cfg(test)]
     record_compact_lq_input_pack(&matrices);
     let mut pairs = Vec::with_capacity(matrices.len());
-    for matrix in &matrices {
-        let rank = matrix.rows.min(matrix.cols);
-        let adjoint = adjoint_col_major(&matrix.data, matrix.rows, matrix.cols);
-        let (mut q_prime, mut r_prime) =
-            compact_qr_owned(dense, &adjoint, matrix.cols, matrix.rows)?;
-        positive_diagonal_gauge_strided(
-            &mut q_prime,
-            matrix.cols,
-            matrix.cols,
-            &mut r_prime,
-            rank,
-            rank,
-            matrix.rows,
-        );
-        pairs.push(FactorPair {
-            sector: matrix.sector,
-            kept: rank,
-            left: adjoint_col_major(&r_prime, rank, matrix.rows),
-            left_rows: matrix.rows,
-            right: adjoint_col_major(&q_prime, matrix.cols, rank),
-            right_leading: rank,
-        });
-    }
+    in_linalg_scope(dense, |dense| {
+        for matrix in &matrices {
+            let rank = matrix.rows.min(matrix.cols);
+            let adjoint = adjoint_col_major(&matrix.data, matrix.rows, matrix.cols);
+            let (mut q_prime, mut r_prime) =
+                compact_qr_owned(dense, &adjoint, matrix.cols, matrix.rows)?;
+            positive_diagonal_gauge_strided(
+                &mut q_prime,
+                matrix.cols,
+                matrix.cols,
+                &mut r_prime,
+                rank,
+                rank,
+                matrix.rows,
+            );
+            pairs.push(FactorPair {
+                sector: matrix.sector,
+                kept: rank,
+                left: adjoint_col_major(&r_prime, rank, matrix.rows),
+                left_rows: matrix.rows,
+                right: adjoint_col_major(&q_prime, matrix.cols, rank),
+                right_leading: rank,
+            });
+        }
+        Ok(())
+    })?;
     #[cfg(test)]
     let scatter_before = generic_pair_publication_probe();
     let result = build_left_right_bound_pair_generic(provider, space.homspace(), &matrices, pairs);

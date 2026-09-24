@@ -243,3 +243,220 @@ fn qr_fallback_and_checked_generic_routes_open_one_session_at_one_thread() {
 fn qr_fallback_and_checked_generic_routes_open_one_session_at_default_threads() {
     assert_fallback_and_checked_generic_routes_open_one_session(DefaultDenseExecutor::new());
 }
+
+// #1389: the streaming per-block loops enter one Tenferro execution scope per
+// call. `sessions_opened` still counts one session per dense factorization,
+// while `admissions` counts the permit acquisitions (under default threads,
+// Rayon pool hops) those sessions cost: one per call.
+
+fn admissions_during<T>(call: impl FnOnce() -> T) -> (u64, u64) {
+    let before = cpu_session_stats();
+    let _ = call();
+    let after = cpu_session_stats();
+    (
+        after.sessions_opened - before.sessions_opened,
+        after.admissions - before.admissions,
+    )
+}
+
+fn hermitian_u1_tensor(charges: &[i32]) -> BoundTensorMap<U1FusionRule, f64, 2, 2> {
+    let tensor = u1_tensor(charges);
+    let mut data = tensor.data().to_vec();
+    symmetrize(tensor.space().space().structure(), 2, &mut data);
+    BoundTensorMap::try_new(
+        Arc::new(U1FusionRule),
+        TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
+            data,
+            tensor.tensor().fusion_space().unwrap().as_ref().clone(),
+        )
+        .unwrap(),
+    )
+    .unwrap()
+}
+
+fn symmetrize(structure: &tenet_core::BlockStructure, nout: usize, data: &mut [f64]) {
+    let regions = structure.coupled_sector_regions(nout).unwrap().unwrap();
+    for region in regions.iter() {
+        let n = region.rows();
+        let block = &mut data[region.range()];
+        for c in 0..n {
+            for r in 0..c {
+                let value = 0.5 * (block[r + n * c] + block[c + n * r]);
+                block[r + n * c] = value;
+                block[c + n * r] = value;
+            }
+        }
+    }
+}
+
+fn toy_leg(d0: usize, d1: usize) -> SectorLeg {
+    SectorLeg::new([(SectorId::new(0), d0), (SectorId::new(1), d1)], false)
+}
+
+fn toy_data(len: usize) -> Vec<f64> {
+    (0..len)
+        .map(|i| 1.0 + ((i * 7 + 3) % 13) as f64 / 8.0)
+        .collect()
+}
+
+fn assert_one_admission(label: &str, (sessions, admissions): (u64, u64)) {
+    assert!(
+        sessions > 1,
+        "{label}: fixture must factorize several blocks"
+    );
+    assert_eq!(admissions, 1, "{label}: {sessions} sessions");
+}
+
+fn assert_streaming_sites_admit_once(mut dense: DefaultDenseExecutor) {
+    use tenet_matrixalgebra::{
+        eigh_full_dyn, eigh_full_dyn_checked_generic, left_null_dyn, left_null_dyn_checked_generic,
+        left_polar_dyn_checked_generic, lq_compact_dyn, lq_compact_dyn_checked_generic,
+        lq_compact_dyn_generic, pinv_direct_into_dyn, right_null_dyn,
+        right_null_dyn_checked_generic, svd_compact_dyn_checked_generic, svd_compact_factors_dyn,
+        svd_compact_factors_dyn_generic,
+    };
+    let _guard = COUNTER_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let dense = &mut dense;
+
+    let bound = u1_tensor(&[-1, 0, 1]);
+    let direct = BoundDynamicTensorRef::try_new(bound.space(), bound.data()).unwrap();
+    let adjoint = bound.space().adjoint_view().unwrap();
+    let matricized = BoundDynamicTensorRef::try_new(&adjoint, bound.data()).unwrap();
+    assert_one_admission(
+        "lq direct",
+        admissions_during(|| lq_compact_dyn(dense, &direct).unwrap()),
+    );
+    assert_one_admission(
+        "lq matricized",
+        admissions_during(|| lq_compact_dyn(dense, &matricized).unwrap()),
+    );
+    assert_one_admission(
+        "svd matricized",
+        admissions_during(|| svd_compact_factors_dyn(dense, &matricized).unwrap()),
+    );
+    assert_one_admission(
+        "left_null",
+        admissions_during(|| left_null_dyn(dense, &direct).unwrap()),
+    );
+    assert_one_admission(
+        "right_null",
+        admissions_during(|| right_null_dyn(dense, &direct).unwrap()),
+    );
+    let hermitian = hermitian_u1_tensor(&[-1, 0, 1]);
+    let h_direct = BoundDynamicTensorRef::try_new(hermitian.space(), hermitian.data()).unwrap();
+    let h_adjoint = hermitian.space().adjoint_view().unwrap();
+    let h_matricized = BoundDynamicTensorRef::try_new(&h_adjoint, hermitian.data()).unwrap();
+    assert_one_admission(
+        "eigh direct",
+        admissions_during(|| eigh_full_dyn(dense, &h_direct).unwrap()),
+    );
+    assert_one_admission(
+        "eigh matricized",
+        admissions_during(|| eigh_full_dyn(dense, &h_matricized).unwrap()),
+    );
+
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([toy_leg(2, 2), toy_leg(1, 2)]),
+        FusionProductSpace::new([toy_leg(2, 1)]),
+    );
+    let space = BoundDynamicFusionMapSpace::from_final_homspace_generic(
+        Arc::new(ToyGenericRule),
+        homspace.clone(),
+    )
+    .unwrap();
+    let data = toy_data(space.space().required_len().unwrap());
+    let generic = BoundDynamicTensorRef::try_new(&space, &data).unwrap();
+    let generic_adjoint = space.adjoint_view().unwrap();
+    let generic_matricized = BoundDynamicTensorRef::try_new(&generic_adjoint, &data).unwrap();
+    assert_one_admission(
+        "generic lq direct",
+        admissions_during(|| lq_compact_dyn_generic(dense, &generic).unwrap()),
+    );
+    assert_one_admission(
+        "generic lq matricized",
+        admissions_during(|| lq_compact_dyn_generic(dense, &generic_matricized).unwrap()),
+    );
+    assert_one_admission(
+        "generic svd matricized",
+        admissions_during(|| svd_compact_factors_dyn_generic(dense, &generic_matricized).unwrap()),
+    );
+
+    let provider = Arc::new(CheckedToyRule);
+    let checked = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+        Arc::clone(&provider),
+        homspace,
+    )
+    .unwrap();
+    let data = toy_data(checked.space().required_len().unwrap());
+    let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
+    assert_one_admission(
+        "checked lq",
+        admissions_during(|| lq_compact_dyn_checked_generic(dense, &input).unwrap()),
+    );
+    assert_one_admission(
+        "checked svd",
+        admissions_during(|| svd_compact_dyn_checked_generic(dense, &input).unwrap()),
+    );
+    assert_one_admission(
+        "checked left_null",
+        admissions_during(|| left_null_dyn_checked_generic(dense, &input).unwrap()),
+    );
+    assert_one_admission(
+        "checked right_null",
+        admissions_during(|| right_null_dyn_checked_generic(dense, &input).unwrap()),
+    );
+
+    // Polar and pinv read canonical coupled-sector storage: a 1 <- 1 map.
+    let matrix = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+        Arc::clone(&provider),
+        FusionTreeHomSpace::new(
+            FusionProductSpace::new([toy_leg(3, 2)]),
+            FusionProductSpace::new([toy_leg(2, 1)]),
+        ),
+    )
+    .unwrap();
+    let data = toy_data(matrix.space().required_len().unwrap());
+    let input = BoundDynamicTensorRef::try_new(&matrix, &data).unwrap();
+    assert_one_admission(
+        "checked left_polar",
+        admissions_during(|| left_polar_dyn_checked_generic(dense, &input).unwrap()),
+    );
+    let swapped = FusionTreeHomSpace::new(
+        matrix.space().homspace().domain().clone(),
+        matrix.space().homspace().codomain().clone(),
+    );
+    let output = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+        Arc::clone(&provider),
+        swapped,
+    )
+    .unwrap();
+    assert_one_admission(
+        "checked pinv",
+        admissions_during(|| pinv_direct_into_dyn(dense, &input, output, 1e-12).unwrap()),
+    );
+
+    let endomorphism = FusionTreeHomSpace::new(
+        FusionProductSpace::new([toy_leg(1, 2), toy_leg(2, 1)]),
+        FusionProductSpace::new([toy_leg(1, 2), toy_leg(2, 1)]),
+    );
+    let endo =
+        BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(provider, endomorphism)
+            .unwrap();
+    let mut data = toy_data(endo.space().required_len().unwrap());
+    symmetrize(endo.space().structure(), endo.space().nout(), &mut data);
+    let input = BoundDynamicTensorRef::try_new(&endo, &data).unwrap();
+    assert_one_admission(
+        "checked eigh",
+        admissions_during(|| eigh_full_dyn_checked_generic(dense, &input).unwrap()),
+    );
+}
+
+#[test]
+fn streaming_factorization_sites_admit_once_per_call_at_one_thread() {
+    assert_streaming_sites_admit_once(DefaultDenseExecutor::with_threads(1).unwrap());
+}
+
+#[test]
+fn streaming_factorization_sites_admit_once_per_call_at_default_threads() {
+    assert_streaming_sites_admit_once(DefaultDenseExecutor::new());
+}

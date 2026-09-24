@@ -102,3 +102,64 @@ fn fz2_u1_compact_factorizations_open_one_session() {
         assert_one_session_per_factorization!(&runtime, rule(), Complex64, sectors(), 2, 1);
     }
 }
+
+/// #1389: the streaming factorizations enter a Tenferro execution scope that
+/// holds the process permit for the whole call. Calls from a worker of a
+/// foreign Rayon pool, inside a `rayon::join`, and concurrent calls from
+/// plain threads must serialize on that permit without deadlock or panic and
+/// return the serial results.
+///
+/// Not covered: concurrent calls from several workers of one foreign pool.
+/// A worker blocked in Tenferro's pool install steals a sibling job that
+/// re-enters Tenferro, which panics in Tenferro's re-entry guard with or
+/// without the scope.
+#[test]
+fn streaming_factorizations_from_rayon_workers_and_threads_match_serial_results() {
+    let _guard = COUNTER_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let runtime = Runtime::builder().build().unwrap();
+    let leg =
+        GradedSpace::try_new(U1FusionRule, centered(5).map(|q| (U1Irrep::new(q), 2))).unwrap();
+    let tensors = (0..6)
+        .map(|seed| TensorMap::<_, f64>::rand_with_seed(&runtime, [&leg, &leg], [&leg], seed))
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let run = |tensor: &TensorMap<U1FusionRule, f64>| {
+        let (l, q) = tensor.lq_compact().unwrap();
+        let null = tensor.left_null().unwrap();
+        let (w, v) = tensor
+            .compose(&tensor.adjoint().unwrap())
+            .unwrap()
+            .eigh_full()
+            .unwrap();
+        [l, q, null, w, v]
+            .iter()
+            .flat_map(|factor| {
+                factor
+                    .data()
+                    .iter()
+                    .map(|x| x.to_bits())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<u64>>()
+    };
+    let serial = tensors.iter().map(run).collect::<Vec<_>>();
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(3)
+        .build()
+        .unwrap();
+    let pooled = pool.install(|| run(&tensors[1]));
+    assert_eq!(pooled, serial[1]);
+    let joined = pool.install(|| rayon::join(|| run(&tensors[2]), || (0..1000u64).sum::<u64>()));
+    assert_eq!(joined.0, serial[2]);
+    let threaded = std::thread::scope(|scope| {
+        let handles = tensors
+            .iter()
+            .map(|tensor| scope.spawn(|| run(tensor)))
+            .collect::<Vec<_>>();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(threaded, serial);
+}

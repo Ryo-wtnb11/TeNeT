@@ -1,0 +1,58 @@
+f64 u1 lq direct                             digest=af1ecad026f30a6d peak_bytes=  66612 sessions=5
+f64 u1 lq matricized                         digest=4f1ccbf2544f7c85 peak_bytes=  20840 sessions=5
+f64 u1 svd matricized                        digest=7eab1f8f2240d7bc peak_bytes=  33640 sessions=5
+f64 u1 left_null                             digest=0c2d6bc77b366ce9 peak_bytes=  25952 sessions=5
+f64 u1 right_null                            digest=b024d58a01102503 peak_bytes=  25952 sessions=5
+f64 u1 eigh direct                           digest=758f30c640836816 peak_bytes=  27628 sessions=5
+f64 u1 eigh matricized                       digest=758f30c640836816 peak_bytes=  24148 sessions=5
+f64 generic lq direct                        digest=1657c5773f4e3ddb peak_bytes=  26832 sessions=2
+f64 generic lq matricized                    digest=182e613524235260 peak_bytes=  17824 sessions=2
+f64 generic svd matricized                   digest=ae488d47f5ec3654 peak_bytes=  25848 sessions=2
+f64 checked lq                               digest=46021ff302e3d0d9 peak_bytes=  11256 sessions=2
+f64 checked svd                              digest=c853fa3a9ab3ebf5 peak_bytes=  15496 sessions=2
+f64 checked left_null                        digest=1ab513faba18196d peak_bytes=  20704 sessions=4
+f64 checked right_null                       digest=af63bd4c8601b7df peak_bytes=  15336 sessions=2
+f64 checked left_polar                       digest=11e1a81697014d28 peak_bytes=  22000 sessions=2
+f64 checked pinv                             digest=5450e00e0a0131de peak_bytes=  19336 sessions=2
+f64 checked eigh                             digest=82a81bb31db3eb15 peak_bytes=  13389 sessions=2
+c64 u1 lq direct                             digest=4afaab7b8970022c peak_bytes=  57496 sessions=5
+c64 u1 lq matricized                         digest=178ef94842c0bfbf peak_bytes=  35912 sessions=5
+c64 u1 svd matricized                        digest=ec444f8a51a40c37 peak_bytes=  50696 sessions=5
+c64 u1 left_null                             digest=eb5bc75c1b9852ab peak_bytes=  38144 sessions=5
+c64 u1 right_null                            digest=19a3191cd77f3c75 peak_bytes=  38144 sessions=5
+c64 u1 eigh direct                           digest=c8f33eefbd44de31 peak_bytes=  34796 sessions=5
+c64 u1 eigh matricized                       digest=48f33eefbd44de31 peak_bytes=  36180 sessions=5
+c64 generic lq direct                        digest=d887369acb1448cc peak_bytes=  26832 sessions=2
+c64 generic lq matricized                    digest=f25a518f1893467a peak_bytes=  18280 sessions=2
+c64 generic svd matricized                   digest=6f31185a3220b998 peak_bytes=  26432 sessions=2
+c64 checked lq                               digest=8b50baf2a078efc3 peak_bytes=  11712 sessions=2
+c64 checked svd                              digest=6705ee5fdd0b4060 peak_bytes=  15952 sessions=2
+c64 checked left_null                        digest=7e966ba620bae46d peak_bytes=  33104 sessions=4
+c64 checked right_null                       digest=af63bd4c8601b7df peak_bytes=  15672 sessions=2
+c64 checked left_polar                       digest=7fb0cb59985b2ae5 peak_bytes=  22104 sessions=2
+c64 checked pinv                             digest=f2a42dd7c22a0725 peak_bytes=  19152 sessions=2
+c64 checked eigh                             digest=da43b1bef9dcec91 peak_bytes=  19665 sessions=2
+f64 facade u1 lq                             digest=2b6af717c983f2e5 peak_bytes=  47848 sessions=7
+f64 facade u1 left_null                      digest=7c5db29a015c4e47 peak_bytes= 135112 sessions=14
+f64 facade u1 right_null                     digest=af63bd4c8601b7df peak_bytes=  25488 sessions=7
+f64 facade u1 eigh                           digest=ce7b3b7eb631d706 peak_bytes= 301296 sessions=13
+f64 facade su2 lq                            digest=f9278d24f6e6b6c9 peak_bytes=  29512 sessions=4
+f64 facade su2 left_null                     digest=391fad653b2ba367 peak_bytes= 100848 sessions=8
+f64 facade su2 right_null                    digest=af63bd4c8601b7df peak_bytes=  20376 sessions=4
+f64 facade su2 eigh                          digest=26f1ddc3c9d3b3c7 peak_bytes= 219520 sessions=7
+f64 facade fz2xu1 lq                         digest=e9602c088ee575d6 peak_bytes=  38168 sessions=6
+f64 facade fz2xu1 left_null                  digest=26e13dd122fabf4b peak_bytes= 115200 sessions=12
+f64 facade fz2xu1 right_null                 digest=af63bd4c8601b7df peak_bytes=  22824 sessions=6
+f64 facade fz2xu1 eigh                       digest=290557a56a43061a peak_bytes= 257312 sessions=11
+c64 facade u1 lq                             digest=01ef20ceae2310b5 peak_bytes=  42064 sessions=7
+c64 facade u1 left_null                      digest=e4d012f87ddc013a peak_bytes= 153728 sessions=14
+c64 facade u1 right_null                     digest=af63bd4c8601b7df peak_bytes=  28336 sessions=7
+c64 facade u1 eigh                           digest=0f9f436da11e3678 peak_bytes= 342016 sessions=13
+c64 facade su2 lq                            digest=5cade24b6e60c6f6 peak_bytes=  26816 sessions=4
+c64 facade su2 left_null                     digest=671056e2a6e45619 peak_bytes= 136576 sessions=8
+c64 facade su2 right_null                    digest=af63bd4c8601b7df peak_bytes=  22328 sessions=4
+c64 facade su2 eigh                          digest=d8433f64c829b484 peak_bytes= 293184 sessions=7
+c64 facade fz2xu1 lq                         digest=c77bf4f88afd4811 peak_bytes=  32816 sessions=6
+c64 facade fz2xu1 left_null                  digest=ab62d15bf0ca87c4 peak_bytes= 133248 sessions=12
+c64 facade fz2xu1 right_null                 digest=af63bd4c8601b7df peak_bytes=  24968 sessions=6
+c64 facade fz2xu1 eigh                       digest=0fc4f69c09e51597 peak_bytes= 293568 sessions=11
