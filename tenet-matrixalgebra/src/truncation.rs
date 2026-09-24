@@ -503,7 +503,23 @@ fn kept_counts(spectra: &[WeightedSpectrum<'_>], truncation: &Truncation) -> Vec
         // The heap build is paid even for D = 0; no cutoff to the scan.
         Truncation::DiscardWeight { rtol } => {
             let norm = full_norm(spectra);
-            let budget = (rtol * norm) * (rtol * norm);
+            let bound = rtol * norm;
+            let budget = bound * bound;
+            let values: usize = spectra.iter().map(|spectrum| spectrum.values.len()).sum();
+            let slack = 1.0 + (values + 5) as f64 * f64::EPSILON;
+            // In range, the historical unscaled comparison. Out of range
+            // (#1440), `BudgetUnits` compares in exact power-of-two units
+            // instead: unscaled, `budget` or `limit` is `Inf` near 1e154
+            // (`Inf > Inf` never stops the scan, so everything is discarded),
+            // and `budget` is `0` or `rtol * norm` rounds to the subnormal
+            // grid near 1e-162 (a value whose square underflows, or one within
+            // that rounding of the bound, is discarded). An infinite `bound`
+            // needs `rtol > 1`, so discarding everything is the right answer
+            // and stays unscaled.
+            let in_range = bound.is_infinite()
+                || (budget >= UNSCALED_POWER_SUM_MIN && (budget * slack).is_finite());
+            let units = (!in_range).then(|| BudgetUnits::new(*rtol, norm));
+            let budget = units.map_or(budget, |units| units.budget);
             // Slack for the rounding of the two quantities compared, both of
             // order `budget` (`u = eps / 2`, `n` values, Higham gamma bounds
             // in this exact evaluation order):
@@ -530,8 +546,7 @@ fn kept_counts(spectra: &[WeightedSpectrum<'_>], truncation: &Truncation) -> Vec
             // discards while the running error is `<= budget`, which this
             // keeps, so a budget met exactly up to rounding discards that
             // state.
-            let values: usize = spectra.iter().map(|spectrum| spectrum.values.len()).sum();
-            let limit = budget * (1.0 + (values + 5) as f64 * f64::EPSILON);
+            let limit = budget * slack;
             let mut kept: Vec<usize> = spectra
                 .iter()
                 .map(|spectrum| spectrum.values.len())
@@ -546,7 +561,15 @@ fn kept_counts(spectra: &[WeightedSpectrum<'_>], truncation: &Truncation) -> Vec
             let mut tails = BinaryHeap::from(tails);
             let mut discarded = 0.0;
             while let Some(TailCandidate { value, sector }) = tails.pop() {
-                let next = discarded + spectra[sector].weight * value * value;
+                let weight = spectra[sector].weight;
+                let next = discarded
+                    + match units {
+                        None => weight * value * value,
+                        Some(units) => {
+                            let value = units.scaled(value);
+                            weight * value * value
+                        }
+                    };
                 if next > limit {
                     break;
                 }
@@ -585,6 +608,89 @@ fn kept_counts(spectra: &[WeightedSpectrum<'_>], truncation: &Truncation) -> Vec
             kept
         }
     }
+}
+
+/// The out-of-range `DiscardWeight` comparison in units of
+/// `2^e = floor2(rtol) * floor2(norm) * floor2(ρ ν)`, where `floor2` is
+/// [`power_of_two_floor`], `ρ = rtol / floor2(rtol)` and
+/// `ν = norm / floor2(norm)`, both in `[1, 2)` and exact.
+///
+/// `rtol * norm = ρ ν 2^e / floor2(ρ ν)`, so the budget in these units is
+/// `(ρ ν / floor2(ρ ν))^2` in `[1, 4)`, formed with the single rounding of
+/// `ρ ν` that the in-range `rtol * norm` also has. The bound itself is never
+/// formed, so it cannot round on the subnormal grid, and `e` is carried as an
+/// integer because `2^e` can lie outside the `f64` range. Each value is
+/// rescaled by `2^-e` in one direction only ([`scale_by_power_of_two`]), so
+/// the result is exact whenever it is normal: the decision is the in-range
+/// decision for `spectrum / 2^e`. A term that overflows exceeds the budget
+/// and stops the scan; a rescaled value that is not normal is below
+/// `2^-1022` of the bound, and its square below `2^-2044` of the budget.
+///
+/// Why one integer exponent rather than dividing by the three factors in
+/// turn: whichever factor goes first, a mixed-direction chain (a large
+/// `floor2(norm)` with a subnormal `floor2(rtol)`) can underflow or overflow
+/// an intermediate quotient whose final value is in range.
+#[derive(Clone, Copy)]
+struct BudgetUnits {
+    exponent: i32,
+    budget: f64,
+}
+
+impl BudgetUnits {
+    fn new(rtol: f64, norm: f64) -> Self {
+        if rtol == 0.0 || norm == 0.0 {
+            // A zero budget discards exactly the zero values: in units of
+            // the smallest subnormal every positive value is at least `1`.
+            return Self {
+                exponent: power_of_two_exponent(power_of_two_floor(0.0)),
+                budget: 0.0,
+            };
+        }
+        let norm_scale = power_of_two_floor(norm);
+        let rtol_scale = power_of_two_floor(rtol);
+        let product = (rtol / rtol_scale) * (norm / norm_scale);
+        let product_scale = power_of_two_floor(product);
+        let bound = product / product_scale;
+        Self {
+            exponent: power_of_two_exponent(norm_scale)
+                + power_of_two_exponent(rtol_scale)
+                + power_of_two_exponent(product_scale),
+            budget: bound * bound,
+        }
+    }
+
+    fn scaled(self, value: f64) -> f64 {
+        scale_by_power_of_two(value, -self.exponent)
+    }
+}
+
+/// `e` for a positive power of two `2^e`, normal or subnormal.
+fn power_of_two_exponent(power: f64) -> i32 {
+    let bits = power.to_bits();
+    match (bits >> 52) as i32 {
+        0 => 63 - bits.leading_zeros() as i32 - 1074,
+        biased => biased - 1023,
+    }
+}
+
+/// `value * 2^exponent`, exact whenever the result is normal.
+///
+/// The factors all move the same way, so an intermediate overflows only if
+/// the result does, and an intermediate becomes subnormal (the only place a
+/// step rounds) only if the result is subnormal too.
+fn scale_by_power_of_two(mut value: f64, mut exponent: i32) -> f64 {
+    const MAX_EXPONENT: i32 = f64::MAX_EXP - 1;
+    const MIN_EXPONENT: i32 = f64::MIN_EXP - 1;
+    let power = |exponent: i32| f64::from_bits(((exponent + MAX_EXPONENT) as u64) << 52);
+    while exponent > MAX_EXPONENT {
+        value *= power(MAX_EXPONENT);
+        exponent -= MAX_EXPONENT;
+    }
+    while exponent < MIN_EXPONENT {
+        value *= power(MIN_EXPONENT);
+        exponent -= MIN_EXPONENT;
+    }
+    value * power(exponent)
 }
 
 /// A sector's current tail for `DiscardWeight`. `Ord` is inverted so the
@@ -685,19 +791,136 @@ impl Ord for DescendingCandidate {
     }
 }
 
-fn full_norm(spectra: &[WeightedSpectrum<'_>]) -> f64 {
+/// An unscaled power sum at or above this is accurate to rounding: any term
+/// that underflowed is below `f64::MIN_POSITIVE`, under `EPSILON` relative to
+/// the sum.
+const UNSCALED_POWER_SUM_MIN: f64 = f64::MIN_POSITIVE / f64::EPSILON;
+
+/// A finite-`p` norm from its unscaled weighted power sum `sum`, rescaled when
+/// `sum` overflowed or underflowed.
+///
+/// Julia's `generic_norm2` / `generic_normp` (LinearAlgebra `generic.jl:468`,
+/// `:498`) divide every entry by `maxabs = normInf(x)` when the unscaled sum
+/// would leave the range, return `maxabs` itself when it is zero, infinite or
+/// NaN, and never rescale for `p <= 1`. This runs that scaled branch only
+/// after the unscaled sum proved out of range, so an in-range norm keeps one
+/// pass and no division per entry, and an out-of-range one pays two more.
+/// A single-pass running scale (LAPACK `dnrm2`) would charge every call a
+/// division and a comparison per entry.
+///
+/// `scale` returns Julia's `maxabs`, or any positive scale within a factor of
+/// two below it (the truncation norms pass its power-of-two floor, so the
+/// scaled pass divides exactly).
+///
+/// Callers sum over all coupled sectors with one global scale. TensorKit's
+/// non-UniqueFusion `_norm` instead adds `dim(c) * norm(b, p)^p` unscaled, so
+/// it returns `Inf` or `0` once one weighted block power leaves the range even
+/// though the norm itself is representable; TeNeT returns the representable
+/// value.
+#[doc(hidden)]
+pub fn rescaled_power_norm<E>(
+    sum: f64,
+    p: f64,
+    scale: impl FnOnce() -> f64,
+    scaled_sum: impl FnOnce(f64) -> Result<f64, E>,
+) -> Result<f64, E> {
+    let root = |sum: f64| {
+        if p == 2.0 {
+            sum.sqrt()
+        } else {
+            sum.powf(p.recip())
+        }
+    };
+    if p <= 1.0 || (sum.is_finite() && sum >= UNSCALED_POWER_SUM_MIN) {
+        return Ok(root(sum));
+    }
+    let scale = scale();
+    if scale == 0.0 || !scale.is_finite() {
+        return Ok(scale);
+    }
+    Ok(scale * root(scaled_sum(scale)?))
+}
+
+/// The largest power of two at or below a finite `value > 0`; the smallest
+/// subnormal, `2^-1074`, for `value == 0`.
+///
+/// Dividing by it is exact for every value that stays normal, so a quantity
+/// computed on `spectrum / scale` is the in-range computation on an exactly
+/// rescaled spectrum. Why the smallest subnormal for zero: a zero budget must
+/// discard exactly the zero values, and `v / 2^-1074 >= 1` for every `v > 0`,
+/// where `v * v` itself underflows to zero below about `1.5e-162`.
+fn power_of_two_floor(value: f64) -> f64 {
+    const EXPONENT: u64 = 0x7ff0_0000_0000_0000;
+    let bits = value.to_bits();
+    if bits & EXPONENT != 0 {
+        f64::from_bits(bits & EXPONENT)
+    } else if bits != 0 {
+        f64::from_bits(1 << (63 - bits.leading_zeros()))
+    } else {
+        f64::from_bits(1)
+    }
+}
+
+/// `sqrt(Σ weight · Σ value²)` over the suffix `values[from(sector)..]` of
+/// every sector, finite whenever the result is representable (#1440).
+///
+/// The in-range pass is the historical unscaled sum. Out of range, the scale
+/// is the power-of-two floor of the largest value summed, which is the first
+/// value of a descending suffix, so the result is exactly
+/// `scale * (in-range norm of spectrum / scale)`.
+fn weighted_norm(spectra: &[WeightedSpectrum<'_>], from: impl Fn(usize) -> usize) -> f64 {
+    let max = || {
+        spectra
+            .iter()
+            .enumerate()
+            .filter_map(|(sector, spectrum)| spectrum.values.get(from(sector)).copied())
+            .fold(0.0, f64::max)
+    };
+    rescaled_power_norm::<std::convert::Infallible>(
+        weighted_square_sum(spectra, &from, |value| value * value),
+        2.0,
+        || {
+            let max = max();
+            if max == 0.0 {
+                0.0
+            } else {
+                power_of_two_floor(max)
+            }
+        },
+        |scale| {
+            Ok(weighted_square_sum(spectra, &from, |value| {
+                (value / scale) * (value / scale)
+            }))
+        },
+    )
+    .unwrap_or_else(|never| match never {})
+}
+
+fn weighted_square_sum(
+    spectra: &[WeightedSpectrum<'_>],
+    from: &impl Fn(usize) -> usize,
+    square: impl Fn(f64) -> f64,
+) -> f64 {
     spectra
         .iter()
-        .map(|spectrum| {
+        .enumerate()
+        .map(|(sector, spectrum)| {
             spectrum.weight
-                * spectrum
-                    .values
+                * spectrum.values[from(sector)..]
                     .iter()
-                    .map(|value| value * value)
+                    .map(|&value| square(value))
                     .sum::<f64>()
         })
-        .sum::<f64>()
-        .sqrt()
+        // Not `sum()`: its f64 identity is `-0.0`, so a decision that
+        // discards nothing would report `sqrt(-0.0) = -0.0`. The norm is a
+        // magnitude a caller prints and compares, and `-0` is not one.
+        // Folding from `+0.0` normalizes it without changing any other total,
+        // because `0.0 + x == x` for every `x` that is not `-0.0`.
+        .fold(0.0_f64, |total, sector| total + sector)
+}
+
+fn full_norm(spectra: &[WeightedSpectrum<'_>]) -> f64 {
+    weighted_norm(spectra, |_| 0)
 }
 
 fn full_norm_inf(spectra: &[WeightedSpectrum<'_>]) -> f64 {
@@ -708,23 +931,7 @@ fn full_norm_inf(spectra: &[WeightedSpectrum<'_>]) -> f64 {
 }
 
 fn discarded_norm(spectra: &[WeightedSpectrum<'_>], kept: &[usize]) -> f64 {
-    spectra
-        .iter()
-        .zip(kept)
-        .map(|(spectrum, &count)| {
-            spectrum.weight
-                * spectrum.values[count..]
-                    .iter()
-                    .map(|value| value * value)
-                    .sum::<f64>()
-        })
-        // Not `sum()`: its f64 identity is `-0.0`, so a decision that discards
-        // nothing would report `sqrt(-0.0) = -0.0`. The discarded norm is a
-        // magnitude a caller prints and compares, and `-0` is not one. Folding
-        // from `+0.0` normalizes it without changing any other total, because
-        // `0.0 + x == x` for every `x` that is not `-0.0`.
-        .fold(0.0_f64, |total, sector| total + sector)
-        .sqrt()
+    weighted_norm(spectra, |sector| kept[sector])
 }
 
 #[cfg(test)]
@@ -1361,5 +1568,177 @@ mod tests {
             assert_eq!(decision.kept, expected);
             assert_eq!(decision.error, discarded_norm(&spectra, &decision.kept));
         }
+    }
+
+    #[test]
+    fn out_of_range_powers_of_two_scale_norms_and_decisions_exactly() {
+        // What (#1440): at `2^±700` and beyond every square leaves the `f64`
+        // range, yet the norm is representable. Scaling by a power of two is
+        // exact, so the kept counts must equal the unit spectrum's and the
+        // error must scale bit for bit, for every norm-driven policy.
+        let mut cases = 0;
+        for entries in scale_fixtures() {
+            let unit = spectra(&entries);
+            for rtol in SCALE_RTOLS {
+                for policy in [
+                    Truncation::relative_error(rtol).unwrap(),
+                    Truncation::relative_cutoff(rtol).unwrap(),
+                    Truncation::rank(3),
+                ] {
+                    let reference = select(&unit, &policy).unwrap();
+                    for exponent in [-1000, -700, -540, 540, 700, 1000] {
+                        let s = 2f64.powi(exponent);
+                        let decision =
+                            select(&spectra(&scaled(&entries, |v| v * s)), &policy).unwrap();
+                        assert_eq!(decision.kept, reference.kept, "{policy:?} s 2^{exponent}");
+                        assert_eq!(
+                            decision.error.to_bits(),
+                            (reference.error * s).to_bits(),
+                            "{policy:?} s 2^{exponent}"
+                        );
+                        assert_eq!(
+                            full_norm(&spectra(&scaled(&entries, |v| v * s))).to_bits(),
+                            (full_norm(&unit) * s).to_bits()
+                        );
+                        cases += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(cases, 2 * SCALE_RTOLS.len() * 3 * 6);
+    }
+
+    #[test]
+    fn a_zero_budget_discards_exactly_the_zero_values_even_when_squares_underflow() {
+        // What: `relative_error(0)` keeps every positive value (its type-level
+        // contract). `1e-170^2` underflows to zero, so an unscaled budget of
+        // zero used to discard it; the error is then zero, not `1e-170`.
+        let entries = [(1.0, vec![1e-170, 0.0]), (2.0, vec![3e-200])];
+        let decision = select(
+            &spectra(&entries),
+            &Truncation::relative_error(0.0).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(decision.kept, [1, 1]);
+        assert_eq!(decision.error.to_bits(), 0.0f64.to_bits());
+    }
+
+    #[test]
+    fn a_budget_whose_square_underflows_is_compared_in_scaled_units() {
+        // What: norm 1, rtol 1e-170 -> budget `1e-340`, below the `f64`
+        // range, as is every tail square. Ascending, `8e-171 <= 1e-170` is
+        // discarded; with `9e-171` the tail norm is `sqrt(64 + 81) 1e-171
+        // ≈ 1.2e-170`, over the bound, so it is kept. Unscaled, the budget
+        // and both squares are zero and both would be discarded.
+        let entries = [(1.0, vec![1.0, 9e-171, 8e-171])];
+        let decision = select(
+            &spectra(&entries),
+            &Truncation::relative_error(1e-170).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(decision.kept, [2]);
+        // Relative, as `error / 1e-171`: the absolute tolerance would accept
+        // zero here. One value reaches the error.
+        crate::test_numerics::numerics::assert_close("error", decision.error / 1e-171, 8.0, 1);
+    }
+
+    #[test]
+    fn a_budget_whose_slack_overflows_is_compared_in_scaled_units() {
+        // What: `rtol * norm = 1.3407807929942596e154` puts the budget in
+        // `(MAX / (1 + (n + 5) eps), MAX]`: finite, but `limit` overflows, and
+        // `next > Inf` never stops the scan. Exact oracle (Python
+        // `fractions.Fraction` over these f64 values): with
+        // `B = rtol^2 * Σ w v^2`, the weighted `2^1000` tail is at most `B`
+        // (`B / 2^1000 ≈ 1.68e7`, `≈ 8.4e6` with weight 2), and the whole
+        // spectrum is not (`rtol < 1`). So one value is discarded and the error
+        // is `sqrt(w) 2^500`.
+        let rtol = 1.3407807929942596e154 * 2f64.powi(-530);
+        for weight in [1.0, 2.0] {
+            let entries = [(1.0, vec![2f64.powi(530)]), (weight, vec![2f64.powi(500)])];
+            let unit = spectra(&entries);
+            let bound = rtol * full_norm(&unit);
+            let n = 2.0;
+            assert!(bound * bound <= f64::MAX);
+            assert!((bound * bound * (1.0 + (n + 5.0) * f64::EPSILON)).is_infinite());
+            let decision = select(&unit, &Truncation::relative_error(rtol).unwrap()).unwrap();
+            assert_eq!(decision.kept, [1, 0], "weight {weight}");
+            // Exact: one dyadic term, `sqrt(w)` rounded once.
+            assert_eq!(decision.error, weight.sqrt() * 2f64.powi(500));
+        }
+        // The same window with both values in one sector (the review repro).
+        let entries = [(1.0, vec![2f64.powi(530), 2f64.powi(500)])];
+        let decision = select(
+            &spectra(&entries),
+            &Truncation::relative_error(rtol).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(decision.kept, [1]);
+        assert_eq!(decision.error, 2f64.powi(500));
+    }
+
+    #[test]
+    fn a_subnormal_bound_is_not_rounded_before_the_comparison() {
+        // What: `rtol * norm` with `rtol = 3 * 2^-1074`, norm `≈ 1.9` is
+        // `≈ 5.7 * 2^-1074`, which rounds to `6 * 2^-1074` on the subnormal
+        // grid. Exact oracle (Python `fractions.Fraction`): the tail
+        // `6 * 2^-1074` squared over `rtol^2 * norm^2` is `1 / 0.9025 > 1`,
+        // so it must be kept and the error is zero.
+        let tiny = f64::from_bits(1);
+        let entries = [(1.0, vec![1.9, 6.0 * tiny])];
+        let decision = select(
+            &spectra(&entries),
+            &Truncation::relative_error(3.0 * tiny).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(decision.kept, [2]);
+        assert_eq!(decision.error.to_bits(), 0.0f64.to_bits());
+    }
+
+    #[test]
+    fn a_large_norm_with_a_subnormal_rtol_keeps_the_rescaling_exact() {
+        // What: `floor2(norm) = 1024` and `floor2(rtol)` subnormal. Dividing
+        // by the norm's scale first put the tail on the subnormal grid and
+        // discarded it. Exact oracle (Python `fractions.Fraction` over these
+        // f64 values): `v / (rtol * norm)` is `1.4900853664633535` for A and
+        // `1.0189416273584906` for B, both above 1, so both keep everything
+        // and report a zero error.
+        let tiny = f64::from_bits(1);
+        for (first, tail, rtol) in [
+            (1.0001 * 1024.0, 1526.0 * tiny, tiny),
+            ((5.3 / 3.0) * 1024.0, 5530.0 * tiny, 3.0 * tiny),
+        ] {
+            let entries = [(1.0, vec![first, tail])];
+            let decision = select(
+                &spectra(&entries),
+                &Truncation::relative_error(rtol).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(decision.kept, [2], "tail {tail:e} rtol {rtol:e}");
+            assert_eq!(decision.error.to_bits(), 0.0f64.to_bits());
+        }
+    }
+
+    #[test]
+    fn power_of_two_rescaling_is_exact_across_the_whole_exponent_range() {
+        let tiny = f64::from_bits(1);
+        for (power, exponent) in [
+            (tiny, -1074),
+            (f64::MIN_POSITIVE, -1022),
+            (1.0, 0),
+            (2f64.powi(1023), 1023),
+        ] {
+            assert_eq!(power_of_two_exponent(power), exponent);
+        }
+        assert_eq!(
+            scale_by_power_of_two(1.5, -2148).to_bits(),
+            0.0f64.to_bits()
+        );
+        assert_eq!(scale_by_power_of_two(tiny, 2097), 2f64.powi(1023));
+        assert_eq!(scale_by_power_of_two(2f64.powi(1023), -2097), tiny);
+        assert_eq!(
+            scale_by_power_of_two(3.0 * tiny, 2000),
+            3.0 * 2f64.powi(926)
+        );
+        assert!(scale_by_power_of_two(1.0, 2048).is_infinite());
     }
 }

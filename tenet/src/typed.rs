@@ -267,7 +267,9 @@ pub use tenet_matrixalgebra::SpectrumMagnitude;
 /// self-sufficient without it.
 pub use tenet_matrixalgebra::{Truncation, TruncationSpace};
 
-use tenet_matrixalgebra::{BoundDynFactor, CheckedGenericFactorPlanError, FactorScalar};
+use tenet_matrixalgebra::{
+    rescaled_power_norm, BoundDynFactor, CheckedGenericFactorPlanError, FactorScalar,
+};
 
 use crate::runtime::{Ctx, Ctxs};
 #[cfg(feature = "cuda")]
@@ -3059,50 +3061,6 @@ fn scaled_power<D: ScalarOps>(value: D, max: f64, p: f64) -> f64 {
     } else {
         (value.norm() / max).powf(p)
     }
-}
-
-/// An unscaled power sum at or above this is accurate to rounding: any term
-/// that underflowed is below `f64::MIN_POSITIVE`, under `EPSILON` relative to
-/// the sum.
-const UNSCALED_POWER_SUM_MIN: f64 = f64::MIN_POSITIVE / f64::EPSILON;
-
-/// A finite-`p` norm from its unscaled weighted power sum `sum`, rescaled when
-/// `sum` overflowed or underflowed.
-///
-/// Julia's `generic_norm2` / `generic_normp` (LinearAlgebra `generic.jl:468`,
-/// `:498`) divide every entry by `maxabs = normInf(x)` when the unscaled sum
-/// would leave the range, return `maxabs` itself when it is zero, infinite or
-/// NaN, and never rescale for `p <= 1`. This runs that scaled branch only
-/// after the unscaled sum proved out of range, so an in-range norm keeps one
-/// pass and no division per entry, and an out-of-range one pays two more.
-/// A single-pass running scale (LAPACK `dnrm2`) would charge every call a
-/// division and a comparison per entry.
-///
-/// The scale is global over all coupled sectors. TensorKit's non-UniqueFusion
-/// `_norm` instead adds `dim(c) * norm(b, p)^p` unscaled, so it returns `Inf`
-/// or `0` once one weighted block power leaves the range even though the
-/// norm itself is representable; TeNeT returns the representable value.
-fn rescaled_power_norm<E>(
-    sum: f64,
-    p: f64,
-    max_abs: impl FnOnce() -> f64,
-    scaled_sum: impl FnOnce(f64) -> Result<f64, E>,
-) -> Result<f64, E> {
-    let root = |sum: f64| {
-        if p == 2.0 {
-            sum.sqrt()
-        } else {
-            sum.powf(p.recip())
-        }
-    };
-    if p <= 1.0 || (sum.is_finite() && sum >= UNSCALED_POWER_SUM_MIN) {
-        return Ok(root(sum));
-    }
-    let max = max_abs();
-    if max == 0.0 || !max.is_finite() {
-        return Ok(max);
-    }
-    Ok(max * root(scaled_sum(max)?))
 }
 
 pub(crate) fn absorb_mapped<D, S>(
