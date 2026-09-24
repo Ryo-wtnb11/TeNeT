@@ -398,17 +398,18 @@ where
             Codec::decode_checked(right).map_err(FusionAlgebraError::ProductCodec)?;
         let (coupled_left, coupled_right) =
             Codec::decode_checked(coupled).map_err(FusionAlgebraError::ProductCodec)?;
-        self.left
-            .try_nsymbol(left_left, right_left, coupled_left)?
-            .checked_mul(
-                self.right
-                    .try_nsymbol(left_right, right_right, coupled_right)?,
-            )
-            .ok_or(FusionAlgebraError::MultiplicityOverflow {
+        let left_multiplicity = self.left.try_nsymbol(left_left, right_left, coupled_left)?;
+        let right_multiplicity = self
+            .right
+            .try_nsymbol(left_right, right_right, coupled_right)?;
+        match left_multiplicity.checked_mul(right_multiplicity) {
+            Some(multiplicity) => Ok(multiplicity),
+            None => Err(FusionAlgebraError::MultiplicityOverflow {
                 left,
                 right,
                 coupled,
-            })
+            }),
+        }
     }
 }
 

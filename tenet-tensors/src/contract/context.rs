@@ -787,13 +787,13 @@ where
     {
         let dst_fusion = dst
             .fusion_space()
-            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
+            .ok_or_else(|| OperationError::Core(CoreError::MissingFusionSpace))?;
         let lhs_fusion = lhs
             .fusion_space()
-            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
+            .ok_or_else(|| OperationError::Core(CoreError::MissingFusionSpace))?;
         let rhs_fusion = rhs
             .fusion_space()
-            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
+            .ok_or_else(|| OperationError::Core(CoreError::MissingFusionSpace))?;
 
         let dst_dynamic = DynamicFusionMapSpace::from_typed(dst_fusion);
         let lhs_dynamic = DynamicFusionMapSpace::from_typed(lhs_fusion);
@@ -1829,10 +1829,11 @@ where
                     fusion_scratch,
                     ..
                 } = self;
-                let artifact =
-                    dynamic_artifact.ok_or(OperationError::UnsupportedTensorContractScope {
+                let artifact = dynamic_artifact.ok_or_else(|| {
+                    OperationError::UnsupportedTensorContractScope {
                         message: "dynamic-tree resolution requires a compiled execution artifact",
-                    })?;
+                    }
+                })?;
                 super::dynamic::execute_dynamic_tree_execution_artifact(
                     tree_context,
                     contract_backend,
@@ -1971,13 +1972,13 @@ where
     {
         let dst_fusion = dst
             .fusion_space()
-            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
+            .ok_or_else(|| OperationError::Core(CoreError::MissingFusionSpace))?;
         let lhs_fusion = lhs
             .fusion_space()
-            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
+            .ok_or_else(|| OperationError::Core(CoreError::MissingFusionSpace))?;
         let rhs_fusion = rhs
             .fusion_space()
-            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
+            .ok_or_else(|| OperationError::Core(CoreError::MissingFusionSpace))?;
         let dst_dynamic = DynamicFusionMapSpace::from_typed(dst_fusion);
         let lhs_dynamic = DynamicFusionMapSpace::from_typed(lhs_fusion);
         let rhs_dynamic = DynamicFusionMapSpace::from_typed(rhs_fusion);
@@ -2149,13 +2150,13 @@ where
         let start = std::time::Instant::now();
         let dst_fusion = dst
             .fusion_space()
-            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
+            .ok_or_else(|| OperationError::Core(CoreError::MissingFusionSpace))?;
         let lhs_fusion = lhs
             .fusion_space()
-            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
+            .ok_or_else(|| OperationError::Core(CoreError::MissingFusionSpace))?;
         let rhs_fusion = rhs
             .fusion_space()
-            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
+            .ok_or_else(|| OperationError::Core(CoreError::MissingFusionSpace))?;
         let dst_dynamic = DynamicFusionMapSpace::from_typed(dst_fusion);
         let lhs_dynamic = DynamicFusionMapSpace::from_typed(lhs_fusion);
         let rhs_dynamic = DynamicFusionMapSpace::from_typed(rhs_fusion);
@@ -2493,17 +2494,17 @@ where
 
         let dst_space = DynamicFusionMapSpace::from_typed(
             dst.fusion_space()
-                .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
+                .ok_or_else(|| OperationError::Core(CoreError::MissingFusionSpace))?,
         );
         let lhs_space = DynamicFusionMapSpace::from_typed(
             lhs_core
                 .fusion_space()
-                .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
+                .ok_or_else(|| OperationError::Core(CoreError::MissingFusionSpace))?,
         );
         let rhs_space = DynamicFusionMapSpace::from_typed(
             rhs_core
                 .fusion_space()
-                .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
+                .ok_or_else(|| OperationError::Core(CoreError::MissingFusionSpace))?,
         );
         let block_plan = compile_core_plan(
             rule,
@@ -2555,7 +2556,7 @@ where
     {
         let src_fusion = src
             .fusion_space()
-            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
+            .ok_or_else(|| OperationError::Core(CoreError::MissingFusionSpace))?;
         let src_replay_structure = if source_conjugate {
             Arc::clone(adjoint_fusion_space_view(rule, src_fusion)?.subblock_structure())
         } else {
@@ -2750,7 +2751,7 @@ where
         NonuniformTwist::Reject,
     )?
     .filter(|plan| plan.is_fully_direct())
-    .ok_or(OperationError::UnsupportedTensorContractScope {
+    .ok_or_else(|| OperationError::UnsupportedTensorContractScope {
         message:
             "storage-direct contraction supports only canonical fully-direct oriented operands",
     })?;
@@ -2795,17 +2796,14 @@ where
         lhs.storage_conjugate(),
         rhs.storage_conjugate(),
     );
-    let plan = try_compile_oriented_storage_composition_plan(
-        rule,
-        dst_space.space(),
-        lhs,
-        rhs,
-        axes,
-    )?
-    .filter(|plan| plan.is_fully_direct())
-    .ok_or(OperationError::UnsupportedTensorContractScope {
+    let plan =
+        try_compile_oriented_storage_composition_plan(rule, dst_space.space(), lhs, rhs, axes)?
+            .filter(|plan| plan.is_fully_direct())
+            .ok_or_else(|| {
+                OperationError::UnsupportedTensorContractScope {
         message:
             "storage-direct composition supports only canonical fully-direct oriented operands",
-    })?;
+    }
+            })?;
     plan.execute_direct_on_storage_prezeroed(gemm, dst, lhs_storage, rhs_storage)
 }

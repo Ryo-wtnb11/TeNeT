@@ -798,7 +798,7 @@ impl<'a> FusionOperandLayout<'a> {
             }
             FusionOperandProjection::Adjoint { logical_keys, .. } => logical_keys
                 .get(logical_index)
-                .ok_or(OperationError::BlockIndexOutOfBounds {
+                .ok_or_else(|| OperationError::BlockIndexOutOfBounds {
                     tensor: "logical src",
                     index: logical_index,
                     count: logical_keys.len(),
@@ -816,13 +816,13 @@ impl<'a> FusionOperandLayout<'a> {
             FusionOperandProjection::Adjoint {
                 logical_keys,
                 storage_indices,
-            } => storage_indices.get(logical_index).copied().ok_or(
+            } => storage_indices.get(logical_index).copied().ok_or_else(|| {
                 OperationError::BlockIndexOutOfBounds {
                     tensor: "logical src",
                     index: logical_index,
                     count: logical_keys.len(),
-                },
-            ),
+                }
+            }),
         }
     }
 
@@ -2534,14 +2534,14 @@ impl DynamicFusionMapSpace {
         let nout = lhs
             .rank()
             .checked_sub(axes.lhs_contracting_axes().len())
-            .ok_or(OperationError::RankMismatch {
+            .ok_or_else(|| OperationError::RankMismatch {
                 expected: axes.lhs_contracting_axes().len(),
                 actual: lhs.rank(),
             })?;
         let nin = rhs
             .rank()
             .checked_sub(axes.rhs_contracting_axes().len())
-            .ok_or(OperationError::RankMismatch {
+            .ok_or_else(|| OperationError::RankMismatch {
                 expected: axes.rhs_contracting_axes().len(),
                 actual: rhs.rank(),
             })?;
@@ -2583,20 +2583,20 @@ impl DynamicFusionMapSpace {
     {
         lhs.validate_rule(rule)?;
         rhs.validate_rule(rule)?;
-        let nout = lhs
-            .rank()
-            .checked_sub(lhs_axes.len())
-            .ok_or(OperationError::RankMismatch {
-                expected: lhs_axes.len(),
-                actual: lhs.rank(),
-            })?;
-        let nin = rhs
-            .rank()
-            .checked_sub(rhs_axes.len())
-            .ok_or(OperationError::RankMismatch {
-                expected: rhs_axes.len(),
-                actual: rhs.rank(),
-            })?;
+        let nout =
+            lhs.rank()
+                .checked_sub(lhs_axes.len())
+                .ok_or_else(|| OperationError::RankMismatch {
+                    expected: lhs_axes.len(),
+                    actual: lhs.rank(),
+                })?;
+        let nin =
+            rhs.rank()
+                .checked_sub(rhs_axes.len())
+                .ok_or_else(|| OperationError::RankMismatch {
+                    expected: rhs_axes.len(),
+                    actual: rhs.rank(),
+                })?;
         let axes = TensorContractSpec::with_default_output_order(lhs_axes, rhs_axes);
         let axis_plan = TensorContractAxisPlan::compile(lhs.rank(), rhs.rank(), nout + nin, axes)?;
         Self::contracted_homspace_from_plan(rule, lhs, rhs, axes, &axis_plan, nout, primer)?;
@@ -2724,20 +2724,20 @@ impl DynamicFusionMapSpace {
                 rhs: rhs_axes.len(),
             });
         }
-        let nout = lhs
-            .rank()
-            .checked_sub(lhs_axes.len())
-            .ok_or(OperationError::RankMismatch {
-                expected: lhs_axes.len(),
-                actual: lhs.rank(),
-            })?;
-        let nin = rhs
-            .rank()
-            .checked_sub(rhs_axes.len())
-            .ok_or(OperationError::RankMismatch {
-                expected: rhs_axes.len(),
-                actual: rhs.rank(),
-            })?;
+        let nout =
+            lhs.rank()
+                .checked_sub(lhs_axes.len())
+                .ok_or_else(|| OperationError::RankMismatch {
+                    expected: lhs_axes.len(),
+                    actual: lhs.rank(),
+                })?;
+        let nin =
+            rhs.rank()
+                .checked_sub(rhs_axes.len())
+                .ok_or_else(|| OperationError::RankMismatch {
+                    expected: rhs_axes.len(),
+                    actual: rhs.rank(),
+                })?;
         let axes = TensorContractSpec::with_default_output_order(lhs_axes, rhs_axes);
         let axis_plan = TensorContractAxisPlan::compile(lhs.rank(), rhs.rank(), nout + nin, axes)?;
         let homspace = FusionTreeHomSpace::tensorcontract_homspace(

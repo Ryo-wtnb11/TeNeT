@@ -23,9 +23,9 @@ pub(crate) fn validate_dense_layout(
         return Err(DenseError::OutOfBounds);
     }
     let max_delta = max_offset_delta(shape, strides)?;
-    let last = offset
-        .checked_add(max_delta)
-        .ok_or(DenseError::OffsetOverflow { value: offset })?;
+    let Some(last) = offset.checked_add(max_delta) else {
+        return Err(DenseError::OffsetOverflow { value: offset });
+    };
     if last < len {
         Ok(())
     } else {
@@ -39,11 +39,13 @@ fn max_offset_delta(shape: &[usize], strides: &[usize]) -> Result<usize, DenseEr
         .zip(strides)
         .try_fold(0usize, |acc, (&dim, &stride)| {
             let steps = dim.saturating_sub(1);
-            let delta = steps
-                .checked_mul(stride)
-                .ok_or(DenseError::StrideOverflow { value: stride })?;
-            acc.checked_add(delta)
-                .ok_or(DenseError::ElementCountOverflow)
+            let Some(delta) = steps.checked_mul(stride) else {
+                return Err(DenseError::StrideOverflow { value: stride });
+            };
+            match acc.checked_add(delta) {
+                Some(total) => Ok(total),
+                None => Err(DenseError::ElementCountOverflow),
+            }
         })
 }
 

@@ -422,9 +422,13 @@ fn copy_contiguous_tensor_into_view<T: Copy>(
             ),
         });
     }
-    let expected = source_shape.iter().try_fold(1usize, |acc, &dim| {
-        acc.checked_mul(dim).ok_or(DenseError::ElementCountOverflow)
-    })?;
+    let expected =
+        source_shape
+            .iter()
+            .try_fold(1usize, |acc, &dim| match acc.checked_mul(dim) {
+                Some(count) => Ok(count),
+                None => Err(DenseError::ElementCountOverflow),
+            })?;
     if source.len() != expected {
         return Err(DenseError::Backend {
             backend: DenseBackend::Tenferro,
@@ -477,8 +481,10 @@ fn copy_contiguous_tensor_into_view<T: Copy>(
 }
 
 pub(crate) fn batch_offset(base: usize, offset: usize) -> Result<usize, DenseError> {
-    base.checked_add(offset)
-        .ok_or(DenseError::OffsetOverflow { value: offset })
+    match base.checked_add(offset) {
+        Some(end) => Ok(end),
+        None => Err(DenseError::OffsetOverflow { value: offset }),
+    }
 }
 
 fn same_gemm_shape(lhs: &DenseGemmBatchJob, rhs: &DenseGemmBatchJob) -> bool {

@@ -274,7 +274,10 @@ impl FusionRule for Z2FusionRule {
 }
 
 fn checked_z2_irrep(sector: SectorId) -> Result<Z2Irrep, FusionAlgebraError> {
-    Z2Irrep::from_sector_id(sector).ok_or(FusionAlgebraError::InvalidSector { sector })
+    match Z2Irrep::from_sector_id(sector) {
+        Some(irrep) => Ok(irrep),
+        None => Err(FusionAlgebraError::InvalidSector { sector }),
+    }
 }
 
 impl CheckedFusionAlgebra for Z2FusionRule {
@@ -557,13 +560,17 @@ impl U1Irrep {
     }
 
     pub fn checked_fuse(self, other: Self) -> Result<Self, FusionAlgebraError> {
-        self.charge
+        match self
+            .charge
             .checked_add(other.charge)
             .and_then(Self::try_new)
-            .ok_or(FusionAlgebraError::U1FusionOverflow {
+        {
+            Some(fused) => Ok(fused),
+            None => Err(FusionAlgebraError::U1FusionOverflow {
                 left: self.charge,
                 right: other.charge,
-            })
+            }),
+        }
     }
 }
 
@@ -576,7 +583,10 @@ const fn u1_charge_from_zigzag_u32(encoded: u32) -> i32 {
 }
 
 fn checked_u1_irrep(sector: SectorId) -> Result<U1Irrep, FusionAlgebraError> {
-    U1Irrep::from_sector_id(sector).ok_or(FusionAlgebraError::InvalidSector { sector })
+    match U1Irrep::from_sector_id(sector) {
+        Some(irrep) => Ok(irrep),
+        None => Err(FusionAlgebraError::InvalidSector { sector }),
+    }
 }
 
 impl From<U1Irrep> for SectorId {

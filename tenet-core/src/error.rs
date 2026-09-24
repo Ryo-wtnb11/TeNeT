@@ -332,7 +332,7 @@ pub fn validate_layout(layout: BlockLayout<'_>) -> Result<(), CoreError> {
     let last = layout
         .offset
         .checked_add(max_delta)
-        .ok_or(CoreError::OffsetOverflow {
+        .ok_or_else(|| CoreError::OffsetOverflow {
             value: layout.offset,
         })?;
     if last < layout.len {
@@ -350,9 +350,9 @@ fn max_offset_delta(shape: &[usize], strides: &[usize]) -> Result<usize, CoreErr
             let steps = dim.saturating_sub(1);
             let delta = steps
                 .checked_mul(stride)
-                .ok_or(CoreError::StrideOverflow { value: stride })?;
+                .ok_or_else(|| CoreError::StrideOverflow { value: stride })?;
             acc.checked_add(delta)
-                .ok_or(CoreError::ElementCountOverflow)
+                .ok_or_else(|| CoreError::ElementCountOverflow)
         })
 }
 
@@ -374,12 +374,12 @@ fn storage_end_exclusive(
     offset
         .checked_add(max_delta)
         .and_then(|last| last.checked_add(1))
-        .ok_or(CoreError::OffsetOverflow { value: offset })
+        .ok_or_else(|| CoreError::OffsetOverflow { value: offset })
 }
 
 fn checked_product(dims: &[usize]) -> Result<usize, CoreError> {
     dims.iter().try_fold(1usize, |acc, &dim| {
-        acc.checked_mul(dim).ok_or(CoreError::ElementCountOverflow)
+        acc.checked_mul(dim).ok_or_else(|| CoreError::ElementCountOverflow)
     })
 }
 
@@ -388,7 +388,7 @@ fn column_major_strides(shape: &[usize]) -> Result<Vec<usize>, CoreError> {
     for index in 1..shape.len() {
         strides[index] = strides[index - 1]
             .checked_mul(shape[index - 1])
-            .ok_or(CoreError::ElementCountOverflow)?;
+            .ok_or_else(|| CoreError::ElementCountOverflow)?;
     }
     Ok(strides)
 }

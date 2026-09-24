@@ -1448,10 +1448,10 @@ fn validate_storage_range(
 ) -> Result<(), OperationError> {
     let len = rows
         .checked_mul(cols)
-        .ok_or(OperationError::ElementCountOverflow)?;
+        .ok_or_else(|| OperationError::ElementCountOverflow)?;
     let end = base
         .checked_add(len)
-        .ok_or(OperationError::ElementCountOverflow)?;
+        .ok_or_else(|| OperationError::ElementCountOverflow)?;
     if end > storage_len {
         return Err(OperationError::ElementCountMismatch {
             expected: end,
@@ -1612,7 +1612,7 @@ pub fn fusion_scale_block_layouts_excluding(
 
 fn direct_matrix_len(rows: usize, cols: usize) -> Result<usize, OperationError> {
     rows.checked_mul(cols)
-        .ok_or(OperationError::ElementCountOverflow)
+        .ok_or_else(|| OperationError::ElementCountOverflow)
 }
 
 fn group_scratch_layout<C>(
@@ -1637,10 +1637,10 @@ fn group_scratch_layout<C>(
     let rhs_offset = lhs_len;
     let dst_offset = rhs_offset
         .checked_add(rhs_len)
-        .ok_or(OperationError::ElementCountOverflow)?;
+        .ok_or_else(|| OperationError::ElementCountOverflow)?;
     let total_len = dst_offset
         .checked_add(dst_len)
-        .ok_or(OperationError::ElementCountOverflow)?;
+        .ok_or_else(|| OperationError::ElementCountOverflow)?;
     Ok(FusionGroupScratchLayout {
         lhs_len,
         rhs_offset,
@@ -1721,13 +1721,13 @@ where
             MatrixOp::Identity,
         )?;
         for &block_index in &group.dst.block_indices {
-            let owned = active_dst_blocks.get_mut(block_index).ok_or(
+            let owned = active_dst_blocks.get_mut(block_index).ok_or_else(|| {
                 OperationError::BlockIndexOutOfBounds {
                     tensor: "dst",
                     index: block_index,
                     count: dst_structure.block_count(),
-                },
-            )?;
+                }
+            })?;
             if *owned {
                 return Err(OperationError::DuplicateTransformDestination {
                     dst_block: block_index,
@@ -1741,9 +1741,11 @@ where
         if active {
             continue;
         }
-        let layout = inactive.next().ok_or(OperationError::StructureMismatch {
-            tensor: "inactive dst blocks",
-        })?;
+        let layout = inactive
+            .next()
+            .ok_or_else(|| OperationError::StructureMismatch {
+                tensor: "inactive dst blocks",
+            })?;
         let block = dst_structure.block(block_index)?;
         if block.shape() != layout.block.shape
             || strides_to_isize(block.strides())? != layout.block.strides
@@ -1932,7 +1934,7 @@ fn canonical_job_range(job: &Rank2GemmBatchJob) -> Result<(usize, usize), Operat
     let end = job
         .dst_offset
         .checked_add(len)
-        .ok_or(OperationError::ElementCountOverflow)?;
+        .ok_or_else(|| OperationError::ElementCountOverflow)?;
     Ok((job.dst_offset, end))
 }
 
@@ -1952,7 +1954,7 @@ fn canonical_inactive_range(
         .map_err(|_| OperationError::OffsetOverflow { value: usize::MAX })?;
     let end = start
         .checked_add(layout.block.shape[0])
-        .ok_or(OperationError::ElementCountOverflow)?;
+        .ok_or_else(|| OperationError::ElementCountOverflow)?;
     if end > dst_len {
         return Err(OperationError::ElementCountMismatch {
             expected: end,
@@ -2068,9 +2070,9 @@ fn matrix_layouts_cover_exactly<C>(
         total
             .checked_add(
                 rows.checked_mul(cols)
-                    .ok_or(OperationError::ElementCountOverflow)?,
+                    .ok_or_else(|| OperationError::ElementCountOverflow)?,
             )
-            .ok_or(OperationError::ElementCountOverflow)
+            .ok_or_else(|| OperationError::ElementCountOverflow)
     })?;
     Ok(occupied == matrix_len)
 }
@@ -2096,7 +2098,7 @@ fn canonical_matrix_rectangle<C>(
             }
             row_dim = row_dim
                 .checked_mul(dim)
-                .ok_or(OperationError::ElementCountOverflow)?;
+                .ok_or_else(|| OperationError::ElementCountOverflow)?;
             expected_stride = row_dim;
         }
         if !canonical || row_dim > matrix_rows {
@@ -2115,10 +2117,10 @@ fn canonical_matrix_rectangle<C>(
             }
             col_dim = col_dim
                 .checked_mul(dim)
-                .ok_or(OperationError::ElementCountOverflow)?;
+                .ok_or_else(|| OperationError::ElementCountOverflow)?;
             expected_stride = expected_stride
                 .checked_mul(dim)
-                .ok_or(OperationError::ElementCountOverflow)?;
+                .ok_or_else(|| OperationError::ElementCountOverflow)?;
         }
         if !canonical || col_dim > matrix_cols {
             continue;
@@ -2128,10 +2130,10 @@ fn canonical_matrix_rectangle<C>(
         let col = offset / matrix_rows;
         let row_end = row
             .checked_add(row_dim)
-            .ok_or(OperationError::ElementCountOverflow)?;
+            .ok_or_else(|| OperationError::ElementCountOverflow)?;
         let col_end = col
             .checked_add(col_dim)
-            .ok_or(OperationError::ElementCountOverflow)?;
+            .ok_or_else(|| OperationError::ElementCountOverflow)?;
         if row_end <= matrix_rows && col_end <= matrix_cols {
             return Ok([(row, row_end), (col, col_end)]);
         }
@@ -2207,10 +2209,10 @@ pub fn direct_slice_mut<T>(
     let len = direct_matrix_len(rows, cols)?;
     let end = base
         .checked_add(len)
-        .ok_or(OperationError::ElementCountOverflow)?;
+        .ok_or_else(|| OperationError::ElementCountOverflow)?;
     let actual = data.len();
     data.get_mut(base..end)
-        .ok_or(OperationError::ElementCountMismatch {
+        .ok_or_else(|| OperationError::ElementCountMismatch {
             expected: end,
             actual,
         })
@@ -2352,7 +2354,7 @@ fn validate_disjoint_direct_destinations(jobs: &[Rank2GemmBatchJob]) -> Result<(
         let (base, len) = pair[0];
         let end = base
             .checked_add(len)
-            .ok_or(OperationError::ElementCountOverflow)?;
+            .ok_or_else(|| OperationError::ElementCountOverflow)?;
         if end > pair[1].0 {
             return Err(OperationError::UnsupportedTensorContractScope {
                 message: "core contraction groups must write disjoint destination ranges",
@@ -2373,9 +2375,9 @@ pub fn direct_slice<T>(
     let len = direct_matrix_len(rows, cols)?;
     let end = base
         .checked_add(len)
-        .ok_or(OperationError::ElementCountOverflow)?;
+        .ok_or_else(|| OperationError::ElementCountOverflow)?;
     data.get(base..end)
-        .ok_or(OperationError::ElementCountMismatch {
+        .ok_or_else(|| OperationError::ElementCountMismatch {
             expected: end,
             actual: data.len(),
         })

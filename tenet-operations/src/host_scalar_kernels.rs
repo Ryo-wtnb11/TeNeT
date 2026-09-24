@@ -201,15 +201,15 @@ where
         let dim = isize::try_from(dim - 1).map_err(|_| OperationError::ElementCountOverflow)?;
         let end = stride(axis)?
             .checked_mul(dim)
-            .ok_or(OperationError::ElementCountOverflow)?;
+            .ok_or_else(|| OperationError::ElementCountOverflow)?;
         if end >= 0 {
             max_offset = max_offset
                 .checked_add(end)
-                .ok_or(OperationError::ElementCountOverflow)?;
+                .ok_or_else(|| OperationError::ElementCountOverflow)?;
         } else {
             min_offset = min_offset
                 .checked_add(end)
-                .ok_or(OperationError::ElementCountOverflow)?;
+                .ok_or_else(|| OperationError::ElementCountOverflow)?;
         }
     }
     if min_offset < 0 {
@@ -889,15 +889,15 @@ fn checked_strided_extrema_from(
             isize::try_from(dim - 1).map_err(|_| OperationError::ElementCountOverflow)?;
         let end = coordinate
             .checked_mul(stride)
-            .ok_or(OperationError::ElementCountOverflow)?;
+            .ok_or_else(|| OperationError::ElementCountOverflow)?;
         if end >= 0 {
             max_offset = max_offset
                 .checked_add(end)
-                .ok_or(OperationError::ElementCountOverflow)?;
+                .ok_or_else(|| OperationError::ElementCountOverflow)?;
         } else {
             min_offset = min_offset
                 .checked_add(end)
-                .ok_or(OperationError::ElementCountOverflow)?;
+                .ok_or_else(|| OperationError::ElementCountOverflow)?;
         }
     }
     Ok((min_offset, max_offset))
@@ -970,10 +970,10 @@ where
         let dst_start = checked_offset_to_index(dst_offset)?;
         let dst_end = dst_start
             .checked_add(len)
-            .ok_or(OperationError::ElementCountOverflow)?;
+            .ok_or_else(|| OperationError::ElementCountOverflow)?;
         let dst = dst_data
             .get_mut(dst_start..dst_end)
-            .ok_or(OperationError::OffsetOverflow { value: dst_end })?;
+            .ok_or_else(|| OperationError::OffsetOverflow { value: dst_end })?;
         for dst_value in dst.iter_mut() {
             *dst_value = beta * *dst_value;
         }
@@ -1059,16 +1059,16 @@ where
         let src_start = checked_offset_to_index(src_offset)?;
         let dst_end = dst_start
             .checked_add(len)
-            .ok_or(OperationError::ElementCountOverflow)?;
+            .ok_or_else(|| OperationError::ElementCountOverflow)?;
         let src_end = src_start
             .checked_add(len)
-            .ok_or(OperationError::ElementCountOverflow)?;
+            .ok_or_else(|| OperationError::ElementCountOverflow)?;
         let dst = dst_data
             .get_mut(dst_start..dst_end)
-            .ok_or(OperationError::OffsetOverflow { value: dst_end })?;
+            .ok_or_else(|| OperationError::OffsetOverflow { value: dst_end })?;
         let src = src_data
             .get(src_start..src_end)
-            .ok_or(OperationError::OffsetOverflow { value: src_end })?;
+            .ok_or_else(|| OperationError::OffsetOverflow { value: src_end })?;
         for (dst_value, src_value) in dst.iter_mut().zip(src.iter().copied()) {
             apply_raw_strided_action(dst_value, src_value.maybe_conj(source_conjugate), action);
         }
@@ -1204,7 +1204,7 @@ fn is_column_major_contiguous(shape: &[usize], strides: &[isize]) -> Result<bool
         let dim = isize::try_from(dim).map_err(|_| OperationError::ElementCountOverflow)?;
         expected = expected
             .checked_mul(dim)
-            .ok_or(OperationError::ElementCountOverflow)?;
+            .ok_or_else(|| OperationError::ElementCountOverflow)?;
     }
     Ok(true)
 }
@@ -1226,9 +1226,9 @@ fn strided_linear_offset(
             .checked_add(
                 coord
                     .checked_mul(stride)
-                    .ok_or(OperationError::ElementCountOverflow)?,
+                    .ok_or_else(|| OperationError::ElementCountOverflow)?,
             )
-            .ok_or(OperationError::ElementCountOverflow)?;
+            .ok_or_else(|| OperationError::ElementCountOverflow)?;
     }
     usize::try_from(offset).map_err(|_| OperationError::OffsetOverflow { value: usize::MAX })
 }

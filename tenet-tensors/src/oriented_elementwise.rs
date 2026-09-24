@@ -72,7 +72,7 @@ fn logical_axis_sector(key: &FusionTreePairKey, axis: usize) -> Result<SectorId,
     key.domain_uncoupled()
         .get(axis - codomain.len())
         .copied()
-        .ok_or(OperationError::StructureMismatch {
+        .ok_or_else(|| OperationError::StructureMismatch {
             tensor: "oriented elementwise axis sector",
         })
 }
@@ -160,7 +160,7 @@ where
             let logical_start = match table {
                 None => 0,
                 Some(table) => *selected_for_sector(table, logical_axis_sector(logical_key, axis)?)
-                    .ok_or(OperationError::StructureMismatch {
+                    .ok_or_else(|| OperationError::StructureMismatch {
                         tensor: "oriented degeneracy restriction sector",
                     })?,
             };
@@ -168,7 +168,7 @@ where
             let source_extent = source_block.shape()[storage_axis];
             let end = logical_start
                 .checked_add(destination_block.shape()[axis])
-                .ok_or(OperationError::ElementCountOverflow)?;
+                .ok_or_else(|| OperationError::ElementCountOverflow)?;
             if end > source_extent {
                 return Err(OperationError::StructureMismatch {
                     tensor: "oriented degeneracy restriction rectangle",
@@ -178,9 +178,9 @@ where
                 .checked_add(
                     logical_start
                         .checked_mul(source_block.strides()[storage_axis])
-                        .ok_or(OperationError::ElementCountOverflow)?,
+                        .ok_or_else(|| OperationError::ElementCountOverflow)?,
                 )
-                .ok_or(OperationError::ElementCountOverflow)?;
+                .ok_or_else(|| OperationError::ElementCountOverflow)?;
             destination_strides.push(stride(destination_block.strides()[axis])?);
             source_strides.push(stride(source_block.strides()[storage_axis])?);
         }
@@ -217,7 +217,7 @@ fn preflight_scatter_bounds(
     shape.iter().try_fold(1usize, |count, &extent| {
         count
             .checked_mul(extent)
-            .ok_or(OperationError::ElementCountOverflow)
+            .ok_or_else(|| OperationError::ElementCountOverflow)
     })?;
     if shape.contains(&0) {
         return Ok(());
@@ -232,9 +232,9 @@ fn preflight_scatter_bounds(
                 .checked_add(
                     stride
                         .checked_mul(steps)
-                        .ok_or(OperationError::ElementCountOverflow)?,
+                        .ok_or_else(|| OperationError::ElementCountOverflow)?,
                 )
-                .ok_or(OperationError::ElementCountOverflow)
+                .ok_or_else(|| OperationError::ElementCountOverflow)
         })?;
     let maximum = usize::try_from(maximum)
         .map_err(|_| OperationError::OffsetOverflow { value: usize::MAX })?;
@@ -315,11 +315,10 @@ where
             let range = match table {
                 None => None,
                 Some(table) => Some(
-                    selected_for_sector(table, logical_axis_sector(logical_key, axis)?).ok_or(
-                        OperationError::StructureMismatch {
+                    selected_for_sector(table, logical_axis_sector(logical_key, axis)?)
+                        .ok_or_else(|| OperationError::StructureMismatch {
                             tensor: "fusion scatter sliced sector",
-                        },
-                    )?,
+                        })?,
                 ),
             };
             let start = match range {
@@ -345,9 +344,9 @@ where
                 .checked_add(
                     start
                         .checked_mul(destination_block.strides()[axis])
-                        .ok_or(OperationError::ElementCountOverflow)?,
+                        .ok_or_else(|| OperationError::ElementCountOverflow)?,
                 )
-                .ok_or(OperationError::ElementCountOverflow)?;
+                .ok_or_else(|| OperationError::ElementCountOverflow)?;
         }
         let destination_strides = destination_block
             .strides()

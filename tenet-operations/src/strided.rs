@@ -36,7 +36,7 @@ pub fn offset_to_isize(offset: usize) -> Result<isize, OperationError> {
 pub fn element_count(shape: &[usize]) -> Result<usize, OperationError> {
     shape.iter().try_fold(1usize, |acc, &dim| {
         acc.checked_mul(dim)
-            .ok_or(OperationError::ElementCountOverflow)
+            .ok_or_else(|| OperationError::ElementCountOverflow)
     })
 }
 
@@ -50,7 +50,7 @@ pub fn column_major_strides_isize(shape: &[usize]) -> Result<Vec<isize>, Operati
         );
         stride = stride
             .checked_mul(dim)
-            .ok_or(OperationError::ElementCountOverflow)?;
+            .ok_or_else(|| OperationError::ElementCountOverflow)?;
     }
     Ok(strides)
 }
@@ -62,7 +62,7 @@ pub fn column_major_strides_usize(shape: &[usize]) -> Result<Vec<usize>, Operati
         strides.push(stride);
         stride = stride
             .checked_mul(dim)
-            .ok_or(OperationError::ElementCountOverflow)?;
+            .ok_or_else(|| OperationError::ElementCountOverflow)?;
     }
     Ok(strides)
 }

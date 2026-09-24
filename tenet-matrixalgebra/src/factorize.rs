@@ -2208,16 +2208,17 @@ where
     );
     let left = input.prepare_final_homspace_generic_checked(provider, left_hom)?;
     let right = input.prepare_final_homspace_generic_checked(provider, right_hom)?;
-    let left_regions = checked_sector_regions(left.structure(), space.nout())?.ok_or(
-        OperationError::UnsupportedTensorContractScope {
-            message: "compact left factor is not a coupled-sector matrix layout",
-        },
-    )?;
-    let right_regions = checked_sector_regions(right.structure(), 1)?.ok_or(
+    let left_regions =
+        checked_sector_regions(left.structure(), space.nout())?.ok_or_else(|| {
+            OperationError::UnsupportedTensorContractScope {
+                message: "compact left factor is not a coupled-sector matrix layout",
+            }
+        })?;
+    let right_regions = checked_sector_regions(right.structure(), 1)?.ok_or_else(|| {
         OperationError::UnsupportedTensorContractScope {
             message: "compact right factor is not a coupled-sector matrix layout",
-        },
-    )?;
+        }
+    })?;
     if !source_factor_tree_extents_match(&regions, &left_regions, &right_regions) {
         return Ok(None);
     }
@@ -2342,12 +2343,12 @@ where
         build_bound_factor_space(input, space.homspace(), bond.clone(), FactorSide::Left)?;
     let vh_space = build_bound_factor_space(input, space.homspace(), bond, FactorSide::Right)?;
     let left_regions = checked_sector_regions(u_space.space().structure(), u_space.space().nout())?
-        .ok_or(OperationError::UnsupportedTensorContractScope {
+        .ok_or_else(|| OperationError::UnsupportedTensorContractScope {
             message: "compact left factor is not a coupled-sector matrix layout",
         })?;
     let right_regions =
-        checked_sector_regions(vh_space.space().structure(), vh_space.space().nout())?.ok_or(
-            OperationError::UnsupportedTensorContractScope {
+        checked_sector_regions(vh_space.space().structure(), vh_space.space().nout())?.ok_or_else(
+            || OperationError::UnsupportedTensorContractScope {
                 message: "compact right factor is not a coupled-sector matrix layout",
             },
         )?;
@@ -2603,7 +2604,7 @@ fn sector_region_index_of(
 ) -> Result<usize, OperationError> {
     regions
         .get(sector)
-        .ok_or(OperationError::UnsupportedTensorContractScope {
+        .ok_or_else(|| OperationError::UnsupportedTensorContractScope {
             message: match side {
                 "left" => "compact left factor is missing a nonzero-rank sector",
                 _ => "compact right factor is missing a nonzero-rank sector",
@@ -6205,8 +6206,9 @@ fn compact_factor_output_owned<D: FactorScalar>(
     }
     let expected_len = shape
         .iter()
-        .try_fold(1usize, |acc, &dim| {
-            acc.checked_mul(dim).ok_or(DenseError::ElementCountOverflow)
+        .try_fold(1usize, |acc, &dim| match acc.checked_mul(dim) {
+            Some(count) => Ok(count),
+            None => Err(DenseError::ElementCountOverflow),
         })
         .map_err(OperationError::Dense)?;
     if source.len() != expected_len {
@@ -6241,8 +6243,9 @@ fn compact_real_spectrum_owned<D: FactorScalar>(
     }
     let expected_len = shape
         .iter()
-        .try_fold(1usize, |acc, &dim| {
-            acc.checked_mul(dim).ok_or(DenseError::ElementCountOverflow)
+        .try_fold(1usize, |acc, &dim| match acc.checked_mul(dim) {
+            Some(count) => Ok(count),
+            None => Err(DenseError::ElementCountOverflow),
         })
         .map_err(OperationError::Dense)?;
     if spectrum.len() != expected_len {
