@@ -2765,6 +2765,94 @@ mod tests {
         assert_eq!(dst, expected);
         assert_eq!(profile.core_contract_groups, 8);
         assert_eq!(profile.core_direct_gemm_groups, 4);
+
+        // A zero alpha (either sign) leaves exactly TensorKit's `scale(C,
+        // beta)` in every class, over Inf/NaN operands, a NaN destination and
+        // a NaN-filled scratch: no pack, GEMM or product is formed (#1442).
+        let nan = T::from(f64::NAN);
+        let poisoned = |values: &[T], bad: T| {
+            let mut values = values.to_vec();
+            values[0] = bad;
+            values[5] = bad;
+            values
+        };
+        let (bad_lhs, bad_rhs) = (poisoned(&lhs, T::from(f64::INFINITY)), poisoned(&rhs, nan));
+        let dirty = poisoned(&initial, nan);
+        let same = |got: &[T], want: &[T]| {
+            assert_eq!(got.len(), want.len());
+            for (&got, &want) in got.iter().zip(want) {
+                #[allow(clippy::eq_op)]
+                let both_nan = got != got && want != want;
+                assert!(got == want || both_nan, "{got:?} != {want:?}");
+            }
+        };
+        for zero in [0.0, -0.0] {
+            for beta in [0.0, 1.0, 2.0] {
+                let want: Vec<T> = dirty
+                    .iter()
+                    .map(|&value| match beta {
+                        0.0 => T::zero(),
+                        1.0 => value,
+                        _ => T::from(beta) * value,
+                    })
+                    .collect();
+                for profiled in [false, true] {
+                    workspace.scratch.fill(nan);
+                    dst.clone_from(&dirty);
+                    let run = if profiled {
+                        plan.execute_raw_profiled(
+                            &mut kernels,
+                            &mut gemm,
+                            &mut workspace,
+                            &structure,
+                            &mut dst,
+                            &structure,
+                            &bad_lhs,
+                            &structure,
+                            &bad_rhs,
+                            T::from(zero),
+                            T::from(beta),
+                            &mut TensorContractFusionProfile::default(),
+                        )
+                    } else {
+                        plan.execute_raw(
+                            &mut kernels,
+                            &mut gemm,
+                            &mut workspace,
+                            &structure,
+                            &mut dst,
+                            &structure,
+                            &bad_lhs,
+                            &structure,
+                            &bad_rhs,
+                            T::from(zero),
+                            T::from(beta),
+                        )
+                    };
+                    run.unwrap();
+                    same(&dst, &want);
+                }
+            }
+        }
+
+        // The dirty workspace left by the zero-alpha runs replays a non-zero
+        // alpha exactly as a fresh one does.
+        dst.clone_from(&initial);
+        plan.execute_raw(
+            &mut kernels,
+            &mut gemm,
+            &mut workspace,
+            &structure,
+            &mut dst,
+            &structure,
+            &lhs,
+            &structure,
+            &rhs,
+            alpha,
+            beta,
+        )
+        .unwrap();
+        assert_eq!(dst, expected);
     }
 
     #[test]
