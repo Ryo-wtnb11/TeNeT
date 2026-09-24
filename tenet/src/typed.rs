@@ -180,9 +180,8 @@
 //!   change.
 //! - `conj` stays design-gated on its open correctness question for
 //!   non-self-dual sectors. [`TensorMap::adjoint`] is the TensorKit-style lazy
-//!   parent view for dense storage. A multiplicity-free compact diagonal keeps
-//!   its direct `O(Σ_c k_c)` conjugation path; a checked `Generic` compact
-//!   diagonal uses the lazy parent view instead.
+//!   parent view for dense storage. A compact diagonal, in either admission
+//!   mode, keeps its direct `O(Σ_c k_c)` conjugation path.
 //!
 //! Adding any of them ahead of its review would bypass the gate that exists to
 //! keep this surface deliberate.
@@ -840,6 +839,9 @@ pub(crate) trait ScalarOps:
     + tenet_tensors::ZeroBytes
     + tenet_tensors::WideScalar<Wide: FactorScalar>
 {
+    /// Whether `FactorScalar::adjoint` is the identity (a real dtype).
+    const CONJUGATION_IS_IDENTITY: bool;
+
     /// Returns the execution lane for this payload dtype, building it if the
     /// runtime has not needed it yet.
     ///
@@ -1844,9 +1846,9 @@ where
     /// Dense storage becomes a lazy parent-backed view: its logical space is
     /// available immediately, while [`Self::data`] performs and caches the
     /// whole-payload materialization on first demand. Applying `adjoint` twice
-    /// returns the original owned parent. Multiplicity-free compact diagonal
-    /// storage instead performs an owned `O(sum_c k_c)` conjugation and stays
-    /// compact; a checked-Generic compact diagonal uses the general lazy view.
+    /// returns the original owned parent. Compact diagonal storage instead
+    /// performs an owned `O(sum_c k_c)` conjugation and stays compact, as
+    /// TensorKit `adjoint(::DiagonalTensorMap)` does.
     /// Every result keeps the source's exact provider `Arc`.
     ///
     /// If layout construction or checked pivotal data fails, that layout or
@@ -2593,6 +2595,8 @@ where
 }
 
 impl ScalarOps for f64 {
+    const CONJUGATION_IS_IDENTITY: bool = true;
+
     fn ctx_of<Key: Clone + Eq + Hash + Send + Sync + 'static>(
         ctxs: &mut Ctxs<Key>,
     ) -> Result<&mut Ctx<Self, Key>, Error> {
@@ -2628,6 +2632,8 @@ impl ScalarOps for f64 {
 }
 
 impl ScalarOps for num_complex::Complex64 {
+    const CONJUGATION_IS_IDENTITY: bool = false;
+
     fn ctx_of<Key: Clone + Eq + Hash + Send + Sync + 'static>(
         ctxs: &mut Ctxs<Key>,
     ) -> Result<&mut Ctx<Self, Key>, Error> {
@@ -2656,6 +2662,8 @@ impl ScalarOps for num_complex::Complex64 {
 }
 
 impl ScalarOps for f32 {
+    const CONJUGATION_IS_IDENTITY: bool = true;
+
     fn ctx_of<Key: Clone + Eq + Hash + Send + Sync + 'static>(
         ctxs: &mut Ctxs<Key>,
     ) -> Result<&mut Ctx<Self, Key>, Error> {
@@ -2691,6 +2699,8 @@ impl ScalarOps for f32 {
 }
 
 impl ScalarOps for num_complex::Complex32 {
+    const CONJUGATION_IS_IDENTITY: bool = false;
+
     fn ctx_of<Key: Clone + Eq + Hash + Send + Sync + 'static>(
         ctxs: &mut Ctxs<Key>,
     ) -> Result<&mut Ctx<Self, Key>, Error> {
@@ -6243,6 +6253,11 @@ where
     fn adjoint(
         tensor: &TensorMap<R, D>,
     ) -> Result<TensorMap<R, D>, GenericTensorError<<R as CheckedGenericFusion>::Error>> {
+        // Why not a lazy view: densifying its unstored zeros through
+        // conjugation would publish them as `0-0i`.
+        if let Some(adjoint) = tensor.compact_adjoint() {
+            return Ok(adjoint);
+        }
         Ok(match &tensor.repr {
             TypedTensorRepr::Owned(parent) => {
                 let logical_space =
@@ -10789,6 +10804,36 @@ impl<R, D> TensorMap<R, D> {
             TypedData::Dense(_) => None,
         }
     }
+
+    /// TensorKit `adjoint(::DiagonalTensorMap)`: `d` itself for a real
+    /// payload, else the conjugated diagonal. A bond space is its own adjoint
+    /// (`codomain == domain`), so this is `O(Σ_c k_c)` with no dense buffer
+    /// and no bend, and a real payload shares the body without copying.
+    /// [`None`] unless the tensor owns a compact diagonal.
+    fn compact_adjoint(&self) -> Option<Self>
+    where
+        D: TensorScalar,
+    {
+        let spectrum = self.spectrum()?;
+        if D::CONJUGATION_IS_IDENTITY {
+            return Some(self.clone());
+        }
+        Some(
+            self.with_spectrum(
+                spectrum
+                    .iter()
+                    .map(|entry| tenet_matrixalgebra::SectorSpectrum {
+                        sector: entry.sector,
+                        values: entry
+                            .values
+                            .iter()
+                            .map(|&value| FactorScalar::adjoint(value))
+                            .collect(),
+                    })
+                    .collect(),
+            ),
+        )
+    }
 }
 
 impl<R, D> TensorMap<R, D>
@@ -11006,8 +11051,8 @@ where
     ///
     /// * Owned dense or compact diagonal: one pass into one new payload of
     ///   the same form.
-    /// * Lazy adjoint of a compact diagonal (checked Generic only; the
-    ///   multiplicity-free `adjoint` already returns an owned diagonal): the
+    /// * Lazy adjoint of a compact diagonal (no `adjoint` builds one; every
+    ///   mode returns an owned diagonal): the
     ///   owned compact diagonal of the conjugated, converted values on the
     ///   logical space — what the multiplicity-free `adjoint` emits, since a
     ///   bond space is its own adjoint.
@@ -18957,25 +19002,8 @@ where
     /// [`Error::Operation`] / [`Error::Core`] / [`Error::FusionAlgebra`]
     /// straight from the seam, which owns the bend the dagger performs.
     fn adjoint_multiplicity_free(&self) -> Result<Self, Error> {
-        if let Some(spectrum) = self.spectrum() {
-            // A bond space is its own adjoint (`codomain == domain`), and the
-            // dagger of a diagonal is the conjugated diagonal — so this is
-            // O(Σ_c k_c) with no dense buffer and no bend. For a real payload
-            // `FactorScalar::adjoint` is the identity, which is why there is no
-            // separate real arm: the payload dtype is already a static property.
-            return Ok(self.with_spectrum(
-                spectrum
-                    .iter()
-                    .map(|entry| tenet_matrixalgebra::SectorSpectrum {
-                        sector: entry.sector,
-                        values: entry
-                            .values
-                            .iter()
-                            .map(|&value| FactorScalar::adjoint(value))
-                            .collect(),
-                    })
-                    .collect(),
-            ));
+        if let Some(adjoint) = self.compact_adjoint() {
+            return Ok(adjoint);
         }
         self.dense_adjoint_view()
     }
@@ -25905,6 +25933,8 @@ mod representation_gates {
             TypedData::Diagonal(_)
         ));
         assert_eq!(real_adjoint.spectrum().unwrap()[0].values, [1.0, 2.0]);
+        // TensorKit's real `adjoint(d) = d`: the body is shared, not copied.
+        assert!(Arc::ptr_eq(owned(&real_adjoint), owned(&real)));
         assert!(owned(&real_adjoint).dense_cache.get().is_none());
         let spectrum = complex_adjoint.spectrum().unwrap();
         assert_eq!(
