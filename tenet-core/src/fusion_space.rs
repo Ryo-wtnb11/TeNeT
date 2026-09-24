@@ -1278,10 +1278,31 @@ enum CompleteHomSpaceStructureLookup {
 
 /// Bounded FIFO owner for complete immutable multiplicity-free layouts.
 ///
+/// Memory tradeoff: retains up to 4 MiB of charged bytes process-wide. The
+/// byte budget is the binding bound; the 1024-entry cap only stops the count
+/// growing without bound when entries are very small. An entry above
+/// `max_entry_bytes` (about 39 % of the budget) is returned uncached, so one
+/// outlier can no longer evict the working set and hold the budget alone.
+/// Why not shrink `max_entry_bytes` as well: a smaller limit bypasses
+/// high-rank structures that are cached today, e.g. the 361,285-byte rank-7
+/// U(1) destination of `warm_contract_compile_allocations`; the larger budget,
+/// not a smaller entry limit, is what removes the monopolisation. The census of #1365
+/// (`benchmarks/history/complete-structure-census-2026-09-24.md`) measured
+/// entries of 2.6-47 KB and warm live sets of up to 53 structures and 301 KB
+/// in MPS sweeps and `tensor!` networks; a single eager op touches at most 3.
+///
+/// Eviction is FIFO by admission. `entries` is an `lru::LruCache` used only as
+/// an insertion-ordered map: lookups go through `peek`/`peek_mut`, which never
+/// promote, and `put` only inserts absent keys, so `pop_lru` pops the oldest
+/// admission. Why not true LRU: promotion needs `&mut self`, so every hit
+/// would take the write lock; at these bounds FIFO and LRU give the same
+/// (compulsory-only) warm misses on the census traces.
+///
 /// Why not reuse `coupled_block_structure_cache`: that weak table accepts
 /// arbitrary `nout` and caller shapes, so it cannot avoid the final-HomSpace
 /// construction work and would retain a live wrapper if made strong.
 struct CompleteHomSpaceStructureCache {
+    /// Insertion-ordered (FIFO) map; never promoted, see the type docs.
     entries: lru::LruCache<
         Arc<CompleteHomSpaceStructureCacheKey>,
         CompleteHomSpaceStructureCacheEntry,
@@ -1298,18 +1319,18 @@ struct CompleteHomSpaceStructureCache {
     bypasses: AtomicUsize,
 }
 
-const COMPLETE_HOM_SPACE_STRUCTURE_CACHE_CAP: usize = 5;
-const COMPLETE_HOM_SPACE_STRUCTURE_CACHE_BYTE_BUDGET: usize = 1_764_237;
+const COMPLETE_HOM_SPACE_STRUCTURE_CACHE_CAP: usize = 1024;
+const COMPLETE_HOM_SPACE_STRUCTURE_CACHE_BYTE_BUDGET: usize = 4 * 1024 * 1024;
 const COMPLETE_HOM_SPACE_STRUCTURE_CACHE_MAX_ENTRY_BYTES: usize = 1_650_641;
 
 impl CompleteHomSpaceStructureCache {
     fn new(entry_capacity: usize, byte_budget: usize, max_entry_bytes: usize) -> Self {
         assert!(entry_capacity > 0, "complete HomSpace cache capacity must be positive");
         Self {
-            entries: lru::LruCache::with_hasher(
-                std::num::NonZeroUsize::new(entry_capacity).unwrap(),
-                rustc_hash::FxBuildHasher,
-            ),
+            // Unbounded here because `admit` enforces `entry_capacity`; a
+            // bounded constructor would preallocate the table for the whole
+            // cap, uncharged, even while the cache is nearly empty.
+            entries: lru::LruCache::unbounded_with_hasher(rustc_hash::FxBuildHasher),
             entry_capacity,
             byte_budget,
             max_entry_bytes,
