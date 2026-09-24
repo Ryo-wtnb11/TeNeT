@@ -2151,9 +2151,7 @@ where
         }
         let source_is_dense = match &source.repr {
             TypedTensorRepr::Owned(body) => matches!(body.data.as_ref(), TypedData::Dense(_)),
-            TypedTensorRepr::Adjoint(view) => {
-                matches!(view.parent.data.as_ref(), TypedData::Dense(_))
-            }
+            TypedTensorRepr::Adjoint(_) => true,
         };
         if !source_is_dense {
             return Err(Error::InvalidArgument(
@@ -6270,13 +6268,10 @@ where
                         .map_err(GenericTensorError::Plan)?;
                 TensorMap {
                     runtime: tensor.runtime.clone(),
-                    repr: TypedTensorRepr::Adjoint(Arc::new(TypedAdjointView {
-                        parent: Arc::clone(parent),
+                    repr: TypedTensorRepr::Adjoint(Arc::new(TypedAdjointView::new(
+                        Arc::clone(parent),
                         logical_space,
-                        materialized: OnceLock::new(),
-                        #[cfg(test)]
-                        materialized_body_builds: std::sync::atomic::AtomicUsize::new(0),
-                    })),
+                    ))),
                 }
             }
             TypedTensorRepr::Adjoint(view) => TensorMap {
@@ -7472,13 +7467,10 @@ where
         };
         return Ok(TensorMap {
             runtime: tensor.runtime.clone(),
-            repr: TypedTensorRepr::Adjoint(Arc::new(TypedAdjointView {
-                parent: Arc::clone(parent),
+            repr: TypedTensorRepr::Adjoint(Arc::new(TypedAdjointView::new(
+                Arc::clone(parent),
                 logical_space,
-                materialized: OnceLock::new(),
-                #[cfg(test)]
-                materialized_body_builds: std::sync::atomic::AtomicUsize::new(0),
-            })),
+            ))),
         });
     }
     flip_checked_generic_owned(tensor, legs, inverse)
@@ -7672,13 +7664,10 @@ where
         // after all fallible twist values had been staged.
         return Ok(TensorMap {
             runtime: tensor.runtime.clone(),
-            repr: TypedTensorRepr::Adjoint(Arc::new(TypedAdjointView {
-                parent: Arc::clone(parent),
-                logical_space: view.logical_space.clone(),
-                materialized: OnceLock::new(),
-                #[cfg(test)]
-                materialized_body_builds: std::sync::atomic::AtomicUsize::new(0),
-            })),
+            repr: TypedTensorRepr::Adjoint(Arc::new(TypedAdjointView::new(
+                Arc::clone(parent),
+                view.logical_space.clone(),
+            ))),
         });
     }
 
@@ -10225,6 +10214,34 @@ struct TypedAdjointView<R, D, S = Vec<D>> {
     materialized_body_builds: std::sync::atomic::AtomicUsize,
 }
 
+impl<R, D, S> TypedAdjointView<R, D, S> {
+    /// A lazy adjoint over a dense parent.
+    ///
+    /// Why not a compact diagonal parent: densifying its unstored zeros
+    /// through conjugation would publish them as `0-0i`, so every `adjoint`
+    /// entry point returns the owned conjugated diagonal through
+    /// `compact_adjoint` first, and flip, twist and device transfer only
+    /// re-wrap parents that are already dense. Why not a dense-only parent
+    /// type: `parent` is the same `Arc` an owned tensor holds, which keeps
+    /// adjoint-of-adjoint an `O(1)` handle swap.
+    fn new(
+        parent: Arc<TypedTensorBody<R, D, S>>,
+        logical_space: BoundDynamicFusionMapSpace<R>,
+    ) -> Self {
+        debug_assert!(
+            matches!(parent.data.as_ref(), TypedData::Dense(_)),
+            "a lazy adjoint never holds a compact diagonal parent"
+        );
+        Self {
+            parent,
+            logical_space,
+            materialized: OnceLock::new(),
+            #[cfg(test)]
+            materialized_body_builds: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+}
+
 #[cfg(test)]
 thread_local! {
     static UNCACHED_ADJOINT_MATERIALIZATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -10634,13 +10651,10 @@ impl<R, D, S> TensorMap<R, D, S> {
                 ));
                 Self {
                     runtime: self.runtime.clone(),
-                    repr: TypedTensorRepr::Adjoint(Arc::new(TypedAdjointView {
-                        parent: Arc::clone(parent),
+                    repr: TypedTensorRepr::Adjoint(Arc::new(TypedAdjointView::new(
+                        Arc::clone(parent),
                         logical_space,
-                        materialized: OnceLock::new(),
-                        #[cfg(test)]
-                        materialized_body_builds: std::sync::atomic::AtomicUsize::new(0),
-                    })),
+                    ))),
                 }
             }
             TypedTensorRepr::Adjoint(view) => Self {
@@ -11059,12 +11073,8 @@ where
     ///
     /// * Owned dense or compact diagonal: one pass into one new payload of
     ///   the same form.
-    /// * Lazy adjoint of a compact diagonal (no `adjoint` builds one; every
-    ///   mode returns an owned diagonal): the
-    ///   owned compact diagonal of the conjugated, converted values on the
-    ///   logical space — what the multiplicity-free `adjoint` emits, since a
-    ///   bond space is its own adjoint.
-    /// * Lazy adjoint of a dense parent: materialized in the source dtype,
+    /// * Lazy adjoint (always of a dense parent; see
+    ///   `TypedAdjointView::new`): materialized in the source dtype,
     ///   then converted — an operation-local source-sized buffer plus the
     ///   output. Why not a lazy view over a converted parent: several
     ///   operations (`diagview`, `restrict_diagonal`, the
@@ -11076,18 +11086,12 @@ where
     fn convert_payload<E>(&self, convert: impl Fn(D) -> E) -> TensorMap<R, E> {
         let body = match &self.repr {
             TypedTensorRepr::Owned(body) => body.convert_payload(convert),
-            TypedTensorRepr::Adjoint(view) => match view.parent.data.as_ref() {
-                TypedData::Diagonal(spectrum) => Arc::new(TypedTensorBody::diagonal(
-                    view.logical_space.clone(),
-                    map_spectrum_dtype(spectrum, |value| convert(FactorScalar::adjoint(value))),
-                )),
-                TypedData::Dense(_) => self
-                    .materialized_tensor_uncached()
-                    .expect("a pre-admitted typed adjoint must materialize")
-                    .owned_body()
-                    .expect("uncached materialization is owned")
-                    .convert_payload(convert),
-            },
+            TypedTensorRepr::Adjoint(_) => self
+                .materialized_tensor_uncached()
+                .expect("a pre-admitted typed adjoint must materialize")
+                .owned_body()
+                .expect("uncached materialization is owned")
+                .convert_payload(convert),
         };
         TensorMap {
             runtime: self.runtime.clone(),
@@ -11308,15 +11312,9 @@ impl<R, D: CudaPayload> TensorMap<R, D> {
 
         let repr = match &self.repr {
             TypedTensorRepr::Owned(body) => TypedTensorRepr::Owned(upload(body)?),
-            TypedTensorRepr::Adjoint(view) => {
-                TypedTensorRepr::Adjoint(Arc::new(TypedAdjointView {
-                    parent: upload(&view.parent)?,
-                    logical_space: view.logical_space.clone(),
-                    materialized: OnceLock::new(),
-                    #[cfg(test)]
-                    materialized_body_builds: std::sync::atomic::AtomicUsize::new(0),
-                }))
-            }
+            TypedTensorRepr::Adjoint(view) => TypedTensorRepr::Adjoint(Arc::new(
+                TypedAdjointView::new(upload(&view.parent)?, view.logical_space.clone()),
+            )),
         };
         Ok(TensorMap {
             runtime: self.runtime.clone(),
@@ -11357,15 +11355,9 @@ impl<R, D: CudaPayload> TensorMap<R, D, CudaStorage<D>> {
 
         let repr = match &self.repr {
             TypedTensorRepr::Owned(body) => TypedTensorRepr::Owned(download(body)?),
-            TypedTensorRepr::Adjoint(view) => {
-                TypedTensorRepr::Adjoint(Arc::new(TypedAdjointView {
-                    parent: download(&view.parent)?,
-                    logical_space: view.logical_space.clone(),
-                    materialized: OnceLock::new(),
-                    #[cfg(test)]
-                    materialized_body_builds: std::sync::atomic::AtomicUsize::new(0),
-                }))
-            }
+            TypedTensorRepr::Adjoint(view) => TypedTensorRepr::Adjoint(Arc::new(
+                TypedAdjointView::new(download(&view.parent)?, view.logical_space.clone()),
+            )),
         };
         Ok(TensorMap {
             runtime: self.runtime.clone(),
@@ -12939,16 +12931,16 @@ where
                     "{operation} requires dense CUDA storage"
                 ))),
             },
-            TypedTensorRepr::Adjoint(view) => match view.parent.data.as_ref() {
-                TypedData::Dense(storage) => Ok((
+            TypedTensorRepr::Adjoint(view) => {
+                let TypedData::Dense(storage) = view.parent.data.as_ref() else {
+                    unreachable!("TypedAdjointView::new admits only dense parents")
+                };
+                Ok((
                     &view.logical_space,
                     tenet_tensors::FusionOperand::adjoint(view.parent.space.space()),
                     storage,
-                )),
-                TypedData::Diagonal(_) => Err(Error::UnsupportedOnDevice(format!(
-                    "{operation} requires dense CUDA storage"
-                ))),
-            },
+                ))
+            }
         }
     }
 
@@ -14676,9 +14668,6 @@ where
         if matches!(
             &self.repr,
             TypedTensorRepr::Owned(body) if matches!(body.data.as_ref(), TypedData::Diagonal(_))
-        ) || matches!(
-            &self.repr,
-            TypedTensorRepr::Adjoint(view) if matches!(view.parent.data.as_ref(), TypedData::Diagonal(_))
         ) {
             return Err(Error::InvalidArgument(
                 "network degeneracy restriction requires dense Host payloads".to_string(),
@@ -22333,12 +22322,10 @@ mod representation_gates {
         let logical_space = tenet_tensors::adjoint_bound_space_dyn(&parent.space).unwrap();
         let lazy = TensorMap {
             runtime: source.runtime.clone(),
-            repr: TypedTensorRepr::Adjoint(Arc::new(TypedAdjointView {
-                parent: Arc::clone(&parent),
+            repr: TypedTensorRepr::Adjoint(Arc::new(TypedAdjointView::new(
+                Arc::clone(&parent),
                 logical_space,
-                materialized: OnceLock::new(),
-                materialized_body_builds: std::sync::atomic::AtomicUsize::new(0),
-            })),
+            ))),
         };
 
         let expected = source.adjoint().unwrap();
@@ -25911,6 +25898,28 @@ mod representation_gates {
         };
         assert!(Arc::ptr_eq(scalar_view, transpose_view));
         assert!(scalar_view.materialized.get().is_none());
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "a lazy adjoint never holds a compact diagonal parent")]
+    fn lazy_adjoint_constructor_rejects_a_compact_diagonal_parent() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let bond =
+            GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
+        let diagonal = TensorMap::diagonal(
+            &runtime,
+            &bond,
+            [SectorSpectrum {
+                sector: U1Irrep::new(0),
+                values: vec![1.0, 2.0],
+            }],
+        )
+        .unwrap();
+        let _ = TypedAdjointView::new(
+            Arc::clone(owned(&diagonal)),
+            diagonal.logical_space().clone(),
+        );
     }
 
     #[test]
