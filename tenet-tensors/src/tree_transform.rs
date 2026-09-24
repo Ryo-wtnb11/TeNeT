@@ -2,6 +2,8 @@ mod cache;
 mod operation;
 mod plan;
 
+#[cfg(test)]
+pub(crate) use cache::take_oriented_tree_pair_compiles;
 pub use cache::{
     RuntimeTreeTransformCacheInfo, RuntimeTreeTransformCacheLedger, RuntimeTreeTransformStore,
     TreePairTransformCache, TreeTransformCache, TreeTransformCacheStats,
