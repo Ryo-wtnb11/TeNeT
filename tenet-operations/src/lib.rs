@@ -21,6 +21,7 @@ compile_error!(
 );
 
 pub mod axis;
+mod checked_block_layout;
 #[cfg(feature = "cuda")]
 pub mod cuda;
 #[cfg(feature = "cuda")]
@@ -52,6 +53,11 @@ pub mod transform_structure;
 mod tree_profile;
 
 pub use axis::*;
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub use checked_block_layout::take_checked_block_passes;
+#[doc(hidden)]
+pub use checked_block_layout::{CheckedBlockLayout, CheckedBlockPasses};
 #[cfg(feature = "cuda")]
 pub use cuda_transform::{
     CudaTreeTransformDestination, CudaTreeTransformExecutor, DEFAULT_COEFFICIENT_BUDGET_BYTES,

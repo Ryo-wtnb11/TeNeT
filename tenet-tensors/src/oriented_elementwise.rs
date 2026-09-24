@@ -1,10 +1,9 @@
 use core::ops::{Add, Mul, Range};
 
 use num_traits::{One, Zero};
-use smallvec::SmallVec;
 use tenet_core::{BlockKey, BlockStructure, FusionTreePairKey, SectorId};
 use tenet_operations::{
-    bilinear_raw_strided_kernel_mapped, ConjugateValue, OperationError,
+    bilinear_raw_strided_kernel_mapped, CheckedBlockLayout, ConjugateValue, OperationError,
     RecouplingCoefficientAction, StridedHostKernelAdapter, WideScalar,
 };
 
@@ -136,9 +135,7 @@ where
             tensor: "oriented degeneracy restriction storage",
         });
     }
-    let mut kernels = StridedHostKernelAdapter::default();
-    let mut destination_strides = SmallVec::<[isize; 8]>::new();
-    let mut source_strides = SmallVec::<[isize; 8]>::new();
+    let mut layout = CheckedBlockLayout::default();
     for destination_index in 0..destination.block_count() {
         let destination_block = destination.block(destination_index)?;
         let BlockKey::FusionTree(logical_key) = destination_block.key() else {
@@ -150,20 +147,22 @@ where
             .storage_space()
             .structure()
             .block(source.storage_block_index(logical_key)?)?;
-        let stride = |stride: usize| {
-            isize::try_from(stride).map_err(|_| OperationError::ElementCountOverflow)
-        };
-        destination_strides.clear();
-        source_strides.clear();
         let mut source_offset = source_block.offset();
-        for (axis, table) in logical_starts.iter().take(destination.rank()).enumerate() {
-            let logical_start = match table {
-                None => 0,
-                Some(table) => *selected_for_sector(table, logical_axis_sector(logical_key, axis)?)
+        layout.fill_one(destination_block.shape(), |axis| {
+            let logical_start =
+                match logical_starts
+                    .get(axis)
                     .ok_or_else(|| OperationError::StructureMismatch {
-                        tensor: "oriented degeneracy restriction sector",
-                    })?,
-            };
+                        tensor: "oriented degeneracy restriction rank",
+                    })? {
+                    None => 0,
+                    Some(table) => {
+                        *selected_for_sector(table, logical_axis_sector(logical_key, axis)?)
+                            .ok_or_else(|| OperationError::StructureMismatch {
+                                tensor: "oriented degeneracy restriction sector",
+                            })?
+                    }
+                };
             let storage_axis = source.storage_axis(axis)?;
             let source_extent = source_block.shape()[storage_axis];
             let end = logical_start
@@ -181,15 +180,14 @@ where
                         .ok_or_else(|| OperationError::ElementCountOverflow)?,
                 )
                 .ok_or_else(|| OperationError::ElementCountOverflow)?;
-            destination_strides.push(stride(destination_block.strides()[axis])?);
-            source_strides.push(stride(source_block.strides()[storage_axis])?);
-        }
-        kernels.tensoradd_strided_checked(
+            Ok((
+                destination_block.strides()[axis],
+                source_block.strides()[storage_axis],
+            ))
+        })?;
+        layout.tensoradd(
             destination_data,
             source_data,
-            destination_block.shape(),
-            &destination_strides,
-            &source_strides,
             checked_offset(destination_block.offset())?,
             checked_offset(source_offset)?,
             source.storage_conjugate(),
@@ -403,82 +401,6 @@ where
     Ok(())
 }
 
-/// One logical block's shape and `isize` strides against one operand, in the
-/// form [`StridedHostKernelAdapter::tensoradd_strided_checked`] takes.
-///
-/// Extent-one axes are dropped: they move no element and reach no extra
-/// offset. Why not keep them: these inline buffers would then spill at a lower
-/// rank than the adapter's own normalization scratch, which drops them too.
-/// Every axis' stride is still converted, so an unrepresentable stride is an
-/// error before any write, as it was per element before.
-///
-/// Past eight non-unit axes the buffers spill to the heap: three per operand,
-/// once per op and reused across blocks, on top of the adapter's own three.
-/// The per-element kernel this replaced allocated nothing at any rank; the
-/// count is pinned in `tenet/tests/adjoint_view_allocations.rs`.
-#[derive(Default)]
-pub(crate) struct CheckedBlockAxes {
-    shape: SmallVec<[usize; 8]>,
-    destination_strides: SmallVec<[isize; 8]>,
-    source_strides: SmallVec<[isize; 8]>,
-}
-
-impl CheckedBlockAxes {
-    pub(crate) fn fill(
-        &mut self,
-        shape: &[usize],
-        destination_strides: &[usize],
-        source: FusionOperand<'_>,
-        source_strides: &[usize],
-    ) -> Result<(), OperationError> {
-        let stride = |stride: usize| {
-            isize::try_from(stride).map_err(|_| OperationError::ElementCountOverflow)
-        };
-        self.shape.clear();
-        self.destination_strides.clear();
-        self.source_strides.clear();
-        for (axis, &extent) in shape.iter().enumerate() {
-            let destination = stride(destination_strides[axis])?;
-            let source = stride(source_strides[source.storage_axis(axis)?])?;
-            if extent != 1 {
-                self.shape.push(extent);
-                self.destination_strides.push(destination);
-                self.source_strides.push(source);
-            }
-        }
-        Ok(())
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn tensoradd<D>(
-        &self,
-        kernels: &mut StridedHostKernelAdapter,
-        destination_data: &mut [D],
-        source_data: &[D],
-        destination_offset: isize,
-        source_offset: isize,
-        source_conjugate: bool,
-        alpha: D,
-        beta: D,
-    ) -> Result<(), OperationError>
-    where
-        D: Copy + Add<D, Output = D> + Mul<D, Output = D> + PartialEq + Zero + One + ConjugateValue,
-    {
-        kernels.tensoradd_strided_checked(
-            destination_data,
-            source_data,
-            &self.shape,
-            &self.destination_strides,
-            &self.source_strides,
-            destination_offset,
-            source_offset,
-            source_conjugate,
-            alpha,
-            beta,
-        )
-    }
-}
-
 #[doc(hidden)]
 #[allow(clippy::too_many_arguments)]
 pub fn oriented_fusion_add_into<D>(
@@ -511,9 +433,7 @@ where
     }
     validate_oriented_fusion_layout(destination, lhs)?;
     validate_oriented_fusion_layout(destination, rhs)?;
-    let mut kernels = StridedHostKernelAdapter::default();
-    let mut lhs_axes = CheckedBlockAxes::default();
-    let mut rhs_axes = CheckedBlockAxes::default();
+    let mut layout = CheckedBlockLayout::default();
     for destination_index in 0..destination.block_count() {
         let destination_block = destination.block(destination_index)?;
         let BlockKey::FusionTree(logical_key) = destination_block.key() else {
@@ -529,26 +449,38 @@ where
             .storage_space()
             .structure()
             .block(rhs.storage_block_index(logical_key)?)?;
-        // Both sources' layouts are converted before the first write of the
-        // block, whichever coefficients are zero.
-        lhs_axes.fill(
-            destination_block.shape(),
-            destination_block.strides(),
-            lhs,
-            lhs_block.strides(),
-        )?;
-        rhs_axes.fill(
-            destination_block.shape(),
-            destination_block.strides(),
-            rhs,
-            rhs_block.strides(),
-        )?;
+        // Both sources' strides are converted before the first write of the
+        // block, whichever coefficients are zero. With `alpha = 0` the rhs is
+        // the layout's first source, which the single-source entry reads.
+        let (first, first_block, second, second_block) = if alpha.is_zero() {
+            (rhs, rhs_block, lhs, lhs_block)
+        } else {
+            (lhs, lhs_block, rhs, rhs_block)
+        };
+        layout.fill_two(destination_block.shape(), |axis| {
+            Ok((
+                destination_block.strides()[axis],
+                first_block.strides()[first.storage_axis(axis)?],
+                second_block.strides()[second.storage_axis(axis)?],
+            ))
+        })?;
         let destination_offset = checked_offset(destination_block.offset())?;
         let lhs_offset = checked_offset(lhs_block.offset())?;
         let rhs_offset = checked_offset(rhs_block.offset())?;
-        if !alpha.is_zero() {
-            lhs_axes.tensoradd(
-                &mut kernels,
+        match (alpha.is_zero(), beta.is_zero()) {
+            (false, false) => layout.add_two_source(
+                destination_data,
+                lhs_data,
+                rhs_data,
+                destination_offset,
+                lhs_offset,
+                rhs_offset,
+                lhs.storage_conjugate(),
+                rhs.storage_conjugate(),
+                alpha,
+                beta,
+            )?,
+            (false, true) => layout.tensoradd(
                 destination_data,
                 lhs_data,
                 destination_offset,
@@ -556,19 +488,17 @@ where
                 lhs.storage_conjugate(),
                 alpha,
                 D::zero(),
-            )?;
-        }
-        if !beta.is_zero() {
-            rhs_axes.tensoradd(
-                &mut kernels,
+            )?,
+            (true, false) => layout.tensoradd(
                 destination_data,
                 rhs_data,
                 destination_offset,
                 rhs_offset,
                 rhs.storage_conjugate(),
                 beta,
-                if alpha.is_zero() { D::zero() } else { D::one() },
-            )?;
+                D::zero(),
+            )?,
+            (true, true) => {}
         }
     }
     if alpha.is_zero() && beta.is_zero() {
@@ -935,6 +865,59 @@ mod tests {
             Err(OperationError::StrideOverflow { value: usize::MAX })
         ));
         assert_eq!(output, before);
+    }
+
+    /// #1401: per block, lazy `add` normalizes one joint layout and walks it
+    /// once (it made two adapter calls, each converting and then normalizing
+    /// its own layout), and restriction and adjoint materialization normalize
+    /// once per block.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn checked_block_paths_make_one_layout_pass_and_one_walk_per_block() {
+        use tenet_operations::{take_checked_block_passes, CheckedBlockPasses};
+        let passes = |count| CheckedBlockPasses {
+            layout_passes: count,
+            span_walks: count,
+        };
+        let destination = two_key_destination();
+        let operand = destination_operand();
+        let data: Vec<f64> = (0..12).map(f64::from).collect();
+        let mut output = vec![0.0; 12];
+        take_checked_block_passes();
+        oriented_fusion_add_into(
+            &destination,
+            &mut output,
+            FusionOperand::direct(&operand),
+            &data,
+            FusionOperand::direct(&operand),
+            &data,
+            2.0,
+            0.5,
+        )
+        .unwrap();
+        assert_eq!(take_checked_block_passes(), passes(2));
+        assert_eq!(
+            output,
+            data.iter().map(|x| 2.0 * x + 0.5 * x).collect::<Vec<_>>()
+        );
+
+        oriented_fusion_restrict_into(
+            &destination,
+            &mut output,
+            FusionOperand::direct(&operand),
+            &data,
+            &[None, None],
+        )
+        .unwrap();
+        assert_eq!(take_checked_block_passes(), passes(2));
+        assert_eq!(output, data);
+
+        let (logical, padded, _, parent) = padded_fixture();
+        take_checked_block_passes();
+        let materialized =
+            crate::adjoint::materialize_adjoint_data_dyn(&padded, &logical, &parent).unwrap();
+        assert_eq!(take_checked_block_passes(), passes(1));
+        assert_eq!(materialized.len(), 6);
     }
 
     #[test]
