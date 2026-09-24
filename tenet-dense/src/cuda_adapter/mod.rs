@@ -18,9 +18,10 @@ use tenferro_gpu::cuda::{download_tensor, upload_tensor, CudaBackend, CudaDevice
 use tenferro_linalg::{QrGauge, QrOptions, TensorReadLinalgExt};
 use tenferro_tensor::backend::{BackendSession, BackendSessionHost};
 use tenferro_tensor::{
-    CompareDir, ContractionScalar, DotGeneralAccumulation, DotGeneralConfig, Tensor, TensorDot,
-    TensorElementwise, TensorIndexing, TensorRead, TensorReduction, TensorScalar as TenferroScalar,
-    TensorStructural, TensorView, TensorViewMut, TensorWrite, TypedTensor,
+    CompareDir, ContractionScalar, DotGeneralAccumulation, DotGeneralConfig, DynRank, Tensor,
+    TensorDot, TensorElementwise, TensorIndexing, TensorRead, TensorReduction,
+    TensorScalar as TenferroScalar, TensorStructural, TensorView, TensorViewCanonicalization,
+    TensorViewMut, TensorWrite, TypedTensor, TypedTensorView, TypedTensorViewMut,
 };
 
 use super::{DenseBackend, DenseDType, DenseError, MatrixOp};
@@ -164,6 +165,13 @@ pub trait CudaScalar:
     fn typed_mut(tensor: &mut Tensor) -> Option<&mut TypedTensor<Self>> {
         tensor.as_typed_mut::<Self>()
     }
+
+    #[doc(hidden)]
+    fn copy_view_into(
+        backend: &mut CudaBackend,
+        src: &TypedTensorView<'_, Self, DynRank>,
+        dst: &mut TypedTensorViewMut<'_, Self, DynRank>,
+    ) -> tenferro_tensor::Result<()>;
 }
 /// The real lane of a [`CudaScalar`] payload.
 ///
@@ -224,6 +232,14 @@ impl CudaScalar for f32 {
     fn contraction_scalar(self) -> ContractionScalar {
         ContractionScalar::F32(self)
     }
+
+    fn copy_view_into(
+        backend: &mut CudaBackend,
+        src: &TypedTensorView<'_, Self, DynRank>,
+        dst: &mut TypedTensorViewMut<'_, Self, DynRank>,
+    ) -> tenferro_tensor::Result<()> {
+        TensorViewCanonicalization::copy_into(backend, src, dst)
+    }
 }
 impl CudaScalar for Complex32 {
     const DTYPE: DenseDType = DenseDType::C32;
@@ -234,6 +250,14 @@ impl CudaScalar for Complex32 {
 
     fn contraction_scalar(self) -> ContractionScalar {
         ContractionScalar::C32(self)
+    }
+
+    fn copy_view_into(
+        backend: &mut CudaBackend,
+        src: &TypedTensorView<'_, Self, DynRank>,
+        dst: &mut TypedTensorViewMut<'_, Self, DynRank>,
+    ) -> tenferro_tensor::Result<()> {
+        TensorViewCanonicalization::copy_into(backend, src, dst)
     }
 }
 impl CudaScalar for f64 {
@@ -246,6 +270,14 @@ impl CudaScalar for f64 {
     fn contraction_scalar(self) -> ContractionScalar {
         ContractionScalar::F64(self)
     }
+
+    fn copy_view_into(
+        backend: &mut CudaBackend,
+        src: &TypedTensorView<'_, Self, DynRank>,
+        dst: &mut TypedTensorViewMut<'_, Self, DynRank>,
+    ) -> tenferro_tensor::Result<()> {
+        TensorViewCanonicalization::copy_into(backend, src, dst)
+    }
 }
 impl CudaScalar for Complex64 {
     const DTYPE: DenseDType = DenseDType::C64;
@@ -256,6 +288,14 @@ impl CudaScalar for Complex64 {
 
     fn contraction_scalar(self) -> ContractionScalar {
         ContractionScalar::C64(self)
+    }
+
+    fn copy_view_into(
+        backend: &mut CudaBackend,
+        src: &TypedTensorView<'_, Self, DynRank>,
+        dst: &mut TypedTensorViewMut<'_, Self, DynRank>,
+    ) -> tenferro_tensor::Result<()> {
+        TensorViewCanonicalization::copy_into(backend, src, dst)
     }
 }
 fn dtype_mismatch<D: CudaScalar>(op: &'static str, tensor: &Tensor) -> DenseError {

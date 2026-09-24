@@ -122,6 +122,40 @@ pub(super) fn submit_region_axpby<D: CudaScalar>(
         )
         .map_err(|err| cuda_error(op, err))
 }
+
+fn submit_region_copy<D: CudaScalar>(
+    backend: &mut CudaBackend,
+    op: &'static str,
+    src: &CudaDenseStorage,
+    src_region: &CudaRegion,
+    dst: &mut CudaDenseStorage,
+    dst_region: &CudaRegion,
+) -> Result<(), DenseError> {
+    let (mut dims, mut src_strides) = src_region.contraction_view_metadata()?;
+    let (_, mut dst_strides) = dst_region.contraction_view_metadata()?;
+    dims.pop();
+    src_strides.pop();
+    dst_strides.pop();
+    let Some(src_tensor) = D::typed(&src.tensor) else {
+        return Err(dtype_mismatch::<D>(op, &src.tensor));
+    };
+    let src_view = src_tensor
+        .backend_region_view(dims.clone(), src_strides, src_region.offset_isize()?)
+        .map_err(|err| cuda_error(op, err))?;
+    let actual = dst.dtype;
+    let Some(dst_tensor) = D::typed_mut(&mut dst.tensor) else {
+        return Err(DenseError::DTypeMismatch {
+            op,
+            expected: D::DTYPE,
+            actual,
+        });
+    };
+    let mut dst_view = dst_tensor
+        .backend_region_view_mut(dims, dst_strides, dst_region.offset_isize()?)
+        .map_err(|err| cuda_error(op, err))?;
+    record(|stats| stats.copy_calls += 1);
+    D::copy_view_into(backend, &src_view, &mut dst_view).map_err(|err| cuda_error(op, err))
+}
 /// `dst_region = alpha * c * [conj] src_region + beta * dst_region`, where `c`
 /// is a 1x1 **data** operand chosen by `coeff` and `alpha` is the caller's own
 /// scale, carried by the contraction descriptor.
@@ -130,8 +164,10 @@ pub(super) fn submit_region_axpby<D: CudaScalar>(
 /// operations are built on: one strided, offset, rank-N source region of one
 /// buffer moved into a strided, offset, rank-N destination region of another,
 /// with the axis permutation carried by the destination strides. It submits
-/// one `dot_general` against the 1x1 coefficient and allocates no device
-/// buffer of its own.
+/// one typed strided copy for an unscaled, unconjugated overwrite with a unit
+/// coefficient, or one `dot_general` against the 1x1 coefficient otherwise.
+/// The copy route allocates no buffer, builds no cuTENSOR plan, counts one
+/// `copy_calls`, and transports every payload bit-exactly.
 ///
 /// Transfer contract: a call with [`CudaRegionCoefficient::Buffer`] moves
 /// nothing across the host boundary, ever. A call with
@@ -248,6 +284,14 @@ pub fn cuda_region_axpby<D: CudaScalar>(
     validate_destination_layout(OP, dst_region)?;
     validate_region(src_region, src.len)?;
     validate_region(dst_region, dst.len)?;
+
+    if matches!(coeff, CudaRegionCoefficient::One)
+        && !conj
+        && alpha == D::ONE
+        && matches!(beta, CudaRegionBeta::Overwrite)
+    {
+        return submit_region_copy::<D>(&mut ctx.backend, OP, src, src_region, dst, dst_region);
+    }
 
     match coeff {
         CudaRegionCoefficient::Buffer(coeff, offset) => submit_region_axpby::<D>(
