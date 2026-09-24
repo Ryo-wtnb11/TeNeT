@@ -686,6 +686,10 @@ pub struct DynamicFusionMapSpace {
     /// layout hash because it is a function of the compared fields; clones
     /// share the filled value. The error is boxed so an unused slot adds only
     /// two pointers and the once-state to every space.
+    ///
+    /// Hazard: a struct update (`Self { subblock_structure, ..other }`) that
+    /// replaces `nout`, `nin`, `homspace`, or `subblock_structure` must also
+    /// reset this slot with `OnceLock::new()`, or it inherits a stale adjoint.
     adjoint: OnceLock<Result<AdjointViewParts, Box<OperationError>>>,
 }
 
@@ -3872,6 +3876,7 @@ mod bound_invariant_tests {
         let raw = DynamicFusionMapSpace {
             nout: 0,
             nin: 1,
+            adjoint: OnceLock::new(),
             ..matrix_space()
         };
 
@@ -3909,6 +3914,7 @@ mod bound_invariant_tests {
         .unwrap();
         let raw = DynamicFusionMapSpace {
             subblock_structure: Arc::new(structure),
+            adjoint: OnceLock::new(),
             ..raw
         };
 
@@ -4029,6 +4035,7 @@ mod bound_invariant_tests {
         let subset = DynamicFusionMapSpace {
             subblock_structure: Arc::new(structure),
             admission: FusionSpaceAdmission::Subset(provider.rule_identity()),
+            adjoint: OnceLock::new(),
             ..complete
         };
 
@@ -5732,6 +5739,7 @@ mod scratch_cache_tests {
             .collect();
         let shifted_raw = DynamicFusionMapSpace {
             subblock_structure: Arc::new(BlockStructure::from_blocks(shifted_blocks).unwrap()),
+            adjoint: OnceLock::new(),
             ..raw.clone()
         };
         let canonical =
@@ -5870,6 +5878,7 @@ mod scratch_cache_tests {
         let incomplete = DynamicFusionMapSpace {
             subblock_structure: Arc::new(incomplete_structure),
             admission: FusionSpaceAdmission::Subset(Z2FusionRule.rule_identity()),
+            adjoint: OnceLock::new(),
             ..complete
         };
 

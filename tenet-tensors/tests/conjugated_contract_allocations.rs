@@ -180,8 +180,15 @@ fn warm_conjugated_contract_allocations_are_pinned() {
         }
         // What: the warm count does not grow with the degeneracy and holds no
         // per-call adjoint rebuild (before #1368: U1 49, SU2 188, fZ2xU1 49).
-        for ((name, (calls, _, _)), expected) in rows.into_iter().zip([11, 168, 11]) {
-            assert_eq!(calls, expected, "{name} d{deg}");
+        // Byte bounds sit well below the pre-#1368 warm bytes (U1 and fZ2xU1
+        // 14088, SU2 11268) and above today's (1376, 4616, 1376); the filled
+        // memo of these three rank-2 blocks charges 3862 bytes.
+        for ((name, (calls, bytes, retained)), (expected_calls, max_bytes)) in
+            rows.into_iter().zip([(11, 2048), (168, 6144), (11, 2048)])
+        {
+            assert_eq!(calls, expected_calls, "{name} d{deg}");
+            assert!(bytes <= max_bytes, "{name} d{deg}: {bytes} warm bytes");
+            assert!(retained <= 4096, "{name} d{deg}: {retained} memo bytes");
         }
     }
 }
