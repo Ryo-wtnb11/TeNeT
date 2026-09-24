@@ -19180,15 +19180,130 @@ mod tests {
             .unwrap()
             .shares_sector_data_with(&fixed));
 
-        // What: the leg the dual moves keeps building its own sorted data,
-        // and the round trip still returns the source.
+        // What: a leg whose map the dual moves also shares its storage, with
+        // the dual map the hand-computed `q -> -q` gives.
         let moved = SectorLeg::new([(u1(-1), 2), (u1(1), 4)], false);
         let moved_dual = moved.dual(&rule);
-        assert!(!moved.shares_sector_data_with(&moved_dual));
+        assert!(moved.shares_sector_data_with(&moved_dual));
         assert_eq!(moved_dual.sectors(), &[u1(-1), u1(1)]);
         assert_eq!(moved_dual.degeneracies(), &[4, 2]);
+        assert_eq!(moved_dual.degeneracy(u1(1)), Some(2));
         assert!(moved_dual.is_dual());
         assert_eq!(moved_dual.dual(&rule), moved);
+        assert!(moved_dual.dual(&rule).shares_sector_data_with(&moved));
+    }
+
+    fn sector_leg_hash(leg: &SectorLeg) -> u64 {
+        let mut state = std::collections::hash_map::DefaultHasher::new();
+        leg.hash(&mut state);
+        state.finish()
+    }
+
+    /// `leg.dual(rule)` equals, hashes and prints like `expected` built
+    /// eagerly, shares `leg`'s storage, and dualizes back to `leg`.
+    fn assert_shared_dual<R: FusionRule>(rule: &R, leg: &SectorLeg, expected: &SectorLeg) {
+        for _ in 0..2 {
+            let dual = leg.dual(rule);
+            assert_eq!(&dual, expected);
+            assert_eq!(sector_leg_hash(&dual), sector_leg_hash(expected));
+            assert_eq!(format!("{dual:?}"), format!("{expected:?}"));
+            assert!(dual.shares_sector_data_with(leg));
+            let back = dual.dual(rule);
+            assert_eq!(&back, leg);
+            assert_eq!(sector_leg_hash(&back), sector_leg_hash(leg));
+            assert!(back.shares_sector_data_with(leg));
+        }
+    }
+
+    #[test]
+    fn sector_leg_dual_is_shared_for_non_self_dual_self_dual_and_product_rules() {
+        // What: #1403. The dual shares storage for every map, and its content
+        // is the hand-computed dual map with the flag flipped.
+        for is_dual in [false, true] {
+            let u1_leg = SectorLeg::new([(u1(-2), 1), (u1(0), 3), (u1(1), 5)], is_dual);
+            let u1_expected = SectorLeg::new([(u1(2), 1), (u1(0), 3), (u1(-1), 5)], !is_dual);
+            assert_shared_dual(&U1FusionRule, &u1_leg, &u1_expected);
+            assert_eq!(u1_leg.try_dual(&U1FusionRule), Ok(u1_expected.clone()));
+            assert!(u1_leg
+                .try_dual(&U1FusionRule)
+                .unwrap()
+                .shares_sector_data_with(&u1_leg));
+
+            let su2_leg = SectorLeg::new([(su2(0), 2), (su2(1), 1), (su2(2), 4)], is_dual);
+            let su2_expected = SectorLeg::new([(su2(0), 2), (su2(1), 1), (su2(2), 4)], !is_dual);
+            assert_shared_dual(&SU2FusionRule, &su2_leg, &su2_expected);
+
+            type Fz2U1 = ProductFusionRule<FermionParityFusionRule, U1FusionRule>;
+            let product = Fz2U1::new(FermionParityFusionRule, U1FusionRule);
+            let sector = |parity, charge| product.encode_sector(parity, u1(charge));
+            let product_leg = SectorLeg::new(
+                [
+                    (sector(z2_even(), 0), 2),
+                    (sector(z2_odd(), 1), 3),
+                    (sector(z2_even(), -2), 1),
+                ],
+                is_dual,
+            );
+            let product_expected = SectorLeg::new(
+                [
+                    (sector(z2_even(), 0), 2),
+                    (sector(z2_odd(), -1), 3),
+                    (sector(z2_even(), 2), 1),
+                ],
+                !is_dual,
+            );
+            assert_shared_dual(&product, &product_leg, &product_expected);
+            assert_eq!(product_leg.try_dual(&product), Ok(product_expected));
+        }
+    }
+
+    #[test]
+    fn sector_leg_dual_under_a_different_rule_ignores_the_shared_map() {
+        // What: sector ids are rule-relative. A rule whose dual differs from
+        // the rule that filled a leg's dual map gets its own dual, and the
+        // shared map keeps serving the filling rule.
+        let leg = SectorLeg::new([(u1(-1), 2), (u1(1), 4)], false);
+        let u1_dual = leg.dual(&U1FusionRule);
+        let identity_dual = leg.dual(&SU2FusionRule);
+        assert_eq!(
+            identity_dual,
+            SectorLeg::new([(u1(-1), 2), (u1(1), 4)], true)
+        );
+        assert_eq!(
+            u1_dual.dual(&SU2FusionRule),
+            SectorLeg::new([(u1(-1), 4), (u1(1), 2)], false)
+        );
+        assert_eq!(leg.dual(&U1FusionRule), u1_dual);
+        assert!(leg.dual(&U1FusionRule).shares_sector_data_with(&leg));
+        assert_eq!(u1_dual.degeneracies(), &[4, 2]);
+
+        // What: the other fill order.
+        let leg = SectorLeg::new([(u1(-1), 2), (u1(1), 4)], false);
+        assert_eq!(
+            leg.dual(&SU2FusionRule),
+            SectorLeg::new([(u1(-1), 2), (u1(1), 4)], true)
+        );
+        assert_eq!(
+            leg.dual(&U1FusionRule),
+            SectorLeg::new([(u1(-1), 4), (u1(1), 2)], true)
+        );
+    }
+
+    #[test]
+    fn sector_leg_charge_does_not_grow_when_the_dual_map_is_filled() {
+        // What: a cache charges a leg when it admits it; filling the shared
+        // dual map later, including spilled storage, stays inside that charge.
+        let rule = U1FusionRule;
+        let leg = SectorLeg::new((0..12).map(|charge| (u1(charge), 1 + charge as usize)), false);
+        let charge = leg.charged_retained_bytes();
+        let dual = leg.dual(&rule);
+        assert_eq!(leg.charged_retained_bytes(), charge);
+        assert_eq!(dual.charged_retained_bytes(), charge);
+        assert_eq!(
+            dual,
+            SectorLeg::new((0..12).map(|charge| (u1(-charge), 1 + charge as usize)), true)
+        );
+        assert_eq!(dual.dual(&rule), leg);
     }
 
     #[test]

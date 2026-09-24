@@ -46,7 +46,6 @@ impl From<MultiplicityIndex> for usize {
     }
 }
 
-#[derive(Debug, Eq, PartialEq, Hash)]
 struct SectorLegData {
     sectors: SectorVec,
     /// Per-sector degeneracy, parallel to `sectors`. The leg is the single
@@ -54,6 +53,37 @@ struct SectorLegData {
     /// (TensorKit `GradedSpace` parity: the space stores the complete map
     /// independent of which fusion trees are populated).
     degeneracies: DimVec,
+    /// The dual of this map, filled by the first dual query and shared by
+    /// every leg dualized from this storage afterwards (TensorKit
+    /// `dual(V)` shares `V.dims`).
+    ///
+    /// Why lazy and not at construction: `SectorLeg::new` has no rule, and a
+    /// `SectorId`'s dual is rule-relative. Why validated on every query and
+    /// not trusted: two rules of one Rust type (Generic providers) can dualize
+    /// one id differently, so a query whose rule disagrees with `images`
+    /// builds its own storage and leaves this map untouched.
+    dual: OnceLock<DualSectorMap>,
+}
+
+struct DualSectorMap {
+    /// `dual(sectors[i])` under the rule that filled this map.
+    images: SectorVec,
+    /// The sorted dual map, `None` when it equals the source map.
+    moved: Option<MovedSectorMap>,
+}
+
+struct MovedSectorMap {
+    sectors: SectorVec,
+    degeneracies: DimVec,
+    /// `dual(sectors[j])` under the filling rule: the source sector that
+    /// `sectors[j]` is the dual of.
+    images: SectorVec,
+}
+
+fn exact_sector_vec(values: impl ExactSizeIterator<Item = SectorId>) -> SectorVec {
+    let mut out = SectorVec::with_capacity(values.len());
+    out.extend(values);
+    out
 }
 
 #[non_exhaustive]
@@ -74,37 +104,135 @@ impl fmt::Display for SectorLegConstructionError {
 
 impl std::error::Error for SectorLegConstructionError {}
 
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone)]
 pub struct SectorLeg {
     data: Arc<SectorLegData>,
     is_dual: bool,
+    /// Whether this leg's map is `data.dual`'s moved map rather than
+    /// `data`'s own. Invariant: set only after `data.dual` holds a moved map;
+    /// a `OnceLock` is never cleared.
+    moved: bool,
+}
+
+impl PartialEq for SectorLeg {
+    fn eq(&self, other: &Self) -> bool {
+        self.is_dual == other.is_dual
+            && ((Arc::ptr_eq(&self.data, &other.data) && self.moved == other.moved)
+                || self.map() == other.map())
+    }
+}
+
+impl Eq for SectorLeg {}
+
+impl Hash for SectorLeg {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        // Same fields in the same order as the former derived hash, so hashes
+        // depend on content only, never on which storage a leg shares.
+        let (sectors, degeneracies) = self.map();
+        sectors.hash(state);
+        degeneracies.hash(state);
+        self.is_dual.hash(state);
+    }
+}
+
+impl fmt::Debug for SectorLeg {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        struct Data<'a>(&'a [SectorId], &'a [usize]);
+        impl fmt::Debug for Data<'_> {
+            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter
+                    .debug_struct("SectorLegData")
+                    .field("sectors", &self.0)
+                    .field("degeneracies", &self.1)
+                    .finish()
+            }
+        }
+        let (sectors, degeneracies) = self.map();
+        formatter
+            .debug_struct("SectorLeg")
+            .field("data", &Data(sectors, degeneracies))
+            .field("is_dual", &self.is_dual)
+            .finish()
+    }
 }
 
 impl SectorLeg {
+    fn from_data(sectors: SectorVec, degeneracies: DimVec, is_dual: bool) -> Self {
+        Self {
+            data: Arc::new(SectorLegData {
+                sectors,
+                degeneracies,
+                dual: OnceLock::new(),
+            }),
+            is_dual,
+            moved: false,
+        }
+    }
+
+    #[inline]
+    fn map(&self) -> (&SectorVec, &DimVec) {
+        if self.moved {
+            let moved = self
+                .data
+                .dual
+                .get()
+                .and_then(|dual| dual.moved.as_ref())
+                .expect("a moved leg's storage holds its moved dual map");
+            (&moved.sectors, &moved.degeneracies)
+        } else {
+            (&self.data.sectors, &self.data.degeneracies)
+        }
+    }
+
+    /// The stored `dual(sector)` of each of this leg's sectors, when a dual
+    /// query has filled the shared map.
+    fn stored_images(&self) -> Option<&[SectorId]> {
+        let dual = self.data.dual.get()?;
+        if self.moved {
+            dual.moved.as_ref().map(|moved| moved.images.as_slice())
+        } else {
+            Some(&dual.images)
+        }
+    }
+
+    /// The dual leg over the same storage; `data.dual` must be filled.
+    fn flipped(&self) -> Self {
+        let moves = self
+            .data
+            .dual
+            .get()
+            .is_some_and(|dual| dual.moved.is_some());
+        Self {
+            data: Arc::clone(&self.data),
+            is_dual: !self.is_dual,
+            moved: moves && !self.moved,
+        }
+    }
+
     /// Conservative retained bytes for this leg's Arc-backed sector and
     /// degeneracy metadata, excluding the inline `SectorLeg` pointer shell.
+    ///
+    /// The dual map's heap bytes are charged whether or not a dual query has
+    /// filled it yet, so a leg's charge does not grow after a cache admits it.
     #[doc(hidden)]
     pub fn charged_retained_bytes(&self) -> usize {
-        let sectors = if self.data.sectors.spilled() {
-            self.data
-                .sectors
-                .capacity()
-                .saturating_mul(std::mem::size_of::<SectorId>())
+        let len = self.data.sectors.len();
+        let dual_sectors = if len > self.data.sectors.inline_size() {
+            len.saturating_mul(3 * std::mem::size_of::<SectorId>())
         } else {
             0
         };
-        let degeneracies = if self.data.degeneracies.spilled() {
-            self.data
-                .degeneracies
-                .capacity()
-                .saturating_mul(std::mem::size_of::<usize>())
+        let dual_degeneracies = if len > self.data.degeneracies.inline_size() {
+            len.saturating_mul(std::mem::size_of::<usize>())
         } else {
             0
         };
         std::mem::size_of::<SectorLegData>()
             .saturating_add(2 * std::mem::size_of::<usize>())
-            .saturating_add(sectors)
-            .saturating_add(degeneracies)
+            .saturating_add(spilled_smallvec_heap_bytes(&self.data.sectors))
+            .saturating_add(spilled_smallvec_heap_bytes(&self.data.degeneracies))
+            .saturating_add(dual_sectors)
+            .saturating_add(dual_degeneracies)
     }
 
     /// Builds one external leg from `(sector, degeneracy)` pairs.
@@ -189,6 +317,7 @@ impl SectorLeg {
                 return Ok(Self {
                     data: Arc::clone(&share.data),
                     is_dual,
+                    moved: share.moved,
                 });
             }
         }
@@ -207,13 +336,7 @@ impl SectorLeg {
             sectors.push(sector);
             degeneracies.push(degeneracy);
         }
-        Ok(Self {
-            data: Arc::new(SectorLegData {
-                sectors,
-                degeneracies,
-            }),
-            is_dual,
-        })
+        Ok(Self::from_data(sectors, degeneracies, is_dual))
     }
 
     pub fn from_sector_id(sector: usize, degeneracy: usize) -> Self {
@@ -222,54 +345,130 @@ impl SectorLeg {
 
     #[inline]
     pub fn sectors(&self) -> &[SectorId] {
-        &self.data.sectors
+        self.map().0
     }
 
     /// Per-sector degeneracies, parallel to [`Self::sectors`].
     #[inline]
     pub fn degeneracies(&self) -> &[usize] {
-        &self.data.degeneracies
+        self.map().1
     }
 
     /// Degeneracy of `sector` on this leg, `None` when the sector is not
     /// part of the leg.
     pub fn degeneracy(&self, sector: SectorId) -> Option<usize> {
-        self.data
-            .sectors
+        let (sectors, degeneracies) = self.map();
+        sectors
             .binary_search(&sector)
             .ok()
-            .map(|index| self.data.degeneracies[index])
+            .map(|index| degeneracies[index])
     }
 
     /// `(sector, degeneracy)` pairs in sorted sector order.
     pub fn iter(&self) -> impl Iterator<Item = (SectorId, usize)> + '_ {
-        self.data
-            .sectors
-            .iter()
-            .copied()
-            .zip(self.data.degeneracies.iter().copied())
+        let (sectors, degeneracies) = self.map();
+        sectors.iter().copied().zip(degeneracies.iter().copied())
     }
 
     /// The dual leg: every sector is replaced by its dual (degeneracies
     /// carried along) and the dual flag is flipped.
+    ///
+    /// After the first query on a leg's storage, the dual shares that
+    /// storage and allocates nothing.
     pub fn dual<R>(&self, rule: &R) -> Self
     where
         R: FusionRule,
     {
-        Self::build(
-            self.iter()
-                .map(|(sector, degeneracy)| (rule.dual(sector), degeneracy))
-                .collect(),
-            !self.is_dual,
-            Some(self),
+        self.dual_by(
+            |sector| Ok(rule.dual(sector)),
+            |sector| SectorLegConstructionError::DuplicateSector { sector },
         )
         .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    /// Shared body of the dual constructors. `dual_of` is queried once per
+    /// sector in sector order, so the first rule error is the one returned;
+    /// `not_injective` reports the smallest sector two sectors dualize onto.
+    fn dual_by<E>(
+        &self,
+        mut dual_of: impl FnMut(SectorId) -> Result<SectorId, E>,
+        not_injective: impl FnOnce(SectorId) -> E,
+    ) -> Result<Self, E> {
+        let (sectors, degeneracies) = self.map();
+        if let Some(images) = self.stored_images() {
+            for (index, (&sector, &image)) in sectors.iter().zip(images).enumerate() {
+                let dual = dual_of(sector)?;
+                if dual != image {
+                    // A rule that disagrees with the filling rule: build the
+                    // dual as a fresh leg and leave the shared map untouched.
+                    let mut pairs = SmallVec::<[(SectorId, usize); 8]>::with_capacity(sectors.len());
+                    pairs.extend(images[..index].iter().copied().zip(degeneracies.iter().copied()));
+                    pairs.push((dual, degeneracies[index]));
+                    for (&sector, &degeneracy) in
+                        sectors[index + 1..].iter().zip(&degeneracies[index + 1..])
+                    {
+                        pairs.push((dual_of(sector)?, degeneracy));
+                    }
+                    return Self::build(pairs, !self.is_dual, Some(self)).map_err(
+                        |SectorLegConstructionError::DuplicateSector { sector }| {
+                            not_injective(sector)
+                        },
+                    );
+                }
+            }
+            return Ok(self.flipped());
+        }
+
+        // First dual query on this storage. Only an unmoved leg gets here: a
+        // moved leg exists only after its storage's dual map is filled.
+        let mut triples = SmallVec::<[(SectorId, usize, SectorId); 8]>::with_capacity(sectors.len());
+        for (&sector, &degeneracy) in sectors.iter().zip(degeneracies) {
+            triples.push((dual_of(sector)?, degeneracy, sector));
+        }
+        let images = exact_sector_vec(triples.iter().map(|&(dual, _, _)| dual));
+        triples.sort_unstable_by_key(|&(dual, _, _)| dual);
+        for window in triples.windows(2) {
+            if window[0].0 == window[1].0 {
+                return Err(not_injective(window[0].0));
+            }
+        }
+        let unchanged = triples
+            .iter()
+            .map(|&(dual, degeneracy, _)| (dual, degeneracy))
+            .eq(self.iter());
+        let moved = (!unchanged).then(|| {
+            let mut degeneracies = DimVec::with_capacity(triples.len());
+            degeneracies.extend(triples.iter().map(|&(_, degeneracy, _)| degeneracy));
+            MovedSectorMap {
+                sectors: exact_sector_vec(triples.iter().map(|&(dual, _, _)| dual)),
+                degeneracies,
+                images: exact_sector_vec(triples.iter().map(|&(_, _, source)| source)),
+            }
+        });
+        match self.data.dual.set(DualSectorMap { images, moved }) {
+            Ok(()) => Ok(self.flipped()),
+            // Another thread filled the map first; share it only when its
+            // rule agrees with this one.
+            Err(map) if self.stored_images() == Some(map.images.as_slice()) => Ok(self.flipped()),
+            Err(DualSectorMap { moved: None, .. }) => Ok(Self {
+                data: Arc::clone(&self.data),
+                is_dual: !self.is_dual,
+                moved: false,
+            }),
+            Err(DualSectorMap {
+                moved: Some(moved), ..
+            }) => Ok(Self::from_data(
+                moved.sectors,
+                moved.degeneracies,
+                !self.is_dual,
+            )),
+        }
     }
 
     /// Whether `pairs`, sorted by sector and free of zero degeneracies, is
     /// this leg's own sector -> degeneracy map.
     fn has_sorted_pairs(&self, pairs: &[(SectorId, usize)]) -> bool {
-        pairs.len() == self.data.sectors.len()
+        pairs.len() == self.sectors().len()
             && pairs
                 .iter()
                 .zip(self.iter())
@@ -290,26 +489,16 @@ impl SectorLeg {
     where
         R: CheckedFusionAlgebra,
     {
-        let sectors = self
-            .iter()
-            .map(|(sector, degeneracy)| {
-                rule.try_dual_sector(sector)
-                    .map(|dual| (dual, degeneracy))
-            })
-            .collect::<Result<SmallVec<[(SectorId, usize); 8]>, _>>()?;
         // Why not mutate a cloned leg as sectors succeed: a later failure must
         // leave no partially dualized value available to callers.
         //
-        // Why `try_new` and not `new`: a rule whose dual collapses two sectors
-        // onto one id would make the panicking constructor fire inside this
-        // `Result`-returning API. A dual is an involution on the sector set, so
-        // a collision is the rule's rigidity structure being broken, not a
-        // caller mistake, and it belongs in the algebra error.
-        Self::build(sectors, !self.is_dual, Some(self)).map_err(|error| match error {
-            SectorLegConstructionError::DuplicateSector { sector } => {
-                FusionAlgebraError::DualNotInjective { dual: sector }
-            }
-        })
+        // Why an algebra error and not the panicking constructor: a rule whose
+        // dual collapses two sectors onto one id breaks the rule's rigidity
+        // structure; it is not a caller mistake.
+        self.dual_by(
+            |sector| rule.try_dual_sector(sector),
+            |dual| FusionAlgebraError::DualNotInjective { dual },
+        )
     }
 
     /// Checked Generic sibling of [`Self::try_dual`] that preserves the
@@ -322,20 +511,18 @@ impl SectorLeg {
     where
         R: CheckedGenericFusion,
     {
-        let sectors = self
-            .iter()
-            .map(|(sector, degeneracy)| {
+        self.dual_by(
+            |sector| {
                 rule.try_dual(sector)
-                    .map(|dual| (dual, degeneracy))
                     .map_err(CheckedGenericStructureError::Provider)
-            })
-            .collect::<Result<SmallVec<[(SectorId, usize); 8]>, _>>()?;
-        Self::build(sectors, !self.is_dual, Some(self)).map_err(|_| {
-            CoreError::MalformedFusionTree {
-                message: "checked Generic dual is not injective on one tensor leg",
-            }
-            .into()
-        })
+            },
+            |_| {
+                CoreError::MalformedFusionTree {
+                    message: "checked Generic dual is not injective on one tensor leg",
+                }
+                .into()
+            },
+        )
     }
 
     #[inline]

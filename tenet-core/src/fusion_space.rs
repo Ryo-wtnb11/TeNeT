@@ -126,13 +126,14 @@ impl FusionTreeHomSpaceContent {
         fn product_space_bytes(space: &FusionProductSpace) -> usize {
             std::mem::size_of::<FusionProductSpace>()
                 .saturating_add(spilled_smallvec_heap_bytes(&space.legs))
-                .saturating_add(space.legs.iter().fold(0usize, |bytes, leg| {
-                    bytes
-                        .saturating_add(std::mem::size_of::<SectorLegData>())
-                        .saturating_add(spilled_smallvec_heap_bytes(&leg.data.sectors))
-                        .saturating_add(spilled_smallvec_heap_bytes(&leg.data.degeneracies))
-                        .saturating_add(2 * std::mem::size_of::<usize>())
-                }))
+                .saturating_add(
+                    space
+                        .legs
+                        .iter()
+                        .fold(0usize, |bytes, leg| {
+                            bytes.saturating_add(leg.charged_retained_bytes())
+                        }),
+                )
         }
 
         product_space_bytes(&self.codomain)
