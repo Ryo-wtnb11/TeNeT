@@ -3,6 +3,11 @@ use core::ops::{Add, Mul};
 use num_traits::{One, Zero};
 use tenet_core::{BlockView, BlockViewMut};
 
+use strided_kernel::{
+    axpy_conj_raw, axpy_raw, copy_scale_conj_raw, copy_scale_raw, CopyPlan, MaybeSendSync,
+    RawStridedMut, RawStridedRef, RAW_FUSED_RANK_LIMIT,
+};
+
 use crate::scalar::scale_value;
 use crate::strided::{error as strided_error, read as strided_read, write as strided_write};
 use crate::{ConjugateValue, OperationError};
@@ -290,7 +295,14 @@ fn tensoradd_raw_strided_conjugating_kernel<T>(
     beta: T,
 ) -> Result<(), OperationError>
 where
-    T: Copy + Add<T, Output = T> + Mul<T, Output = T> + PartialEq + Zero + One + ConjugateValue,
+    T: Copy
+        + Add<T, Output = T>
+        + Mul<T, Output = T>
+        + PartialEq
+        + Zero
+        + One
+        + ConjugateValue
+        + MaybeSendSync,
 {
     validate_raw_strided_views(
         dst_data,
@@ -330,7 +342,14 @@ fn tensoradd_raw_strided_conjugating_kernel_trusted<T>(
     beta: T,
 ) -> Result<(), OperationError>
 where
-    T: Copy + Add<T, Output = T> + Mul<T, Output = T> + PartialEq + Zero + One + ConjugateValue,
+    T: Copy
+        + Add<T, Output = T>
+        + Mul<T, Output = T>
+        + PartialEq
+        + Zero
+        + One
+        + ConjugateValue
+        + MaybeSendSync,
 {
     #[cfg(debug_assertions)]
     validate_raw_strided_views(
@@ -1042,10 +1061,23 @@ fn raw_strided_combine_loop<T>(
     action: RawStridedAction<T>,
 ) -> Result<(), OperationError>
 where
-    T: Copy + Add<T, Output = T> + Mul<T, Output = T> + Zero + ConjugateValue,
+    T: Copy + Add<T, Output = T> + Mul<T, Output = T> + Zero + ConjugateValue + MaybeSendSync,
 {
     let len = crate::strided::element_count(shape)?;
     if len == 0 {
+        return Ok(());
+    }
+    if strided_raw_action(
+        dst_data,
+        src_data,
+        shape,
+        dst_strides,
+        src_strides,
+        dst_offset,
+        src_offset,
+        source_conjugate,
+        action,
+    )? {
         return Ok(());
     }
     if shape.is_empty() {
@@ -1147,6 +1179,111 @@ where
         )?;
     }
     Ok(())
+}
+
+/// Runs `Copy`, a nonzero `CopyScale` and a nonzero `Axpy` through Strided's
+/// raw kernels, which compute the same per-element expression as
+/// [`apply_raw_strided_action`]. Returns `Ok(false)`, without touching `dst`,
+/// when the call must stay on TeNeT's loop:
+///
+/// - `Axpby` (Strided has no allocation-free axpby) and a zero `alpha`, whose
+///   TensorKit zero rule Strided's `alpha * x` would break (`0 * inf = NaN`);
+/// - rank above [`RAW_FUSED_RANK_LIMIT`], where Strided falls back to
+///   allocating view kernels;
+/// - a destination whose axes are not separated (see
+///   [`destination_axes_separated`]). Strided replays axes in destination
+///   stride order, so on an aliasing destination the overwrite winner and the
+///   accumulation order would differ from TeNeT's column-major loop.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn strided_raw_action<T>(
+    dst_data: &mut [T],
+    src_data: &[T],
+    shape: &[usize],
+    dst_strides: &[isize],
+    src_strides: &[isize],
+    dst_offset: isize,
+    src_offset: isize,
+    source_conjugate: bool,
+    action: RawStridedAction<T>,
+) -> Result<bool, OperationError>
+where
+    T: Copy + Add<T, Output = T> + Mul<T, Output = T> + Zero + ConjugateValue + MaybeSendSync,
+{
+    match action {
+        RawStridedAction::Copy => {}
+        RawStridedAction::CopyScale { alpha } | RawStridedAction::Axpy { alpha }
+            if !alpha.is_zero() => {}
+        _ => return Ok(false),
+    }
+    if shape.len() > RAW_FUSED_RANK_LIMIT || !destination_axes_separated(shape, dst_strides) {
+        return Ok(false);
+    }
+    let src =
+        RawStridedRef::new(src_data, shape, src_strides, src_offset).map_err(strided_error)?;
+    let mut dst =
+        RawStridedMut::new(dst_data, shape, dst_strides, dst_offset).map_err(strided_error)?;
+    let (dst, src) = (&mut dst, &src);
+    match (action, source_conjugate) {
+        (RawStridedAction::Copy, conjugate) => {
+            let plan = CopyPlan::compile(shape, dst_strides, src_strides).map_err(strided_error)?;
+            if conjugate {
+                plan.execute_conj(dst, src)
+            } else {
+                plan.execute(dst, src)
+            }
+        }
+        (RawStridedAction::CopyScale { alpha }, false) => copy_scale_raw(dst, src, alpha),
+        (RawStridedAction::CopyScale { alpha }, true) => copy_scale_conj_raw(dst, src, alpha),
+        (RawStridedAction::Axpy { alpha }, false) => axpy_raw(dst, src, alpha),
+        (RawStridedAction::Axpy { alpha }, true) => axpy_conj_raw(dst, src, alpha),
+        (RawStridedAction::Axpby { .. }, _) => return Ok(false),
+    }
+    .map_err(strided_error)?;
+    Ok(true)
+}
+
+/// Whether every non-unit destination axis, taken in ascending `|stride|`
+/// order, has a stride beyond the offset span of all smaller-stride axes.
+/// Such a layout is injective, so each destination slot is written once and
+/// traversal order cannot change a value.
+///
+/// Why not Strided's `validate_destination_layout_without_alloc`: it also
+/// accepts interleaved injective layouts through an `O(block²)` pairwise scan,
+/// and `CopyPlan::compile` then re-proves them with an allocating exact check.
+/// Separated layouts are the ones both decide in `O(rank²)` without
+/// allocating; interleaved layouts keep TeNeT's `O(n)` loop.
+fn destination_axes_separated(shape: &[usize], strides: &[isize]) -> bool {
+    if shape.contains(&0) {
+        return true;
+    }
+    let mut span = 0usize;
+    let mut previous: Option<(usize, usize)> = None;
+    loop {
+        let mut next: Option<((usize, usize), usize)> = None;
+        for (axis, (&dim, &stride)) in shape.iter().zip(strides).enumerate() {
+            let key = (stride.unsigned_abs(), axis);
+            if dim > 1
+                && previous.is_none_or(|previous| key > previous)
+                && next.is_none_or(|(best, _)| key < best)
+            {
+                next = Some((key, dim));
+            }
+        }
+        let Some(((stride, axis), dim)) = next else {
+            return true;
+        };
+        if stride <= span {
+            return false;
+        }
+        match stride
+            .checked_mul(dim - 1)
+            .and_then(|extent| span.checked_add(extent))
+        {
+            Some(covered) => span = covered,
+            None => return false,
+        }
+        previous = Some((stride, axis));
+    }
 }
 
 fn apply_raw_strided_action<T>(dst: &mut T, src: T, action: RawStridedAction<T>)
@@ -2069,5 +2206,485 @@ mod tests {
         let mut dst = [Complex64::new(1.0, -2.0)];
         run(&mut dst, &non_finite, Complex64::zero());
         assert_eq!(bit_pairs(&dst), bit_pairs(&[Complex64::new(1.0, -2.0)]));
+    }
+
+    trait BitPattern: Copy {
+        fn pattern(self) -> (u64, u64);
+    }
+
+    impl BitPattern for f64 {
+        fn pattern(self) -> (u64, u64) {
+            (self.to_bits(), 0)
+        }
+    }
+
+    impl BitPattern for Complex64 {
+        fn pattern(self) -> (u64, u64) {
+            (self.re.to_bits(), self.im.to_bits())
+        }
+    }
+
+    fn patterns<T: BitPattern>(values: &[T]) -> Vec<(u64, u64)> {
+        values.iter().map(|&value| value.pattern()).collect()
+    }
+
+    /// Bit patterns with every NaN component collapsed to one pattern.
+    ///
+    /// Why not compare NaN payloads of arithmetic results: Rust leaves the
+    /// payload and sign of a NaN produced by `+`/`*` unspecified, and LLVM
+    /// commutes operands, so with two NaN inputs the surviving payload differs
+    /// between optimization levels of the same kernel. Copies and
+    /// conjugation (a sign flip) are exact and keep full bit comparison.
+    fn arithmetic_patterns<T: BitPattern>(values: &[T]) -> Vec<(u64, u64)> {
+        let canonical = |bits: u64| {
+            if f64::from_bits(bits).is_nan() {
+                f64::NAN.to_bits()
+            } else {
+                bits
+            }
+        };
+        patterns(values)
+            .into_iter()
+            .map(|(re, im)| (canonical(re), canonical(im)))
+            .collect()
+    }
+
+    /// Test-only oracle: the column-major TeNeT loop the Strided route replaced.
+    #[allow(clippy::too_many_arguments)]
+    fn previous_kernel<T>(
+        dst: &mut [T],
+        src: &[T],
+        shape: &[usize],
+        dst_strides: &[isize],
+        src_strides: &[isize],
+        dst_offset: isize,
+        src_offset: isize,
+        conjugate: bool,
+        action: RawStridedAction<T>,
+    ) where
+        T: Copy + Add<T, Output = T> + Mul<T, Output = T> + Zero + ConjugateValue,
+    {
+        if shape.contains(&0) {
+            return;
+        }
+        if shape.is_empty() {
+            let (d, s) = (dst_offset as usize, src_offset as usize);
+            apply_raw_strided_action(&mut dst[d], src[s].maybe_conj(conjugate), action);
+            return;
+        }
+        raw_strided_combine_recurse_mapped(
+            shape.len() - 1,
+            dst,
+            src,
+            shape,
+            |axis| Ok(dst_strides[axis]),
+            |axis| Ok(src_strides[axis]),
+            dst_offset,
+            src_offset,
+            conjugate,
+            action,
+        )
+        .unwrap();
+    }
+
+    const NAN_PAYLOAD: u64 = 0x7ff8_0000_0000_1234;
+
+    fn special_reals() -> [f64; 12] {
+        [
+            -0.0,
+            0.0,
+            f64::from_bits(NAN_PAYLOAD),
+            f64::from_bits(NAN_PAYLOAD | (1 << 63)),
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::from_bits(1),
+            -f64::MIN_POSITIVE / 3.0,
+            f64::MAX,
+            1.5,
+            -2.25,
+            1.0e-300,
+        ]
+    }
+
+    fn special_values<T>(len: usize, seed: usize, make: impl Fn(f64, f64) -> T) -> Vec<T> {
+        let reals = special_reals();
+        (0..len)
+            .map(|i| {
+                make(
+                    reals[(i * 5 + seed) % reals.len()],
+                    reals[(i * 7 + seed + 3) % reals.len()],
+                )
+            })
+            .collect()
+    }
+
+    /// Layouts of the given shape: column-major, reversed axis order,
+    /// negative strides, and a stride-0 (broadcast) source axis. Returns
+    /// `(dst_strides, dst_offset, src_strides, src_offset)` with offsets
+    /// making every reachable index nonnegative.
+    fn layouts(shape: &[usize]) -> Vec<(Vec<isize>, isize, Vec<isize>, isize)> {
+        let column_major = |order: &[usize]| {
+            let mut strides = vec![0isize; shape.len()];
+            let mut stride = 1isize;
+            for &axis in order {
+                strides[axis] = stride;
+                stride *= shape[axis] as isize;
+            }
+            strides
+        };
+        let forward: Vec<usize> = (0..shape.len()).collect();
+        let reverse: Vec<usize> = (0..shape.len()).rev().collect();
+        let negate_even = |strides: &[isize]| {
+            let mut offset = 0isize;
+            let strides: Vec<isize> = strides
+                .iter()
+                .enumerate()
+                .map(|(axis, &stride)| {
+                    if axis % 2 == 0 {
+                        offset += stride * (shape[axis].max(1) as isize - 1);
+                        -stride
+                    } else {
+                        stride
+                    }
+                })
+                .collect();
+            (strides, offset)
+        };
+        let (negative, negative_offset) = negate_even(&column_major(&forward));
+        let mut broadcast = column_major(&reverse);
+        if let Some(first) = broadcast.first_mut() {
+            *first = 0;
+        }
+        vec![
+            (column_major(&forward), 0, column_major(&forward), 0),
+            (column_major(&forward), 0, column_major(&reverse), 0),
+            (column_major(&reverse), 0, negative.clone(), negative_offset),
+            (negative, negative_offset, broadcast, 0),
+        ]
+    }
+
+    fn assert_strided_matches_previous<T>(make: impl Fn(f64, f64) -> T, scales: &[T])
+    where
+        T: BitPattern
+            + Add<T, Output = T>
+            + Mul<T, Output = T>
+            + PartialEq
+            + Zero
+            + One
+            + ConjugateValue
+            + MaybeSendSync
+            + core::fmt::Debug,
+    {
+        let shapes: Vec<Vec<usize>> = (0..=RAW_FUSED_RANK_LIMIT)
+            .map(|rank| (0..rank).map(|axis| [2, 3, 1, 2][axis % 4]).collect())
+            .chain([vec![2, 0, 3], vec![0]])
+            .collect();
+        let one = T::one();
+        let mut actions = vec![RawStridedAction::Copy];
+        for &alpha in scales {
+            actions.push(RawStridedAction::CopyScale { alpha });
+            actions.push(RawStridedAction::Axpy { alpha });
+        }
+        actions.push(RawStridedAction::Axpy { alpha: one });
+        for shape in &shapes {
+            let len = shape.iter().product::<usize>().max(1);
+            for (dst_strides, dst_offset, src_strides, src_offset) in layouts(shape) {
+                for &action in &actions {
+                    for conjugate in [false, true] {
+                        let src = special_values(len, 1, &make);
+                        let initial = special_values(len, 4, &make);
+                        let mut expected = initial.clone();
+                        previous_kernel(
+                            &mut expected,
+                            &src,
+                            shape,
+                            &dst_strides,
+                            &src_strides,
+                            dst_offset,
+                            src_offset,
+                            conjugate,
+                            action,
+                        );
+                        let mut actual = initial.clone();
+                        let routed = strided_raw_action(
+                            &mut actual,
+                            &src,
+                            shape,
+                            &dst_strides,
+                            &src_strides,
+                            dst_offset,
+                            src_offset,
+                            conjugate,
+                            action,
+                        )
+                        .unwrap();
+                        assert!(routed, "shape {shape:?} {action:?}");
+                        let compare = if matches!(action, RawStridedAction::Copy) {
+                            patterns::<T>
+                        } else {
+                            arithmetic_patterns::<T>
+                        };
+                        assert_eq!(
+                            compare(&actual),
+                            compare(&expected),
+                            "shape {shape:?} dst {dst_strides:?} src {src_strides:?} \
+                             {action:?} conj {conjugate}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// What: `Copy`, nonzero `CopyScale` and nonzero `Axpy` through Strided
+    /// are bit-identical to TeNeT's previous loop at ranks 0 through 8 over
+    /// permuted, negative, broadcast and zero-extent layouts, with and
+    /// without conjugation, for signed zeros, NaN payloads, infinities and
+    /// subnormals (NaN payloads compared exactly for copies, as NaN-ness for
+    /// arithmetic). `Copy` of `inf + 0i` stays `inf + 0i` (no multiply).
+    #[test]
+    fn strided_raw_actions_match_previous_kernel_bitwise() {
+        assert_strided_matches_previous(|re, _| re, &[-0.5, 3.0, f64::from_bits(1)]);
+        assert_strided_matches_previous(
+            Complex64::new,
+            &[
+                Complex64::new(-0.5, 0.25),
+                Complex64::new(0.0, -1.0),
+                Complex64::new(3.0, 0.0),
+            ],
+        );
+        let mut dst = [Complex64::zero()];
+        let src = [Complex64::new(f64::INFINITY, 0.0)];
+        tensoradd_raw_strided_kernel(
+            &mut Vec::new(),
+            &mut dst,
+            &src,
+            &[1],
+            &[1],
+            &[1],
+            0,
+            0,
+            false,
+            Complex64::one(),
+            Complex64::zero(),
+        )
+        .unwrap();
+        assert_eq!(bit_pairs(&dst), bit_pairs(&src));
+    }
+
+    /// What: a zero `α` never reaches Strided, so a non-finite source still
+    /// follows TensorKit's `scale(x, 0) = zero(x) * 0` through both public
+    /// entries: `tensoradd!(C, A, (2, 1, 3), conj, 0, β)` with `A` all
+    /// `Inf`/`NaN` gives `C = zero * 0` for `β = 0` and `C + zero * 0` for
+    /// `β = 1` (so a `-0.0` component of `C` becomes `+0.0`).
+    #[test]
+    fn zero_alpha_keeps_tensorkit_rule_on_strided_route() {
+        let shape = [2, 3, 2];
+        let dst_strides = [3, 1, 6];
+        let src_strides = [1, 2, 6];
+        let src = [
+            Complex64::new(f64::INFINITY, f64::NAN),
+            Complex64::new(f64::NAN, f64::NEG_INFINITY),
+        ]
+        .repeat(6);
+        let initial: Vec<Complex64> = (0..12)
+            .map(|i| Complex64::new(i as f64 - 0.5, -(i as f64)))
+            .collect();
+        for conjugate in [false, true] {
+            for (beta, want) in [
+                (Complex64::zero(), vec![Complex64::zero(); 12]),
+                (
+                    Complex64::one(),
+                    initial.iter().map(|&c| c + Complex64::zero()).collect(),
+                ),
+            ] {
+                let alpha = Complex64::zero();
+                let mut gated = initial.clone();
+                assert!(!strided_raw_action(
+                    &mut gated,
+                    &src,
+                    &shape,
+                    &dst_strides,
+                    &src_strides,
+                    0,
+                    0,
+                    conjugate,
+                    raw_strided_action(alpha, beta),
+                )
+                .unwrap());
+                assert_eq!(bit_pairs(&gated), bit_pairs(&initial));
+
+                let mut raw = initial.clone();
+                tensoradd_raw_strided_kernel(
+                    &mut Vec::new(),
+                    &mut raw,
+                    &src,
+                    &shape,
+                    &dst_strides,
+                    &src_strides,
+                    0,
+                    0,
+                    conjugate,
+                    alpha,
+                    beta,
+                )
+                .unwrap();
+                assert_eq!(bit_pairs(&raw), bit_pairs(&want), "beta {beta}");
+
+                let mut checked = initial.clone();
+                crate::kernel_adapter::StridedHostKernelAdapter::default()
+                    .tensoradd_strided_checked(
+                        &mut checked,
+                        &src,
+                        &shape,
+                        &dst_strides,
+                        &src_strides,
+                        0,
+                        0,
+                        conjugate,
+                        alpha,
+                        beta,
+                    )
+                    .unwrap();
+                assert_eq!(bit_pairs(&checked), bit_pairs(&want), "beta {beta}");
+            }
+        }
+    }
+
+    /// What: an aliasing destination keeps TeNeT's column-major accumulation
+    /// order. With `shape = [2, 3]` and destination strides `[2, 1]`, slot 2
+    /// receives `(1, 0)` then `(0, 2)`: `(1e-16 + 1) - 1 = 0`. Strided's
+    /// `axpy_raw` visits `(0, 2)` first and gives `(1e-16 - 1) + 1 ≠ 0`, which
+    /// is why such layouts stay on TeNeT's loop.
+    #[test]
+    fn aliasing_destination_keeps_column_major_accumulation() {
+        let shape = [2, 3];
+        let dst_strides = [2, 1];
+        let src_strides = [1, 2];
+        let mut src = [0.0; 6];
+        src[1] = 1.0;
+        src[4] = -1.0;
+        let mut initial = [0.0; 5];
+        initial[2] = 1.0e-16;
+        assert!(!destination_axes_separated(&shape, &dst_strides));
+
+        let mut expected = initial;
+        previous_kernel(
+            &mut expected,
+            &src,
+            &shape,
+            &dst_strides,
+            &src_strides,
+            0,
+            0,
+            false,
+            RawStridedAction::Axpy { alpha: 1.0 },
+        );
+        assert_eq!(expected[2], 0.0);
+        for (alpha, beta) in [(1.0, 1.0), (1.0, 0.0), (2.0, 0.0)] {
+            let mut want = initial;
+            previous_kernel(
+                &mut want,
+                &src,
+                &shape,
+                &dst_strides,
+                &src_strides,
+                0,
+                0,
+                false,
+                raw_strided_action(alpha, beta),
+            );
+            let mut actual = initial;
+            tensoradd_raw_strided_kernel(
+                &mut Vec::new(),
+                &mut actual,
+                &src,
+                &shape,
+                &dst_strides,
+                &src_strides,
+                0,
+                0,
+                false,
+                alpha,
+                beta,
+            )
+            .unwrap();
+            assert_eq!(bits(&actual), bits(&want), "alpha {alpha} beta {beta}");
+        }
+
+        let mut reordered = initial;
+        axpy_raw(
+            &mut RawStridedMut::new(&mut reordered, &shape, &dst_strides, 0).unwrap(),
+            &RawStridedRef::new(&src, &shape, &src_strides, 0).unwrap(),
+            1.0,
+        )
+        .unwrap();
+        assert_ne!(reordered[2].to_bits(), expected[2].to_bits());
+    }
+
+    /// What: the separation test accepts exactly the layouts whose axes
+    /// never share an offset range and rejects broadcast, overlapping and
+    /// interleaved destinations.
+    #[test]
+    fn destination_separation_classifies_layouts() {
+        assert!(destination_axes_separated(&[], &[]));
+        assert!(destination_axes_separated(&[2, 3, 4], &[1, 2, 6]));
+        assert!(destination_axes_separated(&[2, 3, 4], &[12, -4, 1]));
+        assert!(destination_axes_separated(&[1, 5, 1], &[0, 1, 0]));
+        assert!(!destination_axes_separated(&[2, 3], &[0, 1]));
+        assert!(!destination_axes_separated(&[2, 2], &[1, 1]));
+        // Injective but interleaved: kept on TeNeT's loop.
+        assert!(!destination_axes_separated(&[3, 2], &[2, 3]));
+        assert!(!destination_axes_separated(&[3, 3], &[1, isize::MAX]));
+    }
+
+    /// What: rank above `RAW_FUSED_RANK_LIMIT` stays on TeNeT's loop, which is
+    /// allocation-free at any rank; the result is unchanged.
+    #[test]
+    fn rank_above_fused_limit_keeps_tenet_loop() {
+        let shape = [2usize; RAW_FUSED_RANK_LIMIT + 1];
+        let strides: Vec<isize> = (0..shape.len()).map(|axis| 1 << axis).collect();
+        let reversed: Vec<isize> = strides.iter().rev().copied().collect();
+        let src: Vec<f64> = (0..512).map(f64::from).collect();
+        let mut dst = vec![0.0; 512];
+        assert!(!strided_raw_action(
+            &mut dst,
+            &src,
+            &shape,
+            &strides,
+            &reversed,
+            0,
+            0,
+            false,
+            RawStridedAction::Copy,
+        )
+        .unwrap());
+        tensoradd_raw_strided_kernel(
+            &mut Vec::new(),
+            &mut dst,
+            &src,
+            &shape,
+            &strides,
+            &reversed,
+            0,
+            0,
+            false,
+            1.0,
+            0.0,
+        )
+        .unwrap();
+        let mut want = vec![0.0; 512];
+        previous_kernel(
+            &mut want,
+            &src,
+            &shape,
+            &strides,
+            &reversed,
+            0,
+            0,
+            false,
+            RawStridedAction::Copy,
+        );
+        assert_eq!(bits(&dst), bits(&want));
     }
 }

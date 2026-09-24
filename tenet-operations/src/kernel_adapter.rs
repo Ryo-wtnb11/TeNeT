@@ -4,7 +4,7 @@ use num_traits::{One, Zero};
 use smallvec::SmallVec;
 
 use crate::host_scalar_kernels::{
-    raw_strided_action, validate_raw_strided_bounds, RawStridedAction,
+    raw_strided_action, strided_raw_action, validate_raw_strided_bounds, RawStridedAction,
 };
 use crate::scalar::scale_value;
 use crate::{
@@ -935,11 +935,31 @@ impl StridedHostKernelAdapter {
         beta: T,
     ) -> Result<(), OperationError>
     where
-        T: Copy + Add<T, Output = T> + Mul<T, Output = T> + PartialEq + Zero + One + ConjugateValue,
+        T: Copy
+            + Add<T, Output = T>
+            + Mul<T, Output = T>
+            + PartialEq
+            + Zero
+            + One
+            + ConjugateValue
+            + strided_kernel::MaybeSendSync,
     {
         validate_raw_strided_bounds(dst_data.len(), shape, dst_strides, dst_offset)?;
         validate_raw_strided_bounds(src_data.len(), shape, src_strides, src_offset)?;
         crate::checked_block_layout::record_checked_block_passes(1, 1);
+        if strided_raw_action(
+            dst_data,
+            src_data,
+            shape,
+            dst_strides,
+            src_strides,
+            dst_offset,
+            src_offset,
+            source_conjugate,
+            raw_strided_action(alpha, beta),
+        )? {
+            return Ok(());
+        }
         let op = move |value: T| value.maybe_conj(source_conjugate);
         let scratch = &mut self.scratch;
         macro_rules! run {
