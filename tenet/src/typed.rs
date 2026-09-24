@@ -122,7 +122,10 @@
 //! group** ([`TensorMap::catdomain`], [`TensorMap::catcodomain`],
 //! [`TensorMap::absorb`]) and the **index-unit group** ([`TensorMap::twist`],
 //! [`TensorMap::flip`], [`TensorMap::insert_left_unit`],
-//! [`TensorMap::insert_right_unit`], [`TensorMap::remove_unit`]).
+//! [`TensorMap::insert_right_unit`], [`TensorMap::remove_unit`]) and — with
+//! issue #1323 — the **explicit payload precision conversions**: exact
+//! widening `to_f64` / `to_c32` / `to_c64` and lossy `narrow_to_f32` /
+//! `narrow_to_c32`, with no implicit conversion anywhere.
 //!
 //! Issue #570 also gave the facade **compact diagonal storage**. For
 //! multiplicity-free providers, the `s` factor from `svd_compact` and
@@ -201,7 +204,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::sync::{Arc, OnceLock};
 
-use num_complex::Complex64;
+use num_complex::{Complex32, Complex64};
 use smallvec::SmallVec;
 use tenet_core::{
     validate_unit_layout_correspondence_checked,
@@ -10982,6 +10985,218 @@ where
     }
 }
 
+// Explicit payload precision conversions (#1323).
+//
+// TensorKit converts with `complex(t)`, `convert(TensorMap{T,…}, t)` and
+// `similar(t, T)` + `copy!`, and promotes mixed scalar types implicitly
+// (`promote_rule` on `TensorMap`), so a `Float64 -> Float32` `convert` rounds
+// silently. TeNeT keeps mixed payload dtypes a compile error and names the
+// direction instead: `to_*` is exact, `narrow_to_*` is the only lossy entry
+// point. There are deliberately no `From` impls, and no complex -> real
+// conversion (TensorKit's `real(t)` discards data; it is not a precision
+// change).
+//
+// Only the host `Vec<D>` storage has these methods; a device tensor is
+// downloaded, converted and uploaded explicitly.
+impl<R, D> TensorMap<R, D>
+where
+    D: TensorScalar + FactorScalar,
+{
+    /// Converts the payload elementwise into an owned tensor.
+    ///
+    /// * Owned dense or compact diagonal: one pass into one new payload of
+    ///   the same form.
+    /// * Lazy adjoint of a compact diagonal (checked Generic only; the
+    ///   multiplicity-free `adjoint` already returns an owned diagonal): the
+    ///   owned compact diagonal of the conjugated, converted values on the
+    ///   logical space — what the multiplicity-free `adjoint` emits, since a
+    ///   bond space is its own adjoint.
+    /// * Lazy adjoint of a dense parent: materialized in the source dtype,
+    ///   then converted — an operation-local source-sized buffer plus the
+    ///   output. Why not a lazy view over a converted parent: several
+    ///   operations (`diagview`, `restrict_diagonal`, the
+    ///   `permute_overwrite_into` source, the checked-Generic factorizations,
+    ///   the device path after `to_cuda`) reject lazy adjoints, so a lazy
+    ///   result would accept less than the owned one `to_c64` always
+    ///   returned. Why not one fused pass: `materialize_adjoint_data_dyn` has
+    ///   no mapped variant, and adding one would duplicate its block walk.
+    fn convert_payload<E>(&self, convert: impl Fn(D) -> E) -> TensorMap<R, E> {
+        let body = match &self.repr {
+            TypedTensorRepr::Owned(body) => body.convert_payload(convert),
+            TypedTensorRepr::Adjoint(view) => match view.parent.data.as_ref() {
+                TypedData::Diagonal(spectrum) => Arc::new(TypedTensorBody::diagonal(
+                    view.logical_space.clone(),
+                    map_spectrum_dtype(spectrum, |value| convert(FactorScalar::adjoint(value))),
+                )),
+                TypedData::Dense(_) => self
+                    .materialized_tensor_uncached()
+                    .expect("a pre-admitted typed adjoint must materialize")
+                    .owned_body()
+                    .expect("uncached materialization is owned")
+                    .convert_payload(convert),
+            },
+        };
+        TensorMap {
+            runtime: self.runtime.clone(),
+            repr: TypedTensorRepr::Owned(body),
+        }
+    }
+}
+
+impl<R, D: Copy> TypedTensorBody<R, D> {
+    fn convert_payload<E>(&self, convert: impl Fn(D) -> E) -> Arc<TypedTensorBody<R, E>> {
+        let data = match self.data.as_ref() {
+            TypedData::Dense(values) => {
+                TypedData::Dense(values.iter().map(|&value| convert(value)).collect())
+            }
+            TypedData::Diagonal(spectrum) => {
+                TypedData::Diagonal(map_spectrum_dtype(spectrum, convert))
+            }
+        };
+        Arc::new(TypedTensorBody::new(self.space.clone(), data))
+    }
+}
+
+impl<R> TensorMap<R, f32> {
+    /// Widens the payload to `f64`. Exact: every `f32`, including subnormals,
+    /// `±0`, `±inf` and NaN, is representable in `f64`.
+    ///
+    /// Spaces, block structure, gauge and the provider are unchanged, and
+    /// the result is always owned. Dense and compact diagonal storage keep
+    /// their form: one pass and one payload-sized allocation (a compact
+    /// diagonal allocates the per-sector spectra its form holds). A lazy
+    /// adjoint of a compact diagonal becomes the owned compact diagonal its
+    /// multiplicity-free `adjoint` would be; a dense lazy adjoint is
+    /// materialized in the source dtype and then converted, which is two
+    /// payload-sized allocations (the operation-local materialization and the
+    /// output).
+    ///
+    /// ```
+    /// use tenet::core::{U1FusionRule, U1Irrep};
+    /// use tenet::typed::{GradedSpace, Runtime, TensorMap};
+    ///
+    /// let runtime = Runtime::builder().build()?;
+    /// let v = GradedSpace::try_new(U1FusionRule, [(U1Irrep::new(0), 2)])?;
+    /// let single: TensorMap<_, f32> = TensorMap::rand(&runtime, [&v], [&v])?;
+    /// let double = single.to_f64();
+    /// assert_eq!(double.narrow_to_f32().data(), single.data());
+    /// # Ok::<(), tenet::typed::Error>(())
+    /// ```
+    ///
+    /// Mixing payload dtypes stays a compile error; nothing converts
+    /// implicitly:
+    ///
+    /// ```compile_fail
+    /// use tenet::core::U1FusionRule;
+    /// use tenet::typed::TensorMap;
+    ///
+    /// fn mixed(a: &TensorMap<U1FusionRule, f32>, b: &TensorMap<U1FusionRule, f64>) {
+    ///     let _ = a.add(b, 1.0, 1.0);
+    /// }
+    /// ```
+    ///
+    /// and there is no `From`/`Into` between payload dtypes:
+    ///
+    /// ```compile_fail
+    /// use tenet::core::U1FusionRule;
+    /// use tenet::typed::TensorMap;
+    ///
+    /// fn into(a: TensorMap<U1FusionRule, f32>) -> TensorMap<U1FusionRule, f64> {
+    ///     a.into()
+    /// }
+    /// ```
+    ///
+    /// The conversions are host-only: a tensor on another storage (such as
+    /// `CudaStorage`) is converted after an explicit download.
+    ///
+    /// ```compile_fail
+    /// use tenet::core::{Placement, TensorStorage, U1FusionRule};
+    /// use tenet::typed::TensorMap;
+    ///
+    /// struct DeviceStorage(usize);
+    /// impl TensorStorage<f32> for DeviceStorage {
+    ///     fn len(&self) -> usize { self.0 }
+    ///     fn placement(&self) -> Placement { Placement::Cuda(0) }
+    /// }
+    ///
+    /// fn device(tensor: &TensorMap<U1FusionRule, f32, DeviceStorage>) {
+    ///     let _ = tensor.to_f64();
+    /// }
+    /// ```
+    pub fn to_f64(&self) -> TensorMap<R, f64> {
+        self.convert_payload(f64::from)
+    }
+
+    /// Embeds the payload in `Complex32` with a zero imaginary part. Exact;
+    /// the same structure, storage and allocation contract as [`Self::to_f64`].
+    pub fn to_c32(&self) -> TensorMap<R, Complex32> {
+        self.convert_payload(|value| Complex32::new(value, 0.0))
+    }
+
+    /// Widens and embeds the payload in `Complex64` with a zero imaginary
+    /// part. Exact; the same contract as [`Self::to_f64`].
+    pub fn to_c64(&self) -> TensorMap<R, Complex64> {
+        self.convert_payload(|value| Complex64::new(f64::from(value), 0.0))
+    }
+}
+
+impl<R> TensorMap<R, f64> {
+    /// Embeds the payload in `Complex64` with a zero imaginary part. Exact;
+    /// the same contract as [`TensorMap::to_f64`] (TensorKit `Base.complex`).
+    ///
+    /// ```
+    /// use tenet::core::{U1FusionRule, U1Irrep};
+    /// use tenet::typed::{GradedSpace, Runtime, TensorMap};
+    ///
+    /// let runtime = Runtime::builder().build()?;
+    /// let v = GradedSpace::try_new(
+    ///     U1FusionRule,
+    ///     [(U1Irrep::new(0), 1), (U1Irrep::new(1), 2)],
+    /// )?;
+    /// let t: TensorMap<_, f64> = TensorMap::rand(&runtime, [&v], [&v])?;
+    ///
+    /// let widened = t.to_c64();
+    /// // The real part round-trips exactly; the imaginary part is zero.
+    /// assert_eq!(widened.re().data(), t.data());
+    /// assert_eq!(widened.im().norm()?, 0.0);
+    /// # Ok::<(), tenet::typed::Error>(())
+    /// ```
+    pub fn to_c64(&self) -> TensorMap<R, Complex64> {
+        self.convert_payload(|value| Complex64::new(value, 0.0))
+    }
+
+    /// Narrows the payload to `f32`. **Lossy.**
+    ///
+    /// Each entry is `value as f32`: IEEE 754 round to nearest, ties to even.
+    /// A finite value whose rounding exceeds `f32::MAX` in magnitude becomes
+    /// `±inf`; a tiny value rounds to the nearest `f32` subnormal or `±0`
+    /// (no flush to zero); `±0` and `±inf` keep their sign; NaN stays NaN
+    /// (Rust does not promise its payload bits). The same structure, storage and allocation contract
+    /// as [`TensorMap::to_f64`].
+    pub fn narrow_to_f32(&self) -> TensorMap<R, f32> {
+        let narrow = |value: f64| value as f32;
+        self.convert_payload(narrow)
+    }
+}
+
+impl<R> TensorMap<R, Complex32> {
+    /// Widens both components to `Complex64`. Exact; the same contract as
+    /// [`TensorMap::to_f64`].
+    pub fn to_c64(&self) -> TensorMap<R, Complex64> {
+        let widen = |value: Complex32| Complex64::new(f64::from(value.re), f64::from(value.im));
+        self.convert_payload(widen)
+    }
+}
+
+impl<R> TensorMap<R, Complex64> {
+    /// Narrows both components to `Complex32`. **Lossy**, componentwise with
+    /// the rounding, overflow and NaN behavior of [`TensorMap::narrow_to_f32`].
+    pub fn narrow_to_c32(&self) -> TensorMap<R, Complex32> {
+        let narrow = |value: Complex64| Complex32::new(value.re as f32, value.im as f32);
+        self.convert_payload(narrow)
+    }
+}
+
 #[cfg(feature = "cuda")]
 impl<R, D: CudaPayload> TensorMap<R, D> {
     /// Uploads host ownership of a device-capable payload to this tensor's
@@ -19972,63 +20187,6 @@ where
             tenet_matrixalgebra::diagonal_bond_data(body.space.space(), spectrum, &|value| value)
                 .expect("diagonal fill is total on the stored bond space"),
         )),
-    }
-}
-
-// Bound-free, like the accessor impl on `GradedSpace<R>`: dtype conversion
-// needs no provider algebra or new layout admission.
-impl<R> TensorMap<R, f64> {
-    /// Widens to a c64 tensor map, imaginary parts zero (TensorKit
-    /// `Base.complex`).
-    ///
-    /// Element-wise on an owned payload: a dense payload is widened in
-    /// place-order, while a compact spectrum maps spectrum-to-spectrum and
-    /// **stays compact**. A cold lazy adjoint uses an operation-local payload
-    /// before the output allocation; an already-owned input needs only its
-    /// `O(stored_len)` output. The logical space is shared, not re-derived.
-    ///
-    /// Infallible for host storage; device transfer and conversion use their
-    /// storage-specific APIs.
-    ///
-    /// ```
-    ///
-    /// use tenet::core::{U1FusionRule, U1Irrep};
-    /// use tenet::typed::{GradedSpace, Runtime, TensorMap};
-    ///
-    /// let runtime = Runtime::builder().build()?;
-    /// let v = GradedSpace::try_new(
-    ///     U1FusionRule,
-    ///     [(U1Irrep::new(0), 1), (U1Irrep::new(1), 2)],
-    /// )?;
-    /// let t: TensorMap<_, f64> = TensorMap::rand(&runtime, [&v], [&v])?;
-    ///
-    /// let widened = t.to_c64();
-    /// // The real part round-trips exactly; the imaginary part is zero.
-    /// assert_eq!(widened.re().data(), t.data());
-    /// assert_eq!(widened.im().norm()?, 0.0);
-    /// # Ok::<(), tenet::typed::Error>(())
-    /// ```
-    pub fn to_c64(&self) -> TensorMap<R, num_complex::Complex64> {
-        let widen = |&value: &f64| num_complex::Complex64::new(value, 0.0);
-        let materialized = self
-            .materialized_tensor_uncached()
-            .expect("a pre-admitted typed adjoint must materialize");
-        let source = materialized
-            .owned_body()
-            .expect("uncached materialization is owned");
-        let body = match source.data.as_ref() {
-            TypedData::Dense(data) => {
-                TypedTensorBody::dense(source.space.clone(), data.iter().map(widen).collect())
-            }
-            TypedData::Diagonal(spectrum) => TypedTensorBody::diagonal(
-                source.space.clone(),
-                map_spectrum_dtype(spectrum, |value| num_complex::Complex64::new(value, 0.0)),
-            ),
-        };
-        TensorMap {
-            runtime: self.runtime.clone(),
-            repr: owned_repr(body),
-        }
     }
 }
 
