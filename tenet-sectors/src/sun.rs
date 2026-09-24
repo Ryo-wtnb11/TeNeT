@@ -561,7 +561,7 @@ mod tests {
 
     #[test]
     fn checked_rigid_dimension_accepts_the_largest_su2_dynkin_label() {
-        let mut rule = SUNFusionRule::new(2).unwrap();
+        let rule = SUNFusionRule::new(2).unwrap();
         let sector = rule.encode_dynkin(&[i64::MAX]).unwrap();
         let expected_dimension = 2.0_f64.powi(63);
         let sqrt_dimension = rule.try_sqrt_dim_scalar(sector).unwrap();
@@ -712,7 +712,7 @@ mod tests {
 
     #[test]
     fn su3_rigid_symbols_match_sunrepresentations_fixtures() {
-        let mut rule = SUNFusionRule::new(3).unwrap();
+        let rule = SUNFusionRule::new(3).unwrap();
         let three = rule.encode_dynkin(&[1, 0]).unwrap();
         let anti_three = rule.encode_dynkin(&[0, 1]).unwrap();
         let eight = rule.encode_dynkin(&[1, 1]).unwrap();
@@ -780,7 +780,7 @@ mod tests {
 
     #[test]
     fn su2_fundamental_pivotal_phase_matches_f_gauge() {
-        let mut rule = SUNFusionRule::new(2).unwrap();
+        let rule = SUNFusionRule::new(2).unwrap();
         let fundamental = rule.encode_dynkin(&[1]).unwrap();
         assert_eq!(
             rule.try_frobenius_schur_phase_scalar(fundamental).unwrap(),
@@ -790,7 +790,7 @@ mod tests {
 
     #[test]
     fn su4_adjoint_rigid_shape_smoke() {
-        let mut rule = SUNFusionRule::new(4).unwrap();
+        let rule = SUNFusionRule::new(4).unwrap();
         let adjoint = rule.encode_dynkin(&[1, 0, 1]).unwrap();
         assert_eq!(rule.dim_scalar(adjoint).unwrap(), 15.0);
         assert_eq!(
@@ -809,7 +809,7 @@ mod tests {
 
     #[test]
     fn rigid_failures_remain_typed() {
-        let mut rule = SUNFusionRule::new(3).unwrap();
+        let rule = SUNFusionRule::new(3).unwrap();
         let three = rule.encode_dynkin(&[1, 0]).unwrap();
         let eight = rule.encode_dynkin(&[1, 1]).unwrap();
         assert!(matches!(
@@ -825,7 +825,7 @@ mod tests {
             ))
         ));
 
-        let mut rule = SUNFusionRule::new(78).unwrap();
+        let rule = SUNFusionRule::new(78).unwrap();
         let mut labels = vec![0; 77];
         labels[36] = 19;
         let sector = rule.encode_dynkin(&labels).unwrap();

@@ -24332,12 +24332,16 @@ mod representation_gates {
             .any(|i| { divisor.block_fusion_trees(i).unwrap().codomain_vertices()[0].get() == 2 }));
 
         for (lazy_lhs, lazy_rhs) in [(false, false), (true, false), (false, true), (true, true)] {
-            let lhs = lazy_lhs
-                .then(|| divisor.adjoint().unwrap())
-                .unwrap_or_else(|| divisor.clone());
-            let right = lazy_rhs
-                .then(|| rhs.adjoint().unwrap())
-                .unwrap_or_else(|| rhs.clone());
+            let lhs = if lazy_lhs {
+                divisor.adjoint().unwrap()
+            } else {
+                divisor.clone()
+            };
+            let right = if lazy_rhs {
+                rhs.adjoint().unwrap()
+            } else {
+                rhs.clone()
+            };
             let lhs_before = divisor.data().to_vec();
             let rhs_before = rhs.data().to_vec();
             calls.store(0, std::sync::atomic::Ordering::Relaxed);

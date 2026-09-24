@@ -1080,13 +1080,15 @@ mod tests {
             DenseTensorInfo::new(vec![3, 4]),
         ];
         let cost = DenseCostModel::from_network(&ir, &infos).unwrap();
-        let mut config = CotengraPythonConfig::default();
-        config.slicing = CotengraSlicingConfig::Reconfigure {
-            target_size: 8,
-            step_size: 2,
-            max_repeats: 7,
-            allow_outer: false,
-            forested: true,
+        let config = CotengraPythonConfig {
+            slicing: CotengraSlicingConfig::Reconfigure {
+                target_size: 8,
+                step_size: 2,
+                max_repeats: 7,
+                allow_outer: false,
+                forested: true,
+            },
+            ..Default::default()
         };
         let spec = cotengra_spec(&ir, &cost, &config);
         assert_eq!(
