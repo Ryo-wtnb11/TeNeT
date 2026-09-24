@@ -60,6 +60,9 @@ pub use truncation::{
 };
 
 #[doc(hidden)]
+pub use truncation::rescaled_power_norm;
+
+#[doc(hidden)]
 pub use factorize::validate_hermitian_regions;
 
 #[doc(hidden)]
