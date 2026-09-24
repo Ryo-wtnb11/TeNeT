@@ -107,3 +107,12 @@ pub use tree::ContractionTree;
 
 /// The `tensor!` @tensor-style contraction macro (from `tenet-macros`).
 pub use tenet_macros::tensor;
+
+/// The workspace tolerance rule for arithmetic test comparisons
+/// (`docs/testing_numerics.md`).
+#[cfg(test)]
+#[path = "../../tests/support"]
+mod test_numerics {
+    use tenet::prelude::{Complex32, Complex64};
+    pub(crate) mod numerics;
+}

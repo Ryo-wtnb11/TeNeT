@@ -115,3 +115,12 @@ pub use owned_cat::{
 };
 #[doc(hidden)]
 pub use owned_trace::{try_tensortrace_owned_raw, OwnedTraceTerm};
+
+/// The workspace tolerance rule for arithmetic test comparisons
+/// (`docs/testing_numerics.md`).
+#[cfg(test)]
+#[path = "../../tests/support"]
+mod test_numerics {
+    use num_complex::{Complex32, Complex64};
+    pub(crate) mod numerics;
+}

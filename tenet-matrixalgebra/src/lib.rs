@@ -78,3 +78,12 @@ pub use factorize::{sector_matricization_diagnostic, SectorMatricizationDiagnost
 
 #[cfg(test)]
 mod tests;
+
+/// The workspace tolerance rule for arithmetic test comparisons
+/// (`docs/testing_numerics.md`).
+#[cfg(test)]
+#[path = "../../tests/support"]
+mod test_numerics {
+    use num_complex::{Complex32, Complex64};
+    pub(crate) mod numerics;
+}
