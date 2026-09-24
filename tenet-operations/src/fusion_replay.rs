@@ -848,7 +848,9 @@ where
     {
         let group = &self.groups[execution.group_index];
         let scratch = &mut fusion_workspace.scratch.as_mut_slice()[..execution.scratch.total_len];
-        if execution.class.packs_lhs() {
+        // `execute_batch` never reads the packed operands at a zero `alpha`.
+        let forms_product = !alpha.is_zero();
+        if forms_product && execution.class.packs_lhs() {
             let lhs = &mut scratch[..execution.scratch.lhs_len];
             if group.lhs.needs_clear {
                 lhs.fill(D::zero());
@@ -858,12 +860,12 @@ where
             if let (Some(start), Some(profile)) = (start, profile.as_deref_mut()) {
                 profile.core_pack_lhs += start.elapsed();
             }
-        } else if PROFILED {
+        } else if PROFILED && !execution.class.packs_lhs() {
             if let Some(profile) = profile.as_deref_mut() {
                 profile.core_direct_pack_skips += 1;
             }
         }
-        if execution.class.packs_rhs() {
+        if forms_product && execution.class.packs_rhs() {
             let start_index = execution.scratch.rhs_offset;
             let end = start_index + execution.scratch.rhs_len;
             let rhs = &mut scratch[start_index..end];
@@ -875,7 +877,7 @@ where
             if let (Some(start), Some(profile)) = (start, profile.as_deref_mut()) {
                 profile.core_pack_rhs += start.elapsed();
             }
-        } else if PROFILED {
+        } else if PROFILED && !execution.class.packs_rhs() {
             if let Some(profile) = profile.as_deref_mut() {
                 profile.core_direct_pack_skips += 1;
             }

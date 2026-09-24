@@ -786,8 +786,9 @@ where
     );
     let term_alpha = alpha.scale_by_coefficient(term.coefficient);
     // A zero `alpha` never forms `A * B`, as BLAS `gemm` and TensorKit's
-    // `mul!` do not (#1442); the zero-rule add below then contributes an
-    // exact zero whatever the scratch holds.
+    // `mul!` do not (#1442). The skip only saves cost: the zero arm of the
+    // add below (#1447) already contributes an exact zero whatever the
+    // scratch holds.
     if !term_alpha.is_zero() {
         dense
             .dot_general_into(output, lhs, rhs, descriptor.dot_config())
