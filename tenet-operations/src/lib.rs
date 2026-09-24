@@ -87,8 +87,9 @@ pub use placement::ReportsPlacement;
 pub use profile::{TensorContractFusionProfile, TensorContractFusionRoute};
 pub use replay_backend::*;
 pub use scalar::{
-    ConjugateValue, DenseBlockScalar, DenseRecouplingScalar, RealStructuralCoefficient,
-    RecouplingCoefficientAction, TransformScale, TreeTransformScalar, WideScalar,
+    scale_value, ConjugateValue, DenseBlockScalar, DenseRecouplingScalar,
+    RealStructuralCoefficient, RecouplingCoefficientAction, TransformScale, TreeTransformScalar,
+    WideScalar,
 };
 pub use tensoradd::*;
 pub use transform_key::{TreeTransformOperation, TreeTransformOperationKind};

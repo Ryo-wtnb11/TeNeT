@@ -4,6 +4,7 @@
 //! builds these plans; nothing here consumes fusion rules.
 
 use std::collections::HashSet;
+use std::ops::Mul;
 use std::sync::Arc;
 
 use num_traits::{One, Zero};
@@ -961,8 +962,22 @@ where
     ) -> Result<(), OperationError>
     where
         G: Rank2Gemm<D>,
-        D: Copy,
+        D: Copy + PartialEq + Zero + One + Mul<D, Output = D>,
     {
+        // BLAS `gemm` at `alpha == 0` leaves `beta * C` without forming
+        // `A * B`, as TensorKit's `mul!` reaches it; a backend that multiplies
+        // through (faer) would turn `0 * Inf` into NaN (#1442).
+        if alpha.is_zero() {
+            for job in jobs {
+                let block = direct_slice_mut(dst, job.dst_offset, job.rows, job.cols)?;
+                if beta.is_zero() {
+                    block.fill(D::zero());
+                } else if !beta.is_one() {
+                    block.iter_mut().for_each(|value| *value = beta * *value);
+                }
+            }
+            return Ok(());
+        }
         if self.lhs_op == MatrixOp::Identity && self.rhs_op == MatrixOp::Identity {
             gemm.matmul_rank2_batch(dst, lhs, rhs, jobs, runs, alpha, beta)
         } else {
@@ -1048,7 +1063,8 @@ where
         let lhs_data = lhs.data();
         let rhs_data = rhs.data();
         let _ = fusion_workspace;
-        gemm.matmul_rank2_batch(
+        self.execute_batch(
+            gemm,
             dst.data_mut(),
             lhs_data,
             rhs_data,
@@ -1162,7 +1178,8 @@ where
         )?;
 
         let _ = fusion_workspace;
-        gemm.matmul_rank2_batch(
+        self.execute_batch(
+            gemm,
             dst_data,
             lhs_data,
             rhs_data,
@@ -1243,7 +1260,8 @@ where
         )?;
 
         let _ = fusion_workspace;
-        gemm.matmul_rank2_batch(
+        self.execute_batch(
+            gemm,
             dst.data_mut(),
             lhs_data,
             rhs_data,

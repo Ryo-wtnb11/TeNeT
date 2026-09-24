@@ -784,11 +784,15 @@ where
         )
         .map_err(OperationError::Dense)?,
     );
-    dense
-        .dot_general_into(output, lhs, rhs, descriptor.dot_config())
-        .map_err(OperationError::Dense)?;
-
     let term_alpha = alpha.scale_by_coefficient(term.coefficient);
+    // A zero `alpha` never forms `A * B`, as BLAS `gemm` and TensorKit's
+    // `mul!` do not (#1442); the zero-rule add below then contributes an
+    // exact zero whatever the scratch holds.
+    if !term_alpha.is_zero() {
+        dense
+            .dot_general_into(output, lhs, rhs, descriptor.dot_config())
+            .map_err(OperationError::Dense)?;
+    }
     let term_beta = if term.apply_beta { beta } else { D::one() };
     tensoradd_raw_strided_kernel(
         zero_strides,
