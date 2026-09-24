@@ -158,7 +158,7 @@ fn validate_braid_source_axes<const SRC_NOUT: usize, const SRC_NIN: usize>(
 ) -> Result<(), OperationError> {
     let rank = SRC_NOUT
         .checked_add(SRC_NIN)
-        .ok_or(OperationError::ElementCountOverflow)?;
+        .ok_or_else(|| OperationError::ElementCountOverflow)?;
     let mut axes = Vec::with_capacity(codomain_permutation.len() + domain_permutation.len());
     axes.extend_from_slice(codomain_permutation);
     axes.extend_from_slice(domain_permutation);
@@ -290,10 +290,10 @@ pub(crate) fn lower_tensorcontract_adjoint_axes(
     }
     let lhs_rank = lhs_nout
         .checked_add(lhs_nin)
-        .ok_or(OperationError::ElementCountOverflow)?;
+        .ok_or_else(|| OperationError::ElementCountOverflow)?;
     let rhs_rank = rhs_nout
         .checked_add(rhs_nin)
-        .ok_or(OperationError::ElementCountOverflow)?;
+        .ok_or_else(|| OperationError::ElementCountOverflow)?;
     let contract_count = axes.lhs_contracting_axes().len();
     let core_output_rank = lhs_rank
         .checked_sub(contract_count)
@@ -302,7 +302,7 @@ pub(crate) fn lower_tensorcontract_adjoint_axes(
                 .checked_sub(contract_count)
                 .and_then(|rhs_open| lhs_open.checked_add(rhs_open))
         })
-        .ok_or(OperationError::ElementCountOverflow)?;
+        .ok_or_else(|| OperationError::ElementCountOverflow)?;
     Ok(LoweredTensorContractSpec {
         lhs_contracting_axes: if axes.lhs_conjugate() {
             adjoint_tensor_axes_inline(lhs_nout, lhs_nin, axes.lhs_contracting_axes())?
@@ -327,7 +327,7 @@ pub(crate) fn adjoint_tensor_axis(
 ) -> Result<usize, OperationError> {
     let rank = nout
         .checked_add(nin)
-        .ok_or(OperationError::ElementCountOverflow)?;
+        .ok_or_else(|| OperationError::ElementCountOverflow)?;
     if axis >= rank {
         return Err(OperationError::InvalidAxisSet {
             tensor: "adjoint source",
@@ -381,7 +381,7 @@ pub(crate) fn adjoint_block_structure_view(
     ADJOINT_VIEW_BUILDS.with(|count| count.set(count.get() + 1));
     let rank = nout
         .checked_add(nin)
-        .ok_or(OperationError::ElementCountOverflow)?;
+        .ok_or_else(|| OperationError::ElementCountOverflow)?;
     if source.rank() != rank {
         return Err(OperationError::StructureRankMismatch {
             expected: rank,

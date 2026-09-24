@@ -315,7 +315,7 @@ fn checked_fused_index_len(threads: usize, max_fused_rank: usize) -> Result<usiz
     let len = threads
         .max(1)
         .checked_mul(max_fused_rank)
-        .ok_or(OperationError::ElementCountOverflow)?;
+        .ok_or_else(|| OperationError::ElementCountOverflow)?;
     core::alloc::Layout::array::<usize>(len).map_err(|_| OperationError::ElementCountOverflow)?;
     Ok(len)
 }
@@ -367,14 +367,14 @@ where
         };
         let coefficient_len = src_count
             .checked_mul(dst_count)
-            .ok_or(OperationError::ElementCountOverflow)?;
+            .ok_or_else(|| OperationError::ElementCountOverflow)?;
         let coefficient_end = coefficient_start
             .checked_add(coefficient_len)
-            .ok_or(OperationError::ElementCountOverflow)?;
+            .ok_or_else(|| OperationError::ElementCountOverflow)?;
         let coefficients = task
             .coefficients()
             .get(coefficient_start..coefficient_end)
-            .ok_or(OperationError::CoefficientCountMismatch {
+            .ok_or_else(|| OperationError::CoefficientCountMismatch {
                 expected: coefficient_end,
                 actual: task.coefficients().len(),
             })?;
@@ -2267,10 +2267,10 @@ where
             } => {
                 let source_len = element_count
                     .checked_mul(src_count)
-                    .ok_or(OperationError::ElementCountOverflow)?;
+                    .ok_or_else(|| OperationError::ElementCountOverflow)?;
                 let destination_len = element_count
                     .checked_mul(dst_count)
-                    .ok_or(OperationError::ElementCountOverflow)?;
+                    .ok_or_else(|| OperationError::ElementCountOverflow)?;
                 workspace.prepare_from_storages(
                     src.storage(),
                     dst.storage(),
@@ -3487,9 +3487,9 @@ fn layout_linear_offset(
             .checked_add(
                 coordinate
                     .checked_mul(stride)
-                    .ok_or(OperationError::ElementCountOverflow)?,
+                    .ok_or_else(|| OperationError::ElementCountOverflow)?,
             )
-            .ok_or(OperationError::ElementCountOverflow)?;
+            .ok_or_else(|| OperationError::ElementCountOverflow)?;
     }
     usize::try_from(offset).map_err(|_| OperationError::OffsetOverflow { value: usize::MAX })
 }
@@ -4121,10 +4121,10 @@ where
         debug_assert_eq!(job.cols, dst_count);
         let source_len = element_count
             .checked_mul(src_count)
-            .ok_or(OperationError::ElementCountOverflow)?;
+            .ok_or_else(|| OperationError::ElementCountOverflow)?;
         let destination_len = element_count
             .checked_mul(dst_count)
-            .ok_or(OperationError::ElementCountOverflow)?;
+            .ok_or_else(|| OperationError::ElementCountOverflow)?;
         let start = profile.as_ref().map(|_| std::time::Instant::now());
         workspace.prepare_packed_buffers(source_len, destination_len, D::zero());
         if let (Some(profile), Some(start)) = (profile.as_deref_mut(), start) {
@@ -4633,7 +4633,7 @@ where
                 .checked_mul(job.contracted)
                 .and_then(|len| job.lhs_offset.checked_add(len))
         })
-        .ok_or(OperationError::ElementCountOverflow)?;
+        .ok_or_else(|| OperationError::ElementCountOverflow)?;
     let destination_end = chunk
         .last()
         .and_then(|job| {
@@ -4641,7 +4641,7 @@ where
                 .checked_mul(job.cols)
                 .and_then(|len| job.dst_offset.checked_add(len))
         })
-        .ok_or(OperationError::ElementCountOverflow)?;
+        .ok_or_else(|| OperationError::ElementCountOverflow)?;
 
     workspace.chunk_jobs.clear();
     workspace
@@ -5176,10 +5176,10 @@ where
 {
     let source_len = element_count
         .checked_mul(src_count)
-        .ok_or(OperationError::ElementCountOverflow)?;
+        .ok_or_else(|| OperationError::ElementCountOverflow)?;
     let destination_len = element_count
         .checked_mul(dst_count)
-        .ok_or(OperationError::ElementCountOverflow)?;
+        .ok_or_else(|| OperationError::ElementCountOverflow)?;
     workspace.prepare_packed_buffers(source_len, destination_len, D::zero());
     let HostTreeTransformWorkspace {
         zero_strides,

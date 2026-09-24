@@ -135,7 +135,7 @@ impl<'a> BakedFusedLayout<'a> {
         dims.iter().try_fold(1usize, |product, &dim| {
             product
                 .checked_mul(dim)
-                .ok_or(OperationError::ElementCountOverflow)
+                .ok_or_else(|| OperationError::ElementCountOverflow)
         })?;
         Ok(Self {
             dims,
@@ -216,7 +216,7 @@ pub(crate) fn normalize_fused_layout(
     shape.iter().try_fold(1usize, |product, &dim| {
         product
             .checked_mul(dim)
-            .ok_or(OperationError::ElementCountOverflow)
+            .ok_or_else(|| OperationError::ElementCountOverflow)
     })?;
 
     for axis in 0..shape.len() {
@@ -244,7 +244,7 @@ pub(crate) fn normalize_fused_layout(
         {
             scratch.dims[fused] = scratch.dims[fused]
                 .checked_mul(scratch.dims[axis])
-                .ok_or(OperationError::ElementCountOverflow)?;
+                .ok_or_else(|| OperationError::ElementCountOverflow)?;
         } else {
             fused += 1;
             scratch.dims[fused] = scratch.dims[axis];
@@ -1703,16 +1703,16 @@ pub fn validate_recoupling_lens(
 ) -> Result<(), OperationError> {
     let expected_source_len = element_count
         .checked_mul(src_count)
-        .ok_or(OperationError::ElementCountOverflow)?;
+        .ok_or_else(|| OperationError::ElementCountOverflow)?;
     let expected_destination_len = element_count
         .checked_mul(dst_count)
-        .ok_or(OperationError::ElementCountOverflow)?;
+        .ok_or_else(|| OperationError::ElementCountOverflow)?;
     let coefficient_count = src_count
         .checked_mul(dst_count)
-        .ok_or(OperationError::ElementCountOverflow)?;
+        .ok_or_else(|| OperationError::ElementCountOverflow)?;
     let coefficient_end = coefficient_start
         .checked_add(coefficient_count)
-        .ok_or(OperationError::ElementCountOverflow)?;
+        .ok_or_else(|| OperationError::ElementCountOverflow)?;
 
     if source_len != expected_source_len {
         return Err(OperationError::ElementCountMismatch {

@@ -79,7 +79,10 @@ fn racah_irrep(irrep: SU2Irrep) -> racah::Su2Irrep {
 }
 
 fn checked_irrep(sector: SectorId) -> Result<SU2Irrep, FusionAlgebraError> {
-    SU2Irrep::try_from_sector_id(sector).ok_or(FusionAlgebraError::InvalidSector { sector })
+    match SU2Irrep::try_from_sector_id(sector) {
+        Some(irrep) => Ok(irrep),
+        None => Err(FusionAlgebraError::InvalidSector { sector }),
+    }
 }
 
 fn checked_irreps(

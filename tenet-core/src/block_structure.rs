@@ -678,7 +678,7 @@ impl SectorStructure {
     pub fn block(&self, index: usize) -> Result<&SectorBlock, CoreError> {
         self.blocks
             .get(index)
-            .ok_or(CoreError::BlockIndexOutOfBounds {
+            .ok_or_else(|| CoreError::BlockIndexOutOfBounds {
                 index,
                 count: self.blocks.len(),
             })
@@ -998,7 +998,7 @@ impl DegeneracyStructure {
     pub fn block(&self, index: usize) -> Result<&DegeneracyBlock, CoreError> {
         self.blocks
             .get(index)
-            .ok_or(CoreError::BlockIndexOutOfBounds {
+            .ok_or_else(|| CoreError::BlockIndexOutOfBounds {
                 index,
                 count: self.blocks.len(),
             })
@@ -2282,7 +2282,7 @@ where
         index: usize,
     ) -> Result<&'structure FusionTreePairKey, CoreError> {
         self.fusion_tree_pair_key(index)?
-            .ok_or(CoreError::MalformedFusionTree {
+            .ok_or_else(|| CoreError::MalformedFusionTree {
                 message: "validated fusion-tree group contains a dense block",
             })
     }
@@ -2754,7 +2754,7 @@ fn block_layout_bounds(
     }
     let end = storage_end_exclusive(shape, strides, offset)?
         .checked_sub(1)
-        .ok_or(CoreError::ElementCountOverflow)?;
+        .ok_or_else(|| CoreError::ElementCountOverflow)?;
     Ok(Some((offset, end)))
 }
 
@@ -2783,7 +2783,7 @@ where
             if indices[axis] < shape[axis] {
                 physical = physical
                     .checked_add(strides[axis])
-                    .ok_or(CoreError::ElementCountOverflow)?;
+                    .ok_or_else(|| CoreError::ElementCountOverflow)?;
                 break;
             }
             indices[axis] = 0;
@@ -2792,9 +2792,9 @@ where
                     shape[axis]
                         .saturating_sub(1)
                         .checked_mul(strides[axis])
-                        .ok_or(CoreError::ElementCountOverflow)?,
+                        .ok_or_else(|| CoreError::ElementCountOverflow)?,
                 )
-                .ok_or(CoreError::ElementCountOverflow)?;
+                .ok_or_else(|| CoreError::ElementCountOverflow)?;
             axis += 1;
         }
         if axis == indices.len() {
@@ -2876,7 +2876,7 @@ fn compile_coupled_sector_regions(
             let expected_blocks = row_trees
                 .len()
                 .checked_mul(col_trees.len())
-                .ok_or(CoreError::ElementCountOverflow)?;
+                .ok_or_else(|| CoreError::ElementCountOverflow)?;
             if end - block_index != expected_blocks {
                 return Ok(None);
             }
@@ -2898,7 +2898,7 @@ fn compile_coupled_sector_regions(
                             .checked_mul(col_offset)
                             .and_then(|column| offset.checked_add(column))
                     })
-                    .ok_or(CoreError::ElementCountOverflow)?;
+                    .ok_or_else(|| CoreError::ElementCountOverflow)?;
                 if block.offset() != expected_offset
                     || !coupled_sector_strides(block.shape(), block.strides(), nout, rows)?
                 {
@@ -2907,10 +2907,10 @@ fn compile_coupled_sector_regions(
             }
             let elements = rows
                 .checked_mul(cols)
-                .ok_or(CoreError::ElementCountOverflow)?;
+                .ok_or_else(|| CoreError::ElementCountOverflow)?;
             let end_offset = next_offset
                 .checked_add(elements)
-                .ok_or(CoreError::ElementCountOverflow)?;
+                .ok_or_else(|| CoreError::ElementCountOverflow)?;
             if end_offset > structure.content.required_len {
                 return Ok(None);
             }
@@ -2951,7 +2951,7 @@ fn insert_coupled_tree_extent<'a>(
     let offset = *total;
     *total = offset
         .checked_add(checked_element_count(&shape)?)
-        .ok_or(CoreError::ElementCountOverflow)?;
+        .ok_or_else(|| CoreError::ElementCountOverflow)?;
     indexes.insert(tree, index);
     trees.push(CoupledTreeExtent {
         tree: tree.clone(),
@@ -2965,7 +2965,7 @@ fn checked_element_count(shape: &[usize]) -> Result<usize, CoreError> {
     shape.iter().try_fold(1usize, |count, &extent| {
         count
             .checked_mul(extent)
-            .ok_or(CoreError::ElementCountOverflow)
+            .ok_or_else(|| CoreError::ElementCountOverflow)
     })
 }
 
@@ -2985,7 +2985,7 @@ fn coupled_sector_strides(
         }
         expected = expected
             .checked_mul(shape[axis])
-            .ok_or(CoreError::ElementCountOverflow)?;
+            .ok_or_else(|| CoreError::ElementCountOverflow)?;
     }
     expected = rows;
     for axis in nout..shape.len() {
@@ -2994,7 +2994,7 @@ fn coupled_sector_strides(
         }
         expected = expected
             .checked_mul(shape[axis])
-            .ok_or(CoreError::ElementCountOverflow)?;
+            .ok_or_else(|| CoreError::ElementCountOverflow)?;
     }
     Ok(true)
 }

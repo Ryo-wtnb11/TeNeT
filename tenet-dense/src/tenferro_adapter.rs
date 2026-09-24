@@ -686,24 +686,21 @@ impl DefaultDenseExecutor {
         let first = &run[0];
         let next = &run[1];
         let run_len = run.len();
-        let lhs_batch_stride =
-            next.lhs_offset
-                .checked_sub(first.lhs_offset)
-                .ok_or(DenseError::OffsetOverflow {
-                    value: first.lhs_offset,
-                })?;
-        let rhs_batch_stride =
-            next.rhs_offset
-                .checked_sub(first.rhs_offset)
-                .ok_or(DenseError::OffsetOverflow {
-                    value: first.rhs_offset,
-                })?;
-        let dst_batch_stride =
-            next.dst_offset
-                .checked_sub(first.dst_offset)
-                .ok_or(DenseError::OffsetOverflow {
-                    value: first.dst_offset,
-                })?;
+        let Some(lhs_batch_stride) = next.lhs_offset.checked_sub(first.lhs_offset) else {
+            return Err(DenseError::OffsetOverflow {
+                value: first.lhs_offset,
+            });
+        };
+        let Some(rhs_batch_stride) = next.rhs_offset.checked_sub(first.rhs_offset) else {
+            return Err(DenseError::OffsetOverflow {
+                value: first.rhs_offset,
+            });
+        };
+        let Some(dst_batch_stride) = next.dst_offset.checked_sub(first.dst_offset) else {
+            return Err(DenseError::OffsetOverflow {
+                value: first.dst_offset,
+            });
+        };
         let lhs_shape = [first.rows, first.contracted, run_len];
         let lhs_strides = match lhs_op {
             MatrixOp::Identity => [1, first.rows, lhs_batch_stride],
