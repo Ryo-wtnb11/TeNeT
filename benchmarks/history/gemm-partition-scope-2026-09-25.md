@@ -60,7 +60,7 @@ ab, b, a, base / base, a, b, ab. Raw rows:
 `gemm-partition-scope-2026-09-25-victim.csv`.
 
 Median of the three passes (µs). `solo` = phase time without the victim;
-victim alone p50 is 9.6 to 11.4 in every run.
+the victim-alone p50 (measured once per process, before the aggressor starts) ranges 9.04 to 11.75 over the CSV rows; its per-mode medians over the three passes are 9.62 to 10.50.
 
 | partition | n | mode | solo phase | victim p50 | victim p99 |
 |---|---:|---|---:|---:|---:|
@@ -101,7 +101,9 @@ base `[1,4,1,4]` n=8 pass 1, 1416 µs) and track host load, not the mode.
 Choice: (a)+(b). The admission saving is structural (one per phase regardless
 of partition shape); the latency cost is bounded by the phase and is the same
 tradeoff #1424 accepted for the streaming factorization loops. No block size
-or run count selects between the modes.
+or run count selects between the modes. A covering partition with a single run
+is already one dispatch and skips the scope (no admission to save, and no
+`CpuBackend` clone).
 
 ## Not measured
 

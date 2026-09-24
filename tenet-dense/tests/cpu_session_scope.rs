@@ -524,10 +524,12 @@ fn partition_call(
 fn mixed_partition_is_one_admission_and_bitwise_equal_to_per_run_calls() {
     let _guard = counter_lock();
     // (partition, serial stretches, runs issued one call each: admissions)
-    let cases: [(&[usize], u64, u64); 3] = [
+    let cases: [(&[usize], u64, u64); 4] = [
         (&[4, 1, 1, 1], 1, 4),
         (&[1, 4, 1, 4], 2, 4),
         (&[1, 1, 3, 1, 2], 2, 5),
+        // One run: no scope, its single strided call admits itself.
+        (&[4], 0, 1),
     ];
     for threads in [Some(1), None] {
         for (pattern, stretches, per_run_admissions) in cases {

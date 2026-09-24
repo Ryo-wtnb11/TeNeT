@@ -40,7 +40,7 @@ thread_local! {
 /// outside an execution scope, plus one per entered scope, whose entries share
 /// its permit and pool handoff. Scopes are entered by
 /// [`DenseExecutor::with_linalg_scope`] and by an op-bearing batch GEMM whose
-/// partition holds several runs. Other backend-level dot entries are not
+/// covering run partition has more than one run. Other backend-level dot entries are not
 /// counted. Under a multi-threaded CPU layout each admission is one Rayon pool
 /// hop.
 ///
@@ -545,6 +545,12 @@ impl DefaultDenseExecutor {
         // whole phase pay that once. The permit is then held across the
         // phase's between-run view setup too, so a short Tenferro call on
         // another thread can wait for the whole phase rather than one run.
+        // A single run is one dispatch already, so a scope would save nothing.
+        if runs.len() == 1 {
+            return self.matmul_batch_axpby_ops_partition_typed(
+                output, lhs, rhs, jobs, runs, lhs_op, rhs_op, alpha, beta, wrap_write, wrap_read,
+            );
+        }
         self.in_execution_scope(move |this| {
             this.matmul_batch_axpby_ops_partition_typed(
                 output, lhs, rhs, jobs, runs, lhs_op, rhs_op, alpha, beta, wrap_write, wrap_read,
@@ -2113,6 +2119,37 @@ mod linalg_scope_tests {
                 .all(|&(caller, session)| caller == here && session != caller));
             assert_eq!(whole, per_run, "{pattern:?}");
         }
+    }
+
+    /// A single-run partition is one dispatch, so it enters no scope: its one
+    /// serial session is admitted (and hops to the pool) like any other.
+    #[test]
+    fn single_run_partition_enters_no_scope() {
+        let singletons = Partition::new(&[1, 1]);
+        // Two jobs of different shapes as one non-batchable run.
+        let fixture = Partition {
+            runs: vec![2],
+            ..singletons
+        };
+        let mut executor = DefaultDenseExecutor::new();
+        let key = session_key(&executor.backend);
+        let here = std::thread::current().id();
+        let mut whole = Vec::new();
+        let sessions = session_threads_of(key, || whole = fixture.whole(&mut executor));
+        assert_eq!(sessions.len(), 1);
+        assert!(sessions
+            .iter()
+            .all(|&(caller, session)| caller == here && session != caller));
+        let mut reference = fixture.dst.clone();
+        for job in &fixture.jobs {
+            fixture.run(
+                &mut executor,
+                std::slice::from_ref(job),
+                &[1],
+                &mut reference,
+            );
+        }
+        assert_eq!(whole, bits_c64(&reference));
     }
 
     /// A caller-owned domain cannot enter a scope: the phase runs unscoped on
