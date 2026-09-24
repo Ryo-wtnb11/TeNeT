@@ -502,27 +502,24 @@ fn kept_counts(spectra: &[WeightedSpectrum<'_>], truncation: &Truncation) -> Vec
         // workspace instead of rescanning G sectors per discard (O(D * G)).
         // The heap build is paid even for D = 0; no cutoff to the scan.
         Truncation::DiscardWeight { rtol } => {
-            let bound = rtol * full_norm(spectra);
+            let norm = full_norm(spectra);
+            let bound = rtol * norm;
             let budget = bound * bound;
-            // Out of range (#1440), the budget and every discarded term are
-            // taken in units of `scale`, the power-of-two floor of `bound`:
-            // the decision is then exactly the in-range decision for
-            // `spectrum / scale`, whose budget lies in `[1, 4)` (zero for a zero
-            // bound). A term that
-            // overflows in those units exceeds the budget and stops the scan;
-            // one that underflows is below `2^-1022` of it. Unscaled, `budget`
-            // is `Inf` near 1e154 (so `Inf > Inf` never stops the scan and
-            // everything is discarded) and `0` near 1e-162 (so every value
-            // whose square underflows is discarded). An infinite `bound`
+            let values: usize = spectra.iter().map(|spectrum| spectrum.values.len()).sum();
+            let slack = 1.0 + (values + 5) as f64 * f64::EPSILON;
+            // In range, the historical unscaled comparison. Out of range
+            // (#1440), `BudgetUnits` compares in exact power-of-two units
+            // instead: unscaled, `budget` or `limit` is `Inf` near 1e154
+            // (`Inf > Inf` never stops the scan, so everything is discarded),
+            // and `budget` is `0` or `rtol * norm` rounds to the subnormal
+            // grid near 1e-162 (a value whose square underflows, or one within
+            // that rounding of the bound, is discarded). An infinite `bound`
             // needs `rtol > 1`, so discarding everything is the right answer
             // and stays unscaled.
-            let in_range =
-                bound.is_infinite() || (budget.is_finite() && budget >= UNSCALED_POWER_SUM_MIN);
-            let scale = (!in_range).then(|| power_of_two_floor(bound));
-            let budget = match scale {
-                None => budget,
-                Some(scale) => (bound / scale) * (bound / scale),
-            };
+            let in_range = bound.is_infinite()
+                || (budget >= UNSCALED_POWER_SUM_MIN && (budget * slack).is_finite());
+            let units = (!in_range).then(|| BudgetUnits::new(*rtol, norm));
+            let budget = units.map_or(budget, |units| units.budget);
             // Slack for the rounding of the two quantities compared, both of
             // order `budget` (`u = eps / 2`, `n` values, Higham gamma bounds
             // in this exact evaluation order):
@@ -549,8 +546,7 @@ fn kept_counts(spectra: &[WeightedSpectrum<'_>], truncation: &Truncation) -> Vec
             // discards while the running error is `<= budget`, which this
             // keeps, so a budget met exactly up to rounding discards that
             // state.
-            let values: usize = spectra.iter().map(|spectrum| spectrum.values.len()).sum();
-            let limit = budget * (1.0 + (values + 5) as f64 * f64::EPSILON);
+            let limit = budget * slack;
             let mut kept: Vec<usize> = spectra
                 .iter()
                 .map(|spectrum| spectrum.values.len())
@@ -567,9 +563,12 @@ fn kept_counts(spectra: &[WeightedSpectrum<'_>], truncation: &Truncation) -> Vec
             while let Some(TailCandidate { value, sector }) = tails.pop() {
                 let weight = spectra[sector].weight;
                 let next = discarded
-                    + match scale {
+                    + match units {
                         None => weight * value * value,
-                        Some(scale) => weight * (value / scale) * (value / scale),
+                        Some(units) => {
+                            let value = units.scaled(value);
+                            weight * value * value
+                        }
                     };
                 if next > limit {
                     break;
@@ -608,6 +607,60 @@ fn kept_counts(spectra: &[WeightedSpectrum<'_>], truncation: &Truncation) -> Vec
             }
             kept
         }
+    }
+}
+
+/// The out-of-range `DiscardWeight` comparison in units of
+/// `2^e = floor2(rtol) * floor2(norm) * floor2(ρ ν)`, where `floor2` is
+/// [`power_of_two_floor`], `ρ = rtol / floor2(rtol)` and
+/// `ν = norm / floor2(norm)`, both in `[1, 2)` and exact.
+///
+/// `rtol * norm = ρ ν 2^e / floor2(ρ ν)`, so the budget in these units is
+/// `(ρ ν / floor2(ρ ν))^2` in `[1, 4)`, formed with the single rounding of
+/// `ρ ν` that the in-range `rtol * norm` also has. The bound itself is never
+/// formed, so it cannot round on the subnormal grid, and `2^e` is carried as
+/// three factors because it can lie outside the `f64` range. Each value is
+/// divided by the three factors, which is exact while the quotients stay
+/// normal: the decision is the in-range decision for `spectrum / 2^e`. A term
+/// that overflows in these units exceeds the budget and stops the scan; one
+/// whose first quotient `value / floor2(norm)` underflows is below `2^-1022`
+/// of the norm.
+#[derive(Clone, Copy)]
+struct BudgetUnits {
+    norm_scale: f64,
+    product_scale: f64,
+    rtol_scale: f64,
+    budget: f64,
+}
+
+impl BudgetUnits {
+    fn new(rtol: f64, norm: f64) -> Self {
+        if rtol == 0.0 || norm == 0.0 {
+            // A zero budget discards exactly the zero values. Dividing by the
+            // smallest subnormal alone makes every positive value at least
+            // `1`, where `v / floor2(norm)` could underflow to zero.
+            return Self {
+                norm_scale: power_of_two_floor(0.0),
+                product_scale: 1.0,
+                rtol_scale: 1.0,
+                budget: 0.0,
+            };
+        }
+        let norm_scale = power_of_two_floor(norm);
+        let rtol_scale = power_of_two_floor(rtol);
+        let product = (rtol / rtol_scale) * (norm / norm_scale);
+        let product_scale = power_of_two_floor(product);
+        let bound = product / product_scale;
+        Self {
+            norm_scale,
+            product_scale,
+            rtol_scale,
+            budget: bound * bound,
+        }
+    }
+
+    fn scaled(self, value: f64) -> f64 {
+        value / self.norm_scale / self.product_scale / self.rtol_scale
     }
 }
 
@@ -1558,5 +1611,57 @@ mod tests {
         // Relative, as `error / 1e-171`: the absolute tolerance would accept
         // zero here. One value reaches the error.
         crate::test_numerics::numerics::assert_close("error", decision.error / 1e-171, 8.0, 1);
+    }
+
+    #[test]
+    fn a_budget_whose_slack_overflows_is_compared_in_scaled_units() {
+        // What: `rtol * norm = 1.3407807929942596e154` puts the budget in
+        // `(MAX / (1 + (n + 5) eps), MAX]`: finite, but `limit` overflows, and
+        // `next > Inf` never stops the scan. Exact oracle (Python
+        // `fractions.Fraction` over these f64 values): with
+        // `B = rtol^2 * Σ w v^2`, the weighted `2^1000` tail is at most `B`
+        // (`B / 2^1000 ≈ 1.68e7`, `≈ 8.4e6` with weight 2), and the whole
+        // spectrum is not (`rtol < 1`). So one value is discarded and the error
+        // is `sqrt(w) 2^500`.
+        let rtol = 1.3407807929942596e154 * 2f64.powi(-530);
+        for weight in [1.0, 2.0] {
+            let entries = [(1.0, vec![2f64.powi(530)]), (weight, vec![2f64.powi(500)])];
+            let unit = spectra(&entries);
+            let bound = rtol * full_norm(&unit);
+            let n = 2.0;
+            assert!(bound * bound <= f64::MAX);
+            assert!((bound * bound * (1.0 + (n + 5.0) * f64::EPSILON)).is_infinite());
+            let decision = select(&unit, &Truncation::relative_error(rtol).unwrap()).unwrap();
+            assert_eq!(decision.kept, [1, 0], "weight {weight}");
+            // Exact: one dyadic term, `sqrt(w)` rounded once.
+            assert_eq!(decision.error, weight.sqrt() * 2f64.powi(500));
+        }
+        // The same window with both values in one sector (the review repro).
+        let entries = [(1.0, vec![2f64.powi(530), 2f64.powi(500)])];
+        let decision = select(
+            &spectra(&entries),
+            &Truncation::relative_error(rtol).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(decision.kept, [1]);
+        assert_eq!(decision.error, 2f64.powi(500));
+    }
+
+    #[test]
+    fn a_subnormal_bound_is_not_rounded_before_the_comparison() {
+        // What: `rtol * norm` with `rtol = 3 * 2^-1074`, norm `≈ 1.9` is
+        // `≈ 5.7 * 2^-1074`, which rounds to `6 * 2^-1074` on the subnormal
+        // grid. Exact oracle (Python `fractions.Fraction`): the tail
+        // `6 * 2^-1074` squared over `rtol^2 * norm^2` is `1 / 0.9025 > 1`,
+        // so it must be kept and the error is zero.
+        let tiny = f64::from_bits(1);
+        let entries = [(1.0, vec![1.9, 6.0 * tiny])];
+        let decision = select(
+            &spectra(&entries),
+            &Truncation::relative_error(3.0 * tiny).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(decision.kept, [2]);
+        assert_eq!(decision.error.to_bits(), 0.0f64.to_bits());
     }
 }
