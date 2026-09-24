@@ -35,11 +35,14 @@ thread_local! {
 /// so this is a lower bound on the sessions a phase actually enters.
 ///
 /// `admissions` counts the execution-permit acquisitions of those sessions
-/// and of [`DenseExecutor::dot_general_into`]'s backend-level call: one per
-/// such entry made outside a [`DenseExecutor::with_linalg_scope`], plus one
-/// per entered scope, whose entries share its permit and pool handoff. Other
-/// backend-level dot entries are not counted. Under a multi-threaded CPU
-/// layout each admission is one Rayon pool hop.
+/// and of the backend-level calls of [`DenseExecutor::dot_general_into`] and
+/// of the strided and grouped batch GEMM routes: one per such entry made
+/// outside an execution scope, plus one per entered scope, whose entries share
+/// its permit and pool handoff. Scopes are entered by
+/// [`DenseExecutor::with_linalg_scope`] and by an op-bearing batch GEMM whose
+/// covering run partition has more than one run. Other backend-level dot entries are not
+/// counted. Under a multi-threaded CPU layout each admission is one Rayon pool
+/// hop.
 ///
 /// The counters are `Relaxed` and process-wide: a snapshot taken while another
 /// thread executes is a sample, not a global instant.
@@ -302,6 +305,67 @@ impl DefaultDenseExecutor {
         }
     }
 
+    /// Runs `body` once inside one Tenferro execution scope on this
+    /// executor's backend, so every session it opens shares one permit and
+    /// pool install. Inside an active TeNeT scope it runs inline; where
+    /// Tenferro cannot enter a scope it runs unscoped, paying one admission
+    /// per session as without a scope.
+    #[cfg(not(feature = "provider-inject"))]
+    fn in_execution_scope(
+        &mut self,
+        mut body: impl FnMut(&mut Self) -> Result<(), DenseError> + Send,
+    ) -> Result<(), DenseError> {
+        if IN_LINALG_SCOPE.get() {
+            return body(self);
+        }
+        // `with_execution_scope` borrows its backend while the body needs
+        // `&mut self`; a clone keeps the runtime identity, engine and domain,
+        // which is what the scope matches sessions against.
+        let witness = self.backend.clone();
+        let mut entered = false;
+        let scoped = witness.with_execution_scope(|| {
+            entered = true;
+            ADMISSIONS.fetch_add(1, Ordering::Relaxed);
+            IN_LINALG_SCOPE.set(true);
+            struct Leave;
+            impl Drop for Leave {
+                fn drop(&mut self) {
+                    IN_LINALG_SCOPE.set(false);
+                }
+            }
+            let _leave = Leave;
+            body(&mut *self)
+        });
+        match scoped {
+            Ok(result) => result,
+            // Not entered because the domain is caller-owned (`Unsupported`)
+            // or a Tenferro execution is already active on this thread
+            // (`RuntimeState`): per-session admission is still correct, only
+            // slower, so run the body unscoped.
+            Err(err)
+                if !entered
+                    && matches!(
+                        err.kind(),
+                        tenferro_tensor::ErrorKind::Unsupported
+                            | tenferro_tensor::ErrorKind::RuntimeState
+                    ) =>
+            {
+                body(self)
+            }
+            Err(err) => Err(tenferro_error("with_execution_scope", err)),
+        }
+    }
+
+    // provider-inject has no linear-algebra scope (see `with_linalg_scope`);
+    // each session admits itself.
+    #[cfg(feature = "provider-inject")]
+    fn in_execution_scope(
+        &mut self,
+        mut body: impl FnMut(&mut Self) -> Result<(), DenseError> + Send,
+    ) -> Result<(), DenseError> {
+        body(self)
+    }
+
     #[cfg(test)]
     pub(crate) fn reset_seam_dispatches(&mut self) {
         self.seam_dispatches = 0;
@@ -426,6 +490,7 @@ impl DefaultDenseExecutor {
             beta: tenferro_scalar(beta),
         };
         let config = GroupedGemmConfig::new(&self.grouped_jobs, accumulation);
+        note_backend_admission();
         BackendCachedDot::grouped_gemm_cached(
             &mut self.backend,
             &mut self.grouped_cache,
@@ -474,7 +539,52 @@ impl DefaultDenseExecutor {
             );
         }
 
+        // Every run of the partition is one dispatch into its own Tenferro
+        // session, and each session takes the process-wide execution permit
+        // (on faer, also a Rayon pool install). One execution scope makes the
+        // whole phase pay that once. The permit is then held across the
+        // phase's between-run view setup too, so a short Tenferro call on
+        // another thread can wait for the whole phase rather than one run.
+        // A single run is one dispatch already, so a scope would save nothing.
+        if runs.len() == 1 {
+            return self.matmul_batch_axpby_ops_partition_typed(
+                output, lhs, rhs, jobs, runs, lhs_op, rhs_op, alpha, beta, wrap_write, wrap_read,
+            );
+        }
+        self.in_execution_scope(move |this| {
+            this.matmul_batch_axpby_ops_partition_typed(
+                output, lhs, rhs, jobs, runs, lhs_op, rhs_op, alpha, beta, wrap_write, wrap_read,
+            )
+        })
+    }
+
+    /// Issues a covering partition in job order: each batchable run as one
+    /// strided call, and each maximal stretch of adjacent non-batchable runs
+    /// as one serial call (one session) instead of one call per run. Plan-cache
+    /// slots are absolute job indices on both routes, so every GEMM keeps the
+    /// slot, kernel and order it had with one serial call per run.
+    #[allow(clippy::too_many_arguments)]
+    fn matmul_batch_axpby_ops_partition_typed<T, W, R>(
+        &mut self,
+        output: &mut DenseViewMut<'_, T>,
+        lhs: DenseView<'_, T>,
+        rhs: DenseView<'_, T>,
+        jobs: &[DenseGemmBatchJob],
+        runs: &[usize],
+        lhs_op: MatrixOp,
+        rhs_op: MatrixOp,
+        alpha: DenseScalar,
+        beta: DenseScalar,
+        wrap_write: W,
+        wrap_read: R,
+    ) -> Result<(), DenseError>
+    where
+        T: 'static + Send + Sync,
+        W: for<'x> Fn(DenseViewMut<'x, T>) -> DenseWrite<'x> + Copy + Send,
+        R: for<'x> Fn(DenseView<'x, T>) -> DenseRead<'x> + Copy + Send,
+    {
         let mut start = 0usize;
+        let mut serial_start = 0usize;
         for &run_len in runs {
             let end = start + run_len;
             let run = &jobs[start..end];
@@ -488,6 +598,19 @@ impl DefaultDenseExecutor {
                 .and_then(Result::ok)
                 .filter(|layout| self.strided_batch_run_layout_admitted(output, lhs, rhs, layout));
             if let Some(layout) = layout {
+                self.matmul_batch_axpby_ops_serial_typed(
+                    output,
+                    lhs,
+                    rhs,
+                    &jobs[serial_start..start],
+                    serial_start,
+                    lhs_op,
+                    rhs_op,
+                    alpha,
+                    beta,
+                    wrap_write,
+                    wrap_read,
+                )?;
                 self.matmul_strided_batch_run_layout_typed(
                     output,
                     lhs,
@@ -502,15 +625,23 @@ impl DefaultDenseExecutor {
                     wrap_write,
                     wrap_read,
                 )?;
-            } else {
-                self.matmul_batch_axpby_ops_serial_typed(
-                    output, lhs, rhs, run, start, lhs_op, rhs_op, alpha, beta, wrap_write,
-                    wrap_read,
-                )?;
+                serial_start = end;
             }
             start = end;
         }
-        Ok(())
+        self.matmul_batch_axpby_ops_serial_typed(
+            output,
+            lhs,
+            rhs,
+            &jobs[serial_start..],
+            serial_start,
+            lhs_op,
+            rhs_op,
+            alpha,
+            beta,
+            wrap_write,
+            wrap_read,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -565,7 +696,11 @@ impl DefaultDenseExecutor {
             ..
         } = self;
         note_session_opened();
+        #[cfg(test)]
+        let (key, caller) = (session_key(backend), std::thread::current().id());
         backend.with_backend_session_cached(grouped_cache, |session| {
+            #[cfg(test)]
+            record_session_thread(key, caller);
             Self::run_batch_jobs_in_session(
                 session,
                 matmul_config,
@@ -856,6 +991,7 @@ impl DefaultDenseExecutor {
         {
             self.seam_dispatches += 1;
         }
+        note_backend_admission();
         BackendCachedDot::dot_general_read_into_accum_cached(
             &mut self.backend,
             &mut self.grouped_cache,
@@ -1156,45 +1292,7 @@ impl DenseExecutor for DefaultDenseExecutor {
         &mut self,
         body: &mut crate::DenseLinalgScopeBody<'_>,
     ) -> Result<(), DenseError> {
-        if IN_LINALG_SCOPE.get() {
-            return body(self);
-        }
-        // `with_execution_scope` borrows its backend while the body needs
-        // `&mut self`; a clone keeps the runtime identity, engine and domain,
-        // which is what the scope matches sessions against.
-        let witness = self.backend.clone();
-        let mut entered = false;
-        let scoped = witness.with_execution_scope(|| {
-            entered = true;
-            ADMISSIONS.fetch_add(1, Ordering::Relaxed);
-            IN_LINALG_SCOPE.set(true);
-            struct Leave;
-            impl Drop for Leave {
-                fn drop(&mut self) {
-                    IN_LINALG_SCOPE.set(false);
-                }
-            }
-            let _leave = Leave;
-            body(&mut *self)
-        });
-        match scoped {
-            Ok(result) => result,
-            // Not entered because the domain is caller-owned (`Unsupported`)
-            // or a Tenferro execution is already active on this thread
-            // (`RuntimeState`): per-session admission is still correct, only
-            // slower, so run the body unscoped.
-            Err(err)
-                if !entered
-                    && matches!(
-                        err.kind(),
-                        tenferro_tensor::ErrorKind::Unsupported
-                            | tenferro_tensor::ErrorKind::RuntimeState
-                    ) =>
-            {
-                body(self)
-            }
-            Err(err) => Err(tenferro_error("with_execution_scope", err)),
-        }
+        self.in_execution_scope(|this| body(this))
     }
 
     fn solve_into(
@@ -1630,22 +1728,37 @@ fn with_cpu_linalg<R: Send>(
     note_session_opened();
     #[cfg(test)]
     {
-        let caller = std::thread::current().id();
-        let (result, session) =
-            backend.with_backend_session(|s| (f(s), std::thread::current().id()));
-        SESSION_THREADS.with(|threads| threads.borrow_mut().push((caller, session)));
-        result
+        let (key, caller) = (session_key(backend), std::thread::current().id());
+        backend.with_backend_session(|s| {
+            record_session_thread(key, caller);
+            f(s)
+        })
     }
     #[cfg(not(test))]
     backend.with_backend_session(f)
 }
 
-// Test-only record, on the calling thread, of (caller thread, thread the
-// Tenferro session closure ran on) for each `with_cpu_linalg` session.
+// Test-only record of (backend, caller thread, thread the Tenferro session
+// closure ran on) for each `with_cpu_linalg` and serial-batch session. It is
+// process-wide because the closure may run on a pool worker, so tests read it
+// filtered by their own executor's backend.
 #[cfg(test)]
-thread_local! {
-    static SESSION_THREADS: std::cell::RefCell<Vec<(std::thread::ThreadId, std::thread::ThreadId)>> =
-        const { std::cell::RefCell::new(Vec::new()) };
+type SessionThreads = Vec<(usize, std::thread::ThreadId, std::thread::ThreadId)>;
+
+#[cfg(test)]
+static SESSION_THREADS: std::sync::Mutex<SessionThreads> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn session_key(backend: &CpuBackend) -> usize {
+    std::ptr::from_ref(backend) as usize
+}
+
+#[cfg(test)]
+fn record_session_thread(key: usize, caller: std::thread::ThreadId) {
+    SESSION_THREADS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .push((key, caller, std::thread::current().id()));
 }
 
 #[cfg(feature = "provider-inject")]
@@ -1725,12 +1838,20 @@ mod linalg_scope_tests {
         }
     }
 
+    /// (caller, session) threads of the sessions the executor whose backend
+    /// is `key` opens during `run`.
     fn session_threads_of(
+        key: usize,
         run: impl FnOnce(),
     ) -> Vec<(std::thread::ThreadId, std::thread::ThreadId)> {
-        SESSION_THREADS.with(|threads| threads.borrow_mut().clear());
+        let lock = || SESSION_THREADS.lock().unwrap_or_else(|p| p.into_inner());
+        let before = lock().len();
         run();
-        SESSION_THREADS.with(|threads| threads.take())
+        lock()[before..]
+            .iter()
+            .filter(|&&(recorded, ..)| recorded == key)
+            .map(|&(_, caller, session)| (caller, session))
+            .collect()
     }
 
     /// Tenferro-side evidence, not TeNeT bookkeeping: inside the scope every
@@ -1739,12 +1860,13 @@ mod linalg_scope_tests {
     #[test]
     fn scoped_sessions_run_on_the_body_thread_and_unscoped_ones_hop() {
         let mut executor = DefaultDenseExecutor::new();
+        let key = session_key(&executor.backend);
         let mut body_thread = None;
         let mut scoped = Vec::new();
         executor
             .with_linalg_scope(&mut |dense| {
                 body_thread = Some(std::thread::current().id());
-                scoped = session_threads_of(|| {
+                scoped = session_threads_of(key, || {
                     factor_bits(dense);
                 });
                 Ok(())
@@ -1761,7 +1883,7 @@ mod linalg_scope_tests {
             .iter()
             .all(|&(caller, session)| caller == body_thread && session == body_thread));
 
-        let unscoped = session_threads_of(|| {
+        let unscoped = session_threads_of(key, || {
             factor_bits(&mut executor);
         });
         assert_eq!(unscoped.len(), 6);
@@ -1803,8 +1925,9 @@ mod linalg_scope_tests {
         }
     }
 
-    #[test]
-    fn caller_owned_cpu_domain_falls_back_to_per_call_sessions() {
+    /// A `DefaultDenseExecutor` on a caller-owned CPU domain, or `None` where
+    /// the provider refuses such a domain with the typed error it must use.
+    fn caller_owned_executor() -> Option<DefaultDenseExecutor> {
         use std::num::NonZeroUsize;
         use tenferro_cpu::{
             discover_cpu_topology, CpuPlacementGuarantee, ExternalCpuDomain, ResolvedCpuPlacement,
@@ -1820,8 +1943,8 @@ mod linalg_scope_tests {
             CpuPlacementGuarantee::AdvisoryDeclared,
         )
         .unwrap();
-        let backend = match CpuBackend::from_external_managed_domains(id, [domain]) {
-            Ok(backend) => backend,
+        match CpuBackend::from_external_managed_domains(id, [domain]) {
+            Ok(backend) => Some(DefaultDenseExecutor::from_backend(backend)),
             // A provider whose thread count is process-global (Accelerate)
             // cannot serve a caller-owned domain at all, so there is no
             // fallback to exercise; the refusal itself must be typed.
@@ -1842,17 +1965,211 @@ mod linalg_scope_tests {
                     ),
                     "unexpected refusal: {source}"
                 );
-                return;
+                None
             }
             Err(error) => panic!("caller-owned domain construction failed: {error}"),
+        }
+    }
+
+    #[test]
+    fn caller_owned_cpu_domain_falls_back_to_per_call_sessions() {
+        let Some(mut executor) = caller_owned_executor() else {
+            return;
         };
-        let mut executor = DefaultDenseExecutor::from_backend(backend);
         let (entered, scoped) = scoped_bits(&mut executor);
         assert!(
             !entered,
             "Tenferro scopes need a managed domain; body runs unscoped"
         );
         assert_eq!(scoped, factor_bits(&mut DefaultDenseExecutor::new()));
+    }
+
+    const PARTITIONS: [&[usize]; 2] = [&[4, 1, 1, 1], &[1, 4, 1, 4]];
+
+    /// An op-bearing c64 GEMM phase with run partition `pattern`: a run of
+    /// length >= 2 is equal-shape, constant-stride (batchable) jobs, and a
+    /// singleton differs in shape from its neighbours.
+    struct Partition {
+        jobs: Vec<DenseGemmBatchJob>,
+        runs: Vec<usize>,
+        lhs: Vec<Complex64>,
+        rhs: Vec<Complex64>,
+        dst: Vec<Complex64>,
+    }
+
+    impl Partition {
+        fn new(pattern: &[usize]) -> Self {
+            let mut jobs = Vec::new();
+            let (mut l, mut r, mut d) = (0usize, 0usize, 0usize);
+            for (index, &len) in pattern.iter().enumerate() {
+                let (rows, contracted, cols) = if len >= 2 {
+                    (3, 4, 2)
+                } else {
+                    (2 + index % 2, 3, 4)
+                };
+                for _ in 0..len {
+                    jobs.push(DenseGemmBatchJob {
+                        dst_offset: d,
+                        lhs_offset: l,
+                        rhs_offset: r,
+                        rows,
+                        contracted,
+                        cols,
+                    });
+                    l += rows * contracted;
+                    r += contracted * cols;
+                    d += rows * cols;
+                }
+            }
+            let value = |i: usize| {
+                Complex64::new(
+                    ((i * 7 + 3) % 11) as f64 * 0.25 - 1.0,
+                    ((i * 5) % 7) as f64 * 0.125,
+                )
+            };
+            Self {
+                jobs,
+                runs: pattern.to_vec(),
+                lhs: (0..l).map(value).collect(),
+                rhs: (0..r).map(|i| value(i + 5)).collect(),
+                dst: (0..d).map(|i| value(i + 9)).collect(),
+            }
+        }
+
+        /// Output bits after one call with `jobs`/`runs`, from the fixture's
+        /// accumulator, with nonzero alpha and beta.
+        fn run(
+            &self,
+            dense: &mut dyn DenseExecutor,
+            jobs: &[DenseGemmBatchJob],
+            runs: &[usize],
+            dst: &mut [Complex64],
+        ) {
+            let s = [1usize];
+            let dl = dst.len();
+            dense
+                .matmul_batch_axpby_with_ops_into(
+                    DenseWrite::C64(DenseViewMut::new(dst, &[dl], &s, 0).unwrap()),
+                    DenseRead::C64(DenseView::new(&self.lhs, &[self.lhs.len()], &s, 0).unwrap()),
+                    DenseRead::C64(DenseView::new(&self.rhs, &[self.rhs.len()], &s, 0).unwrap()),
+                    jobs,
+                    runs,
+                    MatrixOp::Adjoint,
+                    MatrixOp::Identity,
+                    DenseScalar::C64(Complex64::new(0.75, -0.5)),
+                    DenseScalar::C64(Complex64::new(-0.25, 0.125)),
+                )
+                .unwrap();
+        }
+
+        fn whole(&self, dense: &mut dyn DenseExecutor) -> Vec<u64> {
+            let mut dst = self.dst.clone();
+            self.run(dense, &self.jobs, &self.runs, &mut dst);
+            bits_c64(&dst)
+        }
+
+        /// The same GEMMs issued one run per call.
+        fn per_run(&self, dense: &mut dyn DenseExecutor) -> Vec<u64> {
+            let mut dst = self.dst.clone();
+            let mut start = 0;
+            for &len in &self.runs {
+                self.run(dense, &self.jobs[start..start + len], &[len], &mut dst);
+                start += len;
+            }
+            bits_c64(&dst)
+        }
+    }
+
+    fn bits_c64(values: &[Complex64]) -> Vec<u64> {
+        values
+            .iter()
+            .flat_map(|v| [v.re.to_bits(), v.im.to_bits()])
+            .collect()
+    }
+
+    /// Tenferro-side evidence for the scoped partition: at default threads
+    /// every serial session of the phase runs on the scope body's thread (no
+    /// second pool install), while one call per run hops for each session.
+    #[test]
+    fn mixed_partition_sessions_run_in_one_scope_without_a_pool_hop() {
+        for pattern in PARTITIONS {
+            let fixture = Partition::new(pattern);
+            let mut executor = DefaultDenseExecutor::new();
+            let key = session_key(&executor.backend);
+            let here = std::thread::current().id();
+            let mut whole = Vec::new();
+            let scoped = session_threads_of(key, || whole = fixture.whole(&mut executor));
+            let serial_stretches = if pattern == [4, 1, 1, 1] { 1 } else { 2 };
+            assert_eq!(scoped.len(), serial_stretches, "{pattern:?}");
+            assert!(
+                scoped
+                    .iter()
+                    .all(|&(caller, session)| caller != here && session == caller),
+                "{pattern:?}: sessions must run inline on the scope body's worker"
+            );
+
+            let mut per_run = Vec::new();
+            let unscoped = session_threads_of(key, || per_run = fixture.per_run(&mut executor));
+            assert_eq!(
+                unscoped.len(),
+                pattern.iter().filter(|&&len| len == 1).count()
+            );
+            assert!(unscoped
+                .iter()
+                .all(|&(caller, session)| caller == here && session != caller));
+            assert_eq!(whole, per_run, "{pattern:?}");
+        }
+    }
+
+    /// A single-run partition is one dispatch, so it enters no scope: its one
+    /// serial session is admitted (and hops to the pool) like any other.
+    #[test]
+    fn single_run_partition_enters_no_scope() {
+        let singletons = Partition::new(&[1, 1]);
+        // Two jobs of different shapes as one non-batchable run.
+        let fixture = Partition {
+            runs: vec![2],
+            ..singletons
+        };
+        let mut executor = DefaultDenseExecutor::new();
+        let key = session_key(&executor.backend);
+        let here = std::thread::current().id();
+        let mut whole = Vec::new();
+        let sessions = session_threads_of(key, || whole = fixture.whole(&mut executor));
+        assert_eq!(sessions.len(), 1);
+        assert!(sessions
+            .iter()
+            .all(|&(caller, session)| caller == here && session != caller));
+        let mut reference = fixture.dst.clone();
+        for job in &fixture.jobs {
+            fixture.run(
+                &mut executor,
+                std::slice::from_ref(job),
+                &[1],
+                &mut reference,
+            );
+        }
+        assert_eq!(whole, bits_c64(&reference));
+    }
+
+    /// A caller-owned domain cannot enter a scope: the phase runs unscoped on
+    /// the calling thread, still coalesced, with the per-run result.
+    #[test]
+    fn mixed_partition_on_a_caller_owned_domain_runs_unscoped() {
+        for pattern in PARTITIONS {
+            let Some(mut executor) = caller_owned_executor() else {
+                return;
+            };
+            let fixture = Partition::new(pattern);
+            let key = session_key(&executor.backend);
+            let here = std::thread::current().id();
+            let mut whole = Vec::new();
+            let sessions = session_threads_of(key, || whole = fixture.whole(&mut executor));
+            let serial_stretches = if pattern == [4, 1, 1, 1] { 1 } else { 2 };
+            assert_eq!(sessions.len(), serial_stretches, "{pattern:?}");
+            assert!(sessions.iter().all(|&(caller, _)| caller == here));
+            assert_eq!(whole, fixture.per_run(&mut DefaultDenseExecutor::new()));
+        }
     }
 }
 

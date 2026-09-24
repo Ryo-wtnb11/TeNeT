@@ -483,3 +483,123 @@ fn factorize_batch_empty_opens_no_session() {
     assert!(outputs.is_empty());
     assert_eq!(sessions_opened() - before, 0);
 }
+
+/// Runs `jobs` with `runs` as one op-bearing c64 call on `dst` and returns the
+/// (sessions, admissions) it took.
+fn partition_call(
+    executor: &mut DefaultDenseExecutor,
+    (lhs, rhs): (&[Complex64], &[Complex64]),
+    dst: &mut [Complex64],
+    jobs: &[DenseGemmBatchJob],
+    runs: &[usize],
+) -> (u64, u64) {
+    let strides = [1usize];
+    let dst_len = dst.len();
+    let before = cpu_session_stats();
+    executor
+        .matmul_batch_axpby_with_ops_into(
+            DenseWrite::C64(DenseViewMut::new(dst, &[dst_len], &strides, 0).unwrap()),
+            DenseRead::C64(DenseView::new(lhs, &[lhs.len()], &strides, 0).unwrap()),
+            DenseRead::C64(DenseView::new(rhs, &[rhs.len()], &strides, 0).unwrap()),
+            jobs,
+            runs,
+            MatrixOp::Adjoint,
+            MatrixOp::Identity,
+            DenseScalar::C64(Complex64::new(0.75, -0.5)),
+            DenseScalar::C64(Complex64::new(-0.25, 0.125)),
+        )
+        .unwrap();
+    let after = cpu_session_stats();
+    (
+        after.sessions_opened - before.sessions_opened,
+        after.admissions - before.admissions,
+    )
+}
+
+// #1291: a mixed run partition is one dense phase. Adjacent non-batchable runs
+// share one serial session, and the whole phase — strided runs included —
+// pays one execution admission. Each GEMM keeps its kernel, order, alpha/beta
+// and conjugation, so the output is bitwise what one call per run produces.
+#[test]
+fn mixed_partition_is_one_admission_and_bitwise_equal_to_per_run_calls() {
+    let _guard = counter_lock();
+    // (partition, serial stretches, runs issued one call each: admissions)
+    let cases: [(&[usize], u64, u64); 4] = [
+        (&[4, 1, 1, 1], 1, 4),
+        (&[1, 4, 1, 4], 2, 4),
+        (&[1, 1, 3, 1, 2], 2, 5),
+        // One run: no scope, its single strided call admits itself.
+        (&[4], 0, 1),
+    ];
+    for threads in [Some(1), None] {
+        for (pattern, stretches, per_run_admissions) in cases {
+            let mut jobs = Vec::new();
+            let (mut l, mut r, mut d) = (0usize, 0usize, 0usize);
+            for (index, &len) in pattern.iter().enumerate() {
+                let (rows, contracted, cols) = if len >= 2 {
+                    (3, 4, 2)
+                } else {
+                    (2 + index % 2, 3, 4)
+                };
+                for _ in 0..len {
+                    jobs.push(DenseGemmBatchJob {
+                        dst_offset: d,
+                        lhs_offset: l,
+                        rhs_offset: r,
+                        rows,
+                        contracted,
+                        cols,
+                    });
+                    l += rows * contracted;
+                    r += contracted * cols;
+                    d += rows * cols;
+                }
+            }
+            let value = |i: usize| {
+                Complex64::new(
+                    ((i * 7 + 3) % 11) as f64 * 0.25 - 1.0,
+                    ((i * 5) % 7) as f64 * 0.125,
+                )
+            };
+            let lhs = (0..l).map(value).collect::<Vec<_>>();
+            let rhs = (0..r).map(|i| value(i + 5)).collect::<Vec<_>>();
+            let initial = (0..d).map(|i| value(i + 9)).collect::<Vec<_>>();
+            let executor = || match threads {
+                Some(threads) => DefaultDenseExecutor::with_threads(threads).unwrap(),
+                None => DefaultDenseExecutor::new(),
+            };
+            let label = format!("{pattern:?} threads={threads:?}");
+
+            let mut whole = initial.clone();
+            let counts = partition_call(&mut executor(), (&lhs, &rhs), &mut whole, &jobs, pattern);
+            assert_eq!(counts, (stretches, 1), "{label}: (sessions, admissions)");
+
+            let mut per_run = initial.clone();
+            let mut reference = executor();
+            let mut admissions = 0;
+            let mut start = 0;
+            for &len in pattern {
+                admissions += partition_call(
+                    &mut reference,
+                    (&lhs, &rhs),
+                    &mut per_run,
+                    &jobs[start..start + len],
+                    &[len],
+                )
+                .1;
+                start += len;
+            }
+            assert_eq!(
+                admissions, per_run_admissions,
+                "{label}: per-run admissions"
+            );
+            let bits = |v: &[Complex64]| {
+                v.iter()
+                    .flat_map(|z| [z.re.to_bits(), z.im.to_bits()])
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(bits(&whole), bits(&per_run), "{label}");
+            assert_ne!(whole, initial, "{label}: fixture must write");
+        }
+    }
+}
