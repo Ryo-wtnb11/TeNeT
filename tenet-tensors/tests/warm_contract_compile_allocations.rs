@@ -78,7 +78,7 @@ fn leg(dual: bool) -> SectorLeg {
 }
 
 /// Same sectors with a degeneracy profile the `q -> -q` dual does not fix, so
-/// the dual leg cannot share the source leg's sector data.
+/// the dual leg's map differs from the source leg's.
 fn asymmetric_leg(dual: bool) -> SectorLeg {
     SectorLeg::new(
         [
@@ -253,13 +253,13 @@ fn crossing_compile_allocations(
     })
 }
 
-/// The route's own allocation count, and the number of legs it dualizes
-/// while forming permuted HomSpaces.
-fn crossing_compile_base(codomain: usize, domain: usize) -> (usize, usize) {
+/// The route's own allocation count. Every shape but (1, 2) dualizes
+/// `(1 + domain) + 2` legs while forming permuted HomSpaces.
+fn crossing_compile_base(codomain: usize, domain: usize) -> usize {
     if (codomain, domain) == (1, 2) {
-        (19, 0)
+        19
     } else {
-        (16, (1 + domain) + 2)
+        16
     }
 }
 
@@ -279,31 +279,26 @@ fn warm_contract_compile_allocates_nothing_per_leg_that_changes_side() {
         // source leg's sector data, as TensorKit's `dual(V)` shares `V.dims`.
         //
         // Why shape (1, 2) is apart: its route forms no permuted HomSpace
-        // with a crossing leg, so it never dualizes one. The twin test below
-        // measures the same 19 with legs whose dual cannot be shared, which
-        // is what proves the difference is the route and not the sharing.
-        let (base, _) = crossing_compile_base(codomain, domain);
+        // with a crossing leg, so it never dualizes one.
+        let base = crossing_compile_base(codomain, domain);
         assert_eq!(allocations, base, "rank {}", codomain + domain);
     }
 }
 
-/// The residual of #1403: TeNeT stores a leg's sectors sorted, so a leg whose
-/// sector -> degeneracy map the dual does not fix still builds its own sector
-/// data, one allocation per crossing leg. Sharing that case needs dualization
-/// deferred to every accessor, which is a representation change, not this leaf.
+/// #1403: a leg whose sector -> degeneracy map the dual moves shares its
+/// storage too, so it allocates nothing per crossing leg either.
 #[test]
-fn warm_contract_compile_allocates_once_per_crossing_leg_the_dual_does_not_fix() {
+fn warm_contract_compile_allocates_nothing_per_crossing_leg_the_dual_moves() {
     let _serial = SERIAL
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     for (codomain, domain) in [(2, 1), (1, 2), (2, 2), (3, 2), (2, 3), (3, 3)] {
-        let allocations = crossing_compile_allocations(asymmetric_leg, codomain, domain);
-        let (base, crossing_legs) = crossing_compile_base(codomain, domain);
-        assert_eq!(
-            allocations,
-            base + crossing_legs,
-            "rank {}",
-            codomain + domain
-        );
+        let moved = crossing_compile_allocations(asymmetric_leg, codomain, domain);
+        let fixed = crossing_compile_allocations(leg, codomain, domain);
+        let base = crossing_compile_base(codomain, domain);
+        // What: the same count as legs the dual fixes, and as the route with
+        // no crossing leg.
+        assert_eq!(moved, fixed, "rank {}", codomain + domain);
+        assert_eq!(moved, base, "rank {}", codomain + domain);
     }
 }
