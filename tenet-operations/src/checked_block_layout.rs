@@ -18,6 +18,7 @@ use crate::host_scalar_kernels::{
     raw_strided_action, validate_raw_strided_bounds, RawStridedAction,
 };
 use crate::kernel_adapter::apply_fused_pair_slices;
+use crate::scalar::scale_value;
 use crate::{ConjugateValue, OperationError};
 
 /// Layout passes and span walks of the checked block entries on this thread.
@@ -307,9 +308,9 @@ impl CheckedBlockLayout {
             };
         }
         if alpha.is_one() {
-            run!(move |lhs: T, rhs: T| op_l(lhs) + beta * op_r(rhs));
+            run!(move |lhs: T, rhs: T| op_l(lhs) + scale_value(op_r(rhs), beta));
         } else {
-            run!(move |lhs: T, rhs: T| alpha * op_l(lhs) + beta * op_r(rhs));
+            run!(move |lhs: T, rhs: T| scale_value(op_l(lhs), alpha) + scale_value(op_r(rhs), beta));
         }
         Ok(())
     }
@@ -358,13 +359,13 @@ impl CheckedBlockLayout {
         match raw_strided_action(alpha, beta) {
             RawStridedAction::Copy => run!(|dst: &mut T, value| *dst = value),
             RawStridedAction::CopyScale { alpha } => run!(move |dst: &mut T, value| {
-                *dst = alpha * value;
+                *dst = scale_value(value, alpha);
             }),
             RawStridedAction::Axpy { alpha } => run!(move |dst: &mut T, value| {
-                *dst = *dst + alpha * value;
+                *dst = *dst + scale_value(value, alpha);
             }),
             RawStridedAction::Axpby { alpha, beta } => run!(move |dst: &mut T, value| {
-                *dst = beta * *dst + alpha * value;
+                *dst = beta * *dst + scale_value(value, alpha);
             }),
         }
     }

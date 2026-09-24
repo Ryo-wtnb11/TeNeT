@@ -363,43 +363,30 @@ fn the_caller_scale_multiplies_the_scatter_once_and_not_the_pack() {
 }
 
 #[test]
-fn a_zero_caller_scale_multiplies_rather_than_skipping_the_source() {
-    // What: the host has no alpha short circuit, so a zero scale propagates a
-    // NaN source into every written element and leaves the zero fills of
-    // Overwrite exact. This is the contract the device reproduces with a zero
-    // 1x1 operand instead of a zero descriptor scale; here it is pinned on the
-    // host, which is what the device is compared against.
+fn a_zero_caller_scale_writes_zeros_over_a_non_finite_source() {
+    // What: the host follows VectorInterface's `scale(x, 0) = zero(x) * 0`
+    // (#1438): a zero scale writes exact zeros over a NaN source, in the
+    // Single moves and in the Multi scatter whose recoupling GEMM did see
+    // the NaN, as TensorKit's `permute!(tdst, tsrc, p, 0, 0)` does; the
+    // explicit-index oracle, which the device is compared against, agrees.
     let fixture = mixed_single_and_multi();
     let poisoned = vec![f64::NAN; fixture.src_len()];
-    let destination = vec![0.0_f64; fixture.dst_len()];
+    let destination = vec![f64::NAN; fixture.dst_len()];
 
     for alpha in [0.0_f64, -0.0_f64] {
         let host = host_replay_scaled(&fixture, &poisoned, &destination, true, alpha);
         assert!(
-            host.iter().any(|value| value.is_nan()),
-            "a zero scale must still multiply the source: {host:?}"
+            host.iter().all(|value| *value == 0.0),
+            "a zero scale writes zeros whatever the source holds: {host:?}"
         );
-        let oracle = fixture.expected_scaled(&poisoned, &destination, true, alpha);
-        for (index, (left, right)) in host.iter().zip(&oracle).enumerate() {
-            assert_eq!(
-                left.is_nan(),
-                right.is_nan(),
-                "element {index}: host {left} vs oracle {right}"
-            );
-            assert!(left.is_nan() || left == right, "element {index}");
-        }
-        // The inactive destination layout is an exact zero whatever the scale.
-        let clean = host_replay_scaled(
-            &fixture,
-            &fixture.source::<f64>(),
-            &destination,
-            true,
-            alpha,
+        assert_same(
+            &host,
+            &fixture.expected_scaled(&poisoned, &destination, true, alpha),
+            &format!("zero scale over a NaN source, alpha = {alpha}"),
         );
-        assert!(
-            clean.iter().all(|value| *value == 0.0),
-            "a zero scale over a finite source writes zeros: {clean:?}"
-        );
+        // Accumulation adds zeros: the destination is kept, NaN included.
+        let kept = host_replay_scaled(&fixture, &poisoned, &destination, false, alpha);
+        assert!(kept.iter().all(|value| value.is_nan()), "{kept:?}");
     }
 }
 

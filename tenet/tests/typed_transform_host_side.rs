@@ -263,11 +263,11 @@ fn the_host_overwrite_into_preconditions_have_a_fixed_order_and_wording() {
 }
 
 #[test]
-fn host_overwrite_into_clears_a_poisoned_destination_and_never_short_circuits() {
-    // The three destination semantics the device must reproduce: Overwrite
-    // clears whatever the destination held, `alpha == 0` still computes
-    // `0 * src` so a NaN source propagates, and an identity axis list is still
-    // written rather than short circuited.
+fn host_overwrite_into_clears_a_poisoned_destination_and_zero_scales_to_zeros() {
+    // The three Host destination semantics: Overwrite clears whatever the
+    // destination held, `alpha == 0` writes zeros whatever the source holds
+    // (#1438), and an identity axis list is still written rather than short
+    // circuited.
     let runtime = Runtime::builder().build().unwrap();
     let v = u1_leg();
     let source: TensorMap<_, f64> =
@@ -299,8 +299,11 @@ fn host_overwrite_into_clears_a_poisoned_destination_and_never_short_circuits() 
         .unwrap();
     assert_eq!(same_split.data(), source.scale(2.0).data());
 
-    // `alpha == 0`, `-0.0` included, is not short circuited: a NaN source
-    // poisons the destination.
+    // `alpha == 0`, `-0.0` included, writes VectorInterface's
+    // `scale(x, 0) = zero(x) * 0` (#1438): an exact zero at every position,
+    // NaN sources included, as TensorKit's `permute!(tdst, tsrc, p, 0.0,
+    // Zero())` does (observed: `0.0 + 0.0im` over a `NaN + 1.0im`
+    // destination and an `Inf + 1.0im` source).
     let nan_source: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&v, &v], [&v, &v], |trees, idx| {
             if idx.iter().sum::<usize>() % 3 == 0 {
@@ -310,39 +313,19 @@ fn host_overwrite_into_clears_a_poisoned_destination_and_never_short_circuits() 
             }
         })
         .unwrap();
-    // The expected NaN *set*, computed from the source's own poisoned
-    // positions carried through the permute — not read back off the call
-    // under test. `0 * NaN` is NaN, so every NaN of the permuted source, and
-    // only those, must survive at alpha = 0.
     let permuted_source = nan_source.permute(&[1, 2], &[3, 0]).unwrap();
-    let expected_nans = nan_positions(permuted_source.data());
     assert!(
-        !expected_nans.is_empty(),
+        !nan_positions(permuted_source.data()).is_empty(),
         "the fixture must carry NaNs through the permute"
-    );
-    assert!(
-        expected_nans.len() < permuted_source.data().len(),
-        "the fixture must also carry finite entries, so the set is a real pattern"
     );
     for alpha in [0.0, -0.0] {
         let mut destination = nan_source.permute(&[1, 2], &[3, 0]).unwrap();
         nan_source
             .permute_overwrite_into(&mut destination, &[1, 2], &[3, 0], alpha)
             .unwrap();
-        assert_eq!(
-            nan_positions(destination.data()),
-            expected_nans,
-            "alpha = {alpha} must still compute 0 * src at every poisoned position"
-        );
-        // Everything else is an exact zero: `alpha == 0` is a multiplication,
-        // not a skip, and the Overwrite zero fills clear the rest.
         assert!(
-            destination
-                .data()
-                .iter()
-                .enumerate()
-                .all(|(index, value)| expected_nans.contains(&index) || *value == 0.0),
-            "alpha = {alpha}: every finite position must be an exact zero"
+            destination.data().iter().all(|value| *value == 0.0),
+            "alpha = {alpha}: every position must be an exact zero"
         );
     }
 }

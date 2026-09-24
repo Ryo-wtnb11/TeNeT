@@ -4317,10 +4317,9 @@ mod tests {
     /// What: pack and scatter apply a real structural coefficient to a complex
     /// block componentwise, i.e. exactly as it acts on the two real component
     /// blocks, for coefficients `1`, `-0.5` and `0`, and for scatter `beta`
-    /// in `{0, 1, 0.5}`. The coefficient-0 result is TeNeT's componentwise
-    /// product, not TensorKit's: VectorInterface's `scale(x, α)` returns
-    /// `zero(x)` at `iszero(α)` and so wipes NaN and inf. That zero-scale
-    /// divergence predates this path and is tracked separately.
+    /// in `{0, 1, 0.5}`. The coefficient-0 block is VectorInterface's
+    /// `scale(x, 0) = zero(x) * 0`, an exact zero that wipes NaN and inf
+    /// (#1438); the real component runs give the same zeros.
     #[test]
     fn pack_and_scatter_scale_real_coefficients_componentwise() {
         let group = three_block_group([1.0, -0.5, 0.0]);
@@ -4340,9 +4339,16 @@ mod tests {
         pack_group(&mut kernels, &group, &im, &mut packed_im).unwrap();
         assert_eq!(component_bits(&packed), pair_bits(&packed_re, &packed_im));
         // The coefficient-0 block of the `(inf, 1)`-bearing payload is the
-        // sharpest case; pin it independently of the oracle as well.
+        // sharpest case; pin it independently of the oracle as well:
+        // TensorKit's `scale(complex(Inf, 1.0), 0.0)` is `0.0 + 0.0im`.
         let zero_block = &packed[8..];
-        assert!(zero_block.iter().any(|v| v.re.is_nan() && v.im == 0.0));
+        assert!(SPECIAL_COMPONENTS[8..]
+            .iter()
+            .any(|&(re, im)| !re.is_finite() || !im.is_finite()));
+        assert_eq!(
+            component_bits(zero_block),
+            vec![(0.0f64.to_bits(), 0.0f64.to_bits()); 4]
+        );
 
         // Why a finite, nonzero destination for the general beta: beta is a
         // payload-typed scalar, so `(0.5 + 0i) * dst` is a complex multiply by

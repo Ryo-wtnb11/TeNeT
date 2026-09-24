@@ -215,7 +215,9 @@ impl Geometry {
         self.out_base + span + 2
     }
 
-    /// `dst[o] += alpha * sum_k [conj] src[o, k_0, k_0, k_1, k_1, ...]`.
+    /// `dst[o] += sum_k alpha * [conj] src[o, k_0, k_0, k_1, k_1, ...]`, the
+    /// scale applied to each element before the sum as TensorOperations'
+    /// `tensortrace!` does.
     fn oracle<D: TraceScalar>(&self, src: &[D], dst: &[D], conj: bool, alpha: D) -> Vec<D> {
         let rank = self.out.len();
         let mut expected = dst.to_vec();
@@ -231,13 +233,13 @@ impl Geometry {
                     at += index * self.block_strides[rank + 2 * pair + 1];
                 }
                 let value = src[at];
-                sum = sum + if conj { value.conj() } else { value };
+                sum = sum + alpha * if conj { value.conj() } else { value };
             });
             let mut to = self.out_base;
             for (axis, &index) in o.iter().enumerate() {
                 to += index * self.out_strides[axis];
             }
-            expected[to] = alpha * sum + expected[to];
+            expected[to] = expected[to] + sum;
         });
         expected
     }
@@ -311,12 +313,12 @@ fn device_trace_matches_the_unmerged_host_oracle_at_every_dtype() {
     traces_match_the_unmerged_oracle::<Complex32>(&mut ctx);
 }
 
-/// A zero scale reads the source against the zero template: a NaN on the
-/// traced diagonal still reaches the destination, as `dst + 0 * sum` does on
-/// the host, and a finite source adds an exact zero.
+/// A zero scale is VectorInterface's `scale(x, 0) = 0` (#1438): it adds
+/// nothing and submits nothing, even with a NaN on the traced diagonal.
 #[test]
 #[ignore = "requires a real CUDA device"]
-fn a_zero_scale_still_propagates_nan_from_the_diagonal() {
+fn a_zero_scale_adds_nothing_even_over_a_nan_diagonal() {
+    let _guard = COUNTER_TESTS.lock().unwrap();
     let mut ctx = CudaDenseContext::new(0).unwrap();
     let geometry = Geometry::new(&[2], &[3], &[0, 1, 2], &[0]);
     let mut src: Vec<f64> = (0..geometry.src_len()).map(f64::sample).collect();
@@ -324,39 +326,72 @@ fn a_zero_scale_still_propagates_nan_from_the_diagonal() {
         .map(|i| f64::sample(i + 500))
         .collect();
     let region = geometry.src_region();
-    let finite = CudaDenseStorage::upload(&ctx, &src).unwrap();
-    let mut out = CudaDenseStorage::upload(&ctx, &dst).unwrap();
-    cuda_region_trace_accumulate::<f64>(
-        &mut ctx,
-        &finite,
-        &region,
-        false,
-        0.0,
-        &mut out,
-        &geometry.dst_region(),
-    )
-    .unwrap();
-    assert_eq!(out.download::<f64>(&ctx).unwrap(), dst, "adding 0 * finite");
-
-    // Poison the diagonal entry (o = 1, k = 2).
     let at = geometry.base + geometry.block_strides[0] + 2 * (region.strides()[1]);
     src[at] = f64::NAN;
     let poisoned = CudaDenseStorage::upload(&ctx, &src).unwrap();
     let mut out = CudaDenseStorage::upload(&ctx, &dst).unwrap();
-    cuda_region_trace_accumulate::<f64>(
+    let (_, counters) = delta(|| {
+        cuda_region_trace_accumulate::<f64>(
+            &mut ctx,
+            &poisoned,
+            &region,
+            false,
+            0.0,
+            &mut out,
+            &geometry.dst_region(),
+        )
+        .unwrap()
+    });
+    assert_eq!(counters, CudaTransferStats::default());
+    assert_eq!(out.download::<f64>(&ctx).unwrap(), dst);
+}
+
+/// The scale reaches every element before the sum, as TensorOperations'
+/// `Scaler(α)` inside `_mapreducedim!`: Julia's `tensortrace!(C, [1e308 0;
+/// 0 1e308], ((), ()), ((1,), (2,)), false, 0.5, 0.0)` is `1.0e308`, where
+/// scaling the traced sum overflows to `Inf`. A reserved scaled template
+/// makes a later change of scale a device refill, not an upload.
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn the_scale_applies_per_element_before_the_sum() {
+    let _guard = COUNTER_TESTS.lock().unwrap();
+    let mut ctx = CudaDenseContext::new(0).unwrap();
+    let src_region = CudaRegion::new(vec![2], vec![3], 0).unwrap();
+    let dst_region = CudaRegion::new(vec![], vec![], 0).unwrap();
+    let src = CudaDenseStorage::upload(&ctx, &[1e308, 0.0, 0.0, 1e308]).unwrap();
+    ctx.reserve_scaled_template::<f64>(2).unwrap();
+    for (alpha, want) in [(0.5, 1e308), (-0.25, -5e307), (0.5, 1e308)] {
+        let mut dst = CudaDenseStorage::upload(&ctx, &[0.0]).unwrap();
+        let (_, counters) = delta(|| {
+            cuda_region_trace_accumulate::<f64>(
+                &mut ctx,
+                &src,
+                &src_region,
+                false,
+                alpha,
+                &mut dst,
+                &dst_region,
+            )
+            .unwrap()
+        });
+        assert_eq!(counters.h2d_calls, 0, "alpha {alpha}: {counters:?}");
+        assert_eq!(dst.download::<f64>(&ctx).unwrap(), [want], "alpha {alpha}");
+    }
+    let big = Complex64::new(1e308, 1e308);
+    let zero = Complex64::new(0.0, 0.0);
+    let src = CudaDenseStorage::upload(&ctx, &[big, zero, zero, big]).unwrap();
+    let mut dst = CudaDenseStorage::upload(&ctx, &[zero]).unwrap();
+    cuda_region_trace_accumulate::<Complex64>(
         &mut ctx,
-        &poisoned,
-        &region,
+        &src,
+        &src_region,
         false,
-        0.0,
-        &mut out,
-        &geometry.dst_region(),
+        Complex64::new(0.5, 0.0),
+        &mut dst,
+        &dst_region,
     )
     .unwrap();
-    let actual = out.download::<f64>(&ctx).unwrap();
-    let to = geometry.out_base + geometry.out_strides[0];
-    assert!(actual[to].is_nan(), "the NaN must propagate: {actual:?}");
-    assert_eq!(actual[geometry.out_base], dst[geometry.out_base]);
+    assert_eq!(dst.download::<Complex64>(&ctx).unwrap(), [big]);
 }
 
 #[test]

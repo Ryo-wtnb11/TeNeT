@@ -6,6 +6,7 @@ use smallvec::SmallVec;
 use crate::host_scalar_kernels::{
     raw_strided_action, validate_raw_strided_bounds, RawStridedAction,
 };
+use crate::scalar::scale_value;
 use crate::{
     axpby_raw_strided_kernel_trusted, scale_raw_strided_kernel_trusted,
     tensoradd_raw_strided_kernel_trusted, ConjugateValue, OperationError,
@@ -960,13 +961,13 @@ impl StridedHostKernelAdapter {
         match raw_strided_action(alpha, beta) {
             RawStridedAction::Copy => run!(|dst: &mut T, value| *dst = value),
             RawStridedAction::CopyScale { alpha } => run!(move |dst: &mut T, value| {
-                *dst = alpha * value;
+                *dst = scale_value(value, alpha);
             }),
             RawStridedAction::Axpy { alpha } => run!(move |dst: &mut T, value| {
-                *dst = *dst + alpha * value;
+                *dst = *dst + scale_value(value, alpha);
             }),
             RawStridedAction::Axpby { alpha, beta } => run!(move |dst: &mut T, value| {
-                *dst = beta * *dst + alpha * value;
+                *dst = beta * *dst + scale_value(value, alpha);
             }),
         }
     }
@@ -1075,9 +1076,12 @@ impl StridedHostKernelAdapter {
                     )
                 };
             }
-            // Why the identity arm: see `copy_scale_strided_baked_impl`.
+            // Why the identity and zero arms: see `copy_scale_strided_baked_impl`.
             if alpha.is_one() {
                 run!(move |value: T| value.maybe_conj(source_conjugate))?;
+            } else if alpha.is_zero() {
+                let zero = T::zero() * alpha;
+                run!(move |_: T| zero)?;
             } else {
                 run!(move |value: T| alpha * value.maybe_conj(source_conjugate))?;
             }
@@ -1150,9 +1154,13 @@ impl StridedHostKernelAdapter {
                     )
                 };
             }
-            // Why the identity arm: see `copy_scale_strided_baked_impl`.
+            // Why the identity and zero arms: see `copy_scale_strided_baked_impl`.
             if alpha.is_one() {
                 return run!(|value: T| value);
+            }
+            if alpha.is_zero() {
+                let zero = T::zero() * alpha;
+                return run!(move |_: T| zero);
             }
             return run!(move |value: T| alpha * value);
         }
@@ -1213,9 +1221,15 @@ impl StridedHostKernelAdapter {
             };
         }
         // Why the identity arm: `1 * (inf + 0i)` is `inf + NaN i`, so a pack or
-        // scatter at alpha = 1 must copy rather than multiply.
+        // scatter at alpha = 1 must copy rather than multiply. Why the zero
+        // arm: VectorInterface's `scale(x, 0) = zero(x) * 0`, never
+        // `0 * inf = NaN`, so a zero scale does not read the source.
         if alpha.is_one() {
             return run!(move |value: T| value.maybe_conj(source_conjugate));
+        }
+        if alpha.is_zero() {
+            let zero = T::zero() * alpha;
+            return run!(move |_: T| zero);
         }
         run!(move |value: T| alpha * value.maybe_conj(source_conjugate))
     }
@@ -1315,6 +1329,12 @@ impl StridedHostKernelAdapter {
         }
         if scale.is_identity() {
             return run!(move |value: T| value.maybe_conj(source_conjugate));
+        }
+        // A zero `α * coeff` is VectorInterface's `zero(x) * α`, whatever
+        // the source holds; see `TransformScale::scale`.
+        if scale.is_zero() {
+            let zero = scale.apply(T::zero());
+            return run!(move |_: T| zero);
         }
         match scale {
             TransformScale::Structural(coefficient) => run!(move |value: T| value
@@ -2501,5 +2521,99 @@ mod tests {
                 (u128::from(value.re.to_bits()) << 64) | u128::from(value.im.to_bits())
             },
         );
+    }
+
+    /// What: every block-level scaling entry — the transform op used by
+    /// tree-transform singles and by fusion pack/scatter, and the payload
+    /// `alpha` copy/add/axpby ops — gives VectorInterface's
+    /// `scale(x, 0) = zero(x) * 0` for a zero scale, so `±inf`/NaN sources
+    /// contribute zero (#1438). Oracle (Julia, TensorOperations 5.6.2):
+    /// `scale(complex(Inf, 1.0), 0.0)` and `scale(complex(Inf, NaN),
+    /// complex(0.0, 0.0))` are `0.0 + 0.0im`, and `tensoradd!(C, A, p, false,
+    /// 0, β)` leaves `scale(C, β)`: `C` for `β = 1`, `0` for `β = 0`.
+    #[test]
+    fn zero_scales_ignore_non_finite_sources() {
+        use num_complex::Complex64;
+        let src = [
+            Complex64::new(f64::INFINITY, 1.0),
+            Complex64::new(f64::NAN, f64::NEG_INFINITY),
+        ];
+        let initial = [Complex64::new(1.5, -2.0), Complex64::new(f64::NAN, 3.0)];
+        let pairs = |values: &[Complex64]| {
+            values
+                .iter()
+                .map(|v| {
+                    let canonical = |x: f64| if x.is_nan() { f64::NAN } else { x };
+                    (canonical(v.re).to_bits(), canonical(v.im).to_bits())
+                })
+                .collect::<Vec<_>>()
+        };
+        let zero = [Complex64::zero(); 2];
+        let mut adapter = StridedHostKernelAdapter::default();
+        let mut zero_strides = Vec::new();
+        let scales: [TransformScale<Complex64, f64>; 3] = [
+            TransformScale::Structural(0.0),
+            TransformScale::new(Complex64::zero(), 2.0),
+            TransformScale::new(Complex64::new(2.0, 1.0), 0.0),
+        ];
+        for scale in scales {
+            for (beta, want) in [
+                (None, zero),
+                (Some(Complex64::zero()), zero),
+                (Some(Complex64::one()), initial),
+            ] {
+                let mut dst = initial;
+                adapter
+                    .transform_strided_baked(
+                        &mut zero_strides,
+                        &mut dst,
+                        &src,
+                        &[2],
+                        &[1],
+                        &[1],
+                        0,
+                        0,
+                        false,
+                        scale,
+                        beta,
+                        None,
+                        None,
+                    )
+                    .unwrap();
+                assert_eq!(pairs(&dst), pairs(&want), "{scale:?}, beta {beta:?}");
+            }
+        }
+
+        let alpha = Complex64::zero();
+        let mut dst = initial;
+        adapter
+            .copy_scale_strided(&mut dst, &src, &[2], &[1], &[1], 0, 0, false, alpha)
+            .unwrap();
+        assert_eq!(pairs(&dst), pairs(&zero));
+        for beta in [Complex64::zero(), Complex64::one()] {
+            let want = if beta.is_zero() { zero } else { initial };
+            let mut dst = initial;
+            adapter
+                .add_strided(
+                    &mut zero_strides,
+                    &mut dst,
+                    &src,
+                    &[2],
+                    &[1],
+                    &[1],
+                    0,
+                    0,
+                    false,
+                    alpha,
+                    beta,
+                )
+                .unwrap();
+            assert_eq!(pairs(&dst), pairs(&want), "add, beta {beta}");
+            let mut dst = initial;
+            adapter
+                .axpby_strided(&mut dst, &src, &[2], &[1], &[1], 0, 0, alpha, beta)
+                .unwrap();
+            assert_eq!(pairs(&dst), pairs(&want), "axpby, beta {beta}");
+        }
     }
 }

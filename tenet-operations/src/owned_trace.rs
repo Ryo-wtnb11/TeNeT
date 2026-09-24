@@ -238,11 +238,14 @@ where
                             .offset(),
                     )
                     .expect("owned trace source offset was preflighted");
+                    // See the raw trace kernel: a zero coefficient is
+                    // skipped, and `α′ = α * coeff` scales every traced
+                    // element before it is added.
+                    if D::coefficient_as_data(term.coefficient).is_zero() {
+                        continue;
+                    }
                     let trace_len = element_count_infallible(term.trace_shape);
-                    // See the raw trace kernel: `α * coeff`, folded once
-                    // and applied to the traced sum.
                     let scale = TransformScale::new(alpha, term.coefficient);
-                    let identity = scale.is_identity();
                     for (tile_index, value) in active_tile.iter_mut().enumerate() {
                         let output_linear = tile_start + tile_index;
                         let src_base = strided_offset(
@@ -251,7 +254,6 @@ where
                             term.src_output_strides,
                             src_offset,
                         );
-                        let mut sum = D::zero();
                         for trace_linear in 0..trace_len {
                             let src_index = strided_offset(
                                 trace_linear,
@@ -259,9 +261,9 @@ where
                                 term.src_trace_strides,
                                 src_base,
                             ) as usize;
-                            sum = sum + src[src_index].maybe_conj(self.source_conjugate);
+                            *value = *value
+                                + scale.scale(src[src_index].maybe_conj(self.source_conjugate));
                         }
-                        *value = *value + if identity { sum } else { scale.apply(sum) };
                     }
                 }
 
@@ -663,5 +665,26 @@ mod tests {
             (got[0].re, got[0].im.to_bits()),
             (f64::INFINITY, 1.5f64.to_bits())
         );
+    }
+
+    /// What: the owned trace follows TensorKit's scaling (#1438): a zero `α`
+    /// yields exact zeros for `±inf`/NaN sources (`scale(x, 0) = zero(x) * 0`;
+    /// Julia's `trace_permute!(tdst, tsrc, p, q, 0, 0)` returns zeros), a zero
+    /// coefficient term is skipped, and `α′ = α * coeff` scales every traced
+    /// element before the sum, so `α = 0.5` over `[1e308, 1e308]` gives
+    /// `1.0e308` (TensorOperations' `tensortrace!` output) rather than `inf`.
+    #[test]
+    fn zero_alpha_and_per_element_alpha_follow_tensorkit() {
+        let got = owned_trace(&special_source(), [2.0, -1.0, 0.5], Complex64::zero());
+        assert!(got.iter().all(|v| *v == Complex64::zero()), "{got:?}");
+
+        let got = owned_trace(&special_source(), [0.0, 0.0, 0.0], Complex64::one());
+        assert!(got.iter().all(|v| *v == Complex64::zero()), "{got:?}");
+
+        let mut src = vec![0.0; 12];
+        src[0] = 1e308;
+        src[2] = 1e308;
+        let got = owned_trace(&src, [1.0, 1.0, 1.0], 0.5);
+        assert_eq!(got[0], 1e308);
     }
 }

@@ -14,6 +14,15 @@ use num_complex::{Complex32, Complex64};
 use tenet_core::{BlockKey, BlockSpec, BlockStructure};
 use tenet_operations::{TreeTransformBlockSpec, TreeTransformStructure};
 
+/// VectorInterface's `scale(x, α) = (iszero(α) ? zero(x) : x) * α`.
+fn vi_scale<T: TestScalar>(value: T, alpha: T) -> T {
+    if alpha == T::zero() {
+        T::zero().mul(alpha)
+    } else {
+        alpha.mul(value)
+    }
+}
+
 /// Payload dtypes the fixtures are replayed with, plus the host arithmetic the
 /// oracle needs. Deliberately not a TeNeT trait: the oracle must not share a
 /// scalar contract with the code under test.
@@ -363,8 +372,9 @@ impl Fixture {
     /// applies it: `(alpha * coefficient) * src` for a Single block and
     /// `alpha * (U x)` for a recoupling group — never on a pack, never inside
     /// the recoupling sum, and never on a zero fill, which stays an exact zero
-    /// whatever `alpha` is. `alpha = 0` is not a short circuit: it multiplies,
-    /// so a NaN source poisons the destination.
+    /// whatever `alpha` is. A zero scale is VectorInterface's
+    /// `scale(x, 0) = zero(x) * 0` (#1438): an exact zero whatever the source
+    /// holds, so a NaN source does not reach the destination.
     pub fn expected_scaled<T: TestScalar>(
         &self,
         source: &[T],
@@ -404,7 +414,7 @@ impl Fixture {
                 if self.conjugate {
                     value = value.conjugate();
                 }
-                let value = alpha.scale(pair.coefficient).mul(value);
+                let value = vi_scale(value, alpha.scale(pair.coefficient));
                 expected[dst_position] = if overwrite {
                     value
                 } else {
@@ -430,7 +440,7 @@ impl Fixture {
                     }
                 }
                 for (&dst_position, value) in dst_positions.iter().zip(column) {
-                    let value = alpha.mul(value);
+                    let value = vi_scale(value, alpha);
                     expected[dst_position] = if overwrite {
                         value
                     } else {

@@ -4,14 +4,19 @@
 //! tree) terms, their coefficients (recoupling row x `dim(c)/dim(a_1)` x the
 //! fermionic twist of every non-dual traced leg after the first) and every
 //! stride were fixed on the host by the compile the Host trace itself runs.
-//! Each descriptor term becomes one [`cuda_region_trace_accumulate`]: the
-//! source block read through one merged diagonal axis per traced pair,
-//! contracted against the context ones template and accumulated into its
-//! destination block with descriptor scale `alpha * coefficient`.
+//! Each descriptor term with a non-zero coefficient becomes one
+//! [`cuda_region_trace_accumulate`]: the source block read through one merged
+//! diagonal axis per traced pair, contracted against `α′ = alpha *
+//! coefficient` repeated (the ones template when `α′ = 1`), so every traced
+//! element is scaled before the sum, and accumulated into its destination
+//! block. A zero coefficient is skipped and a zero `α′` adds nothing, as on
+//! the host (#1438).
 //!
 //! TensorKit `_trace_permute!` (tensoroperations.jl:242/267 @cfaa073) is the
 //! same loop — `scale!(tdst, β)`, then one dense `tensortrace!` per valid tree
-//! pair with `α′ = α·coeff`, `β = One()` — and TensorOperations' strided and
+//! pair (`iszero(coeff) && continue`) with `α′ = α·coeff`, `β = One()`,
+//! which `stridedtensortrace!` applies as `Scaler(α′)` to each element before
+//! the `Adder()` reduction — and TensorOperations' strided and
 //! cuTENSOR `tensortrace!` build the same diagonal-stride view
 //! (`newstrides = strides(q₁) .+ strides(q₂)`). QSpace `QSpace::trace`
 //! (QSpace.cc:4487 @dd2cc7e) filters the source blocks whose traced labels
@@ -41,8 +46,9 @@ use crate::{OperationError, RecouplingCoefficientAction};
 ///
 /// Every region is built and every structure identity and length checked
 /// before the first submission, so a rejected call touches neither buffer.
-/// The ones template is reserved to the largest traced extent first, so a
-/// replay uploads at most once and a warm one never. The cuTENSOR plan bound
+/// The ones and scaled templates are reserved to the largest traced extent
+/// first, so a replay uploads at most once each and a warm one never; each
+/// distinct non-unit `α′` costs one device refill of the scaled template. The cuTENSOR plan bound
 /// is raised by the number of distinct term signatures under the transform
 /// executor's plan-cache budget, so a warm replay of up to that budget
 /// rebuilds no plan.
@@ -73,7 +79,8 @@ where
     }
 
     let mut moves = Vec::with_capacity(descriptor.terms().len());
-    let mut largest_trace = 0usize;
+    let mut largest_unit = 0usize;
+    let mut largest_scaled = 0usize;
     for (term, fusion_term) in descriptor.terms().iter().zip(structure.terms()) {
         if term.dst_block != fusion_term.dst_block() || term.src_block != fusion_term.src_block() {
             return Err(OperationError::StructureMismatch {
@@ -108,30 +115,53 @@ where
             .iter()
             .try_fold(1usize, |count, &dim| count.checked_mul(dim))
             .ok_or(OperationError::ElementCountOverflow)?;
-        largest_trace = largest_trace.max(trace_len);
-        moves.push((
-            src_region,
-            dst_region,
-            alpha.scale_by_coefficient(fusion_term.coefficient),
-        ));
+        if D::coefficient_as_data(fusion_term.coefficient) == D::ZERO {
+            continue;
+        }
+        let scale = alpha.scale_by_coefficient(fusion_term.coefficient);
+        if scale == D::ONE {
+            largest_unit = largest_unit.max(trace_len);
+        } else if scale != D::ZERO {
+            largest_scaled = largest_scaled.max(trace_len);
+        }
+        moves.push((src_region, dst_region, scale, trace_len));
     }
 
     // A plan is keyed on the three operand layouts: the source and destination
     // regions (offsets excepted, alignment being `size_of::<D>()` for every
     // view) and the ones view, which the source's traced extents fix. The
     // conjugation flag and the scale are the same for every term or not in
-    // the key, and a zero-scale term reads the zero template through a view
-    // of the same metadata.
-    let signatures = moves
+    // the key, and a scaled term reads the scaled template through a view of
+    // the same metadata as the ones template.
+    // Each refill of the scaled template is one more packed `[len]` move.
+    let fills = moves
         .iter()
-        .map(|(src, dst, _)| (src.dims(), src.strides(), dst.strides()))
+        .filter(|(_, _, scale, _)| *scale != D::ONE)
+        .map(|&(_, _, _, len)| len)
         .collect::<HashSet<_>>()
         .len();
+    let signatures = moves
+        .iter()
+        .map(|(src, dst, _, _)| (src.dims(), src.strides(), dst.strides()))
+        .collect::<HashSet<_>>()
+        .len()
+        + fills;
     transforms.raise_plan_cache_for_additional(ctx, signatures)?;
-    ctx.reserve_ones_template::<D>(largest_trace)
+    ctx.reserve_ones_template::<D>(largest_unit)
         .map_err(OperationError::Dense)?;
+    ctx.reserve_scaled_template::<D>(largest_scaled)
+        .map_err(OperationError::Dense)?;
+    // Terms sharing `α′` run together, longest traced extent first, so the
+    // scaled template is refilled once per distinct `α′`: one sort on the
+    // bit pattern, O(T log T). The order of terms adding into one
+    // destination changes rounding only.
+    let mut order: Vec<usize> = (0..moves.len()).collect();
+    order.sort_by_key(|&term| {
+        let (_, _, scale, len) = &moves[term];
+        (scale.bit_pattern(), std::cmp::Reverse(*len))
+    });
     let conjugate = descriptor.source_conjugate();
-    for (src_region, dst_region, scale) in &moves {
+    for (src_region, dst_region, scale, _) in order.into_iter().map(|term| &moves[term]) {
         cuda_region_trace_accumulate::<D>(
             ctx, &src.0, src_region, conjugate, *scale, &mut dst.0, dst_region,
         )

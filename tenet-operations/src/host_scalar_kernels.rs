@@ -3,6 +3,7 @@ use core::ops::{Add, Mul};
 use num_traits::{One, Zero};
 use tenet_core::{BlockView, BlockViewMut};
 
+use crate::scalar::scale_value;
 use crate::strided::{error as strided_error, read as strided_read, write as strided_write};
 use crate::{ConjugateValue, OperationError};
 
@@ -489,7 +490,7 @@ pub fn scale_raw_strided_kernel_trusted<T>(
     beta: T,
 ) -> Result<(), OperationError>
 where
-    T: Copy + Mul<T, Output = T>,
+    T: Copy + Mul<T, Output = T> + Zero,
 {
     #[cfg(debug_assertions)]
     validate_raw_strided_bounds(dst_data.len(), shape, dst_strides, dst_offset)?;
@@ -632,18 +633,16 @@ where
             strided_linear_offset(output_linear, output_shape, src_output_strides, src_offset)?;
         let src_base = isize::try_from(src_base)
             .map_err(|_| OperationError::OffsetOverflow { value: src_base })?;
-        let mut sum = T::zero();
+        // TensorOperations' `stridedtensortrace!`: `C = scale(C, β)`, then
+        // `C += scale(aᵢ, α)` per traced element; see the coefficient loop.
+        let mut accumulator = scale_value(dst_data[dst_index], beta);
         for trace_linear in 0..trace_len {
             let src_index =
                 strided_linear_offset(trace_linear, trace_shape, src_trace_strides, src_base)?;
-            sum = sum + src_data[src_index].maybe_conj(source_conjugate);
+            accumulator =
+                accumulator + scale_value(src_data[src_index].maybe_conj(source_conjugate), alpha);
         }
-        let value = alpha * sum;
-        dst_data[dst_index] = if beta.is_zero() {
-            value
-        } else {
-            beta * dst_data[dst_index] + value
-        };
+        dst_data[dst_index] = accumulator;
     }
     Ok(())
 }
@@ -801,14 +800,16 @@ where
         + crate::RecouplingCoefficientAction<C>,
     C: Copy,
 {
-    // The scale is folded as TensorKit's `α′ = α * coeff` (`_trace_permute!`)
-    // and keeps the coefficient in its own type; an exact one does not
-    // multiply, since `(1 + 0i) * (inf + 0i)` is `inf + NaN i`. Unlike
-    // TensorOperations, which applies `α′` per element before the reduction
-    // (`strided.jl`, `Scaler(α′)` inside `_mapreducedim!`), this applies it
-    // once to the traced sum.
+    // TensorKit's `_trace_permute!` skips a zero coefficient and otherwise
+    // folds `α′ = α * coeff`, keeping the coefficient in its own type; then
+    // TensorOperations' `stridedtensortrace!` adds `scale(aᵢ, α′)` for every
+    // traced element into `C` (`_mapreducedim!(Scaler(α′), Adder(), …)`).
+    // Why not scale the traced sum once: `α′ * Σ aᵢ` overflows where
+    // `Σ α′ aᵢ` does not, and `0 * inf` is NaN where `scale` gives zero.
+    if T::coefficient_as_data(coefficient).is_zero() {
+        return Ok(());
+    }
     let scale = crate::TransformScale::new(alpha, coefficient);
-    let identity = scale.is_identity();
     for output_linear in 0..output_len {
         let dst_index =
             strided_linear_offset(output_linear, output_shape, dst_strides, dst_offset)?;
@@ -816,14 +817,14 @@ where
             strided_linear_offset(output_linear, output_shape, src_output_strides, src_offset)?;
         let src_base = isize::try_from(src_base)
             .map_err(|_| OperationError::OffsetOverflow { value: src_base })?;
-        let mut sum = T::zero();
+        let mut accumulator = dst_data[dst_index];
         for trace_linear in 0..trace_len {
             let src_index =
                 strided_linear_offset(trace_linear, trace_shape, src_trace_strides, src_base)?;
-            sum = sum + src_data[src_index].maybe_conj(source_conjugate);
+            accumulator =
+                accumulator + scale.scale(src_data[src_index].maybe_conj(source_conjugate));
         }
-        let value = if identity { sum } else { scale.apply(sum) };
-        dst_data[dst_index] = dst_data[dst_index] + value;
+        dst_data[dst_index] = accumulator;
     }
     Ok(())
 }
@@ -960,7 +961,7 @@ fn raw_strided_scale_loop<T>(
     beta: T,
 ) -> Result<(), OperationError>
 where
-    T: Copy + Mul<T, Output = T>,
+    T: Copy + Mul<T, Output = T> + Zero,
 {
     let len = crate::strided::element_count(shape)?;
     if len == 0 {
@@ -968,7 +969,7 @@ where
     }
     if shape.is_empty() {
         let dst_index = checked_offset_to_index(dst_offset)?;
-        dst_data[dst_index] = beta * dst_data[dst_index];
+        dst_data[dst_index] = scale_value(dst_data[dst_index], beta);
         return Ok(());
     }
     if is_column_major_contiguous(shape, dst_strides)? {
@@ -980,7 +981,7 @@ where
             .get_mut(dst_start..dst_end)
             .ok_or_else(|| OperationError::OffsetOverflow { value: dst_end })?;
         for dst_value in dst.iter_mut() {
-            *dst_value = beta * *dst_value;
+            *dst_value = scale_value(*dst_value, beta);
         }
         return Ok(());
     }
@@ -1004,13 +1005,13 @@ fn raw_strided_scale_recurse<T>(
     beta: T,
 ) -> Result<(), OperationError>
 where
-    T: Copy + Mul<T, Output = T>,
+    T: Copy + Mul<T, Output = T> + Zero,
 {
     if axis == 0 {
         for index in 0..shape[0] {
             let dst_index =
                 checked_offset_to_index(checked_strided_offset(dst_base, index, dst_strides[0])?)?;
-            dst_data[dst_index] = beta * dst_data[dst_index];
+            dst_data[dst_index] = scale_value(dst_data[dst_index], beta);
         }
         return Ok(());
     }
@@ -1041,7 +1042,7 @@ fn raw_strided_combine_loop<T>(
     action: RawStridedAction<T>,
 ) -> Result<(), OperationError>
 where
-    T: Copy + Add<T, Output = T> + Mul<T, Output = T> + ConjugateValue,
+    T: Copy + Add<T, Output = T> + Mul<T, Output = T> + Zero + ConjugateValue,
 {
     let len = crate::strided::element_count(shape)?;
     if len == 0 {
@@ -1108,7 +1109,7 @@ fn raw_strided_combine_recurse_mapped<T, D, S>(
     action: RawStridedAction<T>,
 ) -> Result<(), OperationError>
 where
-    T: Copy + Add<T, Output = T> + Mul<T, Output = T> + ConjugateValue,
+    T: Copy + Add<T, Output = T> + Mul<T, Output = T> + Zero + ConjugateValue,
     D: Copy + Fn(usize) -> Result<isize, OperationError>,
     S: Copy + Fn(usize) -> Result<isize, OperationError>,
 {
@@ -1150,13 +1151,13 @@ where
 
 fn apply_raw_strided_action<T>(dst: &mut T, src: T, action: RawStridedAction<T>)
 where
-    T: Copy + Add<T, Output = T> + Mul<T, Output = T>,
+    T: Copy + Add<T, Output = T> + Mul<T, Output = T> + Zero,
 {
     *dst = match action {
         RawStridedAction::Copy => src,
-        RawStridedAction::CopyScale { alpha } => alpha * src,
-        RawStridedAction::Axpy { alpha } => *dst + alpha * src,
-        RawStridedAction::Axpby { alpha, beta } => beta * *dst + alpha * src,
+        RawStridedAction::CopyScale { alpha } => scale_value(src, alpha),
+        RawStridedAction::Axpy { alpha } => *dst + scale_value(src, alpha),
+        RawStridedAction::Axpby { alpha, beta } => beta * *dst + scale_value(src, alpha),
     };
 }
 
@@ -1580,8 +1581,9 @@ mod tests {
         )
         .unwrap();
 
-        assert!(dst[0].is_nan());
-        assert!(dst[1].is_nan());
+        // TensorOperations' `_mapreducedim!` over an empty trace applies only
+        // `initop = Scaler(One())`, so `C` is left as it was: no `inf * 0`.
+        assert_eq!(dst, [1.0, 2.0]);
     }
 
     /// Three `output [2] x trace [2]` source blocks whose traced sums carry
@@ -1666,13 +1668,11 @@ mod tests {
     /// What: an anyonic complex coefficient keeps the complex multiply, an
     /// exact `1 + 0i` does not multiply, and a non-unit alpha is folded into
     /// the coefficient first (TensorKit's `α′ = α * coeff`) and then applied
-    /// to the traced sum.
+    /// to every traced element before it is added (TensorOperations'
+    /// `C + scale(a₁, α′) + scale(a₂, α′)`).
     #[test]
     fn coefficient_tensortrace_raw_complex_coefficients_and_folded_alpha() {
         let src = special_trace_source();
-        let sum = |output: usize, src_offset: usize| {
-            src[src_offset + output] + src[src_offset + output + 2]
-        };
         let one = Complex64::new(1.0, 0.0);
         let mut got = vec![Complex64::zero(); 6];
         run_trace_terms(&mut got, &src, one, [one, one, one, one]);
@@ -1699,7 +1699,9 @@ mod tests {
             coefficient,
         )
         .unwrap();
-        let want = [0, 1].map(|output| Complex64::zero() + sum(output, 8) * coefficient);
+        let want = [0, 1].map(|output| {
+            Complex64::zero() + src[8 + output] * coefficient + src[10 + output] * coefficient
+        });
         assert_eq!(got, want);
 
         let alpha = Complex64::new(0.5, -0.25);
@@ -1723,15 +1725,11 @@ mod tests {
         )
         .unwrap();
         let folded = Complex64::new(alpha.re * 3.0, alpha.im * 3.0);
-        let want = [0, 1]
-            .map(|output| Complex64::zero() + folded * (finite[4 + output] + finite[6 + output]));
-        let bits = |values: &[Complex64]| {
-            values
-                .iter()
-                .map(|v| (v.re.to_bits(), v.im.to_bits()))
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(bits(&got), bits(&want));
+        let want = [0, 1].map(|output| {
+            Complex64::zero() + folded * finite[4 + output] + folded * finite[6 + output]
+        });
+        // Two traced terms reach each entry.
+        crate::test_numerics::numerics::assert_slices_close("folded alpha", &got, &want, 2);
     }
 
     #[test]
@@ -1842,5 +1840,234 @@ mod tests {
             .unwrap(),
             3.0 * 4.0 + 2.0 * 5.0 + 1.0 * 6.0
         );
+    }
+
+    // TensorKit scaling parity for non-finite data (#1438). Every expected
+    // value below is an output observed in Julia 1.11 with TensorOperations
+    // 5.6.2 and VectorInterface 0.6.0 (the TensorKit f87ca7fe oracle
+    // environment in `benchmarks/tensorkit_oracle`), quoted beside it.
+
+    fn bit_pairs(values: &[Complex64]) -> Vec<(u64, u64)> {
+        values
+            .iter()
+            .map(|v| (v.re.to_bits(), v.im.to_bits()))
+            .collect()
+    }
+
+    fn bits(values: &[f64]) -> Vec<u64> {
+        values.iter().map(|v| v.to_bits()).collect()
+    }
+
+    /// What: a zero `α` adds VectorInterface's `scale(x, 0) = zero(x) * 0`,
+    /// whatever the source holds, and `β` scales the destination the same way.
+    /// `A = [Inf NaN; -Inf 1.0]`, `C = [1.0 -0.0; 2.0 NaN]` (column-major
+    /// below) and `tensoradd!(C, A, ((2, 1), ()), false, α, β)` gives
+    /// `α = 0, β = 1`: `[1.0 0.0; 2.0 NaN]`; `α = 0, β = 0`: all `0.0`;
+    /// `α = 0, β = 2`: `[2.0 0.0; 4.0 NaN]`; `α = 2, β = 0`:
+    /// `[Inf -Inf; NaN 2.0]`.
+    #[test]
+    fn tensoradd_raw_zero_alpha_matches_tensoroperations() {
+        let src = [f64::INFINITY, f64::NEG_INFINITY, f64::NAN, 1.0];
+        let initial = [1.0, 2.0, -0.0, f64::NAN];
+        for (alpha, beta, want) in [
+            (0.0, 1.0, [1.0, 2.0, 0.0, f64::NAN]),
+            (0.0, 0.0, [0.0; 4]),
+            (0.0, 2.0, [2.0, 4.0, 0.0, f64::NAN]),
+            (2.0, 0.0, [f64::INFINITY, f64::NAN, f64::NEG_INFINITY, 2.0]),
+        ] {
+            let mut dst = initial;
+            tensoradd_raw_strided_kernel(
+                &mut Vec::new(),
+                &mut dst,
+                &src,
+                &[2, 2],
+                &[1, 2],
+                &[2, 1],
+                0,
+                0,
+                false,
+                alpha,
+                beta,
+            )
+            .unwrap();
+            // NaN bits are the kernel's own; compare NaN-ness, then bits.
+            let canonical = |v: f64| if v.is_nan() { f64::NAN } else { v };
+            assert_eq!(
+                bits(&dst.map(canonical)),
+                bits(&want.map(canonical)),
+                "alpha {alpha}, beta {beta}"
+            );
+        }
+    }
+
+    /// What: a complex zero scale gives `0 + 0i` for a non-finite complex
+    /// source: `scale(complex(Inf, NaN), complex(0.0, 0.0))` is `0.0 + 0.0im`,
+    /// and `scale(complex(Inf, 1.0), 0.0)` is `0.0 + 0.0im`.
+    #[test]
+    fn complex_zero_scale_is_exact_zero() {
+        let src = [
+            Complex64::new(f64::INFINITY, f64::NAN),
+            Complex64::new(f64::INFINITY, 1.0),
+        ];
+        let mut dst = [Complex64::new(f64::NAN, 1.0); 2];
+        tensoradd_raw_strided_kernel(
+            &mut Vec::new(),
+            &mut dst,
+            &src,
+            &[2],
+            &[1],
+            &[1],
+            0,
+            0,
+            false,
+            Complex64::zero(),
+            Complex64::zero(),
+        )
+        .unwrap();
+        assert_eq!(bit_pairs(&dst), bit_pairs(&[Complex64::zero(); 2]));
+    }
+
+    /// What: `β = 0` wipes a NaN destination (`scale(NaN, 0.0)` is `0.0`) and
+    /// a nonzero `β` still multiplies it.
+    #[test]
+    fn scale_raw_zero_beta_is_exact_zero() {
+        let mut dst = [f64::NAN, f64::INFINITY, -1.0];
+        scale_raw_strided_kernel_trusted(&mut dst, &[3], &[1], 0, 0.0).unwrap();
+        assert_eq!(bits(&dst), bits(&[0.0; 3]));
+        let mut dst = [f64::NAN, f64::INFINITY, -1.0];
+        scale_raw_strided_kernel_trusted(&mut dst, &[3], &[1], 0, 2.0).unwrap();
+        assert!(dst[0].is_nan());
+        assert_eq!(dst[1..], [f64::INFINITY, -2.0]);
+    }
+
+    fn full_trace<T>(dst: &mut [T], src: &[T], alpha: T, beta: T)
+    where
+        T: Copy + Add<T, Output = T> + Mul<T, Output = T> + PartialEq + Zero + One + ConjugateValue,
+    {
+        // The full trace of a column-major `2 x 2` matrix.
+        tensortrace_raw_strided_kernel(
+            dst,
+            src,
+            &[],
+            &[2],
+            &[],
+            &[],
+            &[3],
+            0,
+            0,
+            false,
+            alpha,
+            beta,
+        )
+        .unwrap();
+    }
+
+    /// What: the plain trace applies `α` to every traced element before
+    /// adding it, and a zero `α` or `β` gives an exact zero:
+    /// `tensortrace!(C, [1e308 0; 0 1e308], ((), ()), ((1,), (2,)), false,
+    /// 0.5, 0.0)` is `1.0e308` (the traced sum overflows); with `α = 0` and
+    /// `A = [Inf 0; 0 NaN]`, `C = 1.0, β = 1` gives `1.0`, `C = NaN, β = 0`
+    /// gives `0.0`, and `C = -0.0, β = 1` gives `0.0`; for `ComplexF64`,
+    /// `C = 1 + 2im, α = 0, β = 1` gives `1.0 + 2.0im` and
+    /// `A = (1e308 + 1e308im) I, α = 0.5 + 0im, β = 0` gives
+    /// `1.0e308 + 1.0e308im`.
+    #[test]
+    fn tensortrace_raw_matches_tensoroperations_scaling() {
+        let mut dst = [7.0];
+        full_trace(&mut dst, &[1e308, 0.0, 0.0, 1e308], 0.5, 0.0);
+        assert_eq!(dst, [1e308]);
+
+        let non_finite = [f64::INFINITY, 0.0, 0.0, f64::NAN];
+        for (initial, beta, want) in [(1.0, 1.0, 1.0), (f64::NAN, 0.0, 0.0), (-0.0, 1.0, 0.0)] {
+            let mut dst = [initial];
+            full_trace(&mut dst, &non_finite, 0.0, beta);
+            assert_eq!(bits(&dst), bits(&[want]), "C = {initial}, beta = {beta}");
+        }
+
+        let non_finite = non_finite.map(|v| Complex64::new(v, 0.0));
+        let mut dst = [Complex64::new(1.0, 2.0)];
+        full_trace(&mut dst, &non_finite, Complex64::zero(), Complex64::one());
+        assert_eq!(bit_pairs(&dst), bit_pairs(&[Complex64::new(1.0, 2.0)]));
+
+        let big = Complex64::new(1e308, 1e308);
+        let mut dst = [Complex64::zero()];
+        full_trace(
+            &mut dst,
+            &[big, Complex64::zero(), Complex64::zero(), big],
+            Complex64::new(0.5, 0.0),
+            Complex64::zero(),
+        );
+        assert_eq!(dst, [big]);
+    }
+
+    /// What: the coefficient trace skips a zero coefficient, as TensorKit's
+    /// `_trace_permute!` does (`iszero(coeff) && continue`), so even a `-0.0`
+    /// destination is untouched; a zero `α` with a nonzero coefficient adds
+    /// `α′ = 0` scaled elements; and `α′ = α * coeff` scales each element
+    /// before the sum, so `α = 1, coeff = 0.5` over `[1e308, 1e308]` gives
+    /// `1.0e308` rather than `inf`.
+    #[test]
+    fn coefficient_trace_zero_scales_and_per_element_alpha() {
+        let run = |dst: &mut [f64], src: &[f64], alpha: f64, coefficient: f64| {
+            tensortrace_raw_strided_kernel_add_with_coefficient(
+                dst,
+                src,
+                &[],
+                &[2],
+                &[],
+                &[],
+                &[3],
+                0,
+                0,
+                false,
+                alpha,
+                coefficient,
+            )
+            .unwrap();
+        };
+        let non_finite = [f64::INFINITY, 0.0, 0.0, f64::NAN];
+        let mut dst = [-0.0];
+        run(&mut dst, &non_finite, 1.0, 0.0);
+        assert_eq!(bits(&dst), bits(&[-0.0]));
+        let mut dst = [-0.0];
+        run(&mut dst, &non_finite, 3.0, 0.0);
+        assert_eq!(bits(&dst), bits(&[-0.0]));
+
+        let mut dst = [1.5];
+        run(&mut dst, &non_finite, 0.0, 2.0);
+        assert_eq!(dst, [1.5]);
+
+        let mut dst = [0.0];
+        run(&mut dst, &[1e308, 0.0, 0.0, 1e308], 1.0, 0.5);
+        assert_eq!(dst, [1e308]);
+
+        // Complex payload, real coefficient: `α = 0 + 0i` still gives zero
+        // contributions for `(inf, NaN)` entries.
+        let run = |dst: &mut [Complex64], src: &[Complex64], alpha: Complex64| {
+            tensortrace_raw_strided_kernel_add_with_coefficient(
+                dst,
+                src,
+                &[],
+                &[2],
+                &[],
+                &[],
+                &[3],
+                0,
+                0,
+                false,
+                alpha,
+                -2.0,
+            )
+            .unwrap();
+        };
+        let non_finite = [
+            Complex64::new(f64::INFINITY, f64::NAN),
+            Complex64::zero(),
+            Complex64::zero(),
+            Complex64::new(1.0, f64::NEG_INFINITY),
+        ];
+        let mut dst = [Complex64::new(1.0, -2.0)];
+        run(&mut dst, &non_finite, Complex64::zero());
+        assert_eq!(bit_pairs(&dst), bit_pairs(&[Complex64::new(1.0, -2.0)]));
     }
 }

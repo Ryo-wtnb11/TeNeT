@@ -347,6 +347,10 @@ fn column_move<C: Copy>(
 /// `([N], [1], [1])` — are therefore two plans, and counting them once would
 /// under-raise the cap by exactly the amount a conjugated transform needs.
 ///
+/// A zero caller scale writes each Single and scatter destination with a zero
+/// fill instead of its move (#1438), so those fills' signatures are counted
+/// too: a zero-scale replay then needs no plan the cap does not cover.
+///
 /// The per-executor *sum* of these counts over-counts signatures two structures
 /// share, which is the safe direction for a cap.
 /// `(dims, destination strides, source strides, source conjugation)` — the
@@ -377,6 +381,17 @@ fn distinct_plan_signatures(
             entry.dims.as_slice(),
             entry.dst_strides.as_slice(),
             entry.src_strides.clone(),
+            false,
+        ));
+    }
+    let written = moves
+        .iter()
+        .chain(recouplings.iter().flat_map(|entry| entry.scatters.iter()));
+    for entry in written {
+        seen.insert((
+            entry.dims.as_slice(),
+            entry.dst_strides.as_slice(),
+            packed_strides(&entry.dims)?,
             false,
         ));
     }
@@ -580,7 +595,9 @@ mod tests {
         assert_ne!(entry.dst_strides, entry.src_strides);
         assert_eq!(entry.coefficient, Some(0));
         assert!(plan.zeros.is_empty());
-        assert_eq!(plan.plan_signatures, 1);
+        // The transposing move and the zero fill a zero caller scale writes
+        // over its destination instead (#1438) are two signatures.
+        assert_eq!(plan.plan_signatures, 2);
     }
 
     #[test]

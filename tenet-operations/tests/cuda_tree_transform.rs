@@ -648,7 +648,8 @@ fn unsupported_modes_are_rejected_before_any_device_work() {
     let before = cuda_transfer_stats();
     let plans_before = ctx.plan_cache_stats().unwrap();
 
-    for beta in [0.0_f64, 2.0, -1.0] {
+    // `beta = 0` is `Overwrite` (#1438) and is exercised below, not rejected.
+    for beta in [2.0_f64, -1.0] {
         let error = executor
             .replay(
                 &mut ctx,
@@ -1424,17 +1425,17 @@ fn check_scales<T: DeviceScalar>(
 
 #[test]
 #[ignore = "requires a real CUDA device"]
-fn a_zero_caller_scale_multiplies_rather_than_skipping_the_source() {
-    // What: alpha = 0 is submitted as a zero 1x1 *operand* with descriptor 1,
-    // never as a descriptor alpha of 0, so the source is still read and
-    // multiplied: a NaN source poisons every written element exactly as it does
-    // on the host. The comparison is against the host, not against an assumed
-    // NaN pattern.
+fn a_zero_caller_scale_writes_zeros_over_a_nan_source_as_the_host() {
+    // What: alpha = 0 follows VectorInterface's `scale(x, 0) = zero(x) * 0`
+    // (#1438), as TensorKit's `permute!(tdst, tsrc, p, 0, 0)` does: Overwrite
+    // writes zeros over every layout whatever the source holds, and
+    // Axpby(1) and Axpby(0) behave as `dst + 0` and Overwrite. Compared
+    // with the host and the oracle, whose zero rule CI pins.
     let mut ctx = context();
     let mut executor = CudaTreeTransformExecutor::default();
     let fixture = mixed_single_and_multi();
     let poisoned = vec![f64::NAN; fixture.src_len()];
-    let destination = vec![0.0_f64; fixture.dst_len()];
+    let destination: Vec<f64> = (0..fixture.dst_len()).map(|i| 1.0 + i as f64).collect();
 
     for alpha in [0.0_f64, -0.0_f64] {
         let device = device_replay_scaled(
@@ -1447,13 +1448,45 @@ fn a_zero_caller_scale_multiplies_rather_than_skipping_the_source() {
             alpha,
         );
         assert!(
-            device.iter().any(|value| value.is_nan()),
-            "a zero scale must still multiply the source: {device:?}"
+            device.iter().all(|value| *value == 0.0),
+            "a zero scale writes zeros whatever the source holds: {device:?}"
         );
         assert_same(
             &device,
             &host_replay_scaled(&fixture, &poisoned, &destination, true, alpha),
             &format!("zero scale over a NaN source, alpha = {alpha}"),
+        );
+        let accumulated = device_replay_scaled(
+            &mut ctx,
+            &mut executor,
+            &fixture,
+            &poisoned,
+            &destination,
+            false,
+            alpha,
+        );
+        assert_eq!(accumulated, destination, "Axpby(1) with alpha = {alpha}");
+
+        let mut dst = CudaStorage::<f64>::upload(&ctx, &vec![f64::NAN; fixture.dst_len()]).unwrap();
+        let src = CudaStorage::<f64>::upload(&ctx, &poisoned).unwrap();
+        executor
+            .replay(
+                &mut ctx,
+                &fixture.compile(),
+                &fixture.dst_structure(),
+                &fixture.src_structure(),
+                &mut dst,
+                &src,
+                alpha,
+                CudaTreeTransformDestination::Axpby(0.0),
+            )
+            .unwrap();
+        assert!(
+            dst.download(&ctx)
+                .unwrap()
+                .iter()
+                .all(|value| *value == 0.0),
+            "Axpby(0) is Overwrite: scale(NaN, 0) = 0"
         );
     }
 }
@@ -1540,9 +1573,10 @@ fn a_nan_caller_scale_reproduces_the_hosts_nan_pattern() {
 #[ignore = "requires a real CUDA device"]
 fn a_zero_scale_sizes_the_template_of_a_structure_with_no_zero_fill() {
     // What: a structure whose destination layouts are all written sizes no zero
-    // template of its own, so the zero-scale operand is the only reason one
-    // exists. It must still be reserved — before the first submission — and the
-    // result must be the host's.
+    // template of its own, so the zero fills a zero scale writes over its
+    // written layouts are the only reason one exists. It must still be
+    // reserved — before the first submission — and the result must be the
+    // host's: zeros, NaN source included (#1438).
     let mut ctx = context();
     let mut executor = CudaTreeTransformExecutor::default();
     let fixture = rank_sweep().remove(3);
@@ -1575,8 +1609,8 @@ fn a_zero_scale_sizes_the_template_of_a_structure_with_no_zero_fill() {
             alpha,
         );
         assert!(
-            poisoned_device.iter().all(|value| value.is_nan()),
-            "the zero operand must still read the source: {poisoned_device:?}"
+            poisoned_device.iter().all(|value| *value == 0.0),
+            "a zero scale must not read the source: {poisoned_device:?}"
         );
         assert_same(
             &poisoned_device,
@@ -1590,10 +1624,11 @@ fn a_zero_scale_sizes_the_template_of_a_structure_with_no_zero_fill() {
 #[ignore = "requires a real CUDA device"]
 fn a_warm_replay_is_transfer_free_and_plan_stable_for_every_caller_scale() {
     // What: the caller scale is an execution-time argument — it is in no cache
-    // key, and the zero-scale operand reads the same context zero template the
-    // inactive-layout fills read. So a warm replay stays transfer-free and
+    // key, and the zero fills a zero scale writes read the same context zero
+    // template the inactive-layout fills read, with signatures the plan
+    // requirement already counts. So a warm replay stays transfer-free and
     // allocation-free for every scale including 0, the prepared-structure count
-    // does not grow, and the zero-scale signature evicts no cuTENSOR plan.
+    // does not grow, and the zero-scale fills evict no cuTENSOR plan.
     let _guard = COUNTER_TESTS.lock().unwrap();
     warm_scale_sweep::<f32>();
     warm_scale_sweep::<f64>();
@@ -1639,19 +1674,19 @@ fn warm_scale_sweep<T: DeviceScalar>() {
     };
 
     // Cold, and cold again with a zero scale: the first call uploads the
-    // coefficients and sizes the zero template, the second reads element 0 of
-    // that template as its coefficient operand.
+    // coefficients and sizes the zero template, the second may grow that
+    // template to the largest written layout its zero fills cover.
     replay(&mut ctx, &mut executor, &mut dst, T::from_parts(1.0, 0.0));
     let after_unit = ctx.plan_cache_stats().unwrap();
     replay(&mut ctx, &mut executor, &mut dst, T::from_parts(0.0, 0.0));
     let after_zero = ctx.plan_cache_stats().unwrap();
-    // The claim `required_plan_entries` rests on: the zero-scale operand is a
-    // 1x1 view like every other coefficient operand, so it is no new plan.
-    assert_eq!(
-        after_zero.misses, after_unit.misses,
-        "the zero-scale operand added a plan signature the executor does not count: \
-         {after_unit:?} -> {after_zero:?}"
+    // The claim `required_plan_entries` rests on: the zero fills' new plans
+    // are signatures the executor counts, and they evict nothing.
+    assert!(
+        after_zero.misses - after_unit.misses <= executor.required_plan_entries() as u64,
+        "{after_unit:?} -> {after_zero:?}"
     );
+    assert_eq!(after_zero.evictions, after_unit.evictions);
     let entries = executor.required_plan_entries();
     let structures = executor.prepared_structures();
     let workspace = executor.workspace_device_bytes();
@@ -1683,11 +1718,11 @@ fn warm_scale_sweep<T: DeviceScalar>() {
     assert_eq!(executor.workspace_device_bytes(), workspace);
     assert_eq!(
         plans_after.evictions, plans_before.evictions,
-        "the zero-scale operand evicted a plan"
+        "the zero-scale fills evicted a plan"
     );
     assert_eq!(
         plans_after.misses, plans_before.misses,
-        "the zero-scale operand needed a new plan: {plans_before:?} -> {plans_after:?}"
+        "a warm zero-scale replay needed a new plan: {plans_before:?} -> {plans_after:?}"
     );
     assert_close(
         &dst.download(&ctx).unwrap(),
@@ -1924,9 +1959,9 @@ fn destination_scales_match_the_host_replay_followed_by_an_in_place_block_scale(
 
 #[test]
 #[ignore = "requires a real CUDA device"]
-fn a_zero_caller_scale_with_destination_scales_keeps_the_hosts_nan_pattern() {
-    // What: alpha = 0 keeps the zero-operand route whatever θ is, so a NaN
-    // source still poisons every written element, as the host's θ * (0 * x).
+fn a_zero_caller_scale_with_destination_scales_writes_the_hosts_zeros() {
+    // What: alpha = 0 takes the zero route whatever θ is, so a NaN source
+    // does not reach the destination, as the host's θ * scale(x, 0) (#1438).
     let mut ctx = context();
     let mut executor = CudaTreeTransformExecutor::default();
     let fixture = mixed_single_and_multi();
@@ -1943,7 +1978,7 @@ fn a_zero_caller_scale_with_destination_scales_keeps_the_hosts_nan_pattern() {
             alpha,
             &scales,
         );
-        assert!(device.iter().any(|value| value.is_nan()), "{device:?}");
+        assert!(device.iter().all(|value| *value == 0.0), "{device:?}");
         assert_same(
             &device,
             &host_replay_then_scale(&fixture, &poisoned, &destination, alpha, &scales),
