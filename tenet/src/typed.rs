@@ -5112,6 +5112,11 @@ where
 
     /// Preserves a provider-side admission error.
     fn map_provider_error(error: R::Error) -> Self::FacadeError;
+
+    /// Whether every operation of this mode, factorizations included, reads
+    /// a lazy-adjoint operand. A payload conversion keeps a lazy adjoint lazy
+    /// only when it does, so converting never narrows what the result accepts.
+    const LAZY_ADJOINT_OPERANDS: bool;
 }
 
 /// Tensor-side root construction selected by a provider-owned mode.
@@ -7193,6 +7198,8 @@ where
     fn map_provider_error(error: <R as TypedSectorAdmission>::Error) -> Self::FacadeError {
         error.into()
     }
+
+    const LAZY_ADJOINT_OPERANDS: bool = true;
 }
 
 impl<R> TypedTensorRootDispatch<R> for MultiplicityFreeAdmissionMode
@@ -7247,6 +7254,9 @@ where
     fn map_provider_error(error: <R as TypedSectorAdmission>::Error) -> Self::FacadeError {
         GenericTensorError::Structure(CheckedGenericStructureError::Provider(error))
     }
+
+    // The checked-Generic factorizations reject lazy adjoints.
+    const LAZY_ADJOINT_OPERANDS: bool = false;
 }
 
 impl<R> TypedTensorRootDispatch<R> for CheckedGenericAdmissionMode
@@ -10998,37 +11008,70 @@ where
 //
 // Only the host `Vec<D>` storage has these methods; a device tensor is
 // downloaded, converted and uploaded explicitly.
-impl<R, D: Copy> TensorMap<R, D> {
-    /// One pass over the stored payload, preserving the storage form.
+impl<R, D> TensorMap<R, D>
+where
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorModeDispatch<R>,
+    D: TensorScalar + FactorScalar,
+{
+    /// Converts the payload elementwise, preserving the storage form where
+    /// the result stays usable by every operation of its provider mode.
     ///
-    /// A lazy adjoint stays lazy over a converted parent instead of being
-    /// materialized (TensorKit's `complex(t')` materializes through
-    /// `similar` and `copy!`): the conversions are elementwise, so converting the parent
-    /// is the same number of entries without the adjoint's permutation.
-    /// `parent_of_adjoint` converts that parent so the *logical* entries are
-    /// exactly `convert` of the logical source entries. Rounding and widening
-    /// commute with conjugation, so it is `convert` for those; the real ->
-    /// complex embedding does not commute at the sign of zero (`conj(x + 0i)`
-    /// is `x - 0i`), so a real parent is embedded as `x - 0i` and the view's
-    /// conjugation yields the documented `+0` imaginary part.
+    /// * Owned dense or compact diagonal: one pass into one new payload.
+    /// * Lazy adjoint of a compact diagonal (checked Generic only; the
+    ///   multiplicity-free `adjoint` already returns an owned diagonal): an
+    ///   owned compact diagonal of the conjugated, converted values on the
+    ///   logical space — exactly what the multiplicity-free `adjoint` emits,
+    ///   since a bond space is its own adjoint. Materializing would store the
+    ///   structural off-diagonal zeros.
+    /// * Lazy adjoint of a dense parent, when the mode reads lazy adjoints
+    ///   everywhere ([`TypedTensorModeDispatch::LAZY_ADJOINT_OPERANDS`],
+    ///   multiplicity free): a lazy view over the converted parent. TensorKit's
+    ///   `complex(t')` materializes through `similar` and `copy!`; converting
+    ///   the parent is the same entry count without the permutation.
+    ///   `parent_of_adjoint` makes the *logical* entries exactly `convert` of
+    ///   the logical source entries: rounding and widening commute with
+    ///   conjugation, but the real -> complex embedding does not at the sign
+    ///   of zero (`conj(x + 0i)` is `x - 0i`), so a real parent is embedded as
+    ///   `x - 0i`.
+    /// * Otherwise (checked Generic, whose factorizations reject lazy
+    ///   adjoints): materialized in the source dtype, then converted — an
+    ///   operation-local source-sized buffer plus the output.
     fn convert_payload<E>(
         &self,
         convert: impl Fn(D) -> E,
         parent_of_adjoint: impl Fn(D) -> E,
     ) -> TensorMap<R, E> {
         let repr = match &self.repr {
-            TypedTensorRepr::Owned(parent) => {
-                TypedTensorRepr::Owned(parent.convert_payload(convert))
-            }
-            TypedTensorRepr::Adjoint(view) => {
-                TypedTensorRepr::Adjoint(Arc::new(TypedAdjointView {
-                    parent: view.parent.convert_payload(parent_of_adjoint),
-                    logical_space: view.logical_space.clone(),
-                    materialized: OnceLock::new(),
-                    #[cfg(test)]
-                    materialized_body_builds: std::sync::atomic::AtomicUsize::new(0),
-                }))
-            }
+            TypedTensorRepr::Owned(body) => TypedTensorRepr::Owned(body.convert_payload(convert)),
+            TypedTensorRepr::Adjoint(view) => match view.parent.data.as_ref() {
+                TypedData::Diagonal(spectrum) => {
+                    TypedTensorRepr::Owned(Arc::new(TypedTensorBody::diagonal(
+                        view.logical_space.clone(),
+                        map_spectrum_dtype(spectrum, |value| convert(FactorScalar::adjoint(value))),
+                    )))
+                }
+                TypedData::Dense(_)
+                    if <R::Mode as TypedTensorModeDispatch<R>>::LAZY_ADJOINT_OPERANDS =>
+                {
+                    TypedTensorRepr::Adjoint(Arc::new(TypedAdjointView {
+                        parent: view.parent.convert_payload(parent_of_adjoint),
+                        logical_space: view.logical_space.clone(),
+                        materialized: OnceLock::new(),
+                        #[cfg(test)]
+                        materialized_body_builds: std::sync::atomic::AtomicUsize::new(0),
+                    }))
+                }
+                TypedData::Dense(_) => {
+                    let materialized = self
+                        .materialized_tensor_uncached()
+                        .expect("a pre-admitted typed adjoint must materialize");
+                    let body = materialized
+                        .owned_body()
+                        .expect("uncached materialization is owned");
+                    TypedTensorRepr::Owned(body.convert_payload(convert))
+                }
+            },
         };
         TensorMap {
             runtime: self.runtime.clone(),
@@ -11051,14 +11094,24 @@ impl<R, D: Copy> TypedTensorBody<R, D> {
     }
 }
 
-impl<R> TensorMap<R, f32> {
+impl<R> TensorMap<R, f32>
+where
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorModeDispatch<R>,
+{
     /// Widens the payload to `f64`. Exact: every `f32`, including subnormals,
     /// `±0`, `±inf` and NaN, is representable in `f64`.
     ///
-    /// Spaces, block structure and gauge are unchanged, and so is the storage
-    /// form (dense, compact diagonal, lazy adjoint). One pass and one
-    /// payload-sized allocation; a compact diagonal allocates its per-sector
-    /// spectra as its storage form requires.
+    /// Spaces, block structure, gauge and the provider are unchanged. Dense
+    /// and compact diagonal storage keep their form: one pass and one
+    /// payload-sized allocation (a compact diagonal allocates the per-sector
+    /// spectra its form holds). A lazy adjoint of a compact diagonal becomes
+    /// the owned compact diagonal its multiplicity-free `adjoint` would be. A
+    /// dense lazy adjoint stays lazy over a converted parent (one allocation)
+    /// for multiplicity-free providers, whose operations all read lazy
+    /// adjoints; for checked-Generic providers, whose factorizations reject
+    /// lazy adjoints, it is materialized and then converted (an
+    /// operation-local buffer plus the output).
     ///
     /// ```
     /// use tenet::core::{U1FusionRule, U1Irrep};
@@ -11135,7 +11188,11 @@ impl<R> TensorMap<R, f32> {
     }
 }
 
-impl<R> TensorMap<R, f64> {
+impl<R> TensorMap<R, f64>
+where
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorModeDispatch<R>,
+{
     /// Embeds the payload in `Complex64` with a zero imaginary part. Exact;
     /// the same contract as [`TensorMap::to_f64`] (TensorKit `Base.complex`).
     ///
@@ -11177,7 +11234,11 @@ impl<R> TensorMap<R, f64> {
     }
 }
 
-impl<R> TensorMap<R, Complex32> {
+impl<R> TensorMap<R, Complex32>
+where
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorModeDispatch<R>,
+{
     /// Widens both components to `Complex64`. Exact; the same contract as
     /// [`TensorMap::to_f64`].
     pub fn to_c64(&self) -> TensorMap<R, Complex64> {
@@ -11186,7 +11247,11 @@ impl<R> TensorMap<R, Complex32> {
     }
 }
 
-impl<R> TensorMap<R, Complex64> {
+impl<R> TensorMap<R, Complex64>
+where
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorModeDispatch<R>,
+{
     /// Narrows both components to `Complex32`. **Lossy**, componentwise with
     /// the rounding, overflow and NaN behavior of [`TensorMap::narrow_to_f32`].
     pub fn narrow_to_c32(&self) -> TensorMap<R, Complex32> {

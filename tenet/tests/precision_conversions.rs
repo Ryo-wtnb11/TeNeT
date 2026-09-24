@@ -171,6 +171,11 @@ macro_rules! assert_same_structure {
             );
         }
         assert_eq!(got.data().len(), source.data().len(), "{}: length", $what);
+        assert!(
+            std::ptr::eq(got.provider(), source.provider()),
+            "{}: the provider Arc must be shared, not rebuilt",
+            $what
+        );
     }};
 }
 
@@ -252,6 +257,140 @@ macro_rules! assert_all_conversions {
     }};
 }
 
+/// Converts the lazy adjoint of `$owned` at every source dtype and compares
+/// each result bitwise with the element-wise conversion of the materialized
+/// source view. Returns the converted views for storage-form checks.
+///
+/// `$signless_complex_zeros` is set for a checked-Generic compact diagonal:
+/// its complex lazy view materializes the unstored off-diagonal zeros as
+/// `0 - 0i` (the conjugate of the dense expansion), while the converted
+/// result is the owned compact diagonal the multiplicity-free `adjoint`
+/// emits, whose unstored zeros are `+0`. Only the sign of a zero is waived,
+/// and only for complex sources; the stored spectrum is compared bitwise by
+/// the caller.
+macro_rules! assert_adjoint_conversions {
+    ($what:expr, $owned:expr) => {
+        assert_adjoint_conversions!($what, $owned, false)
+    };
+    ($what:expr, $owned:expr, $signless_complex_zeros:expr) => {{
+        let what = $what;
+        let zeros = |bits: Vec<(u64, u64)>| -> Vec<(u64, u64)> {
+            let unsign = |b: u64| if b == 1 << 63 { 0 } else { b };
+            if $signless_complex_zeros {
+                bits.into_iter()
+                    .map(|(re, im)| (unsign(re), unsign(im)))
+                    .collect()
+            } else {
+                bits
+            }
+        };
+        let zeros32 = |bits: Vec<(u32, u32)>| -> Vec<(u32, u32)> {
+            let unsign = |b: u32| if b == 1 << 31 { 0 } else { b };
+            if $signless_complex_zeros {
+                bits.into_iter()
+                    .map(|(re, im)| (unsign(re), unsign(im)))
+                    .collect()
+            } else {
+                bits
+            }
+        };
+        let owned: TensorMap<_, f32> = $owned;
+        let lazy32 = owned.adjoint().unwrap();
+        let lazy64 = owned.to_f64().adjoint().unwrap();
+        let lazyc32 = owned
+            .to_c32()
+            .scale(Complex32::new(0.75, -1.5))
+            .adjoint()
+            .unwrap();
+        let lazyc64 = owned
+            .to_c64()
+            .scale(Complex64::new(0.75, -1.5))
+            .adjoint()
+            .unwrap();
+
+        let to_f64 = lazy32.to_f64();
+        let expected: Vec<f64> = lazy32.data().iter().map(|&v| f64::from(v)).collect();
+        assert_eq!(
+            f64_bits(to_f64.data()),
+            f64_bits(&expected),
+            "{what}: f32 to_f64"
+        );
+        assert_same_structure!(what, to_f64, lazy32);
+
+        let to_c32 = lazy32.to_c32();
+        let expected: Vec<Complex32> = lazy32
+            .data()
+            .iter()
+            .map(|&v| Complex32::new(v, 0.0))
+            .collect();
+        assert_eq!(
+            c32_bits(to_c32.data()),
+            c32_bits(&expected),
+            "{what}: f32 to_c32"
+        );
+
+        let f32_to_c64 = lazy32.to_c64();
+        let expected: Vec<Complex64> = lazy32
+            .data()
+            .iter()
+            .map(|&v| Complex64::new(f64::from(v), 0.0))
+            .collect();
+        assert_eq!(
+            c64_bits(f32_to_c64.data()),
+            c64_bits(&expected),
+            "{what}: f32 to_c64"
+        );
+
+        let f64_to_c64 = lazy64.to_c64();
+        let expected: Vec<Complex64> = lazy64
+            .data()
+            .iter()
+            .map(|&v| Complex64::new(v, 0.0))
+            .collect();
+        assert_eq!(
+            c64_bits(f64_to_c64.data()),
+            c64_bits(&expected),
+            "{what}: f64 to_c64"
+        );
+        assert_same_structure!(what, f64_to_c64, lazy64);
+
+        let narrowed = lazy64.narrow_to_f32();
+        let expected: Vec<f32> = lazy64.data().iter().map(|&v| narrow(v)).collect();
+        assert_eq!(
+            f32_bits(narrowed.data()),
+            f32_bits(&expected),
+            "{what}: narrow_to_f32"
+        );
+
+        let c32_to_c64 = lazyc32.to_c64();
+        let expected: Vec<Complex64> = lazyc32
+            .data()
+            .iter()
+            .map(|v| Complex64::new(f64::from(v.re), f64::from(v.im)))
+            .collect();
+        assert_eq!(
+            zeros(c64_bits(c32_to_c64.data())),
+            zeros(c64_bits(&expected)),
+            "{what}: Complex32 to_c64"
+        );
+
+        let narrowed_c = lazyc64.narrow_to_c32();
+        let expected: Vec<Complex32> = lazyc64
+            .data()
+            .iter()
+            .map(|v| Complex32::new(narrow(v.re), narrow(v.im)))
+            .collect();
+        assert_eq!(
+            zeros32(c32_bits(narrowed_c.data())),
+            zeros32(c32_bits(&expected)),
+            "{what}: narrow_to_c32"
+        );
+        assert_same_structure!(what, narrowed_c, lazyc64);
+
+        (to_f64, f64_to_c64, c32_to_c64, narrowed_c)
+    }};
+}
+
 /// A tensor cycling through [`F32_SPECIALS`], scaled per entry so the
 /// stored values are distinct.
 macro_rules! filled {
@@ -301,6 +440,9 @@ fn lazy_adjoint_conversions_match_the_converted_logical_payload() {
         "u1 lazy adjoint",
         filled!([&u1], [&u1, &u1]).adjoint().unwrap()
     );
+
+    assert_adjoint_conversions!("fermionic dense adjoint", source.clone());
+    assert_adjoint_conversions!("u1 dense adjoint", filled!([&u1, &u1], [&u1]));
 
     // A complex lazy adjoint conjugates: the converted view must too.
     let complex = source.to_c32().scale(Complex32::new(0.5, 2.0));
@@ -361,15 +503,10 @@ fn compact_diagonal_stays_compact() {
         .diagonal_spectrum()
         .unwrap()
         .is_some());
-    // The lazy adjoint of a compact diagonal stays a view over a compact
-    // parent: its own adjoint is the compact converted parent again.
-    let lazy = source.adjoint().unwrap().to_f64();
-    assert!(lazy
-        .adjoint()
-        .unwrap()
-        .diagonal_spectrum()
-        .unwrap()
-        .is_some());
+    // A multiplicity-free `adjoint` of a compact diagonal is already an owned
+    // compact diagonal, so its conversion is the owned case again.
+    let adjoint = source.adjoint().unwrap().to_f64();
+    assert!(adjoint.diagonal_spectrum().unwrap().is_some());
 }
 
 #[test]
@@ -561,4 +698,102 @@ fn checked_generic_su3_conversions_are_exact_and_keep_structure() {
     );
     assert_all_conversions!("SU(3) dense", source.clone());
     assert_all_conversions!("SU(3) lazy adjoint", source.adjoint().unwrap());
+    let (_, complex, _, _) = assert_adjoint_conversions!("SU(3) dense adjoint", source);
+    // Checked-Generic factorizations reject lazy adjoints, so the converted
+    // adjoint must come out owned and factorizable.
+    complex.qr_compact().unwrap();
+}
+
+/// Checked-Generic compact diagonal under a lazy adjoint (#1446 review):
+/// the conversion must come out as the owned compact diagonal, keep the
+/// structural zeros `+0 + 0i`, and stay factorizable.
+#[cfg(feature = "racah-generated")]
+#[test]
+fn checked_generic_diagonal_adjoint_converts_to_an_owned_compact_diagonal() {
+    use std::sync::Arc;
+    use tenet::typed::SUNFusionRule;
+
+    let provider = Arc::new(SUNFusionRule::new(3).unwrap());
+    let leg =
+        GradedSpace::try_new_with_arc(provider, [(vec![2i64, 1], 3), (vec![0, 0], 2)]).unwrap();
+    let spectra = [
+        SectorSpectrum {
+            sector: vec![2i64, 1],
+            values: vec![f32::INFINITY, f32::from_bits(0x7fc0_1234), -0.0],
+        },
+        SectorSpectrum {
+            sector: vec![0, 0],
+            values: vec![f32::NEG_INFINITY, f32::from_bits(1)],
+        },
+    ];
+    let source: TensorMap<_, f32> = TensorMap::diagonal(&runtime(), &leg, spectra).unwrap();
+    assert!(source.data().iter().any(|value| value.is_nan()));
+    assert!(source.data().iter().any(|value| value.is_infinite()));
+
+    let (to_f64, to_c64, c32_to_c64, narrowed_c) =
+        assert_adjoint_conversions!("SU(3) diagonal adjoint", source.clone(), true);
+    for converted in [&to_f64.to_c64(), &to_c64] {
+        assert!(converted.diagonal_spectrum().unwrap().is_some());
+    }
+    // The stored spectrum of the complex conversions is conj(convert(value)),
+    // bitwise.
+    let factor = Complex32::new(0.75, -1.5);
+    let stored = source
+        .to_c32()
+        .scale(factor)
+        .diagonal_spectrum()
+        .unwrap()
+        .unwrap();
+    let got = c32_to_c64.diagonal_spectrum().unwrap().unwrap();
+    for entry in &got {
+        let parent = stored.iter().find(|p| p.sector == entry.sector).unwrap();
+        let expected: Vec<Complex64> = parent
+            .values
+            .iter()
+            .map(|v| Complex64::new(f64::from(v.re), f64::from(v.im)).conj())
+            .collect();
+        assert_eq!(c64_bits(&entry.values), c64_bits(&expected));
+    }
+    let stored = source
+        .to_c64()
+        .scale(Complex64::new(0.75, -1.5))
+        .diagonal_spectrum()
+        .unwrap()
+        .unwrap();
+    let got = narrowed_c.diagonal_spectrum().unwrap().unwrap();
+    for entry in &got {
+        let parent = stored.iter().find(|p| p.sector == entry.sector).unwrap();
+        let expected: Vec<Complex32> = parent
+            .values
+            .iter()
+            .map(|v| Complex32::new(narrow(v.re), narrow(-v.im)))
+            .collect();
+        assert_eq!(c32_bits(&entry.values), c32_bits(&expected));
+    }
+
+    // The review repro: finite f64 values, `to_c64` of the lazy adjoint.
+    let finite: TensorMap<_, f64> = TensorMap::diagonal(
+        &runtime(),
+        &leg,
+        [
+            SectorSpectrum {
+                sector: vec![2i64, 1],
+                values: vec![1.5, -2.0, 0.25],
+            },
+            SectorSpectrum {
+                sector: vec![0, 0],
+                values: vec![3.0, -0.5],
+            },
+        ],
+    )
+    .unwrap();
+    let lazy = finite.adjoint().unwrap();
+    let converted = lazy.to_c64();
+    let expected: Vec<Complex64> = lazy
+        .data()
+        .iter()
+        .map(|&v| Complex64::new(v, 0.0))
+        .collect();
+    assert_eq!(c64_bits(converted.data()), c64_bits(&expected));
+    converted.qr_compact().unwrap();
 }
