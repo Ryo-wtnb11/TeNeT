@@ -1158,11 +1158,12 @@ fn device_overwrite_into_matches_the_host_for_recoupling_and_fermionic_providers
 
 #[test]
 #[ignore = "requires a real CUDA device"]
-fn device_overwrite_into_propagates_a_nan_source_at_alpha_zero_like_the_host() {
-    // The caller scale is never short-circuited: at `alpha == 0` the device
-    // still computes `0 * src`, so a NaN or infinite source poisons the
-    // destination exactly where the Host's does — which is also what proves
-    // the zero *operand* route, not a descriptor alpha of zero, was taken.
+fn device_overwrite_into_matches_the_hosts_nan_pattern_for_every_alpha() {
+    // At `alpha == 0` device and Host follow VectorInterface's
+    // `scale(x, 0) = zero(x) * 0` (#1438): zeros whatever the source holds,
+    // as TensorKit's `permute!(tdst, tsrc, p, 0, 0)`. Every other scale
+    // multiplies, so a NaN or infinite source poisons the destination
+    // exactly where the Host's does.
     let runtime = runtime();
     let u1 = u1_leg(&[(-1, 2), (0, 1), (1, 2)], false);
     let poisoned_source: TensorMap<_, f64> =
@@ -1184,9 +1185,9 @@ fn device_overwrite_into_propagates_a_nan_source_at_alpha_zero_like_the_host() {
     let model = poisoned_source.permute(&[1, 2], &[3, 0]).unwrap();
 
     // A NaN and an infinite caller scale belong here too: the contract is
-    // "alpha is never short-circuited and equals the Host", not "alpha is
-    // finite". `NaN * x` and `inf * 0` are both NaN, so these also widen the
-    // NaN set the comparison has to reproduce.
+    // "alpha equals the Host", not "alpha is finite". `NaN * x` and `inf * 0`
+    // are both NaN, so these also widen the NaN set the comparison has to
+    // reproduce.
     for alpha in [0.0, -0.0, 1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
         let written = device_overwrite_matches_host!(
             &format!("NaN source overwrite_into alpha={alpha}"),
@@ -1203,6 +1204,13 @@ fn device_overwrite_into_propagates_a_nan_source_at_alpha_zero_like_the_host() {
             .permute_overwrite_into(&mut host_expected, &[1, 2], &[3, 0], alpha)
             .unwrap();
         let expected_nans = nan_positions(host_expected.data());
+        if alpha == 0.0 {
+            assert!(
+                written.data().iter().all(|value| *value == 0.0),
+                "alpha = {alpha}: a zero scale writes zeros"
+            );
+            continue;
+        }
         assert!(
             !expected_nans.is_empty(),
             "alpha = {alpha}: the fixture must propagate at least one NaN"

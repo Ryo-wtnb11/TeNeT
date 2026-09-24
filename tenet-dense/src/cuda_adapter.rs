@@ -348,7 +348,8 @@ fn ensure_cuda_device(
 /// The device operands a region call needs but never varies: the ones
 /// template, whose first element is the 1x1 coefficient of an unscaled move
 /// and whose packed prefix a trace contracts its diagonal against, and the
-/// zero template read as the packed source of a region fill.
+/// zero template read as the packed source of a region fill, plus the scaled
+/// template a trace with a non-unit scale contracts its diagonal against.
 ///
 /// One pair per payload dtype, created on first use of that dtype rather than
 /// at [`CudaDenseContext::warm_up`], so the warm-up's documented fixed cost
@@ -364,6 +365,12 @@ fn ensure_cuda_device(
 struct ScalarOperands {
     ones: Option<CudaDenseStorage>,
     zeros: Option<CudaDenseStorage>,
+    /// `α` repeated: the trace's per-element scale (TensorOperations'
+    /// `Scaler(α)` before the sum). Filled on the device from the ones
+    /// template whenever `α` changes, so only growth uploads.
+    scaled: Option<CudaDenseStorage>,
+    /// The value and length of the filled prefix of `scaled`.
+    scaled_prefix: Option<(ContractionScalar, usize)>,
     /// Payload bytes per element of this slot's dtype, recorded when a buffer
     /// is created so [`CudaDenseContext::scalar_operand_bytes`] needs no dtype
     /// parameter. Zero while the slot is empty.
@@ -500,6 +507,74 @@ impl CudaDenseContext {
         Ok(())
     }
 
+    /// Makes the first `len` elements of this dtype's scaled template equal
+    /// `alpha`. Growth uploads `alpha` repeated (one H2D); a resident template
+    /// of another value is refilled on the device as `alpha * ones`, one region
+    /// submission and no transfer; the same value and length does nothing.
+    fn ensure_scaled<D: CudaScalar>(&mut self, alpha: D, len: usize) -> Result<(), DenseError> {
+        let tag = alpha.contraction_scalar();
+        let slot = self.operands::<D>();
+        if slot
+            .scaled_prefix
+            .is_some_and(|(value, filled)| value == tag && filled >= len)
+        {
+            return Ok(());
+        }
+        if slot.scaled.as_ref().is_none_or(|scaled| scaled.len() < len) {
+            self.operands_mut::<D>().scaled = None;
+            let scaled = CudaDenseStorage::upload_owned(self, vec![alpha; len])?;
+            let slot = self.operands_mut::<D>();
+            slot.element_bytes = std::mem::size_of::<D>();
+            slot.scaled = Some(scaled);
+            slot.scaled_prefix = Some((tag, len));
+            return Ok(());
+        }
+        self.ensure_ones::<D>(len)?;
+        let region = CudaRegion::packed(&[len], 0)?;
+        let Self {
+            backend, operands, ..
+        } = self;
+        let slot = &mut operands[D::OPERAND_SLOT];
+        let (Some(ones), Some(scaled)) = (slot.ones.as_ref(), slot.scaled.as_mut()) else {
+            return Err(cuda_error(
+                "cuda_scaled_template",
+                "scalar operands are missing",
+            ));
+        };
+        submit_region_axpby::<D>(
+            backend,
+            "cuda_scaled_template",
+            ones,
+            &region,
+            false,
+            alpha,
+            ones,
+            0,
+            CudaRegionBeta::Overwrite,
+            scaled,
+            &region,
+        )?;
+        slot.scaled_prefix = Some((tag, len));
+        Ok(())
+    }
+
+    /// Sizes this dtype's scaled template (see [`cuda_region_trace_accumulate`])
+    /// for `len` elements up front, so a trace with a non-unit scale uploads
+    /// nothing afterwards: a later change of scale is a device refill. Never
+    /// shrinks; reported and released with the other scalar operands.
+    pub fn reserve_scaled_template<D: CudaScalar>(&mut self, len: usize) -> Result<(), DenseError> {
+        if len == 0
+            || self
+                .operands::<D>()
+                .scaled
+                .as_ref()
+                .is_some_and(|s| s.len() >= len)
+        {
+            return Ok(());
+        }
+        self.ensure_scaled::<D>(D::ONE, len)
+    }
+
     /// Sizes this dtype's ones template for `len` elements up front, the
     /// counterpart of [`Self::reserve_zero_template`]: a caller that knows the
     /// largest trace extent it will submit reserves once and every later
@@ -562,7 +637,8 @@ impl CudaDenseContext {
             .iter()
             .map(|operands| {
                 let elements = operands.ones.as_ref().map_or(0, CudaDenseStorage::len)
-                    + operands.zeros.as_ref().map_or(0, CudaDenseStorage::len);
+                    + operands.zeros.as_ref().map_or(0, CudaDenseStorage::len)
+                    + operands.scaled.as_ref().map_or(0, CudaDenseStorage::len);
                 elements * operands.element_bytes
             })
             .sum()
@@ -1534,15 +1610,21 @@ pub fn cuda_region_zero<D: CudaScalar>(
 /// views when this route was written against 0.5.0). Pairs are never merged
 /// with one another, so no pair needs a stride commensurate with another's.
 ///
-/// `alpha` rides the contraction descriptor. A zero `alpha` would let the
-/// backend skip the source read and erase NaN/Inf the host propagates, so it
-/// contracts against the zero template instead with a unit descriptor scale:
-/// `dst += 1 * sum(src * 0)`, which is the host's `dst + 0 * sum(src)`.
+/// `alpha` scales every traced element before the sum, as TensorOperations'
+/// `_mapreducedim!(Scaler(α), Adder(), …)` does and the host does: the
+/// diagonal is contracted against `alpha` repeated (the scaled template) with
+/// a unit descriptor scale, `dst += Σ aᵢ α`. Why not the descriptor: it
+/// scales the finished sum, which overflows where `Σ α aᵢ` does not. At
+/// `alpha = 1` the ones template is read and nothing is filled. A zero
+/// `alpha` adds VectorInterface's `scale(x, 0) = 0` whatever the source
+/// holds, so it submits nothing.
 ///
-/// Transfer contract: the ones (or zero) template grows to `prod t_k` on first
-/// need and nothing is uploaded afterwards; reserve it with
-/// [`CudaDenseContext::reserve_ones_template`] to pay one upload for a whole
-/// replay.
+/// Transfer contract: the ones and scaled templates grow to `prod t_k` on
+/// first need and nothing is uploaded afterwards; a change of `alpha` refills
+/// the scaled template on the device (one more submission). Reserve them with
+/// [`CudaDenseContext::reserve_ones_template`] and
+/// [`CudaDenseContext::reserve_scaled_template`] to pay one upload each for a
+/// whole replay.
 ///
 /// Validation, all before any device work: devices, payload dtypes, the
 /// source rank and leading extents against the destination (`ShapeMismatch`),
@@ -1584,17 +1666,20 @@ pub fn cuda_region_trace_accumulate<D: CudaScalar>(
     validate_region(src_region, src.len)?;
     validate_region(dst_region, dst.len)?;
 
-    let zero = alpha == D::ZERO;
-    if zero {
-        ctx.ensure_zeros::<D>(trace_len)?;
-    } else {
+    if alpha == D::ZERO {
+        return Ok(());
+    }
+    let unit = alpha == D::ONE;
+    if unit {
         ctx.ensure_ones::<D>(trace_len)?;
+    } else {
+        ctx.ensure_scaled::<D>(alpha, trace_len)?;
     }
     let (backend, operands) = ctx.split_operands::<D>();
-    let template = if zero {
-        operands.zeros.as_ref()
-    } else {
+    let template = if unit {
         operands.ones.as_ref()
+    } else {
+        operands.scaled.as_ref()
     };
     let Some(template) = template else {
         return Err(cuda_error(OP, "context scalar operand is missing"));
@@ -1631,7 +1716,7 @@ pub fn cuda_region_trace_accumulate<D: CudaScalar>(
     let accumulation = DotGeneralAccumulation {
         lhs_conj: conj,
         rhs_conj: false,
-        alpha: if zero { D::ONE } else { alpha }.contraction_scalar(),
+        alpha: D::ONE.contraction_scalar(),
         beta: D::ONE.contraction_scalar(),
     };
     GEMM_CALLS.fetch_add(1, Ordering::Relaxed);

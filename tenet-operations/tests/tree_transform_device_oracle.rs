@@ -367,13 +367,8 @@ fn a_zero_caller_scale_writes_zeros_over_a_non_finite_source() {
     // What: the host follows VectorInterface's `scale(x, 0) = zero(x) * 0`
     // (#1438): a zero scale writes exact zeros over a NaN source, in the
     // Single moves and in the Multi scatter whose recoupling GEMM did see
-    // the NaN, as TensorKit's `permute!(tdst, tsrc, p, 0, 0)` does.
-    //
-    // Why not the explicit-index oracle: `expected_scaled` still multiplies
-    // (`0 * NaN = NaN`), which is the device's unchanged zero-operand route
-    // (`cuda_tree_transform.rs`, `a_zero_caller_scale_*`). The device leaf
-    // of #1438 adopts the zero rule; until then host and device differ here
-    // and nowhere else.
+    // the NaN, as TensorKit's `permute!(tdst, tsrc, p, 0, 0)` does; the
+    // explicit-index oracle, which the device is compared against, agrees.
     let fixture = mixed_single_and_multi();
     let poisoned = vec![f64::NAN; fixture.src_len()];
     let destination = vec![f64::NAN; fixture.dst_len()];
@@ -384,11 +379,14 @@ fn a_zero_caller_scale_writes_zeros_over_a_non_finite_source() {
             host.iter().all(|value| *value == 0.0),
             "a zero scale writes zeros whatever the source holds: {host:?}"
         );
-        let oracle = fixture.expected_scaled(&poisoned, &destination, true, alpha);
-        assert!(
-            oracle.iter().any(|value| value.is_nan()),
-            "the explicit-index oracle multiplies, so it cannot stand in here"
+        assert_same(
+            &host,
+            &fixture.expected_scaled(&poisoned, &destination, true, alpha),
+            &format!("zero scale over a NaN source, alpha = {alpha}"),
         );
+        // Accumulation adds zeros: the destination is kept, NaN included.
+        let kept = host_replay_scaled(&fixture, &poisoned, &destination, false, alpha);
+        assert!(kept.iter().all(|value| value.is_nan()), "{kept:?}");
     }
 }
 

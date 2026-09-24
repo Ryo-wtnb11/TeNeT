@@ -14139,8 +14139,10 @@ where
     /// supertrace), and every block stride. The device only replays it: one
     /// contraction per term, reading the source block through one merged
     /// diagonal axis per pair (extent `t_k`, stride `s_lhs + s_rhs`; pairs are
-    /// never merged with each other) against the context ones template, with
-    /// descriptor scale `coefficient`, accumulated (`beta = 1`) into the
+    /// never merged with each other) against the coefficient repeated (the
+    /// context ones template for a unit coefficient, the scaled template
+    /// otherwise), so each traced element is scaled before the sum as on the
+    /// Host, accumulated (`beta = 1`) into the
     /// zero-initialised output, so a destination block with several producers
     /// receives their sum. A lazy adjoint traces its parent with the Host's
     /// parent axes and a conjugated read.
@@ -14153,21 +14155,19 @@ where
     /// distinct term signatures fit the plan-cache budget the transform
     /// executor raises the bound under (about 585 plans together with the
     /// prepared transforms; beyond it a warm call rebuilds plans). The first call whose
-    /// largest traced extent `prod t_k` exceeds the resident ones template
-    /// grows it once (one upload, reported by
+    /// largest traced extent `prod t_k` exceeds the resident ones or scaled
+    /// template grows it once (one upload each, reported by
     /// [`crate::prelude::CudaTreeTransformStats::context_scalar_operand_bytes`]).
-    /// One submission per term; FLOPs are the Host's `sum_terms |out| * prod t_k`
-    /// with one multiply per term element that a reduction would not need.
+    /// One submission per term with a non-zero coefficient, plus one device
+    /// refill of the scaled template per distinct non-unit coefficient; FLOPs
+    /// are the Host's `sum_terms |out| * prod t_k` multiply-adds.
     ///
     /// # Numerics
     ///
     /// Device and Host agree to dtype tolerance, never bitwise: the sum order
-    /// is cuTENSOR's and the coefficient is applied as `(alpha * c) * sum`
-    /// where the Host adds `(alpha * c) * a_i` per traced element, as
-    /// TensorOperations does. Not yet aligned with the Host (#1438): a zero
-    /// coefficient reads the source against the zero template, so NaN/Inf
-    /// propagate where the Host skips the term, and a sum that overflows is
-    /// `inf` where the Host's per-element scale may stay finite.
+    /// is cuTENSOR's. Both scale each traced element by `alpha * c` before
+    /// the sum and skip a zero coefficient, as TensorKit's `_trace_permute!`
+    /// and TensorOperations' `tensortrace!` do (#1438).
     ///
     /// # Errors
     ///
