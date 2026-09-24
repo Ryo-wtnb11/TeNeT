@@ -180,6 +180,15 @@ jobs:
       - uses: ./tenet/.github/actions/cargo-build-script-cache
         with:
           key: feature-${{ matrix.name }}
+      # The top-level `clippy` job only lints default features (#1450), so a
+      # lint that only fires under one of these non-default feature sets
+      # (e.g. the racah-generated `obfuscated_if_else`s in typed.rs) never ran
+      # in CI. `--all-targets` mirrors that job's scope rather than the
+      # narrower `matrix.extra_args` used for the test step below, since
+      # clippy should see every target this feature set compiles, not only
+      # the ones the test step happens to filter to.
+      - run: cargo clippy -p "${{ matrix.package }}" --no-default-features --features "${{ matrix.features }}" --all-targets -- -D warnings
+        working-directory: tenet
       - run: cargo test -p "${{ matrix.package }}" --no-default-features --features "${{ matrix.features }}" ${{ matrix.extra_args }}
         working-directory: tenet
         env:

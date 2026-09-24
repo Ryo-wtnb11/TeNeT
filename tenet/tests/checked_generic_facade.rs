@@ -4458,6 +4458,10 @@ fn checked_generic_null_dense_failure_is_typed_and_nonpublishing() {
     assert!(std::ptr::eq(source.provider(), provider.as_ref()));
 }
 
+// Why not fewer args: each parameter is an independent fixture input for one
+// assertion helper shared by several SU(N) null-projector tests; bundling
+// them would add a struct with a single call-site shape.
+#[allow(clippy::too_many_arguments)]
 #[cfg(feature = "racah-generated")]
 fn assert_sun_checked_generic_null_projectors<D>(
     n: usize,

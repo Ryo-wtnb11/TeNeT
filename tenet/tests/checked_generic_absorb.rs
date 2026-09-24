@@ -6,6 +6,10 @@ use std::sync::Arc;
 use tenet::prelude::{Complex64, Error, Runtime};
 use tenet::typed::{GradedSpace, SUNFusionRule, TensorMap};
 
+// Why not fewer args: this is a recursive N-dimensional shape-copy helper;
+// grouping the paired source/destination offset+shape+stride triples into a
+// struct would add an abstraction with one call site for no clarity gain.
+#[allow(clippy::too_many_arguments)]
 fn copy_prefix<D: Copy>(
     destination: &mut [D],
     destination_offset: usize,
