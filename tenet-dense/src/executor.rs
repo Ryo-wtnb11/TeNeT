@@ -49,10 +49,48 @@ pub enum DenseFactorization {
     Qr,
 }
 
-pub trait DenseExecutor {
+mod sealed {
+    /// Lends any sized executor as a trait object, so that
+    /// [`super::DenseExecutor::with_linalg_scope`]'s default can pass `self`
+    /// to its body even when it is called through
+    /// `E: DenseExecutor + ?Sized`. Blanket-implemented; not nameable outside
+    /// this crate.
+    pub trait AsDynDenseExecutor {
+        fn as_dyn_dense_executor(&mut self) -> &mut dyn super::DenseExecutor;
+    }
+
+    impl<T: super::DenseExecutor> AsDynDenseExecutor for T {
+        fn as_dyn_dense_executor(&mut self) -> &mut dyn super::DenseExecutor {
+            self
+        }
+    }
+}
+
+/// The body of a [`DenseExecutor::with_linalg_scope`].
+pub type DenseLinalgScopeBody<'a> =
+    dyn FnMut(&mut dyn DenseExecutor) -> Result<(), DenseError> + Send + 'a;
+
+pub trait DenseExecutor: sealed::AsDynDenseExecutor {
     fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError>;
     fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError>;
     fn eigh(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError>;
+
+    /// Runs `body` once with this executor, letting the sequence of per-matrix
+    /// calls it makes share one backend admission where the executor has a
+    /// per-call admission cost. A streaming per-block loop uses this instead of
+    /// [`Self::factorize_batch`] when holding every block's output at once
+    /// would raise its working set.
+    ///
+    /// The body runs exactly once, and its calls reach this executor in the
+    /// order it makes them. It may run on another thread than the caller, so
+    /// it must not rely on the caller's thread-local state. It must reach
+    /// dense work only through the executor it is given: another executor, or
+    /// work started on other threads that re-enters this one, can panic in the
+    /// backend's re-entry guard. The default runs `body(self)` on the calling
+    /// thread.
+    fn with_linalg_scope(&mut self, body: &mut DenseLinalgScopeBody<'_>) -> Result<(), DenseError> {
+        body(self.as_dyn_dense_executor())
+    }
 
     /// Applies `op` to each input in order and returns exactly one entry per
     /// input, holding that input's outputs exactly as the per-matrix entry

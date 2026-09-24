@@ -12,8 +12,16 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static SESSIONS_OPENED: AtomicU64 = AtomicU64::new(0);
+static ADMISSIONS: AtomicU64 = AtomicU64::new(0);
 
-/// A snapshot of the process-wide TeNeT CPU-session observation counter.
+thread_local! {
+    // Set on the thread that runs a `with_linalg_scope` body while the
+    // Tenferro execution scope is entered, so sessions opened there reuse its
+    // admission and are not counted as admissions of their own.
+    static IN_LINALG_SCOPE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// A snapshot of the process-wide TeNeT CPU-session observation counters.
 ///
 /// Observability only: nothing here reads the value back, so no execution
 /// decision, dispatch, or capability depends on it. It exists so a test or a
@@ -26,27 +34,44 @@ static SESSIONS_OPENED: AtomicU64 = AtomicU64::new(0);
 /// backend-level dot call are invisible at this seam and are **not** counted,
 /// so this is a lower bound on the sessions a phase actually enters.
 ///
-/// The counter is `Relaxed` and process-wide: a snapshot taken while another
+/// `admissions` counts the execution-permit acquisitions of those sessions
+/// and of [`DenseExecutor::dot_general_into`]'s backend-level call: one per
+/// such entry made outside a [`DenseExecutor::with_linalg_scope`], plus one
+/// per entered scope, whose entries share its permit and pool handoff. Other
+/// backend-level dot entries are not counted. Under a multi-threaded CPU
+/// layout each admission is one Rayon pool hop.
+///
+/// The counters are `Relaxed` and process-wide: a snapshot taken while another
 /// thread executes is a sample, not a global instant.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct CpuSessionStats {
     pub sessions_opened: u64,
+    pub admissions: u64,
 }
 
-/// Reads the CPU-session observation counter. See [`CpuSessionStats`].
+/// Reads the CPU-session observation counters. See [`CpuSessionStats`].
 pub fn cpu_session_stats() -> CpuSessionStats {
     CpuSessionStats {
         sessions_opened: SESSIONS_OPENED.load(Ordering::Relaxed),
+        admissions: ADMISSIONS.load(Ordering::Relaxed),
     }
 }
 
-/// Zeroes the CPU-session observation counter. See [`CpuSessionStats`].
+/// Zeroes the CPU-session observation counters. See [`CpuSessionStats`].
 pub fn reset_cpu_session_stats() {
     SESSIONS_OPENED.store(0, Ordering::Relaxed);
+    ADMISSIONS.store(0, Ordering::Relaxed);
 }
 
 fn note_session_opened() {
     SESSIONS_OPENED.fetch_add(1, Ordering::Relaxed);
+    note_backend_admission();
+}
+
+fn note_backend_admission() {
+    if !IN_LINALG_SCOPE.get() {
+        ADMISSIONS.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 #[cfg(all(
@@ -1121,6 +1146,57 @@ impl DenseExecutor for DefaultDenseExecutor {
             .collect()
     }
 
+    // One Tenferro execution scope for the whole body: its sessions skip the
+    // per-session permit and pool install (tenferro-cpu 0.6.0
+    // `CpuOperationEntry::enter`, `is_entered`), so a streaming per-block loop
+    // pays one admission per call while keeping one block in flight. The
+    // permit is held across the body's own between-block work too.
+    #[cfg(not(feature = "provider-inject"))]
+    fn with_linalg_scope(
+        &mut self,
+        body: &mut crate::DenseLinalgScopeBody<'_>,
+    ) -> Result<(), DenseError> {
+        if IN_LINALG_SCOPE.get() {
+            return body(self);
+        }
+        // `with_execution_scope` borrows its backend while the body needs
+        // `&mut self`; a clone keeps the runtime identity, engine and domain,
+        // which is what the scope matches sessions against.
+        let witness = self.backend.clone();
+        let mut entered = false;
+        let scoped = witness.with_execution_scope(|| {
+            entered = true;
+            ADMISSIONS.fetch_add(1, Ordering::Relaxed);
+            IN_LINALG_SCOPE.set(true);
+            struct Leave;
+            impl Drop for Leave {
+                fn drop(&mut self) {
+                    IN_LINALG_SCOPE.set(false);
+                }
+            }
+            let _leave = Leave;
+            body(&mut *self)
+        });
+        match scoped {
+            Ok(result) => result,
+            // Not entered because the domain is caller-owned (`Unsupported`)
+            // or a Tenferro execution is already active on this thread
+            // (`RuntimeState`): per-session admission is still correct, only
+            // slower, so run the body unscoped.
+            Err(err)
+                if !entered
+                    && matches!(
+                        err.kind(),
+                        tenferro_tensor::ErrorKind::Unsupported
+                            | tenferro_tensor::ErrorKind::RuntimeState
+                    ) =>
+            {
+                body(self)
+            }
+            Err(err) => Err(tenferro_error("with_execution_scope", err)),
+        }
+    }
+
     fn solve_into(
         &mut self,
         a: DenseRead<'_>,
@@ -1235,6 +1311,7 @@ impl DenseExecutor for DefaultDenseExecutor {
         let rhs = TensorRead::from_view(tenferro_view(rhs)?);
         let output = TensorWrite::from_view(tenferro_view_mut(output)?);
         let dot_config = tenferro_dot_config(config);
+        note_backend_admission();
         // Non-conjugating path stays byte-identical to the plain read_into
         // (which itself just wraps an overwrite accumulation). Conjugation is
         // folded into the kernel via the accumulation's conj flags — no
@@ -1551,7 +1628,24 @@ fn with_cpu_linalg<R: Send>(
     f: impl FnOnce(&mut dyn BackendSession) -> tenferro_tensor::Result<R> + Send,
 ) -> tenferro_tensor::Result<R> {
     note_session_opened();
+    #[cfg(test)]
+    {
+        let caller = std::thread::current().id();
+        let (result, session) =
+            backend.with_backend_session(|s| (f(s), std::thread::current().id()));
+        SESSION_THREADS.with(|threads| threads.borrow_mut().push((caller, session)));
+        result
+    }
+    #[cfg(not(test))]
     backend.with_backend_session(f)
+}
+
+// Test-only record, on the calling thread, of (caller thread, thread the
+// Tenferro session closure ran on) for each `with_cpu_linalg` session.
+#[cfg(test)]
+thread_local! {
+    static SESSION_THREADS: std::cell::RefCell<Vec<(std::thread::ThreadId, std::thread::ThreadId)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 #[cfg(feature = "provider-inject")]
@@ -1559,6 +1653,206 @@ fn linalg_unavailable(op: &'static str) -> DenseError {
     DenseError::Unsupported {
         op,
         message: "provider-inject requires a registered BLAS/LAPACK provider".to_string(),
+    }
+}
+
+#[cfg(all(
+    test,
+    any(feature = "cpu-faer", feature = "cpu-blas-core"),
+    not(feature = "provider-inject")
+))]
+mod linalg_scope_tests {
+    use super::*;
+
+    const ROWS: usize = 5;
+    const COLS: usize = 3;
+
+    fn matrix(seed: usize) -> Vec<f64> {
+        (0..ROWS * COLS)
+            .map(|i| ((i * 7 + seed * 3) % 11) as f64 * 0.25 - 1.0)
+            .collect()
+    }
+
+    /// Every output bit of an SVD then a QR of each of three matrices.
+    fn factor_bits(dense: &mut dyn DenseExecutor) -> Vec<u64> {
+        let mut bits = Vec::new();
+        for seed in 0..3 {
+            let data = matrix(seed);
+            let read =
+                || DenseRead::F64(DenseView::new(&data, &[ROWS, COLS], &[1, ROWS], 0).unwrap());
+            for output in dense
+                .svd(read())
+                .unwrap()
+                .into_iter()
+                .chain(dense.qr(read()).unwrap())
+            {
+                bits.extend(output.as_f64_slice().unwrap().iter().map(|x| x.to_bits()));
+            }
+        }
+        bits
+    }
+
+    /// Runs [`factor_bits`] in a scope; also reports whether the Tenferro
+    /// execution scope was entered for the body.
+    fn scoped_bits(executor: &mut DefaultDenseExecutor) -> (bool, Vec<u64>) {
+        let mut entered = None;
+        let mut bits = Vec::new();
+        executor
+            .with_linalg_scope(&mut |dense| {
+                entered = Some(IN_LINALG_SCOPE.get());
+                bits = factor_bits(dense);
+                Ok(())
+            })
+            .unwrap();
+        (entered.expect("scope body runs"), bits)
+    }
+
+    fn executors() -> [DefaultDenseExecutor; 2] {
+        [
+            DefaultDenseExecutor::new(),
+            DefaultDenseExecutor::with_threads(1).unwrap(),
+        ]
+    }
+
+    #[test]
+    fn managed_scope_is_entered_and_bitwise_matches_per_call_sessions() {
+        for mut executor in executors() {
+            let unscoped = factor_bits(&mut executor);
+            let (entered, scoped) = scoped_bits(&mut executor);
+            assert!(entered);
+            assert_eq!(scoped, unscoped);
+            assert!(!IN_LINALG_SCOPE.get(), "scope flag leaks past the call");
+        }
+    }
+
+    fn session_threads_of(
+        run: impl FnOnce(),
+    ) -> Vec<(std::thread::ThreadId, std::thread::ThreadId)> {
+        SESSION_THREADS.with(|threads| threads.borrow_mut().clear());
+        run();
+        SESSION_THREADS.with(|threads| threads.take())
+    }
+
+    /// Tenferro-side evidence, not TeNeT bookkeeping: inside the scope every
+    /// session closure runs on the body's own thread, so no session installs
+    /// onto the pool again; outside it each session hops to a pool worker.
+    #[test]
+    fn scoped_sessions_run_on_the_body_thread_and_unscoped_ones_hop() {
+        let mut executor = DefaultDenseExecutor::new();
+        let mut body_thread = None;
+        let mut scoped = Vec::new();
+        executor
+            .with_linalg_scope(&mut |dense| {
+                body_thread = Some(std::thread::current().id());
+                scoped = session_threads_of(|| {
+                    factor_bits(dense);
+                });
+                Ok(())
+            })
+            .unwrap();
+        let body_thread = body_thread.unwrap();
+        assert_ne!(
+            body_thread,
+            std::thread::current().id(),
+            "body runs on a pool worker"
+        );
+        assert_eq!(scoped.len(), 6);
+        assert!(scoped
+            .iter()
+            .all(|&(caller, session)| caller == body_thread && session == body_thread));
+
+        let unscoped = session_threads_of(|| {
+            factor_bits(&mut executor);
+        });
+        assert_eq!(unscoped.len(), 6);
+        assert!(unscoped
+            .iter()
+            .all(|&(caller, session)| caller == std::thread::current().id() && session != caller));
+    }
+
+    #[test]
+    fn nested_scope_runs_inline_in_the_outer_scope() {
+        for mut executor in executors() {
+            let unscoped = factor_bits(&mut executor);
+            let mut inner = None;
+            executor
+                .with_linalg_scope(&mut |dense| {
+                    dense.with_linalg_scope(&mut |dense| {
+                        inner = Some((IN_LINALG_SCOPE.get(), factor_bits(dense)));
+                        Ok(())
+                    })
+                })
+                .unwrap();
+            assert_eq!(inner, Some((true, unscoped)));
+        }
+    }
+
+    #[test]
+    fn active_tenferro_scope_falls_back_to_per_call_sessions() {
+        for mut executor in executors() {
+            let unscoped = factor_bits(&mut executor);
+            let witness = executor.backend.clone();
+            let (entered, scoped) = witness
+                .with_execution_scope(|| scoped_bits(&mut executor))
+                .unwrap();
+            assert!(
+                !entered,
+                "Tenferro rejects a nested scope; body runs unscoped"
+            );
+            assert_eq!(scoped, unscoped);
+        }
+    }
+
+    #[test]
+    fn caller_owned_cpu_domain_falls_back_to_per_call_sessions() {
+        use std::num::NonZeroUsize;
+        use tenferro_cpu::{
+            discover_cpu_topology, CpuPlacementGuarantee, ExternalCpuDomain, ResolvedCpuPlacement,
+        };
+        let id = tenferro_tensor::CpuDomainId::new(1389);
+        let domain = ExternalCpuDomain::new(
+            id,
+            ResolvedCpuPlacement::AllAllowed {
+                cpus: discover_cpu_topology().unwrap().allowed_cpus().clone(),
+            },
+            Arc::new(CpuContext::with_threads(2).unwrap()),
+            NonZeroUsize::new(2).unwrap(),
+            CpuPlacementGuarantee::AdvisoryDeclared,
+        )
+        .unwrap();
+        let backend = match CpuBackend::from_external_managed_domains(id, [domain]) {
+            Ok(backend) => backend,
+            // A provider whose thread count is process-global (Accelerate)
+            // cannot serve a caller-owned domain at all, so there is no
+            // fallback to exercise; the refusal itself must be typed.
+            Err(tenferro_cpu::CpuBackendError::Tensor(error)) => {
+                let source = std::error::Error::source(&error)
+                    .and_then(|source| {
+                        source.downcast_ref::<tenferro_cpu::CpuProviderBundleInstallError>()
+                    })
+                    .expect("caller-owned domain refusal carries its provider install error");
+                assert!(
+                    matches!(
+                        source,
+                        tenferro_cpu::CpuProviderBundleInstallError::IncompatibleDomain {
+                            source:
+                                tenferro_cpu::CpuProviderDomainError::ThreadCountNotEnforceable { .. },
+                            ..
+                        }
+                    ),
+                    "unexpected refusal: {source}"
+                );
+                return;
+            }
+            Err(error) => panic!("caller-owned domain construction failed: {error}"),
+        };
+        let mut executor = DefaultDenseExecutor::from_backend(backend);
+        let (entered, scoped) = scoped_bits(&mut executor);
+        assert!(
+            !entered,
+            "Tenferro scopes need a managed domain; body runs unscoped"
+        );
+        assert_eq!(scoped, factor_bits(&mut DefaultDenseExecutor::new()));
     }
 }
 
