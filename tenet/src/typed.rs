@@ -284,7 +284,9 @@ use crate::tensor_core::{
 use crate::RuntimeIdentity;
 
 mod serialization;
-pub use serialization::{DecodeError, DecodeLimits, EncodeError, TypedPersistenceCodec};
+pub use serialization::{
+    DecodeError, DecodeLimits, EncodeError, PersistedScalar, TypedPersistenceCodec,
+};
 
 /// Scalar payloads supported by [`TensorMap`], base capability.
 ///

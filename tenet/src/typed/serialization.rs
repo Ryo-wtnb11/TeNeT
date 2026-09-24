@@ -178,12 +178,12 @@ pub enum DecodeError<C, F> {
     Codec(C),
     /// The tensor snapshot stores a different scalar type than the one requested.
     ///
-    /// Tags are listed in [`TypedPersistenceCodec`]; no conversion is attempted.
+    /// No conversion is attempted.
     ScalarMismatch {
-        /// Scalar tag declared by the snapshot.
-        actual: u8,
-        /// Scalar tag of the requested payload type.
-        expected: u8,
+        /// Scalar type stored by the snapshot.
+        actual: PersistedScalar,
+        /// Scalar type requested by the caller.
+        expected: PersistedScalar,
     },
     /// The resolver returned a provider whose stable key differs from the file.
     ProviderMismatch,
@@ -210,9 +210,7 @@ impl<C: fmt::Display, F: fmt::Display> fmt::Display for DecodeError<C, F> {
             Self::Codec(error) => write!(formatter, "persistence codec error: {error}"),
             Self::ScalarMismatch { actual, expected } => write!(
                 formatter,
-                "typed snapshot stores {} values, but {} was requested",
-                scalar_name(*actual),
-                scalar_name(*expected)
+                "typed snapshot stores {actual} values, but {expected} was requested"
             ),
             Self::ProviderMismatch => formatter.write_str("resolved provider key does not match"),
             Self::Facade(error) => write!(formatter, "typed admission error: {error}"),
@@ -238,13 +236,42 @@ where
     }
 }
 
-fn scalar_name(tag: u8) -> &'static str {
-    match tag {
-        SCALAR_F64 => "f64",
-        SCALAR_C64 => "Complex64",
-        SCALAR_F32 => "f32",
-        SCALAR_C32 => "Complex32",
-        _ => "unknown",
+/// Tensor payload scalar type recorded in a typed snapshot.
+///
+/// Reported by [`DecodeError::ScalarMismatch`]; the wire tags behind it are
+/// private to the format.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum PersistedScalar {
+    /// `f64`.
+    F64,
+    /// [`Complex64`].
+    Complex64,
+    /// `f32`.
+    F32,
+    /// [`Complex32`].
+    Complex32,
+}
+
+impl PersistedScalar {
+    fn from_tag(tag: u8) -> Option<Self> {
+        match tag {
+            SCALAR_F64 => Some(Self::F64),
+            SCALAR_C64 => Some(Self::Complex64),
+            SCALAR_F32 => Some(Self::F32),
+            SCALAR_C32 => Some(Self::Complex32),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for PersistedScalar {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::F64 => "f64",
+            Self::Complex64 => "Complex64",
+            Self::F32 => "f32",
+            Self::Complex32 => "Complex32",
+        })
     }
 }
 
@@ -461,12 +488,11 @@ fn read_header<'a, C, F>(
     }
     let scalar = reader.u8().map_err(DecodeError::InvalidFormat)?;
     if scalar != expected_scalar {
-        let tensor_scalar = |tag| matches!(tag, SCALAR_F64 | SCALAR_C64 | SCALAR_F32 | SCALAR_C32);
-        if tensor_scalar(scalar) && tensor_scalar(expected_scalar) {
-            return Err(DecodeError::ScalarMismatch {
-                actual: scalar,
-                expected: expected_scalar,
-            });
+        if let (Some(actual), Some(expected)) = (
+            PersistedScalar::from_tag(scalar),
+            PersistedScalar::from_tag(expected_scalar),
+        ) {
+            return Err(DecodeError::ScalarMismatch { actual, expected });
         }
         return Err(DecodeError::InvalidFormat("wrong scalar kind".to_string()));
     }

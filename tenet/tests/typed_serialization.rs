@@ -10,8 +10,8 @@ use tenet::core::{
 };
 use tenet::prelude::{Complex32, Complex64, Runtime};
 use tenet::typed::{
-    DecodeError, DecodeLimits, GradedSpace, NetworkReuseClass, SectorSpectrum, TensorMap,
-    TypedPersistenceCodec,
+    DecodeError, DecodeLimits, GradedSpace, NetworkReuseClass, PersistedScalar, SectorSpectrum,
+    TensorMap, TypedPersistenceCodec,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1547,19 +1547,24 @@ macro_rules! single_precision_roundtrip {
 /// Wire tag of each payload dtype, spelled out independently of the library.
 trait Tag {
     const TAG: u8;
+    const SCALAR: PersistedScalar;
 }
 
 impl Tag for f64 {
     const TAG: u8 = 1;
+    const SCALAR: PersistedScalar = PersistedScalar::F64;
 }
 impl Tag for Complex64 {
     const TAG: u8 = 2;
+    const SCALAR: PersistedScalar = PersistedScalar::Complex64;
 }
 impl Tag for f32 {
     const TAG: u8 = 3;
+    const SCALAR: PersistedScalar = PersistedScalar::F32;
 }
 impl Tag for Complex32 {
     const TAG: u8 = 4;
+    const SCALAR: PersistedScalar = PersistedScalar::Complex32;
 }
 
 /// Unwrapping front end over the per-dtype inherent persistence methods.
@@ -1627,8 +1632,8 @@ macro_rules! assert_decode_as {
                 matches!(
                     error,
                     DecodeError::ScalarMismatch { actual, expected }
-                        if actual == <$stored as Tag>::TAG
-                            && expected == <$requested as Tag>::TAG
+                        if actual == <$stored as Tag>::SCALAR
+                            && expected == <$requested as Tag>::SCALAR
                 ),
                 "{error}"
             );
@@ -1687,18 +1692,25 @@ fn every_scalar_mismatch_direction_is_typed_and_precedes_provider_resolution() {
     let su2_bytes = su2
         .to_bytes_with(&Su2Codec::new(Arc::new(SU2FusionRule)))
         .unwrap();
+    let error = TensorMap::<SU2FusionRule, f64>::from_bytes_with(
+        &runtime,
+        &su2_bytes,
+        DecodeLimits::default(),
+        &missing,
+    )
+    .err()
+    .unwrap();
     assert!(matches!(
-        TensorMap::<SU2FusionRule, f64>::from_bytes_with(
-            &runtime,
-            &su2_bytes,
-            DecodeLimits::default(),
-            &missing,
-        ),
-        Err(DecodeError::ScalarMismatch {
-            actual: 3,
-            expected: 1
-        })
+        error,
+        DecodeError::ScalarMismatch {
+            actual: PersistedScalar::F32,
+            expected: PersistedScalar::F64,
+        }
     ));
+    assert_eq!(
+        error.to_string(),
+        "typed snapshot stores f32 values, but f64 was requested"
+    );
     assert_eq!(missing.resolve_calls.load(Ordering::Relaxed), 0);
 
     // A tensor snapshot is never a graded space, whatever its scalar tag.
