@@ -1641,6 +1641,8 @@ impl DenseExecutor for PanicDenseExecutor {
     }
 }
 
+mod adjoint_memo;
+
 mod copy;
 
 mod contract_dense;

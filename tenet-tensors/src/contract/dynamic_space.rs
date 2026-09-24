@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 use std::fmt;
 use std::hash::{Hash, Hasher};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use tenet_core::{
     BlockKey, BlockStructure, CheckedFusionAlgebra, CheckedFusionSpaceError, CheckedGenericFusion,
@@ -675,7 +675,25 @@ pub struct DynamicFusionMapSpace {
     homspace: Arc<FusionTreeHomSpace>,
     subblock_structure: Arc<BlockStructure>,
     admission: FusionSpaceAdmission,
+    /// The adjoint view's hom space and block structure, derived on first use.
+    ///
+    /// Why not the bounded complete-structure cache or a context cache: this
+    /// is immutable data derived only from `nout`, `nin`, `homspace`, and
+    /// `subblock_structure`, none of which is reassigned after construction,
+    /// so it lives and dies with the space and needs no key, byte bound, or
+    /// invalidation. Its cost is one adjoint hom space and block structure per
+    /// space that is ever adjointed. It stays out of `PartialEq` and the
+    /// layout hash because it is a function of the compared fields; clones
+    /// share the filled value. The error is boxed so an unused slot adds only
+    /// two pointers and the once-state to every space.
+    ///
+    /// Hazard: a struct update (`Self { subblock_structure, ..other }`) that
+    /// replaces `nout`, `nin`, `homspace`, or `subblock_structure` must also
+    /// reset this slot with `OnceLock::new()`, or it inherits a stale adjoint.
+    adjoint: OnceLock<Result<AdjointViewParts, Box<OperationError>>>,
 }
+
+type AdjointViewParts = (Arc<FusionTreeHomSpace>, Arc<BlockStructure>);
 
 impl PartialEq for DynamicFusionMapSpace {
     fn eq(&self, other: &Self) -> bool {
@@ -1153,6 +1171,7 @@ impl PreparedCheckedGenericDynamicSpace {
             homspace: Arc::new(self.homspace),
             subblock_structure: self.structure.commit().into_shared(),
             admission: FusionSpaceAdmission::Complete(self.identity),
+            adjoint: OnceLock::new(),
         }
     }
 }
@@ -2094,6 +2113,7 @@ impl DynamicFusionMapSpace {
                 homspace: Arc::new(homspace),
                 subblock_structure,
                 admission: FusionSpaceAdmission::Complete(rule.rule_identity()),
+                adjoint: OnceLock::new(),
             });
         }
         let nout = homspace.codomain().len();
@@ -2107,6 +2127,7 @@ impl DynamicFusionMapSpace {
             homspace: Arc::new(homspace),
             subblock_structure,
             admission: FusionSpaceAdmission::Complete(rule.rule_identity()),
+            adjoint: OnceLock::new(),
         })
     }
 
@@ -2130,6 +2151,7 @@ impl DynamicFusionMapSpace {
             homspace: Arc::new(homspace),
             subblock_structure,
             admission: FusionSpaceAdmission::Complete(rule.rule_identity()),
+            adjoint: OnceLock::new(),
         })
     }
 
@@ -2169,6 +2191,7 @@ impl DynamicFusionMapSpace {
             homspace: Arc::clone(space.homspace_arc()),
             subblock_structure: Arc::clone(space.subblock_structure()),
             admission: space.admission().clone(),
+            adjoint: OnceLock::new(),
         }
     }
 
@@ -2251,6 +2274,7 @@ impl DynamicFusionMapSpace {
             homspace: Arc::new(homspace),
             subblock_structure,
             admission: FusionSpaceAdmission::Complete(rule.rule_identity()),
+            adjoint: OnceLock::new(),
         })
     }
 
@@ -2380,6 +2404,7 @@ impl DynamicFusionMapSpace {
             homspace: Arc::new(homspace),
             subblock_structure,
             admission: FusionSpaceAdmission::Complete(rule.rule_identity()),
+            adjoint: OnceLock::new(),
         })
     }
 
@@ -2735,21 +2760,34 @@ impl DynamicFusionMapSpace {
     /// source layout, so this space is for replay bookkeeping, not for
     /// allocating fresh coupled storage.
     pub(crate) fn adjoint_view(&self) -> Result<Self, OperationError> {
-        let homspace = FusionTreeHomSpace::new(
-            self.homspace.domain().clone(),
-            self.homspace.codomain().clone(),
+        let (homspace, structure) = self
+            .adjoint
+            .get_or_init(|| {
+                let homspace = FusionTreeHomSpace::new(
+                    self.homspace.domain().clone(),
+                    self.homspace.codomain().clone(),
+                );
+                let structure = crate::lowering::adjoint_block_structure_view(
+                    self.nout,
+                    self.nin,
+                    &self.subblock_structure,
+                )?;
+                Ok((Arc::new(homspace), Arc::new(structure)))
+            })
+            .clone()
+            .map_err(|error| *error)?;
+        debug_assert_eq!(structure.rank(), self.subblock_structure.rank());
+        debug_assert_eq!(
+            structure.block_count(),
+            self.subblock_structure.block_count()
         );
-        let structure = crate::lowering::adjoint_block_structure_view(
-            self.nout,
-            self.nin,
-            &self.subblock_structure,
-        )?;
         Ok(Self {
             nout: self.nin,
             nin: self.nout,
-            homspace: Arc::new(homspace),
-            subblock_structure: Arc::new(structure),
+            homspace,
+            subblock_structure: structure,
             admission: self.admission.clone(),
+            adjoint: OnceLock::new(),
         })
     }
 
@@ -3658,6 +3696,7 @@ mod bound_invariant_tests {
             homspace: Arc::new(homspace),
             subblock_structure: structure,
             admission: FusionSpaceAdmission::Unbound,
+            adjoint: OnceLock::new(),
         };
 
         reset_core_intern_tables();
@@ -3738,6 +3777,7 @@ mod bound_invariant_tests {
             homspace: Arc::new(homspace),
             subblock_structure: structure,
             admission: FusionSpaceAdmission::Subset(rule.rule_identity()),
+            adjoint: OnceLock::new(),
         };
         reset_core_intern_tables();
         reset_scratch_publication_observations();
@@ -3836,6 +3876,7 @@ mod bound_invariant_tests {
         let raw = DynamicFusionMapSpace {
             nout: 0,
             nin: 1,
+            adjoint: OnceLock::new(),
             ..matrix_space()
         };
 
@@ -3873,6 +3914,7 @@ mod bound_invariant_tests {
         .unwrap();
         let raw = DynamicFusionMapSpace {
             subblock_structure: Arc::new(structure),
+            adjoint: OnceLock::new(),
             ..raw
         };
 
@@ -3993,6 +4035,7 @@ mod bound_invariant_tests {
         let subset = DynamicFusionMapSpace {
             subblock_structure: Arc::new(structure),
             admission: FusionSpaceAdmission::Subset(provider.rule_identity()),
+            adjoint: OnceLock::new(),
             ..complete
         };
 
@@ -4027,6 +4070,22 @@ mod bound_invariant_tests {
             })
         ));
         assert_eq!(final_result_layout_builds(), 0);
+    }
+
+    #[test]
+    fn memoized_adjoint_view_reads_the_current_admission() {
+        // What: admission is reassigned after construction when a layout is
+        // promoted, so the adjoint view reads it at call time; only the
+        // admission-independent hom space and structure are memoized.
+        let complete = DynamicFusionMapSpace::from_typed(&typed_z2_matrix_space());
+        let first = complete.adjoint_view().unwrap();
+        let mut unbound = complete.clone();
+        unbound.admission = FusionSpaceAdmission::Unbound;
+        let second = unbound.adjoint_view().unwrap();
+        assert_eq!(second.admission(), &FusionSpaceAdmission::Unbound);
+        assert_eq!(first.admission(), complete.admission());
+        assert!(Arc::ptr_eq(second.structure(), first.structure()));
+        assert!(Arc::ptr_eq(second.homspace_arc(), first.homspace_arc()));
     }
 }
 
@@ -5680,6 +5739,7 @@ mod scratch_cache_tests {
             .collect();
         let shifted_raw = DynamicFusionMapSpace {
             subblock_structure: Arc::new(BlockStructure::from_blocks(shifted_blocks).unwrap()),
+            adjoint: OnceLock::new(),
             ..raw.clone()
         };
         let canonical =
@@ -5818,6 +5878,7 @@ mod scratch_cache_tests {
         let incomplete = DynamicFusionMapSpace {
             subblock_structure: Arc::new(incomplete_structure),
             admission: FusionSpaceAdmission::Subset(Z2FusionRule.rule_identity()),
+            adjoint: OnceLock::new(),
             ..complete
         };
 
