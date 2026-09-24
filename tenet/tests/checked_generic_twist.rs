@@ -983,7 +983,9 @@ fn assert_compose_oracle<D>(
             );
         }
     }
-    assert_eq!(nonzero, actual_blocks.len());
+    // An empty middle reaches only the unit coupled sector; every other
+    // destination block must stay zero, which the value check above proves.
+    assert!(nonzero > 0);
 }
 
 fn assert_compose_any_braiding<D>(
@@ -991,7 +993,7 @@ fn assert_compose_any_braiding<D>(
     tag: u8,
     value: impl Fn(usize) -> D + Copy,
 ) where
-    D: TensorScalar + Into<Complex64>,
+    D: TensorScalar + tenet::prelude::AdvancedLinalgScalar + Into<Complex64>,
 {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedPivotalToy::new(tag, braiding, -1.0));
@@ -1024,7 +1026,15 @@ fn assert_compose_any_braiding<D>(
     // (middle V ⊗ W, with the μ = 1, 2 vertices of X ⊗ X → X) are compositions.
     let a = filled(0, &[&v, &w], &[&v]);
     let b = filled(3, &[&v], &[&v, &w]);
-    for (lhs, rhs) in [(&a, &b), (&b, &a)] {
+    // Dual legs in both middles: A': V ⊗ W* ← V* and B': V* ← V ⊗ W*.
+    let (v_dual, w_dual) = (v.try_dual().unwrap(), w.try_dual().unwrap());
+    let a_dual = filled(5, &[&v, &w_dual], &[&v_dual]);
+    let b_dual = filled(7, &[&v_dual], &[&v, &w_dual]);
+    // Empty middle (outer product through the unit): V ← () and () ← W.
+    let column = filled(11, &[&v], &[]);
+    let row = filled(13, &[], &[&w]);
+    let composed = |lhs: &TensorMap<CheckedPivotalToy, D>,
+                    rhs: &TensorMap<CheckedPivotalToy, D>| {
         let composed = lhs
             .compose(rhs)
             .unwrap_or_else(|error| panic!("{braiding:?}: {error:?}"));
@@ -1032,7 +1042,21 @@ fn assert_compose_any_braiding<D>(
         assert_eq!(composed.codomain(), lhs.codomain());
         assert_eq!(composed.domain(), rhs.domain());
         assert_compose_oracle(lhs, rhs, &composed);
+        composed
+    };
+    for (lhs, rhs) in [
+        (&a, &b),
+        (&b, &a),
+        (&a_dual, &b_dual),
+        (&b_dual, &a_dual),
+        (&column, &row),
+    ] {
+        composed(lhs, rhs);
     }
+    // `powi(2)` is one self-composition of the endomorphism A∘B.
+    let endomorphism = composed(&a, &b);
+    let squared = endomorphism.powi(2).unwrap();
+    assert_compose_oracle(&endomorphism, &endomorphism, &squared);
     // Composition is not a contraction over mismatched spaces, and a lazy
     // adjoint operand stays outside this engine's direct-operand scope.
     assert!(matches!(a.compose(&a), Err(GenericTensorError::Plan(_))));
