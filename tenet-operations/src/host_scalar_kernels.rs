@@ -801,6 +801,14 @@ where
         + crate::RecouplingCoefficientAction<C>,
     C: Copy,
 {
+    // The scale is folded as TensorKit's `α′ = α * coeff` (`_trace_permute!`)
+    // and keeps the coefficient in its own type; an exact one does not
+    // multiply, since `(1 + 0i) * (inf + 0i)` is `inf + NaN i`. Unlike
+    // TensorOperations, which applies `α′` per element before the reduction
+    // (`strided.jl`, `Scaler(α′)` inside `_mapreducedim!`), this applies it
+    // once to the traced sum.
+    let scale = crate::TransformScale::new(alpha, coefficient);
+    let identity = scale.is_identity();
     for output_linear in 0..output_len {
         let dst_index =
             strided_linear_offset(output_linear, output_shape, dst_strides, dst_offset)?;
@@ -814,10 +822,7 @@ where
                 strided_linear_offset(trace_linear, trace_shape, src_trace_strides, src_base)?;
             sum = sum + src_data[src_index].maybe_conj(source_conjugate);
         }
-        // Why not `alpha * sum` unconditionally: `1 * (inf + 0i)` is
-        // `inf + NaN i`, so an identity alpha must not multiply.
-        let scaled = if alpha.is_one() { sum } else { alpha * sum };
-        let value = scaled.scale_by_coefficient(coefficient);
+        let value = if identity { sum } else { scale.apply(sum) };
         dst_data[dst_index] = dst_data[dst_index] + value;
     }
     Ok(())
@@ -1577,6 +1582,156 @@ mod tests {
 
         assert!(dst[0].is_nan());
         assert!(dst[1].is_nan());
+    }
+
+    /// Three `output [2] x trace [2]` source blocks whose traced sums carry
+    /// `(inf, 1.5)`, `(-0, -0)`, NaN payloads and a subnormal.
+    fn special_trace_source() -> Vec<Complex64> {
+        vec![
+            Complex64::new(f64::INFINITY, 1.0),
+            Complex64::new(-0.0, -0.0),
+            Complex64::new(-0.0, 0.5),
+            Complex64::new(-0.0, -0.0),
+            Complex64::new(f64::from_bits(0x7ff8_0000_0000_1407), 2.5),
+            Complex64::new(1.5, f64::NEG_INFINITY),
+            Complex64::new(0.0, -2.0),
+            Complex64::new(-4.0, f64::from_bits(0xfff8_0000_0000_0042)),
+            Complex64::new(2.0, f64::INFINITY),
+            Complex64::new(-0.0, 3.0),
+            Complex64::new(-1.25, 0.5),
+            Complex64::new(f64::from_bits(1), -0.0),
+        ]
+    }
+
+    /// `(src_offset, dst_offset)` of each term; the last one accumulates a
+    /// second producer into the third destination block.
+    const TRACE_TERMS: [(isize, isize); 4] = [(0, 0), (4, 2), (8, 4), (0, 4)];
+
+    fn run_trace_terms<T, C: Copy>(dst: &mut [T], src: &[T], alpha: T, coefficients: [C; 4])
+    where
+        T: Copy
+            + Add<T, Output = T>
+            + Mul<T, Output = T>
+            + Zero
+            + One
+            + PartialEq
+            + ConjugateValue
+            + crate::RecouplingCoefficientAction<C>,
+    {
+        for (&(src_offset, dst_offset), coefficient) in TRACE_TERMS.iter().zip(coefficients) {
+            tensortrace_raw_strided_kernel_add_with_coefficient(
+                dst,
+                src,
+                &[2],
+                &[2],
+                &[1],
+                &[1],
+                &[2],
+                dst_offset,
+                src_offset,
+                false,
+                alpha,
+                coefficient,
+            )
+            .unwrap();
+        }
+    }
+
+    /// What: the raw trace applies a real coefficient to a complex traced sum
+    /// componentwise, i.e. exactly as it acts on the traced real and
+    /// imaginary components, with `α = 1` and the coefficient applied to
+    /// the traced sum.
+    #[test]
+    fn coefficient_tensortrace_raw_scales_real_coefficients_componentwise() {
+        let src = special_trace_source();
+        let re: Vec<f64> = src.iter().map(|v| v.re).collect();
+        let im: Vec<f64> = src.iter().map(|v| v.im).collect();
+        for coefficients in [[-0.5, 1.0, 2.0, 0.25], [0.0, -1.0, 0.1, 1.0]] {
+            let mut got = vec![Complex64::new(-0.0, -0.0); 6];
+            let mut want_re = vec![-0.0; 6];
+            let mut want_im = vec![-0.0; 6];
+            run_trace_terms(&mut got, &src, Complex64::one(), coefficients);
+            run_trace_terms(&mut want_re, &re, 1.0, coefficients);
+            run_trace_terms(&mut want_im, &im, 1.0, coefficients);
+            for (position, value) in got.iter().enumerate() {
+                assert_eq!(
+                    (value.re.to_bits(), value.im.to_bits()),
+                    (want_re[position].to_bits(), want_im[position].to_bits()),
+                    "element {position} for {coefficients:?}"
+                );
+            }
+        }
+    }
+
+    /// What: an anyonic complex coefficient keeps the complex multiply, an
+    /// exact `1 + 0i` does not multiply, and a non-unit alpha is folded into
+    /// the coefficient first (TensorKit's `α′ = α * coeff`) and then applied
+    /// to the traced sum.
+    #[test]
+    fn coefficient_tensortrace_raw_complex_coefficients_and_folded_alpha() {
+        let src = special_trace_source();
+        let sum = |output: usize, src_offset: usize| {
+            src[src_offset + output] + src[src_offset + output + 2]
+        };
+        let one = Complex64::new(1.0, 0.0);
+        let mut got = vec![Complex64::zero(); 6];
+        run_trace_terms(&mut got, &src, one, [one, one, one, one]);
+        // `(inf, 1.5)` survives only because `1 + 0i` does not multiply.
+        assert_eq!(
+            (got[0].re, got[0].im.to_bits()),
+            (f64::INFINITY, 1.5f64.to_bits())
+        );
+
+        let coefficient = Complex64::new(0.6, 0.8);
+        let mut got = vec![Complex64::zero(); 2];
+        tensortrace_raw_strided_kernel_add_with_coefficient(
+            &mut got,
+            &src,
+            &[2],
+            &[2],
+            &[1],
+            &[1],
+            &[2],
+            0,
+            8,
+            false,
+            one,
+            coefficient,
+        )
+        .unwrap();
+        let want = [0, 1].map(|output| Complex64::zero() + sum(output, 8) * coefficient);
+        assert_eq!(got, want);
+
+        let alpha = Complex64::new(0.5, -0.25);
+        let finite: Vec<Complex64> = (0..12)
+            .map(|k| Complex64::new(k as f64 * 0.37 - 2.0, 1.3 - k as f64 * 0.11))
+            .collect();
+        let mut got = vec![Complex64::zero(); 2];
+        tensortrace_raw_strided_kernel_add_with_coefficient(
+            &mut got,
+            &finite,
+            &[2],
+            &[2],
+            &[1],
+            &[1],
+            &[2],
+            0,
+            4,
+            false,
+            alpha,
+            3.0,
+        )
+        .unwrap();
+        let folded = Complex64::new(alpha.re * 3.0, alpha.im * 3.0);
+        let want = [0, 1]
+            .map(|output| Complex64::zero() + folded * (finite[4 + output] + finite[6 + output]));
+        let bits = |values: &[Complex64]| {
+            values
+                .iter()
+                .map(|v| (v.re.to_bits(), v.im.to_bits()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(bits(&got), bits(&want));
     }
 
     #[test]

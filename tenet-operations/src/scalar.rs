@@ -225,6 +225,19 @@ where
             Self::Data(scale) => scale.is_one(),
         }
     }
+
+    /// `scale * value`, with a `Structural` coefficient acting in its own type
+    /// (componentwise for a real coefficient on a complex payload).
+    #[inline]
+    pub fn apply(self, value: D) -> D
+    where
+        D: Mul<D, Output = D>,
+    {
+        match self {
+            Self::Structural(coefficient) => value.scale_by_coefficient(coefficient),
+            Self::Data(scale) => scale * value,
+        }
+    }
 }
 
 #[doc(hidden)]

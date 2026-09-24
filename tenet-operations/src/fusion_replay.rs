@@ -22,7 +22,10 @@ use crate::storage_scratch::StorageFusionBlockContractWorkspace;
 use crate::strided::{offset_to_isize, strides_to_isize};
 use crate::structure_identity::validate_structure_identity;
 use crate::transform_structure::validate_destination_layouts_injective;
-use crate::{DenseBlockScalar, HostKernelAdapter, OperationError, RecouplingCoefficientAction};
+use crate::{
+    DenseBlockScalar, HostKernelAdapter, OperationError, RecouplingCoefficientAction,
+    TransformScale,
+};
 
 /// Storage-handle replay accepts only operands whose coupled-sector matrices
 /// sit directly in storage. Host replay also supports group-local pack/scatter,
@@ -2151,11 +2154,12 @@ fn pack_group<A, T, C>(
 ) -> Result<(), OperationError>
 where
     A: HostKernelAdapter<T>,
-    T: Copy + RecouplingCoefficientAction<C>,
+    T: Copy + One + PartialEq + RecouplingCoefficientAction<C>,
     C: Copy,
 {
     for layout in &group.subblocks {
-        kernels.copy_scale_strided(
+        kernels.transform_strided_baked(
+            &mut Vec::new(),
             packed,
             data,
             &layout.block.shape,
@@ -2164,7 +2168,10 @@ where
             layout.matrix_offset,
             layout.block.offset,
             false,
-            T::coefficient_as_data(layout.coefficient),
+            TransformScale::Structural(layout.coefficient),
+            None,
+            None,
+            None,
         )?;
     }
     Ok(())
@@ -2179,11 +2186,12 @@ fn scatter_group<A, T, C>(
 ) -> Result<(), OperationError>
 where
     A: HostKernelAdapter<T>,
-    T: Copy + RecouplingCoefficientAction<C>,
+    T: Copy + One + PartialEq + RecouplingCoefficientAction<C>,
     C: Copy,
 {
     for layout in &group.subblocks {
-        kernels.axpby_strided(
+        kernels.transform_strided_baked(
+            &mut Vec::new(),
             data,
             packed,
             &layout.block.shape,
@@ -2191,8 +2199,11 @@ where
             &layout.matrix_strides,
             layout.block.offset,
             layout.matrix_offset,
-            T::coefficient_as_data(layout.coefficient),
-            beta,
+            false,
+            TransformScale::Structural(layout.coefficient),
+            Some(beta),
+            None,
+            None,
         )?;
     }
     Ok(())
@@ -4239,5 +4250,207 @@ mod tests {
         assert_eq!(zeroed, assigned);
         assert!(zeroed.iter().all(|v| v.to_bits() == 0 || *v == 4.0));
         assert_eq!(zeroed.iter().filter(|v| **v == 4.0).count(), 4);
+    }
+
+    /// Payload components that separate a componentwise real scale from a
+    /// promoted complex multiply: `0 * inf` and `0 * NaN` pollute the other
+    /// component, and `x - 0 * y` can flip the sign of a zero.
+    const SPECIAL_COMPONENTS: [(f64, f64); 12] = [
+        (f64::INFINITY, 1.0),
+        (-0.0, -0.0),
+        (f64::from_bits(0x7ff8_0000_0000_1407), 2.5),
+        (1.5, f64::NEG_INFINITY),
+        (-0.0, 3.0),
+        (f64::from_bits(1), -0.0),
+        (0.0, -2.0),
+        (-4.0, f64::from_bits(0xfff8_0000_0000_0042)),
+        (0.75, -0.0),
+        (f64::NEG_INFINITY, -0.0),
+        (-1.25, 0.5),
+        (2.0, f64::INFINITY),
+    ];
+
+    /// Three `2 x 2` storage blocks packed into one `2 x 6` column-major
+    /// matrix, each with its own real structural coefficient (`0` included:
+    /// `0 * (inf + 1i)` is `(NaN, 0)` componentwise, `(NaN, NaN)` promoted).
+    fn three_block_group<C: Copy>(coefficients: [C; 3]) -> FusionBlockMatrixGroup<C> {
+        FusionBlockMatrixGroup {
+            coupled: SectorId::new(0),
+            rows: 2,
+            cols: 6,
+            needs_clear: false,
+            direct_offset: None,
+            block_indices: vec![0, 1, 2],
+            subblocks: coefficients
+                .iter()
+                .enumerate()
+                .map(|(block, &coefficient)| FusionSubblockMatrixLayout {
+                    // Storage blocks are transposed against the matrix so the
+                    // pack is a genuine strided move.
+                    block: FusionStridedBlockLayout {
+                        shape: vec![2, 2],
+                        strides: vec![2, 1],
+                        offset: 4 * block as isize,
+                    },
+                    matrix_offset: 4 * block as isize,
+                    matrix_strides: vec![1, 2],
+                    coefficient,
+                })
+                .collect(),
+        }
+    }
+
+    fn component_bits(values: &[Complex64]) -> Vec<(u64, u64)> {
+        values
+            .iter()
+            .map(|v| (v.re.to_bits(), v.im.to_bits()))
+            .collect()
+    }
+
+    fn pair_bits(re: &[f64], im: &[f64]) -> Vec<(u64, u64)> {
+        re.iter()
+            .zip(im)
+            .map(|(re, im)| (re.to_bits(), im.to_bits()))
+            .collect()
+    }
+
+    /// What: pack and scatter apply a real structural coefficient to a complex
+    /// block componentwise, i.e. exactly as it acts on the two real component
+    /// blocks, for coefficients `1`, `-0.5` and `0`, and for scatter `beta`
+    /// in `{0, 1, 0.5}`. The coefficient-0 result is TeNeT's componentwise
+    /// product, not TensorKit's: VectorInterface's `scale(x, α)` returns
+    /// `zero(x)` at `iszero(α)` and so wipes NaN and inf. That zero-scale
+    /// divergence predates this path and is tracked separately.
+    #[test]
+    fn pack_and_scatter_scale_real_coefficients_componentwise() {
+        let group = three_block_group([1.0, -0.5, 0.0]);
+        let data: Vec<Complex64> = SPECIAL_COMPONENTS
+            .iter()
+            .map(|&(re, im)| Complex64::new(re, im))
+            .collect();
+        let re: Vec<f64> = data.iter().map(|v| v.re).collect();
+        let im: Vec<f64> = data.iter().map(|v| v.im).collect();
+        let mut kernels = crate::StridedHostKernelAdapter::default();
+
+        let mut packed = vec![Complex64::zero(); 12];
+        pack_group(&mut kernels, &group, &data, &mut packed).unwrap();
+        let mut packed_re = vec![0.0; 12];
+        let mut packed_im = vec![0.0; 12];
+        pack_group(&mut kernels, &group, &re, &mut packed_re).unwrap();
+        pack_group(&mut kernels, &group, &im, &mut packed_im).unwrap();
+        assert_eq!(component_bits(&packed), pair_bits(&packed_re, &packed_im));
+        // The coefficient-0 block of the `(inf, 1)`-bearing payload is the
+        // sharpest case; pin it independently of the oracle as well.
+        let zero_block = &packed[8..];
+        assert!(zero_block.iter().any(|v| v.re.is_nan() && v.im == 0.0));
+
+        // Why a finite, nonzero destination for the general beta: beta is a
+        // payload-typed scalar, so `(0.5 + 0i) * dst` is a complex multiply by
+        // design; only the packed side carries the non-finite values there.
+        let finite: Vec<Complex64> = (0..12)
+            .map(|k| Complex64::new(k as f64 * 0.37 - 2.1, 1.3 - k as f64 * 0.29))
+            .collect();
+        for beta in [0.0, 1.0, 0.5] {
+            let initial = if beta == 0.5 { &finite } else { &data };
+            let mut scattered = initial.clone();
+            scatter_group(
+                &mut kernels,
+                &group,
+                &mut scattered,
+                &packed,
+                Complex64::new(beta, 0.0),
+            )
+            .unwrap();
+            let mut scattered_re: Vec<f64> = initial.iter().map(|v| v.re).collect();
+            let mut scattered_im: Vec<f64> = initial.iter().map(|v| v.im).collect();
+            scatter_group(&mut kernels, &group, &mut scattered_re, &packed_re, beta).unwrap();
+            scatter_group(&mut kernels, &group, &mut scattered_im, &packed_im, beta).unwrap();
+            assert_eq!(
+                component_bits(&scattered),
+                pair_bits(&scattered_re, &scattered_im),
+                "beta = {beta}"
+            );
+        }
+    }
+
+    /// What: a complex (anyonic) coefficient keeps the full complex multiply,
+    /// except that an exact `1 + 0i` does not multiply at all.
+    #[test]
+    fn pack_keeps_complex_coefficients_complex_and_skips_one() {
+        let coefficients = [
+            Complex64::new(1.0, 0.0),
+            Complex64::new(0.6, 0.8),
+            Complex64::new(-0.5, 0.25),
+        ];
+        let group = three_block_group(coefficients);
+        let data: Vec<Complex64> = SPECIAL_COMPONENTS
+            .iter()
+            .map(|&(re, im)| Complex64::new(re, im))
+            .collect();
+        let mut kernels = crate::StridedHostKernelAdapter::default();
+        let mut packed = vec![Complex64::zero(); 12];
+        pack_group(&mut kernels, &group, &data, &mut packed).unwrap();
+        for (block, coefficient) in coefficients.into_iter().enumerate() {
+            for row in 0..2 {
+                for col in 0..2 {
+                    let value = data[4 * block + 2 * row + col];
+                    let want = if block == 0 {
+                        value
+                    } else {
+                        value * coefficient
+                    };
+                    let got = packed[4 * block + row + 2 * col];
+                    assert_eq!(
+                        (got.re.to_bits(), got.im.to_bits()),
+                        (want.re.to_bits(), want.im.to_bits()),
+                        "block {block} ({row}, {col})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// What: for finite payloads the componentwise scale that pack applies is
+    /// bit for bit the promoted complex product `(c + 0i)(x + yi)` whenever
+    /// both component products are nonzero, and differs only in the sign of a
+    /// zero product, where the componentwise result is the real oracle's.
+    #[test]
+    fn componentwise_pack_matches_promoted_product_on_finite_values() {
+        let coefficients = [-0.5, 3.0, 0.1];
+        let group = three_block_group(coefficients);
+        let finite: Vec<Complex64> = (0..12)
+            .map(|k| {
+                let k = k as f64;
+                Complex64::new((k - 5.5) * 0.37, (7.0 - k) * 1.3 + 0.01)
+            })
+            .collect();
+        let mut kernels = crate::StridedHostKernelAdapter::default();
+        let mut packed = vec![Complex64::zero(); 12];
+        pack_group(&mut kernels, &group, &finite, &mut packed).unwrap();
+        for (block, &coefficient) in coefficients.iter().enumerate() {
+            for row in 0..2 {
+                for col in 0..2 {
+                    let value = finite[4 * block + 2 * row + col];
+                    let promoted = Complex64::new(coefficient, 0.0) * value;
+                    let got = packed[4 * block + row + 2 * col];
+                    assert_eq!(
+                        (got.re.to_bits(), got.im.to_bits()),
+                        (promoted.re.to_bits(), promoted.im.to_bits())
+                    );
+                }
+            }
+        }
+
+        // `-1 * (+0 - 3i)`: componentwise `(-0, 3)`; promoted
+        // `(-1)(+0) - (0)(-3) = -0 - (-0) = +0`.
+        let group = three_block_group([-1.0, -1.0, -1.0]);
+        let data = vec![Complex64::new(0.0, -3.0); 12];
+        let mut packed = vec![Complex64::zero(); 12];
+        pack_group(&mut kernels, &group, &data, &mut packed).unwrap();
+        let promoted = Complex64::new(-1.0, 0.0) * data[0];
+        assert_eq!(promoted.re.to_bits(), 0.0f64.to_bits());
+        assert!(packed
+            .iter()
+            .all(|v| v.re.to_bits() == (-0.0f64).to_bits() && v.im == 3.0));
     }
 }
