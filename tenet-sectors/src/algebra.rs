@@ -4,6 +4,7 @@ use core::ops::{Add, Mul};
 use std::convert::Infallible;
 
 use num_complex::Complex64;
+use smallvec::SmallVec;
 
 use crate::{BraidingStyleKind, FusionStyleKind, RuleIdentity, SectorId, SectorVec};
 
@@ -208,6 +209,73 @@ pub trait FusionRule: 'static {
     /// that the two entry points agree on which sectors exist (#971).
     fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
         usize::from(self.fusion_channels(left, right).contains(&coupled))
+    }
+
+    /// This sector's position in TensorKit's sector order; see
+    /// [`SectorOrderKey`] for the contract.
+    ///
+    /// The default is the id itself, which is correct only when ids ascend in
+    /// TensorKit `findindex` order. A provider whose codec is not monotone in
+    /// that order (U(1)'s zigzag ids) or that has several factors (products)
+    /// must override it.
+    fn sector_order_key(&self, sector: SectorId) -> SectorOrderKey {
+        SectorOrderKey::position(sector.id() as u64)
+    }
+}
+
+/// A sector's position in TensorKit's sector order, used where a TeNeT result
+/// depends on sector order and must agree with TensorKit's: today, which
+/// sector a truncation keeps at an exact cross-sector tie.
+///
+/// `SectorId` stays the storage and interning key; this is only a sort key.
+///
+/// A key is the list of TensorKitSectors `findindex(values(I), c) - 1`
+/// positions of the sector's factors, one position for a simple sector.
+/// Keys order by the sum of the positions, then lexicographically. For one
+/// position that is the plain position order, which is `isless` for every
+/// TensorKitSectors irrep type. For several positions it is TensorKitSectors
+/// `isless(::ProductSector, ::ProductSector)` (`src/product.jl`), which
+/// compares exactly this degree-then-lexicographic order over the factors'
+/// `findindex` values. Because TensorKit's `⊠` flattens and TeNeT's product
+/// nests, a product's key is its factors' keys concatenated.
+///
+/// Why positions rather than a comparison hook: a product's order needs its
+/// factors' positions, not only their mutual order, and a key lets a caller
+/// compute each sector's rank once instead of inside a sort comparator.
+///
+/// Implementations must give distinct sectors of one rule distinct keys of
+/// one length.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct SectorOrderKey(SmallVec<[u64; 4]>);
+
+impl SectorOrderKey {
+    /// The key of a simple sector at `findindex - 1 = position`.
+    pub fn position(position: u64) -> Self {
+        Self(SmallVec::from_slice(&[position]))
+    }
+
+    /// The key of `left ⊠ right`, flattened as TensorKit's `⊠` flattens.
+    pub fn product(mut left: Self, right: Self) -> Self {
+        left.0.extend_from_slice(&right.0);
+        left
+    }
+
+    fn degree(&self) -> u128 {
+        self.0.iter().map(|&position| u128::from(position)).sum()
+    }
+}
+
+impl Ord for SectorOrderKey {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        self.degree()
+            .cmp(&other.degree())
+            .then_with(|| self.0.cmp(&other.0))
+    }
+}
+
+impl PartialOrd for SectorOrderKey {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
     }
 }
 
@@ -806,6 +874,12 @@ pub trait CheckedGenericFusion {
         right: SectorId,
         coupled: SectorId,
     ) -> Result<usize, Self::Error>;
+
+    /// The checked-Generic counterpart of [`FusionRule::sector_order_key`],
+    /// with the same default and contract.
+    fn sector_order_key(&self, sector: SectorId) -> SectorOrderKey {
+        SectorOrderKey::position(sector.id() as u64)
+    }
 }
 
 /// Provider-side labels and checked duality used by ordinary typed tensors.
@@ -972,6 +1046,10 @@ impl<R: FusionRule> CheckedGenericFusion for InfallibleGeneric<'_, R> {
         coupled: SectorId,
     ) -> Result<usize, Self::Error> {
         Ok(self.0.nsymbol(left, right, coupled))
+    }
+
+    fn sector_order_key(&self, sector: SectorId) -> SectorOrderKey {
+        self.0.sector_order_key(sector)
     }
 }
 

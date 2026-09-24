@@ -27,10 +27,9 @@
 //!
 //! ## Cross-sector exact ties
 //!
-//! `select_truncation` breaks an exact tie between two sectors in ascending
-//! `SectorId` order (a deterministic TeNeT rule, not TensorKit's `isless`
-//! order for every sector type), sorting the
-//! feed itself when a producer hands it another order (#1305). Host feeds the
+//! `select_truncation` breaks an exact tie between two sectors in TensorKit's
+//! sector order (#1381), sorting the feed itself when a producer hands it
+//! another order (#1305). Host feeds the
 //! first-encounter block order of the input and `find_truncated` a sorted
 //! one, so the tie cases below are part of the exact selection gate whatever order a
 //! `BlockStructure` stores its blocks in.

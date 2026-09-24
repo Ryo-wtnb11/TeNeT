@@ -12,12 +12,19 @@
 //! All budgets are weighted by the coupled sector's quantum dimension: one
 //! kept value of an SU(2) spin-j sector consumes `2j + 1` of a rank budget
 //! and contributes `(2j + 1) * value^2` to the 2-norm.
+//!
+//! An exact tie between sectors goes to the sector TensorKit's `isless`
+//! puts first: [`Truncation::Rank`] keeps it first and
+//! [`Truncation::DiscardWeight`] discards it first, as TensorKit's stable
+//! `sortperm` over its sorted `SectorVector` does. The order comes from the
+//! provider's `sector_order_key`; `docs/sector_id_compatibility.md` records it
+//! for every built-in provider.
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BinaryHeap};
 use std::fmt;
 
-use tenet_core::{RuleIdentity, SectorId};
+use tenet_core::{RuleIdentity, SectorId, SectorOrderKey};
 
 /// A fixed per-sector prefix count, TensorKit's `TruncationSpace`
 /// (`src/factorizations/truncation.jl:261-269`).
@@ -289,33 +296,35 @@ pub struct TruncationDecision {
 /// are not finite, non-negative and descending, or that repeat a sector.
 ///
 /// The decision does not depend on the order of `spectra`: it is taken in
-/// ascending [`WeightedSpectrum::sector`] order and `kept` is reported in the
-/// caller's order.
+/// ascending `order_key(sector)` order and `kept` is reported in the
+/// caller's order. That order breaks exact cross-sector ties: the earlier
+/// sector is kept first by [`Truncation::Rank`] and discarded first by
+/// [`Truncation::DiscardWeight`], as TensorKit's stable `sortperm` over its
+/// `SectorVector` does. Callers pass the rule's
+/// [`FusionRule::sector_order_key`](tenet_core::FusionRule::sector_order_key),
+/// so a tie keeps the sector TensorKit keeps.
 pub fn select_truncation(
     spectra: &[WeightedSpectrum<'_>],
     truncation: &Truncation,
     rule: &RuleIdentity,
+    order_key: impl Fn(SectorId) -> SectorOrderKey,
 ) -> Result<TruncationDecision, TruncationError> {
     validate_rule(truncation, rule)?;
     validate_truncation(truncation)?;
     validate_spectra(spectra)?;
     // Cross-sector ties go to the earlier slice position and the norms sum in
-    // slice order, so the decision is defined on ascending `SectorId` order,
-    // a deterministic tie rule, whatever order the producer encountered its
-    // blocks in. It is TensorKit's `SectorVector` (sorted, `isless`) order
-    // only where the sector codec is monotone in `isless`; U(1) ids are
-    // zigzag-encoded (0, -1, +1, ...) while TensorKit orders 0, +1, -1, ...,
-    // so an exact +-q tie keeps the other sector than TensorKit does. Why sort instead of rejecting: expert
-    // layouts may legitimately store coupled sectors out of order, and the
-    // O(G log G) permutation of G slice headers is spectrum-free work.
-    if spectra
-        .windows(2)
-        .all(|pair| pair[0].sector < pair[1].sector)
-    {
+    // slice order, so the slice is put in TensorKit's sector order first.
+    // Why sort instead of rejecting: expert layouts and the id-ordered typed
+    // facade legitimately feed other orders, and the O(G log G) permutation
+    // of G slice headers, one key per sector, is spectrum-free work. The
+    // `SectorId` after the key only makes the order total for a provider
+    // whose keys break the distinctness contract.
+    let key = |spectrum: &WeightedSpectrum<'_>| (order_key(spectrum.sector), spectrum.sector);
+    if spectra.windows(2).all(|pair| key(&pair[0]) < key(&pair[1])) {
         return Ok(decide(spectra, truncation));
     }
     let mut order: Vec<usize> = (0..spectra.len()).collect();
-    order.sort_unstable_by_key(|&index| spectra[index].sector);
+    order.sort_by_cached_key(|&index| key(&spectra[index]));
     if order
         .windows(2)
         .any(|pair| spectra[pair[0]].sector == spectra[pair[1]].sector)
@@ -614,7 +623,7 @@ impl Ord for TailCandidate {
 }
 
 /// Candidates as `(sector, index)` sorted by descending value; ties keep the
-/// slice order (ascending `SectorId` after `select_truncation`), the same
+/// slice order (TensorKit sector order after `select_truncation`), the same
 /// stable rule as TensorKit `sortperm(parent(values); rev=true)` over its own
 /// sector order.
 fn descending_candidates(spectra: &[WeightedSpectrum<'_>]) -> Vec<(usize, usize)> {
@@ -754,7 +763,9 @@ mod tests {
         spectra: &[WeightedSpectrum<'_>],
         truncation: &Truncation,
     ) -> Result<TruncationDecision, TruncationError> {
-        select_truncation(spectra, truncation, &rule())
+        select_truncation(spectra, truncation, &rule(), |sector| {
+            SectorOrderKey::position(sector.id() as u64)
+        })
     }
 
     fn profile(pairs: [(usize, usize); 2]) -> TruncationSpace {
