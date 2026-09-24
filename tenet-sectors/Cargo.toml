@@ -19,4 +19,4 @@ racah-generated = ["racah/cgc-gen"]
 smallvec = { version = "1", features = ["const_generics", "union"] }
 num-complex = "0.4"
 num-traits = "0.2"
-racah = { version = "0.2.1" }
+racah = { version = "0.2.2" }
