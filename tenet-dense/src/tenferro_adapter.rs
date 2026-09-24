@@ -1628,7 +1628,24 @@ fn with_cpu_linalg<R: Send>(
     f: impl FnOnce(&mut dyn BackendSession) -> tenferro_tensor::Result<R> + Send,
 ) -> tenferro_tensor::Result<R> {
     note_session_opened();
+    #[cfg(test)]
+    {
+        let caller = std::thread::current().id();
+        let (result, session) =
+            backend.with_backend_session(|s| (f(s), std::thread::current().id()));
+        SESSION_THREADS.with(|threads| threads.borrow_mut().push((caller, session)));
+        result
+    }
+    #[cfg(not(test))]
     backend.with_backend_session(f)
+}
+
+// Test-only record, on the calling thread, of (caller thread, thread the
+// Tenferro session closure ran on) for each `with_cpu_linalg` session.
+#[cfg(test)]
+thread_local! {
+    static SESSION_THREADS: std::cell::RefCell<Vec<(std::thread::ThreadId, std::thread::ThreadId)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 #[cfg(feature = "provider-inject")]
@@ -1706,6 +1723,51 @@ mod linalg_scope_tests {
             assert_eq!(scoped, unscoped);
             assert!(!IN_LINALG_SCOPE.get(), "scope flag leaks past the call");
         }
+    }
+
+    fn session_threads_of(
+        run: impl FnOnce(),
+    ) -> Vec<(std::thread::ThreadId, std::thread::ThreadId)> {
+        SESSION_THREADS.with(|threads| threads.borrow_mut().clear());
+        run();
+        SESSION_THREADS.with(|threads| threads.take())
+    }
+
+    /// Tenferro-side evidence, not TeNeT bookkeeping: inside the scope every
+    /// session closure runs on the body's own thread, so no session installs
+    /// onto the pool again; outside it each session hops to a pool worker.
+    #[test]
+    fn scoped_sessions_run_on_the_body_thread_and_unscoped_ones_hop() {
+        let mut executor = DefaultDenseExecutor::new();
+        let mut body_thread = None;
+        let mut scoped = Vec::new();
+        executor
+            .with_linalg_scope(&mut |dense| {
+                body_thread = Some(std::thread::current().id());
+                scoped = session_threads_of(|| {
+                    factor_bits(dense);
+                });
+                Ok(())
+            })
+            .unwrap();
+        let body_thread = body_thread.unwrap();
+        assert_ne!(
+            body_thread,
+            std::thread::current().id(),
+            "body runs on a pool worker"
+        );
+        assert_eq!(scoped.len(), 6);
+        assert!(scoped
+            .iter()
+            .all(|&(caller, session)| caller == body_thread && session == body_thread));
+
+        let unscoped = session_threads_of(|| {
+            factor_bits(&mut executor);
+        });
+        assert_eq!(unscoped.len(), 6);
+        assert!(unscoped
+            .iter()
+            .all(|&(caller, session)| caller == std::thread::current().id() && session != caller));
     }
 
     #[test]

@@ -49,17 +49,20 @@ pub enum DenseFactorization {
     Qr,
 }
 
-/// Lends any sized executor as a trait object, so that
-/// [`DenseExecutor::with_linalg_scope`]'s default can pass `self` to its body
-/// even when it is called through `E: DenseExecutor + ?Sized`.
-#[doc(hidden)]
-pub trait AsDynDenseExecutor {
-    fn as_dyn_dense_executor(&mut self) -> &mut dyn DenseExecutor;
-}
+mod sealed {
+    /// Lends any sized executor as a trait object, so that
+    /// [`super::DenseExecutor::with_linalg_scope`]'s default can pass `self`
+    /// to its body even when it is called through
+    /// `E: DenseExecutor + ?Sized`. Blanket-implemented; not nameable outside
+    /// this crate.
+    pub trait AsDynDenseExecutor {
+        fn as_dyn_dense_executor(&mut self) -> &mut dyn super::DenseExecutor;
+    }
 
-impl<T: DenseExecutor> AsDynDenseExecutor for T {
-    fn as_dyn_dense_executor(&mut self) -> &mut dyn DenseExecutor {
-        self
+    impl<T: super::DenseExecutor> AsDynDenseExecutor for T {
+        fn as_dyn_dense_executor(&mut self) -> &mut dyn super::DenseExecutor {
+            self
+        }
     }
 }
 
@@ -67,7 +70,7 @@ impl<T: DenseExecutor> AsDynDenseExecutor for T {
 pub type DenseLinalgScopeBody<'a> =
     dyn FnMut(&mut dyn DenseExecutor) -> Result<(), DenseError> + Send + 'a;
 
-pub trait DenseExecutor: AsDynDenseExecutor {
+pub trait DenseExecutor: sealed::AsDynDenseExecutor {
     fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError>;
     fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError>;
     fn eigh(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError>;
