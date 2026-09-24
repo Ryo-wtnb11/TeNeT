@@ -113,6 +113,18 @@ fn warmed_non_abelian_inner_and_norm_do_not_allocate() {
 
     assert_eq!(inner_allocations, 0);
     assert_eq!(norm_allocations, 0);
+
+    // Out-of-range payloads take the rescaling passes, which add none either.
+    for scale in [1e200, 1e-200] {
+        let extreme = lhs.scale(Complex64::new(scale, 0.0));
+        black_box(extreme.norm().unwrap());
+        let (value, allocations) = measured(|| extreme.norm().unwrap());
+        assert!(value.is_finite() && value > 0.0, "{scale:e}: {value:e}");
+        assert_eq!(allocations, 0, "rescaled norm at {scale:e}");
+        let (value, allocations) = measured(|| extreme.norm_p(3.0).unwrap());
+        assert!(value.is_finite() && value > 0.0, "{scale:e}: {value:e}");
+        assert_eq!(allocations, 0, "rescaled norm_p(3) at {scale:e}");
+    }
 }
 
 #[test]
@@ -452,6 +464,27 @@ fn warmed_checked_generic_reductions_do_not_allocate() {
     ] {
         black_box(value);
         assert_eq!(allocations, 0, "{row}");
+    }
+
+    // The rescaled checked norm neither allocates nor loses the value: scaling
+    // commutes with the norm, so `norm(s * t) = s * norm(t)` within the
+    // workspace rule taken relative to the result (the payload's entry count
+    // bounds the terms of the sum).
+    let norm = lhs.norm().unwrap();
+    for scale in [1e200, 1e-200] {
+        let extreme = lhs.scale(Complex64::new(scale, 0.0));
+        let lazy = extreme.adjoint().unwrap();
+        black_box((extreme.norm().unwrap(), lazy.norm().unwrap()));
+        for (row, tensor) in [("owned", &extreme), ("lazy", &lazy)] {
+            let (value, allocations) = measured(|| tensor.norm().unwrap());
+            assert_eq!(allocations, 0, "{row} rescaled norm at {scale:e}");
+            let want = scale * norm;
+            let bound = 32.0 * (lhs.data().len() as f64).sqrt() * f64::EPSILON * want;
+            assert!(
+                (value - want).abs() <= bound,
+                "{row} {scale:e}: {value:e} against {want:e}"
+            );
+        }
     }
 }
 
