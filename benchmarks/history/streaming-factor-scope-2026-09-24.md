@@ -172,7 +172,8 @@ allocation evidence.
 The scope holds the process-wide execution permit for the whole call, including
 TeNeT's own between-block gauge, adjoint copies, scatter and validation. Under
 default threads another thread's Tenferro call now waits for that work as well
-as for the kernels. The body also runs on a Tenferro pool worker, so
-thread-local state read inside it (TeNeT's test probes, thread-local
-allocation counters) belongs to that worker; the probe-reading unit tests use a
-one-thread executor for that reason.
+as for the kernels. The body also runs on a Tenferro pool worker (on Linux
+even at one thread, where Tenferro's managed engine keeps a worker pool), so
+thread-local state read inside it belongs to that worker; the factorization
+layer's test probes are therefore moved into and out of the body by
+`in_linalg_scope`.

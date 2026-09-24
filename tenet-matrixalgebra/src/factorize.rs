@@ -6034,6 +6034,51 @@ where
         .map_err(OperationError::Dense)
 }
 
+/// The test probes follow the scope body: it may run on a backend worker
+/// thread, and the probes are thread-local so that parallel tests stay apart.
+/// Moving them in and out makes a probe observe the call, whichever thread
+/// runs it.
+#[cfg(test)]
+macro_rules! test_probes {
+    ($($field:ident: $key:ident: $ty:ty),* $(,)?) => {
+        struct TestProbes {
+            $($field: $ty,)*
+        }
+
+        impl TestProbes {
+            fn take() -> Self {
+                Self { $($field: $key.take(),)* }
+            }
+
+            fn put(self) {
+                $($key.set(self.$field);)*
+            }
+        }
+    };
+}
+
+#[cfg(test)]
+test_probes! {
+    compact_svd: COMPACT_SVD_COPY_PROBE: CompactSvdCopyProbe,
+    compact_qr: COMPACT_QR_COPY_PROBE: CompactQrCopyProbe,
+    eigh: EIGH_COPY_PROBE: EighCopyProbe,
+    eigh_vectors: EIGH_OWNED_VECTOR_POINTERS: Vec<usize>,
+    checked_eigh_pairs: CHECKED_EIGH_PAIR_POINTERS: Vec<usize>,
+    checked_svd_stage: CHECKED_COMPACT_SVD_STAGE_POINTERS: Vec<(usize, usize)>,
+    generic_svd_fallback: GENERIC_COMPACT_SVD_FALLBACK_POINTERS: Vec<(usize, usize)>,
+    mf_svd_fallback: MF_COMPACT_SVD_FALLBACK_POINTERS: Vec<(usize, usize)>,
+    compact_lq: COMPACT_LQ_COPY_PROBE: CompactLqCopyProbe,
+    diagonal_bond: DIAGONAL_BOND_BUILD_PROBE: DiagonalBondBuildProbe,
+    values_fallbacks: VALUES_MATRICIZATION_FALLBACKS: usize,
+    checked_inputs: CHECKED_COMPACT_INPUT_OBSERVATIONS: Vec<CheckedCompactInputObservation>,
+    plan_finish: GENERIC_FACTOR_PLAN_FINISH_CALLS: usize,
+    pair_publication: GENERIC_PAIR_PUBLICATION_PROBE: GenericPairPublicationProbe,
+    one_sided: ONE_SIDED_PUBLICATION_PROBE: OneSidedPublicationProbe,
+    buffer_builds: FACTOR_BUFFER_BUILD_COUNTS: (usize, usize),
+    placement_index: PLACEMENT_INDEX_PROBE: PlacementIndexProbe,
+    scatter_visits: SCATTER_VISIT_PROBE: ScatterVisitProbe,
+}
+
 /// Runs one streaming per-block factorization loop inside a single executor
 /// linear-algebra scope: the backend admits the call once, while the loop
 /// still holds only one block's input and output at a time. Batching through
@@ -6048,14 +6093,27 @@ where
 {
     let mut body = Some(body);
     let mut outcome = None;
-    dense
-        .with_linalg_scope(&mut |dense| {
-            if let Some(body) = body.take() {
-                outcome = Some(body(dense));
+    #[cfg(test)]
+    let mut probes = Some(TestProbes::take());
+    let scoped = dense.with_linalg_scope(&mut |dense| {
+        if let Some(body) = body.take() {
+            #[cfg(test)]
+            if let Some(probes) = probes.take() {
+                probes.put();
             }
-            Ok(())
-        })
-        .map_err(OperationError::Dense)?;
+            outcome = Some(body(dense));
+            #[cfg(test)]
+            {
+                probes = Some(TestProbes::take());
+            }
+        }
+        Ok(())
+    });
+    #[cfg(test)]
+    if let Some(probes) = probes.take() {
+        probes.put();
+    }
+    scoped.map_err(OperationError::Dense)?;
     outcome.unwrap_or_else(|| {
         Err(OperationError::Dense(DenseError::Backend {
             backend: DenseBackend::Tenferro,

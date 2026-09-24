@@ -1820,8 +1820,32 @@ mod linalg_scope_tests {
             CpuPlacementGuarantee::AdvisoryDeclared,
         )
         .unwrap();
-        let backend = CpuBackend::from_external_managed_domains(id, [domain])
-            .expect("the compiled CPU provider accepts a caller-owned domain");
+        let backend = match CpuBackend::from_external_managed_domains(id, [domain]) {
+            Ok(backend) => backend,
+            // A provider whose thread count is process-global (Accelerate)
+            // cannot serve a caller-owned domain at all, so there is no
+            // fallback to exercise; the refusal itself must be typed.
+            Err(tenferro_cpu::CpuBackendError::Tensor(error)) => {
+                let source = std::error::Error::source(&error)
+                    .and_then(|source| {
+                        source.downcast_ref::<tenferro_cpu::CpuProviderBundleInstallError>()
+                    })
+                    .expect("caller-owned domain refusal carries its provider install error");
+                assert!(
+                    matches!(
+                        source,
+                        tenferro_cpu::CpuProviderBundleInstallError::IncompatibleDomain {
+                            source:
+                                tenferro_cpu::CpuProviderDomainError::ThreadCountNotEnforceable { .. },
+                            ..
+                        }
+                    ),
+                    "unexpected refusal: {source}"
+                );
+                return;
+            }
+            Err(error) => panic!("caller-owned domain construction failed: {error}"),
+        };
         let mut executor = DefaultDenseExecutor::from_backend(backend);
         let (entered, scoped) = scoped_bits(&mut executor);
         assert!(
