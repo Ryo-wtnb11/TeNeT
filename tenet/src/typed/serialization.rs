@@ -1047,16 +1047,9 @@ where
         TypedTensorRepr::Adjoint(view) => {
             output.push(REPR_ADJOINT);
             // Why not serialize the logical cache: it is derived state and may be warm.
-            match view.parent.data.as_ref() {
-                TypedData::Dense(_) => {
-                    output.push(REPR_DENSE);
-                    encode_dense_body(&mut output, codec, &view.parent)?;
-                }
-                TypedData::Diagonal(spectrum) => {
-                    output.push(REPR_DIAGONAL);
-                    encode_diagonal_body(&mut output, codec, &view.parent, spectrum)?;
-                }
-            }
+            // The parent is dense by `TypedAdjointView::new`.
+            output.push(REPR_DENSE);
+            encode_dense_body(&mut output, codec, &view.parent)?;
         }
     }
     Ok(output)
