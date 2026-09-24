@@ -424,7 +424,7 @@ where
 {
     let dst_nout = dst.nout();
     let axis_plan = TensorContractAxisPlan::compile(lhs.rank(), rhs.rank(), dst.rank(), axes)?;
-    let expected_homspace = FusionTreeHomSpace::tensorcontract_homspace(
+    if !FusionTreeHomSpace::tensorcontract_homspace_matches(
         rule,
         lhs.homspace(),
         rhs.homspace(),
@@ -432,9 +432,10 @@ where
         axes.rhs_contracting_axes(),
         axis_plan.output_axes.as_slice(),
         dst_nout,
+        dst.homspace(),
     )
-    .map_err(OperationError::from_core_preserving_context)?;
-    if &expected_homspace != dst.homspace() {
+    .map_err(OperationError::from_core_preserving_context)?
+    {
         return Err(OperationError::StructureMismatch { tensor: "dst" });
     }
     if !is_core_form_fusion_source_contract(
@@ -781,9 +782,8 @@ fn is_core_form_fusion_compose_contract(
     dst_codomain_rank: usize,
 ) -> bool {
     let core_output_rank = lhs.codomain().len() + rhs.domain().len();
-    let core_output_axes = (0..core_output_rank).collect::<Vec<_>>();
     is_core_form_fusion_source_contract(lhs, rhs, lhs_contracting_axes, rhs_contracting_axes)
-        && output_axes == core_output_axes.as_slice()
+        && output_axes.iter().copied().eq(0..core_output_rank)
         && dst_codomain_rank == lhs.codomain().len()
 }
 
@@ -793,9 +793,12 @@ fn is_core_form_fusion_source_contract(
     lhs_contracting_axes: &[usize],
     rhs_contracting_axes: &[usize],
 ) -> bool {
-    let lhs_domain_axes =
-        (lhs.codomain().len()..lhs.codomain().len() + lhs.domain().len()).collect::<Vec<_>>();
-    let rhs_codomain_axes = (0..rhs.codomain().len()).collect::<Vec<_>>();
-    lhs_contracting_axes == lhs_domain_axes.as_slice()
-        && rhs_contracting_axes == rhs_codomain_axes.as_slice()
+    lhs_contracting_axes
+        .iter()
+        .copied()
+        .eq(lhs.codomain().len()..lhs.rank())
+        && rhs_contracting_axes
+            .iter()
+            .copied()
+            .eq(0..rhs.codomain().len())
 }

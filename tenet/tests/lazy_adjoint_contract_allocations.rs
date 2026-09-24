@@ -1,8 +1,8 @@
 //! Warm eager `contract`/`compose` with a lazy-adjoint receiver (#1414).
 //!
 //! The adjoint-oriented tree-pair plan lives in the Runtime-owned transform
-//! store, so a warm lazy-adjoint call allocates on the order of the owned
-//! `contract` instead of recompiling that plan.
+//! store, and the operand projection reuses the parent's memoized adjoint, so
+//! a warm lazy-adjoint call allocates no more than the owned `contract` (#1419).
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -55,10 +55,11 @@ fn allocations<T>(f: impl FnOnce() -> T) -> (u64, T) {
 }
 
 /// Warm `contract_conj` may exceed the owned `contract` by at most this many
-/// allocation calls: the per-call adjoint projection, measured at 5 to 8 on
-/// macOS and Linux. Why not exact pins: allocator and std differences move the
-/// absolute counts between platforms by the same offset.
-const LAZY_ADJOINT_SLACK: u64 = 10;
+/// allocation calls. It was 5 to 8 before #1419 (the per-call adjoint HomSpace,
+/// storage map, axis-check Vecs and, for SU2, the contracted HomSpace compare);
+/// it is now 0 on these rows. Why not exact pins: allocator and std
+/// differences move the absolute counts between platforms by the same offset.
+const LAZY_ADJOINT_SLACK: u64 = 0;
 /// Upper bound on warm `contract_conj` allocation calls. Recompiling the
 /// oriented plan per call cost 474 or more on every E1 row.
 const LAZY_ADJOINT_CEILING: u64 = 64;

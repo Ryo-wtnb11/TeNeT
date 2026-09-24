@@ -2155,7 +2155,7 @@ fn no_cache_tree_transform_paths_compile_without_retaining_structures() {
                 &operation,
                 &structure,
                 &logical_keys,
-                &storage_indices,
+                || Ok(&storage_indices),
                 &structure,
                 tenet_core::FusionTreePairOrientation::Direct,
                 structure.rank(),
@@ -2246,7 +2246,7 @@ fn oriented_adjoint_projection_matches_materialized_logical_oracle() {
             &operation,
             &logical,
             &logical_keys,
-            &storage_indices,
+            || Ok(&storage_indices),
             &storage,
             tenet_core::FusionTreePairOrientation::Adjoint,
             4,
@@ -2353,7 +2353,7 @@ fn runtime_bound_adjoint_oriented_plan_is_reused_and_keyed_by_orientation() {
                 operation,
                 &destination,
                 if direct { &storage_keys } else { &logical_keys },
-                if direct { &[0, 1] } else { &storage_indices },
+                || Ok(if direct { &[0, 1] } else { &storage_indices }),
                 &storage,
                 orientation,
                 4,
@@ -2464,7 +2464,7 @@ fn runtime_bound_adjoint_oriented_projection_errors_match_the_local_path() {
                     &operation,
                     &storage,
                     logical_keys,
-                    storage_indices,
+                    || Ok(storage_indices),
                     &storage,
                     tenet_core::FusionTreePairOrientation::Adjoint,
                     4,
@@ -2478,8 +2478,10 @@ fn runtime_bound_adjoint_oriented_projection_errors_match_the_local_path() {
         // as the context-local path and admits nothing.
         assert_eq!(compile(&mut bound), compile(&mut local));
     }
+    // What: every malformed projection is read only after a store miss, so
+    // each one counts a miss and admits nothing.
     assert_eq!(store.info().entries(), 0);
-    assert_eq!(store.info().misses(), 3);
+    assert_eq!(store.info().misses(), 4);
 }
 
 #[test]

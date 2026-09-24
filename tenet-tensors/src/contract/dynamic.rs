@@ -2230,15 +2230,15 @@ where
         self.stats.misses += 1;
         let space = source.transformed_space(rule, operation, layout_primer)?;
         let dst_structure = Arc::clone(space.structure());
-        let (logical_keys, storage_indices) = source
-            .adjoint_projection()
+        let logical_keys = source
+            .adjoint_logical_keys()
             .expect("only adjoint sources use the oriented transform compiler");
         let transform_structure = tree_context.get_or_compile_tree_pair_structure_oriented(
             rule,
             operation,
             &dst_structure,
             logical_keys,
-            storage_indices,
+            || source.adjoint_storage_indices(),
             source.storage_space().structure(),
             source.orientation(),
             source.rank(),
