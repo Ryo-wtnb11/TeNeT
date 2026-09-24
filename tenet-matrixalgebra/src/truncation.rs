@@ -618,31 +618,31 @@ fn kept_counts(spectra: &[WeightedSpectrum<'_>], truncation: &Truncation) -> Vec
 /// `rtol * norm = ρ ν 2^e / floor2(ρ ν)`, so the budget in these units is
 /// `(ρ ν / floor2(ρ ν))^2` in `[1, 4)`, formed with the single rounding of
 /// `ρ ν` that the in-range `rtol * norm` also has. The bound itself is never
-/// formed, so it cannot round on the subnormal grid, and `2^e` is carried as
-/// three factors because it can lie outside the `f64` range. Each value is
-/// divided by the three factors, which is exact while the quotients stay
-/// normal: the decision is the in-range decision for `spectrum / 2^e`. A term
-/// that overflows in these units exceeds the budget and stops the scan; one
-/// whose first quotient `value / floor2(norm)` underflows is below `2^-1022`
-/// of the norm.
+/// formed, so it cannot round on the subnormal grid, and `e` is carried as an
+/// integer because `2^e` can lie outside the `f64` range. Each value is
+/// rescaled by `2^-e` in one direction only ([`scale_by_power_of_two`]), so
+/// the result is exact whenever it is normal: the decision is the in-range
+/// decision for `spectrum / 2^e`. A term that overflows exceeds the budget
+/// and stops the scan; a rescaled value that is not normal is below
+/// `2^-1022` of the bound, and its square below `2^-2044` of the budget.
+///
+/// Why one integer exponent rather than dividing by the three factors in
+/// turn: whichever factor goes first, a mixed-direction chain (a large
+/// `floor2(norm)` with a subnormal `floor2(rtol)`) can underflow or overflow
+/// an intermediate quotient whose final value is in range.
 #[derive(Clone, Copy)]
 struct BudgetUnits {
-    norm_scale: f64,
-    product_scale: f64,
-    rtol_scale: f64,
+    exponent: i32,
     budget: f64,
 }
 
 impl BudgetUnits {
     fn new(rtol: f64, norm: f64) -> Self {
         if rtol == 0.0 || norm == 0.0 {
-            // A zero budget discards exactly the zero values. Dividing by the
-            // smallest subnormal alone makes every positive value at least
-            // `1`, where `v / floor2(norm)` could underflow to zero.
+            // A zero budget discards exactly the zero values: in units of
+            // the smallest subnormal every positive value is at least `1`.
             return Self {
-                norm_scale: power_of_two_floor(0.0),
-                product_scale: 1.0,
-                rtol_scale: 1.0,
+                exponent: power_of_two_exponent(power_of_two_floor(0.0)),
                 budget: 0.0,
             };
         }
@@ -652,16 +652,45 @@ impl BudgetUnits {
         let product_scale = power_of_two_floor(product);
         let bound = product / product_scale;
         Self {
-            norm_scale,
-            product_scale,
-            rtol_scale,
+            exponent: power_of_two_exponent(norm_scale)
+                + power_of_two_exponent(rtol_scale)
+                + power_of_two_exponent(product_scale),
             budget: bound * bound,
         }
     }
 
     fn scaled(self, value: f64) -> f64 {
-        value / self.norm_scale / self.product_scale / self.rtol_scale
+        scale_by_power_of_two(value, -self.exponent)
     }
+}
+
+/// `e` for a positive power of two `2^e`, normal or subnormal.
+fn power_of_two_exponent(power: f64) -> i32 {
+    let bits = power.to_bits();
+    match (bits >> 52) as i32 {
+        0 => 63 - bits.leading_zeros() as i32 - 1074,
+        biased => biased - 1023,
+    }
+}
+
+/// `value * 2^exponent`, exact whenever the result is normal.
+///
+/// The factors all move the same way, so an intermediate overflows only if
+/// the result does, and an intermediate becomes subnormal (the only place a
+/// step rounds) only if the result is subnormal too.
+fn scale_by_power_of_two(mut value: f64, mut exponent: i32) -> f64 {
+    const MAX_EXPONENT: i32 = f64::MAX_EXP - 1;
+    const MIN_EXPONENT: i32 = f64::MIN_EXP - 1;
+    let power = |exponent: i32| f64::from_bits(((exponent + MAX_EXPONENT) as u64) << 52);
+    while exponent > MAX_EXPONENT {
+        value *= power(MAX_EXPONENT);
+        exponent -= MAX_EXPONENT;
+    }
+    while exponent < MIN_EXPONENT {
+        value *= power(MIN_EXPONENT);
+        exponent -= MIN_EXPONENT;
+    }
+    value * power(exponent)
 }
 
 /// A sector's current tail for `DiscardWeight`. `Ord` is inverted so the
@@ -1663,5 +1692,53 @@ mod tests {
         .unwrap();
         assert_eq!(decision.kept, [2]);
         assert_eq!(decision.error.to_bits(), 0.0f64.to_bits());
+    }
+
+    #[test]
+    fn a_large_norm_with_a_subnormal_rtol_keeps_the_rescaling_exact() {
+        // What: `floor2(norm) = 1024` and `floor2(rtol)` subnormal. Dividing
+        // by the norm's scale first put the tail on the subnormal grid and
+        // discarded it. Exact oracle (Python `fractions.Fraction` over these
+        // f64 values): `v / (rtol * norm)` is `1.4900853664633535` for A and
+        // `1.0189416273584906` for B, both above 1, so both keep everything
+        // and report a zero error.
+        let tiny = f64::from_bits(1);
+        for (first, tail, rtol) in [
+            (1.0001 * 1024.0, 1526.0 * tiny, tiny),
+            ((5.3 / 3.0) * 1024.0, 5530.0 * tiny, 3.0 * tiny),
+        ] {
+            let entries = [(1.0, vec![first, tail])];
+            let decision = select(
+                &spectra(&entries),
+                &Truncation::relative_error(rtol).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(decision.kept, [2], "tail {tail:e} rtol {rtol:e}");
+            assert_eq!(decision.error.to_bits(), 0.0f64.to_bits());
+        }
+    }
+
+    #[test]
+    fn power_of_two_rescaling_is_exact_across_the_whole_exponent_range() {
+        let tiny = f64::from_bits(1);
+        for (power, exponent) in [
+            (tiny, -1074),
+            (f64::MIN_POSITIVE, -1022),
+            (1.0, 0),
+            (2f64.powi(1023), 1023),
+        ] {
+            assert_eq!(power_of_two_exponent(power), exponent);
+        }
+        assert_eq!(
+            scale_by_power_of_two(1.5, -2148).to_bits(),
+            0.0f64.to_bits()
+        );
+        assert_eq!(scale_by_power_of_two(tiny, 2097), 2f64.powi(1023));
+        assert_eq!(scale_by_power_of_two(2f64.powi(1023), -2097), tiny);
+        assert_eq!(
+            scale_by_power_of_two(3.0 * tiny, 2000),
+            3.0 * 2f64.powi(926)
+        );
+        assert!(scale_by_power_of_two(1.0, 2048).is_infinite());
     }
 }
