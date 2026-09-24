@@ -4,6 +4,7 @@
 //! builds these plans; nothing here consumes fusion rules.
 
 use std::collections::HashSet;
+use std::ops::Mul;
 use std::sync::Arc;
 
 use num_traits::{One, Zero};
@@ -847,7 +848,9 @@ where
     {
         let group = &self.groups[execution.group_index];
         let scratch = &mut fusion_workspace.scratch.as_mut_slice()[..execution.scratch.total_len];
-        if execution.class.packs_lhs() {
+        // `execute_batch` never reads the packed operands at a zero `alpha`.
+        let forms_product = !alpha.is_zero();
+        if forms_product && execution.class.packs_lhs() {
             let lhs = &mut scratch[..execution.scratch.lhs_len];
             if group.lhs.needs_clear {
                 lhs.fill(D::zero());
@@ -857,12 +860,12 @@ where
             if let (Some(start), Some(profile)) = (start, profile.as_deref_mut()) {
                 profile.core_pack_lhs += start.elapsed();
             }
-        } else if PROFILED {
+        } else if PROFILED && !execution.class.packs_lhs() {
             if let Some(profile) = profile.as_deref_mut() {
                 profile.core_direct_pack_skips += 1;
             }
         }
-        if execution.class.packs_rhs() {
+        if forms_product && execution.class.packs_rhs() {
             let start_index = execution.scratch.rhs_offset;
             let end = start_index + execution.scratch.rhs_len;
             let rhs = &mut scratch[start_index..end];
@@ -874,7 +877,7 @@ where
             if let (Some(start), Some(profile)) = (start, profile.as_deref_mut()) {
                 profile.core_pack_rhs += start.elapsed();
             }
-        } else if PROFILED {
+        } else if PROFILED && !execution.class.packs_rhs() {
             if let Some(profile) = profile.as_deref_mut() {
                 profile.core_direct_pack_skips += 1;
             }
@@ -961,8 +964,22 @@ where
     ) -> Result<(), OperationError>
     where
         G: Rank2Gemm<D>,
-        D: Copy,
+        D: Copy + PartialEq + Zero + One + Mul<D, Output = D>,
     {
+        // BLAS `gemm` at `alpha == 0` leaves `beta * C` without forming
+        // `A * B`, as TensorKit's `mul!` reaches it; a backend that multiplies
+        // through (faer) would turn `0 * Inf` into NaN (#1442).
+        if alpha.is_zero() {
+            for job in jobs {
+                let block = direct_slice_mut(dst, job.dst_offset, job.rows, job.cols)?;
+                if beta.is_zero() {
+                    block.fill(D::zero());
+                } else if !beta.is_one() {
+                    block.iter_mut().for_each(|value| *value = beta * *value);
+                }
+            }
+            return Ok(());
+        }
         if self.lhs_op == MatrixOp::Identity && self.rhs_op == MatrixOp::Identity {
             gemm.matmul_rank2_batch(dst, lhs, rhs, jobs, runs, alpha, beta)
         } else {
@@ -1048,7 +1065,8 @@ where
         let lhs_data = lhs.data();
         let rhs_data = rhs.data();
         let _ = fusion_workspace;
-        gemm.matmul_rank2_batch(
+        self.execute_batch(
+            gemm,
             dst.data_mut(),
             lhs_data,
             rhs_data,
@@ -1162,7 +1180,8 @@ where
         )?;
 
         let _ = fusion_workspace;
-        gemm.matmul_rank2_batch(
+        self.execute_batch(
+            gemm,
             dst_data,
             lhs_data,
             rhs_data,
@@ -1243,7 +1262,8 @@ where
         )?;
 
         let _ = fusion_workspace;
-        gemm.matmul_rank2_batch(
+        self.execute_batch(
+            gemm,
             dst.data_mut(),
             lhs_data,
             rhs_data,
@@ -2745,6 +2765,94 @@ mod tests {
         assert_eq!(dst, expected);
         assert_eq!(profile.core_contract_groups, 8);
         assert_eq!(profile.core_direct_gemm_groups, 4);
+
+        // A zero alpha (either sign) leaves exactly TensorKit's `scale(C,
+        // beta)` in every class, over Inf/NaN operands, a NaN destination and
+        // a NaN-filled scratch: no pack, GEMM or product is formed (#1442).
+        let nan = T::from(f64::NAN);
+        let poisoned = |values: &[T], bad: T| {
+            let mut values = values.to_vec();
+            values[0] = bad;
+            values[5] = bad;
+            values
+        };
+        let (bad_lhs, bad_rhs) = (poisoned(&lhs, T::from(f64::INFINITY)), poisoned(&rhs, nan));
+        let dirty = poisoned(&initial, nan);
+        let same = |got: &[T], want: &[T]| {
+            assert_eq!(got.len(), want.len());
+            for (&got, &want) in got.iter().zip(want) {
+                #[allow(clippy::eq_op)]
+                let both_nan = got != got && want != want;
+                assert!(got == want || both_nan, "{got:?} != {want:?}");
+            }
+        };
+        for zero in [0.0, -0.0] {
+            for beta in [0.0, 1.0, 2.0] {
+                let want: Vec<T> = dirty
+                    .iter()
+                    .map(|&value| match beta {
+                        0.0 => T::zero(),
+                        1.0 => value,
+                        _ => T::from(beta) * value,
+                    })
+                    .collect();
+                for profiled in [false, true] {
+                    workspace.scratch.fill(nan);
+                    dst.clone_from(&dirty);
+                    let run = if profiled {
+                        plan.execute_raw_profiled(
+                            &mut kernels,
+                            &mut gemm,
+                            &mut workspace,
+                            &structure,
+                            &mut dst,
+                            &structure,
+                            &bad_lhs,
+                            &structure,
+                            &bad_rhs,
+                            T::from(zero),
+                            T::from(beta),
+                            &mut TensorContractFusionProfile::default(),
+                        )
+                    } else {
+                        plan.execute_raw(
+                            &mut kernels,
+                            &mut gemm,
+                            &mut workspace,
+                            &structure,
+                            &mut dst,
+                            &structure,
+                            &bad_lhs,
+                            &structure,
+                            &bad_rhs,
+                            T::from(zero),
+                            T::from(beta),
+                        )
+                    };
+                    run.unwrap();
+                    same(&dst, &want);
+                }
+            }
+        }
+
+        // The dirty workspace left by the zero-alpha runs replays a non-zero
+        // alpha exactly as a fresh one does.
+        dst.clone_from(&initial);
+        plan.execute_raw(
+            &mut kernels,
+            &mut gemm,
+            &mut workspace,
+            &structure,
+            &mut dst,
+            &structure,
+            &lhs,
+            &structure,
+            &rhs,
+            alpha,
+            beta,
+        )
+        .unwrap();
+        assert_eq!(dst, expected);
     }
 
     #[test]

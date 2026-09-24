@@ -291,3 +291,162 @@ fn trace_scales_each_element_before_the_sum_as_tensorkit() {
         -big,
     );
 }
+
+/// `W ← V` over `sectors` with degeneracy 2 on every leg.
+fn matrix_space<R>(
+    provider: &Arc<R>,
+    sectors: &[SectorId],
+    dual: bool,
+) -> BoundDynamicFusionMapSpace<R>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    let leg = |dual| SectorLeg::new(sectors.iter().map(|&sector| (sector, 2)), dual);
+    homspace_space(
+        provider,
+        FusionTreeHomSpace::new(
+            FusionProductSpace::new([leg(dual)]),
+            FusionProductSpace::new([leg(false)]),
+        ),
+    )
+}
+
+/// `tensorcontract!(C, A, pA, conjA, B, ((1,), (2,)), false, pAB, α, β)`
+/// with `α = 0` over a non-finite `A`, and with `β = 0` over a NaN-bearing
+/// `C`. TensorKit (observed in the environment of the module docs) gives
+/// `scale.(C, β)` elementwise for `α = 0` — `A·B` is never formed, as BLAS
+/// `gemm` skips it at `α = 0` — and for `β = 0` the same values as over an
+/// all-zero `C`, since `C` is never read. Both hold for U(1), SU(2) and fZ₂,
+/// `Float64` and `ComplexF64`, for `mul!` and for three contractions, one per
+/// TeNeT route:
+///
+/// - direct, `A ∈ V ⊗ V ← V`, `B ∈ V ← V`, `pA = ((1, 2), (3,))` (`Core`);
+/// - recoupled, `B ∈ V' ← V`, `pA = ((1, 3), (2,))` (`DynamicTree`);
+/// - conjugated, `A, B ∈ V ← V`, `pA = ((2,), (1,))`, `conjA = true`
+///   (`Structure` for the self-dual SU(2) and fZ₂ legs, `DynamicTree` for
+///   U(1)).
+///
+/// Returns whether the conjugated case took the `Structure` route.
+fn check_zero_scale_contraction<R, D>(label: &str, provider: Arc<R>, sectors: &[SectorId]) -> bool
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey,
+    D: Payload + DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+{
+    const FINITE: [(f64, f64); 4] = [(0.5, 0.25), (-1.0, 2.0), (0.75, -0.5), (1.5, 1.0)];
+    let square = || matrix_space(&provider, sectors, false);
+    let cases = [
+        // (route, lhs, rhs, contracted lhs axis, conjA, (Core, Structure))
+        (
+            "direct",
+            legs(&provider, sectors),
+            square(),
+            2,
+            false,
+            Some((true, false)),
+        ),
+        (
+            "recoupled",
+            legs(&provider, sectors),
+            matrix_space(&provider, sectors, true),
+            1,
+            false,
+            Some((false, false)),
+        ),
+        ("conjugated", square(), square(), 0, true, None),
+    ];
+    let mut structure = false;
+    for (route, lhs, rhs, contracted, conjugate, expected_route) in cases {
+        // `A†` has `A`'s space here (no dual legs), so the contraction of `A`'s
+        // domain leg gives the conjugated destination too.
+        let dst_axis = if conjugate { 1 } else { contracted };
+        let dst =
+            BoundDynamicFusionMapSpace::contracted_multiplicity_free(&lhs, &rhs, &[dst_axis], &[0])
+                .unwrap();
+        let lhs_len = lhs.space().required_len().unwrap();
+        let rhs_data: Vec<D> = cycle(&FINITE, rhs.space().required_len().unwrap());
+        let dst_len = dst.space().required_len().unwrap();
+        let initial: Vec<D> = cycle(&DESTINATION, dst_len);
+        let lhs_axes = [contracted];
+        let axes = TensorContractSpec::with_default_output_order_and_conjugation(
+            &lhs_axes,
+            &[0],
+            conjugate,
+            false,
+        );
+        let mut context = TensorContractFusionExecutionContext::<D, R::Key>::default();
+        let mut contract = |dst_data: &mut [D], lhs_data: &[D], alpha: f64, beta: f64| {
+            context
+                .tensorcontract_fusion_dyn_into(
+                    &dst,
+                    dst_data,
+                    &lhs,
+                    lhs_data,
+                    &rhs,
+                    &rhs_data,
+                    axes,
+                    D::from_real(alpha),
+                    D::from_real(beta),
+                )
+                .unwrap();
+            let taken = (
+                context.last_resolution_is_core(),
+                context.last_resolution_is_structure(),
+            );
+            if let Some(expected) = expected_route {
+                assert_eq!(taken, expected, "{label} {route}: route");
+            }
+            taken.1
+        };
+
+        let non_finite: Vec<D> = cycle(&SOURCE, lhs_len);
+        for beta in [1.0, 2.0, 0.0] {
+            let mut got = initial.clone();
+            structure |= contract(&mut got, &non_finite, 0.0, beta);
+            let want: Vec<_> = initial
+                .iter()
+                .map(|&value| tensorkit_scale(value, beta))
+                .collect();
+            assert_same(&format!("{label} {route} α = 0, β = {beta}"), &got, &want);
+        }
+
+        let finite: Vec<D> = cycle(&FINITE, lhs_len);
+        for alpha in [1.0, 0.5] {
+            let mut over_zero = vec![D::from_real(0.0); dst_len];
+            contract(&mut over_zero, &finite, alpha, 0.0);
+            assert!(
+                over_zero.iter().any(|value| value.parts() != (0.0, 0.0)),
+                "{label} {route}: the β = 0 fixture must produce a nonzero product"
+            );
+            let mut over_nan = initial.clone();
+            contract(&mut over_nan, &finite, alpha, 0.0);
+            let want: Vec<_> = over_zero.iter().map(|value| value.parts()).collect();
+            assert_same(
+                &format!("{label} {route} α = {alpha}, β = 0 over NaN"),
+                &over_nan,
+                &want,
+            );
+        }
+    }
+    structure
+}
+
+#[test]
+fn zero_scale_contraction_matches_tensorkit() {
+    let u1 = [0, 1, -1].map(|charge| U1Irrep::new(charge).sector_id());
+    let su2 = [0, 1, 2].map(|twice| SU2Irrep::from_twice_spin(twice).sector_id());
+    let fz2 = [SectorId::new(0), SectorId::new(1)];
+    check_zero_scale_contraction::<_, f64>("U(1) f64", Arc::new(U1FusionRule), &u1);
+    check_zero_scale_contraction::<_, Complex64>("U(1) c64", Arc::new(U1FusionRule), &u1);
+    assert!(check_zero_scale_contraction::<_, f64>(
+        "SU(2) f64",
+        Arc::new(SU2FusionRule),
+        &su2
+    ));
+    check_zero_scale_contraction::<_, Complex64>("SU(2) c64", Arc::new(SU2FusionRule), &su2);
+    check_zero_scale_contraction::<_, f64>("fZ2 f64", Arc::new(FermionParityFusionRule), &fz2);
+    check_zero_scale_contraction::<_, Complex64>(
+        "fZ2 c64",
+        Arc::new(FermionParityFusionRule),
+        &fz2,
+    );
+}

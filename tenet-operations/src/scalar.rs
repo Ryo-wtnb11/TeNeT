@@ -276,8 +276,9 @@ where
 /// payload-typed `α`: a zero scale gives an exact zero rather than
 /// `0 * inf = NaN`. An exact one still multiplies here; the callers that
 /// stand for TensorKit's `One()` keep their own identity arm.
+#[doc(hidden)]
 #[inline]
-pub(crate) fn scale_value<T>(value: T, alpha: T) -> T
+pub fn scale_value<T>(value: T, alpha: T) -> T
 where
     T: Copy + Mul<T, Output = T> + Zero,
 {

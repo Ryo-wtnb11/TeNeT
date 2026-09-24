@@ -1537,6 +1537,11 @@ fn typed_cuda_arithmetic_matches_host_lazy_ownership_and_concurrency() {
             .to_host()
             .unwrap();
         assert_nonfinite_numeric_parity(actual_zero_beta.data(), expected_zero_beta.data());
+        // TensorKit's `scale(x, 0)` drops a zero-scaled operand, NaN and Inf
+        // included (#1442).
+        assert!(actual_scale_zero.data().iter().all(|&value| value == 0.0));
+        assert_eq!(actual_zero_alpha.data(), finite.data());
+        assert_eq!(actual_zero_beta.data(), finite.data());
     }
     assert_eq!(
         nonfinite_device

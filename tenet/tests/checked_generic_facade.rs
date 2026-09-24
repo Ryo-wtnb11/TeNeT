@@ -7412,3 +7412,51 @@ fn checked_inner_and_norm_take_one_weight_per_sector_and_keep_error_precedence()
         expected_lazy
     ));
 }
+
+/// TensorKit's zero-scale rule on the checked-generic `add`/`scale`
+/// (VectorInterface `scale(x, α) = (iszero(α) ? zero(x) : x) * α`, observed on
+/// TensorKit 0.17.1 as in `typed_zero_scale.rs`): a zero coefficient drops its
+/// operand, NaN and `Inf` included (#1442).
+#[test]
+fn checked_generic_add_and_scale_drop_zero_scaled_operands_as_tensorkit() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new(0));
+    let leg = GradedSpace::try_new_with_arc(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
+    let x: TensorMap<_, f64> = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, ij| {
+        [[f64::INFINITY, f64::NAN], [1.5, -2.0]][ij[0]][ij[1]]
+    })
+    .unwrap();
+    let y: TensorMap<_, f64> = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, ij| {
+        [[3.0, 4.0], [f64::NAN, 0.5]][ij[0]][ij[1]]
+    })
+    .unwrap();
+    let scale = |value: f64, factor: f64| if factor == 0.0 { 0.0 } else { value * factor };
+    let same = |got: &[f64], want: &[f64]| {
+        assert_eq!(got.len(), want.len());
+        for (&got, &want) in got.iter().zip(want) {
+            assert!(
+                (got.is_nan() && want.is_nan()) || got == want,
+                "{got} != {want}"
+            );
+        }
+    };
+    for (alpha, beta) in [(0.0, 1.0), (1.0, 0.0), (0.0, 0.0), (2.0, -1.0)] {
+        let want: Vec<f64> = x
+            .data()
+            .iter()
+            .zip(y.data())
+            .map(|(&a, &b)| scale(a, alpha) + scale(b, beta))
+            .collect();
+        same(x.add(&y, alpha, beta).unwrap().data(), &want);
+        let mut assigned = x.clone();
+        assigned.add_assign(&y, alpha, beta).unwrap();
+        same(assigned.data(), &want);
+    }
+    for factor in [0.0, 2.0] {
+        let want: Vec<f64> = x.data().iter().map(|&a| scale(a, factor)).collect();
+        same(x.scale(factor).data(), &want);
+        let mut assigned = x.clone();
+        assigned.scale_assign(factor);
+        same(assigned.data(), &want);
+    }
+}

@@ -227,6 +227,7 @@ use tenet_dense::{
     cuda_qr_region as dense_cuda_qr_region, cuda_svd_region as dense_cuda_svd_region,
     CudaDenseContext, CudaDenseStorage,
 };
+use tenet_operations::scale_value;
 #[cfg(feature = "cuda")]
 use tenet_operations::{CudaTreeTransformDestination, StorageGemm};
 use tenet_tensors::{
@@ -912,7 +913,7 @@ where
                             .values
                             .iter()
                             .zip(&right.values)
-                            .map(|(&x, &y)| x * alpha + y * beta)
+                            .map(|(&x, &y)| scale_value(x, alpha) + scale_value(y, beta))
                             .collect(),
                     })
                 })
@@ -957,7 +958,7 @@ where
                     .expect("owned add input")
                     .materialized_dense_data(),
             )
-            .map(|(&x, &y)| x * alpha + y * beta)
+            .map(|(&x, &y)| scale_value(x, alpha) + scale_value(y, beta))
             .collect(),
     ))
 }
@@ -974,7 +975,11 @@ where
                 .iter()
                 .map(|entry| tenet_matrixalgebra::SectorSpectrum {
                     sector: entry.sector,
-                    values: entry.values.iter().map(|&value| value * factor).collect(),
+                    values: entry
+                        .values
+                        .iter()
+                        .map(|&value| scale_value(value, factor))
+                        .collect(),
                 })
                 .collect(),
         );
@@ -994,7 +999,7 @@ where
             .expect("owned scale input")
             .materialized_dense_data()
             .iter()
-            .map(|&value| value * factor)
+            .map(|&value| scale_value(value, factor))
             .collect(),
     )
 }
@@ -1331,7 +1336,7 @@ where
             return;
         };
         for value in data.iter_mut() {
-            *value = *value * factor;
+            *value = scale_value(*value, factor);
         }
     }
 
@@ -1382,7 +1387,7 @@ where
             )));
         }
         for (dst, src) in data.iter_mut().zip(source) {
-            *dst = *dst * alpha + *src * beta;
+            *dst = scale_value(*dst, alpha) + scale_value(*src, beta);
         }
         Ok(())
     }
@@ -9939,7 +9944,10 @@ fn scatter_spectrum<D>(
 where
     D: TensorScalar,
 {
-    let mut data: Vec<D> = dense.iter().map(|&value| value * dense_factor).collect();
+    let mut data: Vec<D> = dense
+        .iter()
+        .map(|&value| scale_value(value, dense_factor))
+        .collect();
     add_spectrum_into(space, &mut data, spectrum, diagonal_factor)?;
     Ok(data)
 }
@@ -9985,7 +9993,7 @@ where
             .min(entry.values.len());
         for (i, &value) in entry.values[..count].iter().enumerate() {
             let position = offset + i * stride;
-            data[position] = data[position] + value * diagonal_factor;
+            data[position] = data[position] + scale_value(value, diagonal_factor);
         }
     }
     Ok(())
@@ -12477,16 +12485,18 @@ where
             Some((_, beta)) => vec![alpha, beta],
             None => vec![alpha],
         };
-        // Keep coefficients as data operands: descriptor alpha == 0 permits
-        // CUDA to skip source reads and erase NaN/Inf propagation. Arithmetic
-        // does not promise signed-zero bit parity across storage backends.
+        // Coefficients stay data operands so the descriptor scales stay 1/0.
+        // A zero coefficient skips its operand, VectorInterface's
+        // `scale(x, 0) = zero(x) * 0` as on the Host (#1442): the output is
+        // born zero. Arithmetic does not promise signed-zero bit parity
+        // across storage backends.
         let coefficients = CudaStorage::upload_owned(cuda, coefficient_values)?;
         #[cfg(test)]
         observe_cuda_arithmetic(0, 1, 0);
         let mut output = CudaStorage::upload_owned(cuda, vec![D::from_real(0.0); required_len])?;
         #[cfg(test)]
         observe_cuda_arithmetic(1, 0, 0);
-        if required_len != 0 {
+        if required_len != 0 && !alpha.is_zero() {
             cuda_gemm_region_into::<D>(
                 cuda,
                 &mut output.0,
@@ -12507,28 +12517,28 @@ where
             .map_err(|err| Error::from(tenet_tensors::OperationError::Dense(err)))?;
             #[cfg(test)]
             observe_cuda_arithmetic(0, 0, 1);
-            if let Some((rhs, _)) = rhs {
-                cuda_gemm_region_into::<D>(
-                    cuda,
-                    &mut output.0,
-                    0,
-                    required_len,
-                    &rhs.0,
-                    0,
-                    required_len,
-                    &coefficients.0,
-                    1,
-                    1,
-                    required_len,
-                    1,
-                    1,
-                    D::from_real(1.0),
-                    D::from_real(1.0),
-                )
-                .map_err(|err| Error::from(tenet_tensors::OperationError::Dense(err)))?;
-                #[cfg(test)]
-                observe_cuda_arithmetic(0, 0, 1);
-            }
+        }
+        if let Some((rhs, _)) = rhs.filter(|(_, beta)| required_len != 0 && !beta.is_zero()) {
+            cuda_gemm_region_into::<D>(
+                cuda,
+                &mut output.0,
+                0,
+                required_len,
+                &rhs.0,
+                0,
+                required_len,
+                &coefficients.0,
+                1,
+                1,
+                required_len,
+                1,
+                1,
+                D::from_real(1.0),
+                D::from_real(1.0),
+            )
+            .map_err(|err| Error::from(tenet_tensors::OperationError::Dense(err)))?;
+            #[cfg(test)]
+            observe_cuda_arithmetic(0, 0, 1);
         }
         Ok(output)
     }
@@ -12578,8 +12588,9 @@ where
     }
 
     /// Fresh device result `factor * self` for owned storage; a lazy adjoint
-    /// redirects algebraically through its canonical parent. Zero factors
-    /// preserve nonfinite propagation, but signed-zero bits are backend-local.
+    /// redirects algebraically through its canonical parent. A zero factor
+    /// gives exact zeros whatever `self` holds, as on the Host (TensorKit's
+    /// `scale(x, 0)`); signed-zero bits are backend-local.
     pub fn scale(&self, factor: D) -> Result<Self, Error> {
         let required_len = self.logical_space().space().required_len()?;
         if let TypedTensorRepr::Adjoint(view) = &self.repr {
@@ -12596,8 +12607,9 @@ where
         Ok(self.with_owned_cuda_storage(output))
     }
 
-    /// Fresh device result `alpha * self + beta * other`. Zero coefficients
-    /// preserve nonfinite propagation, but signed-zero bits are backend-local.
+    /// Fresh device result `alpha * self + beta * other`. A zero coefficient
+    /// drops its operand, NaN and Inf included, as on the Host (TensorKit's
+    /// `add`); signed-zero bits are backend-local.
     pub fn add(&self, other: &Self, alpha: D, beta: D) -> Result<Self, Error> {
         let required_len = self.logical_space().space().required_len()?;
         if !self.runtime.same_runtime(&other.runtime) {
@@ -18724,7 +18736,7 @@ where
                                 .values
                                 .iter()
                                 .zip(&right.values)
-                                .map(|(&x, &y)| x * alpha + y * beta)
+                                .map(|(&x, &y)| scale_value(x, alpha) + scale_value(y, beta))
                                 .collect(),
                         })
                     })
@@ -18771,7 +18783,7 @@ where
                         .expect("owned add input")
                         .materialized_dense_data(),
                 )
-                .map(|(&x, &y)| x * alpha + y * beta)
+                .map(|(&x, &y)| scale_value(x, alpha) + scale_value(y, beta))
                 .collect(),
         ))
     }
@@ -18790,7 +18802,11 @@ where
                     .iter()
                     .map(|entry| tenet_matrixalgebra::SectorSpectrum {
                         sector: entry.sector,
-                        values: entry.values.iter().map(|&value| value * factor).collect(),
+                        values: entry
+                            .values
+                            .iter()
+                            .map(|&value| scale_value(value, factor))
+                            .collect(),
                     })
                     .collect(),
             );
@@ -18810,7 +18826,7 @@ where
                 .expect("owned scale input")
                 .materialized_dense_data()
                 .iter()
-                .map(|&value| value * factor)
+                .map(|&value| scale_value(value, factor))
                 .collect(),
         )
     }
