@@ -300,6 +300,54 @@ fn fermionic_transforms_scale_componentwise() {
     assert_eq!(bits(back.data()), bits(source.data()));
 }
 
+/// Trace (#1407): with `α = 1` the structural coefficient acts on the traced
+/// sum in its own type (TensorKit folds `α′ = α * coeff` but applies it per
+/// element before the reduction; TeNeT applies it after the sum). The SU(2) partial trace carries
+/// `dim(coupled) / dim(uncoupled)` and the fermionic one a twist `-1`, so
+/// both reach a non-unit real coefficient.
+#[test]
+fn traces_scale_componentwise() {
+    let provider = Arc::new(U1FusionRule);
+    let leg = u1(&provider, &[(-1, 3), (0, 2), (1, 4)]);
+    let dual = leg.try_dual().unwrap();
+    let other = u1(&provider, &[(-1, 1), (0, 3), (1, 2)]);
+    assert_componentwise!([&leg, &other], [&leg, &other], |t| t.trace_pairs(&[(0, 2)]));
+    assert_componentwise!([&dual, &other], [&dual, &other], |t| t
+        .trace_pairs(&[(1, 3)]));
+    assert_componentwise!(Complex32, f32, [&leg, &other], [&leg, &other], |t| t
+        .trace_pairs(&[(1, 3)]));
+
+    let provider = Arc::new(SU2FusionRule);
+    let leg = su2(&provider, &[(0, 2), (1, 3), (2, 1)]);
+    let dual = leg.try_dual().unwrap();
+    let other = su2(&provider, &[(0, 1), (1, 2)]);
+    assert_componentwise!([&leg, &other], [&leg, &other], |t| t.trace_pairs(&[(1, 3)]));
+    assert_componentwise!([&other, &dual], [&other, &dual], |t| t
+        .trace_pairs(&[(0, 2)]));
+    assert_componentwise!(Complex32, f32, [&leg, &other], [&leg, &other], |t| t
+        .trace_pairs(&[(1, 3)]));
+
+    let provider = Arc::new(FermionParityFusionRule.product(U1FusionRule));
+    let label = |odd: bool, charge: i32| {
+        product_sector(
+            if odd { Z2Irrep::ODD } else { Z2Irrep::EVEN },
+            U1Irrep::new(charge),
+        )
+    };
+    let leg = GradedSpace::try_new_with_arc(
+        Arc::clone(&provider),
+        [
+            (label(false, 0), 3),
+            (label(true, 1), 2),
+            (label(true, -1), 2),
+        ],
+    )
+    .unwrap();
+    let dual = leg.try_dual().unwrap();
+    assert_componentwise!([&leg, &dual], [&leg, &dual], |t| t.trace_pairs(&[(1, 3)]));
+    assert_componentwise!([&leg, &dual], [&leg, &dual], |t| t.trace_pairs(&[(0, 2)]));
+}
+
 /// Known residual of #1398: a transform that needs a recoupling *matrix* still
 /// applies it as a dense GEMM over coefficients promoted to the payload type,
 /// so `0 * inf` reappears. Fixing it needs the complex destination block to be

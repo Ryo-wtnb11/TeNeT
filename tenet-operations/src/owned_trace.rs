@@ -5,7 +5,7 @@ use num_traits::{One, Zero};
 use tenet_core::BlockStructure;
 
 use crate::owned_overwrite_buffer::initialize_owned;
-use crate::{ConjugateValue, OperationError, RecouplingCoefficientAction};
+use crate::{ConjugateValue, OperationError, RecouplingCoefficientAction, TransformScale};
 
 const OWNED_TRACE_TILE_ELEMENTS: usize = 256;
 
@@ -239,6 +239,10 @@ where
                     )
                     .expect("owned trace source offset was preflighted");
                     let trace_len = element_count_infallible(term.trace_shape);
+                    // See the raw trace kernel: `α * coeff`, folded once
+                    // and applied to the traced sum.
+                    let scale = TransformScale::new(alpha, term.coefficient);
+                    let identity = scale.is_identity();
                     for (tile_index, value) in active_tile.iter_mut().enumerate() {
                         let output_linear = tile_start + tile_index;
                         let src_base = strided_offset(
@@ -257,9 +261,7 @@ where
                             ) as usize;
                             sum = sum + src[src_index].maybe_conj(self.source_conjugate);
                         }
-                        // Why not `alpha * sum`: see the raw trace kernel.
-                        let scaled = if alpha.is_one() { sum } else { alpha * sum };
-                        *value = *value + scaled.scale_by_coefficient(term.coefficient);
+                        *value = *value + if identity { sum } else { scale.apply(sum) };
                     }
                 }
 
@@ -475,6 +477,7 @@ fn unsigned_strided_offset(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use num_complex::Complex64;
     use tenet_core::{BlockKey, BlockSpec, FusionTreePairKey};
 
     #[test]
@@ -533,5 +536,132 @@ mod tests {
         assert_eq!(&output[..400], &source[..400]);
         assert_eq!(&output[400..], &[0.0; 400]);
         assert!(bitmap.into_iter().all(|writes| writes == 1));
+    }
+
+    fn sector_key(sector: usize) -> BlockKey {
+        BlockKey::from(
+            FusionTreePairKey::try_pair_from_sector_ids(
+                [sector],
+                [sector],
+                sector,
+                [false],
+                [false],
+                [],
+                [],
+                [],
+                [],
+            )
+            .unwrap(),
+        )
+    }
+
+    /// Two `2 x 1` destination blocks fed by three `2 x 2` source blocks (the
+    /// second destination has two producers), each traced over its column.
+    fn owned_trace<D, C>(src: &[D], coefficients: [C; 3], alpha: D) -> Vec<D>
+    where
+        C: Copy,
+        D: Copy
+            + Add<D, Output = D>
+            + Mul<D, Output = D>
+            + Zero
+            + One
+            + PartialEq
+            + ConjugateValue
+            + RecouplingCoefficientAction<C>,
+    {
+        let dst = BlockStructure::from_blocks_with_rank(
+            2,
+            (0..2)
+                .map(|b| BlockSpec::with_key(sector_key(b + 1), vec![2, 1], vec![1, 2], 2 * b))
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap(),
+        )
+        .unwrap();
+        let source = BlockStructure::from_blocks_with_rank(
+            2,
+            (0..3)
+                .map(|b| BlockSpec::with_key(sector_key(b + 1), vec![2, 2], vec![1, 2], 4 * b))
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap(),
+        )
+        .unwrap();
+        let term_blocks = [(0, 0), (1, 1), (1, 2)];
+        try_tensortrace_owned_raw(
+            &dst,
+            1,
+            &source,
+            src,
+            false,
+            3,
+            &[0, 1, 2],
+            &[0, 1, 3],
+            |term| {
+                let (dst_block, src_block) = term_blocks[term];
+                OwnedTraceTerm::new(
+                    dst_block,
+                    src_block,
+                    &[2, 1],
+                    &[2],
+                    &[1, 0],
+                    &[2],
+                    coefficients[term],
+                )
+            },
+            alpha,
+        )
+        .unwrap()
+        .expect("canonical destination coverage")
+    }
+
+    fn special_source() -> Vec<Complex64> {
+        [
+            (f64::INFINITY, 1.0),
+            (-0.0, -0.0),
+            (-0.0, 0.5),
+            (-0.0, -0.0),
+            (f64::from_bits(0x7ff8_0000_0000_1407), 2.5),
+            (1.5, f64::NEG_INFINITY),
+            (0.0, -2.0),
+            (-4.0, f64::from_bits(0xfff8_0000_0000_0042)),
+            (2.0, f64::INFINITY),
+            (-0.0, 3.0),
+            (-1.25, 0.5),
+            (f64::from_bits(1), -0.0),
+        ]
+        .map(|(re, im)| Complex64::new(re, im))
+        .to_vec()
+    }
+
+    /// What: the owned trace applies a real coefficient to a complex traced
+    /// sum exactly as it acts on the traced real and imaginary components.
+    #[test]
+    fn real_coefficients_scale_traced_sums_componentwise() {
+        let src = special_source();
+        let re: Vec<f64> = src.iter().map(|v| v.re).collect();
+        let im: Vec<f64> = src.iter().map(|v| v.im).collect();
+        for coefficients in [[-0.5, 1.0, 2.0], [0.0, -1.0, 0.1]] {
+            let got = owned_trace(&src, coefficients, Complex64::one());
+            let want_re = owned_trace(&re, coefficients, 1.0);
+            let want_im = owned_trace(&im, coefficients, 1.0);
+            for (position, value) in got.iter().enumerate() {
+                assert_eq!(
+                    (value.re.to_bits(), value.im.to_bits()),
+                    (want_re[position].to_bits(), want_im[position].to_bits()),
+                    "element {position} for {coefficients:?}"
+                );
+            }
+        }
+    }
+
+    /// What: an exact `1 + 0i` anyonic coefficient does not multiply, so the
+    /// traced `(inf, 1.5)` is not turned into `(inf, NaN)`.
+    #[test]
+    fn complex_unit_coefficient_does_not_multiply() {
+        let one = Complex64::new(1.0, 0.0);
+        let got = owned_trace(&special_source(), [one, one, one], one);
+        assert_eq!(
+            (got[0].re, got[0].im.to_bits()),
+            (f64::INFINITY, 1.5f64.to_bits())
+        );
     }
 }
