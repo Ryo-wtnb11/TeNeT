@@ -19290,6 +19290,52 @@ mod tests {
     }
 
     #[test]
+    fn sector_leg_dual_race_loser_shares_only_an_agreeing_map() {
+        // What: the arm a thread takes when another filled the shared dual
+        // map between its check and its install. The loser's maps are written
+        // out by hand: `q -> -q` moves this leg's map, the identity keeps it.
+        let pairs = [(u1(-1), 2), (u1(1), 4)];
+        let u1_map = || DualSectorMap {
+            images: Box::new([u1(1), u1(-1)]),
+            moved: Some(MovedSectorMap {
+                sectors: Box::new([u1(-1), u1(1)]),
+                degeneracies: Box::new([4, 2]),
+                images: Box::new([u1(1), u1(-1)]),
+            }),
+        };
+        let identity_map = || DualSectorMap {
+            images: Box::new([u1(-1), u1(1)]),
+            moved: None,
+        };
+        let u1_dual = SectorLeg::new([(u1(-1), 4), (u1(1), 2)], true);
+        let identity_dual = SectorLeg::new(pairs, true);
+
+        // Loser agrees with the winner: shares the winner's map.
+        let leg = SectorLeg::new(pairs, false);
+        leg.dual(&U1FusionRule);
+        let dual = leg.install_dual_map(u1_map());
+        assert_eq!(dual, u1_dual);
+        assert!(dual.shares_sector_data_with(&leg));
+
+        // Loser's moved map, winner's identity map: the loser's own leg.
+        let leg = SectorLeg::new(pairs, false);
+        leg.dual(&SU2FusionRule);
+        let dual = leg.install_dual_map(u1_map());
+        assert_eq!(dual, u1_dual);
+        assert!(!dual.shares_sector_data_with(&leg));
+        assert_eq!(leg.dual(&SU2FusionRule), identity_dual);
+
+        // Loser's identity map, winner's moved map: the source storage with
+        // the flag flipped, not the winner's moved map.
+        let leg = SectorLeg::new(pairs, false);
+        leg.dual(&U1FusionRule);
+        let dual = leg.install_dual_map(identity_map());
+        assert_eq!(dual, identity_dual);
+        assert!(dual.shares_sector_data_with(&leg));
+        assert_eq!(leg.dual(&U1FusionRule), u1_dual);
+    }
+
+    #[test]
     fn sector_leg_charge_does_not_grow_when_the_dual_map_is_filled() {
         // What: a cache charges a leg when it admits it; filling the shared
         // dual map later, including spilled storage, stays inside that charge.

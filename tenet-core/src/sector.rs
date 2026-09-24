@@ -62,28 +62,26 @@ struct SectorLegData {
     /// not trusted: two rules of one Rust type (Generic providers) can dualize
     /// one id differently, so a query whose rule disagrees with `images`
     /// builds its own storage and leaves this map untouched.
-    dual: OnceLock<DualSectorMap>,
+    ///
+    /// Why boxed exact-size slices and not inline vectors: every leg storage
+    /// carries this field, most are never dualized, and the few allocations
+    /// of the first dual query happen once per storage on the cold path.
+    dual: OnceLock<Box<DualSectorMap>>,
 }
 
 struct DualSectorMap {
     /// `dual(sectors[i])` under the rule that filled this map.
-    images: SectorVec,
+    images: Box<[SectorId]>,
     /// The sorted dual map, `None` when it equals the source map.
     moved: Option<MovedSectorMap>,
 }
 
 struct MovedSectorMap {
-    sectors: SectorVec,
-    degeneracies: DimVec,
+    sectors: Box<[SectorId]>,
+    degeneracies: Box<[usize]>,
     /// `dual(sectors[j])` under the filling rule: the source sector that
     /// `sectors[j]` is the dual of.
-    images: SectorVec,
-}
-
-fn exact_sector_vec(values: impl ExactSizeIterator<Item = SectorId>) -> SectorVec {
-    let mut out = SectorVec::with_capacity(values.len());
-    out.extend(values);
-    out
+    images: Box<[SectorId]>,
 }
 
 #[non_exhaustive]
@@ -170,7 +168,7 @@ impl SectorLeg {
     }
 
     #[inline]
-    fn map(&self) -> (&SectorVec, &DimVec) {
+    fn map(&self) -> (&[SectorId], &[usize]) {
         if self.moved {
             let moved = self
                 .data
@@ -189,7 +187,7 @@ impl SectorLeg {
     fn stored_images(&self) -> Option<&[SectorId]> {
         let dual = self.data.dual.get()?;
         if self.moved {
-            dual.moved.as_ref().map(|moved| moved.images.as_slice())
+            dual.moved.as_ref().map(|moved| &*moved.images)
         } else {
             Some(&dual.images)
         }
@@ -212,27 +210,22 @@ impl SectorLeg {
     /// Conservative retained bytes for this leg's Arc-backed sector and
     /// degeneracy metadata, excluding the inline `SectorLeg` pointer shell.
     ///
-    /// The dual map's heap bytes are charged whether or not a dual query has
-    /// filled it yet, so a leg's charge does not grow after a cache admits it.
+    /// The dual map is charged up front at its exact worst case, a moved map:
+    /// `size_of::<DualSectorMap>() + n * (3 * size_of::<SectorId>() +
+    /// size_of::<usize>())` for `n` sectors (images, sorted sectors,
+    /// back-images, degeneracies). A dual query that fills it later therefore
+    /// never grows a charge a cache has already admitted.
     #[doc(hidden)]
     pub fn charged_retained_bytes(&self) -> usize {
-        let len = self.data.sectors.len();
-        let dual_sectors = if len > self.data.sectors.inline_size() {
-            len.saturating_mul(3 * std::mem::size_of::<SectorId>())
-        } else {
-            0
-        };
-        let dual_degeneracies = if len > self.data.degeneracies.inline_size() {
-            len.saturating_mul(std::mem::size_of::<usize>())
-        } else {
-            0
-        };
+        let dual_map = self.data.sectors.len().saturating_mul(
+            3 * std::mem::size_of::<SectorId>() + std::mem::size_of::<usize>(),
+        );
         std::mem::size_of::<SectorLegData>()
             .saturating_add(2 * std::mem::size_of::<usize>())
             .saturating_add(spilled_smallvec_heap_bytes(&self.data.sectors))
             .saturating_add(spilled_smallvec_heap_bytes(&self.data.degeneracies))
-            .saturating_add(dual_sectors)
-            .saturating_add(dual_degeneracies)
+            .saturating_add(std::mem::size_of::<DualSectorMap>())
+            .saturating_add(dual_map)
     }
 
     /// Builds one external leg from `(sector, degeneracy)` pairs.
@@ -425,7 +418,7 @@ impl SectorLeg {
         for (&sector, &degeneracy) in sectors.iter().zip(degeneracies) {
             triples.push((dual_of(sector)?, degeneracy, sector));
         }
-        let images = exact_sector_vec(triples.iter().map(|&(dual, _, _)| dual));
+        let images = triples.iter().map(|&(dual, _, _)| dual).collect();
         triples.sort_unstable_by_key(|&(dual, _, _)| dual);
         for window in triples.windows(2) {
             if window[0].0 == window[1].0 {
@@ -436,32 +429,34 @@ impl SectorLeg {
             .iter()
             .map(|&(dual, degeneracy, _)| (dual, degeneracy))
             .eq(self.iter());
-        let moved = (!unchanged).then(|| {
-            let mut degeneracies = DimVec::with_capacity(triples.len());
-            degeneracies.extend(triples.iter().map(|&(_, degeneracy, _)| degeneracy));
-            MovedSectorMap {
-                sectors: exact_sector_vec(triples.iter().map(|&(dual, _, _)| dual)),
-                degeneracies,
-                images: exact_sector_vec(triples.iter().map(|&(_, _, source)| source)),
-            }
+        let moved = (!unchanged).then(|| MovedSectorMap {
+            sectors: triples.iter().map(|&(dual, _, _)| dual).collect(),
+            degeneracies: triples.iter().map(|&(_, degeneracy, _)| degeneracy).collect(),
+            images: triples.iter().map(|&(_, _, source)| source).collect(),
         });
-        match self.data.dual.set(DualSectorMap { images, moved }) {
-            Ok(()) => Ok(self.flipped()),
+        Ok(self.install_dual_map(DualSectorMap { images, moved }))
+    }
+
+    /// The dual leg once `map`, computed from this leg's own sectors, is
+    /// offered to the shared storage.
+    fn install_dual_map(&self, map: DualSectorMap) -> Self {
+        match self.data.dual.set(Box::new(map)) {
+            Ok(()) => self.flipped(),
             // Another thread filled the map first; share it only when its
             // rule agrees with this one.
-            Err(map) if self.stored_images() == Some(map.images.as_slice()) => Ok(self.flipped()),
-            Err(DualSectorMap { moved: None, .. }) => Ok(Self {
-                data: Arc::clone(&self.data),
-                is_dual: !self.is_dual,
-                moved: false,
-            }),
-            Err(DualSectorMap {
-                moved: Some(moved), ..
-            }) => Ok(Self::from_data(
-                moved.sectors,
-                moved.degeneracies,
-                !self.is_dual,
-            )),
+            Err(map) if self.stored_images() == Some(&*map.images) => self.flipped(),
+            Err(map) => match map.moved {
+                None => Self {
+                    data: Arc::clone(&self.data),
+                    is_dual: !self.is_dual,
+                    moved: false,
+                },
+                Some(moved) => Self::from_data(
+                    SectorVec::from_vec(moved.sectors.into_vec()),
+                    DimVec::from_vec(moved.degeneracies.into_vec()),
+                    !self.is_dual,
+                ),
+            },
         }
     }
 
