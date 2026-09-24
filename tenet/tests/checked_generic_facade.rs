@@ -1270,8 +1270,8 @@ fn checked_generic_complex_diagonal_adjoint_is_the_owned_conjugated_diagonal() {
     let provider = Arc::new(SUNFusionRule::new(3).unwrap());
     let leg =
         GradedSpace::try_new_with_arc(provider, [(vec![2i64, 1], 3), (vec![0, 0], 2)]).unwrap();
-    let octet = [(1.5, 0.5), (-2.0, -1.0), (0.25, 3.0)];
-    let singlet = [(3.0, -0.75), (-0.5, 2.0)];
+    let big = [(1.5, 0.5), (-2.0, -1.0), (0.25, 3.0)];
+    let small = [(3.0, -0.75), (-0.5, 2.0)];
     let su3 = |conj: bool| {
         TensorMap::<_, Complex64>::diagonal(
             &runtime,
@@ -1279,11 +1279,11 @@ fn checked_generic_complex_diagonal_adjoint_is_the_owned_conjugated_diagonal() {
             [
                 SectorSpectrum {
                     sector: vec![2i64, 1],
-                    values: conj_if(conj, &octet),
+                    values: conj_if(conj, &big),
                 },
                 SectorSpectrum {
                     sector: vec![0, 0],
-                    values: conj_if(conj, &singlet),
+                    values: conj_if(conj, &small),
                 },
             ],
         )
@@ -1293,7 +1293,7 @@ fn checked_generic_complex_diagonal_adjoint_is_the_owned_conjugated_diagonal() {
     let adjoint = s.adjoint().unwrap();
     // Hand-conjugated values are the oracle.
     let expected = su3(true);
-    // 3x3 octet and 2x2 singlet blocks: 6 + 2 off-diagonal entries.
+    // 3x3 [2,1] and 2x2 [0,0] blocks: 6 + 2 off-diagonal entries.
     assert_positive_zeros(&adjoint, 8);
     assert_eq!(bits(&adjoint), bits(&expected));
     assert!(adjoint.network_reuse_class(false) == NetworkReuseClass::Compact);
@@ -1332,16 +1332,80 @@ fn checked_generic_complex_diagonal_adjoint_is_the_owned_conjugated_diagonal() {
         [
             SectorSpectrum {
                 sector: vec![2i64, 1],
-                values: norms(&octet),
+                values: norms(&big),
             },
             SectorSpectrum {
                 sector: vec![0, 0],
-                values: norms(&singlet),
+                values: norms(&small),
             },
         ],
     )
     .unwrap();
     assert_close(gram.data(), expected_gram.data(), "s^† s");
+
+    // Non-self-dual SU(3) irreps on a dual leg (`[1,0]^2 + [0,1]` dualized to
+    // `[0,1]^2 + [1,0]`): the adjoint keeps the space, not its dual, and
+    // conjugates the values.
+    let provider = Arc::new(SUNFusionRule::new(3).unwrap());
+    let chiral = GradedSpace::try_new_with_arc(provider, [(vec![1i64, 0], 2), (vec![0, 1], 1)])
+        .unwrap()
+        .try_dual()
+        .unwrap();
+    let triplets = [(0.5, -1.25), (2.0, 0.75)];
+    let antitriplet = [(-1.0, 4.0)];
+    let chiral_diagonal = |conj: bool| {
+        TensorMap::<_, Complex64>::diagonal(
+            &runtime,
+            &chiral,
+            [
+                SectorSpectrum {
+                    sector: vec![0i64, 1],
+                    values: conj_if(conj, &triplets),
+                },
+                SectorSpectrum {
+                    sector: vec![1, 0],
+                    values: conj_if(conj, &antitriplet),
+                },
+            ],
+        )
+        .unwrap()
+    };
+    let source = chiral_diagonal(false);
+    let chiral_adjoint = source.adjoint().unwrap();
+    assert_eq!(chiral_adjoint.codomain(), source.codomain());
+    assert_eq!(chiral_adjoint.domain(), source.domain());
+    assert_eq!(chiral_adjoint.codomain()[0], chiral);
+    assert_eq!(
+        chiral_adjoint.diagonal_spectrum().unwrap(),
+        chiral_diagonal(true).diagonal_spectrum().unwrap()
+    );
+    assert_eq!(bits(&chiral_adjoint), bits(&chiral_diagonal(true)));
+    // 2x2 [0,1] block and 1x1 [1,0] block: 2 off-diagonal entries.
+    assert_positive_zeros(&chiral_adjoint, 2);
+
+    // A real diagonal is its own adjoint (TensorKit returns `d`).
+    let real = TensorMap::<_, f64>::diagonal(
+        &runtime,
+        &chiral,
+        [
+            SectorSpectrum {
+                sector: vec![0i64, 1],
+                values: vec![0.5, 2.0],
+            },
+            SectorSpectrum {
+                sector: vec![1, 0],
+                values: vec![-1.0],
+            },
+        ],
+    )
+    .unwrap();
+    let real_adjoint = real.adjoint().unwrap();
+    assert!(real_adjoint.network_reuse_class(false) == NetworkReuseClass::Compact);
+    assert_eq!(real_adjoint.codomain(), real.codomain());
+    assert_eq!(
+        real_adjoint.diagonal_spectrum().unwrap(),
+        real.diagonal_spectrum().unwrap()
+    );
 
     // The multiplicity-free path gives the same representation and zeros.
     let u1 =
@@ -1353,11 +1417,11 @@ fn checked_generic_complex_diagonal_adjoint_is_the_owned_conjugated_diagonal() {
             [
                 SectorSpectrum {
                     sector: U1Irrep::new(1),
-                    values: conj_if(conj, &octet),
+                    values: conj_if(conj, &big),
                 },
                 SectorSpectrum {
                     sector: U1Irrep::new(0),
-                    values: conj_if(conj, &singlet),
+                    values: conj_if(conj, &small),
                 },
             ],
         )
