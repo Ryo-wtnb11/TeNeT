@@ -2727,7 +2727,10 @@ where
             values: values.as_slice(),
         })
         .collect();
-    select_truncation(&weighted, truncation, &rule.rule_identity()).map_err(OperationError::from)
+    select_truncation(&weighted, truncation, &rule.rule_identity(), |sector| {
+        rule.sector_order_key(sector)
+    })
+    .map_err(OperationError::from)
 }
 
 /// Applies a truncation policy to an untruncated compact factorization (the host
@@ -10500,7 +10503,10 @@ where
             values: values.as_slice(),
         })
         .collect();
-    select_truncation(&weighted, truncation, &rule.rule_identity()).map_err(OperationError::from)
+    select_truncation(&weighted, truncation, &rule.rule_identity(), |sector| {
+        rule.sector_order_key(sector)
+    })
+    .map_err(OperationError::from)
 }
 
 /// Checked-Generic sibling of [`decide_bond_truncation`], public for the same
@@ -10530,8 +10536,10 @@ where
             values,
         });
     }
-    select_truncation(&weighted, truncation, &rule.rule_identity())
-        .map_err(|error| CheckedGenericFactorPlanError::Operation(error.into()))
+    select_truncation(&weighted, truncation, &rule.rule_identity(), |sector| {
+        rule.sector_order_key(sector)
+    })
+    .map_err(|error| CheckedGenericFactorPlanError::Operation(error.into()))
 }
 
 #[cfg(test)]

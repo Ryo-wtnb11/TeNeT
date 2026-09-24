@@ -36,6 +36,38 @@ must remain identical across codec or layout changes.
 that need stable behavior must key by the provider's semantic sector type or
 apply their own ordering rather than relying on the returned `Vec` order.
 
+## Sector order where TensorKit's order is observable
+
+TeNeT sorts by `SectorId` for storage, but a result that depends on sector
+order must use TensorKit's. Today one result does: which sector a truncation
+keeps at an exact cross-sector tie. TensorKit 0.17.1
+`findtruncated(::SectorVector, ...)` (`src/factorizations/truncation.jl`)
+sorts the flat values of a `SectorVector` with `sortperm` or
+`partialsortperm`, whose ties go to the lower flat index. The flat order is
+the block order, sorted by TensorKitSectors `isless`. So `truncrank` keeps the
+`isless`-earlier sector first, and `truncerror` discards it first.
+`truncspace` and `trunctol` decide each sector on its own, so they have no
+cross-sector tie. `select_truncation` takes its decision in the order of
+`FusionRule::sector_order_key` (or `CheckedGenericFusion::sector_order_key`),
+which is TensorKitSectors `findindex - 1` per factor, ordered by degree and
+then lexicographically, as TensorKitSectors 0.3.9 `isless` does for products
+(`src/product.jl`).
+
+| Provider | TensorKit order (TensorKitSectors 0.3.9) | Key | `SectorId` monotone? |
+| --- | --- | --- | --- |
+| `U1FusionRule` | `isless(::U1Irrep)`: 0, +1, -1, +2, -2, ... (`src/irreps/u1irrep.jl`) | `4q - 1` for `q > 0`, `4\|q\|` otherwise (TensorKit also enumerates half-integers) | no: zigzag ids 0, -1, +1, ... |
+| `ZNFusionRule`, `Z2FusionRule` | `isless(c1.n, c2.n)` (`src/irreps/znirrep.jl`) | id = `n` | yes |
+| `FermionParityFusionRule` | even < odd (`src/fermions.jl`) | id = parity | yes |
+| `SU2FusionRule` | `isless(s1.j, s2.j)` (`src/irreps/su2irrep.jl`) | id = `2j` | yes |
+| `CU1FusionRule` | `j`, then `s` at `j = 0`: `0+ < 0- < 1/2 < 1 < ...` (`src/irreps/cu1irrep.jl`) | id = `findindex - 1` | yes |
+| `FibonacciFusionRule`, `CategoryDataFibonacci` | unit < tau (`src/anyons.jl`) | id | yes |
+| `ProductFusionRule` (any codec, any nesting) | `isless(::ProductSector)`: degree `sum(findindex) - n`, then lexicographic over the flattened factors (`src/product.jl`) | factor keys concatenated | no in general |
+| `SUNFusionRule` (checked Generic) | SUNRepresentations 0.4.0 `isless(::SUNIrrep)`: Dynkin-label sum, then lexicographic (`src/sunirrep.jl`) | id (encoded in that order) | yes |
+
+A provider without a TensorKit counterpart keeps the default key, its
+`SectorId`, and its ties follow id order. A provider whose ids do not ascend in
+TensorKit order must override the hook.
+
 ## Cache migration
 
 Codec types participate in fusion-rule identity, so in-process TeNeT caches do

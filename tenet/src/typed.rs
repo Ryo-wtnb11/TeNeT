@@ -8869,11 +8869,9 @@ where
     ///
     /// `spectra` must name every sector of this leg exactly once, each with
     /// `values.len()` equal to that sector's degeneracy. Input order does not
-    /// matter: the spectra are ordered by ascending [`SectorId`] before the
-    /// decision, and that deterministic order is what breaks exact ties
-    /// between sectors. It is not TensorKit's sector order in general (U(1)
-    /// ids are zigzag-encoded), so at an exact cross-sector tie the kept
-    /// sector may differ from TensorKit's; both are valid truncations.
+    /// matter: the decision is taken in TensorKit's sector order (the
+    /// provider's `sector_order_key`), so at an exact cross-sector tie the
+    /// kept sector is the one TensorKit keeps.
     ///
     /// Values are selected by magnitude (`|v|`), so signed `eigh` eigenvalues
     /// and complex `eig` eigenvalues can be passed as published. Magnitudes

@@ -2,7 +2,7 @@ use crate::{
     BraidingStyleKind, CanonicalUnitFusionRule, CheckedFusionAlgebra, FusionAlgebraError,
     FusionRule, FusionStyleKind, MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols,
     MultiplicityFreeRigidSymbols, PhysicalBasisError, PhysicalFusionBasis, RuleIdentity,
-    SectorCodec, SectorId, SectorVec,
+    SectorCodec, SectorId, SectorOrderKey, SectorVec,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -629,6 +629,20 @@ impl FusionRule for U1FusionRule {
 
     fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
         self.nsymbol_or_panic(left, right, coupled)
+    }
+
+    /// TensorKitSectors 0.3.9 `findindex(::SectorValues{U1Irrep}, c)`
+    /// (`src/irreps/u1irrep.jl`) is `2|2q| + (2q <= 0)`: TensorKit also
+    /// enumerates half-integer charges (0, 1/2, -1/2, 1, -1, ...), so an
+    /// integer charge `q` sits at position `4q - 1` for `q > 0` and `4|q|`
+    /// otherwise. The spacing matters inside a product's degree, not only the
+    /// order.
+    fn sector_order_key(&self, sector: SectorId) -> SectorOrderKey {
+        let charge = match checked_u1_irrep(sector) {
+            Ok(irrep) => irrep.charge(),
+            Err(error) => panic!("{error}"),
+        };
+        SectorOrderKey::position(4 * u64::from(charge.unsigned_abs()) - u64::from(charge > 0))
     }
 }
 

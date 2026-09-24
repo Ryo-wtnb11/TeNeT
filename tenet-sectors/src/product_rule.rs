@@ -6,7 +6,7 @@ use crate::{
     BraidingStyleKind, CanonicalUnitFusionRule, CheckedFusionAlgebra, FusionAlgebraError,
     FusionRule, FusionStyleKind, MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols,
     MultiplicityFreeRigidSymbols, ProductSector, ProductSectorCodec, PromoteCoefficientScalar,
-    RuleIdentity, SectorCodec, SectorId, SectorVec, TensorKitProductCodec,
+    RuleIdentity, SectorCodec, SectorId, SectorOrderKey, SectorVec, TensorKitProductCodec,
 };
 
 /// The coefficient scalar of `Left ⊠ Right`, promoted from its components'.
@@ -295,6 +295,16 @@ where
         let (coupled_left, coupled_right) = self.decode_sector_or_panic(coupled);
         self.left.nsymbol(left_left, right_left, coupled_left)
             * self.right.nsymbol(left_right, right_right, coupled_right)
+    }
+
+    /// Independent of `Codec`: the order is TensorKit's product order over the
+    /// factors, whatever ids the codec packs them into.
+    fn sector_order_key(&self, sector: SectorId) -> SectorOrderKey {
+        let (left, right) = self.decode_sector_or_panic(sector);
+        SectorOrderKey::product(
+            self.left.sector_order_key(left),
+            self.right.sector_order_key(right),
+        )
     }
 }
 

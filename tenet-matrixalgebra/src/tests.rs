@@ -2015,7 +2015,7 @@ fn generic_svd_trunc_on_the_interleaved_layout_breaks_exact_ties_like_the_canoni
     // Every singular value is exactly 2 (sector 0: [2]; sector 1: 2 * I with
     // weight 1 + sqrt 2), so every cut below is decided by the tie rule, and
     // the producer's kept counts must reach the factors in its own order.
-    // Hand-computed, ascending SectorId: rank(1) keeps sector 0 only; rank(4)
+    // Hand-computed, ascending default (id) order: rank(1) keeps sector 0 only; rank(4)
     // keeps one of each; the unsorted [1, 0] feed would keep [0, 0] and
     // [0, 1] (sector 1 first, weight 2.414).
     let (canonical_space, template, _) = generic_values_endomorphism_input();
