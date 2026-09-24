@@ -2300,6 +2300,189 @@ fn oriented_adjoint_projection_matches_materialized_logical_oracle() {
 }
 
 #[test]
+fn runtime_bound_adjoint_oriented_plan_is_reused_and_keyed_by_orientation() {
+    // Both trees carry sectors [1, 1], so the parent block set is closed under
+    // the adjoint and the ordinary and oriented compilers accept the same
+    // destination and parent structures: only the key separates their plans.
+    let tree = |coupled: usize| {
+        FusionTreeKey::try_new_for_rule(
+            &SU2FusionRule,
+            [SectorId::new(1), SectorId::new(1)],
+            SectorId::new(coupled),
+            [false, false],
+            [],
+            [MultiplicityIndex::ONE],
+        )
+        .unwrap()
+    };
+    let storage_keys = [
+        FusionTreePairKey::pair(tree(2), tree(2)),
+        FusionTreePairKey::pair(tree(0), tree(0)),
+    ];
+    let storage = Arc::new(
+        packed_fixture_structure(
+            4,
+            storage_keys
+                .iter()
+                .cloned()
+                .map(|key| (key, vec![1usize; 4])),
+        )
+        .unwrap(),
+    );
+    let destination = Arc::new(
+        packed_fixture_structure(
+            4,
+            [storage_keys[1].clone(), storage_keys[0].clone()]
+                .into_iter()
+                .map(|key| (key, vec![1usize; 4])),
+        )
+        .unwrap(),
+    );
+    let logical_keys = [storage_keys[1].clone(), storage_keys[0].clone()];
+    let storage_indices = [1, 0];
+    let storage_axes = [2, 3, 0, 1];
+    let operation = TreeTransformOperation::braid([1, 0], [3, 2], [0, 1], [2, 3]);
+    let other_operation = TreeTransformOperation::braid([0, 1], [3, 2], [0, 1], [2, 3]);
+    let oriented = |cache: &mut TreeTransformCache<f64, RuleIdentity>,
+                    operation: &TreeTransformOperation,
+                    orientation: tenet_core::FusionTreePairOrientation| {
+        let direct = orientation == tenet_core::FusionTreePairOrientation::Direct;
+        cache
+            .get_or_compile_tree_pair_oriented(
+                &SU2FusionRule,
+                operation,
+                &destination,
+                if direct { &storage_keys } else { &logical_keys },
+                if direct { &[0, 1] } else { &storage_indices },
+                &storage,
+                orientation,
+                4,
+                |axis| Ok(if direct { axis } else { storage_axes[axis] }),
+            )
+            .unwrap()
+    };
+    let adjoint = tenet_core::FusionTreePairOrientation::Adjoint;
+    let store = Arc::new(RuntimeTreeTransformStore::<f64>::default());
+    let mut cache = TreeTransformCache::<f64, RuleIdentity>::default();
+    cache.bind_runtime_store(Arc::downgrade(&store));
+    crate::tree_transform::take_oriented_tree_pair_compiles();
+
+    let first = oriented(&mut cache, &operation, adjoint);
+    let second = oriented(&mut cache, &operation, adjoint);
+
+    // What: the second runtime-bound call reuses the Runtime-owned plan.
+    assert_eq!(crate::tree_transform::take_oriented_tree_pair_compiles(), 1);
+    assert!(Arc::ptr_eq(&first, &second));
+    assert_eq!((store.info().hits(), store.info().misses()), (1, 1));
+    let mut uncached =
+        TreeTransformCache::<f64, RuleIdentity>::with_policy(OperationCachePolicy::NoCache);
+    // What: the retained plan equals a fresh compile of the same inputs.
+    assert_eq!(
+        first.as_ref(),
+        oriented(&mut uncached, &operation, adjoint).as_ref()
+    );
+
+    let conjugated = cache
+        .get_or_compile_tree_pair_structures_with_storage_conjugation_ref(
+            &SU2FusionRule,
+            &operation,
+            &destination,
+            &storage,
+            true,
+        )
+        .unwrap();
+    let plain = cache
+        .get_or_compile_tree_pair_structures_with_storage_conjugation_ref(
+            &SU2FusionRule,
+            &operation,
+            &destination,
+            &storage,
+            false,
+        )
+        .unwrap();
+    let other = oriented(&mut cache, &other_operation, adjoint);
+
+    // What: an ordinary plan with either conjugation flag, and an adjoint plan
+    // for another operation, each miss instead of aliasing the adjoint entry.
+    assert!(!Arc::ptr_eq(&first, &conjugated));
+    assert!(!Arc::ptr_eq(&first, &plain));
+    assert!(!Arc::ptr_eq(&first, &other));
+    assert_eq!((store.info().hits(), store.info().misses()), (1, 4));
+    assert_eq!(store.info().entries(), 4);
+
+    let direct = tenet_core::FusionTreePairOrientation::Direct;
+    let direct_first = oriented(&mut cache, &operation, direct);
+    let direct_second = oriented(&mut cache, &operation, direct);
+
+    // What: a direct oriented plan is neither served from nor admitted to the
+    // ordinary tree-pair entry whose key it would share.
+    assert_eq!(crate::tree_transform::take_oriented_tree_pair_compiles(), 4);
+    assert!(!Arc::ptr_eq(&direct_first, &plain));
+    assert!(!Arc::ptr_eq(&direct_first, &direct_second));
+    assert_eq!((store.info().hits(), store.info().misses()), (1, 4));
+}
+
+#[test]
+fn runtime_bound_adjoint_oriented_projection_errors_match_the_local_path() {
+    let tree = |coupled: usize| {
+        FusionTreeKey::try_new_for_rule(
+            &SU2FusionRule,
+            [SectorId::new(1), SectorId::new(1)],
+            SectorId::new(coupled),
+            [false, false],
+            [],
+            [MultiplicityIndex::ONE],
+        )
+        .unwrap()
+    };
+    let keys = [
+        FusionTreePairKey::pair(tree(2), tree(2)),
+        FusionTreePairKey::pair(tree(0), tree(0)),
+    ];
+    let storage = Arc::new(
+        packed_fixture_structure(4, keys.iter().cloned().map(|key| (key, vec![1usize; 4])))
+            .unwrap(),
+    );
+    let operation = TreeTransformOperation::braid([1, 0], [3, 2], [0, 1], [2, 3]);
+    let duplicate = [keys[0].clone(), keys[0].clone()];
+    let store = Arc::new(RuntimeTreeTransformStore::<f64>::default());
+    let mut bound = TreeTransformCache::<f64, RuleIdentity>::default();
+    bound.bind_runtime_store(Arc::downgrade(&store));
+    let mut local =
+        TreeTransformCache::<f64, RuleIdentity>::with_policy(OperationCachePolicy::NoCache);
+    let malformed: [(&[FusionTreePairKey], &[usize]); 4] = [
+        (&keys, &[1]),
+        (&keys, &[1, 2]),
+        (&duplicate, &[1, 0]),
+        (&duplicate, &[1, 2]),
+    ];
+    for (logical_keys, storage_indices) in malformed {
+        let compile = |cache: &mut TreeTransformCache<f64, RuleIdentity>| {
+            let error = cache
+                .get_or_compile_tree_pair_oriented(
+                    &SU2FusionRule,
+                    &operation,
+                    &storage,
+                    logical_keys,
+                    storage_indices,
+                    &storage,
+                    tenet_core::FusionTreePairOrientation::Adjoint,
+                    4,
+                    Ok,
+                )
+                .unwrap_err();
+            format!("{error:?}")
+        };
+
+        // What: a runtime-bound miss reports the same first projection error
+        // as the context-local path and admits nothing.
+        assert_eq!(compile(&mut bound), compile(&mut local));
+    }
+    assert_eq!(store.info().entries(), 0);
+    assert_eq!(store.info().misses(), 3);
+}
+
+#[test]
 fn prelowered_compile_does_not_enter_the_completed_structure_lru() {
     let structure = simple_su2_vertex_structure(1);
     let operation_a = TreeTransformOperation::braid([1, 0], [], [0, 1], []);

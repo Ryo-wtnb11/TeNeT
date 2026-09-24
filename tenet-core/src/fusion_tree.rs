@@ -1792,7 +1792,7 @@ struct ValidatedFusionTreePair<'a, R> {
 }
 
 #[doc(hidden)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum FusionTreePairOrientation {
     Direct,
     Adjoint,

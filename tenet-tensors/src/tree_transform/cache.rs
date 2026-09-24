@@ -52,6 +52,10 @@ struct RuntimeTreeTransformOperationKey {
     rule: RuleIdentity,
     operation: TreeTransformOperation,
     logical_source: Option<BlockStructureCacheKey>,
+    // Why not fold this into `storage_conjugate`: a conjugated owned source
+    // reads storage keys directly, while an adjoint-oriented source reads
+    // them through the adjoint key and axis projection.
+    orientation: FusionTreePairOrientation,
 }
 
 type RuntimeTreeTransformKey = TreeTransformStructureCacheKey<RuntimeTreeTransformOperationKey>;
@@ -498,6 +502,7 @@ impl<T> RuntimeTreeTransformStore<T> {
             RuntimeTreeTransformOperationKey {
                 rule,
                 operation: operation.clone(),
+                orientation: FusionTreePairOrientation::Direct,
                 logical_source: logical_src_structure
                     .map(BlockStructureCacheKey::from_structure)
                     .transpose()?,
@@ -519,6 +524,7 @@ impl<T> RuntimeTreeTransformStore<T> {
             state.entries.iter().find_map(|(candidate, _)| {
                 (candidate.plan().rule == key.plan().rule
                     && candidate.plan().operation == key.plan().operation
+                    && candidate.plan().orientation == key.plan().orientation
                     && match (&candidate.plan().logical_source, &key.plan().logical_source) {
                         (Some(candidate), Some(key)) => candidate.same_content(key),
                         (None, None) => true,
@@ -561,6 +567,7 @@ impl<T> RuntimeTreeTransformStore<T> {
             RuntimeTreeTransformOperationKey {
                 rule,
                 operation: operation.clone(),
+                orientation: FusionTreePairOrientation::Direct,
                 logical_source: logical_src_structure
                     .map(BlockStructureCacheKey::from_structure)
                     .transpose()?,
@@ -621,6 +628,7 @@ impl<T> RuntimeTreeTransformStore<T> {
             RuntimeTreeTransformOperationKey {
                 rule,
                 operation: operation.clone(),
+                orientation: FusionTreePairOrientation::Direct,
                 logical_source: None,
             },
             dst_structure,
@@ -659,15 +667,102 @@ impl<T> Drop for RuntimeTreeTransformStore<T> {
     }
 }
 
+fn oriented_source_projection<'a>(
+    logical_keys: &'a [FusionTreePairKey],
+    storage_indices: &[usize],
+    storage_src_structure: &BlockStructure,
+) -> Result<FxHashMap<&'a FusionTreePairKey, usize>, OperationError> {
+    let mut projection =
+        FxHashMap::with_capacity_and_hasher(logical_keys.len(), rustc_hash::FxBuildHasher);
+    // Why not track storage-index uniqueness here: FusionOperandLayout
+    // already proves this projection is a bijection onto parent blocks.
+    for (position, (key, &storage_index)) in logical_keys.iter().zip(storage_indices).enumerate() {
+        if storage_index >= storage_src_structure.block_count() {
+            return Err(OperationError::BlockIndexOutOfBounds {
+                tensor: "oriented src",
+                index: storage_index,
+                count: storage_src_structure.block_count(),
+            });
+        }
+        if projection.insert(key, storage_index).is_some() {
+            return Err(OperationError::DuplicateTreeTransformKey {
+                tensor: "src",
+                index: position,
+            });
+        }
+    }
+    Ok(projection)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compile_oriented_tree_pair_structure<R, FAxis>(
+    rule: &R,
+    operation: &TreeTransformOperation,
+    dst_structure: &Arc<BlockStructure>,
+    logical_keys: &[FusionTreePairKey],
+    storage_src_structure: &Arc<BlockStructure>,
+    orientation: FusionTreePairOrientation,
+    logical_rank: usize,
+    projection: &FxHashMap<&FusionTreePairKey, usize>,
+    logical_to_storage_axis: FAxis,
+    threads: usize,
+) -> Result<TreeTransformStructure<R::Scalar>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar:
+        Copy + Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero + Send + Sync,
+    FAxis: Fn(usize) -> Result<usize, OperationError>,
+{
+    #[cfg(test)]
+    ORIENTED_TREE_PAIR_COMPILES.set(ORIENTED_TREE_PAIR_COMPILES.get() + 1);
+    let plan = build_oriented_tree_pair_transform_group_plan_with_threads(
+        rule,
+        operation.clone(),
+        logical_keys,
+        storage_src_structure,
+        orientation,
+        logical_rank,
+        projection,
+        threads,
+    )?;
+    let source_index = |key: &FusionTreePairKey| {
+        projection
+            .get(key)
+            .copied()
+            .ok_or_else(|| OperationError::MissingBlockKey {
+                key: Box::new(tenet_core::BlockKey::FusionTree(key.clone())),
+            })
+    };
+    plan.compile_shared_structures_with_source_projection(
+        Arc::clone(dst_structure),
+        Arc::clone(storage_src_structure),
+        logical_rank,
+        source_index,
+        logical_to_storage_axis,
+        orientation == FusionTreePairOrientation::Adjoint,
+    )
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static ORIENTED_TREE_PAIR_COMPILES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Oriented tree-pair plans compiled on this thread since the last reset.
+#[cfg(test)]
+pub(crate) fn take_oriented_tree_pair_compiles() -> usize {
+    ORIENTED_TREE_PAIR_COMPILES.replace(0)
+}
+
 pub(crate) const DEFAULT_TREE_TRANSFORM_CACHE_ENTRIES: usize = 256;
 
 /// Context-local retention for completed immutable tree-transform structures.
 ///
 /// Standalone expert contexts may retain ordinary multiplicity-free and
 /// all-codomain structures according to [`OperationCachePolicy`]. Runtime-bound
-/// ordinary and checked Generic tree-pair operations use their Runtime-owned
-/// store instead. Prelowered callback paths compile eagerly and are not retained
-/// here.
+/// ordinary, adjoint-oriented, and checked Generic tree-pair operations use
+/// their Runtime-owned store instead. Prelowered callback paths compile eagerly
+/// and are not retained here.
 pub struct TreeTransformCache<T, RuleKey> {
     structures: TreeTransformStructureCache<T, TreeTransformStructureOperationKey<RuleKey>>,
     runtime_store: Option<Weak<RuntimeTreeTransformStore<T>>>,
@@ -945,6 +1040,7 @@ where
                 RuntimeTreeTransformOperationKey {
                     rule: rule.rule_identity(),
                     operation: operation.clone(),
+                    orientation: FusionTreePairOrientation::Direct,
                     logical_source: None,
                 },
                 dst_structure,
@@ -1082,56 +1178,57 @@ where
                 tensor: "oriented source projection",
             });
         }
-        let mut projection =
-            FxHashMap::with_capacity_and_hasher(logical_keys.len(), rustc_hash::FxBuildHasher);
-        // Why not track storage-index uniqueness here: FusionOperandLayout
-        // already proves this projection is a bijection onto parent blocks.
-        for (position, (key, &storage_index)) in
-            logical_keys.iter().zip(storage_indices).enumerate()
-        {
-            if storage_index >= storage_src_structure.block_count() {
-                return Err(OperationError::BlockIndexOutOfBounds {
-                    tensor: "oriented src",
-                    index: storage_index,
-                    count: storage_src_structure.block_count(),
-                });
-            }
-            if projection.insert(key, storage_index).is_some() {
-                return Err(OperationError::DuplicateTreeTransformKey {
-                    tensor: "src",
-                    index: position,
-                });
-            }
-        }
-        self.stats.structure_misses += 1;
-        let plan = build_oriented_tree_pair_transform_group_plan_with_threads(
-            rule,
-            operation.clone(),
-            logical_keys,
-            storage_src_structure,
-            orientation,
-            logical_rank,
-            &projection,
-            self.recoupling_threads,
-        )?;
-        let source_index = |key: &FusionTreePairKey| {
-            projection
-                .get(key)
-                .copied()
-                .ok_or_else(|| OperationError::MissingBlockKey {
-                    key: Box::new(tenet_core::BlockKey::FusionTree(key.clone())),
-                })
-        };
-        Ok(Arc::new(
-            plan.compile_shared_structures_with_source_projection(
-                Arc::clone(dst_structure),
-                Arc::clone(storage_src_structure),
+        let storage_conjugate = orientation == FusionTreePairOrientation::Adjoint;
+        let threads = self.recoupling_threads;
+        let compile = |projection: &FxHashMap<&FusionTreePairKey, usize>| {
+            compile_oriented_tree_pair_structure(
+                rule,
+                operation,
+                dst_structure,
+                logical_keys,
+                storage_src_structure,
+                orientation,
                 logical_rank,
-                source_index,
+                projection,
                 logical_to_storage_axis,
-                orientation == FusionTreePairOrientation::Adjoint,
-            )?,
-        ))
+                threads,
+            )
+        };
+        // Why only the adjoint orientation: a direct oriented key would equal
+        // the ordinary tree-pair key while its plan follows the caller's
+        // logical key order, and no production caller compiles it.
+        let runtime_store = storage_conjugate.then(|| self.runtime_store()).flatten();
+        if let Some(store) = runtime_store {
+            // Why not key the logical keys, projection, rank, or axis map: the
+            // only caller derives all four from the parent structure
+            // (`FusionOperand::prepare` enumerates the adjoint HomSpace in its
+            // canonical sorted-sector order restricted to the parent's blocks;
+            // `FusionOperand::storage_axis` reads the parent split carried by
+            // its block keys; a blockless parent compiles no spec).
+            let key = TreeTransformStructureCacheKey::from_structures_with_storage_conjugation(
+                RuntimeTreeTransformOperationKey {
+                    rule: rule.rule_identity(),
+                    operation: operation.clone(),
+                    logical_source: None,
+                    orientation,
+                },
+                dst_structure,
+                storage_src_structure,
+                storage_conjugate,
+            )?;
+            return store.get_or_compile(key, || {
+                let projection = oriented_source_projection(
+                    logical_keys,
+                    storage_indices,
+                    storage_src_structure,
+                )?;
+                compile(&projection).map(Arc::new)
+            });
+        }
+        let projection =
+            oriented_source_projection(logical_keys, storage_indices, storage_src_structure)?;
+        self.stats.structure_misses += 1;
+        compile(&projection).map(Arc::new)
     }
 
     /// Generic-fusion sibling of [`Self::get_or_compile_tree_pair`].
@@ -1340,6 +1437,7 @@ mod runtime_store_tests {
             RuntimeTreeTransformOperationKey {
                 rule,
                 operation: TreeTransformOperation::permute([tag], []),
+                orientation: tenet_core::FusionTreePairOrientation::Direct,
                 logical_source: None,
             },
             &structure,
@@ -1373,6 +1471,7 @@ mod runtime_store_tests {
             RuntimeTreeTransformOperationKey {
                 rule: RuleIdentity::of_type::<TestRuleIdentity>(),
                 operation: TreeTransformOperation::permute([tag], []),
+                orientation: tenet_core::FusionTreePairOrientation::Direct,
                 logical_source: None,
             },
             &structure,
@@ -1409,6 +1508,7 @@ mod runtime_store_tests {
             RuntimeTreeTransformOperationKey {
                 rule: RuleIdentity::of_type::<TestRuleIdentity>(),
                 operation: TreeTransformOperation::permute([0], []),
+                orientation: tenet_core::FusionTreePairOrientation::Direct,
                 logical_source: None,
             },
             &dst,
