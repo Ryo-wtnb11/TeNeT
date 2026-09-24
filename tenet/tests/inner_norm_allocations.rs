@@ -12,7 +12,7 @@ use tenet::core::{
     RuleIdentity, SU2FusionRule, SU2Irrep, SectorId, SectorVec, Su2SectorLayout,
     TypedSectorAdmission, U1FusionRule, U1Irrep, U1SectorLayout, Z2Irrep,
 };
-use tenet::prelude::{Complex64, GradedSpace, Runtime, TensorMap};
+use tenet::prelude::{Complex32, Complex64, GradedSpace, Runtime, TensorMap};
 use tenet::typed::TensorScalar;
 
 type Fz2U1Codec = PackedProductCodec<Fz2SectorLayout, U1SectorLayout>;
@@ -113,6 +113,18 @@ fn warmed_non_abelian_inner_and_norm_do_not_allocate() {
 
     assert_eq!(inner_allocations, 0);
     assert_eq!(norm_allocations, 0);
+
+    // Out-of-range payloads take the rescaling passes, which add none either.
+    for scale in [1e200, 1e-200] {
+        let extreme = lhs.scale(Complex64::new(scale, 0.0));
+        black_box(extreme.norm().unwrap());
+        let (value, allocations) = measured(|| extreme.norm().unwrap());
+        assert!(value.is_finite() && value > 0.0, "{scale:e}: {value:e}");
+        assert_eq!(allocations, 0, "rescaled norm at {scale:e}");
+        let (value, allocations) = measured(|| extreme.norm_p(3.0).unwrap());
+        assert!(value.is_finite() && value > 0.0, "{scale:e}: {value:e}");
+        assert_eq!(allocations, 0, "rescaled norm_p(3) at {scale:e}");
+    }
 }
 
 #[test]
@@ -453,6 +465,27 @@ fn warmed_checked_generic_reductions_do_not_allocate() {
         black_box(value);
         assert_eq!(allocations, 0, "{row}");
     }
+
+    // The rescaled checked norm neither allocates nor loses the value: scaling
+    // commutes with the norm, so `norm(s * t) = s * norm(t)` within the
+    // workspace rule taken relative to the result (the payload's entry count
+    // bounds the terms of the sum).
+    let norm = lhs.norm().unwrap();
+    for scale in [1e200, 1e-200] {
+        let extreme = lhs.scale(Complex64::new(scale, 0.0));
+        let lazy = extreme.adjoint().unwrap();
+        black_box((extreme.norm().unwrap(), lazy.norm().unwrap()));
+        for (row, tensor) in [("owned", &extreme), ("lazy", &lazy)] {
+            let (value, allocations) = measured(|| tensor.norm().unwrap());
+            assert_eq!(allocations, 0, "{row} rescaled norm at {scale:e}");
+            let want = scale * norm;
+            let bound = 32.0 * (lhs.data().len() as f64).sqrt() * f64::EPSILON * want;
+            assert!(
+                (value - want).abs() <= bound,
+                "{row} {scale:e}: {value:e} against {want:e}"
+            );
+        }
+    }
 }
 
 /// SU(N) checked `dim` allocates per query (`tenet-sectors/src/sun.rs::
@@ -517,4 +550,80 @@ fn warmed_su3_checked_inner_and_norm_allocate_only_through_the_provider() {
         );
         assert_eq!(allocations, provider_allocations, "{row}");
     }
+}
+
+/// Checked-Generic `norm` of single-precision payloads accumulates in `f64`
+/// (#1315, #1344) and rescales from that wide sum (#1437).
+///
+/// Oracle: the same `f32` entries widened exactly into an `f64` tensor, whose
+/// norm cannot overflow or underflow at these magnitudes. A single-precision
+/// payload therefore must agree to `f64` rounding — the workspace rule at
+/// `f64` epsilon, relative to the result, with the entry count as `terms` —
+/// which a sum narrowed to `f32` (relative error near `2^-24`, or far worse
+/// once `|t|²` is `f32`-subnormal) cannot meet.
+#[test]
+fn checked_generic_single_precision_norm_accumulates_wide() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedToy);
+    let leg = GradedSpace::try_new_with_arc(
+        Arc::clone(&provider),
+        [(CheckedLabel::Vacuum, 1), (CheckedLabel::X, 2)],
+    )
+    .unwrap();
+
+    let check = |what: &str,
+                 value: &dyn Fn(
+        &tenet::typed::BlockFusionTrees<CheckedLabel>,
+        &[usize],
+    ) -> Complex32| {
+        let real32: TensorMap<CheckedToy, f32> =
+            TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, indices| {
+                value(trees, indices).re
+            })
+            .unwrap();
+        let real64: TensorMap<CheckedToy, f64> =
+            TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, indices| {
+                f64::from(value(trees, indices).re)
+            })
+            .unwrap();
+        let complex32: TensorMap<CheckedToy, Complex32> =
+            TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, indices| {
+                value(trees, indices)
+            })
+            .unwrap();
+        let complex64: TensorMap<CheckedToy, Complex64> =
+            TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, indices| {
+                let z = value(trees, indices);
+                Complex64::new(z.re.into(), z.im.into())
+            })
+            .unwrap();
+        let terms = real64.data().len() as f64;
+        for (row, got, want) in [
+            ("f32", real32.norm().unwrap(), real64.norm().unwrap()),
+            ("c32", complex32.norm().unwrap(), complex64.norm().unwrap()),
+        ] {
+            let bound = 32.0 * terms.sqrt() * f64::EPSILON * want;
+            assert!(
+                want > 0.0 && (got - want).abs() <= bound,
+                "{what} {row}: {got:e} against {want:e} (tolerance {bound:e})"
+            );
+        }
+    };
+
+    for scale in [1.0_f32, 1e-24, 1e-25] {
+        check(&format!("block values x{scale:e}"), &|trees, indices| {
+            let x = block_value::<f32>(trees, indices) * scale;
+            Complex32::new(x, 0.5 * x)
+        });
+    }
+    // One `8192` among ones: `8192^2 = 2^26` has `f32` spacing 8, so an `f32`
+    // rounding of the sum drops most of the unit terms.
+    check("8192 among ones", &|_, indices| {
+        let x = if indices.iter().all(|&index| index == 0) {
+            8192.0
+        } else {
+            1.0
+        };
+        Complex32::new(x, 1.0)
+    });
 }

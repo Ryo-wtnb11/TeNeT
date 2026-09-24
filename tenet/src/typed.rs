@@ -1240,6 +1240,12 @@ where
     /// read their parent orientation without caching a materialization.
     /// Checked-Generic reductions currently require dense payloads.
     ///
+    /// The Host norm does not overflow or underflow while the norm itself is
+    /// representable: when the unscaled sum of squares leaves the `f64` range,
+    /// two more passes rescale every entry by the largest magnitude, as Julia's
+    /// `LinearAlgebra.generic_norm2` does. An entry of NaN magnitude `|x|` gives
+    /// NaN; otherwise an infinite magnitude gives `inf`.
+    ///
     /// If a checked provider cannot supply a quantum dimension, its original
     /// error is available as the source. An invalid coupled-sector layout
     /// returns [`Error::Core`].
@@ -2991,30 +2997,31 @@ fn max_propagating_nan(accumulator: f64, magnitude: f64) -> f64 {
     }
 }
 
-/// TensorKit `_norm(blocks(t), p, 0)` for finite `p > 0` (`linalg.jl:262-270`):
-/// `(Σ_c dim(c) · Σ_{x ∈ block_c} |x|^p)^(1/p)` over the coupled-sector regions
-/// of one dense payload.
+/// `Σ_c dim(c) · Σ_{x ∈ block_c} term(x)` over the coupled-sector regions of
+/// one dense payload: the weighted sum under TensorKit `_norm(blocks(t), p, 0)`
+/// (`linalg.jl:261-270`) for finite `p > 0`.
 ///
 /// Why no `UniqueFusion` whole-buffer fast path like [`weighted_inner`]'s: that
 /// one exists to reach a single BLAS-shaped dot, and an entrywise `|x|^p`
 /// reduction has no such kernel to reach. The region walk is a partition of the
 /// same buffer, so the element count is identical either way.
-pub(crate) fn coupled_region_pow_sum<D, W>(
+pub(crate) fn coupled_region_weighted_sum<D, W, E>(
     structure: &BlockStructure,
     nout: usize,
     data: &[D],
-    p: f64,
     mut weight_of: W,
-) -> Result<f64, Error>
+    term: impl Fn(D) -> f64,
+) -> Result<f64, E>
 where
     D: ScalarOps,
-    W: FnMut(SectorId) -> f64,
+    W: FnMut(SectorId) -> Result<f64, E>,
+    E: From<Error>,
 {
     let regions = sector_regions(structure, nout)?;
-    if data.len() != structure.required_len()? {
-        return Err(internal_layout_error(
-            "coupled-sector regions do not cover the scalar buffer",
-        ));
+    if data.len() != structure.required_len().map_err(Error::from)? {
+        return Err(
+            internal_layout_error("coupled-sector regions do not cover the scalar buffer").into(),
+        );
     }
 
     let mut total = 0.0;
@@ -3022,13 +3029,80 @@ where
         let block = data.get(region.range()).ok_or_else(|| {
             internal_layout_error("coupled-sector region exceeds the scalar buffer")
         })?;
-        let partial: f64 = block
-            .iter()
-            .map(|&value| value.widen_complex().norm().powf(p))
-            .sum();
-        total += weight_of(region.coupled()) * partial;
+        let partial: f64 = block.iter().map(|&value| term(value)).sum();
+        total += weight_of(region.coupled())? * partial;
     }
-    Ok(total.powf(p.recip()))
+    Ok(total)
+}
+
+/// The largest entry magnitude, NaN-propagating like Julia's `normInf`.
+fn max_abs<D: ScalarOps>(values: impl IntoIterator<Item = D>) -> f64 {
+    // Why `widen_complex().norm()` rather than an f64/c64 match: the widening
+    // is exact and `Complex64::new(x, 0.0).norm()` is exactly `|x|`, so one
+    // expression covers every payload dtype.
+    values
+        .into_iter()
+        .map(|value| value.widen_complex().norm())
+        .fold(0.0, max_propagating_nan)
+}
+
+/// `|x / max|^p` of one entry, in `f64`.
+///
+/// For `p == 2` the components are divided and squared separately, like
+/// BLAS `dznrm2`: `hypot` first would add a square root per entry, and
+/// `re² + im²` before dividing is the overflow being avoided.
+fn scaled_power<D: ScalarOps>(value: D, max: f64, p: f64) -> f64 {
+    let value = value.widen_complex();
+    if p == 2.0 {
+        let (re, im) = (value.re / max, value.im / max);
+        re * re + im * im
+    } else {
+        (value.norm() / max).powf(p)
+    }
+}
+
+/// An unscaled power sum at or above this is accurate to rounding: any term
+/// that underflowed is below `f64::MIN_POSITIVE`, under `EPSILON` relative to
+/// the sum.
+const UNSCALED_POWER_SUM_MIN: f64 = f64::MIN_POSITIVE / f64::EPSILON;
+
+/// A finite-`p` norm from its unscaled weighted power sum `sum`, rescaled when
+/// `sum` overflowed or underflowed.
+///
+/// Julia's `generic_norm2` / `generic_normp` (LinearAlgebra `generic.jl:468`,
+/// `:498`) divide every entry by `maxabs = normInf(x)` when the unscaled sum
+/// would leave the range, return `maxabs` itself when it is zero, infinite or
+/// NaN, and never rescale for `p <= 1`. This runs that scaled branch only
+/// after the unscaled sum proved out of range, so an in-range norm keeps one
+/// pass and no division per entry, and an out-of-range one pays two more.
+/// A single-pass running scale (LAPACK `dnrm2`) would charge every call a
+/// division and a comparison per entry.
+///
+/// The scale is global over all coupled sectors. TensorKit's non-UniqueFusion
+/// `_norm` instead adds `dim(c) * norm(b, p)^p` unscaled, so it returns `Inf`
+/// or `0` once one weighted block power leaves the range even though the
+/// norm itself is representable; TeNeT returns the representable value.
+fn rescaled_power_norm<E>(
+    sum: f64,
+    p: f64,
+    max_abs: impl FnOnce() -> f64,
+    scaled_sum: impl FnOnce(f64) -> Result<f64, E>,
+) -> Result<f64, E> {
+    let root = |sum: f64| {
+        if p == 2.0 {
+            sum.sqrt()
+        } else {
+            sum.powf(p.recip())
+        }
+    };
+    if p <= 1.0 || (sum.is_finite() && sum >= UNSCALED_POWER_SUM_MIN) {
+        return Ok(root(sum));
+    }
+    let max = max_abs();
+    if max == 0.0 || !max.is_finite() {
+        return Ok(max);
+    }
+    Ok(max * root(scaled_sum(max)?))
 }
 
 pub(crate) fn absorb_mapped<D, S>(
@@ -7097,7 +7171,40 @@ where
     fn norm(
         tensor: &TensorMap<R, D>,
     ) -> Result<f64, GenericTensorError<<R as CheckedGenericFusion>::Error>> {
-        Ok(Self::inner(tensor, tensor)?.widen_complex().re.sqrt())
+        // The norm is adjoint invariant, so a lazy adjoint reads its parent in
+        // storage order instead of pairing oriented blocks.
+        if let TypedTensorRepr::Adjoint(view) = &tensor.repr {
+            return Self::norm(&TensorMap {
+                runtime: tensor.runtime.clone(),
+                repr: TypedTensorRepr::Owned(Arc::clone(&view.parent)),
+            });
+        }
+        let body = tensor.owned_body().expect("owned norm input");
+        if matches!(body.data.as_ref(), TypedData::Diagonal(_)) {
+            return Err(Error::InvalidArgument(
+                "checked Generic reductions require dense payloads".to_string(),
+            )
+            .into());
+        }
+        let data = body.materialized_dense_data();
+        let structure = tensor.logical_space().space().structure();
+        let nout = tensor.logical_space().space().nout();
+        let provider = tensor.logical_space().provider();
+        let weight_of = |sector| <R::Mode as TypedSpaceModeDispatch<R>>::dim(provider, sector);
+        // Why not `Self::inner(tensor, tensor)`: it narrows the wide sum to
+        // `D`, which for `f32`/`Complex32` rounds `|t|²` to single precision
+        // and can leave it subnormal, above the rescaling threshold.
+        let sum = coupled_region_inner(structure, nout, data, data, weight_of)?.re;
+        rescaled_power_norm(
+            sum,
+            2.0,
+            || max_abs(data.iter().copied()),
+            |max| {
+                coupled_region_weighted_sum(structure, nout, data, weight_of, |value| {
+                    scaled_power(value, max, 2.0)
+                })
+            },
+        )
     }
 
     fn tr(
@@ -12502,6 +12609,12 @@ where
     /// `f64` rounding (#1344). `f64`/`Complex64` payloads take the unwidened
     /// reduction and pay nothing extra. [`Self::inner`] keeps the payload-dtype
     /// within-sector sum documented on `weighted_inner_cuda`.
+    ///
+    /// Unlike the Host `norm`, an `f64`/`Complex64` device sum is not
+    /// rescaled: it returns `inf` once the squared norm exceeds `f64::MAX`
+    /// (entries near `1e154` and above) and loses accuracy once it falls
+    /// below `f64::MIN_POSITIVE` (norms near `1e-154` and below), where the
+    /// Host returns the representable norm.
     pub fn norm(&self) -> Result<f64, Error> {
         if let TypedTensorRepr::Adjoint(view) = &self.repr {
             return Self {
@@ -18726,9 +18839,18 @@ where
     fn norm_multiplicity_free(&self) -> Result<f64, Error> {
         // Keep the weighted reduction on the shared helper; a second copy
         // could drift from the block semantics it centralizes.
+        let provider = self.logical_space().provider();
         if let Some(spectrum) = self.spectrum() {
-            let provider = self.logical_space().provider();
-            return Ok(Self::compact_inner(spectrum, spectrum, provider)?.re.sqrt());
+            return rescaled_power_norm(
+                Self::compact_inner(spectrum, spectrum, provider)?.re,
+                2.0,
+                || Self::spectrum_max_abs(spectrum),
+                |max| {
+                    Ok(Self::spectrum_weighted_sum(spectrum, provider, |value| {
+                        scaled_power(value, max, 2.0)
+                    }))
+                },
+            );
         }
         if let TypedTensorRepr::Adjoint(view) = &self.repr {
             let parent = Self {
@@ -18737,7 +18859,50 @@ where
             };
             return parent.norm();
         }
-        Ok(self.weighted_self_inner()?.re.sqrt())
+        let data = self
+            .owned_body()
+            .expect("owned norm input")
+            .materialized_dense_data();
+        rescaled_power_norm(
+            self.weighted_self_inner()?.re,
+            2.0,
+            || max_abs(data.iter().copied()),
+            |max| {
+                coupled_region_weighted_sum(
+                    self.logical_space().space().structure(),
+                    self.logical_space().space().nout(),
+                    data,
+                    |coupled| Ok::<_, Error>(provider.dim_scalar(coupled)),
+                    |value| scaled_power(value, max, 2.0),
+                )
+            },
+        )
+    }
+
+    /// The largest stored magnitude of a compact spectrum, as [`max_abs`].
+    fn spectrum_max_abs(spectrum: &[tenet_matrixalgebra::SectorSpectrum<D>]) -> f64 {
+        max_abs(
+            spectrum
+                .iter()
+                .flat_map(|entry| entry.values.iter().copied()),
+        )
+    }
+
+    /// `Σ_c dim(c) · Σ_k term(s_{c,k})` over a compact spectrum: the stored
+    /// diagonal of each coupled block, whose off-diagonal zeros add nothing
+    /// to any power sum with `p > 0`.
+    fn spectrum_weighted_sum(
+        spectrum: &[tenet_matrixalgebra::SectorSpectrum<D>],
+        provider: &R,
+        term: impl Fn(D) -> f64,
+    ) -> f64 {
+        spectrum
+            .iter()
+            .map(|entry| {
+                provider.dim_scalar(entry.sector)
+                    * entry.values.iter().map(|&value| term(value)).sum::<f64>()
+            })
+            .sum()
     }
 
     /// TensorKit `norm(t, Inf)`: the largest absolute stored entry.
@@ -18757,31 +18922,21 @@ where
     /// None today; the `Result` keeps the shape of [`Self::norm`], which the
     /// two are usually reached through together.
     pub fn norm_inf(&self) -> Result<f64, Error> {
-        // Why `widen_complex().norm()` rather than an f64/c64 match: the
-        // widening is exact and `Complex64::new(x, 0.0).norm()` is exactly
-        // `|x|`, so one expression covers both instantiations.
         if let Some(spectrum) = self.spectrum() {
-            return Ok(spectrum
-                .iter()
-                .flat_map(|entry| entry.values.iter())
-                .map(|&value| value.widen_complex().norm())
-                .fold(0.0, max_propagating_nan));
+            return Ok(Self::spectrum_max_abs(spectrum));
         }
         if let TypedTensorRepr::Adjoint(view) = &self.repr {
-            return Ok(view
-                .parent
+            return Ok(max_abs(
+                view.parent.materialized_dense_data().iter().copied(),
+            ));
+        }
+        Ok(max_abs(
+            self.owned_body()
+                .expect("owned norm input")
                 .materialized_dense_data()
                 .iter()
-                .map(|&value| value.widen_complex().norm())
-                .fold(0.0, max_propagating_nan));
-        }
-        Ok(self
-            .owned_body()
-            .expect("owned norm input")
-            .materialized_dense_data()
-            .iter()
-            .map(|&value| value.widen_complex().norm())
-            .fold(0.0, max_propagating_nan))
+                .copied(),
+        ))
     }
 
     /// TensorKit `norm(t, p)` for a general exponent:
@@ -18831,28 +18986,35 @@ where
             return parent.norm_p(p);
         }
         let provider = self.logical_space().provider();
+        let power = |value: D| value.widen_complex().norm().powf(p);
         if let Some(spectrum) = self.spectrum() {
-            let total: f64 = spectrum
-                .iter()
-                .map(|entry| {
-                    provider.dim_scalar(entry.sector)
-                        * entry
-                            .values
-                            .iter()
-                            .map(|&value| value.widen_complex().norm().powf(p))
-                            .sum::<f64>()
-                })
-                .sum();
-            return Ok(total.powf(p.recip()));
+            return rescaled_power_norm(
+                Self::spectrum_weighted_sum(spectrum, provider, power),
+                p,
+                || Self::spectrum_max_abs(spectrum),
+                |max| {
+                    Ok(Self::spectrum_weighted_sum(spectrum, provider, |value| {
+                        scaled_power(value, max, p)
+                    }))
+                },
+            );
         }
-        coupled_region_pow_sum(
-            self.logical_space().space().structure(),
-            self.logical_space().space().nout(),
-            self.owned_body()
-                .expect("owned norm input")
-                .materialized_dense_data(),
+        let structure = self.logical_space().space().structure();
+        let nout = self.logical_space().space().nout();
+        let data = self
+            .owned_body()
+            .expect("owned norm input")
+            .materialized_dense_data();
+        let weight_of = |coupled| Ok::<_, Error>(provider.dim_scalar(coupled));
+        rescaled_power_norm(
+            coupled_region_weighted_sum(structure, nout, data, weight_of, power)?,
             p,
-            |coupled| provider.dim_scalar(coupled),
+            || max_abs(data.iter().copied()),
+            |max| {
+                coupled_region_weighted_sum(structure, nout, data, weight_of, |value| {
+                    scaled_power(value, max, p)
+                })
+            },
         )
     }
 
