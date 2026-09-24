@@ -18,13 +18,16 @@
 
 use std::collections::HashMap;
 
-use num_complex::Complex64;
+use num_complex::{Complex32, Complex64};
 use tenet::prelude::{GradedSpace, Runtime, TensorMap};
 use tenet_category_data::{CategoryDataFibonacci, CategoryObject};
 use tenet_sectors::{
     CheckedFusionAlgebra, FibonacciFusionRule, FibonacciSector, FusionAlgebraError, FusionRule,
     MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols, SectorCodec, SectorId,
 };
+
+#[path = "../../tests/support/numerics.rs"]
+mod numerics;
 
 const FIXTURE: &str = include_str!("fixtures/fib-categorydata-v0.1.3.txt");
 
@@ -53,6 +56,8 @@ fn table() -> CategoryDataFibonacci {
     CategoryDataFibonacci::try_new().expect("the shipped tables load")
 }
 
+/// Exact comparison for imported `F` and `R` entries: both sides parse the
+/// same shortest-round-trip decimals, so no arithmetic separates them.
 fn assert_bits(actual: Complex64, expected: Complex64, what: &str) {
     assert_eq!(
         (actual.re.to_bits(), actual.im.to_bits()),
@@ -185,21 +190,29 @@ fn every_derived_value_matches_the_pinned_julia_environment() {
 
     let mut checked = 0usize;
 
+    // Derived values are arithmetic on the imported F and R (a norm, a
+    // quotient, a channel sum for the twist, and products for A and B), so
+    // they are compared under the workspace tolerance rule; the imported
+    // entries themselves are compared exactly above. `terms` counts the rank-2
+    // channel sum and the at most four factors of each product.
     for a in SECTORS {
-        assert_bits(
+        numerics::assert_close(
+            "dim",
             fib.dim_scalar(a),
             fixture_value(&entries, "dim", &[a.id()]),
-            "dim",
+            4,
         );
-        assert_bits(
+        numerics::assert_close(
+            "frobenius-schur",
             fib.frobenius_schur_phase_scalar(a),
             fixture_value(&entries, "frobeniusschur", &[a.id()]),
-            "frobenius-schur",
+            4,
         );
-        assert_bits(
+        numerics::assert_close(
+            "twist",
             fib.twist_scalar(a),
             fixture_value(&entries, "twist", &[a.id()]),
-            "twist",
+            4,
         );
         checked += 3;
     }
@@ -210,15 +223,17 @@ fn every_derived_value_matches_the_pinned_julia_environment() {
         for b in SECTORS {
             for c in SECTORS {
                 let labels = [a.id(), b.id(), c.id()];
-                assert_bits(
+                numerics::assert_close(
+                    "A",
                     fib.a_symbol_scalar(a, b, c),
                     fixture_value(&entries, "A", &labels),
-                    "A",
+                    4,
                 );
-                assert_bits(
+                numerics::assert_close(
+                    "B",
                     fib.b_symbol_scalar(a, b, c),
                     fixture_value(&entries, "B", &labels),
-                    "B",
+                    4,
                 );
                 checked += 2;
             }

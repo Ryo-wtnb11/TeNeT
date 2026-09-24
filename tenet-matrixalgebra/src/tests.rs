@@ -19,6 +19,7 @@ use crate::factorize::{
     typed_from_dyn, validate_eigenvector_singular_values, validate_inverse_region_routes_for_test,
     BoundTensorMap,
 };
+use crate::test_numerics::numerics;
 use crate::*;
 use num_complex::{Complex32, Complex64};
 use num_traits::Zero;
@@ -2042,6 +2043,8 @@ fn generic_svd_trunc_on_the_interleaved_layout_breaks_exact_ties_like_the_canoni
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
 
     let full = svd_trunc_dyn_generic(&mut dense, &canonical, &Truncation::Full).unwrap();
+    // Fixture precondition, kept exact: the tie rule is only exercised when
+    // the spectrum is exactly tied.
     assert!(full
         .singular_values()
         .iter()
@@ -2063,7 +2066,9 @@ fn generic_svd_trunc_on_the_interleaved_layout_breaks_exact_ties_like_the_canoni
         for svd in [&reference, &fallback] {
             assert_eq!([kept(svd, 0), kept(svd, 1)], expected, "{policy:?}");
         }
-        assert_eq!(fallback.error().to_bits(), reference.error().to_bits());
+        // The layouts feed the sectors in different orders, so the discarded
+        // weight is summed in a different order: path agreement under the rule.
+        numerics::assert_close("truncation error", fallback.error(), reference.error(), 3);
         // The factors carry the same kept bond: one nonzero S entry per state.
         for svd in [&reference, &fallback] {
             let nonzero = svd.s().data().iter().filter(|v| !v.is_zero()).count();
@@ -7585,7 +7590,11 @@ fn compact_svd_direct_and_fallback_apply_the_same_gauge() {
     for (left, right) in direct.vh.data().iter().zip(fallback.vh().data()) {
         assert!((left - right).abs() < 1e-12);
     }
-    assert_eq!(direct.singular_values, fallback.singular_values());
+    assert_spectra_agree(
+        "direct vs adjoint-view fallback",
+        &direct.singular_values,
+        fallback.singular_values(),
+    );
 
     let adjoint_fallback = svd_compact_adjoint_factors_dyn(&mut dense, &fallback_input).unwrap();
     let expected = svd_compact_factors_dyn(&mut dense, &bound.as_ref().dynamic()).unwrap();
@@ -9255,11 +9264,20 @@ fn svd_trunc_is_svd_compact_plus_host_truncation() {
     )
     .unwrap();
 
-    assert_eq!(composed.singular_values, direct.singular_values);
+    // Path agreement is the contract: the direct entry may fuse truncation
+    // into its factorization, so the factors agree under the workspace rule
+    // rather than bit for bit. The matricized 4x4 legs bound every coupled
+    // block's dimension by 16.
+    let terms = 16;
+    assert_spectra_agree(
+        "singular values",
+        &composed.singular_values,
+        &direct.singular_values,
+    );
     assert!((composed.error - direct.error).abs() < 1e-15);
-    assert_eq!(composed.u.data(), direct.u.data());
-    assert_eq!(composed.s.data(), direct.s.data());
-    assert_eq!(composed.vh.data(), direct.vh.data());
+    numerics::assert_slices_close("U", composed.u.data(), direct.u.data(), terms);
+    numerics::assert_slices_close("S", composed.s.data(), direct.s.data(), terms);
+    numerics::assert_slices_close("Vh", composed.vh.data(), direct.vh.data(), terms);
 }
 
 #[test]
@@ -10208,6 +10226,9 @@ fn checked_full_qr_and_lq_preserve_complex_inputs_and_provider_identity() {
 
 #[test]
 fn full_and_compact_qr_lq_match_for_rank_deficient_no_completion_shapes() {
+    // What: with no completion columns the full and compact factorizations
+    // agree (path agreement under the workspace rule, 3 = the long side), and
+    // the full factors are orthonormal and reconstruct the input.
     let rule = Z2FusionRule;
     let wide_space = rectangular_svd_tensor(2, 3)
         .fusion_space()
@@ -10225,8 +10246,8 @@ fn full_and_compact_qr_lq_match_for_rank_deficient_no_completion_shapes() {
     let full = qr_full_dyn(&mut dense, &wide_input).unwrap();
     assert_eq!(full.0.space().space(), compact.0.space().space());
     assert_eq!(full.1.space().space(), compact.1.space().space());
-    assert_eq!(full.0.data(), compact.0.data());
-    assert_eq!(full.1.data(), compact.1.data());
+    numerics::assert_slices_close("full vs compact", full.0.data(), compact.0.data(), 3);
+    numerics::assert_slices_close("full vs compact", full.1.data(), compact.1.data(), 3);
     assert_orthonormal_columns(&bound_factor_matrices(&full.0));
     assert_nonnegative_diagonal(&bound_factor_matrices(&full.1));
     assert_compact_factors_reconstruct_input(&wide_input, &full.0, None, &full.1);
@@ -10239,8 +10260,8 @@ fn full_and_compact_qr_lq_match_for_rank_deficient_no_completion_shapes() {
     let full = lq_full_dyn(&mut dense, &tall_input).unwrap();
     assert_eq!(full.0.space().space(), compact.0.space().space());
     assert_eq!(full.1.space().space(), compact.1.space().space());
-    assert_eq!(full.0.data(), compact.0.data());
-    assert_eq!(full.1.data(), compact.1.data());
+    numerics::assert_slices_close("full vs compact", full.0.data(), compact.0.data(), 3);
+    numerics::assert_slices_close("full vs compact", full.1.data(), compact.1.data(), 3);
     assert_nonnegative_diagonal(&bound_factor_matrices(&full.0));
     assert_orthonormal_rows(&bound_factor_matrices(&full.1));
     assert_compact_factors_reconstruct_input(&tall_input, &full.0, None, &full.1);
@@ -10819,7 +10840,10 @@ fn checked_native_full_svd_reconstructs_complex_interleaved_square_trees() {
 }
 
 #[test]
-fn full_factorizations_preserve_compact_bytes_on_matching_square_support() {
+fn full_factorizations_agree_with_compact_on_matching_square_support() {
+    // What: on square support the full factorizations need no completion and
+    // agree with the compact ones (path agreement under the workspace rule,
+    // 2 = the block dimension); each builds only its returned buffers.
     let rule = U1FusionRule;
     let neutral = U1Irrep::new(0).sector_id();
     let homspace = FusionTreeHomSpace::new(
@@ -10845,19 +10869,19 @@ fn full_factorizations_preserve_compact_bytes_on_matching_square_support() {
         (1, 1),
         "full SVD must build exactly its returned U and Vh buffers"
     );
-    assert_eq!(full.u.data(), compact.u.data());
-    assert_eq!(full.s.data(), compact.s.data());
-    assert_eq!(full.vh.data(), compact.vh.data());
+    numerics::assert_slices_close("U", full.u.data(), compact.u.data(), 2);
+    numerics::assert_slices_close("S", full.s.data(), compact.s.data(), 2);
+    numerics::assert_slices_close("Vh", full.vh.data(), compact.vh.data(), 2);
 
     let (q_compact, r_compact) = qr_compact(&mut dense, &input.as_ref()).unwrap();
     let (q_full, r_full) = qr_full(&mut dense, &input.as_ref()).unwrap();
-    assert_eq!(q_full.data(), q_compact.data());
-    assert_eq!(r_full.data(), r_compact.data());
+    numerics::assert_slices_close("Q", q_full.data(), q_compact.data(), 2);
+    numerics::assert_slices_close("R", r_full.data(), r_compact.data(), 2);
 
     let (l_compact, q_compact) = lq_compact(&mut dense, &input.as_ref()).unwrap();
     let (l_full, q_full) = lq_full(&mut dense, &input.as_ref()).unwrap();
-    assert_eq!(l_full.data(), l_compact.data());
-    assert_eq!(q_full.data(), q_compact.data());
+    numerics::assert_slices_close("L", l_full.data(), l_compact.data(), 2);
+    numerics::assert_slices_close("Q", q_full.data(), q_compact.data(), 2);
 }
 
 #[test]
@@ -11560,6 +11584,16 @@ fn spectrum_only_entry_points_return_descending_magnitudes() {
         for pair in entry.values.windows(2) {
             assert!(pair[0].norm() >= pair[1].norm() - 1e-12);
         }
+    }
+}
+
+/// Path agreement of two spectra: sectors and kept counts exact, values under
+/// the workspace rule with the sector's value count as `terms`.
+fn assert_spectra_agree(what: &str, lhs: &[SectorSpectrum], rhs: &[SectorSpectrum]) {
+    assert_eq!(lhs.len(), rhs.len(), "{what}");
+    for (lhs, rhs) in lhs.iter().zip(rhs) {
+        assert_eq!(lhs.sector, rhs.sector, "{what}");
+        numerics::assert_slices_close(what, &lhs.values, &rhs.values, lhs.values.len());
     }
 }
 
@@ -12347,9 +12381,11 @@ fn solve_left_uses_one_direct_solve_per_sector_for_rectangular_rhs() {
         .find(|(sector, _, _, _)| *sector == U1Irrep::new(1).sector_id())
         .unwrap();
     assert_eq!((even.1, even.2), (2, 3));
-    assert_eq!(even.3, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    // Hand quotients; the triangular solve may divide or multiply by a
+    // reciprocal, so they are compared under the rule (2 = the sector order).
+    numerics::assert_slices_close("even", &even.3, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], 2);
     assert_eq!((odd.1, odd.2), (1, 2));
-    assert_eq!(odd.3, vec![7.0, 8.0]);
+    numerics::assert_slices_close("odd", &odd.3, &[7.0, 8.0], 1);
     assert_eq!(dense.solve_calls, 2);
     // What: the backend wrote the first final sector in the returned payload;
     // no owned solution twin followed by a full-result copy can satisfy this
@@ -15330,17 +15366,17 @@ fn hermitian_exp_fixture() -> TensorMap<f64, 1, 1> {
 }
 
 #[test]
-fn exp_of_a_hermitian_endomorphism_is_the_spectral_route_bit_for_bit() {
+fn exp_of_a_hermitian_endomorphism_is_the_spectral_route() {
     // What: the retained route, pinned two ways — the dispatch (one EIGH per
-    // sector, no solve, no GEMM) and the published values, byte for byte
-    // against `v exp(d) v^H` computed here on the same backend.
+    // sector, no solve, no GEMM) and the published values, which agree with
+    // `v exp(d) v^H` computed here on the same backend under the workspace
+    // rule (3 = the largest sector order).
     //
     // The reference is computed rather than frozen because a frozen one is a
     // pin on the platform's LAPACK: the constants this test used to carry were
     // right on macOS and a few ULP off on Linux, so CI failed on values that
-    // were never the point. Byte-identity against the spectral route is, and it
-    // still catches a reroute onto Pade, whose approximant does not land on the
-    // eigendecomposition's last bits.
+    // were never the point. The spy counters above are what catch a reroute onto
+    // Pade; the values check that the route publishes `v exp(d) v^H`.
     let tensor = hermitian_exp_fixture();
     let mut spy = MatrixFunctionCallSpy::default();
     let mut context = default_context();
@@ -15369,13 +15405,18 @@ fn exp_of_a_hermitian_endomorphism_is_the_spectral_route_bit_for_bit() {
     )
     .unwrap();
     let spectral: BoundTensorMap<_, _, 1, 1> = typed_from_bound_factor(spectral).unwrap();
-    assert_eq!(exponential.tensor().data(), spectral.tensor().data());
+    numerics::assert_slices_close(
+        "exp",
+        exponential.tensor().data(),
+        spectral.tensor().data(),
+        3,
+    );
 }
 
 #[test]
 fn exp_of_a_hermitian_c64_endomorphism_takes_the_spectral_route() {
     // What: the *dispatch*, not the values. The retained Hermitian route is
-    // pinned bit for bit only on U(1)/f64 above, so a hermiticity predicate that
+    // pinned by value only on U(1)/f64 above, so a hermiticity predicate that
     // misclassified complex input would silently reroute it onto Pade with
     // nothing failing. A solve on Hermitian input is the observable.
     let half = Complex64::new(0.5, 0.0);

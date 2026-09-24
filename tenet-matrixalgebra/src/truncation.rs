@@ -982,7 +982,9 @@ mod tests {
     fn a_shuffled_feed_decides_exactly_as_the_ascending_one() {
         // What: the tie among the three 1.0 tails (and the 2.0 heads) is
         // broken by ascending sector, so every permutation of the feed must
-        // report the same per-sector counts and the same error bits.
+        // report the same per-sector counts and the same error bits. The
+        // spectra are small integers, so every partial sum of squares is exact
+        // and the error bits do not depend on the summation order.
         // Ascending oracle by hand: rank(4) keeps 3.0, 2.0, 2.0 and the first
         // 1.0 (sector 0); rank(5) adds sector 1's 1.0. Sector 2 holds the
         // largest value, so no permutation coincides with the ascending one

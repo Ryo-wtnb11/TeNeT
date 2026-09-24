@@ -4609,7 +4609,22 @@ fn eager_su2_dense_tree_pair_plan_matches_legacy_replay() {
     reset_tree_pair_lowering_calls();
     let direct =
         build_tree_pair_transform_group_plan(&SU2FusionRule, operation, &structure).unwrap();
-    assert_eq!(direct, legacy);
+    // The per-source core oracle and the prepared lowering compute the F-move
+    // coefficients by different routes, so keys and axes match exactly and the
+    // coefficients within the tolerance rule (a rank-4 recoupling chain).
+    assert_eq!(direct.specs().len(), legacy.specs().len());
+    for (actual, expected) in direct.specs().iter().zip(legacy.specs()) {
+        assert_eq!(actual.group_key(), expected.group_key());
+        assert_eq!(actual.src_keys(), expected.src_keys());
+        assert_eq!(actual.dst_keys(), expected.dst_keys());
+        assert_eq!(actual.source_axes(), expected.source_axes());
+        crate::test_numerics::numerics::assert_slices_close(
+            "direct vs legacy recoupling coefficients",
+            actual.recoupling_coefficients_dst_src(),
+            expected.recoupling_coefficients_dst_src(),
+            4,
+        );
+    }
     assert_eq!(tree_pair_lowering_calls(), (1, 0));
 
     let space = TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap();
@@ -4654,7 +4669,13 @@ fn eager_su2_dense_tree_pair_plan_matches_legacy_replay() {
         0.0,
     )
     .unwrap();
-    assert_eq!(direct_dst.data(), legacy_dst.data());
+    // Each destination entry sums the two recoupled source trees.
+    crate::test_numerics::numerics::assert_slices_close(
+        "direct vs legacy replay",
+        direct_dst.data(),
+        legacy_dst.data(),
+        2,
+    );
 }
 
 #[test]

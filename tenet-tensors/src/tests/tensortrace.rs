@@ -129,7 +129,15 @@ fn assert_owned_trace_matches_initialized_for_real_and_complex<R>(
     tensortrace_fusion_dyn_into(dst, &mut expected_real, src, &real_source, axes, 1.0, 0.0)
         .unwrap();
     let actual_real = tensortrace_fusion_dyn_owned(dst, src, &real_source, axes, 1.0).unwrap();
-    assert_eq!(actual_real, expected_real);
+    // The owned writer and the initialized writer are two paths whose
+    // agreement is the contract; each destination entry sums at most
+    // `src_len` recoupled source entries.
+    crate::test_numerics::numerics::assert_slices_close(
+        "owned vs initialized real trace",
+        &actual_real,
+        &expected_real,
+        src_len,
+    );
 
     let complex_source = real_source
         .iter()
@@ -150,7 +158,12 @@ fn assert_owned_trace_matches_initialized_for_real_and_complex<R>(
     let actual_complex =
         tensortrace_fusion_dyn_owned(dst, src, &complex_source, axes, Complex64::new(1.0, 0.0))
             .unwrap();
-    assert_eq!(actual_complex, expected_complex);
+    crate::test_numerics::numerics::assert_slices_close(
+        "owned vs initialized complex trace",
+        &actual_complex,
+        &expected_complex,
+        src_len,
+    );
 }
 
 #[derive(Clone, Debug)]

@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_numerics::numerics;
 use std::sync::Arc;
 
 #[test]
@@ -686,7 +687,17 @@ fn tensorcontract_fusion_su2_swap_matches_explicit_permute_then_compose() {
             // SU2 destination structure and reduced-block values as the
             // explicit permute-then-compose oracle.
             assert_eq!(artifact.structure(), dst_compose.structure());
-            assert_eq!(artifact.data(), actual.data());
+            // The compiled artifact and the direct plan replay are two
+            // executors of one plan whose SU2 recoupling sums may associate
+            // differently, so their agreement is checked under the tolerance
+            // rule (terms bounded by the operand length). Profiling replays
+            // the same artifact and stays exact.
+            numerics::assert_slices_close(
+                "compiled artifact vs direct plan replay",
+                artifact.data(),
+                actual.data(),
+                lhs.data().len(),
+            );
             assert_eq!(profiled.data(), artifact.data());
             for (&actual, &expected) in artifact.data().iter().zip(dst_compose.data()) {
                 assert!((actual - expected).abs() < 1.0e-10);
@@ -1857,7 +1868,16 @@ fn crossed_axis_selection_preserves_asymmetric_fz2_u1_su2_result() {
             // structure and every reduced-block value for the odd, charged,
             // half-spin product sector.
             assert_eq!(artifact.structure(), dst.structure());
-            assert_eq!(artifact.data(), dst.data());
+            // Path-to-path agreement of two executors of one plan with SU2
+            // recoupling, under the tolerance rule (terms bounded by the
+            // operand length); the profiled replay of the same artifact stays
+            // exact.
+            numerics::assert_slices_close(
+                "compiled artifact vs direct plan replay",
+                artifact.data(),
+                dst.data(),
+                lhs.data().len(),
+            );
             assert_eq!(profiled.data(), artifact.data());
             outputs.push(dst);
         }
@@ -8439,7 +8459,10 @@ fn nested_product_lowered_dynamic_execution_matches_independent_encoded_oracles(
                 0.0,
             )
             .unwrap();
-        assert_eq!(lowered, encoded);
+        // The encoded layout is the independent oracle for the lowered one;
+        // SU2 recoupling makes the sums order-dependent, so the comparison
+        // uses the tolerance rule (terms bounded by the operand length).
+        numerics::assert_slices_close("lowered vs encoded", &lowered, &encoded, lhs_data.len());
         let cold_misses = lowered_context.dynamic_fusion_space_cache_misses();
         let cold_hits = lowered_context.dynamic_fusion_space_cache_hits();
         assert!(cold_misses >= 3);
@@ -8553,7 +8576,12 @@ fn nested_product_lowered_dynamic_execution_matches_independent_encoded_oracles(
                 0.0,
             )
             .unwrap();
-        assert_eq!(encoded_lazy, eager);
+        numerics::assert_slices_close(
+            "encoded lazy adjoint vs eager adjoint oracle",
+            &encoded_lazy,
+            &eager,
+            lhs_data.len(),
+        );
 
         reset_global_operation_caches();
         tenet_core::reset_core_intern_tables();
@@ -8577,7 +8605,12 @@ fn nested_product_lowered_dynamic_execution_matches_independent_encoded_oracles(
                 )
             };
         execute_lazy(&mut lazy_context, &mut lazy).unwrap();
-        assert_eq!(lazy, eager);
+        numerics::assert_slices_close(
+            "lowered lazy adjoint vs eager adjoint oracle",
+            &lazy,
+            &eager,
+            lhs_data.len(),
+        );
         let cold_misses = lazy_context.dynamic_fusion_space_cache_misses();
         let cold_hits = lazy_context.dynamic_fusion_space_cache_hits();
         assert!(cold_misses >= 3);

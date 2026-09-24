@@ -481,7 +481,14 @@ mod generic_context_tests {
                 1.0,
             )
             .unwrap();
-        assert_eq!(destination_data, expected);
+        // Overwrite and accumulate-with-beta-zero are two writers whose
+        // agreement is the contract; each entry sums at most the source length.
+        crate::test_numerics::numerics::assert_slices_close(
+            "generic overwrite vs assign",
+            &destination_data,
+            &expected,
+            source_data.len(),
+        );
     }
 }
 
