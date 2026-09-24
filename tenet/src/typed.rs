@@ -302,7 +302,7 @@ pub use serialization::{DecodeError, DecodeLimits, EncodeError, TypedPersistence
 /// This trait is sealed; the supported scalar types are `f64`,
 /// [`num_complex::Complex64`], `f32` and [`num_complex::Complex32`]. Single
 /// precision is admitted here and *only* here: factorizations, matrix
-/// functions, persistence and device payloads stay double-precision, which is
+/// functions and device payloads stay double-precision, which is
 /// why admission is split across markers rather than carried by one trait — a
 /// payload dtype joins one family at a time, with its own review and its own
 /// tolerance evidence (<https://github.com/Ryo-wtnb11/TeNeT/issues/1065>).
@@ -375,7 +375,10 @@ pub use serialization::{DecodeError, DecodeLimits, EncodeError, TypedPersistence
 /// Factorizations are *not* in this list: single precision reaches
 /// [`FactorizationScalar`] under
 /// <https://github.com/Ryo-wtnb11/TeNeT/issues/1324>, so `svd_compact` and its
-/// siblings compile at `f32` and [`num_complex::Complex32`].
+/// siblings compile at `f32` and [`num_complex::Complex32`]. Neither is
+/// persistence: the wire format has `f32` and `Complex32` tags since
+/// <https://github.com/Ryo-wtnb11/TeNeT/issues/1325> (see
+/// [`TypedPersistenceCodec`]).
 ///
 /// A matrix function:
 ///
@@ -437,32 +440,6 @@ pub use serialization::{DecodeError, DecodeLimits, EncodeError, TypedPersistence
 ///
 /// fn double_precision_eig(tensor: &TensorMap<U1FusionRule, f64>) {
 ///     let _ = tensor.eig_full();
-/// }
-/// ```
-///
-/// Persistence, whose wire format has tags for the double-precision pair only:
-///
-/// ```compile_fail
-/// use tenet::core::U1FusionRule;
-/// use tenet::typed::{TensorMap, TypedPersistenceCodec};
-///
-/// fn no_single_precision_encode<C: TypedPersistenceCodec<U1FusionRule>>(
-///     tensor: &TensorMap<U1FusionRule, f32>,
-///     codec: &C,
-/// ) {
-///     let _ = tensor.to_bytes_with(codec);
-/// }
-/// ```
-///
-/// ```
-/// use tenet::core::U1FusionRule;
-/// use tenet::typed::{TensorMap, TypedPersistenceCodec};
-///
-/// fn double_precision_encode<C: TypedPersistenceCodec<U1FusionRule>>(
-///     tensor: &TensorMap<U1FusionRule, f64>,
-///     codec: &C,
-/// ) {
-///     let _ = tensor.to_bytes_with(codec);
 /// }
 /// ```
 ///

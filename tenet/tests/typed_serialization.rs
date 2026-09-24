@@ -4,10 +4,11 @@ use std::sync::Arc;
 
 use tenet::core::{
     BraidingStyleKind, CheckedGenericAdmissionMode, CheckedGenericFusion,
-    CheckedGenericRigidSymbols, FusionStyleKind, GenericFArray, GenericRMatrix, RuleIdentity,
-    SU2FusionRule, SU2Irrep, SectorId, SectorVec, TypedSectorAdmission, U1FusionRule, U1Irrep,
+    CheckedGenericRigidSymbols, FermionParityFusionRule, FusionStyleKind, GenericFArray,
+    GenericRMatrix, RuleIdentity, SU2FusionRule, SU2Irrep, SectorId, SectorVec,
+    TypedSectorAdmission, U1FusionRule, U1Irrep, Z2Irrep,
 };
-use tenet::prelude::{Complex64, Runtime};
+use tenet::prelude::{Complex32, Complex64, Runtime};
 use tenet::typed::{
     DecodeError, DecodeLimits, GradedSpace, NetworkReuseClass, SectorSpectrum, TensorMap,
     TypedPersistenceCodec,
@@ -1058,7 +1059,7 @@ fn malformed_tensor_tags_and_duplicate_or_missing_blocks_are_rejected() {
         )
     };
 
-    for (offset, value) in [(10, 1), (11, 2), (header_end(&bytes), 99)] {
+    for (offset, value) in [(10, 1), (11, 0), (11, 99), (header_end(&bytes), 99)] {
         let mut malformed = bytes.clone();
         malformed[offset] = value;
         assert!(matches!(
@@ -1114,4 +1115,595 @@ fn malformed_tensor_tags_and_duplicate_or_missing_blocks_are_rejected() {
             Err(DecodeError::LimitExceeded { .. })
         ));
     }
+}
+
+const GOLDEN_DIR: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/typed_serialization"
+);
+const GOLDEN_F64_BITS: [u64; 3] = [
+    0x8000_0000_0000_0000,
+    0x3ff0_0000_0000_0001,
+    0x7ff8_0000_0000_0042,
+];
+
+fn golden_dense_f64(
+    runtime: &Runtime,
+    provider: &Arc<SU2FusionRule>,
+) -> TensorMap<SU2FusionRule, f64> {
+    let codomain = su2_leg(provider, false);
+    let domain = su2_leg(provider, true);
+    TensorMap::from_block_fn(
+        runtime,
+        [&codomain, &codomain],
+        [&domain],
+        |trees, indices| {
+            f64::from_bits(
+                GOLDEN_F64_BITS[(trees.coupled().twice_spin() + indices.iter().sum::<usize>()) % 3],
+            )
+        },
+    )
+    .unwrap()
+}
+
+fn golden_diagonal_c64(
+    runtime: &Runtime,
+    provider: &Arc<SU2FusionRule>,
+) -> TensorMap<SU2FusionRule, Complex64> {
+    let spectrum = vec![
+        SectorSpectrum {
+            sector: SU2Irrep::from_twice_spin(0),
+            values: vec![Complex64::new(
+                f64::from_bits(GOLDEN_F64_BITS[0]),
+                f64::from_bits(GOLDEN_F64_BITS[2]),
+            )],
+        },
+        SectorSpectrum {
+            sector: SU2Irrep::from_twice_spin(1),
+            values: vec![
+                Complex64::new(2.0, -3.0),
+                Complex64::new(f64::from_bits(GOLDEN_F64_BITS[1]), -0.0),
+            ],
+        },
+    ];
+    TensorMap::diagonal(runtime, &su2_leg(provider, false), spectrum).unwrap()
+}
+
+#[test]
+fn version_one_golden_files_decode_and_reencode_byte_for_byte() {
+    let runtime = runtime();
+    let provider = Arc::new(SU2FusionRule);
+    let codec = Su2Codec::new(Arc::clone(&provider));
+    let golden = |name: &str| std::fs::read(format!("{GOLDEN_DIR}/{name}")).unwrap();
+    let decode_f64 = |bytes: &[u8]| {
+        TensorMap::<SU2FusionRule, f64>::from_bytes_with(
+            &runtime,
+            bytes,
+            DecodeLimits::default(),
+            &codec,
+        )
+        .unwrap()
+    };
+
+    let dense_bytes = golden("su2_dense_f64_v1.bin");
+    let dense = decode_f64(&dense_bytes);
+    let expected = golden_dense_f64(&runtime, &provider);
+    assert!(matches!(
+        dense.network_reuse_class(false),
+        NetworkReuseClass::OwnedDense
+    ));
+    assert_eq!(dense.data().bits(), expected.data().bits());
+    assert_eq!(dense.to_bytes_with(&codec).unwrap(), dense_bytes);
+    assert_eq!(expected.to_bytes_with(&codec).unwrap(), dense_bytes);
+
+    let adjoint_bytes = golden("su2_adjoint_f64_v1.bin");
+    let adjoint = decode_f64(&adjoint_bytes);
+    assert!(matches!(
+        adjoint.network_reuse_class(false),
+        NetworkReuseClass::LazyAdjoint
+    ));
+    assert_eq!(
+        adjoint.data().bits(),
+        expected.adjoint().unwrap().data().bits()
+    );
+    assert_eq!(adjoint.to_bytes_with(&codec).unwrap(), adjoint_bytes);
+
+    let diagonal_bytes = golden("su2_diagonal_c64_v1.bin");
+    let diagonal = TensorMap::<SU2FusionRule, Complex64>::from_bytes_with(
+        &runtime,
+        &diagonal_bytes,
+        DecodeLimits::default(),
+        &codec,
+    )
+    .unwrap();
+    let expected = golden_diagonal_c64(&runtime, &provider);
+    assert!(matches!(
+        diagonal.network_reuse_class(false),
+        NetworkReuseClass::Compact
+    ));
+    assert_eq!(diagonal.data().bits(), expected.data().bits());
+    assert_eq!(diagonal.to_bytes_with(&codec).unwrap(), diagonal_bytes);
+    assert_eq!(expected.to_bytes_with(&codec).unwrap(), diagonal_bytes);
+
+    let space_bytes = golden("su2_space_v1.bin");
+    let space = GradedSpace::<SU2FusionRule>::from_bytes_with(
+        &space_bytes,
+        DecodeLimits::default(),
+        &codec,
+    )
+    .unwrap();
+    assert!(space.is_dual());
+    assert_eq!(space.to_bytes_with(&codec).unwrap(), space_bytes);
+}
+
+/// Scalar bit patterns compared exactly: persistence is data movement.
+trait Bits {
+    fn bits(&self) -> Vec<(u64, u64)>;
+}
+
+macro_rules! impl_bits {
+    ($real:ty) => {
+        impl Bits for [$real] {
+            fn bits(&self) -> Vec<(u64, u64)> {
+                self.iter().map(|x| (u64::from(x.to_bits()), 0)).collect()
+            }
+        }
+    };
+    ($complex:ty, complex) => {
+        impl Bits for [$complex] {
+            fn bits(&self) -> Vec<(u64, u64)> {
+                self.iter()
+                    .map(|x| (u64::from(x.re.to_bits()), u64::from(x.im.to_bits())))
+                    .collect()
+            }
+        }
+    };
+}
+
+impl_bits!(f64);
+impl_bits!(f32);
+impl_bits!(Complex64, complex);
+impl_bits!(Complex32, complex);
+
+/// `-0`, a value one ulp above 1, a quiet NaN with a payload, and a signalling
+/// NaN with a payload, as `f32` bits.
+const SINGLE_BITS: [u32; 4] = [0x8000_0000, 0x3f80_0001, 0x7fc0_0042, 0x7f80_0007];
+
+fn single_bits(index: usize) -> f32 {
+    f32::from_bits(SINGLE_BITS[index % SINGLE_BITS.len()])
+}
+
+struct FermionCodec {
+    provider: Arc<FermionParityFusionRule>,
+}
+
+impl TypedPersistenceCodec<FermionParityFusionRule> for FermionCodec {
+    type Error = CodecError;
+
+    fn provider_key(&self, _provider: &FermionParityFusionRule) -> Result<Vec<u8>, Self::Error> {
+        Ok(b"fermion-parity".to_vec())
+    }
+
+    fn resolve_provider(&self, key: &[u8]) -> Result<Arc<FermionParityFusionRule>, Self::Error> {
+        if key == b"fermion-parity" {
+            Ok(Arc::clone(&self.provider))
+        } else {
+            Err(CodecError::MissingProvider)
+        }
+    }
+
+    fn encode_sector(
+        &self,
+        _provider: &FermionParityFusionRule,
+        sector: &Z2Irrep,
+    ) -> Result<Vec<u8>, Self::Error> {
+        Ok(vec![sector.parity()])
+    }
+
+    fn decode_sector(
+        &self,
+        _provider: &FermionParityFusionRule,
+        bytes: &[u8],
+    ) -> Result<Z2Irrep, Self::Error> {
+        match bytes {
+            [parity @ (0 | 1)] => Ok(Z2Irrep::new(*parity)),
+            _ => Err(CodecError::InvalidSector),
+        }
+    }
+}
+
+/// Round-trips dense, compact-diagonal and lazy-adjoint forms of one payload
+/// dtype and checks the restored representation class and every bit.
+macro_rules! single_precision_roundtrip {
+    ($name:ident, $scalar:ty, $value:expr) => {
+        #[test]
+        fn $name() {
+            let runtime = runtime();
+            let value: fn(usize) -> $scalar = $value;
+
+            fn check<R, C>(
+                runtime: &Runtime,
+                codec: &C,
+                source: &TensorMap<R, $scalar>,
+                class: NetworkReuseClass,
+            ) where
+                R: TypedSectorAdmission,
+                C: TypedPersistenceCodec<R>,
+                TensorMap<R, $scalar>: RoundTrip<R, C>,
+            {
+                assert!(source.network_reuse_class(false) == class);
+                let bytes = source.encode(codec);
+                assert_eq!(bytes[11], <$scalar as Tag>::TAG);
+                let restored = TensorMap::<R, $scalar>::decode(runtime, &bytes, codec);
+                assert!(std::ptr::eq(restored.provider(), source.provider()));
+                assert!(restored.network_reuse_class(false) == class);
+                assert_eq!(restored.data().bits(), source.data().bits());
+                // The snapshot carries every block's fusion-tree key, so equal
+                // re-encoded bytes also prove the block keys were restored.
+                assert_eq!(restored.encode(codec), bytes);
+            }
+
+            // U(1): non-self-dual legs, so a dualization error would move sectors.
+            let provider = Arc::new(U1FusionRule);
+            let codec = U1Codec {
+                provider: Arc::clone(&provider),
+            };
+            let leg = GradedSpace::try_new_with_arc(
+                Arc::clone(&provider),
+                [
+                    (U1Irrep::new(-1), 2),
+                    (U1Irrep::new(0), 1),
+                    (U1Irrep::new(2), 3),
+                ],
+            )
+            .unwrap();
+            let dual = leg.try_dual().unwrap();
+            let dense: TensorMap<_, $scalar> =
+                TensorMap::from_block_fn(&runtime, [&leg, &dual], [&leg], |trees, indices| {
+                    value(
+                        trees.coupled().charge().unsigned_abs() as usize
+                            + indices.iter().sum::<usize>(),
+                    )
+                })
+                .unwrap();
+            check(&runtime, &codec, &dense, NetworkReuseClass::OwnedDense);
+            check(
+                &runtime,
+                &codec,
+                &dense.adjoint().unwrap(),
+                NetworkReuseClass::LazyAdjoint,
+            );
+            let diagonal = TensorMap::<_, $scalar>::diagonal(
+                &runtime,
+                &leg,
+                [
+                    SectorSpectrum {
+                        sector: U1Irrep::new(-1),
+                        values: vec![value(0), value(1)],
+                    },
+                    SectorSpectrum {
+                        sector: U1Irrep::new(0),
+                        values: vec![value(2)],
+                    },
+                    SectorSpectrum {
+                        sector: U1Irrep::new(2),
+                        values: vec![value(3), value(4), value(5)],
+                    },
+                ],
+            )
+            .unwrap();
+            check(&runtime, &codec, &diagonal, NetworkReuseClass::Compact);
+            // Multiplicity-free compact adjoints are owned compact values.
+            check(
+                &runtime,
+                &codec,
+                &diagonal.adjoint().unwrap(),
+                NetworkReuseClass::Compact,
+            );
+
+            // SU(2): nontrivial inner lines.
+            let provider = Arc::new(SU2FusionRule);
+            let codec = Su2Codec::new(Arc::clone(&provider));
+            let codomain = su2_leg(&provider, false);
+            let domain = su2_leg(&provider, true);
+            let dense: TensorMap<_, $scalar> = TensorMap::from_block_fn(
+                &runtime,
+                [&codomain, &codomain, &codomain],
+                [&domain],
+                |trees, indices| {
+                    value(trees.coupled().twice_spin() + indices.iter().sum::<usize>())
+                },
+            )
+            .unwrap();
+            assert!((0..dense.block_count()).any(|index| {
+                !dense
+                    .block_fusion_trees(index)
+                    .unwrap()
+                    .codomain_innerlines()
+                    .is_empty()
+            }));
+            check(&runtime, &codec, &dense, NetworkReuseClass::OwnedDense);
+            check(
+                &runtime,
+                &codec,
+                &dense.adjoint().unwrap(),
+                NetworkReuseClass::LazyAdjoint,
+            );
+            let diagonal = TensorMap::<_, $scalar>::diagonal(
+                &runtime,
+                &codomain,
+                [
+                    SectorSpectrum {
+                        sector: SU2Irrep::from_twice_spin(0),
+                        values: vec![value(0)],
+                    },
+                    SectorSpectrum {
+                        sector: SU2Irrep::from_twice_spin(1),
+                        values: vec![value(2), value(3)],
+                    },
+                ],
+            )
+            .unwrap();
+            check(&runtime, &codec, &diagonal, NetworkReuseClass::Compact);
+            check(
+                &runtime,
+                &codec,
+                &diagonal.adjoint().unwrap(),
+                NetworkReuseClass::Compact,
+            );
+
+            // Fermion parity: odd sectors carry fermionic twists.
+            let provider = Arc::new(FermionParityFusionRule);
+            let codec = FermionCodec {
+                provider: Arc::clone(&provider),
+            };
+            let leg = GradedSpace::try_new_with_arc(
+                Arc::clone(&provider),
+                [(Z2Irrep::EVEN, 2), (Z2Irrep::ODD, 3)],
+            )
+            .unwrap();
+            let dual = leg.try_dual().unwrap();
+            let dense: TensorMap<_, $scalar> =
+                TensorMap::from_block_fn(&runtime, [&leg, &dual], [&leg], |trees, indices| {
+                    value(usize::from(trees.coupled().parity()) + indices.iter().sum::<usize>())
+                })
+                .unwrap();
+            check(&runtime, &codec, &dense, NetworkReuseClass::OwnedDense);
+            check(
+                &runtime,
+                &codec,
+                &dense.adjoint().unwrap(),
+                NetworkReuseClass::LazyAdjoint,
+            );
+            let diagonal = TensorMap::<_, $scalar>::diagonal(
+                &runtime,
+                &leg,
+                [
+                    SectorSpectrum {
+                        sector: Z2Irrep::EVEN,
+                        values: vec![value(0), value(1)],
+                    },
+                    SectorSpectrum {
+                        sector: Z2Irrep::ODD,
+                        values: vec![value(2), value(3), value(4)],
+                    },
+                ],
+            )
+            .unwrap();
+            check(&runtime, &codec, &diagonal, NetworkReuseClass::Compact);
+            check(
+                &runtime,
+                &codec,
+                &diagonal.adjoint().unwrap(),
+                NetworkReuseClass::Compact,
+            );
+
+            // Checked Generic: vertex multiplicity; a compact adjoint stays lazy.
+            let provider = Arc::new(GenericToy);
+            let codec = GenericCodec {
+                provider: Arc::clone(&provider),
+            };
+            let leg = GradedSpace::try_new_with_arc(Arc::clone(&provider), [(GenericLabel::X, 2)])
+                .unwrap();
+            let dense: TensorMap<_, $scalar> =
+                TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, indices| {
+                    value(
+                        trees.codomain_vertices()[0].get()
+                            + trees.domain_vertices()[0].get()
+                            + indices.iter().sum::<usize>(),
+                    )
+                })
+                .unwrap();
+            assert!((0..dense.block_count()).any(|index| {
+                dense.block_fusion_trees(index).unwrap().codomain_vertices()[0].get() == 2
+            }));
+            check(&runtime, &codec, &dense, NetworkReuseClass::OwnedDense);
+            check(
+                &runtime,
+                &codec,
+                &dense.adjoint().unwrap(),
+                NetworkReuseClass::LazyAdjoint,
+            );
+            let diagonal = TensorMap::<_, $scalar>::diagonal(
+                &runtime,
+                &leg,
+                [SectorSpectrum {
+                    sector: GenericLabel::X,
+                    values: vec![value(2), value(3)],
+                }],
+            )
+            .unwrap();
+            check(&runtime, &codec, &diagonal, NetworkReuseClass::Compact);
+            check(
+                &runtime,
+                &codec,
+                &diagonal.adjoint().unwrap(),
+                NetworkReuseClass::LazyAdjoint,
+            );
+        }
+    };
+}
+
+/// Wire tag of each payload dtype, spelled out independently of the library.
+trait Tag {
+    const TAG: u8;
+}
+
+impl Tag for f64 {
+    const TAG: u8 = 1;
+}
+impl Tag for Complex64 {
+    const TAG: u8 = 2;
+}
+impl Tag for f32 {
+    const TAG: u8 = 3;
+}
+impl Tag for Complex32 {
+    const TAG: u8 = 4;
+}
+
+/// Unwrapping front end over the per-dtype inherent persistence methods.
+trait RoundTrip<R: TypedSectorAdmission, C: TypedPersistenceCodec<R>>: Sized {
+    fn encode(&self, codec: &C) -> Vec<u8>;
+    fn decode(runtime: &Runtime, bytes: &[u8], codec: &C) -> Self;
+}
+
+macro_rules! impl_round_trip {
+    ($scalar:ty, $($rule:ty),+) => {$(
+        impl<C: TypedPersistenceCodec<$rule>> RoundTrip<$rule, C> for TensorMap<$rule, $scalar> {
+            fn encode(&self, codec: &C) -> Vec<u8> {
+                self.to_bytes_with(codec).unwrap()
+            }
+
+            fn decode(runtime: &Runtime, bytes: &[u8], codec: &C) -> Self {
+                Self::from_bytes_with(runtime, bytes, DecodeLimits::default(), codec).unwrap()
+            }
+        }
+    )+};
+}
+
+impl_round_trip!(
+    f32,
+    U1FusionRule,
+    SU2FusionRule,
+    FermionParityFusionRule,
+    GenericToy
+);
+impl_round_trip!(
+    Complex32,
+    U1FusionRule,
+    SU2FusionRule,
+    FermionParityFusionRule,
+    GenericToy
+);
+
+single_precision_roundtrip!(
+    f32_roundtrips_every_representation_and_provider_bit_exactly,
+    f32,
+    single_bits
+);
+single_precision_roundtrip!(
+    complex32_roundtrips_every_representation_and_provider_bit_exactly,
+    Complex32,
+    |index| Complex32::new(single_bits(index), single_bits(index + 1))
+);
+
+/// Decodes `bytes`, written as `$stored`, as `$requested`: only the stored
+/// dtype succeeds, and every other request is a typed scalar mismatch rather
+/// than a conversion.
+macro_rules! assert_decode_as {
+    ($runtime:expr, $codec:expr, $bytes:expr, $stored:ty, $requested:ty) => {{
+        let result = TensorMap::<U1FusionRule, $requested>::from_bytes_with(
+            $runtime,
+            $bytes,
+            DecodeLimits::default(),
+            $codec,
+        );
+        if <$requested as Tag>::TAG == <$stored as Tag>::TAG {
+            assert!(result.is_ok());
+        } else {
+            let error = result.err().unwrap();
+            assert!(
+                matches!(
+                    error,
+                    DecodeError::ScalarMismatch { actual, expected }
+                        if actual == <$stored as Tag>::TAG
+                            && expected == <$requested as Tag>::TAG
+                ),
+                "{error}"
+            );
+        }
+    }};
+}
+
+macro_rules! assert_only_decodes_as {
+    ($runtime:expr, $codec:expr, $bytes:expr, $stored:ty) => {{
+        assert_decode_as!($runtime, $codec, $bytes, $stored, f64);
+        assert_decode_as!($runtime, $codec, $bytes, $stored, Complex64);
+        assert_decode_as!($runtime, $codec, $bytes, $stored, f32);
+        assert_decode_as!($runtime, $codec, $bytes, $stored, Complex32);
+    }};
+}
+
+#[test]
+fn every_scalar_mismatch_direction_is_typed_and_precedes_provider_resolution() {
+    let runtime = runtime();
+    let provider = Arc::new(U1FusionRule);
+    let codec = U1Codec {
+        provider: Arc::clone(&provider),
+    };
+    let leg = GradedSpace::try_new_with_arc(Arc::clone(&provider), [(U1Irrep::new(0), 2)]).unwrap();
+    let f64_bytes = TensorMap::<_, f64>::from_block_fn(&runtime, [&leg], [&leg], |_, _| 1.0)
+        .unwrap()
+        .to_bytes_with(&codec)
+        .unwrap();
+    let c64_bytes = TensorMap::<_, Complex64>::from_block_fn(&runtime, [&leg], [&leg], |_, _| {
+        Complex64::new(1.0, -0.0)
+    })
+    .unwrap()
+    .to_bytes_with(&codec)
+    .unwrap();
+    let f32_bytes = TensorMap::<_, f32>::from_block_fn(&runtime, [&leg], [&leg], |_, _| 1.0)
+        .unwrap()
+        .to_bytes_with(&codec)
+        .unwrap();
+    let c32_bytes = TensorMap::<_, Complex32>::from_block_fn(&runtime, [&leg], [&leg], |_, _| {
+        Complex32::new(1.0, -0.0)
+    })
+    .unwrap()
+    .to_bytes_with(&codec)
+    .unwrap();
+
+    assert_only_decodes_as!(&runtime, &codec, &f64_bytes, f64);
+    assert_only_decodes_as!(&runtime, &codec, &c64_bytes, Complex64);
+    assert_only_decodes_as!(&runtime, &codec, &f32_bytes, f32);
+    assert_only_decodes_as!(&runtime, &codec, &c32_bytes, Complex32);
+
+    // The mismatch is reported from the header, before the resolver runs.
+    let missing = Su2Codec::missing(Arc::new(SU2FusionRule));
+    let su2_leg = su2_leg(&Arc::new(SU2FusionRule), false);
+    let su2: TensorMap<_, f32> =
+        TensorMap::from_block_fn(&runtime, [&su2_leg], [&su2_leg], |_, _| 1.0).unwrap();
+    let su2_bytes = su2
+        .to_bytes_with(&Su2Codec::new(Arc::new(SU2FusionRule)))
+        .unwrap();
+    assert!(matches!(
+        TensorMap::<SU2FusionRule, f64>::from_bytes_with(
+            &runtime,
+            &su2_bytes,
+            DecodeLimits::default(),
+            &missing,
+        ),
+        Err(DecodeError::ScalarMismatch {
+            actual: 3,
+            expected: 1
+        })
+    ));
+    assert_eq!(missing.resolve_calls.load(Ordering::Relaxed), 0);
+
+    // A tensor snapshot is never a graded space, whatever its scalar tag.
+    assert!(matches!(
+        GradedSpace::<U1FusionRule>::from_bytes_with(&f32_bytes, DecodeLimits::default(), &codec),
+        Err(DecodeError::InvalidFormat(_))
+    ));
 }

@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
-use num_complex::Complex64;
+use num_complex::{Complex32, Complex64};
 use tenet_core::{FusionTreeKey, MultiplicityIndex, SectorLeg, TypedSectorAdmission};
 
 use super::{
@@ -21,6 +21,8 @@ const KIND_TENSOR: u8 = 2;
 const SCALAR_NONE: u8 = 0;
 const SCALAR_F64: u8 = 1;
 const SCALAR_C64: u8 = 2;
+const SCALAR_F32: u8 = 3;
+const SCALAR_C32: u8 = 4;
 const REPR_DENSE: u8 = 1;
 const REPR_DIAGONAL: u8 = 2;
 const REPR_ADJOINT: u8 = 3;
@@ -38,6 +40,19 @@ const REPR_ADJOINT: u8 = 3;
 /// Version 1 keeps the same meaning across compatible TeNeT releases. A change
 /// that cannot preserve that meaning requires a new version, and readers reject
 /// unknown versions.
+///
+/// Every snapshot header carries a one-byte scalar tag: `0` for a graded space
+/// and, for a tensor, `1` = `f64`, `2` = [`Complex64`], `3` = `f32`,
+/// `4` = [`Complex32`]. Values are stored as the little-endian IEEE 754 bits of
+/// the tagged type (a complex value as real then imaginary part), so
+/// round-trips are bit-exact, including NaN payloads and signed zeros. Tags
+/// `3` and `4` were added without a version bump: they give no existing tag or
+/// payload a new meaning, so version-1 files written before them decode
+/// unchanged, and a decoder that predates them rejects their files with
+/// [`DecodeError::InvalidFormat`] because it only accepts the tag of the type it
+/// was asked for. A tensor decoder never converts precision: a snapshot tagged
+/// for a different scalar type fails with [`DecodeError::ScalarMismatch`] before
+/// provider resolution.
 ///
 /// Encoding can fail if the codec cannot encode a label or the provider cannot
 /// read back a stored label. Tensor encoding can also reject an invalid live
@@ -161,6 +176,15 @@ pub enum DecodeError<C, F> {
     },
     /// Provider resolution or semantic-label codec failure.
     Codec(C),
+    /// The tensor snapshot stores a different scalar type than the one requested.
+    ///
+    /// Tags are listed in [`TypedPersistenceCodec`]; no conversion is attempted.
+    ScalarMismatch {
+        /// Scalar tag declared by the snapshot.
+        actual: u8,
+        /// Scalar tag of the requested payload type.
+        expected: u8,
+    },
     /// The resolver returned a provider whose stable key differs from the file.
     ProviderMismatch,
     /// Typed provider/layout admission failure.
@@ -184,6 +208,12 @@ impl<C: fmt::Display, F: fmt::Display> fmt::Display for DecodeError<C, F> {
                 "typed snapshot {resource} {actual} exceeds decode limit {limit}"
             ),
             Self::Codec(error) => write!(formatter, "persistence codec error: {error}"),
+            Self::ScalarMismatch { actual, expected } => write!(
+                formatter,
+                "typed snapshot stores {} values, but {} was requested",
+                scalar_name(*actual),
+                scalar_name(*expected)
+            ),
             Self::ProviderMismatch => formatter.write_str("resolved provider key does not match"),
             Self::Facade(error) => write!(formatter, "typed admission error: {error}"),
         }
@@ -202,8 +232,19 @@ where
             Self::InvalidFormat(_)
             | Self::UnsupportedVersion { .. }
             | Self::LimitExceeded { .. }
+            | Self::ScalarMismatch { .. }
             | Self::ProviderMismatch => None,
         }
+    }
+}
+
+fn scalar_name(tag: u8) -> &'static str {
+    match tag {
+        SCALAR_F64 => "f64",
+        SCALAR_C64 => "Complex64",
+        SCALAR_F32 => "f32",
+        SCALAR_C32 => "Complex32",
+        _ => "unknown",
     }
 }
 
@@ -245,6 +286,36 @@ impl WireScalar for Complex64 {
     }
 }
 
+impl WireScalar for f32 {
+    const TAG: u8 = SCALAR_F32;
+    const WIDTH: usize = 4;
+
+    fn write(self, output: &mut Vec<u8>) {
+        output.extend_from_slice(&self.to_bits().to_le_bytes());
+    }
+
+    fn read(reader: &mut Reader<'_>) -> Result<Self, String> {
+        Ok(Self::from_bits(reader.u32()?))
+    }
+}
+
+impl WireScalar for Complex32 {
+    const TAG: u8 = SCALAR_C32;
+    const WIDTH: usize = 8;
+
+    fn write(self, output: &mut Vec<u8>) {
+        output.extend_from_slice(&self.re.to_bits().to_le_bytes());
+        output.extend_from_slice(&self.im.to_bits().to_le_bytes());
+    }
+
+    fn read(reader: &mut Reader<'_>) -> Result<Self, String> {
+        Ok(Self::new(
+            f32::from_bits(reader.u32()?),
+            f32::from_bits(reader.u32()?),
+        ))
+    }
+}
+
 struct Reader<'a> {
     bytes: &'a [u8],
     position: usize,
@@ -276,6 +347,12 @@ impl<'a> Reader<'a> {
         let mut bytes = [0; 2];
         bytes.copy_from_slice(self.take(2)?);
         Ok(u16::from_le_bytes(bytes))
+    }
+
+    fn u32(&mut self) -> Result<u32, String> {
+        let mut bytes = [0; 4];
+        bytes.copy_from_slice(self.take(4)?);
+        Ok(u32::from_le_bytes(bytes))
     }
 
     fn u64(&mut self) -> Result<u64, String> {
@@ -384,6 +461,13 @@ fn read_header<'a, C, F>(
     }
     let scalar = reader.u8().map_err(DecodeError::InvalidFormat)?;
     if scalar != expected_scalar {
+        let tensor_scalar = |tag| matches!(tag, SCALAR_F64 | SCALAR_C64 | SCALAR_F32 | SCALAR_C32);
+        if tensor_scalar(scalar) && tensor_scalar(expected_scalar) {
+            return Err(DecodeError::ScalarMismatch {
+                actual: scalar,
+                expected: expected_scalar,
+            });
+        }
         return Err(DecodeError::InvalidFormat("wrong scalar kind".to_string()));
     }
     let provider_key = read_blob(&mut reader, limits, "provider key bytes")?;
@@ -1748,7 +1832,8 @@ macro_rules! tensor_persistence_impl {
         {
             /// Returns a deterministic v1 semantic snapshot of this Host `Vec` tensor.
             ///
-            /// This method is available for `f64` and [`Complex64`]. It records
+            /// This method is available for `f64`, [`Complex64`], `f32`, and
+            /// [`Complex32`]. It records
             /// spaces, canonical sector and fusion-tree labels, scalar bits,
             /// and whether the representation is dense, compact-diagonal, or
             /// a lazy adjoint. See [`TypedPersistenceCodec`] for the shared
@@ -1772,8 +1857,8 @@ macro_rules! tensor_persistence_impl {
             /// Returns a fully validated Host `Vec` tensor using the provider
             /// instance returned by the resolver.
             ///
-            /// The method restores `f64` or [`Complex64`] scalar bits and
-            /// preserves whether the snapshot is dense, compact-diagonal, or a
+            /// The method restores the scalar bits of the requested type, never
+            /// converting precision, and preserves whether the snapshot is dense, compact-diagonal, or a
             /// lazy adjoint. See [`TypedPersistenceCodec`] for provider-key
             /// checks, resource limits, compatibility, and failure guarantees.
             pub fn from_bytes_with<C>(
@@ -1793,3 +1878,5 @@ macro_rules! tensor_persistence_impl {
 
 tensor_persistence_impl!(f64);
 tensor_persistence_impl!(Complex64);
+tensor_persistence_impl!(f32);
+tensor_persistence_impl!(Complex32);
