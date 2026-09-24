@@ -341,7 +341,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn apply_fused_pair_slices<T, Apply, ElementOp>(
+pub(crate) fn apply_fused_pair_slices<T, Apply, ElementOp>(
     dst_data: &mut [T],
     src_data: &[T],
     dims: &[usize],
@@ -938,6 +938,7 @@ impl StridedHostKernelAdapter {
     {
         validate_raw_strided_bounds(dst_data.len(), shape, dst_strides, dst_offset)?;
         validate_raw_strided_bounds(src_data.len(), shape, src_strides, src_offset)?;
+        crate::checked_block_layout::record_checked_block_passes(1, 1);
         let op = move |value: T| value.maybe_conj(source_conjugate);
         let scratch = &mut self.scratch;
         macro_rules! run {

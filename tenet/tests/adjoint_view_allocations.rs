@@ -447,21 +447,24 @@ fn lazy_add_allocation_count_is_pinned_across_block_counts() {
 }
 
 #[test]
-fn above_rank_eight_the_block_stride_buffers_spill_once_per_op() {
+fn block_stride_buffers_spill_only_past_rank_sixteen() {
     let _measurement = MEASUREMENT_LOCK.lock().unwrap();
-    // What: past eight non-unit axes the inline per-block stride buffers
-    // (`CheckedBlockAxes`) and the adapter's normalization scratch spill to
-    // the heap (#1399). They are reused across blocks, so the count is fixed
-    // per op: the same for one rank-10 block as for many. This is an accepted
-    // tradeoff against main, recorded in
-    // benchmarks/history/adjoint-checked-block-copy-2026-09-22.md.
+    // What: the per-op block layout (`CheckedBlockLayout`, #1401) holds up
+    // to 16 non-unit axes inline, so at rank 10 lazy `add` and the first
+    // lazy-adjoint `data()` allocate only their output, as main's per-element
+    // kernel did, for one block or many. Past 16 axes its stride buffers
+    // spill once per op.
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let alpha = num_complex::Complex64::new(0.5, 0.0);
     let beta = num_complex::Complex64::new(-0.25, 0.0);
     let mut counts = Vec::new();
-    for sectors in [vec![(0, 2)], vec![(0, 2), (1, 1), (-1, 1)]] {
-        let parent = tensor(&runtime, sectors.clone(), 10);
-        let owned = tensor(&runtime, sectors, 10);
+    for (sectors, rank) in [
+        (vec![(0, 2)], 10),
+        (vec![(0, 2), (1, 1), (-1, 1)], 10),
+        (vec![(0, 2)], 18),
+    ] {
+        let parent = tensor(&runtime, sectors.clone(), rank);
+        let owned = tensor(&runtime, sectors, rank);
         let other_lazy = owned.adjoint().unwrap();
         let lazy = parent.adjoint().unwrap();
         black_box(lazy.add(&owned, alpha, beta).unwrap());
@@ -479,12 +482,18 @@ fn above_rank_eight_the_block_stride_buffers_spill_once_per_op() {
             black_box(fresh.data().len());
         })
         .0;
-        counts.push((parent.block_count() > 1, mixed, pair, materialize));
+        counts.push((rank, parent.block_count() > 1, mixed, pair, materialize));
     }
-    // Main's per-element kernel made 3 (output only) at every rank. `add`
-    // adds 9: two operands' three stride buffers plus the adapter's three
-    // layout buffers. Materialization adds 6: one operand's three plus three.
-    assert_eq!(counts, vec![(false, 12, 12, 9), (true, 12, 12, 9)]);
+    // Output only: 3 calls. At rank 18 `add` spills its four layout buffers
+    // (extents and three operands' strides) and materialization its three.
+    assert_eq!(
+        counts,
+        vec![
+            (10, false, 3, 3, 3),
+            (10, true, 3, 3, 3),
+            (18, false, 7, 7, 6)
+        ]
+    );
 }
 
 #[test]
