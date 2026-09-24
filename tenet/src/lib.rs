@@ -98,8 +98,8 @@ pub mod prelude {
     pub use crate::typed::{
         AdvancedLinalgScalar, CheckedGenericEigTrunc, CheckedGenericEighTrunc, DecodeError,
         DecodeLimits, EigTrunc, EighTrunc, EncodeError, FactorizationScalar, GenericTensorError,
-        GenericUnitTensorMapExt, GradedSpace, LegSelection, PhysicalDense, PhysicalDenseError,
-        SectorSpectrum, SvdTrunc, TensorMap, TensorScalar, TruncatedSelection,
+        GenericUnitTensorMapExt, GradedSpace, LegSelection, PersistedScalar, PhysicalDense,
+        PhysicalDenseError, SectorSpectrum, SvdTrunc, TensorMap, TensorScalar, TruncatedSelection,
         TypedPersistenceCodec,
     };
     pub use num_complex::{Complex32, Complex64};
