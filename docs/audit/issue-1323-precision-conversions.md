@@ -23,7 +23,7 @@ References:
 | `f32` | `to_f64` | `f64` | yes |
 | `f32` | `to_c32` | `Complex32`, imaginary `+0` | yes |
 | `f32` | `to_c64` | `Complex64`, imaginary `+0` | yes |
-| `f64` | `to_c64` | `Complex64`, imaginary `+0` | yes (existed; now keeps a lazy adjoint lazy) |
+| `f64` | `to_c64` | `Complex64`, imaginary `+0` | yes (existed; unchanged except that a checked-Generic lazy adjoint of a compact diagonal now converts to an owned compact diagonal instead of a dense one) |
 | `Complex32` | `to_c64` | `Complex64` | yes |
 | `f64` | `narrow_to_f32` | `f32` | no: `as f32` |
 | `Complex64` | `narrow_to_c32` | `Complex32` | no: `as f32` per component |
@@ -43,7 +43,7 @@ doctests on `to_f64`).
 | `tensor.jl:Base.convert(::Type{TensorMap{T,S,N₁,N₂,A}}, t)` (`TT(undef, space(t))` + `copy!`) | same, named by direction |
 | `diagonal.jl:Base.convert(D::Type{<:DiagonalTensorMap}, d)` / `similar_diagonal(d, T)` — stays diagonal | compact diagonal stays compact |
 | `tensor.jl:Base.promote_rule` — mixed scalar types promote implicitly | no counterpart: mixing is a compile error |
-| `Base.complex(t::AdjointTensorMap)` via `similar` — materializes | lazy adjoint stays lazy over a converted parent |
+| `Base.complex(t::AdjointTensorMap)` via `similar` — materializes | materializes too; the result is owned |
 
 Why TeNeT differs in name: TensorKit's `convert`/`promote_rule` make a
 `Float64 -> Float32` conversion silent (Julia `convert` rounds). TeNeT forbids
@@ -57,19 +57,17 @@ name because TeNeT needs the target precision (`to_c32` vs `to_c64`) explicit.
   iterator: one pass, one payload-sized allocation.
 * **Compact diagonal**: stays compact (`map_spectrum_dtype`); allocates the
   per-sector spectra its representation holds, `O(Σ_c k_c)` values.
-* **Lazy adjoint of a dense parent**, decided by the provider mode's
-  `TypedTensorModeDispatch::LAZY_ADJOINT_OPERANDS`:
-  * multiplicity free (every operation, factorizations included, reads lazy
-    adjoints): the parent is converted and the view rebuilt over it (cold
-    `materialized` cache) — one allocation, no permutation. The real -> complex
-    embedding does not commute with conjugation at the sign of zero
-    (`conj(x + 0i) = x - 0i`), so a real *parent* is embedded as `x - 0i`,
-    which makes the logical entries exactly `x + 0i`. Rounding and widening
-    commute with conjugation, so the parent uses the same conversion;
-  * checked Generic (its factorizations reject lazy adjoints): materialized in
-    the source dtype, then converted, as `f64::to_c64` did before this leaf —
-    an operation-local source-sized buffer plus the output. Keeping it lazy
-    would make `s.adjoint()?.to_c64().qr_compact()` fail (review of #1446).
+* **Lazy adjoint of a dense parent**: the result is always owned. It is
+  materialized in the source dtype and then converted — an operation-local
+  source-sized buffer plus the output, two payload-sized allocations (pinned
+  by the allocation test). This is what `f64::to_c64` did before this leaf.
+  Why not a lazy view over a converted parent: `diagview`,
+  `restrict_diagonal`, the `permute_overwrite_into` source, the
+  checked-Generic factorizations and the device path after `to_cuda` reject
+  lazy adjoints, so a lazy result would accept less than the owned one (the
+  review of #1446 reproduced `t.adjoint()?.to_c64().diagview()` failing). Why
+  not one fused convert-while-materializing pass: `materialize_adjoint_data_dyn`
+  has no mapped variant, and adding one would duplicate its block walk.
 * **Lazy adjoint of a compact diagonal** (checked Generic only; the
   multiplicity-free `adjoint` already returns an owned diagonal): an owned
   compact diagonal of `convert(conj(value))` on the logical space, which is
@@ -115,5 +113,8 @@ compare NaN bits against a runtime `as` oracle and otherwise assert NaN-ness.
   `qr_compact` succeeds on them; the provider `Arc` is shared (`ptr::eq`);
 * allocations: between two payload sizes of one structure the call count is
   equal, the byte difference is exactly the payload difference, and exactly
-  one allocation is payload-sized — for every conversion and for a lazy
-  adjoint, whose converted view reads its parent back with zero allocations.
+  one allocation is payload-sized for every conversion of an owned tensor; a
+  dense lazy-adjoint source makes exactly two (source-dtype materialization
+  plus output);
+* a converted lazy adjoint is owned: `diagview` (the U(1) review repro) and a
+  `permute_overwrite_into` source succeed on it.

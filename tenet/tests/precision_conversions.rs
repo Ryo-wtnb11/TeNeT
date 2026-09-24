@@ -432,8 +432,7 @@ fn fermionic_su2_dense_conversions_are_exact_and_keep_structure() {
 fn lazy_adjoint_conversions_match_the_converted_logical_payload() {
     let leg = fermion_su2_leg();
     let source = filled!([&leg, &leg], [&leg]);
-    // The logical payload of the lazy view is compared, so this also pins
-    // that converting the parent commutes with the adjoint.
+    // The logical payload of the lazy view is what gets converted.
     assert_all_conversions!("fermionic lazy adjoint", source.adjoint().unwrap());
     let u1 = u1_leg();
     assert_all_conversions!(
@@ -566,115 +565,159 @@ fn narrowing_rounds_like_as_f32_per_element() {
 
 /// Measures `convert` on a small and a large source of the same structure:
 /// the handle cost must not depend on the payload, the byte difference must
-/// be exactly the payload difference, and exactly one allocation is
-/// payload-sized.
-fn assert_one_payload_allocation<T, E, O>(
+/// be exactly `payloads` buffers of the given entry sizes, and exactly that
+/// many allocations are payload-sized.
+fn assert_payload_allocations<T, O>(
     what: &str,
     small: &T,
     large: &T,
     lengths: (usize, usize),
+    entry_sizes: &[usize],
     convert: impl Fn(&T) -> O,
 ) {
-    let size = std::mem::size_of::<E>();
+    let smallest = *entry_sizes.iter().min().unwrap();
+    let per_entry: usize = entry_sizes.iter().sum();
     black_box(convert(small));
     black_box(convert(large));
     let (_, small_calls, small_bytes, small_payloads) =
-        measured(lengths.0 * size, || black_box(convert(small)));
+        measured(lengths.0 * smallest, || black_box(convert(small)));
     let (_, large_calls, large_bytes, large_payloads) =
-        measured(lengths.1 * size, || black_box(convert(large)));
+        measured(lengths.1 * smallest, || black_box(convert(large)));
     assert_eq!(
         small_calls, large_calls,
         "{what}: handle cost depends on the payload"
     );
     assert_eq!(
         large_bytes - small_bytes,
-        (lengths.1 - lengths.0) * size,
-        "{what}: output bytes are not one payload"
+        (lengths.1 - lengths.0) * per_entry,
+        "{what}: payload bytes"
     );
     assert_eq!(
         (small_payloads, large_payloads),
-        (1, 1),
+        (entry_sizes.len(), entry_sizes.len()),
         "{what}: payload-sized allocations"
     );
 }
 
 #[test]
-fn a_conversion_makes_one_payload_sized_allocation() {
+fn conversion_payload_allocations() {
     let (small_leg, large_leg) = (u1_leg_with([2, 3, 2]), u1_leg_with([9, 10, 9]));
     let small = filled!([&small_leg, &small_leg], [&small_leg]);
     let large = filled!([&large_leg, &large_leg], [&large_leg]);
     let lengths = (small.data().len(), large.data().len());
-    assert_one_payload_allocation::<_, f64, _>(
+    assert_payload_allocations(
         "to_f64",
         &small,
         &large,
         lengths,
+        &[std::mem::size_of::<f64>()],
         TensorMap::to_f64,
     );
-    assert_one_payload_allocation::<_, Complex32, _>(
+    assert_payload_allocations(
         "to_c32",
         &small,
         &large,
         lengths,
+        &[std::mem::size_of::<Complex32>()],
         TensorMap::to_c32,
     );
-    assert_one_payload_allocation::<_, Complex64, _>(
+    assert_payload_allocations(
         "f32 to_c64",
         &small,
         &large,
         lengths,
+        &[std::mem::size_of::<Complex64>()],
         |t: &TensorMap<U1FusionRule, f32>| t.to_c64(),
     );
 
     let (small_wide, large_wide) = (small.to_f64(), large.to_f64());
-    assert_one_payload_allocation::<_, f32, _>(
+    assert_payload_allocations(
         "narrow_to_f32",
         &small_wide,
         &large_wide,
         lengths,
+        &[std::mem::size_of::<f32>()],
         TensorMap::narrow_to_f32,
     );
-    assert_one_payload_allocation::<_, Complex64, _>(
+    assert_payload_allocations(
         "f64 to_c64",
         &small_wide,
         &large_wide,
         lengths,
+        &[std::mem::size_of::<Complex64>()],
         |t: &TensorMap<U1FusionRule, f64>| t.to_c64(),
     );
     let (small_c32, large_c32) = (small.to_c32(), large.to_c32());
-    assert_one_payload_allocation::<_, Complex64, _>(
+    assert_payload_allocations(
         "Complex32 to_c64",
         &small_c32,
         &large_c32,
         lengths,
+        &[std::mem::size_of::<Complex64>()],
         |t: &TensorMap<U1FusionRule, Complex32>| t.to_c64(),
     );
     let (small_c64, large_c64) = (small.to_c64(), large.to_c64());
-    assert_one_payload_allocation::<_, Complex32, _>(
+    assert_payload_allocations(
         "narrow_to_c32",
         &small_c64,
         &large_c64,
         lengths,
+        &[std::mem::size_of::<Complex32>()],
         TensorMap::narrow_to_c32,
     );
 
-    // Lazy adjoint: the parent is converted and the view is not materialized.
+    // A lazy-adjoint source: the result is owned, at the cost of an
+    // operation-local materialization in the source dtype plus the output —
+    // two payload-sized allocations.
     let (small_lazy, large_lazy) = (small.adjoint().unwrap(), large.adjoint().unwrap());
-    assert_one_payload_allocation::<_, f64, _>(
+    assert_payload_allocations(
         "lazy adjoint to_f64",
         &small_lazy,
         &large_lazy,
         lengths,
+        &[std::mem::size_of::<f32>(), std::mem::size_of::<f64>()],
         TensorMap::to_f64,
     );
-    let converted = large_lazy.to_f64();
-    let (parent_len, calls, _, _) =
-        measured(usize::MAX, || converted.adjoint().unwrap().data().len());
-    assert_eq!(parent_len, lengths.1);
-    assert_eq!(
-        calls, 0,
-        "the converted view's parent must be a converted owned payload"
+}
+
+/// A converted lazy adjoint is owned, so operations that reject lazy
+/// adjoints accept it (#1446 review: `diagview` on U(1) returned `Ok` on main
+/// and must keep doing so).
+#[test]
+fn converted_lazy_adjoints_are_owned() {
+    let leg = u1_leg();
+    let bond: TensorMap<U1FusionRule, f64> =
+        TensorMap::rand_with_seed(&runtime(), [&leg], [&leg], 11).unwrap();
+    let lazy = bond.adjoint().unwrap();
+    assert!(
+        lazy.diagview().is_err(),
+        "the fixture must be a lazy adjoint"
     );
+    assert_eq!(
+        lazy.to_c64().diagview().unwrap().len(),
+        bond.diagview().unwrap().len()
+    );
+    lazy.narrow_to_f32().diagview().unwrap();
+    lazy.narrow_to_f32().to_f64().diagview().unwrap();
+    lazy.narrow_to_f32().to_c32().diagview().unwrap();
+    lazy.to_c64().narrow_to_c32().diagview().unwrap();
+    lazy.to_c64()
+        .adjoint()
+        .unwrap()
+        .narrow_to_c32()
+        .to_c64()
+        .diagview()
+        .unwrap();
+
+    // A `permute_overwrite_into` source must be owned.
+    let tensor: TensorMap<U1FusionRule, f32> = filled!([&leg, &leg], [&leg]);
+    let source = tensor.adjoint().unwrap().to_f64();
+    let expected = source.permute(&[2], &[0, 1]).unwrap();
+    let mut destination = expected.zeros_like();
+    source
+        .permute_overwrite_into(&mut destination, &[2], &[0, 1], 1.0)
+        .unwrap();
+    assert_eq!(f64_bits(destination.data()), f64_bits(expected.data()));
 }
 
 /// Checked-Generic provider: SU(3) with an outer-multiplicity vertex.
