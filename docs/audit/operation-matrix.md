@@ -99,8 +99,9 @@ Notes:
    exact provider `Arc`, and semantic sector-label encoding through
    `TypedPersistenceCodec`; TeNeT does not ship a fixed provider registry. Tests
    also cover checked-Generic vertex multiplicity, all four scalar types, and every
-   admitted representation kind. MF compact adjoints normalize to owned compact
-   tensors; checked Generic preserves a lazy adjoint over a compact parent.
+   admitted representation kind. Compact adjoints normalize to owned compact
+   tensors in both modes; a legacy checked-Generic lazy-adjoint-over-compact
+   record decodes to that owned compact tensor (#1449).
    Direct device snapshots and storage types other than Host `Vec<D>` are
    unsupported; use explicit `to_host()` before encoding a device tensor.
 

@@ -180,9 +180,8 @@
 //!   change.
 //! - `conj` stays design-gated on its open correctness question for
 //!   non-self-dual sectors. [`TensorMap::adjoint`] is the TensorKit-style lazy
-//!   parent view for dense storage. A multiplicity-free compact diagonal keeps
-//!   its direct `O(Σ_c k_c)` conjugation path; a checked `Generic` compact
-//!   diagonal uses the lazy parent view instead.
+//!   parent view for dense storage. A compact diagonal, in either admission
+//!   mode, keeps its direct `O(Σ_c k_c)` conjugation path.
 //!
 //! Adding any of them ahead of its review would bypass the gate that exists to
 //! keep this surface deliberate.
@@ -1844,9 +1843,9 @@ where
     /// Dense storage becomes a lazy parent-backed view: its logical space is
     /// available immediately, while [`Self::data`] performs and caches the
     /// whole-payload materialization on first demand. Applying `adjoint` twice
-    /// returns the original owned parent. Multiplicity-free compact diagonal
-    /// storage instead performs an owned `O(sum_c k_c)` conjugation and stays
-    /// compact; a checked-Generic compact diagonal uses the general lazy view.
+    /// returns the original owned parent. Compact diagonal storage instead
+    /// performs an owned `O(sum_c k_c)` conjugation and stays compact, as
+    /// TensorKit `adjoint(::DiagonalTensorMap)` does.
     /// Every result keeps the source's exact provider `Arc`.
     ///
     /// If layout construction or checked pivotal data fails, that layout or
@@ -6243,6 +6242,25 @@ where
     fn adjoint(
         tensor: &TensorMap<R, D>,
     ) -> Result<TensorMap<R, D>, GenericTensorError<<R as CheckedGenericFusion>::Error>> {
+        // TensorKit `adjoint(::DiagonalTensorMap)` is the conjugated diagonal
+        // on the same bond space, as on the multiplicity-free path. Why not a
+        // lazy view: densifying its unstored zeros through conjugation would
+        // publish them as `0-0i`.
+        if let Some(spectrum) = tensor.spectrum() {
+            return Ok(tensor.with_spectrum(
+                spectrum
+                    .iter()
+                    .map(|entry| tenet_matrixalgebra::SectorSpectrum {
+                        sector: entry.sector,
+                        values: entry
+                            .values
+                            .iter()
+                            .map(|&value| FactorScalar::adjoint(value))
+                            .collect(),
+                    })
+                    .collect(),
+            ));
+        }
         Ok(match &tensor.repr {
             TypedTensorRepr::Owned(parent) => {
                 let logical_space =
@@ -11006,8 +11024,8 @@ where
     ///
     /// * Owned dense or compact diagonal: one pass into one new payload of
     ///   the same form.
-    /// * Lazy adjoint of a compact diagonal (checked Generic only; the
-    ///   multiplicity-free `adjoint` already returns an owned diagonal): the
+    /// * Lazy adjoint of a compact diagonal (no `adjoint` builds one; every
+    ///   mode returns an owned diagonal): the
     ///   owned compact diagonal of the conjugated, converted values on the
     ///   logical space — what the multiplicity-free `adjoint` emits, since a
     ///   bond space is its own adjoint.

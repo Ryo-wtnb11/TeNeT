@@ -260,40 +260,9 @@ macro_rules! assert_all_conversions {
 /// Converts the lazy adjoint of `$owned` at every source dtype and compares
 /// each result bitwise with the element-wise conversion of the materialized
 /// source view. Returns the converted views for storage-form checks.
-///
-/// `$signless_complex_zeros` is set for a checked-Generic compact diagonal:
-/// its complex lazy view materializes the unstored off-diagonal zeros as
-/// `0 - 0i` (the conjugate of the dense expansion), while the converted
-/// result is the owned compact diagonal the multiplicity-free `adjoint`
-/// emits, whose unstored zeros are `+0`. Only the sign of a zero is waived,
-/// and only for complex sources; the stored spectrum is compared bitwise by
-/// the caller.
 macro_rules! assert_adjoint_conversions {
-    ($what:expr, $owned:expr) => {
-        assert_adjoint_conversions!($what, $owned, false)
-    };
-    ($what:expr, $owned:expr, $signless_complex_zeros:expr) => {{
+    ($what:expr, $owned:expr) => {{
         let what = $what;
-        let zeros = |bits: Vec<(u64, u64)>| -> Vec<(u64, u64)> {
-            let unsign = |b: u64| if b == 1 << 63 { 0 } else { b };
-            if $signless_complex_zeros {
-                bits.into_iter()
-                    .map(|(re, im)| (unsign(re), unsign(im)))
-                    .collect()
-            } else {
-                bits
-            }
-        };
-        let zeros32 = |bits: Vec<(u32, u32)>| -> Vec<(u32, u32)> {
-            let unsign = |b: u32| if b == 1 << 31 { 0 } else { b };
-            if $signless_complex_zeros {
-                bits.into_iter()
-                    .map(|(re, im)| (unsign(re), unsign(im)))
-                    .collect()
-            } else {
-                bits
-            }
-        };
         let owned: TensorMap<_, f32> = $owned;
         let lazy32 = owned.adjoint().unwrap();
         let lazy64 = owned.to_f64().adjoint().unwrap();
@@ -369,8 +338,8 @@ macro_rules! assert_adjoint_conversions {
             .map(|v| Complex64::new(f64::from(v.re), f64::from(v.im)))
             .collect();
         assert_eq!(
-            zeros(c64_bits(c32_to_c64.data())),
-            zeros(c64_bits(&expected)),
+            c64_bits(c32_to_c64.data()),
+            c64_bits(&expected),
             "{what}: Complex32 to_c64"
         );
 
@@ -381,8 +350,8 @@ macro_rules! assert_adjoint_conversions {
             .map(|v| Complex32::new(narrow(v.re), narrow(v.im)))
             .collect();
         assert_eq!(
-            zeros32(c32_bits(narrowed_c.data())),
-            zeros32(c32_bits(&expected)),
+            c32_bits(narrowed_c.data()),
+            c32_bits(&expected),
             "{what}: narrow_to_c32"
         );
         assert_same_structure!(what, narrowed_c, lazyc64);
@@ -747,8 +716,8 @@ fn checked_generic_su3_conversions_are_exact_and_keep_structure() {
     complex.qr_compact().unwrap();
 }
 
-/// Checked-Generic compact diagonal under a lazy adjoint (#1446 review):
-/// the conversion must come out as the owned compact diagonal, keep the
+/// Checked-Generic compact diagonal adjoint (#1446 review, #1449): the
+/// conversion must come out as the owned compact diagonal, keep the
 /// structural zeros `+0 + 0i`, and stay factorizable.
 #[cfg(feature = "racah-generated")]
 #[test]
@@ -774,7 +743,7 @@ fn checked_generic_diagonal_adjoint_converts_to_an_owned_compact_diagonal() {
     assert!(source.data().iter().any(|value| value.is_infinite()));
 
     let (to_f64, to_c64, c32_to_c64, narrowed_c) =
-        assert_adjoint_conversions!("SU(3) diagonal adjoint", source.clone(), true);
+        assert_adjoint_conversions!("SU(3) diagonal adjoint", source.clone());
     for converted in [&to_f64.to_c64(), &to_c64] {
         assert!(converted.diagonal_spectrum().unwrap().is_some());
     }
@@ -814,7 +783,7 @@ fn checked_generic_diagonal_adjoint_converts_to_an_owned_compact_diagonal() {
         assert_eq!(c32_bits(&entry.values), c32_bits(&expected));
     }
 
-    // The review repro: finite f64 values, `to_c64` of the lazy adjoint.
+    // The review repro: finite f64 values, `to_c64` of the adjoint.
     let finite: TensorMap<_, f64> = TensorMap::diagonal(
         &runtime(),
         &leg,

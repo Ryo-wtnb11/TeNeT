@@ -1711,8 +1711,13 @@ where
             parent_space,
             parent_spectrum,
         } => {
+            // Why not `build_adjoint`: every mode now takes the adjoint of a
+            // compact diagonal as an owned compact diagonal, so a v1 record
+            // written by an earlier lazy checked-Generic adjoint keeps its
+            // meaning but re-encodes as `Diagonal`.
             let parent = build_diagonal(runtime, &provider, parent_space, parent_spectrum, limits)?;
-            build_adjoint(parent)
+            <R::Mode as TypedTensorAdjointDispatch<R, D>>::adjoint(&parent)
+                .map_err(DecodeError::Facade)
         }
     }
 }

@@ -1197,7 +1197,7 @@ fn checked_generic_diagonal_is_compact_canonical_and_provider_owned() {
     );
     let adjoint = real.adjoint().unwrap();
     assert!(std::ptr::eq(adjoint.provider(), provider.as_ref()));
-    assert!(adjoint.network_reuse_class(false) == NetworkReuseClass::LazyAdjoint);
+    assert!(adjoint.network_reuse_class(false) == NetworkReuseClass::Compact);
     assert_eq!(real.data(), &[1.0, 2.0, 0.0, 0.0, 3.0]);
     assert_eq!(adjoint.data(), real.data());
     assert_eq!(
@@ -1230,6 +1230,143 @@ fn checked_generic_diagonal_is_compact_canonical_and_provider_owned() {
         complex.adjoint().unwrap().data()[0],
         Complex64::new(1.0, -1.0)
     );
+}
+
+/// #1449: like TensorKit `adjoint(::DiagonalTensorMap)` and the
+/// multiplicity-free path, the checked-Generic adjoint of a compact diagonal is
+/// the owned conjugated diagonal, and its unstored zeros stay `+0 + 0i`.
+#[cfg(feature = "racah-generated")]
+#[test]
+fn checked_generic_complex_diagonal_adjoint_is_the_owned_conjugated_diagonal() {
+    use tenet::core::{U1FusionRule, U1Irrep};
+    use tenet::typed::SUNFusionRule;
+
+    fn bits<R: TypedSectorAdmission>(tensor: &TensorMap<R, Complex64>) -> Vec<(u64, u64)> {
+        tensor
+            .data()
+            .iter()
+            .map(|z| (z.re.to_bits(), z.im.to_bits()))
+            .collect()
+    }
+    // Each structural zero must be `+0 + 0i`; an `im` of `-0` fails.
+    fn assert_positive_zeros<R: TypedSectorAdmission>(
+        tensor: &TensorMap<R, Complex64>,
+        count: usize,
+    ) {
+        let zeros: Vec<_> = bits(tensor)
+            .into_iter()
+            .filter(|&(re, im)| f64::from_bits(re) == 0.0 && f64::from_bits(im) == 0.0)
+            .collect();
+        assert_eq!(zeros, vec![(0, 0); count]);
+    }
+    let conj_if = |conj: bool, values: &[(f64, f64)]| -> Vec<Complex64> {
+        values
+            .iter()
+            .map(|&(re, im)| Complex64::new(re, if conj { -im } else { im }))
+            .collect()
+    };
+
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(SUNFusionRule::new(3).unwrap());
+    let leg =
+        GradedSpace::try_new_with_arc(provider, [(vec![2i64, 1], 3), (vec![0, 0], 2)]).unwrap();
+    let octet = [(1.5, 0.5), (-2.0, -1.0), (0.25, 3.0)];
+    let singlet = [(3.0, -0.75), (-0.5, 2.0)];
+    let su3 = |conj: bool| {
+        TensorMap::<_, Complex64>::diagonal(
+            &runtime,
+            &leg,
+            [
+                SectorSpectrum {
+                    sector: vec![2i64, 1],
+                    values: conj_if(conj, &octet),
+                },
+                SectorSpectrum {
+                    sector: vec![0, 0],
+                    values: conj_if(conj, &singlet),
+                },
+            ],
+        )
+        .unwrap()
+    };
+    let s = su3(false);
+    let adjoint = s.adjoint().unwrap();
+    // Hand-conjugated values are the oracle.
+    let expected = su3(true);
+    // 3x3 octet and 2x2 singlet blocks: 6 + 2 off-diagonal entries.
+    assert_positive_zeros(&adjoint, 8);
+    assert_eq!(bits(&adjoint), bits(&expected));
+    assert!(adjoint.network_reuse_class(false) == NetworkReuseClass::Compact);
+    assert_eq!(
+        adjoint.diagonal_spectrum().unwrap(),
+        expected.diagonal_spectrum().unwrap()
+    );
+    assert_eq!(
+        adjoint.adjoint().unwrap().diagonal_spectrum().unwrap(),
+        s.diagonal_spectrum().unwrap()
+    );
+
+    let assert_close = |got: &[Complex64], want: &[Complex64], what: &str| {
+        assert_eq!(got.len(), want.len(), "{what}");
+        for (got, want) in got.iter().zip(want) {
+            assert!((got - want).norm() <= 1e-12, "{what}");
+        }
+    };
+    // Consumers take the owned compact form as they take `s` itself.
+    let (q, r) = adjoint.qr_compact().unwrap();
+    assert_close(q.compose(&r).unwrap().data(), adjoint.data(), "qr");
+    let (u, sigma, vh) = adjoint.svd_compact().unwrap();
+    let reconstructed = u.compose(&sigma).unwrap().compose(&vh).unwrap();
+    assert_close(reconstructed.data(), adjoint.data(), "svd");
+    // s^† s is diagonal with |s|^2 entries.
+    let gram = adjoint.compose(&s).unwrap();
+    let norms = |values: &[(f64, f64)]| -> Vec<Complex64> {
+        values
+            .iter()
+            .map(|&(re, im)| Complex64::new(re * re + im * im, 0.0))
+            .collect()
+    };
+    let expected_gram = TensorMap::<_, Complex64>::diagonal(
+        &runtime,
+        &leg,
+        [
+            SectorSpectrum {
+                sector: vec![2i64, 1],
+                values: norms(&octet),
+            },
+            SectorSpectrum {
+                sector: vec![0, 0],
+                values: norms(&singlet),
+            },
+        ],
+    )
+    .unwrap();
+    assert_close(gram.data(), expected_gram.data(), "s^† s");
+
+    // The multiplicity-free path gives the same representation and zeros.
+    let u1 =
+        GradedSpace::try_new(U1FusionRule, [(U1Irrep::new(1), 3), (U1Irrep::new(0), 2)]).unwrap();
+    let u1_diagonal = |conj: bool| {
+        TensorMap::<_, Complex64>::diagonal(
+            &runtime,
+            &u1,
+            [
+                SectorSpectrum {
+                    sector: U1Irrep::new(1),
+                    values: conj_if(conj, &octet),
+                },
+                SectorSpectrum {
+                    sector: U1Irrep::new(0),
+                    values: conj_if(conj, &singlet),
+                },
+            ],
+        )
+        .unwrap()
+    };
+    let mf_adjoint = u1_diagonal(false).adjoint().unwrap();
+    assert!(mf_adjoint.network_reuse_class(false) == NetworkReuseClass::Compact);
+    assert_eq!(bits(&mf_adjoint), bits(&u1_diagonal(true)));
+    assert_positive_zeros(&mf_adjoint, 8);
 }
 
 #[test]

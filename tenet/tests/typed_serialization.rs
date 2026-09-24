@@ -537,10 +537,11 @@ fn checked_generic_multiplicity_keys_payload_and_resolver_arc_roundtrip() {
         factor.network_reuse_class(false),
         NetworkReuseClass::Compact
     ));
+    // TensorKit `adjoint(::DiagonalTensorMap)` is again a diagonal (#1449).
     let factor_adjoint = factor.adjoint().unwrap();
     assert!(matches!(
         factor_adjoint.network_reuse_class(false),
-        NetworkReuseClass::LazyAdjoint
+        NetworkReuseClass::Compact
     ));
     let restored_adjoint = TensorMap::<GenericToy, f64>::from_bytes_with(
         &runtime,
@@ -612,7 +613,7 @@ fn checked_generic_multiplicity_keys_payload_and_resolver_arc_roundtrip() {
     ));
     assert!(matches!(
         restored_complex_factor_lazy.network_reuse_class(false),
-        NetworkReuseClass::LazyAdjoint
+        NetworkReuseClass::Compact
     ));
     assert!(restored_complex_factor_lazy
         .data()
@@ -960,6 +961,79 @@ fn compact_and_lazy_representations_survive_roundtrip() {
             (actual.re.to_bits(), actual.im.to_bits())
                 == (expected.re.to_bits(), expected.im.to_bits())
         }));
+}
+
+/// A v1 lazy-adjoint-of-diagonal record, which checked-Generic wrote before
+/// #1449, still decodes to the adjoint it denotes: the owned conjugated
+/// diagonal, which re-encodes as a plain diagonal record.
+#[test]
+fn legacy_adjoint_diagonal_records_decode_to_the_owned_conjugated_diagonal() {
+    fn legacy_adjoint_record(diagonal_bytes: &[u8]) -> Vec<u8> {
+        let mut bytes = diagonal_bytes.to_vec();
+        let repr = header_end(&bytes);
+        assert_eq!(bytes[repr], 2, "diagonal record tag");
+        bytes.insert(repr, 3);
+        bytes
+    }
+    let runtime = runtime();
+    let values = vec![Complex64::new(2.0, 1.5), Complex64::new(-3.0, -0.5)];
+
+    let provider = Arc::new(GenericToy);
+    let codec = GenericCodec {
+        provider: Arc::clone(&provider),
+    };
+    let leg = GradedSpace::try_new_with_arc(Arc::clone(&provider), [(GenericLabel::X, 2)]).unwrap();
+    let diagonal = TensorMap::<_, Complex64>::diagonal(
+        &runtime,
+        &leg,
+        [SectorSpectrum {
+            sector: GenericLabel::X,
+            values: values.clone(),
+        }],
+    )
+    .unwrap();
+    let decoded = TensorMap::<GenericToy, Complex64>::from_bytes_with(
+        &runtime,
+        &legacy_adjoint_record(&diagonal.to_bytes_with(&codec).unwrap()),
+        DecodeLimits::default(),
+        &codec,
+    )
+    .unwrap();
+    let adjoint = diagonal.adjoint().unwrap();
+    assert!(decoded.network_reuse_class(false) == NetworkReuseClass::Compact);
+    assert_eq!(decoded.data().bits(), adjoint.data().bits());
+    assert_eq!(
+        decoded.to_bytes_with(&codec).unwrap(),
+        adjoint.to_bytes_with(&codec).unwrap()
+    );
+
+    let provider = Arc::new(SU2FusionRule);
+    let codec = Su2Codec::new(Arc::clone(&provider));
+    let diagonal = TensorMap::<_, Complex64>::diagonal(
+        &runtime,
+        &su2_leg(&provider, false),
+        [
+            SectorSpectrum {
+                sector: SU2Irrep::from_twice_spin(0),
+                values: vec![values[0]],
+            },
+            SectorSpectrum {
+                sector: SU2Irrep::from_twice_spin(1),
+                values: values.clone(),
+            },
+        ],
+    )
+    .unwrap();
+    let decoded = TensorMap::<SU2FusionRule, Complex64>::from_bytes_with(
+        &runtime,
+        &legacy_adjoint_record(&diagonal.to_bytes_with(&codec).unwrap()),
+        DecodeLimits::default(),
+        &codec,
+    )
+    .unwrap();
+    let adjoint = diagonal.adjoint().unwrap();
+    assert!(decoded.network_reuse_class(false) == NetworkReuseClass::Compact);
+    assert_eq!(decoded.data().bits(), adjoint.data().bits());
 }
 
 #[test]
@@ -1498,7 +1572,8 @@ macro_rules! single_precision_roundtrip {
                 NetworkReuseClass::Compact,
             );
 
-            // Checked Generic: vertex multiplicity; a compact adjoint stays lazy.
+            // Checked Generic: vertex multiplicity; compact adjoints are owned
+            // compact values here too (#1449).
             let provider = Arc::new(GenericToy);
             let codec = GenericCodec {
                 provider: Arc::clone(&provider),
@@ -1538,7 +1613,7 @@ macro_rules! single_precision_roundtrip {
                 &runtime,
                 &codec,
                 &diagonal.adjoint().unwrap(),
-                NetworkReuseClass::LazyAdjoint,
+                NetworkReuseClass::Compact,
             );
         }
     };
