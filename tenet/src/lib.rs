@@ -162,3 +162,12 @@ pub mod matrixalgebra {
         svd_compact, BoundTensorMap, BoundTensorMapRef, SectorSpectrum, SvdCompact,
     };
 }
+
+/// The workspace tolerance rule for arithmetic test comparisons
+/// (`docs/testing_numerics.md`).
+#[cfg(test)]
+#[path = "../../tests/support"]
+mod test_numerics {
+    use num_complex::{Complex32, Complex64};
+    pub(crate) mod numerics;
+}

@@ -4,7 +4,6 @@
 //! macro and an explicitly planned `Network` preserve their provider and
 //! payload, including a static intra-operand trace.
 
-use std::fmt::Debug;
 use std::sync::Arc;
 
 use tenet::core::{
@@ -13,25 +12,34 @@ use tenet::core::{
     ProductFusionRuleExt, SU2FusionRule, SU2Irrep, SectorCodec, TypedSectorAdmission, U1FusionRule,
     U1Irrep, Z2FusionRule, Z2Irrep, ZNFusionRule,
 };
-use tenet::prelude::TensorScalar;
+use tenet::prelude::{Complex32, Complex64};
 use tenet::typed::{GradedSpace, Runtime, TensorMap};
 use tenet_network::{
     plan_cache_stats, tensor, GreedyDenseOptimizer, Network, NetworkExecutionWorkspace,
     TemporaryLabel,
 };
 
+#[path = "../../tests/support/numerics.rs"]
+mod numerics;
+
 fn labels(names: &[&str]) -> Vec<TemporaryLabel> {
     names.iter().copied().map(TemporaryLabel::from).collect()
 }
 
-fn assert_same<R, D>(actual: &TensorMap<R, D>, expected: &TensorMap<R, D>, provider: &R)
-where
+/// The network and macro paths may group the contraction differently from the
+/// direct typed call, so payloads agree within the workspace tolerance rule
+/// with `terms` bounded by the contracted space's weighted dimension.
+fn assert_same<R>(
+    actual: &TensorMap<R, f64>,
+    expected: &TensorMap<R, f64>,
+    provider: &R,
+    terms: usize,
+) where
     R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
         + MultiplicityFreeRigidSymbols<Scalar = f64>
         + CheckedFusionAlgebra
         + SectorCodec
         + Send,
-    D: TensorScalar + PartialEq + Debug,
 {
     assert!(std::ptr::eq(actual.provider(), provider));
     assert!(std::ptr::eq(expected.provider(), provider));
@@ -45,7 +53,7 @@ where
         .all(|leg| std::ptr::eq(leg.provider(), provider)));
     assert_eq!(actual.codomain(), expected.codomain());
     assert_eq!(actual.domain(), expected.domain());
-    assert_eq!(actual.data(), expected.data());
+    numerics::assert_slices_close("payload", actual.data(), expected.data(), terms);
 }
 
 fn ordinary_network_and_workspace_reuse<R>(runtime: &Runtime, space: &GradedSpace<R>, seed: u64)
@@ -58,6 +66,7 @@ where
 {
     let lhs = TensorMap::<R, f64>::rand_with_seed(runtime, [space], [space], seed).unwrap();
     let rhs = TensorMap::<R, f64>::rand_with_seed(runtime, [space], [space], seed + 1).unwrap();
+    let terms = space.dim().unwrap().ceil() as usize;
     let expected = lhs
         .contract(&rhs, &[1], &[0], &[0, 1])
         .unwrap()
@@ -80,16 +89,16 @@ where
     let second = planned
         .execute_with_workspace(&tensors, &mut workspace)
         .unwrap();
-    assert_same(&first, &expected, space.provider());
-    assert_same(&second, &expected, space.provider());
+    assert_same(&first, &expected, space.provider(), terms);
+    assert_same(&second, &expected, space.provider(), terms);
 
     // This is workspace reuse only.  The public contract intentionally makes
     // no promise that output payload allocations themselves are reused.
     let cold = plan_cache_stats(runtime);
     let macro_first = tensor!([k; i] = lhs[i; j] * rhs[j; k]).unwrap();
     let macro_second = tensor!([k; i] = lhs[i; j] * rhs[j; k]).unwrap();
-    assert_same(&macro_first, &expected, space.provider());
-    assert_same(&macro_second, &expected, space.provider());
+    assert_same(&macro_first, &expected, space.provider(), terms);
+    assert_same(&macro_second, &expected, space.provider(), terms);
     assert!(plan_cache_stats(runtime).workspace_reuses > cold.workspace_reuses);
 }
 
@@ -105,8 +114,9 @@ where
     let source =
         TensorMap::<R, f64>::rand_with_seed(runtime, [space, &dual], [space], seed).unwrap();
     let expected = source.trace_pairs(&[(0, 1)]).unwrap();
+    let terms = space.dim().unwrap().ceil() as usize;
     let actual = tensor!([; out] = source[i, i; out]).unwrap();
-    assert_same(&actual, &expected, space.provider());
+    assert_same(&actual, &expected, space.provider(), terms);
 }
 
 #[test]

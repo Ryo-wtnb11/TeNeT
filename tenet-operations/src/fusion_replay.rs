@@ -2601,7 +2601,15 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(dst[0], r_tau_tau_vacuum * Complex64::new(6.0, 0.0));
+        // The non-dyadic R-symbol makes the product order-dependent in its
+        // last bit, so it is compared to the hand value under the tolerance
+        // rule; three factors (R, lhs, rhs) reach the entry.
+        crate::test_numerics::numerics::assert_close(
+            "R(tau, tau; 1) * 2 * 3",
+            dst[0],
+            r_tau_tau_vacuum * Complex64::new(6.0, 0.0),
+            3,
+        );
         assert_ne!(dst[0].im, 0.0, "discarding the R-symbol phase must fail");
     }
 

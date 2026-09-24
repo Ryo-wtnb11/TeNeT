@@ -258,6 +258,13 @@ mod tests {
         assert_eq!(actual.im.to_bits(), expected.im.to_bits());
     }
 
+    /// Closed-form irrational values (`1/φ`, `1/√φ`, `φ`, `cispi`) admit more
+    /// than one valid evaluation order, so they meet the TensorKitSectors
+    /// closed forms under the workspace tolerance rule, not bit for bit.
+    fn assert_closed_form(what: &str, actual: Complex64, expected: Complex64) {
+        crate::test_numerics::numerics::assert_close(what, actual, expected, 1);
+    }
+
     #[test]
     fn fibonacci_provider_matches_tensorkitsectors() {
         let rule = FibonacciFusionRule;
@@ -286,7 +293,8 @@ mod tests {
             (tau, vacuum, 1.0 / phi.sqrt()),
             (tau, tau, -1.0 / phi),
         ] {
-            assert_complex_bits(
+            assert_closed_form(
+                "F(τ,τ,τ,τ)",
                 rule.f_symbol_scalar(tau, tau, tau, tau, left_coupled, right_coupled),
                 Complex64::new(expected, 0.0),
             );
@@ -303,10 +311,18 @@ mod tests {
             rule.f_symbol_scalar(vacuum, vacuum, vacuum, tau, vacuum, vacuum),
             Complex64::new(0.0, 0.0)
         );
-        assert_complex_bits(rule.r_symbol_scalar(tau, tau, vacuum), cispi(4.0 / 5.0));
-        assert_complex_bits(rule.r_symbol_scalar(tau, tau, tau), cispi(-3.0 / 5.0));
-        assert_complex_bits(rule.dim_scalar(tau), Complex64::new(phi, 0.0));
-        assert_complex_bits(rule.twist_scalar(tau), cispi(-4.0 / 5.0));
+        assert_closed_form(
+            "R(τ,τ,1)",
+            rule.r_symbol_scalar(tau, tau, vacuum),
+            cispi(4.0 / 5.0),
+        );
+        assert_closed_form(
+            "R(τ,τ,τ)",
+            rule.r_symbol_scalar(tau, tau, tau),
+            cispi(-3.0 / 5.0),
+        );
+        assert_closed_form("dim(τ)", rule.dim_scalar(tau), Complex64::new(phi, 0.0));
+        assert_closed_form("twist(τ)", rule.twist_scalar(tau), cispi(-4.0 / 5.0));
         assert_eq!(
             rule.frobenius_schur_phase_scalar(vacuum),
             Complex64::new(1.0, 0.0)

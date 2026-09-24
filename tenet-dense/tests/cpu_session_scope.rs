@@ -8,12 +8,15 @@
 
 #![cfg(all(feature = "tenferro", not(feature = "provider-inject")))]
 
-use num_complex::Complex64;
+use num_complex::{Complex32, Complex64};
 use tenet_dense::{
     cpu_session_stats, reset_cpu_session_stats, strided_batch_runs, CpuSessionStats,
     DefaultDenseExecutor, DenseError, DenseExecutor, DenseFactorization, DenseGemmBatchJob,
     DenseRead, DenseScalar, DenseView, DenseViewMut, DenseWrite, MatrixOp,
 };
+
+#[path = "../../tests/support/numerics.rs"]
+mod numerics;
 
 fn assert_close(got: f64, want: f64, tol: f64) {
     assert!((got - want).abs() <= tol, "{got} != {want} (tol {tol})");
@@ -40,7 +43,10 @@ fn sessions_opened() -> u64 {
 // Heterogeneous jobs with a non-Identity operand op take the op-bearing serial
 // route (`runs.len() == jobs.len()`). It must enter exactly one Tenferro
 // session for the whole loop and land bitwise what the same jobs produce when
-// issued one at a time through the public batch API.
+// issued one at a time through the public batch API. Bit equality is a
+// determinism contract here, not an arithmetic one: the fixture pins the
+// singleton runs, so both sides issue the identical single-threaded kernel
+// per job and only the session boundary differs.
 #[allow(clippy::too_many_arguments)]
 fn serial_route_is_one_session_and_bitwise_equal<T, W, R>(
     values: impl Fn(usize) -> T,
@@ -351,22 +357,35 @@ fn cpu_session_stats_reset_and_scope() {
     reset_cpu_session_stats();
 }
 
-fn tensor_bits(tensor: &tenet_dense::DenseTensor) -> (Vec<usize>, Vec<u64>) {
-    let bits = match (tensor.as_f64_slice(), tensor.as_c64_slice()) {
-        (Ok(values), _) => values.iter().map(|v| v.to_bits()).collect(),
-        (_, Ok(values)) => values
-            .iter()
-            .flat_map(|v| [v.re.to_bits(), v.im.to_bits()])
-            .collect(),
-        _ => panic!("fixture outputs are f64 or c64"),
-    };
-    (tensor.shape().to_vec(), bits)
+/// Asserts equal shapes and factor entries within the workspace tolerance.
+///
+/// Path agreement is the contract: `factorize_batch` must return the factors
+/// (including their gauge) the per-matrix entry returns for the same input.
+/// It is compared under the rule rather than bit for bit because the batch
+/// route is free to order the same factorization's floating work differently;
+/// `terms` is the longest inner product, the larger matrix dimension.
+fn assert_factor_agrees(
+    what: &str,
+    got: &tenet_dense::DenseTensor,
+    want: &tenet_dense::DenseTensor,
+    terms: usize,
+) {
+    assert_eq!(got.shape(), want.shape(), "{what}: factor shapes differ");
+    match (got.as_f64_slice(), want.as_f64_slice()) {
+        (Ok(got), Ok(want)) => numerics::assert_slices_close(what, got, want, terms),
+        _ => numerics::assert_slices_close(
+            what,
+            got.as_c64_slice().expect("fixture outputs are f64 or c64"),
+            want.as_c64_slice().expect("fixture outputs are f64 or c64"),
+            terms,
+        ),
+    }
 }
 
 // A coupled-sector factorization loop is one `factorize_batch`: it must enter
-// one session for every matrix, and land bitwise what the per-matrix entries
-// return, since the same kernels run in the same order.
-fn factorize_batch_is_one_session_and_bitwise_equal<T: Copy>(
+// one session for every matrix, and return what the per-matrix entries return
+// (path agreement under the tolerance rule, see `assert_factor_agrees`).
+fn factorize_batch_is_one_session_and_matches_per_call<T: Copy>(
     value: impl Fn(usize) -> T,
     wrap: impl for<'x> Fn(DenseView<'x, T>) -> DenseRead<'x>,
 ) {
@@ -418,21 +437,19 @@ fn factorize_batch_is_one_session_and_bitwise_equal<T: Copy>(
             "{op:?}: the per-call entry opens one session per matrix"
         );
         assert_eq!(batched.len(), per_call.len());
-        for (got, want) in batched.iter().zip(&per_call) {
-            let got = got.iter().map(tensor_bits).collect::<Vec<_>>();
-            let want = want.iter().map(tensor_bits).collect::<Vec<_>>();
-            assert_eq!(
-                got, want,
-                "{op:?}: batch must be bitwise the per-call result"
-            );
+        for ((got, want), &(rows, cols)) in batched.iter().zip(&per_call).zip(&shapes) {
+            assert_eq!(got.len(), want.len(), "{op:?}: factor counts differ");
+            for (got, want) in got.iter().zip(want) {
+                assert_factor_agrees(&format!("{op:?}"), got, want, rows.max(cols));
+            }
         }
     }
 }
 
 #[test]
 #[allow(clippy::redundant_closure)]
-fn factorize_batch_is_one_session_and_bitwise_equal_f64() {
-    factorize_batch_is_one_session_and_bitwise_equal(
+fn factorize_batch_is_one_session_and_matches_per_call_f64() {
+    factorize_batch_is_one_session_and_matches_per_call(
         |i| ((i * 7 + 3) % 11) as f64 - 4.5,
         // Constructor functions fix one lifetime; the closure stays generic.
         |view| DenseRead::F64(view),
@@ -441,8 +458,8 @@ fn factorize_batch_is_one_session_and_bitwise_equal_f64() {
 
 #[test]
 #[allow(clippy::redundant_closure)]
-fn factorize_batch_is_one_session_and_bitwise_equal_c64() {
-    factorize_batch_is_one_session_and_bitwise_equal(
+fn factorize_batch_is_one_session_and_matches_per_call_c64() {
+    factorize_batch_is_one_session_and_matches_per_call(
         |i| {
             Complex64::new(
                 ((i * 7 + 3) % 11) as f64 - 4.5,

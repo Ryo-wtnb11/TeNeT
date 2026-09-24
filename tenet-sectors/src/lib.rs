@@ -147,3 +147,12 @@ impl BraidingStyleKind {
 /// caches touches no heap. Inline capacity 8 covers typical tensor ranks and
 /// per-leg sector counts; larger cases spill to heap exactly like `Vec`.
 pub type SectorVec = SmallVec<[SectorId; 8]>;
+
+/// The workspace tolerance rule for arithmetic test comparisons
+/// (`docs/testing_numerics.md`).
+#[cfg(test)]
+#[path = "../../tests/support"]
+mod test_numerics {
+    use num_complex::{Complex32, Complex64};
+    pub(crate) mod numerics;
+}

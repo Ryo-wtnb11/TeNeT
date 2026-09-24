@@ -3455,6 +3455,11 @@ mod typed_replay_tests {
         ));
     }
 
+    // The sliced-vs-unsliced tests below use small-integer payloads under
+    // abelian and fermion-parity rules (every coefficient is +-1), so each
+    // partial sum is an exactly representable integer and every accumulation
+    // order gives the same bits. Exact equality there checks slice
+    // selection and scatter without freezing an order.
     #[test]
     fn internal_symmetric_slices_match_unsliced_multisector_and_meter_cold_warm() {
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
@@ -4766,7 +4771,14 @@ mod typed_replay_tests {
             .unwrap();
         assert_eq!(before, after);
         assert_ne!(after.0, output.data().as_ptr());
-        assert_eq!(output.data(), oracle.data());
+        // The crossed schedule groups the bond-8 and left-9 contractions
+        // differently from the chained direct calls: 8 * 9 terms per entry.
+        crate::test_numerics::numerics::assert_slices_close(
+            "crossed schedule vs chained contract",
+            output.data(),
+            oracle.data(),
+            8 * 9,
+        );
 
         let other_bond = space(&other_provider, 8);
         let other_right = space(&other_provider, 10);

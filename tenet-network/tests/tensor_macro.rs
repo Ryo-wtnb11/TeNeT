@@ -6,12 +6,15 @@ use tenet::core::{
     MultiplicityFreeAdmissionMode, MultiplicityFreeRigidSymbols, ProductFusionRuleExt,
     SU2FusionRule, SU2Irrep, SectorCodec, TypedSectorAdmission, U1FusionRule, U1Irrep, Z2Irrep,
 };
-use tenet::prelude::{Complex64, Error, TensorScalar};
+use tenet::prelude::{Complex32, Complex64, Error, TensorScalar};
 use tenet::typed::{GradedSpace, Runtime, TensorMap, Truncation};
 use tenet_network::{plan_cache_stats, tensor};
 
 #[path = "../../tenet/tests/braiding_probe/mod.rs"]
 mod braiding_probe;
+
+#[path = "../../tests/support/numerics.rs"]
+mod numerics;
 
 fn space() -> GradedSpace<U1FusionRule> {
     GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap()
@@ -68,11 +71,20 @@ where
         + CheckedFusionAlgebra
         + SectorCodec
         + Send,
-    D: TensorScalar + Send + Sync + PartialEq + std::fmt::Debug + 'static,
+    D: TensorScalar + Send + Sync + numerics::Numeric + 'static,
 {
+    // The macro may group the contraction differently from the direct call,
+    // so the payloads agree under the tolerance rule; the contracted length is
+    // bounded by the weighted dimension of the shared leg.
+    let terms = a.domain()[0].dim().unwrap().ceil() as usize;
     let actual = tensor!([i; k] = a[i; j] * b[j; k]).unwrap();
     let expected = a.contract(b, &[1], &[0], &[0, 1]).unwrap();
-    assert_eq!(actual.data(), expected.data());
+    numerics::assert_slices_close(
+        "macro vs direct contract",
+        actual.data(),
+        expected.data(),
+        terms,
+    );
 }
 
 fn assert_pair_case<R, D>(runtime: &Runtime, space: &GradedSpace<R>, seed: u64)
@@ -82,7 +94,7 @@ where
         + CheckedFusionAlgebra
         + SectorCodec
         + Send,
-    D: TensorScalar + Send + Sync + PartialEq + std::fmt::Debug + 'static,
+    D: TensorScalar + Send + Sync + numerics::Numeric + 'static,
 {
     let lhs = TensorMap::<R, D>::rand_with_seed(runtime, [space], [space], seed).unwrap();
     let rhs = TensorMap::<R, D>::rand_with_seed(runtime, [space], [space], seed + 1).unwrap();
@@ -158,7 +170,14 @@ fn owned_operands_infer_the_typed_host_path() {
     let (a, b) = pair::<f64>(&runtime);
     let actual = tensor!([i; k] = a[i; j] * b[j; k]).unwrap();
     let expected = a.contract(&b, &[1], &[0], &[0, 1]).unwrap();
-    assert_eq!(actual.data(), expected.data());
+    // Length-2 contraction of random payloads: the macro and the direct call
+    // may round differently, so compare under the tolerance rule.
+    numerics::assert_slices_close(
+        "macro vs direct contract",
+        actual.data(),
+        expected.data(),
+        2,
+    );
 }
 
 #[test]
@@ -168,7 +187,14 @@ fn borrowed_first_operand_is_normalized_once() {
     let a_ref = &a;
     let actual = tensor!([i; k] = a_ref[i; j] * b[j; k]).unwrap();
     let expected = a.contract(&b, &[1], &[0], &[0, 1]).unwrap();
-    assert_eq!(actual.data(), expected.data());
+    // Length-2 contraction of random payloads: the macro and the direct call
+    // may round differently, so compare under the tolerance rule.
+    numerics::assert_slices_close(
+        "macro vs direct contract",
+        actual.data(),
+        expected.data(),
+        2,
+    );
 }
 
 #[test]
@@ -178,7 +204,14 @@ fn borrowed_later_operand_is_normalized_once() {
     let b_ref = &b;
     let actual = tensor!([i; k] = a[i; j] * b_ref[j; k]).unwrap();
     let expected = a.contract(&b, &[1], &[0], &[0, 1]).unwrap();
-    assert_eq!(actual.data(), expected.data());
+    // Length-2 contraction of random payloads: the macro and the direct call
+    // may round differently, so compare under the tolerance rule.
+    numerics::assert_slices_close(
+        "macro vs direct contract",
+        actual.data(),
+        expected.data(),
+        2,
+    );
 }
 
 #[test]
@@ -196,7 +229,14 @@ fn field_operands_are_normalized_without_moving_the_owner() {
         .lhs
         .contract(&operands.rhs, &[1], &[0], &[0, 1])
         .unwrap();
-    assert_eq!(actual.data(), expected.data());
+    // Length-2 contraction of random payloads: the macro and the direct call
+    // may round differently, so compare under the tolerance rule.
+    numerics::assert_slices_close(
+        "macro vs direct contract",
+        actual.data(),
+        expected.data(),
+        2,
+    );
 }
 
 #[test]
@@ -217,7 +257,14 @@ fn operand_expressions_are_evaluated_exactly_once_in_left_to_right_order() {
     let actual = tensor!([i; k] = (left())[i; j] * (right())[j; k]).unwrap();
     assert_eq!(order.get(), 2);
     let expected = a.contract(&b, &[1], &[0], &[0, 1]).unwrap();
-    assert_eq!(actual.data(), expected.data());
+    // Length-2 contraction of random payloads: the macro and the direct call
+    // may round differently, so compare under the tolerance rule.
+    numerics::assert_slices_close(
+        "macro vs direct contract",
+        actual.data(),
+        expected.data(),
+        2,
+    );
 }
 
 #[test]
@@ -226,7 +273,14 @@ fn parenthesized_temporary_lives_through_execution() {
     let (a, b) = pair::<f64>(&runtime);
     let actual = tensor!([i; k] = (a.clone())[i; j] * (b.clone())[j; k]).unwrap();
     let expected = a.contract(&b, &[1], &[0], &[0, 1]).unwrap();
-    assert_eq!(actual.data(), expected.data());
+    // Length-2 contraction of random payloads: the macro and the direct call
+    // may round differently, so compare under the tolerance rule.
+    numerics::assert_slices_close(
+        "macro vs direct contract",
+        actual.data(),
+        expected.data(),
+        2,
+    );
 }
 
 fn assert_high_rank_pairwise<R>(runtime: &Runtime, space: &GradedSpace<R>)

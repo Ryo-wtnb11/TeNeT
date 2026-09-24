@@ -22320,7 +22320,14 @@ mod representation_gates {
             let actual = lazy.powi(exponent).unwrap();
             let expected = source.powi(exponent).unwrap().adjoint().unwrap();
             assert!(matches!(actual.repr, TypedTensorRepr::Owned(_)));
-            assert_eq!(actual.data(), expected.data());
+            // `(A†)^k = (A^k)†`: the two sides factor different matrices, so
+            // they agree under the tolerance rule over the 2x2 degeneracy block.
+            crate::test_numerics::numerics::assert_slices_close(
+                "lazy powi against the adjoint of powi",
+                actual.data(),
+                expected.data(),
+                2,
+            );
             assert_eq!(materialized_adjoint_builds(&lazy), 0);
             let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
                 unreachable!()
@@ -24676,8 +24683,27 @@ mod representation_gates {
         let actual = lazy.svd_trunc(&truncation).unwrap();
         let expected = eager.svd_trunc(&truncation).unwrap();
 
-        assert_eq!(actual.singular_values, expected.singular_values);
-        assert_eq!(actual.error, expected.error);
+        // The lazy route factors the parent while the oracle factors the
+        // materialized adjoint, so kept sectors and counts match exactly and
+        // values under the tolerance rule; every payload entry can reach a
+        // singular value, so `terms` is the payload length.
+        let terms = source.data().len();
+        assert_eq!(actual.singular_values.len(), expected.singular_values.len());
+        for (actual, expected) in actual.singular_values.iter().zip(&expected.singular_values) {
+            assert_eq!(actual.sector, expected.sector);
+            crate::test_numerics::numerics::assert_slices_close(
+                "kept singular values",
+                &actual.values,
+                &expected.values,
+                terms,
+            );
+        }
+        crate::test_numerics::numerics::assert_close(
+            "truncation error",
+            actual.error,
+            expected.error,
+            terms,
+        );
         assert_eq!(materialized_adjoint_builds(&lazy), 0);
         let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
             unreachable!()
@@ -25782,7 +25808,7 @@ mod representation_gates {
         overwrite: impl FnOnce(&mut TensorMap<R, D>) -> Result<(), Error>,
     ) where
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
-        D: TensorScalar + core::fmt::Debug,
+        D: TensorScalar + core::fmt::Debug + crate::test_numerics::numerics::Numeric,
     {
         let source_before = source.data().to_vec();
         let mut destination = expected.zeros_like();
@@ -25794,8 +25820,16 @@ mod representation_gates {
 
         overwrite(&mut destination).unwrap();
 
+        // The overwrite folds `alpha` into the recoupling while the oracle
+        // scales afterwards; a recoupled entry sums at most one term per
+        // source block.
         let scaled = expected.scale(alpha);
-        assert_eq!(destination.data(), scaled.data());
+        crate::test_numerics::numerics::assert_slices_close(
+            "overwrite against the scaled owned route",
+            destination.data(),
+            scaled.data(),
+            source.block_count(),
+        );
         assert_eq!(source.data(), source_before);
         assert_eq!(
             Arc::as_ptr(destination.logical_space().provider_arc()),
@@ -25825,7 +25859,7 @@ mod representation_gates {
             + MultiplicityFreeRigidSymbols<Scalar = f64>
             + CheckedFusionAlgebra
             + SectorCodec,
-        D: TensorScalar + core::fmt::Debug,
+        D: TensorScalar + core::fmt::Debug + crate::test_numerics::numerics::Numeric,
     {
         let expected = lhs
             .contract(rhs, lhs_axes, rhs_axes, output_axes)
@@ -25861,7 +25895,16 @@ mod representation_gates {
             .unwrap_or_else(|error| panic!("{label} overwrite failed: {error:?}"));
         }
 
-        assert_eq!(destination.data(), expected.scale(alpha).data());
+        // Owned and destination routes of one contraction. An entry is
+        // bilinear in the operands, so `len(lhs) * len(rhs)` bounds its
+        // terms, recoupled fusion trees (the cu1 output order) included.
+        let terms = lhs.data().len() * rhs.data().len();
+        crate::test_numerics::numerics::assert_slices_close(
+            label,
+            destination.data(),
+            expected.scale(alpha).data(),
+            terms,
+        );
         assert_eq!(lhs.data(), lhs_before);
         assert_eq!(rhs.data(), rhs_before);
         assert_eq!(

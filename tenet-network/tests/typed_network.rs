@@ -7,12 +7,15 @@ use tenet::core::{
     SU2FusionRule, SU2Irrep, SectorCodec, TensorStorage, TypedSectorAdmission, U1FusionRule,
     U1Irrep, Z2Irrep,
 };
-use tenet::prelude::{Complex64, TensorScalar};
+use tenet::prelude::{Complex32, Complex64, TensorScalar};
 use tenet::typed::{GradedSpace, Runtime, TensorMap};
 use tenet_network::{
     GreedyDenseOptimizer, LabelOrderDenseOptimizer, Network, NetworkExecutionWorkspace,
     PlannedNetwork, TemporaryLabel, TensorId,
 };
+
+#[path = "../../tests/support/numerics.rs"]
+mod numerics;
 
 fn labels(names: &[&str]) -> Vec<TemporaryLabel> {
     names.iter().copied().map(TemporaryLabel::from).collect()
@@ -47,9 +50,13 @@ where
         + MultiplicityFreeRigidSymbols<Scalar = f64>
         + CheckedFusionAlgebra
         + SectorCodec,
-    D: TensorScalar + PartialEq + Debug,
+    D: TensorScalar + numerics::Numeric,
 {
     let runtime = Runtime::builder().build().unwrap();
+    // The planned network may group the contraction differently from the
+    // direct call; the contracted length is bounded by the leg's weighted
+    // dimension.
+    let terms = space.dim().unwrap().ceil() as usize;
     let lhs = TensorMap::<R, D>::rand_with_seed(&runtime, [space], [space], 1).unwrap();
     let rhs = TensorMap::<R, D>::rand_with_seed(&runtime, [space], [space], 2).unwrap();
     let tensors = [&lhs, &rhs];
@@ -62,7 +69,12 @@ where
         let actual = planned
             .execute_with_workspace(&tensors, &mut workspace)
             .unwrap();
-        assert_eq!(actual.data(), expected.data());
+        numerics::assert_slices_close(
+            "network vs direct contract",
+            actual.data(),
+            expected.data(),
+            terms,
+        );
         assert_eq!(actual.codomain(), expected.codomain());
         assert_eq!(actual.domain(), expected.domain());
     }

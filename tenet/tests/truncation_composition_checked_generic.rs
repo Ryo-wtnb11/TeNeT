@@ -11,17 +11,21 @@
 //! `u`'s blocks differ only by their vertex label and the restriction has to
 //! leave that part of the key alone.
 //!
-//! The gate is the same as the multiplicity-free one: spaces and block
-//! geometry first, then payload bits, then the truncation error (compared by
-//! `to_bits()`).
+//! The gate is the same as the multiplicity-free one: spaces, block geometry
+//! and the kept bond exactly, then payloads and the truncation error under the
+//! workspace tolerance rule (`docs/testing_numerics.md`), the error also
+//! against an independent discarded-norm oracle.
 
 #![cfg(feature = "racah-generated")]
 
 use std::sync::Arc;
 
-use num_complex::Complex64;
+use num_complex::{Complex32, Complex64};
 use tenet::prelude::{Runtime, TensorMap, Truncation};
-use tenet::typed::{GradedSpace, SUNFusionRule};
+use tenet::typed::{GradedSpace, SUNFusionRule, SpectrumMagnitude};
+
+#[path = "../../tests/support/numerics.rs"]
+mod numerics;
 
 fn runtime() -> Runtime {
     Runtime::builder().dense_threads(1).build().unwrap()
@@ -62,6 +66,50 @@ macro_rules! assert_same_layout {
             );
         }
     }};
+}
+
+/// Weyl dimension of the SU(3) irrep with Dynkin labels `(p, q)`:
+/// `(p + 1)(q + 1)(p + q + 2) / 2`.
+fn su3_dim(labels: &[i64]) -> f64 {
+    let (p, q) = (labels[0] as f64, labels[1] as f64);
+    (p + 1.0) * (q + 1.0) * (p + q + 2.0) / 2.0
+}
+
+/// Checks the error against Host and against `sqrt(sum_c dim(c) sum_discarded
+/// |v|^2)` over the offered spectrum past each sector's kept prefix; `terms`
+/// is the number of offered values.
+fn assert_truncation_error<V: SpectrumMagnitude>(
+    found: &tenet::typed::TruncatedSelection<SUNFusionRule>,
+    host_error: f64,
+    spectra: &[tenet::typed::SectorSpectrum<Vec<i64>, V>],
+    case: &str,
+) {
+    let kept = found.selection.subspace();
+    let kept_sectors = kept.sectors().unwrap();
+    let mut sum = 0.0f64;
+    for entry in spectra {
+        let prefix = kept_sectors
+            .iter()
+            .position(|sector| *sector == entry.sector)
+            .map_or(0, |index| kept.degeneracies()[index]);
+        for &value in &entry.values[prefix..] {
+            let magnitude = value.magnitude();
+            sum += su3_dim(&entry.sector) * magnitude * magnitude;
+        }
+    }
+    let terms: usize = spectra.iter().map(|e| e.values.len()).sum();
+    numerics::assert_close(
+        &format!("{case}: truncation error against Host"),
+        found.error,
+        host_error,
+        terms,
+    );
+    numerics::assert_close(
+        &format!("{case}: truncation error against the discarded-norm oracle"),
+        found.error,
+        sum.sqrt(),
+        terms,
+    );
 }
 
 fn su3_legs() -> (Arc<SUNFusionRule>, GradedSpace<SUNFusionRule>) {
@@ -110,9 +158,8 @@ macro_rules! assert_su3_svd_composition {
                 "checked-Generic compact s is dense, which is what exercises diagview's strided arm"
             );
             let bond = s.domain()[0].clone();
-            let found = bond
-                .find_truncated(&s.diagview().unwrap(), &truncation)
-                .unwrap();
+            let spectra = s.diagview().unwrap();
+            let found = bond.find_truncated(&spectra, &truncation).unwrap();
             let selection = &found.selection;
             let host = source.svd_trunc(&truncation).unwrap();
 
@@ -121,19 +168,31 @@ macro_rules! assert_su3_svd_composition {
             let got_vh = vh.restrict_leg(0, selection).unwrap();
 
             assert_eq!(*selection.subspace(), host.s.domain()[0], "{case}: bond");
+            // Both routes factorize the same input and then only copy; every
+            // source entry of a block can reach every factor entry of it.
+            let terms = source.data().len();
             assert_same_layout!(got_u, host.u, format!("{case}: u"));
             assert_same_layout!(got_s, host.s, format!("{case}: s"));
             assert_same_layout!(got_vh, host.vh, format!("{case}: vh"));
-            assert_eq!(got_u.data(), host.u.data(), "{case}: u payload bits");
-            assert_eq!(got_s.data(), host.s.data(), "{case}: s payload bits");
-            assert_eq!(got_vh.data(), host.vh.data(), "{case}: vh payload bits");
-            assert_eq!(
-                found.error.to_bits(),
-                host.error.to_bits(),
-                "{case}: truncation error bits ({} vs {})",
-                found.error,
-                host.error
+            numerics::assert_slices_close(
+                &format!("{case}: u payload"),
+                got_u.data(),
+                host.u.data(),
+                terms,
             );
+            numerics::assert_slices_close(
+                &format!("{case}: s payload"),
+                got_s.data(),
+                host.s.data(),
+                terms,
+            );
+            numerics::assert_slices_close(
+                &format!("{case}: vh payload"),
+                got_vh.data(),
+                host.vh.data(),
+                terms,
+            );
+            assert_truncation_error(&found, host.error, &spectra, &case);
         }
     }};
 }
@@ -145,9 +204,8 @@ macro_rules! assert_su3_eigh_composition {
             let case = format!("{} {name}", $tag);
             let (d, v) = source.eigh_full().unwrap();
             let bond = d.domain()[0].clone();
-            let found = bond
-                .find_truncated(&d.diagview().unwrap(), &truncation)
-                .unwrap();
+            let spectra = d.diagview().unwrap();
+            let found = bond.find_truncated(&spectra, &truncation).unwrap();
             let selection = &found.selection;
             let host = source.eigh_trunc(&truncation).unwrap();
 
@@ -155,17 +213,23 @@ macro_rules! assert_su3_eigh_composition {
             let got_v = v.restrict_leg(v.codomain_rank(), selection).unwrap();
 
             assert_eq!(*selection.subspace(), host.d.domain()[0], "{case}: bond");
+            // Both routes factorize the same input and then only copy.
+            let terms = source.data().len();
             assert_same_layout!(got_d, host.d, format!("{case}: d"));
             assert_same_layout!(got_v, host.v, format!("{case}: v"));
-            assert_eq!(got_d.data(), host.d.data(), "{case}: d payload bits");
-            assert_eq!(got_v.data(), host.v.data(), "{case}: v payload bits");
-            assert_eq!(
-                found.error.to_bits(),
-                host.error.to_bits(),
-                "{case}: truncation error bits ({} vs {})",
-                found.error,
-                host.error
+            numerics::assert_slices_close(
+                &format!("{case}: d payload"),
+                got_d.data(),
+                host.d.data(),
+                terms,
             );
+            numerics::assert_slices_close(
+                &format!("{case}: v payload"),
+                got_v.data(),
+                host.v.data(),
+                terms,
+            );
+            assert_truncation_error(&found, host.error, &spectra, &case);
         }
     }};
 }

@@ -8,11 +8,17 @@
 //! the domain axes first, and the value is conjugated. The `add` oracle spells
 //! out the documented update order: `alpha = 1, beta = 0` is a copy, never
 //! `1 * x`, so complex `inf + 0i` and signed zeros survive bit for bit.
+//! Copies (`(1, 0)`, `(0, 1)`, `(0, 0)`) compare bit for bit; a scaled update
+//! is arithmetic, so its finite entries compare under the workspace tolerance
+//! rule (`docs/testing_numerics.md`) and its nonfinite entries by class.
 
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use num_complex::Complex64;
+use num_complex::{Complex32, Complex64};
+
+#[path = "../../tests/support/numerics.rs"]
+mod numerics;
 use tenet::core::{
     product_sector, FermionParityFusionRule, ProductFusionRuleExt, SU2FusionRule, SU2Irrep,
     U1FusionRule, U1Irrep, Z2Irrep,
@@ -20,7 +26,9 @@ use tenet::core::{
 use tenet::prelude::{GradedSpace, Runtime, TensorMap};
 use tenet::typed::BlockFusionTrees;
 
-trait Exact: Copy + PartialEq + std::ops::Add<Output = Self> + std::ops::Mul<Output = Self> {
+trait Exact:
+    Copy + PartialEq + std::ops::Add<Output = Self> + std::ops::Mul<Output = Self> + numerics::Numeric
+{
     const ZERO: Self;
     const ONE: Self;
     const ALPHA: Self;
@@ -166,6 +174,38 @@ fn bits<D: Exact>(data: &[D]) -> Vec<(u64, u64)> {
     data.iter().map(|value| value.bits()).collect()
 }
 
+/// A scaled `add` entry is at most `beta * rhs + alpha * lhs`, four real
+/// products per component (`terms = 4`). Nonfinite oracle components must be
+/// reproduced by class (NaN, or the same infinity).
+fn assert_update_close<D: Exact>(what: &str, got: &[D], want: &[D]) {
+    assert_eq!(got.len(), want.len(), "{what}: payload lengths differ");
+    let scale = want
+        .iter()
+        .flat_map(|value| {
+            let value = value.wide();
+            [value.re, value.im]
+        })
+        .filter(|value| value.is_finite())
+        .fold(0.0, |max: f64, value| max.max(value.abs()));
+    let bound = numerics::tolerance::<D>(4, scale);
+    for (index, (got, want)) in got.iter().zip(want).enumerate() {
+        let (got, want) = (got.wide(), want.wide());
+        for (g, w) in [(got.re, want.re), (got.im, want.im)] {
+            let agrees = if w.is_nan() {
+                g.is_nan()
+            } else if w.is_infinite() {
+                g == w
+            } else {
+                (g - w).abs() <= bound
+            };
+            assert!(
+                agrees,
+                "{what}: entry {index} is {got:?} against the oracle {want:?} (tolerance {bound:e})"
+            );
+        }
+    }
+}
+
 macro_rules! assert_exact_adjoint {
     ($dtype:ty, [$($codomain:expr),+], [$($domain:expr),+]) => {{
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
@@ -237,11 +277,20 @@ macro_rules! assert_exact_adjoint {
                     updated(a, b, value(lhs_salt, trees, indices), value(rhs_salt, trees, indices))
                 });
                 let sum = lhs.add(rhs, a, b).unwrap();
-                assert_eq!(
-                    bits(sum.data()),
-                    bits(expected.data()),
-                    "salts ({lhs_salt}, {rhs_salt})"
-                );
+                let copy = [(one, zero), (zero, one), (zero, zero)].contains(&(a, b));
+                if copy {
+                    assert_eq!(
+                        bits(sum.data()),
+                        bits(expected.data()),
+                        "salts ({lhs_salt}, {rhs_salt})"
+                    );
+                } else {
+                    assert_update_close(
+                        &format!("salts ({lhs_salt}, {rhs_salt})"),
+                        sum.data(),
+                        expected.data(),
+                    );
+                }
             }
         }
         // The operands stayed lazy views of untouched parents.

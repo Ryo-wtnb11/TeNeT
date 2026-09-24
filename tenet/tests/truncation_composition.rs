@@ -1,23 +1,29 @@
 //! Truncation as a composition (#1300).
 //!
 //! The invariant: `svd_compact` → `diagview` → `find_truncated` →
-//! `restrict_leg`/`restrict_diagonal` reproduces `svd_trunc` **bitwise**, and
-//! `eigh_full` → … reproduces `eigh_trunc` bitwise. The oracle is Host
-//! `svd_trunc`/`eigh_trunc` itself, which is the point: the primitives are only
-//! useful if they are the very decision and the very slicing those two make.
+//! `restrict_leg`/`restrict_diagonal` reproduces `svd_trunc`, and
+//! `eigh_full` → … reproduces `eigh_trunc`. The oracle for the decision is
+//! Host `svd_trunc`/`eigh_trunc` itself, which is the point: the primitives
+//! are only useful if they make the very decision and the very slicing those
+//! two make.
 //!
 //! Each case asserts in this order, because a payload comparison over two
 //! different layouts would be meaningless:
 //!
-//! 1. **spaces and layout** — every factor's codomain/domain, then block count
-//!    and per-block key, shape, strides and offset. Host builds the truncated
-//!    space with `derive_from_final_homspace`, the composition with
-//!    `build_root`; nothing guarantees a priori that the two agree.
-//! 2. **payload bits** — `assert_eq!` on the raw `f64`/`Complex64` slices, not
-//!    a tolerance. Host slices with a leading-prefix copy and the restriction
-//!    kernel dispatches to a bit-exact `Copy`, so any difference is a defect.
-//! 3. **truncation error bits** — `to_bits()`, not `==`, so a `-0.0` on one
-//!    side and a `+0.0` on the other would fail rather than pass.
+//! 1. **spaces and layout** — exact: every factor's codomain/domain, then
+//!    block count and per-block key, shape, strides and offset. Host builds
+//!    the truncated space with `derive_from_final_homspace`, the composition
+//!    with `build_root`; nothing guarantees a priori that the two agree. The
+//!    kept bond subspace (which values survive, in which sector) is
+//!    combinatorial and also exact.
+//! 2. **payloads** — within the workspace tolerance rule
+//!    (`docs/testing_numerics.md`). Both routes factorize the same input and
+//!    then only copy; that the two routes agree is the contract, so they are
+//!    compared with each other, and a factorization kernel that reorders its
+//!    arithmetic does not break it.
+//! 3. **truncation error** — within the tolerance of both Host's error and an
+//!    independent oracle, `sqrt(sum_c dim(c) sum_discarded |v|^2)` summed here
+//!    from the offered spectrum and the kept prefix counts.
 //!
 //! ## Cross-sector exact ties
 //!
@@ -26,20 +32,23 @@
 //! order for every sector type), sorting the
 //! feed itself when a producer hands it another order (#1305). Host feeds the
 //! first-encounter block order of the input and `find_truncated` a sorted
-//! one, so the tie cases below are part of the bitwise gate whatever order a
+//! one, so the tie cases below are part of the exact selection gate whatever order a
 //! `BlockStructure` stores its blocks in.
 
 use std::sync::Arc;
 
-use num_complex::Complex64;
+use num_complex::{Complex32, Complex64};
 use tenet::core::{
-    product_sector, FermionParityFusionRule, ProductFusionRuleExt, SU2FusionRule, SU2Irrep,
-    U1FusionRule, U1Irrep, Z2Irrep,
+    product_sector, FermionParityFusionRule, ProductFusionRuleExt, ProductSector, SU2FusionRule,
+    SU2Irrep, U1FusionRule, U1Irrep, Z2Irrep,
 };
 use tenet::prelude::{Error, Runtime, TensorMap, Truncation};
 use tenet::typed::{
     GradedSpace, LegSelection, SectorSpectrum, SpectrumMagnitude, TruncatedSelection,
 };
+
+#[path = "../../tests/support/numerics.rs"]
+mod numerics;
 
 fn runtime() -> Runtime {
     Runtime::builder().dense_threads(1).build().unwrap()
@@ -107,6 +116,106 @@ macro_rules! assert_same_layout {
     }};
 }
 
+/// `dim(c)` of one sector, read from a one-sector space of degeneracy 1.
+/// Closed-form quantum dimension of each sector type this file uses, so the
+/// discarded-weight oracle does not read `dim(c)` back from TeNeT: 1 for the
+/// abelian labels, `2j + 1` for SU(2), the product of the parts for a
+/// product sector.
+trait ClosedFormDim {
+    fn closed_form_dim(&self) -> f64;
+}
+
+impl ClosedFormDim for U1Irrep {
+    fn closed_form_dim(&self) -> f64 {
+        1.0
+    }
+}
+
+impl ClosedFormDim for Z2Irrep {
+    fn closed_form_dim(&self) -> f64 {
+        1.0
+    }
+}
+
+impl ClosedFormDim for SU2Irrep {
+    fn closed_form_dim(&self) -> f64 {
+        (self.twice_spin() + 1) as f64
+    }
+}
+
+impl<L: ClosedFormDim, R: ClosedFormDim> ClosedFormDim for ProductSector<L, R> {
+    fn closed_form_dim(&self) -> f64 {
+        self.left().closed_form_dim() * self.right().closed_form_dim()
+    }
+}
+
+/// Independent oracle for `TruncatedSelection::error`: the quantum-dimension
+/// weighted 2-norm of every offered value past the kept prefix of its sector.
+macro_rules! discarded_norm {
+    ($bond:expr, $spectra:expr, $selection:expr) => {{
+        let kept = $selection.subspace();
+        let kept_sectors = kept.sectors().unwrap();
+        let mut sum = 0.0f64;
+        for entry in $spectra.iter() {
+            let prefix = kept_sectors
+                .iter()
+                .position(|sector| *sector == entry.sector)
+                .map_or(0, |index| kept.degeneracies()[index]);
+            let weight = ClosedFormDim::closed_form_dim(&entry.sector);
+            for &value in &entry.values[prefix..] {
+                let magnitude = SpectrumMagnitude::magnitude(value);
+                sum += weight * magnitude * magnitude;
+            }
+        }
+        sum.sqrt()
+    }};
+}
+
+/// The error agrees with Host and with [`discarded_norm`]; `terms` is the
+/// number of offered values.
+macro_rules! assert_truncation_error {
+    ($found:expr, $host_error:expr, $bond:expr, $spectra:expr, $case:expr) => {{
+        let terms: usize = $spectra.iter().map(|e| e.values.len()).sum();
+        let oracle = discarded_norm!($bond, $spectra, $found.selection);
+        numerics::assert_close(
+            &format!("{}: truncation error against Host", $case),
+            $found.error,
+            $host_error,
+            terms,
+        );
+        numerics::assert_close(
+            &format!(
+                "{}: truncation error against the discarded-norm oracle",
+                $case
+            ),
+            $found.error,
+            oracle,
+            terms,
+        );
+    }};
+}
+
+/// Payloads of two routes that factorize the same input and then only copy.
+/// Every source entry of a block can reach every factor entry of it, so
+/// `terms` is the source payload length.
+macro_rules! assert_same_payload {
+    ($got:expr, $want:expr, $terms:expr, $what:expr) => {{
+        numerics::assert_slices_close(&$what, $got.data(), $want.data(), $terms);
+        let got = $got.diagonal_spectrum().unwrap();
+        let want = $want.diagonal_spectrum().unwrap();
+        assert_eq!(got.is_some(), want.is_some(), "{} compact storage", $what);
+        for (got, want) in got.iter().flatten().zip(want.iter().flatten()) {
+            assert_eq!(got.sector, want.sector, "{} compact sector", $what);
+            numerics::assert_slices_close(
+                &format!("{} compact values", $what),
+                &got.values,
+                &want.values,
+                $terms,
+            );
+        }
+    }};
+}
+
 /// The whole gate for one SVD case.
 macro_rules! assert_svd_composition {
     ($source:expr, $truncation:expr, $case:expr) => {{
@@ -135,22 +244,11 @@ macro_rules! assert_svd_composition {
         assert_same_layout!(got_s, host.s, format!("{case}: s"));
         assert_same_layout!(got_vh, host.vh, format!("{case}: vh"));
 
-        assert_eq!(got_u.data(), host.u.data(), "{case}: u payload bits");
-        assert_eq!(got_s.data(), host.s.data(), "{case}: s payload bits");
-        assert_eq!(got_vh.data(), host.vh.data(), "{case}: vh payload bits");
-        assert_eq!(
-            got_s.diagonal_spectrum().unwrap(),
-            host.s.diagonal_spectrum().unwrap(),
-            "{case}: s compact storage"
-        );
-
-        assert_eq!(
-            found.error.to_bits(),
-            host.error.to_bits(),
-            "{case}: truncation error bits ({} vs {})",
-            found.error,
-            host.error
-        );
+        let terms = source.data().len();
+        assert_same_payload!(got_u, host.u, terms, format!("{case}: u payload"));
+        assert_same_payload!(got_s, host.s, terms, format!("{case}: s payload"));
+        assert_same_payload!(got_vh, host.vh, terms, format!("{case}: vh payload"));
+        assert_truncation_error!(found, host.error, bond, spectra, case);
         let kept: usize = host.singular_values.iter().map(|e| e.values.len()).sum();
         let offered: usize = spectra.iter().map(|e| e.values.len()).sum();
         assert_eq!(
@@ -187,20 +285,10 @@ macro_rules! assert_eigh_composition {
         );
         assert_same_layout!(got_d, host.d, format!("{case}: d"));
         assert_same_layout!(got_v, host.v, format!("{case}: v"));
-        assert_eq!(got_d.data(), host.d.data(), "{case}: d payload bits");
-        assert_eq!(got_v.data(), host.v.data(), "{case}: v payload bits");
-        assert_eq!(
-            got_d.diagonal_spectrum().unwrap(),
-            host.d.diagonal_spectrum().unwrap(),
-            "{case}: d compact storage"
-        );
-        assert_eq!(
-            found.error.to_bits(),
-            host.error.to_bits(),
-            "{case}: truncation error bits ({} vs {})",
-            found.error,
-            host.error
-        );
+        let terms = source.data().len();
+        assert_same_payload!(got_d, host.d, terms, format!("{case}: d payload"));
+        assert_same_payload!(got_v, host.v, terms, format!("{case}: v payload"));
+        assert_truncation_error!(found, host.error, bond, spectra, case);
         let kept: usize = host.eigenvalues.iter().map(|e| e.values.len()).sum();
         let offered: usize = spectra.iter().map(|e| e.values.len()).sum();
         assert_eq!(
@@ -321,16 +409,15 @@ fn u1_complex_svd_composition_matches_host_for_every_policy() {
     svd_policy_sweep!(source, u1_leg(&[(-1, 1), (0, 2)]), "u1 c64");
 }
 
-/// The same bitwise composition at single precision (#1324).
+/// The same composition at single precision (#1324).
 ///
 /// `svd_trunc` is `svd_compact` + `find_truncated(diagview(s))` +
-/// `restrict_*`, and the equality is bitwise at `f32`/`Complex32` for the same
-/// reason it is at `f64`: `real_spectrum` widens the payload's singular values
-/// into the `f64` the decision runs on, `s` stores `from_real` of those same
-/// widened values, and `SpectrumMagnitude` for `f32` / `Complex32` is
+/// `restrict_*`: `real_spectrum` widens the payload's singular values into the
+/// `f64` the decision runs on, `s` stores `from_real` of those same widened
+/// values, and `SpectrumMagnitude` for `f32` / `Complex32` is
 /// `f64::from(v).abs()` / `hypot(re, 0)`. Both routes therefore hand the
-/// selection the identical `f64` slice. This is the path the single-precision
-/// `SpectrumMagnitude` impls exist for, so it is pinned rather than argued.
+/// selection the same `f64` slice, so the kept subspace agrees exactly. This
+/// is the path the single-precision `SpectrumMagnitude` impls exist for.
 #[test]
 fn u1_single_precision_svd_composition_matches_host_for_every_policy() {
     let left = u1_leg(&[(-1, 2), (0, 3), (1, 2)]);
@@ -694,7 +781,8 @@ fn discarding_everything_yields_the_empty_bond_and_host_s_empty_factors() {
     assert_same_layout!(got_s, host.s, "discard-all s");
     assert_same_layout!(got_vh, host.vh, "discard-all vh");
     assert!(got_u.data().is_empty() && got_s.data().is_empty() && got_vh.data().is_empty());
-    assert_eq!(found.error, host.error);
+    let spectra = s.diagview().unwrap();
+    assert_truncation_error!(found, host.error, bond, spectra, "discard-all");
 
     // `embed_leg` with the empty selection: the adjoint of restricting to
     // nothing is the zero map back onto the parent leg.
@@ -975,10 +1063,13 @@ fn a_payload_generic_caller_can_name_the_find_truncated_bound() {
         TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| fill(&mut state)).unwrap();
     let (_, s, _) = real.svd_compact().unwrap();
     let found = find_truncated_generically(&s, &truncation);
+    let host = real.svd_trunc(&truncation).unwrap();
     assert_eq!(
-        found.error.to_bits(),
-        real.svd_trunc(&truncation).unwrap().error.to_bits()
+        found.selection.subspace(),
+        &host.s.domain()[0],
+        "f64 kept bond"
     );
+    assert_truncation_error!(found, host.error, leg, s.diagview().unwrap(), "f64");
 
     let complex: TensorMap<_, Complex64> =
         TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| {
@@ -987,8 +1078,11 @@ fn a_payload_generic_caller_can_name_the_find_truncated_bound() {
         .unwrap();
     let (_, s, _) = complex.svd_compact().unwrap();
     let found = find_truncated_generically(&s, &truncation);
+    let host = complex.svd_trunc(&truncation).unwrap();
     assert_eq!(
-        found.error.to_bits(),
-        complex.svd_trunc(&truncation).unwrap().error.to_bits()
+        found.selection.subspace(),
+        &host.s.domain()[0],
+        "c64 kept bond"
     );
+    assert_truncation_error!(found, host.error, leg, s.diagview().unwrap(), "c64");
 }

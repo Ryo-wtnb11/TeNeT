@@ -1,11 +1,15 @@
 use std::sync::{Arc, Barrier};
 
 use tenet::core::{U1FusionRule, U1Irrep};
+use tenet::prelude::{Complex32, Complex64};
 use tenet::typed::{GradedSpace, Runtime, TensorMap};
 use tenet_network::{
     clear_plan_cache, configure_plan_cache, load_plan_cache, plan_cache_stats, save_plan_cache,
     tensor, PlanCacheConfig, ReplanPolicy,
 };
+
+#[path = "../../tests/support/numerics.rs"]
+mod numerics;
 
 fn space(provider: Arc<U1FusionRule>, dim: usize) -> GradedSpace<U1FusionRule> {
     GradedSpace::try_new_with_arc(provider, [(U1Irrep::new(0), dim)]).unwrap()
@@ -194,8 +198,16 @@ fn concurrent_macro_calls_share_one_plan_and_bound_idle_pool() {
                 tensor!([i; k] = a[i; j] * b[j; k]).unwrap()
             }));
         }
+        // The macro may group the length-8 contraction differently from the
+        // direct call, so each thread is compared to it under the tolerance
+        // rule.
         for handle in handles {
-            assert_eq!(handle.join().unwrap().data(), expected.data());
+            numerics::assert_slices_close(
+                "macro vs direct contract",
+                handle.join().unwrap().data(),
+                expected.data(),
+                8,
+            );
         }
     });
     let stats = plan_cache_stats(&runtime);
