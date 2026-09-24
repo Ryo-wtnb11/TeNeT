@@ -836,6 +836,10 @@ impl<'a> FusionOperandLayout<'a> {
 
     /// The parent storage index of each logical key, in logical order.
     ///
+    /// Its errors are unreachable under the Complete admission invariant (the
+    /// parent holds exactly the canonical keys), which is why deferring them
+    /// past `prepare` is safe.
+    ///
     /// # Panics
     ///
     /// On a direct operand, which has no projection.
@@ -2073,7 +2077,13 @@ where
     /// Why not return [`DynamicFusionMapSpace`]: a raw value does not carry the
     /// complete-tree-grid proof established by the bound constructor.
     pub fn validated_layout(&self) -> ValidatedDynamicFusionLayout {
-        ValidatedDynamicFusionLayout(self.space.clone())
+        let mut space = self.space.clone();
+        // Why a fresh slot rather than charging the memo: a clone shares the
+        // filled `Arc<AdjointMemo>`, whose block structure can still fill after
+        // the layout was charged, so the charge would go stale. The parked
+        // layout never adjoints itself and a rebound space refills on demand.
+        space.adjoint = OnceLock::new();
+        ValidatedDynamicFusionLayout(space)
     }
 
     /// Rebinds a validated cached layout to this space's exact provider allocation.
@@ -5822,6 +5832,31 @@ mod scratch_cache_tests {
 
         assert!(weak.upgrade().is_none());
         assert_eq!(validated.required_len().unwrap(), 2);
+    }
+
+    #[test]
+    fn validated_layout_does_not_retain_the_adjoint_memo() {
+        // What: a layout taken after a lazy-adjoint contraction filled the
+        // parent's adjoint memo neither keeps that memo nor charges differently
+        // from a never-adjointed layout (#1419 detach_runtime trace).
+        let provider = Arc::new(Z2FusionRule);
+        let bound = BoundDynamicFusionMapSpace::bind_multiplicity_free(
+            z2_matrix_space(),
+            Arc::clone(&provider),
+        )
+        .unwrap();
+        let cold_charge = bound.validated_layout().charged_retained_bytes();
+        FusionOperand::adjoint(bound.space())
+            .prepare(&Z2FusionRule, encoded_layout_primer::<Z2FusionRule>)
+            .unwrap();
+        bound.space().adjoint_view().unwrap();
+        let memo = Arc::downgrade(bound.space().adjoint.get().expect("prepare fills the memo"));
+
+        let validated = bound.validated_layout();
+        drop(bound);
+
+        assert!(memo.upgrade().is_none());
+        assert_eq!(validated.charged_retained_bytes(), cold_charge);
     }
 
     fn z2_matrix_space() -> DynamicFusionMapSpace {
