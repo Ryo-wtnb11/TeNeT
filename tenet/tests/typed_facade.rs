@@ -13,8 +13,11 @@ use tenet::core::{
     MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols,
     ProductFusionRuleExt, RuleIdentity, SU2FusionRule, SU2Irrep, SectorCodec, SectorId, SectorVec,
 };
-use tenet::prelude::{Complex64, FibonacciFusionRule, FibonacciSector, Runtime};
+use tenet::prelude::{Complex32, Complex64, FibonacciFusionRule, FibonacciSector, Runtime};
 use tenet::typed::{GradedSpace, TensorMap, Truncation};
+
+#[path = "../../tests/support/numerics.rs"]
+mod numerics;
 
 /// The fusion-tree layout and complete-structure caches are process-global, so
 /// the tests in this binary that snapshot them must not run beside a test that
@@ -3121,15 +3124,18 @@ fn left_and_right_orth_are_the_tensorkit_default_kinds() {
     let runtime = runtime();
     let typed = z2_tensor(&runtime);
 
+    // The two routes are the same factorization, so agreeing is the contract;
+    // every source entry of a block can reach every factor entry of it.
+    let terms = typed.data().len();
     let (v, c) = typed.left_orth().unwrap();
     let (q, r) = typed.qr_compact().unwrap();
-    assert_eq!(v.data(), q.data());
-    assert_eq!(c.data(), r.data());
+    numerics::assert_slices_close("left_orth v against qr q", v.data(), q.data(), terms);
+    numerics::assert_slices_close("left_orth c against qr r", c.data(), r.data(), terms);
 
     let (c, vh) = typed.right_orth().unwrap();
     let (l, q) = typed.lq_compact().unwrap();
-    assert_eq!(c.data(), l.data());
-    assert_eq!(vh.data(), q.data());
+    numerics::assert_slices_close("right_orth c against lq l", c.data(), l.data(), terms);
+    numerics::assert_slices_close("right_orth vh against lq q", vh.data(), q.data(), terms);
 }
 
 #[test]
@@ -4019,10 +4025,19 @@ fn compact_reductions_match_the_forced_dense_route() {
     let typed = z2_bond(&runtime);
     let dense = forced_dense(&typed);
 
-    assert_eq!(typed.norm().unwrap(), dense.norm().unwrap());
+    // Two reductions of the same singular values that may sum in different
+    // orders: agreement within the tolerance rule over the dense payload is
+    // the contract. A maximum is order-independent, so `norm_inf` is exact.
+    let terms = dense.data().len();
+    numerics::assert_close("norm", typed.norm().unwrap(), dense.norm().unwrap(), terms);
     assert_eq!(typed.norm_inf().unwrap(), dense.norm_inf().unwrap());
-    assert_eq!(typed.tr().unwrap(), dense.tr().unwrap());
-    assert_eq!(typed.inner(&typed).unwrap(), dense.inner(&dense).unwrap());
+    numerics::assert_close("tr", typed.tr().unwrap(), dense.tr().unwrap(), terms);
+    numerics::assert_close(
+        "inner",
+        typed.inner(&typed).unwrap(),
+        dense.inner(&dense).unwrap(),
+        terms,
+    );
     // `<s, s>` is the squared norm: the identity that pins the weighting.
     let norm = typed.norm().unwrap();
     assert!((typed.inner(&typed).unwrap() - norm * norm).abs() < 1e-9 * norm * norm);
@@ -4038,9 +4053,16 @@ fn compact_reductions_carry_the_su2_dimension_weight() {
     let typed = typed.svd_compact().unwrap().1;
     let dense = forced_dense(&typed);
 
-    assert_eq!(typed.norm().unwrap(), dense.norm().unwrap());
-    assert_eq!(typed.tr().unwrap(), dense.tr().unwrap());
-    assert_eq!(typed.inner(&typed).unwrap(), dense.inner(&dense).unwrap());
+    // Compact and dense routes may sum in different orders; see above.
+    let terms = dense.data().len();
+    numerics::assert_close("norm", typed.norm().unwrap(), dense.norm().unwrap(), terms);
+    numerics::assert_close("tr", typed.tr().unwrap(), dense.tr().unwrap(), terms);
+    numerics::assert_close(
+        "inner",
+        typed.inner(&typed).unwrap(),
+        dense.inner(&dense).unwrap(),
+        terms,
+    );
     // The unweighted sum, for contrast: a dropped `dim(c)` would make `tr` this.
     let unweighted: f64 = typed.data().iter().sum();
     assert!(
@@ -6472,6 +6494,14 @@ fn assert_nonzero(what: &str, data: &[f64]) {
     );
 }
 
+/// Upper bound on the length of any reduced-block sum over `legs`: the
+/// product of each leg's total degeneracy.
+fn contracted_terms<R>(legs: &[GradedSpace<R>]) -> usize {
+    legs.iter()
+        .map(|leg| leg.degeneracies().iter().sum::<usize>())
+        .product()
+}
+
 /// Contract, compose, and compact-SVD laws shared by all three provider families.
 fn assert_contract_compose_compact_laws_hold<R>(
     what: &str,
@@ -6505,10 +6535,14 @@ fn assert_contract_compose_compact_laws_hold<R>(
     let permuted_default = default_contract.permute(&[1, 3], &[0, 2]).unwrap();
     assert_same_legs(&ordered_contract.codomain(), &permuted_default.codomain());
     assert_same_legs(&ordered_contract.domain(), &permuted_default.domain());
-    assert_eq!(
+    // Routes that may recouple and accumulate in different orders: agreement
+    // within the tolerance rule is the law. `terms` is the contracted length.
+    let terms = contracted_terms(&typed.0.domain());
+    numerics::assert_slices_close(
+        &format!("{what}: order"),
         ordered_contract.data(),
         permuted_default.data(),
-        "{what}: order"
+        terms,
     );
     assert!(
         std::ptr::eq(ordered_contract.provider(), typed.0.provider()),
@@ -6543,16 +6577,29 @@ fn assert_contract_compose_compact_laws_hold<R>(
         .unwrap();
     assert_same_legs(&composed.codomain(), &typed.0.codomain());
     assert_same_legs(&composed.domain(), &typed.1.domain());
-    assert_eq!(composed.data(), twisted_contract.data(), "{what}: compose");
+    numerics::assert_slices_close(
+        &format!("{what}: compose"),
+        composed.data(),
+        twisted_contract.data(),
+        terms,
+    );
     assert!(
         std::ptr::eq(composed.provider(), typed.0.provider()),
         "{what}: compose lost left provider authority"
     );
-    assert_eq!(
-        composed.data() != default_contract.data(),
-        nontrivial_twist,
-        "{what}: compose twist control"
+    let bound = numerics::tolerance::<f64>(
+        terms,
+        default_contract
+            .data()
+            .iter()
+            .fold(0.0, |max, v| v.abs().max(max)),
     );
+    let differs = composed
+        .data()
+        .iter()
+        .zip(default_contract.data())
+        .any(|(a, b)| (a - b).abs() > bound);
+    assert_eq!(differs, nontrivial_twist, "{what}: compose twist control");
     assert_nonzero(what, composed.data());
 
     // Absorb the compact spectrum into U, then use the remaining Vh factor to
@@ -6661,13 +6708,17 @@ fn the_fermionic_product_compose_is_contract_against_a_twisted_right_operand() {
     )
     .unwrap();
 
-    assert_eq!(
+    // The two routes may accumulate in different orders; within the tolerance
+    // rule, `terms` being the contracted length.
+    let terms = contracted_terms(&fermionic_a.domain());
+    numerics::assert_slices_close(
+        "fZ2 x U1 x SU2: compose is contract against the twisted right operand",
         fermionic_a.compose(&fermionic_b).unwrap().data(),
         fermionic_a
             .contract(&twisted_b, &[2, 3], &[0, 1], &[0, 1, 2, 3])
             .unwrap()
             .data(),
-        "fZ2 x U1 x SU2: compose is contract against the twisted right operand"
+        terms,
     );
     // And the twist is not vacuous: without it the two contractions differ.
     assert_ne!(
@@ -6681,13 +6732,14 @@ fn the_fermionic_product_compose_is_contract_against_a_twisted_right_operand() {
 
     let bosonic_a = u1_oracle(&runtime, 1.0);
     let bosonic_b = u1_oracle(&runtime, 100.0);
-    assert_eq!(
+    numerics::assert_slices_close(
+        "U1: a bosonic rule has no twist, so the two agree",
         bosonic_a
             .contract(&bosonic_b, &[2, 3], &[0, 1], &[0, 1, 2, 3])
             .unwrap()
             .data(),
         bosonic_a.compose(&bosonic_b).unwrap().data(),
-        "U1: a bosonic rule has no twist, so the two agree"
+        contracted_terms(&bosonic_a.domain()),
     );
 }
 
@@ -6766,8 +6818,21 @@ fn assert_reductions_and_factorizations_hold<R>(
 
     // TensorKit's default left orthogonalization is QR.
     let (typed_v, typed_c) = typed.0.left_orth().unwrap();
-    assert_eq!(typed_v.data(), typed_q.data(), "{what}: left_orth is qr");
-    assert_eq!(typed_c.data(), typed_r.data(), "{what}: left_orth is qr");
+    // The same factorization by two names; every source entry of a block can
+    // reach every factor entry of it.
+    let terms = typed.0.data().len();
+    numerics::assert_slices_close(
+        &format!("{what}: left_orth v is qr q"),
+        typed_v.data(),
+        typed_q.data(),
+        terms,
+    );
+    numerics::assert_slices_close(
+        &format!("{what}: left_orth c is qr r"),
+        typed_c.data(),
+        typed_r.data(),
+        terms,
+    );
     assert_data_close_f64(typed_v.compose(&typed_c).unwrap().data(), typed.0.data());
     assert!(typed_v.is_isometric(1e-12).unwrap(), "{what}: left orth v");
     assert_same_legs(&typed_v.codomain(), &typed.0.codomain());
@@ -9214,7 +9279,9 @@ fn contract_ordered_delegates_with_a_nonidentity_output_order() {
         .unwrap()
         .permute(&[], &[1, 0])
         .unwrap();
-    assert_eq!(actual.data(), expected.data());
+    // The ordered route may run its GEMM on another layout; the contracted
+    // leg has dimension 4.
+    numerics::assert_slices_close("contract_ordered", actual.data(), expected.data(), 4);
 }
 
 #[test]

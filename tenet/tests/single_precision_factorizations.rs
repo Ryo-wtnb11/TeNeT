@@ -28,6 +28,9 @@
 
 mod single_precision_oracle;
 
+#[path = "../../tests/support/numerics.rs"]
+mod numerics;
+
 use num_complex::{Complex32, Complex64};
 use tenet::core::{U1FusionRule, U1Irrep};
 use tenet::prelude::{TensorMap, Truncation};
@@ -1243,24 +1246,17 @@ fn a_rank_tie_the_single_precision_payload_cannot_resolve_keeps_the_other_sector
     );
 }
 
-/// Double-precision truncation decisions and errors, pinned bit for bit.
+/// Double-precision truncation decisions, pinned exactly, and their errors
+/// against hand values.
 ///
-/// This leaf changes no expression on a `f64`/`Complex64` path — the spectra
-/// that reach a decision are `f64` at every payload dtype, and the only source
-/// changes are two marker impls, two `SpectrumMagnitude` impls for types that
-/// had none, and documentation. These pins make that claim falsifiable from
-/// here on: the fixtures are non-dyadic (multiples of a tenth, so no partial
-/// sum is exact) and two of them sit within a rounding of the budget, which is
-/// where the rounding slack in `tenet-matrixalgebra/src/truncation.rs` decides
-/// (absolute `1e-15` when pinned; budget-relative since #1333, with every pin
-/// below unchanged). A reordered, re-associated or re-scaled accumulation moves these
-/// bits.
-///
-/// The expected values were measured on a detached `origin/main` worktree at
-/// `a06c3a78` with its own target directory; see
-/// `docs/audit/issue-1324-single-precision-factorizations.md`.
+/// The fixtures are non-dyadic (multiples of a tenth) and two of them sit
+/// within a rounding of the budget, which is where the rounding slack in
+/// `tenet-matrixalgebra/src/truncation.rs` decides (budget-relative since
+/// #1333). The kept counts are combinatorial and compared exactly; the error
+/// is `sqrt(sum_discarded v^2)` (every `dim(c) == 1`), compared under the
+/// workspace tolerance rule with the hand value of the discarded tail.
 #[test]
-fn double_precision_truncation_decisions_are_bitwise_unchanged() {
+fn double_precision_truncation_decisions_and_errors_match_hand_values() {
     use tenet::prelude::SectorSpectrum;
 
     let rt = runtime();
@@ -1281,31 +1277,18 @@ fn double_precision_truncation_decisions_are_bitwise_unchanged() {
     let tensor: TensorMap<U1FusionRule, f64> = TensorMap::diagonal(&rt, &leg, spectra()).unwrap();
     let view = tensor.diagview().unwrap();
 
-    // Measured on the detached `origin/main` worktree, not read back from
-    // this branch.
-    let cases: [(Truncation, usize, u64); 8] = [
-        (Truncation::rank(4), 4, 0x3FD9_9999_9999_999A),
-        (Truncation::rank(7), 7, 0x3FC2_1A18_51FF_630B),
-        (
-            Truncation::relative_cutoff(0.25).unwrap(),
-            3,
-            0x3FE0_0000_0000_0000,
-        ),
-        (
-            Truncation::relative_error(0.1).unwrap(),
-            8,
-            0x3FB9_9999_9999_999A,
-        ),
-        (
-            Truncation::relative_error(0.2).unwrap(),
-            5,
-            0x3FD0_EECC_87DB_FA55,
-        ),
-        (
-            Truncation::relative_error(0.3).unwrap(),
-            4,
-            0x3FD9_9999_9999_999A,
-        ),
+    // Hand errors: the discarded tail of the 9-value spectrum
+    // {0.9, 0.3, 0.1 | 0.7, 0.2, 0.1 | 0.5, 0.3, 0.1}, whose squares sum to 1.8.
+    // Keeping 4 discards {0.3, 0.2, 0.1, 0.1, 0.1} (0.16); keeping 7 discards
+    // two 0.1s (0.02); keeping 3 discards 0.25 of the weight; keeping 8 one
+    // 0.1; keeping 5 {0.2, 0.1, 0.1, 0.1} (0.07).
+    let cases: [(Truncation, usize, f64); 8] = [
+        (Truncation::rank(4), 4, 0.4),
+        (Truncation::rank(7), 7, 0.02f64.sqrt()),
+        (Truncation::relative_cutoff(0.25).unwrap(), 3, 0.5),
+        (Truncation::relative_error(0.1).unwrap(), 8, 0.1),
+        (Truncation::relative_error(0.2).unwrap(), 5, 0.07f64.sqrt()),
+        (Truncation::relative_error(0.3).unwrap(), 4, 0.4),
         // The budget is exactly the weight of the two smallest tails, so the
         // rounding slack is what decides: `0.1 * 0.1` twice sums to
         // `0.020000000000000004`, four ulps above the budget, and only the
@@ -1314,16 +1297,16 @@ fn double_precision_truncation_decisions_are_bitwise_unchanged() {
         (
             Truncation::relative_error((1.0f64 / 90.0).sqrt()).unwrap(),
             7,
-            0x3FC2_1A18_51FF_630B,
+            0.02f64.sqrt(),
         ),
         // A composite, so the intersection path is pinned too.
         (
             Truncation::rank(4).and(Truncation::relative_error(0.2).unwrap()),
             4,
-            0x3FD9_9999_9999_999A,
+            0.4,
         ),
     ];
-    for (policy, kept, error_bits) in cases {
+    for (policy, kept, error) in cases {
         let decision = leg.find_truncated(&view, &policy).unwrap();
         let subspace = decision.selection.subspace();
         let kept_total: usize = subspace
@@ -1336,12 +1319,11 @@ fn double_precision_truncation_decisions_are_bitwise_unchanged() {
             kept_total, kept,
             "{policy:?} kept {kept_total} states, the pin says {kept}"
         );
-        assert_eq!(
-            decision.error.to_bits(),
-            error_bits,
-            "{policy:?} error {} ({:#018X}) against the pinned {error_bits:#018X}",
+        numerics::assert_close(
+            &format!("{policy:?} truncation error"),
             decision.error,
-            decision.error.to_bits()
+            error,
+            9,
         );
     }
 }

@@ -42,8 +42,11 @@
 use std::sync::Arc;
 
 use tenet::core::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
-use tenet::prelude::{Complex64, Error, Runtime};
+use tenet::prelude::{Complex32, Complex64, Error, Runtime};
 use tenet::typed::{GradedSpace, TensorMap};
+
+#[path = "../../tests/support/numerics.rs"]
+mod numerics;
 
 /// Relative agreement with the TensorKit oracle. The two engines sum the same
 /// terms in different orders, so exact equality is not the claim; `1e-13` is
@@ -214,11 +217,17 @@ fn typed_norm_p_matches_tensorkit() {
         );
     }
 
-    assert_eq!(
+    // `norm_p(2)` and `norm()` are two reductions of the same entries that may
+    // sum in different orders; agreeing is the contract, within the workspace
+    // tolerance rule over every stored entry.
+    numerics::assert_close(
+        "typed p=2 against norm()",
         su2_c64.norm_p(2.0).unwrap(),
         su2_c64.norm().unwrap(),
-        "typed p=2 is not norm()"
+        su2_c64.data().len(),
     );
+    // A maximum does not depend on the order it is taken in, so `p = Inf`
+    // equals `norm_inf()` exactly.
     assert_eq!(
         su2_c64.norm_p(f64::INFINITY).unwrap(),
         su2_c64.norm_inf().unwrap(),

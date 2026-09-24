@@ -1,38 +1,39 @@
 //! Behaviour of the owned eager contraction output (#1212): inactive
 //! destination blocks (coupled sectors the contracted bond cannot reach) are
-//! exactly `+0.0`, active blocks are bit-identical to the destination path
+//! exactly `+0.0`, active blocks agree with the destination path
 //! `contract_overwrite_into` on a `+0.0`-prefilled buffer, and an empty
 //! support yields an all-zero payload of the full destination length.
+//!
+//! Owned and destination results are two execution paths of one contraction,
+//! so their agreement is the contract; it is checked under the workspace
+//! tolerance rule (`docs/testing_numerics.md`) with `terms` the contracted
+//! bond length. Inactive blocks are exact zeros by construction.
 
 use std::collections::HashSet;
 use std::fmt::Debug;
 use std::sync::Arc;
 
-use num_complex::Complex64;
+use num_complex::{Complex32, Complex64};
+
+#[path = "../../tests/support/numerics.rs"]
+mod numerics;
 use tenet::core::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
 use tenet::prelude::Runtime;
 use tenet::typed::{GradedSpace, TensorMap, TensorScalar};
 
-trait Bits: TensorScalar + Debug {
+trait Bits: TensorScalar + Debug + numerics::Numeric {
     fn is_positive_zero(self) -> bool;
-    fn bits_equal(self, other: Self) -> bool;
 }
 
 impl Bits for f64 {
     fn is_positive_zero(self) -> bool {
         self.to_bits() == 0
     }
-    fn bits_equal(self, other: Self) -> bool {
-        self.to_bits() == other.to_bits()
-    }
 }
 
 impl Bits for Complex64 {
     fn is_positive_zero(self) -> bool {
         self.re.to_bits() == 0 && self.im.to_bits() == 0
-    }
-    fn bits_equal(self, other: Self) -> bool {
-        self.re.to_bits() == other.re.to_bits() && self.im.to_bits() == other.im.to_bits()
     }
 }
 
@@ -77,17 +78,14 @@ fn block_values<D: Copy>(view: &tenet::core::BlockView<'_, D>) -> Vec<D> {
 /// and that every block whose coupled sector is absent from the operands is
 /// exactly `+0.0`. Evaluates to the number of inactive blocks.
 macro_rules! check_owned {
-    ($output:expr, $expected:expr, $lhs:expr, $rhs:expr) => {{
+    ($output:expr, $expected:expr, $lhs:expr, $rhs:expr, $terms:expr) => {{
         let output = &$output;
         let expected = &$expected;
-        assert_eq!(output.data().len(), expected.data().len());
-        assert!(
-            output
-                .data()
-                .iter()
-                .zip(expected.data())
-                .all(|(&a, &b)| a.bits_equal(b)),
-            "owned payload differs from the destination path"
+        numerics::assert_slices_close(
+            "owned payload against the destination path",
+            output.data(),
+            expected.data(),
+            $terms,
         );
         let lhs_coupled: HashSet<_> = $lhs
             .blocks()
@@ -130,11 +128,11 @@ fn u1_case<D: Bits>(seed: u64) {
     lhs.contract_overwrite_into(&rhs, &mut expected, &[1], &[0], &[0, 1], D::from_real(1.0))
         .unwrap();
     assert_eq!(output.data().len(), 4 + 9 + 4);
-    assert_eq!(check_owned!(output, expected, lhs, rhs), 2);
+    assert_eq!(check_owned!(output, expected, lhs, rhs, 2), 2);
 
     // compose
     let composed = lhs.compose(&rhs).unwrap();
-    assert_eq!(check_owned!(composed, expected, lhs, rhs), 2);
+    assert_eq!(check_owned!(composed, expected, lhs, rhs, 2), 2);
 
     // lazy-adjoint operand (oriented owner)
     let parent: TensorMap<_, D> =
@@ -144,9 +142,9 @@ fn u1_case<D: Bits>(seed: u64) {
     let mut expected = output.zeros_like();
     lazy.contract_overwrite_into(&rhs, &mut expected, &[1], &[0], &[0, 1], D::from_real(1.0))
         .unwrap();
-    assert_eq!(check_owned!(output, expected, lazy, rhs), 2);
+    assert_eq!(check_owned!(output, expected, lazy, rhs, 2), 2);
     let composed = lazy.compose(&rhs).unwrap();
-    assert_eq!(check_owned!(composed, expected, lazy, rhs), 2);
+    assert_eq!(check_owned!(composed, expected, lazy, rhs, 2), 2);
 }
 
 #[test]
@@ -182,10 +180,10 @@ fn su2_case<D: Bits>(seed: u64) {
         D::from_real(1.0),
     )
     .unwrap();
-    assert!(check_owned!(output, expected, lhs, rhs) >= 1);
+    assert!(check_owned!(output, expected, lhs, rhs, 3) >= 1);
 
     let composed = lhs.compose(&rhs).unwrap();
-    assert!(check_owned!(composed, expected, lhs, rhs) >= 1);
+    assert!(check_owned!(composed, expected, lhs, rhs, 3) >= 1);
 
     let parent: TensorMap<_, D> =
         TensorMap::rand_with_seed(&runtime, [&b], [&a, &c], seed + 2).unwrap();
@@ -201,7 +199,7 @@ fn su2_case<D: Bits>(seed: u64) {
         D::from_real(1.0),
     )
     .unwrap();
-    assert!(check_owned!(output, expected, lazy, rhs) >= 1);
+    assert!(check_owned!(output, expected, lazy, rhs, 3) >= 1);
 }
 
 #[test]
@@ -229,5 +227,5 @@ fn empty_support_yields_a_zero_payload_of_the_full_destination_length() {
     let output = lhs.compose(&rhs).unwrap();
     assert_eq!(output.data().len(), 4 + 9);
     assert!(output.data().iter().all(|v| v.to_bits() == 0));
-    assert_eq!(check_owned!(output, output.zeros_like(), lhs, rhs), 2);
+    assert_eq!(check_owned!(output, output.zeros_like(), lhs, rhs, 1), 2);
 }

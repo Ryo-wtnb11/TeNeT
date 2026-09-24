@@ -1,4 +1,6 @@
 mod common;
+#[path = "../../tests/support/numerics.rs"]
+mod numerics;
 
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -13,7 +15,7 @@ use tenet::dense::{
     DefaultDenseExecutor, DenseBackend, DenseDotConfig, DenseError, DenseExecutor, DenseRead,
     DenseTensor, DenseWrite,
 };
-use tenet::prelude::{Complex64, GenericTensorError, Runtime, SectorSpectrum};
+use tenet::prelude::{Complex32, Complex64, GenericTensorError, Runtime, SectorSpectrum};
 use tenet::typed::{
     CheckedGenericTensorProductError, GradedSpace, NetworkReuseClass, TensorMap, Truncation,
 };
@@ -26,6 +28,13 @@ enum Label {
     X,
     AliasX,
     Invalid,
+}
+
+/// `terms` of the tolerance rule for a product of endomorphisms: an
+/// endomorphism payload holds `sum_c n_c^2` entries, so its square root
+/// bounds every coupled block's contracted length `n_c`.
+fn endomorphism_terms(payload_len: usize) -> usize {
+    (payload_len as f64).sqrt().ceil() as usize
 }
 
 #[test]
@@ -227,7 +236,7 @@ fn checked_generic_powi_i32_min_on_identity_is_exact() {
 #[cfg(feature = "racah-generated")]
 fn assert_sun_checked_generic_powi_outer_multiplicity<D>(n: usize, adjoint: Vec<i64>)
 where
-    D: tenet::typed::AdvancedLinalgScalar + fmt::Debug + PartialEq,
+    D: tenet::typed::AdvancedLinalgScalar + fmt::Debug + PartialEq + numerics::Numeric,
 {
     use tenet::typed::SUNFusionRule;
 
@@ -275,14 +284,26 @@ where
             source.block_fusion_trees(index).unwrap()
         );
     }
+    // `powi(2)` is defined as `self ∘ self`, so the two paths must agree.
+    let terms = endomorphism_terms(source.data().len());
     let squared = source.powi(2).unwrap();
-    assert_eq!(squared.data(), source.compose(&source).unwrap().data());
+    numerics::assert_slices_close(
+        "powi(2) against self ∘ self",
+        squared.data(),
+        source.compose(&source).unwrap().data(),
+        terms,
+    );
     let inverse = source.powi(-1).unwrap();
     for product in [
         source.compose(&inverse).unwrap(),
         inverse.compose(&source).unwrap(),
     ] {
-        assert_eq!(product.data(), identity.data());
+        numerics::assert_slices_close(
+            "powi(-1) against the identity",
+            product.data(),
+            identity.data(),
+            terms,
+        );
     }
 }
 
@@ -2172,7 +2193,7 @@ fn sun_checked_generic_full_svd_preserves_provider_reconstructs_and_rejects_lazy
 #[cfg(feature = "racah-generated")]
 fn assert_sun_checked_generic_inv<D>(n: usize, label: Vec<i64>)
 where
-    D: tenet::typed::AdvancedLinalgScalar + fmt::Debug + PartialEq,
+    D: tenet::typed::AdvancedLinalgScalar + fmt::Debug + PartialEq + numerics::Numeric,
 {
     use tenet::typed::SUNFusionRule;
 
@@ -2206,12 +2227,20 @@ where
     assert!(source.runtime().shares_state_with(inverse.runtime()));
     assert_eq!(inverse.codomain(), source.domain());
     assert_eq!(inverse.domain(), source.codomain());
+    // Hand oracle: `source` is `2·1` on its tree diagonal, so both products
+    // with the inverse are `1` there, i.e. `source / 2`.
     let expected = source.scale(D::from_real(0.5));
+    let terms = endomorphism_terms(source.data().len());
     for identity in [
         source.compose(&inverse).unwrap(),
         inverse.compose(&source).unwrap(),
     ] {
-        assert_eq!(identity.data(), expected.data());
+        numerics::assert_slices_close(
+            "inverse product against the identity",
+            identity.data(),
+            expected.data(),
+            terms,
+        );
     }
 }
 
@@ -3013,7 +3042,14 @@ fn checked_generic_eigh_signed_ties_are_stable_and_degenerate_projectors_are_inv
     })
     .unwrap();
     let (d, _) = tied.eigh_full().unwrap();
-    assert_eq!([d.data()[0], d.data()[4], d.data()[8]], [-2.0, 2.0, 1.0]);
+    // The order of the tied magnitudes is the contract; the values carry the
+    // eigensolver's rounding (`terms` = the block size 3).
+    numerics::assert_slices_close(
+        "eigh_full tied spectrum",
+        &[d.data()[0], d.data()[4], d.data()[8]],
+        &[-2.0, 2.0, 1.0],
+        3,
+    );
 
     let degenerate: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, index| {
@@ -3043,9 +3079,11 @@ fn checked_generic_eigh_signed_ties_are_stable_and_degenerate_projectors_are_inv
         })
         .unwrap();
     let projector = v.compose(&selector).unwrap().compose(&vh).unwrap();
-    assert_eq!(
+    numerics::assert_slices_close(
+        "eigh degenerate projector",
         projector.data(),
-        &[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0]
+        &[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+        3,
     );
 }
 
@@ -3146,13 +3184,15 @@ fn checked_generic_eig_ties_are_stable_and_degenerate_projectors_are_invariant()
     })
     .unwrap();
     let (d, _) = tied.eig_full().unwrap();
-    assert_eq!(
-        [d.data()[0], d.data()[4], d.data()[8]],
-        [
+    numerics::assert_slices_close(
+        "eig_full tied spectrum",
+        &[d.data()[0], d.data()[4], d.data()[8]],
+        &[
             Complex64::new(-2.0, 0.0),
             Complex64::new(2.0, 0.0),
-            Complex64::new(1.0, 0.0)
-        ]
+            Complex64::new(1.0, 0.0),
+        ],
+        3,
     );
 
     let degenerate: TensorMap<_, f64> =
@@ -3181,7 +3221,8 @@ fn checked_generic_eig_ties_are_stable_and_degenerate_projectors_are_invariant()
         .unwrap()
         .compose(&v.inv().unwrap())
         .unwrap();
-    assert_eq!(
+    numerics::assert_slices_close(
+        "eig degenerate projector",
         projector.data(),
         &[
             Complex64::new(1.0, 0.0),
@@ -3193,7 +3234,8 @@ fn checked_generic_eig_ties_are_stable_and_degenerate_projectors_are_invariant()
             Complex64::new(0.0, 0.0),
             Complex64::new(0.0, 0.0),
             Complex64::new(0.0, 0.0),
-        ]
+        ],
+        3,
     );
 }
 
@@ -3343,7 +3385,13 @@ fn checked_generic_exp_uses_general_pade_for_nonhermitian_dense_blocks() {
     assert_eq!(lazy_exp.codomain(), lazy.codomain());
     assert_eq!(lazy_exp.domain(), lazy.domain());
     assert_eq!(lazy_exp.block_count(), lazy.block_count());
-    assert_eq!(lazy_exp.data(), direct.adjoint().unwrap().data());
+    // Hand oracle: exp(Nᵀ) = 1 + Nᵀ for the nilpotent N above.
+    numerics::assert_slices_close(
+        "exp of the lazy adjoint",
+        lazy_exp.data(),
+        &[1.0, 1.0, 0.0, 1.0],
+        2,
+    );
     let complex = source.to_c64().scale(Complex64::new(1.0, 0.25));
     reset_provider_queries(&provider);
     let complex_exp = complex.exp().unwrap();
@@ -3595,13 +3643,19 @@ fn checked_generic_inv_accepts_unequal_isomorphic_spaces_and_rejects_nonisomorph
     assert_eq!(inverse.domain(), source.codomain());
     assert!(std::ptr::eq(inverse.provider(), provider.as_ref()));
     assert!(source.runtime().shares_state_with(inverse.runtime()));
-    assert_eq!(
+    // Hand oracle: `source` is `2·1`, so both products are `source / 2`.
+    let terms = endomorphism_terms(source.data().len());
+    numerics::assert_slices_close(
+        "source ∘ inverse",
         source.compose(&inverse).unwrap().data(),
-        source.scale(0.5).data()
+        source.scale(0.5).data(),
+        terms,
     );
-    assert_eq!(
+    numerics::assert_slices_close(
+        "inverse ∘ source",
         inverse.compose(&source).unwrap().data(),
-        source.scale(0.5).data()
+        source.scale(0.5).data(),
+        terms,
     );
 
     let narrow = GradedSpace::try_new_with_arc(Arc::clone(&provider), [(Label::X, 1)]).unwrap();
@@ -4281,7 +4335,9 @@ fn checked_generic_pinv_uses_a_strict_global_cutoff() {
         })
         .unwrap();
     let pseudo = source.pinv(0.5).unwrap();
-    assert_eq!(pseudo.data(), &[0.25, 0.0]);
+    // The cutoff drops the X block exactly; the kept value is 1/4.
+    assert_eq!(pseudo.data()[1], 0.0);
+    numerics::assert_close("pinv kept value", pseudo.data()[0], 0.25, 1);
 }
 
 #[test]
@@ -4413,7 +4469,7 @@ fn assert_sun_checked_generic_null_projectors<D>(
     adjoint: impl Fn(D) -> D,
     close: impl Fn(D, D) -> f64,
 ) where
-    D: tenet::typed::FactorizationScalar + fmt::Debug + PartialEq,
+    D: tenet::typed::FactorizationScalar + fmt::Debug + PartialEq + numerics::Numeric,
 {
     use tenet::typed::SUNFusionRule;
 
@@ -4537,7 +4593,14 @@ fn assert_sun_checked_generic_null_projectors<D>(
     let lazy_left = lazy.left_null().unwrap();
     let expected_lazy_left = right_adjoint;
     assert!(std::ptr::eq(lazy_left.provider(), provider.as_ref()));
-    assert_eq!(lazy_left.data(), expected_lazy_left.data());
+    // Path agreement is the contract: the lazy route is defined as the
+    // adjoint of the parent's right null space, gauge included.
+    numerics::assert_slices_close(
+        "left_null of the lazy adjoint",
+        lazy_left.data(),
+        expected_lazy_left.data(),
+        endomorphism_terms(source.data().len()),
+    );
 }
 
 #[cfg(feature = "racah-generated")]
@@ -5195,7 +5258,18 @@ fn checked_generic_left_solve_covers_all_lazy_input_pairs() {
             }
         })
         .unwrap();
-    let expected = divisor.solve(&rhs).unwrap();
+    // Hand oracle: the divisor is diagonal and both fixtures are symmetric,
+    // so every lazy/eager combination solves to `rhs[i][j] / (2 + i)`.
+    let expected: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+            let rhs = if indices[0] == indices[1] {
+                2.0 + indices[0] as f64
+            } else {
+                1.0
+            };
+            rhs / (2.0 + indices[0] as f64)
+        })
+        .unwrap();
     for (lazy_lhs, lazy_rhs) in [(false, false), (true, false), (false, true), (true, true)] {
         let lhs = if lazy_lhs {
             divisor.adjoint().unwrap()
@@ -5210,7 +5284,7 @@ fn checked_generic_left_solve_covers_all_lazy_input_pairs() {
         reset_provider_queries(&provider);
         let solution = lhs.solve(&right).unwrap();
         assert!(std::ptr::eq(solution.provider(), provider.as_ref()));
-        assert_eq!(solution.data(), expected.data());
+        numerics::assert_slices_close("solve", solution.data(), expected.data(), 2);
         assert_eq!(provider.queries_since_reset.load(Ordering::Relaxed), 8);
     }
 }

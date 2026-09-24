@@ -4,8 +4,11 @@
 use std::sync::Arc;
 
 use tenet::core::{U1FusionRule, U1Irrep};
-use tenet::prelude::Runtime;
+use tenet::prelude::{Complex32, Complex64, Runtime};
 use tenet::typed::{GradedSpace, TensorMap, Truncation};
+
+#[path = "../../tests/support/numerics.rs"]
+mod numerics;
 
 /// A truncated bond may drop a whole coupled sector, but recomposition must
 /// restore the source layout with a zero block so ordinary typed operations
@@ -41,10 +44,14 @@ fn truncated_svd_restores_dropped_sector_in_non_dual_closed_space() {
         })
         .unwrap();
 
+    // Reconstruction is backward stable: within the tolerance rule, one term
+    // per entry of the largest (2 x 2) block.
     let (u, s, vh) = tensor.svd_compact().unwrap();
-    assert_eq!(
+    numerics::assert_slices_close(
+        "u s vh",
         u.compose(&s).unwrap().compose(&vh).unwrap().data(),
-        tensor.data()
+        tensor.data(),
+        4,
     );
 
     let truncated = tensor.svd_trunc(&Truncation::rank(3)).unwrap();
@@ -62,7 +69,12 @@ fn truncated_svd_restores_dropped_sector_in_non_dual_closed_space() {
         .unwrap()
         .compose(&truncated.vh)
         .unwrap();
-    assert_eq!(recomposed.data(), &[4.0, 0.0, 0.0, 3.0, 0.0, 2.0]);
+    numerics::assert_slices_close(
+        "truncated u s vh",
+        recomposed.data(),
+        &[4.0, 0.0, 0.0, 3.0, 0.0, 2.0],
+        4,
+    );
     let error = tensor.add(&recomposed, 1.0, -1.0).unwrap().norm().unwrap();
     assert!((error - truncated.error).abs() < 1.0e-12);
 }

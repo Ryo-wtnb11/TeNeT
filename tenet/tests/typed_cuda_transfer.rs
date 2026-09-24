@@ -8,7 +8,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use num_complex::Complex64;
+use num_complex::{Complex32, Complex64};
 
 use tenet::core::{
     product_sector, BraidingStyleKind, CheckedFusionAlgebra, FermionParityFusionRule,
@@ -19,6 +19,9 @@ use tenet::core::{
 };
 use tenet::prelude::TensorScalar;
 use tenet::typed::{BlockFusionTrees, CudaStorage, GradedSpace, Runtime, TensorMap, Truncation};
+
+#[path = "../../tests/support/numerics.rs"]
+mod numerics;
 
 #[derive(Debug, Eq, PartialEq)]
 struct LegSnapshot<S> {
@@ -2815,12 +2818,16 @@ fn typed_cuda_contract_overwrite_into_matches_the_returning_contraction() {
         .unwrap();
     let written = destination.to_host().unwrap().data().to_vec();
     assert_eq!(written.len(), expected_data.len());
+    // Reached entries are two-term GEMM sums that the two entry points may
+    // accumulate differently: within the tolerance rule. Unreached entries
+    // are the zero fill, which is exact.
+    numerics::assert_slices_close(
+        "overwrite_into against contract",
+        &written,
+        &expected_data,
+        2,
+    );
     for (index, (&actual, &expected)) in written.iter().zip(&expected_data).enumerate() {
-        assert_eq!(
-            actual.to_bits(),
-            expected.to_bits(),
-            "element {index}: {actual} != {expected}"
-        );
         if expected == 0.0 {
             assert_eq!(
                 actual.to_bits(),

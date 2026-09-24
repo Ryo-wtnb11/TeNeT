@@ -1,9 +1,12 @@
 use std::sync::Arc;
 
-use num_complex::Complex64;
+use num_complex::{Complex32, Complex64};
 use tenet::core::{Z2FusionRule, Z2Irrep};
 use tenet::prelude::{Error, Runtime};
 use tenet::typed::{GradedSpace, SectorSpectrum, TensorMap};
+
+#[path = "../../tests/support/numerics.rs"]
+mod numerics;
 
 fn typed_bond(provider: &Arc<Z2FusionRule>, degeneracy: usize) -> GradedSpace<Z2FusionRule> {
     GradedSpace::try_new_with_arc(
@@ -114,7 +117,10 @@ fn powi_c64_handles_i32_min_identity() {
             .flat_map(|spectrum| &spectrum.values)
             .zip(values.map(|value| value.powi(exponent)))
         {
-            assert_eq!(*actual, expected);
+            // A negative power divides, and the order of the repeated products
+            // is not part of the contract: compare within the tolerance rule,
+            // one term per factor of the at most fourth power.
+            numerics::assert_close(&format!("powi({exponent})"), *actual, expected, 4);
         }
     }
 

@@ -7,39 +7,31 @@
 //! `single_precision_base.rs`, whose tolerance is far larger than the
 //! difference between a wide and a narrow accumulator.
 //!
-//! 1. **Double precision is bit-for-bit unchanged.** The reference bit
-//!    patterns below were captured by running the `f64`/`Complex64` half of
-//!    this file against `origin/main` at `89b1cde6` — before the accumulators
-//!    were widened — in a detached worktree with its own target directory,
-//!    and they are asserted here as exact `to_bits()` equalities.
+//! 1. **Double precision matches an independent oracle.** Each `f64` and
+//!    `Complex64` reduction is compared, under the workspace tolerance rule
+//!    (`docs/testing_numerics.md`), with a double-double sum of the fixture
+//!    entries recorded while `from_block_fn` fills them. The oracle does not
+//!    depend on the order TeNeT accumulates in, so a valid reordering passes
+//!    and a wrong weight, conjugation or pairing fails.
 //!
-//!    The fixtures are deliberately **not** exactly representable. Dyadic
-//!    entries make every partial sum exact, which would let a reordered or
-//!    re-associated accumulation pass unnoticed; the values below come from
-//!    `0.1`-based sequences, so the result depends on the summation order and
-//!    the pins fail if it changes. They cover all three storage forms (dense,
-//!    compact diagonal, lazy adjoint), the three reduction kinds (`norm`,
-//!    `inner`, `tr`/full trace), an abelian provider with `dim(c) == 1` and a
-//!    non-abelian one where `dim(c) == 2`, so the quantum-dimension weight is
-//!    a real factor rather than a no-op. `checked_generic` adds the
-//!    Checked-Generic admission mode behind `racah-generated`.
-//!
-//!    That the fixtures bite is visible in the reference table itself:
-//!    `f64 su2 dense inner` and `f64 su2 lazy adjoint inner` differ in their
-//!    last bit, because the two paths sum the same products in a different
-//!    order. Dyadic entries would have made them identical.
+//!    The fixtures are deliberately **not** exactly representable: the values
+//!    come from `0.1`-based sequences. They cover all three storage forms
+//!    (dense, compact diagonal, lazy adjoint), the three reduction kinds
+//!    (`norm`, `inner`, `tr`/full trace), an abelian provider with
+//!    `dim(c) == 1` and a non-abelian one where `dim(c) == 2`, so the
+//!    quantum-dimension weight is a real factor rather than a no-op.
+//!    `checked_generic` adds the Checked-Generic admission mode behind
+//!    `racah-generated`.
 //!
 //!    One micro-difference is *not* observable here and is worth recording:
 //!    applying the weight componentwise (`re * w`, `im * w`) rather than as
 //!    the full complex product with `w + 0i` differs only when the real part
 //!    of a block's contribution is a signed zero or non-finite, and a signed
 //!    zero is then flattened by the `+0.0` the accumulator starts from — no
-//!    public input reaches it. The implementation keeps the full complex
-//!    product anyway, because it is the expression the loop used before the
-//!    accumulator was widened. The `negative zero` fixtures pin what *is*
+//!    public input reaches it. The `negative zero` fixtures check what *is*
 //!    observable: `-0.0` components entering the lazy-adjoint kernel, with
 //!    the other component non-dyadic so the result is nonzero and the
-//!    conjugation direction and multiplication order show in its bits.
+//!    conjugation direction shows in its sign.
 //!
 //! 2. **Single precision really does accumulate wide.** The fixture is one
 //!    entry of `8192.0f32` and the rest `1.0f32`. `8192^2` is `2^26`, whose
@@ -49,16 +41,22 @@
 //!    `f32`, so even `inner`, which returns the payload type, tells them
 //!    apart. Each assertion is paired with `assert_ne!` against the value a
 //!    narrow accumulator would produce, computed in this file, so the test
-//!    cannot pass by both paths agreeing.
+//!    cannot pass by both paths agreeing. These comparisons stay exact: every
+//!    entry and partial sum is an integer below `2^53`, so every summation
+//!    order gives the same bits.
 //!
 //! A third case pins range rather than precision: entries of `1e20f32` square
 //! to `1e40`, far past the `f32` maximum of about `3.4e38`. `norm` must be
 //! finite in every storage form.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use tenet::core::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
 use tenet::prelude::{Complex32, Complex64, GradedSpace, Runtime, SectorSpectrum, TensorMap};
+
+#[path = "../../tests/support/numerics.rs"]
+mod numerics;
 
 fn runtime() -> Runtime {
     Runtime::builder().dense_threads(1).build().unwrap()
@@ -77,7 +75,7 @@ fn wide_leg() -> GradedSpace<U1FusionRule> {
     GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), 32)]).unwrap()
 }
 
-// --- 1. double precision is bit-for-bit unchanged ----------------------------
+// --- 1. double precision matches an independent oracle ------------------------
 
 /// Three U(1) charges with unequal degeneracies: several coupled blocks of
 /// different sizes, every `dim(c) == 1`.
@@ -128,51 +126,149 @@ fn stepper() -> impl FnMut() -> usize {
     }
 }
 
-fn bits(value: Complex64) -> (u64, u64) {
-    (value.re.to_bits(), value.im.to_bits())
+/// Double-double accumulator: `hi + lo` carries about 106 bits, so the oracle
+/// sums below are exact to far below one `f64` ulp for these few-dozen-term,
+/// well-scaled fixtures, independently of any summation order TeNeT picks.
+#[derive(Clone, Copy, Default)]
+struct DoubleDouble {
+    hi: f64,
+    lo: f64,
+}
+
+impl DoubleDouble {
+    fn add(&mut self, value: f64) {
+        let sum = self.hi + value;
+        let virtual_value = sum - self.hi;
+        let error = (self.hi - (sum - virtual_value)) + (value - virtual_value);
+        self.hi = sum;
+        self.lo += error;
+    }
+
+    /// Adds `a * b` exactly: `mul_add` recovers the rounding error of the
+    /// product.
+    fn add_product(&mut self, a: f64, b: f64) {
+        let product = a * b;
+        self.add(product);
+        self.add(a.mul_add(b, -product));
+    }
+
+    fn value(self) -> f64 {
+        self.hi + self.lo
+    }
+}
+
+/// `sum_k weight_k * x_k * y_k` over complex operands, accumulated exactly
+/// enough to serve as the oracle (`weight` is a small integer quantum
+/// dimension, so `weight * x` is exact).
+fn oracle_dot(terms: impl IntoIterator<Item = (f64, Complex64, Complex64)>) -> Complex64 {
+    let (mut re, mut im) = (DoubleDouble::default(), DoubleDouble::default());
+    for (weight, x, y) in terms {
+        let x = x * weight;
+        re.add_product(x.re, y.re);
+        re.add_product(-x.im, y.im);
+        im.add_product(x.re, y.im);
+        im.add_product(x.im, y.re);
+    }
+    Complex64::new(re.value(), im.value())
+}
+
+/// Entries of a fixture, recorded while `from_block_fn` fills it, keyed by
+/// coupled sector and (row, column) inside that sector's block.
+type Entries = HashMap<(String, usize, usize), (f64, Complex64)>;
+
+/// One reduction: TeNeT's value, the double-double oracle, and the number of
+/// terms that reach it.
+type Measurement = (&'static str, Complex64, Complex64, usize);
+
+fn one() -> Complex64 {
+    Complex64::new(1.0, 0.0)
+}
+
+/// Oracles for `norm`, `inner(a, b)`, `tr(a)`, `inner(a†, b†)`, `inner(a†, b)`
+/// from the recorded entries. `(a†)_c[i][j] = conj(a_c[j][i])` in the block of
+/// the same coupled sector, weighted by `dim(c)` like every other reduction.
+fn dense_oracles(a: &Entries, b: &Entries) -> [Complex64; 5] {
+    let transposed = |(sector, i, j): &(String, usize, usize)| (sector.clone(), *j, *i);
+    let norm2 = oracle_dot(a.values().map(|&(w, x)| (w, x.conj(), x)));
+    let inner = oracle_dot(a.iter().map(|(key, &(w, x))| (w, x.conj(), b[key].1)));
+    let tr = oracle_dot(
+        a.iter()
+            .filter(|((_, i, j), _)| i == j)
+            .map(|(_, &(w, x))| (w, x, one())),
+    );
+    // conj(conj(a_ji)) * conj(b_ji), summed over every (j, i).
+    let adjoint_inner = oracle_dot(a.iter().map(|(key, &(w, x))| (w, x, b[key].1.conj())));
+    // conj(conj(a_ji)) * b_ij.
+    let mixed_inner = oracle_dot(a.iter().map(|(key, &(w, x))| (w, x, b[&transposed(key)].1)));
+    [
+        Complex64::new(norm2.re.sqrt(), 0.0),
+        inner,
+        tr,
+        adjoint_inner,
+        mixed_inner,
+    ]
+}
+
+/// Records every entry `from_block_fn` produces, keyed by coupled sector and
+/// block position, with the sector's quantum dimension as its weight.
+macro_rules! recorded_fixture {
+    ($runtime:expr, $leg:expr, $dtype:ty, $wide:expr, $dim:expr, $entry:expr) => {{
+        let mut entries = Entries::new();
+        let mut step = stepper();
+        let tensor: TensorMap<_, $dtype> =
+            TensorMap::from_block_fn($runtime, [$leg], [$leg], |trees, index| {
+                let value: $dtype = $entry(step());
+                let key = (format!("{:?}", trees.coupled()), index[0], index[1]);
+                entries.insert(key, ($dim(trees.coupled()), $wide(value)));
+                value
+            })
+            .unwrap();
+        (tensor, entries)
+    }};
 }
 
 macro_rules! dense_reductions {
-    ($out:expr, $prefix:literal, $runtime:expr, $leg:expr, $dtype:ty, $wide:expr) => {{
-        let mut left = stepper();
-        let a: TensorMap<_, $dtype> = TensorMap::from_block_fn($runtime, [$leg], [$leg], |_, _| {
-            let step = left();
+    ($out:expr, $prefix:literal, $runtime:expr, $leg:expr, $dtype:ty, $wide:expr, $dim:expr) => {{
+        let (a, a_entries) = recorded_fixture!($runtime, $leg, $dtype, $wide, $dim, |step| {
             <$dtype>::from_parts(real_at(step), other_at(step))
-        })
-        .unwrap();
-        let mut right = stepper();
-        let b: TensorMap<_, $dtype> = TensorMap::from_block_fn($runtime, [$leg], [$leg], |_, _| {
-            let step = right();
+        });
+        let (b, b_entries) = recorded_fixture!($runtime, $leg, $dtype, $wide, $dim, |step| {
             <$dtype>::from_parts(other_at(step + 5), real_at(step + 2))
-        })
-        .unwrap();
+        });
+        let [norm, inner, tr, adjoint_inner, mixed_inner] = dense_oracles(&a_entries, &b_entries);
+        let terms = a_entries.len();
 
         $out.push((
             concat!($prefix, " dense norm"),
-            a.norm().unwrap().to_bits(),
-            0,
+            Complex64::new(a.norm().unwrap(), 0.0),
+            norm,
+            terms,
         ));
-        let value = $wide(a.inner(&b).unwrap());
         $out.push((
             concat!($prefix, " dense inner"),
-            bits(value).0,
-            bits(value).1,
+            $wide(a.inner(&b).unwrap()),
+            inner,
+            terms,
         ));
-        let value = $wide(a.tr().unwrap());
-        $out.push((concat!($prefix, " dense tr"), bits(value).0, bits(value).1));
+        $out.push((
+            concat!($prefix, " dense tr"),
+            $wide(a.tr().unwrap()),
+            tr,
+            terms,
+        ));
         // Both operands lazy, then one lazy and one owned: the oriented kernel
         // is reached with a different conjugation pattern each way.
-        let value = $wide(a.adjoint().unwrap().inner(&b.adjoint().unwrap()).unwrap());
         $out.push((
             concat!($prefix, " lazy adjoint inner"),
-            bits(value).0,
-            bits(value).1,
+            $wide(a.adjoint().unwrap().inner(&b.adjoint().unwrap()).unwrap()),
+            adjoint_inner,
+            terms,
         ));
-        let value = $wide(a.adjoint().unwrap().inner(&b).unwrap());
         $out.push((
             concat!($prefix, " lazy adjoint mixed inner"),
-            bits(value).0,
-            bits(value).1,
+            $wide(a.adjoint().unwrap().inner(&b).unwrap()),
+            mixed_inner,
+            terms,
         ));
     }};
 }
@@ -180,55 +276,70 @@ macro_rules! dense_reductions {
 /// Compact diagonal storage has its own reductions. The Checked-Generic mode
 /// rejects compact payloads, so this is separate from [`dense_reductions`].
 macro_rules! compact_reductions {
-    ($out:expr, $prefix:literal, $runtime:expr, $leg:expr, $dtype:ty, $wide:expr) => {{
+    ($out:expr, $prefix:literal, $runtime:expr, $leg:expr, $dtype:ty, $wide:expr, $dim:expr) => {{
         let mut diagonal = stepper();
         let mut spectrum = || {
-            $leg.sectors()
+            let mut recorded = Vec::new();
+            let spectrum = $leg
+                .sectors()
                 .unwrap()
                 .into_iter()
                 .zip($leg.degeneracies())
-                .map(|(sector, &degeneracy)| SectorSpectrum {
-                    sector,
-                    values: (0..degeneracy)
+                .map(|(sector, &degeneracy)| {
+                    let values: Vec<$dtype> = (0..degeneracy)
                         .map(|_| {
                             let step = diagonal();
                             <$dtype>::from_parts(real_at(step), other_at(step))
                         })
-                        .collect(),
+                        .collect();
+                    recorded.extend(values.iter().map(|&v| ($dim(&sector), $wide(v))));
+                    SectorSpectrum { sector, values }
                 })
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            (spectrum, recorded)
         };
-        let compact: TensorMap<_, $dtype> =
-            TensorMap::diagonal($runtime, $leg, spectrum()).unwrap();
-        let other: TensorMap<_, $dtype> = TensorMap::diagonal($runtime, $leg, spectrum()).unwrap();
+        let (values, compact_entries) = spectrum();
+        let compact: TensorMap<_, $dtype> = TensorMap::diagonal($runtime, $leg, values).unwrap();
+        let (values, other_entries) = spectrum();
+        let other: TensorMap<_, $dtype> = TensorMap::diagonal($runtime, $leg, values).unwrap();
+        let terms = compact_entries.len();
+        let norm2 = oracle_dot(compact_entries.iter().map(|&(w, x)| (w, x.conj(), x)));
+        let inner = oracle_dot(
+            compact_entries
+                .iter()
+                .zip(&other_entries)
+                .map(|(&(w, x), &(_, y))| (w, x.conj(), y)),
+        );
+        let tr = oracle_dot(compact_entries.iter().map(|&(w, x)| (w, x, one())));
 
         $out.push((
             concat!($prefix, " compact norm"),
-            compact.norm().unwrap().to_bits(),
-            0,
+            Complex64::new(compact.norm().unwrap(), 0.0),
+            Complex64::new(norm2.re.sqrt(), 0.0),
+            terms,
         ));
-        let value = $wide(compact.inner(&other).unwrap());
         $out.push((
             concat!($prefix, " compact inner"),
-            bits(value).0,
-            bits(value).1,
+            $wide(compact.inner(&other).unwrap()),
+            inner,
+            terms,
         ));
-        let value = $wide(compact.tr().unwrap());
         $out.push((
             concat!($prefix, " compact tr"),
-            bits(value).0,
-            bits(value).1,
+            $wide(compact.tr().unwrap()),
+            tr,
+            terms,
         ));
-        let value = $wide(compact.trace_pairs(&[(0, 1)]).unwrap().scalar().unwrap());
         $out.push((
             concat!($prefix, " compact full trace"),
-            bits(value).0,
-            bits(value).1,
+            $wide(compact.trace_pairs(&[(0, 1)]).unwrap().scalar().unwrap()),
+            tr,
+            terms,
         ));
     }};
 }
 
-/// Bridges the two payload dtypes into one `Complex64` for the bit dump.
+/// Bridges the two payload dtypes into one `Complex64` for the oracle.
 trait FromParts: Copy {
     fn from_parts(re: f64, im: f64) -> Self;
 }
@@ -245,217 +356,76 @@ impl FromParts for Complex64 {
     }
 }
 
-fn double_precision_measurements() -> Vec<(&'static str, u64, u64)> {
+fn u1_dim(_: &U1Irrep) -> f64 {
+    1.0
+}
+
+fn su2_dim(sector: &SU2Irrep) -> f64 {
+    (sector.twice_spin() + 1) as f64
+}
+
+fn double_precision_measurements() -> Vec<Measurement> {
     let runtime = runtime();
     let u1 = u1_multi_leg();
     let su2 = su2_leg();
     let real = |v: f64| Complex64::new(v, 0.0);
     let complex = |v| v;
     let mut out = Vec::new();
-    dense_reductions!(out, "f64 u1", &runtime, &u1, f64, real);
-    compact_reductions!(out, "f64 u1", &runtime, &u1, f64, real);
-    dense_reductions!(out, "f64 su2", &runtime, &su2, f64, real);
-    compact_reductions!(out, "f64 su2", &runtime, &su2, f64, real);
-    dense_reductions!(out, "c64 u1", &runtime, &u1, Complex64, complex);
-    compact_reductions!(out, "c64 u1", &runtime, &u1, Complex64, complex);
-    dense_reductions!(out, "c64 su2", &runtime, &su2, Complex64, complex);
-    compact_reductions!(out, "c64 su2", &runtime, &su2, Complex64, complex);
+    dense_reductions!(out, "f64 u1", &runtime, &u1, f64, real, u1_dim);
+    compact_reductions!(out, "f64 u1", &runtime, &u1, f64, real, u1_dim);
+    dense_reductions!(out, "f64 su2", &runtime, &su2, f64, real, su2_dim);
+    compact_reductions!(out, "f64 su2", &runtime, &su2, f64, real, su2_dim);
+    dense_reductions!(out, "c64 u1", &runtime, &u1, Complex64, complex, u1_dim);
+    compact_reductions!(out, "c64 u1", &runtime, &u1, Complex64, complex, u1_dim);
+    dense_reductions!(out, "c64 su2", &runtime, &su2, Complex64, complex, su2_dim);
+    compact_reductions!(out, "c64 su2", &runtime, &su2, Complex64, complex, su2_dim);
 
     // Negative zeros in the payload, carried through the lazy-adjoint kernel.
     // Each operand has `-0.0` in one component and a non-dyadic value in the
-    // other, so the conjugation the oriented inner applies and the order it
-    // multiplies in both reach the sign bits of a *nonzero* result rather
-    // than a zero the accumulator would flatten.
-    let mut step = stepper();
-    let signed: TensorMap<_, Complex64> =
-        TensorMap::from_block_fn(&runtime, [&u1], [&u1], |_, _| {
-            Complex64::new(real_at(step()), -0.0)
-        })
-        .unwrap();
-    let mut step = stepper();
-    let probe: TensorMap<_, Complex64> =
-        TensorMap::from_block_fn(&runtime, [&u1], [&u1], |_, _| {
-            Complex64::new(-0.0, other_at(step()))
-        })
-        .unwrap();
-    let (re, im) = bits(
+    // other, so the conjugation the oriented inner applies shows in the sign
+    // of a *nonzero* imaginary part.
+    let (signed, signed_entries) =
+        recorded_fixture!(&runtime, &u1, Complex64, complex, u1_dim, |step| {
+            Complex64::new(real_at(step), -0.0)
+        });
+    let (probe, probe_entries) =
+        recorded_fixture!(&runtime, &u1, Complex64, complex, u1_dim, |step| {
+            Complex64::new(-0.0, other_at(step))
+        });
+    let [_, _, tr, adjoint_inner, mixed_inner] = dense_oracles(&signed_entries, &probe_entries);
+    let terms = signed_entries.len();
+    out.push((
+        "c64 negative zero lazy adjoint inner",
         signed
             .adjoint()
             .unwrap()
             .inner(&probe.adjoint().unwrap())
             .unwrap(),
-    );
-    out.push(("c64 negative zero lazy adjoint inner", re, im));
-    let (re, im) = bits(signed.adjoint().unwrap().inner(&probe).unwrap());
-    out.push(("c64 negative zero lazy adjoint mixed inner", re, im));
-    let (re, im) = bits(signed.tr().unwrap());
-    out.push(("c64 negative zero tr", re, im));
+        adjoint_inner,
+        terms,
+    ));
+    out.push((
+        "c64 negative zero lazy adjoint mixed inner",
+        signed.adjoint().unwrap().inner(&probe).unwrap(),
+        mixed_inner,
+        terms,
+    ));
+    out.push(("c64 negative zero tr", signed.tr().unwrap(), tr, terms));
     out
 }
 
-/// Reference bits measured on `origin/main` 89b1cde6, before the accumulators
-/// were widened. Regenerated by the procedure in the module docs.
-const DOUBLE_PRECISION_REFERENCE: &[(&str, u64, u64)] = &[
-    ("f64 u1 dense norm", 0x4009a46ee0a3c378, 0x0000000000000000),
-    ("f64 u1 dense inner", 0xc0149cf932c30ad2, 0x0000000000000000),
-    ("f64 u1 dense tr", 0x401483669828948a, 0x0000000000000000),
-    (
-        "f64 u1 lazy adjoint inner",
-        0xc0149cf932c30ad2,
-        0x0000000000000000,
-    ),
-    (
-        "f64 u1 lazy adjoint mixed inner",
-        0xc0145084f921ba54,
-        0x0000000000000000,
-    ),
-    (
-        "f64 u1 compact norm",
-        0x3fe4f6912c49514b,
-        0x0000000000000000,
-    ),
-    (
-        "f64 u1 compact inner",
-        0x3ff59ee8758233ba,
-        0x0000000000000000,
-    ),
-    ("f64 u1 compact tr", 0x3ff73e272cd4267c, 0x0000000000000000),
-    (
-        "f64 u1 compact full trace",
-        0x3ff73e272cd4267c,
-        0x0000000000000000,
-    ),
-    ("f64 su2 dense norm", 0x3ff2a43660ae06e6, 0x0000000000000000),
-    (
-        "f64 su2 dense inner",
-        0xbfeee16b65101eac,
-        0x0000000000000000,
-    ),
-    ("f64 su2 dense tr", 0x3ffcf26a090b0bd0, 0x0000000000000000),
-    (
-        "f64 su2 lazy adjoint inner",
-        0xbfeee16b65101ead,
-        0x0000000000000000,
-    ),
-    (
-        "f64 su2 lazy adjoint mixed inner",
-        0xbfee9e5e3e5ae3ca,
-        0x0000000000000000,
-    ),
-    (
-        "f64 su2 compact norm",
-        0x3fd4179d71dbbad3,
-        0x0000000000000000,
-    ),
-    (
-        "f64 su2 compact inner",
-        0x3fd4cbb5ef75eed6,
-        0x0000000000000000,
-    ),
-    ("f64 su2 compact tr", 0x3fe69933a14cf00a, 0x0000000000000000),
-    (
-        "f64 su2 compact full trace",
-        0x3fe69933a14cf00a,
-        0x0000000000000000,
-    ),
-    ("c64 u1 dense norm", 0x400b1436751d0e19, 0x0000000000000000),
-    ("c64 u1 dense inner", 0xc02207dea03e6db5, 0x402590c2dfbbc519),
-    ("c64 u1 dense tr", 0x401483669828948a, 0xbff55b78b74c4d06),
-    (
-        "c64 u1 lazy adjoint inner",
-        0xc02207dea03e6db6,
-        0xc02590c2dfbbc519,
-    ),
-    (
-        "c64 u1 lazy adjoint mixed inner",
-        0xbff54a15a15d673e,
-        0x402b6b92f903d113,
-    ),
-    (
-        "c64 u1 compact norm",
-        0x3fe7b1918ea8db75,
-        0x0000000000000000,
-    ),
-    (
-        "c64 u1 compact inner",
-        0x3ff5344daa642833,
-        0xbfe19bed10a31666,
-    ),
-    ("c64 u1 compact tr", 0x3ff73e272cd4267c, 0x3fd528dd1a088b94),
-    (
-        "c64 u1 compact full trace",
-        0x3ff73e272cd4267c,
-        0x3fd528dd1a088b94,
-    ),
-    ("c64 su2 dense norm", 0x3ff3da78a03ff248, 0x0000000000000000),
-    (
-        "c64 su2 dense inner",
-        0xbff51b8e64afc627,
-        0x3ffd3a26c6f0024d,
-    ),
-    ("c64 su2 dense tr", 0x3ffcf26a090b0bd0, 0xbfaeec6b609de2c8),
-    (
-        "c64 su2 lazy adjoint inner",
-        0xbff51b8e64afc627,
-        0xbffd3a26c6f0024d,
-    ),
-    (
-        "c64 su2 lazy adjoint mixed inner",
-        0xbfe3b811e22b3459,
-        0x4000eee20408f566,
-    ),
-    (
-        "c64 su2 compact norm",
-        0x3fdd349baaf1174f,
-        0x0000000000000000,
-    ),
-    (
-        "c64 su2 compact inner",
-        0x3fd1f195d239fe45,
-        0xbfd40407a2450844,
-    ),
-    ("c64 su2 compact tr", 0x3fe69933a14cf00a, 0x3fe4bb40880fde0c),
-    (
-        "c64 su2 compact full trace",
-        0x3fe69933a14cf00a,
-        0x3fe4bb40880fde0c,
-    ),
-    (
-        "c64 negative zero lazy adjoint inner",
-        0x0000000000000000,
-        0x400a334586b46571,
-    ),
-    (
-        "c64 negative zero lazy adjoint mixed inner",
-        0x0000000000000000,
-        0xc00965365c1a5b8a,
-    ),
-    (
-        "c64 negative zero tr",
-        0x401483669828948a,
-        0x0000000000000000,
-    ),
-];
+fn assert_measurements_match_the_oracle(measurements: &[Measurement]) {
+    for &(what, got, want, terms) in measurements {
+        numerics::assert_close(what, got, want, terms);
+    }
+}
 
 #[test]
-fn double_precision_reductions_are_bit_for_bit_unchanged() {
-    let measured = double_precision_measurements();
-    assert_eq!(
-        measured.len(),
-        DOUBLE_PRECISION_REFERENCE.len(),
-        "the reference list must cover every measurement"
-    );
-    for ((what, re, im), (expected_what, expected_re, expected_im)) in
-        measured.iter().zip(DOUBLE_PRECISION_REFERENCE)
-    {
-        assert_eq!(what, expected_what);
-        assert_eq!(
-            (re, im),
-            (expected_re, expected_im),
-            "{what}: ({re:#018x}, {im:#018x}) against the pre-widening reference \
-             ({expected_re:#018x}, {expected_im:#018x})"
-        );
-    }
+fn double_precision_reductions_match_a_double_double_oracle() {
+    let measurements = double_precision_measurements();
+    // 8 reductions per (dtype, provider) pair plus the 3 negative-zero probes.
+    assert_eq!(measurements.len(), 4 * 9 + 3);
+    assert_measurements_match_the_oracle(&measurements);
 }
 
 // --- 2. single precision accumulates wide ------------------------------------
@@ -622,14 +592,21 @@ fn single_precision_norm_stays_finite_where_a_narrow_accumulator_overflows() {
 }
 
 /// The Checked-Generic admission mode reaches the same reductions through its
-/// own dispatch and its own fallible weight lookup, so it needs its own pins.
+/// own dispatch and its own fallible weight lookup, so it needs its own checks.
 /// SU(3) with the adjoint irrep also carries outer multiplicity.
 #[cfg(feature = "racah-generated")]
 mod checked_generic {
     use super::*;
     use tenet::typed::SUNFusionRule;
 
-    fn measurements() -> Vec<(&'static str, u64, u64)> {
+    /// Weyl dimension of the SU(3) irrep with Dynkin labels `(p, q)`:
+    /// `(p + 1)(q + 1)(p + q + 2) / 2`.
+    fn su3_dim(labels: &[i64]) -> f64 {
+        let (p, q) = (labels[0] as f64, labels[1] as f64);
+        (p + 1.0) * (q + 1.0) * (p + q + 2.0) / 2.0
+    }
+
+    fn measurements() -> Vec<Measurement> {
         let runtime = runtime();
         let provider = Arc::new(SUNFusionRule::new(3).unwrap());
         let adjoint = vec![2i64, 2];
@@ -637,66 +614,19 @@ mod checked_generic {
             GradedSpace::try_new_with_arc(Arc::clone(&provider), [(adjoint.clone(), 2)]).unwrap();
         // Compact payloads are rejected by this admission mode
         // ("checked Generic reductions require dense payloads"), so only the
-        // dense and lazy-adjoint reductions exist to pin here.
+        // dense and lazy-adjoint reductions exist to check here.
         let real = |v: f64| Complex64::new(v, 0.0);
         let complex = |v| v;
         let mut out = Vec::new();
-        dense_reductions!(out, "f64 su3", &runtime, &leg, f64, real);
-        dense_reductions!(out, "c64 su3", &runtime, &leg, Complex64, complex);
+        dense_reductions!(out, "f64 su3", &runtime, &leg, f64, real, su3_dim);
+        dense_reductions!(out, "c64 su3", &runtime, &leg, Complex64, complex, su3_dim);
         out
     }
 
-    /// Measured on `origin/main` 89b1cde6 with `--features racah-generated`.
-    const REFERENCE: &[(&str, u64, u64)] = &[
-        ("f64 su3 dense norm", 0x3ff315470a2c4936, 0x0000000000000000),
-        (
-            "f64 su3 dense inner",
-            0xbffacf946aab6d12,
-            0x0000000000000000,
-        ),
-        ("f64 su3 dense tr", 0x401988a19f4fedde, 0x0000000000000000),
-        (
-            "f64 su3 lazy adjoint inner",
-            0xbffacf946aab6d12,
-            0x0000000000000000,
-        ),
-        (
-            "f64 su3 lazy adjoint mixed inner",
-            0xbff9f09942323c09,
-            0x0000000000000000,
-        ),
-        ("c64 su3 dense norm", 0x400051ec764bf090, 0x0000000000000000),
-        (
-            "c64 su3 dense inner",
-            0x3fe89429f51145f8,
-            0x4011b00fa69112af,
-        ),
-        ("c64 su3 dense tr", 0x401988a19f4fedde, 0x401f16da112a7b51),
-        (
-            "c64 su3 lazy adjoint inner",
-            0x3fe89429f51145f8,
-            0xc011b00fa69112af,
-        ),
-        (
-            "c64 su3 lazy adjoint mixed inner",
-            0xc010e22c8877339d,
-            0x3ff530dcff4fa754,
-        ),
-    ];
-
     #[test]
-    fn checked_generic_reductions_are_bit_for_bit_unchanged() {
-        let measured = measurements();
-        assert_eq!(measured.len(), REFERENCE.len());
-        for ((what, re, im), (expected_what, expected_re, expected_im)) in
-            measured.iter().zip(REFERENCE)
-        {
-            assert_eq!(what, expected_what);
-            assert_eq!(
-                (re, im),
-                (expected_re, expected_im),
-                "{what}: ({re:#018x}, {im:#018x}) against the pre-widening reference"
-            );
-        }
+    fn checked_generic_reductions_match_a_double_double_oracle() {
+        let measurements = measurements();
+        assert_eq!(measurements.len(), 2 * 5);
+        assert_measurements_match_the_oracle(&measurements);
     }
 }
