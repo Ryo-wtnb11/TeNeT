@@ -1655,6 +1655,8 @@ mod tensoradd;
 
 mod tensortrace;
 
+mod tensorkit_scaling;
+
 mod tree_transform_exec;
 
 mod tree_transform_plan;

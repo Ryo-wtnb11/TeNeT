@@ -315,10 +315,12 @@ impl CudaTreeTransformExecutor {
     /// the host, so [`Overwrite`] still cleans a poisoned destination.
     ///
     /// `alpha == 0` (IEEE comparison, so `-0.0` is a zero scale) is *not* a
-    /// short circuit: the host multiplies there too, so a NaN or infinite
-    /// source must still poison the destination. It is submitted as an exact
-    /// zero 1x1 *operand* with descriptor `1`, because a descriptor `alpha` of
-    /// zero lets CUDA skip the source read.
+    /// short circuit: it is submitted as an exact zero 1x1 *operand* with
+    /// descriptor `1`, because a descriptor `alpha` of zero lets CUDA skip the
+    /// source read, so a NaN or infinite source still poisons the
+    /// destination. The host no longer does (#1438): it follows
+    /// VectorInterface's `scale(x, 0) = zero(x) * 0` and writes zeros. This
+    /// device route is unchanged until the device leaf of #1438 aligns it.
     ///
     /// Disclosed differences from the host's arithmetic, all within dtype
     /// tolerance and none of them a change of the written block set:
@@ -420,9 +422,9 @@ impl CudaTreeTransformExecutor {
     /// replay uploads nothing more: θ is a descriptor scalar, not an operand.
     ///
     /// `alpha == 0` keeps the zero-operand route of [`Self::replay`] and ignores
-    /// θ: the written values are `0 * x`, NaN for a NaN source, as the host's
-    /// `θ * (0 * x)`; only the sign of an exact zero may differ (never compare
-    /// bitwise). A fermionic twist is `±1`, so `alpha * θ_b` is non-zero for
+    /// θ: the written values are `0 * x`, NaN for a NaN source, where the
+    /// host now writes zeros (#1438, see above); for a finite source only the
+    /// sign of an exact zero may differ (never compare bitwise). A fermionic twist is `±1`, so `alpha * θ_b` is non-zero for
     /// every non-zero `alpha`; a θ that would make it zero is rejected, since a
     /// zero descriptor alpha would let CUDA skip the source read.
     ///

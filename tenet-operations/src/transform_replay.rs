@@ -19,6 +19,7 @@ use tenet_dense::{strided_batch_runs_into, DenseExecutor, DenseGemmBatchJob};
 use crate::host_scratch::HostScratchBuffer;
 use crate::kernel_adapter::for_each_fused_span;
 use crate::owned_overwrite_buffer::initialize_owned;
+use crate::scalar::scale_value;
 use crate::storage_scratch::{StorageTreeTransformWorkspace, TreeTransformScratchBuffers};
 use crate::strided::offset_to_isize;
 use crate::task_view::TreeTransformTaskView;
@@ -1219,8 +1220,11 @@ mod inactive_destination_tests {
         assert!(dst.data().iter().all(|value| value.is_nan()));
     }
 
+    /// What: `beta = 0` scales an inactive destination by VectorInterface's
+    /// `scale(x, 0) = zero(x) * 0`, so a NaN there becomes zero rather than
+    /// `0 * NaN` (#1438), as TensorKit's `scale!(tdst, β)` does.
     #[test]
-    fn generic_beta_zero_keeps_existing_ieee_inactive_behavior() {
+    fn generic_beta_zero_wipes_nan_in_inactive_destinations() {
         let (mut dst, src, structure) = fixture();
         dst.data_mut().fill(f64::NAN);
 
@@ -1238,7 +1242,7 @@ mod inactive_destination_tests {
         .unwrap();
 
         assert_eq!(dst.data()[0], 6.0);
-        assert!(dst.data()[1].is_nan());
+        assert_eq!(dst.data()[1].to_bits(), 0.0f64.to_bits());
     }
 
     #[test]
@@ -3152,6 +3156,79 @@ mod owned_overwrite_tests {
         );
     }
 
+    #[test]
+    fn owned_writer_zero_scales_write_zeros_over_non_finite_sources() {
+        // What: the uninitialized writer follows VectorInterface's
+        // `scale(x, 0) = zero(x) * 0` (#1438) for a zero caller alpha and for
+        // a zero structural coefficient in a Single block, and for a zero
+        // alpha in a Multi scatter whose recoupling GEMM saw `inf`: every
+        // output is `0.0`, as TensorKit's `permute!(tdst, tsrc, p, 0, 0)`
+        // (and `scale(Inf, 0.0) == 0.0`) gives.
+        let non_finite = [f64::INFINITY, f64::NAN, f64::NEG_INFINITY, 1.0, -0.0, 2.0];
+        let structure = canonical_structure(0);
+        for (alpha, coefficient) in [(0.0, -2.0), (1.0, 0.0), (3.0, 0.0)] {
+            let transform = TreeTransformStructure::compile_structures(
+                &structure,
+                &structure,
+                &[TreeTransformBlockSpec::single(0, 0, coefficient)],
+            )
+            .unwrap();
+            let actual = try_tree_transform_structure_overwrite_owned_raw(
+                &mut DefaultDenseExecutor::new(),
+                &mut TreeTransformWorkspace::default(),
+                &transform,
+                &structure,
+                &structure,
+                1,
+                &non_finite,
+                alpha,
+                1,
+            )
+            .unwrap()
+            .unwrap();
+            assert!(
+                actual.iter().all(|&value| value == 0.0),
+                "alpha {alpha}, coefficient {coefficient}: {actual:?}"
+            );
+        }
+
+        let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+            TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap(),
+            FusionTreeHomSpace::new(
+                FusionProductSpace::new([z2_leg(1, 1)]),
+                FusionProductSpace::new([z2_leg(1, 1)]),
+            ),
+            &Z2FusionRule,
+            [vec![1, 1], vec![1, 1]],
+        )
+        .unwrap();
+        let structure = Arc::clone(space.subblock_structure());
+        let transform = TreeTransformStructure::compile_structures(
+            &structure,
+            &structure,
+            &[TreeTransformBlockSpec::multi(
+                vec![0, 1],
+                vec![0, 1],
+                vec![2.0, 3.0, 5.0, 7.0],
+            )],
+        )
+        .unwrap();
+        let actual = try_tree_transform_structure_overwrite_owned_raw(
+            &mut DefaultDenseExecutor::new(),
+            &mut TreeTransformWorkspace::default(),
+            &transform,
+            &structure,
+            &structure,
+            1,
+            &[f64::INFINITY, f64::NEG_INFINITY],
+            0.0,
+            1,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(actual, [0.0, 0.0]);
+    }
+
     fn pool(threads: usize) -> rayon::ThreadPool {
         rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
@@ -3583,6 +3660,7 @@ fn write_uninit_layout_from_source<D, C>(
 where
     D: Copy
         + Mul<D, Output = D>
+        + Zero
         + One
         + PartialEq
         + ConjugateValue
@@ -3601,6 +3679,19 @@ where
             src,
             fused_index,
             move |value: D| value.maybe_conj(conjugate),
+        );
+    }
+    if scale.is_zero() {
+        let zero = scale.apply(D::zero());
+        return write_uninit_layout_mapped(
+            layouts,
+            dst_index,
+            src_index,
+            dst,
+            dst_start,
+            src,
+            fused_index,
+            move |_: D| zero,
         );
     }
     match scale {
@@ -3689,11 +3780,13 @@ fn write_uninit_layout_from_packed<D>(
     fused_index: &mut [usize],
 ) -> Result<(), OperationError>
 where
-    D: Copy + Mul<D, Output = D> + One + PartialEq,
+    D: Copy + Mul<D, Output = D> + Zero + One + PartialEq,
 {
     let layout = layouts.entry(dst_index);
     // Why the identity arm: `1 * (inf + 0i)` is `inf + NaN i`, so the scatter
-    // must copy rather than multiply when the caller's alpha is one.
+    // must copy rather than multiply when the caller's alpha is one. A zero
+    // alpha gives `scale_value`'s exact zero even where the recoupling GEMM
+    // left a NaN in `packed`, as TensorKit's scatter `tensoradd!` does.
     let identity = alpha.is_one();
     if let Some(baked) = layouts.fused_baked(dst_index) {
         // The scatter role bakes src = packed (column-major) strides, so the
@@ -3719,7 +3812,7 @@ where
                 dst_offset,
                 src_offset,
                 fused_index,
-                move |value| alpha * value,
+                move |value| scale_value(value, alpha),
             )?;
         }
         return Ok(());
@@ -3732,7 +3825,11 @@ where
             layout.offset - dst_start,
         )?;
         let value = packed[packed_offset + linear];
-        dst[dst_index].write(if identity { value } else { alpha * value });
+        dst[dst_index].write(if identity {
+            value
+        } else {
+            scale_value(value, alpha)
+        });
     }
     Ok(())
 }

@@ -226,6 +226,19 @@ where
         }
     }
 
+    /// Whether this scale is zero, so that it contributes VectorInterface's
+    /// `zero(x) * α` whatever the source holds.
+    #[inline]
+    pub fn is_zero(self) -> bool
+    where
+        D: Zero,
+    {
+        match self {
+            Self::Structural(coefficient) => D::coefficient_as_data(coefficient).is_zero(),
+            Self::Data(scale) => scale.is_zero(),
+        }
+    }
+
     /// `scale * value`, with a `Structural` coefficient acting in its own type
     /// (componentwise for a real coefficient on a complex payload).
     #[inline]
@@ -237,6 +250,41 @@ where
             Self::Structural(coefficient) => value.scale_by_coefficient(coefficient),
             Self::Data(scale) => scale * value,
         }
+    }
+
+    /// VectorInterface's `scale(x, α) = (iszero(α) ? zero(x) : x) * α` with
+    /// this scale as `α`, and no multiply at exactly one (TensorKit's `One()`).
+    /// Callers that pick one element op per block test
+    /// [`is_identity`](Self::is_identity) and [`is_zero`](Self::is_zero)
+    /// themselves.
+    #[inline]
+    pub fn scale(self, value: D) -> D
+    where
+        D: Mul<D, Output = D> + Zero,
+    {
+        if self.is_identity() {
+            value
+        } else if self.is_zero() {
+            self.apply(D::zero())
+        } else {
+            self.apply(value)
+        }
+    }
+}
+
+/// VectorInterface's `scale(x, α) = (iszero(α) ? zero(x) : x) * α` for a
+/// payload-typed `α`: a zero scale gives an exact zero rather than
+/// `0 * inf = NaN`. An exact one still multiplies here; the callers that
+/// stand for TensorKit's `One()` keep their own identity arm.
+#[inline]
+pub(crate) fn scale_value<T>(value: T, alpha: T) -> T
+where
+    T: Copy + Mul<T, Output = T> + Zero,
+{
+    if alpha.is_zero() {
+        T::zero() * alpha
+    } else {
+        alpha * value
     }
 }
 

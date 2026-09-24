@@ -14163,8 +14163,11 @@ where
     ///
     /// Device and Host agree to dtype tolerance, never bitwise: the sum order
     /// is cuTENSOR's and the coefficient is applied as `(alpha * c) * sum`
-    /// where the Host rounds `(alpha * sum) * c`. A zero coefficient reads the
-    /// source against the zero template, so NaN/Inf propagate as on Host.
+    /// where the Host adds `(alpha * c) * a_i` per traced element, as
+    /// TensorOperations does. Not yet aligned with the Host (#1438): a zero
+    /// coefficient reads the source against the zero template, so NaN/Inf
+    /// propagate where the Host skips the term, and a sum that overflows is
+    /// `inf` where the Host's per-element scale may stay finite.
     ///
     /// # Errors
     ///
