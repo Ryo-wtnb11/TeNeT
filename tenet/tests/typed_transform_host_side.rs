@@ -266,8 +266,8 @@ fn the_host_overwrite_into_preconditions_have_a_fixed_order_and_wording() {
 fn host_overwrite_into_clears_a_poisoned_destination_and_zero_scales_to_zeros() {
     // The three Host destination semantics: Overwrite clears whatever the
     // destination held, `alpha == 0` writes zeros whatever the source holds
-    // (#1438; the device still computes `0 * src` until its leaf aligns it),
-    // and an identity axis list is still written rather than short circuited.
+    // (#1438), and an identity axis list is still written rather than short
+    // circuited.
     let runtime = Runtime::builder().build().unwrap();
     let v = u1_leg();
     let source: TensorMap<_, f64> =

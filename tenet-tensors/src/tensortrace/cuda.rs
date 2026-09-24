@@ -152,22 +152,14 @@ where
     ctx.reserve_scaled_template::<D>(largest_scaled)
         .map_err(OperationError::Dense)?;
     // Terms sharing `α′` run together, longest traced extent first, so the
-    // scaled template is refilled once per distinct `α′`; the order of terms
-    // adding into one destination changes rounding only.
-    let mut distinct: Vec<D> = Vec::new();
-    let mut group = Vec::with_capacity(moves.len());
-    for (_, _, scale, _) in &moves {
-        let index = distinct
-            .iter()
-            .position(|value| value == scale)
-            .unwrap_or_else(|| {
-                distinct.push(*scale);
-                distinct.len() - 1
-            });
-        group.push(index);
-    }
+    // scaled template is refilled once per distinct `α′`: one sort on the
+    // bit pattern, O(T log T). The order of terms adding into one
+    // destination changes rounding only.
     let mut order: Vec<usize> = (0..moves.len()).collect();
-    order.sort_by_key(|&term| (group[term], std::cmp::Reverse(moves[term].3)));
+    order.sort_by_key(|&term| {
+        let (_, _, scale, len) = &moves[term];
+        (scale.bit_pattern(), std::cmp::Reverse(*len))
+    });
     let conjugate = descriptor.source_conjugate();
     for (src_region, dst_region, scale, _) in order.into_iter().map(|term| &moves[term]) {
         cuda_region_trace_accumulate::<D>(

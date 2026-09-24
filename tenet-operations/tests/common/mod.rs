@@ -14,9 +14,6 @@ use num_complex::{Complex32, Complex64};
 use tenet_core::{BlockKey, BlockSpec, BlockStructure};
 use tenet_operations::{TreeTransformBlockSpec, TreeTransformStructure};
 
-/// Payload dtypes the fixtures are replayed with, plus the host arithmetic the
-/// oracle needs. Deliberately not a TeNeT trait: the oracle must not share a
-/// scalar contract with the code under test.
 /// VectorInterface's `scale(x, α) = (iszero(α) ? zero(x) : x) * α`.
 fn vi_scale<T: TestScalar>(value: T, alpha: T) -> T {
     if alpha == T::zero() {
@@ -26,6 +23,9 @@ fn vi_scale<T: TestScalar>(value: T, alpha: T) -> T {
     }
 }
 
+/// Payload dtypes the fixtures are replayed with, plus the host arithmetic the
+/// oracle needs. Deliberately not a TeNeT trait: the oracle must not share a
+/// scalar contract with the code under test.
 pub trait TestScalar: Copy + std::fmt::Debug + PartialEq + 'static {
     const NAME: &'static str;
     /// Machine epsilon of this payload's real lane, widened, so a tolerance

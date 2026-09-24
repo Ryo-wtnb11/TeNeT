@@ -71,6 +71,20 @@ pub trait CudaScalar:
     /// The backend's dtype-erased GEMM coefficient for this payload.
     fn contraction_scalar(self) -> ContractionScalar;
 
+    /// The value's bit pattern, real then imaginary part: a total order key
+    /// for grouping equal scales (the float order is only partial).
+    #[doc(hidden)]
+    fn bit_pattern(self) -> [u64; 2] {
+        match self.contraction_scalar() {
+            ContractionScalar::F32(value) => [u64::from(value.to_bits()), 0],
+            ContractionScalar::F64(value) => [value.to_bits(), 0],
+            ContractionScalar::C32(value) => {
+                [u64::from(value.re.to_bits()), u64::from(value.im.to_bits())]
+            }
+            ContractionScalar::C64(value) => [value.re.to_bits(), value.im.to_bits()],
+        }
+    }
+
     /// The typed tensor behind a dtype-erased device buffer, if the dtypes agree.
     fn typed(tensor: &Tensor) -> Option<&TypedTensor<Self>> {
         tensor.as_typed::<Self>()
