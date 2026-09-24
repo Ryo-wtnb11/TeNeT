@@ -3,6 +3,7 @@ use core::mem::MaybeUninit;
 use core::ops::Range;
 
 use num_complex::Complex64;
+use strided_kernel::{CopyPlan, MaybeSendSync, RawStridedMut, RawStridedRef, StridedError};
 
 use crate::owned_overwrite_buffer::initialize_owned;
 use crate::ConjugateValue;
@@ -120,7 +121,7 @@ pub enum OwnedCatC64Source<'a> {
 
 /// Returns `None` unless the compiled copies prove a complete physical overwrite.
 #[doc(hidden)]
-pub fn try_cat_owned_raw<D: ConjugateValue>(
+pub fn try_cat_owned_raw<D: ConjugateValue + MaybeSendSync>(
     required_len: usize,
     side: OwnedCatSide,
     copies: &[OwnedCatCopy],
@@ -273,12 +274,27 @@ fn source_bounds_hold(copy: &OwnedCatCopy, source_len: usize) -> bool {
         .is_some_and(|last| last < source_len)
 }
 
-fn write_same<D: ConjugateValue>(
+fn write_same<D: ConjugateValue + MaybeSendSync>(
     destination: &mut [MaybeUninit<D>],
     source: &[D],
     copy: &OwnedCatCopy,
 ) {
     if copy.rows == 0 || copy.cols == 0 {
+        return;
+    }
+    if !copy.conjugate && copy.source_row_stride != 1 {
+        // `validate_owned_cat` proved every source and destination slot in
+        // bounds and `rows <= leading_dimension`, so strided's bounds and
+        // injectivity checks cannot reject this layout. On `Ok`, strided
+        // initializes every logical destination slot, which is the coverage
+        // `initialize_owned` relies on; a panic here unwinds before its
+        // `set_len`, as with the indexing panics of the loops below.
+        copy_strided_rows(destination, source, copy).expect("owned cat geometry was validated");
+        #[cfg(test)]
+        for column in 0..copy.cols {
+            let start = copy.destination_offset + column * copy.destination_leading_dimension;
+            observe_writes(start..start + copy.rows);
+        }
         return;
     }
     if !copy.conjugate
@@ -312,6 +328,34 @@ fn write_same<D: ConjugateValue>(
             }
         }
     }
+}
+
+/// One compiled rank-2 strided copy into the uninitialized destination; the
+/// replay allocates nothing at rank 2 (`RAW_FUSED_RANK_LIMIT` is 8).
+fn copy_strided_rows<D: Copy + MaybeSendSync>(
+    destination: &mut [MaybeUninit<D>],
+    source: &[D],
+    copy: &OwnedCatCopy,
+) -> strided_kernel::Result<()> {
+    let signed = |value: usize| isize::try_from(value).map_err(|_| StridedError::OffsetOverflow);
+    // A unit extent never advances its axis, and validation leaves its stride
+    // unbounded, so it is zeroed rather than converted.
+    let stride = |extent: usize, value: usize| if extent > 1 { signed(value) } else { Ok(0) };
+    let dims = [copy.rows, copy.cols];
+    let source_strides = [
+        stride(copy.rows, copy.source_row_stride)?,
+        stride(copy.cols, copy.source_column_stride)?,
+    ];
+    let destination_strides = [1, stride(copy.cols, copy.destination_leading_dimension)?];
+    let source = RawStridedRef::new(source, &dims, &source_strides, signed(copy.source_offset)?)?;
+    let mut destination = RawStridedMut::new(
+        destination,
+        &dims,
+        &destination_strides,
+        signed(copy.destination_offset)?,
+    )?;
+    CopyPlan::compile(&dims, &destination_strides, &source_strides)?
+        .execute_uninit(&mut destination, &source)
 }
 
 fn write_widened(destination: &mut [MaybeUninit<Complex64>], source: &[f64], copy: &OwnedCatCopy) {
@@ -452,6 +496,60 @@ mod tests {
             ]
         );
         assert_eq!(bitmap, [1; 4]);
+    }
+
+    #[test]
+    fn strided_row_writer_copies_transposed_sources_bit_exactly() {
+        // What: non-conjugating copies whose source rows are strided (a real
+        // or unconjugated adjoint) land in column-major order bit-exactly and
+        // overwrite every address once, on both sides and next to a
+        // contiguous slab.
+        let lhs = [1., 4., 2., 5., 3., 6.]; // 2x3 read transposed: rows stride 2
+        let rhs = [-0.0, f64::NAN, 7.5, f64::INFINITY];
+        let copies = [
+            copy(0, 0, 0, [3, 2], [2, 1], 3, 0..6, false),
+            copy(1, 0, 6, [3, 1], [1, 3], 3, 6..9, false),
+        ];
+        let (output, bitmap) = with_bitmap(9, || {
+            try_cat_owned_raw(9, OwnedCatSide::Domain, &copies, [&lhs, &rhs[..3]]).unwrap()
+        });
+        let expected = [1., 2., 3., 4., 5., 6., -0.0, f64::NAN, 7.5];
+        assert_eq!(
+            output.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+            expected.map(f64::to_bits)
+        );
+        assert_eq!(bitmap, [1; 9]);
+
+        // Codomain: a strided-row slab of 2 rows above a 1-row slab, with a
+        // source offset and a column stride of 1.
+        let copies = [
+            copy(0, 1, 0, [2, 2], [2, 1], 3, 0..6, false),
+            copy(1, 0, 2, [1, 2], [1, 1], 3, 0..6, false),
+        ];
+        let (output, bitmap) = with_bitmap(6, || {
+            try_cat_owned_raw(6, OwnedCatSide::Codomain, &copies, [&lhs, &rhs[2..]]).unwrap()
+        });
+        let expected = [4., 5., 7.5, 2., 3., f64::INFINITY];
+        assert_eq!(
+            output.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+            expected.map(f64::to_bits)
+        );
+        assert_eq!(bitmap, [1; 6]);
+    }
+
+    #[test]
+    fn strided_row_writer_does_not_conjugate_complex_values() {
+        // What: the non-conjugating strided path moves complex values
+        // unchanged (the conjugating one is covered by the mapped writer).
+        let source = [
+            Complex64::new(1., 1.),
+            Complex64::new(2., 2.),
+            Complex64::new(3., 3.),
+            Complex64::new(4., 4.),
+        ];
+        let copies = [copy(0, 0, 0, [2, 2], [2, 1], 2, 0..4, false)];
+        let output = try_cat_owned_raw(4, OwnedCatSide::Domain, &copies, [&source, &[]]).unwrap();
+        assert_eq!(output, [source[0], source[2], source[1], source[3]]);
     }
 
     #[test]
