@@ -30,7 +30,9 @@ use super::backend::TensorContractBackend;
 #[cfg(test)]
 use super::dynamic_space::encoded_layout_primer;
 use super::dynamic_space::{DynamicFusionMapSpace, FusionOperandLayout, LayoutKeyBuilder};
-use super::fusion::{FusionContractOrientation, FusionContractPlan};
+use super::fusion::{
+    contract_twist_on_physical_lhs, FusionContractOrientation, FusionContractPlan,
+};
 use super::fusion_block::{
     tensorcontract_core_fusion_blocks_into_raw, FusionBlockContractWorkspace,
 };
@@ -225,28 +227,55 @@ fn source_is_borrowable_core_layout(
         || core_structure.as_ref() == source_structure.as_ref()
 }
 
-fn rhs_source_is_borrowable<R>(
+/// Which physical operands are read in place, and which one carries the
+/// fermionic contraction twist when there is one.
+#[derive(Clone, Copy, Debug)]
+struct SourceBorrowing {
+    lhs_borrowed: bool,
+    rhs_borrowed: bool,
+    twist_lhs: bool,
+}
+
+/// Borrowing once the fermionic contraction twist, if any, claims one
+/// operand: the one the layout already copies when exactly one is copied
+/// (so no extra materialization), otherwise the smaller
+/// ([`contract_twist_on_physical_lhs`]). A twisted operand is never borrowed.
+fn resolve_source_borrowing<R>(
     rule: &R,
-    source_space: &DynamicFusionMapSpace,
-    source_structure: &Arc<BlockStructure>,
-    core_space: &DynamicFusionMapSpace,
-    operation: &TreeTransformOperation,
-    source_conjugate: bool,
-    core_axes: TensorContractSpec<'_>,
-) -> Result<bool, OperationError>
+    plan: &FusionContractPlan,
+    lhs_core: &DynamicFusionMapSpace,
+    rhs_core: &DynamicFusionMapSpace,
+    lhs_layout_borrowable: bool,
+    rhs_layout_borrowable: bool,
+) -> Result<SourceBorrowing, OperationError>
 where
     R: MultiplicityFreeRigidSymbols,
 {
-    if !source_is_borrowable_core_layout(
-        source_space,
-        source_structure,
-        core_space,
-        operation,
-        source_conjugate,
-    ) {
-        return Ok(false);
+    let reverse = plan.orientation() == FusionContractOrientation::RhsLhs;
+    let core_right = if reverse { lhs_core } else { rhs_core };
+    if !rhs_contract_requires_twist(rule, core_right, plan.core_axes().as_spec())? {
+        return Ok(SourceBorrowing {
+            lhs_borrowed: lhs_layout_borrowable,
+            rhs_borrowed: rhs_layout_borrowable,
+            twist_lhs: false,
+        });
     }
-    Ok(!rhs_contract_requires_twist(rule, core_space, core_axes)?)
+    let required_len = |space: &DynamicFusionMapSpace| {
+        space
+            .required_len()
+            .map_err(OperationError::from_core_preserving_context)
+    };
+    let twist_lhs = contract_twist_on_physical_lhs(
+        reverse,
+        !lhs_layout_borrowable,
+        !rhs_layout_borrowable,
+        || Ok((required_len(lhs_core)?, required_len(rhs_core)?)),
+    )?;
+    Ok(SourceBorrowing {
+        lhs_borrowed: lhs_layout_borrowable && !twist_lhs,
+        rhs_borrowed: rhs_layout_borrowable && twist_lhs,
+        twist_lhs,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -301,25 +330,13 @@ where
         plan.lhs_transform(),
         plan.lhs_source_conjugate(),
     )?;
-    let lhs_borrowed = if reverse {
-        rhs_source_is_borrowable(
-            rule,
-            &lhs_source_space,
-            lhs.structure(),
-            &lhs_transformed.0,
-            plan.lhs_transform(),
-            plan.lhs_source_conjugate(),
-            plan.core_axes().as_spec(),
-        )?
-    } else {
-        source_is_borrowable_core_layout(
-            &lhs_source_space,
-            lhs.structure(),
-            &lhs_transformed.0,
-            plan.lhs_transform(),
-            plan.lhs_source_conjugate(),
-        )
-    };
+    let lhs_layout_borrowable = source_is_borrowable_core_layout(
+        &lhs_source_space,
+        lhs.structure(),
+        &lhs_transformed.0,
+        plan.lhs_transform(),
+        plan.lhs_source_conjugate(),
+    );
     let (rhs_space, rhs_replay_structure) = transformed_source_space_and_structure(
         rule,
         rhs,
@@ -330,25 +347,31 @@ where
         rhs.fusion_space()
             .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
     );
-    let rhs_borrowed = if reverse {
-        source_is_borrowable_core_layout(
-            &rhs_source_space,
-            rhs.structure(),
-            &rhs_space,
-            plan.rhs_transform(),
-            plan.rhs_source_conjugate(),
-        )
+    let rhs_layout_borrowable = source_is_borrowable_core_layout(
+        &rhs_source_space,
+        rhs.structure(),
+        &rhs_space,
+        plan.rhs_transform(),
+        plan.rhs_source_conjugate(),
+    );
+    let SourceBorrowing {
+        lhs_borrowed,
+        rhs_borrowed,
+        twist_lhs,
+    } = resolve_source_borrowing(
+        rule,
+        plan,
+        &lhs_transformed.0,
+        &rhs_space,
+        lhs_layout_borrowable,
+        rhs_layout_borrowable,
+    )?;
+    let core_right_space = if reverse {
+        &lhs_transformed.0
     } else {
-        rhs_source_is_borrowable(
-            rule,
-            &rhs_source_space,
-            rhs.structure(),
-            &rhs_space,
-            plan.rhs_transform(),
-            plan.rhs_source_conjugate(),
-            plan.core_axes().as_spec(),
-        )?
+        &rhs_space
     };
+    let core_right_homspace = core_right_space.homspace();
     let mut lhs_core = (!lhs_borrowed)
         .then(|| DynamicFusionScratch::<D>::zeroed(Arc::new(lhs_transformed.0.clone())))
         .transpose()?;
@@ -368,12 +391,14 @@ where
             plan.lhs_source_conjugate(),
             D::one(),
         )?;
-        if reverse {
+        if twist_lhs {
             let lhs_scratch_space = lhs_core.space().clone();
-            apply_rhs_contract_twist(
+            apply_contract_twist(
                 &mut crate::StridedHostKernelAdapter::default(),
                 rule,
                 &lhs_scratch_space,
+                core_right_homspace,
+                !reverse,
                 lhs_core.data_mut(),
                 plan.core_axes().as_spec().rhs_contracting_axes(),
             )?;
@@ -391,12 +416,14 @@ where
             plan.rhs_source_conjugate(),
             D::one(),
         )?;
-        if !reverse {
+        if !twist_lhs {
             let rhs_scratch_space = rhs_core.space().clone();
-            apply_rhs_contract_twist(
+            apply_contract_twist(
                 &mut crate::StridedHostKernelAdapter::default(),
                 rule,
                 &rhs_scratch_space,
+                core_right_homspace,
+                reverse,
                 rhs_core.data_mut(),
                 plan.core_axes().as_spec().rhs_contracting_axes(),
             )?;
@@ -828,26 +855,36 @@ pub(crate) struct DynamicTreeExecutionArtifact<C = f64> {
     rhs_transform: DynamicFusionTransformedSourceEntry<C>,
     lhs_borrowed: bool,
     rhs_borrowed: bool,
-    core_right_twist: Arc<[RhsTwistAction<C>]>,
-    /// The same twist as `(core-right destination block offset, θ_b ≠ 1)`,
+    /// The fermionic contraction twist scales the physical lhs's
+    /// materialized core source (else the physical rhs's); meaningful only
+    /// when `source_twist` is non-empty.
+    twist_lhs: bool,
+    source_twist: Arc<[RhsTwistAction<C>]>,
+    /// The same twist as `(twisted destination block offset, θ_b ≠ 1)`,
     /// sorted by offset and without zero-element blocks, for a replay that
     /// folds θ_b into the move writing block b instead of scaling afterwards
     /// (the device, `replay_with_destination_scales`). Built in the loop that
-    /// builds `core_right_twist`, so the two cannot disagree.
+    /// builds `source_twist`, so the two cannot disagree.
     #[cfg_attr(not(any(feature = "cuda", test)), allow(dead_code))]
-    core_right_destination_scales: Box<[(usize, C)]>,
+    source_twist_destination_scales: Box<[(usize, C)]>,
     core_dst: Option<DynamicFusionCoreDstEntry<C>>,
     block_plan: Arc<FusionBlockContractPlan<C>>,
 }
 
 impl<C: DenseBlockScalar> DynamicTreeExecutionArtifact<C> {
-    pub(crate) fn requires_core_right_twist(&self) -> bool {
-        !self.core_right_twist.is_empty()
+    pub(crate) fn requires_source_twist(&self) -> bool {
+        !self.source_twist.is_empty()
+    }
+
+    /// Whether the twist, if any, scales the physical lhs's core source.
+    #[cfg(any(feature = "cuda", test))]
+    pub(crate) fn twists_lhs(&self) -> bool {
+        self.twist_lhs
     }
 
     #[cfg(any(feature = "cuda", test))]
-    pub(crate) fn core_right_destination_scales(&self) -> &[(usize, C)] {
-        &self.core_right_destination_scales
+    pub(crate) fn source_twist_destination_scales(&self) -> &[(usize, C)] {
+        &self.source_twist_destination_scales
     }
 
     #[cfg(feature = "cuda")]
@@ -869,7 +906,7 @@ impl<C: DenseBlockScalar> DynamicTreeExecutionArtifact<C> {
             .then(|| self.block_plan.inactive_destination_regions().len())
     }
 
-    #[cfg(all(test, feature = "cuda"))]
+    #[cfg(test)]
     pub(crate) fn borrowed_sources(&self) -> (bool, bool) {
         (self.lhs_borrowed, self.rhs_borrowed)
     }
@@ -879,7 +916,7 @@ impl<C: DenseBlockScalar> DynamicTreeExecutionArtifact<C> {
     #[cfg(test)]
     pub(crate) fn host_twist_scales(&self) -> Vec<(usize, C)> {
         let mut scales: Vec<(usize, C)> = self
-            .core_right_twist
+            .source_twist
             .iter()
             .filter(|action| !action.shape.contains(&0))
             .map(|action| (usize::try_from(action.offset).unwrap(), action.factor))
@@ -900,8 +937,8 @@ impl<C: DenseBlockScalar> DynamicTreeExecutionArtifact<C> {
     }
 
     #[cfg(test)]
-    pub(crate) fn core_right_transform_structure(&self) -> &TreeTransformStructure<C> {
-        if self.orientation == FusionContractOrientation::RhsLhs {
+    pub(crate) fn twisted_transform_structure(&self) -> &TreeTransformStructure<C> {
+        if self.twist_lhs {
             &self.lhs_transform.transform_structure
         } else {
             &self.rhs_transform.transform_structure
@@ -931,7 +968,6 @@ where
     C: DenseBlockScalar,
 {
     let source_start = PROFILED.then(std::time::Instant::now);
-    let reverse = plan.orientation() == FusionContractOrientation::RhsLhs;
     let lhs_transform = dynamic_space_cache.get_or_compile_transformed_source(
         tree_context,
         rule,
@@ -941,25 +977,13 @@ where
         plan.lhs_source_conjugate(),
         layout_primer,
     )?;
-    let lhs_borrowed = if reverse {
-        rhs_source_is_borrowable(
-            rule,
-            lhs_space,
-            lhs_structure,
-            &lhs_transform.space,
-            plan.lhs_transform(),
-            plan.lhs_source_conjugate(),
-            plan.core_axes().as_spec(),
-        )?
-    } else {
-        source_is_borrowable_core_layout(
-            lhs_space,
-            lhs_structure,
-            &lhs_transform.space,
-            plan.lhs_transform(),
-            plan.lhs_source_conjugate(),
-        )
-    };
+    let lhs_layout_borrowable = source_is_borrowable_core_layout(
+        lhs_space,
+        lhs_structure,
+        &lhs_transform.space,
+        plan.lhs_transform(),
+        plan.lhs_source_conjugate(),
+    );
     let rhs_transform = dynamic_space_cache.get_or_compile_transformed_source(
         tree_context,
         rule,
@@ -969,25 +993,21 @@ where
         plan.rhs_source_conjugate(),
         layout_primer,
     )?;
-    let rhs_borrowed = if reverse {
-        source_is_borrowable_core_layout(
-            rhs_space,
-            rhs_structure,
-            &rhs_transform.space,
-            plan.rhs_transform(),
-            plan.rhs_source_conjugate(),
-        )
-    } else {
-        rhs_source_is_borrowable(
-            rule,
-            rhs_space,
-            rhs_structure,
-            &rhs_transform.space,
-            plan.rhs_transform(),
-            plan.rhs_source_conjugate(),
-            plan.core_axes().as_spec(),
-        )?
-    };
+    let rhs_layout_borrowable = source_is_borrowable_core_layout(
+        rhs_space,
+        rhs_structure,
+        &rhs_transform.space,
+        plan.rhs_transform(),
+        plan.rhs_source_conjugate(),
+    );
+    let borrowing = resolve_source_borrowing(
+        rule,
+        plan,
+        &lhs_transform.space,
+        &rhs_transform.space,
+        lhs_layout_borrowable,
+        rhs_layout_borrowable,
+    )?;
     finish_dynamic_tree_execution_artifact::<_, _, _, _, _, PROFILED>(
         tree_context,
         dynamic_space_cache,
@@ -997,8 +1017,7 @@ where
         dst_space,
         lhs_transform,
         rhs_transform,
-        lhs_borrowed,
-        rhs_borrowed,
+        borrowing,
         source_start,
         profile,
     )
@@ -1031,7 +1050,6 @@ where
     C: DenseBlockScalar,
 {
     let source_start = PROFILED.then(std::time::Instant::now);
-    let reverse = plan.orientation() == FusionContractOrientation::RhsLhs;
     debug_assert_eq!(
         plan.lhs_source_conjugate(),
         lhs.orientation() == FusionTreePairOrientation::Adjoint
@@ -1049,26 +1067,14 @@ where
         plan.lhs_transform(),
         layout_primer,
     )?;
-    let lhs_borrowed = lhs_direct
-        && if reverse {
-            rhs_source_is_borrowable(
-                rule,
-                lhs.storage_space(),
-                lhs.storage_space().structure(),
-                &lhs_transform.space,
-                plan.lhs_transform(),
-                false,
-                plan.core_axes().as_spec(),
-            )?
-        } else {
-            source_is_borrowable_core_layout(
-                lhs.storage_space(),
-                lhs.storage_space().structure(),
-                &lhs_transform.space,
-                plan.lhs_transform(),
-                false,
-            )
-        };
+    let lhs_layout_borrowable = lhs_direct
+        && source_is_borrowable_core_layout(
+            lhs.storage_space(),
+            lhs.storage_space().structure(),
+            &lhs_transform.space,
+            plan.lhs_transform(),
+            false,
+        );
     let rhs_direct = rhs.is_direct();
     let rhs_transform = compile_prelowered_source_transform(
         tree_context,
@@ -1078,26 +1084,22 @@ where
         plan.rhs_transform(),
         layout_primer,
     )?;
-    let rhs_borrowed = rhs_direct
-        && if reverse {
-            source_is_borrowable_core_layout(
-                rhs.storage_space(),
-                rhs.storage_space().structure(),
-                &rhs_transform.space,
-                plan.rhs_transform(),
-                false,
-            )
-        } else {
-            rhs_source_is_borrowable(
-                rule,
-                rhs.storage_space(),
-                rhs.storage_space().structure(),
-                &rhs_transform.space,
-                plan.rhs_transform(),
-                false,
-                plan.core_axes().as_spec(),
-            )?
-        };
+    let rhs_layout_borrowable = rhs_direct
+        && source_is_borrowable_core_layout(
+            rhs.storage_space(),
+            rhs.storage_space().structure(),
+            &rhs_transform.space,
+            plan.rhs_transform(),
+            false,
+        );
+    let borrowing = resolve_source_borrowing(
+        rule,
+        plan,
+        &lhs_transform.space,
+        &rhs_transform.space,
+        lhs_layout_borrowable,
+        rhs_layout_borrowable,
+    )?;
     let artifact = finish_dynamic_tree_execution_artifact::<_, _, _, _, _, PROFILED>(
         tree_context,
         dynamic_space_cache,
@@ -1107,8 +1109,7 @@ where
         dst_space,
         lhs_transform,
         rhs_transform,
-        lhs_borrowed,
-        rhs_borrowed,
+        borrowing,
         source_start,
         profile,
     )?;
@@ -1161,8 +1162,7 @@ fn finish_dynamic_tree_execution_artifact<RuleKey, BT, R, D, C, const PROFILED: 
     dst_space: &DynamicFusionMapSpace,
     lhs_transform: DynamicFusionTransformedSourceEntry<C>,
     rhs_transform: DynamicFusionTransformedSourceEntry<C>,
-    lhs_borrowed: bool,
-    rhs_borrowed: bool,
+    borrowing: SourceBorrowing,
     source_start: Option<std::time::Instant>,
     mut profile: Option<&mut TensorContractFusionProfile>,
 ) -> Result<DynamicTreeExecutionArtifact<C>, OperationError>
@@ -1181,23 +1181,25 @@ where
     } else {
         (&physical_lhs_core_space, &physical_rhs_core_space)
     };
-    let mut core_right_destination_scales = Vec::new();
-    let core_right_twist = compile_rhs_contract_twist(
+    let twisted_transform = if borrowing.twist_lhs {
+        &lhs_transform
+    } else {
+        &rhs_transform
+    };
+    let mut source_twist_destination_scales = Vec::new();
+    let source_twist = compile_contract_twist(
         rule,
-        core_right_space,
+        &twisted_transform.space,
+        core_right_space.homspace(),
+        borrowing.twist_lhs != reverse,
         plan.core_axes().as_spec().rhs_contracting_axes(),
-        Some(&mut core_right_destination_scales),
+        Some(&mut source_twist_destination_scales),
     )?;
-    core_right_destination_scales.sort_unstable_by_key(|&(offset, _)| offset);
-    if !core_right_destination_scales.is_empty() {
-        let core_right_transform = if reverse {
-            &lhs_transform
-        } else {
-            &rhs_transform
-        };
+    source_twist_destination_scales.sort_unstable_by_key(|&(offset, _)| offset);
+    if !source_twist_destination_scales.is_empty() {
         validate_uniform_multi_scales(
-            &core_right_transform.transform_structure,
-            &core_right_destination_scales,
+            &twisted_transform.transform_structure,
+            &source_twist_destination_scales,
         )?;
     }
     if let Some(start) = source_start {
@@ -1258,10 +1260,11 @@ where
         orientation: plan.orientation(),
         lhs_transform,
         rhs_transform,
-        lhs_borrowed,
-        rhs_borrowed,
-        core_right_twist,
-        core_right_destination_scales: core_right_destination_scales.into_boxed_slice(),
+        lhs_borrowed: borrowing.lhs_borrowed,
+        rhs_borrowed: borrowing.rhs_borrowed,
+        twist_lhs: borrowing.twist_lhs,
+        source_twist,
+        source_twist_destination_scales: source_twist_destination_scales.into_boxed_slice(),
         core_dst,
         block_plan,
     })
@@ -1411,11 +1414,11 @@ where
                 D::one(),
             )?;
         }
-        if reverse {
-            execute_rhs_contract_twist(
+        if artifact.twist_lhs {
+            execute_contract_twist(
                 &mut crate::StridedHostKernelAdapter::default(),
                 lhs_scratch.data_mut(),
-                &artifact.core_right_twist,
+                &artifact.source_twist,
             )?;
         }
         if let Some(start) = transform_start {
@@ -1460,11 +1463,11 @@ where
                 D::one(),
             )?;
         }
-        if !reverse {
-            execute_rhs_contract_twist(
+        if !artifact.twist_lhs {
+            execute_contract_twist(
                 &mut crate::StridedHostKernelAdapter::default(),
                 rhs_scratch.data_mut(),
-                &artifact.core_right_twist,
+                &artifact.source_twist,
             )?;
         }
         if let Some(start) = transform_start {
@@ -2553,12 +2556,22 @@ struct RhsTwistAction<C = f64> {
     factor: C,
 }
 
+/// The fermionic contraction twist of one materialized core operand `space`:
+/// `θ` of each block is read from its contracted fusion tree — the codomain
+/// tree of a core-right block, the domain tree of a core-left block (equal to
+/// the codomain tree of every core-right block it meets) — at the positions
+/// where `core_right`'s contracted leg is dual, as TensorKit twists `B`'s
+/// dual codomain legs or the matching `A` domain legs (`blas_contract!`,
+/// src/tensors/tensoroperations.jl:419/429 @cfaa073).
+///
 /// Also appends `(block offset, θ_b)` for every non-empty twisted block to
 /// `destination_scales` when given (unsorted; a zero-element block is left
 /// out because it can share its offset with the next block).
-fn compile_rhs_contract_twist<R>(
+fn compile_contract_twist<R>(
     rule: &R,
     space: &DynamicFusionMapSpace,
+    core_right: &FusionTreeHomSpace,
+    space_is_core_left: bool,
     rhs_contracting_axes: &[usize],
     mut destination_scales: Option<&mut Vec<(usize, R::Scalar)>>,
 ) -> Result<Arc<[RhsTwistAction<R::Scalar>]>, OperationError>
@@ -2578,11 +2591,16 @@ where
         let tenet_core::BlockKey::FusionTree(key) = block.key() else {
             continue;
         };
+        let contracted_tree = if space_is_core_left {
+            key.domain_tree()
+        } else {
+            key.codomain_tree()
+        };
         let factor = super::fusion::rhs_contract_twist_factor(
             rule,
-            space.homspace(),
+            core_right,
             rhs_contracting_axes,
-            key.codomain_tree(),
+            contracted_tree,
         )?;
         if factor != R::Scalar::one() {
             if let Some(scales) = destination_scales.as_deref_mut() {
@@ -2604,9 +2622,11 @@ where
 /// The Host twist compiler's `(offset, θ)` list for `space`, sorted: the test
 /// oracle for one physical operand's twist, independent of any artifact.
 #[cfg(test)]
-pub(super) fn rhs_contract_twist_scales<R>(
+pub(super) fn contract_twist_scales<R>(
     rule: &R,
     space: &DynamicFusionMapSpace,
+    core_right: &FusionTreeHomSpace,
+    space_is_core_left: bool,
     rhs_contracting_axes: &[usize],
 ) -> Result<Vec<(usize, R::Scalar)>, OperationError>
 where
@@ -2614,7 +2634,14 @@ where
     R::Scalar: DenseBlockScalar,
 {
     let mut scales = Vec::new();
-    compile_rhs_contract_twist(rule, space, rhs_contracting_axes, Some(&mut scales))?;
+    compile_contract_twist(
+        rule,
+        space,
+        core_right,
+        space_is_core_left,
+        rhs_contracting_axes,
+        Some(&mut scales),
+    )?;
     scales.sort_unstable_by_key(|&(offset, _)| offset);
     Ok(scales)
 }
@@ -2628,10 +2655,11 @@ fn destination_scale<C: DenseBlockScalar>(scales: &[(usize, C)], offset: usize) 
 }
 
 /// Asserts θ is uniform over the destination layouts of every Multi block of
-/// the core-right transform. Scaling each scatter by its own block's θ would
-/// be exact either way; what this pins is the invariant behind it: θ depends
-/// only on the destination codomain's uncoupled sectors at the contracted
-/// positions, which one Multi block shares, so a non-uniform list means the
+/// the twisted operand's transform. Scaling each scatter by its own block's θ
+/// would be exact either way; what this pins is the invariant behind it: θ
+/// depends only on the destination's contracted uncoupled sectors (codomain
+/// of a core-right block, domain of a core-left one), which one Multi block
+/// shares, so a non-uniform list means the
 /// twist and the transform disagree about block identity — an internal
 /// inconsistency of the compiled artifact, reported before any replay.
 pub(super) fn validate_uniform_multi_scales<C: DenseBlockScalar>(
@@ -2656,7 +2684,7 @@ pub(super) fn validate_uniform_multi_scales<C: DenseBlockScalar>(
             }
             let offset =
                 usize::try_from(layout.offset).map_err(|_| OperationError::InvalidArgument {
-                    message: "core-right transform destination layout has a negative offset",
+                    message: "twisted transform destination layout has a negative offset",
                 })?;
             let theta = destination_scale(scales, offset);
             match first {
@@ -2664,7 +2692,7 @@ pub(super) fn validate_uniform_multi_scales<C: DenseBlockScalar>(
                 Some(expected) if expected == theta => {}
                 Some(_) => {
                     return Err(OperationError::InvalidArgument {
-                        message: "fermionic core-right twist is not uniform within one \
+                        message: "fermionic contraction twist is not uniform within one \
                                   recoupling block",
                     })
                 }
@@ -2674,10 +2702,12 @@ pub(super) fn validate_uniform_multi_scales<C: DenseBlockScalar>(
     Ok(())
 }
 
-fn apply_rhs_contract_twist<A, R, D>(
+fn apply_contract_twist<A, R, D>(
     kernels: &mut A,
     rule: &R,
     space: &DynamicFusionMapSpace,
+    core_right: &FusionTreeHomSpace,
+    space_is_core_left: bool,
     data: &mut [D],
     rhs_contracting_axes: &[usize],
 ) -> Result<(), OperationError>
@@ -2687,14 +2717,21 @@ where
     R::Scalar: DenseBlockScalar,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<R::Scalar>,
 {
-    let actions = compile_rhs_contract_twist(rule, space, rhs_contracting_axes, None)?;
-    execute_rhs_contract_twist(kernels, data, &actions)
+    let actions = compile_contract_twist(
+        rule,
+        space,
+        core_right,
+        space_is_core_left,
+        rhs_contracting_axes,
+        None,
+    )?;
+    execute_contract_twist(kernels, data, &actions)
 }
 
 /// Applies the fermionic supertrace actions compiled with the tree artifact.
 /// Why not retain the rule here: numerical replay must not re-enter categorical
 /// coefficient evaluation or rebuild strided descriptors.
-fn execute_rhs_contract_twist<A, D, C>(
+fn execute_contract_twist<A, D, C>(
     kernels: &mut A,
     data: &mut [D],
     actions: &[RhsTwistAction<C>],

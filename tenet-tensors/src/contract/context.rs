@@ -1611,9 +1611,9 @@ where
     ///   packs/scatters in its core route, the device takes this artifact
     ///   (only reachable from expert layouts, never from typed tensors).
     ///
-    /// A fermionic core-right twist travels in the artifact, both as the
+    /// A fermionic contraction twist travels in the artifact, both as the
     /// Host's in-place scale actions and as the sorted per-block scale list
-    /// the device folds into the core-right source transform. A canonical
+    /// the device folds into the twisted operand's source transform. A canonical
     /// contraction whose twist varies within one coupled sector reaches here
     /// too (the first half declines it); the Host eager contraction runs the
     /// same artifact class for it, while the Host storage-direct entries

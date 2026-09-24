@@ -86,13 +86,14 @@ impl<C: DenseBlockScalar> StorageContractResolution<C> {
         Ok(Self { route })
     }
 
-    /// True when the route needs the fermionic twist of the core-right
-    /// operand: the Host scales it in place after its source transform, the
-    /// device folds it into that transform's destination writes.
-    pub fn requires_core_right_twist(&self) -> bool {
+    /// True when the route needs the fermionic contraction twist of one
+    /// materialized operand: the Host scales it in place after its source
+    /// transform, the device folds it into that transform's destination
+    /// writes.
+    pub fn requires_source_twist(&self) -> bool {
         match &self.route {
             StorageContractRoute::Core(_) => false,
-            StorageContractRoute::DynamicTree(artifact) => artifact.requires_core_right_twist(),
+            StorageContractRoute::DynamicTree(artifact) => artifact.requires_source_twist(),
         }
     }
 

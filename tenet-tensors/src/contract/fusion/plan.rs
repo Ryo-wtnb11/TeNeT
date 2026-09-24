@@ -99,6 +99,7 @@ pub(crate) struct FusionContractCandidateFacts {
     rhs_conjugate: bool,
     lhs_exact_identity_borrowable: bool,
     rhs_exact_identity_borrowable: bool,
+    lhs_requires_twist: bool,
     rhs_requires_twist: bool,
     output_exact_identity: bool,
     lhs_materialized_elements: usize,
@@ -142,6 +143,12 @@ impl FusionContractCandidateFacts {
     #[inline]
     pub(crate) fn rhs_exact_identity_borrowable(&self) -> bool {
         self.rhs_exact_identity_borrowable
+    }
+
+    #[cfg(test)]
+    #[inline]
+    pub(crate) fn lhs_requires_twist(&self) -> bool {
+        self.lhs_requires_twist
     }
 
     #[cfg(test)]
@@ -1209,20 +1216,55 @@ where
 
 // Why not resolve every length eagerly: identity-borrowed storage never uses
 // that count and must not gain an overflow/error from an unused route.
+#[derive(Clone, Copy)]
 enum CandidateRequiredLen<'a> {
     Known(usize),
     Space(&'a DynamicFusionMapSpace),
 }
 
 impl CandidateRequiredLen<'_> {
-    fn get(self) -> Result<usize, OperationError> {
+    fn get(&self) -> Result<usize, OperationError> {
         match self {
-            Self::Known(len) => Ok(len),
+            Self::Known(len) => Ok(*len),
             Self::Space(space) => space
                 .required_len()
                 .map_err(OperationError::from_core_preserving_context),
         }
     }
+}
+
+/// Whether the fermionic contraction twist goes on the physical lhs (else the
+/// physical rhs), given which operands the layout alone already copies: the
+/// copied one when exactly one is, otherwise the smaller core operand, the
+/// core-right one on a tie — TensorKit `blas_contract!`
+/// (src/tensors/tensoroperations.jl:398-409 @cfaa073), with core-left as its
+/// `A` and core-right as its `B`. Both sides carry the same `θ`: a core-left
+/// block's domain tree equals the codomain tree of every core-right block it
+/// contracts with, so twisting either operand of the pair scales the same
+/// products. `lens` is `(lhs, rhs)` core lengths, read only when needed.
+pub(crate) fn contract_twist_on_physical_lhs(
+    reverse: bool,
+    lhs_copied: bool,
+    rhs_copied: bool,
+    lens: impl FnOnce() -> Result<(usize, usize), OperationError>,
+) -> Result<bool, OperationError> {
+    let (core_left_copied, core_right_copied) = if reverse {
+        (rhs_copied, lhs_copied)
+    } else {
+        (lhs_copied, rhs_copied)
+    };
+    let twist_core_left = if core_left_copied != core_right_copied {
+        core_left_copied
+    } else {
+        let (lhs_len, rhs_len) = lens()?;
+        let (core_left_len, core_right_len) = if reverse {
+            (rhs_len, lhs_len)
+        } else {
+            (lhs_len, rhs_len)
+        };
+        core_left_len < core_right_len
+    };
+    Ok(twist_core_left != reverse)
 }
 
 struct FusionContractMaterializationInputs<'a> {
@@ -1270,8 +1312,24 @@ fn fusion_contract_candidate_facts(
     inputs: FusionContractMaterializationInputs<'_>,
 ) -> Result<FusionContractCandidateFacts, OperationError> {
     let reverse = plan.orientation == FusionContractOrientation::RhsLhs;
-    let lhs_requires_twist = reverse && inputs.core_right_requires_twist;
-    let rhs_requires_twist = !reverse && inputs.core_right_requires_twist;
+    let twist_lhs = inputs
+        .core_right_requires_twist
+        .then(|| {
+            contract_twist_on_physical_lhs(
+                reverse,
+                !inputs.lhs_exact_identity_borrowable,
+                !inputs.rhs_exact_identity_borrowable,
+                || {
+                    Ok((
+                        inputs.lhs_required_len.get()?,
+                        inputs.rhs_required_len.get()?,
+                    ))
+                },
+            )
+        })
+        .transpose()?;
+    let lhs_requires_twist = twist_lhs == Some(true);
+    let rhs_requires_twist = twist_lhs == Some(false);
     let lhs_materialized_elements = if inputs.lhs_exact_identity_borrowable && !lhs_requires_twist {
         0
     } else {
@@ -1303,6 +1361,7 @@ fn fusion_contract_candidate_facts(
         rhs_conjugate: plan.rhs_source_conjugate,
         lhs_exact_identity_borrowable: inputs.lhs_exact_identity_borrowable,
         rhs_exact_identity_borrowable: inputs.rhs_exact_identity_borrowable,
+        lhs_requires_twist,
         rhs_requires_twist,
         output_exact_identity,
         lhs_materialized_elements,
