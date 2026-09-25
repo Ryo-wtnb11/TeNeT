@@ -604,8 +604,16 @@ impl CudaTreeTransformExecutor {
             if let Some(entry) = self.prepared.value_mut(index) {
                 if !entry.zero_fills_reserved && (alpha == D::ZERO || entry.zero_coefficient_moves)
                 {
+                    // Set before the refresh because the refresh sums the
+                    // flag; undone on failure so the next such replay retries
+                    // instead of submitting unreserved fills.
                     entry.zero_fills_reserved = true;
-                    self.refresh_plan_cache(ctx)?;
+                    if let Err(error) = self.refresh_plan_cache(ctx) {
+                        if let Some(entry) = self.prepared.value_mut(index) {
+                            entry.zero_fills_reserved = false;
+                        }
+                        return Err(error);
+                    }
                 }
             }
         }
