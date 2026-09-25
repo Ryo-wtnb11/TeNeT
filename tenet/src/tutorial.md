@@ -219,6 +219,18 @@ assert_eq!(c.repartition(1)?.repartition(2)?.data(), c.data());
 # Ok::<(), Error>(())
 ```
 
+`contract` always puts the open legs of `self` in the codomain and those of
+`other` in the domain; `output_axes` reorders legs within that split. An output
+whose codomain takes legs from both operands is a `contract` followed by a
+`permute`. `tensor!` does the same internally for such an output signature, so
+neither route produces that partition in one pass: both write an output-sized
+intermediate and then permute it. TensorKit's `@tensor` does the same
+(`blas_contract!` contracts into a temporary when the destination is not a
+BLAS destination, then adds it with the permutation). `tensor!` reuses the
+intermediate buffer on warm calls, so only the extra data movement remains.
+When that pass is significant, choose operand and output orientations so that
+each codomain leg comes from the left operand.
+
 For simple relabeling, use `permute`. Use `repartition` only to change where
 the existing ordered leg list is split between codomain and domain. `adjoint`
 swaps the orientation and conjugates entries; `transpose` is the planar
@@ -276,6 +288,43 @@ assert_eq!(v.fuse(&w)?.dim()?, v.dim()? * w.dim()?);
 assert_eq!(v.oplus(&w)?.degeneracy(&U1Irrep::new(0))?, 4);
 # Ok::<(), Error>(())
 ```
+
+### Fusing legs
+
+TensorKit's `isomorphism(fuse(V1 ⊗ V2), V1 ⊗ V2)` is spelled with
+`GradedSpace::fuse` and `TensorMap::isomorphism`. Compose with the
+isomorphism to fuse two codomain legs into one, and with its adjoint to split
+them again. Restricting the fused leg with `restrict_leg` then keeps a
+selected subspace of it, for example to truncate a multi-leg side before a
+factorization. `remove_unit` only drops a trivial unit leg; it is not a
+general fusion.
+
+```rust
+use tenet::prelude::*;
+
+let rt = Runtime::builder().build()?;
+let v = GradedSpace::try_new(
+    U1FusionRule,
+    [(-1, 1), (0, 2), (1, 1)].map(|(q, n)| (U1Irrep::new(q), n)),
+)?;
+let w = GradedSpace::try_new(U1FusionRule, [(0, 2), (1, 1)].map(|(q, n)| (U1Irrep::new(q), n)))?;
+let t = TensorMap::<U1FusionRule, f64>::rand(&rt, [&v, &w], [&v])?;
+
+let vw = v.fuse(&w)?;
+let fuser = TensorMap::<U1FusionRule, f64>::isomorphism(&rt, [&vw], [&v, &w])?;
+let fused = fuser.compose(&t)?;
+assert_eq!((fused.codomain_rank(), fused.domain_rank()), (1, 1));
+let split = fuser.adjoint()?.compose(&fused)?;
+assert!(split.add(&t, 1.0, -1.0)?.norm()? <= 1e-12);
+
+let keep = LegSelection::try_new(&vw, [(U1Irrep::new(0), 0..2), (U1Irrep::new(1), 0..1)])?;
+let truncated = fused.restrict_leg(0, &keep)?;
+assert_eq!(truncated.codomain()[0].dim()?, 3.0);
+# Ok::<(), Error>(())
+```
+
+Composing with the isomorphism is a GEMM against an identity in every coupled
+sector; TensorKit fuses the same way.
 
 Symmetries can be combined with `product`. The order and association are part
 of the provider type, so choose an order once for a model. The payload scalar
@@ -354,6 +403,12 @@ that basis and [`prelude::TensorMap::project_physical_dense`] to project into
 the exact schema of another tensor. Basis alignment is application-specific;
 TeNeT does not infer a conversion between different symmetry choices.
 
+The index order of an axis depends on the side of its leg: a domain axis is
+indexed by the domain space, a codomain axis by the codomain space, and a dual
+space by its own dualized sectors. Moving a leg across the split can therefore
+reorder that axis; [`prelude::TensorMap::to_physical_dense`] has an example.
+Compare physical data only between tensors of the same orientation.
+
 Projection takes the receiver tensor as the target schema. It therefore makes
 the destination runtime, provider, leg order, and sector content explicit.
 When two applications use different physical basis orders, permute that
@@ -410,6 +465,17 @@ through `TENFERRO_CUTENSOR_PATH`, `TENFERRO_CUSOLVER_PATH` and
 of each CubeCL kernel family still compiles it (NVRTC) in that process; that
 compile is CubeCL's, and so is its PTX disk cache, enabled through CubeCL's
 `cubecl.toml` (`[compilation] cache`), not through a TeNeT setting.
+
+Spaces built with `GradedSpace::try_new` each own a provider allocation.
+To share one provider, and its caches, across spaces, create it once as an
+`Arc` and pass clones to `GradedSpace::try_new_with_arc`; spaces derived from
+an existing space (`try_dual`, `fuse`, `oplus`, `unitspace`) already reuse its
+provider.
+
+Implicit caches are per runtime. `Runtime::tree_transform_cache_info` and
+`Runtime::clear_tree_transform_cache` observe and reset the tree-transform
+cache, and `Runtime::plan_cache_config` bounds the `tensor!` plan cache.
+Contraction-structure and fusion-space caches have no public statistics yet.
 
 `tensor!` does not accept hyperedges: a label may appear at most twice.
 It does not promote scalar types automatically. Slicing is explicit rather

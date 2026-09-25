@@ -2091,6 +2091,7 @@ impl<'a> OrientedFusionTreeHomSpace<'a> {
                     .toggled(),
                 rhs.external_axis_leg_view(rhs_axis)
                     .expect("validated axis belongs to the rhs"),
+                (lhs_axis, rhs_axis),
             )?;
         }
         Ok(descriptor.materialize(rule))
@@ -2134,6 +2135,7 @@ impl<'a> OrientedFusionTreeHomSpace<'a> {
                     .toggled(),
                 rhs.external_axis_leg_view(rhs_axis)
                     .expect("validated axis belongs to the rhs"),
+                (lhs_axis, rhs_axis),
             )?;
         }
         let proven = descriptor
@@ -2176,6 +2178,7 @@ impl<'a> OrientedFusionTreeHomSpace<'a> {
                     .toggled(),
                 rhs.external_axis_leg_view(rhs_axis)
                     .expect("validated axis belongs to the rhs"),
+                (lhs_axis, rhs_axis),
             )?;
         }
         if descriptor.matches(expected, |sector| rule.try_dual_sector(sector))? {
@@ -2214,6 +2217,7 @@ impl<'a> OrientedFusionTreeHomSpace<'a> {
                     .toggled(),
                 rhs.external_axis_leg_view(rhs_axis)
                     .expect("validated axis belongs to the rhs"),
+                (lhs_axis, rhs_axis),
             )?;
         }
         descriptor.try_materialize(rule).map_err(Into::into)
@@ -2254,6 +2258,7 @@ impl<'a> OrientedFusionTreeHomSpace<'a> {
                     .toggled(),
                 rhs.external_axis_leg_view(rhs_axis)
                     .expect("validated axis belongs to the rhs"),
+                (lhs_axis, rhs_axis),
             )?;
         }
         descriptor.try_materialize_generic(rule)
@@ -2950,8 +2955,15 @@ impl FusionTreeHomSpace {
                 actual: rhs.codomain().len(),
             });
         }
-        for (lhs_domain, rhs_codomain) in lhs.domain().legs().iter().zip(rhs.codomain().legs()) {
-            validate_composed_leg(lhs_domain, rhs_codomain)?;
+        let lhs_codomain_rank = lhs.codomain().len();
+        for (index, (lhs_domain, rhs_codomain)) in lhs
+            .domain()
+            .legs()
+            .iter()
+            .zip(rhs.codomain().legs())
+            .enumerate()
+        {
+            validate_composed_leg(lhs_domain, rhs_codomain, (lhs_codomain_rank + index, index))?;
         }
         let descriptor = HomSpaceDescriptor::new(
             lhs.codomain()
@@ -3920,14 +3932,32 @@ fn validate_axis_selection(
     Ok(())
 }
 
+/// `axes` are the external axes `(lhs, rhs)` being contracted; the error
+/// reports each operand's external-axis flag, which is what callers see.
+fn contracted_leg_duality_mismatch(
+    (lhs_axis, rhs_axis): (usize, usize),
+    lhs_domain_is_dual: bool,
+    rhs_codomain_is_dual: bool,
+) -> CoreError {
+    CoreError::ContractedLegDualityMismatch {
+        lhs_axis,
+        rhs_axis,
+        lhs_is_dual: !lhs_domain_is_dual,
+        rhs_is_dual: rhs_codomain_is_dual,
+    }
+}
+
 fn validate_composed_leg(
     lhs_domain: &SectorLeg,
     rhs_codomain: &SectorLeg,
+    axes: (usize, usize),
 ) -> Result<(), CoreError> {
     if lhs_domain.is_dual() != rhs_codomain.is_dual() {
-        return Err(CoreError::MalformedFusionTree {
-            message: "contracted fusion leg duality flags do not match",
-        });
+        return Err(contracted_leg_duality_mismatch(
+            axes,
+            lhs_domain.is_dual(),
+            rhs_codomain.is_dual(),
+        ));
     }
     // TensorKit parity: `A * B` requires `domain(A) == codomain(B)` as
     // spaces, so the stored legs must match verbatim (domain legs store the
@@ -3962,6 +3992,7 @@ fn validate_oriented_composed_leg<R>(
     rule: &R,
     lhs_domain: OrientedLegView<'_>,
     rhs_codomain: OrientedLegView<'_>,
+    axes: (usize, usize),
 ) -> Result<(), CoreError>
 where
     R: FusionRule,
@@ -3985,6 +4016,7 @@ where
     validate_composed_leg(
         &lhs_domain.materialize(rule),
         &rhs_codomain.materialize(rule),
+        axes,
     )
 }
 
@@ -3992,15 +4024,16 @@ fn validate_oriented_composed_leg_checked<R>(
     rule: &R,
     lhs_domain: OrientedLegView<'_>,
     rhs_codomain: OrientedLegView<'_>,
+    axes: (usize, usize),
 ) -> Result<(), CheckedFusionSpaceError>
 where
     R: CheckedFusionAlgebra,
 {
     if lhs_domain.is_dual() != rhs_codomain.is_dual() {
-        return Err(CoreError::MalformedFusionTree {
-            message: "contracted fusion leg duality flags do not match",
-        }
-        .into());
+        return Err(
+            contracted_leg_duality_mismatch(axes, lhs_domain.is_dual(), rhs_codomain.is_dual())
+                .into(),
+        );
     }
     if lhs_domain.source.sectors().len() != rhs_codomain.source.sectors().len() {
         return Err(CoreError::DimensionMismatch {
@@ -4030,6 +4063,7 @@ where
     validate_composed_leg(
         &lhs_domain.try_materialize(rule)?,
         &rhs_codomain.try_materialize(rule)?,
+        axes,
     )
     .map_err(Into::into)
 }
@@ -4038,15 +4072,16 @@ fn validate_oriented_composed_leg_generic_checked<R>(
     rule: &R,
     lhs_domain: OrientedLegView<'_>,
     rhs_codomain: OrientedLegView<'_>,
+    axes: (usize, usize),
 ) -> Result<(), CheckedGenericStructureError<R::Error>>
 where
     R: CheckedGenericFusion,
 {
     if lhs_domain.is_dual() != rhs_codomain.is_dual() {
-        return Err(CoreError::MalformedFusionTree {
-            message: "contracted fusion leg duality flags do not match",
-        }
-        .into());
+        return Err(
+            contracted_leg_duality_mismatch(axes, lhs_domain.is_dual(), rhs_codomain.is_dual())
+                .into(),
+        );
     }
     if lhs_domain.source.sectors().len() != rhs_codomain.source.sectors().len() {
         return Err(CoreError::DimensionMismatch {
@@ -4057,7 +4092,7 @@ where
     }
     let lhs = lhs_domain.try_materialize_generic(rule)?;
     let rhs = rhs_codomain.try_materialize_generic(rule)?;
-    validate_composed_leg(&lhs, &rhs).map_err(Into::into)
+    validate_composed_leg(&lhs, &rhs, axes).map_err(Into::into)
 }
 
 fn degeneracy_shape_for_tree_side(

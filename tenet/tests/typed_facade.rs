@@ -3911,11 +3911,19 @@ fn compose_rejects_operands_whose_domain_and_codomain_do_not_meet() {
     .unwrap();
     let dual_endo =
         TensorMap::from_block_fn(&runtime, [&wide_leg], [&wide_leg], typed_fill_value).unwrap();
-    assert!(endo
-        .compose(&dual_endo)
+    // The error names both operands' axes and external-axis flags: `endo`'s
+    // domain axis 1 is `V'` and `dual_endo`'s codomain axis 0 is `V'` too.
+    assert!(endo.compose(&dual_endo).unwrap_err().to_string().ends_with(
+        "contracted fusion leg duality flags do not match: lhs axis 1 (is_dual = true) \
+         and rhs axis 0 (is_dual = true) must have opposite duality flags"
+    ));
+    // `contract` reports the axes the caller named.
+    let tall = z2_tensor_split(&runtime, 2);
+    assert!(tall
+        .contract(&dual_endo, &[2], &[0], &[0, 1, 2])
         .unwrap_err()
         .to_string()
-        .contains("contracted fusion leg duality flags do not match"));
+        .ends_with("lhs axis 2 (is_dual = true) and rhs axis 0 (is_dual = true) must have opposite duality flags"));
 
     // Matching ranks and flags, different sector content.
     let even_only =

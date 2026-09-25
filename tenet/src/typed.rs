@@ -1117,6 +1117,39 @@ where
     /// carrier basis and fusion coefficients determine the embedding; no
     /// symmetry-specific dispatch occurs in this method.
     ///
+    /// # Index order depends on the side of a leg
+    ///
+    /// A codomain axis is indexed in its codomain space's sector order, a
+    /// domain axis in its domain space's order (not in the order of the dual
+    /// space the external axis carries). A [`Self::permute`] or
+    /// [`Self::repartition`] that moves a leg to the other side therefore
+    /// reindexes that axis by the dual space's sectors. For U(1),
+    /// [`SectorId`] order is `0, -1, 1`, so the dual `V'` of
+    /// `V = (-1) ⊕ 0 ⊕ 1` lists the charges of `V` as `0, 1, -1`: bending the
+    /// domain leg of `id(V)` into the codomain turns the identity matrix into
+    /// the swap of the two charged entries.
+    ///
+    /// ```
+    /// use tenet::prelude::*;
+    ///
+    /// let rt = Runtime::builder().build()?;
+    /// let v = GradedSpace::try_new(U1FusionRule, [-1, 0, 1].map(|q| (U1Irrep::new(q), 1)))?;
+    /// let id = TensorMap::<U1FusionRule, f64>::id(&rt, [&v])?;
+    ///
+    /// // `V <- V`: both axes in `V`'s order.
+    /// let matrix = id.to_physical_dense().expect("U(1) has a physical basis");
+    /// assert_eq!(matrix.data, [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]);
+    ///
+    /// // `V ⊗ V' <- ()`: axis 1 is now in `V'`'s order.
+    /// let bent = id.permute(&[0, 1], &[])?;
+    /// let vector = bent.to_physical_dense().expect("U(1) has a physical basis");
+    /// assert_eq!(vector.data, [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0]);
+    /// # Ok::<(), Error>(())
+    /// ```
+    ///
+    /// To compare data across orientations, permute the tensor to the
+    /// orientation the other side expects before expanding it.
+    ///
     /// Providers opt in at compile time by implementing
     /// [`PhysicalFusionBasis`]:
     ///
@@ -8634,6 +8667,21 @@ where
     /// several spaces should share an expensive provider or its performance
     /// cache; ordinary callers do not need to allocate an [`Arc`] themselves.
     /// Call [`Self::try_dual`] to construct the dual space.
+    ///
+    /// Spaces derived from an existing space ([`Self::try_dual`],
+    /// [`Self::fuse`], [`Self::unitspace`]) already share its provider, so
+    /// the `Arc` is only needed for independently constructed spaces.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use tenet::prelude::*;
+    ///
+    /// let rule = Arc::new(U1FusionRule);
+    /// let physical = GradedSpace::try_new_with_arc(Arc::clone(&rule), [(U1Irrep::new(0), 2)])?;
+    /// let bond = GradedSpace::try_new_with_arc(rule, [(U1Irrep::new(1), 3)])?;
+    /// assert_eq!(physical.fuse(&bond)?.dim()?, 6.0);
+    /// # Ok::<(), Error>(())
+    /// ```
     pub fn try_new_with_arc<Pairs>(
         provider: Arc<R>,
         pairs: Pairs,
@@ -10258,6 +10306,18 @@ enum TypedTensorRepr<R, D, S = Vec<D>> {
 /// column-major (axis 0 varies fastest). Within each leg, entries follow that
 /// [`SectorLeg`]'s canonical [`SectorId`] order, then degeneracy, then
 /// carrier-basis index, with the carrier index varying fastest.
+///
+/// The leg that orders an axis is the one stored on its side: the codomain
+/// space for a codomain axis, and the domain space itself for a domain axis,
+/// as for a matrix column index. A dual space is ordered by its own
+/// (dualized) sectors. Moving a leg across the split replaces that space by
+/// its dual, whose sectors can sort differently, so the same physical leg can
+/// come back in a different index order; see
+/// [`TensorMap::to_physical_dense`].
+///
+/// This is not TensorKit's `convert(Array, t)` order: TensorKit orders sectors
+/// by its own `isless` (U(1): `0, 1, -1`) and lists a dual space `V'` in
+/// `V`'s order.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PhysicalDense<D> {
     /// Physical dimension of each axis, in codomain-then-domain order.

@@ -9262,7 +9262,7 @@ mod tests {
         let lhs = OrientedLegView::borrowed(&leg).toggled();
         let rhs = OrientedLegView::borrowed(&leg).toggled();
         rule.reset_dual_calls();
-        validate_oriented_composed_leg(rule, lhs, rhs).unwrap();
+        validate_oriented_composed_leg(rule, lhs, rhs, (0, 0)).unwrap();
         assert_eq!(rule.dual_calls(), 2 * sector_count);
     }
 
@@ -9304,9 +9304,13 @@ mod tests {
         let lhs_view = OrientedLegView::borrowed(&lhs).toggled();
         let rhs_view = OrientedLegView::borrowed(&rhs).toggled();
         let expected =
-            validate_composed_leg(&lhs_view.materialize(&rule), &rhs_view.materialize(&rule));
+            validate_composed_leg(
+                &lhs_view.materialize(&rule),
+                &rhs_view.materialize(&rule),
+                (0, 0),
+            );
         assert_eq!(
-            validate_oriented_composed_leg(&rule, lhs_view, rhs_view),
+            validate_oriented_composed_leg(&rule, lhs_view, rhs_view, (0, 0)),
             expected
         );
     }
@@ -19484,8 +19488,11 @@ mod tests {
                 0,
             ),
             Err(CheckedFusionSpaceError::Core(Box::new(
-                CoreError::MalformedFusionTree {
-                    message: "contracted fusion leg duality flags do not match",
+                CoreError::ContractedLegDualityMismatch {
+                    lhs_axis: 0,
+                    rhs_axis: 0,
+                    lhs_is_dual: false,
+                    rhs_is_dual: false,
                 }
             )))
         );
