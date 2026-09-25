@@ -209,6 +209,10 @@ jobs:
   cuda-check:
     name: CUDA compile contract
     runs-on: ubuntu-latest
+    # Why: #436 — Jimver/cuda-toolkit's network setup can stall indefinitely,
+    # making an unrelated PR look unstable rather than failing fast and
+    # pointing at the toolkit setup step.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
         with:
@@ -216,9 +220,31 @@ jobs:
       - name: Record source revisions
         run: |
           git -C tenet log -1 --format='TeNeT %H'
-      - uses: Jimver/cuda-toolkit@v0.2.28
+      - name: Install CUDA toolkit
+        id: cuda-toolkit
+        timeout-minutes: 12
+        uses: Jimver/cuda-toolkit@v0.2.28
         with:
           method: network
+      - name: Diagnose CUDA toolkit setup
+        # Runs whether the setup step above succeeded, failed, or timed out,
+        # so a stuck/failed toolkit install is attributable and distinct from
+        # a later TeNeT cuda-feature compile failure.
+        if: always()
+        run: |
+          set -uo pipefail
+          echo "cuda-toolkit step outcome: ${{ steps.cuda-toolkit.outcome }}"
+          echo "CUDA_PATH=${CUDA_PATH:-<unset>}"
+          echo "PATH=${PATH}"
+          if command -v nvcc >/dev/null 2>&1; then
+            nvcc --version
+          else
+            echo "nvcc not found on PATH"
+          fi
+          if [ "${{ steps.cuda-toolkit.outcome }}" != "success" ]; then
+            echo "::error::CUDA toolkit setup (Jimver/cuda-toolkit) did not complete successfully or timed out; this is a toolkit/network setup failure, not a TeNeT cuda feature compile failure." >&2
+            exit 1
+          fi
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
