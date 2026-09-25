@@ -104,9 +104,15 @@ pub use tree_profile::TreeTransformReplayProfile;
 // to override it. `deny` keeps every other module unsafe-free while this one
 // owns the audited Vec length transition.
 mod opaque_admission;
+mod owned_blocks;
 mod owned_cat;
 #[allow(unsafe_code)]
 mod owned_overwrite_buffer;
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub use owned_blocks::take_owned_block_prefills;
+#[doc(hidden)]
+pub use owned_blocks::{overwrite_owned_blocks, BlockOverwrite};
 #[doc(hidden)]
 pub use owned_overwrite_buffer::{zeroed_payload, ZeroBytes};
 mod owned_trace;

@@ -78,8 +78,8 @@ pub use facade::{
 };
 #[doc(hidden)]
 pub use oriented_elementwise::{
-    fusion_scatter_add_assign, oriented_fusion_add_into, oriented_fusion_inner,
-    oriented_fusion_inner_with, oriented_fusion_restrict_into, validate_oriented_fusion_layout,
+    fusion_scatter_add_assign, oriented_fusion_add_owned, oriented_fusion_inner,
+    oriented_fusion_inner_with, oriented_fusion_restrict_owned, validate_oriented_fusion_layout,
     SectorRangeTable, SectorStartTable,
 };
 // Stage B3a: Generic-fusion (outer-multiplicity) facade siblings.

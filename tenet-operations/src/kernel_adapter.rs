@@ -342,8 +342,8 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn apply_fused_pair_slices<T, Apply, ElementOp>(
-    dst_data: &mut [T],
+pub(crate) fn apply_fused_pair_slices<Dst, T, Apply, ElementOp>(
+    dst_data: &mut [Dst],
     src_data: &[T],
     dims: &[usize],
     dst_strides: &[isize],
@@ -355,7 +355,7 @@ pub(crate) fn apply_fused_pair_slices<T, Apply, ElementOp>(
     op: ElementOp,
 ) where
     T: Copy,
-    Apply: Fn(&mut T, T),
+    Apply: Fn(&mut Dst, T),
     ElementOp: Fn(T) -> T,
 {
     for_each_fused_span(

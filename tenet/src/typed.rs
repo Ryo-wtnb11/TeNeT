@@ -846,10 +846,8 @@ where
     {
         let (lhs, lhs_data) = tensor.fusion_operand_and_data();
         let (rhs, rhs_data) = other.fusion_operand_and_data();
-        let mut data = vec![D::from_real(0.0); tensor.logical_space().space().required_len()?];
-        tenet_tensors::oriented_fusion_add_into(
+        let data = tenet_tensors::oriented_fusion_add_owned(
             tensor.logical_space().space().structure(),
-            &mut data,
             lhs,
             lhs_data,
             rhs,
@@ -14671,12 +14669,6 @@ where
     {
         self.require_selected_leg(axis, selection.parent(), "restrict_leg")?;
         let destination = self.root_with_replaced_leg(axis, selection.subspace().leg())?;
-        let len = destination
-            .space()
-            .required_len()
-            .map_err(Error::from)
-            .map_err(TypedFacadeError::<R>::from)?;
-        let mut data = tenet_tensors::zeroed_payload::<D>(len);
         let table: Vec<(SectorId, usize)> = selection
             .entries
             .iter()
@@ -14685,9 +14677,8 @@ where
         let mut starts: Vec<tenet_tensors::SectorStartTable<'_>> = vec![None; self.rank()];
         starts[axis] = Some(table.as_slice());
         let (source, source_data) = self.fusion_operand_and_data();
-        tenet_tensors::oriented_fusion_restrict_into(
+        let data = tenet_tensors::oriented_fusion_restrict_owned(
             destination.space().structure(),
-            &mut data,
             source,
             source_data,
             &starts,
@@ -14891,12 +14882,6 @@ where
             Arc::clone(self.logical_space().provider_arc()),
             restricted_homspace,
         )?;
-        let len = destination
-            .space()
-            .required_len()
-            .map_err(Error::from)
-            .map_err(TypedFacadeError::<R>::from)?;
-        let mut data = tenet_tensors::zeroed_payload::<D>(len);
         // One single-entry table per restricted axis: this path always names
         // exactly one sector per axis, and the kernel reads the sector back
         // from each destination block's own key.
@@ -14909,9 +14894,8 @@ where
             starts[axis] = Some(table.as_slice());
         }
         let (source, source_data) = self.fusion_operand_and_data();
-        tenet_tensors::oriented_fusion_restrict_into(
+        let data = tenet_tensors::oriented_fusion_restrict_owned(
             destination.space().structure(),
-            &mut data,
             source,
             source_data,
             &starts,
@@ -15488,12 +15472,6 @@ where
                 Ok(self.with_spectrum_on(destination, kept))
             }
             TypedData::Dense(_) => {
-                let len = destination
-                    .space()
-                    .required_len()
-                    .map_err(Error::from)
-                    .map_err(TypedFacadeError::<R>::from)?;
-                let mut data = tenet_tensors::zeroed_payload::<D>(len);
                 let table: Vec<(SectorId, usize)> = selection
                     .entries
                     .iter()
@@ -15502,9 +15480,8 @@ where
                 let starts: Vec<tenet_tensors::SectorStartTable<'_>> =
                     vec![Some(table.as_slice()); 2];
                 let (source, source_data) = self.fusion_operand_and_data();
-                tenet_tensors::oriented_fusion_restrict_into(
+                let data = tenet_tensors::oriented_fusion_restrict_owned(
                     destination.space().structure(),
-                    &mut data,
                     source,
                     source_data,
                     &starts,
@@ -17630,18 +17607,15 @@ where
     ) -> Result<Self, Error> {
         let mut data = if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
             let (operand, source) = self.fusion_operand_and_data();
-            let mut data = vec![D::from_real(0.0); self.logical_space().space().required_len()?];
-            tenet_tensors::oriented_fusion_add_into(
+            tenet_tensors::oriented_fusion_add_owned(
                 self.logical_space().space().structure(),
-                &mut data,
                 operand,
                 source,
                 operand,
                 source,
                 D::from_real(1.0),
                 D::from_real(0.0),
-            )?;
-            data
+            )?
         } else {
             self.owned_body()
                 .expect("owned scaled-axis input")
@@ -18767,11 +18741,8 @@ where
         {
             if let (Some(spectrum), TypedTensorRepr::Adjoint(_)) = (self.spectrum(), &other.repr) {
                 let (operand, dense) = other.fusion_operand_and_data();
-                let mut data =
-                    vec![D::from_real(0.0); self.logical_space().space().required_len()?];
-                tenet_tensors::oriented_fusion_add_into(
+                let mut data = tenet_tensors::oriented_fusion_add_owned(
                     self.logical_space().space().structure(),
-                    &mut data,
                     operand,
                     dense,
                     operand,
@@ -18784,11 +18755,8 @@ where
             }
             if let (TypedTensorRepr::Adjoint(_), Some(spectrum)) = (&self.repr, other.spectrum()) {
                 let (operand, dense) = self.fusion_operand_and_data();
-                let mut data =
-                    vec![D::from_real(0.0); self.logical_space().space().required_len()?];
-                tenet_tensors::oriented_fusion_add_into(
+                let mut data = tenet_tensors::oriented_fusion_add_owned(
                     self.logical_space().space().structure(),
-                    &mut data,
                     operand,
                     dense,
                     operand,
@@ -18801,10 +18769,8 @@ where
             }
             let (lhs, lhs_data) = self.fusion_operand_and_data();
             let (rhs, rhs_data) = other.fusion_operand_and_data();
-            let mut data = vec![D::from_real(0.0); self.logical_space().space().required_len()?];
-            tenet_tensors::oriented_fusion_add_into(
+            let data = tenet_tensors::oriented_fusion_add_owned(
                 self.logical_space().space().structure(),
-                &mut data,
                 lhs,
                 lhs_data,
                 rhs,

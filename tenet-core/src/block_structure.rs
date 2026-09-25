@@ -1166,6 +1166,33 @@ pub struct BlockStructureContent {
     degeneracy: DegeneracyStructure,
     blocks: Arc<[BlockStructureContentBlock]>,
     required_len: usize,
+    storage_tiling: StorageTilingProof,
+}
+
+/// Set once a constructor proved that the blocks' reachable offsets partition
+/// `0..required_len`, each exactly once. That is a function of the geometry
+/// equality compares, so the bit is sound on every structure sharing this
+/// content and is excluded from equality. Why not compute it on demand: the
+/// general check (`coupled_sector_regions`) allocates and hashes, and is
+/// cached on the short-lived wrapper, not on this interned content.
+#[derive(Debug, Default)]
+struct StorageTilingProof(core::sync::atomic::AtomicBool);
+
+// A derived fact about the compared geometry, never part of equality.
+impl PartialEq for StorageTilingProof {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for StorageTilingProof {}
+
+impl Clone for StorageTilingProof {
+    fn clone(&self) -> Self {
+        Self(core::sync::atomic::AtomicBool::new(
+            self.0.load(Ordering::Acquire),
+        ))
+    }
 }
 
 impl core::fmt::Debug for BlockStructureContent {
@@ -1205,6 +1232,30 @@ impl BlockStructureContent {
     #[inline]
     pub fn id(&self) -> usize {
         self.id
+    }
+
+    /// Whether a constructor proved that the blocks tile `0..required_len`
+    /// exactly once (see [`BlockStructure::storage_tiling_proven`]).
+    #[inline]
+    pub(crate) fn storage_tiling_proven(&self) -> bool {
+        self.storage_tiling.0.load(Ordering::Acquire)
+    }
+
+    /// Records the tiling proof. Callers must have built this exact geometry
+    /// so that the blocks are pairwise disjoint and each reaches its offsets
+    /// once; the element counts are checked here to sum to `required_len`, so
+    /// the disjoint blocks cover all of it.
+    fn record_storage_tiling(&self) {
+        let covered = self.blocks.iter().try_fold(0usize, |total, block| {
+            block
+                .shape
+                .iter()
+                .try_fold(1usize, |count, &extent| count.checked_mul(extent))
+                .and_then(|count| total.checked_add(count))
+        });
+        if covered == Some(self.required_len) {
+            self.storage_tiling.0.store(true, Ordering::Release);
+        }
     }
 
     #[inline]
@@ -1613,6 +1664,7 @@ fn intern_block_structure_content(
             degeneracy,
             blocks,
             required_len,
+            storage_tiling: StorageTilingProof::default(),
         })
     })
 }
@@ -1801,6 +1853,7 @@ impl PreparedBlockStructure {
                 degeneracy: self.degeneracy.clone(),
                 blocks,
                 required_len: self.required_len,
+                storage_tiling: StorageTilingProof::default(),
             }))
         })
     }
@@ -2563,6 +2616,21 @@ impl BlockStructure {
 
     pub fn required_len(&self) -> Result<usize, CoreError> {
         Ok(self.content.required_len)
+    }
+
+    /// Whether this structure's blocks are proved, at construction, to reach
+    /// every offset of `0..required_len` exactly once, so writing each block
+    /// once fully initializes an owned payload. O(1); `false` only means no
+    /// constructor recorded the proof.
+    #[doc(hidden)]
+    #[inline]
+    pub fn storage_tiling_proven(&self) -> bool {
+        self.content.storage_tiling_proven()
+    }
+
+    /// See [`BlockStructureContent::record_storage_tiling`].
+    pub(crate) fn record_storage_tiling(&self) {
+        self.content.record_storage_tiling();
     }
 
     /// Compiles the canonical coupled-sector matrix layout of this structure.
