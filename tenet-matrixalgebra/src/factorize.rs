@@ -1206,6 +1206,28 @@ impl<'a, D: FactorScalar> InputMatricizations<'a, D> {
         matches!(self, Self::Packed(_))
     }
 
+    /// Eigenvalues are basis-invariant only when row `i` and column `i` name
+    /// the same tree state, so each sector must stack its row and column trees
+    /// identically (outer-multiplicity vertices included).
+    fn validate_endomorphism_stacking(&self) -> Result<(), OperationError> {
+        match self {
+            Self::Regions { regions, .. } => {
+                if regions
+                    .iter()
+                    .all(|region| region.row_trees() == region.col_trees())
+                {
+                    Ok(())
+                } else {
+                    Err(OperationError::UnsupportedTensorContractScope {
+                        message:
+                            "eigh requires identical endomorphism row/column fusion-tree stacking",
+                    })
+                }
+            }
+            Self::Packed(matrices) => validate_endomorphism_tree_stacking(matrices),
+        }
+    }
+
     fn validate_hermitian(&self) -> Result<(), OperationError> {
         match self {
             Self::Regions { data, regions } => validate_hermitian_regions(data, regions),
@@ -7388,29 +7410,6 @@ fn checked_sector_regions(
         .map_err(OperationError::from_core_preserving_context)
 }
 
-fn canonical_generic_sector_regions(
-    structure: &BlockStructure,
-    nout: usize,
-) -> Result<Option<Arc<[CoupledSectorRegion]>>, OperationError> {
-    let Some(regions) = checked_sector_regions(structure, nout)? else {
-        return Ok(None);
-    };
-    let sectors_are_ordered = regions
-        .windows(2)
-        .all(|pair| pair[0].coupled() < pair[1].coupled());
-    let trees_are_ordered = regions.iter().all(|region| {
-        region
-            .row_trees()
-            .windows(2)
-            .all(|pair| pair[0].tree() < pair[1].tree())
-            && region
-                .col_trees()
-                .windows(2)
-                .all(|pair| pair[0].tree() < pair[1].tree())
-    });
-    Ok((sectors_are_ordered && trees_are_ordered).then_some(regions))
-}
-
 fn generic_value_matricizations<'a, D>(
     structure: &BlockStructure,
     data: &'a [D],
@@ -7435,7 +7434,15 @@ fn generic_input_matricizations<'a, D>(
 where
     D: FactorScalar,
 {
-    let regions = canonical_generic_sector_regions(structure, nout)?;
+    // Why no tree-order admission (`FusionTreeKey` Ord, which the facade
+    // builder's multi-leg order fails): a region lists its sector and tree
+    // extents in first-appearance block order and proves the dense column-major
+    // matrix at `range`, which is exactly the matrix, sector order and tree
+    // order `sector_matricizations_generic` would pack from the same tiling.
+    // Every consumer therefore sees the same matricization either way; output
+    // tree order is proven per output by `factor_output_is_canonical` (else a
+    // by-tree scatter), and the eigenvalue ops check endomorphism stacking.
+    let regions = checked_sector_regions(structure, nout)?;
     Ok(match regions {
         Some(regions) => InputMatricizations::Regions { data, regions },
         None => InputMatricizations::Packed(sector_matricizations_generic(structure, data, nout)?),
@@ -7803,8 +7810,6 @@ where
             tensor: "pinv output space",
         });
     }
-    // Why not `canonical_generic_sector_regions`: as for polar, the route
-    // compiler proves the output transposes the source's exact tree lists.
     let source_regions = checked_sector_regions(source_space.structure(), source_space.nout())?
         .ok_or(OperationError::UnsupportedTensorContractScope {
             message: "pinv requires coupled-sector input storage",
@@ -8203,12 +8208,6 @@ where
         Arc::clone(input.space().provider_arc()),
         p_homspace,
     )?;
-    // Why not `canonical_generic_sector_regions`: its sorted-tree test is a
-    // proxy that the leg-degeneracy builder's own tree order fails for
-    // multi-leg Generic trees, so every ordinary rank > 2 map was refused.
-    // Polar never compares against a freshly enumerated bond space: the route
-    // compiler proves W and P index the source's exact tree lists, which is
-    // the real requirement.
     let source_regions = checked_sector_regions(source_space.structure(), source_space.nout())?
         .ok_or(CheckedGenericFactorPlanError::Operation(
             OperationError::UnsupportedTensorContractScope {
@@ -12058,6 +12057,9 @@ where
         generic_value_matricizations(space.structure(), input.data(), space.nout())
             .map_err(CheckedGenericFactorPlanError::from)?;
     matricizations
+        .validate_endomorphism_stacking()
+        .map_err(CheckedGenericFactorPlanError::from)?;
+    matricizations
         .validate_hermitian()
         .map_err(CheckedGenericFactorPlanError::from)?;
     let mut eigenvalues = Vec::with_capacity(matricizations.len());
@@ -12111,6 +12113,9 @@ where
     let matricizations =
         generic_value_matricizations(space.structure(), input.data(), space.nout())
             .map_err(CheckedGenericFactorPlanError::from)?;
+    matricizations
+        .validate_endomorphism_stacking()
+        .map_err(CheckedGenericFactorPlanError::from)?;
     let mut eigenvalues = Vec::with_capacity(matricizations.len());
     for index in 0..matricizations.len() {
         let matrix = matricizations
