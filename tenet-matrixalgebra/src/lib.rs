@@ -63,7 +63,9 @@ pub use truncation::{
 pub use truncation::rescaled_power_norm;
 
 #[doc(hidden)]
-pub use factorize::validate_hermitian_regions;
+pub use factorize::{
+    validate_endomorphism_region_stacking, validate_hermitian_regions, EIGH_FULL_STACKING,
+};
 
 #[doc(hidden)]
 pub use factorize::{decide_bond_truncation, decide_bond_truncation_generic_checked};

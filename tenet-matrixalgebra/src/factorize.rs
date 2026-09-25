@@ -3534,6 +3534,7 @@ where
     let matricizations = sector_matricizations(space.structure(), input.data(), space.nout())?;
     #[cfg(test)]
     record_eigh_input_pack(&matricizations);
+    validate_endomorphism_tree_stacking(&matricizations, EIGH_FULL_STACKING)?;
     validate_hermitian_matricizations(&matricizations)?;
 
     let ranks = matricizations
@@ -3623,6 +3624,7 @@ where
 {
     let space = input.space().space();
     debug_assert_eq!(plan.source_layout, input.space().validated_layout());
+    validate_endomorphism_tree_stacking(plan.source_regions.as_ref(), EIGH_FULL_STACKING)?;
     validate_hermitian_regions(input.data(), &plan.source_regions)?;
 
     let v_space = input.space().rebind_validated(&plan.left_layout)?;
@@ -4831,6 +4833,10 @@ where
         });
     }
     let matricizations = sector_matricizations(space.structure(), input.data(), space.nout())?;
+    validate_endomorphism_tree_stacking(
+        &matricizations,
+        "eig_full requires identical endomorphism row/column fusion-tree stacking",
+    )?;
 
     let mut pairs: Vec<FactorPair<D::Eig>> = Vec::with_capacity(matricizations.len());
     let mut eigenvalues = Vec::with_capacity(matricizations.len());
@@ -5021,6 +5027,9 @@ where
         });
     }
     let matricizations = value_matricizations(space.structure(), input.data(), space.nout())?;
+    matricizations.validate_endomorphism_stacking(
+        "eigh_vals requires identical endomorphism row/column fusion-tree stacking",
+    )?;
     matricizations.validate_hermitian()?;
     let mut eigenvalues = Vec::with_capacity(matricizations.len());
     for index in 0..matricizations.len() {
@@ -5082,6 +5091,9 @@ where
         });
     }
     let matricizations = value_matricizations(space.structure(), input.data(), space.nout())?;
+    matricizations.validate_endomorphism_stacking(
+        "eig_vals requires identical endomorphism row/column fusion-tree stacking",
+    )?;
     let mut eigenvalues = Vec::with_capacity(matricizations.len());
     for index in 0..matricizations.len() {
         let matrix = matricizations.get(index)?;
@@ -7357,6 +7369,7 @@ where
     // also builds the factor bond spaces — work a yes/no question must not pay
     // for on the retained Hermitian route.
     if let Some(regions) = checked_sector_regions(space.structure(), space.nout())? {
+        validate_endomorphism_tree_stacking(regions.as_ref(), EXP_STACKING)?;
         for region in regions.iter() {
             let range = region.range();
             let matrix = data_region(input.data(), &range)?;
@@ -7372,6 +7385,7 @@ where
         return Ok(true);
     }
     let matricizations = sector_matricizations(space.structure(), input.data(), space.nout())?;
+    validate_endomorphism_tree_stacking(&matricizations, EXP_STACKING)?;
     for matrix in &matricizations {
         validate_hermitian_matrix_shape(&matrix.data, matrix.rows, matrix.cols)?;
     }
@@ -8693,6 +8707,7 @@ where
     let output_len = output_space.space().required_len()?;
     let output_data = match source_regions {
         Some(source) => {
+            validate_endomorphism_tree_stacking(source.as_ref(), EXP_STACKING)?;
             let routes = compile_inverse_region_routes(
                 &source,
                 &output_regions,
@@ -8726,6 +8741,10 @@ where
         None => {
             let source_matrices =
                 sector_matricizations(source_space.structure(), input.data(), source_space.nout())?;
+            // Why not rely on the tree-identity routes as `inv` does: they are
+            // right for `A^-1` of any stacking, but `f(P_R A P_C^T)` is not
+            // `P_R f(A) P_C^T` unless the row and column stackings coincide.
+            validate_endomorphism_tree_stacking(&source_matrices, EXP_STACKING)?;
             let routes =
                 compile_inverse_matrix_routes(&source_matrices, &output_regions, output_len)?;
             let max_order = routes
@@ -9215,6 +9234,22 @@ fn endomorphism_tree_stacking_is_identical<M: SectorGeometry>(matrices: &[M]) ->
                 }
             })
     })
+}
+
+#[doc(hidden)]
+pub const EIGH_FULL_STACKING: &str =
+    "eigh_full requires identical endomorphism row/column fusion-tree stacking";
+const EXP_STACKING: &str = "exp requires identical endomorphism row/column fusion-tree stacking";
+
+/// [`validate_endomorphism_tree_stacking`] over canonical coupled-sector
+/// regions, for device paths outside this crate. `message` names the
+/// refusing operation.
+#[doc(hidden)]
+pub fn validate_endomorphism_region_stacking(
+    regions: &[CoupledSectorRegion],
+    message: &'static str,
+) -> Result<(), OperationError> {
+    validate_endomorphism_tree_stacking(regions, message)
 }
 
 /// `message` names the refusing operation.
@@ -11680,11 +11715,8 @@ where
     // Why not trust equal product spaces alone: outer-multiplicity vertices
     // are part of a tree key, so Hermitian coordinates require identical full
     // tree stacking, not merely equal coupled-sector dimensions.
-    validate_endomorphism_tree_stacking(
-        &matrices,
-        "eigh_full requires identical endomorphism row/column fusion-tree stacking",
-    )
-    .map_err(CheckedGenericFactorPlanError::from)?;
+    validate_endomorphism_tree_stacking(&matrices, EIGH_FULL_STACKING)
+        .map_err(CheckedGenericFactorPlanError::from)?;
     validate_hermitian_matricizations(&matrices).map_err(CheckedGenericFactorPlanError::from)?;
 
     let max_n = matrices.iter().map(|matrix| matrix.rows).max().unwrap_or(0);
