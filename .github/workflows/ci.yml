@@ -158,6 +158,7 @@ jobs:
           - { name: cotengra-python, package: tenet-network, features: "cotengra-python,cpu-faer" }
           - { name: racah-generated, package: tenet-sectors, features: racah-generated }
           - { name: racah-generated-tensors, package: tenet-tensors, features: "racah-generated,cpu-faer" }
+          - { name: racah-generated-matrixalgebra, package: tenet-matrixalgebra, features: "racah-generated,cpu-faer" }
           # tenet-rs (the `tenet` crate) is never in the package list above, so
           # its `tests/*.rs` files gated `#![cfg(feature = "racah-generated")]`
           # compiled to nothing in CI (#1293); `--tests` keeps this row scoped

@@ -1226,6 +1226,24 @@ impl<'a, D: FactorScalar> InputMatricizations<'a, D> {
     }
 }
 
+/// Binds `$geometry` to the admitted input's per-sector geometry
+/// (`&[CoupledSectorRegion]` or `&[SectorMatricization<D>]`) for the
+/// `SectorGeometry`-generic publication helpers.
+macro_rules! with_input_geometry {
+    ($input:expr, |$geometry:ident| $body:expr) => {
+        match $input {
+            InputMatricizations::Regions { regions, .. } => {
+                let $geometry: &[CoupledSectorRegion] = regions;
+                $body
+            }
+            InputMatricizations::Packed(matrices) => {
+                let $geometry = matrices.as_slice();
+                $body
+            }
+        }
+    };
+}
+
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct CompactSvdCopyProbe {
@@ -3358,10 +3376,10 @@ where
     BoundDynFactor::from_bound(space, data, nout, nin)
 }
 
-fn scatter_left_sector_blocks<D>(
+fn scatter_left_sector_blocks<D, M>(
     left_space: &DynamicFusionMapSpace,
     left_data: &mut [D],
-    matrix: &SectorMatricization<D>,
+    matrix: &M,
     index: &PlacementIndex<'_>,
     groups: &SectorBlockGroups,
     factor: &[D],
@@ -3369,9 +3387,10 @@ fn scatter_left_sector_blocks<D>(
 ) -> Result<(), OperationError>
 where
     D: FactorScalar,
+    M: SectorGeometry,
 {
     let left_structure = Arc::clone(left_space.structure());
-    for block_index in groups.blocks(matrix.sector) {
+    for block_index in groups.blocks(matrix.sector()) {
         #[cfg(test)]
         record_scatter_visit(FactorSide::Left);
         let block = left_structure
@@ -3380,9 +3399,9 @@ where
         let BlockKey::FusionTree(key) = block.key() else {
             continue;
         };
-        debug_assert_eq!(coupled_of(key.codomain_tree()), matrix.sector);
+        debug_assert_eq!(coupled_of(key.codomain_tree()), matrix.sector());
         let (row_offset, _) =
-            index.placement(matrix.sector, FactorSide::Left, key.codomain_tree())?;
+            index.placement(matrix.sector(), FactorSide::Left, key.codomain_tree())?;
         scatter_matrix_block(
             left_data,
             block.shape(),
@@ -3398,10 +3417,10 @@ where
     Ok(())
 }
 
-fn scatter_right_sector_blocks<D>(
+fn scatter_right_sector_blocks<D, M>(
     right_space: &DynamicFusionMapSpace,
     right_data: &mut [D],
-    matrix: &SectorMatricization<D>,
+    matrix: &M,
     index: &PlacementIndex<'_>,
     groups: &SectorBlockGroups,
     factor: &[D],
@@ -3409,9 +3428,10 @@ fn scatter_right_sector_blocks<D>(
 ) -> Result<(), OperationError>
 where
     D: FactorScalar,
+    M: SectorGeometry,
 {
     let right_structure = Arc::clone(right_space.structure());
-    for block_index in groups.blocks(matrix.sector) {
+    for block_index in groups.blocks(matrix.sector()) {
         #[cfg(test)]
         record_scatter_visit(FactorSide::Right);
         let block = right_structure
@@ -3420,9 +3440,9 @@ where
         let BlockKey::FusionTree(key) = block.key() else {
             continue;
         };
-        debug_assert_eq!(coupled_of(key.domain_tree()), matrix.sector);
+        debug_assert_eq!(coupled_of(key.domain_tree()), matrix.sector());
         let (col_offset, _) =
-            index.placement(matrix.sector, FactorSide::Right, key.domain_tree())?;
+            index.placement(matrix.sector(), FactorSide::Right, key.domain_tree())?;
         scatter_matrix_block(
             right_data,
             block.shape(),
@@ -3561,17 +3581,42 @@ where
     if let Some(plan) = compact_factor_plan(input.space())? {
         return eigh_full_direct_regions(dense, input, &plan);
     }
-    let matricizations = sector_matricizations(space.structure(), input.data(), space.nout())?;
+    let matricizations =
+        multiplicity_free_input_matricizations(space.structure(), input.data(), space.nout())?;
     #[cfg(test)]
-    record_eigh_input_pack(&matricizations);
-    validate_endomorphism_tree_stacking(&matricizations, EIGH_FULL_STACKING)?;
-    validate_hermitian_matricizations(&matricizations)?;
+    if let InputMatricizations::Packed(matrices) = &matricizations {
+        record_eigh_input_pack(matrices);
+    }
+    matricizations.validate_endomorphism_stacking(EIGH_FULL_STACKING)?;
+    matricizations.validate_hermitian()?;
+    with_input_geometry!(&matricizations, |geometry| eigh_full_scattered(
+        dense,
+        input,
+        &matricizations,
+        geometry
+    ))
+}
 
-    let ranks = matricizations
+/// Eigendecomposition of an input whose tree order the positional direct
+/// path cannot prove; eigenvectors scatter by tree identity.
+fn eigh_full_scattered<E, R, D, M>(
+    dense: &mut E,
+    input: &BoundDynamicTensorRef<'_, R, D>,
+    matricizations: &InputMatricizations<'_, D>,
+    geometry: &[M],
+) -> Result<EighFullDyn<R, D>, OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+    M: SectorGeometry + Sync,
+{
+    let space = input.space().space();
+    let ranks = geometry
         .iter()
         .map(|matrix| SectorRank {
-            sector: matrix.sector,
-            kept: matrix.rows,
+            sector: matrix.sector(),
+            kept: matrix.rows(),
         })
         .collect::<Vec<_>>();
     let v_space = build_bound_factor_space(
@@ -3585,22 +3630,19 @@ where
         .required_len()
         .map_err(OperationError::from_core_preserving_context)?;
     let mut v_data = vec![D::zero(); v_len];
-    let max_n = matricizations
-        .iter()
-        .map(|matrix| matrix.rows)
-        .max()
-        .unwrap_or(0);
+    let max_n = geometry.iter().map(SectorGeometry::rows).max().unwrap_or(0);
     let mut order = Vec::with_capacity(max_n);
     let mut visited = vec![false; max_n];
     let mut column_scratch = vec![D::zero(); max_n];
-    let mut eigenvalues = Vec::with_capacity(matricizations.len());
-    let index = PlacementIndex::new(&matricizations, &[FactorSide::Left]);
+    let mut eigenvalues = Vec::with_capacity(geometry.len());
+    let index = PlacementIndex::new(geometry, &[FactorSide::Left]);
     let v_groups = SectorBlockGroups::new(v_space.space().structure(), FactorSide::Left)?;
     let v_target = v_space.space();
     in_linalg_scope(dense, |dense| {
-        for matrix in &matricizations {
+        for (position, sector_geometry) in geometry.iter().enumerate() {
+            let matrix = matricizations.get(position)?;
             let n = matrix.rows;
-            let (real_values, mut vectors) = compact_eigh_owned(dense, &matrix.data, n)?;
+            let (real_values, mut vectors) = compact_eigh_owned(dense, matrix.data, n)?;
             validate_real_eigenvalues(&real_values)?;
 
             order.clear();
@@ -3624,7 +3666,7 @@ where
             scatter_left_sector_blocks(
                 v_target,
                 &mut v_data,
-                matrix,
+                sector_geometry,
                 &index,
                 &v_groups,
                 &vectors,
@@ -3963,6 +4005,9 @@ where
     D: FactorScalar,
 {
     let space = input.space().space();
+    // Why pack rather than borrow admitted regions: `owned_full_svd_stage`
+    // moves each matrix into the dense provider, so a borrowed region would
+    // be copied into an owned buffer anyway.
     let mut matricizations = sector_matricizations(space.structure(), input.data(), space.nout())?;
     let row_dimensions = space
         .homspace()
@@ -4630,12 +4675,14 @@ where
     D: FactorScalar,
 {
     let space = input.space().space();
-    let matrices = sector_matricizations(space.structure(), input.data(), space.nout())?;
+    let matrices =
+        multiplicity_free_input_matricizations(space.structure(), input.data(), space.nout())?;
     let mut pairs = Vec::with_capacity(matrices.len());
-    for matrix in &matrices {
+    for index in 0..matrices.len() {
+        let matrix = matrices.get(index)?;
         let rows = matrix.rows;
         let cols = matrix.cols;
-        let (q, r) = full_qr_numerical_stage(dense, &matrix.data, rows, cols)?;
+        let (q, r) = full_qr_numerical_stage(dense, matrix.data, rows, cols)?;
         pairs.push(FactorPair {
             sector: matrix.sector,
             kept: rows,
@@ -4649,11 +4696,11 @@ where
         .homspace()
         .codomain()
         .coupled_sector_block_dimensions(input.space().provider())?;
-    Ok((
+    with_input_geometry!(&matrices, |geometry| Ok((
         build_bound_factor(
             input.space(),
             space.homspace(),
-            &matrices,
+            geometry,
             &mut pairs,
             &dimensions,
             FactorSide::Left,
@@ -4661,12 +4708,12 @@ where
         build_bound_factor(
             input.space(),
             space.homspace(),
-            &matrices,
+            geometry,
             &mut pairs,
             &dimensions,
             FactorSide::Right,
         )?,
-    ))
+    )))
 }
 
 /// Full LQ `t = L * Q` (MatrixAlgebraKit `lq_full`): per sector `L` is the
@@ -4705,12 +4752,14 @@ where
     D: FactorScalar,
 {
     let space = input.space().space();
-    let matrices = sector_matricizations(space.structure(), input.data(), space.nout())?;
+    let matrices =
+        multiplicity_free_input_matricizations(space.structure(), input.data(), space.nout())?;
     let mut pairs = Vec::with_capacity(matrices.len());
-    for matrix in &matrices {
+    for index in 0..matrices.len() {
+        let matrix = matrices.get(index)?;
         let rows = matrix.rows;
         let cols = matrix.cols;
-        let transposed = adjoint_col_major(&matrix.data, rows, cols);
+        let transposed = adjoint_col_major(matrix.data, rows, cols);
         let (q_prime, r_prime) = full_qr_numerical_stage(dense, &transposed, cols, rows)?;
         pairs.push(FactorPair {
             sector: matrix.sector,
@@ -4725,11 +4774,11 @@ where
         .homspace()
         .domain()
         .coupled_sector_block_dimensions(input.space().provider())?;
-    Ok((
+    with_input_geometry!(&matrices, |geometry| Ok((
         build_bound_factor(
             input.space(),
             space.homspace(),
-            &matrices,
+            geometry,
             &mut pairs,
             &dimensions,
             FactorSide::Left,
@@ -4737,12 +4786,12 @@ where
         build_bound_factor(
             input.space(),
             space.homspace(),
-            &matrices,
+            geometry,
             &mut pairs,
             &dimensions,
             FactorSide::Right,
         )?,
-    ))
+    )))
 }
 
 /// Full general eigendecomposition `t = V * D * V^-1` (MatrixAlgebraKit
@@ -4862,19 +4911,20 @@ where
             message: "eig requires an endomorphism (codomain == domain)",
         });
     }
-    let matricizations = sector_matricizations(space.structure(), input.data(), space.nout())?;
-    validate_endomorphism_tree_stacking(
-        &matricizations,
+    let matricizations =
+        multiplicity_free_input_matricizations(space.structure(), input.data(), space.nout())?;
+    matricizations.validate_endomorphism_stacking(
         "eig_full requires identical endomorphism row/column fusion-tree stacking",
     )?;
 
     let mut pairs: Vec<FactorPair<D::Eig>> = Vec::with_capacity(matricizations.len());
     let mut eigenvalues = Vec::with_capacity(matricizations.len());
-    for matrix in &matricizations {
+    for index in 0..matricizations.len() {
+        let matrix = matricizations.get(index)?;
         let shape = [matrix.rows, matrix.cols];
         let strides = [1usize, matrix.rows];
         let view =
-            DenseView::new(&matrix.data, &shape, &strides, 0).map_err(OperationError::Dense)?;
+            DenseView::new(matrix.data, &shape, &strides, 0).map_err(OperationError::Dense)?;
         let outputs = dense
             .eig(D::dense_read(view))
             .map_err(OperationError::Dense)?;
@@ -4923,8 +4973,12 @@ where
         });
     }
 
-    let v_factor =
-        build_left_bound_factor(input.space(), space.homspace(), &matricizations, &mut pairs)?;
+    let v_factor = with_input_geometry!(&matricizations, |geometry| build_left_bound_factor(
+        input.space(),
+        space.homspace(),
+        geometry,
+        &mut pairs,
+    ))?;
     Ok(EigFullDyn {
         v: v_factor,
         eigenvalues,
@@ -5179,7 +5233,8 @@ where
     D: FactorScalar,
 {
     let space = input.space().space();
-    let matrices = sector_matricizations(space.structure(), input.data(), space.nout())?;
+    let matrices =
+        multiplicity_free_input_matricizations(space.structure(), input.data(), space.nout())?;
     // A codomain-only sector has no tensor block but is entirely left-null.
     let mut null_dimensions = space
         .homspace()
@@ -5187,15 +5242,11 @@ where
         .coupled_sector_block_dimensions(input.space().provider())?;
     let mut pairs = Vec::new();
     in_linalg_scope(dense, |dense| {
-        for matrix in &matrices {
+        for index in 0..matrices.len() {
+            let matrix = matrices.get(index)?;
             let (rows, cols) = (matrix.rows, matrix.cols);
-            let (rank, u_compact) = numerical_rank_and_compact_basis(
-                dense,
-                &matrix.data,
-                rows,
-                cols,
-                FactorSide::Left,
-            )?;
+            let (rank, u_compact) =
+                numerical_rank_and_compact_basis(dense, matrix.data, rows, cols, FactorSide::Left)?;
             if rank == rows {
                 null_dimensions.remove(&matrix.sector);
                 continue;
@@ -5216,14 +5267,14 @@ where
         }
         Ok(())
     })?;
-    build_bound_factor(
+    with_input_geometry!(&matrices, |geometry| build_bound_factor(
         input.space(),
         space.homspace(),
-        &matrices,
+        geometry,
         &mut pairs,
         &null_dimensions,
         FactorSide::Left,
-    )
+    ))
 }
 
 /// Right null space `N : W <- domain` (MatrixAlgebraKit `right_null`).
@@ -5256,7 +5307,8 @@ where
     D: FactorScalar,
 {
     let space = input.space().space();
-    let matrices = sector_matricizations(space.structure(), input.data(), space.nout())?;
+    let matrices =
+        multiplicity_free_input_matricizations(space.structure(), input.data(), space.nout())?;
     // A domain-only sector has no tensor block but is entirely right-null.
     let mut null_dimensions = space
         .homspace()
@@ -5264,11 +5316,12 @@ where
         .coupled_sector_block_dimensions(input.space().provider())?;
     let mut pairs = Vec::new();
     in_linalg_scope(dense, |dense| {
-        for matrix in &matrices {
+        for index in 0..matrices.len() {
+            let matrix = matrices.get(index)?;
             let (rows, cols) = (matrix.rows, matrix.cols);
             let (rank, v_compact) = numerical_rank_and_compact_basis(
                 dense,
-                &matrix.data,
+                matrix.data,
                 rows,
                 cols,
                 FactorSide::Right,
@@ -5293,14 +5346,14 @@ where
         }
         Ok(())
     })?;
-    build_bound_factor(
+    with_input_geometry!(&matrices, |geometry| build_bound_factor(
         input.space(),
         space.homspace(),
-        &matrices,
+        geometry,
         &mut pairs,
         &null_dimensions,
         FactorSide::Right,
-    )
+    ))
 }
 
 /// Checked-Generic numerical left null space.
@@ -5320,7 +5373,7 @@ where
 {
     let provider = input.space().provider_arc();
     let space = input.space().space();
-    let matrices = sector_matricizations_generic(space.structure(), input.data(), space.nout())
+    let matrices = generic_input_matricizations(space.structure(), input.data(), space.nout())
         .map_err(CheckedGenericFactorPlanError::from)?;
     let mut null_dimensions = coupled_sector_block_dimensions_generic_checked(
         space.homspace().codomain(),
@@ -5328,10 +5381,11 @@ where
     )?;
     let mut pairs = Vec::new();
     in_linalg_scope(dense, |dense| {
-        for matrix in &matrices {
+        for index in 0..matrices.len() {
+            let matrix = matrices.get(index)?;
             let (rank, u_compact) = numerical_rank_and_compact_basis(
                 dense,
-                &matrix.data,
+                matrix.data,
                 matrix.rows,
                 matrix.cols,
                 FactorSide::Left,
@@ -5360,14 +5414,14 @@ where
         Ok(())
     })
     .map_err(CheckedGenericFactorPlanError::from)?;
-    build_bound_factor_generic_checked(
+    with_input_geometry!(&matrices, |geometry| build_bound_factor_generic_checked(
         provider,
         space.homspace(),
-        &matrices,
+        geometry,
         &mut pairs,
         &null_dimensions,
         FactorSide::Left,
-    )
+    ))
 }
 
 /// Checked-Generic numerical right null space; see
@@ -5384,7 +5438,7 @@ where
 {
     let provider = input.space().provider_arc();
     let space = input.space().space();
-    let matrices = sector_matricizations_generic(space.structure(), input.data(), space.nout())
+    let matrices = generic_input_matricizations(space.structure(), input.data(), space.nout())
         .map_err(CheckedGenericFactorPlanError::from)?;
     let mut null_dimensions = coupled_sector_block_dimensions_generic_checked(
         space.homspace().domain(),
@@ -5392,10 +5446,11 @@ where
     )?;
     let mut pairs = Vec::new();
     in_linalg_scope(dense, |dense| {
-        for matrix in &matrices {
+        for index in 0..matrices.len() {
+            let matrix = matrices.get(index)?;
             let (rank, v_compact) = numerical_rank_and_compact_basis(
                 dense,
-                &matrix.data,
+                matrix.data,
                 matrix.rows,
                 matrix.cols,
                 FactorSide::Right,
@@ -5424,14 +5479,14 @@ where
         Ok(())
     })
     .map_err(CheckedGenericFactorPlanError::from)?;
-    build_bound_factor_generic_checked(
+    with_input_geometry!(&matrices, |geometry| build_bound_factor_generic_checked(
         provider,
         space.homspace(),
-        &matrices,
+        geometry,
         &mut pairs,
         &null_dimensions,
         FactorSide::Right,
-    )
+    ))
 }
 
 /// Computes the requested compact singular-vector basis and the documented numerical rank.
@@ -7476,11 +7531,75 @@ where
     // Every consumer therefore sees the same matricization either way; output
     // tree order is proven per output by `factor_output_is_canonical` (else a
     // by-tree scatter), and the eigenvalue ops check endomorphism stacking.
-    let regions = checked_sector_regions(structure, nout)?;
-    Ok(match regions {
+    Ok(match input_regions(structure, nout)? {
         Some(regions) => InputMatricizations::Regions { data, regions },
         None => InputMatricizations::Packed(sector_matricizations_generic(structure, data, nout)?),
     })
+}
+
+/// Multiplicity-free sibling of [`generic_input_matricizations`]; the same
+/// region admission applies because both packers stack sectors and trees in
+/// first-appearance order.
+fn multiplicity_free_input_matricizations<'a, D>(
+    structure: &BlockStructure,
+    data: &'a [D],
+    nout: usize,
+) -> Result<InputMatricizations<'a, D>, OperationError>
+where
+    D: FactorScalar,
+{
+    Ok(match input_regions(structure, nout)? {
+        Some(regions) => InputMatricizations::Regions { data, regions },
+        None => InputMatricizations::Packed(sector_matricizations(structure, data, nout)?),
+    })
+}
+
+/// The single admission authority for lending input regions to the
+/// numerical stages instead of packing them.
+fn input_regions(
+    structure: &BlockStructure,
+    nout: usize,
+) -> Result<Option<Arc<[CoupledSectorRegion]>>, OperationError> {
+    #[cfg(test)]
+    if FORCE_INPUT_PACK.with(Cell::get) {
+        return Ok(None);
+    }
+    checked_sector_regions(structure, nout)
+}
+
+#[cfg(test)]
+thread_local! {
+    static FORCE_INPUT_PACK: Cell<bool> = const { Cell::new(false) };
+    static INPUT_PACK_BYTES: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Runs `f` with region admission disabled, so every input packs.
+#[cfg(test)]
+pub(crate) fn with_forced_input_pack<T>(f: impl FnOnce() -> T) -> T {
+    let previous = FORCE_INPUT_PACK.with(|force| force.replace(true));
+    let result = f();
+    FORCE_INPUT_PACK.with(|force| force.set(previous));
+    result
+}
+
+#[cfg(test)]
+pub(crate) fn reset_input_pack_bytes() {
+    INPUT_PACK_BYTES.with(|bytes| bytes.set(0));
+}
+
+/// Bytes allocated by `sector_matricizations{,_generic}` on this thread.
+#[cfg(test)]
+pub(crate) fn input_pack_bytes() -> usize {
+    INPUT_PACK_BYTES.with(Cell::get)
+}
+
+#[cfg(test)]
+fn record_input_pack_bytes<D>(matricizations: &[SectorMatricization<D>]) {
+    let bytes = matricizations
+        .iter()
+        .map(|matrix| matrix.data.len() * std::mem::size_of::<D>())
+        .sum::<usize>();
+    INPUT_PACK_BYTES.with(|total| total.set(total.get() + bytes));
 }
 
 fn value_matricizations<'a, D>(
@@ -7491,15 +7610,12 @@ fn value_matricizations<'a, D>(
 where
     D: FactorScalar,
 {
-    if let Some(regions) = checked_sector_regions(structure, nout)? {
-        Ok(InputMatricizations::Regions { data, regions })
-    } else {
-        #[cfg(test)]
+    let matricizations = multiplicity_free_input_matricizations(structure, data, nout)?;
+    #[cfg(test)]
+    if matricizations.is_packed() {
         record_values_matricization_fallback();
-        Ok(InputMatricizations::Packed(sector_matricizations(
-            structure, data, nout,
-        )?))
     }
+    Ok(matricizations)
 }
 
 /// Packs every coupled sector of the source data into its dense column-major
@@ -7605,6 +7721,8 @@ where
             col_offset,
         );
     }
+    #[cfg(test)]
+    record_input_pack_bytes(&matricizations);
     Ok(matricizations)
 }
 
@@ -9239,6 +9357,8 @@ where
             col_offset,
         );
     }
+    #[cfg(test)]
+    record_input_pack_bytes(&matricizations);
     Ok(matricizations)
 }
 
@@ -11602,13 +11722,16 @@ where
 {
     let provider = input.space().provider_arc();
     let space = input.space().space();
-    let matrices = sector_matricizations_generic(space.structure(), input.data(), space.nout())
+    let matrices = generic_input_matricizations(space.structure(), input.data(), space.nout())
         .map_err(CheckedGenericFactorPlanError::from)?;
     let mut pairs = Vec::with_capacity(matrices.len());
-    for matrix in &matrices {
+    for index in 0..matrices.len() {
+        let matrix = matrices
+            .get(index)
+            .map_err(CheckedGenericFactorPlanError::from)?;
         let rows = matrix.rows;
         let cols = matrix.cols;
-        let (q, r) = full_qr_numerical_stage(dense, &matrix.data, rows, cols)
+        let (q, r) = full_qr_numerical_stage(dense, matrix.data, rows, cols)
             .map_err(CheckedGenericFactorPlanError::from)?;
         pairs.push(FactorPair {
             sector: matrix.sector,
@@ -11623,23 +11746,30 @@ where
         space.homspace().codomain(),
         provider.as_ref(),
     )?;
-    checked_full_factor_pair(provider, space.homspace(), &matrices, pairs, &dimensions)
+    with_input_geometry!(&matrices, |geometry| checked_full_factor_pair(
+        provider,
+        space.homspace(),
+        geometry,
+        pairs,
+        &dimensions
+    ))
 }
 
 /// Why not the paired builder: its bond holds only sectors that carry a
 /// factor pair, so a side-only sector would be dropped from the full
 /// factor's `fuse(codomain)`/`fuse(domain)` bond instead of publishing its
 /// identity block, as TensorKit's `initialize_output(qr_full!/lq_full!)` does.
-fn checked_full_factor_pair<R, D>(
+fn checked_full_factor_pair<R, D, M>(
     provider: &Arc<R>,
     homspace: &FusionTreeHomSpace,
-    matrices: &[SectorMatricization<D>],
+    matrices: &[M],
     mut pairs: Vec<FactorPair<D>>,
     dimensions: &BTreeMap<SectorId, usize>,
 ) -> Result<DynamicFactorPair<R, D>, CheckedGenericFactorPlanError<R::Error>>
 where
     R: CheckedGenericFusion,
     D: FactorScalar,
+    M: SectorGeometry,
 {
     let left = build_bound_factor_generic_checked(
         provider,
@@ -11675,6 +11805,9 @@ where
 {
     let provider = input.space().provider_arc();
     let space = input.space().space();
+    // Why pack rather than borrow admitted regions: `owned_full_svd_stage`
+    // moves each matrix into the dense provider, so a borrowed region would
+    // be copied into an owned buffer anyway.
     let mut matrices = sector_matricizations_generic(space.structure(), input.data(), space.nout())
         .map_err(CheckedGenericFactorPlanError::from)?;
     let row_dimensions = coupled_sector_block_dimensions_generic_checked(
@@ -11847,13 +11980,16 @@ where
 {
     let provider = input.space().provider_arc();
     let space = input.space().space();
-    let matrices = sector_matricizations_generic(space.structure(), input.data(), space.nout())
+    let matrices = generic_input_matricizations(space.structure(), input.data(), space.nout())
         .map_err(CheckedGenericFactorPlanError::from)?;
     let mut pairs = Vec::with_capacity(matrices.len());
-    for matrix in &matrices {
+    for index in 0..matrices.len() {
+        let matrix = matrices
+            .get(index)
+            .map_err(CheckedGenericFactorPlanError::from)?;
         let rows = matrix.rows;
         let cols = matrix.cols;
-        let transposed = adjoint_col_major(&matrix.data, rows, cols);
+        let transposed = adjoint_col_major(matrix.data, rows, cols);
         let (q_prime, r_prime) = full_qr_numerical_stage(dense, &transposed, cols, rows)
             .map_err(CheckedGenericFactorPlanError::from)?;
         pairs.push(FactorPair {
@@ -11869,7 +12005,13 @@ where
         space.homspace().domain(),
         provider.as_ref(),
     )?;
-    checked_full_factor_pair(provider, space.homspace(), &matrices, pairs, &dimensions)
+    with_input_geometry!(&matrices, |geometry| checked_full_factor_pair(
+        provider,
+        space.homspace(),
+        geometry,
+        pairs,
+        &dimensions
+    ))
 }
 
 /// Checked-Generic singular values only. No factor-space publication occurs.
@@ -11934,25 +12076,33 @@ where
             },
         ));
     }
-    let matrices = sector_matricizations_generic(space.structure(), input.data(), space.nout())
+    let matrices = generic_input_matricizations(space.structure(), input.data(), space.nout())
         .map_err(CheckedGenericFactorPlanError::from)?;
     // Why not trust equal product spaces alone: outer-multiplicity vertices
     // are part of a tree key, so Hermitian coordinates require identical full
     // tree stacking, not merely equal coupled-sector dimensions.
-    validate_endomorphism_tree_stacking(&matrices, EIGH_FULL_STACKING)
+    matrices
+        .validate_endomorphism_stacking(EIGH_FULL_STACKING)
         .map_err(CheckedGenericFactorPlanError::from)?;
-    validate_hermitian_matricizations(&matrices).map_err(CheckedGenericFactorPlanError::from)?;
+    matrices
+        .validate_hermitian()
+        .map_err(CheckedGenericFactorPlanError::from)?;
 
-    let max_n = matrices.iter().map(|matrix| matrix.rows).max().unwrap_or(0);
+    let max_n = with_input_geometry!(&matrices, |geometry| geometry
+        .iter()
+        .map(SectorGeometry::rows)
+        .max()
+        .unwrap_or(0));
     let mut order = Vec::with_capacity(max_n);
     let mut visited = vec![false; max_n];
     let mut column_scratch = vec![D::zero(); max_n];
     let mut eigenvalues = Vec::with_capacity(matrices.len());
     let mut pairs = Vec::with_capacity(matrices.len());
     in_linalg_scope(dense, |dense| {
-        for matrix in &matrices {
+        for index in 0..matrices.len() {
+            let matrix = matrices.get(index)?;
             let n = matrix.rows;
-            let (real_values, mut vectors) = compact_eigh_owned(dense, &matrix.data, n)?;
+            let (real_values, mut vectors) = compact_eigh_owned(dense, matrix.data, n)?;
             validate_real_eigenvalues(&real_values)?;
             order.clear();
             order.extend(0..n);
@@ -11981,20 +12131,20 @@ where
         Ok(())
     })
     .map_err(CheckedGenericFactorPlanError::from)?;
-    let dimensions = matrices
+    let dimensions = with_input_geometry!(&matrices, |geometry| geometry
         .iter()
-        .map(|matrix| (matrix.sector, matrix.rows))
-        .collect::<BTreeMap<_, _>>();
+        .map(|matrix| (matrix.sector(), matrix.rows()))
+        .collect::<BTreeMap<_, _>>());
     #[cfg(test)]
     record_checked_eigh_pair_pointers(&pairs);
-    let v = build_bound_factor_generic_checked(
+    let v = with_input_geometry!(&matrices, |geometry| build_bound_factor_generic_checked(
         provider,
         space.homspace(),
-        &matrices,
+        geometry,
         &mut pairs,
         &dimensions,
         FactorSide::Left,
-    )?;
+    ))?;
     Ok(EighFullDyn { v, eigenvalues })
 }
 
@@ -12108,21 +12258,24 @@ where
             },
         ));
     }
-    let matrices = sector_matricizations_generic(space.structure(), input.data(), space.nout())
+    let matrices = generic_input_matricizations(space.structure(), input.data(), space.nout())
         .map_err(CheckedGenericFactorPlanError::from)?;
-    validate_endomorphism_tree_stacking(
-        &matrices,
-        "eig_full requires identical endomorphism row/column fusion-tree stacking",
-    )
-    .map_err(CheckedGenericFactorPlanError::from)?;
-    if matrices
-        .iter()
-        .flat_map(|matrix| &matrix.data)
-        .any(|&value| {
+    matrices
+        .validate_endomorphism_stacking(
+            "eig_full requires identical endomorphism row/column fusion-tree stacking",
+        )
+        .map_err(CheckedGenericFactorPlanError::from)?;
+    let mut nonfinite = false;
+    for index in 0..matrices.len() {
+        let matrix = matrices
+            .get(index)
+            .map_err(CheckedGenericFactorPlanError::from)?;
+        nonfinite |= matrix.data.iter().any(|&value| {
             let value = value.widen_complex();
             !value.re.is_finite() || !value.im.is_finite()
-        })
-    {
+        });
+    }
+    if nonfinite {
         return Err(CheckedGenericFactorPlanError::Operation(
             OperationError::InvalidArgument {
                 message: "eig input components must be finite",
@@ -12132,11 +12285,14 @@ where
 
     let mut pairs: Vec<FactorPair<D::Eig>> = Vec::with_capacity(matrices.len());
     let mut eigenvalues = Vec::with_capacity(matrices.len());
-    for matrix in &matrices {
+    for index in 0..matrices.len() {
+        let matrix = matrices
+            .get(index)
+            .map_err(CheckedGenericFactorPlanError::from)?;
         let n = matrix.rows;
         let shape = [n, n];
         let strides = [1usize, n];
-        let view = DenseView::new(&matrix.data, &shape, &strides, 0).map_err(|error| {
+        let view = DenseView::new(matrix.data, &shape, &strides, 0).map_err(|error| {
             CheckedGenericFactorPlanError::Operation(OperationError::Dense(error))
         })?;
         let outputs = dense.eig(D::dense_read(view)).map_err(|error| {
@@ -12223,18 +12379,20 @@ where
         });
     }
 
-    let dimensions = matrices
-        .iter()
-        .map(|matrix| (matrix.sector, matrix.rows))
-        .collect::<BTreeMap<_, _>>();
-    let v = build_bound_factor_generic_checked(
-        provider,
-        space.homspace(),
-        &matrices,
-        &mut pairs,
-        &dimensions,
-        FactorSide::Left,
-    )?;
+    let v = with_input_geometry!(&matrices, |geometry| {
+        let dimensions = geometry
+            .iter()
+            .map(|matrix| (matrix.sector(), matrix.rows()))
+            .collect::<BTreeMap<_, _>>();
+        build_bound_factor_generic_checked(
+            provider,
+            space.homspace(),
+            geometry,
+            &mut pairs,
+            &dimensions,
+            FactorSide::Left,
+        )
+    })?;
     Ok(EigFullDyn { v, eigenvalues })
 }
 
