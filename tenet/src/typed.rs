@@ -286,7 +286,9 @@ use crate::tensor_core::{
 use crate::RuntimeIdentity;
 
 mod batched;
-pub use batched::StructureSignature;
+pub use batched::{
+    BatchMemberRepresentation, SignatureField, StackedTensorMap, StructureSignature,
+};
 
 #[cfg(test)]
 mod contract_stacking_tests;

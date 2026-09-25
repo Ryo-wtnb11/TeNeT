@@ -6,6 +6,8 @@ use tenet_core::{CoreError, FusionAlgebraError};
 use tenet_matrixalgebra::TruncationError;
 use tenet_tensors::OperationError;
 
+use crate::typed::{BatchMemberRepresentation, SignatureField};
+
 /// Error produced by the user-layer [`crate::prelude::TensorMap`] /
 /// [`crate::prelude::GradedSpace`] / [`crate::prelude::Runtime`] API.
 ///
@@ -38,6 +40,23 @@ pub enum Error {
     UnsupportedOnDevice(String),
     /// Invalid user input (axes, sectors, spaces); the message says what.
     InvalidArgument(String),
+    /// A batch operand does not match one structure signature: `member` is
+    /// the first differing member of a pack, or `None` when a whole stack
+    /// differs from a prepared handle. `field` is the first differing
+    /// determinant.
+    BatchSignatureMismatch {
+        /// The differing member of a pack; `None` for a whole stack.
+        member: Option<usize>,
+        /// The first differing determinant.
+        field: SignatureField,
+    },
+    /// A batch member's payload is not an owned dense buffer.
+    UnsupportedBatchMember {
+        /// The rejected member.
+        member: usize,
+        /// Its payload representation.
+        representation: BatchMemberRepresentation,
+    },
 }
 
 impl fmt::Display for Error {
@@ -56,6 +75,18 @@ impl fmt::Display for Error {
                 write!(f, "unsupported on device: {message}")
             }
             Self::InvalidArgument(message) => write!(f, "invalid argument: {message}"),
+            Self::BatchSignatureMismatch {
+                member: Some(member),
+                field,
+            } => write!(f, "batch member {member} differs from member 0 in {field:?}"),
+            Self::BatchSignatureMismatch {
+                member: None,
+                field,
+            } => write!(f, "stack differs from the prepared handle in {field:?}"),
+            Self::UnsupportedBatchMember {
+                member,
+                representation,
+            } => write!(f, "batch member {member} is a {representation:?} payload; pack needs owned dense members"),
         }
     }
 }
