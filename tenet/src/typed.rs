@@ -2681,6 +2681,11 @@ fn robust_cinv(c: f64, d: f64) -> (f64, f64) {
 /// takes the signed-zero branch below (not `NaN`, unlike the naive `1/z`
 /// this replaces), and a `NaN` component propagates through whichever branch
 /// its finite counterpart's magnitude selects, exactly as it does in Julia.
+// Why not Tenferro: elementwise complex division/reciprocal is dense-backend
+// arithmetic, not TeNeT's to own long-term. This port is interim until
+// tensor4all/tenferro-rs#1922 lands a scale-robust primitive (TeNeT#1512
+// tracks it); `benchmarks/complex64_reciprocal_oracle.*` stays the
+// acceptance test when that happens.
 #[inline]
 fn julia_complex64_reciprocal(w: Complex64) -> Complex64 {
     let (c, d) = (w.re, w.im);
@@ -2742,6 +2747,8 @@ fn julia_complex64_reciprocal(w: Complex64) -> Complex64 {
 /// infinite or `NaN` `c`/`d` (from an infinite or `NaN` `f32` input, which
 /// widening preserves) still reaches this function and is handled below,
 /// exactly as Julia's own function handles it.
+// Interim per the "Why not Tenferro" note above `julia_complex64_reciprocal`
+// (TeNeT#1512).
 #[inline]
 fn julia_complex32_reciprocal_wide(c: f64, d: f64) -> (f64, f64) {
     if c.is_infinite() || d.is_infinite() {
