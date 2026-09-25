@@ -37,8 +37,8 @@ use tenet_dense::{
 
 use crate::cuda::CudaStorage;
 use crate::cuda_transform_plan::{
-    compile_device_plan, DeviceMoveSpec, DeviceTransformPlan, StructureCache, StructureKey,
-    DEFAULT_STRUCTURE_CACHE_ENTRIES,
+    compile_device_plan, DeviceMoveSpec, DeviceTransformPlan, PlanSignatures, StructureCache,
+    StructureKey, DEFAULT_STRUCTURE_CACHE_ENTRIES,
 };
 use crate::opaque_admission::{
     validate_stage_a, validate_stage_c, AllocationIdentity, CoefficientReadiness, ContextIdentity,
@@ -107,7 +107,15 @@ struct PreparedStructure {
     /// The largest Single or scatter destination, the zero template a zero
     /// caller scale needs to write zeros over every written layout.
     max_write_len: usize,
-    plan_signatures: usize,
+    plan_signatures: PlanSignatures,
+    /// Whether an Overwrite replay has zero-filled the written destinations on
+    /// this entry's context, so `plan_signatures.zero_fill` is reserved too.
+    /// Set by the first such replay, never cleared: the entry leaves the ledger
+    /// whole when it is evicted or cleared.
+    zero_fills_reserved: bool,
+    /// Whether some Single block's coefficient is zero in the payload dtype,
+    /// so every Overwrite replay zero-fills its destination, whatever the scale.
+    zero_coefficient_moves: bool,
     /// The structure's whole coefficient payload converted to the payload dtype
     /// and uploaded as one device vector. Block `b`'s scalar is the 1x1 operand
     /// at its own index and Multi block `b`'s recoupling matrix is the
@@ -278,11 +286,13 @@ impl CudaTreeTransformExecutor {
     /// submit together, i.e. the plan-cache size a thrash-free warm replay of
     /// all of them needs.
     ///
-    /// The caller scale does not enter it. A zero scale swaps the buffer the
-    /// 1x1 coefficient operand is read from, but not that operand's view
+    /// A nonzero caller scale's value does not enter it: it swaps the buffer
+    /// the 1x1 coefficient operand is read from, but not that operand's view
     /// metadata (`[1, 1]` extents and strides) nor its alignment, which is
     /// `size_of::<D>()` for every view, and the accumulation scalars are not in
-    /// a contraction plan key at all.
+    /// a contraction plan key at all. A zero scale does: it zero-fills the
+    /// written destinations instead (#1438), and a structure's fill signatures
+    /// are added from its first such replay on.
     pub fn required_plan_entries(&self) -> usize {
         self.required_plan_entries
     }
@@ -589,6 +599,24 @@ impl CudaTreeTransformExecutor {
                     })?
             }
         };
+        // Before any submission, so the fills below find their plans covered.
+        if matches!(beta, CudaRegionBeta::Overwrite) {
+            if let Some(entry) = self.prepared.value_mut(index) {
+                if !entry.zero_fills_reserved && (alpha == D::ZERO || entry.zero_coefficient_moves)
+                {
+                    // Set before the refresh because the refresh sums the
+                    // flag; undone on failure so the next such replay retries
+                    // instead of submitting unreserved fills.
+                    entry.zero_fills_reserved = true;
+                    if let Err(error) = self.refresh_plan_cache(ctx) {
+                        if let Some(entry) = self.prepared.value_mut(index) {
+                            entry.zero_fills_reserved = false;
+                        }
+                        return Err(error);
+                    }
+                }
+            }
+        }
 
         let Self {
             prepared,
@@ -796,6 +824,7 @@ impl CudaTreeTransformExecutor {
                 .coefficient
                 .is_some_and(|index| values.get(index) == Some(&D::ZERO));
         }
+        prepared.zero_coefficient_moves = prepared.moves.iter().any(|entry| entry.zero_coefficient);
         let device_bytes = core::mem::size_of_val(values.as_slice());
         if !values.is_empty() {
             prepared.coefficients = Some(
@@ -880,7 +909,14 @@ impl CudaTreeTransformExecutor {
     fn refresh_plan_cache(&mut self, ctx: &mut CudaDenseContext) -> Result<(), OperationError> {
         let signatures = |values: &mut dyn Iterator<Item = &PreparedStructure>| {
             values.fold(0usize, |total, prepared| {
-                total.saturating_add(prepared.plan_signatures)
+                let zero_fill = if prepared.zero_fills_reserved {
+                    prepared.plan_signatures.zero_fill
+                } else {
+                    0
+                };
+                total
+                    .saturating_add(prepared.plan_signatures.submitted)
+                    .saturating_add(zero_fill)
             })
         };
         self.required_plan_entries = signatures(&mut self.prepared.values());
@@ -967,6 +1003,8 @@ fn prepared_structure(
         max_zero_len: plan.max_zero_len,
         max_write_len,
         plan_signatures: plan.plan_signatures,
+        zero_fills_reserved: false,
+        zero_coefficient_moves: false,
         coefficients: None,
         recoupling_len,
         readiness,

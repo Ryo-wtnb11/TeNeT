@@ -600,6 +600,15 @@ impl<T: DeviceScalar> Held<T> {
     }
 
     fn replay(&mut self, ctx: &mut CudaDenseContext, executor: &mut CudaTreeTransformExecutor) {
+        self.replay_scaled(ctx, executor, T::from_parts(1.0, 0.0));
+    }
+
+    fn replay_scaled(
+        &mut self,
+        ctx: &mut CudaDenseContext,
+        executor: &mut CudaTreeTransformExecutor,
+        alpha: T,
+    ) {
         executor
             .replay(
                 ctx,
@@ -608,7 +617,7 @@ impl<T: DeviceScalar> Held<T> {
                 &self.fixture.src_structure(),
                 &mut self.dst,
                 &self.src,
-                T::from_parts(1.0, 0.0),
+                alpha,
                 CudaTreeTransformDestination::Overwrite,
             )
             .unwrap();
@@ -2348,4 +2357,103 @@ fn unsorted_or_vanishing_destination_scales_are_rejected_before_any_device_work(
         CudaTransferStats::default()
     );
     assert_eq!(executor.prepared_structures(), 0);
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn zero_fill_plans_are_reserved_at_the_first_zero_scale_replay() {
+    // What: a nonzero-scale replay reserves exactly the plans it submits; the
+    // zero fills a zero caller scale writes over every written destination
+    // (#1438) are reserved by the first such replay, before it submits them,
+    // and only once.
+    let mut ctx = context();
+    let mut executor = CudaTreeTransformExecutor::default();
+    let mut held = Held::<f64>::new(&ctx, many_distinct_signatures(70));
+
+    held.replay(&mut ctx, &mut executor);
+    assert_eq!(
+        ctx.reserved_plan_entries(),
+        70,
+        "one plan per transposing move"
+    );
+    assert_eq!(executor.required_plan_entries(), 70);
+
+    let before = ctx.plan_cache_stats().unwrap();
+    held.replay_scaled(&mut ctx, &mut executor, 0.0);
+    let after = ctx.plan_cache_stats().unwrap();
+    assert_eq!(ctx.reserved_plan_entries(), 140, "one fill per destination");
+    assert_eq!(executor.required_plan_entries(), 140);
+    assert_eq!(after.evictions, before.evictions, "{before:?} -> {after:?}");
+    assert_eq!(
+        held.dst.download(&ctx).unwrap(),
+        vec![0.0; held.fixture.dst_len()]
+    );
+
+    // Warm in both scales: nothing more reserved, missed or evicted.
+    held.replay_scaled(&mut ctx, &mut executor, -0.0);
+    held.replay(&mut ctx, &mut executor);
+    let warm = ctx.plan_cache_stats().unwrap();
+    assert_eq!(ctx.reserved_plan_entries(), 140);
+    assert_eq!(
+        (warm.misses, warm.evictions),
+        (after.misses, after.evictions)
+    );
+    let source = held.fixture.source::<f64>();
+    let zeros = vec![0.0; held.fixture.dst_len()];
+    assert_close(
+        &held.dst.download(&ctx).unwrap(),
+        &held.fixture.expected(&source, &zeros, true),
+        "nonzero replay after a zero-scale one",
+    );
+
+    executor.clear(&mut ctx);
+    assert_eq!(ctx.reserved_plan_entries(), 0, "clear returns both parts");
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn an_evicted_structure_returns_its_zero_fill_reservation() {
+    // What: the zero-fill part travels with its structure, so an eviction
+    // releases it and a re-preparation starts without it again.
+    let mut ctx = context();
+    let mut executor = CudaTreeTransformExecutor::with_structure_entries(
+        1 << 20,
+        DEFAULT_PLAN_CACHE_BUDGET_BYTES,
+        1,
+    );
+    let mut large = Held::<f64>::new(&ctx, many_distinct_signatures(12));
+    let mut small = Held::<f64>::new(&ctx, many_distinct_signatures(3));
+
+    large.replay_scaled(&mut ctx, &mut executor, 0.0);
+    assert_eq!(ctx.reserved_plan_entries(), 24);
+    small.replay(&mut ctx, &mut executor);
+    assert_eq!(ctx.reserved_plan_entries(), 3, "the eviction released 24");
+    large.replay(&mut ctx, &mut executor);
+    assert_eq!(ctx.reserved_plan_entries(), 12, "re-prepared without fills");
+    executor.clear(&mut ctx);
+    assert_eq!(ctx.reserved_plan_entries(), 0);
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn a_zero_fill_reservation_lands_on_its_own_context() {
+    let mut a = context();
+    let mut b = context();
+    let mut executor = CudaTreeTransformExecutor::default();
+    let mut on_a = Held::<f64>::new(&a, many_distinct_signatures(12));
+    let mut on_b = Held::<f64>::new(&b, many_distinct_signatures(12));
+
+    on_a.replay(&mut a, &mut executor);
+    on_b.replay(&mut b, &mut executor);
+    on_b.replay_scaled(&mut b, &mut executor, 0.0);
+    assert_eq!(a.reserved_plan_entries(), 12);
+    assert_eq!(b.reserved_plan_entries(), 24);
+    assert_eq!(executor.required_plan_entries(), 36);
+
+    executor.clear(&mut b);
+    assert_eq!(b.reserved_plan_entries(), 0);
+    assert_eq!(a.reserved_plan_entries(), 12, "clearing B must not touch A");
+    on_a.replay(&mut a, &mut executor);
+    executor.clear(&mut a);
+    assert_eq!(a.reserved_plan_entries(), 0);
 }
