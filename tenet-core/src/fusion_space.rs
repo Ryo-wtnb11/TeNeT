@@ -842,7 +842,9 @@ impl PreparedFusionTreeLayout {
         // HomSpace is their authority, while sectors and duality select keys.
         let (sector, degeneracy) =
             coupled_subblock_parts_from_leg_degeneracies(homspace, self.layout_data())?;
-        BlockStructure::from_parts(sector, degeneracy).map(BlockStructure::into_shared)
+        let structure = BlockStructure::from_parts(sector, degeneracy)?;
+        structure.record_storage_tiling();
+        Ok(structure.into_shared())
     }
 
     /// Finalizes a checked complete multiplicity-free layout through the core
@@ -3301,8 +3303,9 @@ impl FusionTreeHomSpace {
         let layout = self.cached_fusion_tree_layout(rule);
         let (sector, degeneracy) =
             coupled_subblock_parts_from_leg_degeneracies(self, &layout)?;
-        let built = BlockStructure::from_parts(sector, degeneracy)?.into_shared();
-        Ok(admit_complete_hom_space_structure(key, built))
+        let built = BlockStructure::from_parts(sector, degeneracy)?;
+        built.record_storage_tiling();
+        Ok(admit_complete_hom_space_structure(key, built.into_shared()))
     }
 
     #[doc(hidden)]
@@ -4120,6 +4123,14 @@ fn degeneracy_shape_for_tree_side(
         .collect()
 }
 
+/// Why its structures carry the storage-tiling proof: `visit_coupled_leg_blocks`
+/// places block `(row, col)` of a coupled sector at the positional
+/// `(row_offsets[row], col_offsets[col])` window of that sector's column-major
+/// `matrix_rows × matrix_cols` matrix, with compact row axes and column
+/// strides that are multiples of `matrix_rows`, for every `row < row_count`
+/// and `col < col_count` once, and the sector matrices follow each other from
+/// offset zero. The blocks are therefore pairwise disjoint and each reaches
+/// its window once, independent of tree identity.
 fn coupled_subblock_parts_from_leg_degeneracies(
     homspace: &FusionTreeHomSpace,
     layout: &FusionTreeHomSpaceLayoutData,

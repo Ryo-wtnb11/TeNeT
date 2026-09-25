@@ -323,3 +323,64 @@ fn lazy_adjoint_add_and_materialization_fill_no_payload() {
     let actual: Vec<u64> = sum.unwrap().data().iter().map(|x| x.to_bits()).collect();
     assert_eq!(actual, expected);
 }
+
+/// Steady-state `restrict_leg` on `[leg, other] <- [leg, other]`: every
+/// coupled sector has several row trees, so the destination blocks are
+/// strided sub-matrices. Returns the measurement and payload bytes of one
+/// warm call whose previous outputs were dropped.
+fn steady_multi_row_restrict(scale: usize) -> (Measurement, usize) {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(U1FusionRule);
+    let leg = u1(
+        &provider,
+        &[(-1, 2 * scale), (0, 3 * scale), (1, 2 * scale)],
+    );
+    let other = u1(&provider, &[(-1, 1), (0, 2), (1, 1)]);
+    let source: TensorMap<_, f64> =
+        TensorMap::rand_with_seed(&runtime, [&leg, &other], [&leg, &other], 61).unwrap();
+    let selection = LegSelection::try_new(
+        &leg,
+        [
+            (U1Irrep::new(-1), 0..scale),
+            (U1Irrep::new(0), scale..3 * scale),
+        ],
+    )
+    .unwrap();
+    let warm = source.restrict_leg(0, &selection).unwrap();
+    let expected = warm.data().to_vec();
+    let payload_bytes = std::mem::size_of_val(warm.data());
+    drop(warm);
+    drop(black_box(source.restrict_leg(0, &selection).unwrap()));
+    let mut output = None;
+    let measurement = measure(|| {
+        output = Some(black_box(source.restrict_leg(0, &selection).unwrap()));
+    });
+    assert_eq!(output.unwrap().data(), expected.as_slice());
+    (measurement, payload_bytes)
+}
+
+#[test]
+fn steady_state_restrict_leg_with_several_row_trees_pays_no_layout_proof() {
+    let _guard = MEASUREMENT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (small, small_bytes) = steady_multi_row_restrict(1);
+    let (large, large_bytes) = steady_multi_row_restrict(4);
+    for (measurement, bytes) in [(&small, small_bytes), (&large, large_bytes)] {
+        assert!(
+            !measurement.zeroed_sizes.contains(&bytes),
+            "no payload-sized zeroed allocation, got {:?} for {bytes} bytes",
+            measurement.zeroed_sizes
+        );
+    }
+    // origin/main (zero-filled output) measures 11 here. Proving the tiling
+    // by compiling `coupled_sector_regions` on the per-call destination
+    // wrapper measured 50: the proof must be an O(1) property recorded when
+    // the canonical layout is built (#1290).
+    assert!(
+        small.allocations <= 11,
+        "steady-state restrict_leg allocated {} times",
+        small.allocations
+    );
+    assert_eq!(small.allocations, large.allocations);
+}

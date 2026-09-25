@@ -620,12 +620,6 @@ fn first_lazy_materialization_allocates_once_per_payload_not_per_block() {
             rank,
         );
         assert!(rank == 2 && radius == 0 || source.block_count() > 1);
-        // #1290: the unfilled output needs the adjoint structure's tiling
-        // proof, whose coupled-sector regions are compiled once per interned
-        // structure (O(blocks), shared with factorization and transform
-        // replay). An earlier view of the same structure pays it, so this
-        // measures the per-materialization cost.
-        black_box(source.adjoint().unwrap().data().len());
         let lazy = source.adjoint().unwrap();
         let payload_bytes = std::mem::size_of_val(source.data()) as u64;
         let (allocations, bytes) = measure(|| {

@@ -18509,6 +18509,7 @@ mod tests {
                 degeneracy,
                 blocks,
                 required_len,
+                storage_tiling: Default::default(),
             })
         })
     }

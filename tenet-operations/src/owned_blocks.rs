@@ -15,7 +15,7 @@ use core::mem::MaybeUninit;
 use core::ops::{Add, Mul};
 
 use num_traits::{One, Zero};
-use tenet_core::{BlockKey, BlockRef, BlockStructure};
+use tenet_core::{BlockRef, BlockStructure};
 
 use crate::owned_overwrite_buffer::initialize_owned;
 use crate::{CheckedBlockLayout, ConjugateValue, OperationError};
@@ -221,25 +221,20 @@ fn checked_offset(offset: usize) -> Result<isize, OperationError> {
 
 /// Whether the blocks' reachable offsets partition `0..len`, so writing every
 /// block once initializes every element exactly once. Sufficient, not
-/// necessary; `false` only costs the zero fill. Two proofs are accepted:
+/// necessary; `false` only costs the zero fill. Two proofs are accepted, both
+/// without allocation or hashing:
 ///
-/// - the canonical coupled-sector matrix layout (TensorKit's block layout),
-///   whose checked regions tile storage exactly
-///   ([`BlockStructure::coupled_sector_regions`], cached per structure), with
-///   the codomain rank read from the first block's fusion-tree key;
+/// - the tiling its constructor recorded on the structure
+///   ([`BlockStructure::storage_tiling_proven`]: the canonical coupled-sector
+///   layout built from leg degeneracies, TensorKit's block layout);
 /// - non-empty blocks that, in index order, are each compact (column-major
 ///   under some axis permutation) and contiguous from offset zero to `len`.
+///
+/// Why not `BlockStructure::coupled_sector_regions`: it compiles hashed region
+/// metadata on the structure wrapper, which the interner rebuilds whenever the
+/// last owner drops it, so a steady-state eager call would pay it every time.
 fn blocks_tile_storage(structure: &BlockStructure, len: usize) -> Result<bool, OperationError> {
-    if compact_blocks_tile_storage(structure, len)? {
-        return Ok(true);
-    }
-    if structure.block_count() > 0 {
-        if let BlockKey::FusionTree(key) = structure.block(0)?.key() {
-            let nout = key.codomain_uncoupled().len();
-            return Ok(structure.coupled_sector_regions(nout)?.is_some());
-        }
-    }
-    Ok(false)
+    Ok(structure.storage_tiling_proven() || compact_blocks_tile_storage(structure, len)?)
 }
 
 fn compact_blocks_tile_storage(
@@ -343,7 +338,7 @@ where
 mod tests {
     use super::*;
     use num_complex::Complex64;
-    use tenet_core::BlockSpec;
+    use tenet_core::{BlockKey, BlockSpec};
 
     fn structure(blocks: &[(&[usize], &[usize], usize)]) -> BlockStructure {
         BlockStructure::from_blocks_with_rank(
@@ -528,6 +523,7 @@ mod tests {
             block.element_count().unwrap() > 0 && !is_compact(block.shape(), block.strides())
         }));
         assert!(!compact_blocks_tile_storage(&structure, len).unwrap());
+        assert!(structure.storage_tiling_proven());
         let lhs = values().into_iter().cycle().take(len).collect::<Vec<_>>();
         let rhs = lhs.iter().rev().copied().collect::<Vec<_>>();
         let one = Complex64::new(1.0, 0.0);
