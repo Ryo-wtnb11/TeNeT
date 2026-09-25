@@ -3,7 +3,7 @@ use core::ops::{Add, Mul, Range};
 use num_traits::{One, Zero};
 use tenet_core::{BlockKey, BlockStructure, FusionTreePairKey, SectorId};
 use tenet_operations::{
-    bilinear_raw_strided_kernel_mapped, CheckedBlockLayout, ConjugateValue, OperationError,
+    bilinear_raw_strided_kernel_mapped, overwrite_owned_blocks, ConjugateValue, OperationError,
     RecouplingCoefficientAction, StridedHostKernelAdapter, WideScalar,
 };
 
@@ -99,7 +99,7 @@ pub type SectorRangeTable<'a> = Option<&'a [(SectorId, Range<usize>)]>;
 pub type SectorStartTable<'a> = Option<&'a [(SectorId, usize)]>;
 
 /// Copies one logical degeneracy rectangle per block from an owned or
-/// lazy-adjoint fusion tensor into a compact destination.
+/// lazy-adjoint fusion tensor into a newly allocated `destination` payload.
 ///
 /// `logical_starts` holds one entry per logical axis: `None` starts that axis
 /// at zero for every sector, `Some(table)` gives the start per uncoupled
@@ -110,13 +110,12 @@ pub type SectorStartTable<'a> = Option<&'a [(SectorId, usize)]>;
 /// block's own shape, and `start + destination extent <= source extent` is
 /// checked per block and axis.
 #[doc(hidden)]
-pub fn oriented_fusion_restrict_into<D>(
+pub fn oriented_fusion_restrict_owned<D>(
     destination: &BlockStructure,
-    destination_data: &mut [D],
     source: FusionOperand<'_>,
     source_data: &[D],
     logical_starts: &[SectorStartTable<'_>],
-) -> Result<(), OperationError>
+) -> Result<Vec<D>, OperationError>
 where
     D: Copy
         + Add<D, Output = D>
@@ -127,17 +126,14 @@ where
         + ConjugateValue
         + strided_kernel::MaybeSendSync,
 {
-    if destination_data.len() != destination.required_len()?
-        || source_data.len() != source.storage_space().required_len()?
+    if source_data.len() != source.storage_space().required_len()?
         || logical_starts.len() != destination.rank()
     {
         return Err(OperationError::StructureMismatch {
             tensor: "oriented degeneracy restriction storage",
         });
     }
-    let mut layout = CheckedBlockLayout::default();
-    for destination_index in 0..destination.block_count() {
-        let destination_block = destination.block(destination_index)?;
+    overwrite_owned_blocks(destination, |destination_block, writer| {
         let BlockKey::FusionTree(logical_key) = destination_block.key() else {
             return Err(OperationError::StructureMismatch {
                 tensor: "oriented degeneracy restriction destination",
@@ -148,27 +144,24 @@ where
             .structure()
             .block(source.storage_block_index(logical_key)?)?;
         let mut source_offset = source_block.offset();
-        layout.fill_one(destination_block.shape(), |axis| {
-            let logical_start =
-                match logical_starts
-                    .get(axis)
+        for (axis, (&extent, table)) in destination_block
+            .shape()
+            .iter()
+            .zip(logical_starts)
+            .enumerate()
+        {
+            let logical_start = match table {
+                None => 0,
+                Some(table) => *selected_for_sector(table, logical_axis_sector(logical_key, axis)?)
                     .ok_or_else(|| OperationError::StructureMismatch {
-                        tensor: "oriented degeneracy restriction rank",
-                    })? {
-                    None => 0,
-                    Some(table) => {
-                        *selected_for_sector(table, logical_axis_sector(logical_key, axis)?)
-                            .ok_or_else(|| OperationError::StructureMismatch {
-                                tensor: "oriented degeneracy restriction sector",
-                            })?
-                    }
-                };
+                        tensor: "oriented degeneracy restriction sector",
+                    })?,
+            };
             let storage_axis = source.storage_axis(axis)?;
-            let source_extent = source_block.shape()[storage_axis];
             let end = logical_start
-                .checked_add(destination_block.shape()[axis])
+                .checked_add(extent)
                 .ok_or_else(|| OperationError::ElementCountOverflow)?;
-            if end > source_extent {
+            if end > source_block.shape()[storage_axis] {
                 return Err(OperationError::StructureMismatch {
                     tensor: "oriented degeneracy restriction rectangle",
                 });
@@ -180,22 +173,15 @@ where
                         .ok_or_else(|| OperationError::ElementCountOverflow)?,
                 )
                 .ok_or_else(|| OperationError::ElementCountOverflow)?;
-            Ok((
-                destination_block.strides()[axis],
-                source_block.strides()[storage_axis],
-            ))
-        })?;
-        layout.tensoradd(
-            destination_data,
+        }
+        writer.copy(
+            |axis| Ok(source_block.strides()[source.storage_axis(axis)?]),
             source_data,
-            checked_offset(destination_block.offset())?,
-            checked_offset(source_offset)?,
+            source_offset,
             source.storage_conjugate(),
             D::one(),
-            D::zero(),
-        )?;
-    }
-    Ok(())
+        )
+    })
 }
 
 struct ScatterBlock {
@@ -401,18 +387,18 @@ where
     Ok(())
 }
 
+/// `alpha * op(lhs) + beta * op(rhs)` per logical block of `destination`,
+/// from owned or lazy-adjoint operands, into a newly allocated payload.
 #[doc(hidden)]
-#[allow(clippy::too_many_arguments)]
-pub fn oriented_fusion_add_into<D>(
+pub fn oriented_fusion_add_owned<D>(
     destination: &BlockStructure,
-    destination_data: &mut [D],
     lhs: FusionOperand<'_>,
     lhs_data: &[D],
     rhs: FusionOperand<'_>,
     rhs_data: &[D],
     alpha: D,
     beta: D,
-) -> Result<(), OperationError>
+) -> Result<Vec<D>, OperationError>
 where
     D: Copy
         + Add<D, Output = D>
@@ -423,8 +409,7 @@ where
         + ConjugateValue
         + strided_kernel::MaybeSendSync,
 {
-    if destination_data.len() != destination.required_len()?
-        || lhs_data.len() != lhs.storage_space().required_len()?
+    if lhs_data.len() != lhs.storage_space().required_len()?
         || rhs_data.len() != rhs.storage_space().required_len()?
     {
         return Err(OperationError::StructureMismatch {
@@ -433,9 +418,7 @@ where
     }
     validate_oriented_fusion_layout(destination, lhs)?;
     validate_oriented_fusion_layout(destination, rhs)?;
-    let mut layout = CheckedBlockLayout::default();
-    for destination_index in 0..destination.block_count() {
-        let destination_block = destination.block(destination_index)?;
+    overwrite_owned_blocks(destination, |destination_block, writer| {
         let BlockKey::FusionTree(logical_key) = destination_block.key() else {
             return Err(OperationError::StructureMismatch {
                 tensor: "oriented elementwise destination",
@@ -449,62 +432,19 @@ where
             .storage_space()
             .structure()
             .block(rhs.storage_block_index(logical_key)?)?;
-        // Both sources' strides are converted before the first write of the
-        // block, whichever coefficients are zero. With `alpha = 0` the rhs is
-        // the layout's first source, which the single-source entry reads.
-        let (first, first_block, second, second_block) = if alpha.is_zero() {
-            (rhs, rhs_block, lhs, lhs_block)
-        } else {
-            (lhs, lhs_block, rhs, rhs_block)
-        };
-        layout.fill_two(destination_block.shape(), |axis| {
-            Ok((
-                destination_block.strides()[axis],
-                first_block.strides()[first.storage_axis(axis)?],
-                second_block.strides()[second.storage_axis(axis)?],
-            ))
-        })?;
-        let destination_offset = checked_offset(destination_block.offset())?;
-        let lhs_offset = checked_offset(lhs_block.offset())?;
-        let rhs_offset = checked_offset(rhs_block.offset())?;
-        match (alpha.is_zero(), beta.is_zero()) {
-            (false, false) => layout.add_two_source(
-                destination_data,
-                lhs_data,
-                rhs_data,
-                destination_offset,
-                lhs_offset,
-                rhs_offset,
-                lhs.storage_conjugate(),
-                rhs.storage_conjugate(),
-                alpha,
-                beta,
-            )?,
-            (false, true) => layout.tensoradd(
-                destination_data,
-                lhs_data,
-                destination_offset,
-                lhs_offset,
-                lhs.storage_conjugate(),
-                alpha,
-                D::zero(),
-            )?,
-            (true, false) => layout.tensoradd(
-                destination_data,
-                rhs_data,
-                destination_offset,
-                rhs_offset,
-                rhs.storage_conjugate(),
-                beta,
-                D::zero(),
-            )?,
-            (true, true) => {}
-        }
-    }
-    if alpha.is_zero() && beta.is_zero() {
-        destination_data.fill(D::zero());
-    }
-    Ok(())
+        writer.add(
+            |axis| {
+                Ok((
+                    lhs_block.strides()[lhs.storage_axis(axis)?],
+                    rhs_block.strides()[rhs.storage_axis(axis)?],
+                ))
+            },
+            (lhs_data, lhs_block.offset(), lhs.storage_conjugate()),
+            (rhs_data, rhs_block.offset(), rhs.storage_conjugate()),
+            alpha,
+            beta,
+        )
+    })
 }
 
 /// Quantum-dimension-weighted oriented inner product.
@@ -818,11 +758,9 @@ mod tests {
         ));
         assert_eq!(output, before);
 
-        let mut restricted = vec![0.0; source.required_len().unwrap()];
         assert!(matches!(
-            oriented_fusion_restrict_into(
+            oriented_fusion_restrict_owned(
                 source.structure(),
-                &mut restricted,
                 FusionOperand::direct(&destination_operand()),
                 &[0.0; 12],
                 &[Some(&[(SectorId::new(0), 1)][..]), None],
@@ -874,7 +812,9 @@ mod tests {
     #[cfg(debug_assertions)]
     #[test]
     fn checked_block_paths_make_one_layout_pass_and_one_walk_per_block() {
-        use tenet_operations::{take_checked_block_passes, CheckedBlockPasses};
+        use tenet_operations::{
+            take_checked_block_passes, take_owned_block_prefills, CheckedBlockPasses,
+        };
         let passes = |count| CheckedBlockPasses {
             layout_passes: count,
             span_walks: count,
@@ -882,11 +822,10 @@ mod tests {
         let destination = two_key_destination();
         let operand = destination_operand();
         let data: Vec<f64> = (0..12).map(f64::from).collect();
-        let mut output = vec![0.0; 12];
         take_checked_block_passes();
-        oriented_fusion_add_into(
+        take_owned_block_prefills();
+        let output = oriented_fusion_add_owned(
             &destination,
-            &mut output,
             FusionOperand::direct(&operand),
             &data,
             FusionOperand::direct(&operand),
@@ -901,9 +840,8 @@ mod tests {
             data.iter().map(|x| 2.0 * x + 0.5 * x).collect::<Vec<_>>()
         );
 
-        oriented_fusion_restrict_into(
+        let output = oriented_fusion_restrict_owned(
             &destination,
-            &mut output,
             FusionOperand::direct(&operand),
             &data,
             &[None, None],
@@ -918,6 +856,9 @@ mod tests {
             crate::adjoint::materialize_adjoint_data_dyn(&padded, &logical, &parent).unwrap();
         assert_eq!(take_checked_block_passes(), passes(1));
         assert_eq!(materialized.len(), 6);
+        // #1290: each owned output tiles its storage, so none is zero-filled
+        // before the blocks overwrite it.
+        assert_eq!(take_owned_block_prefills(), 0);
     }
 
     #[test]
@@ -954,10 +895,8 @@ mod tests {
                 alpha,
             ),
         ] {
-            let mut output = vec![Complex64::zero(); 6];
-            oriented_fusion_add_into(
+            let output = oriented_fusion_add_owned(
                 logical.structure(),
-                &mut output,
                 lhs,
                 lhs_data,
                 rhs,
@@ -1012,11 +951,9 @@ mod tests {
             expected_inner.conj()
         );
 
-        let mut output = vec![Complex64::zero(); direct.len()];
         let inactive = vec![Complex64::new(f64::NAN, f64::NAN); parent.len()];
-        oriented_fusion_add_into(
+        let output = oriented_fusion_add_owned(
             logical.structure(),
-            &mut output,
             direct_operand,
             &direct,
             adjoint_operand,
@@ -1027,10 +964,8 @@ mod tests {
         .unwrap();
         assert_eq!(output, direct);
 
-        let mut output = vec![Complex64::zero(); direct.len()];
-        oriented_fusion_add_into(
+        let output = oriented_fusion_add_owned(
             logical.structure(),
-            &mut output,
             direct_operand,
             &vec![Complex64::new(f64::NAN, f64::NAN); direct.len()],
             adjoint_operand,
@@ -1048,10 +983,8 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(output, expected);
 
-        let mut output = vec![Complex64::new(f64::NAN, f64::NAN); direct.len()];
-        oriented_fusion_add_into(
+        let output = oriented_fusion_add_owned(
             logical.structure(),
-            &mut output,
             direct_operand,
             &vec![Complex64::new(f64::NAN, f64::NAN); direct.len()],
             adjoint_operand,

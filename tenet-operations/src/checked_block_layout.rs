@@ -9,6 +9,7 @@
 //! TensorOperations' strided backend runs: axes fuse only where every array's
 //! strides agree, and the loop order is chosen once over all arrays.
 
+use core::mem::MaybeUninit;
 use core::ops::{Add, Mul};
 
 use num_traits::{One, Zero};
@@ -308,9 +309,139 @@ impl CheckedBlockLayout {
             };
         }
         if alpha.is_one() {
-            run!(move |lhs: T, rhs: T| op_l(lhs) + scale_value(op_r(rhs), beta));
+            run!(move |dst: &mut T, lhs: T, rhs: T| {
+                *dst = op_l(lhs) + scale_value(op_r(rhs), beta);
+            });
         } else {
-            run!(move |lhs: T, rhs: T| scale_value(op_l(lhs), alpha) + scale_value(op_r(rhs), beta));
+            run!(move |dst: &mut T, lhs: T, rhs: T| {
+                *dst = scale_value(op_l(lhs), alpha) + scale_value(op_r(rhs), beta);
+            });
+        }
+        Ok(())
+    }
+
+    /// [`Self::tensoradd`] with `beta = 0` into uninitialized storage: every
+    /// element the filled destination layout reaches is written, from the
+    /// same `op(src)` (times `alpha` unless it is one) the initialized walk
+    /// stores, and none is read.
+    ///
+    /// Crate-private: coverage of an owned buffer is proved by the caller
+    /// (`owned_blocks`), not by this walk.
+    pub(crate) fn copy_uninit<T>(
+        &mut self,
+        dst_data: &mut [MaybeUninit<T>],
+        src_data: &[T],
+        dst_offset: isize,
+        src_offset: isize,
+        source_conjugate: bool,
+        alpha: T,
+    ) -> Result<(), OperationError>
+    where
+        T: Copy + Mul<T, Output = T> + PartialEq + Zero + One + ConjugateValue,
+    {
+        validate_raw_strided_bounds(dst_data.len(), &self.dims, &self.dst_strides, dst_offset)?;
+        validate_raw_strided_bounds(src_data.len(), &self.dims, &self.lhs_strides, src_offset)?;
+        record_checked_block_passes(0, 1);
+        let op = move |value: T| value.maybe_conj(source_conjugate);
+        let Self {
+            dims,
+            dst_strides,
+            lhs_strides,
+            index,
+            ..
+        } = self;
+        index.resize(dims.len(), 0);
+        macro_rules! run {
+            ($store:expr) => {
+                apply_fused_pair_slices(
+                    dst_data,
+                    src_data,
+                    dims,
+                    dst_strides,
+                    lhs_strides,
+                    dst_offset,
+                    src_offset,
+                    index,
+                    $store,
+                    op,
+                )
+            };
+        }
+        if alpha.is_one() {
+            run!(|dst: &mut MaybeUninit<T>, value| {
+                dst.write(value);
+            });
+        } else {
+            run!(move |dst: &mut MaybeUninit<T>, value| {
+                dst.write(scale_value(value, alpha));
+            });
+        }
+        Ok(())
+    }
+
+    /// [`Self::add_two_source`] into uninitialized storage, in its single
+    /// walk: the destination layout must reach each element at most once,
+    /// which is rejected before any write otherwise, so no element is read.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn add_two_source_uninit<T>(
+        &mut self,
+        dst_data: &mut [MaybeUninit<T>],
+        lhs_data: &[T],
+        rhs_data: &[T],
+        dst_offset: isize,
+        lhs_offset: isize,
+        rhs_offset: isize,
+        lhs_conjugate: bool,
+        rhs_conjugate: bool,
+        alpha: T,
+        beta: T,
+    ) -> Result<(), OperationError>
+    where
+        T: Copy + Add<T, Output = T> + Mul<T, Output = T> + PartialEq + Zero + One + ConjugateValue,
+    {
+        if self.rhs_strides.len() != self.dims.len()
+            || !reaches_each_element_once(&self.dims, &self.dst_strides)
+        {
+            return Err(OperationError::InvalidArgument {
+                message: "uninitialized two-source block add needs a two-source, write-once layout",
+            });
+        }
+        validate_raw_strided_bounds(dst_data.len(), &self.dims, &self.dst_strides, dst_offset)?;
+        validate_raw_strided_bounds(lhs_data.len(), &self.dims, &self.lhs_strides, lhs_offset)?;
+        validate_raw_strided_bounds(rhs_data.len(), &self.dims, &self.rhs_strides, rhs_offset)?;
+        record_checked_block_passes(0, 1);
+        let op_l = move |value: T| value.maybe_conj(lhs_conjugate);
+        let op_r = move |value: T| value.maybe_conj(rhs_conjugate);
+        let Self {
+            dims,
+            dst_strides,
+            lhs_strides,
+            rhs_strides,
+            index,
+        } = self;
+        index.resize(dims.len(), 0);
+        macro_rules! run {
+            ($store:expr) => {
+                apply_fused_triple_slices(
+                    dst_data,
+                    lhs_data,
+                    rhs_data,
+                    dims,
+                    [dst_strides, lhs_strides, rhs_strides],
+                    [dst_offset, lhs_offset, rhs_offset],
+                    index,
+                    $store,
+                )
+            };
+        }
+        if alpha.is_one() {
+            run!(move |dst: &mut MaybeUninit<T>, lhs: T, rhs: T| {
+                dst.write(op_l(lhs) + scale_value(op_r(rhs), beta));
+            });
+        } else {
+            run!(move |dst: &mut MaybeUninit<T>, lhs: T, rhs: T| {
+                dst.write(scale_value(op_l(lhs), alpha) + scale_value(op_r(rhs), beta));
+            });
         }
         Ok(())
     }
@@ -392,18 +523,18 @@ fn reaches_each_element_once(dims: &[usize], strides: &[isize]) -> bool {
 /// normalized axes, the innermost axis as a contiguous run when all three
 /// operands step by one.
 #[allow(clippy::too_many_arguments)]
-fn apply_fused_triple_slices<T, Combine>(
-    dst_data: &mut [T],
+fn apply_fused_triple_slices<Dst, T, Combine>(
+    dst_data: &mut [Dst],
     lhs_data: &[T],
     rhs_data: &[T],
     dims: &[usize],
     [dst_strides, lhs_strides, rhs_strides]: [&[isize]; 3],
     [dst_offset, lhs_offset, rhs_offset]: [isize; 3],
     index: &mut [usize],
-    combine: Combine,
+    store: Combine,
 ) where
     T: Copy,
-    Combine: Fn(T, T) -> T,
+    Combine: Fn(&mut Dst, T, T),
 {
     let rank = dims.len();
     if rank == 0 || dims.contains(&0) {
@@ -420,11 +551,12 @@ fn apply_fused_triple_slices<T, Combine>(
             let lhs = &lhs_data[lhs_base as usize..][..inner_len];
             let rhs = &rhs_data[rhs_base as usize..][..inner_len];
             for position in 0..inner_len {
-                dst[position] = combine(lhs[position], rhs[position]);
+                store(&mut dst[position], lhs[position], rhs[position]);
             }
         } else {
             for position in 0..inner_len as isize {
-                dst_data[(dst_base + position * inner_dst) as usize] = combine(
+                store(
+                    &mut dst_data[(dst_base + position * inner_dst) as usize],
                     lhs_data[(lhs_base + position * inner_lhs) as usize],
                     rhs_data[(rhs_base + position * inner_rhs) as usize],
                 );
@@ -516,6 +648,22 @@ mod tests {
             .unwrap();
     }
 
+    /// Every slot starts initialized, so the uninitialized walks can be
+    /// compared on the slots they do not reach as well.
+    fn as_uninit<T: Copy>(values: &[T]) -> Vec<MaybeUninit<T>> {
+        values.iter().copied().map(MaybeUninit::new).collect()
+    }
+
+    #[allow(unsafe_code)]
+    fn assume_all_init<T: Copy>(values: Vec<MaybeUninit<T>>) -> Vec<T> {
+        // SAFETY: every element came from `as_uninit`, and the walks only
+        // `write` initialized values over it.
+        values
+            .into_iter()
+            .map(|value| unsafe { value.assume_init() })
+            .collect()
+    }
+
     fn check<T>(values: &[T], coefficients: &[(T, T)], bits: fn(T) -> u128)
     where
         T: Copy
@@ -589,6 +737,34 @@ mod tests {
                     let actual: Vec<u128> = actual.into_iter().map(bits).collect();
                     assert_eq!(actual, expected, "shape {shape:?}");
 
+                    // The uninitialized entry stores the same bits wherever
+                    // the layout reaches, and leaves the rest untouched; a
+                    // layout that could revisit an element is refused.
+                    let mut uninit = as_uninit(&initial);
+                    let result = layout.add_two_source_uninit(
+                        &mut uninit,
+                        &lhs,
+                        &rhs,
+                        dst_offset,
+                        lhs_offset,
+                        rhs_offset,
+                        lhs_conjugate,
+                        rhs_conjugate,
+                        alpha,
+                        beta,
+                    );
+                    if reaches_each_element_once(&layout.dims, &layout.dst_strides) {
+                        result.unwrap();
+                        let uninit: Vec<u128> =
+                            assume_all_init(uninit).into_iter().map(bits).collect();
+                        assert_eq!(uninit, expected, "uninit, shape {shape:?}");
+                    } else {
+                        assert!(matches!(
+                            result,
+                            Err(OperationError::InvalidArgument { .. })
+                        ));
+                    }
+
                     // The single-source entry against one scalar-kernel pass,
                     // for every action of the pair.
                     for b in [T::zero(), T::one(), beta] {
@@ -622,6 +798,22 @@ mod tests {
                         let expected: Vec<u128> = expected.into_iter().map(bits).collect();
                         let actual: Vec<u128> = actual.into_iter().map(bits).collect();
                         assert_eq!(actual, expected, "single source, shape {shape:?}");
+                        if b.is_zero() {
+                            let mut uninit = as_uninit(&initial);
+                            layout
+                                .copy_uninit(
+                                    &mut uninit,
+                                    &lhs,
+                                    dst_offset,
+                                    lhs_offset,
+                                    lhs_conjugate,
+                                    alpha,
+                                )
+                                .unwrap();
+                            let uninit: Vec<u128> =
+                                assume_all_init(uninit).into_iter().map(bits).collect();
+                            assert_eq!(uninit, expected, "uninit copy, shape {shape:?}");
+                        }
                     }
 
                     // Any source window past its end is rejected before the

@@ -23,7 +23,7 @@ use crate::contract::{
     dispatch_prepare, BoundDynamicFusionMapSpace, DynamicFusionMapSpace, LayoutKeyBuilder,
 };
 use crate::{CheckedGenericPlanError, ConjugateValue, FusionOperand, OperationError};
-use tenet_operations::CheckedBlockLayout;
+use tenet_operations::overwrite_owned_blocks;
 
 /// Scalar contract of the adjoint materialization: exactly what the shared
 /// strided owner `CheckedBlockLayout::tensoradd` requires, in one place.
@@ -299,9 +299,9 @@ where
 ///
 /// Per logical block this is one strided copy with conjugation from the
 /// parent block, read through [`FusionOperand::adjoint`] and the same owner
-/// (`CheckedBlockLayout::tensoradd`, layout normalized and bounds checked once
-/// per block) that the oriented add path uses, so
-/// the adjoint axis/key map lives in one place. The receiver-sized output copy itself is the retained limitation
+/// (`overwrite_owned_blocks`, layout normalized and bounds checked once per
+/// block, output left unfilled when its blocks tile it) that the oriented add
+/// path uses, so the adjoint axis/key map lives in one place. The receiver-sized output copy itself is the retained limitation
 /// recorded on #1177.
 ///
 /// This contains no provider work: callers must derive and admit
@@ -316,20 +316,13 @@ where
     D: AdjointScalar,
 {
     validate_adjoint_data_extent(space.required_len(), data.len())?;
-    let len = adjoint_space
-        .required_len()
-        .map_err(OperationError::from_core_preserving_context)?;
-    let mut result = vec![D::zero(); len];
     let source = FusionOperand::adjoint(space);
     let structure = space.structure();
-    let result_structure = adjoint_space.structure();
-    let mut layout = CheckedBlockLayout::default();
-    for index in 0..result_structure.block_count() {
-        let block = result_structure
-            .block(index)
-            .map_err(OperationError::from_core_preserving_context)?;
+    overwrite_owned_blocks(adjoint_space.structure(), |block, writer| {
+        // Why not an error: a non-fusion-tree block has no adjoint source
+        // and reads as zero, as it did when the payload was zero-filled.
         let BlockKey::FusionTree(key) = block.key() else {
-            continue;
+            return writer.zero();
         };
         let source_index = structure
             .find_block_index_by_adjoint_fusion_tree_pair(key)
@@ -342,27 +335,14 @@ where
         let source_block = structure
             .block(source_index)
             .map_err(OperationError::from_core_preserving_context)?;
-        layout.fill_one(block.shape(), |axis| {
-            Ok((
-                block.strides()[axis],
-                source_block.strides()[source.storage_axis(axis)?],
-            ))
-        })?;
-        layout.tensoradd(
-            &mut result,
+        writer.copy(
+            |axis| Ok(source_block.strides()[source.storage_axis(axis)?]),
             data,
-            checked_offset(block.offset())?,
-            checked_offset(source_block.offset())?,
+            source_block.offset(),
             source.storage_conjugate(),
             D::one(),
-            D::zero(),
-        )?;
-    }
-    Ok(result)
-}
-
-fn checked_offset(offset: usize) -> Result<isize, OperationError> {
-    isize::try_from(offset).map_err(|_| OperationError::OffsetOverflow { value: offset })
+        )
+    })
 }
 
 /// Dynamic-rank adjoint that retains the exact provider allocation of its
@@ -1475,7 +1455,9 @@ mod cache_tests {
         OUTPUT_ZERO_CALLS.with(|calls| calls.set(0));
         let output = adjoint(&U1FusionRule, &exact).unwrap();
         assert_eq!(output.storage_dim(), expected);
-        assert!(OUTPUT_ZERO_CALLS.with(Cell::get) > 0);
+        // #1290: the canonical output tiles its storage, so no element is
+        // zero-filled before its block overwrites it.
+        assert_eq!(OUTPUT_ZERO_CALLS.with(Cell::get), 0);
     }
 
     #[test]

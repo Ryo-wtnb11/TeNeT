@@ -3,10 +3,11 @@
 //!
 //! The contract is *not* a total call count: each call rebuilds the small
 //! structural objects of the destination hom-space. What is pinned is that
-//! exactly one allocator-zeroed allocation has the output payload's size, and
-//! that everything else is independent of the degeneracy dimensions — two
-//! tensors with the same sector structure and different degeneracies must
-//! allocate the same number of non-payload blocks.
+//! the output payload is never zero-filled — its blocks tile it, so it is
+//! allocated uninitialized and overwritten once (#1290) — and that everything
+//! else is independent of the degeneracy dimensions — two tensors with the
+//! same sector structure and different degeneracies must allocate the same
+//! number of non-payload blocks.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -144,7 +145,7 @@ fn restrict_measurement(scale: usize) -> (Measurement, usize) {
 }
 
 #[test]
-fn restrict_leg_allocates_one_zeroed_payload_and_degeneracy_independent_scratch() {
+fn restrict_leg_allocates_one_unfilled_payload_and_degeneracy_independent_scratch() {
     let _guard = MEASUREMENT_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -153,14 +154,9 @@ fn restrict_leg_allocates_one_zeroed_payload_and_degeneracy_independent_scratch(
     assert!(large_bytes > small_bytes);
 
     for (measurement, bytes) in [(&small, small_bytes), (&large, large_bytes)] {
-        assert_eq!(
-            measurement
-                .zeroed_sizes
-                .iter()
-                .filter(|&&size| size == bytes)
-                .count(),
-            1,
-            "exactly one payload-sized zeroed allocation, got {:?} for {bytes} bytes",
+        assert!(
+            !measurement.zeroed_sizes.contains(&bytes),
+            "no payload-sized zeroed allocation, got {:?} for {bytes} bytes",
             measurement.zeroed_sizes
         );
     }
@@ -169,8 +165,8 @@ fn restrict_leg_allocates_one_zeroed_payload_and_degeneracy_independent_scratch(
     // or its payload.
     assert_eq!(small.allocations, 9);
     // Structural work does not grow with the degeneracy dimensions. The byte
-    // budget is what rules out a second payload-sized buffer taken through
-    // plain `alloc`/`realloc`, which the zeroed-size log cannot see.
+    // budget pins the payload to one buffer and rules out a second
+    // payload-sized buffer taken through plain `alloc`/`realloc`.
     assert_eq!(small.allocations, large.allocations);
     assert_eq!(
         small.bytes - small_bytes,
@@ -183,7 +179,7 @@ fn restrict_leg_allocates_one_zeroed_payload_and_degeneracy_independent_scratch(
 }
 
 #[test]
-fn the_network_restriction_still_takes_one_allocation_for_several_axes() {
+fn the_network_restriction_of_several_axes_fills_no_payload() {
     let _guard = MEASUREMENT_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -225,16 +221,12 @@ fn the_network_restriction_still_takes_one_allocation_for_several_axes() {
         ));
     });
     assert_eq!(output.unwrap().data(), warm.data());
-    assert_eq!(
-        measurement
-            .zeroed_sizes
-            .iter()
-            .filter(|&&size| size == payload_bytes)
-            .count(),
-        1,
-        "two restricted axes must still share one payload allocation, got {:?}",
+    assert!(
+        !measurement.zeroed_sizes.contains(&payload_bytes),
+        "two restricted axes write one unfilled payload, got {:?}",
         measurement.zeroed_sizes
     );
+    assert!(measurement.bytes >= payload_bytes);
 }
 
 /// One compact `restrict_diagonal` on an `s : bond <- bond` whose degeneracies
@@ -279,4 +271,55 @@ fn compact_restrict_diagonal_costs_the_kept_values_and_nothing_per_discarded_one
     let large = restrict_diagonal_measurement(16);
     assert_eq!(small.allocations, large.allocations);
     assert_eq!(small.bytes, large.bytes);
+}
+
+#[test]
+fn lazy_adjoint_add_and_materialization_fill_no_payload() {
+    let _guard = MEASUREMENT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // What: the owned outputs of a lazy-adjoint `add` and of the first
+    // lazy-adjoint `data()` tile their storage, so neither zero-fills its
+    // payload before overwriting every block (#1290). For `f64` the base
+    // fill was `vec![0.0; len]`, an allocator-zeroed allocation.
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(U1FusionRule);
+    let leg = u1(&provider, &[(-1, 2), (0, 3), (1, 2)]);
+    let other = u1(&provider, &[(-1, 1), (0, 2), (1, 3)]);
+    let square: TensorMap<_, f64> =
+        TensorMap::rand_with_seed(&runtime, [&leg, &other], [&leg, &other], 53).unwrap();
+    let partner: TensorMap<_, f64> =
+        TensorMap::rand_with_seed(&runtime, [&leg, &other], [&leg, &other], 59).unwrap();
+    let lazy = square.adjoint().unwrap();
+    let payload_bytes = std::mem::size_of_val(square.data());
+    assert!(square.block_count() > 1);
+
+    let mut sum = None;
+    let add = measure(|| {
+        sum = Some(black_box(lazy.add(&partner, 0.5, -2.0).unwrap()));
+    });
+    assert!(
+        !add.zeroed_sizes.contains(&payload_bytes),
+        "lazy add zero-filled its payload: {:?}",
+        add.zeroed_sizes
+    );
+
+    let materialize = measure(|| {
+        black_box(lazy.data().len());
+    });
+    assert!(
+        !materialize.zeroed_sizes.contains(&payload_bytes),
+        "lazy materialization zero-filled its payload: {:?}",
+        materialize.zeroed_sizes
+    );
+    // Oracle: the elementwise sum over the materialized adjoint payload,
+    // which shares the partner's logical layout.
+    let expected: Vec<u64> = lazy
+        .data()
+        .iter()
+        .zip(partner.data())
+        .map(|(&x, &y)| (0.5 * x + -2.0 * y).to_bits())
+        .collect();
+    let actual: Vec<u64> = sum.unwrap().data().iter().map(|x| x.to_bits()).collect();
+    assert_eq!(actual, expected);
 }
