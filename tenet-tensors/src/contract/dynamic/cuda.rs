@@ -217,8 +217,12 @@ where
     D: CudaScalar + RecouplingCoefficientAction<C> + PartialEq + 'static,
     C: DenseBlockScalar,
 {
+    let (lhs, rhs) = match resolution.route {
+        StorageContractRoute::SwappedCore(_) => (rhs, lhs),
+        StorageContractRoute::Core(_) | StorageContractRoute::DynamicTree(_) => (lhs, rhs),
+    };
     match &resolution.route {
-        StorageContractRoute::Core(plan) => {
+        StorageContractRoute::Core(plan) | StorageContractRoute::SwappedCore(plan) => {
             // Converted before the first submission, like every other check.
             let regions = if dst_is_zeroed {
                 &[][..]
