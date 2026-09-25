@@ -3041,6 +3041,8 @@ pub(crate) struct OneSidedPublicationProbe {
     /// Elements written by canonical publication beyond the moved first
     /// owner: appended factors plus in-place identity blocks.
     pub appended_elements: usize,
+    /// Heap bytes held by publication plans (identity segment lists).
+    pub plan_bytes: usize,
 }
 
 #[cfg(test)]
@@ -3262,7 +3264,7 @@ where
         (FactorSide::Right, FactorPlacement::Direct)
         | (FactorSide::Left, FactorPlacement::Adjoint) => FactorSide::Right,
     };
-    if let Some(segments) = one_sided_factor_output_plan(
+    if let Some(identities) = one_sided_factor_output_plan(
         space.space().structure(),
         matricizations,
         pairs,
@@ -3271,7 +3273,7 @@ where
         side,
         source_trees,
     ) {
-        let data = take_one_sided_factors(pairs, &segments, required_len, side);
+        let data = take_one_sided_factors(pairs, &identities, required_len, side);
         let (nout, nin) = match side {
             FactorSide::Left => (space.space().nout(), 1),
             FactorSide::Right => (1, space.space().nin()),
@@ -9661,14 +9663,13 @@ fn identity_sector_output_is_canonical(
     }
 }
 
-/// One output segment of a proven one-sided publication, in output order.
+/// A column-major `bond x bond` identity for a sector without a source
+/// matricization (MatrixAlgebraKit `one!` on a zero-extent input block),
+/// published after the first `pairs_before` pairs.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum OneSidedSegment {
-    /// The selected side of `pairs[index]`.
-    Factor(usize),
-    /// A column-major `bond x bond` identity for a sector without a source
-    /// matricization (MatrixAlgebraKit `one!` on a zero-extent input block).
-    Identity(usize),
+struct IdentitySegment {
+    pairs_before: usize,
+    bond: usize,
 }
 
 /// One-sided sibling of [`factor_output_is_canonical`]: walks the ascending
@@ -9681,6 +9682,10 @@ enum OneSidedSegment {
 /// records return `None` and keep the scatter fallback. `source_trees`
 /// selects the matricization side whose trees index the selected factor
 /// (columns for adjoint placement).
+///
+/// Every pair is consumed in order, so the plan records only the identity
+/// segments; the list stays unallocated when there are none, keeping the
+/// all-populated case free of plan allocation.
 fn one_sided_factor_output_plan<D, M: SectorGeometry>(
     structure: &BlockStructure,
     matricizations: &[M],
@@ -9689,8 +9694,8 @@ fn one_sided_factor_output_plan<D, M: SectorGeometry>(
     required_len: usize,
     side: FactorSide,
     source_trees: FactorSide,
-) -> Option<Vec<OneSidedSegment>> {
-    let mut segments = Vec::with_capacity(dimensions.len());
+) -> Option<Vec<IdentitySegment>> {
+    let mut identities = Vec::new();
     let mut matrices = matricizations.iter().peekable();
     let mut pair_records = pairs.iter().enumerate().peekable();
     let mut bonds = dimensions.iter().peekable();
@@ -9717,7 +9722,10 @@ fn one_sided_factor_output_plan<D, M: SectorGeometry>(
                 side,
             )?;
             if identity {
-                segments.push(OneSidedSegment::Identity(bond?));
+                identities.push(IdentitySegment {
+                    pairs_before: pair_records.peek().map_or(pairs.len(), |&(index, _)| index),
+                    bond: bond?,
+                });
             }
             output_offset = next_offset;
             continue;
@@ -9727,7 +9735,7 @@ fn one_sided_factor_output_plan<D, M: SectorGeometry>(
             return None;
         }
         previous_matrix = Some(sector);
-        let Some((index, pair)) = pair_records.next_if(|(_, pair)| pair.sector == sector) else {
+        let Some((_, pair)) = pair_records.next_if(|(_, pair)| pair.sector == sector) else {
             if bond.unwrap_or(0) != 0 {
                 return None;
             }
@@ -9749,21 +9757,29 @@ fn one_sided_factor_output_plan<D, M: SectorGeometry>(
             side,
             None,
         )?;
-        segments.push(OneSidedSegment::Factor(index));
     }
-    (pair_records.next().is_none()
-        && block_index == structure.block_count()
-        && output_offset == required_len)
-        .then_some(segments)
+    if pair_records.next().is_some()
+        || block_index != structure.block_count()
+        || output_offset != required_len
+    {
+        return None;
+    }
+    #[cfg(test)]
+    ONE_SIDED_PUBLICATION_PROBE.with(|probe| {
+        let mut value = probe.get();
+        value.plan_bytes += identities.capacity() * std::mem::size_of::<IdentitySegment>();
+        probe.set(value);
+    });
+    Some(identities)
 }
 
-/// Publishes the segments proved by [`one_sided_factor_output_plan`]: the
+/// Publishes the plan proved by [`one_sided_factor_output_plan`]: the
 /// selected side of each pair is moved or appended and each identity is
 /// written once in place, so no output element is written twice. The
 /// opposite side stays in place for its own publication.
 fn take_one_sided_factors<D: FactorScalar>(
     pairs: &mut [FactorPair<D>],
-    segments: &[OneSidedSegment],
+    identities: &[IdentitySegment],
     required_len: usize,
     side: FactorSide,
 ) -> Vec<D> {
@@ -9778,26 +9794,26 @@ fn take_one_sided_factors<D: FactorScalar>(
         .map(Vec::as_ptr);
     let mut output: Option<Vec<D>> = None;
     let mut _written = 0usize;
-    for &segment in segments {
-        match segment {
-            OneSidedSegment::Factor(index) => {
-                let pair = &mut pairs[index];
-                let factor = match side {
-                    FactorSide::Left => std::mem::take(&mut pair.left),
-                    FactorSide::Right => std::mem::take(&mut pair.right),
-                };
-                _written += append_owned_factor(&mut output, factor, required_len);
+    let mut identities = identities.iter().peekable();
+    for index in 0..=pairs.len() {
+        while let Some(identity) = identities.next_if(|identity| identity.pairs_before == index) {
+            let bond = identity.bond;
+            let data = output.get_or_insert_with(|| Vec::with_capacity(required_len));
+            let start = data.len();
+            data.resize(start + bond * bond, D::zero());
+            for diagonal in 0..bond {
+                data[start + diagonal * (bond + 1)] = D::one();
             }
-            OneSidedSegment::Identity(bond) => {
-                let data = output.get_or_insert_with(|| Vec::with_capacity(required_len));
-                let start = data.len();
-                data.resize(start + bond * bond, D::zero());
-                for diagonal in 0..bond {
-                    data[start + diagonal * (bond + 1)] = D::one();
-                }
-                _written += bond * bond;
-            }
+            _written += bond * bond;
         }
+        let Some(pair) = pairs.get_mut(index) else {
+            break;
+        };
+        let factor = match side {
+            FactorSide::Left => std::mem::take(&mut pair.left),
+            FactorSide::Right => std::mem::take(&mut pair.right),
+        };
+        _written += append_owned_factor(&mut output, factor, required_len);
     }
     let data = output.unwrap_or_default();
     #[cfg(test)]
@@ -10369,7 +10385,7 @@ where
         FactorSide::Left => (space.space().nout(), 1),
         FactorSide::Right => (1, space.space().nin()),
     };
-    if let Some(segments) = one_sided_factor_output_plan(
+    if let Some(identities) = one_sided_factor_output_plan(
         space.space().structure(),
         matricizations,
         pairs,
@@ -10378,7 +10394,7 @@ where
         side,
         side,
     ) {
-        let data = take_one_sided_factors(pairs, &segments, len, side);
+        let data = take_one_sided_factors(pairs, &identities, len, side);
         return BoundDynFactor::from_bound(space, data, nout, nin)
             .map_err(CheckedGenericFactorPlanError::from);
     }
@@ -13832,10 +13848,12 @@ mod sector_matricization_tests {
                     staged_one_sided_pairs(matrices, &dimensions, side, side, &values)
                 };
 
-                // Canonical transfer: prevalidation alone, one lookup per key.
+                // Canonical transfer: prevalidation alone, one lookup per key,
+                // and no plan allocation for the all-populated input.
                 let mut pairs = staged(&matrices);
                 let (reference, probe, index) = build(&matrices, &mut pairs);
                 assert_eq!(probe.canonical_publications, 1);
+                assert_eq!(probe.plan_bytes, 0);
                 assert_eq!(
                     index,
                     PlacementIndexProbe {
@@ -14820,6 +14838,8 @@ mod sector_matricization_tests {
                 (1, 0)
             );
             assert_eq!(probe.appended_elements, selected[1].len());
+            // All-populated input allocates no plan, as the boolean proof did.
+            assert_eq!(probe.plan_bytes, 0);
             assert_literal_one_sided_layout(
                 factor.space().space().structure(),
                 factor.data(),
@@ -15212,6 +15232,8 @@ mod sector_matricization_tests {
                 (probe.canonical_publications, probe.fallback_publications),
                 (1, 0)
             );
+            // An identity sector is the only case that allocates a plan.
+            assert_ne!(probe.plan_bytes, 0);
             assert_eq!(bytes(probe.appended_elements), bytes(expected_written));
         };
 
@@ -15593,6 +15615,8 @@ mod sector_matricization_tests {
                 (1, 0)
             );
             assert_eq!(probe.appended_elements, selected[1].len());
+            // All-populated input allocates no plan, as the boolean proof did.
+            assert_eq!(probe.plan_bytes, 0);
             assert!(Arc::ptr_eq(factor.space().provider_arc(), &provider));
             assert_literal_one_sided_layout(
                 factor.space().space().structure(),
