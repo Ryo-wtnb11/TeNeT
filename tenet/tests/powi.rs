@@ -21,7 +21,7 @@ fn powi_f64_matches_exact_spectra_and_stays_compact() {
     let runtime = Runtime::builder().build().unwrap();
     let provider = Arc::new(Z2FusionRule);
     let bond = typed_bond(&provider, 1);
-    let typed = TensorMap::diagonal(
+    let typed: TensorMap<_, f64> = TensorMap::diagonal(
         &runtime,
         &bond,
         [

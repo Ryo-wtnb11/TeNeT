@@ -70,27 +70,27 @@ fn advanced_family<D: AdvancedLinalgScalar>(tensor: &TensorMap<U1FusionRule, D>)
     let _ = tensor.solve_right(tensor);
 }
 
-/// The general (non-Hermitian) eigendecomposition also carries its pre-existing
-/// `FactorScalar<Eig = Complex64>` bound, so it gets its own helper rather than
-/// widening the marker.
+/// The general (non-Hermitian) eigendecomposition also needs its factor dtype
+/// `D::Eig` to be a payload, so it gets its own helper rather than widening
+/// the marker.
 fn general_eig_family<D>(tensor: &TensorMap<U1FusionRule, D>)
 where
-    D: AdvancedLinalgScalar + FactorScalar<Eig = num_complex::Complex64>,
+    D: AdvancedLinalgScalar,
+    <D as FactorScalar>::Eig: TensorScalar,
 {
     let _ = tensor.eig_full();
     let _ = tensor.eig_vals();
+    let _ = tensor.eig_trunc(&tenet::prelude::Truncation::rank(1));
 }
 
-/// Instantiating the three helpers for both admitted payload dtypes is the
+/// Instantiating the helpers for every admitted payload dtype is the
 /// assertion: it type-checks each body under exactly one marker bound.
 #[test]
 fn each_family_is_callable_under_exactly_its_marker() {
     let _: fn(&TensorMap<U1FusionRule, f64>) = base_family;
     let _: fn(&TensorMap<U1FusionRule, num_complex::Complex64>) = base_family;
-    // The single-precision payloads reach the base family (#1315) and the
-    // factorization family (#1324) and nothing beyond it; `advanced_family`
-    // and `general_eig_family` are deliberately not instantiated for them, and
-    // the `compile_fail` doctests on `TensorScalar` pin that.
+    // Single precision reaches every family: base (#1315), factorization
+    // (#1324) and advanced (#1459).
     let _: fn(&TensorMap<U1FusionRule, f32>) = base_family;
     let _: fn(&TensorMap<U1FusionRule, num_complex::Complex32>) = base_family;
     let _: fn(&TensorMap<U1FusionRule, f64>) = factorization_family;
@@ -101,4 +101,8 @@ fn each_family_is_callable_under_exactly_its_marker() {
     let _: fn(&TensorMap<U1FusionRule, num_complex::Complex64>) = advanced_family;
     let _: fn(&TensorMap<U1FusionRule, f64>) = general_eig_family;
     let _: fn(&TensorMap<U1FusionRule, num_complex::Complex64>) = general_eig_family;
+    let _: fn(&TensorMap<U1FusionRule, f32>) = advanced_family;
+    let _: fn(&TensorMap<U1FusionRule, num_complex::Complex32>) = advanced_family;
+    let _: fn(&TensorMap<U1FusionRule, f32>) = general_eig_family;
+    let _: fn(&TensorMap<U1FusionRule, num_complex::Complex32>) = general_eig_family;
 }
