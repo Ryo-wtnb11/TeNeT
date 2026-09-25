@@ -4439,6 +4439,9 @@ thread_local! {
     static CUDA_EIGH_FAILURE: std::cell::Cell<Option<(&'static str, usize)>> = const {
         std::cell::Cell::new(None)
     };
+    /// Forces the per-tree EIGH assembly on aligned routes, so the general
+    /// path can be compared with the aligned one on the same input.
+    static CUDA_EIGH_TREEWISE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 #[cfg(all(test, feature = "cuda"))]
@@ -4637,6 +4640,7 @@ pub(crate) fn assemble_left_factor<D: CudaPayload>(
     factor: &CudaDenseStorage,
     k_full: usize,
     selector: &CudaStorage<D>,
+    selector_offset: usize,
     kept: usize,
 ) -> Result<(), Error> {
     for target_tree in target.row_trees() {
@@ -4659,7 +4663,7 @@ pub(crate) fn assemble_left_factor<D: CudaPayload>(
             src_row,
             source.rows(),
             &selector.0,
-            0,
+            selector_offset,
             k_full,
             sub_rows,
             k_full,
@@ -4671,6 +4675,54 @@ pub(crate) fn assemble_left_factor<D: CudaPayload>(
         #[cfg(test)]
         observe_cuda_qr_assembly_gemm();
     }
+    Ok(())
+}
+
+/// Writes `factor * selector` into a left-factor region with one GEMM.
+///
+/// Only valid on a route the plan proved layout-aligned: the target's
+/// codomain trees tile it exactly as the source's do, so the per-tree GEMMs
+/// of [`assemble_left_factor`] are row slices of this one product.
+///
+/// The product is exact data movement: each selector column holds a single
+/// unit entry. Why not Tenferro `gather`: at 0.7.1 it reads owned index
+/// tensors only, so one index upload per call would need a device slice copy
+/// per route to feed it.
+#[cfg(feature = "cuda")]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn assemble_aligned_left_factor<D: CudaPayload>(
+    cuda: &mut CudaDenseContext,
+    dst: &mut CudaStorage<D>,
+    target: &CoupledSectorRegion,
+    factor: &CudaDenseStorage,
+    k_full: usize,
+    selector: &CudaStorage<D>,
+    selector_offset: usize,
+    kept: usize,
+) -> Result<(), Error> {
+    if target.rows() == 0 {
+        return Ok(());
+    }
+    cuda_gemm_region_into::<D>(
+        cuda,
+        &mut dst.0,
+        target.range().start,
+        target.rows(),
+        factor,
+        0,
+        target.rows(),
+        &selector.0,
+        selector_offset,
+        k_full,
+        target.rows(),
+        k_full,
+        kept,
+        D::ONE,
+        D::ZERO,
+    )
+    .map_err(dense_err)?;
+    #[cfg(test)]
+    observe_cuda_qr_assembly_gemm();
     Ok(())
 }
 
@@ -4895,6 +4947,9 @@ struct TypedCudaEighRoute {
     left: usize,
     full_rank: usize,
     kept: usize,
+    /// The eigenvector region has the source's codomain tree layout, so its
+    /// column permutation is one whole-region GEMM instead of one per tree.
+    aligned: bool,
 }
 
 /// The eigenvector (`left`) and diagonal (`middle`) factor spaces and routes
@@ -11899,6 +11954,11 @@ where
                 left,
                 full_rank,
                 kept,
+                aligned: cuda_factor_layout_is_aligned(
+                    source_region.row_trees(),
+                    left_region.row_trees(),
+                    source_region.rows(),
+                )?,
             });
         }
         if routes.len() != left_regions.len() || routes.len() != middle_regions.len() {
@@ -12006,6 +12066,7 @@ where
                         &scratch.left,
                         route.rank,
                         Self::route_selector(&scratch.selector)?,
+                        0,
                         route.rank,
                     )?;
                 }
@@ -12261,43 +12322,81 @@ where
             let cuda = &mut *lease;
             let diagonal_data = CudaStorage::upload_owned(cuda, diagonal_host)?;
             let mut vector_data = CudaStorage::upload_owned(cuda, vec![D::ZERO; vector_len])?;
+            // Every route's `full_rank x kept` column selector, packed back
+            // to back so the call makes one upload whatever its route count.
+            let mut selector_offsets = Vec::with_capacity(plan.routes.len());
+            let mut selector_len = 0usize;
+            for route in plan.routes.iter() {
+                if route.kept > orders[route.source].len() {
+                    return Err(internal_layout_error(
+                        "CUDA EIGH rank exceeds its eigenvector order",
+                    ));
+                }
+                selector_offsets.push(selector_len);
+                selector_len += route.full_rank * route.kept;
+            }
+            let selector = if selector_len == 0 {
+                None
+            } else {
+                Some(upload_selector(
+                    cuda,
+                    selector_len,
+                    1,
+                    plan.routes
+                        .iter()
+                        .zip(&selector_offsets)
+                        .flat_map(|(route, &offset)| {
+                            orders[route.source][..route.kept].iter().enumerate().map(
+                                move |(column, &row)| {
+                                    (offset + row + route.full_rank * column, 0, D::ONE)
+                                },
+                            )
+                        }),
+                )?)
+            };
             #[cfg(test)]
             let mut assembly_ordinal = 0;
-            for route in plan.routes.iter() {
+            for (route, &selector_offset) in plan.routes.iter().zip(&selector_offsets) {
                 #[cfg(test)]
                 {
                     assembly_ordinal += 1;
                     Self::inject_cuda_eigh_failure("assembly", assembly_ordinal)?;
                 }
-                let source_region = &plan.source_regions[route.source];
+                let selector = selector
+                    .as_ref()
+                    .ok_or_else(|| internal_layout_error("CUDA EIGH route has no selector"))?;
                 let raw = raw_vectors[route.source]
                     .take()
                     .ok_or_else(|| internal_layout_error("CUDA EIGH route has no eigenvectors"))?;
-                let order = &orders[route.source];
-                if route.kept > order.len() {
-                    return Err(internal_layout_error(
-                        "CUDA EIGH rank exceeds its eigenvector order",
-                    ));
+                let left_region = &plan.left_regions[route.left];
+                #[cfg(test)]
+                let aligned = route.aligned && !CUDA_EIGH_TREEWISE.with(std::cell::Cell::get);
+                #[cfg(not(test))]
+                let aligned = route.aligned;
+                if aligned {
+                    assemble_aligned_left_factor(
+                        cuda,
+                        &mut vector_data,
+                        left_region,
+                        &raw,
+                        route.full_rank,
+                        selector,
+                        selector_offset,
+                        route.kept,
+                    )?;
+                } else {
+                    assemble_left_factor(
+                        cuda,
+                        &mut vector_data,
+                        left_region,
+                        &plan.source_regions[route.source],
+                        &raw,
+                        route.full_rank,
+                        selector,
+                        selector_offset,
+                        route.kept,
+                    )?;
                 }
-                let selector = upload_selector(
-                    cuda,
-                    route.full_rank,
-                    route.kept,
-                    order[..route.kept]
-                        .iter()
-                        .enumerate()
-                        .map(|(column, &row)| (row, column, D::ONE)),
-                )?;
-                assemble_left_factor(
-                    cuda,
-                    &mut vector_data,
-                    &plan.left_regions[route.left],
-                    source_region,
-                    &raw,
-                    route.full_rank,
-                    &selector,
-                    route.kept,
-                )?;
             }
             (diagonal_data, vector_data)
         };
@@ -12485,6 +12584,7 @@ where
                         &scratch.left,
                         route.rank,
                         Self::route_selector(&scratch.selector)?,
+                        0,
                         route.rank,
                     )?;
                 }
@@ -21814,6 +21914,69 @@ mod representation_gates {
                     tenet_tensors::OperationError::UnsupportedTensorContractScope { .. }
                 )
         ));
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    #[ignore = "requires a real CUDA device"]
+    fn typed_cuda_eigh_aligned_assembly_matches_the_per_tree_path_bitwise() {
+        // What: an aligned route permutes its eigenvectors with one GEMM, the
+        // general path with one per codomain tree; both read one selector
+        // uploaded per call and, being exact data movement, publish the same
+        // bytes.
+        let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+        let leg = GradedSpace::try_new_with_arc(
+            Arc::new(U1FusionRule),
+            [
+                (U1Irrep::new(-1), 2),
+                (U1Irrep::new(0), 1),
+                (U1Irrep::new(1), 2),
+            ],
+        )
+        .unwrap();
+        let source = TensorMap::<U1FusionRule, f64>::rand_with_seed(
+            &runtime,
+            [&leg, &leg],
+            [&leg, &leg],
+            11,
+        )
+        .unwrap();
+        let source = source.add(&source.adjoint().unwrap(), 1.0, 1.0).unwrap();
+        let device = source.to_cuda().unwrap();
+        let sectors = sector_regions(
+            device.logical_space().space().structure(),
+            device.logical_space().space().nout(),
+        )
+        .unwrap();
+        let trees: usize = sectors.iter().map(|region| region.row_trees().len()).sum();
+        assert!(
+            trees > sectors.len(),
+            "the fixture needs multi-tree sectors"
+        );
+
+        let mut outputs = Vec::new();
+        for (treewise, gemms) in [(false, sectors.len()), (true, trees)] {
+            CUDA_EIGH_TREEWISE.with(|flag| flag.set(treewise));
+            CUDA_QR_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0, 0, 0))));
+            let (d, v) = device.eigh_full().unwrap();
+            CUDA_EIGH_TREEWISE.with(|flag| flag.set(false));
+            CUDA_QR_OBSERVATION.with(|observation| {
+                let (_, _, selector_uploads, _, assembly_gemms, _, _) = observation.get().unwrap();
+                assert_eq!((selector_uploads, assembly_gemms), (1, gemms));
+                observation.set(None);
+            });
+            outputs.push((d.to_host().unwrap(), v.to_host().unwrap()));
+        }
+        let bits = |map: &TensorMap<U1FusionRule, f64>| {
+            map.data()
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(bits(&outputs[0].0), bits(&outputs[1].0));
+        assert_eq!(bits(&outputs[0].1), bits(&outputs[1].1));
+        let (d, v) = &outputs[0];
+        assert_typed_map_close(&source.compose(v).unwrap(), &v.compose(d).unwrap(), 1.0e-10);
     }
 
     #[cfg(feature = "cuda")]
