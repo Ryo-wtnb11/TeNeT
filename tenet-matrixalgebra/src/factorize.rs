@@ -5882,6 +5882,8 @@ where
     // to empty buffers instead of zero-filling first; otherwise overwrite a
     // zeroed buffer region by region.
     let append = lq_routes_append_in_storage_order(plan, left_len, right_len);
+    #[cfg(test)]
+    let append = append && !FORCE_LQ_ZEROED_PUBLICATION.with(Cell::get);
     let (mut left_data, mut right_data) = if append {
         (Vec::with_capacity(left_len), Vec::with_capacity(right_len))
     } else {
@@ -6004,6 +6006,32 @@ where
     D: FactorScalar,
 {
     lq_compact(dense, input)
+}
+
+#[cfg(test)]
+thread_local! {
+    static FORCE_LQ_ZEROED_PUBLICATION: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Routes compact LQ through its zero-and-overwrite publication on this
+/// thread even when the append proof holds.
+#[cfg(test)]
+pub(crate) fn force_lq_zeroed_publication_for_test(force: bool) {
+    FORCE_LQ_ZEROED_PUBLICATION.with(|cell| cell.set(force));
+}
+
+/// [`lq_routes_append_in_storage_order`] after replacing the plan's routes.
+#[cfg(test)]
+pub(crate) fn lq_routes_append_with_routes_for_test(
+    plan: &mut CompactFactorPlan,
+    routes: Vec<CompactFactorRoute>,
+) -> Result<bool, OperationError> {
+    plan.routes = routes;
+    Ok(lq_routes_append_in_storage_order(
+        plan,
+        plan.left_layout.required_len()?,
+        plan.right_layout.required_len()?,
+    ))
 }
 
 /// Whether the nonzero routes of `plan` reach the left and right factor

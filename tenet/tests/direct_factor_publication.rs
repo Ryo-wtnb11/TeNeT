@@ -250,22 +250,46 @@ mod checked_generic {
         (su3_leg(provider, &rows), su3_leg(provider, &cols))
     }
 
-    /// Left: `A = W P`, right: `A = P W`, with `P = Pᴴ`.
+    /// Left: `A = W P`, right: `A = P W`, with `W` an isometry (`Wᴴ W = 1`
+    /// left, `W Wᴴ = 1` right: every eigenvalue of the Gram matrix is one)
+    /// and `P` Hermitian positive semidefinite (eigenvalues `>= -tol`). This
+    /// excludes trivial splittings such as `W = A`, `P = 1`.
     macro_rules! assert_polar {
         ($d:ty, $a:expr, $left:expr) => {{
             let a = $a;
             let terms = a.data().len();
-            let (p, product) = if $left {
+            let (w, p, product, gram) = if $left {
                 let (w, p) = a.left_polar().unwrap();
                 let product = w.compose(&p).unwrap();
-                (p, product)
+                let gram = owned_adjoint!($d, w).compose(&w).unwrap();
+                (w, p, product, gram)
             } else {
                 let (p, w) = a.right_polar().unwrap();
                 let product = p.compose(&w).unwrap();
-                (p, product)
+                let gram = w.compose(&owned_adjoint!($d, w)).unwrap();
+                (w, p, product, gram)
             };
+            assert!(!w.data().is_empty());
             assert_residual!("A = polar product", $d, &product, a, terms);
             assert_residual!("P = Pᴴ", $d, &owned_adjoint!($d, p), &p, terms);
+            let one = numerics::tolerance::<$d>(terms, 1.0);
+            for spectrum in gram.eigh_vals().unwrap() {
+                for value in spectrum.values {
+                    assert!(
+                        (value - 1.0).abs() <= one,
+                        "W is not an isometry: Gram eigenvalue {value:e}"
+                    );
+                }
+            }
+            let psd = numerics::tolerance::<$d>(terms, p.norm().unwrap());
+            let mut p_values = 0;
+            for spectrum in p.eigh_vals().unwrap() {
+                for value in spectrum.values {
+                    p_values += 1;
+                    assert!(value >= -psd, "P is not PSD: eigenvalue {value:e}");
+                }
+            }
+            assert!(p_values > 0);
         }};
     }
 

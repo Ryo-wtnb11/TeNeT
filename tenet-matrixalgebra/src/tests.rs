@@ -1420,6 +1420,62 @@ fn compact_lq_canonical_layout_uses_only_bounded_adjoint_copies() {
     assert_eq!(probe.output_prefill_bytes, 0);
 }
 
+#[test]
+fn compact_lq_append_proof_rejects_unordered_routes_and_fallback_matches_append() {
+    // What: the storage-order proof refuses permuted, gapped and duplicated
+    // routes, and the zero-and-overwrite fallback it guards publishes the same
+    // bits as the append path.
+    let charges =
+        [U1Irrep::new(-1), U1Irrep::new(0), U1Irrep::new(1)].map(|charge| charge.sector_id());
+    let tensor = tsvd_test_tensor(&U1FusionRule, &charges);
+    let bound = bound_tensor(Arc::new(U1FusionRule), &tensor);
+    let mut plan = crate::factorize::compact_factor_plan_for_test(bound.space())
+        .unwrap()
+        .unwrap();
+    let routes = crate::factorize::compact_factor_plan_routes_for_test(&plan).to_vec();
+    assert!(
+        routes
+            .iter()
+            .filter(|route| route.factor_regions_for_test().1.is_some())
+            .count()
+            >= 2
+    );
+    let mut check = |routes: Vec<_>| {
+        crate::factorize::lq_routes_append_with_routes_for_test(&mut plan, routes).unwrap()
+    };
+    assert!(check(routes.clone()));
+    let mut permuted = routes.clone();
+    permuted.reverse();
+    assert!(!check(permuted));
+    let mut gapped = routes.clone();
+    gapped.remove(0);
+    assert!(!check(gapped));
+    let mut truncated = routes.clone();
+    truncated.pop();
+    assert!(!check(truncated));
+    let mut duplicated = routes.clone();
+    duplicated.insert(1, routes[0]);
+    assert!(!check(duplicated));
+
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    let input = bound.as_ref();
+    crate::factorize::reset_compact_lq_copy_probe();
+    let (append_l, append_q) = lq_compact(&mut dense, &input).unwrap();
+    assert_eq!(
+        crate::factorize::compact_lq_copy_probe().output_prefill_bytes,
+        0
+    );
+    crate::factorize::force_lq_zeroed_publication_for_test(true);
+    crate::factorize::reset_compact_lq_copy_probe();
+    let fallback = lq_compact(&mut dense, &input);
+    crate::factorize::force_lq_zeroed_publication_for_test(false);
+    let (fallback_l, fallback_q) = fallback.unwrap();
+    assert!(crate::factorize::compact_lq_copy_probe().output_prefill_bytes > 0);
+    let bits = |data: &[f64]| data.iter().map(|value| value.to_bits()).collect::<Vec<_>>();
+    assert_eq!(bits(fallback_l.data()), bits(append_l.data()));
+    assert_eq!(bits(fallback_q.data()), bits(append_q.data()));
+}
+
 #[derive(Clone, Copy)]
 struct FactorGenericRule;
 
