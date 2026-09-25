@@ -701,13 +701,66 @@ fn large_output_cases(runtime: &Runtime) -> Vec<Case<tenet::core::U1FusionRule, 
     ]
 }
 
+/// Review inputs where the destination has coupled sectors no GEMM writes,
+/// so `dim(C)` (946,176) is far above its GEMM-active part (200,704) and
+/// above `dim(A) + dim(B)`: with `v = u1{-3..3, each 8}` and `w = u1{0:20}`,
+///
+/// - `X1` `A[3,2]·B[1,0] → [2,3,0,1]`, `A: v⊗v ← w⊗w`, `B: w⊗w ← v⊗v`;
+/// - `X2` `A[3,2]·Q'[1,0]`, `Q: v⊗v ← w⊗w`;
+/// - `X3` `P'[3,2]·B[1,0]`, `P: w⊗w ← v⊗v`;
+/// - `X4` the #1466 core form `A[2]·B[0] → [2,3,0,1]` with
+///   `A: v⊗v ← u`, `B: u ← v⊗v`, `u = u1{0:500}`.
+fn inactive_output_cases(runtime: &Runtime) -> Vec<Case<tenet::core::U1FusionRule, f64>> {
+    let v = u1(&[(-3, 8), (-2, 8), (-1, 8), (0, 8), (1, 8), (2, 8), (3, 8)]);
+    let w = u1(&[(0, 20)]);
+    let u = u1(&[(0, 500)]);
+    let tensor = |codomain: &[&GradedSpace<_>], domain: &[&GradedSpace<_>], salt| {
+        TensorMap::<_, f64>::from_block_fn(
+            runtime,
+            codomain.iter().copied(),
+            domain.iter().copied(),
+            fill(salt),
+        )
+        .unwrap()
+    };
+    let a = tensor(&[&v, &v], &[&w, &w], 95);
+    let b = tensor(&[&w, &w], &[&v, &v], 96);
+    let q = tensor(&[&v, &v], &[&w, &w], 97).adjoint().unwrap();
+    let p = tensor(&[&w, &w], &[&v, &v], 98).adjoint().unwrap();
+    let case =
+        |name, lhs: &TensorMap<_, f64>, rhs: &TensorMap<_, f64>, l: &[usize], r: &[usize]| Case {
+            name,
+            lhs: lhs.clone(),
+            rhs: rhs.clone(),
+            lhs_axes: l.to_vec(),
+            rhs_axes: r.to_vec(),
+            output_axes: vec![2, 3, 0, 1],
+            dense: false,
+        };
+    vec![
+        case("X1", &a, &b, &[3, 2], &[1, 0]),
+        case("X2", &a, &q, &[3, 2], &[1, 0]),
+        case("X3", &p, &b, &[3, 2], &[1, 0]),
+        case(
+            "X4",
+            &tensor(&[&v, &v], &[&u], 99),
+            &tensor(&[&u], &[&v, &v], 100),
+            &[2],
+            &[0],
+        ),
+    ]
+}
+
 #[test]
 fn large_output_from_small_operands_copies_the_operands_not_c() {
     let _guard = MEASUREMENT_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-    for case in large_output_cases(&runtime) {
+    for case in large_output_cases(&runtime)
+        .into_iter()
+        .chain(inactive_output_cases(&runtime))
+    {
         let name = case.name;
         let host = case.host();
         let output_bytes = std::mem::size_of_val(host.data()) as u64;

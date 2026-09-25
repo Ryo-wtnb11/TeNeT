@@ -983,6 +983,16 @@ impl<'a> FusionOperand<'a> {
         OrientedFusionTreeHomSpace::new(self.storage_space.homspace(), self.orientation())
     }
 
+    /// The logical hom space: the parent's own, or its memoized adjoint.
+    pub(crate) fn logical_homspace(self) -> &'a FusionTreeHomSpace {
+        match self.orientation() {
+            FusionTreePairOrientation::Direct => self.storage_space.homspace(),
+            FusionTreePairOrientation::Adjoint => {
+                self.storage_space.adjoint_memo().homspace.as_ref()
+            }
+        }
+    }
+
     pub(crate) fn prepare<R>(
         self,
         rule: &R,

@@ -380,6 +380,25 @@ where
     #[cfg(test)]
     observe_tree_transform_seam_call();
     let destination = input.space().transformed_multiplicity_free(&operation)?;
+    let data =
+        tree_transform_owned_multiplicity_free_into(context, input, operation, &destination)?;
+    Ok((destination, data))
+}
+
+/// [`tree_transform_owned_multiplicity_free`] into a `destination` the
+/// caller already derived: the transformed space of `input` under
+/// `operation`, which the tree-transform replay validates.
+pub(crate) fn tree_transform_owned_multiplicity_free_into<R, D, C>(
+    context: &mut CoefficientCtx<D, RuleIdentity, C>,
+    input: BoundDynamicTensorRef<'_, R, D>,
+    operation: TreeTransformOperation,
+    destination: &BoundDynamicFusionMapSpace<R>,
+) -> Result<Vec<D>, tenet_tensors::OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleIdentity>,
+    C: CategoricalScalar + tenet_tensors::DenseRecouplingScalar,
+    D: ScalarOps + RecouplingCoefficientAction<C>,
+{
     let dst_space = destination.space();
     if let Some(data) = context
         .tree_context_mut()
@@ -393,7 +412,7 @@ where
             D::from_real(1.0),
         )?
     {
-        return Ok((destination, data));
+        return Ok(data);
     }
 
     let mut data = vec![D::from_real(0.0); dst_space.required_len()?];
@@ -407,9 +426,10 @@ where
         D::from_real(1.0),
         D::from_real(0.0),
     )?;
-    Ok((destination, data))
+    Ok(data)
 }
 
+#[cfg(test)]
 pub(crate) fn tensorcontract_owned_multiplicity_free<R, D>(
     context: &mut Ctx<D, RuleIdentity>,
     lhs: BoundDynamicTensorRef<'_, R, D>,
@@ -422,8 +442,6 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleIdentity>,
     D: ScalarOps,
 {
-    #[cfg(test)]
-    observe_contract_seam_call();
     let destination = BoundDynamicFusionMapSpace::contracted_multiplicity_free_ordered(
         lhs.space(),
         rhs.space(),
@@ -431,9 +449,38 @@ where
         rhs_axes,
         output_order,
     )?;
+    let data = tensorcontract_owned_multiplicity_free_into(
+        context,
+        &destination,
+        lhs,
+        rhs,
+        lhs_axes,
+        rhs_axes,
+        output_order,
+    )?;
+    Ok((destination, data))
+}
+
+/// Owned multiplicity-free contraction into a `destination` the caller
+/// already derived with `contracted_multiplicity_free_ordered`.
+pub(crate) fn tensorcontract_owned_multiplicity_free_into<R, D>(
+    context: &mut Ctx<D, RuleIdentity>,
+    destination: &BoundDynamicFusionMapSpace<R>,
+    lhs: BoundDynamicTensorRef<'_, R, D>,
+    rhs: BoundDynamicTensorRef<'_, R, D>,
+    lhs_axes: &[usize],
+    rhs_axes: &[usize],
+    output_order: OutputAxisOrder<'_>,
+) -> Result<Vec<D>, tenet_tensors::OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleIdentity>,
+    D: ScalarOps,
+{
+    #[cfg(test)]
+    observe_contract_seam_call();
     let mut data = zeroed_payload(destination.space().required_len()?);
     context.tensorcontract_fusion_dyn_into_with_init(
-        &destination,
+        destination,
         &mut data,
         lhs.space(),
         lhs.data(),
@@ -443,7 +490,7 @@ where
         D::from_real(1.0),
         ContractDestinationInit::Zeroed,
     )?;
-    Ok((destination, data))
+    Ok(data)
 }
 
 pub(crate) enum OrientedContractionKind {
@@ -594,10 +641,47 @@ where
         rhs_axes,
         output_order,
     )?;
+    let data = tensorcontract_oriented_multiplicity_free_into(
+        context,
+        &destination,
+        lhs,
+        lhs_data,
+        rhs,
+        rhs_data,
+        lhs_axes,
+        rhs_axes,
+        output_order,
+        kind,
+    )?;
+    Ok((destination, data))
+}
+
+/// [`tensorcontract_oriented_multiplicity_free`] into a `destination` the
+/// caller already derived with [`oriented_contract_destination`].
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn tensorcontract_oriented_multiplicity_free_into<R, D>(
+    context: &mut CoefficientCtx<D, RuleIdentity, R::Scalar>,
+    destination: &BoundDynamicFusionMapSpace<R>,
+    lhs: FusionOperand<'_>,
+    lhs_data: &[D],
+    rhs: FusionOperand<'_>,
+    rhs_data: &[D],
+    lhs_axes: &[usize],
+    rhs_axes: &[usize],
+    output_order: OutputAxisOrder<'_>,
+    kind: OrientedContractionKind,
+) -> Result<Vec<D>, tenet_tensors::OperationError>
+where
+    R: MultiplicityFreeRigidSymbols
+        + CheckedFusionAlgebra
+        + TreeTransformRuleCacheKey<Key = RuleIdentity>,
+    R::Scalar: CategoricalScalar + tenet_tensors::DenseRecouplingScalar,
+    D: ScalarOps + RecouplingCoefficientAction<R::Scalar>,
+{
     let mut data = zeroed_payload(destination.space().required_len()?);
     match kind {
         OrientedContractionKind::Compose => context.tensorcompose_fusion_dyn_into_with_init(
-            &destination,
+            destination,
             &mut data,
             lhs,
             lhs_data,
@@ -610,7 +694,7 @@ where
         )?,
         OrientedContractionKind::Contract => context
             .tensorcontract_fusion_dyn_prelowered_into_with_init(
-                &destination,
+                destination,
                 &mut data,
                 lhs,
                 lhs_data,
@@ -627,7 +711,7 @@ where
                 ContractDestinationInit::Zeroed,
             )?,
     }
-    Ok((destination, data))
+    Ok(data)
 }
 
 /// TensorKit tensor product: merge codomain trees with codomain trees and
@@ -1172,7 +1256,7 @@ fn increment_coordinates(coordinates: &mut [usize], shape: &[usize]) {
 /// Categorical composition (TensorKit `A * B` / `mul!`) of two owned
 /// multiplicity-free operands.
 ///
-/// Differs from [`tensorcontract_owned_multiplicity_free`] in exactly two
+/// Differs from [`tensorcontract_owned_multiplicity_free_into`] in exactly two
 /// places: the output order is fixed to the identity (composition has no
 /// re-ordering freedom — the open axes keep their sides), and the seam is the
 /// composition one, which never inserts the fermionic supertrace twist.

@@ -854,39 +854,34 @@ where
     rhs_contract_axes_require_twist(rule, rhs, axes.rhs_contracting_axes())
 }
 
-/// Whether a contraction takes TensorKit `blas_contract!`'s `copyC` shape,
-/// and in which operand order: the returned order's default-output
-/// contraction runs a zero-copy candidate (see
-/// [`try_zero_copy_contract_candidates`]) into a temporary, and one permute
-/// then gives `output_axes`. `LhsRhs` contracts `lhs·rhs`, `RhsLhs`
-/// contracts `rhs·lhs`. A lazy adjoint stays a GEMM flag there
-/// (`has_shared_permute(::AdjointTensorMap)`).
+/// Whether a contraction into `dst`, the destination of the requested
+/// `output_axes`, takes TensorKit `blas_contract!`'s `copyC` shape, and in
+/// which operand order: the returned order's default-output contraction runs
+/// a zero-copy candidate (see [`try_zero_copy_contract_candidates`]) into a
+/// temporary, and one permute into `dst` then gives `output_axes`. `LhsRhs`
+/// contracts `lhs·rhs`, `RhsLhs` contracts `rhs·lhs`. A lazy adjoint stays a
+/// GEMM flag there (`has_shared_permute(::AdjointTensorMap)`).
 ///
 /// The choice is TensorKit `contract!`'s (tensoroperations.jl L318-357)
-/// under `_contract_memcost` (L378): `copyC` costs `dim(C)`, and it is taken
-/// only when that is no more than the cheapest DynamicTree candidate for the
-/// requested order ([`min_dynamic_tree_materialized_elements`]). Ties go to
-/// the earlier candidate in TensorKit's order: a B·A `copyC` (m3/m4) loses a
-/// tie to an A·B DynamicTree candidate (m1/m2) and wins one against a B·A
-/// candidate, whose equal cost is then the same output-only copy. A large `C`
-/// from small operands therefore keeps the one-call route, which copies the
-/// operands instead.
+/// under `_contract_memcost` (L378): `copyC` costs `dim(C)`, the required
+/// length of `dst` (the temporary has the same blocks), and it is taken only
+/// when that is no more than the cheapest DynamicTree candidate for the
+/// requested order ([`min_dynamic_tree_materialized_elements`], the real
+/// selector's scorer). Ties go to the earlier candidate in TensorKit's
+/// order: a B·A `copyC` (m3/m4) loses a tie to an A·B DynamicTree candidate
+/// (m1/m2) and wins one against a B·A candidate, whose equal cost is then
+/// the same output-only copy. A large `C` from small operands therefore
+/// keeps the one-call route, which copies the operands instead.
 ///
 /// `None` also when `output_axes` is not a permutation of the open axes,
-/// when it is already zero-copy, or when no candidate is: the one-call route
-/// then applies and keeps its errors. Candidate checks are axis and
-/// dual-flag comparisons, with the fermionic twist declined as on the Host
-/// Core route.
-///
-/// Why `dim(C)` is the active part, `Σ_c rows(c)·cols(c)` over the coupled
-/// sectors both core operands carry, rather than the destination layout:
-/// the operands' cached coupled regions give it with no allocation or
-/// hashing, while deriving the destination costs a layout lookup that the
-/// chosen route repeats. It omits destination blocks no GEMM writes, so it
-/// can only understate `dim(C)`, on both sides of the comparison alike.
+/// when it is already zero-copy, when no candidate is, or when an admission
+/// is not Complete: the one-call route then applies and keeps its errors.
+/// Candidate checks are axis and dual-flag comparisons, with the fermionic
+/// twist declined as on the Host Core route.
 #[doc(hidden)]
 pub fn zero_copy_contract_order_for_output_permute<R>(
     rule: &R,
+    dst: &DynamicFusionMapSpace,
     lhs: FusionOperand<'_>,
     rhs: FusionOperand<'_>,
     lhs_axes: &[usize],
@@ -895,6 +890,7 @@ pub fn zero_copy_contract_order_for_output_permute<R>(
 ) -> Option<FusionContractOrientation>
 where
     R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
 {
     let lhs_open = lhs.storage_space().rank().checked_sub(lhs_axes.len())?;
     let rhs_open = rhs.storage_space().rank().checked_sub(rhs_axes.len())?;
@@ -902,54 +898,44 @@ where
     if output_axes.len() != open || !(0..open).all(|axis| output_axes.contains(&axis)) {
         return None;
     }
-    let requested =
-        TensorContractSpec::new(lhs_axes, rhs_axes, OutputAxisOrder::from_axes(output_axes));
-    if try_zero_copy_contract_candidates(
-        rule,
-        lhs_open,
-        lhs,
-        rhs,
-        requested,
-        false,
-        |_, _, _, _| Ok(Some(())),
-    )
-    .ok()?
-    .is_some()
-    {
+    let zero_copy = |lhs, rhs, lhs_axes, rhs_axes, output, dst_nout| {
+        matches!(
+            try_zero_copy_contract_candidates(
+                rule,
+                dst_nout,
+                lhs,
+                rhs,
+                TensorContractSpec::new(lhs_axes, rhs_axes, output),
+                false,
+                |_, _, _, _| Ok(Some(())),
+            ),
+            Ok(Some(()))
+        )
+    };
+    let requested = OutputAxisOrder::from_axes(output_axes);
+    if zero_copy(lhs, rhs, lhs_axes, rhs_axes, requested, lhs_open) {
         return None;
     }
     let identity = OutputAxisOrder::identity();
-    let temporary_len = |lhs, rhs, lhs_axes, rhs_axes, dst_nout| {
-        try_zero_copy_contract_candidates(
-            rule,
-            dst_nout,
-            lhs,
-            rhs,
-            TensorContractSpec::new(lhs_axes, rhs_axes, identity),
-            false,
-            |core_lhs, core_rhs, _, _| active_core_output_len(core_lhs, core_rhs),
-        )
-        .ok()
-        .flatten()
+    let order = if zero_copy(lhs, rhs, lhs_axes, rhs_axes, identity, lhs_open) {
+        FusionContractOrientation::LhsRhs
+    } else if zero_copy(rhs, lhs, rhs_axes, lhs_axes, identity, rhs_open) {
+        FusionContractOrientation::RhsLhs
+    } else {
+        return None;
     };
-    let (order, output_len) =
-        if let Some(len) = temporary_len(lhs, rhs, lhs_axes, rhs_axes, lhs_open) {
-            (FusionContractOrientation::LhsRhs, len)
-        } else {
-            let len = temporary_len(rhs, lhs, rhs_axes, lhs_axes, rhs_open)?;
-            (FusionContractOrientation::RhsLhs, len)
-        };
+    let output_len = dst.required_len().ok()?;
     let dynamic = |orientation| {
         min_dynamic_tree_materialized_elements(
             rule,
-            lhs_open,
-            output_len,
+            dst,
             lhs,
             rhs,
-            requested,
+            TensorContractSpec::new(lhs_axes, rhs_axes, requested),
             &[orientation],
         )
         .ok()
+        .flatten()
     };
     let (a_b, b_a) = (
         dynamic(FusionContractOrientation::LhsRhs)?,
@@ -960,65 +946,6 @@ where
         FusionContractOrientation::RhsLhs => output_len < a_b && output_len <= b_a,
     };
     copy_c.then_some(order)
-}
-
-/// `Σ_c rows(c)·cols(c)` of the core GEMM over the coupled sectors both
-/// operands carry, read from their cached canonical regions; `None` when a
-/// layout is not canonical and sorted.
-fn active_core_output_len(
-    core_lhs: FusionOperand<'_>,
-    core_rhs: FusionOperand<'_>,
-) -> Result<Option<usize>, OperationError> {
-    let regions = |operand: FusionOperand<'_>| {
-        let storage = operand.storage_space();
-        let regions = storage
-            .structure()
-            .coupled_sector_regions(storage.nout())
-            .map_err(OperationError::from_core_preserving_context)?;
-        Ok::<_, OperationError>(regions.filter(|regions| {
-            regions
-                .windows(2)
-                .all(|pair| pair[0].coupled() < pair[1].coupled())
-        }))
-    };
-    let (Some(left), Some(right)) = (regions(core_lhs)?, regions(core_rhs)?) else {
-        return Ok(None);
-    };
-    // Logical rows of core-left and columns of core-right; an adjoint
-    // exchanges its storage rows and columns.
-    let rows = |region: &tenet_core::CoupledSectorRegion| {
-        if core_lhs.storage_conjugate() {
-            region.cols()
-        } else {
-            region.rows()
-        }
-    };
-    let cols = |region: &tenet_core::CoupledSectorRegion| {
-        if core_rhs.storage_conjugate() {
-            region.rows()
-        } else {
-            region.cols()
-        }
-    };
-    let mut total = 0usize;
-    let mut right_regions = right.iter().peekable();
-    for region in left.iter() {
-        while right_regions
-            .next_if(|other| other.coupled() < region.coupled())
-            .is_some()
-        {}
-        if let Some(other) = right_regions.next_if(|other| other.coupled() == region.coupled()) {
-            total = rows(region)
-                .checked_mul(cols(other))
-                .and_then(|len| total.checked_add(len))
-                .ok_or_else(|| {
-                    OperationError::from_core_preserving_context(
-                        tenet_core::CoreError::ElementCountOverflow,
-                    )
-                })?;
-        }
-    }
-    Ok(Some(total))
 }
 
 fn rhs_contract_axes_require_twist<R>(
