@@ -11619,7 +11619,45 @@ where
             right_leading: rows,
         });
     }
-    build_left_right_bound_pair_generic_checked(provider, space.homspace(), &matrices, pairs)
+    let dimensions = coupled_sector_block_dimensions_generic_checked(
+        space.homspace().codomain(),
+        provider.as_ref(),
+    )?;
+    checked_full_factor_pair(provider, space.homspace(), &matrices, pairs, &dimensions)
+}
+
+/// Why not the paired builder: its bond holds only sectors that carry a
+/// factor pair, so a side-only sector would be dropped from the full
+/// factor's `fuse(codomain)`/`fuse(domain)` bond instead of publishing its
+/// identity block, as TensorKit's `initialize_output(qr_full!/lq_full!)` does.
+fn checked_full_factor_pair<R, D>(
+    provider: &Arc<R>,
+    homspace: &FusionTreeHomSpace,
+    matrices: &[SectorMatricization<D>],
+    mut pairs: Vec<FactorPair<D>>,
+    dimensions: &BTreeMap<SectorId, usize>,
+) -> Result<DynamicFactorPair<R, D>, CheckedGenericFactorPlanError<R::Error>>
+where
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
+    let left = build_bound_factor_generic_checked(
+        provider,
+        homspace,
+        matrices,
+        &mut pairs,
+        dimensions,
+        FactorSide::Left,
+    )?;
+    let right = build_bound_factor_generic_checked(
+        provider,
+        homspace,
+        matrices,
+        &mut pairs,
+        dimensions,
+        FactorSide::Right,
+    )?;
+    Ok((left, right))
 }
 
 /// Checked-Generic full SVD. Dense work is performed before any output-space
@@ -11827,7 +11865,11 @@ where
             right_leading: cols,
         });
     }
-    build_left_right_bound_pair_generic_checked(provider, space.homspace(), &matrices, pairs)
+    let dimensions = coupled_sector_block_dimensions_generic_checked(
+        space.homspace().domain(),
+        provider.as_ref(),
+    )?;
+    checked_full_factor_pair(provider, space.homspace(), &matrices, pairs, &dimensions)
 }
 
 /// Checked-Generic singular values only. No factor-space publication occurs.

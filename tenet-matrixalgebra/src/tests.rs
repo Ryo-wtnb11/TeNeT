@@ -2493,6 +2493,7 @@ fn staged_generic_pair_callers_publish_canonical_owned_payloads() {
     let checked_input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
     crate::factorize::reset_generic_pair_publication_probe();
+    crate::factorize::reset_one_sided_publication_probe();
 
     qr_compact_dyn_generic(&mut dense, &padded).unwrap();
     lq_compact_dyn_generic(&mut dense, &padded).unwrap();
@@ -2502,10 +2503,19 @@ fn staged_generic_pair_callers_publish_canonical_owned_payloads() {
     qr_full_dyn_checked_generic(&mut dense, &checked_input).unwrap();
     lq_full_dyn_checked_generic(&mut dense, &checked_input).unwrap();
 
+    // Full QR/LQ publish each side through the side-aware builder (#1524).
+    let one_sided = crate::factorize::one_sided_publication_probe();
+    assert_eq!(
+        (
+            one_sided.canonical_publications,
+            one_sided.fallback_publications
+        ),
+        (4, 0)
+    );
     let probe = crate::factorize::generic_pair_publication_probe();
-    assert_eq!(probe.canonical_publications, 7);
+    assert_eq!(probe.canonical_publications, 5);
     assert_eq!(probe.fallback_publications, 0);
-    assert_eq!((probe.left_owner_reused, probe.right_owner_reused), (7, 7));
+    assert_eq!((probe.left_owner_reused, probe.right_owner_reused), (5, 5));
     assert_eq!(
         (probe.left_appended_elements, probe.right_appended_elements),
         (0, 0)
@@ -2527,6 +2537,7 @@ where
     let input = BoundDynamicTensorRef::try_new(&space, &data).unwrap();
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
     crate::factorize::reset_generic_pair_publication_probe();
+    crate::factorize::reset_one_sided_publication_probe();
 
     let qr = qr_compact_dyn_checked_generic(&mut dense, &input).unwrap();
     assert_pair_reconstructs_checked_literal(&qr.0, &qr.1, complex);
@@ -2549,8 +2560,17 @@ where
     let full_lq = lq_full_dyn_checked_generic(&mut dense, &input).unwrap();
     assert_pair_reconstructs_checked_literal(&full_lq.0, &full_lq.1, complex);
 
+    // Full QR/LQ publish each side through the side-aware builder (#1524).
+    let one_sided = crate::factorize::one_sided_publication_probe();
+    assert_eq!(
+        (
+            one_sided.canonical_publications,
+            one_sided.fallback_publications
+        ),
+        (4, 0)
+    );
     let probe = crate::factorize::generic_pair_publication_probe();
-    assert_eq!(probe.canonical_publications, 5);
+    assert_eq!(probe.canonical_publications, 3);
     assert_eq!(probe.fallback_publications, 0);
     assert!(probe.left_appended_elements > 0);
     assert!(probe.right_appended_elements > 0);

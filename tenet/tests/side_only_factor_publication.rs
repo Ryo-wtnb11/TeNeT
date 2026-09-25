@@ -161,3 +161,122 @@ fn side_only_full_and_null_factors_are_complete_real() {
 fn side_only_full_and_null_factors_are_complete_complex() {
     all_symmetries!(Complex64, complex);
 }
+
+/// TensorKit `initialize_output(qr_full!/lq_full!)`: Q of full QR maps
+/// `fuse(codomain)` into the codomain, Q of full LQ maps the domain into
+/// `fuse(domain)`, so every side-only sector is identity-completed (#1524).
+/// `$qr_bond`/`$lq_bond` are those fused spaces built by `GradedSpace::fuse`,
+/// independently of the factorization.
+#[cfg(feature = "racah-generated")]
+macro_rules! full_qr_lq_bond_case {
+    ($rt:expr, $scalar:ty, $codomain:expr, $domain:expr, $qr_bond:expr, $lq_bond:expr, $seed:expr) => {{
+        let rt = $rt;
+        let owned_adjoint = |u: &TensorMap<_, $scalar>| {
+            let adjoint = u.adjoint().unwrap();
+            adjoint.add(&adjoint, 1.0.into(), 0.0.into()).unwrap()
+        };
+        // Checked Generic has no `id`: a Hermitian map is the identity iff
+        // every eigenvalue is one, and a count equal to the expected reduced
+        // dimension rules out an unstored (zero) side-only block.
+        let identity = |gram: TensorMap<_, $scalar>, reduced: usize| {
+            let values = gram
+                .eigh_vals()
+                .unwrap()
+                .into_iter()
+                .flat_map(|spectrum| spectrum.values)
+                .collect::<Vec<_>>();
+            assert_eq!(values.len(), reduced);
+            assert!(
+                values.iter().all(|value| (value - 1.0).abs() <= 1e-10),
+                "{values:?}"
+            );
+        };
+        let reduced = |space: &GradedSpace<_>| space.degeneracies().iter().sum::<usize>();
+        let unitary = |u: &TensorMap<_, $scalar>, bond: &GradedSpace<_>| {
+            let adjoint = owned_adjoint(u);
+            identity(adjoint.compose(u).unwrap(), reduced(bond));
+            identity(u.compose(&adjoint).unwrap(), reduced(bond));
+        };
+        let t: TensorMap<_, $scalar> =
+            TensorMap::rand_with_seed(rt, $codomain, $domain, $seed).unwrap();
+        let (q, r) = t.qr_full().unwrap();
+        assert_eq!(q.domain(), std::slice::from_ref($qr_bond));
+        assert_eq!(r.codomain(), q.domain());
+        assert_close!(&q.compose(&r).unwrap(), &t);
+        unitary(&q, $qr_bond);
+        let (l, q) = t.lq_full().unwrap();
+        assert_eq!(q.codomain(), std::slice::from_ref($lq_bond));
+        assert_eq!(l.domain(), q.codomain());
+        assert_close!(&l.compose(&q).unwrap(), &t);
+        unitary(&q, $lq_bond);
+        // Null spaces already use the side-aware builder: a side-only sector
+        // is wholly null, so rank + null dimension is the fused dimension.
+        let rank = t
+            .svd_vals()
+            .unwrap()
+            .into_iter()
+            .flat_map(|spectrum| spectrum.values)
+            .filter(|&value| value > 1e-10)
+            .count();
+        let n = t.left_null().unwrap();
+        let n_adjoint = owned_adjoint(&n);
+        assert!(n_adjoint.compose(&t).unwrap().norm().unwrap() <= 1e-10);
+        identity(n_adjoint.compose(&n).unwrap(), reduced($qr_bond) - rank);
+        let n = t.right_null().unwrap();
+        let n_adjoint = owned_adjoint(&n);
+        assert!(t.compose(&n_adjoint).unwrap().norm().unwrap() <= 1e-10);
+        identity(n.compose(&n_adjoint).unwrap(), reduced($lq_bond) - rank);
+    }};
+}
+
+/// The multiplicity-free comparison fixture: U(1) with codomain-only charge
+/// 2 and domain-only charge 3 obeys the same output-space rule.
+#[cfg(feature = "racah-generated")]
+macro_rules! multiplicity_free_full_qr_lq_bonds {
+    ($d:ty) => {{
+        let rt = Runtime::builder().dense_threads(1).build().unwrap();
+        let provider = Arc::new(U1FusionRule);
+        let q = U1Irrep::new;
+        let space = |irreps: Vec<(U1Irrep, usize)>| {
+            GradedSpace::try_new_with_arc(Arc::clone(&provider), irreps).unwrap()
+        };
+        let left = space(vec![(q(0), 2), (q(1), 2)]);
+        let phys = space(vec![(q(0), 1), (q(1), 1)]);
+        let right = space(vec![(q(0), 2), (q(1), 3), (q(3), 2)]);
+        let fused = left.fuse(&phys).unwrap();
+        full_qr_lq_bond_case!(&rt, $d, [&left, &phys], [&right], &fused, &right, 1524);
+        full_qr_lq_bond_case!(&rt, $d, [&right], [&left, &phys], &right, &fused, 1525);
+    }};
+}
+
+#[cfg(feature = "racah-generated")]
+mod checked_generic {
+    use super::*;
+    use tenet::typed::SUNFusionRule;
+
+    /// SU(3), `a = 8^2 + 1`, `b = 8^2 + 1 + 6^2`: `a ⊗ a` holds 8 with
+    /// multiplicity two and the codomain-only 10, 10̄, 27; `b` holds the
+    /// domain-only 6. Both orientations put side-only sectors on each side.
+    macro_rules! checked_full_qr_lq_bonds {
+        ($d:ty) => {{
+            let rt = Runtime::builder().dense_threads(1).build().unwrap();
+            let provider = Arc::new(SUNFusionRule::new(3).unwrap());
+            let space = |irreps: Vec<(Vec<i64>, usize)>| {
+                GradedSpace::try_new_with_arc(Arc::clone(&provider), irreps).unwrap()
+            };
+            let a = space(vec![(vec![1, 1], 2), (vec![0, 0], 1)]);
+            let b = space(vec![(vec![1, 1], 2), (vec![0, 0], 1), (vec![2, 0], 2)]);
+            let fused = a.fuse(&a).unwrap();
+            full_qr_lq_bond_case!(&rt, $d, [&a, &a], [&b], &fused, &b, 1526);
+            full_qr_lq_bond_case!(&rt, $d, [&b], [&a, &a], &b, &fused, 1527);
+        }};
+    }
+
+    #[test]
+    fn checked_generic_full_qr_lq_bonds_are_fused_sides() {
+        multiplicity_free_full_qr_lq_bonds!(f64);
+        checked_full_qr_lq_bonds!(f64);
+        multiplicity_free_full_qr_lq_bonds!(Complex64);
+        checked_full_qr_lq_bonds!(Complex64);
+    }
+}
