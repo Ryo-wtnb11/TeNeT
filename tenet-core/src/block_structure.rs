@@ -1084,8 +1084,9 @@ pub struct CoupledSectorRegion {
     rows: usize,
     cols: usize,
     range: core::ops::Range<usize>,
-    row_trees: Vec<CoupledTreeExtent>,
-    col_trees: Vec<CoupledTreeExtent>,
+    /// Row trees, then column trees: one allocation per region.
+    trees: Box<[CoupledTreeExtent]>,
+    row_tree_count: usize,
     aligned_diagonal: bool,
 }
 
@@ -1112,12 +1113,12 @@ impl CoupledSectorRegion {
 
     /// Codomain trees with their row offsets and degeneracy shapes.
     pub fn row_trees(&self) -> &[CoupledTreeExtent] {
-        &self.row_trees
+        &self.trees[..self.row_tree_count]
     }
 
     /// Domain trees with their column offsets and degeneracy shapes.
     pub fn col_trees(&self) -> &[CoupledTreeExtent] {
-        &self.col_trees
+        &self.trees[self.row_tree_count..]
     }
 
     #[doc(hidden)]
@@ -2884,6 +2885,16 @@ fn compile_coupled_sector_regions(
 ) -> Result<Option<Vec<CoupledSectorRegion>>, CoreError> {
         let mut regions = Vec::new();
         let mut seen_coupled = FxHashMap::<SectorId, ()>::default();
+        // Why hoist the per-sector scratch: the eager routes compile these
+        // regions for every fresh destination wrapper, and per-sector maps
+        // and vectors made the allocation count grow with the sector count.
+        // Each region still owns one exact-length tree list.
+        let mut row_trees = Vec::<CoupledTreeExtent>::new();
+        let mut col_trees = Vec::<CoupledTreeExtent>::new();
+        let mut row_indexes = FxHashMap::<&FusionTreeKey, usize>::default();
+        let mut col_indexes = FxHashMap::<&FusionTreeKey, usize>::default();
+        let mut tree_pairs = Vec::<(usize, usize)>::new();
+        let mut seen_pairs = Vec::<bool>::new();
         let mut block_index = 0usize;
         let mut next_offset = 0usize;
         while block_index < structure.block_count() {
@@ -2898,11 +2909,11 @@ fn compile_coupled_sector_regions(
                 return Ok(None);
             }
 
-            let mut row_trees = Vec::<CoupledTreeExtent>::new();
-            let mut col_trees = Vec::<CoupledTreeExtent>::new();
-            let mut row_indexes = FxHashMap::<&FusionTreeKey, usize>::default();
-            let mut col_indexes = FxHashMap::<&FusionTreeKey, usize>::default();
-            let mut tree_pairs = Vec::<(usize, usize)>::new();
+            row_trees.clear();
+            col_trees.clear();
+            row_indexes.clear();
+            col_indexes.clear();
+            tree_pairs.clear();
             let mut rows = 0usize;
             let mut cols = 0usize;
             let mut end = block_index;
@@ -2948,7 +2959,8 @@ fn compile_coupled_sector_regions(
             if end - block_index != expected_blocks {
                 return Ok(None);
             }
-            let mut seen_pairs = vec![false; expected_blocks];
+            seen_pairs.clear();
+            seen_pairs.resize(expected_blocks, false);
             for (index, (row_index, col_index)) in
                 (block_index..end).zip(tree_pairs.iter().copied())
             {
@@ -2992,8 +3004,8 @@ fn compile_coupled_sector_regions(
                 rows,
                 cols,
                 range: next_offset..end_offset,
-                row_trees,
-                col_trees,
+                row_tree_count: row_trees.len(),
+                trees: row_trees.drain(..).chain(col_trees.drain(..)).collect(),
                 aligned_diagonal,
             });
             next_offset = end_offset;

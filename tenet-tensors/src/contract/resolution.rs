@@ -4,9 +4,13 @@
 //! prepared handles own the returned [`Resolution`] and any complete dynamic
 //! execution artifact required for lookup-free replay.
 
+use std::cmp::Ordering;
 use std::sync::Arc;
 
-use tenet_core::{FusionTreeHomSpace, FusionTreePairOrientation, MultiplicityFreeRigidSymbols};
+use tenet_core::{
+    FusionSpaceAdmission, FusionTreeHomSpace, FusionTreePairOrientation,
+    MultiplicityFreeRigidSymbols,
+};
 
 use super::structure::TensorContractStructure;
 use crate::{DenseBlockScalar, OperationError};
@@ -925,6 +929,16 @@ where
         return None;
     };
     let output_len = dst.required_len().ok()?;
+    let complete = [
+        dst.admission(),
+        lhs.storage_space().admission(),
+        rhs.storage_space().admission(),
+    ]
+    .into_iter()
+    .all(|admission| matches!(admission, FusionSpaceAdmission::Complete(_)));
+    if !complete {
+        return None;
+    }
     let dynamic = |orientation| {
         min_dynamic_tree_materialized_elements(
             rule,
@@ -937,15 +951,51 @@ where
         .ok()
         .flatten()
     };
-    let (a_b, b_a) = (
-        dynamic(FusionContractOrientation::LhsRhs)?,
-        dynamic(FusionContractOrientation::RhsLhs)?,
-    );
-    let copy_c = match order {
-        FusionContractOrientation::LhsRhs => output_len <= a_b.min(b_a),
-        FusionContractOrientation::RhsLhs => output_len < a_b && output_len <= b_a,
+    let scored = || -> Option<bool> {
+        let (a_b, b_a) = (
+            dynamic(FusionContractOrientation::LhsRhs)?,
+            dynamic(FusionContractOrientation::RhsLhs)?,
+        );
+        Some(match order {
+            FusionContractOrientation::LhsRhs => output_len <= a_b.min(b_a),
+            FusionContractOrientation::RhsLhs => output_len < a_b && output_len <= b_a,
+        })
     };
-    copy_c.then_some(order)
+    // Why not always score: a DynamicTree candidate that copies nothing is a
+    // zero-copy candidate for `output_axes` (the same axis, borrowability and
+    // twist conditions), which returned `None` above, so every candidate
+    // copies an operand (at least `operand_len`) or the output
+    // (`output_len`). Under `RhsLhs` no A·B candidate borrows both operands
+    // either, or the `LhsRhs` walk would have found it, so every A·B
+    // candidate costs at least `operand_len`, plus `output_len` unless
+    // `output_axes` is the identity (its only output-free order). Only an
+    // `RhsLhs` tie of the two lengths with an identity (or empty) output
+    // needs scores, and only the A·B ones: the B·A ones are then at least
+    // `output_len`.
+    let operand_len = lhs
+        .storage_space()
+        .required_len()
+        .ok()?
+        .min(rhs.storage_space().required_len().ok()?);
+    let identity_output = output_axes.iter().copied().eq(0..open);
+    let copy_c = match (order, output_len.cmp(&operand_len)) {
+        (FusionContractOrientation::LhsRhs, Ordering::Less | Ordering::Equal)
+        | (FusionContractOrientation::RhsLhs, Ordering::Less) => Some(true),
+        (FusionContractOrientation::RhsLhs, Ordering::Equal)
+            if output_len > 0 && !identity_output =>
+        {
+            Some(true)
+        }
+        (FusionContractOrientation::RhsLhs, Ordering::Equal) => {
+            Some(dynamic(FusionContractOrientation::LhsRhs).is_some_and(|a_b| output_len < a_b))
+        }
+        _ => None,
+    };
+    debug_assert!(
+        copy_c.is_none() || copy_c == Some(scored() == Some(true)),
+        "copyC shortcut disagrees with full candidate scoring"
+    );
+    copy_c.or_else(scored).unwrap_or(false).then_some(order)
 }
 
 fn rhs_contract_axes_require_twist<R>(

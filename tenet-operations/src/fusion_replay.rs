@@ -533,10 +533,12 @@ where
         let dst_rows_are_lhs_rows = same_regions(lhs_storage_structure, lhs_storage_nout, lhs_op);
         let dst_cols_are_rhs_cols = same_regions(rhs_storage_structure, rhs_storage_nout, rhs_op);
         let mut direct_batch = Vec::with_capacity(dst_regions.len());
-        let mut inactive_dst_scale_blocks = Vec::new();
+        let mut inactive_dst_scale_blocks = Vec::<FusionScaleBlockLayout>::new();
+        let mut previous_inactive = false;
         let mut lhs_index = 0usize;
         let mut rhs_index = 0usize;
         for dst in dst_regions.iter() {
+            let follows_inactive = std::mem::replace(&mut previous_inactive, true);
             while lhs_regions
                 .get(lhs_index)
                 .is_some_and(|region| region.coupled() < dst.coupled())
@@ -558,9 +560,17 @@ where
                 .map(|region| OrientedCoupledRegion::new(region, rhs_op))
                 .filter(|region| region.coupled() == dst.coupled());
             let (Some(lhs), Some(rhs)) = (lhs, rhs) else {
-                inactive_dst_scale_blocks.push(contiguous_scale_layout(dst.range())?);
+                // Why merge: regions tile storage in order, so a run of
+                // inactive sectors is one contiguous range, and scaling it
+                // once equals scaling each sector; a layout per sector cost
+                // two heap vectors and one kernel call each.
+                match inactive_dst_scale_blocks.last_mut() {
+                    Some(last) if follows_inactive => last.block.shape[0] += dst.range().len(),
+                    _ => inactive_dst_scale_blocks.push(contiguous_scale_layout(dst.range())?),
+                }
                 continue;
             };
+            previous_inactive = false;
             if lhs.cols() != rhs.rows()
                 || dst.rows() != lhs.rows()
                 || dst.cols() != rhs.cols()
