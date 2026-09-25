@@ -16648,16 +16648,22 @@ fn checked_generic_mis_stacked_tiling_scatters_factors_and_refuses_eigenvalues()
     assert_compact_factors_reconstruct_input(&input, &lq.0, None, &lq.1);
 
     let hermitian_input = BoundDynamicTensorRef::try_new(&space, &hermitian_data).unwrap();
-    for error in [
-        eigh_vals_dyn_checked_generic(&mut dense, &hermitian_input).unwrap_err(),
-        eig_vals_dyn_checked_generic(&mut dense, &input).unwrap_err(),
+    for (error, operation) in [
+        (
+            eigh_vals_dyn_checked_generic(&mut dense, &hermitian_input).unwrap_err(),
+            "eigh_vals ",
+        ),
+        (
+            eig_vals_dyn_checked_generic(&mut dense, &input).unwrap_err(),
+            "eig_vals ",
+        ),
     ] {
         assert!(
             matches!(
                 error,
                 CheckedGenericFactorPlanError::Operation(
-                    OperationError::UnsupportedTensorContractScope { .. }
-                )
+                    OperationError::UnsupportedTensorContractScope { message }
+                ) if message.starts_with(operation)
             ),
             "{error:?}"
         );
