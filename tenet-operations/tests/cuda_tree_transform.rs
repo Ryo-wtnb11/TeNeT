@@ -683,6 +683,83 @@ fn an_evicted_structure_returns_its_plan_reservation() {
     assert_eq!(ctx.reserved_plan_entries(), large_total);
 }
 
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn an_executor_serving_two_contexts_reserves_on_each_separately() {
+    // What: one executor may prepare on several contexts, and a reservation
+    // can only move on the context that granted it. Clearing one context
+    // returns exactly its own share and leaves the other's intact.
+    let mut a = context();
+    let mut b = context();
+    let mut executor = CudaTreeTransformExecutor::default();
+    let mut on_a = Held::<f64>::new(&a, many_distinct_signatures(12));
+    let mut on_b = Held::<f64>::new(&b, many_distinct_signatures(12));
+
+    on_a.replay(&mut a, &mut executor);
+    let n = a.reserved_plan_entries();
+    assert!(n > 0);
+    on_b.replay(&mut b, &mut executor);
+    assert_eq!(
+        b.reserved_plan_entries(),
+        n,
+        "B reserves its own structures only"
+    );
+    assert_eq!(a.reserved_plan_entries(), n);
+    assert_eq!(executor.required_plan_entries(), 2 * n);
+
+    executor.clear(&mut a);
+    assert_eq!(a.reserved_plan_entries(), 0);
+    assert_eq!(b.reserved_plan_entries(), n, "clearing A must not touch B");
+
+    // B's structure went with the clear; B's next refresh settles its share.
+    on_b.replay(&mut b, &mut executor);
+    assert_eq!(b.reserved_plan_entries(), n);
+    executor.clear(&mut b);
+    assert_eq!(b.reserved_plan_entries(), 0);
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn an_eviction_across_contexts_is_settled_on_the_evicted_context() {
+    // What: with one structure slot, preparing on B evicts A's entry. B's
+    // plans are reserved on B; A's now-dead reservation stays recorded
+    // against A and is released at A's next refresh, not leaked or charged
+    // to B.
+    let mut a = context();
+    let mut b = context();
+    let mut executor = CudaTreeTransformExecutor::with_structure_entries(
+        1 << 20,
+        DEFAULT_PLAN_CACHE_BUDGET_BYTES,
+        1,
+    );
+    let mut large_a = Held::<f64>::new(&a, many_distinct_signatures(12));
+    let mut small_a = Held::<f64>::new(&a, many_distinct_signatures(3));
+    let mut on_b = Held::<f64>::new(&b, many_distinct_signatures(12));
+
+    large_a.replay(&mut a, &mut executor);
+    let n = a.reserved_plan_entries();
+    on_b.replay(&mut b, &mut executor);
+    assert_eq!(executor.prepared_structures(), 1, "B's insert evicted A's");
+    assert_eq!(b.reserved_plan_entries(), n, "B's live plans are reserved");
+    assert_eq!(a.reserved_plan_entries(), n, "A's share waits for A");
+
+    // A's next refresh counts only what is prepared on A.
+    small_a.replay(&mut a, &mut executor);
+    let small = executor.required_plan_entries();
+    assert!(small < n);
+    assert_eq!(a.reserved_plan_entries(), small);
+    assert_eq!(b.reserved_plan_entries(), n);
+
+    // Re-preparing the evicted structure does not creep.
+    large_a.replay(&mut a, &mut executor);
+    assert_eq!(a.reserved_plan_entries(), n);
+
+    executor.clear(&mut b);
+    executor.clear(&mut a);
+    assert_eq!(a.reserved_plan_entries(), 0);
+    assert_eq!(b.reserved_plan_entries(), 0);
+}
+
 /// A synthetic consumer outside the executor: `count` zero fills of distinct
 /// packed f32 shapes, one cuTENSOR plan each.
 struct ZeroFills {

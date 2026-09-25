@@ -546,6 +546,14 @@ impl<V> StructureCache<V> {
     pub(crate) fn values(&self) -> impl Iterator<Item = &V> {
         self.entries.iter().map(|entry| &entry.value)
     }
+
+    /// Every value prepared on context `context`.
+    pub(crate) fn values_on(&self, context: u64) -> impl Iterator<Item = &V> {
+        self.entries
+            .iter()
+            .filter(move |entry| entry.key.context == context)
+            .map(|entry| &entry.value)
+    }
 }
 
 #[cfg(test)]

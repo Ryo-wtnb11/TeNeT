@@ -237,6 +237,7 @@ static COPY_CALLS: AtomicU64 = AtomicU64::new(0);
 /// reservation ledger; it exists so TeNeT callers never name a tenferro type.
 /// Observability only.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct CudaPlanCacheStats {
     pub entries: usize,
     pub retained_bytes: usize,
