@@ -272,6 +272,182 @@ mod checked_generic {
         }};
     }
 
+    /// Column-major multi-index of `linear` within `shape`.
+    fn unravel(mut linear: usize, shape: &[usize]) -> Vec<usize> {
+        shape
+            .iter()
+            .map(|&extent| {
+                let index = linear % extent;
+                linear /= extent;
+                index
+            })
+            .collect()
+    }
+
+    /// Asserts that a Gram map is the literal identity block by block:
+    /// entry = δ(codomain tree, domain tree) δ(row, column), where a tree is
+    /// its uncoupled sectors, inner lines and vertex labels. Returns the
+    /// number of unit entries, i.e. the reduced dimension it is the identity on.
+    macro_rules! assert_literal_identity {
+        ($gram:expr) => {{
+            let gram = $gram;
+            let nc = gram.codomain().len();
+            let mut ones = 0usize;
+            for (trees, view) in gram.blocks().unwrap() {
+                let same = trees.codomain_uncoupled() == trees.domain_uncoupled()
+                    && trees.codomain_innerlines() == trees.domain_innerlines()
+                    && trees.codomain_vertices() == trees.domain_vertices();
+                let (row_shape, col_shape) = view.shape().split_at(nc);
+                let rows = row_shape.iter().product::<usize>();
+                let cols = col_shape.iter().product::<usize>();
+                for col in 0..cols {
+                    for row in 0..rows {
+                        let mut index = unravel(row, row_shape);
+                        index.extend(unravel(col, col_shape));
+                        let value: Complex64 = (*view.get(&index).unwrap()).into();
+                        let unit = same && row == col;
+                        ones += usize::from(unit);
+                        let expected = if unit { 1.0 } else { 0.0 };
+                        assert!(
+                            (value - expected).norm() <= 1e-10,
+                            "{trees:?} [{row}, {col}] = {value}"
+                        );
+                    }
+                }
+            }
+            ones
+        }};
+    }
+
+    /// Every side-only block of a full Q is exactly the identity slice in
+    /// output tree order: tree-side index `i` of the `n`-th tree of sector c
+    /// maps to bond index `offset_n + i` (column-major `i`), and the offsets
+    /// tile the fused degeneracy of c. The opposite factor stores no block in
+    /// a side-only sector. Returns the largest tree count of one side-only
+    /// sector.
+    macro_rules! assert_side_only_identity_slices {
+        ($scalar:ty, $t:expr, $q:expr, $other:expr, $bond:expr, $bond_first:expr) => {{
+            let (t, q, bond) = ($t, $q, $bond);
+            let one: $scalar = 1.0.into();
+            let zero: $scalar = 0.0.into();
+            let populated = t
+                .blocks()
+                .unwrap()
+                .map(|(trees, _)| trees.coupled().clone())
+                .collect::<Vec<_>>();
+            let mut offsets = Vec::new();
+            for (trees, view) in q.blocks().unwrap() {
+                let sector = trees.coupled().clone();
+                if populated.contains(&sector) {
+                    continue;
+                }
+                let shape = view.shape();
+                let (bond_axis, tree_shape) = if $bond_first {
+                    (0, &shape[1..])
+                } else {
+                    (shape.len() - 1, &shape[..shape.len() - 1])
+                };
+                let extent = tree_shape.iter().product::<usize>();
+                let position = match offsets.iter().position(|(s, _, _)| *s == sector) {
+                    Some(position) => position,
+                    None => {
+                        offsets.push((sector.clone(), 0usize, 0usize));
+                        offsets.len() - 1
+                    }
+                };
+                let offset = offsets[position].1;
+                for k in 0..shape[bond_axis] {
+                    for i in 0..extent {
+                        let mut index = unravel(i, tree_shape);
+                        index.insert(bond_axis, k);
+                        let value = *view.get(&index).unwrap();
+                        let expected = if k == offset + i { one } else { zero };
+                        assert!(value == expected, "{trees:?} bond {k} tree index {i}");
+                    }
+                }
+                offsets[position].1 += extent;
+                offsets[position].2 += 1;
+            }
+            assert!(!offsets.is_empty());
+            for (sector, offset, _) in &offsets {
+                assert_eq!(*offset, bond.degeneracy(sector).unwrap());
+            }
+            for (trees, _) in $other.blocks().unwrap() {
+                assert!(populated.contains(trees.coupled()), "{trees:?}");
+            }
+            offsets.iter().map(|&(_, _, n)| n).max().unwrap()
+        }};
+    }
+
+    macro_rules! literal_side_only_case {
+        ($rt:expr, $scalar:ty, $codomain:expr, $domain:expr, $qr_bond:expr, $lq_bond:expr, $seed:expr) => {{
+            let rt = $rt;
+            let owned_adjoint = |u: &TensorMap<_, $scalar>| {
+                let adjoint = u.adjoint().unwrap();
+                adjoint.add(&adjoint, 1.0.into(), 0.0.into()).unwrap()
+            };
+            let reduced = |space: &GradedSpace<_>| space.degeneracies().iter().sum::<usize>();
+            let t: TensorMap<_, $scalar> =
+                TensorMap::rand_with_seed(rt, $codomain, $domain, $seed).unwrap();
+            let (q, r) = t.qr_full().unwrap();
+            let qh = owned_adjoint(&q);
+            assert_eq!(
+                assert_literal_identity!(qh.compose(&q).unwrap()),
+                reduced($qr_bond)
+            );
+            assert_eq!(
+                assert_literal_identity!(q.compose(&qh).unwrap()),
+                reduced($qr_bond)
+            );
+            let qr_trees = assert_side_only_identity_slices!($scalar, &t, &q, &r, $qr_bond, false);
+            let (l, q) = t.lq_full().unwrap();
+            let qh = owned_adjoint(&q);
+            assert_eq!(
+                assert_literal_identity!(qh.compose(&q).unwrap()),
+                reduced($lq_bond)
+            );
+            assert_eq!(
+                assert_literal_identity!(q.compose(&qh).unwrap()),
+                reduced($lq_bond)
+            );
+            let lq_trees = assert_side_only_identity_slices!($scalar, &t, &q, &l, $lq_bond, true);
+            (qr_trees, lq_trees)
+        }};
+    }
+
+    /// Side-only sectors with several fusion trees, including both outer
+    /// multiplicity vertices of 8 ⊗ 8 → 8: `a = 8² ⊕ 1 ⊕ 3`, so 8 in `a ⊗ a`
+    /// has the four trees (8,8)μ=1, (8,8)μ=2, (8,1), (1,8). `b = 1² ⊕ 15²`
+    /// makes 8 codomain-only and 15 = (4,0) domain-only; the mixed
+    /// `b = 1² ⊕ 8³ ⊕ 15²` keeps 8 populated.
+    macro_rules! checked_literal_side_only {
+        ($d:ty) => {{
+            let rt = Runtime::builder().dense_threads(1).build().unwrap();
+            let provider = Arc::new(SUNFusionRule::new(3).unwrap());
+            let space = |irreps: Vec<(Vec<i64>, usize)>| {
+                GradedSpace::try_new_with_arc(Arc::clone(&provider), irreps).unwrap()
+            };
+            let a = space(vec![(vec![1, 1], 2), (vec![0, 0], 1), (vec![1, 0], 1)]);
+            let fused = a.fuse(&a).unwrap();
+            let pure = space(vec![(vec![0, 0], 2), (vec![4, 0], 2)]);
+            let mixed = space(vec![(vec![0, 0], 2), (vec![1, 1], 3), (vec![4, 0], 2)]);
+            for (seed, b) in [(1528, &pure), (1530, &mixed)] {
+                let (qr_trees, _) =
+                    literal_side_only_case!(&rt, $d, [&a, &a], [b], &fused, b, seed);
+                assert!(qr_trees >= 4, "{qr_trees}");
+                let (_, lq_trees) =
+                    literal_side_only_case!(&rt, $d, [b], [&a, &a], b, &fused, seed + 1);
+                assert!(lq_trees >= 4, "{lq_trees}");
+            }
+        }};
+    }
+
+    #[test]
+    fn checked_generic_side_only_identity_is_literal_in_tree_order() {
+        checked_literal_side_only!(f64);
+        checked_literal_side_only!(Complex64);
+    }
+
     #[test]
     fn checked_generic_full_qr_lq_bonds_are_fused_sides() {
         multiplicity_free_full_qr_lq_bonds!(f64);
