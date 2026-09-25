@@ -9236,7 +9236,8 @@ fn endomorphism_tree_stacking_is_identical<M: SectorGeometry>(matrices: &[M]) ->
     })
 }
 
-const EIGH_FULL_STACKING: &str =
+#[doc(hidden)]
+pub const EIGH_FULL_STACKING: &str =
     "eigh_full requires identical endomorphism row/column fusion-tree stacking";
 const EXP_STACKING: &str = "exp requires identical endomorphism row/column fusion-tree stacking";
 

@@ -12355,7 +12355,7 @@ where
         }
         tenet_matrixalgebra::validate_endomorphism_region_stacking(
             &source_regions,
-            "eigh_full requires identical endomorphism row/column fusion-tree stacking",
+            tenet_matrixalgebra::EIGH_FULL_STACKING,
         )?;
 
         {

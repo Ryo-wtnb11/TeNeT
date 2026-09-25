@@ -16908,3 +16908,86 @@ fn multiplicity_free_eigen_ops_accept_consistently_reordered_tree_stacking() {
     )
     .unwrap();
 }
+
+#[test]
+#[ignore = "compose of a consistently reordered layout returns wrong values (#1517)"]
+fn hermitian_exp_accepts_consistently_reordered_tree_stacking_with_facade_values() {
+    // What: reversing rows and columns together is the same operator in a
+    // permuted basis, so exp's spectral route passes the stacking guard and
+    // must publish the facade's values block by block. It currently does
+    // not: `V f(D) V^H` goes through `compose`, and composing such a layout
+    // with itself already differs from the facade's `A A`. The Padé route
+    // refuses the layout explicitly instead ("inverse output tree basis does
+    // not transpose the source basis"): its direct-region output must list
+    // trees in the source's positional order.
+    let rule = U1FusionRule;
+    let sectors = [-1, 0, 1].map(|charge| U1Irrep::new(charge).sector_id());
+    let scaled = |tensor: TensorMap<f64, 2, 2>| {
+        TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
+            tensor.data().iter().map(|value| 0.1 * value).collect(),
+            tensor.fusion_space().unwrap().as_ref().clone(),
+        )
+        .unwrap()
+    };
+    let provider = Arc::new(rule);
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    let mut context = default_context();
+    {
+        let facade = scaled(hermitian_test_tensor(&rule, &sectors));
+        let reordered = reversed_coupled_tree_basis_copy(&rule, &facade);
+        let expected = exp(
+            &mut dense,
+            &mut context,
+            &bound_tensor_ref!(Arc::clone(&provider), &facade),
+        )
+        .unwrap();
+        let actual = exp(
+            &mut dense,
+            &mut context,
+            &bound_tensor_ref!(Arc::clone(&provider), &reordered),
+        )
+        .unwrap();
+        let (expected, actual) = (expected.tensor(), actual.tensor());
+        let scale = expected
+            .data()
+            .iter()
+            .fold(1.0f64, |max, value| max.max(value.abs()));
+        let structure = expected.structure();
+        for index in 0..structure.block_count() {
+            let key = structure.block(index).unwrap().key().clone();
+            let (left, right) = (
+                expected.block_by_key(&key).unwrap(),
+                actual.block_by_key(&key).unwrap(),
+            );
+            assert_eq!(left.shape(), right.shape());
+            let mut multi = vec![0usize; left.shape().len()];
+            loop {
+                let at = |view: &tenet_core::BlockView<'_, f64>| {
+                    view.data()[view.offset()
+                        + multi
+                            .iter()
+                            .zip(view.strides())
+                            .map(|(&index, &stride)| index * stride)
+                            .sum::<usize>()]
+                };
+                let (a, b) = (at(&left), at(&right));
+                assert!(
+                    (a - b).abs() <= 1e-12 * scale,
+                    "{key:?} {multi:?}: {a} vs {b}"
+                );
+                let Some(axis) = (0..multi.len()).find(|&axis| {
+                    multi[axis] += 1;
+                    if multi[axis] < left.shape()[axis] {
+                        true
+                    } else {
+                        multi[axis] = 0;
+                        false
+                    }
+                }) else {
+                    break;
+                };
+                let _ = axis;
+            }
+        }
+    }
+}
