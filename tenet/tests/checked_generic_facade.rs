@@ -2275,7 +2275,7 @@ fn checked_generic_sqrt_rejects_shape_before_queries_and_preserves_source() {
 
     let dense = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
         if indices[0] == indices[1] {
-            4.0
+            4.0_f64
         } else {
             0.0
         }

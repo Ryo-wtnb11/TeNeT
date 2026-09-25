@@ -305,12 +305,11 @@ pub use serialization::{
 /// solves and the general eigendecomposition need [`AdvancedLinalgScalar`].
 ///
 /// This trait is sealed; the supported scalar types are `f64`,
-/// [`num_complex::Complex64`], `f32` and [`num_complex::Complex32`]. Single
-/// precision is admitted here and *only* here: factorizations, matrix
-/// functions and device payloads stay double-precision, which is
-/// why admission is split across markers rather than carried by one trait — a
-/// payload dtype joins one family at a time, with its own review and its own
-/// tolerance evidence (<https://github.com/Ryo-wtnb11/TeNeT/issues/1065>).
+/// [`num_complex::Complex64`], `f32` and [`num_complex::Complex32`].
+/// Admission is split across markers rather than carried by one trait so that
+/// a payload dtype joins one family at a time, with its own review and its own
+/// tolerance evidence (<https://github.com/Ryo-wtnb11/TeNeT/issues/1065>);
+/// single precision has since joined every host family.
 ///
 /// # Precision
 ///
@@ -385,68 +384,11 @@ pub use serialization::{
 /// <https://github.com/Ryo-wtnb11/TeNeT/issues/1325> (see
 /// [`TypedPersistenceCodec`]).
 ///
-/// A matrix function:
-///
-/// ```compile_fail
-/// use num_complex::Complex32;
-/// use tenet::core::U1FusionRule;
-/// use tenet::typed::TensorMap;
-///
-/// fn no_single_precision_exp(tensor: &TensorMap<U1FusionRule, Complex32>) {
-///     let _ = tensor.exp();
-/// }
-/// ```
-///
-/// ```
-/// use num_complex::Complex64;
-/// use tenet::core::U1FusionRule;
-/// use tenet::typed::TensorMap;
-///
-/// fn double_precision_exp(tensor: &TensorMap<U1FusionRule, Complex64>) {
-///     let _ = tensor.exp();
-/// }
-/// ```
-///
-/// An inverse, which is the same family:
-///
-/// ```compile_fail
-/// use tenet::core::U1FusionRule;
-/// use tenet::typed::TensorMap;
-///
-/// fn no_single_precision_inv(tensor: &TensorMap<U1FusionRule, f32>) {
-///     let _ = tensor.inv();
-/// }
-/// ```
-///
-/// ```
-/// use tenet::core::U1FusionRule;
-/// use tenet::typed::TensorMap;
-///
-/// fn double_precision_inv(tensor: &TensorMap<U1FusionRule, f64>) {
-///     let _ = tensor.inv();
-/// }
-/// ```
-///
-/// The general (non-Hermitian) eigendecomposition, which would otherwise widen
-/// a single-precision payload to `Complex64` on the Checked-Generic path:
-///
-/// ```compile_fail
-/// use tenet::core::U1FusionRule;
-/// use tenet::typed::TensorMap;
-///
-/// fn no_single_precision_eig(tensor: &TensorMap<U1FusionRule, f32>) {
-///     let _ = tensor.eig_full();
-/// }
-/// ```
-///
-/// ```
-/// use tenet::core::U1FusionRule;
-/// use tenet::typed::TensorMap;
-///
-/// fn double_precision_eig(tensor: &TensorMap<U1FusionRule, f64>) {
-///     let _ = tensor.eig_full();
-/// }
-/// ```
+/// Nor is the advanced family: matrix functions, `inv`/`pinv`/`solve` and the
+/// general eigendecomposition reach both single-precision payloads under
+/// <https://github.com/Ryo-wtnb11/TeNeT/issues/1459> (see
+/// [`AdvancedLinalgScalar`]). What stays closed is a provider with complex
+/// structural coefficients, described above.
 ///
 /// A device payload is *not* one of the closed gates: every dtype of this
 /// marker uploads (<https://github.com/Ryo-wtnb11/TeNeT/issues/1336>) and, since
@@ -485,8 +427,8 @@ impl TensorScalar for num_complex::Complex32 {}
 ///
 /// Sealed through [`TensorScalar`]: implemented for `f64`,
 /// [`num_complex::Complex64`], `f32` and [`num_complex::Complex32`]. Matrix
-/// functions, `inv`/`pinv`/`solve` and the general eigendecomposition stay on
-/// [`AdvancedLinalgScalar`], which the single-precision payloads do not reach.
+/// functions, `inv`/`pinv`/`solve` and the general eigendecomposition are on
+/// [`AdvancedLinalgScalar`].
 ///
 /// # Single-precision tolerances
 ///
@@ -658,9 +600,28 @@ impl FactorizationScalar for num_complex::Complex32 {}
 /// These are the operations whose accuracy depends on conditioning rather than
 /// on one backend call, so they are the last family a new payload dtype joins.
 ///
-/// Sealed through [`TensorScalar`]: implemented for `f64` and
-/// [`num_complex::Complex64`] only. Single precision is staged under
-/// <https://github.com/Ryo-wtnb11/TeNeT/issues/1065>.
+/// Sealed through [`TensorScalar`]: implemented for `f64`,
+/// [`num_complex::Complex64`], `f32` and [`num_complex::Complex32`] (single
+/// precision since <https://github.com/Ryo-wtnb11/TeNeT/issues/1459>).
+///
+/// # Single precision
+///
+/// Every operation runs in the payload's own precision; nothing is silently
+/// widened. The general eigendecomposition returns its factors in
+/// `D::Eig` — [`num_complex::Complex32`] for an `f32` or
+/// [`num_complex::Complex32`] payload — on both the multiplicity-free and the
+/// Checked-Generic dispatch, while the reported eigenvalue lists
+/// (`eig_vals`, [`EigTrunc::eigenvalues`]) stay `Complex64` at every payload
+/// dtype, as every spectrum and norm of this crate does.
+///
+/// A single-precision result agrees with the double-precision result of the
+/// same input only to `eps(f32)` times the conditioning of the operation:
+/// `inv`, `solve`, `pinv` and negative powers carry the condition number of
+/// the divisor, and eigenvalues that of the eigenbasis. `pinv`'s `rcond`
+/// is the caller's; one below `eps(f32)` keeps noise. Unlike TensorKit, whose
+/// ordinary test matrix skips `\` at `Float32`/`ComplexF32`, `solve` is
+/// admitted: it is one LU solve per coupled block, backward stable at any
+/// working precision, and tested against the widened oracle.
 ///
 /// Neither the base marker nor [`FactorizationScalar`] reaches a matrix
 /// function:
@@ -730,29 +691,30 @@ impl FactorizationScalar for num_complex::Complex32 {}
 /// }
 /// ```
 ///
-/// And the general eigendecomposition, whose pre-existing
-/// `FactorScalar<Eig = Complex64>` bound is held constant across the pair so
-/// that only the marker differs:
+/// And the general eigendecomposition, whose `D::Eig: TensorScalar` bound is
+/// held constant across the pair so that only the marker differs:
 ///
 /// ```compile_fail
-/// use tenet::prelude::{Complex64, FactorizationScalar, TensorMap, U1FusionRule};
+/// use tenet::prelude::{FactorizationScalar, TensorMap, TensorScalar, U1FusionRule};
 /// use tenet_matrixalgebra::FactorScalar;
 ///
 /// fn factorizing_only<D>(tensor: &TensorMap<U1FusionRule, D>)
 /// where
-///     D: FactorizationScalar + FactorScalar<Eig = Complex64>,
+///     D: FactorizationScalar,
+///     <D as FactorScalar>::Eig: TensorScalar,
 /// {
 ///     let _ = tensor.eig_full();
 /// }
 /// ```
 ///
 /// ```
-/// use tenet::prelude::{AdvancedLinalgScalar, Complex64, TensorMap, U1FusionRule};
+/// use tenet::prelude::{AdvancedLinalgScalar, TensorMap, TensorScalar, U1FusionRule};
 /// use tenet_matrixalgebra::FactorScalar;
 ///
 /// fn advanced<D>(tensor: &TensorMap<U1FusionRule, D>)
 /// where
-///     D: AdvancedLinalgScalar + FactorScalar<Eig = Complex64>,
+///     D: AdvancedLinalgScalar,
+///     <D as FactorScalar>::Eig: TensorScalar,
 /// {
 ///     let _ = tensor.eig_full();
 /// }
@@ -761,6 +723,8 @@ pub trait AdvancedLinalgScalar: FactorizationScalar {}
 
 impl AdvancedLinalgScalar for f64 {}
 impl AdvancedLinalgScalar for num_complex::Complex64 {}
+impl AdvancedLinalgScalar for f32 {}
+impl AdvancedLinalgScalar for num_complex::Complex32 {}
 
 /// Scalar payloads a [`CudaStorage`] device buffer can own.
 ///
@@ -1641,7 +1605,8 @@ where
             Error = <R as CheckedGenericFusion>::Error,
             Mode = CheckedGenericAdmissionMode,
         > + CheckedGenericFusion,
-    D: AdvancedLinalgScalar + FactorScalar<Eig = num_complex::Complex64>,
+    D: AdvancedLinalgScalar,
+    <D as FactorScalar>::Eig: TensorScalar,
 {
     #[expect(
         clippy::type_complexity,
@@ -1651,8 +1616,8 @@ where
         &self,
     ) -> Result<
         (
-            TensorMap<R, num_complex::Complex64>,
-            TensorMap<R, num_complex::Complex64>,
+            TensorMap<R, <D as FactorScalar>::Eig>,
+            TensorMap<R, <D as FactorScalar>::Eig>,
         ),
         GenericTensorError<<R as CheckedGenericFusion>::Error>,
     > {
@@ -1672,7 +1637,7 @@ where
             &self.runtime,
             Arc::clone(input.space().provider_arc()),
             &mut eigenvalues,
-            num_complex::Complex64::from_complex64,
+            <<D as FactorScalar>::Eig as FactorScalar>::from_complex64,
         )?;
         Ok((d, wrap_factor_on(&self.runtime, v)))
     }
@@ -1684,13 +1649,16 @@ where
             Error = <R as CheckedGenericFusion>::Error,
             Mode = CheckedGenericAdmissionMode,
         > + CheckedGenericRigidSymbols<Scalar = f64>,
-    D: AdvancedLinalgScalar + FactorScalar<Eig = num_complex::Complex64>,
+    D: AdvancedLinalgScalar,
+    <D as FactorScalar>::Eig: TensorScalar,
 {
     fn eig_trunc_checked_generic(
         &self,
         truncation: &Truncation,
-    ) -> Result<CheckedGenericEigTrunc<R>, GenericTensorError<<R as CheckedGenericFusion>::Error>>
-    {
+    ) -> Result<
+        CheckedGenericEigTrunc<R, <D as FactorScalar>::Eig>,
+        GenericTensorError<<R as CheckedGenericFusion>::Error>,
+    > {
         if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
             return self
                 .materialized_tensor_uncached()
@@ -1708,7 +1676,7 @@ where
             &self.runtime,
             Arc::clone(input.space().provider_arc()),
             &mut eigenvalues,
-            num_complex::Complex64::from_complex64,
+            <<D as FactorScalar>::Eig as FactorScalar>::from_complex64,
         )?;
         let provider = input.space().provider();
         let mut decoded = eigenvalues
@@ -2528,7 +2496,8 @@ where
     R::Mode: TypedTensorEigValsDispatch<R, D>,
     D: AdvancedLinalgScalar,
 {
-    /// Returns only the general eigenvalues as `Complex64`, grouped by
+    /// Returns only the general eigenvalues as `Complex64` (at every payload
+    /// dtype, like every spectrum of this crate), grouped by
     /// provider-labelled sector and descending by magnitude.
     ///
     /// No eigenvector factor or bond space is built. The input must be an
@@ -2556,8 +2525,9 @@ where
     /// `(d, v)`.
     ///
     /// For a diagonalizable input this gives
-    /// `self = v * d * v^-1`. Both factors are `Complex64` even when the input
-    /// is real. `v : codomain(self) <- W` holds right eigenvectors and compact
+    /// `self = v * d * v^-1`. Both factors are complex even when the input is
+    /// real, in the payload's own precision: `D::Eig` is `Complex64` for `f64`
+    /// and `Complex64`, and `Complex32` for `f32` and `Complex32`. `v : codomain(self) <- W` holds right eigenvectors and compact
     /// `d : W <- W` holds their eigenvalues. Values are stable-sorted by
     /// descending magnitude, and the largest-magnitude component of each
     /// eigenvector is made real and non-negative. Degenerate eigenbases remain
@@ -2595,8 +2565,8 @@ where
         &self,
     ) -> Result<
         (
-            TensorMap<R, num_complex::Complex64>,
-            TensorMap<R, num_complex::Complex64>,
+            TensorMap<R, <D as FactorScalar>::Eig>,
+            TensorMap<R, <D as FactorScalar>::Eig>,
         ),
         TypedFacadeError<R>,
     > {
@@ -2759,7 +2729,12 @@ impl ScalarOps for num_complex::Complex32 {
     }
 
     fn recip_value(self) -> Self {
-        Self::new(1.0, 0.0) / self
+        // Via `Complex64`, as `abs_value`: the unscaled `Complex32` division
+        // squares the modulus in `f32`, which flushes to zero below
+        // `|z| = 2^-75` and overflows above `2^64` while `1/z` itself is
+        // representable. Every `f32` squared modulus is a normal `f64`.
+        let inverse = Complex64::new(1.0, 0.0) / tenet_tensors::WideScalar::widen(self);
+        Self::new(inverse.re as f32, inverse.im as f32)
     }
 
     fn sqrt_value(self) -> Result<Self, Error> {
@@ -5745,8 +5720,8 @@ where
         tensor: &TensorMap<R, D>,
     ) -> Result<
         (
-            TensorMap<R, num_complex::Complex64>,
-            TensorMap<R, num_complex::Complex64>,
+            TensorMap<R, <D as FactorScalar>::Eig>,
+            TensorMap<R, <D as FactorScalar>::Eig>,
         ),
         Self::FacadeError,
     >;
@@ -6249,14 +6224,15 @@ where
         + MultiplicityFreeRigidSymbols<Scalar = f64>
         + CheckedFusionAlgebra
         + SectorCodec,
-    D: AdvancedLinalgScalar + FactorScalar<Eig = num_complex::Complex64>,
+    D: AdvancedLinalgScalar,
+    <D as FactorScalar>::Eig: TensorScalar,
 {
     fn eig_full(
         tensor: &TensorMap<R, D>,
     ) -> Result<
         (
-            TensorMap<R, num_complex::Complex64>,
-            TensorMap<R, num_complex::Complex64>,
+            TensorMap<R, <D as FactorScalar>::Eig>,
+            TensorMap<R, <D as FactorScalar>::Eig>,
         ),
         Error,
     > {
@@ -6270,7 +6246,8 @@ where
         + MultiplicityFreeRigidSymbols<Scalar = f64>
         + CheckedFusionAlgebra
         + SectorCodec,
-    D: AdvancedLinalgScalar + FactorScalar<Eig = num_complex::Complex64>,
+    D: AdvancedLinalgScalar,
+    <D as FactorScalar>::Eig: TensorScalar,
 {
     type Output = EigTrunc<R, D>;
     fn eig_trunc(tensor: &TensorMap<R, D>, truncation: &Truncation) -> Result<Self::Output, Error> {
@@ -7046,14 +7023,15 @@ where
             Error = <R as CheckedGenericFusion>::Error,
             Mode = CheckedGenericAdmissionMode,
         > + CheckedGenericFusion,
-    D: AdvancedLinalgScalar + FactorScalar<Eig = num_complex::Complex64>,
+    D: AdvancedLinalgScalar,
+    <D as FactorScalar>::Eig: TensorScalar,
 {
     fn eig_full(
         tensor: &TensorMap<R, D>,
     ) -> Result<
         (
-            TensorMap<R, num_complex::Complex64>,
-            TensorMap<R, num_complex::Complex64>,
+            TensorMap<R, <D as FactorScalar>::Eig>,
+            TensorMap<R, <D as FactorScalar>::Eig>,
         ),
         GenericTensorError<<R as CheckedGenericFusion>::Error>,
     > {
@@ -7067,9 +7045,10 @@ where
             Error = <R as CheckedGenericFusion>::Error,
             Mode = CheckedGenericAdmissionMode,
         > + CheckedGenericRigidSymbols<Scalar = f64>,
-    D: AdvancedLinalgScalar + FactorScalar<Eig = num_complex::Complex64>,
+    D: AdvancedLinalgScalar,
+    <D as FactorScalar>::Eig: TensorScalar,
 {
-    type Output = CheckedGenericEigTrunc<R>;
+    type Output = CheckedGenericEigTrunc<R, <D as FactorScalar>::Eig>;
     fn eig_trunc(
         tensor: &TensorMap<R, D>,
         truncation: &Truncation,
@@ -10117,15 +10096,16 @@ pub struct CheckedGenericEighTrunc<R: TypedSectorAdmission, D: TensorScalar> {
 /// provider: `t * v ~= v * d`.
 ///
 /// Fields are ordered `(d, v)`: compact diagonal `d : bond <- bond` and dense
-/// right-eigenvector factor `v : codomain(t) <- bond`. Both use `Complex64`
-/// for real and complex inputs and retain the same provider instance as `t`.
+/// right-eigenvector factor `v : codomain(t) <- bond`. Both use `E`, the
+/// payload's `D::Eig` (`Complex64` for `f64`/`Complex64`, `Complex32` for
+/// `f32`/`Complex32`), and retain the same provider instance as `t`.
 /// [`Self::error`] is the quantum-dimension-weighted 2-norm of discarded
 /// eigenvalues, not a reconstruction-error bound for a non-normal matrix.
-pub struct CheckedGenericEigTrunc<R: TypedSectorAdmission> {
+pub struct CheckedGenericEigTrunc<R: TypedSectorAdmission, E = num_complex::Complex64> {
     /// Compact diagonal eigenvalue factor `d : bond <- bond`.
-    pub d: TensorMap<R, num_complex::Complex64>,
+    pub d: TensorMap<R, E>,
     /// Dense right-eigenvector factor `v : codomain(t) <- bond`.
-    pub v: TensorMap<R, num_complex::Complex64>,
+    pub v: TensorMap<R, E>,
     /// Kept eigenvalues sorted by provider label.
     pub eigenvalues: Vec<SectorSpectrum<R::Sector, num_complex::Complex64>>,
     /// Quantum-dimension-weighted norm of discarded eigenvalues only.
@@ -18293,9 +18273,10 @@ where
     ///
     /// # The `D::Eig` bound
     ///
-    /// The `where` clause is vacuous for the two payload types this facade
-    /// admits — `f64` and `Complex64` both have `Eig = Complex64`, which is a
-    /// [`TensorScalar`]. It is written out because
+    /// The `where` clause is vacuous for the payload types this facade
+    /// admits — `f64` and `Complex64` have `Eig = Complex64`, `f32` and
+    /// `Complex32` have `Eig = Complex32`, all [`TensorScalar`]s. It is written
+    /// out because
     /// [`tenet_matrixalgebra::FactorScalar::Eig`] is the wider seam's associated
     /// type and is not constrained to this facade's scalars, so without it the
     /// factors could not be `TensorMap`s at all. Per-method rather than on the
@@ -18373,7 +18354,7 @@ where
     }
 
     /// TensorKit 0.17 / MatrixAlgebraKit `eig_vals`: the general eigenvalues
-    /// per coupled sector, and nothing else. Complex for both payload dtypes.
+    /// per coupled sector, and nothing else. `Complex64` for every payload dtype.
     ///
     /// # Errors
     ///
@@ -23572,7 +23553,7 @@ mod representation_gates {
         let leg = GradedSpace::try_new_with_arc(provider, [(U1Irrep::new(0), 2)]).unwrap();
         let source = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
             match (indices[0], indices[1]) {
-                (0, 0) => 1.0,
+                (0, 0) => 1.0_f64,
                 (1, 1) => 2.0,
                 (0, 1) => 1.0,
                 _ => 0.0,
