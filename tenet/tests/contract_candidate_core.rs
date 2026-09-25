@@ -659,3 +659,70 @@ fn zero_copy_fermionic_candidates_with_an_output_permute_match_tensorkit() {
     fermionic_output_permute_values::<f32>();
     fermionic_output_permute_values::<Complex32>();
 }
+
+/// Review inputs of #1475 where `dim(C)` dwarfs the operands, so
+/// TensorKit's `_contract_memcost` (tensoroperations.jl L378) prefers
+/// copying both operands (m3/m4, `dim(A) + dim(B)`) over `copyC`: with
+/// `v = u1{-1:16, 0:16, 1:16}` and `c = u1{0:1}`,
+///
+/// - `R1` `A[3,2]·Q'[1,0] → [2,3,0,1]` with `A: v⊗v ← c⊗c`,
+///   `Q = v⊗v ← c⊗c`;
+/// - `R2` `P'[3,2]·B[1,0] → [2,3,0,1]` with `P: c⊗c ← v⊗v`,
+///   `B: c⊗c ← v⊗v`;
+/// - `R3` the owned sort `A[3,2]·B[1,0] → [2,3,0,1]`;
+/// - `R4` the #1466 core form `A[2,3]·B[0,1] → [2,3,0,1]`.
+fn large_output_cases(runtime: &Runtime) -> Vec<Case<tenet::core::U1FusionRule, f64>> {
+    let v = u1(&[(-1, 16), (0, 16), (1, 16)]);
+    let c = u1(&[(0, 1)]);
+    let tensor = |codomain: [&GradedSpace<_>; 2], domain: [&GradedSpace<_>; 2], salt| {
+        TensorMap::<_, f64>::from_block_fn(runtime, codomain, domain, fill(salt)).unwrap()
+    };
+    let a = tensor([&v, &v], [&c, &c], 91);
+    let q = tensor([&v, &v], [&c, &c], 92).adjoint().unwrap();
+    let p = tensor([&c, &c], [&v, &v], 93).adjoint().unwrap();
+    let b = tensor([&c, &c], [&v, &v], 94);
+    let case =
+        |name, lhs: &TensorMap<_, f64>, rhs: &TensorMap<_, f64>, l: [usize; 2], r: [usize; 2]| {
+            Case {
+                name,
+                lhs: lhs.clone(),
+                rhs: rhs.clone(),
+                lhs_axes: l.to_vec(),
+                rhs_axes: r.to_vec(),
+                output_axes: vec![2, 3, 0, 1],
+                dense: false,
+            }
+        };
+    vec![
+        case("R1", &a, &q, [3, 2], [1, 0]),
+        case("R2", &p, &b, [3, 2], [1, 0]),
+        case("R3", &a, &b, [3, 2], [1, 0]),
+        case("R4", &a, &b, [2, 3], [0, 1]),
+    ]
+}
+
+#[test]
+fn large_output_from_small_operands_copies_the_operands_not_c() {
+    let _guard = MEASUREMENT_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    for case in large_output_cases(&runtime) {
+        let name = case.name;
+        let host = case.host();
+        let output_bytes = std::mem::size_of_val(host.data()) as u64;
+        assert_close(
+            host.data(),
+            blas_contract_oracle(&case).data(),
+            case.terms(),
+            name,
+        );
+        let (calls, bytes, lookups) = warm(&runtime, &case);
+        eprintln!("U(1) {name}: {calls} calls, {bytes} B, {lookups} transform lookups, dim(C) {output_bytes} B");
+        // What: only the output is allocated, not a `dim(C)` temporary as well.
+        assert!(
+            bytes < output_bytes + output_bytes / 2,
+            "{name}: {bytes} B allocated for a {output_bytes} B output"
+        );
+    }
+}

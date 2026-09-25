@@ -9,8 +9,8 @@ use crate::{DenseBlockScalar, OperationError, TreeTransformOperation, TreeTransf
 use tenet_operations::{AxisVec, OutputAxisOrder, TensorContractSpec, TensorContractSpecOwned};
 
 use super::super::dynamic_space::{
-    encoded_layout_primer, BoundDynamicFusionMapSpace, DynamicFusionMapSpace, FusionOperandLayout,
-    LayoutKeyBuilder, MetadataOutput, MetadataRequest, TransformedLayoutProbe,
+    encoded_layout_primer, BoundDynamicFusionMapSpace, DynamicFusionMapSpace, FusionOperand,
+    FusionOperandLayout, LayoutKeyBuilder, MetadataOutput, MetadataRequest, TransformedLayoutProbe,
 };
 use super::super::structure::TensorContractAxisPlan;
 
@@ -1416,6 +1416,74 @@ pub(crate) fn select_complete_bosonic_contract_candidate(
         Ok((shape.orientation, facts))
     })
     .map(|(orientation, facts)| (facts.axis_order, orientation))
+}
+
+/// The fewest elements any DynamicTree candidate of `axes` materializes:
+/// TensorKit `_contract_memcost` (tensoroperations.jl L378) minimized over
+/// the `_contract_candidates` (L360) of `orientations`, from ranks and
+/// required lengths only.
+/// `output_len` is `dim(C)`. A conjugated source is never borrowable there
+/// (`source_layout_permutation_is_borrowable`), and a fermionic twist on the
+/// core-right contracted legs copies one operand as in `blas_contract!`.
+pub(crate) fn min_dynamic_tree_materialized_elements<R>(
+    rule: &R,
+    dst_nout: usize,
+    output_len: usize,
+    lhs: FusionOperand<'_>,
+    rhs: FusionOperand<'_>,
+    axes: TensorContractSpec<'_>,
+    orientations: &[FusionContractOrientation],
+) -> Result<usize, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols,
+{
+    let (lhs_space, rhs_space) = (lhs.oriented_homspace(), rhs.oriented_homspace());
+    let (lhs_nout, lhs_rank) = (lhs_space.nout(), lhs_space.rank());
+    let (rhs_nout, rhs_rank) = (rhs_space.nout(), rhs_space.rank());
+    let output_rank = (lhs_rank + rhs_rank)
+        .checked_sub(2 * axes.lhs_contracting_axes().len())
+        .ok_or(OperationError::RankMismatch {
+            expected: axes.lhs_contracting_axes().len(),
+            actual: lhs_rank.min(rhs_rank),
+        })?;
+    let fermionic = rule.braiding_style() == tenet_core::BraidingStyleKind::Fermionic;
+    select_best_scored_contract_candidate(axes, orientations, |candidate, orientation| {
+        let candidate_axes =
+            TensorContractSpec::new(candidate.lhs(), candidate.rhs(), axes.output_permutation());
+        let shape = CandidatePlan::from_ranks(
+            dst_nout,
+            output_rank,
+            lhs_rank,
+            rhs_rank,
+            candidate_axes,
+            lhs.storage_conjugate(),
+            rhs.storage_conjugate(),
+        )?
+        .orient(orientation);
+        let (core_right, core_right_axes) = match orientation {
+            FusionContractOrientation::LhsRhs => (&rhs_space, candidate.rhs()),
+            FusionContractOrientation::RhsLhs => (&lhs_space, candidate.lhs()),
+        };
+        let facts = fusion_contract_candidate_facts(
+            candidate.clone(),
+            CandidateRoute::of_candidate(&shape),
+            FusionContractMaterializationInputs {
+                lhs_exact_identity_borrowable: !lhs.storage_conjugate()
+                    && shape.lhs_transform_is_identity_for(lhs_nout, lhs_rank - lhs_nout),
+                rhs_exact_identity_borrowable: !rhs.storage_conjugate()
+                    && shape.rhs_transform_is_identity_for(rhs_nout, rhs_rank - rhs_nout),
+                core_right_requires_twist: fermionic
+                    && core_right_axes
+                        .iter()
+                        .any(|&axis| core_right.external_axis_is_dual(axis) == Some(true)),
+                lhs_required_len: CandidateRequiredLen::Space(lhs.storage_space()),
+                rhs_required_len: CandidateRequiredLen::Space(rhs.storage_space()),
+                output_required_len: CandidateRequiredLen::Known(output_len),
+            },
+        )?;
+        Ok(((), facts))
+    })
+    .map(|((), facts)| facts.total_materialized_elements())
 }
 
 fn score_complete_fusion_contract_candidate<R, S>(
