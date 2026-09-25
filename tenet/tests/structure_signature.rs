@@ -85,19 +85,6 @@ fn assert_differ(left: &StructureSignature, right: &StructureSignature, label: &
     assert!(left != right, "{label}: {left:?} == {right:?}");
 }
 
-/// The block-structure content id, read from the diagnostic `Debug` form so
-/// the premise "content ids differ" needs no API beyond the signature.
-fn content_id(signature: &StructureSignature) -> usize {
-    let debug = format!("{signature:?}");
-    let tail = debug
-        .split("content_id: ")
-        .nth(1)
-        .expect("Debug names the content id");
-    tail[..tail.find(|c: char| !c.is_ascii_digit()).unwrap()]
-        .parse()
-        .unwrap()
-}
-
 /// One symmetry fixture: `$leg(variant)` builds an independent `GradedSpace`
 /// on every call. Variant 0 is the base leg, 1 changes one degeneracy, and 2
 /// changes one sector. A macro because the typed constructors' dispatch
@@ -252,8 +239,8 @@ fn equal_across_reset_core_intern_tables() {
     reset_core_intern_tables();
     let after = u1_signature(&runtime, &u1_leg(-2..=2, 3));
     assert_ne!(
-        content_id(&before),
-        content_id(&after),
+        before.content_id(),
+        after.content_id(),
         "premise: fresh content"
     );
     assert_same(&before, &after, "reset");
@@ -277,7 +264,7 @@ fn equal_across_interner_eviction() {
     }
     assert!(block_structure_intern_cache_info().pressure_evictions() > evictions);
     let after = u1_signature(&runtime, &u1_leg(-3..=3, 5));
-    assert_ne!(content_id(&before), content_id(&after), "premise: evicted");
+    assert_ne!(before.content_id(), after.content_id(), "premise: evicted");
     assert_same(&before, &after, "eviction");
 }
 
@@ -297,8 +284,8 @@ fn equal_for_oversized_structures_that_bypass_the_interner() {
     let after = signature();
     assert!(block_structure_intern_cache_info().oversized_admission_bypasses() >= bypasses + 2);
     assert_ne!(
-        content_id(&before),
-        content_id(&after),
+        before.content_id(),
+        after.content_id(),
         "premise: not interned"
     );
     assert_same(&before, &after, "oversized");
@@ -311,7 +298,7 @@ fn shared_structure_comparison_does_not_allocate() {
     let leg = u1_leg(-2..=2, 2);
     let first = u1_signature(&runtime, &leg);
     let second = u1_signature(&runtime, &leg);
-    assert_eq!(content_id(&first), content_id(&second), "premise: shared");
+    assert_eq!(first.content_id(), second.content_id(), "premise: shared");
     let (equal, allocations) = measured(|| first == second);
     assert!(equal);
     assert_eq!(allocations, 0, "pointer fast path");

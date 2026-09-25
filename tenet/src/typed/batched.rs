@@ -69,6 +69,15 @@ impl Hash for StructureSignature {
     }
 }
 
+impl StructureSignature {
+    /// The process-local block-structure intern id, for diagnostics and
+    /// tests only. It is not part of equality.
+    #[doc(hidden)]
+    pub fn content_id(&self) -> usize {
+        self.structure.id()
+    }
+}
+
 impl std::fmt::Debug for StructureSignature {
     // Why not derive: the hom-space key and block list are O(legs + blocks)
     // and would make a diagnostic proportional to the tensor's structure.
