@@ -223,6 +223,55 @@ fn compact_lq_requests_no_zeroed_output_storage() {
     );
 }
 
+/// Caller-thread allocation bytes of the second call of each full, null and
+/// eigen op on an endomorphism `$a` and a tall `$tall` (`$h` Hermitian).
+macro_rules! full_family_bytes {
+    ($d:ty, $a:expr, $tall:expr, $h:expr) => {{
+        let (a, tall, h) = ($a, $tall, $h);
+        let mut bytes = Vec::new();
+        for t in [a, tall] {
+            black_box((t.qr_full().unwrap(), t.lq_full().unwrap()));
+            bytes.push(measured(|| black_box(t.qr_full().unwrap())).1.bytes);
+            bytes.push(measured(|| black_box(t.lq_full().unwrap())).1.bytes);
+            black_box((t.left_null().unwrap(), t.right_null().unwrap()));
+            bytes.push(measured(|| black_box(t.left_null().unwrap())).1.bytes);
+            bytes.push(measured(|| black_box(t.right_null().unwrap())).1.bytes);
+        }
+        black_box((a.eig_full().unwrap(), h.eigh_full().unwrap()));
+        bytes.push(measured(|| black_box(a.eig_full().unwrap())).1.bytes);
+        bytes.push(measured(|| black_box(h.eigh_full().unwrap())).1.bytes);
+        bytes
+    }};
+}
+
+// Byte contract (#1525): canonical inputs lend their coupled-sector regions
+// to full QR/LQ, null and eig instead of packing a copy first. Caller-thread
+// bytes of the second call, pinned faer provider, one dense thread, in the
+// order [square QR, LQ, left null, right null, tall QR, LQ, left null,
+// right null, eig_full, eigh_full], before -> after:
+//   [100788, 115404, 114020, 118892, 80932, 37708, 118168, 38568, 109556, 81049]
+//   -> [87184, 101800, 100416, 105288, 75808, 32584, 113044, 33444, 95952, 81049].
+// Each drop is one pack: the payload (square 4872 B, tall 792 B) plus its
+// per-sector tree tables (13604 B and 5124 B in all). eigh_full already
+// borrowed through its direct region path.
+#[test]
+fn full_null_eigen_ops_read_canonical_input_in_place() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let leg = u1_leg();
+    let a: TensorMap<_, f64> =
+        TensorMap::rand_with_seed(&runtime, [&leg, &leg], [&leg, &leg], 1525).unwrap();
+    let tall: TensorMap<_, f64> =
+        TensorMap::rand_with_seed(&runtime, [&leg, &leg], [&leg], 1526).unwrap();
+    let h = a.add(&owned_adjoint!(f64, a), 1.0, 1.0).unwrap();
+    let bytes = full_family_bytes!(f64, &a, &tall, &h);
+    let budget = [
+        87184, 101800, 100416, 105288, 75808, 32584, 113044, 33444, 95952, 81049,
+    ];
+    for (actual, budget) in bytes.iter().zip(budget) {
+        assert!(*actual <= budget, "{bytes:?}");
+    }
+}
+
 #[cfg(feature = "racah-generated")]
 mod checked_generic {
     use super::*;
@@ -431,6 +480,34 @@ mod checked_generic {
                     large[op]
                 );
             }
+        }
+    }
+
+    // Byte contract (#1525), checked Generic, measured as in
+    // `full_null_eigen_ops_read_canonical_input_in_place`, before -> after:
+    //   [260550, 267438, 161909, 164205, 136330, 82652, 151583, 38369, 247893, 214601]
+    //   -> [239782, 246670, 141141, 143437, 130842, 77164, 146095, 32881, 227125, 193833].
+    // Each drop is one pack (payload 2296 B square, 280 B tall; 20768 B and
+    // 5488 B with the tree tables); eigh_full packed here too.
+    #[test]
+    fn checked_generic_full_null_eigen_ops_read_canonical_input_in_place() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let provider = Arc::new(SUNFusionRule::new(3).unwrap());
+        let leg = su3_leg(
+            &provider,
+            &[(vec![1, 1], 2), (vec![0, 0], 1), (vec![1, 0], 1)],
+        );
+        let a: TensorMap<_, f64> =
+            TensorMap::rand_with_seed(&runtime, [&leg, &leg], [&leg, &leg], 1527).unwrap();
+        let tall: TensorMap<_, f64> =
+            TensorMap::rand_with_seed(&runtime, [&leg, &leg], [&leg], 1528).unwrap();
+        let h = a.add(&owned_adjoint!(f64, a), 1.0, 1.0).unwrap();
+        let bytes = full_family_bytes!(f64, &a, &tall, &h);
+        let budget = [
+            239782, 246670, 141141, 143437, 130842, 77164, 146095, 32881, 227125, 193833,
+        ];
+        for (actual, budget) in bytes.iter().zip(budget) {
+            assert!(*actual <= budget, "{bytes:?}");
         }
     }
 }
