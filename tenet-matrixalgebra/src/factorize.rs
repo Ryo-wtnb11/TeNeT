@@ -1206,6 +1206,18 @@ impl<'a, D: FactorScalar> InputMatricizations<'a, D> {
         matches!(self, Self::Packed(_))
     }
 
+    /// Eigenvalues are basis-invariant only when row `i` and column `i` name
+    /// the same tree state, so each sector must stack its row and column trees
+    /// identically (outer-multiplicity vertices included).
+    fn validate_endomorphism_stacking(&self, message: &'static str) -> Result<(), OperationError> {
+        match self {
+            Self::Regions { regions, .. } => {
+                validate_endomorphism_tree_stacking(regions.as_ref(), message)
+            }
+            Self::Packed(matrices) => validate_endomorphism_tree_stacking(matrices, message),
+        }
+    }
+
     fn validate_hermitian(&self) -> Result<(), OperationError> {
         match self {
             Self::Regions { data, regions } => validate_hermitian_regions(data, regions),
@@ -7388,29 +7400,6 @@ fn checked_sector_regions(
         .map_err(OperationError::from_core_preserving_context)
 }
 
-fn canonical_generic_sector_regions(
-    structure: &BlockStructure,
-    nout: usize,
-) -> Result<Option<Arc<[CoupledSectorRegion]>>, OperationError> {
-    let Some(regions) = checked_sector_regions(structure, nout)? else {
-        return Ok(None);
-    };
-    let sectors_are_ordered = regions
-        .windows(2)
-        .all(|pair| pair[0].coupled() < pair[1].coupled());
-    let trees_are_ordered = regions.iter().all(|region| {
-        region
-            .row_trees()
-            .windows(2)
-            .all(|pair| pair[0].tree() < pair[1].tree())
-            && region
-                .col_trees()
-                .windows(2)
-                .all(|pair| pair[0].tree() < pair[1].tree())
-    });
-    Ok((sectors_are_ordered && trees_are_ordered).then_some(regions))
-}
-
 fn generic_value_matricizations<'a, D>(
     structure: &BlockStructure,
     data: &'a [D],
@@ -7435,7 +7424,15 @@ fn generic_input_matricizations<'a, D>(
 where
     D: FactorScalar,
 {
-    let regions = canonical_generic_sector_regions(structure, nout)?;
+    // Why no tree-order admission (`FusionTreeKey` Ord, which the facade
+    // builder's multi-leg order fails): a region lists its sector and tree
+    // extents in first-appearance block order and proves the dense column-major
+    // matrix at `range`, which is exactly the matrix, sector order and tree
+    // order `sector_matricizations_generic` would pack from the same tiling.
+    // Every consumer therefore sees the same matricization either way; output
+    // tree order is proven per output by `factor_output_is_canonical` (else a
+    // by-tree scatter), and the eigenvalue ops check endomorphism stacking.
+    let regions = checked_sector_regions(structure, nout)?;
     Ok(match regions {
         Some(regions) => InputMatricizations::Regions { data, regions },
         None => InputMatricizations::Packed(sector_matricizations_generic(structure, data, nout)?),
@@ -7803,8 +7800,6 @@ where
             tensor: "pinv output space",
         });
     }
-    // Why not `canonical_generic_sector_regions`: as for polar, the route
-    // compiler proves the output transposes the source's exact tree lists.
     let source_regions = checked_sector_regions(source_space.structure(), source_space.nout())?
         .ok_or(OperationError::UnsupportedTensorContractScope {
             message: "pinv requires coupled-sector input storage",
@@ -8203,12 +8198,6 @@ where
         Arc::clone(input.space().provider_arc()),
         p_homspace,
     )?;
-    // Why not `canonical_generic_sector_regions`: its sorted-tree test is a
-    // proxy that the leg-degeneracy builder's own tree order fails for
-    // multi-leg Generic trees, so every ordinary rank > 2 map was refused.
-    // Polar never compares against a freshly enumerated bond space: the route
-    // compiler proves W and P index the source's exact tree lists, which is
-    // the real requirement.
     let source_regions = checked_sector_regions(source_space.structure(), source_space.nout())?
         .ok_or(CheckedGenericFactorPlanError::Operation(
             OperationError::UnsupportedTensorContractScope {
@@ -9204,24 +9193,40 @@ where
     Ok(matricizations)
 }
 
-fn validate_endomorphism_tree_stacking<D>(
-    matricizations: &[SectorMatricization<D>],
+/// Row `i` and column `i` of every sector name the same tree state (tree key
+/// including outer-multiplicity vertices, offset and shape), so the block is
+/// an endomorphism matrix in one basis and its spectrum is basis-invariant.
+/// Generic over [`SectorGeometry`] so packed matricizations and borrowed
+/// regions share this one predicate.
+fn endomorphism_tree_stacking_is_identical<M: SectorGeometry>(matrices: &[M]) -> bool {
+    matrices.iter().all(|matrix| {
+        let count = matrix.tree_count(FactorSide::Left);
+        matrix.rows() == matrix.cols()
+            && count == matrix.tree_count(FactorSide::Right)
+            && (0..count).all(|index| {
+                match (
+                    matrix.tree(FactorSide::Left, index),
+                    matrix.tree(FactorSide::Right, index),
+                ) {
+                    (Some(row), Some(col)) => {
+                        row.tree == col.tree && row.offset == col.offset && row.shape == col.shape
+                    }
+                    _ => false,
+                }
+            })
+    })
+}
+
+/// `message` names the refusing operation.
+fn validate_endomorphism_tree_stacking<M: SectorGeometry>(
+    matrices: &[M],
+    message: &'static str,
 ) -> Result<(), OperationError> {
-    for matrix in matricizations {
-        if matrix.rows != matrix.cols
-            || matrix.row_trees.len() != matrix.col_trees.len()
-            || !matrix
-                .row_trees
-                .iter()
-                .zip(&matrix.col_trees)
-                .all(|(row, column)| row == column)
-        {
-            return Err(OperationError::UnsupportedTensorContractScope {
-                message: "eigh requires identical endomorphism row/column fusion-tree stacking",
-            });
-        }
+    if endomorphism_tree_stacking_is_identical(matrices) {
+        Ok(())
+    } else {
+        Err(OperationError::UnsupportedTensorContractScope { message })
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -11675,7 +11680,11 @@ where
     // Why not trust equal product spaces alone: outer-multiplicity vertices
     // are part of a tree key, so Hermitian coordinates require identical full
     // tree stacking, not merely equal coupled-sector dimensions.
-    validate_endomorphism_tree_stacking(&matrices).map_err(CheckedGenericFactorPlanError::from)?;
+    validate_endomorphism_tree_stacking(
+        &matrices,
+        "eigh_full requires identical endomorphism row/column fusion-tree stacking",
+    )
+    .map_err(CheckedGenericFactorPlanError::from)?;
     validate_hermitian_matricizations(&matrices).map_err(CheckedGenericFactorPlanError::from)?;
 
     let max_n = matrices.iter().map(|matrix| matrix.rows).max().unwrap_or(0);
@@ -11845,7 +11854,11 @@ where
     }
     let matrices = sector_matricizations_generic(space.structure(), input.data(), space.nout())
         .map_err(CheckedGenericFactorPlanError::from)?;
-    validate_endomorphism_tree_stacking(&matrices).map_err(CheckedGenericFactorPlanError::from)?;
+    validate_endomorphism_tree_stacking(
+        &matrices,
+        "eig_full requires identical endomorphism row/column fusion-tree stacking",
+    )
+    .map_err(CheckedGenericFactorPlanError::from)?;
     if matrices
         .iter()
         .flat_map(|matrix| &matrix.data)
@@ -12058,6 +12071,11 @@ where
         generic_value_matricizations(space.structure(), input.data(), space.nout())
             .map_err(CheckedGenericFactorPlanError::from)?;
     matricizations
+        .validate_endomorphism_stacking(
+            "eigh_vals requires identical endomorphism row/column fusion-tree stacking",
+        )
+        .map_err(CheckedGenericFactorPlanError::from)?;
+    matricizations
         .validate_hermitian()
         .map_err(CheckedGenericFactorPlanError::from)?;
     let mut eigenvalues = Vec::with_capacity(matricizations.len());
@@ -12111,6 +12129,11 @@ where
     let matricizations =
         generic_value_matricizations(space.structure(), input.data(), space.nout())
             .map_err(CheckedGenericFactorPlanError::from)?;
+    matricizations
+        .validate_endomorphism_stacking(
+            "eig_vals requires identical endomorphism row/column fusion-tree stacking",
+        )
+        .map_err(CheckedGenericFactorPlanError::from)?;
     let mut eigenvalues = Vec::with_capacity(matricizations.len());
     for index in 0..matricizations.len() {
         let matrix = matricizations

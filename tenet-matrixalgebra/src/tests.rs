@@ -16392,3 +16392,280 @@ fn compact_factorizations_reject_a_malformed_executor_batch() {
         assert!(is_backend_error(&svd, svd_op), "svd_compact: {svd:?}");
     }
 }
+
+/// Hermitian and general payloads of one coupled-sector tiling, written per
+/// region so the Hermitian one is Hermitian in the tree basis.
+fn region_payloads(
+    regions: &[tenet_core::CoupledSectorRegion],
+    len: usize,
+) -> (Vec<Complex64>, Vec<Complex64>) {
+    let entry = |salt: usize| {
+        let value = |seed: usize| ((seed * 2_654_435_761) % 1009) as f64 / 1009.0 - 0.5;
+        Complex64::new(value(salt), value(salt + 7919))
+    };
+    let mut general = vec![Complex64::zero(); len];
+    let mut hermitian = general.clone();
+    for region in regions {
+        let (rows, start) = (region.rows(), region.range().start);
+        for column in 0..region.cols() {
+            for row in 0..rows {
+                general[start + row + rows * column] = entry(start + row + rows * column);
+            }
+        }
+        if rows == region.cols() {
+            for column in 0..rows {
+                for row in 0..rows {
+                    hermitian[start + row + rows * column] = general[start + row + rows * column]
+                        + general[start + column + rows * row].conj();
+                }
+            }
+        }
+    }
+    (hermitian, general)
+}
+
+// #1494: the leg-degeneracy (facade) builder lists multi-leg Generic trees in
+// its own order, which the former `FusionTreeKey`-Ord admission refused, so
+// every one of these packed the whole payload before QR/SVD/LQ and the
+// value-only spectra. A coupled-sector tiling is the same matricization the
+// pack would build, so no pack may happen.
+#[test]
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
+fn checked_generic_facade_layouts_take_the_direct_region_path() {
+    let x = SectorId::new(1);
+    let v = SectorLeg::new([(SectorId::new(0), 1), (x, 2)], false);
+    let w = SectorLeg::new([(x, 1)], false);
+    let product =
+        |legs: &[&SectorLeg]| FusionProductSpace::new(legs.iter().map(|&leg| leg.clone()));
+    let cases = [
+        (product(&[&v, &v]), product(&[&w])),
+        (product(&[&w]), product(&[&v, &v])),
+        (product(&[&v, &w]), product(&[&v, &w])),
+        (product(&[&v, &v, &w]), product(&[&v])),
+    ];
+    let mut unordered_fixtures = 0;
+    for (codomain, domain) in cases {
+        let endomorphism = codomain == domain;
+        let provider = Arc::new(LateGenericSpy {
+            rule: FactorGenericRule,
+            fail_at: usize::MAX,
+            calls: Cell::new(0),
+        });
+        let space = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+            Arc::clone(&provider),
+            FusionTreeHomSpace::new(codomain, domain),
+        )
+        .unwrap();
+        let regions = space
+            .space()
+            .structure()
+            .coupled_sector_regions(space.space().nout())
+            .unwrap()
+            .expect("the facade builder lays out a coupled-sector tiling");
+        let ord_ordered = regions.iter().all(|region| {
+            [region.row_trees(), region.col_trees()]
+                .iter()
+                .all(|trees| trees.windows(2).all(|pair| pair[0].tree() < pair[1].tree()))
+        });
+        unordered_fixtures += usize::from(!ord_ordered);
+        let (hermitian, general) = region_payloads(&regions, space.space().required_len().unwrap());
+        let input = BoundDynamicTensorRef::try_new(&space, &general).unwrap();
+        let mut dense = tenet_dense::DefaultDenseExecutor::new();
+
+        crate::factorize::reset_generic_pair_publication_probe();
+        crate::factorize::reset_compact_qr_copy_probe();
+        let qr = qr_compact_dyn_checked_generic(&mut dense, &input).unwrap();
+        assert_compact_factors_reconstruct_input(&input, &qr.0, None, &qr.1);
+        assert_eq!(
+            crate::factorize::compact_qr_copy_probe().input_pack_bytes,
+            0
+        );
+
+        crate::factorize::reset_compact_svd_copy_probe();
+        let svd = svd_compact_dyn_checked_generic(&mut dense, &input).unwrap();
+        assert_compact_factors_reconstruct_input(&input, &svd.0, Some(&svd.1), &svd.2);
+        assert_eq!(
+            crate::factorize::compact_svd_copy_probe().input_pack_bytes,
+            0
+        );
+
+        crate::factorize::reset_compact_lq_copy_probe();
+        let lq = lq_compact_dyn_checked_generic(&mut dense, &input).unwrap();
+        assert_compact_factors_reconstruct_input(&input, &lq.0, None, &lq.1);
+        assert_eq!(
+            crate::factorize::compact_lq_copy_probe().input_pack_bytes,
+            0
+        );
+
+        // The fresh bond-space builder enumerates the preserved side's trees
+        // in the facade input's order, so the per-call route proof publishes
+        // every factor in place: no pack in, no scatter out.
+        let publication = crate::factorize::generic_pair_publication_probe();
+        assert_eq!(
+            (
+                publication.canonical_publications,
+                publication.fallback_publications
+            ),
+            (3, 0),
+            "{publication:?}"
+        );
+        crate::factorize::reset_values_matricization_fallbacks();
+        svd_vals_dyn_checked_generic(&mut dense, &input).unwrap();
+        if endomorphism {
+            let hermitian_input = BoundDynamicTensorRef::try_new(&space, &hermitian).unwrap();
+            eigh_vals_dyn_checked_generic(&mut dense, &hermitian_input).unwrap();
+            eig_vals_dyn_checked_generic(&mut dense, &input).unwrap();
+        }
+        assert_eq!(crate::factorize::values_matricization_fallbacks(), 0);
+    }
+    assert!(
+        unordered_fixtures > 0,
+        "the fixtures must include the facade order that Ord admission packed"
+    );
+}
+
+// Tree order is not admission, but it is still proven where it matters:
+// sector `x` of this tiling lists its rows as (t0, t1) and its columns as
+// (t1, t0). The direct QR/SVD/LQ outputs must still reconstruct the input
+// (the fresh bond spaces are reached by tree identity, never by position),
+// and eigenvalues must refuse the mis-stacked endomorphism instead of
+// returning the spectrum of a column-permuted block (which the packed path
+// silently did, since it stacks rows and columns by first appearance too).
+#[test]
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
+fn checked_generic_mis_stacked_tiling_scatters_factors_and_refuses_eigenvalues() {
+    let (canonical, hermitian, general) = generic_values_endomorphism_input();
+    let structure = canonical.space().structure();
+    let matrix = structure
+        .coupled_sector_regions(2)
+        .unwrap()
+        .unwrap()
+        .iter()
+        .find(|region| region.coupled() == SectorId::new(1))
+        .unwrap()
+        .clone();
+    let (t0, t1) = (matrix.row_trees()[0].tree(), matrix.row_trees()[1].tree());
+    let key_of = |index: usize| {
+        let block = structure.block(index).unwrap();
+        (
+            block.key().as_fusion_tree_pair().unwrap().clone(),
+            block.shape().to_vec(),
+        )
+    };
+    let find = |row: &FusionTreeKey, col: &FusionTreeKey| {
+        (0..structure.block_count())
+            .find(|&index| {
+                let key = key_of(index).0;
+                key.codomain_tree() == row && key.domain_tree() == col
+            })
+            .unwrap()
+    };
+    let scalar = (0..structure.block_count())
+        .find(|&index| key_of(index).0.coupled() == SectorId::new(0))
+        .unwrap();
+    let order = [
+        scalar,
+        find(t0, t1),
+        find(t0, t0),
+        find(t1, t0),
+        find(t1, t1),
+    ];
+    let blocks = order.iter().map(|&index| key_of(index)).collect();
+    let mis_stacked =
+        BlockStructure::coupled_sector_matrix_with_keys(&FactorGenericRule, 2, 4, blocks).unwrap();
+    let region = mis_stacked
+        .coupled_sector_regions(2)
+        .unwrap()
+        .expect("the reordered layout is still a coupled-sector tiling")
+        .iter()
+        .find(|region| region.coupled() == SectorId::new(1))
+        .unwrap()
+        .clone();
+    assert_ne!(region.row_trees(), region.col_trees());
+
+    let provider = Arc::new(LateGenericSpy {
+        rule: FactorGenericRule,
+        fail_at: usize::MAX,
+        calls: Cell::new(0),
+    });
+    let relayout = |source: &[Complex64]| {
+        let typed_space = FusionTensorMapSpace::new_unbound(
+            TensorMapSpace::<2, 2>::from_dims([1, 1], [1, 1]).unwrap(),
+            canonical.space().homspace().clone(),
+            mis_stacked.clone(),
+        )
+        .unwrap()
+        .try_bind_rule(&FactorGenericRule)
+        .unwrap();
+        let tensor = TensorMap::<Complex64, 2, 2>::from_block_fn_with_fusion_space(
+            typed_space,
+            Complex64::zero(),
+            |key, indices| {
+                let block = structure
+                    .block(structure.find_block_index_by_key(key).unwrap())
+                    .unwrap();
+                source[block.offset()
+                    + indices
+                        .iter()
+                        .zip(block.strides())
+                        .map(|(&index, &stride)| index * stride)
+                        .sum::<usize>()]
+            },
+        )
+        .unwrap();
+        (
+            DynamicFusionMapSpace::from_typed(tensor.fusion_space().unwrap()),
+            tensor.data().to_vec(),
+        )
+    };
+    let (dynamic, general_data) = relayout(&general);
+    let (_, hermitian_data) = relayout(&hermitian);
+    let space = BoundDynamicFusionMapSpace::bind_generic(dynamic, Arc::clone(&provider)).unwrap();
+    let input = BoundDynamicTensorRef::try_new(&space, &general_data).unwrap();
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+
+    crate::factorize::reset_compact_qr_copy_probe();
+    crate::factorize::reset_generic_pair_publication_probe();
+    let qr = qr_compact_dyn_checked_generic(&mut dense, &input).unwrap();
+    assert_compact_factors_reconstruct_input(&input, &qr.0, None, &qr.1);
+    assert_eq!(
+        crate::factorize::compact_qr_copy_probe().input_pack_bytes,
+        0
+    );
+    assert_eq!(
+        crate::factorize::generic_pair_publication_probe().canonical_publications,
+        0
+    );
+    let svd = svd_compact_dyn_checked_generic(&mut dense, &input).unwrap();
+    assert_compact_factors_reconstruct_input(&input, &svd.0, Some(&svd.1), &svd.2);
+    let lq = lq_compact_dyn_checked_generic(&mut dense, &input).unwrap();
+    assert_compact_factors_reconstruct_input(&input, &lq.0, None, &lq.1);
+
+    let hermitian_input = BoundDynamicTensorRef::try_new(&space, &hermitian_data).unwrap();
+    for (error, operation) in [
+        (
+            eigh_vals_dyn_checked_generic(&mut dense, &hermitian_input).unwrap_err(),
+            "eigh_vals ",
+        ),
+        (
+            eig_vals_dyn_checked_generic(&mut dense, &input).unwrap_err(),
+            "eig_vals ",
+        ),
+    ] {
+        assert!(
+            matches!(
+                error,
+                CheckedGenericFactorPlanError::Operation(
+                    OperationError::UnsupportedTensorContractScope { message }
+                ) if message.starts_with(operation)
+            ),
+            "{error:?}"
+        );
+    }
+}

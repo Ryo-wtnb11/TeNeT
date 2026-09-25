@@ -4406,6 +4406,171 @@ fn sun_checked_generic_polar_and_pinv_accept_facade_layouts_of_rank_three_and_fo
     }
 }
 
+/// QR/LQ/SVD and the value-only spectra of a facade-layout source (#1494),
+/// each against an oracle that does not share the factorization's layout:
+/// reconstruction, isometry against an explicit tree-basis identity, `S`
+/// against `svd_vals`, and `eigh_vals`/`eig_vals` of `A Aᴴ` against the
+/// squared singular values.
+#[cfg(feature = "racah-generated")]
+macro_rules! assert_sun_compact_laws {
+    ($runtime:expr, $source:expr) => {{
+        let source = $source;
+        let assert_close = |actual: &TensorMap<_, _>, expected: &TensorMap<_, _>, what: &str| {
+            let error = actual
+                .add(expected, 1.0.into(), (-1.0).into())
+                .unwrap()
+                .norm()
+                .unwrap();
+            assert!(
+                error < 1e-9 * (1.0 + expected.norm().unwrap()),
+                "{what}: {error}"
+            );
+        };
+        let owned_adjoint = |tensor: &TensorMap<_, _>| {
+            let lazy = tensor.adjoint().unwrap();
+            let blocks: std::collections::HashMap<_, _> = lazy.blocks().unwrap().collect();
+            let (codomain, domain) = (lazy.codomain(), lazy.domain());
+            TensorMap::from_block_fn($runtime, codomain.iter(), domain.iter(), |trees, ij| {
+                *blocks[trees].get(ij).unwrap()
+            })
+            .unwrap()
+        };
+        let assert_identity = |gram: &TensorMap<_, _>, what: &str| {
+            let (codomain, domain) = (gram.codomain(), gram.domain());
+            let rank = codomain.iter().count();
+            let identity =
+                TensorMap::from_block_fn($runtime, codomain.iter(), domain.iter(), |trees, ij| {
+                    let same_tree = trees.codomain_uncoupled() == trees.domain_uncoupled()
+                        && trees.codomain_innerlines() == trees.domain_innerlines()
+                        && trees.codomain_vertices() == trees.domain_vertices();
+                    let (row, col) = ij.split_at(rank);
+                    if same_tree && row == col { 1.0 } else { 0.0 }.into()
+                })
+                .unwrap();
+            assert_close(gram, &identity, what);
+        };
+        let by_sector = |spectra: Vec<SectorSpectrum<_>>| {
+            spectra
+                .into_iter()
+                .filter(|spectrum| !spectrum.values.is_empty())
+                .map(|spectrum| {
+                    let mut values = spectrum.values;
+                    values.sort_by(|a, b| b.total_cmp(a));
+                    (spectrum.sector, values)
+                })
+                .collect::<Vec<_>>()
+        };
+        fn find<S: PartialEq>(spectra: &[(S, Vec<f64>)], sector: &S) -> Vec<f64> {
+            spectra
+                .iter()
+                .find(|(key, _)| key == sector)
+                .map_or_else(Vec::new, |(_, values)| values.clone())
+        }
+        let assert_values = |actual: &[f64], expected: &[f64], what: &str| {
+            let scale = 1.0 + expected.first().copied().unwrap_or(0.0).abs();
+            for (index, &actual) in actual.iter().enumerate() {
+                let expected = expected.get(index).copied().unwrap_or(0.0);
+                assert!((actual - expected).abs() < 1e-9 * scale, "{what}");
+            }
+        };
+
+        let (q, r) = source.qr_compact().unwrap();
+        assert_close(&q.compose(&r).unwrap(), source, "A = QR");
+        assert_identity(&owned_adjoint(&q).compose(&q).unwrap(), "Qᴴ Q = 1");
+        let (l, q) = source.lq_compact().unwrap();
+        assert_close(&l.compose(&q).unwrap(), source, "A = LQ");
+        assert_identity(&q.compose(&owned_adjoint(&q)).unwrap(), "Q Qᴴ = 1");
+        let (u, s, vh) = source.svd_compact().unwrap();
+        assert_close(
+            &u.compose(&s).unwrap().compose(&vh).unwrap(),
+            source,
+            "A = U S Vh",
+        );
+        assert_identity(&owned_adjoint(&u).compose(&u).unwrap(), "Uᴴ U = 1");
+        assert_identity(&vh.compose(&owned_adjoint(&vh)).unwrap(), "Vh Vhᴴ = 1");
+
+        let singular = by_sector(source.svd_vals().unwrap());
+        let diagonal = by_sector(s.eigh_vals().unwrap());
+        assert_eq!(singular.len(), diagonal.len());
+        for (sector, values) in &singular {
+            assert_eq!(find(&diagonal, sector).len(), values.len());
+            assert_values(&find(&diagonal, sector), values, "S = svd_vals");
+        }
+        let gram = source.compose(&owned_adjoint(source)).unwrap();
+        let squared = singular
+            .iter()
+            .map(|(sector, values)| (sector.clone(), values.iter().map(|v| v * v).collect()))
+            .collect::<Vec<_>>();
+        for (sector, values) in by_sector(gram.eigh_vals().unwrap()) {
+            assert_values(&values, &find(&squared, &sector), "eigh_vals(A Aᴴ) = s²");
+        }
+        for spectrum in gram.eig_vals().unwrap() {
+            let mut values = spectrum.values.iter().map(|v| v.re).collect::<Vec<_>>();
+            assert!(spectrum
+                .values
+                .iter()
+                .all(|v| v.im.abs() < 1e-9 * (1.0 + v.norm())));
+            values.sort_by(|a, b| b.total_cmp(a));
+            assert_values(
+                &values,
+                &find(&squared, &spectrum.sector),
+                "eig_vals(A Aᴴ) = s²",
+            );
+        }
+    }};
+}
+
+#[cfg(feature = "racah-generated")]
+#[test]
+fn sun_checked_generic_compact_factors_and_spectra_on_facade_layouts() {
+    use tenet::typed::SUNFusionRule;
+
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(SUNFusionRule::new(3).unwrap());
+    let leg =
+        GradedSpace::try_new_with_arc(Arc::clone(&provider), [(vec![1, 1], 2), (vec![0, 0], 1)])
+            .unwrap();
+    let t =
+        GradedSpace::try_new_with_arc(Arc::clone(&provider), [(vec![1, 0], 2), (vec![0, 1], 1)])
+            .unwrap();
+    let t_dual = t.try_dual().unwrap();
+    let value = |salt: u64| ((salt.wrapping_mul(2_654_435_761) % 1009) as f64) / 1009.0 - 0.5;
+    let cases: [(&[&GradedSpace<_>], &[&GradedSpace<_>]); 7] = [
+        (&[&leg, &leg], &[&leg]),
+        (&[&leg], &[&leg, &leg]),
+        (&[&leg, &leg], &[&leg, &leg]),
+        (&[&t, &t_dual], &[&t]),
+        (&[&t], &[&t, &t_dual]),
+        (&[&t_dual, &t_dual], &[&t_dual]),
+        (&[&t_dual, &t_dual, &t_dual], &[]),
+    ];
+    for (codomain, domain) in cases {
+        let mut salt = 0;
+        let real: TensorMap<_, f64> = TensorMap::from_block_fn(
+            &runtime,
+            codomain.iter().copied(),
+            domain.iter().copied(),
+            |_, _| {
+                salt += 1;
+                value(salt)
+            },
+        )
+        .unwrap();
+        assert_sun_compact_laws!(&runtime, &real);
+        let complex: TensorMap<_, Complex64> = TensorMap::from_block_fn(
+            &runtime,
+            codomain.iter().copied(),
+            domain.iter().copied(),
+            |_, _| {
+                salt += 2;
+                Complex64::new(value(salt), value(salt + 1))
+            },
+        )
+        .unwrap();
+        assert_sun_compact_laws!(&runtime, &complex);
+    }
+}
+
 struct PinvFaultExecutor {
     inner: DefaultDenseExecutor,
     svd_calls: Arc<AtomicUsize>,

@@ -343,4 +343,42 @@ mod checked_generic {
         assert!(counts.calls <= 329, "{counts:?}");
         assert!(counts.bytes <= 53098, "{counts:?}");
     }
+
+    // Byte contract (#1494): the leg-degeneracy (facade) layout of a rank-3
+    // and a rank-4 multiplicity map is a coupled-sector tiling, so QR, SVD,
+    // LQ and `svd_vals` read the payload in place. Before, `FusionTreeKey`
+    // Ord admission rejected the facade tree order and each call first packed
+    // a copy of the whole payload. Caller-thread calls / bytes of the second
+    // call, pinned faer provider, one dense thread, before -> after:
+    //   rank 3: QR 351/47555 -> 325/43275, SVD 420/59541 -> 394/55261,
+    //           LQ 353/48811 -> 327/44531, svd_vals 40/6616 -> 14/2336;
+    //   rank 4: QR 647/121808 -> 583/111248, SVD 778/158444 -> 714/147884,
+    //           LQ 657/124632 -> 593/114072, svd_vals 97/21544 -> 33/10984.
+    // `svd_vals` no longer zero-fills a packed matrix at all.
+    #[test]
+    fn checked_generic_facade_factorizations_read_the_payload_in_place() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let provider = Arc::new(SUNFusionRule::new(3).unwrap());
+        let leg = su3_leg(&provider, &[(vec![1, 1], 2), (vec![0, 0], 1)]);
+        let rank3: TensorMap<_, f64> =
+            TensorMap::rand_with_seed(&runtime, [&leg, &leg], [&leg], 1494).unwrap();
+        let rank4: TensorMap<_, f64> =
+            TensorMap::rand_with_seed(&runtime, [&leg, &leg], [&leg, &leg], 1495).unwrap();
+        let budgets = [
+            [(325, 43275), (394, 55261), (327, 44531), (14, 2336)],
+            [(583, 111248), (714, 147884), (593, 114072), (33, 10984)],
+        ];
+        for (a, budget) in [&rank3, &rank4].into_iter().zip(budgets) {
+            let warm = (a.qr_compact().unwrap(), a.svd_compact().unwrap());
+            let (_, qr) = measured(|| black_box(a.qr_compact().unwrap()));
+            let (_, svd) = measured(|| black_box(a.svd_compact().unwrap()));
+            let (_, lq) = measured(|| black_box(a.lq_compact().unwrap()));
+            let (_, vals) = measured(|| black_box(a.svd_vals().unwrap()));
+            black_box(&warm);
+            for (counts, (calls, bytes)) in [&qr, &svd, &lq, &vals].into_iter().zip(budget) {
+                assert!(counts.calls <= calls && counts.bytes <= bytes, "{counts:?}");
+            }
+            assert_eq!(vals.zeroed_bytes, 0, "{vals:?}");
+        }
+    }
 }
