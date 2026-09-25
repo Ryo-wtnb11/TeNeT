@@ -125,7 +125,7 @@ trivial/dense provider exists.
 | `twist`/`twist_inverse` [11] | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | PROVED | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/1336) |
 | Canonical contraction/compose | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | PROVED | PROVED |
 | General-axes `contract` [12] | PROVED | [NEEDS-PROOF](https://github.com/Ryo-wtnb11/TeNeT/issues/3) | UNSUPPORTED | PROVED | UNSUPPORTED | PROVED | PROVED |
-| Arithmetic/reductions | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | PROVED | INTENTIONAL-DIFFERENCE [10] |
+| Arithmetic/reductions | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | PROVED | PROVED [10] |
 | `trace_pairs` [13] | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | PROVED | PROVED |
 | SVD/EIGH [9] | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | PROVED | PROVED [11] |
 | QR | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | PROVED [11] | PROVED [11] |
@@ -224,19 +224,19 @@ gates of `tenet-network/tests/typed_cuda_network.rs`. Every cell is one generic
 body instantiated for all four device dtypes against the host result *of the
 same dtype*.
 
-The reductions are an `INTENTIONAL-DIFFERENCE` rather than `PROVED` because
-`inner`'s two halves accumulate differently: within one coupled sector the
-device sums in the payload dtype inside the backend GEMM (Tenferro 0.5.0 and
-0.6.0 expose no widening reduction), while across coupled sectors the host half
-accumulates in `WideScalar::Wide` like every host reduction; this is documented
-on `weighted_inner_cuda`. `norm` (and therefore `normalize`) is not affected
-since [#1344](https://github.com/Ryo-wtnb11/TeNeT/issues/1344): a
-single-precision payload is widened on the device by one Tenferro `cast`
-before the per-sector reduction, so it accumulates in `f64` like the host and
-stays finite and nonzero wherever the host does, pinned by
-`device_norm_and_normalize_match_the_host_where_a_payload_sum_would_overflow_or_underflow`
-(cost: one extra device allocation, pinned by
-`a_warm_single_precision_norm_costs_one_extra_device_allocation`).
+The reductions accumulate in `f64` like the host at every payload dtype:
+Tenferro 0.7.1 exposes no widening dot or reduction, so a single-precision
+payload is widened on the device by one Tenferro `cast` per distinct operand
+before the per-sector reduction, and the cross-sector combine runs in
+`WideScalar::Wide`; this is documented on `weighted_inner_cuda`. `norm` (and
+therefore `normalize`) has done so since
+[#1344](https://github.com/Ryo-wtnb11/TeNeT/issues/1344), pinned by
+`device_norm_and_normalize_match_the_host_where_a_payload_sum_would_overflow_or_underflow`;
+`inner`/`dot` since [#1383](https://github.com/Ryo-wtnb11/TeNeT/issues/1383),
+pinned by `device_inner_matches_the_host_where_single_precision_products_overflow`
+(a cancelling sum whose products overflow `f32`). Cost: one extra device
+allocation per distinct operand, pinned by
+`a_warm_single_precision_reduction_costs_one_extra_device_allocation_per_operand`.
 
 [11] The device factorizations are open for single precision since leaf C4
 ([#1341](https://github.com/Ryo-wtnb11/TeNeT/issues/1341)): `svd_compact` and

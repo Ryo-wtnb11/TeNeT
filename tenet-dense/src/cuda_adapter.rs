@@ -2071,13 +2071,13 @@ pub fn cuda_copy_region_into<D: CudaScalar>(
 
 /// Widens a single-precision device buffer to its double-precision lane,
 /// `f32 -> f64` or `Complex32 -> Complex64`, with one device cast
-/// (tenferro-gpu 0.6.0 `TensorStructural::cast`, `cubecl/mod.rs:5781`).
+/// (tenferro-gpu 0.7.1 `TensorStructural::cast`, `cubecl/mod.rs:6006`).
 ///
-/// Why: Tenferro 0.6.0 has no reduction that accumulates wider than its
-/// operands — the GEMM, `norm_squared_read` (cuBLAS self-`dot`) and
-/// `reduce_sum_squares` all sum in the payload dtype — so a reduction that
-/// must accumulate as wide as the Host does widens its operand once and then
-/// runs the ordinary double-precision reduction. Exact: every `f32` is an
+/// Why: Tenferro 0.7.1 has no reduction that accumulates wider than its
+/// operands — the GEMM, `vdot_read` and `norm_squared_read` (cuBLAS
+/// `dot`/`dotc`) and `reduce_sum_squares` all sum in the payload dtype — so a
+/// reduction that must accumulate as wide as the Host does widens its
+/// operands once and then runs the ordinary double-precision reduction. Exact: every `f32` is an
 /// `f64`. Costs one device allocation of `capacity * size_of::<W>()` bytes
 /// (the whole allocation is cast; [`CudaDenseStorage::len`] carries over) and
 /// one elementwise pass; no host transfer.

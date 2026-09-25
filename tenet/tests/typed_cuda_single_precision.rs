@@ -14,12 +14,12 @@
 //! * transfer is **bit exact** at every dtype — a byte-for-byte round trip;
 //! * elementwise arithmetic and the structural transforms are compared at
 //!   `8 * sqrt(n) * eps(real(D)) * scale`, `n` the number of terms combined;
-//! * the reductions get their own, wider bound, because the device `inner`
-//!   sums a coupled sector *in the payload dtype* inside the GEMM while the
-//!   host accumulates in `WideScalar::Wide`. That contract is documented on
-//!   `weighted_inner_cuda`. `norm` widens first and accumulates like the host
-//!   (#1344), pinned by
-//!   `device_norm_and_normalize_match_the_host_where_a_payload_sum_would_overflow_or_underflow`.
+//! * the reductions accumulate in `f64` on the device like the host
+//!   (`weighted_inner_cuda`; #1344 for `norm`, #1383 for `inner`), so
+//!   `inner` is compared under the workspace rule of
+//!   `docs/testing_numerics.md`; the range cases are pinned by
+//!   `device_norm_and_normalize_match_the_host_where_a_payload_sum_would_overflow_or_underflow`
+//!   and `device_inner_matches_the_host_where_single_precision_products_overflow`.
 //!
 //! Fixture entries are dyadic rationals, so every fixture is exactly
 //! representable in `f32` and no fixture value is itself a rounding of the
@@ -45,6 +45,9 @@ use tenet::typed::{BlockFusionTrees, Error, GradedSpace, Runtime, TensorMap};
 
 mod common;
 
+#[path = "../../tests/support/numerics.rs"]
+mod numerics;
+
 use common::{DevicePayload, DeviceRule};
 
 // ---------------------------------------------------------------------------
@@ -57,56 +60,21 @@ fn elementwise_tolerance<D: DevicePayload>(terms: usize, scale: f64) -> f64 {
     8.0 * (terms as f64).sqrt() * D::EPS * scale.max(1.0)
 }
 
-/// Bound for a reduction the device accumulated *in the payload dtype*:
-/// `2 * terms * eps(real(D)) * scale`, where the caller passes `scale` as an
-/// upper bound on `sum |conj(a_i) * b_i|` — the sum of the **absolute**
-/// products, which is what the documented device bound on
-/// `TensorMap::<..., CudaStorage<D>>::norm` is relative to. It is not the
-/// host's wide-accumulator tolerance, and it is not relative to the magnitude
-/// of the result.
+/// Absolute bound `2 * terms * eps(real(D)) * scale` for the `norm` and
+/// `normalize` checks, `scale` an upper bound on `sum |conj(a_i) * b_i|`.
+/// It dates from the payload-dtype device reduction and is looser than the
+/// `f64` accumulation (#1344, #1383) now needs; `inner` uses the workspace
+/// rule instead.
 fn reduction_tolerance<D: DevicePayload>(terms: usize, scale: f64) -> f64 {
     2.0 * (terms as f64) * D::EPS * scale.max(1.0)
 }
 
-/// Compares against `tolerance * (1 + |expected|)`.
-///
-/// The relative factor belongs to the elementwise families, whose
-/// `elementwise_tolerance` is a *relative* bound. The reductions use
-/// [`assert_close_absolutely`] instead: their documented bound is already
-/// absolute.
+/// Compares against `tolerance * (1 + |expected|)`, the relative bound of the
+/// elementwise families.
 fn assert_close<D: DevicePayload>(actual: &[D], expected: &[D], tolerance: f64, what: &str) {
-    assert_within(actual, expected, tolerance, what, true)
-}
-
-/// Compares against `tolerance` exactly, with no relative widening.
-///
-/// This is the bound `reduction_tolerance` documents, asserted as documented.
-/// #1336 left the extra `(1 + |expected|)` factor in place here because
-/// tightening a device tolerance cannot be validated without a device run;
-/// leaf C4 (#1341) removed it on the A100 record of this suite.
-fn assert_close_absolutely<D: DevicePayload>(
-    actual: &[D],
-    expected: &[D],
-    tolerance: f64,
-    what: &str,
-) {
-    assert_within(actual, expected, tolerance, what, false)
-}
-
-fn assert_within<D: DevicePayload>(
-    actual: &[D],
-    expected: &[D],
-    tolerance: f64,
-    what: &str,
-    relative: bool,
-) {
     assert_eq!(actual.len(), expected.len(), "{what} [{}]: length", D::NAME);
     for (index, (&left, &right)) in actual.iter().zip(expected).enumerate() {
-        let bound = if relative {
-            tolerance * (1.0 + right.magnitude())
-        } else {
-            tolerance
-        };
+        let bound = tolerance * (1.0 + right.magnitude());
         assert!(
             left.distance(right) <= bound,
             "{what} [{}]: element {index} is {left:?}, expected {right:?} \
@@ -358,7 +326,7 @@ fn device_arithmetic_matches_the_host_at_every_payload() {
 fn assert_reductions_match_host<R, D>(runtime: &Runtime, leg: &GradedSpace<R>)
 where
     R: DeviceRule,
-    D: DevicePayload,
+    D: DevicePayload + numerics::Numeric,
 {
     let a = TensorMap::<R, D>::from_block_fn(runtime, [leg], [leg], fill::<D, _>(1.5)).unwrap();
     let b = TensorMap::<R, D>::from_block_fn(runtime, [leg], [leg], fill::<D, _>(-2.25)).unwrap();
@@ -384,17 +352,20 @@ where
     // reduction's own bound or the rounding of a result of that magnitude,
     // whichever is larger. Both halves are absolute and documented.
     assert!(
-        (device_norm - host_norm).abs() <= tolerance.max(host_norm * D::EPS * terms as f64),
+        (device_norm - host_norm).abs()
+            <= tolerance.max(host_norm * <D as numerics::Numeric>::EPS * terms as f64),
         "norm [{}]: device {device_norm}, host {host_norm}",
         D::NAME
     );
     assert!(host_norm > 0.0, "norm [{}] fixture is vacuous", D::NAME);
 
-    assert_close_absolutely(
-        &[device_a.inner(&device_b).unwrap()],
-        &[a.inner(&b).unwrap()],
-        tolerance,
-        "inner",
+    // `terms`: an inner product reaches its scalar through the `terms`
+    // products `conj(a_i) * b_i`, each weighted once.
+    numerics::assert_close(
+        &format!("inner [{}]", D::NAME),
+        device_a.inner(&device_b).unwrap(),
+        a.inner(&b).unwrap(),
+        terms,
     );
     // `dot` is the deprecated alias; it must still reduce identically.
     #[allow(deprecated)]
@@ -411,18 +382,18 @@ where
     let phase = D::entry(0.0, 1.0);
     if phase != D::entry(0.0, 0.0) {
         let scaled_lhs = device_a.scale(phase).unwrap();
-        assert_close_absolutely(
-            &[scaled_lhs.inner(&device_b).unwrap()],
-            &[a.scale(phase).inner(&b).unwrap()],
-            tolerance,
-            "inner conjugate linearity",
+        numerics::assert_close(
+            &format!("inner conjugate linearity [{}]", D::NAME),
+            scaled_lhs.inner(&device_b).unwrap(),
+            a.scale(phase).inner(&b).unwrap(),
+            terms,
         );
     }
 }
 
 #[test]
 #[ignore = "requires a real CUDA device"]
-fn device_reductions_match_the_host_within_the_device_accumulation_bound() {
+fn device_reductions_match_the_host() {
     let runtime = runtime();
     let u1 = u1_leg();
     let su2 = su2_leg();
@@ -479,8 +450,8 @@ where
 /// computes from the leg's sectors and degeneracies. For `[leg] <- [leg]`
 /// every coupled sector `c` is one leg sector of degeneracy `d_c`, so its
 /// block is `d_c x d_c` and `W = sum_c dim(c) * d_c^2`.
-/// The unchanged payload-dtype `inner` is the device-side non-vacuity check:
-/// on the same fixtures it still saturates / underflows at single precision.
+/// `inner(t, t)` narrows its `f64` total to the payload like the Host, so on
+/// these fixtures it saturates / underflows exactly where the Host's does.
 /// `f64`/`Complex64` run the same fixtures as the control.
 fn assert_norm_is_overflow_and_underflow_safe<R, D>(
     runtime: &Runtime,
@@ -524,34 +495,16 @@ fn assert_norm_is_overflow_and_underflow_safe<R, D>(
 
         if single {
             let square = magnitude as f32 * magnitude as f32;
-            let inner = device.inner(&device).unwrap().magnitude();
-            if overflows {
-                assert!(
-                    square.is_infinite(),
-                    "{what} [{}]: squares must overflow f32",
-                    D::NAME
-                );
-                // Complex32: the saturated `re * im - im * re` is `inf - inf`,
-                // so the saturated inner is non-finite rather than `inf`.
-                assert!(
-                    !inner.is_finite(),
-                    "{what} [{}]: the payload-dtype inner must still saturate, got {inner}",
-                    D::NAME
-                );
-            } else {
-                assert_eq!(
-                    square,
-                    0.0,
-                    "{what} [{}]: squares must underflow f32",
-                    D::NAME
-                );
-                assert_eq!(
-                    inner,
-                    0.0,
-                    "{what} [{}]: the payload-dtype inner must still underflow",
-                    D::NAME
-                );
-            }
+            let expected = if overflows { f32::INFINITY } else { 0.0 };
+            assert_eq!(square, expected, "{what} [{}]: squares leave f32", D::NAME);
+            // The wide total `|x|^2 * W` itself leaves the `f32` range, so the
+            // one narrowing saturates / flushes both sides identically.
+            assert_eq!(
+                device.inner(&device).unwrap(),
+                host.inner(&host).unwrap(),
+                "{what} inner [{}] must narrow like the host",
+                D::NAME
+            );
         }
 
         let normalized = device.normalize().unwrap();
@@ -619,36 +572,150 @@ fn device_norm_and_normalize_match_the_host_where_a_payload_sum_would_overflow_o
     assert_norm_is_overflow_and_underflow_safe::<_, Complex32>(&runtime, &fz2_u1, fz2_u1_weight);
 }
 
-/// What the widening costs, warm: a single-precision `norm` runs the same
-/// device schedule as its double-precision twin plus exactly one device
-/// allocation (the widened copy). Transferred bytes are *equal*, not halved,
-/// because the per-sector partials are downloaded in the wide lane. The
-/// double-precision schedule itself is pinned by hand: one partials upload,
-/// one download, one GEMM per nonempty coupled sector (three for `u1_leg`).
+/// #1383: the device `inner` accumulates in `f64` like the Host, so a
+/// cancelling sum whose every product exceeds `f32::MAX` stays finite.
+///
+/// Every coupled block of `[leg] <- [leg]` is `2 x 2` (all degeneracies two).
+/// `a` holds `x (1 + i)` everywhere, `x = 2^64`, so every `|a_i|^2` and every
+/// product `conj(a_i) b_i` overflows `f32`; `b` holds
+/// `x (1 + i) (-1)^(i+j) (1 + 2^-10 [i = j = 0])`. Per block the four products
+/// cancel to `u x^2 2^-10 = u 2^118`, `u = |1 + i|^2` in the payload (1 for a
+/// real payload, whose entries drop the imaginary part, 2 for a complex one),
+/// so the hand oracle is `u 2^118 sum_c dim(c)`. Every partial sum is a small
+/// multiple of `2^118`, exact in `f64` in any order, and the result is exact
+/// in `f32`. A payload-dtype accumulation instead meets `inf - inf` and
+/// returns NaN.
+fn assert_inner_survives_overflowing_products<R, D>(
+    runtime: &Runtime,
+    leg: &GradedSpace<R>,
+    dim_sum: f64,
+) where
+    R: DeviceRule,
+    D: DevicePayload + numerics::Numeric,
+{
+    let x = 2.0_f64.powi(64);
+    let a = TensorMap::<R, D>::from_block_fn(runtime, [leg], [leg], |_, _| D::entry(x, x)).unwrap();
+    let b = TensorMap::<R, D>::from_block_fn(runtime, [leg], [leg], |_, indices| {
+        let sign = if (indices[0] + indices[1]) % 2 == 0 {
+            1.0
+        } else {
+            -1.0
+        };
+        let bump = if indices == [0, 0] {
+            1.0 + 2.0_f64.powi(-10)
+        } else {
+            1.0
+        };
+        D::entry(x * sign * bump, x * sign * bump)
+    })
+    .unwrap();
+    // `re^2 + im^2`, exact, where `magnitude().powi(2)` rounds through a root.
+    let (re, im) = D::entry(1.0, 1.0).parts();
+    let unit = re * re + im * im;
+    let hand = D::entry(unit * 2.0_f64.powi(118) * dim_sum, 0.0);
+    assert!(
+        (x as f32) * (x as f32) == f32::INFINITY,
+        "the fixture products must overflow f32"
+    );
+
+    let host = a.inner(&b).unwrap();
+    let device = a.to_cuda().unwrap().inner(&b.to_cuda().unwrap()).unwrap();
+    assert_eq!(
+        host,
+        hand,
+        "host inner [{}] against the hand value",
+        D::NAME
+    );
+    assert!(
+        device.magnitude().is_finite(),
+        "device inner [{}] must stay finite, got {device:?}",
+        D::NAME
+    );
+    // `terms`: the `a.data().len()` products reaching the scalar.
+    numerics::assert_close(
+        &format!("device inner [{}]", D::NAME),
+        device,
+        hand,
+        a.data().len(),
+    );
+}
+
 #[test]
 #[ignore = "requires a real CUDA device"]
-fn a_warm_single_precision_norm_costs_one_extra_device_allocation() {
-    fn measure<D: DevicePayload>(
-        runtime: &Runtime,
-        leg: &GradedSpace<U1FusionRule>,
-    ) -> (u64, u64, u64, u64, u64, u64) {
-        let device =
-            TensorMap::<U1FusionRule, D>::from_block_fn(runtime, [leg], [leg], fill::<D, _>(1.5))
+fn device_inner_matches_the_host_where_single_precision_products_overflow() {
+    let runtime = runtime();
+    let u1 = GradedSpace::try_new_with_arc(
+        Arc::new(U1FusionRule),
+        [
+            (U1Irrep::new(-1), 2),
+            (U1Irrep::new(0), 2),
+            (U1Irrep::new(1), 2),
+        ],
+    )
+    .unwrap();
+    let su2 = GradedSpace::try_new_with_arc(
+        Arc::new(SU2FusionRule),
+        [
+            (SU2Irrep::from_twice_spin(0), 2),
+            (SU2Irrep::from_twice_spin(2), 2),
+        ],
+    )
+    .unwrap();
+    // `sum_c dim(c)`: three U(1) charges; SU(2) spins 0 and 1, 1 + 3.
+    assert_inner_survives_overflowing_products::<_, f32>(&runtime, &u1, 3.0);
+    assert_inner_survives_overflowing_products::<_, Complex32>(&runtime, &u1, 3.0);
+    assert_inner_survives_overflowing_products::<_, f32>(&runtime, &su2, 4.0);
+    assert_inner_survives_overflowing_products::<_, Complex32>(&runtime, &su2, 4.0);
+    // Control: the double-precision payloads never overflowed.
+    assert_inner_survives_overflowing_products::<_, f64>(&runtime, &su2, 4.0);
+    assert_inner_survives_overflowing_products::<_, Complex64>(&runtime, &su2, 4.0);
+}
+
+/// What the widening costs, warm: a single-precision reduction runs the same
+/// device schedule as its double-precision twin plus exactly one device
+/// allocation per distinct widened operand (#1344, #1383): one for `norm` and
+/// `inner(a, a)`, two for `inner(a, b)`. Transferred bytes are *equal*, not
+/// halved, because the per-sector partials are downloaded in the wide lane.
+/// The double-precision schedule itself is pinned by hand: one partials
+/// upload, one download, one GEMM per nonempty coupled sector (three for
+/// `u1_leg`).
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn a_warm_single_precision_reduction_costs_one_extra_device_allocation_per_operand() {
+    type Stats = (u64, u64, u64, u64, u64, u64);
+    fn measure<D: DevicePayload>(runtime: &Runtime, leg: &GradedSpace<U1FusionRule>) -> [Stats; 3] {
+        let tensor = |seed| {
+            TensorMap::<U1FusionRule, D>::from_block_fn(runtime, [leg], [leg], fill::<D, _>(seed))
                 .unwrap()
                 .to_cuda()
-                .unwrap();
-        let _ = device.norm().unwrap();
-        let before = cuda_transfer_stats();
-        let _ = device.norm().unwrap();
-        let after = cuda_transfer_stats();
-        (
-            after.h2d_calls - before.h2d_calls,
-            after.h2d_bytes - before.h2d_bytes,
-            after.d2h_calls - before.d2h_calls,
-            after.d2h_bytes - before.d2h_bytes,
-            after.device_allocs - before.device_allocs,
-            after.gemm_calls - before.gemm_calls,
-        )
+                .unwrap()
+        };
+        let (a, b) = (tensor(1.5), tensor(-2.25));
+        let warm = |op: &dyn Fn()| {
+            op();
+            let before = cuda_transfer_stats();
+            op();
+            let after = cuda_transfer_stats();
+            (
+                after.h2d_calls - before.h2d_calls,
+                after.h2d_bytes - before.h2d_bytes,
+                after.d2h_calls - before.d2h_calls,
+                after.d2h_bytes - before.d2h_bytes,
+                after.device_allocs - before.device_allocs,
+                after.gemm_calls - before.gemm_calls,
+            )
+        };
+        [
+            warm(&|| {
+                a.norm().unwrap();
+            }),
+            warm(&|| {
+                a.inner(&a).unwrap();
+            }),
+            warm(&|| {
+                a.inner(&b).unwrap();
+            }),
+        ]
     }
 
     let runtime = runtime();
@@ -665,24 +732,30 @@ fn a_warm_single_precision_norm_costs_one_extra_device_allocation() {
             "c32 against c64",
         ),
     ] {
-        eprintln!("{what}: single {single:?} double {double:?}");
-        assert_eq!(
-            (double.0, double.2, double.4, double.5),
-            (1, 1, 1, 3),
-            "{what}: double-precision (h2d_calls, d2h_calls, device_allocs, gemm_calls)"
-        );
-        assert_eq!(
-            single,
-            (
-                double.0,
-                double.1,
-                double.2,
-                double.3,
-                double.4 + 1,
-                double.5
-            ),
-            "{what}: single precision adds exactly the widened allocation"
-        );
+        for ((single, double), (op, widened)) in single.into_iter().zip(double).zip([
+            ("norm", 1),
+            ("inner(a, a)", 1),
+            ("inner(a, b)", 2),
+        ]) {
+            eprintln!("{what} {op}: single {single:?} double {double:?}");
+            assert_eq!(
+                (double.0, double.2, double.4, double.5),
+                (1, 1, 1, 3),
+                "{what} {op}: double-precision (h2d_calls, d2h_calls, device_allocs, gemm_calls)"
+            );
+            assert_eq!(
+                single,
+                (
+                    double.0,
+                    double.1,
+                    double.2,
+                    double.3,
+                    double.4 + widened,
+                    double.5
+                ),
+                "{what} {op}: single precision adds exactly the widened allocations"
+            );
+        }
     }
 }
 
