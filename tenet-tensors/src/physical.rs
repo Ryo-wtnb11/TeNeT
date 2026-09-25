@@ -591,9 +591,21 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = C> + PhysicalFusionBasis<Scalar = C>,
     C: CategoricalScalar,
 {
+    // TensorKit `axes(V::GradedSpace, c)` walks `sectors(V)`, which for
+    // `V'` yields `dual(c)` for `c` in `V`'s order; `SectorId` order would
+    // make bending a leg reorder its dense axis.
+    let rule = basis.rule;
+    let mut ordered = leg.iter().collect::<Vec<_>>();
+    ordered.sort_by_cached_key(|&(sector, _)| {
+        rule.sector_order_key(if leg.is_dual() {
+            rule.dual(sector)
+        } else {
+            sector
+        })
+    });
     let mut dimension = 0usize;
-    let mut sectors = HashMap::with_capacity(leg.sectors().len());
-    for (sector, degeneracy) in leg.iter() {
+    let mut sectors = HashMap::with_capacity(ordered.len());
+    for (sector, degeneracy) in ordered {
         let carrier_dim = basis.carrier_dim(sector)?;
         let width = degeneracy
             .checked_mul(carrier_dim)

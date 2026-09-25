@@ -1081,17 +1081,14 @@ where
     /// carrier basis and fusion coefficients determine the embedding; no
     /// symmetry-specific dispatch occurs in this method.
     ///
-    /// # Index order depends on the side of a leg
+    /// # Index order matches TensorKit
     ///
-    /// A codomain axis is indexed in its codomain space's sector order, a
-    /// domain axis in its domain space's order (not in the order of the dual
-    /// space the external axis carries). A [`Self::permute`] or
-    /// [`Self::repartition`] that moves a leg to the other side therefore
-    /// reindexes that axis by the dual space's sectors. For U(1),
-    /// [`SectorId`] order is `0, -1, 1`, so the dual `V'` of
-    /// `V = (-1) ⊕ 0 ⊕ 1` lists the charges of `V` as `0, 1, -1`: bending the
-    /// domain leg of `id(V)` into the codomain turns the identity matrix into
-    /// the swap of the two charged entries.
+    /// Each axis is ordered as TensorKit's `convert(Array, t)` orders it: a
+    /// dual space `V'` is listed in `V`'s order, so bending a leg with
+    /// [`Self::permute`] or [`Self::repartition`] leaves its index order
+    /// unchanged. For the built-in U(1) and SU(2) providers, whose braiding is
+    /// bosonic, the expansion of a permuted tensor is exactly the matching
+    /// axis permutation of this array.
     ///
     /// ```
     /// use tenet::prelude::*;
@@ -1100,19 +1097,16 @@ where
     /// let v = GradedSpace::try_new(U1FusionRule, [-1, 0, 1].map(|q| (U1Irrep::new(q), 1)))?;
     /// let id = TensorMap::<U1FusionRule, f64>::id(&rt, [&v])?;
     ///
-    /// // `V <- V`: both axes in `V`'s order.
+    /// // `V <- V`.
     /// let matrix = id.to_physical_dense().expect("U(1) has a physical basis");
     /// assert_eq!(matrix.data, [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]);
     ///
-    /// // `V ⊗ V' <- ()`: axis 1 is now in `V'`'s order.
+    /// // `V ⊗ V' <- ()`: the same entries.
     /// let bent = id.permute(&[0, 1], &[])?;
     /// let vector = bent.to_physical_dense().expect("U(1) has a physical basis");
-    /// assert_eq!(vector.data, [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0]);
+    /// assert_eq!(vector.data, matrix.data);
     /// # Ok::<(), Error>(())
     /// ```
-    ///
-    /// To compare data across orientations, permute the tensor to the
-    /// orientation the other side expects before expanding it.
     ///
     /// Providers opt in at compile time by implementing
     /// [`PhysicalFusionBasis`]:
@@ -10283,21 +10277,14 @@ enum TypedTensorRepr<R, D, S = Vec<D>> {
 /// Owned physical-basis tensor data on the Host.
 ///
 /// Axes are ordered as all codomain legs followed by all domain legs. Data is
-/// column-major (axis 0 varies fastest). Within each leg, entries follow that
-/// [`SectorLeg`]'s canonical [`SectorId`] order, then degeneracy, then
-/// carrier-basis index, with the carrier index varying fastest.
+/// column-major (axis 0 varies fastest). Within each leg, entries follow
+/// TensorKit's sector order (the provider's `sector_order_key`; U(1):
+/// `0, 1, -1, 2, ...`), then degeneracy, then carrier-basis index, with the
+/// carrier index varying fastest. A dual space `V'` is listed in `V`'s sector
+/// order, the dual basis vector `e^i` at the position of `e_i`.
 ///
-/// The leg that orders an axis is the one stored on its side: the codomain
-/// space for a codomain axis, and the domain space itself for a domain axis,
-/// as for a matrix column index. A dual space is ordered by its own
-/// (dualized) sectors. Moving a leg across the split replaces that space by
-/// its dual, whose sectors can sort differently, so the same physical leg can
-/// come back in a different index order; see
-/// [`TensorMap::to_physical_dense`].
-///
-/// This is not TensorKit's `convert(Array, t)` order: TensorKit orders sectors
-/// by its own `isless` (U(1): `0, 1, -1`) and lists a dual space `V'` in
-/// `V`'s order.
+/// This is TensorKit's `convert(Array, t)` layout, so the side of a leg does
+/// not change its index order; see [`TensorMap::to_physical_dense`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct PhysicalDense<D> {
     /// Physical dimension of each axis, in codomain-then-domain order.

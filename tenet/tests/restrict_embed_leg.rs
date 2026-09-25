@@ -4,8 +4,8 @@
 //!
 //! * a **dense gather**: `to_physical_dense` of the result must equal a
 //!   per-sector gather of `to_physical_dense` of the source, with the dense
-//!   offsets of the restricted leg recomputed (TeNeT's physical order is
-//!   sector, then degeneracy, then carrier index);
+//!   offsets of the restricted leg recomputed (the physical order is
+//!   TensorKit's sector order, then degeneracy, then carrier index);
 //! * an **inclusion isometry**: `ι_σ` hand-filled with `from_block_fn`, padded
 //!   with `TensorMap::id` through `otimes`, and applied with `compose`.
 //!   `contract` is deliberately not used: it applies the fermionic supertrace
@@ -23,12 +23,12 @@ use tenet::core::{
 use tenet::prelude::{GradedSpace, LegSelection, Runtime, TensorMap};
 use tenet::typed::BlockFusionTrees;
 
-/// `(degeneracy, carrier dimension)` per sector, in the leg's stored order.
+/// `(degeneracy, carrier dimension)` per sector, in the leg's physical order.
 type AxisLayout = Vec<(usize, usize)>;
 
 /// Destination dense index -> source dense index for one axis.
 ///
-/// `selection[i]` is the kept degeneracy range of the `i`-th stored sector,
+/// `selection[i]` is the kept degeneracy range of the `i`-th sector,
 /// `None` when that sector is dropped entirely.
 fn axis_gather(layout: &AxisLayout, selection: &[Option<Range<usize>>]) -> Vec<usize> {
     let mut map = Vec::new();
@@ -192,14 +192,42 @@ fn fz2(
     .unwrap()
 }
 
-/// The stored-order `(degeneracy, carrier)` layout and the per-position
+/// A sector's TensorKitSectors `findindex` position on a leg. A dual leg is
+/// listed in its parent's order, so the position is that of the dual sector.
+trait TensorKitPosition {
+    fn tensorkit_position(&self, is_dual: bool) -> u64;
+}
+
+impl TensorKitPosition for U1Irrep {
+    /// TensorKit U(1) order `0, 1, -1, 2, -2, ...` (integer charges only).
+    fn tensorkit_position(&self, is_dual: bool) -> u64 {
+        let charge = if is_dual {
+            -self.charge()
+        } else {
+            self.charge()
+        };
+        2 * u64::from(charge.unsigned_abs()) - u64::from(charge > 0)
+    }
+}
+
+impl TensorKitPosition for SU2Irrep {
+    fn tensorkit_position(&self, _is_dual: bool) -> u64 {
+        self.twice_spin() as u64
+    }
+}
+
+/// The physical-order `(degeneracy, carrier)` layout and the per-position
 /// selection ranges the dense oracle needs.
-fn dense_plan<S: PartialEq>(
+fn dense_plan<S: PartialEq + TensorKitPosition>(
     sectors: &[S],
     degeneracies: &[usize],
+    is_dual: bool,
     carrier: impl Fn(&S) -> usize,
     selected: &[(S, Range<usize>)],
 ) -> (AxisLayout, Vec<Option<Range<usize>>>) {
+    let mut order = sectors.iter().zip(degeneracies).collect::<Vec<_>>();
+    order.sort_by_key(|(sector, _)| sector.tensorkit_position(is_dual));
+    let (sectors, degeneracies): (Vec<_>, Vec<_>) = order.into_iter().unzip();
     let layout: AxisLayout = sectors
         .iter()
         .zip(degeneracies)
@@ -210,7 +238,7 @@ fn dense_plan<S: PartialEq>(
         .map(|sector| {
             selected
                 .iter()
-                .find(|(candidate, _)| candidate == sector)
+                .find(|(candidate, _)| candidate == *sector)
                 .map(|(_, range)| range.clone())
         })
         .collect();
@@ -243,11 +271,17 @@ fn restrict_matches_the_dense_gather_on_a_dual_u1_codomain_leg() {
     let (layout, ranges) = dense_plan(
         &leg.sectors().unwrap(),
         leg.degeneracies(),
+        leg.is_dual(),
         |_| 1,
         &selected,
     );
-    let (other_layout, _) =
-        dense_plan::<U1Irrep>(&other.sectors().unwrap(), other.degeneracies(), |_| 1, &[]);
+    let (other_layout, _) = dense_plan::<U1Irrep>(
+        &other.sectors().unwrap(),
+        other.degeneracies(),
+        other.is_dual(),
+        |_| 1,
+        &[],
+    );
     let dense = source.to_physical_dense().unwrap();
     let maps = vec![
         axis_gather(&layout, &ranges),
@@ -282,12 +316,14 @@ fn restrict_keeps_su2_multiplets_intact_for_a_middle_sector_with_offset() {
     let (layout, ranges) = dense_plan(
         &leg.sectors().unwrap(),
         leg.degeneracies(),
+        leg.is_dual(),
         |sector: &SU2Irrep| sector.twice_spin() + 1,
         &selected,
     );
     let (other_layout, _) = dense_plan::<SU2Irrep>(
         &other.sectors().unwrap(),
         other.degeneracies(),
+        other.is_dual(),
         |sector| sector.twice_spin() + 1,
         &[],
     );
@@ -425,12 +461,14 @@ fn restrict_reads_a_complex_lazy_adjoint_domain_leg_with_a_multi_sector_selectio
     let (layout, ranges) = dense_plan(
         &leg.sectors().unwrap(),
         leg.degeneracies(),
+        leg.is_dual(),
         |_| 1,
         &selected,
     );
     let (row_layout, _) = dense_plan::<U1Irrep>(
         &columns.sectors().unwrap(),
         columns.degeneracies(),
+        columns.is_dual(),
         |_| 1,
         &[],
     );
@@ -523,11 +561,17 @@ fn embed_after_restrict_is_the_orthogonal_projector() {
     let (layout, ranges) = dense_plan(
         &leg.sectors().unwrap(),
         leg.degeneracies(),
+        leg.is_dual(),
         |_| 1,
         &selected,
     );
-    let (other_layout, _) =
-        dense_plan::<U1Irrep>(&other.sectors().unwrap(), other.degeneracies(), |_| 1, &[]);
+    let (other_layout, _) = dense_plan::<U1Irrep>(
+        &other.sectors().unwrap(),
+        other.degeneracies(),
+        other.is_dual(),
+        |_| 1,
+        &[],
+    );
     let dense = source.to_physical_dense().unwrap();
     let maps = vec![
         axis_gather(&layout, &ranges),
@@ -649,18 +693,21 @@ fn embed_scatters_a_complex_lazy_adjoint_dual_domain_leg_per_sector() {
     let (layout, ranges) = dense_plan(
         &leg.sectors().unwrap(),
         leg.degeneracies(),
+        leg.is_dual(),
         |_| 1,
         &selected,
     );
     let (column_layout, _) = dense_plan::<U1Irrep>(
         &columns.sectors().unwrap(),
         columns.degeneracies(),
+        columns.is_dual(),
         |_| 1,
         &[],
     );
     let (spectator_layout, _) = dense_plan::<U1Irrep>(
         &spectator.sectors().unwrap(),
         spectator.degeneracies(),
+        spectator.is_dual(),
         |_| 1,
         &[],
     );
@@ -783,11 +830,17 @@ fn a_rank_five_restriction_still_gathers_one_axis_only() {
     let (layout, ranges) = dense_plan(
         &leg.sectors().unwrap(),
         leg.degeneracies(),
+        leg.is_dual(),
         |_| 1,
         &selected,
     );
-    let (small_layout, _) =
-        dense_plan::<U1Irrep>(&small.sectors().unwrap(), small.degeneracies(), |_| 1, &[]);
+    let (small_layout, _) = dense_plan::<U1Irrep>(
+        &small.sectors().unwrap(),
+        small.degeneracies(),
+        small.is_dual(),
+        |_| 1,
+        &[],
+    );
     let dense = source.to_physical_dense().unwrap();
     let maps = vec![
         identity_gather(&small_layout),
