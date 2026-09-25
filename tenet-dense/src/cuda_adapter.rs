@@ -11,7 +11,7 @@ use tenferro_linalg::{QrGauge, QrOptions, TensorReadLinalgExt};
 use tenferro_tensor::backend::{BackendSession, BackendSessionHost};
 use tenferro_tensor::{
     ContractionScalar, DotGeneralAccumulation, DotGeneralConfig, Tensor, TensorDot,
-    TensorElementwise, TensorRead, TensorReduction, TensorScalar as TenferroScalar,
+    TensorElementwise, TensorIndexing, TensorRead, TensorReduction, TensorScalar as TenferroScalar,
     TensorStructural, TensorView, TensorViewMut, TensorWrite, TypedTensor,
 };
 
@@ -257,7 +257,7 @@ pub struct CudaPlanCacheStats {
 /// - `device_allocs`: device buffers this module creates or takes ownership
 ///   of, i.e. uploads plus tenferro-produced tensors wrapped as
 ///   [`CudaDenseStorage`] (factorization factors). Tenferro's own solver
-///   workspaces and the intermediate tensors of `cuda_is_hermitian_region`
+///   workspaces and the intermediate tensors of `cuda_hermitian_regions`
 ///   (`abs`, `div`, `sub`, the reductions) allocate on device but are not
 ///   visible as buffers here and are therefore not counted.
 /// - `gemm_calls`: `dot_general` submissions, from
@@ -1792,24 +1792,6 @@ fn download_values<R: CudaRealScalar>(
     Ok(values.into_iter().map(R::widen).collect())
 }
 
-fn download_scalar<R: CudaRealScalar>(
-    ctx: &CudaDenseContext,
-    tensor: &Tensor,
-    op: &'static str,
-) -> Result<f64, DenseError> {
-    let values = download_values::<R>(ctx, tensor)?;
-    if values.len() != 1 {
-        return Err(cuda_error(
-            op,
-            format!(
-                "device reduction returned {} values; expected 1",
-                values.len()
-            ),
-        ));
-    }
-    Ok(values[0])
-}
-
 /// Uploads a rank-0 operand in the payload's **real** lane.
 ///
 /// The lane is not a symmetry: Tenferro rejects an `F64` rank-0 operand
@@ -1885,10 +1867,22 @@ fn magnitudes_for_sum_squares<D: CudaScalar>(
         .map_err(|err| cuda_error(op, err))
 }
 
-/// Tests one packed CUDA matrix region with the host EIGH rule
-/// `||(A - A^H)/2||_F <= 64 eps(real(D)) ||A||_F`. The residual uses the
-/// *conjugate* transpose, so a complex-symmetric non-Hermitian block is
-/// rejected.
+/// Tests one packed CUDA matrix region with the host EIGH rule; the
+/// one-region case of [`cuda_hermitian_regions`].
+#[doc(hidden)]
+pub fn cuda_is_hermitian_region<D: CudaScalar>(
+    ctx: &mut CudaDenseContext,
+    src: &CudaDenseStorage,
+    offset: usize,
+    n: usize,
+) -> Result<bool, DenseError> {
+    Ok(cuda_hermitian_regions::<D>(ctx, src, &[(offset, n)])?[0])
+}
+
+/// Tests packed square CUDA regions `(offset, n)` of `src` with the host EIGH
+/// rule `||(A - A^H)/2||_F <= 64 eps(real(D)) ||A||_F`, returning one decision
+/// per region. The residual uses the *conjugate* transpose, so a
+/// complex-symmetric non-Hermitian block is rejected.
 ///
 /// The epsilon is the payload's own real lane
 /// ([`crate::cuda_hermitian::HERMITIAN_TOLERANCE_EPSILONS`]), matching the
@@ -1900,115 +1894,210 @@ fn magnitudes_for_sum_squares<D: CudaScalar>(
 /// of two normalizer; it is why the device tests' scale window stops at
 /// `2^(MAX_EXP - 4)`.
 ///
-/// The normal and conjugate-transposed views are materialized and reduced on
-/// device. Only scalar norm metadata is downloaded; the receiver region is
-/// never copied to the host. Operation-local workspaces are dropped on return.
+/// Each region's rule needs three dependent scalar stages: its maximum picks
+/// the input normalizer, the residual maximum picks the residual normalizer,
+/// and the residual sum of squares decides. Every stage runs over all
+/// still-undecided regions before its scalars are gathered with one
+/// `concatenate` and downloaded together, so a call makes at most three
+/// downloads whatever the region count. Why not per region: each download
+/// blocks the host (a D2H plus a CubeCL flush), which made admission the
+/// largest TeNeT-owned cost of `eigh` (#1483). The price is that the
+/// materialized input, then residual, of every undecided region is live
+/// across a stage boundary: one extra copy of the regions' payload, the same
+/// order as the eigenvector factor `eigh` allocates anyway.
+///
+/// Only scalar norm metadata is downloaded; no region is copied to the host.
 #[doc(hidden)]
-pub fn cuda_is_hermitian_region<D: CudaScalar>(
+pub fn cuda_hermitian_regions<D: CudaScalar>(
     ctx: &mut CudaDenseContext,
     src: &CudaDenseStorage,
-    offset: usize,
-    n: usize,
-) -> Result<bool, DenseError> {
+    regions: &[(usize, usize)],
+) -> Result<Vec<bool>, DenseError> {
     const OP: &str = "cuda_hermitian";
     ensure_cuda_device(ctx.device, OP, &[("src", src.device)])?;
-    if n == 0 {
-        return Ok(true);
-    }
+    let max_exp = <D::Real as CudaRealScalar>::MAX_EXP;
+    let mut accepted = vec![true; regions.len()];
 
-    let normal_view = src.region_view_strided::<D>([n, n], [1, n], offset)?;
-    let normal = ctx
-        .backend
-        .to_contiguous_read(TensorRead::from_view(normal_view))
-        .map_err(|err| cuda_error(OP, err))?;
-    let input_abs = ctx
-        .backend
-        .abs(&normal)
-        .map_err(|err| cuda_error(OP, err))?;
-    let input_max = ctx
-        .backend
-        .reduce_max(&input_abs, &[0, 1])
-        .map_err(|err| cuda_error(OP, err))?;
-    let input_scale = download_scalar::<D::Real>(ctx, &input_max, OP)?;
-    // Pinned Tenferro's CUDA reduce_max propagates NaN. Keep this check before
-    // the zero fast path so an otherwise-zero matrix containing NaN is rejected.
-    if !input_scale.is_finite() {
-        return Ok(false);
+    // Stage 1: max |A|.
+    let mut inputs = Vec::new();
+    let mut maxima = Vec::new();
+    for (index, &(offset, n)) in regions.iter().enumerate() {
+        if n == 0 {
+            continue;
+        }
+        let normal = contiguous_square::<D>(ctx, src, n, [1, n], offset)?;
+        let input_abs = ctx
+            .backend
+            .abs(&normal)
+            .map_err(|err| cuda_error(OP, err))?;
+        maxima.push(
+            ctx.backend
+                .reduce_max(&input_abs, &[0, 1])
+                .map_err(|err| cuda_error(OP, err))?,
+        );
+        inputs.push((index, normal));
     }
-    if input_scale == 0.0 {
-        return Ok(true);
-    }
+    let input_scales = download_gathered::<D::Real>(ctx, &maxima, OP)?;
+    drop(maxima);
 
-    let transpose_view = src.region_view_strided::<D>([n, n], [n, 1], offset)?;
-    let transpose = ctx
-        .backend
-        .to_contiguous_read(TensorRead::from_view(transpose_view))
-        .map_err(|err| cuda_error(OP, err))?;
-    // Conjugation is a backend op on the transposed copy, never a TeNeT loop.
-    let transpose = if D::IS_COMPLEX {
-        ctx.backend
-            .conj(&transpose)
-            .map_err(|err| cuda_error(OP, err))?
-    } else {
-        transpose
-    };
-    let normalizer = power_of_two_operand::<D>(
-        ctx,
-        power_of_two_normalizer(input_scale, <D::Real as CudaRealScalar>::MAX_EXP),
+    // Stage 2: sum |A/s|^2 and max |(A - A^H)/s|.
+    let mut residuals = Vec::new();
+    let mut input_sums = Vec::new();
+    let mut residual_maxima = Vec::new();
+    for ((index, normal), input_scale) in inputs.into_iter().zip(input_scales) {
+        // Pinned Tenferro's CUDA reduce_max propagates NaN. Keep this check
+        // before the zero fast path so an otherwise-zero matrix containing NaN
+        // is rejected.
+        if !input_scale.is_finite() {
+            accepted[index] = false;
+            continue;
+        }
+        if input_scale == 0.0 {
+            continue;
+        }
+        let (offset, n) = regions[index];
+        let transpose = contiguous_square::<D>(ctx, src, n, [n, 1], offset)?;
+        // Conjugation is a backend op on the transposed copy, never a TeNeT loop.
+        let transpose = if D::IS_COMPLEX {
+            ctx.backend
+                .conj(&transpose)
+                .map_err(|err| cuda_error(OP, err))?
+        } else {
+            transpose
+        };
+        let normalizer =
+            power_of_two_operand::<D>(ctx, power_of_two_normalizer(input_scale, max_exp))?;
+        let normal_scaled = scale_by_power_of_two::<D>(ctx, OP, &normal, &normalizer)?;
+        drop(normal);
+        let transpose_scaled = scale_by_power_of_two::<D>(ctx, OP, &transpose, &normalizer)?;
+        input_sums.push(sum_of_squares::<D>(ctx, OP, &normal_scaled)?);
+        let residual = ctx
+            .backend
+            .sub(&normal_scaled, &transpose_scaled)
+            .map_err(|err| cuda_error(OP, err))?;
+        let residual_abs = ctx
+            .backend
+            .abs(&residual)
+            .map_err(|err| cuda_error(OP, err))?;
+        residual_maxima.push(
+            ctx.backend
+                .reduce_max(&residual_abs, &[0, 1])
+                .map_err(|err| cuda_error(OP, err))?,
+        );
+        residuals.push((index, residual));
+    }
+    let count = residuals.len();
+    input_sums.append(&mut residual_maxima);
+    let stage2 = download_gathered::<D::Real>(ctx, &input_sums, OP)?;
+    drop(input_sums);
+    let (input_ss, residual_scales) = stage2.split_at(count);
+
+    // Stage 3: sum |R/r|^2.
+    let mut undecided = Vec::new();
+    let mut residual_sums = Vec::new();
+    for (((index, residual), &input_ss), &residual_scale) in
+        residuals.into_iter().zip(input_ss).zip(residual_scales)
+    {
+        if !residual_scale.is_finite() {
+            accepted[index] = false;
+            continue;
+        }
+        if residual_scale == 0.0 {
+            accepted[index] = input_ss.is_finite() && input_ss >= 0.0;
+            continue;
+        }
+        let residual_normalizer = power_of_two_normalizer(residual_scale, max_exp);
+        let residual_normalizer_tensor = power_of_two_operand::<D>(ctx, residual_normalizer)?;
+        let residual_normalized =
+            scale_by_power_of_two::<D>(ctx, OP, &residual, &residual_normalizer_tensor)?;
+        residual_sums.push(sum_of_squares::<D>(ctx, OP, &residual_normalized)?);
+        undecided.push((index, input_ss, residual_normalizer));
+    }
+    let residual_ss = download_gathered::<D::Real>(ctx, &residual_sums, OP)?;
+    for ((index, input_ss, residual_normalizer), residual_ss) in
+        undecided.into_iter().zip(residual_ss)
+    {
+        accepted[index] = scaled_hermitian_residual_accepts(
+            input_ss,
+            // Exact: the reciprocal of a normal power of two.
+            residual_normalizer.recip(),
+            residual_ss,
+            hermitian_tolerance::<D>(),
+        );
+    }
+    Ok(accepted)
+}
+
+/// Materializes the `n x n` region at `offset` with element strides
+/// `strides` as a compact `[n, n, 1]` device tensor.
+///
+/// Why the trailing unit axis: a reduction over axes `[0, 1]` then yields a
+/// rank-1 `[1]` tensor, which Tenferro's `concatenate` accepts, whereas the
+/// rank-0 result of a rank-2 input would need a reshape copy per scalar.
+fn contiguous_square<D: CudaScalar>(
+    ctx: &mut CudaDenseContext,
+    src: &CudaDenseStorage,
+    n: usize,
+    strides: [usize; 2],
+    offset: usize,
+) -> Result<Tensor, DenseError> {
+    const OP: &str = "cuda_hermitian";
+    src.check_matrix_bound([n, n], strides, offset)?;
+    let to_isize =
+        |value: usize| isize::try_from(value).map_err(|_| cuda_error(OP, "index exceeds isize"));
+    let view = src.region_view_nd::<D>(
+        &[n, n, 1],
+        &[to_isize(strides[0])?, to_isize(strides[1])?, 1],
+        to_isize(offset)?,
     )?;
-    let normal_scaled = scale_by_power_of_two::<D>(ctx, OP, &normal, &normalizer)?;
-    let transpose_scaled = scale_by_power_of_two::<D>(ctx, OP, &transpose, &normalizer)?;
-    let input_magnitudes = magnitudes_for_sum_squares::<D>(ctx, OP, &normal_scaled)?;
-    let input_ss = ctx
-        .backend
+    ctx.backend
+        .to_contiguous_read(TensorRead::from_view(view))
+        .map_err(|err| cuda_error(OP, err))
+}
+
+/// `sum |x|^2` over axes `[0, 1]` of a `[n, n, 1]` payload tensor, in its
+/// real lane.
+fn sum_of_squares<D: CudaScalar>(
+    ctx: &mut CudaDenseContext,
+    op: &'static str,
+    tensor: &Tensor,
+) -> Result<Tensor, DenseError> {
+    let magnitudes = magnitudes_for_sum_squares::<D>(ctx, op, tensor)?;
+    ctx.backend
         .reduce_sum_squares_read(
-            TensorRead::from_tensor(input_magnitudes.as_ref().unwrap_or(&normal_scaled)),
+            TensorRead::from_tensor(magnitudes.as_ref().unwrap_or(tensor)),
             &[0, 1],
         )
-        .map_err(|err| cuda_error(OP, err))?;
-    let input_ss = download_scalar::<D::Real>(ctx, &input_ss, OP)?;
+        .map_err(|err| cuda_error(op, err))
+}
 
-    let residual = ctx
-        .backend
-        .sub(&normal_scaled, &transpose_scaled)
-        .map_err(|err| cuda_error(OP, err))?;
-    let residual_abs = ctx
-        .backend
-        .abs(&residual)
-        .map_err(|err| cuda_error(OP, err))?;
-    let residual_max = ctx
-        .backend
-        .reduce_max(&residual_abs, &[0, 1])
-        .map_err(|err| cuda_error(OP, err))?;
-    let residual_scale = download_scalar::<D::Real>(ctx, &residual_max, OP)?;
-    if !residual_scale.is_finite() {
-        return Ok(false);
+/// Downloads rank-1 real reductions of lane `R` with one transfer: they are
+/// concatenated on device first. No parts means no transfer.
+fn download_gathered<R: CudaRealScalar>(
+    ctx: &mut CudaDenseContext,
+    parts: &[Tensor],
+    op: &'static str,
+) -> Result<Vec<f64>, DenseError> {
+    if parts.is_empty() {
+        return Ok(Vec::new());
     }
-    if residual_scale == 0.0 {
-        return Ok(input_ss.is_finite() && input_ss >= 0.0);
-    }
-
-    let residual_normalizer =
-        power_of_two_normalizer(residual_scale, <D::Real as CudaRealScalar>::MAX_EXP);
-    let residual_normalizer_tensor = power_of_two_operand::<D>(ctx, residual_normalizer)?;
-    let residual_normalized =
-        scale_by_power_of_two::<D>(ctx, OP, &residual, &residual_normalizer_tensor)?;
-    let residual_magnitudes = magnitudes_for_sum_squares::<D>(ctx, OP, &residual_normalized)?;
-    let residual_ss = ctx
+    let refs: Vec<&Tensor> = parts.iter().collect();
+    let gathered = ctx
         .backend
-        .reduce_sum_squares_read(
-            TensorRead::from_tensor(residual_magnitudes.as_ref().unwrap_or(&residual_normalized)),
-            &[0, 1],
-        )
-        .map_err(|err| cuda_error(OP, err))?;
-    let residual_ss = download_scalar::<D::Real>(ctx, &residual_ss, OP)?;
-    Ok(scaled_hermitian_residual_accepts(
-        input_ss,
-        // Exact: the reciprocal of a normal power of two.
-        residual_normalizer.recip(),
-        residual_ss,
-        hermitian_tolerance::<D>(),
-    ))
+        .concatenate(&refs, 0)
+        .map_err(|err| cuda_error(op, err))?;
+    let values = download_values::<R>(ctx, &gathered)?;
+    if values.len() != parts.len() {
+        return Err(cuda_error(
+            op,
+            format!(
+                "device reductions returned {} values; expected {}",
+                values.len(),
+                parts.len()
+            ),
+        ));
+    }
+    Ok(values)
 }
 
 /// Copies the leading compact `rows x cols` block of a device buffer into a
