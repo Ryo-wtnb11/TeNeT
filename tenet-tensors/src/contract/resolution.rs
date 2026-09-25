@@ -16,9 +16,9 @@ use tenet_operations::TensorContractFusionProfile;
 
 use super::dynamic_space::{DynamicFusionMapSpace, FusionOperand, FusionOperandLayout};
 use super::fusion::{
-    contracted_axis_order_candidates, external_axis_is_dual, is_core_form_fusion_source_contract,
-    rhs_contract_twist_factor_oriented, FusionContractOrientation, FusionContractPlan,
-    CACHED_ORIENTATIONS,
+    contracted_axis_order_candidates, external_axis_is_dual,
+    min_dynamic_tree_materialized_elements, rhs_contract_twist_factor_oriented,
+    FusionContractOrientation, FusionContractPlan, CACHED_ORIENTATIONS,
 };
 use super::fusion_block::{
     compile_fusion_block_contract_plan_core_geometry,
@@ -854,28 +854,98 @@ where
     rhs_contract_axes_require_twist(rule, rhs, axes.rhs_contracting_axes())
 }
 
-/// True when these contracting axes put a contraction in the direct core-GEMM
-/// source form — `lhs`'s whole domain paired in order with `rhs`'s whole
-/// codomain — with no fermionic supertrace twist on `rhs`. In that form the
-/// identity output order resolves to [`Resolution::Core`]; any other output
-/// order resolves to the dynamic tree route.
+/// Whether a contraction into `dst`, the destination of the requested
+/// `output_axes`, takes TensorKit `blas_contract!`'s `copyC` shape, and in
+/// which operand order: the returned order's default-output contraction runs
+/// a zero-copy candidate (see [`try_zero_copy_contract_candidates`]) into a
+/// temporary, and one permute into `dst` then gives `output_axes`. `LhsRhs`
+/// contracts `lhs·rhs`, `RhsLhs` contracts `rhs·lhs`. A lazy adjoint stays a
+/// GEMM flag there (`has_shared_permute(::AdjointTensorMap)`).
+///
+/// The choice is TensorKit `contract!`'s (tensoroperations.jl L318-357)
+/// under `_contract_memcost` (L378): `copyC` costs `dim(C)`, the required
+/// length of `dst` (the temporary has the same blocks), and it is taken only
+/// when that is no more than the cheapest DynamicTree candidate for the
+/// requested order ([`min_dynamic_tree_materialized_elements`], the real
+/// selector's scorer). Ties go to the earlier candidate in TensorKit's
+/// order: a B·A `copyC` (m3/m4) loses a tie to an A·B DynamicTree candidate
+/// (m1/m2) and wins one against a B·A candidate, whose equal cost is then
+/// the same output-only copy. A large `C` from small operands therefore
+/// keeps the one-call route, which copies the operands instead.
+///
+/// `None` also when `output_axes` is not a permutation of the open axes,
+/// when it is already zero-copy, when no candidate is, or when an admission
+/// is not Complete: the one-call route then applies and keeps its errors.
+/// Candidate checks are axis and dual-flag comparisons, with the fermionic
+/// twist declined as on the Host Core route.
 #[doc(hidden)]
-pub fn contraction_sources_are_untwisted_core_form<R>(
+pub fn zero_copy_contract_order_for_output_permute<R>(
     rule: &R,
-    lhs: &FusionTreeHomSpace,
-    rhs: &FusionTreeHomSpace,
-    lhs_contracting_axes: &[usize],
-    rhs_contracting_axes: &[usize],
-) -> bool
+    dst: &DynamicFusionMapSpace,
+    lhs: FusionOperand<'_>,
+    rhs: FusionOperand<'_>,
+    lhs_axes: &[usize],
+    rhs_axes: &[usize],
+    output_axes: &[usize],
+) -> Option<FusionContractOrientation>
 where
     R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
 {
-    lhs_contracting_axes.len() == rhs_contracting_axes.len()
-        && is_core_form_fusion_source_contract(lhs, rhs, lhs_contracting_axes, rhs_contracting_axes)
-        && matches!(
-            rhs_contract_axes_require_twist(rule, rhs, rhs_contracting_axes),
-            Ok(false)
+    let lhs_open = lhs.storage_space().rank().checked_sub(lhs_axes.len())?;
+    let rhs_open = rhs.storage_space().rank().checked_sub(rhs_axes.len())?;
+    let open = lhs_open + rhs_open;
+    if output_axes.len() != open || !(0..open).all(|axis| output_axes.contains(&axis)) {
+        return None;
+    }
+    let zero_copy = |lhs, rhs, lhs_axes, rhs_axes, output, dst_nout| {
+        matches!(
+            try_zero_copy_contract_candidates(
+                rule,
+                dst_nout,
+                lhs,
+                rhs,
+                TensorContractSpec::new(lhs_axes, rhs_axes, output),
+                false,
+                |_, _, _, _| Ok(Some(())),
+            ),
+            Ok(Some(()))
         )
+    };
+    let requested = OutputAxisOrder::from_axes(output_axes);
+    if zero_copy(lhs, rhs, lhs_axes, rhs_axes, requested, lhs_open) {
+        return None;
+    }
+    let identity = OutputAxisOrder::identity();
+    let order = if zero_copy(lhs, rhs, lhs_axes, rhs_axes, identity, lhs_open) {
+        FusionContractOrientation::LhsRhs
+    } else if zero_copy(rhs, lhs, rhs_axes, lhs_axes, identity, rhs_open) {
+        FusionContractOrientation::RhsLhs
+    } else {
+        return None;
+    };
+    let output_len = dst.required_len().ok()?;
+    let dynamic = |orientation| {
+        min_dynamic_tree_materialized_elements(
+            rule,
+            dst,
+            lhs,
+            rhs,
+            TensorContractSpec::new(lhs_axes, rhs_axes, requested),
+            &[orientation],
+        )
+        .ok()
+        .flatten()
+    };
+    let (a_b, b_a) = (
+        dynamic(FusionContractOrientation::LhsRhs)?,
+        dynamic(FusionContractOrientation::RhsLhs)?,
+    );
+    let copy_c = match order {
+        FusionContractOrientation::LhsRhs => output_len <= a_b.min(b_a),
+        FusionContractOrientation::RhsLhs => output_len < a_b && output_len <= b_a,
+    };
+    copy_c.then_some(order)
 }
 
 fn rhs_contract_axes_require_twist<R>(

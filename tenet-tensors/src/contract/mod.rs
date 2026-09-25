@@ -25,16 +25,18 @@ mod dynamic_space;
 mod fusion;
 #[cfg(test)]
 pub(crate) use fusion::contracted_axis_order_candidates;
+#[doc(hidden)]
+pub use fusion::FusionContractOrientation;
 #[cfg(test)]
 pub(crate) use fusion::{
     candidate_score_calls, prepare_tensorcontract_fusion_candidate_facts_dyn_raw,
     prepare_tensorcontract_fusion_plan_dyn_raw_with_axis_order_and_orientation,
-    reset_candidate_score_calls, FusionContractCandidateFacts, FusionContractOrientation,
+    reset_candidate_score_calls, FusionContractCandidateFacts,
 };
 mod fusion_block;
 mod resolution;
 #[doc(hidden)]
-pub use resolution::{contraction_sources_are_untwisted_core_form, StorageContractResolution};
+pub use resolution::{zero_copy_contract_order_for_output_permute, StorageContractResolution};
 #[cfg(test)]
 mod candidate_core_tests;
 mod scratch;

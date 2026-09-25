@@ -42,15 +42,6 @@ pub(crate) use contract::{
     contracted_fusion_tree_basis_matches, TensorContractDenseRouteKind,
     EXPLICIT_OUTPUT_TRANSFORM_REQUIRES_CORE_DST,
 };
-#[doc(hidden)]
-pub use contract::{
-    contraction_sources_are_untwisted_core_form,
-    tensorcompose_fusion_dyn_prelowered_direct_on_storage,
-    tensorcompose_owned_checked_generic_in_context,
-    tensorcontract_fusion_dyn_prelowered_direct_on_storage, tensorcontract_owned_checked_generic,
-    tensorcontract_owned_checked_generic_in_context, try_compile_storage_contract_core_route,
-    StorageContractResolution,
-};
 pub use contract::{
     prepare_tensorcontract_fusion_plan, prepare_tensorcontract_fusion_plan_dyn,
     tensorcontract_execute_with, tensorcontract_fusion_block_specs, tensorcontract_fusion_into,
@@ -61,12 +52,21 @@ pub use contract::{
     tensorcontract_fusion_via_tree_pair_transforms_into, tensorcontract_into,
     tensorcontract_into_with, tensorcontract_into_with_context, tensorcontract_structure,
     tensorproduct_fusion_into, tensorproduct_fusion_into_with_conjugation, tensorproduct_into,
-    tensorproduct_into_with_conjugation, FusionContractPlan, HostTensorContractBackend,
+    tensorproduct_into_with_conjugation, zero_copy_contract_order_for_output_permute,
+    FusionContractOrientation, FusionContractPlan, HostTensorContractBackend,
     HostTensorContractWorkspace, HostTreeFusionExecutionContext, PreparedTensorContractFusion,
     TensorContractBackend, TensorContractBlockSpec, TensorContractCache, TensorContractCacheStats,
     TensorContractExecutionContext, TensorContractFusionExecutionContext,
     TensorContractFusionProfile, TensorContractFusionRoute, TensorContractPlanKey,
     TensorContractStructure, TensorContractStructureTerm, TensorContractWorkspace,
+};
+#[doc(hidden)]
+pub use contract::{
+    tensorcompose_fusion_dyn_prelowered_direct_on_storage,
+    tensorcompose_owned_checked_generic_in_context,
+    tensorcontract_fusion_dyn_prelowered_direct_on_storage, tensorcontract_owned_checked_generic,
+    tensorcontract_owned_checked_generic_in_context, try_compile_storage_contract_core_route,
+    StorageContractResolution,
 };
 pub use contract::{
     BoundDynamicFusionMapSpace, DynamicFusionMapSpace, FusionOperand,

@@ -9,8 +9,8 @@ use crate::{DenseBlockScalar, OperationError, TreeTransformOperation, TreeTransf
 use tenet_operations::{AxisVec, OutputAxisOrder, TensorContractSpec, TensorContractSpecOwned};
 
 use super::super::dynamic_space::{
-    encoded_layout_primer, BoundDynamicFusionMapSpace, DynamicFusionMapSpace, FusionOperandLayout,
-    LayoutKeyBuilder, MetadataOutput, MetadataRequest, TransformedLayoutProbe,
+    encoded_layout_primer, BoundDynamicFusionMapSpace, DynamicFusionMapSpace, FusionOperand,
+    FusionOperandLayout, LayoutKeyBuilder, MetadataOutput, MetadataRequest, TransformedLayoutProbe,
 };
 use super::super::structure::TensorContractAxisPlan;
 
@@ -74,8 +74,9 @@ impl ContractAxisOrderCandidate {
 ///
 /// Keeping orientation separate prevents reversed candidates from overloading
 /// paired-axis ordering with a second meaning.
+#[doc(hidden)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum FusionContractOrientation {
+pub enum FusionContractOrientation {
     LhsRhs,
     RhsLhs,
 }
@@ -1000,6 +1001,28 @@ impl ContractPlanSource for DynamicFusionMapSpace {
     }
 }
 
+impl ContractPlanSource for FusionOperand<'_> {
+    fn homspace(&self) -> &FusionTreeHomSpace {
+        self.logical_homspace()
+    }
+
+    fn nout(&self) -> usize {
+        self.oriented_homspace().nout()
+    }
+
+    fn rank(&self) -> usize {
+        self.storage_space().rank()
+    }
+
+    fn admission(&self) -> &FusionSpaceAdmission {
+        self.storage_space().admission()
+    }
+
+    fn storage_space(&self) -> &DynamicFusionMapSpace {
+        FusionOperand::storage_space(*self)
+    }
+}
+
 impl ContractPlanSource for FusionOperandLayout<'_> {
     fn homspace(&self) -> &FusionTreeHomSpace {
         self.homspace()
@@ -1415,6 +1438,57 @@ pub(crate) fn select_complete_bosonic_contract_candidate(
         Ok((shape.orientation, facts))
     })
     .map(|(orientation, facts)| (facts.axis_order, orientation))
+}
+
+/// The fewest elements any DynamicTree candidate of `axes` over
+/// `orientations` materializes into `dst`: TensorKit `_contract_memcost`
+/// (tensoroperations.jl L378) minimized over `_contract_candidates` (L360).
+/// This is the complete-admission scorer of the real selector
+/// (`score_complete_fusion_contract_candidate`), run without building a
+/// plan; `None` when an admission is not Complete, where the selector would
+/// probe transformed layouts instead.
+pub(crate) fn min_dynamic_tree_materialized_elements<R>(
+    rule: &R,
+    dst: &DynamicFusionMapSpace,
+    lhs: FusionOperand<'_>,
+    rhs: FusionOperand<'_>,
+    axes: TensorContractSpec<'_>,
+    orientations: &[FusionContractOrientation],
+) -> Result<Option<usize>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
+{
+    let complete = [dst.admission(), lhs.admission(), rhs.admission()]
+        .into_iter()
+        .all(|admission| matches!(admission, FusionSpaceAdmission::Complete(_)));
+    if !complete {
+        return Ok(None);
+    }
+    select_best_scored_contract_candidate(axes, orientations, |candidate, orientation| {
+        let candidate_axes =
+            TensorContractSpec::new(candidate.lhs(), candidate.rhs(), axes.output_permutation());
+        let shape = CandidatePlan::from_ranks(
+            dst.nout(),
+            dst.rank(),
+            ContractPlanSource::rank(&lhs),
+            ContractPlanSource::rank(&rhs),
+            candidate_axes,
+            lhs.storage_conjugate(),
+            rhs.storage_conjugate(),
+        )?
+        .orient(orientation);
+        let facts = score_complete_fusion_contract_candidate(
+            rule,
+            dst,
+            &lhs,
+            &rhs,
+            candidate.clone(),
+            &shape,
+        )?;
+        Ok(((), facts))
+    })
+    .map(|((), facts)| Some(facts.total_materialized_elements()))
 }
 
 fn score_complete_fusion_contract_candidate<R, S>(
