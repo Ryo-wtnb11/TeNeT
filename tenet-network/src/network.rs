@@ -36,7 +36,7 @@ use crate::cost::{DenseCostModel, DenseTensorInfo};
 use crate::error::{SliceError, SymmetricSliceExecutionError, SymmetricSliceLowerError};
 use crate::ir::NetworkIR;
 use crate::labels::{TemporaryLabel, TensorId};
-use crate::optimizer::{ContractionStep, DenseContractionOptimizer};
+use crate::optimizer::{next_use_axes, ContractionStep, DenseContractionOptimizer};
 use crate::plan::ContractionPlan;
 use crate::slice::{
     lower_symmetric_sliced_plan, validate_contraction_plan_for_ir, SlicedPlan, SymmetricSlicePlan,
@@ -2556,20 +2556,7 @@ fn compiled_intermediate_permutation(
     let sibling_labels = labels_by_id
         .get(&sibling_id)
         .ok_or_else(|| invalid("future sibling labels missing"))?;
-    let mut open_axes = Vec::new();
-    let mut contracted_axes = Vec::new();
-    for (axis, label) in labels.iter().enumerate() {
-        if sibling_labels.contains(label) {
-            contracted_axes.push(axis);
-        } else {
-            open_axes.push(axis);
-        }
-    }
-    let permutation = if result_is_lhs {
-        (open_axes, contracted_axes)
-    } else {
-        (contracted_axes, open_axes)
-    };
+    let permutation = next_use_axes(labels, result_is_lhs, sibling_labels);
     if permutation.0.len() == current_codomain_rank
         && permutation
             .0
