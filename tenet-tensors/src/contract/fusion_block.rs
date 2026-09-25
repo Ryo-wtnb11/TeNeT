@@ -780,7 +780,9 @@ mod tests {
         assert_eq!(facts[0].rhs_materialized_elements(), 14);
         assert_eq!(facts[0].output_materialized_elements(), 14);
 
-        let layout = FusionBlockMatrixLayout::compile(&rule, &sparse).unwrap();
+        let layout = FusionBlockMatrixLayout::compile(&sparse)
+            .unwrap()
+            .finish_all(|group| group.finish(&rule, &sparse));
         assert_eq!(layout.groups.len(), 3);
         assert_eq!(
             layout
@@ -1083,19 +1085,22 @@ mod tests {
         )
         .unwrap();
         let dynamic = DynamicFusionMapSpace::from_typed(&space);
-        let layout = FusionBlockMatrixLayout::<f64>::compile_generic(&dynamic).unwrap();
+        let mut layout = FusionBlockMatrixLayout::compile(&dynamic).unwrap();
+        let finished = layout
+            .clone()
+            .finish_all(|group| group.finish_generic::<f64>(dynamic.structure(), dynamic.nout()));
 
         // What: first destination occurrence fixes group order, while distinct
         // row/column vertex labels retain their full Cartesian block set.
         assert_eq!(
-            layout
+            finished
                 .groups
                 .iter()
                 .map(|group| group.coupled)
                 .collect::<Vec<_>>(),
             vec![SectorId::new(1), SectorId::new(0)]
         );
-        let multiplicity = layout.group(SectorId::new(1)).unwrap();
+        let multiplicity = &finished.groups[0];
         assert_eq!(multiplicity.block_indices, vec![0, 2, 3, 4]);
         assert_eq!((multiplicity.rows, multiplicity.cols), (2, 2));
         assert_eq!(
@@ -1109,9 +1114,9 @@ mod tests {
         assert!(!multiplicity.needs_clear);
 
         reset_layout_lookups();
-        assert!(layout.group(SectorId::new(1)).is_some());
-        assert!(layout.group(SectorId::new(0)).is_some());
-        assert!(layout.group(SectorId::new(9)).is_none());
+        assert!(layout.take_group(SectorId::new(1)).is_some());
+        assert!(layout.take_group(SectorId::new(0)).is_some());
+        assert!(layout.take_group(SectorId::new(9)).is_none());
         // What: finalized coupled-sector hits and misses use one indexed probe each.
         assert_eq!(layout_lookups(), 3);
     }
@@ -1351,8 +1356,9 @@ mod tests {
                 super::super::dynamic_space::encoded_layout_primer::<U1FusionRule>,
             )
             .unwrap();
-        let mapped = FusionBlockMatrixLayout::compile_operand(&rule, &operand, MatrixOp::Adjoint)
+        let mapped = FusionBlockMatrixLayout::compile_operand(&operand)
             .unwrap()
+            .finish_all(|group| group.finish_operand(&rule, &operand, MatrixOp::Adjoint))
             .groups
             .iter()
             .flat_map(|group| group.block_indices.iter().copied())
@@ -1881,32 +1887,18 @@ where
         return Ok(plan);
     }
 
-    let lhs_layout = FusionBlockMatrixLayout::compile(rule, lhs_space)?;
-    let rhs_layout = FusionBlockMatrixLayout::compile(rule, rhs_space)?;
-    let dst_layout = FusionBlockMatrixLayout::compile(rule, dst_space)?;
+    let lhs_layout = FusionBlockMatrixLayout::compile(lhs_space)?;
+    let rhs_layout = FusionBlockMatrixLayout::compile(rhs_space)?;
+    let dst_layout = FusionBlockMatrixLayout::compile(dst_space)?;
 
-    let mut groups = Vec::new();
-    let mut active_dst_blocks = HashSet::<usize>::new();
-    for dst_group in dst_layout.groups {
-        let Some(lhs_group) = lhs_layout.group(dst_group.coupled) else {
-            continue;
-        };
-        let Some(rhs_group) = rhs_layout.group(dst_group.coupled) else {
-            continue;
-        };
-        for block_index in &dst_group.block_indices {
-            debug_assert!(
-                !active_dst_blocks.contains(block_index),
-                "core fusion-block dst subblock must be scattered exactly once"
-            );
-        }
-        active_dst_blocks.extend(dst_group.block_indices.iter().copied());
-        groups.push(FusionBlockContractGroupPlan::new(
-            lhs_group.clone(),
-            rhs_group.clone(),
-            dst_group,
-        )?);
-    }
+    let (groups, active_dst_blocks) = pair_coupled_groups(
+        lhs_layout,
+        rhs_layout,
+        dst_layout,
+        |group| group.finish(rule, lhs_space),
+        |group| group.finish(rule, rhs_space),
+        |group| group.finish(rule, dst_space),
+    )?;
     FusionBlockContractPlan::from_parts_generic(
         Arc::clone(dst_space.structure()),
         Arc::clone(lhs_space.structure()),
@@ -1944,39 +1936,33 @@ where
         return Ok(plan);
     }
 
-    let compile_source = |source: &FusionOperandLayout<'_>, op| {
+    let compile_source = |source: &FusionOperandLayout<'_>| {
         if source.is_direct() {
-            FusionBlockMatrixLayout::compile(rule, source.storage_space())
+            FusionBlockMatrixLayout::compile(source.storage_space())
         } else {
-            FusionBlockMatrixLayout::compile_operand(rule, source, op)
+            FusionBlockMatrixLayout::compile_operand(source)
         }
     };
-    let lhs_layout = compile_source(lhs, lhs_op)?;
-    let rhs_layout = compile_source(rhs, rhs_op)?;
-    let dst_layout = FusionBlockMatrixLayout::compile(rule, dst_space)?;
+    let finish_source =
+        |group: FusionBlockMatrixGroupBuilder, source: &FusionOperandLayout<'_>, op| {
+            if source.is_direct() {
+                group.finish(rule, source.storage_space())
+            } else {
+                group.finish_operand(rule, source, op)
+            }
+        };
+    let lhs_layout = compile_source(lhs)?;
+    let rhs_layout = compile_source(rhs)?;
+    let dst_layout = FusionBlockMatrixLayout::compile(dst_space)?;
 
-    let mut groups = Vec::new();
-    let mut active_dst_blocks = HashSet::<usize>::new();
-    for dst_group in dst_layout.groups {
-        let Some(lhs_group) = lhs_layout.group(dst_group.coupled) else {
-            continue;
-        };
-        let Some(rhs_group) = rhs_layout.group(dst_group.coupled) else {
-            continue;
-        };
-        for block_index in &dst_group.block_indices {
-            debug_assert!(
-                !active_dst_blocks.contains(block_index),
-                "core fusion-block dst subblock must be scattered exactly once"
-            );
-        }
-        active_dst_blocks.extend(dst_group.block_indices.iter().copied());
-        groups.push(FusionBlockContractGroupPlan::new(
-            lhs_group.clone(),
-            rhs_group.clone(),
-            dst_group,
-        )?);
-    }
+    let (groups, active_dst_blocks) = pair_coupled_groups(
+        lhs_layout,
+        rhs_layout,
+        dst_layout,
+        |group| finish_source(group, lhs, lhs_op),
+        |group| finish_source(group, rhs, rhs_op),
+        |group| group.finish(rule, dst_space),
+    )?;
     FusionBlockContractPlan::from_parts_with_ops_generic(
         Arc::clone(dst_space.structure()),
         Arc::clone(lhs.storage_space().structure()),
@@ -2046,32 +2032,18 @@ where
         return Ok(plan);
     }
 
-    let lhs_layout = FusionBlockMatrixLayout::<C>::compile_generic(lhs_space)?;
-    let rhs_layout = FusionBlockMatrixLayout::<C>::compile_generic(rhs_space)?;
-    let dst_layout = FusionBlockMatrixLayout::<C>::compile_generic(dst_space)?;
+    let lhs_layout = FusionBlockMatrixLayout::compile(lhs_space)?;
+    let rhs_layout = FusionBlockMatrixLayout::compile(rhs_space)?;
+    let dst_layout = FusionBlockMatrixLayout::compile(dst_space)?;
 
-    let mut groups = Vec::new();
-    let mut active_dst_blocks = HashSet::<usize>::new();
-    for dst_group in dst_layout.groups {
-        let Some(lhs_group) = lhs_layout.group(dst_group.coupled) else {
-            continue;
-        };
-        let Some(rhs_group) = rhs_layout.group(dst_group.coupled) else {
-            continue;
-        };
-        for block_index in &dst_group.block_indices {
-            debug_assert!(
-                !active_dst_blocks.contains(block_index),
-                "core fusion-block dst subblock must be scattered exactly once"
-            );
-        }
-        active_dst_blocks.extend(dst_group.block_indices.iter().copied());
-        groups.push(FusionBlockContractGroupPlan::new(
-            lhs_group.clone(),
-            rhs_group.clone(),
-            dst_group,
-        )?);
-    }
+    let (groups, active_dst_blocks) = pair_coupled_groups(
+        lhs_layout,
+        rhs_layout,
+        dst_layout,
+        |group| group.finish_generic(lhs_space.structure(), lhs_space.nout()),
+        |group| group.finish_generic(rhs_space.structure(), rhs_space.nout()),
+        |group| group.finish_generic(dst_space.structure(), dst_space.nout()),
+    )?;
     FusionBlockContractPlan::from_parts_generic(
         Arc::clone(dst_space.structure()),
         Arc::clone(lhs_space.structure()),
@@ -2118,25 +2090,17 @@ pub(crate) fn compile_checked_generic_core_plan(
         });
     }
 
-    let lhs_layout = FusionBlockMatrixLayout::compile_generic_parts(lhs_structure, lhs_nout)?;
-    let rhs_layout = FusionBlockMatrixLayout::compile_generic_parts(rhs_structure, rhs_nout)?;
-    let dst_layout = FusionBlockMatrixLayout::compile_generic_parts(dst_structure, dst_nout)?;
-    let mut groups = Vec::new();
-    let mut active_dst_blocks = HashSet::<usize>::new();
-    for dst_group in dst_layout.groups {
-        let Some(lhs_group) = lhs_layout.group(dst_group.coupled) else {
-            continue;
-        };
-        let Some(rhs_group) = rhs_layout.group(dst_group.coupled) else {
-            continue;
-        };
-        active_dst_blocks.extend(dst_group.block_indices.iter().copied());
-        groups.push(FusionBlockContractGroupPlan::new(
-            lhs_group.clone(),
-            rhs_group.clone(),
-            dst_group,
-        )?);
-    }
+    let lhs_layout = FusionBlockMatrixLayout::compile_parts(lhs_structure, lhs_nout)?;
+    let rhs_layout = FusionBlockMatrixLayout::compile_parts(rhs_structure, rhs_nout)?;
+    let dst_layout = FusionBlockMatrixLayout::compile_parts(dst_structure, dst_nout)?;
+    let (groups, active_dst_blocks) = pair_coupled_groups(
+        lhs_layout,
+        rhs_layout,
+        dst_layout,
+        |group| group.finish_generic(lhs_structure, lhs_nout),
+        |group| group.finish_generic(rhs_structure, rhs_nout),
+        |group| group.finish_generic(dst_structure, dst_nout),
+    )?;
     FusionBlockContractPlan::from_parts(
         Arc::clone(dst_structure),
         Arc::clone(lhs_structure),
@@ -2236,77 +2200,23 @@ where
     }
 }
 
+/// One operand's coupled-sector groups with tree offsets collected but not
+/// yet finished, so [`pair_coupled_groups`] can give every shared GEMM index
+/// one tree order before any subblock offset is fixed.
 #[derive(Clone, Debug)]
-struct FusionBlockMatrixLayout<C = f64> {
-    groups: Vec<FusionBlockMatrixGroup<C>>,
+struct FusionBlockMatrixLayout {
+    groups: Vec<Option<FusionBlockMatrixGroupBuilder>>,
     // Why not sort for a merge walk: expert block layouts retain first
     // destination occurrence order, while this compile-time map preserves it.
     group_indices: FxHashMap<SectorId, usize>,
 }
 
-impl<C> FusionBlockMatrixLayout<C>
-where
-    C: DenseBlockScalar,
-{
-    fn compile<R>(rule: &R, space: &DynamicFusionMapSpace) -> Result<Self, OperationError>
-    where
-        R: MultiplicityFreeRigidSymbols<Scalar = C>,
-    {
-        #[cfg(test)]
-        FUSION_LAYOUT_COMPILES.set(FUSION_LAYOUT_COMPILES.get() + 1);
-        let mut builders = Vec::<FusionBlockMatrixGroupBuilder>::new();
-        let mut group_indices = FxHashMap::<SectorId, usize>::default();
-        for block_index in 0..space.structure().block_count() {
-            let block = space.structure().block(block_index)?;
-            let BlockKey::FusionTree(key) = block.key() else {
-                return Err(OperationError::ExpectedFusionTreeBlock {
-                    tensor: "fusion",
-                    index: block_index,
-                });
-            };
-            let coupled = coupled_sector(key.codomain_tree());
-            if coupled != coupled_sector(key.domain_tree()) {
-                return Err(OperationError::FusionTreeGroupMismatch {
-                    tensor: "fusion",
-                    index: block_index,
-                });
-            }
-            let group_index = if let Some(&group_index) = group_indices.get(&coupled) {
-                group_index
-            } else {
-                let group_index = builders.len();
-                group_indices.insert(coupled, group_index);
-                builders.push(FusionBlockMatrixGroupBuilder::new(coupled));
-                group_index
-            };
-            let row_dim = element_count(&block.shape()[..space.nout()])?;
-            let col_dim = element_count(&block.shape()[space.nout()..])?;
-            builders[group_index].add_tree_pair(
-                key.codomain_tree().clone(),
-                row_dim,
-                key.domain_tree().clone(),
-                col_dim,
-                block_index,
-            )?;
-        }
-        let mut groups = Vec::with_capacity(builders.len());
-        for builder in builders {
-            groups.push(builder.finish(rule, space)?);
-        }
-        Ok(Self {
-            groups,
-            group_indices,
-        })
+impl FusionBlockMatrixLayout {
+    fn compile(space: &DynamicFusionMapSpace) -> Result<Self, OperationError> {
+        Self::compile_parts(space.structure(), space.nout())
     }
 
-    fn compile_operand<R>(
-        rule: &R,
-        source: &FusionOperandLayout<'_>,
-        op: MatrixOp,
-    ) -> Result<Self, OperationError>
-    where
-        R: MultiplicityFreeRigidSymbols<Scalar = C>,
-    {
+    fn compile_operand(source: &FusionOperandLayout<'_>) -> Result<Self, OperationError> {
         #[cfg(test)]
         FUSION_LAYOUT_COMPILES.set(FUSION_LAYOUT_COMPILES.get() + 1);
         let mut builders = Vec::<FusionBlockMatrixGroupBuilder>::new();
@@ -2349,26 +2259,10 @@ where
                 storage_index,
             )?;
         }
-        let mut groups = Vec::with_capacity(builders.len());
-        for builder in builders {
-            groups.push(builder.finish_operand(rule, source, op)?);
-        }
-        Ok(Self {
-            groups,
-            group_indices,
-        })
+        Ok(Self::from_builders(builders, group_indices))
     }
 
-    /// Generic-fusion (Stage B3c-1) sibling of [`Self::compile`]: relaxed to any
-    /// [`FusionRule`] (the layout only needs `coupled()`/`vacuum()` to group
-    /// blocks by coupled sector — no F/R symbols). Outer-multiplicity vertex
-    /// labels ride in the fusion-tree keys, so multiplicity blocks land in the
-    /// right coupled group automatically.
-    fn compile_generic(space: &DynamicFusionMapSpace) -> Result<Self, OperationError> {
-        Self::compile_generic_parts(space.structure(), space.nout())
-    }
-
-    fn compile_generic_parts(
+    fn compile_parts(
         structure: &Arc<tenet_core::BlockStructure>,
         nout: usize,
     ) -> Result<Self, OperationError> {
@@ -2409,23 +2303,144 @@ where
                 block_index,
             )?;
         }
-        let mut groups = Vec::with_capacity(builders.len());
-        for builder in builders {
-            groups.push(builder.finish_generic(structure, nout)?);
-        }
-        Ok(Self {
-            groups,
-            group_indices,
-        })
+        Ok(Self::from_builders(builders, group_indices))
     }
 
-    fn group(&self, coupled: SectorId) -> Option<&FusionBlockMatrixGroup<C>> {
+    fn from_builders(
+        builders: Vec<FusionBlockMatrixGroupBuilder>,
+        group_indices: FxHashMap<SectorId, usize>,
+    ) -> Self {
+        Self {
+            groups: builders.into_iter().map(Some).collect(),
+            group_indices,
+        }
+    }
+
+    #[cfg(test)]
+    fn finish_all<C>(
+        self,
+        finish: impl FnMut(
+            FusionBlockMatrixGroupBuilder,
+        ) -> Result<FusionBlockMatrixGroup<C>, OperationError>,
+    ) -> FinishedLayout<C> {
+        FinishedLayout {
+            groups: self
+                .groups
+                .into_iter()
+                .flatten()
+                .map(finish)
+                .collect::<Result<_, _>>()
+                .unwrap(),
+        }
+    }
+
+    /// Moves out the group of `coupled`; one destination group pairs it once.
+    fn take_group(&mut self, coupled: SectorId) -> Option<FusionBlockMatrixGroupBuilder> {
         #[cfg(test)]
         record_fusion_group_lookup();
         self.group_indices
             .get(&coupled)
-            .and_then(|&group_index| self.groups.get(group_index))
+            .and_then(|&group_index| self.groups.get_mut(group_index))
+            .and_then(Option::take)
     }
+}
+
+#[cfg(test)]
+struct FinishedLayout<C> {
+    groups: Vec<FusionBlockMatrixGroup<C>>,
+}
+
+/// Pairs each destination coupled-sector group with the operand groups of the
+/// same coupled sector, giving every shared GEMM index one tree order.
+///
+/// Why not trust each operand's own order: the GEMM multiplies rows and
+/// columns by position, and an expert tiling may stack the trees of a
+/// coupled sector in any order, so `lhs` columns and `rhs` rows (and the
+/// destination rows and columns against the operand ones) could otherwise name
+/// different trees at one position (#1517). Aligned orders are left
+/// untouched, so an operand whose storage already matches keeps its direct
+/// GEMM; a re-based one is packed through its group matrix.
+fn pair_coupled_groups<C>(
+    mut lhs: FusionBlockMatrixLayout,
+    mut rhs: FusionBlockMatrixLayout,
+    dst: FusionBlockMatrixLayout,
+    mut finish_lhs: impl FnMut(
+        FusionBlockMatrixGroupBuilder,
+    ) -> Result<FusionBlockMatrixGroup<C>, OperationError>,
+    mut finish_rhs: impl FnMut(
+        FusionBlockMatrixGroupBuilder,
+    ) -> Result<FusionBlockMatrixGroup<C>, OperationError>,
+    mut finish_dst: impl FnMut(
+        FusionBlockMatrixGroupBuilder,
+    ) -> Result<FusionBlockMatrixGroup<C>, OperationError>,
+) -> Result<(Vec<FusionBlockContractGroupPlan<C>>, HashSet<usize>), OperationError>
+where
+    C: DenseBlockScalar,
+{
+    let mut groups = Vec::new();
+    let mut active_dst_blocks = HashSet::<usize>::new();
+    for dst_group in dst.groups.into_iter().flatten() {
+        let Some(mut lhs_group) = lhs.take_group(dst_group.coupled) else {
+            continue;
+        };
+        let Some(mut rhs_group) = rhs.take_group(dst_group.coupled) else {
+            continue;
+        };
+        adopt_tree_offsets(&mut lhs_group.row_offsets, &dst_group.row_offsets)?;
+        adopt_tree_offsets(&mut rhs_group.row_offsets, &lhs_group.col_offsets)?;
+        adopt_tree_offsets(&mut rhs_group.col_offsets, &dst_group.col_offsets)?;
+        for block_index in &dst_group.blocks {
+            debug_assert!(
+                !active_dst_blocks.contains(block_index),
+                "core fusion-block dst subblock must be scattered exactly once"
+            );
+        }
+        active_dst_blocks.extend(dst_group.blocks.iter().copied());
+        groups.push(FusionBlockContractGroupPlan::new(
+            finish_lhs(lhs_group)?,
+            finish_rhs(rhs_group)?,
+            finish_dst(dst_group)?,
+        )?);
+    }
+    Ok((groups, active_dst_blocks))
+}
+
+/// Re-bases `offsets` onto the tree positions of `reference`, the other
+/// matrix that shares this GEMM index. Empty trees occupy no position and are
+/// ignored; any other tree must appear on both sides with one dimension.
+fn adopt_tree_offsets(
+    offsets: &mut FxHashMap<FusionTreeKey, TreeMatrixOffset>,
+    reference: &FxHashMap<FusionTreeKey, TreeMatrixOffset>,
+) -> Result<(), OperationError> {
+    let nonempty = |map: &FxHashMap<FusionTreeKey, TreeMatrixOffset>| {
+        map.values().filter(|offset| offset.dim != 0).count()
+    };
+    let mut aligned = true;
+    for (tree, offset) in offsets.iter().filter(|(_, offset)| offset.dim != 0) {
+        let Some(target) = reference.get(tree) else {
+            return Err(OperationError::StructureMismatch {
+                tensor: "fusion contraction index",
+            });
+        };
+        if target.dim != offset.dim {
+            return Err(OperationError::ShapeMismatch {
+                dst: vec![target.dim],
+                src: vec![offset.dim],
+            });
+        }
+        aligned &= target.offset == offset.offset;
+    }
+    if nonempty(offsets) != nonempty(reference) {
+        return Err(OperationError::StructureMismatch {
+            tensor: "fusion contraction index",
+        });
+    }
+    if !aligned {
+        for (tree, offset) in offsets.iter_mut() {
+            offset.offset = reference.get(tree).map_or(0, |target| target.offset);
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
