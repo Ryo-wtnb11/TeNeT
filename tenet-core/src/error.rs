@@ -78,6 +78,15 @@ pub enum CoreError {
     MalformedFusionTree {
         message: &'static str,
     },
+    /// A contracted leg pair does not pair a space with its dual. Axes are
+    /// the operands' external axes and the flags are their external-axis
+    /// duality flags; a valid pair has opposite flags.
+    ContractedLegDualityMismatch {
+        lhs_axis: usize,
+        rhs_axis: usize,
+        lhs_is_dual: bool,
+        rhs_is_dual: bool,
+    },
     BlockCountMismatch {
         expected: usize,
         actual: usize,
@@ -220,6 +229,19 @@ impl fmt::Display for CoreError {
             }
             Self::MalformedFusionTree { message } => {
                 write!(f, "malformed fusion tree: {message}")
+            }
+            Self::ContractedLegDualityMismatch {
+                lhs_axis,
+                rhs_axis,
+                lhs_is_dual,
+                rhs_is_dual,
+            } => {
+                write!(
+                    f,
+                    "contracted fusion leg duality flags do not match: lhs axis {lhs_axis} \
+                     (is_dual = {lhs_is_dual}) and rhs axis {rhs_axis} (is_dual = {rhs_is_dual}) \
+                     must have opposite duality flags"
+                )
             }
             Self::BlockCountMismatch { expected, actual } => {
                 write!(f, "block count mismatch: expected {expected}, got {actual}")
