@@ -3,6 +3,7 @@ use tenet::prelude::{
     Complex64, GradedSpace, PhysicalDense, PhysicalDenseError, Runtime, SU2FusionRule, SU2Irrep,
     TensorMap, U1FusionRule, U1Irrep,
 };
+use tenet::typed::BlockFusionTrees;
 
 fn su2_multitree<D: tenet::prelude::TensorScalar>(
     runtime: &Runtime,
@@ -165,8 +166,8 @@ fn su2_spin_one_singlet_projects_to_explicit_doubled_u1_charges() {
     assert_eq!(su2_physical.shape, [3, 3]);
 
     // SU(2) uses doubled magnetic labels (2, 0, -2), whereas this U(1)
-    // leg's canonical order is (0, -2, 2). Keep the basis change explicit.
-    let target_to_source = [1, 2, 0];
+    // leg's TensorKit order is (0, 2, -2). Keep the basis change explicit.
+    let target_to_source = [1, 0, 2];
     let u1_physical = PhysicalDense {
         shape: vec![3, 3],
         data: permute_each_axis(&su2_physical, &target_to_source),
@@ -180,10 +181,6 @@ fn su2_spin_one_singlet_projects_to_explicit_doubled_u1_charges() {
         ],
     )
     .unwrap();
-    assert_eq!(
-        u1_leg.sectors().unwrap(),
-        [U1Irrep::new(0), U1Irrep::new(-2), U1Irrep::new(2)]
-    );
     let target: TensorMap<_, f64> = TensorMap::zeros(&runtime, [&u1_leg, &u1_leg], []).unwrap();
     let projected = target.project_physical_dense(&u1_physical).unwrap();
 
@@ -217,4 +214,192 @@ fn su2_spin_one_singlet_projects_to_explicit_doubled_u1_charges() {
         &projected.to_physical_dense().unwrap().data,
         &u1_physical.data,
     );
+}
+
+/// Mirrors `value` in `benchmarks/tensorkit_physical_dense_oracle.jl`.
+fn fixture_value<S, D: From<f64>>(
+    trees: &BlockFusionTrees<S>,
+    index: &[usize],
+    label: impl Fn(&S) -> f64,
+    complex: impl Fn(f64, f64) -> D,
+) -> D {
+    let labels = trees
+        .codomain_uncoupled()
+        .iter()
+        .chain(trees.domain_uncoupled())
+        .map(&label)
+        .collect::<Vec<_>>();
+    let inner = trees
+        .codomain_innerlines()
+        .iter()
+        .chain(trees.domain_innerlines())
+        .map(&label)
+        .sum::<f64>();
+    let mut value = 1.0 + label(trees.coupled()) / 5.0 + inner / 11.0;
+    for (k, (&label, &index)) in labels.iter().zip(index).enumerate() {
+        let k = (k + 1) as f64;
+        value += k * (label + 3.0) / 7.0 + index as f64 * (k + 1.0) / 3.0;
+    }
+    complex(value, value / 2.0 - labels.iter().sum::<f64>() / 13.0)
+}
+
+/// Dense arrays from `benchmarks/tensorkit_physical_dense_oracle.jl`.
+fn tensorkit_dense(name: &str) -> (Vec<usize>, Vec<Complex64>) {
+    let text = include_str!("fixtures/physical_dense/tensorkit_dense.txt");
+    let mut lines = text
+        .lines()
+        .skip_while(|line| line.split_whitespace().nth(1) != Some(name));
+    let shape = lines
+        .next()
+        .expect("fixture exists")
+        .split_whitespace()
+        .skip(2);
+    let shape = shape.map(|d| d.parse().unwrap()).collect::<Vec<usize>>();
+    let mut data = vec![Complex64::new(0.0, 0.0); shape.iter().product()];
+    for line in lines.take_while(|line| !line.starts_with('#')) {
+        let mut fields = line.split_whitespace();
+        let index: usize = fields.next().unwrap().parse().unwrap();
+        let re = fields.next().unwrap().parse().unwrap();
+        let im = fields.next().unwrap().parse().unwrap();
+        data[index] = Complex64::new(re, im);
+    }
+    (shape, data)
+}
+
+/// Column-major `permutedims(data, axes)`.
+fn permute_dense<D: Copy>(physical: &PhysicalDense<D>, axes: &[usize]) -> PhysicalDense<D> {
+    let shape = axes.iter().map(|&a| physical.shape[a]).collect::<Vec<_>>();
+    let mut source_strides = vec![1; physical.shape.len()];
+    for a in 1..physical.shape.len() {
+        source_strides[a] = source_strides[a - 1] * physical.shape[a - 1];
+    }
+    let data = (0..physical.data.len())
+        .map(|mut target| {
+            let mut source = 0;
+            for (&a, &dimension) in axes.iter().zip(&shape) {
+                source += (target % dimension) * source_strides[a];
+                target /= dimension;
+            }
+            physical.data[source]
+        })
+        .collect();
+    PhysicalDense { shape, data }
+}
+
+const PERMUTATIONS: [(&[usize], &[usize]); 6] = [
+    (&[0, 1, 2, 3], &[]),
+    (&[0], &[1, 2, 3]),
+    (&[], &[0, 1, 2, 3]),
+    (&[3, 0, 1], &[2]),
+    (&[1, 2], &[3, 0]),
+    (&[3, 2], &[1, 0]),
+];
+
+/// Compares one tensor, its permutations, and the inverse projection with
+/// the TensorKit fixture `$name`.
+macro_rules! assert_matches_tensorkit {
+    ($tensor:expr, $name:expr, $to_complex:expr) => {{
+        let (tensor, name, to_complex) = (&$tensor, $name, $to_complex);
+        let (shape, expected) = tensorkit_dense(name);
+        let physical = tensor.to_physical_dense().unwrap();
+        assert_eq!(physical.shape, shape, "{name}");
+        let actual = physical
+            .data
+            .iter()
+            .map(|&x| to_complex(x))
+            .collect::<Vec<_>>();
+        assert_complex_close(&actual, &expected);
+
+        // TensorKit's order makes bending or braiding a leg a plain axis
+        // permutation of the dense array for these bosonic providers; the oracle
+        // script asserts the same property of TensorKit itself.
+        for (codomain, domain) in PERMUTATIONS {
+            let axes = [codomain, domain].concat();
+            let permuted = tensor.permute(codomain, domain).unwrap();
+            let actual = permuted.to_physical_dense().unwrap();
+            let expected = permute_dense(&physical, &axes);
+            assert_eq!(actual.shape, expected.shape, "{name} {axes:?}");
+            let actual = actual
+                .data
+                .iter()
+                .map(|&x| to_complex(x))
+                .collect::<Vec<_>>();
+            let expected = expected
+                .data
+                .iter()
+                .map(|&x| to_complex(x))
+                .collect::<Vec<_>>();
+            assert_complex_close(&actual, &expected);
+        }
+
+        let reduced = tensor.data().to_vec();
+        let projected = tensor.project_physical_dense(&physical).unwrap();
+        let projected = projected.data().iter().map(|&x| to_complex(x));
+        let reduced = reduced.into_iter().map(&to_complex).collect::<Vec<_>>();
+        assert_complex_close(&projected.collect::<Vec<_>>(), &reduced);
+    }};
+}
+
+#[test]
+fn u1_dense_order_matches_tensorkit_for_dual_and_bent_legs() {
+    let runtime = Runtime::builder().build().unwrap();
+    let v = GradedSpace::try_new(
+        U1FusionRule,
+        [
+            (U1Irrep::new(-1), 1),
+            (U1Irrep::new(0), 2),
+            (U1Irrep::new(1), 1),
+        ],
+    )
+    .unwrap();
+    let dual = v.try_dual().unwrap();
+    let label = |q: &U1Irrep| f64::from(q.charge());
+    let real = TensorMap::<U1FusionRule, f64>::from_block_fn(
+        &runtime,
+        [&v, &dual],
+        [&dual, &v],
+        |trees, index| fixture_value(trees, index, label, |re, _| re),
+    )
+    .unwrap();
+    assert_matches_tensorkit!(real, "u1_real", |x| Complex64::new(x, 0.0));
+    let complex = TensorMap::<U1FusionRule, Complex64>::from_block_fn(
+        &runtime,
+        [&v, &dual],
+        [&dual, &v],
+        |trees, index| fixture_value(trees, index, label, Complex64::new),
+    )
+    .unwrap();
+    assert_matches_tensorkit!(complex, "u1_complex", |x| x);
+}
+
+#[test]
+fn su2_dense_order_matches_tensorkit_for_dual_and_bent_legs() {
+    let runtime = Runtime::builder().build().unwrap();
+    let w = GradedSpace::try_new(
+        SU2FusionRule,
+        [
+            (SU2Irrep::from_twice_spin(0), 2),
+            (SU2Irrep::from_twice_spin(1), 1),
+            (SU2Irrep::from_twice_spin(2), 1),
+        ],
+    )
+    .unwrap();
+    let dual = w.try_dual().unwrap();
+    let label = |j: &SU2Irrep| j.twice_spin() as f64;
+    let real = TensorMap::<SU2FusionRule, f64>::from_block_fn(
+        &runtime,
+        [&w, &dual, &w],
+        [&dual],
+        |trees, index| fixture_value(trees, index, label, |re, _| re),
+    )
+    .unwrap();
+    assert_matches_tensorkit!(real, "su2_real", |x| Complex64::new(x, 0.0));
+    let complex = TensorMap::<SU2FusionRule, Complex64>::from_block_fn(
+        &runtime,
+        [&w, &dual, &w],
+        [&dual],
+        |trees, index| fixture_value(trees, index, label, Complex64::new),
+    )
+    .unwrap();
+    assert_matches_tensorkit!(complex, "su2_complex", |x| x);
 }

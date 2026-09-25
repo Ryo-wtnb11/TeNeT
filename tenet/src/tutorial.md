@@ -403,11 +403,11 @@ that basis and [`prelude::TensorMap::project_physical_dense`] to project into
 the exact schema of another tensor. Basis alignment is application-specific;
 TeNeT does not infer a conversion between different symmetry choices.
 
-The index order of an axis depends on the side of its leg: a domain axis is
-indexed by the domain space, a codomain axis by the codomain space, and a dual
-space by its own dualized sectors. Moving a leg across the split can therefore
-reorder that axis; [`prelude::TensorMap::to_physical_dense`] has an example.
-Compare physical data only between tensors of the same orientation.
+Each axis is laid out as in TensorKit's `convert(Array, t)`: sectors in
+TensorKit's order, and a dual space `V'` in `V`'s order. Moving a leg across the
+split therefore keeps its index order; for the built-in U(1) and SU(2)
+providers a `permute` is exactly an axis permutation of the physical array
+([`prelude::TensorMap::to_physical_dense`] has an example).
 
 Projection takes the receiver tensor as the target schema. It therefore makes
 the destination runtime, provider, leg order, and sector content explicit.

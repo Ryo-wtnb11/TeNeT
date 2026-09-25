@@ -191,7 +191,7 @@ upstream location (the note says why).
 | `typed::TensorMap::right_polar` | TensorKit | 0.17.0 | `factorizations/matrixalgebrakit.jl:210-214` | factor spaces: `p` on `codomain ← codomain`, `wh` on the input's homspace |
 | `typed::TensorMap::scalar` | TensorKit | 0.17.0 | `tensors/tensoroperations.jl:446-451` | empty payload reads as zero |
 | `typed::TensorMap::to_c64` | TensorKit | 0.17.0 | `tensors/abstracttensor.jl:696-705` | `Base.complex` |
-| `typed::TensorMap::to_physical_dense` | TensorKit | 0.17.1 | `tensors/abstracttensor.jl:730-750` | physical expansion; executable fixture provenance is recorded above |
+| `typed::TensorMap::to_physical_dense` | TensorKit | 0.17.1 | `tensors/abstracttensor.jl:730-750` | physical expansion; leg order from `spaces/gradedspace.jl` `axes(V, c)`/`sectors(V)` (a dual `V'` in `V`'s order); fixtures `benchmarks/tensorkit_physical_dense_oracle.jl` (#1464); executable fixture provenance is recorded above |
 | `typed::TensorMap::project_physical_dense` | TensorKit | 0.17.1 | `tensors/abstracttensor.jl:752-790` | adjoint projection and coupled-sector normalization; executable fixture provenance is recorded above |
 | `typed::TensorMap::twist` | TensorKit | 0.17.0 | `tensors/indexmanipulations.jl:90-97` | `twist`; in-place `twist!` at 62-78 |
 | `typed::TensorMap::twist` | TensorKit | 0.17.0 | `tensors/indexmanipulations.jl:34-51` | `has_shared_twist` identity-twist detection |
