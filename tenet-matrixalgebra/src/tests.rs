@@ -16910,16 +16910,13 @@ fn multiplicity_free_eigen_ops_accept_consistently_reordered_tree_stacking() {
 }
 
 #[test]
-#[ignore = "compose of a consistently reordered layout returns wrong values (#1517)"]
 fn hermitian_exp_accepts_consistently_reordered_tree_stacking_with_facade_values() {
     // What: reversing rows and columns together is the same operator in a
     // permuted basis, so exp's spectral route passes the stacking guard and
-    // must publish the facade's values block by block. It currently does
-    // not: `V f(D) V^H` goes through `compose`, and composing such a layout
-    // with itself already differs from the facade's `A A`. The Padé route
-    // refuses the layout explicitly instead ("inverse output tree basis does
-    // not transpose the source basis"): its direct-region output must list
-    // trees in the source's positional order.
+    // publishes the facade's values block by block: `V f(D) V^H` composes
+    // eigenvectors published in the fresh factor layout by tree identity
+    // (#1518). The Padé route refuses the layout explicitly instead
+    // ("inverse output tree basis does not transpose the source basis").
     let rule = U1FusionRule;
     let sectors = [-1, 0, 1].map(|charge| U1Irrep::new(charge).sector_id());
     let scaled = |tensor: TensorMap<f64, 2, 2>| {
@@ -16990,4 +16987,267 @@ fn hermitian_exp_accepts_consistently_reordered_tree_stacking_with_facade_values
             }
         }
     }
+}
+
+/// Both factors come from the fresh builder of one homspace, so equal
+/// layouts compare position by position.
+fn assert_factor_matches_facade<R, D>(
+    what: &str,
+    expected: &BoundDynFactor<R, D>,
+    actual: &BoundDynFactor<R, D>,
+) where
+    D: FactorScalar,
+{
+    let (left, right) = (
+        expected.space().space().structure(),
+        actual.space().space().structure(),
+    );
+    assert_eq!(left.block_count(), right.block_count(), "{what}");
+    for index in 0..left.block_count() {
+        let (a, b) = (left.block(index).unwrap(), right.block(index).unwrap());
+        assert_eq!(a.key(), b.key(), "{what}");
+        assert_eq!(a.offset(), b.offset(), "{what}");
+        assert_eq!(a.shape(), b.shape(), "{what}");
+    }
+    let scale = expected
+        .data()
+        .iter()
+        .fold(1.0f64, |max, &value| max.max(value.widen_complex().norm()));
+    assert_eq!(expected.data().len(), actual.data().len(), "{what}");
+    for (position, (&a, &b)) in expected.data().iter().zip(actual.data()).enumerate() {
+        let (a, b) = (a.widen_complex(), b.widen_complex());
+        assert!(
+            (a - b).norm() <= 1e-10 * scale,
+            "{what} at {position}: {a} vs {b}"
+        );
+    }
+}
+
+/// Dense eig leaves each eigenvector's scale free, so compare every bond
+/// column of a sector up to one complex factor fixed at its largest entry.
+fn assert_eig_columns_match_up_to_scale<R>(
+    expected: &BoundDynFactor<R, Complex64>,
+    actual: &BoundDynFactor<R, Complex64>,
+) {
+    let structure = expected.space().space().structure();
+    let actual_structure = actual.space().space().structure();
+    let mut columns = std::collections::BTreeMap::<(SectorId, usize), Vec<usize>>::new();
+    for index in 0..structure.block_count() {
+        let block = structure.block(index).unwrap();
+        let other = actual_structure.block(index).unwrap();
+        assert_eq!(block.key(), other.key());
+        assert_eq!(block.offset(), other.offset());
+        let BlockKey::FusionTree(key) = block.key() else {
+            unreachable!("fusion-tree blocks")
+        };
+        let shape = block.shape();
+        let extent = shape.iter().product::<usize>();
+        for flat in 0..extent {
+            let mut rest = flat;
+            let mut position = block.offset();
+            let mut bond = 0;
+            for (axis, (&dim, &stride)) in shape.iter().zip(block.strides()).enumerate() {
+                let index = rest % dim;
+                rest /= dim;
+                position += index * stride;
+                if axis + 1 == shape.len() {
+                    bond = index;
+                }
+            }
+            columns
+                .entry((key.coupled(), bond))
+                .or_default()
+                .push(position);
+        }
+    }
+    for (column, positions) in columns {
+        let pivot = *positions
+            .iter()
+            .max_by(|&&a, &&b| {
+                expected.data()[a]
+                    .norm()
+                    .total_cmp(&expected.data()[b].norm())
+            })
+            .unwrap();
+        let ratio = actual.data()[pivot] / expected.data()[pivot];
+        for position in positions {
+            let (a, b) = (expected.data()[position] * ratio, actual.data()[position]);
+            assert!(
+                (a - b).norm() <= 1e-10 * ratio.norm().max(1.0),
+                "eig_full column {column:?} at {position}: {a} vs {b}"
+            );
+        }
+    }
+}
+
+/// [`hermitian_test_tensor`]'s layout with unsymmetrized hashed entries, so
+/// every coupled-sector matrix is full rank with a simple spectrum and its
+/// gauge-fixed factors are unique.
+fn generic_spectrum_test_tensor<R>(rule: &R, sectors: &[SectorId]) -> TensorMap<f64, 2, 2>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    let template = hermitian_test_tensor(rule, sectors);
+    let space = template.fusion_space().unwrap().as_ref().clone();
+    TensorMap::<f64, 2, 2>::from_block_fn_with_fusion_space(space, 0.0, |key, indices| {
+        let mut hash = 0x9e37_79b9_7f4a_7c15u64;
+        let BlockKey::FusionTree(tree) = key else {
+            return 0.0;
+        };
+        for &sector in tree
+            .codomain_tree()
+            .uncoupled()
+            .iter()
+            .chain(tree.domain_tree().uncoupled())
+        {
+            hash = (hash ^ (sector.id() as u64 + 1)).wrapping_mul(0x100_0000_01b3);
+        }
+        for &index in indices {
+            hash = (hash ^ (index as u64 + 7)).wrapping_mul(0x100_0000_01b3);
+        }
+        ((hash >> 40) % 1009) as f64 / 100.0 - 5.0
+    })
+    .unwrap()
+}
+
+/// What: a consistently reordered compact input (every coupled sector's rows
+/// and columns stacked in reverse tree order) is the same tensor, so its
+/// factors reconstruct it by tree identity and its SVD factors equal the
+/// facade's gauge-fixed ones.
+fn assert_reordered_compact_factor_publication<R, D>(provider: Arc<R>, facade: &TensorMap<D, 2, 2>)
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    let reordered = reversed_coupled_tree_basis_copy(provider.as_ref(), facade);
+    let facade = bound_tensor(Arc::clone(&provider), facade);
+    let reordered = bound_tensor(provider, &reordered);
+    assert!(reordered
+        .space()
+        .space()
+        .structure()
+        .coupled_sector_regions(2)
+        .unwrap()
+        .is_some());
+    let (facade, reordered) = (facade.as_ref(), reordered.as_ref());
+    let (facade, input) = (facade.dynamic(), reordered.dynamic());
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+
+    let expected = svd_compact_dyn(&mut dense, &facade).unwrap();
+    let actual = svd_compact_dyn(&mut dense, &input).unwrap();
+    assert_compact_factors_reconstruct_input(&input, actual.u(), Some(actual.s()), actual.vh());
+    assert_factor_matches_facade("svd_compact U", expected.u(), actual.u());
+    assert_factor_matches_facade("svd_compact Vh", expected.vh(), actual.vh());
+
+    let truncation = Truncation::rank(3);
+    let expected = svd_trunc_dyn(&mut dense, &facade, &truncation).unwrap();
+    let actual = svd_trunc_dyn(&mut dense, &input, &truncation).unwrap();
+    assert_factor_matches_facade("svd_trunc U", expected.u(), actual.u());
+    assert_factor_matches_facade("svd_trunc Vh", expected.vh(), actual.vh());
+
+    // Why reconstruction only: QR of a column-permuted matrix is a different
+    // factorization, so QR/LQ factors are not facade-comparable here.
+    let actual = qr_compact_dyn(&mut dense, &input).unwrap();
+    assert_compact_factors_reconstruct_input(&input, &actual.0, None, &actual.1);
+
+    let actual = lq_compact_dyn(&mut dense, &input).unwrap();
+    assert_compact_factors_reconstruct_input(&input, &actual.0, None, &actual.1);
+
+    // Full factorizations publish through the one-sided tree-identity
+    // scatter; their completion columns are not unique, so only
+    // reconstruction is checked.
+    let actual = svd_full_dyn(&mut dense, &input).unwrap();
+    assert_compact_factors_reconstruct_input(&input, actual.u(), Some(actual.s()), actual.vh());
+    let actual = qr_full_dyn(&mut dense, &input).unwrap();
+    assert_compact_factors_reconstruct_input(&input, &actual.0, None, &actual.1);
+    let actual = lq_full_dyn(&mut dense, &input).unwrap();
+    assert_compact_factors_reconstruct_input(&input, &actual.0, None, &actual.1);
+}
+
+/// What: eigenvectors of a consistently reordered Hermitian or general
+/// endomorphism map rows by tree identity: `A V = V Λ` against the facade
+/// operator, `V D Vᴴ = A` over the reordered input, and the facade's
+/// gauge-fixed eigenvectors, polar factors and eig vectors.
+fn assert_reordered_eigen_factor_publication<R>(rule: R, sectors: &[SectorId])
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>
+        + TreeTransformRuleCacheKey<Key = RuleIdentity>
+        + Clone,
+{
+    let provider = Arc::new(rule.clone());
+    let hermitian = hermitian_test_tensor(&rule, sectors);
+    let general = generic_spectrum_test_tensor(&rule, sectors);
+    let reordered_hermitian = reversed_coupled_tree_basis_copy(&rule, &hermitian);
+    let reordered_general = reversed_coupled_tree_basis_copy(&rule, &general);
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+
+    let eigh = eigh_full(
+        &mut dense,
+        &bound_tensor_ref!(Arc::clone(&provider), &reordered_hermitian),
+    )
+    .unwrap();
+    assert_eigen_equation(&rule, &hermitian, &eigh.v, &eigh.d);
+
+    let input = bound_tensor(Arc::clone(&provider), &reordered_hermitian);
+    let input = input.as_ref();
+    let input = input.dynamic();
+    let eigh = eigh_full_dyn(&mut dense, &input).unwrap();
+    let vh = crate::factorize::adjoint_bound_factor(eigh.v()).unwrap();
+    let mut vd = eigh.v().clone();
+    let vd_space = vd.space().space().clone();
+    scale_axis_by_spectrum(&vd_space, vd.data_mut(), None, eigh.eigenvalues()).unwrap();
+    assert_compact_factors_reconstruct_input(&input, &vd, None, &vh);
+
+    let facade = bound_tensor(Arc::clone(&provider), &general);
+    let facade = facade.as_ref();
+    let facade = facade.dynamic();
+    let reordered = bound_tensor(Arc::clone(&provider), &reordered_general);
+    let reordered = reordered.as_ref();
+    let reordered = reordered.dynamic();
+    let expected = eig_full_dyn(&mut dense, &facade).unwrap();
+    let actual = eig_full_dyn(&mut dense, &reordered).unwrap();
+    assert_eig_columns_match_up_to_scale(expected.v(), actual.v());
+
+    let mut context = default_context();
+    let expected = left_polar_dyn(&mut dense, &mut context, &facade).unwrap();
+    let actual = left_polar_dyn(&mut dense, &mut context, &reordered).unwrap();
+    assert_factor_matches_facade("left_polar W", &expected.0, &actual.0);
+    assert_factor_matches_facade("left_polar P", &expected.1, &actual.1);
+
+    assert_reordered_compact_factor_publication(Arc::clone(&provider), &general);
+    let complex = TensorMap::<Complex64, 2, 2>::from_vec_with_fusion_space(
+        general
+            .data()
+            .iter()
+            .enumerate()
+            .map(|(index, &value)| Complex64::new(value, ((index * 7 + 3) % 13) as f64 * 0.2 - 1.0))
+            .collect(),
+        general.fusion_space().unwrap().as_ref().clone(),
+    )
+    .unwrap();
+    assert_reordered_compact_factor_publication(provider, &complex);
+}
+
+#[test]
+fn z2_factor_publication_maps_consistently_reordered_trees_by_identity() {
+    assert_reordered_eigen_factor_publication(Z2FusionRule, &[SectorId::new(0), SectorId::new(1)]);
+}
+
+#[test]
+fn u1_factor_publication_maps_consistently_reordered_trees_by_identity() {
+    assert_reordered_eigen_factor_publication(
+        U1FusionRule,
+        &[-1, 0, 1].map(|charge| U1Irrep::new(charge).sector_id()),
+    );
+}
+
+#[test]
+fn su2_factor_publication_maps_consistently_reordered_trees_by_identity() {
+    assert_reordered_eigen_factor_publication(
+        SU2FusionRule,
+        &[
+            SU2Irrep::from_twice_spin(0).sector_id(),
+            SU2Irrep::from_twice_spin(1).sector_id(),
+        ],
+    );
 }
