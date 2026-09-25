@@ -10,7 +10,7 @@ use std::cell::{Cell, RefCell};
 use num_complex::Complex64;
 use num_traits::{Float, Zero};
 use tenet_core::{
-    BlockKey, BlockStructure, CheckedGenericFusion, CheckedGenericRigidSymbols,
+    BlockKey, BlockRef, BlockStructure, CheckedGenericFusion, CheckedGenericRigidSymbols,
     CheckedGenericStructureError, CoreError, CoupledSectorRegion, CoupledTreeExtent,
     FusionProductSpace, FusionRule, FusionTensorMapSpace, FusionTreeHomSpace, FusionTreeKey,
     FusionTreePairKey, GenericRigidSymbols, InfallibleGeneric, MultiplicityFreeRigidSymbols,
@@ -3038,6 +3038,8 @@ pub(crate) struct OneSidedPublicationProbe {
     pub canonical_publications: usize,
     pub fallback_publications: usize,
     pub owner_reused: usize,
+    /// Elements written by canonical publication beyond the moved first
+    /// owner: appended factors plus in-place identity blocks.
     pub appended_elements: usize,
 }
 
@@ -3260,7 +3262,7 @@ where
         (FactorSide::Right, FactorPlacement::Direct)
         | (FactorSide::Left, FactorPlacement::Adjoint) => FactorSide::Right,
     };
-    if one_sided_factor_output_is_canonical(
+    if let Some(segments) = one_sided_factor_output_plan(
         space.space().structure(),
         matricizations,
         pairs,
@@ -3269,7 +3271,7 @@ where
         side,
         source_trees,
     ) {
-        let data = take_one_sided_factors(pairs, required_len, side);
+        let data = take_one_sided_factors(pairs, &segments, required_len, side);
         let (nout, nin) = match side {
             FactorSide::Left => (space.space().nout(), 1),
             FactorSide::Right => (1, space.space().nin()),
@@ -9539,43 +9541,15 @@ fn sector_factor_output_is_canonical<M: SectorGeometry>(
         if actual_tree != tree.tree || coupled_of(actual_tree) != matrix.sector() {
             return None;
         }
-        let block_offset = match side {
-            FactorSide::Left => output_offset.checked_add(tree.offset)?,
-            FactorSide::Right => output_offset.checked_add(bond.checked_mul(tree.offset)?)?,
-        };
-        if block.offset() != block_offset
-            || block.shape().len() != tree.shape.len() + 1
-            || block.strides().len() != block.shape().len()
-        {
-            return None;
-        }
-        let shape_matches = match side {
-            FactorSide::Left => {
-                &block.shape()[..tree.shape.len()] == tree.shape
-                    && block.shape()[tree.shape.len()] == bond
-            }
-            FactorSide::Right => block.shape()[0] == bond && &block.shape()[1..] == tree.shape,
-        };
-        if !shape_matches {
-            return None;
-        }
-        let mut stride = match side {
-            FactorSide::Left => 1,
-            FactorSide::Right => bond,
-        };
-        let stride_offset = usize::from(matches!(side, FactorSide::Right));
-        if matches!(side, FactorSide::Right) && block.strides()[0] != 1 {
-            return None;
-        }
-        for (axis, &dim) in tree.shape.iter().enumerate() {
-            if block.strides()[axis + stride_offset] != stride {
-                return None;
-            }
-            stride = stride.checked_mul(dim)?;
-        }
-        if matches!(side, FactorSide::Left) && block.strides()[tree.shape.len()] != source_extent {
-            return None;
-        }
+        factor_block_is_canonical(
+            &block,
+            tree.shape,
+            tree.offset,
+            output_offset,
+            source_extent,
+            bond,
+            side,
+        )?;
         *block_index += 1;
     }
     if tree_prefix != source_extent {
@@ -9584,13 +9558,130 @@ fn sector_factor_output_is_canonical<M: SectorGeometry>(
     output_offset.checked_add(factor_len)
 }
 
-/// One-sided sibling of [`factor_output_is_canonical`]: the source
-/// matricizations, factor pairs and admitted bond dimensions must be one
-/// aligned ascending sector stream (which excludes duplicate, omitted, and
-/// identity-only sectors), and the whole admitted output must be exhausted by
-/// the selected factors. `source_trees` selects the matricization side whose
-/// trees index the selected factor (columns for adjoint placement).
-fn one_sided_factor_output_is_canonical<D, M: SectorGeometry>(
+/// Proves that `block` holds the side-tree span `[tree_offset, tree_offset +
+/// |tree_shape|)` of a column-major sector factor starting at `output_offset`
+/// (left `a x bond`, right `bond x a`, `a = source_extent`).
+fn factor_block_is_canonical(
+    block: &BlockRef<'_>,
+    tree_shape: &[usize],
+    tree_offset: usize,
+    output_offset: usize,
+    source_extent: usize,
+    bond: usize,
+    side: FactorSide,
+) -> Option<()> {
+    let block_offset = match side {
+        FactorSide::Left => output_offset.checked_add(tree_offset)?,
+        FactorSide::Right => output_offset.checked_add(bond.checked_mul(tree_offset)?)?,
+    };
+    if block.offset() != block_offset
+        || block.shape().len() != tree_shape.len() + 1
+        || block.strides().len() != block.shape().len()
+    {
+        return None;
+    }
+    let shape_matches = match side {
+        FactorSide::Left => {
+            &block.shape()[..tree_shape.len()] == tree_shape
+                && block.shape()[tree_shape.len()] == bond
+        }
+        FactorSide::Right => block.shape()[0] == bond && &block.shape()[1..] == tree_shape,
+    };
+    if !shape_matches {
+        return None;
+    }
+    let mut stride = match side {
+        FactorSide::Left => 1,
+        FactorSide::Right => bond,
+    };
+    let stride_offset = usize::from(matches!(side, FactorSide::Right));
+    if matches!(side, FactorSide::Right) && block.strides()[0] != 1 {
+        return None;
+    }
+    for (axis, &dim) in tree_shape.iter().enumerate() {
+        if block.strides()[axis + stride_offset] != stride {
+            return None;
+        }
+        stride = stride.checked_mul(dim)?;
+    }
+    if matches!(side, FactorSide::Left) && block.strides()[tree_shape.len()] != source_extent {
+        return None;
+    }
+    Some(())
+}
+
+/// Identity-completed sector (bond states but no source matricization): its
+/// output blocks, in output order, must tile a column-major `bond x bond`
+/// identity at `output_offset`, with the output tree order as the side basis
+/// exactly as the scatter fallback numbers it. A sector with no output blocks
+/// on this side (e.g. the right factor of a codomain-only full-QR sector)
+/// publishes nothing. Returns the next offset and whether an identity is due.
+fn identity_sector_output_is_canonical(
+    structure: &BlockStructure,
+    block_index: &mut usize,
+    output_offset: usize,
+    sector: SectorId,
+    bond: usize,
+    side: FactorSide,
+) -> Option<(usize, bool)> {
+    let mut tree_prefix = 0usize;
+    while let Ok(block) = structure.block(*block_index) {
+        let BlockKey::FusionTree(key) = block.key() else {
+            return None;
+        };
+        let tree = match side {
+            FactorSide::Left => key.codomain_tree(),
+            FactorSide::Right => key.domain_tree(),
+        };
+        if coupled_of(tree) != sector {
+            break;
+        }
+        let tree_shape = match side {
+            FactorSide::Left => block.shape().split_last()?.1,
+            FactorSide::Right => block.shape().split_first()?.1,
+        };
+        factor_block_is_canonical(
+            &block,
+            tree_shape,
+            tree_prefix,
+            output_offset,
+            bond,
+            bond,
+            side,
+        )?;
+        tree_prefix = tree_prefix.checked_add(checked_extent(tree_shape)?)?;
+        *block_index += 1;
+    }
+    if tree_prefix == 0 {
+        Some((output_offset, false))
+    } else if tree_prefix == bond {
+        Some((output_offset.checked_add(bond.checked_mul(bond)?)?, true))
+    } else {
+        None
+    }
+}
+
+/// One output segment of a proven one-sided publication, in output order.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OneSidedSegment {
+    /// The selected side of `pairs[index]`.
+    Factor(usize),
+    /// A column-major `bond x bond` identity for a sector without a source
+    /// matricization (MatrixAlgebraKit `one!` on a zero-extent input block).
+    Identity(usize),
+}
+
+/// One-sided sibling of [`factor_output_is_canonical`]: walks the ascending
+/// union of source sectors and admitted bond sectors. A populated sector must
+/// carry its pair and publish it by [`sector_factor_output_is_canonical`]; a
+/// populated sector without a pair must have no bond (a null sector omitted
+/// as full rank); a bond-only sector must pass
+/// [`identity_sector_output_is_canonical`]. The whole admitted output must be
+/// exhausted and every pair consumed, so unordered, duplicate or extraneous
+/// records return `None` and keep the scatter fallback. `source_trees`
+/// selects the matricization side whose trees index the selected factor
+/// (columns for adjoint placement).
+fn one_sided_factor_output_plan<D, M: SectorGeometry>(
     structure: &BlockStructure,
     matricizations: &[M],
     pairs: &[FactorPair<D>],
@@ -9598,21 +9689,55 @@ fn one_sided_factor_output_is_canonical<D, M: SectorGeometry>(
     required_len: usize,
     side: FactorSide,
     source_trees: FactorSide,
-) -> bool {
-    if matricizations.len() != pairs.len() || matricizations.len() != dimensions.len() {
-        return false;
-    }
+) -> Option<Vec<OneSidedSegment>> {
+    let mut segments = Vec::with_capacity(dimensions.len());
+    let mut matrices = matricizations.iter().peekable();
+    let mut pair_records = pairs.iter().enumerate().peekable();
+    let mut bonds = dimensions.iter().peekable();
+    let mut previous_matrix = None;
     let mut block_index = 0usize;
     let mut output_offset = 0usize;
-    for ((matrix, pair), (&sector, &bond)) in matricizations.iter().zip(pairs).zip(dimensions) {
-        if matrix.sector() != sector || pair.sector != sector {
-            return false;
+    loop {
+        let matrix_sector = matrices.peek().map(|matrix| matrix.sector());
+        let sector = match (matrix_sector, bonds.peek().map(|(&sector, _)| sector)) {
+            (None, None) => break,
+            (Some(matrix), Some(bond)) => matrix.min(bond),
+            (Some(sector), None) | (None, Some(sector)) => sector,
+        };
+        let bond = bonds
+            .next_if(|&(&candidate, _)| candidate == sector)
+            .map(|(_, &bond)| bond);
+        if matrix_sector != Some(sector) {
+            let (next_offset, identity) = identity_sector_output_is_canonical(
+                structure,
+                &mut block_index,
+                output_offset,
+                sector,
+                bond?,
+                side,
+            )?;
+            if identity {
+                segments.push(OneSidedSegment::Identity(bond?));
+            }
+            output_offset = next_offset;
+            continue;
         }
+        let matrix = matrices.next()?;
+        if previous_matrix.is_some_and(|previous| previous >= sector) {
+            return None;
+        }
+        previous_matrix = Some(sector);
+        let Some((index, pair)) = pair_records.next_if(|(_, pair)| pair.sector == sector) else {
+            if bond.unwrap_or(0) != 0 {
+                return None;
+            }
+            continue;
+        };
         let (factor_len, factor_leading) = match side {
             FactorSide::Left => (pair.left.len(), pair.left_rows),
             FactorSide::Right => (pair.right.len(), pair.right_leading),
         };
-        let Some(next_offset) = sector_factor_output_is_canonical(
+        output_offset = sector_factor_output_is_canonical(
             structure,
             &mut block_index,
             output_offset,
@@ -9620,22 +9745,25 @@ fn one_sided_factor_output_is_canonical<D, M: SectorGeometry>(
             source_trees,
             factor_len,
             factor_leading,
-            bond,
+            bond?,
             side,
             None,
-        ) else {
-            return false;
-        };
-        output_offset = next_offset;
+        )?;
+        segments.push(OneSidedSegment::Factor(index));
     }
-    block_index == structure.block_count() && output_offset == required_len
+    (pair_records.next().is_none()
+        && block_index == structure.block_count()
+        && output_offset == required_len)
+        .then_some(segments)
 }
 
-/// Moves the selected side of every pair into one output buffer after
-/// [`one_sided_factor_output_is_canonical`] proved the layout; the opposite
-/// side stays in place for its own publication.
-fn take_one_sided_factors<D>(
+/// Publishes the segments proved by [`one_sided_factor_output_plan`]: the
+/// selected side of each pair is moved or appended and each identity is
+/// written once in place, so no output element is written twice. The
+/// opposite side stays in place for its own publication.
+fn take_one_sided_factors<D: FactorScalar>(
     pairs: &mut [FactorPair<D>],
+    segments: &[OneSidedSegment],
     required_len: usize,
     side: FactorSide,
 ) -> Vec<D> {
@@ -9649,16 +9777,28 @@ fn take_one_sided_factors<D>(
         .find(|factor| !factor.is_empty())
         .map(Vec::as_ptr);
     let mut output: Option<Vec<D>> = None;
-    let _appended = pairs
-        .iter_mut()
-        .map(|pair| {
-            let factor = match side {
-                FactorSide::Left => std::mem::take(&mut pair.left),
-                FactorSide::Right => std::mem::take(&mut pair.right),
-            };
-            append_owned_factor(&mut output, factor, required_len)
-        })
-        .sum::<usize>();
+    let mut _written = 0usize;
+    for &segment in segments {
+        match segment {
+            OneSidedSegment::Factor(index) => {
+                let pair = &mut pairs[index];
+                let factor = match side {
+                    FactorSide::Left => std::mem::take(&mut pair.left),
+                    FactorSide::Right => std::mem::take(&mut pair.right),
+                };
+                _written += append_owned_factor(&mut output, factor, required_len);
+            }
+            OneSidedSegment::Identity(bond) => {
+                let data = output.get_or_insert_with(|| Vec::with_capacity(required_len));
+                let start = data.len();
+                data.resize(start + bond * bond, D::zero());
+                for diagonal in 0..bond {
+                    data[start + diagonal * (bond + 1)] = D::one();
+                }
+                _written += bond * bond;
+            }
+        }
+    }
     let data = output.unwrap_or_default();
     #[cfg(test)]
     ONE_SIDED_PUBLICATION_PROBE.with(|probe| {
@@ -9666,7 +9806,7 @@ fn take_one_sided_factors<D>(
         value.canonical_publications += 1;
         value.owner_reused +=
             usize::from(first.is_some_and(|pointer| std::ptr::eq(pointer, data.as_ptr())));
-        value.appended_elements += _appended;
+        value.appended_elements += _written;
         probe.set(value);
     });
     data
@@ -10229,7 +10369,7 @@ where
         FactorSide::Left => (space.space().nout(), 1),
         FactorSide::Right => (1, space.space().nin()),
     };
-    if one_sided_factor_output_is_canonical(
+    if let Some(segments) = one_sided_factor_output_plan(
         space.space().structure(),
         matricizations,
         pairs,
@@ -10238,7 +10378,7 @@ where
         side,
         side,
     ) {
-        let data = take_one_sided_factors(pairs, len, side);
+        let data = take_one_sided_factors(pairs, &segments, len, side);
         return BoundDynFactor::from_bound(space, data, nout, nin)
             .map_err(CheckedGenericFactorPlanError::from);
     }
@@ -13516,11 +13656,6 @@ mod sector_matricization_tests {
         [all.clone(), all.clone(), all.clone(), all]
     }
 
-    fn assert_identity_segment<D: FactorScalar + fmt::Debug>(segment: &[D], ones: usize) {
-        assert_eq!(segment.iter().filter(|&&v| v == D::one()).count(), ones);
-        assert!(segment.iter().all(|&v| v == D::zero() || v == D::one()));
-    }
-
     #[test]
     fn mf_one_sided_many_tree_fallback_indexes_each_populated_sector_once() {
         fn run<D: FactorScalar + fmt::Debug>(values: impl Fn(usize) -> D) {
@@ -13593,36 +13728,49 @@ mod sector_matricization_tests {
                 assert!(index.indexed_trees + index.lookups < 8 * 8 * 8);
 
                 // Identity-only sectors 0 (before), 3 (between) and 7 (after)
-                // have no matricization and index nothing.
+                // publish canonically without any placement index.
                 let (_, kept) = fresh();
                 let kept = kept
                     .into_iter()
                     .filter(|m| ![0, 3, 7].contains(&m.sector.id()))
                     .collect::<Vec<_>>();
                 let mut pairs = staged(&kept);
+                let selected = pairs
+                    .iter()
+                    .map(|pair| selected_of(pair, side).clone())
+                    .collect::<Vec<_>>();
                 let (data, probe, index) = build(&kept, &mut pairs);
-                assert_eq!(probe.fallback_publications, 1);
                 assert_eq!(
-                    index,
-                    PlacementIndexProbe {
-                        index_builds: 1,
-                        indexed_sides: 5,
-                        indexed_trees: 40,
-                        lookups: 40,
-                    }
+                    (probe.canonical_publications, probe.fallback_publications),
+                    (1, 0)
                 );
+                assert_eq!(index, PlacementIndexProbe::default());
                 let mut start = 0usize;
                 for matrix in &matrices {
                     let len = source_extent(matrix, source_trees) * dimensions[&matrix.sector];
-                    let segment = &data[start..start + len];
-                    if [0, 3, 7].contains(&matrix.sector.id()) {
-                        assert_identity_segment(segment, dimensions[&matrix.sector]);
-                    } else {
-                        assert_eq!(segment, &reference[start..start + len]);
+                    if ![0, 3, 7].contains(&matrix.sector.id()) {
+                        assert_eq!(&data[start..start + len], &reference[start..start + len]);
                     }
                     start += len;
                 }
                 assert_eq!(start, data.len());
+                let (authority, _) = fresh();
+                let factor_space = build_bound_factor_space(
+                    &authority,
+                    authority.space().homspace(),
+                    SectorLeg::new(dimensions.iter().map(|(&s, &d)| (s, d)), false),
+                    side,
+                )
+                .unwrap();
+                assert_literal_one_sided_layout(
+                    factor_space.space().structure(),
+                    &data,
+                    &kept,
+                    &selected,
+                    &dimensions,
+                    side,
+                    source_trees,
+                );
             }
         }
         run(|k| k as f64 + 0.25);
@@ -13731,15 +13879,22 @@ mod sector_matricization_tests {
                         .filter(|m| m.sector.id() == keep)
                         .collect::<Vec<_>>();
                     let mut pairs = staged(&kept);
+                    let selected = pairs
+                        .iter()
+                        .map(|pair| selected_of(pair, side).clone())
+                        .collect::<Vec<_>>();
                     let (data, probe, index) = build(&kept, &mut pairs);
-                    assert_eq!(probe.fallback_publications, 1);
+                    assert_eq!(
+                        (probe.canonical_publications, probe.fallback_publications),
+                        (1, 0)
+                    );
                     assert_eq!(
                         index,
                         PlacementIndexProbe {
                             index_builds: 1,
                             indexed_sides: 1,
                             indexed_trees: kept[0].row_trees.len(),
-                            lookups: 2 * kept[0].row_trees.len(),
+                            lookups: kept[0].row_trees.len(),
                         }
                     );
                     let (first, second) = data.split_at(lens[0]);
@@ -13747,11 +13902,27 @@ mod sector_matricization_tests {
                     assert_eq!(second.len(), lens[1]);
                     if keep == 0 {
                         assert_eq!(first, reference_first);
-                        assert_identity_segment(second, dimensions[&SectorId::new(1)]);
                     } else {
-                        assert_identity_segment(first, dimensions[&SectorId::new(0)]);
                         assert_eq!(second, reference_second);
                     }
+                    let checked_factor = build_bound_factor_generic_checked(
+                        &provider,
+                        &homspace,
+                        &kept,
+                        &mut staged(&kept),
+                        &dimensions,
+                        side,
+                    )
+                    .unwrap();
+                    assert_literal_one_sided_layout(
+                        checked_factor.space().space().structure(),
+                        &data,
+                        &kept,
+                        &selected,
+                        &dimensions,
+                        side,
+                        side,
+                    );
                 }
             }
         }
@@ -14463,7 +14634,9 @@ mod sector_matricization_tests {
 
     /// Checks every output element against the literal coordinates
     /// `F[o + q + a*j]` (left) / `F[j + b*(o + q)]` (right), independent of
-    /// the production layout proof.
+    /// the production layout proof. A sector without a matricization is
+    /// checked against a separately built `d x d` identity with `o` counted
+    /// over its earlier output blocks (the output tree order is its basis).
     fn assert_literal_one_sided_layout<D>(
         structure: &BlockStructure,
         data: &[D],
@@ -14475,7 +14648,33 @@ mod sector_matricization_tests {
     ) where
         D: FactorScalar + PartialEq + fmt::Debug,
     {
+        assert_literal_one_sided_blocks(
+            structure,
+            data,
+            matrices,
+            Some(selected),
+            dimensions,
+            side,
+            source_trees,
+        );
+    }
+
+    /// [`assert_literal_one_sided_layout`] that skips populated sectors when
+    /// `selected` is `None` (numerical factors), keeping the literal identity
+    /// check and the exact output coverage.
+    fn assert_literal_one_sided_blocks<D, M>(
+        structure: &BlockStructure,
+        data: &[D],
+        matrices: &[SectorMatricization<M>],
+        selected: Option<&[Vec<D>]>,
+        dimensions: &BTreeMap<SectorId, usize>,
+        side: FactorSide,
+        source_trees: FactorSide,
+    ) where
+        D: FactorScalar + PartialEq + fmt::Debug,
+    {
         let mut verified = 0usize;
+        let mut identity_offsets = BTreeMap::<SectorId, usize>::new();
         for index in 0..structure.block_count() {
             let block = structure.block(index).unwrap();
             let BlockKey::FusionTree(key) = block.key() else {
@@ -14485,26 +14684,47 @@ mod sector_matricization_tests {
                 FactorSide::Left => key.codomain_tree(),
                 FactorSide::Right => key.domain_tree(),
             };
-            let (matrix_index, matrix) = matrices
-                .iter()
-                .enumerate()
-                .find(|(_, matrix)| matrix.sector == tree.coupled())
-                .unwrap();
-            let trees = match source_trees {
-                FactorSide::Left => &matrix.row_trees,
-                FactorSide::Right => &matrix.col_trees,
-            };
-            let (_, o, tree_shape) = trees
-                .iter()
-                .find(|(candidate, _, _)| candidate == tree)
-                .unwrap();
-            let a = source_extent(matrix, source_trees);
-            let b = dimensions[&matrix.sector];
-            let factor = &selected[matrix_index];
             let shape = block.shape();
             let strides = block.strides();
             let total = shape.iter().product::<usize>();
-            assert_eq!(total, tree_shape.iter().product::<usize>() * b);
+            let identity;
+            let (o, a, b, factor) = if let Some((matrix_index, matrix)) = matrices
+                .iter()
+                .enumerate()
+                .find(|(_, matrix)| matrix.sector == tree.coupled())
+            {
+                let Some(selected) = selected else {
+                    verified += total;
+                    continue;
+                };
+                let trees = match source_trees {
+                    FactorSide::Left => &matrix.row_trees,
+                    FactorSide::Right => &matrix.col_trees,
+                };
+                let (_, o, tree_shape) = trees
+                    .iter()
+                    .find(|(candidate, _, _)| candidate == tree)
+                    .unwrap();
+                let b = dimensions[&matrix.sector];
+                assert_eq!(total, tree_shape.iter().product::<usize>() * b);
+                (
+                    *o,
+                    source_extent(matrix, source_trees),
+                    b,
+                    &selected[matrix_index],
+                )
+            } else {
+                let d = dimensions[&tree.coupled()];
+                let mut literal = vec![D::zero(); d * d];
+                for diagonal in 0..d {
+                    literal[diagonal + d * diagonal] = D::one();
+                }
+                identity = literal;
+                let o = identity_offsets.entry(tree.coupled()).or_default();
+                let start = *o;
+                *o += total / d;
+                (start, d, d, &identity)
+            };
             for flat in 0..total {
                 let mut remaining = flat;
                 let mut destination = block.offset();
@@ -14717,32 +14937,40 @@ mod sector_matricization_tests {
         assert_buffers_intact(&pairs, side);
 
         // Identity-only sector after (drop odd) and before (drop even) the
-        // populated sector; the populated region equals the canonical one.
-        let mut pairs = staged(1.0);
-        let (factor, probe) = build(&matrices[..1], &mut pairs[..1], &row_dimensions);
-        assert_eq!(probe.fallback_publications, 1);
-        let factor = factor.unwrap();
-        assert_eq!(&factor.data()[..sector_len], &reference[..sector_len]);
-        let identity = &factor.data()[sector_len..];
-        assert_eq!(
-            identity.iter().filter(|&&value| value == 1.0).count(),
-            matrices[1].rows
-        );
-        assert!(identity.iter().all(|&value| value == 0.0 || value == 1.0));
-        assert_buffers_intact(&pairs, side);
-        let mut pairs = staged(1.0);
-        let (factor, probe) = build(&matrices[1..], &mut pairs[1..], &row_dimensions);
-        assert_eq!(probe.fallback_publications, 1);
-        let factor = factor.unwrap();
-        assert_eq!(&factor.data()[sector_len..], &reference[sector_len..]);
-        assert_eq!(
-            factor.data()[..sector_len]
+        // populated sector publishes canonically: the populated region equals
+        // the canonical one and the identity matches the literal oracle.
+        for kept in [0..1, 1..2] {
+            let mut pairs = staged(1.0);
+            let selected = pairs[kept.clone()]
                 .iter()
-                .filter(|&&value| value == 1.0)
-                .count(),
-            matrices[0].rows
-        );
-        assert_buffers_intact(&pairs, side);
+                .map(|pair| pair.left.clone())
+                .collect::<Vec<_>>();
+            let (factor, probe) = build(
+                &matrices[kept.clone()],
+                &mut pairs[kept.clone()],
+                &row_dimensions,
+            );
+            assert_eq!(
+                (probe.canonical_publications, probe.fallback_publications),
+                (1, 0)
+            );
+            let factor = factor.unwrap();
+            let populated = if kept.start == 0 {
+                0..sector_len
+            } else {
+                sector_len..reference.len()
+            };
+            assert_eq!(&factor.data()[populated.clone()], &reference[populated]);
+            assert_literal_one_sided_layout(
+                factor.space().space().structure(),
+                factor.data(),
+                &matrices[kept],
+                &selected,
+                &row_dimensions,
+                side,
+                side,
+            );
+        }
 
         // Missing pair for a populated sector: unchanged error.
         let mut pairs = staged(1.0);
@@ -14795,7 +15023,7 @@ mod sector_matricization_tests {
     }
 
     #[test]
-    fn mf_one_sided_identity_sector_between_populated_sectors_falls_back() {
+    fn mf_one_sided_identity_sector_between_populated_sectors_publishes_canonically() {
         let rule = Arc::new(tenet_core::ZNFusionRule::new(3).unwrap());
         let sectors = [SectorId::new(0), SectorId::new(1), SectorId::new(2)];
         let [s0, s1, s2] = sectors;
@@ -14856,23 +15084,191 @@ mod sector_matricization_tests {
             staged_one_sided_pairs(&without_middle, &col_dimensions, side, side, &|k| {
                 k as f64 + 0.25
             });
-        let (data, probe) = build(&without_middle, &mut pairs);
+        let selected = pairs
+            .iter()
+            .map(|pair| pair.right.clone())
+            .collect::<Vec<_>>();
+        reset_one_sided_publication_probe();
+        let factor = build_bound_factor_with_placement(
+            &authority,
+            authority.space().homspace(),
+            &without_middle,
+            &mut pairs,
+            &col_dimensions,
+            side,
+            FactorPlacement::Direct,
+        )
+        .unwrap();
+        let probe = one_sided_publication_probe();
+        assert_eq!(
+            (probe.canonical_publications, probe.fallback_publications),
+            (1, 0)
+        );
+        let first = matrices[0].cols * matrices[0].cols;
+        let middle = matrices[1].cols * matrices[1].cols;
+        // The first factor owns the output; the identity is written in place
+        // and the last factor appended.
+        assert_eq!(probe.appended_elements, middle + selected[1].len());
+        let data = factor.data();
+        assert_eq!(&data[..first], &reference[..first]);
+        assert_eq!(&data[first + middle..], &reference[first + middle..]);
+        assert_literal_one_sided_layout(
+            factor.space().space().structure(),
+            data,
+            &without_middle,
+            &selected,
+            &col_dimensions,
+            side,
+            side,
+        );
+
+        // Reordered records around the identity sector keep the tree-identity
+        // scatter and publish the same output.
+        let (_, mut reversed) = two_leg_geometry::<_, f64>(
+            Arc::new(tenet_core::ZNFusionRule::new(3).unwrap()),
+            [
+                vec![(s0, 1), (s1, 2), (s2, 1)],
+                vec![(s0, 2), (s1, 1), (s2, 1)],
+                vec![(s0, 1), (s1, 1), (s2, 2)],
+                vec![(s0, 2), (s1, 1), (s2, 1)],
+            ],
+        );
+        reversed.remove(1);
+        reversed.reverse();
+        let mut pairs =
+            staged_one_sided_pairs(&reversed, &col_dimensions, side, side, &|k| k as f64 + 0.25);
+        let (scattered, probe) = build(&reversed, &mut pairs);
         assert_eq!(
             (probe.canonical_publications, probe.fallback_publications),
             (0, 1)
         );
         assert_buffers_intact(&pairs, side);
-        let first = matrices[0].cols * matrices[0].cols;
-        let middle = matrices[1].cols * matrices[1].cols;
-        assert_eq!(&data[..first], &reference[..first]);
-        assert_eq!(&data[first + middle..], &reference[first + middle..]);
-        assert_eq!(
-            data[first..first + middle]
-                .iter()
-                .filter(|&&value| value == 1.0)
-                .count(),
-            matrices[1].cols
+        assert_eq!(scattered, data);
+    }
+
+    /// U(1) MPS site `(left x phys) <- right` with a codomain-only coupled
+    /// charge 2 and a domain-only charge 3; charge 0 is square (full rank,
+    /// omitted from both null spaces) and charge 1 is `6 x 4`.
+    fn u1_mps_side_only_space() -> BoundDynamicFusionMapSpace<tenet_core::U1FusionRule> {
+        let q = |charge| tenet_core::U1Irrep::new(charge).sector_id();
+        let homspace = FusionTreeHomSpace::new(
+            FusionProductSpace::new([
+                SectorLeg::new([(q(0), 3), (q(1), 3)], false),
+                SectorLeg::new([(q(0), 1), (q(1), 1)], false),
+            ]),
+            FusionProductSpace::new([SectorLeg::new([(q(0), 3), (q(1), 4), (q(3), 2)], false)]),
         );
+        BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free(
+            Arc::new(tenet_core::U1FusionRule),
+            homspace,
+        )
+        .unwrap()
+    }
+
+    /// Byte-traffic contract for side-only publication: every full/null factor
+    /// of the MPS site is published canonically, and the only elements
+    /// written beyond the moved first owner are the appended factors and the
+    /// in-place identities. The scatter fallback instead zero-fills all `P`
+    /// output elements and then scatters every populated block.
+    fn side_only_publication_bytes_case<D>(values: impl Fn(usize) -> D)
+    where
+        D: FactorScalar + PartialEq + fmt::Debug,
+    {
+        let space = u1_mps_side_only_space();
+        let data = (0..space.space().required_len().unwrap())
+            .map(&values)
+            .collect::<Vec<_>>();
+        let input = BoundDynamicTensorRef::try_new(&space, &data).unwrap();
+        let matrices = sector_matricizations(space.space().structure(), &data, 2).unwrap();
+        assert_eq!(
+            matrices
+                .iter()
+                .map(|matrix| (matrix.rows, matrix.cols))
+                .collect::<Vec<_>>(),
+            [(3, 3), (6, 4)]
+        );
+        let q = |charge| tenet_core::U1Irrep::new(charge).sector_id();
+        let codomain = BTreeMap::from([(q(0), 3), (q(1), 6), (q(2), 3)]);
+        let domain = BTreeMap::from([(q(0), 3), (q(1), 4), (q(3), 2)]);
+        let mut dense = tenet_dense::DefaultDenseExecutor::new();
+        let bytes = |elements: usize| elements * std::mem::size_of::<D>();
+        let check = |factor: &BoundDynFactor<_, D>,
+                     dimensions: &BTreeMap<SectorId, usize>,
+                     side: FactorSide| {
+            assert_literal_one_sided_blocks(
+                factor.space().space().structure(),
+                factor.data(),
+                &matrices,
+                None,
+                dimensions,
+                side,
+                side,
+            );
+        };
+        let publication = |expected_written: usize| {
+            let probe = one_sided_publication_probe();
+            reset_one_sided_publication_probe();
+            assert_eq!(
+                (probe.canonical_publications, probe.fallback_publications),
+                (1, 0)
+            );
+            assert_eq!(bytes(probe.appended_elements), bytes(expected_written));
+        };
+
+        // Left null: charge 1 null basis 6 x 2 owns the buffer, charge 2 adds
+        // a 3 x 3 identity, charge 0 is absent (P = 12 + 9, fallback 21 + 12 + 3).
+        reset_one_sided_publication_probe();
+        let null = left_null_dyn(&mut dense, &input).unwrap();
+        publication(9);
+        assert_eq!(null.data().len(), 21);
+        check(
+            &null,
+            &BTreeMap::from([(q(1), 2), (q(2), 3)]),
+            FactorSide::Left,
+        );
+        // Right null: charges 0 and 1 have full column rank and are absent;
+        // the charge-3 identity (2 x 2) is written into a fresh buffer.
+        let null = right_null_dyn(&mut dense, &input).unwrap();
+        publication(4);
+        assert_eq!(null.data().len(), 4);
+        check(&null, &BTreeMap::from([(q(3), 2)]), FactorSide::Right);
+
+        let (left, right) = qr_full_dyn(&mut dense, &input).unwrap();
+        let _ = one_sided_publication_probe();
+        check(&left, &codomain, FactorSide::Left);
+        check(&right, &codomain, FactorSide::Right);
+        let (left, right) = lq_full_dyn(&mut dense, &input).unwrap();
+        check(&left, &domain, FactorSide::Left);
+        check(&right, &domain, FactorSide::Right);
+        let svd = svd_full_dyn(&mut dense, &input).unwrap();
+        check(svd.u(), &codomain, FactorSide::Left);
+        check(svd.vh(), &domain, FactorSide::Right);
+        let probe = one_sided_publication_probe();
+        assert_eq!(
+            (probe.canonical_publications, probe.fallback_publications),
+            (6, 0)
+        );
+        // Q: 36 + 9 identity; R: 24 (charge 2 has no domain block); L: 24;
+        // Q': 16 + 4 identity; U: 36 + 9; Vh: 16 + 4 (first owners moved).
+        assert_eq!(
+            bytes(probe.appended_elements),
+            bytes(45 + 24 + 24 + 20 + 45 + 20)
+        );
+    }
+
+    #[test]
+    fn side_only_publication_writes_each_output_element_once_real() {
+        side_only_publication_bytes_case(|k| ((k * k) as f64 * 0.37 + k as f64).sin());
+    }
+
+    #[test]
+    fn side_only_publication_writes_each_output_element_once_complex() {
+        side_only_publication_bytes_case(|k| {
+            Complex64::new(
+                ((k * k) as f64 * 0.37 + k as f64).sin(),
+                ((k * k) as f64 * 0.23 - k as f64).cos(),
+            )
+        });
     }
 
     #[test]
