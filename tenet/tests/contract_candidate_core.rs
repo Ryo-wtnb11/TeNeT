@@ -779,3 +779,117 @@ fn large_output_from_small_operands_copies_the_operands_not_c() {
         );
     }
 }
+
+/// Warm DynamicTree calls on the inactive-destination inputs, each after the
+/// previous result was dropped, as in a sweep: the destination's coupled
+/// regions are then recompiled on a fresh structure wrapper every call, so
+/// their per-sector cost is visible (#1488). Base d90bfd17 made 191 calls
+/// for X1 and X4; the regions now cost one allocation per coupled sector
+/// and a run of inactive sectors one scale layout.
+#[test]
+fn dynamic_tree_with_a_fresh_destination_allocates_per_region_not_per_tree() {
+    let _guard = MEASUREMENT_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    for case in inactive_output_cases(&runtime) {
+        let (calls, bytes, _) = warm(&runtime, &case);
+        let name = case.name;
+        eprintln!("U(1) {name}: {calls} calls, {bytes} B with a fresh destination");
+        // What: 13 destination sectors no longer cost ~10 allocations each.
+        assert!(calls <= 70, "{name}: {calls} warm allocation calls");
+    }
+}
+
+/// `dim(C)` below both operands, so `copyC` wins TensorKit's
+/// `_contract_memcost` without scoring the DynamicTree candidates (#1488):
+/// with `v = u1{-1:8, 0:8, 1:8}` and `c = u1{0:2, 1:1}`,
+///
+/// - `S1` the sort `A[3,2]·B[1,0] → [2,3,0,1]`, `A: c⊗c ← v⊗v`,
+///   `B: v⊗v ← c⊗c`;
+/// - `S2` the swap `A[0,1]·B[2,3] → [3,2,1,0]`, `A: v⊗v ← c⊗c`,
+///   `B: c⊗c ← v⊗v`.
+///
+/// Debug builds also check the shortcut against full candidate scoring.
+#[test]
+fn small_output_takes_copy_c_without_scoring() {
+    let _guard = MEASUREMENT_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let v = u1(&[(-1, 8), (0, 8), (1, 8)]);
+    let c = u1(&[(0, 2), (1, 1)]);
+    let tensor = |codomain: [&GradedSpace<_>; 2], domain: [&GradedSpace<_>; 2], salt| {
+        TensorMap::<_, f64>::from_block_fn(&runtime, codomain, domain, fill(salt)).unwrap()
+    };
+    let case = |name, lhs, rhs, l: [usize; 2], r: [usize; 2], out: [usize; 4]| Case {
+        name,
+        lhs,
+        rhs,
+        lhs_axes: l.to_vec(),
+        rhs_axes: r.to_vec(),
+        output_axes: out.to_vec(),
+        dense: false,
+    };
+    let cases = [
+        case(
+            "S1",
+            tensor([&c, &c], [&v, &v], 101),
+            tensor([&v, &v], [&c, &c], 102),
+            [3, 2],
+            [1, 0],
+            [2, 3, 0, 1],
+        ),
+        case(
+            "S2",
+            tensor([&v, &v], [&c, &c], 103),
+            tensor([&c, &c], [&v, &v], 104),
+            [0, 1],
+            [2, 3],
+            [3, 2, 1, 0],
+        ),
+    ];
+    for case in &cases {
+        let name = case.name;
+        assert_close(
+            case.host().data(),
+            blas_contract_oracle(case).data(),
+            case.terms(),
+            name,
+        );
+        let operand_bytes = std::mem::size_of_val(case.lhs.data()) as u64;
+        let (calls, bytes, _) = warm(&runtime, case);
+        eprintln!("U(1) {name}: {calls} calls, {bytes} B, operand {operand_bytes} B");
+        // What: copyC allocates the temporary and the output, never an
+        // operand-sized copy.
+        assert!(bytes < operand_bytes, "{name}: {bytes} B allocated");
+    }
+}
+
+/// The one shape the `copyC` shortcut still scores (#1488): a swap whose
+/// `dim(C)` ties the smaller operand and whose requested order is the
+/// identity, the only order in which an A·B candidate copies no output:
+/// `A[0,1]·B[2,3] → [0,1,2,3]` over `v⊗v ← v⊗v`. Debug builds check the
+/// decision against full scoring; the value is TensorKit's.
+#[test]
+fn swapped_tie_with_an_identity_output_matches_tensorkit() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let v = u1_non_self_dual();
+    let tensor =
+        |salt| TensorMap::<_, f64>::from_block_fn(&runtime, [&v, &v], [&v, &v], fill(salt));
+    let case = Case {
+        name: "T1",
+        lhs: tensor(105).unwrap(),
+        rhs: tensor(106).unwrap(),
+        lhs_axes: vec![0, 1],
+        rhs_axes: vec![2, 3],
+        output_axes: vec![0, 1, 2, 3],
+        dense: false,
+    };
+    assert_close(
+        case.host().data(),
+        blas_contract_oracle(&case).data(),
+        case.terms(),
+        case.name,
+    );
+}
