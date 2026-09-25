@@ -4442,6 +4442,10 @@ thread_local! {
     /// Forces the per-tree EIGH assembly on aligned routes, so the general
     /// path can be compared with the aligned one on the same input.
     static CUDA_EIGH_TREEWISE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Selector uploads made by device `eigh_full` assembly.
+    static CUDA_EIGH_SELECTOR_UPLOADS: std::cell::Cell<Option<usize>> = const {
+        std::cell::Cell::new(None)
+    };
 }
 
 #[cfg(all(test, feature = "cuda"))]
@@ -4520,7 +4524,7 @@ pub(crate) fn observe_cuda_qr_selector_upload() {
 }
 
 #[cfg(all(test, feature = "cuda"))]
-pub(crate) fn observe_cuda_qr_assembly_gemm() {
+pub(crate) fn observe_cuda_factor_assembly_gemm() {
     update_cuda_qr_observation(|(qr, copies, selectors, outputs, gemms, live, peak)| {
         (qr, copies, selectors, outputs, gemms + 1, live, peak)
     });
@@ -4673,7 +4677,7 @@ pub(crate) fn assemble_left_factor<D: CudaPayload>(
         )
         .map_err(dense_err)?;
         #[cfg(test)]
-        observe_cuda_qr_assembly_gemm();
+        observe_cuda_factor_assembly_gemm();
     }
     Ok(())
 }
@@ -4722,7 +4726,7 @@ pub(crate) fn assemble_aligned_left_factor<D: CudaPayload>(
     )
     .map_err(dense_err)?;
     #[cfg(test)]
-    observe_cuda_qr_assembly_gemm();
+    observe_cuda_factor_assembly_gemm();
     Ok(())
 }
 
@@ -4771,7 +4775,7 @@ pub(crate) fn assemble_right_factor<D: CudaPayload>(
         )
         .map_err(dense_err)?;
         #[cfg(test)]
-        observe_cuda_qr_assembly_gemm();
+        observe_cuda_factor_assembly_gemm();
     }
     Ok(())
 }
@@ -12354,6 +12358,14 @@ where
                         }),
                 )?)
             };
+            #[cfg(test)]
+            if selector.is_some() {
+                CUDA_EIGH_SELECTOR_UPLOADS.with(|uploads| {
+                    if let Some(count) = uploads.get() {
+                        uploads.set(Some(count + 1));
+                    }
+                });
+            }
             #[cfg(test)]
             let mut assembly_ordinal = 0;
             for (route, &selector_offset) in plan.routes.iter().zip(&selector_offsets) {
@@ -21958,11 +21970,16 @@ mod representation_gates {
         for (treewise, gemms) in [(false, sectors.len()), (true, trees)] {
             CUDA_EIGH_TREEWISE.with(|flag| flag.set(treewise));
             CUDA_QR_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0, 0, 0))));
+            CUDA_EIGH_SELECTOR_UPLOADS.with(|uploads| uploads.set(Some(0)));
             let (d, v) = device.eigh_full().unwrap();
             CUDA_EIGH_TREEWISE.with(|flag| flag.set(false));
+            assert_eq!(
+                CUDA_EIGH_SELECTOR_UPLOADS.with(|uploads| uploads.replace(None)),
+                Some(1)
+            );
             CUDA_QR_OBSERVATION.with(|observation| {
-                let (_, _, selector_uploads, _, assembly_gemms, _, _) = observation.get().unwrap();
-                assert_eq!((selector_uploads, assembly_gemms), (1, gemms));
+                let (_, _, _, _, assembly_gemms, _, _) = observation.get().unwrap();
+                assert_eq!(assembly_gemms, gemms);
                 observation.set(None);
             });
             outputs.push((d.to_host().unwrap(), v.to_host().unwrap()));

@@ -1,6 +1,5 @@
 //! Device `eigh_full` assembles each layout-aligned coupled sector with one
-//! GEMM and uploads one selector per call, whatever the number of fusion trees
-//! (#1485).
+//! GEMM, and its uploads do not depend on the number of fusion trees (#1485).
 //!
 //! This file holds a single test because it reads the process-wide
 //! [`cuda_transfer_stats`] counters.
@@ -35,7 +34,7 @@ fn close(got: &TensorMap<U1FusionRule, f64>, want: &TensorMap<U1FusionRule, f64>
 
 #[test]
 #[ignore = "requires a real CUDA device"]
-fn eigh_assembly_is_one_gemm_per_sector_and_one_selector_upload_per_call() {
+fn eigh_assembly_gemms_and_uploads_do_not_depend_on_the_tree_count() {
     let runtime = Runtime::builder().cuda(0).build().unwrap();
     let small = leg(&[(-1, 2), (0, 1), (1, 2)]);
     // The same five coupled sectors with the same matrix sizes (4, 4, 9, 4,
@@ -48,8 +47,6 @@ fn eigh_assembly_is_one_gemm_per_sector_and_one_selector_upload_per_call() {
 
     let mut counts = Vec::new();
     for source in [one_tree, many_trees] {
-        // Exactly Hermitian, so device admission skips its residual stage and
-        // uploads one normalizer per block (#1486).
         let source = source.add(&source.adjoint().unwrap(), 1.0, 1.0).unwrap();
         let device = source.to_cuda().unwrap();
 
@@ -57,11 +54,12 @@ fn eigh_assembly_is_one_gemm_per_sector_and_one_selector_upload_per_call() {
         let (d, v) = device.eigh_full().unwrap();
         let after = cuda_transfer_stats();
         let gemms = after.gemm_calls - before.gemm_calls;
-        let uploads = after.h2d_calls - before.h2d_calls;
-        // One GEMM per coupled sector; five normalizers, the diagonal, the
-        // zero eigenvector buffer and one selector.
-        assert_eq!((gemms, uploads), (5, 5 + 3));
-        counts.push(after.h2d_bytes - before.h2d_bytes);
+        // One GEMM per coupled sector, not per tree.
+        assert_eq!(gemms, 5);
+        counts.push((
+            after.h2d_calls - before.h2d_calls,
+            after.h2d_bytes - before.h2d_bytes,
+        ));
 
         // Device vs host: the same descending-|λ| spectrum, and the device
         // eigenvectors (raw cuSOLVER gauge) satisfy the eigen equation.
@@ -71,8 +69,8 @@ fn eigh_assembly_is_one_gemm_per_sector_and_one_selector_upload_per_call() {
         close(&d, &host_d);
         close(&source.compose(&v).unwrap(), &v.compose(&d).unwrap());
     }
-    assert_eq!(
-        counts[0], counts[1],
-        "upload bytes do not depend on the trees"
-    );
+    // The same sectors and sizes, so every upload, selectors included, is
+    // independent of the tree count. The one-selector-per-call count itself is
+    // asserted in-crate (`typed_cuda_eigh_aligned_assembly_matches_the_per_tree_path_bitwise`).
+    assert_eq!(counts[0], counts[1], "uploads do not depend on the trees");
 }
