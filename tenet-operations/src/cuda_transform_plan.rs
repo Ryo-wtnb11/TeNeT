@@ -86,7 +86,20 @@ pub(crate) struct DeviceTransformPlan {
     /// Longest inactive layout, so the zero template is sized once.
     pub(crate) max_zero_len: usize,
     /// Distinct cuTENSOR operand signatures this plan submits.
-    pub(crate) plan_signatures: usize,
+    pub(crate) plan_signatures: PlanSignatures,
+}
+
+/// Distinct cuTENSOR plan signatures of one structure, split by when they are
+/// submitted.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct PlanSignatures {
+    /// Submitted by a nonzero-scale replay: moves, packs, scatters, GEMMs and
+    /// the inactive-layout zero fills.
+    pub(crate) submitted: usize,
+    /// The zero fills over written destinations a zero caller scale (#1438)
+    /// submits instead of the moves and scatters, less those that coincide
+    /// with a `submitted` signature.
+    pub(crate) zero_fill: usize,
 }
 
 fn unsupported(message: &'static str) -> OperationError {
@@ -348,8 +361,9 @@ fn column_move<C: Copy>(
 /// under-raise the cap by exactly the amount a conjugated transform needs.
 ///
 /// A zero caller scale writes each Single and scatter destination with a zero
-/// fill instead of its move (#1438), so those fills' signatures are counted
-/// too: a zero-scale replay then needs no plan the cap does not cover.
+/// fill instead of its move (#1438). Those fills' signatures are returned
+/// apart, as the delta over the ones a nonzero-scale replay submits, so a
+/// workload that never replays with a zero scale does not reserve them.
 ///
 /// The per-executor *sum* of these counts over-counts signatures two structures
 /// share, which is the safe direction for a cap.
@@ -363,7 +377,7 @@ fn distinct_plan_signatures(
     recouplings: &[DeviceRecouplingSpec],
     zeros: &[DeviceRegionSpec],
     storage_conjugate: bool,
-) -> Result<usize, OperationError> {
+) -> Result<PlanSignatures, OperationError> {
     let mut seen: HashSet<RegionSignature<'_>> = HashSet::new();
     let conjugated = moves
         .iter()
@@ -384,6 +398,15 @@ fn distinct_plan_signatures(
             false,
         ));
     }
+    for zero in zeros {
+        seen.insert((
+            zero.dims.as_slice(),
+            zero.strides.as_slice(),
+            packed_strides(&zero.dims)?,
+            false,
+        ));
+    }
+    let submitted = seen.len();
     let written = moves
         .iter()
         .chain(recouplings.iter().flat_map(|entry| entry.scatters.iter()));
@@ -395,14 +418,7 @@ fn distinct_plan_signatures(
             false,
         ));
     }
-    for zero in zeros {
-        seen.insert((
-            zero.dims.as_slice(),
-            zero.strides.as_slice(),
-            packed_strides(&zero.dims)?,
-            false,
-        ));
-    }
+    let zero_fill = seen.len() - submitted;
     // A recoupling GEMM is a contraction of three dense column-major operands,
     // so its plan key is its `(rows, contracted, cols)` shape; jobs of equal
     // shape share one plan.
@@ -410,7 +426,10 @@ fn distinct_plan_signatures(
         .iter()
         .map(|entry| (entry.job.rows, entry.job.contracted, entry.job.cols))
         .collect();
-    Ok(seen.len().saturating_add(gemms.len()))
+    Ok(PlanSignatures {
+        submitted: submitted.saturating_add(gemms.len()),
+        zero_fill,
+    })
 }
 
 /// Identity of device state prepared for one completed structure.
@@ -513,6 +532,11 @@ impl<V> StructureCache<V> {
         self.touch(index)
     }
 
+    /// The entry at `index`, mutably, without changing the recency order.
+    pub(crate) fn value_mut(&mut self, index: usize) -> Option<&mut V> {
+        self.entries.get_mut(index).map(|entry| &mut entry.value)
+    }
+
     /// Drops every entry whose structure no longer exists.
     pub(crate) fn purge_dead(&mut self) {
         self.entries.retain(|entry| {
@@ -591,9 +615,15 @@ mod tests {
         assert_ne!(entry.dst_strides, entry.src_strides);
         assert_eq!(entry.coefficient, Some(0));
         assert!(plan.zeros.is_empty());
-        // The transposing move and the zero fill a zero caller scale writes
-        // over its destination instead (#1438) are two signatures.
-        assert_eq!(plan.plan_signatures, 2);
+        // The transposing move is submitted; the zero fill a zero caller scale
+        // writes over its destination instead (#1438) is a separate signature.
+        assert_eq!(
+            plan.plan_signatures,
+            PlanSignatures {
+                submitted: 1,
+                zero_fill: 1
+            }
+        );
     }
 
     #[test]
@@ -779,19 +809,24 @@ mod tests {
             offset: 32,
         };
 
-        assert_eq!(
-            distinct_plan_signatures(&[same.clone(), twin], &[], &[], false).unwrap(),
-            1
-        );
-        assert_eq!(
-            distinct_plan_signatures(&[same.clone(), other], &[], &[], false).unwrap(),
-            2
-        );
+        let count = |moves: &[DeviceMoveSpec], zeros: &[DeviceRegionSpec]| {
+            let signatures = distinct_plan_signatures(moves, &[], zeros, false).unwrap();
+            (signatures.submitted, signatures.zero_fill)
+        };
+        // `same` is a packed copy, so its zero fill is its own signature.
+        assert_eq!(count(&[same.clone(), twin], &[]), (1, 0));
+        // `other` reads a packed source, so its fill is its own signature too.
+        assert_eq!(count(&[same.clone(), other.clone()], &[]), (2, 0));
+        // `gather` reads a strided source into a packed destination: its fill
+        // reads a packed template, a signature no nonzero-scale replay submits.
+        let gather = DeviceMoveSpec {
+            dst_strides: vec![1, 2],
+            src_strides: vec![2, 1],
+            ..other.clone()
+        };
+        assert_eq!(count(&[same.clone(), other, gather], &[]), (3, 1));
         // The fill's source is packed [1], identical to `same`'s source.
-        assert_eq!(
-            distinct_plan_signatures(&[same], &[], &[zero], false).unwrap(),
-            1
-        );
+        assert_eq!(count(&[same], &[zero]), (1, 0));
     }
 
     #[test]
@@ -826,12 +861,18 @@ mod tests {
         // Unconjugated: one column plan shared by both directions, plus the GEMM.
         assert_eq!(
             distinct_plan_signatures(&[], std::slice::from_ref(&recoupling), &[], false).unwrap(),
-            2
+            PlanSignatures {
+                submitted: 2,
+                zero_fill: 0
+            }
         );
         // Conjugated: the packs are their own plan.
         assert_eq!(
             distinct_plan_signatures(&[], &[recoupling], &[], true).unwrap(),
-            3
+            PlanSignatures {
+                submitted: 3,
+                zero_fill: 0
+            }
         );
     }
 
