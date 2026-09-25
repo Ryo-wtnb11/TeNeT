@@ -19,14 +19,12 @@ struct CountingAllocator;
 
 thread_local! {
     static COUNTING: Cell<bool> = const { Cell::new(false) };
-    static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
     static BYTES: Cell<usize> = const { Cell::new(0) };
     static ZEROED_BYTES: Cell<usize> = const { Cell::new(0) };
 }
 
 fn record(layout: Layout, zeroed: bool) {
     if COUNTING.get() {
-        ALLOCATIONS.set(ALLOCATIONS.get() + 1);
         BYTES.set(BYTES.get() + layout.size());
         if zeroed {
             ZEROED_BYTES.set(ZEROED_BYTES.get() + layout.size());
@@ -75,24 +73,21 @@ static ALLOCATOR: CountingAllocator = CountingAllocator;
     not(feature = "racah-generated"),
     expect(
         dead_code,
-        reason = "only the checked-Generic polar contract reads calls and bytes"
+        reason = "only the checked-Generic contracts read total bytes"
     )
 )]
 struct Counts {
-    calls: usize,
     bytes: usize,
     zeroed_bytes: usize,
 }
 
 fn measured<T>(operation: impl FnOnce() -> T) -> (T, Counts) {
-    ALLOCATIONS.set(0);
     BYTES.set(0);
     ZEROED_BYTES.set(0);
     COUNTING.set(true);
     let value = operation();
     COUNTING.set(false);
     let counts = Counts {
-        calls: ALLOCATIONS.get(),
         bytes: BYTES.get(),
         zeroed_bytes: ZEROED_BYTES.get(),
     };
@@ -240,14 +235,28 @@ mod checked_generic {
         GradedSpace::try_new_with_arc(Arc::clone(provider), irreps.to_vec()).unwrap()
     }
 
-    /// Four coupled sectors, rows >= columns in each.
+    /// Four coupled sectors, rows >= columns in each; every degeneracy is
+    /// multiplied by `scale`, which leaves the tree structure unchanged.
     fn tall_legs(
         provider: &Arc<SUNFusionRule>,
+        scale: usize,
     ) -> (GradedSpace<SUNFusionRule>, GradedSpace<SUNFusionRule>) {
         let irreps = [vec![0i64, 0], vec![1, 0], vec![0, 1], vec![1, 1]];
-        let rows = irreps.iter().cloned().zip([1, 2, 3, 2]).collect::<Vec<_>>();
-        let cols = irreps.iter().cloned().zip([1, 1, 2, 2]).collect::<Vec<_>>();
+        let rows = irreps
+            .iter()
+            .cloned()
+            .zip([1, 2, 3, 2].map(|d| d * scale))
+            .collect::<Vec<_>>();
+        let cols = irreps
+            .iter()
+            .cloned()
+            .zip([1, 1, 2, 2].map(|d| d * scale))
+            .collect::<Vec<_>>();
         (su3_leg(provider, &rows), su3_leg(provider, &cols))
+    }
+
+    fn payload_bytes(tensor: &TensorMap<SUNFusionRule, f64>) -> usize {
+        std::mem::size_of_val(tensor.data())
     }
 
     /// Left: `A = W P`, right: `A = P W`, with `W` an isometry (`Wᴴ W = 1`
@@ -296,7 +305,7 @@ mod checked_generic {
     macro_rules! cases {
         ($d:ty, $runtime:expr) => {{
             let provider = Arc::new(SUNFusionRule::new(3).unwrap());
-            let (rows, cols) = tall_legs(&provider);
+            let (rows, cols) = tall_legs(&provider, 1);
             let tall: TensorMap<_, $d> =
                 TensorMap::rand_with_seed($runtime, [&rows], [&cols], 1481).unwrap();
             assert_polar!($d, &tall, true);
@@ -326,59 +335,102 @@ mod checked_generic {
     }
 
     // Allocation contract: polar writes W and P into their output regions.
-    // Before #1478 each of the four coupled sectors added three temporaries
-    // (W, P and a clone of the scaled factor) that were then copied out.
-    // Caller-thread counts of the second call, pinned faer provider, one dense
-    // thread: 341 calls / 53362 bytes before, 329 / 53098 after (-3 per sector).
+    // Before #1478 each coupled sector added three temporaries (W, P and a
+    // clone of the scaled factor) that were then copied out. Both polar and
+    // `svd_compact` run the same staged per-sector SVD, so absolute counts
+    // include backend workspace whose size depends on the dense kernel's SIMD
+    // width (macOS and Linux differ by tens of bytes). Scaling every
+    // degeneracy keeps the tree structure (and all metadata) fixed, so the
+    // growth of the bytes a call allocates beyond its outputs is its
+    // payload-proportional scratch. Polar's must not exceed the SVD stage's,
+    // which it would by the size of the temporaries before #1478.
     #[test]
     fn checked_generic_polar_allocates_no_per_sector_temporaries() {
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let provider = Arc::new(SUNFusionRule::new(3).unwrap());
-        let (rows, cols) = tall_legs(&provider);
-        let a: TensorMap<_, f64> =
-            TensorMap::rand_with_seed(&runtime, [&rows], [&cols], 1485).unwrap();
-        let warm = a.left_polar().unwrap();
-        let ((w, p), counts) = measured(|| a.left_polar().unwrap());
-        black_box((&warm, &w, &p));
-        assert!(counts.calls <= 329, "{counts:?}");
-        assert!(counts.bytes <= 53098, "{counts:?}");
+        let scratch = |scale| {
+            let (rows, cols) = tall_legs(&provider, scale);
+            let a: TensorMap<_, f64> =
+                TensorMap::rand_with_seed(&runtime, [&rows], [&cols], 1485).unwrap();
+            let warm = (a.left_polar().unwrap(), a.svd_compact().unwrap());
+            let ((w, p), polar) = measured(|| a.left_polar().unwrap());
+            let ((u, s, vh), svd) = measured(|| a.svd_compact().unwrap());
+            black_box(&warm);
+            let polar_outputs = payload_bytes(&w) + payload_bytes(&p);
+            let svd_outputs = payload_bytes(&u) + payload_bytes(&s) + payload_bytes(&vh);
+            (polar.bytes - polar_outputs, svd.bytes - svd_outputs)
+        };
+        let (polar_small, svd_small) = scratch(1);
+        let (polar_large, svd_large) = scratch(3);
+        assert!(
+            polar_large - polar_small <= svd_large - svd_small,
+            "polar scratch {polar_small} -> {polar_large}, SVD stage {svd_small} -> {svd_large}"
+        );
     }
 
     // Byte contract (#1494): the leg-degeneracy (facade) layout of a rank-3
     // and a rank-4 multiplicity map is a coupled-sector tiling, so QR, SVD,
     // LQ and `svd_vals` read the payload in place. Before, `FusionTreeKey`
     // Ord admission rejected the facade tree order and each call first packed
-    // a copy of the whole payload. Caller-thread calls / bytes of the second
-    // call, pinned faer provider, one dense thread, before -> after:
-    //   rank 3: QR 351/47555 -> 325/43275, SVD 420/59541 -> 394/55261,
-    //           LQ 353/48811 -> 327/44531, svd_vals 40/6616 -> 14/2336;
-    //   rank 4: QR 647/121808 -> 583/111248, SVD 778/158444 -> 714/147884,
-    //           LQ 657/124632 -> 593/114072, svd_vals 97/21544 -> 33/10984.
-    // `svd_vals` no longer zero-fills a packed matrix at all.
+    // a copy of the whole payload. The control is the rank-2 map between the
+    // fused legs: it has the same coupled blocks, hence the same dense kernel
+    // work and output sizes, and was always read in place. The facade call
+    // still allocates more tree metadata than the control, but scaling every
+    // degeneracy leaves that metadata fixed, so the facade's excess over the
+    // control must not grow with the payload; a packed copy grows it by the
+    // whole payload growth.
     #[test]
     fn checked_generic_facade_factorizations_read_the_payload_in_place() {
+        type Tensor = TensorMap<SUNFusionRule, f64>;
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let provider = Arc::new(SUNFusionRule::new(3).unwrap());
-        let leg = su3_leg(&provider, &[(vec![1, 1], 2), (vec![0, 0], 1)]);
-        let rank3: TensorMap<_, f64> =
-            TensorMap::rand_with_seed(&runtime, [&leg, &leg], [&leg], 1494).unwrap();
-        let rank4: TensorMap<_, f64> =
-            TensorMap::rand_with_seed(&runtime, [&leg, &leg], [&leg, &leg], 1495).unwrap();
-        let budgets = [
-            [(325, 43275), (394, 55261), (327, 44531), (14, 2336)],
-            [(583, 111248), (714, 147884), (593, 114072), (33, 10984)],
-        ];
-        for (a, budget) in [&rank3, &rank4].into_iter().zip(budgets) {
-            let warm = (a.qr_compact().unwrap(), a.svd_compact().unwrap());
-            let (_, qr) = measured(|| black_box(a.qr_compact().unwrap()));
-            let (_, svd) = measured(|| black_box(a.svd_compact().unwrap()));
-            let (_, lq) = measured(|| black_box(a.lq_compact().unwrap()));
-            let (_, vals) = measured(|| black_box(a.svd_vals().unwrap()));
-            black_box(&warm);
-            for (counts, (calls, bytes)) in [&qr, &svd, &lq, &vals].into_iter().zip(budget) {
-                assert!(counts.calls <= calls && counts.bytes <= bytes, "{counts:?}");
+        let excess = |scale: usize, rank4: bool| {
+            let leg = su3_leg(&provider, &[(vec![1, 1], 2 * scale), (vec![0, 0], scale)]);
+            let fused = leg.fuse(&leg).unwrap();
+            let (facade, control): (Tensor, Tensor) = if rank4 {
+                (
+                    TensorMap::rand_with_seed(&runtime, [&leg, &leg], [&leg, &leg], 1495).unwrap(),
+                    TensorMap::rand_with_seed(&runtime, [&fused], [&fused], 1495).unwrap(),
+                )
+            } else {
+                (
+                    TensorMap::rand_with_seed(&runtime, [&leg, &leg], [&leg], 1494).unwrap(),
+                    TensorMap::rand_with_seed(&runtime, [&fused], [&leg], 1494).unwrap(),
+                )
+            };
+            assert_eq!(payload_bytes(&facade), payload_bytes(&control));
+            let counts = |a: &Tensor| {
+                black_box((a.qr_compact().unwrap(), a.svd_compact().unwrap()));
+                black_box((a.lq_compact().unwrap(), a.svd_vals().unwrap()));
+                [
+                    measured(|| black_box(a.qr_compact().unwrap())).1,
+                    measured(|| black_box(a.svd_compact().unwrap())).1,
+                    measured(|| black_box(a.lq_compact().unwrap())).1,
+                    measured(|| black_box(a.svd_vals().unwrap())).1,
+                ]
+            };
+            let (facade_counts, control_counts) = (counts(&facade), counts(&control));
+            assert_eq!(facade_counts[3].zeroed_bytes, 0, "{:?}", facade_counts[3]);
+            let excess = std::array::from_fn::<isize, 4, _>(|op| {
+                facade_counts[op].bytes as isize - control_counts[op].bytes as isize
+            });
+            (payload_bytes(&facade), excess)
+        };
+        for rank4 in [false, true] {
+            let (small_payload, small) = excess(1, rank4);
+            let (large_payload, large) = excess(2, rank4);
+            let payload_growth = (large_payload - small_payload) as isize;
+            for (op, name) in ["qr_compact", "svd_compact", "lq_compact", "svd_vals"]
+                .into_iter()
+                .enumerate()
+            {
+                assert!(
+                    large[op] - small[op] < payload_growth,
+                    "rank4 {rank4} {name}: facade excess {} -> {}, payload growth {payload_growth}",
+                    small[op],
+                    large[op]
+                );
             }
-            assert_eq!(vals.zeroed_bytes, 0, "{vals:?}");
         }
     }
 }
