@@ -18,6 +18,8 @@ use tenet::typed::{GradedSpace, TensorMap, Truncation};
 
 #[path = "../../tests/support/numerics.rs"]
 mod numerics;
+#[path = "ulp/mod.rs"]
+mod ulp;
 
 /// The fusion-tree layout and complete-structure caches are process-global, so
 /// the tests in this binary that snapshot them must not run beside a test that
@@ -5298,14 +5300,20 @@ fn c64_compact_inv_and_pinv_are_elementwise_reciprocals() {
             .zip(&inverse.values)
             .zip(&pseudo.values)
         {
+            // Within 2 ulps, not bitwise: the compact reciprocal now runs a
+            // scaled, correctly-rounded-or-1-ulp algorithm rather than the
+            // naive, not-always-correctly-rounded `1/z` computed here
+            // (#1463); two results each within 1 ulp of the true value can
+            // be up to 2 ulps apart. `scaled_complex64_reciprocal.rs` checks
+            // the new algorithm against an exact-rational oracle instead.
             let reciprocal = Complex64::new(1.0, 0.0) / value;
-            assert_eq!(inverse, reciprocal);
+            ulp::assert_complex_within_ulps(inverse, reciprocal, 2, "inv");
             let expected = if value.norm() > rcond * sigma_max {
                 reciprocal
             } else {
                 Complex64::new(0.0, 0.0)
             };
-            assert_eq!(pseudo, expected);
+            ulp::assert_complex_within_ulps(pseudo, expected, 2, "pinv");
         }
     }
 }
