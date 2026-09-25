@@ -257,7 +257,7 @@ pub struct CudaPlanCacheStats {
 /// - `device_allocs`: device buffers this module creates or takes ownership
 ///   of, i.e. uploads plus tenferro-produced tensors wrapped as
 ///   [`CudaDenseStorage`] (factorization factors). Tenferro's own solver
-///   workspaces and the intermediate tensors of `cuda_is_hermitian_region`
+///   workspaces and the intermediate tensors of `cuda_hermitian_regions`
 ///   (`abs`, `div`, `sub`, the reductions) allocate on device but are not
 ///   visible as buffers here and are therefore not counted.
 /// - `gemm_calls`: `dot_general` submissions, from

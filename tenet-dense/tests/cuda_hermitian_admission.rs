@@ -23,14 +23,17 @@ trait Payload: CudaScalar + Copy {
     const EPSILON: f64;
     /// The lane's smallest normal magnitude and `2^(MAX_EXP - 4)`.
     const TINY: f64;
-    const HUGE: f64;
+    /// Not a `const`: `powi` is not a `const fn`.
+    fn huge() -> f64;
     fn narrow(value: Complex64) -> Self;
 }
 
 impl Payload for f32 {
     const EPSILON: f64 = f32::EPSILON as f64;
     const TINY: f64 = f32::MIN_POSITIVE as f64;
-    const HUGE: f64 = 2.126_764_793_255_87e37;
+    fn huge() -> f64 {
+        f64::from(2f32.powi(124))
+    }
     fn narrow(value: Complex64) -> Self {
         value.re as f32
     }
@@ -39,7 +42,9 @@ impl Payload for f32 {
 impl Payload for f64 {
     const EPSILON: f64 = f64::EPSILON;
     const TINY: f64 = f64::MIN_POSITIVE;
-    const HUGE: f64 = 1.117_902_744_918_257e307;
+    fn huge() -> f64 {
+        2f64.powi(1020)
+    }
     fn narrow(value: Complex64) -> Self {
         value.re
     }
@@ -48,7 +53,9 @@ impl Payload for f64 {
 impl Payload for Complex32 {
     const EPSILON: f64 = f32::EPSILON as f64;
     const TINY: f64 = f32::MIN_POSITIVE as f64;
-    const HUGE: f64 = 2.126_764_793_255_87e37;
+    fn huge() -> f64 {
+        f64::from(2f32.powi(124))
+    }
     fn narrow(value: Complex64) -> Self {
         Complex32::new(value.re as f32, value.im as f32)
     }
@@ -57,7 +64,9 @@ impl Payload for Complex32 {
 impl Payload for Complex64 {
     const EPSILON: f64 = f64::EPSILON;
     const TINY: f64 = f64::MIN_POSITIVE;
-    const HUGE: f64 = 1.117_902_744_918_257e307;
+    fn huge() -> f64 {
+        2f64.powi(1020)
+    }
     fn narrow(value: Complex64) -> Self {
         value
     }
@@ -108,8 +117,8 @@ fn cases<D: Payload>() -> Vec<(Vec<Complex64>, bool)> {
         (asymmetric(4, 1.0), false),
         (vec![Complex64::new(0.0, 0.0); 4], true),
         (Vec::new(), true),
-        (hermitian(4, D::HUGE), true),
-        (asymmetric(4, D::HUGE), false),
+        (hermitian(4, D::huge()), true),
+        (asymmetric(4, D::huge()), false),
         (hermitian(4, D::TINY), true),
         (asymmetric(4, D::TINY), false),
         (poisoned(f64::NAN), false),
