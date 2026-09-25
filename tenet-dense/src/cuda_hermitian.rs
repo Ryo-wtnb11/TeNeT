@@ -30,10 +30,12 @@ pub(crate) const HERMITIAN_TOLERANCE_EPSILONS: f64 = 64.0;
 /// device reductions.
 ///
 /// Both norms arrive factored as `scale * sqrt(sum_of_squares)` of a
-/// max-normalized copy, which is what keeps the relative decision stable when
-/// either norm would overflow or underflow if formed directly — the input
-/// side is already normalized to 1, so `input_scale` cancels out of both
-/// sides and only `residual_scale` remains. A non-finite or negative part
+/// copy normalized by an exact power of two near its maximum
+/// ([`power_of_two_normalizer`]), which is what keeps the relative decision
+/// stable when either norm would overflow or underflow if formed directly —
+/// the residual is formed from the normalized input, so the input normalizer
+/// cancels out of both sides and only the residual's `residual_scale`
+/// (the reciprocal of its own normalizer) remains. A non-finite or negative part
 /// rejects: it can only come from a non-finite block.
 ///
 /// `relative_tolerance` is `HERMITIAN_TOLERANCE_EPSILONS * eps(real(D))` for
@@ -52,6 +54,39 @@ pub(crate) fn scaled_hermitian_residual_accepts(
         && residual_ss.is_finite()
         && residual_ss >= 0.0
         && 0.5 * residual_scale * residual_ss.sqrt() <= relative_tolerance * input_ss.sqrt()
+}
+
+/// The exact power of two `2^-k`, `k = floor(log2(scale))`, that brings a
+/// finite positive `scale` of a real lane with `max_exp` (its `MAX_EXP`)
+/// into `[1, 2)`.
+///
+/// Why not divide by `scale` itself: Tenferro's complex-by-real division
+/// promotes the divisor to `Complex(s, 0)` and forms `s * s`, which leaves
+/// the lane once `|s|` passes the square root of its range (tenferro-rs#1922),
+/// while its complex-by-real multiplication is componentwise. Multiplying by
+/// a power of two is also exact wherever the product stays normal.
+///
+/// `k` is read from the exponent bits, never from a float `log2`. It is
+/// clamped to `[-(MAX_EXP - 2), MAX_EXP - 2]` so both `2^-k` and its
+/// reciprocal `2^k` (the operand a real payload divides by) are *normal*
+/// numbers of the lane, which flush-to-zero cannot touch. The lower bound
+/// acts only on a subnormal `scale`, whose clamped product still has a normal
+/// maximum (`>= 2^-23` in `f32`, `>= 2^-52` in `f64`); the upper bound acts
+/// on the top octave, whose clamped product is merely in `[2, 4)`.
+pub(crate) fn power_of_two_normalizer(scale: f64, max_exp: i32) -> f64 {
+    const MANTISSA_BITS: u32 = 52;
+    const BIAS: i32 = 1023;
+    let bits = scale.to_bits();
+    let biased = ((bits >> MANTISSA_BITS) & 0x7ff) as i32;
+    let floor_log2 = if biased == 0 {
+        // An `f64` subnormal is `mantissa * 2^-1074`.
+        let mantissa = bits & ((1 << MANTISSA_BITS) - 1);
+        63 - mantissa.leading_zeros() as i32 - 1074
+    } else {
+        biased - BIAS
+    };
+    let k = floor_log2.clamp(-(max_exp - 2), max_exp - 2);
+    f64::from_bits(((BIAS - k) as u64) << MANTISSA_BITS)
 }
 
 #[cfg(test)]
@@ -150,5 +185,74 @@ mod tests {
                 tolerance
             ));
         }
+    }
+
+    /// Every finite positive scale of either lane lands in `[1, 2)` except
+    /// where the clamp is documented to act, and the multiplier and its
+    /// reciprocal are always normal numbers of the lane, so narrowing and
+    /// flush-to-zero leave them alone.
+    #[test]
+    fn the_power_of_two_normalizer_is_exact_across_each_lane() {
+        fn check(scale: f64, max_exp: i32, min_positive: f64) {
+            // `1 / MIN_POSITIVE = 2^(MAX_EXP - 2)`, the largest power of two
+            // whose reciprocal is still normal.
+            let max_power = min_positive.recip();
+            let normalizer = power_of_two_normalizer(scale, max_exp);
+            for value in [normalizer, normalizer.recip()] {
+                assert!(
+                    (min_positive..=max_power).contains(&value),
+                    "{scale:e}: {value:e} is not a normal lane power of two"
+                );
+                assert_eq!(value.to_bits() & ((1 << 52) - 1), 0, "{scale:e}");
+            }
+            let scaled = scale * normalizer;
+            if scale < min_positive {
+                assert_eq!(normalizer, max_power, "{scale:e}");
+            } else if scale >= 2.0 * max_power {
+                assert!((2.0..4.0).contains(&scaled), "{scale:e}: {scaled:e}");
+            } else {
+                assert!((1.0..2.0).contains(&scaled), "{scale:e}: {scaled:e}");
+            }
+        }
+        let f32_lane = |scale: f64| check(scale, f32::MAX_EXP, f64::from(f32::MIN_POSITIVE));
+        for scale in [
+            f32::from_bits(1),
+            f32::from_bits(0x0000_1234),
+            f32::MIN_POSITIVE,
+            f32::MIN_POSITIVE * 1.5,
+            0.75,
+            1.0,
+            1.999_999_9,
+            2.0f32.powi(124) * 5.0,
+            2.0f32.powi(127),
+            f32::MAX,
+        ] {
+            f32_lane(f64::from(scale));
+        }
+        let f64_lane = |scale: f64| check(scale, f64::MAX_EXP, f64::MIN_POSITIVE);
+        for scale in [
+            f64::from_bits(1),
+            f64::from_bits(0x000f_ffff_ffff_ffff),
+            f64::MIN_POSITIVE,
+            3.0e-300,
+            1.0,
+            1.0 - f64::EPSILON / 2.0,
+            2f64.powi(1020) * 5.0,
+            2f64.powi(1023),
+            f64::MAX,
+        ] {
+            f64_lane(scale);
+        }
+        // Subnormal lane scales are clamped yet still end in the lane's normal
+        // range after the multiply.
+        assert!(
+            f64::from(f32::from_bits(1))
+                * power_of_two_normalizer(f64::from(f32::from_bits(1)), f32::MAX_EXP)
+                >= 2f64.powi(-23)
+        );
+        assert!(
+            f64::from_bits(1) * power_of_two_normalizer(f64::from_bits(1), f64::MAX_EXP)
+                >= 2f64.powi(-52)
+        );
     }
 }
