@@ -260,6 +260,8 @@ pub struct CudaPlanCacheStats {
 ///   workspaces and the intermediate tensors of `cuda_hermitian_regions`
 ///   (`abs`, `div`, `sub`, the reductions) allocate on device but are not
 ///   visible as buffers here and are therefore not counted.
+///   Nor are the solvers' device spectra ([`CudaSpectrum`]) or the
+///   `concatenate` output that [`cuda_download_spectra`] gathers them into.
 /// - `gemm_calls`: `dot_general` submissions, from
 ///   `cuda_gemm_region_strided_into` and from the region primitives
 ///   ([`cuda_region_axpby`], [`cuda_region_zero`]) alike.
