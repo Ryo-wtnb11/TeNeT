@@ -223,9 +223,8 @@ use tenet_core::{
 #[cfg(feature = "cuda")]
 use tenet_dense::{
     cuda_copy_region_into, cuda_eigh_region, cuda_gemm_region_into,
-    cuda_is_hermitian_region as dense_cuda_is_hermitian_region,
-    cuda_qr_region as dense_cuda_qr_region, cuda_svd_region as dense_cuda_svd_region,
-    CudaDenseContext, CudaDenseStorage,
+    cuda_hermitian_regions as dense_cuda_hermitian_regions, cuda_qr_region as dense_cuda_qr_region,
+    cuda_svd_region as dense_cuda_svd_region, CudaDenseContext, CudaDenseStorage,
 };
 use tenet_operations::scale_value;
 #[cfg(feature = "cuda")]
@@ -4588,13 +4587,12 @@ pub(crate) fn cuda_svd_region<D: CudaPayload>(
 
 #[cfg(feature = "cuda")]
 #[inline]
-pub(crate) fn cuda_is_hermitian_region<D: CudaPayload>(
+pub(crate) fn cuda_hermitian_regions<D: CudaPayload>(
     cuda: &mut CudaDenseContext,
     source: &CudaDenseStorage,
-    offset: usize,
-    n: usize,
-) -> Result<bool, Error> {
-    dense_cuda_is_hermitian_region::<D>(cuda, source, offset, n).map_err(dense_err)
+    regions: &[(usize, usize)],
+) -> Result<Vec<bool>, Error> {
+    dense_cuda_hermitian_regions::<D>(cuda, source, regions).map_err(dense_err)
 }
 
 #[cfg(feature = "cuda")]
@@ -12150,20 +12148,18 @@ where
         {
             let mut lease = self.runtime.lease_cuda()?;
             let cuda = &mut *lease;
-            for region in source_plan.source_regions.iter() {
-                if !cuda_is_hermitian_region::<D>(
-                    cuda,
-                    &source.0,
-                    region.range().start,
-                    region.rows(),
-                )? {
-                    return Err(
-                        tenet_tensors::OperationError::UnsupportedTensorContractScope {
-                            message: "eigh requires every coupled-sector block to be Hermitian",
-                        }
-                        .into(),
-                    );
-                }
+            let regions: Vec<_> = source_plan
+                .source_regions
+                .iter()
+                .map(|region| (region.range().start, region.rows()))
+                .collect();
+            if cuda_hermitian_regions::<D>(cuda, &source.0, &regions)?.contains(&false) {
+                return Err(
+                    tenet_tensors::OperationError::UnsupportedTensorContractScope {
+                        message: "eigh requires every coupled-sector block to be Hermitian",
+                    }
+                    .into(),
+                );
             }
         }
 
