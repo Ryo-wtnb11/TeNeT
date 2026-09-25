@@ -27,8 +27,8 @@ use std::hint::black_box;
 use std::sync::Mutex;
 
 use contract_cases::{
-    assert_close, blas_contract_oracle, candidate_core_probes as probes, fermion_u1,
-    fermionic_blas_contract_oracle, fill, su2, u1_non_self_dual, Case, FermionU1, Payload,
+    assert_close, blas_contract_oracle, candidate_core_probes as probes, dense_oracle, fermion_u1,
+    fermionic_blas_contract_oracle, fill, su2, u1, u1_non_self_dual, Case, FermionU1, Payload,
     TwistRole,
 };
 use num_complex::{Complex32, Complex64};
@@ -229,4 +229,156 @@ fn zero_copy_fermionic_candidates_match_tensorkit_with_and_without_twist() {
     fermionic_values::<Complex64>();
     fermionic_values::<f32>();
     fermionic_values::<Complex32>();
+}
+
+/// Zero-copy candidates over non-square operands with a different space per
+/// leg (`w*` is the dual of `w`):
+///
+/// - `N1`: `A: v⊗w ← w⊗v`, `A[3,2]·B[1,0]` with `B: w⊗v ← v` (sort);
+/// - `D1`: the same with dual legs, `A: v⊗w* ← w*⊗v*`, `B: w*⊗v* ← w`;
+/// - `S1`: `P'[0,1]·B[2,3] → [2,3,0,1]` with the lazy adjoint on the lhs,
+///   `P: w⊗v ← v⊗w*` and `B: w⊗v ← v⊗w*` (swap);
+/// - `S2`: rank 3 × 3 with one contracted leg, `A[0]·B[2] → [2,3,0,1]` with
+///   `A: w ← v⊗w*` and `B: v⊗w ← w` (swap).
+///
+/// `N1` and `D1` contract only A's domain against B's codomain, so the
+/// physical-basis expansion also applies to them.
+fn mixed_cases<R, D>(runtime: &Runtime, v: &GradedSpace<R>, w: &GradedSpace<R>) -> Vec<Case<R, D>>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: Payload,
+{
+    let w_dual = w.try_dual().unwrap();
+    let v_dual = v.try_dual().unwrap();
+    let tensor = |codomain: &[&GradedSpace<R>], domain: &[&GradedSpace<R>], salt| {
+        TensorMap::<R, D>::from_block_fn(
+            runtime,
+            codomain.iter().copied(),
+            domain.iter().copied(),
+            fill(salt),
+        )
+        .unwrap()
+    };
+    let case = |name, lhs, rhs, l: &[usize], r: &[usize], out: &[usize], dense| Case {
+        name,
+        lhs,
+        rhs,
+        lhs_axes: l.to_vec(),
+        rhs_axes: r.to_vec(),
+        output_axes: out.to_vec(),
+        dense,
+    };
+    vec![
+        case(
+            "N1",
+            tensor(&[v, w], &[w, v], 71),
+            tensor(&[w, v], &[v], 72),
+            &[3, 2],
+            &[1, 0],
+            &[0, 1, 2],
+            true,
+        ),
+        case(
+            "D1",
+            tensor(&[v, &w_dual], &[&w_dual, &v_dual], 73),
+            tensor(&[&w_dual, &v_dual], &[w], 74),
+            &[3, 2],
+            &[1, 0],
+            &[0, 1, 2],
+            true,
+        ),
+        case(
+            "S1",
+            tensor(&[w, v], &[v, &w_dual], 75).adjoint().unwrap(),
+            tensor(&[w, v], &[v, &w_dual], 76),
+            &[0, 1],
+            &[2, 3],
+            &[2, 3, 0, 1],
+            false,
+        ),
+        case(
+            "S2",
+            tensor(&[w], &[v, &w_dual], 77),
+            tensor(&[v, w], &[w], 78),
+            &[0],
+            &[2],
+            &[2, 3, 0, 1],
+            false,
+        ),
+    ]
+}
+
+fn mixed_values<R, D>(v: &GradedSpace<R>, w: &GradedSpace<R>, symmetry: &str)
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec
+        + tenet::core::PhysicalFusionBasis<Scalar = f64>,
+    D: Payload,
+{
+    let runtime = Runtime::builder().build().unwrap();
+    for case in mixed_cases::<R, D>(&runtime, v, w) {
+        let what = format!("{symmetry} {} [{}]", case.name, D::NAME);
+        let host = case.host();
+        assert_close(
+            host.data(),
+            blas_contract_oracle(&case).data(),
+            case.terms(),
+            &what,
+        );
+        if case.dense {
+            let (shape, expected) = dense_oracle(&case);
+            let actual = host.to_physical_dense().unwrap();
+            assert_eq!(actual.shape, shape, "{what}");
+            assert_close(&actual.data, &expected, case.terms(), &what);
+        }
+    }
+}
+
+fn assert_mixed_zero_copy<R>(v: &GradedSpace<R>, w: &GradedSpace<R>, symmetry: &str)
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+{
+    let _guard = MEASUREMENT_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    for case in mixed_cases::<R, f64>(&runtime, v, w) {
+        let (_, _, lookups) = warm(&runtime, &case);
+        // What: the selected candidate transforms neither source nor output.
+        assert_eq!(lookups, 0, "{symmetry} {}: tree transforms ran", case.name);
+    }
+}
+
+fn u1_second() -> GradedSpace<tenet::core::U1FusionRule> {
+    u1(&[(0, 2), (1, 1), (2, 1)])
+}
+
+fn su2_second() -> GradedSpace<tenet::core::SU2FusionRule> {
+    GradedSpace::try_new_with_arc(
+        std::sync::Arc::new(tenet::core::SU2FusionRule),
+        [
+            (tenet::core::SU2Irrep::from_twice_spin(1), 1),
+            (tenet::core::SU2Irrep::from_twice_spin(2), 2),
+        ],
+    )
+    .unwrap()
+}
+
+#[test]
+fn mixed_space_candidates_match_the_blas_sequence_and_the_dense_expansion() {
+    fn at<D: Payload>() {
+        mixed_values::<_, D>(&u1_non_self_dual(), &u1_second(), "U(1)");
+        mixed_values::<_, D>(&su2(), &su2_second(), "SU(2)");
+    }
+    at::<f64>();
+    at::<Complex64>();
+    at::<f32>();
+    at::<Complex32>();
+}
+
+#[test]
+fn mixed_space_candidates_run_no_transform() {
+    assert_mixed_zero_copy(&u1_non_self_dual(), &u1_second(), "U(1)");
+    assert_mixed_zero_copy(&su2(), &su2_second(), "SU(2)");
 }
