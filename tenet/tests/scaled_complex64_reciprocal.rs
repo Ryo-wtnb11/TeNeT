@@ -30,7 +30,7 @@
 
 use std::sync::Arc;
 
-use num_complex::Complex64;
+use num_complex::{Complex32, Complex64};
 use tenet::core::{U1FusionRule, U1Irrep};
 use tenet::prelude::{GradedSpace, Runtime, SectorSpectrum, TensorMap};
 
@@ -42,12 +42,16 @@ fn leg(dim: usize) -> GradedSpace<U1FusionRule> {
     GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), dim)]).unwrap()
 }
 
-/// Builds a rank-`(1,1)` compact diagonal tensor holding exactly `value` and
-/// returns the single stored entry of `t.inv()`.
 fn bits(z: Complex64) -> (u64, u64) {
     (z.re.to_bits(), z.im.to_bits())
 }
 
+fn bits32(z: Complex32) -> (u32, u32) {
+    (z.re.to_bits(), z.im.to_bits())
+}
+
+/// Builds a rank-`(1,1)` compact diagonal tensor holding exactly `value` and
+/// returns the single stored entry of `t.inv()`.
 fn compact_inv(value: Complex64) -> Complex64 {
     let rt = runtime();
     let space = leg(1);
@@ -82,6 +86,22 @@ fn compact_inv_and_pinv(value: Complex64) -> (Complex64, Complex64) {
     let inv = diagonal.inv().unwrap().diagview().unwrap()[0].values[0];
     let pinv = diagonal.pinv(0.0).unwrap().diagview().unwrap()[0].values[0];
     (inv, pinv)
+}
+
+/// As [`compact_inv`], but for a `Complex32` payload (`julia_complex32_reciprocal_wide`).
+fn compact_inv32(value: Complex32) -> Complex32 {
+    let rt = runtime();
+    let space = leg(1);
+    let diagonal: TensorMap<_, Complex32> = TensorMap::diagonal(
+        &rt,
+        &space,
+        [SectorSpectrum {
+            sector: U1Irrep::new(0),
+            values: vec![value],
+        }],
+    )
+    .unwrap();
+    diagonal.inv().unwrap().diagview().unwrap()[0].values[0]
 }
 
 /// One oracle-checked `(z, 1/z)` pair, bits taken verbatim from
@@ -1198,6 +1218,153 @@ fn compact_reciprocal_matches_julia_bitwise() {
                 case.label
             );
         }
+    }
+}
+
+/// A `Complex32` oracle-checked `(z, 1/z)` pair, bits taken verbatim from
+/// `benchmarks/complex64_reciprocal_oracle.out`'s `c32_*`-labeled rows
+/// (Julia 1.11.6's `inv(::ComplexF32)`). Large, small-normal, subnormal, and
+/// infinite `f32` magnitudes, purely real/imaginary and mixed: this path
+/// (`julia_complex32_reciprocal_wide`) only ever reaches the widened
+/// multiply-based branch, never the `ComplexF64` fast-path/`robust_cinv`
+/// split [`ORACLE_CASES`] exercises, but is still checked bitwise here.
+struct OracleCase32 {
+    label: &'static str,
+    z_re: u32,
+    z_im: u32,
+    exp_re: u32,
+    exp_im: u32,
+}
+
+const ORACLE_CASES_32: &[OracleCase32] = &[
+    OracleCase32 {
+        label: "c32_large_real",
+        z_re: 0x7f000000,
+        z_im: 0x00000000,
+        exp_re: 0x00400000,
+        exp_im: 0x80000000,
+    },
+    OracleCase32 {
+        label: "c32_large_imag",
+        z_re: 0x00000000,
+        z_im: 0x7f000000,
+        exp_re: 0x00000000,
+        exp_im: 0x80400000,
+    },
+    OracleCase32 {
+        label: "c32_large_mixed",
+        z_re: 0x7f000000,
+        z_im: 0xff000000,
+        exp_re: 0x00200000,
+        exp_im: 0x00200000,
+    },
+    OracleCase32 {
+        label: "c32_small_normal_real",
+        z_re: 0x00800000,
+        z_im: 0x00000000,
+        exp_re: 0x7e800000,
+        exp_im: 0x80000000,
+    },
+    OracleCase32 {
+        label: "c32_small_normal_imag",
+        z_re: 0x00000000,
+        z_im: 0x00800000,
+        exp_re: 0x00000000,
+        exp_im: 0xfe800000,
+    },
+    OracleCase32 {
+        label: "c32_small_normal_mixed",
+        z_re: 0x00800000,
+        z_im: 0x80800000,
+        exp_re: 0x7e000000,
+        exp_im: 0x7e000000,
+    },
+    OracleCase32 {
+        label: "c32_subnormal_real",
+        z_re: 0x00000010,
+        z_im: 0x00000000,
+        exp_re: 0x7f800000,
+        exp_im: 0x80000000,
+    },
+    OracleCase32 {
+        label: "c32_subnormal_imag",
+        z_re: 0x00000000,
+        z_im: 0x00000010,
+        exp_re: 0x00000000,
+        exp_im: 0xff800000,
+    },
+    OracleCase32 {
+        label: "c32_subnormal_min_mixed",
+        z_re: 0x00000001,
+        z_im: 0x80000001,
+        exp_re: 0x7f800000,
+        exp_im: 0x7f800000,
+    },
+    OracleCase32 {
+        label: "c32_inf_re_pos_im_zero",
+        z_re: 0x7f800000,
+        z_im: 0x00000000,
+        exp_re: 0x00000000,
+        exp_im: 0x80000000,
+    },
+    OracleCase32 {
+        label: "c32_inf_re_neg_im_zero",
+        z_re: 0xff800000,
+        z_im: 0x00000000,
+        exp_re: 0x80000000,
+        exp_im: 0x80000000,
+    },
+    OracleCase32 {
+        label: "c32_re_zero_inf_im_pos",
+        z_re: 0x00000000,
+        z_im: 0x7f800000,
+        exp_re: 0x00000000,
+        exp_im: 0x80000000,
+    },
+    OracleCase32 {
+        label: "c32_re_zero_inf_im_neg",
+        z_re: 0x00000000,
+        z_im: 0xff800000,
+        exp_re: 0x00000000,
+        exp_im: 0x00000000,
+    },
+    OracleCase32 {
+        label: "c32_inf_re_pos_inf_im_pos",
+        z_re: 0x7f800000,
+        z_im: 0x7f800000,
+        exp_re: 0x00000000,
+        exp_im: 0x80000000,
+    },
+    OracleCase32 {
+        label: "c32_inf_re_pos_finite_im",
+        z_re: 0x7f800000,
+        z_im: 0x40400000,
+        exp_re: 0x00000000,
+        exp_im: 0x80000000,
+    },
+    OracleCase32 {
+        label: "c32_finite_re_inf_im_pos",
+        z_re: 0x40400000,
+        z_im: 0x7f800000,
+        exp_re: 0x00000000,
+        exp_im: 0x80000000,
+    },
+];
+
+/// `inv` of a compact `Complex32` diagonal entry matches Julia's
+/// `inv(::ComplexF32)` **bitwise** at every case above.
+#[test]
+fn compact_reciprocal_32_matches_julia_bitwise() {
+    for case in ORACLE_CASES_32 {
+        let z = Complex32::new(f32::from_bits(case.z_re), f32::from_bits(case.z_im));
+        let expected = Complex32::new(f32::from_bits(case.exp_re), f32::from_bits(case.exp_im));
+        let inv = compact_inv32(z);
+        assert_eq!(
+            bits32(inv),
+            bits32(expected),
+            "inv({}) = {inv:?}, expected {expected:?}",
+            case.label
+        );
     }
 }
 

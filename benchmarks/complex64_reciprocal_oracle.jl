@@ -12,10 +12,12 @@
 # `tenet/tests/scaled_complex64_reciprocal.rs` checks it against this
 # script's output *bitwise*, not within a tolerance.
 #
-# The Float32 path (`inv(z::Complex{Float32})`, `base/complex.jl:473`) is not
-# exercised here: it only ever reaches the widened multiply-based branch,
-# which never needs the ComplexF64 fast-path/robust_cinv split this script
-# probes, and already has decimal-tolerance coverage in
+# The Float32 path (`inv(z::Complex{Float32})`, `base/complex.jl:473`,
+# ported as `julia_complex32_reciprocal_wide`) gets its own, separate
+# ComplexF32 case list below: it only ever reaches the widened
+# multiply-based branch, so it never needs the ComplexF64 fast-path/
+# robust_cinv split the main case list above probes, but is still checked
+# bitwise here rather than only against the decimal-tolerance oracle in
 # `tenet/tests/single_precision_advanced_linalg.rs`.
 #
 # Run (Julia 1.11.6, Base only, no packages):
@@ -181,5 +183,51 @@ for (label, re_bits, im_bits) in CASES
         label, " ",
         hex16(re_bits), " ", hex16(im_bits), " ",
         hex16(bits(real(r))), " ", hex16(bits(imag(r))),
+    )
+end
+
+# ---------------------------------------------------------------------------
+# ComplexF32: `inv(z::Complex{Float32})` (`base/complex.jl:473`), ported as
+# `julia_complex32_reciprocal_wide` (`tenet/src/typed.rs`). This path widens
+# to `ComplexF64` before dividing, so — unlike the `ComplexF64` path above —
+# it never reaches the scaled/`robust_cinv` fallback for any finite `f32`
+# input; these cases exist to pin the widen/narrow port itself (including
+# its infinite-input branch) bitwise, not to probe an overflow boundary.
+# ---------------------------------------------------------------------------
+
+bits32(x::Float32) = reinterpret(UInt32, x)
+frombits32(u::UInt32) = reinterpret(Float32, u)
+hex8(u::UInt32) = string(u; base=16, pad=8)
+
+# (label, re bits, im bits) — large, small-normal, subnormal, and infinite
+# f32 magnitudes, purely real/imaginary and mixed.
+const CASES32 = [
+    ("c32_large_real", 0x7f000000, 0x00000000),
+    ("c32_large_imag", 0x00000000, 0x7f000000),
+    ("c32_large_mixed", 0x7f000000, 0xff000000),
+    ("c32_small_normal_real", 0x00800000, 0x00000000),
+    ("c32_small_normal_imag", 0x00000000, 0x00800000),
+    ("c32_small_normal_mixed", 0x00800000, 0x80800000),
+    ("c32_subnormal_real", 0x00000010, 0x00000000),
+    ("c32_subnormal_imag", 0x00000000, 0x00000010),
+    ("c32_subnormal_min_mixed", 0x00000001, 0x80000001),
+    ("c32_inf_re_pos_im_zero", 0x7f800000, 0x00000000),
+    ("c32_inf_re_neg_im_zero", 0xff800000, 0x00000000),
+    ("c32_re_zero_inf_im_pos", 0x00000000, 0x7f800000),
+    ("c32_re_zero_inf_im_neg", 0x00000000, 0xff800000),
+    ("c32_inf_re_pos_inf_im_pos", 0x7f800000, 0x7f800000),
+    ("c32_inf_re_pos_finite_im", 0x7f800000, 0x40400000),
+    ("c32_finite_re_inf_im_pos", 0x40400000, 0x7f800000),
+]
+
+for (label, re_bits, im_bits) in CASES32
+    re = frombits32(re_bits)
+    im = frombits32(im_bits)
+    w = ComplexF32(re, im)
+    r = inv(w)
+    println(
+        label, " ",
+        hex8(re_bits), " ", hex8(im_bits), " ",
+        hex8(bits32(real(r))), " ", hex8(bits32(imag(r))),
     )
 end

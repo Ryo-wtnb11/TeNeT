@@ -2,10 +2,13 @@
 //! against a correctly-rounded (or otherwise independently derived) oracle
 //! value, rather than requiring bitwise equality.
 //!
-//! Used by `scaled_complex64_reciprocal.rs` (#1463) and by the existing
-//! `c64_compact_inv_and_pinv_are_elementwise_reciprocals` pin, whose exact
-//! equality assumption no longer holds once `Complex64`'s compact reciprocal
-//! runs Smith's algorithm instead of the naive `1/z`.
+//! Used by `typed_facade.rs`'s
+//! `c64_compact_inv_and_pinv_are_elementwise_reciprocals` (#1463), whose
+//! exact equality assumption no longer holds once `Complex64`'s compact
+//! reciprocal runs the Julia-ported `inv` (`tenet/src/typed.rs`
+//! `julia_complex64_reciprocal`) instead of the naive `1/z` it compares
+//! against: the new fast path's `mul_add` gives a different, still valid,
+//! rounding for the same normal-range value.
 
 use num_complex::Complex64;
 
