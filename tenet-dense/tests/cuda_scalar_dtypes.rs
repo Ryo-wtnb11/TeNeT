@@ -42,7 +42,8 @@ trait ProbeScalar: CudaScalar + Copy + Debug + PartialEq {
     /// window: the rule normalizes by an exact power of two, never by a
     /// complex-by-real division that squares the divisor (tenferro-rs#1922).
     const TINY: f64;
-    const HUGE: f64;
+    /// `2^(MAX_EXP - 4)`; not a `const` because `powi` is not a `const fn`.
+    fn huge() -> f64;
 
     /// The payload value nearest `value`, i.e. the fixture as the device sees
     /// it. The oracle runs on `widen(narrow(z))`, so the comparison isolates
@@ -55,7 +56,9 @@ impl ProbeScalar for f32 {
     const NAME: &'static str = "f32";
     const EPSILON: f64 = f32::EPSILON as f64;
     const TINY: f64 = f32::MIN_POSITIVE as f64;
-    const HUGE: f64 = 2.126_764_793_255_87e37; // 2^124
+    fn huge() -> f64 {
+        f64::from(2f32.powi(124))
+    }
 
     fn narrow(value: Complex64) -> Self {
         value.re as Self
@@ -70,7 +73,9 @@ impl ProbeScalar for f64 {
     const NAME: &'static str = "f64";
     const EPSILON: f64 = f64::EPSILON;
     const TINY: f64 = f64::MIN_POSITIVE;
-    const HUGE: f64 = 1.117_902_744_918_257e307; // 2^1020
+    fn huge() -> f64 {
+        2f64.powi(1020)
+    }
 
     fn narrow(value: Complex64) -> Self {
         value.re
@@ -85,7 +90,9 @@ impl ProbeScalar for Complex32 {
     const NAME: &'static str = "Complex32";
     const EPSILON: f64 = f32::EPSILON as f64;
     const TINY: f64 = f32::MIN_POSITIVE as f64;
-    const HUGE: f64 = 2.126_764_793_255_87e37; // 2^124
+    fn huge() -> f64 {
+        f64::from(2f32.powi(124))
+    }
 
     fn narrow(value: Complex64) -> Self {
         Complex32::new(value.re as f32, value.im as f32)
@@ -100,7 +107,9 @@ impl ProbeScalar for Complex64 {
     const NAME: &'static str = "Complex64";
     const EPSILON: f64 = f64::EPSILON;
     const TINY: f64 = f64::MIN_POSITIVE;
-    const HUGE: f64 = 1.117_902_744_918_257e307; // 2^1020
+    fn huge() -> f64 {
+        2f64.powi(1020)
+    }
 
     fn narrow(value: Complex64) -> Self {
         value
@@ -635,7 +644,7 @@ fn hermitian_admits_an_exactly_hermitian_block<D: ProbeScalar>(ctx: &mut CudaDen
 /// than propagating into the decision.
 fn hermitian_extremes_case<D: ProbeScalar>(ctx: &mut CudaDenseContext) {
     let n = 4usize;
-    for scale in [D::TINY, D::HUGE] {
+    for scale in [D::TINY, D::huge()] {
         let src = upload::<D>(ctx, &hermitian_block::<D>(n, scale));
         assert!(
             cuda_is_hermitian_region::<D>(ctx, &src, 0, n).expect("hermitian"),
