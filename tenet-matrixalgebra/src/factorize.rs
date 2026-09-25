@@ -7803,18 +7803,18 @@ where
             tensor: "pinv output space",
         });
     }
-    let source_regions =
-        canonical_generic_sector_regions(source_space.structure(), source_space.nout())?.ok_or(
-            OperationError::UnsupportedTensorContractScope {
-                message: "pinv requires canonical coupled-sector input storage",
-            },
-        )?;
-    let output_regions = canonical_generic_sector_regions(
+    // Why not `canonical_generic_sector_regions`: as for polar, the route
+    // compiler proves the output transposes the source's exact tree lists.
+    let source_regions = checked_sector_regions(source_space.structure(), source_space.nout())?
+        .ok_or(OperationError::UnsupportedTensorContractScope {
+            message: "pinv requires coupled-sector input storage",
+        })?;
+    let output_regions = checked_sector_regions(
         output_space.space().structure(),
         output_space.space().nout(),
     )?
     .ok_or(OperationError::UnsupportedTensorContractScope {
-        message: "pinv requires canonical coupled-sector output storage",
+        message: "pinv requires coupled-sector output storage",
     })?;
     let routes = compile_pinv_region_routes(
         &source_regions,
@@ -8203,24 +8203,27 @@ where
         Arc::clone(input.space().provider_arc()),
         p_homspace,
     )?;
-    let source_regions =
-        canonical_generic_sector_regions(source_space.structure(), source_space.nout())?.ok_or(
-            CheckedGenericFactorPlanError::Operation(
-                OperationError::UnsupportedTensorContractScope {
-                    message: "polar requires canonical coupled-sector input storage",
-                },
-            ),
-        )?;
-    let w_regions =
-        canonical_generic_sector_regions(w_space.space().structure(), w_space.space().nout())?
-            .ok_or(CheckedGenericFactorPlanError::Operation(
-                OperationError::UnsupportedTensorContractScope {
-                    message: "polar requires canonical coupled-sector W storage",
-                },
-            ))?;
-    let p_regions = canonical_generic_sector_regions(p_space.space().structure(), p_nout)?.ok_or(
+    // Why not `canonical_generic_sector_regions`: its sorted-tree test is a
+    // proxy that the leg-degeneracy builder's own tree order fails for
+    // multi-leg Generic trees, so every ordinary rank > 2 map was refused.
+    // Polar never compares against a freshly enumerated bond space: the route
+    // compiler proves W and P index the source's exact tree lists, which is
+    // the real requirement.
+    let source_regions = checked_sector_regions(source_space.structure(), source_space.nout())?
+        .ok_or(CheckedGenericFactorPlanError::Operation(
+            OperationError::UnsupportedTensorContractScope {
+                message: "polar requires coupled-sector input storage",
+            },
+        ))?;
+    let w_regions = checked_sector_regions(w_space.space().structure(), w_space.space().nout())?
+        .ok_or(CheckedGenericFactorPlanError::Operation(
+            OperationError::UnsupportedTensorContractScope {
+                message: "polar requires coupled-sector W storage",
+            },
+        ))?;
+    let p_regions = checked_sector_regions(p_space.space().structure(), p_nout)?.ok_or(
         CheckedGenericFactorPlanError::Operation(OperationError::UnsupportedTensorContractScope {
-            message: "polar requires canonical coupled-sector P storage",
+            message: "polar requires coupled-sector P storage",
         }),
     )?;
     let w_len = w_space
