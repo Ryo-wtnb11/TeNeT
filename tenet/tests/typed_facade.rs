@@ -18,6 +18,8 @@ use tenet::typed::{GradedSpace, TensorMap, Truncation};
 
 #[path = "../../tests/support/numerics.rs"]
 mod numerics;
+#[path = "ulp/mod.rs"]
+mod ulp;
 
 /// The fusion-tree layout and complete-structure caches are process-global, so
 /// the tests in this binary that snapshot them must not run beside a test that
@@ -5298,14 +5300,22 @@ fn c64_compact_inv_and_pinv_are_elementwise_reciprocals() {
             .zip(&inverse.values)
             .zip(&pseudo.values)
         {
+            // Within 1 ulp, not bitwise, per `docs/testing_numerics.md`: the
+            // compact reciprocal now runs a literal port of Julia's
+            // `inv(::ComplexF64)` (#1463, `tenet/src/typed.rs`
+            // `julia_complex64_reciprocal`), whose fast path uses `mul_add`
+            // where the naive `1/z` computed here does not, so this is a
+            // different valid floating-point order of the same formula, not
+            // an exact-equality contract. `scaled_complex64_reciprocal.rs`
+            // is the bitwise-against-Julia-itself oracle for this port.
             let reciprocal = Complex64::new(1.0, 0.0) / value;
-            assert_eq!(inverse, reciprocal);
+            ulp::assert_complex_within_ulps(inverse, reciprocal, 1, "inv");
             let expected = if value.norm() > rcond * sigma_max {
                 reciprocal
             } else {
                 Complex64::new(0.0, 0.0)
             };
-            assert_eq!(pseudo, expected);
+            ulp::assert_complex_within_ulps(pseudo, expected, 1, "pinv");
         }
     }
 }
