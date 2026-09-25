@@ -5300,20 +5300,22 @@ fn c64_compact_inv_and_pinv_are_elementwise_reciprocals() {
             .zip(&inverse.values)
             .zip(&pseudo.values)
         {
-            // Within 2 ulps, not bitwise: the compact reciprocal now runs a
-            // scaled, correctly-rounded-or-1-ulp algorithm rather than the
-            // naive, not-always-correctly-rounded `1/z` computed here
-            // (#1463); two results each within 1 ulp of the true value can
-            // be up to 2 ulps apart. `scaled_complex64_reciprocal.rs` checks
-            // the new algorithm against an exact-rational oracle instead.
+            // Within 1 ulp, not bitwise, per `docs/testing_numerics.md`: the
+            // compact reciprocal now runs a literal port of Julia's
+            // `inv(::ComplexF64)` (#1463, `tenet/src/typed.rs`
+            // `julia_complex64_reciprocal`), whose fast path uses `mul_add`
+            // where the naive `1/z` computed here does not, so this is a
+            // different valid floating-point order of the same formula, not
+            // an exact-equality contract. `scaled_complex64_reciprocal.rs`
+            // is the bitwise-against-Julia-itself oracle for this port.
             let reciprocal = Complex64::new(1.0, 0.0) / value;
-            ulp::assert_complex_within_ulps(inverse, reciprocal, 2, "inv");
+            ulp::assert_complex_within_ulps(inverse, reciprocal, 1, "inv");
             let expected = if value.norm() > rcond * sigma_max {
                 reciprocal
             } else {
                 Complex64::new(0.0, 0.0)
             };
-            ulp::assert_complex_within_ulps(pseudo, expected, 2, "pinv");
+            ulp::assert_complex_within_ulps(pseudo, expected, 1, "pinv");
         }
     }
 }
