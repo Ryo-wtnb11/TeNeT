@@ -505,21 +505,7 @@ fn dense_orientation_for_next_use(
     result_is_lhs: bool,
     sibling_labels: &[TemporaryLabel],
 ) -> (bool, Vec<TemporaryLabel>) {
-    let mut open_axes = Vec::new();
-    let mut contracted_axes = Vec::new();
-    for (axis, label) in labels.iter().enumerate() {
-        if sibling_labels.contains(label) {
-            contracted_axes.push(axis);
-        } else {
-            open_axes.push(axis);
-        }
-    }
-
-    let (cod_axes, dom_axes) = if result_is_lhs {
-        (open_axes, contracted_axes)
-    } else {
-        (contracted_axes, open_axes)
-    };
+    let (cod_axes, dom_axes) = next_use_axes(labels, result_is_lhs, sibling_labels);
     let rank = labels.len();
     let identity = cod_axes.iter().copied().eq(0..raw_codomain_rank)
         && dom_axes.iter().copied().eq(raw_codomain_rank..rank);
@@ -531,6 +517,38 @@ fn dense_orientation_for_next_use(
     oriented_labels.extend(cod_axes.iter().map(|&axis| labels[axis].clone()));
     oriented_labels.extend(dom_axes.iter().map(|&axis| labels[axis].clone()));
     (true, oriented_labels)
+}
+
+/// Codomain/domain axes of an intermediate for its consuming step: `(open |
+/// contracted)` as lhs, `(contracted | open)` as rhs, with the contracted legs
+/// in the lhs's order on both sides. TensorOperations 5.3.1
+/// `instantiators.jl:instantiate_contraction` takes `cind = intersect(indA,
+/// indB)` in A's order (L209) for both an lhs temporary `(oindA | cind)` (L217)
+/// and an rhs temporary `(cind | oindB)` (L233), so the consuming step borrows
+/// both operands. Ordering the rhs by its own labels instead would force that
+/// step to copy one operand. `sibling_labels` is the planned order; an lhs
+/// layout never reorders legs within a group, so the planned relative order of
+/// its contracted legs is the order the consuming step enumerates.
+pub(crate) fn next_use_axes(
+    labels: &[TemporaryLabel],
+    result_is_lhs: bool,
+    sibling_labels: &[TemporaryLabel],
+) -> (Vec<usize>, Vec<usize>) {
+    let open_axes = (0..labels.len())
+        .filter(|&axis| !sibling_labels.contains(&labels[axis]))
+        .collect();
+    if result_is_lhs {
+        let contracted_axes = (0..labels.len())
+            .filter(|&axis| sibling_labels.contains(&labels[axis]))
+            .collect();
+        (open_axes, contracted_axes)
+    } else {
+        let contracted_axes = sibling_labels
+            .iter()
+            .filter_map(|label| labels.iter().position(|own| own == label))
+            .collect();
+        (contracted_axes, open_axes)
+    }
 }
 
 /// Map each tensor id to its single later consuming step and whether it is that

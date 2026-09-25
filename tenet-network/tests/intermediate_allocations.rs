@@ -6,8 +6,11 @@ use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use tenet::core::{U1FusionRule, U1Irrep};
-use tenet::prelude::{Complex64, Runtime, TensorScalar};
+use tenet::prelude::{Complex32, Complex64, Runtime, TensorScalar};
 use tenet::typed::{GradedSpace, SectorSpectrum, TensorMap as TypedTensorMap};
+#[path = "../../tests/support/numerics.rs"]
+mod numerics;
+
 use tenet_network::{
     tensor, ContractionPlan, ContractionStep, Network, NetworkExecutionWorkspace, PlannedNetwork,
     TemporaryLabel, TensorId,
@@ -422,6 +425,183 @@ fn record_dealloc_result(pointer: *mut u8) -> bool {
         }
     }
     true
+}
+
+type U1Tensor = TypedTensorMap<U1FusionRule, f64>;
+type U1Legs<'a> = &'a [&'a GradedSpace<U1FusionRule>];
+
+/// `X[a,b|i]`, `Y[i|c]`, the audit probe `Z[d|c*,b]`, `W[b*,c|d]`,
+/// `P[d|j]`, `Q[j|c*,b]` over U(1) {-1,0,1}, seeded so every runtime gets the
+/// same values.
+fn temporary_order_fixture(runtime: &Runtime) -> (Vec<U1Tensor>, usize) {
+    let provider = Arc::new(U1FusionRule);
+    let space = |degeneracy: usize| {
+        GradedSpace::try_new_with_arc(
+            Arc::clone(&provider),
+            (-1..=1).map(|charge| (U1Irrep::new(charge), degeneracy)),
+        )
+        .unwrap()
+    };
+    let (va, vb, vc, vd, vi, vj) = (space(2), space(3), space(4), space(5), space(3), space(2));
+    let (vb_dual, vc_dual) = (vb.try_dual().unwrap(), vc.try_dual().unwrap());
+    let legs: [(U1Legs, U1Legs); 6] = [
+        (&[&va, &vb], &[&vi]),
+        (&[&vi], &[&vc]),
+        (&[&vd], &[&vc_dual, &vb]),
+        (&[&vb_dual, &vc], &[&vd]),
+        (&[&vd], &[&vj]),
+        (&[&vj], &[&vc_dual, &vb]),
+    ];
+    let tensors = legs
+        .iter()
+        .zip(146_900..)
+        .map(|((codomain, domain), seed)| {
+            U1Tensor::rand_with_seed(
+                runtime,
+                codomain.iter().copied(),
+                domain.iter().copied(),
+                seed,
+            )
+            .unwrap()
+        })
+        .collect();
+    // Bounds the floating terms of every compared entry: i, then (b, c).
+    let terms = (vi.dim().unwrap() * vb.dim().unwrap() * vc.dim().unwrap()).ceil() as usize;
+    (tensors, terms)
+}
+
+/// `T = X*Y` consumed as lhs (by `W`), as rhs (by the audit probe `Z`), and as
+/// rhs of the lhs temporary `S = P*Q`. Every consumer admits a zero-copy
+/// layout of `T`, so a first execution allocates exactly two `dim(T)`
+/// payloads: `T` and the producer's one layout pass (the output transform into
+/// the rhs layout, or the repartition into the lhs layout). A source copy of
+/// `T` in the consuming step adds more. It runs on a fresh runtime because the
+/// contraction scratch is retained across calls.
+fn temporary_contracted_order_worker() {
+    let (oracle_inputs, terms) = temporary_order_fixture(&Runtime::builder().build().unwrap());
+    let [x, y, z, w, p, q] = &oracle_inputs[..] else {
+        unreachable!()
+    };
+    let t = x.contract(y, &[2], &[0], &[0, 1, 2]).unwrap();
+    let s = p.contract(q, &[1], &[0], &[0, 1, 2]).unwrap();
+    let t_bytes = std::mem::size_of_val(t.data());
+
+    let labels = |names: &[&str]| {
+        names
+            .iter()
+            .map(|&name| TemporaryLabel::from(name))
+            .collect::<Vec<_>>()
+    };
+    let step = |lhs, rhs, result, names: &[&str]| {
+        ContractionStep::new(
+            TensorId::new(lhs),
+            TensorId::new(rhs),
+            TensorId::new(result),
+            0,
+            labels(names),
+        )
+    };
+    let xy = || vec![labels(&["a", "b", "i"]), labels(&["i", "c"])];
+    let cases = [
+        (
+            "rhs temporary",
+            vec![&["d", "c", "b"] as &[&str]],
+            vec![2],
+            labels(&["d", "a"]),
+            vec![step(0, 1, 3, &["a", "b", "c"]), step(2, 3, 4, &["d", "a"])],
+            z.contract(&t, &[1, 2], &[2, 1], &[0, 1]).unwrap(),
+        ),
+        (
+            "lhs temporary",
+            vec![&["b", "c", "d"] as &[&str]],
+            vec![3],
+            labels(&["a", "d"]),
+            vec![step(0, 1, 3, &["a", "b", "c"]), step(3, 2, 4, &["a", "d"])],
+            t.contract(w, &[1, 2], &[0, 1], &[0, 1]).unwrap(),
+        ),
+        (
+            "both temporaries",
+            vec![&["d", "j"] as &[&str], &["j", "c", "b"]],
+            vec![4, 5],
+            labels(&["d", "a"]),
+            vec![
+                step(0, 1, 4, &["a", "b", "c"]),
+                step(2, 3, 5, &["d", "c", "b"]),
+                step(5, 4, 6, &["d", "a"]),
+            ],
+            s.contract(&t, &[1, 2], &[2, 1], &[0, 1]).unwrap(),
+        ),
+    ];
+    for (name, extra_labels, extra_inputs, output, steps, oracle) in cases {
+        assert_ne!(
+            oracle.data().len(),
+            t.data().len(),
+            "{name}: ambiguous size"
+        );
+        let runtime = Runtime::builder().build().unwrap();
+        let (inputs, _) = temporary_order_fixture(&runtime);
+        let refs = [0, 1]
+            .into_iter()
+            .chain(extra_inputs)
+            .map(|index| &inputs[index])
+            .collect::<Vec<_>>();
+        let mut input_labels = xy();
+        input_labels.extend(extra_labels.iter().map(|names| labels(names)));
+        let count = refs.len();
+        let network = Network::new(
+            input_labels,
+            vec![false; count],
+            refs.iter()
+                .map(|tensor| Some(tensor.codomain_rank()))
+                .collect(),
+            output.clone(),
+            Some(1),
+        )
+        .unwrap();
+        let plan = ContractionPlan::new(count, output, steps).unwrap();
+        let planned = network.plan_with(&refs, plan).unwrap();
+
+        reset_event_counters();
+        PAYLOAD_SIZE.store(t_bytes, Ordering::Relaxed);
+        reset_live_registry();
+        ENABLED.store(true, Ordering::SeqCst);
+        let actual = planned
+            .execute_with_workspace(&refs, &mut NetworkExecutionWorkspace::default())
+            .unwrap();
+        ENABLED.store(false, Ordering::SeqCst);
+        assert_eq!(
+            PAYLOAD_ALLOC_CALLS.load(Ordering::Relaxed),
+            2,
+            "{name}: the consuming step copied T"
+        );
+        assert_eq!(REGISTRY_OVERFLOWS.load(Ordering::Relaxed), 0);
+        assert_eq!(actual.codomain(), oracle.codomain(), "{name}");
+        assert_eq!(actual.domain(), oracle.domain(), "{name}");
+        numerics::assert_slices_close(name, actual.data(), oracle.data(), terms);
+    }
+}
+
+#[test]
+fn first_execution_lays_out_temporaries_in_the_consumer_contracted_order() {
+    let _test_guard = lock_unpoisoned(&TEST_LOCK);
+    if std::env::var_os("TENET_TEMPORARY_ORDER_ALLOC_WORKER").is_some() {
+        temporary_contracted_order_worker();
+        return;
+    }
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "first_execution_lays_out_temporaries_in_the_consumer_contracted_order",
+            "--nocapture",
+        ])
+        .env("TENET_TEMPORARY_ORDER_ALLOC_WORKER", "1")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "temporary-order allocator worker failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 fn add_live(bytes: u64) {
