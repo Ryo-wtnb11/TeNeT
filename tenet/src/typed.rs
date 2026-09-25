@@ -10193,7 +10193,7 @@ impl<R, D, S> TypedTensorBody<R, D, S> {
     }
 }
 
-impl<R, D> TypedTensorBody<R, D> {
+impl<R, D, S> TypedTensorBody<R, D, S> {
     /// A body holding a compact spectrum payload.
     fn diagonal(
         space: BoundDynamicFusionMapSpace<R>,
@@ -10798,7 +10798,11 @@ impl<R, D> TensorMap<R, D> {
             repr: owned_repr(TypedTensorBody::dense(self.logical_space().clone(), data)),
         }
     }
+}
 
+// Generic over storage so the device `adjoint` applies the same compact rule
+// as Host (#1452) to any compact diagonal a device tensor holds.
+impl<R, D, S> TensorMap<R, D, S> {
     fn with_spectrum(&self, spectrum: Vec<tenet_matrixalgebra::SectorSpectrum<D>>) -> Self {
         Self {
             runtime: self.runtime.clone(),
@@ -12421,7 +12425,13 @@ where
     D: CudaPayload,
 {
     /// Lazy categorical adjoint over the same parent device allocation.
+    ///
+    /// A compact diagonal returns its owned conjugated diagonal instead, as
+    /// on Host (#1452), so no lazy view ever holds a diagonal parent.
     pub fn adjoint(&self) -> Result<Self, Error> {
+        if let Some(adjoint) = self.compact_adjoint() {
+            return Ok(adjoint);
+        }
         self.dense_adjoint_view()
     }
 
@@ -21422,7 +21432,82 @@ mod representation_gates {
                 "{operation}: {error:?}"
             );
         }
-        let lazy = device_diagonal.adjoint().unwrap();
+        // #1452: the adjoint of a compact diagonal is the owned (conjugated)
+        // diagonal on every storage, never a lazy view, so it is rejected as
+        // compact storage. The lazy-operand rejection needs a dense device
+        // parent and is covered by
+        // `typed_cuda_factorizations_reject_lazy_adjoint_before_runtime_work`.
+        let adjoint = device_diagonal.adjoint().unwrap();
+        assert!(Arc::ptr_eq(owned(&adjoint), owned(&device_diagonal)));
+        assert!(matches!(
+            adjoint.qr_compact(),
+            Err(Error::UnsupportedOnDevice(message)) if message.contains("dense CUDA storage")
+        ));
+        assert!(matches!(
+            adjoint.svd_compact(),
+            Err(Error::UnsupportedOnDevice(message)) if message.contains("dense CUDA storage")
+        ));
+        assert!(matches!(
+            adjoint.eigh_full(),
+            Err(Error::UnsupportedOnDevice(message)) if message.contains("dense CUDA storage")
+        ));
+        for (operation, error) in [
+            ("svd_trunc", adjoint.svd_trunc(&Truncation::Full).err()),
+            ("eigh_trunc", adjoint.eigh_trunc(&Truncation::Full).err()),
+        ] {
+            assert!(
+                matches!(error, Some(Error::UnsupportedOnDevice(ref message))
+                    if message.contains(operation) && message.contains("find_truncated")),
+                "{operation}: {error:?}"
+            );
+        }
+
+        let complex_spectrum: Vec<_> = spectrum
+            .iter()
+            .map(|entry| tenet_matrixalgebra::SectorSpectrum {
+                sector: entry.sector,
+                values: entry
+                    .values
+                    .iter()
+                    .map(|&value| num_complex::Complex64::new(value, value + 1.0))
+                    .collect(),
+            })
+            .collect();
+        let complex_diagonal: TensorMap<_, num_complex::Complex64, CudaStorage<_>> = TensorMap {
+            runtime: diagonal.runtime.clone(),
+            repr: owned_repr(TypedTensorBody::diagonal(
+                diagonal.logical_space().clone(),
+                complex_spectrum.clone(),
+            )),
+        };
+        let complex_adjoint = complex_diagonal.adjoint().unwrap();
+        let TypedData::Diagonal(conjugated) = owned(&complex_adjoint).data.as_ref() else {
+            unreachable!("the adjoint of a compact diagonal is compact")
+        };
+        for (actual, source) in conjugated.iter().zip(&complex_spectrum) {
+            assert_eq!(actual.sector, source.sector);
+            let expected: Vec<_> = source.values.iter().map(|value| value.conj()).collect();
+            assert_eq!(actual.values, expected);
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    #[ignore = "requires a real CUDA device"]
+    fn typed_cuda_factorizations_reject_lazy_adjoint_before_runtime_work() {
+        let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+        let leg = GradedSpace::try_new_with_arc(
+            Arc::new(U1FusionRule),
+            [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
+        )
+        .unwrap();
+        let source: TensorMap<_, f64> =
+            TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+                indices.iter().sum::<usize>() as f64 + 1.0
+            })
+            .unwrap();
+        let lazy = source.to_cuda().unwrap().adjoint().unwrap();
+        assert!(matches!(&lazy.repr, TypedTensorRepr::Adjoint(_)));
         assert!(matches!(
             lazy.qr_compact(),
             Err(Error::UnsupportedOnDevice(message)) if message.contains("lazy adjoint")
@@ -21445,6 +21530,7 @@ mod representation_gates {
                 "{operation}: {error:?}"
             );
         }
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
     }
 
     #[cfg(feature = "cuda")]
