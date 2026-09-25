@@ -413,18 +413,6 @@ fn distinct_plan_signatures(
     Ok(seen.len().saturating_add(gemms.len()))
 }
 
-/// Entries of a cuTENSOR contraction plan cost about this much retained state
-/// (`g2-design.md` §4). Used only to bound how far the executor raises the
-/// backend's plan entry cap.
-pub(crate) const CUTENSOR_PLAN_BYTES: usize = 14 * 1024;
-
-/// How many plan entries `budget_bytes` pays for: the requirement, truncated
-/// to what the budget affords. It can be below Tenferro's own default bound,
-/// in which case the caller raises nothing and the backend keeps that default.
-pub(crate) fn plan_cache_entries_for(required: usize, budget_bytes: usize) -> usize {
-    required.min(budget_bytes / CUTENSOR_PLAN_BYTES)
-}
-
 /// Identity of device state prepared for one completed structure.
 ///
 /// The `Weak` is the structure's own identity marker, so an entry whose
@@ -837,13 +825,6 @@ mod tests {
             distinct_plan_signatures(&[], &[recoupling], &[], true).unwrap(),
             3
         );
-    }
-
-    #[test]
-    fn the_plan_cap_never_exceeds_the_byte_budget() {
-        assert_eq!(plan_cache_entries_for(200, 300 * CUTENSOR_PLAN_BYTES), 200);
-        assert_eq!(plan_cache_entries_for(200, 10 * CUTENSOR_PLAN_BYTES), 10);
-        assert_eq!(plan_cache_entries_for(200, 0), 0);
     }
 
     #[test]

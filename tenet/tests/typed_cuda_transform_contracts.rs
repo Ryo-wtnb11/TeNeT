@@ -148,6 +148,41 @@ fn clearing_the_transform_cache_releases_the_device_executor_state() {
 
 #[test]
 #[ignore = "requires a real CUDA device"]
+fn clearing_and_re_preparing_does_not_creep_the_plan_reservation() {
+    // What: `clear_tree_transform_cache` returns the executor's plan-entry
+    // reservation, so repeated clear/re-prepare cycles of the same structures
+    // leave the ledger and the cap where the first preparation put them.
+    let runtime = Runtime::builder().cuda(0).build().unwrap();
+    let device = fixture(&runtime).to_cuda().unwrap();
+    let prepare = || {
+        let _ = device.permute(&[2, 0], &[1, 3]).unwrap();
+        let _ = device.transpose().unwrap();
+    };
+    prepare();
+    let reserved = runtime
+        .cuda_plan_cache_stats()
+        .unwrap()
+        .unwrap()
+        .reserved_entries;
+    let required = runtime
+        .cuda_tree_transform_stats()
+        .unwrap()
+        .required_plan_entries;
+    assert!(reserved > 0);
+    assert_eq!(reserved, required);
+
+    for cycle in 0..3 {
+        runtime.clear_tree_transform_cache();
+        let cleared = runtime.cuda_plan_cache_stats().unwrap().unwrap();
+        assert_eq!(cleared.reserved_entries, 0, "cycle {cycle}");
+        prepare();
+        let again = runtime.cuda_plan_cache_stats().unwrap().unwrap();
+        assert_eq!(again.reserved_entries, reserved, "cycle {cycle}");
+    }
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
 fn device_transform_short_circuits_do_no_device_work() {
     let runtime = Runtime::builder().cuda(0).build().unwrap();
     let device = fixture(&runtime).to_cuda().unwrap();

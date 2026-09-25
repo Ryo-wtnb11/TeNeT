@@ -341,3 +341,40 @@ fn a_warm_trace_past_the_default_plan_bound_rebuilds_no_plan() {
     assert_eq!(after.misses, plans.misses, "{plans:?} -> {after:?}");
     assert_eq!(after.evictions, plans.evictions, "{plans:?} -> {after:?}");
 }
+
+/// The trace and the transform executor reserve plan entries independently,
+/// and their reservations add: interleaving the 81-signature trace with a
+/// device permute of the same tensor evicts no plan once both are warm.
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn an_interleaved_trace_and_transform_evict_no_plan() {
+    let runtime = Runtime::builder().cuda(0).build().unwrap();
+    let v = u1(&(0..9).map(|a| (a, a as usize + 1)).collect::<Vec<_>>());
+    let w = u1(&(0..9)
+        .map(|j| (100 * j, j as usize + 1))
+        .collect::<Vec<_>>());
+    let host: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&v, &w], [&v, &w], fill(71)).unwrap();
+    let source = host.to_cuda().unwrap();
+    let round = || {
+        let _ = source.trace_pairs(&[(0, 2)]).unwrap();
+        let _ = source.permute(&[1, 0], &[3, 2]).unwrap();
+    };
+    round();
+    let plans = runtime.cuda_plan_cache_stats().unwrap().unwrap();
+    let executor = runtime
+        .cuda_tree_transform_stats()
+        .unwrap()
+        .required_plan_entries;
+    assert!(
+        plans.reserved_entries > executor,
+        "the trace reserves beside the executor: {plans:?}, executor {executor}"
+    );
+    for _ in 0..3 {
+        round();
+    }
+    let after = runtime.cuda_plan_cache_stats().unwrap().unwrap();
+    assert_eq!(after.evictions, plans.evictions, "{plans:?} -> {after:?}");
+    assert_eq!(after.misses, plans.misses, "{plans:?} -> {after:?}");
+    assert_eq!(after.reserved_entries, plans.reserved_entries);
+}

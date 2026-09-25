@@ -28,6 +28,10 @@ mod cuda_hermitian;
 #[cfg(any(feature = "cuda", test))]
 #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
 mod cuda_region;
+// Pure host arithmetic: compiled (and tested) without the `cuda` feature.
+#[cfg(any(feature = "cuda", test))]
+#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+mod plan_ledger;
 #[cfg(feature = "tenferro")]
 mod tenferro_adapter;
 #[cfg(test)]
@@ -77,3 +81,7 @@ pub use cuda_adapter::{
 pub use cuda_adapter::{cuda_download_spectra, CudaSpectrum};
 #[cfg(feature = "cuda")]
 pub use cuda_region::CudaRegion;
+#[cfg(feature = "cuda")]
+pub use plan_ledger::{
+    plan_cache_entries_for, CUTENSOR_PLAN_BYTES, DEFAULT_PLAN_CACHE_BUDGET_BYTES,
+};

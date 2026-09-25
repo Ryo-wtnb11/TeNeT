@@ -1124,8 +1124,8 @@ impl Runtime {
         self.inner.tree_transform_stores.clear();
         #[cfg(feature = "cuda")]
         if let Some(mut lease) = self.lease_cuda_for_maintenance() {
-            let (_, executor, scratch) = lease.split_contract();
-            executor.clear();
+            let (dense, executor, scratch) = lease.split_contract();
+            executor.clear(dense);
             scratch.clear();
         }
     }

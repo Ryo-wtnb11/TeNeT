@@ -24,7 +24,8 @@ use common::{
 };
 use num_complex::{Complex32, Complex64};
 use tenet_dense::{
-    cuda_transfer_stats, reset_cuda_transfer_stats, CudaDenseContext, CudaScalar, CudaTransferStats,
+    cuda_region_zero, cuda_transfer_stats, reset_cuda_transfer_stats, CudaDenseContext,
+    CudaDenseStorage, CudaRegion, CudaScalar, CudaTransferStats,
 };
 use tenet_operations::cuda::CudaStorage;
 use tenet_operations::{
@@ -573,6 +574,190 @@ fn more_signatures_than_the_default_plan_bound_raise_the_cap_without_thrashing()
         &fixture.expected(&source, &destination, true),
         "many signatures, thrashing plan cache",
     );
+}
+
+/// A compiled fixture held alive with its device buffers, so repeated replays
+/// hit one prepared structure instead of preparing a fresh one each time.
+struct Held<T: DeviceScalar> {
+    fixture: Fixture,
+    structure: tenet_operations::TreeTransformStructure<f64>,
+    dst: CudaStorage<T>,
+    src: CudaStorage<T>,
+}
+
+impl<T: DeviceScalar> Held<T> {
+    fn new(ctx: &CudaDenseContext, fixture: Fixture) -> Self {
+        let structure = fixture.compile();
+        let dst = CudaStorage::<T>::upload(ctx, &vec![T::from_parts(0.0, 0.0); fixture.dst_len()])
+            .unwrap();
+        let src = CudaStorage::<T>::upload(ctx, &fixture.source::<T>()).unwrap();
+        Self {
+            fixture,
+            structure,
+            dst,
+            src,
+        }
+    }
+
+    fn replay(&mut self, ctx: &mut CudaDenseContext, executor: &mut CudaTreeTransformExecutor) {
+        executor
+            .replay(
+                ctx,
+                &self.structure,
+                &self.fixture.dst_structure(),
+                &self.fixture.src_structure(),
+                &mut self.dst,
+                &self.src,
+                T::from_parts(1.0, 0.0),
+                CudaTreeTransformDestination::Overwrite,
+            )
+            .unwrap();
+    }
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn clearing_and_re_preparing_returns_the_same_plan_reservation() {
+    // What: `clear` returns the executor's whole plan-entry reservation, so a
+    // clear/re-prepare cycle leaves the context ledger and the cap where they
+    // were instead of adding the executor total again each cycle.
+    let mut ctx = context();
+    let mut executor = CudaTreeTransformExecutor::default();
+    let mut held: Vec<Held<f64>> = vec![
+        Held::new(&ctx, many_distinct_signatures(12)),
+        Held::new(&ctx, interleaved()),
+    ];
+    for entry in &mut held {
+        entry.replay(&mut ctx, &mut executor);
+    }
+    let reserved = ctx.reserved_plan_entries();
+    let cap = ctx.plan_cache_max_entries().unwrap();
+    assert!(reserved > 0);
+    assert_eq!(reserved, executor.required_plan_entries());
+
+    for cycle in 0..3 {
+        executor.clear(&mut ctx);
+        assert_eq!(ctx.reserved_plan_entries(), 0, "cycle {cycle}");
+        for entry in &mut held {
+            entry.replay(&mut ctx, &mut executor);
+        }
+        assert_eq!(ctx.reserved_plan_entries(), reserved, "cycle {cycle}");
+        assert_eq!(ctx.plan_cache_max_entries().unwrap(), cap, "cycle {cycle}");
+    }
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn an_evicted_structure_returns_its_plan_reservation() {
+    // What: when the bounded prepared-structure cache evicts a structure, the
+    // executor total falls and the context ledger falls by the same amount.
+    let mut ctx = context();
+    let mut executor = CudaTreeTransformExecutor::with_structure_entries(
+        1 << 20,
+        DEFAULT_PLAN_CACHE_BUDGET_BYTES,
+        1,
+    );
+    let mut large = Held::<f64>::new(&ctx, many_distinct_signatures(12));
+    let mut small = Held::<f64>::new(&ctx, many_distinct_signatures(3));
+
+    large.replay(&mut ctx, &mut executor);
+    let large_total = executor.required_plan_entries();
+    assert_eq!(ctx.reserved_plan_entries(), large_total);
+
+    small.replay(&mut ctx, &mut executor);
+    assert_eq!(
+        executor.prepared_structures(),
+        1,
+        "the bound evicted nothing"
+    );
+    let small_total = executor.required_plan_entries();
+    assert!(small_total < large_total);
+    assert_eq!(
+        large_total - ctx.reserved_plan_entries(),
+        large_total - small_total,
+        "the ledger must follow the executor total down"
+    );
+
+    // And back up when the evicted structure returns.
+    large.replay(&mut ctx, &mut executor);
+    assert_eq!(ctx.reserved_plan_entries(), large_total);
+}
+
+/// A synthetic consumer outside the executor: `count` zero fills of distinct
+/// packed f32 shapes, one cuTENSOR plan each.
+struct ZeroFills {
+    regions: Vec<CudaRegion>,
+    buffer: CudaDenseStorage,
+}
+
+impl ZeroFills {
+    fn new(ctx: &mut CudaDenseContext, count: usize) -> Self {
+        let regions: Vec<CudaRegion> = (0..count)
+            .map(|index| CudaRegion::packed(&[2 + index % 9, 3 + index / 9], 0).unwrap())
+            .collect();
+        let len = regions
+            .iter()
+            .map(|region| region.element_count().unwrap())
+            .max()
+            .unwrap();
+        ctx.reserve_zero_template::<f32>(len).unwrap();
+        let buffer = CudaDenseStorage::upload_owned::<f32>(ctx, vec![1.0; len]).unwrap();
+        Self { regions, buffer }
+    }
+
+    fn submit(&mut self, ctx: &mut CudaDenseContext) {
+        for region in &self.regions {
+            cuda_region_zero::<f32>(ctx, &mut self.buffer, region).unwrap();
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn a_consumer_reserving_first_keeps_its_plans_beside_a_large_executor() {
+    // What: plan-entry reservations of independent consumers add. A consumer
+    // that reserves its 80 plans first is not absorbed when an executor's
+    // total then exceeds the default bound of 64, so a warm interleave of both
+    // evicts nothing. Under an absolute raise the consumer's `64 + 80` and
+    // the executor's own total are combined by max, below the joint working
+    // set, and every round thrashes (the origin/main negative control).
+    let _guard = COUNTER_TESTS.lock().unwrap();
+    let mut ctx = context();
+    let base = ctx.plan_cache_max_entries().unwrap();
+    let consumer_plans = 80;
+    let mut consumer = ZeroFills::new(&mut ctx, consumer_plans);
+    let mut executor = CudaTreeTransformExecutor::default();
+    let mut held = Held::<f64>::new(&ctx, many_distinct_signatures(70));
+
+    assert_eq!(
+        ctx.reserve_plan_entries(consumer_plans).unwrap(),
+        consumer_plans
+    );
+    consumer.submit(&mut ctx);
+    held.replay(&mut ctx, &mut executor);
+    assert!(executor.required_plan_entries() > base, "{base}");
+    let reserved = consumer_plans + executor.required_plan_entries();
+    assert_eq!(ctx.reserved_plan_entries(), reserved);
+    assert!(ctx.plan_cache_max_entries().unwrap() >= base + reserved);
+    assert_eq!(ctx.plan_cache_stats().unwrap().reservation_shortfall, 0);
+
+    let before = ctx.plan_cache_stats().unwrap();
+    for _ in 0..3 {
+        consumer.submit(&mut ctx);
+        held.replay(&mut ctx, &mut executor);
+    }
+    let after = ctx.plan_cache_stats().unwrap();
+    assert_eq!(after.evictions, before.evictions, "{before:?} -> {after:?}");
+    assert_eq!(after.misses, before.misses, "{before:?} -> {after:?}");
+
+    // Releasing returns the consumer's share and keeps the cap.
+    let cap = ctx.plan_cache_max_entries().unwrap();
+    ctx.release_plan_entries(consumer_plans);
+    assert_eq!(
+        ctx.reserved_plan_entries(),
+        executor.required_plan_entries()
+    );
+    assert_eq!(ctx.plan_cache_max_entries().unwrap(), cap);
 }
 
 #[test]
