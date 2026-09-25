@@ -8186,8 +8186,82 @@ where
     if let Some(compact) = lhs.try_contract_diagonal(rhs, lhs_axes, rhs_axes, output_axes)? {
         return Ok(compact);
     }
+    if permutes_core_form_contraction(lhs, rhs, lhs_axes, rhs_axes, output_axes) {
+        // Why not the one-call ordered route: for core-form operands its
+        // source-transform route rebuilds the source and core spaces per
+        // call, while the default order resolves to the direct core GEMM and
+        // the permute replays a Runtime-cached plan (#1461). This is
+        // TensorKit `blas_contract!`'s `copyC` shape: a temporary, then a
+        // permuting `tensoradd!`.
+        let (codomain, domain) = output_axes.split_at(lhs.codomain_rank());
+        return contract_multiplicity_free_ordered(
+            lhs,
+            rhs,
+            lhs_axes,
+            rhs_axes,
+            OutputAxisOrder::identity(),
+        )?
+        .tree_transform_multiplicity_free_real(TreeTransformOperation::permute(
+            codomain.iter().copied(),
+            domain.iter().copied(),
+        ));
+    }
+    contract_multiplicity_free_ordered(
+        lhs,
+        rhs,
+        lhs_axes,
+        rhs_axes,
+        OutputAxisOrder::from_axes(output_axes),
+    )
+}
+
+/// True when `output_axes` is a valid, non-identity permutation of the open
+/// axes and the default order would run the direct core GEMM: `lhs_axes` and
+/// `rhs_axes` pair `lhs`'s whole domain with `rhs`'s whole codomain in order,
+/// and no fermionic supertrace twist applies (a dual contracted `rhs` leg).
+/// Why not also the other cases: there the default order runs source
+/// transforms too, and the one-call route folds the output order into its own
+/// output transform for less than a separate permute. Malformed input keeps
+/// the one-call route and its errors.
+fn permutes_core_form_contraction<R, D>(
+    lhs: &TensorMap<R, D>,
+    rhs: &TensorMap<R, D>,
+    lhs_axes: &[usize],
+    rhs_axes: &[usize],
+    output_axes: &[usize],
+) -> bool
+where
+    R: MultiplicityFreeRigidSymbols,
+    D: TensorScalar,
+{
+    let (lhs_nout, rhs_nout) = (lhs.codomain_rank(), rhs.codomain_rank());
+    let open_rank = lhs_nout + rhs.rank() - rhs_nout;
+    let rhs_homspace = rhs.logical_space().space().homspace();
+    lhs_axes.len() == rhs_axes.len()
+        && lhs_axes.iter().copied().eq(lhs_nout..lhs.rank())
+        && rhs_axes.iter().copied().eq(0..rhs_nout)
+        && output_axes.len() == open_rank
+        && !output_axes.iter().copied().eq(0..open_rank)
+        && (0..open_rank).all(|axis| output_axes.contains(&axis))
+        && (rhs.logical_space().provider().braiding_style()
+            != tenet_core::BraidingStyleKind::Fermionic
+            || !rhs_axes
+                .iter()
+                .any(|&axis| rhs_homspace.external_axis_is_dual(axis) == Some(true)))
+}
+
+fn contract_multiplicity_free_ordered<R, D>(
+    lhs: &TensorMap<R, D>,
+    rhs: &TensorMap<R, D>,
+    lhs_axes: &[usize],
+    rhs_axes: &[usize],
+    output_order: OutputAxisOrder<'_>,
+) -> Result<TensorMap<R, D>, Error>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: TensorScalar,
+{
     let mut lease = lhs.runtime.lease_context()?;
-    let output_order = OutputAxisOrder::from_axes(output_axes);
     let (space, data) =
         if let (TypedTensorRepr::Owned(lhs_body), TypedTensorRepr::Owned(rhs_body)) =
             (&lhs.repr, &rhs.repr)
