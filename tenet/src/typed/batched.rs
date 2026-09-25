@@ -74,6 +74,7 @@ impl Hash for StructureSignature {
 
 /// The first determinant in which two [`StructureSignature`]s differ.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum SignatureField {
     /// Host or device ordinal.
     Placement,
@@ -89,8 +90,10 @@ pub enum SignatureField {
 
 /// A payload representation a [`StackedTensorMap`] cannot hold.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum BatchMemberRepresentation {
-    /// A lazy adjoint view over its parent's payload.
+    /// A lazy adjoint view over its parent's payload. Own it first with
+    /// `adj.zeros_like().absorb(&adj)`.
     LazyAdjoint,
     /// A compact diagonal spectrum, whose dense layout is not stored.
     CompactDiagonal,
@@ -236,6 +239,9 @@ where
     /// a member whose signature differs from member 0's returns
     /// [`Error::BatchSignatureMismatch`] naming that member and the first
     /// differing field. An empty batch is an [`Error::InvalidArgument`].
+    ///
+    /// A lazy adjoint `adj` packs after `adj.zeros_like().absorb(&adj)`,
+    /// which returns an owned dense copy.
     pub fn pack<T: AsRef<TensorMap<R, D>>>(members: &[T]) -> Result<Self, Error> {
         let first = members
             .first()
