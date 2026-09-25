@@ -4252,6 +4252,15 @@ macro_rules! assert_sun_polar_laws {
             })
             .unwrap()
         };
+        // A rank-0 map names no leg to rebuild its adjoint from; checked eigh
+        // admission is the Hermitian (real scalar) test there.
+        let assert_hermitian = |tensor: &TensorMap<_, _>, what: &str| {
+            if tensor.rank() == 0 {
+                assert!(tensor.eigh_vals().is_ok(), "{what}");
+            } else {
+                assert_close(&owned_adjoint(tensor), tensor, what);
+            }
+        };
         let rebuilt = if left { w.compose(&p) } else { p.compose(&w) }.unwrap();
         assert_close(&rebuilt, source, "A = WP / PW");
         let wh = owned_adjoint(&w);
@@ -4269,26 +4278,33 @@ macro_rules! assert_sun_polar_laws {
             )
         };
         let spaces: Vec<&GradedSpace<_>> = gram_space.collect();
-        let identity = TensorMap::from_block_fn(
-            $runtime,
-            spaces.iter().copied(),
-            spaces.iter().copied(),
-            |trees, ij| {
-                let same_tree = trees.codomain_uncoupled() == trees.domain_uncoupled()
-                    && trees.codomain_innerlines() == trees.domain_innerlines()
-                    && trees.codomain_vertices() == trees.domain_vertices();
-                let (row, col) = ij.split_at(spaces.len());
-                if same_tree && row == col { 1.0 } else { 0.0 }.into()
-            },
-        )
-        .unwrap();
-        assert_close(&owned_adjoint(&p), &p, "P Hermitian");
+        assert_hermitian(&p, "P Hermitian");
         assert_close(
             &p.compose(&p).unwrap(),
             &square_oracle,
             "P^2 = A^H A / A A^H",
         );
-        assert_close(&gram, &identity, "W isometry");
+        if spaces.is_empty() {
+            // A rank-0 Gram map sum |w|^2 is real and nonnegative, so unit
+            // norm is the scalar identity (no leg names the provider).
+            assert_eq!(gram.data().len(), 1);
+            assert!((gram.norm().unwrap() - 1.0).abs() < 1e-9, "W isometry");
+        } else {
+            let identity = TensorMap::from_block_fn(
+                $runtime,
+                spaces.iter().copied(),
+                spaces.iter().copied(),
+                |trees, ij| {
+                    let same_tree = trees.codomain_uncoupled() == trees.domain_uncoupled()
+                        && trees.codomain_innerlines() == trees.domain_innerlines()
+                        && trees.codomain_vertices() == trees.domain_vertices();
+                    let (row, col) = ij.split_at(spaces.len());
+                    if same_tree && row == col { 1.0 } else { 0.0 }.into()
+                },
+            )
+            .unwrap();
+            assert_close(&gram, &identity, "W isometry");
+        }
         assert!(p
             .eigh_vals()
             .unwrap()
@@ -4312,11 +4328,7 @@ macro_rules! assert_sun_polar_laws {
             source.compose(&pseudo).unwrap(),
             pseudo.compose(source).unwrap(),
         ] {
-            assert_close(
-                &owned_adjoint(&projector),
-                &projector,
-                "pinv projector Hermitian",
-            );
+            assert_hermitian(&projector, "pinv projector Hermitian");
         }
     }};
 }
@@ -4337,11 +4349,23 @@ fn sun_checked_generic_polar_and_pinv_accept_facade_layouts_of_rank_three_and_fo
         GradedSpace::try_new_with_arc(Arc::clone(&provider), [(vec![1, 1], 2), (vec![0, 0], 1)])
             .unwrap();
     let value = |salt: u64| ((salt.wrapping_mul(2_654_435_761) % 1009) as f64) / 1009.0 - 0.5;
-    let cases: [(&[&GradedSpace<_>], &[&GradedSpace<_>], bool); 4] = [
+    // Non-self-dual legs: T = 3 (x2) + 3bar and its dual T*, in mixed-dual
+    // and all-dual rank-3 shapes. An all-dual map with one codomain and two
+    // domain legs (or the reverse) violates the polar direction in some
+    // sector, so the all-dual shapes put all three legs on one side.
+    let t =
+        GradedSpace::try_new_with_arc(Arc::clone(&provider), [(vec![1, 0], 2), (vec![0, 1], 1)])
+            .unwrap();
+    let t_dual = t.try_dual().unwrap();
+    let cases: [(&[&GradedSpace<_>], &[&GradedSpace<_>], bool); 8] = [
         (&[&leg, &leg], &[&leg], true),
         (&[&leg], &[&leg, &leg], false),
         (&[&leg, &leg], &[&leg, &leg], true),
         (&[&leg, &leg], &[&leg, &leg], false),
+        (&[&t, &t_dual], &[&t], true),
+        (&[&t], &[&t, &t_dual], false),
+        (&[&t_dual, &t_dual, &t_dual], &[], true),
+        (&[], &[&t_dual, &t_dual, &t_dual], false),
     ];
     for (codomain, domain, left) in cases {
         let mut salt = 0;
