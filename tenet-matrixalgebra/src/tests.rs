@@ -16669,3 +16669,242 @@ fn checked_generic_mis_stacked_tiling_scatters_factors_and_refuses_eigenvalues()
         );
     }
 }
+
+/// Copy of `source` whose coupled sectors stack rows by ascending codomain
+/// tree and columns by descending domain tree: the same operator, but row `i`
+/// and column `i` of a multi-tree sector name different tree states.
+fn mis_stacked_endomorphism_copy<R, D>(rule: &R, source: &TensorMap<D, 2, 2>) -> TensorMap<D, 2, 2>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    let mut blocks: Vec<(tenet_core::FusionTreePairKey, Vec<usize>)> =
+        (0..source.structure().block_count())
+            .map(|index| {
+                let block = source.structure().block(index).unwrap();
+                let BlockKey::FusionTree(key) = block.key() else {
+                    unreachable!("source has fusion-tree blocks")
+                };
+                (key.clone(), block.shape().to_vec())
+            })
+            .collect();
+    blocks.sort_by(|(a, _), (b, _)| {
+        a.codomain_tree()
+            .cmp(b.codomain_tree())
+            .then(b.domain_tree().cmp(a.domain_tree()))
+    });
+    let structure = BlockStructure::coupled_sector_matrix_with_keys(rule, 2, 4, blocks).unwrap();
+    let regions = structure.coupled_sector_regions(2).unwrap().unwrap();
+    assert!(
+        regions
+            .iter()
+            .any(|region| region.row_trees() != region.col_trees()),
+        "the fixture must mis-stack at least one coupled sector"
+    );
+    let source_space = source.fusion_space().unwrap();
+    let space = FusionTensorMapSpace::new_unbound(
+        source_space.dense_space().clone(),
+        source_space.homspace().clone(),
+        structure,
+    )
+    .unwrap()
+    .try_bind_rule(rule)
+    .unwrap();
+    TensorMap::from_block_fn_with_fusion_space(space, D::zero(), |key, indices| {
+        let block = source.block_by_key(key).unwrap();
+        block.data()[block.offset()
+            + indices
+                .iter()
+                .zip(block.strides())
+                .map(|(&index, &stride)| index * stride)
+                .sum::<usize>()]
+    })
+    .unwrap()
+}
+
+fn assert_stacking_refusal<T: fmt::Debug>(result: Result<T, OperationError>, operation: &str) {
+    match result {
+        Err(OperationError::UnsupportedTensorContractScope { message })
+            if message.starts_with(operation) && message.contains("stacking") => {}
+        other => panic!("{operation}: expected a stacking refusal, got {other:?}"),
+    }
+}
+
+fn assert_multiplicity_free_eigen_ops_refuse_mis_stacking<R>(rule: R, sectors: &[SectorId])
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>
+        + TreeTransformRuleCacheKey<Key = RuleIdentity>
+        + Clone
+        + fmt::Debug
+        + 'static,
+{
+    let provider = Arc::new(rule.clone());
+    let general = mis_stacked_endomorphism_copy(&rule, &tsvd_test_tensor(&rule, sectors));
+    let hermitian = mis_stacked_endomorphism_copy(&rule, &hermitian_test_tensor(&rule, sectors));
+    let general_bound = bound_tensor(Arc::clone(&provider), &general);
+    let hermitian_bound = bound_tensor(Arc::clone(&provider), &hermitian);
+    let (general, hermitian) = (general_bound.as_ref(), hermitian_bound.as_ref());
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    let mut context = default_context();
+    let truncation = Truncation::Rank(1);
+
+    assert_stacking_refusal(eig_vals(&mut dense, &general), "eig_vals ");
+    assert_stacking_refusal(eig_full(&mut dense, &general), "eig_full ");
+    assert_stacking_refusal(eig_trunc(&mut dense, &general, &truncation), "eig_full ");
+    assert_stacking_refusal(eigh_vals(&mut dense, &hermitian), "eigh_vals ");
+    assert_stacking_refusal(eigh_full(&mut dense, &hermitian), "eigh_full ");
+    assert_stacking_refusal(
+        eigh_trunc(&mut dense, &hermitian, &truncation),
+        "eigh_full ",
+    );
+    assert_stacking_refusal(exp(&mut dense, &mut context, &general), "exp ");
+    assert_stacking_refusal(exp(&mut dense, &mut context, &hermitian), "exp ");
+    assert_stacking_refusal(
+        exp_pade13_direct_into_dyn(&mut dense, &general.dynamic()),
+        "exp ",
+    );
+
+    // The lazy adjoint is a noncanonical layout, so these reach the packed
+    // matricization branches; the adjoint of a mis-stacked block stays
+    // mis-stacked.
+    let general_adjoint = general_bound.space().adjoint_view().unwrap();
+    let general_adjoint =
+        BoundDynamicTensorRef::try_new(&general_adjoint, general_bound.data()).unwrap();
+    let hermitian_adjoint = hermitian_bound.space().adjoint_view().unwrap();
+    let hermitian_adjoint =
+        BoundDynamicTensorRef::try_new(&hermitian_adjoint, hermitian_bound.data()).unwrap();
+    assert_stacking_refusal(eig_vals_dyn(&mut dense, &general_adjoint), "eig_vals ");
+    assert_stacking_refusal(eig_full_dyn(&mut dense, &general_adjoint), "eig_full ");
+    assert_stacking_refusal(eigh_vals_dyn(&mut dense, &hermitian_adjoint), "eigh_vals ");
+    assert_stacking_refusal(eigh_full_dyn(&mut dense, &hermitian_adjoint), "eigh_full ");
+    assert_stacking_refusal(exp_dyn(&mut dense, &mut context, &general_adjoint), "exp ");
+}
+
+#[test]
+fn multiplicity_free_eigen_ops_refuse_mis_stacked_z2_endomorphisms() {
+    // What: every multiplicity-free spectral op refuses a tiling whose row and
+    // column tree stackings differ, instead of returning the spectrum (or the
+    // function) of a column-permuted block.
+    assert_multiplicity_free_eigen_ops_refuse_mis_stacking(
+        Z2FusionRule,
+        &[SectorId::new(0), SectorId::new(1)],
+    );
+}
+
+#[test]
+fn multiplicity_free_eigen_ops_refuse_mis_stacked_u1_endomorphisms() {
+    assert_multiplicity_free_eigen_ops_refuse_mis_stacking(
+        U1FusionRule,
+        &[-1, 0, 1].map(|charge| U1Irrep::new(charge).sector_id()),
+    );
+}
+
+#[test]
+fn multiplicity_free_eigen_ops_refuse_mis_stacked_su2_endomorphisms() {
+    assert_multiplicity_free_eigen_ops_refuse_mis_stacking(
+        SU2FusionRule,
+        &[0, 1].map(|twice| SU2Irrep::from_twice_spin(twice).sector_id()),
+    );
+}
+
+#[test]
+fn eigh_refuses_a_block_that_stays_hermitian_after_the_column_swap() {
+    // What: canonical sector blocks [[2,1],[1,2]] (spectrum {3, 1}) stored
+    // with reversed columns read as [[1,2],[2,1]], which is Hermitian with
+    // spectrum {3, -1}. The Hermitian preflight cannot catch it; only the
+    // stacking guard does.
+    let rule = Z2FusionRule;
+    let leg = || SectorLeg::new([(SectorId::new(0), 1), (SectorId::new(1), 1)], false);
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg(), leg()]),
+        FusionProductSpace::new([leg(), leg()]),
+    );
+    let key_count = homspace.fusion_tree_keys(&rule).len();
+    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+        TensorMapSpace::<2, 2>::from_dims([2, 2], [2, 2]).unwrap(),
+        homspace,
+        &rule,
+        vec![vec![1; 4]; key_count],
+    )
+    .unwrap();
+    let canonical =
+        TensorMap::<f64, 2, 2>::from_block_fn_with_fusion_space(space, 0.0, |key, _| {
+            let BlockKey::FusionTree(tree) = key else {
+                unreachable!("fusion-tree blocks")
+            };
+            if tree.codomain_tree() == tree.domain_tree() {
+                2.0
+            } else {
+                1.0
+            }
+        })
+        .unwrap();
+    let swapped = mis_stacked_endomorphism_copy(&rule, &canonical);
+    let provider = Arc::new(rule);
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+
+    let reference = eigh_vals(
+        &mut dense,
+        &bound_tensor_ref!(Arc::clone(&provider), &canonical),
+    )
+    .unwrap();
+    assert_eq!(reference.len(), 2);
+    for spectrum in &reference {
+        assert_eq!(spectrum.values.len(), 2);
+        assert!((spectrum.values[0] - 3.0).abs() < 1e-12, "{reference:?}");
+        assert!((spectrum.values[1] - 1.0).abs() < 1e-12, "{reference:?}");
+    }
+    let swapped = bound_tensor(provider, &swapped);
+    assert_stacking_refusal(eigh_vals(&mut dense, &swapped.as_ref()), "eigh_vals ");
+    assert_stacking_refusal(eigh_full(&mut dense, &swapped.as_ref()), "eigh_full ");
+}
+
+#[test]
+fn multiplicity_free_eigen_ops_accept_consistently_reordered_tree_stacking() {
+    // What: the guard is stacking identity, not canonical order — reversing
+    // rows and columns together is the same operator in a permuted basis and
+    // keeps the facade spectra.
+    let rule = U1FusionRule;
+    let sectors = [-1, 0, 1].map(|charge| U1Irrep::new(charge).sector_id());
+    let provider = Arc::new(rule);
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    let general = tsvd_test_tensor(&rule, &sectors);
+    let hermitian = hermitian_test_tensor(&rule, &sectors);
+    let reordered_general = reversed_coupled_tree_basis_copy(&rule, &general);
+    let reordered_hermitian = reversed_coupled_tree_basis_copy(&rule, &hermitian);
+
+    let eig = |dense: &mut tenet_dense::DefaultDenseExecutor, tensor| {
+        eig_vals(dense, &bound_tensor_ref!(Arc::clone(&provider), tensor)).unwrap()
+    };
+    let eigh = |dense: &mut tenet_dense::DefaultDenseExecutor, tensor| {
+        eigh_vals(dense, &bound_tensor_ref!(Arc::clone(&provider), tensor)).unwrap()
+    };
+    for (left, right) in eig(&mut dense, &general)
+        .iter()
+        .zip(&eig(&mut dense, &reordered_general))
+    {
+        assert_eq!(left.sector, right.sector);
+        for (a, b) in left.values.iter().zip(&right.values) {
+            assert!((a - b).norm() <= 1e-10 * a.norm().max(1.0), "{a} vs {b}");
+        }
+    }
+    for (left, right) in eigh(&mut dense, &hermitian)
+        .iter()
+        .zip(&eigh(&mut dense, &reordered_hermitian))
+    {
+        assert_eq!(left.sector, right.sector);
+        for (a, b) in left.values.iter().zip(&right.values) {
+            assert!((a - b).abs() <= 1e-10 * a.abs().max(1.0), "{a} vs {b}");
+        }
+    }
+    eigh_full(
+        &mut dense,
+        &bound_tensor_ref!(Arc::clone(&provider), &reordered_hermitian),
+    )
+    .unwrap();
+    eig_full(
+        &mut dense,
+        &bound_tensor_ref!(Arc::clone(&provider), &reordered_general),
+    )
+    .unwrap();
+}

@@ -12353,6 +12353,10 @@ where
                 "CUDA EIGH source contains a non-square coupled-sector region",
             ));
         }
+        tenet_matrixalgebra::validate_endomorphism_region_stacking(
+            &source_regions,
+            "eigh_full requires identical endomorphism row/column fusion-tree stacking",
+        )?;
 
         {
             // Preflight only: the ordinal is immutable, so this placement
@@ -22062,6 +22066,107 @@ mod representation_gates {
                 if matches!(
                     error.as_ref(),
                     tenet_tensors::OperationError::UnsupportedTensorContractScope { .. }
+                )
+        ));
+    }
+
+    /// Z2 endomorphism whose canonical sector blocks are `[[2,1],[1,2]]`
+    /// (spectrum {3, 1}), stored with rows stacked by ascending codomain tree
+    /// and columns by descending domain tree, so each block reads
+    /// `[[1,2],[2,1]]`: still Hermitian, but with spectrum {3, -1}.
+    fn mis_stacked_hermitian_z2(runtime: &Runtime) -> TensorMap<Z2FusionRule, f64> {
+        let rule = Z2FusionRule;
+        let leg = || {
+            SectorLeg::new(
+                [
+                    (Z2Irrep::new(0).sector_id(), 1),
+                    (Z2Irrep::new(1).sector_id(), 1),
+                ],
+                false,
+            )
+        };
+        let homspace = FusionTreeHomSpace::new(
+            FusionProductSpace::new([leg(), leg()]),
+            FusionProductSpace::new([leg(), leg()]),
+        );
+        let mut blocks: Vec<(FusionTreePairKey, Vec<usize>)> = homspace
+            .fusion_tree_keys(&rule)
+            .iter()
+            .map(|key| (key.clone(), vec![1; 4]))
+            .collect();
+        blocks.sort_by(|(a, _), (b, _)| {
+            a.codomain_tree()
+                .cmp(b.codomain_tree())
+                .then(b.domain_tree().cmp(a.domain_tree()))
+        });
+        let structure =
+            BlockStructure::coupled_sector_matrix_with_keys(&rule, 2, 4, blocks).unwrap();
+        let regions = structure.coupled_sector_regions(2).unwrap().unwrap();
+        assert!(regions
+            .iter()
+            .all(|region| region.row_trees() != region.col_trees()));
+        let space = tenet_core::FusionTensorMapSpace::new_unbound(
+            tenet_core::TensorMapSpace::<2, 2>::from_dims([2, 2], [2, 2]).unwrap(),
+            homspace,
+            structure,
+        )
+        .unwrap()
+        .try_bind_rule(&rule)
+        .unwrap();
+        let core = tenet_core::TensorMap::<f64, 2, 2>::from_block_fn_with_fusion_space(
+            space,
+            0.0,
+            |key, _| {
+                let BlockKey::FusionTree(tree) = key else {
+                    unreachable!("fusion-tree blocks")
+                };
+                if tree.codomain_tree() == tree.domain_tree() {
+                    2.0
+                } else {
+                    1.0
+                }
+            },
+        )
+        .unwrap();
+        let space = BoundDynamicFusionMapSpace::bind_multiplicity_free(
+            tenet_tensors::DynamicFusionMapSpace::from_typed(core.fusion_space().unwrap()),
+            Arc::new(rule),
+        )
+        .unwrap();
+        TensorMap {
+            runtime: runtime.clone(),
+            repr: owned_repr(TypedTensorBody {
+                space,
+                data: Arc::new(TypedData::Dense(core.data().to_vec())),
+                dense_cache: std::sync::OnceLock::new(),
+            }),
+        }
+    }
+
+    #[test]
+    fn host_eigh_refuses_a_mis_stacked_block_that_stays_hermitian() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let tensor = mis_stacked_hermitian_z2(&runtime);
+        let error = format!("{:?}", tensor.eigh_full().err());
+        assert!(error.contains("eigh_full requires identical"), "{error}");
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    #[ignore = "requires a real CUDA device"]
+    fn typed_cuda_eigh_refuses_a_mis_stacked_block_that_stays_hermitian() {
+        // What: the device path reads the same tiling as the host and must
+        // refuse it too, instead of returning the {3, -1} spectrum of the
+        // column-permuted block.
+        let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+        let device = mis_stacked_hermitian_z2(&runtime).to_cuda().unwrap();
+        assert!(matches!(
+            device.eigh_full(),
+            Err(Error::Operation(error))
+                if matches!(
+                    error.as_ref(),
+                    tenet_tensors::OperationError::UnsupportedTensorContractScope { message }
+                        if message.starts_with("eigh_full requires identical")
                 )
         ));
     }
