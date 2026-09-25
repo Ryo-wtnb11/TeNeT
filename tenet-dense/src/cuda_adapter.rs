@@ -20,6 +20,9 @@ use crate::cuda_hermitian::{
     power_of_two_normalizer, scaled_hermitian_residual_accepts, HERMITIAN_TOLERANCE_EPSILONS,
 };
 use crate::cuda_region::{validate_destination_layout, validate_region, CudaRegion};
+use crate::plan_ledger::{
+    plan_cache_entries_for, PlanEntryLedger, DEFAULT_PLAN_CACHE_BUDGET_BYTES,
+};
 use crate::tensor::dense_dtype_from_tenferro;
 
 mod cuda_scalar_sealed {
@@ -230,15 +233,23 @@ static COPY_CALLS: AtomicU64 = AtomicU64::new(0);
 
 /// A snapshot of the backend's cuTENSOR contraction plan cache.
 ///
-/// Mirrors Tenferro's own cache statistics; it exists so TeNeT callers never
-/// name a tenferro type. Observability only.
+/// Mirrors Tenferro's own cache statistics, plus this context's plan-entry
+/// reservation ledger; it exists so TeNeT callers never name a tenferro type.
+/// Observability only.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct CudaPlanCacheStats {
     pub entries: usize,
     pub retained_bytes: usize,
     pub hits: u64,
     pub misses: u64,
     pub evictions: u64,
+    /// Plan entries currently reserved through
+    /// [`CudaDenseContext::reserve_plan_entries`], over every consumer.
+    pub reserved_entries: usize,
+    /// Entries requested but not granted because the reservation budget was
+    /// exhausted, summed over the context's lifetime.
+    pub reservation_shortfall: u64,
 }
 
 /// A snapshot of the process-wide CUDA boundary observation counters.
@@ -410,6 +421,7 @@ pub struct CudaDenseContext {
     device: usize,
     identity: u64,
     operands: [ScalarOperands; SCALAR_OPERAND_SLOTS],
+    plan_ledger: PlanEntryLedger,
 }
 
 /// Process-wide context counter. A monotonic ticket rather than the context's
@@ -486,11 +498,19 @@ impl CudaDenseContext {
             .map_err(|_| cuda_error("cuda_context", "device ordinal exceeds u32"))?;
         let backend = CudaBackend::new(CudaDeviceId::from_ordinal(ordinal))
             .map_err(|err| cuda_error("cuda_context", err))?;
+        let base = backend
+            .cutensor_plan_cache_max_entries()
+            .map_err(|err| cuda_error("cuda_plan_cache", err))?
+            .get();
         Ok(Self {
             backend,
             device,
             identity: NEXT_CONTEXT_IDENTITY.fetch_add(1, Ordering::Relaxed),
             operands: std::array::from_fn(|_| ScalarOperands::default()),
+            plan_ledger: PlanEntryLedger::new(
+                base,
+                plan_cache_entries_for(usize::MAX, DEFAULT_PLAN_CACHE_BUDGET_BYTES),
+            ),
         })
     }
 
@@ -710,6 +730,8 @@ impl CudaDenseContext {
             hits: stats.hits,
             misses: stats.misses,
             evictions: stats.evictions,
+            reserved_entries: self.plan_ledger.reserved(),
+            reservation_shortfall: self.plan_ledger.shortfall(),
         })
     }
 
@@ -721,15 +743,42 @@ impl CudaDenseContext {
             .map_err(|err| cuda_error("cuda_plan_cache", err))
     }
 
-    /// Raises the cuTENSOR contraction plan entry bound to `entries`.
+    /// Reserves `delta` more plan entries for one consumer and returns how
+    /// many were granted.
     ///
-    /// Monotonic by construction: a request below the current bound is
-    /// ignored rather than shrinking a cache another caller sized. A caller
-    /// that knows how many distinct operand signatures it is about to submit
-    /// — a compiled transform structure knows exactly — uses this so a replay
-    /// larger than the default bound does not evict the plan it will need
-    /// again on the next block.
-    pub fn raise_plan_cache_max_entries(&self, entries: usize) -> Result<(), DenseError> {
+    /// A consumer that knows how many distinct operand signatures it will
+    /// submit again — a compiled transform structure knows exactly — reserves
+    /// them so a replay larger than the default bound does not evict the plan
+    /// it needs on the next block. Reservations of independent consumers add:
+    /// the cap becomes at least the bound found at construction plus every
+    /// live reservation. The total is bounded by
+    /// [`DEFAULT_PLAN_CACHE_BUDGET_BYTES`]; a request beyond it is truncated,
+    /// and the truncation is reported by
+    /// [`CudaPlanCacheStats::reservation_shortfall`]. The consumer owns what
+    /// it was granted and returns it through [`Self::release_plan_entries`].
+    pub fn reserve_plan_entries(&mut self, delta: usize) -> Result<usize, DenseError> {
+        let granted = self.plan_ledger.grant(delta);
+        self.raise_plan_cache_max_entries(self.plan_ledger.cap_with(granted))?;
+        self.plan_ledger.commit(delta, granted);
+        Ok(granted)
+    }
+
+    /// Returns `entries` a consumer reserved. The cap is not lowered: the
+    /// plans stay cached, and the next reservation reuses the headroom rather
+    /// than raising the cap again. Infallible so a `Drop` can call it.
+    pub fn release_plan_entries(&mut self, entries: usize) {
+        self.plan_ledger.release(entries);
+    }
+
+    /// Plan entries currently reserved over every consumer.
+    pub fn reserved_plan_entries(&self) -> usize {
+        self.plan_ledger.reserved()
+    }
+
+    /// Raises the cuTENSOR contraction plan entry bound to `entries`, never
+    /// lowering it. Private: a consumer raising to its own absolute need would
+    /// silently absorb another consumer's reservation.
+    fn raise_plan_cache_max_entries(&self, entries: usize) -> Result<(), DenseError> {
         let Some(entries) = NonZeroUsize::new(entries) else {
             return Ok(());
         };

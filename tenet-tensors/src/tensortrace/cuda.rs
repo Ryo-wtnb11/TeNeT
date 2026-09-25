@@ -48,15 +48,15 @@ use crate::{OperationError, RecouplingCoefficientAction};
 /// before the first submission, so a rejected call touches neither buffer.
 /// The ones and scaled templates are reserved to the largest traced extent
 /// first, so a replay uploads at most once each and a warm one never; each
-/// distinct non-unit `α′` costs one device refill of the scaled template. The cuTENSOR plan bound
-/// is raised by the number of distinct term signatures under the transform
-/// executor's plan-cache budget, so a warm replay of up to that budget
-/// rebuilds no plan.
+/// distinct non-unit `α′` costs one device refill of the scaled template. The
+/// transform executor reserves plan entries for the distinct term signatures
+/// (a high-water mark, under its plan-cache budget), so a warm replay of up
+/// to that budget rebuilds no plan.
 #[doc(hidden)]
 #[allow(clippy::too_many_arguments)]
 pub fn tensortrace_fusion_structure_accumulate_on_cuda<C, D>(
     ctx: &mut CudaDenseContext,
-    transforms: &CudaTreeTransformExecutor,
+    transforms: &mut CudaTreeTransformExecutor,
     structure: &TensorTraceFusionStructure<C>,
     dst_structure: &Arc<BlockStructure>,
     dst: &mut CudaStorage<D>,
@@ -146,7 +146,7 @@ where
         .collect::<HashSet<_>>()
         .len()
         + fills;
-    transforms.raise_plan_cache_for_additional(ctx, signatures)?;
+    transforms.reserve_plan_entries_for_additional(ctx, signatures)?;
     ctx.reserve_ones_template::<D>(largest_unit)
         .map_err(OperationError::Dense)?;
     ctx.reserve_scaled_template::<D>(largest_scaled)

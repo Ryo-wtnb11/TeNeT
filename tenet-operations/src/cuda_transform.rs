@@ -28,15 +28,17 @@ use core::any::TypeId;
 use std::sync::Arc;
 
 use tenet_core::{BlockStructure, Placement, TensorStorage};
+pub use tenet_dense::DEFAULT_PLAN_CACHE_BUDGET_BYTES;
 use tenet_dense::{
-    cuda_matmul_region_into, cuda_region_axpby, cuda_region_zero, CudaDenseContext,
-    CudaDenseStorage, CudaRegion, CudaRegionBeta, CudaRegionCoefficient, CudaScalar, DenseError,
+    cuda_matmul_region_into, cuda_region_axpby, cuda_region_zero, plan_cache_entries_for,
+    CudaDenseContext, CudaDenseStorage, CudaRegion, CudaRegionBeta, CudaRegionCoefficient,
+    CudaScalar, DenseError,
 };
 
 use crate::cuda::CudaStorage;
 use crate::cuda_transform_plan::{
-    compile_device_plan, plan_cache_entries_for, DeviceMoveSpec, DeviceTransformPlan,
-    StructureCache, StructureKey, DEFAULT_STRUCTURE_CACHE_ENTRIES,
+    compile_device_plan, DeviceMoveSpec, DeviceTransformPlan, StructureCache, StructureKey,
+    DEFAULT_STRUCTURE_CACHE_ENTRIES,
 };
 use crate::opaque_admission::{
     validate_stage_a, validate_stage_c, AllocationIdentity, CoefficientReadiness, ContextIdentity,
@@ -166,6 +168,25 @@ pub struct CudaTreeTransformExecutor {
     structure_entries: usize,
     plan_cache_budget_bytes: usize,
     required_plan_entries: usize,
+    /// Plan entries this executor holds on each context it has prepared or
+    /// reserved on, what it owes back to that context's ledger.
+    plan_reservations: Vec<PlanReservation>,
+}
+
+/// One context's share of an executor's plan-entry reservation.
+///
+/// Kept per context because the prepared-structure cache is keyed by context
+/// and one executor may serve several: a reservation can only be moved on the
+/// context that granted it, and a structure evicted by another context's
+/// insert is released at this context's next refresh or clear.
+#[derive(Debug)]
+struct PlanReservation {
+    context: u64,
+    /// Granted for the structures prepared on this context.
+    structures: usize,
+    /// High-water reservation for submissions through this context that have
+    /// no prepared structure (the device trace).
+    additional: usize,
 }
 
 /// Default device budget for uploaded coefficient vectors: 16 MiB, i.e. two
@@ -173,14 +194,6 @@ pub struct CudaTreeTransformExecutor {
 /// budget is still prepared; the budget bounds what is *retained* for other
 /// structures, and evicting the structure under replay would only re-upload it.
 pub const DEFAULT_COEFFICIENT_BUDGET_BYTES: usize = 16 * 1024 * 1024;
-
-/// Default ceiling on the cuTENSOR plan entries this executor asks for: 8 MiB
-/// at an estimated 14 KB per plan, about 585 distinct operand signatures.
-/// Tenferro's own default bound is 64, which a transform with more distinct
-/// block layouts than that would thrash. The per-plan figure is an estimate of
-/// a Tenferro internal, so it bounds only how far this executor is willing to
-/// raise the bound.
-pub const DEFAULT_PLAN_CACHE_BUDGET_BYTES: usize = 8 * 1024 * 1024;
 
 impl Default for CudaTreeTransformExecutor {
     fn default() -> Self {
@@ -224,6 +237,7 @@ impl CudaTreeTransformExecutor {
             structure_entries,
             plan_cache_budget_bytes,
             required_plan_entries: 0,
+            plan_reservations: Vec::new(),
         }
     }
 
@@ -273,30 +287,68 @@ impl CudaTreeTransformExecutor {
         self.required_plan_entries
     }
 
-    /// Raises the backend's plan entry bound to what the prepared structures
-    /// need plus `signatures` more, under this executor's plan-cache budget:
-    /// the same rule [`Self::required_plan_entries`] is raised by, for a
-    /// caller that submits through the same context without a prepared
-    /// structure (the device trace). Monotonic like every raise.
-    pub fn raise_plan_cache_for_additional(
-        &self,
-        ctx: &CudaDenseContext,
+    /// Reserves plan entries for `signatures` distinct operand signatures a
+    /// caller submits through `ctx` without a prepared structure (the device
+    /// trace), under this executor's plan-cache budget.
+    ///
+    /// The reservation is a high-water mark: only growth over the largest
+    /// count reserved before is added, so repeated calls do not accumulate.
+    /// It is returned by [`Self::clear`].
+    pub fn reserve_plan_entries_for_additional(
+        &mut self,
+        ctx: &mut CudaDenseContext,
         signatures: usize,
     ) -> Result<(), OperationError> {
-        let entries = plan_cache_entries_for(
-            self.required_plan_entries.saturating_add(signatures),
-            self.plan_cache_budget_bytes,
-        );
-        ctx.raise_plan_cache_max_entries(entries)
-            .map_err(OperationError::Dense)
+        let target = plan_cache_entries_for(signatures, self.plan_cache_budget_bytes);
+        let reservation = self.plan_reservation(ctx.identity());
+        if target > reservation.additional {
+            let granted = ctx
+                .reserve_plan_entries(target - reservation.additional)
+                .map_err(OperationError::Dense)?;
+            reservation.additional += granted;
+        }
+        Ok(())
     }
 
-    /// Drops every prepared structure. The next replay re-prepares whatever it
+    /// Drops every prepared structure and returns every plan entry this
+    /// executor reserved on `ctx`. The next replay re-prepares whatever it
     /// needs, so this is a memory decision, never a correctness one.
-    pub fn clear(&mut self) {
+    ///
+    /// Reservations on other contexts stay recorded, since only their own
+    /// context can take them back; their structures are gone, so each is
+    /// released at that context's next refresh or clear.
+    pub fn clear(&mut self, ctx: &mut CudaDenseContext) {
         self.prepared = StructureCache::new(self.coefficient_budget_bytes, self.structure_entries);
         self.workspaces.clear();
         self.required_plan_entries = 0;
+        let context = ctx.identity();
+        if let Some(index) = self
+            .plan_reservations
+            .iter()
+            .position(|reservation| reservation.context == context)
+        {
+            let reservation = self.plan_reservations.swap_remove(index);
+            ctx.release_plan_entries(reservation.structures + reservation.additional);
+        }
+    }
+
+    fn plan_reservation(&mut self, context: u64) -> &mut PlanReservation {
+        let index = match self
+            .plan_reservations
+            .iter()
+            .position(|reservation| reservation.context == context)
+        {
+            Some(index) => index,
+            None => {
+                self.plan_reservations.push(PlanReservation {
+                    context,
+                    structures: 0,
+                    additional: 0,
+                });
+                self.plan_reservations.len() - 1
+            }
+        };
+        &mut self.plan_reservations[index]
     }
 
     /// Replays `structure` from `src` into `dst` on `ctx`'s device.
@@ -815,21 +867,37 @@ impl CudaTreeTransformExecutor {
         Ok(())
     }
 
-    /// Raises the backend's cuTENSOR plan entry bound to what every prepared
-    /// structure needs together, under this executor's byte budget.
+    /// Moves this executor's plan-entry reservation on `ctx` to what the
+    /// structures prepared on `ctx` need together, under this executor's byte
+    /// budget.
     ///
     /// Counting is structural — the distinct baked fused signatures of a
     /// structure, computed once on the host when it is prepared — not a timing
-    /// heuristic, and the raise is monotonic, so a cap another caller set is
-    /// never lowered.
-    fn refresh_plan_cache(&mut self, ctx: &CudaDenseContext) -> Result<(), OperationError> {
-        let required = self.prepared.values().fold(0usize, |total, prepared| {
-            total.saturating_add(prepared.plan_signatures)
-        });
-        self.required_plan_entries = required;
-        let entries = plan_cache_entries_for(required, self.plan_cache_budget_bytes);
-        ctx.raise_plan_cache_max_entries(entries)
-            .map_err(OperationError::Dense)
+    /// heuristic. The change is a signed delta against what the executor holds
+    /// on `ctx`, so a total that falls (an insert evicted a structure) is
+    /// released, and a shortfall left by an exhausted budget is requested again
+    /// next time.
+    fn refresh_plan_cache(&mut self, ctx: &mut CudaDenseContext) -> Result<(), OperationError> {
+        let signatures = |values: &mut dyn Iterator<Item = &PreparedStructure>| {
+            values.fold(0usize, |total, prepared| {
+                total.saturating_add(prepared.plan_signatures)
+            })
+        };
+        self.required_plan_entries = signatures(&mut self.prepared.values());
+        let context = ctx.identity();
+        let required = signatures(&mut self.prepared.values_on(context));
+        let target = plan_cache_entries_for(required, self.plan_cache_budget_bytes);
+        let reservation = self.plan_reservation(context);
+        if target > reservation.structures {
+            let granted = ctx
+                .reserve_plan_entries(target - reservation.structures)
+                .map_err(OperationError::Dense)?;
+            reservation.structures += granted;
+        } else {
+            ctx.release_plan_entries(reservation.structures - target);
+            reservation.structures = target;
+        }
+        Ok(())
     }
 }
 
