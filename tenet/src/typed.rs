@@ -288,6 +288,8 @@ use crate::RuntimeIdentity;
 mod batched;
 pub use batched::StructureSignature;
 
+#[cfg(test)]
+mod contract_stacking_tests;
 mod serialization;
 pub use serialization::{
     DecodeError, DecodeLimits, EncodeError, PersistedScalar, TypedPersistenceCodec,

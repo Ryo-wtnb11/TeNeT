@@ -8759,3 +8759,99 @@ fn nested_product_lowered_dynamic_execution_matches_independent_encoded_oracles(
         }
     }
 }
+
+#[test]
+fn storage_direct_contraction_refuses_mis_stacked_trees_before_gemm() {
+    // What (#1517): an operand whose coupled-sector columns are stacked in a
+    // different tree order than the partner's rows has no positional GEMM;
+    // the storage-direct seam must refuse it, not multiply mismatched trees.
+    struct NoGemm;
+
+    impl tenet_operations::fusion_replay::StorageGemm<f64, Vec<f64>, Vec<f64>, Vec<f64>> for NoGemm {
+        fn matmul_range_into(
+            &mut self,
+            _dst: &mut Vec<f64>,
+            _dst_offset: usize,
+            _lhs: &Vec<f64>,
+            _lhs_offset: usize,
+            _rhs: &Vec<f64>,
+            _rhs_offset: usize,
+            _rows: usize,
+            _contracted: usize,
+            _cols: usize,
+        ) -> Result<(), OperationError> {
+            panic!("mis-stacked storage must be refused before GEMM")
+        }
+    }
+
+    let _guard = crate::test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let rule = Z2FusionRule;
+    let leg = || SectorLeg::new([(SectorId::new(0), 1), (SectorId::new(1), 1)], false);
+    let homspace = || {
+        FusionTreeHomSpace::new(
+            FusionProductSpace::new([leg(), leg()]),
+            FusionProductSpace::new([leg(), leg()]),
+        )
+    };
+    let dense = || TensorMapSpace::<2, 2>::from_dims([2, 2], [2, 2]).unwrap();
+    let keys = homspace().fusion_tree_keys(&rule);
+    let canonical = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+        dense(),
+        homspace(),
+        &rule,
+        vec![vec![1; 4]; keys.len()],
+    )
+    .unwrap();
+    let mut blocks = keys
+        .iter()
+        .map(|key| (key.clone(), vec![1; 4]))
+        .collect::<Vec<_>>();
+    blocks.sort_by(|(a, _), (b, _)| {
+        a.codomain_tree()
+            .cmp(b.codomain_tree())
+            .then(b.domain_tree().cmp(a.domain_tree()))
+    });
+    let mis_stacked = FusionTensorMapSpace::new_unbound(
+        dense(),
+        homspace(),
+        BlockStructure::coupled_sector_matrix_with_keys(&rule, 2, 4, blocks).unwrap(),
+    )
+    .unwrap()
+    .try_bind_rule(&rule)
+    .unwrap();
+    let provider = Arc::new(rule);
+    let bind = |space: &FusionTensorMapSpace<2, 2>| {
+        BoundDynamicFusionMapSpace::bind_multiplicity_free(
+            DynamicFusionMapSpace::from_typed(space),
+            Arc::clone(&provider),
+        )
+        .unwrap()
+    };
+    let (canonical, mis_stacked) = (bind(&canonical), bind(&mis_stacked));
+    let len = canonical.space().required_len().unwrap();
+    let values = (0..len).map(|index| index as f64 + 1.0).collect::<Vec<_>>();
+    reset_global_operation_caches();
+    let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
+    for (lhs, rhs) in [(&mis_stacked, &canonical), (&canonical, &mis_stacked)] {
+        let mut dst = vec![0.0; len];
+        let result = context.tensorcontract_fusion_dyn_direct_on_storage(
+            &mut NoGemm,
+            &canonical,
+            &mut dst,
+            lhs,
+            &values,
+            rhs,
+            &values,
+            TensorContractSpec::new(&[2, 3], &[0, 1], crate::OutputAxisOrder::identity()),
+        );
+        assert!(
+            matches!(
+                result,
+                Err(OperationError::UnsupportedTensorContractScope { .. })
+            ),
+            "{result:?}"
+        );
+    }
+}
