@@ -1416,6 +1416,8 @@ fn compact_lq_canonical_layout_uses_only_bounded_adjoint_copies() {
         probe.final_adjoint_copy_bytes,
         (left.data().len() + right.data().len()) * std::mem::size_of::<f64>()
     );
+    // Both outputs are appended in storage order, never zero-filled first.
+    assert_eq!(probe.output_prefill_bytes, 0);
 }
 
 #[derive(Clone, Copy)]

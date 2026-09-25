@@ -1449,6 +1449,7 @@ pub(crate) struct CompactLqCopyProbe {
     pub adjoint_scratch_fill_bytes: usize,
     pub final_adjoint_copy_calls: usize,
     pub final_adjoint_copy_bytes: usize,
+    pub output_prefill_bytes: usize,
 }
 
 #[cfg(test)]
@@ -1612,6 +1613,15 @@ fn record_compact_lq_adjoint_fill<D>(elements: usize) {
         let mut current = probe.get();
         current.adjoint_scratch_fill_calls += 1;
         current.adjoint_scratch_fill_bytes += elements * std::mem::size_of::<D>();
+        probe.set(current);
+    });
+}
+
+#[cfg(test)]
+fn record_compact_lq_output_prefill<D>(elements: usize) {
+    COMPACT_LQ_COPY_PROBE.with(|probe| {
+        let mut current = probe.get();
+        current.output_prefill_bytes += elements * std::mem::size_of::<D>();
         probe.set(current);
     });
 }
@@ -5865,8 +5875,18 @@ where
     debug_assert_eq!(plan.source_layout, input.space().validated_layout());
     let left_space = input.space().rebind_validated(&plan.left_layout)?;
     let right_space = input.space().rebind_validated(&plan.right_layout)?;
-    let mut left_data = vec![D::zero(); plan.left_layout.required_len()?];
-    let mut right_data = vec![D::zero(); plan.right_layout.required_len()?];
+    let left_len = plan.left_layout.required_len()?;
+    let right_len = plan.right_layout.required_len()?;
+    // Every output element is written once by the final adjoints. When the
+    // nonzero routes visit both factor regions in storage order, append them
+    // to empty buffers instead of zero-filling first; otherwise overwrite a
+    // zeroed buffer region by region.
+    let append = lq_routes_append_in_storage_order(plan, left_len, right_len);
+    let (mut left_data, mut right_data) = if append {
+        (Vec::with_capacity(left_len), Vec::with_capacity(right_len))
+    } else {
+        (vec![D::zero(); left_len], vec![D::zero(); right_len])
+    };
 
     let max_adjoint_len = plan
         .routes
@@ -5874,7 +5894,7 @@ where
         .map(|route| plan.source_regions[route.source_region].range().len())
         .max()
         .unwrap_or(0);
-    let mut adjoint_scratch = vec![D::zero(); max_adjoint_len];
+    let mut adjoint_scratch = Vec::with_capacity(max_adjoint_len);
     #[cfg(test)]
     record_compact_lq_scratch::<D>(max_adjoint_len);
 
@@ -5890,13 +5910,18 @@ where
             let right =
                 &plan.right_regions[route.right_region.expect("nonzero route has right region")];
             let source_data = &data[source.range()];
-            let adjoint = &mut adjoint_scratch[..source_data.len()];
-            adjoint_col_major_into(source_data, source.rows(), source.cols(), adjoint);
+            adjoint_scratch.clear();
+            extend_adjoint_col_major(
+                &mut adjoint_scratch,
+                source_data,
+                source.rows(),
+                source.cols(),
+            );
             #[cfg(test)]
             record_compact_lq_adjoint_fill::<D>(source_data.len());
 
             let (mut q_prime, mut r_prime) =
-                compact_qr_owned(dense, adjoint, source.cols(), source.rows())?;
+                compact_qr_owned(dense, &adjoint_scratch, source.cols(), source.rows())?;
             positive_diagonal_gauge_strided(
                 &mut q_prime,
                 source.cols(),
@@ -5906,25 +5931,32 @@ where
                 route.rank,
                 source.rows(),
             );
-            adjoint_col_major_into(
-                &r_prime,
-                route.rank,
-                source.rows(),
-                &mut left_data[left.range()],
-            );
+            if append {
+                extend_adjoint_col_major(&mut left_data, &r_prime, route.rank, source.rows());
+                extend_adjoint_col_major(&mut right_data, &q_prime, source.cols(), route.rank);
+            } else {
+                adjoint_col_major_into(
+                    &r_prime,
+                    route.rank,
+                    source.rows(),
+                    &mut left_data[left.range()],
+                );
+                adjoint_col_major_into(
+                    &q_prime,
+                    source.cols(),
+                    route.rank,
+                    &mut right_data[right.range()],
+                );
+            }
             #[cfg(test)]
             record_compact_lq_final_adjoint_copy::<D>(r_prime.len());
-            adjoint_col_major_into(
-                &q_prime,
-                source.cols(),
-                route.rank,
-                &mut right_data[right.range()],
-            );
             #[cfg(test)]
             record_compact_lq_final_adjoint_copy::<D>(q_prime.len());
         }
         Ok(())
     })?;
+    #[cfg(test)]
+    record_compact_lq_output_prefill::<D>(if append { 0 } else { left_len + right_len });
 
     let left = BoundDynFactor::from_bound(left_space, left_data, space.nout(), 1)?;
     let right = BoundDynFactor::from_bound(right_space, right_data, 1, space.nin())?;
@@ -5972,6 +6004,53 @@ where
     D: FactorScalar,
 {
     lq_compact(dense, input)
+}
+
+/// Whether the nonzero routes of `plan` reach the left and right factor
+/// regions contiguously from offset zero, in route order, and cover
+/// `left_len`/`right_len` exactly, so appending each route's factors in turn
+/// builds both outputs. Rank-zero routes own empty regions.
+fn lq_routes_append_in_storage_order(
+    plan: &CompactFactorPlan,
+    left_len: usize,
+    right_len: usize,
+) -> bool {
+    let (mut left_end, mut right_end) = (0usize, 0usize);
+    for route in &plan.routes {
+        let (Some(left), Some(right)) = (route.left_region, route.right_region) else {
+            continue;
+        };
+        let (left, right) = (
+            plan.left_regions[left].range(),
+            plan.right_regions[right].range(),
+        );
+        if left.start != left_end || right.start != right_end {
+            return false;
+        }
+        (left_end, right_end) = (left.end, right.end);
+    }
+    left_end == left_len && right_end == right_len
+}
+
+/// Appends the adjoint of the column-major `rows x cols` matrix `data` to
+/// `output` as a column-major `cols x rows` matrix.
+fn extend_adjoint_col_major<D: FactorScalar>(
+    output: &mut Vec<D>,
+    data: &[D],
+    rows: usize,
+    cols: usize,
+) {
+    debug_assert_eq!(data.len(), rows * cols);
+    output.reserve(data.len());
+    for row in 0..rows {
+        output.extend(
+            data[row..]
+                .iter()
+                .step_by(rows)
+                .take(cols)
+                .map(|&value| FactorScalar::adjoint(value)),
+        );
+    }
 }
 
 /// Transposes a column-major `rows x cols` matrix into column-major
@@ -7957,11 +8036,17 @@ fn project_hermitian_col_major<D: FactorScalar>(matrix: &mut [D], n: usize) {
     }
 }
 
+/// Writes `W = U Vh` into `w` and `P` into `p`, both column-major output
+/// regions (MatrixAlgebraKit `left_polar!`/`right_polar!` via SVD): the GEMMs
+/// target the destination and the `sqrt(S)` scaling is applied in place to the
+/// staged factor, which is not read again.
 fn checked_generic_polar_products<E, D>(
     dense: &mut E,
-    stage: &CompactSvdNumericalStage<D>,
+    stage: &mut CompactSvdNumericalStage<D>,
     direction: PolarDirection,
-) -> Result<(Vec<D>, Vec<D>), OperationError>
+    w: &mut [D],
+    p: &mut [D],
+) -> Result<(), OperationError>
 where
     E: DenseExecutor + ?Sized,
     D: FactorScalar,
@@ -7974,15 +8059,14 @@ where
         singular_values,
         vt,
     } = stage;
-    let mut w = vec![D::zero(); rows * cols];
+    let (rows, cols, rank) = (&*rows, &*cols, &*rank);
     let w_shape = [*rows, *cols];
     let w_strides = [1, *rows];
     let u_shape = [*rows, *rank];
     let u_strides = [1, *rows];
     let vt_shape = [*rank, *cols];
     let vt_strides = [1, *rank];
-    let w_view =
-        DenseViewMut::new(&mut w, &w_shape, &w_strides, 0).map_err(OperationError::Dense)?;
+    let w_view = DenseViewMut::new(w, &w_shape, &w_strides, 0).map_err(OperationError::Dense)?;
     let u_view = DenseView::new(u, &u_shape, &u_strides, 0).map_err(OperationError::Dense)?;
     let vt_view = DenseView::new(vt, &vt_shape, &vt_strides, 0).map_err(OperationError::Dense)?;
     dense
@@ -7998,10 +8082,9 @@ where
         PolarDirection::Left => *cols,
         PolarDirection::Right => *rows,
     };
-    let mut p = vec![D::zero(); p_order * p_order];
-    let mut x = match direction {
-        PolarDirection::Left => vt.clone(),
-        PolarDirection::Right => u.clone(),
+    let x = match direction {
+        PolarDirection::Left => vt,
+        PolarDirection::Right => u,
     };
     match direction {
         PolarDirection::Left => {
@@ -8023,17 +8106,15 @@ where
     }
     let p_shape = [p_order, p_order];
     let p_strides = [1, p_order];
-    let p_view =
-        DenseViewMut::new(&mut p, &p_shape, &p_strides, 0).map_err(OperationError::Dense)?;
+    let p_view = DenseViewMut::new(p, &p_shape, &p_strides, 0).map_err(OperationError::Dense)?;
     match direction {
         PolarDirection::Left => {
             let xh_shape = [*cols, *rank];
             let xh_strides = [*rank, 1];
             let x_shape = [*rank, *cols];
             let x_strides = [1, *rank];
-            let xh =
-                DenseView::new(&x, &xh_shape, &xh_strides, 0).map_err(OperationError::Dense)?;
-            let x = DenseView::new(&x, &x_shape, &x_strides, 0).map_err(OperationError::Dense)?;
+            let xh = DenseView::new(x, &xh_shape, &xh_strides, 0).map_err(OperationError::Dense)?;
+            let x = DenseView::new(x, &x_shape, &x_strides, 0).map_err(OperationError::Dense)?;
             dense
                 .dot_general_into(
                     D::dense_write(p_view),
@@ -8049,9 +8130,8 @@ where
             let xh_shape = [*rank, *rows];
             let xh_strides = [*rows, 1];
             let x_view =
-                DenseView::new(&x, &x_shape, &x_strides, 0).map_err(OperationError::Dense)?;
-            let xh =
-                DenseView::new(&x, &xh_shape, &xh_strides, 0).map_err(OperationError::Dense)?;
+                DenseView::new(x, &x_shape, &x_strides, 0).map_err(OperationError::Dense)?;
+            let xh = DenseView::new(x, &xh_shape, &xh_strides, 0).map_err(OperationError::Dense)?;
             dense
                 .dot_general_into(
                     D::dense_write(p_view),
@@ -8062,8 +8142,8 @@ where
                 .map_err(OperationError::Dense)?;
         }
     }
-    project_hermitian_col_major(&mut p, p_order);
-    Ok((w, p))
+    project_hermitian_col_major(p, p_order);
+    Ok(())
 }
 
 fn polar_dyn_checked_generic_reported<E, R, D>(
@@ -8146,12 +8226,18 @@ where
                 region.cols(),
             )?);
         }
+        // Why zeroed rather than uninitialized: the GEMM destinations are
+        // safe initialized views, and every region is then overwritten once.
         let mut w_data = vec![D::zero(); w_len];
         let mut p_data = vec![D::zero(); p_len];
-        for (route, stage) in routes.iter().zip(&stages) {
-            let (w, p) = checked_generic_polar_products(dense, stage, direction)?;
-            w_data[w_regions[route.w].range()].copy_from_slice(&w);
-            p_data[p_regions[route.p].range()].copy_from_slice(&p);
+        for (route, stage) in routes.iter().zip(&mut stages) {
+            checked_generic_polar_products(
+                dense,
+                stage,
+                direction,
+                &mut w_data[w_regions[route.w].range()],
+                &mut p_data[p_regions[route.p].range()],
+            )?;
         }
         Ok((w_data, p_data))
     })
