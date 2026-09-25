@@ -16,7 +16,9 @@ use tenferro_tensor::{
 };
 
 use super::{DenseBackend, DenseDType, DenseError, MatrixOp};
-use crate::cuda_hermitian::{scaled_hermitian_residual_accepts, HERMITIAN_TOLERANCE_EPSILONS};
+use crate::cuda_hermitian::{
+    power_of_two_normalizer, scaled_hermitian_residual_accepts, HERMITIAN_TOLERANCE_EPSILONS,
+};
 use crate::cuda_region::{validate_destination_layout, validate_region, CudaRegion};
 use crate::tensor::dense_dtype_from_tenferro;
 
@@ -112,14 +114,19 @@ pub trait CudaRealScalar: TenferroScalar + cuda_scalar_sealed::Sealed {
     /// every `f32` is an `f64`.
     fn widen(self) -> f64;
 
-    /// Narrows a host scalar to this lane, for a rank-0 device divisor. The
-    /// only values narrowed here are device reductions of this lane's own
-    /// data, so the value round-trips.
+    /// Narrows a host scalar to this lane, for a rank-0 device operand. The
+    /// only values narrowed here are powers of two inside this lane's range,
+    /// so the value round-trips.
     fn narrow(value: f64) -> Self;
+
+    /// This lane's `MAX_EXP`: its largest normal power of two is
+    /// `2^(MAX_EXP - 1)` and its smallest is `2^-(MAX_EXP - 2)`.
+    const MAX_EXP: i32;
 }
 
 impl CudaRealScalar for f32 {
     const EPSILON: f64 = f32::EPSILON as f64;
+    const MAX_EXP: i32 = f32::MAX_EXP;
 
     fn widen(self) -> f64 {
         f64::from(self)
@@ -132,6 +139,7 @@ impl CudaRealScalar for f32 {
 
 impl CudaRealScalar for f64 {
     const EPSILON: f64 = f64::EPSILON;
+    const MAX_EXP: i32 = f64::MAX_EXP;
 
     fn widen(self) -> f64 {
         self
@@ -1802,12 +1810,12 @@ fn download_scalar<R: CudaRealScalar>(
     Ok(values[0])
 }
 
-/// Uploads a rank-0 divisor in the payload's **real** lane.
+/// Uploads a rank-0 operand in the payload's **real** lane.
 ///
-/// The lane is not a symmetry: Tenferro rejects an `F64` rank-0 divisor
+/// The lane is not a symmetry: Tenferro rejects an `F64` rank-0 operand
 /// against an `F32` or `C32` tensor as a dtype mismatch, and rejects a
-/// *payload*-typed complex divisor as a shape mismatch, so "complex tensor
-/// divided by a real rank-0 scalar" is the one production shape (probe
+/// *payload*-typed complex operand as a shape mismatch, so "complex tensor
+/// with a real rank-0 scalar" is the one production shape (probe
 /// `cuda-single-precision-probe-2026-09-20.md`, finding 3).
 fn upload_scalar<R: CudaRealScalar>(
     ctx: &CudaDenseContext,
@@ -1824,6 +1832,39 @@ fn upload_scalar<R: CudaRealScalar>(
 /// The relative anti-Hermitian residual this payload's real lane admits.
 fn hermitian_tolerance<D: CudaScalar>() -> f64 {
     HERMITIAN_TOLERANCE_EPSILONS * <D::Real as CudaRealScalar>::EPSILON
+}
+
+/// The rank-0 lane operand through which [`scale_by_power_of_two`] multiplies
+/// a payload by the exact power of two `normalizer`.
+fn power_of_two_operand<D: CudaScalar>(
+    ctx: &CudaDenseContext,
+    normalizer: f64,
+) -> Result<Tensor, DenseError> {
+    let operand = if D::IS_COMPLEX {
+        normalizer
+    } else {
+        // Exact: the reciprocal of a power of two inside the lane's range.
+        normalizer.recip()
+    };
+    upload_scalar::<D::Real>(ctx, operand)
+}
+
+/// Multiplies a payload tensor by the power of two that `operand` encodes.
+fn scale_by_power_of_two<D: CudaScalar>(
+    ctx: &mut CudaDenseContext,
+    op: &'static str,
+    tensor: &Tensor,
+    operand: &Tensor,
+) -> Result<Tensor, DenseError> {
+    if D::IS_COMPLEX {
+        ctx.backend.mul(tensor, operand)
+    } else {
+        // Why not `mul`: Tenferro 0.7.1's real `mul` does not broadcast a
+        // rank-0 operand, while its real `div` does and, unlike the
+        // complex-by-real one, never squares the divisor.
+        ctx.backend.div(tensor, operand)
+    }
+    .map_err(|err| cuda_error(op, err))
 }
 
 /// Real magnitudes of a device tensor, so the real-only sum-of-squares
@@ -1906,15 +1947,12 @@ pub fn cuda_is_hermitian_region<D: CudaScalar>(
     } else {
         transpose
     };
-    let scale = upload_scalar::<D::Real>(ctx, input_scale)?;
-    let normal_scaled = ctx
-        .backend
-        .div(&normal, &scale)
-        .map_err(|err| cuda_error(OP, err))?;
-    let transpose_scaled = ctx
-        .backend
-        .div(&transpose, &scale)
-        .map_err(|err| cuda_error(OP, err))?;
+    let normalizer = power_of_two_operand::<D>(
+        ctx,
+        power_of_two_normalizer(input_scale, <D::Real as CudaRealScalar>::MAX_EXP),
+    )?;
+    let normal_scaled = scale_by_power_of_two::<D>(ctx, OP, &normal, &normalizer)?;
+    let transpose_scaled = scale_by_power_of_two::<D>(ctx, OP, &transpose, &normalizer)?;
     let input_magnitudes = magnitudes_for_sum_squares::<D>(ctx, OP, &normal_scaled)?;
     let input_ss = ctx
         .backend
@@ -1945,11 +1983,11 @@ pub fn cuda_is_hermitian_region<D: CudaScalar>(
         return Ok(input_ss.is_finite() && input_ss >= 0.0);
     }
 
-    let residual_scale_tensor = upload_scalar::<D::Real>(ctx, residual_scale)?;
-    let residual_normalized = ctx
-        .backend
-        .div(&residual, &residual_scale_tensor)
-        .map_err(|err| cuda_error(OP, err))?;
+    let residual_normalizer =
+        power_of_two_normalizer(residual_scale, <D::Real as CudaRealScalar>::MAX_EXP);
+    let residual_normalizer_tensor = power_of_two_operand::<D>(ctx, residual_normalizer)?;
+    let residual_normalized =
+        scale_by_power_of_two::<D>(ctx, OP, &residual, &residual_normalizer_tensor)?;
     let residual_magnitudes = magnitudes_for_sum_squares::<D>(ctx, OP, &residual_normalized)?;
     let residual_ss = ctx
         .backend
@@ -1961,7 +1999,8 @@ pub fn cuda_is_hermitian_region<D: CudaScalar>(
     let residual_ss = download_scalar::<D::Real>(ctx, &residual_ss, OP)?;
     Ok(scaled_hermitian_residual_accepts(
         input_ss,
-        residual_scale,
+        // Exact: the reciprocal of a normal power of two.
+        residual_normalizer.recip(),
         residual_ss,
         hermitian_tolerance::<D>(),
     ))

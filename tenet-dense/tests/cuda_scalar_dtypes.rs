@@ -35,22 +35,14 @@ trait ProbeScalar: CudaScalar + Copy + Debug + PartialEq {
     /// Machine epsilon of this payload's real lane, widened.
     const EPSILON: f64;
     /// The scale window over which the device Hermitian rule is required to be
-    /// scale-invariant for this payload: a small magnitude and a large one,
-    /// both exact powers of two, so scaling a fixture only moves exponents.
-    ///
-    /// For a **real** payload the window is the lane's own smallest and
-    /// largest normal magnitudes, mirroring the `f64` case the adapter's
-    /// device test already pins. For a **complex** one it stops at their
-    /// square roots, because the rule's magnitude pass squares the components
-    /// before any normalization: outside that the squares underflow or
-    /// overflow and the device answer stops being a statement about
-    /// Hermiticity. Recorded by
-    /// `the_complex_rule_is_conservative_outside_the_square_of_its_lane`.
+    /// scale-invariant for this payload: the real lane's smallest normal
+    /// magnitude and `2^(MAX_EXP - 4)`, both exact powers of two, so scaling a
+    /// fixture only moves exponents and the fixture's largest element (a few
+    /// times the scale) is still finite. Real and complex payloads share the
+    /// window: the rule normalizes by an exact power of two, never by a
+    /// complex-by-real division that squares the divisor (tenferro-rs#1922).
     const TINY: f64;
     const HUGE: f64;
-    /// The lane's own extremes, whatever the window above is.
-    const SMALLEST_NORMAL: f64;
-    const LARGEST_NORMAL: f64;
 
     /// The payload value nearest `value`, i.e. the fixture as the device sees
     /// it. The oracle runs on `widen(narrow(z))`, so the comparison isolates
@@ -63,9 +55,7 @@ impl ProbeScalar for f32 {
     const NAME: &'static str = "f32";
     const EPSILON: f64 = f32::EPSILON as f64;
     const TINY: f64 = f32::MIN_POSITIVE as f64;
-    const HUGE: f64 = 1.267_650_600_228_229_4e30; // 2^100
-    const SMALLEST_NORMAL: f64 = f32::MIN_POSITIVE as f64;
-    const LARGEST_NORMAL: f64 = 2.126_764_793_255_87e37; // 2^124
+    const HUGE: f64 = 2.126_764_793_255_87e37; // 2^124
 
     fn narrow(value: Complex64) -> Self {
         value.re as Self
@@ -80,9 +70,7 @@ impl ProbeScalar for f64 {
     const NAME: &'static str = "f64";
     const EPSILON: f64 = f64::EPSILON;
     const TINY: f64 = f64::MIN_POSITIVE;
-    const HUGE: f64 = 3.273_390_607_896_142e150; // 2^500
-    const SMALLEST_NORMAL: f64 = f64::MIN_POSITIVE;
-    const LARGEST_NORMAL: f64 = 1.117_902_744_918_257e307; // 2^1020
+    const HUGE: f64 = 1.117_902_744_918_257e307; // 2^1020
 
     fn narrow(value: Complex64) -> Self {
         value.re
@@ -96,12 +84,8 @@ impl ProbeScalar for f64 {
 impl ProbeScalar for Complex32 {
     const NAME: &'static str = "Complex32";
     const EPSILON: f64 = f32::EPSILON as f64;
-    // The square root of the lane's normal range: the magnitude pass squares
-    // the components, so this is the widest window it can answer over.
-    const TINY: f64 = 1.084_202_172_485_504_4e-19; // 2^-63, ~sqrt(MIN_POSITIVE)
-    const HUGE: f64 = 1.125_899_906_842_624e15; // 2^50, ~sqrt(MAX)
-    const SMALLEST_NORMAL: f64 = f32::MIN_POSITIVE as f64;
-    const LARGEST_NORMAL: f64 = 2.126_764_793_255_87e37; // 2^124
+    const TINY: f64 = f32::MIN_POSITIVE as f64;
+    const HUGE: f64 = 2.126_764_793_255_87e37; // 2^124
 
     fn narrow(value: Complex64) -> Self {
         Complex32::new(value.re as f32, value.im as f32)
@@ -115,11 +99,8 @@ impl ProbeScalar for Complex32 {
 impl ProbeScalar for Complex64 {
     const NAME: &'static str = "Complex64";
     const EPSILON: f64 = f64::EPSILON;
-    // The square root of the lane's normal range, as for `Complex32`.
-    const TINY: f64 = 1.491_668_146_240_041_3e-154; // 2^-511, ~sqrt(MIN_POSITIVE)
-    const HUGE: f64 = 1.809_251_394_333_065_6e76; // 2^253, ~sqrt(MAX)
-    const SMALLEST_NORMAL: f64 = f64::MIN_POSITIVE;
-    const LARGEST_NORMAL: f64 = 1.117_902_744_918_257e307; // 2^1020
+    const TINY: f64 = f64::MIN_POSITIVE;
+    const HUGE: f64 = 1.117_902_744_918_257e307; // 2^1020
 
     fn narrow(value: Complex64) -> Self {
         value
@@ -647,10 +628,11 @@ fn hermitian_admits_an_exactly_hermitian_block<D: ProbeScalar>(ctx: &mut CudaDen
 }
 
 /// Scale invariance and non-finite rejection, in the payload's own lane: the
-/// rule normalizes by the input maximum before reducing, so an exactly
-/// Hermitian block stays Hermitian and a clearly asymmetric one stays rejected
-/// at the smallest normal magnitude of the lane and at a large one. A NaN or
-/// infinity anywhere rejects rather than propagating into the decision.
+/// rule normalizes by an exact power of two near the input maximum before
+/// reducing, so an exactly Hermitian block stays Hermitian and a clearly
+/// asymmetric one stays rejected at both ends of the lane's normal range, for
+/// real and complex payloads alike. A NaN or infinity anywhere rejects rather
+/// than propagating into the decision.
 fn hermitian_extremes_case<D: ProbeScalar>(ctx: &mut CudaDenseContext) {
     let n = 4usize;
     for scale in [D::TINY, D::HUGE] {
@@ -786,62 +768,6 @@ fn the_hermitian_rule_scales_with_the_payload_real_lane() {
 // ---------------------------------------------------------------------------
 // Capability boundary: Complex32 device QR.
 // ---------------------------------------------------------------------------
-
-/// Recorded behaviour, not a promise: outside the square root of its lane's
-/// normal range, a **complex** block is not decided by magnitudes any more.
-///
-/// The rule takes the input maximum of `abs(A)` and normalizes by it before
-/// reducing. For a complex payload `abs` squares the components, so at the
-/// lane's own extremes those squares underflow to zero or overflow to
-/// infinity *before* any normalization can rescue them. Observed on an A100
-/// with CUDA 12.6 / cuTENSOR 2.5.0, for an exactly Hermitian `Complex32`
-/// block: scaled to `f32::MIN_POSITIVE` and scaled to `2^100`, both come back
-/// **rejected**.
-///
-/// That direction is the safe one — the caller is denied the Hermitian fast
-/// path and keeps the general one — and it is why `TINY`/`HUGE` stop at the
-/// square roots for the complex payloads, where `hermitian_extremes_case`
-/// requires real scale invariance. What this test pins at the lane's actual
-/// extremes is the part that is a contract: the call returns a *decision*
-/// rather than erroring or letting a NaN out of the reduction, a real payload
-/// is still decided correctly, and an asymmetric block is never admitted at
-/// any scale.
-fn conservative_outside_the_square_case<D: ProbeScalar>(ctx: &mut CudaDenseContext) {
-    let n = 4usize;
-    for scale in [D::SMALLEST_NORMAL, D::LARGEST_NORMAL] {
-        let hermitian = upload::<D>(ctx, &hermitian_block::<D>(n, scale));
-        let decided = cuda_is_hermitian_region::<D>(ctx, &hermitian, 0, n)
-            .unwrap_or_else(|err| panic!("{}: the rule must decide, not fail: {err}", D::NAME));
-        if !D::IS_COMPLEX {
-            // A real payload's `abs` does not square, so it stays
-            // scale-invariant across its whole normal range.
-            assert!(
-                decided,
-                "{}: a real payload must stay scale-invariant at {scale:e}",
-                D::NAME
-            );
-        }
-
-        let mut asymmetric = hermitian_block::<D>(n, scale);
-        asymmetric[1] = D::narrow(asymmetric[1].widen() + Complex64::new(scale, 0.0));
-        let asymmetric = upload::<D>(ctx, &asymmetric);
-        assert!(
-            !cuda_is_hermitian_region::<D>(ctx, &asymmetric, 0, n).expect("asymmetric"),
-            "{}: an asymmetric block must never be admitted, at {scale:e} or anywhere",
-            D::NAME
-        );
-    }
-}
-
-#[test]
-#[ignore = "requires a real CUDA device"]
-fn the_complex_rule_is_conservative_outside_the_square_of_its_lane() {
-    let mut ctx = context();
-    conservative_outside_the_square_case::<f32>(&mut ctx);
-    conservative_outside_the_square_case::<f64>(&mut ctx);
-    conservative_outside_the_square_case::<Complex32>(&mut ctx);
-    conservative_outside_the_square_case::<Complex64>(&mut ctx);
-}
 
 /// A dtype mismatch stays a typed error for the new payloads too, rather than
 /// a reinterpretation of the bytes: `f32` and `Complex32` buffers are half the
