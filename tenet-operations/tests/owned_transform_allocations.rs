@@ -104,3 +104,70 @@ fn warm_owned_transform_allocates_only_the_output_payload() {
     assert_eq!(ALLOCATIONS.get(), 1);
     assert_eq!(output, source);
 }
+
+#[test]
+fn warm_complex_recoupling_with_real_matrix_allocates_only_view_metadata() {
+    // What: a complex payload recoupled by a real matrix (#1407) runs its
+    // componentwise real GEMM on the reused pack buffers, real coefficient
+    // scratch and executor job buffer; the result is `U` applied to each
+    // component (dyadic values, so exact in every summation order).
+    //
+    // The only warm allocations are the layout metadata of Tenferro 0.7.1's
+    // `as_real_view{,_mut}` (three small Vecs per reinterpreted operand, two
+    // operands per GEMM call), independent of block count and size. The
+    // promoted complex GEMM this replaced allocated none; zero needs an
+    // allocation-free reinterpretation from Tenferro.
+    use num_complex::Complex64;
+    use tenet_operations::{
+        tree_transform_structure_with_structural_recoupling_raw, StridedHostKernelAdapter,
+    };
+    let structure =
+        Arc::new(BlockStructure::packed_column_major(1, [vec![3], vec![3], vec![2]]).unwrap());
+    let transform = TreeTransformStructure::compile_structures(
+        &structure,
+        &structure,
+        &[
+            TreeTransformBlockSpec::multi(vec![0, 1], vec![0, 1], vec![0.5, -0.25, 2.0, 0.75]),
+            TreeTransformBlockSpec::single(2, 2, -1.0),
+        ],
+    )
+    .unwrap();
+    let source = (0..8)
+        .map(|i| Complex64::new(f64::from(i) + 1.0, -f64::from(i) * 0.5))
+        .collect::<Vec<_>>();
+    let mut destination = vec![Complex64::default(); 8];
+    let mut kernels = StridedHostKernelAdapter::default();
+    let mut dense = DefaultDenseExecutor::new();
+    let mut workspace = TreeTransformWorkspace::default();
+    let mut replay = |destination: &mut [Complex64]| {
+        tree_transform_structure_with_structural_recoupling_raw(
+            &mut kernels,
+            &mut dense,
+            &mut workspace,
+            &transform,
+            &structure,
+            &structure,
+            destination,
+            &source,
+            Complex64::new(1.0, 0.0),
+            Complex64::new(0.0, 0.0),
+            1,
+        )
+        .unwrap();
+    };
+    replay(&mut destination);
+
+    ALLOCATIONS.set(0);
+    COUNTING.set(true);
+    replay(&mut destination);
+    COUNTING.set(false);
+
+    assert!(ALLOCATIONS.get() <= 6, "{} allocations", ALLOCATIONS.get());
+    // U[dst, src] row-major: dst0 = 0.5 s0 - 0.25 s1, dst1 = 2 s0 + 0.75 s1.
+    let expected = (0..3)
+        .map(|i| 0.5 * source[i] - 0.25 * source[3 + i])
+        .chain((0..3).map(|i| 2.0 * source[i] + 0.75 * source[3 + i]))
+        .chain(source[6..].iter().map(|&value| -value))
+        .collect::<Vec<_>>();
+    assert_eq!(destination, expected);
+}

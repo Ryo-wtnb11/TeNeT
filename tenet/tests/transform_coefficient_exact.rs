@@ -69,8 +69,14 @@ macro_rules! assert_componentwise {
         )
     };
     ($complex:ty, $real:ty, [$($codomain:expr),* $(,)?], [$($domain:expr),* $(,)?],
-     |$t:ident| $body:expr) => {{
-        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+     |$t:ident| $body:expr) => {
+        assert_componentwise!(
+            threads = 1, $complex, $real, [$($codomain),*], [$($domain),*], |$t| $body
+        )
+    };
+    (threads = $threads:expr, $complex:ty, $real:ty, [$($codomain:expr),* $(,)?],
+     [$($domain:expr),* $(,)?], |$t:ident| $body:expr) => {{
+        let runtime = Runtime::builder().dense_threads($threads).build().unwrap();
         let codomain = vec![$($codomain),*];
         let domain = vec![$($domain),*];
         let build = |f: &dyn Fn(&BlockFusionTrees<_>, &[usize]) -> $real| {
@@ -348,18 +354,30 @@ fn traces_scale_componentwise() {
     assert_componentwise!([&leg, &dual], [&leg, &dual], |t| t.trace_pairs(&[(0, 2)]));
 }
 
-/// Known residual of #1398: a transform that needs a recoupling *matrix* still
-/// applies it as a dense GEMM over coefficients promoted to the payload type,
-/// so `0 * inf` reappears. Fixing it needs the complex destination block to be
-/// driven through the real GEMM as an interleaved real matrix (the column
-/// mixing only touches the source index, so the reinterpretation is exact),
-/// which is a separate leaf at the dense-executor boundary.
+/// A transform that needs a recoupling *matrix* runs it as a dense GEMM. With
+/// a real `U` that GEMM views the complex pack buffers as interleaved real
+/// matrices of twice the rows, so each component meets only the real formula
+/// (#1407). TensorKit's multi-tree path instead promotes `U` to complex
+/// through `Adapt.adapt` and runs zgemm, which returns NaN here
+/// (reviews/1407-site1-evidence/pinned.jl); TeNeT follows TensorKit's
+/// documented `ComplexF64 * Float64` rule, which its single-tree path uses.
 #[test]
-#[ignore = "multi-block recoupling GEMM still promotes the coefficient (#1398 residual)"]
 fn su2_recoupling_matrix_transforms_scale_componentwise() {
     let provider = Arc::new(SU2FusionRule);
     let leg = su2(&provider, &[(0, 2), (1, 3), (2, 1)]);
     let other = su2(&provider, &[(0, 1), (1, 2)]);
     assert_componentwise!([&leg, &other, &other], [&leg], |t| t
+        .permute(&[2, 1, 0], &[3]));
+    assert_componentwise!([&leg, &other], [&other, &leg], |t| t
+        .permute(&[1, 3], &[2, 0]));
+    assert_componentwise!(
+        threads = 4,
+        Complex64,
+        f64,
+        [&leg, &other, &other],
+        [&leg],
+        |t| t.permute(&[2, 1, 0], &[3])
+    );
+    assert_componentwise!(Complex32, f32, [&leg, &other, &other], [&leg], |t| t
         .permute(&[2, 1, 0], &[3]));
 }

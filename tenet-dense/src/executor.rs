@@ -391,6 +391,61 @@ pub trait DenseExecutor: sealed::AsDynDenseExecutor {
         }
     }
 
+    /// Batched overwrite matmul with a real right-hand side: for each job the
+    /// destination block receives `lhs_block * rhs_block` (column-major, see
+    /// [`DenseGemmBatchJob`]). `rhs` is `F32`/`F64`; `lhs` and `output` are
+    /// both of that type or both of its complex type, in which case the real
+    /// matrix acts on the real and the imaginary components separately.
+    ///
+    /// Why not promote `rhs` to complex and call
+    /// [`Self::matmul_batch_axpby_into`]: the promoted zero imaginary part
+    /// meets every payload component in the complex product, so `0 * inf`
+    /// turns an infinite component into NaN and `x - 0` drops the sign of a
+    /// zero. It also costs twice the flops of the real product.
+    ///
+    /// Complex operands must be rank-1 unit-stride views, as the batch job
+    /// offsets address one flat buffer. The default runs a componentwise loop
+    /// for complex operands and forwards real ones to
+    /// [`Self::matmul_batch_axpby_into`].
+    fn matmul_batch_real_rhs_into(
+        &mut self,
+        output: DenseWrite<'_>,
+        lhs: DenseRead<'_>,
+        rhs: DenseRead<'_>,
+        jobs: &[DenseGemmBatchJob],
+        runs: &[usize],
+    ) -> Result<(), DenseError> {
+        match (output, lhs, rhs) {
+            (output @ DenseWrite::F32(_), lhs @ DenseRead::F32(_), rhs @ DenseRead::F32(_)) => self
+                .matmul_batch_axpby_into(
+                    output,
+                    lhs,
+                    rhs,
+                    jobs,
+                    runs,
+                    DenseScalar::F32(1.0),
+                    DenseScalar::F32(0.0),
+                ),
+            (output @ DenseWrite::F64(_), lhs @ DenseRead::F64(_), rhs @ DenseRead::F64(_)) => self
+                .matmul_batch_axpby_into(
+                    output,
+                    lhs,
+                    rhs,
+                    jobs,
+                    runs,
+                    DenseScalar::F64(1.0),
+                    DenseScalar::F64(0.0),
+                ),
+            (DenseWrite::C32(output), DenseRead::C32(lhs), DenseRead::F32(rhs)) => {
+                matmul_batch_real_rhs_componentwise(output, lhs, rhs, jobs)
+            }
+            (DenseWrite::C64(output), DenseRead::C64(lhs), DenseRead::F64(rhs)) => {
+                matmul_batch_real_rhs_componentwise(output, lhs, rhs, jobs)
+            }
+            _ => Err(real_rhs_dtype_error()),
+        }
+    }
+
     /// Batched rank-2 multiplication with one matrix interpretation shared by
     /// every job for each operand.
     #[allow(clippy::too_many_arguments)]
@@ -415,6 +470,68 @@ pub trait DenseExecutor: sealed::AsDynDenseExecutor {
             message: "executor does not implement transpose/adjoint rank-2 batches".to_string(),
         })
     }
+}
+
+pub(crate) fn real_rhs_dtype_error() -> DenseError {
+    DenseError::Unsupported {
+        op: "matmul_batch_real_rhs_into",
+        message: "requires a f32/f64 rhs with lhs and output of that type or its complex type"
+            .to_string(),
+    }
+}
+
+/// Checks that a complex batch operand is one flat unit-stride buffer, the
+/// layout under which it is also an interleaved real buffer.
+pub(crate) fn validate_real_rhs_flat(shape: &[usize], strides: &[usize]) -> Result<(), DenseError> {
+    if shape.len() == 1 && strides == [1] {
+        return Ok(());
+    }
+    Err(DenseError::Unsupported {
+        op: "matmul_batch_real_rhs_into",
+        message: "complex operands must be rank-1 unit-stride views".to_string(),
+    })
+}
+
+fn matmul_batch_real_rhs_componentwise<T>(
+    mut output: DenseViewMut<'_, num_complex::Complex<T>>,
+    lhs: DenseView<'_, num_complex::Complex<T>>,
+    rhs: DenseView<'_, T>,
+    jobs: &[DenseGemmBatchJob],
+) -> Result<(), DenseError>
+where
+    T: Copy + Default + core::ops::Add<Output = T> + core::ops::Mul<Output = T>,
+{
+    validate_real_rhs_flat(output.shape(), output.strides())?;
+    validate_real_rhs_flat(lhs.shape(), lhs.strides())?;
+    let out_of_bounds = || DenseError::Unsupported {
+        op: "matmul_batch_real_rhs_into",
+        message: "batch job exceeds its operand buffer".to_string(),
+    };
+    let (output_offset, lhs_offset, rhs_offset) = (output.offset(), lhs.offset(), rhs.offset());
+    let output_data = output.data_mut();
+    for job in jobs {
+        for col in 0..job.cols {
+            for row in 0..job.rows {
+                let (mut re, mut im) = (T::default(), T::default());
+                for k in 0..job.contracted {
+                    let value = *lhs
+                        .data()
+                        .get(lhs_offset + job.lhs_offset + row + k * job.rows)
+                        .ok_or_else(out_of_bounds)?;
+                    let u = *rhs
+                        .data()
+                        .get(rhs_offset + job.rhs_offset + k + col * job.contracted)
+                        .ok_or_else(out_of_bounds)?;
+                    re = re + value.re * u;
+                    im = im + value.im * u;
+                }
+                *output_data
+                    .get_mut(output_offset + job.dst_offset + row + col * job.rows)
+                    .ok_or_else(out_of_bounds)? = num_complex::Complex::new(re, im);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn copy_dense_tensor_into(

@@ -79,14 +79,20 @@ impl<T> TreeTransformScalar for T where
 /// TensorKit allows, for example, real SU(2) coefficients to act on complex
 /// tensor blocks. Rust needs that conversion boundary to be explicit.
 pub trait RecouplingCoefficientAction<C>: Copy {
+    /// Whether `C` is a real type, so a recoupling matrix of `C` acts on each
+    /// real component of `Self` separately (TensorKit's `sectorscalartype <:
+    /// Real`). A complex `C` (anyonic F/R symbols) needs the complex product.
+    const REAL_COEFFICIENT: bool;
     fn scale_by_coefficient(self, coefficient: C) -> Self;
     fn coefficient_as_data(coefficient: C) -> Self;
 }
 
 macro_rules! impl_same_recoupling_coefficient_action {
-    ($($ty:ty),+ $(,)?) => {
+    ($($ty:ty => $real:literal),+ $(,)?) => {
         $(
             impl RecouplingCoefficientAction<$ty> for $ty {
+                const REAL_COEFFICIENT: bool = $real;
+
                 #[inline]
                 fn scale_by_coefficient(self, coefficient: $ty) -> Self {
                     self * coefficient
@@ -101,9 +107,18 @@ macro_rules! impl_same_recoupling_coefficient_action {
     };
 }
 
-impl_same_recoupling_coefficient_action!(f32, f64, i32, i64, Complex32, Complex64);
+impl_same_recoupling_coefficient_action!(
+    f32 => true,
+    f64 => true,
+    i32 => true,
+    i64 => true,
+    Complex32 => false,
+    Complex64 => false,
+);
 
 impl RecouplingCoefficientAction<f64> for f32 {
+    const REAL_COEFFICIENT: bool = true;
+
     #[inline]
     fn scale_by_coefficient(self, coefficient: f64) -> Self {
         self * coefficient as f32
@@ -116,6 +131,8 @@ impl RecouplingCoefficientAction<f64> for f32 {
 }
 
 impl RecouplingCoefficientAction<f32> for f64 {
+    const REAL_COEFFICIENT: bool = true;
+
     #[inline]
     fn scale_by_coefficient(self, coefficient: f32) -> Self {
         self * f64::from(coefficient)
@@ -128,6 +145,8 @@ impl RecouplingCoefficientAction<f32> for f64 {
 }
 
 impl RecouplingCoefficientAction<f32> for Complex32 {
+    const REAL_COEFFICIENT: bool = true;
+
     #[inline]
     fn scale_by_coefficient(self, coefficient: f32) -> Self {
         self * coefficient
@@ -140,6 +159,8 @@ impl RecouplingCoefficientAction<f32> for Complex32 {
 }
 
 impl RecouplingCoefficientAction<f64> for Complex32 {
+    const REAL_COEFFICIENT: bool = true;
+
     #[inline]
     fn scale_by_coefficient(self, coefficient: f64) -> Self {
         self * coefficient as f32
@@ -152,6 +173,8 @@ impl RecouplingCoefficientAction<f64> for Complex32 {
 }
 
 impl RecouplingCoefficientAction<f32> for Complex64 {
+    const REAL_COEFFICIENT: bool = true;
+
     #[inline]
     fn scale_by_coefficient(self, coefficient: f32) -> Self {
         self * f64::from(coefficient)
@@ -164,6 +187,8 @@ impl RecouplingCoefficientAction<f32> for Complex64 {
 }
 
 impl RecouplingCoefficientAction<f64> for Complex64 {
+    const REAL_COEFFICIENT: bool = true;
+
     #[inline]
     fn scale_by_coefficient(self, coefficient: f64) -> Self {
         self * coefficient
@@ -305,6 +330,28 @@ pub trait DenseBlockScalar:
     fn dense_write(view: DenseViewMut<'_, Self>) -> DenseWrite<'_>;
     /// Dtype-erased carrier for accumulate-form GEMM parameters.
     fn dense_scalar(self) -> DenseScalar;
+    /// The real field of `Self`: itself when real, the component type when
+    /// complex.
+    type Component: DenseBlockScalar;
+    /// The real part; exact for a value produced by
+    /// [`RecouplingCoefficientAction::coefficient_as_data`] from a real
+    /// coefficient.
+    fn real_part(self) -> Self::Component;
+    /// The lane of `scratch` that holds real recoupling coefficients of this
+    /// scalar's precision.
+    fn real_coefficient_lane(scratch: &mut RealCoefficientScratch) -> &mut Vec<Self::Component>;
+}
+
+/// Real recoupling-matrix scratch, one lane per precision.
+///
+/// Why not a `Vec<T::Component>` field in the host workspace: that would bound the
+/// workspace, and with it every host-kernel entry that names it, by
+/// [`DenseBlockScalar`]. An unused lane is an empty `Vec` and never allocates.
+#[doc(hidden)]
+#[derive(Clone, Debug, Default)]
+pub struct RealCoefficientScratch {
+    f32: Vec<f32>,
+    f64: Vec<f64>,
 }
 
 #[doc(hidden)]
@@ -313,8 +360,21 @@ pub trait DenseRecouplingScalar: DenseBlockScalar + RecouplingCoefficientAction<
 impl<T> DenseRecouplingScalar for T where T: DenseBlockScalar + RecouplingCoefficientAction<Self> {}
 
 macro_rules! impl_dense_block_scalar {
-    ($ty:ty, $read_variant:ident, $write_variant:ident) => {
+    ($ty:ty, $read_variant:ident, $write_variant:ident, $real:ident, |$v:ident| $real_part:expr) => {
         impl DenseBlockScalar for $ty {
+            type Component = $real;
+
+            #[inline]
+            fn real_coefficient_lane(scratch: &mut RealCoefficientScratch) -> &mut Vec<$real> {
+                &mut scratch.$real
+            }
+
+            #[inline]
+            fn real_part(self) -> $real {
+                let $v = self;
+                $real_part
+            }
+
             fn dense_read(view: DenseView<'_, Self>) -> DenseRead<'_> {
                 DenseRead::$read_variant(view)
             }
@@ -330,10 +390,10 @@ macro_rules! impl_dense_block_scalar {
     };
 }
 
-impl_dense_block_scalar!(f32, F32, F32);
-impl_dense_block_scalar!(f64, F64, F64);
-impl_dense_block_scalar!(Complex32, C32, C32);
-impl_dense_block_scalar!(Complex64, C64, C64);
+impl_dense_block_scalar!(f32, F32, F32, f32, |v| v);
+impl_dense_block_scalar!(f64, F64, F64, f64, |v| v);
+impl_dense_block_scalar!(Complex32, C32, C32, f32, |v| v.re);
+impl_dense_block_scalar!(Complex64, C64, C64, f64, |v| v.re);
 
 /// Pairs a payload scalar with the double-precision member of its own field.
 ///

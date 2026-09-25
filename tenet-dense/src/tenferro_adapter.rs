@@ -1,6 +1,8 @@
 use num_complex::{Complex32, Complex64};
 
-use crate::executor::{batch_offset, strided_batch_run_len};
+use crate::executor::{
+    batch_offset, real_rhs_dtype_error, strided_batch_run_len, validate_real_rhs_flat,
+};
 use crate::layout::strides_to_isize;
 use crate::{
     DenseBackend, DenseDotConfig, DenseError, DenseExecutor, DenseGemmBatchJob, DenseOwned,
@@ -203,6 +205,8 @@ pub struct DefaultDenseExecutor {
     strided_batch_matmul_config: DotGeneralConfig,
     grouped_cache: <CpuBackend as BackendRuntimeCache>::RuntimeCache,
     grouped_jobs: Vec<GroupedGemmJob>,
+    // Reused doubled-row copy of a real-rhs batch's jobs.
+    real_rhs_jobs: Vec<DenseGemmBatchJob>,
     // The runtime-shared context this executor was built on, if any (see
     // `with_shared_context`). Kept here rather than read back off the backend:
     // tenferro's `CpuBackend::linalg_context` accessor is `cpu-faer`-gated, so
@@ -299,6 +303,7 @@ impl DefaultDenseExecutor {
             },
             grouped_cache: <CpuBackend as BackendRuntimeCache>::RuntimeCache::default(),
             grouped_jobs: Vec::new(),
+            real_rhs_jobs: Vec::new(),
             shared_ctx: None,
             #[cfg(test)]
             seam_dispatches: 0,
@@ -450,6 +455,61 @@ impl DefaultDenseExecutor {
             )
         }));
         self.matmul_grouped_bundle_typed(output, lhs, rhs, alpha, beta, wrap_write, wrap_read)
+    }
+
+    /// Runs a real-rhs batch over complex operands already reinterpreted as
+    /// interleaved real buffers. A column-major complex `rows x k` block is
+    /// the column-major real `2 rows x k` block over the same memory, so row
+    /// counts and lhs/dst offsets double while the rhs addressing and the job
+    /// count stay as they are.
+    #[allow(clippy::too_many_arguments)]
+    fn matmul_batch_real_rhs_interleaved<R, W, V>(
+        &mut self,
+        output: &mut [R],
+        output_offset: usize,
+        output_len: usize,
+        lhs: &[R],
+        lhs_offset: usize,
+        lhs_len: usize,
+        rhs: DenseView<'_, R>,
+        jobs: &[DenseGemmBatchJob],
+        runs: &[usize],
+        one: DenseScalar,
+        zero: DenseScalar,
+        wrap_write: W,
+        wrap_read: V,
+    ) -> Result<(), DenseError>
+    where
+        R: 'static,
+        W: for<'x> Fn(DenseViewMut<'x, R>) -> DenseWrite<'x> + Copy,
+        V: for<'x> Fn(DenseView<'x, R>) -> DenseRead<'x> + Copy,
+    {
+        let mut doubled = std::mem::take(&mut self.real_rhs_jobs);
+        doubled.clear();
+        doubled.extend(jobs.iter().map(|job| DenseGemmBatchJob {
+            dst_offset: 2 * job.dst_offset,
+            lhs_offset: 2 * job.lhs_offset,
+            rows: 2 * job.rows,
+            ..*job
+        }));
+        let unit = [1];
+        let output_shape = [2 * output_len];
+        let lhs_shape = [2 * lhs_len];
+        let mut output = DenseViewMut::new_trusted(output, &output_shape, &unit, 2 * output_offset);
+        let lhs = DenseView::new_trusted(lhs, &lhs_shape, &unit, 2 * lhs_offset);
+        let result = self.matmul_batch_axpby_route_typed(
+            &mut output,
+            lhs,
+            rhs,
+            &doubled,
+            runs,
+            one,
+            zero,
+            wrap_write,
+            wrap_read,
+        );
+        self.real_rhs_jobs = doubled;
+        result
     }
 
     /// Single grouped-gemm call over the jobs staged in `self.grouped_jobs`.
@@ -1535,6 +1595,100 @@ impl DenseExecutor for DefaultDenseExecutor {
                 op: "matmul_batch_axpby_into",
                 message: "batched matmul requires matching f32/f64/c32/c64 operands".to_string(),
             }),
+        }
+    }
+
+    fn matmul_batch_real_rhs_into(
+        &mut self,
+        output: DenseWrite<'_>,
+        lhs: DenseRead<'_>,
+        rhs: DenseRead<'_>,
+        jobs: &[DenseGemmBatchJob],
+        runs: &[usize],
+    ) -> Result<(), DenseError> {
+        // The reinterpretation borrows through Tenferro's sealed, validated
+        // `as_real_view{,_mut}`; tenet-dense forbids its own `unsafe`.
+        macro_rules! interleaved {
+            ($out:ident, $lhs:ident, $rhs:ident, $real:ident, $one:expr, $zero:expr) => {{
+                validate_real_rhs_flat($out.shape(), $out.strides())?;
+                validate_real_rhs_flat($lhs.shape(), $lhs.strides())?;
+                let (output_offset, output_len) = ($out.offset(), $out.shape()[0]);
+                let (lhs_offset, lhs_len) = ($lhs.offset(), $lhs.shape()[0]);
+                let lhs_real =
+                    TypedTensorView::from_slice([$lhs.data().len()], [1], 0, $lhs.data())
+                        .and_then(|view| view.as_real_view())
+                        .and_then(|view| view.host_storage())
+                        .map_err(|err| tenferro_error("as_real_view", err))?;
+                let output_data = $out.data_mut();
+                let output_data_len = output_data.len();
+                let mut output_complex =
+                    TypedTensorViewMut::from_slice([output_data_len], [1], 0, output_data)
+                        .map_err(|err| tenferro_error("as_real_view_mut", err))?;
+                let mut output_real = output_complex
+                    .as_real_view_mut()
+                    .map_err(|err| tenferro_error("as_real_view_mut", err))?;
+                let output_real = output_real
+                    .host_storage_mut()
+                    .map_err(|err| tenferro_error("as_real_view_mut", err))?;
+                self.matmul_batch_real_rhs_interleaved(
+                    output_real,
+                    output_offset,
+                    output_len,
+                    lhs_real,
+                    lhs_offset,
+                    lhs_len,
+                    $rhs,
+                    jobs,
+                    runs,
+                    $one,
+                    $zero,
+                    |view| DenseWrite::$real(view),
+                    |view| DenseRead::$real(view),
+                )
+            }};
+        }
+        match (output, lhs, rhs) {
+            (DenseWrite::C64(mut out), DenseRead::C64(lhs), DenseRead::F64(rhs)) => {
+                interleaved!(
+                    out,
+                    lhs,
+                    rhs,
+                    F64,
+                    DenseScalar::F64(1.0),
+                    DenseScalar::F64(0.0)
+                )
+            }
+            (DenseWrite::C32(mut out), DenseRead::C32(lhs), DenseRead::F32(rhs)) => {
+                interleaved!(
+                    out,
+                    lhs,
+                    rhs,
+                    F32,
+                    DenseScalar::F32(1.0),
+                    DenseScalar::F32(0.0)
+                )
+            }
+            (output @ DenseWrite::F64(_), lhs @ DenseRead::F64(_), rhs @ DenseRead::F64(_)) => self
+                .matmul_batch_axpby_into(
+                    output,
+                    lhs,
+                    rhs,
+                    jobs,
+                    runs,
+                    DenseScalar::F64(1.0),
+                    DenseScalar::F64(0.0),
+                ),
+            (output @ DenseWrite::F32(_), lhs @ DenseRead::F32(_), rhs @ DenseRead::F32(_)) => self
+                .matmul_batch_axpby_into(
+                    output,
+                    lhs,
+                    rhs,
+                    jobs,
+                    runs,
+                    DenseScalar::F32(1.0),
+                    DenseScalar::F32(0.0),
+                ),
+            _ => Err(real_rhs_dtype_error()),
         }
     }
 

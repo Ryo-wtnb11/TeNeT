@@ -1376,6 +1376,13 @@ where
                     job.cols,
                     self.lhs_op,
                     self.rhs_op,
+                    // Why not the componentwise real GEMM of the recoupling
+                    // transform: both operands are complex, so the product
+                    // already carries complex cross terms. Folding the
+                    // fermionic twist into alpha matches TensorKit's
+                    // `twist!` on a copied operand bit for bit on OpenBLAS,
+                    // ±inf and -0 included, and skips that O(k·n) copy
+                    // (reviews/1407-site1-evidence/twist.jl).
                     D::coefficient_as_data(alpha),
                 )?;
             }

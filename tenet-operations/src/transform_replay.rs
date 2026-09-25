@@ -30,10 +30,10 @@ use crate::transform_structure::{
 };
 use crate::{
     tensoradd_raw_strided_kernel, tensoradd_raw_strided_kernel_trusted, BakedFusedLayout,
-    ConjugateValue, DenseRecouplingScalar, HostAllocator, HostKernelAdapter, OperationError,
-    RecouplingCoefficientAction, ReportsPlacement, TensorAddStructure, TransformScale,
-    TreeTransformBlock, TreeTransformLayout, TreeTransformLayoutTable, TreeTransformReplayProfile,
-    TreeTransformStructure,
+    ConjugateValue, DenseBlockScalar, DenseRecouplingScalar, HostAllocator, HostKernelAdapter,
+    OperationError, RealCoefficientScratch, RecouplingCoefficientAction, ReportsPlacement,
+    TensorAddStructure, TransformScale, TreeTransformBlock, TreeTransformLayout,
+    TreeTransformLayoutTable, TreeTransformReplayProfile, TreeTransformStructure,
 };
 
 #[cfg(test)]
@@ -228,11 +228,14 @@ impl<'a, C: Copy> PhysicalOverwriteProof<'a, C> {
 pub struct HostTreeTransformWorkspace<T> {
     zero_strides: Vec<isize>,
     packed: TreeTransformScratchBuffers<HostScratchBuffer<T>, HostScratchBuffer<T>>,
-    // Recoupling matrices converted into the data scalar type and packed in
-    // recoupling_plan().entries() execution order. This order is layout
-    // dependent and supplies the GEMM RHS offsets; it is not canonical
-    // categorical U storage (TensorKit's basistransform buffer).
+    // Recoupling matrices packed in recoupling_plan().entries() execution
+    // order. This order is layout dependent and supplies the GEMM RHS offsets;
+    // it is not canonical categorical U storage (TensorKit's basistransform
+    // buffer). A real coefficient type fills the real scratch of T's
+    // precision, a complex one the data-typed scratch; only one is in use per
+    // structure.
     coefficient_scratch: Vec<T>,
+    real_coefficient_scratch: RealCoefficientScratch,
     // Identity of the structure whose layout-ordered RHS pack is installed.
     coefficient_structure_identity: Option<Weak<()>>,
     chunk_jobs: Vec<DenseGemmBatchJob>,
@@ -249,6 +252,7 @@ impl<T> Default for HostTreeTransformWorkspace<T> {
             zero_strides: Vec::new(),
             packed: TreeTransformScratchBuffers::default(),
             coefficient_scratch: Vec::new(),
+            real_coefficient_scratch: RealCoefficientScratch::default(),
             coefficient_structure_identity: None,
             chunk_jobs: Vec::new(),
             chunk_runs: Vec::new(),
@@ -334,7 +338,7 @@ fn ensure_recoupling_coefficients<D, C>(
     structure_identity: &Arc<()>,
 ) -> Result<bool, OperationError>
 where
-    D: RecouplingCoefficientAction<C>,
+    D: DenseBlockScalar + RecouplingCoefficientAction<C>,
     C: Copy,
 {
     let plan = task.recoupling_plan();
@@ -346,14 +350,25 @@ where
         .as_ref()
         .and_then(Weak::upgrade)
         .is_some_and(|identity| Arc::ptr_eq(&identity, structure_identity));
-    if same_structure && workspace.coefficient_scratch.len() == plan.coefficient_len() {
+    let installed_len = if <D as RecouplingCoefficientAction<C>>::REAL_COEFFICIENT {
+        D::real_coefficient_lane(&mut workspace.real_coefficient_scratch).len()
+    } else {
+        workspace.coefficient_scratch.len()
+    };
+    if same_structure && installed_len == plan.coefficient_len() {
         return Ok(false);
     }
 
     workspace.coefficient_scratch.clear();
-    workspace
-        .coefficient_scratch
-        .reserve(plan.coefficient_len());
+    D::real_coefficient_lane(&mut workspace.real_coefficient_scratch).clear();
+    if <D as RecouplingCoefficientAction<C>>::REAL_COEFFICIENT {
+        D::real_coefficient_lane(&mut workspace.real_coefficient_scratch)
+            .reserve(plan.coefficient_len());
+    } else {
+        workspace
+            .coefficient_scratch
+            .reserve(plan.coefficient_len());
+    }
     // Preserve entry order: each job's rhs_offset addresses this exact pack.
     for (block_index, _) in plan.entries() {
         let block = recoupling_multi_block(task, block_index)?;
@@ -379,16 +394,22 @@ where
                 expected: coefficient_end,
                 actual: task.coefficients().len(),
             })?;
-        workspace.coefficient_scratch.extend(
-            coefficients
-                .iter()
-                .map(|&coefficient| D::coefficient_as_data(coefficient)),
-        );
+        let as_data = coefficients
+            .iter()
+            .map(|&coefficient| D::coefficient_as_data(coefficient));
+        if <D as RecouplingCoefficientAction<C>>::REAL_COEFFICIENT {
+            D::real_coefficient_lane(&mut workspace.real_coefficient_scratch)
+                .extend(as_data.map(DenseBlockScalar::real_part));
+        } else {
+            workspace.coefficient_scratch.extend(as_data);
+        }
     }
-    if workspace.coefficient_scratch.len() != plan.coefficient_len() {
+    let installed_len = workspace.coefficient_scratch.len()
+        + D::real_coefficient_lane(&mut workspace.real_coefficient_scratch).len();
+    if installed_len != plan.coefficient_len() {
         return Err(OperationError::CoefficientCountMismatch {
             expected: plan.coefficient_len(),
-            actual: workspace.coefficient_scratch.len(),
+            actual: installed_len,
         });
     }
     workspace.coefficient_structure_identity = Some(Arc::downgrade(structure_identity));
@@ -543,7 +564,10 @@ mod coefficient_cache_tests {
             structure.identity_marker(),
         )
         .unwrap());
-        assert_eq!(workspace.coefficient_scratch, vec![1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(
+            *f64::real_coefficient_lane(&mut workspace.real_coefficient_scratch),
+            vec![1.0, 2.0, 3.0, 4.0]
+        );
         assert!(!ensure_recoupling_coefficients(
             &mut workspace,
             structure.task_view().unwrap(),
@@ -561,14 +585,17 @@ mod coefficient_cache_tests {
 
         let equal_but_distinct = multi_recoupling_structure([1.0, 2.0, 3.0, 4.0]);
         assert_eq!(structure, equal_but_distinct);
-        workspace.coefficient_scratch.fill(-1.0);
+        f64::real_coefficient_lane(&mut workspace.real_coefficient_scratch).fill(-1.0);
         assert!(ensure_recoupling_coefficients(
             &mut workspace,
             equal_but_distinct.task_view().unwrap(),
             equal_but_distinct.identity_marker(),
         )
         .unwrap());
-        assert_eq!(workspace.coefficient_scratch, vec![1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(
+            *f64::real_coefficient_lane(&mut workspace.real_coefficient_scratch),
+            vec![1.0, 2.0, 3.0, 4.0]
+        );
     }
 
     #[test]
@@ -609,7 +636,7 @@ mod coefficient_cache_tests {
         )
         .unwrap());
         assert_eq!(
-            workspace.coefficient_scratch,
+            *f64::real_coefficient_lane(&mut workspace.real_coefficient_scratch),
             vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
         );
         assert!(ensure_recoupling_coefficients(
@@ -619,7 +646,7 @@ mod coefficient_cache_tests {
         )
         .unwrap());
         assert_eq!(
-            workspace.coefficient_scratch,
+            *f64::real_coefficient_lane(&mut workspace.real_coefficient_scratch),
             vec![5.0, 6.0, 7.0, 8.0, 1.0, 2.0, 3.0, 4.0]
         );
     }
@@ -4254,11 +4281,12 @@ where
                 ..*job
             };
             let (source, destination) = workspace.packed.source_and_destination_mut();
-            recoupling_gemm_batch(
+            recoupling_gemm_batch::<E, D, C>(
                 dense,
                 destination.as_mut_slice(),
                 source.as_slice(),
                 &workspace.coefficient_scratch,
+                D::real_coefficient_lane(&mut workspace.real_coefficient_scratch),
                 core::slice::from_ref(&local_job),
                 &[1],
             )?;
@@ -4786,11 +4814,12 @@ where
 
     let start = profile.as_ref().map(|_| std::time::Instant::now());
     let (source, destination) = workspace.packed.source_and_destination_mut();
-    recoupling_gemm_batch(
+    recoupling_gemm_batch::<E, D, C>(
         dense,
         destination.as_mut_slice(),
         source.as_slice(),
         &workspace.coefficient_scratch,
+        D::real_coefficient_lane(&mut workspace.real_coefficient_scratch),
         &workspace.chunk_jobs,
         &workspace.chunk_runs,
     )?;
@@ -5201,21 +5230,31 @@ where
 /// grouped call; the naive per-element loop in the kernel adapter remains
 /// only for adapters without a dense executor. Job offsets are relative to the
 /// supplied chunk scratch, matching the trusted-view validation contract.
-fn recoupling_gemm_batch<E, D>(
+///
+/// A real coefficient type multiplies with the real `U` from
+/// `real_coefficients`, acting on each payload component separately, as
+/// TensorKit's single-tree `ComplexF64 * Float64` does. Why not the complex
+/// GEMM over `U` promoted to the payload type, as TensorKit's multi-tree
+/// `Adapt.adapt` + zgemm path does: the promoted zero imaginary part turns
+/// `0 * inf` into NaN, loses signed zeros, and costs twice the flops
+/// (reviews/1407-site1-recoupling-gemm-design.md). A complex coefficient type
+/// keeps the complex GEMM over `coefficients`.
+#[allow(clippy::too_many_arguments)]
+fn recoupling_gemm_batch<E, D, C>(
     dense: &mut E,
     destination: &mut [D],
     source: &[D],
     coefficients: &[D],
+    real_coefficients: &[D::Component],
     jobs: &[DenseGemmBatchJob],
     runs: &[usize],
 ) -> Result<(), OperationError>
 where
     E: DenseExecutor,
-    D: DenseRecouplingScalar,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
 {
     let dst_shape = [destination.len()];
     let lhs_shape = [source.len()];
-    let rhs_shape = [coefficients.len()];
     let flat_strides = [1];
     let lhs = D::dense_read(tenet_dense::DenseView::new_trusted(
         source,
@@ -5223,15 +5262,25 @@ where
         &flat_strides,
         0,
     ));
-    let rhs = D::dense_read(tenet_dense::DenseView::new_trusted(
-        coefficients,
-        &rhs_shape,
-        &flat_strides,
-        0,
-    ));
     let output = D::dense_write(tenet_dense::DenseViewMut::new_trusted(
         destination,
         &dst_shape,
+        &flat_strides,
+        0,
+    ));
+    if <D as RecouplingCoefficientAction<C>>::REAL_COEFFICIENT {
+        let rhs_shape = [real_coefficients.len()];
+        let rhs = <D::Component as DenseBlockScalar>::dense_read(
+            tenet_dense::DenseView::new_trusted(real_coefficients, &rhs_shape, &flat_strides, 0),
+        );
+        return dense
+            .matmul_batch_real_rhs_into(output, lhs, rhs, jobs, runs)
+            .map_err(OperationError::Dense);
+    }
+    let rhs_shape = [coefficients.len()];
+    let rhs = D::dense_read(tenet_dense::DenseView::new_trusted(
+        coefficients,
+        &rhs_shape,
         &flat_strides,
         0,
     ));
