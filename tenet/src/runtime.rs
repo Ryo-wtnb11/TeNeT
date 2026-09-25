@@ -1041,10 +1041,28 @@ pub struct Runtime {
 }
 
 /// Non-owning identity for internal state parked outside an active execution.
+///
+/// Equality and hashing use the Runtime allocation's address. The held `Weak`
+/// keeps that allocation reserved, so a later Runtime can never reuse the
+/// address while this identity is live.
 #[doc(hidden)]
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct RuntimeIdentity {
     inner: Weak<RuntimeInner>,
+}
+
+impl PartialEq for RuntimeIdentity {
+    fn eq(&self, other: &Self) -> bool {
+        Weak::ptr_eq(&self.inner, &other.inner)
+    }
+}
+
+impl Eq for RuntimeIdentity {}
+
+impl std::hash::Hash for RuntimeIdentity {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.inner.as_ptr().hash(state);
+    }
 }
 
 impl RuntimeIdentity {

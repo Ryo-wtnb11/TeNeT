@@ -285,6 +285,9 @@ use crate::tensor_core::{
 };
 use crate::RuntimeIdentity;
 
+mod batched;
+pub use batched::StructureSignature;
+
 mod serialization;
 pub use serialization::{
     DecodeError, DecodeLimits, EncodeError, PersistedScalar, TypedPersistenceCodec,

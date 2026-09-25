@@ -8,7 +8,7 @@ pub type DualVec = SmallVec<[bool; 8]>;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Trivial;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Placement {
     Host,
     /// Storage resident on a CUDA device, identified by its ordinal.
