@@ -1892,8 +1892,13 @@ fn magnitudes_for_sum_squares<D: CudaScalar>(
 ///
 /// The epsilon is the payload's own real lane
 /// ([`crate::cuda_hermitian::HERMITIAN_TOLERANCE_EPSILONS`]), matching the
-/// host twin `normwise_hermitian`; the `f64` and [`Complex64`] decisions are
-/// bit-for-bit what they were.
+/// host twin `normwise_hermitian`.
+///
+/// A complex entry whose modulus overflows the lane is rejected here (the
+/// `hypot`-based `abs` gives infinity) but admitted by the component-scaled
+/// host twin. That disagreement is on the safe side and predates the power
+/// of two normalizer; it is why the device tests' scale window stops at
+/// `2^(MAX_EXP - 4)`.
 ///
 /// The normal and conjugate-transposed views are materialized and reduced on
 /// device. Only scalar norm metadata is downloaded; the receiver region is

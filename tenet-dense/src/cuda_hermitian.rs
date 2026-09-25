@@ -67,12 +67,12 @@ pub(crate) fn scaled_hermitian_residual_accepts(
 /// a power of two is also exact wherever the product stays normal.
 ///
 /// `k` is read from the exponent bits, never from a float `log2`. It is
-/// clamped so `2^-k` is a *normal* number of the lane: below
-/// `2^-(MAX_EXP - 1)` (only a subnormal `scale`) `2^-k` would overflow, and
-/// the clamped product still has a normal maximum (`>= 2^-22` in `f32`,
-/// `>= 2^-51` in `f64`); at `2^(MAX_EXP - 1)` and above `2^-k` would be
-/// subnormal, which a flush-to-zero kernel may zero, and the clamped product
-/// is merely in `[2, 4)`.
+/// clamped to `[-(MAX_EXP - 2), MAX_EXP - 2]` so both `2^-k` and its
+/// reciprocal `2^k` (the operand a real payload divides by) are *normal*
+/// numbers of the lane, which flush-to-zero cannot touch. The lower bound
+/// acts only on a subnormal `scale`, whose clamped product still has a normal
+/// maximum (`>= 2^-23` in `f32`, `>= 2^-52` in `f64`); the upper bound acts
+/// on the top octave, whose clamped product is merely in `[2, 4)`.
 pub(crate) fn power_of_two_normalizer(scale: f64, max_exp: i32) -> f64 {
     const MANTISSA_BITS: u32 = 52;
     const BIAS: i32 = 1023;
@@ -85,7 +85,7 @@ pub(crate) fn power_of_two_normalizer(scale: f64, max_exp: i32) -> f64 {
     } else {
         biased - BIAS
     };
-    let k = floor_log2.clamp(-(max_exp - 1), max_exp - 2);
+    let k = floor_log2.clamp(-(max_exp - 2), max_exp - 2);
     f64::from_bits(((BIAS - k) as u64) << MANTISSA_BITS)
 }
 
@@ -188,34 +188,33 @@ mod tests {
     }
 
     /// Every finite positive scale of either lane lands in `[1, 2)` except
-    /// where the clamp is documented to act, and the multiplier is always a
-    /// normal number of the lane, so narrowing and flush-to-zero leave it alone.
+    /// where the clamp is documented to act, and the multiplier and its
+    /// reciprocal are always normal numbers of the lane, so narrowing and
+    /// flush-to-zero leave them alone.
     #[test]
     fn the_power_of_two_normalizer_is_exact_across_each_lane() {
-        fn check(scale: f64, max_exp: i32, min_positive: f64, max_power: f64) {
+        fn check(scale: f64, max_exp: i32, min_positive: f64) {
+            // `1 / MIN_POSITIVE = 2^(MAX_EXP - 2)`, the largest power of two
+            // whose reciprocal is still normal.
+            let max_power = min_positive.recip();
             let normalizer = power_of_two_normalizer(scale, max_exp);
-            assert!(
-                (min_positive..=max_power).contains(&normalizer),
-                "{scale:e}: {normalizer:e} is not a normal lane power of two"
-            );
-            assert_eq!(normalizer.to_bits() & ((1 << 52) - 1), 0, "{scale:e}");
+            for value in [normalizer, normalizer.recip()] {
+                assert!(
+                    (min_positive..=max_power).contains(&value),
+                    "{scale:e}: {value:e} is not a normal lane power of two"
+                );
+                assert_eq!(value.to_bits() & ((1 << 52) - 1), 0, "{scale:e}");
+            }
             let scaled = scale * normalizer;
-            if scale < 2.0 / max_power {
+            if scale < min_positive {
                 assert_eq!(normalizer, max_power, "{scale:e}");
-            } else if scale >= max_power {
+            } else if scale >= 2.0 * max_power {
                 assert!((2.0..4.0).contains(&scaled), "{scale:e}: {scaled:e}");
             } else {
                 assert!((1.0..2.0).contains(&scaled), "{scale:e}: {scaled:e}");
             }
         }
-        let f32_lane = |scale: f64| {
-            check(
-                scale,
-                f32::MAX_EXP,
-                f64::from(f32::MIN_POSITIVE),
-                2f64.powi(127),
-            )
-        };
+        let f32_lane = |scale: f64| check(scale, f32::MAX_EXP, f64::from(f32::MIN_POSITIVE));
         for scale in [
             f32::from_bits(1),
             f32::from_bits(0x0000_1234),
@@ -230,7 +229,7 @@ mod tests {
         ] {
             f32_lane(f64::from(scale));
         }
-        let f64_lane = |scale: f64| check(scale, f64::MAX_EXP, f64::MIN_POSITIVE, 2f64.powi(1023));
+        let f64_lane = |scale: f64| check(scale, f64::MAX_EXP, f64::MIN_POSITIVE);
         for scale in [
             f64::from_bits(1),
             f64::from_bits(0x000f_ffff_ffff_ffff),
@@ -249,11 +248,11 @@ mod tests {
         assert!(
             f64::from(f32::from_bits(1))
                 * power_of_two_normalizer(f64::from(f32::from_bits(1)), f32::MAX_EXP)
-                >= 2f64.powi(-22)
+                >= 2f64.powi(-23)
         );
         assert!(
             f64::from_bits(1) * power_of_two_normalizer(f64::from_bits(1), f64::MAX_EXP)
-                >= 2f64.powi(-51)
+                >= 2f64.powi(-52)
         );
     }
 }
