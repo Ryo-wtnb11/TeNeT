@@ -8,11 +8,18 @@
 //! `D` of every consumer and is therefore checked by the compiler, not here.
 
 use std::hash::{Hash, Hasher};
+use std::marker::PhantomData;
 use std::sync::Arc;
 
 use tenet_core::{BlockStructureContent, HomSpaceId, Placement, RuleIdentity, TensorStorage};
 
-use super::{TensorMap, TypedSectorAdmission};
+use super::{
+    owned_repr, BoundDynamicFusionMapSpace, Runtime, TensorMap, TypedData, TypedSectorAdmission,
+    TypedTensorBody, TypedTensorRepr,
+};
+#[cfg(feature = "cuda")]
+use super::{CudaPayload, CudaStorage};
+use crate::error::Error;
 use crate::RuntimeIdentity;
 
 /// Content identity of a tensor's structure, placement and Runtime.
@@ -50,11 +57,7 @@ pub struct StructureSignature {
 
 impl PartialEq for StructureSignature {
     fn eq(&self, other: &Self) -> bool {
-        self.placement == other.placement
-            && self.runtime == other.runtime
-            && self.rule == other.rule
-            && self.homspace == other.homspace
-            && (Arc::ptr_eq(&self.structure, &other.structure) || self.structure == other.structure)
+        self.first_mismatch(other).is_none()
     }
 }
 
@@ -69,7 +72,51 @@ impl Hash for StructureSignature {
     }
 }
 
+/// The first determinant in which two [`StructureSignature`]s differ.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SignatureField {
+    /// Host or device ordinal.
+    Placement,
+    /// The owning Runtime.
+    Runtime,
+    /// The fusion-rule identity.
+    Rule,
+    /// A codomain or domain leg's sectors, degeneracies or dual flag.
+    HomSpace,
+    /// The fusion-tree blocks, their order or dense offsets.
+    BlockStructure,
+}
+
+/// A payload representation a [`StackedTensorMap`] cannot hold.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BatchMemberRepresentation {
+    /// A lazy adjoint view over its parent's payload.
+    LazyAdjoint,
+    /// A compact diagonal spectrum, whose dense layout is not stored.
+    CompactDiagonal,
+}
+
 impl StructureSignature {
+    /// The first field in which `other` differs, in the order `==` checks
+    /// them, or `None` when the signatures are equal.
+    pub fn first_mismatch(&self, other: &Self) -> Option<SignatureField> {
+        if self.placement != other.placement {
+            Some(SignatureField::Placement)
+        } else if self.runtime != other.runtime {
+            Some(SignatureField::Runtime)
+        } else if self.rule != other.rule {
+            Some(SignatureField::Rule)
+        } else if self.homspace != other.homspace {
+            Some(SignatureField::HomSpace)
+        } else if !(Arc::ptr_eq(&self.structure, &other.structure)
+            || self.structure == other.structure)
+        {
+            Some(SignatureField::BlockStructure)
+        } else {
+            None
+        }
+    }
+
     /// The process-local block-structure intern id, for diagnostics and
     /// tests only. It is not part of equality.
     #[doc(hidden)]
@@ -121,12 +168,196 @@ where
     }
 }
 
+/// `B` tensors of one [`StructureSignature`] in one buffer: member `i`
+/// occupies `[i * L, (i + 1) * L)`, where `L` is the signature's required
+/// payload length. There is no padding and no member leg; the member axis
+/// exists only as this stride.
+///
+/// A stack is the operand of a prepared batched handle, not a tensor. It
+/// deliberately does not implement `TensorStorage`, whose `len` would be
+/// `B * L` and would let an ordinary per-tensor kernel run on member 0 only:
+///
+/// ```compile_fail
+/// use tenet::core::{TensorStorage, U1FusionRule};
+/// use tenet::typed::StackedTensorMap;
+///
+/// fn as_storage<S: TensorStorage<f64>>(_: &S) {}
+/// fn reject(stack: &StackedTensorMap<U1FusionRule, f64>) {
+///     as_storage(stack);
+/// }
+/// ```
+///
+/// The same imports compile when the stack is used as a stack:
+///
+/// ```
+/// use tenet::core::{TensorStorage, U1FusionRule};
+/// use tenet::typed::StackedTensorMap;
+///
+/// fn as_storage<S: TensorStorage<f64>>(_: &S) {}
+/// fn accept(stack: &StackedTensorMap<U1FusionRule, f64>) {
+///     let _ = stack.signature();
+///     as_storage(&vec![0.0_f64]);
+/// }
+/// ```
+pub struct StackedTensorMap<R, D, S = Vec<D>> {
+    runtime: Runtime,
+    space: BoundDynamicFusionMapSpace<R>,
+    signature: StructureSignature,
+    storage: S,
+    members: usize,
+    member_len: usize,
+    _payload: PhantomData<D>,
+}
+
+impl<R, D, S> StackedTensorMap<R, D, S> {
+    /// The signature every member shares, with the stack's placement.
+    pub fn signature(&self) -> &StructureSignature {
+        &self.signature
+    }
+
+    /// The member count `B`. Never zero: [`Self::pack`] rejects an empty
+    /// batch.
+    #[allow(clippy::len_without_is_empty)]
+    pub fn len(&self) -> usize {
+        self.members
+    }
+}
+
+impl<R, D> StackedTensorMap<R, D>
+where
+    R: TypedSectorAdmission,
+    D: Copy,
+{
+    /// Copies `members` into one stacked buffer: one allocation of `B * L`
+    /// elements and `B` copies.
+    ///
+    /// Every member is checked before anything is copied. A lazy adjoint or
+    /// a compact diagonal member returns [`Error::UnsupportedBatchMember`];
+    /// a member whose signature differs from member 0's returns
+    /// [`Error::BatchSignatureMismatch`] naming that member and the first
+    /// differing field. An empty batch is an [`Error::InvalidArgument`].
+    pub fn pack<T: AsRef<TensorMap<R, D>>>(members: &[T]) -> Result<Self, Error> {
+        let first = members
+            .first()
+            .ok_or_else(|| Error::InvalidArgument("a stack needs at least one member".into()))?
+            .as_ref();
+        let signature = first.structure_signature();
+        let payloads = members
+            .iter()
+            .enumerate()
+            .map(|(member, tensor)| {
+                let tensor = tensor.as_ref();
+                let payload = dense_payload(tensor).map_err(|representation| {
+                    Error::UnsupportedBatchMember {
+                        member,
+                        representation,
+                    }
+                })?;
+                match signature.first_mismatch(&tensor.structure_signature()) {
+                    Some(field) => Err(Error::BatchSignatureMismatch {
+                        member: Some(member),
+                        field,
+                    }),
+                    None => Ok(payload),
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let space = first.logical_space().clone();
+        let member_len = space.space().required_len()?;
+        let total = member_len.checked_mul(members.len()).ok_or_else(|| {
+            Error::InvalidArgument("stacked payload length overflows usize".into())
+        })?;
+        let mut storage = Vec::with_capacity(total);
+        for payload in payloads {
+            storage.extend_from_slice(payload);
+        }
+        Ok(Self {
+            runtime: first.runtime.clone(),
+            space,
+            signature,
+            storage,
+            members: members.len(),
+            member_len,
+            _payload: PhantomData,
+        })
+    }
+
+    /// An owned, bit-identical copy of member `i`.
+    pub fn member(&self, i: usize) -> Result<TensorMap<R, D>, Error> {
+        if i >= self.members {
+            return Err(Error::InvalidArgument(format!(
+                "member {i} is out of range for a stack of {}",
+                self.members
+            )));
+        }
+        let start = i * self.member_len;
+        let data = self.storage[start..start + self.member_len].to_vec();
+        Ok(TensorMap {
+            runtime: self.runtime.clone(),
+            repr: owned_repr(TypedTensorBody::dense(self.space.clone(), data)),
+        })
+    }
+}
+
+/// The owned dense payload of `tensor`, or the representation a stack
+/// cannot hold.
+fn dense_payload<R, D>(tensor: &TensorMap<R, D>) -> Result<&[D], BatchMemberRepresentation> {
+    match &tensor.repr {
+        TypedTensorRepr::Adjoint(_) => Err(BatchMemberRepresentation::LazyAdjoint),
+        TypedTensorRepr::Owned(body) => match body.data.as_ref() {
+            TypedData::Dense(data) => Ok(data),
+            TypedData::Diagonal(_) => Err(BatchMemberRepresentation::CompactDiagonal),
+        },
+    }
+}
+
+#[cfg(feature = "cuda")]
+impl<R, D: CudaPayload> StackedTensorMap<R, D> {
+    /// Uploads the whole stack with one host-to-device transfer to this
+    /// stack's Runtime CUDA context.
+    pub fn to_cuda(&self) -> Result<StackedTensorMap<R, D, CudaStorage<D>>, Error> {
+        let lease = self.runtime.lease_cuda()?;
+        let storage = CudaStorage::upload(&lease, &self.storage)?;
+        Ok(self.with_storage(storage))
+    }
+}
+
+#[cfg(feature = "cuda")]
+impl<R, D: CudaPayload> StackedTensorMap<R, D, CudaStorage<D>> {
+    /// Downloads the whole stack with one device-to-host transfer.
+    pub fn to_host(&self) -> Result<StackedTensorMap<R, D>, Error> {
+        let lease = self.runtime.lease_cuda()?;
+        let storage = self.storage.download(&lease)?;
+        Ok(self.with_storage(storage))
+    }
+}
+
+#[cfg(feature = "cuda")]
+impl<R, D, S> StackedTensorMap<R, D, S> {
+    fn with_storage<T: TensorStorage<D>>(&self, storage: T) -> StackedTensorMap<R, D, T> {
+        StackedTensorMap {
+            runtime: self.runtime.clone(),
+            space: self.space.clone(),
+            signature: StructureSignature {
+                placement: storage.placement(),
+                ..self.signature.clone()
+            },
+            storage,
+            members: self.members,
+            member_len: self.member_len,
+            _payload: PhantomData,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
-    use tenet_core::{Placement, TensorStorage, U1FusionRule, U1Irrep};
+    use std::sync::Arc;
+
+    use tenet_core::{Placement, RuleIdentity, TensorStorage, U1FusionRule, U1Irrep};
 
     use super::super::Runtime;
     use super::super::{owned_repr, GradedSpace, TensorMap, TypedTensorBody};
@@ -188,6 +419,49 @@ mod tests {
         assert!(host_signature == host_again);
         assert_eq!(hash_of(&host_signature), hash_of(&host_again));
         assert!(cuda0 == placed(Placement::Cuda(0)).structure_signature());
+    }
+
+    #[test]
+    fn first_mismatch_names_each_field_alone() {
+        // What: replacing one field of an equal signature with another
+        // signature's value is reported as exactly that field, and `==`
+        // agrees with `first_mismatch`.
+        use super::SignatureField;
+
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let other_runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let q = U1Irrep::new;
+        let leg = GradedSpace::try_new(U1FusionRule, [(q(0), 2), (q(1), 1)]).unwrap();
+        let wide = GradedSpace::try_new(U1FusionRule, [(q(0), 3), (q(1), 1)]).unwrap();
+        let signature = |runtime: &Runtime, leg: &GradedSpace<U1FusionRule>| {
+            TensorMap::<_, f64>::zeros(runtime, [leg, leg], [leg])
+                .unwrap()
+                .structure_signature()
+        };
+        let base = signature(&runtime, &leg);
+        let other = signature(&other_runtime, &wide);
+        assert_eq!(base.first_mismatch(&base.clone()), None);
+
+        let mut cases = Vec::new();
+        let mut changed = base.clone();
+        changed.placement = Placement::Cuda(0);
+        cases.push((changed, SignatureField::Placement));
+        let mut changed = base.clone();
+        changed.runtime = other.runtime.clone();
+        cases.push((changed, SignatureField::Runtime));
+        let mut changed = base.clone();
+        changed.rule = RuleIdentity::from_canonical_bytes::<u8>(1, Arc::from([]));
+        cases.push((changed, SignatureField::Rule));
+        let mut changed = base.clone();
+        changed.homspace = other.homspace.clone();
+        cases.push((changed, SignatureField::HomSpace));
+        let mut changed = base.clone();
+        changed.structure = other.structure.clone();
+        cases.push((changed, SignatureField::BlockStructure));
+        for (changed, field) in cases {
+            assert_eq!(base.first_mismatch(&changed), Some(field));
+            assert!(base != changed, "{field:?}");
+        }
     }
 
     #[cfg(feature = "racah-generated")]

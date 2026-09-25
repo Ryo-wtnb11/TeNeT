@@ -40,6 +40,7 @@ mod placement;
 mod profile;
 pub mod replay_backend;
 mod scalar;
+mod stacked;
 pub mod storage_scratch;
 pub mod strided;
 pub mod structure_identity;
@@ -91,6 +92,8 @@ pub use scalar::{
     RealStructuralCoefficient, RecouplingCoefficientAction, TransformScale, TreeTransformScalar,
     WideScalar,
 };
+#[doc(hidden)]
+pub use stacked::{StackedStorageView, StackedStorageViewMut};
 pub use tensoradd::*;
 pub use transform_key::{TreeTransformOperation, TreeTransformOperationKind};
 pub use transform_plan::{
