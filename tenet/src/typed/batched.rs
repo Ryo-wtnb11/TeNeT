@@ -92,8 +92,7 @@ pub enum SignatureField {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum BatchMemberRepresentation {
-    /// A lazy adjoint view over its parent's payload. Own it first with
-    /// `adj.zeros_like().absorb(&adj)`.
+    /// A lazy adjoint view over its parent's payload.
     LazyAdjoint,
     /// A compact diagonal spectrum, whose dense layout is not stored.
     CompactDiagonal,
@@ -102,7 +101,7 @@ pub enum BatchMemberRepresentation {
 impl StructureSignature {
     /// The first field in which `other` differs, in the order `==` checks
     /// them, or `None` when the signatures are equal.
-    pub fn first_mismatch(&self, other: &Self) -> Option<SignatureField> {
+    pub(crate) fn first_mismatch(&self, other: &Self) -> Option<SignatureField> {
         if self.placement != other.placement {
             Some(SignatureField::Placement)
         } else if self.runtime != other.runtime {
@@ -240,8 +239,8 @@ where
     /// [`Error::BatchSignatureMismatch`] naming that member and the first
     /// differing field. An empty batch is an [`Error::InvalidArgument`].
     ///
-    /// A lazy adjoint `adj` packs after `adj.zeros_like().absorb(&adj)`,
-    /// which returns an owned dense copy.
+    /// Lazy adjoints are not packed: a handle consumes adjoint operands
+    /// through its orientation flag (#1287 leaf L8) instead.
     pub fn pack<T: AsRef<TensorMap<R, D>>>(members: &[T]) -> Result<Self, Error> {
         let first = members
             .first()

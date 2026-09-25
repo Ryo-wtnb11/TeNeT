@@ -50,8 +50,7 @@ pub enum Error {
         /// The first differing determinant.
         field: SignatureField,
     },
-    /// A batch member's payload is not an owned dense buffer. A lazy
-    /// adjoint `adj` becomes one with `adj.zeros_like().absorb(&adj)`.
+    /// A batch member's payload is not an owned dense buffer.
     UnsupportedBatchMember {
         /// The rejected member.
         member: usize,

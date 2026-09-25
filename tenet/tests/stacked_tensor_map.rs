@@ -137,14 +137,6 @@ fn lazy_adjoint_and_compact_diagonal_members_are_rejected() {
         ],
     )
     .unwrap();
-    // The documented owning route for a lazy adjoint packs bit-exactly.
-    let owned = lazy.zeros_like().absorb(&lazy).unwrap();
-    let stack = StackedTensorMap::pack(&[&square, &owned]).unwrap();
-    fixtures::assert_bit_exact(
-        stack.member(1).unwrap().data(),
-        lazy.data(),
-        "owned adjoint",
-    );
     for (tensor, representation) in [
         (&lazy, BatchMemberRepresentation::LazyAdjoint),
         (&diagonal, BatchMemberRepresentation::CompactDiagonal),
