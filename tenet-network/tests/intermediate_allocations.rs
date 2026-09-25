@@ -904,7 +904,10 @@ fn measured_typed_overwrite_witness() {
                 fresh.iter().all(|sample| {
                     sample.payload_retained_live_bytes == sample.payload_size_bytes
                         && sample.payload_output_live_bytes == sample.payload_size_bytes
-                        && sample.payload_alloc_calls == 2
+                        // The first step's reordered output is the default order plus
+                        // a permute (#1461, TensorKit `copyC`): its temporary, its
+                        // result, and the network output.
+                        && sample.payload_alloc_calls == 3
                         && sample.registry_overflows == 0
                 }),
                 "{diagnostics}; fresh samples={fresh:?}"
