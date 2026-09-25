@@ -35,6 +35,8 @@ mod fusion_block;
 mod resolution;
 #[doc(hidden)]
 pub use resolution::{contraction_sources_are_untwisted_core_form, StorageContractResolution};
+#[cfg(test)]
+mod candidate_core_tests;
 mod scratch;
 #[cfg(test)]
 mod storage_contract_tests;

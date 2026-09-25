@@ -41,8 +41,10 @@ use super::fusion_block::{validate_fusion_contract_rule, FusionBlockContractWork
 use super::resolution::{
     compile_composition_plan, compile_core_plan, compile_prelowered_resolution, compile_resolution,
     compile_storage_resolution, try_compile_oriented_canonical_core_resolution,
-    try_compile_oriented_storage_composition_plan, try_compile_oriented_storage_contract_plan,
-    NonuniformTwist, Resolution, StorageContractResolution, StorageContractRoute,
+    try_compile_oriented_storage_composition_plan,
+    try_compile_oriented_storage_contract_candidate_plan,
+    try_compile_oriented_storage_contract_plan, NonuniformTwist, Resolution,
+    StorageContractResolution, StorageContractRoute,
 };
 use super::scratch::DynamicFusionScratchWorkspace;
 use super::structure::{TensorContractAxisPlan, TensorContractStructure};
@@ -623,12 +625,14 @@ where
 
     #[cfg(test)]
     fn record_top_level_resolution(&mut self, resolution: &Resolution<C>) {
-        self.last_top_level_resolution_was_core = matches!(resolution, Resolution::Core(_));
+        self.last_top_level_resolution_was_core =
+            matches!(resolution, Resolution::Core(_) | Resolution::SwappedCore(_));
         self.last_top_level_resolution_was_structure =
             matches!(resolution, Resolution::Structure(_));
         self.last_top_level_resolution_orientation = match resolution {
             Resolution::DynamicTree(plan) => Some(plan.orientation()),
             Resolution::Core(_) | Resolution::Structure(_) => None,
+            Resolution::SwappedCore(_) => Some(FusionContractOrientation::RhsLhs),
         };
     }
 
@@ -1551,13 +1555,14 @@ where
             Resolution::Core(plan) if plan.is_fully_direct() => {
                 plan.execute_direct_on_storage_prezeroed(gemm, dst, lhs, rhs)
             }
-            Resolution::Core(_) | Resolution::DynamicTree(_) | Resolution::Structure(_) => {
-                Err(OperationError::UnsupportedTensorContractScope {
-                    message: "storage-direct contraction supports only the canonical \
+            Resolution::Core(_)
+            | Resolution::SwappedCore(_)
+            | Resolution::DynamicTree(_)
+            | Resolution::Structure(_) => Err(OperationError::UnsupportedTensorContractScope {
+                message: "storage-direct contraction supports only the canonical \
                               fully-direct route; this contraction needs tree transforms \
                               or conjugate structures, which have no device kernels yet",
-                })
-            }
+            }),
         }
     }
 
@@ -1780,7 +1785,13 @@ where
         // pass with `beta = 0`; only the core replay honours `Zeroed`.
         let beta = init.active_beta();
         match resolution {
-            Resolution::Core(block_plan) => {
+            Resolution::Core(block_plan) | Resolution::SwappedCore(block_plan) => {
+                let ((lhs_structure, lhs_data), (rhs_structure, rhs_data)) =
+                    if matches!(resolution, Resolution::SwappedCore(_)) {
+                        ((rhs_structure, rhs_data), (lhs_structure, lhs_data))
+                    } else {
+                        ((lhs_structure, lhs_data), (rhs_structure, rhs_data))
+                    };
                 let Self {
                     contract_backend,
                     contract_workspace,
@@ -2191,7 +2202,7 @@ where
         self.record_top_level_resolution(&resolution);
 
         match &resolution {
-            Resolution::Core(block_plan) => {
+            Resolution::Core(block_plan) | Resolution::SwappedCore(block_plan) => {
                 let Self {
                     contract_backend,
                     contract_workspace,
@@ -2199,8 +2210,15 @@ where
                     ..
                 } = self;
                 let dst_structure = std::sync::Arc::clone(dst.structure());
-                let lhs_structure = std::sync::Arc::clone(lhs.structure());
-                let rhs_structure = std::sync::Arc::clone(rhs.structure());
+                let ((lhs_structure, lhs_data), (rhs_structure, rhs_data)) = {
+                    let lhs = (std::sync::Arc::clone(lhs.structure()), lhs.data());
+                    let rhs = (std::sync::Arc::clone(rhs.structure()), rhs.data());
+                    if matches!(resolution, Resolution::SwappedCore(_)) {
+                        (rhs, lhs)
+                    } else {
+                        (lhs, rhs)
+                    }
+                };
                 let mut kernels = crate::StridedHostKernelAdapter::default();
                 let mut gemm = super::fusion_block::BackendRank2Gemm::new(
                     contract_backend,
@@ -2214,9 +2232,9 @@ where
                     &dst_structure,
                     dst.data_mut(),
                     &lhs_structure,
-                    lhs.data(),
+                    lhs_data,
                     &rhs_structure,
-                    rhs.data(),
+                    rhs_data,
                     alpha,
                     beta,
                     profile,
@@ -2692,24 +2710,23 @@ where
     validate_storage_contract_request(dst_space, lhs, rhs, axes)?;
     // A twist that is not uniform within one coupled-sector matrix has no
     // per-job alpha; the DynamicTree artifact applies it per block instead.
-    let Some(plan) = try_compile_oriented_storage_contract_plan(
+    let Some(route) = try_compile_oriented_storage_contract_candidate_plan(
         rule,
         dst_space.space(),
         lhs,
         rhs,
         axes,
-        NonuniformTwist::Decline,
     )?
     else {
         return Ok(None);
     };
-    if !plan.is_fully_direct() {
+    if !route.block_plan_is_fully_direct() {
         return Err(OperationError::UnsupportedTensorContractScope {
             message: "storage-direct contraction supports only canonical fully-direct oriented \
                       operands",
         });
     }
-    StorageContractResolution::new(StorageContractRoute::Core(plan)).map(Some)
+    StorageContractResolution::new(route).map(Some)
 }
 
 /// Canonical storage contraction over parent buffers with lazy operand

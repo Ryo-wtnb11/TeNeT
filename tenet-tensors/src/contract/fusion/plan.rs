@@ -81,7 +81,8 @@ pub(crate) enum FusionContractOrientation {
 }
 
 const FORWARD_ORIENTATIONS: [FusionContractOrientation; 1] = [FusionContractOrientation::LhsRhs];
-const CACHED_ORIENTATIONS: [FusionContractOrientation; 2] = [
+/// TensorKit `contract!` tie order: A·B (m1, m2) before B·A (m3, m4).
+pub(crate) const CACHED_ORIENTATIONS: [FusionContractOrientation; 2] = [
     FusionContractOrientation::LhsRhs,
     FusionContractOrientation::RhsLhs,
 ];

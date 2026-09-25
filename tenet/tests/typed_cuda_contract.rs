@@ -37,10 +37,11 @@ mod contract_cases;
 
 use common::{DevicePayload, DeviceRule};
 use contract_cases::{
-    assert_close, blas_contract_oracle, dense_oracle, fermion_su2, fermionic_blas_contract_oracle,
-    fermionic_general, fz2_tensorkit_loops, lazy_cases, poisoned_destination, product_general,
-    su2_bent, su2_reordered, su2_structure_cases, u1_inactive_cases, u1_lhs_identity, u1_rank_five,
-    u1_reordered, u1_rhs_identity, Case, TwistRole,
+    assert_close, blas_contract_oracle, candidate_core_probes, dense_oracle, fermion_su2,
+    fermion_u1, fermionic_blas_contract_oracle, fermionic_general, fz2_tensorkit_loops, lazy_cases,
+    poisoned_destination, product_general, su2, su2_bent, su2_reordered, su2_structure_cases,
+    u1_inactive_cases, u1_lhs_identity, u1_non_self_dual, u1_rank_five, u1_reordered,
+    u1_rhs_identity, Case, FermionU1, TwistRole,
 };
 use num_complex::{Complex32, Complex64};
 use tenet::dense::{cuda_transfer_stats, CudaTransferStats};
@@ -217,6 +218,32 @@ fn lazy_at<D: DevicePayload>(runtime: &Runtime) {
     for case in lazy_cases(&product_general::<D>(runtime).lhs, "U(1) x SU(2) lazy") {
         check(case);
     }
+}
+
+/// The zero-copy sorted/swapped candidates (#1468) run the device Core
+/// route, swapped operands and lazy-adjoint GEMM flags included. The
+/// fermionic probes take the twisted `blas_contract!` oracle: C2 and L5
+/// contract dual B legs in their literal sequence, which TensorKit twists.
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn zero_copy_candidates_match_the_host_at_every_dtype() {
+    let runtime = Runtime::builder().cuda(0).build().unwrap();
+    fn at<D: DevicePayload>(runtime: &Runtime) {
+        for (case, _) in candidate_core_probes::<_, D>(runtime, &u1_non_self_dual()) {
+            check(case);
+        }
+        for (case, _) in candidate_core_probes::<_, D>(runtime, &su2()) {
+            check(case);
+        }
+        let twist = |t: &TensorMap<FermionU1, D>, legs: &[usize]| t.twist(legs).unwrap();
+        for (case, _) in candidate_core_probes::<_, D>(runtime, &fermion_u1()) {
+            check_fermionic(case, twist);
+        }
+    }
+    at::<f64>(&runtime);
+    at::<Complex64>(&runtime);
+    at::<f32>(&runtime);
+    at::<Complex32>(&runtime);
 }
 
 #[test]

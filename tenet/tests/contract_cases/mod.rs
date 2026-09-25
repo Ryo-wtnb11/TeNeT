@@ -309,6 +309,62 @@ pub fn u1_rhs_identity<D: Payload>(runtime: &Runtime) -> Case<U1FusionRule, D> {
     }
 }
 
+/// U(1) with `-1` and `1` at different degeneracies: `V != V*`.
+pub fn u1_non_self_dual() -> GradedSpace<U1FusionRule> {
+    u1(&[(-1, 2), (0, 1), (1, 3)])
+}
+
+/// The contraction-candidate audit probes (#1468) on `V⊗V ← V⊗V` operands,
+/// each paired with its literal Core control's name. They are free in
+/// TensorKit only after the paired-axis sort or the operand swap; `P'` is a
+/// lazy adjoint:
+///
+/// - C0 `A[2,3]·B[0,1]` (literal control), C1 `A[3,2]·B[1,0]`,
+///   C2 `A[0,1]·B[2,3] → [2,3,0,1]`;
+/// - L4 `P'[2,3]·B[0,1]` (literal control), L3 `P'[3,2]·B[1,0]`,
+///   L5 `A[0,1]·P'[2,3] → [2,3,0,1]`, L7 `A[3,2]·P'[1,0]`.
+pub fn candidate_core_probes<R, D>(
+    runtime: &Runtime,
+    v: &GradedSpace<R>,
+) -> Vec<(Case<R, D>, &'static str)>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: Payload,
+{
+    let a: TensorMap<R, D> = tensor(runtime, &[v, v], &[v, v], 61);
+    let b: TensorMap<R, D> = tensor(runtime, &[v, v], &[v, v], 62);
+    let lazy = tensor::<R, D>(runtime, &[v, v], &[v, v], 63)
+        .adjoint()
+        .unwrap();
+    let case = |name,
+                lhs: &TensorMap<R, D>,
+                rhs: &TensorMap<R, D>,
+                l: [usize; 2],
+                r: [usize; 2],
+                swap: bool| Case {
+        name,
+        lhs: lhs.clone(),
+        rhs: rhs.clone(),
+        lhs_axes: l.to_vec(),
+        rhs_axes: r.to_vec(),
+        output_axes: if swap {
+            vec![2, 3, 0, 1]
+        } else {
+            vec![0, 1, 2, 3]
+        },
+        dense: false,
+    };
+    vec![
+        (case("C0", &a, &b, [2, 3], [0, 1], false), "C0"),
+        (case("C1", &a, &b, [3, 2], [1, 0], false), "C0"),
+        (case("C2", &a, &b, [0, 1], [2, 3], true), "C0"),
+        (case("L4", &lazy, &b, [2, 3], [0, 1], false), "L4"),
+        (case("L3", &lazy, &b, [3, 2], [1, 0], false), "L4"),
+        (case("L5", &a, &lazy, [0, 1], [2, 3], true), "L4"),
+        (case("L7", &a, &lazy, [3, 2], [1, 0], false), "L4"),
+    ]
+}
+
 /// A destination of `case`'s result space holding NaN everywhere: a retained
 /// buffer `contract_overwrite_into` must rewrite element by element.
 pub fn poisoned_destination<R, D>(case: &Case<R, D>) -> TensorMap<R, D>

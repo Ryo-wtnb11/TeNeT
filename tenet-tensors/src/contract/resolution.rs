@@ -10,14 +10,15 @@ use tenet_core::{FusionTreeHomSpace, FusionTreePairOrientation, MultiplicityFree
 
 use super::structure::TensorContractStructure;
 use crate::{DenseBlockScalar, OperationError};
-use tenet_operations::axis::TensorContractSpec;
+use tenet_operations::axis::{OutputAxisOrder, TensorContractSpec};
 use tenet_operations::fusion_replay::FusionBlockContractPlan;
 use tenet_operations::TensorContractFusionProfile;
 
 use super::dynamic_space::{DynamicFusionMapSpace, FusionOperand, FusionOperandLayout};
 use super::fusion::{
-    external_axis_is_dual, is_core_form_fusion_source_contract, rhs_contract_twist_factor_oriented,
-    FusionContractPlan,
+    contracted_axis_order_candidates, external_axis_is_dual, is_core_form_fusion_source_contract,
+    rhs_contract_twist_factor_oriented, FusionContractOrientation, FusionContractPlan,
+    CACHED_ORIENTATIONS,
 };
 use super::fusion_block::{
     compile_fusion_block_contract_plan_core_geometry,
@@ -32,6 +33,10 @@ use super::fusion_block::{
 pub(crate) enum Resolution<C = f64> {
     /// Coupled-sector direct GEMM (TensorKit `mul!` shape).
     Core(Arc<FusionBlockContractPlan<C>>),
+    /// [`Self::Core`] of the swapped candidate B·A (TensorKit
+    /// `blas_contract!(C, B, reverse(pB), A, reverse(pA), pAB′)`): the plan's
+    /// lhs is the caller's rhs, and replay passes the operands swapped.
+    SwappedCore(Arc<FusionBlockContractPlan<C>>),
     /// Source/output tree transforms around a core contraction
     /// (TensorKit `@tensor` shape).
     DynamicTree(Arc<FusionContractPlan>),
@@ -56,11 +61,18 @@ pub struct StorageContractResolution<C = f64> {
 }
 
 impl<C: DenseBlockScalar> StorageContractRoute<C> {
+    pub(crate) fn block_plan_is_fully_direct(&self) -> bool {
+        match self {
+            Self::Core(plan) | Self::SwappedCore(plan) => plan.is_fully_direct(),
+            Self::DynamicTree(artifact) => artifact.block_plan_is_fully_direct(),
+        }
+    }
+
     /// The core plan whose GEMMs this route runs.
     #[cfg(feature = "cuda")]
     pub(crate) fn block_plan(&self) -> &FusionBlockContractPlan<C> {
         match self {
-            Self::Core(plan) => plan,
+            Self::Core(plan) | Self::SwappedCore(plan) => plan,
             Self::DynamicTree(artifact) => artifact.block_plan(),
         }
     }
@@ -73,6 +85,10 @@ pub(crate) enum StorageContractRoute<C> {
     /// as per-job alpha).
     #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
     Core(Arc<FusionBlockContractPlan<C>>),
+    /// [`Self::Core`] of the swapped candidate B·A; replay passes the
+    /// operands swapped (see [`Resolution::SwappedCore`]).
+    #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+    SwappedCore(Arc<FusionBlockContractPlan<C>>),
     /// Source tree transforms → fully-direct core GEMM → output transform.
     DynamicTree(Arc<super::dynamic::DynamicTreeExecutionArtifact<C>>),
 }
@@ -93,7 +109,7 @@ impl<C: DenseBlockScalar> StorageContractResolution<C> {
     /// writes.
     pub fn requires_source_twist(&self) -> bool {
         match &self.route {
-            StorageContractRoute::Core(_) => false,
+            StorageContractRoute::Core(_) | StorageContractRoute::SwappedCore(_) => false,
             StorageContractRoute::DynamicTree(artifact) => artifact.requires_source_twist(),
         }
     }
@@ -104,7 +120,9 @@ impl<C: DenseBlockScalar> StorageContractResolution<C> {
     #[cfg(test)]
     pub(crate) fn direct_destination_inactive_blocks(&self) -> Option<usize> {
         match &self.route {
-            StorageContractRoute::Core(plan) => Some(plan.inactive_destination_regions().len()),
+            StorageContractRoute::Core(plan) | StorageContractRoute::SwappedCore(plan) => {
+                Some(plan.inactive_destination_regions().len())
+            }
             StorageContractRoute::DynamicTree(artifact) => {
                 artifact.direct_destination_inactive_blocks()
             }
@@ -216,7 +234,31 @@ where
                 return Ok(Resolution::Core(Arc::new(plan)));
             }
         }
+        let candidate = try_zero_copy_contract_candidates(
+            rule,
+            dst.nout(),
+            FusionOperand::direct(lhs),
+            FusionOperand::direct(rhs),
+            axes,
+            false,
+            |core_lhs, core_rhs, core_axes, orientation| {
+                let (core_lhs, core_rhs) = (core_lhs.storage_space(), core_rhs.storage_space());
+                let Some(validated) =
+                    CoreContractPreflight::compile(rule, dst, core_lhs, core_rhs, core_axes)?
+                        .validate_core_geometry()?
+                else {
+                    return Ok(None);
+                };
+                let plan = compile_fusion_block_contract_plan_validated(
+                    validated, dst, core_lhs, core_rhs,
+                )?;
+                Ok(Some(Resolution::core(plan, orientation)))
+            },
+        )?;
         record_resolution_preflight(&mut profile, preflight_start);
+        if let Some(resolution) = candidate {
+            return Ok(resolution);
+        }
         return compile_dynamic_tree_plan::<R::Scalar, PROFILED>(compile_dynamic, &mut profile);
     }
     if let Some(structure) = compile_structure()? {
@@ -298,8 +340,9 @@ where
 }
 
 /// Tries the parent-owned coupled-region route before an adjoint operand
-/// derives logical block keys. A miss is not an error: the exact projection is
-/// then prepared by the general prelowered lowering path.
+/// derives logical block keys, on every zero-copy TensorKit candidate (see
+/// [`try_zero_copy_contract_candidates`]). A miss is not an error: the exact
+/// projection is then prepared by the general prelowered lowering path.
 pub(crate) fn try_compile_oriented_canonical_core_resolution<R>(
     rule: &R,
     dst: &DynamicFusionMapSpace,
@@ -311,26 +354,144 @@ where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: DenseBlockScalar,
 {
-    let preflight = CoreContractPreflight::compile_oriented(
+    try_zero_copy_contract_candidates(
         rule,
-        dst.homspace(),
-        lhs.oriented_homspace(),
-        rhs.oriented_homspace(),
+        dst.nout(),
+        lhs,
+        rhs,
         axes,
-    )?;
-    let Some(validated) = preflight.validate_core_geometry()? else {
-        return Ok(None);
-    };
-    if validated_rhs_contract_requires_twist(&validated)? {
+        false,
+        |core_lhs, core_rhs, core_axes, orientation| {
+            let preflight = CoreContractPreflight::compile_oriented(
+                rule,
+                dst.homspace(),
+                core_lhs.oriented_homspace(),
+                core_rhs.oriented_homspace(),
+                core_axes,
+            )?;
+            let Some(validated) = preflight.validate_core_geometry()? else {
+                return Ok(None);
+            };
+            let plan = try_compile_oriented_canonical_core_plan(
+                &validated,
+                dst,
+                core_lhs.storage_space(),
+                core_rhs.storage_space(),
+            )?;
+            Ok(plan.map(|plan| Resolution::core(plan, orientation)))
+        },
+    )
+}
+
+impl<C> Resolution<C> {
+    fn core(plan: FusionBlockContractPlan<C>, orientation: FusionContractOrientation) -> Self {
+        match orientation {
+            FusionContractOrientation::LhsRhs => Self::Core(Arc::new(plan)),
+            FusionContractOrientation::RhsLhs => Self::SwappedCore(Arc::new(plan)),
+        }
+    }
+}
+
+/// Runs `compile` on the TensorKit `contract!` candidates
+/// (`_contract_candidates`: pairs sorted by lhs or by rhs keys, times A·B or
+/// B·A) that need no source or output materialization, in TensorKit's tie
+/// order m1..m4, and returns the first compiled route.
+///
+/// A candidate qualifies when, over the *oriented* operand HomSpaces, its
+/// core-left operand contracts exactly its domain and its core-right operand
+/// exactly its codomain, both in order, and its output is the identity: the
+/// core GEMM then reads both parent buffers, a lazy adjoint as a GEMM
+/// adjoint flag. This is TensorKit `_contract_memcost == 0` with
+/// `has_shared_permute(::AdjointTensorMap)` (indexmanipulations.jl L282)
+/// delegating to the parent: a lazy adjoint whose permuted index order is its
+/// natural adjoint order is free. Unless `twist_consumable`, a candidate
+/// whose core-right contracted legs carry the fermionic supertrace twist is
+/// excluded, since `blas_contract!` must then copy one operand to twist it.
+///
+/// Why before the DynamicTree scorer, not inside it: DynamicTree cannot
+/// borrow a conjugated source (`source_layout_permutation_is_borrowable`),
+/// so a zero-cost score there would select a candidate that materializes.
+/// Every qualifying candidate has cost zero, the global minimum, so taking
+/// the first in tie order selects what `select_best_scored_contract_candidate`
+/// would under TensorKit's cost; when none compiles, the DynamicTree scorer
+/// runs unchanged. The checks here are axis and dual-flag comparisons only;
+/// `compile` runs the categorical preflight for a qualifying candidate.
+pub(crate) fn try_zero_copy_contract_candidates<'a, R, T>(
+    rule: &R,
+    dst_nout: usize,
+    lhs: FusionOperand<'a>,
+    rhs: FusionOperand<'a>,
+    axes: TensorContractSpec<'_>,
+    twist_consumable: bool,
+    mut compile: impl FnMut(
+        FusionOperand<'a>,
+        FusionOperand<'a>,
+        TensorContractSpec<'_>,
+        FusionContractOrientation,
+    ) -> Result<Option<T>, OperationError>,
+) -> Result<Option<T>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols,
+{
+    let (lhs_axes, rhs_axes) = (axes.lhs_contracting_axes(), axes.rhs_contracting_axes());
+    let contracted = lhs_axes.len();
+    let (lhs_rank, rhs_rank) = (lhs.storage_space().rank(), rhs.storage_space().rank());
+    if contracted != rhs_axes.len() || contracted > lhs_rank || contracted > rhs_rank {
         return Ok(None);
     }
-    let plan = try_compile_oriented_canonical_core_plan(
-        &validated,
-        dst,
-        lhs.storage_space(),
-        rhs.storage_space(),
-    )?;
-    Ok(plan.map(|plan| Resolution::Core(Arc::new(plan))))
+    let lhs_open = lhs_rank - contracted;
+    let open = lhs_open + rhs_rank - contracted;
+    let output_is = |expected: &mut dyn Iterator<Item = usize>| match axes.output_permutation() {
+        OutputAxisOrder::Identity => (0..open).eq(expected),
+        OutputAxisOrder::Axes(output) => output.iter().copied().eq(expected),
+    };
+    // pAB′: B·A writes (rhs open | lhs open).
+    let output_ok = [
+        output_is(&mut (0..open)),
+        output_is(&mut (lhs_open..open).chain(0..lhs_open)),
+    ];
+    if !output_ok.contains(&true) {
+        return Ok(None);
+    }
+    let fermionic = rule.braiding_style() == tenet_core::BraidingStyleKind::Fermionic;
+    let candidates = contracted_axis_order_candidates(lhs_axes, rhs_axes);
+    for (orientation, output_ok) in CACHED_ORIENTATIONS.into_iter().zip(output_ok) {
+        if !output_ok {
+            continue;
+        }
+        for candidate in &candidates {
+            let (core_lhs, core_rhs, core_lhs_axes, core_rhs_axes) = match orientation {
+                FusionContractOrientation::LhsRhs => (lhs, rhs, candidate.lhs(), candidate.rhs()),
+                FusionContractOrientation::RhsLhs => (rhs, lhs, candidate.rhs(), candidate.lhs()),
+            };
+            let (left, right) = (core_lhs.oriented_homspace(), core_rhs.oriented_homspace());
+            if dst_nout != left.nout()
+                || !core_lhs_axes.iter().copied().eq(left.nout()..left.rank())
+                || !core_rhs_axes.iter().copied().eq(0..right.nout())
+            {
+                continue;
+            }
+            if fermionic
+                && !twist_consumable
+                && core_rhs_axes
+                    .iter()
+                    .any(|&axis| right.external_axis_is_dual(axis) == Some(true))
+            {
+                continue;
+            }
+            let core_axes = TensorContractSpec::new_with_conjugation(
+                core_lhs_axes,
+                core_rhs_axes,
+                OutputAxisOrder::identity(),
+                core_lhs.storage_conjugate(),
+                core_rhs.storage_conjugate(),
+            );
+            if let Some(route) = compile(core_lhs, core_rhs, core_axes, orientation)? {
+                return Ok(Some(route));
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// Compiles the storage-only route with one categorical preflight. Ordinary
@@ -496,6 +657,44 @@ where
         )?
     };
     Ok(plan.map(Arc::new))
+}
+
+/// [`try_compile_oriented_storage_contract_plan`] over every zero-copy
+/// TensorKit candidate ([`try_zero_copy_contract_candidates`]); a uniform
+/// twist is consumed as per-job alpha, a nonuniform one declines.
+pub(crate) fn try_compile_oriented_storage_contract_candidate_plan<R>(
+    rule: &R,
+    dst: &DynamicFusionMapSpace,
+    lhs: FusionOperand<'_>,
+    rhs: FusionOperand<'_>,
+    axes: TensorContractSpec<'_>,
+) -> Result<Option<StorageContractRoute<R::Scalar>>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
+{
+    try_zero_copy_contract_candidates(
+        rule,
+        dst.nout(),
+        lhs,
+        rhs,
+        axes,
+        true,
+        |core_lhs, core_rhs, core_axes, orientation| {
+            let plan = try_compile_oriented_storage_contract_plan(
+                rule,
+                dst,
+                core_lhs,
+                core_rhs,
+                core_axes,
+                NonuniformTwist::Decline,
+            )?;
+            Ok(plan.map(|plan| match orientation {
+                FusionContractOrientation::LhsRhs => StorageContractRoute::Core(plan),
+                FusionContractOrientation::RhsLhs => StorageContractRoute::SwappedCore(plan),
+            }))
+        },
+    )
 }
 
 /// Twist-free counterpart used only by tensor-map composition.
@@ -913,7 +1112,9 @@ mod tests {
                     assert!(resolution.is_dynamic_tree());
                     core_dst = resolution.direct_destination_inactive_blocks().is_none();
                 });
-                // What: one core preflight per call (the route's), no core
+                // What: at most one core preflight per call (the Host
+                // route's; the device route rejects every candidate on axes
+                // alone, before any preflight), no core
                 // destination check for a non-core request, and only the
                 // HomSpaces TensorKit also forms: one permuted HomSpace per
                 // transformed source plus the core destination when the
@@ -927,7 +1128,14 @@ mod tests {
                     derived_homspace_builds: 2 + core_dst,
                 };
                 assert_eq!(host, expected, "host output order {output:?}");
-                assert_eq!(storage, expected, "storage output order {output:?}");
+                assert_eq!(
+                    storage,
+                    ContractCompileCounts {
+                        preflights: 0,
+                        ..expected
+                    },
+                    "storage output order {output:?}"
+                );
             }
         }
 
