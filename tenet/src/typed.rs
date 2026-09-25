@@ -12879,8 +12879,10 @@ where
     /// space: one device allocation for the output and one conjugating strided
     /// region copy per block from the parent allocation. Nothing is downloaded.
     /// The output is initialized by uploading zeros (#740), so the call also
-    /// moves one payload-sized host buffer into that upload. An owned tensor
-    /// is returned as a cheap [`Clone`].
+    /// moves one payload-sized host buffer into that upload. The first call
+    /// per dtype on a device context additionally uploads the region copy's
+    /// one-element unit scalar operand, which the context then keeps. An
+    /// owned tensor is returned as a cheap [`Clone`].
     ///
     /// # Errors
     ///

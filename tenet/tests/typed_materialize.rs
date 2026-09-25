@@ -184,3 +184,165 @@ fn materialize_keeps_owned_and_compact_representations() {
         adjoint.materialize().unwrap().network_reuse_class(false) == NetworkReuseClass::Compact
     );
 }
+
+// Independent oracle (reviewer, #1522): the physical-basis expansion of
+// `adjoint().materialize()` is the conjugate transpose of the parent's
+// physical expansion. This does not go through the reduced-block adjoint map.
+
+trait Conjugate: Copy {
+    fn conjugate(self) -> Self;
+    fn distance(self, other: Self) -> f64;
+}
+
+impl Conjugate for f64 {
+    fn conjugate(self) -> Self {
+        self
+    }
+    fn distance(self, other: Self) -> f64 {
+        (self - other).abs()
+    }
+}
+
+impl Conjugate for Complex64 {
+    fn conjugate(self) -> Self {
+        self.conj()
+    }
+    fn distance(self, other: Self) -> f64 {
+        (self - other).norm()
+    }
+}
+
+/// Returns how many entries would also match *without* conjugation, so a
+/// complex caller can prove the conjugation is observable.
+fn assert_physical_dagger<D: Conjugate>(
+    what: &str,
+    shape: &[usize],
+    nout: usize,
+    parent: &[D],
+    adjoint_shape: &[usize],
+    adjoint: &[D],
+) -> usize {
+    let rows: usize = shape[..nout].iter().product();
+    let cols: usize = shape[nout..].iter().product();
+    let mut expected_shape = shape[nout..].to_vec();
+    expected_shape.extend_from_slice(&shape[..nout]);
+    assert_eq!(adjoint_shape, expected_shape.as_slice(), "{what}: shape");
+    assert_eq!(adjoint.len(), rows * cols, "{what}: length");
+    let mut unconjugated_matches = 0;
+    for row in 0..rows {
+        for col in 0..cols {
+            let parent_entry = parent[row + rows * col];
+            let adjoint_entry = adjoint[col + cols * row];
+            assert!(
+                parent_entry.conjugate().distance(adjoint_entry) < 1e-12,
+                "{what}: entry ({row},{col})"
+            );
+            if parent_entry.distance(adjoint_entry) < 1e-12 {
+                unconjugated_matches += 1;
+            }
+        }
+    }
+    unconjugated_matches
+}
+
+macro_rules! dense_oracle {
+    ($leg:expr, $what:expr, $dtype:ty, $codomain:expr, $domain:expr, $seed:expr) => {{
+        let runtime = runtime();
+        let leg = $leg;
+        let dual = leg.try_dual().unwrap();
+        let tensor: TensorMap<_, $dtype> = TensorMap::rand_with_seed(
+            &runtime,
+            $codomain(&leg, &dual),
+            $domain(&leg, &dual),
+            $seed,
+        )
+        .unwrap();
+        let lazy = tensor.adjoint().unwrap();
+        assert!(lazy.network_reuse_class(false) == NetworkReuseClass::LazyAdjoint);
+        let owned = lazy.materialize().unwrap();
+        let parent = tensor.to_physical_dense().unwrap();
+        let adjoint = owned.to_physical_dense().unwrap();
+        let unconjugated = assert_physical_dagger::<$dtype>(
+            $what,
+            &parent.shape,
+            tensor.codomain_rank(),
+            &parent.data,
+            &adjoint.shape,
+            &adjoint.data,
+        );
+        (unconjugated, adjoint.data.len())
+    }};
+}
+
+#[test]
+fn materialize_matches_the_physical_conjugate_transpose() {
+    for (unconjugated, len) in [
+        dense_oracle!(
+            u1_leg(),
+            "U1 c64 2<-2",
+            Complex64,
+            |l, d| [l, d],
+            |d, l| [l, d],
+            2
+        ),
+        dense_oracle!(
+            u1_leg(),
+            "U1 c64 1<-2",
+            Complex64,
+            |l, _d| [l],
+            |l, d| [d, l],
+            3
+        ),
+        dense_oracle!(
+            u1_leg(),
+            "U1 c64 3<-1",
+            Complex64,
+            |l, d| [d, l, l],
+            |_l, d| [d],
+            4
+        ),
+        dense_oracle!(
+            su2_leg(),
+            "SU2 c64 2<-2",
+            Complex64,
+            |l, d| [l, d],
+            |d, l| [l, d],
+            6
+        ),
+        dense_oracle!(
+            su2_leg(),
+            "SU2 c64 1<-2",
+            Complex64,
+            |l, _d| [l],
+            |l, d| [d, l],
+            7
+        ),
+        dense_oracle!(
+            su2_leg(),
+            "SU2 c64 3<-1",
+            Complex64,
+            |l, d| [d, l, l],
+            |_l, d| [d],
+            8
+        ),
+    ] {
+        // Negative control: a transpose without conjugation must not pass.
+        assert!(unconjugated < len, "conjugation is not observable");
+    }
+    dense_oracle!(
+        u1_leg(),
+        "U1 f64 2<-2",
+        f64,
+        |l, d| [l, d],
+        |l, d| [l, d],
+        1
+    );
+    dense_oracle!(
+        su2_leg(),
+        "SU2 f64 2<-2",
+        f64,
+        |l, d| [l, d],
+        |l, d| [l, d],
+        5
+    );
+}

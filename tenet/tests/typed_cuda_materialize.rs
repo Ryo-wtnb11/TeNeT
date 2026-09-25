@@ -59,6 +59,9 @@ macro_rules! device_materialize_matches_host {
         let lazy = device.adjoint().unwrap();
         assert!(lazy.network_reuse_class(false) == NetworkReuseClass::LazyAdjoint);
 
+        // Warm-up: the region copy's unit scalar operand is uploaded once per
+        // dtype per context, which is not part of the per-call contract.
+        let _ = lazy.materialize().unwrap();
         let before = cuda_transfer_stats();
         let owned = lazy.materialize().unwrap();
         let after = cuda_transfer_stats();
