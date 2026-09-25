@@ -183,9 +183,14 @@ fn zero_copy_candidates_match_the_tensorkit_blas_contract_sequence() {
 fn fermionic_values<D: Payload>() {
     let runtime = Runtime::builder().build().unwrap();
     let twist = |t: &TensorMap<FermionU1, D>, legs: &[usize]| t.twist(legs).unwrap();
-    check::<_, D>(&runtime, &fermion_u1(), "fZ2xU(1)", |case| {
-        fermionic_blas_contract_oracle(case, TwistRole::B, twist)
-    });
+    // The literal sequence of C2 and L5 contracts B legs that are dual, so
+    // `blas_contract!` twists there even though the selected swapped
+    // candidate needs no twist; either twist role is the oracle.
+    for role in [TwistRole::B, TwistRole::A] {
+        check::<_, D>(&runtime, &fermion_u1(), "fZ2xU(1)", |case| {
+            fermionic_blas_contract_oracle(case, role, twist)
+        });
+    }
 
     // Twisted control: `A: V⊗V ← V*⊗V*` with `B` (or `P'`) `V*⊗V* ← V⊗V`
     // puts dual legs on the core-right contracted codomain of the sorted
