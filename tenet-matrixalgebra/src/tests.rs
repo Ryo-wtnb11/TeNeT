@@ -17272,7 +17272,85 @@ fn su2_factor_publication_maps_consistently_reordered_trees_by_identity() {
     );
 }
 
+/// Caller-thread allocation bytes, so a pack can be compared against its
+/// forced-pack control in the same process.
+#[allow(unsafe_code)]
+mod allocation_bytes {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
+
+    struct CountingAllocator;
+
+    thread_local! {
+        static COUNTING: Cell<bool> = const { Cell::new(false) };
+        static BYTES: Cell<usize> = const { Cell::new(0) };
+    }
+
+    fn record(size: usize) {
+        let _ = COUNTING.try_with(|counting| {
+            if counting.get() {
+                let _ = BYTES.try_with(|bytes| bytes.set(bytes.get() + size));
+            }
+        });
+    }
+
+    // SAFETY: every method forwards to `System` unchanged; `record` only
+    // touches const-initialized thread-locals and never allocates.
+    unsafe impl GlobalAlloc for CountingAllocator {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            record(layout.size());
+            unsafe { System.alloc(layout) }
+        }
+
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            record(layout.size());
+            unsafe { System.alloc_zeroed(layout) }
+        }
+
+        unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+            unsafe { System.dealloc(pointer, layout) }
+        }
+
+        unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            record(new_size);
+            unsafe { System.realloc(pointer, layout, new_size) }
+        }
+    }
+
+    #[global_allocator]
+    static ALLOCATOR: CountingAllocator = CountingAllocator;
+
+    pub(super) fn measured<T>(operation: impl FnOnce() -> T) -> (T, usize) {
+        BYTES.set(0);
+        COUNTING.set(true);
+        let value = operation();
+        COUNTING.set(false);
+        (value, BYTES.get())
+    }
+}
+
+/// Byte contract (#1525): per op, the forced-pack control allocates at least
+/// the op's input payload more than the borrowed call, measured in-process
+/// after warming both paths (provider-independent, unlike absolute budgets).
+fn assert_pack_drop_covers_payload(borrowed: &[usize], packed: &[usize], payloads: &[usize]) {
+    assert_eq!(borrowed.len(), payloads.len());
+    assert_eq!(packed.len(), payloads.len());
+    for ((&borrowed_bytes, &packed_bytes), &payload) in borrowed.iter().zip(packed).zip(payloads) {
+        assert!(
+            packed_bytes >= borrowed_bytes + payload,
+            "borrowed {borrowed:?}, packed {packed:?}, payloads {payloads:?}"
+        );
+    }
+}
+
 type OutputBits = Vec<Vec<(u64, u64)>>;
+type FamilyRun = (OutputBits, Vec<usize>);
+
+fn measured_into<T>(bytes: &mut Vec<usize>, operation: impl FnOnce() -> T) -> T {
+    let (value, allocated) = allocation_bytes::measured(operation);
+    bytes.push(allocated);
+    value
+}
 
 fn scalar_bits<D: FactorScalar>(data: &[D]) -> Vec<(u64, u64)> {
     data.iter()
@@ -17300,36 +17378,37 @@ fn multiplicity_free_full_family_bits<R, D>(
     general: &BoundDynamicTensorRef<'_, R, D>,
     tall: &BoundDynamicTensorRef<'_, R, D>,
     hermitian: &BoundDynamicTensorRef<'_, R, D>,
-) -> OutputBits
+) -> FamilyRun
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
     let mut bits = Vec::new();
+    let mut bytes = Vec::new();
     for input in [general, tall] {
-        let (q, r) = qr_full_dyn(&mut dense, input).unwrap();
+        let (q, r) = measured_into(&mut bytes, || qr_full_dyn(&mut dense, input).unwrap());
         bits.extend([scalar_bits(q.data()), scalar_bits(r.data())]);
-        let (l, q) = lq_full_dyn(&mut dense, input).unwrap();
+        let (l, q) = measured_into(&mut bytes, || lq_full_dyn(&mut dense, input).unwrap());
         bits.extend([scalar_bits(l.data()), scalar_bits(q.data())]);
         bits.push(scalar_bits(
-            left_null_dyn(&mut dense, input).unwrap().data(),
+            measured_into(&mut bytes, || left_null_dyn(&mut dense, input).unwrap()).data(),
         ));
         bits.push(scalar_bits(
-            right_null_dyn(&mut dense, input).unwrap().data(),
+            measured_into(&mut bytes, || right_null_dyn(&mut dense, input).unwrap()).data(),
         ));
     }
-    let eig = eig_full_dyn(&mut dense, general).unwrap();
+    let eig = measured_into(&mut bytes, || eig_full_dyn(&mut dense, general).unwrap());
     bits.extend([
         scalar_bits(eig.v().data()),
         spectrum_bits(eig.eigenvalues()),
     ]);
-    let eigh = eigh_full_dyn(&mut dense, hermitian).unwrap();
+    let eigh = measured_into(&mut bytes, || eigh_full_dyn(&mut dense, hermitian).unwrap());
     bits.extend([
         scalar_bits(eigh.v().data()),
         spectrum_bits(eigh.eigenvalues()),
     ]);
-    bits
+    (bits, bytes)
 }
 
 fn multiplicity_free_tall_test_tensor<R>(rule: &R, sectors: &[SectorId]) -> TensorMap<f64, 2, 1>
@@ -17408,31 +17487,42 @@ where
         let (general, hermitian) = (bind(general), bind(hermitian));
         let (general, hermitian) = (general.as_ref(), hermitian.as_ref());
         let (general, hermitian) = (general.dynamic(), hermitian.dynamic());
+        let family = || multiplicity_free_full_family_bits(&general, &tall_input, &hermitian);
+        // Warm both paths so one-time caches do not enter the comparison.
+        family();
+        crate::factorize::with_forced_input_pack(family);
         crate::factorize::reset_input_pack_bytes();
-        let borrowed = multiplicity_free_full_family_bits(&general, &tall_input, &hermitian);
+        let (borrowed, borrowed_allocated) = family();
         let borrowed_bytes = crate::factorize::input_pack_bytes();
         crate::factorize::reset_input_pack_bytes();
-        let packed = crate::factorize::with_forced_input_pack(|| {
-            multiplicity_free_full_family_bits(&general, &tall_input, &hermitian)
-        });
+        let (packed, packed_allocated) = crate::factorize::with_forced_input_pack(family);
         let packed_bytes = crate::factorize::input_pack_bytes();
         assert_eq!(borrowed, packed);
+        let (general_bytes, tall_bytes) = (element_bytes(&general), element_bytes(&tall_input));
+        // The canonical eigh already publishes through its direct region
+        // path, so it packs on neither side.
+        let payloads = [
+            [general_bytes; 4].as_slice(),
+            &[tall_bytes; 4],
+            &[general_bytes, 0],
+        ]
+        .concat();
         (
             borrowed_bytes,
             packed_bytes,
-            element_bytes(&general),
-            element_bytes(&tall_input),
+            (borrowed_allocated, packed_allocated, payloads),
         )
     };
 
-    // Canonical: the forced-pack control packs every call's whole input (the
-    // canonical eigh already publishes through its direct region path).
-    let (borrowed, packed, general_bytes, tall_bytes) = run(&general, &hermitian);
+    // Canonical: the forced-pack control packs every call's whole input.
+    let (borrowed, packed, (borrowed_allocated, packed_allocated, payloads)) =
+        run(&general, &hermitian);
+    assert_pack_drop_covers_payload(&borrowed_allocated, &packed_allocated, &payloads);
     assert_eq!(borrowed, 0);
-    assert_eq!(packed, 5 * general_bytes + 4 * tall_bytes);
+    assert_eq!(packed, payloads.iter().sum::<usize>());
 
     // Consistently reordered tree stacking is still a tiling: same values.
-    let (borrowed, _, _, _) = run(
+    let (borrowed, _, _) = run(
         &reversed_coupled_tree_basis_copy(&rule, &general),
         &reversed_coupled_tree_basis_copy(&rule, &hermitian),
     );
@@ -17501,33 +17591,46 @@ fn checked_full_family_bits<R, D>(
     general: &BoundDynamicTensorRef<'_, R, D>,
     tall: &BoundDynamicTensorRef<'_, R, D>,
     hermitian: &BoundDynamicTensorRef<'_, R, D>,
-) -> OutputBits
+) -> FamilyRun
 where
     R: CheckedGenericFusion,
     D: FactorScalar,
 {
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
     let mut bits = Vec::new();
+    let mut bytes = Vec::new();
     for input in [general, tall] {
-        let (q, r) = qr_full_dyn_checked_generic(&mut dense, input).unwrap();
+        let (q, r) = measured_into(&mut bytes, || {
+            qr_full_dyn_checked_generic(&mut dense, input).unwrap()
+        });
         bits.extend([scalar_bits(q.data()), scalar_bits(r.data())]);
-        let (l, q) = lq_full_dyn_checked_generic(&mut dense, input).unwrap();
+        let (l, q) = measured_into(&mut bytes, || {
+            lq_full_dyn_checked_generic(&mut dense, input).unwrap()
+        });
         bits.extend([scalar_bits(l.data()), scalar_bits(q.data())]);
-        let left = left_null_dyn_checked_generic(&mut dense, input).unwrap();
-        let right = right_null_dyn_checked_generic(&mut dense, input).unwrap();
+        let left = measured_into(&mut bytes, || {
+            left_null_dyn_checked_generic(&mut dense, input).unwrap()
+        });
+        let right = measured_into(&mut bytes, || {
+            right_null_dyn_checked_generic(&mut dense, input).unwrap()
+        });
         bits.extend([scalar_bits(left.data()), scalar_bits(right.data())]);
     }
-    let eig = eig_full_dyn_checked_generic(&mut dense, general).unwrap();
+    let eig = measured_into(&mut bytes, || {
+        eig_full_dyn_checked_generic(&mut dense, general).unwrap()
+    });
     bits.extend([
         scalar_bits(eig.v().data()),
         spectrum_bits(eig.eigenvalues()),
     ]);
-    let eigh = eigh_full_dyn_checked_generic(&mut dense, hermitian).unwrap();
+    let eigh = measured_into(&mut bytes, || {
+        eigh_full_dyn_checked_generic(&mut dense, hermitian).unwrap()
+    });
     bits.extend([
         scalar_bits(eigh.v().data()),
         spectrum_bits(eigh.eigenvalues()),
     ]);
-    bits
+    (bits, bytes)
 }
 
 #[cfg(feature = "racah-generated")]
@@ -17552,14 +17655,31 @@ fn su3_checked_input<D: FactorScalar>(
         homspace,
     )
     .unwrap();
-    let data = (0..space.space().required_len().unwrap())
-        .map(|index| {
-            D::from_complex64(Complex64::new(
-                ((index * 11 + seed) % 29) as f64 * 0.25 - 3.0,
-                ((index * 5 + seed) % 7) as f64 * 0.3 - 0.9,
-            ))
-        })
-        .collect();
+    // Diagonal `1, 2, ..., n` plus off-diagonal entries of modulus below
+    // `0.36 / n`: the Gershgorin discs (radius < 0.36) are disjoint, so every
+    // square sector has distinct eigenvalues and is diagonalizable by
+    // construction, independent of the dense provider.
+    let mut data = vec![D::zero(); space.space().required_len().unwrap()];
+    let regions = space
+        .space()
+        .structure()
+        .coupled_sector_regions(space.space().nout())
+        .unwrap()
+        .unwrap();
+    for region in regions.iter() {
+        let rows = region.rows();
+        let scale = 0.25 / rows.max(region.cols()) as f64;
+        let matrix = &mut data[region.range()];
+        for (index, value) in matrix.iter_mut().enumerate() {
+            let (row, col) = (index % rows, index / rows);
+            *value = D::from_complex64(if row == col {
+                Complex64::new((row + 1) as f64, 0.0)
+            } else {
+                let hash = (index * 11 + seed) as f64;
+                Complex64::new((hash * 0.7).sin() * scale, (hash * 1.3).cos() * scale)
+            });
+        }
+    }
     (space, data)
 }
 
@@ -17621,17 +17741,28 @@ fn assert_checked_full_family_borrows_input<R, D>(
     R: CheckedGenericFusion,
     D: FactorScalar,
 {
+    let family = || checked_full_family_bits(general, tall, hermitian);
+    // Warm both paths so one-time caches do not enter the comparison.
+    family();
+    crate::factorize::with_forced_input_pack(family);
     crate::factorize::reset_input_pack_bytes();
-    let borrowed = checked_full_family_bits(general, tall, hermitian);
-    assert_eq!(crate::factorize::input_pack_bytes(), 0);
+    let (borrowed, borrowed_allocated) = family();
+    let borrowed_bytes = crate::factorize::input_pack_bytes();
     crate::factorize::reset_input_pack_bytes();
-    let packed = crate::factorize::with_forced_input_pack(|| {
-        checked_full_family_bits(general, tall, hermitian)
-    });
+    let (packed, packed_allocated) = crate::factorize::with_forced_input_pack(family);
+    let (general_bytes, tall_bytes) = (element_bytes(general), element_bytes(tall));
+    let payloads = [
+        [general_bytes; 4].as_slice(),
+        &[tall_bytes; 4],
+        &[general_bytes, element_bytes(hermitian)],
+    ]
+    .concat();
     assert_eq!(
         crate::factorize::input_pack_bytes(),
-        6 * element_bytes(general) + 4 * element_bytes(tall)
+        payloads.iter().sum::<usize>()
     );
+    assert_pack_drop_covers_payload(&borrowed_allocated, &packed_allocated, &payloads);
+    assert_eq!(borrowed_bytes, 0);
     assert_eq!(borrowed, packed);
 }
 
