@@ -387,3 +387,275 @@ fn mixed_space_candidates_run_no_transform() {
     assert_mixed_zero_copy(&u1_non_self_dual(), &u1_second(), "U(1)");
     assert_mixed_zero_copy(&su2(), &su2_second(), "SU(2)");
 }
+
+/// Zero-copy candidates under a requested output order that is neither the
+/// identity nor `pAB′` (#1475): TensorKit `blas_contract!` then copies only
+/// C (`copyC`: `mul!` into a temporary, then a permuting `tensoradd!`), and
+/// `has_shared_permute(::AdjointTensorMap)` keeps `P'` free. Each probe is
+/// paired with whether that zero-copy candidate is the swap `B·A`:
+///
+/// - `L3p` `P'[3,2]·B[1,0] → [1,0,2,3]` (the issue's example, sort);
+/// - `L5p` `A[0,1]·P'[2,3] → [3,2,0,1]` (swap);
+/// - `L7p` `A[3,2]·P'[1,0] → [0,1,3,2]` (sort, lazy rhs);
+/// - `C1p` `A[3,2]·B[1,0] → [1,0,3,2]`, `C2p` `A[0,1]·B[2,3] → [3,2,1,0]`
+///   (owned sort and swap).
+fn output_permute_probes<R, D>(runtime: &Runtime, v: &GradedSpace<R>) -> Vec<(Case<R, D>, bool)>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: Payload,
+{
+    let tensor =
+        |salt| TensorMap::<R, D>::from_block_fn(runtime, [v, v], [v, v], fill(salt)).unwrap();
+    let (a, b, lazy) = (tensor(81), tensor(82), tensor(83).adjoint().unwrap());
+    let case = |name,
+                lhs: &TensorMap<R, D>,
+                rhs: &TensorMap<R, D>,
+                l: [usize; 2],
+                r: [usize; 2],
+                out: [usize; 4]| Case {
+        name,
+        lhs: lhs.clone(),
+        rhs: rhs.clone(),
+        lhs_axes: l.to_vec(),
+        rhs_axes: r.to_vec(),
+        output_axes: out.to_vec(),
+        dense: l == [3, 2],
+    };
+    vec![
+        (case("L3p", &lazy, &b, [3, 2], [1, 0], [1, 0, 2, 3]), false),
+        (case("L5p", &a, &lazy, [0, 1], [2, 3], [3, 2, 0, 1]), true),
+        (case("L7p", &a, &lazy, [3, 2], [1, 0], [0, 1, 3, 2]), false),
+        (case("C1p", &a, &b, [3, 2], [1, 0], [1, 0, 3, 2]), false),
+        (case("C2p", &a, &b, [0, 1], [2, 3], [3, 2, 1, 0]), true),
+    ]
+}
+
+fn transform_lookups(runtime: &Runtime) -> usize {
+    let info = runtime.tree_transform_cache_info();
+    info.hits() + info.misses()
+}
+
+/// The zero-copy candidate with its own output order, then one `permute`.
+fn contract_then_permute<R, D>(case: &Case<R, D>, swapped: bool) -> TensorMap<R, D>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: Payload,
+{
+    let lhs_open = case.lhs.rank() - case.lhs_axes.len();
+    let rhs_open = case.rhs.rank() - case.rhs_axes.len();
+    let (temporary, position): (_, Box<dyn Fn(usize) -> usize>) = if swapped {
+        let identity: Vec<usize> = (0..lhs_open + rhs_open).collect();
+        (
+            case.rhs
+                .contract(&case.lhs, &case.rhs_axes, &case.lhs_axes, &identity)
+                .unwrap(),
+            Box::new(move |axis| {
+                if axis < lhs_open {
+                    axis + rhs_open
+                } else {
+                    axis - lhs_open
+                }
+            }),
+        )
+    } else {
+        let identity: Vec<usize> = (0..lhs_open + rhs_open).collect();
+        (
+            case.lhs
+                .contract(&case.rhs, &case.lhs_axes, &case.rhs_axes, &identity)
+                .unwrap(),
+            Box::new(|axis| axis),
+        )
+    };
+    let permutation: Vec<usize> = case
+        .output_axes
+        .iter()
+        .map(|&axis| position(axis))
+        .collect();
+    temporary
+        .permute(&permutation[..lhs_open], &permutation[lhs_open..])
+        .unwrap()
+}
+
+fn assert_output_permute_budget<R>(v: &GradedSpace<R>, symmetry: &str)
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+{
+    let _guard = MEASUREMENT_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    for (case, swapped) in output_permute_probes::<R, f64>(&runtime, v) {
+        let (calls, bytes, lookups) = warm(&runtime, &case);
+        contract_then_permute(&case, swapped);
+        let before = transform_lookups(&runtime);
+        CALLS.set(0);
+        BYTES.set(0);
+        ENABLED.set(true);
+        let two_step = contract_then_permute(black_box(&case), swapped);
+        ENABLED.set(false);
+        drop(two_step);
+        let (budget_calls, budget_bytes) = (CALLS.get(), BYTES.get());
+        let permute_lookups = transform_lookups(&runtime) - before;
+        let name = case.name;
+        eprintln!(
+            "{symmetry} {name}: {calls} calls, {bytes} B, {lookups} transform lookups; \
+             contract + permute {budget_calls} / {budget_bytes} / {permute_lookups}"
+        );
+        // What: only the output permute transforms; no source is rebuilt.
+        assert_eq!(
+            lookups, permute_lookups,
+            "{symmetry} {name}: source transforms ran"
+        );
+        // What: no more than the zero-copy contract plus one permute, so no
+        // operand (a `P'`-sized buffer) is materialized.
+        assert!(
+            calls <= budget_calls && bytes <= budget_bytes,
+            "{symmetry} {name}: {calls} calls / {bytes} B vs contract + permute \
+             {budget_calls} / {budget_bytes}"
+        );
+    }
+}
+
+#[test]
+fn zero_copy_candidates_with_an_output_permute_allocate_like_contract_then_permute() {
+    assert_output_permute_budget(&u1_non_self_dual(), "U(1)");
+    assert_output_permute_budget(&su2(), "SU(2)");
+    assert_output_permute_budget(&fermion_u1(), "fZ2xU(1)");
+}
+
+/// `S3`: rank 3 × 4 with open counts 2 and 3, so the swapped candidate's own
+/// output has a different codomain rank from the result's, and operands on
+/// distinct provider allocations: `P'[0]·B[3] → [2,0,1,3,4]` with
+/// `P: v⊗w* ← w` and `B: w⊗v⊗v ← w`.
+fn uneven_swap<R, D>(runtime: &Runtime, v: &GradedSpace<R>, w: &GradedSpace<R>) -> Case<R, D>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: Payload,
+{
+    let w_dual = w.try_dual().unwrap();
+    Case {
+        name: "S3",
+        lhs: TensorMap::from_block_fn(runtime, [v, &w_dual], [w], fill(84))
+            .unwrap()
+            .adjoint()
+            .unwrap(),
+        rhs: TensorMap::from_block_fn(runtime, [w, v, v], [w], fill(85)).unwrap(),
+        lhs_axes: vec![0],
+        rhs_axes: vec![3],
+        output_axes: vec![2, 0, 1, 3, 4],
+        dense: false,
+    }
+}
+
+fn output_permute_values<R, D>(v: &GradedSpace<R>, w: &GradedSpace<R>, symmetry: &str)
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec
+        + tenet::core::PhysicalFusionBasis<Scalar = f64>,
+    D: Payload,
+{
+    let runtime = Runtime::builder().build().unwrap();
+    let cases = output_permute_probes::<R, D>(&runtime, v)
+        .into_iter()
+        .map(|(case, _)| case)
+        .chain([uneven_swap::<R, D>(&runtime, v, w)]);
+    for case in cases {
+        let what = format!("{symmetry} {} [{}]", case.name, D::NAME);
+        let host = case.host();
+        // What: the left-authority provider rule holds after a swap.
+        assert!(std::ptr::eq(host.provider(), case.lhs.provider()), "{what}");
+        assert_eq!(host.codomain_rank(), case.lhs.rank() - case.lhs_axes.len());
+        assert_close(
+            host.data(),
+            blas_contract_oracle(&case).data(),
+            case.terms(),
+            &what,
+        );
+        if case.dense {
+            let (shape, expected) = dense_oracle(&case);
+            let actual = host.to_physical_dense().unwrap();
+            assert_eq!(actual.shape, shape, "{what}");
+            assert_close(&actual.data, &expected, case.terms(), &what);
+        }
+    }
+}
+
+#[test]
+fn zero_copy_candidates_with_an_output_permute_match_tensorkit_and_the_dense_expansion() {
+    fn at<D: Payload>() {
+        output_permute_values::<_, D>(&u1_non_self_dual(), &u1_second(), "U(1)");
+        output_permute_values::<_, D>(&su2(), &su2_second(), "SU(2)");
+    }
+    at::<f64>();
+    at::<Complex64>();
+    at::<f32>();
+    at::<Complex32>();
+}
+
+#[test]
+fn uneven_swapped_candidate_with_an_output_permute_runs_one_transform() {
+    let _guard = MEASUREMENT_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let case = uneven_swap::<_, f64>(&runtime, &u1_non_self_dual(), &u1_second());
+    let (_, _, lookups) = warm(&runtime, &case);
+    contract_then_permute(&case, true);
+    let before = transform_lookups(&runtime);
+    contract_then_permute(&case, true);
+    // What: only the output permute transforms.
+    assert_eq!(
+        lookups,
+        transform_lookups(&runtime) - before,
+        "S3: source transforms ran"
+    );
+}
+
+fn fermionic_output_permute_values<D: Payload>() {
+    let runtime = Runtime::builder().build().unwrap();
+    let twist = |t: &TensorMap<FermionU1, D>, legs: &[usize]| t.twist(legs).unwrap();
+    // As for the identity-output probes, the literal sequence of the swapped
+    // probes twists dual `B` legs that the selected candidate does not, so
+    // either twist role is the oracle.
+    for role in [TwistRole::B, TwistRole::A] {
+        for (case, _) in output_permute_probes::<_, D>(&runtime, &fermion_u1()) {
+            let expected = fermionic_blas_contract_oracle(&case, role, twist);
+            assert_close(
+                case.host().data(),
+                expected.data(),
+                case.terms(),
+                &format!("fZ2xU(1) {} [{}]", case.name, D::NAME),
+            );
+        }
+    }
+
+    // Twisted control: dual legs on the core-right contracted codomain of the
+    // sorted candidate, under a permuted output. The candidate is declined,
+    // and the result must carry TensorKit's B-role twist.
+    let v = fermion_u1();
+    let v_dual = v.try_dual().unwrap();
+    let a =
+        TensorMap::<_, D>::from_block_fn(&runtime, [&v, &v], [&v_dual, &v_dual], fill(86)).unwrap();
+    let p =
+        TensorMap::<_, D>::from_block_fn(&runtime, [&v, &v], [&v_dual, &v_dual], fill(87)).unwrap();
+    let case = Case {
+        name: "twisted L7p",
+        lhs: a,
+        rhs: p.adjoint().unwrap(),
+        lhs_axes: vec![3, 2],
+        rhs_axes: vec![1, 0],
+        output_axes: vec![1, 0, 2, 3],
+        dense: false,
+    };
+    let expected = fermionic_blas_contract_oracle(&case, TwistRole::B, twist);
+    assert_close(case.host().data(), expected.data(), case.terms(), case.name);
+}
+
+#[test]
+fn zero_copy_fermionic_candidates_with_an_output_permute_match_tensorkit() {
+    fermionic_output_permute_values::<f64>();
+    fermionic_output_permute_values::<Complex64>();
+    fermionic_output_permute_values::<f32>();
+    fermionic_output_permute_values::<Complex32>();
+}

@@ -74,8 +74,9 @@ impl ContractAxisOrderCandidate {
 ///
 /// Keeping orientation separate prevents reversed candidates from overloading
 /// paired-axis ordering with a second meaning.
+#[doc(hidden)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum FusionContractOrientation {
+pub enum FusionContractOrientation {
     LhsRhs,
     RhsLhs,
 }

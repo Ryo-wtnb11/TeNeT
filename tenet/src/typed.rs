@@ -8184,25 +8184,61 @@ where
     if let Some(compact) = lhs.try_contract_diagonal(rhs, lhs_axes, rhs_axes, output_axes)? {
         return Ok(compact);
     }
-    if permutes_core_form_contraction(lhs, rhs, lhs_axes, rhs_axes, output_axes) {
-        // Why not the one-call ordered route: for core-form operands its
-        // source-transform route rebuilds the source and core spaces per
-        // call, while the default order resolves to the direct core GEMM and
-        // the permute replays a Runtime-cached plan (#1461). This is
-        // TensorKit `blas_contract!`'s `copyC` shape: a temporary, then a
-        // permuting `tensoradd!`.
-        let (codomain, domain) = output_axes.split_at(lhs.codomain_rank());
-        return contract_multiplicity_free_ordered(
-            lhs,
-            rhs,
-            lhs_axes,
-            rhs_axes,
-            OutputAxisOrder::identity(),
-        )?
-        .tree_transform_multiplicity_free_real(TreeTransformOperation::permute(
-            codomain.iter().copied(),
-            domain.iter().copied(),
-        ));
+    if let Some(order) = tenet_tensors::zero_copy_contract_order_for_output_permute(
+        lhs.logical_space().provider(),
+        lhs.fusion_operand(),
+        rhs.fusion_operand(),
+        lhs_axes,
+        rhs_axes,
+        output_axes,
+    ) {
+        // Why not the one-call ordered route: it compiles a source-transform
+        // DynamicTree, which rebuilds the source and core spaces per call and
+        // cannot borrow a lazy adjoint, while the zero-copy candidate borrows
+        // both operands and the permute replays a Runtime-cached plan (#1461,
+        // #1475). This is TensorKit `blas_contract!`'s `copyC`: a temporary,
+        // then a permuting `tensoradd!`.
+        let lhs_open = lhs.rank() - lhs_axes.len();
+        let rhs_open = rhs.rank() - rhs_axes.len();
+        let (temporary, lhs_offset, rhs_offset) = match order {
+            tenet_tensors::FusionContractOrientation::LhsRhs => (
+                contract_multiplicity_free_ordered(
+                    lhs,
+                    rhs,
+                    lhs_axes,
+                    rhs_axes,
+                    OutputAxisOrder::identity(),
+                )?,
+                0,
+                0,
+            ),
+            tenet_tensors::FusionContractOrientation::RhsLhs => (
+                contract_multiplicity_free_ordered(
+                    rhs,
+                    lhs,
+                    rhs_axes,
+                    lhs_axes,
+                    OutputAxisOrder::identity(),
+                )?,
+                rhs_open,
+                lhs_open,
+            ),
+        };
+        // `temporary` lists the rhs open axes first under `RhsLhs`.
+        let position = |axis: usize| {
+            if axis < lhs_open {
+                axis + lhs_offset
+            } else {
+                axis - rhs_offset
+            }
+        };
+        let (codomain, domain) = output_axes.split_at(lhs_open);
+        let result =
+            temporary.tree_transform_multiplicity_free_real(TreeTransformOperation::permute(
+                codomain.iter().copied().map(position),
+                domain.iter().copied().map(position),
+            ))?;
+        return with_provider_of(result, lhs);
     }
     contract_multiplicity_free_ordered(
         lhs,
@@ -8213,35 +8249,33 @@ where
     )
 }
 
-/// True when `output_axes` is a valid, non-identity permutation of the open
-/// axes and the contracting axes are in untwisted core form, where the
-/// default order runs the direct core GEMM (the tenet-tensors routing
-/// predicate decides that). Why not also the other cases: there the default
-/// order runs source transforms too, and the one-call route folds the output
-/// order into its own output transform for less than a separate permute.
-/// Malformed input keeps the one-call route and its errors.
-fn permutes_core_form_contraction<R, D>(
-    lhs: &TensorMap<R, D>,
-    rhs: &TensorMap<R, D>,
-    lhs_axes: &[usize],
-    rhs_axes: &[usize],
-    output_axes: &[usize],
-) -> bool
+/// Rebinds an owned `result` to `authority`'s provider allocation, the
+/// left-authority rule of [`TensorMap::contract`], sharing its payload.
+fn with_provider_of<R, D>(
+    result: TensorMap<R, D>,
+    authority: &TensorMap<R, D>,
+) -> Result<TensorMap<R, D>, Error>
 where
     R: MultiplicityFreeRigidSymbols,
     D: TensorScalar,
 {
-    let open_rank = (lhs.rank() + rhs.rank()).saturating_sub(lhs_axes.len() + rhs_axes.len());
-    output_axes.len() == open_rank
-        && !output_axes.iter().copied().eq(0..open_rank)
-        && (0..open_rank).all(|axis| output_axes.contains(&axis))
-        && tenet_tensors::contraction_sources_are_untwisted_core_form(
-            rhs.logical_space().provider(),
-            lhs.logical_space().space().homspace(),
-            rhs.logical_space().space().homspace(),
-            lhs_axes,
-            rhs_axes,
-        )
+    if Arc::ptr_eq(
+        result.logical_space().provider_arc(),
+        authority.logical_space().provider_arc(),
+    ) {
+        return Ok(result);
+    }
+    let body = result.owned_body().expect("contraction results are owned");
+    let space = authority
+        .logical_space()
+        .rebind_validated(&body.space.validated_layout())?;
+    Ok(TensorMap {
+        runtime: result.runtime.clone(),
+        repr: owned_repr(TypedTensorBody::with_shared_payload(
+            space,
+            Arc::clone(&body.data),
+        )),
+    })
 }
 
 fn contract_multiplicity_free_ordered<R, D>(
@@ -14540,6 +14574,17 @@ impl<R, D> TensorMap<R, D>
 where
     D: TensorScalar,
 {
+    fn fusion_operand(&self) -> tenet_tensors::FusionOperand<'_> {
+        match &self.repr {
+            TypedTensorRepr::Owned(body) => {
+                tenet_tensors::FusionOperand::direct(body.space.space())
+            }
+            TypedTensorRepr::Adjoint(view) => {
+                tenet_tensors::FusionOperand::adjoint(view.parent.space.space())
+            }
+        }
+    }
+
     fn fusion_operand_and_data(&self) -> (tenet_tensors::FusionOperand<'_>, &[D]) {
         match &self.repr {
             TypedTensorRepr::Owned(body) => (

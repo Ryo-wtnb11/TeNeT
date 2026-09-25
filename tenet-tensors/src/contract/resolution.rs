@@ -16,9 +16,8 @@ use tenet_operations::TensorContractFusionProfile;
 
 use super::dynamic_space::{DynamicFusionMapSpace, FusionOperand, FusionOperandLayout};
 use super::fusion::{
-    contracted_axis_order_candidates, external_axis_is_dual, is_core_form_fusion_source_contract,
-    rhs_contract_twist_factor_oriented, FusionContractOrientation, FusionContractPlan,
-    CACHED_ORIENTATIONS,
+    contracted_axis_order_candidates, external_axis_is_dual, rhs_contract_twist_factor_oriented,
+    FusionContractOrientation, FusionContractPlan, CACHED_ORIENTATIONS,
 };
 use super::fusion_block::{
     compile_fusion_block_contract_plan_core_geometry,
@@ -854,28 +853,69 @@ where
     rhs_contract_axes_require_twist(rule, rhs, axes.rhs_contracting_axes())
 }
 
-/// True when these contracting axes put a contraction in the direct core-GEMM
-/// source form — `lhs`'s whole domain paired in order with `rhs`'s whole
-/// codomain — with no fermionic supertrace twist on `rhs`. In that form the
-/// identity output order resolves to [`Resolution::Core`]; any other output
-/// order resolves to the dynamic tree route.
+/// The operand order whose default-output contraction runs a zero-copy
+/// candidate (see [`try_zero_copy_contract_candidates`]) when `output_axes`
+/// itself has none: `LhsRhs` contracts `lhs·rhs`, `RhsLhs` contracts
+/// `rhs·lhs`, and one permute of the result then gives `output_axes`. This
+/// is TensorKit `blas_contract!`'s `copyC`: the temporary and the permuting
+/// `tensoradd!` move `dim(C)`, and a lazy adjoint stays a GEMM flag
+/// (`has_shared_permute(::AdjointTensorMap)`), where the one-call
+/// DynamicTree route would materialize it. Candidates are tried in
+/// TensorKit's tie order, A·B before B·A.
+///
+/// `None` when `output_axes` is not a permutation of the open axes, when it
+/// is already zero-copy, or when no candidate is: the one-call route is then
+/// no costlier. Checks are axis and dual-flag comparisons only, with the
+/// fermionic twist declined as on the Host Core route.
 #[doc(hidden)]
-pub fn contraction_sources_are_untwisted_core_form<R>(
+pub fn zero_copy_contract_order_for_output_permute<R>(
     rule: &R,
-    lhs: &FusionTreeHomSpace,
-    rhs: &FusionTreeHomSpace,
-    lhs_contracting_axes: &[usize],
-    rhs_contracting_axes: &[usize],
-) -> bool
+    lhs: FusionOperand<'_>,
+    rhs: FusionOperand<'_>,
+    lhs_axes: &[usize],
+    rhs_axes: &[usize],
+    output_axes: &[usize],
+) -> Option<FusionContractOrientation>
 where
     R: MultiplicityFreeRigidSymbols,
 {
-    lhs_contracting_axes.len() == rhs_contracting_axes.len()
-        && is_core_form_fusion_source_contract(lhs, rhs, lhs_contracting_axes, rhs_contracting_axes)
-        && matches!(
-            rhs_contract_axes_require_twist(rule, rhs, rhs_contracting_axes),
-            Ok(false)
+    let lhs_open = lhs.storage_space().rank().checked_sub(lhs_axes.len())?;
+    let rhs_open = rhs.storage_space().rank().checked_sub(rhs_axes.len())?;
+    let open = lhs_open + rhs_open;
+    if output_axes.len() != open || !(0..open).all(|axis| output_axes.contains(&axis)) {
+        return None;
+    }
+    let zero_copy = |lhs, rhs, lhs_axes, rhs_axes, output, dst_nout| {
+        matches!(
+            try_zero_copy_contract_candidates(
+                rule,
+                dst_nout,
+                lhs,
+                rhs,
+                TensorContractSpec::new(lhs_axes, rhs_axes, output),
+                false,
+                |_, _, _, _| Ok(Some(())),
+            ),
+            Ok(Some(()))
         )
+    };
+    let identity = OutputAxisOrder::identity();
+    if zero_copy(
+        lhs,
+        rhs,
+        lhs_axes,
+        rhs_axes,
+        OutputAxisOrder::from_axes(output_axes),
+        lhs_open,
+    ) {
+        None
+    } else if zero_copy(lhs, rhs, lhs_axes, rhs_axes, identity, lhs_open) {
+        Some(FusionContractOrientation::LhsRhs)
+    } else if zero_copy(rhs, lhs, rhs_axes, lhs_axes, identity, rhs_open) {
+        Some(FusionContractOrientation::RhsLhs)
+    } else {
+        None
+    }
 }
 
 fn rhs_contract_axes_require_twist<R>(
