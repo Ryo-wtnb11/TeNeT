@@ -12872,6 +12872,96 @@ where
         self.dense_adjoint_view()
     }
 
+    /// TensorKit `copy(t)` on a device tensor: the Host
+    /// [`TensorMap::materialize`] semantics, executed on the device.
+    ///
+    /// A lazy adjoint becomes an owned dense device tensor in the adjoint
+    /// space: one device allocation for the output and one conjugating strided
+    /// region copy per block from the parent allocation. Nothing is downloaded.
+    /// The output is initialized by uploading zeros (#740), so the call also
+    /// moves one payload-sized host buffer into that upload. An owned tensor
+    /// is returned as a cheap [`Clone`].
+    ///
+    /// # Errors
+    ///
+    /// [`Error::PlacementMismatch`] when the parent allocation is not on this
+    /// runtime's device, and CUDA backend errors from the upload or copies.
+    #[doc(alias = "copy")]
+    pub fn materialize(&self) -> Result<Self, Error> {
+        let TypedTensorRepr::Adjoint(view) = &self.repr else {
+            return Ok(self.clone());
+        };
+        let TypedData::Dense(source) = view.parent.data.as_ref() else {
+            return Err(internal_layout_error(
+                "a lazy CUDA adjoint holds a dense parent",
+            ));
+        };
+        let parent_space = view.parent.space.space();
+        let (nout, nin) = (parent_space.nout(), parent_space.nin());
+        let parent_structure = parent_space.structure();
+        let space = view.logical_space.clone();
+        let structure = space.space().structure();
+        let required_len = space.space().required_len()?;
+        let region = |dims: &[usize], strides: Vec<usize>, offset: usize| {
+            tenet_dense::CudaRegion::new(dims.to_vec(), strides, offset)
+                .map_err(|err| Error::from(tenet_tensors::OperationError::Dense(err)))
+        };
+        let mut copies = Vec::with_capacity(structure.block_count());
+        for index in 0..structure.block_count() {
+            let block = structure.block(index)?;
+            // Why skip instead of error: a non-fusion-tree block has no
+            // adjoint source and reads as zero, as on the Host.
+            let BlockKey::FusionTree(key) = block.key() else {
+                continue;
+            };
+            let source_block = parent_structure.block(
+                parent_structure
+                    .find_block_index_by_adjoint_fusion_tree_pair(key)
+                    .ok_or_else(|| internal_layout_error("adjoint block has no parent block"))?,
+            )?;
+            let source_strides = (0..block.shape().len())
+                .map(|axis| source_block.strides()[logical_adjoint_axis_to_parent(nout, nin, axis)])
+                .collect();
+            let destination = region(block.shape(), block.strides().to_vec(), block.offset())?;
+            destination
+                .validate_as_destination("materialize")
+                .map_err(|err| Error::from(tenet_tensors::OperationError::Dense(err)))?;
+            copies.push((
+                region(block.shape(), source_strides, source_block.offset())?,
+                destination,
+            ));
+        }
+
+        let mut lease = self.runtime.lease_cuda()?;
+        let cuda = &mut *lease;
+        Self::validate_cuda_owned_metadata(
+            Placement::Cuda(cuda.device()),
+            source.placement(),
+            parent_space.required_len()?,
+            source.len(),
+        )?;
+        let mut output = CudaStorage::upload_owned(cuda, vec![D::from_real(0.0); required_len])?;
+        for (source_region, destination_region) in &copies {
+            tenet_dense::cuda_region_axpby::<D>(
+                cuda,
+                &source.0,
+                source_region,
+                true,
+                D::from_real(1.0),
+                tenet_dense::CudaRegionCoefficient::One,
+                tenet_dense::CudaRegionBeta::Overwrite,
+                &mut output.0,
+                destination_region,
+            )
+            .map_err(|err| Error::from(tenet_tensors::OperationError::Dense(err)))?;
+        }
+        drop(lease);
+        Ok(Self {
+            runtime: self.runtime.clone(),
+            repr: owned_repr(TypedTensorBody::dense(space, output)),
+        })
+    }
+
     fn direct_cuda_storage(&self, operation: &'static str) -> Result<&CudaStorage<D>, Error> {
         match &self.repr {
             TypedTensorRepr::Owned(body) => match body.data.as_ref() {
@@ -15344,6 +15434,59 @@ where
             )),
         }
     }
+
+    /// TensorKit `copy(t)`: an owned, non-lazy tensor with this tensor's
+    /// logical space and values.
+    ///
+    /// A lazy adjoint (TensorKit `copy(adjoint(t))`) becomes an owned dense
+    /// tensor in the adjoint space, built by one blockwise conjugate-transposed
+    /// copy of the parent into a single payload allocation. If [`Self::data`]
+    /// already published this view's materialization, that body is shared
+    /// instead and nothing is allocated. Any other tensor is returned as a
+    /// cheap [`Clone`], so a compact diagonal stays compact, as TensorKit's
+    /// `copy(::DiagonalTensorMap)` stays a `DiagonalTensorMap`.
+    ///
+    /// Why not named `copy`: TensorKit's `copy` must deep-copy because a
+    /// Julia array can be mutated through any alias. An owned `TensorMap`
+    /// body is copy-on-write (`scale_assign` and `add_assign` copy a shared
+    /// payload, `*_overwrite_into` rejects a shared destination), so a shared
+    /// handle is already an independent value and a deep copy would only add
+    /// a payload allocation; the method guarantees non-laziness, not a fresh
+    /// buffer. Why not `to_owned`: `ToOwned::to_owned` is [`Clone`] here, and
+    /// an inherent method of that name with different semantics would depend
+    /// on method resolution.
+    ///
+    /// ```
+    /// use tenet::core::{U1FusionRule, U1Irrep};
+    /// use tenet::typed::{GradedSpace, Runtime, TensorMap};
+    ///
+    /// let runtime = Runtime::builder().build()?;
+    /// let v = GradedSpace::try_new(U1FusionRule, [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)])?;
+    /// let w = GradedSpace::try_new(U1FusionRule, [(U1Irrep::new(0), 1), (U1Irrep::new(1), 3)])?;
+    /// let t: TensorMap<_, f64> = TensorMap::rand(&runtime, [&v], [&w])?;
+    /// let adjoint = t.adjoint()?;
+    /// let owned = adjoint.materialize()?;
+    /// assert_eq!(owned.data(), adjoint.data());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Operation`] only if the pre-admitted adjoint layout does not
+    /// cover the parent payload, an engine-internal invariant.
+    #[doc(alias = "copy")]
+    pub fn materialize(&self) -> Result<Self, Error> {
+        if let TypedTensorRepr::Adjoint(view) = &self.repr {
+            if let Some(body) = view.materialized.get() {
+                return Ok(Self {
+                    runtime: self.runtime.clone(),
+                    repr: TypedTensorRepr::Owned(Arc::clone(body)),
+                });
+            }
+        }
+        self.materialized_tensor_uncached()
+    }
+
     /// Builds an operation-local logical tensor without publishing the
     /// receiver's reusable materialization cache, but still constructs a full
     /// receiver-sized logical payload. Prefer an oriented kernel or algebraic

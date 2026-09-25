@@ -646,3 +646,45 @@ fn first_lazy_materialization_allocates_once_per_payload_not_per_block() {
     // block count (before #1201: 3 + 6 per block).
     assert_eq!(reference, Some(3));
 }
+
+#[test]
+fn materialize_allocates_one_payload_and_shares_owned_bodies() {
+    let _measurement = MEASUREMENT_LOCK.lock().unwrap();
+    // What: `materialize` (#1514, TensorKit `copy(adjoint(t))`) of a cold
+    // lazy adjoint costs exactly one payload allocation plus the fixed body
+    // wrappers, whatever the block count; the three-payload
+    // `zeros_like().absorb(&adj)` route is what it replaces. An owned tensor
+    // and a warm view share an existing body and allocate nothing.
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    for (rank, radius, degeneracy) in [(2, 0, 8), (2, 6, 2), (4, 3, 2), (6, 1, 2)] {
+        let source = tensor(
+            &runtime,
+            (-radius..=radius).map(|charge| (charge, degeneracy)),
+            rank,
+        );
+        let payload_bytes = std::mem::size_of_val(source.data()) as u64;
+        let cold = source.adjoint().unwrap();
+        let (allocations, bytes) = measure(|| {
+            black_box(cold.materialize().unwrap());
+        });
+        // Payload `Vec`, its `Arc<TypedData>` and the `Arc<TypedTensorBody>`.
+        assert_eq!(allocations, 3, "rank={rank}, radius={radius}");
+        assert!(
+            bytes >= payload_bytes && bytes < payload_bytes + 256,
+            "rank={rank}, radius={radius}: {bytes} bytes for a {payload_bytes}-byte payload"
+        );
+        assert_eq!(
+            measure(|| {
+                black_box(source.materialize().unwrap());
+            }),
+            (0, 0)
+        );
+        black_box(cold.data());
+        assert_eq!(
+            measure(|| {
+                black_box(cold.materialize().unwrap());
+            }),
+            (0, 0)
+        );
+    }
+}
