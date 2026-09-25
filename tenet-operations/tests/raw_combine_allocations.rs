@@ -98,6 +98,7 @@ fn parallel_copy_matches_oracle_without_caller_allocations() {
     // explicit 4-thread Rayon pool so `CopyPlan` fans out. Every element
     // equals the transposed (conjugated) source bit for bit, and the thread
     // running the call allocates nothing once warm.
+    const THREADS: usize = 4;
     let (rows, cols) = (256usize, 512usize);
     let len = rows * cols;
     let shape = [rows, cols];
@@ -107,19 +108,21 @@ fn parallel_copy_matches_oracle_without_caller_allocations() {
         .map(|i| Complex64::new(i as f64 + 0.25, -(i as f64) - 0.5))
         .collect();
     let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(4)
+        .num_threads(THREADS)
         .build()
         .unwrap();
-    // Why not count from the first install: std's pthread `Condvar` boxes its
-    // OS condvar on its first `wait`, so a worker that parks for the first
-    // time inside the counted join allocates once. That is thread start-up,
-    // not replay; letting the idle pool park every worker settles it.
-    // ponytail: a 100 ms idle window, not a handshake; rayon does not expose
-    // whether a worker has parked.
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    // Why not assert on one counted call: std's pthread `Mutex` and `Condvar`
+    // box their OS object on first use (`OnceBox::get_or_init`), and each
+    // rayon worker owns one of each in `WorkerSleepState`. The counted thread
+    // boxes its own on its first `Sleep::sleep` and a peer's mutex on its first
+    // `Sleep::wake_specific_thread`, so a call can pay up to
+    // 2 * THREADS pool start-up allocations whenever a worker has not parked or
+    // been woken yet; no idle window guarantees that. Those boxes are made once
+    // per pool, so a replay that itself allocates can never reach a zero run
+    // within that many retries, while an allocation-free one must.
     for conjugate in [false, true] {
         let (dst, allocations) = pool.install(|| {
-            assert_eq!(rayon::current_num_threads(), 4);
+            assert_eq!(rayon::current_num_threads(), THREADS);
             let mut dst = vec![Complex64::new(0.0, 0.0); len];
             let mut zero_strides = Vec::new();
             let mut run = |dst: &mut [Complex64]| {
@@ -139,14 +142,22 @@ fn parallel_copy_matches_oracle_without_caller_allocations() {
                 .unwrap()
             };
             run(&mut dst);
-            dst.fill(Complex64::new(0.0, 0.0));
-            ALLOCATIONS.set(0);
-            COUNTING.set(true);
-            run(&mut dst);
-            COUNTING.set(false);
-            (dst, ALLOCATIONS.get())
+            let mut allocations = Vec::new();
+            while allocations.last() != Some(&0) && allocations.len() <= 2 * THREADS {
+                dst.fill(Complex64::new(0.0, 0.0));
+                ALLOCATIONS.set(0);
+                COUNTING.set(true);
+                run(&mut dst);
+                COUNTING.set(false);
+                allocations.push(ALLOCATIONS.get());
+            }
+            (dst, allocations)
         });
-        assert_eq!(allocations, 0, "conj {conjugate}");
+        assert_eq!(
+            allocations.last(),
+            Some(&0),
+            "conj {conjugate}: {allocations:?}"
+        );
         for col in 0..cols {
             for row in 0..rows {
                 let source = src[row * cols + col];
