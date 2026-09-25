@@ -34,7 +34,7 @@ pub(crate) use fusion::{
 mod fusion_block;
 mod resolution;
 #[doc(hidden)]
-pub use resolution::StorageContractResolution;
+pub use resolution::{contraction_sources_are_untwisted_core_form, StorageContractResolution};
 mod scratch;
 #[cfg(test)]
 mod storage_contract_tests;

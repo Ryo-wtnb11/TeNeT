@@ -16,7 +16,8 @@ use tenet_operations::TensorContractFusionProfile;
 
 use super::dynamic_space::{DynamicFusionMapSpace, FusionOperand, FusionOperandLayout};
 use super::fusion::{
-    external_axis_is_dual, rhs_contract_twist_factor_oriented, FusionContractPlan,
+    external_axis_is_dual, is_core_form_fusion_source_contract, rhs_contract_twist_factor_oriented,
+    FusionContractPlan,
 };
 use super::fusion_block::{
     compile_fusion_block_contract_plan_core_geometry,
@@ -652,6 +653,30 @@ where
     R: MultiplicityFreeRigidSymbols,
 {
     rhs_contract_axes_require_twist(rule, rhs, axes.rhs_contracting_axes())
+}
+
+/// True when these contracting axes put a contraction in the direct core-GEMM
+/// source form — `lhs`'s whole domain paired in order with `rhs`'s whole
+/// codomain — with no fermionic supertrace twist on `rhs`. In that form the
+/// identity output order resolves to [`Resolution::Core`]; any other output
+/// order resolves to the dynamic tree route.
+#[doc(hidden)]
+pub fn contraction_sources_are_untwisted_core_form<R>(
+    rule: &R,
+    lhs: &FusionTreeHomSpace,
+    rhs: &FusionTreeHomSpace,
+    lhs_contracting_axes: &[usize],
+    rhs_contracting_axes: &[usize],
+) -> bool
+where
+    R: MultiplicityFreeRigidSymbols,
+{
+    lhs_contracting_axes.len() == rhs_contracting_axes.len()
+        && is_core_form_fusion_source_contract(lhs, rhs, lhs_contracting_axes, rhs_contracting_axes)
+        && matches!(
+            rhs_contract_axes_require_twist(rule, rhs, rhs_contracting_axes),
+            Ok(false)
+        )
 }
 
 fn rhs_contract_axes_require_twist<R>(

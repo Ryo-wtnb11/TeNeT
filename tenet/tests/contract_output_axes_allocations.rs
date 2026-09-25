@@ -9,7 +9,11 @@ use std::cell::Cell;
 use std::hint::black_box;
 use std::sync::Mutex;
 
+use num_complex::{Complex32, Complex64};
 use tenet::prelude::*;
+
+#[path = "../../tests/support/numerics.rs"]
+mod numerics;
 
 struct CountingAllocator;
 
@@ -119,6 +123,29 @@ macro_rules! assert_output_axes_cost {
             let a = TensorMap::<_, f64>::rand_with_seed(&runtime, [&v, &v], [&w, &w], 1).unwrap();
             let b = TensorMap::<_, f64>::rand_with_seed(&runtime, [&w, &w], [&v], 2).unwrap();
             let m = TensorMap::<_, f64>::rand_with_seed(&runtime, [&w], [&w], 3).unwrap();
+            let x = TensorMap::<_, f64>::rand_with_seed(&runtime, [&w, &w], [&v, &v], 4).unwrap();
+            // What: the value matches an independent route. Pre-permuting the
+            // left operand to `[0, 2] <- [1, 3]` puts its contracted legs at
+            // `[1, 3]`, off the core form, so the one-call source-transform
+            // route computes it (TensorKit's copyA). Covered for an owned and
+            // a lazy-adjoint left operand. Bound: an entry is bilinear in the
+            // operands, so `len(lhs) * len(rhs)` terms.
+            for lhs in [a.clone(), x.adjoint().unwrap()] {
+                let got = lhs.contract(&b, &[2, 3], &[0, 1], &[0, 2, 1]).unwrap();
+                let want = lhs
+                    .permute(&[0, 2], &[1, 3])
+                    .unwrap()
+                    .contract(&b, &[1, 3], &[0, 1], &[0, 2, 1])
+                    .unwrap();
+                assert_eq!(got.codomain_rank(), want.codomain_rank());
+                assert_eq!(got.leg_dims().unwrap(), want.leg_dims().unwrap());
+                numerics::assert_slices_close(
+                    "contract(output_axes) vs pre-permuted operand",
+                    got.data(),
+                    want.data(),
+                    a.data().len() * b.data().len(),
+                );
+            }
             assert_no_costlier_than_permute!(
                 runtime,
                 &a,

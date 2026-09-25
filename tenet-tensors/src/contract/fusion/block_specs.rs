@@ -787,7 +787,7 @@ fn is_core_form_fusion_compose_contract(
         && dst_codomain_rank == lhs.codomain().len()
 }
 
-fn is_core_form_fusion_source_contract(
+pub(crate) fn is_core_form_fusion_source_contract(
     lhs: &FusionTreeHomSpace,
     rhs: &FusionTreeHomSpace,
     lhs_contracting_axes: &[usize],
