@@ -8855,3 +8855,252 @@ fn storage_direct_contraction_refuses_mis_stacked_trees_before_gemm() {
         );
     }
 }
+
+#[cfg(feature = "racah-generated")]
+#[test]
+fn checked_generic_compose_pairs_mis_stacked_multiplicity_trees_by_identity() {
+    // What (#1520): checked Generic compose on SU(3), where `8 ⊗ 8 → 8` has
+    // vertex multiplicity 2, pairs coupled-sector rows and columns by tree
+    // identity (vertex label included) when operands stack those trees in
+    // different orders, through `compile_checked_generic_core_plan`.
+    use std::collections::BTreeMap;
+    use tenet_core::CheckedGenericFusion;
+    use tenet_sectors::SUNFusionRule;
+
+    type Entries = BTreeMap<(BlockKey, Vec<usize>), f64>;
+    fn position(block: &tenet_core::BlockRef<'_>, coordinates: &[usize]) -> usize {
+        block.offset()
+            + coordinates
+                .iter()
+                .zip(block.strides())
+                .map(|(&c, &s)| c * s)
+                .sum::<usize>()
+    }
+    fn coordinates(shape: &[usize]) -> Vec<Vec<usize>> {
+        (0..shape.iter().product::<usize>())
+            .map(|mut linear| {
+                shape
+                    .iter()
+                    .map(|&extent| {
+                        let coordinate = linear % extent;
+                        linear /= extent;
+                        coordinate
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+    fn entries(structure: &BlockStructure, data: &[f64]) -> Entries {
+        let mut entries = Entries::new();
+        for index in 0..structure.block_count() {
+            let block = structure.block(index).unwrap();
+            for coordinates in coordinates(block.shape()) {
+                let value = data[position(&block, &coordinates)];
+                entries.insert((block.key().clone(), coordinates), value);
+            }
+        }
+        entries
+    }
+
+    let _guard = crate::test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let provider = Arc::new(SUNFusionRule::new(3).unwrap());
+    let adjoint = provider.encode_dynkin(&[1, 1]).unwrap();
+    assert_eq!(provider.try_nsymbol(adjoint, adjoint, adjoint).unwrap(), 2);
+    let leg = || SectorLeg::new([(adjoint, 2)], false);
+    let canonical = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+        Arc::clone(&provider),
+        FusionTreeHomSpace::new(
+            FusionProductSpace::new([leg(), leg()]),
+            FusionProductSpace::new([leg(), leg()]),
+        ),
+    )
+    .unwrap();
+    let structure = canonical.space().structure();
+    let len = canonical.space().required_len().unwrap();
+    let data = (0..len)
+        .map(|index| ((7 * index) % 11) as f64 - 4.5 + 0.01 * index as f64)
+        .collect::<Vec<_>>();
+    let good = entries(structure, &data);
+
+    // Coupled-sector matrix layout with the row (codomain) and column
+    // (domain) trees of every sector stacked in first-occurrence order,
+    // optionally reversed.
+    let restack = |reverse_rows: bool, reverse_columns: bool| {
+        let mut sectors: Vec<(SectorId, Vec<usize>)> = Vec::new();
+        for index in 0..structure.block_count() {
+            let BlockKey::FusionTree(pair) = structure.block(index).unwrap().key().clone() else {
+                unreachable!()
+            };
+            let coupled = pair.codomain_tree().coupled();
+            match sectors.iter_mut().find(|(sector, _)| *sector == coupled) {
+                Some((_, indices)) => indices.push(index),
+                None => sectors.push((coupled, vec![index])),
+            }
+        }
+        let mut specs = Vec::new();
+        for (_, indices) in sectors {
+            let blocks = indices
+                .iter()
+                .map(|&index| structure.block(index).unwrap())
+                .collect::<Vec<_>>();
+            let base = blocks.iter().map(|block| block.offset()).min().unwrap();
+            let axis_trees = |codomain: bool, reverse: bool| {
+                let mut trees: Vec<(FusionTreeKey, usize)> = Vec::new();
+                for block in &blocks {
+                    let BlockKey::FusionTree(pair) = block.key() else {
+                        unreachable!()
+                    };
+                    let (tree, extents) = if codomain {
+                        (pair.codomain_tree(), &block.shape()[..2])
+                    } else {
+                        (pair.domain_tree(), &block.shape()[2..])
+                    };
+                    if !trees.iter().any(|(known, _)| known == tree) {
+                        trees.push((tree.clone(), extents.iter().product()));
+                    }
+                }
+                if reverse {
+                    trees.reverse();
+                }
+                trees
+            };
+            let (rows, columns) = (
+                axis_trees(true, reverse_rows),
+                axis_trees(false, reverse_columns),
+            );
+            let offset = |trees: &[(FusionTreeKey, usize)], tree: &FusionTreeKey| {
+                trees
+                    .iter()
+                    .take_while(|(known, _)| known != tree)
+                    .map(|(_, extent)| extent)
+                    .sum::<usize>()
+            };
+            let height = rows.iter().map(|(_, extent)| extent).sum::<usize>();
+            let rank_of = |trees: &[(FusionTreeKey, usize)], tree: &FusionTreeKey| {
+                trees.iter().position(|(known, _)| known == tree).unwrap()
+            };
+            // Blocks are listed row by row in the new stacking, so each
+            // operand's first-occurrence tree order is its storage order.
+            let mut sector_specs = blocks
+                .iter()
+                .map(|block| {
+                    let BlockKey::FusionTree(pair) = block.key() else {
+                        unreachable!()
+                    };
+                    let shape = block.shape().to_vec();
+                    let spec = BlockSpec::with_key(
+                        block.key().clone(),
+                        shape.clone(),
+                        vec![1, shape[0], height, height * shape[2]],
+                        base + offset(&rows, pair.codomain_tree())
+                            + height * offset(&columns, pair.domain_tree()),
+                    )
+                    .unwrap();
+                    (
+                        (
+                            rank_of(&rows, pair.codomain_tree()),
+                            rank_of(&columns, pair.domain_tree()),
+                        ),
+                        spec,
+                    )
+                })
+                .collect::<Vec<_>>();
+            sector_specs.sort_by_key(|(position, _)| *position);
+            specs.extend(sector_specs.into_iter().map(|(_, spec)| spec));
+        }
+        let restacked =
+            canonical.with_test_structure(BlockStructure::from_blocks_with_rank(4, specs).unwrap());
+        let mut restacked_data = vec![0.0; len];
+        let layout = restacked.space().structure();
+        for index in 0..layout.block_count() {
+            let block = layout.block(index).unwrap();
+            for coordinates in coordinates(block.shape()) {
+                let at = position(&block, &coordinates);
+                restacked_data[at] = good[&(block.key().clone(), coordinates)];
+            }
+        }
+        assert_eq!(entries(layout, &restacked_data), good);
+        (restacked, restacked_data)
+    };
+
+    // The layout model reproduces the canonical layout exactly.
+    let (unchanged, unchanged_data) = restack(false, false);
+    assert_eq!(unchanged_data, data);
+    let layout = |structure: &BlockStructure| {
+        (0..structure.block_count())
+            .map(|index| {
+                let block = structure.block(index).unwrap();
+                (
+                    block.key().clone(),
+                    (block.offset(), block.strides().to_vec()),
+                )
+            })
+            .collect::<BTreeMap<_, _>>()
+    };
+    assert_eq!(layout(unchanged.space().structure()), layout(structure));
+
+    let tilings = [
+        ("Canonical", (canonical.clone(), data.clone())),
+        ("RowsReversed", restack(true, false)),
+        ("ColumnsReversed", restack(false, true)),
+        ("BothReversed", restack(true, true)),
+    ];
+    for (name, (_, tiling_data)) in &tilings[1..] {
+        assert_ne!(
+            tiling_data, &data,
+            "{name} must restack a multi-tree sector"
+        );
+    }
+
+    // Independent oracle: `(A B)[X, Z] = Σ_Y A[X, Y] B[Y, Z]` over tree
+    // identity; composition crosses no leg, so no recoupling enters.
+    let mut square = Entries::new();
+    for ((lhs_key, lhs_index), lhs_value) in &good {
+        let BlockKey::FusionTree(lhs_tree) = lhs_key else {
+            unreachable!()
+        };
+        for ((rhs_key, rhs_index), rhs_value) in &good {
+            let BlockKey::FusionTree(rhs_tree) = rhs_key else {
+                unreachable!()
+            };
+            if lhs_tree.domain_tree() == rhs_tree.codomain_tree()
+                && lhs_index[2..] == rhs_index[..2]
+            {
+                let key = BlockKey::FusionTree(FusionTreePairKey::pair(
+                    lhs_tree.codomain_tree().clone(),
+                    rhs_tree.domain_tree().clone(),
+                ));
+                let index = [&lhs_index[..2], &rhs_index[2..]].concat();
+                *square.entry((key, index)).or_insert(0.0) += lhs_value * rhs_value;
+            }
+        }
+    }
+
+    let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
+    for (lhs_name, (lhs_space, lhs_data)) in &tilings {
+        for (rhs_name, (rhs_space, rhs_data)) in &tilings {
+            let (space, product) = crate::tensorcompose_owned_checked_generic_in_context(
+                &mut context,
+                lhs_space,
+                lhs_data,
+                rhs_space,
+                rhs_data,
+            )
+            .unwrap();
+            let actual = entries(space.space().structure(), &product);
+            assert_eq!(
+                actual.keys().collect::<Vec<_>>(),
+                square.keys().collect::<Vec<_>>(),
+                "{lhs_name}·{rhs_name}: keys"
+            );
+            for ((key, value), expected) in actual.iter().zip(square.values()) {
+                assert!(
+                    (value - expected).abs() <= 1e-10 * expected.abs().max(1.0),
+                    "{lhs_name}·{rhs_name}: {key:?}: {value} != {expected}"
+                );
+            }
+        }
+    }
+}

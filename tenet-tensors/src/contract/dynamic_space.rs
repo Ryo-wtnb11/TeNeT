@@ -1301,6 +1301,24 @@ impl<R> fmt::Debug for BoundDynamicFusionMapSpace<R> {
     }
 }
 
+#[cfg(all(test, feature = "racah-generated"))]
+impl<R> BoundDynamicFusionMapSpace<R> {
+    /// The same binding over a caller-restacked layout of the same trees:
+    /// the only way a test obtains a non-canonical checked Generic operand,
+    /// since checked admission always derives the canonical layout.
+    pub(crate) fn with_test_structure(&self, structure: BlockStructure) -> Self {
+        Self {
+            space: DynamicFusionMapSpace {
+                subblock_structure: structure.into_shared(),
+                adjoint: OnceLock::new(),
+                ..self.space.clone()
+            },
+            provider: Arc::clone(&self.provider),
+            layout_build: self.layout_build,
+        }
+    }
+}
+
 impl<R> BoundDynamicFusionMapSpace<R> {
     #[inline]
     /// Read-only access to the validated dynamic layout for expert planning

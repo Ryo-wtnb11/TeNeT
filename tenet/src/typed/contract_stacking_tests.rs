@@ -6,8 +6,8 @@ use std::collections::BTreeMap;
 use super::*;
 use tenet_core::{
     BlockKey, BlockStructure, FermionParityFusionRule, FusionProductSpace, FusionTreeHomSpace,
-    FusionTreePairKey, SU2FusionRule, SU2Irrep, SectorLeg, U1FusionRule, U1Irrep, Z2FusionRule,
-    Z2Irrep,
+    FusionTreePairKey, PhysicalFusionBasis, SU2FusionRule, SU2Irrep, SectorLeg, U1FusionRule,
+    U1Irrep, Z2FusionRule, Z2Irrep,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -388,4 +388,172 @@ fn su2_mis_stacked_contractions_match_tree_identity() {
             (SU2Irrep::from_twice_spin(1).sector_id(), 1),
         ],
     );
+}
+
+/// Column-major einsum over physical-basis arrays: contracts `lhs_axes` with
+/// `rhs_axes` and orders the open axes (lhs then rhs) by `output_axes`.
+fn dense_contract(
+    lhs: &PhysicalDense<f64>,
+    rhs: &PhysicalDense<f64>,
+    lhs_axes: &[usize],
+    rhs_axes: &[usize],
+    output_axes: &[usize],
+) -> PhysicalDense<f64> {
+    let decode = |shape: &[usize], mut linear: usize| {
+        shape
+            .iter()
+            .map(|&extent| {
+                let coordinate = linear % extent;
+                linear /= extent;
+                coordinate
+            })
+            .collect::<Vec<_>>()
+    };
+    let open = |shape: &[usize], axes: &[usize]| {
+        (0..shape.len())
+            .filter(|axis| !axes.contains(axis))
+            .collect::<Vec<_>>()
+    };
+    let (lhs_open, rhs_open) = (open(&lhs.shape, lhs_axes), open(&rhs.shape, rhs_axes));
+    let open_extent = |i: usize| {
+        if i < lhs_open.len() {
+            lhs.shape[lhs_open[i]]
+        } else {
+            rhs.shape[rhs_open[i - lhs_open.len()]]
+        }
+    };
+    let shape = output_axes
+        .iter()
+        .map(|&i| open_extent(i))
+        .collect::<Vec<_>>();
+    let mut data = vec![0.0; shape.iter().product()];
+    for (l, &lhs_value) in lhs.data.iter().enumerate() {
+        let a = decode(&lhs.shape, l);
+        for (r, &rhs_value) in rhs.data.iter().enumerate() {
+            let b = decode(&rhs.shape, r);
+            if lhs_axes.iter().zip(rhs_axes).any(|(&i, &j)| a[i] != b[j]) {
+                continue;
+            }
+            let coordinates = lhs_open
+                .iter()
+                .map(|&axis| a[axis])
+                .chain(rhs_open.iter().map(|&axis| b[axis]))
+                .collect::<Vec<_>>();
+            let linear = output_axes
+                .iter()
+                .zip(&shape)
+                .rev()
+                .fold(0, |acc, (&i, &extent)| acc * extent + coordinates[i]);
+            data[linear] += lhs_value * rhs_value;
+        }
+    }
+    PhysicalDense { shape, data }
+}
+
+fn assert_dense_close(actual: &PhysicalDense<f64>, expected: &PhysicalDense<f64>, what: &str) {
+    assert_eq!(actual.shape, expected.shape, "{what}: shape");
+    for (index, (value, expected)) in actual.data.iter().zip(&expected.data).enumerate() {
+        assert!(
+            (value - expected).abs() <= 1e-12 * expected.abs().max(1.0),
+            "{what}: [{index}]: {value} != {expected}"
+        );
+    }
+}
+
+/// `compose`, `powi` and `contract` of every stacking pair (and the lazy
+/// adjoint) match a physical-basis einsum of the canonical operand, which
+/// does not depend on any fusion-tree basis or stacking. Returns the number
+/// of checks.
+fn assert_stacking_matches_dense<R>(rule: R, sectors: &[(SectorId, usize)]) -> usize
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>
+        + PhysicalFusionBasis<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec
+        + Clone
+        + 'static,
+{
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let build = |stacking| endomorphism(&runtime, rule.clone(), sectors, stacking);
+    let good = build(Stacking::Canonical);
+    let dense = good.to_physical_dense().unwrap();
+    // A† of a real operator: swap the codomain and domain axis pairs.
+    let dense_adjoint = dense_contract(
+        &dense,
+        &PhysicalDense {
+            shape: vec![],
+            data: vec![1.0],
+        },
+        &[],
+        &[],
+        &[2, 3, 0, 1],
+    );
+    let mut operands = [
+        Stacking::Canonical,
+        Stacking::Sorted,
+        Stacking::ColumnsReversed,
+        Stacking::BothReversed,
+    ]
+    .map(|stacking| (format!("{stacking:?}"), build(stacking), &dense))
+    .to_vec();
+    operands.push(("Adjoint".into(), good.adjoint().unwrap(), &dense_adjoint));
+    let mut checks = 0;
+    let mut check = |actual: &TensorMap<R, f64>, expected: &PhysicalDense<f64>, what: String| {
+        assert_dense_close(&actual.to_physical_dense().unwrap(), expected, &what);
+        checks += 1;
+    };
+    for (name, tensor, dense) in &operands {
+        let square = dense_contract(dense, dense, &[2, 3], &[0, 1], &[0, 1, 2, 3]);
+        let cube = dense_contract(&square, dense, &[2, 3], &[0, 1], &[0, 1, 2, 3]);
+        check(&tensor.powi(2).unwrap(), &square, format!("{name} powi(2)"));
+        check(&tensor.powi(3).unwrap(), &cube, format!("{name} powi(3)"));
+        for (other_name, other, other_dense) in &operands {
+            let what = |op: &str| format!("{name}·{other_name} {op}");
+            check(
+                &tensor.compose(other).unwrap(),
+                &dense_contract(dense, other_dense, &[2, 3], &[0, 1], &[0, 1, 2, 3]),
+                what("compose"),
+            );
+            for (lhs_axes, rhs_axes, output_axes, op) in [
+                (&[2, 3][..], &[0, 1][..], &[0, 1, 2, 3][..], "contract"),
+                (&[2, 3], &[0, 1], &[2, 3, 0, 1], "contract swapped"),
+                (&[2, 3], &[0, 1], &[1, 0, 2, 3], "contract copyC"),
+                (&[3], &[1], &[0, 1, 2, 3, 4, 5], "contract one leg"),
+            ] {
+                check(
+                    &tensor
+                        .contract(other, lhs_axes, rhs_axes, output_axes)
+                        .unwrap(),
+                    &dense_contract(dense, other_dense, lhs_axes, rhs_axes, output_axes),
+                    what(op),
+                );
+            }
+        }
+    }
+    checks
+}
+
+#[test]
+fn u1_mis_stacked_contractions_match_physical_dense_einsum() {
+    let checks = assert_stacking_matches_dense(
+        U1FusionRule,
+        &[
+            (U1Irrep::new(-1).sector_id(), 1),
+            (U1Irrep::new(0).sector_id(), 2),
+            (U1Irrep::new(1).sector_id(), 1),
+        ],
+    );
+    assert_eq!(checks, 5 * 2 + 5 * 5 * 5);
+}
+
+#[test]
+fn su2_mis_stacked_contractions_match_physical_dense_einsum() {
+    let checks = assert_stacking_matches_dense(
+        SU2FusionRule,
+        &[
+            (SU2Irrep::from_twice_spin(0).sector_id(), 2),
+            (SU2Irrep::from_twice_spin(1).sector_id(), 1),
+        ],
+    );
+    assert_eq!(checks, 5 * 2 + 5 * 5 * 5);
 }
