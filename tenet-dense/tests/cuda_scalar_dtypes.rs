@@ -23,9 +23,9 @@ use std::fmt::Debug;
 
 use num_complex::{Complex32, Complex64};
 use tenet_dense::{
-    cuda_eigh_region, cuda_gemm_region_with_ops_into, cuda_is_hermitian_region, cuda_qr_region,
-    cuda_svd_region, CudaDenseContext, CudaDenseStorage, CudaScalar, DenseDType, DenseError,
-    MatrixOp,
+    cuda_download_spectra, cuda_eigh_region, cuda_gemm_region_with_ops_into,
+    cuda_is_hermitian_region, cuda_qr_region, cuda_svd_region, CudaDenseContext, CudaDenseStorage,
+    CudaScalar, DenseDType, DenseError, MatrixOp,
 };
 
 /// The payload dtypes under test, with just enough host arithmetic for a
@@ -311,6 +311,15 @@ fn region_gemm_matches_a_double_precision_oracle_for_every_dtype_and_op_pair() {
 // Factorization regions: the laws, and the widened spectra.
 // ---------------------------------------------------------------------------
 
+fn download_spectrum<D: ProbeScalar>(
+    ctx: &mut CudaDenseContext,
+    spectrum: tenet_dense::CudaSpectrum,
+) -> Vec<f64> {
+    cuda_download_spectra::<D>(ctx, &[spectrum])
+        .expect("spectrum download")
+        .remove(0)
+}
+
 /// `U diag(s) Vt == A`, `U^H U == I`, `Vt Vt^H == I`, and a spectrum that is
 /// non-negative, descending and downloaded as `f64` whatever the lane.
 fn svd_case<D: ProbeScalar>(ctx: &mut CudaDenseContext, rows: usize, cols: usize) {
@@ -320,6 +329,7 @@ fn svd_case<D: ProbeScalar>(ctx: &mut CudaDenseContext, rows: usize, cols: usize
 
     let (u, values, vt) = cuda_svd_region::<D>(ctx, &src, 0, rows, cols)
         .unwrap_or_else(|err| panic!("{} SVD {rows}x{cols}: {err}", D::NAME));
+    let values = download_spectrum::<D>(ctx, values);
     let u: Vec<Complex64> = download::<D>(ctx, &u).iter().map(|v| v.widen()).collect();
     let vt: Vec<Complex64> = download::<D>(ctx, &vt).iter().map(|v| v.widen()).collect();
 
@@ -419,6 +429,7 @@ fn eigh_case<D: ProbeScalar>(ctx: &mut CudaDenseContext, n: usize) {
 
     let (values, vectors) = cuda_eigh_region::<D>(ctx, &src, 0, n)
         .unwrap_or_else(|err| panic!("{} EIGH {n}x{n}: {err}", D::NAME));
+    let values = download_spectrum::<D>(ctx, values);
     let vectors: Vec<Complex64> = download::<D>(ctx, &vectors)
         .iter()
         .map(|v| v.widen())
@@ -560,6 +571,7 @@ fn spectrum_widening_case<D: ProbeScalar>(ctx: &mut CudaDenseContext) {
     let src = upload::<D>(ctx, &payload);
 
     let (_, values, _) = cuda_svd_region::<D>(ctx, &src, 0, n, n).expect("svd");
+    let values = download_spectrum::<D>(ctx, values);
     let allowed = tolerance::<D>(n, 4.0);
     for (index, value) in values.iter().enumerate() {
         assert!(
@@ -571,6 +583,7 @@ fn spectrum_widening_case<D: ProbeScalar>(ctx: &mut CudaDenseContext) {
     }
 
     let (eigenvalues, _) = cuda_eigh_region::<D>(ctx, &src, 0, n).expect("eigh");
+    let eigenvalues = download_spectrum::<D>(ctx, eigenvalues);
     let mut ascending = diagonal;
     ascending.sort_by(f64::total_cmp);
     for (index, value) in eigenvalues.iter().enumerate() {

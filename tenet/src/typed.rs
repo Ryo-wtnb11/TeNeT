@@ -4577,7 +4577,14 @@ pub(crate) fn cuda_svd_region<D: CudaPayload>(
     offset: usize,
     rows: usize,
     cols: usize,
-) -> Result<(CudaDenseStorage, Vec<f64>, CudaDenseStorage), Error> {
+) -> Result<
+    (
+        CudaDenseStorage,
+        tenet_dense::CudaSpectrum,
+        CudaDenseStorage,
+    ),
+    Error,
+> {
     let factors =
         dense_cuda_svd_region::<D>(cuda, source, offset, rows, cols).map_err(dense_err)?;
     #[cfg(test)]
@@ -4602,8 +4609,18 @@ pub(crate) fn typed_cuda_eigh_region<D: CudaPayload>(
     source: &CudaDenseStorage,
     offset: usize,
     n: usize,
-) -> Result<(Vec<f64>, CudaDenseStorage), Error> {
+) -> Result<(tenet_dense::CudaSpectrum, CudaDenseStorage), Error> {
     cuda_eigh_region::<D>(cuda, source, offset, n).map_err(dense_err)
+}
+
+/// Downloads the device spectra of one factorization call with one transfer.
+#[cfg(feature = "cuda")]
+#[inline]
+pub(crate) fn cuda_download_spectra<D: CudaPayload>(
+    cuda: &mut CudaDenseContext,
+    spectra: &[tenet_dense::CudaSpectrum],
+) -> Result<Vec<Vec<f64>>, Error> {
+    tenet_dense::cuda_download_spectra::<D>(cuda, spectra).map_err(dense_err)
 }
 
 /// Writes `factor_rows x kept` slices of `factor * selector` into the target
@@ -11902,7 +11919,8 @@ where
     ///
     /// Each nonempty coupled-sector route is decomposed and assembled before
     /// its raw device factors are dropped. Singular values are the only
-    /// numerical tensor payload downloaded; the backend additionally reads
+    /// numerical tensor payload downloaded, all routes' with one transfer
+    /// after the solver loop; the backend additionally reads
     /// O(1) solver-status metadata per route. The returned `s` is deliberately
     /// a dense CUDA tensor because
     /// CUDA diagonal storage is not part of the typed storage contract.
@@ -11958,14 +11976,14 @@ where
                 let source_region = &plan.source_regions[route.source];
                 let left_region = &plan.left_regions[route.left];
                 let right_region = &plan.right_regions[route.right];
-                let (raw_left, values, raw_right) = cuda_svd_region::<D>(
+                let (raw_left, spectrum, raw_right) = cuda_svd_region::<D>(
                     cuda,
                     &source.0,
                     source_region.range().start,
                     source_region.rows(),
                     source_region.cols(),
                 )?;
-                if values.len() != route.rank {
+                if spectrum.len() != route.rank {
                     return Err(internal_layout_error(
                         "compact SVD spectrum length does not match its source route",
                     ));
@@ -12005,11 +12023,17 @@ where
                         &scratch.right,
                     )?;
                 }
-                spectra.push(tenet_matrixalgebra::SectorSpectrum {
-                    sector: source_region.coupled(),
-                    values,
-                });
+                spectra.push(spectrum);
             }
+            let spectra: Vec<_> = plan
+                .routes
+                .iter()
+                .zip(cuda_download_spectra::<D>(cuda, &spectra)?)
+                .map(|(route, values)| tenet_matrixalgebra::SectorSpectrum {
+                    sector: plan.source_regions[route.source].coupled(),
+                    values,
+                })
+                .collect();
 
             let mut middle_host = vec![D::ZERO; middle_len];
             fill_diagonal_values(middle_space.space().structure(), &mut middle_host, &spectra)?;
@@ -12166,20 +12190,14 @@ where
         let (spectra, mut raw_vectors, orders) = {
             let mut lease = self.runtime.lease_cuda()?;
             let cuda = &mut *lease;
-            let mut spectra = Vec::with_capacity(source_plan.source_regions.len());
+            let mut device_spectra = Vec::with_capacity(source_plan.source_regions.len());
             let mut vectors = Vec::with_capacity(source_plan.source_regions.len());
-            let mut orders = Vec::with_capacity(source_plan.source_regions.len());
             #[cfg(test)]
             let mut decomposition_ordinal = 0;
             for region in source_plan.source_regions.iter() {
                 let n = region.rows();
                 if n == 0 {
-                    spectra.push(tenet_matrixalgebra::SectorSpectrum {
-                        sector: region.coupled(),
-                        values: Vec::new(),
-                    });
                     vectors.push(None);
-                    orders.push(Vec::new());
                     continue;
                 }
                 let (values, vector) =
@@ -12189,6 +12207,21 @@ where
                     decomposition_ordinal += 1;
                     Self::inject_cuda_eigh_failure("decomposition", decomposition_ordinal)?;
                 }
+                device_spectra.push(values);
+                vectors.push(Some(vector));
+            }
+            let mut downloaded = cuda_download_spectra::<D>(cuda, &device_spectra)?.into_iter();
+            let mut spectra = Vec::with_capacity(source_plan.source_regions.len());
+            let mut orders = Vec::with_capacity(source_plan.source_regions.len());
+            for region in source_plan.source_regions.iter() {
+                let n = region.rows();
+                let values = if n == 0 {
+                    Vec::new()
+                } else {
+                    downloaded.next().ok_or_else(|| {
+                        internal_layout_error("CUDA EIGH spectrum count does not match its blocks")
+                    })?
+                };
                 if values.iter().any(|value| !value.is_finite()) {
                     return Err(internal_layout_error(
                         "CUDA EIGH returned a non-finite eigenvalue",
@@ -12206,7 +12239,6 @@ where
                     sector: region.coupled(),
                     values: sorted,
                 });
-                vectors.push(Some(vector));
                 orders.push(order);
             }
             (spectra, vectors, orders)
