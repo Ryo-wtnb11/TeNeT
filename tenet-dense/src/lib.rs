@@ -74,4 +74,6 @@ pub use cuda_adapter::{
     CudaTransferStats,
 };
 #[cfg(feature = "cuda")]
+pub use cuda_adapter::{cuda_download_spectra, CudaSpectrum};
+#[cfg(feature = "cuda")]
 pub use cuda_region::CudaRegion;

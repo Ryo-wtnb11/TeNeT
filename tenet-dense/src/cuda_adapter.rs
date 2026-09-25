@@ -260,6 +260,8 @@ pub struct CudaPlanCacheStats {
 ///   workspaces and the intermediate tensors of `cuda_hermitian_regions`
 ///   (`abs`, `div`, `sub`, the reductions) allocate on device but are not
 ///   visible as buffers here and are therefore not counted.
+///   Nor are the solvers' device spectra ([`CudaSpectrum`]) or the
+///   `concatenate` output that [`cuda_download_spectra`] gathers them into.
 /// - `gemm_calls`: `dot_general` submissions, from
 ///   `cuda_gemm_region_strided_into` and from the region primitives
 ///   ([`cuda_region_axpby`], [`cuda_region_zero`]) alike.
@@ -813,7 +815,8 @@ impl CudaDenseContext {
         )?;
         // cuSOLVER + cuBLAS: a 1x1 region is trivially Hermitian, so this is a
         // real `eigh` with no host-side precondition to fake.
-        let (_values, _vectors) = cuda_eigh_region::<f64>(self, &lhs, 0, 1)?;
+        let (values, _vectors) = cuda_eigh_region::<f64>(self, &lhs, 0, 1)?;
+        cuda_download_spectra::<f64>(self, &[values])?;
         Ok(())
     }
 }
@@ -2194,17 +2197,88 @@ pub fn cuda_widen<W: CudaScalar>(
     Ok(wide)
 }
 
+/// A factorization's real spectrum (singular values or eigenvalues), still
+/// device-resident in the payload's real lane.
+///
+/// Why not downloaded by the factorization itself: every download blocks the
+/// host (a D2H plus a CubeCL flush), so a per-block download made a
+/// block-sparse factorization pay one host sync per coupled sector (#1484).
+/// Callers collect the spectra of all their blocks and read them with one
+/// [`cuda_download_spectra`].
+pub struct CudaSpectrum {
+    tensor: Tensor,
+}
+
+impl CudaSpectrum {
+    /// Number of values.
+    pub fn len(&self) -> usize {
+        self.tensor.shape().iter().product()
+    }
+
+    /// Whether the spectrum holds no values.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// Downloads `spectra` (all from factorizations of payload `D`, so in its real
+/// lane) with at most one transfer: two or more nonempty spectra are first concatenated on
+/// device. Returns each spectrum's values, widened to `f64`, in input order;
+/// the values are the solver's own, since concatenation only moves them.
+pub fn cuda_download_spectra<D: CudaScalar>(
+    ctx: &mut CudaDenseContext,
+    spectra: &[CudaSpectrum],
+) -> Result<Vec<Vec<f64>>, DenseError> {
+    use tenferro_tensor::TensorIndexing;
+    const OP: &str = "cuda_download_spectra";
+    let parts: Vec<&Tensor> = spectra
+        .iter()
+        .filter(|spectrum| !spectrum.is_empty())
+        .map(|spectrum| &spectrum.tensor)
+        .collect();
+    let values = match parts.as_slice() {
+        [] => Vec::new(),
+        [single] => download_values::<D::Real>(ctx, single)?,
+        _ => {
+            let gathered = ctx
+                .backend
+                .concatenate(&parts, 0)
+                .map_err(|err| cuda_error(OP, err))?;
+            download_values::<D::Real>(ctx, &gathered)?
+        }
+    };
+    let total: usize = spectra.iter().map(CudaSpectrum::len).sum();
+    if values.len() != total {
+        return Err(cuda_error(
+            OP,
+            format!(
+                "downloaded {} spectrum values; expected {total}",
+                values.len()
+            ),
+        ));
+    }
+    let mut rest = values.as_slice();
+    Ok(spectra
+        .iter()
+        .map(|spectrum| {
+            let (head, tail) = rest.split_at(spectrum.len());
+            rest = tail;
+            head.to_vec()
+        })
+        .collect())
+}
+
 /// cuSOLVER SVD of one packed column-major `rows x cols` region:
-/// `region = U * diag(s) * Vt` with `k = min(rows, cols)`. `U` (`rows x k`)
-/// and `Vt` (`k x cols`) stay device-resident; only the singular values
-/// (descending) are downloaded.
+/// `region = U * diag(s) * Vt` with `k = min(rows, cols)`. `U` (`rows x k`),
+/// the singular values `s` (descending) and `Vt` (`k x cols`) all stay
+/// device-resident; read `s` with [`cuda_download_spectra`].
 pub fn cuda_svd_region<D: CudaScalar>(
     ctx: &mut CudaDenseContext,
     src: &CudaDenseStorage,
     offset: usize,
     rows: usize,
     cols: usize,
-) -> Result<(CudaDenseStorage, Vec<f64>, CudaDenseStorage), DenseError> {
+) -> Result<(CudaDenseStorage, CudaSpectrum, CudaDenseStorage), DenseError> {
     ensure_cuda_device(ctx.device, "cuda_svd", &[("src", src.device)])?;
     let view = src.region_view::<D>(rows, cols, rows, offset)?;
     SOLVER_CALLS.fetch_add(1, Ordering::Relaxed);
@@ -2213,7 +2287,7 @@ pub fn cuda_svd_region<D: CudaScalar>(
     })
     .map_err(|err| cuda_error("cuda_svd", err))?;
     let vt = CudaDenseStorage::from_tensor::<D>("cuda_svd", vt, ctx.device)?;
-    let s = download_values::<D::Real>(ctx, &s)?;
+    let s = CudaSpectrum { tensor: s };
     let u = CudaDenseStorage::from_tensor::<D>("cuda_svd", u, ctx.device)?;
     validate_svd_factor_shapes(u.tensor.shape(), s.len(), vt.tensor.shape(), rows, cols)?;
     Ok((u, s, vt))
@@ -2290,15 +2364,16 @@ fn validate_qr_factor_shapes(
 }
 
 /// cuSOLVER Hermitian eigendecomposition of one packed column-major
-/// `n x n` region: eigenvalues are downloaded (host truncation / ordering
-/// decisions), eigenvectors stay device-resident (`n x n`, one eigenvector
-/// per column, in cuSOLVER's ascending-eigenvalue order).
+/// `n x n` region: eigenvalues (ascending) and eigenvectors (`n x n`, one
+/// eigenvector per column, in the same order) stay device-resident; read the
+/// eigenvalues with [`cuda_download_spectra`] for host ordering and
+/// truncation decisions.
 pub fn cuda_eigh_region<D: CudaScalar>(
     ctx: &mut CudaDenseContext,
     src: &CudaDenseStorage,
     offset: usize,
     n: usize,
-) -> Result<(Vec<f64>, CudaDenseStorage), DenseError> {
+) -> Result<(CudaSpectrum, CudaDenseStorage), DenseError> {
     ensure_cuda_device(ctx.device, "cuda_eigh", &[("src", src.device)])?;
     let view = src.region_view::<D>(n, n, n, offset)?;
     SOLVER_CALLS.fetch_add(1, Ordering::Relaxed);
@@ -2307,7 +2382,7 @@ pub fn cuda_eigh_region<D: CudaScalar>(
     })
     .map_err(|err| cuda_error("cuda_eigh", err))?;
     let vectors = CudaDenseStorage::from_tensor::<D>("cuda_eigh", vectors, ctx.device)?;
-    let values = download_values::<D::Real>(ctx, &values)?;
+    let values = CudaSpectrum { tensor: values };
     validate_eigh_factor_shapes(values.len(), vectors.tensor.shape(), n)?;
     Ok((values, vectors))
 }
