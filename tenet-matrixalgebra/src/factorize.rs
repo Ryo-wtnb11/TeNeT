@@ -2379,6 +2379,15 @@ where
             },
         )?;
     let routes = compile_compact_factor_routes(&regions, &left_regions, &right_regions)?;
+    // The direct path publishes each dense factor region positionally, so it
+    // is sound only when the fresh factor lists the source's trees in the
+    // source's order. Why not scatter here: a reordered tiling takes the
+    // packed path, whose `PlacementIndex` scatter already maps by tree
+    // identity, so one authority owns non-canonical publication.
+    if !compact_factor_routes_preserve_tree_order(&routes, &regions, &left_regions, &right_regions)
+    {
+        return Ok(None);
+    }
     Ok(Some(CompactFactorPlan {
         source_layout,
         source_regions: regions,
@@ -2388,6 +2397,23 @@ where
         right_regions,
         routes,
     }))
+}
+
+fn compact_factor_routes_preserve_tree_order(
+    routes: &[CompactFactorRoute],
+    source: &[CoupledSectorRegion],
+    left: &[CoupledSectorRegion],
+    right: &[CoupledSectorRegion],
+) -> bool {
+    routes.iter().all(|route| {
+        let region = &source[route.source_region];
+        route
+            .left_region
+            .is_none_or(|index| left[index].row_trees() == region.row_trees())
+            && route
+                .right_region
+                .is_none_or(|index| right[index].col_trees() == region.col_trees())
+    })
 }
 
 /// The bond leg `W` shared by both compact factors: one sector per source
