@@ -4696,6 +4696,114 @@ fn checked_generic_polar_covers_scalar_maps() {
 }
 
 #[test]
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
+fn checked_generic_polar_and_pinv_reject_a_tiled_source_whose_tree_order_differs_from_fresh_outputs(
+) {
+    // What: admission accepts any coupled-sector tiling, so a tiled source
+    // whose multiplicity trees are stacked in reverse of the fresh P / pinv
+    // output order must be refused by the route proof with a typed error
+    // before any dense work, never answered in mismatched coordinates.
+    let (base, base_data) = generic_factorization_input();
+    let base_structure = base.space().structure();
+    let blocks = (0..base_structure.block_count())
+        .rev()
+        .map(|index| {
+            let block = base_structure.block(index).unwrap();
+            let BlockKey::FusionTree(key) = block.key() else {
+                unreachable!("generic input has fusion-tree blocks")
+            };
+            (key.clone(), block.shape().to_vec())
+        })
+        .collect();
+    let structure =
+        BlockStructure::coupled_sector_matrix_with_keys(&FactorGenericRule, 2, 4, blocks).unwrap();
+    let typed_space = FusionTensorMapSpace::new_unbound(
+        TensorMapSpace::<2, 2>::from_dims([2, 1], [1, 1]).unwrap(),
+        base.space().homspace().clone(),
+        structure,
+    )
+    .unwrap()
+    .try_bind_rule(&FactorGenericRule)
+    .unwrap();
+    let tensor = TensorMap::<f64, 2, 2>::from_block_fn_with_fusion_space(
+        typed_space,
+        0.0,
+        |key, indices| {
+            let block = base_structure
+                .block(base_structure.find_block_index_by_key(key).unwrap())
+                .unwrap();
+            base_data[block.offset()
+                + indices
+                    .iter()
+                    .zip(block.strides())
+                    .map(|(&index, &stride)| index * stride)
+                    .sum::<usize>()]
+        },
+    )
+    .unwrap();
+    let provider = Arc::new(LateGenericSpy {
+        rule: FactorGenericRule,
+        fail_at: usize::MAX,
+        calls: Cell::new(0),
+    });
+    let source = BoundDynamicFusionMapSpace::bind_generic(
+        DynamicFusionMapSpace::from_typed(tensor.fusion_space().unwrap()),
+        Arc::clone(&provider),
+    )
+    .unwrap();
+    let input = BoundDynamicTensorRef::try_new(&source, tensor.data()).unwrap();
+
+    let fresh = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+        Arc::clone(&provider),
+        base.space().homspace().clone(),
+    )
+    .unwrap();
+    let tiled = source
+        .space()
+        .structure()
+        .coupled_sector_regions(2)
+        .unwrap()
+        .expect("the reordered source is still a coupled-sector tiling");
+    let fresh_regions = fresh
+        .space()
+        .structure()
+        .coupled_sector_regions(2)
+        .unwrap()
+        .unwrap();
+    assert!(tiled
+        .iter()
+        .zip(fresh_regions.iter())
+        .any(|(source, fresh)| source.col_trees() != fresh.col_trees()));
+
+    let polar = left_polar_dyn_checked_generic(&mut RejectExecutorCalls, &input).unwrap_err();
+    assert!(
+        matches!(
+            polar,
+            CheckedGenericFactorPlanError::Operation(
+                OperationError::UnsupportedTensorContractScope { .. }
+            )
+        ),
+        "{polar:?}"
+    );
+    let output = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+        provider,
+        FusionTreeHomSpace::new(
+            source.space().homspace().domain().clone(),
+            source.space().homspace().codomain().clone(),
+        ),
+    )
+    .unwrap();
+    let pinv = pinv_direct_into_dyn(&mut RejectExecutorCalls, &input, output, 0.0).unwrap_err();
+    assert!(
+        matches!(pinv, OperationError::UnsupportedTensorContractScope { .. }),
+        "{pinv:?}"
+    );
+}
+
+#[test]
 fn checked_generic_factor_plan_late_failure_precedes_commit() {
     let (space, _data) = generic_factorization_input();
     let complete = LateGenericSpy {

@@ -4219,6 +4219,193 @@ fn checked_generic_polar_completes_rank_deficient_and_zero_sectors() {
     }
 }
 
+#[cfg(feature = "racah-generated")]
+macro_rules! assert_sun_polar_laws {
+    ($runtime:expr, $source:expr, $codomain:expr, $domain:expr, $left:expr) => {{
+        let source = $source;
+        let left: bool = $left;
+        let (w, p) = if left {
+            source.left_polar().unwrap()
+        } else {
+            let (p, w) = source.right_polar().unwrap();
+            (w, p)
+        };
+        let assert_close = |actual: &TensorMap<_, _>, expected: &TensorMap<_, _>, what: &str| {
+            let error = actual
+                .add(expected, 1.0.into(), (-1.0).into())
+                .unwrap()
+                .norm()
+                .unwrap();
+            assert!(
+                error < 1e-9 * (1.0 + expected.norm().unwrap()),
+                "{what}: {error}"
+            );
+        };
+        // Checked Generic contraction reads owned tensors only; the lazy
+        // adjoint's logical data is replayed into an owned map.
+        let owned_adjoint = |tensor: &TensorMap<_, _>| {
+            let lazy = tensor.adjoint().unwrap();
+            let blocks: std::collections::HashMap<_, _> = lazy.blocks().unwrap().collect();
+            let (codomain, domain) = (lazy.codomain(), lazy.domain());
+            TensorMap::from_block_fn($runtime, codomain.iter(), domain.iter(), |trees, ij| {
+                *blocks[trees].get(ij).unwrap()
+            })
+            .unwrap()
+        };
+        // A rank-0 map names no leg to rebuild its adjoint from; checked eigh
+        // admission is the Hermitian (real scalar) test there.
+        let assert_hermitian = |tensor: &TensorMap<_, _>, what: &str| {
+            if tensor.rank() == 0 {
+                assert!(tensor.eigh_vals().is_ok(), "{what}");
+            } else {
+                assert_close(&owned_adjoint(tensor), tensor, what);
+            }
+        };
+        let rebuilt = if left { w.compose(&p) } else { p.compose(&w) }.unwrap();
+        assert_close(&rebuilt, source, "A = WP / PW");
+        let wh = owned_adjoint(&w);
+        let (gram, gram_space, square_oracle) = if left {
+            (
+                wh.compose(&w).unwrap(),
+                $domain,
+                owned_adjoint(source).compose(source).unwrap(),
+            )
+        } else {
+            (
+                w.compose(&wh).unwrap(),
+                $codomain,
+                source.compose(&owned_adjoint(source)).unwrap(),
+            )
+        };
+        let spaces: Vec<&GradedSpace<_>> = gram_space.collect();
+        assert_hermitian(&p, "P Hermitian");
+        assert_close(
+            &p.compose(&p).unwrap(),
+            &square_oracle,
+            "P^2 = A^H A / A A^H",
+        );
+        if spaces.is_empty() {
+            // A rank-0 Gram map sum |w|^2 is real and nonnegative, so unit
+            // norm is the scalar identity (no leg names the provider).
+            assert_eq!(gram.data().len(), 1);
+            assert!((gram.norm().unwrap() - 1.0).abs() < 1e-9, "W isometry");
+        } else {
+            let identity = TensorMap::from_block_fn(
+                $runtime,
+                spaces.iter().copied(),
+                spaces.iter().copied(),
+                |trees, ij| {
+                    let same_tree = trees.codomain_uncoupled() == trees.domain_uncoupled()
+                        && trees.codomain_innerlines() == trees.domain_innerlines()
+                        && trees.codomain_vertices() == trees.domain_vertices();
+                    let (row, col) = ij.split_at(spaces.len());
+                    if same_tree && row == col { 1.0 } else { 0.0 }.into()
+                },
+            )
+            .unwrap();
+            assert_close(&gram, &identity, "W isometry");
+        }
+        assert!(p
+            .eigh_vals()
+            .unwrap()
+            .iter()
+            .flat_map(|entry| &entry.values)
+            .all(|&value| value >= -1e-10));
+
+        // pinv reads the same coupled-sector regions: Moore-Penrose laws.
+        let pseudo = source.pinv(1e-12).unwrap();
+        assert_close(
+            &source.compose(&pseudo).unwrap().compose(source).unwrap(),
+            source,
+            "A A+ A = A",
+        );
+        assert_close(
+            &pseudo.compose(source).unwrap().compose(&pseudo).unwrap(),
+            &pseudo,
+            "A+ A A+ = A+",
+        );
+        for projector in [
+            source.compose(&pseudo).unwrap(),
+            pseudo.compose(source).unwrap(),
+        ] {
+            assert_hermitian(&projector, "pinv projector Hermitian");
+        }
+    }};
+}
+
+#[cfg(feature = "racah-generated")]
+#[test]
+fn sun_checked_generic_polar_and_pinv_accept_facade_layouts_of_rank_three_and_four() {
+    // What: polar and pinv are defined for every TensorMap (TensorKit
+    // left_polar / right_polar / pinv); multi-leg SU(3) facade layouts with
+    // outer multiplicity satisfy A = WP / PW, W isometric, and P Hermitian
+    // PSD with P^2 = A^H A / A A^H (which fixes P uniquely), and the
+    // Moore-Penrose laws for pinv.
+    use tenet::typed::SUNFusionRule;
+
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(SUNFusionRule::new(3).unwrap());
+    let leg =
+        GradedSpace::try_new_with_arc(Arc::clone(&provider), [(vec![1, 1], 2), (vec![0, 0], 1)])
+            .unwrap();
+    let value = |salt: u64| ((salt.wrapping_mul(2_654_435_761) % 1009) as f64) / 1009.0 - 0.5;
+    // Non-self-dual legs: T = 3 (x2) + 3bar and its dual T*, in mixed-dual
+    // and all-dual rank-3 shapes. An all-dual map with one codomain and two
+    // domain legs (or the reverse) violates the polar direction in some
+    // sector, so the all-dual shapes put all three legs on one side.
+    let t =
+        GradedSpace::try_new_with_arc(Arc::clone(&provider), [(vec![1, 0], 2), (vec![0, 1], 1)])
+            .unwrap();
+    let t_dual = t.try_dual().unwrap();
+    let cases: [(&[&GradedSpace<_>], &[&GradedSpace<_>], bool); 8] = [
+        (&[&leg, &leg], &[&leg], true),
+        (&[&leg], &[&leg, &leg], false),
+        (&[&leg, &leg], &[&leg, &leg], true),
+        (&[&leg, &leg], &[&leg, &leg], false),
+        (&[&t, &t_dual], &[&t], true),
+        (&[&t], &[&t, &t_dual], false),
+        (&[&t_dual, &t_dual, &t_dual], &[], true),
+        (&[], &[&t_dual, &t_dual, &t_dual], false),
+    ];
+    for (codomain, domain, left) in cases {
+        let mut salt = 0;
+        let real: TensorMap<_, f64> = TensorMap::from_block_fn(
+            &runtime,
+            codomain.iter().copied(),
+            domain.iter().copied(),
+            |_, _| {
+                salt += 1;
+                value(salt)
+            },
+        )
+        .unwrap();
+        assert_sun_polar_laws!(
+            &runtime,
+            &real,
+            codomain.iter().copied(),
+            domain.iter().copied(),
+            left
+        );
+        let complex: TensorMap<_, Complex64> = TensorMap::from_block_fn(
+            &runtime,
+            codomain.iter().copied(),
+            domain.iter().copied(),
+            |_, _| {
+                salt += 2;
+                Complex64::new(value(salt), value(salt + 1))
+            },
+        )
+        .unwrap();
+        assert_sun_polar_laws!(
+            &runtime,
+            &complex,
+            codomain.iter().copied(),
+            domain.iter().copied(),
+            left
+        );
+    }
+}
+
 struct PinvFaultExecutor {
     inner: DefaultDenseExecutor,
     svd_calls: Arc<AtomicUsize>,
