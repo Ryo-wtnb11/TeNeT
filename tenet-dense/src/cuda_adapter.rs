@@ -19,7 +19,9 @@ use super::{DenseBackend, DenseDType, DenseError, MatrixOp};
 use crate::cuda_hermitian::{
     power_of_two_normalizer, scaled_hermitian_residual_accepts, HERMITIAN_TOLERANCE_EPSILONS,
 };
-use crate::cuda_region::{validate_destination_layout, validate_region, CudaRegion};
+use crate::cuda_region::{
+    validate_destination_layout, validate_gather_rows, validate_region, CudaRegion,
+};
 use crate::plan_ledger::{
     plan_cache_entries_for, PlanEntryLedger, DEFAULT_PLAN_CACHE_BUDGET_BYTES,
 };
@@ -2866,7 +2868,8 @@ pub fn cuda_eigh_region<D: CudaScalar>(
 /// member) and the eigenvectors as a compact `[n, n, members]` buffer. One
 /// `solver_calls` count whatever `members` is. Tenferro reads the solver
 /// status of the whole batch once and reports the first failure, without its
-/// member.
+/// member: a positive status is [`DenseError::NumericalFailure`]; argument,
+/// bounds and backend failures keep their own variants.
 #[doc(hidden)]
 pub fn cuda_eigh_region_batched<D: CudaScalar>(
     ctx: &mut CudaDenseContext,
@@ -2889,7 +2892,19 @@ pub fn cuda_eigh_region_batched<D: CudaScalar>(
     let (values, vectors) = with_cuda_linalg(&mut ctx.backend, |exec| {
         TensorRead::from_view(view).eigh_read(exec)
     })
-    .map_err(|err| cuda_error(OP, err))?;
+    .map_err(|err| {
+        // The solver's own status (cuSOLVER `info > 0`) is a numerical
+        // failure of some member; everything else is the call's.
+        if err.kind() == tenferro_tensor::ErrorKind::NumericalFailure {
+            DenseError::NumericalFailure {
+                backend: DenseBackend::Cuda,
+                op: OP,
+                message: err.to_string(),
+            }
+        } else {
+            cuda_error(OP, err)
+        }
+    })?;
     if values.shape() != [n, members] || vectors.shape() != [n, n, members] {
         return Err(cuda_error(
             OP,
@@ -2955,12 +2970,18 @@ pub fn cuda_download_batched_spectra<D: CudaScalar>(
 /// `columns[b * kept + c]` of member `b` of `src`, a compact `[n, n,
 /// members]` buffer (as [`cuda_eigh_region_batched`] returns it).
 ///
+/// The destination is the `dst_ld x kept` region at `dst_offset` of each
+/// member (leading dimension `dst_ld`, member stride `dst_member_stride`).
 /// One Tenferro `gather` over all members, then one strided copy per entry
-/// of `rows`: `(src_row, dst_offset, rows)` copies source rows
-/// `src_row..src_row + rows` of every selected column to the `rows x kept`
-/// region at `dst_offset` (leading dimension `dst_ld`) of each member, at
-/// member stride `dst_member_stride`. So a layout-aligned target is one
-/// entry and a tree-wise target one entry per codomain tree.
+/// of `rows`: `(src_row, dst_row, rows)` copies source rows `src_row..src_row
+/// + rows` of every selected column to rows `dst_row..dst_row + rows` of the
+/// destination region. So a layout-aligned target is one entry and a
+/// tree-wise target one entry per codomain tree.
+///
+/// Every entry is validated before any submission: source rows inside `n`,
+/// destination rows inside `dst_ld` and pairwise disjoint, and the whole
+/// destination region inside `dst` and injective. A rejected call writes
+/// nothing.
 ///
 /// Why not a selector GEMM, as eager's rank-2 assembly uses: over a member
 /// axis the selector is `members · n · kept` values uploaded per call and
@@ -2977,6 +2998,7 @@ pub fn cuda_download_batched_spectra<D: CudaScalar>(
 pub fn cuda_gather_columns_batched_into<D: CudaScalar>(
     ctx: &mut CudaDenseContext,
     dst: &mut CudaDenseStorage,
+    dst_offset: usize,
     dst_ld: usize,
     dst_member_stride: usize,
     src: &CudaDenseStorage,
@@ -3000,6 +3022,15 @@ pub fn cuda_gather_columns_batched_into<D: CudaScalar>(
             "columns must hold `kept` source columns (< n) per member of an [n, n, members] source",
         ));
     }
+    validate_gather_rows(n, dst_ld, rows).map_err(|message| cuda_error(OP, message))?;
+    let target = CudaRegion::new(
+        vec![dst_ld, kept, members],
+        vec![1, dst_ld, dst_member_stride],
+        dst_offset,
+    )?;
+    validate_destination_layout(OP, &target)?;
+    validate_region(&target, dst.len)?;
+
     let to_i64 =
         |value: usize| i64::try_from(value).map_err(|_| cuda_error(OP, "index exceeds i64"));
     let mut indices = Vec::with_capacity(2 * columns.len());
@@ -3029,39 +3060,70 @@ pub fn cuda_gather_columns_batched_into<D: CudaScalar>(
         .map_err(|err| cuda_error(OP, err))?;
     // `[n, kept * members]`, member-major: the compact `[n, kept, members]`.
     let gathered = CudaDenseStorage::from_tensor::<D>(OP, gathered, ctx.device)?;
-    for &(src_row, dst_offset, count) in rows {
+    for &(src_row, dst_row, count) in rows {
         if count == 0 {
             continue;
         }
-        let src_region =
-            CudaRegion::new(vec![count, kept, members], vec![1, n, n * kept], src_row)?;
-        let dst_region = CudaRegion::new(
-            vec![count, kept, members],
-            vec![1, dst_ld, dst_member_stride],
-            dst_offset,
+        cuda_copy_strided_into::<D>(
+            ctx,
+            &gathered,
+            &CudaRegion::new(vec![count, kept, members], vec![1, n, n * kept], src_row)?,
+            dst,
+            &CudaRegion::new(
+                vec![count, kept, members],
+                vec![1, dst_ld, dst_member_stride],
+                dst_offset + dst_row,
+            )?,
         )?;
-        validate_region(&src_region, gathered.len)?;
-        validate_destination_layout(OP, &dst_region)?;
-        validate_region(&dst_region, dst.len)?;
-        let src_view = gathered.region_view_nd::<D>(
-            src_region.dims(),
-            &isize_strides(src_region.strides())?,
-            src_region.offset_isize()?,
-        )?;
-        let dst_view = dst.region_view_nd_mut::<D>(
-            dst_region.dims(),
-            &isize_strides(dst_region.strides())?,
-            dst_region.offset_isize()?,
-        )?;
-        COPY_CALLS.fetch_add(1, Ordering::Relaxed);
-        ctx.backend
-            .copy_read_into(
-                TensorRead::from_view(src_view),
-                TensorWrite::from_view(dst_view),
-            )
-            .map_err(|err| cuda_error(OP, err))?;
     }
     Ok(())
+}
+
+/// Moves `src_region` of `src` into `dst_region` of `dst` (equal `dims`,
+/// any strides and offsets, an injective destination) with one cuTENSOR
+/// permutation: the source bits arrive unchanged (a NaN payload may be
+/// canonicalized). Unlike [`cuda_region_axpby`] it submits no contraction,
+/// so it needs no plan-entry reservation. Counts one `copy_calls`.
+#[doc(hidden)]
+pub fn cuda_copy_strided_into<D: CudaScalar>(
+    ctx: &mut CudaDenseContext,
+    src: &CudaDenseStorage,
+    src_region: &CudaRegion,
+    dst: &mut CudaDenseStorage,
+    dst_region: &CudaRegion,
+) -> Result<(), DenseError> {
+    const OP: &str = "cuda_copy_strided";
+    ensure_cuda_device(ctx.device, OP, &[("dst", dst.device), ("src", src.device)])?;
+    if src_region.dims() != dst_region.dims() {
+        return Err(DenseError::ShapeMismatch {
+            op: OP,
+            expected: dst_region.dims().to_vec(),
+            actual: src_region.dims().to_vec(),
+        });
+    }
+    if src_region.is_empty() {
+        return Ok(());
+    }
+    validate_region(src_region, src.len)?;
+    validate_destination_layout(OP, dst_region)?;
+    validate_region(dst_region, dst.len)?;
+    let src_view = src.region_view_nd::<D>(
+        src_region.dims(),
+        &isize_strides(src_region.strides())?,
+        src_region.offset_isize()?,
+    )?;
+    let dst_view = dst.region_view_nd_mut::<D>(
+        dst_region.dims(),
+        &isize_strides(dst_region.strides())?,
+        dst_region.offset_isize()?,
+    )?;
+    COPY_CALLS.fetch_add(1, Ordering::Relaxed);
+    ctx.backend
+        .copy_read_into(
+            TensorRead::from_view(src_view),
+            TensorWrite::from_view(dst_view),
+        )
+        .map_err(|err| cuda_error(OP, err))
 }
 
 fn validate_eigh_factor_shapes(
@@ -3219,6 +3281,73 @@ mod tests {
                 !slots[..index].contains(slot),
                 "slot {slot} is claimed twice"
             );
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a real CUDA device"]
+    fn a_bad_later_gather_row_rejects_the_call_before_any_write() {
+        // What: with a valid first entry and an out-of-range later one, the
+        // gather is rejected and the destination keeps every sentinel; the
+        // valid list alone places the selected columns.
+        let _serialized = COUNTER_TESTS.lock().unwrap_or_else(|err| err.into_inner());
+        let mut ctx = CudaDenseContext::new(0).unwrap();
+        let (n, members) = (3, 2);
+        let mut data = vec![0.0; n * n * members];
+        for member in 0..members {
+            for i in 0..n {
+                data[member * n * n + i + n * i] = (i + 1 + member) as f64;
+            }
+        }
+        let src = CudaDenseStorage::upload_owned(&ctx, data).unwrap();
+        let (_, vectors) =
+            cuda_eigh_region_batched::<f64>(&mut ctx, &src, 0, n, members, n * n).unwrap();
+        let reference = vectors.download::<f64>(&ctx).unwrap();
+        let sentinel = vec![7.0; n * n * members];
+        let mut dst = CudaDenseStorage::upload(&ctx, &sentinel).unwrap();
+        let columns = [2, 0, 1, 1, 2, 0];
+        let copies_before = cuda_transfer_stats().copy_calls;
+        let bad = cuda_gather_columns_batched_into::<f64>(
+            &mut ctx,
+            &mut dst,
+            0,
+            n,
+            n * n,
+            &vectors,
+            n,
+            members,
+            &columns,
+            &[(0, 0, 1), (1, 2, 2)],
+        );
+        assert!(bad.is_err());
+        assert_eq!(
+            cuda_transfer_stats().copy_calls,
+            copies_before,
+            "no submission"
+        );
+        assert_eq!(dst.download::<f64>(&ctx).unwrap(), sentinel);
+
+        cuda_gather_columns_batched_into::<f64>(
+            &mut ctx,
+            &mut dst,
+            0,
+            n,
+            n * n,
+            &vectors,
+            n,
+            members,
+            &columns,
+            &[(0, 0, 1), (1, 1, 2)],
+        )
+        .unwrap();
+        let got = dst.download::<f64>(&ctx).unwrap();
+        for member in 0..members {
+            for (c, &column) in columns[member * n..][..n].iter().enumerate() {
+                for row in 0..n {
+                    let want = reference[member * n * n + row + n * column];
+                    assert_eq!(got[member * n * n + row + n * c], want);
+                }
+            }
         }
     }
 

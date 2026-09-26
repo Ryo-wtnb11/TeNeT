@@ -283,3 +283,67 @@ fn warm_calls_reuse_the_outputs() {
     assert_eq!((d.len(), v.len()), (3, 3));
     assert!(handle.retained_bytes() < retained);
 }
+
+/// Every member of `output` equals Host eager bit for bit (the Host handle
+/// runs the eager per-member code), so `d` is exactly zero off its diagonal.
+fn assert_equals_eager<R>(
+    what: &str,
+    handle: &mut PreparedEighFull<R, f64>,
+    inputs: &[TensorMap<R, f64>],
+    stack: &StackedTensorMap<R, f64>,
+) where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+{
+    let output = handle.execute(stack).unwrap();
+    for (member, input) in inputs.iter().enumerate() {
+        let (d, v) = input.eigh_full().unwrap();
+        assert!(
+            output.d.member(member).unwrap().data() == d.data(),
+            "{what}: d {member}"
+        );
+        assert!(
+            output.v.member(member).unwrap().data() == v.data(),
+            "{what}: v {member}"
+        );
+    }
+}
+
+#[test]
+fn a_failed_batch_leaves_no_observable_output_and_the_next_call_is_whole() {
+    // What: after a non-finite or non-Hermitian rejection `take_output` is
+    // `None`; the reused buffers of the next successful call hold exactly
+    // eager's factors, `d` zero off its diagonal; the same after
+    // `take_output` and after a change of `B`.
+    let runtime = Runtime::builder().build().unwrap();
+    let (leg, _) = u1_legs();
+    let good = single_leg(&runtime, &leg, 4, |member, i, j| {
+        1.0 + (i + j + member) as f64 / 4.0 + f64::from(u8::from(i == j))
+    });
+    let mut overflowing = good.clone();
+    overflowing[2] = overflowing[2].scale(f64::MAX / 1.5);
+    let mut skewed = good.clone();
+    skewed[1] = members::<_, f64>(&runtime, &[&leg], &[&leg], 1, 3).remove(0);
+    let stack = |inputs: &[TensorMap<_, f64>]| StackedTensorMap::pack(inputs).unwrap();
+    let mut handle = PreparedEighFull::new(&stack(&good)).unwrap();
+    assert_equals_eager("first", &mut handle, &good, &stack(&good));
+
+    let failed = handle.execute(&stack(&overflowing)).map(|_| ());
+    assert!(matches!(failed, Err(BatchError::MemberRejected { .. })));
+    assert!(
+        handle.take_output().is_none(),
+        "no output after a non-finite rejection"
+    );
+    assert_equals_eager("after non-finite", &mut handle, &good, &stack(&good));
+
+    let failed = handle.execute(&stack(&skewed)).map(|_| ());
+    assert!(matches!(failed, Err(BatchError::MemberRejected { .. })));
+    assert!(
+        handle.take_output().is_none(),
+        "no output after a non-Hermitian rejection"
+    );
+    assert_equals_eager("after non-Hermitian", &mut handle, &good, &stack(&good));
+
+    assert!(handle.take_output().is_some());
+    assert_equals_eager("after take_output", &mut handle, &good, &stack(&good));
+    assert_equals_eager("B change", &mut handle, &good[..2], &stack(&good[..2]));
+}

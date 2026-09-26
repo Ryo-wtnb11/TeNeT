@@ -164,10 +164,13 @@ fn plus_minus_lambda_and_degenerate_groups_compare_by_value() {
 
 /// Per call, independent of `B`: one solver call per coupled sector, one
 /// gather plus one copy per coupled sector (every route of this fixture is
-/// layout-aligned), no GEMM, the same downloads and uploads, and warm calls
-/// miss and evict no plan. The ledger reservation counts the contraction
-/// plans of the selector and admission steps, which is none: no step
-/// submits a contraction, so even the cold call misses no contraction plan.
+/// layout-aligned) and one diagonal copy into `d` per coupled sector, no
+/// GEMM, the same downloads and upload count, and warm calls miss and evict
+/// no plan. No step submits a contraction, so the ledger reservation (which
+/// counts the selector and admission plans) is zero and even the cold call
+/// misses no contraction plan. A warm call uploads no dense `d`: its bytes
+/// are at most the `B · Σ n` eigenvalues, the index tables and the
+/// normalizers.
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn submissions_transfers_and_the_ledger_do_not_depend_on_b() {
@@ -177,7 +180,12 @@ fn submissions_transfers_and_the_ledger_do_not_depend_on_b() {
     let mut per_b = BTreeSet::new();
     for count in [1, 2, 17] {
         let inputs = hermitian_members(&runtime, &[&leg, &leg], count, 7);
-        let sectors = sector_matrices(&inputs[0]).len() as u64;
+        let sizes: Vec<usize> = sector_matrices(&inputs[0])
+            .values()
+            .map(|m| m.rows)
+            .collect();
+        let sectors = sizes.len() as u64;
+        let sum_n: usize = sizes.iter().sum();
         let stack = StackedTensorMap::pack(&inputs).unwrap().to_cuda().unwrap();
         let reserved = plans(&runtime).reserved_entries;
         let mut handle = PreparedEighFull::new(&stack).unwrap();
@@ -214,13 +222,22 @@ fn submissions_transfers_and_the_ledger_do_not_depend_on_b() {
         assert_eq!(warm.gemm_calls, 0, "B={count}: no GEMM");
         assert_eq!(
             warm.copy_calls,
-            2 * sectors,
+            3 * sectors,
             "B={count}: gathers and copies"
         );
         assert_eq!(
             cold.h2d_calls,
-            warm.h2d_calls + 1,
-            "B={count}: cold allocates v once"
+            warm.h2d_calls + 2,
+            "B={count}: cold allocates d and v"
+        );
+        let f64_bytes = std::mem::size_of::<f64>();
+        let values = count * sum_n * f64_bytes;
+        let indices = 2 * count * sum_n * std::mem::size_of::<i64>();
+        let normalizers = 2 * sizes.len() * count * f64_bytes;
+        assert!(
+            warm.h2d_bytes as usize <= values + indices + normalizers,
+            "B={count}: warm H2D {} bytes",
+            warm.h2d_bytes
         );
         // Exactly symmetric inputs are decided at stage 2 of admission:
         // two admission downloads plus one spectra download.
@@ -356,4 +373,96 @@ fn complex_device_payloads_are_unsupported() {
         PreparedEighFull::new(&stack),
         Err(Error::Operation(error)) if format!("{error:?}").contains("real payloads")
     ));
+}
+
+/// Every member's `d` is exactly zero off its diagonal and carries the
+/// member's spectra on it.
+fn assert_diagonal_only<R>(
+    what: &str,
+    output: &tenet::typed::EighStackOutput<'_, R, f64, tenet::typed::CudaStorage<f64>>,
+) where
+    R: DeviceRule,
+    R::Sector: Debug,
+{
+    let d = output.d.to_host().unwrap();
+    for member in 0..d.len() {
+        let matrices = sector_matrices(&d.member(member).unwrap());
+        for entry in &output.spectra[member] {
+            let m = &matrices[&format!("{:?}", entry.sector)];
+            for j in 0..m.cols {
+                for i in 0..m.rows {
+                    let value = m.data[i + m.rows * j];
+                    if i == j {
+                        assert!(value == entry.values[i], "{what}: diagonal");
+                    } else {
+                        assert!(value.to_bits() == 0, "{what}: off-diagonal {value}");
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// After any failed call no output is observable, and the next successful
+/// call rewrites every member (reused buffers included): the oracle holds,
+/// `d` is zero off its diagonal, and at B = 1 `v` is device eager's bits;
+/// the same after `take_output` and after a change of `B`.
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn a_failed_batch_leaves_no_observable_output_and_the_next_call_is_whole() {
+    let _serial = serial();
+    let runtime = Runtime::builder().cuda(0).build().unwrap();
+    let (leg, _) = u1_legs();
+    let good = single_leg(&runtime, &leg, 4, |member, i, j| {
+        1.0 + (i + j + member) as f64 / 4.0 + f64::from(u8::from(i == j))
+    });
+    let mut overflowing = good.clone();
+    overflowing[2] = overflowing[2].scale(f64::MAX / 1.5);
+    let mut skewed = good.clone();
+    skewed[1] = members::<_, f64>(&runtime, &[&leg], &[&leg], 1, 3).remove(0);
+    let stack =
+        |inputs: &[TensorMap<_, f64>]| StackedTensorMap::pack(inputs).unwrap().to_cuda().unwrap();
+    let mut handle = PreparedEighFull::new(&stack(&good)).unwrap();
+    let check = |what: &str,
+                 handle: &mut PreparedEighFull<_, f64, tenet::typed::CudaStorage<f64>>,
+                 inputs: &[TensorMap<_, f64>]| {
+        let output = handle.execute(&stack(inputs)).unwrap();
+        assert_diagonal_only(what, &output);
+        let d = output.d.to_host().unwrap();
+        let v = output.v.to_host().unwrap();
+        for (member, input) in inputs.iter().enumerate() {
+            let (host_d, host_v) = input.eigh_full().unwrap();
+            let (d, v) = (d.member(member).unwrap(), v.member(member).unwrap());
+            check_member(what, input, &d, &v, (&host_d, &host_v), f64::EPSILON);
+            if inputs.len() == 1 {
+                let (_, eager_v) = input.to_cuda().unwrap().eigh_full().unwrap();
+                assert!(
+                    v.data() == eager_v.to_host().unwrap().data(),
+                    "{what}: B = 1 bits"
+                );
+            }
+        }
+    };
+    check("first", &mut handle, &good);
+    assert!(matches!(
+        handle.execute(&stack(&overflowing)).map(|_| ()),
+        Err(BatchError::MemberRejected { .. })
+    ));
+    assert!(
+        handle.take_output().is_none(),
+        "no output after a non-finite rejection"
+    );
+    check("after non-finite", &mut handle, &good);
+    assert!(matches!(
+        handle.execute(&stack(&skewed)).map(|_| ()),
+        Err(BatchError::MemberRejected { .. })
+    ));
+    assert!(
+        handle.take_output().is_none(),
+        "no output after a non-Hermitian rejection"
+    );
+    check("after non-Hermitian", &mut handle, &good);
+    assert!(handle.take_output().is_some());
+    check("after take_output", &mut handle, &good);
+    check("B change", &mut handle, &good[..1]);
 }

@@ -939,8 +939,9 @@ pub struct EighStackOutput<'a, R: SectorCodec, D, S = Vec<D>> {
 ///
 /// Endomorphisms with packed coupled-sector regions (every structure a
 /// public constructor builds). A batch fails as a whole
-/// ([`BatchError`]); on any error no output is returned, and the handle-owned
-/// output is unspecified until the next successful call.
+/// ([`BatchError`]): on any error no output is returned, and none is
+/// observable afterwards ([`Self::take_output`] returns `None`) until the
+/// next successful call, which rewrites every member.
 ///
 /// # Retained state and shared effects
 ///
@@ -958,7 +959,11 @@ pub struct PreparedEighFull<R: SectorCodec, D, S = Vec<D>> {
     regions: Arc<[CoupledSectorRegion]>,
     /// The source's coupled sectors in label order, as eager reports them.
     labels: Vec<(SectorId, <R as SectorCodec>::Sector)>,
+    /// The factors of the last successful call: the only observable output.
     output: Option<StackPair<R, D, S>>,
+    /// Buffers kept for reuse after a failed call. Never observable: a
+    /// failed call may have written part of them.
+    spare: Option<StackPair<R, D, S>>,
     spectra: Vec<Vec<SectorSpectrum<<R as SectorCodec>::Sector>>>,
     #[cfg(feature = "cuda")]
     device: Option<DeviceEighPlan<R>>,
@@ -979,8 +984,8 @@ struct DeviceEighPlan<R> {
     spectrum_len: usize,
     /// Each route's diagonal in `d`: `(offset, step)` within a member.
     diagonals: Vec<(usize, usize)>,
-    /// Each route's `(source row, target offset, rows)` copies within a
-    /// member: one for a layout-aligned route, one per codomain tree
+    /// Each route's `(source row, target row, rows)` copies within its
+    /// target region: one for a layout-aligned route, one per codomain tree
     /// otherwise.
     copies: Vec<Vec<(usize, usize, usize)>>,
     d_len: usize,
@@ -1056,6 +1061,7 @@ where
             regions,
             labels,
             output: None,
+            spare: None,
             spectra: Vec::new(),
             #[cfg(feature = "cuda")]
             device,
@@ -1064,18 +1070,52 @@ where
 }
 
 impl<R: SectorCodec, D, S> PreparedEighFull<R, D, S> {
-    /// Moves the handle-owned `(d, v)` out; the next execute allocates new
-    /// ones.
+    /// Moves the handle-owned `(d, v)` of the last successful call out; the
+    /// next execute allocates new ones. `None` after a failed call: a batch
+    /// fails as a whole, so no partially written factor is ever handed out.
     pub fn take_output(&mut self) -> Option<StackPair<R, D, S>> {
         self.output.take()
+    }
+
+    /// The output buffers for a call over `members`: the last output or the
+    /// spare, if either has that member count. Taking them also makes the
+    /// previous output unobservable until this call succeeds.
+    fn take_buffers(&mut self, members: usize) -> Option<StackPair<R, D, S>> {
+        let buffers = self.output.take().or_else(|| self.spare.take());
+        self.spare = None;
+        buffers.filter(|(d, _)| d.members == members)
+    }
+
+    /// Publishes `buffers` after a successful call, or keeps them as the
+    /// unobservable spare after a failed one.
+    fn settle<T>(
+        &mut self,
+        buffers: Option<StackPair<R, D, S>>,
+        result: Result<T, BatchError>,
+    ) -> Result<T, BatchError> {
+        match result {
+            Ok(value) => {
+                self.output = buffers;
+                Ok(value)
+            }
+            Err(error) => {
+                self.spare = buffers;
+                Err(error)
+            }
+        }
     }
 
     /// Bytes the handle itself retains: the output payloads (host or device)
     /// and the host spectra. The shared plan is not included.
     pub fn retained_bytes(&self) -> usize {
-        let payloads = self.output.as_ref().map_or(0, |(d, v)| {
-            (d.members * d.member_len + v.members * v.member_len) * std::mem::size_of::<D>()
-        });
+        let payloads = self
+            .output
+            .iter()
+            .chain(&self.spare)
+            .map(|(d, v)| {
+                (d.members * d.member_len + v.members * v.member_len) * std::mem::size_of::<D>()
+            })
+            .sum::<usize>();
         let spectra = self
             .spectra
             .iter()
@@ -1137,8 +1177,9 @@ where
     ///
     /// Every member is admitted (the eager Hermitian rule, per coupled
     /// sector) before any member is solved; then each member runs the eager
-    /// Host eigendecomposition. The outputs are allocated when absent or when
-    /// `B` changes and are overwritten otherwise.
+    /// Host eigendecomposition. The outputs are allocated zeroed when absent
+    /// or when `B` changes and reused otherwise: `v` is overwritten, and `d`
+    /// only on its diagonal, since the handle never writes `d` elsewhere.
     ///
     /// # Errors
     ///
@@ -1151,6 +1192,32 @@ where
         &mut self,
         source: &StackedTensorMap<R, D>,
     ) -> Result<EighStackOutput<'_, R, D>, BatchError> {
+        let mut buffers = self.take_buffers(source.members);
+        let result = self.run_host(source, &mut buffers);
+        let spectra = self.settle(buffers, result)?;
+        publish_spectra(
+            &mut self.spectra,
+            &self.labels,
+            source.members,
+            |member, sector| {
+                spectra[member]
+                    .binary_search_by_key(&sector, |entry| entry.sector)
+                    .map(|index| spectra[member][index].values.as_slice())
+                    .map_err(|_| internal_layout_error("a member is missing a coupled sector"))
+            },
+        )?;
+        Ok(self.output_ref()?)
+    }
+
+    /// The Host call into `buffers`, allocated zeroed when absent; returns
+    /// every member's spectra. `d`'s off-diagonal entries are never written,
+    /// so a reused `d` needs only its diagonals.
+    #[allow(clippy::type_complexity)]
+    fn run_host(
+        &self,
+        source: &StackedTensorMap<R, D>,
+        buffers: &mut Option<StackPair<R, D, Vec<D>>>,
+    ) -> Result<Vec<Vec<tenet_matrixalgebra::SectorSpectrum>>, BatchError> {
         self.check_source(source)?;
         let members = source.members;
         let len = self.member_len;
@@ -1177,9 +1244,9 @@ where
             return Err(BatchError::MemberRejected { members: rejected });
         }
 
-        let mut output = self.output.take().filter(|(d, _)| d.members == members);
         let mut spectra = Vec::with_capacity(members);
         let mut faults = Vec::new();
+        let mut diagonals = Vec::new();
         for member in 0..members {
             let data = &source.storage[member * len..(member + 1) * len];
             let input = BoundDynamicTensorRef::try_new(&self.space, data).map_err(Error::from)?;
@@ -1200,7 +1267,7 @@ where
             // As eager `diagonal_factor`: the bond is built in sector order.
             eigenvalues.sort_unstable_by_key(|entry| entry.sector);
             let (v_space, v_data) = v.into_parts();
-            if output.is_none() {
+            if buffers.is_none() {
                 let d_space =
                     tenet_matrixalgebra::diagonal_bond_bound_space_like(&self.space, &eigenvalues)
                         .map_err(Error::from)?;
@@ -1208,7 +1275,7 @@ where
                 let v_len = v_data.len();
                 let signature =
                     |space| StructureSignature::of_space(space, Placement::Host, &runtime);
-                output = Some((
+                *buffers = Some((
                     self.stack(
                         d_space.clone(),
                         signature(&d_space),
@@ -1225,7 +1292,7 @@ where
                     ),
                 ));
             }
-            let Some((d_stack, v_stack)) = output.as_mut() else {
+            let Some((d_stack, v_stack)) = buffers.as_mut() else {
                 return Err(internal_layout_error("eigh output stacks are missing").into());
             };
             if v_space.space() != v_stack.space.space() {
@@ -1233,34 +1300,57 @@ where
                     internal_layout_error("members produced different eigenvector spaces").into(),
                 );
             }
-            let d_data = tenet_matrixalgebra::diagonal_bond_data(
-                d_stack.space.space(),
-                &eigenvalues,
-                &D::from_real,
-            )
-            .map_err(Error::from)?;
-            copy_member(&mut d_stack.storage, member, &d_data)?;
+            if diagonals.is_empty() {
+                diagonals = sector_diagonals(d_stack.space.space().structure())?;
+            }
+            // Only the diagonal, as eager `diagonal_bond_data` fills it; the
+            // rest of `d` is zero from its allocation and never written.
+            let d_member = d_stack
+                .storage
+                .get_mut(member * d_stack.member_len..(member + 1) * d_stack.member_len)
+                .ok_or_else(|| internal_layout_error("a member overruns its stack"))?;
+            for &(sector, offset, step, count) in &diagonals {
+                let Ok(index) = eigenvalues.binary_search_by_key(&sector, |entry| entry.sector)
+                else {
+                    continue;
+                };
+                for (position, &value) in eigenvalues[index].values[..count].iter().enumerate() {
+                    d_member[offset + position * step] = D::from_real(value);
+                }
+            }
             copy_member(&mut v_stack.storage, member, &v_data)?;
             spectra.push(eigenvalues);
         }
         drop(dense);
-        self.output = output;
         if !faults.is_empty() {
             return Err(BatchError::MemberRejected { members: faults });
         }
-        publish_spectra(
-            &mut self.spectra,
-            &self.labels,
-            members,
-            |member, sector| {
-                spectra[member]
-                    .binary_search_by_key(&sector, |entry| entry.sector)
-                    .map(|index| spectra[member][index].values.as_slice())
-                    .map_err(|_| internal_layout_error("a member is missing a coupled sector"))
-            },
-        )?;
-        Ok(self.output_ref()?)
+        Ok(spectra)
     }
+}
+
+/// Every diagonal fusion-tree block of a `bond <- bond` structure as
+/// `(coupled sector, offset, step, count)`, read as eager
+/// `diagonal_bond_data` reads it.
+fn sector_diagonals(
+    structure: &tenet_core::BlockStructure,
+) -> Result<Vec<(SectorId, usize, usize, usize)>, Error> {
+    let mut diagonals = Vec::with_capacity(structure.block_count());
+    for index in 0..structure.block_count() {
+        let block = structure.block(index)?;
+        let tenet_core::BlockKey::FusionTree(tree) = block.key() else {
+            continue;
+        };
+        let strides = block.strides();
+        let shape = block.shape();
+        diagonals.push((
+            tree.codomain_tree().coupled(),
+            block.offset(),
+            strides[0] + strides[1],
+            shape[0].min(shape[1]),
+        ));
+    }
+    Ok(diagonals)
 }
 
 /// Resizes `spectra` to `members` and rewrites each member's coupled
@@ -1361,7 +1451,7 @@ where
     }
 }
 
-/// A route's `(source row, target offset, rows)` copies within one member,
+/// A route's `(source row, target row, rows)` copies within its target region,
 /// exactly the placements of eager's assembly: the whole region when the
 /// plan proved it layout-aligned, else one row slice per codomain tree,
 /// matched by tree identity.
@@ -1371,8 +1461,12 @@ fn route_copies<R>(
     route: &super::TypedCudaEighRoute,
 ) -> Result<Vec<(usize, usize, usize)>, Error> {
     let target = &plan.left_regions[route.left];
-    if route.aligned {
-        return Ok(vec![(0, target.range().start, target.rows())]);
+    #[cfg(test)]
+    let aligned = route.aligned && !tests::FORCE_TREEWISE.with(std::cell::Cell::get);
+    #[cfg(not(test))]
+    let aligned = route.aligned;
+    if aligned {
+        return Ok(vec![(0, 0, target.rows())]);
     }
     let source = &plan.source_regions[route.source];
     let mut copies = Vec::with_capacity(target.row_trees().len());
@@ -1387,43 +1481,25 @@ fn route_copies<R>(
             .find(|tree| tree.tree() == target_tree.tree())
             .map(|tree| tree.offset())
             .ok_or_else(|| internal_layout_error("codomain tree missing in the source sector"))?;
-        copies.push((src_row, target.range().start + target_tree.offset(), rows));
+        copies.push((src_row, target_tree.offset(), rows));
     }
     Ok(copies)
 }
 
-/// Each route's diagonal in the dense `d` of one member, `(offset, step)`,
-/// read from the diagonal factor's blocks as eager `fill_diagonal_values`
-/// does.
+/// Each route's diagonal in the dense `d` of one member, `(offset, step)`.
 #[cfg(feature = "cuda")]
 fn route_diagonals<R>(plan: &super::TypedCudaEighPlan<R>) -> Result<Vec<(usize, usize)>, Error> {
-    let structure = plan.middle_space.space().structure();
-    let mut diagonals = vec![None; plan.routes.len()];
-    for index in 0..structure.block_count() {
-        let block = structure.block(index)?;
-        let tenet_core::BlockKey::FusionTree(tree) = block.key() else {
-            continue;
-        };
-        let sector = tree.codomain_tree().coupled();
-        let Some(route) = plan
-            .routes
-            .iter()
-            .position(|route| plan.source_regions[route.source].coupled() == sector)
-        else {
-            continue;
-        };
-        let strides = block.strides();
-        if block.shape() != [plan.routes[route].kept, plan.routes[route].kept] {
-            return Err(internal_layout_error(
-                "CUDA EIGH diagonal block does not match its route",
-            ));
-        }
-        diagonals[route] = Some((block.offset(), strides[0] + strides[1]));
-    }
-    diagonals
-        .into_iter()
-        .map(|diagonal| {
-            diagonal.ok_or_else(|| internal_layout_error("CUDA EIGH route has no diagonal block"))
+    let diagonals = sector_diagonals(plan.middle_space.space().structure())?;
+    plan.routes
+        .iter()
+        .map(|route| {
+            let sector = plan.source_regions[route.source].coupled();
+            match diagonals.iter().find(|entry| entry.0 == sector) {
+                Some(&(_, offset, step, count)) if count == route.kept => Ok((offset, step)),
+                _ => Err(internal_layout_error(
+                    "CUDA EIGH route has no matching diagonal block",
+                )),
+            }
         })
         .collect()
 }
@@ -1440,22 +1516,60 @@ where
     /// one spectra download; one batched solver call per coupled sector
     /// (each reads its solver status, a host barrier, inside the backend);
     /// one column gather per coupled sector, then one strided copy per
-    /// aligned coupled sector (per codomain tree otherwise); uploads of `d`
-    /// (built on the host from the sorted spectra, as eager builds it), of
-    /// one `[B · n, 2]` index table per coupled sector and of at most two
-    /// `[B]` normalizer vectors per coupled sector. `v` is
-    /// reused across calls at the same `B`; a new `B` allocates it with one
-    /// zero upload.
+    /// aligned coupled sector (per codomain tree otherwise); one strided copy
+    /// per coupled sector onto `d`'s diagonals. Host to device, per call:
+    /// the `B · Σ n` sorted eigenvalues (the only payload of `d` that
+    /// changes), one `[B · n, 2]` index table per coupled sector and at most
+    /// two `[B]` normalizer vectors per coupled sector.
+    ///
+    /// `d` and `v` are reused across calls at the same `B`. A new `B`, or a
+    /// call after [`Self::take_output`], allocates both with one zero upload
+    /// each (`B · Σ n²` and `B · L_v` elements, the only device allocation
+    /// path until #740); `d`'s off-diagonal entries are never written.
     ///
     /// # Errors
     ///
     /// As the Host form, with non-Hermitian members found by the batched
-    /// admission before any solver launch, and [`BatchError::Solver`] for a
-    /// failed batched solve.
+    /// admission before any solver launch, and [`BatchError::Solver`] when
+    /// the solver reports a numerical failure on a block. Argument, bounds
+    /// and backend failures are [`BatchError::Operation`].
     pub fn execute(
         &mut self,
         source: &StackedTensorMap<R, D, CudaStorage<D>>,
     ) -> Result<EighStackOutput<'_, R, D, CudaStorage<D>>, BatchError> {
+        let mut buffers = self.take_buffers(source.members);
+        let result = self.run_cuda(source, &mut buffers);
+        let sorted = self.settle(buffers, result)?;
+        let device = self
+            .device
+            .as_ref()
+            .ok_or_else(|| internal_layout_error("a device eigh handle has no device plan"))?;
+        let total = device.spectrum_len;
+        publish_spectra(
+            &mut self.spectra,
+            &self.labels,
+            source.members,
+            |member, sector| {
+                device
+                    .plan
+                    .routes
+                    .iter()
+                    .zip(&device.spectrum_offsets)
+                    .find(|(route, _)| device.plan.source_regions[route.source].coupled() == sector)
+                    .map(|(route, &offset)| &sorted[member * total + offset..][..route.kept])
+                    .ok_or_else(|| internal_layout_error("a coupled sector has no route"))
+            },
+        )?;
+        Ok(self.output_ref()?)
+    }
+
+    /// The device call into `buffers`, allocated zeroed when absent; returns
+    /// every member's sorted eigenvalues, member-major (`Σ n` per member).
+    fn run_cuda(
+        &self,
+        source: &StackedTensorMap<R, D, CudaStorage<D>>,
+        buffers: &mut Option<StackPair<R, D, CudaStorage<D>>>,
+    ) -> Result<Vec<f64>, BatchError> {
         self.check_source(source)?;
         let members = source.members;
         let runtime = self.runtime.clone();
@@ -1497,9 +1611,14 @@ where
                 members,
                 self.member_len,
             )
-            .map_err(|error| BatchError::Solver {
-                block: route.source,
-                source: dense_err(error),
+            .map_err(|error| match error {
+                // Only the solver's own status names a block; argument,
+                // bounds and backend failures are the operation's.
+                error @ tenet_dense::DenseError::NumericalFailure { .. } => BatchError::Solver {
+                    block: route.source,
+                    source: dense_err(error),
+                },
+                other => BatchError::Operation(dense_err(other)),
             })?;
             device_spectra.push(values);
             vectors.push(vector);
@@ -1543,26 +1662,57 @@ where
             return Err(BatchError::MemberRejected { members: faults });
         }
 
-        let mut d_host = vec![D::zero(); device.d_len * members];
-        for member in 0..members {
-            for ((&(offset, step), &spectrum), route) in device
-                .diagonals
-                .iter()
-                .zip(&device.spectrum_offsets)
-                .zip(routes)
-            {
-                let values = &sorted[member * total + spectrum..][..route.kept];
-                for (position, &value) in values.iter().enumerate() {
-                    d_host[member * device.d_len + offset + position * step] = D::from_real(value);
-                }
-            }
+        // `d` and `v` are allocated zeroed once per `B` (the only device
+        // allocation path, #740). The handle never writes `d` off its
+        // diagonal, so each call moves only the `B · Σ n` sorted values.
+        if buffers.is_none() {
+            let zeros = |len: usize| {
+                CudaStorage::<D>::upload_owned(cuda, vec![D::zero(); len * members])
+                    .map_err(Error::from)
+            };
+            *buffers = Some((
+                self.stack(
+                    device.plan.middle_space.clone(),
+                    device.d_signature.clone(),
+                    zeros(device.d_len)?,
+                    members,
+                    device.d_len,
+                ),
+                self.stack(
+                    device.plan.left_space.clone(),
+                    device.v_signature.clone(),
+                    zeros(device.v_len)?,
+                    members,
+                    device.v_len,
+                ),
+            ));
         }
-        let d_storage = CudaStorage::<D>::upload_owned(cuda, d_host).map_err(Error::from)?;
-        let mut v_storage = match self.output.take() {
-            Some((_, v)) if v.members == members => v.storage,
-            _ => CudaStorage::<D>::upload_owned(cuda, vec![D::zero(); device.v_len * members])
-                .map_err(Error::from)?,
+        let Some((d, v)) = buffers.as_mut() else {
+            return Err(internal_layout_error("eigh output stacks are missing").into());
         };
+        let values = CudaStorage::<D>::upload_owned(
+            cuda,
+            sorted.iter().map(|&value| D::from_real(value)).collect(),
+        )
+        .map_err(Error::from)?;
+        for ((&(offset, step), &spectrum), route) in device
+            .diagonals
+            .iter()
+            .zip(&device.spectrum_offsets)
+            .zip(routes)
+        {
+            let region = |dims: Vec<usize>, strides: Vec<usize>, offset: usize| {
+                tenet_dense::CudaRegion::new(dims, strides, offset).map_err(dense_err)
+            };
+            tenet_dense::cuda_copy_strided_into::<D>(
+                cuda,
+                &values.0,
+                &region(vec![route.kept, members], vec![1, total], spectrum)?,
+                &mut d.storage.0,
+                &region(vec![route.kept, members], vec![step, device.d_len], offset)?,
+            )
+            .map_err(dense_err)?;
+        }
         for (((route, raw_vectors), &offset), copies) in routes
             .iter()
             .zip(&vectors)
@@ -1579,7 +1729,8 @@ where
                 .collect();
             tenet_dense::cuda_gather_columns_batched_into::<D>(
                 cuda,
-                &mut v_storage.0,
+                &mut v.storage.0,
+                target.range().start,
                 target.rows(),
                 device.v_len,
                 raw_vectors,
@@ -1590,39 +1741,7 @@ where
             )
             .map_err(dense_err)?;
         }
-        drop(lease);
-
-        let d = self.stack(
-            device.plan.middle_space.clone(),
-            device.d_signature.clone(),
-            d_storage,
-            members,
-            device.d_len,
-        );
-        let v = self.stack(
-            device.plan.left_space.clone(),
-            device.v_signature.clone(),
-            v_storage,
-            members,
-            device.v_len,
-        );
-        self.output = Some((d, v));
-        publish_spectra(
-            &mut self.spectra,
-            &self.labels,
-            members,
-            |member, sector| {
-                device
-                    .plan
-                    .routes
-                    .iter()
-                    .zip(&device.spectrum_offsets)
-                    .find(|(route, _)| device.plan.source_regions[route.source].coupled() == sector)
-                    .map(|(route, &offset)| &sorted[member * total + offset..][..route.kept])
-                    .ok_or_else(|| internal_layout_error("a coupled sector has no route"))
-            },
-        )?;
-        Ok(self.output_ref()?)
+        Ok(sorted)
     }
 }
 
@@ -1688,6 +1807,85 @@ mod tests {
 
     use super::super::Runtime;
     use super::super::{owned_repr, GradedSpace, TensorMap, TypedTensorBody};
+
+    thread_local! {
+        /// Forces every device eigh route onto the per-tree copies, so the
+        /// branch the fixtures' aligned routes never take is exercised.
+        pub(super) static FORCE_TREEWISE: std::cell::Cell<bool> = const {
+            std::cell::Cell::new(false)
+        };
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    #[ignore = "requires a real CUDA device"]
+    fn tree_wise_eigenvector_copies_equal_the_aligned_ones_bitwise() {
+        // What: the per-tree placement (one copy per codomain tree) writes
+        // exactly the bits of the aligned placement (one copy per sector),
+        // and both are eager's device `v` at B = 1.
+        use super::PreparedEighFull;
+        use tenet_core::{SU2FusionRule, SU2Irrep};
+
+        let runtime = Runtime::builder().cuda(0).build().unwrap();
+        let j = SU2Irrep::from_twice_spin;
+        let leg = GradedSpace::try_new(SU2FusionRule, [(j(0), 2), (j(1), 2), (j(2), 1)]).unwrap();
+        let members: Vec<_> = (0..3)
+            .map(|seed| {
+                let x =
+                    TensorMap::<_, f64>::rand_with_seed(&runtime, [&leg, &leg], [&leg, &leg], seed)
+                        .unwrap();
+                x.add(&x.adjoint().unwrap(), 1.0, 1.0).unwrap()
+            })
+            .collect();
+        let stack = super::StackedTensorMap::pack(&members)
+            .unwrap()
+            .to_cuda()
+            .unwrap();
+        let run = |treewise: bool| {
+            FORCE_TREEWISE.with(|flag| flag.set(treewise));
+            let mut handle = PreparedEighFull::new(&stack).unwrap();
+            FORCE_TREEWISE.with(|flag| flag.set(false));
+            let copies: usize = handle
+                .device
+                .as_ref()
+                .unwrap()
+                .copies
+                .iter()
+                .map(Vec::len)
+                .sum();
+            let routes = handle.device.as_ref().unwrap().copies.len();
+            let output = handle.execute(&stack).unwrap();
+            (
+                copies,
+                routes,
+                output.v.to_host().unwrap(),
+                output.d.to_host().unwrap(),
+            )
+        };
+        let (aligned_copies, routes, aligned_v, aligned_d) = run(false);
+        let (tree_copies, _, tree_v, tree_d) = run(true);
+        assert_eq!(aligned_copies, routes, "every fixture route is aligned");
+        assert!(tree_copies > routes, "several codomain trees per sector");
+        assert!(tree_v.storage == aligned_v.storage);
+        assert!(tree_d.storage == aligned_d.storage);
+        let single = super::StackedTensorMap::pack(&members[..1])
+            .unwrap()
+            .to_cuda()
+            .unwrap();
+        FORCE_TREEWISE.with(|flag| flag.set(true));
+        let mut handle = PreparedEighFull::new(&single).unwrap();
+        FORCE_TREEWISE.with(|flag| flag.set(false));
+        let v = handle
+            .execute(&single)
+            .unwrap()
+            .v
+            .to_host()
+            .unwrap()
+            .member(0)
+            .unwrap();
+        let (_, eager_v) = members[0].to_cuda().unwrap().eigh_full().unwrap();
+        assert!(v.data() == eager_v.to_host().unwrap().data());
+    }
 
     struct PlacedStorage {
         len: usize,
