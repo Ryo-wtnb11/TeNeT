@@ -3110,6 +3110,9 @@ pub fn cuda_gather_members<D: CudaScalar>(
     const OP: &str = "cuda_gather_members";
     ensure_cuda_device(ctx.device, OP, &[("src", src.device)])?;
     ensure_payload_dtype::<D>(OP, src)?;
+    // Why checked here: the gather kernel clamps an out-of-range start
+    // (tenferro-gpu `indexing.rs:clamp_window_start`) instead of faulting, so
+    // an unchecked index would silently return another member.
     if members
         .checked_mul(member_len)
         .is_none_or(|len| len > src.len)
@@ -3123,6 +3126,10 @@ pub fn cuda_gather_members<D: CudaScalar>(
     if member_len == 0 || selection.is_empty() {
         return CudaDenseStorage::upload_owned::<D>(ctx, Vec::new());
     }
+    // Why a second, `[L, B]` configuration rather than reshaping the gather
+    // output to flat: Tenferro 0.7.1 has no metadata-only owned reshape
+    // (`CudaBackend::reshape` materializes a copy, `TypedTensor::into_parts`
+    // refuses backend storage), so normalizing would add a full copy.
     let (start_stride, config) = match src.tensor.shape() {
         [_] => (
             member_len,
