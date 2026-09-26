@@ -99,17 +99,19 @@ macro_rules! factor_conformance {
         let (u, s, vh) = tall.svd_full().unwrap();
         assert_provider!(provider; u, s, vh);
         assert_close!(&u.compose(&s).unwrap().compose(&vh).unwrap(), &tall);
-        let trunc = tall.svd_trunc(&Truncation::rank(1)).unwrap();
-        assert_provider!(provider; trunc.u, trunc.s, trunc.vh);
-        let reconstructed = trunc
-            .u
-            .compose(&trunc.s)
-            .unwrap()
-            .compose(&trunc.vh)
+        // Truncated SVD: svd_compact -> diagview -> find_truncated -> restrict.
+        let (u, s, vh) = tall.svd_compact().unwrap();
+        let found = s.domain()[0]
+            .find_truncated(&s.diagview().unwrap(), &Truncation::rank(1))
             .unwrap();
+        let u = u.restrict_leg(u.codomain_rank(), &found.selection).unwrap();
+        let s = s.restrict_diagonal(&found.selection).unwrap();
+        let vh = vh.restrict_leg(0, &found.selection).unwrap();
+        assert_provider!(provider; u, s, vh);
+        let reconstructed = u.compose(&s).unwrap().compose(&vh).unwrap();
         let error = reconstructed.add(&tall, 1.0, -1.0).unwrap().norm().unwrap();
-        assert!((error - trunc.error).abs() <= 1e-9 * (1.0 + trunc.error));
-        assert!(trunc.error > 0.0, $name);
+        assert!((error - found.error).abs() <= 1e-9 * (1.0 + found.error));
+        assert!(found.error > 0.0, $name);
         let singular_values = tall.svd_vals().unwrap();
         assert!(singular_values
             .iter()
@@ -130,9 +132,6 @@ macro_rules! factor_conformance {
         assert_close!(&q.compose(&r).unwrap(), &tall);
         let id = TensorMap::id(&rt, q.domain().iter()).unwrap();
         assert_close!(&q.adjoint().unwrap().compose(&q).unwrap(), &id);
-        let (q, r) = tall.left_orth().unwrap();
-        assert_provider!(provider; q, r);
-        assert_close!(&q.compose(&r).unwrap(), &tall);
         let (q, r) = tall.qr_full().unwrap();
         assert_provider!(provider; q, r);
         assert_close!(&q.compose(&r).unwrap(), &tall);
@@ -144,9 +143,6 @@ macro_rules! factor_conformance {
         assert_close!(&l.compose(&q).unwrap(), &wide);
         let id = TensorMap::id(&rt, q.codomain().iter()).unwrap();
         assert_close!(&q.compose(&q.adjoint().unwrap()).unwrap(), &id);
-        let (l, q) = wide.right_orth().unwrap();
-        assert_provider!(provider; l, q);
-        assert_close!(&l.compose(&q).unwrap(), &wide);
         let (l, q) = wide.lq_full().unwrap();
         assert_provider!(provider; l, q);
         assert_close!(&l.compose(&q).unwrap(), &wide);
@@ -227,17 +223,20 @@ macro_rules! factor_conformance {
             .unwrap()
             .iter()
             .all(|entry| entry.values == [4.0, 2.0]));
-        let trunc = h.eigh_trunc(&Truncation::rank(1)).unwrap();
-        assert_provider!(provider; trunc.d, trunc.v);
-        let reconstructed = trunc
-            .v
-            .compose(&trunc.d)
+        let found = d.domain()[0]
+            .find_truncated(&d.diagview().unwrap(), &Truncation::rank(1))
+            .unwrap();
+        let trunc_d = d.restrict_diagonal(&found.selection).unwrap();
+        let trunc_v = v.restrict_leg(v.codomain_rank(), &found.selection).unwrap();
+        assert_provider!(provider; trunc_d, trunc_v);
+        let reconstructed = trunc_v
+            .compose(&trunc_d)
             .unwrap()
-            .compose(&trunc.v.adjoint().unwrap())
+            .compose(&trunc_v.adjoint().unwrap())
             .unwrap();
         let error = reconstructed.add(&h, 1.0, -1.0).unwrap().norm().unwrap();
-        assert!((error - trunc.error).abs() <= 1e-9 * (1.0 + trunc.error));
-        assert!(trunc.error > 0.0, $name);
+        assert!((error - found.error).abs() <= 1e-9 * (1.0 + found.error));
+        assert!(found.error > 0.0, $name);
 
         let g: TensorMap<_, f64> =
             TensorMap::from_block_fn(&rt, [&endo_space], [&endo_space], |_, index| {
@@ -255,13 +254,17 @@ macro_rules! factor_conformance {
             .unwrap()
             .iter()
             .all(|entry| entry.values == [3.0.into(), 1.0.into()]));
-        let trunc = g.eig_trunc(&Truncation::rank(1)).unwrap();
-        assert_provider!(provider; trunc.d, trunc.v);
+        let found = d.domain()[0]
+            .find_truncated(&d.diagview().unwrap(), &Truncation::rank(1))
+            .unwrap();
+        let trunc_d = d.restrict_diagonal(&found.selection).unwrap();
+        let trunc_v = v.restrict_leg(v.codomain_rank(), &found.selection).unwrap();
+        assert_provider!(provider; trunc_d, trunc_v);
         assert_complex_close!(
-            &g.to_c64().compose(&trunc.v).unwrap(),
-            &trunc.v.compose(&trunc.d).unwrap()
+            &g.to_c64().compose(&trunc_v).unwrap(),
+            &trunc_v.compose(&trunc_d).unwrap()
         );
-        assert!(trunc.error > 0.0, $name);
+        assert!(found.error > 0.0, $name);
 
         let id = TensorMap::id(&rt, h.domain().iter()).unwrap();
         let inverse = h.inv().unwrap();

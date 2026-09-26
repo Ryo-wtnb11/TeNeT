@@ -45,6 +45,25 @@ fn typed_source(seed: u64) -> TensorMap<SU2FusionRule, f64> {
     TensorMap::from_block_fn(&runtime(), [&leg], [&leg], move |_, _| fill(&mut state)).unwrap()
 }
 
+/// The truncated SVD's `u` and error: `svd_compact` -> `diagview` ->
+/// `find_truncated` -> `restrict_leg`.
+fn truncated_svd<R>(
+    source: &TensorMap<R, f64>,
+    truncation: &Truncation,
+) -> Result<(TensorMap<R, f64>, f64), Error>
+where
+    R: tenet::core::MultiplicityFreeRigidSymbols<Scalar = f64>
+        + tenet::core::CheckedFusionAlgebra
+        + tenet::typed::SectorCodec,
+{
+    let (u, s, _) = source.svd_compact()?;
+    let found = s.domain()[0].find_truncated(&s.diagview()?, truncation)?;
+    Ok((
+        u.restrict_leg(u.codomain_rank(), &found.selection)?,
+        found.error,
+    ))
+}
+
 fn typed_u1_leg(entries: &[(i32, usize)]) -> GradedSpace<U1FusionRule> {
     GradedSpace::try_new_with_arc(
         Arc::new(U1FusionRule),
@@ -62,10 +81,8 @@ fn typed_truncspace_produces_exactly_the_target_bond_space_on_every_sweep() {
     let expected = target.sectors().unwrap();
 
     for seed in 0..4u64 {
-        let result = typed_source(0x5eed_3000 + seed)
-            .svd_trunc(&truncation)
-            .unwrap();
-        let bond = result.u.domain()[0].clone();
+        let (u, _) = truncated_svd(&typed_source(0x5eed_3000 + seed), &truncation).unwrap();
+        let bond = u.domain()[0].clone();
         assert_eq!(
             bond.sectors().unwrap(),
             expected,
@@ -86,8 +103,8 @@ fn typed_truncspace_composes_with_a_magnitude_policy() {
     // the tighter policy may cut further.
     let target = typed_leg(&[(0, 4), (1, 4), (2, 4)]);
     let combined = Truncation::space(target.truncspace()).and(Truncation::rank(2));
-    let result = typed_source(0x5eed_4000).svd_trunc(&combined).unwrap();
-    let bond = result.u.domain()[0].clone();
+    let (u, _) = truncated_svd(&typed_source(0x5eed_4000), &combined).unwrap();
+    let bond = u.domain()[0].clone();
 
     let kept: usize = bond.degeneracies().iter().sum();
     assert!(
@@ -100,11 +117,10 @@ fn typed_truncspace_composes_with_a_magnitude_policy() {
 fn typed_truncspace_clamps_a_request_longer_than_the_spectrum() {
     let source = typed_source(0x5eed_1000);
     let greedy = typed_leg(&[(0, 99), (1, 99), (2, 99)]);
-    let clamped = source
-        .svd_trunc(&Truncation::space(greedy.truncspace()))
-        .unwrap();
+    let (clamped, clamped_error) =
+        truncated_svd(&source, &Truncation::space(greedy.truncspace())).unwrap();
     let full = source.svd_compact().unwrap();
-    let clamped_bond = &clamped.u.domain()[0];
+    let clamped_bond = &clamped.domain()[0];
     let full_bond = &full.0.domain()[0];
 
     assert_eq!(
@@ -112,7 +128,7 @@ fn typed_truncspace_clamps_a_request_longer_than_the_spectrum() {
         full_bond.sectors().unwrap()
     );
     assert_eq!(clamped_bond.degeneracies(), full_bond.degeneracies());
-    assert_eq!(clamped.error, 0.0);
+    assert_eq!(clamped_error, 0.0);
 }
 
 #[test]
@@ -125,7 +141,10 @@ fn typed_truncspace_from_another_rule_is_a_typed_error() {
         [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
     )
     .unwrap();
-    let result = typed_source(0x5eed_5000).svd_trunc(&Truncation::space(foreign.truncspace()));
+    let result = truncated_svd(
+        &typed_source(0x5eed_5000),
+        &Truncation::space(foreign.truncspace()),
+    );
     assert!(
         matches!(result, Err(Error::Operation(_))),
         "a foreign-rule profile must be a typed error, got {result:?}"
@@ -142,10 +161,9 @@ fn typed_truncspace_follows_stored_sectors_not_the_dual_flag() {
         TensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime(), [&leg], [&leg], 0x5eed_6000)
             .unwrap();
     let bond = |space: &GradedSpace<U1FusionRule>| {
-        source
-            .svd_trunc(&Truncation::space(space.truncspace()))
+        truncated_svd(&source, &Truncation::space(space.truncspace()))
             .unwrap()
-            .u
+            .0
             .domain()[0]
             .clone()
     };

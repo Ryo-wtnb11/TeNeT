@@ -53,10 +53,15 @@ fn bond_update(
     let theta = tensor!([l, pa; pb, r] = l_out[l; x] * g1[x, qa; y] * l_mid[y; z]
         * g2[z, qb; w] * l_out[w; r] * gate[pa, pb; qa, qb])
     .unwrap();
-    let svd = theta.svd_trunc(trunc).unwrap();
-    let l_new = svd.s.scale(1.0 / svd.s.norm().unwrap());
+    let (u, s, vh) = theta.svd_compact().unwrap();
+    let found = s.domain()[0]
+        .find_truncated(&s.diagview().unwrap(), trunc)
+        .unwrap();
+    let u = u.restrict_leg(u.codomain_rank(), &found.selection).unwrap();
+    let s = s.restrict_diagonal(&found.selection).unwrap();
+    let vh = vh.restrict_leg(0, &found.selection).unwrap();
+    let l_new = s.scale(1.0 / s.norm().unwrap());
     let l_out_inv = l_out.pinv(1e-12).unwrap();
-    let (u, vh) = (svd.u, svd.vh);
     let g1_new = tensor!([l, pa; m] = l_out_inv[l; x] * u[x, pa; m]).unwrap();
     let g2_new = tensor!([m, pb; r] = vh[m; pb, x] * l_out_inv[x; r]).unwrap();
     (g1_new, l_new, g2_new)

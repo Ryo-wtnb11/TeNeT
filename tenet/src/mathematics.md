@@ -570,7 +570,8 @@ discarded singular values contribute
 </math>
 </div>
 
-The reported truncation error is `epsilon`, so after a truncated SVD
+`find_truncated` reports `epsilon` as its `error`, so after an SVD truncated
+with its selection
 
 <div class="math" style="margin: 1.25rem 0; padding: 0.2rem 0; overflow-x: auto;">
 <math display="block" style="font-size: 1.12em; line-height: 1.8;" xmlns="http://www.w3.org/1998/Math/MathML">
@@ -606,8 +607,11 @@ rank budget.
 - `adjoint` swaps codomain and domain and conjugates the scalar data.
 - TensorKit-style `flip` toggles a leg's duality flag and multiplies by the
   relevant Z-isomorphism coefficient; `twist` multiplies by the sector twist.
-- `svd_trunc`, `eigh_trunc`, and related decompositions operate blockwise on
-  the coupled-sector matrices, with quantum-dimension-weighted decisions.
+- `svd_compact`, `eigh_full`, and related decompositions operate blockwise on
+  the coupled-sector matrices. Truncating one is a separate,
+  quantum-dimension-weighted decision over all sectors
+  (`GradedSpace::find_truncated`), applied with `restrict_leg` and
+  `restrict_diagonal`.
 
 The method `exp` is the sectorwise matrix exponential. For a Hermitian
 endomorphism `H`, an imaginary-time gate uses

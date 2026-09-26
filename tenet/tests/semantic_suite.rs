@@ -796,15 +796,23 @@ fn weighted_rank_truncation_matches_tensorkit() {
                 .unwrap()
                 .compose(&a.compose(&b).unwrap())
                 .unwrap();
-            let truncated = e.svd_trunc(&Truncation::rank(5)).unwrap();
-            let kept: Vec<_> = truncated
-                .singular_values
+            let (_, s, _) = e.svd_compact().unwrap();
+            let found = s.domain()[0]
+                .find_truncated(&s.diagview().unwrap(), &Truncation::rank(5))
+                .unwrap();
+            // `diagview` lists sectors in stored order; compare by label.
+            let mut kept: Vec<_> = s
+                .restrict_diagonal(&found.selection)
+                .unwrap()
+                .diagview()
+                .unwrap()
                 .iter()
                 .filter(|entry| !entry.values.is_empty())
                 .map(|entry| (label_of(&entry.sector), entry.values.len()))
                 .collect();
+            kept.sort_unstable();
             assert_eq!(kept, $expected);
-            assert_scalar_close(truncated.error, $error, 1e-10);
+            assert_scalar_close(found.error, $error, 1e-10);
         }};
     }
 

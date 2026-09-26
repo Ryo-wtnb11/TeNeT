@@ -55,11 +55,8 @@ mod runtime;
 mod tensor_core;
 pub mod typed;
 
-// Crate-root re-exports so the `default!` macro's `$crate::set_default_runtime`
-// path resolves in user code (the `runtime` module itself is private).
 #[doc(hidden)]
 pub use runtime::RuntimeIdentity;
-pub use runtime::{clear_default_runtime, default_runtime, set_default_runtime};
 /// User-layer API: [`prelude::Runtime`], [`prelude::GradedSpace`], and
 /// [`prelude::TensorMap`], plus the handful of expert-layer types their
 /// signatures mention. `use tenet::prelude::*;` is the intended import for
@@ -96,11 +93,10 @@ pub mod prelude {
         LinalgBackend, Runtime, RuntimeBuilder, RuntimeTreeTransformCacheInfo,
     };
     pub use crate::typed::{
-        AdvancedLinalgScalar, CheckedGenericEigTrunc, CheckedGenericEighTrunc, DecodeError,
-        DecodeLimits, EigTrunc, EighTrunc, EncodeError, FactorizationScalar, GenericTensorError,
-        GenericUnitTensorMapExt, GradedSpace, LegSelection, PersistedScalar, PhysicalDense,
-        PhysicalDenseError, SectorSpectrum, SvdTrunc, TensorMap, TensorScalar, TruncatedSelection,
-        TypedPersistenceCodec,
+        AdvancedLinalgScalar, DecodeError, DecodeLimits, EncodeError, FactorizationScalar,
+        GenericTensorError, GenericUnitTensorMapExt, GradedSpace, LegSelection, PersistedScalar,
+        PhysicalDense, PhysicalDenseError, SectorSpectrum, TensorMap, TensorScalar,
+        TruncatedSelection, TypedPersistenceCodec,
     };
     pub use num_complex::{Complex32, Complex64};
     #[allow(deprecated)]

@@ -205,7 +205,7 @@ fn untied_truncation_is_decided_by_magnitude_alone() {
 }
 
 #[test]
-fn svd_and_eigh_trunc_keep_tensorkits_sector_at_a_tie() {
+fn svd_and_eigh_truncation_keep_tensorkits_sector_at_a_tie() {
     // TensorKit: svd_trunc/eigh_trunc(id(Rep[U1](0 => 1, 1 => 1, -1 => 1)),
     // truncrank(2)) both return Rep[U1](0 => 1, 1 => 1).
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
@@ -217,10 +217,20 @@ fn svd_and_eigh_trunc_keep_tensorkits_sector_at_a_tie() {
     let source: TensorMap<U1FusionRule, f64> = TensorMap::id(&runtime, [&leg]).unwrap();
     let expected =
         GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(u1(0), 1), (u1(1), 1)]).unwrap();
-    let svd = source.svd_trunc(&Truncation::rank(2)).unwrap();
-    assert_eq!(svd.u.domain()[0], expected);
-    let eigh = source.eigh_trunc(&Truncation::rank(2)).unwrap();
-    assert_eq!(eigh.d.domain()[0], expected);
+    // The truncated factorizations are `*_full`/`svd_compact` -> `diagview` ->
+    // `find_truncated` -> `restrict_*`; the kept bond is the restricted leg.
+    let (u, s, _) = source.svd_compact().unwrap();
+    let found = s.domain()[0]
+        .find_truncated(&s.diagview().unwrap(), &Truncation::rank(2))
+        .unwrap();
+    let u = u.restrict_leg(u.codomain_rank(), &found.selection).unwrap();
+    assert_eq!(u.domain()[0], expected);
+    let (d, _) = source.eigh_full().unwrap();
+    let found = d.domain()[0]
+        .find_truncated(&d.diagview().unwrap(), &Truncation::rank(2))
+        .unwrap();
+    let d = d.restrict_diagonal(&found.selection).unwrap();
+    assert_eq!(d.domain()[0], expected);
 }
 
 #[test]

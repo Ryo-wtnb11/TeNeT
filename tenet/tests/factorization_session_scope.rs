@@ -43,9 +43,6 @@ macro_rules! assert_one_session_per_factorization {
         let (sessions, _) = sessions_during(|| tensor.qr_compact().unwrap());
         assert_eq!(sessions, 1, "qr_compact");
 
-        let (sessions, _) = sessions_during(|| tensor.left_orth().unwrap());
-        assert_eq!(sessions, 1, "left_orth");
-
         let (sessions, _) = sessions_during(|| tensor.svd_compact().unwrap());
         assert_eq!(sessions, 1, "svd_compact");
     }};

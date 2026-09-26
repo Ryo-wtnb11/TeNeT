@@ -13,8 +13,8 @@ use tenet_core::{
     BlockKey, BlockRef, BlockStructure, CheckedGenericFusion, CheckedGenericRigidSymbols,
     CheckedGenericStructureError, CoreError, CoupledSectorRegion, CoupledTreeExtent,
     FusionProductSpace, FusionRule, FusionTensorMapSpace, FusionTreeHomSpace, FusionTreeKey,
-    FusionTreePairKey, GenericRigidSymbols, InfallibleGeneric, MultiplicityFreeRigidSymbols,
-    SectorId, SectorLeg, SectorStructure, TensorMap, TensorMapSpace,
+    FusionTreePairKey, InfallibleGeneric, MultiplicityFreeRigidSymbols, SectorId, SectorLeg,
+    SectorStructure, TensorMap, TensorMapSpace,
 };
 use tenet_dense::{
     DenseBackend, DenseDotConfig, DenseError, DenseExecutor, DenseFactorization, DenseOwned,
@@ -368,18 +368,11 @@ impl FactorScalar for Complex64 {
 /// Magnitude used by the truncation selection over a spectrum.
 pub trait SpectrumMagnitude: Copy {
     fn magnitude(self) -> f64;
-    fn nonnegative_f64_slice(_values: &[Self]) -> Option<&[f64]> {
-        None
-    }
 }
 
 impl SpectrumMagnitude for f64 {
     fn magnitude(self) -> f64 {
         self.abs()
-    }
-
-    fn nonnegative_f64_slice(values: &[Self]) -> Option<&[f64]> {
-        Some(values)
     }
 }
 
@@ -392,10 +385,7 @@ impl SpectrumMagnitude for Complex64 {
 // The single-precision magnitudes widen *before* the absolute value or the
 // hypotenuse, so a `Complex32` whose components straddle the `f32` range still
 // reports a finite magnitude and the truncation policies compare the same
-// `f64` quantities they compare for a double-precision payload. There is no
-// `nonnegative_f64_slice` fast path: an `f32` slice is not an `f64` slice, so
-// the selection materializes the magnitudes, exactly as `Complex64` already
-// does.
+// `f64` quantities they compare for a double-precision payload.
 impl SpectrumMagnitude for f32 {
     fn magnitude(self) -> f64 {
         f64::from(self).abs()
@@ -700,81 +690,6 @@ where
     let tensor = typed_from_dyn(provider.as_ref(), (space.space().clone(), data))?;
     Ok(BoundTensorMap { space, tensor })
 }
-
-/// Truncated fusion-tensor SVD `t ~ U * S * Vh` (MatrixAlgebraKit `svd_trunc`).
-///
-/// The factorization acts blockwise on the coupled-sector matricization
-/// through the placement-capable [`DenseExecutor`] boundary; the truncation
-/// decision is a host-side scalar selection over the per-sector spectra
-/// (see [`crate::truncation`]), applied as a leading-columns/rows gather.
-/// `U : codomain <- W`, `S : W <- W` diagonal, `Vh : W <- domain`; `error` is
-/// the quantum-dimension-weighted 2-norm of the discarded values.
-#[derive(Clone, Debug)]
-pub struct SvdTrunc<R, D, const NOUT: usize, const NIN: usize> {
-    pub u: BoundTensorMap<R, D, NOUT, 1>,
-    pub s: BoundTensorMap<R, D, 1, 1>,
-    pub vh: BoundTensorMap<R, D, 1, NIN>,
-    pub singular_values: Vec<SectorSpectrum>,
-    pub error: f64,
-}
-
-/// Dynamic-rank [`SvdTrunc`].
-#[derive(Clone, Debug)]
-pub struct SvdTruncDyn<R, D> {
-    u: BoundDynFactor<R, D>,
-    s: BoundDynFactor<R, D>,
-    vh: BoundDynFactor<R, D>,
-    singular_values: Vec<SectorSpectrum>,
-    error: f64,
-}
-
-impl<R, D> SvdTruncDyn<R, D> {
-    pub fn u(&self) -> &BoundDynFactor<R, D> {
-        &self.u
-    }
-
-    pub fn s(&self) -> &BoundDynFactor<R, D> {
-        &self.s
-    }
-
-    pub fn vh(&self) -> &BoundDynFactor<R, D> {
-        &self.vh
-    }
-
-    pub fn singular_values(&self) -> &[SectorSpectrum] {
-        &self.singular_values
-    }
-
-    pub fn error(&self) -> f64 {
-        self.error
-    }
-
-    #[expect(
-        clippy::type_complexity,
-        reason = "the public decomposition accessor returns its named components in documented order"
-    )]
-    pub fn into_parts(
-        self,
-    ) -> (
-        BoundDynFactor<R, D>,
-        BoundDynFactor<R, D>,
-        BoundDynFactor<R, D>,
-        Vec<SectorSpectrum>,
-        f64,
-    ) {
-        (self.u, self.s, self.vh, self.singular_values, self.error)
-    }
-}
-
-/// Truncated SVD factors without a materialized diagonal `S`:
-/// `(U, Vh, spectrum, error)`.
-#[doc(hidden)]
-pub type SvdTruncFactorsDyn<R, D> = (
-    BoundDynFactor<R, D>,
-    BoundDynFactor<R, D>,
-    Vec<SectorSpectrum>,
-    f64,
-);
 
 /// Compact (thin, untruncated) fusion-tensor SVD `t = U * S * Vh`
 /// (MatrixAlgebraKit `svd_compact`).
@@ -1754,70 +1669,6 @@ where
     Ok(singular_values)
 }
 
-/// Truncated fusion-tensor SVD (MatrixAlgebraKit `svd_trunc`).
-///
-/// Layering: the untruncated compact factorization runs on the device
-/// boundary ([`svd_compact`]); the truncation decision is host-side scalar
-/// work over the spectra and its application slices the leading bond states
-/// per sector.
-pub fn svd_trunc<E, R, D, const NOUT: usize, const NIN: usize>(
-    dense: &mut E,
-    input: &BoundTensorMapRef<'_, R, D, NOUT, NIN>,
-    truncation: &Truncation,
-) -> Result<SvdTrunc<R, D, NOUT, NIN>, OperationError>
-where
-    E: DenseExecutor + ?Sized,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: FactorScalar,
-{
-    let out = svd_trunc_dyn(dense, &input.dynamic(), truncation)?;
-    Ok(SvdTrunc {
-        u: typed_from_bound_factor(out.u)?,
-        s: typed_from_bound_factor(out.s)?,
-        vh: typed_from_bound_factor(out.vh)?,
-        singular_values: out.singular_values,
-        error: out.error,
-    })
-}
-
-/// Dynamic-rank [`svd_trunc`].
-pub fn svd_trunc_dyn<E, R, D>(
-    dense: &mut E,
-    input: &BoundDynamicTensorRef<'_, R, D>,
-    truncation: &Truncation,
-) -> Result<SvdTruncDyn<R, D>, OperationError>
-where
-    E: DenseExecutor + ?Sized,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: FactorScalar,
-{
-    let (u, vh, singular_values, error) = svd_trunc_factors_dyn(dense, input, truncation)?;
-    let s = diagonal_bond_svd_factor(u.space(), &singular_values, &D::from_real)?;
-    Ok(SvdTruncDyn {
-        u,
-        s,
-        vh,
-        singular_values,
-        error,
-    })
-}
-
-/// Dynamic-rank truncated SVD without materializing the diagonal `S` factor.
-#[doc(hidden)]
-pub fn svd_trunc_factors_dyn<E, R, D>(
-    dense: &mut E,
-    input: &BoundDynamicTensorRef<'_, R, D>,
-    truncation: &Truncation,
-) -> Result<SvdTruncFactorsDyn<R, D>, OperationError>
-where
-    E: DenseExecutor + ?Sized,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: FactorScalar,
-{
-    let (u, vh, singular_values) = svd_compact_factors_dyn(dense, input)?;
-    truncate_svd_factors_only_dyn(u, vh, singular_values, truncation)
-}
-
 /// Compact (untruncated) fusion-tensor SVD through the device boundary.
 pub fn svd_compact<E, R, D, const NOUT: usize, const NIN: usize>(
     dense: &mut E,
@@ -1879,29 +1730,6 @@ where
         adjoint_bound_factor(&vh)?,
         adjoint_bound_factor(&u)?,
         spectrum,
-    ))
-}
-
-/// Truncated SVD factors for the logical adjoint without constructing its input.
-#[doc(hidden)]
-pub fn svd_trunc_adjoint_factors_dyn<E, R, D>(
-    dense: &mut E,
-    input: &BoundDynamicTensorRef<'_, R, D>,
-    truncation: &Truncation,
-) -> Result<SvdTruncFactorsDyn<R, D>, OperationError>
-where
-    E: DenseExecutor + ?Sized,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: FactorScalar,
-{
-    let (u, vh, spectrum) =
-        svd_compact_factors_dyn_with_direction(dense, input, None, CompactSvdGauge::AdjointLeft)?;
-    let (u, vh, spectrum, error) = truncate_svd_factors_only_dyn(u, vh, spectrum, truncation)?;
-    Ok((
-        adjoint_bound_factor(&vh)?,
-        adjoint_bound_factor(&u)?,
-        spectrum,
-        error,
     ))
 }
 
@@ -2740,49 +2568,27 @@ where
     })
 }
 
-/// Host-side truncation decision shared by every bond factorization: the
-/// selection magnitude is `|value|` and each `spectra` entry is stored
+/// Host-side truncation decision over the spectra of a bond factorization:
+/// the selection magnitude is `|value|` and each `spectra` entry is stored
 /// descending by magnitude (the `*_full` output contract), so the kept set is
 /// always a per-sector prefix.
 ///
-/// Public and `doc(hidden)` so the typed facade's `GradedSpace::find_truncated`
-/// reaches the very same decision — weight, validation and error bits — instead
-/// of growing a fourth copy of this adapter.
+/// Public and `doc(hidden)` only because the typed facade's
+/// `GradedSpace::find_truncated`, in the `tenet` crate, is its caller; it is
+/// not an API of its own.
 #[doc(hidden)]
 pub fn decide_bond_truncation<R, V>(
     rule: &R,
     spectra: &[SectorSpectrum<V>],
     truncation: &Truncation,
-    values_are_nonnegative: bool,
 ) -> Result<crate::truncation::TruncationDecision, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     V: SpectrumMagnitude,
 {
-    enum MagnitudeValues<'a> {
-        Borrowed(&'a [f64]),
-        Owned(Vec<f64>),
-    }
-
-    impl<'a> MagnitudeValues<'a> {
-        fn as_slice(&self) -> &[f64] {
-            match self {
-                MagnitudeValues::Borrowed(values) => values,
-                MagnitudeValues::Owned(values) => values,
-            }
-        }
-    }
-
-    let magnitudes: Vec<MagnitudeValues<'_>> = spectra
+    let magnitudes: Vec<Vec<f64>> = spectra
         .iter()
-        .map(|entry| {
-            if values_are_nonnegative {
-                if let Some(values) = V::nonnegative_f64_slice(&entry.values) {
-                    return MagnitudeValues::Borrowed(values);
-                }
-            }
-            MagnitudeValues::Owned(entry.values.iter().map(|value| value.magnitude()).collect())
-        })
+        .map(|entry| entry.values.iter().map(|value| value.magnitude()).collect())
         .collect();
     let weighted: Vec<WeightedSpectrum<'_>> = spectra
         .iter()
@@ -2790,205 +2596,13 @@ where
         .map(|(entry, values)| WeightedSpectrum {
             sector: entry.sector,
             weight: rule.dim_scalar(entry.sector),
-            values: values.as_slice(),
+            values,
         })
         .collect();
     select_truncation(&weighted, truncation, &rule.rule_identity(), |sector| {
         rule.sector_order_key(sector)
     })
     .map_err(OperationError::from)
-}
-
-/// Applies a truncation policy to an untruncated compact factorization (the host
-/// half of [`svd_trunc`]).
-///
-/// The decision is host-side scalar work over the spectra; the application
-/// keeps the leading bond states per coupled sector, which in the coupled
-/// layout is a per-sector leading-columns/rows copy (device kernel later).
-#[cfg_attr(not(test), allow(dead_code))] // exercised by the typed test suite
-pub(crate) fn truncate_svd<R, D, const NOUT: usize, const NIN: usize>(
-    compact: SvdCompact<R, D, NOUT, NIN>,
-    truncation: &Truncation,
-) -> Result<SvdTrunc<R, D, NOUT, NIN>, OperationError>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: FactorScalar,
-{
-    let SvdCompact {
-        u,
-        s,
-        vh,
-        singular_values,
-    } = compact;
-    let (u_space, u) = u.into_parts();
-    let (s_space, s) = s.into_parts();
-    let (vh_space, vh) = vh.into_parts();
-    let compact_dyn = SvdCompactDyn {
-        u: BoundDynFactor::from_bound(u_space, u.data().to_vec(), NOUT, 1)?,
-        s: BoundDynFactor::from_bound(s_space, s.data().to_vec(), 1, 1)?,
-        vh: BoundDynFactor::from_bound(vh_space, vh.data().to_vec(), 1, NIN)?,
-        singular_values,
-    };
-    let out = truncate_svd_dyn(compact_dyn, truncation)?;
-    Ok(SvdTrunc {
-        u: typed_from_bound_factor(out.u)?,
-        s: typed_from_bound_factor(out.s)?,
-        vh: typed_from_bound_factor(out.vh)?,
-        singular_values: out.singular_values,
-        error: out.error,
-    })
-}
-
-/// Dynamic-rank [`truncate_svd`].
-pub(crate) fn truncate_svd_dyn<R, D>(
-    compact: SvdCompactDyn<R, D>,
-    truncation: &Truncation,
-) -> Result<SvdTruncDyn<R, D>, OperationError>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: FactorScalar,
-{
-    let SvdCompactDyn {
-        u,
-        s,
-        vh,
-        singular_values,
-    } = compact;
-    let full_rank = singular_values
-        .iter()
-        .map(|entry| entry.values.len())
-        .sum::<usize>();
-    let (u, vh, singular_values, error) =
-        truncate_svd_factors_only_dyn(u, vh, singular_values, truncation)?;
-    let kept_rank = singular_values
-        .iter()
-        .map(|entry| entry.values.len())
-        .sum::<usize>();
-    let s = if kept_rank == full_rank {
-        s
-    } else {
-        diagonal_bond_svd_factor(u.space(), &singular_values, &D::from_real)?
-    };
-    Ok(SvdTruncDyn {
-        u,
-        s,
-        vh,
-        singular_values,
-        error,
-    })
-}
-
-/// Decides and applies SVD truncation without constructing the diagonal factor.
-fn truncate_svd_factors_only_dyn<R, D>(
-    u: BoundDynFactor<R, D>,
-    vh: BoundDynFactor<R, D>,
-    mut singular_values: Vec<SectorSpectrum>,
-    truncation: &Truncation,
-) -> Result<SvdTruncFactorsDyn<R, D>, OperationError>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: FactorScalar,
-{
-    let decision =
-        decide_bond_truncation(u.space().provider(), &singular_values, truncation, true)?;
-    if singular_values
-        .iter()
-        .zip(&decision.kept)
-        .all(|(entry, &count)| entry.values.len() == count)
-    {
-        return Ok((u, vh, singular_values, decision.error));
-    }
-
-    for (entry, &count) in singular_values.iter_mut().zip(&decision.kept) {
-        entry.values.truncate(count);
-    }
-    singular_values.retain(|entry| !entry.values.is_empty());
-    let kept_by_sector: FxHashMap<SectorId, usize> = singular_values
-        .iter()
-        .map(|entry| (entry.sector, entry.values.len()))
-        .collect();
-
-    let kept_of = |sector: SectorId| -> usize { kept_by_sector.get(&sector).copied().unwrap_or(0) };
-
-    let bond_axis = u.space().space().nout();
-    let u_factor = sliced_bond_bound_factor(
-        u.space(),
-        u.data(),
-        bond_axis,
-        &kept_of,
-        u.space().space().nout(),
-        1,
-    )?;
-    let vh_factor = sliced_bond_bound_factor(
-        vh.space(),
-        vh.data(),
-        0,
-        &kept_of,
-        1,
-        vh.space().space().nin(),
-    )?;
-    Ok((u_factor, vh_factor, singular_values, decision.error))
-}
-
-fn sliced_bond_bound_factor<R, D>(
-    authority: &BoundDynamicFusionMapSpace<R>,
-    source_data: &[D],
-    axis: usize,
-    kept_of: &dyn Fn(SectorId) -> usize,
-    expected_nout: usize,
-    expected_nin: usize,
-) -> Result<BoundDynFactor<R, D>, OperationError>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: FactorScalar,
-{
-    let source_space = authority.space();
-    let nout = source_space.nout();
-    let source_structure = Arc::clone(source_space.structure());
-    let homspace = source_space.homspace();
-    let leg = if axis < nout {
-        &homspace.codomain().legs()[axis]
-    } else {
-        &homspace.domain().legs()[axis - nout]
-    };
-    let bond_leg = SectorLeg::new(
-        leg.sectors()
-            .iter()
-            .copied()
-            .filter(|&sector| kept_of(sector) > 0)
-            .map(|sector| (sector, kept_of(sector))),
-        false,
-    );
-    let new_hom = if axis < nout {
-        let mut legs = homspace.codomain().legs().to_vec();
-        legs[axis] = bond_leg;
-        FusionTreeHomSpace::new(FusionProductSpace::new(legs), homspace.domain().clone())
-    } else {
-        let mut legs = homspace.domain().legs().to_vec();
-        legs[axis - nout] = bond_leg;
-        FusionTreeHomSpace::new(homspace.codomain().clone(), FusionProductSpace::new(legs))
-    };
-    let space = authority.derive_from_final_homspace(new_hom)?;
-    let mut data = vec![D::zero(); space.space().required_len()?];
-    for index in 0..space.space().structure().block_count() {
-        let new_block = space.space().structure().block(index)?;
-        let old_index = source_structure
-            .find_block_index_by_key(new_block.key())
-            .ok_or(OperationError::UnsupportedTensorContractScope {
-                message: "truncated factor tree must exist in the full factor",
-            })?;
-        let old_block = source_structure.block(old_index)?;
-        copy_matching_block_prefix(
-            source_data,
-            old_block.strides(),
-            old_block.offset(),
-            &mut data,
-            new_block.strides(),
-            new_block.offset(),
-            new_block.shape(),
-        );
-    }
-    BoundDynFactor::from_bound(space, data, expected_nout, expected_nin)
 }
 
 /// One coupled sector's factor pair: `left` is `left_rows x kept` (leading
@@ -3497,43 +3111,6 @@ impl<R, D> EighFullDyn<R, D> {
     }
 }
 
-/// Truncated Hermitian eigendecomposition; `error` is the
-/// quantum-dimension-weighted 2-norm of the discarded eigenvalues.
-#[derive(Clone, Debug)]
-pub struct EighTrunc<R, D, const NOUT: usize, const NIN: usize> {
-    pub d: BoundTensorMap<R, D, 1, 1>,
-    pub v: BoundTensorMap<R, D, NOUT, 1>,
-    pub eigenvalues: Vec<SectorSpectrum>,
-    pub error: f64,
-}
-
-/// Dynamic-rank [`EighTrunc`]. Spectrum + eigenvectors only; the dense diagonal
-/// is materialized by the typed [`eigh_trunc`] wrapper (see [`EighFullDyn`]).
-#[derive(Clone, Debug)]
-pub struct EighTruncDyn<R, D> {
-    v: BoundDynFactor<R, D>,
-    eigenvalues: Vec<SectorSpectrum>,
-    error: f64,
-}
-
-impl<R, D> EighTruncDyn<R, D> {
-    pub fn v(&self) -> &BoundDynFactor<R, D> {
-        &self.v
-    }
-
-    pub fn eigenvalues(&self) -> &[SectorSpectrum] {
-        &self.eigenvalues
-    }
-
-    pub fn error(&self) -> f64 {
-        self.error
-    }
-
-    pub fn into_parts(self) -> (BoundDynFactor<R, D>, Vec<SectorSpectrum>, f64) {
-        (self.v, self.eigenvalues, self.error)
-    }
-}
-
 /// Full Hermitian eigendecomposition through the device boundary.
 ///
 /// Before any dense call, every coupled-sector block `A` must satisfy
@@ -3764,88 +3341,6 @@ where
     Ok(EighFullDyn {
         v: BoundDynFactor::from_bound(v_space, output.unwrap_or_default(), space.nout(), 1)?,
         eigenvalues,
-    })
-}
-
-/// Truncated Hermitian eigendecomposition: [`eigh_full`] on the device
-/// boundary plus the shared host-side truncation by `|eigenvalue|`.
-pub fn eigh_trunc<E, R, D, const NOUT: usize, const NIN: usize>(
-    dense: &mut E,
-    input: &BoundTensorMapRef<'_, R, D, NOUT, NIN>,
-    truncation: &Truncation,
-) -> Result<EighTrunc<R, D, NOUT, NIN>, OperationError>
-where
-    E: DenseExecutor + ?Sized,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: FactorScalar,
-{
-    let dynamic = input.dynamic();
-    let out = eigh_trunc_dyn(dense, &dynamic, truncation)?;
-    let d = diagonal_bond_svd_factor(dynamic.space(), &out.eigenvalues, &D::from_real)?;
-    Ok(EighTrunc {
-        d: typed_from_bound_factor(d)?,
-        v: typed_from_bound_factor(out.v)?,
-        eigenvalues: out.eigenvalues,
-        error: out.error,
-    })
-}
-
-/// Dynamic-rank [`eigh_trunc`].
-pub fn eigh_trunc_dyn<E, R, D>(
-    dense: &mut E,
-    input: &BoundDynamicTensorRef<'_, R, D>,
-    truncation: &Truncation,
-) -> Result<EighTruncDyn<R, D>, OperationError>
-where
-    E: DenseExecutor + ?Sized,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: FactorScalar,
-{
-    let rule = input.space().provider();
-    let full = eigh_full_dyn(dense, input)?;
-    if matches!(truncation, Truncation::Full) {
-        return Ok(EighTruncDyn {
-            v: full.v,
-            eigenvalues: full.eigenvalues,
-            error: 0.0,
-        });
-    }
-    let decision = decide_bond_truncation(rule, &full.eigenvalues, truncation, false)?;
-    if full
-        .eigenvalues
-        .iter()
-        .zip(&decision.kept)
-        .all(|(entry, &count)| entry.values.len() == count)
-    {
-        return Ok(EighTruncDyn {
-            v: full.v,
-            eigenvalues: full.eigenvalues,
-            error: 0.0,
-        });
-    }
-    let mut eigenvalues = full.eigenvalues;
-    for (entry, &count) in eigenvalues.iter_mut().zip(&decision.kept) {
-        entry.values.truncate(count);
-    }
-    eigenvalues.retain(|entry| !entry.values.is_empty());
-    let kept_by_sector: FxHashMap<SectorId, usize> = eigenvalues
-        .iter()
-        .map(|entry| (entry.sector, entry.values.len()))
-        .collect();
-    let kept_of = |sector: SectorId| -> usize { kept_by_sector.get(&sector).copied().unwrap_or(0) };
-    let bond_axis = full.v.space().space().nout();
-    let v_factor = sliced_bond_bound_factor(
-        full.v.space(),
-        full.v.data(),
-        bond_axis,
-        &kept_of,
-        bond_axis,
-        1,
-    )?;
-    Ok(EighTruncDyn {
-        v: v_factor,
-        eigenvalues,
-        error: decision.error,
     })
 }
 
@@ -4826,49 +4321,6 @@ impl<R, D: FactorScalar> EigFullDyn<R, D> {
     }
 }
 
-/// Truncated general eigendecomposition; `error` is the
-/// quantum-dimension-weighted 2-norm of the discarded `|eigenvalues|`.
-#[derive(Clone, Debug)]
-pub struct EigTrunc<R, D: FactorScalar, const NOUT: usize, const NIN: usize> {
-    pub d: BoundTensorMap<R, D::Eig, 1, 1>,
-    pub v: BoundTensorMap<R, D::Eig, NOUT, 1>,
-    pub eigenvalues: Vec<SectorSpectrum<Complex64>>,
-    pub error: f64,
-}
-
-/// Dynamic-rank [`EigTrunc`]. Spectrum + eigenvectors only; the dense diagonal
-/// is materialized by the typed [`eig_trunc`] wrapper (see [`EighFullDyn`], #56 N).
-#[derive(Clone, Debug)]
-pub struct EigTruncDyn<R, D: FactorScalar> {
-    v: BoundDynFactor<R, D::Eig>,
-    eigenvalues: Vec<SectorSpectrum<Complex64>>,
-    error: f64,
-}
-
-impl<R, D: FactorScalar> EigTruncDyn<R, D> {
-    pub fn v(&self) -> &BoundDynFactor<R, D::Eig> {
-        &self.v
-    }
-
-    pub fn eigenvalues(&self) -> &[SectorSpectrum<Complex64>] {
-        &self.eigenvalues
-    }
-
-    pub fn error(&self) -> f64 {
-        self.error
-    }
-
-    pub fn into_parts(
-        self,
-    ) -> (
-        BoundDynFactor<R, D::Eig>,
-        Vec<SectorSpectrum<Complex64>>,
-        f64,
-    ) {
-        (self.v, self.eigenvalues, self.error)
-    }
-}
-
 /// Full general eigendecomposition through the device boundary.
 pub fn eig_full<E, R, D, const NOUT: usize, const NIN: usize>(
     dense: &mut E,
@@ -4982,92 +4434,6 @@ where
     Ok(EigFullDyn {
         v: v_factor,
         eigenvalues,
-    })
-}
-
-/// Truncated general eigendecomposition: [`eig_full`] plus the shared
-/// host-side truncation by `|eigenvalue|`.
-pub fn eig_trunc<E, R, D, const NOUT: usize, const NIN: usize>(
-    dense: &mut E,
-    input: &BoundTensorMapRef<'_, R, D, NOUT, NIN>,
-    truncation: &Truncation,
-) -> Result<EigTrunc<R, D, NOUT, NIN>, OperationError>
-where
-    E: DenseExecutor + ?Sized,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: FactorScalar,
-{
-    let dynamic = input.dynamic();
-    let out = eig_trunc_dyn::<E, R, D>(dense, &dynamic, truncation)?;
-    let d = diagonal_bond_svd_factor(
-        dynamic.space(),
-        &out.eigenvalues,
-        &<D::Eig as FactorScalar>::from_complex64,
-    )?;
-    Ok(EigTrunc {
-        d: typed_from_bound_factor(d)?,
-        v: typed_from_bound_factor(out.v)?,
-        eigenvalues: out.eigenvalues,
-        error: out.error,
-    })
-}
-
-/// Dynamic-rank [`eig_trunc`].
-pub fn eig_trunc_dyn<E, R, D>(
-    dense: &mut E,
-    input: &BoundDynamicTensorRef<'_, R, D>,
-    truncation: &Truncation,
-) -> Result<EigTruncDyn<R, D>, OperationError>
-where
-    E: DenseExecutor + ?Sized,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: FactorScalar,
-{
-    let rule = input.space().provider();
-    let full = eig_full_dyn::<E, R, D>(dense, input)?;
-    if matches!(truncation, Truncation::Full) {
-        return Ok(EigTruncDyn {
-            v: full.v,
-            eigenvalues: full.eigenvalues,
-            error: 0.0,
-        });
-    }
-    let decision = decide_bond_truncation(rule, &full.eigenvalues, truncation, false)?;
-    if full
-        .eigenvalues
-        .iter()
-        .zip(&decision.kept)
-        .all(|(entry, &count)| entry.values.len() == count)
-    {
-        return Ok(EigTruncDyn {
-            v: full.v,
-            eigenvalues: full.eigenvalues,
-            error: 0.0,
-        });
-    }
-    let mut eigenvalues = full.eigenvalues;
-    for (entry, &count) in eigenvalues.iter_mut().zip(&decision.kept) {
-        entry.values.truncate(count);
-    }
-    eigenvalues.retain(|entry| !entry.values.is_empty());
-    let kept_by_sector: FxHashMap<SectorId, usize> = eigenvalues
-        .iter()
-        .map(|entry| (entry.sector, entry.values.len()))
-        .collect();
-    let kept_of = |sector: SectorId| -> usize { kept_by_sector.get(&sector).copied().unwrap_or(0) };
-    let bond_axis = full.v.space().space().nout();
-    let v_factor = sliced_bond_bound_factor(
-        full.v.space(),
-        full.v.data(),
-        bond_axis,
-        &kept_of,
-        bond_axis,
-        1,
-    )?;
-    Ok(EigTruncDyn {
-        v: v_factor,
-        eigenvalues,
-        error: decision.error,
     })
 }
 
@@ -6074,49 +5440,6 @@ where
     Ok((left, right))
 }
 
-/// Left isometry factorization `t = V * C` (TensorKit 0.17 / MatrixAlgebraKit
-/// `left_orth`): `V : codomain <- W` isometric, `C : W <- domain`.
-///
-/// TensorKit's default `kind = :qr` maps to [`qr_compact`], which applies the
-/// positive-diagonal QR gauge (`positive = true`, the MAK default).
-#[expect(
-    clippy::type_complexity,
-    reason = "the public factorization API exposes its ordered factor tuple directly"
-)]
-pub fn left_orth<E, R, D, const NOUT: usize, const NIN: usize>(
-    dense: &mut E,
-    input: &BoundTensorMapRef<'_, R, D, NOUT, NIN>,
-) -> Result<(BoundTensorMap<R, D, NOUT, 1>, BoundTensorMap<R, D, 1, NIN>), OperationError>
-where
-    E: DenseExecutor + ?Sized,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: FactorScalar,
-{
-    qr_compact(dense, input)
-}
-
-/// Right isometry factorization `t = C * Vh` (TensorKit 0.17 /
-/// MatrixAlgebraKit `right_orth`): `C : codomain <- W`, `Vh : W <- domain`
-/// with orthonormal rows.
-///
-/// TensorKit's default `kind = :lq` maps to [`lq_compact`], which applies the
-/// positive-diagonal LQ gauge (`positive = true`, the MAK default).
-#[expect(
-    clippy::type_complexity,
-    reason = "the public factorization API exposes its ordered factor tuple directly"
-)]
-pub fn right_orth<E, R, D, const NOUT: usize, const NIN: usize>(
-    dense: &mut E,
-    input: &BoundTensorMapRef<'_, R, D, NOUT, NIN>,
-) -> Result<(BoundTensorMap<R, D, NOUT, 1>, BoundTensorMap<R, D, 1, NIN>), OperationError>
-where
-    E: DenseExecutor + ?Sized,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: FactorScalar,
-{
-    lq_compact(dense, input)
-}
-
 #[cfg(test)]
 thread_local! {
     static FORCE_LQ_ZEROED_PUBLICATION: Cell<bool> = const { Cell::new(false) };
@@ -6733,43 +6056,6 @@ fn copy_tensor_block_to_matrix<D: Copy>(
             for lane in 0..run {
                 matrix[dst_start + lane * dst_lane_stride] =
                     source[src_start + lane * src_lane_stride];
-            }
-        }
-        advance_outer_index(&mut index, shape);
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn copy_matching_block_prefix<D: Copy>(
-    source: &[D],
-    source_strides: &[usize],
-    source_offset: usize,
-    destination: &mut [D],
-    destination_strides: &[usize],
-    destination_offset: usize,
-    shape: &[usize],
-) {
-    if shape.is_empty() {
-        destination[destination_offset] = source[source_offset];
-        return;
-    }
-    let run = shape[0];
-    let outer_count: usize = shape[1..].iter().product();
-    let mut index = vec![0usize; shape.len()];
-    for _ in 0..outer_count {
-        let mut src_start = source_offset;
-        let mut dst_start = destination_offset;
-        for axis in 1..shape.len() {
-            src_start += index[axis] * source_strides[axis];
-            dst_start += index[axis] * destination_strides[axis];
-        }
-        if source_strides[0] == 1 && destination_strides[0] == 1 {
-            destination[dst_start..dst_start + run]
-                .copy_from_slice(&source[src_start..src_start + run]);
-        } else {
-            for lane in 0..run {
-                destination[dst_start + lane * destination_strides[0]] =
-                    source[src_start + lane * source_strides[0]];
             }
         }
         advance_outer_index(&mut index, shape);
@@ -10859,24 +10145,6 @@ where
     Ok((u, vh, singular_values))
 }
 
-/// Builds a provider-bound diagonal factor for a generic rule.
-fn diagonal_bond_svd_factor_generic<R, D, V>(
-    provider: Arc<R>,
-    spectrum: &[SectorSpectrum<V>],
-    to_scalar: &dyn Fn(V) -> D,
-) -> Result<BoundDynFactor<R, D>, OperationError>
-where
-    R: FusionRule,
-    D: FactorScalar,
-    V: Copy,
-{
-    #[cfg(test)]
-    record_diagonal_bond_build(spectrum);
-    let space = diagonal_bond_bound_space_generic(provider, spectrum)?;
-    let data = diagonal_bond_data(space.space(), spectrum, to_scalar)?;
-    BoundDynFactor::from_bound(space, data, 1, 1)
-}
-
 pub fn diagonal_bond_bound_space_generic<R, V>(
     provider: Arc<R>,
     spectrum: &[SectorSpectrum<V>],
@@ -10931,13 +10199,6 @@ where
     Ok(singular_values)
 }
 
-/// Generic sibling of [`decide_bond_truncation`]: the weight is
-/// `sqrt_dim(c)²`. Why not round it: generic rigid categories may have
-/// non-integer quantum dimensions, so rounding changes the truncation policy.
-fn generic_truncation_weight(sqrt_dim: f64) -> f64 {
-    sqrt_dim * sqrt_dim
-}
-
 fn invalid_eigenvalues() -> OperationError {
     OperationError::InvalidArgument {
         message: "eigenvalues must be finite",
@@ -10968,58 +10229,8 @@ fn validate_complex_eigenvalues(values: &[Complex64]) -> Result<(), OperationErr
     }
 }
 
-fn decide_bond_truncation_generic<R, V>(
-    rule: &R,
-    spectra: &[SectorSpectrum<V>],
-    truncation: &Truncation,
-    values_are_nonnegative: bool,
-) -> Result<crate::truncation::TruncationDecision, OperationError>
-where
-    R: GenericRigidSymbols<Scalar = f64>,
-    V: SpectrumMagnitude,
-{
-    enum MagnitudeValues<'a> {
-        Borrowed(&'a [f64]),
-        Owned(Vec<f64>),
-    }
-
-    impl<'a> MagnitudeValues<'a> {
-        fn as_slice(&self) -> &[f64] {
-            match self {
-                MagnitudeValues::Borrowed(values) => values,
-                MagnitudeValues::Owned(values) => values,
-            }
-        }
-    }
-
-    let magnitudes: Vec<MagnitudeValues<'_>> = spectra
-        .iter()
-        .map(|entry| {
-            if values_are_nonnegative {
-                if let Some(values) = V::nonnegative_f64_slice(&entry.values) {
-                    return MagnitudeValues::Borrowed(values);
-                }
-            }
-            MagnitudeValues::Owned(entry.values.iter().map(|value| value.magnitude()).collect())
-        })
-        .collect();
-    let weighted: Vec<WeightedSpectrum<'_>> = spectra
-        .iter()
-        .zip(&magnitudes)
-        .map(|(entry, values)| WeightedSpectrum {
-            sector: entry.sector,
-            weight: generic_truncation_weight(rule.sqrt_dim_scalar(entry.sector)),
-            values: values.as_slice(),
-        })
-        .collect();
-    select_truncation(&weighted, truncation, &rule.rule_identity(), |sector| {
-        rule.sector_order_key(sector)
-    })
-    .map_err(OperationError::from)
-}
-
-/// Checked-Generic sibling of [`decide_bond_truncation`], public for the same
-/// reason.
+/// Checked-Generic sibling of [`decide_bond_truncation`], public and hidden for
+/// the same reason.
 #[doc(hidden)]
 pub fn decide_bond_truncation_generic_checked<R, V>(
     rule: &R,
@@ -11049,377 +10260,6 @@ where
         rule.sector_order_key(sector)
     })
     .map_err(|error| CheckedGenericFactorPlanError::Operation(error.into()))
-}
-
-#[cfg(test)]
-mod generic_truncation_weight_tests {
-    use super::generic_truncation_weight;
-
-    #[test]
-    fn preserves_non_integer_quantum_dimension() {
-        // What: an anyonic sqrt(qdim) must remain an irrational qdim weight.
-        let golden_ratio = (1.0 + 5.0_f64.sqrt()) / 2.0;
-        let weight = generic_truncation_weight(golden_ratio.sqrt());
-        assert!((weight - golden_ratio).abs() < 1.0e-14);
-        assert_ne!(weight, weight.round());
-    }
-}
-
-/// Generic sibling of [`sliced_bond_tensor`].
-fn sliced_bond_tensor_generic<R, D>(
-    provider: Arc<R>,
-    source_space: &DynamicFusionMapSpace,
-    source_data: &[D],
-    axis: usize,
-    kept_of: &dyn Fn(SectorId) -> usize,
-    expected_nout: usize,
-    expected_nin: usize,
-) -> Result<BoundDynFactor<R, D>, OperationError>
-where
-    R: FusionRule,
-    D: FactorScalar,
-{
-    let rule = provider.as_ref();
-    let nout = source_space.nout();
-    let source_structure = Arc::clone(source_space.structure());
-
-    // The bond leg carries exactly the kept sectors.
-    let kept_sectors: Vec<SectorId> = {
-        let homspace = source_space.homspace();
-        let leg = if axis < nout {
-            &homspace.codomain().legs()[axis]
-        } else {
-            &homspace.domain().legs()[axis - nout]
-        };
-        leg.sectors()
-            .iter()
-            .copied()
-            .filter(|&sector| kept_of(sector) > 0)
-            .collect()
-    };
-    let bond_leg = SectorLeg::new(
-        kept_sectors.iter().map(|&sector| (sector, kept_of(sector))),
-        false,
-    );
-    let homspace = source_space.homspace();
-    let new_hom = if axis < nout {
-        let mut codomain_legs = homspace.codomain().legs().to_vec();
-        codomain_legs[axis] = bond_leg;
-        FusionTreeHomSpace::new(
-            FusionProductSpace::new(codomain_legs),
-            homspace.domain().clone(),
-        )
-    } else {
-        let mut domain_legs = homspace.domain().legs().to_vec();
-        domain_legs[axis - nout] = bond_leg;
-        FusionTreeHomSpace::new(
-            homspace.codomain().clone(),
-            FusionProductSpace::new(domain_legs),
-        )
-    };
-
-    let keys = new_hom
-        .fusion_tree_keys_generic(rule)
-        .map_err(OperationError::from_core_preserving_context)?;
-    for key in keys.iter() {
-        // Why not build the truncated layout first: a missing full-factor tree
-        // remains a source error, while prepared Generic enumeration belongs
-        // to #257 rather than a second layout abstraction here.
-        let old_index = source_structure
-            .find_block_index_by_key(&BlockKey::FusionTree(key.clone()))
-            .ok_or(OperationError::UnsupportedTensorContractScope {
-                message: "truncated factor tree must exist in the full factor",
-            })?;
-        source_structure
-            .block(old_index)
-            .map_err(OperationError::from_core_preserving_context)?;
-    }
-
-    let space = BoundDynamicFusionMapSpace::from_final_homspace_generic(provider, new_hom)?;
-    let len = space
-        .space()
-        .required_len()
-        .map_err(OperationError::from_core_preserving_context)?;
-    let mut data = vec![D::zero(); len];
-
-    let sliced_structure = Arc::clone(space.space().structure());
-    for index in 0..sliced_structure.block_count() {
-        let new_block = sliced_structure
-            .block(index)
-            .map_err(OperationError::from_core_preserving_context)?;
-        let key = new_block.key().clone();
-        let old_index = source_structure.find_block_index_by_key(&key).ok_or(
-            OperationError::UnsupportedTensorContractScope {
-                message: "truncated factor tree must exist in the full factor",
-            },
-        )?;
-        let old_block = source_structure
-            .block(old_index)
-            .map_err(OperationError::from_core_preserving_context)?;
-        let shape = new_block.shape().to_vec();
-        let new_strides = new_block.strides().to_vec();
-        let new_offset = new_block.offset();
-        let old_strides = old_block.strides().to_vec();
-        let old_offset = old_block.offset();
-        copy_matching_block_prefix(
-            source_data,
-            &old_strides,
-            old_offset,
-            &mut data,
-            &new_strides,
-            new_offset,
-            &shape,
-        );
-    }
-    BoundDynFactor::from_bound(space, data, expected_nout, expected_nin)
-}
-
-fn sliced_bond_tensor_generic_checked<R, D>(
-    provider: Arc<R>,
-    source_space: &DynamicFusionMapSpace,
-    source_data: &[D],
-    axis: usize,
-    kept_of: &dyn Fn(SectorId) -> usize,
-    expected_nout: usize,
-    expected_nin: usize,
-) -> Result<BoundDynFactor<R, D>, CheckedGenericFactorPlanError<R::Error>>
-where
-    R: CheckedGenericFusion,
-    D: FactorScalar,
-{
-    let nout = source_space.nout();
-    let source_structure = Arc::clone(source_space.structure());
-    let homspace = source_space.homspace();
-    let leg = if axis < nout {
-        &homspace.codomain().legs()[axis]
-    } else {
-        &homspace.domain().legs()[axis - nout]
-    };
-    let bond_leg = SectorLeg::new(
-        leg.sectors()
-            .iter()
-            .copied()
-            .filter(|&sector| kept_of(sector) > 0)
-            .map(|sector| (sector, kept_of(sector))),
-        false,
-    );
-    let new_hom = if axis < nout {
-        let mut legs = homspace.codomain().legs().to_vec();
-        legs[axis] = bond_leg;
-        FusionTreeHomSpace::new(FusionProductSpace::new(legs), homspace.domain().clone())
-    } else {
-        let mut legs = homspace.domain().legs().to_vec();
-        legs[axis - nout] = bond_leg;
-        FusionTreeHomSpace::new(homspace.codomain().clone(), FusionProductSpace::new(legs))
-    };
-    let prepared = new_hom
-        .prepare_coupled_subblock_structure_from_leg_degeneracies_generic_checked(provider.as_ref())
-        .map_err(CheckedGenericFactorPlanError::from)?;
-    for key in staged_fusion_tree_keys(prepared.sector_structure()) {
-        let old = source_structure
-            .find_block_index_by_key(&BlockKey::FusionTree(key.clone()))
-            .ok_or(CheckedGenericFactorPlanError::Operation(
-                OperationError::UnsupportedTensorContractScope {
-                    message: "truncated factor tree must exist in the full factor",
-                },
-            ))?;
-        source_structure.block(old).map_err(|error| {
-            CheckedGenericFactorPlanError::Operation(OperationError::from_core_preserving_context(
-                error,
-            ))
-        })?;
-    }
-    let space = BoundDynamicFusionMapSpace::from_prepared_final_homspace_generic_checked(
-        provider, new_hom, prepared,
-    )
-    .map_err(CheckedGenericFactorPlanError::from)?;
-    let len = space.space().required_len().map_err(|error| {
-        CheckedGenericFactorPlanError::Operation(OperationError::from_core_preserving_context(
-            error,
-        ))
-    })?;
-    let mut data = vec![D::zero(); len];
-    let sliced_structure = Arc::clone(space.space().structure());
-    for index in 0..sliced_structure.block_count() {
-        let new_block = sliced_structure.block(index).map_err(|error| {
-            CheckedGenericFactorPlanError::Operation(OperationError::from_core_preserving_context(
-                error,
-            ))
-        })?;
-        let old_index = source_structure
-            .find_block_index_by_key(new_block.key())
-            .ok_or(CheckedGenericFactorPlanError::Operation(
-                OperationError::UnsupportedTensorContractScope {
-                    message: "truncated factor tree must exist in the full factor",
-                },
-            ))?;
-        let old_block = source_structure.block(old_index).map_err(|error| {
-            CheckedGenericFactorPlanError::Operation(OperationError::from_core_preserving_context(
-                error,
-            ))
-        })?;
-        copy_matching_block_prefix(
-            source_data,
-            old_block.strides(),
-            old_block.offset(),
-            &mut data,
-            new_block.strides(),
-            new_block.offset(),
-            new_block.shape(),
-        );
-    }
-    BoundDynFactor::from_bound(space, data, expected_nout, expected_nin)
-        .map_err(CheckedGenericFactorPlanError::from)
-}
-
-fn truncate_svd_factors_only_dyn_generic<R, D>(
-    u: BoundDynFactor<R, D>,
-    vh: BoundDynFactor<R, D>,
-    mut singular_values: Vec<SectorSpectrum>,
-    truncation: &Truncation,
-) -> Result<SvdTruncFactorsDyn<R, D>, OperationError>
-where
-    R: GenericRigidSymbols<Scalar = f64>,
-    D: FactorScalar,
-{
-    let rule = u.space().provider();
-    let decision = decide_bond_truncation_generic(rule, &singular_values, truncation, true)?;
-    if singular_values
-        .iter()
-        .zip(&decision.kept)
-        .all(|(entry, &count)| entry.values.len() == count)
-    {
-        return Ok((u, vh, singular_values, decision.error));
-    }
-
-    for (entry, &count) in singular_values.iter_mut().zip(&decision.kept) {
-        entry.values.truncate(count);
-    }
-    singular_values.retain(|entry| !entry.values.is_empty());
-    let kept_by_sector: FxHashMap<SectorId, usize> = singular_values
-        .iter()
-        .map(|entry| (entry.sector, entry.values.len()))
-        .collect();
-
-    let kept_of = |sector: SectorId| -> usize { kept_by_sector.get(&sector).copied().unwrap_or(0) };
-
-    let bond_axis = u.space().space().nout();
-    let provider = Arc::clone(u.space().provider_arc());
-    let u_factor = sliced_bond_tensor_generic(
-        Arc::clone(&provider),
-        u.space().space(),
-        u.data(),
-        bond_axis,
-        &kept_of,
-        u.space().space().nout(),
-        1,
-    )?;
-    let vh_factor = sliced_bond_tensor_generic(
-        provider,
-        vh.space().space(),
-        vh.data(),
-        0,
-        &kept_of,
-        1,
-        vh.space().space().nin(),
-    )?;
-    Ok((u_factor, vh_factor, singular_values, decision.error))
-}
-
-/// Generic sibling of [`svd_trunc_dyn`].
-pub fn svd_trunc_dyn_generic<E, R, D>(
-    dense: &mut E,
-    input: &BoundDynamicTensorRef<'_, R, D>,
-    truncation: &Truncation,
-) -> Result<SvdTruncDyn<R, D>, OperationError>
-where
-    E: DenseExecutor + ?Sized,
-    R: GenericRigidSymbols<Scalar = f64>,
-    D: FactorScalar,
-{
-    let (u, vh, singular_values, error) = svd_trunc_factors_dyn_generic(dense, input, truncation)?;
-    let s = diagonal_bond_svd_factor_generic(
-        Arc::clone(input.space().provider_arc()),
-        &singular_values,
-        &D::from_real,
-    )?;
-    Ok(SvdTruncDyn {
-        u,
-        s,
-        vh,
-        singular_values,
-        error,
-    })
-}
-
-/// Generic dynamic-rank truncated SVD without a materialized diagonal `S`.
-#[doc(hidden)]
-pub fn svd_trunc_factors_dyn_generic<E, R, D>(
-    dense: &mut E,
-    input: &BoundDynamicTensorRef<'_, R, D>,
-    truncation: &Truncation,
-) -> Result<SvdTruncFactorsDyn<R, D>, OperationError>
-where
-    E: DenseExecutor + ?Sized,
-    R: GenericRigidSymbols<Scalar = f64>,
-    D: FactorScalar,
-{
-    let (u, vh, singular_values) = svd_compact_factors_dyn_generic(dense, input)?;
-    truncate_svd_factors_only_dyn_generic(u, vh, singular_values, truncation)
-}
-
-#[doc(hidden)]
-pub fn svd_trunc_factors_dyn_checked_generic<E, R, D>(
-    dense: &mut E,
-    input: &BoundDynamicTensorRef<'_, R, D>,
-    truncation: &Truncation,
-) -> Result<SvdTruncFactorsDyn<R, D>, CheckedGenericFactorPlanError<R::Error>>
-where
-    E: DenseExecutor + ?Sized,
-    R: CheckedGenericRigidSymbols<Scalar = f64>,
-    D: FactorScalar,
-{
-    let (u, _s, vh, mut singular_values) =
-        svd_compact_with_spectrum_dyn_checked_generic(dense, input)?;
-    let rule = u.space().provider();
-    let decision = decide_bond_truncation_generic_checked(rule, &singular_values, truncation)?;
-    if singular_values
-        .iter()
-        .zip(&decision.kept)
-        .all(|(entry, &count)| entry.values.len() == count)
-    {
-        return Ok((u, vh, singular_values, decision.error));
-    }
-    for (entry, &count) in singular_values.iter_mut().zip(&decision.kept) {
-        entry.values.truncate(count);
-    }
-    singular_values.retain(|entry| !entry.values.is_empty());
-    let kept: FxHashMap<SectorId, usize> = singular_values
-        .iter()
-        .map(|entry| (entry.sector, entry.values.len()))
-        .collect();
-    let kept_of = |sector: SectorId| kept.get(&sector).copied().unwrap_or(0);
-    let bond_axis = u.space().space().nout();
-    let provider = Arc::clone(u.space().provider_arc());
-    let u_factor = sliced_bond_tensor_generic_checked(
-        Arc::clone(&provider),
-        u.space().space(),
-        u.data(),
-        bond_axis,
-        &kept_of,
-        u.space().space().nout(),
-        1,
-    )?;
-    let vh_factor = sliced_bond_tensor_generic_checked(
-        provider,
-        vh.space().space(),
-        vh.data(),
-        0,
-        &kept_of,
-        1,
-        vh.space().space().nin(),
-    )?;
-    Ok((u_factor, vh_factor, singular_values, decision.error))
 }
 
 /// Provider-bound compact QR for a generic rule.
@@ -12149,71 +10989,6 @@ where
     Ok(EighFullDyn { v, eigenvalues })
 }
 
-/// Checked-Generic truncated Hermitian eigendecomposition.
-#[doc(hidden)]
-pub fn eigh_trunc_dyn_checked_generic<E, R, D>(
-    dense: &mut E,
-    input: &BoundDynamicTensorRef<'_, R, D>,
-    truncation: &Truncation,
-) -> Result<EighTruncDyn<R, D>, CheckedGenericFactorPlanError<R::Error>>
-where
-    E: DenseExecutor + ?Sized,
-    R: CheckedGenericRigidSymbols<Scalar = f64>,
-    D: FactorScalar,
-{
-    let full = eigh_full_dyn_checked_generic(dense, input)?;
-    if matches!(truncation, Truncation::Full) {
-        return Ok(EighTruncDyn {
-            v: full.v,
-            eigenvalues: full.eigenvalues,
-            error: 0.0,
-        });
-    }
-    let decision = decide_bond_truncation_generic_checked(
-        full.v.space().provider(),
-        &full.eigenvalues,
-        truncation,
-    )?;
-    if full
-        .eigenvalues
-        .iter()
-        .zip(&decision.kept)
-        .all(|(entry, &count)| entry.values.len() == count)
-    {
-        return Ok(EighTruncDyn {
-            v: full.v,
-            eigenvalues: full.eigenvalues,
-            error: 0.0,
-        });
-    }
-    let mut eigenvalues = full.eigenvalues;
-    for (entry, &count) in eigenvalues.iter_mut().zip(&decision.kept) {
-        entry.values.truncate(count);
-    }
-    eigenvalues.retain(|entry| !entry.values.is_empty());
-    let kept = eigenvalues
-        .iter()
-        .map(|entry| (entry.sector, entry.values.len()))
-        .collect::<FxHashMap<_, _>>();
-    let kept_of = |sector| kept.get(&sector).copied().unwrap_or(0);
-    let bond_axis = full.v.space().space().nout();
-    let provider = Arc::clone(full.v.space().provider_arc());
-    let v = sliced_bond_tensor_generic_checked(
-        provider,
-        full.v.space().space(),
-        full.v.data(),
-        bond_axis,
-        &kept_of,
-        bond_axis,
-        1,
-    )?;
-    Ok(EighTruncDyn {
-        v,
-        eigenvalues,
-        error: decision.error,
-    })
-}
-
 fn eig_not_numerically_diagonalizable() -> OperationError {
     OperationError::InvalidArgument {
         message: "eig requires a numerically diagonalizable coupled-sector matrix",
@@ -12395,71 +11170,6 @@ where
         )
     })?;
     Ok(EigFullDyn { v, eigenvalues })
-}
-
-/// Checked-Generic general eigendecomposition with shared global truncation.
-#[doc(hidden)]
-pub fn eig_trunc_dyn_checked_generic<E, R, D>(
-    dense: &mut E,
-    input: &BoundDynamicTensorRef<'_, R, D>,
-    truncation: &Truncation,
-) -> Result<EigTruncDyn<R, D>, CheckedGenericFactorPlanError<R::Error>>
-where
-    E: DenseExecutor + ?Sized,
-    R: CheckedGenericRigidSymbols<Scalar = f64>,
-    D: FactorScalar,
-{
-    let full = eig_full_dyn_checked_generic(dense, input)?;
-    if matches!(truncation, Truncation::Full) {
-        return Ok(EigTruncDyn {
-            v: full.v,
-            eigenvalues: full.eigenvalues,
-            error: 0.0,
-        });
-    }
-    let decision = decide_bond_truncation_generic_checked(
-        full.v.space().provider(),
-        &full.eigenvalues,
-        truncation,
-    )?;
-    if full
-        .eigenvalues
-        .iter()
-        .zip(&decision.kept)
-        .all(|(entry, &count)| entry.values.len() == count)
-    {
-        return Ok(EigTruncDyn {
-            v: full.v,
-            eigenvalues: full.eigenvalues,
-            error: 0.0,
-        });
-    }
-    let mut eigenvalues = full.eigenvalues;
-    for (entry, &count) in eigenvalues.iter_mut().zip(&decision.kept) {
-        entry.values.truncate(count);
-    }
-    eigenvalues.retain(|entry| !entry.values.is_empty());
-    let kept = eigenvalues
-        .iter()
-        .map(|entry| (entry.sector, entry.values.len()))
-        .collect::<FxHashMap<_, _>>();
-    let kept_of = |sector| kept.get(&sector).copied().unwrap_or(0);
-    let bond_axis = full.v.space().space().nout();
-    let provider = Arc::clone(full.v.space().provider_arc());
-    let v = sliced_bond_tensor_generic_checked(
-        provider,
-        full.v.space().space(),
-        full.v.data(),
-        bond_axis,
-        &kept_of,
-        bond_axis,
-        1,
-    )?;
-    Ok(EigTruncDyn {
-        v,
-        eigenvalues,
-        error: decision.error,
-    })
 }
 
 /// Checked-Generic Hermitian eigenvalues only. No eigenvector or factor-space
@@ -16744,75 +15454,6 @@ mod sector_matricization_tests {
                 (probe.canonical_publications, probe.fallback_publications),
                 (0, 0)
             );
-        }
-    }
-
-    #[test]
-    #[allow(clippy::arc_with_non_send_sync)] // The checked API needs Arc identity; the recorder is a single-threaded RefCell log.
-    fn checked_sliced_enumerates_the_bond_layout_once() {
-        // What: one sliced-bond build issues exactly the provider queries of
-        // one enumeration of the sliced HomSpace (formerly twice: keys, then
-        // the bound space), on a codomain and a domain axis, and equals the
-        // two-enumeration construction in structure and the unchecked sliced
-        // builder in data.
-        let x = SectorId::new(1);
-        let (homspace, ..) = vertex_tree_factor_fixture(false);
-        let source = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
-            Arc::new(InfallibleGeneric::new(&TestGenericRule)),
-            homspace.clone(),
-        )
-        .unwrap();
-        let data = (0..source.space().required_len().unwrap())
-            .map(|k| Complex64::new(k as f64, -0.5 * k as f64))
-            .collect::<Vec<_>>();
-        let nout = source.space().nout();
-        for (axis, kept) in [(0usize, 1usize), (3, 2)] {
-            let kept_of = move |sector: SectorId| usize::from(sector == x) * kept;
-            let recorder = Arc::new(RecordingGeneric::new());
-            let factor = sliced_bond_tensor_generic_checked(
-                Arc::clone(&recorder),
-                source.space(),
-                &data,
-                axis,
-                &kept_of,
-                nout,
-                2,
-            )
-            .unwrap();
-            let once = recorder.log();
-
-            let mut legs = if axis < nout {
-                homspace.codomain().legs().to_vec()
-            } else {
-                homspace.domain().legs().to_vec()
-            };
-            legs[axis % nout] = SectorLeg::new([(x, kept)], false);
-            let sliced_hom = if axis < nout {
-                FusionTreeHomSpace::new(FusionProductSpace::new(legs), homspace.domain().clone())
-            } else {
-                FusionTreeHomSpace::new(homspace.codomain().clone(), FusionProductSpace::new(legs))
-            };
-            let former = Arc::new(RecordingGeneric::new());
-            let (keys, expected) = two_enumeration_space(&former, sliced_hom);
-            let twice = former.log();
-            // Both sides of the sliced HomSpace keep two legs: channels plus
-            // the vertex multiplicity per side, and one fold per side.
-            assert_eq!(once.len(), 6, "{once:?}");
-            assert_eq!(twice, [once.clone(), once].concat());
-            assert_factor_matches_space(&factor, &keys, &expected, &recorder);
-
-            let plain = sliced_bond_tensor_generic(
-                Arc::new(TestGenericRule),
-                source.space(),
-                &data,
-                axis,
-                &kept_of,
-                nout,
-                2,
-            )
-            .unwrap();
-            assert_eq!(factor.data(), plain.data());
-            assert!(factor.data().len() < data.len());
         }
     }
 }

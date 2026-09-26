@@ -106,7 +106,11 @@ twice are summed; labels that remain once become output legs.
 
 ## 7. Truncate the new bond
 
-`theta.svd_trunc(&trunc)` returns $U$, $S$, $V^\dagger$, and `svd.error`.
+A truncated SVD is four primitive steps: `theta.svd_compact()` returns $U$,
+$S$, $V^\dagger$; `diagview` reads the singular values off $S$;
+`find_truncated` on the bond leg decides which to keep and reports the
+discarded weight as `error`; and `restrict_leg` / `restrict_diagonal` cut
+$U$, $S$ and $V^\dagger$ to that selection.
 [`run`](../tenet-network/examples/itebd_heisenberg.rs) combines a bond budget
 `Truncation::rank(chi)` with `Truncation::relative_cutoff(rtol)`. The latter
 keeps singular values satisfying
@@ -116,7 +120,7 @@ $\lVert\sigma\rVert_{2,w}^2=\sum_{q,i}d_q\sigma_{q,i}^2$. `chi` bounds the kept
 $\sum_q d_q n_q$. For U(1), every quantum dimension is $d_q=1$, so this is the
 ordinary sum of the kept sector degeneracies.
 
-`svd.error` is the absolute quantum-dimension-weighted 2-norm of the discarded
+That `error` is the absolute quantum-dimension-weighted 2-norm of the discarded
 singular values for this one local `theta`. It is not a relative energy error.
 The printed `max trunc err` is the largest such local error among the A-B and
 B-A updates in one schedule stage; it is not an accumulated error and does not
@@ -152,7 +156,7 @@ steps reduce imaginary-time discretization error.
 
 Three diagnostics answer different questions:
 
-- `svd.error` measures the discarded quantum-dimension-weighted 2-norm in one
+- The truncation `error` measures the discarded quantum-dimension-weighted 2-norm in one
   local SVD.
 - An energy plateau, or the change in energy between decreasing-$dt$ stages,
   measures whether this finite schedule has stabilized.

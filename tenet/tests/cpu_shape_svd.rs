@@ -5,7 +5,7 @@ use tenet::prelude::{Runtime, Truncation};
 use tenet::typed::{GradedSpace, TensorMap};
 
 #[test]
-fn svd_trunc_runtime_reuse_tracks_data_dependent_rank() {
+fn truncated_svd_runtime_reuse_tracks_data_dependent_rank() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let space =
         GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), 3)]).unwrap();
@@ -26,26 +26,27 @@ fn svd_trunc_runtime_reuse_tracks_data_dependent_rank() {
                 }
             })
             .unwrap();
-        let result = source.svd_trunc(&policy).unwrap();
+        let (u, s, vh) = source.svd_compact().unwrap();
+        let found = s.domain()[0]
+            .find_truncated(&s.diagview().unwrap(), &policy)
+            .unwrap();
+        let u = u.restrict_leg(u.codomain_rank(), &found.selection).unwrap();
+        let s = s.restrict_diagonal(&found.selection).unwrap();
+        let vh = vh.restrict_leg(0, &found.selection).unwrap();
 
         assert_eq!(
-            result
-                .singular_values
+            s.diagview()
+                .unwrap()
                 .iter()
                 .map(|entry| entry.values.len())
                 .sum::<usize>(),
             kept
         );
-        assert_eq!(result.u.domain()[0].degeneracies(), &[kept]);
-        assert!(result.u.is_isometric(1.0e-12).unwrap());
-        assert!(result.vh.adjoint().unwrap().is_isometric(1.0e-12).unwrap());
+        assert_eq!(u.domain()[0].degeneracies(), &[kept]);
+        assert!(u.is_isometric(1.0e-12).unwrap());
+        assert!(vh.adjoint().unwrap().is_isometric(1.0e-12).unwrap());
 
-        let reconstructed = result
-            .u
-            .compose(&result.s)
-            .unwrap()
-            .compose(&result.vh)
-            .unwrap();
+        let reconstructed = u.compose(&s).unwrap().compose(&vh).unwrap();
         let residual = source
             .add(&reconstructed, 1.0, -1.0)
             .unwrap()
@@ -58,7 +59,7 @@ fn svd_trunc_runtime_reuse_tracks_data_dependent_rank() {
             .map(|value| value * value)
             .sum::<f64>()
             .sqrt();
-        assert!((result.error - discarded).abs() <= 1.0e-12);
+        assert!((found.error - discarded).abs() <= 1.0e-12);
         assert!((residual - discarded).abs() <= 1.0e-12);
     }
 }

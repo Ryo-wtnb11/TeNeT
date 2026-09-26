@@ -238,7 +238,15 @@ macro_rules! measure_factorizations {
                 TensorMap::rand_with_seed($runtime, [space, space], [space], 7_502).unwrap();
             let (q, r) = tensor.qr_compact().unwrap();
             let (u, s, vh) = tensor.svd_compact().unwrap();
-            let truncated = tensor.svd_trunc(&Truncation::rank(4)).unwrap();
+            // The truncated SVD is a composition (#1534).
+            let found = s.domain()[0]
+                .find_truncated(&s.diagview().unwrap(), &Truncation::rank(4))
+                .unwrap();
+            let truncated = (
+                u.restrict_leg(u.codomain_rank(), &found.selection).unwrap(),
+                s.restrict_diagonal(&found.selection).unwrap(),
+                vh.restrict_leg(0, &found.selection).unwrap(),
+            );
             (tensor, q, r, u, s, vh, truncated)
         };
         // Warm: every one-time backend workspace growth is paid here.
@@ -253,10 +261,10 @@ macro_rules! measure_factorizations {
             + u.data().len()
             + s.data().len()
             + vh.data().len()
-            + truncated.u.data().len()
-            + truncated.s.data().len()
-            + truncated.vh.data().len();
-        let spectrum_sectors = s.diagview().unwrap().len() + truncated.s.diagview().unwrap().len();
+            + truncated.0.data().len()
+            + truncated.1.data().len()
+            + truncated.2.data().len();
+        let spectrum_sectors = s.diagview().unwrap().len() + truncated.1.diagview().unwrap().len();
         black_box((tensor, q, r, u, s, vh, truncated));
 
         let (_, calls, bytes) = measured(|| black_box(sequence()));

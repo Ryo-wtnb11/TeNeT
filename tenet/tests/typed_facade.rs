@@ -2705,10 +2705,6 @@ mod typed_glob_is_self_sufficient {
 
     #[test]
     fn a_glob_import_runs_an_end_to_end_typed_operation() {
-        let _: Option<SvdTrunc<ExternalZ3, f64>> = None;
-        let _: Option<EigTrunc<ExternalZ3, f64>> = None;
-        let _: Option<EighTrunc<ExternalZ3, f64>> = None;
-
         let _guard = super::cache_lock();
         let runtime: Runtime = Runtime::builder().build().expect("runtime builds");
         let provider = Arc::new(ExternalZ3::new());
@@ -2921,25 +2917,59 @@ fn svd_full_reconstructs_with_unitary_outer_factors() {
     }
 }
 
+/// The truncated SVD, composed: `svd_compact` -> `diagview` ->
+/// `find_truncated` -> `restrict_leg` / `restrict_diagonal`.
+/// Evaluates to `(u, s, vh, error)`.
+macro_rules! truncated_svd {
+    ($tensor:expr, $truncation:expr) => {{
+        let (u, s, vh) = $tensor.svd_compact().unwrap();
+        let found = s.domain()[0]
+            .find_truncated(&s.diagview().unwrap(), &$truncation)
+            .unwrap();
+        (
+            u.restrict_leg(u.codomain_rank(), &found.selection).unwrap(),
+            s.restrict_diagonal(&found.selection).unwrap(),
+            vh.restrict_leg(0, &found.selection).unwrap(),
+            found.error,
+        )
+    }};
+}
+
+/// The truncated eigendecomposition `(d, v)` of `eigh_full` / `eig_full`
+/// output, composed the same way. Evaluates to `(d, v, error)`.
+macro_rules! truncated_eigen {
+    ($full:expr, $truncation:expr) => {{
+        let (d, v) = $full.unwrap();
+        let found = d.domain()[0]
+            .find_truncated(&d.diagview().unwrap(), &$truncation)
+            .unwrap();
+        (
+            d.restrict_diagonal(&found.selection).unwrap(),
+            v.restrict_leg(v.codomain_rank(), &found.selection).unwrap(),
+            found.error,
+        )
+    }};
+}
+
 #[test]
-fn svd_trunc_reconstructs_and_reports_the_discarded_weight() {
+fn truncated_svd_reconstructs_and_reports_the_discarded_weight() {
     let _guard = cache_lock();
     let runtime = runtime();
     let typed = z2_tensor(&runtime);
 
     let truncation = tenet::typed::Truncation::rank(2);
-    let typed_out = typed.svd_trunc(&truncation).unwrap();
+    let (u, s, vh, error) = truncated_svd!(typed, truncation);
 
-    assert_same_legs(&typed_out.u.codomain(), &typed.codomain());
-    assert_same_legs(&typed_out.vh.domain(), &typed.domain());
-    assert_same_legs(&typed_out.u.domain(), &typed_out.s.codomain());
-    assert_same_legs(&typed_out.s.domain(), &typed_out.vh.codomain());
+    assert_same_legs(&u.codomain(), &typed.codomain());
+    assert_same_legs(&vh.domain(), &typed.domain());
+    assert_same_legs(&u.domain(), &s.codomain());
+    assert_same_legs(&s.domain(), &vh.codomain());
 
     // The reported error is the 2-norm of everything the truncation dropped.
     // Z2 is a group, so every quantum dimension is one and the weighting is
     // the identity — the check is then a plain sum of squares.
     let full = typed.svd_vals().unwrap();
-    let kept = typed_z2_spectrum(&typed_out.singular_values);
+    let kept = typed_z2_spectrum(&s.diagview().unwrap());
     let mut discarded = 0.0;
     for entry in &full {
         let kept_here = kept
@@ -2951,9 +2981,9 @@ fn svd_trunc_reconstructs_and_reports_the_discarded_weight() {
         }
     }
     assert!(discarded > 0.0, "the fixture must actually truncate");
-    assert!((typed_out.error - discarded.sqrt()).abs() < 1e-12);
+    assert!((error - discarded.sqrt()).abs() < 1e-12);
 
-    let recon = recompose(&typed_out.u, &typed_out.s, &typed_out.vh);
+    let recon = recompose(&u, &s, &vh);
     let reconstruction_error = recon
         .data()
         .iter()
@@ -2961,16 +2991,15 @@ fn svd_trunc_reconstructs_and_reports_the_discarded_weight() {
         .map(|(got, want)| (got - want) * (got - want))
         .sum::<f64>()
         .sqrt();
-    assert!((typed_out.error - reconstruction_error).abs() < 1e-12);
+    assert!((error - reconstruction_error).abs() < 1e-12);
 
     // A degenerate but well-formed policy is a policy, not an error: keeping
     // nothing succeeds and discards the whole spectrum.
-    let empty = typed
-        .svd_trunc(&tenet::typed::Truncation::Rank(0))
-        .expect("Rank(0) is degenerate, not malformed");
-    assert!(empty.s.data().is_empty());
-    assert!(empty
-        .singular_values
+    let (_, empty_s, _, _) = truncated_svd!(typed, tenet::typed::Truncation::Rank(0));
+    assert!(empty_s.data().is_empty());
+    assert!(empty_s
+        .diagview()
+        .unwrap()
         .iter()
         .all(|entry| entry.values.is_empty()));
 }
@@ -3004,9 +3033,7 @@ fn a_spectrum_decode_failure_comes_back_as_the_codec_error() {
         tenet::prelude::Error::FusionAlgebra(_)
     ));
     assert!(matches!(
-        tensor
-            .svd_trunc(&tenet::typed::Truncation::Full)
-            .unwrap_err(),
+        tensor.svd_compact().unwrap().1.diagview().unwrap_err(),
         tenet::prelude::Error::FusionAlgebra(_)
     ));
 }
@@ -3120,27 +3147,6 @@ fn qr_and_lq_reconstruct_with_the_expected_isometries_and_spaces() {
 }
 
 #[test]
-fn left_and_right_orth_are_the_tensorkit_default_kinds() {
-    // TensorKit 0.17 defaults `left_orth` to `:qr` and `right_orth` to `:lq`.
-    let _guard = cache_lock();
-    let runtime = runtime();
-    let typed = z2_tensor(&runtime);
-
-    // The two routes are the same factorization, so agreeing is the contract;
-    // every source entry of a block can reach every factor entry of it.
-    let terms = typed.data().len();
-    let (v, c) = typed.left_orth().unwrap();
-    let (q, r) = typed.qr_compact().unwrap();
-    numerics::assert_slices_close("left_orth v against qr q", v.data(), q.data(), terms);
-    numerics::assert_slices_close("left_orth c against qr r", c.data(), r.data(), terms);
-
-    let (c, vh) = typed.right_orth().unwrap();
-    let (l, q) = typed.lq_compact().unwrap();
-    numerics::assert_slices_close("right_orth c against lq l", c.data(), l.data(), terms);
-    numerics::assert_slices_close("right_orth vh against lq q", vh.data(), q.data(), terms);
-}
-
-#[test]
 fn left_and_right_null_spaces_annihilate_the_source() {
     let _guard = cache_lock();
     let runtime = runtime();
@@ -3223,10 +3229,11 @@ fn decompositions_carry_an_external_provider_with_its_own_labels() {
     assert!(spectrum.iter().all(|entry| entry.sector.0 < 3));
     assert!(spectrum.windows(2).all(|w| w[0].sector < w[1].sector));
 
-    let out = tensor.svd_trunc(&tenet::typed::Truncation::Full).unwrap();
-    assert_eq!(out.error, 0.0);
+    let (_, s, _, error) = truncated_svd!(tensor, tenet::typed::Truncation::Full);
+    assert_eq!(error, 0.0);
     assert_eq!(
-        out.singular_values
+        s.diagview()
+            .unwrap()
             .iter()
             .map(|entry| entry.sector)
             .collect::<Vec<_>>(),
@@ -3380,7 +3387,7 @@ fn su2_tensor(runtime: &Runtime) -> TensorMap<tenet::core::SU2FusionRule, f64> {
 }
 
 #[test]
-fn normalize_divides_by_the_dimension_weighted_norm() {
+fn scaling_by_the_inverse_norm_divides_by_the_dimension_weighted_norm() {
     let _guard = cache_lock();
     let runtime = runtime();
 
@@ -3389,7 +3396,7 @@ fn normalize_divides_by_the_dimension_weighted_norm() {
     // can see it.
     let typed = su2_tensor(&runtime);
     let norm = typed.norm().unwrap();
-    let unit = typed.normalize().unwrap();
+    let unit = typed.scale(1.0 / norm);
     for (&actual, &source) in unit.data().iter().zip(typed.data()) {
         assert!((actual - source / norm).abs() <= 1e-12 * source.abs().max(1.0));
     }
@@ -3454,18 +3461,6 @@ fn inner_conjugates_its_first_argument() {
     assert_eq!(value, other.inner(&typed).unwrap().conj());
     assert_ne!(value, other.inner(&typed).unwrap());
     assert!(value.im.abs() > 1e-6, "the fixture must have a real phase");
-}
-
-#[test]
-#[allow(deprecated)]
-fn dot_is_inner() {
-    // `dot` is an alias for `inner`; the two names must not drift apart.
-    let _guard = cache_lock();
-    let runtime = runtime();
-    let typed = z2_complex_tensor(&runtime);
-    let other = typed.permute(&[1, 0], &[2]).unwrap();
-
-    assert_eq!(typed.dot(&other).unwrap(), typed.inner(&other).unwrap());
 }
 
 #[test]
@@ -4242,7 +4237,7 @@ fn eigh_vals_follow_the_provider_label_order() {
 }
 
 #[test]
-fn eigh_trunc_reports_the_discarded_eigenvalue_norm() {
+fn truncated_eigh_reports_the_discarded_eigenvalue_norm() {
     let _guard = cache_lock();
     let runtime = runtime();
     let typed = z2_hermitian(&runtime);
@@ -4261,11 +4256,11 @@ fn eigh_trunc_reports_the_discarded_eigenvalue_norm() {
         .map(|value| value * value)
         .sum::<f64>()
         .sqrt();
-    let typed_out = typed.eigh_trunc(&truncation).unwrap();
+    let (d, _, error) = truncated_eigen!(typed.eigh_full(), truncation);
 
     assert_eq!(
-        typed_out
-            .eigenvalues
+        d.diagview()
+            .unwrap()
             .iter()
             .map(|entry| entry.values.len())
             .sum::<usize>(),
@@ -4275,8 +4270,8 @@ fn eigh_trunc_reports_the_discarded_eigenvalue_norm() {
         expected_error > 0.0,
         "the fixture must discard nonzero values"
     );
-    assert!((typed_out.error - expected_error).abs() < 1e-12 * expected_error.max(1.0));
-    assert!(typed_out.d.data().len() < typed.eigh_full().unwrap().0.data().len());
+    assert!((error - expected_error).abs() < 1e-12 * expected_error.max(1.0));
+    assert!(d.data().len() < typed.eigh_full().unwrap().0.data().len());
 }
 
 #[test]
@@ -4287,7 +4282,6 @@ fn eigh_reports_a_non_hermitian_input_rather_than_a_wrong_answer() {
 
     assert!(typed.eigh_full().is_err());
     assert!(typed.eigh_vals().is_err());
-    assert!(typed.eigh_trunc(&Truncation::Full).is_err());
 }
 
 // ---------------------------------------------------------------------------
@@ -4377,11 +4371,11 @@ fn eig_vals_are_label_ordered_and_trunc_reports_the_discarded_norm() {
         .map(|value| value * value)
         .sum::<f64>()
         .sqrt();
-    let typed_out = typed.eig_trunc(&truncation).unwrap();
+    let (d, _, error) = truncated_eigen!(typed.eig_full(), truncation);
 
     assert_eq!(
-        typed_out
-            .eigenvalues
+        d.diagview()
+            .unwrap()
             .iter()
             .map(|entry| entry.values.len())
             .sum::<usize>(),
@@ -4391,7 +4385,7 @@ fn eig_vals_are_label_ordered_and_trunc_reports_the_discarded_norm() {
         expected_error > 0.0,
         "the fixture must discard nonzero values"
     );
-    assert!((typed_out.error - expected_error).abs() < 1e-12 * expected_error.max(1.0));
+    assert!((error - expected_error).abs() < 1e-12 * expected_error.max(1.0));
 }
 
 // ---------------------------------------------------------------------------
@@ -4574,10 +4568,10 @@ fn inv_of_a_compact_spectrum_is_the_elementwise_reciprocal() {
     let runtime = runtime();
     let typed = z2_endomorphism(&runtime);
 
-    let typed_s = typed.svd_trunc(&Truncation::Full).unwrap().s;
+    let typed_s = typed.svd_compact().unwrap().1;
     // The fixture is rank deficient, so the full spectrum contains zeros that
     // `inv` must refuse; keep only the nonzero part.
-    let typed_s = typed_s.svd_trunc(&Truncation::Rank(2)).unwrap().s;
+    let (_, typed_s, _, _) = truncated_svd!(typed_s, Truncation::Rank(2));
 
     let inverse = typed_s.inv().unwrap();
     let source_spectrum = typed_s.diagonal_spectrum().unwrap().unwrap();
@@ -4615,7 +4609,7 @@ fn inv_reports_a_singular_input_as_a_typed_error() {
     // Compact: a spectrum scaled to exactly zero. Why not the tail of a
     // rank-deficient SVD: those singular values come back tiny but nonzero, and
     // the arm under test compares against exact zero, not a tolerance.
-    let spectrum = typed.svd_trunc(&Truncation::Full).unwrap().s.scale(0.0);
+    let spectrum = typed.svd_compact().unwrap().1.scale(0.0);
     match spectrum.inv() {
         Err(tenet::typed::Error::InvalidArgument(message)) => {
             assert!(
@@ -4745,7 +4739,7 @@ fn pinv_of_a_compact_spectrum_is_the_elementwise_cutoff_reciprocal() {
     let _guard = cache_lock();
     let runtime = runtime();
     let typed = z2_endomorphism(&runtime);
-    let typed_s = typed.svd_trunc(&Truncation::Full).unwrap().s;
+    let typed_s = typed.svd_compact().unwrap().1;
     let source = typed_s.diagonal_spectrum().unwrap().unwrap();
     let sigma_max = source
         .iter()
@@ -4833,7 +4827,7 @@ fn pinv_cuts_a_singular_value_sitting_exactly_on_the_cutoff() {
     assert_ne!(triple.data(), tensor.data());
 
     // And on the compact arm.
-    let spectrum = tensor.svd_trunc(&Truncation::Full).unwrap().s;
+    let spectrum = tensor.svd_compact().unwrap().1;
     let compact_pinv = spectrum.pinv(0.25).unwrap();
     let mut kept: Vec<f64> = compact_pinv
         .data()
@@ -4857,7 +4851,7 @@ fn pinv_rejects_a_nonfinite_or_negative_rcond_before_any_work() {
     let _guard = cache_lock();
     let runtime = runtime();
     let typed = z2_endomorphism(&runtime);
-    let spectrum = typed.svd_trunc(&Truncation::Full).unwrap().s;
+    let spectrum = typed.svd_compact().unwrap().1;
 
     for rcond in [-1.0, f64::NAN, f64::INFINITY] {
         assert!(
@@ -4927,7 +4921,7 @@ fn pinv_uses_one_global_sigma_max_across_every_sector() {
         "a per-sector cutoff kept the small sector"
     );
     // The compact arm's own `max|entry|` is global for the same reason.
-    let spectrum = tensor.svd_trunc(&Truncation::Full).unwrap().s;
+    let spectrum = tensor.svd_compact().unwrap().1;
     let kept = spectrum
         .pinv(0.5)
         .unwrap()
@@ -4999,7 +4993,7 @@ fn exp_of_a_compact_spectrum_stays_compact_and_is_elementwise() {
     // Scaled down: the fixture's largest singular value is in the thousands and
     // `exp` of it overflows to infinity, which no comparison can separate from
     // a wrong infinity.
-    let typed_s = typed.svd_trunc(&Truncation::Full).unwrap().s.scale(1e-3);
+    let typed_s = typed.svd_compact().unwrap().1.scale(1e-3);
 
     let typed_exp = typed_s.exp().unwrap();
     // Every stored value is `exp` of the source's: the elementwise claim, read
@@ -5109,7 +5103,7 @@ fn sqrt_squares_to_the_source_on_both_storages() {
     let _guard = cache_lock();
     let runtime = runtime();
     let typed = z2_endomorphism(&runtime);
-    let typed_s = typed.svd_trunc(&Truncation::Full).unwrap().s;
+    let typed_s = typed.svd_compact().unwrap().1;
 
     // √S · √S = S.
     let root = typed_s.sqrt().unwrap();
@@ -5180,7 +5174,7 @@ fn sqrt_of_a_negative_f64_entry_points_at_the_complex_payload() {
     let _guard = cache_lock();
     let runtime = runtime();
     let typed = z2_endomorphism(&runtime);
-    let typed_s = typed.svd_trunc(&Truncation::Full).unwrap().s.scale(-1.0);
+    let typed_s = typed.svd_compact().unwrap().1.scale(-1.0);
 
     for (name, result) in [
         ("compact", typed_s.sqrt()),
@@ -5276,7 +5270,7 @@ fn c64_compact_inv_and_pinv_are_elementwise_reciprocals() {
         complex(((state >> 33) as f64) / (u32::MAX as f64) + 0.5)
     };
     let typed = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| next()).unwrap();
-    let typed_s = typed.svd_trunc(&Truncation::Full).unwrap().s;
+    let typed_s = typed.svd_compact().unwrap().1;
     let source = typed_s.diagonal_spectrum().unwrap().unwrap();
     let sigma_max = source
         .iter()
@@ -6833,34 +6827,11 @@ fn assert_reductions_and_factorizations_hold<R>(
     assert_nonzero(what, typed_q.data());
     assert_nonzero(what, typed_r.data());
 
-    // TensorKit's default left orthogonalization is QR.
-    let (typed_v, typed_c) = typed.0.left_orth().unwrap();
-    // The same factorization by two names; every source entry of a block can
-    // reach every factor entry of it.
-    let terms = typed.0.data().len();
-    numerics::assert_slices_close(
-        &format!("{what}: left_orth v is qr q"),
-        typed_v.data(),
-        typed_q.data(),
-        terms,
-    );
-    numerics::assert_slices_close(
-        &format!("{what}: left_orth c is qr r"),
-        typed_c.data(),
-        typed_r.data(),
-        terms,
-    );
-    assert_data_close_f64(typed_v.compose(&typed_c).unwrap().data(), typed.0.data());
-    assert!(typed_v.is_isometric(1e-12).unwrap(), "{what}: left orth v");
-    assert_same_legs(&typed_v.codomain(), &typed.0.codomain());
-    assert_same_legs(&typed_c.domain(), &typed.0.domain());
-    assert_same_legs(&typed_v.domain(), &typed_c.codomain());
-
-    let (typed_c, typed_vh) = typed.0.right_orth().unwrap();
+    let (typed_c, typed_vh) = typed.0.lq_compact().unwrap();
     assert_data_close_f64(typed_c.compose(&typed_vh).unwrap().data(), typed.0.data());
     assert!(
         typed_vh.adjoint().unwrap().is_isometric(1e-12).unwrap(),
-        "{what}: right orth vh"
+        "{what}: lq q"
     );
     assert_same_legs(&typed_c.codomain(), &typed.0.codomain());
     assert_same_legs(&typed_vh.domain(), &typed.0.domain());

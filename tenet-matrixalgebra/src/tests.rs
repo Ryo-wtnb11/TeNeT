@@ -15,7 +15,7 @@ use tenet_tensors::{
 };
 
 use crate::factorize::{
-    dyn_space_of, map_square_sectors_dyn_into, pinv_cutoff, truncate_svd, typed_from_bound_factor,
+    dyn_space_of, map_square_sectors_dyn_into, pinv_cutoff, typed_from_bound_factor,
     typed_from_dyn, validate_eigenvector_singular_values, validate_inverse_region_routes_for_test,
     BoundTensorMap,
 };
@@ -1224,10 +1224,9 @@ where
     .unwrap();
 
     let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
-    let svd = svd_trunc(
+    let svd = svd_compact(
         &mut dense_executor,
         &bound_tensor_ref!(Arc::new(rule.clone()), &tensor),
-        &Truncation::Full,
     )
     .unwrap();
     assert_factor_layout_matches_legacy_shapes(svd.u.space());
@@ -1709,6 +1708,22 @@ fn flattened_block_value<D: FactorScalar>(
     (offset, data[offset])
 }
 
+/// The diagonal `S` of a generic compact SVD, built from its spectrum on
+/// `u`'s provider.
+fn generic_diagonal_factor<R, D>(
+    u: &BoundDynFactor<R, D>,
+    spectrum: &[SectorSpectrum],
+) -> BoundDynFactor<R, D>
+where
+    R: FusionRule,
+    D: FactorScalar,
+{
+    let space =
+        diagonal_bond_bound_space_generic(Arc::clone(u.space().provider_arc()), spectrum).unwrap();
+    let data = diagonal_bond_data(space.space(), spectrum, &D::from_real).unwrap();
+    BoundDynFactor::from_bound(space, data, 1, 1).unwrap()
+}
+
 fn assert_compact_factors_reconstruct_input<R, D>(
     input: &BoundDynamicTensorRef<'_, R, D>,
     left: &BoundDynFactor<R, D>,
@@ -2033,27 +2048,28 @@ fn generic_compact_svd_interleaved_complex_fallback_preserves_source_order() {
         BoundDynamicTensorRef::try_new(&interleaved_space, &interleaved_data).unwrap();
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
 
-    let canonical_svd = svd_trunc_dyn_generic(&mut dense, &canonical, &Truncation::Full).unwrap();
+    let canonical_svd = svd_compact_factors_dyn_generic(&mut dense, &canonical).unwrap();
     crate::factorize::reset_compact_svd_copy_probe();
-    let fallback_svd = svd_trunc_dyn_generic(&mut dense, &interleaved, &Truncation::Full).unwrap();
+    let fallback_svd = svd_compact_factors_dyn_generic(&mut dense, &interleaved).unwrap();
 
+    let fallback_s = generic_diagonal_factor(&fallback_svd.0, &fallback_svd.2);
     assert_compact_factors_reconstruct_input(
         &interleaved,
-        fallback_svd.u(),
-        Some(fallback_svd.s()),
-        fallback_svd.vh(),
+        &fallback_svd.0,
+        Some(&fallback_s),
+        &fallback_svd.1,
     );
     assert_eq!(
         fallback_svd
-            .singular_values()
+            .2
             .iter()
             .map(|entry| entry.sector)
             .collect::<Vec<_>>(),
         [SectorId::new(1), SectorId::new(0)]
     );
-    for actual in fallback_svd.singular_values() {
+    for actual in &fallback_svd.2 {
         let expected = canonical_svd
-            .singular_values()
+            .2
             .iter()
             .find(|entry| entry.sector == actual.sector)
             .unwrap();
@@ -2068,74 +2084,6 @@ fn generic_compact_svd_interleaved_complex_fallback_preserves_source_order() {
 }
 
 #[test]
-fn generic_svd_trunc_on_the_interleaved_layout_breaks_exact_ties_like_the_canonical_one() {
-    // What: the interleaved expert layout feeds the decision sectors [1, 0].
-    // Every singular value is exactly 2 (sector 0: [2]; sector 1: 2 * I with
-    // weight 1 + sqrt 2), so every cut below is decided by the tie rule, and
-    // the producer's kept counts must reach the factors in its own order.
-    // Hand-computed, ascending default (id) order: rank(1) keeps sector 0 only; rank(4)
-    // keeps one of each; the unsorted [1, 0] feed would keep [0, 0] and
-    // [0, 1] (sector 1 first, weight 2.414).
-    let (canonical_space, template, _) = generic_values_endomorphism_input();
-    let mut canonical_data = vec![Complex64::zero(); template.len()];
-    for region in canonical_space
-        .space()
-        .structure()
-        .coupled_sector_regions(2)
-        .unwrap()
-        .unwrap()
-        .iter()
-    {
-        let two = Complex64::new(2.0, 0.0);
-        let values: &[Complex64] = match region.coupled().id() {
-            0 => &[two],
-            _ => &[two, Complex64::zero(), Complex64::zero(), two],
-        };
-        canonical_data[region.range()].copy_from_slice(values);
-    }
-    let (interleaved_space, interleaved_data) =
-        interleaved_generic_endomorphism_input(&canonical_space, &canonical_data);
-    let canonical = BoundDynamicTensorRef::try_new(&canonical_space, &canonical_data).unwrap();
-    let interleaved =
-        BoundDynamicTensorRef::try_new(&interleaved_space, &interleaved_data).unwrap();
-    let mut dense = tenet_dense::DefaultDenseExecutor::new();
-
-    let full = svd_trunc_dyn_generic(&mut dense, &canonical, &Truncation::Full).unwrap();
-    // Fixture precondition, kept exact: the tie rule is only exercised when
-    // the spectrum is exactly tied.
-    assert!(full
-        .singular_values()
-        .iter()
-        .flat_map(|entry| &entry.values)
-        .all(|value| value.to_bits() == 2.0f64.to_bits()));
-    let kept = |svd: &SvdTruncDyn<FactorGenericRule, Complex64>, sector: usize| {
-        svd.singular_values()
-            .iter()
-            .find(|entry| entry.sector == SectorId::new(sector))
-            .map_or(0, |entry| entry.values.len())
-    };
-    for (policy, expected) in [
-        (Truncation::rank(1), [1, 0]),
-        (Truncation::rank(4), [1, 1]),
-        (Truncation::rank(6), [1, 2]),
-    ] {
-        let reference = svd_trunc_dyn_generic(&mut dense, &canonical, &policy).unwrap();
-        let fallback = svd_trunc_dyn_generic(&mut dense, &interleaved, &policy).unwrap();
-        for svd in [&reference, &fallback] {
-            assert_eq!([kept(svd, 0), kept(svd, 1)], expected, "{policy:?}");
-        }
-        // The layouts feed the sectors in different orders, so the discarded
-        // weight is summed in a different order: path agreement under the rule.
-        numerics::assert_close("truncation error", fallback.error(), reference.error(), 3);
-        // The factors carry the same kept bond: one nonzero S entry per state.
-        for svd in [&reference, &fallback] {
-            let nonzero = svd.s().data().iter().filter(|v| !v.is_zero()).count();
-            assert_eq!(nonzero, expected.iter().sum::<usize>(), "{policy:?}");
-        }
-    }
-}
-
-#[test]
 fn generic_compact_svd_padded_complex_rectangular_fallback_matches_canonical_gauge() {
     let (canonical_space, canonical_data) = generic_svd_truncation_input::<Complex64>(true);
     let (padded_space, padded_data) =
@@ -2144,25 +2092,22 @@ fn generic_compact_svd_padded_complex_rectangular_fallback_matches_canonical_gau
     let padded = BoundDynamicTensorRef::try_new(&padded_space, &padded_data).unwrap();
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
 
-    let canonical_svd = svd_trunc_dyn_generic(&mut dense, &canonical, &Truncation::Full).unwrap();
+    let canonical_svd = svd_compact_factors_dyn_generic(&mut dense, &canonical).unwrap();
     crate::factorize::reset_compact_svd_copy_probe();
     let mut reject = RejectSvdInto::default();
-    let padded_svd = svd_trunc_dyn_generic(&mut reject, &padded, &Truncation::Full).unwrap();
+    let padded_svd = svd_compact_factors_dyn_generic(&mut reject, &padded).unwrap();
 
     assert_eq!(reject.svd_into_calls, 0);
+    let padded_s = generic_diagonal_factor(&padded_svd.0, &padded_svd.2);
     assert_compact_factors_reconstruct_input(
         &padded,
-        padded_svd.u(),
-        Some(padded_svd.s()),
-        padded_svd.vh(),
+        &padded_svd.0,
+        Some(&padded_s),
+        &padded_svd.1,
     );
-    assert_generic_complex_factor_close(padded_svd.u(), canonical_svd.u());
-    assert_generic_complex_factor_close(padded_svd.s(), canonical_svd.s());
-    assert_generic_complex_factor_close(padded_svd.vh(), canonical_svd.vh());
-    assert_real_spectra_close(
-        padded_svd.singular_values(),
-        canonical_svd.singular_values(),
-    );
+    assert_generic_complex_factor_close(&padded_svd.0, &canonical_svd.0);
+    assert_generic_complex_factor_close(&padded_svd.1, &canonical_svd.1);
+    assert_real_spectra_close(&padded_svd.2, &canonical_svd.2);
     let probe = crate::factorize::compact_svd_copy_probe();
     assert!(probe.input_pack_calls > 0);
     assert!(probe.output_scatter_calls > 0);
@@ -2177,7 +2122,7 @@ fn generic_compact_svd_second_dense_failure_preserves_source() {
     let mut dense = FailSecondSvd::default();
 
     crate::factorize::reset_compact_svd_copy_probe();
-    match svd_trunc_dyn_generic(&mut dense, &input, &Truncation::Full) {
+    match svd_compact_factors_dyn_generic(&mut dense, &input) {
         Err(OperationError::Dense(DenseError::Backend { op: "svd_into", .. })) => {}
         Err(error) => panic!("unexpected Generic SVD failure: {error}"),
         Ok(_) => panic!("second compact SVD must fail"),
@@ -2205,132 +2150,11 @@ fn generic_compact_svd_empty_input_skips_dense_execution() {
     let input = BoundDynamicTensorRef::try_new(&space, &data).unwrap();
     let mut reject = RejectExecutorCalls;
 
-    let result = svd_trunc_dyn_generic(&mut reject, &input, &Truncation::Full).unwrap();
+    let (u, vh, singular_values) = svd_compact_factors_dyn_generic(&mut reject, &input).unwrap();
 
-    assert!(result.u().data().is_empty());
-    assert!(result.s().data().is_empty());
-    assert!(result.vh().data().is_empty());
-    assert!(result.singular_values().is_empty());
-    assert_eq!(result.error(), 0.0);
-}
-
-#[test]
-fn generic_svd_truncation_keeps_cutoff_spectrum_and_diagonal_s() {
-    let (source_space, source_data) = generic_svd_truncation_input::<Complex64>(true);
-    let (space, data) = padded_generic_svd_truncation_input(&source_space, &source_data);
-    let input = BoundDynamicTensorRef::try_new(&space, &data).unwrap();
-    let mut dense = tenet_dense::DefaultDenseExecutor::new();
-
-    let full = svd_trunc_dyn_generic(&mut dense, &input, &Truncation::Full).unwrap();
-    assert_compact_factors_reconstruct_input(&input, full.u(), Some(full.s()), full.vh());
-
-    crate::factorize::reset_compact_svd_copy_probe();
-    let cutoff = svd_trunc_dyn_generic(
-        &mut dense,
-        &input,
-        &Truncation::absolute_cutoff(2.5).unwrap(),
-    )
-    .unwrap();
-    let expected = [
-        SectorSpectrum {
-            sector: SectorId::new(0),
-            values: vec![4.0],
-        },
-        SectorSpectrum {
-            sector: SectorId::new(1),
-            values: vec![3.0],
-        },
-    ];
-    assert_real_spectra_close(cutoff.singular_values(), &expected);
-    assert!((cutoff.error() - (1.0 + 4.0 * (1.0 + 2.0_f64.sqrt())).sqrt()).abs() < 1.0e-10);
-
-    let mut s_blocks = 0;
-    for block_index in 0..cutoff.s().space().space().structure().block_count() {
-        let block = cutoff
-            .s()
-            .space()
-            .space()
-            .structure()
-            .block(block_index)
-            .unwrap();
-        let BlockKey::FusionTree(key) = block.key() else {
-            panic!("truncated diagonal S must use fusion-tree blocks")
-        };
-        let sector = key.codomain_tree().coupled();
-        let spectrum = cutoff
-            .singular_values()
-            .iter()
-            .find(|entry| entry.sector == sector)
-            .unwrap();
-        assert_eq!(block.shape(), [1, 1]);
-        assert!(
-            (cutoff.s().data()[block.offset()].widen_complex().re - spectrum.values[0]).abs()
-                < 1.0e-10
-        );
-        assert!(cutoff.s().data()[block.offset()].widen_complex().im.abs() < 1.0e-10);
-        s_blocks += 1;
-    }
-    assert_eq!(s_blocks, 2);
-
-    let mut residual_squared = 0.0;
-    for spectrum in cutoff.singular_values() {
-        let sector = spectrum.sector;
-        let u_block = (0..cutoff.u().space().space().structure().block_count())
-            .map(|index| cutoff.u().space().space().structure().block(index).unwrap())
-            .find(|block| {
-                matches!(
-                    block.key(),
-                    BlockKey::FusionTree(key) if key.codomain_tree().coupled() == sector
-                )
-            })
-            .unwrap();
-        let vh_block = (0..cutoff.vh().space().space().structure().block_count())
-            .map(|index| {
-                cutoff
-                    .vh()
-                    .space()
-                    .space()
-                    .structure()
-                    .block(index)
-                    .unwrap()
-            })
-            .find(|block| {
-                matches!(
-                    block.key(),
-                    BlockKey::FusionTree(key) if key.domain_tree().coupled() == sector
-                )
-            })
-            .unwrap();
-        let (rows, cols, matrix) = checked_svd_matrix(sector, true);
-        for col in 0..cols {
-            for row in 0..rows {
-                let u = cutoff.u().data()[u_block.offset() + row * u_block.strides()[0]];
-                let vh = cutoff.vh().data()[vh_block.offset() + col * vh_block.strides()[1]];
-                let reconstructed = u
-                    * cutoff.s().data()[(0..cutoff.s().space().space().structure().block_count())
-                        .map(|index| cutoff.s().space().space().structure().block(index).unwrap())
-                        .find(|block| {
-                            matches!(
-                                block.key(),
-                                BlockKey::FusionTree(key) if key.codomain_tree().coupled() == sector
-                            )
-                        })
-                        .unwrap()
-                        .offset()]
-                    * vh;
-                let weight = if sector == SectorId::new(1) {
-                    1.0 + 2.0_f64.sqrt()
-                } else {
-                    1.0
-                };
-                residual_squared += weight * (reconstructed - matrix[row + rows * col]).norm_sqr();
-            }
-        }
-    }
-    assert!((residual_squared.sqrt() - cutoff.error()).abs() < 1.0e-10);
-    let probe = crate::factorize::compact_svd_copy_probe();
-    assert!(probe.input_pack_calls > 0);
-    assert!(probe.output_scatter_calls > 0);
+    assert!(u.data().is_empty());
+    assert!(vh.data().is_empty());
+    assert!(singular_values.is_empty());
 }
 
 #[test]
@@ -3212,129 +3036,6 @@ impl CheckedGenericRigidSymbols for LateGenericSpy {
         coupled: SectorId,
     ) -> Result<GenericRMatrix<Self::Scalar>, Self::Error> {
         self.call(|| self.rule.r_symbol_generic(a, b, coupled))
-    }
-}
-
-struct FailSingleLegFold {
-    rule: FactorGenericRule,
-    fail_at: usize,
-    single_leg_folds: Cell<usize>,
-}
-
-impl FusionRule for FailSingleLegFold {
-    fn rule_identity(&self) -> RuleIdentity {
-        self.rule.rule_identity()
-    }
-    fn fusion_style(&self) -> FusionStyleKind {
-        self.rule.fusion_style()
-    }
-    fn braiding_style(&self) -> BraidingStyleKind {
-        self.rule.braiding_style()
-    }
-    fn vacuum(&self) -> SectorId {
-        self.rule.vacuum()
-    }
-    fn dual(&self, sector: SectorId) -> SectorId {
-        self.rule.dual(sector)
-    }
-    fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
-        self.rule.fusion_channels(left, right)
-    }
-    fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
-        self.rule.nsymbol(left, right, coupled)
-    }
-}
-
-impl CheckedGenericFusion for FailSingleLegFold {
-    type Error = LateGenericError;
-
-    fn rule_identity(&self) -> RuleIdentity {
-        self.rule.rule_identity()
-    }
-    fn fusion_style(&self) -> FusionStyleKind {
-        self.rule.fusion_style()
-    }
-    fn braiding_style(&self) -> BraidingStyleKind {
-        self.rule.braiding_style()
-    }
-    fn vacuum(&self) -> SectorId {
-        self.rule.vacuum()
-    }
-    fn try_dual(&self, sector: SectorId) -> Result<SectorId, Self::Error> {
-        Ok(self.rule.dual(sector))
-    }
-    fn try_fusion_channels(
-        &self,
-        left: SectorId,
-        right: SectorId,
-    ) -> Result<SectorVec, Self::Error> {
-        Ok(self.rule.fusion_channels(left, right))
-    }
-    fn try_fusion_channels_in_table(
-        &self,
-        left: SectorId,
-        right: SectorId,
-    ) -> Result<SectorVec, Self::Error> {
-        self.try_fusion_channels(left, right)
-    }
-    fn try_coupled_sector_fold(
-        &self,
-        effective: &[SectorId],
-    ) -> Result<CoupledSectorFold, Self::Error> {
-        if effective.len() == 1 {
-            let call = self.single_leg_folds.get() + 1;
-            self.single_leg_folds.set(call);
-            if call == self.fail_at {
-                return Err(LateGenericError(call));
-            }
-        }
-        Ok(InfallibleGeneric::new(&self.rule)
-            .try_coupled_sector_fold(effective)
-            .unwrap())
-    }
-    fn try_nsymbol(
-        &self,
-        left: SectorId,
-        right: SectorId,
-        coupled: SectorId,
-    ) -> Result<usize, Self::Error> {
-        Ok(self.rule.nsymbol(left, right, coupled))
-    }
-}
-
-impl CheckedGenericRigidSymbols for FailSingleLegFold {
-    type Scalar = f64;
-
-    fn try_sqrt_dim_scalar(&self, sector: SectorId) -> Result<Self::Scalar, Self::Error> {
-        Ok(self.rule.sqrt_dim_scalar(sector))
-    }
-    fn try_inv_sqrt_dim_scalar(&self, sector: SectorId) -> Result<Self::Scalar, Self::Error> {
-        Ok(self.rule.inv_sqrt_dim_scalar(sector))
-    }
-    fn try_frobenius_schur_phase_scalar(
-        &self,
-        sector: SectorId,
-    ) -> Result<Self::Scalar, Self::Error> {
-        Ok(self.rule.frobenius_schur_phase_scalar(sector))
-    }
-    fn try_f_symbol_generic(
-        &self,
-        a: SectorId,
-        b: SectorId,
-        c: SectorId,
-        d: SectorId,
-        e: SectorId,
-        f: SectorId,
-    ) -> Result<GenericFArray<Self::Scalar>, Self::Error> {
-        Ok(self.rule.f_symbol_generic(a, b, c, d, e, f))
-    }
-    fn try_r_symbol_generic(
-        &self,
-        a: SectorId,
-        b: SectorId,
-        coupled: SectorId,
-    ) -> Result<GenericRMatrix<Self::Scalar>, Self::Error> {
-        Ok(self.rule.r_symbol_generic(a, b, coupled))
     }
 }
 
@@ -4473,15 +4174,15 @@ fn checked_only_generic_values_preserve_empty_scalar_and_shape_boundaries() {
     assert_eq!(rectangular_provider.calls.get(), rectangular_calls);
 }
 
-fn assert_checked_svd_truncation<D>(complex: bool, truncation: &Truncation, kept: usize)
+fn assert_checked_compact_svd<D>(complex: bool)
 where
     D: FactorScalar,
 {
+    let kept = 2;
     let (provider, space, data) = checked_svd_truncation_input::<D>(complex);
     let input = BoundDynamicTensorRef::try_new(&space, &data).unwrap();
     let mut dense = CountingDense::default();
-    let (u, vh, spectra, error) =
-        svd_trunc_factors_dyn_checked_generic(&mut dense, &input, truncation).unwrap();
+    let (u, s, vh) = svd_compact_dyn_checked_generic(&mut dense, &input).unwrap();
 
     assert_eq!(dense.svd_calls, 2);
     assert_eq!(dense.svd_into_calls, 0);
@@ -4495,9 +4196,25 @@ where
     ];
     let mut residual_squared = 0.0;
     for (sector, expected) in expected_spectra {
-        let spectrum = spectra.iter().find(|entry| entry.sector == sector).unwrap();
-        assert_eq!(spectrum.values.len(), kept);
-        for (&actual, &expected) in spectrum.values.iter().zip(&expected[..kept]) {
+        // The checked compact S is dense: read its diagonal.
+        let s_block = (0..s.space().space().structure().block_count())
+            .map(|index| s.space().space().structure().block(index).unwrap())
+            .find(|block| {
+                matches!(
+                    block.key(),
+                    BlockKey::FusionTree(key) if key.codomain_tree().coupled() == sector
+                )
+            })
+            .unwrap();
+        let spectrum = (0..s_block.shape()[0])
+            .map(|k| {
+                s.data()[s_block.offset() + k * (s_block.strides()[0] + s_block.strides()[1])]
+                    .widen_complex()
+                    .re
+            })
+            .collect::<Vec<f64>>();
+        assert_eq!(spectrum.len(), kept);
+        for (&actual, &expected) in spectrum.iter().zip(&expected[..kept]) {
             assert!((actual - expected).abs() < 1.0e-10);
         }
 
@@ -4547,7 +4264,7 @@ where
         for col in 0..cols {
             for row in 0..rows {
                 let reconstructed = (0..kept)
-                    .map(|bond| u_value(row, bond) * spectrum.values[bond] * vh_value(bond, col))
+                    .map(|bond| u_value(row, bond) * spectrum[bond] * vh_value(bond, col))
                     .sum::<Complex64>();
                 residual_squared += if sector == SectorId::new(1) {
                     (1.0 + 2.0_f64.sqrt()) * (reconstructed - matrix[row + rows * col]).norm_sqr()
@@ -4557,25 +4274,17 @@ where
             }
         }
     }
-    let expected_error = if kept == 2 {
-        0.0
-    } else {
-        (1.0 + 4.0 * (1.0 + 2.0_f64.sqrt())).sqrt()
-    };
-    assert!((error - expected_error).abs() < 1.0e-10);
-    assert!((residual_squared.sqrt() - error).abs() < 1.0e-10);
+    assert!(residual_squared.sqrt() < 1.0e-10);
 }
 
 #[test]
-fn checked_generic_svd_trunc_uses_each_real_compact_decomposition_once() {
-    assert_checked_svd_truncation::<f64>(false, &Truncation::Full, 2);
-    assert_checked_svd_truncation::<f64>(false, &Truncation::absolute_cutoff(2.5).unwrap(), 1);
+fn checked_generic_svd_compact_uses_each_real_compact_decomposition_once() {
+    assert_checked_compact_svd::<f64>(false);
 }
 
 #[test]
-fn checked_generic_svd_trunc_uses_each_complex_compact_decomposition_once() {
-    assert_checked_svd_truncation::<Complex64>(true, &Truncation::Full, 2);
-    assert_checked_svd_truncation::<Complex64>(true, &Truncation::absolute_cutoff(2.5).unwrap(), 1);
+fn checked_generic_svd_compact_uses_each_complex_compact_decomposition_once() {
+    assert_checked_compact_svd::<Complex64>(true);
 }
 
 #[test]
@@ -4583,7 +4292,7 @@ fn checked_generic_svd_trunc_uses_each_complex_compact_decomposition_once() {
     clippy::arc_with_non_send_sync,
     reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
 )]
-fn checked_generic_svd_trunc_empty_input_skips_dense_execution() {
+fn checked_generic_svd_compact_empty_input_skips_dense_execution() {
     let vacuum = SectorId::new(0);
     let x = SectorId::new(1);
     let homspace = FusionTreeHomSpace::new(
@@ -4606,14 +4315,12 @@ fn checked_generic_svd_trunc_empty_input_skips_dense_execution() {
     let data = Vec::<f64>::new();
     let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
     let mut dense = CountingDense::default();
-    let (u, vh, spectra, error) =
-        svd_trunc_factors_dyn_checked_generic(&mut dense, &input, &Truncation::Full).unwrap();
+    let (u, s, vh) = svd_compact_dyn_checked_generic(&mut dense, &input).unwrap();
 
     assert_eq!(dense.svd_calls, 0);
     assert_eq!(dense.svd_into_calls, 0);
     assert_eq!(dense.svd_vals_calls, 0);
-    assert!(spectra.is_empty());
-    assert_eq!(error, 0.0);
+    assert!(s.data().is_empty());
     assert!(u.data().is_empty());
     assert!(vh.data().is_empty());
     assert!(Arc::ptr_eq(u.space().provider_arc(), &provider));
@@ -4621,12 +4328,12 @@ fn checked_generic_svd_trunc_empty_input_skips_dense_execution() {
 }
 
 #[test]
-fn checked_generic_svd_trunc_dense_failure_precedes_output_provider_admission() {
+fn checked_generic_svd_compact_dense_failure_precedes_output_provider_admission() {
     let (provider, space, data) = checked_svd_truncation_input::<f64>(false);
     let input = BoundDynamicTensorRef::try_new(&space, &data).unwrap();
     let before = input.data().to_vec();
     let mut dense = FailAfterObservingSvdInput::default();
-    let result = svd_trunc_factors_dyn_checked_generic(&mut dense, &input, &Truncation::Full);
+    let result = svd_compact_dyn_checked_generic(&mut dense, &input);
 
     assert!(matches!(
         result,
@@ -4636,46 +4343,6 @@ fn checked_generic_svd_trunc_dense_failure_precedes_output_provider_admission() 
     ));
     assert_eq!(provider.calls.get(), 0);
     assert_eq!(dense.observed.len(), 1);
-    assert_eq!(input.data(), before);
-}
-
-#[test]
-#[expect(
-    clippy::arc_with_non_send_sync,
-    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
-)]
-fn checked_generic_svd_trunc_preserves_full_s_fold_failure() {
-    let (source, data) = generic_factorization_input();
-    // U and Vh construction each enumerate their layout once and fold both
-    // one-leg bond sectors (U 1-2, Vh 3-4), making the first fold for the
-    // full diagonal S the fifth one. Formerly each side enumerated twice
-    // (keys, then space: U 1-4, Vh 5-8) and S's first fold was the ninth.
-    const FIRST_FULL_S_FOLD: usize = 5;
-    let failing_provider = Arc::new(FailSingleLegFold {
-        rule: FactorGenericRule,
-        fail_at: FIRST_FULL_S_FOLD,
-        single_leg_folds: Cell::new(0),
-    });
-    let failing_space = BoundDynamicFusionMapSpace::bind_generic(
-        source.space().clone(),
-        Arc::clone(&failing_provider),
-    )
-    .unwrap();
-    let input = BoundDynamicTensorRef::try_new(&failing_space, &data).unwrap();
-    let before = input.data().to_vec();
-    let mut dense = CountingDense::default();
-    let cutoff = Truncation::absolute_cutoff(1.0e100).unwrap();
-    let result = svd_trunc_factors_dyn_checked_generic(&mut dense, &input, &cutoff);
-
-    assert!(matches!(
-        result,
-        Err(CheckedGenericFactorPlanError::Provider(LateGenericError(call)))
-            if call == FIRST_FULL_S_FOLD
-    ));
-    assert_eq!(failing_provider.single_leg_folds.get(), FIRST_FULL_S_FOLD);
-    assert_eq!(dense.svd_calls, 2);
-    assert_eq!(dense.svd_into_calls, 0);
-    assert_eq!(dense.svd_vals_calls, 0);
     assert_eq!(input.data(), before);
 }
 
@@ -5707,72 +5374,6 @@ fn checked_generic_compact_pair_builder_failure_preserves_provider_context() {
     clippy::arc_with_non_send_sync,
     reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
 )]
-fn checked_generic_svd_trunc_enumerates_each_factor_layout_once() {
-    // What: a truncating checked SVD queries the provider for exactly one
-    // enumeration of each of the compact U and Vh spaces, the diagonal S
-    // space, and the sliced U and Vh spaces, plus one dimension weight per
-    // bond sector for the truncation decision. On
-    // `generic_factorization_input`: compact U 3 + Vh 3, S 0, weights 2,
-    // sliced U 3 + Vh 3 = 14 calls. Formerly the compact pair and both
-    // sliced spaces enumerated twice: 2 * (3 + 3) + 0 + 2 + 2 * (3 + 3) = 26.
-    const TRUNC_SVD_CALLS: usize = 14;
-    let (source, data) = generic_factorization_input();
-    let provider = Arc::new(LateGenericSpy {
-        rule: FactorGenericRule,
-        fail_at: usize::MAX,
-        calls: Cell::new(0),
-    });
-    let checked =
-        BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
-            .unwrap();
-    let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
-    let mut dense = CountingDense::default();
-    let (u_compact, s, vh_compact) = svd_compact_dyn_checked_generic(&mut dense, &input).unwrap();
-    let compact_calls = provider.calls.get();
-    assert!(s.data().len() > 1);
-
-    let (u, vh, truncated, _) =
-        svd_trunc_factors_dyn_checked_generic(&mut dense, &input, &Truncation::rank(4)).unwrap();
-    let trunc_calls = provider.calls.get() - compact_calls;
-    // Weighted rank 4 keeps one value in each of the two bond sectors and
-    // drops the second value of sector 1, so both sliced spaces are strict
-    // sub-spaces that still carry every sector.
-    assert_eq!(
-        truncated
-            .iter()
-            .map(|entry| entry.values.len())
-            .collect::<Vec<_>>(),
-        [1, 1]
-    );
-    assert_eq!(
-        compact_calls,
-        checked_enumeration_calls(&u_compact)
-            + checked_enumeration_calls(&s)
-            + checked_enumeration_calls(&vh_compact)
-    );
-    let weight_calls = late_spy_calls(&|probe| {
-        for entry in &truncated {
-            probe.try_sqrt_dim_scalar(entry.sector).unwrap();
-        }
-    });
-    assert_eq!(weight_calls, 2);
-    assert_eq!(
-        trunc_calls,
-        compact_calls
-            + weight_calls
-            + checked_enumeration_calls(&u)
-            + checked_enumeration_calls(&vh)
-    );
-    assert_eq!(trunc_calls, TRUNC_SVD_CALLS);
-    assert!(Arc::ptr_eq(u.space().provider_arc(), &provider));
-    assert!(Arc::ptr_eq(vh.space().provider_arc(), &provider));
-}
-
-#[test]
-#[expect(
-    clippy::arc_with_non_send_sync,
-    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
-)]
 fn checked_generic_full_svd_local_shape_error_precedes_provider_query() {
     // What: checked tensor admission reports the local storage mismatch before
     // any provider-backed factorization work can run.
@@ -6386,7 +5987,7 @@ fn compact_svd_adjoint_error_preserves_borrowed_input_and_publishes_no_factors()
 }
 
 #[test]
-fn truncated_svd_adjoint_error_preserves_borrowed_input_and_publishes_no_factors() {
+fn compact_svd_adjoint_late_error_preserves_borrowed_input_and_publishes_no_factors() {
     let rule = Z2FusionRule;
     let canonical = hermitian_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
     let tensor = padded_copy(&rule, &canonical);
@@ -6395,8 +5996,7 @@ fn truncated_svd_adjoint_error_preserves_borrowed_input_and_publishes_no_factors
     let mut dense = FailSecondSvd::default();
     crate::factorize::reset_compact_svd_copy_probe();
 
-    let result =
-        svd_trunc_adjoint_factors_dyn(&mut dense, &bound.as_ref().dynamic(), &Truncation::rank(1));
+    let result = svd_compact_adjoint_factors_dyn(&mut dense, &bound.as_ref().dynamic());
 
     assert!(matches!(result, Err(OperationError::Dense(_))));
     assert_eq!(tensor.data(), before);
@@ -8323,138 +7923,6 @@ fn compact_svd_c32_direct_and_fallback_apply_the_same_gauge() {
     }
 }
 
-#[test]
-fn svd_trunc_c32_reports_the_discarded_reconstruction_error() {
-    // What: Complex32 spectrum buffering and truncation preserve the reported discarded norm.
-    let rule = Z2FusionRule;
-    let tensor = mixed_rectangular_c32_tensor();
-    let mut dense = tenet_dense::DefaultDenseExecutor::new();
-    crate::factorize::reset_compact_svd_copy_probe();
-
-    let svd = svd_trunc(
-        &mut dense,
-        &bound_tensor_ref!(Arc::new(rule), &tensor),
-        &Truncation::rank(4),
-    )
-    .unwrap();
-
-    assert_compact_svd_direct_copy_probe();
-    assert_eq!(
-        svd.singular_values
-            .iter()
-            .map(|entry| entry.values.len())
-            .sum::<usize>(),
-        4
-    );
-    let input_regions = tensor
-        .structure()
-        .coupled_sector_regions(1)
-        .unwrap()
-        .unwrap();
-    let u_regions = svd
-        .u
-        .tensor()
-        .structure()
-        .coupled_sector_regions(1)
-        .unwrap()
-        .unwrap();
-    let vh_regions = svd
-        .vh
-        .tensor()
-        .structure()
-        .coupled_sector_regions(1)
-        .unwrap()
-        .unwrap();
-    let mut distance_squared = 0.0f64;
-    for input_region in input_regions.iter() {
-        let sector = input_region.coupled();
-        let singular = &svd
-            .singular_values
-            .iter()
-            .find(|values| values.sector == sector)
-            .unwrap()
-            .values;
-        let u_region = u_regions.iter().find(|region| region.coupled() == sector);
-        let vh_region = vh_regions.iter().find(|region| region.coupled() == sector);
-        let rows = input_region.rows();
-        let cols = input_region.cols();
-        for col in 0..cols {
-            for row in 0..rows {
-                let reconstructed = match (u_region, vh_region) {
-                    (Some(u_region), Some(vh_region)) => (0..singular.len())
-                        .map(|bond| {
-                            svd.u.data()[u_region.range().start + row + rows * bond]
-                                * singular[bond] as f32
-                                * svd.vh.data()
-                                    [vh_region.range().start + bond + singular.len() * col]
-                        })
-                        .sum::<Complex32>(),
-                    _ => Complex32::new(0.0, 0.0),
-                };
-                let expected = tensor.data()[input_region.range().start + row + rows * col];
-                distance_squared += (reconstructed - expected).norm_sqr() as f64;
-            }
-        }
-    }
-    let distance = distance_squared.sqrt();
-    assert!(svd.error > 0.0);
-    assert!(
-        (distance - svd.error).abs() < 2e-3,
-        "Complex32 distance {distance} != error {}",
-        svd.error
-    );
-}
-
-fn weighted_norm_squared_of_difference<R>(
-    rule: &R,
-    lhs: &TensorMap<f64, 2, 2>,
-    rhs: &TensorMap<f64, 2, 2>,
-) -> f64
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-{
-    let lhs_structure = std::sync::Arc::clone(lhs.structure());
-    let rhs_structure = std::sync::Arc::clone(rhs.structure());
-    assert_eq!(lhs_structure.block_count(), rhs_structure.block_count());
-    let mut total = 0.0;
-    for index in 0..lhs_structure.block_count() {
-        let lhs_block = lhs_structure.block(index).unwrap();
-        let rhs_block = rhs_structure.block(index).unwrap();
-        assert_eq!(lhs_block.key(), rhs_block.key());
-        let BlockKey::FusionTree(key) = lhs_block.key() else {
-            continue;
-        };
-        let weight = rule.dim_scalar(key.codomain_tree().coupled());
-        let shape = lhs_block.shape().to_vec();
-        let count = shape.iter().product::<usize>();
-        let mut multi_index = vec![0usize; shape.len()];
-        for _ in 0..count {
-            let lhs_position = lhs_block.offset()
-                + multi_index
-                    .iter()
-                    .zip(lhs_block.strides())
-                    .map(|(&i, &s)| i * s)
-                    .sum::<usize>();
-            let rhs_position = rhs_block.offset()
-                + multi_index
-                    .iter()
-                    .zip(rhs_block.strides())
-                    .map(|(&i, &s)| i * s)
-                    .sum::<usize>();
-            let difference = lhs.data()[lhs_position] - rhs.data()[rhs_position];
-            total += weight * difference * difference;
-            for axis in 0..shape.len() {
-                multi_index[axis] += 1;
-                if multi_index[axis] < shape[axis] {
-                    break;
-                }
-                multi_index[axis] = 0;
-            }
-        }
-    }
-    total
-}
-
 fn tsvd_test_tensor<R>(rule: &R, sectors: &[SectorId]) -> TensorMap<f64, 2, 2>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
@@ -8986,174 +8454,6 @@ fn typed_svd_borrows_input_authority_and_retains_its_exact_allocation() {
     assert!(Arc::ptr_eq(&provider, factors.vh.space().provider_arc()));
 }
 
-fn reconstruct_from_svd<R>(
-    rule: &R,
-    template: &TensorMap<f64, 2, 2>,
-    svd: &SvdTrunc<R, f64, 2, 2>,
-) -> TensorMap<f64, 2, 2>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleIdentity>,
-{
-    let mut scaled_vt = svd.vh.tensor().clone();
-    scale_vt_rows_by_singular_values(&mut scaled_vt, &svd.singular_values);
-    let mut reconstructed = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
-        vec![0.0; template.data().len()],
-        template.fusion_space().unwrap().as_ref().clone(),
-    )
-    .unwrap();
-    let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
-    context
-        .tensorcontract_fusion_into(
-            rule,
-            &mut reconstructed,
-            &svd.u,
-            &scaled_vt,
-            TensorContractSpec::new(&[2], &[0], OutputAxisOrder::from_axes(&[0, 1, 2, 3])),
-            1.0,
-            0.0,
-        )
-        .unwrap();
-    reconstructed
-}
-
-#[test]
-fn tsvd_truncdim_bounds_weighted_dimension_and_reports_error_su2() {
-    let rule = SU2FusionRule;
-    let sectors = [
-        SU2Irrep::from_twice_spin(0).sector_id(),
-        SU2Irrep::from_twice_spin(1).sector_id(),
-    ];
-    let canonical = tsvd_test_tensor(&rule, &sectors);
-    let tensor = padded_copy(&rule, &canonical);
-    let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
-    crate::factorize::reset_compact_svd_copy_probe();
-
-    let max_dim = 10usize;
-    let svd = svd_trunc(
-        &mut dense_executor,
-        &bound_tensor_ref!(Arc::new(rule), &tensor),
-        &Truncation::rank(max_dim),
-    )
-    .unwrap();
-    let error = svd.error;
-
-    let weighted_dim: f64 = svd
-        .singular_values
-        .iter()
-        .map(|entry| rule.dim_scalar(entry.sector) * entry.values.len() as f64)
-        .sum();
-    assert!(
-        weighted_dim <= max_dim as f64 + 1e-9,
-        "weighted dimension {weighted_dim} exceeds bound {max_dim}"
-    );
-    assert!(error > 0.0, "this cut must discard weight");
-
-    let reconstructed = reconstruct_from_svd(&rule, &canonical, &svd);
-    let distance = weighted_norm_squared_of_difference(&rule, &canonical, &reconstructed).sqrt();
-    assert!(
-        (distance - error).abs() < 1e-8,
-        "reconstruction distance {distance} != reported truncation error {error}"
-    );
-    let probe = crate::factorize::compact_svd_copy_probe();
-    assert!(probe.input_pack_calls > 0);
-    assert!(probe.output_scatter_calls > 0);
-}
-
-#[test]
-fn tsvd_truncbelow_drops_exactly_the_small_values() {
-    let rule = Z2FusionRule;
-    let sectors = [SectorId::new(0), SectorId::new(1)];
-    let tensor = tsvd_test_tensor(&rule, &sectors);
-    let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
-
-    let full = svd_trunc(
-        &mut dense_executor,
-        &bound_tensor_ref!(Arc::new(rule), &tensor),
-        &Truncation::Full,
-    )
-    .unwrap();
-    let threshold = {
-        let mut all: Vec<f64> = full
-            .singular_values
-            .iter()
-            .flat_map(|entry| entry.values.iter().copied())
-            .collect();
-        all.sort_by(|a, b| b.partial_cmp(a).unwrap());
-        (all[all.len() / 2] + all[all.len() / 2 - 1]) / 2.0
-    };
-
-    let truncation = Truncation::absolute_cutoff(threshold).unwrap();
-    let svd = svd_trunc(
-        &mut dense_executor,
-        &bound_tensor_ref!(Arc::new(rule), &tensor),
-        &truncation,
-    )
-    .unwrap();
-    let error = svd.error;
-
-    for entry in &svd.singular_values {
-        assert!(entry.values.iter().all(|&value| value >= threshold));
-    }
-    let kept: usize = svd
-        .singular_values
-        .iter()
-        .map(|entry| entry.values.len())
-        .sum();
-    let full_count: usize = full
-        .singular_values
-        .iter()
-        .map(|entry| entry.values.len())
-        .sum();
-    assert!(kept < full_count);
-    assert!(error > 0.0);
-
-    let reconstructed = reconstruct_from_svd(&rule, &tensor, &svd);
-    let distance = weighted_norm_squared_of_difference(&rule, &tensor, &reconstructed).sqrt();
-    assert!((distance - error).abs() < 1e-8);
-}
-
-#[test]
-fn tsvd_truncerr_respects_relative_tolerance() {
-    let rule = U1FusionRule;
-    let sectors = [
-        U1Irrep::new(-1).sector_id(),
-        U1Irrep::new(0).sector_id(),
-        U1Irrep::new(1).sector_id(),
-    ];
-    let tensor = tsvd_test_tensor(&rule, &sectors);
-    let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
-
-    let tolerance = 0.2;
-    let truncation = Truncation::relative_error(tolerance).unwrap();
-    let svd = svd_trunc(
-        &mut dense_executor,
-        &bound_tensor_ref!(Arc::new(rule), &tensor),
-        &truncation,
-    )
-    .unwrap();
-    let error = svd.error;
-
-    let norm = weighted_norm_squared_of_difference(
-        &rule,
-        &tensor,
-        &TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
-            vec![0.0; tensor.data().len()],
-            tensor.fusion_space().unwrap().as_ref().clone(),
-        )
-        .unwrap(),
-    )
-    .sqrt();
-    assert!(
-        error <= tolerance * norm + 1e-9,
-        "truncation error {error} exceeds tolerance {tolerance} * norm {norm}"
-    );
-    assert!(error > 0.0, "tolerance 0.2 must discard something here");
-
-    let reconstructed = reconstruct_from_svd(&rule, &tensor, &svd);
-    let distance = weighted_norm_squared_of_difference(&rule, &tensor, &reconstructed).sqrt();
-    assert!((distance - error).abs() < 1e-8);
-}
-
 #[test]
 fn leftorth_fusion_reconstructs_z2_and_su2_tensors() {
     for (rule_case, sectors) in [
@@ -9376,10 +8676,9 @@ fn tsvd_singular_tensor_composes_u_s_vt() {
         ],
     );
     let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
-    let svd = svd_trunc(
+    let svd = svd_compact(
         &mut dense_executor,
         &bound_tensor_ref!(Arc::new(rule), &tensor),
-        &Truncation::Full,
     )
     .unwrap();
     let s_tensor = svd.s.clone();
@@ -9423,218 +8722,7 @@ fn tsvd_singular_tensor_composes_u_s_vt() {
 }
 
 #[test]
-fn svd_trunc_is_svd_compact_plus_host_truncation() {
-    let rule = SU2FusionRule;
-    let tensor = tsvd_test_tensor(
-        &rule,
-        &[
-            SU2Irrep::from_twice_spin(0).sector_id(),
-            SU2Irrep::from_twice_spin(1).sector_id(),
-        ],
-    );
-    let truncation = Truncation::rank(9).and(Truncation::absolute_cutoff(1e-12).unwrap());
-
-    let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
-    let composed = {
-        let compact = svd_compact(
-            &mut dense_executor,
-            &bound_tensor_ref!(Arc::new(rule), &tensor),
-        )
-        .unwrap();
-        truncate_svd(compact, &truncation).unwrap()
-    };
-    let direct = svd_trunc(
-        &mut dense_executor,
-        &bound_tensor_ref!(Arc::new(rule), &tensor),
-        &truncation,
-    )
-    .unwrap();
-
-    // Path agreement is the contract: the direct entry may fuse truncation
-    // into its factorization, so the factors agree under the workspace rule
-    // rather than bit for bit. The matricized 4x4 legs bound every coupled
-    // block's dimension by 16.
-    let terms = 16;
-    assert_spectra_agree(
-        "singular values",
-        &composed.singular_values,
-        &direct.singular_values,
-    );
-    assert!((composed.error - direct.error).abs() < 1e-15);
-    numerics::assert_slices_close("U", composed.u.data(), direct.u.data(), terms);
-    numerics::assert_slices_close("S", composed.s.data(), direct.s.data(), terms);
-    numerics::assert_slices_close("Vh", composed.vh.data(), direct.vh.data(), terms);
-}
-
-#[test]
-fn truncate_svd_full_reuses_the_prebuilt_diagonal_factor() {
-    // What: composed compact-then-full truncation moves its existing S without rebuilding it.
-    let rule = Z2FusionRule;
-    let tensor = tsvd_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
-    let mut dense = tenet_dense::DefaultDenseExecutor::new();
-    let compact = svd_compact(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor)).unwrap();
-
-    crate::factorize::reset_diagonal_bond_build_probe();
-    let result = truncate_svd(compact, &Truncation::Full).unwrap();
-
-    assert_eq!(result.error, 0.0);
-    assert_eq!(
-        crate::factorize::diagonal_bond_build_probe(),
-        crate::factorize::DiagonalBondBuildProbe::default()
-    );
-}
-
-#[test]
-fn svd_trunc_builds_only_the_returned_diagonal_factor() {
-    // What: partial and full truncation each materialize S once at the final returned rank.
-    let rule = SU2FusionRule;
-    let tensor = tsvd_test_tensor(
-        &rule,
-        &[
-            SU2Irrep::from_twice_spin(0).sector_id(),
-            SU2Irrep::from_twice_spin(1).sector_id(),
-        ],
-    );
-    let input = bound_tensor(Arc::new(rule), &tensor);
-    let mut dense = tenet_dense::DefaultDenseExecutor::new();
-    let full_rank = svd_vals_dyn(&mut dense, &input.as_ref().dynamic())
-        .unwrap()
-        .iter()
-        .map(|entry| entry.values.len())
-        .sum::<usize>();
-
-    crate::factorize::reset_diagonal_bond_build_probe();
-    let partial =
-        svd_trunc_dyn(&mut dense, &input.as_ref().dynamic(), &Truncation::rank(5)).unwrap();
-    let partial_rank = partial
-        .singular_values()
-        .iter()
-        .map(|entry| entry.values.len())
-        .sum();
-    for factor in [partial.u(), partial.s(), partial.vh()] {
-        assert_factor_layout_matches_legacy_shapes(factor.space());
-    }
-    assert!(partial_rank < full_rank);
-    assert!(partial.error() > 0.0);
-    assert_eq!(
-        crate::factorize::diagonal_bond_build_probe(),
-        crate::factorize::DiagonalBondBuildProbe {
-            calls: 1,
-            values: partial_rank,
-        }
-    );
-
-    crate::factorize::reset_diagonal_bond_build_probe();
-    let full = svd_trunc_dyn(&mut dense, &input.as_ref().dynamic(), &Truncation::Full).unwrap();
-    let returned_full_rank = full
-        .singular_values()
-        .iter()
-        .map(|entry| entry.values.len())
-        .sum::<usize>();
-    for factor in [full.u(), full.s(), full.vh()] {
-        assert_factor_layout_matches_legacy_shapes(factor.space());
-    }
-    assert_eq!(returned_full_rank, full_rank);
-    assert_eq!(full.error(), 0.0);
-    assert_eq!(
-        crate::factorize::diagonal_bond_build_probe(),
-        crate::factorize::DiagonalBondBuildProbe {
-            calls: 1,
-            values: full_rank,
-        }
-    );
-}
-
-#[test]
-fn svd_trunc_factor_only_core_skips_dense_s_and_dense_contract_wraps_once() {
-    // What: the factor-only entry returns the same truncated U/Vh, spectrum,
-    // and error without building S; the existing dense-S API wraps it once.
-    let rule = SU2FusionRule;
-    let tensor = tsvd_test_tensor(
-        &rule,
-        &[
-            SU2Irrep::from_twice_spin(0).sector_id(),
-            SU2Irrep::from_twice_spin(1).sector_id(),
-        ],
-    );
-    let input = bound_tensor(Arc::new(rule), &tensor);
-    let truncation = Truncation::rank(5);
-    let mut dense = tenet_dense::DefaultDenseExecutor::new();
-
-    crate::factorize::reset_diagonal_bond_build_probe();
-    let (u, vh, singular_values, error) =
-        svd_trunc_factors_dyn(&mut dense, &input.as_ref().dynamic(), &truncation).unwrap();
-    assert_eq!(
-        crate::factorize::diagonal_bond_build_probe(),
-        crate::factorize::DiagonalBondBuildProbe::default()
-    );
-
-    crate::factorize::reset_diagonal_bond_build_probe();
-    let wrapped = svd_trunc_dyn(&mut dense, &input.as_ref().dynamic(), &truncation).unwrap();
-    assert_eq!(u.data(), wrapped.u().data());
-    assert_eq!(vh.data(), wrapped.vh().data());
-    assert_eq!(singular_values, wrapped.singular_values());
-    assert_eq!(error, wrapped.error());
-    assert_eq!(
-        crate::factorize::diagonal_bond_build_probe(),
-        crate::factorize::DiagonalBondBuildProbe {
-            calls: 1,
-            values: singular_values.iter().map(|entry| entry.values.len()).sum(),
-        }
-    );
-}
-
-#[test]
-fn svd_trunc_zero_rank_returns_empty_factors_and_the_full_error() {
-    // What: an all-discard decision publishes rank-zero factors and reports the entire weighted norm.
-    let rule = SU2FusionRule;
-    let provider = Arc::new(rule);
-    let tensor = tsvd_test_tensor(
-        &rule,
-        &[
-            SU2Irrep::from_twice_spin(0).sector_id(),
-            SU2Irrep::from_twice_spin(1).sector_id(),
-        ],
-    );
-    let input = bound_tensor(Arc::clone(&provider), &tensor);
-    let mut dense = tenet_dense::DefaultDenseExecutor::new();
-    let full_spectrum = svd_vals_dyn(&mut dense, &input.as_ref().dynamic()).unwrap();
-    let expected_error = full_spectrum
-        .iter()
-        .map(|entry| {
-            rule.dim_scalar(entry.sector)
-                * entry.values.iter().map(|value| value * value).sum::<f64>()
-        })
-        .sum::<f64>()
-        .sqrt();
-
-    crate::factorize::reset_diagonal_bond_build_probe();
-    let result =
-        svd_trunc_dyn(&mut dense, &input.as_ref().dynamic(), &Truncation::rank(0)).unwrap();
-
-    assert!(result.singular_values().is_empty());
-    assert!(result.u().data().is_empty());
-    assert!(result.s().data().is_empty());
-    assert!(result.vh().data().is_empty());
-    for factor in [result.u(), result.s(), result.vh()] {
-        assert_eq!(factor.space().space().structure().block_count(), 0);
-        assert_factor_layout_matches_legacy_shapes(factor.space());
-    }
-    assert!((result.error() - expected_error).abs() < 1e-12);
-    assert_eq!(
-        crate::factorize::diagonal_bond_build_probe(),
-        crate::factorize::DiagonalBondBuildProbe {
-            calls: 1,
-            values: 0,
-        }
-    );
-    for factor in [result.u(), result.s(), result.vh()] {
-        assert!(Arc::ptr_eq(factor.space().provider_arc(), &provider));
-    }
-}
-
-#[test]
-fn svd_trunc_dense_failure_preserves_input_and_builds_no_diagonal_factor() {
+fn svd_compact_dense_failure_preserves_input_and_builds_no_diagonal_factor() {
     // What: a failed dense SVD leaves borrowed input unchanged and cannot publish or build factors.
     let rule = Z2FusionRule;
     let tensor = tsvd_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
@@ -9642,11 +8730,7 @@ fn svd_trunc_dense_failure_preserves_input_and_builds_no_diagonal_factor() {
     let mut dense = FailAfterObservingSvdInput::default();
 
     crate::factorize::reset_diagonal_bond_build_probe();
-    let result = svd_trunc(
-        &mut dense,
-        &bound_tensor_ref!(Arc::new(rule), &tensor),
-        &Truncation::rank(1),
-    );
+    let result = svd_compact(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor));
 
     assert!(matches!(result, Err(OperationError::Dense(_))));
     assert_eq!(tensor.data(), before);
@@ -9656,15 +8740,15 @@ fn svd_trunc_dense_failure_preserves_input_and_builds_no_diagonal_factor() {
     );
 }
 
-fn assert_zero_axis_svd_trunc(rows: usize, cols: usize) {
+fn assert_zero_axis_svd_compact(rows: usize, cols: usize) {
     let rule = Z2FusionRule;
     let tensor = rectangular_svd_tensor(rows, cols);
     let input = bound_tensor(Arc::new(rule), &tensor);
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
 
-    for truncation in [Truncation::Full, Truncation::rank(1)] {
+    {
         crate::factorize::reset_diagonal_bond_build_probe();
-        let result = svd_trunc_dyn(&mut dense, &input.as_ref().dynamic(), &truncation).unwrap();
+        let result = svd_compact_dyn(&mut dense, &input.as_ref().dynamic()).unwrap();
         assert_eq!(
             result
                 .singular_values()
@@ -9680,7 +8764,6 @@ fn assert_zero_axis_svd_trunc(rows: usize, cols: usize) {
             assert_eq!(factor.space().space().structure().block_count(), 0);
             assert_factor_layout_matches_legacy_shapes(factor.space());
         }
-        assert_eq!(result.error(), 0.0);
         assert_eq!(
             crate::factorize::diagonal_bond_build_probe(),
             crate::factorize::DiagonalBondBuildProbe {
@@ -9692,11 +8775,11 @@ fn assert_zero_axis_svd_trunc(rows: usize, cols: usize) {
 }
 
 #[test]
-fn svd_trunc_zero_only_input_normalizes_to_an_empty_factorization_result() {
-    // What: full and partial truncation expose no phantom sector when either
-    // side of the zero-only input is absent.
-    assert_zero_axis_svd_trunc(0, 3);
-    assert_zero_axis_svd_trunc(3, 0);
+fn svd_compact_zero_only_input_normalizes_to_an_empty_factorization_result() {
+    // What: the compact SVD exposes no phantom sector when either side of the
+    // zero-only input is absent.
+    assert_zero_axis_svd_compact(0, 3);
+    assert_zero_axis_svd_compact(3, 0);
 }
 
 fn hermitian_test_tensor<R>(rule: &R, sectors: &[SectorId]) -> TensorMap<f64, 2, 2>
@@ -10064,41 +9147,6 @@ fn eigh_direct_regions_publish_vectors_by_factor_order_and_spectra_by_source_ord
         )
         .unwrap(),
     );
-}
-
-#[test]
-fn eigh_trunc_truncates_by_magnitude_and_keeps_eigen_equation() {
-    let rule = Z2FusionRule;
-    let tensor = hermitian_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
-    let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
-
-    let full = eigh_full(
-        &mut dense_executor,
-        &bound_tensor_ref!(Arc::new(rule), &tensor),
-    )
-    .unwrap();
-    let full_count: usize = full
-        .eigenvalues
-        .iter()
-        .map(|entry| entry.values.len())
-        .sum();
-    let max_dim = full_count / 2;
-    let eigh = eigh_trunc(
-        &mut dense_executor,
-        &bound_tensor_ref!(Arc::new(rule), &tensor),
-        &Truncation::rank(max_dim),
-    )
-    .unwrap();
-
-    let kept: usize = eigh
-        .eigenvalues
-        .iter()
-        .map(|entry| entry.values.len())
-        .sum();
-    assert!(kept <= max_dim);
-    assert!(eigh.error > 0.0);
-    // Truncated eigenvectors still satisfy t . V = V . D exactly.
-    assert_eigen_equation(&rule, &tensor, &eigh.v, &eigh.d);
 }
 
 fn dense_sector_matrices<const A: usize, const B: usize>(
@@ -11092,130 +10140,6 @@ fn full_factorizations_skip_dense_backend_for_disjoint_support() {
     svd_full(&mut RejectExecutorCalls, &input.as_ref()).unwrap();
     qr_full(&mut RejectExecutorCalls, &input.as_ref()).unwrap();
     lq_full(&mut RejectExecutorCalls, &input.as_ref()).unwrap();
-}
-
-#[test]
-fn svd_trunc_c64_reconstruction_distance_matches_error() {
-    use num_complex::Complex64;
-    let rule = Z2FusionRule;
-    let sectors = [SectorId::new(0), SectorId::new(1)];
-    let degeneracy = 2usize;
-    let leg = || SectorLeg::new(sectors.iter().map(|&sector| (sector, degeneracy)), false);
-    let leg_dim = sectors.len() * degeneracy;
-    let homspace = FusionTreeHomSpace::new(
-        FusionProductSpace::new([leg(), leg()]),
-        FusionProductSpace::new([leg(), leg()]),
-    );
-    let key_count = homspace.fusion_tree_keys(&rule).len();
-    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<2, 2>::from_dims([leg_dim, leg_dim], [leg_dim, leg_dim]).unwrap(),
-        homspace,
-        &rule,
-        vec![vec![degeneracy; 4]; key_count],
-    )
-    .unwrap();
-    let len = space.required_len().unwrap();
-    let tensor = TensorMap::<Complex64, 2, 2>::from_vec_with_fusion_space(
-        (0..len)
-            .map(|i| {
-                Complex64::new(
-                    ((i * 7 + 3) % 23) as f64 * 0.5 - 5.0,
-                    ((i * 5 + 1) % 17) as f64 * 0.25 - 2.0,
-                )
-            })
-            .collect(),
-        space,
-    )
-    .unwrap();
-
-    let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
-    crate::factorize::reset_compact_svd_copy_probe();
-    let svd = svd_trunc(
-        &mut dense_executor,
-        &bound_tensor_ref!(Arc::new(rule), &tensor),
-        &Truncation::rank(8),
-    )
-    .unwrap();
-    assert_compact_svd_direct_copy_probe();
-    assert!(svd.error > 0.0);
-    for entry in &svd.singular_values {
-        for pair in entry.values.windows(2) {
-            assert!(pair[0] >= pair[1] - 1e-12);
-        }
-    }
-
-    // Scale Vh rows by the (real) singular values.
-    let mut scaled_vh = svd.vh.tensor().clone();
-    {
-        let structure = std::sync::Arc::clone(scaled_vh.structure());
-        for index in 0..structure.block_count() {
-            let block = structure.block(index).unwrap();
-            let BlockKey::FusionTree(key) = block.key() else {
-                continue;
-            };
-            let sector = key.codomain_tree().coupled();
-            let values = &svd
-                .singular_values
-                .iter()
-                .find(|entry| entry.sector == sector)
-                .unwrap()
-                .values;
-            let shape = block.shape().to_vec();
-            let strides = block.strides().to_vec();
-            let offset = block.offset();
-            let count = shape.iter().product::<usize>();
-            let mut indices = vec![0usize; shape.len()];
-            for _ in 0..count {
-                let position = offset
-                    + indices
-                        .iter()
-                        .zip(&strides)
-                        .map(|(&i, &s)| i * s)
-                        .sum::<usize>();
-                scaled_vh.data_mut()[position] *= values[indices[0]];
-                for axis in 0..shape.len() {
-                    indices[axis] += 1;
-                    if indices[axis] < shape[axis] {
-                        break;
-                    }
-                    indices[axis] = 0;
-                }
-            }
-        }
-    }
-
-    let mut reconstructed = TensorMap::<Complex64, 2, 2>::from_vec_with_fusion_space(
-        vec![Complex64::new(0.0, 0.0); len],
-        tensor.fusion_space().unwrap().as_ref().clone(),
-    )
-    .unwrap();
-    let mut context = TensorContractFusionExecutionContext::<Complex64, RuleIdentity>::default();
-    context
-        .tensorcontract_fusion_into(
-            &rule,
-            &mut reconstructed,
-            &svd.u,
-            &scaled_vh,
-            TensorContractSpec::new(&[2], &[0], OutputAxisOrder::from_axes(&[0, 1, 2, 3])),
-            Complex64::new(1.0, 0.0),
-            Complex64::new(0.0, 0.0),
-        )
-        .unwrap();
-
-    // Weighted 2-norm of the difference equals the reported error (Z2 has
-    // quantum dimension 1 everywhere).
-    let distance = tensor
-        .data()
-        .iter()
-        .zip(reconstructed.data())
-        .map(|(lhs, rhs)| (lhs - rhs).norm_sqr())
-        .sum::<f64>()
-        .sqrt();
-    assert!(
-        (distance - svd.error).abs() < 1e-8,
-        "distance {distance} != error {}",
-        svd.error
-    );
 }
 
 #[test]
@@ -14367,16 +13291,13 @@ fn single_precision_svd_and_eig_work_end_to_end() {
     .unwrap();
 
     let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
-    let svd = svd_trunc(
+    let svd = svd_compact(
         &mut dense_executor,
         &bound_tensor_ref!(Arc::new(rule), &tensor_f32),
-        &Truncation::rank(8),
     )
     .unwrap();
-    assert!(svd.error > 0.0);
 
-    // Reconstruct through an f32 contraction and compare against the
-    // truncation error at single precision.
+    // Reconstruct through an f32 contraction at single precision.
     let mut scaled_vh = svd.vh.tensor().clone();
     {
         let structure = std::sync::Arc::clone(scaled_vh.structure());
@@ -14424,11 +13345,7 @@ fn single_precision_svd_and_eig_work_end_to_end() {
         .map(|(lhs, rhs)| ((lhs - rhs) as f64).powi(2))
         .sum::<f64>()
         .sqrt();
-    assert!(
-        (distance - svd.error).abs() < 1e-3,
-        "f32 distance {distance} != error {}",
-        svd.error
-    );
+    assert!(distance < 1e-3, "f32 reconstruction distance {distance}");
 
     // Complex32 general eigendecomposition returns Complex32 factors.
     let c32_space = space();
@@ -16766,17 +15683,10 @@ where
     let (general, hermitian) = (general_bound.as_ref(), hermitian_bound.as_ref());
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
     let mut context = default_context();
-    let truncation = Truncation::Rank(1);
-
     assert_stacking_refusal(eig_vals(&mut dense, &general), "eig_vals ");
     assert_stacking_refusal(eig_full(&mut dense, &general), "eig_full ");
-    assert_stacking_refusal(eig_trunc(&mut dense, &general, &truncation), "eig_full ");
     assert_stacking_refusal(eigh_vals(&mut dense, &hermitian), "eigh_vals ");
     assert_stacking_refusal(eigh_full(&mut dense, &hermitian), "eigh_full ");
-    assert_stacking_refusal(
-        eigh_trunc(&mut dense, &hermitian, &truncation),
-        "eigh_full ",
-    );
     assert_stacking_refusal(exp(&mut dense, &mut context, &general), "exp ");
     assert_stacking_refusal(exp(&mut dense, &mut context, &hermitian), "exp ");
     assert_stacking_refusal(
@@ -17158,12 +16068,6 @@ where
     assert_compact_factors_reconstruct_input(&input, actual.u(), Some(actual.s()), actual.vh());
     assert_factor_matches_facade("svd_compact U", expected.u(), actual.u());
     assert_factor_matches_facade("svd_compact Vh", expected.vh(), actual.vh());
-
-    let truncation = Truncation::rank(3);
-    let expected = svd_trunc_dyn(&mut dense, &facade, &truncation).unwrap();
-    let actual = svd_trunc_dyn(&mut dense, &input, &truncation).unwrap();
-    assert_factor_matches_facade("svd_trunc U", expected.u(), actual.u());
-    assert_factor_matches_facade("svd_trunc Vh", expected.vh(), actual.vh());
 
     // Why reconstruction only: QR of a column-permuted matrix is a different
     // factorization, so QR/LQ factors are not facade-comparable here.
@@ -17835,4 +16739,200 @@ fn checked_generic_full_null_ops_keep_packing_padded_input() {
     left_null_dyn_checked_generic(&mut dense, &expert).unwrap();
     right_null_dyn_checked_generic(&mut dense, &expert).unwrap();
     assert_eq!(crate::factorize::input_pack_bytes(), 4 * packed_len);
+}
+
+struct FailSingleLegFold {
+    rule: FactorGenericRule,
+    fail_at: usize,
+    single_leg_folds: Cell<usize>,
+}
+
+impl FusionRule for FailSingleLegFold {
+    fn rule_identity(&self) -> RuleIdentity {
+        self.rule.rule_identity()
+    }
+    fn fusion_style(&self) -> FusionStyleKind {
+        self.rule.fusion_style()
+    }
+    fn braiding_style(&self) -> BraidingStyleKind {
+        self.rule.braiding_style()
+    }
+    fn vacuum(&self) -> SectorId {
+        self.rule.vacuum()
+    }
+    fn dual(&self, sector: SectorId) -> SectorId {
+        self.rule.dual(sector)
+    }
+    fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+        self.rule.fusion_channels(left, right)
+    }
+    fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+        self.rule.nsymbol(left, right, coupled)
+    }
+}
+
+impl CheckedGenericFusion for FailSingleLegFold {
+    type Error = LateGenericError;
+
+    fn rule_identity(&self) -> RuleIdentity {
+        self.rule.rule_identity()
+    }
+    fn fusion_style(&self) -> FusionStyleKind {
+        self.rule.fusion_style()
+    }
+    fn braiding_style(&self) -> BraidingStyleKind {
+        self.rule.braiding_style()
+    }
+    fn vacuum(&self) -> SectorId {
+        self.rule.vacuum()
+    }
+    fn try_dual(&self, sector: SectorId) -> Result<SectorId, Self::Error> {
+        Ok(self.rule.dual(sector))
+    }
+    fn try_fusion_channels(
+        &self,
+        left: SectorId,
+        right: SectorId,
+    ) -> Result<SectorVec, Self::Error> {
+        Ok(self.rule.fusion_channels(left, right))
+    }
+    fn try_fusion_channels_in_table(
+        &self,
+        left: SectorId,
+        right: SectorId,
+    ) -> Result<SectorVec, Self::Error> {
+        self.try_fusion_channels(left, right)
+    }
+    fn try_coupled_sector_fold(
+        &self,
+        effective: &[SectorId],
+    ) -> Result<CoupledSectorFold, Self::Error> {
+        if effective.len() == 1 {
+            let call = self.single_leg_folds.get() + 1;
+            self.single_leg_folds.set(call);
+            if call == self.fail_at {
+                return Err(LateGenericError(call));
+            }
+        }
+        Ok(InfallibleGeneric::new(&self.rule)
+            .try_coupled_sector_fold(effective)
+            .unwrap())
+    }
+    fn try_nsymbol(
+        &self,
+        left: SectorId,
+        right: SectorId,
+        coupled: SectorId,
+    ) -> Result<usize, Self::Error> {
+        Ok(self.rule.nsymbol(left, right, coupled))
+    }
+}
+
+impl CheckedGenericRigidSymbols for FailSingleLegFold {
+    type Scalar = f64;
+
+    fn try_sqrt_dim_scalar(&self, sector: SectorId) -> Result<Self::Scalar, Self::Error> {
+        Ok(self.rule.sqrt_dim_scalar(sector))
+    }
+    fn try_inv_sqrt_dim_scalar(&self, sector: SectorId) -> Result<Self::Scalar, Self::Error> {
+        Ok(self.rule.inv_sqrt_dim_scalar(sector))
+    }
+    fn try_frobenius_schur_phase_scalar(
+        &self,
+        sector: SectorId,
+    ) -> Result<Self::Scalar, Self::Error> {
+        Ok(self.rule.frobenius_schur_phase_scalar(sector))
+    }
+    fn try_f_symbol_generic(
+        &self,
+        a: SectorId,
+        b: SectorId,
+        c: SectorId,
+        d: SectorId,
+        e: SectorId,
+        f: SectorId,
+    ) -> Result<GenericFArray<Self::Scalar>, Self::Error> {
+        Ok(self.rule.f_symbol_generic(a, b, c, d, e, f))
+    }
+    fn try_r_symbol_generic(
+        &self,
+        a: SectorId,
+        b: SectorId,
+        coupled: SectorId,
+    ) -> Result<GenericRMatrix<Self::Scalar>, Self::Error> {
+        Ok(self.rule.r_symbol_generic(a, b, coupled))
+    }
+}
+
+#[test]
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
+fn checked_generic_svd_compact_preserves_a_diagonal_s_fold_failure() {
+    // What: a provider error while laying out checked compact SVD's dense `S`
+    // is returned unchanged as `Provider(e)`, after both dense SVDs and with
+    // the input untouched. (Formerly asserted through the removed
+    // `svd_trunc_factors_dyn_checked_generic`, whose compact call built this
+    // `S`; #1534.) U and Vh each enumerate their layout once and fold both
+    // one-leg bond sectors (U 1-2, Vh 3-4), so S's first fold is the fifth.
+    const FIRST_S_FOLD: usize = 5;
+    let (source, data) = generic_factorization_input();
+    let failing_provider = Arc::new(FailSingleLegFold {
+        rule: FactorGenericRule,
+        fail_at: FIRST_S_FOLD,
+        single_leg_folds: Cell::new(0),
+    });
+    let failing_space = BoundDynamicFusionMapSpace::bind_generic(
+        source.space().clone(),
+        Arc::clone(&failing_provider),
+    )
+    .unwrap();
+    let input = BoundDynamicTensorRef::try_new(&failing_space, &data).unwrap();
+    let before = input.data().to_vec();
+    let mut dense = CountingDense::default();
+    let result = svd_compact_dyn_checked_generic(&mut dense, &input);
+
+    assert!(matches!(
+        result,
+        Err(CheckedGenericFactorPlanError::Provider(LateGenericError(call)))
+            if call == FIRST_S_FOLD
+    ));
+    assert_eq!(failing_provider.single_leg_folds.get(), FIRST_S_FOLD);
+    assert_eq!(dense.svd_calls, 2);
+    assert_eq!(dense.svd_into_calls, 0);
+    assert_eq!(dense.svd_vals_calls, 0);
+    assert_eq!(input.data(), before);
+}
+
+#[test]
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
+fn checked_generic_svd_compact_enumerates_each_factor_layout_once() {
+    // What: checked compact SVD queries the provider for exactly one
+    // enumeration of each of the U, S and Vh spaces. (The truncating half of
+    // the former test went with `svd_trunc_factors_dyn_checked_generic`,
+    // #1534.)
+    let (source, data) = generic_factorization_input();
+    let provider = Arc::new(LateGenericSpy {
+        rule: FactorGenericRule,
+        fail_at: usize::MAX,
+        calls: Cell::new(0),
+    });
+    let checked =
+        BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
+            .unwrap();
+    let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
+    let mut dense = CountingDense::default();
+    let (u, s, vh) = svd_compact_dyn_checked_generic(&mut dense, &input).unwrap();
+    let compact_calls = provider.calls.get();
+    assert!(s.data().len() > 1);
+    assert_eq!(
+        compact_calls,
+        checked_enumeration_calls(&u)
+            + checked_enumeration_calls(&s)
+            + checked_enumeration_calls(&vh)
+    );
 }

@@ -54,21 +54,23 @@ fn truncated_svd_restores_dropped_sector_in_non_dual_closed_space() {
         4,
     );
 
-    let truncated = tensor.svd_trunc(&Truncation::rank(3)).unwrap();
-    let kept: Vec<_> = truncated
-        .singular_values
+    // Truncation is the composition `find_truncated` + `restrict_*`.
+    let found = s.domain()[0]
+        .find_truncated(&s.diagview().unwrap(), &Truncation::rank(3))
+        .unwrap();
+    let u = u.restrict_leg(u.codomain_rank(), &found.selection).unwrap();
+    let s = s.restrict_diagonal(&found.selection).unwrap();
+    let vh = vh.restrict_leg(0, &found.selection).unwrap();
+    let kept: Vec<_> = s
+        .diagview()
+        .unwrap()
         .iter()
         .map(|entry| (entry.sector, entry.values.len()))
         .collect();
     assert_eq!(kept, [(U1Irrep::new(0), 2), (U1Irrep::new(2), 1)]);
-    assert!((truncated.error - 1.0).abs() < 1.0e-12);
+    assert!((found.error - 1.0).abs() < 1.0e-12);
 
-    let recomposed = truncated
-        .u
-        .compose(&truncated.s)
-        .unwrap()
-        .compose(&truncated.vh)
-        .unwrap();
+    let recomposed = u.compose(&s).unwrap().compose(&vh).unwrap();
     numerics::assert_slices_close(
         "truncated u s vh",
         recomposed.data(),
@@ -76,7 +78,7 @@ fn truncated_svd_restores_dropped_sector_in_non_dual_closed_space() {
         4,
     );
     let error = tensor.add(&recomposed, 1.0, -1.0).unwrap().norm().unwrap();
-    assert!((error - truncated.error).abs() < 1.0e-12);
+    assert!((error - found.error).abs() < 1.0e-12);
 }
 
 #[test]

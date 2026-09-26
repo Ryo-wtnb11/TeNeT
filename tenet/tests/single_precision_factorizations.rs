@@ -40,6 +40,53 @@ use single_precision_oracle::{
     runtime, tolerance, u1_leg_with,
 };
 
+/// The truncated factorizations are compositions (#1534):
+/// `svd_compact`/`eigh_full`/`eig_full` → `diagview` → `find_truncated` →
+/// `restrict_leg`/`restrict_diagonal`.
+#[allow(dead_code)] // each case reads the factors it checks
+struct SvdTruncated<T> {
+    u: T,
+    s: T,
+    vh: T,
+    error: f64,
+}
+
+#[allow(dead_code)] // each case reads the factors it checks
+struct EigenTruncated<T> {
+    d: T,
+    v: T,
+    error: f64,
+}
+
+macro_rules! svd_trunc {
+    ($tensor:expr, $truncation:expr) => {{
+        let (u, s, vh) = $tensor.svd_compact().unwrap();
+        let found = s.domain()[0]
+            .find_truncated(&s.diagview().unwrap(), $truncation)
+            .unwrap();
+        SvdTruncated {
+            u: u.restrict_leg(u.codomain_rank(), &found.selection).unwrap(),
+            s: s.restrict_diagonal(&found.selection).unwrap(),
+            vh: vh.restrict_leg(0, &found.selection).unwrap(),
+            error: found.error,
+        }
+    }};
+}
+
+macro_rules! eigen_trunc {
+    ($full:expr, $truncation:expr) => {{
+        let (d, v) = $full.unwrap();
+        let found = d.domain()[0]
+            .find_truncated(&d.diagview().unwrap(), $truncation)
+            .unwrap();
+        EigenTruncated {
+            d: d.restrict_diagonal(&found.selection).unwrap(),
+            v: v.restrict_leg(v.codomain_rank(), &found.selection).unwrap(),
+            error: found.error,
+        }
+    }};
+}
+
 /// `tol` for the tolerance-taking predicates at single precision: far above
 /// `eps(f32)` and far below the fixture's own scale. MatrixAlgebraKit's
 /// `defaulttol` (`src/common/defaults.jl`) is `eps(real(T))^(2/3)`, which is
@@ -290,16 +337,6 @@ macro_rules! factor_checks {
             kappa,
         );
 
-        let (q, r) = tall.left_orth().unwrap();
-        assert_reconstruction!(
-            format!("{name}: left_orth"),
-            &q.compose(&r).unwrap(),
-            &tall,
-            terms,
-            $narrow
-        );
-        assert_isometry!(format!("{name}: left_orth Q"), &rt, &q, terms, $narrow);
-
         // `*_full` adds null columns whose gauge nothing fixes: identities only.
         let (q, r) = tall.qr_full().unwrap();
         assert_reconstruction!(
@@ -311,7 +348,7 @@ macro_rules! factor_checks {
         );
         assert_isometry!(format!("{name}: qr_full Q"), &rt, &q, terms, $narrow);
 
-        // ---- LQ / right_orth. ---------------------------------------------
+        // ---- LQ. ---------------------------------------------------
         let (l, q) = short.lq_compact().unwrap();
         let (wl, wq) = wide_short.lq_compact().unwrap();
         assert_reconstruction!(
@@ -337,16 +374,6 @@ macro_rules! factor_checks {
             terms,
             short_kappa,
         );
-
-        let (l, q) = short.right_orth().unwrap();
-        assert_reconstruction!(
-            format!("{name}: right_orth"),
-            &l.compose(&q).unwrap(),
-            &short,
-            terms,
-            $narrow
-        );
-        assert_coisometry!(format!("{name}: right_orth Q"), &rt, &q, terms, $narrow);
 
         let (l, q) = short.lq_full().unwrap();
         assert_reconstruction!(
@@ -399,8 +426,8 @@ macro_rules! factor_checks {
         // The fixture's singular values are separated by factors of about two,
         // which is far above the `eps(f32) * kappa` noise of the
         // decomposition, so the kept set is reproducible across dtypes.
-        let truncated = tall.svd_trunc(&Truncation::rank(2)).unwrap();
-        let wide_truncated = wide_tall.svd_trunc(&Truncation::rank(2)).unwrap();
+        let truncated = svd_trunc!(tall, &Truncation::rank(2));
+        let wide_truncated = svd_trunc!(wide_tall, &Truncation::rank(2));
         assert_eq!(
             truncated.s.data().len(),
             wide_truncated.s.data().len(),
@@ -476,8 +503,8 @@ macro_rules! factor_checks {
             );
         }
 
-        let truncated = h.eigh_trunc(&Truncation::rank(1)).unwrap();
-        let wide_truncated = wide_h.eigh_trunc(&Truncation::rank(1)).unwrap();
+        let truncated = eigen_trunc!(h.eigh_full(), &Truncation::rank(1));
+        let wide_truncated = eigen_trunc!(wide_h.eigh_full(), &Truncation::rank(1));
         assert!(
             truncated.error > 0.0,
             "{name}: eigh_trunc discarded nothing"
@@ -840,8 +867,8 @@ mod checked_generic {
                         terms
                     );
 
-                    let truncated = tall.svd_trunc(&Truncation::rank(1)).unwrap();
-                    let wide_truncated = wide_tall.svd_trunc(&Truncation::rank(1)).unwrap();
+                    let truncated = svd_trunc!(tall, &Truncation::rank(1));
+                    let wide_truncated = svd_trunc!(wide_tall, &Truncation::rank(1));
                     assert!(
                         truncated.error > 0.0,
                         "{name}: the rank budget must discard something"
@@ -909,8 +936,8 @@ mod checked_generic {
                         &wide_h.eigh_vals().unwrap(),
                         h_terms
                     );
-                    let truncated = h.eigh_trunc(&Truncation::rank(1)).unwrap();
-                    let wide_truncated = wide_h.eigh_trunc(&Truncation::rank(1)).unwrap();
+                    let truncated = eigen_trunc!(h.eigh_full(), &Truncation::rank(1));
+                    let wide_truncated = eigen_trunc!(wide_h.eigh_full(), &Truncation::rank(1));
                     assert_scalars_agree(
                         &format!("{name}: eigh_trunc error"),
                         Complex64::new(truncated.error, 0.0),
@@ -1204,8 +1231,8 @@ fn a_rank_tie_the_single_precision_payload_cannot_resolve_keeps_the_other_sector
         .unwrap();
 
     let policy = Truncation::rank(1);
-    let got = narrow.svd_trunc(&policy).unwrap();
-    let expected = wide.svd_trunc(&policy).unwrap();
+    let got = svd_trunc!(narrow, &policy);
+    let expected = svd_trunc!(wide, &policy);
 
     let kept = |t: &tenet::prelude::GradedSpace<U1FusionRule>| -> usize {
         t.sectors()

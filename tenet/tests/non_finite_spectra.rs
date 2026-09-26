@@ -59,12 +59,17 @@ macro_rules! assert_nan_spectrum_is_rejected {
             );
         }
         // The dense routes: a NaN payload never yields a finite factor either.
+        // The truncated compositions fail at the factorization or at the
+        // decision; neither publishes a factor.
         for policy in policies() {
-            assert!(diagonal.svd_trunc(&policy).is_err(), "svd_trunc {policy:?}");
-            assert!(
-                diagonal.eigh_trunc(&policy).is_err(),
-                "eigh_trunc {policy:?}"
-            );
+            let svd = diagonal
+                .svd_compact()
+                .and_then(|(_, s, _)| s.domain()[0].find_truncated(&s.diagview()?, &policy));
+            assert!(svd.is_err(), "svd composition {policy:?}");
+            let eigh = diagonal
+                .eigh_full()
+                .and_then(|(d, _)| d.domain()[0].find_truncated(&d.diagview()?, &policy));
+            assert!(eigh.is_err(), "eigh composition {policy:?}");
         }
     }};
 }
