@@ -13,8 +13,9 @@ use std::marker::PhantomData;
 
 use tenet_core::{Placement, TensorStorage};
 use tenet_dense::{
-    cuda_gather_members, cuda_gemm_region_batched_into, cuda_gemm_region_with_ops_into,
-    cuda_matmul_region_into, cuda_widen, CudaDenseContext, CudaDenseStorage, CudaScalar, MatrixOp,
+    cuda_gather_member_elements, cuda_gather_members, cuda_gemm_region_batched_into,
+    cuda_gemm_region_with_ops_into, cuda_matmul_region_into, cuda_widen, CudaDenseContext,
+    CudaDenseStorage, CudaScalar, MatrixOp,
 };
 
 use crate::fusion_replay::StorageGemm;
@@ -50,6 +51,20 @@ impl<D: CudaScalar> CudaStorage<D> {
             .map_err(OperationError::Dense)
     }
 
+    /// Uploads a stack of `members` members of `member_len` elements as a
+    /// `[member_len, members]` buffer; see [`CudaDenseStorage::upload_members`].
+    #[doc(hidden)]
+    pub fn upload_members(
+        ctx: &CudaDenseContext,
+        data: Vec<D>,
+        member_len: usize,
+        members: usize,
+    ) -> Result<Self, OperationError> {
+        CudaDenseStorage::upload_members(ctx, data, member_len, members)
+            .map(|storage| Self(storage, PhantomData))
+            .map_err(OperationError::Dense)
+    }
+
     pub fn download(&self, ctx: &CudaDenseContext) -> Result<Vec<D>, OperationError> {
         self.0.download(ctx).map_err(OperationError::Dense)
     }
@@ -77,6 +92,22 @@ impl<D: CudaScalar> CudaStorage<D> {
         selection: &[usize],
     ) -> Result<Self, OperationError> {
         cuda_gather_members::<D>(ctx, &self.0, member_len, members, selection)
+            .map(|storage| Self(storage, PhantomData))
+            .map_err(OperationError::Dense)
+    }
+
+    /// Elements `elements` of every member of a `[member_len, members]`
+    /// stack held in this buffer, as a new `[elements.len(), members]`
+    /// buffer; see [`cuda_gather_member_elements`].
+    #[doc(hidden)]
+    pub fn gather_member_elements(
+        &self,
+        ctx: &mut CudaDenseContext,
+        member_len: usize,
+        members: usize,
+        elements: &[usize],
+    ) -> Result<Self, OperationError> {
+        cuda_gather_member_elements::<D>(ctx, &self.0, member_len, members, elements)
             .map(|storage| Self(storage, PhantomData))
             .map_err(OperationError::Dense)
     }

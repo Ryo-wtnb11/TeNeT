@@ -9458,6 +9458,94 @@ where
     }
 }
 
+impl<R> LegSelection<R> {
+    /// The source start of every selected sector, sorted by [`SectorId`]: the
+    /// per-axis table the restriction kernels read.
+    fn start_table(&self) -> Vec<(SectorId, usize)> {
+        self.entries
+            .iter()
+            .map(|(sector, range)| (*sector, range.start))
+            .collect()
+    }
+}
+
+/// Checks that leg `axis` of `space` can be exchanged for `expected`: the
+/// axis exists, the rules agree, and the leg is `expected`. Shared by the
+/// eager and the stacked restriction, so both reject with the same errors.
+fn require_selected_leg_of<R>(
+    space: &BoundDynamicFusionMapSpace<R>,
+    axis: usize,
+    expected: &GradedSpace<R>,
+    operation: &str,
+) -> Result<(), TypedFacadeError<R>>
+where
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorModeDispatch<R>,
+{
+    let homspace = space.space().homspace();
+    let codomain_rank = homspace.codomain().len();
+    let rank = codomain_rank + homspace.domain().len();
+    if axis >= rank {
+        return Err(Error::InvalidArgument(format!(
+            "{operation}: axis {axis} is out of range for rank {rank}"
+        ))
+        .into());
+    }
+    if TypedSectorAdmission::typed_rule_identity(space.provider())
+        != TypedSectorAdmission::typed_rule_identity(expected.provider())
+    {
+        return Err(Error::RuleMismatch.into());
+    }
+    let leg = if axis < codomain_rank {
+        &homspace.codomain().legs()[axis]
+    } else {
+        &homspace.domain().legs()[axis - codomain_rank]
+    };
+    if leg != expected.leg() {
+        return Err(Error::InvalidArgument(format!(
+            "{operation}: axis {axis} is not the leg this selection was built from"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+/// `space`'s hom-space with leg `axis` replaced, built into a root layout of
+/// the same provider.
+fn space_with_replaced_leg<R>(
+    space: &BoundDynamicFusionMapSpace<R>,
+    axis: usize,
+    replacement: &SectorLeg,
+) -> Result<BoundDynamicFusionMapSpace<R>, TypedFacadeError<R>>
+where
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorRootDispatch<R>,
+{
+    let homspace = space.space().homspace();
+    let codomain_rank = homspace.codomain().len();
+    let replaced = |product: &FusionProductSpace, base: usize| {
+        FusionProductSpace::new(
+            product
+                .legs()
+                .iter()
+                .enumerate()
+                .map(|(offset, leg)| {
+                    if base + offset == axis {
+                        replacement.clone()
+                    } else {
+                        leg.clone()
+                    }
+                })
+                .collect::<Vec<_>>(),
+        )
+    };
+    let homspace = FusionTreeHomSpace::new(
+        replaced(homspace.codomain(), 0),
+        replaced(homspace.domain(), codomain_rank),
+    );
+    <R::Mode as TypedTensorRootDispatch<R>>::build_root(Arc::clone(space.provider_arc()), homspace)
+}
+
 /// The outcome of [`GradedSpace::find_truncated`]: what survives, and the norm
 /// of what does not.
 ///
@@ -14199,32 +14287,7 @@ where
             ))
             .into());
         }
-        let rank = self.rank();
-        if axis >= rank {
-            return Err(Error::InvalidArgument(format!(
-                "{operation}: axis {axis} is out of range for rank {rank}"
-            ))
-            .into());
-        }
-        if TypedSectorAdmission::typed_rule_identity(self.provider())
-            != TypedSectorAdmission::typed_rule_identity(expected.provider())
-        {
-            return Err(Error::RuleMismatch.into());
-        }
-        let codomain_rank = self.codomain_rank();
-        let homspace = self.logical_space().space().homspace();
-        let leg = if axis < codomain_rank {
-            &homspace.codomain().legs()[axis]
-        } else {
-            &homspace.domain().legs()[axis - codomain_rank]
-        };
-        if leg != expected.leg() {
-            return Err(Error::InvalidArgument(format!(
-                "{operation}: axis {axis} is not the leg this selection was built from"
-            ))
-            .into());
-        }
-        Ok(())
+        require_selected_leg_of(self.logical_space(), axis, expected, operation)
     }
 
     /// This tensor's hom-space with leg `axis` replaced, built into a root
@@ -14238,32 +14301,7 @@ where
         R: TypedSectorAdmission,
         R::Mode: TypedTensorRootDispatch<R>,
     {
-        let homspace = self.logical_space().space().homspace();
-        let codomain_rank = homspace.codomain().len();
-        let replaced = |product: &FusionProductSpace, base: usize| {
-            FusionProductSpace::new(
-                product
-                    .legs()
-                    .iter()
-                    .enumerate()
-                    .map(|(offset, leg)| {
-                        if base + offset == axis {
-                            replacement.clone()
-                        } else {
-                            leg.clone()
-                        }
-                    })
-                    .collect::<Vec<_>>(),
-            )
-        };
-        let homspace = FusionTreeHomSpace::new(
-            replaced(homspace.codomain(), 0),
-            replaced(homspace.domain(), codomain_rank),
-        );
-        <R::Mode as TypedTensorRootDispatch<R>>::build_root(
-            Arc::clone(self.logical_space().provider_arc()),
-            homspace,
-        )
+        space_with_replaced_leg(self.logical_space(), axis, replacement)
     }
 
     /// Restricts leg `axis` to the subspace named by `selection`.
@@ -14313,11 +14351,7 @@ where
         self.require_selected_leg(axis, selection.parent(), "restrict_leg")?;
         let _host_pool = self.runtime.enter_host_pool();
         let destination = self.root_with_replaced_leg(axis, selection.subspace().leg())?;
-        let table: Vec<(SectorId, usize)> = selection
-            .entries
-            .iter()
-            .map(|(sector, range)| (*sector, range.start))
-            .collect();
+        let table = selection.start_table();
         let mut starts: Vec<tenet_tensors::SectorStartTable<'_>> = vec![None; self.rank()];
         starts[axis] = Some(table.as_slice());
         let (source, source_data) = self.fusion_operand_and_data();

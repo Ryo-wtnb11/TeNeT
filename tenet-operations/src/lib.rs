@@ -116,7 +116,7 @@ mod owned_overwrite_buffer;
 #[doc(hidden)]
 pub use owned_blocks::take_owned_block_prefills;
 #[doc(hidden)]
-pub use owned_blocks::{overwrite_owned_blocks, BlockOverwrite};
+pub use owned_blocks::{overwrite_owned_blocks, overwrite_owned_member_blocks, BlockOverwrite};
 #[doc(hidden)]
 pub use owned_overwrite_buffer::{zeroed_payload, ZeroBytes};
 mod owned_trace;
