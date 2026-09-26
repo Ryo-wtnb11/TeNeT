@@ -68,11 +68,6 @@ pub(crate) use tenferro_adapter::{
 #[cfg(feature = "tenferro")]
 pub use tenferro_cpu::CpuBackendKind;
 
-/// The process's affinity-aware CPU count, the default runtime pool size
-/// (the count Tenferro's environment-free CPU context uses).
-#[cfg(feature = "tenferro")]
-pub use tenferro_cpu::available_parallelism;
-
 #[cfg(feature = "cuda")]
 pub use cuda_adapter::{
     cuda_copy_region_into, cuda_eigh_region, cuda_gemm_region_into, cuda_gemm_region_with_ops_into,

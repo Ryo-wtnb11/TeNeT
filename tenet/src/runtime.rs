@@ -1755,10 +1755,10 @@ impl RuntimeBuilder {
         // Built-in executors using the compiled default kind share this runtime
         // CPU context. Explicit nondefault providers receive a private context
         // in `with_shared_context`; injected executors own their configuration.
-        let shared_ctx = tenet_dense::SharedCpuContext::with_threads(
-            self.dense_threads
-                .unwrap_or_else(tenet_dense::available_parallelism),
-        )
+        let shared_ctx = match self.dense_threads {
+            Some(threads) => tenet_dense::SharedCpuContext::with_threads(threads),
+            None => tenet_dense::SharedCpuContext::with_available_parallelism(),
+        }
         .map_err(tenet_tensors::OperationError::Dense)?;
         // Injected backend wins; otherwise build the selected provider (faer by
         // default) on the shared context.

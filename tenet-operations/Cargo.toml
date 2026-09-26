@@ -48,3 +48,7 @@ harness = false
 [[bench]]
 name = "tree_transform_lowering"
 harness = false
+
+[lints.rust]
+# `tenet_scope_audit`: CI-only coverage audit of Host pool entry (host_pool.rs).
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tenet_scope_audit)"] }

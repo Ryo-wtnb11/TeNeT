@@ -79,8 +79,25 @@ fn current_pool() -> Option<SharedCpuContext> {
 pub fn current_threads() -> usize {
     CURRENT
         .with(|current| current.borrow().as_ref().map(SharedCpuContext::num_threads))
-        .unwrap_or_else(rayon::current_num_threads)
+        .unwrap_or_else(|| {
+            audit_unentered(HostPoolSite::Threads);
+            rayon::current_num_threads()
+        })
         .max(1)
+}
+
+/// Coverage audit (`--cfg tenet_scope_audit`, a CI row): a Host site reached
+/// on a caller thread with no entered pool means an eager operation that
+/// neither leases nor enters its runtime's pool, so its work would run on the
+/// ambient (global) pool. On a Rayon worker the ambient pool is the one being
+/// worked in, which is correct.
+#[inline(always)]
+fn audit_unentered(site: HostPoolSite) {
+    #[cfg(tenet_scope_audit)]
+    if rayon::current_thread_index().is_none() {
+        panic!("Host {site:?} site reached with no entered runtime pool");
+    }
+    let _ = site;
 }
 
 /// Runs a parallel region inside the entered pool. A one-thread pool runs it
@@ -89,6 +106,7 @@ pub fn current_threads() -> usize {
 pub fn install_region<R: Send>(site: HostPoolSite, op: impl FnOnce() -> R + Send) -> R {
     match current_pool() {
         None => {
+            audit_unentered(site);
             observe(site, None);
             op()
         }
@@ -117,7 +135,10 @@ pub fn strided<R: Send>(len: usize, op: impl FnOnce() -> R + Send) -> R {
             // ambient pool before its own size gate, which would initialize
             // Rayon's global pool from inside a runtime operation.
             true => with_execution_policy(ExecutionPolicy::Sequential, op),
-            false => op(),
+            false => {
+                audit_unentered(HostPoolSite::Strided);
+                op()
+            }
         };
     }
     install_region(HostPoolSite::Strided, op)
@@ -127,6 +148,8 @@ pub fn strided<R: Send>(len: usize, op: impl FnOnce() -> R + Send) -> R {
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HostPoolSite {
+    /// A degree cap read (`current_threads`); audit only, never observed.
+    Threads,
     Replay,
     PlanCompile,
     Strided,

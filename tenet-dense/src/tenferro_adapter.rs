@@ -188,9 +188,23 @@ impl SharedCpuContext {
         self.ctx.num_threads()
     }
 
+    /// One thread per CPU the process may run on (affinity-aware), and no
+    /// environment read: the default size of a runtime's CPU pool.
+    pub fn with_available_parallelism() -> Result<Self, DenseError> {
+        Self::with_threads(tenferro_cpu::available_parallelism())
+    }
+
     /// Runs `op` on this context's Rayon pool, the pool its dense kernels use.
     /// A one-thread context has no pool and runs `op` on the calling thread.
     /// Called from a worker of the same pool, `op` runs inline.
+    ///
+    /// Only for backend-free parallel regions (TeNeT's `host_pool`). Why not a
+    /// whole operation: the pool's workers are registered with this context's
+    /// Tenferro execution scope, so a dense backend call started on a worker
+    /// while another operation's dense call on the same context is active
+    /// panics with Tenferro's re-entry error (`BACKEND_REENTRY_PANIC`), even
+    /// without work stealing.
+    #[doc(hidden)]
     pub fn install<R: Send>(&self, op: impl FnOnce() -> R + Send) -> R {
         self.ctx.install(op)
     }
