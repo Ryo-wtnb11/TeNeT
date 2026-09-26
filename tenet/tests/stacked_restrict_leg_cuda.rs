@@ -44,6 +44,11 @@ macro_rules! device_restrict {
         device_restrict!(@dtype $label, &runtime, &a, &dual, &other, Complex64);
     }};
     (@dtype $label:expr, $runtime:expr, $a:expr, $dual:expr, $other:expr, $d:ty) => {{
+        // Why a closure: each expansion becomes its own stack frame. Inlined
+        // into one test function, the four symmetries times two dtypes
+        // overflow a debug test thread's stack once checked Generic SU(3) is
+        // enabled.
+        let check = || {
         // B = 3, 17 and 64: the submission count must not move with B.
         for count in [3usize, 17, 64] {
             let members = mixed_members!($runtime, $a, $dual, $d, count);
@@ -113,6 +118,8 @@ macro_rules! device_restrict {
             }
             assert_eq!(delta(before), (0, 0, 0, 0, 0), "rejections submit nothing");
         }
+        };
+        check();
     }};
 }
 
