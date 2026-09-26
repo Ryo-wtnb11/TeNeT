@@ -5297,6 +5297,15 @@ where
 
     /// Preserves a provider-side admission error.
     fn map_provider_error(error: R::Error) -> Self::FacadeError;
+
+    /// TensorKit `blockdim(P, c)`: the reduced dimension of coupled sector
+    /// `coupled` in the product space `product`, zero when it does not occur.
+    #[doc(hidden)]
+    fn coupled_block_dimension(
+        provider: &R,
+        product: &FusionProductSpace,
+        coupled: SectorId,
+    ) -> Result<usize, Self::FacadeError>;
 }
 
 /// Tensor-side root construction selected by a provider-owned mode.
@@ -5887,7 +5896,8 @@ where
 impl<R> TypedTruncationDispatch<R> for MultiplicityFreeAdmissionMode
 where
     R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
-        + MultiplicityFreeRigidSymbols<Scalar = f64>,
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra,
 {
     fn decide_bond_truncation<V>(
         provider: &R,
@@ -7161,12 +7171,25 @@ where
 
 impl<R> TypedTensorModeDispatch<R> for MultiplicityFreeAdmissionMode
 where
-    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>,
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + CheckedFusionAlgebra,
 {
     type FacadeError = Error;
 
     fn map_provider_error(error: <R as TypedSectorAdmission>::Error) -> Self::FacadeError {
         error.into()
+    }
+
+    fn coupled_block_dimension(
+        provider: &R,
+        product: &FusionProductSpace,
+        coupled: SectorId,
+    ) -> Result<usize, Self::FacadeError> {
+        Ok(product
+            .coupled_sector_block_dimensions(provider)?
+            .get(&coupled)
+            .copied()
+            .unwrap_or(0))
     }
 }
 
@@ -7221,6 +7244,21 @@ where
 
     fn map_provider_error(error: <R as TypedSectorAdmission>::Error) -> Self::FacadeError {
         GenericTensorError::Structure(CheckedGenericStructureError::Provider(error))
+    }
+
+    fn coupled_block_dimension(
+        provider: &R,
+        product: &FusionProductSpace,
+        coupled: SectorId,
+    ) -> Result<usize, Self::FacadeError> {
+        Ok(
+            tenet_matrixalgebra::coupled_sector_block_dimensions_generic_checked(
+                product, provider,
+            )?
+            .get(&coupled)
+            .copied()
+            .unwrap_or(0),
+        )
     }
 }
 
@@ -9610,20 +9648,27 @@ impl<S> BlockFusionTrees<S> {
 /// One coupled-sector matrix of a tensor map, borrowed without a copy:
 /// TensorKit's `block(t, c)`. See [`TensorMap::block`].
 ///
-/// Rows are the codomain fusion trees of the sector, columns the domain trees;
-/// each tree spans its degeneracy extent, column-major in its legs. Trees come
-/// in the order [`TensorMap::subblocks`] lists them for this sector, which is
-/// TeNeT's storage order and in general a permutation of TensorKit's
-/// `fusiontrees` order (see `docs/sector_id_compatibility.md`).
+/// Rows are the codomain fusion trees of the sector and columns the domain
+/// trees. Each tree owns a contiguous range of rows (columns) whose length is
+/// the product of its legs' degeneracies, indexed column-major in those legs.
+/// The trees and their ranges, in matrix order, are [`Self::row_trees`] and
+/// [`Self::col_trees`]. That order is TeNeT's storage order, which is in
+/// general a permutation of TensorKit's `fusiontrees` order (see
+/// `docs/sector_id_compatibility.md`); presenting TensorKit's order would copy.
 #[derive(Debug)]
-pub struct CoupledBlock<'a, D, S = Vec<D>> {
+pub struct CoupledBlock<'a, R, D, S = Vec<D>> {
     rows: usize,
     cols: usize,
     payload: CoupledBlockPayload<'a, D, S>,
+    provider: &'a R,
+    /// The stored region and whether rows and columns are swapped relative
+    /// to it (a lazy adjoint); `None` for an absent sector's empty view.
+    region: Option<(Arc<[CoupledSectorRegion]>, usize, bool)>,
 }
 
 /// Where the entries of a [`CoupledBlock`] live.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum CoupledBlockPayload<'a, D, S = Vec<D>> {
     /// A column-major matrix inside `storage`, starting at `offset`.
     ///
@@ -9651,15 +9696,56 @@ impl<D, S> Clone for CoupledBlockPayload<'_, D, S> {
 
 impl<D, S> Copy for CoupledBlockPayload<'_, D, S> {}
 
-impl<D, S> Clone for CoupledBlock<'_, D, S> {
+impl<R, D, S> Clone for CoupledBlock<'_, R, D, S> {
     fn clone(&self) -> Self {
-        *self
+        Self {
+            rows: self.rows,
+            cols: self.cols,
+            payload: self.payload,
+            provider: self.provider,
+            region: self.region.clone(),
+        }
     }
 }
 
-impl<D, S> Copy for CoupledBlock<'_, D, S> {}
+/// The provider labels of one fusion tree: one side of a
+/// [`BlockFusionTrees`] pair, as [`CoupledBlock::row_trees`] and
+/// [`CoupledBlock::col_trees`] report it.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct FusionTreeLabels<S> {
+    coupled: S,
+    uncoupled: Vec<S>,
+    innerlines: Vec<S>,
+    vertices: Vec<MultiplicityIndex>,
+}
 
-impl<'a, D, S> CoupledBlock<'a, D, S> {
+impl<S> FusionTreeLabels<S> {
+    /// The sector the tree couples to.
+    #[inline]
+    pub fn coupled(&self) -> &S {
+        &self.coupled
+    }
+
+    /// Leg sectors, in axis order.
+    #[inline]
+    pub fn uncoupled(&self) -> &[S] {
+        &self.uncoupled
+    }
+
+    /// Intermediate fusion sectors, from the innermost outwards.
+    #[inline]
+    pub fn innerlines(&self) -> &[S] {
+        &self.innerlines
+    }
+
+    /// Outer-multiplicity labels, in fusion-vertex order.
+    #[inline]
+    pub fn vertices(&self) -> &[MultiplicityIndex] {
+        &self.vertices
+    }
+}
+
+impl<'a, R, D, S> CoupledBlock<'a, R, D, S> {
     /// Number of rows: the codomain block dimension of the sector.
     #[inline]
     pub fn rows(&self) -> usize {
@@ -9679,7 +9765,67 @@ impl<'a, D, S> CoupledBlock<'a, D, S> {
     }
 }
 
-impl<D, S> CoupledBlock<'_, D, S>
+impl<R, D, S> CoupledBlock<'_, R, D, S>
+where
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorModeDispatch<R>,
+{
+    /// The codomain fusion trees in row order, each with its row range.
+    ///
+    /// Decodes labels and allocates the returned list; reads no payload.
+    pub fn row_trees(
+        &self,
+    ) -> Result<Vec<(FusionTreeLabels<R::Sector>, core::ops::Range<usize>)>, TypedFacadeError<R>>
+    {
+        self.trees(false)
+    }
+
+    /// The domain fusion trees in column order, each with its column range.
+    ///
+    /// Decodes labels and allocates the returned list; reads no payload.
+    pub fn col_trees(
+        &self,
+    ) -> Result<Vec<(FusionTreeLabels<R::Sector>, core::ops::Range<usize>)>, TypedFacadeError<R>>
+    {
+        self.trees(true)
+    }
+
+    fn trees(
+        &self,
+        columns: bool,
+    ) -> Result<Vec<(FusionTreeLabels<R::Sector>, core::ops::Range<usize>)>, TypedFacadeError<R>>
+    {
+        let Some((regions, index, swapped)) = &self.region else {
+            return Ok(Vec::new());
+        };
+        let region = &regions[*index];
+        let extents = if columns != *swapped {
+            region.col_trees()
+        } else {
+            region.row_trees()
+        };
+        extents
+            .iter()
+            .map(|extent| {
+                let tree = extent.tree();
+                let labels = FusionTreeLabels {
+                    coupled: TypedSectorAdmission::try_decode_label(self.provider, tree.coupled())
+                        .map_err(<R::Mode as TypedTensorModeDispatch<R>>::map_provider_error)?,
+                    uncoupled: decode_sectors(self.provider, tree.uncoupled())?,
+                    innerlines: decode_sectors(self.provider, tree.innerlines())?,
+                    vertices: tree.vertices().to_vec(),
+                };
+                let end = extent
+                    .offset()
+                    .checked_add(extent.extent().map_err(Error::from)?)
+                    .ok_or_else(|| internal_layout_error("tree extent overflow"))?;
+                Ok((labels, extent.offset()..end))
+            })
+            .collect()
+    }
+}
+
+impl<R, D, S> CoupledBlock<'_, R, D, S>
 where
     D: TensorScalar,
     S: HostReadableStorage<D>,
@@ -15584,42 +15730,74 @@ where
     /// values, as TensorKit returns `block(parent, c)'` and `Diagonal(view)`.
     /// Row and column order are described on [`CoupledBlock`].
     ///
+    /// A sector the tensor stores no block for gives TensorKit's empty view:
+    /// `blockdim(codomain, c) × blockdim(domain, c)`, where one of the two is
+    /// zero.
+    ///
     /// # Complexity
     ///
-    /// `O(log C)` for `C` coupled sectors, after the per-structure region
-    /// table is compiled once (`O(subblocks)`, cached and shared with
-    /// [`Self::tr`] and [`Self::inner`]).
+    /// `O(log C)` for `C` stored coupled sectors, after the per-structure
+    /// region table is compiled once (`O(subblocks)`, cached and shared with
+    /// [`Self::tr`] and [`Self::inner`]). An absent sector additionally folds
+    /// the fused dimensions of both sides, `O(legs · sectors · channels)`.
     ///
     /// # Errors
     ///
-    /// Fails when the provider cannot encode `coupled`, or when the tensor has
-    /// no block in that sector. TensorKit returns an empty `d₁ × 0` or
-    /// `0 × d₂` view there instead; TeNeT reports the absence.
+    /// Returns the provider's error when it cannot encode `coupled`.
     pub fn block(
         &self,
         coupled: &R::Sector,
-    ) -> Result<CoupledBlock<'_, D, S>, TypedFacadeError<R>> {
-        let id = TypedSectorAdmission::try_encode_label(self.logical_space().provider(), coupled)
+    ) -> Result<CoupledBlock<'_, R, D, S>, TypedFacadeError<R>> {
+        let provider = self.logical_space().provider();
+        let id = TypedSectorAdmission::try_encode_label(provider, coupled)
             .map_err(<R::Mode as TypedTensorModeDispatch<R>>::map_provider_error)?;
         let regions = self.stored_sector_regions()?;
-        let index = regions
-            .binary_search_by_key(&id, CoupledSectorRegion::coupled)
-            .map_err(|_| {
-                TypedFacadeError::<R>::from(Error::InvalidArgument(format!(
-                    "the tensor has no block in coupled sector {coupled:?}"
-                )))
-            })?;
-        self.coupled_block(&regions[index])
-            .map_err(TypedFacadeError::<R>::from)
+        match regions.binary_search_by_key(&id, CoupledSectorRegion::coupled) {
+            Ok(index) => self
+                .coupled_block(regions, index)
+                .map_err(TypedFacadeError::<R>::from),
+            Err(_) => {
+                let homspace = self.logical_space().space().homspace();
+                let rows = <R::Mode as TypedTensorModeDispatch<R>>::coupled_block_dimension(
+                    provider,
+                    homspace.codomain(),
+                    id,
+                )?;
+                let cols = <R::Mode as TypedTensorModeDispatch<R>>::coupled_block_dimension(
+                    provider,
+                    homspace.domain(),
+                    id,
+                )?;
+                debug_assert!(
+                    rows == 0 || cols == 0,
+                    "a stored layout covers every nonempty sector"
+                );
+                let payload = match self.storage_body().data.as_ref() {
+                    TypedData::Dense(storage) => CoupledBlockPayload::Dense {
+                        storage,
+                        offset: 0,
+                        adjoint: matches!(self.repr, TypedTensorRepr::Adjoint(_)),
+                    },
+                    TypedData::Diagonal(_) => CoupledBlockPayload::Diagonal(&[]),
+                };
+                Ok(CoupledBlock {
+                    rows,
+                    cols,
+                    payload,
+                    provider,
+                    region: None,
+                })
+            }
+        }
     }
 
-    /// Every coupled sector with its matrix: TensorKit `blocks(t)`.
+    /// Every stored coupled sector with its matrix: TensorKit `blocks(t)`.
     ///
     /// Sectors come in ascending [`tenet_core::SectorId`] order, the storage
     /// order [`GradedSpace::sectors`] also uses, which is not TensorKit's
-    /// `blocksectors` order in general. Each view is
-    /// the one [`Self::block`] returns. All labels are decoded before the
-    /// iterator is returned, so iteration is infallible.
+    /// `blocksectors` order in general. Each view is the one [`Self::block`]
+    /// returns. All labels are decoded before the iterator is returned, so
+    /// iteration is infallible.
     ///
     /// # Errors
     ///
@@ -15631,18 +15809,18 @@ where
     pub fn blocks<'a>(
         &'a self,
     ) -> Result<
-        impl ExactSizeIterator<Item = (R::Sector, CoupledBlock<'a, D, S>)> + 'a,
+        impl ExactSizeIterator<Item = (R::Sector, CoupledBlock<'a, R, D, S>)> + 'a,
         TypedFacadeError<R>,
     > {
         let regions = self.stored_sector_regions()?;
         let provider = self.logical_space().provider();
-        let blocks = regions
-            .iter()
-            .map(|region| {
-                let sector = TypedSectorAdmission::try_decode_label(provider, region.coupled())
-                    .map_err(<R::Mode as TypedTensorModeDispatch<R>>::map_provider_error)?;
+        let blocks = (0..regions.len())
+            .map(|index| {
+                let sector =
+                    TypedSectorAdmission::try_decode_label(provider, regions[index].coupled())
+                        .map_err(<R::Mode as TypedTensorModeDispatch<R>>::map_provider_error)?;
                 let block = self
-                    .coupled_block(region)
+                    .coupled_block(Arc::clone(&regions), index)
                     .map_err(TypedFacadeError::<R>::from)?;
                 Ok((sector, block))
             })
@@ -15654,10 +15832,23 @@ where
     /// that is the parent's layout, whose sector `c` holds `block(t', c)'`.
     fn stored_sector_regions(&self) -> Result<Arc<[CoupledSectorRegion]>, TypedFacadeError<R>> {
         let space = self.storage_body().space.space();
-        sector_regions(space.structure(), space.nout()).map_err(TypedFacadeError::<R>::from)
+        let regions =
+            sector_regions(space.structure(), space.nout()).map_err(TypedFacadeError::<R>::from)?;
+        debug_assert!(
+            regions
+                .windows(2)
+                .all(|pair| pair[0].coupled() < pair[1].coupled()),
+            "coupled regions are sorted by sector id"
+        );
+        Ok(regions)
     }
 
-    fn coupled_block(&self, region: &CoupledSectorRegion) -> Result<CoupledBlock<'_, D, S>, Error> {
+    fn coupled_block(
+        &self,
+        regions: Arc<[CoupledSectorRegion]>,
+        index: usize,
+    ) -> Result<CoupledBlock<'_, R, D, S>, Error> {
+        let region = &regions[index];
         let adjoint = matches!(self.repr, TypedTensorRepr::Adjoint(_));
         let (rows, cols) = if adjoint {
             (region.cols(), region.rows())
@@ -15693,6 +15884,8 @@ where
             rows,
             cols,
             payload,
+            provider: self.logical_space().provider(),
+            region: Some((regions, index, adjoint)),
         })
     }
 }

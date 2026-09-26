@@ -107,7 +107,7 @@ impl Mat {
     }
 }
 
-fn read<D: Val, S: HostReadableStorage<D>>(block: &CoupledBlock<'_, D, S>) -> Mat {
+fn read<R, D: Val, S: HostReadableStorage<D>>(block: &CoupledBlock<'_, R, D, S>) -> Mat {
     let mut out = Mat::zeros(block.rows(), block.cols());
     for c in 0..block.cols() {
         for r in 0..block.rows() {
@@ -138,6 +138,16 @@ fn product(values: impl IntoIterator<Item = usize>) -> usize {
     values.into_iter().product()
 }
 
+/// A tree's row or column: its label key and its range in the matrix.
+type Extents = Vec<(String, std::ops::Range<usize>)>;
+
+/// One expected sector: label, matrix, row trees, column trees.
+type Expected<S> = (S, Mat, Extents, Extents);
+
+fn tree_key<S: Debug>(uncoupled: &[S], innerlines: &[S], vertices: &[MultiplicityIndex]) -> String {
+    format!("{uncoupled:?}{innerlines:?}{vertices:?}")
+}
+
 /// Expected sector matrices of `t`, assembled only from its subblock labels,
 /// its legs' degeneracies and `value`. Row trees are the codomain trees in
 /// first-appearance order over `subblocks()`, column trees likewise; each tree
@@ -145,7 +155,7 @@ fn product(values: impl IntoIterator<Item = usize>) -> usize {
 fn expected_blocks<R, D>(
     t: &TensorMap<R, D>,
     mut value: impl FnMut(&BlockFusionTrees<R::Sector>, &[usize]) -> Complex64,
-) -> Vec<(R::Sector, Mat)>
+) -> Vec<Expected<R::Sector>>
 where
     R: TypedSectorAdmission,
     R::Mode: tenet::typed::TypedTensorModeDispatch<R>,
@@ -168,17 +178,15 @@ where
     let mut sectors: Vec<Sector<R::Sector>> = Vec::new();
     for index in 0..t.subblock_count() {
         let trees = t.subblock_fusion_trees(index).unwrap();
-        let row_key = format!(
-            "{:?}{:?}{:?}",
+        let row_key = tree_key(
             trees.codomain_uncoupled(),
             trees.codomain_innerlines(),
-            trees.codomain_vertices()
+            trees.codomain_vertices(),
         );
-        let col_key = format!(
-            "{:?}{:?}{:?}",
+        let col_key = tree_key(
             trees.domain_uncoupled(),
             trees.domain_innerlines(),
-            trees.domain_vertices()
+            trees.domain_vertices(),
         );
         let position = match sectors.iter().position(|s| &s.label == trees.coupled()) {
             Some(position) => position,
@@ -251,14 +259,44 @@ where
                     }
                 }
             }
-            (sector.label, matrix)
+            let extents = |keys: &[(String, Vec<usize>)], offsets: &[usize]| -> Extents {
+                keys.iter()
+                    .zip(offsets)
+                    .map(|((key, dims), &start)| {
+                        (key.clone(), start..start + product(dims.iter().copied()))
+                    })
+                    .collect()
+            };
+            let rows = extents(&sector.rows, &row_offsets);
+            let cols = extents(&sector.cols, &col_offsets);
+            (sector.label, matrix, rows, cols)
+        })
+        .collect()
+}
+
+fn labelled_extents<R>(
+    trees: Vec<(
+        tenet::typed::FusionTreeLabels<R::Sector>,
+        std::ops::Range<usize>,
+    )>,
+) -> Extents
+where
+    R: TypedSectorAdmission,
+{
+    trees
+        .into_iter()
+        .map(|(tree, range)| {
+            (
+                tree_key(tree.uncoupled(), tree.innerlines(), tree.vertices()),
+                range,
+            )
         })
         .collect()
 }
 
 /// `blocks()` and every `block(&c)` equal `expected` exactly, sector for
 /// sector and in the same (storage) order.
-fn assert_blocks_equal<R, D>(what: &str, t: &TensorMap<R, D>, expected: &[(R::Sector, Mat)])
+fn assert_blocks_equal<R, D>(what: &str, t: &TensorMap<R, D>, expected: &[Expected<R::Sector>])
 where
     R: TypedSectorAdmission,
     R::Mode: tenet::typed::TypedTensorModeDispatch<R>,
@@ -266,8 +304,26 @@ where
 {
     let blocks: Vec<_> = t.blocks().unwrap().collect();
     assert_eq!(blocks.len(), expected.len(), "{what}: sector count");
-    for ((sector, block), (want_sector, want)) in blocks.iter().zip(expected) {
+    for ((sector, block), (want_sector, want, rows, cols)) in blocks.iter().zip(expected) {
         assert_eq!(sector, want_sector, "{what}: sector order");
+        assert_eq!(
+            &labelled_extents::<R>(block.row_trees().unwrap()),
+            rows,
+            "{what}: row trees of {sector:?}"
+        );
+        assert_eq!(
+            &labelled_extents::<R>(block.col_trees().unwrap()),
+            cols,
+            "{what}: column trees of {sector:?}"
+        );
+        for (tree, _) in block
+            .row_trees()
+            .unwrap()
+            .iter()
+            .chain(&block.col_trees().unwrap())
+        {
+            assert_eq!(tree.coupled(), sector, "{what}: tree coupled sector");
+        }
         let got = read(block);
         assert_eq!(got.rows, want.rows, "{what}: rows of {sector:?}");
         assert_eq!(got.cols, want.cols, "{what}: cols of {sector:?}");
@@ -369,7 +425,8 @@ where
     assert_blocks_equal(&format!("{what} (materialized subblocks)"), lazy, &expected);
 }
 
-fn compose_case<R, D>(what: &str, a: &TensorMap<R, D>, b: &TensorMap<R, D>)
+/// Returns whether some factor block was TensorKit's empty view.
+fn compose_case<R, D>(what: &str, a: &TensorMap<R, D>, b: &TensorMap<R, D>) -> bool
 where
     R: TypedSectorAdmission,
     R::Mode:
@@ -378,15 +435,14 @@ where
 {
     let ab = a.compose(b).unwrap();
     let mut count = 0;
+    let mut empty_factor = false;
     for (sector, block) in ab.blocks().unwrap() {
-        // TensorKit's empty `d₁ × 0` block of a factor makes the product zero.
-        let want = match (a.block(&sector), b.block(&sector)) {
-            (Ok(a), Ok(b)) => {
-                count += 1;
-                read(&a).mul(&read(&b))
-            }
-            _ => Mat::zeros(block.rows(), block.cols()),
-        };
+        // A factor without a stored block gives TensorKit's empty `d₁ × 0` or
+        // `0 × d₂` view, so the plain product is the zero block there.
+        let (a_c, b_c) = (a.block(&sector).unwrap(), b.block(&sector).unwrap());
+        empty_factor |= a_c.cols() == 0 || b_c.rows() == 0;
+        let want = read(&a_c).mul(&read(&b_c));
+        count += 1;
         assert_mat_close(
             &format!("{what}: block(A∘B, {sector:?})"),
             &read(&block),
@@ -394,6 +450,7 @@ where
         );
     }
     assert!(count > 1, "{what}: several coupled sectors");
+    empty_factor
 }
 
 macro_rules! physical_case {
@@ -475,7 +532,7 @@ macro_rules! multiplicity_free {
             let a = label_case::<_, f64>(concat!($name, " f64"), $rt, &[&v, &w], &[&v]);
             let b = label_case::<_, f64>(concat!($name, " f64 B"), $rt, &[&v], &[&v, &w]);
             adjoint_case(concat!($name, " f64 adjoint"), &a);
-            compose_case(concat!($name, " f64 compose"), &a, &b);
+            assert!(compose_case(concat!($name, " f64 compose"), &a, &b));
             let $t = &a;
             $extra;
         }
@@ -483,7 +540,7 @@ macro_rules! multiplicity_free {
             let a = label_case::<_, Complex64>(concat!($name, " c64"), $rt, &[&v, &w], &[&v]);
             let b = label_case::<_, Complex64>(concat!($name, " c64 B"), $rt, &[&v], &[&v, &w]);
             adjoint_case(concat!($name, " c64 adjoint"), &a);
-            compose_case(concat!($name, " c64 compose"), &a, &b);
+            assert!(compose_case(concat!($name, " c64 compose"), &a, &b));
             let $t = &a;
             $extra;
         }
@@ -561,12 +618,47 @@ fn compact_diagonal_block_is_its_stored_spectrum() {
 }
 
 #[test]
-fn absent_or_foreign_coupled_sector_is_an_error() {
+fn absent_coupled_sector_is_tensorkits_empty_view() {
     let rt = Runtime::builder().build().unwrap();
     let (v, w) = u1_legs();
     let t = TensorMap::<_, f64>::from_block_fn(&rt, [&v, &w], [&v], label_value).unwrap();
-    assert!(t.block(&U1Irrep::new(7)).is_err());
-    assert!(t.block(&U1Irrep::new(0)).is_ok());
+    let lazy = t.clone().adjoint().unwrap();
+    // `-2` fuses in the codomain `v ⊗ w'` (3·2 = 6 states) but not in the
+    // domain `v`; `7` fuses nowhere.
+    for (sector, rows, cols) in [(-2, 6, 0), (7, 0, 0)] {
+        let block = t.block(&U1Irrep::new(sector)).unwrap();
+        assert_eq!((block.rows(), block.cols()), (rows, cols), "{sector}");
+        assert!(block.get(0, 0).is_none());
+        assert!(block.row_trees().unwrap().is_empty());
+        assert!(matches!(
+            block.payload(),
+            CoupledBlockPayload::Dense { adjoint: false, .. }
+        ));
+        let swapped = lazy.block(&U1Irrep::new(sector)).unwrap();
+        assert_eq!((swapped.rows(), swapped.cols()), (cols, rows), "{sector}'");
+        assert!(swapped.get(0, 0).is_none());
+        assert!(matches!(
+            swapped.payload(),
+            CoupledBlockPayload::Dense { adjoint: true, .. }
+        ));
+    }
+    assert!(t
+        .blocks()
+        .unwrap()
+        .all(|(sector, _)| sector != U1Irrep::new(-2)));
+
+    let d = TensorMap::<_, f64>::diagonal(
+        &rt,
+        &v,
+        [(-1, 2), (0, 1), (1, 3)].map(|(q, n)| SectorSpectrum {
+            sector: U1Irrep::new(q),
+            values: vec![1.0; n],
+        }),
+    )
+    .unwrap();
+    let block = d.block(&U1Irrep::new(5)).unwrap();
+    assert_eq!((block.rows(), block.cols()), (0, 0));
+    assert!(matches!(block.payload(), CoupledBlockPayload::Diagonal(values) if values.is_empty()));
 }
 
 #[cfg(feature = "racah-generated")]
@@ -604,7 +696,11 @@ mod su3 {
         );
         let b = label_case::<_, D>(what, &rt, &[&octet], &[&chiral, &dual]);
         compose_case(what, &a, &b);
+        let wide = label_case::<_, D>(what, &rt, &[&octet], &[&octet, &octet]);
+        assert!(compose_case(what, &a, &wide), "{what}: empty factor block");
         adjoint_view_case(what, &b, &b.adjoint().unwrap());
+        // Only a label the provider cannot encode is an error.
+        assert!(a.block(&vec![1i64]).is_err(), "{what}: foreign label");
 
         let values = |n: usize| (0..n).map(|i| D::make(i as u64 + 11)).collect::<Vec<_>>();
         let d = TensorMap::<_, D>::diagonal(

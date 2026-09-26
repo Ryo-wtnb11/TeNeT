@@ -1721,7 +1721,7 @@ fn checked_only_provider_uses_ordinary_typed_ownership_and_vertices() {
 }
 
 #[test]
-fn checked_generic_blocks_decode_transactionally_and_keep_outer_multiplicity() {
+fn checked_generic_subblocks_decode_transactionally_and_keep_outer_multiplicity() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
     let leg = GradedSpace::try_new_with_arc(Arc::clone(&provider), [(Label::X, 1)]).unwrap();

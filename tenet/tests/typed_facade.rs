@@ -1318,7 +1318,7 @@ fn tensor_map_inspection_round_trips_the_spaces_and_blocks() {
 }
 
 #[test]
-fn labelled_blocks_borrow_u1_and_su2_values_in_canonical_order() {
+fn labelled_subblocks_borrow_u1_and_su2_values_in_canonical_order() {
     let _guard = cache_lock();
     let runtime = runtime();
     let provider = Arc::new(tenet::core::U1FusionRule);
@@ -1407,7 +1407,7 @@ fn labelled_blocks_borrow_u1_and_su2_values_in_canonical_order() {
 }
 
 #[test]
-fn block_fusion_trees_reports_a_non_self_dual_domain_label() {
+fn subblock_fusion_trees_reports_a_non_self_dual_domain_label() {
     // What: a dual domain leg carrying charge 2 — whose dual is charge 1, so a
     // confusion between the two would show — is decoded as charge 2, matching
     // the convention that a tree labels a domain leg with the space's own
