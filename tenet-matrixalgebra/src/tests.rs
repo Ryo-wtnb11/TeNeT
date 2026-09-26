@@ -1,11 +1,12 @@
 use tenet_core::{
     product_fusion_rule, BlockKey, BlockSpec, BlockStructure, BraidingStyleKind,
-    CheckedGenericFusion, CheckedGenericRigidSymbols, CoreError, FermionParityFusionRule,
-    FusionProductSpace, FusionRule, FusionStyleKind, FusionTensorMapSpace, FusionTreeHomSpace,
-    FusionTreeKey, GenericFArray, GenericFusionSymbols, GenericRMatrix, GenericRigidSymbols,
-    MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols,
-    RuleIdentity, SU2FusionRule, SU2Irrep, SectorId, SectorLeg, SectorVec, TensorMap,
-    TensorMapSpace, U1FusionRule, U1Irrep, Z2FusionRule,
+    CheckedGenericFusion, CheckedGenericRigidSymbols, CoreError, CoupledSectorFold,
+    FermionParityFusionRule, FusionProductSpace, FusionRule, FusionStyleKind, FusionTensorMapSpace,
+    FusionTreeHomSpace, FusionTreeKey, GenericFArray, GenericFusionSymbols, GenericRMatrix,
+    GenericRigidSymbols, InfallibleGeneric, MultiplicityFreeFusionRule,
+    MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols, RuleIdentity, SU2FusionRule,
+    SU2Irrep, SectorId, SectorLeg, SectorVec, TensorMap, TensorMapSpace, U1FusionRule, U1Irrep,
+    Z2FusionRule,
 };
 use tenet_tensors::{
     BoundDynamicFusionMapSpace, DenseTreeTransformOperations, DynamicFusionMapSpace,
@@ -16738,4 +16739,200 @@ fn checked_generic_full_null_ops_keep_packing_padded_input() {
     left_null_dyn_checked_generic(&mut dense, &expert).unwrap();
     right_null_dyn_checked_generic(&mut dense, &expert).unwrap();
     assert_eq!(crate::factorize::input_pack_bytes(), 4 * packed_len);
+}
+
+struct FailSingleLegFold {
+    rule: FactorGenericRule,
+    fail_at: usize,
+    single_leg_folds: Cell<usize>,
+}
+
+impl FusionRule for FailSingleLegFold {
+    fn rule_identity(&self) -> RuleIdentity {
+        self.rule.rule_identity()
+    }
+    fn fusion_style(&self) -> FusionStyleKind {
+        self.rule.fusion_style()
+    }
+    fn braiding_style(&self) -> BraidingStyleKind {
+        self.rule.braiding_style()
+    }
+    fn vacuum(&self) -> SectorId {
+        self.rule.vacuum()
+    }
+    fn dual(&self, sector: SectorId) -> SectorId {
+        self.rule.dual(sector)
+    }
+    fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+        self.rule.fusion_channels(left, right)
+    }
+    fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+        self.rule.nsymbol(left, right, coupled)
+    }
+}
+
+impl CheckedGenericFusion for FailSingleLegFold {
+    type Error = LateGenericError;
+
+    fn rule_identity(&self) -> RuleIdentity {
+        self.rule.rule_identity()
+    }
+    fn fusion_style(&self) -> FusionStyleKind {
+        self.rule.fusion_style()
+    }
+    fn braiding_style(&self) -> BraidingStyleKind {
+        self.rule.braiding_style()
+    }
+    fn vacuum(&self) -> SectorId {
+        self.rule.vacuum()
+    }
+    fn try_dual(&self, sector: SectorId) -> Result<SectorId, Self::Error> {
+        Ok(self.rule.dual(sector))
+    }
+    fn try_fusion_channels(
+        &self,
+        left: SectorId,
+        right: SectorId,
+    ) -> Result<SectorVec, Self::Error> {
+        Ok(self.rule.fusion_channels(left, right))
+    }
+    fn try_fusion_channels_in_table(
+        &self,
+        left: SectorId,
+        right: SectorId,
+    ) -> Result<SectorVec, Self::Error> {
+        self.try_fusion_channels(left, right)
+    }
+    fn try_coupled_sector_fold(
+        &self,
+        effective: &[SectorId],
+    ) -> Result<CoupledSectorFold, Self::Error> {
+        if effective.len() == 1 {
+            let call = self.single_leg_folds.get() + 1;
+            self.single_leg_folds.set(call);
+            if call == self.fail_at {
+                return Err(LateGenericError(call));
+            }
+        }
+        Ok(InfallibleGeneric::new(&self.rule)
+            .try_coupled_sector_fold(effective)
+            .unwrap())
+    }
+    fn try_nsymbol(
+        &self,
+        left: SectorId,
+        right: SectorId,
+        coupled: SectorId,
+    ) -> Result<usize, Self::Error> {
+        Ok(self.rule.nsymbol(left, right, coupled))
+    }
+}
+
+impl CheckedGenericRigidSymbols for FailSingleLegFold {
+    type Scalar = f64;
+
+    fn try_sqrt_dim_scalar(&self, sector: SectorId) -> Result<Self::Scalar, Self::Error> {
+        Ok(self.rule.sqrt_dim_scalar(sector))
+    }
+    fn try_inv_sqrt_dim_scalar(&self, sector: SectorId) -> Result<Self::Scalar, Self::Error> {
+        Ok(self.rule.inv_sqrt_dim_scalar(sector))
+    }
+    fn try_frobenius_schur_phase_scalar(
+        &self,
+        sector: SectorId,
+    ) -> Result<Self::Scalar, Self::Error> {
+        Ok(self.rule.frobenius_schur_phase_scalar(sector))
+    }
+    fn try_f_symbol_generic(
+        &self,
+        a: SectorId,
+        b: SectorId,
+        c: SectorId,
+        d: SectorId,
+        e: SectorId,
+        f: SectorId,
+    ) -> Result<GenericFArray<Self::Scalar>, Self::Error> {
+        Ok(self.rule.f_symbol_generic(a, b, c, d, e, f))
+    }
+    fn try_r_symbol_generic(
+        &self,
+        a: SectorId,
+        b: SectorId,
+        coupled: SectorId,
+    ) -> Result<GenericRMatrix<Self::Scalar>, Self::Error> {
+        Ok(self.rule.r_symbol_generic(a, b, coupled))
+    }
+}
+
+#[test]
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
+fn checked_generic_svd_compact_preserves_a_diagonal_s_fold_failure() {
+    // What: a provider error while laying out checked compact SVD's dense `S`
+    // is returned unchanged as `Provider(e)`, after both dense SVDs and with
+    // the input untouched. (Formerly asserted through the removed
+    // `svd_trunc_factors_dyn_checked_generic`, whose compact call built this
+    // `S`; #1534.) U and Vh each enumerate their layout once and fold both
+    // one-leg bond sectors (U 1-2, Vh 3-4), so S's first fold is the fifth.
+    const FIRST_S_FOLD: usize = 5;
+    let (source, data) = generic_factorization_input();
+    let failing_provider = Arc::new(FailSingleLegFold {
+        rule: FactorGenericRule,
+        fail_at: FIRST_S_FOLD,
+        single_leg_folds: Cell::new(0),
+    });
+    let failing_space = BoundDynamicFusionMapSpace::bind_generic(
+        source.space().clone(),
+        Arc::clone(&failing_provider),
+    )
+    .unwrap();
+    let input = BoundDynamicTensorRef::try_new(&failing_space, &data).unwrap();
+    let before = input.data().to_vec();
+    let mut dense = CountingDense::default();
+    let result = svd_compact_dyn_checked_generic(&mut dense, &input);
+
+    assert!(matches!(
+        result,
+        Err(CheckedGenericFactorPlanError::Provider(LateGenericError(call)))
+            if call == FIRST_S_FOLD
+    ));
+    assert_eq!(failing_provider.single_leg_folds.get(), FIRST_S_FOLD);
+    assert_eq!(dense.svd_calls, 2);
+    assert_eq!(dense.svd_into_calls, 0);
+    assert_eq!(dense.svd_vals_calls, 0);
+    assert_eq!(input.data(), before);
+}
+
+#[test]
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "the checked Generic API requires Arc identity while Cell is a single-threaded call spy"
+)]
+fn checked_generic_svd_compact_enumerates_each_factor_layout_once() {
+    // What: checked compact SVD queries the provider for exactly one
+    // enumeration of each of the U, S and Vh spaces. (The truncating half of
+    // the former test went with `svd_trunc_factors_dyn_checked_generic`,
+    // #1534.)
+    let (source, data) = generic_factorization_input();
+    let provider = Arc::new(LateGenericSpy {
+        rule: FactorGenericRule,
+        fail_at: usize::MAX,
+        calls: Cell::new(0),
+    });
+    let checked =
+        BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
+            .unwrap();
+    let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
+    let mut dense = CountingDense::default();
+    let (u, s, vh) = svd_compact_dyn_checked_generic(&mut dense, &input).unwrap();
+    let compact_calls = provider.calls.get();
+    assert!(s.data().len() > 1);
+    assert_eq!(
+        compact_calls,
+        checked_enumeration_calls(&u)
+            + checked_enumeration_calls(&s)
+            + checked_enumeration_calls(&vh)
+    );
 }

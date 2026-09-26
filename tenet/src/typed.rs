@@ -14916,6 +14916,14 @@ where
     /// [`Error::InvalidArgument`] for a lazy adjoint (adjoin the result of the
     /// owned parent instead), for a receiver that is not `bond <- bond`, and
     /// for a layout whose blocks are not fusion-tree keyed.
+    ///
+    /// Each sector is decoded to its provider label. A provider that cannot
+    /// decode one returns its own error: for a checked Generic provider that
+    /// is [`GenericTensorError::Structure`] wrapping
+    /// [`CheckedGenericStructureError::Provider`],
+    /// and for a multiplicity-free provider [`Error::FusionAlgebra`]. No
+    /// partial spectrum is returned. In a truncated factorization this is the
+    /// step where a decode failure surfaces, before `find_truncated`.
     pub fn diagview(&self) -> Result<Vec<SectorSpectrum<R::Sector, D>>, TypedFacadeError<R>> {
         let body = self.owned_body().ok_or_else(|| {
             TypedFacadeError::<R>::from(Error::InvalidArgument(

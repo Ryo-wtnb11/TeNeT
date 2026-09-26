@@ -6,10 +6,11 @@
 //!
 //! * [`sector_matrices!`] reads each coupled sector's reduced matrix (TensorKit
 //!   `block(t, c)`) from the tensor's public blocks. Rows are grouped by
-//!   codomain tree and columns by domain tree, both in first-appearance
-//!   order, and a block's multi-index is linearized first-axis-fastest. The
-//!   arrangement is arbitrary; spectra do not depend on it, and a
-//!   reconstruction is compared only with another matrix read the same way.
+//!   codomain tree and columns by domain tree, both in the sorted
+//!   order of their labels, and a block's multi-index is linearized
+//!   first-axis-fastest. Singular values do not depend on the arrangement; for
+//!   an endomorphism rows and columns share it, so the matrix is the map in
+//!   one basis and its eigenvalues are the map's.
 //! * [`singular_values`] is a one-sided (Hestenes) Jacobi SVD written here;
 //!   for a Hermitian block it gives `|lambda|`. [`triangular_eigenvalues`] is
 //!   the hand answer for the triangular fixtures the general
@@ -111,7 +112,7 @@ pub fn multi_indices(shape: &[usize]) -> Vec<Vec<usize>> {
 }
 
 /// Stacks the blocks of each coupled sector into its reduced matrix.
-pub fn assemble<S: PartialEq + Clone, K: PartialEq + Clone>(
+pub fn assemble<S: PartialEq + Clone, K: Ord + Clone>(
     codomain_rank: usize,
     blocks: Vec<BlockEntry<S, K>>,
 ) -> Vec<(S, Matrix)> {
@@ -123,8 +124,17 @@ pub fn assemble<S: PartialEq + Clone, K: PartialEq + Clone>(
     }
     fn place<K: PartialEq + Clone>(groups: &mut Vec<(K, usize, usize)>, key: &K, size: usize) {
         if !groups.iter().any(|(k, _, _)| k == key) {
-            let offset = groups.last().map_or(0, |(_, o, s)| o + s);
-            groups.push((key.clone(), offset, size));
+            groups.push((key.clone(), 0, size));
+        }
+    }
+    // Sorted by tree key, so the rows and columns of an endomorphism come in
+    // the same order and the matrix diagonal is the map's diagonal.
+    fn lay_out<K: Ord>(groups: &mut [(K, usize, usize)]) {
+        groups.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut offset = 0;
+        for group in groups.iter_mut() {
+            group.1 = offset;
+            offset += group.2;
         }
     }
     let mut sectors: Vec<Groups<S, K>> = Vec::new();
@@ -145,11 +155,15 @@ pub fn assemble<S: PartialEq + Clone, K: PartialEq + Clone>(
         place(&mut sectors[index].rows, &block.row, rows);
         place(&mut sectors[index].cols, &block.col, cols);
     }
+    for g in &mut sectors {
+        lay_out(&mut g.rows);
+        lay_out(&mut g.cols);
+    }
     let mut matrices: Vec<(S, Matrix)> = sectors
         .iter()
         .map(|g| {
-            let rows = g.rows.last().map_or(0, |(_, o, s)| o + s);
-            let cols = g.cols.last().map_or(0, |(_, o, s)| o + s);
+            let rows = g.rows.iter().map(|(_, _, s)| s).sum();
+            let cols = g.cols.iter().map(|(_, _, s)| s).sum();
             (g.sector.clone(), Matrix::zeros(rows, cols))
         })
         .collect();

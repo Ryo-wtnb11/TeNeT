@@ -318,3 +318,75 @@ fn a_whole_sector_is_dropped_from_the_eig_bond() {
         "the low sector must be gone from the bond, not merely shortened"
     );
 }
+
+/// A rank-(2,2) endomorphism with several fusion trees per coupled sector,
+/// upper triangular in the oracle's sector-matrix order: a basis state is
+/// `(tree labels, degeneracy index with the first axis fastest)`, the order
+/// in which `truncation_oracle` lays out rows and columns, so the eigenvalues
+/// are still the hand-set diagonal (`triangular_eigenvalues` checks the
+/// shape).
+fn multi_tree_triangular<R>(codomain: [&GradedSpace<R>; 2], seed: u64) -> TensorMap<R, Complex64>
+where
+    R: tenet::core::MultiplicityFreeRigidSymbols<Scalar = f64>
+        + tenet::core::CheckedFusionAlgebra
+        + tenet::typed::SectorCodec,
+    R::Sector: Ord + Clone,
+{
+    let mut state = seed;
+    TensorMap::from_block_fn(&runtime(), codomain, codomain, |trees, indices| {
+        let row = (
+            trees.codomain_uncoupled().to_vec(),
+            trees.codomain_innerlines().to_vec(),
+            indices[1],
+            indices[0],
+        );
+        let col = (
+            trees.domain_uncoupled().to_vec(),
+            trees.domain_innerlines().to_vec(),
+            indices[3],
+            indices[2],
+        );
+        let value = Complex64::new(fill(&mut state), fill(&mut state));
+        match row.cmp(&col) {
+            std::cmp::Ordering::Equal => 4.0 * value,
+            std::cmp::Ordering::Less => 0.5 * value,
+            std::cmp::Ordering::Greater => Complex64::new(0.0, 0.0),
+        }
+    })
+    .unwrap()
+}
+
+#[test]
+fn multi_tree_eig_composition_matches_the_hand_selection_for_every_policy() {
+    // Two U(1) legs: coupled sector 1 carries the trees (0, 1) and (1, 0).
+    let leg = u1_leg(&[(0, 2), (1, 2)]);
+    let source = multi_tree_triangular([&leg, &leg], 0x0e19_0008);
+    assert!(
+        (0..source.block_count()).any(|i| {
+            let coupled = *source.block_fusion_trees(i).unwrap().coupled();
+            (0..source.block_count())
+                .filter(|&j| source.block_fusion_trees(j).unwrap().coupled() == &coupled)
+                .count()
+                > 1
+        }),
+        "the fixture must stack several trees in one coupled sector"
+    );
+    eig_policy_sweep!(
+        source,
+        source.clone(),
+        u1_leg(&[(0, 1), (1, 2)]),
+        "u1 x u1 eig c64"
+    );
+
+    // Fermion parity with a dual leg: leg (x) leg' <- leg (x) leg', so the
+    // odd-odd trees and the twist of the dual leg enter the layout.
+    let leg = fz2_leg(&[(false, 2), (true, 2)]);
+    let dual = leg.try_dual().unwrap();
+    let source = multi_tree_triangular([&leg, &dual], 0x0e19_0009);
+    eig_policy_sweep!(
+        source,
+        source.clone(),
+        fz2_leg(&[(false, 2), (true, 1)]),
+        "fz2 x fz2' eig c64"
+    );
+}
