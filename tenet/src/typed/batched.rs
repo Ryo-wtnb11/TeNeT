@@ -1967,19 +1967,20 @@ impl<R, D: CudaPayload> StackedTensorMap<R, D, CudaStorage<D>> {
         R::Mode: TypedTensorRootDispatch<R>,
     {
         let (destination, table) = self.restrict_plan(axis, selection)?;
-        // Why f64 is exact: every source element index is an integer below
-        // `L`, and `L <= 2^53` keeps all of them representable.
-        if self.member_len > 1 << f64::MANTISSA_DIGITS {
-            return Err(Error::InvalidArgument(
-                "restrict_leg: a device member exceeds 2^53 elements".into(),
-            )
-            .into());
-        }
+        // The element table is the eager kernel itself run over the payload
+        // `0, 1, …, L - 1` (in `i64`, the gather's index type), so the block
+        // plan keeps one implementation. Why not enumerate the destination
+        // blocks here instead: that would restate the sector lookup, start
+        // offsets and rectangle checks of `restrict_block`. The price is one
+        // `L`-element iota per call, host work `O(L + L')`, independent of `B`.
         let elements = {
             let _host_pool = self.runtime.enter_host_pool();
             let mut starts: Vec<tenet_tensors::SectorStartTable<'_>> = vec![None; self.rank()];
             starts[axis] = Some(table.as_slice());
-            let iota: Vec<f64> = (0..self.member_len).map(|index| index as f64).collect();
+            let iota = (0..self.member_len)
+                .map(i64::try_from)
+                .collect::<Result<Vec<i64>, _>>()
+                .map_err(|_| Error::InvalidArgument("restrict_leg: a member exceeds i64".into()))?;
             tenet_tensors::oriented_fusion_restrict_owned(
                 destination.space().structure(),
                 FusionOperand::direct(self.space.space()),
@@ -1987,14 +1988,11 @@ impl<R, D: CudaPayload> StackedTensorMap<R, D, CudaStorage<D>> {
                 &starts,
             )
             .map_err(Error::from)?
-            .into_iter()
-            .map(|index| index as usize)
-            .collect::<Vec<usize>>()
         };
         let mut lease = self.runtime.lease_cuda()?;
         let storage = self
             .storage
-            .gather_member_elements(&mut lease, self.member_len, self.members, &elements)
+            .gather_member_elements(&mut lease, self.member_len, self.members, elements)
             .map_err(Error::from)?;
         drop(lease);
         Ok(self.with_space(destination, storage)?)

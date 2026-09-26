@@ -3128,7 +3128,7 @@ pub fn cuda_gather_columns_batched_into<D: CudaScalar>(
 ///
 /// Counts one `h2d_calls` for the index table and one `copy_calls` for the
 /// gather. A zero `member_len` or an empty selection launches nothing and
-/// uploads an empty buffer.
+/// uploads an empty `[member_len, selection.len()]` buffer.
 #[doc(hidden)]
 pub fn cuda_gather_members<D: CudaScalar>(
     ctx: &mut CudaDenseContext,
@@ -3154,7 +3154,7 @@ pub fn cuda_gather_members<D: CudaScalar>(
         ));
     }
     if member_len == 0 || selection.is_empty() {
-        return CudaDenseStorage::upload_owned::<D>(ctx, Vec::new());
+        return CudaDenseStorage::upload_members::<D>(ctx, Vec::new(), member_len, selection.len());
     }
     // Why a second, `[L, B]` configuration rather than reshaping the gather
     // output to flat: Tenferro 0.7.1 has no metadata-only owned reshape
@@ -3227,7 +3227,7 @@ pub fn cuda_gather_member_elements<D: CudaScalar>(
     src: &CudaDenseStorage,
     member_len: usize,
     members: usize,
-    elements: &[usize],
+    elements: Vec<i64>,
 ) -> Result<CudaDenseStorage, DenseError> {
     const OP: &str = "cuda_gather_member_elements";
     ensure_cuda_device(ctx.device, OP, &[("src", src.device)])?;
@@ -3241,7 +3241,10 @@ pub fn cuda_gather_member_elements<D: CudaScalar>(
     // Why checked here: the gather kernel clamps an out-of-range start
     // (tenferro-gpu `indexing.rs:clamp_window_start`) instead of faulting, so
     // an unchecked index would silently read another element.
-    if elements.iter().any(|&element| element >= member_len) {
+    if elements
+        .iter()
+        .any(|&element| usize::try_from(element).map_or(true, |element| element >= member_len))
+    {
         return Err(cuda_error(
             OP,
             "every element index must be below `member_len`",
@@ -3250,14 +3253,10 @@ pub fn cuda_gather_member_elements<D: CudaScalar>(
     if elements.is_empty() || members == 0 {
         return CudaDenseStorage::upload_members::<D>(ctx, Vec::new(), elements.len(), members);
     }
-    let starts = elements
-        .iter()
-        .map(|&element| i64::try_from(element).map_err(|_| cuda_error(OP, "index exceeds i64")))
-        .collect::<Result<Vec<_>, _>>()?;
-    let host =
-        i64::into_tensor(vec![elements.len(), 1], starts).map_err(|err| cuda_error(OP, err))?;
+    let count = elements.len();
+    let host = i64::into_tensor(vec![count, 1], elements).map_err(|err| cuda_error(OP, err))?;
     let indices = upload_tensor(ctx.backend.runtime(), &host).map_err(|err| cuda_error(OP, err))?;
-    record_h2d(elements.len() * std::mem::size_of::<i64>());
+    record_h2d(count * std::mem::size_of::<i64>());
     COPY_CALLS.fetch_add(1, Ordering::Relaxed);
     let config = tenferro_tensor::GatherConfig {
         offset_dims: vec![1],

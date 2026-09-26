@@ -146,4 +146,25 @@ fn device_restrict_leg_is_bit_exact_with_one_gather_per_call() {
         .unwrap()
         .data()
         .is_empty());
+
+    // Both empty-producing paths keep the `[L, B]` shape the other consumes:
+    // a restriction of a blockless selection, and a selection of a blockless
+    // restriction, succeed as eager does and launch nothing.
+    let expected = empty.restrict_leg(0, &selection).unwrap();
+    let before = cuda_transfer_stats();
+    let of_selected = device
+        .select(&[1, 0, 1])
+        .unwrap()
+        .restrict_leg(0, &selection)
+        .unwrap();
+    let of_restricted = restricted.select(&[0]).unwrap();
+    assert_eq!(delta(before).2, 0, "blockless chains launch no gather");
+    assert_eq!((of_selected.len(), of_restricted.len()), (3, 1));
+    for stack in [of_selected, of_restricted] {
+        let host = stack.to_host().unwrap();
+        assert!(*host.signature() == expected.structure_signature());
+        for member in 0..host.len() {
+            assert!(host.member(member).unwrap().data().is_empty());
+        }
+    }
 }

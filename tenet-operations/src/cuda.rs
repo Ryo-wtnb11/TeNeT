@@ -105,7 +105,7 @@ impl<D: CudaScalar> CudaStorage<D> {
         ctx: &mut CudaDenseContext,
         member_len: usize,
         members: usize,
-        elements: &[usize],
+        elements: Vec<i64>,
     ) -> Result<Self, OperationError> {
         cuda_gather_member_elements::<D>(ctx, &self.0, member_len, members, elements)
             .map(|storage| Self(storage, PhantomData))
