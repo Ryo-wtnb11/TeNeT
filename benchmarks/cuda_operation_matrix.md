@@ -107,12 +107,12 @@ uses `Truncation::rank(degeneracy)`; `network_chain3` is the canonical three-ten
 `tensor!([p; s] = a[p; q] * b[q; r] * c[r; s])` chain.
 
 `svd_trunc_composition` replaces the `svd_trunc_rank` row of earlier
-revisions (#1297): device `svd_trunc` is now an explicit `UnsupportedOnDevice`
-boundary, so the `cuda` arm of that row measures the composition that replaces
-it — device `svd_compact`, a D2H of all three factors, then the Host
-`diagview` / `find_truncated` / `restrict_leg` / `restrict_diagonal` chain —
-against the same Host `svd_trunc` arm. The two arms are therefore not the same
-work, and rows named `svd_trunc_rank` in the pinned baselines under
+revisions (#1297). The truncated SVD is no longer an operation of its own
+(#1534); both arms measure the composition. The `cuda` arm runs device
+`svd_compact`, a D2H of all three factors, then the Host `diagview` /
+`find_truncated` / `restrict_leg` / `restrict_diagonal` chain; the `host` arm
+runs the same chain on Host `svd_compact`. The two arms are therefore not the
+same work, and rows named `svd_trunc_rank` in the pinned baselines under
 `benchmarks/history/` measure the removed fused device path, not this one.
 
 A row whose device probe returns an error is printed once per target with
@@ -167,7 +167,7 @@ library reads them back, so no execution decision depends on them.
 | `contract_*`, `compose`, `scale`, `add_*`, `network_chain3` | downloaded device result equals the Host result to `1e-9` relative |
 | `norm`, `inner` | device scalar equals the Host scalar to `1e-9` relative |
 | `svd_compact`, `eigh_full`, `qr_compact` | the device factors recompose on device to the source (gauge-independent) |
-| `svd_trunc_composition` | kept spectrum per coupled sector and discarded weight match Host |
+| `svd_trunc_composition` | kept spectrum per coupled sector and discarded weight match the Host composition |
 
 ## Absent references
 

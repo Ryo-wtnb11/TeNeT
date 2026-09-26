@@ -279,17 +279,29 @@ fn typed_truncated_svd_keeps_total_and_peak_below_materialized_baseline() {
     let parent: TensorMap<_, num_complex::Complex64> =
         TensorMap::rand_with_seed(&runtime, [&space], [&space], 693_696).unwrap();
     let truncation = tenet::typed::Truncation::rank(16);
-    black_box(parent.svd_trunc(&truncation).unwrap());
+    // The truncated SVD is `svd_compact` -> `find_truncated` -> `restrict_*`.
+    let truncated_svd = |tensor: &TensorMap<U1FusionRule, num_complex::Complex64>| {
+        let (u, s, vh) = tensor.svd_compact().unwrap();
+        let found = s.domain()[0]
+            .find_truncated(&s.diagview().unwrap(), &truncation)
+            .unwrap();
+        (
+            u.restrict_leg(u.codomain_rank(), &found.selection).unwrap(),
+            s.restrict_diagonal(&found.selection).unwrap(),
+            vh.restrict_leg(0, &found.selection).unwrap(),
+        )
+    };
+    black_box(truncated_svd(&parent));
 
     let input_bytes = std::mem::size_of_val(parent.data()) as u64;
     let optimized = parent.adjoint().unwrap();
     let baseline = parent.adjoint().unwrap();
     let optimized_cost = measure_peak(|| {
-        black_box(optimized.svd_trunc(&truncation).unwrap());
+        black_box(truncated_svd(&optimized));
     });
     let baseline_cost = measure_peak(|| {
         black_box(baseline.data());
-        black_box(baseline.svd_trunc(&truncation).unwrap());
+        black_box(truncated_svd(&baseline));
     });
 
     assert!(

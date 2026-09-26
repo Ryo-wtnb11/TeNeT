@@ -93,20 +93,21 @@
 //! [`TensorMap::contract`],
 //! [`TensorMap::compose`]), the scalar operations
 //! ([`TensorMap::add`], [`TensorMap::scale`], [`TensorMap::norm`],
-//! [`TensorMap::norm_inf`], [`TensorMap::norm_p`], [`TensorMap::normalize`],
+//! [`TensorMap::norm_inf`], [`TensorMap::norm_p`],
 //! [`TensorMap::inner`], [`TensorMap::tr`], [`TensorMap::trace_pairs`],
 //! [`TensorMap::adjoint`]), the factorizations ([`TensorMap::svd_compact`],
-//! [`TensorMap::svd_full`], [`TensorMap::svd_trunc`], [`TensorMap::svd_vals`],
+//! [`TensorMap::svd_full`], [`TensorMap::svd_vals`],
 //! [`TensorMap::qr_compact`], [`TensorMap::qr_full`],
 //! [`TensorMap::lq_compact`], [`TensorMap::lq_full`],
 //! [`TensorMap::left_polar`], [`TensorMap::right_polar`],
-//! [`TensorMap::left_orth`], [`TensorMap::right_orth`],
-//! [`TensorMap::left_null`], [`TensorMap::right_null`], with
-//! [`GradedSpace::truncspace`] naming a fixed truncation target) and — with
+//! [`TensorMap::left_null`], [`TensorMap::right_null`]) and the **truncation
+//! primitives** a truncated factorization is composed from
+//! ([`TensorMap::diagview`], [`GradedSpace::find_truncated`],
+//! [`GradedSpace::truncspace`], [`TensorMap::restrict_leg`],
+//! [`TensorMap::restrict_diagonal`]; see the tutorial) and — with
 //! issue #570
 //! — the **eigendecompositions** ([`TensorMap::eigh_full`],
-//! [`TensorMap::eigh_trunc`], [`TensorMap::eigh_vals`],
-//! [`TensorMap::eig_full`], [`TensorMap::eig_trunc`], [`TensorMap::eig_vals`])
+//! [`TensorMap::eigh_vals`], [`TensorMap::eig_full`], [`TensorMap::eig_vals`])
 //! and the **`is_hermitian` / `project_*` family** ([`TensorMap::is_hermitian`],
 //! [`TensorMap::is_antihermitian`], [`TensorMap::is_isometric`],
 //! [`TensorMap::is_unitary`], [`TensorMap::is_posdef`],
@@ -128,8 +129,8 @@
 //! `narrow_to_c32`, with no implicit conversion anywhere.
 //!
 //! Issue #570 also gave the facade **compact diagonal storage**. For
-//! multiplicity-free providers, the `s` factor from `svd_compact` and
-//! `svd_trunc` is compact; for checked `Generic` providers, only the `d` factor
+//! multiplicity-free providers, the `s` factor from `svd_compact` is compact
+//! (and stays compact through `restrict_diagonal`); for checked `Generic` providers, only the `d` factor
 //! from EIGH/EIG is compact, while checked SVD publishes its `s` factor densely.
 //! A compact factor holds `Σ_c k_c` values rather than the `Σ_c k_c²`
 //! block-diagonal buffer it would fill, which is what TensorKit's
@@ -265,8 +266,8 @@ pub use crate::runtime::Runtime;
 /// outside the crate.
 pub use tenet_matrixalgebra::SpectrumMagnitude;
 /// Re-exported for the same reason as [`Error`] and [`Runtime`]:
-/// [`TensorMap::svd_trunc`] takes one, so `use tenet::typed::*` would not be
-/// self-sufficient without it.
+/// [`GradedSpace::find_truncated`] takes one, so `use tenet::typed::*` would
+/// not be self-sufficient without it.
 pub use tenet_matrixalgebra::{Truncation, TruncationSpace};
 
 use tenet_matrixalgebra::{
@@ -301,8 +302,8 @@ pub use serialization::{
 /// Scalar payloads supported by [`TensorMap`], base capability.
 ///
 /// Admits the payload-dtype-independent half of the typed API: construction
-/// and inspection, [`TensorMap::adjoint`], `scale`/`add`/`normalize`, the
-/// reductions (`norm`, `norm_inf`, `norm_p`, `inner`, `dot`, `tr`),
+/// and inspection, [`TensorMap::adjoint`], `scale`/`add`, the
+/// reductions (`norm`, `norm_inf`, `norm_p`, `inner`, `tr`),
 /// contraction/`compose`/`otimes`/`cat`, the structural transforms
 /// (`permute`, `braid`, `transpose`, `repartition`, `twist`, `flip`),
 /// `restrict_leg`/`embed_leg`/`restrict_diagonal`/`diagview`, trace, and
@@ -332,7 +333,7 @@ pub use serialization::{
 ///
 /// [`TensorMap::norm`], [`TensorMap::norm_inf`] and [`TensorMap::norm_p`]
 /// return `f64` for every payload dtype and accumulate in `f64`;
-/// [`TensorMap::inner`], [`TensorMap::dot`] and [`TensorMap::tr`] return the
+/// [`TensorMap::inner`] and [`TensorMap::tr`] return the
 /// payload type, as TensorKit's do, but also sum in double precision.
 ///
 /// Tolerances are the caller's: the predicates that take a `tol` have no
@@ -426,9 +427,8 @@ impl TensorScalar for num_complex::Complex32 {}
 /// Scalar payloads admitted to the factorization family.
 ///
 /// Adds, on top of [`TensorScalar`]: QR/LQ (compact and full), SVD (compact,
-/// full, values, truncated), Hermitian eigendecomposition (full, values,
-/// truncated), `left_orth`/`right_orth`, left/right null spaces, left/right
-/// polar, and the predicates that factorize ([`TensorMap::is_posdef`]).
+/// full, values), Hermitian eigendecomposition (full, values), left/right
+/// null spaces, left/right polar, and the predicates that factorize ([`TensorMap::is_posdef`]).
 /// [`GradedSpace::find_truncated`] carries no payload and stays on
 /// [`TensorScalar`].
 ///
@@ -602,7 +602,7 @@ impl FactorizationScalar for num_complex::Complex32 {}
 /// ([`TensorMap::exp`], [`TensorMap::sqrt`], [`TensorMap::powi`]),
 /// [`TensorMap::inv`], [`TensorMap::pinv`], [`TensorMap::solve`] /
 /// [`TensorMap::solve_right`], and the general (non-Hermitian)
-/// eigendecomposition (`eig_full`, `eig_vals`, `eig_trunc`).
+/// eigendecomposition (`eig_full`, `eig_vals`).
 ///
 /// These are the operations whose accuracy depends on conditioning rather than
 /// on one backend call, so they are the last family a new payload dtype joins.
@@ -617,9 +617,9 @@ impl FactorizationScalar for num_complex::Complex32 {}
 /// widened. The general eigendecomposition returns its factors in
 /// `D::Eig` — [`num_complex::Complex32`] for an `f32` or
 /// [`num_complex::Complex32`] payload — on both the multiplicity-free and the
-/// Checked-Generic dispatch, while the reported eigenvalue lists
-/// (`eig_vals`, [`EigTrunc::eigenvalues`]) stay `Complex64` at every payload
-/// dtype, as every spectrum and norm of this crate does.
+/// Checked-Generic dispatch, while the reported eigenvalue list (`eig_vals`)
+/// stays `Complex64` at every payload dtype, as every spectrum and norm of
+/// this crate does.
 ///
 /// A single-precision result agrees with the double-precision result of the
 /// same input only to `eps(f32)` times the conditioning of the operation:
@@ -1395,59 +1395,6 @@ where
     R: TypedSectorAdmission<
             Error = <R as CheckedGenericFusion>::Error,
             Mode = CheckedGenericAdmissionMode,
-        > + CheckedGenericRigidSymbols<Scalar = f64>,
-    D: FactorizationScalar,
-{
-    fn svd_trunc_checked_generic(
-        &self,
-        truncation: &Truncation,
-    ) -> Result<CheckedGenericSvdTrunc<R, D>, GenericTensorError<<R as CheckedGenericFusion>::Error>>
-    {
-        let TypedTensorRepr::Owned(body) = &self.repr else {
-            return Err(GenericTensorError::Facade(Error::InvalidArgument(
-                "checked Generic svd_trunc does not accept lazy adjoints".to_string(),
-            )));
-        };
-        let mut dense = self.runtime.lease_dense();
-        let input = BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())
-            .map_err(|error| GenericTensorError::Facade(error.into()))?;
-        let (u, vh, singular_values, error) =
-            tenet_matrixalgebra::svd_trunc_factors_dyn_checked_generic(
-                dense.dense(),
-                &input,
-                truncation,
-            )?;
-        let s = tenet_matrixalgebra::diagonal_bond_svd_factor_generic_checked(
-            Arc::clone(input.space().provider_arc()),
-            &singular_values,
-            &D::from_real,
-        )?;
-        let provider = self.logical_space().provider();
-        let decoded = singular_values
-            .into_iter()
-            .map(|entry| {
-                Ok(SectorSpectrum {
-                    sector: provider.try_decode_label(entry.sector)?,
-                    values: entry.values,
-                })
-            })
-            .collect::<Result<Vec<_>, <R as TypedSectorAdmission>::Error>>()
-            .map_err(|error| GenericTensorError::Plan(CheckedGenericPlanError::Provider(error)))?;
-        Ok(CheckedGenericSvdTrunc {
-            u: wrap_factor_on(&self.runtime, u),
-            s: wrap_factor_on(&self.runtime, s),
-            vh: wrap_factor_on(&self.runtime, vh),
-            singular_values: decoded,
-            error,
-        })
-    }
-}
-
-impl<R, D> TensorMap<R, D>
-where
-    R: TypedSectorAdmission<
-            Error = <R as CheckedGenericFusion>::Error,
-            Mode = CheckedGenericAdmissionMode,
         > + CheckedGenericFusion,
     D: AdvancedLinalgScalar,
 {
@@ -1551,59 +1498,6 @@ where
     R: TypedSectorAdmission<
             Error = <R as CheckedGenericFusion>::Error,
             Mode = CheckedGenericAdmissionMode,
-        > + CheckedGenericRigidSymbols<Scalar = f64>,
-    D: FactorizationScalar,
-{
-    fn eigh_trunc_checked_generic(
-        &self,
-        truncation: &Truncation,
-    ) -> Result<CheckedGenericEighTrunc<R, D>, GenericTensorError<<R as CheckedGenericFusion>::Error>>
-    {
-        if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
-            return self
-                .materialized_tensor_uncached()
-                .map_err(GenericTensorError::Facade)?
-                .eigh_trunc_checked_generic(truncation);
-        }
-        let body = self.owned_body().expect("owned checked Generic EIGH input");
-        let mut dense = self.runtime.lease_dense();
-        let input = BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())
-            .map_err(|error| GenericTensorError::Facade(error.into()))?;
-        let out =
-            tenet_matrixalgebra::eigh_trunc_dyn_checked_generic(dense.dense(), &input, truncation)?;
-        let (v, mut eigenvalues, error) = out.into_parts();
-        let d = diagonal_factor_on_checked(
-            &self.runtime,
-            Arc::clone(input.space().provider_arc()),
-            &mut eigenvalues,
-            D::from_real,
-        )?;
-        let provider = input.space().provider();
-        let mut decoded = eigenvalues
-            .into_iter()
-            .map(|entry| {
-                Ok(SectorSpectrum {
-                    sector: provider.try_decode_label(entry.sector)?,
-                    values: entry.values,
-                })
-            })
-            .collect::<Result<Vec<_>, <R as TypedSectorAdmission>::Error>>()
-            .map_err(|error| GenericTensorError::Plan(CheckedGenericPlanError::Provider(error)))?;
-        decoded.sort_by(|left, right| left.sector.cmp(&right.sector));
-        Ok(CheckedGenericEighTrunc {
-            d,
-            v: wrap_factor_on(&self.runtime, v),
-            eigenvalues: decoded,
-            error,
-        })
-    }
-}
-
-impl<R, D> TensorMap<R, D>
-where
-    R: TypedSectorAdmission<
-            Error = <R as CheckedGenericFusion>::Error,
-            Mode = CheckedGenericAdmissionMode,
         > + CheckedGenericFusion,
     D: AdvancedLinalgScalar,
     <D as FactorScalar>::Eig: TensorScalar,
@@ -1640,62 +1534,6 @@ where
             <<D as FactorScalar>::Eig as FactorScalar>::from_complex64,
         )?;
         Ok((d, wrap_factor_on(&self.runtime, v)))
-    }
-}
-
-impl<R, D> TensorMap<R, D>
-where
-    R: TypedSectorAdmission<
-            Error = <R as CheckedGenericFusion>::Error,
-            Mode = CheckedGenericAdmissionMode,
-        > + CheckedGenericRigidSymbols<Scalar = f64>,
-    D: AdvancedLinalgScalar,
-    <D as FactorScalar>::Eig: TensorScalar,
-{
-    fn eig_trunc_checked_generic(
-        &self,
-        truncation: &Truncation,
-    ) -> Result<
-        CheckedGenericEigTrunc<R, <D as FactorScalar>::Eig>,
-        GenericTensorError<<R as CheckedGenericFusion>::Error>,
-    > {
-        if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
-            return self
-                .materialized_tensor_uncached()
-                .map_err(GenericTensorError::Facade)?
-                .eig_trunc_checked_generic(truncation);
-        }
-        let body = self.owned_body().expect("owned checked Generic EIG input");
-        let mut dense = self.runtime.lease_dense();
-        let input = BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())
-            .map_err(|error| GenericTensorError::Facade(error.into()))?;
-        let out =
-            tenet_matrixalgebra::eig_trunc_dyn_checked_generic(dense.dense(), &input, truncation)?;
-        let (v, mut eigenvalues, error) = out.into_parts();
-        let d = diagonal_factor_on_checked(
-            &self.runtime,
-            Arc::clone(input.space().provider_arc()),
-            &mut eigenvalues,
-            <<D as FactorScalar>::Eig as FactorScalar>::from_complex64,
-        )?;
-        let provider = input.space().provider();
-        let mut decoded = eigenvalues
-            .into_iter()
-            .map(|entry| {
-                Ok(SectorSpectrum {
-                    sector: provider.try_decode_label(entry.sector)?,
-                    values: entry.values,
-                })
-            })
-            .collect::<Result<Vec<_>, <R as TypedSectorAdmission>::Error>>()
-            .map_err(|error| GenericTensorError::Plan(CheckedGenericPlanError::Provider(error)))?;
-        decoded.sort_by(|left, right| left.sector.cmp(&right.sector));
-        Ok(CheckedGenericEigTrunc {
-            d,
-            v: wrap_factor_on(&self.runtime, v),
-            eigenvalues: decoded,
-            error,
-        })
     }
 }
 
@@ -1952,14 +1790,6 @@ where
     pub fn qr_compact(&self) -> Result<(Self, Self), TypedFacadeError<R>> {
         <R::Mode as TypedTensorQrDispatch<R, D>>::qr_compact(self)
     }
-
-    /// Returns the left-isometry factorization `self = v * c`, with `v`
-    /// isometric and `c` the remaining triangular factor (TensorKit
-    /// `left_orth`). TensorKit's default `kind` is `:qr`, so this calls
-    /// [`Self::qr_compact`] directly and returns the same errors.
-    pub fn left_orth(&self) -> Result<(Self, Self), TypedFacadeError<R>> {
-        self.qr_compact()
-    }
 }
 
 impl<R, D> TensorMap<R, D>
@@ -2053,19 +1883,6 @@ where
     /// ```
     pub fn lq_compact(&self) -> Result<(Self, Self), TypedFacadeError<R>> {
         <R::Mode as TypedTensorLqDispatch<R, D>>::lq_compact(self)
-    }
-
-    /// Returns the right-isometry factorization `self = c * vh`, with `vh`
-    /// carrying orthonormal rows (TensorKit `right_orth`).
-    ///
-    /// TensorKit's default `kind` is `:lq`, so this is [`Self::lq_compact`];
-    /// see [`Self::left_orth`] for why it is a delegation.
-    ///
-    /// # Errors
-    ///
-    /// Exactly [`Self::lq_compact`]'s.
-    pub fn right_orth(&self) -> Result<(Self, Self), TypedFacadeError<R>> {
-        self.lq_compact()
     }
 }
 
@@ -2201,8 +2018,8 @@ where
     /// The receiver must be a **diagonal bond tensor** `[v] <- [v]`: one
     /// codomain leg equal to the one domain leg, and every stored block
     /// diagonal, with off-diagonal entries exactly zero. That is the shape the
-    /// factorizations produce ([`Self::svd_compact`]'s and [`Self::svd_trunc`]'s
-    /// `s`, [`Self::eigh_full`]'s `d`), and it is the receiver type TensorKit's
+    /// factorizations produce ([`Self::svd_compact`]'s `s`, also after
+    /// [`Self::restrict_diagonal`], and [`Self::eigh_full`]'s `d`), and it is the receiver type TensorKit's
     /// own diagonal `sqrt` demands.
     ///
     /// General endomorphism `sqrt` is deliberately out of scope. TensorKit does
@@ -2249,7 +2066,7 @@ where
         if !is_diagonal_bond_space(self.logical_space().space()) {
             return Err(Error::InvalidArgument(
                 "sqrt requires a diagonal bond tensor `[v] <- [v]` (equal single \
-                 codomain and domain legs), like the `s` factor of svd_trunc"
+                 codomain and domain legs), like the `s` factor of svd_compact"
                     .to_string(),
             ));
         }
@@ -2363,36 +2180,6 @@ where
 impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
-    R::Mode: TypedTensorSvdTruncDispatch<R, D>,
-    D: FactorizationScalar,
-{
-    /// Returns `self ~= u * s * vh` after applying `truncation` globally across
-    /// the sector spectra.
-    ///
-    /// The policy keeps a prefix of each descending spectrum, with rank and
-    /// discarded-weight decisions weighted by quantum dimension. The returned
-    /// [`SvdTrunc`] or [`CheckedGenericSvdTrunc`] contains `(u, s, vh)`, the
-    /// kept provider-labelled singular values, and the quantum-dimension-
-    /// weighted 2-norm of the discarded values. The multiplicity-free `s` is
-    /// compact; the checked-Generic `s` is currently dense.
-    ///
-    /// A malformed policy, foreign [`TruncationSpace`], dense failure, label
-    /// decoding failure, or provider rejection returns an error and no result.
-    /// The original provider error is available as the source. Checked Generic
-    /// requires owned input; multiplicity-free lazy adjoints stay uncached. See
-    /// [`Self::svd_compact`] for factor spaces, cost, and the reconstruction
-    /// convention.
-    pub fn svd_trunc(
-        &self,
-        truncation: &Truncation,
-    ) -> Result<<R::Mode as TypedTensorSvdTruncDispatch<R, D>>::Output, TypedFacadeError<R>> {
-        <R::Mode as TypedTensorSvdTruncDispatch<R, D>>::svd_trunc(self, truncation)
-    }
-}
-
-impl<R, D> TensorMap<R, D>
-where
-    R: TypedSectorAdmission,
     R::Mode: TypedTensorEighValsDispatch<R, D>,
     D: FactorizationScalar,
 {
@@ -2462,32 +2249,6 @@ where
     /// ```
     pub fn eigh_full(&self) -> Result<(Self, Self), TypedFacadeError<R>> {
         <R::Mode as TypedTensorEighDispatch<R, D>>::eigh_full(self)
-    }
-}
-
-impl<R, D> TensorMap<R, D>
-where
-    R: TypedSectorAdmission,
-    R::Mode: TypedTensorEighTruncDispatch<R, D>,
-    D: FactorizationScalar,
-{
-    /// Returns selected Hermitian eigenpairs after applying `truncation`
-    /// globally to eigenvalue magnitudes.
-    ///
-    /// [`EighTrunc`] or [`CheckedGenericEighTrunc`] contains compact `d`, the
-    /// truncated eigenvector isometry `v`, provider-labelled kept eigenvalues,
-    /// and the quantum-dimension-weighted 2-norm of the discarded eigenvalues.
-    /// Hence `v * d * v^H` is the corresponding truncated spectral
-    /// reconstruction. Factor spaces, ordering, lazy-input handling, and cost
-    /// are those of [`Self::eigh_full`]. The policy is validated as described
-    /// by [`Self::svd_trunc`]. Checked results use the source provider instance.
-    /// If validation or factorization fails, or the provider rejects an output
-    /// space, no result is returned.
-    pub fn eigh_trunc(
-        &self,
-        truncation: &Truncation,
-    ) -> Result<<R::Mode as TypedTensorEighTruncDispatch<R, D>>::Output, TypedFacadeError<R>> {
-        <R::Mode as TypedTensorEighTruncDispatch<R, D>>::eigh_trunc(self, truncation)
     }
 }
 
@@ -2572,32 +2333,6 @@ where
         TypedFacadeError<R>,
     > {
         <R::Mode as TypedTensorEigDispatch<R, D>>::eig_full(self)
-    }
-}
-
-impl<R, D> TensorMap<R, D>
-where
-    R: TypedSectorAdmission,
-    R::Mode: TypedTensorEigTruncDispatch<R, D>,
-    D: AdvancedLinalgScalar,
-{
-    /// Returns selected general eigenpairs after applying `truncation` globally
-    /// to eigenvalue magnitudes.
-    ///
-    /// [`EigTrunc`] or [`CheckedGenericEigTrunc`] contains compact complex `d`,
-    /// the selected right-eigenvector factor `v`, provider-labelled values, and
-    /// the quantum-dimension-weighted 2-norm of discarded eigenvalues. Because
-    /// truncated `v` is generally rectangular, `error` is a spectral
-    /// discarded-value norm only, not a reconstruction-error bound. Ordering,
-    /// lazy-input handling, and cost are those of [`Self::eig_full`]. The
-    /// policy is validated as described by [`Self::svd_trunc`]. Checked results
-    /// use the source provider instance. If validation or factorization fails,
-    /// or the provider rejects an output space, no result is returned.
-    pub fn eig_trunc(
-        &self,
-        truncation: &Truncation,
-    ) -> Result<<R::Mode as TypedTensorEigTruncDispatch<R, D>>::Output, TypedFacadeError<R>> {
-        <R::Mode as TypedTensorEigTruncDispatch<R, D>>::eig_trunc(self, truncation)
     }
 }
 
@@ -5621,9 +5356,9 @@ where
 
 /// The bond-truncation decision, selected by a provider-owned mode.
 ///
-/// Both arms call the same `tenet_matrixalgebra::decide_bond_truncation*` that
-/// Host `svd_trunc`/`eigh_trunc` call, so the quantum-dimension weight, the
-/// spectrum validation and the returned error bits cannot drift from them.
+/// Both arms call `tenet_matrixalgebra::decide_bond_truncation*`, the one
+/// adapter over `select_truncation` that supplies the quantum-dimension weight
+/// and TensorKit's sector order.
 #[doc(hidden)]
 pub trait TypedTruncationDispatch<R>: TypedTensorModeDispatch<R>
 where
@@ -5852,19 +5587,6 @@ where
 }
 
 #[doc(hidden)]
-pub trait TypedTensorSvdTruncDispatch<R, D>: TypedTensorModeDispatch<R>
-where
-    R: TypedSectorAdmission,
-    D: FactorizationScalar,
-{
-    type Output;
-    fn svd_trunc(
-        tensor: &TensorMap<R, D>,
-        truncation: &Truncation,
-    ) -> Result<Self::Output, Self::FacadeError>;
-}
-
-#[doc(hidden)]
 pub trait TypedTensorEighValsDispatch<R, D>: TypedTensorModeDispatch<R>
 where
     R: TypedSectorAdmission,
@@ -5888,19 +5610,6 @@ where
     fn eigh_full(
         tensor: &TensorMap<R, D>,
     ) -> Result<(TensorMap<R, D>, TensorMap<R, D>), Self::FacadeError>;
-}
-
-#[doc(hidden)]
-pub trait TypedTensorEighTruncDispatch<R, D>: TypedTensorModeDispatch<R>
-where
-    R: TypedSectorAdmission,
-    D: FactorizationScalar,
-{
-    type Output;
-    fn eigh_trunc(
-        tensor: &TensorMap<R, D>,
-        truncation: &Truncation,
-    ) -> Result<Self::Output, Self::FacadeError>;
 }
 
 #[doc(hidden)]
@@ -5936,19 +5645,6 @@ where
         ),
         Self::FacadeError,
     >;
-}
-
-#[doc(hidden)]
-pub trait TypedTensorEigTruncDispatch<R, D>: TypedTensorModeDispatch<R>
-where
-    R: TypedSectorAdmission,
-    D: AdvancedLinalgScalar,
-{
-    type Output;
-    fn eig_trunc(
-        tensor: &TensorMap<R, D>,
-        truncation: &Truncation,
-    ) -> Result<Self::Output, Self::FacadeError>;
 }
 
 impl<R> TypedSpaceModeDispatch<R> for MultiplicityFreeAdmissionMode
@@ -6043,11 +5739,8 @@ where
     where
         V: SpectrumMagnitude,
     {
-        // `false`: the public primitive is magnitude-based, as MatrixAlgebraKit
-        // `findtruncated` is. For the non-negative singular values Host
-        // `svd_trunc` passes with `true`, `|v|` is the same f64, so the
-        // decision and the error are bit-identical either way.
-        tenet_matrixalgebra::decide_bond_truncation(provider, spectra, truncation, false)
+        // Magnitude-based, as MatrixAlgebraKit `findtruncated` is.
+        tenet_matrixalgebra::decide_bond_truncation(provider, spectra, truncation)
             .map_err(Error::from)
     }
 }
@@ -6345,20 +6038,6 @@ where
     }
 }
 
-impl<R, D> TypedTensorSvdTruncDispatch<R, D> for MultiplicityFreeAdmissionMode
-where
-    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
-        + MultiplicityFreeRigidSymbols<Scalar = f64>
-        + CheckedFusionAlgebra
-        + SectorCodec,
-    D: FactorizationScalar,
-{
-    type Output = SvdTrunc<R, D>;
-    fn svd_trunc(tensor: &TensorMap<R, D>, truncation: &Truncation) -> Result<Self::Output, Error> {
-        tensor.svd_trunc_multiplicity_free(truncation)
-    }
-}
-
 impl<R, D> TypedTensorEighValsDispatch<R, D> for MultiplicityFreeAdmissionMode
 where
     R: TypedSectorAdmission<
@@ -6387,23 +6066,6 @@ where
 {
     fn eigh_full(tensor: &TensorMap<R, D>) -> Result<(TensorMap<R, D>, TensorMap<R, D>), Error> {
         tensor.eigh_full_multiplicity_free()
-    }
-}
-
-impl<R, D> TypedTensorEighTruncDispatch<R, D> for MultiplicityFreeAdmissionMode
-where
-    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
-        + MultiplicityFreeRigidSymbols<Scalar = f64>
-        + CheckedFusionAlgebra
-        + SectorCodec,
-    D: FactorizationScalar,
-{
-    type Output = EighTrunc<R, D>;
-    fn eigh_trunc(
-        tensor: &TensorMap<R, D>,
-        truncation: &Truncation,
-    ) -> Result<Self::Output, Error> {
-        tensor.eigh_trunc_multiplicity_free(truncation)
     }
 }
 
@@ -6448,21 +6110,6 @@ where
         Error,
     > {
         tensor.eig_full_multiplicity_free()
-    }
-}
-
-impl<R, D> TypedTensorEigTruncDispatch<R, D> for MultiplicityFreeAdmissionMode
-where
-    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
-        + MultiplicityFreeRigidSymbols<Scalar = f64>
-        + CheckedFusionAlgebra
-        + SectorCodec,
-    D: AdvancedLinalgScalar,
-    <D as FactorScalar>::Eig: TensorScalar,
-{
-    type Output = EigTrunc<R, D>;
-    fn eig_trunc(tensor: &TensorMap<R, D>, truncation: &Truncation) -> Result<Self::Output, Error> {
-        tensor.eig_trunc_multiplicity_free(truncation)
     }
 }
 
@@ -7142,23 +6789,6 @@ where
     }
 }
 
-impl<R, D> TypedTensorSvdTruncDispatch<R, D> for CheckedGenericAdmissionMode
-where
-    R: TypedSectorAdmission<
-            Error = <R as CheckedGenericFusion>::Error,
-            Mode = CheckedGenericAdmissionMode,
-        > + CheckedGenericRigidSymbols<Scalar = f64>,
-    D: FactorizationScalar,
-{
-    type Output = CheckedGenericSvdTrunc<R, D>;
-    fn svd_trunc(
-        tensor: &TensorMap<R, D>,
-        truncation: &Truncation,
-    ) -> Result<Self::Output, GenericTensorError<<R as CheckedGenericFusion>::Error>> {
-        tensor.svd_trunc_checked_generic(truncation)
-    }
-}
-
 impl<R, D> TypedTensorEighValsDispatch<R, D> for CheckedGenericAdmissionMode
 where
     R: TypedSectorAdmission<
@@ -7192,23 +6822,6 @@ where
         GenericTensorError<<R as CheckedGenericFusion>::Error>,
     > {
         tensor.eigh_full_checked_generic()
-    }
-}
-
-impl<R, D> TypedTensorEighTruncDispatch<R, D> for CheckedGenericAdmissionMode
-where
-    R: TypedSectorAdmission<
-            Error = <R as CheckedGenericFusion>::Error,
-            Mode = CheckedGenericAdmissionMode,
-        > + CheckedGenericRigidSymbols<Scalar = f64>,
-    D: FactorizationScalar,
-{
-    type Output = CheckedGenericEighTrunc<R, D>;
-    fn eigh_trunc(
-        tensor: &TensorMap<R, D>,
-        truncation: &Truncation,
-    ) -> Result<Self::Output, GenericTensorError<<R as CheckedGenericFusion>::Error>> {
-        tensor.eigh_trunc_checked_generic(truncation)
     }
 }
 
@@ -7249,24 +6862,6 @@ where
         GenericTensorError<<R as CheckedGenericFusion>::Error>,
     > {
         tensor.eig_full_checked_generic()
-    }
-}
-
-impl<R, D> TypedTensorEigTruncDispatch<R, D> for CheckedGenericAdmissionMode
-where
-    R: TypedSectorAdmission<
-            Error = <R as CheckedGenericFusion>::Error,
-            Mode = CheckedGenericAdmissionMode,
-        > + CheckedGenericRigidSymbols<Scalar = f64>,
-    D: AdvancedLinalgScalar,
-    <D as FactorScalar>::Eig: TensorScalar,
-{
-    type Output = CheckedGenericEigTrunc<R, <D as FactorScalar>::Eig>;
-    fn eig_trunc(
-        tensor: &TensorMap<R, D>,
-        truncation: &Truncation,
-    ) -> Result<Self::Output, GenericTensorError<<R as CheckedGenericFusion>::Error>> {
-        tensor.eig_trunc_checked_generic(truncation)
     }
 }
 
@@ -9275,10 +8870,32 @@ where
     /// This is MatrixAlgebraKit's `findtruncated_svd` plus `truncation_error`
     /// in one call: `spectra` are per-sector magnitudes, already descending, as
     /// every TeNeT `*_compact` / `*_full` factorization publishes them, and the
-    /// result names the surviving bond states. Compose it with
-    /// [`TensorMap::restrict_leg`] on `u` and `vh` and
-    /// [`TensorMap::restrict_diagonal`] on `s` to obtain exactly what
-    /// [`TensorMap::svd_trunc`] returns.
+    /// result names the surviving bond states. A truncated factorization is
+    /// this decision composed with an untruncated one: apply it with
+    /// [`TensorMap::restrict_leg`] to the isometric factors and
+    /// [`TensorMap::restrict_diagonal`] to the spectrum factor. The same
+    /// recipe truncates `eigh_full`'s `(d, v)` and `eig_full`'s `(d, v)`.
+    ///
+    /// ```
+    /// use tenet::core::{U1FusionRule, U1Irrep};
+    /// use tenet::typed::{GradedSpace, Runtime, TensorMap, Truncation};
+    ///
+    /// let runtime = Runtime::builder().build()?;
+    /// let v = GradedSpace::try_new(U1FusionRule, [(U1Irrep::new(0), 3), (U1Irrep::new(1), 2)])?;
+    /// let t: TensorMap<_, f64> = TensorMap::rand(&runtime, [&v, &v], [&v])?;
+    ///
+    /// let (u, s, vh) = t.svd_compact()?;
+    /// let found = s.domain()[0].find_truncated(&s.diagview()?, &Truncation::rank(2))?;
+    /// let u = u.restrict_leg(u.codomain_rank(), &found.selection)?;
+    /// let s = s.restrict_diagonal(&found.selection)?;
+    /// let vh = vh.restrict_leg(0, &found.selection)?;
+    ///
+    /// // The best rank-2 approximation, and the weight it discards.
+    /// let approximation = u.compose(&s)?.compose(&vh)?;
+    /// let residual = t.add(&approximation, 1.0, -1.0)?.norm()?;
+    /// assert!((residual - found.error).abs() < 1e-12);
+    /// # Ok::<(), tenet::typed::Error>(())
+    /// ```
     ///
     /// # Naming deviation
     ///
@@ -9301,7 +8918,7 @@ where
     /// Values are selected by magnitude (`|v|`), so signed `eigh` eigenvalues
     /// and complex `eig` eigenvalues can be passed as published. Magnitudes
     /// must be descending within a sector and finite; non-finite values are
-    /// rejected by the same check Host `svd_trunc` applies.
+    /// rejected.
     ///
     /// # Complexity
     ///
@@ -9316,7 +8933,7 @@ where
     /// [`Error::InvalidArgument`] when a sector is missing, repeated, unknown
     /// to this leg, or carries a spectrum of the wrong length, and for a
     /// malformed policy or an invalid spectrum; [`Error::RuleMismatch`]
-    /// (through the operation error, as Host `svd_trunc` reports it) for a
+    /// (through the operation error) for a
     /// [`TruncationSpace`] built against another rule. Provider label-encoding
     /// failures are returned unchanged.
     pub fn find_truncated<V>(
@@ -9595,8 +9212,8 @@ where
     /// already established.
     ///
     /// Why not [`Self::try_new`]: a decision that discards everything leaves no
-    /// sector to name, and Host `svd_trunc` represents that outcome as an
-    /// ordinary bond leg with no sectors. An empty list from a *caller* is
+    /// sector to name, and that outcome is an ordinary bond leg with no
+    /// sectors. An empty list from a *caller* is
     /// almost always a bug, so `try_new` keeps rejecting it.
     fn from_prefix_counts(
         parent: &GradedSpace<R>,
@@ -9634,7 +9251,7 @@ where
 /// it to the three factors of one decomposition.
 pub struct TruncatedSelection<R> {
     /// The kept bond subspace. It is empty exactly when the policy discarded
-    /// every state, which is the bond Host `svd_trunc` returns for `Rank(0)`.
+    /// every state, as `Rank(0)` does.
     pub selection: LegSelection<R>,
     /// MatrixAlgebraKit `truncation_error`: `sqrt(sum_c dim(c) sum_discarded v^2)`.
     pub error: f64,
@@ -10012,94 +9629,6 @@ pub struct SectorSpectrum<S, V = f64> {
     pub values: Vec<V>,
 }
 
-/// Successful multiplicity-free truncated SVD `t ~= u * s * vh`.
-///
-/// The factor fields are in reconstruction order: `u : codomain(t) <- bond`,
-/// `s : bond <- bond`, and `vh : bond <- domain(t)`. `u` and `vh` are dense
-/// while `s` uses compact diagonal storage. Only host tensors produce this
-/// result: the `CudaStorage` `svd_trunc` is an explicit
-/// [`Error::UnsupportedOnDevice`] boundary, and the device truncation is
-/// composed from `svd_compact` plus the host restriction primitives.
-///
-/// [`Self::singular_values`] contains the kept values by provider-labelled
-/// sector, and [`Self::error`] is the quantum-dimension-weighted 2-norm of all
-/// discarded singular values.
-// The `SectorCodec` bound is the field types' own: `singular_values` is
-// labelled, so the struct cannot be spelled without it.
-pub struct SvdTrunc<R: SectorCodec, D, S = Vec<D>> {
-    /// Left isometry `u : codomain <- bond`.
-    pub u: TensorMap<R, D, S>,
-    /// Singular-value factor `s : bond <- bond`, in TensorKit's compact
-    /// `DiagonalTensorMap` representation.
-    pub s: TensorMap<R, D, S>,
-    /// Right isometry `vh : bond <- domain`.
-    pub vh: TensorMap<R, D, S>,
-    /// Kept singular values per coupled sector, sorted by provider label.
-    pub singular_values: Vec<SectorSpectrum<R::Sector>>,
-    /// Quantum-dimension-weighted 2-norm of everything discarded.
-    pub error: f64,
-}
-
-/// Successful truncated SVD for a checked Generic provider:
-/// `t ~= u * s * vh`.
-///
-/// Factor order and spaces match [`SvdTrunc`]. All three factors use dense host
-/// storage; in particular, `s : bond <- bond` is not stored compactly. The
-/// factors retain the same provider instance as `t`.
-///
-/// [`Self::singular_values`] contains the kept values by provider-labelled
-/// sector, and [`Self::error`] is the quantum-dimension-weighted 2-norm of all
-/// discarded singular values.
-pub struct CheckedGenericSvdTrunc<R: TypedSectorAdmission, D: TensorScalar> {
-    /// Dense left isometry `u : codomain(t) <- bond`.
-    pub u: TensorMap<R, D>,
-    /// Dense singular-value factor `s : bond <- bond`.
-    pub s: TensorMap<R, D>,
-    /// Dense right isometry `vh : bond <- domain(t)`.
-    pub vh: TensorMap<R, D>,
-    /// Kept singular values per provider-labelled sector.
-    pub singular_values: Vec<SectorSpectrum<R::Sector, f64>>,
-    /// Quantum-dimension-weighted 2-norm of discarded singular values.
-    pub error: f64,
-}
-
-// Why hand-written, as for `TensorMap` itself: the derives would demand
-// `R: Clone + Debug`, and neither is needed — the provider lives behind an
-// `Arc` and its labels, not the rule, are what a diagnostic shows.
-impl<R, D, S> Clone for SvdTrunc<R, D, S>
-where
-    R: SectorCodec,
-{
-    fn clone(&self) -> Self {
-        Self {
-            u: self.u.clone(),
-            s: self.s.clone(),
-            vh: self.vh.clone(),
-            singular_values: self.singular_values.clone(),
-            error: self.error,
-        }
-    }
-}
-
-impl<R, D, S> core::fmt::Debug for SvdTrunc<R, D, S>
-where
-    R: SectorCodec,
-    S: TensorStorage<D>,
-{
-    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        // Every field is shown; the storage bound is exactly the one needed by
-        // `TensorMap` to report its stored element count.
-        formatter
-            .debug_struct("SvdTrunc")
-            .field("u", &self.u)
-            .field("s", &self.s)
-            .field("vh", &self.vh)
-            .field("singular_values", &self.singular_values)
-            .field("error", &self.error)
-            .finish()
-    }
-}
-
 /// The two block payload representations one typed tensor map can carry.
 ///
 /// `D` is a type parameter, so one diagonal arm holds values of exactly the
@@ -10149,63 +9678,6 @@ fn spectra_disagree() -> Error {
     Error::InvalidArgument("equal bond spaces carry incompatible compact spectra".to_string())
 }
 
-/// Successful multiplicity-free truncated general eigendecomposition
-/// `t * v ~= v * d`.
-///
-/// Fields are ordered `(d, v)`: `d : bond <- bond` uses compact diagonal host
-/// storage, while the right-eigenvector factor `v : codomain(t) <- bond` is
-/// dense. Both factors use `D::Eig`, which is `Complex64` for real and complex
-/// inputs.
-///
-/// [`Self::eigenvalues`] contains the kept values by provider-labelled sector.
-/// [`Self::error`] is the quantum-dimension-weighted 2-norm of the discarded
-/// eigenvalues; for a non-normal matrix it is not a reconstruction-error bound.
-// `D: TensorScalar` rather than a bare parameter because the field types are
-// spelled through `D::Eig`, which is `FactorScalar`'s associated type.
-pub struct EigTrunc<R: SectorCodec, D: TensorScalar, S = Vec<<D as FactorScalar>::Eig>> {
-    /// Eigenvalue factor `d : bond <- bond`, in compact diagonal storage.
-    pub d: TensorMap<R, <D as FactorScalar>::Eig, S>,
-    /// Eigenbasis `v : codomain <- bond`.
-    pub v: TensorMap<R, <D as FactorScalar>::Eig, S>,
-    /// Kept eigenvalues per coupled sector, sorted by provider label.
-    pub eigenvalues: Vec<SectorSpectrum<R::Sector, num_complex::Complex64>>,
-    /// Quantum-dimension-weighted 2-norm of the discarded `|eigenvalue|`s.
-    pub error: f64,
-}
-
-// Hand-written for the reason [`SvdTrunc`]'s are.
-impl<R, D, S> Clone for EigTrunc<R, D, S>
-where
-    R: SectorCodec,
-    D: TensorScalar,
-{
-    fn clone(&self) -> Self {
-        Self {
-            d: self.d.clone(),
-            v: self.v.clone(),
-            eigenvalues: self.eigenvalues.clone(),
-            error: self.error,
-        }
-    }
-}
-
-impl<R, D, S> core::fmt::Debug for EigTrunc<R, D, S>
-where
-    R: SectorCodec,
-    D: TensorScalar,
-    S: TensorStorage<<D as FactorScalar>::Eig>,
-{
-    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        formatter
-            .debug_struct("EigTrunc")
-            .field("d", &self.d)
-            .field("v", &self.v)
-            .field("eigenvalues", &self.eigenvalues)
-            .field("error", &self.error)
-            .finish()
-    }
-}
-
 /// [`TensorMap::diagonal_factor`]'s body, as a free function so the
 /// `eig_*` family can build a `TensorMap<R, D::Eig>` from a `TensorMap<R, D>`.
 /// The payload type of a factor need not be the payload type of the tensor it
@@ -10216,9 +9688,7 @@ where
 /// source buffer only when `E` and `V` share size and alignment, so consuming
 /// the spectrum made the number of buffers a spectrum factor costs depend on
 /// the payload dtype — free for `f64`, one `Vec<E>` per coupled sector for
-/// `f32`, `Complex32` and `Complex64` (#1337). Borrowing also lets the
-/// truncating callers hand their spectrum to the public field afterwards
-/// instead of cloning it for one of the two uses.
+/// `f32`, `Complex32` and `Complex64` (#1337).
 fn diagonal_factor_on<R, E, V>(
     runtime: &Runtime,
     authority: &BoundDynamicFusionMapSpace<R>,
@@ -10388,101 +9858,6 @@ where
 fn is_diagonal_bond_space(space: &DynamicFusionMapSpace) -> bool {
     let homspace = space.homspace();
     space.nout() == 1 && space.nin() == 1 && homspace.codomain().legs() == homspace.domain().legs()
-}
-
-/// Successful multiplicity-free truncated Hermitian eigendecomposition
-/// `t ~= v * d * v^H`.
-///
-/// Fields are ordered `(d, v)`: `d : bond <- bond` holds the signed real
-/// eigenvalues, and `v : codomain(t) <- bond` is the selected eigenvector
-/// isometry. `d` uses compact diagonal storage and `v` is dense. Only host
-/// tensors produce this result: the `CudaStorage` `eigh_trunc` is an explicit
-/// [`Error::UnsupportedOnDevice`] boundary, and the device truncation is
-/// composed from `eigh_full` plus the host restriction primitives.
-///
-/// [`Self::eigenvalues`] contains the kept values by provider-labelled sector,
-/// and [`Self::error`] is the quantum-dimension-weighted 2-norm of all
-/// discarded eigenvalues.
-// The `SectorCodec` bound is the field types' own, exactly as for [`SvdTrunc`].
-pub struct EighTrunc<R: SectorCodec, D, S = Vec<D>> {
-    /// Compact diagonal eigenvalue factor `d : bond <- bond`.
-    pub d: TensorMap<R, D, S>,
-    /// Eigenvector isometry `v : codomain <- bond`.
-    pub v: TensorMap<R, D, S>,
-    /// Kept eigenvalues per coupled sector, sorted by provider label. Real for
-    /// both payload dtypes, as TensorKit's Hermitian `D` is.
-    pub eigenvalues: Vec<SectorSpectrum<R::Sector>>,
-    /// Quantum-dimension-weighted 2-norm of everything discarded.
-    pub error: f64,
-}
-
-/// Successful truncated Hermitian eigendecomposition for a checked Generic
-/// provider: `t ~= v * d * v^H`.
-///
-/// Factor order and spaces match [`EighTrunc`]. The diagonal factor `d` uses
-/// compact host storage, `v` is dense, and both retain the same provider
-/// instance as `t`. [`Self::error`] is the quantum-dimension-weighted 2-norm of
-/// the discarded eigenvalues.
-pub struct CheckedGenericEighTrunc<R: TypedSectorAdmission, D: TensorScalar> {
-    /// Compact diagonal eigenvalue factor `d : bond <- bond`.
-    pub d: TensorMap<R, D>,
-    /// Dense eigenvector isometry `v : codomain(t) <- bond`.
-    pub v: TensorMap<R, D>,
-    /// Kept signed eigenvalues sorted by provider label.
-    pub eigenvalues: Vec<SectorSpectrum<R::Sector, f64>>,
-    /// Quantum-dimension-weighted discarded 2-norm.
-    pub error: f64,
-}
-
-/// Successful truncated general eigendecomposition for a checked Generic
-/// provider: `t * v ~= v * d`.
-///
-/// Fields are ordered `(d, v)`: compact diagonal `d : bond <- bond` and dense
-/// right-eigenvector factor `v : codomain(t) <- bond`. Both use `E`, the
-/// payload's `D::Eig` (`Complex64` for `f64`/`Complex64`, `Complex32` for
-/// `f32`/`Complex32`), and retain the same provider instance as `t`.
-/// [`Self::error`] is the quantum-dimension-weighted 2-norm of discarded
-/// eigenvalues, not a reconstruction-error bound for a non-normal matrix.
-pub struct CheckedGenericEigTrunc<R: TypedSectorAdmission, E = num_complex::Complex64> {
-    /// Compact diagonal eigenvalue factor `d : bond <- bond`.
-    pub d: TensorMap<R, E>,
-    /// Dense right-eigenvector factor `v : codomain(t) <- bond`.
-    pub v: TensorMap<R, E>,
-    /// Kept eigenvalues sorted by provider label.
-    pub eigenvalues: Vec<SectorSpectrum<R::Sector, num_complex::Complex64>>,
-    /// Quantum-dimension-weighted norm of discarded eigenvalues only.
-    pub error: f64,
-}
-
-// Hand-written for the reason [`SvdTrunc`]'s are.
-impl<R, D, S> Clone for EighTrunc<R, D, S>
-where
-    R: SectorCodec,
-{
-    fn clone(&self) -> Self {
-        Self {
-            d: self.d.clone(),
-            v: self.v.clone(),
-            eigenvalues: self.eigenvalues.clone(),
-            error: self.error,
-        }
-    }
-}
-
-impl<R, D, S> core::fmt::Debug for EighTrunc<R, D, S>
-where
-    R: SectorCodec,
-    S: TensorStorage<D>,
-{
-    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        formatter
-            .debug_struct("EighTrunc")
-            .field("d", &self.d)
-            .field("v", &self.v)
-            .field("eigenvalues", &self.eigenvalues)
-            .field("error", &self.error)
-            .finish()
-    }
 }
 
 /// Storage shared by every clone of one typed tensor map: the admitted space
@@ -10675,12 +10050,11 @@ fn owned_repr<R, D, S>(body: TypedTensorBody<R, D, S>) -> TypedTensorRepr<R, D, 
 /// ```
 ///
 /// Naming a storage type and cloning its handle do not require the storage
-/// itself to implement [`Clone`]; decomposition result types preserve that
-/// storage parameter too:
+/// itself to implement [`Clone`]:
 ///
 /// ```
 /// use tenet::core::{Placement, TensorStorage, U1FusionRule};
-/// use tenet::typed::{EighTrunc, EigTrunc, SvdTrunc, TensorMap};
+/// use tenet::typed::TensorMap;
 ///
 /// struct OpaqueStorage;
 /// impl TensorStorage<f64> for OpaqueStorage {
@@ -10691,12 +10065,6 @@ fn owned_repr<R, D, S>(body: TypedTensorBody<R, D, S>) -> TypedTensorRepr<R, D, 
 /// fn clone_handle(tensor: &TensorMap<U1FusionRule, f64, OpaqueStorage>) {
 ///     let _: TensorMap<U1FusionRule, f64, OpaqueStorage> = tensor.clone();
 /// }
-///
-/// fn name_results(
-///     _: Option<SvdTrunc<U1FusionRule, f64, OpaqueStorage>>,
-///     _: Option<EighTrunc<U1FusionRule, f64, OpaqueStorage>>,
-///     _: Option<EigTrunc<U1FusionRule, f64, OpaqueStorage>>,
-/// ) {}
 /// ```
 ///
 /// Cloning is cheap: the runtime handle and the shared body are both
@@ -11749,11 +11117,38 @@ impl<R, D: CudaPayload> TensorMap<R, D, CudaStorage<D>> {
 /// Device compact SVD (`svd_compact`) and Hermitian eigendecomposition
 /// (`eigh_full`) over either device payload (`f64` or `Complex64`).
 ///
-/// The *truncated* factorizations are deliberately absent here: `svd_trunc`
-/// and `eigh_trunc` return [`Error::UnsupportedOnDevice`], because a
-/// truncation is a decision over quantum-dimension-weighted spectra across all
-/// coupled sectors and belongs on the host. Their rustdoc carries the
-/// composition that replaces them.
+/// A truncated factorization is a composition, and its decision over
+/// quantum-dimension-weighted spectra across all coupled sectors belongs on
+/// the host; placement stays the caller's explicit choice:
+///
+/// ```no_run
+/// use std::sync::Arc;
+///
+/// use tenet::core::U1Irrep;
+/// use tenet::prelude::{Runtime, TensorMap, Truncation, U1FusionRule};
+/// use tenet::typed::GradedSpace;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let runtime = Runtime::builder().cuda(0).build()?;
+/// let leg = GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), 4)])?;
+/// let device = TensorMap::<_, f64>::from_block_fn(&runtime, [&leg], [&leg], |_, index| {
+///     (index[0] + 2 * index[1]) as f64
+/// })?
+/// .to_cuda()?;
+///
+/// let (u, s, vh) = device.svd_compact()?;
+/// // Until a device `restrict_leg` lands, the factors move to the host once.
+/// let (u, s, vh) = (u.to_host()?, s.to_host()?, vh.to_host()?);
+/// let found = s.domain()[0].find_truncated(&s.diagview()?, &Truncation::rank(2))?;
+/// let u = u.restrict_leg(u.codomain_rank(), &found.selection)?;
+/// let s = s.restrict_diagonal(&found.selection)?;
+/// let vh = vh.restrict_leg(0, &found.selection)?;
+/// # let _ = (u, s, vh, found.error);
+/// # Ok(())
+/// # }
+/// ```
+///
+/// `eigh_full`'s `(d, v)` is truncated the same way.
 ///
 /// `u` and `vh` keep the raw device SVD gauge for both dtypes; unlike the Host
 /// methods, these do not impose TensorKit's largest-pivot gauge. `eigh_full`
@@ -11780,25 +11175,6 @@ impl<R, D: CudaPayload> TensorMap<R, D, CudaStorage<D>> {
 ///         + CheckedGenericRigidSymbols<Scalar = f64>,
 /// {
 ///     let _ = tensor.svd_compact();
-/// }
-/// ```
-///
-/// Truncated SVD is absent at the same checked-Generic boundary:
-///
-/// ```compile_fail
-/// use tenet::core::{
-///     CheckedGenericAdmissionMode, CheckedGenericFusion, CheckedGenericRigidSymbols,
-///     TypedSectorAdmission,
-/// };
-/// use tenet::typed::{CudaStorage, TensorMap, Truncation};
-///
-/// fn no_checked_generic_cuda_svd_trunc<R>(tensor: &TensorMap<R, f64, CudaStorage>)
-/// where
-///     R: TypedSectorAdmission<Mode = CheckedGenericAdmissionMode>
-///         + CheckedGenericFusion
-///         + CheckedGenericRigidSymbols<Scalar = f64>,
-/// {
-///     let _ = tensor.svd_trunc(&Truncation::Full);
 /// }
 /// ```
 ///
@@ -11867,18 +11243,6 @@ impl<R, D: CudaPayload> TensorMap<R, D, CudaStorage<D>> {
 ///
 /// fn c64_device_eigh(tensor: &TensorMap<U1FusionRule, Complex64, CudaStorage<Complex64>>) {
 ///     let _ = tensor.eigh_full();
-/// }
-/// ```
-///
-/// The truncated variants stay `UnsupportedOnDevice` at every payload (#1297),
-/// which is a runtime capability error, not a bound — so they *do* compile:
-///
-/// ```
-/// use tenet::prelude::U1FusionRule;
-/// use tenet::typed::{CudaStorage, TensorMap, Truncation};
-///
-/// fn f32_device_svd_trunc(tensor: &TensorMap<U1FusionRule, f32, CudaStorage<f32>>) {
-///     let _ = tensor.svd_trunc(&Truncation::Full);
 /// }
 /// ```
 impl<R, D> TensorMap<R, D, CudaStorage<D>>
@@ -12272,66 +11636,6 @@ where
         ))
     }
 
-    /// Truncated SVD is not a device operation.
-    ///
-    /// Truncation is a decision over quantum-dimension-weighted spectra across
-    /// all coupled sectors, which belongs on the host; placement stays the
-    /// caller's explicit choice. This method therefore returns
-    /// [`Error::UnsupportedOnDevice`] before any lease, plan, allocation or
-    /// transfer, and the truncation is composed from general primitives —
-    /// device [`Self::svd_compact`], `to_host`, [`TensorMap::diagview`],
-    /// [`GradedSpace::find_truncated`], [`TensorMap::restrict_leg`] and
-    /// [`TensorMap::restrict_diagonal`]:
-    ///
-    /// ```no_run
-    /// use std::sync::Arc;
-    ///
-    /// use tenet::core::U1Irrep;
-    /// use tenet::prelude::{Runtime, TensorMap, Truncation, U1FusionRule};
-    /// use tenet::typed::GradedSpace;
-    ///
-    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// let runtime = Runtime::builder().cuda(0).build()?;
-    /// let leg = GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), 4)])?;
-    /// let device = TensorMap::<_, f64>::from_block_fn(&runtime, [&leg], [&leg], |_, index| {
-    ///     (index[0] + 2 * index[1]) as f64
-    /// })?
-    /// .to_cuda()?;
-    /// let truncation = Truncation::rank(2);
-    ///
-    /// let (u, s, vh) = device.svd_compact()?;
-    /// // Until a device `restrict_leg` lands, the factors move to the host once.
-    /// let (u, s, vh) = (u.to_host()?, s.to_host()?, vh.to_host()?);
-    /// let found = s.domain()[0].find_truncated(&s.diagview()?, &truncation)?;
-    /// let u = u.restrict_leg(u.codomain_rank(), &found.selection)?;
-    /// let s = s.restrict_diagonal(&found.selection)?;
-    /// let vh = vh.restrict_leg(0, &found.selection)?;
-    /// let truncation_error = found.error;
-    /// # let _ = (u, s, vh, truncation_error);
-    /// # Ok(())
-    /// # }
-    /// ```
-    ///
-    /// The composition returns exactly what Host `svd_trunc` returns for
-    /// host-resident factors; device factors keep the raw cuSOLVER gauge.
-    ///
-    /// # Errors
-    ///
-    /// Always [`Error::UnsupportedOnDevice`]. The capability boundary precedes
-    /// every operand check, so a compact-diagonal or lazy-adjoint device
-    /// receiver reports the missing capability rather than its storage.
-    pub fn svd_trunc(
-        &self,
-        _truncation: &Truncation,
-    ) -> Result<SvdTrunc<R, D, CudaStorage<D>>, Error> {
-        Err(Error::UnsupportedOnDevice(
-            "svd_trunc has no device implementation: compose it from device svd_compact, \
-             to_host, diagview, GradedSpace::find_truncated and \
-             restrict_leg/restrict_diagonal"
-                .to_string(),
-        ))
-    }
-
     /// Hermitian eigendecomposition of an owned dense CUDA endomorphism.
     ///
     /// Returns `(d, v)` with `self = v * d * v.adjoint()`. Both factors remain
@@ -12586,54 +11890,6 @@ where
         }
         Ok(())
     }
-
-    /// Truncated Hermitian eigendecomposition is not a device operation.
-    ///
-    /// Like [`Self::svd_trunc`], the truncation decision belongs on the host.
-    /// This method returns [`Error::UnsupportedOnDevice`] before any lease,
-    /// plan, allocation or transfer; the truncation is composed from device
-    /// [`Self::eigh_full`] and the host primitives:
-    ///
-    /// ```no_run
-    /// use std::sync::Arc;
-    ///
-    /// use tenet::core::U1Irrep;
-    /// use tenet::prelude::{Runtime, TensorMap, Truncation, U1FusionRule};
-    /// use tenet::typed::GradedSpace;
-    ///
-    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// let runtime = Runtime::builder().cuda(0).build()?;
-    /// let leg = GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), 4)])?;
-    /// let hermitian = TensorMap::<_, f64>::from_block_fn(&runtime, [&leg], [&leg], |_, index| {
-    ///     (index[0] + index[1]) as f64
-    /// })?;
-    /// let truncation = Truncation::rank(2);
-    ///
-    /// let (d, v) = hermitian.to_cuda()?.eigh_full()?;
-    /// let (d, v) = (d.to_host()?, v.to_host()?);
-    /// let found = d.domain()[0].find_truncated(&d.diagview()?, &truncation)?;
-    /// let d = d.restrict_diagonal(&found.selection)?;
-    /// let v = v.restrict_leg(v.codomain_rank(), &found.selection)?;
-    /// let truncation_error = found.error;
-    /// # let _ = (d, v, truncation_error);
-    /// # Ok(())
-    /// # }
-    /// ```
-    ///
-    /// # Errors
-    ///
-    /// Always [`Error::UnsupportedOnDevice`], before every operand check.
-    pub fn eigh_trunc(
-        &self,
-        _truncation: &Truncation,
-    ) -> Result<EighTrunc<R, D, CudaStorage<D>>, Error> {
-        Err(Error::UnsupportedOnDevice(
-            "eigh_trunc has no device implementation: compose it from device eigh_full, \
-             to_host, diagview, GradedSpace::find_truncated and \
-             restrict_leg/restrict_diagonal"
-                .to_string(),
-        ))
-    }
 }
 
 #[cfg(feature = "cuda")]
@@ -12861,7 +12117,6 @@ where
 ///     let _ = lhs.scale(2.0);
 ///     let _ = lhs.add(rhs, 2.0, -3.0);
 ///     let _ = lhs.zeros_like();
-///     let _ = lhs.normalize();
 /// }
 /// ```
 impl<R, D> TensorMap<R, D, CudaStorage<D>>
@@ -13009,21 +12264,6 @@ where
         Ok(output)
     }
 
-    fn preflight_owned_cuda_arithmetic(
-        &self,
-        required_len: usize,
-        storage: &CudaStorage<D>,
-    ) -> Result<(), Error> {
-        // Preflight only: the ordinal is immutable, so this placement check
-        // takes no device lock at all.
-        Self::validate_cuda_owned_metadata(
-            Placement::Cuda(self.runtime.cuda_device_ordinal_checked()?),
-            storage.placement(),
-            required_len,
-            storage.len(),
-        )
-    }
-
     fn with_owned_cuda_storage(&self, storage: CudaStorage<D>) -> Self {
         let body = self
             .owned_body()
@@ -13115,29 +12355,6 @@ where
         let source = self.direct_cuda_storage("zeros_like")?;
         let output = self.cuda_zeros_owned(required_len, source)?;
         Ok(self.with_owned_cuda_storage(output))
-    }
-
-    /// Dimension-weighted unit normalization. Zero norm deliberately follows
-    /// Host IEEE behavior and produces non-finite stored entries.
-    ///
-    /// The divisor is [`Self::norm`], which accumulates in `f64` at every
-    /// payload dtype (#1344), so a single-precision tensor whose entries are
-    /// finite normalizes like the Host: its norm neither saturates near
-    /// `f32::MAX` nor underflows below the `f32` subnormal range. As on Host,
-    /// the reciprocal `1 / norm` is narrowed to the payload dtype, so a norm
-    /// below `1 / f32::MAX` at single precision gives non-finite entries.
-    pub fn normalize(&self) -> Result<Self, Error> {
-        let required_len = self.logical_space().space().required_len()?;
-        if let TypedTensorRepr::Adjoint(view) = &self.repr {
-            let parent = Self {
-                runtime: self.runtime.clone(),
-                repr: TypedTensorRepr::Owned(Arc::clone(&view.parent)),
-            };
-            return parent.normalize()?.adjoint();
-        }
-        let storage = self.direct_cuda_storage("normalize")?;
-        self.preflight_owned_cuda_arithmetic(required_len, storage)?;
-        self.scale(D::from_real(1.0 / self.norm()?))
     }
 
     /// Quantum-dimension-weighted Frobenius reduction over owned CUDA storage,
@@ -13369,13 +12586,6 @@ where
         let lhs = self.direct_cuda_storage("inner")?;
         let rhs = other.direct_cuda_storage("inner")?;
         self.weighted_inner_cuda(lhs, rhs).map(D::from_complex64)
-    }
-
-    /// Deprecated alias of [`Self::inner`], with its accumulation contract.
-    #[deprecated(since = "0.1.0", note = "use inner instead")]
-    #[inline]
-    pub fn dot(&self, other: &Self) -> Result<D, Error> {
-        self.inner(other)
     }
 
     fn cuda_fusion_operand(
@@ -18192,49 +17402,6 @@ where
         ))
     }
 
-    /// TensorKit 0.17 / MatrixAlgebraKit `svd_trunc`: `t ~ u * s * vh` with the
-    /// bond truncated by `truncation`; see [`SvdTrunc`].
-    ///
-    /// TensorKit returns the four-tuple `(U, S, Vᴴ, ϵ)`; this returns them as a
-    /// named struct.
-    ///
-    /// `s` is in compact diagonal storage, exactly as [`Self::svd_compact`]'s.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Operation`] / [`Error::Core`] / [`Error::FusionAlgebra`] from
-    /// the seam, including a malformed `truncation` — the truncation policy is
-    /// validated where it is applied, not here.
-    fn svd_trunc_multiplicity_free(&self, truncation: &Truncation) -> Result<SvdTrunc<R, D>, Error>
-    where
-        D: FactorizationScalar,
-    {
-        let mut dense = self.runtime.lease_dense();
-        // The `_factors_` seam, for the reason `svd_compact` gives.
-        let (u, vh, mut singular_values, error) = match &self.repr {
-            TypedTensorRepr::Adjoint(view) => tenet_matrixalgebra::svd_trunc_adjoint_factors_dyn(
-                dense.dense(),
-                &BoundDynamicTensorRef::try_new(
-                    &view.parent.space,
-                    view.parent.materialized_dense_data(),
-                )?,
-                truncation,
-            )?,
-            TypedTensorRepr::Owned(_) => tenet_matrixalgebra::svd_trunc_factors_dyn(
-                dense.dense(),
-                &self.bound_ref()?,
-                truncation,
-            )?,
-        };
-        Ok(SvdTrunc {
-            u: self.wrap_bound_factor(u),
-            s: self.diagonal_factor(&mut singular_values, D::from_real)?,
-            vh: self.wrap_bound_factor(vh),
-            singular_values: self.decode_spectrum(singular_values)?,
-            error,
-        })
-    }
-
     /// TensorKit 0.17 / MatrixAlgebraKit `svd_vals`: the singular values per
     /// coupled sector, and nothing else.
     ///
@@ -18617,40 +17784,6 @@ where
         ))
     }
 
-    /// TensorKit 0.17 / MatrixAlgebraKit `eigh_trunc`: [`Self::eigh_full`] with
-    /// the eigenbasis truncated by `truncation`; see [`EighTrunc`].
-    ///
-    /// Returned as a named struct rather than a four-tuple, the same rule
-    /// [`Self::svd_trunc`] follows.
-    ///
-    /// # Errors
-    ///
-    /// Exactly [`Self::eigh_full`]'s, plus a malformed `truncation` — validated
-    /// where it is applied, not here.
-    fn eigh_trunc_multiplicity_free(
-        &self,
-        truncation: &Truncation,
-    ) -> Result<EighTrunc<R, D>, Error>
-    where
-        D: FactorizationScalar,
-    {
-        if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
-            return self
-                .materialized_tensor_uncached()?
-                .eigh_trunc_multiplicity_free(truncation);
-        }
-        let mut dense = self.runtime.lease_dense();
-        let out =
-            tenet_matrixalgebra::eigh_trunc_dyn(dense.dense(), &self.bound_ref()?, truncation)?;
-        let (v, mut eigenvalues, error) = out.into_parts();
-        Ok(EighTrunc {
-            d: self.diagonal_factor(&mut eigenvalues, D::from_real)?,
-            v: self.wrap_bound_factor(v),
-            eigenvalues: self.decode_spectrum(eigenvalues)?,
-            error,
-        })
-    }
-
     /// TensorKit 0.17 / MatrixAlgebraKit `eigh_vals`: the Hermitian eigenvalues
     /// per coupled sector, and nothing else.
     ///
@@ -18731,40 +17864,6 @@ where
             )?,
             wrap_factor_on(&self.runtime, v),
         ))
-    }
-
-    /// TensorKit 0.17 / MatrixAlgebraKit `eig_trunc`: [`Self::eig_full`] with
-    /// the eigenbasis truncated by descending `|eigenvalue|`; see [`EigTrunc`].
-    ///
-    /// # Errors
-    ///
-    /// Exactly [`Self::eig_full`]'s, plus a malformed `truncation`.
-    fn eig_trunc_multiplicity_free(&self, truncation: &Truncation) -> Result<EigTrunc<R, D>, Error>
-    where
-        D: AdvancedLinalgScalar,
-        // See [`Self::eig_full`] for why this bound is per-method.
-        <D as FactorScalar>::Eig: TensorScalar,
-    {
-        if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
-            return self
-                .materialized_tensor_uncached()?
-                .eig_trunc_multiplicity_free(truncation);
-        }
-        let mut dense = self.runtime.lease_dense();
-        let out =
-            tenet_matrixalgebra::eig_trunc_dyn(dense.dense(), &self.bound_ref()?, truncation)?;
-        let (v, mut eigenvalues, error) = out.into_parts();
-        Ok(EigTrunc {
-            d: diagonal_factor_on(
-                &self.runtime,
-                self.logical_space(),
-                &mut eigenvalues,
-                <<D as FactorScalar>::Eig as FactorScalar>::from_complex64,
-            )?,
-            v: wrap_factor_on(&self.runtime, v),
-            eigenvalues: self.decode_spectrum(eigenvalues)?,
-            error,
-        })
     }
 
     /// TensorKit 0.17 / MatrixAlgebraKit `eig_vals`: the general eigenvalues
@@ -19665,21 +18764,6 @@ where
         )
     }
 
-    /// TensorKit `normalize`: `self / norm(self)`, the unit-norm tensor
-    /// pointing the same way. The norm is [`Self::norm`]'s, so the result
-    /// satisfies `t.normalize()?.norm()? == 1` up to floating point.
-    ///
-    /// Like TensorKit, a zero-norm tensor is not special-cased: normalizing it
-    /// divides by zero and yields non-finite entries. Guard the caller if that
-    /// input is reachable.
-    ///
-    /// # Errors
-    ///
-    /// Exactly [`Self::norm`]'s.
-    pub fn normalize(&self) -> Result<Self, Error> {
-        Ok(self.scale_multiplicity_free(D::from_real(1.0 / self.norm()?)))
-    }
-
     /// The dimension-weighted inner product of this tensor with itself, the
     /// body of [`Self::norm`].
     fn weighted_self_inner(&self) -> Result<num_complex::Complex64, Error> {
@@ -19767,16 +18851,6 @@ where
                 .expect("owned inner input")
                 .materialized_dense_data(),
         )?))
-    }
-
-    /// Deprecated alias of [`Self::inner`].
-    ///
-    /// # Errors
-    ///
-    /// Exactly [`Self::inner`]'s.
-    #[deprecated(since = "0.1.0", note = "use inner instead")]
-    pub fn dot(&self, other: &Self) -> Result<D, Error> {
-        self.inner(other)
     }
 
     /// TensorKit `tr`: the full trace of an endomorphism
@@ -21862,26 +20936,6 @@ mod representation_gates {
             device_diagonal.eigh_full(),
             Err(Error::UnsupportedOnDevice(message)) if message.contains("dense CUDA storage")
         ));
-        // The truncated factorizations have no device implementation at all,
-        // so their capability boundary precedes the storage and receiver
-        // checks above: the message names the missing operation and its
-        // composition, not the operand.
-        for (operation, error) in [
-            (
-                "svd_trunc",
-                device_diagonal.svd_trunc(&Truncation::Full).err(),
-            ),
-            (
-                "eigh_trunc",
-                device_diagonal.eigh_trunc(&Truncation::Full).err(),
-            ),
-        ] {
-            assert!(
-                matches!(error, Some(Error::UnsupportedOnDevice(ref message))
-                    if message.contains(operation) && message.contains("find_truncated")),
-                "{operation}: {error:?}"
-            );
-        }
         // #1452: the adjoint of a compact diagonal is the owned (conjugated)
         // diagonal on every storage, never a lazy view, so it is rejected as
         // compact storage. The lazy-operand rejection needs a dense device
@@ -21901,16 +20955,6 @@ mod representation_gates {
             adjoint.eigh_full(),
             Err(Error::UnsupportedOnDevice(message)) if message.contains("dense CUDA storage")
         ));
-        for (operation, error) in [
-            ("svd_trunc", adjoint.svd_trunc(&Truncation::Full).err()),
-            ("eigh_trunc", adjoint.eigh_trunc(&Truncation::Full).err()),
-        ] {
-            assert!(
-                matches!(error, Some(Error::UnsupportedOnDevice(ref message))
-                    if message.contains(operation) && message.contains("find_truncated")),
-                "{operation}: {error:?}"
-            );
-        }
 
         let complex_spectrum: Vec<_> = spectrum
             .iter()
@@ -21970,16 +21014,6 @@ mod representation_gates {
             lazy.eigh_full(),
             Err(Error::UnsupportedOnDevice(message)) if message.contains("lazy adjoint")
         ));
-        for (operation, error) in [
-            ("svd_trunc", lazy.svd_trunc(&Truncation::Full).err()),
-            ("eigh_trunc", lazy.eigh_trunc(&Truncation::Full).err()),
-        ] {
-            assert!(
-                matches!(error, Some(Error::UnsupportedOnDevice(ref message))
-                    if message.contains(operation) && message.contains("find_truncated")),
-                "{operation}: {error:?}"
-            );
-        }
         assert_eq!(materialized_adjoint_builds(&lazy), 0);
     }
 
@@ -22652,12 +21686,6 @@ mod representation_gates {
         )
         .unwrap();
         observed_arithmetic!(source_device.zeros_like(), (1, 0, 0), (0, 0, 0)).unwrap();
-        observed_arithmetic!(
-            source_device.normalize(),
-            (1, 1, 1),
-            (1, sector_count.max(1), sector_count.max(1))
-        )
-        .unwrap();
 
         let lazy_scale =
             observed_arithmetic!(lazy_device.scale(-2.0), (1, 1, 1), (0, 0, 0)).unwrap();
@@ -22669,13 +21697,7 @@ mod representation_gates {
         .unwrap();
         let lazy_zero =
             observed_arithmetic!(lazy_device.zeros_like(), (1, 0, 0), (0, 0, 0)).unwrap();
-        let lazy_normalized = observed_arithmetic!(
-            lazy_device.normalize(),
-            (1, 1, 1),
-            (1, sector_count.max(1), sector_count.max(1))
-        )
-        .unwrap();
-        for result in [&lazy_scale, &lazy_add, &lazy_zero, &lazy_normalized] {
+        for result in [&lazy_scale, &lazy_add, &lazy_zero] {
             assert!(matches!(result.repr, TypedTensorRepr::Adjoint(_)));
             assert_eq!(materialized_adjoint_builds(result), 0);
         }
@@ -22802,10 +21824,6 @@ mod representation_gates {
         assert_eq!(
             observe(|| real_device.zeros_like().unwrap()),
             observe(|| complex_device.zeros_like().unwrap())
-        );
-        assert_eq!(
-            observe(|| real_device.normalize().unwrap()),
-            observe(|| complex_device.normalize().unwrap())
         );
         assert_eq!(
             observe(|| real_device.inner(&real_device).unwrap()),
@@ -23332,7 +22350,7 @@ mod representation_gates {
 
     #[cfg(feature = "racah-generated")]
     #[test]
-    fn checked_generic_orth_aliases_reject_lazy_adjoint_without_materializing() {
+    fn checked_generic_compact_qr_lq_reject_lazy_adjoint_without_materializing() {
         use tenet_core::SUNFusionRule;
 
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
@@ -23344,34 +22362,20 @@ mod representation_gates {
             })
             .unwrap();
 
-        let lazy = source.adjoint().unwrap();
-        {
-            let lower = lazy.qr_compact();
-            let alias = lazy.left_orth();
-            let lower_message = match lower {
-                Err(GenericTensorError::Facade(Error::InvalidArgument(message))) => message,
-                other => panic!("unexpected compact QR result: {other:?}"),
+        for qr in [true, false] {
+            let lazy = source.adjoint().unwrap();
+            let result = if qr {
+                lazy.qr_compact()
+            } else {
+                lazy.lq_compact()
             };
-            let alias_message = match alias {
-                Err(GenericTensorError::Facade(Error::InvalidArgument(message))) => message,
-                other => panic!("unexpected left_orth result: {other:?}"),
-            };
-            assert_eq!(lower_message, alias_message);
-            assert_eq!(materialized_adjoint_builds(&lazy), 0);
-        }
-        let lazy = source.adjoint().unwrap();
-        {
-            let lower = lazy.lq_compact();
-            let alias = lazy.right_orth();
-            let lower_message = match lower {
-                Err(GenericTensorError::Facade(Error::InvalidArgument(message))) => message,
-                other => panic!("unexpected compact LQ result: {other:?}"),
-            };
-            let alias_message = match alias {
-                Err(GenericTensorError::Facade(Error::InvalidArgument(message))) => message,
-                other => panic!("unexpected right_orth result: {other:?}"),
-            };
-            assert_eq!(lower_message, alias_message);
+            assert!(
+                matches!(
+                    result,
+                    Err(GenericTensorError::Facade(Error::InvalidArgument(_)))
+                ),
+                "qr = {qr}: {result:?}"
+            );
             assert_eq!(materialized_adjoint_builds(&lazy), 0);
         }
     }
@@ -23916,7 +22920,6 @@ mod representation_gates {
         let eager = eager_adjoint_oracle(source);
         let expected_vals = eager.eigh_vals().unwrap();
         let expected_full = eager.eigh_full().unwrap();
-        let expected_trunc = eager.eigh_trunc(&Truncation::rank(1)).unwrap();
         let parent_body = Arc::clone(owned(source));
         let parent_data = Arc::clone(&parent_body.data);
         let lazy = source.adjoint().unwrap();
@@ -23926,12 +22929,7 @@ mod representation_gates {
             let full = lazy.clone().eigh_full().unwrap();
             assert_eq!(full.0.data(), expected_full.0.data());
             assert_eq!(full.1.data(), expected_full.1.data());
-            let trunc = lazy.clone().eigh_trunc(&Truncation::rank(1)).unwrap();
-            assert_eq!(trunc.eigenvalues, expected_trunc.eigenvalues);
-            assert_eq!(trunc.error, expected_trunc.error);
-            assert_eq!(trunc.d.data(), expected_trunc.d.data());
-            assert_eq!(trunc.v.data(), expected_trunc.v.data());
-            for output in [&full.0, &full.1, &trunc.d, &trunc.v] {
+            for output in [&full.0, &full.1] {
                 assert!(output.owned_body().is_some());
                 assert!(Arc::ptr_eq(
                     output.logical_space().provider_arc(),
@@ -23946,16 +22944,14 @@ mod representation_gates {
                 std::thread::spawn(move || {
                     let vals = clone.eigh_vals().unwrap();
                     let full = clone.eigh_full().unwrap();
-                    let trunc = clone.eigh_trunc(&Truncation::rank(1)).unwrap();
-                    (vals, full.0.data().to_vec(), trunc.error)
+                    (vals, full.0.data().to_vec())
                 })
             })
             .collect::<Vec<_>>();
         for call in calls {
-            let (vals, diagonal, error) = call.join().unwrap();
+            let (vals, diagonal) = call.join().unwrap();
             assert_eq!(vals, expected_vals);
             assert_eq!(diagonal, expected_full.0.data());
-            assert_eq!(error, expected_trunc.error);
         }
         assert!(Arc::ptr_eq(owned(source), &parent_body));
         assert!(Arc::ptr_eq(&owned(source).data, &parent_data));
@@ -23987,10 +22983,6 @@ mod representation_gates {
             .iter()
             .zip(&parent_vals[0].values)
             .any(|(logical, parent)| (logical - parent).abs() > 1.0e-15));
-        let logical_trunc = logical.eigh_trunc(&Truncation::rank(1)).unwrap();
-        let parent_trunc = source.eigh_trunc(&Truncation::rank(1)).unwrap();
-        assert_ne!(logical_trunc.eigenvalues, parent_trunc.eigenvalues);
-        assert_ne!(logical_trunc.error, parent_trunc.error);
 
         assert_eigh_uses_a_cold_logical_copy(&source);
     }
@@ -24043,21 +23035,11 @@ mod representation_gates {
         let expected = [
             eager.eigh_vals().unwrap_err().to_string(),
             eager.eigh_full().unwrap_err().to_string(),
-            eager
-                .eigh_trunc(&Truncation::rank(1))
-                .unwrap_err()
-                .to_string(),
         ];
         let lazy = nonhermitian.adjoint().unwrap();
         for _ in 0..2 {
             assert_eq!(lazy.eigh_vals().unwrap_err().to_string(), expected[0]);
             assert_eq!(lazy.eigh_full().unwrap_err().to_string(), expected[1]);
-            assert_eq!(
-                lazy.eigh_trunc(&Truncation::rank(1))
-                    .unwrap_err()
-                    .to_string(),
-                expected[2]
-            );
         }
         assert_eq!(materialized_adjoint_builds(&lazy), 0);
         let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
@@ -24070,7 +23052,6 @@ mod representation_gates {
         let eager = eager_adjoint_oracle(source);
         let expected_vals = eager.eig_vals().unwrap();
         let expected_full = eager.eig_full().unwrap();
-        let expected_trunc = eager.eig_trunc(&Truncation::rank(1)).unwrap();
         let parent_body = Arc::clone(owned(source));
         let parent_data = Arc::clone(&parent_body.data);
         let lazy = source.adjoint().unwrap();
@@ -24080,12 +23061,7 @@ mod representation_gates {
             let full = lazy.clone().eig_full().unwrap();
             assert_eq!(full.0.data(), expected_full.0.data());
             assert_eq!(full.1.data(), expected_full.1.data());
-            let trunc = lazy.clone().eig_trunc(&Truncation::rank(1)).unwrap();
-            assert_eq!(trunc.eigenvalues, expected_trunc.eigenvalues);
-            assert_eq!(trunc.error, expected_trunc.error);
-            assert_eq!(trunc.d.data(), expected_trunc.d.data());
-            assert_eq!(trunc.v.data(), expected_trunc.v.data());
-            for output in [&full.0, &full.1, &trunc.d, &trunc.v] {
+            for output in [&full.0, &full.1] {
                 assert!(output.owned_body().is_some());
                 assert!(Arc::ptr_eq(
                     output.logical_space().provider_arc(),
@@ -24100,16 +23076,14 @@ mod representation_gates {
                 std::thread::spawn(move || {
                     let vals = clone.eig_vals().unwrap();
                     let full = clone.eig_full().unwrap();
-                    let trunc = clone.eig_trunc(&Truncation::rank(1)).unwrap();
-                    (vals, full.0.data().to_vec(), trunc.error)
+                    (vals, full.0.data().to_vec())
                 })
             })
             .collect::<Vec<_>>();
         for call in calls {
-            let (vals, diagonal, error) = call.join().unwrap();
+            let (vals, diagonal) = call.join().unwrap();
             assert_eq!(vals, expected_vals);
             assert_eq!(diagonal, expected_full.0.data());
-            assert_eq!(error, expected_trunc.error);
         }
         assert!(Arc::ptr_eq(owned(source), &parent_body));
         assert!(Arc::ptr_eq(&owned(source).data, &parent_data));
@@ -24176,12 +23150,6 @@ mod representation_gates {
         assert_eq!(lazy.eig_vals().unwrap(), expected);
         assert_eq!(expected[0].values[0].im, 1.0);
         assert_eq!(expected[0].values[1].im, -1.0);
-        let trunc = lazy.eig_trunc(&Truncation::rank(1)).unwrap();
-        let expected_trunc = eager.eig_trunc(&Truncation::rank(1)).unwrap();
-        assert_eq!(trunc.eigenvalues, expected_trunc.eigenvalues);
-        assert_eq!(trunc.d.data(), expected_trunc.d.data());
-        assert_eq!(trunc.v.data(), expected_trunc.v.data());
-        assert_eq!(trunc.error, expected_trunc.error);
         assert_eq!(materialized_adjoint_builds(&lazy), 0);
 
         for epsilon in [0.0, 1.0e-12] {
@@ -24220,21 +23188,11 @@ mod representation_gates {
         let expected = [
             eager.eig_vals().unwrap_err().to_string(),
             eager.eig_full().unwrap_err().to_string(),
-            eager
-                .eig_trunc(&Truncation::rank(1))
-                .unwrap_err()
-                .to_string(),
         ];
         let lazy = source.adjoint().unwrap();
         for _ in 0..2 {
             assert_eq!(lazy.eig_vals().unwrap_err().to_string(), expected[0]);
             assert_eq!(lazy.eig_full().unwrap_err().to_string(), expected[1]);
-            assert_eq!(
-                lazy.eig_trunc(&Truncation::rank(1))
-                    .unwrap_err()
-                    .to_string(),
-                expected[2]
-            );
         }
         assert_eq!(materialized_adjoint_builds(&lazy), 0);
         let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
@@ -25673,13 +24631,48 @@ mod representation_gates {
     fn assert_truncated_svd_reads_parent<R, D>(source: &TensorMap<R, D>)
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
-        D: FactorizationScalar + core::fmt::Debug,
+        D: FactorizationScalar + SpectrumMagnitude + core::fmt::Debug,
     {
+        // The truncated SVD is the composition `svd_compact` -> `diagview` ->
+        // `find_truncated` -> `restrict_*`.
+        struct Truncated<R: SectorCodec, D> {
+            u: TensorMap<R, D>,
+            s: TensorMap<R, D>,
+            vh: TensorMap<R, D>,
+            singular_values: Vec<SectorSpectrum<R::Sector, f64>>,
+            error: f64,
+        }
+        fn truncated<R, D>(tensor: &TensorMap<R, D>, truncation: &Truncation) -> Truncated<R, D>
+        where
+            R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+            D: FactorizationScalar + SpectrumMagnitude,
+        {
+            let (u, s, vh) = tensor.svd_compact().unwrap();
+            let found = s.domain()[0]
+                .find_truncated(&s.diagview().unwrap(), truncation)
+                .unwrap();
+            let s = s.restrict_diagonal(&found.selection).unwrap();
+            Truncated {
+                u: u.restrict_leg(u.codomain_rank(), &found.selection).unwrap(),
+                singular_values: s
+                    .diagview()
+                    .unwrap()
+                    .into_iter()
+                    .map(|entry| SectorSpectrum {
+                        sector: entry.sector,
+                        values: entry.values.iter().map(|v| v.magnitude()).collect(),
+                    })
+                    .collect(),
+                s,
+                vh: vh.restrict_leg(0, &found.selection).unwrap(),
+                error: found.error,
+            }
+        }
         let eager = eager_adjoint_oracle(source);
         let lazy = source.adjoint().unwrap();
         let truncation = Truncation::rank(1);
-        let actual = lazy.svd_trunc(&truncation).unwrap();
-        let expected = eager.svd_trunc(&truncation).unwrap();
+        let actual = truncated(&lazy, &truncation);
+        let expected = truncated(&eager, &truncation);
 
         // The lazy route factors the parent while the oracle factors the
         // materialized adjoint, so kept sectors and counts match exactly and
@@ -25756,10 +24749,13 @@ mod representation_gates {
         )
         .unwrap();
         let lazy = source.adjoint().unwrap();
-        assert!(matches!(
-            lazy.svd_trunc(&Truncation::space(foreign.truncspace())),
-            Err(Error::Operation(_))
-        ));
+        let (_, s, _) = lazy.svd_compact().unwrap();
+        assert!(s.domain()[0]
+            .find_truncated(
+                &s.diagview().unwrap(),
+                &Truncation::space(foreign.truncspace())
+            )
+            .is_err());
         assert_eq!(materialized_adjoint_builds(&lazy), 0);
         let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
             unreachable!()
@@ -26027,7 +25023,7 @@ mod representation_gates {
         assert!((lazy.norm_inf().unwrap() - eager.norm_inf().unwrap()).abs() < 1e-12);
         assert!((lazy.norm_p(1.5).unwrap() - eager.norm_p(1.5).unwrap()).abs() < 1e-12);
 
-        let normalized = lazy.normalize().unwrap();
+        let normalized = lazy.scale(D::from_real(1.0 / lazy.norm().unwrap()));
         let TypedTensorRepr::Adjoint(normalized_view) = &normalized.repr else {
             panic!("normalizing a lazy adjoint must remain parent-backed");
         };

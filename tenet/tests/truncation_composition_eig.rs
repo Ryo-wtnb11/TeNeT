@@ -153,58 +153,6 @@ macro_rules! assert_eig_composition {
             terms,
         );
 
-        // The composition reproduces the compound `eig_trunc` it replaces:
-        // same bond and geometry exactly, same payload within tolerance.
-        let host = source.eig_trunc(truncation).unwrap();
-        assert_eq!(
-            *found.selection.subspace(),
-            host.d.domain()[0],
-            "{case}: host bond"
-        );
-        for (got, want, what) in [(&got_d, &host.d, "d"), (&got_v, &host.v, "v")] {
-            assert_eq!(
-                got.codomain(),
-                want.codomain(),
-                "{case}: host {what} codomain"
-            );
-            assert_eq!(got.domain(), want.domain(), "{case}: host {what} domain");
-            assert_eq!(
-                got.block_count(),
-                want.block_count(),
-                "{case}: host {what} blocks"
-            );
-            for index in 0..want.block_count() {
-                let (l, r) = (got.block(index).unwrap(), want.block(index).unwrap());
-                assert_eq!(l.key(), r.key(), "{case}: host {what} block {index} key");
-                assert_eq!(
-                    l.shape(),
-                    r.shape(),
-                    "{case}: host {what} block {index} shape"
-                );
-                assert_eq!(
-                    l.strides(),
-                    r.strides(),
-                    "{case}: host {what} block {index} strides"
-                );
-                assert_eq!(
-                    l.offset(),
-                    r.offset(),
-                    "{case}: host {what} block {index} offset"
-                );
-            }
-            numerics::assert_slices_close(
-                &format!("{case}: host {what} payload"),
-                got.data(),
-                want.data(),
-                terms,
-            );
-        }
-        numerics::assert_close(
-            &format!("{case}: host error"),
-            found.error,
-            host.error,
-            terms,
-        );
         found
     }};
 }

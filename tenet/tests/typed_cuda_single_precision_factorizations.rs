@@ -803,9 +803,7 @@ fn device_eigh_admits_a_nearly_hermitian_single_precision_block() {
 // ---------------------------------------------------------------------------
 
 /// The capability and operand boundaries precede every device action, at every
-/// payload, and in the documented order: the truncated entry points report the
-/// missing capability even on a lazy-adjoint receiver whose storage would also
-/// have been rejected.
+/// payload.
 #[test]
 #[ignore = "requires a real CUDA device"]
 fn device_factorization_rejections_do_not_depend_on_the_payload() {
@@ -823,21 +821,6 @@ fn device_factorization_rejections_do_not_depend_on_the_payload() {
             assert!(
                 matches!(&error, Some(Error::UnsupportedOnDevice(message))
                     if message.contains(operation) && message.contains("lazy adjoint")),
-                "{operation} [{}]: {error:?}",
-                D::NAME
-            );
-        }
-        // The truncated variants are a *capability* boundary and win over the
-        // operand check: a lazy-adjoint receiver still reports the capability.
-        for (operation, error) in [
-            ("svd_trunc", lazy.svd_trunc(&Truncation::rank(2)).err()),
-            ("eigh_trunc", lazy.eigh_trunc(&Truncation::rank(2)).err()),
-            ("svd_trunc", device.svd_trunc(&Truncation::rank(2)).err()),
-            ("eigh_trunc", device.eigh_trunc(&Truncation::rank(2)).err()),
-        ] {
-            assert!(
-                matches!(&error, Some(Error::UnsupportedOnDevice(message))
-                    if message.contains(operation) && message.contains("find_truncated")),
                 "{operation} [{}]: {error:?}",
                 D::NAME
             );
@@ -901,7 +884,8 @@ fn device_factorizations_handle_blocks_at_unaligned_offsets_at_every_payload() {
 // ---------------------------------------------------------------------------
 
 /// Device `svd_compact` -> `to_host` -> `diagview` -> `find_truncated` ->
-/// `restrict_*` reproduces host `svd_trunc` **at the same dtype**.
+/// `restrict_*` reproduces the host composition (host `svd_compact` and the
+/// same primitives) **at the same dtype**.
 ///
 /// The kept bond space is asserted exactly: the fixture's singular values are
 /// well separated, so the rank budget is not at a tie and the documented
@@ -920,7 +904,23 @@ fn assert_truncation_composition<R, D>(
     let terms = source.data().len().max(1);
     let bound = tolerance::<D>(terms, source.norm().unwrap(), kappa);
 
-    let expected = source.svd_trunc(truncation).unwrap();
+    let expected = {
+        let (u, s, vh) = source.svd_compact().unwrap();
+        let found = s.domain()[0]
+            .find_truncated(&s.diagview().unwrap(), truncation)
+            .unwrap();
+        let s = s.restrict_diagonal(&found.selection).unwrap();
+        let mut singular_values = s.diagview().unwrap();
+        singular_values.sort_by(|left, right| left.sector.cmp(&right.sector));
+        (
+            u.restrict_leg(u.codomain_rank(), &found.selection).unwrap(),
+            s,
+            vh.restrict_leg(0, &found.selection).unwrap(),
+            singular_values,
+            found.error,
+        )
+    };
+    let (expected_u, expected_s, expected_vh, expected_values, expected_error) = expected;
 
     let (device_u, device_s, device_vh) = source.to_cuda().unwrap().svd_compact().unwrap();
     let u = device_u.to_host().unwrap();
@@ -937,14 +937,14 @@ fn assert_truncation_composition<R, D>(
 
     assert_eq!(
         *selection.subspace(),
-        expected.s.domain()[0],
+        expected_s.domain()[0],
         "kept bond space [{}]",
         D::NAME
     );
     for (actual, expected, what) in [
-        (&u, &expected.u, "u"),
-        (&s, &expected.s, "s"),
-        (&vh, &expected.vh, "vh"),
+        (&u, &expected_u, "u"),
+        (&s, &expected_s, "s"),
+        (&vh, &expected_vh, "vh"),
     ] {
         assert_eq!(
             structure(actual),
@@ -956,12 +956,13 @@ fn assert_truncation_composition<R, D>(
 
     let mut kept = s.diagview().unwrap();
     kept.sort_by(|left, right| left.sector.cmp(&right.sector));
-    assert_eq!(kept.len(), expected.singular_values.len());
-    for (actual, oracle) in kept.iter().zip(&expected.singular_values) {
+    assert_eq!(kept.len(), expected_values.len());
+    for (actual, oracle) in kept.iter().zip(&expected_values) {
         assert_eq!(actual.sector, oracle.sector);
         assert_eq!(actual.values.len(), oracle.values.len());
         for (&value, &reference) in actual.values.iter().zip(&oracle.values) {
             let (re, im) = value.parts();
+            let reference = tenet::typed::SpectrumMagnitude::magnitude(reference);
             assert!(
                 (re - reference).abs() <= bound && im.abs() <= bound,
                 "kept spectrum [{}]: {re}+{im}i against {reference}",
@@ -970,22 +971,21 @@ fn assert_truncation_composition<R, D>(
         }
     }
     assert!(
-        (found.error - expected.error).abs() <= bound,
+        (found.error - expected_error).abs() <= bound,
         "discarded weight [{}]: {} against {}",
         D::NAME,
         found.error,
-        expected.error
+        expected_error
     );
 
     // Reconstruction of the truncated triple, which is the postcondition a
     // caller composing this recipe actually relies on.
     assert_residual(
         &u.compose(&s).unwrap().compose(&vh).unwrap(),
-        &expected
-            .u
-            .compose(&expected.s)
+        &expected_u
+            .compose(&expected_s)
             .unwrap()
-            .compose(&expected.vh)
+            .compose(&expected_vh)
             .unwrap(),
         bound,
         "truncated reconstruction",
@@ -994,7 +994,7 @@ fn assert_truncation_composition<R, D>(
 
 #[test]
 #[ignore = "requires a real CUDA device"]
-fn the_device_truncation_composition_matches_host_svd_trunc_at_every_payload() {
+fn the_device_truncation_composition_matches_the_host_composition_at_every_payload() {
     let runtime = runtime();
     let leg = u1_leg([2, 3, 2]);
     let su2 = su2_leg();

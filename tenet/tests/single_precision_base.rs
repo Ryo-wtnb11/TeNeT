@@ -54,12 +54,6 @@ macro_rules! base_suite {
                     2,
                 );
                 assert_payloads_agree(
-                    "normalize",
-                    a.normalize().unwrap().data(),
-                    wa.normalize().unwrap().data(),
-                    terms,
-                );
-                assert_payloads_agree(
                     "zeros_like",
                     a.zeros_like().data(),
                     wa.zeros_like().data(),

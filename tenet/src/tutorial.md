@@ -239,8 +239,8 @@ makes their values look similar.
 
 ## Tensor algebra and spaces
 
-`TensorMap` has ordinary vector operations: `norm`, `normalize`, `inner`,
-`scale`, `add`, `tr`, and `zeros_like`. It also supplies structural predicates
+`TensorMap` has ordinary vector operations: `norm`, `inner`, `scale`, `add`,
+`tr`, and `zeros_like`. It also supplies structural predicates
 such as `is_hermitian`, `is_unitary`, and `is_posdef`.
 
 ```rust
@@ -255,7 +255,8 @@ let a = TensorMap::<U1FusionRule, f64>::rand(&rt, [&v], [&v])?;
 let b = TensorMap::<U1FusionRule, f64>::rand(&rt, [&v], [&v])?;
 let difference = a.add(&b, 1.0, -1.0)?;
 assert!(difference.norm()? >= 0.0);
-assert!((a.normalize()?.norm()? - 1.0).abs() <= 1e-12);
+let unit = a.scale(1.0 / a.norm()?);
+assert!((unit.norm()? - 1.0).abs() <= 1e-12);
 assert_eq!(a.zeros_like().norm()?, 0.0);
 let id = TensorMap::<U1FusionRule, f64>::id(&rt, [&v])?;
 assert!(id.is_hermitian(1e-12)? && id.is_unitary(1e-12)?);
@@ -264,9 +265,9 @@ assert!(id.is_hermitian(1e-12)? && id.is_unitary(1e-12)?);
 
 `add(&other, alpha, beta)` computes `alpha * self + beta * other`; both maps
 must have compatible runtime, space, scalar, and storage. `inner` and `norm`
-use TeNeT's weighted block inner product. Check `norm()` before `normalize()`
-when zero tensors are possible: normalization divides by that norm, so a zero
-input produces non-finite values rather than an error.
+use TeNeT's weighted block inner product. Normalizing is `scale(1.0 / norm)`;
+check the norm first when zero tensors are possible, since dividing by it
+produces non-finite values rather than an error.
 
 `GradedSpace` exposes its sectors, per-sector degeneracies, total dimension,
 direct sum (`oplus`), and fusion (`fuse`). The total dimension includes each
@@ -358,15 +359,20 @@ labels explicitly, then use the same space and tensor operations as for U(1).
 ## Decompositions
 
 Decompositions act independently in each coupled sector across the current
-codomain | domain split. `svd_trunc` returns `u`, `s`, `vh`, and the discarded
-weighted Frobenius norm. `Truncation::rank(n)` bounds the weighted kept bond
-dimension; tolerance constructors and `and` combine additional limits.
-
-The main method families are `svd_compact`/`svd_full`/`svd_vals`,
-`qr_compact`/`lq_compact`, `left_orth`/`right_orth`,
-`eigh_full`/`eigh_trunc`, `eig_full`/`eig_trunc`, and endomorphism methods
+codomain | domain split. The main method families are
+`svd_compact`/`svd_full`/`svd_vals`, `qr_compact`/`lq_compact`,
+`eigh_full`/`eigh_vals`, `eig_full`/`eig_vals`, and endomorphism methods
 `exp`, `inv`, and `pinv`. General eigendecomposition returns `c64` data even
 for real input.
+
+A truncated factorization is composed from primitives, each with a visible
+cost: factorize (`svd_compact`), read the spectrum (`diagview`), decide what to
+keep (`GradedSpace::find_truncated` on the bond leg), and cut the bond
+(`restrict_leg` on `u` and `vh`, `restrict_diagonal` on `s`). The decision also
+reports the discarded weighted Frobenius norm. `Truncation::rank(n)` bounds the
+weighted kept bond dimension; tolerance constructors and `and` combine
+additional limits. The same four steps truncate `eigh_full` and `eig_full`,
+whose factors are `(d, v)`.
 
 ```rust
 use tenet::prelude::*;
@@ -377,10 +383,17 @@ let v = GradedSpace::try_new(
     [(-1, 1), (0, 2), (1, 1)].map(|(q, n)| (U1Irrep::new(q), n)),
 )?;
 let t = TensorMap::<U1FusionRule, f64>::rand(&rt, [&v, &v], [&v, &v])?;
-let svd = t.svd_trunc(&Truncation::rank(6))?;
-let reconstructed = svd.u.compose(&svd.s)?.compose(&svd.vh)?;
+
+// Truncated SVD: factorize, decide, cut.
+let (u, s, vh) = t.svd_compact()?;
+let found = s.domain()[0].find_truncated(&s.diagview()?, &Truncation::rank(6))?;
+let u = u.restrict_leg(u.codomain_rank(), &found.selection)?;
+let s = s.restrict_diagonal(&found.selection)?;
+let vh = vh.restrict_leg(0, &found.selection)?;
+
+let reconstructed = u.compose(&s)?.compose(&vh)?;
 let error = reconstructed.add(&t, 1.0, -1.0)?.norm()?;
-assert!((error - svd.error).abs() <= 1e-8 * (1.0 + svd.error));
+assert!((error - found.error).abs() <= 1e-8 * (1.0 + found.error));
 
 let (q, r) = t.qr_compact()?;
 assert!(q.compose(&r)?.add(&t, 1.0, -1.0)?.norm()? <= 1e-10 * (1.0 + t.norm()?));
@@ -391,7 +404,7 @@ To factor a different bipartition, use `permute` or `repartition` first.
 
 The returned `s` is a diagonal tensor map on the newly introduced bond space.
 Keep it when a tensor-network algorithm needs bond weights, or absorb it into
-one neighboring factor when it does not. The `error` field measures discarded
+one neighboring factor when it does not. `found.error` measures discarded
 weight for the selected truncation, not convergence of an iterative algorithm.
 Check both that error and the observable relevant to the calculation.
 
@@ -425,13 +438,13 @@ explicitly. Device payloads are `f64` and `Complex64`; single precision has no
 device payload. `svd_compact` and `eigh_full` run on device for both
 payloads: EIGH admits a block only when it equals its conjugate transpose, and
 `u`/`vh` keep the raw device SVD gauge instead of the Host largest-pivot gauge.
-`svd_trunc` and `eigh_trunc` have no device implementation and return
-`UnsupportedOnDevice`: truncation is a global decision over
-quantum-dimension-weighted spectra and stays on the host. Compose it from the
-device factorization and the host primitives — `svd_compact` (or `eigh_full`),
-`to_host`, `diagview`, `GradedSpace::find_truncated`, then `restrict_leg` on
-the bond leg of `u`/`vh` (or `v`) and `restrict_diagonal` on `s` (or `d`); the
-factors move to the host once until a device `restrict_leg` lands. `qr_compact` returns the
+Truncation is a global decision over quantum-dimension-weighted spectra and
+stays on the host, so a device truncated factorization is the same
+composition with one explicit transfer: `svd_compact` (or `eigh_full`) on the
+device, `to_host`, `diagview`, `GradedSpace::find_truncated`, then
+`restrict_leg` on the bond leg of `u`/`vh` (or `v`) and `restrict_diagonal` on
+`s` (or `d`); the factors move to the host once until a device `restrict_leg`
+lands. `qr_compact` returns the
 positive-diagonal gauge and is device-available for every device payload.
 
 ```rust

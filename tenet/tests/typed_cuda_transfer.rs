@@ -23,6 +23,91 @@ use tenet::typed::{BlockFusionTrees, CudaStorage, GradedSpace, Runtime, TensorMa
 #[path = "../../tests/support/numerics.rs"]
 mod numerics;
 
+/// The Host truncated SVD the device composition is compared with: the same
+/// composition on Host factors, with the kept values widened to `f64` and
+/// ordered by provider label.
+struct HostSvdTrunc<R: SectorCodec, D> {
+    u: TensorMap<R, D>,
+    s: TensorMap<R, D>,
+    vh: TensorMap<R, D>,
+    singular_values: Vec<tenet::typed::SectorSpectrum<R::Sector, f64>>,
+    error: f64,
+}
+
+fn host_svd_trunc<R, D>(
+    source: &TensorMap<R, D>,
+    truncation: &Truncation,
+    to_f64: impl Fn(D) -> f64,
+) -> HostSvdTrunc<R, D>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: tenet::prelude::FactorizationScalar + tenet::typed::SpectrumMagnitude,
+{
+    let (u, s, vh) = source.svd_compact().unwrap();
+    let found = s.domain()[0]
+        .find_truncated(&s.diagview().unwrap(), truncation)
+        .unwrap();
+    let s = s.restrict_diagonal(&found.selection).unwrap();
+    HostSvdTrunc {
+        u: u.restrict_leg(u.codomain_rank(), &found.selection).unwrap(),
+        vh: vh.restrict_leg(0, &found.selection).unwrap(),
+        singular_values: labelled_f64(&s, to_f64),
+        s,
+        error: found.error,
+    }
+}
+
+/// [`HostSvdTrunc`] for the Hermitian eigendecomposition.
+struct HostEighTrunc<R: SectorCodec, D> {
+    d: TensorMap<R, D>,
+    v: TensorMap<R, D>,
+    eigenvalues: Vec<tenet::typed::SectorSpectrum<R::Sector, f64>>,
+    error: f64,
+}
+
+fn host_eigh_trunc<R, D>(
+    source: &TensorMap<R, D>,
+    truncation: &Truncation,
+    to_f64: impl Fn(D) -> f64,
+) -> HostEighTrunc<R, D>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: tenet::prelude::FactorizationScalar + tenet::typed::SpectrumMagnitude,
+{
+    let (d, v) = source.eigh_full().unwrap();
+    let found = d.domain()[0]
+        .find_truncated(&d.diagview().unwrap(), truncation)
+        .unwrap();
+    let d = d.restrict_diagonal(&found.selection).unwrap();
+    HostEighTrunc {
+        v: v.restrict_leg(v.codomain_rank(), &found.selection).unwrap(),
+        eigenvalues: labelled_f64(&d, to_f64),
+        d,
+        error: found.error,
+    }
+}
+
+fn labelled_f64<R, D>(
+    factor: &TensorMap<R, D>,
+    to_f64: impl Fn(D) -> f64,
+) -> Vec<tenet::typed::SectorSpectrum<R::Sector, f64>>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: TensorScalar,
+{
+    let mut spectra: Vec<_> = factor
+        .diagview()
+        .unwrap()
+        .into_iter()
+        .map(|entry| tenet::typed::SectorSpectrum {
+            sector: entry.sector,
+            values: entry.values.into_iter().map(&to_f64).collect(),
+        })
+        .collect();
+    spectra.sort_by(|left, right| left.sector.cmp(&right.sector));
+    spectra
+}
+
 #[derive(Debug, Eq, PartialEq)]
 struct LegSnapshot<S> {
     sectors: Vec<S>,
@@ -281,7 +366,6 @@ where
     let tolerance = 1e-12 * (1.0 + expected_inner.abs().max(expected_norm));
 
     assert!((inner - expected_inner).abs() <= tolerance);
-    assert_eq!(lhs_device.dot(&rhs_device).unwrap(), inner);
     assert!((norm - expected_norm).abs() <= tolerance);
     let self_inner = lhs_device.inner(&lhs_device).unwrap();
     assert!((self_inner - norm.powi(2)).abs() <= 1e-12 * (1.0 + self_inner.abs()));
@@ -401,9 +485,9 @@ fn assert_cuda_svd_result<R>(
     assert_close(rebuilt.data(), source.data(), 1e-10);
 }
 
-/// The device replacement for `svd_trunc`: compact SVD on the device, one
-/// download per factor, then the Host truncation primitives. It must reproduce
-/// Host `svd_trunc` in the kept bond space and in the kept spectrum, and
+/// The device truncated SVD: compact SVD on the device, one download per
+/// factor, then the Host truncation primitives. It must reproduce the same
+/// composition on Host in the kept bond space and in the kept spectrum, and
 /// reconstruct `u s vh` to dtype tolerance. The device factors keep the raw
 /// cuSOLVER gauge, so `u`/`vh` payloads are never compared bit for bit.
 fn assert_typed_cuda_svd_trunc_composition_matches_host<R>(
@@ -415,7 +499,7 @@ fn assert_typed_cuda_svd_trunc_composition_matches_host<R>(
     let provider = source.provider() as *const R;
     let runtime = source.runtime().identity();
     let source_bits: Vec<_> = source.data().iter().map(|value| value.to_bits()).collect();
-    let expected = source.svd_trunc(truncation).unwrap();
+    let expected = host_svd_trunc(source, truncation, |value: f64| value);
     let source_device = source.to_cuda().unwrap();
 
     let (u_device, s_device, vh_device) = source_device.svd_compact().unwrap();
@@ -443,8 +527,8 @@ fn assert_typed_cuda_svd_trunc_composition_matches_host<R>(
         assert_eq!(structural_snapshot(actual), structural_snapshot(expected));
     }
     // Per sector and matched by provider label: `diagview` orders by encoded
-    // `SectorId`, Host `singular_values` by decoded label, and those two
-    // orders are not the same contract.
+    // `SectorId`, the Host oracle by decoded label, and those two orders are
+    // not the same contract.
     let mut kept = s.diagview().unwrap();
     kept.sort_by(|left, right| left.sector.cmp(&right.sector));
     assert_eq!(kept.len(), expected.singular_values.len());
@@ -1385,26 +1469,6 @@ fn typed_cuda_svd_trunc_composition_matches_host_policies_structure_and_ownershi
             );
         }
     });
-
-    // The truncated entry points are an explicit capability boundary that
-    // precedes every device action, including on a dense device receiver.
-    let before = tenet::dense::cuda_transfer_stats();
-    for (operation, error) in [
-        ("svd_trunc", device.svd_trunc(&Truncation::rank(2)).err()),
-        ("eigh_trunc", device.eigh_trunc(&Truncation::rank(2)).err()),
-    ] {
-        assert!(
-            matches!(error, Some(tenet::prelude::Error::UnsupportedOnDevice(ref message))
-                if message.contains(operation) && message.contains("find_truncated")),
-            "{operation}: {error:?}"
-        );
-    }
-    // No lease, no plan, no allocation, no transfer: every device counter is
-    // exactly where it was before the two rejected calls. `cuda_transfer_stats`
-    // is process-wide, so this equality only holds because the device suite
-    // runs with `--test-threads=1`; the operand-independent evidence is the
-    // non-device unit test in `typed.rs`.
-    assert_eq!(tenet::dense::cuda_transfer_stats(), before);
 }
 
 #[test]
@@ -1620,25 +1684,8 @@ fn typed_cuda_arithmetic_matches_host_lazy_ownership_and_concurrency() {
             }
         })
         .unwrap();
-    let normalized = su2.to_cuda().unwrap().normalize().unwrap();
-    assert!((normalized.norm().unwrap() - 1.0).abs() < 1e-12);
-    let expected_normalized = su2.normalize().unwrap();
-    let normalized_host = normalized.to_host().unwrap();
-    for (&actual, &expected) in normalized_host
-        .data()
-        .iter()
-        .zip(expected_normalized.data())
-    {
-        assert!((actual - expected).abs() < 1e-12);
-    }
-
-    let zero = lhs.zeros_like().to_cuda().unwrap().normalize().unwrap();
-    assert!(zero
-        .to_host()
-        .unwrap()
-        .data()
-        .iter()
-        .all(|value| !value.is_finite()));
+    // SU(2) weights the norm by dim(c); the device reduction must too.
+    assert!((su2.to_cuda().unwrap().norm().unwrap() - su2.norm().unwrap()).abs() < 1e-12);
 
     let zn3 = Arc::new(ZNFusionRule::new(3).unwrap());
     let charge0 = GradedSpace::try_new_with_arc(Arc::clone(&zn3), [(zn3.irrep(0), 1)]).unwrap();
@@ -1662,13 +1709,6 @@ fn typed_cuda_arithmetic_matches_host_lazy_ownership_and_concurrency() {
         .is_empty());
     assert!(empty_device
         .zeros_like()
-        .unwrap()
-        .to_host()
-        .unwrap()
-        .data()
-        .is_empty());
-    assert!(empty_device
-        .normalize()
         .unwrap()
         .to_host()
         .unwrap()
@@ -2167,11 +2207,6 @@ fn typed_cuda_c64_inner_is_conjugate_linear_in_the_first_argument() {
         let self_inner = a_device.inner(&a_device).unwrap();
         assert!(self_inner.im.abs() <= 1e-12 * (1.0 + self_inner.norm()));
         assert!((self_inner.re - norm * norm).abs() <= 1e-12 * (1.0 + self_inner.norm()));
-
-        #[allow(deprecated)]
-        {
-            assert_eq!(a_device.dot(&b_device).unwrap(), inner);
-        }
     }
 }
 
@@ -2217,11 +2252,6 @@ fn typed_cuda_c64_scale_and_add_match_host_including_the_lazy_fold() {
         a_device.zeros_like().unwrap().to_host().unwrap().data(),
         &vec![Complex64::new(0.0, 0.0); a.data().len()],
         0.0,
-    );
-    assert_close_c64(
-        a_device.normalize().unwrap().to_host().unwrap().data(),
-        a.normalize().unwrap().data(),
-        1e-12,
     );
 
     // `(alpha A^H + beta B^H) == (conj(alpha) A + conj(beta) B)^H`.
@@ -2478,7 +2508,7 @@ fn assert_c64_svd_trunc_composition_matches_host<R>(
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
 {
     let source_data = source.data().to_vec();
-    let expected = source.svd_trunc(truncation).unwrap();
+    let expected = host_svd_trunc(source, truncation, |value: Complex64| value.re);
     let device = source.to_cuda().unwrap();
 
     let (u_device, s_device, vh_device) = device.svd_compact().unwrap();
@@ -2566,7 +2596,7 @@ fn assert_c64_eigh_trunc_composition_matches_host<R>(
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
 {
     let source_data = source.data().to_vec();
-    let expected = source.eigh_trunc(truncation).unwrap();
+    let expected = host_eigh_trunc(source, truncation, |value: Complex64| value.re);
     let device = source.to_cuda().unwrap();
 
     let (d_device, v_device) = device.eigh_full().unwrap();

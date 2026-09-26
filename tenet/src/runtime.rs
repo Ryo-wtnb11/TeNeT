@@ -2,7 +2,6 @@
 //! tensor code never passes explicit contexts around.
 
 use std::any::Any;
-use std::cell::RefCell;
 use std::hash::Hash;
 use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(feature = "cuda")]
@@ -1861,47 +1860,6 @@ impl RuntimeBuilder {
             }),
         })
     }
-}
-
-thread_local! {
-    static DEFAULT_RUNTIME: RefCell<Option<Runtime>> = const { RefCell::new(None) };
-}
-
-/// Sets the calling thread's legacy default [`Runtime`].
-///
-/// The default is **thread-local**: it is not shared with other threads, and
-/// a later call overwrites the default on this thread. Typed tensors receive
-/// their runtime explicitly.
-pub fn set_default_runtime(rt: &Runtime) {
-    DEFAULT_RUNTIME.with(|cell| *cell.borrow_mut() = Some(rt.clone()));
-}
-
-/// Returns the calling thread's default [`Runtime`] (a cheap handle clone), or
-/// an error if none was set with [`set_default_runtime`] / [`default!`](crate::default).
-pub fn default_runtime() -> Result<Runtime, Error> {
-    DEFAULT_RUNTIME.with(|cell| {
-        cell.borrow().clone().ok_or_else(|| {
-            Error::InvalidArgument(
-                "no default runtime set on this thread; call set_default_runtime(&rt) \
-                 (or default!(rt)), or pass a runtime explicitly"
-                    .to_string(),
-            )
-        })
-    })
-}
-
-/// Clears the calling thread's default [`Runtime`] (mainly for test isolation).
-pub fn clear_default_runtime() {
-    DEFAULT_RUNTIME.with(|cell| *cell.borrow_mut() = None);
-}
-
-/// Sets the calling thread's default runtime: `default!(rt)` is shorthand for
-/// [`set_default_runtime`]`(&rt)`.
-#[macro_export]
-macro_rules! default {
-    ($rt:expr) => {
-        $crate::set_default_runtime(&$rt)
-    };
 }
 
 #[cfg(test)]

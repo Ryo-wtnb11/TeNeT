@@ -30,7 +30,7 @@ Version/tree-sha1 pairs resolved from the local package installs'
 with `Base.version_slug` to confirm the correspondence).
 
 MatrixAlgebraKit is pinned for the factorization *names* the rustdoc anchors
-to (`svd_compact`, `left_orth`, `DiagonalAlgorithm`, ...); every `source`
+to (`svd_compact`, `qr_compact`, `DiagonalAlgorithm`, ...); every `source`
 path below that mentions MatrixAlgebraKit behavior
 (`factorizations/matrixalgebrakit.jl`, `factorizations/diagonal.jl`) is a
 TensorKit file wrapping it. `tensors/tensoroperations.jl` and
@@ -77,7 +77,6 @@ upstream location (the note says why).
 
 | Item | Upstream component | Revision | Source | Note |
 | --- | --- | --- | --- | --- |
-| `SvdTrunc` | MatrixAlgebraKit | 0.6.9 | `interface/svd.jl:44-93` | `svd_trunc` docstring: returns `(U, S, Vᴴ, ϵ)` |
 | `typed::TensorMap::add` | TensorKit | 0.17.0 | `tensors/vectorinterface.jl:67-99` | divergence: TK computes `β*ty + α*tx` (first coefficient on the *second* argument); tenet's `alpha` belongs to `self` |
 | `typed::TensorMap::adjoint` | TensorKit | 0.17.0 | `tensors/adjoint.jl:19` | `Base.adjoint` returns the lazy `AdjointTensorMap` wrapper (struct at 9-12) |
 | `typed::TensorMap::braid` | TensorKit | 0.17.0 | `tensors/indexmanipulations.jl:331-342` | typed facade |
@@ -87,10 +86,8 @@ upstream location (the note says why).
 | `typed::TensorMap::data` | TensorKit | 0.17.0 | `tensors/tensor.jl:10-35` | `TensorMap`'s flat `data` vector — the coupled-sector matrix layout tenet's storage claims equivalence with |
 | `typed::TensorMap::inner` | TensorKit | 0.17.0 | `tensors/linalg.jl:255` | TensorKit exposes the same inner product as `LinearAlgebra.dot` |
 | `typed::TensorMap::eig_full` | MatrixAlgebraKit | 0.6.9 | `interface/eig.jl:12-33` | typed facade |
-| `typed::TensorMap::eig_trunc` | MatrixAlgebraKit | 0.6.9 | `interface/eig.jl:35-87` | typed facade |
 | `typed::TensorMap::eig_vals` | MatrixAlgebraKit | 0.6.9 | `interface/eig.jl:140-158` | typed facade |
 | `typed::TensorMap::eigh_full` | MatrixAlgebraKit | 0.6.9 | `interface/eigh.jl:14-37` | typed facade |
-| `typed::TensorMap::eigh_trunc` | MatrixAlgebraKit | 0.6.9 | `interface/eigh.jl:39-91` | typed facade |
 | `typed::TensorMap::eigh_vals` | MatrixAlgebraKit | 0.6.9 | `interface/eigh.jl:144-162` | typed facade |
 | `typed::TensorMap::exp` | TensorKit | 0.17.0 | `tensors/linalg.jl:44` | `exp` copies, then calls `exp!` |
 | `typed::TensorMap::exp` | TensorKit | 0.17.0 | `tensors/linalg.jl:420-427` | `exp!`: `domain == codomain` check, per-block dense exponential |
@@ -110,14 +107,12 @@ upstream location (the note says why).
 | `typed::TensorMap::isometry` | TensorKit | 0.17.0 | `tensors/linalg.jl:149-158` | |
 | `typed::TensorMap::isomorphism` | TensorKit | 0.17.0 | `tensors/linalg.jl:102-109` | |
 | `typed::TensorMap::left_null` | MatrixAlgebraKit | 0.6.9 | `interface/orthnull.jl:167-244` | typed facade |
-| `typed::TensorMap::left_orth` | MatrixAlgebraKit | 0.6.9 | `interface/orthnull.jl:3-82` | TK 0.17 export of the MAK name |
 | `typed::TensorMap::left_polar` | MatrixAlgebraKit | 0.6.9 | `interface/polar.jl:3-20` | typed facade; TK factor-space glue on the typed `left_polar` rows |
 | `typed::TensorMap::lq_compact` | MatrixAlgebraKit | 0.6.9 | `interface/lq.jl:22-43` | typed facade; TK diagonal fast-path divergence on the typed `lq_compact` row |
 | `typed::TensorMap::lq_full` | MatrixAlgebraKit | 0.6.9 | `interface/lq.jl:3-20` | typed facade |
 | `typed::TensorMap::norm` | TensorKit | 0.17.0 | `tensors/linalg.jl:257-275` | quantum-dimension-weighted Frobenius norm (`_norm` at `p = 2`) |
 | `typed::TensorMap::norm_inf` | TensorKit | 0.17.0 | `tensors/linalg.jl:262-265` | `_norm`'s `p == Inf` branch: maximum absolute stored entry, unweighted |
 | `typed::TensorMap::norm_p` | TensorKit | 0.17.0 | `tensors/linalg.jl:257-275` | `norm(t, p)` and the `_norm` block reduction |
-| `typed::TensorMap::normalize` | TensorKit | 0.17.0 | `tensors/linalg.jl:18-19` | typed facade |
 | `typed::TensorMap::permute` | TensorKit | 0.17.0 | `tensors/indexmanipulations.jl:242-259` | typed facade |
 | `typed::TensorMap::pinv` | TensorKit | 0.17.0 | `tensors/linalg.jl:388-396` | typed facade |
 | `typed::TensorMap::project_antihermitian` | MatrixAlgebraKit | 0.6.9 | `interface/projections.jl:16-29` | typed facade |
@@ -126,14 +121,12 @@ upstream location (the note says why).
 | `typed::TensorMap::qr_full` | MatrixAlgebraKit | 0.6.9 | `interface/qr.jl:3-20` | typed facade; see also the typed `qr_full` row |
 | `typed::TensorMap::repartition` | TensorKit | 0.17.0 | `tensors/indexmanipulations.jl:464-474` | typed facade |
 | `typed::TensorMap::right_null` | MatrixAlgebraKit | 0.6.9 | `interface/orthnull.jl:246-323` | typed facade |
-| `typed::TensorMap::right_orth` | MatrixAlgebraKit | 0.6.9 | `interface/orthnull.jl:84-163` | TK 0.17 export of the MAK name |
 | `typed::TensorMap::right_polar` | MatrixAlgebraKit | 0.6.9 | `interface/polar.jl:22-40` | typed facade; TK factor-space glue on the typed `right_polar` row |
 | `typed::TensorMap::scale` | TensorKit | 0.17.0 | `tensors/vectorinterface.jl:24-27` | `VectorInterface.scale`, behind `α * t` |
 | `typed::TensorMap::space` | TensorKit | 0.17.0 | `tensors/abstracttensor.jl:196-201` | `space(t, i)` flat-leg convention (domain legs dualized) |
 | `typed::TensorMap::sqrt` | TensorKit | 0.17.0 | `tensors/diagonal.jl:384-390` | `sqrt.(d.data)` elementwise on the diagonal |
 | `typed::TensorMap::svd_compact` | MatrixAlgebraKit | 0.6.9 | `interface/svd.jl:23-42` | typed facade |
 | `typed::TensorMap::svd_full` | MatrixAlgebraKit | 0.6.9 | `interface/svd.jl:3-21` | typed facade |
-| `typed::TensorMap::svd_trunc` | MatrixAlgebraKit | 0.6.9 | `interface/svd.jl:44-93` | typed facade; return type rowed under `SvdTrunc` |
 | `typed::TensorMap::svd_vals` | MatrixAlgebraKit | 0.6.9 | `interface/svd.jl:144-156` | typed facade |
 | `typed::TensorMap::tr` | TensorKit | 0.17.0 | `tensors/linalg.jl:319-327` | typed facade |
 | `typed::TensorMap::trace_pairs` | TensorKit | 0.17.0 | `tensors/tensoroperations.jl:72-87` | `TO.tensortrace!` |
@@ -144,13 +137,12 @@ upstream location (the note says why).
 | `typed::TensorMap::zeros` | TensorKit | 0.17.0 | `tensors/tensor.jl:283-318` | the generated `zeros`/`ones` constructor pair |
 | `typed` (module doc) | TensorKitSectors | 0.3.4 | `product.jl:245-294` | `ProductSector` / Deligne product `⊠` |
 | `typed::BlockFusionTrees` | TensorKit | 0.17.0 | `tensors/abstracttensor.jl:348-352` | named after `fusiontrees(t)`; its accessors mirror the `f₁.uncoupled`/`f₂.uncoupled`/coupled fields of TK fusion-tree pairs, and `blocksectors` (331-335) is the coarser surface it deliberately is not |
-| `typed::EigTrunc` | MatrixAlgebraKit | 0.6.9 | `interface/eig.jl:35-87` | return-type struct for `eig_trunc` |
-| `typed::EighTrunc` | MatrixAlgebraKit | 0.6.9 | `interface/eigh.jl:39-91` | return-type struct for `eigh_trunc`; field order `d`, `v` as MAK `initialize_output` |
 | `typed::GradedSpace` | TensorKit | 0.17.0 | `spaces/gradedspace.jl:2-29` | the struct this leg type mirrors (docstring 2-25, definition 26-29) |
 | `typed::GradedSpace::degeneracies` | TensorKit | 0.17.0 | `spaces/gradedspace.jl:96-101` | `dim(V, c)` |
 | `typed::GradedSpace::is_dual` | TensorKit | 0.17.0 | `spaces/gradedspace.jl:114` | `isdual(V) = V.dual` — the orientation flag TK's `V'` toggles |
 | `typed::GradedSpace::sectors` | TensorKit | 0.17.0 | `spaces/gradedspace.jl:180-187` | divergence: tenet returns stored labels as-is, TK dualizes stored keys on read when `isdual(V)` |
 | `typed::GradedSpace::truncspace` | TensorKit | 0.17.0 | `factorizations/truncation.jl:261-270` | `findtruncated(_svd)` for `TruncationSpace` — the semantics of the strategy; `truncspace` itself is `factorizations/truncation.jl:23-26` |
+| `typed::GradedSpace::find_truncated` | MatrixAlgebraKit | 0.6.9 | `implementations/truncation.jl:6-15`, `implementations/svd.jl:231-236` | `svd_trunc!` is `svd_compact!` + `truncate` (`findtruncated` on `diagview(S)`, then indexing) + `truncation_error!`, and `eigh_trunc!`/`eig_trunc!` are the same on `(D, V)`; TeNeT exposes only the steps (`diagview`, `find_truncated`, `restrict_leg`, `restrict_diagonal`), #1534 |
 | `typed::GradedSpace::try_dual` | TensorKit | 0.17.0 | `spaces/gradedspace.jl:112` | divergence: TK flips the flag and dualizes lazily on read; tenet rewrites the stored sector table eagerly |
 | `typed::GradedSpace::try_dual` | TensorKit | 0.17.0 | `spaces/vectorspaces.jl:69-73` | the `dual(dual(V)) == V` contract |
 | `typed::GradedSpace::try_new` | TensorKit | 0.17.0 | `spaces/gradedspace.jl:70-85` | `GradedSpace` / `Vect[I]` constructor family |

@@ -2,7 +2,7 @@
 //!
 //! Every operation `AdvancedLinalgScalar` admits — `inv`, `solve`,
 //! `solve_right`, `pinv`, `exp` (Hermitian spectral route and non-Hermitian
-//! Padé route), `powi`, `sqrt`, `eig_vals`, `eig_full`, `eig_trunc` — is
+//! Padé route), `powi`, `sqrt`, `eig_vals`, `eig_full` and its truncation — is
 //! compared against the `f64`/`Complex64` result of the same operation on the
 //! exactly widened input (`single_precision_oracle`).
 //!
@@ -316,19 +316,34 @@ macro_rules! advanced_checks {
             n,
             kappa_v
         );
-        let truncated = a.eig_trunc(&Truncation::rank(2)).unwrap();
-        let wide_truncated = wide_a.eig_trunc(&Truncation::rank(2)).unwrap();
-        let truncated_d: &TensorMap<_, $eig> = &truncated.d;
+        // The truncated eigendecomposition is `eig_full` → `diagview` →
+        // `find_truncated` → `restrict_diagonal` (#1534).
+        let (kept, error) = {
+            let found = d.domain()[0]
+                .find_truncated(&d.diagview().unwrap(), &Truncation::rank(2))
+                .unwrap();
+            (d.restrict_diagonal(&found.selection).unwrap(), found.error)
+        };
+        let (wide_kept, wide_error) = {
+            let (wide_d, _) = wide_a.eig_full().unwrap();
+            let found = wide_d.domain()[0]
+                .find_truncated(&wide_d.diagview().unwrap(), &Truncation::rank(2))
+                .unwrap();
+            (
+                wide_d.restrict_diagonal(&found.selection).unwrap(),
+                found.error,
+            )
+        };
         assert_eq!(
-            truncated_d.data().len(),
-            wide_truncated.d.data().len(),
-            "{name}: eig_trunc kept a different number of states than the widened oracle"
+            kept.data().len(),
+            wide_kept.data().len(),
+            "{name}: truncated eig kept a different number of states than the widened oracle"
         );
-        assert!(truncated.error > 0.0, "{name}: eig_trunc discarded nothing");
+        assert!(error > 0.0, "{name}: truncated eig discarded nothing");
         assert_scalars_agree_scaled(
-            &format!("{name}: eig_trunc error"),
-            Complex64::new(truncated.error, 0.0),
-            Complex64::new(wide_truncated.error, 0.0),
+            &format!("{name}: truncated eig error"),
+            Complex64::new(error, 0.0),
+            Complex64::new(wide_error, 0.0),
             n,
             kappa_v,
         );

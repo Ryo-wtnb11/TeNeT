@@ -2663,75 +2663,6 @@ fn sun_checked_generic_compact_lq_preserves_provider_and_reconstructs() {
 
 #[cfg(feature = "racah-generated")]
 #[test]
-fn sun_checked_generic_orth_aliases_reconstruct_multiplicity_fixture() {
-    use tenet::typed::SUNFusionRule;
-
-    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-    macro_rules! assert_aliases {
-        ($source:expr, $close:expr) => {{
-            let source = $source;
-            let close = $close;
-            let (q, r) = source.qr_compact().unwrap();
-            let (orth_q, orth_r) = source.left_orth().unwrap();
-            for (actual, expected) in orth_q
-                .compose(&orth_r)
-                .unwrap()
-                .data()
-                .iter()
-                .zip(source.data())
-            {
-                assert!(close(*actual, *expected) < 1.0e-10);
-            }
-            for (alias, lower) in [(&orth_q, &q), (&orth_r, &r)] {
-                assert_eq!(alias.data(), lower.data());
-                assert!(std::ptr::eq(alias.provider(), lower.provider()));
-                assert_eq!(alias.codomain(), lower.codomain());
-                assert_eq!(alias.domain(), lower.domain());
-                assert!(alias.runtime().shares_state_with(lower.runtime()));
-            }
-
-            let (l, q) = source.lq_compact().unwrap();
-            let (orth_l, orth_q) = source.right_orth().unwrap();
-            for (actual, expected) in orth_l
-                .compose(&orth_q)
-                .unwrap()
-                .data()
-                .iter()
-                .zip(source.data())
-            {
-                assert!(close(*actual, *expected) < 1.0e-10);
-            }
-            for (alias, lower) in [(&orth_l, &l), (&orth_q, &q)] {
-                assert_eq!(alias.data(), lower.data());
-                assert!(std::ptr::eq(alias.provider(), lower.provider()));
-                assert_eq!(alias.codomain(), lower.codomain());
-                assert_eq!(alias.domain(), lower.domain());
-                assert!(alias.runtime().shares_state_with(lower.runtime()));
-            }
-        }};
-    }
-
-    for n in [3, 4] {
-        let provider = Arc::new(SUNFusionRule::new(n).unwrap());
-        let label = if n == 3 { vec![1, 1] } else { vec![1, 0, 1] };
-        let leg = GradedSpace::try_new_with_arc(Arc::clone(&provider), [(label, 1)]).unwrap();
-        let source: TensorMap<_, f64> =
-            TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], |trees, _| {
-                trees.codomain_vertices()[0].get() as f64
-            })
-            .unwrap();
-        assert_eq!(source.block_count(), 2);
-        assert_aliases!(&source, |actual: f64, expected: f64| {
-            (actual - expected).abs()
-        });
-        assert_aliases!(source.to_c64(), |actual: Complex64, expected: Complex64| {
-            (actual - expected).norm()
-        });
-    }
-}
-
-#[cfg(feature = "racah-generated")]
-#[test]
 fn sun_checked_generic_full_qr_preserves_provider_and_reconstructs() {
     use tenet::typed::SUNFusionRule;
 
@@ -2813,7 +2744,7 @@ fn assert_checked_generic_eigh_factors<D>(
     close: impl Fn(D, D) -> f64 + Copy,
     adjoint: impl Fn(D) -> D + Copy,
 ) where
-    D: tenet::typed::FactorizationScalar + fmt::Debug,
+    D: tenet::typed::FactorizationScalar + tenet::typed::SpectrumMagnitude + fmt::Debug,
 {
     let (d, v) = source.eigh_full().unwrap();
     assert!(std::ptr::eq(d.provider(), source.provider()));
@@ -2852,17 +2783,17 @@ fn assert_checked_generic_eigh_factors<D>(
         }
     }
 
-    let truncated = source.eigh_trunc(&Truncation::rank(5)).unwrap();
-    assert!(std::ptr::eq(truncated.d.provider(), source.provider()));
-    assert!(std::ptr::eq(truncated.v.provider(), source.provider()));
-    assert_eq!(truncated.eigenvalues.len(), 1);
-    assert_eq!(truncated.eigenvalues[0].sector, Label::X);
-    assert_eq!(truncated.eigenvalues[0].values, vec![-3.0, 2.0]);
-    // #1337: the compact payload is filled from the borrowed spectrum, which
-    // the factor sorts in place before the public field is decoded from it.
-    // Both must carry the same values in the same order, exactly — no
+    // The truncated eigendecomposition is a composition (#1534).
+    let found = d.domain()[0]
+        .find_truncated(&d.diagview().unwrap(), &Truncation::rank(5))
+        .unwrap();
+    let truncated_d = d.restrict_diagonal(&found.selection).unwrap();
+    let truncated_v = v.restrict_leg(v.codomain_rank(), &found.selection).unwrap();
+    assert!(std::ptr::eq(truncated_d.provider(), source.provider()));
+    assert!(std::ptr::eq(truncated_v.provider(), source.provider()));
+    // The kept values carry the same values in the same order, exactly — no
     // rounding, and no reordering of the values inside a sector.
-    let compact = truncated.d.diagview().unwrap();
+    let compact = truncated_d.diagview().unwrap();
     assert_eq!(compact.len(), 1);
     assert_eq!(compact[0].sector, Label::X);
     for (actual, expected) in compact[0]
@@ -2873,7 +2804,7 @@ fn assert_checked_generic_eigh_factors<D>(
         assert_eq!(close(*actual, expected), 0.0);
     }
     let expected_error = (1.0 + 2.0_f64.sqrt()).sqrt();
-    assert!((truncated.error - expected_error).abs() < 1e-12);
+    assert!((found.error - expected_error).abs() < 1e-12);
 }
 
 #[test]
@@ -2914,7 +2845,6 @@ fn checked_generic_eigh_lazy_success_and_failure_leave_the_view_lazy() {
     let lazy = hermitian.adjoint().unwrap();
     assert!(lazy.network_reuse_class(false) == tenet::typed::NetworkReuseClass::LazyAdjoint);
     assert!(lazy.eigh_full().is_ok());
-    assert!(lazy.eigh_trunc(&Truncation::rank(1)).is_ok());
     assert!(lazy.network_reuse_class(false) == tenet::typed::NetworkReuseClass::LazyAdjoint);
 
     let nonhermitian: TensorMap<_, f64> =
@@ -2924,7 +2854,6 @@ fn checked_generic_eigh_lazy_success_and_failure_leave_the_view_lazy() {
         .unwrap();
     let lazy = nonhermitian.adjoint().unwrap();
     assert!(lazy.eigh_full().is_err());
-    assert!(lazy.eigh_trunc(&Truncation::Full).is_err());
     assert!(lazy.network_reuse_class(false) == tenet::typed::NetworkReuseClass::LazyAdjoint);
 }
 
@@ -3173,19 +3102,22 @@ fn checked_generic_eigh_qdim_and_decode_failures_publish_no_pair() {
         .unwrap();
     let before = source.data().to_vec();
 
+    // The truncation composition decodes labels in `diagview` and reads the
+    // quantum dimension in `find_truncated`; both surface the provider error.
+    let (d, _) = source.eigh_full().unwrap();
     provider.fail_decode.store(true, Ordering::Relaxed);
-    assert!(source.eigh_full().is_ok());
     assert!(matches!(
-        source.eigh_trunc(&Truncation::Full),
-        Err(GenericTensorError::Plan(
-            tenet::typed::CheckedGenericPlanError::Provider(ToyError::Decode)
+        d.diagview(),
+        Err(GenericTensorError::Structure(
+            CheckedGenericStructureError::Provider(ToyError::Decode)
         ))
     ));
     provider.fail_decode.store(false, Ordering::Relaxed);
 
+    let spectra = d.diagview().unwrap();
     provider.fail_dim.store(true, Ordering::Relaxed);
     assert!(matches!(
-        source.eigh_trunc(&Truncation::rank(1)),
+        d.domain()[0].find_truncated(&spectra, &Truncation::rank(1)),
         Err(GenericTensorError::Plan(
             tenet::typed::CheckedGenericPlanError::Provider(ToyError::Algebra)
         ))
@@ -3208,19 +3140,22 @@ fn checked_generic_eig_qdim_and_decode_failures_publish_no_pair() {
         .unwrap();
     let before = source.data().to_vec();
 
+    // The truncation composition decodes labels in `diagview` and reads the
+    // quantum dimension in `find_truncated`; both surface the provider error.
+    let (d, _) = source.eig_full().unwrap();
     provider.fail_decode.store(true, Ordering::Relaxed);
-    assert!(source.eig_full().is_ok());
     assert!(matches!(
-        source.eig_trunc(&Truncation::Full),
-        Err(GenericTensorError::Plan(
-            tenet::typed::CheckedGenericPlanError::Provider(ToyError::Decode)
+        d.diagview(),
+        Err(GenericTensorError::Structure(
+            CheckedGenericStructureError::Provider(ToyError::Decode)
         ))
     ));
     provider.fail_decode.store(false, Ordering::Relaxed);
 
+    let spectra = d.diagview().unwrap();
     provider.fail_dim.store(true, Ordering::Relaxed);
     assert!(matches!(
-        source.eig_trunc(&Truncation::rank(1)),
+        d.domain()[0].find_truncated(&spectra, &Truncation::rank(1)),
         Err(GenericTensorError::Plan(
             tenet::typed::CheckedGenericPlanError::Provider(ToyError::Algebra)
         ))
@@ -3441,7 +3376,7 @@ fn checked_generic_eig_ties_are_stable_and_degenerate_projectors_are_invariant()
 }
 
 #[test]
-fn checked_generic_eig_trunc_reports_discarded_spectrum_norm_only() {
+fn checked_generic_eig_truncation_reports_discarded_spectrum_norm_only() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
     let leg = GradedSpace::try_new_with_arc(Arc::clone(&provider), [(Label::X, 3)]).unwrap();
@@ -3450,15 +3385,22 @@ fn checked_generic_eig_trunc_reports_discarded_spectrum_norm_only() {
             [-3.0, 2.0, 1.0][index[0]] * f64::from(index[0] == index[1])
         })
         .unwrap();
-    let truncated = source.eig_trunc(&Truncation::rank(5)).unwrap();
-    assert!(std::ptr::eq(truncated.d.provider(), provider.as_ref()));
-    assert!(std::ptr::eq(truncated.v.provider(), provider.as_ref()));
-    assert_eq!(truncated.eigenvalues[0].sector, Label::X);
+    // The truncated eigendecomposition is a composition (#1534).
+    let (d, v) = source.eig_full().unwrap();
+    let found = d.domain()[0]
+        .find_truncated(&d.diagview().unwrap(), &Truncation::rank(5))
+        .unwrap();
+    let truncated_d = d.restrict_diagonal(&found.selection).unwrap();
+    let truncated_v = v.restrict_leg(v.codomain_rank(), &found.selection).unwrap();
+    assert!(std::ptr::eq(truncated_d.provider(), provider.as_ref()));
+    assert!(std::ptr::eq(truncated_v.provider(), provider.as_ref()));
+    let kept = truncated_d.diagview().unwrap();
+    assert_eq!(kept[0].sector, Label::X);
     assert_eq!(
-        truncated.eigenvalues[0].values,
+        kept[0].values,
         vec![Complex64::new(-3.0, 0.0), Complex64::new(2.0, 0.0)]
     );
-    assert!((truncated.error - (1.0 + 2.0_f64.sqrt()).sqrt()).abs() < 1.0e-12);
+    assert!((found.error - (1.0 + 2.0_f64.sqrt()).sqrt()).abs() < 1.0e-12);
 }
 
 #[test]
@@ -3501,12 +3443,11 @@ fn checked_generic_eig_lazy_calls_leave_the_source_view_lazy() {
     let lazy = source.adjoint().unwrap();
     assert!(lazy.network_reuse_class(false) == tenet::typed::NetworkReuseClass::LazyAdjoint);
     assert!(lazy.eig_full().is_ok());
-    assert!(lazy.eig_trunc(&Truncation::rank(1)).is_ok());
     assert!(lazy.network_reuse_class(false) == tenet::typed::NetworkReuseClass::LazyAdjoint);
 }
 
 #[test]
-fn checked_generic_svd_trunc_reconstructs_and_preserves_provider() {
+fn checked_generic_svd_truncation_reconstructs_and_preserves_provider() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
     let leg = GradedSpace::try_new_with_arc(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
@@ -3519,18 +3460,20 @@ fn checked_generic_svd_trunc_reconstructs_and_preserves_provider() {
             }
         })
         .unwrap();
-    let result = source.svd_trunc(&Truncation::rank(1)).unwrap();
-    assert!(std::ptr::eq(result.u.provider(), provider.as_ref()));
-    assert!(std::ptr::eq(result.s.provider(), provider.as_ref()));
-    assert!(std::ptr::eq(result.vh.provider(), provider.as_ref()));
-    let rebuilt = result
-        .u
-        .compose(&result.s)
-        .unwrap()
-        .compose(&result.vh)
+    // The truncated SVD is a composition (#1534).
+    let (u, s, vh) = source.svd_compact().unwrap();
+    let found = s.domain()[0]
+        .find_truncated(&s.diagview().unwrap(), &Truncation::rank(1))
         .unwrap();
+    let u = u.restrict_leg(u.codomain_rank(), &found.selection).unwrap();
+    let s = s.restrict_diagonal(&found.selection).unwrap();
+    let vh = vh.restrict_leg(0, &found.selection).unwrap();
+    assert!(std::ptr::eq(u.provider(), provider.as_ref()));
+    assert!(std::ptr::eq(s.provider(), provider.as_ref()));
+    assert!(std::ptr::eq(vh.provider(), provider.as_ref()));
+    let rebuilt = u.compose(&s).unwrap().compose(&vh).unwrap();
     assert!(rebuilt.data().iter().all(|value| value.is_finite()));
-    assert!(result.singular_values.iter().all(|spectrum| {
+    assert!(s.diagview().unwrap().iter().all(|spectrum| {
         spectrum.values.len() <= 2 && spectrum.values.iter().all(|value| value.is_finite())
     }));
 }
@@ -6020,13 +5963,6 @@ fn checked_generic_compact_qr_failure_is_typed_and_nonpublishing() {
         ))
     ));
     assert_eq!(source.data(), before.as_slice());
-    assert!(matches!(
-        source.left_orth(),
-        Err(GenericTensorError::Plan(
-            tenet::typed::CheckedGenericPlanError::Provider(ToyError::Algebra)
-        ))
-    ));
-    assert_eq!(source.data(), before.as_slice());
 }
 
 #[test]
@@ -6062,13 +5998,6 @@ fn checked_generic_compact_lq_failure_is_typed_and_nonpublishing() {
         error,
         GenericTensorError::Plan(tenet::typed::CheckedGenericPlanError::Provider(
             ToyError::Algebra
-        ))
-    ));
-    assert_eq!(source.data(), before.as_slice());
-    assert!(matches!(
-        source.right_orth(),
-        Err(GenericTensorError::Plan(
-            tenet::typed::CheckedGenericPlanError::Provider(ToyError::Algebra)
         ))
     ));
     assert_eq!(source.data(), before.as_slice());

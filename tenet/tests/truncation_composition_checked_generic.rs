@@ -286,26 +286,6 @@ macro_rules! assert_su3_eig_composition {
                 discarded_norm(&offers, &kept),
                 terms,
             );
-
-            // The composition reproduces the checked-Generic `eig_trunc`.
-            let host = source.eig_trunc(&truncation).unwrap();
-            assert_eq!(
-                *selection.subspace(),
-                host.d.domain()[0],
-                "{case}: host bond"
-            );
-            numerics::assert_slices_close(
-                &format!("{case}: host d"),
-                got_d.data(),
-                host.d.data(),
-                terms,
-            );
-            numerics::assert_slices_close(
-                &format!("{case}: host v"),
-                got_v.data(),
-                host.v.data(),
-                terms,
-            );
         }
     }};
 }

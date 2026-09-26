@@ -122,8 +122,14 @@ fn u1_index_contraction_trace_and_decomposition_paths_are_executable() {
         .unwrap();
     assert_eq!(roundtrip.data(), rank_three.data());
 
-    let svd = tensor.svd_trunc(&Truncation::rank(2)).unwrap();
-    let reconstructed = svd.u.compose(&svd.s).unwrap().compose(&svd.vh).unwrap();
+    let (u, s, vh) = tensor.svd_compact().unwrap();
+    let found = s.domain()[0]
+        .find_truncated(&s.diagview().unwrap(), &Truncation::rank(2))
+        .unwrap();
+    let u = u.restrict_leg(u.codomain_rank(), &found.selection).unwrap();
+    let s = s.restrict_diagonal(&found.selection).unwrap();
+    let vh = vh.restrict_leg(0, &found.selection).unwrap();
+    let reconstructed = u.compose(&s).unwrap().compose(&vh).unwrap();
     assert_close(reconstructed.data(), tensor.data());
 }
 

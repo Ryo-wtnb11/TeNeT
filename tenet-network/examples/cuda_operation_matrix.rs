@@ -1158,11 +1158,11 @@ mod device {
             }
         }
 
-        // Truncated SVD as the composition that replaces the removed device
-        // `svd_trunc`: device compact SVD, one D2H per factor, then the Host
-        // selection and restriction. The device and Host arms are therefore
-        // not the same amount of work; the row exists to price the recipe the
-        // rustdoc gives, not to compare one kernel with another.
+        // Truncated SVD as a composition: device compact SVD, one D2H per
+        // factor, then the Host selection and restriction, against the same
+        // composition on the Host. The two arms are therefore not the same
+        // amount of work; the row prices the recipe the rustdoc gives, not
+        // one kernel against another.
         {
             let fixture = fixture::<R, D>(config, space, 1);
             let source = &fixture.host[0];
@@ -1198,34 +1198,40 @@ mod device {
                     let (host_first, host_rows) = bench(
                         config,
                         "cold",
-                        || Ok::<_, Never>(source.svd_trunc(&truncation).expect("Host svd_trunc")),
+                        || {
+                            let (u, s, vh) = source.svd_compact().expect("Host svd_compact");
+                            let found = s.domain()[0]
+                                .find_truncated(&s.diagview().expect("Host spectrum"), &truncation)
+                                .expect("Host find_truncated");
+                            let restrict = "Host restriction";
+                            Ok::<_, Never>((
+                                u.restrict_leg(u.codomain_rank(), &found.selection)
+                                    .expect(restrict),
+                                s.restrict_diagonal(&found.selection).expect(restrict),
+                                vh.restrict_leg(0, &found.selection).expect(restrict),
+                                found.error,
+                            ))
+                        },
                         || {},
                     )
-                    .expect("Host svd_trunc arm");
-                    // `diagview` orders by encoded sector and Host
-                    // `singular_values` by decoded label, so the device
-                    // spectrum is sorted by label before the two are zipped;
-                    // position then means the same sector on both sides. (The
-                    // sector labels themselves are compared in the equivalence
-                    // tests, where the two `Sector` projections unify.)
-                    let mut kept = device_first.1.diagview().expect("kept spectrum");
-                    kept.sort_by(|left, right| left.sector.cmp(&right.sector));
-                    let kept_match = kept.len() == host_first.singular_values.len()
-                        && kept.iter().zip(&host_first.singular_values).all(
-                            |(actual, expected)| {
-                                actual.values.len() == expected.values.len()
-                                    && actual.values.iter().zip(&expected.values).all(
-                                        |(&actual, &expected)| {
-                                            actual.distance(D::entry(expected, 0.0))
-                                                <= tolerance * (1.0 + expected.abs())
-                                        },
-                                    )
-                            },
-                        );
+                    .expect("Host truncated SVD arm");
+                    let kept = device_first.1.diagview().expect("kept spectrum");
+                    let expected_kept = host_first.1.diagview().expect("Host kept spectrum");
+                    let zero = D::entry(0.0, 0.0);
+                    let kept_match = kept.len() == expected_kept.len()
+                        && kept.iter().zip(&expected_kept).all(|(actual, expected)| {
+                            actual.values.len() == expected.values.len()
+                                && actual.values.iter().zip(&expected.values).all(
+                                    |(&actual, &expected)| {
+                                        actual.distance(expected)
+                                            <= tolerance * (1.0 + expected.distance(zero))
+                                    },
+                                )
+                        });
                     let check = verdict(
                         kept_match
-                            && (device_first.3 - host_first.error).abs()
-                                <= tolerance * (1.0 + host_first.error.abs()),
+                            && (device_first.3 - host_first.3).abs()
+                                <= tolerance * (1.0 + host_first.3.abs()),
                         "host_spectrum_and_discard_weight",
                     );
                     print_rows(label("svd_trunc_composition"), "cuda", &device_rows, &check);

@@ -18,7 +18,7 @@
 //!   (`weighted_inner_cuda`; #1344 for `norm`, #1383 for `inner`), so
 //!   `inner` is compared under the workspace rule of
 //!   `docs/testing_numerics.md`; the range cases are pinned by
-//!   `device_norm_and_normalize_match_the_host_where_a_payload_sum_would_overflow_or_underflow`
+//!   `device_norm_matches_the_host_where_a_payload_sum_would_overflow_or_underflow`
 //!   and `device_inner_matches_the_host_where_single_precision_products_overflow`.
 //!
 //! Fixture entries are dyadic rationals, so every fixture is exactly
@@ -60,8 +60,8 @@ fn elementwise_tolerance<D: DevicePayload>(terms: usize, scale: f64) -> f64 {
     8.0 * (terms as f64).sqrt() * D::EPS * scale.max(1.0)
 }
 
-/// Absolute bound `2 * terms * eps(real(D)) * scale` for the `norm` and
-/// `normalize` checks, `scale` an upper bound on `sum |conj(a_i) * b_i|`.
+/// Absolute bound `2 * terms * eps(real(D)) * scale` for the `norm` check,
+/// `scale` an upper bound on `sum |conj(a_i) * b_i|`.
 /// It dates from the payload-dtype device reduction and is looser than the
 /// `f64` accumulation (#1344, #1383) now needs; `inner` uses the workspace
 /// rule instead.
@@ -260,16 +260,6 @@ where
     let zeros = device_a.zeros_like().unwrap().to_host().unwrap();
     assert_bit_exact(zeros.data(), &vec![D::entry(0.0, 0.0); terms], "zeros_like");
 
-    // `normalize` divides by a device-accumulated norm, so it carries the
-    // reduction bound rather than the elementwise one.
-    let normalized = device_a.normalize().unwrap().to_host().unwrap();
-    assert_close(
-        normalized.data(),
-        a.normalize().unwrap().data(),
-        reduction_tolerance::<D>(terms, 8.0),
-        "normalize",
-    );
-
     // The lazy fold: `alpha A^H + beta B^H` over the device parents.
     let lazy_a = device_a.adjoint().unwrap();
     let lazy_b = device_b.adjoint().unwrap();
@@ -367,15 +357,6 @@ where
         a.inner(&b).unwrap(),
         terms,
     );
-    // `dot` is the deprecated alias; it must still reduce identically.
-    #[allow(deprecated)]
-    let device_dot = device_a.dot(&device_b).unwrap();
-    assert_eq!(
-        device_dot,
-        device_a.inner(&device_b).unwrap(),
-        "dot [{}] must be the alias of inner",
-        D::NAME
-    );
 
     // Conjugate linearity in the first argument, which is what distinguishes
     // `inner` from an unconjugated bilinear form for the complex payloads.
@@ -435,7 +416,7 @@ where
 
 /// #1344: the device `norm` accumulates in `f64` like the Host, so it neither
 /// saturates where every entry is finite nor underflows where every square is
-/// below the payload's subnormal range, and `normalize` agrees with the Host.
+/// below the payload's subnormal range.
 ///
 /// Two fixtures per provider, both derived from the `f32` lane's own limits:
 ///
@@ -506,29 +487,6 @@ fn assert_norm_is_overflow_and_underflow_safe<R, D>(
                 D::NAME
             );
         }
-
-        let normalized = device.normalize().unwrap();
-        let normalized_host = normalized.to_host().unwrap();
-        assert!(
-            normalized_host
-                .data()
-                .iter()
-                .all(|value| value.magnitude().is_finite() && value.magnitude() > 0.0),
-            "{what} normalize [{}] must be finite and nonzero everywhere",
-            D::NAME
-        );
-        assert_close(
-            normalized_host.data(),
-            host.normalize().unwrap().data(),
-            elementwise_tolerance::<D>(n, 1.0),
-            &format!("{what} normalize"),
-        );
-        let unit_norm = normalized.norm().unwrap();
-        assert!(
-            (unit_norm - 1.0).abs() <= elementwise_tolerance::<D>(n, 1.0),
-            "{what} normalize [{}]: norm of the result is {unit_norm}",
-            D::NAME
-        );
     }
 }
 
@@ -549,7 +507,7 @@ fn fz2_u1_leg() -> GradedSpace<FermionU1> {
 
 #[test]
 #[ignore = "requires a real CUDA device"]
-fn device_norm_and_normalize_match_the_host_where_a_payload_sum_would_overflow_or_underflow() {
+fn device_norm_matches_the_host_where_a_payload_sum_would_overflow_or_underflow() {
     let runtime = runtime();
     let u1 = u1_leg();
     let su2 = su2_leg();

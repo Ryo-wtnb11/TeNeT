@@ -12,7 +12,9 @@
 //! Vidal form with a two-site unit cell A-B: state = `... λb Γa λa Γb λb ...`,
 //! Γ tensors shaped `[left_bond, phys] <- [right_bond]`, λ diagonal bond
 //! endomorphisms. One bond update contracts
-//! `θ = λ_out Γ1 λ_mid Γ2 λ_out · gate`, truncates with `svd_trunc`, and
+//! `θ = λ_out Γ1 λ_mid Γ2 λ_out · gate`, truncates it (`svd_compact`, then
+//! `find_truncated` on the spectrum and `restrict_leg`/`restrict_diagonal`
+//! on the factors), and
 //! restores Vidal form by multiplying the outer `λ_out^{-1}` back in
 //! (diagonal inverse via `TensorMap::pinv`).
 //!
@@ -76,15 +78,19 @@ fn bond_update(
 ) -> Result<(Map, Map, Map, f64), Error> {
     let theta = tensor!([l, pa; pb, r] = l_out[l; x] * g1[x, qa; y] * l_mid[y; z]
         * g2[z, qb; w] * l_out[w; r] * gate[pa, pb; qa, qb])?;
-    let svd = theta.svd_trunc(trunc)?;
-    let l_new = svd.s.scale(1.0 / svd.s.norm()?);
+    // Truncated SVD: factorize, decide the kept bond from the spectrum, then
+    // restrict every factor to it.
+    let (u, s, vh) = theta.svd_compact()?;
+    let found = s.domain()[0].find_truncated(&s.diagview()?, trunc)?;
+    let u = u.restrict_leg(u.codomain_rank(), &found.selection)?;
+    let s = s.restrict_diagonal(&found.selection)?;
+    let vh = vh.restrict_leg(0, &found.selection)?;
+    let l_new = s.scale(1.0 / s.norm()?);
     // Divide the outer λ back out: diagonal inverse via pinv.
     let l_out_inv = l_out.pinv(PINV_RCOND)?;
-    let u = svd.u;
-    let vh = svd.vh;
     let g1_new = tensor!([l, pa; m] = l_out_inv[l; x] * u[x, pa; m])?;
     let g2_new = tensor!([m, pb; r] = vh[m; pb, x] * l_out_inv[x; r])?;
-    Ok((g1_new, l_new, g2_new, svd.error))
+    Ok((g1_new, l_new, g2_new, found.error))
 }
 
 /// Energy of one bond, `<θ|h|θ> / <θ|θ>`, on the two-site wavefunction

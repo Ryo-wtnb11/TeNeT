@@ -25,7 +25,6 @@ fn base_family<D: TensorScalar>(tensor: &TensorMap<U1FusionRule, D>) {
     let _ = tensor.inner(tensor);
     let _ = tensor.tr();
     let _ = tensor.adjoint();
-    let _ = tensor.normalize();
     let _ = tensor.permute(&[0], &[1]);
     let _ = tensor.transpose();
     let _ = tensor.repartition(1);
@@ -45,8 +44,6 @@ fn factorization_family<D: FactorizationScalar>(tensor: &TensorMap<U1FusionRule,
     let _ = tensor.qr_full();
     let _ = tensor.lq_compact();
     let _ = tensor.lq_full();
-    let _ = tensor.left_orth();
-    let _ = tensor.right_orth();
     let _ = tensor.svd_compact();
     let _ = tensor.svd_full();
     let _ = tensor.svd_vals();
@@ -80,7 +77,6 @@ where
 {
     let _ = tensor.eig_full();
     let _ = tensor.eig_vals();
-    let _ = tensor.eig_trunc(&tenet::prelude::Truncation::rank(1));
 }
 
 /// Instantiating the helpers for every admitted payload dtype is the

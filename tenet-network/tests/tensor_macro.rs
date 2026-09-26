@@ -7,7 +7,7 @@ use tenet::core::{
     SU2FusionRule, SU2Irrep, SectorCodec, TypedSectorAdmission, U1FusionRule, U1Irrep, Z2Irrep,
 };
 use tenet::prelude::{Complex32, Complex64, Error, TensorScalar};
-use tenet::typed::{GradedSpace, Runtime, TensorMap, Truncation};
+use tenet::typed::{GradedSpace, Runtime, TensorMap};
 use tenet_network::{plan_cache_stats, tensor};
 
 #[path = "../../tenet/tests/braiding_probe/mod.rs"]
@@ -469,7 +469,13 @@ fn factorization_fields_and_tuple_fields_contract_without_parentheses() {
     let tensor =
         TensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&space, &space], [&space], 401)
             .unwrap();
-    let svd = tensor.svd_trunc(&Truncation::Full).unwrap();
+    struct Svd {
+        u: TensorMap<U1FusionRule, f64>,
+        s: TensorMap<U1FusionRule, f64>,
+        vh: TensorMap<U1FusionRule, f64>,
+    }
+    let (u, s, vh) = tensor.svd_compact().unwrap();
+    let svd = Svd { u, s, vh };
     let bare = tensor!([i, j; m] = svd.u[i, j; k] * svd.s[k; l] * svd.vh[l; m]).unwrap();
     let parenthesized =
         tensor!([i, j; m] = (svd.u)[i, j; k] * (svd.s)[k; l] * (svd.vh)[l; m]).unwrap();
