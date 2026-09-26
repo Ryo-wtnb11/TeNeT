@@ -847,6 +847,7 @@ where
             "tensors live on different spaces or block layouts".to_string(),
         ));
     }
+    let _host_pool = tensor.runtime.enter_host_pool();
     if matches!(&tensor.repr, TypedTensorRepr::Adjoint(_))
         || matches!(&other.repr, TypedTensorRepr::Adjoint(_))
     {
@@ -2083,6 +2084,7 @@ where
             return Err(Error::RuntimeMismatch);
         }
         let destination_space = self.logical_space().space();
+        let _host_pool = self.runtime.enter_host_pool();
         let source_space = source.logical_space().space();
         if destination_space.nout() != source_space.nout()
             || destination_space.nin() != source_space.nin()
@@ -6574,6 +6576,7 @@ where
         if !tensor.runtime.same_runtime(&rhs.runtime) {
             return Err(Error::RuntimeMismatch.into());
         }
+        let _host_pool = tensor.runtime.enter_host_pool();
         if tensor.logical_space().space().admission().rule_identity()
             != rhs.logical_space().space().admission().rule_identity()
         {
@@ -6625,6 +6628,7 @@ where
         if !tensor.runtime.same_runtime(&rhs.runtime) {
             return Err(Error::RuntimeMismatch.into());
         }
+        let _host_pool = tensor.runtime.enter_host_pool();
         if tensor.logical_space().space().admission().rule_identity()
             != rhs.logical_space().space().admission().rule_identity()
         {
@@ -7281,6 +7285,7 @@ where
         if !tensor.runtime.same_runtime(&other.runtime) {
             return Err(Error::RuntimeMismatch.into());
         }
+        let _host_pool = tensor.runtime.enter_host_pool();
         if tensor.logical_space().space() != other.logical_space().space() {
             return Err(Error::InvalidArgument(
                 "tensors live on different spaces or block layouts".to_string(),
@@ -15037,6 +15042,7 @@ where
         R::Mode: TypedTensorRootDispatch<R>,
     {
         self.require_selected_leg(axis, selection.parent(), "restrict_leg")?;
+        let _host_pool = self.runtime.enter_host_pool();
         let destination = self.root_with_replaced_leg(axis, selection.subspace().leg())?;
         let table: Vec<(SectorId, usize)> = selection
             .entries
@@ -15091,6 +15097,7 @@ where
         R::Mode: TypedTensorRootDispatch<R>,
     {
         self.require_selected_leg(axis, selection.subspace(), "embed_leg")?;
+        let _host_pool = self.runtime.enter_host_pool();
         let destination = self.root_with_replaced_leg(axis, selection.parent().leg())?;
         let len = destination
             .space()
@@ -15132,6 +15139,7 @@ where
         R: TypedSectorAdmission,
         R::Mode: TypedTensorRootDispatch<R>,
     {
+        let _host_pool = self.runtime.enter_host_pool();
         if matches!(
             &self.repr,
             TypedTensorRepr::Owned(body) if matches!(body.data.as_ref(), TypedData::Diagonal(_))
@@ -15354,6 +15362,7 @@ where
         let TypedTensorRepr::Adjoint(view) = &self.repr else {
             return Ok(self.clone());
         };
+        let _host_pool = self.runtime.enter_host_pool();
         #[cfg(test)]
         UNCACHED_ADJOINT_MATERIALIZATIONS
             .set(UNCACHED_ADJOINT_MATERIALIZATIONS.get().saturating_add(1));
@@ -15436,6 +15445,7 @@ where
         }
         let lhs = lhs_space.homspace();
         let rhs = rhs_space.homspace();
+        let _host_pool = self.runtime.enter_host_pool();
         let (axis, homspace) = cat_homspace(
             lhs.codomain(),
             lhs.domain(),
@@ -15517,6 +15527,7 @@ where
             TypedTensorRepr::Adjoint(view) => view
                 .materialized
                 .get_or_init(|| {
+                    let _host_pool = self.runtime.enter_host_pool();
                     let data = tenet_tensors::materialize_adjoint_data_dyn(
                         view.parent.space.space(),
                         view.logical_space.space(),
@@ -15788,6 +15799,7 @@ where
         &self,
         selection: &LegSelection<R>,
     ) -> Result<Self, TypedFacadeError<R>> {
+        let _host_pool = self.runtime.enter_host_pool();
         let body = self.owned_body().ok_or_else(|| {
             TypedFacadeError::<R>::from(Error::InvalidArgument(
                 "restrict_diagonal requires an owned tensor, not a lazy adjoint".to_string(),
@@ -17974,6 +17986,7 @@ where
         axis: Option<usize>,
         spectrum: &[tenet_matrixalgebra::SectorSpectrum<D>],
     ) -> Result<Self, Error> {
+        let _host_pool = self.runtime.enter_host_pool();
         let mut data = if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
             let (operand, source) = self.fusion_operand_and_data();
             tenet_tensors::oriented_fusion_add_owned(
@@ -19097,6 +19110,7 @@ where
         if !self.runtime.same_runtime(&other.runtime) {
             return Err(Error::RuntimeMismatch);
         }
+        let _host_pool = self.runtime.enter_host_pool();
         // `DynamicFusionMapSpace: PartialEq` covers the hom space, the
         // codomain/domain split and the block structure, which is exactly what
         // makes the zipped element-wise combination below meaningful.
@@ -19299,6 +19313,7 @@ where
     /// [`Error::FusionAlgebra`] from the seam, which owns the rest of the
     /// validation (legs that are not mutually dual, above all).
     fn trace_pairs_multiplicity_free(&self, pairs: &[(usize, usize)]) -> Result<Self, Error> {
+        let _host_pool = self.runtime.enter_host_pool();
         let rank = self.rank();
         let Some(TracePairAxes {
             output_axes,
@@ -19696,6 +19711,7 @@ where
         if !self.runtime.same_runtime(&other.runtime) {
             return Err(Error::RuntimeMismatch);
         }
+        let _host_pool = self.runtime.enter_host_pool();
         if self.logical_space().space() != other.logical_space().space() {
             return Err(Error::InvalidArgument(
                 "tensors live on different spaces or block layouts".to_string(),

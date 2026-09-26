@@ -886,11 +886,14 @@ fn missing_cuda_device() -> Error {
 
 /// RAII lease of a pooled execution context (#155). Returns it to the
 /// pool on drop; on panic it is dropped instead of returned (quarantine —
-/// mirrors `tenet_network`'s `WorkspaceLease`).
+/// mirrors `tenet_network`'s `WorkspaceLease`). While it lives, the runtime's
+/// CPU pool is the calling thread's Host pool, so the operation's replay,
+/// plan compile and strided regions run on it.
 pub(crate) struct ContextLease<'a> {
     pool: &'a Mutex<Vec<PooledContext>>,
     max_idle: usize,
     context: Option<PooledContext>,
+    _host_pool: tenet_operations::host_pool::HostPoolGuard,
 }
 
 impl ContextLease<'_> {
@@ -919,14 +922,19 @@ impl Drop for ContextLease<'_> {
 }
 
 /// RAII lease of a dense executor (#155): a pooled executor for mintable
-/// configs, or the `state` lock for a non-mintable injected executor.
+/// configs, or the `state` lock for a non-mintable injected executor. Like
+/// [`ContextLease`], it enters the runtime's CPU pool while it lives.
 pub(crate) enum DenseLease<'a> {
     Pooled {
         pool: &'a Mutex<Vec<Box<dyn tenet_dense::DenseExecutor + Send>>>,
         max_idle: usize,
         executor: Option<Box<dyn tenet_dense::DenseExecutor + Send>>,
+        _host_pool: tenet_operations::host_pool::HostPoolGuard,
     },
-    Locked(MutexGuard<'a, RuntimeState>),
+    Locked {
+        state: MutexGuard<'a, RuntimeState>,
+        _host_pool: tenet_operations::host_pool::HostPoolGuard,
+    },
 }
 
 impl DenseLease<'_> {
@@ -935,7 +943,7 @@ impl DenseLease<'_> {
             DenseLease::Pooled { executor, .. } => &mut **executor
                 .as_mut()
                 .expect("dense lease always owns an executor"),
-            DenseLease::Locked(guard) => &mut *guard.dense,
+            DenseLease::Locked { state, .. } => &mut *state.dense,
         }
     }
 }
@@ -946,6 +954,7 @@ impl Drop for DenseLease<'_> {
             pool,
             max_idle,
             executor,
+            ..
         } = self
         {
             if std::thread::panicking() {
@@ -1087,6 +1096,12 @@ impl Runtime {
         RuntimeBuilder::default()
     }
 
+    /// Identity of this runtime's CPU pool, for host-pool observation tests.
+    #[doc(hidden)]
+    pub fn host_pool_identity(&self) -> usize {
+        self.inner.execution_config.shared_ctx.identity()
+    }
+
     pub(crate) fn lock(&self) -> MutexGuard<'_, RuntimeState> {
         // ponytail: poisoning treated as fatal; no operation leaves the
         // caches half-written in a way worth recovering from.
@@ -1194,6 +1209,13 @@ impl Runtime {
             );
     }
 
+    /// Enters this runtime's CPU pool as the calling thread's Host pool until
+    /// the guard drops. Every Host eager operation runs inside one: through
+    /// its execution lease, or directly for the strided-only operations.
+    pub(crate) fn enter_host_pool(&self) -> tenet_operations::host_pool::HostPoolGuard {
+        tenet_operations::host_pool::enter_host_pool(&self.inner.execution_config.shared_ctx)
+    }
+
     /// Leases an execution context for one standalone op: pop an idle one or
     /// mint a fresh config-bound one. Each context owns one
     /// `RuleIdentity`-keyed multiplicity-free lane and a separate Generic-fusion
@@ -1216,6 +1238,7 @@ impl Runtime {
             pool: &self.inner.context_pool,
             max_idle: self.inner.max_idle,
             context: Some(context),
+            _host_pool: self.enter_host_pool(),
         })
     }
 
@@ -1224,7 +1247,10 @@ impl Runtime {
     /// injected executor (which cannot be reproduced for a pool).
     pub(crate) fn lease_dense(&self) -> DenseLease<'_> {
         if !self.inner.executor_mintable {
-            return DenseLease::Locked(self.lock());
+            return DenseLease::Locked {
+                state: self.lock(),
+                _host_pool: self.enter_host_pool(),
+            };
         }
         let executor = self
             .inner
@@ -1237,6 +1263,7 @@ impl Runtime {
             pool: &self.inner.executor_pool,
             max_idle: self.inner.max_idle,
             executor: Some(executor),
+            _host_pool: self.enter_host_pool(),
         }
     }
 
@@ -1564,17 +1591,46 @@ impl RuntimeBuilder {
         self
     }
 
-    /// Sets the runtime CPU-context worker count and best-effort initializes
-    /// Rayon’s process-global pool. Rayon can be initialized only once per
-    /// process, so a later call cannot resize an already initialized global
-    /// pool.
+    /// Sets the worker count of this runtime's CPU pool. The runtime owns one
+    /// pool; its Host eager operations run dense kernels, tree-transform
+    /// replay, plan compile and strided kernels on it, and building a runtime
+    /// never touches Rayon's process-global pool. Runtimes with different
+    /// counts coexist in one process.
     ///
-    /// If unset, [`Self::build`] also checks `TENET_DENSE_THREADS`. A value of
-    /// 1 creates no worker pool for this CPU context; it does not resize an
-    /// existing global Rayon pool or configure provider-internal/custom-executor
-    /// threads.
+    /// Unset, the pool uses the process's available parallelism; [`Self::build`]
+    /// reads no environment variable (see [`Self::threads_from_env`]). A value
+    /// of 1 creates no worker pool: every Host operation of this runtime runs
+    /// on its calling thread. The count does not configure provider-internal
+    /// (BLAS) or injected-executor threads.
     pub fn dense_threads(mut self, threads: usize) -> Self {
         self.dense_threads = Some(threads.max(1));
+        self
+    }
+
+    /// Takes the CPU pool size from the environment: `TENET_DENSE_THREADS`,
+    /// else `RAYON_NUM_THREADS`. A missing, unparseable or zero value leaves
+    /// the count unchanged. This is the only place a runtime reads those
+    /// variables; an explicit [`Self::dense_threads`] after this call wins.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tenet::prelude::*;
+    ///
+    /// let rt = Runtime::builder().threads_from_env().build()?;
+    /// # let _ = rt;
+    /// # Ok::<(), tenet::prelude::Error>(())
+    /// ```
+    pub fn threads_from_env(mut self) -> Self {
+        let from = |name: &str| {
+            std::env::var(name)
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .filter(|&threads| threads > 0)
+        };
+        if let Some(threads) = from("TENET_DENSE_THREADS").or_else(|| from("RAYON_NUM_THREADS")) {
+            self.dense_threads = Some(threads);
+        }
         self
     }
 
@@ -1587,8 +1643,9 @@ impl RuntimeBuilder {
     /// `DenseExecutor` and pass it here — no operator or decomposition code changes.
     ///
     /// The injected executor owns its thread configuration. [`Self::dense_threads`]
-    /// configures the runtime CPU context and only attempts global Rayon setup;
-    /// it does not reconfigure the injected backend.
+    /// sizes the runtime CPU pool, which still runs this runtime's replay,
+    /// plan compile and strided work; it does not reconfigure the injected
+    /// backend.
     pub fn with_dense_executor(
         mut self,
         executor: Box<dyn tenet_dense::DenseExecutor + Send>,
@@ -1679,10 +1736,10 @@ impl RuntimeBuilder {
 
     /// Sets the CPU worker count for symmetry recoupling replays
     /// (permute/braid/transpose tree transforms — the cold-path cost of
-    /// SU(2) workloads; **not** BLAS threads). Default is 1 (serial); values
-    /// above 1 request replay parallelism past the backend's size gate on the
-    /// current Rayon pool (normally the process-global pool outside `install`),
-    /// not on the runtime CPU context.
+    /// SU(2) workloads; **not** BLAS threads) and for tree-transform plan
+    /// compile. Default is 1 (serial); values above 1 request parallelism
+    /// past the backend's size gate, capped by and run on this runtime's CPU
+    /// pool ([`Self::dense_threads`]).
     pub fn recoupling_threads(mut self, threads: usize) -> Self {
         self.recoupling_threads = Some(threads);
         self
@@ -1691,15 +1748,6 @@ impl RuntimeBuilder {
     /// Finishes the build; fails when a requested backend (e.g. the CUDA
     /// device) cannot be initialized.
     pub fn build(self) -> Result<Runtime, Error> {
-        let dense_threads = self.dense_threads.or_else(dense_threads_from_env);
-        if let Some(threads) = dense_threads {
-            // rayon's global pool can be initialized only once per process.
-            // Runtime construction is often repeated in tests/examples, so
-            // keep this knob best-effort after the first user.
-            let _ = rayon::ThreadPoolBuilder::new()
-                .num_threads(threads.max(1))
-                .build_global();
-        }
         // A custom injected executor cannot be re-minted for the pool; those
         // runtimes fall back to the state lock for factorizations (#155).
         let executor_mintable = self.dense_executor.is_none();
@@ -1707,11 +1755,11 @@ impl RuntimeBuilder {
         // Built-in executors using the compiled default kind share this runtime
         // CPU context. Explicit nondefault providers receive a private context
         // in `with_shared_context`; injected executors own their configuration.
-        let shared_ctx = match dense_threads {
-            Some(threads) => tenet_dense::SharedCpuContext::with_threads(threads)
-                .map_err(tenet_tensors::OperationError::Dense)?,
-            None => tenet_dense::SharedCpuContext::from_env(),
-        };
+        let shared_ctx = tenet_dense::SharedCpuContext::with_threads(
+            self.dense_threads
+                .unwrap_or_else(tenet_dense::available_parallelism),
+        )
+        .map_err(tenet_tensors::OperationError::Dense)?;
         // Injected backend wins; otherwise build the selected provider (faer by
         // default) on the shared context.
         let dense: Box<dyn tenet_dense::DenseExecutor + Send> = match self.dense_executor {
@@ -1813,13 +1861,6 @@ impl RuntimeBuilder {
             }),
         })
     }
-}
-
-fn dense_threads_from_env() -> Option<usize> {
-    std::env::var("TENET_DENSE_THREADS")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .map(|threads| threads.max(1))
 }
 
 thread_local! {

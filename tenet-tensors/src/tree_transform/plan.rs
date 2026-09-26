@@ -1197,16 +1197,27 @@ where
     O: Send,
     F: Fn(I) -> Result<O, OperationError> + Send + Sync,
 {
-    if threads <= 1 || inputs.len() <= 1 {
+    // The requested degree is a cap within the operation's Host pool.
+    let threads = if threads <= 1 || inputs.len() <= 1 {
+        1
+    } else {
+        threads.min(tenet_operations::host_pool::current_threads())
+    };
+    if threads <= 1 {
         return inputs.into_iter().map(build).collect();
     }
 
     use rayon::prelude::*;
 
-    let batches = partition_staged_groups(inputs, threads)
-        .into_par_iter()
-        .map(|batch| batch.into_iter().map(&build).collect::<Result<Vec<_>, _>>())
-        .collect::<Vec<_>>();
+    let batches = tenet_operations::host_pool::install_region(
+        tenet_operations::host_pool::HostPoolSite::PlanCompile,
+        || {
+            partition_staged_groups(inputs, threads)
+                .into_par_iter()
+                .map(|batch| batch.into_iter().map(&build).collect::<Result<Vec<_>, _>>())
+                .collect::<Vec<_>>()
+        },
+    );
     flatten_ordered_batch_results(batches)
 }
 

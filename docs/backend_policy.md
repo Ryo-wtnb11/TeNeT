@@ -102,9 +102,17 @@ report a value. A leased resource that unwinds is not returned to its pool.
 Built-in executors using the compiled default CPU kind share one
 `SharedCpuContext` per runtime. An explicitly requested nondefault kind uses a
 private provider context, and an injected executor owns its configuration and
-falls back to the runtime state lock for factorization. `CpuContext` worker
-resources are distinct from the process-global Rayon configuration and from
-provider-internal synchronization. Consequently this design makes no general
+falls back to the runtime state lock for factorization. That context's Rayon
+pool is the runtime's one CPU pool: a Host eager operation enters it through
+its execution lease (or directly, for strided-only operations), and its
+tree-transform replay, plan compile and strided-kernel regions are installed
+there (`tenet_operations::host_pool`), with `recoupling_threads` as a degree
+cap inside it. Building a runtime has no process-global side effect, and
+`RuntimeBuilder::build` reads no environment variable; only
+`RuntimeBuilder::threads_from_env` does. The pool is distinct from
+provider-internal (BLAS) threads and synchronization, and a nondefault
+explicit provider kind still owns a private pool (Tenferro exposes no
+context-plus-kind constructor). Consequently this design makes no general
 lock-free, byte-identical warm-path, or outer-thread scaling guarantee.
 
 Device operations take only a process-wide lock per CUDA device ordinal, the

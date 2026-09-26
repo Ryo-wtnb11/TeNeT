@@ -3,9 +3,9 @@ use core::ops::{Add, Mul};
 use std::sync::{Arc, Weak};
 
 #[cfg(test)]
-use allocation_oracle::join as replay_join;
+use allocation_oracle::join as pool_join;
 #[cfg(not(test))]
-use rayon::join as replay_join;
+use rayon::join as pool_join;
 
 use num_traits::{One, Zero};
 use tenet_core::{
@@ -3846,19 +3846,33 @@ fn effective_tree_transform_threads(
     let runnable = singles.max(schedule.pack_columns.len()).max(1);
     let requested = requested.max(1);
 
-    // Why not query Rayon for serial replay: current_num_threads can initialize
-    // the global pool, stealing the later runtime builder's chance to configure
-    // it even though this call cannot use parallel execution.
+    // Why not query the pool for serial replay: without an entered Host pool,
+    // current_num_threads initializes Rayon's global pool even though this
+    // call cannot use parallel execution.
     if requested == 1 || runnable == 1 {
         return 1;
     }
 
-    // Why not trust the requested count: Rayon cannot execute more workers
-    // than its current pool, and scratch for phantom workers turns a harmless
+    // Why not trust the requested count: the Host pool cannot execute more
+    // workers than it has, and scratch for phantom workers turns a harmless
     // large hint into an allocation overflow before any replay begins.
     requested
-        .min(rayon::current_num_threads().max(1))
+        .min(crate::host_pool::current_threads())
         .min(runnable)
+}
+
+/// Every replay fork runs in the operation's Host pool. Only the outermost
+/// fork installs; nested forks already run on a worker of that pool.
+fn replay_join<A, B, RA, RB>(left: A, right: B) -> (RA, RB)
+where
+    A: FnOnce() -> RA + Send,
+    B: FnOnce() -> RB + Send,
+    RA: Send,
+    RB: Send,
+{
+    crate::host_pool::install_region(crate::host_pool::HostPoolSite::Replay, || {
+        pool_join(left, right)
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4843,8 +4857,8 @@ where
 /// - Each chunk is one serial grouped GEMM call between its pack and scatter
 ///   phases. The dense executor owns its own parallelism, so no nesting arises.
 ///
-/// Parallel copy scheduling uses recursive `rayon::join` on the global pool,
-/// capped by the configured worker count. Replay descriptors and safe split
+/// Parallel copy scheduling uses recursive `rayon::join` in the operation's
+/// Host pool, capped by the configured worker count. Replay descriptors and safe split
 /// boundaries are compiled into the structure.
 ///
 /// Per-task traversal indices are disjoint slices of one workspace arena, split

@@ -6315,6 +6315,7 @@ where
     #[cfg(test)]
     let mut probes = Some(TestProbes::take());
     let scoped = dense.with_linalg_scope(&mut |dense| {
+        tenet_tensors::host_pool::observe_dense_site();
         if let Some(body) = body.take() {
             #[cfg(test)]
             if let Some(probes) = probes.take() {

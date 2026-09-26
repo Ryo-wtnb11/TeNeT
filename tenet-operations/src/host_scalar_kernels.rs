@@ -26,7 +26,9 @@ where
 {
     let mut dst = strided_write(dst)?;
     let src = strided_read(src)?;
-    strided_kernel::copy_into(&mut dst, &src).map_err(strided_error)
+    let len = dst.dims().iter().product();
+    crate::host_pool::strided(len, || strided_kernel::copy_into(&mut dst, &src))
+        .map_err(strided_error)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1223,23 +1225,25 @@ where
     let mut dst =
         RawStridedMut::new(dst_data, shape, dst_strides, dst_offset).map_err(strided_error)?;
     let (dst, src) = (&mut dst, &src);
-    match (action, source_conjugate) {
-        (RawStridedAction::Copy, conjugate) => {
-            let plan = CopyPlan::compile(shape, dst_strides, src_strides).map_err(strided_error)?;
-            if conjugate {
-                plan.execute_conj(dst, src)
-            } else {
-                plan.execute(dst, src)
+    crate::host_pool::strided(shape.iter().product(), || {
+        match (action, source_conjugate) {
+            (RawStridedAction::Copy, conjugate) => {
+                let plan = CopyPlan::compile(shape, dst_strides, src_strides)?;
+                if conjugate {
+                    plan.execute_conj(dst, src)
+                } else {
+                    plan.execute(dst, src)
+                }
             }
+            (RawStridedAction::CopyScale { alpha }, false) => copy_scale_raw(dst, src, alpha),
+            (RawStridedAction::CopyScale { alpha }, true) => copy_scale_conj_raw(dst, src, alpha),
+            (RawStridedAction::Axpy { alpha }, false) => axpy_raw(dst, src, alpha),
+            (RawStridedAction::Axpy { alpha }, true) => axpy_conj_raw(dst, src, alpha),
+            (RawStridedAction::Axpby { .. }, _) => return Ok(false),
         }
-        (RawStridedAction::CopyScale { alpha }, false) => copy_scale_raw(dst, src, alpha),
-        (RawStridedAction::CopyScale { alpha }, true) => copy_scale_conj_raw(dst, src, alpha),
-        (RawStridedAction::Axpy { alpha }, false) => axpy_raw(dst, src, alpha),
-        (RawStridedAction::Axpy { alpha }, true) => axpy_conj_raw(dst, src, alpha),
-        (RawStridedAction::Axpby { .. }, _) => return Ok(false),
-    }
-    .map_err(strided_error)?;
-    Ok(true)
+        .map(|()| true)
+    })
+    .map_err(strided_error)
 }
 
 /// Whether every non-unit destination axis, taken in ascending `|stride|`

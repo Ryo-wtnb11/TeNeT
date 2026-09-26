@@ -188,11 +188,24 @@ impl SharedCpuContext {
         self.ctx.num_threads()
     }
 
+    /// Runs `op` on this context's Rayon pool, the pool its dense kernels use.
+    /// A one-thread context has no pool and runs `op` on the calling thread.
+    /// Called from a worker of the same pool, `op` runs inline.
+    pub fn install<R: Send>(&self, op: impl FnOnce() -> R + Send) -> R {
+        self.ctx.install(op)
+    }
+
     /// Identity check for regression tests: do two handles share one context
     /// (hence one rayon pool)?
     #[doc(hidden)]
     pub fn ptr_eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.ctx, &other.ctx)
+    }
+
+    /// Address identity of the shared context, for observation probes only.
+    #[doc(hidden)]
+    pub fn identity(&self) -> usize {
+        Arc::as_ptr(&self.ctx) as usize
     }
 }
 

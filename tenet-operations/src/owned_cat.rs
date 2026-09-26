@@ -354,8 +354,10 @@ fn copy_strided_rows<D: Copy + MaybeSendSync>(
         &destination_strides,
         signed(copy.destination_offset)?,
     )?;
-    CopyPlan::compile(&dims, &destination_strides, &source_strides)?
-        .execute_uninit(&mut destination, &source)
+    let plan = CopyPlan::compile(&dims, &destination_strides, &source_strides)?;
+    crate::host_pool::strided(copy.rows * copy.cols, || {
+        plan.execute_uninit(&mut destination, &source)
+    })
 }
 
 fn write_widened(destination: &mut [MaybeUninit<Complex64>], source: &[f64], copy: &OwnedCatCopy) {

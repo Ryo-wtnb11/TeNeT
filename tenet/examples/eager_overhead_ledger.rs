@@ -16,13 +16,10 @@
 //! Each `filter` must equal one field of `symmetry,dtype,case,op` for a row
 //! to run (`U1 c64 qr_compact`). `LEDGER_THREADS` selects the thread layout:
 //!
-//! - `one` (default): `Runtime::builder().dense_threads(1)`, which also
-//!   initializes Rayon's global pool with one worker;
-//! - `default`: no thread configuration at all;
-//! - `tenet1`: Rayon's global pool (TeNeT's replay/plan `join`s) pinned to one
-//!   worker, the Tenferro CPU context left at its default;
-//! - `dense1`: Rayon's global pool at its default, the Tenferro CPU context
-//!   pinned to one worker.
+//! - `one` (default): `Runtime::builder().dense_threads(1)`, a runtime CPU
+//!   pool of one worker for all of its Host work;
+//! - `default`: no thread configuration at all (the pool uses the process's
+//!   available parallelism).
 //!
 //! `LEDGER_SAMPLE=<path>` with exactly one selected row loops that operation
 //! for `LEDGER_SECONDS` (default 4) while `/usr/bin/sample` (macOS) records
@@ -373,16 +370,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let builder = match threads.as_str() {
         "one" => Runtime::builder().dense_threads(1),
         "default" => Runtime::builder(),
-        "tenet1" => {
-            rayon::ThreadPoolBuilder::new()
-                .num_threads(1)
-                .build_global()?;
-            Runtime::builder()
-        }
-        "dense1" => {
-            rayon::ThreadPoolBuilder::new().build_global()?;
-            Runtime::builder().dense_threads(1)
-        }
         other => return Err(format!("unknown LEDGER_THREADS={other}").into()),
     };
     let runtime = builder.build()?;

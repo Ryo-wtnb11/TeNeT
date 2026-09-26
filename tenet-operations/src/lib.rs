@@ -33,6 +33,8 @@ pub mod cuda_transform;
 mod cuda_transform_plan;
 mod error;
 pub mod fusion_replay;
+#[doc(hidden)]
+pub mod host_pool;
 mod host_scalar_kernels;
 pub mod host_scratch;
 pub mod kernel_adapter;
