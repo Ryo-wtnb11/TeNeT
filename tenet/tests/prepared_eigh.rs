@@ -155,8 +155,8 @@ where
     let h = hermitian_members(runtime, &[leg, leg], 1, 5).remove(0);
     let x = members::<R, f64>(runtime, &[leg, leg], &[leg, leg], 1, 9).remove(0);
     // `2^-30` relative skew rejects (`> 64 eps`); `2^-60` is admitted.
-    let rejected = h.add(&x, 1.0, 2f64.powi(-30)).unwrap();
-    let admitted = h.add(&x, 1.0, 2f64.powi(-60)).unwrap();
+    let rejected = h.axpby(1.0, &x, 2f64.powi(-30)).unwrap();
+    let admitted = h.axpby(1.0, &x, 2f64.powi(-60)).unwrap();
     let mut out = Vec::new();
     for exponent in [0, -1000, 1000, -1060] {
         let s = 2f64.powi(exponent);

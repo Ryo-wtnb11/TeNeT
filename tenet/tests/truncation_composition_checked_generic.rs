@@ -56,7 +56,7 @@ fn su3_dim(labels: &[i64]) -> f64 {
 macro_rules! owned_adjoint {
     ($x:expr, $one:expr) => {{
         let adjoint = $x.adjoint().unwrap();
-        adjoint.add(&adjoint, $one, $one - $one).unwrap()
+        adjoint.axpby($one, &adjoint, $one - $one).unwrap()
     }};
 }
 
@@ -329,7 +329,7 @@ fn su3_eigh_composition_matches_the_oracle_for_every_policy() {
     let mut state = 0x5150_2702u64;
     let raw: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime(), [&leg], [&leg], move |_, _| fill(&mut state)).unwrap();
-    let source = raw.add(&raw.adjoint().unwrap(), 1.0, 1.0).unwrap();
+    let source = raw.axpby(1.0, &raw.adjoint().unwrap(), 1.0).unwrap();
     assert_su3_eigh_composition!(source, 1.0, su3_target(&provider), "su3 eigh f64");
 }
 
@@ -343,7 +343,7 @@ fn su3_complex_eigh_composition_matches_the_oracle_for_every_policy() {
         })
         .unwrap();
     let one = Complex64::new(1.0, 0.0);
-    let source = raw.add(&raw.adjoint().unwrap(), one, one).unwrap();
+    let source = raw.axpby(one, &raw.adjoint().unwrap(), one).unwrap();
     assert_su3_eigh_composition!(
         source,
         Complex64::ONE,

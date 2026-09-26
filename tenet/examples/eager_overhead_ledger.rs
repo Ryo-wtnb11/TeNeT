@@ -2,7 +2,7 @@
 //! (#1313): warm per-call minimum/median and allocation calls/bytes for
 //! `compose`, `contract`, `permute`, `repartition`, `qr_compact`,
 //! `svd_compact`, `lq_compact`, `left_null`, `eigh_full` (of the Hermitian
-//! `square' * square`), `restrict_leg`, `scale`, `add`, and `norm` over U(1), fZ2×U(1), and SU(2),
+//! `square' * square`), `restrict_leg`, `scale`, `axpby`, and `norm` over U(1), fZ2×U(1), and SU(2),
 //! `f64` and `Complex64`, ranks 2–5. Four lazy-adjoint rows follow them:
 //! `add_adjoint` (`a.adjoint() + b` on the adjoint space), `adjoint_data`
 //! (a fresh `a.adjoint()` and its first `data()`, which materializes it), and
@@ -337,11 +337,11 @@ macro_rules! ledger {
             });
             run_op(config, &prefix, "scale", || black_box(&a).scale(one + one));
             run_op(config, &prefix, "add", || {
-                black_box(&a).add(&a2, one, one).unwrap()
+                black_box(&a).axpby(one, &a2, one).unwrap()
             });
             run_op(config, &prefix, "norm", || black_box(&a).norm().unwrap());
             run_op(config, &prefix, "add_adjoint", || {
-                black_box(&lazy).add(&on_adjoint, one, one).unwrap()
+                black_box(&lazy).axpby(one, &on_adjoint, one).unwrap()
             });
             run_op(config, &prefix, "adjoint_data", || {
                 black_box(&a).adjoint().unwrap().data().len()

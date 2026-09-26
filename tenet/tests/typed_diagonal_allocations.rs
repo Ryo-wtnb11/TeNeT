@@ -285,7 +285,7 @@ fn storage_local_compact_operations_never_build_a_dense_payload() {
     for (name, bytes) in [
         ("scale", warmed_bytes(|| d.scale(0.5))),
         ("adjoint", warmed_bytes(|| d.adjoint().unwrap())),
-        ("add", warmed_bytes(|| d.add(&d, 0.75, -0.5).unwrap())),
+        ("add", warmed_bytes(|| d.axpby(0.75, &d, -0.5).unwrap())),
         ("compose", warmed_bytes(|| d.compose(&d).unwrap())),
     ] {
         assert!(
@@ -326,7 +326,7 @@ fn a_mixed_add_allocates_only_its_own_dense_result() {
     let dense = TensorMap::id(runtime(), &d.domain()).unwrap();
     // Reading `dense` must not be what pays for the diagonal: warm nothing on
     // `d` beyond what the operation itself needs.
-    let bytes = warmed_bytes(|| d.add(&dense, 0.75, -0.5).unwrap());
+    let bytes = warmed_bytes(|| d.axpby(0.75, &dense, -0.5).unwrap());
 
     assert!(
         bytes < dense_payload_bytes() * 3 / 2,
@@ -342,7 +342,7 @@ fn a_mixed_add_allocates_only_its_own_dense_result() {
     );
     // Same on the mirrored arm.
     let e = spectrum(0x5eed_0014);
-    black_box(dense.add(&e, 0.75, -0.5).unwrap());
+    black_box(dense.axpby(0.75, &e, -0.5).unwrap());
     assert!(
         measured_bytes(|| e.data().len()) >= dense_payload_bytes(),
         "the mirrored mixed add materialized the diagonal operand"

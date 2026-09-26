@@ -296,7 +296,7 @@ fn lazy_adjoint_add_and_materialization_fill_no_payload() {
 
     let mut sum = None;
     let add = measure(|| {
-        sum = Some(black_box(lazy.add(&partner, 0.5, -2.0).unwrap()));
+        sum = Some(black_box(lazy.axpby(0.5, &partner, -2.0).unwrap()));
     });
     assert!(
         !add.zeroed_sizes.contains(&payload_bytes),

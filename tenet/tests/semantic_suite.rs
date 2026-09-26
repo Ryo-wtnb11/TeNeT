@@ -646,7 +646,7 @@ fn svd_qr_reconstruction_random_spaces() {
 
             let (u, s, vh) = t.svd_compact().unwrap();
             let recon = u.compose(&s).unwrap().compose(&vh).unwrap();
-            let diff = recon.add(&t, 1.0, -1.0).unwrap().norm().unwrap();
+            let diff = recon.axpby(1.0, &t, -1.0).unwrap().norm().unwrap();
             assert!(
                 diff <= 1e-10 * (1.0 + t.norm().unwrap()),
                 "{} draw {draw}: svd reconstruction error {diff}",
@@ -656,7 +656,7 @@ fn svd_qr_reconstruction_random_spaces() {
             let mid_refs: Vec<_> = mid.iter().collect();
             let id: TensorMap<_, f64> = TensorMap::id(&rt, mid_refs).unwrap();
             let utu = u.adjoint().unwrap().compose(&u).unwrap();
-            let iso_err = utu.add(&id, 1.0, -1.0).unwrap().norm().unwrap();
+            let iso_err = utu.axpby(1.0, &id, -1.0).unwrap().norm().unwrap();
             assert!(
                 iso_err <= 1e-10,
                 "{} draw {draw}: U†U != id ({iso_err})",
@@ -665,7 +665,7 @@ fn svd_qr_reconstruction_random_spaces() {
 
             let (q, r) = t.qr_compact().unwrap();
             let recon = q.compose(&r).unwrap();
-            let diff = recon.add(&t, 1.0, -1.0).unwrap().norm().unwrap();
+            let diff = recon.axpby(1.0, &t, -1.0).unwrap().norm().unwrap();
             assert!(
                 diff <= 1e-10 * (1.0 + t.norm().unwrap()),
                 "{} draw {draw}: qr reconstruction error {diff}",
@@ -675,7 +675,7 @@ fn svd_qr_reconstruction_random_spaces() {
             let mid_refs: Vec<_> = mid.iter().collect();
             let id: TensorMap<_, f64> = TensorMap::id(&rt, mid_refs).unwrap();
             let qtq = q.adjoint().unwrap().compose(&q).unwrap();
-            let iso_err = qtq.add(&id, 1.0, -1.0).unwrap().norm().unwrap();
+            let iso_err = qtq.axpby(1.0, &id, -1.0).unwrap().norm().unwrap();
             assert!(
                 iso_err <= 1e-10,
                 "{} draw {draw}: Q†Q != id ({iso_err})",
@@ -873,7 +873,7 @@ macro_rules! invariant_stream_case {
         let d = a.permute(&[1, 0], &[3, 2]).unwrap();
         let e = d.compose(&c).unwrap();
         let g = a.adjoint().unwrap().compose(&a).unwrap();
-        let h = e.add(&a, 1.0, 0.5).unwrap();
+        let h = e.axpby(1.0, &a, 0.5).unwrap();
         let hh_tr = h.compose(&h).unwrap().tr().unwrap();
 
         let steps = [

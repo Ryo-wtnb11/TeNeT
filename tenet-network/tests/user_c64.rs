@@ -24,7 +24,7 @@ fn complexify<R>(re: &TensorMap<R, f64>, im: &TensorMap<R, f64>) -> TensorMap<R,
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
 {
-    re.to_c64().add(&im.to_c64(), one(), i()).unwrap()
+    re.to_c64().axpby(one(), &im.to_c64(), i()).unwrap()
 }
 
 fn assert_close(actual: &[Complex64], expected: &[Complex64], tolerance: f64) {
@@ -58,12 +58,12 @@ where
     let real = a
         .compose(&c)
         .unwrap()
-        .add(&b.compose(&d).unwrap(), 1.0, -1.0)
+        .axpby(1.0, &b.compose(&d).unwrap(), -1.0)
         .unwrap();
     let imaginary = a
         .compose(&d)
         .unwrap()
-        .add(&b.compose(&c).unwrap(), 1.0, 1.0)
+        .axpby(1.0, &b.compose(&c).unwrap(), 1.0)
         .unwrap();
     let expected = complexify(&real, &imaginary);
 
@@ -117,7 +117,7 @@ where
     let psi = TensorMap::<R, Complex64>::rand_with_seed(runtime, [p], [&l, &r], 71).unwrap();
     let h0 = TensorMap::<R, Complex64>::rand_with_seed(runtime, [p], [p], 72).unwrap();
     let h = h0
-        .add(&h0.adjoint().unwrap(), one() * 0.5, one() * 0.5)
+        .axpby(one() * 0.5, &h0.adjoint().unwrap(), one() * 0.5)
         .unwrap();
 
     let expectation = tensor!([] = conj(psi)[p; l, r] * h[p; q] * psi[q; l, r])

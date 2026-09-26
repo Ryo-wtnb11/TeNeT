@@ -2815,7 +2815,7 @@ macro_rules! run_provider {
                     "cold",
                     "warm",
                     $min_time,
-                    || left.add(right, alpha, beta),
+                    || left.axpby(alpha, right, beta),
                 )?;
                 let expected_norm_squared = alpha * alpha * left.norm()?.powi(2)
                     + beta * beta * right.norm()?.powi(2)
@@ -3113,14 +3113,14 @@ fn run_checked_sun(
                     "cold",
                     "warm",
                     min_time,
-                    || lhs.add(&rhs, 0.75, -0.25),
+                    || lhs.axpby(0.75, &rhs, -0.25),
                 )?;
                 for ((&actual, &left), &right) in
                     added.data().iter().zip(lhs.data()).zip(rhs.data())
                 {
                     assert_eq!(actual, 0.75 * left - 0.25 * right);
                 }
-                assert_same_tensor!(added, lhs.add(&rhs, 0.75, -0.25)?, lhs);
+                assert_same_tensor!(added, lhs.axpby(0.75, &rhs, -0.25)?, lhs);
             }
             2 => {
                 let norm = bench(

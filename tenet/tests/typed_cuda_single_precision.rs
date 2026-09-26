@@ -246,13 +246,13 @@ where
     assert_moved(a.data(), scaled.data(), "scale");
 
     let summed = device_a
-        .add(&device_b, alpha, beta)
+        .axpby(alpha, &device_b, beta)
         .unwrap()
         .to_host()
         .unwrap();
     assert_close(
         summed.data(),
-        a.add(&b, alpha, beta).unwrap().data(),
+        a.axpby(alpha, &b, beta).unwrap().data(),
         tolerance,
         "add",
     );
@@ -266,11 +266,11 @@ where
     let host_fold = a
         .adjoint()
         .unwrap()
-        .add(&b.adjoint().unwrap(), alpha, beta)
+        .axpby(alpha, &b.adjoint().unwrap(), beta)
         .unwrap();
     assert_close(
         lazy_a
-            .add(&lazy_b, alpha, beta)
+            .axpby(alpha, &lazy_b, beta)
             .unwrap()
             .to_host()
             .unwrap()
@@ -289,7 +289,7 @@ where
     // Mixing a lazy and an owned operand stays the documented device scope at
     // every dtype: the rejection order is unchanged by the payload.
     assert!(matches!(
-        lazy_a.add(&device_b, alpha, beta),
+        lazy_a.axpby(alpha, &device_b, beta),
         Err(Error::UnsupportedOnDevice(_))
     ));
 }

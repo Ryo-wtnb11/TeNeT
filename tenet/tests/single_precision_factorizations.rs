@@ -149,7 +149,7 @@ macro_rules! assert_reconstruction {
         let actual = $actual;
         let expected = $expected;
         let residual = actual
-            .add(expected, one::<$narrow>(), minus_one::<$narrow>())
+            .axpby(one::<$narrow>(), expected, minus_one::<$narrow>())
             .unwrap()
             .norm()
             .unwrap();
@@ -450,7 +450,7 @@ macro_rules! factor_checks {
             .compose(&truncated.vh)
             .unwrap();
         let residual = reconstructed
-            .add(&tall, one::<$narrow>(), minus_one::<$narrow>())
+            .axpby(one::<$narrow>(), &tall, minus_one::<$narrow>())
             .unwrap()
             .norm()
             .unwrap();

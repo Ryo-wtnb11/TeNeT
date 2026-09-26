@@ -48,7 +48,7 @@ fn truncated_svd_runtime_reuse_tracks_data_dependent_rank() {
 
         let reconstructed = u.compose(&s).unwrap().compose(&vh).unwrap();
         let residual = source
-            .add(&reconstructed, 1.0, -1.0)
+            .axpby(1.0, &reconstructed, -1.0)
             .unwrap()
             .norm()
             .unwrap();

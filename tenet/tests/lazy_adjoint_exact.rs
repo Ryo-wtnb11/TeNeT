@@ -276,7 +276,7 @@ macro_rules! assert_exact_adjoint {
                 let expected = on_adjoint_space(&|trees, indices| {
                     updated(a, b, value(lhs_salt, trees, indices), value(rhs_salt, trees, indices))
                 });
-                let sum = lhs.add(rhs, a, b).unwrap();
+                let sum = lhs.axpby(a, rhs, b).unwrap();
                 let copy = [(one, zero), (zero, one), (zero, zero)].contains(&(a, b));
                 if copy {
                     assert_eq!(

@@ -3245,7 +3245,7 @@ fn decompositions_carry_an_external_provider_with_its_own_labels() {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 5 (issue #568), slice 1: `TensorMap::add` and `TensorMap::scale`.
+// Phase 5 (issue #568), slice 1: `TensorMap::axpby` and `TensorMap::scale`.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -3261,7 +3261,7 @@ fn add_applies_each_real_coefficient_to_the_right_operand() {
     let typed = z2_tensor(&runtime);
     let typed_other = typed.permute(&[1, 0], &[2]).unwrap();
 
-    let typed_sum = typed.add(&typed_other, 2.0, -3.0).unwrap();
+    let typed_sum = typed.axpby(2.0, &typed_other, -3.0).unwrap();
 
     let expected: Vec<_> = typed
         .data()
@@ -3272,7 +3272,7 @@ fn add_applies_each_real_coefficient_to_the_right_operand() {
     assert_eq!(typed_sum.data(), expected);
     // The asymmetry is real: the swapped combination is a different tensor.
     assert_ne!(
-        typed.add(&typed_other, -3.0, 2.0).unwrap().data(),
+        typed.axpby(-3.0, &typed_other, 2.0).unwrap().data(),
         typed_sum.data()
     );
 }
@@ -3288,7 +3288,7 @@ fn add_carries_complex_coefficients() {
     let beta = Complex64::new(-1.5, 0.25);
 
     let other = typed.permute(&[1, 0], &[2]).unwrap();
-    let typed_sum = typed.add(&other, alpha, beta).unwrap();
+    let typed_sum = typed.axpby(alpha, &other, beta).unwrap();
     let expected: Vec<_> = typed
         .data()
         .iter()
@@ -3312,12 +3312,12 @@ fn add_rejects_a_different_runtime_and_a_different_space() {
     let other_split = z2_tensor_split(&runtime, 1);
 
     assert!(matches!(
-        typed.add(&elsewhere, 1.0, 1.0).unwrap_err(),
+        typed.axpby(1.0, &elsewhere, 1.0).unwrap_err(),
         tenet::prelude::Error::RuntimeMismatch
     ));
     // Keep the established space-mismatch diagnostic.
     assert!(matches!(
-        typed.add(&other_split, 1.0, 1.0).unwrap_err(),
+        typed.axpby(1.0, &other_split, 1.0).unwrap_err(),
         tenet::prelude::Error::InvalidArgument(message)
             if message == "tensors live on different spaces or block layouts"
     ));
@@ -4086,7 +4086,7 @@ fn compact_add_matches_pointwise_values_on_both_arms() {
     let runtime = runtime();
     let typed = z2_bond(&runtime);
 
-    let diagonal_sum = typed.add(&typed, 0.75, -0.5).unwrap();
+    let diagonal_sum = typed.axpby(0.75, &typed, -0.5).unwrap();
     for (&actual, &source) in diagonal_sum.data().iter().zip(typed.data()) {
         let expected = 0.25 * source;
         assert!((actual - expected).abs() <= 1e-12 * expected.abs().max(1.0));
@@ -4097,8 +4097,8 @@ fn compact_add_matches_pointwise_values_on_both_arms() {
     let typed_dense = TensorMap::id(&runtime, &typed.domain()).unwrap().scale(3.0);
 
     for (alpha, beta) in [(0.75, -0.5), (1.0, 1.0)] {
-        let diagonal_dense = typed.add(&typed_dense, alpha, beta).unwrap();
-        let dense_diagonal = typed_dense.add(&typed, alpha, beta).unwrap();
+        let diagonal_dense = typed.axpby(alpha, &typed_dense, beta).unwrap();
+        let dense_diagonal = typed_dense.axpby(alpha, &typed, beta).unwrap();
         for (((&diagonal_dense, &dense_diagonal), &diagonal), &dense) in diagonal_dense
             .data()
             .iter()
@@ -4190,7 +4190,7 @@ fn compose_declines_a_compact_arm_it_cannot_prove() {
 /// without projecting first.
 fn z2_hermitian(runtime: &Runtime) -> TensorMap<tenet::core::Z2FusionRule, f64> {
     let typed = z2_endomorphism(runtime);
-    typed.add(&typed.adjoint().unwrap(), 1.0, 1.0).unwrap()
+    typed.axpby(1.0, &typed.adjoint().unwrap(), 1.0).unwrap()
 }
 
 #[test]
@@ -4404,7 +4404,7 @@ fn hermitian_projections_satisfy_their_identities_and_predicate_truth_table() {
     let hermitian = typed.project_hermitian().unwrap();
     let antihermitian = typed.project_antihermitian().unwrap();
     assert_data_close_f64(
-        hermitian.add(&antihermitian, 1.0, 1.0).unwrap().data(),
+        hermitian.axpby(1.0, &antihermitian, 1.0).unwrap().data(),
         typed.data(),
     );
     assert_data_close_f64(hermitian.adjoint().unwrap().data(), hermitian.data());
@@ -4535,7 +4535,7 @@ fn a_non_endomorphism_is_never_hermitian_and_never_errors() {
 fn z2_invertible(runtime: &Runtime) -> TensorMap<tenet::core::Z2FusionRule, f64> {
     let typed = z2_endomorphism(runtime);
     let typed_id = TensorMap::id(runtime, &typed.domain()).unwrap();
-    typed.add(&typed_id, 1.0, 100.0).unwrap()
+    typed.axpby(1.0, &typed_id, 100.0).unwrap()
 }
 
 #[test]
@@ -5122,7 +5122,7 @@ fn sqrt_squares_to_the_source_on_both_storages() {
     let dense_zero = TensorMap::<_, f64>::id(&runtime, &typed_s.domain())
         .unwrap()
         .scale(0.0);
-    let dense_s = typed_s.add(&dense_zero, 1.0, 1.0).unwrap();
+    let dense_s = typed_s.axpby(1.0, &dense_zero, 1.0).unwrap();
     assert_eq!(dense_s.data(), typed_s.data());
     assert_eq!(
         dense_s.sqrt().unwrap().data(),
@@ -5181,11 +5181,11 @@ fn sqrt_of_a_negative_f64_entry_points_at_the_complex_payload() {
         (
             "dense",
             typed_s
-                .add(
+                .axpby(
+                    1.0,
                     &TensorMap::<_, f64>::id(&runtime, &typed_s.domain())
                         .unwrap()
                         .scale(0.0),
-                    1.0,
                     1.0,
                 )
                 .unwrap()
@@ -5757,7 +5757,7 @@ where
     let zeros = TensorMap::zeros(compact.runtime(), &codomain, &domain)
         .expect("zero tensor on an admitted bond space is total");
     let dense = compact
-        .add(&zeros, D::from_real(1.0), D::from_real(1.0))
+        .axpby(D::from_real(1.0), &zeros, D::from_real(1.0))
         .expect("mixed add on one bond space is total");
     assert_eq!(dense.data(), compact.data(), "the dense twin lost values");
     assert!(
@@ -5938,7 +5938,7 @@ fn compact_is_posdef_matches_the_forced_dense_route() {
     let positive = z2_spectrum_fixture(&runtime, false);
     let semidefinite = z2_spectrum_fixture(&runtime, true);
     let negative = positive.scale(-1.0);
-    let indefinite = positive.add(&semidefinite, 1.0, -3.0).unwrap();
+    let indefinite = positive.axpby(1.0, &semidefinite, -3.0).unwrap();
 
     for (name, tensor) in [
         ("positive", &positive),
@@ -6771,7 +6771,7 @@ fn assert_reductions_and_factorizations_hold<R>(
 {
     // Neither coefficient is 1 and they differ in sign, so dropping or
     // swapping one moves the buffer.
-    let typed_sum = typed.0.add(typed.1, 2.0, -3.0).unwrap();
+    let typed_sum = typed.0.axpby(2.0, typed.1, -3.0).unwrap();
     for ((&actual, &left), &right) in typed_sum
         .data()
         .iter()
@@ -6782,7 +6782,7 @@ fn assert_reductions_and_factorizations_hold<R>(
     }
     assert_nonzero(what, typed_sum.data());
     assert_ne!(
-        typed.0.add(typed.1, -3.0, 2.0).unwrap().data(),
+        typed.0.axpby(-3.0, typed.1, 2.0).unwrap().data(),
         typed_sum.data(),
         "{what}: add is not symmetric in its coefficients"
     );
@@ -7867,9 +7867,9 @@ fn typed_re_im_reconstruct_the_complex_tensor_byte_exactly() {
     let imag_part: TensorMap<tenet::core::Z2FusionRule, f64> = complex_typed.im();
     let rebuilt: TensorMap<tenet::core::Z2FusionRule, Complex64> = real_part
         .to_c64()
-        .add(
-            &imag_part.to_c64(),
+        .axpby(
             Complex64::new(1.0, 0.0),
+            &imag_part.to_c64(),
             Complex64::new(0.0, 1.0),
         )
         .unwrap();
@@ -7897,9 +7897,9 @@ fn typed_re_im_keep_a_compact_spectrum_on_its_bond_space() {
     assert_same_legs(&real_part.codomain(), &s.codomain());
     let rebuilt: TensorMap<tenet::core::Z2FusionRule, Complex64> = real_part
         .to_c64()
-        .add(
-            &imag_part.to_c64(),
+        .axpby(
             Complex64::new(1.0, 0.0),
+            &imag_part.to_c64(),
             Complex64::new(0.0, 1.0),
         )
         .unwrap();

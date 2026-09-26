@@ -64,7 +64,7 @@ fn add_assign_preserves_clone_and_updates_unique_receiver() {
     let mut lhs = tensor(&runtime, 2, 2.0);
     let original = lhs.clone();
     let rhs = tensor(&runtime, 2, 3.0);
-    lhs.add_assign(&rhs, 2.0, -1.0).unwrap();
+    lhs.axpby_assign(2.0, &rhs, -1.0).unwrap();
     assert_eq!(lhs.data(), &[1.0, 0.0, 0.0, 1.0]);
     assert_eq!(original.data(), &[2.0, 0.0, 0.0, 2.0]);
 }
@@ -74,7 +74,7 @@ fn add_assign_rejects_layout_mismatch_without_mutating_destination() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let mut lhs = tensor(&runtime, 2, 2.0);
     let rhs = tensor(&runtime, 3, 3.0);
-    let error = lhs.add_assign(&rhs, 1.0, 1.0).unwrap_err();
+    let error = lhs.axpby_assign(1.0, &rhs, 1.0).unwrap_err();
     assert!(error.to_string().contains("different spaces"));
     assert_eq!(lhs.data(), &[2.0, 0.0, 0.0, 2.0]);
 }
@@ -86,7 +86,7 @@ fn unique_dense_assign_is_allocation_free() {
     let rhs = tensor(&runtime, 64, 3.0);
     ALLOCATIONS.set(0);
     COUNTING.set(true);
-    lhs.add_assign(&rhs, 2.0, -1.0).unwrap();
+    lhs.axpby_assign(2.0, &rhs, -1.0).unwrap();
     COUNTING.set(false);
     assert_eq!(ALLOCATIONS.get(), 0);
     let mut scaled = tensor(&runtime, 64, 2.0);

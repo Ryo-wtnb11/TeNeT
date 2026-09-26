@@ -77,7 +77,7 @@ upstream location (the note says why).
 
 | Item | Upstream component | Revision | Source | Note |
 | --- | --- | --- | --- | --- |
-| `typed::TensorMap::add` | TensorKit | 0.17.0 | `tensors/vectorinterface.jl:67-99` | divergence: TK computes `β*ty + α*tx` (first coefficient on the *second* argument); tenet's `alpha` belongs to `self` |
+| `typed::TensorMap::axpby` | TensorKit | 0.17.0 | `tensors/vectorinterface.jl:67-99` | divergence: TK computes `β*ty + α*tx` (first coefficient on the *second* argument); tenet's `alpha` belongs to `self`; named `axpby`, not `add`, so a ported call fails to compile (#1542) |
 | `typed::TensorMap::adjoint` | TensorKit | 0.17.0 | `tensors/adjoint.jl:19` | `Base.adjoint` returns the lazy `AdjointTensorMap` wrapper (struct at 9-12) |
 | `typed::TensorMap::braid` | TensorKit | 0.17.0 | `tensors/indexmanipulations.jl:331-342` | typed facade |
 | `typed::TensorMap::compose` | TensorKit | 0.17.0 | `tensors/tensoroperations.jl:388-420` | fermionic supertrace twist applied only in `blas_contract!`, never in `mul!` |

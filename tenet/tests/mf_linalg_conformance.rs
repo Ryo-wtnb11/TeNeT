@@ -27,7 +27,7 @@ macro_rules! assert_close {
     ($actual:expr, $expected:expr) => {{
         let actual = $actual;
         let expected = $expected;
-        let error = actual.add(expected, 1.0, -1.0).unwrap().norm().unwrap();
+        let error = actual.axpby(1.0, expected, -1.0).unwrap().norm().unwrap();
         assert!(
             error <= 1e-9 * (1.0 + expected.norm().unwrap()),
             "residual {error}"
@@ -109,7 +109,7 @@ macro_rules! factor_conformance {
         let vh = vh.restrict_leg(0, &found.selection).unwrap();
         assert_provider!(provider; u, s, vh);
         let reconstructed = u.compose(&s).unwrap().compose(&vh).unwrap();
-        let error = reconstructed.add(&tall, 1.0, -1.0).unwrap().norm().unwrap();
+        let error = reconstructed.axpby(1.0, &tall, -1.0).unwrap().norm().unwrap();
         assert!((error - found.error).abs() <= 1e-9 * (1.0 + found.error));
         assert!(found.error > 0.0, $name);
         let singular_values = tall.svd_vals().unwrap();
@@ -234,7 +234,7 @@ macro_rules! factor_conformance {
             .unwrap()
             .compose(&trunc_v.adjoint().unwrap())
             .unwrap();
-        let error = reconstructed.add(&h, 1.0, -1.0).unwrap().norm().unwrap();
+        let error = reconstructed.axpby(1.0, &h, -1.0).unwrap().norm().unwrap();
         assert!((error - found.error).abs() <= 1e-9 * (1.0 + found.error));
         assert!(found.error > 0.0, $name);
 
@@ -302,7 +302,7 @@ macro_rules! factor_conformance {
         assert_close!(&a_plus_a.adjoint().unwrap(), &a_plus_a);
         let left_projector = left.compose(&left.adjoint().unwrap()).unwrap();
         let id = TensorMap::id(&rt, tall.codomain().iter()).unwrap();
-        assert_close!(&left_projector.add(&aa_plus, 1.0, 1.0).unwrap(), &id);
+        assert_close!(&left_projector.axpby(1.0, &aa_plus, 1.0).unwrap(), &id);
         let diagonal: TensorMap<_, f64> =
             TensorMap::from_block_fn(&rt, [&endo_space], [&endo_space], |_, index| {
                 if index[0] == index[1] {

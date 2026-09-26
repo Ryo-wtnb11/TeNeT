@@ -516,9 +516,9 @@ fn narrowing_rounds_like_as_f32_per_element() {
     assert!(narrowed.data().iter().any(|value| value.is_subnormal()));
 
     // Complex narrowing is componentwise with the same rounding.
-    let complex = source.to_c64().scale(Complex64::new(0.0, 1.0)).add(
-        &source.to_c64(),
+    let complex = source.to_c64().scale(Complex64::new(0.0, 1.0)).axpby(
         Complex64::new(1.0, 0.0),
+        &source.to_c64(),
         Complex64::new(1.0, 0.0),
     );
     let complex = complex.unwrap();

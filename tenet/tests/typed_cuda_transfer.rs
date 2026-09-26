@@ -1515,9 +1515,9 @@ fn typed_cuda_arithmetic_matches_host_lazy_ownership_and_concurrency() {
     }
 
     let (alpha, beta) = (2.25, -3.5);
-    let expected_add = lhs.add(&rhs, alpha, beta).unwrap();
+    let expected_add = lhs.axpby(alpha, &rhs, beta).unwrap();
     let actual_add = lhs_device
-        .add(&rhs_device, alpha, beta)
+        .axpby(alpha, &rhs_device, beta)
         .unwrap()
         .to_host()
         .unwrap();
@@ -1531,7 +1531,7 @@ fn typed_cuda_arithmetic_matches_host_lazy_ownership_and_concurrency() {
     for _ in 0..3 {
         assert_eq!(
             lhs_device
-                .add(&rhs_device, alpha, beta)
+                .axpby(alpha, &rhs_device, beta)
                 .unwrap()
                 .to_host()
                 .unwrap()
@@ -1586,17 +1586,17 @@ fn typed_cuda_arithmetic_matches_host_lazy_ownership_and_concurrency() {
             .unwrap();
         assert_nonfinite_numeric_parity(actual_scale_zero.data(), expected_scale_zero.data());
 
-        let expected_zero_alpha = nonfinite.add(&finite, zero_factor, 1.0).unwrap();
+        let expected_zero_alpha = nonfinite.axpby(zero_factor, &finite, 1.0).unwrap();
         let actual_zero_alpha = nonfinite_device
-            .add(&finite_device, zero_factor, 1.0)
+            .axpby(zero_factor, &finite_device, 1.0)
             .unwrap()
             .to_host()
             .unwrap();
         assert_nonfinite_numeric_parity(actual_zero_alpha.data(), expected_zero_alpha.data());
 
-        let expected_zero_beta = finite.add(&nonfinite, 1.0, zero_factor).unwrap();
+        let expected_zero_beta = finite.axpby(1.0, &nonfinite, zero_factor).unwrap();
         let actual_zero_beta = finite_device
-            .add(&nonfinite_device, 1.0, zero_factor)
+            .axpby(1.0, &nonfinite_device, zero_factor)
             .unwrap()
             .to_host()
             .unwrap();
@@ -1622,7 +1622,7 @@ fn typed_cuda_arithmetic_matches_host_lazy_ownership_and_concurrency() {
     let rhs_lazy = rhs_device.adjoint().unwrap();
     let lazy_scale = lhs_lazy.scale(alpha).unwrap().to_host().unwrap();
     let lazy_add = lhs_lazy
-        .add(&rhs_lazy, alpha, beta)
+        .axpby(alpha, &rhs_lazy, beta)
         .unwrap()
         .to_host()
         .unwrap();
@@ -1635,7 +1635,7 @@ fn typed_cuda_arithmetic_matches_host_lazy_ownership_and_concurrency() {
         lazy_add.data(),
         lhs.adjoint()
             .unwrap()
-            .add(&rhs.adjoint().unwrap(), alpha, beta)
+            .axpby(alpha, &rhs.adjoint().unwrap(), beta)
             .unwrap()
             .data()
     );
@@ -1643,7 +1643,7 @@ fn typed_cuda_arithmetic_matches_host_lazy_ownership_and_concurrency() {
     assert!(!std::ptr::eq(lazy_add.provider(), rhs_provider));
     assert!(lazy_zero.data().iter().all(|value| value.to_bits() == 0));
     assert!(matches!(
-        lhs_lazy.add(&rhs_device, alpha, beta),
+        lhs_lazy.axpby(alpha, &rhs_device, beta),
         Err(tenet::typed::Error::UnsupportedOnDevice(_))
     ));
 
@@ -1652,7 +1652,7 @@ fn typed_cuda_arithmetic_matches_host_lazy_ownership_and_concurrency() {
             .map(|_| {
                 scope.spawn(|| {
                     lhs_device
-                        .add(&rhs_device, alpha, beta)
+                        .axpby(alpha, &rhs_device, beta)
                         .unwrap()
                         .to_host()
                         .unwrap()
@@ -1701,7 +1701,7 @@ fn typed_cuda_arithmetic_matches_host_lazy_ownership_and_concurrency() {
         .data()
         .is_empty());
     assert!(empty_device
-        .add(&empty_device, alpha, beta)
+        .axpby(alpha, &empty_device, beta)
         .unwrap()
         .to_host()
         .unwrap()
@@ -1723,7 +1723,7 @@ fn typed_cuda_arithmetic_matches_host_lazy_ownership_and_concurrency() {
         .to_cuda()
         .unwrap();
     assert_eq!(
-        lhs_device.add(&foreign, alpha, beta).unwrap_err(),
+        lhs_device.axpby(alpha, &foreign, beta).unwrap_err(),
         tenet::typed::Error::RuntimeMismatch
     );
     let mismatched = TensorMap::from_block_fn(&runtime, [&other_leg], [&other_leg], |_, _| 1.0)
@@ -1731,7 +1731,7 @@ fn typed_cuda_arithmetic_matches_host_lazy_ownership_and_concurrency() {
         .to_cuda()
         .unwrap();
     assert!(matches!(
-        lhs_device.add(&mismatched, alpha, beta),
+        lhs_device.axpby(alpha, &mismatched, beta),
         Err(tenet::typed::Error::InvalidArgument(_))
     ));
     assert_eq!(lhs_device.to_host().unwrap().data(), lhs_data);
@@ -2240,12 +2240,12 @@ fn typed_cuda_c64_scale_and_add_match_host_including_the_lazy_fold() {
     );
     assert_close_c64(
         a_device
-            .add(&b_device, alpha, beta)
+            .axpby(alpha, &b_device, beta)
             .unwrap()
             .to_host()
             .unwrap()
             .data(),
-        a.add(&b, alpha, beta).unwrap().data(),
+        a.axpby(alpha, &b, beta).unwrap().data(),
         1e-12,
     );
     assert_close_c64(
@@ -2260,11 +2260,11 @@ fn typed_cuda_c64_scale_and_add_match_host_including_the_lazy_fold() {
     let host_fold = a
         .adjoint()
         .unwrap()
-        .add(&b.adjoint().unwrap(), alpha, beta)
+        .axpby(alpha, &b.adjoint().unwrap(), beta)
         .unwrap();
     assert_close_c64(
         lazy_a
-            .add(&lazy_b, alpha, beta)
+            .axpby(alpha, &lazy_b, beta)
             .unwrap()
             .to_host()
             .unwrap()
@@ -2280,7 +2280,7 @@ fn typed_cuda_c64_scale_and_add_match_host_including_the_lazy_fold() {
         );
     }
     assert!(matches!(
-        lazy_a.add(&b_device, alpha, beta),
+        lazy_a.axpby(alpha, &b_device, beta),
         Err(tenet::typed::Error::UnsupportedOnDevice(_))
     ));
 }
@@ -2562,9 +2562,9 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
 {
     let hermitian = source
-        .add(
-            &source.adjoint().unwrap(),
+        .axpby(
             Complex64::new(1.0, 0.0),
+            &source.adjoint().unwrap(),
             Complex64::new(1.0, 0.0),
         )
         .unwrap();

@@ -7,7 +7,7 @@
 //! `scale(x, α)`, `scale!(x, α)` and `scale!(y, x, α)` equal, elementwise,
 //! VectorInterface's number rule `scale(x, α) = (iszero(α) ? zero(x) : x) * α`
 //! composed as `scale(y, β) + scale(x, α)`: a zero coefficient drops its
-//! operand, NaN and `Inf` included. TeNeT's `a.add(&b, alpha, beta)` is
+//! operand, NaN and `Inf` included. TeNeT's `a.axpby(alpha, &b, beta)` is
 //! `alpha * a + beta * b`, so the expectation here is
 //! `scale(a, alpha) + scale(b, beta)`.
 //!
@@ -108,18 +108,18 @@ macro_rules! check_dense {
             let want = combine(alpha, beta);
             assert_same(
                 &format!("{what} add"),
-                x.add(&y, a, b).unwrap().data(),
+                x.axpby(a, &y, b).unwrap().data(),
                 &want,
             );
             let mut assigned = x.clone();
-            assigned.add_assign(&y, a, b).unwrap();
+            assigned.axpby_assign(a, &y, b).unwrap();
             assert_same(&format!("{what} add_assign"), assigned.data(), &want);
             // The lazy adjoint route: `(x^H)^H` reads `x` in its logical
             // orientation.
             let lazy = x.adjoint().unwrap().adjoint().unwrap();
             assert_same(
                 &format!("{what} lazy add"),
-                lazy.add(&y, a, b).unwrap().data(),
+                lazy.axpby(a, &y, b).unwrap().data(),
                 &want,
             );
         }
@@ -138,9 +138,9 @@ macro_rules! check_dense {
             .zip(y.data())
             .map(|(&u, &v)| u * a + v * b)
             .collect();
-        assert_eq!(bits(x.add(&y, a, b).unwrap().data()), bits(&base));
+        assert_eq!(bits(x.axpby(a, &y, b).unwrap().data()), bits(&base));
         let mut assigned = x.clone();
-        assigned.add_assign(&y, a, b).unwrap();
+        assigned.axpby_assign(a, &y, b).unwrap();
         assert_eq!(bits(assigned.data()), bits(&base));
         let base: Vec<$d> = x.data().iter().map(|&u| u * a).collect();
         assert_eq!(bits(x.scale(a).data()), bits(&base));
@@ -231,7 +231,7 @@ fn compact_diagonal_add_and_scale_drop_zero_scaled_operands_as_tensorkit() {
             .collect();
         assert_same(
             &format!("{what} spectra"),
-            x.add(&y, alpha, beta).unwrap().data(),
+            x.axpby(alpha, &y, beta).unwrap().data(),
             &want,
         );
         let want: Vec<f64> = x
@@ -242,7 +242,7 @@ fn compact_diagonal_add_and_scale_drop_zero_scaled_operands_as_tensorkit() {
             .collect();
         assert_same(
             &format!("{what} spectrum + dense"),
-            x.add(&dense_y, alpha, beta).unwrap().data(),
+            x.axpby(alpha, &dense_y, beta).unwrap().data(),
             &want,
         );
     }

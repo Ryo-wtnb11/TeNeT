@@ -118,7 +118,7 @@ macro_rules! owned_adjoint {
     ($d:ty, $t:expr) => {{
         let adjoint = $t.adjoint().unwrap();
         adjoint
-            .add(&adjoint, <$d as Scalar>::ONE, <$d as Scalar>::ZERO)
+            .axpby(<$d as Scalar>::ONE, &adjoint, <$d as Scalar>::ZERO)
             .unwrap()
     }};
 }
@@ -130,7 +130,7 @@ macro_rules! owned_adjoint {
 macro_rules! assert_residual {
     ($what:expr, $d:ty, $actual:expr, $expected:expr, $terms:expr) => {{
         let residual = $actual
-            .add($expected, <$d as Scalar>::ONE, <$d as Scalar>::MINUS_ONE)
+            .axpby(<$d as Scalar>::ONE, $expected, <$d as Scalar>::MINUS_ONE)
             .unwrap()
             .norm()
             .unwrap();

@@ -92,7 +92,7 @@
 //! [`TensorMap::transpose_axes`], [`TensorMap::repartition`],
 //! [`TensorMap::contract`],
 //! [`TensorMap::compose`]), the scalar operations
-//! ([`TensorMap::add`], [`TensorMap::scale`], [`TensorMap::norm`],
+//! ([`TensorMap::axpby`], [`TensorMap::scale`], [`TensorMap::norm`],
 //! [`TensorMap::norm_inf`], [`TensorMap::norm_p`],
 //! [`TensorMap::inner`], [`TensorMap::tr`], [`TensorMap::trace_pairs`],
 //! [`TensorMap::adjoint`]), the factorizations ([`TensorMap::svd_compact`],
@@ -138,7 +138,7 @@
 //! mentions it, [`TensorMap::data`] still reports the dense buffer (materialized
 //! once, on demand, shared by every clone), and the operations that can exploit
 //! it — [`TensorMap::compose`],
-//! [`TensorMap::scale`], [`TensorMap::add`], [`TensorMap::adjoint`],
+//! [`TensorMap::scale`], [`TensorMap::axpby`], [`TensorMap::adjoint`],
 //! [`TensorMap::trace_pairs`] on its full-pair arm, and the reductions — do so
 //! silently. The ones that cannot say so in their own
 //! documentation: [`TensorMap::permute`] and its family, and
@@ -302,7 +302,7 @@ pub use serialization::{
 /// Scalar payloads supported by [`TensorMap`], base capability.
 ///
 /// Admits the payload-dtype-independent half of the typed API: construction
-/// and inspection, [`TensorMap::adjoint`], `scale`/`add`, the
+/// and inspection, [`TensorMap::adjoint`], `scale`/`axpby`, the
 /// reductions (`norm`, `norm_inf`, `norm_p`, `inner`, `tr`),
 /// contraction/`compose`/`otimes`/`cat`, the structural transforms
 /// (`permute`, `braid`, `transpose`, `repartition`, `twist`, `flip`),
@@ -354,7 +354,7 @@ pub use serialization::{
 /// *solely* from float literals, whose result then has a method called on it,
 /// now fails with `E0689 ambiguous numeric type {float}`. It affects
 /// [`TensorMap::diagonal`], [`TensorMap::from_block_fn`] closures returning
-/// literals, and `scale`/`add` coefficients on an un-annotated
+/// literals, and `scale`/`axpby` coefficients on an un-annotated
 /// `zeros`/`id`/`rand`:
 ///
 /// ```
@@ -1245,7 +1245,7 @@ where
     /// let runtime = Runtime::builder().build()?;
     /// let v = GradedSpace::try_new(U1FusionRule, [(U1Irrep::new(0), 2)])?;
     /// let id: TensorMap<_, f64> = TensorMap::id(&runtime, [&v])?;
-    /// let twice = id.add(&id, 1.0, 1.0)?;
+    /// let twice = id.axpby(1.0, &id, 1.0)?;
     /// assert!((twice.norm()? - 2.0_f64.sqrt() * 2.0).abs() < 1e-12);
     /// assert_eq!(id.inner(&id)?, 2.0);
     /// assert_eq!(id.tr()?, 2.0);
@@ -1292,19 +1292,32 @@ where
     D: TensorScalar,
 {
     /// Returns the host-side linear combination
-    /// `alpha * self + beta * other` on the operands' common tensor space.
+    /// `x.axpby(alpha, &y, beta) == alpha * x + beta * y` on the operands'
+    /// common tensor space, where `x` is the receiver.
+    ///
+    /// The name is BLAS `axpby`: each coefficient sits next to the operand it
+    /// multiplies. TeNeT has no `add` with coefficients because
+    /// VectorInterface's `add(y, x, α, β)` computes `β·y + α·x`, binding the
+    /// coefficients the other way round; a ported `add` call would compile and
+    /// silently swap them.
     ///
     /// Both operands must share a runtime and exactly the same tensor space and
-    /// block layout. `alpha` multiplies `self` and `beta` multiplies
-    /// `other`; this order differs from VectorInterface's Julia argument
-    /// convention. Two compact diagonal inputs stay compact. A mixed
+    /// block layout. Two compact diagonal inputs stay compact. A mixed
     /// compact/dense pair allocates only the dense result, and lazy inputs are
     /// read in their logical orientation without filling their caches.
     ///
     /// Returns [`Error::RuntimeMismatch`] or [`Error::InvalidArgument`] before
     /// producing a result. See [`Self::norm`] for a runnable example.
-    pub fn add(&self, other: &Self, alpha: D, beta: D) -> Result<Self, TypedFacadeError<R>> {
-        <R::Mode as TypedTensorAddScaleDispatch<R, D>>::add(self, other, alpha, beta)
+    ///
+    /// ```compile_fail
+    /// use tenet::prelude::{TensorMap, U1FusionRule};
+    ///
+    /// fn removed(x: &TensorMap<U1FusionRule, f64>) {
+    ///     let _ = x.add(x, 1.0, 2.0);
+    /// }
+    /// ```
+    pub fn axpby(&self, alpha: D, y: &Self, beta: D) -> Result<Self, TypedFacadeError<R>> {
+        <R::Mode as TypedTensorAddScaleDispatch<R, D>>::axpby(self, alpha, y, beta)
     }
 
     /// Returns `factor * self` in host storage.
@@ -1337,26 +1350,22 @@ where
         }
     }
 
-    /// Replaces this host tensor with `alpha * self + beta * other`.
+    /// Replaces the host tensor `x` with `alpha * x + beta * y`, the in-place
+    /// form of [`Self::axpby`].
     ///
     /// A uniquely owned dense receiver is updated without allocating a new
-    /// payload. All other representations use [`Self::add`], so compact
+    /// payload. All other representations use [`Self::axpby`], so compact
     /// spectra remain compact and shared bodies remain copy-on-write.
-    pub fn add_assign(
-        &mut self,
-        other: &Self,
-        alpha: D,
-        beta: D,
-    ) -> Result<(), TypedFacadeError<R>> {
-        if !self.runtime.same_runtime(&other.runtime) {
+    pub fn axpby_assign(&mut self, alpha: D, y: &Self, beta: D) -> Result<(), TypedFacadeError<R>> {
+        if !self.runtime.same_runtime(&y.runtime) {
             return Err(TypedFacadeError::<R>::from(Error::RuntimeMismatch));
         }
-        if self.logical_space().space() != other.logical_space().space() {
+        if self.logical_space().space() != y.logical_space().space() {
             return Err(TypedFacadeError::<R>::from(Error::InvalidArgument(
                 "tensors live on different spaces or block layouts".to_string(),
             )));
         }
-        let source = match &other.repr {
+        let source = match &y.repr {
             TypedTensorRepr::Owned(body) => match body.data.as_ref() {
                 TypedData::Dense(data) => Some(data.as_slice()),
                 TypedData::Diagonal(_) => None,
@@ -1364,18 +1373,18 @@ where
             TypedTensorRepr::Adjoint(_) => None,
         };
         let Some(source) = source else {
-            *self = self.add(other, alpha, beta)?;
+            *self = self.axpby(alpha, y, beta)?;
             return Ok(());
         };
         let Some(body) = (match &mut self.repr {
             TypedTensorRepr::Owned(body) => Arc::get_mut(body),
             TypedTensorRepr::Adjoint(_) => None,
         }) else {
-            *self = self.add(other, alpha, beta)?;
+            *self = self.axpby(alpha, y, beta)?;
             return Ok(());
         };
         let Some(TypedData::Dense(data)) = Arc::get_mut(&mut body.data) else {
-            *self = self.add(other, alpha, beta)?;
+            *self = self.axpby(alpha, y, beta)?;
             return Ok(());
         };
         if data.len() != source.len() {
@@ -1784,7 +1793,7 @@ where
     /// let a: TensorMap<_, f64> = TensorMap::rand(&runtime, [&v], [&v])?;
     /// let (q, r) = a.qr_compact()?;
     /// let rebuilt = q.compose(&r)?;
-    /// assert!(rebuilt.add(&a, 1.0, -1.0)?.norm()? < 1e-12);
+    /// assert!(rebuilt.axpby(1.0, &a, -1.0)?.norm()? < 1e-12);
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
     pub fn qr_compact(&self) -> Result<(Self, Self), TypedFacadeError<R>> {
@@ -1828,7 +1837,7 @@ where
     /// let a: TensorMap<_, f64> = TensorMap::rand(&runtime, [&v], [&v])?;
     /// let (u, s, vh) = a.svd_compact()?;
     /// let rebuilt = u.compose(&s)?.compose(&vh)?;
-    /// assert!(rebuilt.add(&a, 1.0, -1.0)?.norm()? < 1e-12);
+    /// assert!(rebuilt.axpby(1.0, &a, -1.0)?.norm()? < 1e-12);
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
     pub fn svd_compact(&self) -> Result<(Self, Self, Self), TypedFacadeError<R>> {
@@ -1878,7 +1887,7 @@ where
     /// let v = GradedSpace::try_new(U1FusionRule, [(U1Irrep::new(0), 2)])?;
     /// let a: TensorMap<_, f64> = TensorMap::rand(&runtime, [&v], [&v])?;
     /// let (l, q) = a.lq_compact()?;
-    /// assert!(l.compose(&q)?.add(&a, 1.0, -1.0)?.norm()? < 1e-12);
+    /// assert!(l.compose(&q)?.axpby(1.0, &a, -1.0)?.norm()? < 1e-12);
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
     pub fn lq_compact(&self) -> Result<(Self, Self), TypedFacadeError<R>> {
@@ -2244,7 +2253,7 @@ where
     /// let a: TensorMap<_, f64> = TensorMap::id(&runtime, [&v])?.scale(2.0);
     /// let (d, eigenvectors) = a.eigh_full()?;
     /// let rebuilt = eigenvectors.compose(&d)?.compose(&eigenvectors.adjoint()?)?;
-    /// assert!(rebuilt.add(&a, 1.0, -1.0)?.norm()? < 1e-12);
+    /// assert!(rebuilt.axpby(1.0, &a, -1.0)?.norm()? < 1e-12);
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
     pub fn eigh_full(&self) -> Result<(Self, Self), TypedFacadeError<R>> {
@@ -2316,7 +2325,7 @@ where
     /// let a: TensorMap<_, f64> = TensorMap::id(&runtime, [&v])?.scale(2.0);
     /// let (d, eigenvectors) = a.eig_full()?;
     /// let rebuilt = eigenvectors.compose(&d)?.compose(&eigenvectors.inv()?)?;
-    /// assert!(rebuilt.add(&a.to_c64(), 1.0.into(), (-1.0).into())?.norm()? < 1e-12);
+    /// assert!(rebuilt.axpby(1.0.into(), &a.to_c64(), (-1.0).into())?.norm()? < 1e-12);
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
     #[expect(
@@ -5607,10 +5616,10 @@ where
     R: TypedSectorAdmission,
     D: TensorScalar,
 {
-    fn add(
+    fn axpby(
         tensor: &TensorMap<R, D>,
-        other: &TensorMap<R, D>,
         alpha: D,
+        other: &TensorMap<R, D>,
         beta: D,
     ) -> Result<TensorMap<R, D>, Self::FacadeError>;
     fn scale(tensor: &TensorMap<R, D>, factor: D) -> TensorMap<R, D>;
@@ -6008,10 +6017,10 @@ where
         + SectorCodec,
     D: TensorScalar,
 {
-    fn add(
+    fn axpby(
         tensor: &TensorMap<R, D>,
-        other: &TensorMap<R, D>,
         alpha: D,
+        other: &TensorMap<R, D>,
         beta: D,
     ) -> Result<TensorMap<R, D>, Error> {
         tensor.add_multiplicity_free(other, alpha, beta)
@@ -6030,10 +6039,10 @@ where
         > + CheckedGenericFusion,
     D: TensorScalar,
 {
-    fn add(
+    fn axpby(
         tensor: &TensorMap<R, D>,
-        other: &TensorMap<R, D>,
         alpha: D,
+        other: &TensorMap<R, D>,
         beta: D,
     ) -> Result<TensorMap<R, D>, GenericTensorError<<R as CheckedGenericFusion>::Error>> {
         host_add_impl(tensor, other, alpha, beta).map_err(GenericTensorError::from)
@@ -9108,7 +9117,7 @@ where
     ///
     /// // The best rank-2 approximation, and the weight it discards.
     /// let approximation = u.compose(&s)?.compose(&vh)?;
-    /// let residual = t.add(&approximation, 1.0, -1.0)?.norm()?;
+    /// let residual = t.axpby(1.0, &approximation, -1.0)?.norm()?;
     /// assert!((residual - found.error).abs() < 1e-12);
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
@@ -10153,7 +10162,7 @@ where
 /// sits on a space built by [`diagonal_factor_on`], i.e. by
 /// [`tenet_matrixalgebra::diagonal_bond_bound_space_like`], which is a bond
 /// space by construction, and the operations that preserve the payload
-/// ([`TensorMap::scale`], [`TensorMap::add`], [`TensorMap::adjoint`], the
+/// ([`TensorMap::scale`], [`TensorMap::axpby`], [`TensorMap::adjoint`], the
 /// `D * D` arm) all keep that space. It stays at those sites because the next
 /// constructor of a compact payload — a diagonal-aware `contract`, say — would
 /// be the first one able to aim at a destination that is not a bond space, and
@@ -11199,7 +11208,7 @@ impl<R> TensorMap<R, f32> {
     /// use tenet::typed::TensorMap;
     ///
     /// fn mixed(a: &TensorMap<U1FusionRule, f32>, b: &TensorMap<U1FusionRule, f64>) {
-    ///     let _ = a.add(b, 1.0, 1.0);
+    ///     let _ = a.axpby(1.0, b, 1.0);
     /// }
     /// ```
     ///
@@ -12261,7 +12270,7 @@ where
 ///     let _ = lhs.norm();
 ///     let _ = lhs.inner(rhs);
 ///     let _ = lhs.scale(2.0);
-///     let _ = lhs.add(rhs, 2.0, -3.0);
+///     let _ = lhs.axpby(2.0, rhs, -3.0);
 ///     let _ = lhs.zeros_like();
 /// }
 /// ```
@@ -12440,36 +12449,46 @@ where
         Ok(self.with_owned_cuda_storage(output))
     }
 
-    /// Fresh device result `alpha * self + beta * other`. A zero coefficient
+    /// Fresh device result `x.axpby(alpha, &y, beta) == alpha * x + beta * y`,
+    /// named and ordered like the Host [`TensorMap::axpby`]. A zero coefficient
     /// drops its operand, NaN and Inf included, as on the Host (TensorKit's
     /// `add`); signed-zero bits are backend-local.
-    pub fn add(&self, other: &Self, alpha: D, beta: D) -> Result<Self, Error> {
+    ///
+    /// ```compile_fail
+    /// use tenet::prelude::U1FusionRule;
+    /// use tenet::typed::{CudaStorage, TensorMap};
+    ///
+    /// fn removed(x: &TensorMap<U1FusionRule, f64, CudaStorage<f64>>) {
+    ///     let _ = x.add(x, 1.0, 2.0);
+    /// }
+    /// ```
+    pub fn axpby(&self, alpha: D, y: &Self, beta: D) -> Result<Self, Error> {
         let required_len = self.logical_space().space().required_len()?;
-        if !self.runtime.same_runtime(&other.runtime) {
+        if !self.runtime.same_runtime(&y.runtime) {
             return Err(Error::RuntimeMismatch);
         }
-        if self.logical_space().space() != other.logical_space().space() {
+        if self.logical_space().space() != y.logical_space().space() {
             return Err(Error::InvalidArgument(
                 "tensors live on different spaces or block layouts".to_string(),
             ));
         }
-        match (&self.repr, &other.repr) {
+        match (&self.repr, &y.repr) {
             (TypedTensorRepr::Adjoint(lhs), TypedTensorRepr::Adjoint(rhs)) => {
                 let lhs = Self {
                     runtime: self.runtime.clone(),
                     repr: TypedTensorRepr::Owned(Arc::clone(&lhs.parent)),
                 };
                 let rhs = Self {
-                    runtime: other.runtime.clone(),
+                    runtime: y.runtime.clone(),
                     repr: TypedTensorRepr::Owned(Arc::clone(&rhs.parent)),
                 };
                 // `(alpha A^H + beta B^H) == (conj(alpha) A + conj(beta) B)^H`,
                 // so the folded coefficients are conjugated before the parents
                 // are combined.
                 return lhs
-                    .add(
-                        &rhs,
+                    .axpby(
                         FactorScalar::adjoint(alpha),
+                        &rhs,
                         FactorScalar::adjoint(beta),
                     )?
                     .adjoint();
@@ -12477,13 +12496,13 @@ where
             (TypedTensorRepr::Adjoint(_), TypedTensorRepr::Owned(_))
             | (TypedTensorRepr::Owned(_), TypedTensorRepr::Adjoint(_)) => {
                 return Err(Error::UnsupportedOnDevice(
-                    "add does not support mixed owned/lazy CUDA operands".to_string(),
+                    "axpby does not support mixed owned/lazy CUDA operands".to_string(),
                 ));
             }
             (TypedTensorRepr::Owned(_), TypedTensorRepr::Owned(_)) => {}
         }
-        let lhs = self.direct_cuda_storage("add")?;
-        let rhs = other.direct_cuda_storage("add")?;
+        let lhs = self.direct_cuda_storage("axpby")?;
+        let rhs = y.direct_cuda_storage("axpby")?;
         let output = self.cuda_axpby_owned(required_len, (lhs, alpha), Some((rhs, beta)))?;
         Ok(self.with_owned_cuda_storage(output))
     }
@@ -18300,7 +18319,7 @@ where
     /// let t: TensorMap<_, f64> = TensorMap::rand(&runtime, [&v], [&v])?;
     ///
     /// // `1.0 * t + 1.0 * t` doubles every entry, so the norm doubles too.
-    /// let doubled = t.add(&t, 1.0, 1.0)?;
+    /// let doubled = t.axpby(1.0, &t, 1.0)?;
     /// assert!((doubled.norm()? - 2.0 * t.norm()?).abs() < 1e-12);
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
@@ -18889,7 +18908,7 @@ where
     ///
     /// # Errors
     ///
-    /// Exactly [`Self::add`]'s — the operands must share a runtime and a space
+    /// Exactly [`Self::axpby`]'s — the operands must share a runtime and a space
     /// — plus [`Error::Core`] from the block-structure walk, as for
     /// [`Self::norm`].
     fn inner_multiplicity_free(&self, other: &Self) -> Result<D, Error> {
@@ -19026,7 +19045,7 @@ where
     ///
     /// # Errors
     ///
-    /// [`Self::add`]'s and [`Self::adjoint`]'s, which is where the work happens.
+    /// [`Self::axpby`]'s and [`Self::adjoint`]'s, which is where the work happens.
     pub fn is_hermitian(&self, tol: f64) -> Result<bool, Error> {
         if !self.is_endomorphism() {
             return Ok(false);
@@ -19126,7 +19145,7 @@ where
     ///
     /// # Errors
     ///
-    /// [`Self::add`]'s — including [`Error::InvalidArgument`] when the tensor is
+    /// [`Self::axpby`]'s — including [`Error::InvalidArgument`] when the tensor is
     /// not an endomorphism, since then it and its adjoint live on different
     /// spaces. Unlike [`Self::is_hermitian`] there is no `false` to return here.
     pub fn project_hermitian(&self) -> Result<Self, Error> {
@@ -19443,7 +19462,7 @@ where
     /// let v = GradedSpace::try_new(U1FusionRule, [(U1Irrep::new(0), 2)])?;
     /// let a: TensorMap<_, f64> = TensorMap::id(&runtime, [&v])?.scale(2.0);
     /// let (w, p) = a.left_polar()?;
-    /// assert!(w.compose(&p)?.add(&a, 1.0, -1.0)?.norm()? < 1e-12);
+    /// assert!(w.compose(&p)?.axpby(1.0, &a, -1.0)?.norm()? < 1e-12);
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
     pub fn left_polar(&self) -> Result<(Self, Self), TypedFacadeError<R>> {
@@ -21351,7 +21370,7 @@ mod representation_gates {
             11,
         )
         .unwrap();
-        let source = source.add(&source.adjoint().unwrap(), 1.0, 1.0).unwrap();
+        let source = source.axpby(1.0, &source.adjoint().unwrap(), 1.0).unwrap();
         let device = source.to_cuda().unwrap();
         let sectors = sector_regions(
             device.logical_space().space().structure(),
@@ -22053,7 +22072,7 @@ mod representation_gates {
 
         observed_arithmetic!(source_device.scale(-2.0), (1, 1, 1), (0, 0, 0)).unwrap();
         observed_arithmetic!(
-            source_device.add(&source_device, 2.0, -3.0),
+            source_device.axpby(2.0, &source_device, -3.0),
             (1, 1, 2),
             (0, 0, 0)
         )
@@ -22063,7 +22082,7 @@ mod representation_gates {
         let lazy_scale =
             observed_arithmetic!(lazy_device.scale(-2.0), (1, 1, 1), (0, 0, 0)).unwrap();
         let lazy_add = observed_arithmetic!(
-            lazy_device.add(&lazy_device, 2.0, -3.0),
+            lazy_device.axpby(2.0, &lazy_device, -3.0),
             (1, 1, 2),
             (0, 0, 0)
         )
@@ -22077,7 +22096,7 @@ mod representation_gates {
         assert_eq!(materialized_adjoint_builds(&lazy_device), 0);
         assert!(matches!(
             observed_arithmetic!(
-                lazy_device.add(&source_device, 2.0, -3.0),
+                lazy_device.axpby(2.0, &source_device, -3.0),
                 (0, 0, 0),
                 (0, 0, 0)
             ),
@@ -22185,12 +22204,12 @@ mod representation_gates {
             observe(|| complex_device.scale(Complex64::new(-2.0, 0.5)).unwrap())
         );
         assert_eq!(
-            observe(|| real_device.add(&real_device, 2.0, -3.0).unwrap()),
+            observe(|| real_device.axpby(2.0, &real_device, -3.0).unwrap()),
             observe(|| complex_device
-                .add(
-                    &complex_device,
+                .axpby(
                     Complex64::new(2.0, 1.0),
-                    Complex64::new(-3.0, 0.25),
+                    &complex_device,
+                    Complex64::new(-3.0, 0.25)
                 )
                 .unwrap())
         );
@@ -24084,9 +24103,9 @@ mod representation_gates {
         .unwrap();
         let identity = TensorMap::<_, num_complex::Complex64>::id(&runtime, [&leg]).unwrap();
         let u1 = u1
-            .add(
-                &identity,
+            .axpby(
                 num_complex::Complex64::new(1.0, 0.0),
+                &identity,
                 num_complex::Complex64::new(100.0, 0.0),
             )
             .unwrap();
@@ -24126,7 +24145,7 @@ mod representation_gates {
         )
         .unwrap();
         let identity = TensorMap::<_, f64>::id(&runtime, [&half, &half, &half]).unwrap();
-        let su2 = su2.add(&identity, 1.0, 100.0).unwrap();
+        let su2 = su2.axpby(1.0, &identity, 100.0).unwrap();
         assert!(su2.logical_space().space().structure().block_count() > 1);
         assert_inverse_redirect(&su2);
     }
@@ -25349,8 +25368,8 @@ mod representation_gates {
         let lazy = source.adjoint().unwrap();
         let eager = eager_adjoint_oracle(source);
 
-        let add = lazy.add(&eager, alpha, beta).unwrap();
-        let expected_add = eager.add(&eager, alpha, beta).unwrap();
+        let add = lazy.axpby(alpha, &eager, beta).unwrap();
+        let expected_add = eager.axpby(alpha, &eager, beta).unwrap();
         assert!(add
             .data()
             .iter()
@@ -25358,7 +25377,7 @@ mod representation_gates {
             .all(|(&actual, &expected)| {
                 (actual.widen_complex() - expected.widen_complex()).norm() < 1e-12
             }));
-        let add_both = lazy.add(&lazy, alpha, beta).unwrap();
+        let add_both = lazy.axpby(alpha, &lazy, beta).unwrap();
         assert!(add_both
             .data()
             .iter()
@@ -25366,7 +25385,7 @@ mod representation_gates {
             .all(|(&actual, &expected)| {
                 (actual.widen_complex() - expected.widen_complex()).norm() < 1e-12
             }));
-        let add_rhs = eager.add(&lazy, alpha, beta).unwrap();
+        let add_rhs = eager.axpby(alpha, &lazy, beta).unwrap();
         assert!(add_rhs
             .data()
             .iter()
@@ -25899,11 +25918,11 @@ mod representation_gates {
             }],
         )
         .unwrap();
-        let actual = diagonal.add(&lazy, 0.5, -2.0).unwrap();
-        let expected = diagonal.add(&eager, 0.5, -2.0).unwrap();
+        let actual = diagonal.axpby(0.5, &lazy, -2.0).unwrap();
+        let expected = diagonal.axpby(0.5, &eager, -2.0).unwrap();
         assert_eq!(actual.data(), expected.data());
-        let reverse = lazy.add(&diagonal, -2.0, 0.5).unwrap();
-        let expected_reverse = eager.add(&diagonal, -2.0, 0.5).unwrap();
+        let reverse = lazy.axpby(-2.0, &diagonal, 0.5).unwrap();
+        let expected_reverse = eager.axpby(-2.0, &diagonal, 0.5).unwrap();
         assert_eq!(reverse.data(), expected_reverse.data());
         assert_eq!(materialized_adjoint_builds(&lazy), 0);
         assert!(owned(&diagonal).dense_cache.get().is_none());
