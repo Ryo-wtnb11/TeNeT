@@ -10,10 +10,13 @@
 //!   order, and a block's multi-index is linearized first-axis-fastest. The
 //!   arrangement is arbitrary; spectra do not depend on it, and a
 //!   reconstruction is compared only with another matrix read the same way.
-//! * [`svd`] is a one-sided (Hestenes) Jacobi SVD written here, and
-//!   [`hermitian_eigen`] reads signed eigenvalues from it by Rayleigh
-//!   quotients. [`triangular_eigenvalues`] is the hand answer for the
-//!   triangular fixtures the general eigendecomposition is tested on.
+//! * [`singular_values`] is a one-sided (Hestenes) Jacobi SVD written here;
+//!   for a Hermitian block it gives `|lambda|`. [`triangular_eigenvalues`] is
+//!   the hand answer for the triangular fixtures the general
+//!   eigendecomposition is tested on.
+//! * Factors are checked through gauge-free relations (`t * vh^H = u * s`,
+//!   `u^H u = 1`, `t * v = v * d`, ...), so an exactly degenerate spectrum,
+//!   whose kept basis is a free choice, is covered by the same assertions.
 //! * [`select`] is a hand implementation of each policy's documented rule
 //!   (`tenet_matrixalgebra::Truncation`), written over a flat sorted candidate
 //!   list rather than `select_truncation`'s heap.
@@ -22,6 +25,7 @@
 
 use num_complex::Complex64;
 use tenet::core::{ProductSector, SU2Irrep, U1Irrep, Z2Irrep};
+use tenet::typed::{SectorSpectrum, SpectrumMagnitude};
 
 /// Closed-form quantum dimension of each multiplicity-free sector type these
 /// tests use, so no weight is read back from TeNeT: 1 for the abelian labels,
@@ -77,10 +81,6 @@ impl Matrix {
 
     fn col(&self, col: usize) -> &[Complex64] {
         &self.data[col * self.rows..(col + 1) * self.rows]
-    }
-
-    pub fn max_abs(&self) -> f64 {
-        self.data.iter().map(|v| v.norm()).fold(0.0, f64::max)
     }
 }
 
@@ -207,43 +207,12 @@ macro_rules! sector_matrices {
     }};
 }
 
-/// The matrix of `sector` in a [`sector_matrices!`] result.
-pub fn matrix_of<'a, S: PartialEq>(matrices: &'a [(S, Matrix)], sector: &S) -> &'a Matrix {
-    &matrices
-        .iter()
-        .find(|(s, _)| s == sector)
-        .expect("sector present")
-        .1
-}
-
-/// A singular value decomposition `a = sum_k values[k] * left_k * right_k^H`,
-/// sorted by descending singular value.
-#[derive(Clone, Debug)]
-pub struct Svd {
-    pub values: Vec<f64>,
-    /// `rows x n` left singular vectors (a zero column for a zero value).
-    pub left: Matrix,
-    /// `n x n` right singular vectors.
-    pub right: Matrix,
-}
-
-/// One-sided Jacobi SVD: rotate column pairs of `a` (and of the identity) until
-/// every pair is orthogonal; the column norms are then the singular values.
-pub fn svd(a: &Matrix) -> Svd {
+/// Singular values of `a`, descending, by one-sided (Hestenes) Jacobi: rotate
+/// column pairs until every pair is orthogonal; the column norms are then the
+/// singular values. For a Hermitian `a` they are `|lambda|`.
+pub fn singular_values(a: &Matrix) -> Vec<f64> {
     let (m, n) = (a.rows, a.cols);
     let mut u = a.clone();
-    let mut v = Matrix::zeros(n, n);
-    for k in 0..n {
-        v.data[k + k * n] = Complex64::new(1.0, 0.0);
-    }
-    let rotate = |x: &mut Matrix, rows: usize, i: usize, j: usize, c: f64, s: f64, w: Complex64| {
-        for k in 0..rows {
-            let xi = x.data[k + i * rows];
-            let xj = x.data[k + j * rows] * w.conj();
-            x.data[k + i * rows] = xi * c - xj * s;
-            x.data[k + j * rows] = xi * s + xj * c;
-        }
-    };
     for _sweep in 0..100 {
         let mut rotated = false;
         for i in 0..n {
@@ -253,11 +222,13 @@ pub fn svd(a: &Matrix) -> Svd {
                 let beta: f64 = cj.iter().map(|z| z.norm_sqr()).sum();
                 let gamma: Complex64 = ci.iter().zip(cj).map(|(x, y)| x.conj() * y).sum();
                 let g = gamma.norm();
-                if g <= 4.0 * f64::EPSILON * (alpha * beta).sqrt() || g == 0.0 {
+                if g == 0.0 || g <= 4.0 * f64::EPSILON * (alpha * beta).sqrt() {
                     continue;
                 }
                 rotated = true;
-                let w = gamma / g;
+                // Rephase column j so the pair's inner product is real, then
+                // apply the real Jacobi rotation that zeroes it.
+                let w = (gamma / g).conj();
                 let zeta = (beta - alpha) / (2.0 * g);
                 let t = if zeta == 0.0 {
                     1.0
@@ -266,86 +237,25 @@ pub fn svd(a: &Matrix) -> Svd {
                 };
                 let c = 1.0 / (1.0 + t * t).sqrt();
                 let s = c * t;
-                rotate(&mut u, m, i, j, c, s, w);
-                rotate(&mut v, n, i, j, c, s, w);
+                for k in 0..m {
+                    let xi = u.data[k + i * m];
+                    let xj = u.data[k + j * m] * w;
+                    u.data[k + i * m] = xi * c - xj * s;
+                    u.data[k + j * m] = xi * s + xj * c;
+                }
             }
         }
         if !rotated {
             break;
         }
     }
-    let mut order: Vec<(f64, usize)> = (0..n)
-        .map(|k| (u.col(k).iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt(), k))
+    let mut values: Vec<f64> = (0..n)
+        .map(|k| u.col(k).iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt())
         .collect();
-    order.sort_by(|a, b| b.0.total_cmp(&a.0));
-    let mut left = Matrix::zeros(m, n);
-    let mut right = Matrix::zeros(n, n);
-    for (slot, &(sigma, k)) in order.iter().enumerate() {
-        for row in 0..m {
-            if sigma > 0.0 {
-                left.data[row + slot * m] = u.data[row + k * m] / sigma;
-            }
-        }
-        for row in 0..n {
-            right.data[row + slot * n] = v.data[row + k * n];
-        }
-    }
-    Svd {
-        values: order.iter().map(|&(sigma, _)| sigma).collect(),
-        left,
-        right,
-    }
-}
-
-/// `sum_{k < kept} values[k] * left_k * right_k^H`.
-pub fn svd_truncated(svd: &Svd, kept: usize) -> Matrix {
-    let (m, n) = (svd.left.rows, svd.right.rows);
-    let mut out = Matrix::zeros(m, n);
-    for k in 0..kept {
-        for col in 0..n {
-            let right = svd.right.at(col, k).conj() * svd.values[k];
-            for row in 0..m {
-                out.data[row + col * m] += svd.left.at(row, k) * right;
-            }
-        }
-    }
-    out
-}
-
-/// Signed eigenvalues and eigenvectors of a Hermitian matrix, by descending
-/// magnitude: for distinct `|lambda|`, the right singular vectors are the
-/// eigenvectors and `lambda = v^H a v`.
-pub fn hermitian_eigen(a: &Matrix) -> (Vec<f64>, Matrix) {
-    let decomposition = svd(a);
-    let n = a.cols;
-    let values = (0..n)
-        .map(|k| {
-            let v = decomposition.right.col(k);
-            let mut quotient = Complex64::new(0.0, 0.0);
-            for col in 0..n {
-                for row in 0..n {
-                    quotient += v[row].conj() * a.at(row, col) * v[col];
-                }
-            }
-            quotient.re
-        })
-        .collect();
-    (values, decomposition.right)
-}
-
-/// `sum_{k < kept} values[k] * v_k * v_k^H`.
-pub fn eigen_truncated(values: &[f64], vectors: &Matrix, kept: usize) -> Matrix {
-    let n = vectors.rows;
-    let mut out = Matrix::zeros(n, n);
-    for (k, &value) in values.iter().enumerate().take(kept) {
-        for col in 0..n {
-            let right = vectors.at(col, k).conj() * value;
-            for row in 0..n {
-                out.data[row + col * n] += vectors.at(row, k) * right;
-            }
-        }
-    }
-    out
+    values.sort_by(|x, y| y.total_cmp(x));
+    // A wide matrix has at most `m` nonzero singular values.
+    values.truncate(m.min(n));
+    values
 }
 
 /// The eigenvalues of a triangular matrix are its diagonal. Panics unless `a`
@@ -367,6 +277,54 @@ pub fn triangular_eigenvalues(a: &Matrix) -> Vec<Complex64> {
     let mut values: Vec<Complex64> = (0..a.rows).map(|k| a.at(k, k)).collect();
     values.sort_by(|x, y| y.norm().total_cmp(&x.norm()));
     values
+}
+
+/// The kept spectrum of a restricted factor has, sector by sector, the
+/// magnitudes of the offered prefix, within the tolerance of its own dtype.
+#[track_caller]
+pub fn assert_kept_magnitudes<S, V>(
+    what: &str,
+    kept: &[SectorSpectrum<S, V>],
+    offers: &[Offer<S>],
+    terms: usize,
+) where
+    S: PartialEq + std::fmt::Debug,
+    V: SpectrumMagnitude + crate::numerics::Numeric,
+{
+    for entry in kept {
+        let offer = offers
+            .iter()
+            .find(|offer| offer.sector == entry.sector)
+            .unwrap_or_else(|| panic!("{what}: {:?} was not offered", entry.sector));
+        let want = &offer.magnitudes[..entry.values.len()];
+        let bound =
+            crate::numerics::tolerance::<V>(terms, want.iter().copied().fold(0.0, f64::max));
+        for (index, (&got, &want)) in entry.values.iter().zip(want).enumerate() {
+            let got = SpectrumMagnitude::magnitude(got);
+            assert!(
+                (got - want).abs() <= bound,
+                "{what}: {:?} value {index} is {got} against the oracle {want} (bound {bound:e})",
+                entry.sector
+            );
+        }
+    }
+}
+
+/// The truncation error against the oracle's discarded norm, at the tolerance
+/// of the payload dtype the spectrum was computed in (`payload` only names it).
+#[track_caller]
+pub fn assert_error_close<T: crate::numerics::Numeric>(
+    what: &str,
+    _payload: &[T],
+    got: f64,
+    want: f64,
+    terms: usize,
+) {
+    let bound = crate::numerics::tolerance::<T>(terms, want);
+    assert!(
+        (got - want).abs() <= bound,
+        "{what}: truncation error {got} against the oracle {want} (bound {bound:e})"
+    );
 }
 
 /// One coupled sector's offered spectrum: quantum dimension and descending
@@ -523,6 +481,22 @@ pub fn kept_pairs<S: Ord + Clone>(offers: &[Offer<S>], kept: &[usize]) -> Vec<(S
         .collect();
     pairs.sort_by(|a, b| a.0.cmp(&b.0));
     pairs
+}
+
+/// `Vec<Offer>` of a tensor's per-sector singular values; `$dim` maps a sector
+/// to its quantum dimension.
+#[macro_export]
+macro_rules! singular_offers {
+    ($tensor:expr, $dim:expr) => {{
+        sector_matrices!($tensor)
+            .iter()
+            .map(|(sector, matrix)| $crate::truncation_oracle::Offer {
+                sector: sector.clone(),
+                dim: $dim(sector),
+                magnitudes: $crate::truncation_oracle::singular_values(matrix),
+            })
+            .collect::<Vec<_>>()
+    }};
 }
 
 /// The policy sweep every composition case runs: `(name, Truncation, Policy)`.

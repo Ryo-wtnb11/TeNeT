@@ -1,45 +1,42 @@
-//! Truncation as a composition (#1300).
+//! Truncation as a composition (#1300, #1534).
 //!
 //! The invariant: `svd_compact` → `diagview` → `find_truncated` →
-//! `restrict_leg`/`restrict_diagonal` reproduces `svd_trunc`, and
-//! `eigh_full` → … reproduces `eigh_trunc`. The oracle for the decision is
-//! Host `svd_trunc`/`eigh_trunc` itself, which is the point: the primitives
-//! are only useful if they make the very decision and the very slicing those
-//! two make.
+//! `restrict_leg`/`restrict_diagonal` is a truncated SVD, and `eigh_full` → …
+//! a truncated Hermitian eigendecomposition, under every policy. These
+//! compositions are the only truncated factorizations the API offers, so the
+//! expectation is independent of TeNeT (`truncation_oracle`): each coupled
+//! sector's reduced matrix is read from the input's public blocks, its
+//! singular values come from a Jacobi SVD written in the test, and the kept
+//! prefix from a hand implementation of the policy.
 //!
-//! Each case asserts in this order, because a payload comparison over two
-//! different layouts would be meaningless:
+//! Each case asserts in this order:
 //!
-//! 1. **spaces and layout** — exact: every factor's codomain/domain, then
-//!    block count and per-block key, shape, strides and offset. Host builds
-//!    the truncated space with `derive_from_final_homspace`, the composition
-//!    with `build_root`; nothing guarantees a priori that the two agree. The
-//!    kept bond subspace (which values survive, in which sector) is
-//!    combinatorial and also exact.
+//! 1. **spaces and layout** — exact: the kept bond leg against the hand
+//!    selection, every factor's codomain/domain, and every factor's block
+//!    geometry against the canonical layout of its homspace.
 //! 2. **payloads** — within the workspace tolerance rule
-//!    (`docs/testing_numerics.md`). Both routes factorize the same input and
-//!    then only copy; that the two routes agree is the contract, so they are
-//!    compared with each other, and a factorization kernel that reorders its
-//!    arithmetic does not break it.
-//! 3. **truncation error** — within the tolerance of both Host's error and an
-//!    independent oracle, `sqrt(sum_c dim(c) sum_discarded |v|^2)` summed here
-//!    from the offered spectrum and the kept prefix counts.
+//!    (`docs/testing_numerics.md`): the kept values against the oracle's
+//!    magnitudes, and the gauge-free relations `t vh^H = u s`,
+//!    `u^H t = s vh`, `u^H u = 1`, `vh vh^H = 1` (`t v = v d`, `v^H v = 1`
+//!    for eigh), which make the kept factors genuine singular (eigen) pairs
+//!    whatever basis a degenerate block was given.
+//! 3. **truncation error** — against `sqrt(sum_c dim(c) sum_discarded v^2)`
+//!    over the oracle's spectrum.
 //!
 //! ## Cross-sector exact ties
 //!
 //! `select_truncation` breaks an exact tie between two sectors in TensorKit's
 //! sector order (#1381), sorting the feed itself when a producer hands it
-//! another order (#1305). Host feeds the
-//! first-encounter block order of the input and `find_truncated` a sorted
-//! one, so the tie cases below are part of the exact selection gate whatever order a
-//! `BlockStructure` stores its blocks in.
+//! another order (#1305). The tie fixtures below use non-negative U(1)
+//! charges and SU(2) spins, whose TensorKit order is the label order the hand
+//! selection breaks ties in, so the kept bond is part of the exact gate.
 
 use std::sync::Arc;
 
 use num_complex::{Complex32, Complex64};
 use tenet::core::{
-    product_sector, FermionParityFusionRule, ProductFusionRuleExt, ProductSector, SU2FusionRule,
-    SU2Irrep, U1FusionRule, U1Irrep, Z2Irrep,
+    product_sector, FermionParityFusionRule, ProductFusionRuleExt, SU2FusionRule, SU2Irrep,
+    U1FusionRule, U1Irrep, Z2Irrep,
 };
 use tenet::prelude::{Error, Runtime, TensorMap, Truncation};
 use tenet::typed::{
@@ -48,6 +45,12 @@ use tenet::typed::{
 
 #[path = "../../tests/support/numerics.rs"]
 mod numerics;
+#[macro_use]
+mod truncation_oracle;
+
+use truncation_oracle::{
+    assert_error_close, assert_kept_magnitudes, discarded_norm, select, ClosedFormDim, Policy,
+};
 
 fn runtime() -> Runtime {
     Runtime::builder().dense_threads(1).build().unwrap()
@@ -82,142 +85,30 @@ fn fill(state: &mut u64) -> f64 {
     ((*state >> 33) as f64) / (u32::MAX as f64) - 0.5
 }
 
-/// Every factor's spaces, then its complete block geometry.
-macro_rules! assert_same_layout {
-    ($got:expr, $want:expr, $what:expr) => {{
-        let got = &$got;
-        let want = &$want;
-        assert_eq!(got.codomain(), want.codomain(), "{} codomain", $what);
-        assert_eq!(got.domain(), want.domain(), "{} domain", $what);
-        assert_eq!(
-            got.block_count(),
-            want.block_count(),
-            "{} block count",
-            $what
-        );
-        for index in 0..want.block_count() {
-            let (left, right) = (got.block(index).unwrap(), want.block(index).unwrap());
-            assert_eq!(left.key(), right.key(), "{} block {index} key", $what);
-            assert_eq!(left.shape(), right.shape(), "{} block {index} shape", $what);
-            assert_eq!(
-                left.strides(),
-                right.strides(),
-                "{} block {index} strides",
-                $what
-            );
-            assert_eq!(
-                left.offset(),
-                right.offset(),
-                "{} block {index} offset",
-                $what
-            );
-        }
+/// `lhs` and `rhs` live on one homspace (both are `compose` results, so both
+/// are canonical) and agree within the tolerance rule; `terms` is the source
+/// payload length, every entry of which can reach every compared entry.
+macro_rules! assert_relation {
+    ($lhs:expr, $rhs:expr, $terms:expr, $what:expr) => {{
+        let (lhs, rhs) = (&$lhs, &$rhs);
+        assert_eq!(lhs.codomain(), rhs.codomain(), "{} codomain", $what);
+        assert_eq!(lhs.domain(), rhs.domain(), "{} domain", $what);
+        numerics::assert_slices_close(&$what, lhs.data(), rhs.data(), $terms);
     }};
 }
 
-/// `dim(c)` of one sector, read from a one-sector space of degeneracy 1.
-/// Closed-form quantum dimension of each sector type this file uses, so the
-/// discarded-weight oracle does not read `dim(c)` back from TeNeT: 1 for the
-/// abelian labels, `2j + 1` for SU(2), the product of the parts for a
-/// product sector.
-trait ClosedFormDim {
-    fn closed_form_dim(&self) -> f64;
-}
-
-impl ClosedFormDim for U1Irrep {
-    fn closed_form_dim(&self) -> f64 {
-        1.0
-    }
-}
-
-impl ClosedFormDim for Z2Irrep {
-    fn closed_form_dim(&self) -> f64 {
-        1.0
-    }
-}
-
-impl ClosedFormDim for SU2Irrep {
-    fn closed_form_dim(&self) -> f64 {
-        (self.twice_spin() + 1) as f64
-    }
-}
-
-impl<L: ClosedFormDim, R: ClosedFormDim> ClosedFormDim for ProductSector<L, R> {
-    fn closed_form_dim(&self) -> f64 {
-        self.left().closed_form_dim() * self.right().closed_form_dim()
-    }
-}
-
-/// Independent oracle for `TruncatedSelection::error`: the quantum-dimension
-/// weighted 2-norm of every offered value past the kept prefix of its sector.
-macro_rules! discarded_norm {
-    ($bond:expr, $spectra:expr, $selection:expr) => {{
-        let kept = $selection.subspace();
-        let kept_sectors = kept.sectors().unwrap();
-        let mut sum = 0.0f64;
-        for entry in $spectra.iter() {
-            let prefix = kept_sectors
-                .iter()
-                .position(|sector| *sector == entry.sector)
-                .map_or(0, |index| kept.degeneracies()[index]);
-            let weight = ClosedFormDim::closed_form_dim(&entry.sector);
-            for &value in &entry.values[prefix..] {
-                let magnitude = SpectrumMagnitude::magnitude(value);
-                sum += weight * magnitude * magnitude;
-            }
-        }
-        sum.sqrt()
-    }};
-}
-
-/// The error agrees with Host and with [`discarded_norm`]; `terms` is the
-/// number of offered values.
-macro_rules! assert_truncation_error {
-    ($found:expr, $host_error:expr, $bond:expr, $spectra:expr, $case:expr) => {{
-        let terms: usize = $spectra.iter().map(|e| e.values.len()).sum();
-        let oracle = discarded_norm!($bond, $spectra, $found.selection);
-        numerics::assert_close(
-            &format!("{}: truncation error against Host", $case),
-            $found.error,
-            $host_error,
-            terms,
-        );
-        numerics::assert_close(
-            &format!(
-                "{}: truncation error against the discarded-norm oracle",
-                $case
-            ),
-            $found.error,
-            oracle,
-            terms,
-        );
-    }};
-}
-
-/// Payloads of two routes that factorize the same input and then only copy.
-/// Every source entry of a block can reach every factor entry of it, so
-/// `terms` is the source payload length.
-macro_rules! assert_same_payload {
-    ($got:expr, $want:expr, $terms:expr, $what:expr) => {{
-        numerics::assert_slices_close(&$what, $got.data(), $want.data(), $terms);
-        let got = $got.diagonal_spectrum().unwrap();
-        let want = $want.diagonal_spectrum().unwrap();
-        assert_eq!(got.is_some(), want.is_some(), "{} compact storage", $what);
-        for (got, want) in got.iter().flatten().zip(want.iter().flatten()) {
-            assert_eq!(got.sector, want.sector, "{} compact sector", $what);
-            numerics::assert_slices_close(
-                &format!("{} compact values", $what),
-                &got.values,
-                &want.values,
-                $terms,
-            );
-        }
+/// `x^H x = 1` on the bond, with `x` an isometry out of it.
+macro_rules! assert_isometry {
+    ($gram:expr, $bond:expr, $terms:expr, $what:expr) => {{
+        let gram = $gram;
+        let identity = TensorMap::id(gram.runtime(), [&$bond]).unwrap();
+        assert_relation!(gram, identity, $terms, $what);
     }};
 }
 
 /// The whole gate for one SVD case.
 macro_rules! assert_svd_composition {
-    ($source:expr, $truncation:expr, $case:expr) => {{
+    ($source:expr, $truncation:expr, $policy:expr, $case:expr) => {{
         let source = &$source;
         let truncation: &Truncation = &$truncation;
         let case: &str = $case;
@@ -227,41 +118,77 @@ macro_rules! assert_svd_composition {
         let spectra = s.diagview().unwrap();
         let found = bond.find_truncated(&spectra, truncation).unwrap();
         let selection = &found.selection;
-
-        let host = source.svd_trunc(truncation).unwrap();
-
         let got_u = u.restrict_leg(u.codomain_rank(), selection).unwrap();
         let got_s = s.restrict_diagonal(selection).unwrap();
         let got_vh = vh.restrict_leg(0, selection).unwrap();
 
-        assert_eq!(
-            *selection.subspace(),
-            host.s.domain()[0],
-            "{case}: kept bond space"
-        );
-        assert_same_layout!(got_u, host.u, format!("{case}: u"));
-        assert_same_layout!(got_s, host.s, format!("{case}: s"));
-        assert_same_layout!(got_vh, host.vh, format!("{case}: vh"));
-
+        let offers = singular_offers!(source, ClosedFormDim::closed_form_dim);
+        let kept = select(&offers, &$policy);
         let terms = source.data().len();
-        assert_same_payload!(got_u, host.u, terms, format!("{case}: u payload"));
-        assert_same_payload!(got_s, host.s, terms, format!("{case}: s payload"));
-        assert_same_payload!(got_vh, host.vh, terms, format!("{case}: vh payload"));
-        assert_truncation_error!(found, host.error, bond, spectra, case);
-        let kept: usize = host.singular_values.iter().map(|e| e.values.len()).sum();
-        let offered: usize = spectra.iter().map(|e| e.values.len()).sum();
+
+        let kept_bond = got_s.domain()[0].clone();
+        assert_kept_bond!(kept_bond, offers, kept, case);
+        assert_eq!(got_s.codomain(), got_s.domain(), "{case}: s is a bond map");
+        assert_eq!(got_u.codomain(), source.codomain(), "{case}: u codomain");
+        assert_eq!(got_u.domain(), got_s.domain(), "{case}: u domain");
+        assert_eq!(got_vh.codomain(), got_s.domain(), "{case}: vh codomain");
+        assert_eq!(got_vh.domain(), source.domain(), "{case}: vh domain");
+        assert_eq!(
+            got_s.diagonal_spectrum().unwrap().is_some(),
+            s.diagonal_spectrum().unwrap().is_some(),
+            "{case}: restriction keeps s's storage"
+        );
+        assert_canonical_layout!(got_u, format!("{case}: u"));
+        assert_canonical_layout!(got_s, format!("{case}: s"));
+        assert_canonical_layout!(got_vh, format!("{case}: vh"));
+
+        assert_kept_magnitudes(case, &got_s.diagview().unwrap(), &offers, terms);
+        assert_relation!(
+            source.compose(&got_vh.adjoint().unwrap()).unwrap(),
+            got_u.compose(&got_s).unwrap(),
+            terms,
+            format!("{case}: t vh^H = u s")
+        );
+        assert_relation!(
+            got_u.adjoint().unwrap().compose(source).unwrap(),
+            got_s.compose(&got_vh).unwrap(),
+            terms,
+            format!("{case}: u^H t = s vh")
+        );
+        assert_isometry!(
+            got_u.adjoint().unwrap().compose(&got_u).unwrap(),
+            kept_bond,
+            terms,
+            format!("{case}: u^H u")
+        );
+        assert_isometry!(
+            got_vh.compose(&got_vh.adjoint().unwrap()).unwrap(),
+            kept_bond,
+            terms,
+            format!("{case}: vh vh^H")
+        );
+        assert_error_close(
+            case,
+            source.data(),
+            found.error,
+            discarded_norm(&offers, &kept),
+            terms,
+        );
+        let offered: usize = offers.iter().map(|o| o.magnitudes.len()).sum();
         assert_eq!(
             selection.is_full(),
-            kept == offered,
+            kept.iter().sum::<usize>() == offered,
             "{case}: is_full agrees with the kept count"
         );
         found
     }};
 }
 
-/// The whole gate for one Hermitian eigendecomposition case.
+/// The whole gate for one Hermitian eigendecomposition case. The singular
+/// values of a Hermitian block are its `|lambda|`; `t v = v d` with an
+/// isometric `v` then pins the signs.
 macro_rules! assert_eigh_composition {
-    ($source:expr, $truncation:expr, $case:expr) => {{
+    ($source:expr, $truncation:expr, $policy:expr, $case:expr) => {{
         let source = &$source;
         let truncation: &Truncation = &$truncation;
         let case: &str = $case;
@@ -271,28 +198,49 @@ macro_rules! assert_eigh_composition {
         let spectra = d.diagview().unwrap();
         let found = bond.find_truncated(&spectra, truncation).unwrap();
         let selection = &found.selection;
-
-        let host = source.eigh_trunc(truncation).unwrap();
-
         let got_d = d.restrict_diagonal(selection).unwrap();
         let got_v = v.restrict_leg(v.codomain_rank(), selection).unwrap();
 
-        assert_eq!(
-            *selection.subspace(),
-            host.d.domain()[0],
-            "{case}: kept bond space"
-        );
-        assert_same_layout!(got_d, host.d, format!("{case}: d"));
-        assert_same_layout!(got_v, host.v, format!("{case}: v"));
+        let offers = singular_offers!(source, ClosedFormDim::closed_form_dim);
+        let kept = select(&offers, &$policy);
         let terms = source.data().len();
-        assert_same_payload!(got_d, host.d, terms, format!("{case}: d payload"));
-        assert_same_payload!(got_v, host.v, terms, format!("{case}: v payload"));
-        assert_truncation_error!(found, host.error, bond, spectra, case);
-        let kept: usize = host.eigenvalues.iter().map(|e| e.values.len()).sum();
-        let offered: usize = spectra.iter().map(|e| e.values.len()).sum();
+
+        let kept_bond = got_d.domain()[0].clone();
+        assert_kept_bond!(kept_bond, offers, kept, case);
+        assert_eq!(got_d.codomain(), got_d.domain(), "{case}: d is a bond map");
+        assert_eq!(got_v.codomain(), source.codomain(), "{case}: v codomain");
+        assert_eq!(got_v.domain(), got_d.domain(), "{case}: v domain");
+        assert!(
+            got_d.diagonal_spectrum().unwrap().is_some(),
+            "{case}: d stays compact"
+        );
+        assert_canonical_layout!(got_d, format!("{case}: d"));
+        assert_canonical_layout!(got_v, format!("{case}: v"));
+
+        assert_kept_magnitudes(case, &got_d.diagview().unwrap(), &offers, terms);
+        assert_relation!(
+            source.compose(&got_v).unwrap(),
+            got_v.compose(&got_d).unwrap(),
+            terms,
+            format!("{case}: t v = v d")
+        );
+        assert_isometry!(
+            got_v.adjoint().unwrap().compose(&got_v).unwrap(),
+            kept_bond,
+            terms,
+            format!("{case}: v^H v")
+        );
+        assert_error_close(
+            case,
+            source.data(),
+            found.error,
+            discarded_norm(&offers, &kept),
+            terms,
+        );
+        let offered: usize = offers.iter().map(|o| o.magnitudes.len()).sum();
         assert_eq!(
             selection.is_full(),
-            kept == offered,
+            kept.iter().sum::<usize>() == offered,
             "{case}: is_full agrees with the kept count"
         );
         found
@@ -336,25 +284,8 @@ fn fz2_leg(pairs: &[(bool, usize)]) -> GradedSpace<FermionParityFusionRule> {
 macro_rules! svd_policy_sweep {
     ($source:expr, $target:expr, $tag:expr) => {{
         let source = $source;
-        for (name, truncation) in [
-            ("Full", Truncation::Full),
-            ("Rank(3)", Truncation::rank(3)),
-            ("Rank(1)", Truncation::rank(1)),
-            ("Rank(0)", Truncation::rank(0)),
-            ("Rank(huge)", Truncation::rank(4096)),
-            ("Tolerance", Truncation::relative_cutoff(0.25).unwrap()),
-            (
-                "ToleranceInf",
-                Truncation::relative_inf_cutoff(0.4).unwrap(),
-            ),
-            ("DiscardWeight", Truncation::relative_error(0.2).unwrap()),
-            ("Space", Truncation::space($target.truncspace())),
-            (
-                "Space & Rank",
-                Truncation::space($target.truncspace()).and(Truncation::rank(2)),
-            ),
-        ] {
-            assert_svd_composition!(source, truncation, &format!("{} {name}", $tag));
+        for (name, truncation, policy) in policies!($target) {
+            assert_svd_composition!(source, truncation, policy, &format!("{} {name}", $tag));
         }
     }};
 }
@@ -362,30 +293,14 @@ macro_rules! svd_policy_sweep {
 macro_rules! eigh_policy_sweep {
     ($source:expr, $target:expr, $tag:expr) => {{
         let source = $source;
-        for (name, truncation) in [
-            ("Full", Truncation::Full),
-            ("Rank(3)", Truncation::rank(3)),
-            ("Rank(1)", Truncation::rank(1)),
-            ("Rank(0)", Truncation::rank(0)),
-            ("Tolerance", Truncation::relative_cutoff(0.25).unwrap()),
-            (
-                "ToleranceInf",
-                Truncation::relative_inf_cutoff(0.4).unwrap(),
-            ),
-            ("DiscardWeight", Truncation::relative_error(0.2).unwrap()),
-            ("Space", Truncation::space($target.truncspace())),
-            (
-                "Space & Rank",
-                Truncation::space($target.truncspace()).and(Truncation::rank(2)),
-            ),
-        ] {
-            assert_eigh_composition!(source, truncation, &format!("{} {name}", $tag));
+        for (name, truncation, policy) in policies!($target) {
+            assert_eigh_composition!(source, truncation, policy, &format!("{} {name}", $tag));
         }
     }};
 }
 
 #[test]
-fn u1_svd_composition_matches_host_for_every_policy() {
+fn u1_svd_composition_matches_the_oracle_for_every_policy() {
     let left = u1_leg(&[(-1, 2), (0, 3), (1, 2)]);
     let right = u1_leg(&[(-1, 3), (0, 2), (1, 3)]);
     let mut state = 0x1234_5678u64;
@@ -396,7 +311,7 @@ fn u1_svd_composition_matches_host_for_every_policy() {
 }
 
 #[test]
-fn u1_complex_svd_composition_matches_host_for_every_policy() {
+fn u1_complex_svd_composition_matches_the_oracle_for_every_policy() {
     let left = u1_leg(&[(-1, 2), (0, 3), (1, 2)]);
     let right = u1_leg(&[(-1, 3), (0, 2), (1, 3)]);
     let mut state = 0x2222_1111u64;
@@ -410,15 +325,14 @@ fn u1_complex_svd_composition_matches_host_for_every_policy() {
 
 /// The same composition at single precision (#1324).
 ///
-/// `svd_trunc` is `svd_compact` + `find_truncated(diagview(s))` +
-/// `restrict_*`: `real_spectrum` widens the payload's singular values into the
-/// `f64` the decision runs on, `s` stores `from_real` of those same widened
-/// values, and `SpectrumMagnitude` for `f32` / `Complex32` is
-/// `f64::from(v).abs()` / `hypot(re, 0)`. Both routes therefore hand the
-/// selection the same `f64` slice, so the kept subspace agrees exactly. This
-/// is the path the single-precision `SpectrumMagnitude` impls exist for.
+/// `real_spectrum` widens the payload's singular values into the `f64` the
+/// decision runs on, and `SpectrumMagnitude` for `f32` / `Complex32` is
+/// `f64::from(v).abs()` / `hypot(re, 0)`. This is the path the
+/// single-precision `SpectrumMagnitude` impls exist for. The oracle factorizes
+/// the widened input in `f64`, so its values and relations are compared at
+/// `f32` tolerance; no fixture value lies within `f32` noise of a cut.
 #[test]
-fn u1_single_precision_svd_composition_matches_host_for_every_policy() {
+fn u1_single_precision_svd_composition_matches_the_oracle_for_every_policy() {
     let left = u1_leg(&[(-1, 2), (0, 3), (1, 2)]);
     let right = u1_leg(&[(-1, 3), (0, 2), (1, 3)]);
     let mut state = 0x3333_4444u64;
@@ -431,7 +345,7 @@ fn u1_single_precision_svd_composition_matches_host_for_every_policy() {
 }
 
 #[test]
-fn u1_complex32_svd_composition_matches_host_for_every_policy() {
+fn u1_complex32_svd_composition_matches_the_oracle_for_every_policy() {
     let left = u1_leg(&[(-1, 2), (0, 3), (1, 2)]);
     let right = u1_leg(&[(-1, 3), (0, 2), (1, 3)]);
     let mut state = 0x5555_6666u64;
@@ -444,7 +358,7 @@ fn u1_complex32_svd_composition_matches_host_for_every_policy() {
 }
 
 #[test]
-fn su2_svd_composition_matches_host_for_every_policy() {
+fn su2_svd_composition_matches_the_oracle_for_every_policy() {
     // SU(2): dim(c) = 2j+1, so the rank budget is quantum-dimension weighted
     // and cross-sector selection is not the naive value order.
     let leg = su2_leg(&[(0, 3), (1, 2), (2, 2)]);
@@ -455,7 +369,7 @@ fn su2_svd_composition_matches_host_for_every_policy() {
 }
 
 #[test]
-fn su2_complex_svd_composition_matches_host_for_every_policy() {
+fn su2_complex_svd_composition_matches_the_oracle_for_every_policy() {
     let leg = su2_leg(&[(0, 3), (1, 2), (2, 2)]);
     let mut state = 0x4444_5555u64;
     let source: TensorMap<_, Complex64> =
@@ -467,7 +381,7 @@ fn su2_complex_svd_composition_matches_host_for_every_policy() {
 }
 
 #[test]
-fn fermionic_svd_composition_matches_host_for_every_policy() {
+fn fermionic_svd_composition_matches_the_oracle_for_every_policy() {
     let leg = fz2_leg(&[(false, 3), (true, 3)]);
     let dual = leg.try_dual().unwrap();
     let mut state = 0x5555_6666u64;
@@ -480,7 +394,7 @@ fn fermionic_svd_composition_matches_host_for_every_policy() {
 }
 
 #[test]
-fn fermionic_u1_product_svd_composition_matches_host_for_every_policy() {
+fn fermionic_u1_product_svd_composition_matches_the_oracle_for_every_policy() {
     let provider = Arc::new(FermionParityFusionRule.product(U1FusionRule));
     let leg = GradedSpace::try_new_with_arc(
         Arc::clone(&provider),
@@ -509,7 +423,7 @@ fn fermionic_u1_product_svd_composition_matches_host_for_every_policy() {
 }
 
 #[test]
-fn lazy_adjoint_svd_composition_matches_host() {
+fn lazy_adjoint_svd_composition_matches_the_oracle() {
     let left = u1_leg(&[(0, 3), (1, 2)]);
     let right = u1_leg(&[(0, 2), (1, 3)]);
     let mut state = 0x7777_8888u64;
@@ -535,13 +449,13 @@ fn hermitian_u1(seed: u64) -> TensorMap<U1FusionRule, f64> {
 }
 
 #[test]
-fn u1_eigh_composition_matches_host_for_every_policy() {
+fn u1_eigh_composition_matches_the_oracle_for_every_policy() {
     let source = hermitian_u1(0x8888_9999);
     eigh_policy_sweep!(source, u1_leg(&[(-1, 1), (0, 2)]), "u1 eigh f64");
 }
 
 #[test]
-fn su2_eigh_composition_matches_host_for_every_policy() {
+fn su2_eigh_composition_matches_the_oracle_for_every_policy() {
     let leg = su2_leg(&[(0, 3), (1, 2), (2, 2)]);
     let mut state = 0x9999_aaaau64;
     let raw: TensorMap<_, Complex64> =
@@ -555,7 +469,7 @@ fn su2_eigh_composition_matches_host_for_every_policy() {
 }
 
 #[test]
-fn fermionic_eigh_composition_matches_host_for_every_policy() {
+fn fermionic_eigh_composition_matches_the_oracle_for_every_policy() {
     let leg = fz2_leg(&[(false, 3), (true, 3)]);
     let mut state = 0xaaaa_bbbbu64;
     let raw: TensorMap<_, f64> =
@@ -569,7 +483,7 @@ fn fermionic_eigh_composition_matches_host_for_every_policy() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn a_whole_sector_is_dropped_exactly_as_host_drops_it() {
+fn a_whole_sector_is_dropped_from_the_bond() {
     // Sector 1 carries a spectrum two orders of magnitude below sector 0, so a
     // relative cutoff removes it entirely rather than shortening it.
     let leg = u1_leg(&[(0, 3), (1, 2)]);
@@ -582,7 +496,12 @@ fn a_whole_sector_is_dropped_exactly_as_host_drops_it() {
             }
         })
         .unwrap();
-    let found = assert_svd_composition!(source, Truncation::relative_cutoff(1e-3).unwrap(), "drop");
+    let found = assert_svd_composition!(
+        source,
+        Truncation::relative_cutoff(1e-3).unwrap(),
+        Policy::RelativeCutoff(1e-3),
+        "drop"
+    );
     assert_eq!(
         found.selection.subspace().sectors().unwrap(),
         vec![U1Irrep::new(0)],
@@ -591,19 +510,24 @@ fn a_whole_sector_is_dropped_exactly_as_host_drops_it() {
 }
 
 #[test]
-fn within_sector_ties_at_the_cut_are_broken_as_host_breaks_them() {
+fn within_sector_ties_at_the_cut_keep_genuine_singular_pairs() {
     // A scalar multiple of an isometry: every singular value inside a sector is
     // exactly equal, so `Rank` has to cut inside a run of identical values.
     let leg = u1_leg(&[(0, 3), (1, 3)]);
     let source: TensorMap<_, f64> = TensorMap::id(&runtime(), [&leg]).unwrap().scale(2.5);
     assert_every_value_is_the_same_bit_pattern!(source.svd_compact().unwrap().1);
     for rank in [1usize, 2, 3, 4, 5] {
-        assert_svd_composition!(source, Truncation::rank(rank), &format!("tie rank {rank}"));
+        assert_svd_composition!(
+            source,
+            Truncation::rank(rank),
+            Policy::Rank(rank),
+            &format!("tie rank {rank}")
+        );
     }
 }
 
 #[test]
-fn cross_sector_exact_ties_are_broken_as_host_breaks_them() {
+fn cross_sector_exact_ties_are_broken_in_tensorkit_sector_order() {
     // Two U(1) sectors with bit-identical spectra: every `Rank` cut that is not
     // a multiple of the sector count lands on an exact cross-sector tie.
     let leg = u1_leg(&[(0, 3), (1, 3), (2, 3)]);
@@ -613,13 +537,14 @@ fn cross_sector_exact_ties_are_broken_as_host_breaks_them() {
         assert_svd_composition!(
             source,
             Truncation::rank(rank),
+            Policy::Rank(rank),
             &format!("cross tie rank {rank}")
         );
     }
 }
 
 #[test]
-fn su2_cross_sector_exact_ties_are_broken_as_host_breaks_them() {
+fn su2_cross_sector_exact_ties_are_broken_in_tensorkit_sector_order() {
     // Same, with dim(c) != 1: the weighted budget overflows mid-tie.
     let leg = su2_leg(&[(0, 2), (1, 2), (2, 2)]);
     let source: TensorMap<_, f64> = TensorMap::id(&runtime(), [&leg]).unwrap();
@@ -628,13 +553,14 @@ fn su2_cross_sector_exact_ties_are_broken_as_host_breaks_them() {
         assert_svd_composition!(
             source,
             Truncation::rank(rank),
+            Policy::Rank(rank),
             &format!("su2 cross tie rank {rank}")
         );
     }
 }
 
 #[test]
-fn signed_cross_sector_eigenvalue_ties_are_broken_as_host_breaks_them() {
+fn signed_cross_sector_eigenvalue_ties_are_broken_in_tensorkit_sector_order() {
     // `|lambda|` ties across sectors with *opposite signs*: the selection is
     // magnitude-driven, so +2 in one sector and -2 in another are an exact tie
     // that only the slice order can break, and the published `eigh_full` order
@@ -677,6 +603,7 @@ fn signed_cross_sector_eigenvalue_ties_are_broken_as_host_breaks_them() {
         assert_eigh_composition!(
             source,
             Truncation::rank(rank),
+            Policy::Rank(rank),
             &format!("signed cross tie rank {rank}")
         );
     }
@@ -754,39 +681,31 @@ fn dense_restrict_diagonal_equals_two_restrict_leg_calls() {
 }
 
 #[test]
-fn discarding_everything_yields_the_empty_bond_and_host_s_empty_factors() {
+fn discarding_everything_yields_the_empty_bond_and_empty_factors() {
     let leg = u1_leg(&[(0, 3), (1, 2)]);
     let mut state = 0xbbbb_ccccu64;
     let source: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime(), [&leg], [&leg], move |_, _| fill(&mut state)).unwrap();
 
-    let (u, s, vh) = source.svd_compact().unwrap();
-    let bond = s.domain()[0].clone();
-    let found = bond
-        .find_truncated(&s.diagview().unwrap(), &Truncation::rank(0))
-        .unwrap();
+    let found =
+        assert_svd_composition!(source, Truncation::rank(0), Policy::Rank(0), "discard-all");
     let selection = &found.selection;
     assert!(
         selection.subspace().sectors().unwrap().is_empty(),
-        "discard-all must produce the empty bond leg, as Host svd_trunc does"
+        "discard-all must produce the empty bond leg"
     );
     assert!(!selection.is_full(), "an empty selection of a nonempty leg");
 
-    let host = source.svd_trunc(&Truncation::rank(0)).unwrap();
+    let (u, s, vh) = source.svd_compact().unwrap();
     let got_u = u.restrict_leg(u.codomain_rank(), selection).unwrap();
     let got_s = s.restrict_diagonal(selection).unwrap();
     let got_vh = vh.restrict_leg(0, selection).unwrap();
-    assert_same_layout!(got_u, host.u, "discard-all u");
-    assert_same_layout!(got_s, host.s, "discard-all s");
-    assert_same_layout!(got_vh, host.vh, "discard-all vh");
     assert!(got_u.data().is_empty() && got_s.data().is_empty() && got_vh.data().is_empty());
-    let spectra = s.diagview().unwrap();
-    assert_truncation_error!(found, host.error, bond, spectra, "discard-all");
 
     // `embed_leg` with the empty selection: the adjoint of restricting to
     // nothing is the zero map back onto the parent leg.
     let embedded = got_u.embed_leg(got_u.codomain_rank(), selection).unwrap();
-    assert_eq!(embedded.domain()[0], bond);
+    assert_eq!(embedded.domain()[0], s.domain()[0]);
     assert!(embedded.data().iter().all(|&value| value == 0.0));
 }
 
@@ -1062,13 +981,13 @@ fn a_payload_generic_caller_can_name_the_find_truncated_bound() {
         TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| fill(&mut state)).unwrap();
     let (_, s, _) = real.svd_compact().unwrap();
     let found = find_truncated_generically(&s, &truncation);
-    let host = real.svd_trunc(&truncation).unwrap();
+    let want = assert_svd_composition!(real, truncation, Policy::Rank(2), "f64");
     assert_eq!(
         found.selection.subspace(),
-        &host.s.domain()[0],
+        want.selection.subspace(),
         "f64 kept bond"
     );
-    assert_truncation_error!(found, host.error, leg, s.diagview().unwrap(), "f64");
+    assert_eq!(found.error.to_bits(), want.error.to_bits(), "f64 error");
 
     let complex: TensorMap<_, Complex64> =
         TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| {
@@ -1077,11 +996,11 @@ fn a_payload_generic_caller_can_name_the_find_truncated_bound() {
         .unwrap();
     let (_, s, _) = complex.svd_compact().unwrap();
     let found = find_truncated_generically(&s, &truncation);
-    let host = complex.svd_trunc(&truncation).unwrap();
+    let want = assert_svd_composition!(complex, truncation, Policy::Rank(2), "c64");
     assert_eq!(
         found.selection.subspace(),
-        &host.s.domain()[0],
+        want.selection.subspace(),
         "c64 kept bond"
     );
-    assert_truncation_error!(found, host.error, leg, s.diagview().unwrap(), "c64");
+    assert_eq!(found.error.to_bits(), want.error.to_bits(), "c64 error");
 }
