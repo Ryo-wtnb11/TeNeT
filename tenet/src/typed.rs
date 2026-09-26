@@ -4907,11 +4907,14 @@ fn cuda_qr_tree_extents_match(
     Ok(matched.into_iter().all(|is_matched| is_matched))
 }
 
+/// Validates the compact SVD diagonal factor against its routes and returns
+/// each route's diagonal start: the packed `rank x rank` region's offset,
+/// whose diagonal then has element stride `rank + 1`.
 #[cfg(feature = "cuda")]
 fn validate_cuda_svd_middle_regions<R>(
     plan: &TypedCudaQrPlan<R>,
     middle_regions: &[CoupledSectorRegion],
-) -> Result<(), Error> {
+) -> Result<Vec<usize>, Error> {
     if middle_regions.len() != plan.routes.len() {
         return Err(internal_layout_error(
             "compact SVD diagonal factor does not have exactly one region per route",
@@ -4925,6 +4928,7 @@ fn validate_cuda_svd_middle_regions<R>(
             ));
         }
     }
+    let mut diagonals = Vec::with_capacity(plan.routes.len());
     for route in &plan.routes {
         let source = &plan.source_regions[route.source];
         let middle = by_sector.get(&source.coupled()).ok_or_else(|| {
@@ -4948,8 +4952,9 @@ fn validate_cuda_svd_middle_regions<R>(
                 "compact SVD diagonal factor region does not match its source route",
             ));
         }
+        diagonals.push(middle.range().start);
     }
-    Ok(())
+    Ok(diagonals)
 }
 
 #[cfg(feature = "cuda")]
@@ -11494,12 +11499,19 @@ where
     /// Streamed compact SVD of owned dense CUDA storage.
     ///
     /// Each nonempty coupled-sector route is decomposed and assembled before
-    /// its raw device factors are dropped. Singular values are the only
-    /// numerical tensor payload downloaded, all routes' with one transfer
-    /// after the solver loop; the backend additionally reads
-    /// O(1) solver-status metadata per route. The returned `s` is deliberately
-    /// a dense CUDA tensor because
-    /// CUDA diagonal storage is not part of the typed storage contract.
+    /// its raw device factors are dropped. The returned `s` is deliberately
+    /// a dense CUDA tensor because CUDA diagonal storage is not part of the
+    /// typed storage contract; each route's singular values are copied into
+    /// its diagonal on the device (element stride `k + 1`).
+    ///
+    /// Transfers, exactly: host to device, one zero upload per factor
+    /// (`u`, `s`, `vh`: the dense output sizes, `s` being `Σ_c k_c²`
+    /// elements, since a host zero buffer is the only device allocation
+    /// path until #740) plus one identity-selector upload per route whose
+    /// assembly is not layout-aligned. Device to host, no tensor payload:
+    /// the singular values never cross to the host, so the call ends
+    /// without a spectrum download. The backend still reads O(1)
+    /// solver-status metadata per route, a host barrier each.
     /// `u` and `vh` retain the raw CUDA backend gauge; unlike the Host method,
     /// this method does not impose TensorKit's largest-pivot sign gauge.
     pub fn svd_compact(&self) -> Result<(Self, Self, Self), Error> {
@@ -11533,7 +11545,7 @@ where
             middle_space.space().structure(),
             middle_space.space().nout(),
         )?;
-        validate_cuda_svd_middle_regions(&plan, &middle_regions)?;
+        let diagonals = validate_cuda_svd_middle_regions(&plan, &middle_regions)?;
         let left_len = plan.left_space.space().required_len()?;
         let middle_len = middle_space.space().required_len()?;
         let right_len = plan.right_space.space().required_len()?;
@@ -11546,9 +11558,13 @@ where
             let mut right_data = CudaStorage::upload_owned(cuda, vec![D::ZERO; right_len])?;
             #[cfg(test)]
             observe_cuda_svd_final_storage_creation();
-            let mut spectra = Vec::with_capacity(plan.routes.len());
+            // The zero upload is the only device allocation path until #740;
+            // every value then arrives by a device copy.
+            let mut middle_data = CudaStorage::upload_owned(cuda, vec![D::ZERO; middle_len])?;
+            #[cfg(test)]
+            observe_cuda_svd_final_storage_creation();
 
-            for route in &plan.routes {
+            for (route, &diagonal) in plan.routes.iter().zip(&diagonals) {
                 let source_region = &plan.source_regions[route.source];
                 let left_region = &plan.left_regions[route.left];
                 let right_region = &plan.right_regions[route.right];
@@ -11600,23 +11616,15 @@ where
                         &scratch.right,
                     )?;
                 }
-                spectra.push(spectrum);
+                tenet_dense::cuda_copy_spectrum_into::<D>(
+                    cuda,
+                    spectrum,
+                    &mut middle_data.0,
+                    diagonal,
+                    route.rank + 1,
+                )
+                .map_err(dense_err)?;
             }
-            let spectra: Vec<_> = plan
-                .routes
-                .iter()
-                .zip(cuda_download_spectra::<D>(cuda, &spectra)?)
-                .map(|(route, values)| tenet_matrixalgebra::SectorSpectrum {
-                    sector: plan.source_regions[route.source].coupled(),
-                    values,
-                })
-                .collect();
-
-            let mut middle_host = vec![D::ZERO; middle_len];
-            fill_diagonal_values(middle_space.space().structure(), &mut middle_host, &spectra)?;
-            let middle_data = CudaStorage::upload_owned(cuda, middle_host)?;
-            #[cfg(test)]
-            observe_cuda_svd_final_storage_creation();
             (left_data, middle_data, right_data)
         };
 
@@ -11646,6 +11654,17 @@ where
     /// the only numerical payload that crosses to the host, where they are
     /// sorted by descending `|λ|`; the eigenvectors stay on the device and
     /// their columns are gathered into that order by the assembly selector.
+    ///
+    /// Transfers, exactly: device to host, the Hermiticity verdicts (O(1)
+    /// per sector) and all sectors' eigenvalues (`Σ_c n_c` real values) in
+    /// one download, which the non-finite check, the host `|λ|` order and
+    /// the factor-space plan consume. Host to device, `d` as one dense
+    /// upload of `Σ_c n_c²` elements with the sorted eigenvalues already on
+    /// its diagonal, one zero upload for `v`, and at most one packed
+    /// selector upload. Why `d` is filled on the host rather than scattered on the
+    /// device: the only device allocation path is a zero upload of the same
+    /// `Σ_c n_c²` elements (#740), so a device scatter would add a
+    /// `Σ_c n_c` upload and move nothing less.
     pub fn eigh_full(&self) -> Result<(Self, Self), Error> {
         let source = self.direct_cuda_storage("eigh_full")?;
         let source_space = self.logical_space().space();
@@ -21530,6 +21549,202 @@ mod representation_gates {
             assert_eq!(observation.get(), Some((0, 0, 0, 0, 0)));
             observation.set(None);
         });
+    }
+
+    /// `s` exactly as `svd_compact` built it before #1536: each nonempty
+    /// sector's cuSOLVER spectrum, downloaded and placed on a host zero
+    /// buffer by [`fill_diagonal_values`]. Returned as widened bits.
+    #[cfg(feature = "cuda")]
+    fn downloaded_svd_diagonal_bits<R, D>(
+        device: &TensorMap<R, D, CudaStorage<D>>,
+        s_len: usize,
+        s_structure: &BlockStructure,
+    ) -> Vec<(u64, u64)>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+        D: CudaFactorizationPayload,
+    {
+        let source = device.direct_cuda_storage("test").unwrap();
+        let space = device.logical_space().space();
+        let regions = sector_regions(space.structure(), space.nout()).unwrap();
+        let mut lease = device.runtime.lease_cuda().unwrap();
+        let cuda = &mut *lease;
+        let mut sectors = Vec::new();
+        let mut spectra = Vec::new();
+        for region in regions.iter() {
+            if region.rows() == 0 || region.cols() == 0 {
+                continue;
+            }
+            let (_, spectrum, _) = cuda_svd_region::<D>(
+                cuda,
+                &source.0,
+                region.range().start,
+                region.rows(),
+                region.cols(),
+            )
+            .unwrap();
+            sectors.push(region.coupled());
+            spectra.push(spectrum);
+        }
+        let spectra: Vec<_> = sectors
+            .into_iter()
+            .zip(cuda_download_spectra::<D>(cuda, &spectra).unwrap())
+            .map(|(sector, values)| tenet_matrixalgebra::SectorSpectrum { sector, values })
+            .collect();
+        let mut host = vec![<D as tenet_dense::CudaScalar>::ZERO; s_len];
+        fill_diagonal_values(s_structure, &mut host, &spectra).unwrap();
+        host.into_iter().map(widened_bits).collect()
+    }
+
+    #[cfg(feature = "cuda")]
+    fn widened_bits<D: FactorScalar>(value: D) -> (u64, u64) {
+        let value = value.widen_complex();
+        (value.re.to_bits(), value.im.to_bits())
+    }
+
+    #[cfg(feature = "cuda")]
+    fn assert_device_svd_diagonal_matches_the_downloaded_one<R, D>(host: &TensorMap<R, D>)
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+        D: CudaFactorizationPayload,
+    {
+        let regions = sector_regions(
+            host.logical_space().space().structure(),
+            host.logical_space().space().nout(),
+        )
+        .unwrap();
+        let nonempty = regions
+            .iter()
+            .filter(|region| region.rows() != 0 && region.cols() != 0)
+            .count();
+        assert!(nonempty > 1, "the fixture needs several blocks");
+        let device = host.to_cuda().unwrap();
+        let (_, s, _) = device.svd_compact().unwrap();
+        let s = s.to_host().unwrap();
+        let expected = downloaded_svd_diagonal_bits(
+            &device,
+            s.data().len(),
+            s.logical_space().space().structure(),
+        );
+        let actual: Vec<_> = s.data().iter().copied().map(widened_bits).collect();
+        assert_eq!(actual, expected);
+        // The spectra themselves agree with the Host SVD to dtype tolerance.
+        let (_, host_s, _) = host.svd_compact().unwrap();
+        let tolerance = 1.0e3 * D::epsilon();
+        for (device, host) in s.data().iter().zip(host_s.data()) {
+            let (device, host) = (device.widen_complex(), host.widen_complex());
+            assert!(
+                (device - host).norm() <= tolerance * host.norm().max(1.0),
+                "{device} vs {host}"
+            );
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    /// Every fixture below has a coupled sector on one side only: it has no
+    /// block, no route and no diagonal region, and must not shift the others.
+    fn assert_device_svd_diagonal_every_dtype<R>(
+        runtime: &Runtime,
+        codomain: &[&GradedSpace<R>],
+        domain: &[&GradedSpace<R>],
+    ) where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    {
+        let host = |seed| {
+            TensorMap::<R, f64>::rand_with_seed(
+                runtime,
+                codomain.iter().copied(),
+                domain.iter().copied(),
+                seed,
+            )
+            .unwrap()
+        };
+        assert_device_svd_diagonal_matches_the_downloaded_one(&host(3));
+        assert_device_svd_diagonal_matches_the_downloaded_one(
+            &TensorMap::<R, Complex64>::rand_with_seed(
+                runtime,
+                codomain.iter().copied(),
+                domain.iter().copied(),
+                5,
+            )
+            .unwrap(),
+        );
+        assert_device_svd_diagonal_matches_the_downloaded_one(
+            &TensorMap::<R, f32>::rand_with_seed(
+                runtime,
+                codomain.iter().copied(),
+                domain.iter().copied(),
+                7,
+            )
+            .unwrap(),
+        );
+        assert_device_svd_diagonal_matches_the_downloaded_one(
+            &TensorMap::<R, num_complex::Complex32>::rand_with_seed(
+                runtime,
+                codomain.iter().copied(),
+                domain.iter().copied(),
+                11,
+            )
+            .unwrap(),
+        );
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    #[ignore = "requires a real CUDA device"]
+    fn typed_cuda_svd_diagonal_written_on_device_equals_the_downloaded_diagonal_bitwise() {
+        // What: `s` is now written by a device strided copy of each sector's
+        // spectrum; it must equal, bit for bit, the host-filled `s` built from
+        // the same solver's downloaded spectra, across symmetries, dtypes,
+        // multi-tree (non-aligned) sectors and an empty coupled sector.
+        let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+
+        let u1 = Arc::new(U1FusionRule);
+        let u1_leg = |charges: &[(i32, usize)]| {
+            GradedSpace::try_new_with_arc(
+                Arc::clone(&u1),
+                charges
+                    .iter()
+                    .map(|&(charge, dim)| (U1Irrep::new(charge), dim)),
+            )
+            .unwrap()
+        };
+        let small = u1_leg(&[(-1, 2), (0, 1), (1, 2)]);
+        // Coupled sector 3 exists in the domain only: an empty route.
+        let wide = u1_leg(&[(-1, 3), (0, 4), (1, 2), (3, 2)]);
+        assert_device_svd_diagonal_every_dtype(&runtime, &[&small, &small], &[&wide]);
+
+        let su2 = Arc::new(SU2FusionRule);
+        let su2_leg = GradedSpace::try_new_with_arc(
+            Arc::clone(&su2),
+            [
+                (SU2Irrep::from_twice_spin(0), 2),
+                (SU2Irrep::from_twice_spin(1), 2),
+            ],
+        )
+        .unwrap();
+        // Spin 3/2 occurs in the codomain only.
+        assert_device_svd_diagonal_every_dtype(
+            &runtime,
+            &[&su2_leg, &su2_leg, &su2_leg],
+            &[&su2_leg],
+        );
+
+        let fermion = Arc::new(U1FusionRule.product(FermionParityFusionRule));
+        let fermion_leg = GradedSpace::try_new_with_arc(
+            Arc::clone(&fermion),
+            [
+                (product_sector(U1Irrep::new(0), Z2Irrep::EVEN), 2),
+                (product_sector(U1Irrep::new(1), Z2Irrep::ODD), 2),
+                (product_sector(U1Irrep::new(-1), Z2Irrep::ODD), 1),
+            ],
+        )
+        .unwrap();
+        assert_device_svd_diagonal_every_dtype(
+            &runtime,
+            &[&fermion_leg, &fermion_leg],
+            &[&fermion_leg],
+        );
     }
 
     #[cfg(feature = "cuda")]

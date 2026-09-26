@@ -2429,6 +2429,46 @@ pub fn cuda_download_spectra<D: CudaScalar>(
         .collect())
 }
 
+/// Writes `spectrum` (from a factorization of payload `D`) into `dst` as
+/// `dst[dst_offset + j * dst_stride] = spectrum[j]`, entirely on the device:
+/// with `dst_stride = k + 1` it is the diagonal of a packed `k x k` block.
+///
+/// A real payload copies the spectrum's own buffer. A complex payload first
+/// casts it to `D` (imaginary part `+0`): one device allocation of
+/// `len * size_of::<D>()` bytes. Then one [`cuda_copy_region_into`] of a
+/// `1 x len` region with leading dimension `dst_stride`, with its value
+/// contract. Nothing crosses the host boundary. An empty spectrum is a no-op.
+pub fn cuda_copy_spectrum_into<D: CudaScalar>(
+    ctx: &mut CudaDenseContext,
+    spectrum: CudaSpectrum,
+    dst: &mut CudaDenseStorage,
+    dst_offset: usize,
+    dst_stride: usize,
+) -> Result<(), DenseError> {
+    const OP: &str = "cuda_copy_spectrum";
+    let len = spectrum.len();
+    let src = if D::IS_COMPLEX {
+        let cast = ctx
+            .backend
+            .cast(&spectrum.tensor, D::dtype())
+            .map_err(|err| cuda_error(OP, err))?;
+        CudaDenseStorage::from_tensor::<D>(OP, cast, ctx.device)?
+    } else {
+        // The real lane is the payload itself: wrap the solver's buffer
+        // without an allocation, so none is counted.
+        if D::typed(&spectrum.tensor).is_none() {
+            return Err(dtype_mismatch::<D>(OP, &spectrum.tensor));
+        }
+        CudaDenseStorage {
+            tensor: spectrum.tensor,
+            dtype: D::DTYPE,
+            len,
+            device: ctx.device,
+        }
+    };
+    cuda_copy_region_into::<D>(ctx, dst, dst_offset, dst_stride, &src, 1, len)
+}
+
 /// cuSOLVER SVD of one packed column-major `rows x cols` region:
 /// `region = U * diag(s) * Vt` with `k = min(rows, cols)`. `U` (`rows x k`),
 /// the singular values `s` (descending) and `Vt` (`k x cols`) all stay
