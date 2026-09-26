@@ -456,13 +456,7 @@ where
 
     #[cfg(feature = "cuda")]
     fn reserve_plan_entries(&mut self) -> Result<(), Error> {
-        let gemms = self
-            .plan
-            .direct_batch()
-            .iter()
-            .map(|job| (job.rows, job.contracted, job.cols))
-            .collect::<std::collections::HashSet<_>>()
-            .len();
+        let gemms = self.plan.distinct_direct_gemm_shapes();
         let fills = self
             .plan
             .inactive_destination_regions()
@@ -588,9 +582,12 @@ where
     /// Composes every member pair into the handle-owned output and borrows
     /// it.
     ///
-    /// The output is allocated zeroed when absent or when `B` changes, and
-    /// warm calls allocate nothing: the destination blocks the plan never
-    /// writes stay zero, and every other block is overwritten.
+    /// The output is allocated zeroed when absent or when `B` changes; the
+    /// destination blocks the plan never writes stay zero, and every other
+    /// block is overwritten. A warm call allocates nothing of TeNeT's: the
+    /// output, the job list and the fill strides are reused. The dense
+    /// backend's own grouped-GEMM validation (Tenferro 0.7.1) still allocates
+    /// once per call, as it does for eager `compose`.
     ///
     /// # Errors
     ///

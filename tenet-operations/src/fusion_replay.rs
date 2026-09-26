@@ -1088,10 +1088,20 @@ where
         Ok(())
     }
 
-    /// The direct GEMM jobs, one per active coupled sector, in plan order.
-    #[doc(hidden)]
-    pub fn direct_batch(&self) -> &[Rank2GemmBatchJob] {
+    pub(crate) fn direct_batch(&self) -> &[Rank2GemmBatchJob] {
         &self.direct_batch
+    }
+
+    /// How many distinct `(rows, contracted, cols)` shapes the direct GEMM
+    /// jobs have: the dense plans a replay of this plan needs at one batch
+    /// extent.
+    #[doc(hidden)]
+    pub fn distinct_direct_gemm_shapes(&self) -> usize {
+        self.direct_batch
+            .iter()
+            .map(|job| (job.rows, job.contracted, job.cols))
+            .collect::<HashSet<_>>()
+            .len()
     }
 
     /// The per-member payload lengths `[dst, lhs, rhs]` this plan's

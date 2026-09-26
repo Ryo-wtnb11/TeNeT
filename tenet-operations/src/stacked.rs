@@ -163,6 +163,9 @@ pub struct StackedDirectReplay<C = f64> {
     runs: Vec<usize>,
     /// Each inactive destination layout with a trailing member axis.
     inactive: Vec<(Vec<usize>, Vec<isize>, isize)>,
+    /// All-zero source strides as long as the longest inactive layout, so a
+    /// zero fill borrows a prefix instead of allocating per call.
+    zero_strides: Vec<isize>,
 }
 
 impl<C> StackedDirectReplay<C>
@@ -218,7 +221,15 @@ where
                 strides.push(member_stride);
                 (shape, strides, layout.block.offset)
             })
-            .collect();
+            .collect::<Vec<_>>();
+        let zero_strides = vec![
+            0;
+            inactive
+                .iter()
+                .map(|(shape, _, _)| shape.len())
+                .max()
+                .unwrap_or(0)
+        ];
         Ok(Self {
             plan,
             members,
@@ -226,6 +237,7 @@ where
             jobs,
             runs,
             inactive,
+            zero_strides,
         })
     }
 
@@ -241,6 +253,7 @@ where
     pub fn retained_bytes(&self) -> usize {
         self.jobs.capacity() * std::mem::size_of::<Rank2GemmBatchJob>()
             + self.runs.capacity() * std::mem::size_of::<usize>()
+            + self.zero_strides.capacity() * std::mem::size_of::<isize>()
             + self
                 .inactive
                 .iter()
@@ -290,16 +303,13 @@ where
         let dst_data = dst.storage.as_mut_slice();
         if zero_inactive {
             let zero = [D::zero()];
-            let mut zero_strides = Vec::new();
             for (shape, strides, offset) in &self.inactive {
-                zero_strides.clear();
-                zero_strides.resize(shape.len(), 0);
                 kernels.copy_scale_strided(
                     dst_data,
                     &zero,
                     shape,
                     strides,
-                    &zero_strides,
+                    &self.zero_strides[..shape.len()],
                     *offset,
                     0,
                     false,

@@ -135,6 +135,36 @@ fn warm_replay_retains_the_same_bytes_and_a_new_member_count_resizes() {
         "a larger B resizes the output"
     );
 
+    // `execute_into` across a change of B on the same handle: the job list
+    // is rebuilt for each B and the result stays the oracle's.
+    for count in [4, 9, 4] {
+        let a = members::<_, f64>(&runtime, &[&v, &v], &[&w], count, 1);
+        let b = members::<_, f64>(&runtime, &[&w], &[&v], count, 2);
+        let (lhs, rhs) = (
+            StackedTensorMap::pack(&a).unwrap(),
+            StackedTensorMap::pack(&b).unwrap(),
+        );
+        let mut dst = StackedTensorMap::pack(&filled::<_, f64>(
+            &runtime,
+            &[&v, &v],
+            &[&v],
+            count,
+            f64::NAN,
+        ))
+        .unwrap();
+        handle.execute_into(&lhs, &rhs, &mut dst).unwrap();
+        for (index, (x, y)) in a.iter().zip(&b).enumerate() {
+            let (oracle, _) = compose_oracle(x, y, &x.compose(y).unwrap());
+            assert_close(
+                dst.member(index).unwrap().data(),
+                &oracle,
+                x.data().len(),
+                &format!("execute_into at B={count}, member {index}"),
+            );
+        }
+    }
+    handle.execute(&wide_lhs, &wide_rhs).unwrap();
+
     let output = handle.take_output().unwrap();
     assert_eq!(output.len(), 9);
     assert!(

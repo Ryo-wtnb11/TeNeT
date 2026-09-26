@@ -22,7 +22,10 @@ use tenet::dense::{cuda_transfer_stats, CudaPlanCacheStats, CudaTransferStats};
 use tenet::typed::{GradedSpace, PreparedCompose, Runtime, StackedTensorMap, TensorMap};
 
 use common::{DevicePayload, DeviceRule};
-use prepared::{assert_close, compose_oracle, filled, fz2u1_legs, members, su2_legs, u1_legs};
+use prepared::{
+    assert_close, compose_oracle, expected_plan_entries, filled, fz2u1_legs, members, su2_legs,
+    u1_legs,
+};
 
 static SERIAL: Mutex<()> = Mutex::new(());
 
@@ -203,6 +206,12 @@ fn device_handle_equals_the_oracle_with_b_independent_submissions() {
     device_gate::<_, Complex64>("fZ2xU1", fz2u1_legs());
 }
 
+fn device<R: DeviceRule>(
+    members: &[TensorMap<R, f64>],
+) -> StackedTensorMap<R, f64, tenet::typed::CudaStorage<f64>> {
+    StackedTensorMap::pack(members).unwrap().to_cuda().unwrap()
+}
+
 /// `V ⊗ W ← V ⊗ W` with 81 blocks of distinct extents (the #1508 fixture):
 /// its device permute alone needs more than Tenferro's default 64 plans.
 fn wide_permute_source(runtime: &Runtime) -> TensorMap<U1FusionRule, f64> {
@@ -232,32 +241,18 @@ fn handles_and_an_eager_permute_past_the_default_bound_evict_no_plan() {
     let _guard = serial();
     let runtime = Runtime::builder().cuda(0).build().unwrap();
     let count = 16;
-    let stacks = |(v, w): (GradedSpace<_>, GradedSpace<_>)| {
-        (
-            StackedTensorMap::pack(&members::<_, f64>(&runtime, &[&v, &v], &[&w], count, 1))
-                .unwrap()
-                .to_cuda()
-                .unwrap(),
-            StackedTensorMap::pack(&members::<_, f64>(&runtime, &[&w], &[&v], count, 2))
-                .unwrap()
-                .to_cuda()
-                .unwrap(),
-        )
-    };
-    let (u1_lhs, u1_rhs) = stacks(u1_legs());
-    let (su2_lhs, su2_rhs) = {
-        let (v, w) = su2_legs();
-        (
-            StackedTensorMap::pack(&members::<_, f64>(&runtime, &[&v, &v], &[&w], count, 3))
-                .unwrap()
-                .to_cuda()
-                .unwrap(),
-            StackedTensorMap::pack(&members::<_, f64>(&runtime, &[&w], &[&v], count, 4))
-                .unwrap()
-                .to_cuda()
-                .unwrap(),
-        )
-    };
+    let (u1_v, u1_w) = u1_legs();
+    let (su2_v, su2_w) = su2_legs();
+    let u1_a = members::<_, f64>(&runtime, &[&u1_v, &u1_v], &[&u1_w], count, 1);
+    let u1_b = members::<_, f64>(&runtime, &[&u1_w], &[&u1_v], count, 2);
+    let su2_a = members::<_, f64>(&runtime, &[&su2_v, &su2_v], &[&su2_w], count, 3);
+    let su2_b = members::<_, f64>(&runtime, &[&su2_w], &[&su2_v], count, 4);
+    let (u1_lhs, u1_rhs) = (device(&u1_a), device(&u1_b));
+    let (su2_lhs, su2_rhs) = (device(&su2_a), device(&su2_b));
+    let u1_expected =
+        expected_plan_entries(&u1_a[0], &u1_b[0], &u1_a[0].compose(&u1_b[0]).unwrap());
+    let su2_expected =
+        expected_plan_entries(&su2_a[0], &su2_b[0], &su2_a[0].compose(&su2_b[0]).unwrap());
     let source = wide_permute_source(&runtime).to_cuda().unwrap();
 
     let reserved = |runtime: &Runtime| plans(runtime).reserved_entries;
@@ -267,7 +262,8 @@ fn handles_and_an_eager_permute_past_the_default_bound_evict_no_plan() {
     let mut h2 = PreparedCompose::new(&su2_lhs, &su2_rhs).unwrap();
     let r2 = reserved(&runtime);
     let (h1_entries, h2_entries) = (r1 - r0, r2 - r1);
-    assert!(h1_entries > 0 && h2_entries > 0);
+    assert_eq!(h1_entries, u1_expected, "U(1) handle reservation");
+    assert_eq!(h2_entries, su2_expected, "SU(2) handle reservation");
     h1.execute(&u1_lhs, &u1_rhs).unwrap();
     h2.execute(&su2_lhs, &su2_rhs).unwrap();
 
@@ -295,6 +291,38 @@ fn handles_and_an_eager_permute_past_the_default_bound_evict_no_plan() {
     assert_eq!(after.evictions, before.evictions, "{before:?} -> {after:?}");
     assert_eq!(after.misses, before.misses, "{before:?} -> {after:?}");
     assert_eq!(after.reserved_entries, before.reserved_entries);
+
+    // `execute_into` across a change of B on one handle: the zero regions
+    // and the template are rebuilt for the new B, and the result is still
+    // the oracle's.
+    for wide in [count, 2 * count + 1] {
+        let a = members::<_, f64>(&runtime, &[&u1_v, &u1_v], &[&u1_w], wide, 5);
+        let b = members::<_, f64>(&runtime, &[&u1_w], &[&u1_v], wide, 6);
+        let mut dst = device(&filled::<_, f64>(
+            &runtime,
+            &[&u1_v, &u1_v],
+            &[&u1_v],
+            wide,
+            f64::NAN,
+        ));
+        h1.execute_into(&device(&a), &device(&b), &mut dst).unwrap();
+        let host = dst.to_host().unwrap();
+        for (index, (x, y)) in a.iter().zip(&b).enumerate() {
+            let eager = x.compose(y).unwrap();
+            let (oracle, _) = compose_oracle(x, y, &eager);
+            assert_close(
+                host.member(index).unwrap().data(),
+                &oracle,
+                x.data().len(),
+                &format!("execute_into at B={wide}, member {index}"),
+            );
+        }
+    }
+    assert_eq!(
+        reserved(&runtime),
+        before.reserved_entries,
+        "a new B reserves nothing"
+    );
 
     drop(h1);
     assert_eq!(reserved(&runtime), before.reserved_entries - h1_entries);

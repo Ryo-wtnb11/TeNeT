@@ -259,3 +259,81 @@ pub fn assert_close<D: Payload>(actual: &[D], expected: &[D], terms: usize, what
         );
     }
 }
+
+/// The plan entries a device handle for `a · b` must reserve, derived from
+/// the public block trees alone: one per distinct coupled-sector GEMM shape
+/// `(m, k, n)` over the sectors both operands carry, plus one per distinct
+/// length of a maximal run of consecutive inactive destination sectors
+/// (`template` is the destination; its payload is not read).
+pub fn expected_plan_entries<R, D>(
+    a: &TensorMap<R, D>,
+    b: &TensorMap<R, D>,
+    template: &TensorMap<R, D>,
+) -> usize
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    R::Sector: Debug,
+    D: Payload,
+{
+    use std::collections::{BTreeMap, HashSet};
+    // Per coupled sector: distinct row trees -> rows, distinct column trees -> cols.
+    type Extents = HashMap<String, (HashMap<String, usize>, HashMap<String, usize>)>;
+    let extents = |t: &TensorMap<R, D>| {
+        let mut out: Extents = HashMap::new();
+        for index in 0..t.block_count() {
+            let (row, col, rows, cols, _) = block_matrix(t, index);
+            let coupled = format!("{:?}", t.block_fusion_trees(index).unwrap().coupled());
+            let entry = out.entry(coupled).or_default();
+            entry.0.insert(row, rows);
+            entry.1.insert(col, cols);
+        }
+        out
+    };
+    let total = |map: &HashMap<String, usize>| map.values().sum::<usize>();
+    let (ea, eb) = (extents(a), extents(b));
+    let gemms = ea
+        .iter()
+        .filter_map(|(c, (rows, inner))| {
+            eb.get(c)
+                .map(|(_, cols)| (total(rows), total(inner), total(cols)))
+        })
+        .collect::<HashSet<_>>()
+        .len();
+    // Destination sectors in storage order, with their element counts.
+    let mut sectors: BTreeMap<usize, (String, usize)> = BTreeMap::new();
+    let mut starts: HashMap<String, usize> = HashMap::new();
+    for index in 0..template.block_count() {
+        let coupled = format!(
+            "{:?}",
+            template.block_fusion_trees(index).unwrap().coupled()
+        );
+        let offset = template.block(index).unwrap().offset();
+        let start = starts.entry(coupled).or_insert(offset);
+        *start = (*start).min(offset);
+    }
+    for (coupled, &start) in &starts {
+        let len = (0..template.block_count())
+            .filter(|&i| {
+                format!("{:?}", template.block_fusion_trees(i).unwrap().coupled()) == *coupled
+            })
+            .map(|i| template.block(i).unwrap().shape().iter().product::<usize>())
+            .sum();
+        sectors.insert(start, (coupled.clone(), len));
+    }
+    let mut runs = HashSet::new();
+    let mut run = 0;
+    for (coupled, len) in sectors.values() {
+        if ea.contains_key(coupled) && eb.contains_key(coupled) {
+            if run > 0 {
+                runs.insert(run);
+            }
+            run = 0;
+        } else {
+            run += len;
+        }
+    }
+    if run > 0 {
+        runs.insert(run);
+    }
+    gemms + runs.len()
+}
