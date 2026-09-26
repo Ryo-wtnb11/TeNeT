@@ -239,8 +239,10 @@ makes their values look similar.
 
 ## Tensor algebra and spaces
 
-`TensorMap` has ordinary vector operations: `norm`, `inner`, `scale`, `add`,
-`tr`, and `zeros_like`. It also supplies structural predicates
+`TensorMap` has ordinary vector operations: `norm`, `inner`, `scale`, `axpby`,
+`tr`, and `zeros_like`. `x.axpby(alpha, &y, beta)` is `alpha * x + beta * y`;
+note that VectorInterface's `add(y, x, α, β)` binds the coefficients the other
+way round. It also supplies structural predicates
 such as `is_hermitian`, `is_unitary`, and `is_posdef`.
 
 ```rust
@@ -253,7 +255,7 @@ let v = GradedSpace::try_new(
 )?;
 let a = TensorMap::<U1FusionRule, f64>::rand(&rt, [&v], [&v])?;
 let b = TensorMap::<U1FusionRule, f64>::rand(&rt, [&v], [&v])?;
-let difference = a.add(&b, 1.0, -1.0)?;
+let difference = a.axpby(1.0, &b, -1.0)?;
 assert!(difference.norm()? >= 0.0);
 let unit = a.scale(1.0 / a.norm()?);
 assert!((unit.norm()? - 1.0).abs() <= 1e-12);
@@ -316,7 +318,7 @@ let fuser = TensorMap::<U1FusionRule, f64>::isomorphism(&rt, [&vw], [&v, &w])?;
 let fused = fuser.compose(&t)?;
 assert_eq!((fused.codomain_rank(), fused.domain_rank()), (1, 1));
 let split = fuser.adjoint()?.compose(&fused)?;
-assert!(split.add(&t, 1.0, -1.0)?.norm()? <= 1e-12);
+assert!(split.axpby(1.0, &t, -1.0)?.norm()? <= 1e-12);
 
 let keep = LegSelection::try_new(&vw, [(U1Irrep::new(0), 0..2), (U1Irrep::new(1), 0..1)])?;
 let truncated = fused.restrict_leg(0, &keep)?;
@@ -392,11 +394,11 @@ let s = s.restrict_diagonal(&found.selection)?;
 let vh = vh.restrict_leg(0, &found.selection)?;
 
 let reconstructed = u.compose(&s)?.compose(&vh)?;
-let error = reconstructed.add(&t, 1.0, -1.0)?.norm()?;
+let error = reconstructed.axpby(1.0, &t, -1.0)?.norm()?;
 assert!((error - found.error).abs() <= 1e-8 * (1.0 + found.error));
 
 let (q, r) = t.qr_compact()?;
-assert!(q.compose(&r)?.add(&t, 1.0, -1.0)?.norm()? <= 1e-10 * (1.0 + t.norm()?));
+assert!(q.compose(&r)?.axpby(1.0, &t, -1.0)?.norm()? <= 1e-10 * (1.0 + t.norm()?));
 # Ok::<(), Error>(())
 ```
 

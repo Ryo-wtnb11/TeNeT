@@ -348,8 +348,8 @@ fn lazy_scale_and_add_allocate_only_one_input_sized_payload() {
     let warm = parent.adjoint().unwrap();
     let warm_other = other_parent.adjoint().unwrap();
     black_box(warm.scale(alpha));
-    black_box(warm.add(&owned, alpha, beta).unwrap());
-    black_box(warm.add(&warm_other, alpha, beta).unwrap());
+    black_box(warm.axpby(alpha, &owned, beta).unwrap());
+    black_box(warm.axpby(alpha, &warm_other, beta).unwrap());
 
     let scale_lazy = parent.adjoint().unwrap();
     let mixed_lazy = parent.adjoint().unwrap();
@@ -360,10 +360,10 @@ fn lazy_scale_and_add_allocate_only_one_input_sized_payload() {
             black_box(scale_lazy.scale(alpha));
         }),
         measure(|| {
-            black_box(mixed_lazy.add(&owned, alpha, beta).unwrap());
+            black_box(mixed_lazy.axpby(alpha, &owned, beta).unwrap());
         }),
         measure(|| {
-            black_box(pair_lazy.add(&other_pair_lazy, alpha, beta).unwrap());
+            black_box(pair_lazy.axpby(alpha, &other_pair_lazy, beta).unwrap());
         }),
     ] {
         assert!(
@@ -403,10 +403,16 @@ fn mixed_lazy_add_has_no_rank_dependent_stride_allocation() {
                 .unwrap();
         let alpha = num_complex::Complex64::new(0.5, 0.0);
         let beta = num_complex::Complex64::new(-0.25, 0.0);
-        black_box(parent.adjoint().unwrap().add(&owned, alpha, beta).unwrap());
+        black_box(
+            parent
+                .adjoint()
+                .unwrap()
+                .axpby(alpha, &owned, beta)
+                .unwrap(),
+        );
         let lazy = parent.adjoint().unwrap();
         let cost = measure(|| {
-            black_box(lazy.add(&owned, alpha, beta).unwrap());
+            black_box(lazy.axpby(alpha, &owned, beta).unwrap());
         });
         assert_eq!(
             cost,
@@ -441,14 +447,14 @@ fn lazy_add_allocation_count_is_pinned_across_block_counts() {
         let owned = other.clone();
         let lazy = parent.adjoint().unwrap();
         let other_lazy = other.adjoint().unwrap();
-        black_box(lazy.add(&owned, alpha, beta).unwrap());
-        black_box(lazy.add(&other_lazy, alpha, beta).unwrap());
+        black_box(lazy.axpby(alpha, &owned, beta).unwrap());
+        black_box(lazy.axpby(alpha, &other_lazy, beta).unwrap());
         let mixed = measure(|| {
-            black_box(lazy.add(&owned, alpha, beta).unwrap());
+            black_box(lazy.axpby(alpha, &owned, beta).unwrap());
         })
         .0;
         let pair = measure(|| {
-            black_box(lazy.add(&other_lazy, alpha, beta).unwrap());
+            black_box(lazy.axpby(alpha, &other_lazy, beta).unwrap());
         })
         .0;
         counts.push((mixed, pair));
@@ -479,14 +485,14 @@ fn block_stride_buffers_spill_only_past_rank_sixteen() {
         let owned = tensor(&runtime, sectors, rank);
         let other_lazy = owned.adjoint().unwrap();
         let lazy = parent.adjoint().unwrap();
-        black_box(lazy.add(&owned, alpha, beta).unwrap());
-        black_box(lazy.add(&other_lazy, alpha, beta).unwrap());
+        black_box(lazy.axpby(alpha, &owned, beta).unwrap());
+        black_box(lazy.axpby(alpha, &other_lazy, beta).unwrap());
         let mixed = measure(|| {
-            black_box(lazy.add(&owned, alpha, beta).unwrap());
+            black_box(lazy.axpby(alpha, &owned, beta).unwrap());
         })
         .0;
         let pair = measure(|| {
-            black_box(lazy.add(&other_lazy, alpha, beta).unwrap());
+            black_box(lazy.axpby(alpha, &other_lazy, beta).unwrap());
         })
         .0;
         let fresh = parent.adjoint().unwrap();

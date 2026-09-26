@@ -510,7 +510,7 @@ fn assert_sun_checked_generic_eigh<D>(
                 continue;
             }
             let shifted = d
-                .add(&identity, D::from_real(1.0), D::from_real(-scalar))
+                .axpby(D::from_real(1.0), &identity, D::from_real(-scalar))
                 .unwrap()
                 .scale(D::from_real(1.0 / (lambda_plus - scalar)));
             selector = selector.compose(&shifted).unwrap();
@@ -665,7 +665,7 @@ where
             } else {
                 selector = selector
                     .compose(
-                        &d.add(&identity, Complex64::new(1.0, 0.0), -value)
+                        &d.axpby(Complex64::new(1.0, 0.0), &identity, -value)
                             .unwrap()
                             .scale(Complex64::new(1.0, 0.0) / (lambda_plus - value)),
                     )
@@ -1949,7 +1949,7 @@ fn checked_generic_host_add_scale_cover_real_and_complex_payloads() {
             (indices.iter().sum::<usize>() + 1) as f64
         })
         .unwrap();
-    let added = source.add(&source, 2.0, -1.0).unwrap();
+    let added = source.axpby(2.0, &source, -1.0).unwrap();
     assert_eq!(added.data(), source.data());
     let scaled = source.scale(3.0);
     assert!(scaled
@@ -1960,9 +1960,9 @@ fn checked_generic_host_add_scale_cover_real_and_complex_payloads() {
 
     let complex = source.to_c64();
     let added = complex
-        .add(
-            &complex,
+        .axpby(
             Complex64::new(2.0, 0.0),
+            &complex,
             Complex64::new(-1.0, 0.0),
         )
         .unwrap();
@@ -1988,7 +1988,7 @@ fn checked_generic_add_rejects_runtime_before_layout_without_queries() {
         TensorMap::from_block_fn(&foreign_runtime, [&wide], [&wide], |_, _| 2.0).unwrap();
     reset_provider_queries(&provider);
     let before = left.data().to_vec();
-    let error = left.add(&right, 1.0, 1.0).unwrap_err();
+    let error = left.axpby(1.0, &right, 1.0).unwrap_err();
     assert!(matches!(
         error,
         GenericTensorError::Facade(tenet::prelude::Error::RuntimeMismatch)
@@ -2010,7 +2010,7 @@ fn checked_generic_add_rejects_layout_mismatch_without_queries() {
         TensorMap::from_block_fn(&runtime, [&wide], [&wide], |_, _| 2.0).unwrap();
     reset_provider_queries(&provider);
     let before = left.data().to_vec();
-    let error = left.add(&right, 1.0, 1.0).unwrap_err();
+    let error = left.axpby(1.0, &right, 1.0).unwrap_err();
     assert!(matches!(
         error,
         GenericTensorError::Facade(tenet::prelude::Error::InvalidArgument(_))
@@ -2036,7 +2036,7 @@ fn checked_generic_add_assign_rejects_runtime_before_layout_and_preserves_receiv
         .map(|index| left.block_fusion_trees(index).unwrap())
         .collect::<Vec<_>>();
     reset_provider_queries(&provider);
-    let error = left.add_assign(&right, 1.0, 1.0).unwrap_err();
+    let error = left.axpby_assign(1.0, &right, 1.0).unwrap_err();
     assert!(matches!(
         error,
         GenericTensorError::Facade(tenet::prelude::Error::RuntimeMismatch)
@@ -2067,7 +2067,7 @@ fn checked_generic_add_assign_rejects_layout_mismatch_and_preserves_receiver() {
         .map(|index| left.block_fusion_trees(index).unwrap())
         .collect::<Vec<_>>();
     reset_provider_queries(&provider);
-    let error = left.add_assign(&right, 1.0, 1.0).unwrap_err();
+    let error = left.axpby_assign(1.0, &right, 1.0).unwrap_err();
     assert!(matches!(
         error,
         GenericTensorError::Facade(tenet::prelude::Error::InvalidArgument(_))
@@ -4175,7 +4175,7 @@ macro_rules! assert_sun_polar_laws {
         };
         let assert_close = |actual: &TensorMap<_, _>, expected: &TensorMap<_, _>, what: &str| {
             let error = actual
-                .add(expected, 1.0.into(), (-1.0).into())
+                .axpby(1.0.into(), expected, (-1.0).into())
                 .unwrap()
                 .norm()
                 .unwrap();
@@ -4360,7 +4360,7 @@ macro_rules! assert_sun_compact_laws {
         let source = $source;
         let assert_close = |actual: &TensorMap<_, _>, expected: &TensorMap<_, _>, what: &str| {
             let error = actual
-                .add(expected, 1.0.into(), (-1.0).into())
+                .axpby(1.0.into(), expected, (-1.0).into())
                 .unwrap()
                 .norm()
                 .unwrap();
@@ -5012,11 +5012,11 @@ fn assert_sun_checked_generic_null_projectors<D>(
     assert!(std::ptr::eq(right.provider(), provider.as_ref()));
     let left_adjoint = left.adjoint().unwrap();
     let left_adjoint = left_adjoint
-        .add(&left_adjoint, D::from_real(1.0), D::from_real(0.0))
+        .axpby(D::from_real(1.0), &left_adjoint, D::from_real(0.0))
         .unwrap();
     let right_adjoint = right.adjoint().unwrap();
     let right_adjoint = right_adjoint
-        .add(&right_adjoint, D::from_real(1.0), D::from_real(0.0))
+        .axpby(D::from_real(1.0), &right_adjoint, D::from_real(0.0))
         .unwrap();
     let left_projector = left.compose(&left_adjoint).unwrap();
     let right_projector = right_adjoint.compose(&right).unwrap();
@@ -7728,9 +7728,9 @@ fn checked_generic_add_and_scale_drop_zero_scaled_operands_as_tensorkit() {
             .zip(y.data())
             .map(|(&a, &b)| scale(a, alpha) + scale(b, beta))
             .collect();
-        same(x.add(&y, alpha, beta).unwrap().data(), &want);
+        same(x.axpby(alpha, &y, beta).unwrap().data(), &want);
         let mut assigned = x.clone();
-        assigned.add_assign(&y, alpha, beta).unwrap();
+        assigned.axpby_assign(alpha, &y, beta).unwrap();
         same(assigned.data(), &want);
     }
     for factor in [0.0, 2.0] {

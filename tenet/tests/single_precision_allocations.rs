@@ -165,7 +165,7 @@ macro_rules! measure_pipeline {
             // unsuffixed float literal has no type to fall back to that every
             // instantiation of this macro accepts.
             let one = <$dtype as FactorScalar>::from_real(1.0);
-            let sum = tensor.add(&tensor, one, one).unwrap();
+            let sum = tensor.axpby(one, &tensor, one).unwrap();
             black_box((permuted, sum, tensor.norm().unwrap(), tensor.data().len()))
         })
     }};

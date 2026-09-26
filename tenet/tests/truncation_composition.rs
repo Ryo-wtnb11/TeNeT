@@ -445,7 +445,7 @@ fn hermitian_u1(seed: u64) -> TensorMap<U1FusionRule, f64> {
     let mut state = seed;
     let raw: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime(), [&leg], [&leg], move |_, _| fill(&mut state)).unwrap();
-    raw.add(&raw.adjoint().unwrap(), 1.0, 1.0).unwrap()
+    raw.axpby(1.0, &raw.adjoint().unwrap(), 1.0).unwrap()
 }
 
 #[test]
@@ -464,7 +464,7 @@ fn su2_eigh_composition_matches_the_oracle_for_every_policy() {
         })
         .unwrap();
     let one = Complex64::new(1.0, 0.0);
-    let source = raw.add(&raw.adjoint().unwrap(), one, one).unwrap();
+    let source = raw.axpby(one, &raw.adjoint().unwrap(), one).unwrap();
     eigh_policy_sweep!(source, su2_leg(&[(0, 2), (2, 1)]), "su2 eigh c64");
 }
 
@@ -474,7 +474,7 @@ fn fermionic_eigh_composition_matches_the_oracle_for_every_policy() {
     let mut state = 0xaaaa_bbbbu64;
     let raw: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime(), [&leg], [&leg], move |_, _| fill(&mut state)).unwrap();
-    let source = raw.add(&raw.adjoint().unwrap(), 1.0, 1.0).unwrap();
+    let source = raw.axpby(1.0, &raw.adjoint().unwrap(), 1.0).unwrap();
     eigh_policy_sweep!(source, fz2_leg(&[(false, 2), (true, 1)]), "fz2 eigh f64");
 }
 
@@ -760,7 +760,7 @@ fn diagview_reads_the_same_values_from_compact_and_dense_storage() {
     // a dense zero produces the dense twin (`diagonal_spectrum` is then `None`,
     // which is the contract `diagview` deliberately does not change).
     let zero: TensorMap<_, f64> = TensorMap::zeros(&runtime, [&leg], [&leg]).unwrap();
-    let dense = zero.add(&s, 1.0, 1.0).unwrap();
+    let dense = zero.axpby(1.0, &s, 1.0).unwrap();
     assert!(
         dense.diagonal_spectrum().unwrap().is_none(),
         "the dense twin must still report no compact storage"

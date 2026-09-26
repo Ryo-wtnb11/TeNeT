@@ -138,7 +138,7 @@ where
 {
     members::<R, f64>(runtime, codomain, codomain, count, salt)
         .into_iter()
-        .map(|x| x.add(&x.adjoint().unwrap(), 1.0, 1.0).unwrap())
+        .map(|x| x.axpby(1.0, &x.adjoint().unwrap(), 1.0).unwrap())
         .collect()
 }
 

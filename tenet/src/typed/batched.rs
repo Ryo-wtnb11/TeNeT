@@ -2051,7 +2051,7 @@ mod tests {
                 let x =
                     TensorMap::<_, f64>::rand_with_seed(&runtime, [&leg, &leg], [&leg, &leg], seed)
                         .unwrap();
-                x.add(&x.adjoint().unwrap(), 1.0, 1.0).unwrap()
+                x.axpby(1.0, &x.adjoint().unwrap(), 1.0).unwrap()
             })
             .collect();
         let stack = super::StackedTensorMap::pack(&members)

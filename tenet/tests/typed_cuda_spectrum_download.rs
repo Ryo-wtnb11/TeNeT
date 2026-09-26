@@ -75,7 +75,7 @@ fn device_diagonal_factors_transfer_only_what_the_host_decides_on() {
             assert!((device - host).abs() <= 1e-12 * host.abs().max(1.0));
         }
 
-        let hermitian = host.add(&host.adjoint().unwrap(), 1.0, 1.0).unwrap();
+        let hermitian = host.axpby(1.0, &host.adjoint().unwrap(), 1.0).unwrap();
         let device = hermitian.to_cuda().unwrap();
         let before = cuda_transfer_stats();
         let (d, v) = device.eigh_full().unwrap();

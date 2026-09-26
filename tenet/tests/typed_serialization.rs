@@ -531,7 +531,7 @@ fn checked_generic_multiplicity_keys_payload_and_resolver_arc_roundtrip() {
                 == (expected.re.to_bits(), expected.im.to_bits())
         }));
 
-    let hermitian = source.add(&source.adjoint().unwrap(), 1.0, 1.0).unwrap();
+    let hermitian = source.axpby(1.0, &source.adjoint().unwrap(), 1.0).unwrap();
     let factor = hermitian.eigh_full().unwrap().0;
     assert!(matches!(
         factor.network_reuse_class(false),
@@ -564,9 +564,9 @@ fn checked_generic_multiplicity_keys_payload_and_resolver_arc_roundtrip() {
     ));
 
     let complex_hermitian = complex
-        .add(
-            &complex.adjoint().unwrap(),
+        .axpby(
             Complex64::new(1.0, 0.0),
+            &complex.adjoint().unwrap(),
             Complex64::new(1.0, 0.0),
         )
         .unwrap();

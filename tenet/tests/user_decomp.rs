@@ -77,7 +77,11 @@ fn truncated_svd_restores_dropped_sector_in_non_dual_closed_space() {
         &[4.0, 0.0, 0.0, 3.0, 0.0, 2.0],
         4,
     );
-    let error = tensor.add(&recomposed, 1.0, -1.0).unwrap().norm().unwrap();
+    let error = tensor
+        .axpby(1.0, &recomposed, -1.0)
+        .unwrap()
+        .norm()
+        .unwrap();
     assert!((error - found.error).abs() < 1.0e-12);
 }
 

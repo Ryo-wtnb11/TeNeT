@@ -47,7 +47,7 @@ fn eigh_assembly_gemms_and_uploads_do_not_depend_on_the_tree_count() {
 
     let mut counts = Vec::new();
     for source in [one_tree, many_trees] {
-        let source = source.add(&source.adjoint().unwrap(), 1.0, 1.0).unwrap();
+        let source = source.axpby(1.0, &source.adjoint().unwrap(), 1.0).unwrap();
         let device = source.to_cuda().unwrap();
 
         let before = cuda_transfer_stats();

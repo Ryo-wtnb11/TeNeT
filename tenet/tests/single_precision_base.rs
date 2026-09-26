@@ -47,8 +47,8 @@ macro_rules! base_suite {
                 );
                 assert_payloads_agree(
                     "add",
-                    a.add(&b, scale, wide_of_one::<$narrow>()).unwrap().data(),
-                    wa.add(&wb, wide_scale, wide_of_one::<$wide>())
+                    a.axpby(scale, &b, wide_of_one::<$narrow>()).unwrap().data(),
+                    wa.axpby(wide_scale, &wb, wide_of_one::<$wide>())
                         .unwrap()
                         .data(),
                     2,

@@ -266,7 +266,7 @@ fn compact_norm_p_equals_the_dense_answer() {
     // `s`'s own storage.
     let twin = TensorMap::id(&rt, &s.domain())
         .unwrap()
-        .add(&s, 0.0, 1.0)
+        .axpby(0.0, &s, 1.0)
         .unwrap();
 
     for p in [1.0, 2.0, 3.0, 0.5, f64::INFINITY] {

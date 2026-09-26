@@ -94,7 +94,7 @@ macro_rules! assert_residual {
     ($what:expr, $actual:expr, $expected:expr, $terms:expr, $d:ty) => {{
         let expected = $expected;
         let residual = $actual
-            .add(expected, one::<$d>(), minus_one::<$d>())
+            .axpby(one::<$d>(), expected, minus_one::<$d>())
             .unwrap()
             .norm()
             .unwrap();

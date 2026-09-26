@@ -21,7 +21,7 @@ macro_rules! assert_close {
         let actual = $actual;
         let expected = $expected;
         let error = actual
-            .add(expected, 1.0.into(), (-1.0).into())
+            .axpby(1.0.into(), expected, (-1.0).into())
             .unwrap()
             .norm()
             .unwrap();
@@ -82,7 +82,7 @@ macro_rules! side_only_case {
             &null
                 .compose(&null_adjoint)
                 .unwrap()
-                .add(&t.compose(&pseudo).unwrap(), 1.0.into(), 1.0.into())
+                .axpby(1.0.into(), &t.compose(&pseudo).unwrap(), 1.0.into())
                 .unwrap(),
             &codomain_id
         );
@@ -97,7 +97,7 @@ macro_rules! side_only_case {
             &null_adjoint
                 .compose(&null)
                 .unwrap()
-                .add(&pseudo.compose(&t).unwrap(), 1.0.into(), 1.0.into())
+                .axpby(1.0.into(), &pseudo.compose(&t).unwrap(), 1.0.into())
                 .unwrap(),
             &domain_id
         );
@@ -173,7 +173,7 @@ macro_rules! full_qr_lq_bond_case {
         let rt = $rt;
         let owned_adjoint = |u: &TensorMap<_, $scalar>| {
             let adjoint = u.adjoint().unwrap();
-            adjoint.add(&adjoint, 1.0.into(), 0.0.into()).unwrap()
+            adjoint.axpby(1.0.into(), &adjoint, 0.0.into()).unwrap()
         };
         // Checked Generic has no `id`: a Hermitian map is the identity iff
         // every eigenvalue is one, and a count equal to the expected reduced
@@ -384,7 +384,7 @@ mod checked_generic {
             let rt = $rt;
             let owned_adjoint = |u: &TensorMap<_, $scalar>| {
                 let adjoint = u.adjoint().unwrap();
-                adjoint.add(&adjoint, 1.0.into(), 0.0.into()).unwrap()
+                adjoint.axpby(1.0.into(), &adjoint, 0.0.into()).unwrap()
             };
             let reduced = |space: &GradedSpace<_>| space.degeneracies().iter().sum::<usize>();
             let t: TensorMap<_, $scalar> =

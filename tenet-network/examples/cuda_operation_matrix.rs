@@ -995,7 +995,7 @@ mod device {
             match bench(
                 config,
                 "cold",
-                || lhs_device.add(rhs_device, alpha, beta),
+                || lhs_device.axpby(alpha, rhs_device, beta),
                 barrier,
             ) {
                 Err(reason) => skip_row(label("add_owned"), &reason),
@@ -1003,7 +1003,7 @@ mod device {
                     let (host_first, host_rows) = bench(
                         config,
                         "cold",
-                        || Ok::<_, Never>(lhs.add(rhs, alpha, beta).expect("Host add")),
+                        || Ok::<_, Never>(lhs.axpby(alpha, rhs, beta).expect("Host add")),
                         || {},
                     )
                     .expect("Host add arm");
@@ -1039,7 +1039,7 @@ mod device {
                     match bench(
                         config,
                         "cold",
-                        || lhs_adjoint.add(&rhs_adjoint, alpha, beta),
+                        || lhs_adjoint.axpby(alpha, &rhs_adjoint, beta),
                         barrier,
                     ) {
                         Err(reason) => skip_row(label("add_lazy_fold"), &reason),
@@ -1050,7 +1050,7 @@ mod device {
                                 || {
                                     Ok::<_, Never>(
                                         host_lhs
-                                            .add(&host_rhs, alpha, beta)
+                                            .axpby(alpha, &host_rhs, beta)
                                             .expect("Host lazy add"),
                                     )
                                 },

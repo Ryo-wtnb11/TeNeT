@@ -93,7 +93,7 @@ fn assert_residual<R, D>(
     D: FactorPayload,
 {
     let residual = actual
-        .add(expected, D::entry(1.0, 0.0), D::entry(-1.0, 0.0))
+        .axpby(D::entry(1.0, 0.0), expected, D::entry(-1.0, 0.0))
         .unwrap()
         .norm()
         .unwrap();

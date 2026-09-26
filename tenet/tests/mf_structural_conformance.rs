@@ -431,7 +431,7 @@ fn zn3_and_cu1_arithmetic_contraction_and_reductions_have_scalar_oracles() {
             let ordered = a.contract(&b, &[1], &[0], &[1, 0]).unwrap();
             let composed = a.compose(&b).unwrap();
             let tensor_product = a.otimes(&b).unwrap();
-            let sum = a.add(&b, 1.0, -1.0).unwrap();
+            let sum = a.axpby(1.0, &b, -1.0).unwrap();
             let scaled = a.scale(4.0);
             for output in [&ordered, &composed, &tensor_product, &sum, &scaled] {
                 assert!(std::ptr::eq(output.provider(), provider.as_ref()));
