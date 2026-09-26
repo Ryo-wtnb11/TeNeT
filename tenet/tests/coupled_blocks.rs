@@ -652,19 +652,20 @@ mod cuda {
     use tenet::typed::CudaStorage;
 
     /// The device view has the Host view's geometry, and the device region it
-    /// names holds the Host block's entries.
+    /// names holds the Host block's entries. The device buffer is read back
+    /// verbatim through `to_host`, which downloads the canonical payload (the
+    /// parent's, for a lazy adjoint) without relayout.
     fn device_case<R, D>(what: &str, host: &TensorMap<R, D>)
     where
         R: TypedSectorAdmission,
         R::Mode: tenet::typed::TypedTensorModeDispatch<R>,
         D: Val + tenet::typed::CudaPayload + tenet::dense::CudaScalar,
     {
-        let ctx = tenet::dense::CudaDenseContext::new(0).unwrap();
         let device: TensorMap<R, D, CudaStorage<D>> = host.to_cuda().unwrap();
+        let back = device.to_host().unwrap();
         let host_blocks: Vec<_> = host.blocks().unwrap().collect();
         let device_blocks: Vec<_> = device.blocks().unwrap().collect();
         assert_eq!(host_blocks.len(), device_blocks.len(), "{what}");
-        let mut downloaded = None;
         for ((sector, h), (device_sector, d)) in host_blocks.iter().zip(&device_blocks) {
             assert_eq!(sector, device_sector, "{what}");
             assert_eq!((h.rows(), h.cols()), (d.rows(), d.cols()), "{what}");
@@ -684,7 +685,19 @@ mod cuda {
                 panic!("{what}: dense views expected");
             };
             assert_eq!((host_offset, host_adjoint), (offset, adjoint), "{what}");
-            let data: &Vec<D> = downloaded.get_or_insert_with(|| storage.download(&ctx).unwrap());
+            let CoupledBlockPayload::Dense {
+                storage: downloaded,
+                ..
+            } = back.block(sector).unwrap().payload()
+            else {
+                panic!("{what}: dense download expected");
+            };
+            assert_eq!(
+                downloaded.len(),
+                tenet::core::TensorStorage::len(storage),
+                "{what}"
+            );
+            let data = downloaded.as_slice();
             let want = read(h);
             for c in 0..d.cols() {
                 for r in 0..d.rows() {
