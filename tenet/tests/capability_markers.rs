@@ -33,8 +33,6 @@ fn base_family<D: TensorScalar>(tensor: &TensorMap<U1FusionRule, D>) {
     let _ = tensor.otimes(tensor);
     let _ = tensor.trace_pairs(&[(0, 1)]);
     let _ = tensor.diagview();
-    let _ = tensor.is_hermitian(0.0);
-    let _ = tensor.is_unitary(0.0);
     let _ = tensor.subblocks();
 }
 
@@ -53,7 +51,6 @@ fn factorization_family<D: FactorizationScalar>(tensor: &TensorMap<U1FusionRule,
     let _ = tensor.right_null();
     let _ = tensor.left_polar();
     let _ = tensor.right_polar();
-    let _ = tensor.is_posdef(0.0);
 }
 
 /// Advanced linear algebra: needs [`AdvancedLinalgScalar`].

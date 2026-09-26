@@ -108,10 +108,7 @@
 //! issue #570
 //! — the **eigendecompositions** ([`TensorMap::eigh_full`],
 //! [`TensorMap::eigh_vals`], [`TensorMap::eig_full`], [`TensorMap::eig_vals`])
-//! and the **`is_hermitian` / `project_*` family** ([`TensorMap::is_hermitian`],
-//! [`TensorMap::is_antihermitian`], [`TensorMap::is_isometric`],
-//! [`TensorMap::is_unitary`], [`TensorMap::is_posdef`],
-//! [`TensorMap::project_hermitian`], [`TensorMap::project_antihermitian`]) and
+//! and
 //! — with issue #576 — the **matrix functions** ([`TensorMap::exp`],
 //! [`TensorMap::inv`], [`TensorMap::pinv`], [`TensorMap::sqrt`]) and — with
 //! issue #580 — the **typed inspection, scalar and conversion group**
@@ -431,7 +428,7 @@ impl TensorScalar for num_complex::Complex32 {}
 ///
 /// Adds, on top of [`TensorScalar`]: QR/LQ (compact and full), SVD (compact,
 /// full, values), Hermitian eigendecomposition (full, values), left/right
-/// null spaces, left/right polar, and the predicates that factorize ([`TensorMap::is_posdef`]).
+/// null spaces, and left/right polar.
 /// [`GradedSpace::find_truncated`] carries no payload and stays on
 /// [`TensorScalar`].
 ///
@@ -448,10 +445,12 @@ impl TensorScalar for num_complex::Complex32 {}
 /// (exactly widened) input only to `eps(real(D))`, not to `f64::EPSILON`:
 /// `f32::EPSILON` is `1.19e-7`, about `9e8` times coarser. Concretely,
 ///
-/// * every `tol` this crate takes is the caller's and has no default
-///   ([`TensorMap::is_posdef`], [`TensorMap::is_hermitian`],
-///   [`TensorMap::is_isometric`]). A `tol` chosen for `f64` — `1e-12` in most
-///   of the doctests here — rejects a perfectly good single-precision result.
+/// * every `tol` is the caller's and has no default. A residual test such as
+///   `t.axpby(1, &t.adjoint()?, -1)?.norm(2.0)? <= tol * t.norm(2.0)?.max(1.0)`
+///   (TensorKit `ishermitian`) sees a residual that an `f64` payload keeps
+///   near `1e-16` sit near `1e-7` in `f32`, so a `tol` chosen for `f64` —
+///   `1e-12` in most of the doctests here — rejects a perfectly good
+///   single-precision result.
 ///   Scale it with the payload: MatrixAlgebraKit's `defaulttol`
 ///   (`src/common/defaults.jl`) is `eps(real(T))^(2/3)`, which is `3.7e-11` at
 ///   `f64` and `2.4e-5` at `f32`; TensorKit's `isapprox` default is
@@ -543,24 +542,6 @@ impl TensorScalar for num_complex::Complex32 {}
 /// }
 /// ```
 ///
-/// and for [`TensorMap::is_posdef`], which is gated by a per-method `where`
-/// clause rather than by its impl block:
-///
-/// ```compile_fail
-/// use tenet::prelude::{TensorMap, TensorScalar, U1FusionRule};
-///
-/// fn base_only<D: TensorScalar>(tensor: &TensorMap<U1FusionRule, D>) {
-///     let _ = tensor.is_posdef(0.0);
-/// }
-/// ```
-///
-/// ```
-/// use tenet::prelude::{FactorizationScalar, TensorMap, U1FusionRule};
-///
-/// fn factorizing<D: FactorizationScalar>(tensor: &TensorMap<U1FusionRule, D>) {
-///     let _ = tensor.is_posdef(0.0);
-/// }
-/// ```
 /// This marker still does not *by itself* carry the device factorizations:
 /// those are `CudaFactorizationPayload`, which every payload of this marker now
 /// implements (<https://github.com/Ryo-wtnb11/TeNeT/issues/1341>), device QR
@@ -15361,7 +15342,7 @@ where
     /// tolerance uses `max_offdiag <= tol * max(norm(Inf), 1)`. Negative and
     /// non-finite tolerances are rejected before every shortcut.
     ///
-    /// Scale `tol` to the payload dtype, as [`Self::is_hermitian`] describes.
+    /// Scale `tol` to the payload dtype, as [`FactorizationScalar`] describes.
     pub(crate) fn is_diagonal(&self, tol: f64) -> Result<bool, Error> {
         if !tol.is_finite() || tol < 0.0 {
             return Err(Error::InvalidArgument(
@@ -17684,7 +17665,10 @@ where
     /// let t: TensorMap<_, f64> = TensorMap::rand(&runtime, [&v], [&v])?;
     ///
     /// let Svd { u, s, vh } = t.svd_compact()?;
-    /// assert!(u.is_isometric(1e-12)?);
+    /// // `u` is an isometry: `u† ∘ u` is the identity on its domain.
+    /// let gram = u.adjoint()?.compose(&u)?;
+    /// let identity = TensorMap::id(&runtime, &u.domain())?;
+    /// assert!(gram.axpby(1.0, &identity, -1.0)?.norm(2.0)? <= 1e-12 * gram.norm(2.0)?.max(1.0));
     /// let rebuilt = u.compose(&s)?.compose(&vh)?;
     /// let max_err = rebuilt
     ///     .data()
@@ -19244,145 +19228,8 @@ where
         )?))
     }
 
-    /// Whether the tensor equals its own adjoint within `tol`, relative to its
-    /// norm (TensorKit `ishermitian`).
-    ///
-    /// A non-endomorphism is never Hermitian and comes back `false` rather than
-    /// as an error; TensorKit throws. A predicate that can only be called after
-    /// another predicate is not one.
-    ///
-    /// `tol` has no default and must be scaled to the payload dtype: this
-    /// family of predicates compares a *residual norm* against `tol` times the
-    /// tensor's own norm, and a residual that an `f64` payload keeps near
-    /// `1e-16` sits near `1e-7` in `f32`. A `tol` copied from a
-    /// double-precision example therefore rejects a perfectly good
-    /// single-precision tensor. TensorKit's `isapprox` default is
-    /// `sqrt(eps(real(T)))` — about `1.5e-8` for `f64` and `3.5e-4` for `f32`
-    /// — and scaling a chosen `f64` tolerance by
-    /// `f32::EPSILON / f64::EPSILON` reproduces the same intent.
-    ///
-    /// # Errors
-    ///
-    /// [`Self::axpby`]'s and [`Self::adjoint`]'s, which is where the work happens.
-    pub fn is_hermitian(&self, tol: f64) -> Result<bool, Error> {
-        if !self.is_endomorphism() {
-            return Ok(false);
-        }
-        let difference =
-            self.add_multiplicity_free(&self.adjoint()?, D::from_real(1.0), D::from_real(-1.0))?;
-        Ok(difference.norm(2.0)? <= tol * self.norm(2.0)?.max(1.0))
-    }
-
-    /// Whether the tensor equals minus its own adjoint within `tol`
-    /// (TensorKit `isantihermitian`). A non-endomorphism is `false`, as for
-    /// [`Self::is_hermitian`], whose note on scaling `tol` to the payload
-    /// dtype applies here unchanged.
-    ///
-    /// # Errors
-    ///
-    /// Exactly [`Self::is_hermitian`]'s.
-    pub fn is_antihermitian(&self, tol: f64) -> Result<bool, Error> {
-        if !self.is_endomorphism() {
-            return Ok(false);
-        }
-        let sum =
-            self.add_multiplicity_free(&self.adjoint()?, D::from_real(1.0), D::from_real(1.0))?;
-        Ok(sum.norm(2.0)? <= tol * self.norm(2.0)?.max(1.0))
-    }
-
-    /// Whether `t† ∘ t` is the identity on the domain within `tol`
-    /// (TensorKit `isisometric`): the columns are orthonormal. Defined for any
-    /// shape, not only square ones.
-    ///
-    /// Scale `tol` to the payload dtype, as [`Self::is_hermitian`] describes.
-    ///
-    /// # Errors
-    ///
-    /// [`Self::adjoint`]'s, [`Self::compose`]'s and [`Self::id`]'s.
-    pub fn is_isometric(&self, tol: f64) -> Result<bool, Error> {
-        let gram = self.adjoint()?.compose(self)?;
-        let identity = Self::id(&self.runtime, &self.domain())?;
-        let difference =
-            gram.add_multiplicity_free(&identity, D::from_real(1.0), D::from_real(-1.0))?;
-        Ok(difference.norm(2.0)? <= tol * gram.norm(2.0)?.max(1.0))
-    }
-
-    /// Whether the tensor is unitary within `tol` (TensorKit `isunitary`):
-    /// isometric in both directions.
-    ///
-    /// # Errors
-    ///
-    /// Exactly [`Self::is_isometric`]'s.
-    pub fn is_unitary(&self, tol: f64) -> Result<bool, Error> {
-        Ok(self.is_isometric(tol)? && self.adjoint()?.is_isometric(tol)?)
-    }
-
-    /// Whether the tensor is Hermitian and positive definite (TensorKit
-    /// `isposdef`): every Hermitian eigenvalue exceeds `tol * max(norm, 1)`.
-    ///
-    /// Strict, like TensorKit's Cholesky-based test: a positive *semi*definite
-    /// spectrum — an eigenvalue at zero — is `false`. With `tol = 0.0` this is
-    /// exact strict positivity up to floating point.
-    ///
-    /// Scale `tol` to the payload dtype. The eigenvalues are computed in the
-    /// payload's working precision and only then widened to `f64`, so at
-    /// `f32`/`Complex32` a `tol` of `1e-12` is far below the noise of the
-    /// decomposition and this predicate decides on rounding error; see
-    /// [`FactorizationScalar`] for the scaling the references use. With
-    /// `tol = 0.0` a matrix whose smallest eigenvalue sits within
-    /// `eps(real(D))` of zero can answer either way at either precision.
-    ///
-    /// # Errors
-    ///
-    /// [`Self::is_hermitian`]'s and [`Self::eigh_vals`]'s.
-    pub fn is_posdef(&self, tol: f64) -> Result<bool, Error>
-    where
-        D: FactorizationScalar,
-    {
-        if !self.is_hermitian(tol)? {
-            return Ok(false);
-        }
-        let threshold = tol * self.norm(2.0)?.max(1.0);
-        // Compact arm: a spectrum factor's stored values *are* its Hermitian
-        // eigenvalues, so there is nothing to factorize and nothing to
-        // materialize (#585). The gate and the threshold above are already
-        // compact — `is_hermitian` and `norm` both read the spectrum — so this
-        // is the last step that reached `materialized_dense_data()`.
-        if let Some(spectrum) = self.spectrum() {
-            return Ok(crate::tensor_core::compact_is_posdef(spectrum, threshold));
-        }
-        Ok(self
-            .eigh_vals()?
-            .iter()
-            .flat_map(|spectrum| spectrum.values.iter())
-            .all(|&eigenvalue| eigenvalue > threshold))
-    }
-
-    /// The Hermitian part `(t + t†)/2` (TensorKit `project_hermitian`), the
-    /// nearest Hermitian tensor.
-    ///
-    /// # Errors
-    ///
-    /// [`Self::axpby`]'s — including [`Error::InvalidArgument`] when the tensor is
-    /// not an endomorphism, since then it and its adjoint live on different
-    /// spaces. Unlike [`Self::is_hermitian`] there is no `false` to return here.
-    pub fn project_hermitian(&self) -> Result<Self, Error> {
-        self.add_multiplicity_free(&self.adjoint()?, D::from_real(0.5), D::from_real(0.5))
-    }
-
-    /// The anti-Hermitian part `(t - t†)/2` (TensorKit
-    /// `project_antihermitian`).
-    ///
-    /// # Errors
-    ///
-    /// Exactly [`Self::project_hermitian`]'s.
-    pub fn project_antihermitian(&self) -> Result<Self, Error> {
-        self.add_multiplicity_free(&self.adjoint()?, D::from_real(0.5), D::from_real(-0.5))
-    }
-
-    /// Whether codomain and domain are the same product space — the
-    /// precondition every member of the family above tests against, and the
-    /// same comparison [`Self::tr`] makes.
+    /// Whether codomain and domain are the same product space — the same
+    /// comparison [`Self::tr`] makes.
     fn is_endomorphism(&self) -> bool {
         let hom = self.logical_space().space().homspace();
         hom.codomain().legs() == hom.domain().legs()
@@ -20174,6 +20021,14 @@ fn map_spectrum_dtype<A: Copy, B>(
 #[cfg(test)]
 mod representation_gates {
     use super::*;
+
+    include!("../tests/common/predicate_chains.rs");
+
+    impl<T: ScalarOps> ChainCoefficient for T {
+        fn real(value: f64) -> Self {
+            T::from_real(value)
+        }
+    }
 
     /// The pre-#1541 tuple order of a two-factor result, for the helpers
     /// below that treat QR/LQ and left/right polar factors uniformly.
@@ -23273,7 +23128,7 @@ mod representation_gates {
                     (left.widen_complex() - right.widen_complex()).norm() < 1e-12
                 }));
         }
-        assert!(actual.u.is_isometric(1e-12).unwrap());
+        assert!(is_isometric!(actual.u, 1e-12));
         let rebuilt = actual
             .u
             .compose(&actual.s)
@@ -23349,8 +23204,8 @@ mod representation_gates {
                     }));
             }
         }
-        assert!(actual.u.is_isometric(1e-12).unwrap());
-        assert!(actual.vh.is_isometric(1e-12).unwrap());
+        assert!(is_isometric!(actual.u, 1e-12));
+        assert!(is_isometric!(actual.vh, 1e-12));
         let rebuilt = actual
             .u
             .compose(&actual.s)
@@ -23474,9 +23329,9 @@ mod representation_gates {
             };
             assert!(residual.norm(2.0).unwrap() < 1e-10 * (1.0 + target.norm(2.0).unwrap()));
             assert!(if left {
-                actual.is_isometric(1e-11).unwrap()
+                is_isometric!(actual, 1e-11)
             } else {
-                actual.adjoint().unwrap().is_isometric(1e-11).unwrap()
+                is_isometric!(actual.adjoint().unwrap(), 1e-11)
             });
             let _ = actual.data();
         }
@@ -24219,11 +24074,11 @@ mod representation_gates {
             (&actual.0, &actual.1)
         };
         assert!(if left {
-            isometry.is_isometric(1e-11).unwrap()
+            is_isometric!(isometry, 1e-11)
         } else {
-            isometry.adjoint().unwrap().is_isometric(1e-11).unwrap()
+            is_isometric!(isometry.adjoint().unwrap(), 1e-11)
         });
-        assert!(positive.is_hermitian(1e-11).unwrap());
+        assert!(is_hermitian!(positive, 1e-11));
         assert!(positive
             .eigh_vals()
             .unwrap()
@@ -24833,8 +24688,8 @@ mod representation_gates {
             assert_typed_map_close(&actual, &expected, 1e-9);
             let pap = actual.compose(&eager).unwrap().compose(&actual).unwrap();
             assert_typed_map_close(&pap, &actual, 1e-8);
-            assert!(eager.compose(&actual).unwrap().is_hermitian(1e-9).unwrap());
-            assert!(actual.compose(&eager).unwrap().is_hermitian(1e-9).unwrap());
+            assert!(is_hermitian!(eager.compose(&actual).unwrap(), 1e-9));
+            assert!(is_hermitian!(actual.compose(&eager).unwrap(), 1e-9));
             if exact_original {
                 let apa = eager.compose(&actual).unwrap().compose(&eager).unwrap();
                 assert_typed_map_close(&apa, &eager, 1e-8);
@@ -25112,9 +24967,9 @@ mod representation_gates {
             }
         }
         let isometry = if qr {
-            actual.0.is_isometric(1e-12).unwrap()
+            is_isometric!(actual.0, 1e-12)
         } else {
-            actual.1.adjoint().unwrap().is_isometric(1e-12).unwrap()
+            is_isometric!(actual.1.adjoint().unwrap(), 1e-12)
         };
         assert!(isometry);
         let rebuilt = actual.0.compose(&actual.1).unwrap();
@@ -25402,7 +25257,7 @@ mod representation_gates {
                     (left.widen_complex() - right.widen_complex()).norm() < 1e-12
                 }));
         }
-        assert!(actual.u.is_isometric(1e-12).unwrap());
+        assert!(is_isometric!(actual.u, 1e-12));
         assert_eq!(materialized_adjoint_builds(&lazy), 0);
         assert!(view.materialized.get().is_none());
     }

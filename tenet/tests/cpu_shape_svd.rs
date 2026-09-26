@@ -1,3 +1,6 @@
+include!("common/predicate_chains.rs");
+include!("common/predicate_chain_coefficients.rs");
+
 use std::sync::Arc;
 
 use tenet::core::{U1FusionRule, U1Irrep};
@@ -43,8 +46,8 @@ fn truncated_svd_runtime_reuse_tracks_data_dependent_rank() {
             kept
         );
         assert_eq!(u.domain()[0].degeneracies(), &[kept]);
-        assert!(u.is_isometric(1.0e-12).unwrap());
-        assert!(vh.adjoint().unwrap().is_isometric(1.0e-12).unwrap());
+        assert!(is_isometric!(u, 1.0e-12));
+        assert!(is_isometric!(vh.adjoint().unwrap(), 1.0e-12));
 
         let reconstructed = u.compose(&s).unwrap().compose(&vh).unwrap();
         let residual = source

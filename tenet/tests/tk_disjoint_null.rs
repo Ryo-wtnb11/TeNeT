@@ -1,6 +1,9 @@
 //! Disjoint U(1) zero-map null-space completion against TensorKit `f87ca7f`
 //! (Project 0.17.1, Julia 1.11.6), oracle section 6.
 
+include!("common/predicate_chains.rs");
+include!("common/predicate_chain_coefficients.rs");
+
 use std::sync::Arc;
 
 use tenet::core::{U1FusionRule, U1Irrep};
@@ -25,8 +28,8 @@ fn direct_and_lazy_adjoint_disjoint_null_spaces_match_tensorkit() {
         assert_eq!(right.data().len(), right_dim * right_dim);
         assert!((left.norm(2.0).unwrap() - (left_dim as f64).sqrt()).abs() <= 1e-12);
         assert!((right.norm(2.0).unwrap() - (right_dim as f64).sqrt()).abs() <= 1e-12);
-        assert!(left.is_isometric(1e-12).unwrap());
-        assert!(right.adjoint().unwrap().is_isometric(1e-12).unwrap());
+        assert!(is_isometric!(left, 1e-12));
+        assert!(is_isometric!(right.adjoint().unwrap(), 1e-12));
         assert!(left
             .adjoint()
             .unwrap()

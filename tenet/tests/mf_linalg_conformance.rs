@@ -3,6 +3,9 @@
 //! These are deliberately public-API tests. They cover the residual provider
 //! fixtures in #1002, not every constructible `FusionRule` implementation.
 
+include!("common/predicate_chains.rs");
+include!("common/predicate_chain_coefficients.rs");
+
 use std::sync::Arc;
 
 use tenet::core::{
@@ -189,7 +192,7 @@ macro_rules! factor_conformance {
         assert_close!(&w.compose(&p).unwrap(), &tall);
         let id = TensorMap::id(&rt, w.domain().iter()).unwrap();
         assert_close!(&w.adjoint().unwrap().compose(&w).unwrap(), &id);
-        assert!(p.is_hermitian(1e-10).unwrap());
+        assert!(is_hermitian!(p, 1e-10));
         assert!(p
             .eigh_vals()
             .unwrap()
@@ -201,7 +204,7 @@ macro_rules! factor_conformance {
         assert_close!(&p.compose(&w).unwrap(), &wide);
         let id = TensorMap::id(&rt, w.codomain().iter()).unwrap();
         assert_close!(&w.compose(&w.adjoint().unwrap()).unwrap(), &id);
-        assert!(p.is_hermitian(1e-10).unwrap());
+        assert!(is_hermitian!(p, 1e-10));
         assert!(p
             .eigh_vals()
             .unwrap()
