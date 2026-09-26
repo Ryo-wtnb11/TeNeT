@@ -14,8 +14,9 @@
 //! **Why a fixed CPU budget.** Scaling numbers only mean something if the
 //! outer threads are the ONLY source of parallelism — otherwise inner BLAS /
 //! rayon threads confound the arithmetic. So the harness pins the dense
-//! backend to 1 thread (`.dense_threads(1)`, which also caps the global rayon
-//! pool at 1) and expects `RAYON_NUM_THREADS=1` in the environment. Backend is
+//! runtime to 1 thread (`.dense_threads(1)`: its one CPU pool runs dense,
+//! replay and strided work, so none of it fans out) and expects
+//! `RAYON_NUM_THREADS=1` in the environment for any other Rayon user. Backend is
 //! the default single-threaded faer GEMM (no `blas-*` feature). Every core the
 //! run uses comes from an outer thread, nothing else.
 //!
@@ -88,8 +89,8 @@ fn contract_once(
 }
 
 fn build_runtime() -> Runtime {
-    // dense_threads(1): single-threaded faer GEMM AND caps the global rayon
-    // pool at 1 (best-effort, once per process) — the fixed CPU budget.
+    // dense_threads(1): the runtime's one CPU pool has a single worker, so
+    // GEMM, replay and strided work stay serial — the fixed CPU budget.
     Runtime::builder()
         .dense_threads(1)
         .build()

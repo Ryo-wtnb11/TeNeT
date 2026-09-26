@@ -111,6 +111,8 @@ pub use physical::{
 /// CUDA storage and GEMM seams (flat device buffers, never host-readable).
 #[cfg(feature = "cuda")]
 pub use tenet_operations::cuda;
+#[doc(hidden)]
+pub use tenet_operations::host_pool;
 pub use tenet_operations::ContractDestinationInit;
 pub use tenet_operations::OperationError;
 pub use tenet_operations::ReportsPlacement;
