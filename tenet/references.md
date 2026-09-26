@@ -173,6 +173,9 @@ upstream location (the note says why).
 | `typed::TensorMap::left_polar` | TensorKit | 0.17.0 | `factorizations/diagonal.jl:8-14` | `DiagonalTensorMap` gets only `copy_input` for the polars — no diagonal polar specialization |
 | `typed::TensorMap::leg_dims` | TensorKit | 0.17.0 | `tensors/abstracttensor.jl:196-201` | `space(t, i)` |
 | `typed::TensorMap::lq_compact` | TensorKit | 0.17.0 | `factorizations/diagonal.jl:29-41,61-66` | divergence: TK's `DiagonalAlgorithm` LQ fast path not adopted (#613 Group 4) |
+| `typed::TensorMap::materialize` | TensorKit | 0.17.1 | `tensors/linalg.jl:3,196-201`, `tensors/adjoint.jl:28` | `copy(adjoint(t)) = copy!(similar(t), t)`: one allocation, one conjugate transpose per coupled block |
+| `typed::TensorMap::materialize` | TensorKit | 0.17.1 | `tensors/tensor.jl:431` | `copy(::TensorMap)`: fresh storage for an owned dense input |
+| `typed::TensorMap::materialize` | TensorKit | 0.17.1 | `tensors/diagonal.jl:111-121` | divergence: `copy(::DiagonalTensorMap)` stays diagonal; `materialize` densifies, as `TensorMap(d)` does |
 | `typed::TensorMap::norm` | TensorKit | 0.17.0 | `tensors/linalg.jl:257-275` | `norm(t, p)` and the `_norm` block reduction |
 | `typed::TensorMap::qr_compact` | TensorKit | 0.17.0 | `factorizations/diagonal.jl:16-28,61-66` | divergence: TK's `DiagonalAlgorithm` QR fast path not adopted (#613 Group 4) |
 | `typed::TensorMap::qr_full` | TensorKit | 0.17.0 | `factorizations/diagonal.jl:16-28,61-66` | same non-adoption as `qr_compact` |

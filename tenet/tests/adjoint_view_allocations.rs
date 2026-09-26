@@ -664,3 +664,38 @@ fn first_lazy_materialization_allocates_once_per_payload_not_per_block() {
     // block count (before #1201: 3 + 6 per block).
     assert_eq!(reference, Some(3));
 }
+
+#[test]
+fn materialize_allocates_one_fresh_payload_per_call() {
+    let _measurement = MEASUREMENT_LOCK.lock().unwrap();
+    // What: `materialize` (#1545) of an owned dense tensor or a lazy adjoint
+    // costs one payload allocation plus the two fixed body wrappers, whatever
+    // the block count, on every call: the result never shares a payload, so a
+    // repeated call cannot be free. It also leaves the adjoint's `data()`
+    // cache cold.
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    for (rank, radius, degeneracy) in [(2, 0, 8), (2, 6, 2), (4, 3, 2), (6, 1, 2)] {
+        let source = tensor(
+            &runtime,
+            (-radius..=radius).map(|charge| (charge, degeneracy)),
+            rank,
+        );
+        let payload_bytes = std::mem::size_of_val(source.data()) as u64;
+        let lazy = source.adjoint().unwrap();
+        for input in [&source, &lazy, &source, &lazy] {
+            let (allocations, bytes) = measure(|| {
+                black_box(input.materialize().unwrap());
+            });
+            // Payload `Vec`, its `Arc<TypedData>` and the `Arc<TypedTensorBody>`.
+            assert_eq!(allocations, 3, "rank={rank}, radius={radius}");
+            assert!(
+                bytes >= payload_bytes && bytes < payload_bytes + 256,
+                "rank={rank}, radius={radius}: {bytes} bytes for a {payload_bytes}-byte payload"
+            );
+        }
+        let (allocations, _) = measure(|| {
+            black_box(lazy.data().len());
+        });
+        assert_eq!(allocations, 3, "the first data() still builds its cache");
+    }
+}
