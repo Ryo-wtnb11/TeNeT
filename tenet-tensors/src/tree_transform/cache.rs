@@ -7,19 +7,23 @@ use std::sync::{Arc, Mutex, Weak};
 use num_traits::Zero;
 use rustc_hash::FxHashMap;
 use tenet_core::{
-    BlockStructure, CategoricalScalar, FusionTreePairKey, FusionTreePairOrientation,
-    GenericRigidSymbols, HomSpaceId, LocallyValidatedFusionTreeBlockStructure,
-    MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols, RuleIdentity, TensorMap,
-    TensorStorage, WeakHomSpaceId,
+    BlockStructure, BlockStructureContent, CategoricalScalar, FusionTreePairKey,
+    FusionTreePairOrientation, GenericRigidSymbols, HomSpaceId,
+    LocallyValidatedFusionTreeBlockStructure, MultiplicityFreeFusionSymbols,
+    MultiplicityFreeRigidSymbols, RuleIdentity, TensorMap, TensorStorage, WeakHomSpaceId,
 };
 
 use crate::cache::{BlockStructureCacheKey, OperationCachePolicy, TreeTransformStructureCacheKey};
-use crate::{OperationError, TreeTransformStructure, TreeTransformStructureCache};
+use crate::{
+    OperationError, TreeTransformGroupBlockSpec, TreeTransformGroupPlan, TreeTransformStructure,
+    TreeTransformStructureCache,
+};
 
 use super::operation::{TreeTransformOperation, TreeTransformRuleCacheKey};
 use super::plan::{
     build_all_codomain_tree_transform_group_plan_validated_with_threads,
     build_generic_tree_pair_transform_group_plan_validated,
+    build_multiplicity_free_tree_pair_plan_after_capability_with_threads,
     build_oriented_tree_pair_transform_group_plan_with_threads,
     compile_multiplicity_free_tree_pair_structure_after_capability_with_threads,
     compile_multiplicity_free_tree_pair_structure_with_threads,
@@ -100,35 +104,297 @@ impl RuntimeLayoutIdentity {
     }
 }
 
-struct RuntimeTreeTransformStoreState<T> {
-    entries: lru::LruCache<
-        RuntimeTreeTransformKey,
-        RuntimeTreeTransformStoreEntry<T>,
-        rustc_hash::FxBuildHasher,
-    >,
+/// Degeneracy-free identity of one block structure.
+///
+/// Equality and hashing read only [`SectorStructure`](tenet_core::SectorStructure):
+/// the rank and the ordered block keys, whose fusion-tree pairs carry every
+/// leg's sector and dual flag, the coupled sector, inner lines and vertices.
+/// Why hold the interned content rather than a `SectorStructure` clone: every
+/// completed-structure miss probes the plan tier, and a clone allocates per
+/// block. The retained degeneracy part is charged, never compared.
+#[derive(Clone, Debug)]
+struct SectorKey(Arc<BlockStructureContent>);
+
+impl SectorKey {
+    fn of(structure: &BlockStructure) -> Self {
+        Self(structure.content_key())
+    }
+}
+
+impl PartialEq for SectorKey {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0) || self.0.sector_structure() == other.0.sector_structure()
+    }
+}
+
+impl Eq for SectorKey {}
+
+impl Hash for SectorKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        let sector = self.0.sector_structure();
+        sector.rank().hash(state);
+        sector.block_count().hash(state);
+        for block in sector.blocks() {
+            block.key().hash(state);
+        }
+    }
+}
+
+/// Key of one categorical [`TreeTransformGroupPlan`]: everything the plan and
+/// its key-only preflight read, and no degeneracy, offset or intern id.
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+struct CategoricalTransformKey {
+    rule: RuleIdentity,
+    operation: TreeTransformOperation,
+    orientation: FusionTreePairOrientation,
+    // Why keep it although no plan builder reads it: the key mirrors the
+    // completed-structure key, so it can only split entries, never merge two.
+    storage_conjugate: bool,
+    dst: SectorKey,
+    src: SectorKey,
+    logical_source: Option<SectorKey>,
+}
+
+impl CategoricalTransformKey {
+    fn new(
+        rule: RuleIdentity,
+        operation: &TreeTransformOperation,
+        orientation: FusionTreePairOrientation,
+        storage_conjugate: bool,
+        dst: &BlockStructure,
+        src: &BlockStructure,
+        logical_source: Option<&BlockStructure>,
+    ) -> Self {
+        Self {
+            rule,
+            operation: operation.clone(),
+            orientation,
+            storage_conjugate,
+            dst: SectorKey::of(dst),
+            src: SectorKey::of(src),
+            logical_source: logical_source.map(SectorKey::of),
+        }
+    }
+
+    fn charged_bytes(&self) -> usize {
+        let mut seen = rustc_hash::FxHashSet::default();
+        let mut bytes = core::mem::size_of::<Self>()
+            .saturating_add(self.rule.charged_retained_bytes())
+            .saturating_add(self.operation.charged_retained_bytes());
+        for content in [
+            Some(&self.dst),
+            Some(&self.src),
+            self.logical_source.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if seen.insert(Arc::as_ptr(&content.0) as usize) {
+                bytes = bytes.saturating_add(content.0.charged_retained_bytes());
+            }
+        }
+        bytes
+    }
+}
+
+fn charged_plan_bytes<T>(plan: &TreeTransformGroupPlan<T>) -> usize {
+    const ARC_CONTROL_BYTES: usize = 2 * core::mem::size_of::<usize>();
+    let key_bytes = core::mem::size_of::<FusionTreePairKey>();
+    let mut backings = rustc_hash::FxHashSet::default();
+    let mut bytes = core::mem::size_of::<TreeTransformGroupPlan<T>>()
+        .saturating_add(ARC_CONTROL_BYTES)
+        .saturating_add(
+            plan.specs()
+                .len()
+                .saturating_mul(core::mem::size_of::<TreeTransformGroupBlockSpec<T>>()),
+        );
+    let mut coefficient_count = 0usize;
+    // ponytail: every spec is charged as if its keys and coefficients were
+    // heap vectors (`Single` keeps them inline); over-charging is the contract.
+    for spec in plan.specs() {
+        let coefficients = spec.recoupling_coefficients_dst_src().len();
+        coefficient_count = coefficient_count.saturating_add(coefficients);
+        bytes = bytes
+            .saturating_add(
+                (spec.dst_keys().len().saturating_add(spec.src_keys().len()))
+                    .saturating_mul(key_bytes),
+            )
+            .saturating_add(coefficients.saturating_mul(core::mem::size_of::<T>()))
+            .saturating_add(spec.group_key().charge_retained_backings(&mut backings));
+        for key in spec.dst_keys().iter().chain(spec.src_keys()) {
+            bytes = bytes.saturating_add(key.charge_retained_backings(&mut backings));
+        }
+        if let Some(axes) = spec.source_axes() {
+            if backings.insert(axes.as_ptr() as usize) {
+                bytes = bytes
+                    .saturating_add(ARC_CONTROL_BYTES)
+                    .saturating_add(axes.len().saturating_mul(core::mem::size_of::<usize>()));
+            }
+        }
+    }
+    // Why charge the flattened payload before it exists: the first layout
+    // binding may materialize it after admission, and a charge never grows.
+    bytes
+        .saturating_add(ARC_CONTROL_BYTES)
+        .saturating_add(coefficient_count.saturating_mul(core::mem::size_of::<T>()))
+}
+
+/// A cache value whose admission charge is fixed at insertion.
+trait RuntimeCacheCharge {
+    fn charged_bytes(&self) -> usize;
+}
+
+impl<T> RuntimeCacheCharge for RuntimeTreeTransformStoreEntry<T> {
+    fn charged_bytes(&self) -> usize {
+        self.charged_bytes
+    }
+}
+
+#[derive(Clone)]
+struct RuntimePlanEntry<T> {
+    plan: Arc<TreeTransformGroupPlan<T>>,
+    charged_bytes: usize,
+}
+
+impl<T> RuntimeCacheCharge for RuntimePlanEntry<T> {
+    fn charged_bytes(&self) -> usize {
+        self.charged_bytes
+    }
+}
+
+/// Which Runtime-wide ledger account a tier charges.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RuntimeCacheAccount {
+    Structures,
+    Plans,
+}
+
+/// One bounded LRU tier of a typed Runtime store.
+struct RuntimeCacheTier<K, V> {
+    entries: lru::LruCache<K, V, rustc_hash::FxBuildHasher>,
+    account: RuntimeCacheAccount,
     entry_capacity: usize,
     byte_budget: usize,
     max_entry_bytes: usize,
     charged_payload_bytes: usize,
-    generation: u64,
     hits: usize,
     misses: usize,
     evictions: usize,
     admission_bypasses: usize,
 }
 
+impl<K: Hash + Eq, V: RuntimeCacheCharge> RuntimeCacheTier<K, V> {
+    fn new(
+        account: RuntimeCacheAccount,
+        entry_capacity: usize,
+        byte_budget: usize,
+        max_entry_bytes: usize,
+    ) -> Self {
+        Self {
+            entries: lru::LruCache::with_hasher(
+                NonZeroUsize::new(entry_capacity)
+                    .expect("tree-transform cache capacity is nonzero"),
+                rustc_hash::FxBuildHasher,
+            ),
+            account,
+            entry_capacity,
+            byte_budget,
+            max_entry_bytes,
+            charged_payload_bytes: 0,
+            hits: 0,
+            misses: 0,
+            evictions: 0,
+            admission_bypasses: 0,
+        }
+    }
+
+    fn info(&self) -> RuntimeTreeTransformCacheInfo {
+        RuntimeTreeTransformCacheInfo {
+            entries: self.entries.len(),
+            entry_capacity: self.entry_capacity,
+            charged_payload_bytes: self.charged_payload_bytes,
+            byte_budget: self.byte_budget,
+            hits: self.hits,
+            misses: self.misses,
+            evictions: self.evictions,
+            admission_bypasses: self.admission_bypasses,
+        }
+    }
+
+    fn clear(&mut self, ledger: &RuntimeTreeTransformCacheLedger) {
+        ledger.release(self.account, self.entries.len(), self.charged_payload_bytes);
+        self.entries.clear();
+        self.charged_payload_bytes = 0;
+        self.hits = 0;
+        self.misses = 0;
+        self.evictions = 0;
+        self.admission_bypasses = 0;
+    }
+
+    fn evict_lru(&mut self, ledger: &RuntimeTreeTransformCacheLedger) -> bool {
+        let Some((_, evicted)) = self.entries.pop_lru() else {
+            return false;
+        };
+        let charged = evicted.charged_bytes();
+        self.charged_payload_bytes = self.charged_payload_bytes.saturating_sub(charged);
+        self.evictions = self.evictions.saturating_add(1);
+        ledger.release(self.account, 1, charged);
+        true
+    }
+
+    /// Admits `value` under the local and Runtime-wide limits, evicting LRU
+    /// entries as needed. Returns `false` when the value bypassed retention.
+    fn insert(&mut self, ledger: &RuntimeTreeTransformCacheLedger, key: K, value: V) -> bool {
+        let charged = value.charged_bytes();
+        if charged > self.max_entry_bytes || charged > self.byte_budget {
+            self.admission_bypasses = self.admission_bypasses.saturating_add(1);
+            return false;
+        }
+        while self.entries.len() == self.entry_capacity
+            || self.charged_payload_bytes.saturating_add(charged) > self.byte_budget
+        {
+            if !self.evict_lru(ledger) {
+                break;
+            }
+        }
+        while !ledger.try_reserve(self.account, charged) {
+            if !self.evict_lru(ledger) {
+                self.admission_bypasses = self.admission_bypasses.saturating_add(1);
+                return false;
+            }
+        }
+        self.charged_payload_bytes = self.charged_payload_bytes.saturating_add(charged);
+        self.entries.put(key, value);
+        true
+    }
+}
+
+struct RuntimeTreeTransformStoreState<T> {
+    structures: RuntimeCacheTier<RuntimeTreeTransformKey, RuntimeTreeTransformStoreEntry<T>>,
+    plans: RuntimeCacheTier<CategoricalTransformKey, RuntimePlanEntry<T>>,
+    generation: u64,
+}
+
 const DEFAULT_RUNTIME_TREE_TRANSFORM_CACHE_ENTRIES: usize = 256;
 const DEFAULT_RUNTIME_TREE_TRANSFORM_CACHE_MAX_ENTRY_BYTES: usize = 8 * 1024 * 1024;
 const RUNTIME_TREE_TRANSFORM_LRU_NODE_ALLOWANCE: usize = 8 * core::mem::size_of::<usize>();
 
-/// One Runtime-owned store for completed immutable tree-pair structures.
+/// One Runtime-owned store for immutable tree-transform data of one
+/// coefficient dtype, in two tiers:
+///
+/// - completed [`TreeTransformStructure`]s, keyed on the exact source and
+///   destination layouts;
+/// - categorical [`TreeTransformGroupPlan`]s, keyed on rule, operation and the
+///   sector structures only. A completed-structure miss whose sector structure
+///   was seen before binds the cached plan to the new layout instead of
+///   recomputing recoupling coefficients.
 #[doc(hidden)]
 pub struct RuntimeTreeTransformStore<T> {
     state: Mutex<RuntimeTreeTransformStoreState<T>>,
     ledger: Arc<RuntimeTreeTransformCacheLedger>,
 }
 
-/// Snapshot of one Runtime's completed tree-transform cache.
+/// Snapshot of one tier of a Runtime's tree-transform cache.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RuntimeTreeTransformCacheInfo {
     entries: usize,
@@ -147,16 +413,24 @@ struct RuntimeTreeTransformCacheLedgerState {
     charged_payload_bytes: usize,
 }
 
+impl RuntimeTreeTransformCacheLedgerState {
+    const EMPTY: Self = Self {
+        entries: 0,
+        charged_payload_bytes: 0,
+    };
+}
+
 /// Shared cold-path accounting for Runtime-owned typed transform stores.
 ///
-/// Each coefficient dtype keeps its own typed LRU. This ledger only makes the
-/// configured entry and byte limits one Runtime-wide limit; warm lookup never
-/// locks it.
+/// Each coefficient dtype keeps its own typed LRUs. This ledger only makes the
+/// configured entry and byte limits one Runtime-wide limit per tier; warm
+/// lookup never locks it.
 #[doc(hidden)]
 pub struct RuntimeTreeTransformCacheLedger {
     entry_capacity: usize,
     byte_budget: usize,
     state: Mutex<RuntimeTreeTransformCacheLedgerState>,
+    plan_state: Mutex<RuntimeTreeTransformCacheLedgerState>,
 }
 
 impl RuntimeTreeTransformCacheInfo {
@@ -181,6 +455,8 @@ impl RuntimeTreeTransformCacheInfo {
         self.hits
     }
 
+    /// Lookups that found no entry. For the categorical tier this is the
+    /// number of plan rebuilds.
     pub fn misses(self) -> usize {
         self.misses
     }
@@ -208,18 +484,25 @@ impl RuntimeTreeTransformCacheLedger {
         Self {
             entry_capacity,
             byte_budget,
-            state: Mutex::new(RuntimeTreeTransformCacheLedgerState {
-                entries: 0,
-                charged_payload_bytes: 0,
-            }),
+            state: Mutex::new(RuntimeTreeTransformCacheLedgerState::EMPTY),
+            plan_state: Mutex::new(RuntimeTreeTransformCacheLedgerState::EMPTY),
         }
     }
 
-    fn try_reserve(&self, charged_bytes: usize) -> bool {
-        let mut state = self
-            .state
-            .lock()
-            .expect("runtime tree-transform cache ledger poisoned");
+    fn account(
+        &self,
+        account: RuntimeCacheAccount,
+    ) -> std::sync::MutexGuard<'_, RuntimeTreeTransformCacheLedgerState> {
+        match account {
+            RuntimeCacheAccount::Structures => &self.state,
+            RuntimeCacheAccount::Plans => &self.plan_state,
+        }
+        .lock()
+        .expect("runtime tree-transform cache ledger poisoned")
+    }
+
+    fn try_reserve(&self, account: RuntimeCacheAccount, charged_bytes: usize) -> bool {
+        let mut state = self.account(account);
         if state.entries == self.entry_capacity
             || state.charged_payload_bytes.saturating_add(charged_bytes) > self.byte_budget
         {
@@ -230,13 +513,45 @@ impl RuntimeTreeTransformCacheLedger {
         true
     }
 
-    fn release(&self, entries: usize, charged_bytes: usize) {
-        let mut state = self
-            .state
-            .lock()
-            .expect("runtime tree-transform cache ledger poisoned");
+    fn release(&self, account: RuntimeCacheAccount, entries: usize, charged_bytes: usize) {
+        let mut state = self.account(account);
         state.entries = state.entries.saturating_sub(entries);
         state.charged_payload_bytes = state.charged_payload_bytes.saturating_sub(charged_bytes);
+    }
+
+    fn pair_info(
+        &self,
+        account: RuntimeCacheAccount,
+        first: RuntimeTreeTransformCacheInfo,
+        second: Option<RuntimeTreeTransformCacheInfo>,
+    ) -> RuntimeTreeTransformCacheInfo {
+        let state = self.account(account);
+        let mut combined = RuntimeTreeTransformCacheInfo {
+            entries: state.entries,
+            entry_capacity: self.entry_capacity,
+            charged_payload_bytes: state.charged_payload_bytes,
+            byte_budget: self.byte_budget,
+            ..RuntimeTreeTransformCacheInfo::default()
+        };
+        for store in [Some(first), second].into_iter().flatten() {
+            combined.hits = combined.hits.saturating_add(store.hits);
+            combined.misses = combined.misses.saturating_add(store.misses);
+            combined.evictions = combined.evictions.saturating_add(store.evictions);
+            combined.admission_bypasses = combined
+                .admission_bypasses
+                .saturating_add(store.admission_bypasses);
+        }
+        combined
+    }
+
+    fn same_store<T, U>(
+        first: &RuntimeTreeTransformStore<T>,
+        second: &RuntimeTreeTransformStore<U>,
+    ) -> bool {
+        std::ptr::eq(
+            first as *const RuntimeTreeTransformStore<T> as *const (),
+            second as *const RuntimeTreeTransformStore<U> as *const (),
+        )
     }
 
     /// Aggregates two typed-store metric snapshots while reporting shared
@@ -248,66 +563,19 @@ impl RuntimeTreeTransformCacheLedger {
         first: &RuntimeTreeTransformStore<T>,
         second: &RuntimeTreeTransformStore<U>,
     ) -> RuntimeTreeTransformCacheInfo {
-        let first_info = first.info();
-        let same_store = std::ptr::eq(
-            first as *const RuntimeTreeTransformStore<T> as *const (),
-            second as *const RuntimeTreeTransformStore<U> as *const (),
-        );
-        let second_info = (!same_store).then(|| second.info());
-        let state = self
-            .state
-            .lock()
-            .expect("runtime tree-transform cache ledger poisoned");
-        let mut combined = RuntimeTreeTransformCacheInfo {
-            entries: state.entries,
-            entry_capacity: self.entry_capacity,
-            charged_payload_bytes: state.charged_payload_bytes,
-            byte_budget: self.byte_budget,
-            ..RuntimeTreeTransformCacheInfo::default()
-        };
-        for store in [Some(first_info), second_info].into_iter().flatten() {
-            combined.hits = combined.hits.saturating_add(store.hits);
-            combined.misses = combined.misses.saturating_add(store.misses);
-            combined.evictions = combined.evictions.saturating_add(store.evictions);
-            combined.admission_bypasses = combined
-                .admission_bypasses
-                .saturating_add(store.admission_bypasses);
-        }
-        combined
-    }
-}
-
-impl<T> RuntimeTreeTransformStoreState<T> {
-    fn new(entry_capacity: usize, byte_budget: usize, max_entry_bytes: usize) -> Self {
-        Self {
-            entries: lru::LruCache::with_hasher(
-                NonZeroUsize::new(entry_capacity)
-                    .expect("tree-transform cache capacity is nonzero"),
-                rustc_hash::FxBuildHasher,
-            ),
-            entry_capacity,
-            byte_budget,
-            max_entry_bytes,
-            charged_payload_bytes: 0,
-            generation: 0,
-            hits: 0,
-            misses: 0,
-            evictions: 0,
-            admission_bypasses: 0,
-        }
+        let second_info = (!Self::same_store(first, second)).then(|| second.info());
+        self.pair_info(RuntimeCacheAccount::Structures, first.info(), second_info)
     }
 
-    fn info(&self) -> RuntimeTreeTransformCacheInfo {
-        RuntimeTreeTransformCacheInfo {
-            entries: self.entries.len(),
-            entry_capacity: self.entry_capacity,
-            charged_payload_bytes: self.charged_payload_bytes,
-            byte_budget: self.byte_budget,
-            hits: self.hits,
-            misses: self.misses,
-            evictions: self.evictions,
-            admission_bypasses: self.admission_bypasses,
-        }
+    /// Categorical-plan sibling of [`Self::store_pair_info`].
+    #[doc(hidden)]
+    pub fn plan_pair_info<T, U>(
+        &self,
+        first: &RuntimeTreeTransformStore<T>,
+        second: &RuntimeTreeTransformStore<U>,
+    ) -> RuntimeTreeTransformCacheInfo {
+        let second_info = (!Self::same_store(first, second)).then(|| second.plan_info());
+        self.pair_info(RuntimeCacheAccount::Plans, first.plan_info(), second_info)
     }
 }
 
@@ -341,38 +609,51 @@ impl<T> RuntimeTreeTransformStore<T> {
         ledger: Arc<RuntimeTreeTransformCacheLedger>,
         max_entry_bytes: usize,
     ) -> Self {
+        let (capacity, budget) = (ledger.entry_capacity, ledger.byte_budget);
+        let structures = RuntimeCacheTier::new(
+            RuntimeCacheAccount::Structures,
+            capacity,
+            budget,
+            max_entry_bytes,
+        );
+        let plans = RuntimeCacheTier::new(
+            RuntimeCacheAccount::Plans,
+            capacity,
+            budget,
+            max_entry_bytes,
+        );
         Self {
-            state: Mutex::new(RuntimeTreeTransformStoreState::new(
-                ledger.entry_capacity,
-                ledger.byte_budget,
-                max_entry_bytes,
-            )),
+            state: Mutex::new(RuntimeTreeTransformStoreState {
+                structures,
+                plans,
+                generation: 0,
+            }),
             ledger,
         }
     }
 
-    pub fn info(&self) -> RuntimeTreeTransformCacheInfo {
+    fn lock(&self) -> std::sync::MutexGuard<'_, RuntimeTreeTransformStoreState<T>> {
         self.state
             .lock()
             .expect("runtime tree-transform store poisoned")
-            .info()
     }
 
+    /// Completed-structure tier activity.
+    pub fn info(&self) -> RuntimeTreeTransformCacheInfo {
+        self.lock().structures.info()
+    }
+
+    /// Categorical-plan tier activity; `misses` counts plan rebuilds.
+    pub fn plan_info(&self) -> RuntimeTreeTransformCacheInfo {
+        self.lock().plans.info()
+    }
+
+    /// Clears both tiers and their counters.
     pub fn clear(&self) {
-        let mut state = self
-            .state
-            .lock()
-            .expect("runtime tree-transform store poisoned");
-        let entries = state.entries.len();
-        let charged_payload_bytes = state.charged_payload_bytes;
+        let mut state = self.lock();
         state.generation = state.generation.wrapping_add(1);
-        state.entries.clear();
-        state.charged_payload_bytes = 0;
-        state.hits = 0;
-        state.misses = 0;
-        state.evictions = 0;
-        state.admission_bypasses = 0;
-        self.ledger.release(entries, charged_payload_bytes);
+        state.structures.clear(&self.ledger);
+        state.plans.clear(&self.ledger);
     }
 
     fn charged_entry_bytes(
@@ -403,21 +684,30 @@ impl<T> RuntimeTreeTransformStore<T> {
             .saturating_add(RUNTIME_TREE_TRANSFORM_LRU_NODE_ALLOWANCE)
     }
 
+    fn charged_plan_entry_bytes(
+        key: &CategoricalTransformKey,
+        plan: &TreeTransformGroupPlan<T>,
+    ) -> usize {
+        key.charged_bytes()
+            .saturating_add(core::mem::size_of::<RuntimePlanEntry<T>>())
+            .saturating_add(charged_plan_bytes(plan))
+            .saturating_add(RUNTIME_TREE_TRANSFORM_LRU_NODE_ALLOWANCE)
+    }
+
     fn lookup(
         &self,
         key: &RuntimeTreeTransformKey,
     ) -> (Option<Arc<TreeTransformStructure<T>>>, u64) {
-        let mut state = self
-            .state
-            .lock()
-            .expect("runtime tree-transform store poisoned");
-        if let Some(entry) = state.entries.get(key) {
+        let mut state = self.lock();
+        let generation = state.generation;
+        let tier = &mut state.structures;
+        if let Some(entry) = tier.entries.get(key) {
             let structure = Arc::clone(&entry.structure);
-            state.hits = state.hits.saturating_add(1);
-            return (Some(structure), state.generation);
+            tier.hits = tier.hits.saturating_add(1);
+            return (Some(structure), generation);
         }
-        state.misses = state.misses.saturating_add(1);
-        (None, state.generation)
+        tier.misses = tier.misses.saturating_add(1);
+        (None, generation)
     }
 
     fn admit(
@@ -427,45 +717,15 @@ impl<T> RuntimeTreeTransformStore<T> {
         generation: u64,
     ) -> Arc<TreeTransformStructure<T>> {
         let charged_bytes = Self::charged_entry_bytes(&key, &structure);
-        let mut state = self
-            .state
-            .lock()
-            .expect("runtime tree-transform store poisoned");
-        if let Some(entry) = state.entries.get(&key) {
+        let mut state = self.lock();
+        if let Some(entry) = state.structures.entries.get(&key) {
             return Arc::clone(&entry.structure);
         }
         if state.generation != generation {
             return structure;
         }
-        if charged_bytes > state.max_entry_bytes || charged_bytes > state.byte_budget {
-            state.admission_bypasses = state.admission_bypasses.saturating_add(1);
-            return structure;
-        }
-        while state.entries.len() == state.entry_capacity
-            || state.charged_payload_bytes.saturating_add(charged_bytes) > state.byte_budget
-        {
-            let Some((_, evicted)) = state.entries.pop_lru() else {
-                break;
-            };
-            state.charged_payload_bytes = state
-                .charged_payload_bytes
-                .saturating_sub(evicted.charged_bytes);
-            state.evictions = state.evictions.saturating_add(1);
-            self.ledger.release(1, evicted.charged_bytes);
-        }
-        while !self.ledger.try_reserve(charged_bytes) {
-            let Some((_, evicted)) = state.entries.pop_lru() else {
-                state.admission_bypasses = state.admission_bypasses.saturating_add(1);
-                return structure;
-            };
-            state.charged_payload_bytes = state
-                .charged_payload_bytes
-                .saturating_sub(evicted.charged_bytes);
-            state.evictions = state.evictions.saturating_add(1);
-            self.ledger.release(1, evicted.charged_bytes);
-        }
-        state.charged_payload_bytes = state.charged_payload_bytes.saturating_add(charged_bytes);
-        state.entries.put(
+        state.structures.insert(
+            &self.ledger,
             key,
             RuntimeTreeTransformStoreEntry {
                 structure: Arc::clone(&structure),
@@ -487,6 +747,45 @@ impl<T> RuntimeTreeTransformStore<T> {
         }
         let structure = compile()?;
         Ok(self.admit(key, structure, generation))
+    }
+
+    /// Returns the categorical plan for `key`, building and admitting it on a
+    /// miss. A hit skips `build` entirely, including its key-only preflight:
+    /// the key holds every input that preflight reads.
+    fn get_or_build_plan<E>(
+        &self,
+        key: CategoricalTransformKey,
+        build: impl FnOnce() -> Result<TreeTransformGroupPlan<T>, E>,
+    ) -> Result<Arc<TreeTransformGroupPlan<T>>, E> {
+        let generation = {
+            let mut state = self.lock();
+            let generation = state.generation;
+            let tier = &mut state.plans;
+            if let Some(entry) = tier.entries.get(&key) {
+                let plan = Arc::clone(&entry.plan);
+                tier.hits = tier.hits.saturating_add(1);
+                return Ok(plan);
+            }
+            tier.misses = tier.misses.saturating_add(1);
+            generation
+        };
+        let plan = Arc::new(build()?);
+        let charged_bytes = Self::charged_plan_entry_bytes(&key, &plan);
+        let mut state = self.lock();
+        if let Some(entry) = state.plans.entries.get(&key) {
+            return Ok(Arc::clone(&entry.plan));
+        }
+        if state.generation == generation {
+            state.plans.insert(
+                &self.ledger,
+                key,
+                RuntimePlanEntry {
+                    plan: Arc::clone(&plan),
+                    charged_bytes,
+                },
+            );
+        }
+        Ok(plan)
     }
 
     pub(crate) fn lookup_checked_generic(
@@ -511,17 +810,16 @@ impl<T> RuntimeTreeTransformStore<T> {
             src_structure,
             storage_conjugate,
         )?;
-        let mut state = self
-            .state
-            .lock()
-            .expect("runtime tree-transform store poisoned");
-        let matched = if state.entries.contains(&key) {
+        let mut state = self.lock();
+        let generation = state.generation;
+        let tier = &mut state.structures;
+        let matched = if tier.entries.contains(&key) {
             Some(key.clone())
         } else {
             // ponytail: the Runtime LRU is capped at 256 entries. Generic
             // previews deliberately have no intern identity before commit, so
             // a bounded semantic scan avoids a second key/index hierarchy.
-            state.entries.iter().find_map(|(candidate, _)| {
+            tier.entries.iter().find_map(|(candidate, _)| {
                 (candidate.plan().rule == key.plan().rule
                     && candidate.plan().operation == key.plan().operation
                     && candidate.plan().orientation == key.plan().orientation
@@ -538,17 +836,17 @@ impl<T> RuntimeTreeTransformStore<T> {
         };
         if let Some(matched) = matched {
             let structure = Arc::clone(
-                &state
+                &tier
                     .entries
                     .get(&matched)
                     .expect("matched Runtime transform entry")
                     .structure,
             );
-            state.hits = state.hits.saturating_add(1);
-            return Ok((Some(structure), state.generation));
+            tier.hits = tier.hits.saturating_add(1);
+            return Ok((Some(structure), generation));
         }
-        state.misses = state.misses.saturating_add(1);
-        Ok((None, state.generation))
+        tier.misses = tier.misses.saturating_add(1);
+        Ok((None, generation))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -580,6 +878,35 @@ impl<T> RuntimeTreeTransformStore<T> {
         Ok(())
     }
 
+    /// Checked-Generic entry to the categorical tier. The key takes the same
+    /// structures as [`Self::lookup_checked_generic`]; the plan reads the
+    /// logical source, which is `src_structure` unless `logical_src_structure`
+    /// is given.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn get_or_build_checked_generic_plan<E>(
+        &self,
+        rule: RuleIdentity,
+        operation: &TreeTransformOperation,
+        dst_structure: &BlockStructure,
+        src_structure: &BlockStructure,
+        logical_src_structure: Option<&BlockStructure>,
+        storage_conjugate: bool,
+        build: impl FnOnce() -> Result<TreeTransformGroupPlan<T>, E>,
+    ) -> Result<Arc<TreeTransformGroupPlan<T>>, E> {
+        self.get_or_build_plan(
+            CategoricalTransformKey::new(
+                rule,
+                operation,
+                FusionTreePairOrientation::Direct,
+                storage_conjugate,
+                dst_structure,
+                src_structure,
+                logical_src_structure,
+            ),
+            build,
+        )
+    }
+
     /// Returns a previously admitted exact-layout operation without rebuilding
     /// its owned runtime-rank axis description.
     #[doc(hidden)]
@@ -592,14 +919,11 @@ impl<T> RuntimeTreeTransformStore<T> {
         destination_layout: [usize; 3],
         mut matches: impl FnMut(&TreeTransformOperation) -> bool,
     ) -> Option<TreeTransformOperation> {
-        let state = self
-            .state
-            .lock()
-            .expect("runtime tree-transform store poisoned");
+        let state = self.lock();
         // ponytail: the Runtime LRU is capped at 256 entries. A bounded scan
         // avoids a second index and borrowed-key hierarchy; add one only if a
         // profile shows this lookup, rather than replay, on the hot path.
-        state.entries.iter().find_map(|(key, entry)| {
+        state.structures.entries.iter().find_map(|(key, entry)| {
             (entry.exact_layout.as_ref().is_some_and(|admission| {
                 admission.source.matches(source_homspace, source_layout)
                     && admission
@@ -635,11 +959,8 @@ impl<T> RuntimeTreeTransformStore<T> {
             src_structure,
             false,
         )?;
-        let mut state = self
-            .state
-            .lock()
-            .expect("runtime tree-transform store poisoned");
-        let Some(entry) = state.entries.get_mut(&key) else {
+        let mut state = self.lock();
+        let Some(entry) = state.structures.entries.get_mut(&key) else {
             return Ok(false);
         };
         entry.exact_layout = Some(RuntimeExactLayoutAdmission {
@@ -662,8 +983,20 @@ impl<T> Drop for RuntimeTreeTransformStore<T> {
             .state
             .get_mut()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        self.ledger
-            .release(state.entries.len(), state.charged_payload_bytes);
+        for (account, entries, bytes) in [
+            (
+                RuntimeCacheAccount::Structures,
+                state.structures.entries.len(),
+                state.structures.charged_payload_bytes,
+            ),
+            (
+                RuntimeCacheAccount::Plans,
+                state.plans.entries.len(),
+                state.plans.charged_payload_bytes,
+            ),
+        ] {
+            self.ledger.release(account, entries, bytes);
+        }
     }
 }
 
@@ -706,6 +1039,7 @@ fn compile_oriented_tree_pair_structure<R, FAxis>(
     projection: &FxHashMap<&FusionTreePairKey, usize>,
     logical_to_storage_axis: FAxis,
     threads: usize,
+    plans: Option<&RuntimeTreeTransformStore<R::Scalar>>,
 ) -> Result<TreeTransformStructure<R::Scalar>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols,
@@ -715,16 +1049,36 @@ where
 {
     #[cfg(test)]
     ORIENTED_TREE_PAIR_COMPILES.set(ORIENTED_TREE_PAIR_COMPILES.get() + 1);
-    let plan = build_oriented_tree_pair_transform_group_plan_with_threads(
-        rule,
-        operation.clone(),
-        logical_keys,
-        storage_src_structure,
-        orientation,
-        logical_rank,
-        projection,
-        threads,
-    )?;
+    let build = || {
+        build_oriented_tree_pair_transform_group_plan_with_threads(
+            rule,
+            operation.clone(),
+            logical_keys,
+            storage_src_structure,
+            orientation,
+            logical_rank,
+            projection,
+            threads,
+        )
+    };
+    // Why the storage source's sectors suffice: the logical keys, projection,
+    // rank and axis map all derive from the parent structure's keys and split
+    // (see `TreeTransformCache::get_or_compile_tree_pair_oriented`).
+    let plan = match plans {
+        Some(store) => store.get_or_build_plan(
+            CategoricalTransformKey::new(
+                rule.rule_identity(),
+                operation,
+                orientation,
+                orientation == FusionTreePairOrientation::Adjoint,
+                dst_structure,
+                storage_src_structure,
+                None,
+            ),
+            build,
+        )?,
+        None => Arc::new(build()?),
+    };
     let source_index = |key: &FusionTreePairKey| {
         projection
             .get(key)
@@ -1047,16 +1401,33 @@ where
                 src_structure,
                 storage_conjugate,
             )?;
+            let threads = self.recoupling_threads;
             return store.get_or_compile(key, || {
-                compile_multiplicity_free_tree_pair_structure_after_capability_with_threads(
-                    rule,
+                let plan_key = CategoricalTransformKey::new(
+                    rule.rule_identity(),
                     operation,
-                    Arc::clone(dst_structure),
-                    Arc::clone(src_structure),
+                    FusionTreePairOrientation::Direct,
                     storage_conjugate,
-                    self.recoupling_threads,
-                )
-                .map(Arc::new)
+                    dst_structure,
+                    src_structure,
+                    None,
+                );
+                store
+                    .get_or_build_plan(plan_key, || {
+                        build_multiplicity_free_tree_pair_plan_after_capability_with_threads(
+                            rule,
+                            operation,
+                            dst_structure,
+                            src_structure,
+                            threads,
+                        )
+                    })?
+                    .compile_shared_structures_with_storage_conjugation(
+                        Arc::clone(dst_structure),
+                        Arc::clone(src_structure),
+                        storage_conjugate,
+                    )
+                    .map(Arc::new)
             });
         }
 
@@ -1187,7 +1558,8 @@ where
         };
         let storage_conjugate = orientation == FusionTreePairOrientation::Adjoint;
         let threads = self.recoupling_threads;
-        let compile = |projection: &FxHashMap<&FusionTreePairKey, usize>| {
+        let compile = |projection: &FxHashMap<&FusionTreePairKey, usize>,
+                       plans: Option<&RuntimeTreeTransformStore<T>>| {
             compile_oriented_tree_pair_structure(
                 rule,
                 operation,
@@ -1199,6 +1571,7 @@ where
                 projection,
                 logical_to_storage_axis,
                 threads,
+                plans,
             )
         };
         // Why only the adjoint orientation: a direct oriented key would equal
@@ -1223,11 +1596,12 @@ where
                 storage_src_structure,
                 storage_conjugate,
             )?;
-            return store.get_or_compile(key, || compile(&projection()?).map(Arc::new));
+            return store
+                .get_or_compile(key, || compile(&projection()?, Some(&store)).map(Arc::new));
         }
         let projection = projection()?;
         self.stats.structure_misses += 1;
-        compile(&projection).map(Arc::new)
+        compile(&projection, None).map(Arc::new)
     }
 
     /// Generic-fusion sibling of [`Self::get_or_compile_tree_pair`].
@@ -2212,6 +2586,93 @@ mod runtime_store_tests {
             .charged_retained_bytes();
 
         assert_eq!(adjoint_bytes - direct_bytes, logical_bytes);
+    }
+
+    fn plan_key(tag: usize, degeneracy: usize) -> super::CategoricalTransformKey {
+        let block =
+            BlockSpec::with_key(BlockKey::ordinal(tag), vec![degeneracy], vec![1], 0).unwrap();
+        let structure = BlockStructure::from_blocks_with_rank(1, vec![block]).unwrap();
+        super::CategoricalTransformKey::new(
+            RuleIdentity::of_type::<TestRuleIdentity>(),
+            &TreeTransformOperation::permute([0], []),
+            tenet_core::FusionTreePairOrientation::Direct,
+            false,
+            &structure,
+            &structure,
+            None,
+        )
+    }
+
+    fn empty_plan() -> Result<crate::TreeTransformGroupPlan<f64>, Infallible> {
+        Ok(crate::TreeTransformGroupPlan::new(Vec::new()))
+    }
+
+    #[test]
+    fn plan_key_ignores_degeneracies_and_splits_on_block_keys() {
+        // What: the categorical key is equal (and hashes equal) across a
+        // degeneracy change and differs when the block-key set changes.
+        use std::hash::BuildHasher;
+        let hash = |key: &super::CategoricalTransformKey| rustc_hash::FxBuildHasher.hash_one(key);
+        let (narrow, wide, other) = (plan_key(0, 1), plan_key(0, 3), plan_key(1, 1));
+        assert_eq!(narrow, wide);
+        assert_eq!(hash(&narrow), hash(&wide));
+        assert_ne!(narrow, other);
+    }
+
+    #[test]
+    fn plan_tier_enforces_limits_counts_rebuilds_and_clears() {
+        // What: the plan tier obeys its entry cap and per-entry byte cap,
+        // counts a miss per rebuild, and clear releases every charge.
+        let ledger = Arc::new(RuntimeTreeTransformCacheLedger::with_limits(1, usize::MAX));
+        let real = RuntimeTreeTransformStore::<f64>::with_runtime_ledger(Arc::clone(&ledger));
+        let complex =
+            RuntimeTreeTransformStore::<Complex64>::with_runtime_ledger(Arc::clone(&ledger));
+        real.get_or_build_plan(plan_key(0, 1), empty_plan).unwrap();
+        real.get_or_build_plan(plan_key(0, 2), empty_plan).unwrap();
+        real.get_or_build_plan(plan_key(1, 1), empty_plan).unwrap();
+        let info = real.plan_info();
+        assert_eq!((info.hits(), info.misses()), (1, 2));
+        assert_eq!((info.entries(), info.evictions()), (1, 1));
+        assert!(info.charged_payload_bytes() > 0);
+        // The Runtime-wide ledger caps both dtypes together: a full ledger
+        // makes the other dtype bypass rather than evict a foreign entry.
+        complex
+            .get_or_build_plan(plan_key(2, 1), || {
+                Ok::<_, Infallible>(crate::TreeTransformGroupPlan::new(Vec::new()))
+            })
+            .unwrap();
+        assert_eq!(ledger.plan_pair_info(&real, &complex).entries(), 1);
+        assert_eq!(complex.plan_info().admission_bypasses(), 1);
+        // Structure accounting is untouched by plan admissions.
+        assert_eq!(ledger.store_pair_info(&real, &complex).entries(), 0);
+
+        real.clear();
+        complex.clear();
+        let cleared = ledger.plan_pair_info(&real, &complex);
+        assert_eq!(cleared.entries(), 0);
+        assert_eq!(cleared.charged_payload_bytes(), 0);
+        assert_eq!((cleared.hits(), cleared.misses()), (0, 0));
+
+        let oversized = RuntimeTreeTransformStore::<f64>::with_limits(2, usize::MAX, 1);
+        oversized
+            .get_or_build_plan(plan_key(0, 1), empty_plan)
+            .unwrap();
+        assert_eq!(oversized.plan_info().entries(), 0);
+        assert_eq!(oversized.plan_info().admission_bypasses(), 1);
+    }
+
+    #[test]
+    fn plan_built_across_a_clear_is_not_admitted() {
+        // What: a plan whose build raced a clear is returned to its caller but
+        // not published into the cleared generation.
+        let store = RuntimeTreeTransformStore::<f64>::with_limits(2, usize::MAX, usize::MAX);
+        store
+            .get_or_build_plan(plan_key(0, 1), || {
+                store.clear();
+                empty_plan()
+            })
+            .unwrap();
+        assert_eq!(store.plan_info().entries(), 0);
     }
 }
 

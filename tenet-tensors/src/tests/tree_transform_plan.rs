@@ -2423,6 +2423,78 @@ fn runtime_bound_adjoint_oriented_plan_is_reused_and_keyed_by_orientation() {
 }
 
 #[test]
+fn adjoint_oriented_degeneracy_change_reuses_the_categorical_plan() {
+    // What: a new parent layout with the same sectors misses the completed-
+    // structure tier but rebuilds no categorical plan, and binding the cached
+    // plan equals a fresh uncached compile of that layout.
+    let tree = |coupled: usize| {
+        FusionTreeKey::try_new_for_rule(
+            &SU2FusionRule,
+            [SectorId::new(1), SectorId::new(1)],
+            SectorId::new(coupled),
+            [false, false],
+            [],
+            [MultiplicityIndex::ONE],
+        )
+        .unwrap()
+    };
+    let storage_keys = [
+        FusionTreePairKey::pair(tree(2), tree(2)),
+        FusionTreePairKey::pair(tree(0), tree(0)),
+    ];
+    let logical_keys = [storage_keys[1].clone(), storage_keys[0].clone()];
+    let storage_indices = [1, 0];
+    let storage_axes = [2, 3, 0, 1];
+    let operation = TreeTransformOperation::braid([1, 0], [3, 2], [0, 1], [2, 3]);
+    let layouts = |degeneracy: usize| {
+        let structure = |keys: [FusionTreePairKey; 2]| {
+            Arc::new(
+                packed_fixture_structure(4, keys.into_iter().map(|key| (key, vec![degeneracy; 4])))
+                    .unwrap(),
+            )
+        };
+        (
+            structure(storage_keys.clone()),
+            structure([storage_keys[1].clone(), storage_keys[0].clone()]),
+        )
+    };
+    let oriented =
+        |cache: &mut TreeTransformCache<f64, RuleIdentity>,
+         (storage, destination): &(Arc<BlockStructure>, Arc<BlockStructure>)| {
+            cache
+                .get_or_compile_tree_pair_oriented(
+                    &SU2FusionRule,
+                    &operation,
+                    destination,
+                    &logical_keys,
+                    || Ok(&storage_indices),
+                    storage,
+                    tenet_core::FusionTreePairOrientation::Adjoint,
+                    4,
+                    |axis| Ok(storage_axes[axis]),
+                )
+                .unwrap()
+        };
+    let store = Arc::new(RuntimeTreeTransformStore::<f64>::default());
+    let mut cache = TreeTransformCache::<f64, RuleIdentity>::default();
+    cache.bind_runtime_store(Arc::downgrade(&store));
+
+    oriented(&mut cache, &layouts(1));
+    assert_eq!(store.plan_info().misses(), 1);
+    let wider = layouts(2);
+    let warm = oriented(&mut cache, &wider);
+
+    assert_eq!(store.info().misses(), 2);
+    assert_eq!(
+        (store.plan_info().hits(), store.plan_info().misses()),
+        (1, 1)
+    );
+    let mut uncached =
+        TreeTransformCache::<f64, RuleIdentity>::with_policy(OperationCachePolicy::NoCache);
+    assert_eq!(warm.as_ref(), oriented(&mut uncached, &wider).as_ref());
+}
+
+#[test]
 fn runtime_bound_adjoint_oriented_projection_errors_match_the_local_path() {
     let tree = |coupled: usize| {
         FusionTreeKey::try_new_for_rule(

@@ -1264,6 +1264,13 @@ impl BlockStructureContent {
         self.sector.rank()
     }
 
+    /// The degeneracy-free part of this content: rank and ordered block keys.
+    #[doc(hidden)]
+    #[inline]
+    pub fn sector_structure(&self) -> &SectorStructure {
+        &self.sector
+    }
+
     #[inline]
     pub fn blocks(&self) -> &[BlockStructureContentBlock] {
         &self.blocks

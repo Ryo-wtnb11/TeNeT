@@ -624,6 +624,10 @@ impl RuntimeTreeTransformStores {
         self.ledger.store_pair_info(&self.real, &self.complex)
     }
 
+    fn plan_info(&self) -> RuntimeTreeTransformCacheInfo {
+        self.ledger.plan_pair_info(&self.real, &self.complex)
+    }
+
     fn clear(&self) {
         self.real.clear();
         self.complex.clear();
@@ -1136,7 +1140,22 @@ impl Runtime {
         self.inner.tree_transform_stores.info()
     }
 
-    /// Clears this Runtime's completed tree-transform cache.
+    /// Returns this Runtime's categorical tree-transform plan cache activity.
+    ///
+    /// A plan holds the recoupling coefficients and fusion-tree pair maps of
+    /// one transform. It is keyed on the rule, the operation and the sector
+    /// structures of source and destination, never on degeneracies, so a
+    /// completed-structure miss caused only by new block dimensions (for
+    /// example after a truncation) reuses it and compiles the layout alone.
+    /// `misses` counts plan rebuilds. Entry and byte limits are the same
+    /// configured values as [`Self::tree_transform_cache_info`], charged
+    /// separately.
+    pub fn tree_transform_plan_cache_info(&self) -> RuntimeTreeTransformCacheInfo {
+        self.inner.tree_transform_stores.plan_info()
+    }
+
+    /// Clears this Runtime's tree-transform caches: completed structures and
+    /// categorical plans.
     ///
     /// The device tree-transform executor's prepared state is dropped too, and
     /// strictly after the host store clear has returned: the two locks are
@@ -1726,8 +1745,10 @@ impl RuntimeBuilder {
         self
     }
 
-    /// Sets the retained-byte budget for completed tree-transform structures.
-    /// A zero budget disables admission.
+    /// Sets the retained-byte budget for completed tree-transform structures,
+    /// and separately for categorical tree-transform plans, so the two tiers
+    /// together retain at most twice this charge. A zero budget disables
+    /// admission to both.
     pub fn tree_transform_cache_byte_budget(mut self, bytes: usize) -> Self {
         self.tree_transform_cache_byte_budget = bytes;
         self
