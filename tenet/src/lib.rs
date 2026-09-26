@@ -91,7 +91,7 @@ pub mod prelude {
     #[cfg(feature = "cuda")]
     pub use crate::runtime::CudaTreeTransformStats;
     pub use crate::runtime::{
-        LinalgBackend, Runtime, RuntimeBuilder, RuntimeTreeTransformCacheInfo,
+        LinalgBackend, Runtime, RuntimeBuilder, RuntimeConfigError, RuntimeTreeTransformCacheInfo,
     };
     pub use crate::typed::{
         AdvancedLinalgScalar, DecodeError, DecodeLimits, Eig, Eigh, EncodeError,

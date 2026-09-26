@@ -6,6 +6,7 @@ use tenet_core::{CoreError, FusionAlgebraError};
 use tenet_matrixalgebra::TruncationError;
 use tenet_tensors::OperationError;
 
+use crate::runtime::RuntimeConfigError;
 use crate::typed::{BatchMemberRepresentation, SignatureField};
 
 /// Error produced by the user-layer [`crate::prelude::TensorMap`] /
@@ -40,6 +41,9 @@ pub enum Error {
     UnsupportedOnDevice(String),
     /// Invalid user input (axes, sectors, spaces); the message says what.
     InvalidArgument(String),
+    /// [`crate::prelude::RuntimeBuilder::build`] rejected contradictory or
+    /// invalid settings.
+    RuntimeConfig(RuntimeConfigError),
     /// A batch operand does not match one structure signature: `member` is
     /// the first differing member of a pack, or `None` when a whole stack
     /// differs from a prepared handle. `field` is the first differing
@@ -82,6 +86,7 @@ impl fmt::Display for Error {
                 write!(f, "unsupported on device: {message}")
             }
             Self::InvalidArgument(message) => write!(f, "invalid argument: {message}"),
+            Self::RuntimeConfig(err) => write!(f, "invalid runtime configuration: {err}"),
             Self::BatchSignatureMismatch {
                 member: Some(member),
                 field,
@@ -107,8 +112,15 @@ impl std::error::Error for Error {
             Self::Core(err) => Some(err.as_ref()),
             Self::Operation(err) => Some(err.as_ref()),
             Self::FusionAlgebra(err) => Some(err.as_ref()),
+            Self::RuntimeConfig(err) => Some(err),
             _ => None,
         }
+    }
+}
+
+impl From<RuntimeConfigError> for Error {
+    fn from(err: RuntimeConfigError) -> Self {
+        Self::RuntimeConfig(err)
     }
 }
 

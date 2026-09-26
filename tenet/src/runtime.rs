@@ -18,7 +18,7 @@ use tenet_tensors::{
 };
 
 use crate::error::Error;
-use crate::plancache::{Optimizer, PlanCacheConfig};
+use crate::plancache::PlanCacheConfig;
 use crate::typed::ScalarOps;
 pub(crate) type CoefficientCtx<D, Key, C> = TensorContractFusionExecutionContext<
     D,
@@ -1298,24 +1298,12 @@ impl Runtime {
         self.lock_plan_cache().config.clone()
     }
 
-    /// Replaces the contraction-plan-cache configuration and safely
-    /// invalidates any downstream type-erased cache state.
-    ///
-    /// Use `tenet_network::configure_plan_cache` when eligible compiled plans
-    /// should survive fine-grained configuration transitions. This base-crate
-    /// setter cannot downcast downstream state, so it conservatively drops the
-    /// complete slot under the same lock before publishing `config`.
-    pub fn set_plan_cache_config(&self, config: PlanCacheConfig) {
-        let mut home = self.lock_plan_cache();
-        home.slot = None;
-        home.config = config;
-    }
-
     /// Atomically updates the plan-cache configuration and its downstream
     /// type-erased state under the Runtime's plan-cache lock.
     ///
-    /// `tenet-network` uses this cold-path seam to synchronously release idle
-    /// workspace storage when disabling the cache or lowering its byte budget.
+    /// `tenet_network::configure_plan_cache` is the one public setter and the
+    /// only caller of this seam: the cache type lives in `tenet-network`, so
+    /// only it can retain eligible plans across a configuration change.
     #[doc(hidden)]
     pub fn replace_plan_cache_config<R>(
         &self,
@@ -1522,6 +1510,30 @@ impl LinalgBackend {
     }
 }
 
+/// Contradictory or invalid [`RuntimeBuilder`] settings, rejected by
+/// [`RuntimeBuilder::build`] instead of being silently adjusted.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RuntimeConfigError {
+    /// [`RuntimeBuilder::dense_threads`] was given zero.
+    ZeroDenseThreads,
+    /// Both [`RuntimeBuilder::with_dense_executor`] and
+    /// [`RuntimeBuilder::linalg_backend`] select the factorization provider.
+    DenseExecutorWithLinalgBackend,
+}
+
+impl std::fmt::Display for RuntimeConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::ZeroDenseThreads => "dense_threads must be at least 1",
+            Self::DenseExecutorWithLinalgBackend => {
+                "with_dense_executor and linalg_backend both select the factorization provider"
+            }
+        })
+    }
+}
+
+impl std::error::Error for RuntimeConfigError {}
+
 /// Builder for [`Runtime`]; see [`Runtime::builder`].
 ///
 /// Not `Clone`/`Debug`-derivable: an injected dense executor
@@ -1539,8 +1551,8 @@ pub struct RuntimeBuilder {
     /// provider default is used.
     dense_executor: Option<Box<dyn tenet_dense::DenseExecutor + Send>>,
     /// Selected built-in CPU provider for dense factorizations (SVD/QR/eigh);
-    /// `None` uses the compiled provider default. Ignored when
-    /// [`Self::dense_executor`] is set.
+    /// `None` uses the compiled provider default. Mutually exclusive with
+    /// [`Self::dense_executor`].
     linalg_backend: Option<LinalgBackend>,
     /// Selected built-in CPU provider for the contraction/recoupling GEMM;
     /// `None` uses the compiled provider default. Independent of
@@ -1602,54 +1614,20 @@ impl RuntimeBuilder {
         self
     }
 
-    /// Sets the default contraction-order [`Optimizer`] for network
-    /// contractions (`tensor!`); shorthand for setting it on
-    /// [`Self::plan_cache`]'s config.
-    pub fn optimizer(mut self, optimizer: Optimizer) -> Self {
-        self.plan_cache.optimizer = optimizer;
-        self
-    }
-
     /// Sets the worker count of this runtime's CPU pool. The runtime owns one
     /// pool; its Host eager operations run dense kernels, tree-transform
     /// replay, plan compile and strided kernels on it, and building a runtime
     /// never touches Rayon's process-global pool. Runtimes with different
     /// counts coexist in one process.
     ///
-    /// Unset, the pool uses the process's available parallelism; [`Self::build`]
-    /// reads no environment variable (see [`Self::threads_from_env`]). A value
-    /// of 1 creates no worker pool: every Host operation of this runtime runs
-    /// on its calling thread. The count does not configure provider-internal
-    /// (BLAS) or injected-executor threads.
+    /// Unset, the pool uses the process's available parallelism; the runtime
+    /// reads no environment variable. A value of 1 creates no worker pool:
+    /// every Host operation of this runtime runs on its calling thread. Zero
+    /// makes [`Self::build`] fail with [`RuntimeConfigError::ZeroDenseThreads`].
+    /// The count does not configure provider-internal (BLAS) or
+    /// injected-executor threads.
     pub fn dense_threads(mut self, threads: usize) -> Self {
-        self.dense_threads = Some(threads.max(1));
-        self
-    }
-
-    /// Takes the CPU pool size from the environment: `TENET_DENSE_THREADS`,
-    /// else `RAYON_NUM_THREADS`. A missing, unparseable or zero value leaves
-    /// the count unchanged. This is the only place a runtime reads those
-    /// variables; an explicit [`Self::dense_threads`] after this call wins.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use tenet::prelude::*;
-    ///
-    /// let rt = Runtime::builder().threads_from_env().build()?;
-    /// # let _ = rt;
-    /// # Ok::<(), tenet::prelude::Error>(())
-    /// ```
-    pub fn threads_from_env(mut self) -> Self {
-        let from = |name: &str| {
-            std::env::var(name)
-                .ok()
-                .and_then(|value| value.parse::<usize>().ok())
-                .filter(|&threads| threads > 0)
-        };
-        if let Some(threads) = from("TENET_DENSE_THREADS").or_else(|| from("RAYON_NUM_THREADS")) {
-            self.dense_threads = Some(threads);
-        }
+        self.dense_threads = Some(threads);
         self
     }
 
@@ -1681,7 +1659,8 @@ impl RuntimeBuilder {
     /// chosen separately with [`Self::gemm_backend`].
     ///
     /// This is the ergonomic counterpart to [`Self::with_dense_executor`] for
-    /// the shipped providers; an explicitly injected executor takes precedence.
+    /// the shipped providers; setting both makes [`Self::build`] fail with
+    /// [`RuntimeConfigError::DenseExecutorWithLinalgBackend`].
     /// Choosing [`LinalgBackend::Blas`] without a compiled `cpu-blas`/`blas-*`
     /// provider fails in [`Self::build`].
     ///
@@ -1766,9 +1745,16 @@ impl RuntimeBuilder {
         self
     }
 
-    /// Finishes the build; fails when a requested backend (e.g. the CUDA
+    /// Finishes the build; fails with [`RuntimeConfigError`] on contradictory
+    /// or invalid settings, and when a requested backend (e.g. the CUDA
     /// device) cannot be initialized.
     pub fn build(self) -> Result<Runtime, Error> {
+        if self.dense_threads == Some(0) {
+            return Err(RuntimeConfigError::ZeroDenseThreads.into());
+        }
+        if self.dense_executor.is_some() && self.linalg_backend.is_some() {
+            return Err(RuntimeConfigError::DenseExecutorWithLinalgBackend.into());
+        }
         // A custom injected executor cannot be re-minted for the pool; those
         // runtimes fall back to the state lock for factorizations (#155).
         let executor_mintable = self.dense_executor.is_none();
@@ -2408,25 +2394,6 @@ mod tests {
             )
             .unwrap();
         assert_eq!(actual, expected_data);
-    }
-
-    #[test]
-    fn base_plan_cache_setter_updates_config_and_invalidates_extension_state() {
-        let runtime = Runtime::builder().build().unwrap();
-        runtime.with_extension_slot(|slot| *slot = Some(Box::new(7usize)));
-
-        runtime.set_plan_cache_config(PlanCacheConfig {
-            enabled: false,
-            capacity: 7,
-            workspace_budget_bytes: 0,
-            ..PlanCacheConfig::default()
-        });
-
-        let config = runtime.plan_cache_config();
-        assert!(!config.enabled);
-        assert_eq!(config.capacity, 7);
-        assert_eq!(config.workspace_budget_bytes, 0);
-        runtime.with_extension_slot(|slot| assert!(slot.is_none()));
     }
 
     /// Compile-level gate for the device-state ownership of #1322: the lease is

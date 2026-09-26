@@ -3116,7 +3116,7 @@ mod typed_replay_tests {
     use tenet::typed::{GradedSpace, SectorSpectrum, TensorMap, TensorScalar};
 
     use super::*;
-    use crate::{plan_cache_config, plan_cache_stats, GreedyDenseOptimizer, Optimizer};
+    use crate::{plan_cache_stats, GreedyDenseOptimizer, Optimizer};
 
     fn label(name: &str) -> TemporaryLabel {
         TemporaryLabel::from(name)
@@ -4994,7 +4994,7 @@ mod typed_replay_tests {
     #[test]
     fn default_cached_macro_replays_rank_four_orientation_after_shape_drift_f64() {
         let runtime = Runtime::builder().build().unwrap();
-        assert_eq!(plan_cache_config(&runtime).optimizer, Optimizer::Greedy);
+        assert_eq!(runtime.plan_cache_config().optimizer, Optimizer::Greedy);
         let provider = Arc::new(U1FusionRule);
         assert_rank_four_orientation_replay(&runtime, &provider, |real, _| real);
     }
@@ -5002,7 +5002,7 @@ mod typed_replay_tests {
     #[test]
     fn default_cached_macro_replays_rank_four_orientation_after_shape_drift_c64() {
         let runtime = Runtime::builder().build().unwrap();
-        assert_eq!(plan_cache_config(&runtime).optimizer, Optimizer::Greedy);
+        assert_eq!(runtime.plan_cache_config().optimizer, Optimizer::Greedy);
         let provider = Arc::new(U1FusionRule);
         assert_rank_four_orientation_replay(&runtime, &provider, Complex64::new);
     }

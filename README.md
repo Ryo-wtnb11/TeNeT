@@ -152,7 +152,7 @@ provider default: BLAS when its CPU build enables `cpu-blas`, otherwise faer:
 | `.gemm_backend(LinalgBackend::Faer \| Blas)` | the coupled-block contraction GEMM used by `compose`, `contract`, and recoupling execution (BLAS-style work). |
 | `.with_dense_executor(Box<dyn DenseExecutor + Send>)` | a fully custom factorization backend; takes precedence over `linalg_backend`. |
 | `.cuda(device)` (feature `cuda`) | attaches CUDA capability and context; tensors remain on Host until `to_cuda()`. |
-| `.optimizer(Optimizer::…)` | the contraction-path planner (see below). |
+| `.plan_cache(PlanCacheConfig { optimizer, .. })` | the contraction-path planner (see below). |
 
 Because OpenBLAS, MKL, and Accelerate cannot be linked simultaneously, *which*
 BLAS is a compile-time `blas-*` feature; choosing faer versus the one linked
