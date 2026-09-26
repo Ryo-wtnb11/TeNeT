@@ -9745,6 +9745,9 @@ impl<S> FusionTreeLabels<S> {
     }
 }
 
+/// Decoded trees with their row or column ranges, in matrix order.
+type TreeExtents<S> = Vec<(FusionTreeLabels<S>, core::ops::Range<usize>)>;
+
 impl<'a, R, D, S> CoupledBlock<'a, R, D, S> {
     /// Number of rows: the codomain block dimension of the sector.
     #[inline]
@@ -9773,28 +9776,18 @@ where
     /// The codomain fusion trees in row order, each with its row range.
     ///
     /// Decodes labels and allocates the returned list; reads no payload.
-    pub fn row_trees(
-        &self,
-    ) -> Result<Vec<(FusionTreeLabels<R::Sector>, core::ops::Range<usize>)>, TypedFacadeError<R>>
-    {
+    pub fn row_trees(&self) -> Result<TreeExtents<R::Sector>, TypedFacadeError<R>> {
         self.trees(false)
     }
 
     /// The domain fusion trees in column order, each with its column range.
     ///
     /// Decodes labels and allocates the returned list; reads no payload.
-    pub fn col_trees(
-        &self,
-    ) -> Result<Vec<(FusionTreeLabels<R::Sector>, core::ops::Range<usize>)>, TypedFacadeError<R>>
-    {
+    pub fn col_trees(&self) -> Result<TreeExtents<R::Sector>, TypedFacadeError<R>> {
         self.trees(true)
     }
 
-    fn trees(
-        &self,
-        columns: bool,
-    ) -> Result<Vec<(FusionTreeLabels<R::Sector>, core::ops::Range<usize>)>, TypedFacadeError<R>>
-    {
+    fn trees(&self, columns: bool) -> Result<TreeExtents<R::Sector>, TypedFacadeError<R>> {
         let Some((regions, index, swapped)) = &self.region else {
             return Ok(Vec::new());
         };
