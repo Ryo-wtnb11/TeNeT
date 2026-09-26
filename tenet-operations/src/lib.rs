@@ -42,6 +42,8 @@ mod placement;
 mod profile;
 pub mod replay_backend;
 mod scalar;
+#[doc(hidden)]
+pub mod stacked;
 pub mod storage_scratch;
 pub mod strided;
 pub mod structure_identity;

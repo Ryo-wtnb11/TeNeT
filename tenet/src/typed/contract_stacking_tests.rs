@@ -557,3 +557,32 @@ fn su2_mis_stacked_contractions_match_physical_dense_einsum() {
     );
     assert_eq!(checks, 5 * 2 + 5 * 5 * 5);
 }
+
+#[test]
+fn prepared_compose_rejects_a_non_direct_plan_at_new() {
+    // What: an expert tiling whose column trees are stacked opposite to the
+    // partner's rows has no canonical fully-direct plan, so the handle refuses
+    // it at `new` with the typed error the eager device composition reports,
+    // while eager Host `compose` still runs it.
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let sectors = [
+        (U1Irrep::new(0).sector_id(), 2),
+        (U1Irrep::new(1).sector_id(), 1),
+    ];
+    let reversed = endomorphism(&runtime, U1FusionRule, &sectors, Stacking::ColumnsReversed);
+    let canonical = endomorphism(&runtime, U1FusionRule, &sectors, Stacking::Canonical);
+    assert!(reversed.compose(&canonical).is_ok());
+    let lhs = StackedTensorMap::pack(&[reversed]).unwrap();
+    let rhs = StackedTensorMap::pack(&[canonical]).unwrap();
+    let error = PreparedCompose::new(&lhs, &rhs)
+        .err()
+        .expect("non-direct plan");
+    assert!(
+        matches!(
+            &error,
+            Error::Operation(operation)
+                if matches!(operation.as_ref(), tenet_tensors::OperationError::UnsupportedTensorContractScope { .. })
+        ),
+        "{error:?}"
+    );
+}

@@ -1088,9 +1088,45 @@ where
         Ok(())
     }
 
-    #[cfg(test)]
-    fn direct_batch(&self) -> &[Rank2GemmBatchJob] {
+    pub(crate) fn direct_batch(&self) -> &[Rank2GemmBatchJob] {
         &self.direct_batch
+    }
+
+    /// How many distinct `(rows, contracted, cols)` shapes the direct GEMM
+    /// jobs have: the dense plans a replay of this plan needs at one batch
+    /// extent.
+    #[doc(hidden)]
+    pub fn distinct_direct_gemm_shapes(&self) -> usize {
+        self.direct_batch
+            .iter()
+            .map(|job| (job.rows, job.contracted, job.cols))
+            .collect::<HashSet<_>>()
+            .len()
+    }
+
+    /// The per-member payload lengths `[dst, lhs, rhs]` this plan's
+    /// structures require.
+    pub(crate) fn member_lens(&self) -> Result<[usize; 3], OperationError> {
+        let len = |structure: &BlockStructure| {
+            structure
+                .required_len()
+                .map_err(OperationError::from_core_preserving_context)
+        };
+        Ok([
+            len(&self.dst_structure)?,
+            len(&self.lhs_structure)?,
+            len(&self.rhs_structure)?,
+        ])
+    }
+
+    /// The preconditions of an unscaled identity-orientation direct replay:
+    /// every group direct, both operands untransformed, every job coefficient
+    /// one.
+    #[doc(hidden)]
+    pub fn require_identity_direct_replay(&self) -> Result<(), OperationError> {
+        self.require_fully_direct_storage()?;
+        self.require_identity_storage_ops()?;
+        self.require_unit_direct_batch_alpha()
     }
 
     fn require_fully_direct_storage(&self) -> Result<(), OperationError> {

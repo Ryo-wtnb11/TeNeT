@@ -37,6 +37,14 @@ pub use cache::{
     OperationCachePolicy, TensorContractStructureCache, TensorContractStructureCacheKey,
     TreeTransformStructureCache, TreeTransformStructureCacheKey,
 };
+#[doc(hidden)]
+pub use contract::{
+    compile_direct_composition_plan, tensorcompose_fusion_dyn_prelowered_direct_on_storage,
+    tensorcompose_owned_checked_generic_in_context,
+    tensorcontract_fusion_dyn_prelowered_direct_on_storage, tensorcontract_owned_checked_generic,
+    tensorcontract_owned_checked_generic_in_context, try_compile_storage_contract_core_route,
+    StorageContractResolution,
+};
 #[cfg(test)]
 pub(crate) use contract::{
     contracted_fusion_tree_basis_matches, TensorContractDenseRouteKind,
@@ -59,14 +67,6 @@ pub use contract::{
     TensorContractExecutionContext, TensorContractFusionExecutionContext,
     TensorContractFusionProfile, TensorContractFusionRoute, TensorContractPlanKey,
     TensorContractStructure, TensorContractStructureTerm, TensorContractWorkspace,
-};
-#[doc(hidden)]
-pub use contract::{
-    tensorcompose_fusion_dyn_prelowered_direct_on_storage,
-    tensorcompose_owned_checked_generic_in_context,
-    tensorcontract_fusion_dyn_prelowered_direct_on_storage, tensorcontract_owned_checked_generic,
-    tensorcontract_owned_checked_generic_in_context, try_compile_storage_contract_core_route,
-    StorageContractResolution,
 };
 pub use contract::{
     BoundDynamicFusionMapSpace, DynamicFusionMapSpace, FusionOperand,

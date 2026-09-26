@@ -1315,6 +1315,118 @@ fn cuda_gemm_region_strided_into<D: CudaScalar>(
         .map_err(|err| cuda_error("cuda_matmul", err))
 }
 
+/// `members` independent column-major GEMMs at a fixed member stride per
+/// operand, as ONE `dot_general` with a trailing batch mode:
+/// `dst[dst_offset + i·dst_member_stride][m x n] = lhs[lhs_offset +
+/// i·lhs_member_stride][m x k] · rhs[rhs_offset + i·rhs_member_stride][k x n]`
+/// for `i < members` (overwrite, `beta = 0`).
+///
+/// The views are `[m, k, B]`, `[k, n, B]` and `[m, n, B]` with the member
+/// stride on the last axis; Tenferro orders the output modes `[lhs_free,
+/// rhs_free, batch]`, which is the destination view. One submission, and one
+/// `gemm_calls` count, whatever `members` is. The destination must be
+/// injective (members may not overlap), and every region must lie inside its
+/// buffer's active length; both are checked before any device work.
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn cuda_gemm_region_batched_into<D: CudaScalar>(
+    ctx: &mut CudaDenseContext,
+    dst: &mut CudaDenseStorage,
+    dst_offset: usize,
+    dst_member_stride: usize,
+    lhs: &CudaDenseStorage,
+    lhs_offset: usize,
+    lhs_member_stride: usize,
+    rhs: &CudaDenseStorage,
+    rhs_offset: usize,
+    rhs_member_stride: usize,
+    m: usize,
+    k: usize,
+    n: usize,
+    members: usize,
+) -> Result<(), DenseError> {
+    const OP: &str = "cuda_gemm_batched";
+    ensure_cuda_device(
+        ctx.device,
+        OP,
+        &[
+            ("dst", dst.device),
+            ("lhs", lhs.device),
+            ("rhs", rhs.device),
+        ],
+    )?;
+    let dst_region = CudaRegion::new(
+        vec![m, n, members],
+        vec![1, m, dst_member_stride],
+        dst_offset,
+    )?;
+    let lhs_region = CudaRegion::new(
+        vec![m, k, members],
+        vec![1, m, lhs_member_stride],
+        lhs_offset,
+    )?;
+    let rhs_region = CudaRegion::new(
+        vec![k, n, members],
+        vec![1, k, rhs_member_stride],
+        rhs_offset,
+    )?;
+    if !dst_region.is_empty() {
+        validate_destination_layout(OP, &dst_region)?;
+        validate_region(&dst_region, dst.len)?;
+    }
+    for (region, len) in [(&lhs_region, lhs.len), (&rhs_region, rhs.len)] {
+        if !region.is_empty() {
+            validate_region(region, len)?;
+        }
+    }
+    let lhs_view = lhs.region_view_nd::<D>(
+        lhs_region.dims(),
+        &isize_strides(lhs_region.strides())?,
+        lhs_region.offset_isize()?,
+    )?;
+    let rhs_view = rhs.region_view_nd::<D>(
+        rhs_region.dims(),
+        &isize_strides(rhs_region.strides())?,
+        rhs_region.offset_isize()?,
+    )?;
+    let dst_view = dst.region_view_nd_mut::<D>(
+        dst_region.dims(),
+        &isize_strides(dst_region.strides())?,
+        dst_region.offset_isize()?,
+    )?;
+    let config = DotGeneralConfig {
+        lhs_contracting_dims: vec![1],
+        rhs_contracting_dims: vec![0],
+        lhs_batch_dims: vec![2],
+        rhs_batch_dims: vec![2],
+    };
+    let accumulation = DotGeneralAccumulation {
+        lhs_conj: false,
+        rhs_conj: false,
+        alpha: D::ONE.contraction_scalar(),
+        beta: D::ZERO.contraction_scalar(),
+    };
+    GEMM_CALLS.fetch_add(1, Ordering::Relaxed);
+    ctx.backend
+        .dot_general_read_into_accum(
+            TensorRead::from_view(lhs_view),
+            TensorRead::from_view(rhs_view),
+            &config,
+            accumulation,
+            TensorWrite::from_view(dst_view),
+        )
+        .map_err(|err| cuda_error(OP, err))
+}
+
+fn isize_strides(strides: &[usize]) -> Result<Vec<isize>, DenseError> {
+    strides
+        .iter()
+        .map(|&stride| {
+            isize::try_from(stride).map_err(|_| DenseError::StrideOverflow { value: stride })
+        })
+        .collect()
+}
+
 /// How a region call treats the destination it writes.
 ///
 /// Only these two exist: Tenferro has no in-place strided scale

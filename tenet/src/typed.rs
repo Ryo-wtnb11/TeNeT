@@ -287,7 +287,8 @@ use crate::RuntimeIdentity;
 
 mod batched;
 pub use batched::{
-    BatchMemberRepresentation, SignatureField, StackedTensorMap, StructureSignature,
+    BatchMemberRepresentation, PreparedCompose, SignatureField, StackedTensorMap,
+    StructureSignature,
 };
 
 #[cfg(test)]
