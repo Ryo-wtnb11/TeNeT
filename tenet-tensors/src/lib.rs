@@ -79,8 +79,8 @@ pub use facade::{
 #[doc(hidden)]
 pub use oriented_elementwise::{
     fusion_scatter_add_assign, oriented_fusion_add_owned, oriented_fusion_inner,
-    oriented_fusion_inner_with, oriented_fusion_restrict_owned, validate_oriented_fusion_layout,
-    SectorRangeTable, SectorStartTable,
+    oriented_fusion_inner_with, oriented_fusion_restrict_owned, stacked_fusion_restrict_owned,
+    validate_oriented_fusion_layout, SectorRangeTable, SectorStartTable,
 };
 // Stage B3a: Generic-fusion (outer-multiplicity) facade siblings.
 pub use adjoint::adjoint_bound_space_dyn_generic_checked;

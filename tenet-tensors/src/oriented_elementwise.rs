@@ -1,10 +1,11 @@
 use core::ops::{Add, Mul, Range};
 
 use num_traits::{One, Zero};
-use tenet_core::{BlockKey, BlockStructure, FusionTreePairKey, SectorId};
+use tenet_core::{BlockKey, BlockRef, BlockStructure, FusionTreePairKey, SectorId};
 use tenet_operations::{
-    bilinear_raw_strided_kernel_mapped, overwrite_owned_blocks, ConjugateValue, OperationError,
-    RecouplingCoefficientAction, StridedHostKernelAdapter, WideScalar,
+    bilinear_raw_strided_kernel_mapped, overwrite_owned_blocks, overwrite_owned_member_blocks,
+    BlockOverwrite, ConjugateValue, OperationError, RecouplingCoefficientAction,
+    StridedHostKernelAdapter, WideScalar,
 };
 
 use crate::FusionOperand;
@@ -134,54 +135,124 @@ where
         });
     }
     overwrite_owned_blocks(destination, |destination_block, writer| {
-        let BlockKey::FusionTree(logical_key) = destination_block.key() else {
-            return Err(OperationError::StructureMismatch {
-                tensor: "oriented degeneracy restriction destination",
-            });
-        };
-        let source_block = source
-            .storage_space()
-            .structure()
-            .block(source.storage_block_index(logical_key)?)?;
-        let mut source_offset = source_block.offset();
-        for (axis, (&extent, table)) in destination_block
-            .shape()
-            .iter()
-            .zip(logical_starts)
-            .enumerate()
-        {
-            let logical_start = match table {
-                None => 0,
-                Some(table) => *selected_for_sector(table, logical_axis_sector(logical_key, axis)?)
-                    .ok_or_else(|| OperationError::StructureMismatch {
-                        tensor: "oriented degeneracy restriction sector",
-                    })?,
-            };
-            let storage_axis = source.storage_axis(axis)?;
-            let end = logical_start
-                .checked_add(extent)
-                .ok_or_else(|| OperationError::ElementCountOverflow)?;
-            if end > source_block.shape()[storage_axis] {
-                return Err(OperationError::StructureMismatch {
-                    tensor: "oriented degeneracy restriction rectangle",
-                });
-            }
-            source_offset = source_offset
-                .checked_add(
-                    logical_start
-                        .checked_mul(source_block.strides()[storage_axis])
-                        .ok_or_else(|| OperationError::ElementCountOverflow)?,
-                )
-                .ok_or_else(|| OperationError::ElementCountOverflow)?;
-        }
-        writer.copy(
-            |axis| Ok(source_block.strides()[source.storage_axis(axis)?]),
+        restrict_block(
+            destination_block,
+            writer,
+            source,
             source_data,
-            source_offset,
-            source.storage_conjugate(),
-            D::one(),
+            logical_starts,
         )
     })
+}
+
+/// [`oriented_fusion_restrict_owned`] for `members` source payloads of one
+/// structure stacked end to end in `source_data`: the output stacks the
+/// `members` restrictions at stride `destination.required_len()`.
+///
+/// Each destination block is one strided copy for every member at once (the
+/// member axis is a trailing dimension of the copy), from the same per-block
+/// plan as the single-payload form.
+#[doc(hidden)]
+pub fn stacked_fusion_restrict_owned<D>(
+    destination: &BlockStructure,
+    source: FusionOperand<'_>,
+    source_data: &[D],
+    members: usize,
+    logical_starts: &[SectorStartTable<'_>],
+) -> Result<Vec<D>, OperationError>
+where
+    D: Copy
+        + Add<D, Output = D>
+        + Mul<D, Output = D>
+        + PartialEq
+        + Zero
+        + One
+        + ConjugateValue
+        + strided_kernel::MaybeSendSync,
+{
+    let member_len = source.storage_space().required_len()?;
+    if Some(source_data.len()) != member_len.checked_mul(members)
+        || logical_starts.len() != destination.rank()
+    {
+        return Err(OperationError::StructureMismatch {
+            tensor: "oriented degeneracy restriction storage",
+        });
+    }
+    overwrite_owned_member_blocks(
+        destination,
+        members,
+        member_len,
+        |destination_block, writer| {
+            restrict_block(
+                destination_block,
+                writer,
+                source,
+                source_data,
+                logical_starts,
+            )
+        },
+    )
+}
+
+/// Writes one destination block of a restriction: the source block of the
+/// same key, entered at the selected start on every axis.
+fn restrict_block<D>(
+    destination_block: BlockRef<'_>,
+    writer: &mut BlockOverwrite<'_, D>,
+    source: FusionOperand<'_>,
+    source_data: &[D],
+    logical_starts: &[SectorStartTable<'_>],
+) -> Result<(), OperationError>
+where
+    D: Copy + Add<D, Output = D> + Mul<D, Output = D> + PartialEq + Zero + One + ConjugateValue,
+{
+    let BlockKey::FusionTree(logical_key) = destination_block.key() else {
+        return Err(OperationError::StructureMismatch {
+            tensor: "oriented degeneracy restriction destination",
+        });
+    };
+    let source_block = source
+        .storage_space()
+        .structure()
+        .block(source.storage_block_index(logical_key)?)?;
+    let mut source_offset = source_block.offset();
+    for (axis, (&extent, table)) in destination_block
+        .shape()
+        .iter()
+        .zip(logical_starts)
+        .enumerate()
+    {
+        let logical_start = match table {
+            None => 0,
+            Some(table) => *selected_for_sector(table, logical_axis_sector(logical_key, axis)?)
+                .ok_or_else(|| OperationError::StructureMismatch {
+                    tensor: "oriented degeneracy restriction sector",
+                })?,
+        };
+        let storage_axis = source.storage_axis(axis)?;
+        let end = logical_start
+            .checked_add(extent)
+            .ok_or_else(|| OperationError::ElementCountOverflow)?;
+        if end > source_block.shape()[storage_axis] {
+            return Err(OperationError::StructureMismatch {
+                tensor: "oriented degeneracy restriction rectangle",
+            });
+        }
+        source_offset = source_offset
+            .checked_add(
+                logical_start
+                    .checked_mul(source_block.strides()[storage_axis])
+                    .ok_or_else(|| OperationError::ElementCountOverflow)?,
+            )
+            .ok_or_else(|| OperationError::ElementCountOverflow)?;
+    }
+    writer.copy(
+        |axis| Ok(source_block.strides()[source.storage_axis(axis)?]),
+        source_data,
+        source_offset,
+        source.storage_conjugate(),
+        D::one(),
+    )
 }
 
 struct ScatterBlock {

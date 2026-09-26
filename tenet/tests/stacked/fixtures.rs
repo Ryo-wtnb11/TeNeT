@@ -109,3 +109,52 @@ macro_rules! for_each_symmetry {
         });
     }};
 }
+
+/// Two selections of `leg`, named in its own labels: every sector at a
+/// non-leading offset where it has room, with every other one-dimensional
+/// sector dropped (several surviving blocks, some removed); and one index of
+/// the last sector (a one-dimensional charged leg).
+pub fn selections<R>(leg: &tenet::typed::GradedSpace<R>) -> Vec<tenet::typed::LegSelection<R>>
+where
+    R: tenet::core::TypedSectorAdmission,
+    R::Mode: tenet::typed::TypedTensorModeDispatch<R>,
+{
+    let sectors = leg.sectors().unwrap();
+    let degeneracies = leg.degeneracies();
+    let partial = sectors
+        .iter()
+        .zip(degeneracies)
+        .enumerate()
+        .filter(|&(index, (_, &degeneracy))| index == 0 || degeneracy > 1 || index % 2 == 0)
+        .map(|(_, (sector, &degeneracy))| {
+            let start = usize::from(degeneracy > 1);
+            (sector.clone(), start..degeneracy)
+        });
+    let last = sectors.len() - 1;
+    vec![
+        tenet::typed::LegSelection::try_new(leg, partial).unwrap(),
+        tenet::typed::LegSelection::try_new(leg, [(sectors[last].clone(), 0..1)]).unwrap(),
+    ]
+}
+
+/// `$count` members `[a, a*] <- [a, a*]` of payload `$d`: every leg kind
+/// (codomain/domain, dual/non-dual) appears once.
+macro_rules! mixed_members {
+    ($runtime:expr, $a:expr, $dual:expr, $d:ty, $count:expr) => {
+        (0..$count)
+            .map(|member: usize| {
+                let mut index = 1000 * member;
+                tenet::typed::TensorMap::<_, $d>::from_block_fn(
+                    $runtime,
+                    [$a, $dual],
+                    [$a, $dual],
+                    |_, _| {
+                        index += 1;
+                        <$d as fixtures::Payload>::value(index)
+                    },
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>()
+    };
+}

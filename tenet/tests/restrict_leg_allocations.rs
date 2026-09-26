@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 
 use tenet::core::{TypedSectorAdmission, U1FusionRule, U1Irrep};
 use tenet::prelude::{GradedSpace, LegSelection, Runtime, TensorMap};
-use tenet::typed::NetworkDegeneracyRestriction;
+use tenet::typed::{NetworkDegeneracyRestriction, StackedTensorMap};
 
 const ZEROED_LOG_CAPACITY: usize = 64;
 
@@ -383,4 +383,62 @@ fn steady_state_restrict_leg_with_several_row_trees_pays_no_layout_proof() {
         small.allocations
     );
     assert_eq!(small.allocations, large.allocations);
+}
+
+/// One stacked `restrict_leg` over `members` members `[leg, other] <- [leg,
+/// other]` (several row trees per coupled sector): the measurement of a warm
+/// call and its payload bytes.
+fn stacked_restrict_measurement(members: usize) -> (Measurement, usize) {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(U1FusionRule);
+    let leg = u1(&provider, &[(-1, 2), (0, 3), (1, 2)]);
+    let other = u1(&provider, &[(-1, 1), (0, 2), (1, 1)]);
+    let tensors: Vec<TensorMap<_, f64>> = (0..members)
+        .map(|seed| {
+            TensorMap::rand_with_seed(&runtime, [&leg, &other], [&leg, &other], 67 + seed as u64)
+                .unwrap()
+        })
+        .collect();
+    let stack = StackedTensorMap::pack(&tensors).unwrap();
+    let selection =
+        LegSelection::try_new(&leg, [(U1Irrep::new(-1), 0..1), (U1Irrep::new(0), 1..3)]).unwrap();
+    let warm = stack.restrict_leg(0, &selection).unwrap();
+    let payload_bytes = members * std::mem::size_of_val(warm.member(0).unwrap().data());
+    drop(warm);
+    let mut output = None;
+    let measurement = measure(|| {
+        output = Some(black_box(stack.restrict_leg(0, &selection).unwrap()));
+    });
+    let output = output.unwrap();
+    for (index, tensor) in tensors.iter().enumerate() {
+        assert_eq!(
+            output.member(index).unwrap().data(),
+            tensor.restrict_leg(0, &selection).unwrap().data()
+        );
+    }
+    (measurement, payload_bytes)
+}
+
+#[test]
+fn stacked_restrict_leg_allocates_one_unfilled_payload_independent_of_the_member_count() {
+    let _guard = MEASUREMENT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (small, small_bytes) = stacked_restrict_measurement(2);
+    let (large, large_bytes) = stacked_restrict_measurement(16);
+    for (measurement, bytes) in [(&small, small_bytes), (&large, large_bytes)] {
+        assert!(
+            !measurement.zeroed_sizes.contains(&bytes),
+            "no payload-sized zeroed allocation, got {:?} for {bytes} bytes",
+            measurement.zeroed_sizes
+        );
+    }
+    // One output buffer of `B L'` elements; everything else is the result's
+    // structural objects, which do not depend on `B`.
+    assert_eq!(small.allocations, large.allocations);
+    assert_eq!(
+        small.bytes - small_bytes,
+        large.bytes - large_bytes,
+        "non-payload bytes must not depend on the member count"
+    );
 }

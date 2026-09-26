@@ -909,8 +909,38 @@ impl CudaDenseStorage {
         data: Vec<D>,
     ) -> Result<Self, DenseError> {
         let len = data.len();
+        Self::upload_shaped(ctx, data, vec![len])
+    }
+
+    /// [`Self::upload_owned`] for a stack of `members` members of
+    /// `member_len` elements each, stored member-major: the device tensor is
+    /// `[member_len, members]` (column-major, the same bytes as flat), so a
+    /// gather can address the member axis ([`cuda_gather_member_elements`]).
+    /// Counting and traffic are those of [`Self::upload_owned`].
+    #[doc(hidden)]
+    pub fn upload_members<D: CudaScalar>(
+        ctx: &CudaDenseContext,
+        data: Vec<D>,
+        member_len: usize,
+        members: usize,
+    ) -> Result<Self, DenseError> {
+        if member_len.checked_mul(members) != Some(data.len()) {
+            return Err(cuda_error(
+                "cuda_upload",
+                "a stack upload must hold exactly `members * member_len` elements",
+            ));
+        }
+        Self::upload_shaped(ctx, data, vec![member_len, members])
+    }
+
+    fn upload_shaped<D: CudaScalar>(
+        ctx: &CudaDenseContext,
+        data: Vec<D>,
+        shape: Vec<usize>,
+    ) -> Result<Self, DenseError> {
+        let len = data.len();
         let bytes = std::mem::size_of_val(data.as_slice());
-        let host = Tensor::from_vec_col_major(vec![len], data)
+        let host = Tensor::from_vec_col_major(shape, data)
             .map_err(|err| cuda_error("cuda_upload", err))?;
         let tensor = upload_tensor(ctx.backend.runtime(), &host)
             .map_err(|err| cuda_error("cuda_upload", err))?;
@@ -3098,7 +3128,7 @@ pub fn cuda_gather_columns_batched_into<D: CudaScalar>(
 ///
 /// Counts one `h2d_calls` for the index table and one `copy_calls` for the
 /// gather. A zero `member_len` or an empty selection launches nothing and
-/// uploads an empty buffer.
+/// uploads an empty `[member_len, selection.len()]` buffer.
 #[doc(hidden)]
 pub fn cuda_gather_members<D: CudaScalar>(
     ctx: &mut CudaDenseContext,
@@ -3124,7 +3154,7 @@ pub fn cuda_gather_members<D: CudaScalar>(
         ));
     }
     if member_len == 0 || selection.is_empty() {
-        return CudaDenseStorage::upload_owned::<D>(ctx, Vec::new());
+        return CudaDenseStorage::upload_members::<D>(ctx, Vec::new(), member_len, selection.len());
     }
     // Why a second, `[L, B]` configuration rather than reshaping the gather
     // output to flat: Tenferro 0.7.1 has no metadata-only owned reshape
@@ -3169,6 +3199,72 @@ pub fn cuda_gather_members<D: CudaScalar>(
     let indices = upload_tensor(ctx.backend.runtime(), &host).map_err(|err| cuda_error(OP, err))?;
     record_h2d(selection.len() * std::mem::size_of::<i64>());
     COPY_CALLS.fetch_add(1, Ordering::Relaxed);
+    let gathered = ctx
+        .backend
+        .gather(&src.tensor, &indices, &config)
+        .map_err(|err| cuda_error(OP, err))?;
+    CudaDenseStorage::from_tensor::<D>(OP, gathered, ctx.device)
+}
+
+/// Gathers the same elements of every member of a `[member_len, members]`
+/// stack into a new `[elements.len(), members]` buffer: element `p` of result
+/// member `m` is element `elements[p]` of source member `m`.
+///
+/// One Tenferro gather whose window is the member axis (`slice_sizes =
+/// [1, members]`), so the launch count is one whatever the member count and
+/// however many blocks the element table spans. The gather allocates the
+/// result, so no zero-filled destination is uploaded; the only transfer is
+/// the `elements` table. The values are moved, not recomputed.
+///
+/// `src` must have the `[member_len, members]` shape the stack uploads
+/// produce ([`CudaDenseStorage::upload_members`]); every element index must be
+/// below `member_len`. Both are checked before any device work. Counts one
+/// `h2d_calls` and one `copy_calls`. An empty table launches nothing and
+/// uploads an empty buffer.
+#[doc(hidden)]
+pub fn cuda_gather_member_elements<D: CudaScalar>(
+    ctx: &mut CudaDenseContext,
+    src: &CudaDenseStorage,
+    member_len: usize,
+    members: usize,
+    elements: Vec<i64>,
+) -> Result<CudaDenseStorage, DenseError> {
+    const OP: &str = "cuda_gather_member_elements";
+    ensure_cuda_device(ctx.device, OP, &[("src", src.device)])?;
+    ensure_payload_dtype::<D>(OP, src)?;
+    if src.tensor.shape() != [member_len, members] {
+        return Err(cuda_error(
+            OP,
+            "a stack buffer must be [member_len, members]",
+        ));
+    }
+    // Why checked here: the gather kernel clamps an out-of-range start
+    // (tenferro-gpu `indexing.rs:clamp_window_start`) instead of faulting, so
+    // an unchecked index would silently read another element.
+    if elements
+        .iter()
+        .any(|&element| usize::try_from(element).map_or(true, |element| element >= member_len))
+    {
+        return Err(cuda_error(
+            OP,
+            "every element index must be below `member_len`",
+        ));
+    }
+    if elements.is_empty() || members == 0 {
+        return CudaDenseStorage::upload_members::<D>(ctx, Vec::new(), elements.len(), members);
+    }
+    let count = elements.len();
+    let host = i64::into_tensor(vec![count, 1], elements).map_err(|err| cuda_error(OP, err))?;
+    let indices = upload_tensor(ctx.backend.runtime(), &host).map_err(|err| cuda_error(OP, err))?;
+    record_h2d(count * std::mem::size_of::<i64>());
+    COPY_CALLS.fetch_add(1, Ordering::Relaxed);
+    let config = tenferro_tensor::GatherConfig {
+        offset_dims: vec![1],
+        collapsed_slice_dims: vec![0],
+        start_index_map: vec![0],
+        index_vector_dim: 1,
+        slice_sizes: vec![1, members],
+    };
     let gathered = ctx
         .backend
         .gather(&src.tensor, &indices, &config)

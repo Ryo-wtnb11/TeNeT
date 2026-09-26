@@ -15,6 +15,8 @@ use core::mem::MaybeUninit;
 use core::ops::{Add, Mul};
 
 use num_traits::{One, Zero};
+use std::borrow::Cow;
+
 use tenet_core::{BlockRef, BlockStructure};
 
 use crate::owned_overwrite_buffer::initialize_owned;
@@ -41,12 +43,27 @@ enum Storage<'a, D> {
     Zeroed(&'a mut [D]),
 }
 
+/// A trailing member axis of a stacked output: `members` copies of the
+/// destination structure at stride `destination_stride`, read from a source
+/// whose members sit `source_stride` apart.
+#[derive(Clone, Copy)]
+struct MemberAxis {
+    members: usize,
+    destination_stride: usize,
+    source_stride: usize,
+}
+
 /// The single write of one destination block of an owned output.
+///
+/// For a stacked output ([`overwrite_owned_member_blocks`]) the block is
+/// written for every member at once: the member axis is one more strided
+/// dimension of the same copy.
 #[doc(hidden)]
 pub struct BlockOverwrite<'a, D> {
     storage: Storage<'a, D>,
     layout: &'a mut CheckedBlockLayout,
     block: BlockRef<'a>,
+    member_axis: Option<MemberAxis>,
     written: bool,
 }
 
@@ -76,9 +93,18 @@ where
     ) -> Result<(), OperationError> {
         self.claim()?;
         let strides = self.block.strides();
-        self.layout.fill_one(self.block.shape(), |axis| {
-            Ok((strides[axis], source_stride(axis)?))
-        })?;
+        let rank = strides.len();
+        let member_axis = self.member_axis;
+        self.layout
+            .fill_one(
+                &block_shape(self.block.shape(), member_axis),
+                |axis| match member_axis {
+                    Some(member) if axis == rank => {
+                        Ok((member.destination_stride, member.source_stride))
+                    }
+                    _ => Ok((strides[axis], source_stride(axis)?)),
+                },
+            )?;
         let dst_offset = checked_offset(self.block.offset())?;
         let src_offset = checked_offset(source_offset)?;
         match &mut self.storage {
@@ -114,6 +140,11 @@ where
         beta: D,
     ) -> Result<(), OperationError> {
         self.claim()?;
+        if self.member_axis.is_some() {
+            return Err(OperationError::InvalidArgument {
+                message: "a stacked owned output supports block copies only",
+            });
+        }
         let strides = self.block.strides();
         // With `alpha = 0` the rhs is the layout's first source, which the
         // single-source walks read.
@@ -196,8 +227,11 @@ where
             // one zero read with stride zero on every axis.
             Storage::Uninit(dst) => {
                 let strides = self.block.strides();
-                self.layout
-                    .fill_one(self.block.shape(), |axis| Ok((strides[axis], 0)))?;
+                let member_stride = self.member_axis.map(|member| member.destination_stride);
+                let shape = block_shape(self.block.shape(), self.member_axis);
+                self.layout.fill_one(&shape, |axis| {
+                    Ok((strides.get(axis).copied().or(member_stride).unwrap_or(0), 0))
+                })?;
                 self.layout.copy_uninit(
                     dst,
                     &[D::zero()],
@@ -212,6 +246,17 @@ where
             // path preserves left other blocks' writes in place.
             Storage::Zeroed(_) => Ok(()),
         }
+    }
+}
+
+/// A block's extents, followed by the member count for a stacked output.
+///
+/// Why borrowed without a member axis: an unstacked block of rank above the
+/// inline capacity would otherwise spill one more buffer per block.
+fn block_shape(shape: &[usize], member_axis: Option<MemberAxis>) -> Cow<'_, [usize]> {
+    match member_axis {
+        None => Cow::Borrowed(shape),
+        Some(member) => Cow::Owned([shape, &[member.members]].concat()),
     }
 }
 
@@ -290,18 +335,53 @@ pub fn overwrite_owned_blocks<D>(
 where
     D: Copy + Add<D, Output = D> + Mul<D, Output = D> + PartialEq + Zero + One + ConjugateValue,
 {
-    overwrite_owned_blocks_in(destination, true, write_block)
+    overwrite_owned_blocks_in(destination, true, None, write_block)
+}
+
+/// [`overwrite_owned_blocks`] for `members` outputs of one structure stacked
+/// at stride `destination.required_len()`, read from a source whose members
+/// sit `source_member_stride` apart: each [`BlockOverwrite::copy`] writes its
+/// block for every member in one strided pass with a trailing member axis.
+///
+/// The buffer is left uninitialized under the same tiling proof as
+/// [`overwrite_owned_blocks`], taken on the member structure: if its blocks
+/// partition `0..L`, the (block, member) rectangles partition `0..members * L`,
+/// member `m`'s image being the member-0 image shifted by `m * L`. Only
+/// [`BlockOverwrite::copy`] is supported.
+#[doc(hidden)]
+pub fn overwrite_owned_member_blocks<D>(
+    destination: &BlockStructure,
+    members: usize,
+    source_member_stride: usize,
+    write_block: impl FnMut(BlockRef<'_>, &mut BlockOverwrite<'_, D>) -> Result<(), OperationError>,
+) -> Result<Vec<D>, OperationError>
+where
+    D: Copy + Add<D, Output = D> + Mul<D, Output = D> + PartialEq + Zero + One + ConjugateValue,
+{
+    let member_axis = MemberAxis {
+        members,
+        destination_stride: destination.required_len()?,
+        source_stride: source_member_stride,
+    };
+    overwrite_owned_blocks_in(destination, true, Some(member_axis), write_block)
 }
 
 fn overwrite_owned_blocks_in<D>(
     destination: &BlockStructure,
     allow_uninit: bool,
+    member_axis: Option<MemberAxis>,
     mut write_block: impl FnMut(BlockRef<'_>, &mut BlockOverwrite<'_, D>) -> Result<(), OperationError>,
 ) -> Result<Vec<D>, OperationError>
 where
     D: Copy + Add<D, Output = D> + Mul<D, Output = D> + PartialEq + Zero + One + ConjugateValue,
 {
-    let len = destination.required_len()?;
+    let member_len = destination.required_len()?;
+    let len = match member_axis {
+        Some(member) => member_len
+            .checked_mul(member.members)
+            .ok_or(OperationError::ElementCountOverflow)?,
+        None => member_len,
+    };
     let mut layout = CheckedBlockLayout::default();
     let mut write_all = |mut storage: Storage<'_, D>| -> Result<(), OperationError> {
         for index in 0..destination.block_count() {
@@ -313,6 +393,7 @@ where
                 },
                 layout: &mut layout,
                 block,
+                member_axis,
                 written: false,
             };
             write_block(block, &mut writer)?;
@@ -324,7 +405,7 @@ where
         }
         Ok(())
     };
-    if allow_uninit && blocks_tile_storage(destination, len)? {
+    if allow_uninit && blocks_tile_storage(destination, member_len)? {
         return initialize_owned(len, |dst| write_all(Storage::Uninit(dst)));
     }
     #[cfg(debug_assertions)]
@@ -419,35 +500,128 @@ mod tests {
     ) -> Result<Vec<Complex64>, OperationError> {
         let source = values();
         let mut index = 0;
-        overwrite_owned_blocks_in(&tiled(), allow_uninit, |_, writer: &mut Writer<'_>| {
-            let block = index;
-            index += 1;
-            writer.copy(
-                |axis| Ok(source_stride(block, axis)),
-                &source,
-                2 + block,
-                conjugate,
-                alpha,
-            )
-        })
+        overwrite_owned_blocks_in(
+            &tiled(),
+            allow_uninit,
+            None,
+            |_, writer: &mut Writer<'_>| {
+                let block = index;
+                index += 1;
+                writer.copy(
+                    |axis| Ok(source_stride(block, axis)),
+                    &source,
+                    2 + block,
+                    conjugate,
+                    alpha,
+                )
+            },
+        )
     }
 
     fn write_add(allow_uninit: bool, alpha: Complex64, beta: Complex64) -> Vec<Complex64> {
         let lhs = values();
         let rhs: Vec<Complex64> = values().into_iter().rev().collect();
         let mut index = 0;
-        overwrite_owned_blocks_in(&tiled(), allow_uninit, |_, writer: &mut Writer<'_>| {
-            let block = index;
-            index += 1;
-            writer.add(
-                |axis| Ok((source_stride(block, axis), source_stride(3 - block, axis))),
-                (&lhs, block, block % 2 == 0),
-                (&rhs, 1, block % 2 == 1),
-                alpha,
-                beta,
-            )
-        })
+        overwrite_owned_blocks_in(
+            &tiled(),
+            allow_uninit,
+            None,
+            |_, writer: &mut Writer<'_>| {
+                let block = index;
+                index += 1;
+                writer.add(
+                    |axis| Ok((source_stride(block, axis), source_stride(3 - block, axis))),
+                    (&lhs, block, block % 2 == 0),
+                    (&rhs, 1, block % 2 == 1),
+                    alpha,
+                    beta,
+                )
+            },
+        )
         .unwrap()
+    }
+
+    /// What: a stacked output equals the per-member outputs laid end to end,
+    /// bit for bit, with and without the tiling proof; the member axis never
+    /// triggers a fill of its own, and a two-source add is refused.
+    #[test]
+    fn stacked_copies_equal_the_per_member_outputs_bitwise() {
+        const MEMBERS: usize = 3;
+        let member_source = |member: usize| -> Vec<Complex64> {
+            values()
+                .into_iter()
+                .map(|value| value * Complex64::new(1.0 + member as f64, -(member as f64)))
+                .collect()
+        };
+        let stacked: Vec<Complex64> = (0..MEMBERS).flat_map(member_source).collect();
+        let one = Complex64::new(1.0, 0.0);
+        let run = |allow_uninit: bool| {
+            let mut index = 0;
+            let member_axis = MemberAxis {
+                members: MEMBERS,
+                destination_stride: 23,
+                source_stride: 96,
+            };
+            overwrite_owned_blocks_in(
+                &tiled(),
+                allow_uninit,
+                Some(member_axis),
+                |_, writer: &mut Writer<'_>| {
+                    let block = index;
+                    index += 1;
+                    writer.copy(
+                        |axis| Ok(source_stride(block, axis)),
+                        &stacked,
+                        2 + block,
+                        block % 2 == 1,
+                        one,
+                    )
+                },
+            )
+            .unwrap()
+        };
+        let expected: Vec<Complex64> = (0..MEMBERS)
+            .flat_map(|member| {
+                let source = member_source(member);
+                let mut index = 0;
+                overwrite_owned_blocks_in(&tiled(), true, None, |_, writer: &mut Writer<'_>| {
+                    let block = index;
+                    index += 1;
+                    writer.copy(
+                        |axis| Ok(source_stride(block, axis)),
+                        &source,
+                        2 + block,
+                        block % 2 == 1,
+                        one,
+                    )
+                })
+                .unwrap()
+            })
+            .collect();
+        #[cfg(debug_assertions)]
+        take_owned_block_prefills();
+        let uninit = run(true);
+        #[cfg(debug_assertions)]
+        assert_eq!(take_owned_block_prefills(), 0);
+        assert_eq!(bits(&uninit), bits(&expected));
+        let zeroed = run(false);
+        #[cfg(debug_assertions)]
+        assert_eq!(take_owned_block_prefills(), 23 * MEMBERS);
+        assert_eq!(bits(&zeroed), bits(&expected));
+
+        let refused = overwrite_owned_member_blocks(&tiled(), MEMBERS, 96, |_, writer| {
+            writer.add(
+                |_| Ok((1, 1)),
+                (&stacked, 0, false),
+                (&stacked, 0, false),
+                one,
+                one,
+            )
+        });
+        assert!(matches!(
+            refused,
+            Err(OperationError::InvalidArgument { .. })
+        ));
     }
 
     /// What: a tiled layout skips the fill and stores the same bits as the
@@ -533,6 +707,7 @@ mod tests {
             overwrite_owned_blocks_in(
                 &structure,
                 allow_uninit,
+                None,
                 |block, writer: &mut Writer<'_>| {
                     let strides = block.strides();
                     // Reversed axis order reads a transposed, still in-bounds view.
