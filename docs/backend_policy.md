@@ -108,8 +108,9 @@ its execution lease (or directly, for strided-only operations), and its
 tree-transform replay, plan compile and strided-kernel regions are installed
 there (`tenet_operations::host_pool`), with `recoupling_threads` as a degree
 cap inside it. Building a runtime has no process-global side effect, and
-`RuntimeBuilder::build` reads no environment variable; only
-`RuntimeBuilder::threads_from_env` does. The pool is distinct from
+the runtime reads no environment variable (an application that wants
+`RAYON_NUM_THREADS`-style control reads it and passes
+`RuntimeBuilder::dense_threads`). The pool is distinct from
 provider-internal (BLAS) threads and synchronization, and a nondefault
 explicit provider kind still owns a private pool (Tenferro exposes no
 context-plus-kind constructor). Consequently this design makes no general

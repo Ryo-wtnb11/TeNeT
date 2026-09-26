@@ -366,6 +366,54 @@ fn configuration_flushes_and_capacity_shrink_release_synchronously() {
     assert_eq!(disabled.workspace_byte_evictions, 4);
 }
 
+/// `configure_plan_cache` is the only post-build setter; a transition that
+/// keeps the cache enabled and does not shrink it must keep every compiled
+/// plan and idle workspace, so the next call is a hit, not a re-plan.
+#[test]
+fn enabled_reconfiguration_retains_plans_and_workspaces() {
+    let runtime = Runtime::builder().build().unwrap();
+    let space = space(Arc::new(U1FusionRule), 3);
+    let (a, b) = pair(&runtime, &space, 150);
+    let cold = tensor!([i; k] = a[i; j] * b[j; k]).unwrap();
+    let before = plan_cache_stats(&runtime);
+    assert_eq!(
+        (before.misses, before.entries, before.idle_workspaces),
+        (1, 1, 1)
+    );
+
+    let grown = PlanCacheConfig {
+        capacity: 2 * runtime.plan_cache_config().capacity,
+        workspace_budget_bytes: 2 * runtime.plan_cache_config().workspace_budget_bytes,
+        replan: ReplanPolicy::AlwaysReuse,
+        ..Default::default()
+    };
+    configure_plan_cache(&runtime, grown.clone());
+    let config = runtime.plan_cache_config();
+    assert_eq!(
+        (
+            config.capacity,
+            config.workspace_budget_bytes,
+            config.replan
+        ),
+        (grown.capacity, grown.workspace_budget_bytes, grown.replan)
+    );
+    let retained = plan_cache_stats(&runtime);
+    assert_eq!(
+        (
+            retained.entries,
+            retained.idle_workspaces,
+            retained.retained_workspace_bytes
+        ),
+        (1, 1, before.retained_workspace_bytes)
+    );
+
+    let warm = tensor!([i; k] = a[i; j] * b[j; k]).unwrap();
+    let after = plan_cache_stats(&runtime);
+    assert_eq!((after.misses, after.hits, after.replans), (1, 1, 0));
+    assert_eq!(after.workspace_reuses, before.workspace_reuses + 1);
+    assert_eq!(cold.data(), warm.data());
+}
+
 #[test]
 fn dropping_warm_runtime_breaks_the_cache_workspace_cycle() {
     let runtime = Runtime::builder().build().unwrap();

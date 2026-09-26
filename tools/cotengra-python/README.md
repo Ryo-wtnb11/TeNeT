@@ -31,10 +31,12 @@ let optimizer = Optimizer::CotengraPython(
 );
 ```
 
-Or set the project path without changing Rust code:
+The opt-in integration test takes the project path from its own environment
+(the library itself reads none):
 
 ```sh
-TENET_COTENGRA_UV_PROJECT=tools/cotengra-python cargo test -p tenet-network --features cotengra-python
+TENET_COTENGRA_UV_PROJECT=tools/cotengra-python TENET_RUN_COTENGRA_PYTHON_TEST=1 \
+  cargo test -p tenet-network --features cotengra-python -- --ignored
 ```
 
 Relative `tools/cotengra-python` paths are resolved against the current working

@@ -783,32 +783,9 @@ struct PythonCommand {
 }
 
 fn python_command(config: &CotengraPythonConfig) -> PythonCommand {
-    if let Some(program) = config
-        .python
-        .clone()
-        .or_else(|| std::env::var("TENET_COTENGRA_PYTHON").ok())
-    {
-        return PythonCommand {
-            program,
-            args: config.python_args.clone(),
-        };
-    }
-
-    if let Ok(project) = std::env::var("TENET_COTENGRA_UV_PROJECT") {
-        return PythonCommand {
-            program: "uv".to_string(),
-            args: vec![
-                "run".to_string(),
-                "--project".to_string(),
-                resolve_cotengra_uv_project(project),
-                "python".to_string(),
-            ],
-        };
-    }
-
     PythonCommand {
-        program: "python3".to_string(),
-        args: Vec::new(),
+        program: config.python.clone(),
+        args: config.python_args.clone(),
     }
 }
 
@@ -817,23 +794,6 @@ fn command_text(command: &PythonCommand) -> String {
         .chain(command.args.iter().map(String::as_str))
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-fn resolve_cotengra_uv_project(project: String) -> String {
-    let path = std::path::Path::new(&project);
-    if path.is_absolute() || path.exists() {
-        return project;
-    }
-
-    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    if let Some(workspace) = manifest.parent() {
-        let workspace_path = workspace.join(&project);
-        if workspace_path.exists() {
-            return workspace_path.to_string_lossy().into_owned();
-        }
-    }
-
-    project
 }
 
 fn parse_planner_output(value: &Value) -> Result<CotengraPythonResult> {

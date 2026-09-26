@@ -11,7 +11,9 @@ use tenet::dense::{
     DenseScalar, DenseTensor, DenseWrite, MatrixOp,
 };
 use tenet::operations::OperationError;
-use tenet::prelude::{GradedSpace, Runtime, TensorMap, U1FusionRule, U1Irrep};
+use tenet::prelude::{
+    GradedSpace, LinalgBackend, Runtime, RuntimeConfigError, TensorMap, U1FusionRule, U1Irrep,
+};
 use tenet::typed::{Error, Svd};
 
 fn u1_space(entries: [(i32, usize); 3]) -> GradedSpace<U1FusionRule> {
@@ -266,5 +268,34 @@ fn injected_executor_without_eig_reports_unsupported() {
             OperationError::Dense(DenseError::Unsupported { op: "eig", .. })
         ),
         "a missing executor capability must be Unsupported, got {operation:?}"
+    );
+}
+
+#[test]
+fn injected_executor_with_linalg_backend_is_a_typed_build_error() {
+    let error = Runtime::builder()
+        .with_dense_executor(Box::new(DefaultDenseExecutor::default()))
+        .linalg_backend(LinalgBackend::Faer)
+        .build()
+        .unwrap_err();
+    assert_eq!(
+        error,
+        Error::RuntimeConfig(RuntimeConfigError::DenseExecutorWithLinalgBackend)
+    );
+    // The provider-independent GEMM selection is not a factorization provider,
+    // so it stays compatible with an injected executor.
+    Runtime::builder()
+        .with_dense_executor(Box::new(DefaultDenseExecutor::default()))
+        .gemm_backend(LinalgBackend::Faer)
+        .build()
+        .unwrap();
+}
+
+#[test]
+fn zero_dense_threads_is_a_typed_build_error() {
+    let error = Runtime::builder().dense_threads(0).build().unwrap_err();
+    assert_eq!(
+        error,
+        Error::RuntimeConfig(RuntimeConfigError::ZeroDenseThreads)
     );
 }

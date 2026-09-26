@@ -71,12 +71,12 @@ let rt = Runtime::builder()
 The relative `tools/cotengra-python` path is resolved against the current
 working directory first, then against `tenet-network`'s `CARGO_MANIFEST_DIR`
 parent — so it works regardless of the caller's CWD (a downstream crate does
-**not** need an absolute path). Overrides, in priority order:
+**not** need an absolute path). The interpreter is a config field; TeNeT reads
+no environment variable to choose it:
 
-- `CotengraPythonConfig::python(program)` or `TENET_COTENGRA_PYTHON` — run a
-  specific interpreter directly.
-- `TENET_COTENGRA_UV_PROJECT=<path>` — use `uv run --project <path> python`.
-- otherwise `python3` on `PATH` (must have cotengra importable).
+- `CotengraPythonConfig::python(program)` — run a specific interpreter directly.
+- `CotengraPythonConfig::uv_project(path)` — use `uv run --project <path> python`.
+- the default is `python3` on `PATH` (must have cotengra importable).
 
 `CotengraPythonConfig` selects the `method` (`Greedy` / `Optimal` / `AutoHq` /
 `Hyper`), `minimize` (flops / size / …), `max_repeats`, `seed`, and a

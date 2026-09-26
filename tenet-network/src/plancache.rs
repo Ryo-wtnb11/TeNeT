@@ -679,8 +679,16 @@ fn existing_cache_mut(slot: &mut Option<Box<dyn Any + Send>>) -> Option<&mut Pla
     })
 }
 
-/// Replaces the runtime's plan-cache configuration (the builder-time
-/// equivalent is `Runtime::builder().plan_cache(config)`).
+/// Replaces the runtime's plan-cache configuration after build; the only
+/// post-build setter (the builder-time equivalent is
+/// `Runtime::builder().plan_cache(config)`, the getter
+/// [`Runtime::plan_cache_config`]).
+///
+/// Retention: compiled plans survive every transition that keeps the cache
+/// enabled, so re-tuning a live runtime never forces a re-plan. Disabling
+/// drops all plans; lowering `capacity` evicts least-recently-used plans to
+/// fit; lowering `workspace_budget_bytes` releases idle workspace storage
+/// synchronously. Raising either bound retains everything.
 pub fn configure_plan_cache(runtime: &Runtime, config: PlanCacheConfig) {
     runtime.replace_plan_cache_config(config, |previous, next, slot| {
         let Some(cache) = existing_cache_mut(slot) else {
@@ -714,11 +722,6 @@ pub fn configure_plan_cache(runtime: &Runtime, config: PlanCacheConfig) {
             .workspace_budget
             .set_limit(next.workspace_budget_bytes);
     });
-}
-
-/// The runtime's current plan-cache configuration.
-pub fn plan_cache_config(runtime: &Runtime) -> PlanCacheConfig {
-    runtime.plan_cache_config()
 }
 
 /// Hit/miss/re-plan counters and the current entry count.

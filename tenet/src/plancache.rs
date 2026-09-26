@@ -106,9 +106,11 @@ pub struct CotengraPythonConfig {
     pub parallel: bool,
     /// Optional slicing policy. `None` keeps this as a path-only planner.
     pub slicing: CotengraSlicingConfig,
-    /// Python executable. `None` means `$TENET_COTENGRA_PYTHON`,
-    /// `$TENET_COTENGRA_UV_PROJECT`, or `python3`.
-    pub python: Option<String>,
+    /// Python executable (default `python3` on `PATH`). TeNeT reads no
+    /// environment variable to choose it; an application that wants an
+    /// environment override reads it and calls [`Self::python`] or
+    /// [`Self::uv_project`].
+    pub python: String,
     /// Arguments inserted between the Python executable and `-c <planner>`.
     /// This supports launchers such as `uv run --project <dir> python`.
     pub python_args: Vec<String>,
@@ -175,7 +177,7 @@ impl Default for CotengraPythonConfig {
             seed: Some(0),
             parallel: false,
             slicing: CotengraSlicingConfig::None,
-            python: None,
+            python: "python3".to_string(),
             python_args: Vec::new(),
             timeout: Some(std::time::Duration::from_secs(300)),
         }
@@ -192,7 +194,7 @@ impl CotengraPythonConfig {
     /// Launch this config through `uv run --project <project> python`.
     pub fn uv_project(mut self, project: impl Into<String>) -> Self {
         let project = resolve_cotengra_uv_project(project.into());
-        self.python = Some("uv".to_string());
+        self.python = "uv".to_string();
         self.python_args = vec![
             "run".to_string(),
             "--project".to_string(),
@@ -204,7 +206,7 @@ impl CotengraPythonConfig {
 
     /// Launch this config through a specific Python executable.
     pub fn python(mut self, python: impl Into<String>) -> Self {
-        self.python = Some(python.into());
+        self.python = python.into();
         self.python_args.clear();
         self
     }

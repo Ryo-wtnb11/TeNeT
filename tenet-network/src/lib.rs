@@ -90,9 +90,9 @@ pub use plan::{
     ActivePair, ContractionPlan,
 };
 pub use plancache::{
-    clear_plan_cache, configure_plan_cache, load_plan_cache, plan_cache_config, plan_cache_stats,
-    save_plan_cache, Optimizer, PlanCacheConfig, PlanCacheStats, ReplanPolicy,
-    DEFAULT_PLAN_CACHE_CAPACITY, DEFAULT_REPLAN_DRIFT_FACTOR,
+    clear_plan_cache, configure_plan_cache, load_plan_cache, plan_cache_stats, save_plan_cache,
+    Optimizer, PlanCacheConfig, PlanCacheStats, ReplanPolicy, DEFAULT_PLAN_CACHE_CAPACITY,
+    DEFAULT_REPLAN_DRIFT_FACTOR,
 };
 pub use slice::{
     best_next_internal_index, best_next_slice_index, contraction_width, greedy_slice,
