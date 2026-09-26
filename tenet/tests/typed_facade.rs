@@ -3350,7 +3350,7 @@ fn scale_multiplies_every_real_and_complex_entry() {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 5 (issue #568), slice 2: `norm`, `norm_inf`, `normalize`.
+// Phase 5 (issue #568), slice 2: `norm`, `norm(Inf)`, `normalize`.
 // ---------------------------------------------------------------------------
 
 /// An SU(2) tensor over two legs, split into `num_codomain <- rest`.
@@ -3403,12 +3403,12 @@ fn scaling_by_the_inverse_norm_divides_by_the_dimension_weighted_norm() {
     // Frobenius normalization would get wrong, and only a non-abelian fixture
     // can see it.
     let typed = su2_tensor(&runtime);
-    let norm = typed.norm().unwrap();
+    let norm = typed.norm(2.0).unwrap();
     let unit = typed.scale(1.0 / norm);
     for (&actual, &source) in unit.data().iter().zip(typed.data()) {
         assert!((actual - source / norm).abs() <= 1e-12 * source.abs().max(1.0));
     }
-    assert!((unit.norm().unwrap() - 1.0).abs() < 1e-12);
+    assert!((unit.norm(2.0).unwrap() - 1.0).abs() < 1e-12);
 }
 
 // ---------------------------------------------------------------------------
@@ -3445,10 +3445,13 @@ fn inner_uses_the_same_dimension_weight_as_norm() {
         // weighting to `norm`'s.
         assert!((typed_value - norm * norm).abs() < 1e-9 * norm * norm);
     };
-    agree(z2_typed.inner(&z2_typed).unwrap(), z2_typed.norm().unwrap());
+    agree(
+        z2_typed.inner(&z2_typed).unwrap(),
+        z2_typed.norm(2.0).unwrap(),
+    );
     agree(
         su2_typed.inner(&su2_typed).unwrap(),
-        su2_typed.norm().unwrap(),
+        su2_typed.norm(2.0).unwrap(),
     );
 }
 
@@ -3591,7 +3594,7 @@ fn adjoint_carries_an_external_provider() {
     assert_eq!(adjoint.data().len(), tensor.data().len());
     assert_eq!(adjoint.adjoint().unwrap().data(), tensor.data());
     // A dagger preserves the dimension-weighted norm.
-    assert!((adjoint.norm().unwrap() - tensor.norm().unwrap()).abs() < 1e-12);
+    assert!((adjoint.norm(2.0).unwrap() - tensor.norm(2.0).unwrap()).abs() < 1e-12);
 }
 
 // ---------------------------------------------------------------------------
@@ -4031,7 +4034,7 @@ fn id_needs_at_least_one_leg() {
 
 #[test]
 fn compact_reductions_match_the_forced_dense_route() {
-    // What: `norm`, `norm_inf`, `tr` and `inner` read the stored spectrum
+    // What: `norm`, `norm(Inf)`, `tr` and `inner` read the stored spectrum
     // instead of its materialization, and land on the same numbers.
     let _guard = cache_lock();
     let runtime = runtime();
@@ -4040,10 +4043,18 @@ fn compact_reductions_match_the_forced_dense_route() {
 
     // Two reductions of the same singular values that may sum in different
     // orders: agreement within the tolerance rule over the dense payload is
-    // the contract. A maximum is order-independent, so `norm_inf` is exact.
+    // the contract. A maximum is order-independent, so `norm(Inf)` is exact.
     let terms = dense.data().len();
-    numerics::assert_close("norm", typed.norm().unwrap(), dense.norm().unwrap(), terms);
-    assert_eq!(typed.norm_inf().unwrap(), dense.norm_inf().unwrap());
+    numerics::assert_close(
+        "norm",
+        typed.norm(2.0).unwrap(),
+        dense.norm(2.0).unwrap(),
+        terms,
+    );
+    assert_eq!(
+        typed.norm(f64::INFINITY).unwrap(),
+        dense.norm(f64::INFINITY).unwrap()
+    );
     numerics::assert_close("tr", typed.tr().unwrap(), dense.tr().unwrap(), terms);
     numerics::assert_close(
         "inner",
@@ -4052,7 +4063,7 @@ fn compact_reductions_match_the_forced_dense_route() {
         terms,
     );
     // `<s, s>` is the squared norm: the identity that pins the weighting.
-    let norm = typed.norm().unwrap();
+    let norm = typed.norm(2.0).unwrap();
     assert!((typed.inner(&typed).unwrap() - norm * norm).abs() < 1e-9 * norm * norm);
 }
 
@@ -4068,7 +4079,12 @@ fn compact_reductions_carry_the_su2_dimension_weight() {
 
     // Compact and dense routes may sum in different orders; see above.
     let terms = dense.data().len();
-    numerics::assert_close("norm", typed.norm().unwrap(), dense.norm().unwrap(), terms);
+    numerics::assert_close(
+        "norm",
+        typed.norm(2.0).unwrap(),
+        dense.norm(2.0).unwrap(),
+        terms,
+    );
     numerics::assert_close("tr", typed.tr().unwrap(), dense.tr().unwrap(), terms);
     numerics::assert_close(
         "inner",
@@ -4082,8 +4098,11 @@ fn compact_reductions_carry_the_su2_dimension_weight() {
         (typed.tr().unwrap() - unweighted).abs() > 1e-6,
         "the SU(2) spectrum trace is not dimension weighted"
     );
-    // `norm_inf` is deliberately *not* weighted.
-    assert_eq!(typed.norm_inf().unwrap(), dense.norm_inf().unwrap());
+    // `norm(Inf)` is deliberately *not* weighted.
+    assert_eq!(
+        typed.norm(f64::INFINITY).unwrap(),
+        dense.norm(f64::INFINITY).unwrap()
+    );
 }
 
 #[test]
@@ -4586,8 +4605,8 @@ fn inv_of_a_compact_spectrum_is_the_elementwise_reciprocal() {
     let (_, typed_s, _, _) = truncated_svd!(typed_s, Truncation::Rank(2));
 
     let inverse = typed_s.inv().unwrap();
-    let source_spectrum = typed_s.diagonal_spectrum().unwrap().unwrap();
-    let inverse_spectrum = inverse.diagonal_spectrum().unwrap().unwrap();
+    let source_spectrum = tenet::expert::diagonal_spectrum(&typed_s).unwrap().unwrap();
+    let inverse_spectrum = tenet::expert::diagonal_spectrum(&inverse).unwrap().unwrap();
     assert_eq!(source_spectrum.len(), inverse_spectrum.len());
     for (source, image) in source_spectrum.iter().zip(&inverse_spectrum) {
         assert_eq!(source.sector, image.sector);
@@ -4718,7 +4737,7 @@ fn pinv_satisfies_the_moore_penrose_identities() {
                 .map(|(a, b)| (a - b).abs())
                 .fold(0.0f64, f64::max);
             assert!(
-                error < 1e-9 * expected.norm().unwrap().max(1.0),
+                error < 1e-9 * expected.norm(2.0).unwrap().max(1.0),
                 "{name}: {error}"
             );
         };
@@ -4752,7 +4771,7 @@ fn pinv_of_a_compact_spectrum_is_the_elementwise_cutoff_reciprocal() {
     let runtime = runtime();
     let typed = z2_endomorphism(&runtime);
     let typed_s = typed.svd_compact().unwrap().s;
-    let source = typed_s.diagonal_spectrum().unwrap().unwrap();
+    let source = tenet::expert::diagonal_spectrum(&typed_s).unwrap().unwrap();
     let sigma_max = source
         .iter()
         .flat_map(|entry| &entry.values)
@@ -4760,10 +4779,7 @@ fn pinv_of_a_compact_spectrum_is_the_elementwise_cutoff_reciprocal() {
         .fold(0.0, f64::max);
 
     for rcond in [0.0, 1e-12, 1e-3] {
-        let image = typed_s
-            .pinv(rcond)
-            .unwrap()
-            .diagonal_spectrum()
+        let image = tenet::expert::diagonal_spectrum(&typed_s.pinv(rcond).unwrap())
             .unwrap()
             .unwrap();
         let cutoff = rcond * sigma_max;
@@ -5283,18 +5299,17 @@ fn c64_compact_inv_and_pinv_are_elementwise_reciprocals() {
     };
     let typed = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| next()).unwrap();
     let typed_s = typed.svd_compact().unwrap().s;
-    let source = typed_s.diagonal_spectrum().unwrap().unwrap();
+    let source = tenet::expert::diagonal_spectrum(&typed_s).unwrap().unwrap();
     let sigma_max = source
         .iter()
         .flat_map(|entry| &entry.values)
         .map(|value| value.norm())
         .fold(0.0, f64::max);
     let rcond = 1e-12;
-    let inverse = typed_s.inv().unwrap().diagonal_spectrum().unwrap().unwrap();
-    let pseudo = typed_s
-        .pinv(rcond)
+    let inverse = tenet::expert::diagonal_spectrum(&typed_s.inv().unwrap())
         .unwrap()
-        .diagonal_spectrum()
+        .unwrap();
+    let pseudo = tenet::expert::diagonal_spectrum(&typed_s.pinv(rcond).unwrap())
         .unwrap()
         .unwrap();
     for ((source, inverse), pseudo) in source.iter().zip(&inverse).zip(&pseudo) {
@@ -5428,7 +5443,7 @@ fn diagonal_contract_preserves_left_provider_authority_on_every_compact_arm() {
                     $name
                 );
                 assert_eq!(
-                    actual.diagonal_spectrum().unwrap().is_some(),
+                    tenet::expert::diagonal_spectrum(&actual).unwrap().is_some(),
                     index == 2,
                     "{} {arm} storage",
                     $name
@@ -5488,7 +5503,7 @@ fn complex_diagonal_contract_matches_the_typed_dense_route() {
     assert_same_legs(&got.codomain(), &expected.codomain());
     assert_same_legs(&got.domain(), &expected.domain());
     assert_data_close_c64(got.data(), expected.data());
-    assert!(got.diagonal_spectrum().unwrap().is_some());
+    assert!(tenet::expert::diagonal_spectrum(&got).unwrap().is_some());
 }
 
 #[test]
@@ -5537,7 +5552,7 @@ fn the_diagonal_contract_arm_keeps_fermionic_signs() {
     assert_same_legs(&got.codomain(), &expected.codomain());
     assert_same_legs(&got.domain(), &expected.domain());
     assert_eq!(got.data(), expected.data(), "fermionic s*s");
-    assert!(got.diagonal_spectrum().unwrap().is_some());
+    assert!(tenet::expert::diagonal_spectrum(&got).unwrap().is_some());
 }
 
 #[test]
@@ -5773,7 +5788,7 @@ where
         .expect("mixed add on one bond space is total");
     assert_eq!(dense.data(), compact.data(), "the dense twin lost values");
     assert!(
-        dense.diagonal_spectrum().unwrap().is_none(),
+        tenet::expert::diagonal_spectrum(&dense).unwrap().is_none(),
         "the dense twin stayed compact"
     );
     dense
@@ -6818,7 +6833,7 @@ fn assert_reductions_and_factorizations_hold<R>(
     assert_ne!(typed_inner, 0.0, "{what}: inner is vacuously zero");
     // `<t, t>` is the squared weighted norm, which is the identity that pins
     // this weighting to `norm`'s.
-    let norm = typed.0.norm().unwrap();
+    let norm = typed.0.norm(2.0).unwrap();
     let self_inner = typed.0.inner(typed.0).unwrap();
     assert!(
         (self_inner - norm * norm).abs() < 1e-9 * norm * norm,
@@ -6998,7 +7013,7 @@ fn generic_product_provider_drives_the_typed_facade_without_a_fixed_constructor(
         t.block_count() > 1,
         "a single block would make the identities below near-vacuous"
     );
-    let norm = t.norm().unwrap();
+    let norm = t.norm(2.0).unwrap();
     assert!(norm > 0.0, "zero tensor: the assertions below are vacuous");
 
     // <t, t> = |t|^2 and tr(t† ∘ t) = |t|^2: three independent code paths
@@ -7702,19 +7717,14 @@ fn typed_polar_carries_an_external_provider() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[allow(deprecated)]
-fn typed_rank_accessors_pin_the_aliases() {
-    // Gate 1: ranks on a mixed 2 <- 1 fixture and the TensorKit-named aliases.
+fn typed_rank_accessors_on_a_mixed_fixture() {
+    // Gate 1: ranks on a mixed 2 <- 1 fixture.
     let _guard = cache_lock();
     let runtime = runtime();
     let typed = z2_tensor(&runtime);
     assert_eq!(typed.codomain_rank(), 2);
     assert_eq!(typed.domain_rank(), 1);
     assert_eq!(typed.rank(), 3);
-
-    assert_eq!(typed.numout(), typed.codomain_rank());
-    assert_eq!(typed.numin(), typed.domain_rank());
-    assert_eq!(typed.numind(), typed.rank());
 }
 
 #[test]
@@ -7764,21 +7774,6 @@ fn typed_leg_dim_out_of_range_is_an_invalid_argument() {
         typed_error,
         tenet::prelude::Error::InvalidArgument(_)
     ));
-}
-
-#[test]
-#[allow(deprecated)]
-fn typed_codomain_and_domain_spaces_alias_the_primary_accessors() {
-    // Gate 3: the compatibility names are documented aliases of
-    // `codomain()`/`domain()` — same legs, content-wise.
-    let _guard = cache_lock();
-    let runtime = runtime();
-    let typed = z2_tensor(&runtime);
-
-    assert_same_legs(&typed.codomain_spaces(), &typed.codomain());
-    assert_same_legs(&typed.domain_spaces(), &typed.domain());
-    assert_eq!(typed.codomain_spaces().len(), 2);
-    assert_eq!(typed.domain_spaces().len(), 1);
 }
 
 #[test]
@@ -9283,7 +9278,7 @@ fn contract_ordered_delegates_with_a_nonidentity_output_order() {
     let rhs: TensorMap<tenet::core::U1FusionRule, f64> =
         TensorMap::rand_with_seed(&runtime, [&leg], [&leg, &leg], 224_304).unwrap();
 
-    let actual = lhs.contract_ordered(&rhs, &[0], &[0], &[1, 0]).unwrap();
+    let actual = lhs.contract(&rhs, &[0], &[0], &[1, 0]).unwrap();
     let expected = lhs
         .contract(&rhs, &[0], &[0], &[0, 1])
         .unwrap()
@@ -9291,7 +9286,7 @@ fn contract_ordered_delegates_with_a_nonidentity_output_order() {
         .unwrap();
     // The ordered route may run its GEMM on another layout; the contracted
     // leg has dimension 4.
-    numerics::assert_slices_close("contract_ordered", actual.data(), expected.data(), 4);
+    numerics::assert_slices_close("contract", actual.data(), expected.data(), 4);
 }
 
 #[test]
@@ -9430,13 +9425,13 @@ fn assert_host_contract_entries_reject_but_compose_admits<const ANYONIC: bool>()
     let contract = lhs.contract(&rhs, &[1], &[0], &[0, 1]).unwrap_err();
     assert!(is_non_symmetric_contraction(&contract), "{contract:?}");
     #[allow(deprecated)]
-    let ordered = lhs.contract_ordered(&rhs, &[1], &[0], &[0, 1]).unwrap_err();
+    let ordered = lhs.contract(&rhs, &[1], &[0], &[0, 1]).unwrap_err();
     let overwrite = lhs
         .contract_overwrite_into(&rhs, &mut destination, &[1], &[0], &[0, 1], 1.0)
         .unwrap_err();
     #[allow(deprecated)]
     let ordered_overwrite = lhs
-        .contract_ordered_overwrite_into(&rhs, &mut destination, &[1], &[0], &[0, 1], 1.0)
+        .contract_overwrite_into(&rhs, &mut destination, &[1], &[0], &[0, 1], 1.0)
         .unwrap_err();
     for error in [&ordered, &overwrite, &ordered_overwrite] {
         assert!(is_non_symmetric_contraction(error), "{error:?}");
@@ -9535,7 +9530,7 @@ fn assert_device_contract_entries_reject_but_compose_admits<const ANYONIC: bool>
     let transfers = tenet::dense::cuda_transfer_stats();
     let contract = lhs.contract(&rhs, &[1], &[0], &[0, 1]).unwrap_err();
     #[allow(deprecated)]
-    let ordered = lhs.contract_ordered(&rhs, &[1], &[0], &[0, 1]).unwrap_err();
+    let ordered = lhs.contract(&rhs, &[1], &[0], &[0, 1]).unwrap_err();
     let overwrite = lhs
         .contract_overwrite_into(&rhs, &mut destination, &[1], &[0], &[0, 1], 1.0)
         .unwrap_err();

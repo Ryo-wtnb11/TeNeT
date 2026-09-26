@@ -126,14 +126,14 @@ fn general_exp_matches_the_tensorkit_oracle() {
     ] {
         let typed = typed_real(&runtime, scale);
         assert_close(
-            typed.norm().unwrap(),
+            typed.norm(2.0).unwrap(),
             input_norm,
             &format!("f64 scale {scale} typed input fixture"),
         );
 
         let typed_exp = typed.exp().unwrap();
         assert_close(
-            typed_exp.norm().unwrap(),
+            typed_exp.norm(2.0).unwrap(),
             exponential_norm,
             &format!("f64 scale {scale} exp"),
         );
@@ -142,13 +142,13 @@ fn general_exp_matches_the_tensorkit_oracle() {
     // c64, where the blocks are non-Hermitian in both parts.
     let typed = typed_complex(&runtime, 1.0);
     assert_close(
-        typed.norm().unwrap(),
+        typed.norm(2.0).unwrap(),
         2.5678298230217673,
         "c64 typed input fixture",
     );
 
     let typed_exp = typed.exp().unwrap();
-    assert_close(typed_exp.norm().unwrap(), 3.1806015158373815, "c64 exp");
+    assert_close(typed_exp.norm(2.0).unwrap(), 3.1806015158373815, "c64 exp");
 }
 
 /// `A = [0 1e16; 1e-16 0]`, whose exponential is closed form:

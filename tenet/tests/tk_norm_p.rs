@@ -1,4 +1,4 @@
-//! TensorKit `norm(t, p)` correspondence for `TensorMap::norm_p` (issue #597,
+//! TensorKit `norm(t, p)` correspondence for `TensorMap::norm` (issue #597,
 //! item 2).
 //!
 //! TensorKit 0.17 `src/tensors/linalg.jl:257-275`:
@@ -145,29 +145,37 @@ fn the_fixtures_are_the_tensors_tensorkit_measured() {
         TensorMap::from_block_fn(&rt, [&su2_v], [&su2_w], |_, indices| complex_fill(indices))
             .unwrap();
 
-    assert_close(u1_f64.norm().unwrap(), U1_F64[1], "typed u1 f64 norm()");
+    assert_close(u1_f64.norm(2.0).unwrap(), U1_F64[1], "typed u1 f64 norm()");
     assert_close(
-        u1_f64.norm_inf().unwrap(),
+        u1_f64.norm(f64::INFINITY).unwrap(),
         U1_F64[3],
-        "typed u1 f64 norm_inf()",
+        "typed u1 f64 norm(Inf)",
     );
-    assert_close(u1_c64.norm().unwrap(), U1_C64[1], "typed u1 c64 norm()");
+    assert_close(u1_c64.norm(2.0).unwrap(), U1_C64[1], "typed u1 c64 norm()");
     assert_close(
-        u1_c64.norm_inf().unwrap(),
+        u1_c64.norm(f64::INFINITY).unwrap(),
         U1_C64[3],
-        "typed u1 c64 norm_inf()",
+        "typed u1 c64 norm(Inf)",
     );
-    assert_close(su2_f64.norm().unwrap(), SU2_F64[1], "typed su2 f64 norm()");
     assert_close(
-        su2_f64.norm_inf().unwrap(),
+        su2_f64.norm(2.0).unwrap(),
+        SU2_F64[1],
+        "typed su2 f64 norm()",
+    );
+    assert_close(
+        su2_f64.norm(f64::INFINITY).unwrap(),
         SU2_F64[3],
-        "typed su2 f64 norm_inf()",
+        "typed su2 f64 norm(Inf)",
     );
-    assert_close(su2_c64.norm().unwrap(), SU2_C64[1], "typed su2 c64 norm()");
     assert_close(
-        su2_c64.norm_inf().unwrap(),
+        su2_c64.norm(2.0).unwrap(),
+        SU2_C64[1],
+        "typed su2 c64 norm()",
+    );
+    assert_close(
+        su2_c64.norm(f64::INFINITY).unwrap(),
         SU2_C64[3],
-        "typed su2 c64 norm_inf()",
+        "typed su2 c64 norm(Inf)",
     );
 }
 
@@ -189,50 +197,25 @@ fn typed_norm_p_matches_tensorkit() {
             .unwrap();
 
     for (&p, &expected) in POWERS.iter().zip(&U1_F64) {
-        assert_close(
-            u1_f64.norm_p(p).unwrap(),
-            expected,
-            &format!("u1 f64 p={p}"),
-        );
+        assert_close(u1_f64.norm(p).unwrap(), expected, &format!("u1 f64 p={p}"));
     }
     for (&p, &expected) in POWERS.iter().zip(&U1_C64) {
-        assert_close(
-            u1_c64.norm_p(p).unwrap(),
-            expected,
-            &format!("u1 c64 p={p}"),
-        );
+        assert_close(u1_c64.norm(p).unwrap(), expected, &format!("u1 c64 p={p}"));
     }
     for (&p, &expected) in POWERS.iter().zip(&SU2_F64) {
         assert_close(
-            su2_f64.norm_p(p).unwrap(),
+            su2_f64.norm(p).unwrap(),
             expected,
             &format!("su2 f64 p={p}"),
         );
     }
     for (&p, &expected) in POWERS.iter().zip(&SU2_C64) {
         assert_close(
-            su2_c64.norm_p(p).unwrap(),
+            su2_c64.norm(p).unwrap(),
             expected,
             &format!("su2 c64 p={p}"),
         );
     }
-
-    // `norm_p(2)` and `norm()` are two reductions of the same entries that may
-    // sum in different orders; agreeing is the contract, within the workspace
-    // tolerance rule over every stored entry.
-    numerics::assert_close(
-        "typed p=2 against norm()",
-        su2_c64.norm_p(2.0).unwrap(),
-        su2_c64.norm().unwrap(),
-        su2_c64.data().len(),
-    );
-    // A maximum does not depend on the order it is taken in, so `p = Inf`
-    // equals `norm_inf()` exactly.
-    assert_eq!(
-        su2_c64.norm_p(f64::INFINITY).unwrap(),
-        su2_c64.norm_inf().unwrap(),
-        "typed p=Inf is not norm_inf()"
-    );
 }
 
 #[test]
@@ -243,8 +226,8 @@ fn typed_norm_p_rejects_non_positive_and_non_finite_p() {
         TensorMap::from_block_fn(&rt, [&v], [&w], |_, indices| real_fill(indices)).unwrap();
     for p in [f64::NAN, f64::NEG_INFINITY, 0.0, -1.0, -0.5] {
         assert!(
-            matches!(tensor.norm_p(p), Err(Error::InvalidArgument(_))),
-            "norm_p({p}) must be a typed error, not a panic and not a value"
+            matches!(tensor.norm(p), Err(Error::InvalidArgument(_))),
+            "norm({p}) must be a typed error, not a panic and not a value"
         );
     }
 }
@@ -271,8 +254,8 @@ fn compact_norm_p_equals_the_dense_answer() {
 
     for p in [1.0, 2.0, 3.0, 0.5, f64::INFINITY] {
         assert_close(
-            s.norm_p(p).unwrap(),
-            twin.norm_p(p).unwrap(),
+            s.norm(p).unwrap(),
+            twin.norm(p).unwrap(),
             &format!("compact vs dense p={p}"),
         );
     }
@@ -313,19 +296,19 @@ fn u1_real_with(value: f64) -> TensorMap<U1FusionRule, f64> {
 fn norm_inf_propagates_nan_from_any_block() {
     let poisoned = u1_real_with(f64::NAN);
     assert!(
-        poisoned.norm_inf().unwrap().is_nan(),
-        "a NaN entry must reach norm_inf, not be dropped for the finite maximum"
+        poisoned.norm(f64::INFINITY).unwrap().is_nan(),
+        "a NaN entry must reach norm(Inf), not be dropped for the finite maximum"
     );
     assert!(
-        poisoned.norm_p(f64::INFINITY).unwrap().is_nan(),
-        "norm_p(Inf) must stay identical to norm_inf"
+        poisoned.norm(f64::INFINITY).unwrap().is_nan(),
+        "norm(Inf) must propagate NaN"
     );
     // The finite entries alone still have the clean maximum, so the NaN is the
     // only reason the assertions above hold.
     assert_close(
-        u1_real_with(0.0).norm_inf().unwrap(),
+        u1_real_with(0.0).norm(f64::INFINITY).unwrap(),
         U1_F64[3],
-        "u1 f64 norm_inf() with the poisoned entry zeroed",
+        "u1 f64 norm(Inf) with the poisoned entry zeroed",
     );
 }
 
@@ -343,7 +326,10 @@ fn norm_inf_propagates_nan_hidden_in_the_imaginary_part() {
             }
         })
         .unwrap();
-    assert!(tensor.norm_inf().unwrap().is_nan(), "c64 NaN in Im(z)");
+    assert!(
+        tensor.norm(f64::INFINITY).unwrap().is_nan(),
+        "c64 NaN in Im(z)"
+    );
 }
 
 #[test]
@@ -370,21 +356,24 @@ fn norm_inf_propagates_nan_through_compact_and_lazy_storage() {
     )
     .unwrap();
     assert!(
-        compact.norm_inf().unwrap().is_nan(),
+        compact.norm(f64::INFINITY).unwrap().is_nan(),
         "the compact arm reads the stored spectrum and must fold it the same way"
     );
 
-    // `adjoint` on dense storage is a lazy parent-backed view, and `norm_inf`
+    // `adjoint` on dense storage is a lazy parent-backed view, and `norm(Inf)`
     // reads the parent payload without materializing it: a third fold site.
     let lazy = u1_real_with(f64::NAN).adjoint().unwrap();
-    assert!(lazy.norm_inf().unwrap().is_nan(), "lazy adjoint arm");
+    assert!(
+        lazy.norm(f64::INFINITY).unwrap().is_nan(),
+        "lazy adjoint arm"
+    );
 }
 
 #[test]
 fn norm_inf_reports_infinity_and_zero_payloads() {
     for entry in [f64::INFINITY, f64::NEG_INFINITY] {
         assert_eq!(
-            u1_real_with(entry).norm_inf().unwrap(),
+            u1_real_with(entry).norm(f64::INFINITY).unwrap(),
             f64::INFINITY,
             "|{entry}| is +inf, and no finite entry can exceed it"
         );
@@ -393,7 +382,7 @@ fn norm_inf_reports_infinity_and_zero_payloads() {
     let rt = runtime();
     let (v, w) = typed_u1();
     let zeros: TensorMap<U1FusionRule, f64> = TensorMap::zeros(&rt, [&v], [&w]).unwrap();
-    assert_eq!(zeros.norm_inf().unwrap(), 0.0, "all-zero payload");
+    assert_eq!(zeros.norm(f64::INFINITY).unwrap(), 0.0, "all-zero payload");
 
     // No coupled sector is shared, so there is no stored entry at all and the
     // fold returns its identity rather than `-inf` or a panic.
@@ -403,5 +392,5 @@ fn norm_inf_reports_infinity_and_zero_payloads() {
     let only_one = GradedSpace::try_new_with_arc(rule, [(U1Irrep::new(1), 3)]).unwrap();
     let empty: TensorMap<U1FusionRule, f64> =
         TensorMap::zeros(&rt, [&only_zero], [&only_one]).unwrap();
-    assert_eq!(empty.norm_inf().unwrap(), 0.0, "no stored entries");
+    assert_eq!(empty.norm(f64::INFINITY).unwrap(), 0.0, "no stored entries");
 }

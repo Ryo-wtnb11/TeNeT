@@ -151,10 +151,7 @@ fn compact_pinv_of_a_finite_diagonal_is_unchanged() {
         ],
     )
     .unwrap();
-    let image = diagonal
-        .pinv(0.2)
-        .unwrap()
-        .diagonal_spectrum()
+    let image = tenet::expert::diagonal_spectrum(&diagonal.pinv(0.2).unwrap())
         .unwrap()
         .unwrap();
     assert_eq!(image[0].values, vec![0.25, 1.0]);

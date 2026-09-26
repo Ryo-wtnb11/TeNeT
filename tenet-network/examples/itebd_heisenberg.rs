@@ -86,7 +86,7 @@ fn bond_update(
     let u = u.restrict_leg(u.codomain_rank(), &found.selection)?;
     let s = s.restrict_diagonal(&found.selection)?;
     let vh = vh.restrict_leg(0, &found.selection)?;
-    let l_new = s.scale(1.0 / s.norm()?);
+    let l_new = s.scale(1.0 / s.norm(2.0)?);
     // Divide the outer λ back out: diagonal inverse via pinv.
     let l_out_inv = l_out.pinv(PINV_RCOND)?;
     let g1_new = tensor!([l, pa; m] = l_out_inv[l; x] * u[x, pa; m])?;

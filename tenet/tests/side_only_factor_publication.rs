@@ -24,10 +24,10 @@ macro_rules! assert_close {
         let error = actual
             .axpby(1.0.into(), expected, (-1.0).into())
             .unwrap()
-            .norm()
+            .norm(2.0)
             .unwrap();
         assert!(
-            error <= 1e-10 * (1.0 + expected.norm().unwrap()),
+            error <= 1e-10 * (1.0 + expected.norm(2.0).unwrap()),
             "residual {error}"
         );
     }};
@@ -74,7 +74,7 @@ macro_rules! side_only_case {
         let pseudo = t.pinv(1e-12).unwrap();
         let null = t.left_null().unwrap();
         let null_adjoint = null.adjoint().unwrap();
-        assert!(null_adjoint.compose(&t).unwrap().norm().unwrap() <= 1e-10);
+        assert!(null_adjoint.compose(&t).unwrap().norm(2.0).unwrap() <= 1e-10);
         assert_close!(
             &null_adjoint.compose(&null).unwrap(),
             &TensorMap::id(&rt, null.domain().iter()).unwrap()
@@ -89,7 +89,7 @@ macro_rules! side_only_case {
         );
         let null = t.right_null().unwrap();
         let null_adjoint = null.adjoint().unwrap();
-        assert!(t.compose(&null_adjoint).unwrap().norm().unwrap() <= 1e-10);
+        assert!(t.compose(&null_adjoint).unwrap().norm(2.0).unwrap() <= 1e-10);
         assert_close!(
             &null.compose(&null_adjoint).unwrap(),
             &TensorMap::id(&rt, null.codomain().iter()).unwrap()
@@ -221,11 +221,11 @@ macro_rules! full_qr_lq_bond_case {
             .count();
         let n = t.left_null().unwrap();
         let n_adjoint = owned_adjoint(&n);
-        assert!(n_adjoint.compose(&t).unwrap().norm().unwrap() <= 1e-10);
+        assert!(n_adjoint.compose(&t).unwrap().norm(2.0).unwrap() <= 1e-10);
         identity(n_adjoint.compose(&n).unwrap(), reduced($qr_bond) - rank);
         let n = t.right_null().unwrap();
         let n_adjoint = owned_adjoint(&n);
-        assert!(t.compose(&n_adjoint).unwrap().norm().unwrap() <= 1e-10);
+        assert!(t.compose(&n_adjoint).unwrap().norm(2.0).unwrap() <= 1e-10);
         identity(n.compose(&n_adjoint).unwrap(), reduced($lq_bond) - rank);
     }};
 }

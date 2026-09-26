@@ -23,8 +23,8 @@ fn direct_and_lazy_adjoint_disjoint_null_spaces_match_tensorkit() {
 
         assert_eq!(left.data().len(), left_dim * left_dim);
         assert_eq!(right.data().len(), right_dim * right_dim);
-        assert!((left.norm().unwrap() - (left_dim as f64).sqrt()).abs() <= 1e-12);
-        assert!((right.norm().unwrap() - (right_dim as f64).sqrt()).abs() <= 1e-12);
+        assert!((left.norm(2.0).unwrap() - (left_dim as f64).sqrt()).abs() <= 1e-12);
+        assert!((right.norm(2.0).unwrap() - (right_dim as f64).sqrt()).abs() <= 1e-12);
         assert!(left.is_isometric(1e-12).unwrap());
         assert!(right.adjoint().unwrap().is_isometric(1e-12).unwrap());
         assert!(left

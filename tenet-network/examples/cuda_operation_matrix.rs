@@ -731,7 +731,7 @@ mod device {
             let source = &fixture.host[0];
             let uploaded = &fixture.device[0];
             let barrier = || {
-                let _ = uploaded.norm();
+                let _ = uploaded.norm(2.0);
             };
             match bench(config, "first_after_setup", || source.to_cuda(), barrier) {
                 Err(reason) => skip_row(label("to_cuda"), &reason),
@@ -767,7 +767,7 @@ mod device {
             let (lhs, rhs) = (&fixture.host[0], &fixture.host[1]);
             let (lhs_device, rhs_device) = (&fixture.device[0], &fixture.device[1]);
             let barrier = || {
-                let _ = lhs_device.norm();
+                let _ = lhs_device.norm(2.0);
             };
             match bench(
                 config,
@@ -810,7 +810,7 @@ mod device {
             let (lhs, rhs) = (&fixture.host[0], &fixture.host[1]);
             let (lhs_device, rhs_device) = (&fixture.device[0], &fixture.device[1]);
             let barrier = || {
-                let _ = lhs_device.norm();
+                let _ = lhs_device.norm(2.0);
             };
             match lhs_device.adjoint() {
                 Err(error) => skip_row(label("contract_lazy_adjoint_lhs"), &error.to_string()),
@@ -869,7 +869,7 @@ mod device {
             let (lhs, rhs) = (&fixture.host[0], &fixture.host[1]);
             let (lhs_device, rhs_device) = (&fixture.device[0], &fixture.device[1]);
             let barrier = || {
-                let _ = lhs_device.norm();
+                let _ = lhs_device.norm(2.0);
             };
             match bench(config, "cold", || lhs_device.compose(rhs_device), barrier) {
                 Err(reason) => skip_row(label("compose"), &reason),
@@ -904,7 +904,7 @@ mod device {
                 let host_source = &fixture.host[0];
                 let device_source = &fixture.device[0];
                 let barrier = || {
-                    let _ = device_source.norm();
+                    let _ = device_source.norm(2.0);
                 };
                 match bench(
                     config,
@@ -958,7 +958,7 @@ mod device {
             let source = &fixture.host[0];
             let source_device = &fixture.device[0];
             let barrier = || {
-                let _ = source_device.norm();
+                let _ = source_device.norm(2.0);
             };
             match bench(config, "cold", || source_device.scale(factor), barrier) {
                 Err(reason) => skip_row(label("scale"), &reason),
@@ -990,7 +990,7 @@ mod device {
             let (lhs, rhs) = (&fixture.host[0], &fixture.host[1]);
             let (lhs_device, rhs_device) = (&fixture.device[0], &fixture.device[1]);
             let barrier = || {
-                let _ = lhs_device.norm();
+                let _ = lhs_device.norm(2.0);
             };
             match bench(
                 config,
@@ -1027,7 +1027,7 @@ mod device {
             let (lhs, rhs) = (&fixture.host[0], &fixture.host[1]);
             let (lhs_device, rhs_device) = (&fixture.device[0], &fixture.device[1]);
             let barrier = || {
-                let _ = lhs_device.norm();
+                let _ = lhs_device.norm(2.0);
             };
             match (lhs_device.adjoint(), rhs_device.adjoint()) {
                 (Err(error), _) | (_, Err(error)) => {
@@ -1078,13 +1078,13 @@ mod device {
             let fixture = fixture::<R, D>(config, space, 1);
             let source = &fixture.host[0];
             let source_device = &fixture.device[0];
-            match bench(config, "cold", || source_device.norm(), || {}) {
+            match bench(config, "cold", || source_device.norm(2.0), || {}) {
                 Err(reason) => skip_row(label("norm"), &reason),
                 Ok((device_first, device_rows)) => {
                     let (host_first, host_rows) = bench(
                         config,
                         "cold",
-                        || Ok::<_, Never>(source.norm().expect("Host norm")),
+                        || Ok::<_, Never>(source.norm(2.0).expect("Host norm")),
                         || {},
                     )
                     .expect("Host norm arm");
@@ -1130,7 +1130,7 @@ mod device {
             let source = &fixture.host[0];
             let source_device = &fixture.device[0];
             let barrier = || {
-                let _ = source_device.norm();
+                let _ = source_device.norm(2.0);
             };
             match bench(config, "cold", || source_device.svd_compact(), barrier) {
                 Err(reason) => skip_row(label("svd_compact"), &reason),
@@ -1169,7 +1169,7 @@ mod device {
             let source_device = &fixture.device[0];
             let truncation = Truncation::rank(degeneracy.max(1));
             let barrier = || {
-                let _ = source_device.norm();
+                let _ = source_device.norm(2.0);
             };
             let composed = || -> Result<_, String> {
                 let Svd { u, s, vh } = source_device.svd_compact().map_err(|e| e.to_string())?;
@@ -1246,7 +1246,7 @@ mod device {
             match (&fixture.hermitian_host, &fixture.hermitian_device) {
                 (Some(source), Some(source_device)) => {
                     let barrier = || {
-                        let _ = source_device.norm();
+                        let _ = source_device.norm(2.0);
                     };
                     match bench(config, "cold", || source_device.eigh_full(), barrier) {
                         Err(reason) => skip_row(label("eigh_full"), &reason),
@@ -1285,7 +1285,7 @@ mod device {
             let (a, b, c) = (&fixture.host[0], &fixture.host[1], &fixture.host[2]);
             let (ad, bd, cd) = (&fixture.device[0], &fixture.device[1], &fixture.device[2]);
             let barrier = || {
-                let _ = ad.norm();
+                let _ = ad.norm(2.0);
             };
             match bench(
                 config,
@@ -1353,7 +1353,7 @@ mod device {
         let source = &fixture.host[0];
         let source_device = &fixture.device[0];
         let barrier = || {
-            let _ = source_device.norm();
+            let _ = source_device.norm(2.0);
         };
         match bench(config, "cold", || source_device.qr_compact(), barrier) {
             Err(reason) => skip_row(labels, &reason),

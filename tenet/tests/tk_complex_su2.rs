@@ -73,7 +73,7 @@ fn complex_su2_structural_invariants_match_tensorkit() {
             Complex64::new(1_659.888_888_888_889, 0.0),
         ),
     ] {
-        close(tensor.norm().unwrap(), expected_norm);
+        close(tensor.norm(2.0).unwrap(), expected_norm);
         let trace = tensor.tr().unwrap();
         close(trace.re, expected_trace.re);
         close(trace.im, expected_trace.im);

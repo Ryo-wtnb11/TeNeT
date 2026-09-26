@@ -727,7 +727,7 @@ fn single_scalar_split_and_heterogeneous_final_permutation() {
         .unwrap()
         .scalar()
         .unwrap();
-    let norm = tensor.norm().unwrap();
+    let norm = tensor.norm(2.0).unwrap();
     assert!((value - norm * norm).abs() <= 1e-12 * (1.0 + norm * norm));
     let other_provider = Arc::new(U1FusionRule);
     let other_v =
@@ -838,12 +838,13 @@ fn compact_and_lazy_representation_replay_stays_semantic() {
     let compact_adjoint = compact.adjoint().unwrap();
     for _ in 0..2 {
         assert_eq!(
-            compact_conj_plan
-                .execute_with_workspace(&[&compact], &mut workspace)
-                .unwrap()
-                .diagonal_spectrum()
-                .unwrap(),
-            compact_adjoint.diagonal_spectrum().unwrap()
+            tenet::expert::diagonal_spectrum(
+                &compact_conj_plan
+                    .execute_with_workspace(&[&compact], &mut workspace)
+                    .unwrap()
+            )
+            .unwrap(),
+            tenet::expert::diagonal_spectrum(&compact_adjoint).unwrap()
         );
     }
 }

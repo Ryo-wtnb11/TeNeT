@@ -96,7 +96,7 @@ fn assert_residual<R, D>(
     let residual = actual
         .axpby(D::entry(1.0, 0.0), expected, D::entry(-1.0, 0.0))
         .unwrap()
-        .norm()
+        .norm(2.0)
         .unwrap();
     assert!(
         residual <= bound,
@@ -269,7 +269,7 @@ fn assert_device_svd_matches_host<R, D>(
     let source = fixture::<R, D>(runtime, codomain, domain);
     let kappa = measured_kappa::<R, D>(runtime, codomain, domain, &POSITIVE);
     let terms = source.data().len().max(1);
-    let norm = source.norm().unwrap();
+    let norm = source.norm(2.0).unwrap();
     assert!(norm > 0.0, "the SVD fixture [{}] is vacuous", D::NAME);
     let bound = tolerance::<D>(terms, norm, kappa);
 
@@ -406,7 +406,7 @@ fn assert_device_qr_matches_host<R, D>(
     let source = fixture::<R, D>(runtime, codomain, domain);
     let kappa = measured_kappa::<R, D>(runtime, codomain, domain, &POSITIVE);
     let terms = source.data().len().max(1);
-    let norm = source.norm().unwrap();
+    let norm = source.norm(2.0).unwrap();
     let bound = tolerance::<D>(terms, norm, kappa);
 
     let Qr {
@@ -482,7 +482,7 @@ where
 {
     let runtime = source.runtime();
     let terms = source.data().len().max(1);
-    let norm = source.norm().unwrap();
+    let norm = source.norm(2.0).unwrap();
     let bound = tolerance::<D>(terms, norm, 1.0);
     let Qr {
         q: host_q,
@@ -660,7 +660,7 @@ fn assert_device_eigh_matches_host<R, D>(
     let source = fixture_with::<R, D>(runtime, leg, leg, diagonal);
     let kappa = measured_kappa::<R, D>(runtime, leg, leg, diagonal);
     let terms = source.data().len().max(1);
-    let norm = source.norm().unwrap();
+    let norm = source.norm(2.0).unwrap();
     let bound = tolerance::<D>(terms, norm, kappa);
 
     let Eigh {
@@ -926,7 +926,7 @@ fn assert_truncation_composition<R, D>(
     let source = fixture::<R, D>(runtime, leg, leg);
     let kappa = measured_kappa::<R, D>(runtime, leg, leg, &POSITIVE);
     let terms = source.data().len().max(1);
-    let bound = tolerance::<D>(terms, source.norm().unwrap(), kappa);
+    let bound = tolerance::<D>(terms, source.norm(2.0).unwrap(), kappa);
 
     let expected = {
         let Svd { u, s, vh } = source.svd_compact().unwrap();

@@ -110,9 +110,7 @@ upstream location (the note says why).
 | `typed::TensorMap::left_polar` | MatrixAlgebraKit | 0.6.9 | `interface/polar.jl:3-20` | typed facade; TK factor-space glue on the typed `left_polar` rows |
 | `typed::TensorMap::lq_compact` | MatrixAlgebraKit | 0.6.9 | `interface/lq.jl:22-43` | typed facade; TK diagonal fast-path divergence on the typed `lq_compact` row |
 | `typed::TensorMap::lq_full` | MatrixAlgebraKit | 0.6.9 | `interface/lq.jl:3-20` | typed facade |
-| `typed::TensorMap::norm` | TensorKit | 0.17.0 | `tensors/linalg.jl:257-275` | quantum-dimension-weighted Frobenius norm (`_norm` at `p = 2`) |
-| `typed::TensorMap::norm_inf` | TensorKit | 0.17.0 | `tensors/linalg.jl:262-265` | `_norm`'s `p == Inf` branch: maximum absolute stored entry, unweighted |
-| `typed::TensorMap::norm_p` | TensorKit | 0.17.0 | `tensors/linalg.jl:257-275` | `norm(t, p)` and the `_norm` block reduction |
+| `typed::TensorMap::norm` | TensorKit | 0.17.0 | `tensors/linalg.jl:257-275` | `norm(t, p)` and the `_norm` block reduction: `p = 2` is the quantum-dimension-weighted Frobenius norm, `p == Inf` (`linalg.jl:262-265`) the unweighted maximum absolute stored entry |
 | `typed::TensorMap::permute` | TensorKit | 0.17.0 | `tensors/indexmanipulations.jl:242-259` | typed facade |
 | `typed::TensorMap::pinv` | TensorKit | 0.17.0 | `tensors/linalg.jl:388-396` | typed facade |
 | `typed::TensorMap::project_antihermitian` | MatrixAlgebraKit | 0.6.9 | `interface/projections.jl:16-29` | typed facade |
@@ -172,7 +170,7 @@ upstream location (the note says why).
 | `typed::TensorMap::left_polar` | TensorKit | 0.17.0 | `factorizations/diagonal.jl:8-14` | `DiagonalTensorMap` gets only `copy_input` for the polars — no diagonal polar specialization |
 | `typed::TensorMap::leg_dims` | TensorKit | 0.17.0 | `tensors/abstracttensor.jl:196-201` | `space(t, i)` |
 | `typed::TensorMap::lq_compact` | TensorKit | 0.17.0 | `factorizations/diagonal.jl:29-41,61-66` | divergence: TK's `DiagonalAlgorithm` LQ fast path not adopted (#613 Group 4) |
-| `typed::TensorMap::norm_p` | TensorKit | 0.17.0 | `tensors/linalg.jl:257-275` | `norm(t, p)` and the `_norm` block reduction |
+| `typed::TensorMap::norm` | TensorKit | 0.17.0 | `tensors/linalg.jl:257-275` | `norm(t, p)` and the `_norm` block reduction |
 | `typed::TensorMap::qr_compact` | TensorKit | 0.17.0 | `factorizations/diagonal.jl:16-28,61-66` | divergence: TK's `DiagonalAlgorithm` QR fast path not adopted (#613 Group 4) |
 | `typed::TensorMap::qr_full` | TensorKit | 0.17.0 | `factorizations/diagonal.jl:16-28,61-66` | same non-adoption as `qr_compact` |
 | `typed::TensorMap::rand` | TensorKit | 0.17.0 | `tensors/tensor.jl:320-408` | the generated `rand`/`randn`/`randexp`/`randisometry` family |

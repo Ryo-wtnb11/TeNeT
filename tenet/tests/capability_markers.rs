@@ -20,8 +20,8 @@ use tenet_matrixalgebra::FactorScalar;
 
 /// Base family: everything admitted by [`TensorScalar`] alone.
 fn base_family<D: TensorScalar>(tensor: &TensorMap<U1FusionRule, D>) {
-    let _ = tensor.norm();
-    let _ = tensor.norm_inf();
+    let _ = tensor.norm(2.0);
+    let _ = tensor.norm(f64::INFINITY);
     let _ = tensor.inner(tensor);
     let _ = tensor.tr();
     let _ = tensor.adjoint();

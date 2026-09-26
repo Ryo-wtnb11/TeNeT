@@ -339,7 +339,7 @@ macro_rules! ledger {
             run_op(config, &prefix, "add", || {
                 black_box(&a).axpby(one, &a2, one).unwrap()
             });
-            run_op(config, &prefix, "norm", || black_box(&a).norm().unwrap());
+            run_op(config, &prefix, "norm", || black_box(&a).norm(2.0).unwrap());
             run_op(config, &prefix, "add_adjoint", || {
                 black_box(&lazy).axpby(one, &on_adjoint, one).unwrap()
             });

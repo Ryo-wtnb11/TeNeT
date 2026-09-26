@@ -93,7 +93,6 @@
 //! [`TensorMap::contract`],
 //! [`TensorMap::compose`]), the scalar operations
 //! ([`TensorMap::axpby`], [`TensorMap::scale`], [`TensorMap::norm`],
-//! [`TensorMap::norm_inf`], [`TensorMap::norm_p`],
 //! [`TensorMap::inner`], [`TensorMap::tr`], [`TensorMap::trace_pairs`],
 //! [`TensorMap::adjoint`]), the factorizations ([`TensorMap::svd_compact`],
 //! [`TensorMap::svd_full`], [`TensorMap::svd_vals`],
@@ -307,7 +306,7 @@ pub use serialization::{
 ///
 /// Admits the payload-dtype-independent half of the typed API: construction
 /// and inspection, [`TensorMap::adjoint`], `scale`/`axpby`, the
-/// reductions (`norm`, `norm_inf`, `norm_p`, `inner`, `tr`),
+/// reductions (`norm`, `inner`, `tr`),
 /// contraction/`compose`/`otimes`/`cat`, the structural transforms
 /// (`permute`, `braid`, `transpose`, `repartition`, `twist`, `flip`),
 /// `restrict_leg`/`embed_leg`/`restrict_diagonal`/`diagview`, trace, and
@@ -335,8 +334,7 @@ pub use serialization::{
 /// coefficients and a single-precision payload remains a compile-time
 /// boundary.
 ///
-/// [`TensorMap::norm`], [`TensorMap::norm_inf`] and [`TensorMap::norm_p`]
-/// return `f64` for every payload dtype and accumulate in `f64`;
+/// [`TensorMap::norm`] returns `f64` for every payload dtype and accumulate in `f64`;
 /// [`TensorMap::inner`] and [`TensorMap::tr`] return the
 /// payload type, as TensorKit's do, but also sum in double precision.
 ///
@@ -1050,33 +1048,6 @@ where
     }
 }
 
-/// Closed Rust-only adapter for the built-in SU(2) physical basis.
-impl<D> TensorMap<tenet_core::SU2FusionRule, D>
-where
-    D: TensorScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
-{
-    /// Expands this SU(2) tensor into its owned physical-basis representation.
-    pub fn to_physical_dense_su2(
-        &self,
-    ) -> Result<
-        PhysicalDense<D>,
-        PhysicalDenseError<<tenet_core::SU2FusionRule as tenet_core::PhysicalFusionBasis>::Error>,
-    > {
-        self.to_physical_dense()
-    }
-
-    /// Projects SU(2) physical-basis data into this tensor's reduced schema.
-    pub fn project_physical_dense_su2(
-        &self,
-        physical: &PhysicalDense<D>,
-    ) -> Result<
-        Self,
-        PhysicalDenseError<<tenet_core::SU2FusionRule as tenet_core::PhysicalFusionBasis>::Error>,
-    > {
-        self.project_physical_dense(physical)
-    }
-}
-
 impl<R, D> TensorMap<R, D>
 where
     R: MultiplicityFreeRigidSymbols
@@ -1223,10 +1194,20 @@ where
     R::Mode: TypedTensorReductionDispatch<R, D>,
     D: TensorScalar,
 {
-    /// Returns the quantum-dimension-weighted Frobenius norm
-    /// `sqrt(sum_c dim(c) * sum_ij |self_c[i,j]|^2)`.
+    /// TensorKit `norm(t, p)`: the entrywise `p`-norm of the reduced blocks,
     ///
-    /// Abelian providers have `dim(c) = 1`, giving the ordinary Frobenius
+    /// ```text
+    /// p == 2       -> sqrt(sum_c dim(c) * sum_ij |self_c[i,j]|^2)
+    /// p == Inf     -> max_c max_ij |self_c[i,j]|          (not dim-weighted)
+    /// finite p > 0 -> (sum_c dim(c) * sum_ij |self_c[i,j]|^p)^(1/p)
+    /// ```
+    ///
+    /// `p == 2.0` is the quantum-dimension-weighted Frobenius norm and is the
+    /// only exponent every storage supports; `p` is an `f64` exactly as in
+    /// TensorKit, so each norm has one spelling. The entrywise norm is never
+    /// an operator norm, matrices included.
+    ///
+    /// For `p == 2`, abelian providers have `dim(c) = 1`, giving the ordinary Frobenius
     /// norm. Multiplicity-free compact diagonal input is reduced directly in
     /// `O(sum_c k_c)`; dense input is one pass over the payload. Lazy adjoints
     /// read their parent orientation without caching a materialization.
@@ -1238,9 +1219,21 @@ where
     /// `LinearAlgebra.generic_norm2` does. An entry of NaN magnitude `|x|` gives
     /// NaN; otherwise an infinite magnitude gives `inf`.
     ///
-    /// If a checked provider cannot supply a quantum dimension, its original
-    /// error is available as the source. An invalid coupled-sector layout
-    /// returns [`Error::Core`].
+    /// `p == Inf` follows Julia's NaN-propagating `max`: a payload holding
+    /// any NaN, including a complex entry whose real or imaginary part alone
+    /// is NaN, returns NaN; an infinite entry returns `+inf`; a tensor with no
+    /// stored entries returns `+0.0`. Every exponent is one pass over the
+    /// payload, `O(sum_c k_c)` on compact diagonal storage.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::InvalidArgument`] when `p` is NaN, zero, negative, or
+    ///   `-inf`; TensorKit throws `ArgumentError` over the same domain.
+    /// - [`Error::InvalidArgument`] for `p != 2` on a checked-Generic
+    ///   provider, which has only the Frobenius reduction.
+    /// - If a checked provider cannot supply a quantum dimension, its original
+    ///   error is available as the source. An invalid coupled-sector layout
+    ///   returns [`Error::Core`].
     ///
     /// ```
     /// use tenet::core::{U1FusionRule, U1Irrep};
@@ -1250,19 +1243,20 @@ where
     /// let v = GradedSpace::try_new(U1FusionRule, [(U1Irrep::new(0), 2)])?;
     /// let id: TensorMap<_, f64> = TensorMap::id(&runtime, [&v])?;
     /// let twice = id.axpby(1.0, &id, 1.0)?;
-    /// assert!((twice.norm()? - 2.0_f64.sqrt() * 2.0).abs() < 1e-12);
+    /// assert!((twice.norm(2.0)? - 2.0_f64.sqrt() * 2.0).abs() < 1e-12);
+    /// assert_eq!(twice.norm(f64::INFINITY)?, 2.0);
     /// assert_eq!(id.inner(&id)?, 2.0);
     /// assert_eq!(id.tr()?, 2.0);
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
-    pub fn norm(&self) -> Result<f64, TypedFacadeError<R>> {
-        <R::Mode as TypedTensorReductionDispatch<R, D>>::norm(self)
+    pub fn norm(&self, p: f64) -> Result<f64, TypedFacadeError<R>> {
+        <R::Mode as TypedTensorReductionDispatch<R, D>>::norm(self, p)
     }
     /// Returns the quantum-dimension-weighted Frobenius inner product
     /// `sum_c dim(c) * sum_ij conj(self_c[i,j]) * other_c[i,j]`.
     ///
     /// The product is conjugate-linear in `self`, and `self.inner(&self)` is
-    /// `self.norm()^2` up to floating-point error. Both tensors must share the
+    /// `self.norm(2.0)^2` up to floating-point error. Both tensors must share the
     /// same runtime, hom space, and block layout. Two multiplicity-free compact
     /// diagonal tensors reduce without materialization; checked-Generic
     /// reductions currently require dense payloads. See [`Self::norm`] for the
@@ -1802,7 +1796,7 @@ where
     /// let a: TensorMap<_, f64> = TensorMap::rand(&runtime, [&v], [&v])?;
     /// let Qr { q, r } = a.qr_compact()?;
     /// let rebuilt = q.compose(&r)?;
-    /// assert!(rebuilt.axpby(1.0, &a, -1.0)?.norm()? < 1e-12);
+    /// assert!(rebuilt.axpby(1.0, &a, -1.0)?.norm(2.0)? < 1e-12);
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
     pub fn qr_compact(&self) -> Result<Qr<Self>, TypedFacadeError<R>> {
@@ -1847,7 +1841,7 @@ where
     /// let a: TensorMap<_, f64> = TensorMap::rand(&runtime, [&v], [&v])?;
     /// let Svd { u, s, vh } = a.svd_compact()?;
     /// let rebuilt = u.compose(&s)?.compose(&vh)?;
-    /// assert!(rebuilt.axpby(1.0, &a, -1.0)?.norm()? < 1e-12);
+    /// assert!(rebuilt.axpby(1.0, &a, -1.0)?.norm(2.0)? < 1e-12);
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
     pub fn svd_compact(&self) -> Result<Svd<Self>, TypedFacadeError<R>> {
@@ -1896,7 +1890,7 @@ where
     /// let v = GradedSpace::try_new(U1FusionRule, [(U1Irrep::new(0), 2)])?;
     /// let a: TensorMap<_, f64> = TensorMap::rand(&runtime, [&v], [&v])?;
     /// let Lq { l, q } = a.lq_compact()?;
-    /// assert!(l.compose(&q)?.axpby(1.0, &a, -1.0)?.norm()? < 1e-12);
+    /// assert!(l.compose(&q)?.axpby(1.0, &a, -1.0)?.norm(2.0)? < 1e-12);
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
     pub fn lq_compact(&self) -> Result<Lq<Self>, TypedFacadeError<R>> {
@@ -2261,7 +2255,7 @@ where
     /// let a: TensorMap<_, f64> = TensorMap::id(&runtime, [&v])?.scale(2.0);
     /// let Eigh { d, v: eigenvectors } = a.eigh_full()?;
     /// let rebuilt = eigenvectors.compose(&d)?.compose(&eigenvectors.adjoint()?)?;
-    /// assert!(rebuilt.axpby(1.0, &a, -1.0)?.norm()? < 1e-12);
+    /// assert!(rebuilt.axpby(1.0, &a, -1.0)?.norm(2.0)? < 1e-12);
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
     pub fn eigh_full(&self) -> Result<Eigh<Self>, TypedFacadeError<R>> {
@@ -2333,7 +2327,7 @@ where
     /// let a: TensorMap<_, f64> = TensorMap::id(&runtime, [&v])?.scale(2.0);
     /// let Eig { d, v: eigenvectors } = a.eig_full()?;
     /// let rebuilt = eigenvectors.compose(&d)?.compose(&eigenvectors.inv()?)?;
-    /// assert!(rebuilt.axpby(1.0.into(), &a.to_c64(), (-1.0).into())?.norm()? < 1e-12);
+    /// assert!(rebuilt.axpby(1.0.into(), &a.to_c64(), (-1.0).into())?.norm(2.0)? < 1e-12);
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
     pub fn eig_full(
@@ -2845,7 +2839,7 @@ where
 pub(crate) fn validate_norm_p(p: f64) -> Result<(), Error> {
     if p.is_nan() || p <= 0.0 {
         return Err(Error::InvalidArgument(format!(
-            "norm_p requires a finite p > 0 or p = inf, got {p}"
+            "norm requires a finite p > 0 or p = inf, got {p}"
         )));
     }
     Ok(())
@@ -5603,7 +5597,7 @@ where
     D: TensorScalar,
 {
     fn inner(tensor: &TensorMap<R, D>, other: &TensorMap<R, D>) -> Result<D, Self::FacadeError>;
-    fn norm(tensor: &TensorMap<R, D>) -> Result<f64, Self::FacadeError>;
+    fn norm(tensor: &TensorMap<R, D>, p: f64) -> Result<f64, Self::FacadeError>;
     fn tr(tensor: &TensorMap<R, D>) -> Result<D, Self::FacadeError>;
 }
 
@@ -5939,8 +5933,8 @@ where
     fn inner(tensor: &TensorMap<R, D>, other: &TensorMap<R, D>) -> Result<D, Error> {
         tensor.inner_multiplicity_free(other)
     }
-    fn norm(tensor: &TensorMap<R, D>) -> Result<f64, Error> {
-        tensor.norm_multiplicity_free()
+    fn norm(tensor: &TensorMap<R, D>, p: f64) -> Result<f64, Error> {
+        tensor.norm_p_multiplicity_free(p)
     }
     fn tr(tensor: &TensorMap<R, D>) -> Result<D, Error> {
         tensor.tr_multiplicity_free()
@@ -7079,14 +7073,25 @@ where
 
     fn norm(
         tensor: &TensorMap<R, D>,
+        p: f64,
     ) -> Result<f64, GenericTensorError<<R as CheckedGenericFusion>::Error>> {
+        validate_norm_p(p)?;
+        if p != 2.0 {
+            return Err(Error::InvalidArgument(format!(
+                "checked Generic norm supports only p = 2, got {p}"
+            ))
+            .into());
+        }
         // The norm is adjoint invariant, so a lazy adjoint reads its parent in
         // storage order instead of pairing oriented blocks.
         if let TypedTensorRepr::Adjoint(view) = &tensor.repr {
-            return Self::norm(&TensorMap {
-                runtime: tensor.runtime.clone(),
-                repr: TypedTensorRepr::Owned(Arc::clone(&view.parent)),
-            });
+            return Self::norm(
+                &TensorMap {
+                    runtime: tensor.runtime.clone(),
+                    repr: TypedTensorRepr::Owned(Arc::clone(&view.parent)),
+                },
+                p,
+            );
         }
         let body = tensor.owned_body().expect("owned norm input");
         if matches!(body.data.as_ref(), TypedData::Diagonal(_)) {
@@ -8428,7 +8433,7 @@ where
     }
 }
 
-type TypedFacadeError<R> =
+pub(crate) type TypedFacadeError<R> =
     <<R as TypedSectorAdmission>::Mode as TypedTensorModeDispatch<R>>::FacadeError;
 
 fn write_identity_blocks_generic<R, D>(tensor: &mut TensorMap<R, D>) -> Result<(), Error>
@@ -9025,7 +9030,7 @@ where
     ///
     /// // The best rank-2 approximation, and the weight it discards.
     /// let approximation = u.compose(&s)?.compose(&vh)?;
-    /// let residual = t.axpby(1.0, &approximation, -1.0)?.norm()?;
+    /// let residual = t.axpby(1.0, &approximation, -1.0)?.norm(2.0)?;
     /// assert!((residual - found.error).abs() < 1e-12);
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
@@ -10635,21 +10640,18 @@ impl<R, D, S> TensorMap<R, D, S> {
     }
 
     /// Number of codomain legs.
-    #[doc(alias = "numout")]
     #[inline]
     pub fn codomain_rank(&self) -> usize {
         self.logical_space().space().homspace().codomain().len()
     }
 
     /// Number of domain legs.
-    #[doc(alias = "numin")]
     #[inline]
     pub fn domain_rank(&self) -> usize {
         self.logical_space().space().homspace().domain().len()
     }
 
     /// Total number of legs.
-    #[doc(alias = "numind")]
     #[inline]
     pub fn rank(&self) -> usize {
         self.codomain_rank() + self.domain_rank()
@@ -10665,27 +10667,6 @@ impl<R, D, S> TensorMap<R, D, S> {
         let codomain_rank = self.codomain_rank();
         codomain_axes.iter().copied().eq(0..codomain_rank)
             && domain_axes.iter().copied().eq(codomain_rank..self.rank())
-    }
-
-    /// Deprecated alias of [`Self::codomain_rank`].
-    #[deprecated(since = "0.1.0", note = "use codomain_rank instead")]
-    #[inline]
-    pub fn numout(&self) -> usize {
-        self.codomain_rank()
-    }
-
-    /// Deprecated alias of [`Self::domain_rank`].
-    #[deprecated(since = "0.1.0", note = "use domain_rank instead")]
-    #[inline]
-    pub fn numin(&self) -> usize {
-        self.domain_rank()
-    }
-
-    /// Deprecated alias of [`Self::rank`].
-    #[deprecated(since = "0.1.0", note = "use rank instead")]
-    #[inline]
-    pub fn numind(&self) -> usize {
-        self.rank()
     }
 
     /// One block in the tensor's logical coupled layout.
@@ -10710,7 +10691,6 @@ impl<R, D, S> TensorMap<R, D, S> {
     /// Allocates: each call builds a fresh `Vec` and clones every leg's
     /// sector table (the provider travels by `Arc` bump). Hold the result
     /// rather than re-calling in a loop.
-    #[doc(alias = "codomain_spaces")]
     pub fn codomain(&self) -> Vec<GradedSpace<R>> {
         self.legs(self.logical_space().space().homspace().codomain())
     }
@@ -10718,23 +10698,8 @@ impl<R, D, S> TensorMap<R, D, S> {
     /// The domain legs, in axis order.
     ///
     /// Allocates per call, exactly as [`Self::codomain`].
-    #[doc(alias = "domain_spaces")]
     pub fn domain(&self) -> Vec<GradedSpace<R>> {
         self.legs(self.logical_space().space().homspace().domain())
-    }
-
-    /// Deprecated alias of [`Self::codomain`].
-    #[deprecated(since = "0.1.0", note = "use codomain instead")]
-    #[inline]
-    pub fn codomain_spaces(&self) -> Vec<GradedSpace<R>> {
-        self.codomain()
-    }
-
-    /// Deprecated alias of [`Self::domain`].
-    #[deprecated(since = "0.1.0", note = "use domain instead")]
-    #[inline]
-    pub fn domain_spaces(&self) -> Vec<GradedSpace<R>> {
-        self.domain()
     }
 
     fn legs(&self, product: &FusionProductSpace) -> Vec<GradedSpace<R>> {
@@ -11183,7 +11148,7 @@ impl<R> TensorMap<R, f64> {
     /// let widened = t.to_c64();
     /// // The real part round-trips exactly; the imaginary part is zero.
     /// assert_eq!(widened.re().data(), t.data());
-    /// assert_eq!(widened.im().norm()?, 0.0);
+    /// assert_eq!(widened.im().norm(2.0)?, 0.0);
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
     pub fn to_c64(&self) -> TensorMap<R, Complex64> {
@@ -12175,7 +12140,7 @@ where
 ///         + CheckedGenericFusion
 ///         + CheckedGenericRigidSymbols<Scalar = f64>,
 /// {
-///     let _ = lhs.norm();
+///     let _ = lhs.norm(2.0);
 ///     let _ = lhs.inner(rhs);
 ///     let _ = lhs.scale(2.0);
 ///     let _ = lhs.axpby(2.0, rhs, -3.0);
@@ -12495,7 +12460,7 @@ where
     /// operands widened to the double-precision lane `E` on the device, one
     /// cast when they are the same buffer.
     ///
-    /// Why widen rather than rescale by `norm_inf` (#1344): the reference
+    /// Why widen rather than rescale by `norm(Inf)` (#1344): the reference
     /// only needs *some* overflow-safe sum — LinearAlgebra's `generic_norm2`
     /// accumulates a `Float32` sum in `Float64` and rescales by `normInf`
     /// only when `length * maxabs^2` leaves the payload range — and the Host
@@ -12598,7 +12563,12 @@ where
             ))
     }
 
-    /// Quantum-dimension-weighted Frobenius norm of a device tensor.
+    /// Quantum-dimension-weighted Frobenius norm of a device tensor: the
+    /// `p == 2` arm of the Host [`TensorMap::norm`].
+    ///
+    /// Only `p == 2` has a device reduction. Any other valid `p` is
+    /// [`Error::UnsupportedOnDevice`] rather than a hidden Host transfer; an
+    /// invalid `p` is [`Error::InvalidArgument`], as on the Host.
     ///
     /// A lazy adjoint delegates to its canonical parent because this norm is
     /// adjoint invariant; no logical-adjoint payload is materialized.
@@ -12620,13 +12590,19 @@ where
     /// (entries near `1e154` and above) and loses accuracy once it falls
     /// below `f64::MIN_POSITIVE` (norms near `1e-154` and below), where the
     /// Host returns the representable norm.
-    pub fn norm(&self) -> Result<f64, Error> {
+    pub fn norm(&self, p: f64) -> Result<f64, Error> {
+        validate_norm_p(p)?;
+        if p != 2.0 {
+            return Err(Error::UnsupportedOnDevice(format!(
+                "device norm supports only p = 2, got {p}"
+            )));
+        }
         if let TypedTensorRepr::Adjoint(view) = &self.repr {
             return Self {
                 runtime: self.runtime.clone(),
                 repr: TypedTensorRepr::Owned(Arc::clone(&view.parent)),
             }
-            .norm();
+            .norm(p);
         }
         let storage = self.direct_cuda_storage("norm")?;
         // `<t, t>` is real up to rounding; the norm is its real part's root,
@@ -12765,7 +12741,6 @@ where
     /// [`Error::UnsupportedOnDevice`] for
     /// diagonal storage; the Host's own errors for malformed axes, output
     /// orders or mismatched legs; [`Error::PlacementMismatch`].
-    #[doc(alias = "contract_ordered")]
     pub fn contract(
         &self,
         other: &Self,
@@ -12862,19 +12837,6 @@ where
         })
     }
 
-    /// Deprecated alias of [`Self::contract`].
-    #[deprecated(since = "0.1.0", note = "use contract instead")]
-    #[inline]
-    pub fn contract_ordered(
-        &self,
-        other: &Self,
-        lhs_axes: &[usize],
-        rhs_axes: &[usize],
-        output_axes: &[usize],
-    ) -> Result<Self, Error> {
-        self.contract(other, lhs_axes, rhs_axes, output_axes)
-    }
-
     /// Overwrites `destination` with
     /// `alpha * self.contract(other, lhs_axes, rhs_axes, output_axes)` while
     /// preserving the destination's provider, space, body, and device
@@ -12905,7 +12867,6 @@ where
     /// whole destination). A warm call therefore transfers nothing and
     /// allocates nothing on the device; scratch and coefficient payloads are
     /// as for [`Self::contract`].
-    #[doc(alias = "contract_ordered_overwrite_into")]
     #[allow(clippy::too_many_arguments)]
     pub fn contract_overwrite_into(
         &self,
@@ -14920,9 +14881,9 @@ where
     /// cloned; dense storage is read one strided diagonal per block.
     /// Off-diagonal entries are never inspected, so this returns the diagonal
     /// of an arbitrary endomorphism, not a proof that it is diagonal — use
-    /// [`Self::is_diagonal`] for that.
+    /// [`crate::expert::is_diagonal`] for that.
     ///
-    /// [`Self::diagonal_spectrum`] is a different question and is unchanged: it
+    /// [`crate::expert::diagonal_spectrum`] is a different question: it
     /// answers whether the payload *is* compact.
     ///
     /// # Complexity
@@ -15122,9 +15083,9 @@ where
     /// bond-sector order.
     #[expect(
         clippy::type_complexity,
-        reason = "the public compact readback API exposes provider-labelled sector spectra"
+        reason = "the expert compact readback exposes provider-labelled sector spectra"
     )]
-    pub fn diagonal_spectrum(
+    pub(crate) fn diagonal_spectrum(
         &self,
     ) -> Result<Option<Vec<SectorSpectrum<R::Sector, D>>>, TypedFacadeError<R>> {
         self.spectrum()
@@ -15155,11 +15116,11 @@ where
     /// Tests a rank-one map for blockwise diagonality without materializing compact storage.
     ///
     /// This matches TensorKit `isdiag` for finite data at `tol = 0`; positive
-    /// tolerance uses `max_offdiag <= tol * max(norm_inf, 1)`. Negative and
+    /// tolerance uses `max_offdiag <= tol * max(norm(Inf), 1)`. Negative and
     /// non-finite tolerances are rejected before every shortcut.
     ///
     /// Scale `tol` to the payload dtype, as [`Self::is_hermitian`] describes.
-    pub fn is_diagonal(&self, tol: f64) -> Result<bool, Error> {
+    pub(crate) fn is_diagonal(&self, tol: f64) -> Result<bool, Error> {
         if !tol.is_finite() || tol < 0.0 {
             return Err(Error::InvalidArgument(
                 "diagonal tolerance must be finite and nonnegative".into(),
@@ -16036,7 +15997,6 @@ where
     /// before shared-engine
     /// compilation/replay, so a later engine error may leave it zeroed or
     /// partially overwritten.
-    #[doc(alias = "contract_ordered_overwrite_into")]
     #[allow(clippy::too_many_arguments)]
     pub fn contract_overwrite_into(
         &self,
@@ -16154,22 +16114,6 @@ where
             zero,
         )?;
         Ok(())
-    }
-
-    /// Deprecated alias of [`Self::contract_overwrite_into`].
-    #[deprecated(since = "0.1.0", note = "use contract_overwrite_into instead")]
-    #[inline]
-    #[allow(clippy::too_many_arguments)]
-    pub fn contract_ordered_overwrite_into(
-        &self,
-        other: &Self,
-        destination: &mut Self,
-        lhs_axes: &[usize],
-        rhs_axes: &[usize],
-        output_axes: &[usize],
-        alpha: D,
-    ) -> Result<(), Error> {
-        self.contract_overwrite_into(other, destination, lhs_axes, rhs_axes, output_axes, alpha)
     }
 }
 
@@ -16716,7 +16660,6 @@ where
     /// assert_eq!(out.data(), t.data());
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
-    #[doc(alias = "contract_ordered")]
     pub fn contract(
         &self,
         other: &Self,
@@ -16738,34 +16681,6 @@ where
             rhs_axes,
             output_axes,
         )
-    }
-
-    /// Deprecated alias of [`Self::contract`]: same arguments, same
-    /// semantics, same compact fast paths and complexity, same errors — the
-    /// delegation is total, so everything is stated there once.
-    ///
-    /// [`Self::contract`] always takes the order explicitly, so this alias
-    /// exists only to make that intent visible at the call site.
-    ///
-    /// **TensorKit correspondence.** TensorKit has no `contract_ordered`
-    /// entry point either: the counterpart of `output_axes` is
-    /// `tensorcontract!`'s `pAB` output permutation (`TO.tensorcontract!`;
-    /// the destination structure is `permute(compose(sA, sB), pAB)`, per
-    /// `tensorcontract_structure`).
-    ///
-    /// # Errors
-    ///
-    /// Exactly [`Self::contract`]'s.
-    #[deprecated(since = "0.1.0", note = "use contract instead")]
-    #[inline]
-    pub fn contract_ordered(
-        &self,
-        other: &Self,
-        lhs_axes: &[usize],
-        rhs_axes: &[usize],
-        output_axes: &[usize],
-    ) -> Result<Self, TypedFacadeError<R>> {
-        self.contract(other, lhs_axes, rhs_axes, output_axes)
     }
 }
 
@@ -18242,7 +18157,7 @@ where
     ///
     /// // `1.0 * t + 1.0 * t` doubles every entry, so the norm doubles too.
     /// let doubled = t.axpby(1.0, &t, 1.0)?;
-    /// assert!((doubled.norm()? - 2.0 * t.norm()?).abs() < 1e-12);
+    /// assert!((doubled.norm(2.0)? - 2.0 * t.norm(2.0)?).abs() < 1e-12);
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
     fn add_multiplicity_free(&self, other: &Self, alpha: D, beta: D) -> Result<Self, Error> {
@@ -18644,7 +18559,7 @@ where
                 runtime: self.runtime.clone(),
                 repr: TypedTensorRepr::Owned(Arc::clone(&view.parent)),
             };
-            return parent.norm();
+            return parent.norm_multiplicity_free();
         }
         let data = self
             .owned_body()
@@ -18692,23 +18607,9 @@ where
             .sum()
     }
 
-    /// TensorKit `norm(t, Inf)`: the largest absolute stored entry.
-    ///
-    /// Julia's `norm(array, Inf)` is the maximum absolute element (for
-    /// matrices too), and TensorKit applies it per block, so on coupled
-    /// storage it is the maximum over the whole payload. Unlike [`Self::norm`]
-    /// this is **not** quantum-dimension weighted.
-    ///
-    /// Non-finite entries follow the reference reduction: a payload holding
-    /// any NaN — including a complex entry whose real or imaginary part alone
-    /// is NaN — returns NaN, and an infinite entry returns `+inf`. A tensor
-    /// with no stored entries, like an all-zero one, returns `0.0`.
-    ///
-    /// # Errors
-    ///
-    /// None today; the `Result` keeps the shape of [`Self::norm`], which the
-    /// two are usually reached through together.
-    pub fn norm_inf(&self) -> Result<f64, Error> {
+    /// The `p == Inf` arm of [`Self::norm`]: the largest stored magnitude,
+    /// not dimension weighted, NaN-propagating, `+0.0` without entries.
+    fn norm_inf_multiplicity_free(&self) -> Result<f64, Error> {
         if let Some(spectrum) = self.spectrum() {
             return Ok(Self::spectrum_max_abs(spectrum));
         }
@@ -18726,51 +18627,24 @@ where
         ))
     }
 
-    /// TensorKit `norm(t, p)` for a general exponent:
-    ///
-    /// ```text
-    /// p == Inf     -> maximum entry magnitude over blocks(t)
-    /// finite p > 0 -> (Σ_c dim(c) * norm(block_c, p)^p)^(1/p)
-    /// ```
-    ///
-    /// `norm(block, p)` is Julia's *entrywise* p-norm — matrices included — so
-    /// this is never an operator norm. Only `p == 2` is the quantum-dimension
-    /// weighted Frobenius norm of [`Self::norm`]; every other exponent weights
-    /// the same `dim(c)` against a different power sum.
-    ///
-    /// A separate method rather than an optional argument because Rust has no
-    /// overloading. `p == 2.0` and `p == f64::INFINITY` delegate to
-    /// [`Self::norm`] and [`Self::norm_inf`], so the three cannot drift apart.
-    ///
-    /// # Complexity
-    ///
-    /// One pass over the payload: `O(N)` for a dense payload of `N` scalars,
-    /// `O(Σ_c k_c)` on compact diagonal storage. The compact arm reads the
-    /// stored spectra and never materializes — the `k_c² − k_c` off-diagonal
-    /// zeros contribute nothing to any `p > 0`.
-    ///
-    /// # Errors
-    ///
-    /// - [`Error::InvalidArgument`] when `p` is NaN, zero, negative, or `-inf`;
-    ///   TensorKit throws `ArgumentError` over the same domain.
-    /// - [`Error::Core`] when the block structure cannot be walked, exactly as
-    ///   [`Self::norm`].
-    pub fn norm_p(&self, p: f64) -> Result<f64, Error> {
+    /// [`Self::norm`]'s exponent dispatch. `p == 2` and `p == Inf` take the
+    /// Frobenius and maximum arms, so no exponent has two reductions.
+    fn norm_p_multiplicity_free(&self, p: f64) -> Result<f64, Error> {
         // Checked before any dispatch so an invalid `p` is rejected the same
         // way on compact and dense storage.
         validate_norm_p(p)?;
         if p == 2.0 {
-            return self.norm();
+            return self.norm_multiplicity_free();
         }
         if p.is_infinite() {
-            return self.norm_inf();
+            return self.norm_inf_multiplicity_free();
         }
         if let TypedTensorRepr::Adjoint(view) = &self.repr {
             let parent = Self {
                 runtime: self.runtime.clone(),
                 repr: TypedTensorRepr::Owned(Arc::clone(&view.parent)),
             };
-            return parent.norm_p(p);
+            return parent.norm_p_multiplicity_free(p);
         }
         let provider = self.logical_space().provider();
         let power = |value: D| value.widen_complex().norm().powf(p);
@@ -18825,7 +18699,7 @@ where
     /// product `Σ_c dim(c) * <a_c, b_c>` with **`self` conjugated** — the
     /// product is conjugate-linear in its first argument.
     ///
-    /// `t.inner(&t)?` is `t.norm()?²` up to floating point, and for `D = f64`
+    /// `t.inner(&t)?` is `t.norm(2.0)?²` up to floating point, and for `D = f64`
     /// the result is exactly real.
     ///
     /// # Errors
@@ -18974,7 +18848,7 @@ where
         }
         let difference =
             self.add_multiplicity_free(&self.adjoint()?, D::from_real(1.0), D::from_real(-1.0))?;
-        Ok(difference.norm()? <= tol * self.norm()?.max(1.0))
+        Ok(difference.norm(2.0)? <= tol * self.norm(2.0)?.max(1.0))
     }
 
     /// Whether the tensor equals minus its own adjoint within `tol`
@@ -18991,7 +18865,7 @@ where
         }
         let sum =
             self.add_multiplicity_free(&self.adjoint()?, D::from_real(1.0), D::from_real(1.0))?;
-        Ok(sum.norm()? <= tol * self.norm()?.max(1.0))
+        Ok(sum.norm(2.0)? <= tol * self.norm(2.0)?.max(1.0))
     }
 
     /// Whether `t† ∘ t` is the identity on the domain within `tol`
@@ -19008,7 +18882,7 @@ where
         let identity = Self::id(&self.runtime, &self.domain())?;
         let difference =
             gram.add_multiplicity_free(&identity, D::from_real(1.0), D::from_real(-1.0))?;
-        Ok(difference.norm()? <= tol * gram.norm()?.max(1.0))
+        Ok(difference.norm(2.0)? <= tol * gram.norm(2.0)?.max(1.0))
     }
 
     /// Whether the tensor is unitary within `tol` (TensorKit `isunitary`):
@@ -19046,7 +18920,7 @@ where
         if !self.is_hermitian(tol)? {
             return Ok(false);
         }
-        let threshold = tol * self.norm()?.max(1.0);
+        let threshold = tol * self.norm(2.0)?.max(1.0);
         // Compact arm: a spectrum factor's stored values *are* its Hermitian
         // eigenvalues, so there is nothing to factorize and nothing to
         // materialize (#585). The gate and the threshold above are already
@@ -19333,7 +19207,7 @@ where
     /// let v = GradedSpace::try_new(U1FusionRule, [(U1Irrep::new(0), 2)])?;
     /// let zero: TensorMap<_, f64> = TensorMap::zeros(&runtime, [&v], [&v])?;
     /// let n = zero.left_null()?;
-    /// assert!(n.adjoint()?.compose(&zero)?.norm()? < 1e-12);
+    /// assert!(n.adjoint()?.compose(&zero)?.norm(2.0)? < 1e-12);
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
     pub fn left_null(&self) -> Result<Self, TypedFacadeError<R>> {
@@ -19383,7 +19257,7 @@ where
     /// let v = GradedSpace::try_new(U1FusionRule, [(U1Irrep::new(0), 2)])?;
     /// let a: TensorMap<_, f64> = TensorMap::id(&runtime, [&v])?.scale(2.0);
     /// let LeftPolar { w, p } = a.left_polar()?;
-    /// assert!(w.compose(&p)?.axpby(1.0, &a, -1.0)?.norm()? < 1e-12);
+    /// assert!(w.compose(&p)?.axpby(1.0, &a, -1.0)?.norm(2.0)? < 1e-12);
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
     pub fn left_polar(&self) -> Result<LeftPolar<Self>, TypedFacadeError<R>> {
@@ -20158,7 +20032,7 @@ mod representation_gates {
                 .iter()
                 .zip(expected.data())
                 .all(|(&actual, &expected)| (actual - expected).norm() < 1.0e-10));
-            assert!(actual.norm().unwrap().is_finite());
+            assert!(actual.norm(2.0).unwrap().is_finite());
             assert!(actual.qr_compact().is_ok());
         }
         assert_eq!(UNCACHED_ADJOINT_MATERIALIZATIONS.get(), 0);
@@ -21961,10 +21835,10 @@ mod representation_gates {
             unreachable!("transfer preserves the lazy view")
         };
         assert!(device_view.materialized.get().is_none());
-        let expected_norm = source.norm().unwrap();
+        let expected_norm = source.norm(2.0).unwrap();
         CUDA_REDUCTION_BUFFER_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0))));
         assert!(
-            (lazy_device.norm().unwrap() - expected_norm).abs() <= 1e-12 * (1.0 + expected_norm)
+            (lazy_device.norm(2.0).unwrap() - expected_norm).abs() <= 1e-12 * (1.0 + expected_norm)
         );
         let observed = CUDA_REDUCTION_BUFFER_OBSERVATION.with(|observation| {
             let observed = observation.get().unwrap();
@@ -22072,7 +21946,7 @@ mod representation_gates {
         CUDA_REDUCTION_BUFFER_OBSERVATION
             .with(|observation| observation.set(Some(preflight_sentinel)));
         assert!(matches!(
-            missing_context.norm(),
+            missing_context.norm(2.0),
             Err(Error::InvalidArgument(message)) if message.contains("without a CUDA device")
         ));
         CUDA_REDUCTION_BUFFER_OBSERVATION.with(|observation| {
@@ -23144,7 +23018,7 @@ mod representation_gates {
             } else {
                 target.compose(&actual.adjoint().unwrap()).unwrap()
             };
-            assert!(residual.norm().unwrap() < 1e-10 * (1.0 + target.norm().unwrap()));
+            assert!(residual.norm(2.0).unwrap() < 1e-10 * (1.0 + target.norm(2.0).unwrap()));
             assert!(if left {
                 actual.is_isometric(1e-11).unwrap()
             } else {
@@ -25366,16 +25240,18 @@ mod representation_gates {
         assert_close(lazy.inner(&eager).unwrap(), eager.inner(&eager).unwrap());
         assert_close(eager.inner(&lazy).unwrap(), eager.inner(&eager).unwrap());
         assert_close(lazy.inner(&lazy).unwrap(), eager.inner(&eager).unwrap());
-        assert!((lazy.norm().unwrap() - eager.norm().unwrap()).abs() < 1e-12);
-        assert!((lazy.norm_inf().unwrap() - eager.norm_inf().unwrap()).abs() < 1e-12);
-        assert!((lazy.norm_p(1.5).unwrap() - eager.norm_p(1.5).unwrap()).abs() < 1e-12);
+        assert!((lazy.norm(2.0).unwrap() - eager.norm(2.0).unwrap()).abs() < 1e-12);
+        assert!(
+            (lazy.norm(f64::INFINITY).unwrap() - eager.norm(f64::INFINITY).unwrap()).abs() < 1e-12
+        );
+        assert!((lazy.norm(1.5).unwrap() - eager.norm(1.5).unwrap()).abs() < 1e-12);
 
-        let normalized = lazy.scale(D::from_real(1.0 / lazy.norm().unwrap()));
+        let normalized = lazy.scale(D::from_real(1.0 / lazy.norm(2.0).unwrap()));
         let TypedTensorRepr::Adjoint(normalized_view) = &normalized.repr else {
             panic!("normalizing a lazy adjoint must remain parent-backed");
         };
         assert!(normalized_view.materialized.get().is_none());
-        assert!((normalized.norm().unwrap() - 1.0).abs() < 1e-12);
+        assert!((normalized.norm(2.0).unwrap() - 1.0).abs() < 1e-12);
         assert_eq!(materialized_adjoint_builds(&lazy), 0);
     }
 
@@ -26239,7 +26115,7 @@ mod representation_gates {
         let storage = destination.data().as_ptr();
 
         if ordered_alias {
-            lhs.contract_ordered_overwrite_into(
+            lhs.contract_overwrite_into(
                 rhs,
                 &mut destination,
                 lhs_axes,

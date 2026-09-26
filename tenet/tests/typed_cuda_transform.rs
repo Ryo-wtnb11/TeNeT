@@ -634,7 +634,7 @@ fn device_complex_su2_permute_matches_the_tensorkit_fixture() {
     let permuted = device_matches_host!("tk SU(2) c64 permute", host, |t| t
         .permute(&[1, 0], &[3, 2]));
     assert_not_a_reordering(host.data(), permuted.data(), "tk SU(2) c64 permute");
-    let norm = permuted.norm().unwrap();
+    let norm = permuted.norm(2.0).unwrap();
     assert!(
         (norm - 40.741_733_994_626_32).abs() <= 1e-10 * 41.0,
         "TensorKit norm of the permuted tensor: got {norm}"

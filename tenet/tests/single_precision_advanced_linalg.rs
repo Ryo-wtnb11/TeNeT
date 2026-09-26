@@ -97,9 +97,9 @@ macro_rules! assert_residual {
         let residual = $actual
             .axpby(one::<$d>(), expected, minus_one::<$d>())
             .unwrap()
-            .norm()
+            .norm(2.0)
             .unwrap();
-        let bound = tolerance($terms, expected.norm().unwrap());
+        let bound = tolerance($terms, expected.norm(2.0).unwrap());
         assert!(
             residual <= bound,
             "{}: residual {residual:e} exceeds tolerance {bound:e}",

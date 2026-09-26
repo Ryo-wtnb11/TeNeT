@@ -43,7 +43,7 @@ fn work(rt: &Runtime, seed: u64) -> (f64, f64) {
         .first()
         .and_then(|spec| spec.values.first().copied())
         .unwrap();
-    (c.norm().unwrap(), first)
+    (c.norm(2.0).unwrap(), first)
 }
 
 #[test]

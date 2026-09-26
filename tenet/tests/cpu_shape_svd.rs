@@ -50,7 +50,7 @@ fn truncated_svd_runtime_reuse_tracks_data_dependent_rank() {
         let residual = source
             .axpby(1.0, &reconstructed, -1.0)
             .unwrap()
-            .norm()
+            .norm(2.0)
             .unwrap();
         let discarded = diagonal
             .iter()

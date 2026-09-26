@@ -34,9 +34,9 @@ fn typed_diagonal_preserves_canonical_positions_and_dual_leg() {
         TensorMap::<U1FusionRule, Complex64>::diagonal(&runtime, &bond, values.clone()).unwrap();
     assert_eq!(tensor.codomain()[0], bond);
     assert_eq!(tensor.domain()[0], bond);
-    assert!(tensor.is_diagonal(0.0).unwrap());
+    assert!(tenet::expert::is_diagonal(&tensor, 0.0).unwrap());
     let readback: Vec<SectorSpectrum<U1Irrep, Complex64>> =
-        tensor.diagonal_spectrum().unwrap().unwrap();
+        tenet::expert::diagonal_spectrum(&tensor).unwrap().unwrap();
     assert_eq!(readback, values);
     let singular_values: Vec<SectorSpectrum<U1Irrep>> = tensor.svd_vals().unwrap();
     assert_eq!(singular_values.len(), values.len());
@@ -60,7 +60,10 @@ fn typed_real_c64_eigenvalue_readback_stays_compact() {
         .unwrap();
     let Eigh { d: diagonal, .. } = source.eigh_full().unwrap();
     assert_eq!(
-        diagonal.diagonal_spectrum().unwrap().unwrap()[0].values,
+        tenet::expert::diagonal_spectrum(&diagonal)
+            .unwrap()
+            .unwrap()[0]
+            .values,
         [Complex64::new(2.0, 0.0), Complex64::new(1.0, 0.0)]
     );
 }
@@ -93,10 +96,10 @@ fn typed_diagonal_canonicalizes_labels_and_dense_predicate_handles_nonfinite_off
     )
     .unwrap();
     assert_eq!(
-        tensor.diagonal_spectrum().unwrap().unwrap()[0].sector,
+        tenet::expert::diagonal_spectrum(&tensor).unwrap().unwrap()[0].sector,
         SU2Irrep::from_twice_spin(0)
     );
-    assert!(tensor.is_diagonal(0.0).unwrap());
+    assert!(tenet::expert::is_diagonal(&tensor, 0.0).unwrap());
     assert!(TensorMap::<SU2FusionRule, f64>::diagonal(
         &runtime,
         &bond,
@@ -161,7 +164,7 @@ fn typed_diagonal_canonicalizes_labels_and_dense_predicate_handles_nonfinite_off
         }
     })
     .unwrap();
-    assert!(!dense.is_diagonal(1.0).unwrap());
+    assert!(!tenet::expert::is_diagonal(&dense, 1.0).unwrap());
     let finite = TensorMap::<U1FusionRule, f64>::from_block_fn(&runtime, [&v], [&v], |_, index| {
         if index[0] == index[1] {
             4.0
@@ -172,10 +175,10 @@ fn typed_diagonal_canonicalizes_labels_and_dense_predicate_handles_nonfinite_off
         }
     })
     .unwrap();
-    assert!(!finite.is_diagonal(0.05).unwrap());
-    assert!(finite.is_diagonal(0.1).unwrap());
+    assert!(!tenet::expert::is_diagonal(&finite, 0.05).unwrap());
+    assert!(tenet::expert::is_diagonal(&finite, 0.1).unwrap());
     let exact = TensorMap::<U1FusionRule, f64>::id(&runtime, [&v]).unwrap();
-    assert!(exact.is_diagonal(0.0).unwrap());
+    assert!(tenet::expert::is_diagonal(&exact, 0.0).unwrap());
     let inf = TensorMap::<U1FusionRule, f64>::from_block_fn(&runtime, [&v], [&v], |_, index| {
         if index == [1, 0] {
             f64::INFINITY
@@ -184,8 +187,8 @@ fn typed_diagonal_canonicalizes_labels_and_dense_predicate_handles_nonfinite_off
         }
     })
     .unwrap();
-    assert!(!inf.is_diagonal(1.0).unwrap());
-    assert!(dense.is_diagonal(-1.0).is_err());
+    assert!(!tenet::expert::is_diagonal(&inf, 1.0).unwrap());
+    assert!(tenet::expert::is_diagonal(&dense, -1.0).is_err());
     let vector = TensorMap::<U1FusionRule, f64>::zeros(&runtime, [&v], []).unwrap();
-    assert!(vector.is_diagonal(f64::NAN).is_err());
+    assert!(tenet::expert::is_diagonal(&vector, f64::NAN).is_err());
 }

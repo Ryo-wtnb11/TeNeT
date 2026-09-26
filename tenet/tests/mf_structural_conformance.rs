@@ -137,7 +137,7 @@ fn fermionic_product_contract_otimes_and_reductions_keep_provider_and_signs() {
     assert!(std::ptr::eq(product.provider(), provider.as_ref()));
     assert_eq!(product.data(), &[6.0]);
     assert_eq!(lhs.inner(&rhs).unwrap(), 6.0);
-    assert_eq!(lhs.norm().unwrap(), 2.0);
+    assert_eq!(lhs.norm(2.0).unwrap(), 2.0);
     assert_eq!(lhs.tr().unwrap(), 2.0);
 }
 
@@ -441,7 +441,7 @@ fn zn3_and_cu1_arithmetic_contraction_and_reductions_have_scalar_oracles() {
             }
             assert_eq!(sum.data(), &[-1.0]);
             assert_eq!(scaled.data(), &[8.0]);
-            assert!((a.norm().unwrap() - 2.0 * ($qdim as f64).sqrt()).abs() < 1e-12);
+            assert!((a.norm(2.0).unwrap() - 2.0 * ($qdim as f64).sqrt()).abs() < 1e-12);
             assert!((a.inner(&b).unwrap() - 6.0 * $qdim).abs() < 1e-12);
             assert!((a.tr().unwrap() - 2.0 * $qdim).abs() < 1e-12);
             assert!(
