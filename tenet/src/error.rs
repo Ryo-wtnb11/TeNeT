@@ -57,6 +57,13 @@ pub enum Error {
         /// Its payload representation.
         representation: BatchMemberRepresentation,
     },
+    /// A member index is not below the stack's member count.
+    BatchMemberOutOfRange {
+        /// The requested member.
+        member: usize,
+        /// The stack's member count.
+        len: usize,
+    },
 }
 
 impl fmt::Display for Error {
@@ -87,6 +94,9 @@ impl fmt::Display for Error {
                 member,
                 representation,
             } => write!(f, "batch member {member} is a {representation:?} payload; pack needs owned dense members"),
+            Self::BatchMemberOutOfRange { member, len } => {
+                write!(f, "member {member} is out of range for a stack of {len}")
+            }
         }
     }
 }

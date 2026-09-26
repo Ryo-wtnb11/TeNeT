@@ -35,7 +35,10 @@ macro_rules! round_trip {
             assert!(unpacked.structure_signature() == member.structure_signature());
             fixtures::assert_bit_exact(unpacked.data(), member.data(), &label);
         }
-        assert!(matches!(stack.member(3), Err(Error::InvalidArgument(_))));
+        assert_eq!(
+            stack.member(3).err(),
+            Some(Error::BatchMemberOutOfRange { member: 3, len: 3 })
+        );
     }};
 }
 
@@ -158,4 +161,77 @@ fn empty_batch_is_rejected() {
         StackedTensorMap::pack(&empty),
         Err(Error::InvalidArgument(_))
     ));
+}
+
+/// Reordering, a subset (B' < B), the identity (B' = B), duplicates
+/// (B' > B), and a selection of a selection.
+const SELECTIONS: [&[usize]; 5] = [&[2, 0, 1], &[1], &[0, 1, 2], &[1, 1, 0, 2, 2, 1], &[2, 2]];
+
+macro_rules! select_members {
+    ($label:expr, $leg:expr) => {{
+        let leg = $leg;
+        let a = leg(0);
+        let runtime = runtime();
+        select_members!(@dtype $label, &runtime, &a, f64);
+        select_members!(@dtype $label, &runtime, &a, Complex64);
+    }};
+    (@dtype $label:expr, $runtime:expr, $a:expr, $d:ty) => {{
+        let members = members!($runtime, $a, $d, 3);
+        let stack = StackedTensorMap::pack(&members).unwrap();
+        for selection in SELECTIONS {
+            let label = format!("{} {} {:?}", $label, stringify!($d), selection);
+            let selected = stack.select(selection).unwrap();
+            assert_eq!(selected.len(), selection.len(), "{label}");
+            assert!(*selected.signature() == *stack.signature(), "{label}");
+            for (j, &i) in selection.iter().enumerate() {
+                let member = selected.member(j).unwrap();
+                assert!(member.structure_signature() == members[i].structure_signature());
+                fixtures::assert_bit_exact(member.data(), members[i].data(), &label);
+            }
+            let again = selected.select(&[selection.len() - 1, 0]).unwrap();
+            fixtures::assert_bit_exact(
+                again.member(0).unwrap().data(),
+                members[selection[selection.len() - 1]].data(),
+                &label,
+            );
+            fixtures::assert_bit_exact(
+                again.member(1).unwrap().data(),
+                members[selection[0]].data(),
+                &label,
+            );
+        }
+    }};
+}
+
+#[test]
+fn select_holds_the_chosen_members_in_order() {
+    for_each_symmetry!(select_members);
+}
+
+#[test]
+fn select_rejects_out_of_range_and_empty_selections() {
+    let runtime = runtime();
+    let q = fixtures::U1Irrep::new;
+    let bond = GradedSpace::try_new(fixtures::U1FusionRule, [(q(0), 2), (q(1), 1)]).unwrap();
+    let members = members!(&runtime, &bond, f64, 3);
+    let stack = StackedTensorMap::pack(&members).unwrap();
+    assert_eq!(
+        stack.select(&[0, 3, 7]).err(),
+        Some(Error::BatchMemberOutOfRange { member: 3, len: 3 })
+    );
+    assert!(matches!(stack.select(&[]), Err(Error::InvalidArgument(_))));
+}
+
+#[test]
+fn select_of_a_blockless_structure_is_empty() {
+    let runtime = runtime();
+    let q = fixtures::U1Irrep::new;
+    let charged = GradedSpace::try_new(fixtures::U1FusionRule, [(q(1), 2)]).unwrap();
+    let neutral = GradedSpace::try_new(fixtures::U1FusionRule, [(q(0), 2)]).unwrap();
+    let empty = TensorMap::<_, f64>::zeros(&runtime, [&charged], [&neutral]).unwrap();
+    assert!(empty.data().is_empty());
+    let stack = StackedTensorMap::pack(&[&empty, &empty]).unwrap();
+    let selected = stack.select(&[1, 0, 1]).unwrap();
+    assert_eq!(selected.len(), 3);
+    assert!(selected.member(2).unwrap().data().is_empty());
 }

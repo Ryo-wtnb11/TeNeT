@@ -3079,6 +3079,103 @@ pub fn cuda_gather_columns_batched_into<D: CudaScalar>(
     Ok(())
 }
 
+/// Gathers whole members of a member-major stack into a new buffer: member
+/// `j` of the result is member `selection[j]` of `src`, where member `i`
+/// occupies elements `[i * member_len, (i + 1) * member_len)`.
+///
+/// `src` is flat (`[n]`, `n >= members * member_len`) or `[member_len,
+/// members]` (the shape this function returns). Indices may repeat and
+/// appear in any order; each must be below `members`. Everything is checked
+/// before any device work.
+///
+/// Why one gather rather than a copy per member: a member is one contiguous
+/// slice, but an arbitrary index list has no constant source stride, so no
+/// single strided copy expresses it. The gather is one launch for every
+/// selection and allocates the result itself, where copies would need
+/// `selection.len()` submissions into a destination that must first be
+/// uploaded. The values are moved, not recomputed: the result is the source
+/// bits.
+///
+/// Counts one `h2d_calls` for the index table and one `copy_calls` for the
+/// gather. A zero `member_len` or an empty selection launches nothing and
+/// uploads an empty buffer.
+#[doc(hidden)]
+pub fn cuda_gather_members<D: CudaScalar>(
+    ctx: &mut CudaDenseContext,
+    src: &CudaDenseStorage,
+    member_len: usize,
+    members: usize,
+    selection: &[usize],
+) -> Result<CudaDenseStorage, DenseError> {
+    const OP: &str = "cuda_gather_members";
+    ensure_cuda_device(ctx.device, OP, &[("src", src.device)])?;
+    ensure_payload_dtype::<D>(OP, src)?;
+    // Why checked here: the gather kernel clamps an out-of-range start
+    // (tenferro-gpu `indexing.rs:clamp_window_start`) instead of faulting, so
+    // an unchecked index would silently return another member.
+    if members
+        .checked_mul(member_len)
+        .is_none_or(|len| len > src.len)
+        || selection.iter().any(|&member| member >= members)
+    {
+        return Err(cuda_error(
+            OP,
+            "the stack must hold `members` members and every selected member must be below it",
+        ));
+    }
+    if member_len == 0 || selection.is_empty() {
+        return CudaDenseStorage::upload_owned::<D>(ctx, Vec::new());
+    }
+    // Why a second, `[L, B]` configuration rather than reshaping the gather
+    // output to flat: Tenferro 0.7.1 has no metadata-only owned reshape
+    // (`CudaBackend::reshape` materializes a copy, `TypedTensor::into_parts`
+    // refuses backend storage), so normalizing would add a full copy.
+    let (start_stride, config) = match src.tensor.shape() {
+        [_] => (
+            member_len,
+            tenferro_tensor::GatherConfig {
+                offset_dims: vec![0],
+                collapsed_slice_dims: vec![],
+                start_index_map: vec![0],
+                index_vector_dim: 1,
+                slice_sizes: vec![member_len],
+            },
+        ),
+        &[rows, _] if rows == member_len => (
+            1,
+            tenferro_tensor::GatherConfig {
+                offset_dims: vec![0],
+                collapsed_slice_dims: vec![1],
+                start_index_map: vec![1],
+                index_vector_dim: 1,
+                slice_sizes: vec![member_len, 1],
+            },
+        ),
+        _ => {
+            return Err(cuda_error(
+                OP,
+                "a stack buffer must be flat or [member_len, members]",
+            ))
+        }
+    };
+    let starts = selection
+        .iter()
+        .map(|&member| {
+            i64::try_from(member * start_stride).map_err(|_| cuda_error(OP, "index exceeds i64"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let host =
+        i64::into_tensor(vec![selection.len(), 1], starts).map_err(|err| cuda_error(OP, err))?;
+    let indices = upload_tensor(ctx.backend.runtime(), &host).map_err(|err| cuda_error(OP, err))?;
+    record_h2d(selection.len() * std::mem::size_of::<i64>());
+    COPY_CALLS.fetch_add(1, Ordering::Relaxed);
+    let gathered = ctx
+        .backend
+        .gather(&src.tensor, &indices, &config)
+        .map_err(|err| cuda_error(OP, err))?;
+    CudaDenseStorage::from_tensor::<D>(OP, gathered, ctx.device)
+}
+
 /// Moves `src_region` of `src` into `dst_region` of `dst` (equal `dims`,
 /// any strides and offsets, an injective destination) with one cuTENSOR
 /// permutation: the source bits arrive unchanged (a NaN payload may be

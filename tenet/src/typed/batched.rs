@@ -240,6 +240,46 @@ impl<R, D, S> StackedTensorMap<R, D, S> {
     pub fn len(&self) -> usize {
         self.members
     }
+
+    /// Checks a [`Self::select`] index list and returns the selected payload
+    /// length `B' * L`.
+    fn selection_len(&self, members: &[usize]) -> Result<usize, Error> {
+        if members.is_empty() {
+            return Err(Error::InvalidArgument(
+                "a stack needs at least one member".into(),
+            ));
+        }
+        if let Some(&member) = members.iter().find(|&&member| member >= self.members) {
+            return Err(Error::BatchMemberOutOfRange {
+                member,
+                len: self.members,
+            });
+        }
+        self.member_len
+            .checked_mul(members.len())
+            .ok_or_else(|| Error::InvalidArgument("stacked payload length overflows usize".into()))
+    }
+
+    /// This stack's space, signature and Runtime over `storage` holding
+    /// `members` members; the placement is read from `storage`.
+    fn with_storage<T: TensorStorage<D>>(
+        &self,
+        storage: T,
+        members: usize,
+    ) -> StackedTensorMap<R, D, T> {
+        StackedTensorMap {
+            runtime: self.runtime.clone(),
+            space: self.space.clone(),
+            signature: StructureSignature {
+                placement: storage.placement(),
+                ..self.signature.clone()
+            },
+            storage,
+            members,
+            member_len: self.member_len,
+            _payload: PhantomData,
+        }
+    }
 }
 
 impl<R, D> StackedTensorMap<R, D>
@@ -305,12 +345,15 @@ where
     }
 
     /// An owned, bit-identical copy of member `i`.
+    ///
+    /// An index at or past [`Self::len`] is
+    /// [`Error::BatchMemberOutOfRange`].
     pub fn member(&self, i: usize) -> Result<TensorMap<R, D>, Error> {
         if i >= self.members {
-            return Err(Error::InvalidArgument(format!(
-                "member {i} is out of range for a stack of {}",
-                self.members
-            )));
+            return Err(Error::BatchMemberOutOfRange {
+                member: i,
+                len: self.members,
+            });
         }
         let start = i * self.member_len;
         let data = self.storage[start..start + self.member_len].to_vec();
@@ -318,6 +361,27 @@ where
             runtime: self.runtime.clone(),
             repr: owned_repr(TypedTensorBody::dense(self.space.clone(), data)),
         })
+    }
+
+    /// A new stack whose member `j` is member `members[j]` of this one, with
+    /// the same signature, placement and Runtime: one allocation of
+    /// `members.len() * L` elements and one slice copy per selected member.
+    ///
+    /// Indices may appear in any order and may repeat (a repeated index
+    /// replicates that member), so the result can be longer than this stack.
+    /// An index at or past [`Self::len`] is
+    /// [`Error::BatchMemberOutOfRange`]; an empty list is an
+    /// [`Error::InvalidArgument`], because a stack is never empty. Both are
+    /// checked before anything is allocated.
+    ///
+    /// This is how a caller drops the members a batched handle rejected, or
+    /// splits a stack into groups whose truncated signatures agree.
+    pub fn select(&self, members: &[usize]) -> Result<Self, Error> {
+        let mut storage = Vec::with_capacity(self.selection_len(members)?);
+        for &member in members {
+            storage.extend_from_slice(&self.storage[member * self.member_len..][..self.member_len]);
+        }
+        Ok(self.with_storage(storage, members.len()))
     }
 }
 
@@ -1764,7 +1828,7 @@ impl<R, D: CudaPayload> StackedTensorMap<R, D> {
     pub fn to_cuda(&self) -> Result<StackedTensorMap<R, D, CudaStorage<D>>, Error> {
         let lease = self.runtime.lease_cuda()?;
         let storage = CudaStorage::upload(&lease, &self.storage)?;
-        Ok(self.with_storage(storage))
+        Ok(self.with_storage(storage, self.members))
     }
 }
 
@@ -1774,25 +1838,21 @@ impl<R, D: CudaPayload> StackedTensorMap<R, D, CudaStorage<D>> {
     pub fn to_host(&self) -> Result<StackedTensorMap<R, D>, Error> {
         let lease = self.runtime.lease_cuda()?;
         let storage = self.storage.download(&lease)?;
-        Ok(self.with_storage(storage))
+        Ok(self.with_storage(storage, self.members))
     }
-}
 
-#[cfg(feature = "cuda")]
-impl<R, D, S> StackedTensorMap<R, D, S> {
-    fn with_storage<T: TensorStorage<D>>(&self, storage: T) -> StackedTensorMap<R, D, T> {
-        StackedTensorMap {
-            runtime: self.runtime.clone(),
-            space: self.space.clone(),
-            signature: StructureSignature {
-                placement: storage.placement(),
-                ..self.signature.clone()
-            },
-            storage,
-            members: self.members,
-            member_len: self.member_len,
-            _payload: PhantomData,
-        }
+    /// The device form of the Host [`StackedTensorMap::select`], with the
+    /// same index policy: one upload of the `members.len()` member offsets
+    /// and one Tenferro `gather` launch per call, whatever `B` and the block
+    /// structure. The gather allocates the result buffer. Nothing is
+    /// downloaded and nothing waits on the device.
+    pub fn select(&self, members: &[usize]) -> Result<Self, Error> {
+        self.selection_len(members)?;
+        let mut lease = self.runtime.lease_cuda()?;
+        let storage =
+            self.storage
+                .gather_members(&mut lease, self.member_len, self.members, members)?;
+        Ok(self.with_storage(storage, members.len()))
     }
 }
 
