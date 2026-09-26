@@ -12104,6 +12104,175 @@ where
         self.dense_adjoint_view()
     }
 
+    /// The Host [`TensorMap::materialize`] contract on the device: an owned
+    /// dense device tensor with a fresh allocation on the same device, never
+    /// sharing storage with `self`, and bit-equal to the Host result,
+    /// complex infinities and signed zeros included (a NaN payload may be
+    /// canonicalized by the real strided copy).
+    ///
+    /// Every step moves bits rather than computing them, because a device
+    /// copy that scales by a complex `1` does not: cuTENSOR's permutation and
+    /// `cuda_region_axpby` both multiply by `(1, 0)`, which turns
+    /// `(0, -inf)` into `(NaN, -inf)` and loses `-0`.
+    /// - Owned: one Tenferro gather of the whole allocation, which allocates
+    ///   the output.
+    /// - Real lazy adjoint: the same gather of the parent as the output
+    ///   allocation, then one strided copy per block (the transpose; a real
+    ///   `1` scale is exact).
+    /// - Complex lazy adjoint: one element gather of the parent through an
+    ///   `O(required_len)` coordinate table that encodes the transpose, then
+    ///   one elementwise conjugation of the whole buffer.
+    ///
+    /// Nothing is downloaded.
+    ///
+    /// # Cost
+    ///
+    /// Owned and real adjoint: one payload-sized device allocation and one
+    /// 8-byte index upload; the adjoint adds one copy per block. Complex
+    /// adjoint: a host coordinate table of `required_len` entries, built in
+    /// one pass and uploaded (`8 * rank(buffer) * required_len` bytes, with a
+    /// buffer rank of 1 or 2),
+    /// and a second payload-sized allocation for the conjugation, live
+    /// together with the gathered buffer. The transfer counters also charge
+    /// each index upload as a device allocation. Blocks without a
+    /// fusion-tree key read as zero and are zeroed with `cuda_region_zero`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::UnsupportedOnDevice`] for compact diagonal storage (which
+    /// [`TensorMap::to_cuda`] never produces), [`Error::PlacementMismatch`]
+    /// for a payload on another device, and CUDA backend errors.
+    pub fn materialize(&self) -> Result<Self, Error> {
+        let dense_err = |err| Error::from(tenet_tensors::OperationError::Dense(err));
+        let region = |dims: Vec<usize>, strides: Vec<usize>, offset: usize| {
+            tenet_dense::CudaRegion::new(dims, strides, offset).map_err(dense_err)
+        };
+        let space = self.logical_space().clone();
+        let required_len = space.space().required_len()?;
+        // (strided copies for a real adjoint, element table for a complex
+        // one, regions to zero)
+        type Copies = Vec<(tenet_dense::CudaRegion, tenet_dense::CudaRegion)>;
+        let (source, adjoint): (_, Option<(Copies, Vec<usize>, Copies)>) = match &self.repr {
+            TypedTensorRepr::Owned(_) => (self.direct_cuda_storage("materialize")?, None),
+            TypedTensorRepr::Adjoint(view) => {
+                let TypedData::Dense(source) = view.parent.data.as_ref() else {
+                    unreachable!("TypedAdjointView::new admits only dense parents")
+                };
+                let parent_space = view.parent.space.space();
+                if parent_space.required_len()? != required_len {
+                    return Err(internal_layout_error(
+                        "an adjoint layout has its parent's payload length",
+                    ));
+                }
+                let (nout, nin) = (parent_space.nout(), parent_space.nin());
+                let parent_structure = parent_space.structure();
+                let structure = space.space().structure();
+                let mut copies = Vec::new();
+                let mut table = if D::IS_COMPLEX {
+                    vec![0; required_len]
+                } else {
+                    Vec::new()
+                };
+                let mut zeros = Vec::new();
+                let mut covered = 0usize;
+                for index in 0..structure.block_count() {
+                    let block = structure.block(index)?;
+                    let shape = block.shape();
+                    covered += shape.iter().product::<usize>();
+                    let destination =
+                        region(shape.to_vec(), block.strides().to_vec(), block.offset())?;
+                    // Why zero instead of error: a non-fusion-tree block has no
+                    // adjoint source and reads as zero, as on the Host.
+                    let BlockKey::FusionTree(key) = block.key() else {
+                        zeros.push((destination.clone(), destination));
+                        continue;
+                    };
+                    let source_block = parent_structure.block(
+                        parent_structure
+                            .find_block_index_by_adjoint_fusion_tree_pair(key)
+                            .ok_or_else(|| {
+                                internal_layout_error("adjoint block has no parent block")
+                            })?,
+                    )?;
+                    let source_strides: Vec<usize> = (0..shape.len())
+                        .map(|axis| {
+                            source_block.strides()[logical_adjoint_axis_to_parent(nout, nin, axis)]
+                        })
+                        .collect();
+                    if D::IS_COMPLEX {
+                        let mut position = vec![0usize; shape.len()];
+                        for _ in 0..shape.iter().product::<usize>() {
+                            let offset = |strides: &[usize], base: usize| {
+                                base + position
+                                    .iter()
+                                    .zip(strides)
+                                    .map(|(i, stride)| i * stride)
+                                    .sum::<usize>()
+                            };
+                            table[offset(block.strides(), block.offset())] =
+                                offset(&source_strides, source_block.offset());
+                            for (axis, extent) in shape.iter().enumerate() {
+                                position[axis] += 1;
+                                if position[axis] < *extent {
+                                    break;
+                                }
+                                position[axis] = 0;
+                            }
+                        }
+                    } else {
+                        copies.push((
+                            region(shape.to_vec(), source_strides, source_block.offset())?,
+                            destination,
+                        ));
+                    }
+                }
+                if covered != required_len {
+                    return Err(internal_layout_error(
+                        "adjoint blocks do not tile the payload",
+                    ));
+                }
+                (source, Some((copies, table, zeros)))
+            }
+        };
+
+        let mut lease = self.runtime.lease_cuda()?;
+        let cuda = &mut *lease;
+        if source.placement() != Placement::Cuda(cuda.device()) {
+            return Err(Error::PlacementMismatch);
+        }
+        let output = match adjoint {
+            None => source.gather_members(cuda, required_len, 1, &[0])?,
+            Some((copies, table, zeros)) => {
+                let mut output = if D::IS_COMPLEX {
+                    source.gather_elements(cuda, &table)?.conj(cuda)?
+                } else {
+                    let mut output = source.gather_members(cuda, required_len, 1, &[0])?;
+                    for (source_region, destination_region) in &copies {
+                        tenet_dense::cuda_copy_strided_into::<D>(
+                            cuda,
+                            &source.0,
+                            source_region,
+                            &mut output.0,
+                            destination_region,
+                        )
+                        .map_err(dense_err)?;
+                    }
+                    output
+                };
+                for (zero, _) in &zeros {
+                    tenet_dense::cuda_region_zero::<D>(cuda, &mut output.0, zero)
+                        .map_err(dense_err)?;
+                }
+                output
+            }
+        };
+        drop(lease);
+        Ok(Self {
+            runtime: self.runtime.clone(),
+            repr: owned_repr(TypedTensorBody::dense(space, output)),
+        })
+    }
+
     fn direct_cuda_storage(&self, operation: &'static str) -> Result<&CudaStorage<D>, Error> {
         match &self.repr {
             TypedTensorRepr::Owned(body) => match body.data.as_ref() {
@@ -14486,6 +14655,94 @@ where
             )),
         }
     }
+
+    /// An owned dense copy with this tensor's space, values, provider,
+    /// runtime and placement (TensorKit `copy`, or `TensorMap(d)` for a
+    /// diagonal).
+    ///
+    /// The result is neither a lazy adjoint nor a compact diagonal, and its
+    /// payload is freshly allocated, so writing to it never changes `self`.
+    /// This is the remedy for operations that reject lazy or compact inputs,
+    /// such as `*_overwrite_into` sources and checked-Generic
+    /// factorizations. A lazy adjoint is conjugate-transposed from its parent
+    /// in one pass, without filling or sharing the cache [`Self::data`]
+    /// publishes.
+    ///
+    /// Why not named `copy`: TensorKit's `copy(::DiagonalTensorMap)` stays
+    /// diagonal, and `Clone` here is a shallow handle copy.
+    ///
+    /// # Cost
+    ///
+    /// One payload allocation of `required_len` elements and one pass over
+    /// it, plus two fixed body wrappers. A compact diagonal is zero-filled and
+    /// then writes its `O(Σ_c k_c)` values.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use tenet::core::{U1FusionRule, U1Irrep};
+    /// use tenet::typed::{GradedSpace, Runtime, TensorMap};
+    ///
+    /// let runtime = Runtime::builder().build()?;
+    /// let v = GradedSpace::try_new(
+    ///     Arc::new(U1FusionRule),
+    ///     [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
+    /// )?;
+    /// let t: TensorMap<_, f64> = TensorMap::rand_with_seed(&runtime, [&v], [&v], 7)?;
+    /// let adjoint = t.adjoint()?;
+    /// let mut owned = adjoint.materialize()?;
+    /// assert_eq!(owned.data(), adjoint.data());
+    /// owned.scale_assign(2.0);
+    /// assert_ne!(owned.data(), adjoint.data());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Operation`] only if an engine-internal layout invariant is
+    /// broken.
+    pub fn materialize(&self) -> Result<Self, Error> {
+        let TypedTensorRepr::Owned(body) = &self.repr else {
+            return self.materialized_tensor_uncached();
+        };
+        let data = match body.data.as_ref() {
+            TypedData::Dense(data) => data.clone(),
+            TypedData::Diagonal(spectrum) => {
+                tenet_matrixalgebra::diagonal_bond_data(body.space.space(), spectrum, &|value| {
+                    value
+                })?
+            }
+        };
+        Ok(self.with_data(data))
+    }
+
+    /// The payload a space-only rewrite (unit-leg insert/remove) may install
+    /// in its new body: a dense payload is shared at pointer cost; a lazy
+    /// adjoint or a compact spectrum goes through [`Self::materialize`] into
+    /// a **fresh** dense payload (one copy) — the #613 Group 4 contract.
+    /// Never the body-local `dense_cache`: that buffer belongs to this body's
+    /// space/payload pairing and only lends a borrowed slice (see the
+    /// [`TypedTensorBody::data`] rationale).
+    ///
+    /// Infallible for the reason [`TypedTensorBody::materialized_dense_data`]
+    /// is: the diagonal fill is total on a bond space this module built from
+    /// that same spectrum.
+    fn shareable_dense_payload(&self) -> Arc<TypedData<D>> {
+        if let Some(body) = self.owned_body() {
+            if matches!(body.data.as_ref(), TypedData::Dense(_)) {
+                return Arc::clone(&body.data);
+            }
+        }
+        let materialized = self
+            .materialize()
+            .expect("a pre-admitted typed tensor must materialize");
+        Arc::clone(
+            &materialized
+                .owned_body()
+                .expect("materialize returns an owned body")
+                .data,
+        )
+    }
+
     /// Builds an operation-local logical tensor without publishing the
     /// receiver's reusable materialization cache, but still constructs a full
     /// receiver-sized logical payload. Prefer an oriented kernel or algebraic
@@ -14835,7 +15092,8 @@ where
     /// # Errors
     ///
     /// [`Error::InvalidArgument`] for a lazy adjoint (adjoin the result of the
-    /// owned parent instead), for a receiver that is not `bond <- bond`, and
+    /// owned parent, or read [`Self::materialize`]'s result, instead), for a
+    /// receiver that is not `bond <- bond`, and
     /// for a layout whose blocks are not fusion-tree keyed.
     ///
     /// Each sector is decoded to its provider label. A provider that cannot
@@ -19310,35 +19568,6 @@ where
             repr: owned_repr(TypedTensorBody::with_shared_payload(destination, data)),
         })
     }
-
-    /// The payload a space-only rewrite (unit-leg insert/remove) may install
-    /// in its new body: a dense payload is shared at pointer cost; a compact
-    /// spectrum is materialized into a **fresh** dense payload first (one
-    /// copy) — the #613 Group 4 contract. Never the body-local
-    /// `dense_cache`: that buffer belongs to this body's space/payload
-    /// pairing and only lends a borrowed slice (see the
-    /// [`TypedTensorBody::data`] rationale).
-    ///
-    /// Infallible for the reason [`TypedTensorBody::materialized_dense_data`]
-    /// is: the diagonal fill
-    /// is total on a bond space this module built from that same spectrum.
-    fn shareable_dense_payload(&self) -> Arc<TypedData<D>> {
-        let materialized = self
-            .materialized_tensor_uncached()
-            .expect("a pre-admitted typed adjoint must materialize");
-        let body = materialized
-            .owned_body()
-            .expect("uncached materialization is owned");
-        match body.data.as_ref() {
-            TypedData::Dense(_) => Arc::clone(&body.data),
-            TypedData::Diagonal(spectrum) => Arc::new(TypedData::Dense(
-                tenet_matrixalgebra::diagonal_bond_data(body.space.space(), spectrum, &|value| {
-                    value
-                })
-                .expect("diagonal fill is total on the stored bond space"),
-            )),
-        }
-    }
 }
 
 /// Canonical-unit leg operations for checked Generic providers.
@@ -19448,7 +19677,7 @@ where
         insertion,
     )
     .map_err(GenericTensorError::Structure)?;
-    let data = generic_shareable_dense_payload(tensor);
+    let data = tensor.shareable_dense_payload();
     Ok(TensorMap {
         runtime: tensor.runtime.clone(),
         repr: owned_repr(TypedTensorBody::with_shared_payload(destination, data)),
@@ -19512,31 +19741,11 @@ where
         insertion,
     )
     .map_err(GenericTensorError::Structure)?;
-    let data = generic_shareable_dense_payload(tensor);
+    let data = tensor.shareable_dense_payload();
     Ok(TensorMap {
         runtime: tensor.runtime.clone(),
         repr: owned_repr(TypedTensorBody::with_shared_payload(destination, data)),
     })
-}
-
-fn generic_shareable_dense_payload<R, D>(tensor: &TensorMap<R, D>) -> Arc<TypedData<D>>
-where
-    R: CheckedCanonicalUnitFusionRule,
-    D: TensorScalar,
-{
-    let materialized = tensor
-        .materialized_tensor_uncached()
-        .expect("a pre-admitted typed adjoint must materialize");
-    let body = materialized
-        .owned_body()
-        .expect("uncached materialization is owned");
-    match body.data.as_ref() {
-        TypedData::Dense(_) => Arc::clone(&body.data),
-        TypedData::Diagonal(spectrum) => Arc::new(TypedData::Dense(
-            tenet_matrixalgebra::diagonal_bond_data(body.space.space(), spectrum, &|value| value)
-                .expect("diagonal fill is total on the stored bond space"),
-        )),
-    }
 }
 
 // The `re`/`im` gates are law checks (`re(t) + i·im(t)` rebuilds `t`).

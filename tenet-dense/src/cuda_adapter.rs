@@ -3319,6 +3319,97 @@ pub fn cuda_copy_strided_into<D: CudaScalar>(
         .map_err(|err| cuda_error(OP, err))
 }
 
+/// Gathers single elements of `src` into a new flat buffer: element `p` of
+/// the result is element `elements[p]` of `src`, by linear (first axis
+/// fastest) position, whatever `src`'s shape.
+///
+/// One Tenferro gather with a `[elements.len(), rank]` coordinate table, so
+/// the only transfer is that table (`8 * rank` bytes per element). The values
+/// are moved, not recomputed: unlike a strided copy or a contraction, which
+/// scale by a complex `1`, a complex infinity or signed zero arrives bit for
+/// bit. Every index is checked before any device work. Counts one
+/// `h2d_calls` and one `copy_calls`.
+#[doc(hidden)]
+pub fn cuda_gather_elements<D: CudaScalar>(
+    ctx: &mut CudaDenseContext,
+    src: &CudaDenseStorage,
+    elements: &[usize],
+) -> Result<CudaDenseStorage, DenseError> {
+    const OP: &str = "cuda_gather_elements";
+    ensure_cuda_device(ctx.device, OP, &[("src", src.device)])?;
+    ensure_payload_dtype::<D>(OP, src)?;
+    // Why checked here: the gather kernel clamps an out-of-range start
+    // instead of faulting (see `cuda_gather_members`).
+    if elements.iter().any(|&element| element >= src.len) {
+        return Err(cuda_error(
+            OP,
+            "every element index must be below the buffer length",
+        ));
+    }
+    if elements.is_empty() {
+        return CudaDenseStorage::upload_members::<D>(ctx, Vec::new(), 0, 1);
+    }
+    let shape = src.tensor.shape().to_vec();
+    let rank = shape.len();
+    let mut coordinates = Vec::with_capacity(elements.len() * rank);
+    // Column-major `[count, rank]`: coordinate `axis` of element `p` sits at
+    // `p + axis * count`.
+    let mut strides = Vec::with_capacity(rank);
+    let mut running = 1usize;
+    for &extent in &shape {
+        strides.push(running);
+        running *= extent;
+    }
+    for axis in 0..rank {
+        for &element in elements {
+            let coordinate = (element / strides[axis]) % shape[axis];
+            coordinates
+                .push(i64::try_from(coordinate).map_err(|_| cuda_error(OP, "index exceeds i64"))?);
+        }
+    }
+    let count = elements.len();
+    let host =
+        i64::into_tensor(vec![count, rank], coordinates).map_err(|err| cuda_error(OP, err))?;
+    let indices = upload_tensor(ctx.backend.runtime(), &host).map_err(|err| cuda_error(OP, err))?;
+    record_h2d(count * rank * std::mem::size_of::<i64>());
+    COPY_CALLS.fetch_add(1, Ordering::Relaxed);
+    let config = tenferro_tensor::GatherConfig {
+        offset_dims: vec![],
+        collapsed_slice_dims: (0..rank).collect(),
+        start_index_map: (0..rank).collect(),
+        index_vector_dim: 1,
+        slice_sizes: vec![1; rank],
+    };
+    let gathered = ctx
+        .backend
+        .gather(&src.tensor, &indices, &config)
+        .map_err(|err| cuda_error(OP, err))?;
+    CudaDenseStorage::from_tensor::<D>(OP, gathered, ctx.device)
+}
+
+/// The elementwise complex conjugate of `src` in a new buffer of the same
+/// shape: one Tenferro `conj` launch, `(re, im) -> (re, -im)` with the
+/// imaginary part negated bit for bit, so infinities, NaN payloads and signed
+/// zeros survive. Why not [`cuda_region_axpby`] with its conjugation flag:
+/// that is a contraction against a unit operand, and complex multiplication
+/// by `(1, 0)` turns an infinite part into NaN and does not preserve `-0`.
+/// A real payload is returned as a copy of its bits. Counts one device
+/// allocation and no transfer.
+#[doc(hidden)]
+pub fn cuda_conj<D: CudaScalar>(
+    ctx: &mut CudaDenseContext,
+    src: &CudaDenseStorage,
+) -> Result<CudaDenseStorage, DenseError> {
+    const OP: &str = "cuda_conj";
+    ensure_cuda_device(ctx.device, OP, &[("src", src.device)])?;
+    ensure_payload_dtype::<D>(OP, src)?;
+    let conjugated = ctx
+        .backend
+        .conj(&src.tensor)
+        .map_err(|err| cuda_error(OP, err))?;
+    CudaDenseStorage::from_tensor::<D>(OP, conjugated, ctx.device)
+}
+
 fn validate_eigh_factor_shapes(
     values_len: usize,
     vectors_shape: &[usize],

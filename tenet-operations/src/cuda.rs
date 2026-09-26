@@ -13,9 +13,9 @@ use std::marker::PhantomData;
 
 use tenet_core::{Placement, TensorStorage};
 use tenet_dense::{
-    cuda_gather_member_elements, cuda_gather_members, cuda_gemm_region_batched_into,
-    cuda_gemm_region_with_ops_into, cuda_matmul_region_into, cuda_widen, CudaDenseContext,
-    CudaDenseStorage, CudaScalar, MatrixOp,
+    cuda_conj, cuda_gather_elements, cuda_gather_member_elements, cuda_gather_members,
+    cuda_gemm_region_batched_into, cuda_gemm_region_with_ops_into, cuda_matmul_region_into,
+    cuda_widen, CudaDenseContext, CudaDenseStorage, CudaScalar, MatrixOp,
 };
 
 use crate::fusion_replay::StorageGemm;
@@ -77,6 +77,28 @@ impl<D: CudaScalar> CudaStorage<D> {
     ) -> Result<CudaStorage<W>, OperationError> {
         cuda_widen::<W>(ctx, &self.0)
             .map(|storage| CudaStorage(storage, PhantomData))
+            .map_err(OperationError::Dense)
+    }
+
+    /// Elements `elements` of this buffer, by linear position, as a new flat
+    /// buffer; see [`cuda_gather_elements`].
+    #[doc(hidden)]
+    pub fn gather_elements(
+        &self,
+        ctx: &mut CudaDenseContext,
+        elements: &[usize],
+    ) -> Result<Self, OperationError> {
+        cuda_gather_elements::<D>(ctx, &self.0, elements)
+            .map(|storage| Self(storage, PhantomData))
+            .map_err(OperationError::Dense)
+    }
+
+    /// The elementwise conjugate of this buffer in a new buffer; see
+    /// [`cuda_conj`].
+    #[doc(hidden)]
+    pub fn conj(&self, ctx: &mut CudaDenseContext) -> Result<Self, OperationError> {
+        cuda_conj::<D>(ctx, &self.0)
+            .map(|storage| Self(storage, PhantomData))
             .map_err(OperationError::Dense)
     }
 
