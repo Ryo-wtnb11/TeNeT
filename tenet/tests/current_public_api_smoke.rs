@@ -23,9 +23,9 @@ where
     R::Mode: TypedTensorRootDispatch<R>,
     D: TensorScalar,
 {
-    assert_eq!(tensor.blocks().unwrap().count(), tensor.block_count());
-    if tensor.block_count() != 0 {
-        let _ = tensor.block_fusion_trees(0).unwrap();
+    assert_eq!(tensor.subblocks().unwrap().count(), tensor.subblock_count());
+    if tensor.subblock_count() != 0 {
+        let _ = tensor.subblock_fusion_trees(0).unwrap();
     }
 }
 
@@ -51,9 +51,9 @@ fn constructs_u1_su2_and_product_tensors_from_provider_labels() {
     inspect_with_the_existing_root_bound(&u1_tensor);
     let generic_u1: TensorMap<U1FusionRule, f64> =
         zeros_with_the_construction_bound(&runtime, &u1).unwrap();
-    assert_eq!(generic_u1.block_count(), u1_tensor.block_count());
-    let coupled: Vec<_> = (0..u1_tensor.block_count())
-        .map(|block| *u1_tensor.block_fusion_trees(block).unwrap().coupled())
+    assert_eq!(generic_u1.subblock_count(), u1_tensor.subblock_count());
+    let coupled: Vec<_> = (0..u1_tensor.subblock_count())
+        .map(|block| *u1_tensor.subblock_fusion_trees(block).unwrap().coupled())
         .collect();
     assert!(coupled.contains(&U1Irrep::new(-1)));
     assert!(coupled.contains(&U1Irrep::new(0)));
@@ -67,7 +67,7 @@ fn constructs_u1_su2_and_product_tensors_from_provider_labels() {
     )
     .unwrap();
     let su2_tensor = TensorMap::<SU2FusionRule, f64>::zeros(&runtime, [&su2], [&su2]).unwrap();
-    assert!(su2_tensor.block_count() >= 2);
+    assert!(su2_tensor.subblock_count() >= 2);
 
     let product = GradedSpace::try_new(
         FermionParityFusionRule.product(U1FusionRule),
@@ -78,7 +78,7 @@ fn constructs_u1_su2_and_product_tensors_from_provider_labels() {
     )
     .unwrap();
     let product_tensor = TensorMap::<_, f64>::zeros(&runtime, [&product], [&product]).unwrap();
-    assert_eq!(product_tensor.block_count(), 2);
+    assert_eq!(product_tensor.subblock_count(), 2);
 }
 
 #[test]

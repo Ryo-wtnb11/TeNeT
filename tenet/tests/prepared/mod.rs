@@ -137,7 +137,7 @@ where
     R::Sector: Debug,
     D: Payload,
 {
-    let trees = tensor.block_fusion_trees(index).unwrap();
+    let trees = tensor.subblock_fusion_trees(index).unwrap();
     let codomain = tree_key(
         trees.coupled(),
         trees.codomain_uncoupled(),
@@ -150,7 +150,7 @@ where
         trees.domain_innerlines(),
         &trees.domain_vertices(),
     );
-    let block = tensor.block(index).unwrap();
+    let block = tensor.subblock(index).unwrap();
     let nout = tensor.codomain_rank();
     let rows: usize = block.shape()[..nout].iter().product();
     let cols: usize = block.shape()[nout..].iter().product();
@@ -182,15 +182,17 @@ where
     D: Payload,
 {
     let zero = D::entry(0.0, 0.0);
-    let a_blocks: Vec<_> = (0..a.block_count()).map(|i| block_matrix(a, i)).collect();
+    let a_blocks: Vec<_> = (0..a.subblock_count())
+        .map(|i| block_matrix(a, i))
+        .collect();
     let mut b_by_rows: HashMap<String, Vec<_>> = HashMap::new();
-    for index in 0..b.block_count() {
+    for index in 0..b.subblock_count() {
         let block = block_matrix(b, index);
         b_by_rows.entry(block.0.clone()).or_default().push(block);
     }
     let mut out = vec![zero; template.data().len()];
     let mut unreached = 0;
-    for index in 0..template.block_count() {
+    for index in 0..template.subblock_count() {
         let (x, z, rows, cols, _) = block_matrix(template, index);
         let mut product = vec![zero; rows * cols];
         let mut reached = false;
@@ -216,7 +218,7 @@ where
             }
         }
         unreached += usize::from(!reached);
-        let block = template.block(index).unwrap();
+        let block = template.subblock(index).unwrap();
         let mut linear = 0;
         for_each_index(block.shape(), |index| {
             let position = block.offset()
@@ -282,9 +284,9 @@ where
     type Extents = HashMap<String, (HashMap<String, usize>, HashMap<String, usize>)>;
     let extents = |t: &TensorMap<R, D>| {
         let mut out: Extents = HashMap::new();
-        for index in 0..t.block_count() {
+        for index in 0..t.subblock_count() {
             let (row, col, rows, cols, _) = block_matrix(t, index);
-            let coupled = format!("{:?}", t.block_fusion_trees(index).unwrap().coupled());
+            let coupled = format!("{:?}", t.subblock_fusion_trees(index).unwrap().coupled());
             let entry = out.entry(coupled).or_default();
             entry.0.insert(row, rows);
             entry.1.insert(col, cols);
@@ -304,21 +306,28 @@ where
     // Destination sectors in storage order, with their element counts.
     let mut sectors: BTreeMap<usize, (String, usize)> = BTreeMap::new();
     let mut starts: HashMap<String, usize> = HashMap::new();
-    for index in 0..template.block_count() {
+    for index in 0..template.subblock_count() {
         let coupled = format!(
             "{:?}",
-            template.block_fusion_trees(index).unwrap().coupled()
+            template.subblock_fusion_trees(index).unwrap().coupled()
         );
-        let offset = template.block(index).unwrap().offset();
+        let offset = template.subblock(index).unwrap().offset();
         let start = starts.entry(coupled).or_insert(offset);
         *start = (*start).min(offset);
     }
     for (coupled, &start) in &starts {
-        let len = (0..template.block_count())
+        let len = (0..template.subblock_count())
             .filter(|&i| {
-                format!("{:?}", template.block_fusion_trees(i).unwrap().coupled()) == *coupled
+                format!("{:?}", template.subblock_fusion_trees(i).unwrap().coupled()) == *coupled
             })
-            .map(|i| template.block(i).unwrap().shape().iter().product::<usize>())
+            .map(|i| {
+                template
+                    .subblock(i)
+                    .unwrap()
+                    .shape()
+                    .iter()
+                    .product::<usize>()
+            })
             .sum();
         sectors.insert(start, (coupled.clone(), len));
     }

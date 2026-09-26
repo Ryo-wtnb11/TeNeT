@@ -428,8 +428,8 @@ fn checked_generic_multiplicity_keys_payload_and_resolver_arc_roundtrip() {
         })
         .unwrap();
 
-    let keys = (0..source.block_count())
-        .map(|index| source.block_fusion_trees(index).unwrap())
+    let keys = (0..source.subblock_count())
+        .map(|index| source.subblock_fusion_trees(index).unwrap())
         .collect::<Vec<_>>();
     let mu_one = keys
         .iter()
@@ -475,13 +475,16 @@ fn checked_generic_multiplicity_keys_payload_and_resolver_arc_roundtrip() {
         .iter()
         .zip(source.data())
         .all(|(actual, expected)| actual.to_bits() == expected.to_bits()));
-    assert_eq!(restored.block_count(), source.block_count());
-    for index in 0..source.block_count() {
+    assert_eq!(restored.subblock_count(), source.subblock_count());
+    for index in 0..source.subblock_count() {
         assert_eq!(
-            restored.block_fusion_trees(index).unwrap(),
-            source.block_fusion_trees(index).unwrap()
+            restored.subblock_fusion_trees(index).unwrap(),
+            source.subblock_fusion_trees(index).unwrap()
         );
-        assert_eq!(restored.block(index).unwrap(), source.block(index).unwrap());
+        assert_eq!(
+            restored.subblock(index).unwrap(),
+            source.subblock(index).unwrap()
+        );
     }
 
     let complex = source.to_c64().scale(Complex64::new(1.0, -0.25));
@@ -746,9 +749,9 @@ fn dense_su2_f64_and_c64_roundtrip_exact_bits_and_semantic_blocks() {
         },
     )
     .unwrap();
-    assert!((0..real.block_count()).any(|index| {
+    assert!((0..real.subblock_count()).any(|index| {
         !real
-            .block_fusion_trees(index)
+            .subblock_fusion_trees(index)
             .unwrap()
             .codomain_innerlines()
             .is_empty()
@@ -794,15 +797,15 @@ fn dense_su2_f64_and_c64_roundtrip_exact_bits_and_semantic_blocks() {
             .collect::<Vec<_>>()
     );
     assert!(std::ptr::eq(restored_real.provider(), provider.as_ref()));
-    assert_eq!(restored_real.block_count(), real.block_count());
-    for index in 0..real.block_count() {
+    assert_eq!(restored_real.subblock_count(), real.subblock_count());
+    for index in 0..real.subblock_count() {
         assert_eq!(
-            restored_real.block_fusion_trees(index).unwrap(),
-            real.block_fusion_trees(index).unwrap()
+            restored_real.subblock_fusion_trees(index).unwrap(),
+            real.subblock_fusion_trees(index).unwrap()
         );
         assert_eq!(
-            restored_real.block(index).unwrap().shape(),
-            real.block(index).unwrap().shape()
+            restored_real.subblock(index).unwrap().shape(),
+            real.subblock(index).unwrap().shape()
         );
     }
 }
@@ -1491,9 +1494,9 @@ macro_rules! single_precision_roundtrip {
                 },
             )
             .unwrap();
-            assert!((0..dense.block_count()).any(|index| {
+            assert!((0..dense.subblock_count()).any(|index| {
                 !dense
-                    .block_fusion_trees(index)
+                    .subblock_fusion_trees(index)
                     .unwrap()
                     .codomain_innerlines()
                     .is_empty()
@@ -1591,8 +1594,13 @@ macro_rules! single_precision_roundtrip {
                     )
                 })
                 .unwrap();
-            assert!((0..dense.block_count()).any(|index| {
-                dense.block_fusion_trees(index).unwrap().codomain_vertices()[0].get() == 2
+            assert!((0..dense.subblock_count()).any(|index| {
+                dense
+                    .subblock_fusion_trees(index)
+                    .unwrap()
+                    .codomain_vertices()[0]
+                    .get()
+                    == 2
             }));
             check(&runtime, &codec, &dense, NetworkReuseClass::OwnedDense);
             check(

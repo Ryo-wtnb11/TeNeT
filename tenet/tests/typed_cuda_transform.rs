@@ -141,8 +141,8 @@ where
             .chain(tensor.domain().iter())
             .map(|leg| (leg.is_dual(), leg.degeneracies().to_vec()))
             .collect(),
-        (0..tensor.block_count())
-            .map(|index| tensor.block_fusion_trees(index).unwrap())
+        (0..tensor.subblock_count())
+            .map(|index| tensor.subblock_fusion_trees(index).unwrap())
             .collect(),
     )
 }
@@ -269,7 +269,7 @@ fn device_permute_braid_and_planar_match_the_host_for_u1_and_su2() {
         TensorMap::from_block_fn(&runtime, [&u1, &u1_dual], [&u1, &u1], real_fill).unwrap();
     let complex: TensorMap<_, Complex64> =
         TensorMap::from_block_fn(&runtime, [&u1, &u1_dual], [&u1, &u1], complex_fill).unwrap();
-    assert!(real.block_count() >= 2, "multi-block fixture");
+    assert!(real.subblock_count() >= 2, "multi-block fixture");
 
     let permuted = device_matches_host!("U1/f64 permute", real, |t| t.permute(&[2, 0], &[1, 3]));
     assert_moved(real.data(), permuted.data(), "U1/f64 permute");
@@ -569,7 +569,7 @@ fn device_rank_five_transforms_match_the_host() {
     let u1 = u1_leg(&[(-1, 2), (0, 1), (1, 1)], false);
     let host: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&u1, &u1, &u1], [&u1, &u1], real_fill).unwrap();
-    assert!(host.block_count() >= 3, "multi-block rank-5 fixture");
+    assert!(host.subblock_count() >= 3, "multi-block rank-5 fixture");
     let permuted = device_matches_host!("rank-5 permute", host, |t| t.permute(&[4, 1, 0], &[3, 2]));
     assert_moved(host.data(), permuted.data(), "rank-5 permute");
     device_matches_host!("rank-5 transpose", host, |t| t.transpose());
@@ -658,7 +658,7 @@ fn device_lazy_adjoint_transforms_lower_onto_the_parent_like_the_host() {
     let d = u1_leg(&[(-2, 2), (-1, 3), (0, 1), (1, 2), (2, 1)], false);
     let u1_parent: TensorMap<_, Complex64> =
         TensorMap::from_block_fn(&runtime, [&a, &b, &c], [&d], complex_fill).unwrap();
-    assert!(u1_parent.block_count() >= 4, "multi-block lazy fixture");
+    assert!(u1_parent.subblock_count() >= 4, "multi-block lazy fixture");
     assert_lazy_adjoint_transforms_match_host(&u1_parent, "U(1) c64 lazy", false);
 
     // SU(2): the lowered operation recouples, so the transformed adjoint is
@@ -785,7 +785,7 @@ fn device_transforms_of_an_empty_tensor_produce_an_empty_tensor() {
     let domain = u1_leg(&[(0, 3)], false);
     let host: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&codomain], [&domain], |_, _| 1.0).unwrap();
-    assert_eq!(host.block_count(), 0);
+    assert_eq!(host.subblock_count(), 0);
     assert!(host.data().is_empty());
     let device = host.to_cuda().unwrap();
 
@@ -800,7 +800,7 @@ fn device_transforms_of_an_empty_tensor_produce_an_empty_tensor() {
             actual.data().is_empty(),
             "{what}: expected an empty payload"
         );
-        assert_eq!(actual.block_count(), 0, "{what}: expected no blocks");
+        assert_eq!(actual.subblock_count(), 0, "{what}: expected no blocks");
     }
     // The lazy-adjoint lowering must survive it too.
     assert!(device
@@ -920,7 +920,7 @@ fn device_overwrite_into_matches_the_host_for_every_alpha_and_method() {
     let u1_dual = u1_leg(&[(-1, 1), (0, 2), (1, 1)], true);
     let real: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&u1, &u1_dual], [&u1, &u1], real_fill).unwrap();
-    assert!(real.block_count() >= 2, "multi-block fixture");
+    assert!(real.subblock_count() >= 2, "multi-block fixture");
     let complex: TensorMap<_, Complex64> =
         TensorMap::from_block_fn(&runtime, [&u1, &u1_dual], [&u1, &u1], complex_fill).unwrap();
 
@@ -1281,7 +1281,7 @@ fn device_overwrite_into_of_an_empty_tensor_succeeds() {
     let domain = u1_leg(&[(0, 3)], false);
     let host: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&codomain], [&domain], |_, _| 1.0).unwrap();
-    assert_eq!(host.block_count(), 0);
+    assert_eq!(host.subblock_count(), 0);
     let model = host.permute(&[1], &[0]).unwrap();
     let source = host.to_cuda().unwrap();
     let mut destination = model.to_cuda().unwrap();

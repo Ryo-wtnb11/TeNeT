@@ -278,12 +278,12 @@ where
     StructuralSnapshot {
         codomain: tensor.codomain().into_iter().map(&leg_snapshot).collect(),
         domain: tensor.domain().into_iter().map(leg_snapshot).collect(),
-        blocks: (0..tensor.block_count())
+        blocks: (0..tensor.subblock_count())
             .map(|index| {
-                let block = tensor.block(index).unwrap();
+                let block = tensor.subblock(index).unwrap();
                 BlockSnapshot {
                     key: block.key().clone(),
-                    fusion_trees: tensor.block_fusion_trees(index).unwrap(),
+                    fusion_trees: tensor.subblock_fusion_trees(index).unwrap(),
                     offset: block.offset(),
                     shape: block.shape().to_vec(),
                     strides: block.strides().to_vec(),
@@ -565,8 +565,8 @@ fn assert_finite_r_diagonal_nonnegative<R>(right: &TensorMap<R, f64>)
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
 {
-    for block_index in 0..right.block_count() {
-        let block = right.block(block_index).unwrap();
+    for block_index in 0..right.subblock_count() {
+        let block = right.subblock(block_index).unwrap();
         let diagonal_len = block.shape()[0].min(block.shape()[1]);
         for index in 0..diagonal_len {
             let value = right.data()
@@ -1883,8 +1883,8 @@ fn typed_cuda_direct_supports_canonical_lazy_and_rejects_other_scopes_before_mut
         TensorMap::from_block_fn(&runtime, [&left_open], [&seam], |_, _| 1.0).unwrap();
     let zero_rhs: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&seam], [&right_open], |_, _| 1.0).unwrap();
-    assert_eq!(zero_lhs.block_count(), 0);
-    assert_eq!(zero_rhs.block_count(), 0);
+    assert_eq!(zero_lhs.subblock_count(), 0);
+    assert_eq!(zero_rhs.subblock_count(), 0);
     let zero_output = zero_lhs
         .to_cuda()
         .unwrap()
@@ -1892,7 +1892,7 @@ fn typed_cuda_direct_supports_canonical_lazy_and_rejects_other_scopes_before_mut
         .unwrap()
         .to_host()
         .unwrap();
-    assert_eq!(zero_output.block_count(), 0);
+    assert_eq!(zero_output.subblock_count(), 0);
     assert!(zero_output.data().is_empty());
 }
 
@@ -2311,12 +2311,12 @@ fn typed_cuda_c64_lazy_adjoint_contract_matches_a_hand_expansion() {
         complex_entry(indices, 3.0) * Complex64::new(indices[0] as f64 + 1.0, -1.0)
     })
     .unwrap();
-    assert_eq!(a.block_count(), 1);
+    assert_eq!(a.subblock_count(), 1);
 
     fn reduced_block(
         tensor: &TensorMap<U1FusionRule, Complex64>,
     ) -> impl Fn(usize, usize) -> Complex64 {
-        let block = tensor.block(0).unwrap();
+        let block = tensor.subblock(0).unwrap();
         assert_eq!(block.shape(), [2, 2]);
         let offset = block.offset();
         let strides = block.strides().to_vec();
@@ -2370,7 +2370,7 @@ fn typed_cuda_c64_lazy_adjoint_contract_matches_a_hand_expansion() {
         ),
     ];
     for (label, host, device) in &results {
-        let result_block = host.block(0).unwrap();
+        let result_block = host.subblock(0).unwrap();
         let (offset, strides) = (result_block.offset(), result_block.strides().to_vec());
         for (i, row) in expected.iter().enumerate() {
             for (j, &value) in row.iter().enumerate() {
@@ -2589,9 +2589,9 @@ where
         )
         .unwrap();
     assert!(
-        hermitian.block_count() > 0
-            && (0..hermitian.block_count()).any(|index| {
-                let block = hermitian.block(index).unwrap();
+        hermitian.subblock_count() > 0
+            && (0..hermitian.subblock_count()).any(|index| {
+                let block = hermitian.subblock(index).unwrap();
                 (0..block.shape()[0]).any(|row| {
                     (0..block.shape()[1]).any(|col| {
                         row != col

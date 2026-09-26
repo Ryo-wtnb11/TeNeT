@@ -77,13 +77,16 @@ fn assert_same<D: OracleScalar>(
 ) {
     assert_eq!(actual.codomain(), expected.codomain());
     assert_eq!(actual.domain(), expected.domain());
-    assert_eq!(actual.block_count(), expected.block_count());
-    for index in 0..actual.block_count() {
+    assert_eq!(actual.subblock_count(), expected.subblock_count());
+    for index in 0..actual.subblock_count() {
         assert_eq!(
-            actual.block_fusion_trees(index).unwrap(),
-            expected.block_fusion_trees(index).unwrap()
+            actual.subblock_fusion_trees(index).unwrap(),
+            expected.subblock_fusion_trees(index).unwrap()
         );
-        assert_eq!(actual.block(index).unwrap(), expected.block(index).unwrap());
+        assert_eq!(
+            actual.subblock(index).unwrap(),
+            expected.subblock(index).unwrap()
+        );
     }
     assert_eq!(actual.data().len(), expected.data().len());
     for (index, (&lhs, &rhs)) in actual.data().iter().zip(expected.data()).enumerate() {
@@ -130,8 +133,8 @@ fn assert_sun_network<D: OracleScalar + Send + Sync + 'static>(n: usize, label: 
         |trees, indices| D::value(10_000 + marker(trees, indices)),
     )
     .unwrap();
-    assert!((0..lhs.block_count()).any(|index| {
-        lhs.block_fusion_trees(index)
+    assert!((0..lhs.subblock_count()).any(|index| {
+        lhs.subblock_fusion_trees(index)
             .unwrap()
             .codomain_vertices()
             .iter()
@@ -320,8 +323,8 @@ fn sun_checked_generic_mixed_slice_preserves_outer_multiplicity_keys() {
             Complex64::value(20_000 + marker(trees, indices))
         })
         .unwrap();
-    assert!((0..lhs.block_count()).any(|index| {
-        lhs.block_fusion_trees(index)
+    assert!((0..lhs.subblock_count()).any(|index| {
+        lhs.subblock_fusion_trees(index)
             .unwrap()
             .codomain_vertices()
             .iter()
@@ -721,7 +724,7 @@ fn assert_injected_recovery(
         .unwrap();
     provider.reset_symbols();
     let expected = planned.execute(tensors).unwrap();
-    assert_eq!(recovered.block_count(), expected.block_count());
+    assert_eq!(recovered.subblock_count(), expected.subblock_count());
     for (&actual, &want) in recovered.data().iter().zip(expected.data()) {
         assert!((actual - want).abs() <= 1.0e-12 * (1.0 + want.abs()));
     }

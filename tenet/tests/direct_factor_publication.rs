@@ -319,7 +319,7 @@ mod checked_generic {
             let single = su3_leg(&provider, &[(vec![1, 1], 1)]);
             let tall: TensorMap<_, $d> =
                 TensorMap::rand_with_seed($runtime, [&adjoint, &adjoint], [&single], 1483).unwrap();
-            assert_eq!(tall.block_count(), 2);
+            assert_eq!(tall.subblock_count(), 2);
             assert_polar!($d, &tall, true);
             let wide: TensorMap<_, $d> =
                 TensorMap::rand_with_seed($runtime, [&single], [&adjoint, &adjoint], 1484).unwrap();

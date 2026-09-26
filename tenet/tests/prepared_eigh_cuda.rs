@@ -137,7 +137,7 @@ where
     let runtime = Runtime::builder().cuda(0).build().unwrap();
     for count in [1, 2, 17] {
         let inputs = hermitian_members(&runtime, &[&leg, &leg], count, 3);
-        assert!(inputs[0].block_count() > 3, "{label}: several blocks");
+        assert!(inputs[0].subblock_count() > 3, "{label}: several blocks");
         check_device_batch(&format!("{label} B={count}"), &inputs);
     }
 }

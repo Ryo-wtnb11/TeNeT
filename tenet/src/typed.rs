@@ -9,9 +9,9 @@
 //! instead of opaque [`tenet_core::SectorId`] keys. The engine itself never
 //! sees a label; the codec is the single boundary where one enters or leaves.
 //!
-//! The exception is deliberate: [`TensorMap::block`] is the engine-level
+//! The exception is deliberate: [`TensorMap::subblock`] is the engine-level
 //! layout view, and the [`tenet_core::BlockRef`] it returns carries the raw
-//! [`tenet_core::BlockKey`]. Labels are what [`TensorMap::block_fusion_trees`]
+//! [`tenet_core::BlockKey`]. Labels are what [`TensorMap::subblock_fusion_trees`]
 //! is for.
 //!
 //! # Product symmetries
@@ -39,8 +39,8 @@
 //! let v = GradedSpace::try_new(rule, [(even, 2), (odd, 1)])?;
 //!
 //! let t: TensorMap<_, f64> = TensorMap::zeros(&runtime, [&v], [&v])?;
-//! assert_eq!(t.block_count(), 2);
-//! assert_eq!(t.block_fusion_trees(0)?.coupled(), &even);
+//! assert_eq!(t.subblock_count(), 2);
+//! assert_eq!(t.subblock_fusion_trees(0)?.coupled(), &even);
 //! # Ok(())
 //! # }
 //! ```
@@ -85,8 +85,9 @@
 //! [`TensorMap::isomorphism`], [`TensorMap::unitary`],
 //! [`TensorMap::isometry`]),
 //! inspection ([`TensorMap::codomain`], [`TensorMap::domain`],
-//! [`TensorMap::block_fusion_trees`], [`TensorMap::block`],
-//! [`TensorMap::block_count`], [`TensorMap::data`], [`TensorMap::runtime`]),
+//! [`TensorMap::subblock_fusion_trees`], [`TensorMap::subblock`],
+//! [`TensorMap::subblock_count`], [`TensorMap::block`], [`TensorMap::blocks`],
+//! [`TensorMap::data`], [`TensorMap::runtime`]),
 //! the index-manipulation and contraction operations
 //! ([`TensorMap::permute`], [`TensorMap::braid`], [`TensorMap::transpose`],
 //! [`TensorMap::transpose_axes`], [`TensorMap::repartition`],
@@ -9606,6 +9607,105 @@ impl<S> BlockFusionTrees<S> {
     }
 }
 
+/// One coupled-sector matrix of a tensor map, borrowed without a copy:
+/// TensorKit's `block(t, c)`. See [`TensorMap::block`].
+///
+/// Rows are the codomain fusion trees of the sector, columns the domain trees;
+/// each tree spans its degeneracy extent, column-major in its legs. Trees come
+/// in the order [`TensorMap::subblocks`] lists them for this sector, which is
+/// TeNeT's storage order and in general a permutation of TensorKit's
+/// `fusiontrees` order (see `docs/sector_id_compatibility.md`).
+#[derive(Debug)]
+pub struct CoupledBlock<'a, D, S = Vec<D>> {
+    rows: usize,
+    cols: usize,
+    payload: CoupledBlockPayload<'a, D, S>,
+}
+
+/// Where the entries of a [`CoupledBlock`] live.
+#[derive(Debug)]
+pub enum CoupledBlockPayload<'a, D, S = Vec<D>> {
+    /// A column-major matrix inside `storage`, starting at `offset`.
+    ///
+    /// Without `adjoint` it is the block itself, with leading dimension
+    /// `rows`. With `adjoint` it is the stored `cols × rows` matrix of a lazy
+    /// adjoint's parent, with leading dimension `cols`, and the block is its
+    /// conjugate transpose (the GEMM operand flag `Adjoint`).
+    Dense {
+        /// The tensor's canonical payload (the parent's, for a lazy adjoint).
+        storage: &'a S,
+        /// Element offset of the stored matrix's first entry.
+        offset: usize,
+        /// Whether the block is the conjugate transpose of the stored matrix.
+        adjoint: bool,
+    },
+    /// A compact diagonal: the block is `diag(values)`.
+    Diagonal(&'a [D]),
+}
+
+impl<D, S> Clone for CoupledBlockPayload<'_, D, S> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<D, S> Copy for CoupledBlockPayload<'_, D, S> {}
+
+impl<D, S> Clone for CoupledBlock<'_, D, S> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<D, S> Copy for CoupledBlock<'_, D, S> {}
+
+impl<'a, D, S> CoupledBlock<'a, D, S> {
+    /// Number of rows: the codomain block dimension of the sector.
+    #[inline]
+    pub fn rows(&self) -> usize {
+        self.rows
+    }
+
+    /// Number of columns: the domain block dimension of the sector.
+    #[inline]
+    pub fn cols(&self) -> usize {
+        self.cols
+    }
+
+    /// The borrowed payload, for callers that hand the region to a kernel.
+    #[inline]
+    pub fn payload(&self) -> CoupledBlockPayload<'a, D, S> {
+        self.payload
+    }
+}
+
+impl<D, S> CoupledBlock<'_, D, S>
+where
+    D: TensorScalar,
+    S: HostReadableStorage<D>,
+{
+    /// Entry `(row, col)` of the block, or `None` outside `rows × cols`.
+    pub fn get(&self, row: usize, col: usize) -> Option<D> {
+        if row >= self.rows || col >= self.cols {
+            return None;
+        }
+        Some(match self.payload {
+            CoupledBlockPayload::Dense {
+                storage,
+                offset,
+                adjoint: false,
+            } => storage.as_slice()[offset + row + col * self.rows],
+            CoupledBlockPayload::Dense {
+                storage,
+                offset,
+                adjoint: true,
+            } => FactorScalar::adjoint(storage.as_slice()[offset + col + row * self.cols]),
+            CoupledBlockPayload::Diagonal(values) if row == col => values[row],
+            CoupledBlockPayload::Diagonal(_) => D::from_real(0.0),
+        })
+    }
+}
+
 fn decode_sectors<R>(
     provider: &R,
     ids: &[tenet_core::SectorId],
@@ -9728,10 +9828,10 @@ where
         FusionProductSpace::new(codomain.iter().map(|leg| leg.leg().clone())),
         FusionProductSpace::new(domain.iter().map(|leg| leg.leg().clone())),
     );
-    let mut blocks = HashMap::with_capacity(source.block_count());
-    for index in 0..source.block_count() {
-        let key = source.block_fusion_trees(index)?;
-        let block = source.block(index)?;
+    let mut blocks = HashMap::with_capacity(source.subblock_count());
+    for index in 0..source.subblock_count() {
+        let key = source.subblock_fusion_trees(index)?;
+        let block = source.subblock(index)?;
         blocks.insert(
             key,
             (
@@ -9833,7 +9933,7 @@ where
 /// the typed counterpart of [`tenet_matrixalgebra::SectorSpectrum`], whose
 /// `sector` is a raw [`tenet_core::SectorId`].
 ///
-/// Why decode rather than extend the raw-id exception that [`TensorMap::block`]
+/// Why decode rather than extend the raw-id exception that [`TensorMap::subblock`]
 /// carries: that exception is scoped to engine layout views, and a spectrum is
 /// caller-facing physics — [`TensorMap::svd_vals`]'s entire return would
 /// otherwise be raw ids.
@@ -10669,10 +10769,12 @@ impl<R, D, S> TensorMap<R, D, S> {
             && domain_axes.iter().copied().eq(codomain_rank..self.rank())
     }
 
-    /// One block in the tensor's logical coupled layout.
+    /// Layout metadata of one fusion-tree subblock, by its index in
+    /// [`Self::subblocks`] order. For the coupled-sector matrix use
+    /// [`Self::block`].
     ///
-    /// Metadata only: reading an adjoint block does not materialize its data.
-    pub fn block(&self, index: usize) -> Result<BlockRef<'_>, Error> {
+    /// Metadata only: reading an adjoint subblock does not materialize its data.
+    pub fn subblock(&self, index: usize) -> Result<BlockRef<'_>, Error> {
         self.logical_space()
             .space()
             .structure()
@@ -10713,9 +10815,10 @@ impl<R, D, S> TensorMap<R, D, S> {
             .collect()
     }
 
-    /// Number of stored fusion-tree blocks.
+    /// Number of fusion-tree subblocks: TensorKit `length(fusiontrees(t))`,
+    /// not the number of coupled sectors.
     #[inline]
-    pub fn block_count(&self) -> usize {
+    pub fn subblock_count(&self) -> usize {
         self.logical_space().space().structure().block_count()
     }
 }
@@ -15399,7 +15502,9 @@ where
     R::Mode: TypedTensorModeDispatch<R>,
     D: TensorScalar,
 {
-    /// Provider-labelled fusion trees and borrowed values for every stored block.
+    /// Provider-labelled fusion trees and borrowed values for every fusion-tree
+    /// subblock: TensorKit `subblocks(t)`. For coupled-sector matrices use
+    /// [`Self::blocks`].
     ///
     /// All labels are decoded and all views are validated before the iterator is
     /// returned, so iteration is infallible. In particular, a checked-provider
@@ -15418,7 +15523,7 @@ where
         clippy::type_complexity,
         reason = "the public block iterator yields labelled trees with borrowed block views"
     )]
-    pub fn blocks<'a>(
+    pub fn subblocks<'a>(
         &'a self,
     ) -> Result<
         impl ExactSizeIterator<Item = (BlockFusionTrees<R::Sector>, BlockView<'a, D>)> + 'a,
@@ -15448,8 +15553,9 @@ where
         Ok(blocks.into_iter())
     }
 
-    /// Provider-labelled fusion trees for one stored block.
-    pub fn block_fusion_trees(
+    /// Provider-labelled fusion trees of one subblock, by its index in
+    /// [`Self::subblocks`] order.
+    pub fn subblock_fusion_trees(
         &self,
         index: usize,
     ) -> Result<BlockFusionTrees<R::Sector>, TypedFacadeError<R>> {
@@ -15461,6 +15567,133 @@ where
             .map_err(Error::from)
             .map_err(TypedFacadeError::<R>::from)?;
         decode_block_fusion_trees(self.logical_space().provider(), block.key())
+    }
+}
+
+impl<R, D, S> TensorMap<R, D, S>
+where
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorModeDispatch<R>,
+    S: TensorStorage<D>,
+{
+    /// The matrix of coupled sector `coupled`: TensorKit `block(t, c)`.
+    ///
+    /// A borrowed view on Host and CUDA storage alike; nothing is copied,
+    /// transferred or materialized. A lazy adjoint yields its parent's region
+    /// flagged as conjugate-transposed, and a compact diagonal its stored
+    /// values, as TensorKit returns `block(parent, c)'` and `Diagonal(view)`.
+    /// Row and column order are described on [`CoupledBlock`].
+    ///
+    /// # Complexity
+    ///
+    /// `O(log C)` for `C` coupled sectors, after the per-structure region
+    /// table is compiled once (`O(subblocks)`, cached and shared with
+    /// [`Self::tr`] and [`Self::inner`]).
+    ///
+    /// # Errors
+    ///
+    /// Fails when the provider cannot encode `coupled`, or when the tensor has
+    /// no block in that sector. TensorKit returns an empty `d₁ × 0` or
+    /// `0 × d₂` view there instead; TeNeT reports the absence.
+    pub fn block(
+        &self,
+        coupled: &R::Sector,
+    ) -> Result<CoupledBlock<'_, D, S>, TypedFacadeError<R>> {
+        let id = TypedSectorAdmission::try_encode_label(self.logical_space().provider(), coupled)
+            .map_err(<R::Mode as TypedTensorModeDispatch<R>>::map_provider_error)?;
+        let regions = self.stored_sector_regions()?;
+        let index = regions
+            .binary_search_by_key(&id, CoupledSectorRegion::coupled)
+            .map_err(|_| {
+                TypedFacadeError::<R>::from(Error::InvalidArgument(format!(
+                    "the tensor has no block in coupled sector {coupled:?}"
+                )))
+            })?;
+        self.coupled_block(&regions[index])
+            .map_err(TypedFacadeError::<R>::from)
+    }
+
+    /// Every coupled sector with its matrix: TensorKit `blocks(t)`.
+    ///
+    /// Sectors come in ascending [`tenet_core::SectorId`] order, the storage
+    /// order [`GradedSpace::sectors`] also uses, which is not TensorKit's
+    /// `blocksectors` order in general. Each view is
+    /// the one [`Self::block`] returns. All labels are decoded before the
+    /// iterator is returned, so iteration is infallible.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the provider cannot decode a stored coupled sector.
+    #[expect(
+        clippy::type_complexity,
+        reason = "the public block iterator yields labelled sectors with borrowed matrix views"
+    )]
+    pub fn blocks<'a>(
+        &'a self,
+    ) -> Result<
+        impl ExactSizeIterator<Item = (R::Sector, CoupledBlock<'a, D, S>)> + 'a,
+        TypedFacadeError<R>,
+    > {
+        let regions = self.stored_sector_regions()?;
+        let provider = self.logical_space().provider();
+        let blocks = regions
+            .iter()
+            .map(|region| {
+                let sector = TypedSectorAdmission::try_decode_label(provider, region.coupled())
+                    .map_err(<R::Mode as TypedTensorModeDispatch<R>>::map_provider_error)?;
+                let block = self
+                    .coupled_block(region)
+                    .map_err(TypedFacadeError::<R>::from)?;
+                Ok((sector, block))
+            })
+            .collect::<Result<Vec<_>, TypedFacadeError<R>>>()?;
+        Ok(blocks.into_iter())
+    }
+
+    /// Coupled regions of the stored payload's own layout. For a lazy adjoint
+    /// that is the parent's layout, whose sector `c` holds `block(t', c)'`.
+    fn stored_sector_regions(&self) -> Result<Arc<[CoupledSectorRegion]>, TypedFacadeError<R>> {
+        let space = self.storage_body().space.space();
+        sector_regions(space.structure(), space.nout()).map_err(TypedFacadeError::<R>::from)
+    }
+
+    fn coupled_block(&self, region: &CoupledSectorRegion) -> Result<CoupledBlock<'_, D, S>, Error> {
+        let adjoint = matches!(self.repr, TypedTensorRepr::Adjoint(_));
+        let (rows, cols) = if adjoint {
+            (region.cols(), region.rows())
+        } else {
+            (region.rows(), region.cols())
+        };
+        let payload = match self.storage_body().data.as_ref() {
+            TypedData::Dense(storage) => {
+                if region.range().end > storage.len() {
+                    return Err(internal_layout_error("coupled region outside the payload"));
+                }
+                CoupledBlockPayload::Dense {
+                    storage,
+                    offset: region.range().start,
+                    adjoint,
+                }
+            }
+            // Every compact constructor stores the spectrum in bond-leg id
+            // order, the order of the bond space's regions.
+            TypedData::Diagonal(spectrum) => {
+                let values = spectrum
+                    .binary_search_by_key(&region.coupled(), |entry| entry.sector)
+                    .map(|index| spectrum[index].values.as_slice())
+                    .ok()
+                    .filter(|values| values.len() == rows && rows == cols)
+                    .ok_or_else(|| {
+                        internal_layout_error("compact spectrum disagrees with its bond space")
+                    })?;
+                CoupledBlockPayload::Diagonal(values)
+            }
+        };
+        Ok(CoupledBlock {
+            rows,
+            cols,
+            payload,
+        })
     }
 }
 
@@ -20245,17 +20478,17 @@ mod representation_gates {
             expected.logical_space().space()
         );
         assert_eq!(actual.data(), expected.data());
-        assert_eq!(actual.block_count(), expected.block_count());
-        for index in 0..actual.block_count() {
-            let actual_block = actual.block(index).unwrap();
-            let expected_block = expected.block(index).unwrap();
+        assert_eq!(actual.subblock_count(), expected.subblock_count());
+        for index in 0..actual.subblock_count() {
+            let actual_block = actual.subblock(index).unwrap();
+            let expected_block = expected.subblock(index).unwrap();
             assert_eq!(actual_block.key(), expected_block.key());
             assert_eq!(actual_block.offset(), expected_block.offset());
             assert_eq!(actual_block.shape(), expected_block.shape());
             assert_eq!(actual_block.strides(), expected_block.strides());
             assert_eq!(
-                actual.block_fusion_trees(index).unwrap(),
-                expected.block_fusion_trees(index).unwrap()
+                actual.subblock_fusion_trees(index).unwrap(),
+                expected.subblock_fusion_trees(index).unwrap()
             );
         }
     }
@@ -20394,6 +20627,38 @@ mod representation_gates {
             .unwrap();
         assert_eq!(restricted.data(), &[11.0, 21.0, 12.0, 22.0]);
         assert_eq!(materialized_adjoint_builds(&lazy), 0);
+    }
+
+    #[test]
+    fn coupled_block_reads_do_not_materialize_a_lazy_adjoint() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let provider = Arc::new(U1FusionRule);
+        let leg = GradedSpace::try_new_with_arc(
+            Arc::clone(&provider),
+            [(U1Irrep::new(0), 2), (U1Irrep::new(1), 3)],
+        )
+        .unwrap();
+        let source: TensorMap<_, num_complex::Complex64> =
+            TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], |_, index| {
+                num_complex::Complex64::new(index[0] as f64, index[2] as f64 + 1.0)
+            })
+            .unwrap();
+        let lazy = source.adjoint().unwrap();
+        let clone = lazy.clone();
+        let mut entries = 0;
+        for (sector, block) in lazy.blocks().unwrap() {
+            let again = clone.block(&sector).unwrap();
+            assert_eq!((again.rows(), again.cols()), (block.rows(), block.cols()));
+            for row in 0..block.rows() {
+                for col in 0..block.cols() {
+                    assert_eq!(block.get(row, col), again.get(row, col));
+                    entries += 1;
+                }
+            }
+        }
+        assert!(entries > 0);
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+        assert_eq!(materialized_adjoint_builds(&clone), 0);
     }
 
     #[test]
@@ -20571,7 +20836,7 @@ mod representation_gates {
         let mut empty_destination =
             TensorMap::<_, f64>::zeros(&runtime, [&charged_full], []).unwrap();
         let empty_piece = TensorMap::<_, f64>::zeros(&runtime, [&charged_piece], []).unwrap();
-        assert_eq!(empty_destination.block_count(), 0);
+        assert_eq!(empty_destination.subblock_count(), 0);
         empty_destination
             .network_scatter_add_assign(&empty_piece, &[Some(1..2)])
             .unwrap();
@@ -20583,7 +20848,7 @@ mod representation_gates {
             GradedSpace::try_new_with_arc(provider, [(U1Irrep::new(1), 1), (U1Irrep::new(2), 1)])
                 .unwrap();
         let empty_two = TensorMap::<_, f64>::zeros(&runtime, [&two_sectors], []).unwrap();
-        assert_eq!(empty_two.block_count(), 0);
+        assert_eq!(empty_two.subblock_count(), 0);
         assert!(empty_destination
             .network_scatter_add_assign(&empty_two, &[Some(0..1)])
             .is_err());
@@ -21022,7 +21287,7 @@ mod representation_gates {
                 }
             })
             .unwrap();
-        assert!(su2_source.block_count() >= 2);
+        assert!(su2_source.subblock_count() >= 2);
         let su2_device = su2_source.to_cuda().unwrap();
         let Eigh { d: su2_d, v: su2_v } = su2_device.eigh_full().unwrap();
         assert!(Arc::ptr_eq(
@@ -22416,17 +22681,17 @@ mod representation_gates {
             adjoint.leg_dims().unwrap(),
             [source_dims[2], source_dims[0], source_dims[1]]
         );
-        assert_eq!(adjoint.block_count(), source.block_count());
+        assert_eq!(adjoint.subblock_count(), source.subblock_count());
         let expected = tenet_tensors::adjoint_bound_space_dyn(source.logical_space()).unwrap();
-        for index in 0..adjoint.block_count() {
-            let actual = adjoint.block(index).unwrap();
+        for index in 0..adjoint.subblock_count() {
+            let actual = adjoint.subblock(index).unwrap();
             let expected_block = expected.space().structure().block(index).unwrap();
             assert_eq!(actual.key(), expected_block.key());
             assert_eq!(actual.shape(), expected_block.shape());
             assert_eq!(actual.strides(), expected_block.strides());
             assert_eq!(actual.offset(), expected_block.offset());
             assert_eq!(
-                adjoint.block_fusion_trees(index).unwrap(),
+                adjoint.subblock_fusion_trees(index).unwrap(),
                 decode_block_fusion_trees(adjoint.provider(), expected_block.key()).unwrap()
             );
         }
@@ -24239,8 +24504,14 @@ mod representation_gates {
                 )
             })
             .unwrap();
-        assert!((0..divisor.block_count())
-            .any(|i| { divisor.block_fusion_trees(i).unwrap().codomain_vertices()[0].get() == 2 }));
+        assert!((0..divisor.subblock_count()).any(|i| {
+            divisor
+                .subblock_fusion_trees(i)
+                .unwrap()
+                .codomain_vertices()[0]
+                .get()
+                == 2
+        }));
 
         for (lazy_lhs, lazy_rhs) in [(false, false), (true, false), (false, true), (true, true)] {
             let lhs = if lazy_lhs {
@@ -24283,10 +24554,10 @@ mod representation_gates {
                     (actual.widen_complex() - expected.widen_complex()).norm() < 2e-10
                 }
             ));
-            for i in 0..solution.block_count() {
+            for i in 0..solution.subblock_count() {
                 assert_eq!(
-                    reconstructed.block_fusion_trees(i).unwrap(),
-                    rhs_oracle.block_fusion_trees(i).unwrap(),
+                    reconstructed.subblock_fusion_trees(i).unwrap(),
+                    rhs_oracle.subblock_fusion_trees(i).unwrap(),
                 );
             }
             assert!(right_solution
@@ -25351,12 +25622,12 @@ mod representation_gates {
             |_, indices| indices.iter().sum::<usize>() as f64 + 1.0,
         )
         .unwrap();
-        assert!(su2.block_count() > 1);
+        assert!(su2.subblock_count() > 1);
         assert!(
             eager_adjoint_oracle(&su2)
                 .trace_pairs(&[(0, 1)])
                 .unwrap()
-                .block_count()
+                .subblock_count()
                 > 1
         );
         let u1_c64 = u1.to_c64().scale(num_complex::Complex64::new(1.0, 2.0));
@@ -25488,13 +25759,13 @@ mod representation_gates {
     where
         D: TensorScalar + core::fmt::Debug,
     {
-        assert!(source.block_count() > 1);
+        assert!(source.subblock_count() > 1);
         let lazy = source.adjoint().unwrap();
         let eager = eager_adjoint_oracle(source);
 
         let actual = lazy.contract(source, &[2, 1], &[1, 0], &[1, 0]).unwrap();
         let expected = eager.contract(source, &[2, 1], &[1, 0], &[1, 0]).unwrap();
-        assert!(actual.block_count() > 1);
+        assert!(actual.subblock_count() > 1);
         assert_eq!(
             actual.logical_space().space(),
             expected.logical_space().space()
@@ -25513,7 +25784,7 @@ mod representation_gates {
 
         let actual = lazy.compose(source).unwrap();
         let expected = eager.compose(source).unwrap();
-        assert!(actual.block_count() > 1);
+        assert!(actual.subblock_count() > 1);
         assert_eq!(
             actual.logical_space().space(),
             expected.logical_space().space()
@@ -26069,7 +26340,7 @@ mod representation_gates {
             "overwrite against the scaled owned route",
             destination.data(),
             scaled.data(),
-            source.block_count(),
+            source.subblock_count(),
         );
         assert_eq!(source.data(), source_before);
         assert_eq!(

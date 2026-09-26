@@ -161,11 +161,16 @@ macro_rules! assert_same_structure {
         let (got, source) = (&$got, &$source);
         assert_eq!(got.codomain(), source.codomain(), "{}: codomain", $what);
         assert_eq!(got.domain(), source.domain(), "{}: domain", $what);
-        assert_eq!(got.block_count(), source.block_count(), "{}: blocks", $what);
-        for index in 0..source.block_count() {
+        assert_eq!(
+            got.subblock_count(),
+            source.subblock_count(),
+            "{}: blocks",
+            $what
+        );
+        for index in 0..source.subblock_count() {
             assert_eq!(
-                format!("{:?}", got.block_fusion_trees(index).unwrap()),
-                format!("{:?}", source.block_fusion_trees(index).unwrap()),
+                format!("{:?}", got.subblock_fusion_trees(index).unwrap()),
+                format!("{:?}", source.subblock_fusion_trees(index).unwrap()),
                 "{}: fusion trees of block {index}",
                 $what
             );
@@ -706,8 +711,8 @@ fn checked_generic_su3_conversions_are_exact_and_keep_structure() {
     let leg = GradedSpace::try_new_with_arc(provider, [(vec![2i64, 2], 2)]).unwrap();
     let source = filled!([&leg, &leg], [&leg, &leg]);
     assert!(
-        (0..source.block_count()).any(|index| source
-            .block_fusion_trees(index)
+        (0..source.subblock_count()).any(|index| source
+            .subblock_fusion_trees(index)
             .unwrap()
             .codomain_vertices()
             .iter()

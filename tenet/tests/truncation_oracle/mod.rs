@@ -192,7 +192,7 @@ macro_rules! sector_matrices {
     ($tensor:expr) => {{
         let tensor = &$tensor;
         let blocks = tensor
-            .blocks()
+            .subblocks()
             .unwrap()
             .map(|(trees, view)| {
                 let shape = view.shape().to_vec();
@@ -595,13 +595,13 @@ macro_rules! assert_canonical_layout {
         )
         .unwrap();
         assert_eq!(
-            got.block_count(),
-            want.block_count(),
+            got.subblock_count(),
+            want.subblock_count(),
             "{} block count",
             $what
         );
-        for index in 0..want.block_count() {
-            let (left, right) = (got.block(index).unwrap(), want.block(index).unwrap());
+        for index in 0..want.subblock_count() {
+            let (left, right) = (got.subblock(index).unwrap(), want.subblock(index).unwrap());
             assert_eq!(left.key(), right.key(), "{} block {index} key", $what);
             assert_eq!(left.shape(), right.shape(), "{} block {index} shape", $what);
             assert_eq!(

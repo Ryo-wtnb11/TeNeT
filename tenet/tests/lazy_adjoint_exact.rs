@@ -238,7 +238,7 @@ macro_rules! assert_exact_adjoint {
         let lazy = first.adjoint().unwrap();
         assert_eq!(lazy.codomain(), expected.codomain());
         assert_eq!(lazy.domain(), expected.domain());
-        assert!(expected.block_count() > 1);
+        assert!(expected.subblock_count() > 1);
         assert_eq!(bits(lazy.data()), bits(expected.data()));
 
         let lazy = first.adjoint().unwrap();
@@ -392,8 +392,8 @@ fn lazy_adjoint_materialization_and_add_are_exact_on_su3_multiplicity_legs() {
     let probe =
         TensorMap::<_, f64>::from_block_fn(&runtime, [&leg, &other], [&leg], |_, _| 0.0).unwrap();
     assert!(
-        (0..probe.block_count()).any(|index| probe
-            .block_fusion_trees(index)
+        (0..probe.subblock_count()).any(|index| probe
+            .subblock_fusion_trees(index)
             .unwrap()
             .codomain_vertices()
             .iter()

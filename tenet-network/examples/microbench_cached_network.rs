@@ -88,12 +88,15 @@ mod u1 {
             assert_eq!(actual.data(), oracle.data());
             assert_eq!(actual.codomain(), oracle.codomain());
             assert_eq!(actual.domain(), oracle.domain());
-            assert_eq!(actual.block_count(), oracle.block_count());
-            for index in 0..actual.block_count() {
-                assert_eq!(actual.block(index).unwrap(), oracle.block(index).unwrap());
+            assert_eq!(actual.subblock_count(), oracle.subblock_count());
+            for index in 0..actual.subblock_count() {
                 assert_eq!(
-                    actual.block_fusion_trees(index).unwrap(),
-                    oracle.block_fusion_trees(index).unwrap()
+                    actual.subblock(index).unwrap(),
+                    oracle.subblock(index).unwrap()
+                );
+                assert_eq!(
+                    actual.subblock_fusion_trees(index).unwrap(),
+                    oracle.subblock_fusion_trees(index).unwrap()
                 );
             }
         }
@@ -167,12 +170,15 @@ mod checked_generic {
         assert!(std::ptr::eq(actual.provider(), authority.provider()));
         assert_eq!(actual.codomain(), oracle.codomain());
         assert_eq!(actual.domain(), oracle.domain());
-        assert_eq!(actual.block_count(), oracle.block_count());
-        for index in 0..actual.block_count() {
-            assert_eq!(actual.block(index).unwrap(), oracle.block(index).unwrap());
+        assert_eq!(actual.subblock_count(), oracle.subblock_count());
+        for index in 0..actual.subblock_count() {
             assert_eq!(
-                actual.block_fusion_trees(index).unwrap(),
-                oracle.block_fusion_trees(index).unwrap()
+                actual.subblock(index).unwrap(),
+                oracle.subblock(index).unwrap()
+            );
+            assert_eq!(
+                actual.subblock_fusion_trees(index).unwrap(),
+                oracle.subblock_fusion_trees(index).unwrap()
             );
         }
         assert_eq!(actual.data(), oracle.data());

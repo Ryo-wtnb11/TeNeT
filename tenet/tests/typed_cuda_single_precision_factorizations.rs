@@ -118,11 +118,11 @@ where
     R: DeviceRule,
     D: FactorPayload,
 {
-    (0..tensor.block_count())
+    (0..tensor.subblock_count())
         .map(|index| {
-            let block = tensor.block(index).unwrap();
+            let block = tensor.subblock(index).unwrap();
             (
-                tensor.block_fusion_trees(index).unwrap(),
+                tensor.subblock_fusion_trees(index).unwrap(),
                 block.shape().to_vec(),
                 block.strides().to_vec(),
                 block.offset(),
@@ -500,8 +500,8 @@ where
         tolerance::<D>(terms, 1.0, 1.0),
         what,
     );
-    for block in 0..r.block_count() {
-        let view = r.block(block).unwrap();
+    for block in 0..r.subblock_count() {
+        let view = r.subblock(block).unwrap();
         let (rows, cols) = (view.shape()[0], view.shape()[1]);
         let (row_stride, col_stride) = (view.strides()[0], view.strides()[1]);
         for j in 0..rows.min(cols) {
@@ -625,7 +625,7 @@ fn device_qr_fixes_a_hand_computed_complex_phase() {
         let bound = tolerance::<D>(4, 3.0, 1.0);
         for (factor, expected, what) in [(q, q_expected, "q"), (r, r_expected, "r")] {
             let factor = factor.to_host().unwrap();
-            let view = factor.block(0).unwrap();
+            let view = factor.subblock(0).unwrap();
             for (row, expected_row) in expected.iter().enumerate() {
                 for (col, &(re, im)) in expected_row.iter().enumerate() {
                     let index = view.offset() + row * view.strides()[0] + col * view.strides()[1];

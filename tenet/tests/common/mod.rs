@@ -28,11 +28,11 @@ macro_rules! snapshot {
         let tensor = &$tensor;
         $crate::common::Snapshot {
             nout: tensor.codomain_rank(),
-            blocks: (0..tensor.block_count())
+            blocks: (0..tensor.subblock_count())
                 .map(|index| {
-                    let block = tensor.block(index).unwrap();
+                    let block = tensor.subblock(index).unwrap();
                     (
-                        tensor.block_fusion_trees(index).unwrap(),
+                        tensor.subblock_fusion_trees(index).unwrap(),
                         $crate::common::BlockGeometry {
                             shape: block.shape().to_vec(),
                             strides: block.strides().to_vec(),

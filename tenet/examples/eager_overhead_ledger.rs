@@ -286,8 +286,8 @@ macro_rules! ledger {
                 case.nc - 1
             };
             let open: Vec<usize> = (0..rank).collect();
-            let mut coupled: Vec<_> = (0..a.block_count())
-                .map(|i| a.block_fusion_trees(i).map(|t| t.coupled().clone()))
+            let mut coupled: Vec<_> = (0..a.subblock_count())
+                .map(|i| a.subblock_fusion_trees(i).map(|t| t.coupled().clone()))
                 .collect::<Result<_, _>>()?;
             coupled.sort();
             coupled.dedup();
@@ -297,7 +297,7 @@ macro_rules! ledger {
                 $dname,
                 case.name,
                 rank,
-                a.block_count(),
+                a.subblock_count(),
                 coupled.len(),
                 a.data().len()
             );

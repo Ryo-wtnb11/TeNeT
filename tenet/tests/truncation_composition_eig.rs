@@ -362,10 +362,10 @@ fn multi_tree_eig_composition_matches_the_hand_selection_for_every_policy() {
     let leg = u1_leg(&[(0, 2), (1, 2)]);
     let source = multi_tree_triangular([&leg, &leg], 0x0e19_0008);
     assert!(
-        (0..source.block_count()).any(|i| {
-            let coupled = *source.block_fusion_trees(i).unwrap().coupled();
-            (0..source.block_count())
-                .filter(|&j| source.block_fusion_trees(j).unwrap().coupled() == &coupled)
+        (0..source.subblock_count()).any(|i| {
+            let coupled = *source.subblock_fusion_trees(i).unwrap().coupled();
+            (0..source.subblock_count())
+                .filter(|&j| source.subblock_fusion_trees(j).unwrap().coupled() == &coupled)
                 .count()
                 > 1
         }),

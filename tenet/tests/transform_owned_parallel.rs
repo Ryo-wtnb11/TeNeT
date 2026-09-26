@@ -163,7 +163,7 @@ macro_rules! assert_bit_identical {
     ($expected:expr, $actual:expr) => {
         for ((name, expected), (_, actual)) in $expected.iter().zip(&$actual) {
             assert_eq!(expected.data().len(), actual.data().len(), "{name}");
-            assert_eq!(expected.block_count(), actual.block_count(), "{name}");
+            assert_eq!(expected.subblock_count(), actual.subblock_count(), "{name}");
             assert!(expected.data() == actual.data(), "{name}: payloads differ");
         }
     };

@@ -307,7 +307,7 @@ where
     R: TypedSectorAdmission,
     D: BenchScalar,
 {
-    let metadata = tensor.block(block).unwrap();
+    let metadata = tensor.subblock(block).unwrap();
     tensor.data()[metadata.offset() + row * metadata.strides()[0] + column * metadata.strides()[1]]
 }
 
@@ -320,35 +320,35 @@ where
     <R as TypedSectorAdmission>::Sector: Eq,
     D: BenchScalar,
 {
-    assert_eq!(actual.block_count(), tensors[0].block_count());
+    assert_eq!(actual.subblock_count(), tensors[0].subblock_count());
     for tensor in tensors {
-        assert_eq!(tensor.block_count(), actual.block_count());
-        for input_index in 0..tensor.block_count() {
-            let input_trees = tensor.block_fusion_trees(input_index).unwrap();
+        assert_eq!(tensor.subblock_count(), actual.subblock_count());
+        for input_index in 0..tensor.subblock_count() {
+            let input_trees = tensor.subblock_fusion_trees(input_index).unwrap();
             assert!(
-                (0..actual.block_count())
-                    .any(|index| actual.block_fusion_trees(index).unwrap() == input_trees),
+                (0..actual.subblock_count())
+                    .any(|index| actual.subblock_fusion_trees(index).unwrap() == input_trees),
                 "result is missing an input block"
             );
         }
     }
-    for output_index in 0..actual.block_count() {
-        let trees = actual.block_fusion_trees(output_index).unwrap();
+    for output_index in 0..actual.subblock_count() {
+        let trees = actual.subblock_fusion_trees(output_index).unwrap();
         let input_indices = std::array::from_fn(|slot| {
             let tensor = &tensors[slot];
-            (0..tensor.block_count())
-                .find(|&index| tensor.block_fusion_trees(index).unwrap() == trees)
+            (0..tensor.subblock_count())
+                .find(|&index| tensor.subblock_fusion_trees(index).unwrap() == trees)
                 .expect("square one-leg chain has the output sector in every operand")
         });
         let [a_index, b_index, c_index] = input_indices;
-        let shape = actual.block(output_index).unwrap().shape().to_vec();
+        let shape = actual.subblock(output_index).unwrap().shape().to_vec();
         assert_eq!(shape.len(), 2);
-        let contracted = tensors[0].block(a_index).unwrap().shape()[1];
+        let contracted = tensors[0].subblock(a_index).unwrap().shape()[1];
         assert_eq!(
-            tensors[1].block(b_index).unwrap().shape(),
+            tensors[1].subblock(b_index).unwrap().shape(),
             [contracted, contracted]
         );
-        assert_eq!(tensors[2].block(c_index).unwrap().shape()[0], contracted);
+        assert_eq!(tensors[2].subblock(c_index).unwrap().shape()[0], contracted);
         for column in 0..shape[1] {
             for row in 0..shape[0] {
                 let mut expected = D::default();

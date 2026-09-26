@@ -463,7 +463,7 @@ fn fibonacci_tau_braid_fixture(runtime: &Runtime) -> TensorMap<FibonacciFusionRu
 
 fn fibonacci_tau_channel(tensor: &TensorMap<FibonacciFusionRule, Complex64>) -> [Complex64; 2] {
     let mut values = [Complex64::new(0.0, 0.0); 2];
-    for (trees, block) in tensor.blocks().unwrap() {
+    for (trees, block) in tensor.subblocks().unwrap() {
         if trees.coupled() != &FibonacciSector::Tau {
             continue;
         }
@@ -623,7 +623,7 @@ fn fibonacci_planar_transforms_roundtrip_without_braiding() {
 
     let explicit = source.transpose_axes(&[3], &[2, 1, 0]).unwrap();
     assert_data_close_c64(explicit.data(), transposed.data());
-    for (trees, _) in explicit.blocks().unwrap() {
+    for (trees, _) in explicit.subblocks().unwrap() {
         assert_eq!(trees.codomain_uncoupled(), &[FibonacciSector::Tau]);
         assert_eq!(trees.domain_uncoupled(), &[FibonacciSector::Tau; 3]);
     }
@@ -680,7 +680,7 @@ fn fibonacci_otimes_matches_the_nontrivial_tensorkit_fixture() {
     ];
     let mut seen = [[false; 2]; 2];
     let mut vacuum = 0;
-    for (trees, block) in product.blocks().unwrap() {
+    for (trees, block) in product.subblocks().unwrap() {
         let value = *block.get(&[0; 6]).unwrap();
         if trees.coupled() == &FibonacciSector::Vacuum {
             vacuum += 1;
@@ -1097,7 +1097,7 @@ fn tensor_map_zeros_builds_a_multi_block_checked_layout() {
     let tensor: TensorMap<ExternalZ3, f64> =
         TensorMap::zeros(&runtime, [&leg, &leg], [&dual, &dual]).unwrap();
 
-    assert!(tensor.block_count() >= 2);
+    assert!(tensor.subblock_count() >= 2);
     assert!(!tensor.data().is_empty());
     assert!(tensor.data().iter().all(|&value| value == 0.0));
 }
@@ -1114,7 +1114,7 @@ fn tensor_map_zeros_carries_a_complex_payload() {
     let tensor: TensorMap<ExternalSu2, Complex64> =
         TensorMap::zeros(&runtime, [&leg, &leg], [&leg, &leg]).unwrap();
 
-    assert!(tensor.block_count() >= 2);
+    assert!(tensor.subblock_count() >= 2);
     assert!(tensor
         .data()
         .iter()
@@ -1134,7 +1134,7 @@ fn tensor_map_accepts_separately_allocated_equal_identity_providers() {
     let tensor: TensorMap<ExternalZ3, f64> =
         TensorMap::zeros(&runtime, [&z3_leg(&first, false)], [&z3_leg(&second, true)]).unwrap();
 
-    assert!(tensor.block_count() >= 1);
+    assert!(tensor.subblock_count() >= 1);
 }
 
 #[test]
@@ -1250,7 +1250,7 @@ fn from_block_fn_sees_decoded_labels_and_fills_every_allowed_element() {
         })
         .unwrap();
 
-    assert!(tensor.block_count() >= 1);
+    assert!(tensor.subblock_count() >= 1);
     assert!(tensor.data().iter().all(|&value| value >= 100.0));
 }
 
@@ -1302,15 +1302,15 @@ fn tensor_map_inspection_round_trips_the_spaces_and_blocks() {
     assert!(domain[0].is_dual());
 
     let mut elements = 0;
-    for index in 0..tensor.block_count() {
-        let sectors = tensor.block_fusion_trees(index).unwrap();
+    for index in 0..tensor.subblock_count() {
+        let sectors = tensor.subblock_fusion_trees(index).unwrap();
         assert_eq!(sectors.codomain_uncoupled().len(), 2);
         assert_eq!(sectors.domain_uncoupled().len(), 1);
         // Unique fusion: the two codomain charges fuse to the coupled charge.
         let sum = (sectors.codomain_uncoupled()[0].0 + sectors.codomain_uncoupled()[1].0) % 3;
         assert_eq!(&Z3Charge(sum), sectors.coupled());
 
-        let block = tensor.block(index).unwrap();
+        let block = tensor.subblock(index).unwrap();
         assert!(block.storage_end_exclusive().unwrap() <= tensor.data().len());
         elements += block.element_count().unwrap();
     }
@@ -1340,10 +1340,10 @@ fn labelled_blocks_borrow_u1_and_su2_values_in_canonical_order() {
         })
         .unwrap();
 
-    let mut u1_blocks = u1.blocks().unwrap();
-    assert_eq!(u1_blocks.len(), u1.block_count());
+    let mut u1_blocks = u1.subblocks().unwrap();
+    assert_eq!(u1_blocks.len(), u1.subblock_count());
     for (index, (trees, values)) in u1_blocks.by_ref().enumerate() {
-        let raw = u1.block(index).unwrap();
+        let raw = u1.subblock(index).unwrap();
         assert_eq!(values.shape(), raw.shape());
         assert_eq!(values.strides(), raw.strides());
         assert_eq!(values.data().as_ptr(), u1.data().as_ptr());
@@ -1373,17 +1373,17 @@ fn labelled_blocks_borrow_u1_and_su2_values_in_canonical_order() {
         }
     }
     assert!(matches!(
-        u1.block(u1.block_count()),
+        u1.subblock(u1.subblock_count()),
         Err(tenet::typed::Error::Core(error))
             if matches!(*error, tenet::core::CoreError::BlockIndexOutOfBounds { index, count }
-                if index == count && count == u1.block_count())
+                if index == count && count == u1.subblock_count())
     ));
 
     let su2 = su2_tensor_split(&runtime, 2);
-    let su2_blocks = su2.blocks().unwrap();
-    assert_eq!(su2_blocks.len(), su2.block_count());
+    let su2_blocks = su2.subblocks().unwrap();
+    assert_eq!(su2_blocks.len(), su2.subblock_count());
     for (index, (trees, values)) in su2_blocks.enumerate() {
-        let raw = su2.block(index).unwrap();
+        let raw = su2.subblock(index).unwrap();
         assert_eq!(trees.coupled(), &SU2Irrep::from_twice_spin(0));
         assert!(trees.domain_uncoupled().is_empty());
         assert!(SU2FusionRule
@@ -1430,8 +1430,8 @@ fn block_fusion_trees_reports_a_non_self_dual_domain_label() {
     let tensor: TensorMap<ExternalZ3, f64> =
         TensorMap::zeros(&runtime, [&codomain, &codomain], [&domain]).unwrap();
 
-    assert_eq!(tensor.block_count(), 1);
-    let sectors = tensor.block_fusion_trees(0).unwrap();
+    assert_eq!(tensor.subblock_count(), 1);
+    let sectors = tensor.subblock_fusion_trees(0).unwrap();
     assert_eq!(sectors.coupled(), &Z3Charge(2));
     assert_eq!(sectors.codomain_uncoupled(), &[Z3Charge(1), Z3Charge(1)]);
     assert_eq!(sectors.domain_uncoupled(), &[Z3Charge(2)]);
@@ -1461,11 +1461,11 @@ fn simple_fusion_provider_round_trips_construction_fill_and_inspection() {
         .unwrap();
 
     // Two spin-1/2 legs couple to spin 0 and spin 1 on each side.
-    assert!(tensor.block_count() >= 2);
-    let coupled: Vec<usize> = (0..tensor.block_count())
+    assert!(tensor.subblock_count() >= 2);
+    let coupled: Vec<usize> = (0..tensor.subblock_count())
         .map(|index| {
             tensor
-                .block_fusion_trees(index)
+                .subblock_fusion_trees(index)
                 .unwrap()
                 .coupled()
                 .twice_spin()
@@ -1520,10 +1520,10 @@ fn typed_block_fill_preserves_tree_and_storage_order() {
     let typed: TensorMap<tenet::core::Z2FusionRule, f64> =
         TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], typed_fill_value).unwrap();
 
-    assert!(typed.block_count() > 1);
-    for index in 0..typed.block_count() {
-        let block = typed.block(index).unwrap();
-        let sectors = typed.block_fusion_trees(index).unwrap();
+    assert!(typed.subblock_count() > 1);
+    for index in 0..typed.subblock_count() {
+        let block = typed.subblock(index).unwrap();
+        let sectors = typed.subblock_fusion_trees(index).unwrap();
         for local in 0..block.element_count().unwrap() {
             let mut remainder = local;
             let indices: Vec<_> = block
@@ -1637,11 +1637,11 @@ fn permute_round_trips_back_to_the_source_layout() {
     let back = there.permute(&[2, 0], &[3, 1]).unwrap();
 
     assert_eq!(back.data(), tensor.data());
-    assert_eq!(back.block_count(), tensor.block_count());
-    for index in 0..tensor.block_count() {
+    assert_eq!(back.subblock_count(), tensor.subblock_count());
+    for index in 0..tensor.subblock_count() {
         assert_eq!(
-            back.block_fusion_trees(index).unwrap(),
-            tensor.block_fusion_trees(index).unwrap()
+            back.subblock_fusion_trees(index).unwrap(),
+            tensor.subblock_fusion_trees(index).unwrap()
         );
     }
 }
@@ -1667,7 +1667,7 @@ fn permute_carries_a_simple_fusion_provider_with_a_complex_payload() {
 
     assert_eq!(permuted.codomain().len(), 2);
     assert_eq!(permuted.domain().len(), 2);
-    assert!(permuted.block_count() >= 1);
+    assert!(permuted.subblock_count() >= 1);
     assert!(permuted
         .data()
         .iter()
@@ -2386,7 +2386,7 @@ fn typed_deligne_product_preserves_duals_multiblocks_and_complex_values() {
         .unwrap();
 
     assert_eq!(actual.data(), expected.data());
-    assert!(actual.block_count() > 1);
+    assert!(actual.subblock_count() > 1);
     assert_eq!(
         codomain
             .into_iter()
@@ -2455,7 +2455,7 @@ fn typed_deligne_product_maps_component_innerlines_into_the_product_tree() {
     let product = Arc::new(tenet::core::U1FusionRule.product(tenet::core::FermionParityFusionRule));
 
     let result = lhs.deligne_product(&rhs, product).unwrap();
-    let block = result.block_fusion_trees(0).unwrap();
+    let block = result.subblock_fusion_trees(0).unwrap();
 
     assert_eq!(result.data(), [6.0]);
     assert_eq!(
@@ -2619,11 +2619,11 @@ fn transpose_twice_returns_the_source_layout() {
     assert_ne!(once.data(), tensor.data());
     assert_eq!(typed_leg_shapes(&twice), typed_leg_shapes(&tensor));
     assert_eq!(twice.data(), tensor.data());
-    assert_eq!(twice.block_count(), tensor.block_count());
-    for index in 0..tensor.block_count() {
+    assert_eq!(twice.subblock_count(), tensor.subblock_count());
+    for index in 0..tensor.subblock_count() {
         assert_eq!(
-            twice.block_fusion_trees(index).unwrap(),
-            tensor.block_fusion_trees(index).unwrap()
+            twice.subblock_fusion_trees(index).unwrap(),
+            tensor.subblock_fusion_trees(index).unwrap()
         );
     }
 }
@@ -2667,10 +2667,10 @@ fn repartition_moves_the_boundary_and_round_trips_at_every_split() {
         let back = moved.repartition(2).unwrap();
         assert_eq!(typed_leg_shapes(&back), typed_leg_shapes(&tensor));
         assert_eq!(back.data(), tensor.data());
-        for index in 0..tensor.block_count() {
+        for index in 0..tensor.subblock_count() {
             assert_eq!(
-                back.block_fusion_trees(index).unwrap(),
-                tensor.block_fusion_trees(index).unwrap()
+                back.subblock_fusion_trees(index).unwrap(),
+                tensor.subblock_fusion_trees(index).unwrap()
             );
         }
     }
@@ -3505,9 +3505,9 @@ fn tr_uses_the_nonabelian_dimension_weight() {
     let trace = typed.tr().unwrap();
     // The unweighted diagonal sum of the same blocks, for contrast: `tr` is
     // not it, which is what a dropped `dim(c)` would make it.
-    let unweighted: f64 = (0..typed.block_count())
+    let unweighted: f64 = (0..typed.subblock_count())
         .map(|index| {
-            let block = typed.block(index).unwrap();
+            let block = typed.subblock(index).unwrap();
             let size = block.shape()[0];
             (0..size)
                 .map(|i| {
@@ -5050,8 +5050,8 @@ where
         + tenet::typed::SectorCodec,
     D: tenet::prelude::TensorScalar,
 {
-    (0..tensor.block_count()).any(|block| {
-        let block = tensor.block(block).unwrap();
+    (0..tensor.subblock_count()).any(|block| {
+        let block = tensor.subblock(block).unwrap();
         let shape = block.shape();
         (0..shape[0]).any(|row| {
             index == block.offset() + row * block.strides()[0] + row * block.strides()[1]
@@ -7010,7 +7010,7 @@ fn generic_product_provider_drives_the_typed_facade_without_a_fixed_constructor(
     .unwrap();
 
     assert!(
-        t.block_count() > 1,
+        t.subblock_count() > 1,
         "a single block would make the identities below near-vacuous"
     );
     let norm = t.norm(2.0).unwrap();
@@ -8467,16 +8467,19 @@ macro_rules! assert_same_typed_block_structure {
     ($got:expr, $source:expr) => {{
         let (got, source) = ($got, $source);
         assert!(std::ptr::eq(got.provider(), source.provider()));
-        assert_eq!(got.block_count(), source.block_count());
-        for index in 0..source.block_count() {
-            let (after, before) = (got.block(index).unwrap(), source.block(index).unwrap());
+        assert_eq!(got.subblock_count(), source.subblock_count());
+        for index in 0..source.subblock_count() {
+            let (after, before) = (
+                got.subblock(index).unwrap(),
+                source.subblock(index).unwrap(),
+            );
             assert_eq!(
                 (after.offset(), after.shape(), after.strides()),
                 (before.offset(), before.shape(), before.strides())
             );
             let (after, before) = (
-                got.block_fusion_trees(index).unwrap(),
-                source.block_fusion_trees(index).unwrap(),
+                got.subblock_fusion_trees(index).unwrap(),
+                source.subblock_fusion_trees(index).unwrap(),
             );
             assert_eq!(after.coupled(), before.coupled());
             assert_eq!(after.codomain_uncoupled(), before.codomain_uncoupled());

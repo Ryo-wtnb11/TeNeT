@@ -87,13 +87,15 @@ where
 
     let destination_before = destination.data().to_vec();
     let mut expected = destination_before.clone();
-    for destination_index in 0..destination.block_count() {
-        let destination_trees = destination.block_fusion_trees(destination_index).unwrap();
-        let source_index = (0..source.block_count())
-            .find(|&index| source.block_fusion_trees(index).unwrap() == destination_trees)
+    for destination_index in 0..destination.subblock_count() {
+        let destination_trees = destination
+            .subblock_fusion_trees(destination_index)
             .unwrap();
-        let destination_block = destination.block(destination_index).unwrap();
-        let source_block = source.block(source_index).unwrap();
+        let source_index = (0..source.subblock_count())
+            .find(|&index| source.subblock_fusion_trees(index).unwrap() == destination_trees)
+            .unwrap();
+        let destination_block = destination.subblock(destination_index).unwrap();
+        let source_block = source.subblock(source_index).unwrap();
         copy_prefix(
             &mut expected,
             destination_block.offset(),
@@ -109,9 +111,9 @@ where
         );
     }
     assert!(
-        (0..destination.block_count()).any(|index| {
+        (0..destination.subblock_count()).any(|index| {
             destination
-                .block_fusion_trees(index)
+                .subblock_fusion_trees(index)
                 .unwrap()
                 .codomain_vertices()
                 .iter()

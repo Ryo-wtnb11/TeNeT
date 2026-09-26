@@ -583,7 +583,7 @@ fn signed_cross_sector_eigenvalue_ties_are_broken_in_tensorkit_sector_order() {
             }
         })
         .unwrap();
-    assert_eq!(identity.block_count(), source.block_count());
+    assert_eq!(identity.subblock_count(), source.subblock_count());
     let magnitudes: Vec<f64> = source
         .eigh_full()
         .unwrap()

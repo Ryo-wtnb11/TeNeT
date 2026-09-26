@@ -35,7 +35,7 @@ fn base_family<D: TensorScalar>(tensor: &TensorMap<U1FusionRule, D>) {
     let _ = tensor.diagview();
     let _ = tensor.is_hermitian(0.0);
     let _ = tensor.is_unitary(0.0);
-    let _ = tensor.blocks();
+    let _ = tensor.subblocks();
 }
 
 /// Factorization family: needs [`FactorizationScalar`], not more.

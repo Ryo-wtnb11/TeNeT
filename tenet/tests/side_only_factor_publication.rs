@@ -294,7 +294,7 @@ mod checked_generic {
             let gram = $gram;
             let nc = gram.codomain().len();
             let mut ones = 0usize;
-            for (trees, view) in gram.blocks().unwrap() {
+            for (trees, view) in gram.subblocks().unwrap() {
                 let same = trees.codomain_uncoupled() == trees.domain_uncoupled()
                     && trees.codomain_innerlines() == trees.domain_innerlines()
                     && trees.codomain_vertices() == trees.domain_vertices();
@@ -332,12 +332,12 @@ mod checked_generic {
             let one: $scalar = 1.0.into();
             let zero: $scalar = 0.0.into();
             let populated = t
-                .blocks()
+                .subblocks()
                 .unwrap()
                 .map(|(trees, _)| trees.coupled().clone())
                 .collect::<Vec<_>>();
             let mut offsets = Vec::new();
-            for (trees, view) in q.blocks().unwrap() {
+            for (trees, view) in q.subblocks().unwrap() {
                 let sector = trees.coupled().clone();
                 if populated.contains(&sector) {
                     continue;
@@ -373,7 +373,7 @@ mod checked_generic {
             for (sector, offset, _) in &offsets {
                 assert_eq!(*offset, bond.degeneracy(sector).unwrap());
             }
-            for (trees, _) in $other.blocks().unwrap() {
+            for (trees, _) in $other.subblocks().unwrap() {
                 assert!(populated.contains(trees.coupled()), "{trees:?}");
             }
             offsets.iter().map(|&(_, _, n)| n).max().unwrap()

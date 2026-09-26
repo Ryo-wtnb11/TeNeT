@@ -390,10 +390,10 @@ fn block_value<D: TensorScalar>(
 macro_rules! coupled_sector_count {
     ($tensor:expr) => {{
         let tensor = &$tensor;
-        (0..tensor.block_count())
+        (0..tensor.subblock_count())
             .map(|index| {
                 tensor
-                    .block_fusion_trees(index)
+                    .subblock_fusion_trees(index)
                     .unwrap()
                     .coupled()
                     .to_owned()
@@ -423,7 +423,7 @@ fn warmed_checked_generic_reductions_do_not_allocate() {
             block_value::<Complex64>(trees, indices) * Complex64::new(0.5, -1.5)
         })
         .unwrap();
-    assert!(lhs.block_count() > coupled_sector_count!(lhs));
+    assert!(lhs.subblock_count() > coupled_sector_count!(lhs));
     let lazy_lhs = lhs.adjoint().unwrap();
     let lazy_rhs = rhs.adjoint().unwrap();
 
@@ -511,8 +511,13 @@ fn warmed_su3_checked_inner_and_norm_allocate_only_through_the_provider() {
             2.0 * trees.domain_vertices()[0].get() as f64 - indices[0] as f64
         })
         .unwrap();
-    let coupled = (0..lhs.block_count())
-        .map(|index| lhs.block_fusion_trees(index).unwrap().coupled().to_owned())
+    let coupled = (0..lhs.subblock_count())
+        .map(|index| {
+            lhs.subblock_fusion_trees(index)
+                .unwrap()
+                .coupled()
+                .to_owned()
+        })
         .collect::<BTreeSet<_>>();
     let sectors = coupled.len();
     assert!(sectors >= 2);

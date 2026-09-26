@@ -71,7 +71,7 @@ macro_rules! block_case {
     ($what:expr, $x:expr, $y:expr, $z:expr, $alpha:expr, $beta:expr) => {{
         let entries = |t: &TensorMap<_, _>| {
             let mut out = HashMap::new();
-            for (trees, block) in t.blocks().unwrap() {
+            for (trees, block) in t.subblocks().unwrap() {
                 let shape = block.shape().to_vec();
                 let len: usize = shape.iter().product();
                 for linear in 0..len {

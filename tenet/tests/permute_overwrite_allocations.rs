@@ -221,12 +221,12 @@ fn assert_same_checked_tensor(
     actual: &TensorMap<SUNFusionRule, f64>,
     expected: &TensorMap<SUNFusionRule, f64>,
 ) {
-    assert_eq!(actual.block_count(), expected.block_count());
+    assert_eq!(actual.subblock_count(), expected.subblock_count());
     assert_eq!(actual.data().len(), expected.data().len());
-    for index in 0..actual.block_count() {
+    for index in 0..actual.subblock_count() {
         assert_eq!(
-            actual.block_fusion_trees(index).unwrap(),
-            expected.block_fusion_trees(index).unwrap()
+            actual.subblock_fusion_trees(index).unwrap(),
+            expected.subblock_fusion_trees(index).unwrap()
         );
     }
     for (actual, expected) in actual.data().iter().zip(expected.data()) {
@@ -296,7 +296,7 @@ fn checked_generic_public_transform_measurement() {
         let source: TensorMap<_, f64> =
             TensorMap::rand_with_seed(&runtime, [&half_leg, &half_leg], [&coupled_leg], 783)
                 .unwrap();
-        assert_eq!(source.block_count(), 2);
+        assert_eq!(source.subblock_count(), 2);
         let runtime_before = runtime.tree_transform_cache_info();
         let (first, first_allocations, first_bytes, first_ns) =
             measure_value(|| source.permute(&[1, 0], &[2]).unwrap());

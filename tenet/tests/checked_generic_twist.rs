@@ -398,9 +398,9 @@ fn assert_values<D>(
 ) where
     D: TensorScalar + fmt::Debug + PartialEq,
 {
-    for block_index in 0..tensor.block_count() {
-        let block = tensor.block(block_index).unwrap();
-        let trees = tensor.block_fusion_trees(block_index).unwrap();
+    for block_index in 0..tensor.subblock_count() {
+        let block = tensor.subblock(block_index).unwrap();
+        let trees = tensor.subblock_fusion_trees(block_index).unwrap();
         let elements = block.shape().iter().product::<usize>();
         for linear in 0..elements {
             let mut remainder = linear;
@@ -431,9 +431,9 @@ where
     let before = source.data().to_vec();
     let mut saw_outer_two = false;
     let mut saw_vertex_two = false;
-    for index in 0..source.block_count() {
-        let block = source.block(index).unwrap();
-        let trees = source.block_fusion_trees(index).unwrap();
+    for index in 0..source.subblock_count() {
+        let block = source.subblock(index).unwrap();
+        let trees = source.subblock_fusion_trees(index).unwrap();
         saw_outer_two |= trees.codomain_uncoupled()[0] == Label::X && block.shape()[0] == 2;
         saw_vertex_two |= trees
             .codomain_vertices()
@@ -804,10 +804,10 @@ where
     assert!(std::ptr::eq(twisted.provider(), provider.as_ref()));
     assert_eq!(twisted.codomain(), source.codomain());
     assert_eq!(twisted.domain(), source.domain());
-    assert_eq!(twisted.block_count(), source.block_count());
-    for index in 0..source.block_count() {
-        let before = source.block(index).unwrap();
-        let after = twisted.block(index).unwrap();
+    assert_eq!(twisted.subblock_count(), source.subblock_count());
+    for index in 0..source.subblock_count() {
+        let before = source.subblock(index).unwrap();
+        let after = twisted.subblock(index).unwrap();
         assert_eq!(after.key(), before.key());
         assert_eq!(after.shape(), before.shape());
         assert_eq!(after.strides(), before.strides());
@@ -857,11 +857,11 @@ where
     assert!(flipped.codomain()[2].is_dual());
     assert_eq!(flipped.data(), source.data());
     let mut saw_vertex_two = false;
-    for index in 0..source.block_count() {
-        let before = source.block(index).unwrap();
-        let after = flipped.block(index).unwrap();
-        let before_trees = source.block_fusion_trees(index).unwrap();
-        let after_trees = flipped.block_fusion_trees(index).unwrap();
+    for index in 0..source.subblock_count() {
+        let before = source.subblock(index).unwrap();
+        let after = flipped.subblock(index).unwrap();
+        let before_trees = source.subblock_fusion_trees(index).unwrap();
+        let after_trees = flipped.subblock_fusion_trees(index).unwrap();
         saw_vertex_two |= before_trees
             .codomain_vertices()
             .iter()
@@ -899,10 +899,10 @@ fn tree_blocks<D>(
 where
     D: TensorScalar,
 {
-    (0..tensor.block_count())
+    (0..tensor.subblock_count())
         .map(|index| {
-            let block = tensor.block(index).unwrap();
-            let trees = tensor.block_fusion_trees(index).unwrap();
+            let block = tensor.subblock(index).unwrap();
+            let trees = tensor.subblock_fusion_trees(index).unwrap();
             let codomain = (
                 *trees.coupled(),
                 trees.codomain_uncoupled().to_vec(),

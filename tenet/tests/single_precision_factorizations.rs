@@ -299,10 +299,10 @@ macro_rules! factor_checks {
         );
         let terms = wide_tall.data().len();
         assert!(
-            tall.block_count() >= $min_blocks,
+            tall.subblock_count() >= $min_blocks,
             "{name}: the fixture must carry at least {} coupled blocks, has {}",
             $min_blocks,
-            tall.block_count()
+            tall.subblock_count()
         );
 
         let kappa = measured_kappa!(&wide_tall);

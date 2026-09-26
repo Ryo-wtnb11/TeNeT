@@ -147,7 +147,10 @@ upstream location (the note says why).
 | `typed::TensorMap` | TensorKit | 0.17.0 | `tensors/tensor.jl:10-35` | convention: payload scalar `T` independent of the sector type, as TK's `TensorMap{T, S, ...}` parameters separate them |
 | `typed::TensorMap::absorb` | TensorKit | 0.17.0 | `tensors/linalg.jl:531-545` | `absorb` (531), `absorb!` (532-545); rank-check `DimensionError` at 533-534; shared-block `min` region copy at 538-543 |
 | `typed::TensorMap::adjoint` | TensorKit | 0.17.0 | `tensors/adjoint.jl:9-19` | dense storage returns a lazy parent-backed view; compact diagonal storage keeps its direct owned conjugation path |
-| `typed::TensorMap::block_count` | TensorKit | 0.17.0 | `tensors/abstracttensor.jl:331-335` | `length(blocksectors(t))` counts coupled sectors |
+| `typed::TensorMap::block` | TensorKit | 0.17.0 | `tensors/tensor.jl:447,462-476`, `tensors/adjoint.jl:28`, `tensors/diagonal.jl:153-168` | zero-copy view of the coupled-sector matrix; lazy adjoint `block(parent, c)'`, compact diagonal `Diagonal(view)`. Divergences: rows/columns follow TeNeT's storage tree order, and an absent sector is an error instead of an empty view |
+| `typed::TensorMap::blocks` | TensorKit | 0.17.0 | `tensors/tensor.jl:449,455-460`, `tensors/abstracttensor.jl:380-385` | `c => block(t, c)` pairs, in storage sector order |
+| `typed::TensorMap::subblock_count` | TensorKit | 0.17.0 | `tensors/abstracttensor.jl:346-352` | `length(fusiontrees(t))`, the subblock count, not `blocksectors` |
+| `typed::TensorMap::subblocks` | TensorKit | 0.17.0 | `tensors/abstracttensor.jl:415`, `tensors/tensor.jl:480-491` | `subblocks(t)` / `subblock(t, (f₁, f₂))` |
 | `typed::TensorMap::catcodomain` | TensorKit | 0.17.0 | `tensors/linalg.jl:498-514` | domain match 499-500; codomain duality 503-504; direct sum `V = V1 ⊕ V2` 506; per-sector row slabs, `t1` first, 509-512 |
 | `typed::TensorMap::catdomain` | TensorKit | 0.17.0 | `tensors/linalg.jl:479-497` | codomain match 480-483; domain duality 486-487; direct sum `V = V1 ⊕ V2` 489; per-sector column slabs, `t1` first, 492-495 |
 | `typed::TensorMap::codomain_rank` | TensorKit | 0.17.0 | `tensors/abstracttensor.jl:239-241` | `numout` |

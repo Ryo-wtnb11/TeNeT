@@ -97,7 +97,7 @@ macro_rules! assert_componentwise {
         let real = build(&|trees, indices| component(trees, indices, 0) as $real);
         let imaginary = build(&|trees, indices| component(trees, indices, 1) as $real);
         assert_non_trivial(
-            complex.block_count(),
+            complex.subblock_count(),
             complex
                 .data()
                 .iter()

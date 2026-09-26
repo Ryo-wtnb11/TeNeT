@@ -40,8 +40,11 @@ where
 {
     type Keys = BTreeMap<String, usize>;
     let mut sectors: BTreeMap<String, (Keys, Keys, Vec<_>)> = BTreeMap::new();
-    for index in 0..tensor.block_count() {
-        let coupled = format!("{:?}", tensor.block_fusion_trees(index).unwrap().coupled());
+    for index in 0..tensor.subblock_count() {
+        let coupled = format!(
+            "{:?}",
+            tensor.subblock_fusion_trees(index).unwrap().coupled()
+        );
         let block = block_matrix(tensor, index);
         let entry = sectors.entry(coupled).or_default();
         entry.0.insert(block.0.clone(), block.2);

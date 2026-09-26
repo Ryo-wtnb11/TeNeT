@@ -35,8 +35,8 @@ fn zn3_index_flip_and_units_keep_the_original_provider() {
     // ordered by their Z3 charge, not merely restored by an inverse operation.
     assert_eq!(source.data(), &[10.0, 11.0, 12.0]);
     assert_eq!(
-        (0..source.block_count())
-            .map(|i| *source.block_fusion_trees(i).unwrap().coupled())
+        (0..source.subblock_count())
+            .map(|i| *source.subblock_fusion_trees(i).unwrap().coupled())
             .collect::<Vec<_>>(),
         vec![charge(0), charge(1), charge(2)]
     );
@@ -204,10 +204,10 @@ fn zn3_extended_structural_paths_execute_on_the_original_arc() {
     );
     let restored = permuted.permute(&[1, 0], &[2]).unwrap();
     assert_eq!(restored.data(), source.data());
-    for index in 0..source.block_count() {
+    for index in 0..source.subblock_count() {
         assert_eq!(
-            restored.block_fusion_trees(index).unwrap(),
-            source.block_fusion_trees(index).unwrap()
+            restored.subblock_fusion_trees(index).unwrap(),
+            source.subblock_fusion_trees(index).unwrap()
         );
     }
     let twisted = source.twist(&[0, 1, 2]).unwrap();
