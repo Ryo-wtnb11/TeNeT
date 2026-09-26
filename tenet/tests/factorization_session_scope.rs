@@ -33,8 +33,8 @@ macro_rules! assert_one_session_per_factorization {
         let tensor =
             TensorMap::<_, $dtype>::rand_with_seed($runtime, vec![&leg; $nc], vec![&leg; $nd], 7)
                 .unwrap();
-        let mut coupled = (0..tensor.block_count())
-            .map(|i| tensor.block_fusion_trees(i).unwrap().coupled().clone())
+        let mut coupled = (0..tensor.subblock_count())
+            .map(|i| tensor.subblock_fusion_trees(i).unwrap().coupled().clone())
             .collect::<Vec<_>>();
         coupled.sort();
         coupled.dedup();

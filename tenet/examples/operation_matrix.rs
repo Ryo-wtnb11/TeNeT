@@ -723,12 +723,12 @@ fn assert_public_fixture<T: OrientedScalar>(
 ) -> Result<(), Error> {
     assert_eq!(actual.codomain(), expected.codomain());
     assert_eq!(actual.domain(), expected.domain());
-    assert_eq!(actual.block_count(), expected.block_count());
-    for index in 0..actual.block_count() {
-        assert_eq!(actual.block(index)?, expected.block(index)?);
+    assert_eq!(actual.subblock_count(), expected.subblock_count());
+    for index in 0..actual.subblock_count() {
+        assert_eq!(actual.subblock(index)?, expected.subblock(index)?);
         assert_eq!(
-            actual.block_fusion_trees(index)?,
-            expected.block_fusion_trees(index)?
+            actual.subblock_fusion_trees(index)?,
+            expected.subblock_fusion_trees(index)?
         );
     }
     assert_oriented_close(actual.data(), expected.data());
@@ -740,12 +740,12 @@ macro_rules! assert_same_tensor {
         assert!(std::ptr::eq($actual.provider(), $authority.provider()));
         assert_eq!($actual.codomain(), $expected.codomain());
         assert_eq!($actual.domain(), $expected.domain());
-        assert_eq!($actual.block_count(), $expected.block_count());
-        for index in 0..$actual.block_count() {
-            assert_eq!($actual.block(index)?, $expected.block(index)?);
+        assert_eq!($actual.subblock_count(), $expected.subblock_count());
+        for index in 0..$actual.subblock_count() {
+            assert_eq!($actual.subblock(index)?, $expected.subblock(index)?);
             assert_eq!(
-                $actual.block_fusion_trees(index)?,
-                $expected.block_fusion_trees(index)?
+                $actual.subblock_fusion_trees(index)?,
+                $expected.subblock_fusion_trees(index)?
             );
         }
         assert_f64_payload_close($actual.data(), $expected.data());
@@ -2066,21 +2066,25 @@ where
     assert!(std::ptr::eq(source.provider(), d.provider()));
     assert!(std::ptr::eq(source.provider(), v.provider()));
     assert_eq!(
-        (source.block_count(), d.block_count(), v.block_count()),
+        (
+            source.subblock_count(),
+            d.subblock_count(),
+            v.subblock_count()
+        ),
         (sector_count, sector_count, sector_count)
     );
-    for block_index in 0..v.block_count() {
-        let vectors = v.block(block_index)?;
-        let trees = v.block_fusion_trees(block_index)?;
+    for block_index in 0..v.subblock_count() {
+        let vectors = v.subblock(block_index)?;
+        let trees = v.subblock_fusion_trees(block_index)?;
         let sector = trees.coupled();
-        let source_index = (0..source.block_count())
-            .find(|&index| source.block_fusion_trees(index).unwrap().coupled() == sector)
+        let source_index = (0..source.subblock_count())
+            .find(|&index| source.subblock_fusion_trees(index).unwrap().coupled() == sector)
             .unwrap();
-        let value_index = (0..d.block_count())
-            .find(|&index| d.block_fusion_trees(index).unwrap().coupled() == sector)
+        let value_index = (0..d.subblock_count())
+            .find(|&index| d.subblock_fusion_trees(index).unwrap().coupled() == sector)
             .unwrap();
-        let source_block = source.block(source_index)?;
-        let values = d.block(value_index)?;
+        let source_block = source.subblock(source_index)?;
+        let values = d.subblock(value_index)?;
         let n = vectors.shape()[0];
         assert_eq!(source_block.shape(), [n, n]);
         assert_eq!(vectors.shape(), [n, n]);
@@ -2321,9 +2325,12 @@ where
         },
     )?;
     for selected in [&source, &changed_source] {
-        for block_index in 0..selected.block_count() {
-            let block = selected.block(block_index)?;
-            let sector = selected.block_fusion_trees(block_index)?.coupled().charge() as usize;
+        for block_index in 0..selected.subblock_count() {
+            let block = selected.subblock(block_index)?;
+            let sector = selected
+                .subblock_fusion_trees(block_index)?
+                .coupled()
+                .charge() as usize;
             for column in 0..block.shape()[1] {
                 for row in 0..block.shape()[0] {
                     assert_eq!(
@@ -3037,8 +3044,8 @@ fn run_checked_sun(
         let mut sectors = Vec::new();
         let mut row_trees = Vec::new();
         let mut col_trees = Vec::new();
-        for index in 0..lhs.block_count() {
-            let trees = lhs.block_fusion_trees(index)?;
+        for index in 0..lhs.subblock_count() {
+            let trees = lhs.subblock_fusion_trees(index)?;
             if !sectors.contains(trees.coupled()) {
                 sectors.push(trees.coupled().clone());
             }
@@ -3066,7 +3073,7 @@ fn run_checked_sun(
             sectors.len(),
             row_trees.len(),
             col_trees.len(),
-            lhs.block_count()
+            lhs.subblock_count()
         );
     }
     for (operation, action) in [

@@ -47,7 +47,7 @@ where
             let (oracle, unreached) = compose_oracle(x, y, &eager);
             assert!(unreached > 0, "{label}: fixture must have inactive blocks");
             assert!(
-                eager.block_count() > unreached + 1,
+                eager.subblock_count() > unreached + 1,
                 "{label}: several active blocks"
             );
             assert_close(eager.data(), &oracle, terms, &format!("{label}: eager"));

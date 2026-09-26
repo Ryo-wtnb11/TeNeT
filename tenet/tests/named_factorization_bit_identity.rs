@@ -58,8 +58,8 @@ macro_rules! factor {
                 })
                 .collect::<Vec<_>>()
         };
-        let blocks = (0..t.block_count())
-            .map(|i| format!("{:?}", t.block_fusion_trees(i).unwrap().coupled()))
+        let blocks = (0..t.subblock_count())
+            .map(|i| format!("{:?}", t.subblock_fusion_trees(i).unwrap().coupled()))
             .collect::<Vec<_>>();
         let (codomain, domain) = (legs(t.codomain()), legs(t.domain()));
         let compact = matches!(t.network_reuse_class(false), NetworkReuseClass::Compact);

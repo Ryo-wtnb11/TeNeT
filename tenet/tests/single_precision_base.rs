@@ -148,8 +148,8 @@ macro_rules! base_suite {
                 ] {
                     assert_payloads_agree(what, got.data(), expected.data(), terms);
                     assert_eq!(
-                        got.block_count(),
-                        expected.block_count(),
+                        got.subblock_count(),
+                        expected.subblock_count(),
                         "{what}: block structure diverged between the twins"
                     );
                 }
@@ -233,7 +233,7 @@ macro_rules! base_suite {
                     9_301
                 );
                 assert_eq!(a.rank(), 5);
-                assert!(a.block_count() > 1, "the fixture must be multi-block");
+                assert!(a.subblock_count() > 1, "the fixture must be multi-block");
                 let (b, wb) = twin!(&runtime, $narrow, $wide, [&leg, &leg], [&leg], 9_302);
                 let terms = wa.data().len().max(wb.data().len());
 
@@ -398,8 +398,8 @@ mod checked_generic {
                     let (a, wa) =
                         twin!(&runtime, $narrow, $wide, [&leg, &leg], [&leg, &leg], 9_601);
                     assert!(
-                        (0..a.block_count()).any(|index| a
-                            .block_fusion_trees(index)
+                        (0..a.subblock_count()).any(|index| a
+                            .subblock_fusion_trees(index)
                             .unwrap()
                             .codomain_vertices()
                             .iter()

@@ -292,7 +292,7 @@ fn lazy_adjoint_add_and_materialization_fill_no_payload() {
         TensorMap::rand_with_seed(&runtime, [&leg, &other], [&leg, &other], 59).unwrap();
     let lazy = square.adjoint().unwrap();
     let payload_bytes = std::mem::size_of_val(square.data());
-    assert!(square.block_count() > 1);
+    assert!(square.subblock_count() > 1);
 
     let mut sum = None;
     let add = measure(|| {

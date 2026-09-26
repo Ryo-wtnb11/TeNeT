@@ -170,7 +170,7 @@ fn labelled_block_inspection_materializes_compact_data_once_and_borrows_it() {
     let diagonal = constructed_diagonal(DEGENERACY);
 
     let first = measured_bytes(|| {
-        let blocks = diagonal.blocks().unwrap().collect::<Vec<_>>();
+        let blocks = diagonal.subblocks().unwrap().collect::<Vec<_>>();
         assert_eq!(blocks.len(), 1);
         let (_, values) = &blocks[0];
         assert_eq!(values.shape(), &[DEGENERACY, DEGENERACY]);
@@ -184,7 +184,7 @@ fn labelled_block_inspection_materializes_compact_data_once_and_borrows_it() {
     );
 
     let second = measured_bytes(|| {
-        let blocks = diagonal.blocks().unwrap().collect::<Vec<_>>();
+        let blocks = diagonal.subblocks().unwrap().collect::<Vec<_>>();
         assert_eq!(blocks[0].1.data().as_ptr(), diagonal.data().as_ptr());
     });
     assert!(

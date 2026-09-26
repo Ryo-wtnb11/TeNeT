@@ -93,7 +93,7 @@ where
     let runtime = Runtime::builder().build().unwrap();
     for count in MEMBER_COUNTS {
         let inputs = hermitian_members(&runtime, &[&leg, &leg], count, 3);
-        assert!(inputs[0].block_count() > 3, "{label}: several blocks");
+        assert!(inputs[0].subblock_count() > 3, "{label}: several blocks");
         check_batch(&format!("{label} B={count}"), &runtime, &inputs);
     }
 }

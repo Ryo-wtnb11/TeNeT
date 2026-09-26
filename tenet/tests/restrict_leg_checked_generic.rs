@@ -32,8 +32,8 @@ fn restrict_and_embed_preserve_su3_multiplicity_vertices() {
     )
     .unwrap();
     assert!(
-        (0..source.block_count()).any(|index| source
-            .block_fusion_trees(index)
+        (0..source.subblock_count()).any(|index| source
+            .subblock_fusion_trees(index)
             .unwrap()
             .codomain_vertices()
             .iter()
@@ -44,7 +44,7 @@ fn restrict_and_embed_preserve_su3_multiplicity_vertices() {
     let selection = LegSelection::try_new(&leg, [(adjoint.clone(), 1..3)]).unwrap();
     let restricted = source.restrict_leg(0, &selection).unwrap();
     assert_eq!(restricted.codomain()[0], *selection.subspace());
-    assert_eq!(restricted.block_count(), source.block_count());
+    assert_eq!(restricted.subblock_count(), source.subblock_count());
 
     // Oracle: a literal per-block gather driven by the public fusion-tree
     // keys and block geometry, sharing no code with the restriction kernel.
@@ -73,13 +73,13 @@ fn literal_slice(
     start: usize,
 ) -> Vec<f64> {
     let mut payload = vec![f64::NAN; destination.data().len()];
-    for index in 0..destination.block_count() {
-        let trees = destination.block_fusion_trees(index).unwrap();
-        let block = destination.block(index).unwrap();
-        let matched = (0..source.block_count())
-            .find(|&candidate| source.block_fusion_trees(candidate).unwrap() == trees)
+    for index in 0..destination.subblock_count() {
+        let trees = destination.subblock_fusion_trees(index).unwrap();
+        let block = destination.subblock(index).unwrap();
+        let matched = (0..source.subblock_count())
+            .find(|&candidate| source.subblock_fusion_trees(candidate).unwrap() == trees)
             .expect("every destination tree pair survives from the source");
-        let from = source.block(matched).unwrap();
+        let from = source.subblock(matched).unwrap();
         for_each_index(block.shape(), |position| {
             let to_offset: usize = block.offset()
                 + position
@@ -111,13 +111,13 @@ fn literal_scatter(
     start: usize,
 ) -> Vec<f64> {
     let mut payload = vec![0.0; destination.data().len()];
-    for index in 0..source.block_count() {
-        let trees = source.block_fusion_trees(index).unwrap();
-        let block = source.block(index).unwrap();
-        let matched = (0..destination.block_count())
-            .find(|&candidate| destination.block_fusion_trees(candidate).unwrap() == trees)
+    for index in 0..source.subblock_count() {
+        let trees = source.subblock_fusion_trees(index).unwrap();
+        let block = source.subblock(index).unwrap();
+        let matched = (0..destination.subblock_count())
+            .find(|&candidate| destination.subblock_fusion_trees(candidate).unwrap() == trees)
             .expect("every source tree pair exists in the larger space");
-        let into = destination.block(matched).unwrap();
+        let into = destination.subblock(matched).unwrap();
         for_each_index(block.shape(), |position| {
             let from_offset: usize = block.offset()
                 + position

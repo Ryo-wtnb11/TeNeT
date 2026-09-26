@@ -599,11 +599,11 @@ fn a_valid_selection_with_no_admissible_block_returns_an_empty_tensor() {
     // A rank-(1,0) map with a nonzero charge has no admissible fusion tree.
     let charged = u1(&provider, &[(1, 3)]);
     let source = TensorMap::<_, f64>::zeros(&runtime, [&charged], []).unwrap();
-    assert_eq!(source.block_count(), 0);
+    assert_eq!(source.subblock_count(), 0);
 
     let selection = LegSelection::try_new(&charged, [(U1Irrep::new(1), 1..2)]).unwrap();
     let restricted = source.restrict_leg(0, &selection).unwrap();
-    assert_eq!(restricted.block_count(), 0);
+    assert_eq!(restricted.subblock_count(), 0);
     assert!(restricted.data().is_empty());
     assert_eq!(restricted.codomain()[0].degeneracies(), &[1]);
 

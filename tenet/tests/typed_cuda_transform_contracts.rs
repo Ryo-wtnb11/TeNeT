@@ -776,7 +776,7 @@ fn a_warm_device_twist_uploads_only_its_output_and_downloads_nothing() {
     let host = fermionic_fixture(&runtime);
     let device = host.to_cuda().unwrap();
     let output_bytes = std::mem::size_of_val(host.data()) as u64;
-    let blocks = host.block_count() as u64;
+    let blocks = host.subblock_count() as u64;
     assert!(blocks > 1, "multi-block fixture");
 
     // A twist compiles no structure, so its only cold cost is the context's
@@ -855,7 +855,7 @@ fn device_twist_short_circuits_do_no_device_work() {
     assert_eq!(counters.device_allocs, 1, "{counters:?}");
     assert_eq!(
         counters.gemm_calls,
-        fermionic_host.block_count() as u64,
+        fermionic_host.subblock_count() as u64,
         "one submission per block, as for any other twist: {counters:?}"
     );
     assert_eq!(all_legs.to_host().unwrap().data(), fermionic_host.data());

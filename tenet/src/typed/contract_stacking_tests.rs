@@ -129,8 +129,8 @@ where
 fn entries<R>(tensor: &TensorMap<R, f64>) -> BTreeMap<(BlockKey, Vec<usize>), f64> {
     let data = tensor.data();
     let mut entries = BTreeMap::new();
-    for index in 0..tensor.block_count() {
-        let block = tensor.block(index).unwrap();
+    for index in 0..tensor.subblock_count() {
+        let block = tensor.subblock(index).unwrap();
         let shape = block.shape().to_vec();
         let count = shape.iter().product::<usize>();
         for linear in 0..count {

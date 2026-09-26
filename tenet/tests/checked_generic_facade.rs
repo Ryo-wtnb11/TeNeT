@@ -55,13 +55,16 @@ fn checked_generic_powi_zero_reuses_the_admitted_space_without_provider_work() {
     assert!(identity.runtime().shares_state_with(source.runtime()));
     assert_eq!(identity.codomain(), source.codomain());
     assert_eq!(identity.domain(), source.domain());
-    assert_eq!(identity.block_count(), source.block_count());
+    assert_eq!(identity.subblock_count(), source.subblock_count());
     assert_eq!(identity.data(), &[1.0, 0.0, 0.0, 1.0]);
-    for index in 0..source.block_count() {
-        assert_eq!(identity.block(index).unwrap(), source.block(index).unwrap());
+    for index in 0..source.subblock_count() {
         assert_eq!(
-            identity.block_fusion_trees(index).unwrap(),
-            source.block_fusion_trees(index).unwrap()
+            identity.subblock(index).unwrap(),
+            source.subblock(index).unwrap()
+        );
+        assert_eq!(
+            identity.subblock_fusion_trees(index).unwrap(),
+            source.subblock_fusion_trees(index).unwrap()
         );
     }
 }
@@ -264,15 +267,15 @@ where
             )
         })
         .unwrap();
-    assert!((0..source.block_count()).any(|index| {
-        let trees = source.block_fusion_trees(index).unwrap();
+    assert!((0..source.subblock_count()).any(|index| {
+        let trees = source.subblock_fusion_trees(index).unwrap();
         trees.codomain_vertices()[0].get() == 2 || trees.domain_vertices()[0].get() == 2
     }));
-    assert!((0..source.block_count()).any(|index| {
-        let trees = source.block_fusion_trees(index).unwrap();
+    assert!((0..source.subblock_count()).any(|index| {
+        let trees = source.subblock_fusion_trees(index).unwrap();
         trees.codomain_vertices()[0].get() == 1
             && trees.domain_vertices()[0].get() == 2
-            && source.data()[source.block(index).unwrap().offset()] == D::from_real(1.0)
+            && source.data()[source.subblock(index).unwrap().offset()] == D::from_real(1.0)
     }));
 
     let identity = source.powi(0).unwrap();
@@ -280,11 +283,14 @@ where
     assert!(identity.runtime().shares_state_with(source.runtime()));
     assert_eq!(identity.codomain(), source.codomain());
     assert_eq!(identity.domain(), source.domain());
-    for index in 0..source.block_count() {
-        assert_eq!(identity.block(index).unwrap(), source.block(index).unwrap());
+    for index in 0..source.subblock_count() {
         assert_eq!(
-            identity.block_fusion_trees(index).unwrap(),
-            source.block_fusion_trees(index).unwrap()
+            identity.subblock(index).unwrap(),
+            source.subblock(index).unwrap()
+        );
+        assert_eq!(
+            identity.subblock_fusion_trees(index).unwrap(),
+            source.subblock_fusion_trees(index).unwrap()
         );
     }
     // `powi(2)` is defined as `self ∘ self`, so the two paths must agree.
@@ -342,9 +348,9 @@ fn sun_endomorphism_row_and_column_tree_stacking_is_identical() {
         let source: TensorMap<_, f64> =
             TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |_, _| 0.0).unwrap();
         let mut stacks = BTreeMap::<Vec<i64>, (Vec<TreePlacement>, Vec<TreePlacement>)>::new();
-        for index in 0..source.block_count() {
-            let block = source.block(index).unwrap();
-            let trees = source.block_fusion_trees(index).unwrap();
+        for index in 0..source.subblock_count() {
+            let block = source.subblock(index).unwrap();
+            let trees = source.subblock_fusion_trees(index).unwrap();
             let entry = stacks.entry(trees.coupled().clone()).or_default();
             let row_key = (
                 trees.codomain_uncoupled().to_vec(),
@@ -443,13 +449,13 @@ fn assert_sun_checked_generic_eigh<D>(
             }
         })
         .unwrap();
-    assert!((0..source.block_count()).any(|index| {
-        let trees = source.block_fusion_trees(index).unwrap();
+    assert!((0..source.subblock_count()).any(|index| {
+        let trees = source.subblock_fusion_trees(index).unwrap();
         trees.coupled() == &label
             && trees.codomain_vertices()[0].get() == 1
             && trees.domain_vertices()[0].get() == 2
-            && source.block(index).unwrap().shape() == [2, 2, 2, 2]
-            && source.data()[source.block(index).unwrap().offset()] == off_diagonal
+            && source.subblock(index).unwrap().shape() == [2, 2, 2, 2]
+            && source.data()[source.subblock(index).unwrap().offset()] == off_diagonal
     }));
 
     let Eigh { d, v } = source.eigh_full().unwrap();
@@ -501,8 +507,8 @@ fn assert_sun_checked_generic_eigh<D>(
     .unwrap();
     let mut selector = identity.clone();
     let mut skipped_target = false;
-    for index in 0..d.block_count() {
-        let block = d.block(index).unwrap();
+    for index in 0..d.subblock_count() {
+        let block = d.subblock(index).unwrap();
         for diagonal in 0..block.shape()[0] {
             let value = d.data()
                 [block.offset() + diagonal * block.strides()[0] + diagonal * block.strides()[1]];
@@ -657,8 +663,8 @@ where
     .unwrap();
     let mut selector = identity.clone();
     let mut found_target = false;
-    for index in 0..d.block_count() {
-        let block = d.block(index).unwrap();
+    for index in 0..d.subblock_count() {
+        let block = d.subblock(index).unwrap();
         for diagonal in 0..block.shape()[0] {
             let value = d.data()
                 [block.offset() + diagonal * block.strides()[0] + diagonal * block.strides()[1]];
@@ -1620,9 +1626,9 @@ fn sun_checked_generic_diagonal_constructs_standalone_compact_blocks() {
         assert!(std::ptr::eq(diagonal.provider(), provider.as_ref()));
         assert!(!format!("{diagonal:?}").contains("elements: 4"));
         // This provider has outer multiplicity two, but a rank-one spectrum has no μ axis.
-        assert_eq!(diagonal.block_count(), 1);
-        assert_eq!(diagonal.block(0).unwrap().shape(), &[2, 2]);
-        assert_eq!(diagonal.block(0).unwrap().strides(), &[1, 2]);
+        assert_eq!(diagonal.subblock_count(), 1);
+        assert_eq!(diagonal.subblock(0).unwrap().shape(), &[2, 2]);
+        assert_eq!(diagonal.subblock(0).unwrap().strides(), &[1, 2]);
         assert_eq!(diagonal.data(), &[2.0, 0.0, 0.0, 3.0]);
     }
 }
@@ -1694,10 +1700,10 @@ fn checked_only_provider_uses_ordinary_typed_ownership_and_vertices() {
     let tensor: TensorMap<_, f64> = TensorMap::zeros(&runtime, [&left, &right], [&right]).unwrap();
     assert!(std::ptr::eq(tensor.provider(), first.as_ref()));
     assert_eq!(tensor.rank(), 3);
-    assert_eq!(tensor.block_count(), 2);
-    let vertices: Vec<_> = (0..tensor.block_count())
+    assert_eq!(tensor.subblock_count(), 2);
+    let vertices: Vec<_> = (0..tensor.subblock_count())
         .map(|index| {
-            let trees = tensor.block_fusion_trees(index).unwrap();
+            let trees = tensor.subblock_fusion_trees(index).unwrap();
             assert_eq!(trees.coupled(), &Label::X);
             assert_eq!(trees.codomain_uncoupled(), &[Label::X, Label::X]);
             assert!(trees.codomain_innerlines().is_empty());
@@ -1715,7 +1721,7 @@ fn checked_only_provider_uses_ordinary_typed_ownership_and_vertices() {
 }
 
 #[test]
-fn checked_generic_blocks_decode_transactionally_and_keep_outer_multiplicity() {
+fn checked_generic_subblocks_decode_transactionally_and_keep_outer_multiplicity() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
     let leg = GradedSpace::try_new_with_arc(Arc::clone(&provider), [(Label::X, 1)]).unwrap();
@@ -1728,7 +1734,7 @@ fn checked_generic_blocks_decode_transactionally_and_keep_outer_multiplicity() {
 
     let mut vacuum_blocks = 0;
     let mut observed = tensor
-        .blocks()
+        .subblocks()
         .unwrap()
         .filter_map(|(trees, values)| {
             assert_eq!(trees.codomain_uncoupled(), &[Label::X, Label::X]);
@@ -1763,7 +1769,7 @@ fn checked_generic_blocks_decode_transactionally_and_keep_outer_multiplicity() {
     // second block. The first block decoded fully, but no iterator containing
     // that prefix escapes.
     provider.fail_decode_on_query.store(11, Ordering::Relaxed);
-    let result = tensor.blocks();
+    let result = tensor.subblocks();
     let queries = provider.queries_since_reset.load(Ordering::Relaxed);
     let error = result
         .err()
@@ -1805,12 +1811,12 @@ fn checked_only_provider_roundtrips_through_typed_cuda_without_algebra_dispatch(
     )
     .unwrap();
     let block_structure = |tensor: &TensorMap<CheckedOnlyToy, f64>| {
-        (0..tensor.block_count())
+        (0..tensor.subblock_count())
             .map(|index| {
-                let block = tensor.block(index).unwrap();
+                let block = tensor.subblock(index).unwrap();
                 (
                     block.key().clone(),
-                    tensor.block_fusion_trees(index).unwrap(),
+                    tensor.subblock_fusion_trees(index).unwrap(),
                     block.offset(),
                     block.shape().to_vec(),
                     block.strides().to_vec(),
@@ -1821,9 +1827,9 @@ fn checked_only_provider_roundtrips_through_typed_cuda_without_algebra_dispatch(
     let structure = |tensor: &TensorMap<CheckedOnlyToy, f64>| {
         let mut codomain_legs = Vec::new();
         let mut domain_legs = Vec::new();
-        for index in 0..tensor.block_count() {
-            let block = tensor.block(index).unwrap();
-            let trees = tensor.block_fusion_trees(index).unwrap();
+        for index in 0..tensor.subblock_count() {
+            let block = tensor.subblock(index).unwrap();
+            let trees = tensor.subblock_fusion_trees(index).unwrap();
             let tenet::core::BlockKey::FusionTree(raw_trees) = block.key() else {
                 panic!("checked Generic tensors use fusion-tree block keys")
             };
@@ -1887,8 +1893,8 @@ fn checked_only_multiplicity_two_transforms_keep_the_source_authority() {
         })
         .unwrap();
     let snapshot = |tensor: &TensorMap<CheckedOnlyToy, f64>| {
-        (0..tensor.block_count())
-            .map(|index| tensor.block_fusion_trees(index).unwrap())
+        (0..tensor.subblock_count())
+            .map(|index| tensor.subblock_fusion_trees(index).unwrap())
             .collect::<Vec<_>>()
     };
     let source_snapshot = snapshot(&source);
@@ -2045,8 +2051,8 @@ fn checked_generic_add_assign_rejects_runtime_before_layout_and_preserves_receiv
     let right: TensorMap<_, f64> =
         TensorMap::from_block_fn(&foreign_runtime, [&wide], [&wide], |_, _| 2.0).unwrap();
     let before_data = left.data().to_vec();
-    let before_trees = (0..left.block_count())
-        .map(|index| left.block_fusion_trees(index).unwrap())
+    let before_trees = (0..left.subblock_count())
+        .map(|index| left.subblock_fusion_trees(index).unwrap())
         .collect::<Vec<_>>();
     reset_provider_queries(&provider);
     let error = left.axpby_assign(1.0, &right, 1.0).unwrap_err();
@@ -2056,8 +2062,8 @@ fn checked_generic_add_assign_rejects_runtime_before_layout_and_preserves_receiv
     ));
     assert_eq!(left.data(), before_data.as_slice());
     assert_eq!(
-        (0..left.block_count())
-            .map(|index| left.block_fusion_trees(index).unwrap())
+        (0..left.subblock_count())
+            .map(|index| left.subblock_fusion_trees(index).unwrap())
             .collect::<Vec<_>>(),
         before_trees
     );
@@ -2076,8 +2082,8 @@ fn checked_generic_add_assign_rejects_layout_mismatch_and_preserves_receiver() {
     let right: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&wide], [&wide], |_, _| 2.0).unwrap();
     let before_data = left.data().to_vec();
-    let before_trees = (0..left.block_count())
-        .map(|index| left.block_fusion_trees(index).unwrap())
+    let before_trees = (0..left.subblock_count())
+        .map(|index| left.subblock_fusion_trees(index).unwrap())
         .collect::<Vec<_>>();
     reset_provider_queries(&provider);
     let error = left.axpby_assign(1.0, &right, 1.0).unwrap_err();
@@ -2087,8 +2093,8 @@ fn checked_generic_add_assign_rejects_layout_mismatch_and_preserves_receiver() {
     ));
     assert_eq!(left.data(), before_data.as_slice());
     assert_eq!(
-        (0..left.block_count())
-            .map(|index| left.block_fusion_trees(index).unwrap())
+        (0..left.subblock_count())
+            .map(|index| left.subblock_fusion_trees(index).unwrap())
             .collect::<Vec<_>>(),
         before_trees
     );
@@ -2438,13 +2444,18 @@ where
             )
         })
         .unwrap();
-    assert!((0..source.block_count()).any(|index| {
+    assert!((0..source.subblock_count()).any(|index| {
         source
-            .block_fusion_trees(index)
+            .subblock_fusion_trees(index)
             .unwrap()
             .codomain_vertices()
             .iter()
-            .chain(source.block_fusion_trees(index).unwrap().domain_vertices())
+            .chain(
+                source
+                    .subblock_fusion_trees(index)
+                    .unwrap()
+                    .domain_vertices(),
+            )
             .any(|vertex| vertex.get() > 1)
     }));
     let inverse = source.inv().unwrap();
@@ -2499,13 +2510,18 @@ fn assert_sun_checked_generic_left_solve(n: usize, label: Vec<i64>) {
             }
         })
         .unwrap();
-    assert!((0..divisor.block_count()).any(|index| {
+    assert!((0..divisor.subblock_count()).any(|index| {
         divisor
-            .block_fusion_trees(index)
+            .subblock_fusion_trees(index)
             .unwrap()
             .codomain_vertices()
             .iter()
-            .chain(divisor.block_fusion_trees(index).unwrap().domain_vertices())
+            .chain(
+                divisor
+                    .subblock_fusion_trees(index)
+                    .unwrap()
+                    .domain_vertices(),
+            )
             .any(|vertex| vertex.get() > 1)
     }));
     let rhs: TensorMap<_, f64> =
@@ -2528,14 +2544,14 @@ fn assert_sun_checked_generic_left_solve(n: usize, label: Vec<i64>) {
     let solution = divisor.solve(&rhs).unwrap();
     assert!(std::ptr::eq(solution.provider(), provider.as_ref()));
     let reconstructed = divisor.compose(&solution).unwrap();
-    for index in 0..rhs.block_count() {
+    for index in 0..rhs.subblock_count() {
         assert_eq!(
-            reconstructed.block_fusion_trees(index).unwrap(),
-            rhs.block_fusion_trees(index).unwrap()
+            reconstructed.subblock_fusion_trees(index).unwrap(),
+            rhs.subblock_fusion_trees(index).unwrap()
         );
         assert_eq!(
-            reconstructed.block(index).unwrap().shape(),
-            rhs.block(index).unwrap().shape()
+            reconstructed.subblock(index).unwrap().shape(),
+            rhs.subblock(index).unwrap().shape()
         );
     }
     assert!(reconstructed
@@ -2553,14 +2569,14 @@ fn assert_sun_checked_generic_left_solve(n: usize, label: Vec<i64>) {
     let complex_rhs = rhs.to_c64().scale(Complex64::new(1.0, 0.25));
     let complex_solution = complex_divisor.solve(&complex_rhs).unwrap();
     let complex_reconstructed = complex_divisor.compose(&complex_solution).unwrap();
-    for index in 0..complex_rhs.block_count() {
+    for index in 0..complex_rhs.subblock_count() {
         assert_eq!(
-            complex_reconstructed.block_fusion_trees(index).unwrap(),
-            complex_rhs.block_fusion_trees(index).unwrap()
+            complex_reconstructed.subblock_fusion_trees(index).unwrap(),
+            complex_rhs.subblock_fusion_trees(index).unwrap()
         );
         assert_eq!(
-            complex_reconstructed.block(index).unwrap().shape(),
-            complex_rhs.block(index).unwrap().shape()
+            complex_reconstructed.subblock(index).unwrap().shape(),
+            complex_rhs.subblock(index).unwrap().shape()
         );
     }
     assert!(complex_reconstructed
@@ -3552,7 +3568,7 @@ fn checked_generic_exp_uses_general_pade_for_nonhermitian_dense_blocks() {
     assert!(direct.runtime().shares_state_with(source.runtime()));
     assert_eq!(direct.codomain(), source.codomain());
     assert_eq!(direct.domain(), source.domain());
-    assert_eq!(direct.block_count(), source.block_count());
+    assert_eq!(direct.subblock_count(), source.subblock_count());
     assert!(direct
         .data()
         .iter()
@@ -3564,7 +3580,7 @@ fn checked_generic_exp_uses_general_pade_for_nonhermitian_dense_blocks() {
     assert!(lazy_exp.runtime().shares_state_with(source.runtime()));
     assert_eq!(lazy_exp.codomain(), lazy.codomain());
     assert_eq!(lazy_exp.domain(), lazy.domain());
-    assert_eq!(lazy_exp.block_count(), lazy.block_count());
+    assert_eq!(lazy_exp.subblock_count(), lazy.subblock_count());
     // Hand oracle: exp(Nᵀ) = 1 + Nᵀ for the nilpotent N above.
     numerics::assert_slices_close(
         "exp of the lazy adjoint",
@@ -3670,8 +3686,8 @@ fn assert_sun_checked_generic_exp_outer_multiplicity(n: usize, adjoint: Vec<i64>
         })
         .unwrap();
     assert!(
-        (0..source.block_count()).any(|index| source
-            .block_fusion_trees(index)
+        (0..source.subblock_count()).any(|index| source
+            .subblock_fusion_trees(index)
             .unwrap()
             .codomain_vertices()[0]
             .get()
@@ -3683,14 +3699,14 @@ fn assert_sun_checked_generic_exp_outer_multiplicity(n: usize, adjoint: Vec<i64>
     assert!(real_output.runtime().shares_state_with(source.runtime()));
     assert_eq!(real_output.codomain(), source.codomain());
     assert_eq!(real_output.domain(), source.domain());
-    for index in 0..source.block_count() {
+    for index in 0..source.subblock_count() {
         assert_eq!(
-            real_output.block_fusion_trees(index).unwrap(),
-            source.block_fusion_trees(index).unwrap()
+            real_output.subblock_fusion_trees(index).unwrap(),
+            source.subblock_fusion_trees(index).unwrap()
         );
         assert_eq!(
-            real_output.block(index).unwrap(),
-            source.block(index).unwrap()
+            real_output.subblock(index).unwrap(),
+            source.subblock(index).unwrap()
         );
     }
     let real_inverse = source.scale(-1.0).exp().unwrap();
@@ -3715,13 +3731,16 @@ fn assert_sun_checked_generic_exp_outer_multiplicity(n: usize, adjoint: Vec<i64>
     assert!(output.runtime().shares_state_with(source.runtime()));
     assert_eq!(output.codomain(), input.codomain());
     assert_eq!(output.domain(), input.domain());
-    assert_eq!(output.block_count(), input.block_count());
-    for index in 0..input.block_count() {
+    assert_eq!(output.subblock_count(), input.subblock_count());
+    for index in 0..input.subblock_count() {
         assert_eq!(
-            output.block_fusion_trees(index).unwrap(),
-            input.block_fusion_trees(index).unwrap()
+            output.subblock_fusion_trees(index).unwrap(),
+            input.subblock_fusion_trees(index).unwrap()
         );
-        assert_eq!(output.block(index).unwrap(), input.block(index).unwrap());
+        assert_eq!(
+            output.subblock(index).unwrap(),
+            input.subblock(index).unwrap()
+        );
     }
     let inverse = input.scale(Complex64::new(-1.0, 0.0)).exp().unwrap();
     let identity: TensorMap<_, Complex64> =
@@ -3967,10 +3986,10 @@ fn assert_same_checked_generic_layout_and_close<R, D>(
     R: TypedSectorAdmission,
     D: tenet::typed::TensorScalar + fmt::Debug,
 {
-    assert_eq!(actual.block_count(), expected.block_count());
-    for index in 0..actual.block_count() {
-        let actual_block = actual.block(index).unwrap();
-        let expected_block = expected.block(index).unwrap();
+    assert_eq!(actual.subblock_count(), expected.subblock_count());
+    for index in 0..actual.subblock_count() {
+        let actual_block = actual.subblock(index).unwrap();
+        let expected_block = expected.subblock(index).unwrap();
         assert_eq!(actual_block.key(), expected_block.key());
         assert_eq!(actual_block.shape(), expected_block.shape());
         assert_eq!(actual_block.strides(), expected_block.strides());
@@ -4245,7 +4264,7 @@ macro_rules! assert_sun_polar_laws {
         // adjoint's logical data is replayed into an owned map.
         let owned_adjoint = |tensor: &TensorMap<_, _>| {
             let lazy = tensor.adjoint().unwrap();
-            let blocks: std::collections::HashMap<_, _> = lazy.blocks().unwrap().collect();
+            let blocks: std::collections::HashMap<_, _> = lazy.subblocks().unwrap().collect();
             let (codomain, domain) = (lazy.codomain(), lazy.domain());
             TensorMap::from_block_fn($runtime, codomain.iter(), domain.iter(), |trees, ij| {
                 *blocks[trees].get(ij).unwrap()
@@ -4428,7 +4447,7 @@ macro_rules! assert_sun_compact_laws {
         };
         let owned_adjoint = |tensor: &TensorMap<_, _>| {
             let lazy = tensor.adjoint().unwrap();
-            let blocks: std::collections::HashMap<_, _> = lazy.blocks().unwrap().collect();
+            let blocks: std::collections::HashMap<_, _> = lazy.subblocks().unwrap().collect();
             let (codomain, domain) = (lazy.codomain(), lazy.domain());
             TensorMap::from_block_fn($runtime, codomain.iter(), domain.iter(), |trees, ij| {
                 *blocks[trees].get(ij).unwrap()
@@ -5045,15 +5064,15 @@ fn assert_sun_checked_generic_null_projectors<D>(
             }
         })
         .unwrap();
-    assert!((0..source.block_count()).any(|index| {
-        let trees = source.block_fusion_trees(index).unwrap();
+    assert!((0..source.subblock_count()).any(|index| {
+        let trees = source.subblock_fusion_trees(index).unwrap();
         trees.codomain_vertices()[0].get() == 2
             && trees.domain_vertices()[0].get() == 1
-            && source.data()[source.block(index).unwrap().offset()] != D::from_real(0.0)
+            && source.data()[source.subblock(index).unwrap().offset()] != D::from_real(0.0)
     }));
-    let outer_multiplicity_sectors = (0..source.block_count())
+    let outer_multiplicity_sectors = (0..source.subblock_count())
         .filter_map(|index| {
-            let trees = source.block_fusion_trees(index).unwrap();
+            let trees = source.subblock_fusion_trees(index).unwrap();
             trees
                 .codomain_vertices()
                 .iter()
@@ -5107,10 +5126,10 @@ fn assert_sun_checked_generic_null_projectors<D>(
         ("left", &left_projector, &expected_left),
         ("right", &right_projector, &expected_right),
     ] {
-        assert_eq!(actual.block_count(), expected.block_count());
-        for index in 0..actual.block_count() {
-            let actual = actual.block(index).unwrap();
-            let expected = expected.block(index).unwrap();
+        assert_eq!(actual.subblock_count(), expected.subblock_count());
+        for index in 0..actual.subblock_count() {
+            let actual = actual.subblock(index).unwrap();
+            let expected = expected.subblock(index).unwrap();
             assert_eq!(actual.key(), expected.key());
             assert_eq!(actual.shape(), expected.shape());
             assert_eq!(actual.strides(), expected.strides());
@@ -5133,8 +5152,8 @@ fn assert_sun_checked_generic_null_projectors<D>(
         left_adjoint.compose(&left).unwrap(),
         right.compose(&right_adjoint).unwrap(),
     ] {
-        for block_index in 0..gram.block_count() {
-            let block = gram.block(block_index).unwrap();
+        for block_index in 0..gram.subblock_count() {
+            let block = gram.subblock(block_index).unwrap();
             for column in 0..block.shape()[1] {
                 for row in 0..block.shape()[0] {
                     let expected = D::from_real(f64::from(row == column));
@@ -5217,13 +5236,18 @@ fn assert_sun_checked_generic_pinv<D>(
             }
         })
         .unwrap();
-    assert!((0..source.block_count()).any(|index| {
+    assert!((0..source.subblock_count()).any(|index| {
         source
-            .block_fusion_trees(index)
+            .subblock_fusion_trees(index)
             .unwrap()
             .codomain_vertices()
             .iter()
-            .chain(source.block_fusion_trees(index).unwrap().domain_vertices())
+            .chain(
+                source
+                    .subblock_fusion_trees(index)
+                    .unwrap()
+                    .domain_vertices(),
+            )
             .any(|vertex| vertex.get() > 1)
     }));
     let pseudo = source.pinv(1e-12).unwrap();
@@ -5246,9 +5270,9 @@ fn assert_sun_checked_generic_pinv<D>(
             }
         })
         .unwrap();
-    for index in 0..pseudo.block_count() {
-        let actual = pseudo.block(index).unwrap();
-        let expected_block = expected.block(index).unwrap();
+    for index in 0..pseudo.subblock_count() {
+        let actual = pseudo.subblock(index).unwrap();
+        let expected_block = expected.subblock(index).unwrap();
         assert_eq!(actual.key(), expected_block.key());
         assert_eq!(actual.shape(), expected_block.shape());
         assert_eq!(actual.strides(), expected_block.strides());
@@ -5256,12 +5280,12 @@ fn assert_sun_checked_generic_pinv<D>(
     for (actual, expected) in pseudo.data().iter().zip(expected.data()) {
         assert!(close(*actual, *expected) < 1e-9);
     }
-    assert!((0..source.block_count()).any(|index| {
-        let trees = source.block_fusion_trees(index).unwrap();
+    assert!((0..source.subblock_count()).any(|index| {
+        let trees = source.subblock_fusion_trees(index).unwrap();
         trees.codomain_vertices()[0].get() == 2
             && trees.domain_vertices()[0].get() == 1
-            && source.block(index).unwrap().shape() == [2, 2, 2, 2]
-            && source.data()[source.block(index).unwrap().offset()] == off_diagonal
+            && source.subblock(index).unwrap().shape() == [2, 2, 2, 2]
+            && source.data()[source.subblock(index).unwrap().offset()] == off_diagonal
     }));
     let aa_plus = source.compose(&pseudo).unwrap();
     let a_plus_a = pseudo.compose(&source).unwrap();
@@ -5360,8 +5384,8 @@ fn assert_sun_checked_generic_polar_qh<D>(
     let mut saw_cross_mu = false;
     for (source_matrix, left) in [(multiply_2x2(q, h), true), (multiply_2x2(h, q), false)] {
         let source = build(source_matrix, D::from_real(2.0));
-        saw_cross_mu |= (0..source.block_count()).any(|index| {
-            let trees = source.block_fusion_trees(index).unwrap();
+        saw_cross_mu |= (0..source.subblock_count()).any(|index| {
+            let trees = source.subblock_fusion_trees(index).unwrap();
             trees.coupled() == &label
                 && trees.codomain_vertices()[0].get() == 2
                 && trees.domain_vertices()[0].get() == 1
@@ -5534,9 +5558,9 @@ fn assert_sun_checked_generic_solve_right<D>(
         },
     )
     .unwrap();
-    for index in 0..solution.block_count() {
-        let actual = solution.block(index).unwrap();
-        let expected_block = expected.block(index).unwrap();
+    for index in 0..solution.subblock_count() {
+        let actual = solution.subblock(index).unwrap();
+        let expected_block = expected.subblock(index).unwrap();
         assert_eq!(actual.key(), expected_block.key());
         assert_eq!(actual.shape(), expected_block.shape());
         assert_eq!(actual.strides(), expected_block.strides());
@@ -5630,8 +5654,8 @@ fn checked_generic_inv_singular_early_and_late_sectors_preserve_source() {
                 }
             })
             .unwrap();
-        let labels = (0..source.block_count())
-            .map(|index| *source.block_fusion_trees(index).unwrap().coupled())
+        let labels = (0..source.subblock_count())
+            .map(|index| *source.subblock_fusion_trees(index).unwrap().coupled())
             .collect::<Vec<_>>();
         assert_eq!(labels, [Label::Vacuum, Label::X]);
         let before = source.data().to_vec();
@@ -5992,8 +6016,11 @@ fn checked_generic_solve_right_preflight_precedence_and_provider_failure_are_non
     assert_eq!(geometry_solution.domain(), divisor.codomain());
     assert_eq!(geometry_solution.codomain_rank(), 2);
     assert_eq!(geometry_solution.domain_rank(), 1);
-    for index in 0..geometry_solution.block_count() {
-        assert_eq!(geometry_solution.block(index).unwrap().shape(), [2, 2, 2]);
+    for index in 0..geometry_solution.subblock_count() {
+        assert_eq!(
+            geometry_solution.subblock(index).unwrap().shape(),
+            [2, 2, 2]
+        );
     }
     assert!(geometry_solution
         .compose(&divisor)
@@ -6157,10 +6184,10 @@ fn checked_only_contract_and_compose_keep_left_authority() {
     ] {
         assert!(std::ptr::eq(output.provider(), left_provider.as_ref()));
         assert_eq!(output.data(), source.data());
-        for index in 0..source.block_count() {
+        for index in 0..source.subblock_count() {
             assert_eq!(
-                output.block_fusion_trees(index).unwrap(),
-                source.block_fusion_trees(index).unwrap()
+                output.subblock_fusion_trees(index).unwrap(),
+                source.subblock_fusion_trees(index).unwrap()
             );
         }
     }
@@ -6417,9 +6444,9 @@ fn checked_only_otimes_matches_fixed_heterogeneous_nonunit_oracle() {
         ([1, 1, 2], [2, 1, 2]),
         ([2, 1, 2], [2, 1, 2]),
     ];
-    let keys = (0..output.block_count())
+    let keys = (0..output.subblock_count())
         .map(|index| {
-            let trees = output.block_fusion_trees(index).unwrap();
+            let trees = output.subblock_fusion_trees(index).unwrap();
             assert_eq!(
                 trees.codomain_uncoupled(),
                 &[Label::X, Label::X, Label::One, Label::X]
@@ -6429,7 +6456,7 @@ fn checked_only_otimes_matches_fixed_heterogeneous_nonunit_oracle() {
                 &[Label::X, Label::X, Label::One, Label::X]
             );
             assert_eq!(
-                output.block(index).unwrap().shape(),
+                output.subblock(index).unwrap().shape(),
                 &[2, 1, 3, 1, 1, 1, 1, 1]
             );
             (
@@ -6776,16 +6803,18 @@ fn assert_sun_cat_values<D>(
     D: Copy + fmt::Debug + PartialEq + tenet::typed::TensorScalar,
 {
     let mut saw_mu_two = false;
-    for output_index in 0..output.block_count() {
-        let trees = output.block_fusion_trees(output_index).unwrap();
+    for output_index in 0..output.subblock_count() {
+        let trees = output.subblock_fusion_trees(output_index).unwrap();
         saw_mu_two |= trees
             .codomain_vertices()
             .iter()
             .chain(trees.domain_vertices())
             .any(|vertex| vertex.get() == 2);
-        assert!((0..lhs.block_count()).any(|index| lhs.block_fusion_trees(index).unwrap() == trees));
-        assert!((0..rhs.block_count()).any(|index| rhs.block_fusion_trees(index).unwrap() == trees));
-        let block = output.block(output_index).unwrap();
+        assert!((0..lhs.subblock_count())
+            .any(|index| lhs.subblock_fusion_trees(index).unwrap() == trees));
+        assert!((0..rhs.subblock_count())
+            .any(|index| rhs.subblock_fusion_trees(index).unwrap() == trees));
+        let block = output.subblock(output_index).unwrap();
         let elements = block.shape().iter().product::<usize>();
         for linear in 0..elements {
             let mut remainder = linear;
@@ -6926,9 +6955,9 @@ fn sun_adjoint_multiplicity_transforms_round_trip_labels_vertices_and_payload() 
                 trees.codomain_vertices()[0].get() as f64
             })
             .unwrap();
-        assert_eq!(tensor.block_count(), 2);
+        assert_eq!(tensor.subblock_count(), 2);
         for index in 0..2 {
-            let trees = tensor.block_fusion_trees(index).unwrap();
+            let trees = tensor.subblock_fusion_trees(index).unwrap();
             assert_eq!(trees.coupled(), &adjoint);
             assert_eq!(
                 trees.codomain_uncoupled(),
@@ -6936,7 +6965,7 @@ fn sun_adjoint_multiplicity_transforms_round_trip_labels_vertices_and_payload() 
             );
             assert_eq!(trees.domain_uncoupled(), std::slice::from_ref(&adjoint));
             assert_eq!(trees.codomain_vertices()[0].get(), index + 1);
-            assert_eq!(tensor.block(index).unwrap().shape(), &[1, 1, 1]);
+            assert_eq!(tensor.subblock(index).unwrap().shape(), &[1, 1, 1]);
         }
         assert_eq!(tensor.data(), &[1.0, 2.0]);
 
@@ -6948,10 +6977,10 @@ fn sun_adjoint_multiplicity_transforms_round_trip_labels_vertices_and_payload() 
         ] {
             assert!(std::ptr::eq(output.provider(), provider.as_ref()));
             assert_eq!(output.data(), tensor.data());
-            for index in 0..tensor.block_count() {
+            for index in 0..tensor.subblock_count() {
                 assert_eq!(
-                    output.block_fusion_trees(index).unwrap(),
-                    tensor.block_fusion_trees(index).unwrap()
+                    output.subblock_fusion_trees(index).unwrap(),
+                    tensor.subblock_fusion_trees(index).unwrap()
                 );
             }
         }
@@ -7018,10 +7047,10 @@ fn sun_adjoint_multiplicity_transforms_round_trip_labels_vertices_and_payload() 
             assert!((actual - expected).abs() <= 1e-10);
         }
         let mut adjoint_root_vertices = Vec::new();
-        for index in 0..product.block_count() {
-            let trees = product.block_fusion_trees(index).unwrap();
+        for index in 0..product.subblock_count() {
+            let trees = product.subblock_fusion_trees(index).unwrap();
             if trees.coupled() == &adjoint
-                && product.data()[product.block(index).unwrap().offset()].abs() > 1e-10
+                && product.data()[product.subblock(index).unwrap().offset()].abs() > 1e-10
             {
                 assert_eq!(trees.codomain_uncoupled(), vec![adjoint.clone(); 4]);
                 assert_eq!(trees.domain_uncoupled(), vec![adjoint.clone(); 2]);
@@ -7033,8 +7062,8 @@ fn sun_adjoint_multiplicity_transforms_round_trip_labels_vertices_and_payload() 
         assert_eq!(adjoint_root_vertices, [1, 2]);
 
         let snapshot = |tensor: &TensorMap<SUNFusionRule, f64>| {
-            (0..tensor.block_count())
-                .map(|index| tensor.block_fusion_trees(index).unwrap())
+            (0..tensor.subblock_count())
+                .map(|index| tensor.subblock_fusion_trees(index).unwrap())
                 .collect::<Vec<_>>()
         };
         let source_snapshot = snapshot(&tensor);
@@ -7134,10 +7163,10 @@ fn sun_checked_generic_transforms_reuse_the_runtime_completed_store() {
             assert_eq!(repeated.data(), first.data());
             assert!(std::ptr::eq(first.provider(), provider.as_ref()));
             assert!(std::ptr::eq(repeated.provider(), provider.as_ref()));
-            for index in 0..first.block_count() {
+            for index in 0..first.subblock_count() {
                 assert_eq!(
-                    repeated.block_fusion_trees(index).unwrap(),
-                    first.block_fusion_trees(index).unwrap()
+                    repeated.subblock_fusion_trees(index).unwrap(),
+                    first.subblock_fusion_trees(index).unwrap()
                 );
             }
         }
@@ -7185,13 +7214,13 @@ fn checked_multiplicity_lazy_fixture(
             .unwrap();
     let tensor =
         TensorMap::from_block_fn(runtime, [&x, &x], [&x, &mixed], lazy_oracle_value).unwrap();
-    let coupled: std::collections::BTreeSet<_> = (0..tensor.block_count())
-        .map(|index| *tensor.block_fusion_trees(index).unwrap().coupled())
+    let coupled: std::collections::BTreeSet<_> = (0..tensor.subblock_count())
+        .map(|index| *tensor.subblock_fusion_trees(index).unwrap().coupled())
         .collect();
     assert_eq!(coupled.len(), 2);
-    assert!((0..tensor.block_count()).any(|index| {
+    assert!((0..tensor.subblock_count()).any(|index| {
         tensor
-            .block_fusion_trees(index)
+            .subblock_fusion_trees(index)
             .unwrap()
             .codomain_vertices()[0]
             .get()
@@ -7329,9 +7358,9 @@ fn checked_multiplicity_lazy_adjoint_matches_the_literal_kernel_for_real_and_com
     let x = GradedSpace::try_new_with_arc(Arc::clone(&provider), [(Label::X, 2)]).unwrap();
     let one_sided =
         TensorMap::from_block_fn(&runtime, [&x, &x, &x], [], lazy_oracle_value).unwrap();
-    assert!((0..one_sided.block_count()).any(|index| {
+    assert!((0..one_sided.subblock_count()).any(|index| {
         one_sided
-            .block_fusion_trees(index)
+            .subblock_fusion_trees(index)
             .unwrap()
             .codomain_vertices()[0]
             .get()
@@ -7380,9 +7409,9 @@ fn sun_lazy_adjoint_matches_the_literal_kernel_under_all_transforms() {
             Complex64::new(re, im)
         })
         .unwrap();
-    assert!((0..complex.block_count()).any(|index| {
+    assert!((0..complex.subblock_count()).any(|index| {
         complex
-            .block_fusion_trees(index)
+            .subblock_fusion_trees(index)
             .unwrap()
             .codomain_vertices()[0]
             .get()
@@ -7440,8 +7469,8 @@ fn checked_tr_matches_the_literal_weighted_sum_and_keeps_error_precedence() {
     // off-diagonal multiplicity blocks must not contribute.
     let complex =
         TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], lazy_oracle_value).unwrap();
-    assert!((0..complex.block_count()).any(|index| {
-        let trees = complex.block_fusion_trees(index).unwrap();
+    assert!((0..complex.subblock_count()).any(|index| {
+        let trees = complex.subblock_fusion_trees(index).unwrap();
         trees.codomain_vertices() != trees.domain_vertices()
     }));
     let dim = |label: &Label| match label {
@@ -7456,8 +7485,8 @@ fn checked_tr_matches_the_literal_weighted_sum_and_keeps_error_precedence() {
     });
     assert!(expected.im.abs() > 1e-6);
     let lazy = complex.adjoint().unwrap();
-    let sectors = (0..complex.block_count())
-        .map(|index| *complex.block_fusion_trees(index).unwrap().coupled())
+    let sectors = (0..complex.subblock_count())
+        .map(|index| *complex.subblock_fusion_trees(index).unwrap().coupled())
         .collect::<std::collections::BTreeSet<_>>()
         .len();
     provider.coefficient_queries.store(0, Ordering::Relaxed);
@@ -7567,12 +7596,12 @@ fn checked_inner_and_norm_take_one_weight_per_sector_and_keep_error_precedence()
         lazy_oracle_value(trees, indices) * Complex64::new(0.5, -1.5) + Complex64::new(1.0, 2.0)
     })
     .unwrap();
-    let sectors = (0..lhs.block_count())
-        .map(|index| *lhs.block_fusion_trees(index).unwrap().coupled())
+    let sectors = (0..lhs.subblock_count())
+        .map(|index| *lhs.subblock_fusion_trees(index).unwrap().coupled())
         .collect::<std::collections::BTreeSet<_>>()
         .len();
     assert_eq!(sectors, 2);
-    assert!(lhs.block_count() > sectors);
+    assert!(lhs.subblock_count() > sectors);
     let dim = |label: &Label| match label {
         Label::Vacuum => 1.0,
         Label::X => 1.0 + 2.0_f64.sqrt(),

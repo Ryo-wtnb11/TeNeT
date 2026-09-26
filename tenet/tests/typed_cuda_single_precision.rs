@@ -180,7 +180,7 @@ where
     let back = device.to_host().unwrap();
     assert_bit_exact(back.data(), host.data(), "round trip");
     assert_eq!(back.rank(), host.rank());
-    assert_eq!(back.block_count(), host.block_count());
+    assert_eq!(back.subblock_count(), host.subblock_count());
     assert_eq!(back.leg_dims().unwrap(), host.leg_dims().unwrap());
 
     // A lazy adjoint transfers only its parent and rebuilds a lazy view; the

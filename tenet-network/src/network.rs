@@ -3512,9 +3512,12 @@ mod typed_replay_tests {
             .execute_symmetric_sliced(&tensors, sliced.clone(), usize::MAX)
             .unwrap();
         for actual in [&cold, &warm] {
-            assert_eq!(actual.block_count(), expected.block_count());
-            for index in 0..actual.block_count() {
-                assert_eq!(actual.block(index).unwrap(), expected.block(index).unwrap());
+            assert_eq!(actual.subblock_count(), expected.subblock_count());
+            for index in 0..actual.subblock_count() {
+                assert_eq!(
+                    actual.subblock(index).unwrap(),
+                    expected.subblock(index).unwrap()
+                );
             }
             assert_eq!(actual.data(), expected.data());
         }
@@ -3609,13 +3612,16 @@ mod typed_replay_tests {
                 .unwrap();
             assert_eq!(actual.codomain(), expected.codomain());
             assert_eq!(actual.domain(), expected.domain());
-            assert_eq!(actual.block_count(), expected.block_count());
-            for index in 0..actual.block_count() {
+            assert_eq!(actual.subblock_count(), expected.subblock_count());
+            for index in 0..actual.subblock_count() {
                 assert_eq!(
-                    actual.block_fusion_trees(index).unwrap(),
-                    expected.block_fusion_trees(index).unwrap()
+                    actual.subblock_fusion_trees(index).unwrap(),
+                    expected.subblock_fusion_trees(index).unwrap()
                 );
-                assert_eq!(actual.block(index).unwrap(), expected.block(index).unwrap());
+                assert_eq!(
+                    actual.subblock(index).unwrap(),
+                    expected.subblock(index).unwrap()
+                );
             }
             assert_eq!(actual.data(), expected.data());
             assert_eq!(
@@ -3678,7 +3684,7 @@ mod typed_replay_tests {
             .execute_symmetric_sliced(&tensors, sliced, usize::MAX)
             .unwrap();
         assert_eq!(actual.data(), expected.data());
-        assert_eq!(actual.block_count(), expected.block_count());
+        assert_eq!(actual.subblock_count(), expected.subblock_count());
     }
 
     #[test]
@@ -3894,7 +3900,7 @@ mod typed_replay_tests {
                 usize::MAX,
             )
             .unwrap();
-        assert_eq!(actual.block_count(), expected.block_count());
+        assert_eq!(actual.subblock_count(), expected.subblock_count());
         assert_eq!(actual.data(), expected.data());
         assert_eq!(
             stats.destination_bytes(),

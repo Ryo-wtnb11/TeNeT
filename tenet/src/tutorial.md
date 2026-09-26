@@ -107,8 +107,9 @@ network: convert its operands before writing the contraction.
 
 ### Blocks and contraction orientation
 
-[`prelude::TensorMap::blocks`] reads reduced blocks with their fusion-tree
-labels. To contract two legs, their oriented spaces must be dual. A codomain
+[`prelude::TensorMap::blocks`] reads the coupled-sector matrices, as
+TensorKit's `blocks(t)` does, and [`prelude::TensorMap::subblocks`] reads the
+fusion-tree subblocks with their labels. To contract two legs, their oriented spaces must be dual. A codomain
 leg and a domain leg made from the same space pair directly. For two legs on
 the same side, construct one from `v.try_dual()?`. See [`mathematics`] for the
 full convention.
@@ -128,12 +129,15 @@ let dual = v.try_dual()?;
 let b = TensorMap::<U1FusionRule, f64>::rand(&rt, [&v], [&dual])?;
 let _ = a.contract(&b, &[1], &[1], &[0, 1])?;
 
+for (_coupled, matrix) in a.blocks()? {
+    assert_eq!(matrix.rows(), matrix.cols());
+}
 let mut count = 0;
-for (_trees, values) in a.blocks()? {
+for (_trees, values) in a.subblocks()? {
     assert_eq!(values.shape().len(), 2);
     count += 1;
 }
-assert_eq!(count, a.block_count());
+assert_eq!(count, a.subblock_count());
 # Ok::<(), Error>(())
 ```
 
@@ -345,7 +349,7 @@ let v = GradedSpace::try_new(
         (product_sector(Z2Irrep::ODD, U1Irrep::new(1)), 2),
     ],
 )?;
-assert_eq!(TensorMap::<_, f64>::zeros(&rt, [&v], [&v])?.block_count(), 2);
+assert_eq!(TensorMap::<_, f64>::zeros(&rt, [&v], [&v])?.subblock_count(), 2);
 # Ok::<(), Error>(())
 ```
 

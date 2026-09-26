@@ -173,7 +173,7 @@ macro_rules! advanced_checks {
         });
         let n = wide_h.data().len();
         assert!(
-            h.block_count() >= $min_blocks,
+            h.subblock_count() >= $min_blocks,
             "{name}: the fixture must carry at least {} coupled blocks",
             $min_blocks
         );

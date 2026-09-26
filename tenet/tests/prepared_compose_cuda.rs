@@ -61,8 +61,8 @@ where
     D: DevicePayload,
 {
     let coupled = |t: &TensorMap<R, D>| {
-        (0..t.block_count())
-            .map(|i| format!("{:?}", t.block_fusion_trees(i).unwrap().coupled()))
+        (0..t.subblock_count())
+            .map(|i| format!("{:?}", t.subblock_fusion_trees(i).unwrap().coupled()))
             .collect::<HashSet<_>>()
     };
     coupled(a).intersection(&coupled(b)).count()
@@ -227,7 +227,7 @@ fn wide_permute_source(runtime: &Runtime) -> TensorMap<U1FusionRule, f64> {
     let v = u1((0..9).map(|a| (a, a as usize + 1)).collect());
     let w = u1((0..9).map(|j| (100 * j, j as usize + 1)).collect());
     let source = members::<_, f64>(runtime, &[&v, &w], &[&v, &w], 1, 7).remove(0);
-    assert_eq!(source.block_count(), 81);
+    assert_eq!(source.subblock_count(), 81);
     source
 }
 

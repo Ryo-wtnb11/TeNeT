@@ -160,7 +160,7 @@ fn device_twist_matches_the_host_on_fermion_parity() {
         TensorMap::from_block_fn(&runtime, [&leg, &dual], [&leg, &leg], real_fill).unwrap();
     let complex: TensorMap<_, Complex64> =
         TensorMap::from_block_fn(&runtime, [&leg, &dual], [&leg, &leg], complex_fill).unwrap();
-    assert!(real.block_count() >= 2, "multi-block fixture");
+    assert!(real.subblock_count() >= 2, "multi-block fixture");
 
     // Single codomain leg, single dual codomain leg, single domain leg.
     for legs in [&[0usize][..], &[1][..], &[3][..]] {

@@ -138,7 +138,7 @@ fn u1_contract_measurement<D: TensorScalar + std::fmt::Debug>(max_allocations: u
     let warm = lhs.contract(&rhs, &[1], &[0], &[0, 1]).unwrap();
     let payload_len = warm.data().len();
     assert_eq!(payload_len, 2 * 2 + 3 * 3 + 2 * 2);
-    assert_eq!(warm.block_count(), 3);
+    assert_eq!(warm.subblock_count(), 3);
 
     let mut output = None;
     let measurement = measure(|| {

@@ -88,17 +88,17 @@ macro_rules! check_owned {
             $terms,
         );
         let lhs_coupled: HashSet<_> = $lhs
-            .blocks()
+            .subblocks()
             .unwrap()
             .map(|(trees, _)| trees.coupled().clone())
             .collect();
         let rhs_coupled: HashSet<_> = $rhs
-            .blocks()
+            .subblocks()
             .unwrap()
             .map(|(trees, _)| trees.coupled().clone())
             .collect();
         let mut inactive = 0usize;
-        for (trees, view) in output.blocks().unwrap() {
+        for (trees, view) in output.subblocks().unwrap() {
             if lhs_coupled.contains(trees.coupled()) && rhs_coupled.contains(trees.coupled()) {
                 continue;
             }
@@ -223,7 +223,7 @@ fn empty_support_yields_a_zero_payload_of_the_full_destination_length() {
     let b = su2(&provider, &[(1, 3)]);
     let lhs: TensorMap<_, f64> = TensorMap::rand_with_seed(&runtime, [&a], [&b], 7).unwrap();
     let rhs: TensorMap<_, f64> = TensorMap::rand_with_seed(&runtime, [&b], [&a], 8).unwrap();
-    assert_eq!(lhs.block_count(), 0);
+    assert_eq!(lhs.subblock_count(), 0);
     let output = lhs.compose(&rhs).unwrap();
     assert_eq!(output.data().len(), 4 + 9);
     assert!(output.data().iter().all(|v| v.to_bits() == 0));

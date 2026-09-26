@@ -300,8 +300,8 @@ fn su3_svd_composition_matches_the_oracle_for_every_policy() {
         })
         .unwrap();
     assert!(
-        (0..source.block_count()).any(|index| source
-            .block_fusion_trees(index)
+        (0..source.subblock_count()).any(|index| source
+            .subblock_fusion_trees(index)
             .unwrap()
             .codomain_vertices()
             .iter()

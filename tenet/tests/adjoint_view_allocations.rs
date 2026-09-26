@@ -145,12 +145,12 @@ fn labelled_block_inspection_materializes_lazy_adjoint_once_and_borrows_it() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let parent = tensor(&runtime, [(0, 64)], 2);
     let parent_pointer = parent.data().as_ptr();
-    let parent_block = parent.block(0).unwrap();
+    let parent_block = parent.subblock(0).unwrap();
     let adjoint = parent.adjoint().unwrap();
     let payload_bytes = std::mem::size_of_val(parent.data()) as u64;
 
     let first = measure(|| {
-        let blocks = adjoint.blocks().unwrap().collect::<Vec<_>>();
+        let blocks = adjoint.subblocks().unwrap().collect::<Vec<_>>();
         assert_eq!(blocks.len(), 1);
         let (_, values) = &blocks[0];
         assert_eq!(values.data().as_ptr(), adjoint.data().as_ptr());
@@ -165,7 +165,7 @@ fn labelled_block_inspection_materializes_lazy_adjoint_once_and_borrows_it() {
     );
 
     let second = measure(|| {
-        let blocks = adjoint.blocks().unwrap().collect::<Vec<_>>();
+        let blocks = adjoint.subblocks().unwrap().collect::<Vec<_>>();
         assert_eq!(blocks[0].1.data().as_ptr(), adjoint.data().as_ptr());
     });
     assert!(
@@ -500,7 +500,7 @@ fn block_stride_buffers_spill_only_past_rank_sixteen() {
             black_box(fresh.data().len());
         })
         .0;
-        counts.push((rank, parent.block_count() > 1, mixed, pair, materialize));
+        counts.push((rank, parent.subblock_count() > 1, mixed, pair, materialize));
     }
     // Output only: 3 calls. At rank 18 `add` spills its four layout buffers
     // (extents and three operands' strides) and materialization its three.
@@ -637,7 +637,7 @@ fn first_lazy_materialization_allocates_once_per_payload_not_per_block() {
             (-radius..=radius).map(|charge| (charge, degeneracy)),
             rank,
         );
-        assert!(rank == 2 && radius == 0 || source.block_count() > 1);
+        assert!(rank == 2 && radius == 0 || source.subblock_count() > 1);
         let lazy = source.adjoint().unwrap();
         let payload_bytes = std::mem::size_of_val(source.data()) as u64;
         let (allocations, bytes) = measure(|| {

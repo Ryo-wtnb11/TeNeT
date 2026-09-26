@@ -688,7 +688,7 @@ where
     R::Sector: Copy,
 {
     let mut values = [Complex64::new(0.0, 0.0); 2];
-    for (trees, block) in state.blocks().unwrap() {
+    for (trees, block) in state.subblocks().unwrap() {
         let slot = match trees.codomain_innerlines() {
             [channel] if *channel == vacuum => 0,
             [channel] if *channel == tau => 1,

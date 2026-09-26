@@ -325,7 +325,7 @@ fn a_warm_trace_past_the_default_plan_bound_rebuilds_no_plan() {
         .collect::<Vec<_>>());
     let host: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&v, &w], [&v, &w], fill(71)).unwrap();
-    assert_eq!(host.block_count(), 81);
+    assert_eq!(host.subblock_count(), 81);
     let source = host.to_cuda().unwrap();
     let cold = source.trace_pairs(&[(0, 2)]).unwrap();
     assert_close(

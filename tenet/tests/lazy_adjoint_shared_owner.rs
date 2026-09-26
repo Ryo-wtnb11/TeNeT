@@ -72,7 +72,7 @@ fn u1_rank4(runtime: &Runtime) -> TensorMap<U1FusionRule, Complex64> {
         false,
     );
     let tensor = TensorMap::from_block_fn(runtime, [&a, &b, &c], [&d], complex_value).unwrap();
-    assert!(tensor.block_count() >= 4);
+    assert!(tensor.subblock_count() >= 4);
     tensor
 }
 
@@ -98,8 +98,8 @@ fn su2_rank4(runtime: &Runtime) -> TensorMap<SU2FusionRule, Complex64> {
     .unwrap();
     let tensor =
         TensorMap::from_block_fn(runtime, [&leg, &other], [&leg, &leg], complex_value).unwrap();
-    let coupled: std::collections::BTreeSet<_> = (0..tensor.block_count())
-        .map(|index| *tensor.block_fusion_trees(index).unwrap().coupled())
+    let coupled: std::collections::BTreeSet<_> = (0..tensor.subblock_count())
+        .map(|index| *tensor.subblock_fusion_trees(index).unwrap().coupled())
         .collect();
     assert!(
         coupled.len() >= 2,
@@ -210,9 +210,9 @@ fn empty_support_lazy_adjoint_materializes_an_empty_payload() {
     let domain = u1_leg(&provider, &[(0, 3)], false);
     let parent: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&codomain], [&domain], |_, _| 1.0).unwrap();
-    assert_eq!(parent.block_count(), 0);
+    assert_eq!(parent.subblock_count(), 0);
     let lazy = parent.adjoint().unwrap();
-    assert_eq!(lazy.block_count(), 0);
+    assert_eq!(lazy.subblock_count(), 0);
     assert!(lazy.data().is_empty());
     assert!(lazy.transpose().unwrap().data().is_empty());
 }

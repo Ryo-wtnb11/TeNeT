@@ -176,15 +176,15 @@ fn assert_chain_oracle<R, D>(
         .filter(|sector| domain[0].has_sector(sector).unwrap())
         .collect::<Vec<_>>();
     let actual_sectors = actual
-        .blocks()
+        .subblocks()
         .unwrap()
         .map(|(trees, _)| trees.coupled().clone())
         .collect::<Vec<_>>();
     assert_eq!(actual_sectors, expected_sectors);
-    let a_blocks = a.blocks().unwrap().collect::<Vec<_>>();
-    let b_blocks = b.blocks().unwrap().collect::<Vec<_>>();
-    let c_blocks = c.blocks().unwrap().collect::<Vec<_>>();
-    for (trees, output) in actual.blocks().unwrap() {
+    let a_blocks = a.subblocks().unwrap().collect::<Vec<_>>();
+    let b_blocks = b.subblocks().unwrap().collect::<Vec<_>>();
+    let c_blocks = c.subblocks().unwrap().collect::<Vec<_>>();
+    for (trees, output) in actual.subblocks().unwrap() {
         let left = a_blocks
             .iter()
             .find(|(candidate, _)| candidate.coupled() == trees.coupled())
@@ -344,7 +344,7 @@ fn run_shape_reuse_sequence<R, D>(
         &mut workspace,
         [&empty_chain[0], &empty_chain[1], &empty_chain[2]],
     );
-    assert_eq!(empty.block_count(), 0);
+    assert_eq!(empty.subblock_count(), 0);
     assert!(empty.data().is_empty());
 
     let valid = initial_refs;
@@ -453,10 +453,10 @@ fn assert_reordered_overwrite<R, D>(
     let rhs = matrix::<_, D>(runtime, space, space, 112.0, sector_tag);
     let expected = lhs.contract(&rhs, &[1], &[0], &[1, 0]).unwrap();
     let assert_oracle = |actual: &TensorMap<R, D>| {
-        assert_eq!(actual.block_count(), space.sectors().unwrap().len());
-        let lhs_blocks = lhs.blocks().unwrap().collect::<Vec<_>>();
-        let rhs_blocks = rhs.blocks().unwrap().collect::<Vec<_>>();
-        for (trees, output) in actual.blocks().unwrap() {
+        assert_eq!(actual.subblock_count(), space.sectors().unwrap().len());
+        let lhs_blocks = lhs.subblocks().unwrap().collect::<Vec<_>>();
+        let rhs_blocks = rhs.subblocks().unwrap().collect::<Vec<_>>();
+        for (trees, output) in actual.subblocks().unwrap() {
             let output_id = actual.provider().try_encode_label(trees.coupled()).unwrap();
             let source_coupled = actual
                 .provider()

@@ -186,7 +186,7 @@ fn su2_spin_one_singlet_projects_to_explicit_doubled_u1_charges() {
 
     let inv_sqrt_3 = 1.0 / 3.0_f64.sqrt();
     let mut labelled = projected
-        .blocks()
+        .subblocks()
         .unwrap()
         .map(|(trees, block)| {
             (
