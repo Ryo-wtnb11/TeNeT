@@ -2429,6 +2429,49 @@ pub fn cuda_download_spectra<D: CudaScalar>(
         .collect())
 }
 
+/// Writes `spectrum` (from a factorization of payload `D`) into `dst` as
+/// `dst[dst_offset + j * dst_stride] = spectrum[j]`, entirely on the device:
+/// with `dst_stride = k + 1` it is the diagonal of a packed `k x k` block.
+///
+/// A real payload copies the spectrum's own buffer. A complex payload first
+/// casts it to `D` (imaginary part `+0`): one device allocation of
+/// `len * size_of::<D>()` bytes. Then one [`cuda_copy_region_into`] of a
+/// `1 x len` region with leading dimension `dst_stride`, with its value
+/// contract. Nothing crosses the host boundary. An empty spectrum is a no-op.
+pub fn cuda_copy_spectrum_into<D: CudaScalar>(
+    ctx: &mut CudaDenseContext,
+    spectrum: CudaSpectrum,
+    dst: &mut CudaDenseStorage,
+    dst_offset: usize,
+    dst_stride: usize,
+) -> Result<(), DenseError> {
+    const OP: &str = "cuda_copy_spectrum";
+    let len = spectrum.len();
+    if len == 0 {
+        return Ok(());
+    }
+    let src = if D::IS_COMPLEX {
+        let cast = ctx
+            .backend
+            .cast(&spectrum.tensor, D::dtype())
+            .map_err(|err| cuda_error(OP, err))?;
+        CudaDenseStorage::from_tensor::<D>(OP, cast, ctx.device)?
+    } else {
+        // The real lane is the payload itself: wrap the solver's buffer
+        // without an allocation, so none is counted.
+        if D::typed(&spectrum.tensor).is_none() {
+            return Err(dtype_mismatch::<D>(OP, &spectrum.tensor));
+        }
+        CudaDenseStorage {
+            tensor: spectrum.tensor,
+            dtype: D::DTYPE,
+            len,
+            device: ctx.device,
+        }
+    };
+    cuda_copy_region_into::<D>(ctx, dst, dst_offset, dst_stride, &src, 1, len)
+}
+
 /// cuSOLVER SVD of one packed column-major `rows x cols` region:
 /// `region = U * diag(s) * Vt` with `k = min(rows, cols)`. `U` (`rows x k`),
 /// the singular values `s` (descending) and `Vt` (`k x cols`) all stay
@@ -2704,6 +2747,23 @@ mod tests {
                 "slot {slot} is claimed twice"
             );
         }
+    }
+
+    #[test]
+    #[ignore = "requires a real CUDA device"]
+    fn an_empty_spectrum_copy_touches_nothing_even_for_a_complex_payload() {
+        let _serialized = COUNTER_TESTS.lock().unwrap_or_else(|err| err.into_inner());
+        let mut ctx = CudaDenseContext::new(0).unwrap();
+        let empty = CudaDenseStorage::upload_owned::<f64>(&ctx, Vec::new()).unwrap();
+        let spectrum = CudaSpectrum {
+            tensor: empty.tensor,
+        };
+        let values = vec![Complex64::new(1.0, 2.0); 4];
+        let mut dst = CudaDenseStorage::upload::<Complex64>(&ctx, &values).unwrap();
+        let before = cuda_transfer_stats();
+        cuda_copy_spectrum_into::<Complex64>(&mut ctx, spectrum, &mut dst, 0, 3).unwrap();
+        assert_eq!(cuda_transfer_stats(), before, "no cast, copy or transfer");
+        assert_eq!(dst.download::<Complex64>(&ctx).unwrap(), values);
     }
 
     #[test]
