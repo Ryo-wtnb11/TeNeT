@@ -15761,10 +15761,13 @@ where
                     homspace.domain(),
                     id,
                 )?;
-                debug_assert!(
-                    rows == 0 || cols == 0,
-                    "a stored layout covers every nonempty sector"
-                );
+                // A coupled sector nonempty on both sides always has a stored
+                // region, so a miss with two nonzero dimensions is a broken layout.
+                if rows != 0 && cols != 0 {
+                    return Err(TypedFacadeError::<R>::from(internal_layout_error(
+                        "a sector fused on both sides has no stored block",
+                    )));
+                }
                 let payload = match self.storage_body().data.as_ref() {
                     TypedData::Dense(storage) => CoupledBlockPayload::Dense {
                         storage,
