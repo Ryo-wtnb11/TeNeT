@@ -288,8 +288,8 @@ use crate::RuntimeIdentity;
 
 mod batched;
 pub use batched::{
-    BatchMemberRepresentation, PreparedCompose, SignatureField, StackedTensorMap,
-    StructureSignature,
+    BatchError, BatchMemberRepresentation, EighStackOutput, MemberFault, PreparedCompose,
+    PreparedEighFull, SignatureField, StackedTensorMap, StructureSignature,
 };
 
 #[cfg(test)]
@@ -4726,6 +4726,214 @@ pub(crate) fn fill_diagonal_values<D: CudaPayload>(
         }
     }
     Ok(())
+}
+
+#[cfg(feature = "cuda")]
+fn compile_cuda_qr_plan<R>(
+    space: &BoundDynamicFusionMapSpace<R>,
+    source_regions: Arc<[CoupledSectorRegion]>,
+) -> Result<TypedCudaQrPlan<R>, Error>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+{
+    let source_space = space.space();
+    let hom = source_space.homspace();
+    let bond = SectorLeg::new(
+        source_regions.iter().filter_map(|region| {
+            let rank = region.rows().min(region.cols());
+            (rank != 0).then_some((region.coupled(), rank))
+        }),
+        false,
+    );
+    let left_space = space.derive_from_final_homspace(FusionTreeHomSpace::new(
+        FusionProductSpace::new(hom.codomain().legs().iter().cloned()),
+        FusionProductSpace::new([bond.clone()]),
+    ))?;
+    let right_space = space.derive_from_final_homspace(FusionTreeHomSpace::new(
+        FusionProductSpace::new([bond]),
+        FusionProductSpace::new(hom.domain().legs().iter().cloned()),
+    ))?;
+    let left_regions = sector_regions(left_space.space().structure(), left_space.space().nout())?;
+    let right_regions =
+        sector_regions(right_space.space().structure(), right_space.space().nout())?;
+    let index_by_sector = |regions: &[CoupledSectorRegion]| {
+        let mut indices = HashMap::with_capacity(regions.len());
+        for (index, region) in regions.iter().enumerate() {
+            if indices.insert(region.coupled(), index).is_some() {
+                return Err(internal_layout_error(
+                    "compact QR factor contains a duplicate coupled sector",
+                ));
+            }
+        }
+        Ok(indices)
+    };
+    let left_by_sector = index_by_sector(&left_regions)?;
+    let right_by_sector = index_by_sector(&right_regions)?;
+    let mut routes = Vec::with_capacity(source_regions.len());
+    for (source, region) in source_regions.iter().enumerate() {
+        let rank = region.rows().min(region.cols());
+        if rank == 0 {
+            continue;
+        }
+        let left = *left_by_sector.get(&region.coupled()).ok_or_else(|| {
+            internal_layout_error("compact QR left factor is missing a source sector")
+        })?;
+        let right = *right_by_sector.get(&region.coupled()).ok_or_else(|| {
+            internal_layout_error("compact QR right factor is missing a source sector")
+        })?;
+        let left_region = &left_regions[left];
+        let right_region = &right_regions[right];
+        if (left_region.rows(), left_region.cols()) != (region.rows(), rank)
+            || (right_region.rows(), right_region.cols()) != (rank, region.cols())
+            || !cuda_qr_tree_extents_match(region.row_trees(), left_region.row_trees())?
+            || !cuda_qr_tree_extents_match(region.col_trees(), right_region.col_trees())?
+        {
+            return Err(internal_layout_error(
+                "compact QR factor region does not match its source route",
+            ));
+        }
+        routes.push(TypedCudaQrRoute {
+            source,
+            left,
+            right,
+            rank,
+            aligned_left: cuda_factor_layout_is_aligned(
+                region.row_trees(),
+                left_region.row_trees(),
+                region.rows(),
+            )?,
+            aligned_right: cuda_factor_layout_is_aligned(
+                region.col_trees(),
+                right_region.col_trees(),
+                region.cols(),
+            )?,
+        });
+    }
+    if routes.len() != left_regions.len() || routes.len() != right_regions.len() {
+        return Err(internal_layout_error(
+            "compact QR factor contains an unrouted coupled sector",
+        ));
+    }
+    Ok(TypedCudaQrPlan {
+        left_space,
+        right_space,
+        source_regions,
+        left_regions,
+        right_regions,
+        routes,
+    })
+}
+
+#[cfg(feature = "cuda")]
+/// Admits the eigenvector and diagonal factor spaces for a bond of the given
+/// per-sector `ranks` (`(sector, kept)`) and routes every coupled sector
+/// from its source region to them. A function of the space alone, so the
+/// eager call and a prepared handle compile the same plan.
+fn compile_cuda_eigh_plan<R>(
+    space: &BoundDynamicFusionMapSpace<R>,
+    source_regions: Arc<[CoupledSectorRegion]>,
+    ranks: impl ExactSizeIterator<Item = (SectorId, usize)> + Clone,
+) -> Result<TypedCudaEighPlan<R>, Error>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+{
+    let source_space = space.space();
+    let hom = source_space.homspace();
+    let bond = SectorLeg::new(ranks.clone(), false);
+    let left_space = space.derive_from_final_homspace(FusionTreeHomSpace::new(
+        FusionProductSpace::new(hom.codomain().legs().iter().cloned()),
+        FusionProductSpace::new([bond.clone()]),
+    ))?;
+    let middle_space = space.derive_from_final_homspace(FusionTreeHomSpace::new(
+        FusionProductSpace::new([bond.clone()]),
+        FusionProductSpace::new([bond]),
+    ))?;
+    let left_regions = sector_regions(left_space.space().structure(), left_space.space().nout())?;
+    let middle_regions = sector_regions(
+        middle_space.space().structure(),
+        middle_space.space().nout(),
+    )?;
+    let index_by_sector = |regions: &[CoupledSectorRegion]| {
+        let mut indices = HashMap::with_capacity(regions.len());
+        for (index, region) in regions.iter().enumerate() {
+            if indices.insert(region.coupled(), index).is_some() {
+                return Err(internal_layout_error(
+                    "CUDA EIGH factor contains a duplicate coupled sector",
+                ));
+            }
+        }
+        Ok(indices)
+    };
+    let source_by_sector = index_by_sector(&source_regions)?;
+    let left_by_sector = index_by_sector(&left_regions)?;
+    let middle_by_sector = index_by_sector(&middle_regions)?;
+    let mut routes = Vec::with_capacity(ranks.len());
+    for (sector, kept) in ranks {
+        if kept == 0 {
+            return Err(internal_layout_error(
+                "CUDA EIGH plan retained an empty sector",
+            ));
+        }
+        let source = *source_by_sector
+            .get(&sector)
+            .ok_or_else(|| internal_layout_error("CUDA EIGH factor is missing a source sector"))?;
+        let source_region = &source_regions[source];
+        let full_rank = source_region.rows().min(source_region.cols());
+        if kept > full_rank {
+            return Err(internal_layout_error(
+                "CUDA EIGH rank exceeds its source route",
+            ));
+        }
+        let left = *left_by_sector.get(&sector).ok_or_else(|| {
+            internal_layout_error("CUDA EIGH eigenvector factor is missing a sector")
+        })?;
+        let middle = *middle_by_sector.get(&sector).ok_or_else(|| {
+            internal_layout_error("CUDA EIGH diagonal factor is missing a sector")
+        })?;
+        let left_region = &left_regions[left];
+        let middle_region = &middle_regions[middle];
+        let middle_len = middle_region
+            .range()
+            .end
+            .checked_sub(middle_region.range().start)
+            .ok_or_else(|| internal_layout_error("CUDA EIGH diagonal range is invalid"))?;
+        if (left_region.rows(), left_region.cols()) != (source_region.rows(), kept)
+            || (middle_region.rows(), middle_region.cols()) != (kept, kept)
+            || middle_len
+                != kept
+                    .checked_mul(kept)
+                    .ok_or_else(|| internal_layout_error("CUDA EIGH diagonal length overflows"))?
+            || !cuda_qr_tree_extents_match(source_region.row_trees(), left_region.row_trees())?
+            || !cuda_qr_tree_extents_match(middle_region.row_trees(), middle_region.col_trees())?
+        {
+            return Err(internal_layout_error(
+                "CUDA EIGH factor region does not match its source route",
+            ));
+        }
+        routes.push(TypedCudaEighRoute {
+            source,
+            left,
+            full_rank,
+            kept,
+            aligned: cuda_factor_layout_is_aligned(
+                source_region.row_trees(),
+                left_region.row_trees(),
+                source_region.rows(),
+            )?,
+        });
+    }
+    if routes.len() != left_regions.len() || routes.len() != middle_regions.len() {
+        return Err(internal_layout_error(
+            "CUDA EIGH factor contains an unrouted coupled sector",
+        ));
+    }
+    Ok(TypedCudaEighPlan {
+        left_space,
+        middle_space,
+        source_regions,
+        left_regions,
+        routes,
+    })
 }
 
 #[cfg(feature = "cuda")]
@@ -11286,97 +11494,7 @@ where
         &self,
         source_regions: Arc<[CoupledSectorRegion]>,
     ) -> Result<TypedCudaQrPlan<R>, Error> {
-        let source_space = self.logical_space().space();
-        let hom = source_space.homspace();
-        let bond = SectorLeg::new(
-            source_regions.iter().filter_map(|region| {
-                let rank = region.rows().min(region.cols());
-                (rank != 0).then_some((region.coupled(), rank))
-            }),
-            false,
-        );
-        let left_space =
-            self.logical_space()
-                .derive_from_final_homspace(FusionTreeHomSpace::new(
-                    FusionProductSpace::new(hom.codomain().legs().iter().cloned()),
-                    FusionProductSpace::new([bond.clone()]),
-                ))?;
-        let right_space =
-            self.logical_space()
-                .derive_from_final_homspace(FusionTreeHomSpace::new(
-                    FusionProductSpace::new([bond]),
-                    FusionProductSpace::new(hom.domain().legs().iter().cloned()),
-                ))?;
-        let left_regions =
-            sector_regions(left_space.space().structure(), left_space.space().nout())?;
-        let right_regions =
-            sector_regions(right_space.space().structure(), right_space.space().nout())?;
-        let index_by_sector = |regions: &[CoupledSectorRegion]| {
-            let mut indices = HashMap::with_capacity(regions.len());
-            for (index, region) in regions.iter().enumerate() {
-                if indices.insert(region.coupled(), index).is_some() {
-                    return Err(internal_layout_error(
-                        "compact QR factor contains a duplicate coupled sector",
-                    ));
-                }
-            }
-            Ok(indices)
-        };
-        let left_by_sector = index_by_sector(&left_regions)?;
-        let right_by_sector = index_by_sector(&right_regions)?;
-        let mut routes = Vec::with_capacity(source_regions.len());
-        for (source, region) in source_regions.iter().enumerate() {
-            let rank = region.rows().min(region.cols());
-            if rank == 0 {
-                continue;
-            }
-            let left = *left_by_sector.get(&region.coupled()).ok_or_else(|| {
-                internal_layout_error("compact QR left factor is missing a source sector")
-            })?;
-            let right = *right_by_sector.get(&region.coupled()).ok_or_else(|| {
-                internal_layout_error("compact QR right factor is missing a source sector")
-            })?;
-            let left_region = &left_regions[left];
-            let right_region = &right_regions[right];
-            if (left_region.rows(), left_region.cols()) != (region.rows(), rank)
-                || (right_region.rows(), right_region.cols()) != (rank, region.cols())
-                || !cuda_qr_tree_extents_match(region.row_trees(), left_region.row_trees())?
-                || !cuda_qr_tree_extents_match(region.col_trees(), right_region.col_trees())?
-            {
-                return Err(internal_layout_error(
-                    "compact QR factor region does not match its source route",
-                ));
-            }
-            routes.push(TypedCudaQrRoute {
-                source,
-                left,
-                right,
-                rank,
-                aligned_left: cuda_factor_layout_is_aligned(
-                    region.row_trees(),
-                    left_region.row_trees(),
-                    region.rows(),
-                )?,
-                aligned_right: cuda_factor_layout_is_aligned(
-                    region.col_trees(),
-                    right_region.col_trees(),
-                    region.cols(),
-                )?,
-            });
-        }
-        if routes.len() != left_regions.len() || routes.len() != right_regions.len() {
-            return Err(internal_layout_error(
-                "compact QR factor contains an unrouted coupled sector",
-            ));
-        }
-        Ok(TypedCudaQrPlan {
-            left_space,
-            right_space,
-            source_regions,
-            left_regions,
-            right_regions,
-            routes,
-        })
+        compile_cuda_qr_plan(self.logical_space(), source_regions)
     }
 
     /// Admits the eigenvector and diagonal factor spaces for `spectra` and
@@ -11386,117 +11504,13 @@ where
         source_regions: Arc<[CoupledSectorRegion]>,
         spectra: &[tenet_matrixalgebra::SectorSpectrum<f64>],
     ) -> Result<TypedCudaEighPlan<R>, Error> {
-        let source_space = self.logical_space().space();
-        let hom = source_space.homspace();
-        let bond = SectorLeg::new(
+        compile_cuda_eigh_plan(
+            self.logical_space(),
+            source_regions,
             spectra
                 .iter()
                 .map(|entry| (entry.sector, entry.values.len())),
-            false,
-        );
-        let left_space =
-            self.logical_space()
-                .derive_from_final_homspace(FusionTreeHomSpace::new(
-                    FusionProductSpace::new(hom.codomain().legs().iter().cloned()),
-                    FusionProductSpace::new([bond.clone()]),
-                ))?;
-        let middle_space =
-            self.logical_space()
-                .derive_from_final_homspace(FusionTreeHomSpace::new(
-                    FusionProductSpace::new([bond.clone()]),
-                    FusionProductSpace::new([bond]),
-                ))?;
-        let left_regions =
-            sector_regions(left_space.space().structure(), left_space.space().nout())?;
-        let middle_regions = sector_regions(
-            middle_space.space().structure(),
-            middle_space.space().nout(),
-        )?;
-        let index_by_sector = |regions: &[CoupledSectorRegion]| {
-            let mut indices = HashMap::with_capacity(regions.len());
-            for (index, region) in regions.iter().enumerate() {
-                if indices.insert(region.coupled(), index).is_some() {
-                    return Err(internal_layout_error(
-                        "CUDA EIGH factor contains a duplicate coupled sector",
-                    ));
-                }
-            }
-            Ok(indices)
-        };
-        let source_by_sector = index_by_sector(&source_regions)?;
-        let left_by_sector = index_by_sector(&left_regions)?;
-        let middle_by_sector = index_by_sector(&middle_regions)?;
-        let mut routes = Vec::with_capacity(spectra.len());
-        for spectrum in spectra {
-            let kept = spectrum.values.len();
-            if kept == 0 {
-                return Err(internal_layout_error(
-                    "CUDA EIGH plan retained an empty sector",
-                ));
-            }
-            let source = *source_by_sector.get(&spectrum.sector).ok_or_else(|| {
-                internal_layout_error("CUDA EIGH factor is missing a source sector")
-            })?;
-            let source_region = &source_regions[source];
-            let full_rank = source_region.rows().min(source_region.cols());
-            if kept > full_rank {
-                return Err(internal_layout_error(
-                    "CUDA EIGH rank exceeds its source route",
-                ));
-            }
-            let left = *left_by_sector.get(&spectrum.sector).ok_or_else(|| {
-                internal_layout_error("CUDA EIGH eigenvector factor is missing a sector")
-            })?;
-            let middle = *middle_by_sector.get(&spectrum.sector).ok_or_else(|| {
-                internal_layout_error("CUDA EIGH diagonal factor is missing a sector")
-            })?;
-            let left_region = &left_regions[left];
-            let middle_region = &middle_regions[middle];
-            let middle_len = middle_region
-                .range()
-                .end
-                .checked_sub(middle_region.range().start)
-                .ok_or_else(|| internal_layout_error("CUDA EIGH diagonal range is invalid"))?;
-            if (left_region.rows(), left_region.cols()) != (source_region.rows(), kept)
-                || (middle_region.rows(), middle_region.cols()) != (kept, kept)
-                || middle_len
-                    != kept.checked_mul(kept).ok_or_else(|| {
-                        internal_layout_error("CUDA EIGH diagonal length overflows")
-                    })?
-                || !cuda_qr_tree_extents_match(source_region.row_trees(), left_region.row_trees())?
-                || !cuda_qr_tree_extents_match(
-                    middle_region.row_trees(),
-                    middle_region.col_trees(),
-                )?
-            {
-                return Err(internal_layout_error(
-                    "CUDA EIGH factor region does not match its source route",
-                ));
-            }
-            routes.push(TypedCudaEighRoute {
-                source,
-                left,
-                full_rank,
-                kept,
-                aligned: cuda_factor_layout_is_aligned(
-                    source_region.row_trees(),
-                    left_region.row_trees(),
-                    source_region.rows(),
-                )?,
-            });
-        }
-        if routes.len() != left_regions.len() || routes.len() != middle_regions.len() {
-            return Err(internal_layout_error(
-                "CUDA EIGH factor contains an unrouted coupled sector",
-            ));
-        }
-        Ok(TypedCudaEighPlan {
-            left_space,
-            middle_space,
-            source_regions,
-            left_regions,
-            routes,
-        })
+        )
     }
 
     /// Streamed compact SVD of owned dense CUDA storage.
