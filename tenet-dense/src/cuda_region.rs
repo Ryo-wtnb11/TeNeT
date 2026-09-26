@@ -228,9 +228,56 @@ pub(crate) fn validate_destination_layout(
     })
 }
 
+/// The row entries of `cuda_gather_columns_batched_into`: each source
+/// slice inside `n` rows, each destination slice inside `dst_ld` rows, and
+/// no two destination slices sharing a row. Pure, so it runs before any
+/// submission.
+pub(crate) fn validate_gather_rows(
+    n: usize,
+    dst_ld: usize,
+    rows: &[(usize, usize, usize)],
+) -> Result<(), String> {
+    let mut spans = Vec::with_capacity(rows.len());
+    for (index, &(src_row, dst_row, count)) in rows.iter().enumerate() {
+        let inside =
+            |start: usize, bound: usize| start.checked_add(count).is_some_and(|end| end <= bound);
+        if !inside(src_row, n) || !inside(dst_row, dst_ld) {
+            return Err(format!(
+                "row entry {index} ({src_row}, {dst_row}, {count}) exceeds {n} source or {dst_ld} destination rows"
+            ));
+        }
+        if count != 0 {
+            spans.push((dst_row, dst_row + count, index));
+        }
+    }
+    spans.sort_unstable();
+    for pair in spans.windows(2) {
+        if pair[1].0 < pair[0].1 {
+            return Err(format!(
+                "row entries {} and {} write the same destination rows",
+                pair[0].2, pair[1].2
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gather_rows_are_checked_for_bounds_and_overlap_before_any_work() {
+        // What: every entry is inside the source and destination rows, and
+        // no two destination slices share a row; a later bad entry rejects
+        // the whole list.
+        assert!(validate_gather_rows(4, 6, &[(0, 0, 2), (2, 3, 2), (0, 5, 1)]).is_ok());
+        assert!(validate_gather_rows(4, 6, &[(0, 0, 2), (0, 5, 2)]).is_err());
+        assert!(validate_gather_rows(4, 6, &[(0, 0, 2), (3, 2, 2)]).is_err());
+        assert!(validate_gather_rows(4, 6, &[(0, 0, 3), (0, 2, 2)]).is_err());
+        assert!(validate_gather_rows(4, 6, &[(0, 1, 0), (0, 1, 2)]).is_ok());
+        assert!(validate_gather_rows(4, 6, &[(usize::MAX, 0, 2)]).is_err());
+    }
 
     #[test]
     fn region_rank_disagreement_is_a_typed_rank_mismatch() {
