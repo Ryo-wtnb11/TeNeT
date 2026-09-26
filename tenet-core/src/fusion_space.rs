@@ -3344,7 +3344,9 @@ impl FusionTreeHomSpace {
         let layout = self.fusion_tree_layout_data_generic(rule)?;
         let (sector, degeneracy) =
             coupled_subblock_parts_from_leg_degeneracies(self, &layout)?;
-        BlockStructure::from_parts(sector, degeneracy).map(BlockStructure::into_shared)
+        let built = BlockStructure::from_parts(sector, degeneracy)?;
+        built.record_storage_tiling();
+        Ok(built.into_shared())
     }
 
     /// Checked Generic-fusion structural staging from this HomSpace's leg
@@ -3377,7 +3379,9 @@ impl FusionTreeHomSpace {
         let layout = self.fusion_tree_layout_data_generic_checked(rule)?;
         let (sector, degeneracy) =
             coupled_subblock_parts_from_leg_degeneracies(self, &layout)?;
-        PreparedBlockStructure::from_parts(sector, degeneracy).map_err(Into::into)
+        PreparedBlockStructure::from_parts(sector, degeneracy)
+            .map(PreparedBlockStructure::with_storage_tiling)
+            .map_err(Into::into)
     }
 
     #[cfg(test)]

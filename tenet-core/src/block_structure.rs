@@ -1801,6 +1801,7 @@ pub struct PreparedBlockStructure {
     degeneracy: DegeneracyStructure,
     required_len: usize,
     preview: OnceLock<BlockStructure>,
+    storage_tiling: bool,
 }
 
 impl PreparedBlockStructure {
@@ -1840,7 +1841,16 @@ impl PreparedBlockStructure {
             degeneracy,
             required_len,
             preview: OnceLock::new(),
+            storage_tiling: false,
         })
+    }
+
+    /// Marks this staged geometry as built by the canonical coupled-sector
+    /// builder; the preview and the committed structure then record
+    /// [`BlockStructure::storage_tiling_proven`].
+    pub(crate) fn with_storage_tiling(mut self) -> Self {
+        self.storage_tiling = true;
+        self
     }
 
     /// Borrow an uninterned structure for validation and plan compilation.
@@ -1848,14 +1858,18 @@ impl PreparedBlockStructure {
     pub fn structure(&self) -> &BlockStructure {
         self.preview.get_or_init(|| {
             let blocks = block_structure_content_blocks(&self.sector, &self.degeneracy);
-            BlockStructure::from_content(Arc::new(BlockStructureContent {
+            let preview = BlockStructure::from_content(Arc::new(BlockStructureContent {
                 id: BLOCK_STRUCTURE_CONTENT_ID.fetch_add(1, Ordering::Relaxed),
                 sector: self.sector.clone(),
                 degeneracy: self.degeneracy.clone(),
                 blocks,
                 required_len: self.required_len,
                 storage_tiling: StorageTilingProof::default(),
-            }))
+            }));
+            if self.storage_tiling {
+                preview.record_storage_tiling();
+            }
+            preview
         })
     }
 
@@ -1874,11 +1888,15 @@ impl PreparedBlockStructure {
     /// Publish the validated structure through the existing interner.
     #[doc(hidden)]
     pub fn commit(self) -> BlockStructure {
-        BlockStructure::from_content(intern_block_structure_content(
+        let structure = BlockStructure::from_content(intern_block_structure_content(
             self.sector,
             self.degeneracy,
             self.required_len,
-        ))
+        ));
+        if self.storage_tiling {
+            structure.record_storage_tiling();
+        }
+        structure
     }
 }
 
@@ -2698,8 +2716,19 @@ pub(crate) fn exact_storage_fallback_count() -> usize {
 /// General [`BlockStructure`] values may describe aliased read views. Owning
 /// symmetric spaces and operation destinations call this explicit admission
 /// boundary before publishing writable storage.
+///
+/// A structure whose constructor recorded
+/// [`BlockStructure::storage_tiling_proven`] is admitted in O(1); every other
+/// layout, including expert and imported ones, keeps the exact check.
 #[doc(hidden)]
 pub fn validate_block_storage_injective(structure: &BlockStructure) -> Result<(), CoreError> {
+    // Why not re-check the canonical coupled-sector layout: its subblocks
+    // interleave inside one sector matrix, so the interval sweep below
+    // degenerates to hashing every element, while the tiling proof already
+    // states that each offset is reached exactly once.
+    if structure.storage_tiling_proven() {
+        return Ok(());
+    }
     #[derive(Clone, Copy)]
     struct BoundedBlock {
         block: usize,
