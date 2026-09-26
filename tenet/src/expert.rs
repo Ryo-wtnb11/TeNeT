@@ -39,7 +39,7 @@ where
 /// positive tolerance uses `max_offdiag <= tol * max(norm(Inf), 1)`.
 /// Negative and non-finite tolerances are rejected before every shortcut.
 /// Scale `tol` to the payload dtype, as
-/// [`TensorMap::is_hermitian`] describes.
+/// [`FactorizationScalar`](crate::typed::FactorizationScalar) describes.
 pub fn is_diagonal<R, D>(tensor: &TensorMap<R, D>, tol: f64) -> Result<bool, Error>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,

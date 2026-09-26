@@ -9,6 +9,9 @@
 //! caches allocate on first use, and those allocations belong to the cache, not
 //! to the operation under test.
 
+include!("common/predicate_chains.rs");
+include!("common/predicate_chain_coefficients.rs");
+
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::hint::black_box;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -558,7 +561,8 @@ fn exact_identity_keeps_compact_storage_and_a_real_braid_keeps_the_dense_route()
 
 #[test]
 fn compact_is_posdef_never_builds_or_caches_a_dense_payload() {
-    // What: `is_posdef` on a spectrum factor is a comparison over the stored
+    // What: the positive-definiteness chain on a spectrum factor (#1557:
+    // Hermiticity gate, norm, `diagview`) is a comparison over the stored
     // values (#585). It is not allocation-*free* — the Hermiticity gate it
     // opens with is `t - t†`, which owns two compact `Σ_c k_c` results, and
     // that is the route TensorKit takes too — but it must stay far below the
@@ -569,7 +573,7 @@ fn compact_is_posdef_never_builds_or_caches_a_dense_payload() {
     let ceiling = dense_payload_bytes();
 
     let d = spectrum(0x5eed_0051);
-    let bytes = warmed_bytes(|| d.is_posdef(0.0).unwrap());
+    let bytes = warmed_bytes(|| is_posdef_compact!(d, 0.0, |v: f64| v));
     assert!(
         bytes < ceiling,
         "compact is_posdef allocated at least one dense payload: {bytes} bytes"
@@ -580,7 +584,7 @@ fn compact_is_posdef_never_builds_or_caches_a_dense_payload() {
     );
 
     let e = complex_source(0x5eed_0052).svd_compact().unwrap().s;
-    let bytes = warmed_bytes(|| e.is_posdef(1e-12).unwrap());
+    let bytes = warmed_bytes(|| is_posdef_compact!(e, 1e-12, |v: Complex64| v.re));
     assert!(
         bytes < 2 * ceiling,
         "compact c64 is_posdef allocated at least one dense payload: {bytes} bytes"

@@ -31,6 +31,9 @@ mod single_precision_oracle;
 #[path = "../../tests/support/numerics.rs"]
 mod numerics;
 
+include!("common/predicate_chains.rs");
+include!("common/predicate_chain_coefficients.rs");
+
 use num_complex::{Complex32, Complex64};
 use tenet::core::{U1FusionRule, U1Irrep};
 use tenet::prelude::{TensorMap, Truncation};
@@ -632,9 +635,10 @@ macro_rules! factor_checks {
     }};
 }
 
-/// `is_hermitian` / `is_posdef`: the predicates that factorize. They live on
-/// the multiplicity-free dispatch only, so they are a separate macro rather
-/// than part of `factor_checks!`, which the Checked-Generic provider shares.
+/// `is_hermitian!` / `is_posdef!`: the predicate chains that factorize. They
+/// are checked on multiplicity-free fixtures only, so they are a separate macro
+/// rather than part of `factor_checks!`, which the Checked-Generic provider
+/// shares.
 ///
 /// Both are decided against the *widened* oracle rather than against a
 /// hard-coded answer: what is under test is that a single-precision payload
@@ -657,16 +661,16 @@ macro_rules! hermitian_predicate_checks {
         let gram = tall.adjoint().unwrap().compose(&tall).unwrap();
         let wide_gram = wide_tall.adjoint().unwrap().compose(&wide_tall).unwrap();
         assert!(
-            gram.is_hermitian(PREDICATE_TOL).unwrap(),
+            is_hermitian!(gram, PREDICATE_TOL),
             "{name}: a Gram matrix is Hermitian"
         );
         assert!(
-            gram.is_posdef(PREDICATE_TOL).unwrap(),
+            is_posdef!(gram, PREDICATE_TOL),
             "{name}: the Gram matrix of a full-column-rank fixture is positive definite"
         );
         assert_eq!(
-            gram.is_posdef(PREDICATE_TOL).unwrap(),
-            wide_gram.is_posdef(PREDICATE_TOL).unwrap(),
+            is_posdef!(gram, PREDICATE_TOL),
+            is_posdef!(wide_gram, PREDICATE_TOL),
             "{name}: is_posdef disagreed with the widened oracle on the Gram matrix"
         );
 
@@ -675,16 +679,16 @@ macro_rules! hermitian_predicate_checks {
                 indefinite_entry(index[0], index[1])
             });
         assert!(
-            indefinite.is_hermitian(PREDICATE_TOL).unwrap(),
+            is_hermitian!(indefinite, PREDICATE_TOL),
             "{name}: the indefinite fixture is Hermitian by construction"
         );
         assert!(
-            !indefinite.is_posdef(PREDICATE_TOL).unwrap(),
+            !is_posdef!(indefinite, PREDICATE_TOL),
             "{name}: an indefinite fixture must not be positive definite"
         );
         assert_eq!(
-            indefinite.is_posdef(PREDICATE_TOL).unwrap(),
-            wide_indefinite.is_posdef(PREDICATE_TOL).unwrap(),
+            is_posdef!(indefinite, PREDICATE_TOL),
+            is_posdef!(wide_indefinite, PREDICATE_TOL),
             "{name}: is_posdef disagreed with the widened oracle on the indefinite fixture"
         );
 
@@ -694,7 +698,9 @@ macro_rules! hermitian_predicate_checks {
         let _ = u;
         let Svd { s: spectrum, .. } = tall.svd_compact().unwrap();
         assert!(
-            spectrum.is_posdef(PREDICATE_TOL).unwrap(),
+            is_posdef_compact!(spectrum, PREDICATE_TOL, |v: $narrow| {
+                numerics::Numeric::wide(v).re
+            }),
             "{name}: a compact singular-value factor with positive values is positive definite"
         );
     }};
@@ -761,8 +767,7 @@ factorization_suite!(complex32_payload, Complex32, Complex64);
 /// factor plans) rather than the multiplicity-free one.
 ///
 /// A separate, smaller body rather than an instantiation of `factor_checks!`:
-/// `TensorMap::id`, `is_hermitian` and `is_posdef` are multiplicity-free-only,
-/// so the isometry laws are expressed here as "the Gram factor is the identity"
+/// `TensorMap::id` is multiplicity-free-only, so the isometry laws are expressed here as "the Gram factor is the identity"
 /// read through `diagview` plus a pointwise comparison against the widened
 /// oracle, which is gauge-independent because the factor's own gauge cancels in
 /// `q† ∘ q`.
@@ -1073,12 +1078,18 @@ mod compact_diagonal {
                         terms
                     );
                     assert!(
-                        narrow.is_posdef(PREDICATE_TOL).unwrap(),
+                        is_posdef_compact!(narrow, PREDICATE_TOL, |v: $narrow| {
+                            numerics::Numeric::wide(v).re
+                        }),
                         "a compact factor with positive values is positive definite"
                     );
                     assert_eq!(
-                        narrow.is_posdef(PREDICATE_TOL).unwrap(),
-                        wide.is_posdef(PREDICATE_TOL).unwrap()
+                        is_posdef_compact!(narrow, PREDICATE_TOL, |v: $narrow| {
+                            numerics::Numeric::wide(v).re
+                        }),
+                        is_posdef_compact!(wide, PREDICATE_TOL, |v: $wide| {
+                            numerics::Numeric::wide(v).re
+                        })
                     );
 
                     // `find_truncated` fed from the single-precision

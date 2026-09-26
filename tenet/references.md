@@ -99,11 +99,6 @@ upstream location (the note says why).
 | `typed::TensorMap::inner` | TensorKit | 0.17.0 | `tensors/vectorinterface.jl:114-123` | `VectorInterface.inner`, quantum-dimension weighted; TK `dot` alias at `tensors/linalg.jl:255` |
 | `typed::TensorMap::inv` | TensorKit | 0.17.0 | `tensors/linalg.jl:375-387` | typed facade |
 | `typed::TensorMap::powi` | TensorKit | 0.17.0 | `tensors/linalg.jl:45-47` | typed facade |
-| `typed::TensorMap::is_antihermitian` | TensorKit | 0.17.0 | `factorizations/factorizations.jl:72-76` | per coupled block via MAK `isantihermitian` (`common/matrixproperties.jl:90-102`) |
-| `typed::TensorMap::is_hermitian` | TensorKit | 0.17.0 | `factorizations/factorizations.jl:67-71` | `LinearAlgebra.ishermitian` alias at 77; per coupled block via MAK `ishermitian` (`common/matrixproperties.jl:66-78`) |
-| `typed::TensorMap::is_isometric` | MatrixAlgebraKit | 0.6.9 | `common/matrixproperties.jl:1-21` | TK applies it per coupled block (`factorizations/factorizations.jl:97-100`, `is_left_isometric`) |
-| `typed::TensorMap::is_posdef` | TensorKit | 0.17.0 | `factorizations/factorizations.jl:86-94` | `isposdef` + `isposdef!`, Cholesky per coupled block |
-| `typed::TensorMap::is_unitary` | MatrixAlgebraKit | 0.6.9 | `common/matrixproperties.jl:23-38` | typed facade |
 | `typed::TensorMap::isometry` | TensorKit | 0.17.0 | `tensors/linalg.jl:149-158` | |
 | `typed::TensorMap::isomorphism` | TensorKit | 0.17.0 | `tensors/linalg.jl:102-109` | |
 | `typed::TensorMap::left_null` | MatrixAlgebraKit | 0.6.9 | `interface/orthnull.jl:167-244` | typed facade |
@@ -113,8 +108,6 @@ upstream location (the note says why).
 | `typed::TensorMap::norm` | TensorKit | 0.17.0 | `tensors/linalg.jl:257-275` | `norm(t, p)` and the `_norm` block reduction: `p = 2` is the quantum-dimension-weighted Frobenius norm, `p == Inf` (`linalg.jl:262-265`) the unweighted maximum absolute stored entry |
 | `typed::TensorMap::permute` | TensorKit | 0.17.0 | `tensors/indexmanipulations.jl:242-259` | typed facade |
 | `typed::TensorMap::pinv` | TensorKit | 0.17.0 | `tensors/linalg.jl:388-396` | typed facade |
-| `typed::TensorMap::project_antihermitian` | MatrixAlgebraKit | 0.6.9 | `interface/projections.jl:16-29` | typed facade |
-| `typed::TensorMap::project_hermitian` | MatrixAlgebraKit | 0.6.9 | `interface/projections.jl:1-14` | typed facade |
 | `typed::TensorMap::qr_compact` | MatrixAlgebraKit | 0.6.9 | `interface/qr.jl:22-44` | typed facade; TK diagonal fast-path divergence on the typed `qr_compact` row |
 | `typed::TensorMap::qr_full` | MatrixAlgebraKit | 0.6.9 | `interface/qr.jl:3-20` | typed facade; see also the typed `qr_full` row |
 | `typed::TensorMap::repartition` | TensorKit | 0.17.0 | `tensors/indexmanipulations.jl:464-474` | typed facade |

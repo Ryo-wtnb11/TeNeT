@@ -5,6 +5,9 @@
 //! that a downstream application can drive the typed facade with its own
 //! fusion rule.
 
+include!("common/predicate_chains.rs");
+include!("common/predicate_chain_coefficients.rs");
+
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use tenet::core::{
@@ -2914,8 +2917,8 @@ fn svd_full_reconstructs_with_unitary_outer_factors() {
 
         let recon = u.compose(&s).unwrap().compose(&vh).unwrap();
         assert_data_close_f64(recon.data(), typed.data());
-        assert!(u.is_isometric(1e-12).unwrap());
-        assert!(vh.adjoint().unwrap().is_isometric(1e-12).unwrap());
+        assert!(is_isometric!(u, 1e-12));
+        assert!(is_isometric!(vh.adjoint().unwrap(), 1e-12));
         assert_same_legs(&u.codomain(), &typed.codomain());
         assert_same_legs(&vh.domain(), &typed.domain());
         assert_same_legs(&u.domain(), &s.codomain());
@@ -3122,7 +3125,7 @@ fn qr_and_lq_reconstruct_with_the_expected_isometries_and_spaces() {
         let qr_full = typed.qr_full().unwrap();
         for Qr { q, r } in [&qr_compact, &qr_full] {
             assert_data_close_f64(q.compose(r).unwrap().data(), typed.data());
-            assert!(q.is_isometric(1e-12).unwrap());
+            assert!(is_isometric!(q, 1e-12));
             assert_same_legs(&q.codomain(), &typed.codomain());
             assert_same_legs(&r.domain(), &typed.domain());
             assert_same_legs(&q.domain(), &r.codomain());
@@ -3132,7 +3135,7 @@ fn qr_and_lq_reconstruct_with_the_expected_isometries_and_spaces() {
         let lq_full = typed.lq_full().unwrap();
         for Lq { l, q } in [&lq_compact, &lq_full] {
             assert_data_close_f64(l.compose(q).unwrap().data(), typed.data());
-            assert!(q.adjoint().unwrap().is_isometric(1e-12).unwrap());
+            assert!(is_isometric!(q.adjoint().unwrap(), 1e-12));
             assert_same_legs(&l.codomain(), &typed.codomain());
             assert_same_legs(&q.domain(), &typed.domain());
             assert_same_legs(&l.domain(), &q.codomain());
@@ -3165,8 +3168,8 @@ fn left_and_right_null_spaces_annihilate_the_source() {
 
         assert_same_legs(&left.codomain(), &typed.codomain());
         assert_same_legs(&right.domain(), &typed.domain());
-        assert!(left.is_isometric(1e-12).unwrap());
-        assert!(right.adjoint().unwrap().is_isometric(1e-12).unwrap());
+        assert!(is_isometric!(left, 1e-12));
+        assert!(is_isometric!(right.adjoint().unwrap(), 1e-12));
         assert!(left
             .adjoint()
             .unwrap()
@@ -4432,8 +4435,8 @@ fn hermitian_projections_satisfy_their_identities_and_predicate_truth_table() {
     let typed = z2_endomorphism(&runtime);
     let tol = 1e-10;
 
-    let hermitian = typed.project_hermitian().unwrap();
-    let antihermitian = typed.project_antihermitian().unwrap();
+    let hermitian = project_hermitian!(typed).unwrap();
+    let antihermitian = project_antihermitian!(typed).unwrap();
     assert_data_close_f64(
         hermitian.axpby(1.0, &antihermitian, 1.0).unwrap().data(),
         typed.data(),
@@ -4444,11 +4447,11 @@ fn hermitian_projections_satisfy_their_identities_and_predicate_truth_table() {
         antihermitian.scale(-1.0).data(),
     );
     assert_data_close_f64(
-        hermitian.project_hermitian().unwrap().data(),
+        project_hermitian!(hermitian).unwrap().data(),
         hermitian.data(),
     );
     assert_data_close_f64(
-        antihermitian.project_antihermitian().unwrap().data(),
+        project_antihermitian!(antihermitian).unwrap().data(),
         antihermitian.data(),
     );
 
@@ -4460,11 +4463,11 @@ fn hermitian_projections_satisfy_their_identities_and_predicate_truth_table() {
     for (tensor, expected) in cases {
         assert_eq!(
             [
-                tensor.is_hermitian(tol).unwrap(),
-                tensor.is_antihermitian(tol).unwrap(),
-                tensor.is_isometric(tol).unwrap(),
-                tensor.is_unitary(tol).unwrap(),
-                tensor.is_posdef(tol).unwrap(),
+                is_hermitian!(tensor, tol),
+                is_antihermitian!(tensor, tol),
+                is_isometric!(tensor, tol),
+                is_unitary!(tensor, tol),
+                is_posdef!(tensor, tol),
             ],
             expected
         );
@@ -4482,19 +4485,19 @@ fn isometry_and_posdef_see_their_positive_cases() {
     let tol = 1e-9;
 
     let tu = typed.svd_compact().unwrap().u;
-    assert!(tu.is_isometric(tol).unwrap());
+    assert!(is_isometric!(tu, tol));
     // Isometric but not unitary: `u` is tall here.
-    assert!(!tu.is_unitary(tol).unwrap());
+    assert!(!is_unitary!(tu, tol));
 
     // `2 * id` is Hermitian with every eigenvalue at 2: positive definite on
     // any provider, and the cheapest tensor that is.
     let typed_positive = TensorMap::id(&runtime, &typed.domain()).unwrap().scale(2.0);
-    assert!(typed_positive.is_hermitian(tol).unwrap());
-    assert!(typed_positive.is_posdef(tol).unwrap());
+    assert!(is_hermitian!(typed_positive, tol));
+    assert!(is_posdef!(typed_positive, tol));
     // Hermitian but not positive definite: the same tensor negated.
     let negated = typed_positive.scale(-1.0);
-    assert!(negated.is_hermitian(tol).unwrap());
-    assert!(!negated.is_posdef(tol).unwrap());
+    assert!(is_hermitian!(negated, tol));
+    assert!(!is_posdef!(negated, tol));
     // Positive *semi*definite is `false`, not `true`: TensorKit's `isposdef` is
     // Cholesky-based and strict, and this facade's rustdoc promises the same.
     // A real diagonal endomorphism with one entry at exactly zero is the case
@@ -4522,22 +4525,22 @@ fn isometry_and_posdef_see_their_positive_cases() {
         },
     )
     .unwrap();
-    assert!(semidefinite.is_hermitian(0.0).unwrap());
+    assert!(is_hermitian!(semidefinite, 0.0));
     assert!(semidefinite
         .eigh_vals()
         .unwrap()
         .iter()
         .any(|entry| entry.values.contains(&0.0)));
     assert!(
-        !semidefinite.is_posdef(0.0).unwrap(),
+        !is_posdef!(semidefinite, 0.0),
         "a positive semidefinite tensor must not be reported positive definite"
     );
 
     // This rank-deficient fixture's Gram matrix is Hermitian but not strictly
     // positive definite.
     let tgram = typed.adjoint().unwrap().compose(&typed).unwrap();
-    assert!(tgram.is_hermitian(tol).unwrap());
-    assert!(!tgram.is_posdef(tol).unwrap());
+    assert!(is_hermitian!(tgram, tol));
+    assert!(!is_posdef!(tgram, tol));
 }
 
 #[test]
@@ -4548,11 +4551,11 @@ fn a_non_endomorphism_is_never_hermitian_and_never_errors() {
     let runtime = runtime();
     let typed = z2_tensor(&runtime);
 
-    assert!(!typed.is_hermitian(1e-9).unwrap());
-    assert!(!typed.is_antihermitian(1e-9).unwrap());
-    assert!(!typed.is_posdef(1e-9).unwrap());
-    assert!(typed.project_hermitian().is_err());
-    assert!(typed.project_antihermitian().is_err());
+    assert!(!is_hermitian!(typed, 1e-9));
+    assert!(!is_antihermitian!(typed, 1e-9));
+    assert!(!is_posdef!(typed, 1e-9));
+    assert!(project_hermitian!(typed).is_err());
+    assert!(project_antihermitian!(typed).is_err());
 }
 
 // ---------------------------------------------------------------------------
@@ -4994,7 +4997,7 @@ fn exp_accepts_a_non_hermitian_endomorphism_and_inverts_under_negation() {
     let runtime = runtime();
     let typed = z2_endomorphism(&runtime);
 
-    assert!(!typed.is_hermitian(1e-9).unwrap());
+    assert!(!is_hermitian!(typed, 1e-9));
     let typed_exp = typed.exp().unwrap();
 
     // exp(A) exp(-A) = id, evaluated through the typed composition.
@@ -5085,7 +5088,7 @@ fn exp_of_a_complex_compact_spectrum_takes_the_complex_elementwise_branch() {
     // too, through the general Pade arm — and because this particular matrix is
     // already diagonal, the two arms must agree entry for entry. Storage no
     // longer decides *whether* `exp` is defined, only how it is computed.
-    assert!(!dense.is_hermitian(1e-9).unwrap());
+    assert!(!is_hermitian!(dense, 1e-9));
     let dense_exponential = dense.exp().unwrap();
     for (index, (source, value)) in dense
         .data()
@@ -5976,8 +5979,8 @@ fn compact_is_posdef_matches_the_forced_dense_route() {
         let oracle = forced_dense(tensor);
         for tol in [0.0, 1e-14, 1e-8, 1e-3, 0.5] {
             assert_eq!(
-                tensor.is_posdef(tol).unwrap(),
-                oracle.is_posdef(tol).unwrap(),
+                is_posdef_compact!(tensor, tol, |v: f64| v),
+                is_posdef!(oracle, tol),
                 "{name} at tol {tol}"
             );
         }
@@ -5986,9 +5989,9 @@ fn compact_is_posdef_matches_the_forced_dense_route() {
     // The one case whose answer is asserted absolutely rather than only against
     // the oracle: a rank-deficient spectrum is positive semidefinite, and
     // `isposdef` is strict.
-    assert!(positive.is_posdef(0.0).unwrap());
-    assert!(!semidefinite.is_posdef(0.0).unwrap());
-    assert!(!negative.is_posdef(0.0).unwrap());
+    assert!(is_posdef_compact!(positive, 0.0, |v: f64| v));
+    assert!(!is_posdef_compact!(semidefinite, 0.0, |v: f64| v));
+    assert!(!is_posdef_compact!(negative, 0.0, |v: f64| v));
 }
 
 #[test]
@@ -6005,7 +6008,7 @@ fn compact_is_posdef_matches_the_forced_dense_route_for_a_hermitian_c64_spectrum
         .contract(&real.adjoint().unwrap(), &[2], &[0], &[0, 1, 2, 3])
         .unwrap();
     let hermitian = square.repartition(2).unwrap();
-    assert!(hermitian.is_hermitian(1e-10).unwrap());
+    assert!(is_hermitian!(hermitian, 1e-10));
 
     let d = hermitian.eigh_full().unwrap().d;
 
@@ -6023,12 +6026,15 @@ fn compact_is_posdef_matches_the_forced_dense_route_for_a_hermitian_c64_spectrum
         .unwrap()
         .s
         .scale(Complex64::new(1.0, 1.0));
-    assert!(!skewed.is_hermitian(1e-10).unwrap());
+    assert!(!is_hermitian!(skewed, 1e-10));
     for tol in [0.0, 1e-14, 1e-8, 1e-3] {
-        assert!(!skewed.is_posdef(tol).unwrap(), "skewed at tol {tol}");
+        assert!(
+            !is_posdef_compact!(skewed, tol, |v: Complex64| v.re),
+            "skewed at tol {tol}"
+        );
         assert_eq!(
-            skewed.is_posdef(tol).unwrap(),
-            forced_dense(&skewed).is_posdef(tol).unwrap(),
+            is_posdef_compact!(skewed, tol, |v: Complex64| v.re),
+            is_posdef!(forced_dense(&skewed), tol),
             "skewed at tol {tol}"
         );
     }
@@ -6036,14 +6042,14 @@ fn compact_is_posdef_matches_the_forced_dense_route_for_a_hermitian_c64_spectrum
     let oracle = forced_dense(&d);
     for tol in [0.0, 1e-14, 1e-8, 1e-3] {
         assert_eq!(
-            d.is_posdef(tol).unwrap(),
-            oracle.is_posdef(tol).unwrap(),
+            is_posdef_compact!(d, tol, |v: Complex64| v.re),
+            is_posdef!(oracle, tol),
             "gram at tol {tol}"
         );
         let flipped = d.scale(Complex64::new(-1.0, 0.0));
         assert_eq!(
-            flipped.is_posdef(tol).unwrap(),
-            forced_dense(&flipped).is_posdef(tol).unwrap(),
+            is_posdef_compact!(flipped, tol, |v: Complex64| v.re),
+            is_posdef!(forced_dense(&flipped), tol),
             "negated gram at tol {tol}"
         );
     }
@@ -6854,7 +6860,7 @@ fn assert_reductions_and_factorizations_hold<R>(
         r: typed_r,
     } = typed.0.qr_compact().unwrap();
     assert_data_close_f64(typed_q.compose(&typed_r).unwrap().data(), typed.0.data());
-    assert!(typed_q.is_isometric(1e-12).unwrap(), "{what}: qr q");
+    assert!(is_isometric!(typed_q, 1e-12), "{what}: qr q");
     assert_same_legs(&typed_q.codomain(), &typed.0.codomain());
     assert_same_legs(&typed_r.domain(), &typed.0.domain());
     assert_same_legs(&typed_q.domain(), &typed_r.codomain());
@@ -6867,7 +6873,7 @@ fn assert_reductions_and_factorizations_hold<R>(
     } = typed.0.lq_compact().unwrap();
     assert_data_close_f64(typed_c.compose(&typed_vh).unwrap().data(), typed.0.data());
     assert!(
-        typed_vh.adjoint().unwrap().is_isometric(1e-12).unwrap(),
+        is_isometric!(typed_vh.adjoint().unwrap(), 1e-12),
         "{what}: lq q"
     );
     assert_same_legs(&typed_c.codomain(), &typed.0.codomain());
@@ -7601,7 +7607,7 @@ fn typed_polar_factor_laws_hold() {
     let id: TensorMap<tenet::core::FermionParityFusionRule, Complex64> =
         TensorMap::id(&runtime, [&leg]).unwrap();
     assert_data_close_c64(w.adjoint().unwrap().compose(&w).unwrap().data(), id.data());
-    assert!(p.is_hermitian(1e-12).unwrap());
+    assert!(is_hermitian!(p, 1e-12));
     for entry in p.eigh_vals().unwrap() {
         assert!(entry.values.iter().all(|&value| value >= -1e-12));
     }
@@ -7613,7 +7619,7 @@ fn typed_polar_factor_laws_hold() {
     let RightPolar { p, wh: w } = wide.right_polar().unwrap();
     let id: TensorMap<tenet::core::U1FusionRule, f64> = TensorMap::id(&runtime, [&leg]).unwrap();
     assert_data_close_f64(w.compose(&w.adjoint().unwrap()).unwrap().data(), id.data());
-    assert!(p.is_hermitian(1e-12).unwrap());
+    assert!(is_hermitian!(p, 1e-12));
     for entry in p.eigh_vals().unwrap() {
         assert!(entry.values.iter().all(|&value| value >= -1e-12));
     }

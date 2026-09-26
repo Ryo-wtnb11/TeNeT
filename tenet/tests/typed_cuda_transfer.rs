@@ -5,6 +5,9 @@
 
 #![cfg(feature = "cuda")]
 
+include!("common/predicate_chains.rs");
+include!("common/predicate_chain_coefficients.rs");
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -471,8 +474,8 @@ fn assert_cuda_svd_result<R>(
         structural_snapshot(&actual.2),
         structural_snapshot(&expected.vh)
     );
-    assert!(actual.0.is_isometric(1e-10).unwrap());
-    assert!(actual.2.adjoint().unwrap().is_isometric(1e-10).unwrap());
+    assert!(is_isometric!(actual.0, 1e-10));
+    assert!(is_isometric!(actual.2.adjoint().unwrap(), 1e-10));
     let rebuilt = actual
         .0
         .compose(&actual.1)
@@ -539,8 +542,8 @@ fn assert_typed_cuda_svd_trunc_composition_matches_host<R>(
     }
     assert!((found.error - expected.error).abs() <= 1e-10 * (1.0 + expected.error));
 
-    assert!(u.is_isometric(1e-10).unwrap());
-    assert!(vh.adjoint().unwrap().is_isometric(1e-10).unwrap());
+    assert!(is_isometric!(u, 1e-10));
+    assert!(is_isometric!(vh.adjoint().unwrap(), 1e-10));
     let actual_rebuilt = u.compose(&s).unwrap().compose(&vh).unwrap();
     let expected_rebuilt = expected
         .u
@@ -1077,7 +1080,7 @@ fn typed_cuda_qr_compact_streams_multiplicity_free_f64_factors() {
     } = rank_deficient.to_cuda().unwrap().qr_compact().unwrap();
     let rank_left = rank_left.to_host().unwrap();
     let rank_right = rank_right.to_host().unwrap();
-    assert!(rank_left.is_isometric(1e-10).unwrap());
+    assert!(is_isometric!(rank_left, 1e-10));
     assert_close(
         rank_left.compose(&rank_right).unwrap().data(),
         rank_deficient.data(),
@@ -2463,11 +2466,8 @@ where
     // `u`/`vh` keep the raw device gauge, so only gauge-invariant quantities
     // are compared: the spectrum, both orthonormality relations, and `u s vh`.
     assert_close_c64(s.data(), expected.s.data(), 1e-9);
-    assert!(u.is_isometric(1e-10).unwrap(), "U^H U = I");
-    assert!(
-        vh.adjoint().unwrap().is_isometric(1e-10).unwrap(),
-        "V^H V = I"
-    );
+    assert!(is_isometric!(u, 1e-10), "U^H U = I");
+    assert!(is_isometric!(vh.adjoint().unwrap(), 1e-10), "V^H V = I");
     assert_close_c64(
         u.compose(&s).unwrap().compose(&vh).unwrap().data(),
         &source_data,
@@ -2559,11 +2559,8 @@ fn assert_c64_svd_trunc_composition_matches_host<R>(
     }
     assert!((found.error - expected.error).abs() <= 1e-9 * (1.0 + expected.error));
 
-    assert!(u.is_isometric(1e-10).unwrap(), "U^H U = I");
-    assert!(
-        vh.adjoint().unwrap().is_isometric(1e-10).unwrap(),
-        "V^H V = I"
-    );
+    assert!(is_isometric!(u, 1e-10), "U^H U = I");
+    assert!(is_isometric!(vh.adjoint().unwrap(), 1e-10), "V^H V = I");
     let actual_rebuilt = u.compose(&s).unwrap().compose(&vh).unwrap();
     let expected_rebuilt = expected
         .u
@@ -2652,7 +2649,7 @@ fn assert_c64_eigh_trunc_composition_matches_host<R>(
     }
     assert!((found.error - expected.error).abs() <= 1e-9 * (1.0 + expected.error));
 
-    assert!(v.is_isometric(1e-10).unwrap(), "V^H V = I");
+    assert!(is_isometric!(v, 1e-10), "V^H V = I");
     if matches!(truncation, Truncation::Full) {
         let rebuilt = v
             .compose(&d)
@@ -2743,7 +2740,7 @@ fn typed_cuda_c64_eigh_admits_hermitian_and_rejects_complex_symmetric_input() {
     let Eigh { d, v } = hermitian.to_cuda().unwrap().eigh_full().unwrap();
     let d = d.to_host().unwrap();
     let v = v.to_host().unwrap();
-    assert!(v.is_isometric(1e-10).unwrap(), "V^H V = I");
+    assert!(is_isometric!(v, 1e-10), "V^H V = I");
     assert_close_c64(
         v.compose(&d)
             .unwrap()

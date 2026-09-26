@@ -246,8 +246,7 @@ makes their values look similar.
 `TensorMap` has ordinary vector operations: `norm`, `inner`, `scale`, `axpby`,
 `tr`, and `zeros_like`. `x.axpby(alpha, &y, beta)` is `alpha * x + beta * y`;
 note that VectorInterface's `add(y, x, α, β)` binds the coefficients the other
-way round. It also supplies structural predicates
-such as `is_hermitian`, `is_unitary`, and `is_posdef`.
+way round.
 
 ```rust
 use tenet::prelude::*;
@@ -264,8 +263,54 @@ assert!(difference.norm(2.0)? >= 0.0);
 let unit = a.scale(1.0 / a.norm(2.0)?);
 assert!((unit.norm(2.0)? - 1.0).abs() <= 1e-12);
 assert_eq!(a.zeros_like().norm(2.0)?, 0.0);
-let id = TensorMap::<U1FusionRule, f64>::id(&rt, [&v])?;
-assert!(id.is_hermitian(1e-12)? && id.is_unitary(1e-12)?);
+# Ok::<(), Error>(())
+```
+
+TensorKit's `ishermitian`, `isisometric`, `isunitary`, `isposdef` and
+Hermitian projection are short chains of these operations, and TeNeT spells them
+as such rather than as extra methods. Each allocates the same intermediates the
+chain shows; scale `tol` to the payload dtype as `FactorizationScalar`
+describes.
+
+```rust
+use tenet::prelude::*;
+
+let rt = Runtime::builder().build()?;
+let v = GradedSpace::try_new(
+    U1FusionRule,
+    [(-1, 1), (0, 2), (1, 1)].map(|(q, n)| (U1Irrep::new(q), n)),
+)?;
+let t = TensorMap::<U1FusionRule, f64>::rand(&rt, [&v], [&v])?;
+let tol = 1e-12;
+
+// Hermitian part: (t + t†)/2; the anti-Hermitian part uses -0.5.
+let h = t.axpby(0.5, &t.adjoint()?, 0.5)?;
+
+// ishermitian: ‖h - h†‖ <= tol·max(‖h‖, 1), for an endomorphism
+// (codomain == domain); isantihermitian uses `h + h†`.
+let hermitian = |h: &TensorMap<U1FusionRule, f64>| -> Result<bool, Error> {
+    Ok(h.codomain() == h.domain()
+        && h.axpby(1.0, &h.adjoint()?, -1.0)?.norm(2.0)? <= tol * h.norm(2.0)?.max(1.0))
+};
+assert!(hermitian(&h)?);
+
+// isisometric: ‖u†u - id‖ <= tol·max(‖u†u‖, 1). isunitary also checks u†.
+let u = t.left_polar()?.w;
+let gram = u.adjoint()?.compose(&u)?;
+let identity = TensorMap::id(&rt, &u.domain())?;
+assert!(gram.axpby(1.0, &identity, -1.0)?.norm(2.0)? <= tol * gram.norm(2.0)?.max(1.0));
+
+// isposdef: Hermitian, and every eigenvalue strictly above tol·max(‖p‖, 1).
+let p = h.compose(&h)?.axpby(1.0, &TensorMap::id(&rt, [&v])?, 1.0)?;
+let threshold = tol * p.norm(2.0)?.max(1.0);
+let positive = |values: &[SectorSpectrum<U1Irrep, f64>]| {
+    values.iter().flat_map(|s| &s.values).all(|&x| x > threshold)
+};
+assert!(hermitian(&p)? && positive(&p.eigh_vals()?));
+// A compact spectrum factor already stores its eigenvalues: read them with
+// `diagview` instead of factorizing (compare the real part for complex `d`).
+let d = p.eigh_full()?.d;
+assert!(hermitian(&d)? && positive(&d.diagview()?));
 # Ok::<(), Error>(())
 ```
 
