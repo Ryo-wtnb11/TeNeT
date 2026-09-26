@@ -18440,6 +18440,24 @@ mod tests {
     /// enumerate (interleaved subblocks of one coupled-sector matrix).
     fn assert_canonical_storage_admitted_without_enumeration(canonical: &BlockStructure) {
         assert!(canonical.storage_tiling_proven());
+        // Independent of `record_storage_tiling`: every offset of the payload
+        // is reached by exactly one (block, element), the fact the
+        // uninitialized-output path relies on.
+        let mut hits = vec![0usize; canonical.required_len().unwrap()];
+        for index in 0..canonical.block_count() {
+            let block = canonical.block(index).unwrap();
+            let count = block.shape().iter().product::<usize>();
+            for linear in 0..count {
+                let mut rest = linear;
+                let mut offset = block.offset();
+                for (&extent, &stride) in block.shape().iter().zip(block.strides()) {
+                    offset += (rest % extent) * stride;
+                    rest /= extent;
+                }
+                hits[offset] += 1;
+            }
+        }
+        assert!(hits.iter().all(|&hit| hit == 1), "offset histogram {hits:?}");
         reset_exact_storage_fallback_count();
         validate_block_storage_injective(canonical).unwrap();
         assert_eq!(exact_storage_fallback_count(), 0);
