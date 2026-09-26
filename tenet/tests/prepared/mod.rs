@@ -25,6 +25,8 @@ use tenet::typed::{GradedSpace, Runtime, TensorMap};
 
 use crate::common::{for_each_index, Payload};
 
+pub mod eigh;
+
 pub type Fz2U1Rule = ProductFusionRule<
     FermionParityFusionRule,
     U1FusionRule,
@@ -126,7 +128,7 @@ fn tree_key<S: Debug>(
 
 /// Block `index` of `tensor` as its `(codomain key, domain key)` and a
 /// column-major `rows x cols` matrix, read through the block's own strides.
-fn block_matrix<R, D>(
+pub fn block_matrix<R, D>(
     tensor: &TensorMap<R, D>,
     index: usize,
 ) -> (String, String, usize, usize, Vec<D>)
