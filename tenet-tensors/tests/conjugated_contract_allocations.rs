@@ -181,12 +181,14 @@ fn warm_conjugated_contract_allocations_are_pinned() {
         // What: the warm count does not grow with the degeneracy and holds no
         // per-call adjoint rebuild (before #1368: U1 49, SU2 188, fZ2xU1 49).
         // SU2 fell from 168 when the block-spec route stopped building the
-        // contracted HomSpace to compare it with the destination (#1419).
+        // contracted HomSpace to compare it with the destination (#1419),
+        // and to 161 when witnessed destinations stopped allocating the
+        // injectivity sweep (#1555).
         // Byte bounds sit well below the pre-#1368 warm bytes (U1 and fZ2xU1
-        // 14088, SU2 11268) and above today's (1376, 4616, 1376); the filled
+        // 14088, SU2 11268) and above today's (1376, 4208, 1376); the filled
         // memo of these three rank-2 blocks charges 3862 bytes.
         for ((name, (calls, bytes, retained)), (expected_calls, max_bytes)) in
-            rows.into_iter().zip([(11, 2048), (162, 6144), (11, 2048)])
+            rows.into_iter().zip([(11, 2048), (161, 6144), (11, 2048)])
         {
             assert_eq!(calls, expected_calls, "{name} d{deg}");
             assert!(bytes <= max_bytes, "{name} d{deg}: {bytes} warm bytes");

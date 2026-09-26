@@ -18434,6 +18434,159 @@ mod tests {
         assert_expert_storage_admission_for_rule(&triple, vacuum);
     }
 
+    /// Admits `canonical` through the construction witness with no element
+    /// visit, then checks the same geometry without the witness through the
+    /// exact per-element enumeration, which must agree and must actually
+    /// enumerate (interleaved subblocks of one coupled-sector matrix).
+    fn assert_canonical_storage_admitted_without_enumeration(canonical: &BlockStructure) {
+        assert!(canonical.storage_tiling_proven());
+        // Independent of `record_storage_tiling`: every offset of the payload
+        // is reached by exactly one (block, element), the fact the
+        // uninitialized-output path relies on.
+        let mut hits = vec![0usize; canonical.required_len().unwrap()];
+        for index in 0..canonical.block_count() {
+            let block = canonical.block(index).unwrap();
+            let count = block.shape().iter().product::<usize>();
+            for linear in 0..count {
+                let mut rest = linear;
+                let mut offset = block.offset();
+                for (&extent, &stride) in block.shape().iter().zip(block.strides()) {
+                    offset += (rest % extent) * stride;
+                    rest /= extent;
+                }
+                hits[offset] += 1;
+            }
+        }
+        assert!(hits.iter().all(|&hit| hit == 1), "offset histogram {hits:?}");
+        reset_exact_storage_fallback_count();
+        validate_block_storage_injective(canonical).unwrap();
+        assert_eq!(exact_storage_fallback_count(), 0);
+
+        let unwitnessed = PreparedBlockStructure::from_parts(
+            canonical.sector_structure().clone(),
+            canonical.degeneracy_structure().clone(),
+        )
+        .unwrap();
+        assert!(!unwitnessed.structure().storage_tiling_proven());
+        reset_exact_storage_fallback_count();
+        validate_block_storage_injective(unwitnessed.structure()).unwrap();
+        assert!(exact_storage_fallback_count() > 0);
+    }
+
+    #[test]
+    fn canonical_coupled_storage_is_admitted_by_witness_across_symmetries() {
+        // What: TeNeT-built coupled-sector destinations are admitted as
+        // injective without visiting elements for Abelian, non-Abelian, and
+        // fermionic product sectors with dual legs and nontrivial
+        // degeneracies, while the exact check agrees on the same geometry.
+        let hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new([
+                SectorLeg::new([(u1(-1), 2), (u1(0), 1), (u1(1), 3)], false),
+                SectorLeg::new([(u1(-1), 2), (u1(1), 2)], true),
+            ]),
+            FusionProductSpace::new([
+                SectorLeg::new([(u1(0), 2), (u1(1), 1), (u1(-1), 2)], false),
+                SectorLeg::new([(u1(1), 3), (u1(-1), 1)], true),
+            ]),
+        );
+        assert_canonical_storage_admitted_without_enumeration(
+            &hom.coupled_subblock_structure_from_leg_degeneracies(&U1FusionRule)
+                .unwrap(),
+        );
+
+        let hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new([
+                SectorLeg::new([(su2(1), 2), (su2(3), 1)], false),
+                SectorLeg::new([(su2(0), 1), (su2(2), 2)], true),
+            ]),
+            FusionProductSpace::new([
+                SectorLeg::new([(su2(1), 3), (su2(2), 1)], true),
+                SectorLeg::new([(su2(0), 2), (su2(1), 2)], false),
+            ]),
+        );
+        assert_canonical_storage_admitted_without_enumeration(
+            &hom.coupled_subblock_structure_from_leg_degeneracies(&SU2FusionRule)
+                .unwrap(),
+        );
+
+        type Fz2U1 = ProductFusionRule<FermionParityFusionRule, U1FusionRule>;
+        let rule = Fz2U1::new(FermionParityFusionRule, U1FusionRule);
+        let even0 = rule.encode_sector(z2_even(), u1(0));
+        let odd_p = rule.encode_sector(z2_odd(), u1(1));
+        let odd_m = rule.encode_sector(z2_odd(), u1(-1));
+        let leg = |dual| SectorLeg::new([(even0, 2), (odd_p, 1), (odd_m, 3)], dual);
+        let hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new([leg(false), leg(true)]),
+            FusionProductSpace::new([leg(true), leg(false)]),
+        );
+        assert_canonical_storage_admitted_without_enumeration(
+            &hom.coupled_subblock_structure_from_leg_degeneracies(&rule)
+                .unwrap(),
+        );
+
+        let (s0, s1) = (SectorId::new(0), SectorId::new(1));
+        let hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new([
+                SectorLeg::new([(s0, 2), (s1, 1)], false),
+                SectorLeg::new([(s0, 1), (s1, 3)], false),
+            ]),
+            FusionProductSpace::new([
+                SectorLeg::new([(s0, 2), (s1, 2)], false),
+                SectorLeg::new([(s0, 3), (s1, 1)], false),
+            ]),
+        );
+        assert_canonical_storage_admitted_without_enumeration(
+            &hom.coupled_subblock_structure_from_leg_degeneracies_generic(
+                &IsomorphismMultiplicityRule,
+            )
+            .unwrap(),
+        );
+    }
+
+    #[cfg(feature = "racah-generated")]
+    #[test]
+    fn checked_generic_coupled_storage_is_admitted_by_witness() {
+        // What: checked-Generic SU(3) destinations with outer multiplicity use
+        // the same coupled-sector builder, so both the staged preview and the
+        // committed structure carry the witness.
+        let rule = SUNFusionRule::new(3).unwrap();
+        let fundamental = rule.encode_dynkin(&[1, 0]).unwrap();
+        let adjoint = rule.encode_dynkin(&[1, 1]).unwrap();
+        let trivial = rule.encode_dynkin(&[0, 0]).unwrap();
+        let leg = |dual| SectorLeg::new([(fundamental, 3), (adjoint, 2), (trivial, 2)], dual);
+        let hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new([leg(false), leg(true)]),
+            FusionProductSpace::new([leg(false), leg(true)]),
+        );
+        let prepared = hom
+            .prepare_coupled_subblock_structure_from_leg_degeneracies_generic_checked(&rule)
+            .unwrap();
+        assert_canonical_storage_admitted_without_enumeration(prepared.structure());
+        assert_canonical_storage_admitted_without_enumeration(&prepared.commit());
+    }
+
+    #[test]
+    fn external_aliased_storage_keeps_exact_rejection() {
+        // What: layouts without the construction witness keep the exact check
+        // and its error, even when they interleave like coupled subblocks.
+        let aliased = BlockStructure::from_blocks(vec![
+            BlockSpec::with_key(BlockKey::ordinal(0), vec![2, 2], vec![1, 3], 0).unwrap(),
+            BlockSpec::with_key(BlockKey::ordinal(1), vec![2, 2], vec![1, 3], 1).unwrap(),
+        ])
+        .unwrap();
+        assert!(!aliased.storage_tiling_proven());
+        reset_exact_storage_fallback_count();
+        assert_eq!(
+            validate_block_storage_injective(&aliased),
+            Err(CoreError::OverlappingBlockStorage {
+                first_block: 0,
+                second_block: 1,
+                offset: 1,
+            })
+        );
+        assert!(exact_storage_fallback_count() > 0);
+    }
+
     #[test]
     fn canonical_and_factor_bridge_storage_skip_exact_enumeration() {
         // What: hom-space-generated coupled storage and its typed factor-style
