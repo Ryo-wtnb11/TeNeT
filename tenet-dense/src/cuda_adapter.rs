@@ -2447,6 +2447,9 @@ pub fn cuda_copy_spectrum_into<D: CudaScalar>(
 ) -> Result<(), DenseError> {
     const OP: &str = "cuda_copy_spectrum";
     let len = spectrum.len();
+    if len == 0 {
+        return Ok(());
+    }
     let src = if D::IS_COMPLEX {
         let cast = ctx
             .backend
@@ -2744,6 +2747,23 @@ mod tests {
                 "slot {slot} is claimed twice"
             );
         }
+    }
+
+    #[test]
+    #[ignore = "requires a real CUDA device"]
+    fn an_empty_spectrum_copy_touches_nothing_even_for_a_complex_payload() {
+        let _serialized = COUNTER_TESTS.lock().unwrap_or_else(|err| err.into_inner());
+        let mut ctx = CudaDenseContext::new(0).unwrap();
+        let empty = CudaDenseStorage::upload_owned::<f64>(&ctx, Vec::new()).unwrap();
+        let spectrum = CudaSpectrum {
+            tensor: empty.tensor,
+        };
+        let values = vec![Complex64::new(1.0, 2.0); 4];
+        let mut dst = CudaDenseStorage::upload::<Complex64>(&ctx, &values).unwrap();
+        let before = cuda_transfer_stats();
+        cuda_copy_spectrum_into::<Complex64>(&mut ctx, spectrum, &mut dst, 0, 3).unwrap();
+        assert_eq!(cuda_transfer_stats(), before, "no cast, copy or transfer");
+        assert_eq!(dst.download::<Complex64>(&ctx).unwrap(), values);
     }
 
     #[test]

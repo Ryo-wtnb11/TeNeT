@@ -4322,6 +4322,9 @@ thread_local! {
     /// Forces the per-tree EIGH assembly on aligned routes, so the general
     /// path can be compared with the aligned one on the same input.
     static CUDA_EIGH_TREEWISE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Marks every compact-SVD route non-aligned, so the selector-GEMM
+    /// assembly runs on a layout whose public constructions are all aligned.
+    static CUDA_SVD_TREEWISE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Selector uploads made by device `eigh_full` assembly.
     static CUDA_EIGH_SELECTOR_UPLOADS: std::cell::Cell<Option<usize>> = const {
         std::cell::Cell::new(None)
@@ -11534,6 +11537,17 @@ where
         // As for typed CUDA QR, all provider work and final-space admission
         // complete before the execution lock and before any output exists.
         let plan = self.compile_cuda_qr_plan(source_regions)?;
+        #[cfg(test)]
+        let plan = {
+            let mut plan = plan;
+            if CUDA_SVD_TREEWISE.with(std::cell::Cell::get) {
+                for route in &mut plan.routes {
+                    route.aligned_left = false;
+                    route.aligned_right = false;
+                }
+            }
+            plan
+        };
         let bond = plan.left_space.space().homspace().domain().legs()[0].clone();
         let middle_space =
             self.logical_space()
@@ -11655,13 +11669,24 @@ where
     /// sorted by descending `|λ|`; the eigenvectors stay on the device and
     /// their columns are gathered into that order by the assembly selector.
     ///
-    /// Transfers, exactly: device to host, the Hermiticity verdicts (O(1)
-    /// per sector) and all sectors' eigenvalues (`Σ_c n_c` real values) in
-    /// one download, which the non-finite check, the host `|λ|` order and
-    /// the factor-space plan consume. Host to device, `d` as one dense
-    /// upload of `Σ_c n_c²` elements with the sorted eigenvalues already on
-    /// its diagonal, one zero upload for `v`, and at most one packed
-    /// selector upload. Why `d` is filled on the host rather than scattered on the
+    /// Transfers, exactly:
+    ///
+    /// - Hermiticity admission (`cuda_hermitian_regions`): at most three
+    ///   downloads of gathered real scalars, one per stage that has an
+    ///   undecided sector (per-sector maxima, then sums of squares and
+    ///   residual maxima, then residual sums of squares; O(1) values per
+    ///   sector), and one rank-0 real normalizer upload per sector entering
+    ///   stage 2 (nonzero, finite input maximum) and per sector entering
+    ///   stage 3 (nonzero, finite residual maximum): at most two per
+    ///   sector.
+    /// - Device to host: all sectors' eigenvalues (`Σ_c n_c` real values) in
+    ///   one download, which the non-finite check, the host `|λ|` order and
+    ///   the factor-space plan consume.
+    /// - Host to device: `d` as one dense upload of `Σ_c n_c²` elements with
+    ///   the sorted eigenvalues already on its diagonal, one zero upload for
+    ///   `v`, and at most one packed selector upload.
+    ///
+    /// Why `d` is filled on the host rather than scattered on the
     /// device: the only device allocation path is a zero upload of the same
     /// `Σ_c n_c²` elements (#740), so a device scatter would add a
     /// `Σ_c n_c` upload and move nothing less.
@@ -21551,6 +21576,66 @@ mod representation_gates {
         });
     }
 
+    #[cfg(feature = "cuda")]
+    #[test]
+    #[ignore = "requires a real CUDA device"]
+    fn typed_cuda_svd_non_aligned_routes_upload_one_selector_each_and_the_same_diagonal() {
+        // What: the rustdoc's upload count, three zero-initialized factors
+        // plus one identity selector per non-aligned route, and a diagonal
+        // that does not depend on the assembly path.
+        let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+        let leg = GradedSpace::try_new_with_arc(
+            Arc::new(U1FusionRule),
+            [
+                (U1Irrep::new(-1), 2),
+                (U1Irrep::new(0), 1),
+                (U1Irrep::new(1), 2),
+            ],
+        )
+        .unwrap();
+        let source =
+            TensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&leg, &leg], [&leg], 13)
+                .unwrap();
+        let device = source.to_cuda().unwrap();
+        let routes = sector_regions(
+            source.logical_space().space().structure(),
+            source.logical_space().space().nout(),
+        )
+        .unwrap()
+        .iter()
+        .filter(|region| region.rows() != 0 && region.cols() != 0)
+        .count();
+        let mut diagonals = Vec::new();
+        for (treewise, selectors) in [(false, 0), (true, routes)] {
+            CUDA_SVD_TREEWISE.with(|flag| flag.set(treewise));
+            CUDA_SVD_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0))));
+            CUDA_QR_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0, 0, 0))));
+            let (_, s, _) = device.svd_compact().unwrap();
+            CUDA_SVD_TREEWISE.with(|flag| flag.set(false));
+            let (_, _, creations, _, _) = CUDA_SVD_OBSERVATION
+                .with(|observation| observation.replace(None))
+                .unwrap();
+            let (_, _, selector_uploads, _, _, _, _) = CUDA_QR_OBSERVATION
+                .with(|observation| observation.replace(None))
+                .unwrap();
+            assert_eq!(
+                (creations, selector_uploads),
+                (3, selectors),
+                "treewise {treewise}"
+            );
+            diagonals.push(
+                s.to_host()
+                    .unwrap()
+                    .data()
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+            );
+        }
+        assert!(routes > 1);
+        assert_eq!(diagonals[0], diagonals[1]);
+    }
+
     /// `s` exactly as `svd_compact` built it before #1536: each nonempty
     /// sector's cuSOLVER spectrum, downloaded and placed on a host zero
     /// buffer by [`fill_diagonal_values`]. Returned as widened bits.
@@ -21650,6 +21735,23 @@ mod representation_gates {
     ) where
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
     {
+        let fused = |legs: &[&GradedSpace<R>]| {
+            legs[1..]
+                .iter()
+                .fold(legs[0].clone(), |acc, leg| acc.fuse(leg).unwrap())
+                .sectors()
+                .unwrap()
+        };
+        let (coupled_codomain, coupled_domain) = (fused(codomain), fused(domain));
+        assert!(
+            coupled_codomain
+                .iter()
+                .any(|sector| !coupled_domain.contains(sector))
+                || coupled_domain
+                    .iter()
+                    .any(|sector| !coupled_codomain.contains(sector)),
+            "the fixture needs a coupled sector on one side only"
+        );
         let host = |seed| {
             TensorMap::<R, f64>::rand_with_seed(
                 runtime,
