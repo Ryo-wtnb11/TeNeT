@@ -79,7 +79,7 @@ fn assert_same<D: Payload>(what: &str, got: &[D], want: &[D]) {
 macro_rules! tensor {
     ($runtime:expr, $leg:expr, $values:expr, $d:ty) => {{
         let next = std::cell::Cell::new(0usize);
-        TensorMap::<_, $d>::from_block_fn($runtime, [$leg, $leg], [$leg], |_, _| {
+        TensorMap::<_, $d>::from_subblock_fn($runtime, [$leg, $leg], [$leg], |_, _| {
             let index = next.get();
             next.set(index + 1);
             let (re, im) = $values[index % $values.len()];
@@ -158,7 +158,7 @@ macro_rules! check_dense {
 
 fn u1() -> GradedSpace<U1FusionRule> {
     GradedSpace::try_new(
-        U1FusionRule,
+        std::sync::Arc::new(U1FusionRule),
         [0, 1, -1].map(|charge| (U1Irrep::new(charge), 2)),
     )
     .unwrap()
@@ -166,7 +166,7 @@ fn u1() -> GradedSpace<U1FusionRule> {
 
 fn su2() -> GradedSpace<SU2FusionRule> {
     GradedSpace::try_new(
-        SU2FusionRule,
+        std::sync::Arc::new(SU2FusionRule),
         [0, 1, 2].map(|twice| (SU2Irrep::from_twice_spin(twice), 2)),
     )
     .unwrap()
@@ -174,7 +174,7 @@ fn su2() -> GradedSpace<SU2FusionRule> {
 
 fn fz2() -> GradedSpace<FermionParityFusionRule> {
     GradedSpace::try_new(
-        FermionParityFusionRule,
+        std::sync::Arc::new(FermionParityFusionRule),
         [(Z2Irrep::EVEN, 2), (Z2Irrep::ODD, 2)],
     )
     .unwrap()
@@ -196,8 +196,11 @@ fn typed_add_and_scale_drop_zero_scaled_operands_as_tensorkit() {
 #[test]
 fn compact_diagonal_add_and_scale_drop_zero_scaled_operands_as_tensorkit() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-    let leg =
-        GradedSpace::try_new(U1FusionRule, [(U1Irrep::new(0), 2), (U1Irrep::new(1), 2)]).unwrap();
+    let leg = GradedSpace::try_new(
+        std::sync::Arc::new(U1FusionRule),
+        [(U1Irrep::new(0), 2), (U1Irrep::new(1), 2)],
+    )
+    .unwrap();
     let spectra = |values: [[f64; 2]; 2]| {
         vec![
             SectorSpectrum {
@@ -213,14 +216,15 @@ fn compact_diagonal_add_and_scale_drop_zero_scaled_operands_as_tensorkit() {
     let inf = f64::INFINITY;
     let x = TensorMap::diagonal(&runtime, &leg, spectra([[inf, 1.0], [f64::NAN, -2.0]])).unwrap();
     let y = TensorMap::diagonal(&runtime, &leg, spectra([[3.0, f64::NAN], [0.5, 4.0]])).unwrap();
-    let dense_y: TensorMap<_, f64> = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, ij| {
-        if ij[0] == ij[1] {
-            f64::NAN
-        } else {
-            ij[0] as f64 + 1.0
-        }
-    })
-    .unwrap();
+    let dense_y: TensorMap<_, f64> =
+        TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, ij| {
+            if ij[0] == ij[1] {
+                f64::NAN
+            } else {
+                ij[0] as f64 + 1.0
+            }
+        })
+        .unwrap();
     for (alpha, beta) in [(0.0, 1.0), (1.0, 0.0), (0.0, 0.0)] {
         let what = format!("alpha = {alpha}, beta = {beta}");
         let want: Vec<f64> = x

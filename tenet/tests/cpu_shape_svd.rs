@@ -10,8 +10,7 @@ use tenet::typed::{GradedSpace, Svd, TensorMap};
 #[test]
 fn truncated_svd_runtime_reuse_tracks_data_dependent_rank() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-    let space =
-        GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), 3)]).unwrap();
+    let space = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 3)]).unwrap();
     let policy = Truncation::absolute_cutoff(0.5).unwrap();
 
     for (diagonal, kept) in [
@@ -21,7 +20,7 @@ fn truncated_svd_runtime_reuse_tracks_data_dependent_rank() {
         ([4.0, 3.0, 0.0], 2),
     ] {
         let source =
-            TensorMap::<_, f64>::from_block_fn(&runtime, [&space], [&space], |_, indices| {
+            TensorMap::<_, f64>::from_subblock_fn(&runtime, [&space], [&space], |_, indices| {
                 if indices[0] == indices[1] {
                     diagonal[indices[0]]
                 } else {

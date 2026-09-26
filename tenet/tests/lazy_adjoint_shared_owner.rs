@@ -45,7 +45,7 @@ fn u1_leg(
     sectors: &[(i32, usize)],
     dual: bool,
 ) -> GradedSpace<U1FusionRule> {
-    let space = GradedSpace::try_new_with_arc(
+    let space = GradedSpace::try_new(
         Arc::clone(provider),
         sectors
             .iter()
@@ -71,7 +71,7 @@ fn u1_rank4(runtime: &Runtime) -> TensorMap<U1FusionRule, Complex64> {
         &[(-2, 2), (-1, 3), (0, 1), (1, 2), (2, 1)],
         false,
     );
-    let tensor = TensorMap::from_block_fn(runtime, [&a, &b, &c], [&d], complex_value).unwrap();
+    let tensor = TensorMap::from_subblock_fn(runtime, [&a, &b, &c], [&d], complex_value).unwrap();
     assert!(tensor.subblock_count() >= 4);
     tensor
 }
@@ -79,7 +79,7 @@ fn u1_rank4(runtime: &Runtime) -> TensorMap<U1FusionRule, Complex64> {
 /// SU(2) 2+2 fixture with several coupled sectors and degeneracies 2/1/3.
 fn su2_rank4(runtime: &Runtime) -> TensorMap<SU2FusionRule, Complex64> {
     let provider = Arc::new(SU2FusionRule);
-    let leg = GradedSpace::try_new_with_arc(
+    let leg = GradedSpace::try_new(
         Arc::clone(&provider),
         [
             (SU2Irrep::from_twice_spin(0), 2),
@@ -88,7 +88,7 @@ fn su2_rank4(runtime: &Runtime) -> TensorMap<SU2FusionRule, Complex64> {
         ],
     )
     .unwrap();
-    let other = GradedSpace::try_new_with_arc(
+    let other = GradedSpace::try_new(
         provider,
         [
             (SU2Irrep::from_twice_spin(1), 2),
@@ -97,7 +97,7 @@ fn su2_rank4(runtime: &Runtime) -> TensorMap<SU2FusionRule, Complex64> {
     )
     .unwrap();
     let tensor =
-        TensorMap::from_block_fn(runtime, [&leg, &other], [&leg, &leg], complex_value).unwrap();
+        TensorMap::from_subblock_fn(runtime, [&leg, &other], [&leg, &leg], complex_value).unwrap();
     let coupled: std::collections::BTreeSet<_> = (0..tensor.subblock_count())
         .map(|index| *tensor.subblock_fusion_trees(index).unwrap().coupled())
         .collect();
@@ -124,7 +124,7 @@ macro_rules! assert_lazy_adjoint_reads_and_transforms_match_literal {
         let codomain = lazy.codomain();
         let domain = lazy.domain();
         let owned =
-            TensorMap::from_block_fn(parent.runtime(), &codomain, &domain, |trees, indices| {
+            TensorMap::from_subblock_fn(parent.runtime(), &codomain, &domain, |trees, indices| {
                 let (_, geometry) = lazy_snapshot
                     .blocks
                     .iter()
@@ -209,7 +209,7 @@ fn empty_support_lazy_adjoint_materializes_an_empty_payload() {
     let codomain = u1_leg(&provider, &[(1, 2)], false);
     let domain = u1_leg(&provider, &[(0, 3)], false);
     let parent: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&codomain], [&domain], |_, _| 1.0).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&codomain], [&domain], |_, _| 1.0).unwrap();
     assert_eq!(parent.subblock_count(), 0);
     let lazy = parent.adjoint().unwrap();
     assert_eq!(lazy.subblock_count(), 0);
@@ -225,7 +225,7 @@ fn su2_dim(sector: &SU2Irrep) -> f64 {
 fn su2_tr_matches_the_literal_weighted_diagonal_sum_and_conjugates_lazily() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(SU2FusionRule);
-    let leg = GradedSpace::try_new_with_arc(
+    let leg = GradedSpace::try_new(
         Arc::clone(&provider),
         [
             (SU2Irrep::from_twice_spin(0), 2),
@@ -234,10 +234,10 @@ fn su2_tr_matches_the_literal_weighted_diagonal_sum_and_conjugates_lazily() {
         ],
     )
     .unwrap();
-    let other =
-        GradedSpace::try_new_with_arc(provider, [(SU2Irrep::from_twice_spin(1), 2)]).unwrap();
+    let other = GradedSpace::try_new(provider, [(SU2Irrep::from_twice_spin(1), 2)]).unwrap();
     let complex =
-        TensorMap::from_block_fn(&runtime, [&leg, &other], [&leg, &other], complex_value).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&leg, &other], [&leg, &other], complex_value)
+            .unwrap();
     let real = complex.re();
 
     let mut expected = Complex64::new(0.0, 0.0);
@@ -272,7 +272,7 @@ fn su2_tr_matches_the_literal_weighted_diagonal_sum_and_conjugates_lazily() {
     assert!((unweighted - expected_real).abs() > 1e-6);
 
     let non_endomorphism =
-        TensorMap::from_block_fn(&runtime, [&leg, &other], [&leg, &leg], complex_value).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&leg, &other], [&leg, &leg], complex_value).unwrap();
     assert!(matches!(
         non_endomorphism.tr().unwrap_err(),
         tenet::prelude::Error::InvalidArgument(message)
@@ -293,15 +293,14 @@ fn lazy_adjoint_materialization_copies_non_finite_values_bit_exactly() {
     let provider = Arc::new(U1FusionRule);
     let a = u1_leg(&provider, &[(-1, 2), (0, 1), (1, 2)], false);
     let d = u1_leg(&provider, &[(-1, 1), (0, 2), (1, 1)], true);
-    let complex =
-        TensorMap::from_block_fn(&runtime, [&a], [&a, &d], |trees, indices| {
-            match indices.iter().sum::<usize>() % 3 {
-                0 => Complex64::new(f64::INFINITY, 0.0),
-                1 => Complex64::new(-1.5, f64::NEG_INFINITY),
-                _ => complex_value(trees, indices),
-            }
-        })
-        .unwrap();
+    let complex = TensorMap::from_subblock_fn(&runtime, [&a], [&a, &d], |trees, indices| {
+        match indices.iter().sum::<usize>() % 3 {
+            0 => Complex64::new(f64::INFINITY, 0.0),
+            1 => Complex64::new(-1.5, f64::NEG_INFINITY),
+            _ => complex_value(trees, indices),
+        }
+    })
+    .unwrap();
     let lazy = complex.adjoint().unwrap();
     let literal = literal_adjoint_payload(&snapshot!(complex), &snapshot!(lazy), |z: Complex64| {
         z.conj()
@@ -323,7 +322,7 @@ fn lazy_adjoint_materialization_copies_non_finite_values_bit_exactly() {
         );
     }
 
-    let real = TensorMap::from_block_fn(&runtime, [&a], [&a, &d], |_, indices| {
+    let real = TensorMap::from_subblock_fn(&runtime, [&a], [&a, &d], |_, indices| {
         match indices.iter().sum::<usize>() % 3 {
             0 => f64::INFINITY,
             1 => f64::NEG_INFINITY,

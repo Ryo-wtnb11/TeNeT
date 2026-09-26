@@ -42,7 +42,7 @@ fn real_fill<S: std::fmt::Debug>(_trees: &tenet::typed::BlockFusionTrees<S>, idx
 }
 
 fn u1_leg() -> GradedSpace<U1FusionRule> {
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         Arc::new(U1FusionRule),
         [
             (U1Irrep::new(-1), 2),
@@ -54,7 +54,7 @@ fn u1_leg() -> GradedSpace<U1FusionRule> {
 }
 
 fn su2_leg() -> GradedSpace<SU2FusionRule> {
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         Arc::new(SU2FusionRule),
         [
             (SU2Irrep::from_twice_spin(0), 2),
@@ -71,7 +71,7 @@ fn the_dense_permute_oracle_agrees_with_the_host_for_u1_and_su2() {
 
     let u1 = u1_leg();
     let u1_tensor: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&u1, &u1], [&u1, &u1], real_fill).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&u1, &u1], [&u1, &u1], real_fill).unwrap();
     let source = u1_tensor.to_physical_dense().unwrap();
     let permuted = u1_tensor.permute(&[1, 0], &[3, 2]).unwrap();
     let (shape, data) = permute_dense(&source.shape, &source.data, &[1, 0, 3, 2]);
@@ -83,7 +83,7 @@ fn the_dense_permute_oracle_agrees_with_the_host_for_u1_and_su2() {
     // to produce what is, physically, a bare axis permutation.
     let su2 = su2_leg();
     let su2_tensor: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&su2, &su2], [&su2, &su2], real_fill).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&su2, &su2], [&su2, &su2], real_fill).unwrap();
     let source = su2_tensor.to_physical_dense().unwrap();
     let permuted = su2_tensor.permute(&[1, 0], &[3, 2]).unwrap();
     let (shape, data) = permute_dense(&source.shape, &source.data, &[1, 0, 3, 2]);
@@ -116,7 +116,7 @@ fn a_runtime_without_a_device_reports_no_device_transform_state_and_still_clears
 
     let v = u1_leg();
     let tensor: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&v, &v], [&v, &v], real_fill).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&v, &v], [&v, &v], real_fill).unwrap();
     let _ = tensor.permute(&[1, 0], &[3, 2]).unwrap();
     assert!(runtime.tree_transform_cache_info().entries() > 0);
 
@@ -153,7 +153,7 @@ fn the_host_overwrite_into_preconditions_have_a_fixed_order_and_wording() {
     let runtime = Runtime::builder().build().unwrap();
     let v = u1_leg();
     let source: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&v, &v], [&v, &v], real_fill).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&v, &v], [&v, &v], real_fill).unwrap();
     // Fresh, uniquely owned destinations: a `clone()` shares the payload `Arc`
     // and would trip the unique-ownership check instead.
     let destination = || source.permute(&[2, 0], &[1, 3]).unwrap();
@@ -164,12 +164,12 @@ fn the_host_overwrite_into_preconditions_have_a_fixed_order_and_wording() {
     let other = Runtime::builder().build().unwrap();
     let z2 = Arc::new(tenet::core::ZNFusionRule::new(2).unwrap());
     let z3 = Arc::new(tenet::core::ZNFusionRule::new(3).unwrap());
-    let z2_leg = GradedSpace::try_new_with_arc(Arc::clone(&z2), [(z2.irrep(0), 2)]).unwrap();
-    let z3_leg = GradedSpace::try_new_with_arc(Arc::clone(&z3), [(z3.irrep(0), 2)]).unwrap();
+    let z2_leg = GradedSpace::try_new(Arc::clone(&z2), [(z2.irrep(0), 2)]).unwrap();
+    let z3_leg = GradedSpace::try_new(Arc::clone(&z3), [(z3.irrep(0), 2)]).unwrap();
     let zn_fill = |_: &_, indices: &[usize]| indices.iter().map(|&i| i as f64 + 1.0).sum::<f64>();
-    let z2_source = TensorMap::from_block_fn(&runtime, [&z2_leg], [&z2_leg], zn_fill).unwrap();
+    let z2_source = TensorMap::from_subblock_fn(&runtime, [&z2_leg], [&z2_leg], zn_fill).unwrap();
     let mut foreign =
-        TensorMap::from_block_fn(&other, [&z3_leg], [&z3_leg], |_, _| f64::NAN).unwrap();
+        TensorMap::from_subblock_fn(&other, [&z3_leg], [&z3_leg], |_, _| f64::NAN).unwrap();
     assert_eq!(
         z2_source
             .permute_overwrite_into(&mut foreign, &[0], &[1], 1.0)
@@ -179,7 +179,7 @@ fn the_host_overwrite_into_preconditions_have_a_fixed_order_and_wording() {
 
     // Rule mismatch precedes a lazy-adjoint source.
     let mut z3_destination =
-        TensorMap::from_block_fn(&runtime, [&z3_leg], [&z3_leg], |_, _| f64::NAN).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&z3_leg], [&z3_leg], |_, _| f64::NAN).unwrap();
     assert_eq!(
         z2_source
             .adjoint()
@@ -251,7 +251,7 @@ fn the_host_overwrite_into_preconditions_have_a_fixed_order_and_wording() {
 
     // `repartition_overwrite_into` onto a destination of another rank.
     let mut rank_three =
-        TensorMap::from_block_fn(&runtime, [&v, &v], [&v], |_, _| f64::NAN).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&v, &v], [&v], |_, _| f64::NAN).unwrap();
     assert_eq!(
         message(
             source
@@ -271,7 +271,7 @@ fn host_overwrite_into_clears_a_poisoned_destination_and_zero_scales_to_zeros() 
     let runtime = Runtime::builder().build().unwrap();
     let v = u1_leg();
     let source: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&v, &v], [&v, &v], real_fill).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&v, &v], [&v, &v], real_fill).unwrap();
 
     let mut poisoned = source.permute(&[2, 0], &[1, 3]).unwrap().scale(f64::NAN);
     assert!(poisoned.data().iter().all(|value| value.is_nan()));
@@ -305,7 +305,7 @@ fn host_overwrite_into_clears_a_poisoned_destination_and_zero_scales_to_zeros() 
     // Zero())` does (observed: `0.0 + 0.0im` over a `NaN + 1.0im`
     // destination and an `Inf + 1.0im` source).
     let nan_source: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&v, &v], [&v, &v], |trees, idx| {
+        TensorMap::from_subblock_fn(&runtime, [&v, &v], [&v, &v], |trees, idx| {
             if idx.iter().sum::<usize>() % 3 == 0 {
                 f64::NAN
             } else {
@@ -386,7 +386,7 @@ fn a_fermionic_twist_only_ever_keeps_or_negates_an_entry() {
 
     // The fixtures are the device gate's own: fZ2 with a dual leg, and the two
     // product providers, whose factors are products of the two rules' own.
-    let leg = GradedSpace::try_new_with_arc(
+    let leg = GradedSpace::try_new(
         Arc::new(tenet::core::FermionParityFusionRule),
         [
             (tenet::core::Z2Irrep::EVEN, 2),
@@ -396,7 +396,7 @@ fn a_fermionic_twist_only_ever_keeps_or_negates_an_entry() {
     .unwrap();
     let dual = leg.try_dual().unwrap();
     let tensor: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&leg, &dual], [&leg, &leg], real_fill).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&leg, &dual], [&leg, &leg], real_fill).unwrap();
     assert_signs_only_over!(
         "fZ2",
         tensor,
@@ -411,7 +411,7 @@ fn a_fermionic_twist_only_ever_keeps_or_negates_an_entry() {
 
     // fZ2 x U(1).
     let rule = Arc::new(tenet::core::FermionParityFusionRule.product(U1FusionRule));
-    let leg_u1 = GradedSpace::try_new_with_arc(
+    let leg_u1 = GradedSpace::try_new(
         Arc::clone(&rule),
         [
             (
@@ -430,7 +430,7 @@ fn a_fermionic_twist_only_ever_keeps_or_negates_an_entry() {
     )
     .unwrap();
     let product_u1: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&leg_u1, &leg_u1], [&leg_u1, &leg_u1], real_fill)
+        TensorMap::from_subblock_fn(&runtime, [&leg_u1, &leg_u1], [&leg_u1, &leg_u1], real_fill)
             .unwrap();
     assert_signs_only_over!(
         "fZ2 x U(1)",
@@ -440,7 +440,7 @@ fn a_fermionic_twist_only_ever_keeps_or_negates_an_entry() {
 
     // fZ2 (x) SU(2): the same sign domain with non-Abelian degeneracies.
     let rule = Arc::new(tenet::core::FermionParityFusionRule.product(SU2FusionRule));
-    let leg_su2 = GradedSpace::try_new_with_arc(
+    let leg_su2 = GradedSpace::try_new(
         Arc::clone(&rule),
         [
             (
@@ -467,7 +467,7 @@ fn a_fermionic_twist_only_ever_keeps_or_negates_an_entry() {
         ],
     )
     .unwrap();
-    let product_su2: TensorMap<_, f64> = TensorMap::from_block_fn(
+    let product_su2: TensorMap<_, f64> = TensorMap::from_subblock_fn(
         &runtime,
         [&leg_su2, &leg_su2],
         [&leg_su2, &leg_su2],
@@ -509,18 +509,18 @@ fn a_fermionic_twist_only_ever_keeps_or_negates_an_entry() {
 #[test]
 fn a_twist_of_a_space_with_no_coupled_sector_is_the_identity_short_circuit() {
     let runtime = Runtime::builder().build().unwrap();
-    let even = GradedSpace::try_new_with_arc(
+    let even = GradedSpace::try_new(
         Arc::new(tenet::core::FermionParityFusionRule),
         [(tenet::core::Z2Irrep::EVEN, 2)],
     )
     .unwrap();
-    let odd = GradedSpace::try_new_with_arc(
+    let odd = GradedSpace::try_new(
         Arc::new(tenet::core::FermionParityFusionRule),
         [(tenet::core::Z2Irrep::ODD, 1)],
     )
     .unwrap();
     let empty: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&even], [&odd], real_fill).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&even], [&odd], real_fill).unwrap();
     assert!(empty.data().is_empty(), "the fixture must carry no element");
     assert!(empty.twist(&[0, 1]).unwrap().data().is_empty());
 }

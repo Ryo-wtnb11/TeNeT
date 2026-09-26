@@ -19,10 +19,9 @@ fn restrict_and_embed_preserve_su3_multiplicity_vertices() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(SUNFusionRule::new(3).unwrap());
     let adjoint = vec![2i64, 2];
-    let leg = GradedSpace::try_new_with_arc(Arc::clone(&provider), [(adjoint.clone(), 3)]).unwrap();
-    let spectator =
-        GradedSpace::try_new_with_arc(Arc::clone(&provider), [(adjoint.clone(), 2)]).unwrap();
-    let source: TensorMap<_, f64> = TensorMap::from_block_fn(
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(adjoint.clone(), 3)]).unwrap();
+    let spectator = GradedSpace::try_new(Arc::clone(&provider), [(adjoint.clone(), 2)]).unwrap();
+    let source: TensorMap<_, f64> = TensorMap::from_subblock_fn(
         &runtime,
         [&leg, &spectator, &spectator],
         [],

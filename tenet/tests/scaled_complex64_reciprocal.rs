@@ -39,7 +39,7 @@ fn runtime() -> Runtime {
 }
 
 fn leg(dim: usize) -> GradedSpace<U1FusionRule> {
-    GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), dim)]).unwrap()
+    GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), dim)]).unwrap()
 }
 
 fn bits(z: Complex64) -> (u64, u64) {

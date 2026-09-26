@@ -3,7 +3,6 @@
 
 use std::any::Any;
 use std::hash::Hash;
-use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(feature = "cuda")]
 use std::sync::PoisonError;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
@@ -641,7 +640,6 @@ struct RuntimeInner {
     // can still synchronize. Device operations do not take this lock: they
     // serialize on the device-local `cuda` mutex below instead.
     state: Mutex<RuntimeState>,
-    rand_counter: AtomicU64,
     execution_config: RuntimeExecutionConfig,
     tree_transform_stores: RuntimeTreeTransformStores,
     /// Standalone operations lease an execution context and, for factorization,
@@ -1036,11 +1034,12 @@ pub(crate) struct RuntimeExecutionConfig {
 /// # Examples
 ///
 /// ```
+/// use std::sync::Arc;
 /// use tenet::prelude::*;
 ///
 /// let rt = Runtime::builder().build()?;
 /// let v = GradedSpace::try_new(
-///     Z2FusionRule,
+///     Arc::new(Z2FusionRule),
 ///     [(Z2Irrep::EVEN, 1), (Z2Irrep::ODD, 1)],
 /// )?;
 /// let a: TensorMap<_, f64> = TensorMap::zeros(&rt, [&v], [&v])?;
@@ -1455,14 +1454,6 @@ impl Runtime {
             .map(Some)
             .map_err(|error| Error::from(tenet_operations::OperationError::Dense(error)))
     }
-
-    /// Deterministic per-runtime stream position for
-    /// [`crate::prelude::TensorMap::rand`].
-    pub(crate) fn next_rand_seed(&self) -> u64 {
-        // Fixed base seed: runs are reproducible, consecutive `rand` calls
-        // still produce distinct tensors.
-        0x9E37_79B9_7F4A_7C15 ^ self.inner.rand_counter.fetch_add(1, Ordering::Relaxed)
-    }
 }
 
 fn bound_layout_identity<R>(space: &BoundDynamicFusionMapSpace<R>) -> (HomSpaceId, [usize; 3]) {
@@ -1667,6 +1658,7 @@ impl RuntimeBuilder {
     /// # Examples
     ///
     /// ```
+    /// use std::sync::Arc;
     /// use tenet::prelude::*;
     ///
     /// // Explicit faer provider. Every tensor created from this runtime
@@ -1675,7 +1667,7 @@ impl RuntimeBuilder {
     ///     .linalg_backend(LinalgBackend::Faer)
     ///     .build()?;
     /// let v = GradedSpace::try_new(
-    ///     U1FusionRule,
+    ///     Arc::new(U1FusionRule),
     ///     [(-1, 1), (0, 2), (1, 1)].map(|(q, n)| (U1Irrep::new(q), n)),
     /// )?;
     /// let t: TensorMap<_, f64> = TensorMap::rand_with_seed(&rt, [&v, &v], [&v, &v], 7)?;
@@ -1846,7 +1838,6 @@ impl RuntimeBuilder {
         Ok(Runtime {
             inner: Arc::new(RuntimeInner {
                 state: Mutex::new(state),
-                rand_counter: AtomicU64::new(0),
                 execution_config: RuntimeExecutionConfig {
                     gemm_kind,
                     recoupling_threads: self.recoupling_threads,
@@ -2276,13 +2267,13 @@ mod tests {
             malformed_channels: true,
             ..CountingFibonacci::new()
         });
-        let tau = GradedSpace::try_new_with_arc(Arc::clone(&rule), [(FibonacciSector::Tau, 1)])
+        let tau = GradedSpace::try_new(Arc::clone(&rule), [(FibonacciSector::Tau, 1)])
             .expect("label admission");
         runtime.clear_tree_transform_cache();
         let cache_before = runtime.tree_transform_cache_info();
         let callbacks = AtomicUsize::new(0);
 
-        let late = TensorMap::<CountingFibonacci, Complex64>::from_block_fn(
+        let late = TensorMap::<CountingFibonacci, Complex64>::from_subblock_fn(
             &runtime,
             [&tau, &tau, &tau],
             [&tau],
@@ -2296,7 +2287,7 @@ mod tests {
         assert_eq!(callbacks.load(Ordering::Relaxed), 0);
         assert_eq!(runtime.tree_transform_cache_info(), cache_before);
 
-        let early = TensorMap::<CountingFibonacci, Complex64>::from_block_fn(
+        let early = TensorMap::<CountingFibonacci, Complex64>::from_subblock_fn(
             &runtime,
             std::iter::empty(),
             std::iter::empty(),
@@ -2313,18 +2304,22 @@ mod tests {
         assert_eq!(callbacks.load(Ordering::Relaxed), 0);
         assert_eq!(runtime.tree_transform_cache_info(), cache_before);
 
-        assert!(TensorMap::<CountingFibonacci, Complex64>::rand(
+        assert!(TensorMap::<CountingFibonacci, Complex64>::rand_with_seed(
             &runtime,
             [&tau, &tau, &tau],
-            [&tau]
+            [&tau],
+            0x9E37_79B9_7F4A_7C15,
         )
         .is_err());
         let valid_tau =
-            GradedSpace::try_new(FibonacciFusionRule, [(FibonacciSector::Tau, 1)]).unwrap();
+            GradedSpace::try_new(Arc::new(FibonacciFusionRule), [(FibonacciSector::Tau, 1)])
+                .unwrap();
         let after: TensorMap<_, Complex64> =
-            TensorMap::rand(&runtime, [&valid_tau], [&valid_tau]).unwrap();
+            TensorMap::rand_with_seed(&runtime, [&valid_tau], [&valid_tau], 0x9E37_79B9_7F4A_7C15)
+                .unwrap();
         let expected: TensorMap<_, Complex64> =
-            TensorMap::rand(&control, [&valid_tau], [&valid_tau]).unwrap();
+            TensorMap::rand_with_seed(&control, [&valid_tau], [&valid_tau], 0x9E37_79B9_7F4A_7C15)
+                .unwrap();
         assert_eq!(after.data(), expected.data());
     }
 
@@ -2333,7 +2328,7 @@ mod tests {
         let runtime_a = Runtime::builder().build().unwrap();
         let runtime_b = Runtime::builder().build().unwrap();
         let provider = Arc::new(SU2FusionRule);
-        let space = GradedSpace::try_new_with_arc(
+        let space = GradedSpace::try_new(
             provider,
             [
                 (SU2Irrep::from_twice_spin(0), 2),

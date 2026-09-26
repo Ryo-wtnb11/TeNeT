@@ -30,7 +30,7 @@ fn fill(c0: i64, labels: [i64; 5], idx: &[usize]) -> f64 {
 fn complex_su2_structural_invariants_match_tensorkit() {
     let runtime = Runtime::builder().build().unwrap();
     let rule = Arc::new(SU2FusionRule);
-    let space = GradedSpace::try_new_with_arc(
+    let space = GradedSpace::try_new(
         rule,
         [
             (SU2Irrep::from_twice_spin(0), 1),
@@ -38,7 +38,7 @@ fn complex_su2_structural_invariants_match_tensorkit() {
         ],
     )
     .unwrap();
-    let source: TensorMap<_, Complex64> = TensorMap::from_block_fn(
+    let source: TensorMap<_, Complex64> = TensorMap::from_subblock_fn(
         &runtime,
         [&space, &space],
         [&space, &space],

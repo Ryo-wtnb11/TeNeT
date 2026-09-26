@@ -42,12 +42,12 @@ fn device_diagonal_factors_transfer_only_what_the_host_decides_on() {
     let bytes = |len: usize| (len * std::mem::size_of::<f64>()) as u64;
     for charges in [1_usize, 9] {
         let half = charges as i32 / 2;
-        let leg = GradedSpace::try_new_with_arc(
+        let leg = GradedSpace::try_new(
             Arc::new(U1FusionRule),
             (-half..=half).map(|charge| (U1Irrep::new(charge), 3)),
         )
         .unwrap();
-        let host = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, index| {
+        let host = TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, index| {
             1.0 + ((index[0] * 3 + index[1] * 5) % 7) as f64
         })
         .unwrap();

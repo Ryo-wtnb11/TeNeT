@@ -71,27 +71,27 @@ macro_rules! assert_relation {
     }};
 }
 
-/// `x^H x = 1` on the bond. `TensorMap::id` is multiplicity-free only, so the
-/// identity is spelled by its reduced blocks.
+/// `x^H x = 1` on the bond, with the identity spelled by its reduced blocks.
 macro_rules! assert_isometry {
     ($gram:expr, $bond:expr, $one:expr, $terms:expr, $what:expr) => {{
         let gram = $gram;
         let (one, zero) = ($one, $one - $one);
-        let identity = TensorMap::from_block_fn(gram.runtime(), [&$bond], [&$bond], |_, index| {
-            if index[0] == index[1] {
-                one
-            } else {
-                zero
-            }
-        })
-        .unwrap();
+        let identity =
+            TensorMap::from_subblock_fn(gram.runtime(), [&$bond], [&$bond], |_, index| {
+                if index[0] == index[1] {
+                    one
+                } else {
+                    zero
+                }
+            })
+            .unwrap();
         assert_relation!(gram, identity, $terms, $what);
     }};
 }
 
 fn su3_legs() -> (Arc<SUNFusionRule>, GradedSpace<SUNFusionRule>) {
     let provider = Arc::new(SUNFusionRule::new(3).unwrap());
-    let leg = GradedSpace::try_new_with_arc(
+    let leg = GradedSpace::try_new(
         Arc::clone(&provider),
         [(vec![1i64, 0], 3), (vec![2i64, 2], 2)],
     )
@@ -101,7 +101,7 @@ fn su3_legs() -> (Arc<SUNFusionRule>, GradedSpace<SUNFusionRule>) {
 
 /// A smaller space on the same provider, used as a `truncspace` target.
 fn su3_target(provider: &Arc<SUNFusionRule>) -> GradedSpace<SUNFusionRule> {
-    GradedSpace::try_new_with_arc(Arc::clone(provider), [(vec![2i64, 2], 2)]).unwrap()
+    GradedSpace::try_new(Arc::clone(provider), [(vec![2i64, 2], 2)]).unwrap()
 }
 
 macro_rules! assert_su3_svd_composition {
@@ -295,7 +295,7 @@ fn su3_svd_composition_matches_the_oracle_for_every_policy() {
     let (provider, leg) = su3_legs();
     let mut state = 0x5150_2701u64;
     let source: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime(), [&leg, &leg], [&leg], move |_, _| {
+        TensorMap::from_subblock_fn(&runtime(), [&leg, &leg], [&leg], move |_, _| {
             fill(&mut state)
         })
         .unwrap();
@@ -316,7 +316,7 @@ fn su3_complex_svd_composition_matches_the_oracle_for_every_policy() {
     let (provider, leg) = su3_legs();
     let mut state = 0x5150_2703u64;
     let source: TensorMap<_, Complex64> =
-        TensorMap::from_block_fn(&runtime(), [&leg, &leg], [&leg], move |_, _| {
+        TensorMap::from_subblock_fn(&runtime(), [&leg, &leg], [&leg], move |_, _| {
             Complex64::new(fill(&mut state), fill(&mut state))
         })
         .unwrap();
@@ -328,7 +328,8 @@ fn su3_eigh_composition_matches_the_oracle_for_every_policy() {
     let (provider, leg) = su3_legs();
     let mut state = 0x5150_2702u64;
     let raw: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime(), [&leg], [&leg], move |_, _| fill(&mut state)).unwrap();
+        TensorMap::from_subblock_fn(&runtime(), [&leg], [&leg], move |_, _| fill(&mut state))
+            .unwrap();
     let source = raw.axpby(1.0, &raw.adjoint().unwrap(), 1.0).unwrap();
     assert_su3_eigh_composition!(source, 1.0, su3_target(&provider), "su3 eigh f64");
 }
@@ -338,7 +339,7 @@ fn su3_complex_eigh_composition_matches_the_oracle_for_every_policy() {
     let (provider, leg) = su3_legs();
     let mut state = 0x5150_2704u64;
     let raw: TensorMap<_, Complex64> =
-        TensorMap::from_block_fn(&runtime(), [&leg], [&leg], move |_, _| {
+        TensorMap::from_subblock_fn(&runtime(), [&leg], [&leg], move |_, _| {
             Complex64::new(fill(&mut state), fill(&mut state))
         })
         .unwrap();
@@ -356,7 +357,7 @@ fn su3_complex_eigh_composition_matches_the_oracle_for_every_policy() {
 fn su3_eig_composition_matches_the_oracle_for_every_policy() {
     let (provider, leg) = su3_legs();
     let mut state = 0x5150_2705u64;
-    let source: TensorMap<_, f64> = TensorMap::from_block_fn(
+    let source: TensorMap<_, f64> = TensorMap::from_subblock_fn(
         &runtime(),
         [&leg],
         [&leg],
@@ -367,6 +368,6 @@ fn su3_eig_composition_matches_the_oracle_for_every_policy() {
         },
     )
     .unwrap();
-    let complex = source.to_c64();
+    let complex = source.convert::<Complex64>();
     assert_su3_eig_composition!(source, complex, su3_target(&provider), "su3 eig f64");
 }

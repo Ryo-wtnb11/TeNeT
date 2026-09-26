@@ -6,8 +6,8 @@
 //!   per-sector gather of `to_physical_dense` of the source, with the dense
 //!   offsets of the restricted leg recomputed (the physical order is
 //!   TensorKit's sector order, then degeneracy, then carrier index);
-//! * an **inclusion isometry**: `ι_σ` hand-filled with `from_block_fn`, padded
-//!   with `TensorMap::id` through `otimes`, and applied with `compose`.
+//! * an **inclusion isometry**: `ι_σ` hand-filled with `from_subblock_fn`, padded
+//!   with `TensorMap::isomorphism(V, V)` through `otimes`, and applied with `compose`.
 //!   `contract` is deliberately not used: it applies the fermionic supertrace
 //!   twist to every dual contracted right-hand axis, so it would test a
 //!   different map on odd sectors.
@@ -160,7 +160,7 @@ fn assert_close_complex(actual: &[Complex64], expected: &[Complex64]) {
 }
 
 fn u1(provider: &Arc<U1FusionRule>, pairs: &[(i32, usize)]) -> GradedSpace<U1FusionRule> {
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         Arc::clone(provider),
         pairs
             .iter()
@@ -170,7 +170,7 @@ fn u1(provider: &Arc<U1FusionRule>, pairs: &[(i32, usize)]) -> GradedSpace<U1Fus
 }
 
 fn su2(provider: &Arc<SU2FusionRule>, pairs: &[(usize, usize)]) -> GradedSpace<SU2FusionRule> {
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         Arc::clone(provider),
         pairs
             .iter()
@@ -183,7 +183,7 @@ fn fz2(
     provider: &Arc<FermionParityFusionRule>,
     pairs: &[(bool, usize)],
 ) -> GradedSpace<FermionParityFusionRule> {
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         Arc::clone(provider),
         pairs
             .iter()
@@ -357,7 +357,7 @@ fn restrict_equals_composition_with_the_inclusion_isometry_on_both_sides() {
             .map_or(0, |(_, range)| range.start)
     };
     // ι_σ : V <- W, a one on every selected degeneracy coordinate.
-    let iota = TensorMap::<_, f64>::from_block_fn(
+    let iota = TensorMap::<_, f64>::from_subblock_fn(
         &runtime,
         [&leg],
         [selection.subspace()],
@@ -371,7 +371,7 @@ fn restrict_equals_composition_with_the_inclusion_isometry_on_both_sides() {
     )
     .unwrap();
     // The adjoint isometry, hand-filled rather than taken from `adjoint()`.
-    let iota_dagger = TensorMap::<_, f64>::from_block_fn(
+    let iota_dagger = TensorMap::<_, f64>::from_subblock_fn(
         &runtime,
         [selection.subspace()],
         [&leg],
@@ -384,7 +384,8 @@ fn restrict_equals_composition_with_the_inclusion_isometry_on_both_sides() {
         },
     )
     .unwrap();
-    let spectator_id = TensorMap::<_, f64>::id(&runtime, [&spectator]).unwrap();
+    let spectator_id =
+        TensorMap::<_, f64>::isomorphism(&runtime, [&spectator], [&spectator]).unwrap();
 
     // Codomain leg 1: (id ⊗ ι†) ∘ t.
     let projector = spectator_id.otimes(&iota_dagger).unwrap();
@@ -415,7 +416,7 @@ fn restrict_of_a_fermionic_odd_dual_leg_equals_the_isometry_composition() {
     let selected = [(Z2Irrep::ODD, 1..3)];
     let selection = LegSelection::try_new(&leg, selected.iter().cloned()).unwrap();
     let start = |sector: &Z2Irrep| if *sector == Z2Irrep::ODD { 1 } else { 0 };
-    let iota_dagger = TensorMap::<_, f64>::from_block_fn(
+    let iota_dagger = TensorMap::<_, f64>::from_subblock_fn(
         &runtime,
         [selection.subspace()],
         [&leg],
@@ -428,7 +429,8 @@ fn restrict_of_a_fermionic_odd_dual_leg_equals_the_isometry_composition() {
         },
     )
     .unwrap();
-    let spectator_id = TensorMap::<_, f64>::id(&runtime, [&spectator]).unwrap();
+    let spectator_id =
+        TensorMap::<_, f64>::isomorphism(&runtime, [&spectator], [&spectator]).unwrap();
     let expected = iota_dagger
         .otimes(&spectator_id)
         .unwrap()
@@ -738,7 +740,7 @@ fn restrict_and_embed_on_a_product_fz2_u1_leg_match_the_isometry_composition() {
             U1Irrep::new(charge),
         )
     };
-    let leg = GradedSpace::try_new_with_arc(
+    let leg = GradedSpace::try_new(
         Arc::clone(&provider),
         [
             (label(false, 0), 2),
@@ -747,7 +749,7 @@ fn restrict_and_embed_on_a_product_fz2_u1_leg_match_the_isometry_composition() {
         ],
     )
     .unwrap();
-    let other = GradedSpace::try_new_with_arc(
+    let other = GradedSpace::try_new(
         Arc::clone(&provider),
         [(label(false, 0), 2), (label(true, 1), 1)],
     )
@@ -767,7 +769,7 @@ fn restrict_and_embed_on_a_product_fz2_u1_leg_match_the_isometry_composition() {
 
     // The product rule has no physical-basis expansion, so the oracle here is
     // the inclusion isometry, applied with `compose` only.
-    let iota_dagger = TensorMap::<_, Complex64>::from_block_fn(
+    let iota_dagger = TensorMap::<_, Complex64>::from_subblock_fn(
         &runtime,
         [selection.subspace()],
         [&leg],
@@ -780,7 +782,7 @@ fn restrict_and_embed_on_a_product_fz2_u1_leg_match_the_isometry_composition() {
         },
     )
     .unwrap();
-    let iota = TensorMap::<_, Complex64>::from_block_fn(
+    let iota = TensorMap::<_, Complex64>::from_subblock_fn(
         &runtime,
         [&leg],
         [selection.subspace()],
@@ -793,7 +795,8 @@ fn restrict_and_embed_on_a_product_fz2_u1_leg_match_the_isometry_composition() {
         },
     )
     .unwrap();
-    let spectator_id = TensorMap::<_, Complex64>::id(&runtime, [&other]).unwrap();
+    let spectator_id =
+        TensorMap::<_, Complex64>::isomorphism(&runtime, [&other], [&other]).unwrap();
 
     let expected = iota_dagger
         .otimes(&spectator_id)
@@ -861,9 +864,8 @@ fn a_selection_built_on_another_rule_is_a_rule_mismatch() {
     let two = Arc::new(ZNFusionRule::new(2).unwrap());
     let three = Arc::new(ZNFusionRule::new(3).unwrap());
     let leg =
-        GradedSpace::try_new_with_arc(Arc::clone(&two), [(two.irrep(0), 2), (two.irrep(1), 2)])
-            .unwrap();
-    let foreign = GradedSpace::try_new_with_arc(
+        GradedSpace::try_new(Arc::clone(&two), [(two.irrep(0), 2), (two.irrep(1), 2)]).unwrap();
+    let foreign = GradedSpace::try_new(
         Arc::clone(&three),
         [(three.irrep(0), 2), (three.irrep(1), 2)],
     )
@@ -1017,7 +1019,7 @@ impl Place {
 }
 
 /// `restrict_leg`, `embed_leg` and their round trip, each against a reduced
-/// block oracle filled independently with `from_block_fn`: restriction is a
+/// block oracle filled independently with `from_subblock_fn`: restriction is a
 /// pure copy, so every entry must match bit for bit.
 macro_rules! assert_exact_restrict_embed {
     ($dtype:ty, [$($codomain:expr),+], [$($domain:expr),+], $axis:expr, $selected:expr) => {{
@@ -1055,14 +1057,14 @@ macro_rules! assert_exact_restrict_embed {
         let sub_codomain = replaced(&codomain, 0);
         let sub_domain = replaced(&domain, rank);
 
-        let source = TensorMap::<_, $dtype>::from_block_fn(
+        let source = TensorMap::<_, $dtype>::from_subblock_fn(
             &runtime,
             codomain.iter().copied(),
             domain.iter().copied(),
             |trees, indices| <$dtype as ExactEntry>::entry(trees, indices),
         )
         .unwrap();
-        let expected = TensorMap::<_, $dtype>::from_block_fn(
+        let expected = TensorMap::<_, $dtype>::from_subblock_fn(
             &runtime,
             &sub_codomain,
             &sub_domain,
@@ -1080,7 +1082,7 @@ macro_rules! assert_exact_restrict_embed {
         assert_eq!(exact_bits(restricted.data()), exact_bits(expected.data()));
 
         let embedded = restricted.embed_leg(axis, &selection).unwrap();
-        let projected = TensorMap::<_, $dtype>::from_block_fn(
+        let projected = TensorMap::<_, $dtype>::from_subblock_fn(
             &runtime,
             codomain.iter().copied(),
             domain.iter().copied(),
@@ -1143,7 +1145,7 @@ fn restrict_and_embed_are_exact_block_copies_on_fz2_u1_legs() {
             U1Irrep::new(charge),
         )
     };
-    let leg = GradedSpace::try_new_with_arc(
+    let leg = GradedSpace::try_new(
         Arc::clone(&provider),
         [
             (label(false, 0), 3),
@@ -1153,7 +1155,7 @@ fn restrict_and_embed_are_exact_block_copies_on_fz2_u1_legs() {
     )
     .unwrap();
     let dual = leg.try_dual().unwrap();
-    let other = GradedSpace::try_new_with_arc(
+    let other = GradedSpace::try_new(
         Arc::clone(&provider),
         [
             (label(false, 0), 2),

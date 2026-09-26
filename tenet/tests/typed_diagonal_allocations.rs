@@ -73,11 +73,11 @@ fn runtime() -> &'static Runtime {
 }
 
 fn leg() -> GradedSpace<Z2FusionRule> {
-    GradedSpace::try_new_with_arc(Arc::new(Z2FusionRule), [(Z2Irrep::EVEN, DEGENERACY)]).unwrap()
+    GradedSpace::try_new(Arc::new(Z2FusionRule), [(Z2Irrep::EVEN, DEGENERACY)]).unwrap()
 }
 
 fn leg_with(degeneracy: usize) -> GradedSpace<Z2FusionRule> {
-    GradedSpace::try_new_with_arc(Arc::new(Z2FusionRule), [(Z2Irrep::EVEN, degeneracy)]).unwrap()
+    GradedSpace::try_new(Arc::new(Z2FusionRule), [(Z2Irrep::EVEN, degeneracy)]).unwrap()
 }
 
 fn pseudo_random(state: &mut u64) -> f64 {
@@ -88,7 +88,7 @@ fn pseudo_random(state: &mut u64) -> f64 {
 fn source(seed: u64) -> TensorMap<Z2FusionRule, f64> {
     let leg = leg();
     let mut state = seed;
-    TensorMap::from_block_fn(runtime(), [&leg], [&leg], move |_, _| {
+    TensorMap::from_subblock_fn(runtime(), [&leg], [&leg], move |_, _| {
         pseudo_random(&mut state)
     })
     .unwrap()
@@ -97,7 +97,7 @@ fn source(seed: u64) -> TensorMap<Z2FusionRule, f64> {
 fn complex_source(seed: u64) -> TensorMap<Z2FusionRule, Complex64> {
     let leg = leg();
     let mut state = seed;
-    TensorMap::from_block_fn(runtime(), [&leg], [&leg], move |_, _| {
+    TensorMap::from_subblock_fn(runtime(), [&leg], [&leg], move |_, _| {
         Complex64::new(pseudo_random(&mut state), pseudo_random(&mut state))
     })
     .unwrap()
@@ -336,7 +336,7 @@ fn a_mixed_add_allocates_only_its_own_dense_result() {
     // double this, which is what the ceiling rejects.
     let _measurement = MEASUREMENT_LOCK.lock().unwrap();
     let d = spectrum(0x5eed_0012);
-    let dense = TensorMap::id(runtime(), &d.domain()).unwrap();
+    let dense = TensorMap::isomorphism(runtime(), &d.domain(), &d.domain()).unwrap();
     // Reading `dense` must not be what pays for the diagonal: warm nothing on
     // `d` beyond what the operation itself needs.
     let bytes = warmed_bytes(|| d.axpby(0.75, &dense, -0.5).unwrap());
@@ -608,7 +608,7 @@ fn pr3_conversions_allocate_one_output_and_stay_compact_on_a_spectrum() {
 
     for (name, bytes) in [
         ("zeros_like", warmed_bytes(|| d.zeros_like())),
-        ("to_c64", warmed_bytes(|| d.to_c64())),
+        ("to_c64", warmed_bytes(|| d.convert::<Complex64>())),
         ("re", warmed_bytes(|| complex_d.re())),
         ("im", warmed_bytes(|| complex_d.im())),
     ] {
@@ -641,7 +641,7 @@ fn pr3_dense_conversions_allocate_only_their_own_output() {
     let complex_tensor = complex_source(0x5eed_0024);
     let ceiling = dense_payload_bytes();
 
-    let widen = warmed_bytes(|| tensor.to_c64());
+    let widen = warmed_bytes(|| tensor.convert::<Complex64>());
     assert!(
         (2 * ceiling..3 * ceiling).contains(&widen),
         "dense to_c64 did not allocate exactly its own c64 output: {widen} bytes"
@@ -659,9 +659,9 @@ fn pr3_dense_conversions_allocate_only_their_own_output() {
 
 #[test]
 fn pr3_inspections_allocate_no_payload() {
-    // What (issue #580 PR 3): the rank family and `leg_dim` read the space
-    // structure and allocate nothing; `leg_dims` owns only its `Vec<usize>`
-    // of rank entries, never a payload.
+    // What (issue #580 PR 3): the rank family reads the space structure and
+    // allocates nothing; `leg_dims` owns only its `Vec<usize>` of rank
+    // entries, never a payload.
     let _measurement = MEASUREMENT_LOCK.lock().unwrap();
     let tensor = source(0x5eed_0025);
 
@@ -669,7 +669,6 @@ fn pr3_inspections_allocate_no_payload() {
         ("rank", warmed_bytes(|| tensor.rank())),
         ("codomain_rank", warmed_bytes(|| tensor.codomain_rank())),
         ("domain_rank", warmed_bytes(|| tensor.domain_rank())),
-        ("leg_dim", warmed_bytes(|| tensor.leg_dim(0).unwrap())),
         ("scalar-error", warmed_bytes(|| tensor.scalar().is_err())),
     ] {
         // `scalar` on a tensor with legs formats its error message; everything

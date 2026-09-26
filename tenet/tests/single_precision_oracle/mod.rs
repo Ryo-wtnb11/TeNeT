@@ -3,7 +3,7 @@
 //!
 //! The oracle for every check built on this module is the **`f64`/`Complex64`
 //! result of the same operation on the widened input**. Both tensors are
-//! filled through `from_block_fn` from one 24-bit pseudo-random stream, so the
+//! filled through `from_subblock_fn` from one 24-bit pseudo-random stream, so the
 //! double tensor holds exactly `f64::from` of every single-precision entry and
 //! the widening contributes no error of its own. The double path is a
 //! different execution lane with a different dense kernel, and it is the path
@@ -112,19 +112,19 @@ pub fn minus_one<D: Parts>() -> D {
 ///
 /// A macro rather than a function: the payload dtype is the only thing that
 /// varies, and the alternative is repeating the eight dispatch bounds of
-/// `from_block_fn` for both instantiations.
+/// `from_subblock_fn` for both instantiations.
 #[macro_export]
 macro_rules! twin {
     ($rt:expr, $narrow:ty, $wide:ty, $codomain:expr, $domain:expr, $seed:expr) => {{
         let mut state = $seed;
         let narrow: tenet::prelude::TensorMap<_, $narrow> =
-            tenet::prelude::TensorMap::from_block_fn($rt, $codomain, $domain, |_, _| {
+            tenet::prelude::TensorMap::from_subblock_fn($rt, $codomain, $domain, |_, _| {
                 $crate::single_precision_oracle::draw_parts(&mut state)
             })
             .unwrap();
         let mut state = $seed;
         let wide: tenet::prelude::TensorMap<_, $wide> =
-            tenet::prelude::TensorMap::from_block_fn($rt, $codomain, $domain, |_, _| {
+            tenet::prelude::TensorMap::from_subblock_fn($rt, $codomain, $domain, |_, _| {
                 $crate::single_precision_oracle::draw_parts(&mut state)
             })
             .unwrap();
@@ -143,13 +143,13 @@ macro_rules! twin_with {
     ($rt:expr, $narrow:ty, $wide:ty, $codomain:expr, $domain:expr, $entry:expr) => {{
         let entry = $entry;
         let narrow: tenet::prelude::TensorMap<_, $narrow> =
-            tenet::prelude::TensorMap::from_block_fn($rt, $codomain, $domain, |_, index| {
+            tenet::prelude::TensorMap::from_subblock_fn($rt, $codomain, $domain, |_, index| {
                 let (re, im) = entry(index);
                 <$narrow as $crate::single_precision_oracle::Parts>::parts(re, im)
             })
             .unwrap();
         let wide: tenet::prelude::TensorMap<_, $wide> =
-            tenet::prelude::TensorMap::from_block_fn($rt, $codomain, $domain, |_, index| {
+            tenet::prelude::TensorMap::from_subblock_fn($rt, $codomain, $domain, |_, index| {
                 let (re, im) = entry(index);
                 <$wide as $crate::single_precision_oracle::Parts>::parts(re, im)
             })
@@ -232,7 +232,7 @@ pub fn u1_leg() -> GradedSpace<U1FusionRule> {
 
 /// [`u1_leg`] with chosen per-sector degeneracies, for rectangular fixtures.
 pub fn u1_leg_with(degeneracies: [usize; 3]) -> GradedSpace<U1FusionRule> {
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         Arc::new(U1FusionRule),
         [
             (U1Irrep::new(-1), degeneracies[0]),
@@ -268,7 +268,7 @@ pub fn fermion_su2_leg_with(degeneracies: [usize; 3]) -> GradedSpace<FermionSu2R
             SU2Irrep::from_twice_spin(twice_spin),
         )
     };
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         fermion_su2_provider(),
         [
             (label(Z2Irrep::EVEN, 0, 0), degeneracies[0]),

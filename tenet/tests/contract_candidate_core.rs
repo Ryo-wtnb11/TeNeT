@@ -198,12 +198,12 @@ fn fermionic_values<D: Payload>() {
     // must match TensorKit's B-role twist, not the untwisted sequence.
     let v = fermion_u1();
     let v_dual = v.try_dual().unwrap();
-    let a =
-        TensorMap::<_, D>::from_block_fn(&runtime, [&v, &v], [&v_dual, &v_dual], fill(4)).unwrap();
-    let b =
-        TensorMap::<_, D>::from_block_fn(&runtime, [&v_dual, &v_dual], [&v, &v], fill(5)).unwrap();
-    let p =
-        TensorMap::<_, D>::from_block_fn(&runtime, [&v, &v], [&v_dual, &v_dual], fill(6)).unwrap();
+    let a = TensorMap::<_, D>::from_subblock_fn(&runtime, [&v, &v], [&v_dual, &v_dual], fill(4))
+        .unwrap();
+    let b = TensorMap::<_, D>::from_subblock_fn(&runtime, [&v_dual, &v_dual], [&v, &v], fill(5))
+        .unwrap();
+    let p = TensorMap::<_, D>::from_subblock_fn(&runtime, [&v, &v], [&v_dual, &v_dual], fill(6))
+        .unwrap();
     for (name, rhs) in [("twisted C1", b), ("twisted L7", p.adjoint().unwrap())] {
         let case = Case {
             name,
@@ -256,7 +256,7 @@ where
     let w_dual = w.try_dual().unwrap();
     let v_dual = v.try_dual().unwrap();
     let tensor = |codomain: &[&GradedSpace<R>], domain: &[&GradedSpace<R>], salt| {
-        TensorMap::<R, D>::from_block_fn(
+        TensorMap::<R, D>::from_subblock_fn(
             runtime,
             codomain.iter().copied(),
             domain.iter().copied(),
@@ -360,7 +360,7 @@ fn u1_second() -> GradedSpace<tenet::core::U1FusionRule> {
 }
 
 fn su2_second() -> GradedSpace<tenet::core::SU2FusionRule> {
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         std::sync::Arc::new(tenet::core::SU2FusionRule),
         [
             (tenet::core::SU2Irrep::from_twice_spin(1), 1),
@@ -405,7 +405,7 @@ where
     D: Payload,
 {
     let tensor =
-        |salt| TensorMap::<R, D>::from_block_fn(runtime, [v, v], [v, v], fill(salt)).unwrap();
+        |salt| TensorMap::<R, D>::from_subblock_fn(runtime, [v, v], [v, v], fill(salt)).unwrap();
     let (a, b, lazy) = (tensor(81), tensor(82), tensor(83).adjoint().unwrap());
     let case = |name,
                 lhs: &TensorMap<R, D>,
@@ -535,11 +535,11 @@ where
     let w_dual = w.try_dual().unwrap();
     Case {
         name: "S3",
-        lhs: TensorMap::from_block_fn(runtime, [v, &w_dual], [w], fill(84))
+        lhs: TensorMap::from_subblock_fn(runtime, [v, &w_dual], [w], fill(84))
             .unwrap()
             .adjoint()
             .unwrap(),
-        rhs: TensorMap::from_block_fn(runtime, [w, v, v], [w], fill(85)).unwrap(),
+        rhs: TensorMap::from_subblock_fn(runtime, [w, v, v], [w], fill(85)).unwrap(),
         lhs_axes: vec![0],
         rhs_axes: vec![3],
         output_axes: vec![2, 0, 1, 3, 4],
@@ -635,10 +635,10 @@ fn fermionic_output_permute_values<D: Payload>() {
     // and the result must carry TensorKit's B-role twist.
     let v = fermion_u1();
     let v_dual = v.try_dual().unwrap();
-    let a =
-        TensorMap::<_, D>::from_block_fn(&runtime, [&v, &v], [&v_dual, &v_dual], fill(86)).unwrap();
-    let p =
-        TensorMap::<_, D>::from_block_fn(&runtime, [&v, &v], [&v_dual, &v_dual], fill(87)).unwrap();
+    let a = TensorMap::<_, D>::from_subblock_fn(&runtime, [&v, &v], [&v_dual, &v_dual], fill(86))
+        .unwrap();
+    let p = TensorMap::<_, D>::from_subblock_fn(&runtime, [&v, &v], [&v_dual, &v_dual], fill(87))
+        .unwrap();
     let case = Case {
         name: "twisted L7p",
         lhs: a,
@@ -675,7 +675,7 @@ fn large_output_cases(runtime: &Runtime) -> Vec<Case<tenet::core::U1FusionRule, 
     let v = u1(&[(-1, 16), (0, 16), (1, 16)]);
     let c = u1(&[(0, 1)]);
     let tensor = |codomain: [&GradedSpace<_>; 2], domain: [&GradedSpace<_>; 2], salt| {
-        TensorMap::<_, f64>::from_block_fn(runtime, codomain, domain, fill(salt)).unwrap()
+        TensorMap::<_, f64>::from_subblock_fn(runtime, codomain, domain, fill(salt)).unwrap()
     };
     let a = tensor([&v, &v], [&c, &c], 91);
     let q = tensor([&v, &v], [&c, &c], 92).adjoint().unwrap();
@@ -715,7 +715,7 @@ fn inactive_output_cases(runtime: &Runtime) -> Vec<Case<tenet::core::U1FusionRul
     let w = u1(&[(0, 20)]);
     let u = u1(&[(0, 500)]);
     let tensor = |codomain: &[&GradedSpace<_>], domain: &[&GradedSpace<_>], salt| {
-        TensorMap::<_, f64>::from_block_fn(
+        TensorMap::<_, f64>::from_subblock_fn(
             runtime,
             codomain.iter().copied(),
             domain.iter().copied(),
@@ -820,7 +820,7 @@ fn small_output_takes_copy_c_without_scoring() {
     let v = u1(&[(-1, 8), (0, 8), (1, 8)]);
     let c = u1(&[(0, 2), (1, 1)]);
     let tensor = |codomain: [&GradedSpace<_>; 2], domain: [&GradedSpace<_>; 2], salt| {
-        TensorMap::<_, f64>::from_block_fn(&runtime, codomain, domain, fill(salt)).unwrap()
+        TensorMap::<_, f64>::from_subblock_fn(&runtime, codomain, domain, fill(salt)).unwrap()
     };
     let case = |name, lhs, rhs, l: [usize; 2], r: [usize; 2], out: [usize; 4]| Case {
         name,
@@ -876,7 +876,7 @@ fn swapped_tie_with_an_identity_output_matches_tensorkit() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let v = u1_non_self_dual();
     let tensor =
-        |salt| TensorMap::<_, f64>::from_block_fn(&runtime, [&v, &v], [&v, &v], fill(salt));
+        |salt| TensorMap::<_, f64>::from_subblock_fn(&runtime, [&v, &v], [&v, &v], fill(salt));
     let case = Case {
         name: "T1",
         lhs: tensor(105).unwrap(),

@@ -50,7 +50,7 @@ fn measured<T>(operation: impl FnOnce() -> T) -> (T, usize) {
 /// Rank-4 U(1) tensor with five coupled sectors (charges -2..=2) and
 /// degeneracy 2 per leg sector, so every factor region table is nontrivial.
 fn tensor(runtime: &Runtime) -> TensorMap<U1FusionRule, f64> {
-    let space = GradedSpace::try_new_with_arc(
+    let space = GradedSpace::try_new(
         Arc::new(U1FusionRule),
         [
             (U1Irrep::new(-1), 2),

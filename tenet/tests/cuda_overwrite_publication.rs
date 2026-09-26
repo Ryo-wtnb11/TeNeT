@@ -48,7 +48,7 @@ type Device = TensorMap<U1FusionRule, f64, CudaStorage<f64>>;
 const ITERS: usize = 40;
 
 fn space(sectors: i32, deg: usize) -> GradedSpace<U1FusionRule> {
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         Arc::new(U1FusionRule),
         (0..sectors).map(|q| (U1Irrep::new(q), deg)),
     )
@@ -56,7 +56,7 @@ fn space(sectors: i32, deg: usize) -> GradedSpace<U1FusionRule> {
 }
 
 fn constant(runtime: &Runtime, codomain: &[&GradedSpace<U1FusionRule>], value: f64) -> Device {
-    Host::from_block_fn(
+    Host::from_subblock_fn(
         runtime,
         codomain.iter().copied(),
         codomain.iter().copied(),
@@ -161,7 +161,8 @@ struct F2 {
 impl F2 {
     fn new(runtime: &Runtime, value: f64) -> Self {
         let v = space(F2_SECTORS, F2_DEG);
-        let host = |value| Host::from_block_fn(runtime, [&v, &v], [&v, &v], |_, _| value).unwrap();
+        let host =
+            |value| Host::from_subblock_fn(runtime, [&v, &v], [&v, &v], |_, _| value).unwrap();
         let (x, y) = (host(value), host(1.0));
         let expected = x.contract(&y, &F2_AXES.0, &F2_AXES.1, &F2_AXES.2).unwrap();
         let (x, y) = (x.to_cuda().unwrap(), y.to_cuda().unwrap());

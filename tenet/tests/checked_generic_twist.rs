@@ -375,10 +375,9 @@ where
     D: TensorScalar,
 {
     let mixed =
-        GradedSpace::try_new_with_arc(Arc::clone(provider), [(Label::Unit, 1), (Label::X, 2)])
-            .unwrap();
-    let x = GradedSpace::try_new_with_arc(Arc::clone(provider), [(Label::X, 1)]).unwrap();
-    TensorMap::from_block_fn(runtime, [&mixed, &x], [&x], |trees, indices| {
+        GradedSpace::try_new(Arc::clone(provider), [(Label::Unit, 1), (Label::X, 2)]).unwrap();
+    let x = GradedSpace::try_new(Arc::clone(provider), [(Label::X, 1)]).unwrap();
+    TensorMap::from_subblock_fn(runtime, [&mixed, &x], [&x], |trees, indices| {
         value(
             tree_marker(trees)
                 + indices
@@ -556,9 +555,9 @@ fn checked_generic_twist_handles_nobraiding_bosonic_and_staged_identity_sharing(
         BraidingStyleKind::NoBraiding,
         -1.0,
     ));
-    let unit = GradedSpace::try_new_with_arc(Arc::clone(&no_braiding), [(Label::Unit, 1)]).unwrap();
+    let unit = GradedSpace::try_new(Arc::clone(&no_braiding), [(Label::Unit, 1)]).unwrap();
     let unit_tensor: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&unit], [&unit], |_, _| 3.0).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&unit], [&unit], |_, _| 3.0).unwrap();
     no_braiding.reset_ledger(0);
     let unit_twist = unit_tensor.twist(&[0, 1]).unwrap();
     assert_eq!(unit_twist.data().as_ptr(), unit_tensor.data().as_ptr());
@@ -761,11 +760,11 @@ fn checked_generic_flip_uses_staged_nontrivial_fs_and_twist_factors() {
         -1.0,
         1.0,
     ));
-    let x_dual = GradedSpace::try_new_with_arc(Arc::clone(&provider), [(Label::X, 1)])
+    let x_dual = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)])
         .and_then(|space| space.try_dual())
         .unwrap();
     let source: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&x_dual], [&x_dual], |_, _| 3.0).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&x_dual], [&x_dual], |_, _| 3.0).unwrap();
 
     let codomain = source.flip(&[0]).unwrap();
     let domain = source.flip(&[1]).unwrap();
@@ -787,9 +786,9 @@ where
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(SUNFusionRule::new(n).unwrap());
     let legs = [2, 1, 2].map(|degeneracy| {
-        GradedSpace::try_new_with_arc(Arc::clone(&provider), [(label.clone(), degeneracy)]).unwrap()
+        GradedSpace::try_new(Arc::clone(&provider), [(label.clone(), degeneracy)]).unwrap()
     });
-    let source: TensorMap<_, D> = TensorMap::from_block_fn(
+    let source: TensorMap<_, D> = TensorMap::from_subblock_fn(
         &runtime,
         [&legs[0], &legs[1], &legs[2]],
         [],
@@ -840,9 +839,9 @@ where
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(SUNFusionRule::new(n).unwrap());
     let legs = [2, 1, 2].map(|degeneracy| {
-        GradedSpace::try_new_with_arc(Arc::clone(&provider), [(label.clone(), degeneracy)]).unwrap()
+        GradedSpace::try_new(Arc::clone(&provider), [(label.clone(), degeneracy)]).unwrap()
     });
-    let source: TensorMap<_, D> = TensorMap::from_block_fn(
+    let source: TensorMap<_, D> = TensorMap::from_subblock_fn(
         &runtime,
         [&legs[0], &legs[1], &legs[2]],
         [],
@@ -997,14 +996,12 @@ fn assert_compose_any_braiding<D>(
 {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedPivotalToy::new(tag, braiding, -1.0));
-    let v = GradedSpace::try_new_with_arc(Arc::clone(&provider), [(Label::Unit, 1), (Label::X, 2)])
-        .unwrap();
-    let w = GradedSpace::try_new_with_arc(Arc::clone(&provider), [(Label::Unit, 2), (Label::X, 3)])
-        .unwrap();
+    let v = GradedSpace::try_new(Arc::clone(&provider), [(Label::Unit, 1), (Label::X, 2)]).unwrap();
+    let w = GradedSpace::try_new(Arc::clone(&provider), [(Label::Unit, 2), (Label::X, 3)]).unwrap();
     let filled = |offset: usize,
                   codomain: &[&GradedSpace<CheckedPivotalToy>],
                   domain: &[&GradedSpace<CheckedPivotalToy>]| {
-        TensorMap::from_block_fn(
+        TensorMap::from_subblock_fn(
             &runtime,
             codomain.to_vec(),
             domain.to_vec(),
@@ -1101,17 +1098,16 @@ fn checked_generic_contract_keeps_its_braiding_boundaries() {
         (23, BraidingStyleKind::Fermionic),
     ] {
         let provider = Arc::new(CheckedPivotalToy::new(tag, braiding, 1.0));
-        let unit =
-            GradedSpace::try_new_with_arc(Arc::clone(&provider), [(Label::Unit, 2)]).unwrap();
+        let unit = GradedSpace::try_new(Arc::clone(&provider), [(Label::Unit, 2)]).unwrap();
         let matrix = |offset: f64| -> TensorMap<_, f64> {
-            TensorMap::from_block_fn(&runtime, [&unit], [&unit], |_, index| {
+            TensorMap::from_subblock_fn(&runtime, [&unit], [&unit], |_, index| {
                 offset + (2 * index[0] + index[1]) as f64
             })
             .unwrap()
         };
         let (lhs, rhs) = (matrix(1.0), matrix(5.0));
         // Hand oracle: the one block is [[1,2],[3,4]]·[[5,6],[7,8]].
-        let expected = TensorMap::from_block_fn(&runtime, [&unit], [&unit], |_, index| {
+        let expected = TensorMap::from_subblock_fn(&runtime, [&unit], [&unit], |_, index| {
             [[19.0, 22.0], [43.0, 50.0]][index[0]][index[1]]
         })
         .unwrap();

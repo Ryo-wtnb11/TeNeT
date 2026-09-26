@@ -74,7 +74,7 @@ macro_rules! assert_componentwise {
         let codomain = vec![$($codomain),*];
         let domain = vec![$($domain),*];
         let build = |f: &dyn Fn(&BlockFusionTrees<_>, &[usize]) -> $real| {
-            TensorMap::<_, $real>::from_block_fn(
+            TensorMap::<_, $real>::from_subblock_fn(
                 &runtime,
                 codomain.iter().copied(),
                 domain.iter().copied(),
@@ -82,7 +82,7 @@ macro_rules! assert_componentwise {
             )
             .unwrap()
         };
-        let complex = TensorMap::<_, $complex>::from_block_fn(
+        let complex = TensorMap::<_, $complex>::from_subblock_fn(
             &runtime,
             codomain.iter().copied(),
             domain.iter().copied(),
@@ -167,7 +167,7 @@ fn a_complex_multiply_by_one_cannot_reproduce_the_payloads() {
 }
 
 fn u1(provider: &Arc<U1FusionRule>, pairs: &[(i32, usize)]) -> GradedSpace<U1FusionRule> {
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         Arc::clone(provider),
         pairs
             .iter()
@@ -177,7 +177,7 @@ fn u1(provider: &Arc<U1FusionRule>, pairs: &[(i32, usize)]) -> GradedSpace<U1Fus
 }
 
 fn su2(provider: &Arc<SU2FusionRule>, pairs: &[(usize, usize)]) -> GradedSpace<SU2FusionRule> {
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         Arc::clone(provider),
         pairs
             .iter()
@@ -240,13 +240,13 @@ fn u1_times_su2_transforms_scale_componentwise() {
     let label = |charge: i32, twice_spin: usize| {
         product_sector(U1Irrep::new(charge), SU2Irrep::from_twice_spin(twice_spin))
     };
-    let leg = GradedSpace::try_new_with_arc(
+    let leg = GradedSpace::try_new(
         Arc::clone(&provider),
         [(label(0, 0), 2), (label(1, 1), 3), (label(-1, 1), 2)],
     )
     .unwrap();
     let dual = leg.try_dual().unwrap();
-    let other = GradedSpace::try_new_with_arc(
+    let other = GradedSpace::try_new(
         Arc::clone(&provider),
         [(label(0, 0), 1), (label(1, 1), 2), (label(0, 2), 2)],
     )
@@ -268,7 +268,7 @@ fn fermionic_transforms_scale_componentwise() {
             U1Irrep::new(charge),
         )
     };
-    let leg = GradedSpace::try_new_with_arc(
+    let leg = GradedSpace::try_new(
         Arc::clone(&provider),
         [
             (label(false, 0), 3),
@@ -278,7 +278,7 @@ fn fermionic_transforms_scale_componentwise() {
     )
     .unwrap();
     let dual = leg.try_dual().unwrap();
-    let other = GradedSpace::try_new_with_arc(
+    let other = GradedSpace::try_new(
         Arc::clone(&provider),
         [
             (label(false, 0), 2),
@@ -334,7 +334,7 @@ fn traces_scale_componentwise() {
             U1Irrep::new(charge),
         )
     };
-    let leg = GradedSpace::try_new_with_arc(
+    let leg = GradedSpace::try_new(
         Arc::clone(&provider),
         [
             (label(false, 0), 3),

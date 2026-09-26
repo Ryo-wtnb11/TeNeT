@@ -54,7 +54,7 @@ macro_rules! is_isometric {
     ($tensor:expr, $tol:expr) => {{
         let t = &$tensor;
         let gram = t.adjoint().unwrap().compose(t).unwrap();
-        let identity = TensorMap::id(t.runtime(), &t.domain()).unwrap();
+        let identity = TensorMap::isomorphism(t.runtime(), &t.domain(), &t.domain()).unwrap();
         gram.axpby(
             ChainCoefficient::real(1.0),
             &identity,

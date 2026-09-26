@@ -27,7 +27,7 @@ use tenet::typed::{Eigh, GradedSpace, SectorSpectrum, Svd};
 macro_rules! kept {
     ($rule:expr, [$(($sector:expr, [$($value:expr),*])),* $(,)?], $truncation:expr) => {{
         let entries = vec![$(($sector, vec![$($value),*])),*];
-        let leg = GradedSpace::try_new_with_arc(
+        let leg = GradedSpace::try_new(
             Arc::new($rule),
             entries.iter().map(|(sector, values)| (sector.clone(), values.len())),
         )
@@ -209,14 +209,14 @@ fn svd_and_eigh_truncation_keep_tensorkits_sector_at_a_tie() {
     // TensorKit: svd_trunc/eigh_trunc(id(Rep[U1](0 => 1, 1 => 1, -1 => 1)),
     // truncrank(2)) both return Rep[U1](0 => 1, 1 => 1).
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-    let leg = GradedSpace::try_new_with_arc(
+    let leg = GradedSpace::try_new(
         Arc::new(U1FusionRule),
         [(u1(0), 1), (u1(1), 1), (u1(-1), 1)],
     )
     .unwrap();
-    let source: TensorMap<U1FusionRule, f64> = TensorMap::id(&runtime, [&leg]).unwrap();
-    let expected =
-        GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(u1(0), 1), (u1(1), 1)]).unwrap();
+    let source: TensorMap<U1FusionRule, f64> =
+        TensorMap::isomorphism(&runtime, [&leg], [&leg]).unwrap();
+    let expected = GradedSpace::try_new(Arc::new(U1FusionRule), [(u1(0), 1), (u1(1), 1)]).unwrap();
     // The truncated factorizations are `*_full`/`svd_compact` -> `diagview` ->
     // `find_truncated` -> `restrict_*`; the kept bond is the restricted leg.
     let Svd { u, s, .. } = source.svd_compact().unwrap();

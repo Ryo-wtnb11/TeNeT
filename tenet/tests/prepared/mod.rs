@@ -36,16 +36,16 @@ pub type Fz2U1Rule = ProductFusionRule<
 pub fn u1_legs() -> (GradedSpace<U1FusionRule>, GradedSpace<U1FusionRule>) {
     let q = U1Irrep::new;
     (
-        GradedSpace::try_new(U1FusionRule, [(q(-1), 2), (q(0), 1), (q(1), 3)]).unwrap(),
-        GradedSpace::try_new(U1FusionRule, [(q(0), 2), (q(1), 1)]).unwrap(),
+        GradedSpace::try_new(Arc::new(U1FusionRule), [(q(-1), 2), (q(0), 1), (q(1), 3)]).unwrap(),
+        GradedSpace::try_new(Arc::new(U1FusionRule), [(q(0), 2), (q(1), 1)]).unwrap(),
     )
 }
 
 pub fn su2_legs() -> (GradedSpace<SU2FusionRule>, GradedSpace<SU2FusionRule>) {
     let j = SU2Irrep::from_twice_spin;
     (
-        GradedSpace::try_new(SU2FusionRule, [(j(0), 2), (j(1), 2), (j(2), 1)]).unwrap(),
-        GradedSpace::try_new(SU2FusionRule, [(j(0), 1), (j(2), 2)]).unwrap(),
+        GradedSpace::try_new(Arc::new(SU2FusionRule), [(j(0), 2), (j(1), 2), (j(2), 1)]).unwrap(),
+        GradedSpace::try_new(Arc::new(SU2FusionRule), [(j(0), 1), (j(2), 2)]).unwrap(),
     )
 }
 
@@ -54,9 +54,8 @@ pub fn fz2u1_legs() -> (GradedSpace<Fz2U1Rule>, GradedSpace<Fz2U1Rule>) {
     let even = |charge| product_sector(Z2Irrep::EVEN, U1Irrep::new(charge));
     let odd = |charge| product_sector(Z2Irrep::ODD, U1Irrep::new(charge));
     (
-        GradedSpace::try_new_with_arc(Arc::clone(&rule), [(even(0), 2), (odd(1), 1), (odd(-1), 2)])
-            .unwrap(),
-        GradedSpace::try_new_with_arc(rule, [(even(0), 1), (odd(1), 2)]).unwrap(),
+        GradedSpace::try_new(Arc::clone(&rule), [(even(0), 2), (odd(1), 1), (odd(-1), 2)]).unwrap(),
+        GradedSpace::try_new(rule, [(even(0), 1), (odd(1), 2)]).unwrap(),
     )
 }
 
@@ -76,7 +75,7 @@ where
     (0..count)
         .map(|member| {
             let mut next = 1000 * member + 100 * salt;
-            TensorMap::from_block_fn(
+            TensorMap::from_subblock_fn(
                 runtime,
                 codomain.iter().copied(),
                 domain.iter().copied(),
@@ -106,7 +105,7 @@ where
 {
     (0..count)
         .map(|_| {
-            TensorMap::from_block_fn(
+            TensorMap::from_subblock_fn(
                 runtime,
                 codomain.iter().copied(),
                 domain.iter().copied(),

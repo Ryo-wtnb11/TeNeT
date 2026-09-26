@@ -242,8 +242,10 @@ macro_rules! ledger {
      $labels:expr, $one:expr) => {{
         for case in CASES {
             let sectors: Vec<_> = ($labels)(case.sectors);
-            let leg =
-                GradedSpace::try_new($provider, sectors.iter().map(|s| (s.clone(), case.deg)))?;
+            let leg = GradedSpace::try_new(
+                std::sync::Arc::new($provider),
+                sectors.iter().map(|s| (s.clone(), case.deg)),
+            )?;
             let codomain = vec![&leg; case.nc];
             let domain = vec![&leg; case.nd];
             let a = TensorMap::<_, $dtype>::rand_with_seed(

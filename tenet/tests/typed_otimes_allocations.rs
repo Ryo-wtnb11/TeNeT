@@ -61,7 +61,7 @@ fn measured<T>(payload_bytes: usize, operation: impl FnOnce() -> T) -> (u64, usi
 }
 
 fn leg(rule: &Arc<U1FusionRule>, degeneracy: usize) -> GradedSpace<U1FusionRule> {
-    GradedSpace::try_new_with_arc(Arc::clone(rule), [(U1Irrep::new(0), degeneracy)]).unwrap()
+    GradedSpace::try_new(Arc::clone(rule), [(U1Irrep::new(0), degeneracy)]).unwrap()
 }
 
 #[test]
@@ -73,9 +73,9 @@ fn typed_otimes_allocates_one_output_payload_and_no_dense_kron_temporary() {
     let rhs_codomain = leg(&rule, 18);
     let rhs_domain = leg(&rule, 16);
     let lhs =
-        TensorMap::from_block_fn(&runtime, [&lhs_codomain], [&lhs_domain], |_, _| 2.0).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&lhs_codomain], [&lhs_domain], |_, _| 2.0).unwrap();
     let rhs =
-        TensorMap::from_block_fn(&runtime, [&rhs_codomain], [&rhs_domain], |_, _| 3.0).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&rhs_codomain], [&rhs_domain], |_, _| 3.0).unwrap();
     let warm = lhs.otimes(&rhs).unwrap();
     let output_bytes = std::mem::size_of_val(warm.data());
     drop(warm);

@@ -144,7 +144,7 @@ fn fixtures_are_equal_iff_structure_is_equal() {
             1 => [(q(-1), 2), (q(0), 2), (q(1), 3)],
             _ => [(q(-1), 2), (q(0), 1), (q(2), 3)],
         };
-        GradedSpace::try_new(U1FusionRule, pairs).unwrap()
+        GradedSpace::try_new(Arc::new(U1FusionRule), pairs).unwrap()
     });
     check_fixture!("SU2", |variant| {
         let j = SU2Irrep::from_twice_spin;
@@ -153,7 +153,7 @@ fn fixtures_are_equal_iff_structure_is_equal() {
             1 => [(j(0), 2), (j(1), 3), (j(2), 1)],
             _ => [(j(0), 2), (j(1), 2), (j(3), 1)],
         };
-        GradedSpace::try_new(SU2FusionRule, pairs).unwrap()
+        GradedSpace::try_new(Arc::new(SU2FusionRule), pairs).unwrap()
     });
     check_fixture!("fZ2xU1", |variant| {
         let rule = Arc::new(Fz2U1Rule::new(FermionParityFusionRule, U1FusionRule));
@@ -164,7 +164,7 @@ fn fixtures_are_equal_iff_structure_is_equal() {
             1 => [(even(0), 2), (odd(1), 2), (odd(-1), 2)],
             _ => [(even(0), 2), (odd(1), 1), (even(-2), 2)],
         };
-        GradedSpace::try_new_with_arc(rule, pairs).unwrap()
+        GradedSpace::try_new(rule, pairs).unwrap()
     });
     #[cfg(feature = "racah-generated")]
     check_fixture!("SU3 checked Generic", |variant| {
@@ -174,7 +174,7 @@ fn fixtures_are_equal_iff_structure_is_equal() {
             1 => [(vec![0i64, 0], 1), (vec![1, 1], 3)],
             _ => [(vec![0i64, 0], 1), (vec![1, 0], 2)],
         };
-        GradedSpace::try_new_with_arc(rule, pairs).unwrap()
+        GradedSpace::try_new(rule, pairs).unwrap()
     });
 }
 
@@ -187,7 +187,7 @@ fn checked_generic_rule_instance_separates_signatures() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let signature = |rank: usize, trivial: Vec<i64>| {
         let rule = Arc::new(tenet::typed::SUNFusionRule::new(rank).unwrap());
-        let leg = GradedSpace::try_new_with_arc(rule, [(trivial, 2)]).unwrap();
+        let leg = GradedSpace::try_new(rule, [(trivial, 2)]).unwrap();
         TensorMap::<_, f64>::zeros(&runtime, [&leg], [&leg])
             .unwrap()
             .structure_signature()
@@ -199,7 +199,7 @@ fn checked_generic_rule_instance_separates_signatures() {
 
 fn u1_leg(charges: std::ops::RangeInclusive<i32>, degeneracy: usize) -> GradedSpace<U1FusionRule> {
     GradedSpace::try_new(
-        U1FusionRule,
+        Arc::new(U1FusionRule),
         charges.map(|charge| (U1Irrep::new(charge), degeneracy)),
     )
     .unwrap()
@@ -256,7 +256,8 @@ fn equal_across_interner_eviction() {
     // out of the block-structure interner, with more distinct entries than
     // each holds.
     for degeneracy in 1..=complete_hom_space_structure_cache_info().entry_capacity() + 16 {
-        let leg = GradedSpace::try_new(U1FusionRule, [(U1Irrep::new(0), degeneracy)]).unwrap();
+        let leg =
+            GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), degeneracy)]).unwrap();
         TensorMap::<_, f64>::zeros(&runtime, [&leg], [&leg]).unwrap();
     }
     for extent in 1..=block_structure_intern_cache_info().entry_capacity() + 16 {

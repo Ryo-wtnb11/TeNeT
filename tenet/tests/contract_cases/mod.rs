@@ -66,7 +66,7 @@ pub fn fill<S, D: Payload>(salt: usize) -> impl FnMut(&BlockFusionTrees<S>, &[us
 }
 
 pub fn u1(charges: &[(i32, usize)]) -> GradedSpace<U1FusionRule> {
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         Arc::new(U1FusionRule),
         charges
             .iter()
@@ -76,7 +76,7 @@ pub fn u1(charges: &[(i32, usize)]) -> GradedSpace<U1FusionRule> {
 }
 
 pub fn su2() -> GradedSpace<SU2FusionRule> {
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         Arc::new(SU2FusionRule),
         [
             (SU2Irrep::from_twice_spin(0), 2),
@@ -90,7 +90,7 @@ pub fn su2() -> GradedSpace<SU2FusionRule> {
 pub type U1Su2 = ProductFusionRule<U1FusionRule, SU2FusionRule>;
 
 pub fn u1_su2() -> GradedSpace<U1Su2> {
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         Arc::new(U1FusionRule.product(SU2FusionRule)),
         [
             (
@@ -115,7 +115,7 @@ pub type FermionSu2 = ProductFusionRule<FermionParityFusionRule, SU2FusionRule>;
 
 /// fZ2 x U(1): odd sectors of both charge signs, degeneracy > 1.
 pub fn fermion_u1() -> GradedSpace<FermionU1> {
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         Arc::new(FermionParityFusionRule.product(U1FusionRule)),
         [
             (product_sector(Z2Irrep::EVEN, U1Irrep::new(0)), 2),
@@ -129,7 +129,7 @@ pub fn fermion_u1() -> GradedSpace<FermionU1> {
 
 /// fZ2 (x) SU(2): fermionic signs over non-Abelian recoupling.
 pub fn fermion_su2() -> GradedSpace<FermionSu2> {
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         Arc::new(FermionParityFusionRule.product(SU2FusionRule)),
         [
             (
@@ -193,7 +193,7 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
     D: Payload,
 {
-    TensorMap::from_block_fn(
+    TensorMap::from_subblock_fn(
         runtime,
         codomain.iter().copied(),
         domain.iter().copied(),
@@ -785,12 +785,12 @@ where
 /// (`benchmarks/tensorkit_semantic_oracle.jl` §3, pinned values in
 /// `tenet-network/tests/tk_fermionic_correspondence.rs`).
 pub fn fz2_map(runtime: &Runtime, even: f64, odd: f64) -> TensorMap<FermionParityFusionRule, f64> {
-    let v = GradedSpace::try_new_with_arc(
+    let v = GradedSpace::try_new(
         Arc::new(FermionParityFusionRule),
         [(Z2Irrep::EVEN, 1), (Z2Irrep::ODD, 1)],
     )
     .unwrap();
-    TensorMap::from_block_fn(runtime, [&v], [&v], move |trees, _| {
+    TensorMap::from_subblock_fn(runtime, [&v], [&v], move |trees, _| {
         if *trees.coupled() == Z2Irrep::EVEN {
             even
         } else {

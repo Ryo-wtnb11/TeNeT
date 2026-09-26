@@ -8,6 +8,7 @@
 //! still rebuild.
 
 use num_complex::{Complex32, Complex64};
+use std::sync::Arc;
 use tenet::prelude::*;
 
 #[path = "../../tests/support/numerics.rs"]
@@ -102,7 +103,7 @@ macro_rules! check_rule {
 fn u1_degeneracy_change_reuses_the_categorical_plan() {
     let leg = |sectors: &[(i32, usize)]| {
         GradedSpace::try_new(
-            U1FusionRule,
+            Arc::new(U1FusionRule),
             sectors.iter().map(|&(q, d)| (U1Irrep::new(q), d)),
         )
         .unwrap()
@@ -120,7 +121,7 @@ fn u1_degeneracy_change_reuses_the_categorical_plan() {
 fn su2_degeneracy_change_reuses_the_categorical_plan() {
     let leg = |sectors: &[(usize, usize)]| {
         GradedSpace::try_new(
-            SU2FusionRule,
+            Arc::new(SU2FusionRule),
             sectors
                 .iter()
                 .map(|&(j, d)| (SU2Irrep::from_twice_spin(j), d)),
@@ -144,7 +145,7 @@ fn fermion_u1_degeneracy_change_reuses_the_categorical_plan() {
             U1FusionRule,
         );
         GradedSpace::try_new(
-            rule,
+            Arc::new(rule),
             sectors.iter().map(|&(q, d)| {
                 let parity = if q.rem_euclid(2) == 0 {
                     Z2Irrep::EVEN
@@ -168,13 +169,11 @@ fn fermion_u1_degeneracy_change_reuses_the_categorical_plan() {
 #[cfg(feature = "racah-generated")]
 #[test]
 fn checked_generic_su3_degeneracy_change_reuses_the_categorical_plan() {
-    use std::sync::Arc;
-
     use tenet::typed::SUNFusionRule;
 
     let provider = Arc::new(SUNFusionRule::new(3).unwrap());
     let leg = |sectors: &[([i64; 2], usize)]| {
-        GradedSpace::try_new_with_arc(
+        GradedSpace::try_new(
             Arc::clone(&provider),
             sectors.iter().map(|&(labels, d)| (labels.to_vec(), d)),
         )
@@ -196,7 +195,7 @@ fn checked_generic_su3_degeneracy_change_reuses_the_categorical_plan() {
 fn clear_resets_the_plan_tier() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let leg = GradedSpace::try_new(
-        SU2FusionRule,
+        Arc::new(SU2FusionRule),
         [
             (SU2Irrep::from_twice_spin(0), 1),
             (SU2Irrep::from_twice_spin(1), 1),

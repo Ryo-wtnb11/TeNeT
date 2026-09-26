@@ -726,7 +726,7 @@ where
     R::Sector: Copy,
 {
     let runtime = Runtime::builder().build().unwrap();
-    let tau = GradedSpace::try_new(provider, [(tau_sector, 1)]).unwrap();
+    let tau = GradedSpace::try_new(std::sync::Arc::new(provider), [(tau_sector, 1)]).unwrap();
     let dual_tau = tau.try_dual().unwrap();
 
     for (rank, expected) in [(2, 1), (3, 2), (4, 3)] {
@@ -736,7 +736,7 @@ where
     }
 
     let basis: [TensorMap<_, Complex64>; 2] = [vacuum, tau_sector].map(|channel| {
-        TensorMap::from_block_fn(&runtime, [&tau, &tau, &tau], [&tau], |trees, _| {
+        TensorMap::from_subblock_fn(&runtime, [&tau, &tau, &tau], [&tau], |trees, _| {
             Complex64::new((trees.codomain_innerlines() == [channel]) as u8 as f64, 0.0)
         })
         .unwrap()
@@ -750,7 +750,7 @@ where
             if matches!(*operation, tenet::operations::OperationError::UnsupportedTensorContractScope { .. })
     ));
     let dual_basis: [TensorMap<_, Complex64>; 2] = [vacuum, tau_sector].map(|channel| {
-        TensorMap::from_block_fn(
+        TensorMap::from_subblock_fn(
             &runtime,
             [&dual_tau, &dual_tau, &dual_tau],
             [&dual_tau],

@@ -32,7 +32,7 @@ fn complex_fill(indices: &[usize]) -> Complex64 {
 fn u1() -> (GradedSpace<U1FusionRule>, GradedSpace<U1FusionRule>) {
     let rule = Arc::new(U1FusionRule);
     let pairs = |entries: [(i32, usize); 3]| {
-        GradedSpace::try_new_with_arc(
+        GradedSpace::try_new(
             Arc::clone(&rule),
             entries.map(|(charge, deg)| (U1Irrep::new(charge), deg)),
         )
@@ -47,7 +47,7 @@ fn u1() -> (GradedSpace<U1FusionRule>, GradedSpace<U1FusionRule>) {
 fn su2() -> (GradedSpace<SU2FusionRule>, GradedSpace<SU2FusionRule>) {
     let rule = Arc::new(SU2FusionRule);
     let pairs = |entries: [(usize, usize); 3]| {
-        GradedSpace::try_new_with_arc(
+        GradedSpace::try_new(
             Arc::clone(&rule),
             entries.map(|(twice_spin, deg)| (SU2Irrep::from_twice_spin(twice_spin), deg)),
         )
@@ -113,15 +113,15 @@ fn every_arm_is_bit_identical_to_the_method_it_replaced() {
     let (uv, uw) = u1();
     let (sv, sw) = su2();
     let u1_f64: TensorMap<U1FusionRule, f64> =
-        TensorMap::from_block_fn(&rt, [&uv], [&uw], |_, i| real_fill(i)).unwrap();
+        TensorMap::from_subblock_fn(&rt, [&uv], [&uw], |_, i| real_fill(i)).unwrap();
     let u1_c64: TensorMap<U1FusionRule, Complex64> =
-        TensorMap::from_block_fn(&rt, [&uv], [&uw], |_, i| complex_fill(i)).unwrap();
+        TensorMap::from_subblock_fn(&rt, [&uv], [&uw], |_, i| complex_fill(i)).unwrap();
     let su2_f64: TensorMap<SU2FusionRule, f64> =
-        TensorMap::from_block_fn(&rt, [&sv], [&sw], |_, i| real_fill(i)).unwrap();
+        TensorMap::from_subblock_fn(&rt, [&sv], [&sw], |_, i| real_fill(i)).unwrap();
     let su2_c64: TensorMap<SU2FusionRule, Complex64> =
-        TensorMap::from_block_fn(&rt, [&sv], [&sw], |_, i| complex_fill(i)).unwrap();
+        TensorMap::from_subblock_fn(&rt, [&sv], [&sw], |_, i| complex_fill(i)).unwrap();
     let su2_c32: TensorMap<SU2FusionRule, Complex32> =
-        TensorMap::from_block_fn(&rt, [&sv], [&sw], |_, i| {
+        TensorMap::from_subblock_fn(&rt, [&sv], [&sw], |_, i| {
             let z = complex_fill(i);
             Complex32::new(z.re as f32, z.im as f32)
         })
@@ -129,9 +129,9 @@ fn every_arm_is_bit_identical_to_the_method_it_replaced() {
     // Squares leave the f64 range in both directions, so `p = 2` and the
     // power sums take their rescaling passes.
     let huge: TensorMap<SU2FusionRule, f64> =
-        TensorMap::from_block_fn(&rt, [&sv], [&sw], |_, i| 1e200 * real_fill(i)).unwrap();
+        TensorMap::from_subblock_fn(&rt, [&sv], [&sw], |_, i| 1e200 * real_fill(i)).unwrap();
     let tiny: TensorMap<U1FusionRule, Complex64> =
-        TensorMap::from_block_fn(&rt, [&uv], [&uw], |_, i| 1e-200 * complex_fill(i)).unwrap();
+        TensorMap::from_subblock_fn(&rt, [&uv], [&uw], |_, i| 1e-200 * complex_fill(i)).unwrap();
     let compact = compact_su2(&rt);
     let adjoint = su2_c64.adjoint().unwrap();
 
@@ -151,7 +151,7 @@ fn infinity_arm_propagates_nan_and_is_positive_zero_without_entries() {
     let rt = runtime();
     let (uv, uw) = u1();
     let poisoned: TensorMap<U1FusionRule, Complex64> =
-        TensorMap::from_block_fn(&rt, [&uv], [&uw], |trees, i| {
+        TensorMap::from_subblock_fn(&rt, [&uv], [&uw], |trees, i| {
             if *trees.coupled() == U1Irrep::new(1) && i == [0, 0] {
                 Complex64::new(1.0, f64::NAN)
             } else {
@@ -167,10 +167,8 @@ fn infinity_arm_propagates_nan_and_is_positive_zero_without_entries() {
         .unwrap()
         .is_nan());
 
-    let only_zero =
-        GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
-    let only_one =
-        GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(1), 3)]).unwrap();
+    let only_zero = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
+    let only_one = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(1), 3)]).unwrap();
     let empty: TensorMap<U1FusionRule, f64> =
         TensorMap::zeros(&rt, [&only_zero], [&only_one]).unwrap();
     let zeros: TensorMap<U1FusionRule, f64> = TensorMap::zeros(&rt, [&uv], [&uw]).unwrap();
@@ -189,7 +187,7 @@ fn invalid_exponents_are_typed_errors() {
     let rt = runtime();
     let (uv, uw) = u1();
     let tensor: TensorMap<U1FusionRule, f64> =
-        TensorMap::from_block_fn(&rt, [&uv], [&uw], |_, i| real_fill(i)).unwrap();
+        TensorMap::from_subblock_fn(&rt, [&uv], [&uw], |_, i| real_fill(i)).unwrap();
     for p in [f64::NAN, f64::NEG_INFINITY, 0.0, -0.0, -1.0] {
         assert!(
             matches!(tensor.norm(p), Err(Error::InvalidArgument(_))),
@@ -209,9 +207,9 @@ fn device_norm_is_the_frobenius_arm_and_rejects_other_exponents() {
     let (uv, uw) = u1();
     let (sv, sw) = su2();
     let u1_f64: TensorMap<U1FusionRule, f64> =
-        TensorMap::from_block_fn(&rt, [&uv], [&uw], |_, i| real_fill(i)).unwrap();
+        TensorMap::from_subblock_fn(&rt, [&uv], [&uw], |_, i| real_fill(i)).unwrap();
     let su2_c64: TensorMap<SU2FusionRule, Complex64> =
-        TensorMap::from_block_fn(&rt, [&sv], [&sw], |_, i| complex_fill(i)).unwrap();
+        TensorMap::from_subblock_fn(&rt, [&sv], [&sw], |_, i| complex_fill(i)).unwrap();
 
     let real = u1_f64.to_cuda().unwrap();
     let complex = su2_c64.to_cuda().unwrap();

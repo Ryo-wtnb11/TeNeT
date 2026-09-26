@@ -56,7 +56,7 @@ fn env_usize(key: &str, default: usize) -> usize {
 /// SU(2) sectors {0, 1/2, 1} (twice-spin 0,1,2) each with degeneracy `d`.
 fn space(d: usize) -> GradedSpace<SU2FusionRule> {
     GradedSpace::try_new(
-        SU2FusionRule,
+        Arc::new(SU2FusionRule),
         [
             (SU2Irrep::from_twice_spin(0), d),
             (SU2Irrep::from_twice_spin(1), d),

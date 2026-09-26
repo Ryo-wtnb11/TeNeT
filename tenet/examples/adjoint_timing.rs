@@ -37,7 +37,7 @@ fn main() {
     // A few sectors with non-trivial degeneracies so the coupled blocks are big
     // enough for the conjugate-transpose copy to matter.
     let v = GradedSpace::try_new(
-        U1FusionRule,
+        std::sync::Arc::new(U1FusionRule),
         [
             (U1Irrep::new(-1), 6),
             (U1Irrep::new(0), 10),

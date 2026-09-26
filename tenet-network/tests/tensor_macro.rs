@@ -17,11 +17,11 @@ mod braiding_probe;
 mod numerics;
 
 fn space() -> GradedSpace<U1FusionRule> {
-    GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap()
+    GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap()
 }
 
 fn u1_space() -> GradedSpace<U1FusionRule> {
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         Arc::new(U1FusionRule),
         [
             (U1Irrep::new(-1), 2),
@@ -33,7 +33,7 @@ fn u1_space() -> GradedSpace<U1FusionRule> {
 }
 
 fn su2_space() -> GradedSpace<SU2FusionRule> {
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         Arc::new(SU2FusionRule),
         [
             (SU2Irrep::from_twice_spin(0), 2),
@@ -112,7 +112,7 @@ fn typed_host_macro_provider_dtype_matrix_matches_direct_contract() {
     assert_pair_case::<_, f64>(&runtime, &su2, 750_110);
     assert_pair_case::<_, Complex64>(&runtime, &su2, 750_112);
 
-    let fz2 = GradedSpace::try_new_with_arc(
+    let fz2 = GradedSpace::try_new(
         Arc::new(FermionParityFusionRule),
         [(Z2Irrep::EVEN, 2), (Z2Irrep::ODD, 1)],
     )
@@ -120,7 +120,7 @@ fn typed_host_macro_provider_dtype_matrix_matches_direct_contract() {
     assert_pair_case::<_, f64>(&runtime, &fz2, 750_120);
     assert_pair_case::<_, Complex64>(&runtime, &fz2, 750_122);
 
-    let product = GradedSpace::try_new_with_arc(
+    let product = GradedSpace::try_new(
         Arc::new(FermionParityFusionRule.product(U1FusionRule)),
         [
             (product_sector(Z2Irrep::EVEN, U1Irrep::new(0)), 2),
@@ -427,7 +427,7 @@ fn wrong_input_codomain_split_is_rejected() {
 fn contracted_leg_degeneracy_mismatch_spells_out_both_legs() {
     let runtime = Runtime::builder().build().unwrap();
     let provider = Arc::new(U1FusionRule);
-    let lhs_space = GradedSpace::try_new_with_arc(
+    let lhs_space = GradedSpace::try_new(
         Arc::clone(&provider),
         [
             (U1Irrep::new(-1), 2),
@@ -436,7 +436,7 @@ fn contracted_leg_degeneracy_mismatch_spells_out_both_legs() {
         ],
     )
     .unwrap();
-    let rhs_space = GradedSpace::try_new_with_arc(
+    let rhs_space = GradedSpace::try_new(
         provider,
         [
             (U1Irrep::new(-1), 2),
@@ -496,7 +496,7 @@ fn factorization_fields_and_tuple_fields_contract_without_parentheses() {
 fn assert_host_macro_contraction_rejects_non_symmetric<const ANYONIC: bool>() {
     let runtime = Runtime::builder().build().unwrap();
     let leg = GradedSpace::try_new(
-        braiding_probe::RealBraidingProbe::<ANYONIC>,
+        Arc::new(braiding_probe::RealBraidingProbe::<ANYONIC>),
         [(braiding_probe::ProbeSector, 2)],
     )
     .unwrap();

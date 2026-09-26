@@ -9,7 +9,7 @@ use tenet::typed::{GradedSpace, SectorSpectrum, TensorMap};
 mod numerics;
 
 fn typed_bond(provider: &Arc<Z2FusionRule>, degeneracy: usize) -> GradedSpace<Z2FusionRule> {
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         Arc::clone(provider),
         [(Z2Irrep::EVEN, degeneracy), (Z2Irrep::ODD, degeneracy)],
     )
@@ -158,7 +158,7 @@ fn powi_rejects_non_endomorphisms_and_singular_negative_powers() {
     let typed_narrow = typed_bond(&provider, 1);
     let typed_wide = typed_bond(&provider, 2);
     let typed =
-        TensorMap::from_block_fn(&runtime, [&typed_wide], [&typed_narrow], |_, _| 1.0).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&typed_wide], [&typed_narrow], |_, _| 1.0).unwrap();
     let expected =
         Error::InvalidArgument("powi() requires an endomorphism (domain == codomain)".into());
     for exponent in [0, 1, -1] {
@@ -190,17 +190,19 @@ fn powi_rejects_non_endomorphisms_and_singular_negative_powers() {
 fn dense_powi_matches_hand_computed_matrix_powers() {
     let runtime = Runtime::builder().build().unwrap();
     let provider = Arc::new(Z2FusionRule);
-    let bond = GradedSpace::try_new_with_arc(provider, [(Z2Irrep::EVEN, 2)]).unwrap();
+    let bond = GradedSpace::try_new(provider, [(Z2Irrep::EVEN, 2)]).unwrap();
     let matrix = [[2.0, 1.0], [0.0, 3.0]];
     let typed =
-        TensorMap::from_block_fn(&runtime, [&bond], [&bond], |_, i| matrix[i[0]][i[1]]).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&bond], [&bond], |_, i| matrix[i[0]][i[1]]).unwrap();
     let square = [[4.0, 5.0], [0.0, 9.0]];
     let expected_square =
-        TensorMap::from_block_fn(&runtime, [&bond], [&bond], |_, i| square[i[0]][i[1]]).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&bond], [&bond], |_, i| square[i[0]][i[1]]).unwrap();
     let inverse = [[0.5, -1.0 / 6.0], [0.0, 1.0 / 3.0]];
     let expected_inverse =
-        TensorMap::from_block_fn(&runtime, [&bond], [&bond], |_, i| inverse[i[0]][i[1]]).unwrap();
-    let identity: TensorMap<Z2FusionRule, f64> = TensorMap::id(&runtime, [&bond]).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&bond], [&bond], |_, i| inverse[i[0]][i[1]])
+            .unwrap();
+    let identity: TensorMap<Z2FusionRule, f64> =
+        TensorMap::isomorphism(&runtime, [&bond], [&bond]).unwrap();
 
     let typed_zero = typed.powi(0).unwrap();
     assert_ne!(typed_zero.data(), typed.data());

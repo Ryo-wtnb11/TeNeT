@@ -57,7 +57,7 @@ fn nonnormal_entry(row: usize, col: usize) -> (f32, f32) {
 }
 
 fn su2_leg_with(degeneracies: [usize; 3]) -> GradedSpace<SU2FusionRule> {
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         Arc::new(SU2FusionRule),
         [
             (SU2Irrep::from_twice_spin(0), degeneracies[0]),
@@ -423,8 +423,9 @@ macro_rules! advanced_suite {
     };
 }
 
-advanced_suite!(f32_payload, f32, f64, Complex32, |t: &TensorMap<_, f32>| t
-    .to_c32());
+advanced_suite!(f32_payload, f32, f64, Complex32, |t: &TensorMap<_, f32>| {
+    t.convert::<Complex32>()
+});
 advanced_suite!(
     complex32_payload,
     Complex32,
@@ -439,8 +440,7 @@ advanced_suite!(
 #[test]
 fn compact_complex32_reciprocal_does_not_underflow() {
     let rt = runtime();
-    let leg =
-        GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), 3)]).unwrap();
+    let leg = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 3)]).unwrap();
     let tiny = 2.0f32.powi(-80);
     let diagonal: TensorMap<_, Complex32> = TensorMap::diagonal(
         &rt,
@@ -473,7 +473,7 @@ mod checked_generic {
     use tenet::typed::SUNFusionRule;
 
     fn su3_leg(degeneracy: usize) -> GradedSpace<SUNFusionRule> {
-        GradedSpace::try_new_with_arc(
+        GradedSpace::try_new(
             Arc::new(SUNFusionRule::new(3).unwrap()),
             [(vec![2i64, 2], degeneracy)],
         )
@@ -503,8 +503,9 @@ mod checked_generic {
         };
     }
 
-    checked_generic_suite!(f32_payload, f32, f64, Complex32, |t: &TensorMap<_, f32>| t
-        .to_c32());
+    checked_generic_suite!(f32_payload, f32, f64, Complex32, |t: &TensorMap<_, f32>| {
+        t.convert::<Complex32>()
+    });
     checked_generic_suite!(
         complex32_payload,
         Complex32,

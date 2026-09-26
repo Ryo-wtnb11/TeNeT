@@ -146,7 +146,7 @@ fn permute_composition_law() {
     let mut state = 0x5EED_0001u64;
     macro_rules! case {
         ($name:expr, $provider:expr, $pairs:expr, $fermionic:expr) => {{
-            let v = GradedSpace::try_new_with_arc($provider, $pairs).unwrap();
+            let v = GradedSpace::try_new($provider, $pairs).unwrap();
             for (ncod, ndom, seed) in [(2usize, 2usize, 11u64), (1, 4, 12)] {
                 let rank = ncod + ndom;
                 let cod: Vec<_> = std::iter::repeat(&v).take(ncod).collect();
@@ -183,7 +183,7 @@ fn braid_inverse_roundtrip() {
     let mut state = 0x5EED_0002u64;
     macro_rules! case {
         ($name:expr, $provider:expr, $pairs:expr, $fermionic:expr) => {{
-            let v = GradedSpace::try_new_with_arc($provider, $pairs).unwrap();
+            let v = GradedSpace::try_new($provider, $pairs).unwrap();
             let t: TensorMap<_, f64> =
                 TensorMap::rand_with_seed(&rt, [&v, &v], [&v, &v], 21).unwrap();
             for _ in 0..3 {
@@ -218,7 +218,7 @@ fn bosonic_braid_equals_permute() {
     macro_rules! case {
         ($name:expr, $provider:expr, $pairs:expr, $fermionic:expr) => {{
             if !$fermionic {
-                let v = GradedSpace::try_new_with_arc($provider, $pairs).unwrap();
+                let v = GradedSpace::try_new($provider, $pairs).unwrap();
                 let t: TensorMap<_, f64> =
                     TensorMap::rand_with_seed(&rt, [&v, &v], [&v, &v], 31).unwrap();
                 for _ in 0..3 {
@@ -248,7 +248,7 @@ fn yang_baxter_adjacent_swaps() {
     let rt = Runtime::builder().build().unwrap();
     macro_rules! case {
         ($name:expr, $provider:expr, $pairs:expr, $fermionic:expr) => {{
-            let v = GradedSpace::try_new_with_arc($provider, $pairs).unwrap();
+            let v = GradedSpace::try_new($provider, $pairs).unwrap();
             let t: TensorMap<_, f64> =
                 TensorMap::rand_with_seed(&rt, [&v, &v, &v], [&v], 41).unwrap();
             let swap = |t: &TensorMap<_, f64>, i: usize| {
@@ -275,7 +275,7 @@ fn adjoint_involution_and_antihomomorphism() {
     let rt = Runtime::builder().build().unwrap();
     macro_rules! case {
         ($name:expr, $provider:expr, $pairs:expr, $fermionic:expr) => {{
-            let v = GradedSpace::try_new_with_arc($provider, $pairs).unwrap();
+            let v = GradedSpace::try_new($provider, $pairs).unwrap();
             let a: TensorMap<_, f64> =
                 TensorMap::rand_with_seed(&rt, [&v, &v], [&v, &v], 51).unwrap();
             let b: TensorMap<_, f64> =
@@ -300,7 +300,7 @@ fn trace_cyclicity() {
     let rt = Runtime::builder().build().unwrap();
     macro_rules! case {
         ($name:expr, $provider:expr, $pairs:expr, $fermionic:expr) => {{
-            let v = GradedSpace::try_new_with_arc($provider, $pairs).unwrap();
+            let v = GradedSpace::try_new($provider, $pairs).unwrap();
             for (ncod, seed) in [(1usize, 61u64), (2, 62)] {
                 let cod: Vec<_> = std::iter::repeat(&v).take(ncod).collect();
                 let a: TensorMap<_, f64> =
@@ -327,7 +327,7 @@ fn bosonic_trace_matches_partial_trace_engine() {
     macro_rules! case {
         ($name:expr, $provider:expr, $pairs:expr, $fermionic:expr) => {{
             if !$fermionic {
-                let v = GradedSpace::try_new_with_arc($provider, $pairs).unwrap();
+                let v = GradedSpace::try_new($provider, $pairs).unwrap();
                 for (ncod, seed) in [(1usize, 71u64), (2, 72)] {
                     let cod: Vec<_> = std::iter::repeat(&v).take(ncod).collect();
                     let pairs: Vec<(usize, usize)> = (0..ncod).map(|i| (i, ncod + i)).collect();
@@ -359,11 +359,11 @@ fn ordinary_trace_of_identity_is_positive_dimension() {
     let rt = Runtime::builder().build().unwrap();
     macro_rules! case {
         ($name:expr, $provider:expr, $pairs:expr, $fermionic:expr) => {{
-            let v = GradedSpace::try_new_with_arc($provider, $pairs).unwrap();
+            let v = GradedSpace::try_new($provider, $pairs).unwrap();
             let expected = v.dim().unwrap();
-            let real: TensorMap<_, f64> = TensorMap::id(&rt, [&v]).unwrap();
+            let real: TensorMap<_, f64> = TensorMap::isomorphism(&rt, [&v], [&v]).unwrap();
             assert_scalar_close(real.tr().unwrap(), expected, 1e-12);
-            let complex: TensorMap<_, Complex64> = TensorMap::id(&rt, [&v]).unwrap();
+            let complex: TensorMap<_, Complex64> = TensorMap::isomorphism(&rt, [&v], [&v]).unwrap();
             let actual = complex.tr().unwrap();
             assert_scalar_close(actual.re, expected, 1e-12);
             assert_scalar_close(actual.im, 0.0, 1e-12);
@@ -381,7 +381,7 @@ fn twist_squares_to_identity_and_naturality() {
     let mut state = 0x5EED_0004u64;
     macro_rules! case {
         ($name:expr, $provider:expr, $pairs:expr, $fermionic:expr) => {{
-            let v = GradedSpace::try_new_with_arc($provider, $pairs).unwrap();
+            let v = GradedSpace::try_new($provider, $pairs).unwrap();
             let t: TensorMap<_, f64> =
                 TensorMap::rand_with_seed(&rt, [&v, &v], [&v, &v], 71).unwrap();
             for leg in 0..4usize {
@@ -415,17 +415,16 @@ fn twist_squares_to_identity_and_naturality() {
     for_each_space!(case);
 }
 
-/// isometry / unitary isometric identities: `w†∘w == id`.
+/// isometry / isomorphism isometric identities: `w†∘w == id`.
 #[test]
-fn isometry_and_unitary_are_isometric() {
+fn isometry_and_isomorphism_are_isometric() {
     let rt = Runtime::builder().build().unwrap();
     macro_rules! case {
         ($name:expr, $provider:expr, $pairs:expr, $fermionic:expr) => {{
-            let v = GradedSpace::try_new_with_arc($provider, $pairs).unwrap();
-            let id: TensorMap<_, f64> = TensorMap::id(&rt, [&v]).unwrap();
-            let u: TensorMap<_, f64> = TensorMap::unitary(&rt, [&v], [&v]).unwrap();
+            let v = GradedSpace::try_new($provider, $pairs).unwrap();
+            let id: TensorMap<_, f64> = TensorMap::isomorphism(&rt, [&v], [&v]).unwrap();
             assert_close(
-                u.adjoint().unwrap().compose(&u).unwrap().data(),
+                id.adjoint().unwrap().compose(&id).unwrap().data(),
                 id.data(),
                 1e-12,
             );
@@ -453,7 +452,7 @@ fn contraction_order_independence() {
     let rt = Runtime::builder().build().unwrap();
     macro_rules! case {
         ($name:expr, $provider:expr, $pairs:expr, $fermionic:expr) => {{
-            let v = GradedSpace::try_new_with_arc($provider, $pairs).unwrap();
+            let v = GradedSpace::try_new($provider, $pairs).unwrap();
             // Closed ring of four matrices: full tensor trace of x1 x2 x3 x4.
             let x1: TensorMap<_, f64> = TensorMap::rand_with_seed(&rt, [&v], [&v], 81).unwrap();
             let x2: TensorMap<_, f64> = TensorMap::rand_with_seed(&rt, [&v], [&v], 82).unwrap();
@@ -526,7 +525,7 @@ fn contraction_order_independence() {
 fn su2_nonuniform_degeneracy_crossed_contract() {
     let rt = Runtime::builder().build().unwrap();
     let rule = Arc::new(SU2FusionRule);
-    let v = GradedSpace::try_new_with_arc(
+    let v = GradedSpace::try_new(
         rule,
         [
             (SU2Irrep::from_twice_spin(0), 2),
@@ -559,7 +558,7 @@ fn su2_nonuniform_degeneracy_crossed_contract() {
 fn fz2_decreasing_degeneracy_boundary_crossing_contract() {
     let rt = Runtime::builder().build().unwrap();
     let rule = Arc::new(FermionParityFusionRule);
-    let v = GradedSpace::try_new_with_arc(rule, [(Z2Irrep::EVEN, 2), (Z2Irrep::ODD, 1)]).unwrap();
+    let v = GradedSpace::try_new(rule, [(Z2Irrep::EVEN, 2), (Z2Irrep::ODD, 1)]).unwrap();
     let a: TensorMap<_, f64> = TensorMap::rand_with_seed(&rt, [&v, &v], [&v, &v], 5).unwrap();
     let b: TensorMap<_, f64> = TensorMap::rand_with_seed(&rt, [&v, &v], [&v, &v], 6).unwrap();
     // Open legs cross the split: a's domain axis 3 stays open, b's axes
@@ -589,7 +588,7 @@ fn triple_product_nonuniform_degeneracy_crossed_contract() {
             SU2Irrep::from_twice_spin(spin),
         )
     };
-    let v = GradedSpace::try_new_with_arc(
+    let v = GradedSpace::try_new(
         rule,
         [
             (label(Z2Irrep::EVEN, 0, 0), 2),
@@ -633,7 +632,7 @@ fn svd_qr_reconstruction_random_spaces() {
                     sectors.push(($other, 1 + rand_below(state, 2)));
                 }
             )*
-            GradedSpace::try_new_with_arc(Arc::clone(&provider), sectors).unwrap()
+            GradedSpace::try_new(Arc::clone(&provider), sectors).unwrap()
         };
         for draw in 0..3u64 {
             let va = build(&mut state);
@@ -653,8 +652,8 @@ fn svd_qr_reconstruction_random_spaces() {
                 $name,
             );
             let mid = u.domain();
-            let mid_refs: Vec<_> = mid.iter().collect();
-            let id: TensorMap<_, f64> = TensorMap::id(&rt, mid_refs).unwrap();
+
+            let id: TensorMap<_, f64> = TensorMap::isomorphism(&rt, mid.iter(), mid.iter()).unwrap();
             let utu = u.adjoint().unwrap().compose(&u).unwrap();
             let iso_err = utu.axpby(1.0, &id, -1.0).unwrap().norm(2.0).unwrap();
             assert!(
@@ -672,8 +671,8 @@ fn svd_qr_reconstruction_random_spaces() {
                 $name,
             );
             let mid = q.domain();
-            let mid_refs: Vec<_> = mid.iter().collect();
-            let id: TensorMap<_, f64> = TensorMap::id(&rt, mid_refs).unwrap();
+
+            let id: TensorMap<_, f64> = TensorMap::isomorphism(&rt, mid.iter(), mid.iter()).unwrap();
             let qtq = q.adjoint().unwrap().compose(&q).unwrap();
             let iso_err = qtq.axpby(1.0, &id, -1.0).unwrap().norm(2.0).unwrap();
             assert!(
@@ -764,10 +763,10 @@ fn weighted_rank_truncation_matches_tensorkit() {
     macro_rules! case {
         ($provider:expr, $pairs:expr, $label_of:expr, $expected:expr, $error:expr) => {{
             let runtime = Runtime::builder().build().unwrap();
-            let space = GradedSpace::try_new_with_arc($provider, $pairs).unwrap();
+            let space = GradedSpace::try_new($provider, $pairs).unwrap();
             let label_of = $label_of;
             let build = |c0| {
-                TensorMap::from_block_fn(
+                TensorMap::from_subblock_fn(
                     &runtime,
                     [&space, &space],
                     [&space, &space],
@@ -847,10 +846,10 @@ fn weighted_rank_truncation_matches_tensorkit() {
 macro_rules! invariant_stream_case {
     ($provider:expr, $pairs:expr, $label_of:expr, $expected:expr, $svd_count:expr, $svd_expected:expr) => {{
         let rt = Runtime::builder().build().unwrap();
-        let v = GradedSpace::try_new_with_arc($provider, $pairs).unwrap();
+        let v = GradedSpace::try_new($provider, $pairs).unwrap();
         let label_of = $label_of;
         let build = |c0| {
-            TensorMap::from_block_fn(&rt, [&v, &v], [&v, &v], |trees, idx| {
+            TensorMap::from_subblock_fn(&rt, [&v, &v], [&v, &v], |trees, idx| {
                 let cod = trees.codomain_uncoupled();
                 let dom = trees.domain_uncoupled();
                 oracle_fill(

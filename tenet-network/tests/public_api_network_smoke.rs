@@ -15,7 +15,8 @@ fn labels(names: &[&str]) -> Vec<TemporaryLabel> {
 #[test]
 fn planned_network_replays_through_the_current_public_api() {
     let runtime = Runtime::builder().build().unwrap();
-    let space = GradedSpace::try_new(U1FusionRule, [(U1Irrep::new(0), 2)]).unwrap();
+    let space =
+        GradedSpace::try_new(std::sync::Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
     let lhs = TensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&space], [&space], 9_001)
         .unwrap();
     let rhs = TensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&space], [&space], 9_002)

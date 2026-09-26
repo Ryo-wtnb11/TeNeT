@@ -649,7 +649,7 @@ mod device {
         let host: Vec<TensorMap<R, D>> = (0..count)
             .map(|index| {
                 let shift = index as f64;
-                TensorMap::from_block_fn(&runtime, [space], [space], move |_, indices| {
+                TensorMap::from_subblock_fn(&runtime, [space], [space], move |_, indices| {
                     let row = indices[0] as f64;
                     let column = indices[1] as f64;
                     D::entry(
@@ -665,7 +665,7 @@ mod device {
             .map(|tensor| tensor.to_cuda().expect("fixture upload"))
             .collect();
         let hermitian_host =
-            TensorMap::<R, D>::from_block_fn(&runtime, [space], [space], |_, indices| {
+            TensorMap::<R, D>::from_subblock_fn(&runtime, [space], [space], |_, indices| {
                 let (row, column) = (indices[0], indices[1]);
                 if row == column {
                     D::entry(row as f64 + 1.0, 0.0)
@@ -1406,7 +1406,7 @@ mod device {
 
     fn run_all(config: &Config) {
         provider_rows!(config, "U1", |blocks: usize, degeneracy: usize| {
-            GradedSpace::try_new_with_arc(
+            GradedSpace::try_new(
                 Arc::new(U1FusionRule),
                 (0..blocks).map(|index| (U1Irrep::new(index as i32), degeneracy)),
             )
@@ -1416,21 +1416,21 @@ mod device {
             // Fermion parity has exactly two irreps, so the realized block
             // count of this provider is 2 in both families. That is a provider
             // capability, not a size decision made by the harness.
-            GradedSpace::try_new_with_arc(
+            GradedSpace::try_new(
                 Arc::new(FermionParityFusionRule),
                 [(Z2Irrep::EVEN, degeneracy), (Z2Irrep::ODD, degeneracy)],
             )
             .expect("fZ2 fixture leg")
         });
         provider_rows!(config, "SU2", |blocks: usize, degeneracy: usize| {
-            GradedSpace::try_new_with_arc(
+            GradedSpace::try_new(
                 Arc::new(SU2FusionRule),
                 (0..blocks).map(|index| (SU2Irrep::from_twice_spin(index), degeneracy)),
             )
             .expect("SU(2) fixture leg")
         });
         provider_rows!(config, "U1xfZ2", |blocks: usize, degeneracy: usize| {
-            GradedSpace::try_new_with_arc(
+            GradedSpace::try_new(
                 Arc::new(FermionParityFusionRule.product(U1FusionRule)),
                 (0..blocks).map(|index| {
                     (

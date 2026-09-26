@@ -355,7 +355,7 @@ impl SectorCodec for ExternalSu2 {
 // ---------------------------------------------------------------------------
 
 fn z3_leg(provider: &Arc<ExternalZ3>, is_dual: bool) -> GradedSpace<ExternalZ3> {
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         Arc::clone(provider),
         [(Z3Charge(0), 2), (Z3Charge(1), 3), (Z3Charge(2), 1)],
     )
@@ -364,7 +364,7 @@ fn z3_leg(provider: &Arc<ExternalZ3>, is_dual: bool) -> GradedSpace<ExternalZ3> 
 }
 
 fn su2_leg(provider: &Arc<ExternalSu2>, is_dual: bool) -> GradedSpace<ExternalSu2> {
-    GradedSpace::try_new_with_arc(Arc::clone(provider), [(SU2Irrep::from_twice_spin(1), 2)])
+    GradedSpace::try_new(Arc::clone(provider), [(SU2Irrep::from_twice_spin(1), 2)])
         .and_then(|space| if is_dual { space.try_dual() } else { Ok(space) })
         .expect("SU(2) leg is well formed")
 }
@@ -382,7 +382,7 @@ fn graded_space_reports_labels_in_provider_sector_id_order() {
     // What: `sectors()` decodes back to the caller's labels, ordered by the
     // provider's sector id (not by label order), with degeneracies parallel.
     let provider = Arc::new(ExternalZ3::new());
-    let space = GradedSpace::try_new_with_arc(
+    let space = GradedSpace::try_new(
         Arc::clone(&provider),
         [(Z3Charge(2), 1), (Z3Charge(0), 2), (Z3Charge(1), 3)],
     )
@@ -402,7 +402,7 @@ fn fibonacci_codec_reaches_public_graded_space_construction() {
     // codec boundary and return in engine-sector order. Tensor execution has a
     // separate complex-coefficient admission boundary and is not claimed here.
     let space = GradedSpace::try_new(
-        FibonacciFusionRule,
+        Arc::new(FibonacciFusionRule),
         [(FibonacciSector::Tau, 3), (FibonacciSector::Vacuum, 2)],
     )
     .unwrap();
@@ -419,7 +419,7 @@ fn fibonacci_codec_reaches_public_graded_space_construction() {
 fn fibonacci_complex_tensor_reaches_all_checked_constructors() {
     let runtime = runtime();
     let space = GradedSpace::try_new(
-        FibonacciFusionRule,
+        Arc::new(FibonacciFusionRule),
         [(FibonacciSector::Vacuum, 1), (FibonacciSector::Tau, 1)],
     )
     .unwrap();
@@ -431,7 +431,7 @@ fn fibonacci_complex_tensor_reaches_all_checked_constructors() {
         .all(|&value| value == Complex64::new(0.0, 0.0)));
 
     let filled: TensorMap<_, Complex64> =
-        TensorMap::from_block_fn(&runtime, [&space], [&space], |trees, indices| {
+        TensorMap::from_subblock_fn(&runtime, [&space], [&space], |trees, indices| {
             Complex64::new(
                 (indices.iter().sum::<usize>() + 1) as f64,
                 if trees.coupled() == &FibonacciSector::Tau {
@@ -444,7 +444,8 @@ fn fibonacci_complex_tensor_reaches_all_checked_constructors() {
         .unwrap();
     assert!(filled.data().iter().any(|value| value.im != 0.0));
 
-    let random: TensorMap<_, Complex64> = TensorMap::rand(&runtime, [&space], [&space]).unwrap();
+    let random: TensorMap<_, Complex64> =
+        TensorMap::rand_with_seed(&runtime, [&space], [&space], 0x9E37_79B9_7F4A_7C15).unwrap();
     let seeded: TensorMap<_, Complex64> =
         TensorMap::rand_with_seed(&runtime, [&space], [&space], 592_301).unwrap();
     assert_eq!(random.data().len(), zeros.data().len());
@@ -453,8 +454,9 @@ fn fibonacci_complex_tensor_reaches_all_checked_constructors() {
 }
 
 fn fibonacci_tau_braid_fixture(runtime: &Runtime) -> TensorMap<FibonacciFusionRule, Complex64> {
-    let tau = GradedSpace::try_new(FibonacciFusionRule, [(FibonacciSector::Tau, 1)]).unwrap();
-    TensorMap::from_block_fn(runtime, [&tau, &tau, &tau], [&tau], |trees, _| match trees
+    let tau =
+        GradedSpace::try_new(Arc::new(FibonacciFusionRule), [(FibonacciSector::Tau, 1)]).unwrap();
+    TensorMap::from_subblock_fn(runtime, [&tau, &tau, &tau], [&tau], |trees, _| match trees
         .codomain_innerlines()
     {
         [FibonacciSector::Vacuum] => Complex64::new(1.0, 0.0),
@@ -635,7 +637,8 @@ fn fibonacci_planar_transforms_roundtrip_without_braiding() {
 #[test]
 fn fibonacci_otimes_matches_the_nontrivial_tensorkit_fixture() {
     let runtime = runtime();
-    let tau = GradedSpace::try_new(FibonacciFusionRule, [(FibonacciSector::Tau, 1)]).unwrap();
+    let tau =
+        GradedSpace::try_new(Arc::new(FibonacciFusionRule), [(FibonacciSector::Tau, 1)]).unwrap();
     let dual_tau = tau.try_dual().unwrap();
     let alpha = Complex64::new(2.0, 3.0);
     let beta = Complex64::new(-1.0, 2.0);
@@ -643,8 +646,8 @@ fn fibonacci_otimes_matches_the_nontrivial_tensorkit_fixture() {
     assert_eq!(gamma, Complex64::new(-8.0, 1.0));
 
     let lhs: TensorMap<_, Complex64> =
-        TensorMap::from_block_fn(&runtime, [&tau], [&tau], |_, _| alpha).unwrap();
-    let rhs: TensorMap<_, Complex64> = TensorMap::from_block_fn(
+        TensorMap::from_subblock_fn(&runtime, [&tau], [&tau], |_, _| alpha).unwrap();
+    let rhs: TensorMap<_, Complex64> = TensorMap::from_subblock_fn(
         &runtime,
         [&dual_tau, &tau],
         [&dual_tau, &tau],
@@ -729,28 +732,28 @@ fn fibonacci_compose_is_complex_coupled_sector_matrix_multiplication() {
     let _guard = cache_lock();
     let runtime = runtime();
     let provider = Arc::new(FibonacciFusionRule);
-    let rows = GradedSpace::try_new_with_arc(
+    let rows = GradedSpace::try_new(
         Arc::clone(&provider),
         [(FibonacciSector::Vacuum, 1), (FibonacciSector::Tau, 2)],
     )
     .unwrap();
-    let shared = GradedSpace::try_new_with_arc(
+    let shared = GradedSpace::try_new(
         Arc::clone(&provider),
         [(FibonacciSector::Vacuum, 2), (FibonacciSector::Tau, 3)],
     )
     .unwrap();
-    let columns = GradedSpace::try_new_with_arc(
+    let columns = GradedSpace::try_new(
         Arc::clone(&provider),
         [(FibonacciSector::Vacuum, 2), (FibonacciSector::Tau, 1)],
     )
     .unwrap();
     let lhs: TensorMap<_, Complex64> =
-        TensorMap::from_block_fn(&runtime, [&rows], [&shared], |trees, indices| {
+        TensorMap::from_subblock_fn(&runtime, [&rows], [&shared], |trees, indices| {
             fibonacci_matrix_entry(1.0, trees.coupled(), indices[0], indices[1])
         })
         .unwrap();
     let rhs: TensorMap<_, Complex64> =
-        TensorMap::from_block_fn(&runtime, [&shared], [&columns], |trees, indices| {
+        TensorMap::from_subblock_fn(&runtime, [&shared], [&columns], |trees, indices| {
             fibonacci_matrix_entry(5.0, trees.coupled(), indices[0], indices[1])
         })
         .unwrap();
@@ -760,7 +763,7 @@ fn fibonacci_compose_is_complex_coupled_sector_matrix_multiplication() {
     let after_cold = runtime.tree_transform_cache_info();
     let warm = lhs.compose(&rhs).unwrap();
     let expected: TensorMap<_, Complex64> =
-        TensorMap::from_block_fn(&runtime, [&rows], [&columns], |trees, indices| {
+        TensorMap::from_subblock_fn(&runtime, [&rows], [&columns], |trees, indices| {
             let inner = match trees.coupled() {
                 FibonacciSector::Vacuum => 2,
                 FibonacciSector::Tau => 3,
@@ -783,7 +786,7 @@ fn fibonacci_compose_is_complex_coupled_sector_matrix_multiplication() {
     // What: the same genuinely complex blocks are associative, while ordinary
     // contraction refuses even this crossing-free boundary.
     let matrix = |seed| {
-        TensorMap::from_block_fn(&runtime, [&shared], [&shared], |trees, indices| {
+        TensorMap::from_subblock_fn(&runtime, [&shared], [&shared], |trees, indices| {
             fibonacci_matrix_entry(seed, trees.coupled(), indices[0], indices[1])
         })
         .unwrap()
@@ -806,7 +809,7 @@ fn fibonacci_compose_is_complex_coupled_sector_matrix_multiplication() {
 
     let other_runtime = Runtime::builder().build().unwrap();
     let other: TensorMap<_, Complex64> =
-        TensorMap::from_block_fn(&other_runtime, [&shared], [&shared], |trees, indices| {
+        TensorMap::from_subblock_fn(&other_runtime, [&shared], [&shared], |trees, indices| {
             fibonacci_matrix_entry(2.0, trees.coupled(), indices[0], indices[1])
         })
         .unwrap();
@@ -836,8 +839,7 @@ fn graded_space_drops_zero_degeneracy_sectors() {
     // What: the leg invariant (a zero-degeneracy sector is absent) reaches the
     // typed surface unchanged.
     let provider = Arc::new(ExternalZ3::new());
-    let space =
-        GradedSpace::try_new_with_arc(provider, [(Z3Charge(0), 2), (Z3Charge(1), 0)]).unwrap();
+    let space = GradedSpace::try_new(provider, [(Z3Charge(0), 2), (Z3Charge(1), 0)]).unwrap();
 
     assert_eq!(space.sectors().unwrap(), vec![Z3Charge(0)]);
     assert_eq!(space.degeneracies(), &[2]);
@@ -854,7 +856,7 @@ fn graded_space_constructor_queries_and_algebra_match_tensorkit() {
     }
 
     let ordinary = GradedSpace::<tenet::core::U1FusionRule>::try_new(
-        tenet::core::U1FusionRule,
+        Arc::new(tenet::core::U1FusionRule),
         [(tenet::core::U1Irrep::new(0), 1)],
     )
     .unwrap();
@@ -862,22 +864,18 @@ fn graded_space_constructor_queries_and_algebra_match_tensorkit() {
 
     let provider = Arc::new(tenet::core::U1FusionRule);
     let shared =
-        GradedSpace::try_new_with_arc(Arc::clone(&provider), [(tenet::core::U1Irrep::new(0), 1)])
-            .unwrap();
+        GradedSpace::try_new(Arc::clone(&provider), [(tenet::core::U1Irrep::new(0), 1)]).unwrap();
     assert!(std::ptr::eq(shared.provider(), provider.as_ref()));
     assert_eq!(shared.sectors().unwrap(), ordinary.sectors().unwrap());
     assert_eq!(shared.degeneracies(), ordinary.degeneracies());
     assert_eq!(shared.is_dual(), ordinary.is_dual());
-    let dual =
-        GradedSpace::try_new_with_arc(Arc::clone(&provider), [(tenet::core::U1Irrep::new(1), 2)])
-            .and_then(|space| space.try_dual())
-            .unwrap();
+    let dual = GradedSpace::try_new(Arc::clone(&provider), [(tenet::core::U1Irrep::new(1), 2)])
+        .and_then(|space| space.try_dual())
+        .unwrap();
     assert!(std::ptr::eq(dual.provider(), provider.as_ref()));
     assert_eq!(dual.sectors().unwrap(), [tenet::core::U1Irrep::new(-1)]);
     assert_eq!(dual.degeneracy(&tenet::core::U1Irrep::new(-1)).unwrap(), 2);
     assert_eq!(dual.degeneracy(&tenet::core::U1Irrep::new(1)).unwrap(), 0);
-    assert!(dual.has_sector(&tenet::core::U1Irrep::new(-1)).unwrap());
-    assert!(!dual.has_sector(&tenet::core::U1Irrep::new(1)).unwrap());
     let back = dual.try_dual().unwrap();
     assert!(!back.is_dual());
     assert_eq!(back.sectors().unwrap(), [tenet::core::U1Irrep::new(1)]);
@@ -892,7 +890,7 @@ fn graded_space_constructor_queries_and_algebra_match_tensorkit() {
     assert_eq!(unit.sectors().unwrap(), [tenet::core::U1Irrep::new(0)]);
     assert_eq!(unit.degeneracies(), [1]);
 
-    let left = GradedSpace::try_new_with_arc(
+    let left = GradedSpace::try_new(
         Arc::clone(&provider),
         [
             (tenet::core::U1Irrep::new(0), 1),
@@ -901,8 +899,7 @@ fn graded_space_constructor_queries_and_algebra_match_tensorkit() {
     )
     .unwrap();
     let right =
-        GradedSpace::try_new_with_arc(Arc::clone(&provider), [(tenet::core::U1Irrep::new(-1), 3)])
-            .unwrap();
+        GradedSpace::try_new(Arc::clone(&provider), [(tenet::core::U1Irrep::new(-1), 3)]).unwrap();
     let fused = left.fuse(&right).unwrap();
     assert_eq!(fused.degeneracy(&tenet::core::U1Irrep::new(-1)).unwrap(), 3);
     assert_eq!(fused.degeneracy(&tenet::core::U1Irrep::new(0)).unwrap(), 6);
@@ -917,7 +914,7 @@ fn graded_space_constructor_queries_and_algebra_match_tensorkit() {
     assert_eq!(summed.degeneracy(&tenet::core::U1Irrep::new(0)).unwrap(), 1);
     assert_eq!(summed.degeneracy(&tenet::core::U1Irrep::new(1)).unwrap(), 2);
     assert!(left.oplus(&right.try_dual().unwrap()).is_err());
-    let huge = GradedSpace::try_new_with_arc(
+    let huge = GradedSpace::try_new(
         Arc::clone(&provider),
         [(tenet::core::U1Irrep::new(0), usize::MAX)],
     )
@@ -927,10 +924,10 @@ fn graded_space_constructor_queries_and_algebra_match_tensorkit() {
 
     let su2_provider = Arc::new(SU2FusionRule);
     let half = SU2Irrep::from_twice_spin(1);
-    let su2_left = GradedSpace::try_new_with_arc(Arc::clone(&su2_provider), [(half, 2)])
+    let su2_left = GradedSpace::try_new(Arc::clone(&su2_provider), [(half, 2)])
         .and_then(|space| space.try_dual())
         .unwrap();
-    let su2_right = GradedSpace::try_new_with_arc(Arc::clone(&su2_provider), [(half, 3)]).unwrap();
+    let su2_right = GradedSpace::try_new(Arc::clone(&su2_provider), [(half, 3)]).unwrap();
     assert_eq!(su2_left.sectors().unwrap(), [half]);
     assert!(su2_left.is_dual());
     assert_eq!(su2_left.dim().unwrap(), 4.0);
@@ -945,7 +942,7 @@ fn graded_space_constructor_queries_and_algebra_match_tensorkit() {
     );
 
     let z2_provider = Arc::new(tenet::core::Z2FusionRule);
-    let z2_dual = GradedSpace::try_new_with_arc(z2_provider, [(tenet::core::Z2Irrep::ODD, 1)])
+    let z2_dual = GradedSpace::try_new(z2_provider, [(tenet::core::Z2Irrep::ODD, 1)])
         .and_then(|space| space.try_dual())
         .unwrap();
     assert_eq!(z2_dual.sectors().unwrap(), [tenet::core::Z2Irrep::ODD]);
@@ -953,7 +950,7 @@ fn graded_space_constructor_queries_and_algebra_match_tensorkit() {
 
     let product_provider =
         Arc::new(tenet::core::U1FusionRule.product(tenet::core::FermionParityFusionRule));
-    let product_left = GradedSpace::try_new_with_arc(
+    let product_left = GradedSpace::try_new(
         Arc::clone(&product_provider),
         [(
             tenet::core::product_sector(tenet::core::U1Irrep::new(1), tenet::core::Z2Irrep::ODD),
@@ -961,7 +958,7 @@ fn graded_space_constructor_queries_and_algebra_match_tensorkit() {
         )],
     )
     .unwrap();
-    let product_right = GradedSpace::try_new_with_arc(
+    let product_right = GradedSpace::try_new(
         product_provider,
         [(
             tenet::core::product_sector(tenet::core::U1Irrep::new(-1), tenet::core::Z2Irrep::ODD),
@@ -986,8 +983,7 @@ fn graded_space_rejects_a_duplicate_label_by_name() {
     // What: the duplicate is reported as the caller's own label, which needs
     // the check to run before the label is encoded away into a `SectorId`.
     let provider = Arc::new(ExternalZ3::new());
-    let error =
-        GradedSpace::try_new_with_arc(provider, [(Z3Charge(1), 2), (Z3Charge(1), 3)]).unwrap_err();
+    let error = GradedSpace::try_new(provider, [(Z3Charge(1), 2), (Z3Charge(1), 3)]).unwrap_err();
 
     let message = error.to_string();
     assert!(message.contains("Z3Charge(1)"), "{message}");
@@ -1000,8 +996,7 @@ fn graded_space_reports_aliased_labels_as_a_codec_law_violation() {
     // codec injectivity, not the caller declaring a sector twice, and the two
     // cases must not be conflated in the diagnosis.
     let provider = Arc::new(ExternalZ3::with(Quirk::AliasLabels));
-    let error =
-        GradedSpace::try_new_with_arc(provider, [(Z3Charge(0), 2), (Z3Charge(1), 3)]).unwrap_err();
+    let error = GradedSpace::try_new(provider, [(Z3Charge(0), 2), (Z3Charge(1), 3)]).unwrap_err();
 
     let message = error.to_string();
     assert!(message.contains("SectorCodec"), "{message}");
@@ -1013,13 +1008,12 @@ fn graded_space_reports_aliased_labels_as_a_codec_law_violation() {
 fn graded_space_reports_an_unrepresentable_label() {
     // What: an out-of-domain label surfaces the provider's own encode error.
     let provider = Arc::new(ExternalZ3::new());
-    let error = GradedSpace::try_new_with_arc(provider, [(Z3Charge(7), 2)]).unwrap_err();
+    let error = GradedSpace::try_new(provider, [(Z3Charge(7), 2)]).unwrap_err();
 
     assert!(error.to_string().contains("Z3 charge 7"), "{error}");
     let provider = Arc::new(ExternalZ3::new());
     let space = z3_leg(&provider, false);
     assert!(space.degeneracy(&Z3Charge(7)).is_err());
-    assert!(space.has_sector(&Z3Charge(7)).is_err());
 }
 
 #[test]
@@ -1066,7 +1060,7 @@ fn graded_space_dual_reports_a_non_injective_dual_instead_of_panicking() {
 
     assert!(error.to_string().contains("not injective"), "{error}");
     assert!(
-        GradedSpace::try_new_with_arc(provider, [(Z3Charge(0), 1), (Z3Charge(1), 1)])
+        GradedSpace::try_new(provider, [(Z3Charge(0), 1), (Z3Charge(1), 1)])
             .and_then(|space| space.try_dual())
             .is_err()
     );
@@ -1193,7 +1187,7 @@ fn checked_construction_failure_publishes_no_cache_state() {
     let broken = Arc::new(ExternalZ3::with(Quirk::FailDual));
     let codomain = z3_leg(&broken, false);
     let healthy = Arc::new(ExternalZ3::new());
-    let domain = GradedSpace::try_new_with_arc(
+    let domain = GradedSpace::try_new(
         healthy,
         [(Z3Charge(0), 2), (Z3Charge(2), 3), (Z3Charge(1), 1)],
     )
@@ -1223,7 +1217,7 @@ fn checked_construction_failure_publishes_no_cache_state() {
 }
 
 // ---------------------------------------------------------------------------
-// Slice 6: `from_block_fn` and inspection.
+// Slice 6: `from_subblock_fn` and inspection.
 // ---------------------------------------------------------------------------
 
 /// Numeric stand-in for a Z3 charge, so a fill value can depend on the labels
@@ -1244,7 +1238,7 @@ fn from_block_fn_sees_decoded_labels_and_fills_every_allowed_element() {
     let runtime = runtime();
 
     let tensor: TensorMap<ExternalZ3, f64> =
-        TensorMap::from_block_fn(&runtime, [&leg], [&dual], |sectors, indices| {
+        TensorMap::from_subblock_fn(&runtime, [&leg], [&dual], |sectors, indices| {
             assert_eq!(sectors.codomain_uncoupled().len(), 1);
             assert_eq!(sectors.domain_uncoupled().len(), 1);
             z3_weight(*sectors.coupled()) * 100.0
@@ -1265,12 +1259,11 @@ fn from_block_fn_surfaces_a_decode_failure_as_the_codec_error() {
     let _guard = cache_lock();
     let provider = Arc::new(ExternalZ3::with(Quirk::NarrowDecode));
     let leg =
-        GradedSpace::try_new_with_arc(Arc::clone(&provider), [(Z3Charge(0), 1), (Z3Charge(1), 2)])
-            .unwrap();
+        GradedSpace::try_new(Arc::clone(&provider), [(Z3Charge(0), 1), (Z3Charge(1), 2)]).unwrap();
     let runtime = runtime();
 
     // Two charge-1 codomain legs couple to charge 2, the id this codec refuses.
-    let error = TensorMap::<ExternalZ3, f64>::from_block_fn(
+    let error = TensorMap::<ExternalZ3, f64>::from_subblock_fn(
         &runtime,
         [&leg, &leg],
         [&leg, &leg],
@@ -1325,7 +1318,7 @@ fn labelled_subblocks_borrow_u1_and_su2_values_in_canonical_order() {
     let _guard = cache_lock();
     let runtime = runtime();
     let provider = Arc::new(tenet::core::U1FusionRule);
-    let leg = GradedSpace::try_new_with_arc(
+    let leg = GradedSpace::try_new(
         provider,
         [
             (tenet::core::U1Irrep::new(-1), 1),
@@ -1335,7 +1328,7 @@ fn labelled_subblocks_borrow_u1_and_su2_values_in_canonical_order() {
     )
     .unwrap();
     let u1: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], |trees, indices| {
+        TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg], |trees, indices| {
             100.0 * trees.coupled().charge() as f64
                 + 10.0 * indices[0] as f64
                 + 3.0 * indices[1] as f64
@@ -1417,11 +1410,10 @@ fn subblock_fusion_trees_reports_a_non_self_dual_domain_label() {
     // sector rather than its dual.
     let _guard = cache_lock();
     let provider = Arc::new(ExternalZ3::new());
-    let codomain =
-        GradedSpace::try_new_with_arc(Arc::clone(&provider), [(Z3Charge(1), 1)]).unwrap();
+    let codomain = GradedSpace::try_new(Arc::clone(&provider), [(Z3Charge(1), 1)]).unwrap();
     // A dual constructor interprets its key through the orientation, so key
     // charge 1 is stored and reported as the external charge 2.
-    let domain = GradedSpace::try_new_with_arc(Arc::clone(&provider), [(Z3Charge(1), 1)])
+    let domain = GradedSpace::try_new(Arc::clone(&provider), [(Z3Charge(1), 1)])
         .and_then(|space| space.try_dual())
         .unwrap();
     assert_eq!(
@@ -1455,7 +1447,7 @@ fn simple_fusion_provider_round_trips_construction_fill_and_inspection() {
     let runtime = runtime();
 
     let tensor: TensorMap<ExternalSu2, Complex64> =
-        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |sectors, indices| {
+        TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg, &leg], |sectors, indices| {
             Complex64::new(
                 sectors.coupled().twice_spin() as f64,
                 indices.iter().sum::<usize>() as f64,
@@ -1512,7 +1504,7 @@ fn typed_block_fill_preserves_tree_and_storage_order() {
     let _guard = cache_lock();
     let runtime = runtime();
     let provider = Arc::new(tenet::core::Z2FusionRule);
-    let leg = GradedSpace::try_new_with_arc(
+    let leg = GradedSpace::try_new(
         provider,
         [
             (tenet::core::Z2Irrep::EVEN, 2),
@@ -1521,7 +1513,7 @@ fn typed_block_fill_preserves_tree_and_storage_order() {
     )
     .unwrap();
     let typed: TensorMap<tenet::core::Z2FusionRule, f64> =
-        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], typed_fill_value).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg], typed_fill_value).unwrap();
 
     assert!(typed.subblock_count() > 1);
     for index in 0..typed.subblock_count() {
@@ -1557,7 +1549,7 @@ fn typed_block_fill_preserves_tree_and_storage_order() {
 /// two distinct degeneracy patterns, a permuted leg can be identified by its
 /// degeneracies, which a uniform fixture could not distinguish.
 fn z3_other_leg(provider: &Arc<ExternalZ3>, is_dual: bool) -> GradedSpace<ExternalZ3> {
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         Arc::clone(provider),
         [(Z3Charge(0), 1), (Z3Charge(1), 2), (Z3Charge(2), 4)],
     )
@@ -1574,7 +1566,7 @@ fn z3_rank_four(runtime: &Runtime, provider: &Arc<ExternalZ3>) -> TensorMap<Exte
     let wide_dual = wide.try_dual().unwrap();
     let narrow_dual = narrow.try_dual().unwrap();
     let mut counter = 0.0;
-    TensorMap::from_block_fn(
+    TensorMap::from_subblock_fn(
         runtime,
         [&wide, &narrow],
         [&wide_dual, &narrow_dual],
@@ -1658,7 +1650,7 @@ fn permute_carries_a_simple_fusion_provider_with_a_complex_payload() {
     let provider = Arc::new(ExternalSu2);
     let leg = su2_leg(&provider, false);
     let tensor: TensorMap<ExternalSu2, Complex64> =
-        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |sectors, indices| {
+        TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg, &leg], |sectors, indices| {
             Complex64::new(
                 sectors.coupled().twice_spin() as f64 + 1.0,
                 indices.iter().sum::<usize>() as f64 + 1.0,
@@ -1704,7 +1696,7 @@ fn z2_tensor_split(
     runtime: &Runtime,
     num_codomain: usize,
 ) -> TensorMap<tenet::core::Z2FusionRule, f64> {
-    let leg = GradedSpace::try_new_with_arc(
+    let leg = GradedSpace::try_new(
         Arc::new(tenet::core::Z2FusionRule),
         [
             (tenet::core::Z2Irrep::EVEN, 2),
@@ -1714,7 +1706,7 @@ fn z2_tensor_split(
     .unwrap();
     let legs = [&leg, &leg, &leg];
     let (codomain, domain) = legs.split_at(num_codomain);
-    TensorMap::from_block_fn(
+    TensorMap::from_subblock_fn(
         runtime,
         codomain.iter().copied(),
         domain.iter().copied(),
@@ -1728,7 +1720,7 @@ fn z2_tensor_split(
 /// path is visible in every comparison this tensor feeds.
 fn z2_complex_tensor(runtime: &Runtime) -> TensorMap<tenet::core::Z2FusionRule, Complex64> {
     let complex = |value: f64| Complex64::new(value, 1.0 + value % 5.0);
-    let leg = GradedSpace::try_new_with_arc(
+    let leg = GradedSpace::try_new(
         Arc::new(tenet::core::Z2FusionRule),
         [
             (tenet::core::Z2Irrep::EVEN, 2),
@@ -1736,7 +1728,7 @@ fn z2_complex_tensor(runtime: &Runtime) -> TensorMap<tenet::core::Z2FusionRule, 
         ],
     )
     .unwrap();
-    TensorMap::from_block_fn(runtime, [&leg, &leg], [&leg], |sectors, indices| {
+    TensorMap::from_subblock_fn(runtime, [&leg, &leg], [&leg], |sectors, indices| {
         complex(typed_fill_value(sectors, indices))
     })
     .unwrap()
@@ -1749,7 +1741,7 @@ fn z2_complex_tensor(runtime: &Runtime) -> TensorMap<tenet::core::Z2FusionRule, 
 /// A single-sector Z3 leg: the whole tensor map is then one dense block, so a
 /// contraction result can be checked against a hand-computed matrix product.
 fn z3_dense_leg(provider: &Arc<ExternalZ3>, degeneracy: usize) -> GradedSpace<ExternalZ3> {
-    GradedSpace::try_new_with_arc(Arc::clone(provider), [(Z3Charge(0), degeneracy)])
+    GradedSpace::try_new(Arc::clone(provider), [(Z3Charge(0), degeneracy)])
         .expect("single-sector Z3 leg is well formed")
 }
 
@@ -1761,7 +1753,7 @@ fn counting_z3(
     start: f64,
 ) -> TensorMap<ExternalZ3, f64> {
     let mut next = start - 1.0;
-    TensorMap::from_block_fn(runtime, [codomain], [domain], |_, _| {
+    TensorMap::from_subblock_fn(runtime, [codomain], [domain], |_, _| {
         next += 1.0;
         next
     })
@@ -1831,7 +1823,7 @@ fn contract_carries_a_simple_fusion_provider_with_a_complex_payload() {
     let build = |next: &mut Complex64| {
         let mut step = *next;
         let tensor: TensorMap<ExternalSu2, Complex64> =
-            TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |_, _| {
+            TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg, &leg], |_, _| {
                 step += Complex64::new(1.0, 0.5);
                 step
             })
@@ -2105,27 +2097,25 @@ fn otimes_matches_tensorkit_planar_trivial_without_requesting_braiding() {
     let _guard = cache_lock();
     let runtime = runtime();
     let provider = Arc::new(PlanarTrivial);
-    let lhs_cod =
-        GradedSpace::try_new_with_arc(Arc::clone(&provider), [(PlanarTrivialSector, 2)]).unwrap();
-    let lhs_dom = GradedSpace::try_new_with_arc(Arc::clone(&provider), [(PlanarTrivialSector, 3)])
+    let lhs_cod = GradedSpace::try_new(Arc::clone(&provider), [(PlanarTrivialSector, 2)]).unwrap();
+    let lhs_dom = GradedSpace::try_new(Arc::clone(&provider), [(PlanarTrivialSector, 3)])
         .and_then(|space| space.try_dual())
         .unwrap();
-    let rhs_cod = GradedSpace::try_new_with_arc(Arc::clone(&provider), [(PlanarTrivialSector, 4)])
+    let rhs_cod = GradedSpace::try_new(Arc::clone(&provider), [(PlanarTrivialSector, 4)])
         .and_then(|space| space.try_dual())
         .unwrap();
-    let rhs_dom =
-        GradedSpace::try_new_with_arc(Arc::clone(&provider), [(PlanarTrivialSector, 2)]).unwrap();
+    let rhs_dom = GradedSpace::try_new(Arc::clone(&provider), [(PlanarTrivialSector, 2)]).unwrap();
     let lhs: TensorMap<PlanarTrivial, f64> =
-        TensorMap::from_block_fn(&runtime, [&lhs_cod], [&lhs_dom], |_, indices| {
+        TensorMap::from_subblock_fn(&runtime, [&lhs_cod], [&lhs_dom], |_, indices| {
             (1 + indices[0] + 10 * indices[1]) as f64
         })
         .unwrap();
     let rhs: TensorMap<PlanarTrivial, f64> =
-        TensorMap::from_block_fn(&runtime, [&rhs_cod], [&rhs_dom], |_, indices| {
+        TensorMap::from_subblock_fn(&runtime, [&rhs_cod], [&rhs_dom], |_, indices| {
             (2 + indices[0] + 10 * indices[1]) as f64
         })
         .unwrap();
-    let expected: TensorMap<PlanarTrivial, f64> = TensorMap::from_block_fn(
+    let expected: TensorMap<PlanarTrivial, f64> = TensorMap::from_subblock_fn(
         &runtime,
         [&lhs_cod, &rhs_cod],
         [&lhs_dom, &rhs_dom],
@@ -2161,7 +2151,7 @@ fn otimes_fz2_complex_oracle_has_no_crossing_phase() {
     let _guard = cache_lock();
     let runtime = runtime();
     let rule = Arc::new(tenet::core::FermionParityFusionRule);
-    let leg = GradedSpace::try_new_with_arc(
+    let leg = GradedSpace::try_new(
         Arc::clone(&rule),
         [
             (tenet::core::Z2Irrep::EVEN, 1),
@@ -2170,7 +2160,7 @@ fn otimes_fz2_complex_oracle_has_no_crossing_phase() {
     )
     .unwrap();
     let lhs: TensorMap<_, Complex64> =
-        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |sectors, _| {
+        TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |sectors, _| {
             if *sectors.coupled() == tenet::core::Z2Irrep::EVEN {
                 Complex64::new(2.0, 1.0)
             } else {
@@ -2179,7 +2169,7 @@ fn otimes_fz2_complex_oracle_has_no_crossing_phase() {
         })
         .unwrap();
     let rhs: TensorMap<_, Complex64> =
-        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |sectors, _| {
+        TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |sectors, _| {
             if *sectors.coupled() == tenet::core::Z2Irrep::EVEN {
                 Complex64::new(5.0, -1.0)
             } else {
@@ -2188,7 +2178,7 @@ fn otimes_fz2_complex_oracle_has_no_crossing_phase() {
         })
         .unwrap();
     let expected: TensorMap<_, Complex64> =
-        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |sectors, _| {
+        TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg, &leg], |sectors, _| {
             let codomain = sectors.codomain_uncoupled();
             let domain = sectors.domain_uncoupled();
             if codomain != domain {
@@ -2218,13 +2208,11 @@ fn typed_deligne_product_uses_the_explicit_component_order() {
     let u1_rule = Arc::new(tenet::core::U1FusionRule);
     let fz2_rule = Arc::new(tenet::core::FermionParityFusionRule);
     let charge =
-        GradedSpace::try_new_with_arc(Arc::clone(&u1_rule), [(tenet::core::U1Irrep::new(1), 1)])
-            .unwrap();
+        GradedSpace::try_new(Arc::clone(&u1_rule), [(tenet::core::U1Irrep::new(1), 1)]).unwrap();
     let parity =
-        GradedSpace::try_new_with_arc(Arc::clone(&fz2_rule), [(tenet::core::Z2Irrep::ODD, 1)])
-            .unwrap();
-    let lhs = TensorMap::from_block_fn(&runtime, [&charge], [&charge], |_, _| 2.0).unwrap();
-    let rhs = TensorMap::from_block_fn(&runtime, [&parity], [&parity], |_, _| 3.0).unwrap();
+        GradedSpace::try_new(Arc::clone(&fz2_rule), [(tenet::core::Z2Irrep::ODD, 1)]).unwrap();
+    let lhs = TensorMap::from_subblock_fn(&runtime, [&charge], [&charge], |_, _| 2.0).unwrap();
+    let rhs = TensorMap::from_subblock_fn(&runtime, [&parity], [&parity], |_, _| 3.0).unwrap();
     let product = Arc::new(tenet::core::U1FusionRule.product(tenet::core::FermionParityFusionRule));
 
     let result = lhs.deligne_product(&rhs, product).unwrap();
@@ -2261,9 +2249,8 @@ fn typed_deligne_product_rejects_a_component_identity_mismatch() {
     );
     let u1_rule = Arc::new(tenet::core::U1FusionRule);
     let u1 =
-        GradedSpace::try_new_with_arc(Arc::clone(&u1_rule), [(tenet::core::U1Irrep::new(0), 1)])
-            .unwrap();
-    let rhs = TensorMap::from_block_fn(&runtime, [&u1], [&u1], |_, _| 3.0).unwrap();
+        GradedSpace::try_new(Arc::clone(&u1_rule), [(tenet::core::U1Irrep::new(0), 1)]).unwrap();
+    let rhs = TensorMap::from_subblock_fn(&runtime, [&u1], [&u1], |_, _| 3.0).unwrap();
     let wrong = Arc::new(ExternalZ3::tagged(1).product(tenet::core::U1FusionRule));
 
     assert!(matches!(
@@ -2317,7 +2304,7 @@ fn typed_deligne_product_preserves_duals_multiblocks_and_complex_values() {
     let runtime = runtime();
     let u1_rule = Arc::new(tenet::core::U1FusionRule);
     let fz2_rule = Arc::new(tenet::core::FermionParityFusionRule);
-    let charge_cod = GradedSpace::try_new_with_arc(
+    let charge_cod = GradedSpace::try_new(
         Arc::clone(&u1_rule),
         [
             (tenet::core::U1Irrep::new(-1), 1),
@@ -2325,7 +2312,7 @@ fn typed_deligne_product_preserves_duals_multiblocks_and_complex_values() {
         ],
     )
     .unwrap();
-    let charge_dom = GradedSpace::try_new_with_arc(
+    let charge_dom = GradedSpace::try_new(
         Arc::clone(&u1_rule),
         [
             (tenet::core::U1Irrep::new(-1), 1),
@@ -2334,7 +2321,7 @@ fn typed_deligne_product_preserves_duals_multiblocks_and_complex_values() {
     )
     .and_then(|space| space.try_dual())
     .unwrap();
-    let parity_cod = GradedSpace::try_new_with_arc(
+    let parity_cod = GradedSpace::try_new(
         Arc::clone(&fz2_rule),
         [
             (tenet::core::Z2Irrep::EVEN, 1),
@@ -2343,7 +2330,7 @@ fn typed_deligne_product_preserves_duals_multiblocks_and_complex_values() {
     )
     .and_then(|space| space.try_dual())
     .unwrap();
-    let parity_dom = GradedSpace::try_new_with_arc(
+    let parity_dom = GradedSpace::try_new(
         Arc::clone(&fz2_rule),
         [
             (tenet::core::Z2Irrep::EVEN, 1),
@@ -2352,12 +2339,12 @@ fn typed_deligne_product_preserves_duals_multiblocks_and_complex_values() {
     )
     .unwrap();
     let lhs: TensorMap<_, Complex64> =
-        TensorMap::from_block_fn(&runtime, [&charge_cod], [&charge_dom], |sectors, _| {
+        TensorMap::from_subblock_fn(&runtime, [&charge_cod], [&charge_dom], |sectors, _| {
             Complex64::new(sectors.coupled().charge() as f64, 2.0)
         })
         .unwrap();
     let rhs: TensorMap<_, Complex64> =
-        TensorMap::from_block_fn(&runtime, [&parity_cod], [&parity_dom], |sectors, _| {
+        TensorMap::from_subblock_fn(&runtime, [&parity_cod], [&parity_dom], |sectors, _| {
             if *sectors.coupled() == tenet::core::Z2Irrep::EVEN {
                 Complex64::new(3.0, -1.0)
             } else {
@@ -2371,7 +2358,7 @@ fn typed_deligne_product_preserves_duals_multiblocks_and_complex_values() {
     let codomain = actual.codomain();
     let domain = actual.domain();
     let expected =
-        TensorMap::from_block_fn(&runtime, codomain.iter(), domain.iter(), |sectors, _| {
+        TensorMap::from_subblock_fn(&runtime, codomain.iter(), domain.iter(), |sectors, _| {
             let codomain = sectors.codomain_uncoupled();
             let domain = sectors.domain_uncoupled();
             if codomain[0].left() == domain[0].left() && codomain[1].right() == domain[1].right() {
@@ -2409,13 +2396,11 @@ fn typed_deligne_product_accepts_a_nondefault_product_codec() {
     let u1_rule = Arc::new(tenet::core::U1FusionRule);
     let fz2_rule = Arc::new(tenet::core::FermionParityFusionRule);
     let charge =
-        GradedSpace::try_new_with_arc(Arc::clone(&u1_rule), [(tenet::core::U1Irrep::new(2), 1)])
-            .unwrap();
+        GradedSpace::try_new(Arc::clone(&u1_rule), [(tenet::core::U1Irrep::new(2), 1)]).unwrap();
     let parity =
-        GradedSpace::try_new_with_arc(Arc::clone(&fz2_rule), [(tenet::core::Z2Irrep::ODD, 1)])
-            .unwrap();
-    let lhs = TensorMap::from_block_fn(&runtime, [&charge], [&charge], |_, _| 2.0).unwrap();
-    let rhs = TensorMap::from_block_fn(&runtime, [&parity], [&parity], |_, _| 5.0).unwrap();
+        GradedSpace::try_new(Arc::clone(&fz2_rule), [(tenet::core::Z2Irrep::ODD, 1)]).unwrap();
+    let lhs = TensorMap::from_subblock_fn(&runtime, [&charge], [&charge], |_, _| 2.0).unwrap();
+    let rhs = TensorMap::from_subblock_fn(&runtime, [&parity], [&parity], |_, _| 5.0).unwrap();
     let product = Arc::new(tenet::core::ProductFusionRule::<_, _, Codec>::new(
         tenet::core::U1FusionRule,
         tenet::core::FermionParityFusionRule,
@@ -2440,21 +2425,20 @@ fn typed_deligne_product_maps_component_innerlines_into_the_product_tree() {
     let u1_rule = Arc::new(tenet::core::U1FusionRule);
     let fz2_rule = Arc::new(tenet::core::FermionParityFusionRule);
     let charges = [1, 2, 3].map(|charge| {
-        GradedSpace::try_new_with_arc(
+        GradedSpace::try_new(
             Arc::clone(&u1_rule),
             [(tenet::core::U1Irrep::new(charge), 1)],
         )
         .unwrap()
     });
     let charge_total =
-        GradedSpace::try_new_with_arc(Arc::clone(&u1_rule), [(tenet::core::U1Irrep::new(6), 1)])
-            .unwrap();
+        GradedSpace::try_new(Arc::clone(&u1_rule), [(tenet::core::U1Irrep::new(6), 1)]).unwrap();
     let odd =
-        GradedSpace::try_new_with_arc(Arc::clone(&fz2_rule), [(tenet::core::Z2Irrep::ODD, 1)])
-            .unwrap();
+        GradedSpace::try_new(Arc::clone(&fz2_rule), [(tenet::core::Z2Irrep::ODD, 1)]).unwrap();
     let lhs =
-        TensorMap::from_block_fn(&runtime, charges.iter(), [&charge_total], |_, _| 2.0).unwrap();
-    let rhs = TensorMap::from_block_fn(&runtime, [&odd, &odd, &odd], [&odd], |_, _| 3.0).unwrap();
+        TensorMap::from_subblock_fn(&runtime, charges.iter(), [&charge_total], |_, _| 2.0).unwrap();
+    let rhs =
+        TensorMap::from_subblock_fn(&runtime, [&odd, &odd, &odd], [&odd], |_, _| 3.0).unwrap();
     let product = Arc::new(tenet::core::U1FusionRule.product(tenet::core::FermionParityFusionRule));
 
     let result = lhs.deligne_product(&rhs, product).unwrap();
@@ -2480,10 +2464,11 @@ fn typed_deligne_product_prepares_both_embeddings_before_publishing_either() {
     let runtime = runtime();
     let rule = Arc::new(tenet::core::U1FusionRule);
     let charge_one =
-        GradedSpace::try_new_with_arc(Arc::clone(&rule), [(tenet::core::U1Irrep::new(1), 1)])
-            .unwrap();
-    let lhs = TensorMap::from_block_fn(&runtime, [&charge_one], [&charge_one], |_, _| 2.0).unwrap();
-    let rhs = TensorMap::from_block_fn(&runtime, [&charge_one], [&charge_one], |_, _| 3.0).unwrap();
+        GradedSpace::try_new(Arc::clone(&rule), [(tenet::core::U1Irrep::new(1), 1)]).unwrap();
+    let lhs =
+        TensorMap::from_subblock_fn(&runtime, [&charge_one], [&charge_one], |_, _| 2.0).unwrap();
+    let rhs =
+        TensorMap::from_subblock_fn(&runtime, [&charge_one], [&charge_one], |_, _| 3.0).unwrap();
     let product = Arc::new(tenet::core::ProductFusionRule::<
         tenet::core::U1FusionRule,
         tenet::core::U1FusionRule,
@@ -2713,15 +2698,12 @@ mod typed_glob_is_self_sufficient {
         let _guard = super::cache_lock();
         let runtime: Runtime = Runtime::builder().build().expect("runtime builds");
         let provider = Arc::new(ExternalZ3::new());
-        let leg = GradedSpace::try_new_with_arc(
-            Arc::clone(&provider),
-            [(Z3Charge(0), 2), (Z3Charge(1), 3)],
-        )
-        .expect("leg is well formed");
+        let leg = GradedSpace::try_new(Arc::clone(&provider), [(Z3Charge(0), 2), (Z3Charge(1), 3)])
+            .expect("leg is well formed");
 
         let build = || -> Result<TensorMap<ExternalZ3, f64>, Error> {
             let mut next = 0.0;
-            let tensor = TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], |_, _| {
+            let tensor = TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg], |_, _| {
                 next += 1.0;
                 next
             })?;
@@ -2755,7 +2737,7 @@ mod typed_glob_is_self_sufficient {
 /// only thing a comparison can be reporting.
 /// A fermionic leg carrying both parities, degeneracy one each.
 fn fermionic_leg() -> GradedSpace<tenet::core::FermionParityFusionRule> {
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         Arc::new(tenet::core::FermionParityFusionRule),
         [
             (tenet::core::Z2Irrep::EVEN, 1),
@@ -2770,7 +2752,7 @@ fn fermionic_leg() -> GradedSpace<tenet::core::FermionParityFusionRule> {
 fn fermionic_rank_three(runtime: &Runtime) -> TensorMap<tenet::core::FermionParityFusionRule, f64> {
     let leg = fermionic_leg();
     let mut next = 0.0;
-    TensorMap::from_block_fn(runtime, [&leg, &leg], [&leg], |_, _| {
+    TensorMap::from_subblock_fn(runtime, [&leg, &leg], [&leg], |_, _| {
         next += 1.0;
         next
     })
@@ -3032,8 +3014,7 @@ fn a_spectrum_decode_failure_comes_back_as_the_codec_error() {
     let runtime = runtime();
     let provider = Arc::new(ExternalZ3::with(Quirk::NarrowDecode));
     let leg =
-        GradedSpace::try_new_with_arc(Arc::clone(&provider), [(Z3Charge(0), 1), (Z3Charge(1), 2)])
-            .unwrap();
+        GradedSpace::try_new(Arc::clone(&provider), [(Z3Charge(0), 1), (Z3Charge(1), 2)]).unwrap();
     // Two charge-1 codomain legs couple to charge 2, the id this codec refuses.
     // `zeros` never decodes, so the tensor builds and the failure lands in the
     // spectrum decode.
@@ -3053,7 +3034,7 @@ fn a_spectrum_decode_failure_comes_back_as_the_codec_error() {
 fn svd_vals_reports_exact_per_label_spectra() {
     let _guard = cache_lock();
     let runtime = runtime();
-    let leg = GradedSpace::try_new_with_arc(
+    let leg = GradedSpace::try_new(
         Arc::new(tenet::core::Z2FusionRule),
         [
             (tenet::core::Z2Irrep::EVEN, 3),
@@ -3063,7 +3044,7 @@ fn svd_vals_reports_exact_per_label_spectra() {
     .unwrap();
     // Each block is diagonal, so its singular values are the absolute diagonal
     // entries. Both sectors are deliberately signed and out of magnitude order.
-    let typed = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |trees, indices| {
+    let typed = TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |trees, indices| {
         if indices[0] != indices[1] {
             return 0.0;
         }
@@ -3368,7 +3349,7 @@ fn su2_tensor_split(
     runtime: &Runtime,
     num_codomain: usize,
 ) -> TensorMap<tenet::core::SU2FusionRule, f64> {
-    let leg = GradedSpace::try_new_with_arc(
+    let leg = GradedSpace::try_new(
         Arc::new(tenet::core::SU2FusionRule),
         [
             (SU2Irrep::from_twice_spin(0), 1),
@@ -3379,7 +3360,7 @@ fn su2_tensor_split(
     let legs = [&leg, &leg];
     let (codomain, domain) = legs.split_at(num_codomain);
     let mut next = 0.0;
-    TensorMap::from_block_fn(
+    TensorMap::from_subblock_fn(
         runtime,
         codomain.iter().copied(),
         domain.iter().copied(),
@@ -3421,7 +3402,7 @@ fn scaling_by_the_inverse_norm_divides_by_the_dimension_weighted_norm() {
 /// A Z2 endomorphism, `[v] <- [v]`: the abelian half of the `tr`
 /// comparison, where every quantum dimension is one.
 fn z2_endomorphism(runtime: &Runtime) -> TensorMap<tenet::core::Z2FusionRule, f64> {
-    let leg = GradedSpace::try_new_with_arc(
+    let leg = GradedSpace::try_new(
         Arc::new(tenet::core::Z2FusionRule),
         [
             (tenet::core::Z2Irrep::EVEN, 2),
@@ -3429,7 +3410,7 @@ fn z2_endomorphism(runtime: &Runtime) -> TensorMap<tenet::core::Z2FusionRule, f6
         ],
     )
     .unwrap();
-    TensorMap::from_block_fn(runtime, [&leg], [&leg], typed_fill_value).unwrap()
+    TensorMap::from_subblock_fn(runtime, [&leg], [&leg], typed_fill_value).unwrap()
 }
 
 #[test]
@@ -3608,7 +3589,7 @@ fn adjoint_carries_an_external_provider() {
 fn fermionic_endo(runtime: &Runtime) -> TensorMap<tenet::core::FermionParityFusionRule, f64> {
     let leg = fermionic_leg();
     let mut next = 0.0;
-    TensorMap::from_block_fn(runtime, [&leg], [&leg], |_, _| {
+    TensorMap::from_subblock_fn(runtime, [&leg], [&leg], |_, _| {
         next += 1.0;
         next
     })
@@ -3653,7 +3634,7 @@ fn trace_pairs_preserves_partial_trace_geometry() {
     // `[v, v] <- [v, v]`, tracing (0, 3): two survivors, axes 1 and 2, one on
     // each side — so their relative order in `output_axes` is observable, and
     // reversing it changes the bytes.
-    let leg = GradedSpace::try_new_with_arc(
+    let leg = GradedSpace::try_new(
         Arc::new(tenet::core::Z2FusionRule),
         [
             (tenet::core::Z2Irrep::EVEN, 2),
@@ -3662,7 +3643,8 @@ fn trace_pairs_preserves_partial_trace_geometry() {
     )
     .unwrap();
     let typed: TensorMap<tenet::core::Z2FusionRule, f64> =
-        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], typed_fill_value).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg, &leg], typed_fill_value)
+            .unwrap();
     let two_survivors = typed.trace_pairs(&[(0, 3)]).unwrap();
     assert_eq!(two_survivors.codomain().len(), 1);
     assert_eq!(two_survivors.domain().len(), 1);
@@ -3753,9 +3735,11 @@ fn fermionic_compose_pair(
     let leg = fermionic_leg_with(&[1, 2]);
     let leg_dual = leg.try_dual().unwrap();
     let typed_a =
-        TensorMap::from_block_fn(runtime, [&leg], [&leg_dual, &leg], fermionic_typed_fill).unwrap();
+        TensorMap::from_subblock_fn(runtime, [&leg], [&leg_dual, &leg], fermionic_typed_fill)
+            .unwrap();
     let typed_b =
-        TensorMap::from_block_fn(runtime, [&leg_dual, &leg], [&leg], fermionic_typed_fill).unwrap();
+        TensorMap::from_subblock_fn(runtime, [&leg_dual, &leg], [&leg], fermionic_typed_fill)
+            .unwrap();
     (typed_a, typed_b)
 }
 
@@ -3763,7 +3747,7 @@ fn fermionic_compose_pair(
 fn fermionic_leg_with(
     degeneracies: &[usize; 2],
 ) -> GradedSpace<tenet::core::FermionParityFusionRule> {
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         Arc::new(tenet::core::FermionParityFusionRule),
         [
             (tenet::core::Z2Irrep::EVEN, degeneracies[0]),
@@ -3777,7 +3761,7 @@ fn fermionic_leg_with(
 fn fermionic_compose_is_contract_against_a_twisted_right_operand() {
     // What: the exact relation between the two contraction semantics —
     // `compose(a, b) == contract(a, twist(b, b's dual codomain legs))`. The
-    // twisted operand is built through `from_block_fn` rather than through the
+    // twisted operand is built through `from_subblock_fn` rather than through the
     // public `twist`: theta is -1 on an odd sector and +1 otherwise, so the
     // twisted tensor is a one-line independent oracle here.
     let _guard = cache_lock();
@@ -3787,7 +3771,7 @@ fn fermionic_compose_is_contract_against_a_twisted_right_operand() {
     let leg = fermionic_leg_with(&[1, 2]);
     let leg_dual = leg.try_dual().unwrap();
     let twisted_b =
-        TensorMap::from_block_fn(&runtime, [&leg_dual, &leg], [&leg], |sectors, indices| {
+        TensorMap::from_subblock_fn(&runtime, [&leg_dual, &leg], [&leg], |sectors, indices| {
             // Codomain leg 0 is the dual one; leg 1 is contracted too but is
             // not dual, so theta does not act on it.
             let theta = if sectors.codomain_uncoupled()[0] == tenet::core::Z2Irrep::ODD {
@@ -3894,7 +3878,7 @@ fn compose_rejects_operands_whose_domain_and_codomain_do_not_meet() {
     // Matching ranks, mismatched legs: the degeneracies differ, so the two do
     // not meet even though the shapes line up.
     let z2 = Arc::new(tenet::core::Z2FusionRule);
-    let narrow_leg = GradedSpace::try_new_with_arc(
+    let narrow_leg = GradedSpace::try_new(
         Arc::clone(&z2),
         [
             (tenet::core::Z2Irrep::EVEN, 1),
@@ -3903,7 +3887,8 @@ fn compose_rejects_operands_whose_domain_and_codomain_do_not_meet() {
     )
     .unwrap();
     let narrow =
-        TensorMap::from_block_fn(&runtime, [&narrow_leg], [&narrow_leg], typed_fill_value).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&narrow_leg], [&narrow_leg], typed_fill_value)
+            .unwrap();
     assert!(endo
         .compose(&narrow)
         .unwrap_err()
@@ -3911,7 +3896,7 @@ fn compose_rejects_operands_whose_domain_and_codomain_do_not_meet() {
         .contains("leg degeneracy mismatch"));
 
     // Matching ranks and matching degeneracies, opposite dual flags.
-    let wide_leg = GradedSpace::try_new_with_arc(
+    let wide_leg = GradedSpace::try_new(
         Arc::clone(&z2),
         [
             (tenet::core::Z2Irrep::EVEN, 2),
@@ -3921,7 +3906,7 @@ fn compose_rejects_operands_whose_domain_and_codomain_do_not_meet() {
     .and_then(|space| space.try_dual())
     .unwrap();
     let dual_endo =
-        TensorMap::from_block_fn(&runtime, [&wide_leg], [&wide_leg], typed_fill_value).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&wide_leg], [&wide_leg], typed_fill_value).unwrap();
     // The error names both operands' axes and external-axis flags: `endo`'s
     // domain axis 1 is `V'` and `dual_endo`'s codomain axis 0 is `V'` too.
     assert!(endo.compose(&dual_endo).unwrap_err().to_string().ends_with(
@@ -3938,9 +3923,10 @@ fn compose_rejects_operands_whose_domain_and_codomain_do_not_meet() {
 
     // Matching ranks and flags, different sector content.
     let even_only =
-        GradedSpace::try_new_with_arc(Arc::clone(&z2), [(tenet::core::Z2Irrep::EVEN, 2)]).unwrap();
+        GradedSpace::try_new(Arc::clone(&z2), [(tenet::core::Z2Irrep::EVEN, 2)]).unwrap();
     let even_endo =
-        TensorMap::from_block_fn(&runtime, [&even_only], [&even_only], typed_fill_value).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&even_only], [&even_only], typed_fill_value)
+            .unwrap();
     assert!(endo
         .compose(&even_endo)
         .unwrap_err()
@@ -3949,7 +3935,7 @@ fn compose_rejects_operands_whose_domain_and_codomain_do_not_meet() {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 6 (issue #569), slice 2: `TensorMap::id`.
+// Phase 6 (issue #569), slice 2: the identity `TensorMap::isomorphism(V, V)`.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -3961,7 +3947,7 @@ fn id_writes_the_nonuniform_fused_diagonal() {
     let runtime = runtime();
     let z2 = Arc::new(tenet::core::Z2FusionRule);
     let typed_leg = |even, odd| {
-        GradedSpace::try_new_with_arc(
+        GradedSpace::try_new(
             Arc::clone(&z2),
             [
                 (tenet::core::Z2Irrep::EVEN, even),
@@ -3973,7 +3959,8 @@ fn id_writes_the_nonuniform_fused_diagonal() {
 
     let wide = typed_leg(2, 3);
     let narrow = typed_leg(1, 4);
-    let typed = TensorMap::<_, f64>::id(&runtime, [&wide, &narrow]).unwrap();
+    let typed =
+        TensorMap::<_, f64>::isomorphism(&runtime, [&wide, &narrow], [&wide, &narrow]).unwrap();
 
     // Not the zero tensor, and not the all-ones one either: a genuine diagonal.
     // 14 even + 11 odd fused states: `2*1 + 3*4` and `2*4 + 3*1`.
@@ -3989,8 +3976,8 @@ fn id_composes_as_the_identity_on_both_sides() {
     let runtime = runtime();
     let typed = z2_tensor(&runtime);
 
-    let left = TensorMap::id(&runtime, &typed.codomain()).unwrap();
-    let right = TensorMap::id(&runtime, &typed.domain()).unwrap();
+    let left = TensorMap::isomorphism(&runtime, &typed.codomain(), &typed.codomain()).unwrap();
+    let right = TensorMap::isomorphism(&runtime, &typed.domain(), &typed.domain()).unwrap();
 
     assert_eq!(left.compose(&typed).unwrap().data(), typed.data());
     assert_eq!(typed.compose(&right).unwrap().data(), typed.data());
@@ -4005,8 +3992,8 @@ fn id_composes_as_the_identity_for_a_fermionic_provider() {
     let runtime = runtime();
     let (typed_a, _) = fermionic_compose_pair(&runtime);
 
-    let left = TensorMap::id(&runtime, &typed_a.codomain()).unwrap();
-    let right = TensorMap::id(&runtime, &typed_a.domain()).unwrap();
+    let left = TensorMap::isomorphism(&runtime, &typed_a.codomain(), &typed_a.codomain()).unwrap();
+    let right = TensorMap::isomorphism(&runtime, &typed_a.domain(), &typed_a.domain()).unwrap();
 
     assert_eq!(left.compose(&typed_a).unwrap().data(), typed_a.data());
     assert_eq!(typed_a.compose(&right).unwrap().data(), typed_a.data());
@@ -4020,7 +4007,7 @@ fn id_needs_at_least_one_leg() {
     let legs: [&GradedSpace<tenet::core::Z2FusionRule>; 0] = [];
 
     assert!(matches!(
-        TensorMap::<_, f64>::id(&runtime, legs).unwrap_err(),
+        TensorMap::<_, f64>::isomorphism(&runtime, legs, legs).unwrap_err(),
         tenet::prelude::Error::InvalidArgument(message)
             if message.contains("at least one leg")
     ));
@@ -4124,7 +4111,9 @@ fn compact_add_matches_pointwise_values_on_both_arms() {
 
     // A dense operand on the same bond space: `id` is the cheapest one, and it
     // is not diagonal *storage* even though its values are diagonal.
-    let typed_dense = TensorMap::id(&runtime, &typed.domain()).unwrap().scale(3.0);
+    let typed_dense = TensorMap::isomorphism(&runtime, &typed.domain(), &typed.domain())
+        .unwrap()
+        .scale(3.0);
 
     for (alpha, beta) in [(0.75, -0.5), (1.0, 1.0)] {
         let diagonal_dense = typed.axpby(alpha, &typed_dense, beta).unwrap();
@@ -4184,7 +4173,7 @@ fn compose_declines_a_compact_arm_it_cannot_prove() {
     // A second endomorphism on a leg with different degeneracies, so its bond
     // space genuinely differs from `wide`'s rather than merely being a second
     // allocation of the same one.
-    let narrow_leg = GradedSpace::try_new_with_arc(
+    let narrow_leg = GradedSpace::try_new(
         Arc::new(tenet::core::Z2FusionRule),
         [
             (tenet::core::Z2Irrep::EVEN, 1),
@@ -4193,7 +4182,7 @@ fn compose_declines_a_compact_arm_it_cannot_prove() {
     )
     .unwrap();
     let mut next = 0.0;
-    let narrow = TensorMap::from_block_fn(&runtime, [&narrow_leg], [&narrow_leg], |_, _| {
+    let narrow = TensorMap::from_subblock_fn(&runtime, [&narrow_leg], [&narrow_leg], |_, _| {
         next += 1.0;
         next
     })
@@ -4326,7 +4315,7 @@ fn eigh_reports_a_non_hermitian_input_rather_than_a_wrong_answer() {
 /// three, and `eig` is defined on square maps only.
 fn z2_complex_endo(runtime: &Runtime) -> TensorMap<tenet::core::Z2FusionRule, Complex64> {
     let complex = |value: f64| Complex64::new(value, 1.0 + value % 5.0);
-    let leg = GradedSpace::try_new_with_arc(
+    let leg = GradedSpace::try_new(
         Arc::new(tenet::core::Z2FusionRule),
         [
             (tenet::core::Z2Irrep::EVEN, 2),
@@ -4334,7 +4323,7 @@ fn z2_complex_endo(runtime: &Runtime) -> TensorMap<tenet::core::Z2FusionRule, Co
         ],
     )
     .unwrap();
-    TensorMap::from_block_fn(runtime, [&leg], [&leg], |trees, indices| {
+    TensorMap::from_subblock_fn(runtime, [&leg], [&leg], |trees, indices| {
         complex(typed_fill_value(trees, indices))
     })
     .unwrap()
@@ -4348,7 +4337,7 @@ fn eig_full_satisfies_the_eigen_equation_for_a_real_payload() {
     let typed = z2_endomorphism(&runtime);
 
     let Eig { d, v } = typed.eig_full().unwrap();
-    let av = typed.to_c64().compose(&v).unwrap();
+    let av = typed.convert::<Complex64>().compose(&v).unwrap();
     let vd = v.compose(&d).unwrap();
 
     assert_data_close_c64(av.data(), vd.data());
@@ -4491,7 +4480,9 @@ fn isometry_and_posdef_see_their_positive_cases() {
 
     // `2 * id` is Hermitian with every eigenvalue at 2: positive definite on
     // any provider, and the cheapest tensor that is.
-    let typed_positive = TensorMap::id(&runtime, &typed.domain()).unwrap().scale(2.0);
+    let typed_positive = TensorMap::isomorphism(&runtime, &typed.domain(), &typed.domain())
+        .unwrap()
+        .scale(2.0);
     assert!(is_hermitian!(typed_positive, tol));
     assert!(is_posdef!(typed_positive, tol));
     // Hermitian but not positive definite: the same tensor negated.
@@ -4503,7 +4494,7 @@ fn isometry_and_posdef_see_their_positive_cases() {
     // A real diagonal endomorphism with one entry at exactly zero is the case
     // that separates `>` from `>=` — `eigh` on it returns that zero exactly, so
     // the comparison is not floating-point weather.
-    let semidefinite_leg = GradedSpace::try_new_with_arc(
+    let semidefinite_leg = GradedSpace::try_new(
         Arc::new(tenet::core::Z2FusionRule),
         [
             (tenet::core::Z2Irrep::EVEN, 2),
@@ -4511,7 +4502,7 @@ fn isometry_and_posdef_see_their_positive_cases() {
         ],
     )
     .unwrap();
-    let semidefinite = TensorMap::from_block_fn(
+    let semidefinite = TensorMap::from_subblock_fn(
         &runtime,
         [&semidefinite_leg],
         [&semidefinite_leg],
@@ -4568,7 +4559,7 @@ fn a_non_endomorphism_is_never_hermitian_and_never_errors() {
 /// multiple of the identity is the cheapest fix.
 fn z2_invertible(runtime: &Runtime) -> TensorMap<tenet::core::Z2FusionRule, f64> {
     let typed = z2_endomorphism(runtime);
-    let typed_id = TensorMap::id(runtime, &typed.domain()).unwrap();
+    let typed_id = TensorMap::isomorphism(runtime, &typed.domain(), &typed.domain()).unwrap();
     typed.axpby(1.0, &typed_id, 100.0).unwrap()
 }
 
@@ -4579,7 +4570,8 @@ fn inv_is_a_two_sided_inverse() {
     let typed = z2_invertible(&runtime);
 
     let typed_inverse = typed.inv().unwrap();
-    let expected = TensorMap::<_, f64>::id(&runtime, &typed.domain()).unwrap();
+    let expected =
+        TensorMap::<_, f64>::isomorphism(&runtime, &typed.domain(), &typed.domain()).unwrap();
     for (name, identity) in [
         ("t * inv(t)", typed.compose(&typed_inverse).unwrap()),
         ("inv(t) * t", typed_inverse.compose(&typed).unwrap()),
@@ -4619,7 +4611,8 @@ fn inv_of_a_compact_spectrum_is_the_elementwise_reciprocal() {
     }
     // `s * s^-1` is the identity on the bond.
     let product = typed_s.compose(&inverse).unwrap();
-    let expected = TensorMap::<_, f64>::id(&runtime, &typed_s.domain()).unwrap();
+    let expected =
+        TensorMap::<_, f64>::isomorphism(&runtime, &typed_s.domain(), &typed_s.domain()).unwrap();
     let error = product
         .data()
         .iter()
@@ -4672,7 +4665,7 @@ fn inv_accepts_isomorphic_but_unequal_codomain_and_domain() {
     let _guard = cache_lock();
     let runtime = runtime();
     let provider = Arc::new(tenet::core::Z2FusionRule);
-    let wide = GradedSpace::try_new_with_arc(
+    let wide = GradedSpace::try_new(
         provider.clone(),
         [
             (tenet::core::Z2Irrep::EVEN, 2),
@@ -4682,7 +4675,7 @@ fn inv_accepts_isomorphic_but_unequal_codomain_and_domain() {
     .unwrap();
     // `narrow ⊗ narrow` has coupled dimensions (even 2, odd 2) as well, so the
     // two sides are isomorphic while the hom spaces differ in rank.
-    let narrow = GradedSpace::try_new_with_arc(
+    let narrow = GradedSpace::try_new(
         provider,
         [
             (tenet::core::Z2Irrep::EVEN, 1),
@@ -4691,7 +4684,7 @@ fn inv_accepts_isomorphic_but_unequal_codomain_and_domain() {
     )
     .unwrap();
     let mut next = 0.0;
-    let tensor = TensorMap::from_block_fn(&runtime, [&wide], [&narrow, &narrow], |_, _| {
+    let tensor = TensorMap::from_subblock_fn(&runtime, [&wide], [&narrow, &narrow], |_, _| {
         next += 1.0;
         next * next
     })
@@ -4701,7 +4694,7 @@ fn inv_accepts_isomorphic_but_unequal_codomain_and_domain() {
     assert_eq!(inverse.codomain().len(), 2);
     assert_eq!(inverse.domain().len(), 1);
     let identity = tensor.compose(&inverse).unwrap();
-    let expected = TensorMap::<_, f64>::id(&runtime, [&wide]).unwrap();
+    let expected = TensorMap::<_, f64>::isomorphism(&runtime, [&wide], [&wide]).unwrap();
     let error = identity
         .data()
         .iter()
@@ -4808,7 +4801,7 @@ fn pinv_cuts_a_singular_value_sitting_exactly_on_the_cutoff() {
     // mutation to `>=` would otherwise slip past.
     let _guard = cache_lock();
     let runtime = runtime();
-    let leg = GradedSpace::try_new_with_arc(
+    let leg = GradedSpace::try_new(
         Arc::new(tenet::core::Z2FusionRule),
         [(tenet::core::Z2Irrep::EVEN, 2)],
     )
@@ -4816,7 +4809,7 @@ fn pinv_cuts_a_singular_value_sitting_exactly_on_the_cutoff() {
     // Diagonal with entries 4 and 1: sigma_max is 4, so rcond = 0.25 puts the
     // second singular value exactly on the cutoff. Both are powers of two, so
     // the product is exact and the comparison is not floating-point weather.
-    let tensor = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices: &[usize]| {
+    let tensor = TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, indices: &[usize]| {
         if indices[0] != indices[1] {
             0.0
         } else if indices[0] == 0 {
@@ -4841,14 +4834,15 @@ fn pinv_cuts_a_singular_value_sitting_exactly_on_the_cutoff() {
 
     // A discarded nonzero mode makes this the exact Moore-Penrose inverse of
     // the hard-thresholded effective-rank tensor, not of the original tensor.
-    let thresholded = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices: &[usize]| {
-        if indices[0] == 0 && indices[1] == 0 {
-            4.0
-        } else {
-            0.0
-        }
-    })
-    .unwrap();
+    let thresholded =
+        TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, indices: &[usize]| {
+            if indices[0] == 0 && indices[1] == 0 {
+                4.0
+            } else {
+                0.0
+            }
+        })
+        .unwrap();
     let triple = tensor
         .compose(&dense_pinv)
         .unwrap()
@@ -4917,7 +4911,7 @@ fn pinv_uses_one_global_sigma_max_across_every_sector() {
     // survived, because there the two folds happen to agree.
     let _guard = cache_lock();
     let runtime = runtime();
-    let leg = GradedSpace::try_new_with_arc(
+    let leg = GradedSpace::try_new(
         Arc::new(tenet::core::Z2FusionRule),
         [
             (tenet::core::Z2Irrep::EVEN, 1),
@@ -4929,7 +4923,7 @@ fn pinv_uses_one_global_sigma_max_across_every_sector() {
     // per-sector sigma_max would be the entry itself and nothing could ever be
     // cut; and the global maximum is not in the sector a first-sector-only fold
     // would find.
-    let tensor = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |trees, _| {
+    let tensor = TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |trees, _| {
         if *trees.coupled() == tenet::core::Z2Irrep::EVEN {
             1.0
         } else {
@@ -4974,7 +4968,8 @@ fn exp_of_the_identity_is_e_times_the_identity() {
     let _guard = cache_lock();
     let runtime = runtime();
     let typed = z2_endomorphism(&runtime);
-    let identity = TensorMap::<_, f64>::id(&runtime, &typed.domain()).unwrap();
+    let identity =
+        TensorMap::<_, f64>::isomorphism(&runtime, &typed.domain(), &typed.domain()).unwrap();
 
     let expected = identity.scale(std::f64::consts::E);
     let error = identity
@@ -5002,7 +4997,8 @@ fn exp_accepts_a_non_hermitian_endomorphism_and_inverts_under_negation() {
 
     // exp(A) exp(-A) = id, evaluated through the typed composition.
     let inverse = typed.scale(-1.0).exp().unwrap();
-    let identity = TensorMap::<_, f64>::id(&runtime, &typed.domain()).unwrap();
+    let identity =
+        TensorMap::<_, f64>::isomorphism(&runtime, &typed.domain(), &typed.domain()).unwrap();
     let residual = typed_exp
         .compose(&inverse)
         .unwrap()
@@ -5071,12 +5067,12 @@ fn exp_of_a_complex_compact_spectrum_takes_the_complex_elementwise_branch() {
     // does in TensorKit; the rustdoc says so and this is the pin.
     let _guard = cache_lock();
     let runtime = runtime();
-    let leg = GradedSpace::try_new_with_arc(
+    let leg = GradedSpace::try_new(
         Arc::new(tenet::core::Z2FusionRule),
         [(tenet::core::Z2Irrep::EVEN, 2)],
     )
     .unwrap();
-    let dense = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices: &[usize]| {
+    let dense = TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, indices: &[usize]| {
         if indices[0] == indices[1] {
             Complex64::new(0.0, indices[0] as f64)
         } else {
@@ -5150,9 +5146,10 @@ fn sqrt_squares_to_the_source_on_both_storages() {
     // The dense storage of the same tensor: `add`ing zero to a dense sibling
     // forces the materialized payload, and the block walk must reach the same
     // answer as the compact arm.
-    let dense_zero = TensorMap::<_, f64>::id(&runtime, &typed_s.domain())
-        .unwrap()
-        .scale(0.0);
+    let dense_zero =
+        TensorMap::<_, f64>::isomorphism(&runtime, &typed_s.domain(), &typed_s.domain())
+            .unwrap()
+            .scale(0.0);
     let dense_s = typed_s.axpby(1.0, &dense_zero, 1.0).unwrap();
     assert_eq!(dense_s.data(), typed_s.data());
     assert_eq!(
@@ -5214,9 +5211,13 @@ fn sqrt_of_a_negative_f64_entry_points_at_the_complex_payload() {
             typed_s
                 .axpby(
                     1.0,
-                    &TensorMap::<_, f64>::id(&runtime, &typed_s.domain())
-                        .unwrap()
-                        .scale(0.0),
+                    &TensorMap::<_, f64>::isomorphism(
+                        &runtime,
+                        &typed_s.domain(),
+                        &typed_s.domain(),
+                    )
+                    .unwrap()
+                    .scale(0.0),
                     1.0,
                 )
                 .unwrap()
@@ -5242,12 +5243,12 @@ fn sqrt_of_a_complex_payload_takes_the_principal_branch() {
     // principal one — `√(-1) = i`, not `-i`.
     let _guard = cache_lock();
     let runtime = runtime();
-    let leg = GradedSpace::try_new_with_arc(
+    let leg = GradedSpace::try_new(
         Arc::new(tenet::core::Z2FusionRule),
         [(tenet::core::Z2Irrep::EVEN, 2)],
     )
     .unwrap();
-    let negative = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices: &[usize]| {
+    let negative = TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, indices: &[usize]| {
         if indices[0] == indices[1] {
             Complex64::new(-1.0, 0.0)
         } else {
@@ -5287,7 +5288,7 @@ fn c64_compact_inv_and_pinv_are_elementwise_reciprocals() {
     let runtime = runtime();
     // A full-rank c64 `[v] <- [v]` map with a wide spectrum.
     let complex = |value: f64| Complex64::new(value, 1.0 + value % 5.0);
-    let leg = GradedSpace::try_new_with_arc(
+    let leg = GradedSpace::try_new(
         Arc::new(tenet::core::Z2FusionRule),
         [
             (tenet::core::Z2Irrep::EVEN, 16),
@@ -5300,7 +5301,7 @@ fn c64_compact_inv_and_pinv_are_elementwise_reciprocals() {
         state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
         complex(((state >> 33) as f64) / (u32::MAX as f64) + 0.5)
     };
-    let typed = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| next()).unwrap();
+    let typed = TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, _| next()).unwrap();
     let typed_s = typed.svd_compact().unwrap().s;
     let source = tenet::expert::diagonal_spectrum(&typed_s).unwrap().unwrap();
     let sigma_max = source
@@ -5385,7 +5386,7 @@ fn compact_contract_identity_output_does_not_publish_a_transform_cache_entry() {
     let leg = u1_leg(&provider, &[(-1, 1), (0, 2), (1, 1)]);
     let tensor: TensorMap<_, f64> =
         TensorMap::rand_with_seed(&runtime, [&leg, &leg], [&leg], 592_302).unwrap();
-    let spectrum = TensorMap::<_, f64>::id(&runtime, [&leg])
+    let spectrum = TensorMap::<_, f64>::isomorphism(&runtime, [&leg], [&leg])
         .unwrap()
         .svd_compact()
         .unwrap()
@@ -5406,12 +5407,12 @@ fn diagonal_contract_preserves_left_provider_authority_on_every_compact_arm() {
 
     macro_rules! exercise {
         ($name:literal, $rule:expr, $sectors:expr) => {{
-            let left_leg = GradedSpace::try_new_with_arc(Arc::new($rule), $sectors).unwrap();
-            let right_leg = GradedSpace::try_new_with_arc(Arc::new($rule), $sectors).unwrap();
-            let left = TensorMap::<_, f64>::id(&runtime, [&left_leg])
+            let left_leg = GradedSpace::try_new(Arc::new($rule), $sectors).unwrap();
+            let right_leg = GradedSpace::try_new(Arc::new($rule), $sectors).unwrap();
+            let left = TensorMap::<_, f64>::isomorphism(&runtime, [&left_leg], [&left_leg])
                 .unwrap()
                 .scale(2.0);
-            let right = TensorMap::<_, f64>::id(&runtime, [&right_leg])
+            let right = TensorMap::<_, f64>::isomorphism(&runtime, [&right_leg], [&right_leg])
                 .unwrap()
                 .scale(3.0);
             let left_d = left.svd_compact().unwrap().s;
@@ -5566,7 +5567,7 @@ fn the_diagonal_contract_arm_declines_an_illegal_contraction() {
     // on a made-up space.
     let _guard = cache_lock();
     let runtime = runtime();
-    let leg = GradedSpace::try_new_with_arc(
+    let leg = GradedSpace::try_new(
         Arc::new(tenet::core::Z2FusionRule),
         [
             (tenet::core::Z2Irrep::EVEN, 2),
@@ -5575,8 +5576,8 @@ fn the_diagonal_contract_arm_declines_an_illegal_contraction() {
     )
     .unwrap();
     let dual = leg.try_dual().unwrap();
-    let typed = TensorMap::from_block_fn(&runtime, [&dual], [&leg], typed_fill_value).unwrap();
-    let s = TensorMap::from_block_fn(&runtime, [&leg], [&leg], typed_fill_value)
+    let typed = TensorMap::from_subblock_fn(&runtime, [&dual], [&leg], typed_fill_value).unwrap();
+    let s = TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], typed_fill_value)
         .unwrap()
         .svd_compact()
         .unwrap()
@@ -5589,12 +5590,12 @@ fn the_diagonal_contract_arm_declines_an_illegal_contraction() {
     // domain axis against `s`, whose bond leg is non-dual by construction, so
     // the two raw flags differ and the engine refuses the pair.
     let dual_domain =
-        TensorMap::from_block_fn(&runtime, [&leg], [&dual], typed_fill_value).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&leg], [&dual], typed_fill_value).unwrap();
     assert!(dual_domain.contract(&s, &[1], &[0], &[0, 1]).is_err());
     // A degeneracy mismatch on an otherwise well-oriented pair is the other way
     // the comparison earns its keep: nothing about the axis pattern is wrong, so
     // only the legs themselves say this is not a contraction.
-    let narrow = GradedSpace::try_new_with_arc(
+    let narrow = GradedSpace::try_new(
         Arc::new(tenet::core::Z2FusionRule),
         [
             (tenet::core::Z2Irrep::EVEN, 2),
@@ -5602,12 +5603,12 @@ fn the_diagonal_contract_arm_declines_an_illegal_contraction() {
         ],
     )
     .unwrap();
-    let narrow_bond = TensorMap::from_block_fn(&runtime, [&narrow], [&narrow], typed_fill_value)
+    let narrow_bond = TensorMap::from_subblock_fn(&runtime, [&narrow], [&narrow], typed_fill_value)
         .unwrap()
         .svd_compact()
         .unwrap()
         .s;
-    let wide = TensorMap::from_block_fn(&runtime, [&leg], [&leg], typed_fill_value).unwrap();
+    let wide = TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], typed_fill_value).unwrap();
     assert!(wide.contract(&narrow_bond, &[1], &[0], &[0, 1]).is_err());
     assert!(narrow_bond.contract(&wide, &[1], &[0], &[0, 1]).is_err());
     // And a wrong-length axis list or a non-permutation output order is still
@@ -5798,7 +5799,7 @@ where
 }
 
 fn z2_bond(runtime: &Runtime) -> TensorMap<tenet::core::Z2FusionRule, f64> {
-    let leg = GradedSpace::try_new_with_arc(
+    let leg = GradedSpace::try_new(
         Arc::new(tenet::core::Z2FusionRule),
         [
             (tenet::core::Z2Irrep::EVEN, 2),
@@ -5806,7 +5807,7 @@ fn z2_bond(runtime: &Runtime) -> TensorMap<tenet::core::Z2FusionRule, f64> {
         ],
     )
     .unwrap();
-    let typed = TensorMap::from_block_fn(runtime, [&leg], [&leg], typed_fill_value).unwrap();
+    let typed = TensorMap::from_subblock_fn(runtime, [&leg], [&leg], typed_fill_value).unwrap();
     typed.svd_compact().unwrap().s
 }
 
@@ -5870,7 +5871,7 @@ fn compact_rank_one_swaps_match_the_dense_route_for_dual_and_fermionic_legs() {
         let provider = Arc::new(ExternalZ3::new());
         let leg = z3_leg(&provider, is_dual);
         let mut next = 0.0;
-        let source = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| {
+        let source = TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, _| {
             next += 1.0;
             next
         })
@@ -5893,7 +5894,7 @@ fn compact_rank_one_swaps_match_the_dense_route_for_dual_and_fermionic_legs() {
             );
         }
 
-        let leg = GradedSpace::try_new_with_arc(
+        let leg = GradedSpace::try_new(
             Arc::new(tenet::core::FermionParityFusionRule),
             [
                 (tenet::core::Z2Irrep::EVEN, 2),
@@ -5903,7 +5904,7 @@ fn compact_rank_one_swaps_match_the_dense_route_for_dual_and_fermionic_legs() {
         .and_then(|space| if is_dual { space.try_dual() } else { Ok(space) })
         .unwrap();
         let mut next = 0.0;
-        let source = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| {
+        let source = TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, _| {
             next += 1.0;
             next
         })
@@ -5935,7 +5936,7 @@ fn z2_spectrum_fixture(
     runtime: &Runtime,
     rank_deficient: bool,
 ) -> TensorMap<tenet::core::Z2FusionRule, f64> {
-    let leg = GradedSpace::try_new_with_arc(
+    let leg = GradedSpace::try_new(
         Arc::new(tenet::core::Z2FusionRule),
         [
             (tenet::core::Z2Irrep::EVEN, 2),
@@ -5945,7 +5946,7 @@ fn z2_spectrum_fixture(
     .unwrap();
     // A constant block is rank one, so all but one singular value per sector is
     // zero — the positive *semi*definite fixture `isposdef` must still reject.
-    let source = TensorMap::from_block_fn(runtime, [&leg], [&leg], |sectors, indices| {
+    let source = TensorMap::from_subblock_fn(runtime, [&leg], [&leg], |sectors, indices| {
         if rank_deficient {
             1.0
         } else {
@@ -6074,7 +6075,7 @@ where
 {
     let mut next: f64 = 0.0;
     let typed: TensorMap<R, D> =
-        TensorMap::from_block_fn(runtime, [typed_leg], [typed_leg], |_, _| {
+        TensorMap::from_subblock_fn(runtime, [typed_leg], [typed_leg], |_, _| {
             next += 1.0;
             fill(next)
         })
@@ -6141,7 +6142,7 @@ fn compact_full_trace_matches_the_forced_dense_route() {
 
     for is_dual in [false, true] {
         // U(1).
-        let mut typed_leg: GradedSpace<tenet::core::U1FusionRule> = GradedSpace::try_new_with_arc(
+        let mut typed_leg: GradedSpace<tenet::core::U1FusionRule> = GradedSpace::try_new(
             Arc::new(tenet::core::U1FusionRule),
             [
                 (tenet::core::U1Irrep::new(-1), 2),
@@ -6160,7 +6161,7 @@ fn compact_full_trace_matches_the_forced_dense_route() {
 
         // SU(2): dim(c) takes the values 1 and 2, so a coefficient-free
         // reduction cannot pass.
-        let mut typed_leg: GradedSpace<tenet::core::SU2FusionRule> = GradedSpace::try_new_with_arc(
+        let mut typed_leg: GradedSpace<tenet::core::SU2FusionRule> = GradedSpace::try_new(
             Arc::new(tenet::core::SU2FusionRule),
             [
                 (SU2Irrep::from_twice_spin(0), 2),
@@ -6179,7 +6180,7 @@ fn compact_full_trace_matches_the_forced_dense_route() {
         // fZ2: the twist is -1 on the odd sector, so this is where the
         // supertrace coefficient and its orientation live.
         let mut typed_leg: GradedSpace<tenet::core::FermionParityFusionRule> =
-            GradedSpace::try_new_with_arc(
+            GradedSpace::try_new(
                 Arc::new(tenet::core::FermionParityFusionRule),
                 [
                     (tenet::core::Z2Irrep::EVEN, 2),
@@ -6201,7 +6202,7 @@ fn compact_full_trace_matches_the_forced_dense_route() {
         let product_label = |charge: i32, parity: u8| {
             tenet::core::ProductSector::new(tenet::core::U1Irrep::new(charge), parity_irrep(parity))
         };
-        let mut typed_leg: GradedSpace<U1Fz2Rule> = GradedSpace::try_new_with_arc(
+        let mut typed_leg: GradedSpace<U1Fz2Rule> = GradedSpace::try_new(
             Arc::new(U1Fz2Rule::new(
                 tenet::core::U1FusionRule,
                 tenet::core::FermionParityFusionRule,
@@ -6226,15 +6227,14 @@ fn compact_full_trace_matches_the_forced_dense_route() {
     // the adjoint variant only conjugates): a compact complex rotation stays
     // compact, and the forced-dense oracle covers it on the rule where the
     // twist could interact with the phase.
-    let typed_leg: GradedSpace<tenet::core::FermionParityFusionRule> =
-        GradedSpace::try_new_with_arc(
-            Arc::new(tenet::core::FermionParityFusionRule),
-            [
-                (tenet::core::Z2Irrep::EVEN, 2),
-                (tenet::core::Z2Irrep::ODD, 3),
-            ],
-        )
-        .unwrap();
+    let typed_leg: GradedSpace<tenet::core::FermionParityFusionRule> = GradedSpace::try_new(
+        Arc::new(tenet::core::FermionParityFusionRule),
+        [
+            (tenet::core::Z2Irrep::EVEN, 2),
+            (tenet::core::Z2Irrep::ODD, 3),
+        ],
+    )
+    .unwrap();
     let typed_s = compact_bond_trace(&runtime, &typed_leg, complex);
     let rotated: TensorMap<tenet::core::FermionParityFusionRule, Complex64> =
         typed_s.scale(Complex64::new(0.8, -0.6));
@@ -6276,14 +6276,14 @@ fn compact_full_trace_is_the_supertrace_and_the_transpose_flips_it() {
         ("fz2 even", tenet::core::Z2Irrep::EVEN, 1.0),
         ("fz2 odd", tenet::core::Z2Irrep::ODD, -1.0),
     ] {
-        let leg: GradedSpace<tenet::core::FermionParityFusionRule> = GradedSpace::try_new_with_arc(
+        let leg: GradedSpace<tenet::core::FermionParityFusionRule> = GradedSpace::try_new(
             Arc::new(tenet::core::FermionParityFusionRule),
             [(parity, 3)],
         )
         .unwrap();
         let mut next: f64 = 0.0;
         let source: TensorMap<tenet::core::FermionParityFusionRule, f64> =
-            TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| {
+            TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, _| {
                 next += 1.0;
                 next
             })
@@ -6295,14 +6295,14 @@ fn compact_full_trace_is_the_supertrace_and_the_transpose_flips_it() {
 
     // The bosonic twin of the odd fixture: same parity label, twist +1, so the
     // supertrace *is* the positive trace here.
-    let leg: GradedSpace<tenet::core::Z2FusionRule> = GradedSpace::try_new_with_arc(
+    let leg: GradedSpace<tenet::core::Z2FusionRule> = GradedSpace::try_new(
         Arc::new(tenet::core::Z2FusionRule),
         [(tenet::core::Z2Irrep::ODD, 3)],
     )
     .unwrap();
     let mut next: f64 = 0.0;
     let source: TensorMap<tenet::core::Z2FusionRule, f64> =
-        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| {
+        TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, _| {
             next += 1.0;
             next
         })
@@ -6399,7 +6399,7 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
 {
     let mut next = first_value - 1.0;
-    let typed = TensorMap::from_block_fn(
+    let typed = TensorMap::from_subblock_fn(
         runtime,
         [typed_legs.0, typed_legs.1],
         [typed_legs.0, typed_legs.1],
@@ -6419,7 +6419,7 @@ where
 /// legs either.
 fn u1_oracle(runtime: &Runtime, first_value: f64) -> TensorMap<tenet::core::U1FusionRule, f64> {
     let rule = Arc::new(tenet::core::U1FusionRule);
-    let typed_p = GradedSpace::try_new_with_arc(
+    let typed_p = GradedSpace::try_new(
         Arc::clone(&rule),
         [
             (tenet::core::U1Irrep::new(-1), 1),
@@ -6429,7 +6429,7 @@ fn u1_oracle(runtime: &Runtime, first_value: f64) -> TensorMap<tenet::core::U1Fu
     )
     .unwrap();
     // Built through `try_dual` because the dual flips the sector labels too.
-    let typed_q = GradedSpace::try_new_with_arc(
+    let typed_q = GradedSpace::try_new(
         Arc::clone(&rule),
         [
             (tenet::core::U1Irrep::new(0), 1),
@@ -6462,9 +6462,8 @@ fn u1_fz2_oracle(runtime: &Runtime, first_value: f64) -> TensorMap<U1Fz2Rule, f6
         )
     };
     let typed_p =
-        GradedSpace::try_new_with_arc(Arc::clone(&rule), [(label(0, 0), 1), (label(1, 1), 2)])
-            .unwrap();
-    let typed_q = GradedSpace::try_new_with_arc(
+        GradedSpace::try_new(Arc::clone(&rule), [(label(0, 0), 1), (label(1, 1), 2)]).unwrap();
+    let typed_q = GradedSpace::try_new(
         Arc::clone(&rule),
         [(label(-1, 1), 1), (label(0, 0), 2), (label(1, 1), 1)],
     )
@@ -6510,12 +6509,12 @@ fn fz2_u1_su2_typed_legs() -> (GradedSpace<Fz2U1Su2Rule>, GradedSpace<Fz2U1Su2Ru
             SU2Irrep::from_twice_spin(twice_spin),
         )
     };
-    let typed_p = GradedSpace::try_new_with_arc(
+    let typed_p = GradedSpace::try_new(
         Arc::clone(&rule),
         [(label(0, 0, 0), 1), (label(1, 1, 1), 2)],
     )
     .unwrap();
-    let typed_q = GradedSpace::try_new_with_arc(
+    let typed_q = GradedSpace::try_new(
         Arc::clone(&rule),
         [
             (label(1, -1, 1), 1),
@@ -6743,7 +6742,7 @@ fn the_fermionic_product_compose_is_contract_against_a_twisted_right_operand() {
     let (leg_p, leg_q) = fz2_u1_su2_typed_legs();
     let rule = leg_p.provider().clone();
     let mut next = 99.0;
-    let twisted_b = TensorMap::from_block_fn(
+    let twisted_b = TensorMap::from_subblock_fn(
         &runtime,
         [&leg_p, &leg_q],
         [&leg_p, &leg_q],
@@ -6984,7 +6983,7 @@ fn generic_product_provider_drives_the_typed_facade_without_a_fixed_constructor(
         tenet::core::product_sector(parity, tenet::core::U1Irrep::new(charge))
     };
 
-    let p = GradedSpace::try_new_with_arc(
+    let p = GradedSpace::try_new(
         Arc::clone(&rule),
         [
             (label(tenet::core::Z2Irrep::EVEN, 0), 2),
@@ -6996,7 +6995,7 @@ fn generic_product_provider_drives_the_typed_facade_without_a_fixed_constructor(
     // layout, composition — runs on a product provider. The identities below
     // are sign-consistent and hold for either flag, so this leg is coverage of
     // that path, not a probe that makes them sign-sensitive.
-    let q = GradedSpace::try_new_with_arc(
+    let q = GradedSpace::try_new(
         Arc::clone(&rule),
         [
             (label(tenet::core::Z2Irrep::ODD, -1), 1),
@@ -7009,7 +7008,7 @@ fn generic_product_provider_drives_the_typed_facade_without_a_fixed_constructor(
     // A distinct value per element, so multiple blocks are exercised
     // nontrivially.
     let mut next = 0.0_f64;
-    let t: TensorMap<_, f64> = TensorMap::from_block_fn(&runtime, [&p, &q], [&p, &q], |_, _| {
+    let t: TensorMap<_, f64> = TensorMap::from_subblock_fn(&runtime, [&p, &q], [&p, &q], |_, _| {
         next += 1.0;
         next
     })
@@ -7054,7 +7053,7 @@ fn nested_three_factor_product_keeps_its_declared_factor_order() {
         (label(tenet::core::Z2Irrep::ODD, 1, 1), 1),
         (label(tenet::core::Z2Irrep::EVEN, 0, 2), 2),
     ];
-    let v = GradedSpace::try_new_with_arc(Arc::clone(&left_assoc), declared).unwrap();
+    let v = GradedSpace::try_new(Arc::clone(&left_assoc), declared).unwrap();
 
     // Decoded labels come back nested exactly as declared: parity outermost
     // left, then charge, with the spin as the outer right factor. Compared as
@@ -7105,12 +7104,12 @@ fn nested_three_factor_product_keeps_its_declared_factor_order() {
 }
 
 // ---------------------------------------------------------------------------
-// Slice: typed constructors — `rand`/`rand_with_seed` and the structural
-// family (`isomorphism`/`unitary`/`isometry`), issue #580 PR 1.
+// Slice: typed constructors — `rand_with_seed` and the structural
+// family (`isomorphism`/`isometry`), issue #580 PR 1.
 // ---------------------------------------------------------------------------
 
 fn u1_typed_leg() -> GradedSpace<tenet::core::U1FusionRule> {
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         Arc::new(tenet::core::U1FusionRule),
         [
             (tenet::core::U1Irrep::new(0), 2),
@@ -7122,7 +7121,7 @@ fn u1_typed_leg() -> GradedSpace<tenet::core::U1FusionRule> {
 }
 
 fn fz2_typed_leg() -> GradedSpace<tenet::core::FermionParityFusionRule> {
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         Arc::new(tenet::core::FermionParityFusionRule),
         [
             (tenet::core::Z2Irrep::EVEN, 2),
@@ -7177,7 +7176,8 @@ fn rand_and_isomorphism_build_on_an_external_provider() {
     let leg = z3_leg(&provider, false);
     let dual = leg.try_dual().unwrap();
 
-    let random: TensorMap<ExternalZ3, f64> = TensorMap::rand(&runtime, [&leg], [&leg]).unwrap();
+    let random: TensorMap<ExternalZ3, f64> =
+        TensorMap::rand_with_seed(&runtime, [&leg], [&leg], 0x9E37_79B9_7F4A_7C15).unwrap();
     assert!(random.data().iter().any(|&value| value != 0.0));
 
     // The fused non-dual isomorph of the dual leg has the same sector content.
@@ -7186,7 +7186,8 @@ fn rand_and_isomorphism_build_on_an_external_provider() {
     let roundtrip = f.adjoint().unwrap().compose(&f).unwrap();
     // Explicit `D`: under cuda,cpu-faer serde_json adds a `PartialEq` impl
     // that makes the `assert_eq!` unable to pin `D` on its own (E0283).
-    let id: TensorMap<ExternalZ3, f64> = TensorMap::id(&runtime, [&dual, &leg]).unwrap();
+    let id: TensorMap<ExternalZ3, f64> =
+        TensorMap::isomorphism(&runtime, [&dual, &leg], [&dual, &leg]).unwrap();
     assert_eq!(roundtrip.data(), id.data());
 }
 
@@ -7208,24 +7209,8 @@ fn typed_isomorphism_satisfies_the_identity_law_on_a_builtin_rule() {
     // Explicit `D` for the cuda,cpu-faer feature set (see the ExternalZ3
     // identity-law test above).
     let id: TensorMap<tenet::core::U1FusionRule, f64> =
-        TensorMap::id(&runtime, [&leg, &dual]).unwrap();
+        TensorMap::isomorphism(&runtime, [&leg, &dual], [&leg, &dual]).unwrap();
     assert_eq!(roundtrip.data(), id.data());
-}
-
-#[test]
-fn typed_unitary_byte_equals_isomorphism() {
-    // What: `unitary` is `isomorphism` plus TensorKit's Euclidean
-    // inner-product check, which every tenet fusion rule satisfies, so the two
-    // typed constructors are byte-identical here.
-    let _guard = cache_lock();
-    let runtime = runtime();
-    let leg = fz2_typed_leg();
-
-    let u: TensorMap<tenet::core::FermionParityFusionRule, Complex64> =
-        TensorMap::unitary(&runtime, [&leg], [&leg]).unwrap();
-    let f: TensorMap<tenet::core::FermionParityFusionRule, Complex64> =
-        TensorMap::isomorphism(&runtime, [&leg], [&leg]).unwrap();
-    assert_eq!(u.data(), f.data());
 }
 
 #[test]
@@ -7236,7 +7221,7 @@ fn typed_isometry_embeds_and_satisfies_the_identity_law() {
     let _guard = cache_lock();
     let runtime = runtime();
     let provider = Arc::new(tenet::core::U1FusionRule);
-    let small = GradedSpace::try_new_with_arc(
+    let small = GradedSpace::try_new(
         Arc::clone(&provider),
         [
             (tenet::core::U1Irrep::new(0), 1),
@@ -7244,7 +7229,7 @@ fn typed_isometry_embeds_and_satisfies_the_identity_law() {
         ],
     )
     .unwrap();
-    let big = GradedSpace::try_new_with_arc(
+    let big = GradedSpace::try_new(
         Arc::clone(&provider),
         [
             (tenet::core::U1Irrep::new(0), 2),
@@ -7259,7 +7244,8 @@ fn typed_isometry_embeds_and_satisfies_the_identity_law() {
     let roundtrip = w.adjoint().unwrap().compose(&w).unwrap();
     // Explicit `D` for the cuda,cpu-faer feature set (see the ExternalZ3
     // identity-law test above).
-    let id: TensorMap<tenet::core::U1FusionRule, f64> = TensorMap::id(&runtime, [&small]).unwrap();
+    let id: TensorMap<tenet::core::U1FusionRule, f64> =
+        TensorMap::isomorphism(&runtime, [&small], [&small]).unwrap();
     assert_eq!(roundtrip.data(), id.data());
 }
 
@@ -7268,7 +7254,7 @@ fn typed_isometry_rejects_a_non_embeddable_pair() {
     let _guard = cache_lock();
     let runtime = runtime();
     let small = u1_typed_leg();
-    let big = GradedSpace::try_new_with_arc(
+    let big = GradedSpace::try_new(
         Arc::new(tenet::core::U1FusionRule),
         [(tenet::core::U1Irrep::new(0), 1)],
     )
@@ -7292,7 +7278,13 @@ fn typed_structural_constructors_reject_an_empty_leg_list() {
     let runtime = runtime();
     let empty: [&GradedSpace<ExternalZ3>; 0] = [];
 
-    assert!(TensorMap::<ExternalZ3, f64>::rand(&runtime, empty, empty).is_err());
+    assert!(TensorMap::<ExternalZ3, f64>::rand_with_seed(
+        &runtime,
+        empty,
+        empty,
+        0x9E37_79B9_7F4A_7C15
+    )
+    .is_err());
     assert!(TensorMap::<ExternalZ3, f64>::isomorphism(&runtime, empty, empty).is_err());
     assert!(TensorMap::<ExternalZ3, f64>::isometry(&runtime, empty, empty).is_err());
 }
@@ -7306,52 +7298,27 @@ fn typed_rand_rejects_mismatched_providers_like_zeros() {
     let second = Arc::new(ExternalZ3::tagged(1));
     let runtime = runtime();
 
-    let error = TensorMap::<ExternalZ3, f64>::rand(
+    let error = TensorMap::<ExternalZ3, f64>::rand_with_seed(
         &runtime,
         [&z3_leg(&first, false)],
         [&z3_leg(&second, true)],
+        0x9E37_79B9_7F4A_7C15,
     )
     .unwrap_err();
     assert!(matches!(error, tenet::prelude::Error::RuleMismatch));
 }
 
 #[test]
-fn typed_seedless_rand_does_not_advance_the_stream_on_failure() {
-    // What: a failing seedless `rand` must not consume a position in the
-    // runtime's deterministic random stream. Twin runtimes: on A a failing
-    // call precedes the valid one; on B only the valid call runs. The two
-    // valid results must agree byte for byte.
-    let _guard = cache_lock();
-    let runtime_a = runtime();
-    let runtime_b = runtime();
-    let provider = Arc::new(ExternalZ3::new());
-    let leg = z3_leg(&provider, false);
-    let empty: [&GradedSpace<ExternalZ3>; 0] = [];
-
-    // Fails after provider inference but before any fill: no legs at all.
-    assert!(TensorMap::<ExternalZ3, f64>::rand(&runtime_a, empty, empty).is_err());
-    // Fails during space validation: mismatched rule identities.
-    let other = Arc::new(ExternalZ3::tagged(9));
-    assert!(
-        TensorMap::<ExternalZ3, f64>::rand(&runtime_a, [&leg], [&z3_leg(&other, true)]).is_err()
-    );
-
-    let on_a: TensorMap<ExternalZ3, f64> = TensorMap::rand(&runtime_a, [&leg], [&leg]).unwrap();
-    let on_b: TensorMap<ExternalZ3, f64> = TensorMap::rand(&runtime_b, [&leg], [&leg]).unwrap();
-    assert_eq!(on_a.data(), on_b.data());
-}
-
-#[test]
-fn typed_isomorphism_and_unitary_reject_embeddable_but_not_isomorphic_content() {
+fn typed_isomorphism_rejects_embeddable_but_not_isomorphic_content() {
     // What: the isomorphism gate is `domain ≅ codomain`, strictly stronger
     // than the isometry embedding — a domain that embeds but is smaller must
-    // be rejected by both `isomorphism` and `unitary`. The
-    // embeddable-but-not-isomorphic fixture is deliberate: it also proves
-    // `unitary` routes through the isomorphism check, not the isometry one.
+    // be rejected. The embeddable-but-not-isomorphic fixture is deliberate:
+    // it proves `isomorphism` routes through the isomorphism check, not the
+    // isometry one.
     let _guard = cache_lock();
     let runtime = runtime();
     let provider = Arc::new(tenet::core::U1FusionRule);
-    let small = GradedSpace::try_new_with_arc(
+    let small = GradedSpace::try_new(
         Arc::clone(&provider),
         [
             (tenet::core::U1Irrep::new(0), 1),
@@ -7359,7 +7326,7 @@ fn typed_isomorphism_and_unitary_reject_embeddable_but_not_isomorphic_content() 
         ],
     )
     .unwrap();
-    let big = GradedSpace::try_new_with_arc(
+    let big = GradedSpace::try_new(
         Arc::clone(&provider),
         [
             (tenet::core::U1Irrep::new(0), 2),
@@ -7368,17 +7335,13 @@ fn typed_isomorphism_and_unitary_reject_embeddable_but_not_isomorphic_content() 
     )
     .unwrap();
 
-    for typed_error in [
+    let typed_error =
         TensorMap::<tenet::core::U1FusionRule, f64>::isomorphism(&runtime, [&big], [&small])
-            .unwrap_err(),
-        TensorMap::<tenet::core::U1FusionRule, f64>::unitary(&runtime, [&big], [&small])
-            .unwrap_err(),
-    ] {
-        assert!(matches!(
-            typed_error,
-            tenet::prelude::Error::InvalidArgument(_)
-        ));
-    }
+            .unwrap_err();
+    assert!(matches!(
+        typed_error,
+        tenet::prelude::Error::InvalidArgument(_)
+    ));
 }
 
 #[test]
@@ -7391,7 +7354,7 @@ fn typed_isometry_rejects_a_larger_domain_degeneracy_with_identical_sector_sets(
     let _guard = cache_lock();
     let runtime = runtime();
     let provider = Arc::new(tenet::core::U1FusionRule);
-    let codomain = GradedSpace::try_new_with_arc(
+    let codomain = GradedSpace::try_new(
         Arc::clone(&provider),
         [
             (tenet::core::U1Irrep::new(0), 1),
@@ -7399,7 +7362,7 @@ fn typed_isometry_rejects_a_larger_domain_degeneracy_with_identical_sector_sets(
         ],
     )
     .unwrap();
-    let domain = GradedSpace::try_new_with_arc(
+    let domain = GradedSpace::try_new(
         Arc::clone(&provider),
         [
             (tenet::core::U1Irrep::new(0), 2),
@@ -7424,7 +7387,7 @@ fn typed_isomorphism_is_unitary_on_the_norm_fuser_shape() {
     let _guard = cache_lock();
     let runtime = runtime();
     let provider = Arc::new(tenet::core::U1FusionRule);
-    let typed_v = GradedSpace::try_new_with_arc(
+    let typed_v = GradedSpace::try_new(
         Arc::clone(&provider),
         [
             (tenet::core::U1Irrep::new(0), 1),
@@ -7434,7 +7397,7 @@ fn typed_isomorphism_is_unitary_on_the_norm_fuser_shape() {
     .unwrap();
     let typed_dual = typed_v.try_dual().unwrap();
     // fuse(dual(v) ⊗ v) by hand: charges -1, 0 (twice), 1.
-    let typed_fused = GradedSpace::try_new_with_arc(
+    let typed_fused = GradedSpace::try_new(
         Arc::clone(&provider),
         [
             (tenet::core::U1Irrep::new(-1), 1),
@@ -7446,7 +7409,7 @@ fn typed_isomorphism_is_unitary_on_the_norm_fuser_shape() {
     let typed: TensorMap<tenet::core::U1FusionRule, f64> =
         TensorMap::isomorphism(&runtime, [&typed_fused], [&typed_dual, &typed_v]).unwrap();
     let identity: TensorMap<tenet::core::U1FusionRule, f64> =
-        TensorMap::id(&runtime, [&typed_dual, &typed_v]).unwrap();
+        TensorMap::isomorphism(&runtime, [&typed_dual, &typed_v], [&typed_dual, &typed_v]).unwrap();
 
     assert_eq!(
         typed.adjoint().unwrap().compose(&typed).unwrap().data(),
@@ -7461,9 +7424,9 @@ fn typed_c64_unitary_satisfies_the_identity_law() {
     let leg = fz2_typed_leg();
     let leg_dual = leg.try_dual().unwrap();
     let typed: TensorMap<tenet::core::FermionParityFusionRule, Complex64> =
-        TensorMap::unitary(&runtime, [&leg, &leg_dual], [&leg_dual, &leg]).unwrap();
+        TensorMap::isomorphism(&runtime, [&leg, &leg_dual], [&leg_dual, &leg]).unwrap();
     let identity: TensorMap<tenet::core::FermionParityFusionRule, Complex64> =
-        TensorMap::id(&runtime, [&leg_dual, &leg]).unwrap();
+        TensorMap::isomorphism(&runtime, [&leg_dual, &leg], [&leg_dual, &leg]).unwrap();
 
     assert_eq!(
         typed.adjoint().unwrap().compose(&typed).unwrap().data(),
@@ -7476,7 +7439,7 @@ fn typed_isometry_on_a_dual_domain_satisfies_the_identity_law() {
     let _guard = cache_lock();
     let runtime = runtime();
     let provider = Arc::new(tenet::core::U1FusionRule);
-    let small = GradedSpace::try_new_with_arc(
+    let small = GradedSpace::try_new(
         Arc::clone(&provider),
         [
             (tenet::core::U1Irrep::new(0), 1),
@@ -7486,7 +7449,7 @@ fn typed_isometry_on_a_dual_domain_satisfies_the_identity_law() {
     .unwrap()
     .try_dual()
     .unwrap();
-    let big = GradedSpace::try_new_with_arc(
+    let big = GradedSpace::try_new(
         Arc::clone(&provider),
         [
             (tenet::core::U1Irrep::new(0), 2),
@@ -7499,7 +7462,7 @@ fn typed_isometry_on_a_dual_domain_satisfies_the_identity_law() {
     let typed: TensorMap<tenet::core::U1FusionRule, f64> =
         TensorMap::isometry(&runtime, [&big], [&small]).unwrap();
     let identity: TensorMap<tenet::core::U1FusionRule, f64> =
-        TensorMap::id(&runtime, [&small]).unwrap();
+        TensorMap::isomorphism(&runtime, [&small], [&small]).unwrap();
 
     assert_eq!(
         typed.adjoint().unwrap().compose(&typed).unwrap().data(),
@@ -7522,7 +7485,8 @@ fn typed_su2_isomorphism_satisfies_the_identity_law() {
     let roundtrip = f.adjoint().unwrap().compose(&f).unwrap();
     // Explicit `D` for the cuda,cpu-faer feature set (see the ExternalZ3
     // identity-law test above).
-    let id: TensorMap<ExternalSu2, f64> = TensorMap::id(&runtime, [&leg, &leg]).unwrap();
+    let id: TensorMap<ExternalSu2, f64> =
+        TensorMap::isomorphism(&runtime, [&leg, &leg], [&leg, &leg]).unwrap();
     assert_eq!(roundtrip.data(), id.data());
 }
 
@@ -7605,7 +7569,7 @@ fn typed_polar_factor_laws_hold() {
         TensorMap::rand_with_seed(&runtime, [&leg, &leg], [&leg], 13).unwrap();
     let LeftPolar { w, p } = tall.left_polar().unwrap();
     let id: TensorMap<tenet::core::FermionParityFusionRule, Complex64> =
-        TensorMap::id(&runtime, [&leg]).unwrap();
+        TensorMap::isomorphism(&runtime, [&leg], [&leg]).unwrap();
     assert_data_close_c64(w.adjoint().unwrap().compose(&w).unwrap().data(), id.data());
     assert!(is_hermitian!(p, 1e-12));
     for entry in p.eigh_vals().unwrap() {
@@ -7617,7 +7581,8 @@ fn typed_polar_factor_laws_hold() {
     let wide: TensorMap<tenet::core::U1FusionRule, f64> =
         TensorMap::rand_with_seed(&runtime, [&leg], [&leg, &leg], 17).unwrap();
     let RightPolar { p, wh: w } = wide.right_polar().unwrap();
-    let id: TensorMap<tenet::core::U1FusionRule, f64> = TensorMap::id(&runtime, [&leg]).unwrap();
+    let id: TensorMap<tenet::core::U1FusionRule, f64> =
+        TensorMap::isomorphism(&runtime, [&leg], [&leg]).unwrap();
     assert_data_close_f64(w.compose(&w.adjoint().unwrap()).unwrap().data(), id.data());
     assert!(is_hermitian!(p, 1e-12));
     for entry in p.eigh_vals().unwrap() {
@@ -7704,7 +7669,7 @@ fn typed_polar_carries_an_external_provider() {
     let narrow = z3_other_leg(&provider, false);
     let mut counter = 0.0;
     let tensor: TensorMap<ExternalZ3, f64> =
-        TensorMap::from_block_fn(&runtime, [&wide, &narrow], [&wide, &narrow], |_, _| {
+        TensorMap::from_subblock_fn(&runtime, [&wide, &narrow], [&wide, &narrow], |_, _| {
             counter += 1.0;
             counter
         })
@@ -7713,7 +7678,8 @@ fn typed_polar_carries_an_external_provider() {
     let LeftPolar { w, p } = tensor.left_polar().unwrap();
     assert_data_close_f64(w.compose(&p).unwrap().data(), tensor.data());
     let gram = w.adjoint().unwrap().compose(&w).unwrap();
-    let id: TensorMap<ExternalZ3, f64> = TensorMap::id(&runtime, [&wide, &narrow]).unwrap();
+    let id: TensorMap<ExternalZ3, f64> =
+        TensorMap::isomorphism(&runtime, [&wide, &narrow], [&wide, &narrow]).unwrap();
     assert_data_close_f64(gram.data(), id.data());
 }
 
@@ -7735,7 +7701,7 @@ fn typed_rank_accessors_on_a_mixed_fixture() {
 
 #[test]
 fn typed_leg_dims_include_quantum_dimensions() {
-    // Gate 2: `leg_dims`/`leg_dim` values on a built-in abelian rule and on
+    // Gate 2: `leg_dims` values on a built-in abelian rule and on
     // built-in SU(2), whose non-abelian sectors
     // are what make the quantum-dimension weighting visible (spin-1/2 with
     // degeneracy 2 contributes 4, not 2).
@@ -7744,13 +7710,9 @@ fn typed_leg_dims_include_quantum_dimensions() {
 
     let typed = z2_tensor(&runtime);
     assert_eq!(typed.leg_dims().unwrap(), vec![5, 5, 5]);
-    for axis in 0..typed.rank() {
-        assert_eq!(typed.leg_dim(axis).unwrap(), 5);
-    }
 
     let su2_typed = su2_tensor(&runtime);
     assert_eq!(su2_typed.leg_dims().unwrap(), vec![5, 5]);
-    assert_eq!(su2_typed.leg_dim(1).unwrap(), 5);
 }
 
 #[test]
@@ -7765,21 +7727,6 @@ fn typed_leg_dims_carry_an_external_provider_with_nontrivial_dimensions() {
     let tensor: TensorMap<ExternalSu2, f64> = TensorMap::zeros(&runtime, [&leg], [&leg]).unwrap();
 
     assert_eq!(tensor.leg_dims().unwrap(), vec![4, 4]);
-    assert_eq!(tensor.leg_dim(0).unwrap(), 4);
-    assert_eq!(tensor.leg_dim(1).unwrap(), 4);
-}
-
-#[test]
-fn typed_leg_dim_out_of_range_is_an_invalid_argument() {
-    let _guard = cache_lock();
-    let runtime = runtime();
-    let typed = z2_tensor(&runtime);
-
-    let typed_error = typed.leg_dim(3).unwrap_err();
-    assert!(matches!(
-        typed_error,
-        tenet::prelude::Error::InvalidArgument(_)
-    ));
 }
 
 #[test]
@@ -7799,7 +7746,7 @@ fn typed_scalar_reads_a_complex_full_contraction() {
     let _guard = cache_lock();
     let runtime = runtime();
     let complex = |value: f64| Complex64::new(value, 1.0 + value % 5.0);
-    let leg = GradedSpace::try_new_with_arc(
+    let leg = GradedSpace::try_new(
         Arc::new(tenet::core::Z2FusionRule),
         [
             (tenet::core::Z2Irrep::EVEN, 2),
@@ -7808,7 +7755,7 @@ fn typed_scalar_reads_a_complex_full_contraction() {
     )
     .unwrap();
     let typed: TensorMap<tenet::core::Z2FusionRule, Complex64> =
-        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |sectors, indices| {
+        TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |sectors, indices| {
             complex(typed_fill_value(sectors, indices))
         })
         .unwrap();
@@ -7860,7 +7807,7 @@ fn typed_to_c64_widens_dense_and_compact_values_exactly() {
     let runtime = runtime();
     let typed = z2_tensor(&runtime);
 
-    let typed_wide: TensorMap<tenet::core::Z2FusionRule, Complex64> = typed.to_c64();
+    let typed_wide: TensorMap<tenet::core::Z2FusionRule, Complex64> = typed.convert::<Complex64>();
     assert!(typed_wide
         .data()
         .iter()
@@ -7868,7 +7815,8 @@ fn typed_to_c64_widens_dense_and_compact_values_exactly() {
         .all(|(&wide, &real)| wide == Complex64::new(real, 0.0)));
 
     let typed_s: TensorMap<tenet::core::Z2FusionRule, f64> = typed.svd_compact().unwrap().s;
-    let typed_s_wide: TensorMap<tenet::core::Z2FusionRule, Complex64> = typed_s.to_c64();
+    let typed_s_wide: TensorMap<tenet::core::Z2FusionRule, Complex64> =
+        typed_s.convert::<Complex64>();
     assert!(typed_s_wide
         .data()
         .iter()
@@ -7889,19 +7837,21 @@ fn typed_re_im_reconstruct_the_complex_tensor_byte_exactly() {
     let real_part: TensorMap<tenet::core::Z2FusionRule, f64> = complex_typed.re();
     let imag_part: TensorMap<tenet::core::Z2FusionRule, f64> = complex_typed.im();
     let rebuilt: TensorMap<tenet::core::Z2FusionRule, Complex64> = real_part
-        .to_c64()
+        .convert::<Complex64>()
         .axpby(
             Complex64::new(1.0, 0.0),
-            &imag_part.to_c64(),
+            &imag_part.convert::<Complex64>(),
             Complex64::new(0.0, 1.0),
         )
         .unwrap();
     assert_eq!(rebuilt.data(), complex_typed.data());
 
     let real_typed = z2_tensor(&runtime);
-    let round_trip: TensorMap<tenet::core::Z2FusionRule, f64> = real_typed.to_c64().re();
+    let round_trip: TensorMap<tenet::core::Z2FusionRule, f64> =
+        real_typed.convert::<Complex64>().re();
     assert_eq!(round_trip.data(), real_typed.data());
-    let vanished: TensorMap<tenet::core::Z2FusionRule, f64> = real_typed.to_c64().im();
+    let vanished: TensorMap<tenet::core::Z2FusionRule, f64> =
+        real_typed.convert::<Complex64>().im();
     assert_eq!(vanished.data(), real_typed.zeros_like().data());
 }
 
@@ -7919,10 +7869,10 @@ fn typed_re_im_keep_a_compact_spectrum_on_its_bond_space() {
     let imag_part: TensorMap<tenet::core::Z2FusionRule, f64> = s.im();
     assert_same_legs(&real_part.codomain(), &s.codomain());
     let rebuilt: TensorMap<tenet::core::Z2FusionRule, Complex64> = real_part
-        .to_c64()
+        .convert::<Complex64>()
         .axpby(
             Complex64::new(1.0, 0.0),
-            &imag_part.to_c64(),
+            &imag_part.convert::<Complex64>(),
             Complex64::new(0.0, 1.0),
         )
         .unwrap();
@@ -7930,9 +7880,9 @@ fn typed_re_im_keep_a_compact_spectrum_on_its_bond_space() {
 }
 
 #[test]
-fn typed_leg_dim_routes_each_axis_to_its_own_leg() {
+fn typed_leg_dims_route_each_axis_to_its_own_leg() {
     // Gate 2's axis-routing leg: every earlier fixture has homogeneous leg
-    // dimensions, so a leg_dim that reads the wrong leg (e.g. domain[0] for
+    // dimensions, so a leg_dims that reads the wrong leg (e.g. domain[0] for
     // the last codomain axis) still passes them. Three pairwise-distinct
     // dimensions in a 2 <- 1 split make any misrouting visible, per axis.
     let _guard = cache_lock();
@@ -7944,16 +7894,12 @@ fn typed_leg_dim_routes_each_axis_to_its_own_leg() {
             (tenet::core::Z2Irrep::ODD, odd),
         ]
     };
-    let a = GradedSpace::try_new_with_arc(Arc::clone(&provider), z2_pairs(2, 3)).unwrap();
-    let b = GradedSpace::try_new_with_arc(Arc::clone(&provider), z2_pairs(1, 1)).unwrap();
-    let c = GradedSpace::try_new_with_arc(Arc::clone(&provider), z2_pairs(3, 4)).unwrap();
+    let a = GradedSpace::try_new(Arc::clone(&provider), z2_pairs(2, 3)).unwrap();
+    let b = GradedSpace::try_new(Arc::clone(&provider), z2_pairs(1, 1)).unwrap();
+    let c = GradedSpace::try_new(Arc::clone(&provider), z2_pairs(3, 4)).unwrap();
     let typed: TensorMap<tenet::core::Z2FusionRule, f64> =
         TensorMap::zeros(&runtime, [&a, &b], [&c]).unwrap();
-    let dims = typed.leg_dims().unwrap();
-    assert_eq!(dims, vec![5, 2, 7]);
-    for (axis, &dim) in dims.iter().enumerate() {
-        assert_eq!(typed.leg_dim(axis).unwrap(), dim);
-    }
+    assert_eq!(typed.leg_dims().unwrap(), vec![5, 2, 7]);
 }
 
 // ---------------------------------------------------------------------------
@@ -8004,7 +7950,7 @@ fn u1_leg(
     provider: &Arc<tenet::core::U1FusionRule>,
     pairs: &[(i32, usize)],
 ) -> GradedSpace<tenet::core::U1FusionRule> {
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         Arc::clone(provider),
         pairs
             .iter()
@@ -8022,7 +7968,7 @@ fn u1_cat_tensor(
     let l1 = u1_leg(&provider, &[(-1, 1), (0, 2), (1, 1)]);
     let l2 = u1_leg(&provider, &[(0, 1), (1, 2)]).try_dual().unwrap();
     let lv = u1_leg(&provider, domain_pairs);
-    TensorMap::from_block_fn(runtime, [&l1, &l2], [&lv], u1_typed_fill).unwrap()
+    TensorMap::from_subblock_fn(runtime, [&l1, &l2], [&lv], u1_typed_fill).unwrap()
 }
 
 #[test]
@@ -8032,7 +7978,7 @@ fn typed_cat_preserves_a_dual_changed_leg_and_its_slabs() {
     let _guard = cache_lock();
     let runtime = runtime();
     let provider = Arc::new(tenet::core::FermionParityFusionRule);
-    let lw = GradedSpace::try_new_with_arc(
+    let lw = GradedSpace::try_new(
         Arc::clone(&provider),
         [
             (tenet::core::Z2Irrep::EVEN, 1),
@@ -8041,7 +7987,7 @@ fn typed_cat_preserves_a_dual_changed_leg_and_its_slabs() {
     )
     .unwrap();
     let build = |pairs: &[(u8, usize)]| {
-        let leg = GradedSpace::try_new_with_arc(
+        let leg = GradedSpace::try_new(
             Arc::clone(&provider),
             pairs.iter().map(|&(parity, degeneracy)| {
                 (
@@ -8057,7 +8003,7 @@ fn typed_cat_preserves_a_dual_changed_leg_and_its_slabs() {
         .unwrap()
         .try_dual()
         .unwrap();
-        TensorMap::from_block_fn(&runtime, [&lw], [&leg], |sectors, indices| {
+        TensorMap::from_subblock_fn(&runtime, [&lw], [&leg], |sectors, indices| {
             10.0 * f64::from(sectors.coupled().parity()) + indices[1] as f64
         })
         .unwrap()
@@ -8090,18 +8036,18 @@ fn typed_cat_pins_the_slab_order_by_value() {
     let v2 = u1_leg(&provider, &[(0, 2)]);
 
     let a: TensorMap<tenet::core::U1FusionRule, f64> =
-        TensorMap::from_block_fn(&runtime, [&w], [&v1], |_, i| (i[0] + 1) as f64).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&w], [&v1], |_, i| (i[0] + 1) as f64).unwrap();
     let b: TensorMap<tenet::core::U1FusionRule, f64> =
-        TensorMap::from_block_fn(&runtime, [&w], [&v2], |_, i| (i[0] + 2 * i[1] + 3) as f64)
+        TensorMap::from_subblock_fn(&runtime, [&w], [&v2], |_, i| (i[0] + 2 * i[1] + 3) as f64)
             .unwrap();
     let joined: TensorMap<tenet::core::U1FusionRule, f64> = a.catdomain(&b).unwrap();
     // Column-major: lhs column [1, 2], then rhs columns [3, 4] and [5, 6].
     assert_eq!(joined.data(), &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
 
     let at: TensorMap<tenet::core::U1FusionRule, f64> =
-        TensorMap::from_block_fn(&runtime, [&v1], [&w], |_, i| (i[1] + 1) as f64).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&v1], [&w], |_, i| (i[1] + 1) as f64).unwrap();
     let bt: TensorMap<tenet::core::U1FusionRule, f64> =
-        TensorMap::from_block_fn(&runtime, [&v2], [&w], |_, i| (i[0] + 2 * i[1] + 3) as f64)
+        TensorMap::from_subblock_fn(&runtime, [&v2], [&w], |_, i| (i[0] + 2 * i[1] + 3) as f64)
             .unwrap();
     let stacked: TensorMap<tenet::core::U1FusionRule, f64> = at.catcodomain(&bt).unwrap();
     // Row slabs: lhs row first within each column.
@@ -8116,14 +8062,14 @@ fn typed_absorb_pins_the_common_prefix_by_value() {
     let _guard = cache_lock();
     let runtime = runtime();
     let provider = Arc::new(tenet::core::U1FusionRule);
-    let destination: TensorMap<tenet::core::U1FusionRule, f64> = TensorMap::from_block_fn(
+    let destination: TensorMap<tenet::core::U1FusionRule, f64> = TensorMap::from_subblock_fn(
         &runtime,
         [&u1_leg(&provider, &[(0, 2)])],
         [&u1_leg(&provider, &[(0, 3)])],
         |_, i| (10 * (i[0] + 1) + i[1] + 1) as f64,
     )
     .unwrap();
-    let source: TensorMap<tenet::core::U1FusionRule, f64> = TensorMap::from_block_fn(
+    let source: TensorMap<tenet::core::U1FusionRule, f64> = TensorMap::from_subblock_fn(
         &runtime,
         [&u1_leg(&provider, &[(0, 3)])],
         [&u1_leg(&provider, &[(0, 2)])],
@@ -8144,10 +8090,10 @@ fn typed_absorb_is_total_for_disjoint_zero_extent_and_rank_zero() {
     let zero = u1_leg(&provider, &[(0, 2)]);
     let one = u1_leg(&provider, &[(1, 3)]);
     let destination: TensorMap<tenet::core::U1FusionRule, f64> =
-        TensorMap::from_block_fn(&runtime, [&zero], [&zero], |_, i| (i[0] + 10 * i[1]) as f64)
+        TensorMap::from_subblock_fn(&runtime, [&zero], [&zero], |_, i| (i[0] + 10 * i[1]) as f64)
             .unwrap();
     let disjoint: TensorMap<tenet::core::U1FusionRule, f64> =
-        TensorMap::from_block_fn(&runtime, [&one], [&one], |_, _| 7.0).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&one], [&one], |_, _| 7.0).unwrap();
     assert_eq!(
         destination.absorb(&disjoint).unwrap().data(),
         destination.data()
@@ -8159,13 +8105,13 @@ fn typed_absorb_is_total_for_disjoint_zero_extent_and_rank_zero() {
     assert!(empty.absorb(&destination).unwrap().data().is_empty());
 
     let vector: TensorMap<tenet::core::U1FusionRule, f64> =
-        TensorMap::from_block_fn(&runtime, [&zero], [], |_, _| 2.0).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&zero], [], |_, _| 2.0).unwrap();
     let covector: TensorMap<tenet::core::U1FusionRule, f64> =
-        TensorMap::from_block_fn(&runtime, [], [&zero], |_, _| 3.0).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [], [&zero], |_, _| 3.0).unwrap();
     let source_vector: TensorMap<tenet::core::U1FusionRule, f64> =
-        TensorMap::from_block_fn(&runtime, [&zero], [], |_, _| 5.0).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&zero], [], |_, _| 5.0).unwrap();
     let source_covector: TensorMap<tenet::core::U1FusionRule, f64> =
-        TensorMap::from_block_fn(&runtime, [], [&zero], |_, _| 7.0).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [], [&zero], |_, _| 7.0).unwrap();
     let scalar_destination = covector.compose(&vector).unwrap();
     let scalar_source = source_covector.compose(&source_vector).unwrap();
     assert_eq!(
@@ -8194,7 +8140,7 @@ fn typed_cat_and_absorb_validation_and_precedence_are_stable() {
 
     // Wrong rank: a multi-leg changed side.
     let provider = Arc::new(tenet::core::U1FusionRule);
-    let two_legs_typed: TensorMap<tenet::core::U1FusionRule, f64> = TensorMap::from_block_fn(
+    let two_legs_typed: TensorMap<tenet::core::U1FusionRule, f64> = TensorMap::from_subblock_fn(
         &runtime,
         [
             &u1_leg(&provider, &[(-1, 1), (0, 2), (1, 1)]),
@@ -8212,16 +8158,17 @@ fn typed_cat_and_absorb_validation_and_precedence_are_stable() {
     // Mismatched unchanged side, catdomain: rank `2 <- 1` on both operands
     // (the one-domain-leg check passes) with different codomain product
     // spaces, so the codomain-equality check itself is what fires.
-    let other_codomain_typed: TensorMap<tenet::core::U1FusionRule, f64> = TensorMap::from_block_fn(
-        &runtime,
-        [
-            &u1_leg(&provider, &[(-1, 1), (0, 3), (1, 1)]),
-            &u1_leg(&provider, &[(0, 1), (1, 2)]).try_dual().unwrap(),
-        ],
-        [&u1_leg(&provider, &[(0, 1), (1, 1)])],
-        u1_typed_fill,
-    )
-    .unwrap();
+    let other_codomain_typed: TensorMap<tenet::core::U1FusionRule, f64> =
+        TensorMap::from_subblock_fn(
+            &runtime,
+            [
+                &u1_leg(&provider, &[(-1, 1), (0, 3), (1, 1)]),
+                &u1_leg(&provider, &[(0, 1), (1, 2)]).try_dual().unwrap(),
+            ],
+            [&u1_leg(&provider, &[(0, 1), (1, 1)])],
+            u1_typed_fill,
+        )
+        .unwrap();
     assert_invalid(
         typed_lhs.catdomain(&other_codomain_typed).unwrap_err(),
         "identical codomain product spaces",
@@ -8231,7 +8178,7 @@ fn typed_cat_and_absorb_validation_and_precedence_are_stable() {
     // (the one-codomain-leg check passes) with different domain product
     // spaces, so the domain-equality check itself is what fires.
     let stack_pair = |domain1: &[(i32, usize)]| {
-        TensorMap::from_block_fn(
+        TensorMap::from_subblock_fn(
             &runtime,
             [&u1_leg(&provider, &[(0, 2), (1, 1)])],
             [
@@ -8250,7 +8197,7 @@ fn typed_cat_and_absorb_validation_and_precedence_are_stable() {
     );
 
     // Duality mismatch on the changed leg: the direct sum refuses.
-    let dual_domain_typed: TensorMap<tenet::core::U1FusionRule, f64> = TensorMap::from_block_fn(
+    let dual_domain_typed: TensorMap<tenet::core::U1FusionRule, f64> = TensorMap::from_subblock_fn(
         &runtime,
         [
             &u1_leg(&provider, &[(-1, 1), (0, 2), (1, 1)]),
@@ -8294,13 +8241,10 @@ fn typed_cat_and_absorb_reject_a_foreign_rule_identity_first() {
     let _guard = cache_lock();
     let runtime = runtime();
     let build = |provider: &Arc<ExternalZ3>| {
-        let leg = GradedSpace::try_new_with_arc(
-            Arc::clone(provider),
-            [(Z3Charge(0), 1), (Z3Charge(1), 1)],
-        )
-        .unwrap();
+        let leg = GradedSpace::try_new(Arc::clone(provider), [(Z3Charge(0), 1), (Z3Charge(1), 1)])
+            .unwrap();
         let tensor: TensorMap<ExternalZ3, f64> =
-            TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| 1.0).unwrap();
+            TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, _| 1.0).unwrap();
         tensor
     };
     let ours = build(&Arc::new(ExternalZ3::new()));
@@ -8316,17 +8260,16 @@ fn typed_cat_and_absorb_reject_a_foreign_rule_identity_first() {
     let other_runtime = Runtime::builder().build().unwrap();
     let foreign = Arc::new(ExternalZ3::tagged(7));
     let foreign_leg =
-        GradedSpace::try_new_with_arc(Arc::clone(&foreign), [(Z3Charge(0), 1), (Z3Charge(1), 1)])
-            .unwrap();
+        GradedSpace::try_new(Arc::clone(&foreign), [(Z3Charge(0), 1), (Z3Charge(1), 1)]).unwrap();
     let foreign_runtime: TensorMap<ExternalZ3, f64> =
-        TensorMap::from_block_fn(&other_runtime, [&foreign_leg], [&foreign_leg], |_, _| 1.0)
+        TensorMap::from_subblock_fn(&other_runtime, [&foreign_leg], [&foreign_leg], |_, _| 1.0)
             .unwrap();
     assert!(matches!(
         ours.absorb(&foreign_runtime).unwrap_err(),
         tenet::prelude::Error::RuleMismatch
     ));
 
-    let foreign_bad_rank: TensorMap<ExternalZ3, f64> = TensorMap::from_block_fn(
+    let foreign_bad_rank: TensorMap<ExternalZ3, f64> = TensorMap::from_subblock_fn(
         &other_runtime,
         [&foreign_leg, &foreign_leg],
         [&foreign_leg],
@@ -8348,21 +8291,18 @@ fn external_z3_cat_and_absorb_hold_by_value() {
     let runtime = runtime();
     let provider = Arc::new(ExternalZ3::new());
     let w =
-        GradedSpace::try_new_with_arc(Arc::clone(&provider), [(Z3Charge(0), 1), (Z3Charge(1), 1)])
-            .unwrap();
+        GradedSpace::try_new(Arc::clone(&provider), [(Z3Charge(0), 1), (Z3Charge(1), 1)]).unwrap();
     let v1 =
-        GradedSpace::try_new_with_arc(Arc::clone(&provider), [(Z3Charge(0), 1), (Z3Charge(1), 1)])
-            .unwrap();
+        GradedSpace::try_new(Arc::clone(&provider), [(Z3Charge(0), 1), (Z3Charge(1), 1)]).unwrap();
     let v2 =
-        GradedSpace::try_new_with_arc(Arc::clone(&provider), [(Z3Charge(1), 1), (Z3Charge(2), 1)])
-            .unwrap();
+        GradedSpace::try_new(Arc::clone(&provider), [(Z3Charge(1), 1), (Z3Charge(2), 1)]).unwrap();
     let a: TensorMap<ExternalZ3, f64> =
-        TensorMap::from_block_fn(&runtime, [&w], [&v1], |sectors, _| {
+        TensorMap::from_subblock_fn(&runtime, [&w], [&v1], |sectors, _| {
             1.0 + f64::from(sectors.coupled().0)
         })
         .unwrap();
     let b: TensorMap<ExternalZ3, f64> =
-        TensorMap::from_block_fn(&runtime, [&w], [&v2], |sectors, _| {
+        TensorMap::from_subblock_fn(&runtime, [&w], [&v2], |sectors, _| {
             10.0 + f64::from(sectors.coupled().0)
         })
         .unwrap();
@@ -8383,7 +8323,7 @@ fn external_z3_cat_and_absorb_hold_by_value() {
     // exists. Then a non-shared key: absorb from a tensor whose only block is
     // charge 1.
     let c: TensorMap<ExternalZ3, f64> =
-        TensorMap::from_block_fn(&runtime, [&w], [&v2], |sectors, _| {
+        TensorMap::from_subblock_fn(&runtime, [&w], [&v2], |sectors, _| {
             100.0 + f64::from(sectors.coupled().0)
         })
         .unwrap();
@@ -8403,7 +8343,7 @@ fn external_z3_cat_and_absorb_hold_by_value() {
 fn fz2_index(runtime: &Runtime) -> TensorMap<tenet::core::FermionParityFusionRule, f64> {
     let provider = Arc::new(tenet::core::FermionParityFusionRule);
     let leg = |pairs: &[(u8, usize)]| {
-        GradedSpace::try_new_with_arc(
+        GradedSpace::try_new(
             Arc::clone(&provider),
             pairs.iter().map(|&(parity, degeneracy)| {
                 (
@@ -8421,13 +8361,13 @@ fn fz2_index(runtime: &Runtime) -> TensorMap<tenet::core::FermionParityFusionRul
     let l1 = leg(&[(0, 1), (1, 2)]);
     let l2 = leg(&[(0, 2), (1, 1)]).try_dual().unwrap();
     let lv = leg(&[(0, 1), (1, 1)]);
-    TensorMap::from_block_fn(runtime, [&l1, &l2], [&lv], fz2_typed_fill).unwrap()
+    TensorMap::from_subblock_fn(runtime, [&l1, &l2], [&lv], fz2_typed_fill).unwrap()
 }
 
 /// The typed flip-doctest fixture: fZ2 `V <- V`, even block 2.0, odd block 3.0.
 fn typed_fz2_doctest(runtime: &Runtime) -> TensorMap<tenet::core::FermionParityFusionRule, f64> {
     let provider = Arc::new(tenet::core::FermionParityFusionRule);
-    let leg = GradedSpace::try_new_with_arc(
+    let leg = GradedSpace::try_new(
         Arc::clone(&provider),
         [
             (tenet::core::Z2Irrep::EVEN, 1),
@@ -8435,7 +8375,7 @@ fn typed_fz2_doctest(runtime: &Runtime) -> TensorMap<tenet::core::FermionParityF
         ],
     )
     .unwrap();
-    TensorMap::from_block_fn(runtime, [&leg], [&leg], |sectors, _| {
+    TensorMap::from_subblock_fn(runtime, [&leg], [&leg], |sectors, _| {
         if sectors.coupled() == &tenet::core::Z2Irrep::EVEN {
             2.0
         } else {
@@ -8450,7 +8390,7 @@ fn typed_fz2_two_block(
     dual: bool,
 ) -> TensorMap<tenet::core::FermionParityFusionRule, f64> {
     let provider = Arc::new(tenet::core::FermionParityFusionRule);
-    let leg = GradedSpace::try_new_with_arc(
+    let leg = GradedSpace::try_new(
         provider,
         [
             (tenet::core::Z2Irrep::EVEN, 1),
@@ -8459,7 +8399,7 @@ fn typed_fz2_two_block(
     )
     .unwrap();
     let leg = if dual { leg.try_dual().unwrap() } else { leg };
-    TensorMap::from_block_fn(runtime, [&leg], [&leg], |sectors, _| {
+    TensorMap::from_subblock_fn(runtime, [&leg], [&leg], |sectors, _| {
         if sectors.coupled() == &tenet::core::Z2Irrep::EVEN {
             2.0
         } else {
@@ -8531,7 +8471,7 @@ fn typed_inverse_index_ops_pin_values_and_preserve_structure() {
             .data()
     );
 
-    let complex = simple.to_c64();
+    let complex = simple.convert::<Complex64>();
     assert_eq!(
         complex.flip_inverse(&[0]).unwrap().data(),
         &[2.0.into(), (-3.0).into()]
@@ -8543,10 +8483,10 @@ fn typed_inverse_index_ops_pin_values_and_preserve_structure() {
 
     let su2_provider = Arc::new(SU2FusionRule);
     let spin_half =
-        GradedSpace::try_new_with_arc(su2_provider, [(SU2Irrep::from_twice_spin(1), 1)]).unwrap();
+        GradedSpace::try_new(su2_provider, [(SU2Irrep::from_twice_spin(1), 1)]).unwrap();
     let spin_half_dual = spin_half.try_dual().unwrap();
     let su2: TensorMap<SU2FusionRule, f64> =
-        TensorMap::from_block_fn(&runtime, [&spin_half_dual], [&spin_half], |_, _| 5.0).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&spin_half_dual], [&spin_half], |_, _| 5.0).unwrap();
     assert_eq!(su2.flip_inverse(&[0]).unwrap().data(), &[5.0]);
     assert_eq!(su2.flip_inverse(&[1]).unwrap().data(), &[-5.0]);
 
@@ -8575,7 +8515,7 @@ fn typed_inverse_index_ops_pin_values_and_preserve_structure() {
     );
 
     let u1_provider = Arc::new(tenet::core::U1FusionRule);
-    let u1_leg = GradedSpace::try_new_with_arc(
+    let u1_leg = GradedSpace::try_new(
         u1_provider,
         [
             (tenet::core::U1Irrep::new(-1), 1),
@@ -8585,7 +8525,7 @@ fn typed_inverse_index_ops_pin_values_and_preserve_structure() {
     )
     .unwrap();
     let u1: TensorMap<tenet::core::U1FusionRule, f64> =
-        TensorMap::from_block_fn(&runtime, [&u1_leg], [&u1_leg], |_, _| 7.0).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&u1_leg], [&u1_leg], |_, _| 7.0).unwrap();
     let u1_twist = u1.twist_inverse(&[0, 1]).unwrap();
     assert_eq!(u1_twist.data().as_ptr(), u1.data().as_ptr());
     let u1_flip = u1.flip_inverse(&[0]).unwrap();
@@ -8845,7 +8785,7 @@ fn external_z3_twist_flip_and_units_hold_by_value() {
     let w = z3_leg(&provider, false);
     let v = z3_leg(&provider, true);
     let t: TensorMap<ExternalZ3, f64> =
-        TensorMap::from_block_fn(&runtime, [&w], [&v], |sectors, indices| {
+        TensorMap::from_subblock_fn(&runtime, [&w], [&v], |sectors, indices| {
             f64::from(sectors.coupled().0) * 10.0 + (indices[0] * 3 + indices[1]) as f64
         })
         .unwrap();
@@ -9004,13 +8944,13 @@ fn external_nobraiding_twist_and_flip_reject_nontrivial_sectors() {
     let _guard = cache_lock();
     let runtime = runtime();
     let provider = Arc::new(PlanarZ2);
-    let mixed = GradedSpace::try_new_with_arc(
+    let mixed = GradedSpace::try_new(
         Arc::clone(&provider),
         [(PlanarParity(0), 1), (PlanarParity(1), 2)],
     )
     .unwrap();
     let t: TensorMap<PlanarZ2, f64> =
-        TensorMap::from_block_fn(&runtime, [&mixed], [&mixed], |sectors, indices| {
+        TensorMap::from_subblock_fn(&runtime, [&mixed], [&mixed], |sectors, indices| {
             f64::from(sectors.coupled().0) * 10.0 + (indices[0] * 3 + indices[1]) as f64
         })
         .unwrap();
@@ -9057,10 +8997,9 @@ fn external_nobraiding_vacuum_only_legs_twist_passes_flip_rejects() {
     let _guard = cache_lock();
     let runtime = runtime();
     let provider = Arc::new(PlanarZ2);
-    let unit_only =
-        GradedSpace::try_new_with_arc(Arc::clone(&provider), [(PlanarParity(0), 2)]).unwrap();
+    let unit_only = GradedSpace::try_new(Arc::clone(&provider), [(PlanarParity(0), 2)]).unwrap();
     let t: TensorMap<PlanarZ2, f64> =
-        TensorMap::from_block_fn(&runtime, [&unit_only], [&unit_only], |_, indices| {
+        TensorMap::from_subblock_fn(&runtime, [&unit_only], [&unit_only], |_, indices| {
             (indices[0] * 2 + indices[1]) as f64
         })
         .unwrap();
@@ -9099,9 +9038,9 @@ fn cu1_typed_rank_three_permutation_pins_the_gauge_contract_and_recoupling_value
     let rule = Arc::new(CU1FusionRule);
     assert!(!rule.has_trivial_associator_gauge());
     let q = CU1Irrep::from_twice_charge(1);
-    let leg = GradedSpace::try_new_with_arc(Arc::clone(&rule), [(q, 1)]).unwrap();
+    let leg = GradedSpace::try_new(Arc::clone(&rule), [(q, 1)]).unwrap();
     let tensor: TensorMap<CU1FusionRule, f64> =
-        TensorMap::from_block_fn(&runtime, [&leg, &leg, &leg], [&leg], |_, _| 1.0).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&leg, &leg, &leg], [&leg], |_, _| 1.0).unwrap();
     assert_eq!(tensor.codomain().len(), 3);
     assert_eq!(tensor.domain().len(), 1);
     assert!(tensor
@@ -9140,7 +9079,7 @@ fn contract_error_classes_and_their_both_defect_precedence() {
     let second = runtime();
     let runtime = runtime();
     let typed_fixture = |runtime: &Runtime| {
-        let leg = GradedSpace::try_new_with_arc(
+        let leg = GradedSpace::try_new(
             Arc::new(tenet::core::Z2FusionRule),
             [
                 (tenet::core::Z2Irrep::EVEN, 2),
@@ -9148,7 +9087,7 @@ fn contract_error_classes_and_their_both_defect_precedence() {
             ],
         )
         .unwrap();
-        TensorMap::from_block_fn(runtime, [&leg, &leg], [&leg], typed_fill_value).unwrap()
+        TensorMap::from_subblock_fn(runtime, [&leg, &leg], [&leg], typed_fill_value).unwrap()
     };
     let typed: TensorMap<tenet::core::Z2FusionRule, f64> = typed_fixture(&runtime);
 
@@ -9211,7 +9150,7 @@ fn contract_error_classes_and_their_both_defect_precedence() {
     }
 
     // Mismatched contracted legs retain the expert layer's class.
-    let narrow_leg = GradedSpace::try_new_with_arc(
+    let narrow_leg = GradedSpace::try_new(
         Arc::new(tenet::core::Z2FusionRule),
         [
             (tenet::core::Z2Irrep::EVEN, 2),
@@ -9219,7 +9158,7 @@ fn contract_error_classes_and_their_both_defect_precedence() {
         ],
     )
     .unwrap();
-    let typed_narrow: TensorMap<tenet::core::Z2FusionRule, f64> = TensorMap::from_block_fn(
+    let typed_narrow: TensorMap<tenet::core::Z2FusionRule, f64> = TensorMap::from_subblock_fn(
         &runtime,
         [&narrow_leg, &narrow_leg],
         [&narrow_leg],
@@ -9304,7 +9243,7 @@ fn typed_contract_parallel_su2_replay_matches_serial() {
 
     fn run(runtime: &Runtime) -> Vec<f64> {
         let provider = Arc::new(SU2FusionRule);
-        let leg = GradedSpace::try_new_with_arc(
+        let leg = GradedSpace::try_new(
             provider,
             [
                 (SU2Irrep::from_twice_spin(0), 2),
@@ -9372,7 +9311,7 @@ mod braiding_probe;
 use braiding_probe::{ProbeSector, RealBraidingProbe};
 
 fn probe_leg<const ANYONIC: bool>() -> GradedSpace<RealBraidingProbe<ANYONIC>> {
-    GradedSpace::try_new(RealBraidingProbe::<ANYONIC>, [(ProbeSector, 2)]).unwrap()
+    GradedSpace::try_new(Arc::new(RealBraidingProbe::<ANYONIC>), [(ProbeSector, 2)]).unwrap()
 }
 
 /// Entry `(i, j)` of the one 2x2 block is `offset + 2 i + j`.
@@ -9385,7 +9324,7 @@ fn probe_matrix<const ANYONIC: bool>(
     offset: f64,
 ) -> TensorMap<RealBraidingProbe<ANYONIC>, f64> {
     let leg = probe_leg::<ANYONIC>();
-    TensorMap::from_block_fn(runtime, [&leg], [&leg], |_, index| {
+    TensorMap::from_subblock_fn(runtime, [&leg], [&leg], |_, index| {
         probe_value(offset, index[0], index[1])
     })
     .unwrap()
@@ -9450,7 +9389,7 @@ fn assert_host_contract_entries_reject_but_compose_admits<const ANYONIC: bool>()
     let composed = lhs.compose(&rhs).unwrap();
     let leg = probe_leg::<ANYONIC>();
     let expected: TensorMap<RealBraidingProbe<ANYONIC>, f64> =
-        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, index| {
+        TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, index| {
             probe_composition(index[0], index[1])
         })
         .unwrap();
@@ -9471,19 +9410,19 @@ fn symmetric_canonical_contract_is_admitted_as_the_negative_control() {
     // are the braiding boundary alone.
     let _guard = cache_lock();
     let runtime = runtime();
-    let leg = GradedSpace::try_new_with_arc(
+    let leg = GradedSpace::try_new(
         Arc::new(tenet::core::U1FusionRule),
         [(tenet::core::U1Irrep::new(0), 2)],
     )
     .unwrap();
     let matrix = |offset: f64| -> TensorMap<tenet::core::U1FusionRule, f64> {
-        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, index| {
+        TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, index| {
             probe_value(offset, index[0], index[1])
         })
         .unwrap()
     };
     let expected: TensorMap<tenet::core::U1FusionRule, f64> =
-        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, index| {
+        TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, index| {
             probe_composition(index[0], index[1])
         })
         .unwrap();

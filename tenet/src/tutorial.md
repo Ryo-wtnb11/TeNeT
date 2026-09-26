@@ -31,19 +31,20 @@ and its [guide](https://github.com/Ryo-wtnb11/TeNeT/blob/main/docs/itebd_heisenb
 
 ### Constructing a map
 
-`TensorMap::from_block_fn` visits every allowed reduced entry. Its closure gets
+`TensorMap::from_subblock_fn` visits every allowed reduced entry. Its closure gets
 the fused-tree labels and the index within the current dense block. Returning
 zero is often the clearest way to construct a sparse physical operator.
 
 ```rust
+use std::sync::Arc;
 use tenet::prelude::*;
 
 let runtime = Runtime::builder().build()?;
 let spin = GradedSpace::try_new(
-    U1FusionRule,
+    Arc::new(U1FusionRule),
     [(U1Irrep::new(-1), 1), (U1Irrep::new(1), 1)],
 )?;
-let sz: TensorMap<U1FusionRule, f64> = TensorMap::from_block_fn(
+let sz: TensorMap<U1FusionRule, f64> = TensorMap::from_subblock_fn(
     &runtime,
     [&spin],
     [&spin],
@@ -63,7 +64,8 @@ assert_eq!(sz.domain_rank(), 1);
 # Ok::<(), Error>(())
 ```
 
-`zeros`, `id`, `rand`, and `rand_with_seed` cover common initial values.
+`zeros`, `isomorphism` (the identity is `isomorphism(V, V)`), `isometry`, and
+`rand_with_seed` cover common initial values.
 The constructor validates the symmetry layout before it returns, so invalid
 spaces and invalid provider labels become `Error` values rather than partial
 tensors.
@@ -72,30 +74,31 @@ tensors.
 
 The scalar is the second type parameter: `TensorMap<R, f64>` or
 `TensorMap<R, Complex64>`. Mixed scalar operations are rejected; widen with
-[`prelude::TensorMap::to_c64`]. `GradedSpace::try_new` creates a nondual space.
+[`prelude::TensorMap::convert`]. `GradedSpace::try_new` creates a nondual space.
 Call [`prelude::GradedSpace::try_dual`] when a dual leg is required.
 
 ```rust
+use std::sync::Arc;
 use tenet::prelude::*;
 
 let rt = Runtime::builder().build()?;
 let v = GradedSpace::try_new(
-    U1FusionRule,
+    Arc::new(U1FusionRule),
     [
         (U1Irrep::new(-1), 1),
         (U1Irrep::new(0), 2),
         (U1Irrep::new(1), 1),
     ],
 )?;
-let re = TensorMap::<U1FusionRule, f64>::rand(&rt, [&v], [&v])?;
+let re = TensorMap::<U1FusionRule, f64>::rand_with_seed(&rt, [&v], [&v], 1)?;
 let cx: TensorMap<U1FusionRule, Complex64> =
-    TensorMap::from_block_fn(&rt, [&v], [&v], |_, ij| {
+    TensorMap::from_subblock_fn(&rt, [&v], [&v], |_, ij| {
         Complex64::new(ij[0] as f64, -(ij[1] as f64))
     })?;
 
 let inner = re.inner(&re)?;
 assert!((inner - re.norm(2.0)?.powi(2)).abs() <= 1e-10 * (1.0 + inner));
-assert!(re.to_c64().compose(&cx).is_ok());
+assert!(re.convert::<Complex64>().compose(&cx).is_ok());
 assert!(v.try_dual()?.try_dual()?.sectors()? == v.sectors()?);
 # Ok::<(), Error>(())
 ```
@@ -115,18 +118,19 @@ the same side, construct one from `v.try_dual()?`. See [`mathematics`] for the
 full convention.
 
 ```rust
+use std::sync::Arc;
 use tenet::prelude::*;
 
 let rt = Runtime::builder().build()?;
 let v = GradedSpace::try_new(
-    U1FusionRule,
+    Arc::new(U1FusionRule),
     [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
 )?;
-let a = TensorMap::<U1FusionRule, f64>::rand(&rt, [&v], [&v])?;
+let a = TensorMap::<U1FusionRule, f64>::rand_with_seed(&rt, [&v], [&v], 2)?;
 assert!(a.compose(&a).is_ok());
 
 let dual = v.try_dual()?;
-let b = TensorMap::<U1FusionRule, f64>::rand(&rt, [&v], [&dual])?;
+let b = TensorMap::<U1FusionRule, f64>::rand_with_seed(&rt, [&v], [&dual], 3)?;
 let _ = a.contract(&b, &[1], &[1], &[0, 1])?;
 
 for (_coupled, matrix) in a.blocks()? {
@@ -204,15 +208,16 @@ the general operation; on fermionic rules its selected dual legs carry the
 contraction twist, so its result need not match `compose`.
 
 ```rust
+use std::sync::Arc;
 use tenet::prelude::*;
 
 let rt = Runtime::builder().build()?;
 let v = GradedSpace::try_new(
-    U1FusionRule,
+    Arc::new(U1FusionRule),
     [(-1, 1), (0, 2), (1, 1)].map(|(q, n)| (U1Irrep::new(q), n)),
 )?;
-let a = TensorMap::<U1FusionRule, f64>::rand(&rt, [&v, &v], [&v, &v])?;
-let b = TensorMap::<U1FusionRule, f64>::rand(&rt, [&v, &v], [&v, &v])?;
+let a = TensorMap::<U1FusionRule, f64>::rand_with_seed(&rt, [&v, &v], [&v, &v], 4)?;
+let b = TensorMap::<U1FusionRule, f64>::rand_with_seed(&rt, [&v, &v], [&v, &v], 5)?;
 let c = a.compose(&b)?;
 let same = a.contract(&b, &[2, 3], &[0, 1], &[0, 1, 2, 3])?;
 assert_eq!(c.data(), same.data());
@@ -249,15 +254,16 @@ note that VectorInterface's `add(y, x, α, β)` binds the coefficients the other
 way round.
 
 ```rust
+use std::sync::Arc;
 use tenet::prelude::*;
 
 let rt = Runtime::builder().build()?;
 let v = GradedSpace::try_new(
-    U1FusionRule,
+    Arc::new(U1FusionRule),
     [(-1, 1), (0, 2), (1, 1)].map(|(q, n)| (U1Irrep::new(q), n)),
 )?;
-let a = TensorMap::<U1FusionRule, f64>::rand(&rt, [&v], [&v])?;
-let b = TensorMap::<U1FusionRule, f64>::rand(&rt, [&v], [&v])?;
+let a = TensorMap::<U1FusionRule, f64>::rand_with_seed(&rt, [&v], [&v], 6)?;
+let b = TensorMap::<U1FusionRule, f64>::rand_with_seed(&rt, [&v], [&v], 7)?;
 let difference = a.axpby(1.0, &b, -1.0)?;
 assert!(difference.norm(2.0)? >= 0.0);
 let unit = a.scale(1.0 / a.norm(2.0)?);
@@ -273,14 +279,15 @@ chain shows; scale `tol` to the payload dtype as `FactorizationScalar`
 describes.
 
 ```rust
+use std::sync::Arc;
 use tenet::prelude::*;
 
 let rt = Runtime::builder().build()?;
 let v = GradedSpace::try_new(
-    U1FusionRule,
+    Arc::new(U1FusionRule),
     [(-1, 1), (0, 2), (1, 1)].map(|(q, n)| (U1Irrep::new(q), n)),
 )?;
-let t = TensorMap::<U1FusionRule, f64>::rand(&rt, [&v], [&v])?;
+let t = TensorMap::<U1FusionRule, f64>::rand_with_seed(&rt, [&v], [&v], 8)?;
 let tol = 1e-12;
 
 // Hermitian part: (t + t†)/2; the anti-Hermitian part uses -0.5.
@@ -297,11 +304,11 @@ assert!(hermitian(&h)?);
 // isisometric: ‖u†u - id‖ <= tol·max(‖u†u‖, 1). isunitary also checks u†.
 let u = t.left_polar()?.w;
 let gram = u.adjoint()?.compose(&u)?;
-let identity = TensorMap::id(&rt, &u.domain())?;
+let identity = TensorMap::isomorphism(&rt, &u.domain(), &u.domain())?;
 assert!(gram.axpby(1.0, &identity, -1.0)?.norm(2.0)? <= tol * gram.norm(2.0)?.max(1.0));
 
 // isposdef: Hermitian, and every eigenvalue strictly above tol·max(‖p‖, 1).
-let p = h.compose(&h)?.axpby(1.0, &TensorMap::id(&rt, [&v])?, 1.0)?;
+let p = h.compose(&h)?.axpby(1.0, &TensorMap::isomorphism(&rt, [&v], [&v])?, 1.0)?;
 let threshold = tol * p.norm(2.0)?.max(1.0);
 let positive = |values: &[SectorSpectrum<U1Irrep, f64>]| {
     values.iter().flat_map(|s| &s.values).all(|&x| x > threshold)
@@ -325,14 +332,15 @@ direct sum (`oplus`), and fusion (`fuse`). The total dimension includes each
 sector's quantum dimension.
 
 ```rust
+use std::sync::Arc;
 use tenet::prelude::*;
 
 let v = GradedSpace::try_new(
-    U1FusionRule,
+    Arc::new(U1FusionRule),
     [(-1, 2), (0, 3), (1, 2)].map(|(q, n)| (U1Irrep::new(q), n)),
 )?;
 let w = GradedSpace::try_new(
-    U1FusionRule,
+    Arc::new(U1FusionRule),
     [(U1Irrep::new(0), 1), (U1Irrep::new(1), 1)],
 )?;
 assert_eq!(v.degeneracy(&U1Irrep::new(0))?, 3);
@@ -352,15 +360,16 @@ factorization. `remove_unit` only drops a trivial unit leg; it is not a
 general fusion.
 
 ```rust
+use std::sync::Arc;
 use tenet::prelude::*;
 
 let rt = Runtime::builder().build()?;
 let v = GradedSpace::try_new(
-    U1FusionRule,
+    Arc::new(U1FusionRule),
     [(-1, 1), (0, 2), (1, 1)].map(|(q, n)| (U1Irrep::new(q), n)),
 )?;
-let w = GradedSpace::try_new(U1FusionRule, [(0, 2), (1, 1)].map(|(q, n)| (U1Irrep::new(q), n)))?;
-let t = TensorMap::<U1FusionRule, f64>::rand(&rt, [&v, &w], [&v])?;
+let w = GradedSpace::try_new(Arc::new(U1FusionRule), [(0, 2), (1, 1)].map(|(q, n)| (U1Irrep::new(q), n)))?;
+let t = TensorMap::<U1FusionRule, f64>::rand_with_seed(&rt, [&v, &w], [&v], 9)?;
 
 let vw = v.fuse(&w)?;
 let fuser = TensorMap::<U1FusionRule, f64>::isomorphism(&rt, [&vw], [&v, &w])?;
@@ -383,12 +392,13 @@ of the provider type, so choose an order once for a model. The payload scalar
 remains separate from the provider's categorical coefficient scalar.
 
 ```rust
+use std::sync::Arc;
 use tenet::prelude::*;
 
 let rt = Runtime::builder().build()?;
 let rule = FermionParityFusionRule.product(U1FusionRule);
 let v = GradedSpace::try_new(
-    rule,
+    Arc::new(rule),
     [
         (product_sector(Z2Irrep::EVEN, U1Irrep::new(0)), 1),
         (product_sector(Z2Irrep::ODD, U1Irrep::new(1)), 2),
@@ -430,14 +440,15 @@ documentation states the spectrum order and which routes store `s` or `d`
 compactly.
 
 ```rust
+use std::sync::Arc;
 use tenet::prelude::*;
 
 let rt = Runtime::builder().build()?;
 let v = GradedSpace::try_new(
-    U1FusionRule,
+    Arc::new(U1FusionRule),
     [(-1, 1), (0, 2), (1, 1)].map(|(q, n)| (U1Irrep::new(q), n)),
 )?;
-let t = TensorMap::<U1FusionRule, f64>::rand(&rt, [&v, &v], [&v, &v])?;
+let t = TensorMap::<U1FusionRule, f64>::rand_with_seed(&rt, [&v, &v], [&v, &v], 10)?;
 
 // Truncated SVD: factorize, decide, cut.
 let Svd { u, s, vh } = t.svd_compact()?;
@@ -503,12 +514,13 @@ lands. `qr_compact` returns the
 positive-diagonal gauge and is device-available for every device payload.
 
 ```rust
+use std::sync::Arc;
 use tenet::prelude::*;
 
 let rt = Runtime::builder().dense_threads(4).build()?;
 let rt_for_worker = rt.clone();
-let v = GradedSpace::try_new(U1FusionRule, [(U1Irrep::new(0), 2)])?;
-let a = TensorMap::<U1FusionRule, f64>::rand(&rt_for_worker, [&v], [&v])?;
+let v = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)])?;
+let a = TensorMap::<U1FusionRule, f64>::rand_with_seed(&rt_for_worker, [&v], [&v], 11)?;
 assert!(a.runtime().shares_state_with(&rt));
 # Ok::<(), Error>(())
 ```
@@ -536,7 +548,7 @@ compile is CubeCL's, and so is its PTX disk cache, enabled through CubeCL's
 
 Spaces built with `GradedSpace::try_new` each own a provider allocation.
 To share one provider, and its caches, across spaces, create it once as an
-`Arc` and pass clones to `GradedSpace::try_new_with_arc`; spaces derived from
+`Arc` and pass clones to `GradedSpace::try_new`; spaces derived from
 an existing space (`try_dual`, `fuse`, `oplus`, `unitspace`) already reuse its
 provider.
 

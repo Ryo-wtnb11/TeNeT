@@ -17,7 +17,7 @@ fn space<const N: usize>(
     rule: &Arc<U1FusionRule>,
     sectors: [(i32, usize); N],
 ) -> GradedSpace<U1FusionRule> {
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         Arc::clone(rule),
         sectors.map(|(charge, degeneracy)| (U1Irrep::new(charge), degeneracy)),
     )
@@ -25,7 +25,7 @@ fn space<const N: usize>(
 }
 
 fn heisenberg_two_site(rt: &Runtime, p: &GradedSpace<U1FusionRule>) -> Map {
-    TensorMap::from_block_fn(rt, [p, p], [p, p], |trees, _| {
+    TensorMap::from_subblock_fn(rt, [p, p], [p, p], |trees, _| {
         let cod = trees.codomain_uncoupled();
         let dom = trees.domain_uncoupled();
         if cod == dom {
@@ -90,10 +90,10 @@ fn run_itebd(chi: usize, schedule: &[(f64, usize)]) -> f64 {
     // state; a strict Neel start also works, see the regression test below).
     let vb = space(&rule, [(0, 1)]);
     let va = space(&rule, [(1, 1), (-1, 1)]);
-    let mut ga = TensorMap::from_block_fn(&rt, [&vb, &p], [&va], |_, _| 1.0).unwrap();
-    let mut la = TensorMap::from_block_fn(&rt, [&va], [&va], |_, _| 1.0).unwrap();
-    let mut gb = TensorMap::from_block_fn(&rt, [&va, &p], [&vb], |_, _| 1.0).unwrap();
-    let mut lb = TensorMap::from_block_fn(&rt, [&vb], [&vb], |_, _| 1.0).unwrap();
+    let mut ga = TensorMap::from_subblock_fn(&rt, [&vb, &p], [&va], |_, _| 1.0).unwrap();
+    let mut la = TensorMap::from_subblock_fn(&rt, [&va], [&va], |_, _| 1.0).unwrap();
+    let mut gb = TensorMap::from_subblock_fn(&rt, [&va, &p], [&vb], |_, _| 1.0).unwrap();
+    let mut lb = TensorMap::from_subblock_fn(&rt, [&vb], [&vb], |_, _| 1.0).unwrap();
 
     for &(dt, steps) in schedule {
         let gate = h.scale(-dt).exp().unwrap();
@@ -126,8 +126,8 @@ fn neel_product_state_contracts_with_the_full_gate() {
     let vl = space(&rule, [(0, 1)]);
     let vm = space(&rule, [(1, 1)]);
     let vr = space(&rule, [(0, 1)]);
-    let a = TensorMap::from_block_fn(&rt, [&vl, &p], [&vm], |_, _| 1.0).unwrap();
-    let b = TensorMap::from_block_fn(&rt, [&vm, &p], [&vr], |_, _| 1.0).unwrap();
+    let a = TensorMap::from_subblock_fn(&rt, [&vl, &p], [&vm], |_, _| 1.0).unwrap();
+    let b = TensorMap::from_subblock_fn(&rt, [&vm, &p], [&vr], |_, _| 1.0).unwrap();
 
     // The legs report the full graded space, not just populated sectors.
     assert_eq!(a.leg_dims().unwrap(), vec![1, 2, 1]);

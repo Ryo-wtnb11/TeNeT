@@ -101,7 +101,7 @@ macro_rules! assert_relation {
 macro_rules! assert_isometry {
     ($gram:expr, $bond:expr, $terms:expr, $what:expr) => {{
         let gram = $gram;
-        let identity = TensorMap::id(gram.runtime(), [&$bond]).unwrap();
+        let identity = TensorMap::isomorphism(gram.runtime(), [&$bond], [&$bond]).unwrap();
         assert_relation!(gram, identity, $terms, $what);
     }};
 }
@@ -248,7 +248,7 @@ macro_rules! assert_eigh_composition {
 }
 
 fn u1_leg(pairs: &[(i32, usize)]) -> GradedSpace<U1FusionRule> {
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         Arc::new(U1FusionRule),
         pairs
             .iter()
@@ -258,7 +258,7 @@ fn u1_leg(pairs: &[(i32, usize)]) -> GradedSpace<U1FusionRule> {
 }
 
 fn su2_leg(pairs: &[(usize, usize)]) -> GradedSpace<SU2FusionRule> {
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         Arc::new(SU2FusionRule),
         pairs
             .iter()
@@ -268,7 +268,7 @@ fn su2_leg(pairs: &[(usize, usize)]) -> GradedSpace<SU2FusionRule> {
 }
 
 fn fz2_leg(pairs: &[(bool, usize)]) -> GradedSpace<FermionParityFusionRule> {
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         Arc::new(FermionParityFusionRule),
         pairs
             .iter()
@@ -305,7 +305,7 @@ fn u1_svd_composition_matches_the_oracle_for_every_policy() {
     let right = u1_leg(&[(-1, 3), (0, 2), (1, 3)]);
     let mut state = 0x1234_5678u64;
     let source: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime(), [&left], [&right], move |_, _| fill(&mut state))
+        TensorMap::from_subblock_fn(&runtime(), [&left], [&right], move |_, _| fill(&mut state))
             .unwrap();
     svd_policy_sweep!(source, u1_leg(&[(-1, 1), (0, 2)]), "u1 f64");
 }
@@ -316,7 +316,7 @@ fn u1_complex_svd_composition_matches_the_oracle_for_every_policy() {
     let right = u1_leg(&[(-1, 3), (0, 2), (1, 3)]);
     let mut state = 0x2222_1111u64;
     let source: TensorMap<_, Complex64> =
-        TensorMap::from_block_fn(&runtime(), [&left], [&right], move |_, _| {
+        TensorMap::from_subblock_fn(&runtime(), [&left], [&right], move |_, _| {
             Complex64::new(fill(&mut state), fill(&mut state))
         })
         .unwrap();
@@ -337,7 +337,7 @@ fn u1_single_precision_svd_composition_matches_the_oracle_for_every_policy() {
     let right = u1_leg(&[(-1, 3), (0, 2), (1, 3)]);
     let mut state = 0x3333_4444u64;
     let source: TensorMap<_, f32> =
-        TensorMap::from_block_fn(&runtime(), [&left], [&right], move |_, _| {
+        TensorMap::from_subblock_fn(&runtime(), [&left], [&right], move |_, _| {
             fill(&mut state) as f32
         })
         .unwrap();
@@ -350,7 +350,7 @@ fn u1_complex32_svd_composition_matches_the_oracle_for_every_policy() {
     let right = u1_leg(&[(-1, 3), (0, 2), (1, 3)]);
     let mut state = 0x5555_6666u64;
     let source: TensorMap<_, num_complex::Complex32> =
-        TensorMap::from_block_fn(&runtime(), [&left], [&right], move |_, _| {
+        TensorMap::from_subblock_fn(&runtime(), [&left], [&right], move |_, _| {
             num_complex::Complex32::new(fill(&mut state) as f32, fill(&mut state) as f32)
         })
         .unwrap();
@@ -364,7 +364,8 @@ fn su2_svd_composition_matches_the_oracle_for_every_policy() {
     let leg = su2_leg(&[(0, 3), (1, 2), (2, 2)]);
     let mut state = 0x3333_4444u64;
     let source: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime(), [&leg], [&leg], move |_, _| fill(&mut state)).unwrap();
+        TensorMap::from_subblock_fn(&runtime(), [&leg], [&leg], move |_, _| fill(&mut state))
+            .unwrap();
     svd_policy_sweep!(source, su2_leg(&[(0, 2), (2, 1)]), "su2 f64");
 }
 
@@ -373,7 +374,7 @@ fn su2_complex_svd_composition_matches_the_oracle_for_every_policy() {
     let leg = su2_leg(&[(0, 3), (1, 2), (2, 2)]);
     let mut state = 0x4444_5555u64;
     let source: TensorMap<_, Complex64> =
-        TensorMap::from_block_fn(&runtime(), [&leg], [&leg], move |_, _| {
+        TensorMap::from_subblock_fn(&runtime(), [&leg], [&leg], move |_, _| {
             Complex64::new(fill(&mut state), fill(&mut state))
         })
         .unwrap();
@@ -386,7 +387,7 @@ fn fermionic_svd_composition_matches_the_oracle_for_every_policy() {
     let dual = leg.try_dual().unwrap();
     let mut state = 0x5555_6666u64;
     let source: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime(), [&leg, &dual], [&leg], move |_, _| {
+        TensorMap::from_subblock_fn(&runtime(), [&leg, &dual], [&leg], move |_, _| {
             fill(&mut state)
         })
         .unwrap();
@@ -396,7 +397,7 @@ fn fermionic_svd_composition_matches_the_oracle_for_every_policy() {
 #[test]
 fn fermionic_u1_product_svd_composition_matches_the_oracle_for_every_policy() {
     let provider = Arc::new(FermionParityFusionRule.product(U1FusionRule));
-    let leg = GradedSpace::try_new_with_arc(
+    let leg = GradedSpace::try_new(
         Arc::clone(&provider),
         [
             (product_sector(Z2Irrep::EVEN, U1Irrep::new(0)), 2),
@@ -405,7 +406,7 @@ fn fermionic_u1_product_svd_composition_matches_the_oracle_for_every_policy() {
         ],
     )
     .unwrap();
-    let target = GradedSpace::try_new_with_arc(
+    let target = GradedSpace::try_new(
         Arc::clone(&provider),
         [
             (product_sector(Z2Irrep::EVEN, U1Irrep::new(0)), 1),
@@ -415,7 +416,7 @@ fn fermionic_u1_product_svd_composition_matches_the_oracle_for_every_policy() {
     .unwrap();
     let mut state = 0x6666_7777u64;
     let source: TensorMap<_, Complex64> =
-        TensorMap::from_block_fn(&runtime(), [&leg], [&leg], move |_, _| {
+        TensorMap::from_subblock_fn(&runtime(), [&leg], [&leg], move |_, _| {
             Complex64::new(fill(&mut state), fill(&mut state))
         })
         .unwrap();
@@ -428,7 +429,7 @@ fn lazy_adjoint_svd_composition_matches_the_oracle() {
     let right = u1_leg(&[(0, 2), (1, 3)]);
     let mut state = 0x7777_8888u64;
     let owned: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime(), [&left], [&right], move |_, _| fill(&mut state))
+        TensorMap::from_subblock_fn(&runtime(), [&left], [&right], move |_, _| fill(&mut state))
             .unwrap();
     let lazy = owned.adjoint().unwrap();
     svd_policy_sweep!(lazy, u1_leg(&[(0, 2), (1, 1)]), "u1 lazy adjoint");
@@ -444,7 +445,8 @@ fn hermitian_u1(seed: u64) -> TensorMap<U1FusionRule, f64> {
     let leg = u1_leg(&[(-1, 2), (0, 3), (1, 2)]);
     let mut state = seed;
     let raw: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime(), [&leg], [&leg], move |_, _| fill(&mut state)).unwrap();
+        TensorMap::from_subblock_fn(&runtime(), [&leg], [&leg], move |_, _| fill(&mut state))
+            .unwrap();
     raw.axpby(1.0, &raw.adjoint().unwrap(), 1.0).unwrap()
 }
 
@@ -459,7 +461,7 @@ fn su2_eigh_composition_matches_the_oracle_for_every_policy() {
     let leg = su2_leg(&[(0, 3), (1, 2), (2, 2)]);
     let mut state = 0x9999_aaaau64;
     let raw: TensorMap<_, Complex64> =
-        TensorMap::from_block_fn(&runtime(), [&leg], [&leg], move |_, _| {
+        TensorMap::from_subblock_fn(&runtime(), [&leg], [&leg], move |_, _| {
             Complex64::new(fill(&mut state), fill(&mut state))
         })
         .unwrap();
@@ -473,7 +475,8 @@ fn fermionic_eigh_composition_matches_the_oracle_for_every_policy() {
     let leg = fz2_leg(&[(false, 3), (true, 3)]);
     let mut state = 0xaaaa_bbbbu64;
     let raw: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime(), [&leg], [&leg], move |_, _| fill(&mut state)).unwrap();
+        TensorMap::from_subblock_fn(&runtime(), [&leg], [&leg], move |_, _| fill(&mut state))
+            .unwrap();
     let source = raw.axpby(1.0, &raw.adjoint().unwrap(), 1.0).unwrap();
     eigh_policy_sweep!(source, fz2_leg(&[(false, 2), (true, 1)]), "fz2 eigh f64");
 }
@@ -488,7 +491,7 @@ fn a_whole_sector_is_dropped_from_the_bond() {
     // relative cutoff removes it entirely rather than shortening it.
     let leg = u1_leg(&[(0, 3), (1, 2)]);
     let source: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime(), [&leg], [&leg], |trees, _| {
+        TensorMap::from_subblock_fn(&runtime(), [&leg], [&leg], |trees, _| {
             if trees.coupled() == &U1Irrep::new(0) {
                 1.0
             } else {
@@ -514,7 +517,9 @@ fn within_sector_ties_at_the_cut_keep_genuine_singular_pairs() {
     // A scalar multiple of an isometry: every singular value inside a sector is
     // exactly equal, so `Rank` has to cut inside a run of identical values.
     let leg = u1_leg(&[(0, 3), (1, 3)]);
-    let source: TensorMap<_, f64> = TensorMap::id(&runtime(), [&leg]).unwrap().scale(2.5);
+    let source: TensorMap<_, f64> = TensorMap::isomorphism(&runtime(), [&leg], [&leg])
+        .unwrap()
+        .scale(2.5);
     assert_every_value_is_the_same_bit_pattern!(source.svd_compact().unwrap().s);
     for rank in [1usize, 2, 3, 4, 5] {
         assert_svd_composition!(
@@ -531,7 +536,7 @@ fn cross_sector_exact_ties_are_broken_in_tensorkit_sector_order() {
     // Two U(1) sectors with bit-identical spectra: every `Rank` cut that is not
     // a multiple of the sector count lands on an exact cross-sector tie.
     let leg = u1_leg(&[(0, 3), (1, 3), (2, 3)]);
-    let source: TensorMap<_, f64> = TensorMap::id(&runtime(), [&leg]).unwrap();
+    let source: TensorMap<_, f64> = TensorMap::isomorphism(&runtime(), [&leg], [&leg]).unwrap();
     assert_every_value_is_the_same_bit_pattern!(source.svd_compact().unwrap().s);
     for rank in 0..=9usize {
         assert_svd_composition!(
@@ -547,7 +552,7 @@ fn cross_sector_exact_ties_are_broken_in_tensorkit_sector_order() {
 fn su2_cross_sector_exact_ties_are_broken_in_tensorkit_sector_order() {
     // Same, with dim(c) != 1: the weighted budget overflows mid-tie.
     let leg = su2_leg(&[(0, 2), (1, 2), (2, 2)]);
-    let source: TensorMap<_, f64> = TensorMap::id(&runtime(), [&leg]).unwrap();
+    let source: TensorMap<_, f64> = TensorMap::isomorphism(&runtime(), [&leg], [&leg]).unwrap();
     assert_every_value_is_the_same_bit_pattern!(source.svd_compact().unwrap().s);
     for rank in 0..=12usize {
         assert_svd_composition!(
@@ -567,13 +572,13 @@ fn signed_cross_sector_eigenvalue_ties_are_broken_in_tensorkit_sector_order() {
     // is by descending |lambda|, not by signed value.
     let leg = u1_leg(&[(0, 2), (1, 2), (2, 2)]);
     let runtime = runtime();
-    let identity: TensorMap<_, f64> = TensorMap::id(&runtime, [&leg]).unwrap();
+    let identity: TensorMap<_, f64> = TensorMap::isomorphism(&runtime, [&leg], [&leg]).unwrap();
     // diag(+2, -2) in every sector: three sectors x two magnitudes, all equal.
     // Annotated: the payload dtype is taken solely from float literals, and
     // `f32` reaching `FactorizationScalar` (#1324) means `eigh_full` no longer
     // pins `{float}` to `f64` before `value.abs()` below resolves.
     let source: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+        TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, indices| {
             if indices[0] != indices[1] {
                 0.0
             } else if indices[0] == 0 {
@@ -616,7 +621,7 @@ fn find_truncated_ignores_the_order_the_spectra_arrive_in() {
     // therefore change neither the subspace nor the error bits — and an exact
     // cross-sector tie is where it would show if the sort were missing.
     let leg = u1_leg(&[(0, 3), (1, 3), (2, 3)]);
-    let source: TensorMap<_, f64> = TensorMap::id(&runtime(), [&leg]).unwrap();
+    let source: TensorMap<_, f64> = TensorMap::isomorphism(&runtime(), [&leg], [&leg]).unwrap();
     let Svd { s, .. } = source.svd_compact().unwrap();
     let bond = s.domain()[0].clone();
     let canonical = s.diagview().unwrap();
@@ -654,7 +659,8 @@ fn dense_restrict_diagonal_equals_two_restrict_leg_calls() {
     let runtime = runtime();
     let mut state = 0x1357_9bdfu64;
     let dense: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&leg], [&leg], move |_, _| fill(&mut state)).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], move |_, _| fill(&mut state))
+            .unwrap();
     assert!(
         tenet::expert::diagonal_spectrum(&dense).unwrap().is_none(),
         "this fixture must exercise the dense arm"
@@ -685,7 +691,8 @@ fn discarding_everything_yields_the_empty_bond_and_empty_factors() {
     let leg = u1_leg(&[(0, 3), (1, 2)]);
     let mut state = 0xbbbb_ccccu64;
     let source: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime(), [&leg], [&leg], move |_, _| fill(&mut state)).unwrap();
+        TensorMap::from_subblock_fn(&runtime(), [&leg], [&leg], move |_, _| fill(&mut state))
+            .unwrap();
 
     let found =
         assert_svd_composition!(source, Truncation::rank(0), Policy::Rank(0), "discard-all");
@@ -714,7 +721,8 @@ fn a_no_op_decision_is_reported_as_full_and_copies_the_same_bits() {
     let leg = u1_leg(&[(0, 3), (1, 2)]);
     let mut state = 0xcccc_ddddu64;
     let source: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime(), [&leg], [&leg], move |_, _| fill(&mut state)).unwrap();
+        TensorMap::from_subblock_fn(&runtime(), [&leg], [&leg], move |_, _| fill(&mut state))
+            .unwrap();
     let Svd { u, s, .. } = source.svd_compact().unwrap();
     let bond = s.domain()[0].clone();
     let found = bond
@@ -751,7 +759,8 @@ fn diagview_reads_the_same_values_from_compact_and_dense_storage() {
     let runtime = runtime();
     let mut state = 0xdddd_eeeeu64;
     let source: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&leg], [&leg], move |_, _| fill(&mut state)).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], move |_, _| fill(&mut state))
+            .unwrap();
     let Svd { s, .. } = source.svd_compact().unwrap();
     assert!(
         tenet::expert::diagonal_spectrum(&s).unwrap().is_some(),
@@ -773,7 +782,7 @@ fn diagview_reads_the_same_values_from_compact_and_dense_storage() {
     // Off-diagonal entries are not inspected: a dense map with a nonzero
     // off-diagonal still reports its diagonal.
     let full: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+        TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, indices| {
             if indices[0] == indices[1] {
                 (indices[0] + 1) as f64
             } else {
@@ -861,7 +870,8 @@ fn restrict_diagonal_keeps_a_compact_payload_compact() {
     let leg = u1_leg(&[(0, 4), (1, 3)]);
     let mut state = 0xeeee_ffffu64;
     let source: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime(), [&leg], [&leg], move |_, _| fill(&mut state)).unwrap();
+        TensorMap::from_subblock_fn(&runtime(), [&leg], [&leg], move |_, _| fill(&mut state))
+            .unwrap();
     let Svd { s, .. } = source.svd_compact().unwrap();
     let bond = s.domain()[0].clone();
     let selection = LegSelection::try_new(&bond, [(U1Irrep::new(0), 0..2)]).unwrap();
@@ -980,7 +990,7 @@ fn a_payload_generic_caller_can_name_the_find_truncated_bound() {
 
     let mut state = 7;
     let real: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| fill(&mut state)).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, _| fill(&mut state)).unwrap();
     let Svd { s, .. } = real.svd_compact().unwrap();
     let found = find_truncated_generically(&s, &truncation);
     let want = assert_svd_composition!(real, truncation, Policy::Rank(2), "f64");
@@ -992,7 +1002,7 @@ fn a_payload_generic_caller_can_name_the_find_truncated_bound() {
     assert_eq!(found.error.to_bits(), want.error.to_bits(), "f64 error");
 
     let complex: TensorMap<_, Complex64> =
-        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| {
+        TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, _| {
             Complex64::new(fill(&mut state), fill(&mut state))
         })
         .unwrap();

@@ -45,7 +45,7 @@ where
     V: tenet::typed::SpectrumMagnitude + Copy,
 {
     let sectors = [spin(0), spin(1)];
-    let leg = GradedSpace::try_new_with_arc(
+    let leg = GradedSpace::try_new(
         Arc::new(SU2FusionRule),
         sectors.iter().map(|sector| (*sector, 2)),
     )

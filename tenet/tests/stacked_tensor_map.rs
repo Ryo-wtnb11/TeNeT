@@ -1,6 +1,7 @@
 //! `StackedTensorMap` on Host (#1497, leaf L1 of #1287).
 
 use num_complex::Complex64;
+use std::sync::Arc;
 
 use tenet::prelude::{Error, Runtime};
 use tenet::typed::{
@@ -85,7 +86,7 @@ fn space_drift_names_the_member_and_field() {
 #[test]
 fn runtime_drift_names_the_member_and_field() {
     let leg = GradedSpace::try_new(
-        fixtures::U1FusionRule,
+        Arc::new(fixtures::U1FusionRule),
         [
             (fixtures::U1Irrep::new(0), 2),
             (fixtures::U1Irrep::new(1), 1),
@@ -104,11 +105,10 @@ fn runtime_drift_names_the_member_and_field() {
 #[cfg(feature = "racah-generated")]
 #[test]
 fn rule_instance_drift_names_the_member_and_field() {
-    use std::sync::Arc;
     let runtime = runtime();
     let tensor = |rank: usize, trivial: Vec<i64>| {
         let rule = Arc::new(tenet::typed::SUNFusionRule::new(rank).unwrap());
-        let leg = GradedSpace::try_new_with_arc(rule, [(trivial, 2)]).unwrap();
+        let leg = GradedSpace::try_new(rule, [(trivial, 2)]).unwrap();
         TensorMap::<_, f64>::zeros(&runtime, [&leg], [&leg]).unwrap()
     };
     let su3 = tensor(3, vec![0, 0]);
@@ -122,8 +122,11 @@ fn rule_instance_drift_names_the_member_and_field() {
 fn lazy_adjoint_and_compact_diagonal_members_are_rejected() {
     let runtime = runtime();
     let q = fixtures::U1Irrep::new;
-    let bond = GradedSpace::try_new(fixtures::U1FusionRule, [(q(0), 2), (q(1), 1)]).unwrap();
-    let square = TensorMap::<_, f64>::rand(&runtime, [&bond], [&bond]).unwrap();
+    let bond =
+        GradedSpace::try_new(Arc::new(fixtures::U1FusionRule), [(q(0), 2), (q(1), 1)]).unwrap();
+    let square =
+        TensorMap::<_, f64>::rand_with_seed(&runtime, [&bond], [&bond], 0x9E37_79B9_7F4A_7C15)
+            .unwrap();
     let lazy = square.adjoint().unwrap();
     let diagonal = TensorMap::<_, f64>::diagonal(
         &runtime,
@@ -212,7 +215,8 @@ fn select_holds_the_chosen_members_in_order() {
 fn select_rejects_out_of_range_and_empty_selections() {
     let runtime = runtime();
     let q = fixtures::U1Irrep::new;
-    let bond = GradedSpace::try_new(fixtures::U1FusionRule, [(q(0), 2), (q(1), 1)]).unwrap();
+    let bond =
+        GradedSpace::try_new(Arc::new(fixtures::U1FusionRule), [(q(0), 2), (q(1), 1)]).unwrap();
     let members = members!(&runtime, &bond, f64, 3);
     let stack = StackedTensorMap::pack(&members).unwrap();
     assert_eq!(
@@ -226,8 +230,8 @@ fn select_rejects_out_of_range_and_empty_selections() {
 fn select_of_a_blockless_structure_is_empty() {
     let runtime = runtime();
     let q = fixtures::U1Irrep::new;
-    let charged = GradedSpace::try_new(fixtures::U1FusionRule, [(q(1), 2)]).unwrap();
-    let neutral = GradedSpace::try_new(fixtures::U1FusionRule, [(q(0), 2)]).unwrap();
+    let charged = GradedSpace::try_new(Arc::new(fixtures::U1FusionRule), [(q(1), 2)]).unwrap();
+    let neutral = GradedSpace::try_new(Arc::new(fixtures::U1FusionRule), [(q(0), 2)]).unwrap();
     let empty = TensorMap::<_, f64>::zeros(&runtime, [&charged], [&neutral]).unwrap();
     assert!(empty.data().is_empty());
     let stack = StackedTensorMap::pack(&[&empty, &empty]).unwrap();

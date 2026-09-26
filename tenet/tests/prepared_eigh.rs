@@ -110,7 +110,8 @@ fn plus_minus_lambda_and_degenerate_groups_compare_by_value() {
     let runtime = Runtime::builder().build().unwrap();
     let leg = u1_legs().0;
     let j = SU2Irrep::from_twice_spin;
-    let su2 = GradedSpace::try_new(SU2FusionRule, [(j(0), 3), (j(1), 4)]).unwrap();
+    let su2 =
+        GradedSpace::try_new(std::sync::Arc::new(SU2FusionRule), [(j(0), 3), (j(1), 4)]).unwrap();
     for count in [1, 5] {
         let pm = single_leg(&runtime, &leg, count, plus_minus_entry);
         let Eigh { d, .. } = pm[0].eigh_full().unwrap();

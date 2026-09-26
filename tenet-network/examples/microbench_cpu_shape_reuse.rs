@@ -459,7 +459,7 @@ fn run_case<R, D>(
         workspace_mode,
         1,
         || {
-            let space = GradedSpace::try_new_with_arc(Arc::clone(&provider), cold_pattern).unwrap();
+            let space = GradedSpace::try_new(Arc::clone(&provider), cold_pattern).unwrap();
             let tensors = fixture::<R, D>(&runtime, &space, 11_000);
             let planned = chain_plan(&tensors);
             if workspace_mode == "reuse" {
@@ -473,7 +473,7 @@ fn run_case<R, D>(
     drop(cold);
     drop(cold_workspace);
 
-    let space = GradedSpace::try_new_with_arc(Arc::clone(&provider), patterns[0].clone()).unwrap();
+    let space = GradedSpace::try_new(Arc::clone(&provider), patterns[0].clone()).unwrap();
     let steady = (0..4)
         .map(|index| fixture::<R, D>(&runtime, &space, 12_000 + 10 * index))
         .collect::<Vec<_>>();
@@ -514,7 +514,7 @@ fn run_case<R, D>(
             .skip(1)
             .enumerate()
             .flat_map(|(index, pattern)| {
-                let space = GradedSpace::try_new_with_arc(Arc::clone(&provider), pattern).unwrap();
+                let space = GradedSpace::try_new(Arc::clone(&provider), pattern).unwrap();
                 [
                     fixture::<R, D>(&runtime, &space, 13_000 + 20 * index as u64),
                     fixture::<R, D>(&runtime, &space, 13_010 + 20 * index as u64),

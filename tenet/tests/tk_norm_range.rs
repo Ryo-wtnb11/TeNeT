@@ -67,7 +67,7 @@ fn complex_fill(indices: &[usize]) -> Complex64 {
 }
 
 fn u1_space(entries: [(i32, usize); 3]) -> GradedSpace<U1FusionRule> {
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         Arc::new(U1FusionRule),
         entries.map(|(charge, deg)| (U1Irrep::new(charge), deg)),
     )
@@ -93,7 +93,7 @@ fn u1_big() -> (GradedSpace<U1FusionRule>, GradedSpace<U1FusionRule>) {
 }
 
 fn su2_space(entries: [(usize, usize); 3]) -> GradedSpace<SU2FusionRule> {
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         Arc::new(SU2FusionRule),
         entries.map(|(twice_spin, deg)| (SU2Irrep::from_twice_spin(twice_spin), deg)),
     )
@@ -115,9 +115,8 @@ fn fz2() -> (
 ) {
     let rule = Arc::new(FermionParityFusionRule);
     (
-        GradedSpace::try_new_with_arc(Arc::clone(&rule), [(Z2Irrep::EVEN, 2), (Z2Irrep::ODD, 3)])
-            .unwrap(),
-        GradedSpace::try_new_with_arc(rule, [(Z2Irrep::EVEN, 5), (Z2Irrep::ODD, 1)]).unwrap(),
+        GradedSpace::try_new(Arc::clone(&rule), [(Z2Irrep::EVEN, 2), (Z2Irrep::ODD, 3)]).unwrap(),
+        GradedSpace::try_new(rule, [(Z2Irrep::EVEN, 5), (Z2Irrep::ODD, 1)]).unwrap(),
     )
 }
 
@@ -125,7 +124,7 @@ macro_rules! tensor {
     ($spaces:expr, $d:ty, $fill:expr) => {{
         let (v, w) = $spaces;
         let tensor: TensorMap<_, $d> =
-            TensorMap::from_block_fn(&runtime(), [&v], [&w], $fill).unwrap();
+            TensorMap::from_subblock_fn(&runtime(), [&v], [&w], $fill).unwrap();
         tensor
     }};
 }
@@ -500,9 +499,8 @@ fn zero_and_empty_payloads_have_zero_norm() {
     // TensorKit: `U1Space(0 => 2) ← U1Space(1 => 3)` has no block and every
     // norm is 0.0.
     let rule = Arc::new(U1FusionRule);
-    let only_zero =
-        GradedSpace::try_new_with_arc(Arc::clone(&rule), [(U1Irrep::new(0), 2)]).unwrap();
-    let only_one = GradedSpace::try_new_with_arc(rule, [(U1Irrep::new(1), 3)]).unwrap();
+    let only_zero = GradedSpace::try_new(Arc::clone(&rule), [(U1Irrep::new(0), 2)]).unwrap();
+    let only_one = GradedSpace::try_new(rule, [(U1Irrep::new(1), 3)]).unwrap();
     let empty: TensorMap<U1FusionRule, f64> =
         TensorMap::zeros(&runtime(), [&only_zero], [&only_one]).unwrap();
     assert_rows::<f64>("empty", norms!(empty), [0.0; 4], 1);

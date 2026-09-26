@@ -25,7 +25,7 @@ type U1Su2 = tenet::core::ProductFusionRule<U1FusionRule, SU2FusionRule>;
 fn space(provider: &Arc<U1Su2>, salt: usize) -> GradedSpace<U1Su2> {
     let sector =
         |q, twice_spin| product_sector(U1Irrep::new(q), SU2Irrep::from_twice_spin(twice_spin));
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         Arc::clone(provider),
         [
             (sector(0, 0), 18),
@@ -61,7 +61,7 @@ fn observe(rt: &Runtime, salt: usize) -> Vec<HostPoolObservation> {
     let p = t.permute(&[1], &[2, 0]).unwrap();
     let _ = p.braid(&[1, 0], &[2], &[0, 2, 1]).unwrap();
     // One block past strided's threading gate, embedded by a strided copy.
-    let w = GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), 40)]).unwrap();
+    let w = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 40)]).unwrap();
     let block: TensorMap<_, f64> = TensorMap::rand_with_seed(rt, [&w, &w], [&w], 1532).unwrap();
     let selection = LegSelection::try_new(&w, [(U1Irrep::new(0), 0..39)]).unwrap();
     let _ = block

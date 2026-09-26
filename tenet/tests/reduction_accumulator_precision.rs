@@ -10,7 +10,7 @@
 //! 1. **Double precision matches an independent oracle.** Each `f64` and
 //!    `Complex64` reduction is compared, under the workspace tolerance rule
 //!    (`docs/testing_numerics.md`), with a double-double sum of the fixture
-//!    entries recorded while `from_block_fn` fills them. The oracle does not
+//!    entries recorded while `from_subblock_fn` fills them. The oracle does not
 //!    depend on the order TeNeT accumulates in, so a valid reordering passes
 //!    and a wrong weight, conjugation or pairing fails.
 //!
@@ -65,14 +65,14 @@ fn runtime() -> Runtime {
 /// One U(1) charge with degeneracy 4: a single 4x4 dense block, a 4-entry
 /// compact spectrum, and `dim(c) == 1` so the weight cannot mask a difference.
 fn leg() -> GradedSpace<U1FusionRule> {
-    GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), 4)]).unwrap()
+    GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 4)]).unwrap()
 }
 
 /// Degeneracy 32: 1024 dense entries and a 32-entry compact spectrum, both
 /// long enough for the swallowed `1.0`s below to add up past one `f32` step of
 /// `2^26`.
 fn wide_leg() -> GradedSpace<U1FusionRule> {
-    GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), 32)]).unwrap()
+    GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 32)]).unwrap()
 }
 
 // --- 1. double precision matches an independent oracle ------------------------
@@ -80,7 +80,7 @@ fn wide_leg() -> GradedSpace<U1FusionRule> {
 /// Three U(1) charges with unequal degeneracies: several coupled blocks of
 /// different sizes, every `dim(c) == 1`.
 fn u1_multi_leg() -> GradedSpace<U1FusionRule> {
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         Arc::new(U1FusionRule),
         [
             (U1Irrep::new(-1), 2),
@@ -94,7 +94,7 @@ fn u1_multi_leg() -> GradedSpace<U1FusionRule> {
 /// Spin 0 and spin 1/2, so the reductions weight one block by `dim(c) == 1`
 /// and the other by `dim(c) == 2`.
 fn su2_leg() -> GradedSpace<SU2FusionRule> {
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         Arc::new(SU2FusionRule),
         [
             (SU2Irrep::from_twice_spin(0), 2),
@@ -173,7 +173,7 @@ fn oracle_dot(terms: impl IntoIterator<Item = (f64, Complex64, Complex64)>) -> C
     Complex64::new(re.value(), im.value())
 }
 
-/// Entries of a fixture, recorded while `from_block_fn` fills it, keyed by
+/// Entries of a fixture, recorded while `from_subblock_fn` fills it, keyed by
 /// coupled sector and (row, column) inside that sector's block.
 type Entries = HashMap<(String, usize, usize), (f64, Complex64)>;
 
@@ -210,14 +210,14 @@ fn dense_oracles(a: &Entries, b: &Entries) -> [Complex64; 5] {
     ]
 }
 
-/// Records every entry `from_block_fn` produces, keyed by coupled sector and
+/// Records every entry `from_subblock_fn` produces, keyed by coupled sector and
 /// block position, with the sector's quantum dimension as its weight.
 macro_rules! recorded_fixture {
     ($runtime:expr, $leg:expr, $dtype:ty, $wide:expr, $dim:expr, $entry:expr) => {{
         let mut entries = Entries::new();
         let mut step = stepper();
         let tensor: TensorMap<_, $dtype> =
-            TensorMap::from_block_fn($runtime, [$leg], [$leg], |trees, index| {
+            TensorMap::from_subblock_fn($runtime, [$leg], [$leg], |trees, index| {
                 let value: $dtype = $entry(step());
                 let key = (format!("{:?}", trees.coupled()), index[0], index[1]);
                 entries.insert(key, ($dim(trees.coupled()), $wide(value)));
@@ -455,7 +455,7 @@ fn single_precision_reductions_accumulate_in_double() {
     let leg = wide_leg();
     let dense_entries = 32 * 32;
     let dense: TensorMap<U1FusionRule, f32> =
-        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, index| {
+        TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, index| {
             if index == [0, 0] {
                 PEAK
             } else {
@@ -532,7 +532,7 @@ fn complex32_reductions_accumulate_in_double() {
     let leg = wide_leg();
     let dense_entries = 32 * 32;
     let dense: TensorMap<U1FusionRule, Complex32> =
-        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, index| {
+        TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, index| {
             Complex32::new(if index == [0, 0] { PEAK } else { 1.0 }, 0.0)
         })
         .unwrap();
@@ -561,7 +561,7 @@ fn single_precision_norm_stays_finite_where_a_narrow_accumulator_overflows() {
     );
 
     let dense: TensorMap<U1FusionRule, f32> =
-        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| value).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, _| value).unwrap();
     let compact: TensorMap<U1FusionRule, f32> = TensorMap::diagonal(
         &runtime,
         &leg,
@@ -611,8 +611,7 @@ mod checked_generic {
         let runtime = runtime();
         let provider = Arc::new(SUNFusionRule::new(3).unwrap());
         let adjoint = vec![2i64, 2];
-        let leg =
-            GradedSpace::try_new_with_arc(Arc::clone(&provider), [(adjoint.clone(), 2)]).unwrap();
+        let leg = GradedSpace::try_new(Arc::clone(&provider), [(adjoint.clone(), 2)]).unwrap();
         // Compact payloads are rejected by this admission mode
         // ("checked Generic reductions require dense payloads"), so only the
         // dense and lazy-adjoint reductions exist to check here.

@@ -1,7 +1,7 @@
 //! `TensorMap::block(&c)` / `blocks()` (TensorKit `block(t, c)` /
 //! `blocks(t)`) against oracles that never read the coupled payload layout:
 //!
-//! - the label oracle: a tensor filled by `from_block_fn` with a function of
+//! - the label oracle: a tensor filled by `from_subblock_fn` with a function of
 //!   its tree labels and local indices, assembled into sector matrices from
 //!   the subblock labels and the legs' degeneracies;
 //! - the physical dense expansion (U(1), SU(2)): `M ≅ ⊕_c B_c ⊗ 1_{dim c}`
@@ -16,6 +16,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
 use num_complex::Complex64;
 use tenet::core::{HostReadableStorage, TypedSectorAdmission};
@@ -361,7 +362,7 @@ where
         + tenet::typed::TypedTensorConstructionDispatch<R, D>,
     D: Val,
 {
-    let t = TensorMap::<R, D>::from_block_fn(
+    let t = TensorMap::<R, D>::from_subblock_fn(
         rt,
         codomain.iter().copied(),
         domain.iter().copied(),
@@ -485,7 +486,7 @@ macro_rules! physical_case {
 
 fn u1_legs() -> (GradedSpace<U1FusionRule>, GradedSpace<U1FusionRule>) {
     let v = GradedSpace::try_new(
-        U1FusionRule,
+        Arc::new(U1FusionRule),
         [(-1, 2), (0, 1), (1, 3)].map(|(q, n)| (U1Irrep::new(q), n)),
     )
     .unwrap();
@@ -495,7 +496,7 @@ fn u1_legs() -> (GradedSpace<U1FusionRule>, GradedSpace<U1FusionRule>) {
 
 fn su2_legs() -> (GradedSpace<SU2FusionRule>, GradedSpace<SU2FusionRule>) {
     let v = GradedSpace::try_new(
-        SU2FusionRule,
+        Arc::new(SU2FusionRule),
         [(0, 2), (1, 2), (2, 1)].map(|(s, n)| (SU2Irrep::from_twice_spin(s), n)),
     )
     .unwrap();
@@ -515,7 +516,7 @@ fn fz2u1_legs() -> (GradedSpace<Fz2U1>, GradedSpace<Fz2U1>) {
         ProductSector::new(parity, U1Irrep::new(q))
     };
     let v = GradedSpace::try_new(
-        Fz2U1::new(FermionParityFusionRule, U1FusionRule),
+        Arc::new(Fz2U1::new(FermionParityFusionRule, U1FusionRule)),
         [(-1, 2), (0, 1), (1, 2), (2, 1)].map(|(q, n)| (sector(q), n)),
     )
     .unwrap();
@@ -621,7 +622,7 @@ fn compact_diagonal_block_is_its_stored_spectrum() {
 fn absent_coupled_sector_is_tensorkits_empty_view() {
     let rt = Runtime::builder().build().unwrap();
     let (v, w) = u1_legs();
-    let t = TensorMap::<_, f64>::from_block_fn(&rt, [&v, &w], [&v], label_value).unwrap();
+    let t = TensorMap::<_, f64>::from_subblock_fn(&rt, [&v, &w], [&v], label_value).unwrap();
     let lazy = t.clone().adjoint().unwrap();
     // `-2` fuses in the codomain `v ⊗ w'` (3·2 = 6 states) but not in the
     // domain `v`; `7` fuses nowhere.
@@ -663,20 +664,16 @@ fn absent_coupled_sector_is_tensorkits_empty_view() {
 
 #[cfg(feature = "racah-generated")]
 mod su3 {
-    use std::sync::Arc;
 
     use super::*;
     use tenet::typed::SUNFusionRule;
 
     pub(super) fn legs() -> [GradedSpace<SUNFusionRule>; 3] {
         let provider = Arc::new(SUNFusionRule::new(3).unwrap());
-        let octet = GradedSpace::try_new_with_arc(
-            Arc::clone(&provider),
-            [(vec![1i64, 1], 2), (vec![0, 0], 1)],
-        )
-        .unwrap();
-        let chiral =
-            GradedSpace::try_new_with_arc(provider, [(vec![1i64, 0], 2), (vec![0, 1], 1)]).unwrap();
+        let octet =
+            GradedSpace::try_new(Arc::clone(&provider), [(vec![1i64, 1], 2), (vec![0, 0], 1)])
+                .unwrap();
+        let chiral = GradedSpace::try_new(provider, [(vec![1i64, 0], 2), (vec![0, 1], 1)]).unwrap();
         let dual = chiral.try_dual().unwrap();
         [octet, chiral, dual]
     }

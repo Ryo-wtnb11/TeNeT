@@ -9,6 +9,7 @@
 //! `origin/main` a2ce6c49, single-threaded dense executor, `cpu-faer`.
 
 use num_complex::Complex64;
+use std::sync::Arc;
 use tenet::core::{
     product_sector, FermionParityFusionRule, ProductFusionRule, ProductFusionRuleExt,
     SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep, Z2Irrep,
@@ -102,7 +103,7 @@ macro_rules! fingerprints {
         // Real symmetric blocks with distinct diagonal: Hermitian for both
         // dtypes, built without a contraction (checked Generic rejects lazy
         // operands there).
-        let herm = TensorMap::<_, $d>::from_block_fn(runtime, [v], [v], |_, ij| {
+        let herm = TensorMap::<_, $d>::from_subblock_fn(runtime, [v], [v], |_, ij| {
             let (i, j) = (ij[0] as f64, ij[1] as f64);
             <$d>::from(
                 1.0 / (1.0 + i + j)
@@ -193,7 +194,7 @@ fn runtime() -> Runtime {
 
 fn u1_leg() -> GradedSpace<U1FusionRule> {
     GradedSpace::try_new(
-        U1FusionRule,
+        Arc::new(U1FusionRule),
         [(-1, 1), (0, 2), (1, 2)].map(|(q, n)| (U1Irrep::new(q), n)),
     )
     .unwrap()
@@ -201,7 +202,7 @@ fn u1_leg() -> GradedSpace<U1FusionRule> {
 
 fn su2_leg() -> GradedSpace<SU2FusionRule> {
     GradedSpace::try_new(
-        SU2FusionRule,
+        Arc::new(SU2FusionRule),
         [(0, 2), (1, 2), (2, 1)].map(|(twice, n)| (SU2Irrep::from_twice_spin(twice), n)),
     )
     .unwrap()
@@ -210,7 +211,7 @@ fn su2_leg() -> GradedSpace<SU2FusionRule> {
 fn fz2_u1_leg() -> GradedSpace<ProductFusionRule<FermionParityFusionRule, U1FusionRule>> {
     let rule = FermionParityFusionRule.product(U1FusionRule);
     GradedSpace::try_new(
-        rule,
+        Arc::new(rule),
         [
             (product_sector(Z2Irrep::EVEN, U1Irrep::new(0)), 2),
             (product_sector(Z2Irrep::ODD, U1Irrep::new(1)), 2),
@@ -268,10 +269,9 @@ fn named_results_match_the_tuple_results() {
     {
         // Checked Generic rejects lazy-adjoint operands for most
         // factorizations; those entries fingerprint the error.
-        use std::sync::Arc;
         use tenet::typed::SUNFusionRule;
         let provider = Arc::new(SUNFusionRule::new(3).unwrap());
-        let v = GradedSpace::try_new_with_arc(
+        let v = GradedSpace::try_new(
             provider,
             [(vec![0i64, 0], 2), (vec![1, 0], 2), (vec![0, 1], 1)],
         )

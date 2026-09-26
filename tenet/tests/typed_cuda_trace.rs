@@ -148,13 +148,13 @@ fn device_traces_match_the_host_and_the_independent_oracles_at_every_dtype() {
 #[ignore = "requires a real CUDA device"]
 fn device_fz2_trace_is_the_hand_valued_supertrace() {
     fn at<D: DevicePayload>(runtime: &Runtime) {
-        let space = GradedSpace::try_new_with_arc(
+        let space = GradedSpace::try_new(
             Arc::new(FermionParityFusionRule),
             [(Z2Irrep::EVEN, 2), (Z2Irrep::ODD, 3)],
         )
         .unwrap();
         let tensor: TensorMap<_, D> =
-            TensorMap::from_block_fn(runtime, [&space], [&space], |trees, index| {
+            TensorMap::from_subblock_fn(runtime, [&space], [&space], |trees, index| {
                 let value = if index[0] != index[1] {
                     9.0
                 } else if *trees.coupled() == Z2Irrep::EVEN {
@@ -188,7 +188,7 @@ fn repeated_destinations_accumulate_every_producer() {
     let w = u1(&[(0, 1), (1, 2)]);
     let restricted = |only: Option<i32>| -> TensorMap<_, f64> {
         let mut next = fill::<_, f64>(61);
-        TensorMap::from_block_fn(&runtime, [&v, &w, &v], [&v, &w], move |trees, index| {
+        TensorMap::from_subblock_fn(&runtime, [&v, &w, &v], [&v, &w], move |trees, index| {
             let value = next(trees, index);
             match only {
                 Some(charge) if trees.codomain_uncoupled()[0] != U1Irrep::new(charge) => 0.0,
@@ -324,7 +324,7 @@ fn a_warm_trace_past_the_default_plan_bound_rebuilds_no_plan() {
         .map(|j| (100 * j, j as usize + 1))
         .collect::<Vec<_>>());
     let host: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&v, &w], [&v, &w], fill(71)).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&v, &w], [&v, &w], fill(71)).unwrap();
     assert_eq!(host.subblock_count(), 81);
     let source = host.to_cuda().unwrap();
     let cold = source.trace_pairs(&[(0, 2)]).unwrap();
@@ -354,7 +354,7 @@ fn an_interleaved_trace_and_transform_evict_no_plan() {
         .map(|j| (100 * j, j as usize + 1))
         .collect::<Vec<_>>());
     let host: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&v, &w], [&v, &w], fill(71)).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&v, &w], [&v, &w], fill(71)).unwrap();
     let source = host.to_cuda().unwrap();
     let round = || {
         let _ = source.trace_pairs(&[(0, 2)]).unwrap();

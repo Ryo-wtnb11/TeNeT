@@ -76,7 +76,7 @@ fn cached_permute_overwrite_does_not_allocate_on_the_caller_thread() {
     // compiled plan and replay workspace without allocating on the caller.
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(U1FusionRule.product(SU2FusionRule));
-    let space = GradedSpace::try_new_with_arc(
+    let space = GradedSpace::try_new(
         Arc::clone(&provider),
         [
             (
@@ -128,7 +128,7 @@ fn cached_u1_permute_overwrite_does_not_allocate_on_the_caller_thread() {
     // and replay workspace without allocating on the caller.
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(U1FusionRule);
-    let space = GradedSpace::try_new_with_arc(
+    let space = GradedSpace::try_new(
         Arc::clone(&provider),
         [
             (U1Irrep::new(-1), 4),
@@ -167,7 +167,7 @@ fn cached_planar_overwrites_do_not_allocate_on_the_caller_thread() {
     // explicit, and repartition transpose operations without caller allocation.
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(U1FusionRule);
-    let space = GradedSpace::try_new_with_arc(
+    let space = GradedSpace::try_new(
         Arc::clone(&provider),
         [
             (U1Irrep::new(-1), 2),
@@ -284,8 +284,8 @@ fn checked_generic_public_transform_measurement() {
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let provider = Arc::new(SU2FusionRule);
         let half = SU2Irrep::from_twice_spin(1);
-        let half_leg = GradedSpace::try_new_with_arc(Arc::clone(&provider), [(half, 1)]).unwrap();
-        let coupled_leg = GradedSpace::try_new_with_arc(
+        let half_leg = GradedSpace::try_new(Arc::clone(&provider), [(half, 1)]).unwrap();
+        let coupled_leg = GradedSpace::try_new(
             Arc::clone(&provider),
             [
                 (SU2Irrep::from_twice_spin(0), 1),
@@ -338,9 +338,9 @@ fn checked_generic_public_transform_measurement() {
     };
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(SUNFusionRule::new(n).unwrap());
-    let leg = GradedSpace::try_new_with_arc(Arc::clone(&provider), [(adjoint, 1)]).unwrap();
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(adjoint, 1)]).unwrap();
     let source: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], |trees, _| {
+        TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg], |trees, _| {
             trees.codomain_vertices()[0].get() as f64
         })
         .unwrap();

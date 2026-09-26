@@ -13,7 +13,7 @@ use tenet::core::{
     ProductFusionRule, ProductSectorLayout, SU2FusionRule, SU2Irrep, SectorCodec, Su2SectorLayout,
     U1FusionRule, U1Irrep, U1SectorLayout, Z2Irrep, ZNFusionRule,
 };
-use tenet::prelude::{GradedSpace, Runtime, TensorMap, Truncation};
+use tenet::prelude::{Complex64, GradedSpace, Runtime, TensorMap, Truncation};
 use tenet::typed::{Eig, Eigh, LeftPolar, Lq, Qr, RightPolar, Svd};
 
 type Fz2SectorLayout = tenet::core::Fz2SectorLayout;
@@ -71,7 +71,7 @@ macro_rules! factor_conformance {
         let rt = runtime();
         let provider = Arc::new($rule);
         let pairs = $pairs;
-        let endo_space = GradedSpace::try_new_with_arc(Arc::clone(&provider), pairs.clone()).unwrap();
+        let endo_space = GradedSpace::try_new(Arc::clone(&provider), pairs.clone()).unwrap();
         let tall_pairs: Vec<_> = pairs
             .iter()
             .map(|(sector, degeneracy)| (sector.clone(), degeneracy + 1))
@@ -80,10 +80,10 @@ macro_rules! factor_conformance {
             .iter()
             .map(|(sector, degeneracy)| (sector.clone(), *degeneracy))
             .collect();
-        let tall_space = GradedSpace::try_new_with_arc(Arc::clone(&provider), tall_pairs).unwrap();
-        let wide_space = GradedSpace::try_new_with_arc(Arc::clone(&provider), wide_pairs).unwrap();
+        let tall_space = GradedSpace::try_new(Arc::clone(&provider), tall_pairs).unwrap();
+        let wide_space = GradedSpace::try_new(Arc::clone(&provider), wide_pairs).unwrap();
         let tall: TensorMap<_, f64> =
-            TensorMap::from_block_fn(&rt, [&tall_space], [&wide_space], |_, index| {
+            TensorMap::from_subblock_fn(&rt, [&tall_space], [&wide_space], |_, index| {
                 if index[0] == index[1] {
                     [4.0, 2.0][index[0]]
                 } else {
@@ -92,7 +92,7 @@ macro_rules! factor_conformance {
             })
             .unwrap();
         let wide: TensorMap<_, f64> =
-            TensorMap::from_block_fn(&rt, [&wide_space], [&tall_space], |_, index| {
+            TensorMap::from_subblock_fn(&rt, [&wide_space], [&tall_space], |_, index| {
                 if index[0] == index[1] {
                     [4.0, 2.0][index[0]]
                 } else {
@@ -138,23 +138,23 @@ macro_rules! factor_conformance {
         let Qr { q, r } = tall.qr_compact().unwrap();
         assert_provider!(provider; q, r);
         assert_close!(&q.compose(&r).unwrap(), &tall);
-        let id = TensorMap::id(&rt, q.domain().iter()).unwrap();
+        let id = TensorMap::isomorphism(&rt, q.domain().iter(), q.domain().iter()).unwrap();
         assert_close!(&q.adjoint().unwrap().compose(&q).unwrap(), &id);
         let Qr { q, r } = tall.qr_full().unwrap();
         assert_provider!(provider; q, r);
         assert_close!(&q.compose(&r).unwrap(), &tall);
-        let id = TensorMap::id(&rt, q.domain().iter()).unwrap();
+        let id = TensorMap::isomorphism(&rt, q.domain().iter(), q.domain().iter()).unwrap();
         assert_close!(&q.adjoint().unwrap().compose(&q).unwrap(), &id);
 
         let Lq { l, q } = wide.lq_compact().unwrap();
         assert_provider!(provider; l, q);
         assert_close!(&l.compose(&q).unwrap(), &wide);
-        let id = TensorMap::id(&rt, q.codomain().iter()).unwrap();
+        let id = TensorMap::isomorphism(&rt, q.codomain().iter(), q.codomain().iter()).unwrap();
         assert_close!(&q.compose(&q.adjoint().unwrap()).unwrap(), &id);
         let Lq { l, q } = wide.lq_full().unwrap();
         assert_provider!(provider; l, q);
         assert_close!(&l.compose(&q).unwrap(), &wide);
-        let id = TensorMap::id(&rt, q.codomain().iter()).unwrap();
+        let id = TensorMap::isomorphism(&rt, q.codomain().iter(), q.codomain().iter()).unwrap();
         assert_close!(&q.compose(&q.adjoint().unwrap()).unwrap(), &id);
 
         let left = tall.left_null().unwrap();
@@ -169,7 +169,7 @@ macro_rules! factor_conformance {
                 <= 1e-9,
             $name
         );
-        let left_id = TensorMap::id(&rt, left.domain().iter()).unwrap();
+        let left_id = TensorMap::isomorphism(&rt, left.domain().iter(), left.domain().iter()).unwrap();
         assert_close!(&left.adjoint().unwrap().compose(&left).unwrap(), &left_id);
         let right = wide.right_null().unwrap();
         assert_provider!(provider; right);
@@ -181,7 +181,7 @@ macro_rules! factor_conformance {
                 <= 1e-9,
             $name
         );
-        let right_id = TensorMap::id(&rt, right.codomain().iter()).unwrap();
+        let right_id = TensorMap::isomorphism(&rt, right.codomain().iter(), right.codomain().iter()).unwrap();
         assert_close!(
             &right.compose(&right.adjoint().unwrap()).unwrap(),
             &right_id
@@ -190,7 +190,7 @@ macro_rules! factor_conformance {
         let LeftPolar { w, p } = tall.left_polar().unwrap();
         assert_provider!(provider; w, p);
         assert_close!(&w.compose(&p).unwrap(), &tall);
-        let id = TensorMap::id(&rt, w.domain().iter()).unwrap();
+        let id = TensorMap::isomorphism(&rt, w.domain().iter(), w.domain().iter()).unwrap();
         assert_close!(&w.adjoint().unwrap().compose(&w).unwrap(), &id);
         assert!(is_hermitian!(p, 1e-10));
         assert!(p
@@ -202,7 +202,7 @@ macro_rules! factor_conformance {
         let RightPolar { p, wh: w } = wide.right_polar().unwrap();
         assert_provider!(provider; p, w);
         assert_close!(&p.compose(&w).unwrap(), &wide);
-        let id = TensorMap::id(&rt, w.codomain().iter()).unwrap();
+        let id = TensorMap::isomorphism(&rt, w.codomain().iter(), w.codomain().iter()).unwrap();
         assert_close!(&w.compose(&w.adjoint().unwrap()).unwrap(), &id);
         assert!(is_hermitian!(p, 1e-10));
         assert!(p
@@ -213,7 +213,7 @@ macro_rules! factor_conformance {
             .all(|&x| x >= -1e-10));
 
         let h: TensorMap<_, f64> =
-            TensorMap::from_block_fn(&rt, [&endo_space], [&endo_space], |_, index| {
+            TensorMap::from_subblock_fn(&rt, [&endo_space], [&endo_space], |_, index| {
                 [[3.0, 1.0], [1.0, 3.0]][index[0]][index[1]]
             })
             .unwrap();
@@ -247,7 +247,7 @@ macro_rules! factor_conformance {
         assert!(found.error > 0.0, $name);
 
         let g: TensorMap<_, f64> =
-            TensorMap::from_block_fn(&rt, [&endo_space], [&endo_space], |_, index| {
+            TensorMap::from_subblock_fn(&rt, [&endo_space], [&endo_space], |_, index| {
                 [[3.0, 1.0], [0.0, 1.0]][index[0]][index[1]]
             })
             .unwrap();
@@ -255,7 +255,7 @@ macro_rules! factor_conformance {
         assert_provider!(provider; d, v);
         assert_complex_close!(
             &v.compose(&d).unwrap().compose(&v.inv().unwrap()).unwrap(),
-            &g.to_c64()
+            &g.convert::<Complex64>()
         );
         assert!(g
             .eig_vals()
@@ -269,12 +269,12 @@ macro_rules! factor_conformance {
         let trunc_v = v.restrict_leg(v.codomain_rank(), &found.selection).unwrap();
         assert_provider!(provider; trunc_d, trunc_v);
         assert_complex_close!(
-            &g.to_c64().compose(&trunc_v).unwrap(),
+            &g.convert::<Complex64>().compose(&trunc_v).unwrap(),
             &trunc_v.compose(&trunc_d).unwrap()
         );
         assert!(found.error > 0.0, $name);
 
-        let id = TensorMap::id(&rt, h.domain().iter()).unwrap();
+        let id = TensorMap::isomorphism(&rt, h.domain().iter(), h.domain().iter()).unwrap();
         let inverse = h.inv().unwrap();
         assert_provider!(provider; inverse);
         assert_close!(&h.compose(&inverse).unwrap(), &id);
@@ -309,10 +309,10 @@ macro_rules! factor_conformance {
         assert_close!(&aa_plus.adjoint().unwrap(), &aa_plus);
         assert_close!(&a_plus_a.adjoint().unwrap(), &a_plus_a);
         let left_projector = left.compose(&left.adjoint().unwrap()).unwrap();
-        let id = TensorMap::id(&rt, tall.codomain().iter()).unwrap();
+        let id = TensorMap::isomorphism(&rt, tall.codomain().iter(), tall.codomain().iter()).unwrap();
         assert_close!(&left_projector.axpby(1.0, &aa_plus, 1.0).unwrap(), &id);
         let diagonal: TensorMap<_, f64> =
-            TensorMap::from_block_fn(&rt, [&endo_space], [&endo_space], |_, index| {
+            TensorMap::from_subblock_fn(&rt, [&endo_space], [&endo_space], |_, index| {
                 if index[0] == index[1] {
                     [4.0, 9.0][index[0]]
                 } else {

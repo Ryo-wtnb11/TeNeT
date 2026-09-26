@@ -13,6 +13,7 @@ include!("common/predicate_chain_coefficients.rs");
 
 use num_complex::{Complex32, Complex64};
 use numerics::Numeric;
+use std::sync::Arc;
 use tenet::core::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
 use tenet::prelude::{GradedSpace, Runtime, TensorMap};
 use tenet::typed::{Eigh, LeftPolar, Qr};
@@ -166,10 +167,10 @@ macro_rules! pin_family {
         let leg = $leg;
         let value = $value;
         let x: TensorMap<_, $d> =
-            TensorMap::from_block_fn(rt, [&leg], [&leg], |_, ij: &[usize]| value(ij)).unwrap();
+            TensorMap::from_subblock_fn(rt, [&leg], [&leg], |_, ij: &[usize]| value(ij)).unwrap();
         let h = project_hermitian!(x).unwrap();
         let a = project_antihermitian!(x).unwrap();
-        let identity = TensorMap::id(rt, [&leg]).unwrap();
+        let identity = TensorMap::isomorphism(rt, [&leg], [&leg]).unwrap();
         let positive = x
             .adjoint()
             .unwrap()
@@ -186,7 +187,7 @@ macro_rules! pin_family {
         // reflector, which would also be Hermitian.
         let LeftPolar { w: unitary, .. } = x.left_polar().unwrap();
         let tall: TensorMap<_, $d> =
-            TensorMap::from_block_fn(rt, [&leg, &leg], [&leg], |_, ij: &[usize]| value(ij))
+            TensorMap::from_subblock_fn(rt, [&leg, &leg], [&leg], |_, ij: &[usize]| value(ij))
                 .unwrap();
         let Qr { q: isometry, .. } = tall.qr_compact().unwrap();
         let Eigh {
@@ -234,12 +235,16 @@ macro_rules! pin_family {
 }
 
 fn u1_leg() -> GradedSpace<U1FusionRule> {
-    GradedSpace::try_new(U1FusionRule, [(U1Irrep::new(0), 2), (U1Irrep::new(1), 3)]).unwrap()
+    GradedSpace::try_new(
+        Arc::new(U1FusionRule),
+        [(U1Irrep::new(0), 2), (U1Irrep::new(1), 3)],
+    )
+    .unwrap()
 }
 
 fn su2_leg() -> GradedSpace<SU2FusionRule> {
     GradedSpace::try_new(
-        SU2FusionRule,
+        Arc::new(SU2FusionRule),
         [
             (SU2Irrep::from_twice_spin(0), 3),
             (SU2Irrep::from_twice_spin(1), 2),
@@ -296,25 +301,22 @@ fn su2_chains_match_the_removed_methods() {
 
 /// Checked-Generic providers never had the removed methods; the chains are
 /// the only spelling there. SU(3) with an adjoint leg carries outer
-/// multiplicity. Two capability differences from the multiplicity-free
-/// chains: `TensorMap::id` is multiplicity-free-only, so the identity is
-/// `powi(0)`; and checked-Generic `compose` rejects a lazy adjoint operand, so
-/// `t†` enters the Gram map materialized.
+/// multiplicity. The identity is `powi(0)`, and checked-Generic `compose`
+/// rejects a lazy adjoint operand, so `t†` enters the Gram map materialized.
 #[cfg(feature = "racah-generated")]
 #[test]
 fn checked_generic_su3_chains_decide_true_and_false_cases() {
     use std::cell::Cell;
-    use std::sync::Arc;
 
     use tenet::typed::SUNFusionRule;
 
     let rt = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(SUNFusionRule::new(3).unwrap());
-    let leg = GradedSpace::try_new_with_arc(Arc::clone(&provider), [(vec![1, 1], 2)]).unwrap();
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(vec![1, 1], 2)]).unwrap();
     let materialized_adjoint = |t: &TensorMap<SUNFusionRule, f64>| {
         let logical = t.adjoint().unwrap().data().to_vec();
         let position = Cell::new(0usize);
-        TensorMap::from_block_fn(&rt, t.domain().iter(), t.codomain().iter(), |_, _| {
+        TensorMap::from_subblock_fn(&rt, t.domain().iter(), t.codomain().iter(), |_, _| {
             let index = position.get();
             position.set(index + 1);
             logical[index]
@@ -334,7 +336,7 @@ fn checked_generic_su3_chains_decide_true_and_false_cases() {
         is_isometric(t, tol) && is_identity(t.compose(&materialized_adjoint(t)).unwrap(), tol)
     };
     let x: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&rt, [&leg, &leg], [&leg, &leg], |_, ij: &[usize]| fill(ij))
+        TensorMap::from_subblock_fn(&rt, [&leg, &leg], [&leg, &leg], |_, ij: &[usize]| fill(ij))
             .unwrap();
     let h = project_hermitian!(x).unwrap();
     let a = project_antihermitian!(x).unwrap();
@@ -346,7 +348,7 @@ fn checked_generic_su3_chains_decide_true_and_false_cases() {
     let negative = positive.scale(-1.0);
     let Qr { q: unitary, .. } = x.qr_compact().unwrap();
     let tall: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&rt, [&leg, &leg], [&leg], |_, ij: &[usize]| fill(ij)).unwrap();
+        TensorMap::from_subblock_fn(&rt, [&leg, &leg], [&leg], |_, ij: &[usize]| fill(ij)).unwrap();
     let Qr { q: isometry, .. } = tall.qr_compact().unwrap();
     assert!(project_hermitian!(isometry).is_err());
 

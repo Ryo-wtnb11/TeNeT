@@ -94,13 +94,12 @@ upstream location (the note says why).
 | `typed::TensorMap::exp` | TensorKit | 0.17.0 | `tensors/diagonal.jl:383-390` | compact arm: `exp(::DiagonalTensorMap)` is unconditionally elementwise |
 | `typed::TensorMap::flip` | TensorKit | 0.17.0 | `tensors/indexmanipulations.jl:8-29` | |
 | `typed::TensorMap::flip` | TensorKit | 0.17.0 | `fusiontrees/braiding_manipulations.jl:384-413` | per-leg Z-isomorphism phase (χ, θ) of the fusion-tree `flip` |
-| `typed::TensorMap::from_block_fn` | TensorKit | 0.17.0 | `tensors/tensor.jl` | divergence: no TK counterpart (name-only row — no single defensible range); TK's constructor surface is `undef`/`zeros`/`ones` (283-318) and the rand family (320-408) |
-| `typed::TensorMap::id` | TensorKit | 0.17.0 | `tensors/linalg.jl:75-82` | typed facade |
+| `typed::TensorMap::from_subblock_fn` | TensorKit | 0.17.0 | `tensors/tensor.jl` | divergence: no TK counterpart (name-only row — no single defensible range); TK's constructor surface is `undef`/`zeros`/`ones` (283-318) and the rand family (320-408) |
 | `typed::TensorMap::inner` | TensorKit | 0.17.0 | `tensors/vectorinterface.jl:114-123` | `VectorInterface.inner`, quantum-dimension weighted; TK `dot` alias at `tensors/linalg.jl:255` |
 | `typed::TensorMap::inv` | TensorKit | 0.17.0 | `tensors/linalg.jl:375-387` | typed facade |
 | `typed::TensorMap::powi` | TensorKit | 0.17.0 | `tensors/linalg.jl:45-47` | typed facade |
 | `typed::TensorMap::isometry` | TensorKit | 0.17.0 | `tensors/linalg.jl:149-158` | |
-| `typed::TensorMap::isomorphism` | TensorKit | 0.17.0 | `tensors/linalg.jl:102-109` | |
+| `typed::TensorMap::isomorphism` | TensorKit | 0.17.0 | `tensors/linalg.jl:102-109` | also TK `id(V)` (75-82) as `isomorphism(V, V)` and `unitary` (129-132), whose extra Euclidean check every TeNeT provider satisfies |
 | `typed::TensorMap::left_null` | MatrixAlgebraKit | 0.6.9 | `interface/orthnull.jl:167-244` | typed facade |
 | `typed::TensorMap::left_polar` | MatrixAlgebraKit | 0.6.9 | `interface/polar.jl:3-20` | typed facade; TK factor-space glue on the typed `left_polar` rows |
 | `typed::TensorMap::lq_compact` | MatrixAlgebraKit | 0.6.9 | `interface/lq.jl:22-43` | typed facade; TK diagonal fast-path divergence on the typed `lq_compact` row |
@@ -124,7 +123,6 @@ upstream location (the note says why).
 | `typed::TensorMap::transpose` | TensorKit | 0.17.0 | `tensors/indexmanipulations.jl:401-411` | typed facade |
 | `typed::TensorMap::transpose_axes` | TensorKit | 0.17.0 | `tensors/indexmanipulations.jl:401-411` | the same TK `transpose`, reached with an explicit cyclic `Index2Tuple` |
 | `typed::TensorMap::twist` | TensorKit | 0.17.0 | `tensors/indexmanipulations.jl:62-97` | `twist!` (62-78) and `twist` (90-97) |
-| `typed::TensorMap::unitary` | TensorKit | 0.17.0 | `tensors/linalg.jl:129-132` | |
 | `typed::TensorMap::zeros` | TensorKit | 0.17.0 | `tensors/tensor.jl:283-318` | the generated `zeros`/`ones` constructor pair |
 | `typed` (module doc) | TensorKitSectors | 0.3.4 | `product.jl:245-294` | `ProductSector` / Deligne product `⊠` |
 | `typed::BlockFusionTrees` | TensorKit | 0.17.0 | `tensors/abstracttensor.jl:348-352` | named after `fusiontrees(t)`; its accessors mirror the `f₁.uncoupled`/`f₂.uncoupled`/coupled fields of TK fusion-tree pairs, and `blocksectors` (331-335) is the coarser surface it deliberately is not |
@@ -161,7 +159,7 @@ upstream location (the note says why).
 | `typed::TensorMap::insert_left_unit` | TensorKit | 0.17.0 | `tensors/indexmanipulations.jl:132-137` | non-`TensorMap` arm: `similar` + blockwise copy |
 | `typed::TensorMap::insert_right_unit` | TensorKit | 0.17.0 | `tensors/indexmanipulations.jl:158-172` | typed facade |
 | `typed::TensorMap::isometry` | TensorKit | 0.17.0 | `tensors/linalg.jl:149-158` | |
-| `typed::TensorMap::isomorphism` | TensorKit | 0.17.0 | `tensors/linalg.jl:102-109` | |
+| `typed::TensorMap::isomorphism` | TensorKit | 0.17.0 | `tensors/linalg.jl:102-109` | also TK `id(V)` (75-82) as `isomorphism(V, V)` and `unitary` (129-132), whose extra Euclidean check every TeNeT provider satisfies |
 | `typed::TensorMap::left_polar` | TensorKit | 0.17.0 | `factorizations/matrixalgebrakit.jl:204-208` | factor spaces: `w` on the input's homspace, `p` on `domain ← domain` |
 | `typed::TensorMap::left_polar` | TensorKit | 0.17.0 | `factorizations/diagonal.jl:8-14` | `DiagonalTensorMap` gets only `copy_input` for the polars — no diagonal polar specialization |
 | `typed::TensorMap::leg_dims` | TensorKit | 0.17.0 | `tensors/abstracttensor.jl:196-201` | `space(t, i)` |
@@ -169,19 +167,17 @@ upstream location (the note says why).
 | `typed::TensorMap::norm` | TensorKit | 0.17.0 | `tensors/linalg.jl:257-275` | `norm(t, p)` and the `_norm` block reduction |
 | `typed::TensorMap::qr_compact` | TensorKit | 0.17.0 | `factorizations/diagonal.jl:16-28,61-66` | divergence: TK's `DiagonalAlgorithm` QR fast path not adopted (#613 Group 4) |
 | `typed::TensorMap::qr_full` | TensorKit | 0.17.0 | `factorizations/diagonal.jl:16-28,61-66` | same non-adoption as `qr_compact` |
-| `typed::TensorMap::rand` | TensorKit | 0.17.0 | `tensors/tensor.jl:320-408` | the generated `rand`/`randn`/`randexp`/`randisometry` family |
-| `typed::TensorMap::rand_with_seed` | TensorKit | 0.17.0 | `tensors/tensor.jl:320-408` | divergence: TK threads a caller-supplied `rng` (overloads at 363-406 inside the generated block), no integer-seed entry point |
+| `typed::TensorMap::rand_with_seed` | TensorKit | 0.17.0 | `tensors/tensor.jl:320-408` | the generated `rand` family; divergence: TK threads a caller-supplied `rng` (overloads at 363-406 inside the generated block), the explicit seed is its counterpart; no seedless form |
 | `typed::TensorMap::rank` | TensorKit | 0.17.0 | `tensors/abstracttensor.jl:267` | `numind` |
 | `typed::TensorMap::re` | TensorKit | 0.17.0 | `tensors/abstracttensor.jl:707-717` | `Base.real` |
 | `typed::TensorMap::remove_unit` | TensorKit | 0.17.0 | `tensors/indexmanipulations.jl:186-197` | |
 | `typed::TensorMap::right_polar` | TensorKit | 0.17.0 | `factorizations/matrixalgebrakit.jl:210-214` | factor spaces: `p` on `codomain ← codomain`, `wh` on the input's homspace |
 | `typed::TensorMap::scalar` | TensorKit | 0.17.0 | `tensors/tensoroperations.jl:446-451` | empty payload reads as zero |
-| `typed::TensorMap::to_c64` | TensorKit | 0.17.0 | `tensors/abstracttensor.jl:696-705` | `Base.complex` |
+| `typed::TensorMap::convert` | TensorKit | 0.17.0 | `tensors/abstracttensor.jl:696-705` | `Base.complex` and `convert(TensorMap{T}, t)`; sealed pair list, no complex -> real |
 | `typed::TensorMap::to_physical_dense` | TensorKit | 0.17.1 | `tensors/abstracttensor.jl:730-750` | physical expansion; leg order from `spaces/gradedspace.jl` `axes(V, c)`/`sectors(V)` (a dual `V'` in `V`'s order); fixtures `benchmarks/tensorkit_physical_dense_oracle.jl` (#1464); executable fixture provenance is recorded above |
 | `typed::TensorMap::project_physical_dense` | TensorKit | 0.17.1 | `tensors/abstracttensor.jl:752-790` | adjoint projection and coupled-sector normalization; executable fixture provenance is recorded above |
 | `typed::TensorMap::twist` | TensorKit | 0.17.0 | `tensors/indexmanipulations.jl:90-97` | `twist`; in-place `twist!` at 62-78 |
 | `typed::TensorMap::twist` | TensorKit | 0.17.0 | `tensors/indexmanipulations.jl:34-51` | `has_shared_twist` identity-twist detection |
 | `typed::TensorMap::twist` | TensorKit | 0.17.0 | `tensors/indexmanipulations.jl:91-93` | `copy = false` default shares `t` on identity twist |
 | `typed::TensorMap::twist` | TensorKit | 0.17.0 | `tensors/diagonal.jl:84-89` | `similar(::DiagonalTensorMap)` preserves diagonal storage, so TK's diagonal twist stays diagonal |
-| `typed::TensorMap::unitary` | TensorKit | 0.17.0 | `tensors/linalg.jl:129-132` | |
 | `typed::TensorMap::zeros_like` | TensorKit | 0.17.0 | `tensors/vectorinterface.jl:7-20` | `zerovector` |

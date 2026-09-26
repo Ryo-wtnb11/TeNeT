@@ -87,7 +87,7 @@ fn complex(value: f64) -> Complex64 {
 }
 
 fn u1() -> GradedSpace<U1FusionRule> {
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         Arc::new(U1FusionRule),
         [(U1Irrep::new(0), 2), (U1Irrep::new(1), 2)],
     )
@@ -95,7 +95,7 @@ fn u1() -> GradedSpace<U1FusionRule> {
 }
 
 fn su2() -> GradedSpace<SU2FusionRule> {
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         Arc::new(SU2FusionRule),
         [
             (SU2Irrep::from_twice_spin(0), 2),
@@ -168,7 +168,7 @@ fn dense_pinv_of_a_nan_tensor_is_a_typed_backend_error() {
     let runtime = runtime();
     let leg = u1();
     let real: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |trees, index: &[usize]| {
+        TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |trees, index: &[usize]| {
             if *trees.coupled() == U1Irrep::new(1) && index == [0, 0] {
                 f64::NAN
             } else if index[0] == index[1] {
@@ -178,7 +178,7 @@ fn dense_pinv_of_a_nan_tensor_is_a_typed_backend_error() {
             }
         })
         .unwrap();
-    let complex = real.to_c64();
+    let complex = real.convert::<Complex64>();
     for (case, result) in [
         ("f64 owned", real.pinv(0.1).map(|_| ())),
         ("f64 adjoint", real.adjoint().unwrap().pinv(0.1).map(|_| ())),

@@ -10,8 +10,8 @@ fn su2_multitree<D: tenet::prelude::TensorScalar>(
     value: impl Fn(&[SU2Irrep]) -> D,
 ) -> TensorMap<SU2FusionRule, D> {
     let half = SU2Irrep::from_twice_spin(1);
-    let leg = GradedSpace::try_new(SU2FusionRule, [(half, 1)]).unwrap();
-    TensorMap::from_block_fn(runtime, [&leg, &leg, &leg], [&leg], |trees, _| {
+    let leg = GradedSpace::try_new(std::sync::Arc::new(SU2FusionRule), [(half, 1)]).unwrap();
+    TensorMap::from_subblock_fn(runtime, [&leg, &leg, &leg], [&leg], |trees, _| {
         value(trees.codomain_innerlines())
     })
     .unwrap()
@@ -159,9 +159,10 @@ fn permute_each_axis<D: Copy>(physical: &PhysicalDense<D>, target_to_source: &[u
 fn su2_spin_one_singlet_projects_to_explicit_doubled_u1_charges() {
     let runtime = Runtime::builder().build().unwrap();
     let spin_one = SU2Irrep::from_twice_spin(2);
-    let su2_leg = GradedSpace::try_new(SU2FusionRule, [(spin_one, 1)]).unwrap();
+    let su2_leg =
+        GradedSpace::try_new(std::sync::Arc::new(SU2FusionRule), [(spin_one, 1)]).unwrap();
     let singlet: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&su2_leg, &su2_leg], [], |_, _| 1.0).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&su2_leg, &su2_leg], [], |_, _| 1.0).unwrap();
     let su2_physical = singlet.to_physical_dense().unwrap();
     assert_eq!(su2_physical.shape, [3, 3]);
 
@@ -173,7 +174,7 @@ fn su2_spin_one_singlet_projects_to_explicit_doubled_u1_charges() {
         data: permute_each_axis(&su2_physical, &target_to_source),
     };
     let u1_leg = GradedSpace::try_new(
-        U1FusionRule,
+        std::sync::Arc::new(U1FusionRule),
         [
             (U1Irrep::new(0), 1),
             (U1Irrep::new(-2), 1),
@@ -344,7 +345,7 @@ macro_rules! assert_matches_tensorkit {
 fn u1_dense_order_matches_tensorkit_for_dual_and_bent_legs() {
     let runtime = Runtime::builder().build().unwrap();
     let v = GradedSpace::try_new(
-        U1FusionRule,
+        std::sync::Arc::new(U1FusionRule),
         [
             (U1Irrep::new(-1), 1),
             (U1Irrep::new(0), 2),
@@ -354,7 +355,7 @@ fn u1_dense_order_matches_tensorkit_for_dual_and_bent_legs() {
     .unwrap();
     let dual = v.try_dual().unwrap();
     let label = |q: &U1Irrep| f64::from(q.charge());
-    let real = TensorMap::<U1FusionRule, f64>::from_block_fn(
+    let real = TensorMap::<U1FusionRule, f64>::from_subblock_fn(
         &runtime,
         [&v, &dual],
         [&dual, &v],
@@ -362,7 +363,7 @@ fn u1_dense_order_matches_tensorkit_for_dual_and_bent_legs() {
     )
     .unwrap();
     assert_matches_tensorkit!(real, "u1_real", |x| Complex64::new(x, 0.0));
-    let complex = TensorMap::<U1FusionRule, Complex64>::from_block_fn(
+    let complex = TensorMap::<U1FusionRule, Complex64>::from_subblock_fn(
         &runtime,
         [&v, &dual],
         [&dual, &v],
@@ -376,7 +377,7 @@ fn u1_dense_order_matches_tensorkit_for_dual_and_bent_legs() {
 fn su2_dense_order_matches_tensorkit_for_dual_and_bent_legs() {
     let runtime = Runtime::builder().build().unwrap();
     let w = GradedSpace::try_new(
-        SU2FusionRule,
+        std::sync::Arc::new(SU2FusionRule),
         [
             (SU2Irrep::from_twice_spin(0), 2),
             (SU2Irrep::from_twice_spin(1), 1),
@@ -386,7 +387,7 @@ fn su2_dense_order_matches_tensorkit_for_dual_and_bent_legs() {
     .unwrap();
     let dual = w.try_dual().unwrap();
     let label = |j: &SU2Irrep| j.twice_spin() as f64;
-    let real = TensorMap::<SU2FusionRule, f64>::from_block_fn(
+    let real = TensorMap::<SU2FusionRule, f64>::from_subblock_fn(
         &runtime,
         [&w, &dual, &w],
         [&dual],
@@ -394,7 +395,7 @@ fn su2_dense_order_matches_tensorkit_for_dual_and_bent_legs() {
     )
     .unwrap();
     assert_matches_tensorkit!(real, "su2_real", |x| Complex64::new(x, 0.0));
-    let complex = TensorMap::<SU2FusionRule, Complex64>::from_block_fn(
+    let complex = TensorMap::<SU2FusionRule, Complex64>::from_subblock_fn(
         &runtime,
         [&w, &dual, &w],
         [&dual],

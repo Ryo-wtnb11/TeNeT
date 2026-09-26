@@ -70,7 +70,7 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
     D: Payload,
 {
-    TensorMap::from_block_fn(
+    TensorMap::from_subblock_fn(
         runtime,
         codomain.iter().copied(),
         domain.iter().copied(),
@@ -92,7 +92,7 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
     D: Payload,
 {
-    let identity: TensorMap<R, D> = TensorMap::id(runtime, [space]).unwrap();
+    let identity: TensorMap<R, D> = TensorMap::isomorphism(runtime, [space], [space]).unwrap();
     let open = tensor.rank() - 2;
     let joint = tensor
         .contract(

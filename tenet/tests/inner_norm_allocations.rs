@@ -79,7 +79,7 @@ fn non_abelian_space() -> GradedSpace<Fz2U1Su2Rule> {
             SU2Irrep::from_twice_spin(twice_spin),
         )
     };
-    GradedSpace::try_new_with_arc(
+    GradedSpace::try_new(
         rule,
         [
             (label(0, -2, 0), 4),
@@ -411,15 +411,15 @@ fn warmed_checked_generic_reductions_do_not_allocate() {
     // and lazy-adjoint inputs alike.
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedToy);
-    let leg = GradedSpace::try_new_with_arc(
+    let leg = GradedSpace::try_new(
         Arc::clone(&provider),
         [(CheckedLabel::Vacuum, 1), (CheckedLabel::X, 2)],
     )
     .unwrap();
     let lhs: TensorMap<CheckedToy, Complex64> =
-        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], block_value).unwrap();
+        TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg, &leg], block_value).unwrap();
     let rhs: TensorMap<CheckedToy, Complex64> =
-        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, indices| {
+        TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, indices| {
             block_value::<Complex64>(trees, indices) * Complex64::new(0.5, -1.5)
         })
         .unwrap();
@@ -500,14 +500,14 @@ fn warmed_su3_checked_inner_and_norm_allocate_only_through_the_provider() {
 
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(SUNFusionRule::new(3).unwrap());
-    let leg = GradedSpace::try_new_with_arc(Arc::clone(&provider), [(vec![1, 0], 2)]).unwrap();
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(vec![1, 0], 2)]).unwrap();
     let lhs: TensorMap<SUNFusionRule, f64> =
-        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, indices| {
+        TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, indices| {
             trees.codomain_vertices()[0].get() as f64 + indices.iter().sum::<usize>() as f64
         })
         .unwrap();
     let rhs: TensorMap<SUNFusionRule, f64> =
-        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, indices| {
+        TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, indices| {
             2.0 * trees.domain_vertices()[0].get() as f64 - indices[0] as f64
         })
         .unwrap();
@@ -570,7 +570,7 @@ fn warmed_su3_checked_inner_and_norm_allocate_only_through_the_provider() {
 fn checked_generic_single_precision_norm_accumulates_wide() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedToy);
-    let leg = GradedSpace::try_new_with_arc(
+    let leg = GradedSpace::try_new(
         Arc::clone(&provider),
         [(CheckedLabel::Vacuum, 1), (CheckedLabel::X, 2)],
     )
@@ -582,22 +582,22 @@ fn checked_generic_single_precision_norm_accumulates_wide() {
         &[usize],
     ) -> Complex32| {
         let real32: TensorMap<CheckedToy, f32> =
-            TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, indices| {
+            TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, indices| {
                 value(trees, indices).re
             })
             .unwrap();
         let real64: TensorMap<CheckedToy, f64> =
-            TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, indices| {
+            TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, indices| {
                 f64::from(value(trees, indices).re)
             })
             .unwrap();
         let complex32: TensorMap<CheckedToy, Complex32> =
-            TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, indices| {
+            TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, indices| {
                 value(trees, indices)
             })
             .unwrap();
         let complex64: TensorMap<CheckedToy, Complex64> =
-            TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, indices| {
+            TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, indices| {
                 let z = value(trees, indices);
                 Complex64::new(z.re.into(), z.im.into())
             })

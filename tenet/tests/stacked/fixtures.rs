@@ -66,10 +66,15 @@ macro_rules! members {
         (0..$count)
             .map(|member: usize| {
                 let mut index = 1000 * member;
-                tenet::typed::TensorMap::<_, $d>::from_block_fn($runtime, [$a, $a], [$a], |_, _| {
-                    index += 1;
-                    <$d as fixtures::Payload>::value(index)
-                })
+                tenet::typed::TensorMap::<_, $d>::from_subblock_fn(
+                    $runtime,
+                    [$a, $a],
+                    [$a],
+                    |_, _| {
+                        index += 1;
+                        <$d as fixtures::Payload>::value(index)
+                    },
+                )
                 .unwrap()
             })
             .collect::<Vec<_>>()
@@ -86,26 +91,30 @@ macro_rules! for_each_symmetry {
         use tenet::typed::GradedSpace;
         $check!("U1", |variant: usize| {
             let q = U1Irrep::new;
-            GradedSpace::try_new(U1FusionRule, [(q(-1), 2), (q(0), 1 + variant), (q(1), 3)])
-                .unwrap()
+            GradedSpace::try_new(
+                Arc::new(U1FusionRule),
+                [(q(-1), 2), (q(0), 1 + variant), (q(1), 3)],
+            )
+            .unwrap()
         });
         $check!("SU2", |variant: usize| {
             let j = SU2Irrep::from_twice_spin;
-            GradedSpace::try_new(SU2FusionRule, [(j(0), 2), (j(1), 2 + variant), (j(2), 1)])
-                .unwrap()
+            GradedSpace::try_new(
+                Arc::new(SU2FusionRule),
+                [(j(0), 2), (j(1), 2 + variant), (j(2), 1)],
+            )
+            .unwrap()
         });
         $check!("fZ2xU1", |variant: usize| {
             let rule = Arc::new(Fz2U1Rule::new(FermionParityFusionRule, U1FusionRule));
             let even = |charge| product_sector(Z2Irrep::EVEN, U1Irrep::new(charge));
             let odd = |charge| product_sector(Z2Irrep::ODD, U1Irrep::new(charge));
-            GradedSpace::try_new_with_arc(rule, [(even(0), 2), (odd(1), 1 + variant), (odd(-1), 2)])
-                .unwrap()
+            GradedSpace::try_new(rule, [(even(0), 2), (odd(1), 1 + variant), (odd(-1), 2)]).unwrap()
         });
         #[cfg(feature = "racah-generated")]
         $check!("SU3 checked Generic", |variant: usize| {
             let rule = Arc::new(tenet::typed::SUNFusionRule::new(3).unwrap());
-            GradedSpace::try_new_with_arc(rule, [(vec![0i64, 0], 1), (vec![1, 1], 2 + variant)])
-                .unwrap()
+            GradedSpace::try_new(rule, [(vec![0i64, 0], 1), (vec![1, 1], 2 + variant)]).unwrap()
         });
     }};
 }
@@ -144,7 +153,7 @@ macro_rules! mixed_members {
         (0..$count)
             .map(|member: usize| {
                 let mut index = 1000 * member;
-                tenet::typed::TensorMap::<_, $d>::from_block_fn(
+                tenet::typed::TensorMap::<_, $d>::from_subblock_fn(
                     $runtime,
                     [$a, $dual],
                     [$a, $dual],
