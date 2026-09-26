@@ -679,6 +679,14 @@ impl<T> TreeTransformGroupPlan<T> {
         &self.specs
     }
 
+    /// Allocated spec slots, which a retaining cache charges: builders grow
+    /// the spec vector by extension, so it can exceed [`Self::specs`]'s length.
+    #[doc(hidden)]
+    #[inline]
+    pub fn spec_capacity(&self) -> usize {
+        self.specs.capacity()
+    }
+
     pub fn into_specs(self) -> Vec<TreeTransformGroupBlockSpec<T>> {
         self.specs
     }

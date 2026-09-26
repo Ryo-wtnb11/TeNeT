@@ -204,8 +204,7 @@ fn charged_plan_bytes<T>(plan: &TreeTransformGroupPlan<T>) -> usize {
     let mut bytes = core::mem::size_of::<TreeTransformGroupPlan<T>>()
         .saturating_add(ARC_CONTROL_BYTES)
         .saturating_add(
-            plan.specs()
-                .len()
+            plan.spec_capacity()
                 .saturating_mul(core::mem::size_of::<TreeTransformGroupBlockSpec<T>>()),
         );
     let mut coefficient_count = 0usize;
@@ -455,8 +454,8 @@ impl RuntimeTreeTransformCacheInfo {
         self.hits
     }
 
-    /// Lookups that found no entry. For the categorical tier this is the
-    /// number of plan rebuilds.
+    /// Lookups that found no entry. For the categorical tier each miss starts
+    /// one plan build, whether that build succeeds or returns an error.
     pub fn misses(self) -> usize {
         self.misses
     }
@@ -643,7 +642,8 @@ impl<T> RuntimeTreeTransformStore<T> {
         self.lock().structures.info()
     }
 
-    /// Categorical-plan tier activity; `misses` counts plan rebuilds.
+    /// Categorical-plan tier activity; `misses` counts attempted plan builds,
+    /// including builds that returned an error.
     pub fn plan_info(&self) -> RuntimeTreeTransformCacheInfo {
         self.lock().plans.info()
     }
@@ -2659,6 +2659,18 @@ mod runtime_store_tests {
             .unwrap();
         assert_eq!(oversized.plan_info().entries(), 0);
         assert_eq!(oversized.plan_info().admission_bypasses(), 1);
+    }
+
+    #[test]
+    fn plan_charge_covers_spare_spec_capacity() {
+        // What: the charge bounds allocated spec slots, not only used ones.
+        let spec = core::mem::size_of::<crate::TreeTransformGroupBlockSpec<f64>>();
+        let tight =
+            super::charged_plan_bytes(&crate::TreeTransformGroupPlan::<f64>::new(Vec::new()));
+        let slack = super::charged_plan_bytes(&crate::TreeTransformGroupPlan::<f64>::new(
+            Vec::with_capacity(8),
+        ));
+        assert!(slack >= tight + 8 * spec);
     }
 
     #[test]

@@ -1147,7 +1147,8 @@ impl Runtime {
     /// structures of source and destination, never on degeneracies, so a
     /// completed-structure miss caused only by new block dimensions (for
     /// example after a truncation) reuses it and compiles the layout alone.
-    /// `misses` counts plan rebuilds. Entry and byte limits are the same
+    /// `misses` counts attempted plan builds, including builds that returned an
+    /// error; a failed build is not retained. Entry and byte limits are the same
     /// configured values as [`Self::tree_transform_cache_info`], charged
     /// separately.
     pub fn tree_transform_plan_cache_info(&self) -> RuntimeTreeTransformCacheInfo {
