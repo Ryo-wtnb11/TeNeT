@@ -2100,7 +2100,8 @@ mod tests {
             .unwrap()
             .member(0)
             .unwrap();
-        let (_, eager_v) = members[0].to_cuda().unwrap().eigh_full().unwrap();
+        let crate::typed::Eigh { v: eager_v, .. } =
+            members[0].to_cuda().unwrap().eigh_full().unwrap();
         assert!(v.data() == eager_v.to_host().unwrap().data());
     }
 

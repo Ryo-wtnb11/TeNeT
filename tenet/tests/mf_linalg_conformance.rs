@@ -11,6 +11,7 @@ use tenet::core::{
     U1FusionRule, U1Irrep, U1SectorLayout, Z2Irrep, ZNFusionRule,
 };
 use tenet::prelude::{GradedSpace, Runtime, TensorMap, Truncation};
+use tenet::typed::{Eig, Eigh, LeftPolar, Lq, Qr, RightPolar, Svd};
 
 type Fz2SectorLayout = tenet::core::Fz2SectorLayout;
 type Fz2U1Codec = PackedProductCodec<Fz2SectorLayout, U1SectorLayout>;
@@ -93,14 +94,14 @@ macro_rules! factor_conformance {
             })
             .unwrap();
 
-        let (u, s, vh) = tall.svd_compact().unwrap();
+        let Svd { u, s, vh } = tall.svd_compact().unwrap();
         assert_provider!(provider; u, s, vh);
         assert_close!(&u.compose(&s).unwrap().compose(&vh).unwrap(), &tall);
-        let (u, s, vh) = tall.svd_full().unwrap();
+        let Svd { u, s, vh } = tall.svd_full().unwrap();
         assert_provider!(provider; u, s, vh);
         assert_close!(&u.compose(&s).unwrap().compose(&vh).unwrap(), &tall);
         // Truncated SVD: svd_compact -> diagview -> find_truncated -> restrict.
-        let (u, s, vh) = tall.svd_compact().unwrap();
+        let Svd { u, s, vh } = tall.svd_compact().unwrap();
         let found = s.domain()[0]
             .find_truncated(&s.diagview().unwrap(), &Truncation::rank(1))
             .unwrap();
@@ -127,23 +128,23 @@ macro_rules! factor_conformance {
             .sum();
         assert!((tall.norm().unwrap().powi(2) - weighted_norm_squared).abs() <= 1e-9);
 
-        let (q, r) = tall.qr_compact().unwrap();
+        let Qr { q, r } = tall.qr_compact().unwrap();
         assert_provider!(provider; q, r);
         assert_close!(&q.compose(&r).unwrap(), &tall);
         let id = TensorMap::id(&rt, q.domain().iter()).unwrap();
         assert_close!(&q.adjoint().unwrap().compose(&q).unwrap(), &id);
-        let (q, r) = tall.qr_full().unwrap();
+        let Qr { q, r } = tall.qr_full().unwrap();
         assert_provider!(provider; q, r);
         assert_close!(&q.compose(&r).unwrap(), &tall);
         let id = TensorMap::id(&rt, q.domain().iter()).unwrap();
         assert_close!(&q.adjoint().unwrap().compose(&q).unwrap(), &id);
 
-        let (l, q) = wide.lq_compact().unwrap();
+        let Lq { l, q } = wide.lq_compact().unwrap();
         assert_provider!(provider; l, q);
         assert_close!(&l.compose(&q).unwrap(), &wide);
         let id = TensorMap::id(&rt, q.codomain().iter()).unwrap();
         assert_close!(&q.compose(&q.adjoint().unwrap()).unwrap(), &id);
-        let (l, q) = wide.lq_full().unwrap();
+        let Lq { l, q } = wide.lq_full().unwrap();
         assert_provider!(provider; l, q);
         assert_close!(&l.compose(&q).unwrap(), &wide);
         let id = TensorMap::id(&rt, q.codomain().iter()).unwrap();
@@ -179,7 +180,7 @@ macro_rules! factor_conformance {
             &right_id
         );
 
-        let (w, p) = tall.left_polar().unwrap();
+        let LeftPolar { w, p } = tall.left_polar().unwrap();
         assert_provider!(provider; w, p);
         assert_close!(&w.compose(&p).unwrap(), &tall);
         let id = TensorMap::id(&rt, w.domain().iter()).unwrap();
@@ -191,7 +192,7 @@ macro_rules! factor_conformance {
             .iter()
             .flat_map(|s| &s.values)
             .all(|&x| x >= -1e-10));
-        let (p, w) = wide.right_polar().unwrap();
+        let RightPolar { p, wh: w } = wide.right_polar().unwrap();
         assert_provider!(provider; p, w);
         assert_close!(&p.compose(&w).unwrap(), &wide);
         let id = TensorMap::id(&rt, w.codomain().iter()).unwrap();
@@ -209,7 +210,7 @@ macro_rules! factor_conformance {
                 [[3.0, 1.0], [1.0, 3.0]][index[0]][index[1]]
             })
             .unwrap();
-        let (d, v) = h.eigh_full().unwrap();
+        let Eigh { d, v } = h.eigh_full().unwrap();
         assert_provider!(provider; d, v);
         assert_close!(
             &v.compose(&d)
@@ -243,7 +244,7 @@ macro_rules! factor_conformance {
                 [[3.0, 1.0], [0.0, 1.0]][index[0]][index[1]]
             })
             .unwrap();
-        let (d, v) = g.eig_full().unwrap();
+        let Eig { d, v } = g.eig_full().unwrap();
         assert_provider!(provider; d, v);
         assert_complex_close!(
             &v.compose(&d).unwrap().compose(&v.inv().unwrap()).unwrap(),

@@ -40,7 +40,7 @@ use tenet::core::{
 };
 use tenet::prelude::{Error, Runtime, TensorMap, Truncation};
 use tenet::typed::{
-    GradedSpace, LegSelection, SectorSpectrum, SpectrumMagnitude, TruncatedSelection,
+    Eigh, GradedSpace, LegSelection, SectorSpectrum, SpectrumMagnitude, Svd, TruncatedSelection,
 };
 
 #[path = "../../tests/support/numerics.rs"]
@@ -113,7 +113,7 @@ macro_rules! assert_svd_composition {
         let truncation: &Truncation = &$truncation;
         let case: &str = $case;
 
-        let (u, s, vh) = source.svd_compact().unwrap();
+        let Svd { u, s, vh } = source.svd_compact().unwrap();
         let bond = s.domain()[0].clone();
         let spectra = s.diagview().unwrap();
         let found = bond.find_truncated(&spectra, truncation).unwrap();
@@ -193,7 +193,7 @@ macro_rules! assert_eigh_composition {
         let truncation: &Truncation = &$truncation;
         let case: &str = $case;
 
-        let (d, v) = source.eigh_full().unwrap();
+        let Eigh { d, v } = source.eigh_full().unwrap();
         let bond = d.domain()[0].clone();
         let spectra = d.diagview().unwrap();
         let found = bond.find_truncated(&spectra, truncation).unwrap();
@@ -515,7 +515,7 @@ fn within_sector_ties_at_the_cut_keep_genuine_singular_pairs() {
     // exactly equal, so `Rank` has to cut inside a run of identical values.
     let leg = u1_leg(&[(0, 3), (1, 3)]);
     let source: TensorMap<_, f64> = TensorMap::id(&runtime(), [&leg]).unwrap().scale(2.5);
-    assert_every_value_is_the_same_bit_pattern!(source.svd_compact().unwrap().1);
+    assert_every_value_is_the_same_bit_pattern!(source.svd_compact().unwrap().s);
     for rank in [1usize, 2, 3, 4, 5] {
         assert_svd_composition!(
             source,
@@ -532,7 +532,7 @@ fn cross_sector_exact_ties_are_broken_in_tensorkit_sector_order() {
     // a multiple of the sector count lands on an exact cross-sector tie.
     let leg = u1_leg(&[(0, 3), (1, 3), (2, 3)]);
     let source: TensorMap<_, f64> = TensorMap::id(&runtime(), [&leg]).unwrap();
-    assert_every_value_is_the_same_bit_pattern!(source.svd_compact().unwrap().1);
+    assert_every_value_is_the_same_bit_pattern!(source.svd_compact().unwrap().s);
     for rank in 0..=9usize {
         assert_svd_composition!(
             source,
@@ -548,7 +548,7 @@ fn su2_cross_sector_exact_ties_are_broken_in_tensorkit_sector_order() {
     // Same, with dim(c) != 1: the weighted budget overflows mid-tie.
     let leg = su2_leg(&[(0, 2), (1, 2), (2, 2)]);
     let source: TensorMap<_, f64> = TensorMap::id(&runtime(), [&leg]).unwrap();
-    assert_every_value_is_the_same_bit_pattern!(source.svd_compact().unwrap().1);
+    assert_every_value_is_the_same_bit_pattern!(source.svd_compact().unwrap().s);
     for rank in 0..=12usize {
         assert_svd_composition!(
             source,
@@ -587,7 +587,7 @@ fn signed_cross_sector_eigenvalue_ties_are_broken_in_tensorkit_sector_order() {
     let magnitudes: Vec<f64> = source
         .eigh_full()
         .unwrap()
-        .0
+        .d
         .diagview()
         .unwrap()
         .iter()
@@ -617,7 +617,7 @@ fn find_truncated_ignores_the_order_the_spectra_arrive_in() {
     // cross-sector tie is where it would show if the sort were missing.
     let leg = u1_leg(&[(0, 3), (1, 3), (2, 3)]);
     let source: TensorMap<_, f64> = TensorMap::id(&runtime(), [&leg]).unwrap();
-    let (_, s, _) = source.svd_compact().unwrap();
+    let Svd { s, .. } = source.svd_compact().unwrap();
     let bond = s.domain()[0].clone();
     let canonical = s.diagview().unwrap();
     let mut reversed = canonical.clone();
@@ -696,7 +696,7 @@ fn discarding_everything_yields_the_empty_bond_and_empty_factors() {
     );
     assert!(!selection.is_full(), "an empty selection of a nonempty leg");
 
-    let (u, s, vh) = source.svd_compact().unwrap();
+    let Svd { u, s, vh } = source.svd_compact().unwrap();
     let got_u = u.restrict_leg(u.codomain_rank(), selection).unwrap();
     let got_s = s.restrict_diagonal(selection).unwrap();
     let got_vh = vh.restrict_leg(0, selection).unwrap();
@@ -715,7 +715,7 @@ fn a_no_op_decision_is_reported_as_full_and_copies_the_same_bits() {
     let mut state = 0xcccc_ddddu64;
     let source: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime(), [&leg], [&leg], move |_, _| fill(&mut state)).unwrap();
-    let (u, s, _) = source.svd_compact().unwrap();
+    let Svd { u, s, .. } = source.svd_compact().unwrap();
     let bond = s.domain()[0].clone();
     let found = bond
         .find_truncated(&s.diagview().unwrap(), &Truncation::Full)
@@ -752,7 +752,7 @@ fn diagview_reads_the_same_values_from_compact_and_dense_storage() {
     let mut state = 0xdddd_eeeeu64;
     let source: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&leg], [&leg], move |_, _| fill(&mut state)).unwrap();
-    let (_, s, _) = source.svd_compact().unwrap();
+    let Svd { s, .. } = source.svd_compact().unwrap();
     assert!(s.diagonal_spectrum().unwrap().is_some(), "s is compact");
     let compact = s.diagview().unwrap();
 
@@ -859,7 +859,7 @@ fn restrict_diagonal_keeps_a_compact_payload_compact() {
     let mut state = 0xeeee_ffffu64;
     let source: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime(), [&leg], [&leg], move |_, _| fill(&mut state)).unwrap();
-    let (_, s, _) = source.svd_compact().unwrap();
+    let Svd { s, .. } = source.svd_compact().unwrap();
     let bond = s.domain()[0].clone();
     let selection = LegSelection::try_new(&bond, [(U1Irrep::new(0), 0..2)]).unwrap();
     let restricted = s.restrict_diagonal(&selection).unwrap();
@@ -979,7 +979,7 @@ fn a_payload_generic_caller_can_name_the_find_truncated_bound() {
     let mut state = 7;
     let real: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| fill(&mut state)).unwrap();
-    let (_, s, _) = real.svd_compact().unwrap();
+    let Svd { s, .. } = real.svd_compact().unwrap();
     let found = find_truncated_generically(&s, &truncation);
     let want = assert_svd_composition!(real, truncation, Policy::Rank(2), "f64");
     assert_eq!(
@@ -994,7 +994,7 @@ fn a_payload_generic_caller_can_name_the_find_truncated_bound() {
             Complex64::new(fill(&mut state), fill(&mut state))
         })
         .unwrap();
-    let (_, s, _) = complex.svd_compact().unwrap();
+    let Svd { s, .. } = complex.svd_compact().unwrap();
     let found = find_truncated_generically(&s, &truncation);
     let want = assert_svd_composition!(complex, truncation, Policy::Rank(2), "c64");
     assert_eq!(

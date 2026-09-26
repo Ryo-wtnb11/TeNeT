@@ -21,7 +21,7 @@ use tenet::core::{
     Z2FusionRule, Z2Irrep, ZNFusionRule,
 };
 use tenet::prelude::{Runtime, TensorMap, Truncation};
-use tenet::typed::{GradedSpace, SectorSpectrum};
+use tenet::typed::{Eigh, GradedSpace, SectorSpectrum, Svd};
 
 /// Kept count per entry, in entry order, from `GradedSpace::find_truncated`.
 macro_rules! kept {
@@ -219,13 +219,13 @@ fn svd_and_eigh_truncation_keep_tensorkits_sector_at_a_tie() {
         GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(u1(0), 1), (u1(1), 1)]).unwrap();
     // The truncated factorizations are `*_full`/`svd_compact` -> `diagview` ->
     // `find_truncated` -> `restrict_*`; the kept bond is the restricted leg.
-    let (u, s, _) = source.svd_compact().unwrap();
+    let Svd { u, s, .. } = source.svd_compact().unwrap();
     let found = s.domain()[0]
         .find_truncated(&s.diagview().unwrap(), &Truncation::rank(2))
         .unwrap();
     let u = u.restrict_leg(u.codomain_rank(), &found.selection).unwrap();
     assert_eq!(u.domain()[0], expected);
-    let (d, _) = source.eigh_full().unwrap();
+    let Eigh { d, .. } = source.eigh_full().unwrap();
     let found = d.domain()[0]
         .find_truncated(&d.diagview().unwrap(), &Truncation::rank(2))
         .unwrap();

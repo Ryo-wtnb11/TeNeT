@@ -22,7 +22,7 @@ use tenet::core::{
     FermionParityFusionRule, SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep, Z2Irrep,
 };
 use tenet::prelude::{Runtime, TensorMap};
-use tenet::typed::GradedSpace;
+use tenet::typed::{Eig, GradedSpace};
 
 #[path = "../../tests/support/numerics.rs"]
 mod numerics;
@@ -78,7 +78,7 @@ macro_rules! assert_eig_composition {
         let case: &str = $case;
         let truncation: &tenet::prelude::Truncation = &$truncation;
 
-        let (d, v) = source.eig_full().unwrap();
+        let Eig { d, v } = source.eig_full().unwrap();
         let bond = d.domain()[0].clone();
         let spectra = d.diagview().unwrap();
         let found = bond.find_truncated(&spectra, truncation).unwrap();

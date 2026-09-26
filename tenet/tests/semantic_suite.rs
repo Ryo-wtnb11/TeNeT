@@ -16,7 +16,7 @@ use tenet::core::{
     Su2SectorLayout, U1FusionRule, U1Irrep, U1SectorLayout, Z2FusionRule, Z2Irrep,
 };
 use tenet::prelude::{Complex64, Runtime};
-use tenet::typed::{GradedSpace, TensorMap, Truncation};
+use tenet::typed::{GradedSpace, Qr, Svd, TensorMap, Truncation};
 
 type Fz2U1Codec = PackedProductCodec<Fz2SectorLayout, U1SectorLayout>;
 type Fz2U1Layout = ProductSectorLayout<Fz2SectorLayout, U1SectorLayout>;
@@ -644,7 +644,7 @@ fn svd_qr_reconstruction_random_spaces() {
                 continue;
             }
 
-            let (u, s, vh) = t.svd_compact().unwrap();
+            let Svd { u, s, vh } = t.svd_compact().unwrap();
             let recon = u.compose(&s).unwrap().compose(&vh).unwrap();
             let diff = recon.axpby(1.0, &t, -1.0).unwrap().norm().unwrap();
             assert!(
@@ -663,7 +663,7 @@ fn svd_qr_reconstruction_random_spaces() {
                 $name,
             );
 
-            let (q, r) = t.qr_compact().unwrap();
+            let Qr { q, r } = t.qr_compact().unwrap();
             let recon = q.compose(&r).unwrap();
             let diff = recon.axpby(1.0, &t, -1.0).unwrap().norm().unwrap();
             assert!(
@@ -796,7 +796,7 @@ fn weighted_rank_truncation_matches_tensorkit() {
                 .unwrap()
                 .compose(&a.compose(&b).unwrap())
                 .unwrap();
-            let (_, s, _) = e.svd_compact().unwrap();
+            let Svd { s, .. } = e.svd_compact().unwrap();
             let found = s.domain()[0]
                 .find_truncated(&s.diagview().unwrap(), &Truncation::rank(5))
                 .unwrap();

@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 
 use tenet::core::{TypedSectorAdmission, U1FusionRule, U1Irrep};
 use tenet::prelude::{GradedSpace, LegSelection, Runtime, TensorMap};
-use tenet::typed::{NetworkDegeneracyRestriction, StackedTensorMap};
+use tenet::typed::{NetworkDegeneracyRestriction, StackedTensorMap, Svd};
 
 const ZEROED_LOG_CAPACITY: usize = 64;
 
@@ -237,7 +237,7 @@ fn restrict_diagonal_measurement(scale: usize) -> Measurement {
     let leg = u1(&provider, &[(-1, 2 * scale), (0, 3 * scale)]);
     let source: TensorMap<_, f64> =
         TensorMap::rand_with_seed(&runtime, [&leg], [&leg], 47).unwrap();
-    let (_, s, _) = source.svd_compact().unwrap();
+    let Svd { s, .. } = source.svd_compact().unwrap();
     let bond = s.domain()[0].clone();
     let selection =
         LegSelection::try_new(&bond, [(U1Irrep::new(-1), 0..2), (U1Irrep::new(0), 0..3)]).unwrap();

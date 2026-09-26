@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use tenet::core::{FermionParityFusionRule, Z2Irrep};
 use tenet::prelude::Complex64;
-use tenet::typed::{GradedSpace, Runtime, TensorMap};
+use tenet::typed::{Eig, GradedSpace, Runtime, Svd, TensorMap};
 use tenet_network::tensor;
 
 /// FZ2 map `V <- V`, degeneracy 1, with `even`/`odd` block values — the exact
@@ -51,7 +51,7 @@ fn fz2_contractions_match_tensorkit() {
     let t = fz2_map(&rt, &v, 3.0, 2.0);
 
     // S from an SVD is a compact diagonal factor; singular values = |T| per sector.
-    let (_, s, _) = t.svd_compact().unwrap();
+    let Svd { s, .. } = t.svd_compact().unwrap();
     let sv = s.svd_vals().unwrap();
     for entry in &sv {
         let expect = if entry.sector == Z2Irrep::EVEN {
@@ -77,13 +77,13 @@ fn fz2_contractions_match_tensorkit() {
 
     // The SVD factor uses compact diagonal storage and must keep the same
     // ordinary trace without materializing its dense block matrices.
-    let (_, compact_d, _) = d.svd_compact().unwrap();
+    let Svd { s: compact_d, .. } = d.svd_compact().unwrap();
     let compact_ordinary = compact_d.tr().unwrap();
     assert!(
         (compact_ordinary - 5.0).abs() < 1e-12,
         "compact ordinary = {compact_ordinary}"
     );
-    let (_, compact_c64, _) = d.to_c64().svd_compact().unwrap();
+    let Svd { s: compact_c64, .. } = d.to_c64().svd_compact().unwrap();
     let compact_c64_ordinary = compact_c64.tr().unwrap();
     assert!(
         (compact_c64_ordinary - Complex64::new(5.0, 0.0)).norm() < 1e-12,
@@ -100,7 +100,7 @@ fn fz2_contractions_match_tensorkit() {
         }
     })
     .unwrap();
-    let (complex_d, _) = complex_source.eig_full().unwrap();
+    let Eig { d: complex_d, .. } = complex_source.eig_full().unwrap();
     let complex_trace = complex_d.tr().unwrap();
     let expected_complex_trace = Complex64::new(5.0, 5.0);
     assert!(

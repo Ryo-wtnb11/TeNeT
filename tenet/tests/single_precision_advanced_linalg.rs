@@ -23,6 +23,7 @@ use std::sync::Arc;
 use num_complex::{Complex32, Complex64};
 use tenet::core::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
 use tenet::prelude::{GradedSpace, SectorSpectrum, TensorMap, Truncation};
+use tenet::typed::{Eig, Svd};
 
 use single_precision_oracle::{
     assert_payloads_agree_scaled, assert_scalars_agree_scaled, fermion_su2_leg_with, minus_one,
@@ -243,8 +244,8 @@ macro_rules! advanced_checks {
         );
 
         // ---- sqrt of a diagonal bond tensor (dense and compact arms). ------
-        let (_, s, _) = h.svd_compact().unwrap();
-        let (_, wide_s, _) = wide_h.svd_compact().unwrap();
+        let Svd { s, .. } = h.svd_compact().unwrap();
+        let Svd { s: wide_s, .. } = wide_h.svd_compact().unwrap();
         let root = s.sqrt().unwrap();
         assert_payloads_agree_scaled(
             &format!("{name}: sqrt of a compact spectrum"),
@@ -283,8 +284,8 @@ macro_rules! advanced_checks {
         );
 
         // ---- General eig: factors in `D::Eig`, spectra `Complex64`. --------
-        let (d, v): (TensorMap<_, $eig>, TensorMap<_, $eig>) = a.eig_full().unwrap();
-        let (_, wide_v) = wide_a.eig_full().unwrap();
+        let Eig { d, v }: Eig<TensorMap<_, $eig>> = a.eig_full().unwrap();
+        let Eig { v: wide_v, .. } = wide_a.eig_full().unwrap();
         let kappa_v = measured_kappa!(&wide_v);
         let to_eig = $to_eig;
         let a_eig: TensorMap<_, $eig> = to_eig(&a);
@@ -325,7 +326,7 @@ macro_rules! advanced_checks {
             (d.restrict_diagonal(&found.selection).unwrap(), found.error)
         };
         let (wide_kept, wide_error) = {
-            let (wide_d, _) = wide_a.eig_full().unwrap();
+            let Eig { d: wide_d, .. } = wide_a.eig_full().unwrap();
             let found = wide_d.domain()[0]
                 .find_truncated(&wide_d.diagview().unwrap(), &Truncation::rank(2))
                 .unwrap();

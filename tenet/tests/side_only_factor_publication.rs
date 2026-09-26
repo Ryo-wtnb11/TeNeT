@@ -12,6 +12,7 @@ use tenet::core::{
     SU2Irrep, U1FusionRule, U1Irrep, U1SectorLayout, Z2Irrep,
 };
 use tenet::prelude::{GradedSpace, Runtime, TensorMap};
+use tenet::typed::{Lq, Qr, Svd};
 
 type Fz2U1Codec = PackedProductCodec<tenet::core::Fz2SectorLayout, U1SectorLayout>;
 type Fz2U1Rule = ProductFusionRule<FermionParityFusionRule, U1FusionRule, Fz2U1Codec>;
@@ -59,13 +60,13 @@ macro_rules! side_only_case {
             assert_close!(&u.compose(&adjoint).unwrap(), &outer);
         };
 
-        let (q, r) = t.qr_full().unwrap();
+        let Qr { q, r } = t.qr_full().unwrap();
         assert_close!(&q.compose(&r).unwrap(), &t);
         unitary(&q);
-        let (l, q) = t.lq_full().unwrap();
+        let Lq { l, q } = t.lq_full().unwrap();
         assert_close!(&l.compose(&q).unwrap(), &t);
         unitary(&q);
-        let (u, s, vh) = t.svd_full().unwrap();
+        let Svd { u, s, vh } = t.svd_full().unwrap();
         assert_close!(&u.compose(&s).unwrap().compose(&vh).unwrap(), &t);
         unitary(&u);
         unitary(&vh);
@@ -199,12 +200,12 @@ macro_rules! full_qr_lq_bond_case {
         };
         let t: TensorMap<_, $scalar> =
             TensorMap::rand_with_seed(rt, $codomain, $domain, $seed).unwrap();
-        let (q, r) = t.qr_full().unwrap();
+        let Qr { q, r } = t.qr_full().unwrap();
         assert_eq!(q.domain(), std::slice::from_ref($qr_bond));
         assert_eq!(r.codomain(), q.domain());
         assert_close!(&q.compose(&r).unwrap(), &t);
         unitary(&q, $qr_bond);
-        let (l, q) = t.lq_full().unwrap();
+        let Lq { l, q } = t.lq_full().unwrap();
         assert_eq!(q.codomain(), std::slice::from_ref($lq_bond));
         assert_eq!(l.domain(), q.codomain());
         assert_close!(&l.compose(&q).unwrap(), &t);
@@ -389,7 +390,7 @@ mod checked_generic {
             let reduced = |space: &GradedSpace<_>| space.degeneracies().iter().sum::<usize>();
             let t: TensorMap<_, $scalar> =
                 TensorMap::rand_with_seed(rt, $codomain, $domain, $seed).unwrap();
-            let (q, r) = t.qr_full().unwrap();
+            let Qr { q, r } = t.qr_full().unwrap();
             let qh = owned_adjoint(&q);
             assert_eq!(
                 assert_literal_identity!(qh.compose(&q).unwrap()),
@@ -400,7 +401,7 @@ mod checked_generic {
                 reduced($qr_bond)
             );
             let qr_trees = assert_side_only_identity_slices!($scalar, &t, &q, &r, $qr_bond, false);
-            let (l, q) = t.lq_full().unwrap();
+            let Lq { l, q } = t.lq_full().unwrap();
             let qh = owned_adjoint(&q);
             assert_eq!(
                 assert_literal_identity!(qh.compose(&q).unwrap()),

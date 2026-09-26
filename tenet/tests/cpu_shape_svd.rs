@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use tenet::core::{U1FusionRule, U1Irrep};
 use tenet::prelude::{Runtime, Truncation};
-use tenet::typed::{GradedSpace, TensorMap};
+use tenet::typed::{GradedSpace, Svd, TensorMap};
 
 #[test]
 fn truncated_svd_runtime_reuse_tracks_data_dependent_rank() {
@@ -26,7 +26,7 @@ fn truncated_svd_runtime_reuse_tracks_data_dependent_rank() {
                 }
             })
             .unwrap();
-        let (u, s, vh) = source.svd_compact().unwrap();
+        let Svd { u, s, vh } = source.svd_compact().unwrap();
         let found = s.domain()[0]
             .find_truncated(&s.diagview().unwrap(), &policy)
             .unwrap();

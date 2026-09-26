@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use tenet::core::{U1FusionRule, U1Irrep};
 use tenet::prelude::Runtime;
-use tenet::typed::{GradedSpace, TensorMap};
+use tenet::typed::{GradedSpace, Svd, TensorMap};
 
 struct CountingAllocator;
 
@@ -281,7 +281,7 @@ fn typed_truncated_svd_keeps_total_and_peak_below_materialized_baseline() {
     let truncation = tenet::typed::Truncation::rank(16);
     // The truncated SVD is `svd_compact` -> `find_truncated` -> `restrict_*`.
     let truncated_svd = |tensor: &TensorMap<U1FusionRule, num_complex::Complex64>| {
-        let (u, s, vh) = tensor.svd_compact().unwrap();
+        let Svd { u, s, vh } = tensor.svd_compact().unwrap();
         let found = s.domain()[0]
             .find_truncated(&s.diagview().unwrap(), &truncation)
             .unwrap();

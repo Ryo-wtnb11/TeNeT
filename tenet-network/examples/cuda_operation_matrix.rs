@@ -80,7 +80,7 @@ mod device {
     use tenet::dense::{cuda_transfer_stats, CudaTransferStats};
     use tenet::prelude::{Complex32, Complex64};
     use tenet::typed::{
-        CudaStorage, GradedSpace, Runtime, SpectrumMagnitude, TensorMap, Truncation,
+        CudaStorage, Eigh, GradedSpace, Qr, Runtime, SpectrumMagnitude, Svd, TensorMap, Truncation,
     };
     use tenet_network::tensor;
 
@@ -1134,7 +1134,7 @@ mod device {
             };
             match bench(config, "cold", || source_device.svd_compact(), barrier) {
                 Err(reason) => skip_row(label("svd_compact"), &reason),
-                Ok(((u, s, vh), device_rows)) => {
+                Ok((Svd { u, s, vh }, device_rows)) => {
                     let (_, host_rows) = bench(
                         config,
                         "cold",
@@ -1172,7 +1172,7 @@ mod device {
                 let _ = source_device.norm();
             };
             let composed = || -> Result<_, String> {
-                let (u, s, vh) = source_device.svd_compact().map_err(|e| e.to_string())?;
+                let Svd { u, s, vh } = source_device.svd_compact().map_err(|e| e.to_string())?;
                 let (u, s, vh) = (
                     u.to_host().map_err(|e| e.to_string())?,
                     s.to_host().map_err(|e| e.to_string())?,
@@ -1199,7 +1199,7 @@ mod device {
                         config,
                         "cold",
                         || {
-                            let (u, s, vh) = source.svd_compact().expect("Host svd_compact");
+                            let Svd { u, s, vh } = source.svd_compact().expect("Host svd_compact");
                             let found = s.domain()[0]
                                 .find_truncated(&s.diagview().expect("Host spectrum"), &truncation)
                                 .expect("Host find_truncated");
@@ -1250,7 +1250,7 @@ mod device {
                     };
                     match bench(config, "cold", || source_device.eigh_full(), barrier) {
                         Err(reason) => skip_row(label("eigh_full"), &reason),
-                        Ok(((d, v), device_rows)) => {
+                        Ok((Eigh { d, v }, device_rows)) => {
                             let (_, host_rows) = bench(
                                 config,
                                 "cold",
@@ -1357,7 +1357,7 @@ mod device {
         };
         match bench(config, "cold", || source_device.qr_compact(), barrier) {
             Err(reason) => skip_row(labels, &reason),
-            Ok(((q, r), device_rows)) => {
+            Ok((Qr { q, r }, device_rows)) => {
                 let (_, host_rows) = bench(
                     config,
                     "cold",

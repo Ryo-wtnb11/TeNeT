@@ -21,6 +21,7 @@ use crate::factorize::{
 };
 use crate::test_numerics::numerics;
 use crate::*;
+use crate::{LeftPolar, Lq, Qr, RightPolar, Svd};
 use num_complex::{Complex32, Complex64};
 use num_traits::Zero;
 use std::{cell::Cell, convert::Infallible, fmt, sync::Arc};
@@ -1395,7 +1396,7 @@ fn compact_lq_canonical_layout_uses_only_bounded_adjoint_copies() {
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
 
     crate::factorize::reset_compact_lq_copy_probe();
-    let (left, right) =
+    let Lq { l: left, q: right } =
         lq_compact(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor)).unwrap();
     let probe = crate::factorize::compact_lq_copy_probe();
 
@@ -1459,7 +1460,10 @@ fn compact_lq_append_proof_rejects_unordered_routes_and_fallback_matches_append(
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
     let input = bound.as_ref();
     crate::factorize::reset_compact_lq_copy_probe();
-    let (append_l, append_q) = lq_compact(&mut dense, &input).unwrap();
+    let Lq {
+        l: append_l,
+        q: append_q,
+    } = lq_compact(&mut dense, &input).unwrap();
     assert_eq!(
         crate::factorize::compact_lq_copy_probe().output_prefill_bytes,
         0
@@ -1468,7 +1472,10 @@ fn compact_lq_append_proof_rejects_unordered_routes_and_fallback_matches_append(
     crate::factorize::reset_compact_lq_copy_probe();
     let fallback = lq_compact(&mut dense, &input);
     crate::factorize::force_lq_zeroed_publication_for_test(false);
-    let (fallback_l, fallback_q) = fallback.unwrap();
+    let Lq {
+        l: fallback_l,
+        q: fallback_q,
+    } = fallback.unwrap();
     assert!(crate::factorize::compact_lq_copy_probe().output_prefill_bytes > 0);
     let bits = |data: &[f64]| data.iter().map(|value| value.to_bits()).collect::<Vec<_>>();
     assert_eq!(bits(fallback_l.data()), bits(append_l.data()));
@@ -2029,13 +2036,13 @@ fn provider_neutral_generic_factorizations_keep_the_strided_fallback() {
 
     let canonical_qr = qr_compact_dyn_generic(&mut dense, &canonical).unwrap();
     let padded_qr = qr_compact_dyn_generic(&mut dense, &padded).unwrap();
-    assert_generic_factor_close(&padded_qr.0, &canonical_qr.0);
-    assert_generic_factor_close(&padded_qr.1, &canonical_qr.1);
+    assert_generic_factor_close(&padded_qr.q, &canonical_qr.q);
+    assert_generic_factor_close(&padded_qr.r, &canonical_qr.r);
 
     let canonical_lq = lq_compact_dyn_generic(&mut dense, &canonical).unwrap();
     let padded_lq = lq_compact_dyn_generic(&mut dense, &padded).unwrap();
-    assert_generic_factor_close(&padded_lq.0, &canonical_lq.0);
-    assert_generic_factor_close(&padded_lq.1, &canonical_lq.1);
+    assert_generic_factor_close(&padded_lq.l, &canonical_lq.l);
+    assert_generic_factor_close(&padded_lq.q, &canonical_lq.q);
 }
 
 #[test]
@@ -2168,8 +2175,8 @@ fn generic_pair_publication_keeps_reordered_tree_scatter_fallback() {
     crate::factorize::reset_generic_pair_publication_probe();
     crate::factorize::reset_compact_qr_copy_probe();
     let actual_qr = qr_compact_dyn_generic(&mut dense, &reordered).unwrap();
-    assert!(!actual_qr.0.data().is_empty());
-    assert!(!actual_qr.1.data().is_empty());
+    assert!(!actual_qr.q.data().is_empty());
+    assert!(!actual_qr.r.data().is_empty());
     let probe = crate::factorize::generic_pair_publication_probe();
     assert_eq!(
         (probe.canonical_publications, probe.fallback_publications),
@@ -2184,14 +2191,14 @@ fn generic_pair_publication_keeps_reordered_tree_scatter_fallback() {
     );
     assert_eq!(
         qr_copy.output_scatter_bytes,
-        (actual_qr.0.data().len() + actual_qr.1.data().len()) * std::mem::size_of::<f64>()
+        (actual_qr.q.data().len() + actual_qr.r.data().len()) * std::mem::size_of::<f64>()
     );
 
     crate::factorize::reset_generic_pair_publication_probe();
     crate::factorize::reset_compact_lq_copy_probe();
     let actual_lq = lq_compact_dyn_generic(&mut dense, &reordered).unwrap();
-    assert!(!actual_lq.0.data().is_empty());
-    assert!(!actual_lq.1.data().is_empty());
+    assert!(!actual_lq.l.data().is_empty());
+    assert!(!actual_lq.q.data().is_empty());
     let probe = crate::factorize::generic_pair_publication_probe();
     assert_eq!(
         (probe.canonical_publications, probe.fallback_publications),
@@ -2206,7 +2213,7 @@ fn generic_pair_publication_keeps_reordered_tree_scatter_fallback() {
     );
     assert_eq!(
         lq_copy.output_scatter_bytes,
-        (actual_lq.0.data().len() + actual_lq.1.data().len()) * std::mem::size_of::<f64>()
+        (actual_lq.l.data().len() + actual_lq.q.data().len()) * std::mem::size_of::<f64>()
     );
 }
 
@@ -2218,7 +2225,7 @@ fn checked_generic_pair_publication_reuses_one_sector_owners() {
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
     crate::factorize::reset_generic_pair_publication_probe();
 
-    let (left, right) = qr_compact_dyn_checked_generic(&mut dense, &input).unwrap();
+    let Qr { q: left, r: right } = qr_compact_dyn_checked_generic(&mut dense, &input).unwrap();
 
     let probe = crate::factorize::generic_pair_publication_probe();
     let blocks = left.space().space().structure().block_count()
@@ -2364,10 +2371,10 @@ where
     crate::factorize::reset_one_sided_publication_probe();
 
     let qr = qr_compact_dyn_checked_generic(&mut dense, &input).unwrap();
-    assert_pair_reconstructs_checked_literal(&qr.0, &qr.1, complex);
+    assert_pair_reconstructs_checked_literal(&qr.q, &qr.r, complex);
     let qr_probe = crate::factorize::generic_pair_publication_probe();
-    let qr_blocks = qr.0.space().space().structure().block_count()
-        + qr.1.space().space().structure().block_count();
+    let qr_blocks = qr.q.space().space().structure().block_count()
+        + qr.r.space().space().structure().block_count();
     // Formerly `qr_blocks` visits and `2 * qr_blocks` events: the checked
     // route no longer cross-checks a separate key list against its structure.
     assert_eq!(qr_probe.output_blocks_visited, 0);
@@ -2378,11 +2385,11 @@ where
     );
     svd_compact_dyn_checked_generic(&mut dense, &input).unwrap();
     let lq = lq_compact_dyn_checked_generic(&mut dense, &input).unwrap();
-    assert_pair_reconstructs_checked_literal(&lq.0, &lq.1, complex);
+    assert_pair_reconstructs_checked_literal(&lq.l, &lq.q, complex);
     let full_qr = qr_full_dyn_checked_generic(&mut dense, &input).unwrap();
-    assert_pair_reconstructs_checked_literal(&full_qr.0, &full_qr.1, complex);
+    assert_pair_reconstructs_checked_literal(&full_qr.q, &full_qr.r, complex);
     let full_lq = lq_full_dyn_checked_generic(&mut dense, &input).unwrap();
-    assert_pair_reconstructs_checked_literal(&full_lq.0, &full_lq.1, complex);
+    assert_pair_reconstructs_checked_literal(&full_lq.l, &full_lq.q, complex);
 
     // Full QR/LQ publish each side through the side-aware builder (#1524).
     let one_sided = crate::factorize::one_sided_publication_probe();
@@ -2405,8 +2412,8 @@ where
         ),
         (0, 0)
     );
-    assert!(Arc::ptr_eq(qr.0.space().provider_arc(), &provider));
-    assert!(Arc::ptr_eq(qr.1.space().provider_arc(), &provider));
+    assert!(Arc::ptr_eq(qr.q.space().provider_arc(), &provider));
+    assert!(Arc::ptr_eq(qr.r.space().provider_arc(), &provider));
 }
 
 #[test]
@@ -3577,7 +3584,7 @@ fn assert_checked_compact_input_borrowing<D: FactorScalar>(
     crate::factorize::reset_checked_compact_input_observations();
     let mut qr = CompactInputSpy::new(crate::factorize::CheckedCompactOperation::Qr);
     let factors = qr_compact_dyn_checked_generic(&mut qr, &input).unwrap();
-    assert_compact_factors_reconstruct_input(&input, &factors.0, None, &factors.1);
+    assert_compact_factors_reconstruct_input(&input, &factors.q, None, &factors.r);
     assert_compact_input_observations(
         crate::factorize::CheckedCompactOperation::Qr,
         &qr.observations,
@@ -3593,7 +3600,7 @@ fn assert_checked_compact_input_borrowing<D: FactorScalar>(
     crate::factorize::reset_checked_compact_input_observations();
     let mut svd = CompactInputSpy::new(crate::factorize::CheckedCompactOperation::Svd);
     let factors = svd_compact_dyn_checked_generic(&mut svd, &input).unwrap();
-    assert_compact_factors_reconstruct_input(&input, &factors.0, Some(&factors.1), &factors.2);
+    assert_compact_factors_reconstruct_input(&input, &factors.u, Some(&factors.s), &factors.vh);
     assert_compact_input_observations(
         crate::factorize::CheckedCompactOperation::Svd,
         &svd.observations,
@@ -3609,7 +3616,7 @@ fn assert_checked_compact_input_borrowing<D: FactorScalar>(
     crate::factorize::reset_checked_compact_input_observations();
     let mut lq = CompactInputSpy::new(crate::factorize::CheckedCompactOperation::Lq);
     let factors = lq_compact_dyn_checked_generic(&mut lq, &input).unwrap();
-    assert_compact_factors_reconstruct_input(&input, &factors.0, None, &factors.1);
+    assert_compact_factors_reconstruct_input(&input, &factors.l, None, &factors.q);
     assert_compact_input_observations(
         crate::factorize::CheckedCompactOperation::Lq,
         &lq.observations,
@@ -3668,7 +3675,7 @@ fn checked_generic_compact_geometry_preserves_complete_multi_tree_identity() {
         &data,
         &regions,
     );
-    assert_compact_factors_reconstruct_input(&input, &qr_factors.0, None, &qr_factors.1);
+    assert_compact_factors_reconstruct_input(&input, &qr_factors.q, None, &qr_factors.r);
 
     crate::factorize::reset_checked_compact_input_observations();
     let mut svd = CompactInputSpy::new(crate::factorize::CheckedCompactOperation::Svd);
@@ -3681,9 +3688,9 @@ fn checked_generic_compact_geometry_preserves_complete_multi_tree_identity() {
     );
     assert_compact_factors_reconstruct_input(
         &input,
-        &svd_factors.0,
-        Some(&svd_factors.1),
-        &svd_factors.2,
+        &svd_factors.u,
+        Some(&svd_factors.s),
+        &svd_factors.vh,
     );
 
     crate::factorize::reset_checked_compact_input_observations();
@@ -3695,7 +3702,7 @@ fn checked_generic_compact_geometry_preserves_complete_multi_tree_identity() {
         &data,
         &regions,
     );
-    assert_compact_factors_reconstruct_input(&input, &lq_factors.0, None, &lq_factors.1);
+    assert_compact_factors_reconstruct_input(&input, &lq_factors.l, None, &lq_factors.q);
 }
 
 #[test]
@@ -3725,7 +3732,7 @@ fn checked_generic_compact_factors_keep_padded_reordered_input_pack() {
     crate::factorize::reset_compact_qr_copy_probe();
     crate::factorize::reset_checked_compact_input_observations();
     let actual_qr = qr_compact_dyn_checked_generic(&mut dense, &expert).unwrap();
-    assert_compact_factors_reconstruct_input(&expert, &actual_qr.0, None, &actual_qr.1);
+    assert_compact_factors_reconstruct_input(&expert, &actual_qr.q, None, &actual_qr.r);
     assert!(crate::factorize::compact_qr_copy_probe().input_pack_calls > 0);
 
     crate::factorize::reset_compact_svd_copy_probe();
@@ -3733,16 +3740,16 @@ fn checked_generic_compact_factors_keep_padded_reordered_input_pack() {
     let actual_svd = svd_compact_dyn_checked_generic(&mut dense, &expert).unwrap();
     assert_compact_factors_reconstruct_input(
         &expert,
-        &actual_svd.0,
-        Some(&actual_svd.1),
-        &actual_svd.2,
+        &actual_svd.u,
+        Some(&actual_svd.s),
+        &actual_svd.vh,
     );
     assert!(crate::factorize::compact_svd_copy_probe().input_pack_calls > 0);
 
     crate::factorize::reset_compact_lq_copy_probe();
     crate::factorize::reset_checked_compact_input_observations();
     let actual_lq = lq_compact_dyn_checked_generic(&mut dense, &expert).unwrap();
-    assert_compact_factors_reconstruct_input(&expert, &actual_lq.0, None, &actual_lq.1);
+    assert_compact_factors_reconstruct_input(&expert, &actual_lq.l, None, &actual_lq.q);
     let lq_probe = crate::factorize::compact_lq_copy_probe();
     assert!(lq_probe.input_pack_calls > 0);
     assert!(lq_probe.adjoint_scratch_fill_calls > 0);
@@ -3755,9 +3762,9 @@ fn checked_generic_compact_factors_keep_padded_reordered_input_pack() {
     }
     assert!(canonical_data == canonical_before);
     assert!(expert_data == expert_before);
-    assert!(Arc::ptr_eq(actual_qr.0.space().provider_arc(), &provider));
-    assert!(Arc::ptr_eq(actual_svd.1.space().provider_arc(), &provider));
-    assert!(Arc::ptr_eq(actual_lq.1.space().provider_arc(), &provider));
+    assert!(Arc::ptr_eq(actual_qr.q.space().provider_arc(), &provider));
+    assert!(Arc::ptr_eq(actual_svd.s.space().provider_arc(), &provider));
+    assert!(Arc::ptr_eq(actual_lq.q.space().provider_arc(), &provider));
 }
 
 #[test]
@@ -3810,7 +3817,7 @@ fn checked_generic_compact_interleaved_fallback_keeps_literal_matrix_order() {
             .collect::<Vec<_>>(),
         direct
     );
-    assert_compact_factors_reconstruct_input(&expert, &factors.0, None, &factors.1);
+    assert_compact_factors_reconstruct_input(&expert, &factors.q, None, &factors.r);
     assert!(crate::factorize::compact_qr_copy_probe().input_pack_calls > 0);
 
     crate::factorize::reset_compact_svd_copy_probe();
@@ -3823,7 +3830,7 @@ fn checked_generic_compact_interleaved_fallback_keeps_literal_matrix_order() {
             .collect::<Vec<_>>(),
         direct
     );
-    assert_compact_factors_reconstruct_input(&expert, &factors.0, Some(&factors.1), &factors.2);
+    assert_compact_factors_reconstruct_input(&expert, &factors.u, Some(&factors.s), &factors.vh);
     assert!(crate::factorize::compact_svd_copy_probe().input_pack_calls > 0);
 
     crate::factorize::reset_compact_lq_copy_probe();
@@ -3836,7 +3843,7 @@ fn checked_generic_compact_interleaved_fallback_keeps_literal_matrix_order() {
             .collect::<Vec<_>>(),
         adjoint
     );
-    assert_compact_factors_reconstruct_input(&expert, &factors.0, None, &factors.1);
+    assert_compact_factors_reconstruct_input(&expert, &factors.l, None, &factors.q);
     let probe = crate::factorize::compact_lq_copy_probe();
     assert!(probe.input_pack_calls > 0);
     assert!(probe.adjoint_scratch_fill_calls > 0);
@@ -4182,7 +4189,7 @@ where
     let (provider, space, data) = checked_svd_truncation_input::<D>(complex);
     let input = BoundDynamicTensorRef::try_new(&space, &data).unwrap();
     let mut dense = CountingDense::default();
-    let (u, s, vh) = svd_compact_dyn_checked_generic(&mut dense, &input).unwrap();
+    let Svd { u, s, vh } = svd_compact_dyn_checked_generic(&mut dense, &input).unwrap();
 
     assert_eq!(dense.svd_calls, 2);
     assert_eq!(dense.svd_into_calls, 0);
@@ -4315,7 +4322,7 @@ fn checked_generic_svd_compact_empty_input_skips_dense_execution() {
     let data = Vec::<f64>::new();
     let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
     let mut dense = CountingDense::default();
-    let (u, s, vh) = svd_compact_dyn_checked_generic(&mut dense, &input).unwrap();
+    let Svd { u, s, vh } = svd_compact_dyn_checked_generic(&mut dense, &input).unwrap();
 
     assert_eq!(dense.svd_calls, 0);
     assert_eq!(dense.svd_into_calls, 0);
@@ -4370,8 +4377,14 @@ fn checked_generic_polar_covers_scalar_maps() {
     let input = BoundDynamicTensorRef::try_new(&space, &data).unwrap();
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
 
-    let (left_w, left_p) = left_polar_dyn_checked_generic(&mut dense, &input).unwrap();
-    let (right_p, right_w) = right_polar_dyn_checked_generic(&mut dense, &input).unwrap();
+    let LeftPolar {
+        w: left_w,
+        p: left_p,
+    } = left_polar_dyn_checked_generic(&mut dense, &input).unwrap();
+    let RightPolar {
+        p: right_p,
+        wh: right_w,
+    } = right_polar_dyn_checked_generic(&mut dense, &input).unwrap();
     assert!(Arc::ptr_eq(left_w.space().provider_arc(), &provider));
     assert!(Arc::ptr_eq(left_p.space().provider_arc(), &provider));
     assert!((left_w.data()[0].abs() - 1.0).abs() < 1.0e-12);
@@ -5360,7 +5373,8 @@ fn checked_generic_compact_pair_builder_failure_preserves_provider_context() {
         BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
             .unwrap();
     let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
-    let (q, r) = qr_compact_dyn_checked_generic(&mut CountingDense::default(), &input).unwrap();
+    let Qr { q, r } =
+        qr_compact_dyn_checked_generic(&mut CountingDense::default(), &input).unwrap();
     assert_eq!(provider.calls.get(), COMPACT_PAIR_RIGHT_LAST_CALL);
     assert_eq!(checked_enumeration_calls(&q), COMPACT_PAIR_LEFT_LAST_CALL);
     assert_eq!(
@@ -6452,7 +6466,7 @@ fn compact_qr_uses_owned_executor_outputs_not_qr_into() {
     };
     let input = bound_tensor(Arc::new(rule), &tensor);
 
-    let (q, r) = qr_compact(&mut dense, &input.as_ref()).unwrap();
+    let Qr { q, r } = qr_compact(&mut dense, &input.as_ref()).unwrap();
 
     assert!(!dense.observed.is_empty());
     assert!(!q.data().is_empty());
@@ -6678,8 +6692,14 @@ fn compact_qr_factors_retain_each_callers_exact_provider_arc() {
     let second = bound_tensor(Arc::clone(&second_provider), &tensor);
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
 
-    let (first_q, first_r) = qr_compact(&mut dense, &first.as_ref()).unwrap();
-    let (second_q, second_r) = qr_compact(&mut dense, &second.as_ref()).unwrap();
+    let Qr {
+        q: first_q,
+        r: first_r,
+    } = qr_compact(&mut dense, &first.as_ref()).unwrap();
+    let Qr {
+        q: second_q,
+        r: second_r,
+    } = qr_compact(&mut dense, &second.as_ref()).unwrap();
 
     for factor in [&first_q, &first_r] {
         assert!(Arc::ptr_eq(factor.space().provider_arc(), &first_provider));
@@ -6714,8 +6734,14 @@ fn compact_lq_factors_retain_each_callers_exact_provider_arc() {
     let second = bound_tensor(Arc::clone(&second_provider), &tensor);
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
 
-    let (first_l, first_q) = lq_compact(&mut dense, &first.as_ref()).unwrap();
-    let (second_l, second_q) = lq_compact(&mut dense, &second.as_ref()).unwrap();
+    let Lq {
+        l: first_l,
+        q: first_q,
+    } = lq_compact(&mut dense, &first.as_ref()).unwrap();
+    let Lq {
+        l: second_l,
+        q: second_q,
+    } = lq_compact(&mut dense, &second.as_ref()).unwrap();
 
     for factor in [&first_l, &first_q] {
         assert!(Arc::ptr_eq(factor.space().provider_arc(), &first_provider));
@@ -6890,9 +6916,9 @@ fn compact_svd_qr_lq_direct_regions_follow_factor_order_for_reversed_sector_span
             .map(|region| region.coupled())
             .collect::<Vec<_>>()
     );
-    let (q, r) = qr_compact_dyn(&mut dense, &input).unwrap();
+    let Qr { q, r } = qr_compact_dyn(&mut dense, &input).unwrap();
     assert_compact_factors_reconstruct_input(&input, &q, None, &r);
-    let (l, q) = lq_compact_dyn(&mut dense, &input).unwrap();
+    let Lq { l, q } = lq_compact_dyn(&mut dense, &input).unwrap();
     assert_compact_factors_reconstruct_input(&input, &l, None, &q);
 
     let complex = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
@@ -7248,7 +7274,7 @@ fn assert_rectangular_direct_qr(rows: usize, cols: usize) {
     let tensor = rectangular_svd_tensor(rows, cols);
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
     crate::factorize::reset_compact_qr_copy_probe();
-    let (q, r) = qr_compact(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor)).unwrap();
+    let Qr { q, r } = qr_compact(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor)).unwrap();
     assert_factor_layout_matches_legacy_shapes(q.space());
     assert_factor_layout_matches_legacy_shapes(r.space());
     let probe = crate::factorize::compact_qr_copy_probe();
@@ -7310,7 +7336,7 @@ fn assert_rectangular_direct_lq(rows: usize, cols: usize) {
     let tensor = rectangular_svd_tensor(rows, cols);
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
     crate::factorize::reset_compact_lq_copy_probe();
-    let (left, right) =
+    let Lq { l: left, q: right } =
         lq_compact(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor)).unwrap();
     assert_factor_layout_matches_legacy_shapes(left.space());
     assert_factor_layout_matches_legacy_shapes(right.space());
@@ -7681,7 +7707,7 @@ fn compact_qr_c64_reconstructs_mixed_tall_and_wide_sectors_without_copies() {
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
     crate::factorize::reset_compact_qr_copy_probe();
 
-    let (q, r) = qr_compact(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor)).unwrap();
+    let Qr { q, r } = qr_compact(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor)).unwrap();
 
     let probe = crate::factorize::compact_qr_copy_probe();
     assert_eq!(probe.input_pack_bytes, 0);
@@ -7740,7 +7766,7 @@ fn compact_lq_c64_reconstructs_mixed_tall_and_wide_sectors_with_bounded_scratch(
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
     crate::factorize::reset_compact_lq_copy_probe();
 
-    let (left, right) =
+    let Lq { l: left, q: right } =
         lq_compact(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor)).unwrap();
 
     let probe = crate::factorize::compact_lq_copy_probe();
@@ -8197,12 +8223,12 @@ fn compact_factors_do_not_relabel_the_lowest_u1_sector() {
     }
     assert_matrix_product(tensor.data(), 3, 2, 2, svd.u.data(), &scaled_vh);
 
-    let (q, r) = qr_compact(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor)).unwrap();
+    let Qr { q, r } = qr_compact(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor)).unwrap();
     assert_eq!(q.tensor().space().dims(), &[3, 2]);
     assert_eq!(r.tensor().space().dims(), &[2, 2]);
     assert_matrix_product(tensor.data(), 3, 2, 2, q.data(), r.data());
 
-    let (l, q) = lq_compact(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor)).unwrap();
+    let Lq { l, q } = lq_compact(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor)).unwrap();
     assert_eq!(l.tensor().space().dims(), &[3, 2]);
     assert_eq!(q.tensor().space().dims(), &[2, 2]);
     assert_matrix_product(tensor.data(), 3, 2, 2, l.data(), q.data());
@@ -8278,7 +8304,7 @@ fn compact_factorizations_do_not_relabel_product_lowest_u1_sectors() {
     assert_eq!(svd.s.tensor().space().dims(), &[2, 2]);
     assert_eq!(svd.vh.tensor().space().dims(), &[2, 2]);
 
-    let (q, r) = qr_compact(
+    let Qr { q, r } = qr_compact(
         &mut dense,
         &bound_tensor_ref!(Arc::new(rule.clone()), &rectangular),
     )
@@ -8287,7 +8313,7 @@ fn compact_factorizations_do_not_relabel_product_lowest_u1_sectors() {
     assert_eq!(r.tensor().space().dims(), &[2, 2]);
     assert_matrix_product(rectangular.data(), 3, 2, 2, q.data(), r.data());
 
-    let (l, q) = lq_compact(
+    let Lq { l, q } = lq_compact(
         &mut dense,
         &bound_tensor_ref!(Arc::new(rule.clone()), &rectangular),
     )
@@ -8470,7 +8496,7 @@ fn leftorth_fusion_reconstructs_z2_and_su2_tensors() {
             let rule = Z2FusionRule;
             let tensor = tsvd_test_tensor(&rule, &sectors);
             let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
-            let (q, r) = qr_compact(
+            let Qr { q, r } = qr_compact(
                 &mut dense_executor,
                 &bound_tensor_ref!(Arc::new(rule), &tensor),
             )
@@ -8481,7 +8507,7 @@ fn leftorth_fusion_reconstructs_z2_and_su2_tensors() {
             let rule = SU2FusionRule;
             let tensor = tsvd_test_tensor(&rule, &sectors);
             let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
-            let (q, r) = qr_compact(
+            let Qr { q, r } = qr_compact(
                 &mut dense_executor,
                 &bound_tensor_ref!(Arc::new(rule), &tensor),
             )
@@ -8498,7 +8524,7 @@ where
 {
     let tensor = tsvd_test_tensor(rule, sectors);
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
-    let (q, r) = qr_compact(
+    let Qr { q, r } = qr_compact(
         &mut dense,
         &bound_tensor_ref!(Arc::new((*rule).clone()), &tensor),
     )
@@ -8549,7 +8575,7 @@ where
 {
     let tensor = tsvd_test_tensor(rule, sectors);
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
-    let (left, right) = lq_compact(
+    let Lq { l: left, q: right } = lq_compact(
         &mut dense,
         &bound_tensor_ref!(Arc::new((*rule).clone()), &tensor),
     )
@@ -8608,7 +8634,7 @@ fn rightorth_fusion_reconstructs_z2_and_su2_tensors() {
         let rule = Z2FusionRule;
         let tensor = tsvd_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
         let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
-        let (l, q) = lq_compact(
+        let Lq { l, q } = lq_compact(
             &mut dense_executor,
             &bound_tensor_ref!(Arc::new(rule), &tensor),
         )
@@ -8626,7 +8652,7 @@ fn rightorth_fusion_reconstructs_z2_and_su2_tensors() {
             ],
         );
         let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
-        let (l, q) = lq_compact(
+        let Lq { l, q } = lq_compact(
             &mut dense_executor,
             &bound_tensor_ref!(Arc::new(rule), &tensor),
         )
@@ -9369,7 +9395,7 @@ fn full_qr_and_lq_use_original_input_only_when_economy_q_is_full() {
     let input = input_ref.dynamic();
 
     let mut qr_dense = FullQrInputSpy::default();
-    let (q, r) = qr_full_dyn(&mut qr_dense, &input).unwrap();
+    let Qr { q, r } = qr_full_dyn(&mut qr_dense, &input).unwrap();
     assert_eq!(qr_dense.observations.len(), matrices.len());
     for (observation, (_, rows, cols, matrix)) in qr_dense.observations.iter().zip(matrices.iter())
     {
@@ -9384,7 +9410,7 @@ fn full_qr_and_lq_use_original_input_only_when_economy_q_is_full() {
     assert_compact_factors_reconstruct_input(&input, &q, None, &r);
 
     let mut lq_dense = FullQrInputSpy::default();
-    let (l, q) = lq_full_dyn(&mut lq_dense, &input).unwrap();
+    let Lq { l, q } = lq_full_dyn(&mut lq_dense, &input).unwrap();
     assert_eq!(lq_dense.observations.len(), matrices.len());
     for (observation, (_, rows, cols, matrix)) in lq_dense.observations.iter().zip(matrices.iter())
     {
@@ -9429,7 +9455,7 @@ fn assert_checked_full_qr_lq_inputs(
     let input = BoundDynamicTensorRef::try_new(&space, &data).unwrap();
 
     let mut qr_dense = FullQrInputSpy::default();
-    let (q, r) = qr_full_dyn_checked_generic(&mut qr_dense, &input).unwrap();
+    let Qr { q, r } = qr_full_dyn_checked_generic(&mut qr_dense, &input).unwrap();
     assert_eq!(qr_dense.observations.len(), matrices.len());
     for (observation, (rows, cols, matrix)) in qr_dense.observations.iter().zip(matrices.iter()) {
         assert_full_qr_observation(observation, matrix, *rows, *cols);
@@ -9439,7 +9465,7 @@ fn assert_checked_full_qr_lq_inputs(
     assert!(Arc::ptr_eq(r.space().provider_arc(), &provider));
 
     let mut lq_dense = FullQrInputSpy::default();
-    let (l, q) = lq_full_dyn_checked_generic(&mut lq_dense, &input).unwrap();
+    let Lq { l, q } = lq_full_dyn_checked_generic(&mut lq_dense, &input).unwrap();
     assert_eq!(lq_dense.observations.len(), matrices.len());
     for (observation, (rows, cols, matrix)) in lq_dense.observations.iter().zip(matrices.iter()) {
         let adjoint = adjoint_complex(matrix, *rows, *cols);
@@ -9478,13 +9504,13 @@ fn full_and_compact_qr_lq_match_for_rank_deficient_no_completion_shapes() {
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
     let compact = qr_compact_dyn(&mut dense, &wide_input).unwrap();
     let full = qr_full_dyn(&mut dense, &wide_input).unwrap();
-    assert_eq!(full.0.space().space(), compact.0.space().space());
-    assert_eq!(full.1.space().space(), compact.1.space().space());
-    numerics::assert_slices_close("full vs compact", full.0.data(), compact.0.data(), 3);
-    numerics::assert_slices_close("full vs compact", full.1.data(), compact.1.data(), 3);
-    assert_orthonormal_columns(&bound_factor_matrices(&full.0));
-    assert_nonnegative_diagonal(&bound_factor_matrices(&full.1));
-    assert_compact_factors_reconstruct_input(&wide_input, &full.0, None, &full.1);
+    assert_eq!(full.q.space().space(), compact.q.space().space());
+    assert_eq!(full.r.space().space(), compact.r.space().space());
+    numerics::assert_slices_close("full vs compact", full.q.data(), compact.q.data(), 3);
+    numerics::assert_slices_close("full vs compact", full.r.data(), compact.r.data(), 3);
+    assert_orthonormal_columns(&bound_factor_matrices(&full.q));
+    assert_nonnegative_diagonal(&bound_factor_matrices(&full.r));
+    assert_compact_factors_reconstruct_input(&wide_input, &full.q, None, &full.r);
 
     let tall = transposed_rectangular_tensor(&wide, 2, 3);
     let tall_input = bound_tensor(Arc::new(rule), &tall);
@@ -9492,13 +9518,13 @@ fn full_and_compact_qr_lq_match_for_rank_deficient_no_completion_shapes() {
     let tall_input = tall_input_ref.dynamic();
     let compact = lq_compact_dyn(&mut dense, &tall_input).unwrap();
     let full = lq_full_dyn(&mut dense, &tall_input).unwrap();
-    assert_eq!(full.0.space().space(), compact.0.space().space());
-    assert_eq!(full.1.space().space(), compact.1.space().space());
-    numerics::assert_slices_close("full vs compact", full.0.data(), compact.0.data(), 3);
-    numerics::assert_slices_close("full vs compact", full.1.data(), compact.1.data(), 3);
-    assert_nonnegative_diagonal(&bound_factor_matrices(&full.0));
-    assert_orthonormal_rows(&bound_factor_matrices(&full.1));
-    assert_compact_factors_reconstruct_input(&tall_input, &full.0, None, &full.1);
+    assert_eq!(full.l.space().space(), compact.l.space().space());
+    assert_eq!(full.q.space().space(), compact.q.space().space());
+    numerics::assert_slices_close("full vs compact", full.l.data(), compact.l.data(), 3);
+    numerics::assert_slices_close("full vs compact", full.q.data(), compact.q.data(), 3);
+    assert_nonnegative_diagonal(&bound_factor_matrices(&full.l));
+    assert_orthonormal_rows(&bound_factor_matrices(&full.q));
+    assert_compact_factors_reconstruct_input(&tall_input, &full.l, None, &full.q);
 }
 
 #[test]
@@ -9512,7 +9538,7 @@ fn qr_full_gives_square_unitary_and_reconstructs() {
         ],
     );
     let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
-    let (q, r) = qr_full(
+    let Qr { q, r } = qr_full(
         &mut dense_executor,
         &bound_tensor_ref!(Arc::new(rule), &tensor),
     )
@@ -9533,7 +9559,7 @@ fn lq_full_reconstructs() {
     let rule = Z2FusionRule;
     let tensor = tsvd_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
     let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
-    let (l, q) = lq_full(
+    let Lq { l, q } = lq_full(
         &mut dense_executor,
         &bound_tensor_ref!(Arc::new(rule), &tensor),
     )
@@ -10107,13 +10133,25 @@ fn full_factorizations_agree_with_compact_on_matching_square_support() {
     numerics::assert_slices_close("S", full.s.data(), compact.s.data(), 2);
     numerics::assert_slices_close("Vh", full.vh.data(), compact.vh.data(), 2);
 
-    let (q_compact, r_compact) = qr_compact(&mut dense, &input.as_ref()).unwrap();
-    let (q_full, r_full) = qr_full(&mut dense, &input.as_ref()).unwrap();
+    let Qr {
+        q: q_compact,
+        r: r_compact,
+    } = qr_compact(&mut dense, &input.as_ref()).unwrap();
+    let Qr {
+        q: q_full,
+        r: r_full,
+    } = qr_full(&mut dense, &input.as_ref()).unwrap();
     numerics::assert_slices_close("Q", q_full.data(), q_compact.data(), 2);
     numerics::assert_slices_close("R", r_full.data(), r_compact.data(), 2);
 
-    let (l_compact, q_compact) = lq_compact(&mut dense, &input.as_ref()).unwrap();
-    let (l_full, q_full) = lq_full(&mut dense, &input.as_ref()).unwrap();
+    let Lq {
+        l: l_compact,
+        q: q_compact,
+    } = lq_compact(&mut dense, &input.as_ref()).unwrap();
+    let Lq {
+        l: l_full,
+        q: q_full,
+    } = lq_full(&mut dense, &input.as_ref()).unwrap();
     numerics::assert_slices_close("L", l_full.data(), l_compact.data(), 2);
     numerics::assert_slices_close("Q", q_full.data(), q_compact.data(), 2);
 }
@@ -11279,7 +11317,7 @@ fn ordinary_factorizations_and_composition_inherit_lowered_layout_strategy() {
     for factor in [svd.u(), svd.s(), svd.vh()] {
         assert!(factor.space().prime_derived_homspace(&malformed).is_err());
     }
-    let (q, r) = qr_compact_dyn(&mut dense, &input).unwrap();
+    let Qr { q, r } = qr_compact_dyn(&mut dense, &input).unwrap();
     assert!(q.space().prime_derived_homspace(&malformed).is_err());
     assert!(r.space().prime_derived_homspace(&malformed).is_err());
     let eigh = eigh_full_dyn(&mut dense, &input).unwrap();
@@ -11306,8 +11344,14 @@ fn derived_matrix_functions_inherit_the_exact_provider_arc() {
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
     let mut context = default_context();
 
-    let (w_left, p_left) = left_polar_dyn(&mut dense, &mut context, &input).unwrap();
-    let (p_right, w_right) = right_polar_dyn(&mut dense, &mut context, &input).unwrap();
+    let LeftPolar {
+        w: w_left,
+        p: p_left,
+    } = left_polar_dyn(&mut dense, &mut context, &input).unwrap();
+    let RightPolar {
+        p: p_right,
+        wh: w_right,
+    } = right_polar_dyn(&mut dense, &mut context, &input).unwrap();
     let inverse = inv_dyn(&mut dense, &mut context, &input).unwrap();
     let pseudo_inverse = pinv_dyn(&mut dense, &mut context, &input, 1.0e-13).unwrap();
 
@@ -11334,7 +11378,7 @@ fn adjoint_composition_gives_the_identity_on_the_bond() {
         ],
     );
     let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
-    let (q, _) = qr_compact(
+    let Qr { q, .. } = qr_compact(
         &mut dense_executor,
         &bound_tensor_ref!(Arc::new(rule), &tensor),
     )
@@ -12925,7 +12969,10 @@ fn polar_decompositions_reconstruct_with_isometric_factors() {
     let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
     let mut context = default_context();
 
-    let (isometry, positive) = left_polar(
+    let LeftPolar {
+        w: isometry,
+        p: positive,
+    } = left_polar(
         &mut dense_executor,
         &mut context,
         &bound_tensor_ref!(Arc::new(rule), &tensor),
@@ -12937,7 +12984,10 @@ fn polar_decompositions_reconstruct_with_isometric_factors() {
     let unit = crate::compose::compose(&mut context, &rule, &wh, &isometry).unwrap();
     assert_identity_matrices(&dense_sector_matrices(2, &unit));
 
-    let (positive, isometry) = right_polar(
+    let RightPolar {
+        p: positive,
+        wh: isometry,
+    } = right_polar(
         &mut dense_executor,
         &mut context,
         &bound_tensor_ref!(Arc::new(rule), &tensor),
@@ -12961,12 +13011,14 @@ fn polar_rejects_wrong_rectangular_direction_before_dense_execution() {
                 &mut context,
                 &bound_tensor_ref!(Arc::new(rule), &tensor),
             )
+            .map(drop)
         } else {
             right_polar(
                 &mut dense,
                 &mut context,
                 &bound_tensor_ref!(Arc::new(rule), &tensor),
             )
+            .map(drop)
         };
 
         assert!(matches!(
@@ -13002,7 +13054,10 @@ fn assert_valid_unmatched_left_polar(tensor: &TensorMap<f64, 1, 1>) {
     let input = bound_tensor(Arc::clone(&provider), tensor);
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
     let mut context = default_context();
-    let (isometry, positive) = left_polar(&mut dense, &mut context, &input.as_ref()).unwrap();
+    let LeftPolar {
+        w: isometry,
+        p: positive,
+    } = left_polar(&mut dense, &mut context, &input.as_ref()).unwrap();
 
     assert!(Arc::ptr_eq(isometry.space().provider_arc(), &provider));
     assert!(Arc::ptr_eq(positive.space().provider_arc(), &provider));
@@ -13021,7 +13076,10 @@ fn assert_valid_unmatched_right_polar(tensor: &TensorMap<f64, 1, 1>) {
     let input = bound_tensor(Arc::clone(&provider), tensor);
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
     let mut context = default_context();
-    let (positive, isometry) = right_polar(&mut dense, &mut context, &input.as_ref()).unwrap();
+    let RightPolar {
+        p: positive,
+        wh: isometry,
+    } = right_polar(&mut dense, &mut context, &input.as_ref()).unwrap();
 
     assert!(Arc::ptr_eq(positive.space().provider_arc(), &provider));
     assert!(Arc::ptr_eq(isometry.space().provider_arc(), &provider));
@@ -13100,10 +13158,10 @@ fn polar_complete_dimension_preflight_handles_empty_sides_and_empty_products() {
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
     let mut context = default_context();
     let input = bound_tensor(Arc::new(rule), &scalar);
-    let (w, p) = left_polar(&mut dense, &mut context, &input.as_ref()).unwrap();
+    let LeftPolar { w, p } = left_polar(&mut dense, &mut context, &input.as_ref()).unwrap();
     assert_eq!(w.data(), &[1.0]);
     assert_eq!(p.data(), &[2.0]);
-    let (p, w) = right_polar(&mut dense, &mut context, &input.as_ref()).unwrap();
+    let RightPolar { p, wh: w } = right_polar(&mut dense, &mut context, &input.as_ref()).unwrap();
     assert_eq!(p.data(), &[2.0]);
     assert_eq!(w.data(), &[1.0]);
 }
@@ -13121,9 +13179,9 @@ fn polar_second_sector_failure_leaves_the_source_unchanged() {
         let mut context = default_context();
         crate::factorize::reset_compact_svd_copy_probe();
         let result = if left {
-            left_polar(&mut dense, &mut context, &input.as_ref())
+            left_polar(&mut dense, &mut context, &input.as_ref()).map(drop)
         } else {
-            right_polar(&mut dense, &mut context, &input.as_ref())
+            right_polar(&mut dense, &mut context, &input.as_ref()).map(drop)
         };
         assert!(matches!(result, Err(OperationError::Dense(_))));
         assert_eq!(dense.calls, 2);
@@ -13208,15 +13266,20 @@ fn polar_valid_direct_and_fallback_layouts_agree() {
 
         let (direct_first, direct_second, fallback_first, fallback_second) =
             if operation == "left_polar" {
-                let (direct_first, direct_second) = left_polar(
+                let LeftPolar {
+                    w: direct_first,
+                    p: direct_second,
+                } = left_polar(
                     &mut direct_dense,
                     &mut direct_context,
                     &direct_bound.as_ref(),
                 )
                 .unwrap();
-                let (fallback_first, fallback_second) =
-                    left_polar_dyn(&mut fallback_dense, &mut fallback_context, &fallback_input)
-                        .unwrap();
+                let LeftPolar {
+                    w: fallback_first,
+                    p: fallback_second,
+                } = left_polar_dyn(&mut fallback_dense, &mut fallback_context, &fallback_input)
+                    .unwrap();
                 (
                     direct_first.data().to_vec(),
                     direct_second.data().to_vec(),
@@ -13224,15 +13287,20 @@ fn polar_valid_direct_and_fallback_layouts_agree() {
                     fallback_second.data().to_vec(),
                 )
             } else {
-                let (direct_first, direct_second) = right_polar(
+                let RightPolar {
+                    p: direct_first,
+                    wh: direct_second,
+                } = right_polar(
                     &mut direct_dense,
                     &mut direct_context,
                     &direct_bound.as_ref(),
                 )
                 .unwrap();
-                let (fallback_first, fallback_second) =
-                    right_polar_dyn(&mut fallback_dense, &mut fallback_context, &fallback_input)
-                        .unwrap();
+                let RightPolar {
+                    p: fallback_first,
+                    wh: fallback_second,
+                } = right_polar_dyn(&mut fallback_dense, &mut fallback_context, &fallback_input)
+                    .unwrap();
                 (
                     direct_first.data().to_vec(),
                     direct_second.data().to_vec(),
@@ -13651,8 +13719,8 @@ fn qr_compact_positive_gauge_idempotent_on_isometry() {
             let tensor = tsvd_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
             let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
             let input = bound_tensor(Arc::new(rule), &tensor);
-            let (q, _) = qr_compact(&mut dense_executor, &input.as_ref()).unwrap();
-            let (q2, r2) = qr_compact(&mut dense_executor, &q.as_ref()).unwrap();
+            let Qr { q, .. } = qr_compact(&mut dense_executor, &input.as_ref()).unwrap();
+            let Qr { q: q2, r: r2 } = qr_compact(&mut dense_executor, &q.as_ref()).unwrap();
             assert_svd_blocks_match(&q, &q2);
             assert_identity_sector_matrices(&dense_sector_matrices(1, &r2));
         } else {
@@ -13666,8 +13734,8 @@ fn qr_compact_positive_gauge_idempotent_on_isometry() {
             );
             let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
             let input = bound_tensor(Arc::new(rule), &tensor);
-            let (q, _) = qr_compact(&mut dense_executor, &input.as_ref()).unwrap();
-            let (q2, r2) = qr_compact(&mut dense_executor, &q.as_ref()).unwrap();
+            let Qr { q, .. } = qr_compact(&mut dense_executor, &input.as_ref()).unwrap();
+            let Qr { q: q2, r: r2 } = qr_compact(&mut dense_executor, &q.as_ref()).unwrap();
             assert_svd_blocks_match(&q, &q2);
             assert_identity_sector_matrices(&dense_sector_matrices(1, &r2));
         }
@@ -13680,8 +13748,8 @@ fn lq_compact_positive_gauge_idempotent_on_isometry() {
     let tensor = tsvd_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
     let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
     let input = bound_tensor(Arc::new(rule), &tensor);
-    let (_, q) = lq_compact(&mut dense_executor, &input.as_ref()).unwrap();
-    let (l2, q2) = lq_compact(&mut dense_executor, &q.as_ref()).unwrap();
+    let Lq { q, .. } = lq_compact(&mut dense_executor, &input.as_ref()).unwrap();
+    let Lq { l: l2, q: q2 } = lq_compact(&mut dense_executor, &q.as_ref()).unwrap();
     assert_svd_blocks_match(&q, &q2);
     assert_identity_sector_matrices(&dense_sector_matrices(1, &l2));
 }
@@ -15415,7 +15483,7 @@ fn checked_generic_facade_layouts_take_the_direct_region_path() {
         crate::factorize::reset_generic_pair_publication_probe();
         crate::factorize::reset_compact_qr_copy_probe();
         let qr = qr_compact_dyn_checked_generic(&mut dense, &input).unwrap();
-        assert_compact_factors_reconstruct_input(&input, &qr.0, None, &qr.1);
+        assert_compact_factors_reconstruct_input(&input, &qr.q, None, &qr.r);
         assert_eq!(
             crate::factorize::compact_qr_copy_probe().input_pack_bytes,
             0
@@ -15423,7 +15491,7 @@ fn checked_generic_facade_layouts_take_the_direct_region_path() {
 
         crate::factorize::reset_compact_svd_copy_probe();
         let svd = svd_compact_dyn_checked_generic(&mut dense, &input).unwrap();
-        assert_compact_factors_reconstruct_input(&input, &svd.0, Some(&svd.1), &svd.2);
+        assert_compact_factors_reconstruct_input(&input, &svd.u, Some(&svd.s), &svd.vh);
         assert_eq!(
             crate::factorize::compact_svd_copy_probe().input_pack_bytes,
             0
@@ -15431,7 +15499,7 @@ fn checked_generic_facade_layouts_take_the_direct_region_path() {
 
         crate::factorize::reset_compact_lq_copy_probe();
         let lq = lq_compact_dyn_checked_generic(&mut dense, &input).unwrap();
-        assert_compact_factors_reconstruct_input(&input, &lq.0, None, &lq.1);
+        assert_compact_factors_reconstruct_input(&input, &lq.l, None, &lq.q);
         assert_eq!(
             crate::factorize::compact_lq_copy_probe().input_pack_bytes,
             0
@@ -15570,7 +15638,7 @@ fn checked_generic_mis_stacked_tiling_scatters_factors_and_refuses_eigenvalues()
     crate::factorize::reset_compact_qr_copy_probe();
     crate::factorize::reset_generic_pair_publication_probe();
     let qr = qr_compact_dyn_checked_generic(&mut dense, &input).unwrap();
-    assert_compact_factors_reconstruct_input(&input, &qr.0, None, &qr.1);
+    assert_compact_factors_reconstruct_input(&input, &qr.q, None, &qr.r);
     assert_eq!(
         crate::factorize::compact_qr_copy_probe().input_pack_bytes,
         0
@@ -15580,9 +15648,9 @@ fn checked_generic_mis_stacked_tiling_scatters_factors_and_refuses_eigenvalues()
         0
     );
     let svd = svd_compact_dyn_checked_generic(&mut dense, &input).unwrap();
-    assert_compact_factors_reconstruct_input(&input, &svd.0, Some(&svd.1), &svd.2);
+    assert_compact_factors_reconstruct_input(&input, &svd.u, Some(&svd.s), &svd.vh);
     let lq = lq_compact_dyn_checked_generic(&mut dense, &input).unwrap();
-    assert_compact_factors_reconstruct_input(&input, &lq.0, None, &lq.1);
+    assert_compact_factors_reconstruct_input(&input, &lq.l, None, &lq.q);
 
     let hermitian_input = BoundDynamicTensorRef::try_new(&space, &hermitian_data).unwrap();
     for (error, operation) in [
@@ -16072,10 +16140,10 @@ where
     // Why reconstruction only: QR of a column-permuted matrix is a different
     // factorization, so QR/LQ factors are not facade-comparable here.
     let actual = qr_compact_dyn(&mut dense, &input).unwrap();
-    assert_compact_factors_reconstruct_input(&input, &actual.0, None, &actual.1);
+    assert_compact_factors_reconstruct_input(&input, &actual.q, None, &actual.r);
 
     let actual = lq_compact_dyn(&mut dense, &input).unwrap();
-    assert_compact_factors_reconstruct_input(&input, &actual.0, None, &actual.1);
+    assert_compact_factors_reconstruct_input(&input, &actual.l, None, &actual.q);
 
     // Full factorizations publish through the one-sided tree-identity
     // scatter; their completion columns are not unique, so only
@@ -16083,9 +16151,9 @@ where
     let actual = svd_full_dyn(&mut dense, &input).unwrap();
     assert_compact_factors_reconstruct_input(&input, actual.u(), Some(actual.s()), actual.vh());
     let actual = qr_full_dyn(&mut dense, &input).unwrap();
-    assert_compact_factors_reconstruct_input(&input, &actual.0, None, &actual.1);
+    assert_compact_factors_reconstruct_input(&input, &actual.q, None, &actual.r);
     let actual = lq_full_dyn(&mut dense, &input).unwrap();
-    assert_compact_factors_reconstruct_input(&input, &actual.0, None, &actual.1);
+    assert_compact_factors_reconstruct_input(&input, &actual.l, None, &actual.q);
 }
 
 /// What: eigenvectors of a consistently reordered Hermitian or general
@@ -16135,8 +16203,8 @@ where
     let mut context = default_context();
     let expected = left_polar_dyn(&mut dense, &mut context, &facade).unwrap();
     let actual = left_polar_dyn(&mut dense, &mut context, &reordered).unwrap();
-    assert_factor_matches_facade("left_polar W", &expected.0, &actual.0);
-    assert_factor_matches_facade("left_polar P", &expected.1, &actual.1);
+    assert_factor_matches_facade("left_polar W", &expected.w, &actual.w);
+    assert_factor_matches_facade("left_polar P", &expected.p, &actual.p);
 
     assert_reordered_compact_factor_publication(Arc::clone(&provider), &general);
     let complex = TensorMap::<Complex64, 2, 2>::from_vec_with_fusion_space(
@@ -16291,9 +16359,9 @@ where
     let mut bits = Vec::new();
     let mut bytes = Vec::new();
     for input in [general, tall] {
-        let (q, r) = measured_into(&mut bytes, || qr_full_dyn(&mut dense, input).unwrap());
+        let Qr { q, r } = measured_into(&mut bytes, || qr_full_dyn(&mut dense, input).unwrap());
         bits.extend([scalar_bits(q.data()), scalar_bits(r.data())]);
-        let (l, q) = measured_into(&mut bytes, || lq_full_dyn(&mut dense, input).unwrap());
+        let Lq { l, q } = measured_into(&mut bytes, || lq_full_dyn(&mut dense, input).unwrap());
         bits.extend([scalar_bits(l.data()), scalar_bits(q.data())]);
         bits.push(scalar_bits(
             measured_into(&mut bytes, || left_null_dyn(&mut dense, input).unwrap()).data(),
@@ -16441,8 +16509,8 @@ where
         (mis_stacked.dynamic(), mis_stacked_hermitian.dynamic());
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
     let factor_bits = |dense: &mut tenet_dense::DefaultDenseExecutor| {
-        let (q, r) = qr_full_dyn(dense, &mis_stacked).unwrap();
-        let (l, lq) = lq_full_dyn(dense, &mis_stacked).unwrap();
+        let Qr { q, r } = qr_full_dyn(dense, &mis_stacked).unwrap();
+        let Lq { l, q: lq } = lq_full_dyn(dense, &mis_stacked).unwrap();
         let left = left_null_dyn(dense, &mis_stacked).unwrap();
         let right = right_null_dyn(dense, &mis_stacked).unwrap();
         let refusal = |error: Option<OperationError>| -> Result<(), OperationError> {
@@ -16504,11 +16572,11 @@ where
     let mut bits = Vec::new();
     let mut bytes = Vec::new();
     for input in [general, tall] {
-        let (q, r) = measured_into(&mut bytes, || {
+        let Qr { q, r } = measured_into(&mut bytes, || {
             qr_full_dyn_checked_generic(&mut dense, input).unwrap()
         });
         bits.extend([scalar_bits(q.data()), scalar_bits(r.data())]);
-        let (l, q) = measured_into(&mut bytes, || {
+        let Lq { l, q } = measured_into(&mut bytes, || {
             lq_full_dyn_checked_generic(&mut dense, input).unwrap()
         });
         bits.extend([scalar_bits(l.data()), scalar_bits(q.data())]);
@@ -16926,7 +16994,7 @@ fn checked_generic_svd_compact_enumerates_each_factor_layout_once() {
             .unwrap();
     let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
     let mut dense = CountingDense::default();
-    let (u, s, vh) = svd_compact_dyn_checked_generic(&mut dense, &input).unwrap();
+    let Svd { u, s, vh } = svd_compact_dyn_checked_generic(&mut dense, &input).unwrap();
     let compact_calls = provider.calls.get();
     assert!(s.data().len() > 1);
     assert_eq!(

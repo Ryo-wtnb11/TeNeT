@@ -183,10 +183,10 @@ fn typed_cat_materializes_a_compact_operand_exactly_once() {
             .unwrap();
     // Warm every layout cache with a throwaway spectrum factor, so the
     // measured handle below starts with warm layouts but a cold body cache.
-    let warmup: TensorMap<Z2FusionRule, f64> = tensor.svd_compact().unwrap().1;
+    let warmup: TensorMap<Z2FusionRule, f64> = tensor.svd_compact().unwrap().s;
     black_box(warmup.catdomain(&warmup).unwrap());
 
-    let s: TensorMap<Z2FusionRule, f64> = tensor.svd_compact().unwrap().1;
+    let s: TensorMap<Z2FusionRule, f64> = tensor.svd_compact().unwrap().s;
     let dense_payload = DEGENERACY * DEGENERACY * std::mem::size_of::<f64>();
     let output_payload = 2 * dense_payload;
 

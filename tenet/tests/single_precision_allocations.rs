@@ -25,6 +25,7 @@ use std::sync::Arc;
 
 use tenet::core::{U1FusionRule, U1Irrep};
 use tenet::prelude::{Complex32, Complex64, GradedSpace, Runtime, TensorMap, Truncation};
+use tenet::typed::{Qr, Svd};
 use tenet_matrixalgebra::FactorScalar;
 
 struct CountingAllocator;
@@ -236,8 +237,8 @@ macro_rules! measure_factorizations {
         let sequence = || {
             let tensor: TensorMap<U1FusionRule, $dtype> =
                 TensorMap::rand_with_seed($runtime, [space, space], [space], 7_502).unwrap();
-            let (q, r) = tensor.qr_compact().unwrap();
-            let (u, s, vh) = tensor.svd_compact().unwrap();
+            let Qr { q, r } = tensor.qr_compact().unwrap();
+            let Svd { u, s, vh } = tensor.svd_compact().unwrap();
             // The truncated SVD is a composition (#1534).
             let found = s.domain()[0]
                 .find_truncated(&s.diagview().unwrap(), &Truncation::rank(4))

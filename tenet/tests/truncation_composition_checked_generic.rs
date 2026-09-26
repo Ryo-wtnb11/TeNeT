@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use num_complex::{Complex32, Complex64};
 use tenet::prelude::{Runtime, TensorMap};
-use tenet::typed::{GradedSpace, SUNFusionRule};
+use tenet::typed::{Eig, Eigh, GradedSpace, SUNFusionRule, Svd};
 
 #[path = "../../tests/support/numerics.rs"]
 mod numerics;
@@ -111,7 +111,7 @@ macro_rules! assert_su3_svd_composition {
         let terms = source.data().len();
         for (name, truncation, policy) in policies!($target) {
             let case = format!("{} {name}", $tag);
-            let (u, s, vh) = source.svd_compact().unwrap();
+            let Svd { u, s, vh } = source.svd_compact().unwrap();
             assert!(
                 s.diagonal_spectrum().unwrap().is_none(),
                 "checked-Generic compact s is dense, which is what exercises diagview's strided arm"
@@ -181,7 +181,7 @@ macro_rules! assert_su3_eigh_composition {
         let terms = source.data().len();
         for (name, truncation, policy) in policies!($target) {
             let case = format!("{} {name}", $tag);
-            let (d, v) = source.eigh_full().unwrap();
+            let Eigh { d, v } = source.eigh_full().unwrap();
             let bond = d.domain()[0].clone();
             let found = bond
                 .find_truncated(&d.diagview().unwrap(), &truncation)
@@ -245,7 +245,7 @@ macro_rules! assert_su3_eig_composition {
         let terms = source.data().len();
         for (name, truncation, policy) in policies!($target) {
             let case = format!("{} {name}", $tag);
-            let (d, v) = source.eig_full().unwrap();
+            let Eig { d, v } = source.eig_full().unwrap();
             let bond = d.domain()[0].clone();
             let found = bond
                 .find_truncated(&d.diagview().unwrap(), &truncation)

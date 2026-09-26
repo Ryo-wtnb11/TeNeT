@@ -259,7 +259,7 @@ fn compact_norm_p_equals_the_dense_answer() {
     let (v, w) = typed_su2();
     let dense: TensorMap<SU2FusionRule, f64> =
         TensorMap::from_block_fn(&rt, [&v], [&w], |_, indices| real_fill(indices)).unwrap();
-    let s = dense.svd_compact().unwrap().1;
+    let s = dense.svd_compact().unwrap().s;
 
     // `0 * id + 1 * s` is a value-identical *dense* twin of `s`: `id` on the
     // bond space is dense, so the sum takes the dense route without disturbing

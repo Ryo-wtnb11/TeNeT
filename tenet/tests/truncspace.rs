@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use tenet::core::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
 use tenet::prelude::{Error, Runtime, Truncation};
-use tenet::typed::{GradedSpace, TensorMap};
+use tenet::typed::{GradedSpace, Svd, TensorMap};
 
 fn runtime() -> Runtime {
     Runtime::builder().dense_threads(1).build().unwrap()
@@ -56,7 +56,7 @@ where
         + tenet::core::CheckedFusionAlgebra
         + tenet::typed::SectorCodec,
 {
-    let (u, s, _) = source.svd_compact()?;
+    let Svd { u, s, .. } = source.svd_compact()?;
     let found = s.domain()[0].find_truncated(&s.diagview()?, truncation)?;
     Ok((
         u.restrict_leg(u.codomain_rank(), &found.selection)?,
@@ -121,7 +121,7 @@ fn typed_truncspace_clamps_a_request_longer_than_the_spectrum() {
         truncated_svd(&source, &Truncation::space(greedy.truncspace())).unwrap();
     let full = source.svd_compact().unwrap();
     let clamped_bond = &clamped.domain()[0];
-    let full_bond = &full.0.domain()[0];
+    let full_bond = &full.u.domain()[0];
 
     assert_eq!(
         clamped_bond.sectors().unwrap(),

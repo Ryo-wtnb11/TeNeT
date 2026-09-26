@@ -1061,10 +1061,10 @@ fn run_layout_generic_qr(
     let mut preflight_dense = DefaultDenseExecutor::new();
     let ordered_expected = qr_compact_dyn_generic(&mut preflight_dense, &ordered_input)?;
     let reordered_expected = qr_compact_dyn_generic(&mut preflight_dense, &reordered_input)?;
-    assert_layout_generic_factors_equal(&reordered_expected.0, &ordered_expected.0);
-    assert_layout_generic_factors_equal(&reordered_expected.1, &ordered_expected.1);
-    assert_layout_generic_qr_reconstructs(&ordered_expected.0, &ordered_expected.1);
-    assert_layout_generic_qr_reconstructs(&reordered_expected.0, &reordered_expected.1);
+    assert_layout_generic_factors_equal(&reordered_expected.q, &ordered_expected.q);
+    assert_layout_generic_factors_equal(&reordered_expected.r, &ordered_expected.r);
+    assert_layout_generic_qr_reconstructs(&ordered_expected.q, &ordered_expected.r);
+    assert_layout_generic_qr_reconstructs(&reordered_expected.q, &reordered_expected.r);
 
     println!(
         "# GenericLayout: qr_fixture_matrices=2 row_trees=2 col_trees=2 source_blocks=2 matrix_shapes={}x{},{}x{}",
@@ -1079,7 +1079,7 @@ fn run_layout_generic_qr(
     ] {
         let runtime = benchmark_runtime()?;
         let mut dense = DefaultDenseExecutor::new();
-        let (left, right) = bench(
+        let Qr { q: left, r: right } = bench(
             &runtime,
             symmetry,
             "qr_compact_generic_layout",
@@ -1368,19 +1368,19 @@ fn preflight_checked_compact_input<D: HarnessScalar>(
     let mut dense = DefaultDenseExecutor::new();
     let qr =
         qr_compact_dyn_checked_generic(&mut dense, input).map_err(checked_compact_example_error)?;
-    assert_checked_pair_reconstructs(&qr.0, &qr.1, sector_count);
-    assert_columns_orthonormal(&qr.0, sector_count);
+    assert_checked_pair_reconstructs(&qr.q, &qr.r, sector_count);
+    assert_columns_orthonormal(&qr.q, sector_count);
     drop(qr);
     let svd = svd_compact_dyn_checked_generic(&mut dense, input)
         .map_err(checked_compact_example_error)?;
-    assert_checked_svd_reconstructs(&svd.0, &svd.1, &svd.2, sector_count);
-    assert_columns_orthonormal(&svd.0, sector_count);
-    assert_rows_orthonormal(&svd.2, sector_count);
+    assert_checked_svd_reconstructs(&svd.u, &svd.s, &svd.vh, sector_count);
+    assert_columns_orthonormal(&svd.u, sector_count);
+    assert_rows_orthonormal(&svd.vh, sector_count);
     drop(svd);
     let lq =
         lq_compact_dyn_checked_generic(&mut dense, input).map_err(checked_compact_example_error)?;
-    assert_checked_pair_reconstructs(&lq.0, &lq.1, sector_count);
-    assert_rows_orthonormal(&lq.1, sector_count);
+    assert_checked_pair_reconstructs(&lq.l, &lq.q, sector_count);
+    assert_rows_orthonormal(&lq.q, sector_count);
     Ok(())
 }
 
@@ -1486,7 +1486,7 @@ fn run_checked_compact_input_fixture<D: HarnessScalar>(
                     .map_err(checked_compact_example_error)
             },
         )?;
-        assert_checked_pair_reconstructs(&qr.0, &qr.1, sector_count);
+        assert_checked_pair_reconstructs(&qr.q, &qr.r, sector_count);
         drop(qr);
         let svd = bench(
             &runtime,
@@ -1501,7 +1501,7 @@ fn run_checked_compact_input_fixture<D: HarnessScalar>(
                     .map_err(checked_compact_example_error)
             },
         )?;
-        assert_checked_svd_reconstructs(&svd.0, &svd.1, &svd.2, sector_count);
+        assert_checked_svd_reconstructs(&svd.u, &svd.s, &svd.vh, sector_count);
         drop(svd);
         let lq = bench(
             &runtime,
@@ -1516,7 +1516,7 @@ fn run_checked_compact_input_fixture<D: HarnessScalar>(
                     .map_err(checked_compact_example_error)
             },
         )?;
-        assert_checked_pair_reconstructs(&lq.0, &lq.1, sector_count);
+        assert_checked_pair_reconstructs(&lq.l, &lq.q, sector_count);
         drop(lq);
         assert_checked_source_unchanged(&fixture.data, &original);
 
@@ -2178,7 +2178,7 @@ fn run_checked_eig<D: HarnessScalar<Eig = Complex64>>(
         for selected in [&control_input, &changed_control_input] {
             let qr = qr_compact_dyn_checked_generic(&mut preflight, selected)
                 .map_err(checked_compact_example_error)?;
-            assert_checked_pair_reconstructs(&qr.0, &qr.1, sector_count);
+            assert_checked_pair_reconstructs(&qr.q, &qr.r, sector_count);
             drop(qr);
         }
         drop(preflight);
@@ -2286,7 +2286,7 @@ where
     let source = make(degeneracy)?;
     let changed_source = make(degeneracy + 1)?;
     for selected in [&source, &changed_source] {
-        let (d, v) = selected.eig_full()?;
+        let Eig { d, v } = selected.eig_full()?;
         assert_mf_eig(selected, &d, &v, sector_count)?;
         drop((d, v));
     }
@@ -2411,7 +2411,7 @@ fn run_checked_multitree_eig<D: HarnessScalar<Eig = Complex64>>(
             drop(eig);
             let qr = qr_compact_dyn_checked_generic(&mut preflight, selected)
                 .map_err(checked_compact_example_error)?;
-            assert_multitree_qr(selected, &qr.0, &qr.1, selected_degeneracy, sector_count);
+            assert_multitree_qr(selected, &qr.q, &qr.r, selected_degeneracy, sector_count);
             drop(qr);
         }
         drop(preflight);
@@ -2597,11 +2597,11 @@ fn run_full_qr_fixture<D: HarnessScalar>(
         for selected in [&input, &changed] {
             let qr = qr_full_dyn_checked_generic(&mut preflight_dense, selected)
                 .map_err(checked_compact_example_error)?;
-            assert_full_qr_lq(selected, &qr.0, &qr.1, "qr", sector_count);
+            assert_full_qr_lq(selected, &qr.q, &qr.r, "qr", sector_count);
             drop(qr);
             let lq = lq_full_dyn_checked_generic(&mut preflight_dense, selected)
                 .map_err(checked_compact_example_error)?;
-            assert_full_qr_lq(selected, &lq.0, &lq.1, "lq", sector_count);
+            assert_full_qr_lq(selected, &lq.l, &lq.q, "lq", sector_count);
             drop(lq);
         }
         drop(preflight_dense);
@@ -3171,7 +3171,7 @@ fn run_checked_sun(
                 );
             }
             8 => {
-                let (q, r) = bench(
+                let Qr { q, r } = bench(
                     &runtime,
                     symmetry,
                     operation,
