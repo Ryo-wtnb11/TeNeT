@@ -677,25 +677,47 @@ where
     R::Scalar:
         Copy + Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero + Send + Sync,
 {
-    let replay_src_structure = Arc::clone(&src_structure);
+    build_multiplicity_free_tree_pair_plan_after_capability_with_threads(
+        rule,
+        operation,
+        &dst_structure,
+        &src_structure,
+        threads,
+    )?
+    .compile_shared_structures_with_storage_conjugation(
+        dst_structure,
+        src_structure,
+        storage_conjugate,
+    )
+}
+
+/// The categorical half of
+/// [`compile_multiplicity_free_tree_pair_structure_after_capability_with_threads`]:
+/// source preflight, destination key proof and plan build. It reads only the
+/// rule, the operation and the two structures' block keys.
+pub(crate) fn build_multiplicity_free_tree_pair_plan_after_capability_with_threads<R>(
+    rule: &R,
+    operation: &TreeTransformOperation,
+    dst_structure: &BlockStructure,
+    src_structure: &BlockStructure,
+    threads: usize,
+) -> Result<TreeTransformGroupPlan<R::Scalar>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar:
+        Copy + Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero + Send + Sync,
+{
     let source_proof = validate_multiplicity_free_tree_pair_preflight_after_capability(
         rule,
         operation,
-        &src_structure,
+        src_structure,
     )?;
-    finish_multiplicity_free_tree_pair_structure(
-        source_proof,
-        operation,
-        dst_structure,
-        replay_src_structure,
-        storage_conjugate,
-        |source_proof, operation| {
-            build_tree_pair_transform_group_plan_validated_with_threads(
-                source_proof,
-                operation.clone(),
-                threads,
-            )
-        },
+    LocallyValidatedFusionTreeBlockStructure::try_new(rule, dst_structure)
+        .map_err(OperationError::from_core_preserving_context)?;
+    build_tree_pair_transform_group_plan_validated_with_threads(
+        &source_proof,
+        operation.clone(),
+        threads,
     )
 }
 

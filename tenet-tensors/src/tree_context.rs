@@ -244,11 +244,25 @@ where
     let replay = match cached {
         Some(replay) => replay,
         None => {
-            let plan = build_checked_generic_tree_pair_transform_group_plan_validated(
-                provider,
-                operation.clone(),
-                &source_proof,
-            )?;
+            let build = || {
+                build_checked_generic_tree_pair_transform_group_plan_validated(
+                    provider,
+                    operation.clone(),
+                    &source_proof,
+                )
+            };
+            let plan = match &runtime_store {
+                Some(store) => store.get_or_build_checked_generic_plan(
+                    identity.clone(),
+                    &operation,
+                    prepared.structure(),
+                    storage_source.structure(),
+                    logical_source_key,
+                    operand.storage_conjugate(),
+                    build,
+                )?,
+                None => Arc::new(build()?),
+            };
             if operand.storage_conjugate() {
                 let logical_to_storage_block = |logical_index| {
                     let logical_block = source.structure().block(logical_index)?;

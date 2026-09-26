@@ -1146,6 +1146,13 @@ pub struct FusionTreeGroupKey {
 }
 
 impl FusionTreeGroupKey {
+    /// Heap bytes of this group's shared backing slices, each counted once
+    /// across calls that share `seen`.
+    #[doc(hidden)]
+    pub fn charge_retained_backings(&self, seen: &mut rustc_hash::FxHashSet<usize>) -> usize {
+        charge_fusion_tree_group_key_backings(seen, self)
+    }
+
     pub fn new<Codomain, Domain, CodomainDual, DomainDual>(
         codomain_uncoupled: Codomain,
         domain_uncoupled: Domain,
@@ -1757,6 +1764,15 @@ where
 }
 
 impl FusionTreePairKey {
+    /// Heap bytes of this pair's shared backing slices, each counted once
+    /// across calls that share `seen`.
+    #[doc(hidden)]
+    pub fn charge_retained_backings(&self, seen: &mut rustc_hash::FxHashSet<usize>) -> usize {
+        charge_fusion_tree_key_backings(seen, &self.codomain_tree).saturating_add(
+            charge_fusion_tree_key_backings(seen, &self.domain_tree),
+        )
+    }
+
     /// Validate both trees and their shared coupled sector.
     ///
     /// # Provider-domain precondition
