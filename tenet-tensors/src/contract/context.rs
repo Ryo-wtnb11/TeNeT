@@ -608,6 +608,35 @@ where
         )
     }
 
+    /// Replays `replay` over stacked Host operands with this context's
+    /// contract backend: one batch submission for all members and jobs.
+    #[doc(hidden)]
+    pub fn execute_stacked_direct_host<SD, SL, SR>(
+        &mut self,
+        replay: &tenet_operations::stacked::StackedDirectReplay<C>,
+        dst: &mut tenet_operations::stacked::StackedStorageViewMut<'_, SD>,
+        lhs: &tenet_operations::stacked::StackedStorageView<'_, SL>,
+        rhs: &tenet_operations::stacked::StackedStorageView<'_, SR>,
+        zero_inactive: bool,
+    ) -> Result<(), OperationError>
+    where
+        SD: tenet_core::HostWritableStorage<D>,
+        SL: tenet_core::HostReadableStorage<D>,
+        SR: tenet_core::HostReadableStorage<D>,
+    {
+        replay.execute_host(
+            &mut crate::StridedHostKernelAdapter::default(),
+            &mut super::fusion_block::BackendRank2Gemm::<_, _, C>::new(
+                &mut self.contract_backend,
+                &mut self.contract_workspace,
+            ),
+            dst,
+            lhs,
+            rhs,
+            zero_inactive,
+        )
+    }
+
     #[cfg(test)]
     pub(crate) fn last_resolution_is_core(&self) -> bool {
         self.last_top_level_resolution_was_core
@@ -2799,6 +2828,26 @@ where
     DLhs: TensorStorage<D>,
     DRhs: TensorStorage<D>,
 {
+    compile_direct_composition_plan(dst_space, lhs, rhs, lhs_axes, rhs_axes)?
+        .execute_direct_on_storage_prezeroed(gemm, dst, lhs_storage, rhs_storage)
+}
+
+/// The fully-direct coupled-block plan of a twist-free storage composition:
+/// the plan [`tensorcompose_fusion_dyn_prelowered_direct_on_storage`]
+/// replays, compiled alone so a prepared handle can hold it. Any other plan
+/// is `UnsupportedTensorContractScope`.
+#[doc(hidden)]
+pub fn compile_direct_composition_plan<R>(
+    dst_space: &BoundDynamicFusionMapSpace<R>,
+    lhs: FusionOperand<'_>,
+    rhs: FusionOperand<'_>,
+    lhs_axes: &[usize],
+    rhs_axes: &[usize],
+) -> Result<Arc<tenet_operations::FusionBlockContractPlan<R::Scalar>>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseBlockScalar,
+{
     let rule = dst_space.provider();
     validate_fusion_contract_rule(
         rule,
@@ -2813,14 +2862,10 @@ where
         lhs.storage_conjugate(),
         rhs.storage_conjugate(),
     );
-    let plan =
-        try_compile_oriented_storage_composition_plan(rule, dst_space.space(), lhs, rhs, axes)?
-            .filter(|plan| plan.is_fully_direct())
-            .ok_or_else(|| {
-                OperationError::UnsupportedTensorContractScope {
-        message:
-            "storage-direct composition supports only canonical fully-direct oriented operands",
-    }
-            })?;
-    plan.execute_direct_on_storage_prezeroed(gemm, dst, lhs_storage, rhs_storage)
+    try_compile_oriented_storage_composition_plan(rule, dst_space.space(), lhs, rhs, axes)?
+        .filter(|plan| plan.is_fully_direct())
+        .ok_or(OperationError::UnsupportedTensorContractScope {
+            message:
+                "storage-direct composition supports only canonical fully-direct oriented operands",
+        })
 }

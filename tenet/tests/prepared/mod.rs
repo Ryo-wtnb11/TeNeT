@@ -1,0 +1,261 @@
+//! Shared fixtures and the independent oracle for the `PreparedCompose`
+//! gates (#1498, leaf L2 of #1287).
+//!
+//! Every fixture composes `A: V ⊗ V ← W` with `B: W ← V`. `W` lacks a sector
+//! of `V` that `V ⊗ V` reaches, so the destination `V ⊗ V ← V` has coupled
+//! sectors no member writes (inactive blocks), next to several active ones.
+//!
+//! The oracle never touches the plan under test: it reads the operands
+//! through the public block API and computes TensorKit `mul!` literally, per
+//! destination block `(X, Z)`, `Σ_Y A[X, Y] · B[Y, Z]` over fusion-tree keys
+//! and degeneracy indices, with zero for a block no `Y` reaches.
+
+#![allow(dead_code)]
+
+use std::collections::HashMap;
+use std::fmt::Debug;
+use std::sync::Arc;
+
+use tenet::core::{
+    product_sector, CheckedFusionAlgebra, FermionParityFusionRule, Fz2SectorLayout,
+    MultiplicityFreeRigidSymbols, PackedProductCodec, ProductFusionRule, SU2FusionRule, SU2Irrep,
+    SectorCodec, U1FusionRule, U1Irrep, U1SectorLayout, Z2Irrep,
+};
+use tenet::typed::{GradedSpace, Runtime, TensorMap};
+
+use crate::common::{for_each_index, Payload};
+
+pub type Fz2U1Rule = ProductFusionRule<
+    FermionParityFusionRule,
+    U1FusionRule,
+    PackedProductCodec<Fz2SectorLayout, U1SectorLayout>,
+>;
+
+pub fn u1_legs() -> (GradedSpace<U1FusionRule>, GradedSpace<U1FusionRule>) {
+    let q = U1Irrep::new;
+    (
+        GradedSpace::try_new(U1FusionRule, [(q(-1), 2), (q(0), 1), (q(1), 3)]).unwrap(),
+        GradedSpace::try_new(U1FusionRule, [(q(0), 2), (q(1), 1)]).unwrap(),
+    )
+}
+
+pub fn su2_legs() -> (GradedSpace<SU2FusionRule>, GradedSpace<SU2FusionRule>) {
+    let j = SU2Irrep::from_twice_spin;
+    (
+        GradedSpace::try_new(SU2FusionRule, [(j(0), 2), (j(1), 2), (j(2), 1)]).unwrap(),
+        GradedSpace::try_new(SU2FusionRule, [(j(0), 1), (j(2), 2)]).unwrap(),
+    )
+}
+
+pub fn fz2u1_legs() -> (GradedSpace<Fz2U1Rule>, GradedSpace<Fz2U1Rule>) {
+    let rule = Arc::new(Fz2U1Rule::new(FermionParityFusionRule, U1FusionRule));
+    let even = |charge| product_sector(Z2Irrep::EVEN, U1Irrep::new(charge));
+    let odd = |charge| product_sector(Z2Irrep::ODD, U1Irrep::new(charge));
+    (
+        GradedSpace::try_new_with_arc(Arc::clone(&rule), [(even(0), 2), (odd(1), 1), (odd(-1), 2)])
+            .unwrap(),
+        GradedSpace::try_new_with_arc(rule, [(even(0), 1), (odd(1), 2)]).unwrap(),
+    )
+}
+
+/// `count` tensors `codomain ← domain` with dyadic entries, distinct per
+/// member and per `salt`.
+pub fn members<R, D>(
+    runtime: &Runtime,
+    codomain: &[&GradedSpace<R>],
+    domain: &[&GradedSpace<R>],
+    count: usize,
+    salt: usize,
+) -> Vec<TensorMap<R, D>>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: Payload,
+{
+    (0..count)
+        .map(|member| {
+            let mut next = 1000 * member + 100 * salt;
+            TensorMap::from_block_fn(
+                runtime,
+                codomain.iter().copied(),
+                domain.iter().copied(),
+                |_, _| {
+                    next += 1;
+                    let real = ((next * 37) % 17) as f64 / 8.0 - 1.0;
+                    let imaginary = ((next * 11) % 13) as f64 / 16.0 - 0.375;
+                    D::entry(real, imaginary)
+                },
+            )
+            .unwrap()
+        })
+        .collect()
+}
+
+/// `count` tensors `codomain ← domain` filled with `value`.
+pub fn filled<R, D>(
+    runtime: &Runtime,
+    codomain: &[&GradedSpace<R>],
+    domain: &[&GradedSpace<R>],
+    count: usize,
+    value: D,
+) -> Vec<TensorMap<R, D>>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: Payload,
+{
+    (0..count)
+        .map(|_| {
+            TensorMap::from_block_fn(
+                runtime,
+                codomain.iter().copied(),
+                domain.iter().copied(),
+                |_, _| value,
+            )
+            .unwrap()
+        })
+        .collect()
+}
+
+fn tree_key<S: Debug>(
+    coupled: &S,
+    uncoupled: &[S],
+    innerlines: &[S],
+    vertices: &impl Debug,
+) -> String {
+    format!("{coupled:?}|{uncoupled:?}|{innerlines:?}|{vertices:?}")
+}
+
+/// Block `index` of `tensor` as its `(codomain key, domain key)` and a
+/// column-major `rows x cols` matrix, read through the block's own strides.
+fn block_matrix<R, D>(
+    tensor: &TensorMap<R, D>,
+    index: usize,
+) -> (String, String, usize, usize, Vec<D>)
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    R::Sector: Debug,
+    D: Payload,
+{
+    let trees = tensor.block_fusion_trees(index).unwrap();
+    let codomain = tree_key(
+        trees.coupled(),
+        trees.codomain_uncoupled(),
+        trees.codomain_innerlines(),
+        &trees.codomain_vertices(),
+    );
+    let domain = tree_key(
+        trees.coupled(),
+        trees.domain_uncoupled(),
+        trees.domain_innerlines(),
+        &trees.domain_vertices(),
+    );
+    let block = tensor.block(index).unwrap();
+    let nout = tensor.codomain_rank();
+    let rows: usize = block.shape()[..nout].iter().product();
+    let cols: usize = block.shape()[nout..].iter().product();
+    let data = tensor.data();
+    let mut matrix = Vec::with_capacity(rows * cols);
+    for_each_index(block.shape(), |index| {
+        let position = block.offset()
+            + index
+                .iter()
+                .zip(block.strides())
+                .map(|(i, s)| i * s)
+                .sum::<usize>();
+        matrix.push(data[position]);
+    });
+    (codomain, domain, rows, cols, matrix)
+}
+
+/// TensorKit `mul!(C, A, B)` per fusion-tree block, laid out like
+/// `template` (the destination's structure; its payload is not read).
+/// Also returns how many destination blocks no inner tree reaches.
+pub fn compose_oracle<R, D>(
+    a: &TensorMap<R, D>,
+    b: &TensorMap<R, D>,
+    template: &TensorMap<R, D>,
+) -> (Vec<D>, usize)
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    R::Sector: Debug,
+    D: Payload,
+{
+    let zero = D::entry(0.0, 0.0);
+    let a_blocks: Vec<_> = (0..a.block_count()).map(|i| block_matrix(a, i)).collect();
+    let mut b_by_rows: HashMap<String, Vec<_>> = HashMap::new();
+    for index in 0..b.block_count() {
+        let block = block_matrix(b, index);
+        b_by_rows.entry(block.0.clone()).or_default().push(block);
+    }
+    let mut out = vec![zero; template.data().len()];
+    let mut unreached = 0;
+    for index in 0..template.block_count() {
+        let (x, z, rows, cols, _) = block_matrix(template, index);
+        let mut product = vec![zero; rows * cols];
+        let mut reached = false;
+        for (ax, ay, a_rows, inner, a_matrix) in &a_blocks {
+            if *ax != x {
+                continue;
+            }
+            for (_, bz, b_inner, b_cols, b_matrix) in b_by_rows.get(ay).into_iter().flatten() {
+                if *bz != z {
+                    continue;
+                }
+                assert_eq!((*a_rows, *inner, *b_cols), (rows, *b_inner, cols));
+                reached = true;
+                for col in 0..cols {
+                    for k in 0..*inner {
+                        let factor = b_matrix[k + inner * col];
+                        for row in 0..rows {
+                            let term = mul(a_matrix[row + rows * k], factor);
+                            product[row + rows * col] = add(product[row + rows * col], term);
+                        }
+                    }
+                }
+            }
+        }
+        unreached += usize::from(!reached);
+        let block = template.block(index).unwrap();
+        let mut linear = 0;
+        for_each_index(block.shape(), |index| {
+            let position = block.offset()
+                + index
+                    .iter()
+                    .zip(block.strides())
+                    .map(|(i, s)| i * s)
+                    .sum::<usize>();
+            out[position] = product[linear];
+            linear += 1;
+        });
+    }
+    (out, unreached)
+}
+
+fn mul<D: Payload>(a: D, b: D) -> D {
+    let ((ar, ai), (br, bi)) = (a.parts(), b.parts());
+    D::entry(ar * br - ai * bi, ar * bi + ai * br)
+}
+
+fn add<D: Payload>(a: D, b: D) -> D {
+    let ((ar, ai), (br, bi)) = (a.parts(), b.parts());
+    D::entry(ar + br, ai + bi)
+}
+
+/// The `docs/testing_numerics.md` rule (`numerics::K`) elementwise, over the
+/// largest oracle magnitude; `terms` bounds the sum reaching one entry.
+#[track_caller]
+pub fn assert_close<D: Payload>(actual: &[D], expected: &[D], terms: usize, what: &str) {
+    assert_eq!(actual.len(), expected.len(), "{what}: length");
+    let scale = expected
+        .iter()
+        .map(|value| value.magnitude())
+        .fold(0.0_f64, f64::max);
+    assert!(scale > 0.0, "{what}: an all-zero oracle proves nothing");
+    let tolerance = crate::numerics::K * (terms.max(1) as f64).sqrt() * D::EPS * scale.max(1.0);
+    for (index, (&got, &want)) in actual.iter().zip(expected).enumerate() {
+        assert!(
+            got.distance(want) <= tolerance,
+            "{what} [{}]: element {index} is {got:?}, oracle {want:?} (tolerance {tolerance:e})",
+            D::NAME
+        );
+    }
+}

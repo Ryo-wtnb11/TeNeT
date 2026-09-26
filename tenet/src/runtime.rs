@@ -1361,7 +1361,7 @@ impl Runtime {
     /// another thread's panic into a panic in a cache-clear or a statistics
     /// read would be the worse contract.
     #[cfg(feature = "cuda")]
-    fn lease_cuda_for_maintenance(&self) -> Option<CudaLease<'_>> {
+    pub(crate) fn lease_cuda_for_maintenance(&self) -> Option<CudaLease<'_>> {
         self.inner.cuda.as_ref().map(|cuda| {
             let device = lock_device(cuda.device_lock);
             CudaLease {

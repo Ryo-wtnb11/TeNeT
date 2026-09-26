@@ -1088,9 +1088,35 @@ where
         Ok(())
     }
 
-    #[cfg(test)]
-    fn direct_batch(&self) -> &[Rank2GemmBatchJob] {
+    /// The direct GEMM jobs, one per active coupled sector, in plan order.
+    #[doc(hidden)]
+    pub fn direct_batch(&self) -> &[Rank2GemmBatchJob] {
         &self.direct_batch
+    }
+
+    /// The per-member payload lengths `[dst, lhs, rhs]` this plan's
+    /// structures require.
+    pub(crate) fn member_lens(&self) -> Result<[usize; 3], OperationError> {
+        let len = |structure: &BlockStructure| {
+            structure
+                .required_len()
+                .map_err(OperationError::from_core_preserving_context)
+        };
+        Ok([
+            len(&self.dst_structure)?,
+            len(&self.lhs_structure)?,
+            len(&self.rhs_structure)?,
+        ])
+    }
+
+    /// The preconditions of an unscaled identity-orientation direct replay:
+    /// every group direct, both operands untransformed, every job coefficient
+    /// one.
+    #[doc(hidden)]
+    pub fn require_identity_direct_replay(&self) -> Result<(), OperationError> {
+        self.require_fully_direct_storage()?;
+        self.require_identity_storage_ops()?;
+        self.require_unit_direct_batch_alpha()
     }
 
     fn require_fully_direct_storage(&self) -> Result<(), OperationError> {

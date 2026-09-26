@@ -13,11 +13,12 @@ use std::marker::PhantomData;
 
 use tenet_core::{Placement, TensorStorage};
 use tenet_dense::{
-    cuda_gemm_region_with_ops_into, cuda_matmul_region_into, cuda_widen, CudaDenseContext,
-    CudaDenseStorage, CudaScalar, MatrixOp,
+    cuda_gemm_region_batched_into, cuda_gemm_region_with_ops_into, cuda_matmul_region_into,
+    cuda_widen, CudaDenseContext, CudaDenseStorage, CudaScalar, MatrixOp,
 };
 
 use crate::fusion_replay::StorageGemm;
+use crate::stacked::{StackedStorageView, StackedStorageViewMut};
 use crate::OperationError;
 
 /// Flat device buffer of payload `D` usable as replay storage.
@@ -154,6 +155,73 @@ impl<D: CudaScalar> StorageGemm<D, CudaStorage<D>, CudaStorage<D>, CudaStorage<D
             rhs_op,
             alpha,
             D::ZERO,
+        )
+        .map_err(OperationError::Dense)
+    }
+}
+
+/// [`StorageGemm`] over member-strided device stacks: each plan job is one
+/// batched `dot_general` over all `B` members (see
+/// [`cuda_gemm_region_batched_into`]), so a replay submits one GEMM per job
+/// whatever `B` is.
+///
+/// Identity orientation and unit coefficients only: it does not implement the
+/// scaled entry, so a plan needing it is rejected before any job runs. It is
+/// the only seam that accepts the stacked views, so a stack never reaches
+/// [`CudaStorageGemm`], which would compute member 0 alone.
+#[doc(hidden)]
+pub struct CudaStackedStorageGemm<'a> {
+    ctx: &'a mut CudaDenseContext,
+}
+
+impl<'a> CudaStackedStorageGemm<'a> {
+    pub fn new(ctx: &'a mut CudaDenseContext) -> Self {
+        Self { ctx }
+    }
+}
+
+impl<D: CudaScalar>
+    StorageGemm<
+        D,
+        StackedStorageViewMut<'_, CudaStorage<D>>,
+        StackedStorageView<'_, CudaStorage<D>>,
+        StackedStorageView<'_, CudaStorage<D>>,
+    > for CudaStackedStorageGemm<'_>
+{
+    fn matmul_range_into(
+        &mut self,
+        dst: &mut StackedStorageViewMut<'_, CudaStorage<D>>,
+        dst_offset: usize,
+        lhs: &StackedStorageView<'_, CudaStorage<D>>,
+        lhs_offset: usize,
+        rhs: &StackedStorageView<'_, CudaStorage<D>>,
+        rhs_offset: usize,
+        rows: usize,
+        contracted: usize,
+        cols: usize,
+    ) -> Result<(), OperationError> {
+        let members = dst.members();
+        if lhs.members() != members || rhs.members() != members {
+            return Err(OperationError::InvalidArgument {
+                message: "stacked GEMM operands have different member counts",
+            });
+        }
+        let dst_stride = dst.member_stride();
+        cuda_gemm_region_batched_into::<D>(
+            self.ctx,
+            &mut dst.storage_mut().0,
+            dst_offset,
+            dst_stride,
+            &lhs.storage().0,
+            lhs_offset,
+            lhs.member_stride(),
+            &rhs.storage().0,
+            rhs_offset,
+            rhs.member_stride(),
+            rows,
+            contracted,
+            cols,
+            members,
         )
         .map_err(OperationError::Dense)
     }

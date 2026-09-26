@@ -11,11 +11,17 @@ use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use tenet_core::{BlockStructureContent, HomSpaceId, Placement, RuleIdentity, TensorStorage};
+use tenet_core::{
+    BlockStructureContent, CheckedFusionAlgebra, HomSpaceId, MultiplicityFreeRigidSymbols,
+    Placement, RuleIdentity, SectorCodec, TensorStorage,
+};
+use tenet_operations::stacked::{StackedDirectReplay, StackedStorageView, StackedStorageViewMut};
+use tenet_operations::FusionBlockContractPlan;
+use tenet_tensors::{zeroed_payload, FusionOperand};
 
 use super::{
-    owned_repr, BoundDynamicFusionMapSpace, Runtime, TensorMap, TypedData, TypedSectorAdmission,
-    TypedTensorBody, TypedTensorRepr,
+    owned_repr, BoundDynamicFusionMapSpace, Runtime, TensorMap, TensorScalar, TypedData,
+    TypedSectorAdmission, TypedTensorBody, TypedTensorRepr,
 };
 #[cfg(feature = "cuda")]
 use super::{CudaPayload, CudaStorage};
@@ -151,21 +157,31 @@ where
     /// Builds no new structure: it clones the shared hom-space and block
     /// structure handles and a weak Runtime handle.
     pub fn structure_signature(&self) -> StructureSignature {
-        let space = self.logical_space();
+        StructureSignature::of_space(self.logical_space(), self.placement(), &self.runtime)
+    }
+}
+
+impl StructureSignature {
+    /// The signature of a tensor over `space` with `placement` on `runtime`.
+    fn of_space<R: TypedSectorAdmission>(
+        space: &BoundDynamicFusionMapSpace<R>,
+        placement: Placement,
+        runtime: &Runtime,
+    ) -> Self {
         // Why the admission's identity first: it is the identity the layout
         // was validated against and clones without allocating, whereas
         // `typed_rule_identity` rebuilds canonical bytes for content-keyed
         // checked Generic providers. Every bound space carries one.
         let rule = match space.space().admission().rule_identity() {
             Some(identity) => identity.clone(),
-            None => TypedSectorAdmission::typed_rule_identity(self.provider()),
+            None => TypedSectorAdmission::typed_rule_identity(space.provider()),
         };
         StructureSignature {
             rule,
             homspace: space.space().homspace().id(),
             structure: space.space().structure().content_key(),
-            placement: self.placement(),
-            runtime: self.runtime.identity(),
+            placement,
+            runtime: runtime.identity(),
         }
     }
 }
@@ -301,6 +317,510 @@ where
             runtime: self.runtime.clone(),
             repr: owned_repr(TypedTensorBody::dense(self.space.clone(), data)),
         })
+    }
+}
+
+/// Composition `lhs · rhs` (TensorKit `mul!`) of every member pair of two
+/// stacks, prepared once for one pair of structure signatures (#1287).
+///
+/// Per member it is the eager [`TensorMap::compose`] of the same placement:
+/// the same destination space and the same fully-direct coupled-block plan,
+/// compiled once here instead of once per member and call. The member axis
+/// exists only as a dense stride: every coupled-sector GEMM of the plan runs
+/// once for all members.
+///
+/// - **CUDA**: one batched GEMM per coupled sector per call, independent of
+///   the member count `B`.
+/// - **Host**: one grouped GEMM submission per call over all `B × blocks`
+///   matrices, through the Runtime's dense backend.
+///
+/// The handle is an expert opt-in for repeated work over a stable `B`; the
+/// eager API stays primary. The caller owns the set of handles (one per
+/// signature pair); a stack of another signature is a typed error, never a
+/// silent re-plan.
+///
+/// # Supported scope
+///
+/// Identity orientation only: an adjoint operand must be materialized before
+/// it is packed. A composition whose plan is not the canonical fully-direct
+/// one (for example an expert-layer tiling whose tree stackings differ) is
+/// rejected by [`Self::new`] with the same
+/// `UnsupportedTensorContractScope` the eager device composition reports.
+///
+/// # Retained state and shared effects
+///
+/// The handle owns its output stack and the per-`B` job layout, reported by
+/// [`Self::retained_bytes`] and freed on drop. A change of `B` rebuilds them.
+/// On CUDA it also reserves its cuTENSOR plan entries in the device context's
+/// ledger at [`Self::new`] and returns them on drop (reported by
+/// `Runtime::cuda_plan_cache_stats`), and `execute_into` grows the context's
+/// shared zero template to the largest inactive block times `B`.
+pub struct PreparedCompose<R, D, S = Vec<D>> {
+    runtime: Runtime,
+    lhs: StructureSignature,
+    rhs: StructureSignature,
+    output_signature: StructureSignature,
+    space: BoundDynamicFusionMapSpace<R>,
+    plan: Arc<FusionBlockContractPlan<f64>>,
+    member_len: usize,
+    output: Option<StackedTensorMap<R, D, S>>,
+    /// Host only: the plan expanded over the current `B`.
+    replay: Option<StackedDirectReplay>,
+    #[cfg(feature = "cuda")]
+    device: DeviceComposeState,
+}
+
+#[cfg(feature = "cuda")]
+#[derive(Default)]
+struct DeviceComposeState {
+    /// The `B` the zero regions and the zero template were sized for.
+    members: usize,
+    /// Each inactive destination layout with a trailing member axis.
+    zero_regions: Vec<tenet_dense::CudaRegion>,
+    /// Plan entries this handle holds in the device context's ledger.
+    reserved_plan_entries: usize,
+}
+
+impl<R, D, S> PreparedCompose<R, D, S>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    S: TensorStorage<D>,
+{
+    /// Prepares the composition of stacks with `lhs`'s and `rhs`'s
+    /// signatures. Their payloads are not read, and `B` is not fixed.
+    ///
+    /// On a device placement it also reserves the handle's cuTENSOR plan
+    /// entries in the device context's ledger: one per distinct GEMM shape and
+    /// one per distinct inactive fill layout. The count does not depend on
+    /// `B`, so it is reserved once here and returned on drop.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::RuntimeMismatch`] and [`Error::PlacementMismatch`] for
+    /// operands of different Runtimes or placements; the eager composition's
+    /// structural errors for spaces that do not compose; and
+    /// `UnsupportedTensorContractScope` for a plan that is not fully direct.
+    pub fn new(
+        lhs: &StackedTensorMap<R, D, S>,
+        rhs: &StackedTensorMap<R, D, S>,
+    ) -> Result<Self, Error> {
+        #[cfg_attr(not(feature = "cuda"), allow(unused_mut))]
+        let mut handle = Self::prepare(lhs, rhs)?;
+        #[cfg(feature = "cuda")]
+        if let Placement::Cuda(_) = handle.output_signature.placement {
+            handle.reserve_plan_entries()?;
+        }
+        Ok(handle)
+    }
+
+    fn prepare(
+        lhs: &StackedTensorMap<R, D, S>,
+        rhs: &StackedTensorMap<R, D, S>,
+    ) -> Result<Self, Error> {
+        if !lhs.runtime.same_runtime(&rhs.runtime) {
+            return Err(Error::RuntimeMismatch);
+        }
+        let placement = lhs.signature.placement;
+        if rhs.signature.placement != placement {
+            return Err(Error::PlacementMismatch);
+        }
+        let lhs_space = lhs.space.space();
+        let rhs_space = rhs.space.space();
+        let lhs_axes: Vec<usize> = (lhs_space.nout()..lhs_space.nout() + lhs_space.nin()).collect();
+        let rhs_axes: Vec<usize> = (0..rhs_space.nout()).collect();
+        let space = BoundDynamicFusionMapSpace::contracted_multiplicity_free(
+            &lhs.space, &rhs.space, &lhs_axes, &rhs_axes,
+        )?;
+        let plan = tenet_tensors::compile_direct_composition_plan(
+            &space,
+            FusionOperand::direct(lhs_space),
+            FusionOperand::direct(rhs_space),
+            &lhs_axes,
+            &rhs_axes,
+        )?;
+        plan.require_identity_direct_replay()?;
+        Ok(Self {
+            runtime: lhs.runtime.clone(),
+            lhs: lhs.signature.clone(),
+            rhs: rhs.signature.clone(),
+            output_signature: StructureSignature::of_space(&space, placement, &lhs.runtime),
+            member_len: space.space().required_len()?,
+            space,
+            plan,
+            output: None,
+            replay: None,
+            #[cfg(feature = "cuda")]
+            device: DeviceComposeState::default(),
+        })
+    }
+
+    #[cfg(feature = "cuda")]
+    fn reserve_plan_entries(&mut self) -> Result<(), Error> {
+        let gemms = self
+            .plan
+            .direct_batch()
+            .iter()
+            .map(|job| (job.rows, job.contracted, job.cols))
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        let fills = self
+            .plan
+            .inactive_destination_regions()
+            .iter()
+            .map(|layout| (&layout.block.shape, &layout.block.strides))
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        self.device.reserved_plan_entries = self
+            .runtime
+            .lease_cuda()?
+            .reserve_plan_entries(gemms + fills)
+            .map_err(tenet_operations::OperationError::Dense)?;
+        Ok(())
+    }
+}
+
+impl<R, D, S> PreparedCompose<R, D, S> {
+    /// The signature of every output member.
+    pub fn output_signature(&self) -> &StructureSignature {
+        &self.output_signature
+    }
+
+    /// Moves the handle-owned output out; the next [`Self::execute`]
+    /// allocates a new one.
+    pub fn take_output(&mut self) -> Option<StackedTensorMap<R, D, S>> {
+        self.output.take()
+    }
+
+    /// Bytes the handle itself retains: the output payload (host or device)
+    /// and the host job layout. The shared plan and the context-level effects
+    /// (plan-entry reservation, zero template) are not included.
+    pub fn retained_bytes(&self) -> usize {
+        let output = self.output.as_ref().map_or(0, |output| {
+            output.members * output.member_len * std::mem::size_of::<D>()
+        });
+        let replay = self
+            .replay
+            .as_ref()
+            .map_or(0, StackedDirectReplay::retained_bytes);
+        #[cfg(feature = "cuda")]
+        let regions = self.device.zero_regions.capacity()
+            * std::mem::size_of::<tenet_dense::CudaRegion>()
+            + self
+                .device
+                .zero_regions
+                .iter()
+                .map(|region| 2 * region.dims().len() * std::mem::size_of::<usize>())
+                .sum::<usize>();
+        #[cfg(not(feature = "cuda"))]
+        let regions = 0;
+        output + replay + regions
+    }
+
+    /// Checks both operand stacks against the prepared signatures, O(1) per
+    /// stack, and returns their common member count.
+    fn check_operands(
+        &self,
+        lhs: &StackedTensorMap<R, D, S>,
+        rhs: &StackedTensorMap<R, D, S>,
+    ) -> Result<usize, Error> {
+        for (stack, expected) in [(lhs, &self.lhs), (rhs, &self.rhs)] {
+            if let Some(field) = expected.first_mismatch(&stack.signature) {
+                return Err(Error::BatchSignatureMismatch {
+                    member: None,
+                    field,
+                });
+            }
+        }
+        if lhs.members != rhs.members {
+            return Err(Error::InvalidArgument(format!(
+                "operand stacks hold {} and {} members",
+                lhs.members, rhs.members
+            )));
+        }
+        Ok(lhs.members)
+    }
+
+    /// Checks a caller destination against the output signature and `B`.
+    fn check_destination(
+        &self,
+        dst: &StackedTensorMap<R, D, S>,
+        members: usize,
+    ) -> Result<(), Error> {
+        if let Some(field) = self.output_signature.first_mismatch(&dst.signature) {
+            return Err(Error::BatchSignatureMismatch {
+                member: None,
+                field,
+            });
+        }
+        if dst.members != members {
+            return Err(Error::InvalidArgument(format!(
+                "destination stack holds {} members, operands {members}",
+                dst.members
+            )));
+        }
+        Ok(())
+    }
+
+    fn output_stack(&self, storage: S, members: usize) -> StackedTensorMap<R, D, S> {
+        StackedTensorMap {
+            runtime: self.runtime.clone(),
+            space: self.space.clone(),
+            signature: self.output_signature.clone(),
+            storage,
+            members,
+            member_len: self.member_len,
+            _payload: PhantomData,
+        }
+    }
+
+    fn payload_len(&self, members: usize) -> Result<usize, Error> {
+        self.member_len
+            .checked_mul(members)
+            .ok_or_else(|| Error::InvalidArgument("stacked payload length overflows usize".into()))
+    }
+}
+
+impl<R, D> PreparedCompose<R, D>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: TensorScalar,
+{
+    /// Composes every member pair into the handle-owned output and borrows
+    /// it.
+    ///
+    /// The output is allocated zeroed when absent or when `B` changes, and
+    /// warm calls allocate nothing: the destination blocks the plan never
+    /// writes stay zero, and every other block is overwritten.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::BatchSignatureMismatch`] with `member: None` for a stack of
+    /// another signature, and [`Error::InvalidArgument`] for operand stacks
+    /// of different member counts, all before any work. On any error the
+    /// handle-owned output is unspecified until the next successful call.
+    pub fn execute(
+        &mut self,
+        lhs: &StackedTensorMap<R, D>,
+        rhs: &StackedTensorMap<R, D>,
+    ) -> Result<&StackedTensorMap<R, D>, Error> {
+        let members = self.check_operands(lhs, rhs)?;
+        self.prepare_host_replay(members)?;
+        let mut output = match self
+            .output
+            .take()
+            .filter(|output| output.members == members)
+        {
+            Some(output) => output,
+            None => self.output_stack(zeroed_payload(self.payload_len(members)?), members),
+        };
+        let result = self.run_host(lhs, rhs, &mut output.storage, false);
+        let output = self.output.insert(output);
+        result.map(|()| &*output)
+    }
+
+    /// Composes every member pair into the caller's `dst`, overwriting it.
+    ///
+    /// `dst` must carry [`Self::output_signature`] and the operands' member
+    /// count. Its prior contents never reach the result: the blocks the plan
+    /// does not write are zero-filled on every call (one strided fill per
+    /// such block over all members).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::execute`], plus the same typed errors for `dst`. After an
+    /// error the contents of `dst` are unspecified.
+    pub fn execute_into(
+        &mut self,
+        lhs: &StackedTensorMap<R, D>,
+        rhs: &StackedTensorMap<R, D>,
+        dst: &mut StackedTensorMap<R, D>,
+    ) -> Result<(), Error> {
+        let members = self.check_operands(lhs, rhs)?;
+        self.check_destination(dst, members)?;
+        self.prepare_host_replay(members)?;
+        self.run_host(lhs, rhs, &mut dst.storage, true)
+    }
+
+    fn prepare_host_replay(&mut self, members: usize) -> Result<(), Error> {
+        if self
+            .replay
+            .as_ref()
+            .is_none_or(|replay| replay.members() != members)
+        {
+            self.replay = None;
+            self.replay = Some(StackedDirectReplay::new(Arc::clone(&self.plan), members)?);
+        }
+        Ok(())
+    }
+
+    fn run_host(
+        &self,
+        lhs: &StackedTensorMap<R, D>,
+        rhs: &StackedTensorMap<R, D>,
+        dst: &mut Vec<D>,
+        zero_inactive: bool,
+    ) -> Result<(), Error> {
+        let replay = self
+            .replay
+            .as_ref()
+            .ok_or_else(|| Error::InvalidArgument("host replay is not prepared".into()))?;
+        let members = replay.members();
+        let lhs =
+            StackedStorageView::new::<D>(&lhs.storage, lhs.member_len, members, lhs.member_len)?;
+        let rhs =
+            StackedStorageView::new::<D>(&rhs.storage, rhs.member_len, members, rhs.member_len)?;
+        let mut dst =
+            StackedStorageViewMut::new::<D>(dst, self.member_len, members, self.member_len)?;
+        let mut lease = self.runtime.lease_context()?;
+        lease
+            .context()
+            .multiplicity_free_lane::<D>()?
+            .execute_stacked_direct_host(replay, &mut dst, &lhs, &rhs, zero_inactive)?;
+        Ok(())
+    }
+}
+
+#[cfg(feature = "cuda")]
+impl<R, D> PreparedCompose<R, D, CudaStorage<D>>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: CudaPayload,
+{
+    /// The device form of the Host [`PreparedCompose::execute`]: one batched
+    /// GEMM per coupled sector, and no transfer on a warm call. A new or
+    /// changed `B` allocates the output with one zero upload, as the eager
+    /// composition initializes its output.
+    pub fn execute(
+        &mut self,
+        lhs: &StackedTensorMap<R, D, CudaStorage<D>>,
+        rhs: &StackedTensorMap<R, D, CudaStorage<D>>,
+    ) -> Result<&StackedTensorMap<R, D, CudaStorage<D>>, Error> {
+        let members = self.check_operands(lhs, rhs)?;
+        let len = self.payload_len(members)?;
+        let mut lease = self.runtime.lease_cuda()?;
+        let mut output = match self
+            .output
+            .take()
+            .filter(|output| output.members == members)
+        {
+            Some(output) => output,
+            None => {
+                let storage = CudaStorage::upload_owned(&lease, zeroed_payload(len))?;
+                self.output_stack(storage, members)
+            }
+        };
+        let result = self.run_cuda(&mut lease, lhs, rhs, &mut output.storage, false);
+        drop(lease);
+        let output = self.output.insert(output);
+        result.map(|()| &*output)
+    }
+
+    /// The device form of the Host [`PreparedCompose::execute_into`]: one
+    /// rank-2 zero fill (`[len, B]`) per inactive block per call, from the
+    /// context's zero template, which a new `B` grows once.
+    pub fn execute_into(
+        &mut self,
+        lhs: &StackedTensorMap<R, D, CudaStorage<D>>,
+        rhs: &StackedTensorMap<R, D, CudaStorage<D>>,
+        dst: &mut StackedTensorMap<R, D, CudaStorage<D>>,
+    ) -> Result<(), Error> {
+        let members = self.check_operands(lhs, rhs)?;
+        self.check_destination(dst, members)?;
+        // A second handle to the Runtime (one reference count) so the lease
+        // does not borrow `self` while the zero regions are rebuilt.
+        let runtime = self.runtime.clone();
+        let mut lease = runtime.lease_cuda()?;
+        self.prepare_zero_regions(&mut lease, members)?;
+        self.run_cuda(&mut lease, lhs, rhs, &mut dst.storage, true)
+    }
+
+    fn prepare_zero_regions(
+        &mut self,
+        ctx: &mut tenet_dense::CudaDenseContext,
+        members: usize,
+    ) -> Result<(), Error> {
+        if self.device.members == members {
+            return Ok(());
+        }
+        let mut regions = Vec::with_capacity(self.plan.inactive_destination_regions().len());
+        let mut largest = 0usize;
+        for layout in self.plan.inactive_destination_regions() {
+            let block = &layout.block;
+            let unsigned = |value: isize| {
+                usize::try_from(value).map_err(|_| {
+                    Error::InvalidArgument(
+                        "inactive destination layout has a negative stride".into(),
+                    )
+                })
+            };
+            let mut dims = block.shape.clone();
+            dims.push(members);
+            let mut strides = block
+                .strides
+                .iter()
+                .map(|&stride| unsigned(stride))
+                .collect::<Result<Vec<_>, _>>()?;
+            strides.push(self.member_len);
+            let region = tenet_dense::CudaRegion::new(dims, strides, unsigned(block.offset)?)
+                .map_err(tenet_operations::OperationError::Dense)?;
+            region
+                .validate_as_destination("prepared compose zero fill")
+                .map_err(tenet_operations::OperationError::Dense)?;
+            largest = largest.max(block.shape.iter().product::<usize>());
+            regions.push(region);
+        }
+        ctx.reserve_zero_template::<D>(
+            largest
+                .checked_mul(members)
+                .ok_or_else(|| Error::InvalidArgument("zero template length overflows".into()))?,
+        )
+        .map_err(tenet_operations::OperationError::Dense)?;
+        self.device.zero_regions = regions;
+        self.device.members = members;
+        Ok(())
+    }
+
+    fn run_cuda(
+        &self,
+        ctx: &mut tenet_dense::CudaDenseContext,
+        lhs: &StackedTensorMap<R, D, CudaStorage<D>>,
+        rhs: &StackedTensorMap<R, D, CudaStorage<D>>,
+        dst: &mut CudaStorage<D>,
+        zero_inactive: bool,
+    ) -> Result<(), Error> {
+        let members = lhs.members;
+        let lhs =
+            StackedStorageView::new::<D>(&lhs.storage, lhs.member_len, members, lhs.member_len)?;
+        let rhs =
+            StackedStorageView::new::<D>(&rhs.storage, rhs.member_len, members, rhs.member_len)?;
+        let mut dst =
+            StackedStorageViewMut::new::<D>(dst, self.member_len, members, self.member_len)?;
+        if zero_inactive {
+            for region in &self.device.zero_regions {
+                tenet_dense::cuda_region_zero::<D>(ctx, &mut dst.storage_mut().0, region)
+                    .map_err(tenet_operations::OperationError::Dense)?;
+            }
+        }
+        self.plan.execute_direct_on_storage_prezeroed(
+            &mut tenet_operations::cuda::CudaStackedStorageGemm::new(ctx),
+            &mut dst,
+            &lhs,
+            &rhs,
+        )?;
+        Ok(())
+    }
+}
+
+impl<R, D, S> Drop for PreparedCompose<R, D, S> {
+    /// Returns the ledger reservation through the poison-recovering device
+    /// lease; without device state there is nothing to return. Never panics.
+    fn drop(&mut self) {
+        #[cfg(feature = "cuda")]
+        if self.device.reserved_plan_entries > 0 {
+            if let Some(mut lease) = self.runtime.lease_cuda_for_maintenance() {
+                lease.release_plan_entries(self.device.reserved_plan_entries);
+            }
+        }
     }
 }
 
