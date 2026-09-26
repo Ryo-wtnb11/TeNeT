@@ -657,7 +657,7 @@ fn restricting_a_compact_diagonal_payload_is_rejected() {
     let leg = u1(&provider, &[(0, 3), (1, 2)]);
     let source: TensorMap<_, f64> =
         TensorMap::rand_with_seed(&runtime, [&leg], [&leg], 31).unwrap();
-    let diagonal = source.svd_compact().unwrap().1;
+    let diagonal = source.svd_compact().unwrap().s;
     let bond = diagonal.domain()[0].clone();
     let selection = LegSelection::try_new(&bond, [(U1Irrep::new(0), 0..1)]).unwrap();
     assert!(diagonal.restrict_leg(1, &selection).is_err());

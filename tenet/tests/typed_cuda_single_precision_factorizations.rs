@@ -43,7 +43,8 @@ use num_complex::{Complex32, Complex64};
 use tenet::core::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
 use tenet::dense::{cuda_transfer_stats, CudaScalar};
 use tenet::typed::{
-    CudaFactorizationPayload, CudaStorage, Error, GradedSpace, Runtime, TensorMap, Truncation,
+    CudaFactorizationPayload, CudaStorage, Eigh, Error, GradedSpace, Qr, Runtime, Svd, TensorMap,
+    Truncation,
 };
 
 mod common;
@@ -273,10 +274,18 @@ fn assert_device_svd_matches_host<R, D>(
     let bound = tolerance::<D>(terms, norm, kappa);
 
     let source_payload = source.data().to_vec();
-    let (host_u, host_s, host_vh) = source.svd_compact().unwrap();
+    let Svd {
+        u: host_u,
+        s: host_s,
+        vh: host_vh,
+    } = source.svd_compact().unwrap();
 
     let device = source.to_cuda().unwrap();
-    let (device_u, device_s, device_vh) = device.svd_compact().unwrap();
+    let Svd {
+        u: device_u,
+        s: device_s,
+        vh: device_vh,
+    } = device.svd_compact().unwrap();
     let provider = source.provider() as *const R;
     for factor in [&device_u, &device_s, &device_vh] {
         assert!(std::ptr::eq(factor.provider(), provider));
@@ -400,9 +409,15 @@ fn assert_device_qr_matches_host<R, D>(
     let norm = source.norm().unwrap();
     let bound = tolerance::<D>(terms, norm, kappa);
 
-    let (host_q, host_r) = source.qr_compact().unwrap();
+    let Qr {
+        q: host_q,
+        r: host_r,
+    } = source.qr_compact().unwrap();
     let device = source.to_cuda().unwrap();
-    let (device_q, device_r) = device.qr_compact().unwrap();
+    let Qr {
+        q: device_q,
+        r: device_r,
+    } = device.qr_compact().unwrap();
     let q = device_q.to_host().unwrap();
     let r = device_r.to_host().unwrap();
 
@@ -469,8 +484,11 @@ where
     let terms = source.data().len().max(1);
     let norm = source.norm().unwrap();
     let bound = tolerance::<D>(terms, norm, 1.0);
-    let (host_q, host_r) = source.qr_compact().unwrap();
-    let (q, r) = source.to_cuda().unwrap().qr_compact().unwrap();
+    let Qr {
+        q: host_q,
+        r: host_r,
+    } = source.qr_compact().unwrap();
+    let Qr { q, r } = source.to_cuda().unwrap().qr_compact().unwrap();
     let q = q.to_host().unwrap();
     let r = r.to_host().unwrap();
     assert_eq!(structure(&q), structure(&host_q), "{what} q [{}]", D::NAME);
@@ -554,7 +572,7 @@ fn device_qr_returns_the_positive_diagonal_gauge_at_every_payload() {
     fn assert_gauge<D: FactorPayload>(runtime: &Runtime, leg: &GradedSpace<U1FusionRule>) {
         let source = fixture::<U1FusionRule, D>(runtime, leg, leg);
         let terms = source.data().len().max(1);
-        let (_, r) = source.to_cuda().unwrap().qr_compact().unwrap();
+        let Qr { r, .. } = source.to_cuda().unwrap().qr_compact().unwrap();
         let spectra = r.to_host().unwrap().diagview().unwrap();
         assert!(
             !spectra.is_empty(),
@@ -603,7 +621,7 @@ fn device_qr_fixes_a_hand_computed_complex_phase() {
                 D::entry(re, im)
             })
             .unwrap();
-        let (q, r) = source.to_cuda().unwrap().qr_compact().unwrap();
+        let Qr { q, r } = source.to_cuda().unwrap().qr_compact().unwrap();
         let bound = tolerance::<D>(4, 3.0, 1.0);
         for (factor, expected, what) in [(q, q_expected, "q"), (r, r_expected, "r")] {
             let factor = factor.to_host().unwrap();
@@ -645,9 +663,15 @@ fn assert_device_eigh_matches_host<R, D>(
     let norm = source.norm().unwrap();
     let bound = tolerance::<D>(terms, norm, kappa);
 
-    let (host_d, _host_v) = source.eigh_full().unwrap();
+    let Eigh {
+        d: host_d,
+        v: _host_v,
+    } = source.eigh_full().unwrap();
     let device = source.to_cuda().unwrap();
-    let (device_d, device_v) = device.eigh_full().unwrap();
+    let Eigh {
+        d: device_d,
+        v: device_v,
+    } = device.eigh_full().unwrap();
     let d = device_d.to_host().unwrap();
     let v = device_v.to_host().unwrap();
 
@@ -905,7 +929,7 @@ fn assert_truncation_composition<R, D>(
     let bound = tolerance::<D>(terms, source.norm().unwrap(), kappa);
 
     let expected = {
-        let (u, s, vh) = source.svd_compact().unwrap();
+        let Svd { u, s, vh } = source.svd_compact().unwrap();
         let found = s.domain()[0]
             .find_truncated(&s.diagview().unwrap(), truncation)
             .unwrap();
@@ -922,7 +946,11 @@ fn assert_truncation_composition<R, D>(
     };
     let (expected_u, expected_s, expected_vh, expected_values, expected_error) = expected;
 
-    let (device_u, device_s, device_vh) = source.to_cuda().unwrap().svd_compact().unwrap();
+    let Svd {
+        u: device_u,
+        s: device_s,
+        vh: device_vh,
+    } = source.to_cuda().unwrap().svd_compact().unwrap();
     let u = device_u.to_host().unwrap();
     let s = device_s.to_host().unwrap();
     let vh = device_vh.to_host().unwrap();

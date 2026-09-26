@@ -532,7 +532,7 @@ fn checked_generic_multiplicity_keys_payload_and_resolver_arc_roundtrip() {
         }));
 
     let hermitian = source.axpby(1.0, &source.adjoint().unwrap(), 1.0).unwrap();
-    let factor = hermitian.eigh_full().unwrap().0;
+    let factor = hermitian.eigh_full().unwrap().d;
     assert!(matches!(
         factor.network_reuse_class(false),
         NetworkReuseClass::Compact
@@ -570,7 +570,7 @@ fn checked_generic_multiplicity_keys_payload_and_resolver_arc_roundtrip() {
             Complex64::new(1.0, 0.0),
         )
         .unwrap();
-    let complex_factor = complex_hermitian.eigh_full().unwrap().0;
+    let complex_factor = complex_hermitian.eigh_full().unwrap().d;
     assert!(matches!(
         complex_factor.network_reuse_class(false),
         NetworkReuseClass::Compact

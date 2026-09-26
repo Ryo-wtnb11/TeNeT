@@ -93,10 +93,10 @@ pub mod prelude {
         LinalgBackend, Runtime, RuntimeBuilder, RuntimeTreeTransformCacheInfo,
     };
     pub use crate::typed::{
-        AdvancedLinalgScalar, DecodeError, DecodeLimits, EncodeError, FactorizationScalar,
-        GenericTensorError, GenericUnitTensorMapExt, GradedSpace, LegSelection, PersistedScalar,
-        PhysicalDense, PhysicalDenseError, SectorSpectrum, TensorMap, TensorScalar,
-        TruncatedSelection, TypedPersistenceCodec,
+        AdvancedLinalgScalar, DecodeError, DecodeLimits, Eig, Eigh, EncodeError,
+        FactorizationScalar, GenericTensorError, GenericUnitTensorMapExt, GradedSpace, LeftPolar,
+        LegSelection, Lq, PersistedScalar, PhysicalDense, PhysicalDenseError, Qr, RightPolar,
+        SectorSpectrum, Svd, TensorMap, TensorScalar, TruncatedSelection, TypedPersistenceCodec,
     };
     pub use num_complex::{Complex32, Complex64};
     #[allow(deprecated)]

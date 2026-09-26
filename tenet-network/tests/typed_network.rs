@@ -8,7 +8,7 @@ use tenet::core::{
     U1Irrep, Z2Irrep,
 };
 use tenet::prelude::{Complex32, Complex64, TensorScalar};
-use tenet::typed::{GradedSpace, Runtime, TensorMap};
+use tenet::typed::{GradedSpace, Runtime, Svd, TensorMap};
 use tenet_network::{
     GreedyDenseOptimizer, LabelOrderDenseOptimizer, Network, NetworkExecutionWorkspace,
     PlannedNetwork, TemporaryLabel, TensorId,
@@ -819,7 +819,7 @@ fn compact_and_lazy_representation_replay_stays_semantic() {
         );
     }
 
-    let (_, compact, _) = dense.svd_compact().unwrap();
+    let Svd { s: compact, .. } = dense.svd_compact().unwrap();
     let compact_plan = identity.plan(&[&compact], &GreedyDenseOptimizer).unwrap();
     let scaled = compact.scale(2.0);
     assert_same(

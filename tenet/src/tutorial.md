@@ -374,7 +374,11 @@ keep (`GradedSpace::find_truncated` on the bond leg), and cut the bond
 reports the discarded weighted Frobenius norm. `Truncation::rank(n)` bounds the
 weighted kept bond dimension; tolerance constructors and `and` combine
 additional limits. The same four steps truncate `eigh_full` and `eig_full`,
-whose factors are `(d, v)`.
+whose factors are `d` and `v`. Each factorization returns a named result
+([`prelude::Svd`], [`prelude::Qr`], [`prelude::Lq`], [`prelude::Eigh`],
+[`prelude::Eig`], [`prelude::LeftPolar`], [`prelude::RightPolar`]); its
+documentation states the spectrum order and which routes store `s` or `d`
+compactly.
 
 ```rust
 use tenet::prelude::*;
@@ -387,7 +391,7 @@ let v = GradedSpace::try_new(
 let t = TensorMap::<U1FusionRule, f64>::rand(&rt, [&v, &v], [&v, &v])?;
 
 // Truncated SVD: factorize, decide, cut.
-let (u, s, vh) = t.svd_compact()?;
+let Svd { u, s, vh } = t.svd_compact()?;
 let found = s.domain()[0].find_truncated(&s.diagview()?, &Truncation::rank(6))?;
 let u = u.restrict_leg(u.codomain_rank(), &found.selection)?;
 let s = s.restrict_diagonal(&found.selection)?;
@@ -397,7 +401,7 @@ let reconstructed = u.compose(&s)?.compose(&vh)?;
 let error = reconstructed.axpby(1.0, &t, -1.0)?.norm()?;
 assert!((error - found.error).abs() <= 1e-8 * (1.0 + found.error));
 
-let (q, r) = t.qr_compact()?;
+let Qr { q, r } = t.qr_compact()?;
 assert!(q.compose(&r)?.axpby(1.0, &t, -1.0)?.norm()? <= 1e-10 * (1.0 + t.norm()?));
 # Ok::<(), Error>(())
 ```

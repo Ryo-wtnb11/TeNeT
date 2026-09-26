@@ -12,7 +12,7 @@ use tenet::dense::{
 };
 use tenet::operations::OperationError;
 use tenet::prelude::{GradedSpace, Runtime, TensorMap, U1FusionRule, U1Irrep};
-use tenet::typed::Error;
+use tenet::typed::{Error, Svd};
 
 fn u1_space(entries: [(i32, usize); 3]) -> GradedSpace<U1FusionRule> {
     GradedSpace::try_new_with_arc(
@@ -166,7 +166,7 @@ fn injected_dense_executor_is_used_and_preserves_results() {
 
     let v = u1_space([(-1, 2), (0, 2), (1, 1)]);
     let t = TensorMap::<U1FusionRule, f64>::rand_with_seed(&rt, [&v, &v], [&v, &v], 99).unwrap();
-    let (_, s, _) = t.svd_compact().unwrap();
+    let Svd { s, .. } = t.svd_compact().unwrap();
 
     assert!(
         counts.svd.load(Ordering::Relaxed) > 0,
@@ -180,7 +180,7 @@ fn injected_dense_executor_is_used_and_preserves_results() {
     let t_default =
         TensorMap::<U1FusionRule, f64>::rand_with_seed(&rt_default, [&v, &v], [&v, &v], 99)
             .unwrap();
-    let (_, s_default, _) = t_default.svd_compact().unwrap();
+    let Svd { s: s_default, .. } = t_default.svd_compact().unwrap();
     assert_eq!(s.data().len(), s_default.data().len());
     for (a, b) in s.data().iter().zip(s_default.data()) {
         assert!(
@@ -208,7 +208,7 @@ fn compact_diagonal_exp_drives_no_dense_kernel() {
 
     let v = u1_space([(-1, 3), (0, 4), (1, 3)]);
     let t = TensorMap::<U1FusionRule, f64>::rand_with_seed(&rt, [&v], [&v], 578).unwrap();
-    let s = t.svd_compact().unwrap().1;
+    let s = t.svd_compact().unwrap().s;
     let (svd, ..) = counts.read();
     assert!(svd > 0, "the fixture never reached the injected backend");
 

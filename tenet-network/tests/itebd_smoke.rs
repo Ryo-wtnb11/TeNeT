@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use tenet::core::{U1FusionRule, U1Irrep};
 use tenet::prelude::Truncation;
-use tenet::typed::{GradedSpace, Runtime, TensorMap};
+use tenet::typed::{GradedSpace, Runtime, Svd, TensorMap};
 use tenet_network::tensor;
 
 const E_EXACT: f64 = 0.25 - std::f64::consts::LN_2;
@@ -53,7 +53,7 @@ fn bond_update(
     let theta = tensor!([l, pa; pb, r] = l_out[l; x] * g1[x, qa; y] * l_mid[y; z]
         * g2[z, qb; w] * l_out[w; r] * gate[pa, pb; qa, qb])
     .unwrap();
-    let (u, s, vh) = theta.svd_compact().unwrap();
+    let Svd { u, s, vh } = theta.svd_compact().unwrap();
     let found = s.domain()[0]
         .find_truncated(&s.diagview().unwrap(), trunc)
         .unwrap();

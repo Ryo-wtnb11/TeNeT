@@ -19,7 +19,7 @@ use tenet::core::{
 };
 use tenet::prelude::Error;
 use tenet::typed::{
-    BatchError, GradedSpace, MemberFault, PreparedEighFull, Runtime, SignatureField,
+    BatchError, Eigh, GradedSpace, MemberFault, PreparedEighFull, Runtime, SignatureField,
     StackedTensorMap, TensorMap,
 };
 
@@ -51,7 +51,10 @@ where
     assert_eq!(output.spectra.len(), inputs.len());
     for (member, input) in inputs.iter().enumerate() {
         let what = format!("{label} member {member}/{}", inputs.len());
-        let (eager_d, eager_v) = input.eigh_full().unwrap();
+        let Eigh {
+            d: eager_d,
+            v: eager_v,
+        } = input.eigh_full().unwrap();
         let d = output.d.member(member).unwrap();
         let v = output.v.member(member).unwrap();
         assert!(
@@ -110,11 +113,11 @@ fn plus_minus_lambda_and_degenerate_groups_compare_by_value() {
     let su2 = GradedSpace::try_new(SU2FusionRule, [(j(0), 3), (j(1), 4)]).unwrap();
     for count in [1, 5] {
         let pm = single_leg(&runtime, &leg, count, plus_minus_entry);
-        let (d, _) = pm[0].eigh_full().unwrap();
+        let Eigh { d, .. } = pm[0].eigh_full().unwrap();
         assert!(has_plus_minus_tie(&d), "the ±λ fixture has |λ| ties");
         check_batch(&format!("u1 ±λ B={count}"), &runtime, &pm);
         let degenerate = single_leg(&runtime, &su2, count, degenerate_entry);
-        let (d, _) = degenerate[0].eigh_full().unwrap();
+        let Eigh { d, .. } = degenerate[0].eigh_full().unwrap();
         assert!(
             has_degenerate_group(&d),
             "the degenerate fixture has a group"
@@ -296,7 +299,7 @@ fn assert_equals_eager<R>(
 {
     let output = handle.execute(stack).unwrap();
     for (member, input) in inputs.iter().enumerate() {
-        let (d, v) = input.eigh_full().unwrap();
+        let Eigh { d, v } = input.eigh_full().unwrap();
         assert!(
             output.d.member(member).unwrap().data() == d.data(),
             "{what}: d {member}"

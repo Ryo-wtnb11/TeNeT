@@ -6,7 +6,8 @@ use tenet::prelude::{
     SU2FusionRule, SU2Irrep, TensorMap, Truncation, U1FusionRule, U1Irrep, Z2Irrep,
 };
 use tenet::typed::{
-    TensorScalar, TypedTensorConstructionDispatch, TypedTensorModeDispatch, TypedTensorRootDispatch,
+    Svd, TensorScalar, TypedTensorConstructionDispatch, TypedTensorModeDispatch,
+    TypedTensorRootDispatch,
 };
 
 fn assert_close(actual: &[f64], expected: &[f64]) {
@@ -122,7 +123,7 @@ fn u1_index_contraction_trace_and_decomposition_paths_are_executable() {
         .unwrap();
     assert_eq!(roundtrip.data(), rank_three.data());
 
-    let (u, s, vh) = tensor.svd_compact().unwrap();
+    let Svd { u, s, vh } = tensor.svd_compact().unwrap();
     let found = s.domain()[0]
         .find_truncated(&s.diagview().unwrap(), &Truncation::rank(2))
         .unwrap();

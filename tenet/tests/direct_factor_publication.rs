@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use tenet::core::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
 use tenet::prelude::{Complex32, Complex64, Runtime};
-use tenet::typed::{GradedSpace, TensorMap, TensorScalar};
+use tenet::typed::{GradedSpace, Lq, TensorMap, TensorScalar};
 
 struct CountingAllocator;
 
@@ -148,7 +148,7 @@ macro_rules! assert_residual {
 macro_rules! assert_lq {
     ($d:ty, $a:expr) => {{
         let a = $a;
-        let (l, q) = a.lq_compact().unwrap();
+        let Lq { l, q } = a.lq_compact().unwrap();
         let terms = a.data().len();
         assert_residual!("A = L Q", $d, &l.compose(&q).unwrap(), &a, terms);
         let aqh = a.compose(&owned_adjoint!($d, q)).unwrap();
@@ -214,7 +214,7 @@ fn compact_lq_requests_no_zeroed_output_storage() {
     let a: TensorMap<_, f64> =
         TensorMap::rand_with_seed(&runtime, [&leg, &leg], [&leg, &leg], 1480).unwrap();
     let warm = a.lq_compact().unwrap();
-    let ((l, q), counts) = measured(|| a.lq_compact().unwrap());
+    let (Lq { l, q }, counts) = measured(|| a.lq_compact().unwrap());
     black_box((&warm, &q));
     let backend_r_bytes = std::mem::size_of_val(l.data());
     assert!(
@@ -227,6 +227,7 @@ fn compact_lq_requests_no_zeroed_output_storage() {
 mod checked_generic {
     use super::*;
     use tenet::typed::SUNFusionRule;
+    use tenet::typed::{LeftPolar, RightPolar, Svd};
 
     fn su3_leg(
         provider: &Arc<SUNFusionRule>,
@@ -268,12 +269,12 @@ mod checked_generic {
             let a = $a;
             let terms = a.data().len();
             let (w, p, product, gram) = if $left {
-                let (w, p) = a.left_polar().unwrap();
+                let LeftPolar { w, p } = a.left_polar().unwrap();
                 let product = w.compose(&p).unwrap();
                 let gram = owned_adjoint!($d, w).compose(&w).unwrap();
                 (w, p, product, gram)
             } else {
-                let (p, w) = a.right_polar().unwrap();
+                let RightPolar { p, wh: w } = a.right_polar().unwrap();
                 let product = p.compose(&w).unwrap();
                 let gram = w.compose(&owned_adjoint!($d, w)).unwrap();
                 (w, p, product, gram)
@@ -353,8 +354,8 @@ mod checked_generic {
             let a: TensorMap<_, f64> =
                 TensorMap::rand_with_seed(&runtime, [&rows], [&cols], 1485).unwrap();
             let warm = (a.left_polar().unwrap(), a.svd_compact().unwrap());
-            let ((w, p), polar) = measured(|| a.left_polar().unwrap());
-            let ((u, s, vh), svd) = measured(|| a.svd_compact().unwrap());
+            let (LeftPolar { w, p }, polar) = measured(|| a.left_polar().unwrap());
+            let (Svd { u, s, vh }, svd) = measured(|| a.svd_compact().unwrap());
             black_box(&warm);
             let polar_outputs = payload_bytes(&w) + payload_bytes(&p);
             let svd_outputs = payload_bytes(&u) + payload_bytes(&s) + payload_bytes(&vh);

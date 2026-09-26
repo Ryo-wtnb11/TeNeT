@@ -469,13 +469,7 @@ fn factorization_fields_and_tuple_fields_contract_without_parentheses() {
     let tensor =
         TensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&space, &space], [&space], 401)
             .unwrap();
-    struct Svd {
-        u: TensorMap<U1FusionRule, f64>,
-        s: TensorMap<U1FusionRule, f64>,
-        vh: TensorMap<U1FusionRule, f64>,
-    }
-    let (u, s, vh) = tensor.svd_compact().unwrap();
-    let svd = Svd { u, s, vh };
+    let svd = tensor.svd_compact().unwrap();
     let bare = tensor!([i, j; m] = svd.u[i, j; k] * svd.s[k; l] * svd.vh[l; m]).unwrap();
     let parenthesized =
         tensor!([i, j; m] = (svd.u)[i, j; k] * (svd.s)[k; l] * (svd.vh)[l; m]).unwrap();
@@ -489,7 +483,8 @@ fn factorization_fields_and_tuple_fields_contract_without_parentheses() {
     let norm = svd.u.norm().unwrap();
     assert!((norm_squared - norm * norm).abs() <= 1e-10 * (1.0 + norm * norm));
 
-    let qr = tensor.qr_compact().unwrap();
+    let tenet::typed::Qr { q, r } = tensor.qr_compact().unwrap();
+    let qr = (q, r);
     let recomposed = tensor!([i, j; m] = qr.0[i, j; k] * qr.1[k; m]).unwrap();
     assert_close(recomposed.data(), tensor.data(), 1e-10);
 }

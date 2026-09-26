@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use tenet::core::{U1FusionRule, U1Irrep};
 use tenet::dense::{cuda_transfer_stats, CudaTransferStats};
-use tenet::typed::{GradedSpace, Runtime, TensorMap};
+use tenet::typed::{Eigh, GradedSpace, Runtime, Svd, TensorMap};
 
 fn delta(before: CudaTransferStats) -> CudaTransferStats {
     let after = cuda_transfer_stats();
@@ -54,7 +54,7 @@ fn device_diagonal_factors_transfer_only_what_the_host_decides_on() {
         let device = host.to_cuda().unwrap();
 
         let before = cuda_transfer_stats();
-        let (u, s, vh) = device.svd_compact().unwrap();
+        let Svd { u, s, vh } = device.svd_compact().unwrap();
         let svd = delta(before);
         let (u, s, vh) = (
             u.to_host().unwrap(),
@@ -70,7 +70,7 @@ fn device_diagonal_factors_transfer_only_what_the_host_decides_on() {
             bytes(u.data().len() + s.data().len() + vh.data().len()),
             "{charges} sectors"
         );
-        let (_, expected, _) = host.svd_compact().unwrap();
+        let Svd { s: expected, .. } = host.svd_compact().unwrap();
         for (device, host) in s.data().iter().zip(expected.data()) {
             assert!((device - host).abs() <= 1e-12 * host.abs().max(1.0));
         }
@@ -78,7 +78,7 @@ fn device_diagonal_factors_transfer_only_what_the_host_decides_on() {
         let hermitian = host.axpby(1.0, &host.adjoint().unwrap(), 1.0).unwrap();
         let device = hermitian.to_cuda().unwrap();
         let before = cuda_transfer_stats();
-        let (d, v) = device.eigh_full().unwrap();
+        let Eigh { d, v } = device.eigh_full().unwrap();
         let eigh = delta(before);
         let (d, v) = (d.to_host().unwrap(), v.to_host().unwrap());
         let eigenvalues = 3 * charges;
@@ -91,7 +91,7 @@ fn device_diagonal_factors_transfer_only_what_the_host_decides_on() {
             eigh.h2d_bytes >= bytes(2 * d.data().len() + v.data().len()),
             "{charges}: {eigh:?}"
         );
-        let (expected, _) = hermitian.eigh_full().unwrap();
+        let Eigh { d: expected, .. } = hermitian.eigh_full().unwrap();
         for (device, host) in d.data().iter().zip(expected.data()) {
             assert!((device - host).abs() <= 1e-10 * host.abs().max(1.0));
         }

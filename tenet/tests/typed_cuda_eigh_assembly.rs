@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use tenet::core::{U1FusionRule, U1Irrep};
 use tenet::dense::cuda_transfer_stats;
-use tenet::typed::{GradedSpace, Runtime, TensorMap};
+use tenet::typed::{Eigh, GradedSpace, Runtime, TensorMap};
 
 fn leg(charges: &[(i32, usize)]) -> GradedSpace<U1FusionRule> {
     GradedSpace::try_new_with_arc(
@@ -51,7 +51,7 @@ fn eigh_assembly_gemms_and_uploads_do_not_depend_on_the_tree_count() {
         let device = source.to_cuda().unwrap();
 
         let before = cuda_transfer_stats();
-        let (d, v) = device.eigh_full().unwrap();
+        let Eigh { d, v } = device.eigh_full().unwrap();
         let after = cuda_transfer_stats();
         let gemms = after.gemm_calls - before.gemm_calls;
         // One GEMM per coupled sector, not per tree.
@@ -63,7 +63,7 @@ fn eigh_assembly_gemms_and_uploads_do_not_depend_on_the_tree_count() {
 
         // Device vs host: the same descending-|λ| spectrum, and the device
         // eigenvectors (raw cuSOLVER gauge) satisfy the eigen equation.
-        let (host_d, _) = source.eigh_full().unwrap();
+        let Eigh { d: host_d, .. } = source.eigh_full().unwrap();
         let d = d.to_host().unwrap();
         let v = v.to_host().unwrap();
         close(&d, &host_d);

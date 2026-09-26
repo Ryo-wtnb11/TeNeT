@@ -26,6 +26,7 @@
 use std::time::Instant;
 
 use tenet::prelude::{Error, GradedSpace, Runtime, TensorMap, Truncation, U1FusionRule, U1Irrep};
+use tenet::typed::Svd;
 use tenet_network::tensor;
 
 const E_EXACT: f64 = 0.25 - std::f64::consts::LN_2;
@@ -80,7 +81,7 @@ fn bond_update(
         * g2[z, qb; w] * l_out[w; r] * gate[pa, pb; qa, qb])?;
     // Truncated SVD: factorize, decide the kept bond from the spectrum, then
     // restrict every factor to it.
-    let (u, s, vh) = theta.svd_compact()?;
+    let Svd { u, s, vh } = theta.svd_compact()?;
     let found = s.domain()[0].find_truncated(&s.diagview()?, trunc)?;
     let u = u.restrict_leg(u.codomain_rank(), &found.selection)?;
     let s = s.restrict_diagonal(&found.selection)?;

@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use tenet::core::{Z2FusionRule, Z2Irrep};
 use tenet::prelude::{Complex64, Runtime};
-use tenet::typed::{GradedSpace, TensorMap};
+use tenet::typed::{GradedSpace, Svd, TensorMap};
 
 struct CountingAllocator;
 
@@ -199,7 +199,7 @@ fn svd_compacts_s_is_built_compact_and_materializes_only_on_demand() {
     // Warm the factorization path itself; `s` is discarded, only caches persist.
     black_box(tensor.svd_compact().unwrap());
 
-    let s = tensor.svd_compact().unwrap().1;
+    let s = tensor.svd_compact().unwrap().s;
     let first = measured_bytes(|| s.data().len());
     assert!(
         first >= dense_payload_bytes(),
@@ -228,7 +228,7 @@ fn a_truncated_s_stays_compact_too() {
     let _measurement = MEASUREMENT_LOCK.lock().unwrap();
     let tensor = source(0x5eed_0002);
     let truncated = |tensor: &TensorMap<Z2FusionRule, f64>| {
-        let s = tensor.svd_compact().unwrap().1;
+        let s = tensor.svd_compact().unwrap().s;
         let found = s.domain()[0]
             .find_truncated(&s.diagview().unwrap(), &tenet::typed::Truncation::Full)
             .unwrap();
@@ -253,7 +253,7 @@ fn a_complex_payloads_s_is_compact_as_well() {
     let tensor = complex_source(0x5eed_0003);
     black_box(tensor.svd_compact().unwrap());
 
-    let s = tensor.svd_compact().unwrap().1;
+    let s = tensor.svd_compact().unwrap().s;
     let first = measured_bytes(|| s.data().len());
     assert!(
         first >= 2 * dense_payload_bytes(),
@@ -270,7 +270,7 @@ fn warmed_bytes<T>(operation: impl Fn() -> T) -> u64 {
 }
 
 fn spectrum(seed: u64) -> TensorMap<Z2FusionRule, f64> {
-    source(seed).svd_compact().unwrap().1
+    source(seed).svd_compact().unwrap().s
 }
 
 #[test]
@@ -357,7 +357,7 @@ fn absorbing_a_spectrum_through_compose_scales_instead_of_densifying() {
     // would need `s` materialized as well.
     let _measurement = MEASUREMENT_LOCK.lock().unwrap();
     let tensor = source(0x5eed_0013);
-    let (u, s, vh) = tensor.svd_compact().unwrap();
+    let Svd { u, s, vh } = tensor.svd_compact().unwrap();
     let ceiling = dense_payload_bytes() * 3 / 2;
 
     assert!(
@@ -412,7 +412,7 @@ fn a_complex_spectrums_matrix_functions_stay_o_rank_too() {
     // What: the arms are dtype-generic, so a c64 spectrum takes the same route
     // — at twice the byte size, which is what the ceiling here accounts for.
     let _measurement = MEASUREMENT_LOCK.lock().unwrap();
-    let d = complex_source(0x5eed_0022).svd_compact().unwrap().1;
+    let d = complex_source(0x5eed_0022).svd_compact().unwrap().s;
     let ceiling = 2 * dense_payload_bytes();
 
     for (name, bytes) in [
@@ -569,7 +569,7 @@ fn compact_is_posdef_never_builds_or_caches_a_dense_payload() {
         "compact is_posdef materialized the spectrum"
     );
 
-    let e = complex_source(0x5eed_0052).svd_compact().unwrap().1;
+    let e = complex_source(0x5eed_0052).svd_compact().unwrap().s;
     let bytes = warmed_bytes(|| e.is_posdef(1e-12).unwrap());
     assert!(
         bytes < 2 * ceiling,
@@ -589,7 +589,7 @@ fn pr3_conversions_allocate_one_output_and_stay_compact_on_a_spectrum() {
     // the source's dense buffer as a side effect.
     let _measurement = MEASUREMENT_LOCK.lock().unwrap();
     let d = spectrum(0x5eed_0021);
-    let complex_d = complex_source(0x5eed_0022).svd_compact().unwrap().1;
+    let complex_d = complex_source(0x5eed_0022).svd_compact().unwrap().s;
     let ceiling = dense_payload_bytes();
 
     for (name, bytes) in [
@@ -695,9 +695,9 @@ fn the_full_bond_trace_reduces_the_spectrum_without_materializing() {
     );
 
     // Same on a c64 spectrum: the arm is dtype-generic.
-    let warm = complex_source(0x5eed_0082).svd_compact().unwrap().1;
+    let warm = complex_source(0x5eed_0082).svd_compact().unwrap().s;
     black_box(warm.trace_pairs(&[(0, 1)]).unwrap());
-    let e = complex_source(0x5eed_0082).svd_compact().unwrap().1;
+    let e = complex_source(0x5eed_0082).svd_compact().unwrap().s;
     let bytes = measured_bytes(|| e.trace_pairs(&[(0, 1)]).unwrap());
     assert!(
         bytes < 2 * ceiling,

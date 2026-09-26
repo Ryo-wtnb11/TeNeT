@@ -4404,7 +4404,7 @@ mod typed_replay_tests {
         let dense =
             TensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&space], [&space], 748_200)
                 .unwrap();
-        let (_, compact, _) = dense.svd_compact().unwrap();
+        let tenet::typed::Svd { s: compact, .. } = dense.svd_compact().unwrap();
         assert!(device_operand_admission(
             true,
             tenet::core::FusionRule::braiding_style(dense.provider()),

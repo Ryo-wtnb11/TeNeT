@@ -27,7 +27,8 @@ use tenet::core::{SU2FusionRule, SU2Irrep};
 use tenet::dense::{cuda_transfer_stats, CudaPlanCacheStats, CudaTransferStats};
 use tenet::prelude::Error;
 use tenet::typed::{
-    BatchError, GradedSpace, MemberFault, PreparedEighFull, Runtime, StackedTensorMap, TensorMap,
+    BatchError, Eigh, GradedSpace, MemberFault, PreparedEighFull, Runtime, StackedTensorMap,
+    TensorMap,
 };
 
 use common::DeviceRule;
@@ -78,7 +79,10 @@ where
     let v_stack = output.v.to_host().unwrap();
     for (member, (input, device_input)) in inputs.iter().zip(&device).enumerate() {
         let what = format!("{label} member {member}/{}", inputs.len());
-        let (eager_d, eager_v) = device_input.eigh_full().unwrap();
+        let Eigh {
+            d: eager_d,
+            v: eager_v,
+        } = device_input.eigh_full().unwrap();
         let (eager_d, eager_v) = (eager_d.to_host().unwrap(), eager_v.to_host().unwrap());
         let d = d_stack.member(member).unwrap();
         let v = v_stack.member(member).unwrap();
@@ -110,7 +114,10 @@ where
             assert!(values == entry.values, "{what}: spectra {:?}", entry.sector);
         }
         check_member(&what, input, &d, &v, (&eager_d, &eager_v), f64::EPSILON);
-        let (host_d, host_v) = input.eigh_full().unwrap();
+        let Eigh {
+            d: host_d,
+            v: host_v,
+        } = input.eigh_full().unwrap();
         check_member(
             &format!("{what} vs Host"),
             input,
@@ -154,10 +161,10 @@ fn plus_minus_lambda_and_degenerate_groups_compare_by_value() {
     let su2 = GradedSpace::try_new(SU2FusionRule, [(j(0), 3), (j(1), 4)]).unwrap();
     for count in [1, 17] {
         let pm = single_leg(&runtime, &leg, count, plus_minus_entry);
-        assert!(has_plus_minus_tie(&pm[0].eigh_full().unwrap().0));
+        assert!(has_plus_minus_tie(&pm[0].eigh_full().unwrap().d));
         check_device_batch(&format!("u1 ±λ B={count}"), &pm);
         let degenerate = single_leg(&runtime, &su2, count, degenerate_entry);
-        assert!(has_degenerate_group(&degenerate[0].eigh_full().unwrap().0));
+        assert!(has_degenerate_group(&degenerate[0].eigh_full().unwrap().d));
         check_device_batch(&format!("su2 degenerate B={count}"), &degenerate);
     }
 }
@@ -431,11 +438,14 @@ fn a_failed_batch_leaves_no_observable_output_and_the_next_call_is_whole() {
         let d = output.d.to_host().unwrap();
         let v = output.v.to_host().unwrap();
         for (member, input) in inputs.iter().enumerate() {
-            let (host_d, host_v) = input.eigh_full().unwrap();
+            let Eigh {
+                d: host_d,
+                v: host_v,
+            } = input.eigh_full().unwrap();
             let (d, v) = (d.member(member).unwrap(), v.member(member).unwrap());
             check_member(what, input, &d, &v, (&host_d, &host_v), f64::EPSILON);
             if inputs.len() == 1 {
-                let (_, eager_v) = input.to_cuda().unwrap().eigh_full().unwrap();
+                let Eigh { v: eager_v, .. } = input.to_cuda().unwrap().eigh_full().unwrap();
                 assert!(
                     v.data() == eager_v.to_host().unwrap().data(),
                     "{what}: B = 1 bits"

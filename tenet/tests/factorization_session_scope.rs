@@ -121,9 +121,9 @@ fn streaming_factorizations_from_rayon_workers_and_threads_match_serial_results(
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
     let run = |tensor: &TensorMap<U1FusionRule, f64>| {
-        let (l, q) = tensor.lq_compact().unwrap();
+        let Lq { l, q } = tensor.lq_compact().unwrap();
         let null = tensor.left_null().unwrap();
-        let (w, v) = tensor
+        let Eigh { d: w, v } = tensor
             .compose(&tensor.adjoint().unwrap())
             .unwrap()
             .eigh_full()

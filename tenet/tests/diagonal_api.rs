@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use tenet::core::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
 use tenet::prelude::{Complex64, GradedSpace, Runtime, SectorSpectrum, TensorMap};
+use tenet::typed::Eigh;
 
 fn runtime() -> Runtime {
     Runtime::builder().dense_threads(1).build().unwrap()
@@ -57,7 +58,7 @@ fn typed_real_c64_eigenvalue_readback_stays_compact() {
             )
         })
         .unwrap();
-    let (diagonal, _) = source.eigh_full().unwrap();
+    let Eigh { d: diagonal, .. } = source.eigh_full().unwrap();
     assert_eq!(
         diagonal.diagonal_spectrum().unwrap().unwrap()[0].values,
         [Complex64::new(2.0, 0.0), Complex64::new(1.0, 0.0)]

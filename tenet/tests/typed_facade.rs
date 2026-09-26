@@ -14,7 +14,9 @@ use tenet::core::{
     ProductFusionRuleExt, RuleIdentity, SU2FusionRule, SU2Irrep, SectorCodec, SectorId, SectorVec,
 };
 use tenet::prelude::{Complex32, Complex64, FibonacciFusionRule, FibonacciSector, Runtime};
-use tenet::typed::{GradedSpace, TensorMap, Truncation};
+use tenet::typed::{
+    Eig, Eigh, GradedSpace, LeftPolar, Lq, Qr, RightPolar, Svd, TensorMap, Truncation,
+};
 
 #[path = "../../tests/support/numerics.rs"]
 mod numerics;
@@ -2863,7 +2865,7 @@ fn svd_compact_reconstructs_the_source_through_the_typed_contract() {
     let runtime = runtime();
     let typed = z2_tensor(&runtime);
 
-    let (u, s, vh) = typed.svd_compact().unwrap();
+    let Svd { u, s, vh } = typed.svd_compact().unwrap();
     let recon = recompose(&u, &s, &vh);
 
     assert_eq!(recon.data().len(), typed.data().len());
@@ -2883,7 +2885,11 @@ fn svd_compact_reconstructs_a_complex_payload() {
     let _guard = cache_lock();
     let runtime = runtime();
     let typed = z2_complex_tensor(&runtime);
-    let (tu, ts, tvh) = typed.svd_compact().unwrap();
+    let Svd {
+        u: tu,
+        s: ts,
+        vh: tvh,
+    } = typed.svd_compact().unwrap();
 
     let recon = tu
         .contract(&ts, &[2], &[0], &[0, 1, 2])
@@ -2904,7 +2910,7 @@ fn svd_full_reconstructs_with_unitary_outer_factors() {
     let runtime = runtime();
     for num_codomain in [2, 1] {
         let typed = z2_tensor_split(&runtime, num_codomain);
-        let (u, s, vh) = typed.svd_full().unwrap();
+        let Svd { u, s, vh } = typed.svd_full().unwrap();
 
         let recon = u.compose(&s).unwrap().compose(&vh).unwrap();
         assert_data_close_f64(recon.data(), typed.data());
@@ -2922,7 +2928,7 @@ fn svd_full_reconstructs_with_unitary_outer_factors() {
 /// Evaluates to `(u, s, vh, error)`.
 macro_rules! truncated_svd {
     ($tensor:expr, $truncation:expr) => {{
-        let (u, s, vh) = $tensor.svd_compact().unwrap();
+        let Svd { u, s, vh } = $tensor.svd_compact().unwrap();
         let found = s.domain()[0]
             .find_truncated(&s.diagview().unwrap(), &$truncation)
             .unwrap();
@@ -2939,7 +2945,9 @@ macro_rules! truncated_svd {
 /// output, composed the same way. Evaluates to `(d, v, error)`.
 macro_rules! truncated_eigen {
     ($full:expr, $truncation:expr) => {{
-        let (d, v) = $full.unwrap();
+        // `$full` is an `Eigh` or an `Eig`; both name their factors `d`, `v`.
+        let full = $full.unwrap();
+        let (d, v) = (full.d, full.v);
         let found = d.domain()[0]
             .find_truncated(&d.diagview().unwrap(), &$truncation)
             .unwrap();
@@ -3033,7 +3041,7 @@ fn a_spectrum_decode_failure_comes_back_as_the_codec_error() {
         tenet::prelude::Error::FusionAlgebra(_)
     ));
     assert!(matches!(
-        tensor.svd_compact().unwrap().1.diagview().unwrap_err(),
+        tensor.svd_compact().unwrap().s.diagview().unwrap_err(),
         tenet::prelude::Error::FusionAlgebra(_)
     ));
 }
@@ -3112,7 +3120,7 @@ fn qr_and_lq_reconstruct_with_the_expected_isometries_and_spaces() {
 
         let qr_compact = typed.qr_compact().unwrap();
         let qr_full = typed.qr_full().unwrap();
-        for (q, r) in [&qr_compact, &qr_full] {
+        for Qr { q, r } in [&qr_compact, &qr_full] {
             assert_data_close_f64(q.compose(r).unwrap().data(), typed.data());
             assert!(q.is_isometric(1e-12).unwrap());
             assert_same_legs(&q.codomain(), &typed.codomain());
@@ -3122,7 +3130,7 @@ fn qr_and_lq_reconstruct_with_the_expected_isometries_and_spaces() {
 
         let lq_compact = typed.lq_compact().unwrap();
         let lq_full = typed.lq_full().unwrap();
-        for (l, q) in [&lq_compact, &lq_full] {
+        for Lq { l, q } in [&lq_compact, &lq_full] {
             assert_data_close_f64(l.compose(q).unwrap().data(), typed.data());
             assert!(q.adjoint().unwrap().is_isometric(1e-12).unwrap());
             assert_same_legs(&l.codomain(), &typed.codomain());
@@ -3134,13 +3142,13 @@ fn qr_and_lq_reconstruct_with_the_expected_isometries_and_spaces() {
         // sibling through the internal bond space.
         if num_codomain == 2 {
             assert_ne!(
-                typed_leg_shapes(&qr_compact.0),
-                typed_leg_shapes(&qr_full.0)
+                typed_leg_shapes(&qr_compact.q),
+                typed_leg_shapes(&qr_full.q)
             );
         } else {
             assert_ne!(
-                typed_leg_shapes(&lq_compact.1),
-                typed_leg_shapes(&lq_full.1)
+                typed_leg_shapes(&lq_compact.q),
+                typed_leg_shapes(&lq_full.q)
             );
         }
     }
@@ -3210,7 +3218,7 @@ fn decompositions_carry_a_fermionic_provider() {
     assert!((from_spectrum - from_data).abs() < 1e-12);
 
     // And the seam is reachable at all for this provider, in both directions.
-    let (q, r) = tensor.qr_compact().unwrap();
+    let Qr { q, r } = tensor.qr_compact().unwrap();
     assert_eq!(q.codomain().len(), 2);
     assert_eq!(r.domain().len(), 1);
 }
@@ -4055,7 +4063,7 @@ fn compact_reductions_carry_the_su2_dimension_weight() {
     let _guard = cache_lock();
     let runtime = runtime();
     let typed = su2_tensor(&runtime);
-    let typed = typed.svd_compact().unwrap().1;
+    let typed = typed.svd_compact().unwrap().s;
     let dense = forced_dense(&typed);
 
     // Compact and dense routes may sum in different orders; see above.
@@ -4122,7 +4130,11 @@ fn compose_takes_the_compact_paths_and_reconstructs_the_source() {
     let _guard = cache_lock();
     let runtime = runtime();
     let typed = z2_tensor(&runtime);
-    let (tu, ts, tvh) = typed.svd_compact().unwrap();
+    let Svd {
+        u: tu,
+        s: ts,
+        vh: tvh,
+    } = typed.svd_compact().unwrap();
 
     let tus = tu.compose(&ts).unwrap();
     let svh = ts.compose(&tvh).unwrap();
@@ -4164,8 +4176,8 @@ fn compose_declines_a_compact_arm_it_cannot_prove() {
         next
     })
     .unwrap();
-    let wide_s = wide.svd_compact().unwrap().1;
-    let narrow_s = narrow.svd_compact().unwrap().1;
+    let wide_s = wide.svd_compact().unwrap().s;
+    let narrow_s = narrow.svd_compact().unwrap().s;
 
     assert_ne!(
         wide_s.data().len(),
@@ -4202,7 +4214,7 @@ fn eigh_full_reconstructs_the_source_through_compose() {
     let runtime = runtime();
     let typed = z2_hermitian(&runtime);
 
-    let (d, v) = typed.eigh_full().unwrap();
+    let Eigh { d, v } = typed.eigh_full().unwrap();
     let recon = v
         .compose(&d)
         .unwrap()
@@ -4271,7 +4283,7 @@ fn truncated_eigh_reports_the_discarded_eigenvalue_norm() {
         "the fixture must discard nonzero values"
     );
     assert!((error - expected_error).abs() < 1e-12 * expected_error.max(1.0));
-    assert!(d.data().len() < typed.eigh_full().unwrap().0.data().len());
+    assert!(d.data().len() < typed.eigh_full().unwrap().d.data().len());
 }
 
 #[test]
@@ -4313,7 +4325,7 @@ fn eig_full_satisfies_the_eigen_equation_for_a_real_payload() {
     let runtime = runtime();
     let typed = z2_endomorphism(&runtime);
 
-    let (d, v) = typed.eig_full().unwrap();
+    let Eig { d, v } = typed.eig_full().unwrap();
     let av = typed.to_c64().compose(&v).unwrap();
     let vd = v.compose(&d).unwrap();
 
@@ -4328,7 +4340,7 @@ fn complex_eig_satisfies_the_eigen_equation_and_conjugates_its_spectrum() {
     let runtime = runtime();
     let typed = z2_complex_endo(&runtime);
 
-    let (d, v) = typed.eig_full().unwrap();
+    let Eig { d, v } = typed.eig_full().unwrap();
     assert_data_close_c64(
         typed.compose(&v).unwrap().data(),
         v.compose(&d).unwrap().data(),
@@ -4450,7 +4462,7 @@ fn isometry_and_posdef_see_their_positive_cases() {
     let typed = z2_tensor(&runtime);
     let tol = 1e-9;
 
-    let tu = typed.svd_compact().unwrap().0;
+    let tu = typed.svd_compact().unwrap().u;
     assert!(tu.is_isometric(tol).unwrap());
     // Isometric but not unitary: `u` is tall here.
     assert!(!tu.is_unitary(tol).unwrap());
@@ -4568,7 +4580,7 @@ fn inv_of_a_compact_spectrum_is_the_elementwise_reciprocal() {
     let runtime = runtime();
     let typed = z2_endomorphism(&runtime);
 
-    let typed_s = typed.svd_compact().unwrap().1;
+    let typed_s = typed.svd_compact().unwrap().s;
     // The fixture is rank deficient, so the full spectrum contains zeros that
     // `inv` must refuse; keep only the nonzero part.
     let (_, typed_s, _, _) = truncated_svd!(typed_s, Truncation::Rank(2));
@@ -4609,7 +4621,7 @@ fn inv_reports_a_singular_input_as_a_typed_error() {
     // Compact: a spectrum scaled to exactly zero. Why not the tail of a
     // rank-deficient SVD: those singular values come back tiny but nonzero, and
     // the arm under test compares against exact zero, not a tolerance.
-    let spectrum = typed.svd_compact().unwrap().1.scale(0.0);
+    let spectrum = typed.svd_compact().unwrap().s.scale(0.0);
     match spectrum.inv() {
         Err(tenet::typed::Error::InvalidArgument(message)) => {
             assert!(
@@ -4739,7 +4751,7 @@ fn pinv_of_a_compact_spectrum_is_the_elementwise_cutoff_reciprocal() {
     let _guard = cache_lock();
     let runtime = runtime();
     let typed = z2_endomorphism(&runtime);
-    let typed_s = typed.svd_compact().unwrap().1;
+    let typed_s = typed.svd_compact().unwrap().s;
     let source = typed_s.diagonal_spectrum().unwrap().unwrap();
     let sigma_max = source
         .iter()
@@ -4827,7 +4839,7 @@ fn pinv_cuts_a_singular_value_sitting_exactly_on_the_cutoff() {
     assert_ne!(triple.data(), tensor.data());
 
     // And on the compact arm.
-    let spectrum = tensor.svd_compact().unwrap().1;
+    let spectrum = tensor.svd_compact().unwrap().s;
     let compact_pinv = spectrum.pinv(0.25).unwrap();
     let mut kept: Vec<f64> = compact_pinv
         .data()
@@ -4851,7 +4863,7 @@ fn pinv_rejects_a_nonfinite_or_negative_rcond_before_any_work() {
     let _guard = cache_lock();
     let runtime = runtime();
     let typed = z2_endomorphism(&runtime);
-    let spectrum = typed.svd_compact().unwrap().1;
+    let spectrum = typed.svd_compact().unwrap().s;
 
     for rcond in [-1.0, f64::NAN, f64::INFINITY] {
         assert!(
@@ -4921,7 +4933,7 @@ fn pinv_uses_one_global_sigma_max_across_every_sector() {
         "a per-sector cutoff kept the small sector"
     );
     // The compact arm's own `max|entry|` is global for the same reason.
-    let spectrum = tensor.svd_compact().unwrap().1;
+    let spectrum = tensor.svd_compact().unwrap().s;
     let kept = spectrum
         .pinv(0.5)
         .unwrap()
@@ -4993,7 +5005,7 @@ fn exp_of_a_compact_spectrum_stays_compact_and_is_elementwise() {
     // Scaled down: the fixture's largest singular value is in the thousands and
     // `exp` of it overflows to infinity, which no comparison can separate from
     // a wrong infinity.
-    let typed_s = typed.svd_compact().unwrap().1.scale(1e-3);
+    let typed_s = typed.svd_compact().unwrap().s.scale(1e-3);
 
     let typed_exp = typed_s.exp().unwrap();
     // Every stored value is `exp` of the source's: the elementwise claim, read
@@ -5077,7 +5089,7 @@ fn exp_of_a_complex_compact_spectrum_takes_the_complex_elementwise_branch() {
     }
 
     // Compact storage of the same values: accepted, elementwise.
-    let spectrum = dense.eig_full().unwrap().0.scale(Complex64::new(1.0, 0.0));
+    let spectrum = dense.eig_full().unwrap().d.scale(Complex64::new(1.0, 0.0));
     let image = spectrum.exp().unwrap();
     for (index, (source, value)) in spectrum.data().iter().zip(image.data()).enumerate() {
         let expected = if *source == Complex64::new(0.0, 0.0) && !on_diagonal(&spectrum, index) {
@@ -5103,7 +5115,7 @@ fn sqrt_squares_to_the_source_on_both_storages() {
     let _guard = cache_lock();
     let runtime = runtime();
     let typed = z2_endomorphism(&runtime);
-    let typed_s = typed.svd_compact().unwrap().1;
+    let typed_s = typed.svd_compact().unwrap().s;
 
     // √S · √S = S.
     let root = typed_s.sqrt().unwrap();
@@ -5174,7 +5186,7 @@ fn sqrt_of_a_negative_f64_entry_points_at_the_complex_payload() {
     let _guard = cache_lock();
     let runtime = runtime();
     let typed = z2_endomorphism(&runtime);
-    let typed_s = typed.svd_compact().unwrap().1.scale(-1.0);
+    let typed_s = typed.svd_compact().unwrap().s.scale(-1.0);
 
     for (name, result) in [
         ("compact", typed_s.sqrt()),
@@ -5270,7 +5282,7 @@ fn c64_compact_inv_and_pinv_are_elementwise_reciprocals() {
         complex(((state >> 33) as f64) / (u32::MAX as f64) + 0.5)
     };
     let typed = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| next()).unwrap();
-    let typed_s = typed.svd_compact().unwrap().1;
+    let typed_s = typed.svd_compact().unwrap().s;
     let source = typed_s.diagonal_spectrum().unwrap().unwrap();
     let sigma_max = source
         .iter()
@@ -5359,7 +5371,7 @@ fn compact_contract_identity_output_does_not_publish_a_transform_cache_entry() {
         .unwrap()
         .svd_compact()
         .unwrap()
-        .1;
+        .s;
     runtime.clear_tree_transform_cache();
     let before = runtime.tree_transform_cache_info();
 
@@ -5384,8 +5396,8 @@ fn diagonal_contract_preserves_left_provider_authority_on_every_compact_arm() {
             let right = TensorMap::<_, f64>::id(&runtime, [&right_leg])
                 .unwrap()
                 .scale(3.0);
-            let left_d = left.svd_compact().unwrap().1;
-            let right_d = right.svd_compact().unwrap().1;
+            let left_d = left.svd_compact().unwrap().s;
+            let right_d = right.svd_compact().unwrap().s;
             assert!(!std::ptr::eq(left.provider(), right.provider()));
 
             let left_dense = forced_dense(&left_d);
@@ -5450,7 +5462,7 @@ fn complex_diagonal_contract_matches_the_typed_dense_route() {
     let _guard = cache_lock();
     let runtime = runtime();
     let typed = z2_complex_tensor(&runtime);
-    let typed_s = typed.svd_compact().unwrap().1;
+    let typed_s = typed.svd_compact().unwrap().s;
     let dense_s = forced_dense(&typed_s);
 
     for &(_name, spectrum_on_the_right, lhs_axes, rhs_axes, output_axes) in DIAGONAL_CONTRACT_CASES
@@ -5496,7 +5508,7 @@ fn the_diagonal_contract_arm_keeps_fermionic_signs() {
     let _guard = cache_lock();
     let runtime = runtime();
     let typed = fermionic_endo(&runtime);
-    let typed_s = typed.svd_compact().unwrap().1;
+    let typed_s = typed.svd_compact().unwrap().s;
     let dense_s = forced_dense(&typed_s);
 
     for &(name, spectrum_on_the_right, output_axes) in &[
@@ -5550,7 +5562,7 @@ fn the_diagonal_contract_arm_declines_an_illegal_contraction() {
         .unwrap()
         .svd_compact()
         .unwrap()
-        .1;
+        .s;
 
     // `s`'s domain leg is non-dual, `typed`'s leading codomain leg is dual.
     assert!(s.contract(&typed, &[1], &[0], &[0, 1]).is_err());
@@ -5576,7 +5588,7 @@ fn the_diagonal_contract_arm_declines_an_illegal_contraction() {
         .unwrap()
         .svd_compact()
         .unwrap()
-        .1;
+        .s;
     let wide = TensorMap::from_block_fn(&runtime, [&leg], [&leg], typed_fill_value).unwrap();
     assert!(wide.contract(&narrow_bond, &[1], &[0], &[0, 1]).is_err());
     assert!(narrow_bond.contract(&wide, &[1], &[0], &[0, 1]).is_err());
@@ -5653,7 +5665,7 @@ fn the_diagonal_contract_arm_is_its_own_dense_route_on_every_axis_pattern() {
     let runtime = runtime();
     for split in [1, 2] {
         let t = z2_tensor_split(&runtime, split);
-        let s = t.svd_compact().unwrap().1;
+        let s = t.svd_compact().unwrap().s;
         let s_dense = forced_dense(&s);
 
         let mut fired = 0usize;
@@ -5777,7 +5789,7 @@ fn z2_bond(runtime: &Runtime) -> TensorMap<tenet::core::Z2FusionRule, f64> {
     )
     .unwrap();
     let typed = TensorMap::from_block_fn(runtime, [&leg], [&leg], typed_fill_value).unwrap();
-    typed.svd_compact().unwrap().1
+    typed.svd_compact().unwrap().s
 }
 
 /// The three rank-(1,1) re-orderings that reduce to the proved swap, plus the
@@ -5845,7 +5857,7 @@ fn compact_rank_one_swaps_match_the_dense_route_for_dual_and_fermionic_legs() {
             next
         })
         .unwrap();
-        let compact = source.svd_compact().unwrap().1;
+        let compact = source.svd_compact().unwrap().s;
         let dense = forced_dense(&compact);
         for ((name, actual), (_, expected)) in rank_one_reorderings(&compact)
             .into_iter()
@@ -5878,7 +5890,7 @@ fn compact_rank_one_swaps_match_the_dense_route_for_dual_and_fermionic_legs() {
             next
         })
         .unwrap();
-        let compact = source.svd_compact().unwrap().1;
+        let compact = source.svd_compact().unwrap().s;
         let dense = forced_dense(&compact);
         for ((name, actual), (_, expected)) in rank_one_reorderings(&compact)
             .into_iter()
@@ -5923,7 +5935,7 @@ fn z2_spectrum_fixture(
         }
     })
     .unwrap();
-    source.svd_compact().unwrap().1
+    source.svd_compact().unwrap().s
 }
 
 #[test]
@@ -5980,7 +5992,7 @@ fn compact_is_posdef_matches_the_forced_dense_route_for_a_hermitian_c64_spectrum
     let hermitian = square.repartition(2).unwrap();
     assert!(hermitian.is_hermitian(1e-10).unwrap());
 
-    let d = hermitian.eigh_full().unwrap().0;
+    let d = hermitian.eigh_full().unwrap().d;
 
     // The Hermiticity gate is load-bearing and is checked here, because every
     // other fixture in this file answers the same with or without it. Rotating
@@ -5994,7 +6006,7 @@ fn compact_is_posdef_matches_the_forced_dense_route_for_a_hermitian_c64_spectrum
     let skewed = real
         .svd_compact()
         .unwrap()
-        .1
+        .s
         .scale(Complex64::new(1.0, 1.0));
     assert!(!skewed.is_hermitian(1e-10).unwrap());
     for tol in [0.0, 1e-14, 1e-8, 1e-3] {
@@ -6046,7 +6058,7 @@ where
             fill(next)
         })
         .unwrap();
-    typed.svd_compact().unwrap().1
+    typed.svd_compact().unwrap().s
 }
 
 /// The typed compact trace against the typed forced-dense engine route, both
@@ -6256,7 +6268,7 @@ fn compact_full_trace_is_the_supertrace_and_the_transpose_flips_it() {
             })
             .unwrap();
         let s: TensorMap<tenet::core::FermionParityFusionRule, f64> =
-            source.svd_compact().unwrap().1;
+            source.svd_compact().unwrap().s;
         assert_supertrace(name, sign, &s);
     }
 
@@ -6274,7 +6286,7 @@ fn compact_full_trace_is_the_supertrace_and_the_transpose_flips_it() {
             next
         })
         .unwrap();
-    let s: TensorMap<tenet::core::Z2FusionRule, f64> = source.svd_compact().unwrap().1;
+    let s: TensorMap<tenet::core::Z2FusionRule, f64> = source.svd_compact().unwrap().s;
     let positive: f64 = s.tr().unwrap();
     let traced: f64 = s.trace_pairs(&[(0, 1)]).unwrap().scalar().unwrap();
     assert_eq!(traced, positive, "z2 odd");
@@ -6616,7 +6628,11 @@ fn assert_contract_compose_compact_laws_hold<R>(
     // Absorb the compact spectrum into U, then use the remaining Vh factor to
     // reconstruct the source. This tests the compact arm without comparing an
     // SVD gauge that is not public API.
-    let (typed_u, typed_s, typed_vh) = typed
+    let Svd {
+        u: typed_u,
+        s: typed_s,
+        vh: typed_vh,
+    } = typed
         .0
         .svd_compact()
         .unwrap_or_else(|error| panic!("{what}: svd_compact failed: {error}"));
@@ -6818,7 +6834,10 @@ fn assert_reductions_and_factorizations_hold<R>(
          <t, t> = {self_inner}, sum of squares = {unweighted}"
     );
 
-    let (typed_q, typed_r) = typed.0.qr_compact().unwrap();
+    let Qr {
+        q: typed_q,
+        r: typed_r,
+    } = typed.0.qr_compact().unwrap();
     assert_data_close_f64(typed_q.compose(&typed_r).unwrap().data(), typed.0.data());
     assert!(typed_q.is_isometric(1e-12).unwrap(), "{what}: qr q");
     assert_same_legs(&typed_q.codomain(), &typed.0.codomain());
@@ -6827,7 +6846,10 @@ fn assert_reductions_and_factorizations_hold<R>(
     assert_nonzero(what, typed_q.data());
     assert_nonzero(what, typed_r.data());
 
-    let (typed_c, typed_vh) = typed.0.lq_compact().unwrap();
+    let Lq {
+        l: typed_c,
+        q: typed_vh,
+    } = typed.0.lq_compact().unwrap();
     assert_data_close_f64(typed_c.compose(&typed_vh).unwrap().data(), typed.0.data());
     assert!(
         typed_vh.adjoint().unwrap().is_isometric(1e-12).unwrap(),
@@ -7530,21 +7552,21 @@ fn typed_polar_reconstructs_the_input_f64_u1_and_c64_fz2() {
     let leg = u1_typed_leg();
     let tall: TensorMap<tenet::core::U1FusionRule, f64> =
         TensorMap::rand_with_seed(&runtime, [&leg, &leg], [&leg], 3).unwrap();
-    let (w, p) = tall.left_polar().unwrap();
+    let LeftPolar { w, p } = tall.left_polar().unwrap();
     assert_data_close_f64(w.compose(&p).unwrap().data(), tall.data());
     let wide: TensorMap<tenet::core::U1FusionRule, f64> =
         TensorMap::rand_with_seed(&runtime, [&leg], [&leg, &leg], 5).unwrap();
-    let (p, w) = wide.right_polar().unwrap();
+    let RightPolar { p, wh: w } = wide.right_polar().unwrap();
     assert_data_close_f64(p.compose(&w).unwrap().data(), wide.data());
 
     let leg = fz2_typed_leg();
     let tall: TensorMap<tenet::core::FermionParityFusionRule, Complex64> =
         TensorMap::rand_with_seed(&runtime, [&leg, &leg], [&leg], 7).unwrap();
-    let (w, p) = tall.left_polar().unwrap();
+    let LeftPolar { w, p } = tall.left_polar().unwrap();
     assert_data_close_c64(w.compose(&p).unwrap().data(), tall.data());
     let wide: TensorMap<tenet::core::FermionParityFusionRule, Complex64> =
         TensorMap::rand_with_seed(&runtime, [&leg], [&leg, &leg], 11).unwrap();
-    let (p, w) = wide.right_polar().unwrap();
+    let RightPolar { p, wh: w } = wide.right_polar().unwrap();
     assert_data_close_c64(p.compose(&w).unwrap().data(), wide.data());
 }
 
@@ -7560,7 +7582,7 @@ fn typed_polar_factor_laws_hold() {
     let leg = fz2_typed_leg();
     let tall: TensorMap<tenet::core::FermionParityFusionRule, Complex64> =
         TensorMap::rand_with_seed(&runtime, [&leg, &leg], [&leg], 13).unwrap();
-    let (w, p) = tall.left_polar().unwrap();
+    let LeftPolar { w, p } = tall.left_polar().unwrap();
     let id: TensorMap<tenet::core::FermionParityFusionRule, Complex64> =
         TensorMap::id(&runtime, [&leg]).unwrap();
     assert_data_close_c64(w.adjoint().unwrap().compose(&w).unwrap().data(), id.data());
@@ -7573,7 +7595,7 @@ fn typed_polar_factor_laws_hold() {
     let leg = u1_typed_leg();
     let wide: TensorMap<tenet::core::U1FusionRule, f64> =
         TensorMap::rand_with_seed(&runtime, [&leg], [&leg, &leg], 17).unwrap();
-    let (p, w) = wide.right_polar().unwrap();
+    let RightPolar { p, wh: w } = wide.right_polar().unwrap();
     let id: TensorMap<tenet::core::U1FusionRule, f64> = TensorMap::id(&runtime, [&leg]).unwrap();
     assert_data_close_f64(w.compose(&w.adjoint().unwrap()).unwrap().data(), id.data());
     assert!(p.is_hermitian(1e-12).unwrap());
@@ -7596,7 +7618,7 @@ fn typed_polar_factor_spaces_match_tensorkit() {
 
     let tall: TensorMap<tenet::core::U1FusionRule, f64> =
         TensorMap::rand_with_seed(&runtime, [&leg, &dual], [&dual], 19).unwrap();
-    let (w, p) = tall.left_polar().unwrap();
+    let LeftPolar { w, p } = tall.left_polar().unwrap();
     assert_same_legs(&w.codomain(), &tall.codomain());
     assert_same_legs(&w.domain(), &tall.domain());
     assert_same_legs(&p.codomain(), &tall.domain());
@@ -7604,7 +7626,7 @@ fn typed_polar_factor_spaces_match_tensorkit() {
 
     let wide: TensorMap<tenet::core::U1FusionRule, f64> =
         TensorMap::rand_with_seed(&runtime, [&dual], [&leg, &dual], 23).unwrap();
-    let (p, w) = wide.right_polar().unwrap();
+    let RightPolar { p, wh: w } = wide.right_polar().unwrap();
     assert_same_legs(&p.codomain(), &wide.codomain());
     assert_same_legs(&p.domain(), &wide.codomain());
     assert_same_legs(&w.codomain(), &wide.codomain());
@@ -7667,7 +7689,7 @@ fn typed_polar_carries_an_external_provider() {
         })
         .unwrap();
 
-    let (w, p) = tensor.left_polar().unwrap();
+    let LeftPolar { w, p } = tensor.left_polar().unwrap();
     assert_data_close_f64(w.compose(&p).unwrap().data(), tensor.data());
     let gram = w.adjoint().unwrap().compose(&w).unwrap();
     let id: TensorMap<ExternalZ3, f64> = TensorMap::id(&runtime, [&wide, &narrow]).unwrap();
@@ -7823,7 +7845,7 @@ fn typed_zeros_like_keeps_the_spaces_and_zeroes_the_payload() {
     assert!(zeros.data().iter().all(|&value| value == 0.0));
 
     // A compact spectrum factor stays on its bond space with a zero spectrum.
-    let s: TensorMap<tenet::core::Z2FusionRule, f64> = typed.svd_compact().unwrap().1;
+    let s: TensorMap<tenet::core::Z2FusionRule, f64> = typed.svd_compact().unwrap().s;
     let s_zeros: TensorMap<tenet::core::Z2FusionRule, f64> = s.zeros_like();
     assert_same_legs(&s_zeros.codomain(), &s.codomain());
     assert!(s_zeros.data().iter().all(|&value| value == 0.0));
@@ -7844,7 +7866,7 @@ fn typed_to_c64_widens_dense_and_compact_values_exactly() {
         .zip(typed.data())
         .all(|(&wide, &real)| wide == Complex64::new(real, 0.0)));
 
-    let typed_s: TensorMap<tenet::core::Z2FusionRule, f64> = typed.svd_compact().unwrap().1;
+    let typed_s: TensorMap<tenet::core::Z2FusionRule, f64> = typed.svd_compact().unwrap().s;
     let typed_s_wide: TensorMap<tenet::core::Z2FusionRule, Complex64> = typed_s.to_c64();
     assert!(typed_s_wide
         .data()
@@ -7890,7 +7912,7 @@ fn typed_re_im_keep_a_compact_spectrum_on_its_bond_space() {
     let _guard = cache_lock();
     let runtime = runtime();
     let complex_typed = z2_complex_tensor(&runtime);
-    let s: TensorMap<tenet::core::Z2FusionRule, Complex64> = complex_typed.svd_compact().unwrap().1;
+    let s: TensorMap<tenet::core::Z2FusionRule, Complex64> = complex_typed.svd_compact().unwrap().s;
 
     let real_part: TensorMap<tenet::core::Z2FusionRule, f64> = s.re();
     let imag_part: TensorMap<tenet::core::Z2FusionRule, f64> = s.im();
@@ -8792,7 +8814,7 @@ fn typed_twist_on_a_compact_spectrum_matches_the_dense_route() {
     let runtime = runtime();
     let typed = fz2_index(&runtime);
     let typed_s: TensorMap<tenet::core::FermionParityFusionRule, f64> =
-        typed.svd_compact().unwrap().1;
+        typed.svd_compact().unwrap().s;
     let dense = forced_dense(&typed_s);
     let typed_twisted: TensorMap<tenet::core::FermionParityFusionRule, f64> =
         typed_s.twist(&[0]).unwrap();
@@ -9004,7 +9026,7 @@ fn external_nobraiding_twist_and_flip_reject_nontrivial_sectors() {
     // The compact diagonal arm rejects too: an SVD spectrum factor lives on
     // the mixed bond space, so its twist must fail before the compact
     // per-sector scaling ever runs.
-    let s: TensorMap<PlanarZ2, f64> = t.svd_compact().unwrap().1;
+    let s: TensorMap<PlanarZ2, f64> = t.svd_compact().unwrap().s;
     let compact_error = s.twist(&[0]).unwrap_err();
     assert!(
         matches!(compact_error, tenet::typed::Error::InvalidArgument(_)),

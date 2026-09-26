@@ -22,6 +22,7 @@
 mod compose;
 mod factorize;
 mod matrix_functions;
+mod results;
 pub mod truncation;
 
 pub use factorize::{
@@ -52,6 +53,7 @@ pub use matrix_functions::{
     pinv, pinv_adjoint_parent_dyn, pinv_direct_into_dyn, pinv_dyn, solve_left_direct_dyn,
     solve_left_direct_into_dyn,
 };
+pub use results::{Eig, Eigh, LeftPolar, Lq, Qr, RightPolar, Svd};
 pub use truncation::{
     select_truncation, Truncation, TruncationDecision, TruncationError, TruncationSpace,
     WeightedSpectrum,

@@ -265,6 +265,10 @@ pub use crate::runtime::Runtime;
 /// payload must, so it is re-exported here rather than left unnameable
 /// outside the crate.
 pub use tenet_matrixalgebra::SpectrumMagnitude;
+/// Named factor sets returned by the factorization methods of [`TensorMap`].
+/// They are defined next to the expert factorizations in `tenet-matrixalgebra`,
+/// which return the same types, and re-exported here and in [`crate::prelude`].
+pub use tenet_matrixalgebra::{Eig, Eigh, LeftPolar, Lq, Qr, RightPolar, Svd};
 /// Re-exported for the same reason as [`Error`] and [`Runtime`]:
 /// [`GradedSpace::find_truncated`] takes one, so `use tenet::typed::*` would
 /// not be self-sufficient without it.
@@ -496,7 +500,7 @@ impl TensorScalar for num_complex::Complex32 {}
 /// `f64` by calling a factorization on it, because `f64` and
 /// [`num_complex::Complex64`] were the only implementors. With four, inference
 /// waits for the end-of-function fallback, which is too late for a method call
-/// on the result — `t.eigh_full()?.0.diagview()?[0].values[0].abs()` on an
+/// on the result — `t.eigh_full()?.d.diagview()?[0].values[0].abs()` on an
 /// un-annotated `from_block_fn` tensor now needs the payload dtype written
 /// down. The same holds for [`GradedSpace::find_truncated`], whose spectrum
 /// type is `SpectrumMagnitude` and now has four implementors.
@@ -1479,7 +1483,7 @@ where
 {
     fn eigh_full_checked_generic(
         &self,
-    ) -> Result<(Self, Self), GenericTensorError<<R as CheckedGenericFusion>::Error>> {
+    ) -> Result<Eigh<Self>, GenericTensorError<<R as CheckedGenericFusion>::Error>> {
         if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
             return self
                 .materialized_tensor_uncached()
@@ -1498,7 +1502,10 @@ where
             &mut eigenvalues,
             D::from_real,
         )?;
-        Ok((d, wrap_factor_on(&self.runtime, v)))
+        Ok(Eigh {
+            d,
+            v: wrap_factor_on(&self.runtime, v),
+        })
     }
 }
 
@@ -1518,10 +1525,7 @@ where
     fn eig_full_checked_generic(
         &self,
     ) -> Result<
-        (
-            TensorMap<R, <D as FactorScalar>::Eig>,
-            TensorMap<R, <D as FactorScalar>::Eig>,
-        ),
+        Eig<TensorMap<R, <D as FactorScalar>::Eig>>,
         GenericTensorError<<R as CheckedGenericFusion>::Error>,
     > {
         if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
@@ -1542,7 +1546,10 @@ where
             &mut eigenvalues,
             <<D as FactorScalar>::Eig as FactorScalar>::from_complex64,
         )?;
-        Ok((d, wrap_factor_on(&self.runtime, v)))
+        Ok(Eig {
+            d,
+            v: wrap_factor_on(&self.runtime, v),
+        })
     }
 }
 
@@ -1557,7 +1564,7 @@ where
     /// Checked-Generic full QR for owned host tensors.
     fn qr_full_checked_generic(
         &self,
-    ) -> Result<(Self, Self), GenericTensorError<<R as CheckedGenericFusion>::Error>> {
+    ) -> Result<Qr<Self>, GenericTensorError<<R as CheckedGenericFusion>::Error>> {
         let TypedTensorRepr::Owned(body) = &self.repr else {
             return Err(GenericTensorError::Facade(Error::InvalidArgument(
                 "checked Generic qr_full does not accept lazy adjoints".to_string(),
@@ -1566,11 +1573,11 @@ where
         let mut dense = self.runtime.lease_dense();
         let input = BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())
             .map_err(|error| GenericTensorError::Facade(error.into()))?;
-        let (q, r) = tenet_matrixalgebra::qr_full_dyn_checked_generic(dense.dense(), &input)?;
-        Ok((
-            wrap_factor_on(&self.runtime, q),
-            wrap_factor_on(&self.runtime, r),
-        ))
+        let Qr { q, r } = tenet_matrixalgebra::qr_full_dyn_checked_generic(dense.dense(), &input)?;
+        Ok(Qr {
+            q: wrap_factor_on(&self.runtime, q),
+            r: wrap_factor_on(&self.runtime, r),
+        })
     }
 }
 
@@ -1620,7 +1627,7 @@ where
     /// Checked-Generic compact LQ for owned host tensors.
     fn lq_compact_checked_generic(
         &self,
-    ) -> Result<(Self, Self), GenericTensorError<<R as CheckedGenericFusion>::Error>> {
+    ) -> Result<Lq<Self>, GenericTensorError<<R as CheckedGenericFusion>::Error>> {
         let TypedTensorRepr::Owned(body) = &self.repr else {
             return Err(GenericTensorError::Facade(Error::InvalidArgument(
                 "checked Generic lq_compact does not accept lazy adjoints".to_string(),
@@ -1629,11 +1636,12 @@ where
         let mut dense = self.runtime.lease_dense();
         let input = BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())
             .map_err(|error| GenericTensorError::Facade(error.into()))?;
-        let (l, q) = tenet_matrixalgebra::lq_compact_dyn_checked_generic(dense.dense(), &input)?;
-        Ok((
-            wrap_factor_on(&self.runtime, l),
-            wrap_factor_on(&self.runtime, q),
-        ))
+        let Lq { l, q } =
+            tenet_matrixalgebra::lq_compact_dyn_checked_generic(dense.dense(), &input)?;
+        Ok(Lq {
+            l: wrap_factor_on(&self.runtime, l),
+            q: wrap_factor_on(&self.runtime, q),
+        })
     }
 }
 
@@ -1647,7 +1655,7 @@ where
 {
     fn svd_full_checked_generic(
         &self,
-    ) -> Result<(Self, Self, Self), GenericTensorError<<R as CheckedGenericFusion>::Error>> {
+    ) -> Result<Svd<Self>, GenericTensorError<<R as CheckedGenericFusion>::Error>> {
         let TypedTensorRepr::Owned(body) = &self.repr else {
             return Err(GenericTensorError::Facade(Error::InvalidArgument(
                 "checked Generic svd_full does not accept lazy adjoints".to_string(),
@@ -1658,17 +1666,17 @@ where
             .map_err(|error| GenericTensorError::Facade(error.into()))?;
         let out = tenet_matrixalgebra::svd_full_dyn_checked_generic(dense.dense(), &input)?;
         let (u, s, vh, _) = out.into_parts();
-        Ok((
-            wrap_factor_on(&self.runtime, u),
-            wrap_factor_on(&self.runtime, s),
-            wrap_factor_on(&self.runtime, vh),
-        ))
+        Ok(Svd {
+            u: wrap_factor_on(&self.runtime, u),
+            s: wrap_factor_on(&self.runtime, s),
+            vh: wrap_factor_on(&self.runtime, vh),
+        })
     }
 
     /// Checked-Generic compact SVD for owned host tensors.
     fn svd_compact_checked_generic(
         &self,
-    ) -> Result<(Self, Self, Self), GenericTensorError<<R as CheckedGenericFusion>::Error>> {
+    ) -> Result<Svd<Self>, GenericTensorError<<R as CheckedGenericFusion>::Error>> {
         let TypedTensorRepr::Owned(body) = &self.repr else {
             return Err(GenericTensorError::Facade(Error::InvalidArgument(
                 "checked Generic svd_compact does not accept lazy adjoints".to_string(),
@@ -1677,13 +1685,13 @@ where
         let mut dense = self.runtime.lease_dense();
         let input = BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())
             .map_err(|error| GenericTensorError::Facade(error.into()))?;
-        let (u, s, vh) =
+        let Svd { u, s, vh } =
             tenet_matrixalgebra::svd_compact_dyn_checked_generic(dense.dense(), &input)?;
-        Ok((
-            wrap_factor_on(&self.runtime, u),
-            wrap_factor_on(&self.runtime, s),
-            wrap_factor_on(&self.runtime, vh),
-        ))
+        Ok(Svd {
+            u: wrap_factor_on(&self.runtime, u),
+            s: wrap_factor_on(&self.runtime, s),
+            vh: wrap_factor_on(&self.runtime, vh),
+        })
     }
 }
 
@@ -1737,7 +1745,7 @@ where
     /// inputs; no operation-local whole-payload fallback is introduced here.
     fn qr_compact_checked_generic(
         &self,
-    ) -> Result<(Self, Self), GenericTensorError<<R as CheckedGenericFusion>::Error>> {
+    ) -> Result<Qr<Self>, GenericTensorError<<R as CheckedGenericFusion>::Error>> {
         let TypedTensorRepr::Owned(body) = &self.repr else {
             return Err(GenericTensorError::Facade(Error::InvalidArgument(
                 "checked Generic qr_compact does not accept lazy adjoints".to_string(),
@@ -1746,11 +1754,12 @@ where
         let mut dense = self.runtime.lease_dense();
         let input = BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())
             .map_err(|error| GenericTensorError::Facade(error.into()))?;
-        let (q, r) = tenet_matrixalgebra::qr_compact_dyn_checked_generic(dense.dense(), &input)?;
-        Ok((
-            wrap_factor_on(&self.runtime, q),
-            wrap_factor_on(&self.runtime, r),
-        ))
+        let Qr { q, r } =
+            tenet_matrixalgebra::qr_compact_dyn_checked_generic(dense.dense(), &input)?;
+        Ok(Qr {
+            q: wrap_factor_on(&self.runtime, q),
+            r: wrap_factor_on(&self.runtime, r),
+        })
     }
 }
 
@@ -1760,7 +1769,7 @@ where
     R::Mode: TypedTensorQrDispatch<R, D>,
     D: FactorizationScalar,
 {
-    /// Returns the compact QR factorization `self = q * r` as `(q, r)`.
+    /// Returns the compact QR factorization `self = q * r` as a [`Qr`].
     ///
     /// In coupled sector `c`, with block shape `m_c x n_c`, the bond dimension
     /// is `k_c = min(m_c, n_c)`. Thus `q : codomain(self) <- W` has
@@ -1774,8 +1783,8 @@ where
     /// materialized first. Multiplicity-free lazy adjoints are materialized
     /// only for the operation and stay uncached; checked-Generic QR requires an
     /// owned input. Checked factors use the same provider instance as `self`.
-    /// If any sector fails or the provider rejects an output space, no factor
-    /// tuple is returned.
+    /// If any sector fails or the provider rejects an output space, no factors
+    /// are returned.
     ///
     /// # Errors
     ///
@@ -1786,17 +1795,17 @@ where
     ///
     /// ```
     /// use tenet::core::{U1FusionRule, U1Irrep};
-    /// use tenet::typed::{GradedSpace, Runtime, TensorMap};
+    /// use tenet::typed::{GradedSpace, Qr, Runtime, TensorMap};
     ///
     /// let runtime = Runtime::builder().build()?;
     /// let v = GradedSpace::try_new(U1FusionRule, [(U1Irrep::new(0), 2)])?;
     /// let a: TensorMap<_, f64> = TensorMap::rand(&runtime, [&v], [&v])?;
-    /// let (q, r) = a.qr_compact()?;
+    /// let Qr { q, r } = a.qr_compact()?;
     /// let rebuilt = q.compose(&r)?;
     /// assert!(rebuilt.axpby(1.0, &a, -1.0)?.norm()? < 1e-12);
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
-    pub fn qr_compact(&self) -> Result<(Self, Self), TypedFacadeError<R>> {
+    pub fn qr_compact(&self) -> Result<Qr<Self>, TypedFacadeError<R>> {
         <R::Mode as TypedTensorQrDispatch<R, D>>::qr_compact(self)
     }
 }
@@ -1808,7 +1817,8 @@ where
     D: FactorizationScalar,
 {
     /// Returns the compact singular-value decomposition
-    /// `self = u * s * vh` as `(u, s, vh)`.
+    /// `self = u * s * vh` as an [`Svd`], which states the spectrum order and
+    /// the storage routes of `s`.
     ///
     /// Sector `c` uses `k_c = min(m_c, n_c)`, with
     /// `u : codomain(self) <- W`, `s : W <- W`, and
@@ -1826,35 +1836,34 @@ where
     /// Dense cost is `O(sum_c m_c * n_c * min(m_c, n_c))`. A
     /// multiplicity-free lazy adjoint is handled from its parent without
     /// filling the receiver cache; checked-Generic SVD requires owned input.
-    /// Any sector, layout, or provider failure returns no factor tuple.
+    /// Any sector, layout, or provider failure returns no factors.
     ///
     /// ```
     /// use tenet::core::{U1FusionRule, U1Irrep};
-    /// use tenet::typed::{GradedSpace, Runtime, TensorMap};
+    /// use tenet::typed::{GradedSpace, Runtime, Svd, TensorMap};
     ///
     /// let runtime = Runtime::builder().build()?;
     /// let v = GradedSpace::try_new(U1FusionRule, [(U1Irrep::new(0), 2)])?;
     /// let a: TensorMap<_, f64> = TensorMap::rand(&runtime, [&v], [&v])?;
-    /// let (u, s, vh) = a.svd_compact()?;
+    /// let Svd { u, s, vh } = a.svd_compact()?;
     /// let rebuilt = u.compose(&s)?.compose(&vh)?;
     /// assert!(rebuilt.axpby(1.0, &a, -1.0)?.norm()? < 1e-12);
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
-    pub fn svd_compact(&self) -> Result<(Self, Self, Self), TypedFacadeError<R>> {
+    pub fn svd_compact(&self) -> Result<Svd<Self>, TypedFacadeError<R>> {
         <R::Mode as TypedTensorSvdDispatch<R, D>>::svd_compact(self)
     }
 
     /// Returns the full SVD `self = u * s * vh` with square outer factors.
     ///
     /// In sector `c`, `u` is `m_c x m_c`, `vh` is `n_c x n_c`, and `s` is
-    /// the dense rectangular `m_c x n_c` diagonal matrix. Factor order is
-    /// `(u, s, vh)`, and the spaces are
+    /// the dense rectangular `m_c x n_c` diagonal matrix. The spaces are
     /// `u : codomain <- W_out`, `s : W_out <- W_in`, and
     /// `vh : W_in <- domain`. It accepts the same inputs as
     /// [`Self::svd_compact`], but its square outer factors can require more
     /// dense storage. Checked factors use the source provider instance, and a
-    /// failure returns no factor tuple.
-    pub fn svd_full(&self) -> Result<(Self, Self, Self), TypedFacadeError<R>> {
+    /// failure returns no factors.
+    pub fn svd_full(&self) -> Result<Svd<Self>, TypedFacadeError<R>> {
         <R::Mode as TypedTensorSvdDispatch<R, D>>::svd_full(self)
     }
 }
@@ -1865,7 +1874,7 @@ where
     R::Mode: TypedTensorLqDispatch<R, D>,
     D: FactorizationScalar,
 {
-    /// Returns the compact LQ factorization `self = l * q` as `(l, q)`.
+    /// Returns the compact LQ factorization `self = l * q` as an [`Lq`].
     ///
     /// Sector `c` uses bond dimension `k_c = min(m_c, n_c)`, with
     /// `l : codomain(self) <- W` and `q : W <- domain(self)`. The rows of `q`
@@ -1876,21 +1885,21 @@ where
     /// Its cost is the same as [`Self::qr_compact`]. Compact inputs are
     /// materialized first, and checked Generic requires an owned input.
     /// Checked factors use the source provider instance, and a failure returns
-    /// no factor tuple. A multiplicity-free lazy adjoint runs QR on its owned
+    /// no factors. A multiplicity-free lazy adjoint runs QR on its owned
     /// parent and returns detached owned factors without caching the receiver.
     ///
     /// ```
     /// use tenet::core::{U1FusionRule, U1Irrep};
-    /// use tenet::typed::{GradedSpace, Runtime, TensorMap};
+    /// use tenet::typed::{GradedSpace, Lq, Runtime, TensorMap};
     ///
     /// let runtime = Runtime::builder().build()?;
     /// let v = GradedSpace::try_new(U1FusionRule, [(U1Irrep::new(0), 2)])?;
     /// let a: TensorMap<_, f64> = TensorMap::rand(&runtime, [&v], [&v])?;
-    /// let (l, q) = a.lq_compact()?;
+    /// let Lq { l, q } = a.lq_compact()?;
     /// assert!(l.compose(&q)?.axpby(1.0, &a, -1.0)?.norm()? < 1e-12);
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
-    pub fn lq_compact(&self) -> Result<(Self, Self), TypedFacadeError<R>> {
+    pub fn lq_compact(&self) -> Result<Lq<Self>, TypedFacadeError<R>> {
         <R::Mode as TypedTensorLqDispatch<R, D>>::lq_compact(self)
     }
 }
@@ -2124,7 +2133,7 @@ where
     R::Mode: TypedTensorFullQrDispatch<R, D>,
     D: FactorizationScalar,
 {
-    /// Returns the full QR factorization `self = q * r` as `(q, r)`.
+    /// Returns the full QR factorization `self = q * r` as a [`Qr`].
     ///
     /// Sector `c` has a square `m_c x m_c` unitary `q` and an
     /// `m_c x n_c` upper-trapezoidal `r`; the intermediate bond therefore has
@@ -2134,7 +2143,7 @@ where
     /// square `q` costs `O(m_c²(n_c + m_c))`. Source packing and owned factor
     /// publication are additional costs. See [`Self::qr_compact`] for the
     /// compact alternative, storage and lazy-input behavior, errors, and example.
-    pub fn qr_full(&self) -> Result<(Self, Self), TypedFacadeError<R>> {
+    pub fn qr_full(&self) -> Result<Qr<Self>, TypedFacadeError<R>> {
         <R::Mode as TypedTensorFullQrDispatch<R, D>>::qr_full(self)
     }
 }
@@ -2145,7 +2154,7 @@ where
     R::Mode: TypedTensorFullLqDispatch<R, D>,
     D: FactorizationScalar,
 {
-    /// Returns the full LQ factorization `self = l * q` as `(l, q)`.
+    /// Returns the full LQ factorization `self = l * q` as an [`Lq`].
     ///
     /// Sector `c` has an `m_c x n_c` lower-trapezoidal `l` and a square
     /// `n_c x n_c` unitary `q`; the intermediate bond therefore has the
@@ -2156,7 +2165,7 @@ where
     /// adjoint, and owned factor publication are additional costs. See
     /// [`Self::lq_compact`] for the compact alternative, storage and
     /// lazy-input behavior, errors, and example.
-    pub fn lq_full(&self) -> Result<(Self, Self), TypedFacadeError<R>> {
+    pub fn lq_full(&self) -> Result<Lq<Self>, TypedFacadeError<R>> {
         <R::Mode as TypedTensorFullLqDispatch<R, D>>::lq_full(self)
     }
 }
@@ -2217,13 +2226,12 @@ where
     R::Mode: TypedTensorEighDispatch<R, D>,
     D: FactorizationScalar,
 {
-    /// Returns the Hermitian eigendecomposition `self = v * d * v^H` as
-    /// `(d, v)`.
+    /// Returns the Hermitian eigendecomposition `self = v * d * v^H` as an
+    /// [`Eigh`], which states the spectrum order and the storage routes of `d`.
     ///
     /// The input must be an endomorphism. In each coupled sector,
     /// `v : codomain(self) <- W` is unitary and `d : W <- W` holds the signed
-    /// real eigenvalues. The tuple order is `(d, v)`, not the reading order of
-    /// the reconstruction equation. Eigenvalues are stable-sorted by
+    /// real eigenvalues. Eigenvalues are stable-sorted by
     /// descending absolute value; each eigenvector's phase is fixed by making
     /// its largest-magnitude component real and non-negative. Bases inside an
     /// exactly degenerate eigenspace remain backend-dependent.
@@ -2241,22 +2249,22 @@ where
     /// where applicable. For checked Generic, the original layout or provider
     /// error is available as the source. It also validates identical full
     /// row/column fusion-tree stacking. Factors are returned only after every
-    /// sector succeeds; otherwise the method returns an error and no tuple.
+    /// sector succeeds; otherwise the method returns an error and no factors.
     /// Cost is `O(sum_c n_c^3)`.
     ///
     /// ```
     /// use tenet::core::{U1FusionRule, U1Irrep};
-    /// use tenet::typed::{GradedSpace, Runtime, TensorMap};
+    /// use tenet::typed::{Eigh, GradedSpace, Runtime, TensorMap};
     ///
     /// let runtime = Runtime::builder().build()?;
     /// let v = GradedSpace::try_new(U1FusionRule, [(U1Irrep::new(0), 2)])?;
     /// let a: TensorMap<_, f64> = TensorMap::id(&runtime, [&v])?.scale(2.0);
-    /// let (d, eigenvectors) = a.eigh_full()?;
+    /// let Eigh { d, v: eigenvectors } = a.eigh_full()?;
     /// let rebuilt = eigenvectors.compose(&d)?.compose(&eigenvectors.adjoint()?)?;
     /// assert!(rebuilt.axpby(1.0, &a, -1.0)?.norm()? < 1e-12);
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
-    pub fn eigh_full(&self) -> Result<(Self, Self), TypedFacadeError<R>> {
+    pub fn eigh_full(&self) -> Result<Eigh<Self>, TypedFacadeError<R>> {
         <R::Mode as TypedTensorEighDispatch<R, D>>::eigh_full(self)
     }
 }
@@ -2292,8 +2300,8 @@ where
     R::Mode: TypedTensorEigDispatch<R, D>,
     D: AdvancedLinalgScalar,
 {
-    /// Returns the general eigendecomposition `self * v = v * d` as complex
-    /// `(d, v)`.
+    /// Returns the general eigendecomposition `self * v = v * d` as an
+    /// [`Eig`] of complex factors.
     ///
     /// For a diagonalizable input this gives
     /// `self = v * d * v^-1`. Both factors are complex even when the input is
@@ -2313,34 +2321,24 @@ where
     /// for this call and stay uncached.
     ///
     /// A non-endomorphism, invalid/non-finite dense result, checked rank-gate
-    /// failure, factor-layout failure, or provider failure returns no factor
-    /// tuple. Sectorwise cost is `O(sum_c n_c^3)`.
+    /// failure, factor-layout failure, or provider failure returns no factors.
+    /// Sectorwise cost is `O(sum_c n_c^3)`.
     ///
     /// ```
     /// use tenet::core::{U1FusionRule, U1Irrep};
-    /// use tenet::typed::{GradedSpace, Runtime, TensorMap};
+    /// use tenet::typed::{Eig, GradedSpace, Runtime, TensorMap};
     ///
     /// let runtime = Runtime::builder().build()?;
     /// let v = GradedSpace::try_new(U1FusionRule, [(U1Irrep::new(0), 2)])?;
     /// let a: TensorMap<_, f64> = TensorMap::id(&runtime, [&v])?.scale(2.0);
-    /// let (d, eigenvectors) = a.eig_full()?;
+    /// let Eig { d, v: eigenvectors } = a.eig_full()?;
     /// let rebuilt = eigenvectors.compose(&d)?.compose(&eigenvectors.inv()?)?;
     /// assert!(rebuilt.axpby(1.0.into(), &a.to_c64(), (-1.0).into())?.norm()? < 1e-12);
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
-    #[expect(
-        clippy::type_complexity,
-        reason = "the public eigensolver API exposes its ordered factor tuple directly"
-    )]
     pub fn eig_full(
         &self,
-    ) -> Result<
-        (
-            TensorMap<R, <D as FactorScalar>::Eig>,
-            TensorMap<R, <D as FactorScalar>::Eig>,
-        ),
-        TypedFacadeError<R>,
-    > {
+    ) -> Result<Eig<TensorMap<R, <D as FactorScalar>::Eig>>, TypedFacadeError<R>> {
         <R::Mode as TypedTensorEigDispatch<R, D>>::eig_full(self)
     }
 }
@@ -5684,20 +5682,12 @@ where
     R: TypedSectorAdmission,
     D: FactorizationScalar,
 {
-    #[expect(
-        clippy::type_complexity,
-        reason = "the dispatch contract preserves the public ordered factor tuple"
-    )]
     fn left_polar(
         tensor: &TensorMap<R, D>,
-    ) -> Result<(TensorMap<R, D>, TensorMap<R, D>), Self::FacadeError>;
-    #[expect(
-        clippy::type_complexity,
-        reason = "the dispatch contract preserves the public ordered factor tuple"
-    )]
+    ) -> Result<LeftPolar<TensorMap<R, D>>, Self::FacadeError>;
     fn right_polar(
         tensor: &TensorMap<R, D>,
-    ) -> Result<(TensorMap<R, D>, TensorMap<R, D>), Self::FacadeError>;
+    ) -> Result<RightPolar<TensorMap<R, D>>, Self::FacadeError>;
 }
 
 #[doc(hidden)]
@@ -5724,13 +5714,7 @@ where
     R: TypedSectorAdmission,
     D: FactorizationScalar,
 {
-    #[expect(
-        clippy::type_complexity,
-        reason = "the dispatch contract preserves the public ordered factor tuple"
-    )]
-    fn qr_compact(
-        tensor: &TensorMap<R, D>,
-    ) -> Result<(TensorMap<R, D>, TensorMap<R, D>), Self::FacadeError>;
+    fn qr_compact(tensor: &TensorMap<R, D>) -> Result<Qr<TensorMap<R, D>>, Self::FacadeError>;
 }
 
 #[doc(hidden)]
@@ -5739,20 +5723,8 @@ where
     R: TypedSectorAdmission,
     D: FactorizationScalar,
 {
-    #[expect(
-        clippy::type_complexity,
-        reason = "the dispatch contract preserves the public ordered factor tuple"
-    )]
-    fn svd_compact(
-        tensor: &TensorMap<R, D>,
-    ) -> Result<(TensorMap<R, D>, TensorMap<R, D>, TensorMap<R, D>), Self::FacadeError>;
-    #[expect(
-        clippy::type_complexity,
-        reason = "the dispatch contract preserves the public ordered factor tuple"
-    )]
-    fn svd_full(
-        tensor: &TensorMap<R, D>,
-    ) -> Result<(TensorMap<R, D>, TensorMap<R, D>, TensorMap<R, D>), Self::FacadeError>;
+    fn svd_compact(tensor: &TensorMap<R, D>) -> Result<Svd<TensorMap<R, D>>, Self::FacadeError>;
+    fn svd_full(tensor: &TensorMap<R, D>) -> Result<Svd<TensorMap<R, D>>, Self::FacadeError>;
 }
 
 #[doc(hidden)]
@@ -5761,13 +5733,7 @@ where
     R: TypedSectorAdmission,
     D: FactorizationScalar,
 {
-    #[expect(
-        clippy::type_complexity,
-        reason = "the dispatch contract preserves the public ordered factor tuple"
-    )]
-    fn lq_compact(
-        tensor: &TensorMap<R, D>,
-    ) -> Result<(TensorMap<R, D>, TensorMap<R, D>), Self::FacadeError>;
+    fn lq_compact(tensor: &TensorMap<R, D>) -> Result<Lq<TensorMap<R, D>>, Self::FacadeError>;
 }
 
 #[doc(hidden)]
@@ -5776,13 +5742,7 @@ where
     R: TypedSectorAdmission,
     D: FactorizationScalar,
 {
-    #[expect(
-        clippy::type_complexity,
-        reason = "the dispatch contract preserves the public ordered factor tuple"
-    )]
-    fn qr_full(
-        tensor: &TensorMap<R, D>,
-    ) -> Result<(TensorMap<R, D>, TensorMap<R, D>), Self::FacadeError>;
+    fn qr_full(tensor: &TensorMap<R, D>) -> Result<Qr<TensorMap<R, D>>, Self::FacadeError>;
 }
 
 #[doc(hidden)]
@@ -5791,13 +5751,7 @@ where
     R: TypedSectorAdmission,
     D: FactorizationScalar,
 {
-    #[expect(
-        clippy::type_complexity,
-        reason = "the dispatch contract preserves the public ordered factor tuple"
-    )]
-    fn lq_full(
-        tensor: &TensorMap<R, D>,
-    ) -> Result<(TensorMap<R, D>, TensorMap<R, D>), Self::FacadeError>;
+    fn lq_full(tensor: &TensorMap<R, D>) -> Result<Lq<TensorMap<R, D>>, Self::FacadeError>;
 }
 
 #[doc(hidden)]
@@ -5828,13 +5782,7 @@ where
     R: TypedSectorAdmission,
     D: FactorizationScalar,
 {
-    #[expect(
-        clippy::type_complexity,
-        reason = "the dispatch contract preserves the public ordered factor tuple"
-    )]
-    fn eigh_full(
-        tensor: &TensorMap<R, D>,
-    ) -> Result<(TensorMap<R, D>, TensorMap<R, D>), Self::FacadeError>;
+    fn eigh_full(tensor: &TensorMap<R, D>) -> Result<Eigh<TensorMap<R, D>>, Self::FacadeError>;
 }
 
 #[doc(hidden)]
@@ -5857,19 +5805,9 @@ where
     R: TypedSectorAdmission,
     D: AdvancedLinalgScalar,
 {
-    #[expect(
-        clippy::type_complexity,
-        reason = "the dispatch contract preserves the public ordered factor tuple"
-    )]
     fn eig_full(
         tensor: &TensorMap<R, D>,
-    ) -> Result<
-        (
-            TensorMap<R, <D as FactorScalar>::Eig>,
-            TensorMap<R, <D as FactorScalar>::Eig>,
-        ),
-        Self::FacadeError,
-    >;
+    ) -> Result<Eig<TensorMap<R, <D as FactorScalar>::Eig>>, Self::FacadeError>;
 }
 
 impl<R> TypedSpaceModeDispatch<R> for MultiplicityFreeAdmissionMode
@@ -6137,11 +6075,11 @@ where
         + SectorCodec,
     D: FactorizationScalar,
 {
-    fn left_polar(tensor: &TensorMap<R, D>) -> Result<(TensorMap<R, D>, TensorMap<R, D>), Error> {
+    fn left_polar(tensor: &TensorMap<R, D>) -> Result<LeftPolar<TensorMap<R, D>>, Error> {
         tensor.left_polar_multiplicity_free()
     }
 
-    fn right_polar(tensor: &TensorMap<R, D>) -> Result<(TensorMap<R, D>, TensorMap<R, D>), Error> {
+    fn right_polar(tensor: &TensorMap<R, D>) -> Result<RightPolar<TensorMap<R, D>>, Error> {
         tensor.right_polar_multiplicity_free()
     }
 }
@@ -6180,7 +6118,7 @@ where
         + SectorCodec,
     D: FactorizationScalar,
 {
-    fn qr_compact(tensor: &TensorMap<R, D>) -> Result<(TensorMap<R, D>, TensorMap<R, D>), Error> {
+    fn qr_compact(tensor: &TensorMap<R, D>) -> Result<Qr<TensorMap<R, D>>, Error> {
         tensor.qr_compact_multiplicity_free()
     }
 }
@@ -6193,15 +6131,11 @@ where
         + SectorCodec,
     D: FactorizationScalar,
 {
-    fn svd_compact(
-        tensor: &TensorMap<R, D>,
-    ) -> Result<(TensorMap<R, D>, TensorMap<R, D>, TensorMap<R, D>), Error> {
+    fn svd_compact(tensor: &TensorMap<R, D>) -> Result<Svd<TensorMap<R, D>>, Error> {
         tensor.svd_compact_multiplicity_free()
     }
 
-    fn svd_full(
-        tensor: &TensorMap<R, D>,
-    ) -> Result<(TensorMap<R, D>, TensorMap<R, D>, TensorMap<R, D>), Error> {
+    fn svd_full(tensor: &TensorMap<R, D>) -> Result<Svd<TensorMap<R, D>>, Error> {
         tensor.svd_full_multiplicity_free()
     }
 }
@@ -6214,7 +6148,7 @@ where
         + SectorCodec,
     D: FactorizationScalar,
 {
-    fn lq_compact(tensor: &TensorMap<R, D>) -> Result<(TensorMap<R, D>, TensorMap<R, D>), Error> {
+    fn lq_compact(tensor: &TensorMap<R, D>) -> Result<Lq<TensorMap<R, D>>, Error> {
         tensor.lq_compact_multiplicity_free()
     }
 }
@@ -6227,7 +6161,7 @@ where
         + SectorCodec,
     D: FactorizationScalar,
 {
-    fn qr_full(tensor: &TensorMap<R, D>) -> Result<(TensorMap<R, D>, TensorMap<R, D>), Error> {
+    fn qr_full(tensor: &TensorMap<R, D>) -> Result<Qr<TensorMap<R, D>>, Error> {
         tensor.qr_full_multiplicity_free()
     }
 }
@@ -6240,7 +6174,7 @@ where
         + SectorCodec,
     D: FactorizationScalar,
 {
-    fn lq_full(tensor: &TensorMap<R, D>) -> Result<(TensorMap<R, D>, TensorMap<R, D>), Error> {
+    fn lq_full(tensor: &TensorMap<R, D>) -> Result<Lq<TensorMap<R, D>>, Error> {
         tensor.lq_full_multiplicity_free()
     }
 }
@@ -6289,7 +6223,7 @@ where
         + SectorCodec,
     D: FactorizationScalar,
 {
-    fn eigh_full(tensor: &TensorMap<R, D>) -> Result<(TensorMap<R, D>, TensorMap<R, D>), Error> {
+    fn eigh_full(tensor: &TensorMap<R, D>) -> Result<Eigh<TensorMap<R, D>>, Error> {
         tensor.eigh_full_multiplicity_free()
     }
 }
@@ -6327,13 +6261,7 @@ where
 {
     fn eig_full(
         tensor: &TensorMap<R, D>,
-    ) -> Result<
-        (
-            TensorMap<R, <D as FactorScalar>::Eig>,
-            TensorMap<R, <D as FactorScalar>::Eig>,
-        ),
-        Error,
-    > {
+    ) -> Result<Eig<TensorMap<R, <D as FactorScalar>::Eig>>, Error> {
         tensor.eig_full_multiplicity_free()
     }
 }
@@ -6722,22 +6650,20 @@ where
 {
     fn left_polar(
         tensor: &TensorMap<R, D>,
-    ) -> Result<
-        (TensorMap<R, D>, TensorMap<R, D>),
-        GenericTensorError<<R as CheckedGenericFusion>::Error>,
-    > {
+    ) -> Result<LeftPolar<TensorMap<R, D>>, GenericTensorError<<R as CheckedGenericFusion>::Error>>
+    {
         let mut dense = tensor.runtime.lease_dense();
         match &tensor.repr {
             TypedTensorRepr::Owned(body) => {
                 let input =
                     BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())
                         .map_err(Error::from)?;
-                let (w, p) =
+                let LeftPolar { w, p } =
                     tenet_matrixalgebra::left_polar_dyn_checked_generic(dense.dense(), &input)?;
-                Ok((
-                    wrap_factor_on(&tensor.runtime, w),
-                    wrap_factor_on(&tensor.runtime, p),
-                ))
+                Ok(LeftPolar {
+                    w: wrap_factor_on(&tensor.runtime, w),
+                    p: wrap_factor_on(&tensor.runtime, p),
+                })
             }
             TypedTensorRepr::Adjoint(view) => {
                 let input = BoundDynamicTensorRef::try_new(
@@ -6745,37 +6671,39 @@ where
                     view.parent.materialized_dense_data(),
                 )
                 .map_err(Error::from)?;
-                let (p, w) = tenet_matrixalgebra::left_polar_adjoint_parent_dyn_checked_generic(
-                    dense.dense(),
-                    &input,
-                )?;
+                let RightPolar { p, wh: w } =
+                    tenet_matrixalgebra::left_polar_adjoint_parent_dyn_checked_generic(
+                        dense.dense(),
+                        &input,
+                    )?;
                 let w = wrap_factor_on(&tensor.runtime, w)
                     .adjoint()?
                     .materialized_tensor_uncached()
                     .map_err(GenericTensorError::from)?;
-                Ok((w, wrap_factor_on(&tensor.runtime, p)))
+                Ok(LeftPolar {
+                    w,
+                    p: wrap_factor_on(&tensor.runtime, p),
+                })
             }
         }
     }
 
     fn right_polar(
         tensor: &TensorMap<R, D>,
-    ) -> Result<
-        (TensorMap<R, D>, TensorMap<R, D>),
-        GenericTensorError<<R as CheckedGenericFusion>::Error>,
-    > {
+    ) -> Result<RightPolar<TensorMap<R, D>>, GenericTensorError<<R as CheckedGenericFusion>::Error>>
+    {
         let mut dense = tensor.runtime.lease_dense();
         match &tensor.repr {
             TypedTensorRepr::Owned(body) => {
                 let input =
                     BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())
                         .map_err(Error::from)?;
-                let (p, w) =
+                let RightPolar { p, wh: w } =
                     tenet_matrixalgebra::right_polar_dyn_checked_generic(dense.dense(), &input)?;
-                Ok((
-                    wrap_factor_on(&tensor.runtime, p),
-                    wrap_factor_on(&tensor.runtime, w),
-                ))
+                Ok(RightPolar {
+                    p: wrap_factor_on(&tensor.runtime, p),
+                    wh: wrap_factor_on(&tensor.runtime, w),
+                })
             }
             TypedTensorRepr::Adjoint(view) => {
                 let input = BoundDynamicTensorRef::try_new(
@@ -6783,15 +6711,19 @@ where
                     view.parent.materialized_dense_data(),
                 )
                 .map_err(Error::from)?;
-                let (w, p) = tenet_matrixalgebra::right_polar_adjoint_parent_dyn_checked_generic(
-                    dense.dense(),
-                    &input,
-                )?;
+                let LeftPolar { w, p } =
+                    tenet_matrixalgebra::right_polar_adjoint_parent_dyn_checked_generic(
+                        dense.dense(),
+                        &input,
+                    )?;
                 let w = wrap_factor_on(&tensor.runtime, w)
                     .adjoint()?
                     .materialized_tensor_uncached()
                     .map_err(GenericTensorError::from)?;
-                Ok((wrap_factor_on(&tensor.runtime, p), w))
+                Ok(RightPolar {
+                    p: wrap_factor_on(&tensor.runtime, p),
+                    wh: w,
+                })
             }
         }
     }
@@ -6895,10 +6827,7 @@ where
 {
     fn qr_compact(
         tensor: &TensorMap<R, D>,
-    ) -> Result<
-        (TensorMap<R, D>, TensorMap<R, D>),
-        GenericTensorError<<R as CheckedGenericFusion>::Error>,
-    > {
+    ) -> Result<Qr<TensorMap<R, D>>, GenericTensorError<<R as CheckedGenericFusion>::Error>> {
         tensor.qr_compact_checked_generic()
     }
 }
@@ -6913,19 +6842,13 @@ where
 {
     fn svd_compact(
         tensor: &TensorMap<R, D>,
-    ) -> Result<
-        (TensorMap<R, D>, TensorMap<R, D>, TensorMap<R, D>),
-        GenericTensorError<<R as CheckedGenericFusion>::Error>,
-    > {
+    ) -> Result<Svd<TensorMap<R, D>>, GenericTensorError<<R as CheckedGenericFusion>::Error>> {
         tensor.svd_compact_checked_generic()
     }
 
     fn svd_full(
         tensor: &TensorMap<R, D>,
-    ) -> Result<
-        (TensorMap<R, D>, TensorMap<R, D>, TensorMap<R, D>),
-        GenericTensorError<<R as CheckedGenericFusion>::Error>,
-    > {
+    ) -> Result<Svd<TensorMap<R, D>>, GenericTensorError<<R as CheckedGenericFusion>::Error>> {
         tensor.svd_full_checked_generic()
     }
 }
@@ -6940,10 +6863,7 @@ where
 {
     fn lq_compact(
         tensor: &TensorMap<R, D>,
-    ) -> Result<
-        (TensorMap<R, D>, TensorMap<R, D>),
-        GenericTensorError<<R as CheckedGenericFusion>::Error>,
-    > {
+    ) -> Result<Lq<TensorMap<R, D>>, GenericTensorError<<R as CheckedGenericFusion>::Error>> {
         tensor.lq_compact_checked_generic()
     }
 }
@@ -6958,10 +6878,7 @@ where
 {
     fn qr_full(
         tensor: &TensorMap<R, D>,
-    ) -> Result<
-        (TensorMap<R, D>, TensorMap<R, D>),
-        GenericTensorError<<R as CheckedGenericFusion>::Error>,
-    > {
+    ) -> Result<Qr<TensorMap<R, D>>, GenericTensorError<<R as CheckedGenericFusion>::Error>> {
         tensor.qr_full_checked_generic()
     }
 }
@@ -6976,10 +6893,7 @@ where
 {
     fn lq_full(
         tensor: &TensorMap<R, D>,
-    ) -> Result<
-        (TensorMap<R, D>, TensorMap<R, D>),
-        GenericTensorError<<R as CheckedGenericFusion>::Error>,
-    > {
+    ) -> Result<Lq<TensorMap<R, D>>, GenericTensorError<<R as CheckedGenericFusion>::Error>> {
         let TypedTensorRepr::Owned(body) = &tensor.repr else {
             return Err(GenericTensorError::Facade(Error::InvalidArgument(
                 "checked Generic lq_full does not accept lazy adjoints".to_string(),
@@ -6988,11 +6902,11 @@ where
         let mut dense = tensor.runtime.lease_dense();
         let input = BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())
             .map_err(|error| GenericTensorError::Facade(error.into()))?;
-        let (l, q) = tenet_matrixalgebra::lq_full_dyn_checked_generic(dense.dense(), &input)?;
-        Ok((
-            wrap_factor_on(&tensor.runtime, l),
-            wrap_factor_on(&tensor.runtime, q),
-        ))
+        let Lq { l, q } = tenet_matrixalgebra::lq_full_dyn_checked_generic(dense.dense(), &input)?;
+        Ok(Lq {
+            l: wrap_factor_on(&tensor.runtime, l),
+            q: wrap_factor_on(&tensor.runtime, q),
+        })
     }
 }
 
@@ -7042,10 +6956,7 @@ where
 {
     fn eigh_full(
         tensor: &TensorMap<R, D>,
-    ) -> Result<
-        (TensorMap<R, D>, TensorMap<R, D>),
-        GenericTensorError<<R as CheckedGenericFusion>::Error>,
-    > {
+    ) -> Result<Eigh<TensorMap<R, D>>, GenericTensorError<<R as CheckedGenericFusion>::Error>> {
         tensor.eigh_full_checked_generic()
     }
 }
@@ -7080,10 +6991,7 @@ where
     fn eig_full(
         tensor: &TensorMap<R, D>,
     ) -> Result<
-        (
-            TensorMap<R, <D as FactorScalar>::Eig>,
-            TensorMap<R, <D as FactorScalar>::Eig>,
-        ),
+        Eig<TensorMap<R, <D as FactorScalar>::Eig>>,
         GenericTensorError<<R as CheckedGenericFusion>::Error>,
     > {
         tensor.eig_full_checked_generic()
@@ -9099,17 +9007,17 @@ where
     /// this decision composed with an untruncated one: apply it with
     /// [`TensorMap::restrict_leg`] to the isometric factors and
     /// [`TensorMap::restrict_diagonal`] to the spectrum factor. The same
-    /// recipe truncates `eigh_full`'s `(d, v)` and `eig_full`'s `(d, v)`.
+    /// recipe truncates the `d` and `v` of `eigh_full` and `eig_full`.
     ///
     /// ```
     /// use tenet::core::{U1FusionRule, U1Irrep};
-    /// use tenet::typed::{GradedSpace, Runtime, TensorMap, Truncation};
+    /// use tenet::typed::{GradedSpace, Runtime, Svd, TensorMap, Truncation};
     ///
     /// let runtime = Runtime::builder().build()?;
     /// let v = GradedSpace::try_new(U1FusionRule, [(U1Irrep::new(0), 3), (U1Irrep::new(1), 2)])?;
     /// let t: TensorMap<_, f64> = TensorMap::rand(&runtime, [&v, &v], [&v])?;
     ///
-    /// let (u, s, vh) = t.svd_compact()?;
+    /// let Svd { u, s, vh } = t.svd_compact()?;
     /// let found = s.domain()[0].find_truncated(&s.diagview()?, &Truncation::rank(2))?;
     /// let u = u.restrict_leg(u.codomain_rank(), &found.selection)?;
     /// let s = s.restrict_diagonal(&found.selection)?;
@@ -11438,7 +11346,7 @@ impl<R, D: CudaPayload> TensorMap<R, D, CudaStorage<D>> {
 /// use std::sync::Arc;
 ///
 /// use tenet::core::U1Irrep;
-/// use tenet::prelude::{Runtime, TensorMap, Truncation, U1FusionRule};
+/// use tenet::prelude::{Runtime, Svd, TensorMap, Truncation, U1FusionRule};
 /// use tenet::typed::GradedSpace;
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -11449,7 +11357,7 @@ impl<R, D: CudaPayload> TensorMap<R, D, CudaStorage<D>> {
 /// })?
 /// .to_cuda()?;
 ///
-/// let (u, s, vh) = device.svd_compact()?;
+/// let Svd { u, s, vh } = device.svd_compact()?;
 /// // Until a device `restrict_leg` lands, the factors move to the host once.
 /// let (u, s, vh) = (u.to_host()?, s.to_host()?, vh.to_host()?);
 /// let found = s.domain()[0].find_truncated(&s.diagview()?, &Truncation::rank(2))?;
@@ -11461,7 +11369,7 @@ impl<R, D: CudaPayload> TensorMap<R, D, CudaStorage<D>> {
 /// # }
 /// ```
 ///
-/// `eigh_full`'s `(d, v)` is truncated the same way.
+/// The `d` and `v` of `eigh_full` are truncated the same way.
 ///
 /// `u` and `vh` keep the raw device SVD gauge for both dtypes; unlike the Host
 /// methods, these do not impose TensorKit's largest-pivot gauge. `eigh_full`
@@ -11628,7 +11536,7 @@ where
     /// solver-status metadata per route, a host barrier each.
     /// `u` and `vh` retain the raw CUDA backend gauge; unlike the Host method,
     /// this method does not impose TensorKit's largest-pivot sign gauge.
-    pub fn svd_compact(&self) -> Result<(Self, Self, Self), Error> {
+    pub fn svd_compact(&self) -> Result<Svd<Self>, Error> {
         let source = self.direct_cuda_storage("svd_compact")?;
         let source_space = self.logical_space().space();
         let required_len = source_space.required_len()?;
@@ -11753,25 +11661,25 @@ where
             (left_data, middle_data, right_data)
         };
 
-        Ok((
-            Self {
+        Ok(Svd {
+            u: Self {
                 runtime: self.runtime.clone(),
                 repr: owned_repr(TypedTensorBody::dense(plan.left_space, left_data)),
             },
-            Self {
+            s: Self {
                 runtime: self.runtime.clone(),
                 repr: owned_repr(TypedTensorBody::dense(middle_space, middle_data)),
             },
-            Self {
+            vh: Self {
                 runtime: self.runtime.clone(),
                 repr: owned_repr(TypedTensorBody::dense(plan.right_space, right_data)),
             },
-        ))
+        })
     }
 
     /// Hermitian eigendecomposition of an owned dense CUDA endomorphism.
     ///
-    /// Returns `(d, v)` with `self = v * d * v.adjoint()`. Both factors remain
+    /// Returns an [`Eigh`] with `self = v * d * v.adjoint()`. Both factors remain
     /// on the source device. A lazy-adjoint receiver is rejected explicitly;
     /// no receiver-sized payload is downloaded or materialized.
     ///
@@ -11801,7 +11709,7 @@ where
     /// device: the only device allocation path is a zero upload of the same
     /// `Σ_c n_c²` elements (#740), so a device scatter would add a
     /// `Σ_c n_c` upload and move nothing less.
-    pub fn eigh_full(&self) -> Result<(Self, Self), Error> {
+    pub fn eigh_full(&self) -> Result<Eigh<Self>, Error> {
         let source = self.direct_cuda_storage("eigh_full")?;
         let source_space = self.logical_space().space();
         if source_space.homspace().codomain() != source_space.homspace().domain() {
@@ -12024,16 +11932,16 @@ where
             (diagonal_data, vector_data)
         };
 
-        Ok((
-            Self {
+        Ok(Eigh {
+            d: Self {
                 runtime: self.runtime.clone(),
                 repr: owned_repr(TypedTensorBody::dense(plan.middle_space, diagonal_data)),
             },
-            Self {
+            v: Self {
                 runtime: self.runtime.clone(),
                 repr: owned_repr(TypedTensorBody::dense(plan.left_space, vector_data)),
             },
-        ))
+        })
     }
 
     #[cfg(test)]
@@ -12102,7 +12010,7 @@ where
     /// host. A route whose factor region reproduces the source's tree layout
     /// is assembled by one whole-factor device copy; any other route keeps the
     /// per-tree identity-selector GEMM.
-    pub fn qr_compact(&self) -> Result<(Self, Self), Error> {
+    pub fn qr_compact(&self) -> Result<Qr<Self>, Error> {
         let source = self.direct_cuda_storage("qr_compact")?;
         let source_space = self.logical_space().space();
         let required_len = source_space.required_len()?;
@@ -12181,16 +12089,16 @@ where
             (left_data, right_data)
         };
 
-        Ok((
-            Self {
+        Ok(Qr {
+            q: Self {
                 runtime: self.runtime.clone(),
                 repr: owned_repr(TypedTensorBody::dense(plan.left_space, left_data)),
             },
-            Self {
+            r: Self {
                 runtime: self.runtime.clone(),
                 repr: owned_repr(TypedTensorBody::dense(plan.right_space, right_data)),
             },
-        ))
+        })
     }
 }
 
@@ -17406,7 +17314,7 @@ where
     /// TensorKit 0.17 / MatrixAlgebraKit `svd_compact`: `t = u * s * vh` with
     /// the bond `min(rows, cols)` per coupled sector.
     ///
-    /// Returns `(u, s, vh)` with `u : codomain <- bond`, `s : bond <- bond`
+    /// Returns an [`Svd`] with `u : codomain <- bond`, `s : bond <- bond`
     /// and `vh : bond <- domain`.
     ///
     /// # Storage
@@ -17429,7 +17337,7 @@ where
     /// ```
     ///
     /// use tenet::core::{U1FusionRule, U1Irrep};
-    /// use tenet::typed::{GradedSpace, Runtime, TensorMap};
+    /// use tenet::typed::{GradedSpace, Runtime, Svd, TensorMap};
     ///
     /// let runtime = Runtime::builder().build()?;
     /// let v = GradedSpace::try_new(
@@ -17438,7 +17346,7 @@ where
     /// )?;
     /// let t: TensorMap<_, f64> = TensorMap::rand(&runtime, [&v], [&v])?;
     ///
-    /// let (u, s, vh) = t.svd_compact()?;
+    /// let Svd { u, s, vh } = t.svd_compact()?;
     /// assert!(u.is_isometric(1e-12)?);
     /// let rebuilt = u.compose(&s)?.compose(&vh)?;
     /// let max_err = rebuilt
@@ -17450,7 +17358,7 @@ where
     /// assert!(max_err < 1e-12);
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
-    fn svd_compact_multiplicity_free(&self) -> Result<(Self, Self, Self), Error>
+    fn svd_compact_multiplicity_free(&self) -> Result<Svd<Self>, Error>
     where
         D: FactorizationScalar,
     {
@@ -17473,17 +17381,17 @@ where
                 tenet_matrixalgebra::svd_compact_factors_dyn(dense.dense(), &self.bound_ref()?)?
             }
         };
-        Ok((
-            self.wrap_bound_factor(u),
-            self.diagonal_factor(&mut spectrum, D::from_real)?,
-            self.wrap_bound_factor(vh),
-        ))
+        Ok(Svd {
+            u: self.wrap_bound_factor(u),
+            s: self.diagonal_factor(&mut spectrum, D::from_real)?,
+            vh: self.wrap_bound_factor(vh),
+        })
     }
 
     /// TensorKit 0.17 / MatrixAlgebraKit `svd_full`: `t = u * s * vh` with
     /// square unitaries and a rectangular `s` per coupled sector.
     ///
-    /// Returns `(u, s, vh)` with `u : codomain <- W`, `s : W <- W'` and
+    /// Returns an [`Svd`] with `u : codomain <- W`, `s : W <- W'` and
     /// `vh : W' <- domain`.
     ///
     /// `s` is dense here where [`Self::svd_compact`]'s is diagonal, and that is
@@ -17496,7 +17404,7 @@ where
     /// # Errors
     ///
     /// As [`Self::svd_compact`]: the seam's own errors, unfiltered.
-    fn svd_full_multiplicity_free(&self) -> Result<(Self, Self, Self), Error>
+    fn svd_full_multiplicity_free(&self) -> Result<Svd<Self>, Error>
     where
         D: FactorizationScalar,
     {
@@ -17514,11 +17422,11 @@ where
             }
         };
         let (u, s, vh, _) = out.into_parts();
-        Ok((
-            self.wrap_bound_factor(u),
-            self.wrap_bound_factor(s),
-            self.wrap_bound_factor(vh),
-        ))
+        Ok(Svd {
+            u: self.wrap_bound_factor(u),
+            s: self.wrap_bound_factor(s),
+            vh: self.wrap_bound_factor(vh),
+        })
     }
 
     /// TensorKit 0.17 / MatrixAlgebraKit `svd_vals`: the singular values per
@@ -17574,7 +17482,7 @@ where
     /// (MatrixAlgebraKit's `DiagonalAlgorithm`); that fast path is not adopted
     /// here — the issue #613 Group 4 contract requires every compact fast path
     /// to be re-proven individually, the same deferral the polars record.
-    fn qr_compact_multiplicity_free(&self) -> Result<(Self, Self), Error>
+    fn qr_compact_multiplicity_free(&self) -> Result<Qr<Self>, Error>
     where
         D: FactorizationScalar,
     {
@@ -17582,8 +17490,11 @@ where
             return self.materialized_tensor_uncached()?.qr_compact();
         }
         let mut dense = self.runtime.lease_dense();
-        let (q, r) = tenet_matrixalgebra::qr_compact_dyn(dense.dense(), &self.bound_ref()?)?;
-        Ok((self.wrap_bound_factor(q), self.wrap_bound_factor(r)))
+        let Qr { q, r } = tenet_matrixalgebra::qr_compact_dyn(dense.dense(), &self.bound_ref()?)?;
+        Ok(Qr {
+            q: self.wrap_bound_factor(q),
+            r: self.wrap_bound_factor(r),
+        })
     }
 
     /// TensorKit 0.17 / MatrixAlgebraKit `qr_full`: `t = q * r` with a square
@@ -17602,7 +17513,7 @@ where
     /// it in the receiver cache. A compact-diagonal payload is materialized
     /// dense first (TensorKit's `DiagonalAlgorithm` covers `qr_full!` too —
     /// same non-adoption, same #613 Group 4 deferral).
-    fn qr_full_multiplicity_free(&self) -> Result<(Self, Self), Error>
+    fn qr_full_multiplicity_free(&self) -> Result<Qr<Self>, Error>
     where
         D: FactorizationScalar,
     {
@@ -17610,8 +17521,11 @@ where
             return self.materialized_tensor_uncached()?.qr_full();
         }
         let mut dense = self.runtime.lease_dense();
-        let (q, r) = tenet_matrixalgebra::qr_full_dyn(dense.dense(), &self.bound_ref()?)?;
-        Ok((self.wrap_bound_factor(q), self.wrap_bound_factor(r)))
+        let Qr { q, r } = tenet_matrixalgebra::qr_full_dyn(dense.dense(), &self.bound_ref()?)?;
+        Ok(Qr {
+            q: self.wrap_bound_factor(q),
+            r: self.wrap_bound_factor(r),
+        })
     }
 
     /// TensorKit 0.17 / MatrixAlgebraKit `lq_compact`: `t = l * q` with `q`
@@ -17629,20 +17543,23 @@ where
     /// neither parent factor buffer. A compact-diagonal payload is materialized
     /// dense first (TensorKit's `DiagonalAlgorithm` covers the LQ pair as well
     /// — same non-adoption, same #613 Group 4 deferral).
-    fn lq_compact_multiplicity_free(&self) -> Result<(Self, Self), Error>
+    fn lq_compact_multiplicity_free(&self) -> Result<Lq<Self>, Error>
     where
         D: FactorizationScalar,
     {
         if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
-            let (q, r) = self.adjoint()?.qr_compact()?;
-            return Ok((
-                r.adjoint()?.materialized_tensor_uncached()?,
-                q.adjoint()?.materialized_tensor_uncached()?,
-            ));
+            let Qr { q, r } = self.adjoint()?.qr_compact()?;
+            return Ok(Lq {
+                l: r.adjoint()?.materialized_tensor_uncached()?,
+                q: q.adjoint()?.materialized_tensor_uncached()?,
+            });
         }
         let mut dense = self.runtime.lease_dense();
-        let (l, q) = tenet_matrixalgebra::lq_compact_dyn(dense.dense(), &self.bound_ref()?)?;
-        Ok((self.wrap_bound_factor(l), self.wrap_bound_factor(q)))
+        let Lq { l, q } = tenet_matrixalgebra::lq_compact_dyn(dense.dense(), &self.bound_ref()?)?;
+        Ok(Lq {
+            l: self.wrap_bound_factor(l),
+            q: self.wrap_bound_factor(q),
+        })
     }
 
     /// TensorKit 0.17 / MatrixAlgebraKit `lq_full`: `t = l * q` with a square
@@ -17660,20 +17577,23 @@ where
     /// additional costs. A lazy adjoint uses the parent full-QR route and two
     /// detached owned output payloads. A compact-diagonal payload is
     /// materialized dense first.
-    fn lq_full_multiplicity_free(&self) -> Result<(Self, Self), Error>
+    fn lq_full_multiplicity_free(&self) -> Result<Lq<Self>, Error>
     where
         D: FactorizationScalar,
     {
         if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
-            let (q, r) = self.adjoint()?.qr_full()?;
-            return Ok((
-                r.adjoint()?.materialized_tensor_uncached()?,
-                q.adjoint()?.materialized_tensor_uncached()?,
-            ));
+            let Qr { q, r } = self.adjoint()?.qr_full()?;
+            return Ok(Lq {
+                l: r.adjoint()?.materialized_tensor_uncached()?,
+                q: q.adjoint()?.materialized_tensor_uncached()?,
+            });
         }
         let mut dense = self.runtime.lease_dense();
-        let (l, q) = tenet_matrixalgebra::lq_full_dyn(dense.dense(), &self.bound_ref()?)?;
-        Ok((self.wrap_bound_factor(l), self.wrap_bound_factor(q)))
+        let Lq { l, q } = tenet_matrixalgebra::lq_full_dyn(dense.dense(), &self.bound_ref()?)?;
+        Ok(Lq {
+            l: self.wrap_bound_factor(l),
+            q: self.wrap_bound_factor(q),
+        })
     }
 
     /// TensorKit 0.17 / MatrixAlgebraKit `left_null`: `n : codomain <- W` with
@@ -17758,7 +17678,7 @@ where
     }
 
     /// TensorKit 0.17 / MatrixAlgebraKit `left_polar`: the polar decomposition
-    /// `t = w ∘ p`, returned as `(w, p)` — `w` isometric (`w† ∘ w = id` on the
+    /// `t = w ∘ p`, returned as a [`LeftPolar`] — `w` isometric (`w† ∘ w = id` on the
     /// domain) and `p` Hermitian positive semidefinite.
     ///
     /// Factor spaces per TensorKit 0.17: `w` lives on the input's
@@ -17787,14 +17707,14 @@ where
     /// it dispatches dense per block), and the
     /// issue #613 Group 4 contract requires any compact fast path to be
     /// individually re-proven — out of scope here.
-    fn left_polar_multiplicity_free(&self) -> Result<(Self, Self), Error>
+    fn left_polar_multiplicity_free(&self) -> Result<LeftPolar<Self>, Error>
     where
         D: FactorizationScalar,
     {
         if let TypedTensorRepr::Adjoint(view) = &self.repr {
             let mut dense = self.runtime.lease_dense();
             let mut lease = self.runtime.lease_context()?;
-            let (w, p) = tenet_matrixalgebra::left_polar_adjoint_parent_dyn(
+            let LeftPolar { w, p } = tenet_matrixalgebra::left_polar_adjoint_parent_dyn(
                 dense.dense(),
                 lease.context().multiplicity_free_lane::<D>()?,
                 &BoundDynamicTensorRef::try_new(
@@ -17802,28 +17722,34 @@ where
                     view.parent.materialized_dense_data(),
                 )?,
             )?;
-            return Ok((self.wrap_bound_factor(w), self.wrap_bound_factor(p)));
+            return Ok(LeftPolar {
+                w: self.wrap_bound_factor(w),
+                p: self.wrap_bound_factor(p),
+            });
         }
         // Dense lease before the context lease — the polar seam recouples
         // internally, so unlike QR/LQ/null it takes the context lane; the
         // lease order matches every existing site that takes both lanes.
         let mut dense = self.runtime.lease_dense();
         let mut lease = self.runtime.lease_context()?;
-        let (w, p) = tenet_matrixalgebra::left_polar_dyn(
+        let LeftPolar { w, p } = tenet_matrixalgebra::left_polar_dyn(
             dense.dense(),
             lease.context().multiplicity_free_lane::<D>()?,
             &self.bound_ref()?,
         )?;
-        Ok((self.wrap_bound_factor(w), self.wrap_bound_factor(p)))
+        Ok(LeftPolar {
+            w: self.wrap_bound_factor(w),
+            p: self.wrap_bound_factor(p),
+        })
     }
 
     /// TensorKit 0.17 / MatrixAlgebraKit `right_polar`: the polar
-    /// decomposition `t = p ∘ w`, returned as `(p, w)` — `p` Hermitian
-    /// positive semidefinite and `w` a coisometry (`w ∘ w† = id` on the
-    /// codomain).
+    /// decomposition `t = p ∘ wh`, returned as a [`RightPolar`] — `p`
+    /// Hermitian positive semidefinite and `wh` a coisometry
+    /// (`wh ∘ wh† = id` on the codomain).
     ///
     /// Factor spaces per TensorKit 0.17: `p` on
-    /// `codomain <- codomain`, `w` on the input's own space
+    /// `codomain <- codomain`, `wh` on the input's own space
     /// `codomain <- domain`. Everything [`Self::left_polar`] says about
     /// algorithm kinds, adjoint views and the compact-diagonal route holds
     /// here unchanged.
@@ -17837,14 +17763,14 @@ where
     ///
     /// As [`Self::left_polar`]: `O(Σ_c n_c³)`, sectorwise, with a
     /// compact-diagonal payload materialized first.
-    fn right_polar_multiplicity_free(&self) -> Result<(Self, Self), Error>
+    fn right_polar_multiplicity_free(&self) -> Result<RightPolar<Self>, Error>
     where
         D: FactorizationScalar,
     {
         if let TypedTensorRepr::Adjoint(view) = &self.repr {
             let mut dense = self.runtime.lease_dense();
             let mut lease = self.runtime.lease_context()?;
-            let (p, w) = tenet_matrixalgebra::right_polar_adjoint_parent_dyn(
+            let RightPolar { p, wh: w } = tenet_matrixalgebra::right_polar_adjoint_parent_dyn(
                 dense.dense(),
                 lease.context().multiplicity_free_lane::<D>()?,
                 &BoundDynamicTensorRef::try_new(
@@ -17852,22 +17778,28 @@ where
                     view.parent.materialized_dense_data(),
                 )?,
             )?;
-            return Ok((self.wrap_bound_factor(p), self.wrap_bound_factor(w)));
+            return Ok(RightPolar {
+                p: self.wrap_bound_factor(p),
+                wh: self.wrap_bound_factor(w),
+            });
         }
         // See `left_polar` for the lease order rationale.
         let mut dense = self.runtime.lease_dense();
         let mut lease = self.runtime.lease_context()?;
-        let (p, w) = tenet_matrixalgebra::right_polar_dyn(
+        let RightPolar { p, wh: w } = tenet_matrixalgebra::right_polar_dyn(
             dense.dense(),
             lease.context().multiplicity_free_lane::<D>()?,
             &self.bound_ref()?,
         )?;
-        Ok((self.wrap_bound_factor(p), self.wrap_bound_factor(w)))
+        Ok(RightPolar {
+            p: self.wrap_bound_factor(p),
+            wh: self.wrap_bound_factor(w),
+        })
     }
 
     /// TensorKit 0.17 / MatrixAlgebraKit `eigh_full`: the Hermitian
-    /// eigendecomposition `t = v * d * v^H` of an endomorphism, returned as
-    /// `(d, v)`.
+    /// eigendecomposition `t = v * d * v^H` of an endomorphism, returned as an
+    /// [`Eigh`].
     ///
     /// `d : bond <- bond` carries the eigenvalues in compact diagonal storage
     /// (TensorKit's `DiagonalTensorMap`), so `v.compose(&d)` takes the
@@ -17876,16 +17808,13 @@ where
     /// is real too — but `d` keeps the payload dtype `D` so it composes with
     /// `v` directly.
     ///
-    /// The `(d, v)` order is MatrixAlgebraKit's `initialize_output` order, not
-    /// the `v, d` reading order of the formula.
-    ///
     /// # Errors
     ///
     /// [`Error::Operation`] when the tensor is not an endomorphism or its
     /// coupled blocks are not Hermitian, and otherwise
     /// [`Error::Core`] / [`Error::FusionAlgebra`] from the seam — which owns
     /// those rules, so they are not re-checked here.
-    fn eigh_full_multiplicity_free(&self) -> Result<(Self, Self), Error>
+    fn eigh_full_multiplicity_free(&self) -> Result<Eigh<Self>, Error>
     where
         D: FactorizationScalar,
     {
@@ -17897,10 +17826,10 @@ where
         let mut dense = self.runtime.lease_dense();
         let out = tenet_matrixalgebra::eigh_full_dyn(dense.dense(), &self.bound_ref()?)?;
         let (v, mut eigenvalues) = out.into_parts();
-        Ok((
-            self.diagonal_factor(&mut eigenvalues, D::from_real)?,
-            self.wrap_bound_factor(v),
-        ))
+        Ok(Eigh {
+            d: self.diagonal_factor(&mut eigenvalues, D::from_real)?,
+            v: self.wrap_bound_factor(v),
+        })
     }
 
     /// TensorKit 0.17 / MatrixAlgebraKit `eigh_vals`: the Hermitian eigenvalues
@@ -17929,8 +17858,7 @@ where
 
     /// TensorKit 0.17 / MatrixAlgebraKit `eig_full`: the general
     /// (non-Hermitian) eigendecomposition `t = v * d * v^-1` of an
-    /// endomorphism, returned as `(d, v)` — [`Self::eigh_full`]'s order, for
-    /// the same reason.
+    /// endomorphism, returned as an [`Eig`].
     ///
     /// Both factors are complex whatever `D` is: a real matrix's eigenpairs are
     /// complex in general, and TensorKit's `eigen` likewise returns
@@ -17955,13 +17883,7 @@ where
     #[allow(clippy::type_complexity)]
     fn eig_full_multiplicity_free(
         &self,
-    ) -> Result<
-        (
-            TensorMap<R, <D as FactorScalar>::Eig>,
-            TensorMap<R, <D as FactorScalar>::Eig>,
-        ),
-        Error,
-    >
+    ) -> Result<Eig<TensorMap<R, <D as FactorScalar>::Eig>>, Error>
     where
         D: AdvancedLinalgScalar,
         <D as FactorScalar>::Eig: TensorScalar,
@@ -17974,15 +17896,15 @@ where
         let mut dense = self.runtime.lease_dense();
         let out = tenet_matrixalgebra::eig_full_dyn(dense.dense(), &self.bound_ref()?)?;
         let (v, mut eigenvalues) = out.into_parts();
-        Ok((
-            diagonal_factor_on(
+        Ok(Eig {
+            d: diagonal_factor_on(
                 &self.runtime,
                 self.logical_space(),
                 &mut eigenvalues,
                 <<D as FactorScalar>::Eig as FactorScalar>::from_complex64,
             )?,
-            wrap_factor_on(&self.runtime, v),
-        ))
+            v: wrap_factor_on(&self.runtime, v),
+        })
     }
 
     /// TensorKit 0.17 / MatrixAlgebraKit `eig_vals`: the general eigenvalues
@@ -19438,14 +19360,13 @@ where
     R::Mode: TypedTensorPolarDispatch<R, D>,
     D: FactorizationScalar,
 {
-    /// Returns the left polar decomposition `self = w * p` as `(w, p)`.
+    /// Returns the left polar decomposition `self = w * p` as a [`LeftPolar`].
     ///
     /// `w` lives on the input space `codomain(self) <- domain(self)` and is an
     /// isometry (`w^H * w = id` on the domain). The positive-semidefinite
     /// factor `p : domain(self) <- domain(self)` is `V * S * V^H` from the
     /// compact SVD. Every coupled-sector block must be at least as tall as it
-    /// is wide. [`Self::right_polar`] handles wide blocks and returns its
-    /// factors in the opposite order.
+    /// is wide. [`Self::right_polar`] handles wide blocks.
     ///
     /// Cost is `O(sum_c m_c * n_c * min(m_c, n_c))` plus sectorwise
     /// composition. Compact diagonal input is materialized first. A lazy
@@ -19456,29 +19377,30 @@ where
     ///
     /// ```
     /// use tenet::core::{U1FusionRule, U1Irrep};
-    /// use tenet::typed::{GradedSpace, Runtime, TensorMap};
+    /// use tenet::typed::{GradedSpace, LeftPolar, Runtime, TensorMap};
     ///
     /// let runtime = Runtime::builder().build()?;
     /// let v = GradedSpace::try_new(U1FusionRule, [(U1Irrep::new(0), 2)])?;
     /// let a: TensorMap<_, f64> = TensorMap::id(&runtime, [&v])?.scale(2.0);
-    /// let (w, p) = a.left_polar()?;
+    /// let LeftPolar { w, p } = a.left_polar()?;
     /// assert!(w.compose(&p)?.axpby(1.0, &a, -1.0)?.norm()? < 1e-12);
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
-    pub fn left_polar(&self) -> Result<(Self, Self), TypedFacadeError<R>> {
+    pub fn left_polar(&self) -> Result<LeftPolar<Self>, TypedFacadeError<R>> {
         <R::Mode as TypedTensorPolarDispatch<R, D>>::left_polar(self)
     }
 
-    /// Returns the right polar decomposition `self = p * w` as `(p, w)`.
+    /// Returns the right polar decomposition `self = p * wh` as a
+    /// [`RightPolar`].
     ///
     /// `p : codomain(self) <- codomain(self)` is positive semidefinite and
-    /// `w` lives on the input space as a coisometry
-    /// (`w * w^H = id` on the codomain). Every coupled-sector block must be at
-    /// least as wide as it is tall. Factor order and spaces are stated above;
+    /// `wh` lives on the input space as a coisometry
+    /// (`wh * wh^H = id` on the codomain). Every coupled-sector block must be
+    /// at least as wide as it is tall. Factor spaces are stated above;
     /// [`Self::left_polar`] describes the corresponding storage routes, lazy
     /// input handling, and cost. Checked factors use the source provider
-    /// instance, and a failure returns no factor tuple.
-    pub fn right_polar(&self) -> Result<(Self, Self), TypedFacadeError<R>> {
+    /// instance, and a failure returns no factors.
+    pub fn right_polar(&self) -> Result<RightPolar<Self>, TypedFacadeError<R>> {
         <R::Mode as TypedTensorPolarDispatch<R, D>>::right_polar(self)
     }
 }
@@ -19956,6 +19878,32 @@ fn map_spectrum_dtype<A: Copy, B>(
 #[cfg(test)]
 mod representation_gates {
     use super::*;
+
+    /// The pre-#1541 tuple order of a two-factor result, for the helpers
+    /// below that treat QR/LQ and left/right polar factors uniformly.
+    trait FactorPair<T> {
+        fn pair(self) -> (T, T);
+    }
+    impl<T> FactorPair<T> for Qr<T> {
+        fn pair(self) -> (T, T) {
+            (self.q, self.r)
+        }
+    }
+    impl<T> FactorPair<T> for Lq<T> {
+        fn pair(self) -> (T, T) {
+            (self.l, self.q)
+        }
+    }
+    impl<T> FactorPair<T> for LeftPolar<T> {
+        fn pair(self) -> (T, T) {
+            (self.w, self.p)
+        }
+    }
+    impl<T> FactorPair<T> for RightPolar<T> {
+        fn pair(self) -> (T, T) {
+            (self.p, self.wh)
+        }
+    }
     use tenet_core::{product_sector, ProductFusionRuleExt};
     use tenet_core::{
         BlockKey, BlockSpec, BlockStructure, CU1FusionRule, CU1Irrep, FermionParityFusionRule,
@@ -20824,7 +20772,7 @@ mod representation_gates {
     #[test]
     fn typed_placement_is_diagnostic_for_dense_compact_and_lazy_host_storage() {
         let source = u1_lazy_fixture();
-        let diagonal = source.svd_compact().unwrap().1;
+        let diagonal = source.svd_compact().unwrap().s;
         let lazy = source.adjoint().unwrap();
 
         assert_eq!(source.placement(), Placement::Host);
@@ -20886,7 +20834,7 @@ mod representation_gates {
             .iter()
             .all(|value| value.re.to_bits() == 0 && value.im.to_bits() == 0));
 
-        let compact = source.svd_compact().unwrap().1;
+        let compact = source.svd_compact().unwrap().s;
         let compact = compact.with_spectrum(
             compact
                 .spectrum()
@@ -21032,7 +20980,7 @@ mod representation_gates {
     #[cfg(feature = "cuda")]
     #[test]
     fn typed_cuda_factorizations_reject_compact_lazy_and_truncation_before_runtime_work() {
-        let diagonal = u1_lazy_fixture().svd_compact().unwrap().1;
+        let diagonal = u1_lazy_fixture().svd_compact().unwrap().s;
         let TypedData::Diagonal(spectrum) = owned(&diagonal).data.as_ref() else {
             unreachable!("SVD factor is compact")
         };
@@ -21161,7 +21109,10 @@ mod representation_gates {
         let device = source.to_cuda().unwrap();
 
         let expected_full = source.eigh_full().unwrap();
-        let (d_device, v_device) = device.eigh_full().unwrap();
+        let Eigh {
+            d: d_device,
+            v: v_device,
+        } = device.eigh_full().unwrap();
         assert_eq!(d_device.placement(), Placement::Cuda(0));
         assert_eq!(v_device.placement(), Placement::Cuda(0));
         assert!(Arc::ptr_eq(
@@ -21170,7 +21121,7 @@ mod representation_gates {
         ));
         let d = d_device.to_host().unwrap();
         let v = v_device.to_host().unwrap();
-        assert_typed_map_close(&d, &expected_full.0, 1.0e-10);
+        assert_typed_map_close(&d, &expected_full.d, 1.0e-10);
         assert_typed_map_close(
             &source.compose(&v).unwrap(),
             &v.compose(&d).unwrap(),
@@ -21199,7 +21150,7 @@ mod representation_gates {
             .unwrap();
         assert!(su2_source.block_count() >= 2);
         let su2_device = su2_source.to_cuda().unwrap();
-        let (su2_d, su2_v) = su2_device.eigh_full().unwrap();
+        let Eigh { d: su2_d, v: su2_v } = su2_device.eigh_full().unwrap();
         assert!(Arc::ptr_eq(
             su2_v.logical_space().provider_arc(),
             su2_source.logical_space().provider_arc()
@@ -21388,7 +21339,7 @@ mod representation_gates {
             CUDA_EIGH_TREEWISE.with(|flag| flag.set(treewise));
             CUDA_QR_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0, 0, 0))));
             CUDA_EIGH_SELECTOR_UPLOADS.with(|uploads| uploads.set(Some(0)));
-            let (d, v) = device.eigh_full().unwrap();
+            let Eigh { d, v } = device.eigh_full().unwrap();
             CUDA_EIGH_TREEWISE.with(|flag| flag.set(false));
             assert_eq!(
                 CUDA_EIGH_SELECTOR_UPLOADS.with(|uploads| uploads.replace(None)),
@@ -21468,7 +21419,7 @@ mod representation_gates {
         );
 
         CUDA_QR_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0, 0, 0))));
-        source_device.qr_compact().unwrap();
+        source_device.qr_compact().unwrap().pair();
         CUDA_QR_OBSERVATION.with(|observation| {
             assert_eq!(
                 observation.get(),
@@ -21534,7 +21485,7 @@ mod representation_gates {
         let empty: TensorMap<_, f64> =
             TensorMap::from_block_fn(&runtime, [&charge0], [&charge1], |_, _| 1.0).unwrap();
         CUDA_QR_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0, 0, 0))));
-        empty.to_cuda().unwrap().qr_compact().unwrap();
+        empty.to_cuda().unwrap().qr_compact().unwrap().pair();
         CUDA_QR_OBSERVATION.with(|observation| {
             assert_eq!(observation.get(), Some((0, 0, 0, 2, 0, 0, 0)));
             observation.set(None);
@@ -21677,7 +21628,7 @@ mod representation_gates {
             CUDA_SVD_TREEWISE.with(|flag| flag.set(treewise));
             CUDA_SVD_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0))));
             CUDA_QR_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0, 0, 0))));
-            let (_, s, _) = device.svd_compact().unwrap();
+            let Svd { s, .. } = device.svd_compact().unwrap();
             CUDA_SVD_TREEWISE.with(|flag| flag.set(false));
             let (_, _, creations, _, _) = CUDA_SVD_OBSERVATION
                 .with(|observation| observation.replace(None))
@@ -21771,7 +21722,7 @@ mod representation_gates {
             .count();
         assert!(nonempty > 1, "the fixture needs several blocks");
         let device = host.to_cuda().unwrap();
-        let (_, s, _) = device.svd_compact().unwrap();
+        let Svd { s, .. } = device.svd_compact().unwrap();
         let s = s.to_host().unwrap();
         let expected = downloaded_svd_diagonal_bits(
             &device,
@@ -21781,7 +21732,7 @@ mod representation_gates {
         let actual: Vec<_> = s.data().iter().copied().map(widened_bits).collect();
         assert_eq!(actual, expected);
         // The spectra themselves agree with the Host SVD to dtype tolerance.
-        let (_, host_s, _) = host.svd_compact().unwrap();
+        let Svd { s: host_s, .. } = host.svd_compact().unwrap();
         let tolerance = 1.0e3 * D::epsilon();
         for (device, host) in s.data().iter().zip(host_s.data()) {
             let (device, host) = (device.widen_complex(), host.widen_complex());
@@ -21920,7 +21871,7 @@ mod representation_gates {
     #[test]
     fn missing_cuda_context_precedes_compact_expansion_and_lazy_materialization() {
         let source = u1_lazy_fixture();
-        let diagonal = source.svd_compact().unwrap().1;
+        let diagonal = source.svd_compact().unwrap().s;
         let lazy = source.adjoint().unwrap();
         let TypedData::Diagonal(spectrum) = owned(&diagonal).data.as_ref() else {
             unreachable!("SVD factor is compact")
@@ -21976,7 +21927,7 @@ mod representation_gates {
             })
             .unwrap();
 
-        let diagonal = source.svd_compact().unwrap().1;
+        let diagonal = source.svd_compact().unwrap().s;
         let TypedData::Diagonal(spectrum) = owned(&diagonal).data.as_ref() else {
             unreachable!("SVD factor is compact")
         };
@@ -22757,9 +22708,9 @@ mod representation_gates {
         for qr in [true, false] {
             let lazy = source.adjoint().unwrap();
             let result = if qr {
-                lazy.qr_compact()
+                lazy.qr_compact().map(drop)
             } else {
-                lazy.lq_compact()
+                lazy.lq_compact().map(drop)
             };
             assert!(
                 matches!(
@@ -22790,7 +22741,7 @@ mod representation_gates {
             })
             .unwrap();
         let expected = source.sqrt().unwrap();
-        let (_, s, _) = source.svd_compact().unwrap();
+        let Svd { s, .. } = source.svd_compact().unwrap();
         let TypedTensorRepr::Owned(s_body) = &s.repr else {
             unreachable!()
         };
@@ -22974,9 +22925,9 @@ mod representation_gates {
         };
         assert!(view.materialized.get().is_none());
         for (actual, expected) in [
-            (&actual.0, &expected.0),
-            (&actual.1, &expected.1),
-            (&actual.2, &expected.2),
+            (&actual.u, &expected.u),
+            (&actual.s, &expected.s),
+            (&actual.vh, &expected.vh),
         ] {
             assert_eq!(
                 actual.logical_space().space(),
@@ -22994,12 +22945,12 @@ mod representation_gates {
                     (left.widen_complex() - right.widen_complex()).norm() < 1e-12
                 }));
         }
-        assert!(actual.0.is_isometric(1e-12).unwrap());
+        assert!(actual.u.is_isometric(1e-12).unwrap());
         let rebuilt = actual
-            .0
-            .compose(&actual.1)
+            .u
+            .compose(&actual.s)
             .unwrap()
-            .compose(&actual.2)
+            .compose(&actual.vh)
             .unwrap();
         assert!(rebuilt
             .data()
@@ -23038,9 +22989,9 @@ mod representation_gates {
             unreachable!()
         };
         for (actual, expected) in [
-            (&actual.0, &expected.0),
-            (&actual.1, &expected.1),
-            (&actual.2, &expected.2),
+            (&actual.u, &expected.u),
+            (&actual.s, &expected.s),
+            (&actual.vh, &expected.vh),
         ] {
             assert_eq!(
                 actual.logical_space().space(),
@@ -23052,15 +23003,15 @@ mod representation_gates {
             ));
         }
         assert!(actual
-            .1
+            .s
             .data()
             .iter()
-            .zip(expected.1.data())
+            .zip(expected.s.data())
             .all(|(&left, &right)| {
                 (left.widen_complex() - right.widen_complex()).norm() < 1e-12
             }));
         if compare_factor_bytes {
-            for (actual, expected) in [(&actual.0, &expected.0), (&actual.2, &expected.2)] {
+            for (actual, expected) in [(&actual.u, &expected.u), (&actual.vh, &expected.vh)] {
                 assert!(actual
                     .data()
                     .iter()
@@ -23070,13 +23021,13 @@ mod representation_gates {
                     }));
             }
         }
-        assert!(actual.0.is_isometric(1e-12).unwrap());
-        assert!(actual.2.is_isometric(1e-12).unwrap());
+        assert!(actual.u.is_isometric(1e-12).unwrap());
+        assert!(actual.vh.is_isometric(1e-12).unwrap());
         let rebuilt = actual
-            .0
-            .compose(&actual.1)
+            .u
+            .compose(&actual.s)
             .unwrap()
-            .compose(&actual.2)
+            .compose(&actual.vh)
             .unwrap();
         assert!(rebuilt
             .data()
@@ -23270,14 +23221,14 @@ mod representation_gates {
         let target = eager_adjoint_oracle(source);
         let lazy = source.adjoint().unwrap();
         let actual = if left {
-            lazy.left_polar().unwrap()
+            lazy.left_polar().unwrap().pair()
         } else {
-            lazy.right_polar().unwrap()
+            lazy.right_polar().unwrap().pair()
         };
         let expected = if left {
-            target.left_polar().unwrap()
+            target.left_polar().unwrap().pair()
         } else {
-            target.right_polar().unwrap()
+            target.right_polar().unwrap().pair()
         };
         assert_polar_factors(source, &target, &actual, &expected, left);
         assert_eq!(materialized_adjoint_builds(&lazy), 0);
@@ -23319,9 +23270,9 @@ mod representation_gates {
         for _ in 0..2 {
             assert_eq!(lazy.clone().eigh_vals().unwrap(), expected_vals);
             let full = lazy.clone().eigh_full().unwrap();
-            assert_eq!(full.0.data(), expected_full.0.data());
-            assert_eq!(full.1.data(), expected_full.1.data());
-            for output in [&full.0, &full.1] {
+            assert_eq!(full.d.data(), expected_full.d.data());
+            assert_eq!(full.v.data(), expected_full.v.data());
+            for output in [&full.d, &full.v] {
                 assert!(output.owned_body().is_some());
                 assert!(Arc::ptr_eq(
                     output.logical_space().provider_arc(),
@@ -23336,14 +23287,14 @@ mod representation_gates {
                 std::thread::spawn(move || {
                     let vals = clone.eigh_vals().unwrap();
                     let full = clone.eigh_full().unwrap();
-                    (vals, full.0.data().to_vec())
+                    (vals, full.d.data().to_vec())
                 })
             })
             .collect::<Vec<_>>();
         for call in calls {
             let (vals, diagonal) = call.join().unwrap();
             assert_eq!(vals, expected_vals);
-            assert_eq!(diagonal, expected_full.0.data());
+            assert_eq!(diagonal, expected_full.d.data());
         }
         assert!(Arc::ptr_eq(owned(source), &parent_body));
         assert!(Arc::ptr_eq(&owned(source).data, &parent_data));
@@ -23398,13 +23349,13 @@ mod representation_gates {
         let expected = eager.eigh_full().unwrap();
         let lazy = hermitian.adjoint().unwrap();
         let actual = lazy.eigh_full().unwrap();
-        assert_eq!(actual.0.data(), expected.0.data());
-        assert_eq!(actual.1.data(), expected.1.data());
+        assert_eq!(actual.d.data(), expected.d.data());
+        assert_eq!(actual.v.data(), expected.v.data());
         let reconstructed = actual
-            .1
-            .compose(&actual.0)
+            .v
+            .compose(&actual.d)
             .unwrap()
-            .compose(&actual.1.adjoint().unwrap())
+            .compose(&actual.v.adjoint().unwrap())
             .unwrap();
         assert_typed_map_close(&reconstructed, &eager, 1.0e-12);
         assert_eq!(materialized_adjoint_builds(&lazy), 0);
@@ -23451,9 +23402,9 @@ mod representation_gates {
         for _ in 0..2 {
             assert_eq!(lazy.clone().eig_vals().unwrap(), expected_vals);
             let full = lazy.clone().eig_full().unwrap();
-            assert_eq!(full.0.data(), expected_full.0.data());
-            assert_eq!(full.1.data(), expected_full.1.data());
-            for output in [&full.0, &full.1] {
+            assert_eq!(full.d.data(), expected_full.d.data());
+            assert_eq!(full.v.data(), expected_full.v.data());
+            for output in [&full.d, &full.v] {
                 assert!(output.owned_body().is_some());
                 assert!(Arc::ptr_eq(
                     output.logical_space().provider_arc(),
@@ -23468,14 +23419,14 @@ mod representation_gates {
                 std::thread::spawn(move || {
                     let vals = clone.eig_vals().unwrap();
                     let full = clone.eig_full().unwrap();
-                    (vals, full.0.data().to_vec())
+                    (vals, full.d.data().to_vec())
                 })
             })
             .collect::<Vec<_>>();
         for call in calls {
             let (vals, diagonal) = call.join().unwrap();
             assert_eq!(vals, expected_vals);
-            assert_eq!(diagonal, expected_full.0.data());
+            assert_eq!(diagonal, expected_full.d.data());
         }
         assert!(Arc::ptr_eq(owned(source), &parent_body));
         assert!(Arc::ptr_eq(&owned(source).data, &parent_data));
@@ -23505,7 +23456,7 @@ mod representation_gates {
         })
         .unwrap();
         let logical = eager_adjoint_oracle(&source);
-        let (d, v) = source.adjoint().unwrap().eig_full().unwrap();
+        let Eig { d, v } = source.adjoint().unwrap().eig_full().unwrap();
         let lhs = logical.to_c64().compose(&v).unwrap();
         let rhs = v.compose(&d).unwrap();
         assert_typed_map_close(&lhs, &rhs, 1.0e-12);
@@ -23559,8 +23510,8 @@ mod representation_gates {
             assert_eq!(lazy.eig_vals().unwrap(), eager.eig_vals().unwrap());
             let actual = lazy.eig_full().unwrap();
             let expected = eager.eig_full().unwrap();
-            assert_eq!(actual.0.data(), expected.0.data());
-            assert_eq!(actual.1.data(), expected.1.data());
+            assert_eq!(actual.d.data(), expected.d.data());
+            assert_eq!(actual.v.data(), expected.v.data());
             assert_eq!(materialized_adjoint_builds(&lazy), 0);
         }
     }
@@ -23979,9 +23930,9 @@ mod representation_gates {
         let target_domain = target_pinv.compose(&target).unwrap();
         let lazy = source.adjoint().unwrap();
         let factors = if left {
-            lazy.left_polar().unwrap()
+            lazy.left_polar().unwrap().pair()
         } else {
-            lazy.right_polar().unwrap()
+            lazy.right_polar().unwrap().pair()
         };
         let (positive, isometry) = if left {
             (&factors.1, &factors.0)
@@ -24694,15 +24645,15 @@ mod representation_gates {
         let lazy = source.adjoint().unwrap();
         for left in [true, false] {
             let expected = if left {
-                target.left_polar().unwrap()
+                target.left_polar().unwrap().pair()
             } else {
-                target.right_polar().unwrap()
+                target.right_polar().unwrap().pair()
             };
             for _ in 0..2 {
                 let actual = if left {
-                    lazy.clone().left_polar().unwrap()
+                    lazy.clone().left_polar().unwrap().pair()
                 } else {
-                    lazy.clone().right_polar().unwrap()
+                    lazy.clone().right_polar().unwrap().pair()
                 };
                 assert_polar_factors(&source, &target, &actual, &expected, left);
             }
@@ -24711,9 +24662,9 @@ mod representation_gates {
                     let clone = lazy.clone();
                     std::thread::spawn(move || {
                         if left {
-                            clone.left_polar().unwrap()
+                            clone.left_polar().unwrap().pair()
                         } else {
-                            clone.right_polar().unwrap()
+                            clone.right_polar().unwrap().pair()
                         }
                     })
                 })
@@ -24781,9 +24732,9 @@ mod representation_gates {
             let before = source.data().to_vec();
             let lazy = source.adjoint().unwrap();
             let result = if left {
-                lazy.left_polar()
+                lazy.left_polar().map(drop)
             } else {
-                lazy.right_polar()
+                lazy.right_polar().map(drop)
             };
             assert!(matches!(result, Err(Error::Operation(_))));
             assert_eq!(source.data(), before);
@@ -24850,39 +24801,39 @@ mod representation_gates {
         let target = eager_adjoint_oracle(source);
         let lazy = source.adjoint().unwrap();
 
-        let actual = lazy.qr_compact().unwrap();
+        let actual = lazy.qr_compact().unwrap().pair();
         assert_qr_lq_factors(
             source,
             &target,
             &actual,
-            &target.qr_compact().unwrap(),
+            &target.qr_compact().unwrap().pair(),
             true,
             true,
         );
-        let actual = lazy.lq_compact().unwrap();
+        let actual = lazy.lq_compact().unwrap().pair();
         assert_qr_lq_factors(
             source,
             &target,
             &actual,
-            &target.lq_compact().unwrap(),
+            &target.lq_compact().unwrap().pair(),
             false,
             true,
         );
-        let actual = lazy.qr_full().unwrap();
+        let actual = lazy.qr_full().unwrap().pair();
         assert_qr_lq_factors(
             source,
             &target,
             &actual,
-            &target.qr_full().unwrap(),
+            &target.qr_full().unwrap().pair(),
             true,
             false,
         );
-        let actual = lazy.lq_full().unwrap();
+        let actual = lazy.lq_full().unwrap().pair();
         assert_qr_lq_factors(
             source,
             &target,
             &actual,
-            &target.lq_full().unwrap(),
+            &target.lq_full().unwrap().pair(),
             false,
             false,
         );
@@ -24918,21 +24869,21 @@ mod representation_gates {
         ] {
             let target = eager_adjoint_oracle(&source);
             let lazy = source.adjoint().unwrap();
-            let qr = lazy.qr_full().unwrap();
+            let qr = lazy.qr_full().unwrap().pair();
             assert_qr_lq_factors(
                 &source,
                 &target,
                 &qr,
-                &target.qr_full().unwrap(),
+                &target.qr_full().unwrap().pair(),
                 true,
                 false,
             );
-            let lq = lazy.lq_full().unwrap();
+            let lq = lazy.lq_full().unwrap().pair();
             assert_qr_lq_factors(
                 &source,
                 &target,
                 &lq,
-                &target.lq_full().unwrap(),
+                &target.lq_full().unwrap().pair(),
                 false,
                 false,
             );
@@ -24956,11 +24907,11 @@ mod representation_gates {
         let source = genuinely_complex(&su2_lazy_fixture());
         let target = eager_adjoint_oracle(&source);
         let lazy = source.adjoint().unwrap();
-        let expected_qr = lazy.qr_compact().unwrap();
-        let expected_lq = lazy.lq_full().unwrap();
+        let expected_qr = lazy.qr_compact().unwrap().pair();
+        let expected_lq = lazy.lq_full().unwrap().pair();
         for _ in 0..2 {
-            let qr = lazy.clone().qr_compact().unwrap();
-            let lq = lazy.clone().lq_full().unwrap();
+            let qr = lazy.clone().qr_compact().unwrap().pair();
+            let lq = lazy.clone().lq_full().unwrap().pair();
             assert_qr_lq_factors(&source, &target, &qr, &expected_qr, true, true);
             assert_qr_lq_factors(&source, &target, &lq, &expected_lq, false, false);
         }
@@ -24969,8 +24920,8 @@ mod representation_gates {
                 .map(|_| {
                     let lazy = lazy.clone();
                     scope.spawn(move || {
-                        let qr = lazy.qr_compact().unwrap();
-                        let lq = lazy.lq_full().unwrap();
+                        let qr = lazy.qr_compact().unwrap().pair();
+                        let lq = lazy.lq_full().unwrap().pair();
                         (qr, lq)
                     })
                 })
@@ -25004,7 +24955,11 @@ mod representation_gates {
         let before = source.data().to_vec();
         let lazy = source.adjoint().unwrap();
 
-        let result = if qr { lazy.qr_full() } else { lazy.lq_full() };
+        let result = if qr {
+            lazy.qr_full().map(drop)
+        } else {
+            lazy.lq_full().map(drop)
+        };
         assert!(matches!(result, Err(Error::Operation(_))));
         assert_eq!(source.data(), before);
         assert_eq!(materialized_adjoint_builds(&lazy), 0);
@@ -25039,7 +24994,7 @@ mod representation_gates {
             R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
             D: FactorizationScalar + SpectrumMagnitude,
         {
-            let (u, s, vh) = tensor.svd_compact().unwrap();
+            let Svd { u, s, vh } = tensor.svd_compact().unwrap();
             let found = s.domain()[0]
                 .find_truncated(&s.diagview().unwrap(), truncation)
                 .unwrap();
@@ -25141,7 +25096,7 @@ mod representation_gates {
         )
         .unwrap();
         let lazy = source.adjoint().unwrap();
-        let (_, s, _) = lazy.svd_compact().unwrap();
+        let Svd { s, .. } = lazy.svd_compact().unwrap();
         assert!(s.domain()[0]
             .find_truncated(
                 &s.diagview().unwrap(),
@@ -26159,7 +26114,7 @@ mod representation_gates {
         // dense payload (one copy, never the body-local `dense_cache`
         // buffer), and the follow-up remove shares that dense `Arc` rather
         // than copying again.
-        let s = fixture().svd_compact().unwrap().1;
+        let s = fixture().svd_compact().unwrap().s;
         let warmed = s.data().as_ptr(); // warm the body-local cache first
         let inserted = s.insert_left_unit(0, false).unwrap();
         assert!(!Arc::ptr_eq(&owned(&s).data, &owned(&inserted).data));
@@ -26616,7 +26571,7 @@ mod representation_gates {
             indices.iter().sum::<usize>() as f64 + 1.0
         })
         .unwrap();
-        let compact = square.svd_compact().unwrap().1;
+        let compact = square.svd_compact().unwrap().s;
         let mut compact_destination = compact.zeros_like();
         let before = compact_destination.data().to_vec();
         assert!(square
@@ -26950,7 +26905,7 @@ mod representation_gates {
             assert!(view.materialized.get().is_none());
         }
 
-        let (u, s, _) = lhs.svd_compact().unwrap();
+        let Svd { u, s, .. } = lhs.svd_compact().unwrap();
         assert!(owned(&s).dense_cache.get().is_none());
         let expected = u.contract(&s, &[1], &[0], &[0, 1]).unwrap();
         let mut destination = expected.zeros_like();
@@ -27113,7 +27068,7 @@ mod representation_gates {
         assert_eq!(Arc::as_ptr(after), view);
         assert!(after.materialized.get().is_none());
 
-        let mut compact_destination = lhs.svd_compact().unwrap().1;
+        let mut compact_destination = lhs.svd_compact().unwrap().s;
         let payload = Arc::clone(&owned(&compact_destination).data);
         assert!(owned(&compact_destination).dense_cache.get().is_none());
         assert!(lhs
@@ -27328,7 +27283,7 @@ mod representation_gates {
 
     #[test]
     fn compact_identity_transforms_do_not_materialize() {
-        let factor = fixture().svd_compact().unwrap().1;
+        let factor = fixture().svd_compact().unwrap().s;
         assert!(matches!(&*owned(&factor).data, TypedData::Diagonal(_)));
         assert!(owned(&factor).dense_cache.get().is_none());
 
@@ -27366,7 +27321,7 @@ mod representation_gates {
         // unchanged, so O(Σ_c k_c) storage survives — and its own identity
         // answer (θ ≡ 1 across the spectrum's sectors) is a body-sharing
         // clone.
-        let s = fz2_fixture().svd_compact().unwrap().1;
+        let s = fz2_fixture().svd_compact().unwrap().s;
         let twisted = s.twist(&[0]).unwrap();
         assert!(matches!(&*owned(&twisted).data, TypedData::Diagonal(_)));
         assert!(!Arc::ptr_eq(&owned(&s).data, &owned(&twisted).data));
@@ -27374,7 +27329,7 @@ mod representation_gates {
         assert!(matches!(&*owned(&inverse).data, TypedData::Diagonal(_)));
         assert!(!Arc::ptr_eq(&owned(&s).data, &owned(&inverse).data));
 
-        let bosonic_s = fixture().svd_compact().unwrap().1;
+        let bosonic_s = fixture().svd_compact().unwrap().s;
         let untouched = bosonic_s.twist(&[0]).unwrap();
         assert!(Arc::ptr_eq(owned(&bosonic_s), owned(&untouched)));
         let untouched_inverse = bosonic_s.twist_inverse(&[0]).unwrap();
@@ -27502,7 +27457,7 @@ mod representation_gates {
         // all (see the `data` field rationale on the Group 4 contract). It
         // does *not* gate the struct shape — the fresh `OnceLock` below is
         // hand-supplied, so any layout keeping the field compiles and passes.
-        let s = fixture().svd_compact().unwrap().1;
+        let s = fixture().svd_compact().unwrap().s;
         assert!(owned(&s).dense_cache.get().is_none(), "cache warm at birth");
         let materialized = s.data().as_ptr();
         assert!(owned(&s).dense_cache.get().is_some());

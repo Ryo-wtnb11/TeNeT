@@ -16,8 +16,11 @@ use tenet::dense::{
     DenseTensor, DenseWrite,
 };
 use tenet::prelude::{Complex32, Complex64, GenericTensorError, Runtime, SectorSpectrum};
+#[cfg(feature = "racah-generated")]
+use tenet::typed::Qr;
 use tenet::typed::{
-    CheckedGenericTensorProductError, GradedSpace, NetworkReuseClass, TensorMap, Truncation,
+    CheckedGenericTensorProductError, Eig, Eigh, GradedSpace, LeftPolar, Lq, NetworkReuseClass,
+    RightPolar, Svd, TensorMap, Truncation,
 };
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -449,7 +452,7 @@ fn assert_sun_checked_generic_eigh<D>(
             && source.data()[source.block(index).unwrap().offset()] == off_diagonal
     }));
 
-    let (d, v) = source.eigh_full().unwrap();
+    let Eigh { d, v } = source.eigh_full().unwrap();
     assert!(std::ptr::eq(d.provider(), provider.as_ref()));
     assert!(std::ptr::eq(v.provider(), provider.as_ref()));
     let dense_len = d.data().len();
@@ -626,7 +629,7 @@ where
             }
         })
         .unwrap();
-    let (d, v) = source.eig_full().unwrap();
+    let Eig { d, v } = source.eig_full().unwrap();
     assert!(std::ptr::eq(d.provider(), provider.as_ref()));
     assert!(std::ptr::eq(v.provider(), provider.as_ref()));
     let dense_len = d.data().len();
@@ -1313,9 +1316,9 @@ fn checked_generic_complex_diagonal_adjoint_is_the_owned_conjugated_diagonal() {
         }
     };
     // Consumers take the owned compact form as they take `s` itself.
-    let (q, r) = adjoint.qr_compact().unwrap();
+    let Qr { q, r } = adjoint.qr_compact().unwrap();
     assert_close(q.compose(&r).unwrap().data(), adjoint.data(), "qr");
-    let (u, sigma, vh) = adjoint.svd_compact().unwrap();
+    let Svd { u, s: sigma, vh } = adjoint.svd_compact().unwrap();
     let reconstructed = u.compose(&sigma).unwrap().compose(&vh).unwrap();
     assert_close(reconstructed.data(), adjoint.data(), "svd");
     // s^† s is diagonal with |s|^2 entries.
@@ -2122,7 +2125,7 @@ fn sun_checked_generic_compact_qr_preserves_provider_and_reconstructs() {
         })
         .unwrap();
 
-    let (q, r) = source.qr_compact().unwrap();
+    let Qr { q, r } = source.qr_compact().unwrap();
     assert!(std::ptr::eq(q.provider(), provider.as_ref()));
     assert!(std::ptr::eq(r.provider(), provider.as_ref()));
     let rebuilt = q.compose(&r).unwrap();
@@ -2133,7 +2136,10 @@ fn sun_checked_generic_compact_qr_preserves_provider_and_reconstructs() {
         .all(|(actual, expected)| (actual - expected).abs() < 1.0e-10));
 
     let complex = source.to_c64();
-    let (complex_q, complex_r) = complex.qr_compact().unwrap();
+    let Qr {
+        q: complex_q,
+        r: complex_r,
+    } = complex.qr_compact().unwrap();
     assert!(std::ptr::eq(complex_q.provider(), provider.as_ref()));
     assert!(std::ptr::eq(complex_r.provider(), provider.as_ref()));
     let complex_rebuilt = complex_q.compose(&complex_r).unwrap();
@@ -2158,7 +2164,7 @@ fn sun_checked_generic_compact_svd_preserves_provider_and_reconstructs() {
         })
         .unwrap();
 
-    let (u, s, vh) = source.svd_compact().unwrap();
+    let Svd { u, s, vh } = source.svd_compact().unwrap();
     assert!(std::ptr::eq(u.provider(), provider.as_ref()));
     assert!(std::ptr::eq(s.provider(), provider.as_ref()));
     assert!(std::ptr::eq(vh.provider(), provider.as_ref()));
@@ -2170,7 +2176,11 @@ fn sun_checked_generic_compact_svd_preserves_provider_and_reconstructs() {
         .all(|(actual, expected)| (actual - expected).abs() < 1.0e-10));
 
     let complex = source.to_c64();
-    let (complex_u, complex_s, complex_vh) = complex.svd_compact().unwrap();
+    let Svd {
+        u: complex_u,
+        s: complex_s,
+        vh: complex_vh,
+    } = complex.svd_compact().unwrap();
     assert!(std::ptr::eq(complex_u.provider(), provider.as_ref()));
     assert!(std::ptr::eq(complex_s.provider(), provider.as_ref()));
     assert!(std::ptr::eq(complex_vh.provider(), provider.as_ref()));
@@ -2201,7 +2211,7 @@ fn sun_checked_generic_dense_sqrt_preserves_svd_bond_and_principal_branch() {
                 trees.codomain_vertices()[0].get() as f64 + 1.0
             })
             .unwrap();
-        let (_, s, _) = source.svd_compact().unwrap();
+        let Svd { s, .. } = source.svd_compact().unwrap();
         let root = s.sqrt().unwrap();
         assert!(std::ptr::eq(root.provider(), s.provider()));
         assert_eq!(root.codomain(), s.codomain());
@@ -2215,7 +2225,7 @@ fn sun_checked_generic_dense_sqrt_preserves_svd_bond_and_principal_branch() {
             .zip(s.data())
             .all(|(actual, expected)| (actual - expected).abs() < 1.0e-10));
         let complex = source.to_c64();
-        let (_, s, _) = complex.svd_compact().unwrap();
+        let Svd { s, .. } = complex.svd_compact().unwrap();
         let root = s.sqrt().unwrap();
         assert!(std::ptr::eq(root.provider(), s.provider()));
         assert_eq!(root.codomain(), s.codomain());
@@ -2360,7 +2370,7 @@ fn sun_checked_generic_full_svd_preserves_provider_reconstructs_and_rejects_lazy
         })
         .unwrap();
 
-    let (u, s, vh) = source.svd_full().unwrap();
+    let Svd { u, s, vh } = source.svd_full().unwrap();
     assert!(std::ptr::eq(u.provider(), provider.as_ref()));
     assert!(std::ptr::eq(s.provider(), provider.as_ref()));
     assert!(std::ptr::eq(vh.provider(), provider.as_ref()));
@@ -2372,7 +2382,11 @@ fn sun_checked_generic_full_svd_preserves_provider_reconstructs_and_rejects_lazy
         .all(|(actual, expected)| (actual - expected).abs() < 1.0e-10));
 
     let complex = source.to_c64();
-    let (complex_u, complex_s, complex_vh) = complex.svd_full().unwrap();
+    let Svd {
+        u: complex_u,
+        s: complex_s,
+        vh: complex_vh,
+    } = complex.svd_full().unwrap();
     let complex_rebuilt = complex_u
         .compose(&complex_s)
         .unwrap()
@@ -2639,7 +2653,7 @@ fn sun_checked_generic_compact_lq_preserves_provider_and_reconstructs() {
         })
         .unwrap();
 
-    let (l, q) = source.lq_compact().unwrap();
+    let Lq { l, q } = source.lq_compact().unwrap();
     assert!(std::ptr::eq(l.provider(), provider.as_ref()));
     assert!(std::ptr::eq(q.provider(), provider.as_ref()));
     let rebuilt = l.compose(&q).unwrap();
@@ -2650,7 +2664,10 @@ fn sun_checked_generic_compact_lq_preserves_provider_and_reconstructs() {
         .all(|(actual, expected)| (actual - expected).abs() < 1.0e-10));
 
     let complex = source.to_c64();
-    let (complex_l, complex_q) = complex.lq_compact().unwrap();
+    let Lq {
+        l: complex_l,
+        q: complex_q,
+    } = complex.lq_compact().unwrap();
     assert!(std::ptr::eq(complex_l.provider(), provider.as_ref()));
     assert!(std::ptr::eq(complex_q.provider(), provider.as_ref()));
     let complex_rebuilt = complex_l.compose(&complex_q).unwrap();
@@ -2675,7 +2692,7 @@ fn sun_checked_generic_full_qr_preserves_provider_and_reconstructs() {
         })
         .unwrap();
 
-    let (q, r) = source.qr_full().unwrap();
+    let Qr { q, r } = source.qr_full().unwrap();
     assert!(std::ptr::eq(q.provider(), provider.as_ref()));
     assert!(std::ptr::eq(r.provider(), provider.as_ref()));
     let rebuilt = q.compose(&r).unwrap();
@@ -2686,7 +2703,10 @@ fn sun_checked_generic_full_qr_preserves_provider_and_reconstructs() {
         .all(|(actual, expected)| (actual - expected).abs() < 1.0e-10));
 
     let complex = source.to_c64();
-    let (complex_q, complex_r) = complex.qr_full().unwrap();
+    let Qr {
+        q: complex_q,
+        r: complex_r,
+    } = complex.qr_full().unwrap();
     assert!(std::ptr::eq(complex_q.provider(), provider.as_ref()));
     assert!(std::ptr::eq(complex_r.provider(), provider.as_ref()));
     let complex_rebuilt = complex_q.compose(&complex_r).unwrap();
@@ -2746,7 +2766,7 @@ fn assert_checked_generic_eigh_factors<D>(
 ) where
     D: tenet::typed::FactorizationScalar + tenet::typed::SpectrumMagnitude + fmt::Debug,
 {
-    let (d, v) = source.eigh_full().unwrap();
+    let Eigh { d, v } = source.eigh_full().unwrap();
     assert!(std::ptr::eq(d.provider(), source.provider()));
     assert!(std::ptr::eq(v.provider(), source.provider()));
     assert!(d.runtime().shares_state_with(source.runtime()));
@@ -2828,7 +2848,7 @@ fn checked_generic_eigh_full_and_trunc_preserve_contract_for_both_dtypes() {
         |actual, expected| (actual - expected).norm(),
         |value| value.conj(),
     );
-    let (complex_d, _) = complex.eigh_full().unwrap();
+    let Eigh { d: complex_d, .. } = complex.eigh_full().unwrap();
     assert!(complex_d.data().iter().all(|value| value.im == 0.0));
 }
 
@@ -3104,7 +3124,7 @@ fn checked_generic_eigh_qdim_and_decode_failures_publish_no_pair() {
 
     // The truncation composition decodes labels in `diagview` and reads the
     // quantum dimension in `find_truncated`; both surface the provider error.
-    let (d, _) = source.eigh_full().unwrap();
+    let Eigh { d, .. } = source.eigh_full().unwrap();
     provider.fail_decode.store(true, Ordering::Relaxed);
     assert!(matches!(
         d.diagview(),
@@ -3142,7 +3162,7 @@ fn checked_generic_eig_qdim_and_decode_failures_publish_no_pair() {
 
     // The truncation composition decodes labels in `diagview` and reads the
     // quantum dimension in `find_truncated`; both surface the provider error.
-    let (d, _) = source.eig_full().unwrap();
+    let Eig { d, .. } = source.eig_full().unwrap();
     provider.fail_decode.store(true, Ordering::Relaxed);
     assert!(matches!(
         d.diagview(),
@@ -3177,7 +3197,7 @@ fn checked_generic_eigh_signed_ties_are_stable_and_degenerate_projectors_are_inv
         [-2.0, 2.0, 1.0][index[0]] * f64::from(index[0] == index[1])
     })
     .unwrap();
-    let (d, _) = tied.eigh_full().unwrap();
+    let Eigh { d, .. } = tied.eigh_full().unwrap();
     // The order of the tied magnitudes is the contract; the values carry the
     // eigensolver's rounding (`terms` = the block size 3).
     numerics::assert_slices_close(
@@ -3192,7 +3212,7 @@ fn checked_generic_eigh_signed_ties_are_stable_and_degenerate_projectors_are_inv
             [2.0, 2.0, -1.0][index[0]] * f64::from(index[0] == index[1])
         })
         .unwrap();
-    let (d, v) = degenerate.eigh_full().unwrap();
+    let Eigh { d, v } = degenerate.eigh_full().unwrap();
     let selector_codomain = d.codomain();
     let selector_domain = d.domain();
     let selector: TensorMap<_, f64> = TensorMap::from_block_fn(
@@ -3288,7 +3308,10 @@ fn checked_generic_eig_full_is_complex_and_reconstructs_nonnormal_inputs() {
         [[1.0, -3.0], [1.0, 1.0]][index[0]][index[1]]
     })
     .unwrap();
-    let (real_d, real_v) = real.eig_full().unwrap();
+    let Eig {
+        d: real_d,
+        v: real_v,
+    } = real.eig_full().unwrap();
     assert!(real_d.data().iter().any(|value| value.im.abs() > 1.0));
     for column in 0..2 {
         let pivot = (0..2)
@@ -3305,7 +3328,10 @@ fn checked_generic_eig_full_is_complex_and_reconstructs_nonnormal_inputs() {
     assert_checked_generic_eig_reconstruction(&real.to_c64(), &real_d, &real_v);
 
     let complex = real.to_c64().scale(Complex64::new(1.0, 0.25));
-    let (complex_d, complex_v) = complex.eig_full().unwrap();
+    let Eig {
+        d: complex_d,
+        v: complex_v,
+    } = complex.eig_full().unwrap();
     assert!(complex_d.data().iter().any(|value| value.im.abs() > 1.0));
     assert_checked_generic_eig_reconstruction(&complex, &complex_d, &complex_v);
 }
@@ -3319,7 +3345,7 @@ fn checked_generic_eig_ties_are_stable_and_degenerate_projectors_are_invariant()
         [-2.0, 2.0, 1.0][index[0]] * f64::from(index[0] == index[1])
     })
     .unwrap();
-    let (d, _) = tied.eig_full().unwrap();
+    let Eig { d, .. } = tied.eig_full().unwrap();
     numerics::assert_slices_close(
         "eig_full tied spectrum",
         &[d.data()[0], d.data()[4], d.data()[8]],
@@ -3336,7 +3362,7 @@ fn checked_generic_eig_ties_are_stable_and_degenerate_projectors_are_invariant()
             [2.0, 2.0, -1.0][index[0]] * f64::from(index[0] == index[1])
         })
         .unwrap();
-    let (d, v) = degenerate.eig_full().unwrap();
+    let Eig { d, v } = degenerate.eig_full().unwrap();
     let selector: TensorMap<_, Complex64> = TensorMap::from_block_fn(
         &runtime,
         d.codomain().iter(),
@@ -3386,7 +3412,7 @@ fn checked_generic_eig_truncation_reports_discarded_spectrum_norm_only() {
         })
         .unwrap();
     // The truncated eigendecomposition is a composition (#1534).
-    let (d, v) = source.eig_full().unwrap();
+    let Eig { d, v } = source.eig_full().unwrap();
     let found = d.domain()[0]
         .find_truncated(&d.diagview().unwrap(), &Truncation::rank(5))
         .unwrap();
@@ -3461,7 +3487,7 @@ fn checked_generic_svd_truncation_reconstructs_and_preserves_provider() {
         })
         .unwrap();
     // The truncated SVD is a composition (#1534).
-    let (u, s, vh) = source.svd_compact().unwrap();
+    let Svd { u, s, vh } = source.svd_compact().unwrap();
     let found = s.domain()[0]
         .find_truncated(&s.diagview().unwrap(), &Truncation::rank(1))
         .unwrap();
@@ -3979,13 +4005,19 @@ fn checked_generic_polar_matches_independent_real_and_complex_qh_oracles() {
     let right: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, ij| right_data[ij[0]][ij[1]])
             .unwrap();
-    let (actual_q, actual_h) = left.left_polar().unwrap();
+    let LeftPolar {
+        w: actual_q,
+        p: actual_h,
+    } = left.left_polar().unwrap();
     assert!(std::ptr::eq(actual_q.provider(), provider.as_ref()));
     assert!(std::ptr::eq(actual_h.provider(), provider.as_ref()));
     assert!(actual_q.runtime().shares_state_with(left.runtime()));
     assert_same_checked_generic_layout_and_close(&actual_q, &q_tensor, |a, b| (a - b).abs());
     assert_same_checked_generic_layout_and_close(&actual_h, &h_tensor, |a, b| (a - b).abs());
-    let (actual_h, actual_q) = right.right_polar().unwrap();
+    let RightPolar {
+        p: actual_h,
+        wh: actual_q,
+    } = right.right_polar().unwrap();
     assert_same_checked_generic_layout_and_close(&actual_q, &q_tensor, |a, b| (a - b).abs());
     assert_same_checked_generic_layout_and_close(&actual_h, &h_tensor, |a, b| (a - b).abs());
 
@@ -4007,10 +4039,11 @@ fn checked_generic_polar_matches_independent_real_and_complex_qh_oracles() {
             TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, ij| source[ij[0]][ij[1]])
                 .unwrap();
         let (actual_q, actual_h) = if left {
-            source.left_polar().unwrap()
-        } else {
-            let (p, w) = source.right_polar().unwrap();
+            let LeftPolar { w, p } = source.left_polar().unwrap();
             (w, p)
+        } else {
+            let RightPolar { p, wh } = source.right_polar().unwrap();
+            (wh, p)
         };
         assert_same_checked_generic_layout_and_close(&actual_q, &complex_q, |a, b| (a - b).norm());
         assert_same_checked_generic_layout_and_close(&actual_h, &complex_h, |a, b| (a - b).norm());
@@ -4048,8 +4081,8 @@ fn checked_generic_polar_direction_covers_rectangular_side_only_and_empty_inputs
     assert!(side_only.right_polar().is_err());
     let empty = GradedSpace::try_new_with_arc(Arc::clone(&provider), []).unwrap();
     let empty_map: TensorMap<_, f64> = TensorMap::zeros(&runtime, [&empty], [&empty]).unwrap();
-    assert!(empty_map.left_polar().unwrap().0.data().is_empty());
-    assert!(empty_map.right_polar().unwrap().0.data().is_empty());
+    assert!(empty_map.left_polar().unwrap().w.data().is_empty());
+    assert!(empty_map.right_polar().unwrap().p.data().is_empty());
 }
 
 #[test]
@@ -4068,16 +4101,28 @@ fn checked_generic_polar_lazy_redirects_to_the_opposite_parent_operation() {
         })
         .unwrap();
     let lazy = source.adjoint().unwrap();
-    let (parent_p, parent_w) = source.right_polar().unwrap();
-    let (actual_w, actual_p) = lazy.left_polar().unwrap();
+    let RightPolar {
+        p: parent_p,
+        wh: parent_w,
+    } = source.right_polar().unwrap();
+    let LeftPolar {
+        w: actual_w,
+        p: actual_p,
+    } = lazy.left_polar().unwrap();
     assert_same_checked_generic_layout_and_close(
         &actual_w,
         &parent_w.adjoint().unwrap(),
         |a, b| (a - b).norm(),
     );
     assert_same_checked_generic_layout_and_close(&actual_p, &parent_p, |a, b| (a - b).norm());
-    let (parent_w, parent_p) = source.left_polar().unwrap();
-    let (actual_p, actual_w) = lazy.right_polar().unwrap();
+    let LeftPolar {
+        w: parent_w,
+        p: parent_p,
+    } = source.left_polar().unwrap();
+    let RightPolar {
+        p: actual_p,
+        wh: actual_w,
+    } = lazy.right_polar().unwrap();
     assert_same_checked_generic_layout_and_close(&actual_p, &parent_p, |a, b| (a - b).norm());
     assert_same_checked_generic_layout_and_close(
         &actual_w,
@@ -4124,10 +4169,11 @@ fn checked_generic_polar_completes_rank_deficient_and_zero_sectors() {
             .unwrap();
         for left in [true, false] {
             let (w, p) = if left {
-                source.left_polar().unwrap()
-            } else {
-                let (p, w) = source.right_polar().unwrap();
+                let LeftPolar { w, p } = source.left_polar().unwrap();
                 (w, p)
+            } else {
+                let RightPolar { p, wh } = source.right_polar().unwrap();
+                (wh, p)
             };
             let rebuilt = if left {
                 w.compose(&p).unwrap()
@@ -4168,10 +4214,11 @@ macro_rules! assert_sun_polar_laws {
         let source = $source;
         let left: bool = $left;
         let (w, p) = if left {
-            source.left_polar().unwrap()
-        } else {
-            let (p, w) = source.right_polar().unwrap();
+            let LeftPolar { w, p } = source.left_polar().unwrap();
             (w, p)
+        } else {
+            let RightPolar { p, wh } = source.right_polar().unwrap();
+            (wh, p)
         };
         let assert_close = |actual: &TensorMap<_, _>, expected: &TensorMap<_, _>, what: &str| {
             let error = actual
@@ -4417,13 +4464,13 @@ macro_rules! assert_sun_compact_laws {
             }
         };
 
-        let (q, r) = source.qr_compact().unwrap();
+        let Qr { q, r } = source.qr_compact().unwrap();
         assert_close(&q.compose(&r).unwrap(), source, "A = QR");
         assert_identity(&owned_adjoint(&q).compose(&q).unwrap(), "Qᴴ Q = 1");
-        let (l, q) = source.lq_compact().unwrap();
+        let Lq { l, q } = source.lq_compact().unwrap();
         assert_close(&l.compose(&q).unwrap(), source, "A = LQ");
         assert_identity(&q.compose(&owned_adjoint(&q)).unwrap(), "Q Qᴴ = 1");
-        let (u, s, vh) = source.svd_compact().unwrap();
+        let Svd { u, s, vh } = source.svd_compact().unwrap();
         assert_close(
             &u.compose(&s).unwrap().compose(&vh).unwrap(),
             source,
@@ -4630,7 +4677,7 @@ fn checked_generic_polar_stages_svd_and_both_gemms_without_publication() {
                 ))
             ));
         } else {
-            let (w, p) = result.unwrap();
+            let LeftPolar { w, p } = result.unwrap();
             assert!(std::ptr::eq(w.provider(), provider.as_ref()));
             assert!(std::ptr::eq(p.provider(), provider.as_ref()));
         }
@@ -4674,9 +4721,9 @@ fn checked_generic_lazy_polar_second_svd_failure_keeps_parent_unchanged() {
         let before = source.data().to_vec();
         let lazy = source.adjoint().unwrap();
         let result = if left {
-            lazy.left_polar()
+            lazy.left_polar().map(drop)
         } else {
-            lazy.right_polar()
+            lazy.right_polar().map(drop)
         };
 
         assert!(matches!(
@@ -5310,10 +5357,11 @@ fn assert_sun_checked_generic_polar_qh<D>(
                 && trees.domain_vertices()[0].get() == 1
         });
         let (actual_q, actual_h) = if left {
-            source.left_polar().unwrap()
-        } else {
-            let (p, w) = source.right_polar().unwrap();
+            let LeftPolar { w, p } = source.left_polar().unwrap();
             (w, p)
+        } else {
+            let RightPolar { p, wh } = source.right_polar().unwrap();
+            (wh, p)
         };
         assert!(std::ptr::eq(actual_q.provider(), provider.as_ref()));
         assert!(std::ptr::eq(actual_h.provider(), provider.as_ref()));
@@ -6029,7 +6077,7 @@ fn checked_generic_full_lq_reconstructs_and_preserves_provider() {
     let leg = GradedSpace::try_new_with_arc(Arc::clone(&provider), [(Label::X, 1)]).unwrap();
     let source: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], |_, _| 2.0).unwrap();
-    let (l, q) = source.lq_full().unwrap();
+    let Lq { l, q } = source.lq_full().unwrap();
     assert!(std::ptr::eq(l.provider(), provider.as_ref()));
     assert!(std::ptr::eq(q.provider(), provider.as_ref()));
     let rebuilt = l.compose(&q).unwrap();
@@ -6051,7 +6099,7 @@ fn checked_generic_full_lq_supports_complex_scalars() {
             Complex64::new(2.0, 1.0)
         })
         .unwrap();
-    let (l, q) = source.lq_full().unwrap();
+    let Lq { l, q } = source.lq_full().unwrap();
     let rebuilt = l.compose(&q).unwrap();
     assert!((rebuilt.norm().unwrap() - source.norm().unwrap()).abs() < 1e-12);
 }

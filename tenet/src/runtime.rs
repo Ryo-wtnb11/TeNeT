@@ -1680,7 +1680,7 @@ impl RuntimeBuilder {
     ///     [(-1, 1), (0, 2), (1, 1)].map(|(q, n)| (U1Irrep::new(q), n)),
     /// )?;
     /// let t: TensorMap<_, f64> = TensorMap::rand_with_seed(&rt, [&v, &v], [&v, &v], 7)?;
-    /// let (_u, _s, _vh) = t.svd_compact()?;
+    /// let Svd { u: _u, s: _s, vh: _vh } = t.svd_compact()?;
     ///
     /// // Switch to the system BLAS/LAPACK linked via a `blas-*` cargo feature
     /// // (OpenBLAS / MKL / Accelerate). Results are identical to faer up to

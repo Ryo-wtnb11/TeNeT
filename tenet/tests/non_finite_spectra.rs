@@ -64,11 +64,15 @@ macro_rules! assert_nan_spectrum_is_rejected {
         for policy in policies() {
             let svd = diagonal
                 .svd_compact()
-                .and_then(|(_, s, _)| s.domain()[0].find_truncated(&s.diagview()?, &policy));
+                .and_then(|tenet::typed::Svd { s, .. }| {
+                    s.domain()[0].find_truncated(&s.diagview()?, &policy)
+                });
             assert!(svd.is_err(), "svd composition {policy:?}");
             let eigh = diagonal
                 .eigh_full()
-                .and_then(|(d, _)| d.domain()[0].find_truncated(&d.diagview()?, &policy));
+                .and_then(|tenet::typed::Eigh { d, .. }| {
+                    d.domain()[0].find_truncated(&d.diagview()?, &policy)
+                });
             assert!(eigh.is_err(), "eigh composition {policy:?}");
         }
     }};

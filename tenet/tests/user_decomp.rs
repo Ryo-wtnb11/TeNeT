@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use tenet::core::{U1FusionRule, U1Irrep};
 use tenet::prelude::{Complex32, Complex64, Runtime};
-use tenet::typed::{GradedSpace, TensorMap, Truncation};
+use tenet::typed::{GradedSpace, Svd, TensorMap, Truncation};
 
 #[path = "../../tests/support/numerics.rs"]
 mod numerics;
@@ -46,7 +46,7 @@ fn truncated_svd_restores_dropped_sector_in_non_dual_closed_space() {
 
     // Reconstruction is backward stable: within the tolerance rule, one term
     // per entry of the largest (2 x 2) block.
-    let (u, s, vh) = tensor.svd_compact().unwrap();
+    let Svd { u, s, vh } = tensor.svd_compact().unwrap();
     numerics::assert_slices_close(
         "u s vh",
         u.compose(&s).unwrap().compose(&vh).unwrap().data(),
