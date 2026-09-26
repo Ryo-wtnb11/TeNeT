@@ -424,6 +424,9 @@ where
         if rhs.signature.placement != placement {
             return Err(Error::PlacementMismatch);
         }
+        // The plan compile is lease-free Host work, so it runs in this
+        // runtime's pool like every other eager Host operation (#1531).
+        let _host_pool = lhs.runtime.enter_host_pool();
         let lhs_space = lhs.space.space();
         let rhs_space = rhs.space.space();
         let lhs_axes: Vec<usize> = (lhs_space.nout()..lhs_space.nout() + lhs_space.nin()).collect();
