@@ -1186,7 +1186,7 @@ fn checked_generic_diagonal_is_compact_canonical_and_provider_owned() {
     assert_eq!(real.domain()[0], bond);
     assert!(!format!("{real:?}").contains("elements: 5"));
     assert_eq!(
-        real.diagonal_spectrum().unwrap().unwrap(),
+        tenet::expert::diagonal_spectrum(&real).unwrap().unwrap(),
         [
             SectorSpectrum {
                 sector: Label::Vacuum,
@@ -1204,13 +1204,10 @@ fn checked_generic_diagonal_is_compact_canonical_and_provider_owned() {
     assert_eq!(real.data(), &[1.0, 2.0, 0.0, 0.0, 3.0]);
     assert_eq!(adjoint.data(), real.data());
     assert_eq!(
-        adjoint
-            .adjoint()
-            .unwrap()
-            .diagonal_spectrum()
+        tenet::expert::diagonal_spectrum(&adjoint.adjoint().unwrap())
             .unwrap()
             .unwrap(),
-        real.diagonal_spectrum().unwrap().unwrap()
+        tenet::expert::diagonal_spectrum(&real).unwrap().unwrap()
     );
 
     let complex = TensorMap::<_, Complex64>::diagonal(
@@ -1301,12 +1298,12 @@ fn checked_generic_complex_diagonal_adjoint_is_the_owned_conjugated_diagonal() {
     assert_eq!(bits(&adjoint), bits(&expected));
     assert!(adjoint.network_reuse_class(false) == NetworkReuseClass::Compact);
     assert_eq!(
-        adjoint.diagonal_spectrum().unwrap(),
-        expected.diagonal_spectrum().unwrap()
+        tenet::expert::diagonal_spectrum(&adjoint).unwrap(),
+        tenet::expert::diagonal_spectrum(&expected).unwrap()
     );
     assert_eq!(
-        adjoint.adjoint().unwrap().diagonal_spectrum().unwrap(),
-        s.diagonal_spectrum().unwrap()
+        tenet::expert::diagonal_spectrum(&adjoint.adjoint().unwrap()).unwrap(),
+        tenet::expert::diagonal_spectrum(&s).unwrap()
     );
 
     let assert_close = |got: &[Complex64], want: &[Complex64], what: &str| {
@@ -1379,8 +1376,8 @@ fn checked_generic_complex_diagonal_adjoint_is_the_owned_conjugated_diagonal() {
     assert_eq!(chiral_adjoint.domain(), source.domain());
     assert_eq!(chiral_adjoint.codomain()[0], chiral);
     assert_eq!(
-        chiral_adjoint.diagonal_spectrum().unwrap(),
-        chiral_diagonal(true).diagonal_spectrum().unwrap()
+        tenet::expert::diagonal_spectrum(&chiral_adjoint).unwrap(),
+        tenet::expert::diagonal_spectrum(&chiral_diagonal(true)).unwrap()
     );
     assert_eq!(bits(&chiral_adjoint), bits(&chiral_diagonal(true)));
     // 2x2 [0,1] block and 1x1 [1,0] block: 2 off-diagonal entries.
@@ -1406,8 +1403,8 @@ fn checked_generic_complex_diagonal_adjoint_is_the_owned_conjugated_diagonal() {
     assert!(real_adjoint.network_reuse_class(false) == NetworkReuseClass::Compact);
     assert_eq!(real_adjoint.codomain(), real.codomain());
     assert_eq!(
-        real_adjoint.diagonal_spectrum().unwrap(),
-        real.diagonal_spectrum().unwrap()
+        tenet::expert::diagonal_spectrum(&real_adjoint).unwrap(),
+        tenet::expert::diagonal_spectrum(&real).unwrap()
     );
 
     // The multiplicity-free path gives the same representation and zeros.
@@ -1461,7 +1458,7 @@ fn checked_generic_diagonal_rejects_before_layout_and_preserves_error_precedence
     .unwrap();
     provider.fail_decode.store(true, Ordering::Relaxed);
     assert!(matches!(
-        compact.diagonal_spectrum(),
+        tenet::expert::diagonal_spectrum(&compact),
         Err(GenericTensorError::Structure(
             CheckedGenericStructureError::Provider(ToyError::Decode)
         ))
@@ -1933,13 +1930,26 @@ fn checked_generic_reductions_cover_real_complex_dense_payloads() {
         .unwrap();
     let inner = source.inner(&source).unwrap();
     assert!(inner.is_finite());
-    assert!((source.norm().unwrap() * source.norm().unwrap() - inner).abs() < 1e-12);
+    assert!((source.norm(2.0).unwrap() * source.norm(2.0).unwrap() - inner).abs() < 1e-12);
     assert!(source.tr().unwrap().is_finite());
     let complex = source.to_c64();
     assert!(complex.inner(&complex).unwrap().re.is_finite());
-    assert!(complex.norm().unwrap().is_finite());
+    assert!(complex.norm(2.0).unwrap().is_finite());
     assert!(complex.tr().unwrap().re.is_finite());
     assert!(provider.coefficient_queries.load(Ordering::Relaxed) > 0);
+    // Checked Generic has only the Frobenius reduction: every other exponent
+    // is a typed rejection, never a silently different norm.
+    for p in [1.0, 3.0, f64::INFINITY, 0.0, f64::NAN] {
+        assert!(
+            matches!(
+                source.norm(p),
+                Err(GenericTensorError::Facade(
+                    tenet::prelude::Error::InvalidArgument(_)
+                ))
+            ),
+            "checked Generic norm({p})"
+        );
+    }
 }
 
 #[test]
@@ -3517,7 +3527,7 @@ fn checked_generic_lazy_adjoint_preserves_provider_and_reductions() {
 
     let adjoint = source.adjoint().unwrap();
     assert!(std::ptr::eq(adjoint.provider(), provider.as_ref()));
-    assert!((adjoint.norm().unwrap() - source.norm().unwrap()).abs() < 1.0e-12);
+    assert!((adjoint.norm(2.0).unwrap() - source.norm(2.0).unwrap()).abs() < 1.0e-12);
     assert!((adjoint.tr().unwrap() - source.tr().unwrap()).abs() < 1.0e-12);
 
     let complex = source.to_c64();
@@ -3750,7 +3760,7 @@ fn checked_generic_reduction_dimension_failure_is_typed_and_nonpublishing() {
         TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| 2.0).unwrap();
     let before = source.data().to_vec();
     provider.fail_algebra.store(true, Ordering::Relaxed);
-    let error = source.norm().unwrap_err();
+    let error = source.norm(2.0).unwrap_err();
     assert!(matches!(
         error,
         GenericTensorError::Structure(CheckedGenericStructureError::Provider(ToyError::Algebra))
@@ -4224,10 +4234,10 @@ macro_rules! assert_sun_polar_laws {
             let error = actual
                 .axpby(1.0.into(), expected, (-1.0).into())
                 .unwrap()
-                .norm()
+                .norm(2.0)
                 .unwrap();
             assert!(
-                error < 1e-9 * (1.0 + expected.norm().unwrap()),
+                error < 1e-9 * (1.0 + expected.norm(2.0).unwrap()),
                 "{what}: {error}"
             );
         };
@@ -4278,7 +4288,7 @@ macro_rules! assert_sun_polar_laws {
             // A rank-0 Gram map sum |w|^2 is real and nonnegative, so unit
             // norm is the scalar identity (no leg names the provider).
             assert_eq!(gram.data().len(), 1);
-            assert!((gram.norm().unwrap() - 1.0).abs() < 1e-9, "W isometry");
+            assert!((gram.norm(2.0).unwrap() - 1.0).abs() < 1e-9, "W isometry");
         } else {
             let identity = TensorMap::from_block_fn(
                 $runtime,
@@ -4409,10 +4419,10 @@ macro_rules! assert_sun_compact_laws {
             let error = actual
                 .axpby(1.0.into(), expected, (-1.0).into())
                 .unwrap()
-                .norm()
+                .norm(2.0)
                 .unwrap();
             assert!(
-                error < 1e-9 * (1.0 + expected.norm().unwrap()),
+                error < 1e-9 * (1.0 + expected.norm(2.0).unwrap()),
                 "{what}: {error}"
             );
         };
@@ -6101,7 +6111,7 @@ fn checked_generic_full_lq_supports_complex_scalars() {
         .unwrap();
     let Lq { l, q } = source.lq_full().unwrap();
     let rebuilt = l.compose(&q).unwrap();
-    assert!((rebuilt.norm().unwrap() - source.norm().unwrap()).abs() < 1e-12);
+    assert!((rebuilt.norm(2.0).unwrap() - source.norm(2.0).unwrap()).abs() < 1e-12);
 }
 
 #[test]
@@ -7069,7 +7079,7 @@ fn sun_checked_generic_adjoint_and_reductions_preserve_provider_and_errors() {
 
         let dagger = source.adjoint().unwrap();
         assert!(std::ptr::eq(dagger.provider(), provider.as_ref()));
-        assert!((dagger.norm().unwrap() - source.norm().unwrap()).abs() < 1.0e-12);
+        assert!((dagger.norm(2.0).unwrap() - source.norm(2.0).unwrap()).abs() < 1.0e-12);
         assert!((dagger.inner(&dagger).unwrap() - source.inner(&source).unwrap()).abs() < 1.0e-12);
         assert!((dagger.tr().unwrap() - source.tr().unwrap()).abs() < 1.0e-12);
 
@@ -7590,7 +7600,7 @@ fn checked_inner_and_norm_take_one_weight_per_sector_and_keep_error_precedence()
     assert!(lazy_close_c64(lhs.inner(&rhs).unwrap(), expected));
     assert!(lazy_close_c64(rhs.inner(&lhs).unwrap(), expected.conj()));
     assert!(lazy_close_f64(
-        lhs.norm().unwrap(),
+        lhs.norm(2.0).unwrap(),
         literal_c64(&lhs, &lhs).re.sqrt()
     ));
     let real_lhs = lhs.re();
@@ -7600,7 +7610,7 @@ fn checked_inner_and_norm_take_one_weight_per_sector_and_keep_error_precedence()
         literal_f64(&real_lhs, &real_rhs)
     ));
     assert!(lazy_close_f64(
-        real_lhs.norm().unwrap(),
+        real_lhs.norm(2.0).unwrap(),
         literal_f64(&real_lhs, &real_lhs).sqrt()
     ));
     let mut unweighted = Complex64::new(0.0, 0.0);
@@ -7632,8 +7642,8 @@ fn checked_inner_and_norm_take_one_weight_per_sector_and_keep_error_precedence()
         expected_mixed.conj()
     ));
     assert!(lazy_close_f64(
-        lazy_lhs.norm().unwrap(),
-        lhs.norm().unwrap()
+        lazy_lhs.norm(2.0).unwrap(),
+        lhs.norm(2.0).unwrap()
     ));
     let real_lazy = real_lhs.adjoint().unwrap();
     assert!(lazy_close_f64(
@@ -7649,7 +7659,7 @@ fn checked_inner_and_norm_take_one_weight_per_sector_and_keep_error_precedence()
             "owned inner",
             Box::new(|| lhs.inner(&rhs).map(|_| ())) as Box<dyn Fn() -> _>,
         ),
-        ("owned norm", Box::new(|| lhs.norm().map(|_| ()))),
+        ("owned norm", Box::new(|| lhs.norm(2.0).map(|_| ()))),
         (
             "lazy-lazy inner",
             Box::new(|| lazy_lhs.inner(&lazy_rhs).map(|_| ())),
@@ -7662,7 +7672,7 @@ fn checked_inner_and_norm_take_one_weight_per_sector_and_keep_error_precedence()
             "owned-lazy inner",
             Box::new(|| rhs.inner(&lazy_lhs).map(|_| ())),
         ),
-        ("lazy norm", Box::new(|| lazy_lhs.norm().map(|_| ()))),
+        ("lazy norm", Box::new(|| lazy_lhs.norm(2.0).map(|_| ()))),
     ] {
         provider.coefficient_queries.store(0, Ordering::Relaxed);
         call().unwrap();
@@ -7715,7 +7725,7 @@ fn checked_inner_and_norm_take_one_weight_per_sector_and_keep_error_precedence()
             if message == "checked Generic reductions require dense payloads"
     ));
     assert!(matches!(
-        diagonal.norm().unwrap_err(),
+        diagonal.norm(2.0).unwrap_err(),
         GenericTensorError::Facade(tenet::prelude::Error::InvalidArgument(message))
             if message == "checked Generic reductions require dense payloads"
     ));
@@ -7728,7 +7738,7 @@ fn checked_inner_and_norm_take_one_weight_per_sector_and_keep_error_precedence()
             ))
         ));
         assert!(matches!(
-            tensor.norm().unwrap_err(),
+            tensor.norm(2.0).unwrap_err(),
             GenericTensorError::Structure(CheckedGenericStructureError::Provider(
                 ToyError::Algebra
             ))

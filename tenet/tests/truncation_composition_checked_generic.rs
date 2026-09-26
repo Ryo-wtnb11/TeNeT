@@ -113,7 +113,7 @@ macro_rules! assert_su3_svd_composition {
             let case = format!("{} {name}", $tag);
             let Svd { u, s, vh } = source.svd_compact().unwrap();
             assert!(
-                s.diagonal_spectrum().unwrap().is_none(),
+                tenet::expert::diagonal_spectrum(&s).unwrap().is_none(),
                 "checked-Generic compact s is dense, which is what exercises diagview's strided arm"
             );
             let bond = s.domain()[0].clone();

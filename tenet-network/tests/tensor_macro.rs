@@ -368,7 +368,7 @@ where
         .unwrap()
         .scalar()
         .unwrap();
-    let norm = tensor.norm().unwrap();
+    let norm = tensor.norm(2.0).unwrap();
     assert!((actual - norm * norm).abs() <= 1e-10 * (1.0 + norm * norm));
 }
 
@@ -480,7 +480,7 @@ fn factorization_fields_and_tuple_fields_contract_without_parentheses() {
         .unwrap()
         .scalar()
         .unwrap();
-    let norm = svd.u.norm().unwrap();
+    let norm = svd.u.norm(2.0).unwrap();
     assert!((norm_squared - norm * norm).abs() <= 1e-10 * (1.0 + norm * norm));
 
     let tenet::typed::Qr { q, r } = tensor.qr_compact().unwrap();

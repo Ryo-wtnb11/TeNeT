@@ -154,9 +154,9 @@ macro_rules! assert_reconstruction {
         let residual = actual
             .axpby(one::<$narrow>(), expected, minus_one::<$narrow>())
             .unwrap()
-            .norm()
+            .norm(2.0)
             .unwrap();
-        let bound = tolerance($terms, expected.norm().unwrap());
+        let bound = tolerance($terms, expected.norm(2.0).unwrap());
         assert!(
             residual <= bound,
             "{}: residual {residual:e} exceeds tolerance {bound:e}",
@@ -455,7 +455,7 @@ macro_rules! factor_checks {
         let residual = reconstructed
             .axpby(one::<$narrow>(), &tall, minus_one::<$narrow>())
             .unwrap()
-            .norm()
+            .norm(2.0)
             .unwrap();
         assert!(
             (residual - truncated.error).abs() <= tolerance(terms, truncated.error),
@@ -537,9 +537,9 @@ macro_rules! factor_checks {
             .unwrap()
             .compose(&tall)
             .unwrap()
-            .norm()
+            .norm(2.0)
             .unwrap();
-        let bound = tolerance(terms, tall.norm().unwrap()) * kappa;
+        let bound = tolerance(terms, tall.norm(2.0).unwrap()) * kappa;
         assert!(
             annihilated <= bound,
             "{name}: left_null does not annihilate the fixture, \
@@ -555,9 +555,9 @@ macro_rules! factor_checks {
         let annihilated = short
             .compose(&right.adjoint().unwrap())
             .unwrap()
-            .norm()
+            .norm(2.0)
             .unwrap();
-        let bound = tolerance(terms, short.norm().unwrap()) * short_kappa;
+        let bound = tolerance(terms, short.norm(2.0).unwrap()) * short_kappa;
         assert!(
             annihilated <= bound,
             "{name}: right_null does not annihilate the fixture, \
@@ -581,7 +581,7 @@ macro_rules! factor_checks {
                 .unwrap()
                 .iter()
                 .flat_map(|entry| &entry.values)
-                .all(|&value| value >= -tolerance(terms, p.norm().unwrap())),
+                .all(|&value| value >= -tolerance(terms, p.norm(2.0).unwrap())),
             "{name}: the left polar positive factor must be positive semidefinite"
         );
         assert_payloads_agree_scaled(

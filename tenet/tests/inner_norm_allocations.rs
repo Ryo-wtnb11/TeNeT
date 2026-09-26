@@ -105,10 +105,10 @@ fn warmed_non_abelian_inner_and_norm_do_not_allocate() {
     let (cold, cold_allocations) = measured(|| lhs.inner(&rhs).unwrap());
     eprintln!("cold coupled-region initialization: {cold_allocations} allocations");
     black_box(cold);
-    black_box(lhs.norm().unwrap());
+    black_box(lhs.norm(2.0).unwrap());
 
     let (inner, inner_allocations) = measured(|| lhs.inner(&rhs).unwrap());
-    let (norm, norm_allocations) = measured(|| lhs.norm().unwrap());
+    let (norm, norm_allocations) = measured(|| lhs.norm(2.0).unwrap());
     black_box((inner, norm));
 
     assert_eq!(inner_allocations, 0);
@@ -117,13 +117,13 @@ fn warmed_non_abelian_inner_and_norm_do_not_allocate() {
     // Out-of-range payloads take the rescaling passes, which add none either.
     for scale in [1e200, 1e-200] {
         let extreme = lhs.scale(Complex64::new(scale, 0.0));
-        black_box(extreme.norm().unwrap());
-        let (value, allocations) = measured(|| extreme.norm().unwrap());
+        black_box(extreme.norm(2.0).unwrap());
+        let (value, allocations) = measured(|| extreme.norm(2.0).unwrap());
         assert!(value.is_finite() && value > 0.0, "{scale:e}: {value:e}");
         assert_eq!(allocations, 0, "rescaled norm at {scale:e}");
-        let (value, allocations) = measured(|| extreme.norm_p(3.0).unwrap());
+        let (value, allocations) = measured(|| extreme.norm(3.0).unwrap());
         assert!(value.is_finite() && value > 0.0, "{scale:e}: {value:e}");
-        assert_eq!(allocations, 0, "rescaled norm_p(3) at {scale:e}");
+        assert_eq!(allocations, 0, "rescaled norm(3) at {scale:e}");
     }
 }
 
@@ -430,10 +430,10 @@ fn warmed_checked_generic_reductions_do_not_allocate() {
     let (cold, cold_allocations) = measured(|| lhs.inner(&rhs).unwrap());
     eprintln!("cold checked coupled-region initialization: {cold_allocations} allocations");
     black_box(cold);
-    black_box(lhs.norm().unwrap());
+    black_box(lhs.norm(2.0).unwrap());
     black_box(lazy_lhs.inner(&lazy_rhs).unwrap());
     black_box(lazy_lhs.inner(&rhs).unwrap());
-    black_box(lazy_lhs.norm().unwrap());
+    black_box(lazy_lhs.norm(2.0).unwrap());
     black_box(lhs.tr().unwrap());
     black_box(lazy_lhs.tr().unwrap());
 
@@ -441,7 +441,7 @@ fn warmed_checked_generic_reductions_do_not_allocate() {
         ("owned inner", measured(|| lhs.inner(&rhs).unwrap())),
         (
             "owned norm",
-            measured(|| Complex64::from(lhs.norm().unwrap())),
+            measured(|| Complex64::from(lhs.norm(2.0).unwrap())),
         ),
         (
             "lazy-lazy inner",
@@ -457,7 +457,7 @@ fn warmed_checked_generic_reductions_do_not_allocate() {
         ),
         (
             "lazy norm",
-            measured(|| Complex64::from(lazy_lhs.norm().unwrap())),
+            measured(|| Complex64::from(lazy_lhs.norm(2.0).unwrap())),
         ),
         ("owned trace", measured(|| lhs.tr().unwrap())),
         ("lazy trace", measured(|| lazy_lhs.tr().unwrap())),
@@ -470,13 +470,13 @@ fn warmed_checked_generic_reductions_do_not_allocate() {
     // commutes with the norm, so `norm(s * t) = s * norm(t)` within the
     // workspace rule taken relative to the result (the payload's entry count
     // bounds the terms of the sum).
-    let norm = lhs.norm().unwrap();
+    let norm = lhs.norm(2.0).unwrap();
     for scale in [1e200, 1e-200] {
         let extreme = lhs.scale(Complex64::new(scale, 0.0));
         let lazy = extreme.adjoint().unwrap();
-        black_box((extreme.norm().unwrap(), lazy.norm().unwrap()));
+        black_box((extreme.norm(2.0).unwrap(), lazy.norm(2.0).unwrap()));
         for (row, tensor) in [("owned", &extreme), ("lazy", &lazy)] {
-            let (value, allocations) = measured(|| tensor.norm().unwrap());
+            let (value, allocations) = measured(|| tensor.norm(2.0).unwrap());
             assert_eq!(allocations, 0, "{row} rescaled norm at {scale:e}");
             let want = scale * norm;
             let bound = 32.0 * (lhs.data().len() as f64).sqrt() * f64::EPSILON * want;
@@ -530,18 +530,18 @@ fn warmed_su3_checked_inner_and_norm_allocate_only_through_the_provider() {
     let lazy_lhs = lhs.adjoint().unwrap();
     let lazy_rhs = rhs.adjoint().unwrap();
     black_box(lhs.inner(&rhs).unwrap());
-    black_box(lhs.norm().unwrap());
+    black_box(lhs.norm(2.0).unwrap());
     black_box(lazy_lhs.inner(&lazy_rhs).unwrap());
-    black_box(lazy_lhs.norm().unwrap());
+    black_box(lazy_lhs.norm(2.0).unwrap());
 
     for (row, (value, allocations)) in [
         ("owned inner", measured(|| lhs.inner(&rhs).unwrap())),
-        ("owned norm", measured(|| lhs.norm().unwrap())),
+        ("owned norm", measured(|| lhs.norm(2.0).unwrap())),
         (
             "lazy inner",
             measured(|| lazy_lhs.inner(&lazy_rhs).unwrap()),
         ),
-        ("lazy norm", measured(|| lazy_lhs.norm().unwrap())),
+        ("lazy norm", measured(|| lazy_lhs.norm(2.0).unwrap())),
     ] {
         black_box(value);
         eprintln!(
@@ -599,8 +599,12 @@ fn checked_generic_single_precision_norm_accumulates_wide() {
             .unwrap();
         let terms = real64.data().len() as f64;
         for (row, got, want) in [
-            ("f32", real32.norm().unwrap(), real64.norm().unwrap()),
-            ("c32", complex32.norm().unwrap(), complex64.norm().unwrap()),
+            ("f32", real32.norm(2.0).unwrap(), real64.norm(2.0).unwrap()),
+            (
+                "c32",
+                complex32.norm(2.0).unwrap(),
+                complex64.norm(2.0).unwrap(),
+            ),
         ] {
             let bound = 32.0 * terms.sqrt() * f64::EPSILON * want;
             assert!(

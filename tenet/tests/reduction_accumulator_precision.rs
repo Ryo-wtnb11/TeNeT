@@ -241,7 +241,7 @@ macro_rules! dense_reductions {
 
         $out.push((
             concat!($prefix, " dense norm"),
-            Complex64::new(a.norm().unwrap(), 0.0),
+            Complex64::new(a.norm(2.0).unwrap(), 0.0),
             norm,
             terms,
         ));
@@ -315,7 +315,7 @@ macro_rules! compact_reductions {
 
         $out.push((
             concat!($prefix, " compact norm"),
-            Complex64::new(compact.norm().unwrap(), 0.0),
+            Complex64::new(compact.norm(2.0).unwrap(), 0.0),
             Complex64::new(norm2.re.sqrt(), 0.0),
             terms,
         ));
@@ -475,9 +475,9 @@ fn single_precision_reductions_accumulate_in_double() {
     // `inner(self, self)` is `sum |x|^2` unweighted (dim(c) == 1).
     assert_eq!(dense.inner(&dense).unwrap(), expected as f32, "dense inner");
     // `norm` returns f64, so it shows the accumulator without narrowing.
-    assert_eq!(dense.norm().unwrap(), expected.sqrt(), "dense norm");
+    assert_eq!(dense.norm(2.0).unwrap(), expected.sqrt(), "dense norm");
     assert_ne!(
-        dense.norm().unwrap(),
+        dense.norm(2.0).unwrap(),
         f64::from(narrow_sum(dense_entries)).sqrt()
     );
 
@@ -510,7 +510,7 @@ fn single_precision_reductions_accumulate_in_double() {
         "compact inner"
     );
     assert_eq!(
-        compact.norm().unwrap(),
+        compact.norm(2.0).unwrap(),
         compact_expected.sqrt(),
         "compact norm"
     );
@@ -540,7 +540,7 @@ fn complex32_reductions_accumulate_in_double() {
     assert_ne!(expected.re, narrow_sum(dense_entries));
     assert_eq!(dense.inner(&dense).unwrap(), expected, "dense inner");
     assert_eq!(
-        dense.norm().unwrap(),
+        dense.norm(2.0).unwrap(),
         wide_sum(dense_entries).sqrt(),
         "dense norm"
     );
@@ -573,9 +573,9 @@ fn single_precision_norm_stays_finite_where_a_narrow_accumulator_overflows() {
     .unwrap();
 
     for (what, norm) in [
-        ("dense", dense.norm().unwrap()),
-        ("compact", compact.norm().unwrap()),
-        ("lazy adjoint", dense.adjoint().unwrap().norm().unwrap()),
+        ("dense", dense.norm(2.0).unwrap()),
+        ("compact", compact.norm(2.0).unwrap()),
+        ("lazy adjoint", dense.adjoint().unwrap().norm(2.0).unwrap()),
     ] {
         assert!(norm.is_finite(), "{what} norm overflowed: {norm}");
     }

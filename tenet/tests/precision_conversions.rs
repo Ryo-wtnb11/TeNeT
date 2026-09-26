@@ -445,8 +445,7 @@ fn compact_diagonal_stays_compact() {
         TensorMap::diagonal(&runtime(), &leg, spectra.clone()).unwrap();
     let (_, wide) = assert_all_conversions!("compact diagonal", source.clone());
 
-    let widened = wide
-        .diagonal_spectrum()
+    let widened = tenet::expert::diagonal_spectrum(&wide)
         .unwrap()
         .expect("to_f64 stays compact");
     assert_eq!(widened.len(), spectra.len());
@@ -462,19 +461,26 @@ fn compact_diagonal_stays_compact() {
             .collect();
         assert_eq!(f64_bits(&got.values), f64_bits(&expected));
     }
-    assert!(source.to_c32().diagonal_spectrum().unwrap().is_some());
-    assert!(source.to_c64().diagonal_spectrum().unwrap().is_some());
-    assert!(wide.narrow_to_f32().diagonal_spectrum().unwrap().is_some());
-    assert!(wide
-        .to_c64()
-        .narrow_to_c32()
-        .diagonal_spectrum()
+    assert!(tenet::expert::diagonal_spectrum(&source.to_c32())
         .unwrap()
         .is_some());
+    assert!(tenet::expert::diagonal_spectrum(&source.to_c64())
+        .unwrap()
+        .is_some());
+    assert!(tenet::expert::diagonal_spectrum(&wide.narrow_to_f32())
+        .unwrap()
+        .is_some());
+    assert!(
+        tenet::expert::diagonal_spectrum(&wide.to_c64().narrow_to_c32())
+            .unwrap()
+            .is_some()
+    );
     // A multiplicity-free `adjoint` of a compact diagonal is already an owned
     // compact diagonal, so its conversion is the owned case again.
     let adjoint = source.adjoint().unwrap().to_f64();
-    assert!(adjoint.diagonal_spectrum().unwrap().is_some());
+    assert!(tenet::expert::diagonal_spectrum(&adjoint)
+        .unwrap()
+        .is_some());
 }
 
 #[test]
@@ -745,18 +751,19 @@ fn checked_generic_diagonal_adjoint_converts_to_an_owned_compact_diagonal() {
     let (to_f64, to_c64, c32_to_c64, narrowed_c) =
         assert_adjoint_conversions!("SU(3) diagonal adjoint", source.clone());
     for converted in [&to_f64.to_c64(), &to_c64] {
-        assert!(converted.diagonal_spectrum().unwrap().is_some());
+        assert!(tenet::expert::diagonal_spectrum(converted)
+            .unwrap()
+            .is_some());
     }
     // The stored spectrum of the complex conversions is conj(convert(value)),
     // bitwise.
     let factor = Complex32::new(0.75, -1.5);
-    let stored = source
-        .to_c32()
-        .scale(factor)
-        .diagonal_spectrum()
+    let stored = tenet::expert::diagonal_spectrum(&source.to_c32().scale(factor))
         .unwrap()
         .unwrap();
-    let got = c32_to_c64.diagonal_spectrum().unwrap().unwrap();
+    let got = tenet::expert::diagonal_spectrum(&c32_to_c64)
+        .unwrap()
+        .unwrap();
     for entry in &got {
         let parent = stored.iter().find(|p| p.sector == entry.sector).unwrap();
         let expected: Vec<Complex64> = parent
@@ -766,13 +773,13 @@ fn checked_generic_diagonal_adjoint_converts_to_an_owned_compact_diagonal() {
             .collect();
         assert_eq!(c64_bits(&entry.values), c64_bits(&expected));
     }
-    let stored = source
-        .to_c64()
-        .scale(Complex64::new(0.75, -1.5))
-        .diagonal_spectrum()
+    let stored =
+        tenet::expert::diagonal_spectrum(&source.to_c64().scale(Complex64::new(0.75, -1.5)))
+            .unwrap()
+            .unwrap();
+    let got = tenet::expert::diagonal_spectrum(&narrowed_c)
         .unwrap()
         .unwrap();
-    let got = narrowed_c.diagonal_spectrum().unwrap().unwrap();
     for entry in &got {
         let parent = stored.iter().find(|p| p.sector == entry.sector).unwrap();
         let expected: Vec<Complex32> = parent

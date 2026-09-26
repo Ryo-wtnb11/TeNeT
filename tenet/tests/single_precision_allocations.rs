@@ -156,7 +156,7 @@ macro_rules! measure_pipeline {
         let warm: TensorMap<U1FusionRule, $dtype> =
             TensorMap::rand_with_seed($runtime, [space, space], [space], 5_501).unwrap();
         black_box(warm.permute(&[1], &[2, 0]).unwrap());
-        black_box(warm.norm().unwrap());
+        black_box(warm.norm(2.0).unwrap());
 
         measured(|| {
             let tensor: TensorMap<U1FusionRule, $dtype> =
@@ -167,7 +167,12 @@ macro_rules! measure_pipeline {
             // instantiation of this macro accepts.
             let one = <$dtype as FactorScalar>::from_real(1.0);
             let sum = tensor.axpby(one, &tensor, one).unwrap();
-            black_box((permuted, sum, tensor.norm().unwrap(), tensor.data().len()))
+            black_box((
+                permuted,
+                sum,
+                tensor.norm(2.0).unwrap(),
+                tensor.data().len(),
+            ))
         })
     }};
 }

@@ -58,7 +58,7 @@ fn main() -> Result<(), Error> {
     let warm_norm_start = Instant::now();
     let mut norm_checksum = 0.0;
     for _ in 0..iterations {
-        norm_checksum += black_box(lhs.norm()?);
+        norm_checksum += black_box(lhs.norm(2.0)?);
     }
     let warm_norm_elapsed = warm_norm_start.elapsed();
 

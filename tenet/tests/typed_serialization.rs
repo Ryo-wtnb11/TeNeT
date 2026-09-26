@@ -835,7 +835,9 @@ fn compact_and_lazy_representations_survive_roundtrip() {
         restored_compact.network_reuse_class(false),
         NetworkReuseClass::Compact
     ));
-    let actual = restored_compact.diagonal_spectrum().unwrap().unwrap();
+    let actual = tenet::expert::diagonal_spectrum(&restored_compact)
+        .unwrap()
+        .unwrap();
     assert_eq!(actual.len(), 2);
     assert_eq!(actual[0].values[0].to_bits(), 0x8000_0000_0000_0000);
     assert_eq!(actual[1].values[1].to_bits(), 0x7ff8_0000_0000_0007);

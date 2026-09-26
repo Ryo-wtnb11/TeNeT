@@ -94,7 +94,7 @@ let cx: TensorMap<U1FusionRule, Complex64> =
     })?;
 
 let inner = re.inner(&re)?;
-assert!((inner - re.norm()?.powi(2)).abs() <= 1e-10 * (1.0 + inner));
+assert!((inner - re.norm(2.0)?.powi(2)).abs() <= 1e-10 * (1.0 + inner));
 assert!(re.to_c64().compose(&cx).is_ok());
 assert!(v.try_dual()?.try_dual()?.sectors()? == v.sectors()?);
 # Ok::<(), Error>(())
@@ -256,10 +256,10 @@ let v = GradedSpace::try_new(
 let a = TensorMap::<U1FusionRule, f64>::rand(&rt, [&v], [&v])?;
 let b = TensorMap::<U1FusionRule, f64>::rand(&rt, [&v], [&v])?;
 let difference = a.axpby(1.0, &b, -1.0)?;
-assert!(difference.norm()? >= 0.0);
-let unit = a.scale(1.0 / a.norm()?);
-assert!((unit.norm()? - 1.0).abs() <= 1e-12);
-assert_eq!(a.zeros_like().norm()?, 0.0);
+assert!(difference.norm(2.0)? >= 0.0);
+let unit = a.scale(1.0 / a.norm(2.0)?);
+assert!((unit.norm(2.0)? - 1.0).abs() <= 1e-12);
+assert_eq!(a.zeros_like().norm(2.0)?, 0.0);
 let id = TensorMap::<U1FusionRule, f64>::id(&rt, [&v])?;
 assert!(id.is_hermitian(1e-12)? && id.is_unitary(1e-12)?);
 # Ok::<(), Error>(())
@@ -318,7 +318,7 @@ let fuser = TensorMap::<U1FusionRule, f64>::isomorphism(&rt, [&vw], [&v, &w])?;
 let fused = fuser.compose(&t)?;
 assert_eq!((fused.codomain_rank(), fused.domain_rank()), (1, 1));
 let split = fuser.adjoint()?.compose(&fused)?;
-assert!(split.axpby(1.0, &t, -1.0)?.norm()? <= 1e-12);
+assert!(split.axpby(1.0, &t, -1.0)?.norm(2.0)? <= 1e-12);
 
 let keep = LegSelection::try_new(&vw, [(U1Irrep::new(0), 0..2), (U1Irrep::new(1), 0..1)])?;
 let truncated = fused.restrict_leg(0, &keep)?;
@@ -398,11 +398,11 @@ let s = s.restrict_diagonal(&found.selection)?;
 let vh = vh.restrict_leg(0, &found.selection)?;
 
 let reconstructed = u.compose(&s)?.compose(&vh)?;
-let error = reconstructed.axpby(1.0, &t, -1.0)?.norm()?;
+let error = reconstructed.axpby(1.0, &t, -1.0)?.norm(2.0)?;
 assert!((error - found.error).abs() <= 1e-8 * (1.0 + found.error));
 
 let Qr { q, r } = t.qr_compact()?;
-assert!(q.compose(&r)?.axpby(1.0, &t, -1.0)?.norm()? <= 1e-10 * (1.0 + t.norm()?));
+assert!(q.compose(&r)?.axpby(1.0, &t, -1.0)?.norm(2.0)? <= 1e-10 * (1.0 + t.norm(2.0)?));
 # Ok::<(), Error>(())
 ```
 

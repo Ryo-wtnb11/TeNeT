@@ -336,8 +336,8 @@ where
     let device_a = a.to_cuda().unwrap();
     let device_b = b.to_cuda().unwrap();
 
-    let host_norm = a.norm().unwrap();
-    let device_norm = device_a.norm().unwrap();
+    let host_norm = a.norm(2.0).unwrap();
+    let device_norm = device_a.norm(2.0).unwrap();
     // `norm` takes a square root of the reduction, so its error is the
     // reduction's own bound or the rounding of a result of that magnitude,
     // whichever is larger. Both halves are absolute and documented.
@@ -453,9 +453,9 @@ fn assert_norm_is_overflow_and_underflow_safe<R, D>(
         // Both norms are f64 sums of exactly widened squares.
         let wide_tolerance = 4.0 * n as f64 * f64::EPSILON;
 
-        let host_norm = host.norm().unwrap();
+        let host_norm = host.norm(2.0).unwrap();
         let hand = magnitude * hand_weight.sqrt();
-        let device_norm = device.norm().unwrap();
+        let device_norm = device.norm(2.0).unwrap();
         assert!(
             device_norm.is_finite() && device_norm > 0.0,
             "{what} norm [{}] must be finite and nonzero, got {device_norm}",
@@ -665,7 +665,7 @@ fn a_warm_single_precision_reduction_costs_one_extra_device_allocation_per_opera
         };
         [
             warm(&|| {
-                a.norm().unwrap();
+                a.norm(2.0).unwrap();
             }),
             warm(&|| {
                 a.inner(&a).unwrap();

@@ -1044,7 +1044,7 @@ pub(crate) struct RuntimeExecutionConfig {
 ///     [(Z2Irrep::EVEN, 1), (Z2Irrep::ODD, 1)],
 /// )?;
 /// let a: TensorMap<_, f64> = TensorMap::zeros(&rt, [&v], [&v])?;
-/// assert_eq!(a.norm()?, 0.0);
+/// assert_eq!(a.norm(2.0)?, 0.0);
 /// # Ok::<(), tenet::prelude::Error>(())
 /// ```
 #[derive(Clone)]

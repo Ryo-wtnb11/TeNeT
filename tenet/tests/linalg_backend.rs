@@ -37,7 +37,7 @@ fn contraction_norm(rt: &Runtime) -> f64 {
     let v = u1_space();
     let a = TensorMap::<U1FusionRule, f64>::rand_with_seed(rt, [&v], [&v], 11).unwrap();
     let b = TensorMap::<U1FusionRule, f64>::rand_with_seed(rt, [&v], [&v], 12).unwrap();
-    a.compose(&b).unwrap().norm().unwrap()
+    a.compose(&b).unwrap().norm(2.0).unwrap()
 }
 
 #[test]

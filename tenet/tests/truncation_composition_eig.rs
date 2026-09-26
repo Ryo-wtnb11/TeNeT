@@ -105,7 +105,7 @@ macro_rules! assert_eig_composition {
         assert_eq!(got_v.codomain(), source.codomain(), "{case}: v codomain");
         assert_eq!(got_v.domain(), got_d.domain(), "{case}: v domain");
         assert!(
-            got_d.diagonal_spectrum().unwrap().is_some(),
+            tenet::expert::diagonal_spectrum(&got_d).unwrap().is_some(),
             "{case}: d stays compact"
         );
         assert_canonical_layout!(got_d, format!("{case}: d"));

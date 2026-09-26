@@ -134,8 +134,8 @@ macro_rules! assert_svd_composition {
         assert_eq!(got_vh.codomain(), got_s.domain(), "{case}: vh codomain");
         assert_eq!(got_vh.domain(), source.domain(), "{case}: vh domain");
         assert_eq!(
-            got_s.diagonal_spectrum().unwrap().is_some(),
-            s.diagonal_spectrum().unwrap().is_some(),
+            tenet::expert::diagonal_spectrum(&got_s).unwrap().is_some(),
+            tenet::expert::diagonal_spectrum(&s).unwrap().is_some(),
             "{case}: restriction keeps s's storage"
         );
         assert_canonical_layout!(got_u, format!("{case}: u"));
@@ -211,7 +211,7 @@ macro_rules! assert_eigh_composition {
         assert_eq!(got_v.codomain(), source.codomain(), "{case}: v codomain");
         assert_eq!(got_v.domain(), got_d.domain(), "{case}: v domain");
         assert!(
-            got_d.diagonal_spectrum().unwrap().is_some(),
+            tenet::expert::diagonal_spectrum(&got_d).unwrap().is_some(),
             "{case}: d stays compact"
         );
         assert_canonical_layout!(got_d, format!("{case}: d"));
@@ -656,7 +656,7 @@ fn dense_restrict_diagonal_equals_two_restrict_leg_calls() {
     let dense: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&leg], [&leg], move |_, _| fill(&mut state)).unwrap();
     assert!(
-        dense.diagonal_spectrum().unwrap().is_none(),
+        tenet::expert::diagonal_spectrum(&dense).unwrap().is_none(),
         "this fixture must exercise the dense arm"
     );
     for pairs in [
@@ -753,7 +753,10 @@ fn diagview_reads_the_same_values_from_compact_and_dense_storage() {
     let source: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&leg], [&leg], move |_, _| fill(&mut state)).unwrap();
     let Svd { s, .. } = source.svd_compact().unwrap();
-    assert!(s.diagonal_spectrum().unwrap().is_some(), "s is compact");
+    assert!(
+        tenet::expert::diagonal_spectrum(&s).unwrap().is_some(),
+        "s is compact"
+    );
     let compact = s.diagview().unwrap();
 
     // The same map, forced through dense storage. `add` of a compact factor and
@@ -762,7 +765,7 @@ fn diagview_reads_the_same_values_from_compact_and_dense_storage() {
     let zero: TensorMap<_, f64> = TensorMap::zeros(&runtime, [&leg], [&leg]).unwrap();
     let dense = zero.axpby(1.0, &s, 1.0).unwrap();
     assert!(
-        dense.diagonal_spectrum().unwrap().is_none(),
+        tenet::expert::diagonal_spectrum(&dense).unwrap().is_none(),
         "the dense twin must still report no compact storage"
     );
     assert_eq!(dense.diagview().unwrap(), compact);
@@ -863,8 +866,7 @@ fn restrict_diagonal_keeps_a_compact_payload_compact() {
     let bond = s.domain()[0].clone();
     let selection = LegSelection::try_new(&bond, [(U1Irrep::new(0), 0..2)]).unwrap();
     let restricted = s.restrict_diagonal(&selection).unwrap();
-    let spectrum = restricted
-        .diagonal_spectrum()
+    let spectrum = tenet::expert::diagonal_spectrum(&restricted)
         .unwrap()
         .expect("a compact input must stay compact");
     assert_eq!(spectrum.len(), 1);

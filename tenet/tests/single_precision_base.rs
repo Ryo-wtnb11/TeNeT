@@ -62,20 +62,20 @@ macro_rules! base_suite {
 
                 assert_scalars_agree(
                     "norm",
-                    Complex64::new(a.norm().unwrap(), 0.0),
-                    Complex64::new(wa.norm().unwrap(), 0.0),
+                    Complex64::new(a.norm(2.0).unwrap(), 0.0),
+                    Complex64::new(wa.norm(2.0).unwrap(), 0.0),
                     terms,
                 );
                 assert_scalars_agree(
-                    "norm_inf",
-                    Complex64::new(a.norm_inf().unwrap(), 0.0),
-                    Complex64::new(wa.norm_inf().unwrap(), 0.0),
+                    "norm(Inf)",
+                    Complex64::new(a.norm(f64::INFINITY).unwrap(), 0.0),
+                    Complex64::new(wa.norm(f64::INFINITY).unwrap(), 0.0),
                     1,
                 );
                 assert_scalars_agree(
-                    "norm_p(3)",
-                    Complex64::new(a.norm_p(3.0).unwrap(), 0.0),
-                    Complex64::new(wa.norm_p(3.0).unwrap(), 0.0),
+                    "norm(3)",
+                    Complex64::new(a.norm(3.0).unwrap(), 0.0),
+                    Complex64::new(wa.norm(3.0).unwrap(), 0.0),
                     terms,
                 );
                 assert_scalars_agree(
@@ -300,8 +300,8 @@ macro_rules! base_suite {
                 }
                 assert_scalars_agree(
                     "compact norm",
-                    Complex64::new(compact.norm().unwrap(), 0.0),
-                    Complex64::new(wide_compact.norm().unwrap(), 0.0),
+                    Complex64::new(compact.norm(2.0).unwrap(), 0.0),
+                    Complex64::new(wide_compact.norm(2.0).unwrap(), 0.0),
                     terms,
                 );
                 assert_scalars_agree(
@@ -431,8 +431,8 @@ mod checked_generic {
 
                     assert_scalars_agree(
                         "norm",
-                        Complex64::new(a.norm().unwrap(), 0.0),
-                        Complex64::new(wa.norm().unwrap(), 0.0),
+                        Complex64::new(a.norm(2.0).unwrap(), 0.0),
+                        Complex64::new(wa.norm(2.0).unwrap(), 0.0),
                         terms,
                     );
                     assert_scalars_agree(

@@ -1,4 +1,4 @@
-//! `norm` / `norm_p` keep a representable result when the unscaled power sum
+//! `norm(p)` keeps a representable result when the unscaled power sum
 //! would overflow or underflow (#1437).
 //!
 //! # Reference behaviour
@@ -130,15 +130,15 @@ macro_rules! tensor {
     }};
 }
 
-/// `[norm_p(1), norm(), norm_p(3), norm_inf()]`.
+/// `[norm(1), norm(2), norm(3), norm(Inf)]`.
 macro_rules! norms {
     ($tensor:expr) => {{
         let tensor = &$tensor;
         [
-            tensor.norm_p(1.0).unwrap(),
-            tensor.norm().unwrap(),
-            tensor.norm_p(3.0).unwrap(),
-            tensor.norm_inf().unwrap(),
+            tensor.norm(1.0).unwrap(),
+            tensor.norm(2.0).unwrap(),
+            tensor.norm(3.0).unwrap(),
+            tensor.norm(f64::INFINITY).unwrap(),
         ]
     }};
 }
@@ -531,7 +531,9 @@ fn compact_diagonal_norms_rescale_with_quantum_dimensions() {
             }),
         )
         .unwrap();
-        assert!(compact.diagonal_spectrum().unwrap().is_some());
+        assert!(tenet::expert::diagonal_spectrum(&compact)
+            .unwrap()
+            .is_some());
         assert_rows::<f64>(
             &format!("compact su2 x{s:e}"),
             norms!(compact),

@@ -30,7 +30,7 @@ fn spin_half_vector_operator_norm_matches_qspace() {
     })
     .unwrap();
 
-    let norm = spin.norm().unwrap();
+    let norm = spin.norm(2.0).unwrap();
     assert!(
         (norm * norm - 1.5).abs() <= 1e-12,
         "norm squared = {}",

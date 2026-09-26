@@ -165,7 +165,7 @@ fn permute_composition_law() {
                     let composed: Vec<usize> = s2.iter().map(|&i| s1[i]).collect();
                     let direct = t.permute(&composed[..n2], &composed[n2..]).unwrap();
                     assert_close(step2.data(), direct.data(), 1e-12);
-                    assert_scalar_close(step2.norm().unwrap(), t.norm().unwrap(), 1e-12);
+                    assert_scalar_close(step2.norm(2.0).unwrap(), t.norm(2.0).unwrap(), 1e-12);
                 }
             }
             let _ = ($name, $fermionic);
@@ -202,7 +202,7 @@ fn braid_inverse_roundtrip() {
                     .braid(&s_inv[..2], &s_inv[2..], &levels_braided)
                     .unwrap();
                 assert_close(back.data(), t.data(), 1e-12);
-                assert_scalar_close(braided.norm().unwrap(), t.norm().unwrap(), 1e-12);
+                assert_scalar_close(braided.norm(2.0).unwrap(), t.norm(2.0).unwrap(), 1e-12);
             }
             let _ = ($name, $fermionic);
         }};
@@ -640,15 +640,15 @@ fn svd_qr_reconstruction_random_spaces() {
             let vb = build(&mut state);
             let t: TensorMap<_, f64> =
                 TensorMap::rand_with_seed(&rt, [&va, &vb], [&vb, &va], 90 + draw).unwrap();
-            if t.norm().unwrap() == 0.0 {
+            if t.norm(2.0).unwrap() == 0.0 {
                 continue;
             }
 
             let Svd { u, s, vh } = t.svd_compact().unwrap();
             let recon = u.compose(&s).unwrap().compose(&vh).unwrap();
-            let diff = recon.axpby(1.0, &t, -1.0).unwrap().norm().unwrap();
+            let diff = recon.axpby(1.0, &t, -1.0).unwrap().norm(2.0).unwrap();
             assert!(
-                diff <= 1e-10 * (1.0 + t.norm().unwrap()),
+                diff <= 1e-10 * (1.0 + t.norm(2.0).unwrap()),
                 "{} draw {draw}: svd reconstruction error {diff}",
                 $name,
             );
@@ -656,7 +656,7 @@ fn svd_qr_reconstruction_random_spaces() {
             let mid_refs: Vec<_> = mid.iter().collect();
             let id: TensorMap<_, f64> = TensorMap::id(&rt, mid_refs).unwrap();
             let utu = u.adjoint().unwrap().compose(&u).unwrap();
-            let iso_err = utu.axpby(1.0, &id, -1.0).unwrap().norm().unwrap();
+            let iso_err = utu.axpby(1.0, &id, -1.0).unwrap().norm(2.0).unwrap();
             assert!(
                 iso_err <= 1e-10,
                 "{} draw {draw}: U†U != id ({iso_err})",
@@ -665,9 +665,9 @@ fn svd_qr_reconstruction_random_spaces() {
 
             let Qr { q, r } = t.qr_compact().unwrap();
             let recon = q.compose(&r).unwrap();
-            let diff = recon.axpby(1.0, &t, -1.0).unwrap().norm().unwrap();
+            let diff = recon.axpby(1.0, &t, -1.0).unwrap().norm(2.0).unwrap();
             assert!(
-                diff <= 1e-10 * (1.0 + t.norm().unwrap()),
+                diff <= 1e-10 * (1.0 + t.norm(2.0).unwrap()),
                 "{} draw {draw}: qr reconstruction error {diff}",
                 $name,
             );
@@ -675,7 +675,7 @@ fn svd_qr_reconstruction_random_spaces() {
             let mid_refs: Vec<_> = mid.iter().collect();
             let id: TensorMap<_, f64> = TensorMap::id(&rt, mid_refs).unwrap();
             let qtq = q.adjoint().unwrap().compose(&q).unwrap();
-            let iso_err = qtq.axpby(1.0, &id, -1.0).unwrap().norm().unwrap();
+            let iso_err = qtq.axpby(1.0, &id, -1.0).unwrap().norm(2.0).unwrap();
             assert!(
                 iso_err <= 1e-10,
                 "{} draw {draw}: Q†Q != id ({iso_err})",
@@ -877,13 +877,13 @@ macro_rules! invariant_stream_case {
         let hh_tr = h.compose(&h).unwrap().tr().unwrap();
 
         let steps = [
-            ("s1a", a.norm().unwrap(), a.tr().unwrap()),
-            ("s1b", b.norm().unwrap(), b.tr().unwrap()),
-            ("s2", c.norm().unwrap(), c.tr().unwrap()),
-            ("s3", d.norm().unwrap(), d.tr().unwrap()),
-            ("s4", e.norm().unwrap(), e.tr().unwrap()),
-            ("s5", g.norm().unwrap(), g.tr().unwrap()),
-            ("s7", h.norm().unwrap(), h.tr().unwrap()),
+            ("s1a", a.norm(2.0).unwrap(), a.tr().unwrap()),
+            ("s1b", b.norm(2.0).unwrap(), b.tr().unwrap()),
+            ("s2", c.norm(2.0).unwrap(), c.tr().unwrap()),
+            ("s3", d.norm(2.0).unwrap(), d.tr().unwrap()),
+            ("s4", e.norm(2.0).unwrap(), e.tr().unwrap()),
+            ("s5", g.norm(2.0).unwrap(), g.tr().unwrap()),
+            ("s7", h.norm(2.0).unwrap(), h.tr().unwrap()),
             ("s8", hh_tr, hh_tr),
         ];
         for ((step, norm, tr), &(exp_step, exp_norm, exp_tr)) in steps.iter().zip($expected) {

@@ -39,10 +39,12 @@ fn powi_f64_matches_exact_spectra_and_stays_compact() {
 
     for exponent in [0, 1, 5, -3] {
         let typed_power = typed.powi(exponent).unwrap();
-        assert!(typed_power.diagonal_spectrum().unwrap().is_some());
+        assert!(tenet::expert::diagonal_spectrum(&typed_power)
+            .unwrap()
+            .is_some());
     }
     assert_eq!(
-        typed.powi(0).unwrap().diagonal_spectrum().unwrap(),
+        tenet::expert::diagonal_spectrum(&typed.powi(0).unwrap()).unwrap(),
         Some(vec![
             SectorSpectrum {
                 sector: Z2Irrep::EVEN,
@@ -55,7 +57,7 @@ fn powi_f64_matches_exact_spectra_and_stays_compact() {
         ])
     );
     assert_eq!(
-        typed.powi(5).unwrap().diagonal_spectrum().unwrap(),
+        tenet::expert::diagonal_spectrum(&typed.powi(5).unwrap()).unwrap(),
         Some(vec![
             SectorSpectrum {
                 sector: Z2Irrep::EVEN,
@@ -67,10 +69,7 @@ fn powi_f64_matches_exact_spectra_and_stays_compact() {
             },
         ])
     );
-    let negative = typed
-        .powi(-3)
-        .unwrap()
-        .diagonal_spectrum()
+    let negative = tenet::expert::diagonal_spectrum(&typed.powi(-3).unwrap())
         .unwrap()
         .unwrap();
     for (actual, expected) in negative
@@ -106,10 +105,7 @@ fn powi_c64_handles_i32_min_identity() {
     .unwrap();
 
     for exponent in [0, 1, 4, -2] {
-        let power = typed
-            .powi(exponent)
-            .unwrap()
-            .diagonal_spectrum()
+        let power = tenet::expert::diagonal_spectrum(&typed.powi(exponent).unwrap())
             .unwrap()
             .unwrap();
         for (actual, expected) in power
@@ -141,7 +137,7 @@ fn powi_c64_handles_i32_min_identity() {
     .unwrap();
     let typed_min = typed_roots.powi(i32::MIN).unwrap();
     assert_eq!(
-        typed_min.diagonal_spectrum().unwrap(),
+        tenet::expert::diagonal_spectrum(&typed_min).unwrap(),
         Some(vec![
             SectorSpectrum {
                 sector: Z2Irrep::EVEN,

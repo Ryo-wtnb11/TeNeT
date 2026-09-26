@@ -60,7 +60,7 @@ fn bond_update(
     let u = u.restrict_leg(u.codomain_rank(), &found.selection).unwrap();
     let s = s.restrict_diagonal(&found.selection).unwrap();
     let vh = vh.restrict_leg(0, &found.selection).unwrap();
-    let l_new = s.scale(1.0 / s.norm().unwrap());
+    let l_new = s.scale(1.0 / s.norm(2.0).unwrap());
     let l_out_inv = l_out.pinv(1e-12).unwrap();
     let g1_new = tensor!([l, pa; m] = l_out_inv[l; x] * u[x, pa; m]).unwrap();
     let g2_new = tensor!([m, pb; r] = vh[m; pb, x] * l_out_inv[x; r]).unwrap();
@@ -134,7 +134,7 @@ fn neel_product_state_contracts_with_the_full_gate() {
     assert_eq!(a.codomain()[1], p);
 
     let psi = tensor!([l, pa, pb; r] = a[l, pa; m] * b[m, pb; r]).unwrap();
-    assert!((psi.norm().unwrap() - 1.0).abs() < 1e-12);
+    assert!((psi.norm(2.0).unwrap() - 1.0).abs() < 1e-12);
 
     // theta = h |psi>: this contraction used to be rejected with a leg
     // dimension mismatch against the gate's full physical leg.
@@ -147,7 +147,7 @@ fn neel_product_state_contracts_with_the_full_gate() {
         .scalar()
         .unwrap();
     assert!((energy - (-0.25)).abs() < 1e-12, "energy = {energy}");
-    let theta_norm = theta.norm().unwrap();
+    let theta_norm = theta.norm(2.0).unwrap();
     assert!(
         (theta_norm - (5.0f64 / 16.0).sqrt()).abs() < 1e-12,
         "|h psi| = {theta_norm}"

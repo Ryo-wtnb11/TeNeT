@@ -2700,7 +2700,7 @@ macro_rules! run_provider {
                             _ => unreachable!("fixed tree-operation table"),
                         },
                     )?;
-                    assert!(cold.norm()?.is_finite());
+                    assert!(cold.norm(2.0)?.is_finite());
                     let expected = match operation {
                         "permute" => source.permute(&[1], &[2, 0])?,
                         "transpose" => source.transpose()?,
@@ -2766,7 +2766,7 @@ macro_rules! run_provider {
                 $min_time,
                 || logical_source.trace_pairs(&[(1, 2)]),
             )?;
-            assert!(traced.norm()?.is_finite());
+            assert!(traced.norm(2.0)?.is_finite());
             let expected = logical_source.trace_pairs(&[(1, 2)])?;
             assert_same_tensor!(traced, expected, logical_source);
         }
@@ -2799,8 +2799,8 @@ macro_rules! run_provider {
                     $min_time,
                     || Ok::<_, Error>(left.scale(0.5)),
                 )?;
-                let error = (scaled.norm()? - 0.5 * left.norm()?).abs();
-                assert!(error <= 256.0 * f64::EPSILON * left.norm()?.max(1.0));
+                let error = (scaled.norm(2.0)? - 0.5 * left.norm(2.0)?).abs();
+                assert!(error <= 256.0 * f64::EPSILON * left.norm(2.0)?.max(1.0));
             }
 
             let add_name = format!("add{suffix}");
@@ -2817,10 +2817,10 @@ macro_rules! run_provider {
                     $min_time,
                     || left.axpby(alpha, right, beta),
                 )?;
-                let expected_norm_squared = alpha * alpha * left.norm()?.powi(2)
-                    + beta * beta * right.norm()?.powi(2)
+                let expected_norm_squared = alpha * alpha * left.norm(2.0)?.powi(2)
+                    + beta * beta * right.norm(2.0)?.powi(2)
                     + 2.0 * alpha * beta * left.inner(right)?;
-                let error = (added.norm()?.powi(2) - expected_norm_squared).abs();
+                let error = (added.norm(2.0)?.powi(2) - expected_norm_squared).abs();
                 assert!(error <= 1024.0 * f64::EPSILON * expected_norm_squared.abs().max(1.0));
             }
 
@@ -2834,7 +2834,7 @@ macro_rules! run_provider {
                     "cold",
                     "warm",
                     $min_time,
-                    || left.norm(),
+                    || left.norm(2.0),
                 )?;
                 assert!(value.is_finite());
             }
@@ -2934,7 +2934,7 @@ macro_rules! run_provider {
                         $min_time,
                         || lhs.contract(&rhs, lhs_axes, rhs_axes, output_axes),
                     )?;
-                    assert!(cold.norm()?.is_finite());
+                    assert!(cold.norm(2.0)?.is_finite());
                     let expected = lhs.contract(&rhs, lhs_axes, rhs_axes, output_axes)?;
                     assert_same_tensor!(cold, expected, lhs);
                 } else {
@@ -3131,7 +3131,7 @@ fn run_checked_sun(
                     "cold",
                     "warm",
                     min_time,
-                    || lhs.norm(),
+                    || lhs.norm(2.0),
                 )?;
                 let inner_self = lhs.inner(&lhs)?;
                 assert!(

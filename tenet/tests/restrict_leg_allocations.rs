@@ -244,7 +244,7 @@ fn restrict_diagonal_measurement(scale: usize) -> Measurement {
 
     let warm = s.restrict_diagonal(&selection).unwrap();
     assert!(
-        warm.diagonal_spectrum().unwrap().is_some(),
+        tenet::expert::diagonal_spectrum(&warm).unwrap().is_some(),
         "a compact receiver must stay compact"
     );
 
@@ -253,8 +253,8 @@ fn restrict_diagonal_measurement(scale: usize) -> Measurement {
         output = Some(black_box(s.restrict_diagonal(&selection).unwrap()));
     });
     assert_eq!(
-        output.unwrap().diagonal_spectrum().unwrap(),
-        warm.diagonal_spectrum().unwrap()
+        tenet::expert::diagonal_spectrum(&output.unwrap()).unwrap(),
+        tenet::expert::diagonal_spectrum(&warm).unwrap()
     );
     measurement
 }

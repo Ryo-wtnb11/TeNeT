@@ -28,9 +28,13 @@ macro_rules! assert_close {
     ($actual:expr, $expected:expr) => {{
         let actual = $actual;
         let expected = $expected;
-        let error = actual.axpby(1.0, expected, -1.0).unwrap().norm().unwrap();
+        let error = actual
+            .axpby(1.0, expected, -1.0)
+            .unwrap()
+            .norm(2.0)
+            .unwrap();
         assert!(
-            error <= 1e-9 * (1.0 + expected.norm().unwrap()),
+            error <= 1e-9 * (1.0 + expected.norm(2.0).unwrap()),
             "residual {error}"
         );
     }};
@@ -110,7 +114,7 @@ macro_rules! factor_conformance {
         let vh = vh.restrict_leg(0, &found.selection).unwrap();
         assert_provider!(provider; u, s, vh);
         let reconstructed = u.compose(&s).unwrap().compose(&vh).unwrap();
-        let error = reconstructed.axpby(1.0, &tall, -1.0).unwrap().norm().unwrap();
+        let error = reconstructed.axpby(1.0, &tall, -1.0).unwrap().norm(2.0).unwrap();
         assert!((error - found.error).abs() <= 1e-9 * (1.0 + found.error));
         assert!(found.error > 0.0, $name);
         let singular_values = tall.svd_vals().unwrap();
@@ -126,7 +130,7 @@ macro_rules! factor_conformance {
                     * entry.values.iter().map(|value| value * value).sum::<f64>()
             })
             .sum();
-        assert!((tall.norm().unwrap().powi(2) - weighted_norm_squared).abs() <= 1e-9);
+        assert!((tall.norm(2.0).unwrap().powi(2) - weighted_norm_squared).abs() <= 1e-9);
 
         let Qr { q, r } = tall.qr_compact().unwrap();
         assert_provider!(provider; q, r);
@@ -157,7 +161,7 @@ macro_rules! factor_conformance {
                 .unwrap()
                 .compose(&tall)
                 .unwrap()
-                .norm()
+                .norm(2.0)
                 .unwrap()
                 <= 1e-9,
             $name
@@ -169,7 +173,7 @@ macro_rules! factor_conformance {
         assert!(
             wide.compose(&right.adjoint().unwrap())
                 .unwrap()
-                .norm()
+                .norm(2.0)
                 .unwrap()
                 <= 1e-9,
             $name
@@ -235,7 +239,7 @@ macro_rules! factor_conformance {
             .unwrap()
             .compose(&trunc_v.adjoint().unwrap())
             .unwrap();
-        let error = reconstructed.axpby(1.0, &h, -1.0).unwrap().norm().unwrap();
+        let error = reconstructed.axpby(1.0, &h, -1.0).unwrap().norm(2.0).unwrap();
         assert!((error - found.error).abs() <= 1e-9 * (1.0 + found.error));
         assert!(found.error > 0.0, $name);
 

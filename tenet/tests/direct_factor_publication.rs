@@ -132,9 +132,9 @@ macro_rules! assert_residual {
         let residual = $actual
             .axpby(<$d as Scalar>::ONE, $expected, <$d as Scalar>::MINUS_ONE)
             .unwrap()
-            .norm()
+            .norm(2.0)
             .unwrap();
-        let bound = numerics::tolerance::<$d>($terms, $expected.norm().unwrap());
+        let bound = numerics::tolerance::<$d>($terms, $expected.norm(2.0).unwrap());
         assert!(
             residual <= bound,
             "{}: residual {residual:e} exceeds {bound:e}",
@@ -291,7 +291,7 @@ mod checked_generic {
                     );
                 }
             }
-            let psd = numerics::tolerance::<$d>(terms, p.norm().unwrap());
+            let psd = numerics::tolerance::<$d>(terms, p.norm(2.0).unwrap());
             let mut p_values = 0;
             for spectrum in p.eigh_vals().unwrap() {
                 for value in spectrum.values {

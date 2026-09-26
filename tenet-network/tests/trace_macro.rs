@@ -273,7 +273,9 @@ fn compact_full_trace_preserves_positive_and_supertrace_oracles() {
         }],
     )
     .unwrap();
-    assert!(compact.diagonal_spectrum().unwrap().is_some());
+    assert!(tenet::expert::diagonal_spectrum(&compact)
+        .unwrap()
+        .is_some());
     let trace = tensor!([] = compact[i; i]).unwrap().scalar().unwrap();
     assert!((trace - 10.0).abs() <= 1e-12);
     assert!((compact.tr().unwrap() - 10.0).abs() <= 1e-12);
@@ -294,7 +296,9 @@ fn compact_full_trace_preserves_positive_and_supertrace_oracles() {
         ],
     )
     .unwrap();
-    assert!(compact.diagonal_spectrum().unwrap().is_some());
+    assert!(tenet::expert::diagonal_spectrum(&compact)
+        .unwrap()
+        .is_some());
     let supertrace = tensor!([] = compact[i; i]).unwrap().scalar().unwrap();
     assert!((supertrace - (-13.0)).abs() <= 1e-12);
     assert!((compact.tr().unwrap() - 23.0).abs() <= 1e-12);

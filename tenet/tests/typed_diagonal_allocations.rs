@@ -139,8 +139,16 @@ fn public_diagonal_constructor_and_readback_stay_compact_until_data() {
     );
     let small_diagonal = constructed_diagonal(64);
     let diagonal = constructed_diagonal(DEGENERACY);
-    let small_readback = measured_bytes(|| small_diagonal.diagonal_spectrum().unwrap().unwrap());
-    let readback = measured_bytes(|| diagonal.diagonal_spectrum().unwrap().unwrap());
+    let small_readback = measured_bytes(|| {
+        tenet::expert::diagonal_spectrum(&small_diagonal)
+            .unwrap()
+            .unwrap()
+    });
+    let readback = measured_bytes(|| {
+        tenet::expert::diagonal_spectrum(&diagonal)
+            .unwrap()
+            .unwrap()
+    });
     assert!(
         readback <= small_readback * 3,
         "typed readback growth is not O(d): {small_readback}, {readback}"
@@ -183,7 +191,9 @@ fn labelled_block_inspection_materializes_compact_data_once_and_borrows_it() {
         second < dense_payload_bytes(),
         "block inspection rebuilt the dense payload: {second}"
     );
-    assert!(diagonal.diagonal_spectrum().unwrap().is_some());
+    assert!(tenet::expert::diagonal_spectrum(&diagonal)
+        .unwrap()
+        .is_some());
 }
 
 #[test]
@@ -297,11 +307,11 @@ fn storage_local_compact_operations_never_build_a_dense_payload() {
     // The reductions allocate nothing at all: they read the stored spectrum
     // rather than its materialization, so there is no destination to own.
     for (name, bytes) in [
-        ("norm", warmed_bytes(|| d.norm().unwrap())),
-        ("norm_inf", warmed_bytes(|| d.norm_inf().unwrap())),
+        ("norm", warmed_bytes(|| d.norm(2.0).unwrap())),
+        ("norm(Inf)", warmed_bytes(|| d.norm(f64::INFINITY).unwrap())),
         // p = 3 is the general arm; p = 2 and p = Inf only delegate to the two
         // above, so they would prove nothing here.
-        ("norm_p(3)", warmed_bytes(|| d.norm_p(3.0).unwrap())),
+        ("norm(3)", warmed_bytes(|| d.norm(3.0).unwrap())),
         ("tr", warmed_bytes(|| d.tr().unwrap())),
         ("inner", warmed_bytes(|| d.inner(&d).unwrap())),
     ] {

@@ -50,6 +50,7 @@
 #![doc = include_str!("tutorial.md")]
 
 mod error;
+pub mod expert;
 pub mod plancache;
 mod runtime;
 mod tensor_core;

@@ -313,7 +313,6 @@ where
     assert_eq!(structural_snapshot(&restored), structure);
 }
 
-#[allow(deprecated)]
 fn assert_direct_contract_and_compose<R>(lhs: &TensorMap<R, f64>, rhs: &TensorMap<R, f64>)
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
@@ -335,16 +334,10 @@ where
         .unwrap()
         .to_host()
         .unwrap();
-    let ordered = lhs_device
-        .contract_ordered(&rhs_device, &lhs_axes, &rhs_axes, &output_axes)
-        .unwrap()
-        .to_host()
-        .unwrap();
     let compose = lhs_device.compose(&rhs_device).unwrap().to_host().unwrap();
 
     for (actual, expected) in [
         (&contract, &expected_contract),
-        (&ordered, &expected_contract),
         (&compose, &expected_compose),
     ] {
         assert!(std::ptr::eq(actual.provider(), provider));
@@ -360,11 +353,11 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
 {
     let expected_inner = lhs.inner(rhs).unwrap();
-    let expected_norm = lhs.norm().unwrap();
+    let expected_norm = lhs.norm(2.0).unwrap();
     let lhs_device = lhs.to_cuda().unwrap();
     let rhs_device = rhs.to_cuda().unwrap();
     let inner = lhs_device.inner(&rhs_device).unwrap();
-    let norm = lhs_device.norm().unwrap();
+    let norm = lhs_device.norm(2.0).unwrap();
     let tolerance = 1e-12 * (1.0 + expected_inner.abs().max(expected_norm));
 
     assert!((inner - expected_inner).abs() <= tolerance);
@@ -767,9 +760,9 @@ fn typed_cuda_reductions_cover_weights_providers_lazy_and_preflight() {
     assert_reduction_parity(&u1_lhs, &u1_rhs);
 
     let u1_device = u1_lhs.to_cuda().unwrap();
-    let u1_norm = u1_device.norm().unwrap();
+    let u1_norm = u1_device.norm(2.0).unwrap();
     let lazy = u1_device.adjoint().unwrap();
-    assert!((lazy.norm().unwrap() - u1_norm).abs() < 1e-12);
+    assert!((lazy.norm(2.0).unwrap() - u1_norm).abs() < 1e-12);
     assert!(matches!(
         lazy.inner(&lazy),
         Err(tenet::typed::Error::UnsupportedOnDevice(_))
@@ -941,7 +934,7 @@ fn typed_cuda_reductions_cover_weights_providers_lazy_and_preflight() {
         TensorMap::from_block_fn(&runtime, [&charge0], [&charge1], |_, _| 1.0).unwrap();
     assert!(empty.data().is_empty());
     let empty_device = empty.to_cuda().unwrap();
-    assert_eq!(empty_device.norm().unwrap(), 0.0);
+    assert_eq!(empty_device.norm(2.0).unwrap(), 0.0);
     assert_eq!(empty_device.inner(&empty_device).unwrap(), 0.0);
 }
 
@@ -1705,7 +1698,7 @@ fn typed_cuda_arithmetic_matches_host_lazy_ownership_and_concurrency() {
         })
         .unwrap();
     // SU(2) weights the norm by dim(c); the device reduction must too.
-    assert!((su2.to_cuda().unwrap().norm().unwrap() - su2.norm().unwrap()).abs() < 1e-12);
+    assert!((su2.to_cuda().unwrap().norm(2.0).unwrap() - su2.norm(2.0).unwrap()).abs() < 1e-12);
 
     let zn3 = Arc::new(ZNFusionRule::new(3).unwrap());
     let charge0 = GradedSpace::try_new_with_arc(Arc::clone(&zn3), [(zn3.irrep(0), 1)]).unwrap();
@@ -2017,7 +2010,6 @@ fn typed_cuda_c64_roundtrip_is_bit_exact_across_providers() {
     );
 }
 
-#[allow(deprecated)]
 fn assert_c64_contract_and_compose<R>(lhs: &TensorMap<R, Complex64>, rhs: &TensorMap<R, Complex64>)
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
@@ -2037,15 +2029,9 @@ where
         .unwrap()
         .to_host()
         .unwrap();
-    let ordered = lhs_device
-        .contract_ordered(&rhs_device, &lhs_axes, &rhs_axes, &output_axes)
-        .unwrap()
-        .to_host()
-        .unwrap();
     let compose = lhs_device.compose(&rhs_device).unwrap().to_host().unwrap();
     for (actual, expected) in [
         (&contract, &expected_contract),
-        (&ordered, &expected_contract),
         (&compose, &expected_compose),
     ] {
         assert_close_c64(actual.data(), expected.data(), 1e-12);
@@ -2203,7 +2189,7 @@ fn typed_cuda_c64_inner_is_conjugate_linear_in_the_first_argument() {
         })
         .unwrap();
         let host_inner = a.inner(&b).unwrap();
-        let host_norm = a.norm().unwrap();
+        let host_norm = a.norm(2.0).unwrap();
         assert!(
             host_inner.im != 0.0,
             "the fixture must exercise a complex inner product"
@@ -2222,7 +2208,7 @@ fn typed_cuda_c64_inner_is_conjugate_linear_in_the_first_argument() {
             (a_device.inner(&b_device.scale(i).unwrap()).unwrap() - i * inner).norm() <= tolerance
         );
 
-        let norm = a_device.norm().unwrap();
+        let norm = a_device.norm(2.0).unwrap();
         assert!((norm - host_norm).abs() <= 1e-12 * (1.0 + host_norm));
         let self_inner = a_device.inner(&a_device).unwrap();
         assert!(self_inner.im.abs() <= 1e-12 * (1.0 + self_inner.norm()));
@@ -2509,7 +2495,7 @@ where
     let tolerance = 64.0
         * f64::EPSILON
         * (source_data.len().max(1) as f64).sqrt()
-        * source.norm().unwrap().max(1.0)
+        * source.norm(2.0).unwrap().max(1.0)
         * (largest / smallest);
     let Qr {
         q: host_q,
