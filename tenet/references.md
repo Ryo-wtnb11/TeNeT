@@ -97,13 +97,13 @@ upstream location (the note says why).
 | `typed::TensorMap::from_subblock_fn` | TensorKit | 0.17.0 | `tensors/tensor.jl` | divergence: no TK counterpart (name-only row — no single defensible range); TK's constructor surface is `undef`/`zeros`/`ones` (283-318) and the rand family (320-408) |
 | `typed::TensorMap::inner` | TensorKit | 0.17.0 | `tensors/vectorinterface.jl:114-123` | `VectorInterface.inner`, quantum-dimension weighted; TK `dot` alias at `tensors/linalg.jl:255` |
 | `typed::TensorMap::inv` | TensorKit | 0.17.0 | `tensors/linalg.jl:375-387` | typed facade |
-| `typed::TensorMap::powi` | TensorKit | 0.17.0 | `tensors/linalg.jl:45-47` | typed facade |
 | `typed::TensorMap::isometry` | TensorKit | 0.17.0 | `tensors/linalg.jl:149-158` | |
 | `typed::TensorMap::isomorphism` | TensorKit | 0.17.0 | `tensors/linalg.jl:102-109` | also TK `id(V)` (75-82) as `isomorphism(V, V)` and `unitary` (129-132), whose extra Euclidean check every TeNeT provider satisfies |
 | `typed::TensorMap::left_null` | MatrixAlgebraKit | 0.6.9 | `interface/orthnull.jl:167-244` | typed facade |
 | `typed::TensorMap::left_polar` | MatrixAlgebraKit | 0.6.9 | `interface/polar.jl:3-20` | typed facade; TK factor-space glue on the typed `left_polar` rows |
 | `typed::TensorMap::lq_compact` | MatrixAlgebraKit | 0.6.9 | `interface/lq.jl:22-43` | typed facade; TK diagonal fast-path divergence on the typed `lq_compact` row |
 | `typed::TensorMap::lq_full` | MatrixAlgebraKit | 0.6.9 | `interface/lq.jl:3-20` | typed facade |
+| `typed::TensorMap::map_diagonal` | TensorKit | 0.17.0 | `tensors/diagonal.jl:384-390` | `DiagonalTensorMap($f.(d.data), d.domain)` with the caller's `f`; compact diagonals only |
 | `typed::TensorMap::norm` | TensorKit | 0.17.0 | `tensors/linalg.jl:257-275` | `norm(t, p)` and the `_norm` block reduction: `p = 2` is the quantum-dimension-weighted Frobenius norm, `p == Inf` (`linalg.jl:262-265`) the unweighted maximum absolute stored entry |
 | `typed::TensorMap::permute` | TensorKit | 0.17.0 | `tensors/indexmanipulations.jl:242-259` | typed facade |
 | `typed::TensorMap::pinv` | TensorKit | 0.17.0 | `tensors/linalg.jl:388-396` | typed facade |
@@ -114,7 +114,6 @@ upstream location (the note says why).
 | `typed::TensorMap::right_polar` | MatrixAlgebraKit | 0.6.9 | `interface/polar.jl:22-40` | typed facade; TK factor-space glue on the typed `right_polar` row |
 | `typed::TensorMap::scale` | TensorKit | 0.17.0 | `tensors/vectorinterface.jl:24-27` | `VectorInterface.scale`, behind `α * t` |
 | `typed::TensorMap::space` | TensorKit | 0.17.0 | `tensors/abstracttensor.jl:196-201` | `space(t, i)` flat-leg convention (domain legs dualized) |
-| `typed::TensorMap::sqrt` | TensorKit | 0.17.0 | `tensors/diagonal.jl:384-390` | `sqrt.(d.data)` elementwise on the diagonal |
 | `typed::TensorMap::svd_compact` | MatrixAlgebraKit | 0.6.9 | `interface/svd.jl:23-42` | typed facade |
 | `typed::TensorMap::svd_full` | MatrixAlgebraKit | 0.6.9 | `interface/svd.jl:3-21` | typed facade |
 | `typed::TensorMap::svd_vals` | MatrixAlgebraKit | 0.6.9 | `interface/svd.jl:144-156` | typed facade |

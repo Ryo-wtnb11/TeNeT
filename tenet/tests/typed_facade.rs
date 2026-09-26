@@ -5120,127 +5120,207 @@ fn exp_of_a_complex_compact_spectrum_takes_the_complex_elementwise_branch() {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 6 (issue #576), slice 4: `sqrt`.
+// `map_diagonal`: elementwise maps of a compact diagonal (issue #1558).
 // ---------------------------------------------------------------------------
 
-#[test]
-fn sqrt_squares_to_the_source_on_both_storages() {
-    // What: the diagonal-bond idiom, `√S · √S = S`, on compact storage and on
-    // dense storage of the same spectrum.
-    let _guard = cache_lock();
-    let runtime = runtime();
-    let typed = z2_endomorphism(&runtime);
-    let typed_s = typed.svd_compact().unwrap().s;
-
-    // √S · √S = S.
-    let root = typed_s.sqrt().unwrap();
-    let squared = root.compose(&root).unwrap();
-    let error = squared
-        .data()
+fn spectra<S: Clone, D: Clone>(entries: &[(S, &[D])]) -> Vec<tenet::typed::SectorSpectrum<S, D>> {
+    entries
         .iter()
-        .zip(typed_s.data())
-        .map(|(a, b)| (a - b).abs())
-        .fold(0.0f64, f64::max);
-    assert!(error < 1e-9, "√S · √S != S: {error}");
+        .map(|(sector, values)| tenet::typed::SectorSpectrum {
+            sector: sector.clone(),
+            values: values.to_vec(),
+        })
+        .collect()
+}
 
-    // The dense storage of the same tensor: `add`ing zero to a dense sibling
-    // forces the materialized payload, and the block walk must reach the same
-    // answer as the compact arm.
-    let dense_zero =
-        TensorMap::<_, f64>::isomorphism(&runtime, &typed_s.domain(), &typed_s.domain())
-            .unwrap()
-            .scale(0.0);
-    let dense_s = typed_s.axpby(1.0, &dense_zero, 1.0).unwrap();
-    assert_eq!(dense_s.data(), typed_s.data());
-    assert_eq!(
-        dense_s.sqrt().unwrap().data(),
-        typed_s.sqrt().unwrap().data()
-    );
+fn bits_f64(values: &[f64]) -> Vec<u64> {
+    values.iter().map(|value| value.to_bits()).collect()
 }
 
 #[test]
-fn sqrt_refuses_anything_that_is_not_a_diagonal_bond_tensor() {
-    // What: the scope guard. `sqrt` here is TensorKit's
-    // `sqrt(::DiagonalTensorMap)` and nothing wider — a general endomorphism
-    // `sqrt` needs a Schur seam that does not exist below this facade — so a
-    // rank-two tensor, and a bond-shaped one whose block has a nonzero
-    // off-diagonal entry, are both refused.
+fn map_diagonal_matches_hand_built_diagonals_on_a_dual_u1_bond() {
+    // What: the result is the compact diagonal whose values are `f` of the
+    // stored values, sector by sector, on the receiver's own (dual) bond.
+    // Oracle: diagonals built from hand-computed literals.
     let _guard = cache_lock();
     let runtime = runtime();
-    let typed = z2_tensor(&runtime);
-    // The shape guard, not the off-diagonal walk behind it.
-    match typed.sqrt() {
-        Err(tenet::typed::Error::InvalidArgument(message)) => {
-            assert!(
-                message.contains("`[v] <- [v]`"),
-                "a non-bond tensor was refused by something other than the shape \
-                 guard: {message}"
-            );
-        }
-        other => panic!("a non-bond tensor was accepted: {other:?}"),
-    }
-    let typed = z2_endomorphism(&runtime);
-    // Bond shaped (`[v] <- [v]`) but not diagonal: the off-diagonal check is
-    // what refuses it, and it is the check that separates this from a general
-    // endomorphism `sqrt`.
-    assert!(typed.data().iter().any(|&value| value != 0.0));
-    match typed.sqrt() {
-        Err(tenet::typed::Error::InvalidArgument(message)) => {
-            assert!(message.contains("off-diagonal"), "unexpected: {message}");
-        }
-        other => panic!("expected an off-diagonal refusal, got {other:?}"),
+    let bond = GradedSpace::try_new(
+        Arc::new(tenet::core::U1FusionRule),
+        [
+            (tenet::core::U1Irrep::new(0), 2),
+            (tenet::core::U1Irrep::new(1), 1),
+            (tenet::core::U1Irrep::new(-2), 2),
+        ],
+    )
+    .unwrap()
+    .try_dual()
+    .unwrap();
+    assert!(bond.is_dual());
+    let q = tenet::core::U1Irrep::new;
+    let source: TensorMap<_, f64> = TensorMap::diagonal(
+        &runtime,
+        &bond,
+        spectra(&[
+            (q(0), &[4.0, 9.0][..]),
+            (q(-1), &[0.25][..]),
+            (q(2), &[16.0, 1.0][..]),
+        ]),
+    )
+    .unwrap();
+
+    let root = source.map_diagonal(f64::sqrt).unwrap();
+    let expected: TensorMap<_, f64> = TensorMap::diagonal(
+        &runtime,
+        &bond,
+        spectra(&[
+            (q(0), &[2.0, 3.0][..]),
+            (q(-1), &[0.5][..]),
+            (q(2), &[4.0, 1.0][..]),
+        ]),
+    )
+    .unwrap();
+    assert_eq!(root.codomain(), vec![bond.clone()]);
+    assert_eq!(root.domain(), vec![bond.clone()]);
+    assert_eq!(root.diagview().unwrap(), expected.diagview().unwrap());
+    assert_eq!(bits_f64(root.data()), bits_f64(expected.data()));
+
+    let reciprocal = source.map_diagonal(|value| 1.0 / value).unwrap();
+    let expected: TensorMap<_, f64> = TensorMap::diagonal(
+        &runtime,
+        &bond,
+        spectra(&[
+            (q(0), &[0.25, 1.0 / 9.0][..]),
+            (q(-1), &[4.0][..]),
+            (q(2), &[0.0625, 1.0][..]),
+        ]),
+    )
+    .unwrap();
+    assert_eq!(bits_f64(reciprocal.data()), bits_f64(expected.data()));
+
+    // Complex payload: `f` decides the branch; `Complex64::sqrt` is principal.
+    let source: TensorMap<_, Complex64> = TensorMap::diagonal(
+        &runtime,
+        &bond,
+        spectra(&[
+            (
+                q(0),
+                &[Complex64::new(-1.0, 0.0), Complex64::new(4.0, 0.0)][..],
+            ),
+            (q(-1), &[Complex64::new(0.0, 2.0)][..]),
+            (
+                q(2),
+                &[Complex64::new(9.0, 0.0), Complex64::new(-4.0, 0.0)][..],
+            ),
+        ]),
+    )
+    .unwrap();
+    let root = source.map_diagonal(|value| value.sqrt()).unwrap();
+    let expected = [
+        Complex64::new(0.0, 1.0),
+        Complex64::new(2.0, 0.0),
+        Complex64::new(1.0, 1.0),
+        Complex64::new(3.0, 0.0),
+        Complex64::new(0.0, 2.0),
+    ];
+    let actual: Vec<_> = root
+        .diagview()
+        .unwrap()
+        .into_iter()
+        .flat_map(|entry| entry.values)
+        .collect();
+    let sorted = |mut values: Vec<Complex64>| {
+        values.sort_by(|a, b| (a.re, a.im).partial_cmp(&(b.re, b.im)).unwrap());
+        values
+    };
+    let (actual, expected) = (sorted(actual), sorted(expected.to_vec()));
+    for (value, expected) in actual.iter().zip(&expected) {
+        assert!((value - expected).norm() < 1e-15, "{value} != {expected}");
     }
 }
 
 #[test]
-fn sqrt_of_a_negative_f64_entry_points_at_the_complex_payload() {
-    // What: a real payload has no principal square root of a negative number to
-    // return, so both storages refuse and say what to do instead. This is
-    // TensorKit's `DiagonalTensorMap` behavior (a `DomainError`); TensorKit's
-    // dense path silently returns a complex tensor, which a typed signature
-    // cannot express and which disagrees with TensorKit's own diagonal path.
+fn map_diagonal_on_su2_repeats_each_value_over_its_carrier_dimension() {
+    // What: `f` acts on the reduced values once per degeneracy index, and the
+    // physical-basis expansion repeats each result `2j + 1` times on the
+    // diagonal. Oracle: the hand-listed physical diagonal.
     let _guard = cache_lock();
     let runtime = runtime();
-    let typed = z2_endomorphism(&runtime);
-    let typed_s = typed.svd_compact().unwrap().s.scale(-1.0);
+    let j = SU2Irrep::from_twice_spin;
+    let bond =
+        GradedSpace::try_new(Arc::new(SU2FusionRule), [(j(0), 2), (j(1), 1), (j(2), 2)]).unwrap();
+    let source: TensorMap<_, f64> = TensorMap::diagonal(
+        &runtime,
+        &bond,
+        spectra(&[
+            (j(0), &[4.0, 9.0][..]),
+            (j(1), &[0.25][..]),
+            (j(2), &[16.0, 1.0][..]),
+        ]),
+    )
+    .unwrap();
+    let root = source.map_diagonal(f64::sqrt).unwrap();
+    let expected: TensorMap<_, f64> = TensorMap::diagonal(
+        &runtime,
+        &bond,
+        spectra(&[
+            (j(0), &[2.0, 3.0][..]),
+            (j(1), &[0.5][..]),
+            (j(2), &[4.0, 1.0][..]),
+        ]),
+    )
+    .unwrap();
+    assert_eq!(root.diagview().unwrap(), expected.diagview().unwrap());
+    assert_eq!(bits_f64(root.data()), bits_f64(expected.data()));
 
-    for (name, result) in [
-        ("compact", typed_s.sqrt()),
-        (
-            "dense",
-            typed_s
-                .axpby(
-                    1.0,
-                    &TensorMap::<_, f64>::isomorphism(
-                        &runtime,
-                        &typed_s.domain(),
-                        &typed_s.domain(),
-                    )
-                    .unwrap()
-                    .scale(0.0),
-                    1.0,
-                )
-                .unwrap()
-                .sqrt(),
-        ),
-    ] {
-        match result {
-            Err(tenet::typed::Error::InvalidArgument(message)) => {
-                assert!(
-                    message.contains("negative") && message.contains("c64"),
-                    "the {name} arm's message does not point at the complex \
-                     payload: {message}"
-                );
+    let physical = root.to_physical_dense().unwrap();
+    assert_eq!(physical.shape, vec![10, 10]);
+    let mut diagonal = Vec::new();
+    for row in 0..10 {
+        for col in 0..10 {
+            let value = physical.data[row + 10 * col];
+            if row == col {
+                diagonal.push(value);
+            } else {
+                assert_eq!(value, 0.0, "off-diagonal ({row}, {col})");
             }
-            other => panic!("the {name} arm accepted a negative entry: {other:?}"),
         }
+    }
+    diagonal.sort_by(f64::total_cmp);
+    let mut expected = vec![2.0, 3.0, 0.5, 0.5, 4.0, 4.0, 4.0, 1.0, 1.0, 1.0];
+    expected.sort_by(f64::total_cmp);
+    for (value, expected) in diagonal.iter().zip(&expected) {
+        assert!((value - expected).abs() < 1e-14, "{value} != {expected}");
     }
 }
 
 #[test]
-fn sqrt_of_a_complex_payload_takes_the_principal_branch() {
-    // What: with a c64 payload there is a root to return, and it is the
-    // principal one — `√(-1) = i`, not `-i`.
+fn map_diagonal_keeps_the_result_compact() {
+    // What: the result is stored as a compact diagonal (no dense payload), for
+    // the `s` of `svd_compact` and for the compact adjoint of a c64 diagonal.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let s = z2_endomorphism(&runtime).svd_compact().unwrap().s;
+    assert!(tenet::expert::diagonal_spectrum(&s).unwrap().is_some());
+    let root = s.map_diagonal(f64::sqrt).unwrap();
+    let stored = tenet::expert::diagonal_spectrum(&root).unwrap().unwrap();
+    let source = tenet::expert::diagonal_spectrum(&s).unwrap().unwrap();
+    for (root, source) in stored.iter().zip(&source) {
+        assert_eq!(root.sector, source.sector);
+        let expected: Vec<_> = source.values.iter().map(|value| value.sqrt()).collect();
+        assert_eq!(bits_f64(&root.values), bits_f64(&expected));
+    }
+
+    let complex = s.convert::<Complex64>().scale(Complex64::new(0.0, 1.0));
+    let adjoint = complex.adjoint().unwrap();
+    let mapped = adjoint.map_diagonal(|value| value * value).unwrap();
+    assert!(tenet::expert::diagonal_spectrum(&mapped).unwrap().is_some());
+}
+
+#[test]
+fn map_diagonal_rejects_dense_storage() {
+    // What: dense storage is refused with a typed error naming the expected
+    // input, even when the dense blocks happen to be diagonal, and a lazy
+    // adjoint of a dense tensor is refused the same way.
     let _guard = cache_lock();
     let runtime = runtime();
     let leg = GradedSpace::try_new(
@@ -5248,35 +5328,24 @@ fn sqrt_of_a_complex_payload_takes_the_principal_branch() {
         [(tenet::core::Z2Irrep::EVEN, 2)],
     )
     .unwrap();
-    let negative = TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, indices: &[usize]| {
-        if indices[0] == indices[1] {
-            Complex64::new(-1.0, 0.0)
-        } else {
-            Complex64::new(0.0, 0.0)
+    let dense_diagonal: TensorMap<_, f64> =
+        TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, ij: &[usize]| {
+            f64::from(ij[0] == ij[1])
+        })
+        .unwrap();
+    for (name, tensor) in [
+        ("dense diagonal", dense_diagonal.clone()),
+        ("lazy adjoint", dense_diagonal.adjoint().unwrap()),
+        ("dense endomorphism", z2_endomorphism(&runtime)),
+        ("non-bond", z2_tensor(&runtime)),
+    ] {
+        match tensor.map_diagonal(f64::sqrt) {
+            Err(tenet::typed::Error::InvalidArgument(message)) => assert!(
+                message.contains("compact diagonal") && message.contains("dense storage"),
+                "{name}: {message}"
+            ),
+            other => panic!("{name}: dense input was accepted: {other:?}"),
         }
-    })
-    .unwrap();
-
-    let root = negative.sqrt().unwrap();
-    let squared = root.compose(&root).unwrap();
-    let error = squared
-        .data()
-        .iter()
-        .zip(negative.data())
-        .map(|(a, b)| (a - b).norm())
-        .fold(0.0f64, f64::max);
-    assert!(error < 1e-12, "√t · √t != t: {error}");
-    // The principal branch, not the other one: every diagonal entry is `+i`.
-    for (index, value) in root.data().iter().enumerate() {
-        let expected = if on_diagonal(&root, index) {
-            Complex64::new(0.0, 1.0)
-        } else {
-            Complex64::new(0.0, 0.0)
-        };
-        assert!(
-            (value - expected).norm() < 1e-12,
-            "entry {index} is {value}, not the principal root {expected}"
-        );
     }
 }
 

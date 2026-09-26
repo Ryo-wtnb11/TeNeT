@@ -122,29 +122,6 @@ fn map_checked_tensor_product_symbol_error<E>(
     }
 }
 
-/// Positive integer power with no identity seed.
-pub(crate) fn pow_by_squaring<T: Clone, E>(
-    mut power: T,
-    mut exponent: u32,
-    mut compose: impl FnMut(&T, &T) -> Result<T, E>,
-) -> Result<T, E> {
-    debug_assert!(exponent > 0);
-    while exponent & 1 == 0 {
-        power = compose(&power, &power)?;
-        exponent >>= 1;
-    }
-    let mut result = power.clone();
-    exponent >>= 1;
-    while exponent != 0 {
-        power = compose(&power, &power)?;
-        if exponent & 1 != 0 {
-            result = compose(&result, &power)?;
-        }
-        exponent >>= 1;
-    }
-    Ok(result)
-}
-
 /// Transforms a compact diagonal spectrum through a rank-(1,1) leg swap
 /// without ever building the `Σ_c k_c²` dense payload — TensorKit 0.17
 /// `src/tensors/diagonal.jl:215-242`, where `permute`/`transpose` of a
@@ -1290,40 +1267,12 @@ mod tests {
     };
 
     use super::{
-        pow_by_squaring, scatter_tensor_product_block, tensorcontract_owned_multiplicity_free,
+        scatter_tensor_product_block, tensorcontract_owned_multiplicity_free,
         tensorproduct_owned_checked_generic, tree_transform_owned_multiplicity_free,
         CHECKED_TENSOR_PRODUCT_COMMIT_COUNT, CHECKED_TENSOR_PRODUCT_RHS_STRUCTURE_OVERRIDE,
         FAIL_CHECKED_TENSOR_PRODUCT_BEFORE_SCATTER,
     };
     use crate::runtime::Ctx;
-
-    #[test]
-    fn power_by_squaring_has_logarithmic_composition_count() {
-        let mut compositions = 0;
-        let power = pow_by_squaring(3_u64, 13, |left, right| {
-            compositions += 1;
-            Ok::<_, ()>(left * right)
-        })
-        .unwrap();
-        assert_eq!(power, 3_u64.pow(13));
-        assert_eq!(compositions, 5);
-        let trace = pow_by_squaring("a".to_string(), 13, |left, right| {
-            Ok::<_, ()>(format!("({left}*{right})"))
-        })
-        .unwrap();
-        assert_eq!(trace, "((a*((a*a)*(a*a)))*(((a*a)*(a*a))*((a*a)*(a*a))))");
-
-        compositions = 0;
-        assert_eq!(
-            pow_by_squaring(1_u64, 1 << 31, |left, right| {
-                compositions += 1;
-                Ok::<_, ()>(left * right)
-            })
-            .unwrap(),
-            1
-        );
-        assert_eq!(compositions, 31);
-    }
 
     struct CheckedTensorProductSpy {
         algebra_queries: AtomicUsize,

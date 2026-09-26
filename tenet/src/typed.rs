@@ -110,7 +110,8 @@
 //! [`TensorMap::eigh_vals`], [`TensorMap::eig_full`], [`TensorMap::eig_vals`])
 //! and
 //! — with issue #576 — the **matrix functions** ([`TensorMap::exp`],
-//! [`TensorMap::inv`], [`TensorMap::pinv`], [`TensorMap::sqrt`]) and — with
+//! [`TensorMap::inv`], [`TensorMap::pinv`], and the elementwise
+//! [`TensorMap::map_diagonal`] on compact diagonals) and — with
 //! issue #580 — the **typed inspection, scalar and conversion group**
 //! ([`TensorMap::rank`], [`TensorMap::codomain_rank`],
 //! [`TensorMap::domain_rank`], [`TensorMap::rank`], [`TensorMap::leg_dims`],
@@ -152,16 +153,19 @@
 //! with a decision behind them rather than a queue position:
 //!
 //! - The **rest of the matrix-function family** — the trigonometric and
-//!   hyperbolic members, `log`, `sylvester`, the `\` and `/` solves and integer
-//!   `^` — is out by decision, not by queue position (issue #576). Every one of
-//!   them is a spectral function or a solve over the same seams, so adding them
-//!   is mechanical; what is missing is a reason to. The four that landed are
-//!   the ones the tensor-network algorithms in this repository actually call.
+//!   hyperbolic members, `log`, `sylvester` and a general `sqrt` — is out by
+//!   decision, not by queue position (issue #576). Every one of them is a
+//!   spectral function or a solve over the same seams, so adding them is
+//!   mechanical; what is missing is a reason to. Right solves and integer
+//!   powers are compositions of [`TensorMap::adjoint`], [`TensorMap::solve`],
+//!   [`TensorMap::inv`] and [`TensorMap::compose`] (the zeroth power is
+//!   [`TensorMap::isomorphism`] of the domain onto itself), and elementwise
+//!   maps of a compact spectrum go through [`TensorMap::map_diagonal`].
 //!   One capability gap still stands behind that line: general endomorphism
-//!   **`sqrt`** needs a Schur seam ([`TensorMap::sqrt`] is the diagonal-bond
-//!   idiom only), and that seam does not exist below this facade. The one that
-//!   used to stand beside it is closed — [`TensorMap::exp`] accepts any
-//!   endomorphism since issue #577, through a blockwise Padé arm.
+//!   **`sqrt`** needs a Schur seam, and that seam does not exist below this
+//!   facade. The one that used to stand beside it is closed —
+//!   [`TensorMap::exp`] accepts any endomorphism since issue #577, through a
+//!   blockwise Padé arm.
 //! - Some **outer multiplicity factorization** leaves remain outside this
 //!   facade. Checked `Generic` providers have provider-neutral SVD/QR/LQ,
 //!   numerical null spaces, and the admitted matrix-function subset; each leaf
@@ -278,12 +282,11 @@ use tenet_matrixalgebra::{
 use crate::runtime::{Ctx, Ctxs};
 pub use crate::tensor_core::CheckedGenericTensorProductError;
 use crate::tensor_core::{
-    internal_layout_error, oriented_contract_destination, pow_by_squaring,
-    tensorcompose_owned_multiplicity_free, tensorcontract_oriented_multiplicity_free,
-    tensorcontract_oriented_multiplicity_free_into, tensorcontract_owned_multiplicity_free_into,
-    tensorproduct_owned_checked_generic, tensorproduct_owned_multiplicity_free,
-    tree_transform_owned_multiplicity_free, tree_transform_owned_multiplicity_free_into,
-    OrientedContractionKind,
+    internal_layout_error, oriented_contract_destination, tensorcompose_owned_multiplicity_free,
+    tensorcontract_oriented_multiplicity_free, tensorcontract_oriented_multiplicity_free_into,
+    tensorcontract_owned_multiplicity_free_into, tensorproduct_owned_checked_generic,
+    tensorproduct_owned_multiplicity_free, tree_transform_owned_multiplicity_free,
+    tree_transform_owned_multiplicity_free_into, OrientedContractionKind,
 };
 use crate::RuntimeIdentity;
 
@@ -584,9 +587,8 @@ impl FactorizationScalar for num_complex::Complex32 {}
 /// Scalar payloads admitted to the advanced linear-algebra family.
 ///
 /// Adds, on top of [`FactorizationScalar`]: the matrix functions
-/// ([`TensorMap::exp`], [`TensorMap::sqrt`], [`TensorMap::powi`]),
-/// [`TensorMap::inv`], [`TensorMap::pinv`], [`TensorMap::solve`] /
-/// [`TensorMap::solve_right`], and the general (non-Hermitian)
+/// ([`TensorMap::exp`]), [`TensorMap::inv`], [`TensorMap::pinv`],
+/// [`TensorMap::solve`], and the general (non-Hermitian)
 /// eigendecomposition (`eig_full`, `eig_vals`).
 ///
 /// These are the operations whose accuracy depends on conditioning rather than
@@ -661,25 +663,6 @@ impl FactorizationScalar for num_complex::Complex32 {}
 ///
 /// fn advanced<D: AdvancedLinalgScalar>(tensor: &TensorMap<U1FusionRule, D>) {
 ///     let _ = tensor.inv();
-/// }
-/// ```
-///
-/// [`TensorMap::sqrt`], which is gated by a per-method `where` clause rather
-/// than by its impl block:
-///
-/// ```compile_fail
-/// use tenet::prelude::{FactorizationScalar, TensorMap, U1FusionRule};
-///
-/// fn factorizing_only<D: FactorizationScalar>(tensor: &TensorMap<U1FusionRule, D>) {
-///     let _ = tensor.sqrt();
-/// }
-/// ```
-///
-/// ```
-/// use tenet::prelude::{AdvancedLinalgScalar, TensorMap, U1FusionRule};
-///
-/// fn advanced<D: AdvancedLinalgScalar>(tensor: &TensorMap<U1FusionRule, D>) {
-///     let _ = tensor.sqrt();
 /// }
 /// ```
 ///
@@ -812,7 +795,6 @@ pub(crate) trait ScalarOps:
     fn abs_value(self) -> f64;
     fn exp_value(self) -> Self;
     fn recip_value(self) -> Self;
-    fn sqrt_value(self) -> Result<Self, Error>;
 }
 
 fn host_add_impl<R, D>(
@@ -978,6 +960,8 @@ where
     /// codomain and domain. The result has space
     /// `domain(self) <- domain(rhs)` and keeps `self`'s exact provider `Arc`.
     /// This is TensorKit's left solve `self \\ rhs`.
+    /// TensorKit's right solve `self / rhs` is the composition
+    /// `rhs.adjoint()?.solve(&self.adjoint()?)?.adjoint()`.
     ///
     /// Dense input uses one linear solve per coupled sector. A
     /// multiplicity-free compact diagonal divisor instead applies its
@@ -1004,31 +988,10 @@ where
     /// let a: TensorMap<_, f64> = TensorMap::isomorphism(&runtime, [&v], [&v])?;
     /// let b: TensorMap<_, f64> = TensorMap::rand_with_seed(&runtime, [&v], [&v], 1)?;
     /// assert_eq!(a.solve(&b)?.data(), b.data());
-    /// assert_eq!(b.solve_right(&a)?.data(), b.data());
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
     pub fn solve(&self, rhs: &Self) -> Result<Self, TypedFacadeError<R>> {
         <R::Mode as TypedTensorSolveDispatch<R, D>>::solve(self, rhs)
-    }
-
-    /// Solves `x * rhs = self` independently in every coupled sector, without
-    /// forming an inverse.
-    ///
-    /// The operands must share a runtime and fusion-rule identity, their
-    /// domains must be exactly equal, and `rhs` must have isomorphic codomain
-    /// and domain. The result has space
-    /// `codomain(self) <- codomain(rhs)`. For checked Generic it keeps `self`'s
-    /// exact provider `Arc`, even when the operands use distinct compatible
-    /// provider allocations. The legacy multiplicity-free route derives the
-    /// output from `rhs`'s provider allocation after checking equal rule
-    /// identity. This is TensorKit's right solve `self / rhs`.
-    ///
-    /// It is evaluated through the adjointed left-solve equation
-    /// `rhs^H * x^H = self^H`; the returned tensor is owned. It uses the same
-    /// storage routes, cost, and error classes as [`Self::solve`]. Lazy inputs
-    /// remain uncached, and if any step fails, no result is returned.
-    pub fn solve_right(&self, rhs: &Self) -> Result<Self, TypedFacadeError<R>> {
-        <R::Mode as TypedTensorSolveDispatch<R, D>>::solve_right(self, rhs)
     }
 }
 
@@ -2010,104 +1973,61 @@ where
         .map_err(Error::from)
     }
 
-    /// TensorKit 0.17 `sqrt(::DiagonalTensorMap)`: the elementwise principal
-    /// square root of a diagonal bond tensor, `√s_i` on each diagonal entry, so
-    /// that `√t · √t = t`. This is the idiom that splits singular values in
-    /// Vidal-gauge and gate-application updates.
+    /// Applies `f` to every stored value of a compact diagonal tensor and
+    /// returns a compact diagonal on the same space.
+    ///
+    /// This is TensorKit 0.17's `DiagonalTensorMap($f.(d.data), d.domain)`
+    /// (`tensors/diagonal.jl:384-390`) with the elementwise function supplied
+    /// by the caller: `s.map_diagonal(f64::sqrt)` splits singular values for a
+    /// Vidal gauge, `s.map_diagonal(|x| 1.0 / x)` inverts them. A spectral map
+    /// never mixes sectors or changes a bond dimension, so the result keeps the
+    /// receiver's space. `f` sees the values directly; for a real payload it
+    /// decides what a negative entry means (`f64::sqrt` yields `NaN`).
     ///
     /// # Domain
     ///
-    /// The receiver must be a **diagonal bond tensor** `[v] <- [v]`: one
-    /// codomain leg equal to the one domain leg, and every stored block
-    /// diagonal, with off-diagonal entries exactly zero. That is the shape the
-    /// factorizations produce ([`Self::svd_compact`]'s `s`, also after
-    /// [`Self::restrict_diagonal`], and [`Self::eigh_full`]'s `d`), and it is the receiver type TensorKit's
-    /// own diagonal `sqrt` demands.
-    ///
-    /// General endomorphism `sqrt` is deliberately out of scope. TensorKit does
-    /// have one (`sqrt(::AbstractTensorMap)`, Schur-based, always returning a
-    /// complex tensor), but no Schur seam exists below this facade, and its
-    /// value-independent complexification is not expressible in a typed
-    /// signature. A wider `sqrt` is a separate phase, not an omission here.
-    ///
-    /// Checked Generic standalone compact tensors use the same elementwise arm
-    /// and remain compact. Dense diagonal inputs still take the checked
-    /// off-diagonal-validation path below.
+    /// The receiver must store a compact diagonal: a multiplicity-free
+    /// [`Self::svd_compact`] `s`, an eigendecomposition's `d`, or a tensor
+    /// built by [`Self::diagonal`]. A dense tensor is rejected even when its
+    /// blocks happen to be diagonal; this method never scans or builds a
+    /// dense buffer. A diagonal that is stored densely (a checked-Generic
+    /// `svd_compact` `s`) is made compact explicitly with
+    /// `TensorMap::diagonal(runtime, bond, t.diagview()?)`.
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidArgument`] in every failure case:
-    ///
-    /// - the receiver is not shaped `[v] <- [v]`;
-    /// - a stored block has a nonzero off-diagonal entry (dense arm only — a
-    ///   compact payload has none by construction);
-    /// - the payload is `f64` and a diagonal entry is negative. The message
-    ///   points at the complex payload, matching TensorKit's diagonal-path
-    ///   `DomainError`. TensorKit's *dense* path instead complexifies silently,
-    ///   which contradicts its own diagonal path and is not mirrored here.
-    ///
-    /// A [`num_complex::Complex64`] payload never fails on a value: it takes the
-    /// principal branch (`√(-1) = +i`).
+    /// [`Error::InvalidArgument`] when the receiver has dense storage,
+    /// including a lazy adjoint.
     ///
     /// # Complexity
     ///
-    /// Compact input (the TensorKit `DiagonalTensorMap` path): the **O(rank)
-    /// elementwise arm** over the `Σ_c k_c` stored values, staying compact. On
-    /// the multiplicity-free path, `s.sqrt()` and the two `compose`s around it
-    /// are all bond scalings. Dense input: `O(Σ_c n_c²)`, one walk over the
-    /// block-diagonal buffer, which is what the off-diagonal check costs; the
-    /// root itself is still only `Σ_c n_c` square roots. A dense lazy adjoint
-    /// builds one operation-local logical payload without publishing its
-    /// reusable receiver cache.
-    pub fn sqrt(&self) -> Result<Self, Error>
-    where
-        D: AdvancedLinalgScalar,
-    {
-        // Use the same [`is_diagonal_bond_space`] predicate as compact
-        // destinations; here it is asked of the receiver.
-        if !is_diagonal_bond_space(self.logical_space().space()) {
+    /// `Σ_c k_c` calls of `f` over the stored values and one owned compact
+    /// output of that length.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    ///
+    /// use tenet::core::{U1FusionRule, U1Irrep};
+    /// use tenet::typed::{GradedSpace, Runtime, SectorSpectrum, TensorMap};
+    ///
+    /// let runtime = Runtime::builder().build()?;
+    /// let v = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)])?;
+    /// let values = SectorSpectrum { sector: U1Irrep::new(0), values: vec![4.0, 9.0] };
+    /// let s: TensorMap<_, f64> = TensorMap::diagonal(&runtime, &v, [values])?;
+    /// assert_eq!(s.map_diagonal(f64::sqrt)?.diagview()?[0].values, [2.0, 3.0]);
+    /// let dense: TensorMap<_, f64> = TensorMap::isomorphism(&runtime, [&v], [&v])?;
+    /// assert!(dense.map_diagonal(f64::sqrt).is_err());
+    /// # Ok::<(), tenet::typed::Error>(())
+    /// ```
+    pub fn map_diagonal(&self, f: impl Fn(D) -> D) -> Result<Self, Error> {
+        let Some(spectrum) = self.spectrum() else {
             return Err(Error::InvalidArgument(
-                "sqrt requires a diagonal bond tensor `[v] <- [v]` (equal single \
-                 codomain and domain legs), like the `s` factor of svd_compact"
+                "map_diagonal requires a compact diagonal tensor (a compact factor or a \
+                 TensorMap::diagonal), but this tensor has dense storage"
                     .to_string(),
             ));
-        }
-        if let Some(spectrum) = self.spectrum() {
-            return Ok(self.with_spectrum(map_spectrum(spectrum, D::sqrt_value)?));
-        }
-        if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
-            return self.materialized_tensor_uncached()?.sqrt();
-        }
-        // Dense payload on a bond space: block-diagonal by the space's shape,
-        // but only by convention — the buffer is free to hold anything, so the
-        // off-diagonal entries are checked rather than assumed. Skipping the
-        // check would silently drop them.
-        let data = self
-            .owned_body()
-            .expect("owned square-root input")
-            .materialized_dense_data();
-        let zero = num_complex::Complex64::new(0.0, 0.0);
-        let mut out = vec![D::from_real(0.0); data.len()];
-        let structure = self.logical_space().space().structure();
-        for index in 0..structure.block_count() {
-            let block = structure.block(index)?;
-            let (shape, strides, offset) = (block.shape(), block.strides(), block.offset());
-            for row in 0..shape[0] {
-                for col in 0..shape[1] {
-                    let position = offset + row * strides[0] + col * strides[1];
-                    if row == col {
-                        out[position] = data[position].sqrt_value()?;
-                    } else if data[position].widen_complex() != zero {
-                        return Err(Error::InvalidArgument(format!(
-                            "sqrt requires a diagonal bond tensor, but block {:?} has a \
-                             nonzero off-diagonal entry at ({row}, {col})",
-                            block.key()
-                        )));
-                    }
-                }
-            }
-        }
-        Ok(self.with_data(out))
+        };
+        Ok(self.with_spectrum(map_spectrum(spectrum, |value| Ok(f(value)))?))
     }
 }
 
@@ -2353,17 +2273,6 @@ impl ScalarOps for f64 {
     fn recip_value(self) -> Self {
         1.0 / self
     }
-
-    fn sqrt_value(self) -> Result<Self, Error> {
-        if self < 0.0 {
-            Err(Error::InvalidArgument(format!(
-                "sqrt of a negative diagonal entry {self}; convert to c64 \
-                 with to_c64() for the complex square root"
-            )))
-        } else {
-            Ok(self.sqrt())
-        }
-    }
 }
 
 /// Literal port of Julia 1.11.6 `Base.robust_cinv`
@@ -2521,10 +2430,6 @@ impl ScalarOps for num_complex::Complex64 {
         // exactly as `Base.inv(::ComplexF64)` does.
         julia_complex64_reciprocal(self)
     }
-
-    fn sqrt_value(self) -> Result<Self, Error> {
-        Ok(self.sqrt())
-    }
 }
 
 impl ScalarOps for f32 {
@@ -2550,17 +2455,6 @@ impl ScalarOps for f32 {
 
     fn recip_value(self) -> Self {
         1.0 / self
-    }
-
-    fn sqrt_value(self) -> Result<Self, Error> {
-        if self < 0.0 {
-            Err(Error::InvalidArgument(format!(
-                "sqrt of a negative diagonal entry {self}; convert to a complex \
-                 payload for the complex square root"
-            )))
-        } else {
-            Ok(self.sqrt())
-        }
     }
 }
 
@@ -2599,10 +2493,6 @@ impl ScalarOps for num_complex::Complex32 {
         let wide = tenet_tensors::WideScalar::widen(self);
         let (re, im) = julia_complex32_reciprocal_wide(wide.re, wide.im);
         Self::new(re as f32, im as f32)
-    }
-
-    fn sqrt_value(self) -> Result<Self, Error> {
-        Ok(self.sqrt())
     }
 }
 
@@ -5656,10 +5546,6 @@ where
         tensor: &TensorMap<R, D>,
         rhs: &TensorMap<R, D>,
     ) -> Result<TensorMap<R, D>, Self::FacadeError>;
-    fn solve_right(
-        tensor: &TensorMap<R, D>,
-        rhs: &TensorMap<R, D>,
-    ) -> Result<TensorMap<R, D>, Self::FacadeError>;
 }
 
 #[doc(hidden)]
@@ -5702,15 +5588,6 @@ where
     D: AdvancedLinalgScalar,
 {
     fn exp(tensor: &TensorMap<R, D>) -> Result<TensorMap<R, D>, Self::FacadeError>;
-}
-
-#[doc(hidden)]
-pub trait TypedTensorPowiDispatch<R, D>: TypedTensorModeDispatch<R>
-where
-    R: TypedSectorAdmission,
-    D: AdvancedLinalgScalar,
-{
-    fn powi(tensor: &TensorMap<R, D>, exponent: i32) -> Result<TensorMap<R, D>, Self::FacadeError>;
 }
 
 #[doc(hidden)]
@@ -6034,13 +5911,6 @@ where
     fn solve(tensor: &TensorMap<R, D>, rhs: &TensorMap<R, D>) -> Result<TensorMap<R, D>, Error> {
         tensor.solve_multiplicity_free(rhs)
     }
-
-    fn solve_right(
-        tensor: &TensorMap<R, D>,
-        rhs: &TensorMap<R, D>,
-    ) -> Result<TensorMap<R, D>, Error> {
-        tensor.solve_right_multiplicity_free(rhs)
-    }
 }
 
 impl<R, D> TypedTensorPinvDispatch<R, D> for MultiplicityFreeAdmissionMode
@@ -6100,19 +5970,6 @@ where
 {
     fn exp(tensor: &TensorMap<R, D>) -> Result<TensorMap<R, D>, Error> {
         tensor.exp_multiplicity_free()
-    }
-}
-
-impl<R, D> TypedTensorPowiDispatch<R, D> for MultiplicityFreeAdmissionMode
-where
-    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
-        + MultiplicityFreeRigidSymbols<Scalar = f64>
-        + CheckedFusionAlgebra
-        + SectorCodec,
-    D: AdvancedLinalgScalar,
-{
-    fn powi(tensor: &TensorMap<R, D>, exponent: i32) -> Result<TensorMap<R, D>, Error> {
-        tensor.powi_multiplicity_free(exponent)
     }
 }
 
@@ -6427,88 +6284,6 @@ where
             checked_generic_solve_into(tensor, rhs, tensor.logical_space().clone(), output)?;
         Ok(wrap_factor_on(&tensor.runtime, factor))
     }
-
-    fn solve_right(
-        tensor: &TensorMap<R, D>,
-        rhs: &TensorMap<R, D>,
-    ) -> Result<TensorMap<R, D>, GenericTensorError<<R as CheckedGenericFusion>::Error>> {
-        if !tensor.runtime.same_runtime(&rhs.runtime) {
-            return Err(Error::RuntimeMismatch.into());
-        }
-        let _host_pool = tensor.runtime.enter_host_pool();
-        if tensor.logical_space().space().admission().rule_identity()
-            != rhs.logical_space().space().admission().rule_identity()
-        {
-            return Err(Error::RuleMismatch.into());
-        }
-        if tensor.logical_space().space().homspace().domain()
-            != rhs.logical_space().space().homspace().domain()
-        {
-            return Err(Error::InvalidArgument(
-                "solve_right requires equal receiver and divisor domains".to_string(),
-            )
-            .into());
-        }
-
-        let rhs_space = rhs.logical_space();
-        let codomain = tenet_matrixalgebra::coupled_sector_block_dimensions_generic_checked(
-            rhs_space.space().homspace().codomain(),
-            rhs_space.provider(),
-        )?;
-        let domain = tenet_matrixalgebra::coupled_sector_block_dimensions_generic_checked(
-            rhs_space.space().homspace().domain(),
-            rhs_space.provider(),
-        )?;
-        if codomain != domain {
-            return Err(Error::from(
-                tenet_tensors::OperationError::UnsupportedTensorContractScope {
-                    message: "solve_right requires an isomorphic divisor codomain and domain",
-                },
-            )
-            .into());
-        }
-
-        let rhs_adjoint = rhs.adjoint()?;
-        let receiver_adjoint = tensor.adjoint()?;
-        let receiver_space = tensor.logical_space();
-        let divisor_authority = <R::Mode as TypedTensorRootDispatch<R>>::build_root(
-            Arc::clone(receiver_space.provider_arc()),
-            rhs_adjoint.logical_space().space().homspace().clone(),
-        )?;
-        if divisor_authority.space() != rhs_adjoint.logical_space().space() {
-            return Err(
-                Error::from(tenet_tensors::OperationError::StructureMismatch {
-                    tensor: "solve_right divisor authority",
-                })
-                .into(),
-            );
-        }
-        let oriented_output = <R::Mode as TypedTensorRootDispatch<R>>::build_root(
-            Arc::clone(receiver_space.provider_arc()),
-            FusionTreeHomSpace::new(
-                rhs_space.space().homspace().codomain().clone(),
-                receiver_space.space().homspace().codomain().clone(),
-            ),
-        )?;
-        let output = tenet_tensors::adjoint_bound_space_dyn_generic_checked(&oriented_output)
-            .map_err(GenericTensorError::Plan)?;
-        let factor = checked_generic_solve_into(
-            &rhs_adjoint,
-            &receiver_adjoint,
-            divisor_authority,
-            oriented_output,
-        )?;
-        let data = tenet_tensors::materialize_adjoint_data_dyn(
-            factor.space().space(),
-            output.space(),
-            factor.data(),
-        )
-        .map_err(Error::from)?;
-        Ok(TensorMap {
-            runtime: tensor.runtime.clone(),
-            repr: owned_repr(TypedTensorBody::dense(output, data)),
-        })
-    }
 }
 
 fn checked_generic_solve_into<R, D>(
@@ -6772,54 +6547,6 @@ where
         )
         .map_err(Error::from)?;
         Ok(wrap_factor_on(&tensor.runtime, factor))
-    }
-}
-
-impl<R, D> TypedTensorPowiDispatch<R, D> for CheckedGenericAdmissionMode
-where
-    R: TypedSectorAdmission<
-            Error = <R as CheckedGenericFusion>::Error,
-            Mode = CheckedGenericAdmissionMode,
-        > + CheckedGenericRigidSymbols<Scalar = f64>,
-    D: AdvancedLinalgScalar,
-{
-    fn powi(
-        tensor: &TensorMap<R, D>,
-        exponent: i32,
-    ) -> Result<TensorMap<R, D>, GenericTensorError<<R as CheckedGenericFusion>::Error>> {
-        let hom = tensor.logical_space().space().homspace();
-        if hom.codomain() != hom.domain() {
-            return Err(Error::InvalidArgument(
-                "powi() requires an endomorphism (domain == codomain)".into(),
-            )
-            .into());
-        }
-        if matches!(&tensor.repr, TypedTensorRepr::Adjoint(_)) {
-            return tensor
-                .adjoint()?
-                .powi(exponent)?
-                .adjoint()?
-                .materialized_tensor_uncached()
-                .map_err(GenericTensorError::from);
-        }
-        if exponent == 0 {
-            let space = tensor.logical_space().clone();
-            let len = space.space().required_len().map_err(Error::from)?;
-            let mut output = TensorMap {
-                runtime: tensor.runtime.clone(),
-                repr: owned_repr(TypedTensorBody::dense(space, vec![D::zero(); len])),
-            };
-            write_identity_blocks_generic(&mut output).map_err(GenericTensorError::from)?;
-            return Ok(output);
-        }
-        let power = if exponent < 0 {
-            tensor.inv()?
-        } else {
-            tensor.clone()
-        };
-        pow_by_squaring(power, exponent.unsigned_abs(), |left, right| {
-            left.compose(right)
-        })
     }
 }
 
@@ -8663,35 +8390,6 @@ where
     }
 }
 
-impl<R, D> TensorMap<R, D>
-where
-    R: TypedSectorAdmission,
-    R::Mode: TypedTensorPowiDispatch<R, D>,
-    D: AdvancedLinalgScalar,
-{
-    /// Integer tensor-map power (TensorKit `t ^ p`), using `O(log |p|)`
-    /// compositions. Zero returns the multiplicative identity (staying compact
-    /// for multiplicity-free compact input); negative powers invert once.
-    ///
-    /// For checked-Generic tensors, the exact endomorphism check precedes
-    /// provider work. Zero uses the already admitted full block layout without
-    /// a provider query or new admission; other exponents inherit the checked
-    /// compose/inverse ordering and errors. Standalone checked-Generic compact
-    /// construction is supported, but there is no checked compact power arm:
-    /// exponent one returns the input clone, while zero, negative, and
-    /// magnitude-at-least-two powers enter dense identity, inverse, or compose
-    /// paths respectively.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::InvalidArgument`] unless this is an endomorphism.
-    /// Negative powers additionally return the inverse operation's typed error
-    /// when a block is singular or output admission fails.
-    pub fn powi(&self, exponent: i32) -> Result<Self, TypedFacadeError<R>> {
-        <R::Mode as TypedTensorPowiDispatch<R, D>>::powi(self, exponent)
-    }
-}
-
 /// A symmetry-graded vector space bound to one fusion-rule provider.
 ///
 /// Each sector has a degeneracy, and the space owns this complete map even when
@@ -10127,7 +9825,7 @@ enum TypedData<D, S = Vec<D>> {
 /// leaving the sector keys and the per-sector lengths untouched.
 ///
 /// This is the whole of the O(rank) arm shared by [`TensorMap::exp`],
-/// [`TensorMap::inv`], [`TensorMap::pinv`] and [`TensorMap::sqrt`]: a spectral
+/// [`TensorMap::inv`], [`TensorMap::pinv`] and [`TensorMap::map_diagonal`]: a spectral
 /// function acts on eigenvalues, so it never moves weight between sectors and
 /// never changes a bond dimension, which is exactly why the result can stay on
 /// the space it was called on.
@@ -10314,27 +10012,24 @@ where
 /// This is the guard TensorKit's `DiagonalTensorMap` gets for free from its
 /// type.
 ///
-/// Applied either to the *destination* of an operation — an operand's storage
-/// says what it holds, only the destination says whether a compact result is
-/// representable — or, in [`TensorMap::sqrt`], to the receiver, because there
-/// the bond shape is the operation's own domain restriction rather than a
-/// storage question.
+/// Applied to the *destination* of an operation — an operand's storage says
+/// what it holds, only the destination says whether a compact result is
+/// representable — and to a decoded compact payload's space.
 ///
 /// # Reachability
 ///
-/// Only [`TensorMap::sqrt`] can make this answer `false`, and does: a general
-/// tensor is a legal argument to write and an illegal one to accept, so the
-/// guard is killable there. At the compact-*destination* call sites it still
-/// cannot fail — every [`TypedData::Diagonal`] payload this module can produce
-/// sits on a space built by [`diagonal_factor_on`], i.e. by
+/// Only decoding untrusted input can make this answer `false`. At the
+/// compact-*destination* call sites it cannot fail — every
+/// [`TypedData::Diagonal`] payload this module can produce sits on a space
+/// built by [`diagonal_factor_on`], i.e. by
 /// [`tenet_matrixalgebra::diagonal_bond_bound_space_like`], which is a bond
 /// space by construction, and the operations that preserve the payload
-/// ([`TensorMap::scale`], [`TensorMap::axpby`], [`TensorMap::adjoint`], the
-/// `D * D` arm) all keep that space. It stays at those sites because the next
-/// constructor of a compact payload — a diagonal-aware `contract`, say — would
-/// be the first one able to aim at a destination that is not a bond space, and
-/// should find the
-/// check already in place rather than have to notice it is missing.
+/// ([`TensorMap::scale`], [`TensorMap::axpby`], [`TensorMap::adjoint`],
+/// [`TensorMap::map_diagonal`], the `D * D` arm) all keep that space. It stays
+/// at those sites because the next constructor of a compact payload — a
+/// diagonal-aware `contract`, say — would be the first one able to aim at a
+/// destination that is not a bond space, and should find the check already in
+/// place rather than have to notice it is missing.
 fn is_diagonal_bond_space(space: &DynamicFusionMapSpace) -> bool {
     let homspace = space.homspace();
     space.nout() == 1 && space.nin() == 1 && homspace.codomain().legs() == homspace.domain().legs()
@@ -17188,42 +16883,6 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
     D: TensorScalar,
 {
-    /// Integer tensor-map power (TensorKit `t ^ p`), using `O(log |p|)`
-    /// compositions. Zero returns the multiplicative identity (staying compact
-    /// for compact input); negative powers invert once.
-    ///
-    /// Returns [`Error::InvalidArgument`] unless this is an endomorphism.
-    fn powi_multiplicity_free(&self, exponent: i32) -> Result<Self, Error>
-    where
-        D: AdvancedLinalgScalar,
-    {
-        if !self.is_endomorphism() {
-            return Err(Error::InvalidArgument(
-                "powi() requires an endomorphism (domain == codomain)".to_string(),
-            ));
-        }
-        if exponent == 0 {
-            if let Some(spectrum) = self.spectrum() {
-                return Ok(self.with_spectrum(map_spectrum(spectrum, |_| Ok(D::from_real(1.0)))?));
-            }
-            let space = self.logical_space().clone();
-            let len = space.space().required_len()?;
-            let mut identity = TensorMap {
-                runtime: self.runtime.clone(),
-                repr: owned_repr(TypedTensorBody::dense(space, vec![D::zero(); len])),
-            };
-            write_identity_blocks_generic(&mut identity)?;
-            return Ok(identity);
-        }
-
-        let power = if exponent < 0 {
-            self.inv()?
-        } else {
-            self.clone()
-        };
-        pow_by_squaring(power, exponent.unsigned_abs(), Self::compose)
-    }
-
     /// The compact arms of [`Self::compose`], or `None` when the operands or
     /// the destination cannot support one and the dense route must run.
     ///
@@ -18367,19 +18026,6 @@ where
         Ok(self.wrap_bound_factor(out))
     }
 
-    /// Multiplicity-free implementation of the public mode-dispatched right solve.
-    fn solve_right_multiplicity_free(&self, rhs: &Self) -> Result<Self, Error>
-    where
-        D: AdvancedLinalgScalar,
-    {
-        if !self.runtime.same_runtime(&rhs.runtime) {
-            return Err(Error::RuntimeMismatch);
-        }
-        let rhs_adjoint = rhs.adjoint()?;
-        let self_adjoint = self.adjoint()?;
-        rhs_adjoint.solve(&self_adjoint)?.adjoint()
-    }
-
     /// Multiplicity-free implementation of [`Self::pinv`].
     fn pinv_multiplicity_free(&self, rcond: f64) -> Result<Self, Error>
     where
@@ -19180,13 +18826,6 @@ where
                 .materialized_dense_data(),
             |sector| Ok::<_, Error>(provider.dim_scalar(sector)),
         )?))
-    }
-
-    /// Whether codomain and domain are the same product space — the same
-    /// comparison [`Self::tr`] makes.
-    fn is_endomorphism(&self) -> bool {
-        let hom = self.logical_space().space().homspace();
-        hom.codomain().legs() == hom.domain().legs()
     }
 
     /// The single element of a rank-0 (scalar) tensor, e.g. the result of
@@ -22798,41 +22437,6 @@ mod representation_gates {
 
     #[cfg(feature = "racah-generated")]
     #[test]
-    fn checked_generic_powi_lazy_is_owned_matches_direct_and_keeps_receiver_cold() {
-        use tenet_core::SUNFusionRule;
-
-        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-        let provider = Arc::new(SUNFusionRule::new(3).unwrap());
-        let leg = GradedSpace::try_new(Arc::clone(&provider), [(vec![1, 1], 2)]).unwrap();
-        let source: TensorMap<_, f64> =
-            TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, ij| {
-                [[2.0, 1.0], [3.0, 4.0]][ij[0]][ij[1]]
-            })
-            .unwrap();
-        let lazy = source.adjoint().unwrap();
-
-        for exponent in [0, 2, -1] {
-            let actual = lazy.powi(exponent).unwrap();
-            let expected = source.powi(exponent).unwrap().adjoint().unwrap();
-            assert!(matches!(actual.repr, TypedTensorRepr::Owned(_)));
-            // `(A†)^k = (A^k)†`: the two sides factor different matrices, so
-            // they agree under the tolerance rule over the 2x2 degeneracy block.
-            crate::test_numerics::numerics::assert_slices_close(
-                "lazy powi against the adjoint of powi",
-                actual.data(),
-                expected.data(),
-                2,
-            );
-            assert_eq!(materialized_adjoint_builds(&lazy), 0);
-            let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
-                unreachable!()
-            };
-            assert!(view.materialized.get().is_none());
-        }
-    }
-
-    #[cfg(feature = "racah-generated")]
-    #[test]
     fn checked_generic_compact_qr_lq_reject_lazy_adjoint_without_materializing() {
         use tenet_core::SUNFusionRule;
 
@@ -22861,63 +22465,6 @@ mod representation_gates {
             );
             assert_eq!(materialized_adjoint_builds(&lazy), 0);
         }
-    }
-
-    #[cfg(feature = "racah-generated")]
-    #[test]
-    fn checked_generic_dense_sqrt_lazy_matches_owned_and_stays_cold() {
-        use tenet_core::SUNFusionRule;
-
-        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-        let provider = Arc::new(SUNFusionRule::new(3).unwrap());
-        let leg = GradedSpace::try_new(Arc::clone(&provider), [(vec![1, 1], 1)]).unwrap();
-        let source: TensorMap<_, f64> =
-            TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, indices| {
-                if indices[0] == indices[1] {
-                    4.0
-                } else {
-                    0.0
-                }
-            })
-            .unwrap();
-        let expected = source.sqrt().unwrap();
-        let Svd { s, .. } = source.svd_compact().unwrap();
-        let TypedTensorRepr::Owned(s_body) = &s.repr else {
-            unreachable!()
-        };
-        assert!(matches!(s_body.data.as_ref(), TypedData::Dense(_)));
-        let s_root = s.sqrt().unwrap();
-        let TypedTensorRepr::Owned(root_body) = &s_root.repr else {
-            unreachable!()
-        };
-        assert!(matches!(root_body.data.as_ref(), TypedData::Dense(_)));
-        let lazy = source.adjoint().unwrap();
-        let actual = lazy.sqrt().unwrap();
-        assert!(matches!(&actual.repr, TypedTensorRepr::Owned(_)));
-        assert_eq!(actual.data(), expected.data());
-        assert!(std::ptr::eq(actual.provider(), expected.provider()));
-        assert_eq!(actual.codomain(), expected.codomain());
-        assert_eq!(actual.domain(), expected.domain());
-        assert!(actual.runtime().shares_state_with(expected.runtime()));
-        assert_eq!(materialized_adjoint_builds(&lazy), 0);
-
-        let nonbond: TensorMap<_, f64> =
-            TensorMap::from_subblock_fn(&runtime, [&leg, &leg], [&leg], |_, _| 1.0).unwrap();
-        let malformed_nonbond = TensorMap {
-            runtime: runtime.clone(),
-            repr: owned_repr(TypedTensorBody::dense(
-                nonbond.logical_space().clone(),
-                Vec::<f64>::new(),
-            )),
-        };
-        let lazy_nonbond = malformed_nonbond.adjoint().unwrap();
-        match lazy_nonbond.sqrt() {
-            Err(Error::InvalidArgument(message)) => {
-                assert!(message.contains("diagonal bond tensor"));
-            }
-            other => panic!("unexpected nonbond sqrt result: {other:?}"),
-        }
-        assert_eq!(materialized_adjoint_builds(&lazy_nonbond), 0);
     }
 
     #[cfg(feature = "racah-generated")]
@@ -23845,172 +23392,6 @@ mod representation_gates {
         assert!(view.materialized.get().is_none());
     }
 
-    fn assert_sqrt_uses_a_cold_logical_copy<R, D>(source: &TensorMap<R, D>)
-    where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64>
-            + CheckedFusionAlgebra
-            + SectorCodec
-            + Send
-            + Sync
-            + 'static,
-        D: AdvancedLinalgScalar + core::fmt::Debug + Send + Sync + 'static,
-    {
-        let expected = eager_adjoint_oracle(source).sqrt().unwrap();
-        let parent = Arc::clone(owned(source));
-        let parent_data = Arc::clone(&parent.data);
-        let lazy = source.adjoint().unwrap();
-
-        for _ in 0..2 {
-            let actual = lazy.clone().sqrt().unwrap();
-            assert_typed_map_close(&actual, &expected, f64::EPSILON);
-            assert!(actual.owned_body().is_some());
-            assert!(Arc::ptr_eq(
-                actual.logical_space().provider_arc(),
-                source.logical_space().provider_arc()
-            ));
-            assert!(!Arc::ptr_eq(&owned(&actual).data, &parent_data));
-        }
-        let calls = (0..4)
-            .map(|_| {
-                let clone = lazy.clone();
-                std::thread::spawn(move || clone.sqrt().unwrap())
-            })
-            .collect::<Vec<_>>();
-        for call in calls {
-            assert_typed_map_close(&call.join().unwrap(), &expected, f64::EPSILON);
-        }
-        assert!(Arc::ptr_eq(owned(source), &parent));
-        assert!(Arc::ptr_eq(&owned(source).data, &parent_data));
-        assert_eq!(materialized_adjoint_builds(&lazy), 0);
-        let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
-            unreachable!()
-        };
-        assert!(view.materialized.get().is_none());
-
-        let _ = lazy.data();
-        assert_eq!(materialized_adjoint_builds(&lazy), 1);
-        assert!(view.materialized.get().is_some());
-    }
-
-    #[test]
-    fn sqrt_dense_lazy_success_is_owned_provider_native_repeatable_and_cold() {
-        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-        let provider = Arc::new(U1FusionRule);
-        let leg =
-            GradedSpace::try_new(provider, [(U1Irrep::new(-1), 2), (U1Irrep::new(2), 4)]).unwrap();
-        let f64_source = TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, indices| {
-            if indices[0] == indices[1] {
-                (indices[0] + 1) as f64
-            } else {
-                0.0
-            }
-        })
-        .unwrap();
-        assert_sqrt_uses_a_cold_logical_copy(&f64_source);
-
-        let c64_source = TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, indices| {
-            if indices[0] == indices[1] {
-                match indices[0] % 4 {
-                    0 => num_complex::Complex64::new(-4.0, 0.0),
-                    1 => num_complex::Complex64::new(-4.0, -0.0),
-                    2 => num_complex::Complex64::new(-4.0, 1.0e-300),
-                    _ => num_complex::Complex64::new(-4.0, -1.0e-300),
-                }
-            } else {
-                num_complex::Complex64::new(0.0, -0.0)
-            }
-        })
-        .unwrap();
-        let expected = eager_adjoint_oracle(&c64_source).sqrt().unwrap();
-        let lazy = c64_source.adjoint().unwrap();
-        let actual = lazy.sqrt().unwrap();
-        assert!(actual
-            .data()
-            .iter()
-            .zip(expected.data())
-            .all(|(actual, expected)| {
-                actual.re.to_bits() == expected.re.to_bits()
-                    && actual.im.to_bits() == expected.im.to_bits()
-            }));
-        assert_eq!(materialized_adjoint_builds(&lazy), 0);
-        assert_sqrt_uses_a_cold_logical_copy(&c64_source);
-
-        let provider = Arc::new(SU2FusionRule);
-        let leg = GradedSpace::try_new(
-            provider,
-            [
-                (SU2Irrep::from_twice_spin(0), 2),
-                (SU2Irrep::from_twice_spin(1), 4),
-            ],
-        )
-        .unwrap();
-        let su2 = TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, indices| {
-            if indices[0] == indices[1] {
-                num_complex::Complex64::new(-4.0, (indices[0] as f64 - 1.0) / 10.0)
-            } else {
-                num_complex::Complex64::new(0.0, 0.0)
-            }
-        })
-        .unwrap();
-        assert_sqrt_uses_a_cold_logical_copy(&su2);
-    }
-
-    #[test]
-    fn sqrt_dense_lazy_failures_preserve_logical_order_and_stay_cold() {
-        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-        let provider = Arc::new(U1FusionRule);
-        let leg = GradedSpace::try_new(provider, [(U1Irrep::new(0), 3)]).unwrap();
-
-        let offdiag = TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, indices| {
-            if indices == [0, 1] {
-                1.0
-            } else {
-                0.0
-            }
-        })
-        .unwrap();
-        let lazy = offdiag.adjoint().unwrap();
-        let error = lazy.sqrt().unwrap_err().to_string();
-        assert!(error.contains("(1, 0)"), "{error}");
-        assert_eq!(materialized_adjoint_builds(&lazy), 0);
-
-        let mixed = TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, indices| {
-            match (indices[0], indices[1]) {
-                (1, 1) => -1.0,
-                (0, 2) => 1.0,
-                _ => 0.0,
-            }
-        })
-        .unwrap();
-        let eager_error = eager_adjoint_oracle(&mixed).sqrt().unwrap_err().to_string();
-        let lazy = mixed.adjoint().unwrap();
-        assert_eq!(lazy.sqrt().unwrap_err().to_string(), eager_error);
-        assert!(eager_error.contains("negative"), "{eager_error}");
-        assert_eq!(materialized_adjoint_builds(&lazy), 0);
-
-        let negative = TensorMap::from_subblock_fn(&runtime, [&leg], [&leg], |_, indices| {
-            if indices[0] == indices[1] {
-                -1.0
-            } else {
-                0.0
-            }
-        })
-        .unwrap();
-        let eager_error = eager_adjoint_oracle(&negative)
-            .sqrt()
-            .unwrap_err()
-            .to_string();
-        let lazy = negative.adjoint().unwrap();
-        for _ in 0..2 {
-            assert_eq!(lazy.clone().sqrt().unwrap_err().to_string(), eager_error);
-        }
-        assert_eq!(materialized_adjoint_builds(&lazy), 0);
-        let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
-            unreachable!()
-        };
-        assert!(view.materialized.get().is_none());
-    }
-
     fn assert_polar_factors<R, D>(
         source: &TensorMap<R, D>,
         target: &TensorMap<R, D>,
@@ -24245,9 +23626,9 @@ mod representation_gates {
     }
 
     #[test]
-    fn inverse_redirect_failure_and_negative_powi_leave_the_receiver_cold() {
-        // What: negative powers inherit the inverse redirect, while a singular
-        // solve changes neither parent Arc/bytes nor the lazy receiver cache.
+    fn inverse_redirect_failure_leaves_the_receiver_cold() {
+        // What: a singular solve changes neither parent Arc/bytes nor the lazy
+        // receiver cache.
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let provider = Arc::new(U1FusionRule);
         let leg = GradedSpace::try_new(provider, [(U1Irrep::new(0), 3)]).unwrap();
@@ -24259,11 +23640,6 @@ mod representation_gates {
             }
         })
         .unwrap();
-        let lazy = source.adjoint().unwrap();
-        let eager = eager_adjoint_oracle(&source);
-        assert_typed_map_close(&lazy.powi(-3).unwrap(), &eager.powi(-3).unwrap(), 1e-10);
-        assert_eq!(materialized_adjoint_builds(&lazy), 0);
-
         let singular = source.scale(0.0);
         let before = singular.data().to_vec();
         let body = Arc::clone(owned(&singular));
@@ -24539,18 +23915,6 @@ mod representation_gates {
                 5,
                 "the SU(3) μ=2 fixture has five nonempty coupled-sector solve routes"
             );
-            calls.store(0, std::sync::atomic::Ordering::Relaxed);
-            let right_solution = right.solve_right(&lhs).unwrap();
-            assert!(matches!(right_solution.repr, TypedTensorRepr::Owned(_)));
-            assert!(Arc::ptr_eq(
-                right_solution.logical_space().provider_arc(),
-                right.logical_space().provider_arc()
-            ));
-            assert_eq!(
-                calls.load(std::sync::atomic::Ordering::Relaxed),
-                5,
-                "right solve reuses the five admitted left-solve routes"
-            );
             let lhs_oracle = lhs.materialized_tensor_uncached().unwrap();
             let rhs_oracle = right.materialized_tensor_uncached().unwrap();
             let reconstructed = lhs_oracle.compose(&solution).unwrap();
@@ -24565,15 +23929,6 @@ mod representation_gates {
                     rhs_oracle.subblock_fusion_trees(i).unwrap(),
                 );
             }
-            assert!(right_solution
-                .compose(&lhs_oracle)
-                .unwrap()
-                .data()
-                .iter()
-                .zip(rhs_oracle.data())
-                .all(|(&actual, &expected)| {
-                    (actual.widen_complex() - expected.widen_complex()).norm() < 2e-10
-                }));
             assert_eq!(divisor.data(), lhs_before.as_slice());
             assert_eq!(rhs.data(), rhs_before.as_slice());
             for input in [&lhs, &right] {
@@ -24588,7 +23943,7 @@ mod representation_gates {
     #[cfg(feature = "racah-generated")]
     #[test]
     fn checked_generic_solves_are_owned_uncached_and_one_call_per_route() {
-        // What: both solve directions keep all four lazy input pairs cold on
+        // What: the solve keeps all four lazy input pairs cold on
         // nondegenerate real and complex cross-multiplicity matrices.
         assert_checked_generic_solve_acceptance::<f64>();
         assert_checked_generic_solve_acceptance::<num_complex::Complex64>();

@@ -33,6 +33,7 @@ fn base_family<D: TensorScalar>(tensor: &TensorMap<U1FusionRule, D>) {
     let _ = tensor.otimes(tensor);
     let _ = tensor.trace_pairs(&[(0, 1)]);
     let _ = tensor.diagview();
+    let _ = tensor.map_diagonal(|value| value);
     let _ = tensor.subblocks();
 }
 
@@ -56,12 +57,9 @@ fn factorization_family<D: FactorizationScalar>(tensor: &TensorMap<U1FusionRule,
 /// Advanced linear algebra: needs [`AdvancedLinalgScalar`].
 fn advanced_family<D: AdvancedLinalgScalar>(tensor: &TensorMap<U1FusionRule, D>) {
     let _ = tensor.exp();
-    let _ = tensor.sqrt();
-    let _ = tensor.powi(2);
     let _ = tensor.inv();
     let _ = tensor.pinv(0.0);
     let _ = tensor.solve(tensor);
-    let _ = tensor.solve_right(tensor);
 }
 
 /// The general (non-Hermitian) eigendecomposition also needs its factor dtype
